@@ -38,6 +38,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/gpulease"
 	"github.com/dmmdea/offload-harness/internal/ledger"
 	"github.com/dmmdea/offload-harness/internal/mediacap"
+	"github.com/dmmdea/offload-harness/internal/mediaremote"
 	"github.com/dmmdea/offload-harness/internal/modelaffinity"
 	"github.com/dmmdea/offload-harness/internal/netguard"
 	"github.com/dmmdea/offload-harness/internal/nimclient"
@@ -335,13 +336,13 @@ func (s *Server) buildServer(version string) *mcp.Server {
 	srv.AddTool(&mcp.Tool{
 		Name:        "offload_generate_image",
 		Description: "Generate an IMAGE from a text prompt on THIS machine's LOCAL image engine for FREE — no cloud, runs on the local GPU, using its configured model at its highest-quality settings (the engine is ComfyUI or stable-diffusion.cpp per machine; offload_status media.routes reports which one is bound here — e.g. HiDream-O1 bf16 at native 2048 via its official graph, SDXL on smaller boxes). QUALITY-FIRST: renders can take many minutes — that is intended; do not lower steps/resolution to speed things up unless the caller explicitly asks for a draft. prompt is required (prose sentences beat tag lists on DiT models; quoted text renders as literal text); optional: negative (active on models served with real CFG), width/height (default = the model's native resolution), steps, seed, out. It takes the shared single-slot GPU lock (and, on the ComfyUI engine, auto-starts ComfyUI), so it serializes with other local gen/inference and may wait. Where this machine configures a prompt-refiner model (imagegen_refiner_model), the prompt is first expanded with photographic detail on the free local text tier. Double-quoted text spans (straight or curly quotes) are guarded: if the refined text drops or alters one, or adds new quoted text, the raw prompt is rendered instead — same fallback as on any refiner error, recorded in the result as refine_fallback. The result then carries refined (plus refined_prompt when true); set refine=false to render your prompt verbatim. Caveat: unpaired quote marks used as inch marks can pair into unintended spans and force the (safe) raw-prompt fallback — spell out inches when a prompt also quotes text. NAMED FAMILIES: family selects one of this machine's opt-in bindings (offload_status media.image_families lists them); omit it for the default binding, which is what every call without it renders. transparent=true keeps an alpha channel (only a qwen-image-2.1 family has an RGBA VAE; any other binding defers rather than render opaque). Returns {image_path, width, height, seed, family} plus license/commercial_use when the binding declares a license — width/height are MEASURED from the written file (a family snaps sizes, e.g. qwen-image-2.1 floors to /32 and defaults to 2048x2048). On any failure (unknown family, transparent on a family without alpha, render error) it returns deferred:true — then generate the image another way.",
-		InputSchema: json.RawMessage(`{"type":"object","properties":{"prompt":{"type":"string","description":"positive text prompt describing the image"},"negative":{"type":"string","description":"hard exclusions, e.g. people, text, watermark"},"out":{"type":"string","description":"output PNG path (optional; default under the media dir)"},"width":{"type":"integer","description":"width px (default 1024)"},"height":{"type":"integer","description":"height px (default 1024)"},"steps":{"type":"integer","description":"sampler steps (default 30)"},"seed":{"type":"integer","description":"RNG seed for reproducibility"},"refine":{"type":"boolean","description":"set false to skip this machine's opt-in prompt refiner and render the prompt verbatim (default: refine when a refiner model is configured; no-op otherwise)"},"family":{"type":"string","description":"OPTIONAL named image family (offload_status media.image_families); omit for this machine's default binding"},"transparent":{"type":"boolean","description":"keep an alpha channel (RGBA PNG with a transparent background; the prompt is wrapped in the model's official RGBA template). Only a qwen-image-2.1 family supports it; default false = opaque RGB"}},"required":["prompt"]}`),
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"prompt":{"type":"string","description":"positive text prompt describing the image"},"negative":{"type":"string","description":"hard exclusions, e.g. people, text, watermark"},"out":{"type":"string","description":"output PNG path (optional; default under the media dir)"},"width":{"type":"integer","description":"width px (default 1024)"},"height":{"type":"integer","description":"height px (default 1024)"},"steps":{"type":"integer","description":"sampler steps (default 30)"},"seed":{"type":"integer","description":"RNG seed for reproducibility"},"refine":{"type":"boolean","description":"set false to skip this machine's opt-in prompt refiner and render the prompt verbatim (default: refine when a refiner model is configured; no-op otherwise)"},"family":{"type":"string","description":"OPTIONAL named image family (offload_status media.image_families); omit for this machine's default binding"},"transparent":{"type":"boolean","description":"keep an alpha channel (RGBA PNG with a transparent background; the prompt is wrapped in the model's official RGBA template). Only a qwen-image-2.1 family supports it; default false = opaque RGB"},`+mediaRouteSchema+`},"required":["prompt"]}`),
 	}, s.handleGenerateImage)
 
 	srv.AddTool(&mcp.Tool{
 		Name:        "offload_run_graph",
 		Description: "Execute an arbitrary ComfyUI API-format graph on the LOCAL ComfyUI, satisfying a per-workflow node manifest (custom node packs @ pinned commits + model files) first. Generic: the caller owns ALL graph semantics — the harness passes the graph opaquely, provisions its environment, runs it under the shared single-slot GPU lock, and returns node-addressed outputs. Provide the graph as graph_path (a file) OR graph_json (inline API-format JSON); optionally manifest_path/manifest_json (the node manifest), out_dir (where output files land), reserve_vram (ComfyUI VRAM held back for the display). Returns {outputs:{node_id:[{path,type,kind}]}, image_path (first image, convenience alias), unverified_models[]}. On ANY failure it returns deferred:true with a typed reason (SATISFIER_UNAVAILABLE, VENV_INCOHERENT, SATISFIER_SPAWN_FAILED [a provisioning subprocess failed to START, retried once — transient/retryable, NOT a venv problem], NODE_CLASS_MISSING, PREFLIGHT_MISSING_INPUTS, MODEL_SHA_MISMATCH, GPU_BUSY, TIMEOUT, ...) — it NEVER falls back to cloud; then run the graph another way.",
-		InputSchema: json.RawMessage(`{"type":"object","properties":{"graph_path":{"type":"string","description":"path to a ComfyUI API-format graph JSON file (provide this or graph_json)"},"graph_json":{"type":"string","description":"inline ComfyUI API-format graph JSON (alternative to graph_path)"},"manifest_path":{"type":"string","description":"path to a node manifest JSON (custom node packs @ pinned commits + model files to provision)"},"manifest_json":{"type":"string","description":"inline node manifest JSON (alternative to manifest_path)"},"out_dir":{"type":"string","description":"directory for the graph's output files (optional; default under the media dir)"},"reserve_vram":{"type":"string","description":"ComfyUI --reserve-vram override (VRAM held back for the display; per-workflow)"}}}`),
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"graph_path":{"type":"string","description":"path to a ComfyUI API-format graph JSON file (provide this or graph_json)"},"graph_json":{"type":"string","description":"inline ComfyUI API-format graph JSON (alternative to graph_path)"},"manifest_path":{"type":"string","description":"path to a node manifest JSON (custom node packs @ pinned commits + model files to provision)"},"manifest_json":{"type":"string","description":"inline node manifest JSON (alternative to manifest_path)"},"out_dir":{"type":"string","description":"directory for the graph's output files (optional; default under the media dir)"},"reserve_vram":{"type":"string","description":"ComfyUI --reserve-vram override (VRAM held back for the display; per-workflow)"},`+mediaRouteSchema+`}}`),
 	}, s.handleRunGraph)
 
 	srv.AddTool(&mcp.Tool{
@@ -353,19 +354,19 @@ func (s *Server) buildServer(version string) *mcp.Server {
 	srv.AddTool(&mcp.Tool{
 		Name:        "offload_generate_video",
 		Description: "Animate a still image into a short b-roll VIDEO clip on the LOCAL ComfyUI for FREE. The graph family comes from THIS machine's videogen_family binding (the 2x16 reference box is bound to LTX-2.5, which generates joint AAC audio); pass model ONLY to override that deliberately — no cloud, runs on the local GPU. QUALITY-FIRST DEFAULT: the native two-stage recipe (no distill LoRA, 20 steps, cfg 3.5, the model's official negative) — a render takes tens of minutes and that is intended; set fast=true ONLY when the caller explicitly wants a draft (8-step lightx2v distill — visibly weaker motion). still (a local image path) + prompt describe the motion (prose, one camera move, ~80-120 words works best); optional: model (h3|hunyuan|wan), frames (16fps; 81 ≈ 5s is the native ceiling), width/height (per-machine config may default 720p), steps, seed, negative (defaults to the model's official training negative), reserve_vram, out. It auto-starts ComfyUI and takes the shared single-slot GPU lock, so it serializes with other local gen/inference and may wait for the slot before deferring. Returns {video_path, seed} plus license/commercial_use when the family declares them. On any failure it returns deferred:true — then make the clip another way.",
-		InputSchema: json.RawMessage(`{"type":"object","properties":{"prompt":{"type":"string","description":"prose motion prompt (one camera move, ~80-120 words works best)"},"still":{"type":"string","description":"local path to the input still image (I2V)"},"model":{"type":"string","description":"OPTIONAL family override — omit to use this machine's configured videogen_family, which is the seated verdict. ltx25 (LTX-2.5 22B distilled, joint AV) | h3 (MiniMax-H3 joint AV — the T4-verdict opt-in: strongest prompt adherence/multi-shot direction and audio design, ~2x LTX wall; still is OPTIONAL for h3 — omit it for t2v storyboard direction) | wan (Wan 2.2 14B two-stage) | hunyuan (needs Hunyuan 1.5 files). An override changes the graph AND is recorded in the ledger as the family that rendered, so only pass it when you mean it"},"negative":{"type":"string","description":"hard exclusions (default: the model's official training-time negative)"},"out":{"type":"string","description":"output .mp4 path (optional; default under the media dir)"},"transformer":{"type":"string","description":"OPTIONAL per-request LTX-2.5 transformer file override (e.g. this machine's bf16 transformer for one hero render — the int8 default stays every other call's quality/speed tradeoff). Wins over this box's (or the resolved family's) bound file; a no-op on any other family's graph"},"frames":{"type":"integer","description":"frame count at 16fps (81 ~5s is the native ceiling)"},"width":{"type":"integer","description":"width px"},"height":{"type":"integer","description":"height px"},"steps":{"type":"integer","description":"sampler steps"},"seed":{"type":"integer","description":"RNG seed for reproducibility"},"reserve_vram":{"type":"number","description":"VRAM held back for the display (per-workflow override; default ~1.0, raise for Wan)"},"fast":{"type":"boolean","description":"OPT-IN draft mode: 8-step lightx2v distill (visibly weaker motion). The default is the native quality recipe — only set when the caller explicitly accepts draft quality"},"hero":{"type":"boolean","description":"deprecated: the native quality pass IS the default now; no-op kept for compatibility"},"upscale":{"type":"boolean","description":"post-decode upscale using this machine's configured upscale model (e.g. 720p->1080p; no-op if the machine has none)"}},"required":["prompt"]}`),
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"prompt":{"type":"string","description":"prose motion prompt (one camera move, ~80-120 words works best)"},"still":{"type":"string","description":"local path to the input still image (I2V)"},"model":{"type":"string","description":"OPTIONAL family override — omit to use this machine's configured videogen_family, which is the seated verdict. ltx25 (LTX-2.5 22B distilled, joint AV) | h3 (MiniMax-H3 joint AV — the T4-verdict opt-in: strongest prompt adherence/multi-shot direction and audio design, ~2x LTX wall; still is OPTIONAL for h3 — omit it for t2v storyboard direction) | wan (Wan 2.2 14B two-stage) | hunyuan (needs Hunyuan 1.5 files). An override changes the graph AND is recorded in the ledger as the family that rendered, so only pass it when you mean it"},"negative":{"type":"string","description":"hard exclusions (default: the model's official training-time negative)"},"out":{"type":"string","description":"output .mp4 path (optional; default under the media dir)"},"transformer":{"type":"string","description":"OPTIONAL per-request LTX-2.5 transformer file override (e.g. this machine's bf16 transformer for one hero render — the int8 default stays every other call's quality/speed tradeoff). Wins over this box's (or the resolved family's) bound file; a no-op on any other family's graph"},"frames":{"type":"integer","description":"frame count at 16fps (81 ~5s is the native ceiling)"},"width":{"type":"integer","description":"width px"},"height":{"type":"integer","description":"height px"},"steps":{"type":"integer","description":"sampler steps"},"seed":{"type":"integer","description":"RNG seed for reproducibility"},"reserve_vram":{"type":"number","description":"VRAM held back for the display (per-workflow override; default ~1.0, raise for Wan)"},"fast":{"type":"boolean","description":"OPT-IN draft mode: 8-step lightx2v distill (visibly weaker motion). The default is the native quality recipe — only set when the caller explicitly accepts draft quality"},"hero":{"type":"boolean","description":"deprecated: the native quality pass IS the default now; no-op kept for compatibility"},"upscale":{"type":"boolean","description":"post-decode upscale using this machine's configured upscale model (e.g. 720p->1080p; no-op if the machine has none)"},`+mediaRouteSchema+`},"required":["prompt"]}`),
 	}, s.handleGenerateVideo)
 
 	srv.AddTool(&mcp.Tool{
 		Name:        "offload_animate_character",
 		Description: "CHARACTER ANIMATION on the LOCAL ComfyUI for FREE — retargets the motion of a driver VIDEO onto a reference character IMAGE (WAN-Animate-2 distilled: identity-preserving motion transfer, the only route that does video-driven retargeting; the other video tools generate motion from text). ref = a full-body image of the character to animate (person, mascot, stylized figure); driver = a video of a person performing the motion (full body in frame, static camera works best); prompt describes the CHARACTER + BACKGROUND the output should show. One call renders ONE native chunk (default 81 frames ≈ 3.4s at 24fps — the distilled recipe's unit; measured ~5min warm at the 482x854 template default on the reference box). Optional: motion_prompt (describe the driver's motion), negative, width/height, frames, steps, seed, pose_strength/ref_strength (0-1 floats as strings), reserve_vram, out. The output keeps the driver's own audio track. It auto-starts ComfyUI and takes the shared single-slot GPU lock, so it serializes with other local gen/inference and may wait for the slot before deferring. Returns {video_path, seed}. On any failure it returns deferred:true — then make the clip another way.",
-		InputSchema: json.RawMessage(`{"type":"object","properties":{"ref":{"type":"string","description":"local path to the reference character image (full body visible works best)"},"driver":{"type":"string","description":"local path to the driver video whose motion is transferred"},"prompt":{"type":"string","description":"character appearance + background description for the OUTPUT clip"},"motion_prompt":{"type":"string","description":"one-line description of the driver video's motion (default: a generic motion-reference line)"},"negative":{"type":"string","description":"hard exclusions (default: the model's official training negative)"},"width":{"type":"integer","description":"working width px (default 482, the official template's portrait default)"},"height":{"type":"integer","description":"working height px (default 854)"},"frames":{"type":"integer","description":"frame count (default 81 — one native chunk; longer needs multiple calls)"},"steps":{"type":"integer","description":"sampler steps (default 10 — the distilled lcm recipe; do not raise casually)"},"seed":{"type":"integer","description":"RNG seed for reproducibility"},"pose_strength":{"type":"string","description":"0-1: how strongly the driver's pose drives the output (default 1.0)"},"ref_strength":{"type":"string","description":"0-1: how strongly the reference image pins identity (default 1.0)"},"reserve_vram":{"type":"number","description":"VRAM held back for the display (per-workflow override)"},"out":{"type":"string","description":"output .mp4 path (optional; default under the media dir)"}},"required":["ref","driver","prompt"]}`),
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"ref":{"type":"string","description":"local path to the reference character image (full body visible works best)"},"driver":{"type":"string","description":"local path to the driver video whose motion is transferred"},"prompt":{"type":"string","description":"character appearance + background description for the OUTPUT clip"},"motion_prompt":{"type":"string","description":"one-line description of the driver video's motion (default: a generic motion-reference line)"},"negative":{"type":"string","description":"hard exclusions (default: the model's official training negative)"},"width":{"type":"integer","description":"working width px (default 482, the official template's portrait default)"},"height":{"type":"integer","description":"working height px (default 854)"},"frames":{"type":"integer","description":"frame count (default 81 — one native chunk; longer needs multiple calls)"},"steps":{"type":"integer","description":"sampler steps (default 10 — the distilled lcm recipe; do not raise casually)"},"seed":{"type":"integer","description":"RNG seed for reproducibility"},"pose_strength":{"type":"string","description":"0-1: how strongly the driver's pose drives the output (default 1.0)"},"ref_strength":{"type":"string","description":"0-1: how strongly the reference image pins identity (default 1.0)"},"reserve_vram":{"type":"number","description":"VRAM held back for the display (per-workflow override)"},"out":{"type":"string","description":"output .mp4 path (optional; default under the media dir)"},`+mediaRouteSchema+`},"required":["ref","driver","prompt"]}`),
 	}, s.handleAnimateCharacter)
 
 	srv.AddTool(&mcp.Tool{
 		Name:        "offload_generate_audio",
 		Description: "Synthesize AUDIO on the LOCAL GPU for FREE — no cloud. kind=voice (default) is text-to-speech narration via Chatterbox Multilingual (commercial-safe, default Spanish; pass clone=<ref.wav> for zero-shot voice cloning, lang for the language). kind=music is a text-to-music bed via ACE-Step (style-tag prompt; seconds for length; optional lyrics). text is the narration text or the music style prompt. Optional: out (output path; default under the media dir), seed, reserve_vram (music only). It takes the shared single-slot GPU lock, so it serializes with other local gen/inference and may wait before deferring. Returns {audio_path, kind, seed}. On any failure (GPU busy, no route, worker error, timeout) it returns deferred:true — then synthesize it another way.",
-		InputSchema: json.RawMessage(`{"type":"object","properties":{"text":{"type":"string","description":"narration text (voice) or music style prompt (music)"},"kind":{"type":"string","description":"voice (default, Chatterbox TTS) | music (ACE-Step)"},"voice":{"type":"string","description":"generalist | finetuned | endpoint (default generalist — or endpoint by itself on a box with tts_endpoint and no voicegen_script; finetuned requires this machine's voicegen_ft_* config; endpoint renders through the configured OpenAI-compatible speech server, e.g. VoiceStudio, no media lease — pass tts_voice to name a server-side voice)"},"tts_voice":{"type":"string","description":"voice=endpoint only: the server-side voice/profile name (default: this box's tts_voice, else the server's default)"},"clone":{"type":"string","description":"voice: local path to a reference .wav for zero-shot voice cloning"},"lang":{"type":"string","description":"voice: language code (default es)"},"seconds":{"type":"integer","description":"music: clip length in seconds"},"out":{"type":"string","description":"output audio path (optional; default under the media dir)"},"seed":{"type":"integer","description":"RNG seed for reproducibility"},"reserve_vram":{"type":"number","description":"music: VRAM held back for the display (per-workflow override)"}},"required":["text"]}`),
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"text":{"type":"string","description":"narration text (voice) or music style prompt (music)"},"kind":{"type":"string","description":"voice (default, Chatterbox TTS) | music (ACE-Step)"},"voice":{"type":"string","description":"generalist | finetuned | endpoint (default generalist — or endpoint by itself on a box with tts_endpoint and no voicegen_script; finetuned requires this machine's voicegen_ft_* config; endpoint renders through the configured OpenAI-compatible speech server, e.g. VoiceStudio, no media lease — pass tts_voice to name a server-side voice)"},"tts_voice":{"type":"string","description":"voice=endpoint only: the server-side voice/profile name (default: this box's tts_voice, else the server's default)"},"clone":{"type":"string","description":"voice: local path to a reference .wav for zero-shot voice cloning"},"lang":{"type":"string","description":"voice: language code (default es)"},"seconds":{"type":"integer","description":"music: clip length in seconds"},"out":{"type":"string","description":"output audio path (optional; default under the media dir)"},"seed":{"type":"integer","description":"RNG seed for reproducibility"},"reserve_vram":{"type":"number","description":"music: VRAM held back for the display (per-workflow override)"},`+mediaRouteSchema+`},"required":["text"]}`),
 	}, s.handleGenerateAudio)
 
 	srv.AddTool(&mcp.Tool{
@@ -1433,6 +1434,12 @@ func (s *Server) textRun(ctx context.Context, req core.Request, route string) co
 	return textremote.Run(ctx, s.p.Cfg(), s.p, req, route)
 }
 
+// mediaRouteSchema is the `route` and `remotes` properties the five media doors share (offload_generate_image,
+// offload_generate_video, offload_animate_character, offload_generate_audio, offload_run_graph; ADR 0072): one
+// string so the five descriptions cannot drift. The default is auto, which runs here whenever this machine
+// has the lane, so a caller that never passes it is unchanged on a render box.
+const mediaRouteSchema = `"route":{"type":"string","enum":["local","auto","remote"],"description":"where the job runs (ADR 0072): auto (default; here when this machine has the lane, derived from the files its routes load, else a fleet node from delegate_remotes; a box with no lane and no fleet runs it here and gets the lane's own deferral), remote (always a fleet node; the input files you name travel to it in a hash-checked bundle and the output is fetched back and verified against the sha256 the node published), local (always this machine). meta.node and meta.placement say where it ran. Not carried to a node: out_dir, and refine=false, tts_voice and transformer (those defer on a remote route)"},"remotes":{"type":"array","items":{"type":"string"},"description":"fleet node base URLs for this call, tailnet-only (e.g. http://node-c:18811); each must be one of delegate_remotes, so a call can narrow the fleet and never extend it. Default: delegate_remotes"}`
+
 // textRouteSchema is the `route` property offload_classify and offload_extract share. Adding it
 // changed tools/list on every box (0.154.0): the default is local, so every caller that never
 // passes it is unchanged.
@@ -1609,16 +1616,18 @@ func (s *Server) handleOCR(ctx context.Context, req *mcp.CallToolRequest) (*mcp.
 
 func (s *Server) handleGenerateImage(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	var in struct {
-		Prompt      string `json:"prompt"`
-		Negative    string `json:"negative"`
-		Out         string `json:"out"`
-		Width       int    `json:"width"`
-		Height      int    `json:"height"`
-		Steps       int    `json:"steps"`
-		Seed        int    `json:"seed"`
-		Refine      *bool  `json:"refine"`
-		Family      string `json:"family"`
-		Transparent bool   `json:"transparent"`
+		Prompt      string   `json:"prompt"`
+		Negative    string   `json:"negative"`
+		Out         string   `json:"out"`
+		Width       int      `json:"width"`
+		Height      int      `json:"height"`
+		Steps       int      `json:"steps"`
+		Seed        int      `json:"seed"`
+		Refine      *bool    `json:"refine"`
+		Family      string   `json:"family"`
+		Transparent bool     `json:"transparent"`
+		Route       string   `json:"route"`
+		Remotes     []string `json:"remotes"`
 	}
 	if bad := parseArgs(req.Params.Arguments, &in); bad != nil {
 		return bad, nil
@@ -1655,7 +1664,7 @@ func (s *Server) handleGenerateImage(ctx context.Context, req *mcp.CallToolReque
 	if in.Refine != nil && !*in.Refine {
 		params["refine"] = false
 	}
-	return result(s.p.Run(ctx, core.Request{Task: core.TaskGenerateImage, Door: "offload_generate_image", Input: in.Prompt, Params: params}))
+	return result(mediaremote.Run(ctx, s.p.Cfg(), s.p, core.Request{Task: core.TaskGenerateImage, Door: "offload_generate_image", Input: in.Prompt, Params: params}, in.Route, in.Remotes))
 }
 
 func (s *Server) handleEditImageGenerative(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -1798,12 +1807,14 @@ func (s *Server) handleUpscaleImage(ctx context.Context, req *mcp.CallToolReques
 
 func (s *Server) handleRunGraph(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	var in struct {
-		GraphPath    string `json:"graph_path"`
-		GraphJSON    string `json:"graph_json"`
-		ManifestPath string `json:"manifest_path"`
-		ManifestJSON string `json:"manifest_json"`
-		OutDir       string `json:"out_dir"`
-		ReserveVram  string `json:"reserve_vram"`
+		GraphPath    string   `json:"graph_path"`
+		GraphJSON    string   `json:"graph_json"`
+		ManifestPath string   `json:"manifest_path"`
+		ManifestJSON string   `json:"manifest_json"`
+		OutDir       string   `json:"out_dir"`
+		ReserveVram  string   `json:"reserve_vram"`
+		Route        string   `json:"route"`
+		Remotes      []string `json:"remotes"`
 	}
 	if bad := parseArgs(req.Params.Arguments, &in); bad != nil {
 		return bad, nil
@@ -1830,7 +1841,7 @@ func (s *Server) handleRunGraph(ctx context.Context, req *mcp.CallToolRequest) (
 		"out_dir":       in.OutDir,
 		"reserve_vram":  in.ReserveVram,
 	}
-	return result(s.p.Run(ctx, core.Request{Task: core.TaskRunGraph, Door: "offload_run_graph", Params: params}))
+	return result(mediaremote.Run(ctx, s.p.Cfg(), s.p, core.Request{Task: core.TaskRunGraph, Door: "offload_run_graph", Params: params}, in.Route, in.Remotes))
 }
 
 // materialize returns path if set, else writes inline json to a temp file and returns
@@ -1872,20 +1883,22 @@ func (s *Server) handleGenerateSVG(ctx context.Context, req *mcp.CallToolRequest
 
 func (s *Server) handleGenerateVideo(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	var in struct {
-		Prompt      string  `json:"prompt"`
-		Still       string  `json:"still"`
-		Model       string  `json:"model"`
-		Negative    string  `json:"negative"`
-		Out         string  `json:"out"`
-		Frames      int     `json:"frames"`
-		Width       int     `json:"width"`
-		Height      int     `json:"height"`
-		Steps       int     `json:"steps"`
-		Seed        int     `json:"seed"`
-		ReserveVRAM float64 `json:"reserve_vram"`
-		Fast        bool    `json:"fast"`
-		Hero        bool    `json:"hero"`
-		Upscale     bool    `json:"upscale"`
+		Prompt      string   `json:"prompt"`
+		Still       string   `json:"still"`
+		Model       string   `json:"model"`
+		Negative    string   `json:"negative"`
+		Out         string   `json:"out"`
+		Frames      int      `json:"frames"`
+		Width       int      `json:"width"`
+		Height      int      `json:"height"`
+		Steps       int      `json:"steps"`
+		Seed        int      `json:"seed"`
+		ReserveVRAM float64  `json:"reserve_vram"`
+		Fast        bool     `json:"fast"`
+		Hero        bool     `json:"hero"`
+		Upscale     bool     `json:"upscale"`
+		Route       string   `json:"route"`
+		Remotes     []string `json:"remotes"`
 	}
 	if bad := parseArgs(req.Params.Arguments, &in); bad != nil {
 		return bad, nil
@@ -1932,25 +1945,27 @@ func (s *Server) handleGenerateVideo(ctx context.Context, req *mcp.CallToolReque
 	if in.ReserveVRAM > 0 {
 		params["reserve_vram"] = strconv.FormatFloat(in.ReserveVRAM, 'f', -1, 64)
 	}
-	return result(s.p.Run(ctx, core.Request{Task: core.TaskGenerateVideo, Door: "offload_generate_video", Input: in.Prompt, Image: in.Still, Params: params}))
+	return result(mediaremote.Run(ctx, s.p.Cfg(), s.p, core.Request{Task: core.TaskGenerateVideo, Door: "offload_generate_video", Input: in.Prompt, Image: in.Still, Params: params}, in.Route, in.Remotes))
 }
 
 func (s *Server) handleAnimateCharacter(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	var in struct {
-		Ref          string  `json:"ref"`
-		Driver       string  `json:"driver"`
-		Prompt       string  `json:"prompt"`
-		MotionPrompt string  `json:"motion_prompt"`
-		Negative     string  `json:"negative"`
-		Width        int     `json:"width"`
-		Height       int     `json:"height"`
-		Frames       int     `json:"frames"`
-		Steps        int     `json:"steps"`
-		Seed         int     `json:"seed"`
-		PoseStrength string  `json:"pose_strength"`
-		RefStrength  string  `json:"ref_strength"`
-		ReserveVRAM  float64 `json:"reserve_vram"`
-		Out          string  `json:"out"`
+		Ref          string   `json:"ref"`
+		Driver       string   `json:"driver"`
+		Prompt       string   `json:"prompt"`
+		MotionPrompt string   `json:"motion_prompt"`
+		Negative     string   `json:"negative"`
+		Width        int      `json:"width"`
+		Height       int      `json:"height"`
+		Frames       int      `json:"frames"`
+		Steps        int      `json:"steps"`
+		Seed         int      `json:"seed"`
+		PoseStrength string   `json:"pose_strength"`
+		RefStrength  string   `json:"ref_strength"`
+		ReserveVRAM  float64  `json:"reserve_vram"`
+		Out          string   `json:"out"`
+		Route        string   `json:"route"`
+		Remotes      []string `json:"remotes"`
 	}
 	if bad := parseArgs(req.Params.Arguments, &in); bad != nil {
 		return bad, nil
@@ -1995,21 +2010,23 @@ func (s *Server) handleAnimateCharacter(ctx context.Context, req *mcp.CallToolRe
 	if in.ReserveVRAM > 0 {
 		params["reserve_vram"] = strconv.FormatFloat(in.ReserveVRAM, 'f', -1, 64)
 	}
-	return result(s.p.Run(ctx, core.Request{Task: core.TaskAnimateCharacter, Door: "offload_animate_character", Input: in.Prompt, Image: in.Ref, Video: in.Driver, Params: params}))
+	return result(mediaremote.Run(ctx, s.p.Cfg(), s.p, core.Request{Task: core.TaskAnimateCharacter, Door: "offload_animate_character", Input: in.Prompt, Image: in.Ref, Video: in.Driver, Params: params}, in.Route, in.Remotes))
 }
 
 func (s *Server) handleGenerateAudio(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	var in struct {
-		Text        string  `json:"text"`
-		Kind        string  `json:"kind"`
-		Voice       string  `json:"voice"`
-		TTSVoice    string  `json:"tts_voice"` // voice=endpoint: the server-side voice name
-		Clone       string  `json:"clone"`
-		Lang        string  `json:"lang"`
-		Seconds     int     `json:"seconds"`
-		Out         string  `json:"out"`
-		Seed        int     `json:"seed"`
-		ReserveVRAM float64 `json:"reserve_vram"`
+		Text        string   `json:"text"`
+		Kind        string   `json:"kind"`
+		Voice       string   `json:"voice"`
+		TTSVoice    string   `json:"tts_voice"` // voice=endpoint: the server-side voice name
+		Clone       string   `json:"clone"`
+		Lang        string   `json:"lang"`
+		Seconds     int      `json:"seconds"`
+		Out         string   `json:"out"`
+		Seed        int      `json:"seed"`
+		ReserveVRAM float64  `json:"reserve_vram"`
+		Route       string   `json:"route"`
+		Remotes     []string `json:"remotes"`
 	}
 	if bad := parseArgs(req.Params.Arguments, &in); bad != nil {
 		return bad, nil
@@ -2042,7 +2059,7 @@ func (s *Server) handleGenerateAudio(ctx context.Context, req *mcp.CallToolReque
 	if in.ReserveVRAM > 0 {
 		params["reserve_vram"] = strconv.FormatFloat(in.ReserveVRAM, 'f', -1, 64)
 	}
-	return result(s.p.Run(ctx, core.Request{Task: core.TaskGenerateAudio, Door: "offload_generate_audio", Input: in.Text, Params: params}))
+	return result(mediaremote.Run(ctx, s.p.Cfg(), s.p, core.Request{Task: core.TaskGenerateAudio, Door: "offload_generate_audio", Input: in.Text, Params: params}, in.Route, in.Remotes))
 }
 
 func (s *Server) handleEditImage(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {

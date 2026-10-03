@@ -49,6 +49,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/llamaclient"
 	"github.com/dmmdea/offload-harness/internal/mcpserver"
 	"github.com/dmmdea/offload-harness/internal/mediacap"
+	"github.com/dmmdea/offload-harness/internal/mediaremote"
 	"github.com/dmmdea/offload-harness/internal/netguard"
 	"github.com/dmmdea/offload-harness/internal/nimclient"
 	"github.com/dmmdea/offload-harness/internal/nimoracle"
@@ -836,10 +837,13 @@ func runGenerateImage(args []string) error {
 	family := fs.String("family", "", "named image family to render with (ADR 0058; offload_status media.image_families / doctor list them); default = this machine's default binding")
 	transparent := fs.Bool("transparent", false, "keep an alpha channel (RGBA PNG; qwen-image-2.1 families only — any other binding defers)")
 	batchFile := fs.String("batch", "", "render a JSONL batch of jobs through ONE warm ComfyUI session (one line per job: {\"prompt\":...,\"out\"?,\"negative\"?,\"width\"?,\"height\"?,\"steps\"?,\"seed\"?,\"refine\"?})")
+	route := fs.String("route", "auto", "local | auto (here when this machine has the lane, derived from the files its route loads, else a fleet node from delegate_remotes) | remote (a fleet node; input files travel in a hash-checked bundle and the output is fetched back verified; ADR 0072)")
+	var remotes repeatedFlag
+	fs.Var(&remotes, "remote", "fleet node base URL for this call (repeatable); must be one of delegate_remotes")
 	positional, flagArgs := splitArgs(args, map[string]bool{
 		"config": true, "negative": true, "out": true,
 		"width": true, "height": true, "steps": true, "seed": true,
-		"batch": true, "family": true,
+		"batch": true, "family": true, "route": true, "remote": true,
 	})
 	_ = fs.Parse(flagArgs)
 	// Boolean flags in space form ("--refine false") make the value a stray
@@ -850,6 +854,9 @@ func runGenerateImage(args []string) error {
 	}
 
 	if *batchFile != "" {
+		if r, _ := mediaremote.NormalizeRoute(*route); r == mediaremote.RouteRemote {
+			return fmt.Errorf("generate-image: --batch renders on this machine through one warm session; drop --route remote (or render the jobs one at a time)")
+		}
 		// A batch renders the DEFAULT binding through one warm session (RunImageBatch
 		// has no family seam); a family flag here would be silently ignored, so refuse.
 		if *family != "" || *transparent {
@@ -970,12 +977,12 @@ func runGenerateImage(args []string) error {
 	if *transparent {
 		params["transparent"] = true
 	}
-	res := p.Run(context.Background(), core.Request{
+	res := mediaremote.Run(context.Background(), cfg, p, core.Request{
 		Task:   core.TaskGenerateImage,
 		Door:   "cli:generate-image",
 		Input:  positional,
 		Params: params,
-	})
+	}, *route, remotes)
 	emitResult(res, *asJSON, "", *compactFlag)
 	return nil
 }
@@ -1128,6 +1135,9 @@ func runRunGraph(args []string) error {
 	fs.String("manifest-json", "", "inline node manifest JSON (alternative to --manifest)")
 	fs.String("out-dir", "", "directory for output files (default under the media dir)")
 	fs.String("reserve-vram", "", "ComfyUI --reserve-vram override")
+	route := fs.String("route", "auto", "local | auto (here when this machine has the lane, derived from the files its route loads, else a fleet node from delegate_remotes) | remote (a fleet node; input files travel in a hash-checked bundle and the output is fetched back verified; ADR 0072)")
+	var remotes repeatedFlag
+	fs.Var(&remotes, "remote", "fleet node base URL for this call (repeatable); must be one of delegate_remotes")
 	_ = fs.Parse(args)
 
 	params, err := runGraphParams(args)
@@ -1142,7 +1152,7 @@ func runRunGraph(args []string) error {
 	}
 	defer cleanup()
 
-	res := p.Run(context.Background(), core.Request{Task: core.TaskRunGraph, Door: "cli:run-graph", Params: params})
+	res := mediaremote.Run(context.Background(), cfg, p, core.Request{Task: core.TaskRunGraph, Door: "cli:run-graph", Params: params}, *route, remotes)
 	emitResult(res, *asJSON, "", *compactFlag)
 	return nil
 }
@@ -1164,6 +1174,8 @@ func runGraphParams(args []string) (map[string]any, error) {
 	manifestJSON := fs.String("manifest-json", "", "")
 	outDir := fs.String("out-dir", "", "")
 	reserve := fs.String("reserve-vram", "", "")
+	fs.String("route", "", "")
+	fs.Var(new(repeatedFlag), "remote", "")
 	if err := fs.Parse(args); err != nil {
 		return nil, err
 	}
@@ -1548,11 +1560,15 @@ func runGenerateAudio(args []string) error {
 	seed := fs.Int("seed", 0, "RNG seed for reproducibility")
 	reserveVRAM := fs.Float64("reserve-vram", 0, "music: VRAM held back for the display")
 	compactFlag := fs.Bool("compact", false, "compact (minified) JSON output")
+	route := fs.String("route", "auto", "local | auto (here when this machine has the lane, derived from the files its route loads, else a fleet node from delegate_remotes) | remote (a fleet node; input files travel in a hash-checked bundle and the output is fetched back verified; ADR 0072)")
+	var remotes repeatedFlag
+	fs.Var(&remotes, "remote", "fleet node base URL for this call (repeatable); must be one of delegate_remotes")
 
 	// generate-audio takes TWO positionals (out path, text); the rest are flags.
 	out, text, flagArgs := splitTwoArgs(args, map[string]bool{
 		"config": true, "kind": true, "voice": true, "clone": true, "lang": true,
 		"seconds": true, "seed": true, "reserve-vram": true, "tts-voice": true,
+		"route": true, "remote": true,
 	})
 	_ = fs.Parse(flagArgs)
 
@@ -1571,12 +1587,12 @@ func runGenerateAudio(args []string) error {
 		kind: *kind, voice: *voice, ttsVoice: *ttsVoice, clone: *clone, lang: *lang, out: out,
 		seconds: *seconds, seed: *seed, reserveVRAM: *reserveVRAM,
 	})
-	res := p.Run(context.Background(), core.Request{
+	res := mediaremote.Run(context.Background(), cfg, p, core.Request{
 		Task:   core.TaskGenerateAudio,
 		Door:   "cli:generate-audio",
 		Input:  text,
 		Params: params,
-	})
+	}, *route, remotes)
 	emitResult(res, *asJSON, "", *compactFlag)
 	return nil
 }
@@ -1664,6 +1680,8 @@ type generateVideoCLI struct {
 	prompt  string
 	asJSON  bool
 	compact bool
+	route   string
+	remotes []string
 }
 
 // generateVideoValueFlags are the flags that consume the next token. Bool flags
@@ -1672,7 +1690,7 @@ type generateVideoCLI struct {
 var generateVideoValueFlags = map[string]bool{
 	"config": true, "model": true, "negative": true, "frames": true,
 	"width": true, "height": true, "steps": true, "seed": true, "reserve-vram": true,
-	"transformer": true,
+	"transformer": true, "route": true, "remote": true,
 }
 
 // parseGenerateVideo parses the generate-video command line. The CLI carries every
@@ -1697,6 +1715,9 @@ func parseGenerateVideo(args []string, errorHandling flag.ErrorHandling) (genera
 	hero := fs.Bool("hero", false, "deprecated: the native quality pass IS the default now; accepted as a no-op")
 	upscale := fs.Bool("upscale", false, "post-decode upscale using this machine's configured upscale model (e.g. 720p->1080p)")
 	compactFlag := fs.Bool("compact", false, "compact (minified) JSON output")
+	route := fs.String("route", "auto", "local | auto (here when this machine has the lane, derived from the files its route loads, else a fleet node from delegate_remotes) | remote (a fleet node; input files travel in a hash-checked bundle and the output is fetched back verified; ADR 0072)")
+	remotes := new(repeatedFlag)
+	fs.Var(remotes, "remote", "fleet node base URL for this call (repeatable); must be one of delegate_remotes")
 
 	// generate-video takes THREE positionals (out path, still image, prompt); the
 	// rest are flags.
@@ -1715,6 +1736,7 @@ func parseGenerateVideo(args []string, errorHandling flag.ErrorHandling) (genera
 			seed: *seed, reserveVRAM: *reserveVRAM, fast: *fast, hero: *hero, upscale: *upscale,
 		},
 		prompt: prompt, asJSON: *asJSON, compact: *compactFlag,
+		route: *route, remotes: *remotes,
 	}, nil
 }
 
@@ -1740,13 +1762,13 @@ func runGenerateVideo(args []string) error {
 	}
 	defer cleanup()
 
-	res := p.Run(context.Background(), core.Request{
+	res := mediaremote.Run(context.Background(), cfg, p, core.Request{
 		Task:   core.TaskGenerateVideo,
 		Door:   "cli:generate-video",
 		Input:  c.prompt,
 		Image:  c.video.still,
 		Params: buildVideoParams(c.video),
-	})
+	}, c.route, c.remotes)
 	emitResult(res, c.asJSON, "", c.compact)
 	return nil
 }

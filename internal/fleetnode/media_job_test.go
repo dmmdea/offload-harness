@@ -26,17 +26,17 @@ import (
 // Magic-byte fixtures: the first bytes a real file of each format starts with, padded so the sniff has
 // its whole 16-byte window.
 var (
-	mjPNG  = append([]byte("\x89PNG\r\n\x1a\n"), make([]byte, 32)...)
-	mjJPEG = append([]byte("\xff\xd8\xff\xe0"), make([]byte, 32)...)
-	mjWEBP = append([]byte("RIFF\x24\x00\x00\x00WEBPVP8 "), make([]byte, 32)...)
-	mjWAV  = append([]byte("RIFF\x24\x00\x00\x00WAVEfmt "), make([]byte, 32)...)
-	mjMP4  = append([]byte("\x00\x00\x00\x18ftypmp42"), make([]byte, 32)...)
-	mjWEBM = append([]byte("\x1a\x45\xdf\xa3"), make([]byte, 32)...)
-	mjFLAC = append([]byte("fLaC"), make([]byte, 32)...)
-	mjMP3  = append([]byte("ID3\x04\x00"), make([]byte, 32)...)
-	mjMP3Frame  = append([]byte("\xff\xfb\x90\x00"), make([]byte, 32)...)
-	mjOGG  = append([]byte("OggS\x00\x02"), make([]byte, 32)...)
-	mjText = []byte("this is not media at all, only text padding")
+	mjPNG      = append([]byte("\x89PNG\r\n\x1a\n"), make([]byte, 32)...)
+	mjJPEG     = append([]byte("\xff\xd8\xff\xe0"), make([]byte, 32)...)
+	mjWEBP     = append([]byte("RIFF\x24\x00\x00\x00WEBPVP8 "), make([]byte, 32)...)
+	mjWAV      = append([]byte("RIFF\x24\x00\x00\x00WAVEfmt "), make([]byte, 32)...)
+	mjMP4      = append([]byte("\x00\x00\x00\x18ftypmp42"), make([]byte, 32)...)
+	mjWEBM     = append([]byte("\x1a\x45\xdf\xa3"), make([]byte, 32)...)
+	mjFLAC     = append([]byte("fLaC"), make([]byte, 32)...)
+	mjMP3      = append([]byte("ID3\x04\x00"), make([]byte, 32)...)
+	mjMP3Frame = append([]byte("\xff\xfb\x90\x00"), make([]byte, 32)...)
+	mjOGG      = append([]byte("OggS\x00\x02"), make([]byte, 32)...)
+	mjText     = []byte("this is not media at all, only text padding")
 )
 
 // mediaJobCfg is a node with every media task bound (the test seam reads a bound route as CONFIGURED), the

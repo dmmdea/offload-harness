@@ -237,11 +237,11 @@ func placementDefer(err error, placement string) core.Result {
 // comes back as a deferred core.Result.
 func Call(ctx context.Context, cfg config.Config, req core.Request, remotes []string) (core.Result, error) {
 	start := time.Now()
-	pl, err := plan(req)
+	bases, err := candidateBases(cfg, remotes)
 	if err != nil {
 		return core.Result{}, err
 	}
-	bases, err := candidateBases(cfg, remotes)
+	pl, err := plan(req)
 	if err != nil {
 		return core.Result{}, err
 	}
