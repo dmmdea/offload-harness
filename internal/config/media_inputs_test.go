@@ -36,13 +36,13 @@ func TestMediaInputsAdmissibleNeedsOptInTokenAndATask(t *testing.T) {
 }
 
 func TestEffectiveMediaInputsMaxBytes(t *testing.T) {
-	if got := (Config{}).EffectiveMediaInputsMaxBytes(); got != 512<<20 {
-		t.Errorf("default cap %d, want 512 MiB", got)
+	if got := (Config{}).EffectiveMediaInputsMaxBytes(); got != 256<<20 {
+		t.Errorf("default cap %d, want 256 MiB (the node holds the base64 body and the decoded bundle at once)", got)
 	}
 	if got := (Config{FleetMediaInputsMaxMB: 3}).EffectiveMediaInputsMaxBytes(); got != 3<<20 {
 		t.Errorf("3 MB cap %d", got)
 	}
-	if got := (Config{FleetMediaInputsMaxMB: -1}).EffectiveMediaInputsMaxBytes(); got != 512<<20 {
+	if got := (Config{FleetMediaInputsMaxMB: -1}).EffectiveMediaInputsMaxBytes(); got != 256<<20 {
 		t.Errorf("a negative cap falls back to the default, got %d", got)
 	}
 }

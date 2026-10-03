@@ -109,9 +109,8 @@ func (s *Server) handleMediaJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Only a token holder gets the longer window; everyone else met the blanket timeouts above.
-	rc := http.NewResponseController(w)
-	_ = rc.SetReadDeadline(time.Now().Add(mediaJobWindow))
-	_ = rc.SetWriteDeadline(time.Now().Add(mediaJobWindow))
+	s.extendRead(w, mediaJobWindow, "the media-job door")
+	s.extendWrite(w, mediaJobWindow, "the media-job door")
 	limit := MediaJobBodyCap(s.opts.Cfg)
 	r.Body = http.MaxBytesReader(w, r.Body, limit)
 	if ct := r.Header.Get("Content-Type"); ct != "" {
@@ -120,7 +119,7 @@ func (s *Server) handleMediaJob(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	body, err := io.ReadAll(r.Body)
+	body, err := readMediaJobBody(r, limit)
 	if err != nil {
 		var maxErr *http.MaxBytesError
 		if errors.As(err, &maxErr) {
@@ -130,14 +129,131 @@ func (s *Server) handleMediaJob(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "reading media-job body: "+err.Error())
 		return
 	}
-	dec := json.NewDecoder(bytes.NewReader(body))
-	dec.DisallowUnknownFields()
-	var p MediaJobPayload
-	if err := dec.Decode(&p); err != nil {
+	head, err := decodeMediaJobHead(body)
+	if err != nil {
 		writeError(w, http.StatusBadRequest, "malformed media-job body: "+err.Error())
 		return
 	}
-	s.admit(w, r, dispatchEnvelope{JobID: p.JobID, TaskType: MediaJobTask, Payload: body})
+	s.admit(w, r, dispatchEnvelope{JobID: head.JobID, TaskType: MediaJobTask, Payload: body})
+}
+
+// readMediaJobBody reads the whole body into ONE buffer sized from Content-Length when the client sent it
+// (io.ReadAll would grow by doubling, leaving garbage the size of the body behind it).
+func readMediaJobBody(r *http.Request, limit int64) ([]byte, error) {
+	if r.ContentLength > limit {
+		// Let the MaxBytesReader produce the typed error the caller maps to 413.
+		_, err := io.Copy(io.Discard, r.Body)
+		return nil, err
+	}
+	if r.ContentLength > 0 {
+		buf := bytes.NewBuffer(make([]byte, 0, r.ContentLength+1))
+		if _, err := buf.ReadFrom(r.Body); err != nil {
+			return nil, err
+		}
+		return buf.Bytes(), nil
+	}
+	return io.ReadAll(r.Body)
+}
+
+// discardJSON accepts any JSON value without copying it: encoding/json hands UnmarshalJSON a slice of the
+// input, so decoding a field into this type costs nothing however large the value is.
+type discardJSON struct{}
+
+func (*discardJSON) UnmarshalJSON([]byte) error { return nil }
+
+// mediaJobHead is the part of a media-job body the door reads before admission: the job id, plus the other
+// fields' presence and types. The bundle and the inner payload are decoded, once, by buildMediaJob.
+type mediaJobHead struct {
+	JobID        string            `json:"job_id"`
+	TaskType     string            `json:"task_type"`
+	Payload      discardJSON       `json:"payload"`
+	Bundle       bundleHead        `json:"bundle"`
+	BundleSHA256 string            `json:"bundle_sha256"`
+	Inputs       map[string]string `json:"inputs"`
+}
+
+// bundleHead checks that the bundle is a JSON string (or null) and keeps none of it.
+type bundleHead struct{}
+
+func (*bundleHead) UnmarshalJSON(b []byte) error {
+	if s := bytes.TrimSpace(b); string(s) == "null" || (len(s) >= 2 && s[0] == '"') {
+		return nil
+	}
+	return errors.New("json: cannot unmarshal a non-string into the bundle")
+}
+
+// decodeMediaJobHead decodes the body strictly (an unknown top-level key is refused, matched without regard
+// to case as the decoder matches a field) WITHOUT materialising the bundle: the keys come from a map whose
+// values are discarded, the typed fields from a decode whose bundle and payload are discarded too. The old
+// shape (json.Decoder over the body into MediaJobPayload) held the bundle two more times at the same moment.
+func decodeMediaJobHead(body []byte) (mediaJobHead, error) {
+	var keys map[string]discardJSON
+	if err := json.Unmarshal(body, &keys); err != nil {
+		return mediaJobHead{}, err
+	}
+	for k := range keys {
+		known := false
+		for _, f := range []string{"job_id", "task_type", "payload", "bundle", "bundle_sha256", "inputs"} {
+			if strings.EqualFold(k, f) {
+				known = true
+				break
+			}
+		}
+		if !known {
+			return mediaJobHead{}, fmt.Errorf("json: unknown field %q", k)
+		}
+	}
+	var head mediaJobHead
+	if err := json.Unmarshal(body, &head); err != nil {
+		return mediaJobHead{}, err
+	}
+	return head, nil
+}
+
+// bundleBytes is the bundle field decoded from base64 straight into its bytes: the encoded string is never
+// copied (encoding/json passes UnmarshalJSON a slice of the request body), so the node holds the body once
+// and the decoded bundle once.
+type bundleBytes struct{ raw []byte }
+
+func (b *bundleBytes) UnmarshalJSON(data []byte) error {
+	data = bytes.TrimSpace(data)
+	if string(data) == "null" {
+		return nil
+	}
+	if len(data) < 2 || data[0] != '"' || data[len(data)-1] != '"' {
+		return errors.New("bundle must be a string")
+	}
+	enc := data[1 : len(data)-1]
+	if bytes.IndexByte(enc, '\\') >= 0 {
+		// An escaped string (a client that writes "\/" for "/"): rare, so the one copy is fine.
+		var s string
+		if err := json.Unmarshal(data, &s); err != nil {
+			return err
+		}
+		raw, err := base64.StdEncoding.DecodeString(s)
+		if err != nil {
+			return fmt.Errorf("bundle is not base64: %w", err)
+		}
+		b.raw = raw
+		return nil
+	}
+	raw := make([]byte, base64.StdEncoding.DecodedLen(len(enc)))
+	n, err := base64.StdEncoding.Decode(raw, enc)
+	if err != nil {
+		return fmt.Errorf("bundle is not base64: %w", err)
+	}
+	b.raw = raw[:n]
+	return nil
+}
+
+// mediaJobWire is MediaJobPayload as the node decodes it for the build.
+type mediaJobWire struct {
+	JobID        string            `json:"job_id"`
+	TaskType     string            `json:"task_type"`
+	Payload      json.RawMessage   `json:"payload"`
+	Bundle       bundleBytes       `json:"bundle"`
+	BundleSHA256 string            `json:"bundle_sha256"`
+	Inputs       map[string]string `json:"inputs"`
 }
 
 // buildMediaJob turns an admitted payload into the inner task's request: the bundle is checked against
@@ -145,12 +261,15 @@ func (s *Server) handleMediaJob(w http.ResponseWriter, r *http.Request) {
 // inner payload is rewritten to the extracted path, and the SAME builder /fleet/dispatch uses builds the
 // request. The returned cleanup runs the inner cleanup and removes the directory; the server runs it when
 // the job ends, and on every refusal before that.
-func buildMediaJob(ctx context.Context, cfg config.Config, loopbackListener bool, payload json.RawMessage) (core.Request, func(), error) {
+func buildMediaJob(ctx context.Context, v *mediaView, loopbackListener bool, payload json.RawMessage) (core.Request, func(), error) {
+	cfg := v.cfg
 	noop := func() {}
 	if !cfg.MediaInputsAdmissible() {
 		return core.Request{}, noop, errors.New(mediaJobClosed)
 	}
-	var in MediaJobPayload
+	// The bundle is decoded from base64 straight out of the payload into its bytes (bundleBytes): the
+	// encoded string is never copied, so this is the only full-size copy the build makes.
+	var in mediaJobWire
 	if err := json.Unmarshal(payload, &in); err != nil {
 		return core.Request{}, noop, fmt.Errorf("media-job payload: %w", err)
 	}
@@ -158,8 +277,11 @@ func buildMediaJob(ctx context.Context, cfg config.Config, loopbackListener bool
 	if !containsString(mediaJobTasks, task) {
 		return core.Request{}, noop, fmt.Errorf("media-job payload: task_type %q is not one of %s", in.TaskType, strings.Join(mediaJobTasks, ", "))
 	}
-	if !taskConfiguredFor(cfg, task, loopbackListener) {
-		return core.Request{}, noop, fmt.Errorf("media-job payload: %s is not configured on this node (supported: %s)", task, strings.Join(SupportedTasksFor(cfg, loopbackListener), ", "))
+	if !taskConfiguredIn(v, task, loopbackListener) {
+		if nre := mediaRouteNotReady(v, task); nre != nil {
+			return core.Request{}, noop, nre
+		}
+		return core.Request{}, noop, fmt.Errorf("media-job payload: %s is not configured on this node (supported: %s)", task, strings.Join(supportedTasksIn(v, loopbackListener), ", "))
 	}
 	inner := map[string]json.RawMessage{}
 	if len(in.Payload) > 0 && string(in.Payload) != "null" {
@@ -177,28 +299,33 @@ func buildMediaJob(ctx context.Context, cfg config.Config, loopbackListener bool
 		}
 	}
 	// A file field the payload fills in by itself would be a node-local path read: this door carries
-	// bytes, never paths, so a field is either shipped in the bundle or left out.
-	for name := range fields {
-		if _, shipped := in.Inputs[name]; shipped {
-			continue
-		}
-		if v, ok := inner[name]; ok && !isAbsentJSON(v) && string(v) != `""` {
-			return core.Request{}, noop, fmt.Errorf("media-job payload: payload.%s names a path on this node; ship the file in the bundle (inputs) or use /fleet/dispatch", name)
+	// bytes, never paths, so a field is either shipped in the bundle or left out. The inner builders
+	// decode field names without regard to case ("Still" fills still), so the guard matches the same
+	// way: a key that names a file field in ANY casing is refused when the field is not shipped, and
+	// dropped (the shipped file replaces it) when it is, so no spelling reaches the builder as a path.
+	for key, val := range inner {
+		for name := range fields {
+			if !strings.EqualFold(key, name) {
+				continue
+			}
+			if _, shipped := in.Inputs[name]; shipped {
+				delete(inner, key)
+			} else if !isAbsentJSON(val) && string(val) != `""` {
+				return core.Request{}, noop, fmt.Errorf("media-job payload: payload.%s names a path on this node; ship the file in the bundle (inputs) or use /fleet/dispatch", key)
+			}
+			break
 		}
 	}
-	if len(in.Inputs) == 0 && (in.Bundle != "" || in.BundleSHA256 != "") {
+	if len(in.Inputs) == 0 && (len(in.Bundle.raw) > 0 || in.BundleSHA256 != "") {
 		return core.Request{}, noop, errors.New("media-job payload: a bundle needs inputs naming the files the payload reads")
 	}
-	if len(in.Inputs) > 0 && in.Bundle == "" {
+	if len(in.Inputs) > 0 && len(in.Bundle.raw) == 0 {
 		return core.Request{}, noop, errors.New("media-job payload: inputs name files but the payload carries no bundle")
 	}
 
 	cleanup := noop
 	if len(in.Inputs) > 0 {
-		raw, err := base64.StdEncoding.DecodeString(in.Bundle)
-		if err != nil {
-			return core.Request{}, noop, fmt.Errorf("media-job payload: bundle is not base64: %w", err)
-		}
+		raw := in.Bundle.raw
 		max := cfg.EffectiveMediaInputsMaxBytes()
 		if int64(len(raw)) > max {
 			return core.Request{}, noop, fmt.Errorf("media-job payload: the bundle is %d bytes, over fleet_media_inputs_max_mb", len(raw))
@@ -258,7 +385,7 @@ func buildMediaJob(ctx context.Context, cfg config.Config, loopbackListener bool
 		cleanup()
 		return core.Request{}, noop, fmt.Errorf("media-job payload: %w", err)
 	}
-	req, innerCleanup, err := BuildRequest(ctx, cfg, loopbackListener, task, rewritten)
+	req, innerCleanup, err := buildRequestIn(ctx, v, loopbackListener, task, rewritten)
 	if err != nil {
 		innerCleanup()
 		cleanup()

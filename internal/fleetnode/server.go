@@ -36,6 +36,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/gpuactivity"
 	"github.com/dmmdea/offload-harness/internal/gpulease"
 	"github.com/dmmdea/offload-harness/internal/hostsample"
+	"github.com/dmmdea/offload-harness/internal/mediacap"
 	"github.com/dmmdea/offload-harness/internal/netguard"
 	"github.com/dmmdea/offload-harness/internal/placement"
 	"github.com/dmmdea/offload-harness/internal/seatload"
@@ -184,11 +185,13 @@ type Server struct {
 	// queue is the Option B consolidated pull queue (ADR 0030) — non-nil ONLY
 	// when this node is the config-elected holder (fleet_queue_host). Opened
 	// by EnableQueueHost; the routes mount only when it is non-nil.
-	queue    *fleetqueue.Queue
-	tasks    []string
-	families []string
+	queue *fleetqueue.Queue
+	// The advertised task and family lists are NOT fields: they are derived per health request and per
+	// claim (SupportedTasksFor, Families), because the media tasks depend on a disk read that can change
+	// under a running node (ADR 0072).
+	//
 	// accelerators is Options.Accelerators minus the local-only devices
-	// (config.FleetVisibleAccelerators, register E-08), computed once like tasks:
+	// (config.FleetVisibleAccelerators, register E-08), computed once at construction:
 	// the list health publishes. The standalone Hailo-8L is never in it, whoever
 	// built Options and whatever the manifest says. nil on a node with none.
 	accelerators []string
@@ -196,13 +199,13 @@ type Server struct {
 	// like families; nil on a node without named families (key omitted).
 	imageFamilies []ImageFamily
 	// agentSeat is the resolved agent planner seat (config.AgentPlannerModel:
-	// agent_model > workhorse Model), computed once here like tasks/families —
+	// agent_model > workhorse Model), computed once here at construction —
 	// the config cannot change under a running server. Advertised (and probed
 	// for residency) only when agentLane holds.
 	agentSeat string
 	// agentLane is fleetnode.AgentLaneAdmissible over the RESOLVED listener —
 	// the one predicate dispatch's ack-time guard and this advertisement share,
-	// computed once here like tasks/families. Health must never advertise a
+	// computed once here at construction. Health must never advertise a
 	// lane dispatch would refuse: the delegator reads ONLY the agent_* fields,
 	// so a lane advertised past a tokenless non-loopback listener sends it
 	// through placement and straight into a 403.
@@ -268,6 +271,12 @@ type Server struct {
 	// blanket WriteTimeout (see extendWrite). A field so a test can observe the
 	// deadline a handler asks for; production is controllerWriteDeadline.
 	setWriteDeadline func(w http.ResponseWriter, t time.Time) error
+	// mediaKey is the media-route cache key of opts.Cfg, computed once in New (mediaKeySet says it was).
+	mediaKey    mediacap.Key
+	mediaKeyOK  bool
+	mediaKeySet bool
+	// setReadDeadline is setWriteDeadline's twin for a handler that receives a large body (extendRead).
+	setReadDeadline func(w http.ResponseWriter, t time.Time) error
 	// admitting counts the runs this process has claimed that are still in
 	// their ADMISSION phase (see admittingRuns). A field for the same reason as
 	// the roster seams: tests drive it without a registry on disk.
@@ -442,16 +451,15 @@ func (s *Server) noteAgentResult(data json.RawMessage) {
 	s.agentRes.noteSeatAnswered()
 }
 
-// New builds a Server. The supported-task/family lists are computed here, not
-// per health request — the config cannot change under a running server.
+// New builds a Server. The lane verdicts and the image-family list are computed here — the config
+// cannot change under a running server. The supported-task and family lists are not: they are derived
+// per health request and per claim, because the media tasks follow a cached disk read (ADR 0072).
 func New(runner Runner, jobs *Jobs, opts Options) *Server {
 	s := &Server{
 		runner:             runner,
 		jobs:               jobs,
 		opts:               opts,
-		tasks:              SupportedTasksFor(opts.Cfg, opts.LoopbackListener),
 		accelerators:       config.FleetVisibleAccelerators(opts.Accelerators),
-		families:           Families(opts.Cfg),
 		imageFamilies:      ImageFamilies(opts.Cfg),
 		agentSeat:          opts.Cfg.AgentPlannerModel(""),
 		agentLane:          AgentLaneAdmissible(opts.Cfg, opts.LoopbackListener),
@@ -462,9 +470,20 @@ func New(runner Runner, jobs *Jobs, opts Options) *Server {
 		rosterServedModels: swapRosterServedModels,
 		seatRunning:        swapSeatRunning,
 		setWriteDeadline:   controllerWriteDeadline,
+		setReadDeadline:    controllerReadDeadline,
 	}
 	s.admitting = s.admittingRuns
+	// The config cannot change under a running server, so its cache key is computed once: the health
+	// and admission paths then never encode the config again to look a verdict up.
+	s.mediaKey, s.mediaKeyOK = mediacap.KeyOf(opts.Cfg)
+	s.mediaKeySet = true
 	return s
+}
+
+// mediaView is a fresh single-request view of this node's media route verdicts (see mediaView). It starts
+// from the key New computed, so a read is a cache lookup, never a config encoding.
+func (s *Server) mediaView() *mediaView {
+	return &mediaView{cfg: s.opts.Cfg, key: s.mediaKey, keyOK: s.mediaKeyOK, haveKey: s.mediaKeySet}
 }
 
 // seatRunningClient reads /running on the node's own llama-swap. netguard's
@@ -1016,6 +1035,27 @@ func (s *Server) extendWrite(w http.ResponseWriter, d time.Duration, handler str
 	log.Printf("fleet: %s could not extend its write deadline by %s past the server's blanket WriteTimeout — this answer will be CUT if it takes longer: %v", handler, d, err)
 }
 
+// extendRead pushes THIS handler's read deadline out to now+d, the receiving half of extendWrite: the
+// blanket ReadTimeout (30 s) cuts a large upload on an ordinary link, so the one handler that takes one
+// (the media-job door) extends its own. The failure is reported the way extendWrite reports its own: a
+// writer that cannot carry a deadline once per process per route, any other failure as the event it is.
+func (s *Server) extendRead(w http.ResponseWriter, d time.Duration, handler string) {
+	if s.setReadDeadline == nil {
+		return
+	}
+	err := s.setReadDeadline(w, time.Now().Add(d))
+	if err == nil {
+		return
+	}
+	if errors.Is(err, http.ErrNotSupported) {
+		if _, seen := writeDeadlineUnsupported.LoadOrStore(handler+" (read)", struct{}{}); !seen {
+			log.Printf("fleet: %s runs under the blanket read timeout: this ResponseWriter does not support SetReadDeadline, so the %s extension cannot be applied (reported once per process per route)", handler, d)
+		}
+		return
+	}
+	log.Printf("fleet: %s could not extend its read deadline by %s past the server's blanket ReadTimeout — a large upload will be CUT if it takes longer: %v", handler, d, err)
+}
+
 // writeDeadlineUnsupported remembers which routes have already reported a
 // writer that cannot carry a deadline. Keyed by the handler name, so the chat
 // lane and the long poll each say it once.
@@ -1025,6 +1065,11 @@ var writeDeadlineUnsupported sync.Map
 // per-request deadline control.
 func controllerWriteDeadline(w http.ResponseWriter, t time.Time) error {
 	return http.NewResponseController(w).SetWriteDeadline(t)
+}
+
+// controllerReadDeadline is the production seam for extendRead.
+func controllerReadDeadline(w http.ResponseWriter, t time.Time) error {
+	return http.NewResponseController(w).SetReadDeadline(t)
 }
 
 // httpServer builds the *http.Server with the spec's timeout table
@@ -1406,11 +1451,14 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	// The media tasks are advertised only while mediacap derives their route CONFIGURED (ADR 0072), and
 	// that is a disk read that can change under a running node (a weight removed or restored), so the
 	// lists are derived per request from the same cached readings the admission path consults.
-	tasks := SupportedTasksFor(s.opts.Cfg, s.opts.LoopbackListener)
+	// ONE view of the media verdicts for the whole request: the task list, the family list and
+	// media_routes below all read the same single reading of the cache.
+	mv := s.mediaView()
+	tasks := supportedTasksIn(mv, s.opts.LoopbackListener)
+	families := familiesOf(s.opts.Cfg, tasks)
 	if tasks == nil {
 		tasks = []string{}
 	}
-	families := Families(s.opts.Cfg)
 	if families == nil {
 		families = []string{}
 	}
@@ -1456,7 +1504,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		GpuDevices:            snap.Devices,
 		SupportedTaskTypes:    tasks,
 		LoadableModelFamilies: families,
-		MediaRoutes:           MediaRoutesHealth(s.opts.Cfg),
+		MediaRoutes:           mediaRoutesHealthIn(mv),
 		ImageFamilies:         s.imageFamilies,
 		ModelFootprints:       fps,
 		QueueDepth:            queued + running,
@@ -2284,12 +2332,18 @@ func (s *Server) admit(w http.ResponseWriter, r *http.Request, env dispatchEnvel
 	}
 
 	// The RESOLVED listener goes down the admission path — the same value
-	// s.tasks/s.agentLane were computed from at New(), so what health
-	// advertises and what this admits can never key on different notions of
-	// "loopback".
-	req, cleanup, err := BuildRequest(r.Context(), s.opts.Cfg, s.opts.LoopbackListener, env.TaskType, env.Payload)
+	// health and s.agentLane are computed from, so what health advertises and
+	// what this admits can never key on different notions of "loopback".
+	req, cleanup, err := buildRequestIn(r.Context(), s.mediaView(), s.opts.LoopbackListener, env.TaskType, env.Payload)
 	if err != nil {
 		cleanup()
+		// A media task the node binds but cannot run right now (its route is not CONFIGURED) is the node's
+		// state, not a malformed request: 503, which every delegator re-places elsewhere.
+		var nre *routeNotReadyError
+		if errors.As(err, &nre) {
+			writeError(w, http.StatusServiceUnavailable, err.Error())
+			return
+		}
 		// A failure that is this node's own (a disk that filled while unpacking a project) is not the
 		// request's: 500, so the caller reports infrastructure, never "refused".
 		var ns nodeSideError
@@ -2301,6 +2355,12 @@ func (s *Server) admit(w http.ResponseWriter, r *http.Request, env dispatchEnvel
 		return
 	}
 
+	// The run closure lives as long as the job does, queue wait included, so it captures ONLY what it
+	// needs (the job id and the task type), never `env`: env.Payload is the whole request body, and for
+	// a media job that is the base64 bundle, up to fleet_media_inputs_max_mb of it. BuildRequest above
+	// has already turned it into the request (and, for a bundle, into files on disk), so the body is
+	// released when this handler returns rather than pinned for the job's queue and render life.
+	jobID, taskType := env.JobID, env.TaskType
 	run := func(ctx context.Context) (json.RawMessage, error) {
 		defer cleanup() // temp files live exactly as long as the job
 		// The wall report (register D-116): the executing lane publishes the
@@ -2308,7 +2368,6 @@ func (s *Server) admit(w http.ResponseWriter, r *http.Request, env dispatchEnvel
 		// every poll of the RUNNING job. Wired for every task type — only the
 		// agent lane reports one today, and a lane that reports none leaves
 		// the record at 0, which is what a pre-D-116 node published.
-		jobID := env.JobID
 		ctx = core.WithWallReport(ctx, func(sec int) { s.jobs.SetWall(jobID, sec) })
 		// The liveness report (0.131.0): the executing lane publishes the
 		// run's progress (last token, tok/s, phase, allowance, ceiling) onto
@@ -2323,26 +2382,26 @@ func (s *Server) admit(w http.ResponseWriter, r *http.Request, env dispatchEnvel
 		// equality instead of on a guess at latency.
 		req.FleetJobID = jobID
 		res := s.runner.Run(ctx, req)
-		if env.TaskType == string(core.TaskAgentRun) && res.OK {
+		if taskType == string(core.TaskAgentRun) && res.OK {
 			// The one fact this result proves about the advertised seat —
 			// a completed call on it — goes into the residency cache now,
 			// so the next health read does not charge a cold load for a
 			// seat that just answered. A defer with zero steps proves nothing.
 			s.noteAgentResult(res.Data)
 		}
-		if env.TaskType == VisionTask {
+		if taskType == VisionTask {
 			// The vision caller reads the WHOLE core.Result back (defers
 			// included) — see visionJobData; a defer is a done job here.
 			return visionJobData(res)
 		}
-		if env.TaskType == TextTask {
+		if taskType == TextTask {
 			// The same for the text lane — see textJobData.
 			return textJobData(res)
 		}
 		if res.OK {
 			// A media result names its files with size and sha256 (ADR 0072) so the machine that
 			// fetches them can verify what it received.
-			return withArtifacts(s.opts.Cfg, env.TaskType, res.Data), nil
+			return withArtifacts(s.opts.Cfg, taskType, res.Data), nil
 		}
 		reason := res.Reason
 		if reason == "" {
@@ -2381,6 +2440,8 @@ func (s *Server) admit(w http.ResponseWriter, r *http.Request, env dispatchEnvel
 			}
 		}
 	}
+	// Nothing below reads the body any more: drop this frame's reference to it too.
+	env.Payload = nil
 	spec := AcceptSpec{
 		Agent:     env.TaskType == string(core.TaskAgentRun),
 		Gated:     gatedJob(env.TaskType),

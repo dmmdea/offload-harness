@@ -314,7 +314,7 @@ func TestAccelLocalOnlyPulledJobs(t *testing.T) {
 		t.Fatalf("runner requests = %+v, want one for coral-edgetpu", reqs)
 	}
 
-	// The claim advertises s.tasks: `accel` for the node that serves the Coral, not for a node that
+	// The claim advertises the live supported tasks: `accel` for the node that serves the Coral, not for a node that
 	// carries only the standalone device.
 	only := accelNodeCfg(t, "hailo-8l")
 	so, _ := newTestServer(t, only, &fakeRunner{}, &Options{NodeID: "testnode", Snapshot: goodSnapshot, LoopbackListener: true, Accelerators: []string{"hailo-8l"}})

@@ -1693,7 +1693,10 @@ type Config struct {
 	// renders from. Off unless set, and never open on a node without fleet_auth_token or a bound
 	// media task (MediaInputsAdmissible).
 	FleetMediaInputs bool `json:"fleet_media_inputs,omitempty"`
-	// FleetMediaInputsMaxMB caps one media-job bundle as sent (gzip-compressed), MiB; 0 = 512.
+	// FleetMediaInputsMaxMB caps one media-job bundle as sent (gzip-compressed), MiB; 0 = 256. The node
+	// holds the request body (base64, a third larger) and the decoded bundle at the same moment while it
+	// admits a job, so the default is sized to keep that peak under about 0.6 GiB; raise it for a node with
+	// the RAM and a driver video that needs it.
 	FleetMediaInputsMaxMB int `json:"fleet_media_inputs_max_mb,omitempty"`
 	// KVSlotCapGiB bounds the node's kvslots/ directory (ADR 0056 Layer 2); 0 = 8 GiB.
 	KVSlotCapGiB int `json:"kvslot_cap_gib,omitempty"`
@@ -3006,11 +3009,14 @@ func (c Config) MediaInputsAdmissible() bool {
 		c.VoiceGenScript != "" || c.MusicGenScript != "" || c.TTSEndpoint != "" || c.RunGraphScript != ""
 }
 
+// DefaultMediaInputsMaxMB is the media-job bundle cap when fleet_media_inputs_max_mb is unset.
+const DefaultMediaInputsMaxMB = 256
+
 // EffectiveMediaInputsMaxBytes is the cap on one media-job bundle as sent.
 func (c Config) EffectiveMediaInputsMaxBytes() int64 {
 	mb := c.FleetMediaInputsMaxMB
 	if mb <= 0 {
-		mb = 512
+		mb = DefaultMediaInputsMaxMB
 	}
 	return int64(mb) << 20
 }

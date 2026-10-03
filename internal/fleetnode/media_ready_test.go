@@ -108,11 +108,12 @@ func TestAMissingWeightDropsVideoGenFromTheAdvertisement(t *testing.T) {
 	if _, cleanup, err := BuildRequest(context.Background(), cfg, true, "video-gen", json.RawMessage(`{"prompt":"p"}`)); err == nil {
 		cleanup()
 		t.Fatal("admission accepted a task health no longer advertises: advertisement and admission must be one predicate")
-	} else if !strings.Contains(err.Error(), "unsupported task_type") {
-		t.Fatalf("refusal: %v", err)
+	} else if !strings.Contains(err.Error(), "generate_video") || !strings.Contains(err.Error(), "BOUND-BUT-MISSING") {
+		t.Fatalf("the refusal must name the route and its state: %v", err)
 	}
-	if rec := do(t, s, "POST", "/fleet/dispatch", `{"job_id":"v-1","task_type":"video-gen","payload":{"prompt":"p"}}`, nil); rec.Code != 400 {
-		t.Fatalf("dispatch of an unadvertised task: status %d, want 400: %s", rec.Code, rec.Body.String())
+	// A bound task whose route is not ready is the node's state, not a bad request: 503, re-placeable.
+	if rec := do(t, s, "POST", "/fleet/dispatch", `{"job_id":"v-1","task_type":"video-gen","payload":{"prompt":"p"}}`, nil); rec.Code != 503 {
+		t.Fatalf("dispatch of an unadvertised task: status %d, want 503: %s", rec.Code, rec.Body.String())
 	}
 
 	touchFile(t, vae)
