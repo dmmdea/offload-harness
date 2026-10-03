@@ -58,6 +58,7 @@ func parseNodeSwapFlags(args []string) (nodeswap.Plan, nodeSwapOutput, error) {
 
 	healthURL := fs.String("health-url", "", "this node's GET /fleet/health URL — waits for queue=0 before swapping and verifies health after restart; omit for a standalone node with no fleet-serve endpoint")
 	waitIdleTimeout := fs.Duration("wait-idle-timeout", 10*time.Minute, "max time to wait for the node to go idle before swapping")
+	cardsFlag := fs.String("cards", "", "standalone node only: comma list of the GPU UUIDs this deploy touches — a GPU lease on any other card is left alone and recorded; default (none) is the whole node, where any GPU lease holds the swap. A lease that names no cards is the whole node and always holds it")
 
 	restartTask := fs.String("restart-task", "", "Windows scheduled task to Stop/Start around the swap (e.g. offload-fleet-node); mutually exclusive with --restart-command")
 	restartCommand := fs.String("restart-command", "", "a command that stops+relaunches the node itself (e.g. a launcher script that restarts the node out of session via WMI/CIM); mutually exclusive with --restart-task. Neither flag = standalone binary-only swap, nothing restarted")
@@ -89,6 +90,7 @@ func parseNodeSwapFlags(args []string) (nodeswap.Plan, nodeSwapOutput, error) {
 		BackupSuffix:    *backupSuffix,
 		HealthURL:       *healthURL,
 		WaitIdleTimeout: *waitIdleTimeout,
+		Cards:           splitCards(*cardsFlag),
 		RestartTaskName: *restartTask,
 		RestartCommand:  *restartCommand,
 		RestartTimeout:  *restartTimeout,
@@ -102,6 +104,17 @@ func parseNodeSwapFlags(args []string) (nodeswap.Plan, nodeSwapOutput, error) {
 	}
 	out := nodeSwapOutput{resultPath: *resultPath, logPath: *logPath, asJSON: *asJSON}
 	return plan, out, nil
+}
+
+// splitCards reads --cards: a comma list, each entry trimmed, blanks dropped.
+func splitCards(s string) []string {
+	var out []string
+	for _, c := range strings.Split(s, ",") {
+		if c = strings.TrimSpace(c); c != "" {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 // loopbackOrWildcardHost reports a host that cannot be dialed FROM ANOTHER

@@ -93,6 +93,29 @@ func TestParseNodeSwapFlags_AllFlagsThread(t *testing.T) {
 	}
 }
 
+// --cards names the cards a standalone deploy touches (GPU routing P7): a comma list, spaces
+// and blanks tolerated, case kept as given (the wait compares case-insensitively). Absent is the
+// whole node.
+func TestParseNodeSwapFlags_CardsThread(t *testing.T) {
+	plan, _, err := parseNodeSwapFlags([]string{
+		"--staged", "s.exe", "--target", "t.exe", "--sha256", "DEAD",
+		"--cards", " GPU-AAAA0000 , ,gpu-cccc0000",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Cards) != 2 || plan.Cards[0] != "GPU-AAAA0000" || plan.Cards[1] != "gpu-cccc0000" {
+		t.Fatalf("Cards = %q, want the two cards trimmed with the blank dropped", plan.Cards)
+	}
+	whole, _, err := parseNodeSwapFlags([]string{"--staged", "s.exe", "--target", "t.exe", "--sha256", "DEAD"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(whole.Cards) != 0 {
+		t.Fatalf("Cards = %q with no flag, want the whole node (none)", whole.Cards)
+	}
+}
+
 func TestParseNodeSwapFlags_RestartTaskAndCommandBothSet(t *testing.T) {
 	// parseNodeSwapFlags itself does not reject this (that is
 	// nodeswap.validatePlan's job, exercised inside Run before anything is

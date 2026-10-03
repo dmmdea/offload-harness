@@ -72,6 +72,18 @@ type Plan struct {
 	GPULockPath string
 	GPUStateDir string
 
+	// Cards are the cards this deploy touches, as GPU UUIDs (the lease ids a lease records,
+	// compared case-insensitively). Empty = the whole node, and every GPU lease holds the
+	// standalone wait, exactly as before. The OPERATOR says it, never the tool: a binary swap
+	// touches the exe and the processes it may stop, not a card, but the tool cannot tell
+	// whether a lease's wrapper is running the very image being replaced, so it never narrows
+	// the wait on its own guess. With cards named, only a lease on one of them (or a lease that
+	// names no cards, which is the whole node) holds the deploy; the rest are left alone and
+	// recorded (Outcome.LeasesLeftAlone). It has no effect on a node with a health URL, whose
+	// wait is the job count: a restart of fleet-serve cuts every job the node is running,
+	// whichever card it runs on, and health publishes that count as one number.
+	Cards []string
+
 	// Exactly one of RestartTaskName / RestartCommand should be set for a
 	// fleet node; both empty means a standalone binary-only swap (no restart
 	// at all — the <node-e> case named in the task).
@@ -139,6 +151,11 @@ type Outcome struct {
 	FinalPID         int          `json:"final_pid,omitempty"`
 	FinalImageSHA256 string       `json:"final_image_sha256,omitempty"`
 	HealthVersion    string       `json:"health_version,omitempty"`
+	// Cards are the cards the deploy declared it touches (Plan.Cards); absent for a whole-node
+	// deploy. LeasesLeftAlone names each live GPU lease the standalone wait did NOT wait for
+	// because it sits on other cards, so the record says what the swap ran beside.
+	Cards           []string `json:"cards,omitempty"`
+	LeasesLeftAlone []string `json:"leases_left_alone,omitempty"`
 }
 
 // StepResult is one line of the run's audit trail.
@@ -173,6 +190,20 @@ type HealthInfo struct {
 type GPULeaseInfo struct {
 	Held   bool
 	Reason string
+	// Leases is every live lease with the cards it sits on (empty Devices = the whole node).
+	// A caller that fills only Held and Reason (every Deps written before leases carried
+	// cards) is read as one whole-node lease.
+	Leases []GPULeaseOnCards
+}
+
+// GPULeaseOnCards is one live GPU lease as the standalone wait reads it.
+type GPULeaseOnCards struct {
+	Epoch  uint64
+	Class  string
+	Reason string
+	// Devices are the cards the lease sits on, as lease ids (lower-cased GPU UUIDs). Empty is
+	// the whole node.
+	Devices []string
 }
 
 // Deps is the OS/network seam. Every field is a plain function so Run is
@@ -329,10 +360,21 @@ func Run(ctx context.Context, plan Plan, deps Deps, log *Logger) Outcome {
 		}
 		step("wait-idle", true, "queue depth 0")
 	} else if deps.InspectGPULease != nil {
-		if err := waitGPUFree(ctx, plan, deps, log); err != nil {
+		out.Cards = append([]string(nil), plan.Cards...)
+		leftAlone, err := waitGPUFree(ctx, plan, deps, log)
+		out.LeasesLeftAlone = leftAlone
+		if err != nil {
 			return fail("wait-idle", err.Error())
 		}
-		step("wait-idle", true, "standalone node (no --health-url); waited for the GPU lease to clear")
+		touches := "the whole node"
+		if len(plan.Cards) > 0 {
+			touches = fmt.Sprintf("%d card(s)", len(plan.Cards))
+		}
+		detail := fmt.Sprintf("standalone node (no --health-url); waited for the GPU lease to clear (this deploy touches %s)", touches)
+		if len(leftAlone) > 0 {
+			detail += "; left alone: " + strings.Join(leftAlone, "; ")
+		}
+		step("wait-idle", true, detail)
 	} else {
 		step("wait-idle", true, "standalone node (no --health-url); skipped")
 	}
@@ -489,12 +531,16 @@ func waitIdle(ctx context.Context, plan Plan, deps Deps, log *Logger) error {
 // the operator's own judgment ("gpu status" by hand, before and right before
 // the swap). Same timeout/interval/logging shape as waitIdle on purpose, so
 // the two paths read alike in --log.
-func waitGPUFree(ctx context.Context, plan Plan, deps Deps, log *Logger) error {
+//
+// It waits for the leases that sit on the cards the deploy touches (Plan.Cards; none declared
+// is the whole node, so every lease), and returns a line for each live lease it did NOT wait
+// for, so the outcome records what the swap ran beside (GPU routing P7).
+func waitGPUFree(ctx context.Context, plan Plan, deps Deps, log *Logger) (leftAlone []string, err error) {
 	if deps.InspectGPULease == nil {
 		// No dep wired (an older caller, or a test that only exercises the
 		// fleet-serve path): behave exactly as before this field existed —
 		// nothing to wait on, standalone swap proceeds unchecked.
-		return nil
+		return nil, nil
 	}
 	timeout := plan.WaitIdleTimeout
 	if timeout <= 0 {
@@ -508,24 +554,74 @@ func waitGPUFree(ctx context.Context, plan Plan, deps Deps, log *Logger) error {
 	var lastErr error
 	var lastReason string
 	for {
-		info, err := deps.InspectGPULease(plan.GPULockPath, plan.GPUStateDir)
-		if err == nil && !info.Held {
-			return nil
+		info, ierr := deps.InspectGPULease(plan.GPULockPath, plan.GPUStateDir)
+		var holding []string
+		if ierr == nil {
+			holding, leftAlone = splitLeases(info, plan.Cards)
+			if len(holding) == 0 {
+				return leftAlone, nil
+			}
 		}
-		if err != nil {
-			lastErr = err
+		if ierr != nil {
+			lastErr = ierr
 		} else {
-			lastReason = info.Reason
+			lastReason = strings.Join(holding, "; ")
 		}
 		if deps.Now().After(deadline) {
 			if lastErr != nil {
-				return fmt.Errorf("GPU lease never cleared within %s: last read failed: %w", timeout, lastErr)
+				return leftAlone, fmt.Errorf("GPU lease never cleared within %s: last read failed: %w", timeout, lastErr)
 			}
-			return fmt.Errorf("GPU lease never cleared within %s: held (%s)", timeout, lastReason)
+			return leftAlone, fmt.Errorf("GPU lease never cleared within %s: held (%s)", timeout, lastReason)
 		}
 		log.Printf("wait-gpu-free: still held (%s) err=%v; retrying", lastReason, lastErr)
 		deps.Sleep(interval)
 	}
+}
+
+// splitLeases sorts the live leases into the ones that hold a deploy touching cards (a lease
+// on one of them, or one that names no cards: the whole node) and the ones it leaves alone.
+// cards empty is the whole node, so every lease holds. A caller that reports Held with no
+// per-lease detail is read as one whole-node lease carrying info.Reason. Each line names the
+// lease: its epoch, class, how many cards it sits on and why.
+func splitLeases(info GPULeaseInfo, cards []string) (holding, leftAlone []string) {
+	if !info.Held && len(info.Leases) == 0 {
+		return nil, nil
+	}
+	leases := info.Leases
+	if len(leases) == 0 {
+		return []string{info.Reason}, nil
+	}
+	for _, l := range leases {
+		line := fmt.Sprintf("epoch %d %s lease on %s (%s)", l.Epoch, l.Class, leaseCardsPhrase(l.Devices), l.Reason)
+		if len(cards) == 0 || len(l.Devices) == 0 || sharesCard(l.Devices, cards) {
+			holding = append(holding, line)
+		} else {
+			leftAlone = append(leftAlone, line)
+		}
+	}
+	return holding, leftAlone
+}
+
+func leaseCardsPhrase(devices []string) string {
+	switch len(devices) {
+	case 0:
+		return "the whole node"
+	case 1:
+		return "1 card"
+	default:
+		return fmt.Sprintf("%d cards", len(devices))
+	}
+}
+
+func sharesCard(a, b []string) bool {
+	for _, x := range a {
+		for _, y := range b {
+			if strings.EqualFold(strings.TrimSpace(x), strings.TrimSpace(y)) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func procMatch(plan Plan) string {
