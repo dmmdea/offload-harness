@@ -1390,6 +1390,11 @@ func TestRunTelemetryFailureIsLoudOnceAndNeverFailsTheRun(t *testing.T) {
 		// A ledger under a path that cannot be created either: ledger.Open fails.
 		LedgerPath: filepath.Join(home, "delegation-log", "ledger.jsonl"),
 		AgentModel: "local-seat",
+		// Isolation as testCfg: without a StateDir RunWith opens the MACHINE's
+		// delegate-intent.jsonl and runs RecoverOrphans against the operator's
+		// real open intents, and without a GPULockPath it reads the real lease.
+		StateDir:    filepath.Join(home, "state"),
+		GPULockPath: filepath.Join(home, "gpu-lease"),
 	}
 
 	local := func(ctx context.Context, c core.AgentContract, _ LocalOptions) (core.AgentWireResult, error) {
