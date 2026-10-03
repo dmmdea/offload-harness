@@ -13,6 +13,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/gpugen"
+	"github.com/dmmdea/offload-harness/internal/mediaops"
 	"github.com/dmmdea/offload-harness/internal/tasks"
 )
 
@@ -160,6 +161,55 @@ func extraArgsFlag(extra []string) []string {
 	return []string{"--extra-args", string(b)}
 }
 
+// runnerArgs builds a runner's argv in the shape every iGPU runner parses: the flags first, then a
+// bare `--`, then the positionals. The terminator is what keeps a prompt, TTS text or lyrics that
+// starts with "--" (a lyrics section marker such as "--- Intro ---") a positional instead of being
+// read as a flag that swallows the next token (render/igpu-engine.mjs parseArgs).
+func runnerArgs(flags []string, positionals ...string) []string {
+	out := make([]string, 0, len(flags)+1+len(positionals))
+	out = append(out, flags...)
+	out = append(out, "--")
+	return append(out, positionals...)
+}
+
+// resolveEngineBin is the ONE binary-resolution rule for the iGPU engines: the bound value is
+// resolved the way the spawned child resolves it (mediaops.ResolveBinary: an explicit path is
+// stat'd, a bare name is looked up on PATH, as mediacap reports it) and the ABSOLUTE path is what
+// the runner gets. The runners refuse a non-absolute path, so a bare "sd-cli" that doctor shows
+// CONFIGURED can never pass doctor and then fail every call in the runner.
+func resolveEngineBin(key, bound string) (string, error) {
+	p, ok := mediaops.ResolveBinary(strings.TrimSpace(bound))
+	if !ok {
+		return "", fmt.Errorf("%s=%s not found (no such file, and not on PATH)", key, bound)
+	}
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return "", fmt.Errorf("%s=%s: %v", key, bound, err)
+	}
+	return abs, nil
+}
+
+// ensureOutDir makes the directory a result will land in BEFORE the lease is taken, so a
+// minutes-long render never ends in "cannot write the output"; the error is reported, not
+// dropped (the runner checks again, for a hand run).
+func ensureOutDir(out string) error {
+	dir := filepath.Dir(out)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("cannot create the output directory %s: %v", dir, err)
+	}
+	return nil
+}
+
+// igpuNotes accumulates the notes an iGPU lane puts on its result ("notes" in the payload, only
+// when there is one): what the request asked for that the lane could not honor.
+type igpuNotes []string
+
+func (n igpuNotes) addTo(payload map[string]any) {
+	if len(n) > 0 {
+		payload["notes"] = []string(n)
+	}
+}
+
 // igpuRun is one runner invocation's identity: how it is leased, tagged and worded.
 type igpuRun struct {
 	leaseReason string
@@ -217,10 +267,19 @@ func (p *Pipeline) sdcppVideoBinding(req core.Request) (renderFamily string, fb 
 
 // runGenerateVideoSdcpp renders generate_video through render/sdcpp-video.mjs.
 // params as the ComfyUI route: still/out/negative/seed/steps/frames/width/height; a
-// per-request value wins over the family binding's default.
+// per-request value wins over the family binding's default. fast=true decodes with the family's
+// tiny autoencoder (sdcpp_tae, opt-in); without that key fast is a no-op on this lane and the
+// result's notes say so.
 func (p *Pipeline) runGenerateVideoSdcpp(ctx context.Context, req core.Request, meta core.Meta, start time.Time, renderFamily string, fb config.VideoFamilyBinding) core.Result {
 	if renderFamily == "" {
-		renderFamily = "sdcpp"
+		// a request that names no model on a box whose default family is an sdcpp one that is
+		// spelled like a ComfyUI family (wan22, ...): the ledger and the footprint store key on
+		// THAT family, the one config.DefaultVideoSdcppFamily (and mediacap) name
+		if def, ok := p.cfg.DefaultVideoSdcppFamily(); ok {
+			renderFamily = def
+		} else {
+			renderFamily = "sdcpp"
+		}
 	}
 	meta.Model = "sdcpp-video:" + renderFamily
 	meta.License = fb.License
@@ -243,6 +302,29 @@ func (p *Pipeline) runGenerateVideoSdcpp(ctx context.Context, req core.Request, 
 	if serr != nil {
 		return p.deferGen(req, meta, start, len(req.Input), serr.Error())
 	}
+	pick := func(k string, def int) int {
+		if v := paramIntOr(req.Params, k, 0); v > 0 {
+			return v
+		}
+		return def
+	}
+	frames := normalizeVideoFrames(pick("frames", fb.Frames))
+	width := floorTo32(pick("width", fb.Width))
+	height := floorTo32(pick("height", fb.Height))
+	// The token cap keeps one GPU dispatch inside the amdgpu 2 s lockup timeout. It is
+	// computed here, on what the runner will render, BEFORE the media lease is taken; the
+	// runner computes it again from the same flags. No cap configured = no check.
+	if fb.SdcppMaxTokens > 0 {
+		if err := config.TokenCapRefusal("sdcpp_max_tokens", orDefault(width, defaultIGPUWidth), orDefault(height, defaultIGPUHeight),
+			orDefault(frames, defaultIGPUFrames), fb.SdcppVAEStride, 0, fb.SdcppMaxTokens); err != nil {
+			return p.deferRefused(req, meta, start, errClassTokenCapExceeded, "video generation", err)
+		}
+	}
+	// One binary-resolution rule: the runner gets the ABSOLUTE path the bound name resolves to.
+	bin, berr := resolveEngineBin("sdcpp_bin", fb.SdcppBin)
+	if berr != nil {
+		return p.deferGen(req, meta, start, len(req.Input), "video generation refused: "+berr.Error())
+	}
 	seed := paramIntOr(req.Params, "seed", 0)
 	if seed <= 0 {
 		seed = mintSeed()
@@ -257,73 +339,88 @@ func (p *Pipeline) runGenerateVideoSdcpp(ctx context.Context, req core.Request, 
 	}
 	out := paramStr(req.Params, "out")
 	if out == "" {
-		_ = os.MkdirAll(p.cfg.MediaDir, 0o755)
 		out = filepath.Join(p.cfg.MediaDir, "video-"+sha256hex(prompt + tasks.StableParamsKey(req.Params))[:8]+".mp4")
+	}
+	if err := ensureOutDir(out); err != nil {
+		return p.deferGen(req, meta, start, len(req.Input), "video generation refused: "+err.Error())
 	}
 	timeout := time.Duration(p.cfg.VideoGenTimeoutSec) * time.Second
 
-	args := []string{out}
-	if still != "" {
-		args = append(args, still)
+	var notes igpuNotes
+	tae := ""
+	if paramBool(req.Params, "fast") {
+		switch {
+		case strings.TrimSpace(fb.SdcppTAE) == "":
+			notes = append(notes, fmt.Sprintf("fast=true is a no-op on the sdcpp video lane: family %q binds no sdcpp_tae, so the full VAE decoded", renderFamily))
+		case !fileExistsAt(fb.SdcppTAE):
+			notes = append(notes, fmt.Sprintf("fast=true could not use the tiny autoencoder: sdcpp_tae=%s does not exist, so the full VAE decoded", fb.SdcppTAE))
+		default:
+			tae = fb.SdcppTAE
+			notes = append(notes, "fast=true decoded with the tiny autoencoder "+filepath.Base(tae)+" (approximate against the full VAE)")
+		}
 	}
-	args = append(args, prompt,
-		"--sd-bin", fb.SdcppBin, "--model", fb.SdcppModel, "--vae", fb.SdcppVAE, "--t5xxl", fb.SdcppT5xxl,
-		"--backend", fb.SdcppBackend)
+
+	flags := []string{"--sd-bin", bin, "--model", fb.SdcppModel, "--vae", fb.SdcppVAE, "--t5xxl", fb.SdcppT5xxl,
+		"--backend", fb.SdcppBackend}
 	if fb.SdcppHighNoiseModel != "" {
-		args = append(args, "--high-noise-model", fb.SdcppHighNoiseModel)
+		flags = append(flags, "--high-noise-model", fb.SdcppHighNoiseModel)
+		// the high-noise expert's own recipe (A14B pair); sd-cli's own default there is cfg 7.0
+		if fb.HighNoiseCFG > 0 {
+			flags = append(flags, "--high-noise-cfg", fmtFloat(fb.HighNoiseCFG))
+		}
+		if fb.HighNoiseSteps > 0 {
+			flags = append(flags, "--high-noise-steps", strconv.Itoa(fb.HighNoiseSteps))
+		}
+		if fb.HighNoiseSampler != "" {
+			flags = append(flags, "--high-noise-sampler", fb.HighNoiseSampler)
+		}
+	}
+	if tae != "" {
+		flags = append(flags, "--tae", tae)
 	}
 	if n := paramStr(req.Params, "negative"); n != "" {
-		args = append(args, "--negative", n)
+		flags = append(flags, "--negative", n)
 	}
-	pick := func(k string, def int) int {
-		if v := paramIntOr(req.Params, k, 0); v > 0 {
-			return v
-		}
-		return def
+	if frames > 0 {
+		flags = append(flags, "--frames", strconv.Itoa(frames))
 	}
-	if v := normalizeVideoFrames(pick("frames", fb.Frames)); v > 0 {
-		args = append(args, "--frames", strconv.Itoa(v))
+	if width > 0 {
+		flags = append(flags, "--width", strconv.Itoa(width))
 	}
-	if v := floorTo32(pick("width", fb.Width)); v > 0 {
-		args = append(args, "--width", strconv.Itoa(v))
+	if height > 0 {
+		flags = append(flags, "--height", strconv.Itoa(height))
 	}
-	if v := floorTo32(pick("height", fb.Height)); v > 0 {
-		args = append(args, "--height", strconv.Itoa(v))
-	}
-	// The token cap keeps one GPU dispatch inside the amdgpu 2 s lockup timeout. It is
-	// computed here, on what the runner will render, BEFORE the media lease is taken; the
-	// runner computes it again from the same flags. No cap configured = no check.
 	if fb.SdcppMaxTokens > 0 {
-		if err := config.TokenCapRefusal("sdcpp_max_tokens", orDefault(floorTo32(pick("width", fb.Width)), defaultIGPUWidth),
-			orDefault(floorTo32(pick("height", fb.Height)), defaultIGPUHeight),
-			orDefault(normalizeVideoFrames(pick("frames", fb.Frames)), defaultIGPUFrames), fb.SdcppVAEStride, 0, fb.SdcppMaxTokens); err != nil {
-			return p.deferRefused(req, meta, start, errClassTokenCapExceeded, "video generation", err)
-		}
-		args = append(args, "--max-tokens", strconv.Itoa(fb.SdcppMaxTokens), "--vae-stride", strconv.Itoa(fb.SdcppVAEStride))
+		flags = append(flags, "--max-tokens", strconv.Itoa(fb.SdcppMaxTokens), "--vae-stride", strconv.Itoa(fb.SdcppVAEStride))
 	}
 	if fb.FPS > 0 {
-		args = append(args, "--fps", strconv.Itoa(fb.FPS))
+		flags = append(flags, "--fps", strconv.Itoa(fb.FPS))
 	}
 	if v := pick("steps", fb.Steps); v > 0 {
-		args = append(args, "--steps", strconv.Itoa(v))
+		flags = append(flags, "--steps", strconv.Itoa(v))
 	}
 	if fb.CFG > 0 {
-		args = append(args, "--cfg", fmtFloat(fb.CFG))
+		flags = append(flags, "--cfg", fmtFloat(fb.CFG))
 	}
 	if fb.FlowShift > 0 {
-		args = append(args, "--flow-shift", fmtFloat(fb.FlowShift))
+		flags = append(flags, "--flow-shift", fmtFloat(fb.FlowShift))
 	}
 	if fb.Sampler != "" {
-		args = append(args, "--sampler", fb.Sampler)
+		flags = append(flags, "--sampler", fb.Sampler)
 	}
-	args = append(args, "--seed", strconv.Itoa(seed))
-	args = append(args, extraArgsFlag(fb.SdcppExtraArgs)...)
-	args = append(args, timeoutArgs(timeout)...)
+	flags = append(flags, "--seed", strconv.Itoa(seed))
+	flags = append(flags, extraArgsFlag(fb.SdcppExtraArgs)...)
+	flags = append(flags, timeoutArgs(timeout)...)
+	positionals := []string{out}
+	if still != "" {
+		positionals = append(positionals, still)
+	}
+	positionals = append(positionals, prompt)
 
 	outPath, dres := p.runIGPU(ctx, req, &meta, start, igpuRun{
 		leaseReason: "video-gen (sdcpp)", failVerb: "video generation failed",
 		fpFamily: videoFootprintFamily(renderFamily), fpQuant: quantFromModelFile(fb.SdcppModel), fpTask: "video-gen",
-		script: script, args: args, out: out, timeout: timeout,
+		script: script, args: runnerArgs(flags, positionals...), out: out, timeout: timeout,
 	})
 	if dres != nil {
 		return *dres
@@ -331,9 +428,16 @@ func (p *Pipeline) runGenerateVideoSdcpp(ctx context.Context, req core.Request, 
 	meta.LatencyMs = time.Since(start).Milliseconds()
 	payload := map[string]any{"video_path": outPath, "seed": seed}
 	addLicenseData(payload, config.FamilyInfo{License: fb.License, CommercialUse: fb.CommercialUse})
+	notes.addTo(payload)
 	data, _ := json.Marshal(payload)
 	p.record(req.Task, meta, len(prompt))
 	return core.Result{OK: true, Data: data, Meta: meta}
+}
+
+// fileExistsAt reports whether path names an existing regular file or directory.
+func fileExistsAt(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 // ---------------------------------------------------------------- animate
@@ -341,7 +445,10 @@ func (p *Pipeline) runGenerateVideoSdcpp(ctx context.Context, req core.Request, 
 // runAnimateCharacterSdcpp animates through render/sdcpp-animate.mjs (animategen_engine
 // sdcpp): ffmpeg frames -> depth-anything.cpp -> sd.cpp Wan2.1 VACE. Same params as the
 // ComfyUI route; pose_strength/ref_strength/motion_prompt are WAN-Animate-2 knobs that
-// VACE does not read, so they are accepted and ignored.
+// VACE does not read, so they are accepted and ignored. fast=true decodes with
+// animategen_sdcpp_tae when it is bound (opt-in tiny autoencoder); otherwise fast is a no-op here
+// and the result's notes say so. The VACE model must be a .safetensors checkpoint: the public GGUFs
+// lack vace_patch_embedding.weight and sd-cli refuses them (the runner reports MODEL_INCOMPATIBLE).
 func (p *Pipeline) runAnimateCharacterSdcpp(ctx context.Context, req core.Request, meta core.Meta, start time.Time) core.Result {
 	meta.Model = "sdcpp-animate:wan2.1-vace"
 	prompt := strings.TrimSpace(req.Input)
@@ -382,6 +489,31 @@ func (p *Pipeline) runAnimateCharacterSdcpp(ctx context.Context, req core.Reques
 	if serr != nil {
 		return p.deferGen(req, meta, start, len(req.Input), serr.Error())
 	}
+	pick := func(k string, def int) int {
+		if v := paramIntOr(req.Params, k, 0); v > 0 {
+			return v
+		}
+		return def
+	}
+	frames := normalizeVideoFrames(pick("frames", 0))
+	width := floorTo32(pick("width", cfg.AnimateGenWidth))
+	height := floorTo32(pick("height", cfg.AnimateGenHeight))
+	// The VACE reference image occupies one latent frame on top of the clip's (see the video
+	// lane's note on the token cap).
+	if cfg.AnimateGenSdcppMaxTokens > 0 {
+		if err := config.TokenCapRefusal("animategen_sdcpp_max_tokens", orDefault(width, defaultIGPUWidth), orDefault(height, defaultIGPUHeight),
+			orDefault(frames, defaultIGPUFrames), cfg.AnimateGenSdcppVAEStride, 1, cfg.AnimateGenSdcppMaxTokens); err != nil {
+			return p.deferRefused(req, meta, start, errClassTokenCapExceeded, "character animation", err)
+		}
+	}
+	sdBin, berr := resolveEngineBin("animategen_sdcpp_bin", cfg.AnimateGenSdcppBin)
+	if berr != nil {
+		return p.deferGen(req, meta, start, len(req.Input), "character animation refused: "+berr.Error())
+	}
+	depthBin, derr := resolveEngineBin("animategen_depth_bin", cfg.AnimateGenDepthBin)
+	if derr != nil {
+		return p.deferGen(req, meta, start, len(req.Input), "character animation refused: "+derr.Error())
+	}
 	seed := paramIntOr(req.Params, "seed", 0)
 	if seed <= 0 {
 		seed = mintSeed()
@@ -392,70 +524,77 @@ func (p *Pipeline) runAnimateCharacterSdcpp(ctx context.Context, req core.Reques
 	}
 	out := paramStr(req.Params, "out")
 	if out == "" {
-		_ = os.MkdirAll(cfg.MediaDir, 0o755)
 		out = filepath.Join(cfg.MediaDir, "animate-"+sha256hex(prompt + tasks.StableParamsKey(req.Params))[:8]+".mp4")
+	}
+	if err := ensureOutDir(out); err != nil {
+		return p.deferGen(req, meta, start, len(req.Input), "character animation refused: "+err.Error())
 	}
 	timeout := time.Duration(cfg.AnimateGenTimeoutSec) * time.Second
 
-	args := []string{out, ref, driver, prompt,
-		"--sd-bin", cfg.AnimateGenSdcppBin, "--model", cfg.AnimateGenSdcppModel, "--vae", cfg.AnimateGenSdcppVAE,
+	var notes igpuNotes
+	tae := ""
+	if paramBool(req.Params, "fast") {
+		switch {
+		case strings.TrimSpace(cfg.AnimateGenSdcppTAE) == "":
+			notes = append(notes, "fast=true is a no-op on the sdcpp animate lane: animategen_sdcpp_tae is not bound, so the full VAE decoded")
+		case !fileExistsAt(cfg.AnimateGenSdcppTAE):
+			notes = append(notes, fmt.Sprintf("fast=true could not use the tiny autoencoder: animategen_sdcpp_tae=%s does not exist, so the full VAE decoded", cfg.AnimateGenSdcppTAE))
+		default:
+			tae = cfg.AnimateGenSdcppTAE
+			notes = append(notes, "fast=true decoded with the tiny autoencoder "+filepath.Base(tae)+" (approximate against the full VAE)")
+		}
+	}
+
+	flags := []string{"--sd-bin", sdBin, "--model", cfg.AnimateGenSdcppModel, "--vae", cfg.AnimateGenSdcppVAE,
 		"--t5xxl", cfg.AnimateGenSdcppT5xxl, "--backend", cfg.AnimateGenSdcppBackend,
-		"--depth-bin", cfg.AnimateGenDepthBin, "--depth-model", cfg.AnimateGenDepthModel}
+		"--depth-bin", depthBin, "--depth-model", cfg.AnimateGenDepthModel}
+	if tae != "" {
+		flags = append(flags, "--tae", tae)
+	}
 	if n := paramStr(req.Params, "negative"); n != "" {
-		args = append(args, "--negative", n)
+		flags = append(flags, "--negative", n)
 	}
-	pick := func(k string, def int) int {
-		if v := paramIntOr(req.Params, k, 0); v > 0 {
-			return v
-		}
-		return def
+	if frames > 0 {
+		flags = append(flags, "--frames", strconv.Itoa(frames))
 	}
-	if v := normalizeVideoFrames(pick("frames", 0)); v > 0 {
-		args = append(args, "--frames", strconv.Itoa(v))
+	if width > 0 {
+		flags = append(flags, "--width", strconv.Itoa(width))
 	}
-	if v := floorTo32(pick("width", cfg.AnimateGenWidth)); v > 0 {
-		args = append(args, "--width", strconv.Itoa(v))
+	if height > 0 {
+		flags = append(flags, "--height", strconv.Itoa(height))
 	}
-	if v := floorTo32(pick("height", cfg.AnimateGenHeight)); v > 0 {
-		args = append(args, "--height", strconv.Itoa(v))
-	}
-	// The VACE reference image occupies one latent frame on top of the clip's (see the video
-	// lane's note on the token cap).
 	if cfg.AnimateGenSdcppMaxTokens > 0 {
-		if err := config.TokenCapRefusal("animategen_sdcpp_max_tokens", orDefault(floorTo32(pick("width", cfg.AnimateGenWidth)), defaultIGPUWidth),
-			orDefault(floorTo32(pick("height", cfg.AnimateGenHeight)), defaultIGPUHeight),
-			orDefault(normalizeVideoFrames(pick("frames", 0)), defaultIGPUFrames), cfg.AnimateGenSdcppVAEStride, 1, cfg.AnimateGenSdcppMaxTokens); err != nil {
-			return p.deferRefused(req, meta, start, errClassTokenCapExceeded, "character animation", err)
-		}
-		args = append(args, "--max-tokens", strconv.Itoa(cfg.AnimateGenSdcppMaxTokens), "--vae-stride", strconv.Itoa(cfg.AnimateGenSdcppVAEStride))
+		flags = append(flags, "--max-tokens", strconv.Itoa(cfg.AnimateGenSdcppMaxTokens), "--vae-stride", strconv.Itoa(cfg.AnimateGenSdcppVAEStride))
 	}
 	if v := pick("steps", cfg.AnimateGenSteps); v > 0 {
-		args = append(args, "--steps", strconv.Itoa(v))
+		flags = append(flags, "--steps", strconv.Itoa(v))
 	}
 	if cfg.AnimateGenCFG > 0 {
-		args = append(args, "--cfg", fmtFloat(cfg.AnimateGenCFG))
+		flags = append(flags, "--cfg", fmtFloat(cfg.AnimateGenCFG))
 	}
 	if cfg.AnimateGenFlowShift > 0 {
-		args = append(args, "--flow-shift", fmtFloat(cfg.AnimateGenFlowShift))
+		flags = append(flags, "--flow-shift", fmtFloat(cfg.AnimateGenFlowShift))
 	}
-	args = append(args, "--seed", strconv.Itoa(seed))
-	args = append(args, extraArgsFlag(cfg.AnimateGenSdcppExtraArgs)...)
-	args = append(args, timeoutArgs(timeout)...)
+	flags = append(flags, "--seed", strconv.Itoa(seed))
+	flags = append(flags, extraArgsFlag(cfg.AnimateGenSdcppExtraArgs)...)
+	flags = append(flags, timeoutArgs(timeout)...)
 	if len(cfg.AnimateGenDepthExtraArgs) > 0 {
 		b, _ := json.Marshal(cfg.AnimateGenDepthExtraArgs)
-		args = append(args, "--depth-extra-args", string(b))
+		flags = append(flags, "--depth-extra-args", string(b))
 	}
 
 	outPath, dres := p.runIGPU(ctx, req, &meta, start, igpuRun{
 		leaseReason: "animate (sdcpp)", failVerb: "character animation failed",
 		fpFamily: "wan-vace", fpQuant: quantFromModelFile(cfg.AnimateGenSdcppModel), fpTask: "animate",
-		script: script, args: args, out: out, timeout: timeout,
+		script: script, args: runnerArgs(flags, out, ref, driver, prompt), out: out, timeout: timeout,
 	})
 	if dres != nil {
 		return *dres
 	}
 	meta.LatencyMs = time.Since(start).Milliseconds()
-	data, _ := json.Marshal(map[string]any{"video_path": outPath, "seed": seed})
+	payload := map[string]any{"video_path": outPath, "seed": seed}
+	notes.addTo(payload)
+	data, _ := json.Marshal(payload)
 	p.record(req.Task, meta, len(prompt))
 	return core.Result{OK: true, Data: data, Meta: meta}
 }
@@ -476,8 +615,10 @@ func audiocppServes(cfg config.Config, kind, voice string) bool {
 }
 
 // runGenerateAudioAudiocpp renders voice or music through render/audiocpp-generate.mjs.
-// params: clone/lang (voice), seconds/lyrics (music), out, seed. Output is a .wav (music is
-// loudness-normalized by the runner when ffmpeg is present).
+// params: clone/lang (voice), seconds/lyrics (music), out, seed. Output is a .wav: voice is the
+// engine's file as it wrote it, music is trimmed of its trailing silence, faded and
+// loudness-normalized to -14 LUFS by the runner; both pass the dead-air gate (DEAD_AIR). The
+// voice clone reference falls back to voicegen_ref.
 func (p *Pipeline) runGenerateAudioAudiocpp(ctx context.Context, req core.Request, meta core.Meta, start time.Time, kind string) core.Result {
 	cfg := p.cfg
 	family, model := cfg.AudiocppVoiceFamilyName(), cfg.AudiocppVoiceModel
@@ -489,7 +630,12 @@ func (p *Pipeline) runGenerateAudioAudiocpp(ctx context.Context, req core.Reques
 	if text == "" {
 		return p.deferGen(req, meta, start, len(req.Input), "empty audio prompt")
 	}
-	if err := config.CPUBackendRefusal(cfg.AudiocppBackend); err != nil {
+	// audio.cpp's own backend values (vulkan|cuda|hip|rocm|metal) and a separate device index:
+	// "vulkan0" is sd.cpp's spelling and the CLI would reject it at run time
+	if err := config.AudiocppBackendRefusal(cfg.AudiocppBackend); err != nil {
+		return p.deferCPUBackend(req, meta, start, "audio generation", err)
+	}
+	if err := config.AudiocppDeviceRefusal(cfg.AudiocppDevice); err != nil {
 		return p.deferCPUBackend(req, meta, start, "audio generation", err)
 	}
 	if err := config.ExtraArgsRefusal("audiocpp_extra_args", config.ExtraArgsAudiocpp, cfg.AudiocppExtraArgs); err != nil {
@@ -506,6 +652,10 @@ func (p *Pipeline) runGenerateAudioAudiocpp(ctx context.Context, req core.Reques
 	if serr != nil {
 		return p.deferGen(req, meta, start, len(req.Input), serr.Error())
 	}
+	bin, berr := resolveEngineBin("audiocpp_bin", cfg.AudiocppBin)
+	if berr != nil {
+		return p.deferGen(req, meta, start, len(req.Input), "audio generation refused: "+berr.Error())
+	}
 	seed := paramIntOr(req.Params, "seed", 0)
 	if seed <= 0 {
 		seed = mintSeed()
@@ -516,15 +666,17 @@ func (p *Pipeline) runGenerateAudioAudiocpp(ctx context.Context, req core.Reques
 	}
 	out := paramStr(req.Params, "out")
 	if out == "" {
-		_ = os.MkdirAll(cfg.MediaDir, 0o755)
 		out = filepath.Join(cfg.MediaDir, kind+"-"+sha256hex(text + tasks.StableParamsKey(req.Params))[:8]+".wav")
+	}
+	if err := ensureOutDir(out); err != nil {
+		return p.deferGen(req, meta, start, len(req.Input), "audio generation refused: "+err.Error())
 	}
 	timeout := time.Duration(cfg.AudioGenTimeoutSec) * time.Second
 
-	args := []string{out, text, "--kind", kind,
-		"--bin", cfg.AudiocppBin, "--family", family, "--model", model, "--backend", cfg.AudiocppBackend}
+	flags := []string{"--kind", kind,
+		"--bin", bin, "--family", family, "--model", model, "--backend", cfg.AudiocppBackend}
 	if d := strings.TrimSpace(cfg.AudiocppDevice); d != "" {
-		args = append(args, "--device", d)
+		flags = append(flags, "--device", d)
 	}
 	if kind == "voice" {
 		ref := paramStr(req.Params, "clone")
@@ -532,27 +684,27 @@ func (p *Pipeline) runGenerateAudioAudiocpp(ctx context.Context, req core.Reques
 			ref = cfg.VoiceGenRef
 		}
 		if ref != "" {
-			args = append(args, "--clone", ref)
+			flags = append(flags, "--clone", ref)
 		}
 		if lang := paramStr(req.Params, "lang"); lang != "" {
-			args = append(args, "--lang", lang)
+			flags = append(flags, "--lang", lang)
 		}
 	} else {
 		if s := paramIntOr(req.Params, "seconds", 0); s > 0 {
-			args = append(args, "--seconds", strconv.Itoa(s))
+			flags = append(flags, "--seconds", strconv.Itoa(s))
 		}
 		if l := paramStr(req.Params, "lyrics"); l != "" {
-			args = append(args, "--lyrics", l)
+			flags = append(flags, "--lyrics", l)
 		}
 	}
-	args = append(args, "--seed", strconv.Itoa(seed))
-	args = append(args, extraArgsFlag(cfg.AudiocppExtraArgs)...)
-	args = append(args, timeoutArgs(timeout)...)
+	flags = append(flags, "--seed", strconv.Itoa(seed))
+	flags = append(flags, extraArgsFlag(cfg.AudiocppExtraArgs)...)
+	flags = append(flags, timeoutArgs(timeout)...)
 
 	outPath, dres := p.runIGPU(ctx, req, &meta, start, igpuRun{
 		leaseReason: "audio-gen (" + kind + ", audiocpp)", failVerb: "audio generation failed",
 		fpFamily: family, fpQuant: quantFromModelFile(model), fpTask: "audio-gen",
-		script: script, args: args, out: out, timeout: timeout,
+		script: script, args: runnerArgs(flags, out, text), out: out, timeout: timeout,
 	})
 	if dres != nil {
 		return *dres

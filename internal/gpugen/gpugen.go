@@ -393,6 +393,23 @@ func ClassifyErr(err error) string {
 		return "extra_args_refused"
 	case strings.Contains(s, "illegal_instruction"):
 		return "illegal_instruction"
+	// The iGPU runners' output gates and input refusals (render/igpu-qa.mjs, render/igpu-engine.mjs):
+	// the engine exited 0 but the clip is black / frozen, the depth frames are not the RGB sd-cli
+	// needs, sd-cli refused the model file, or the runner refused its own inputs. Never retried:
+	// the same request fails the same way, and none of these is a timeout or an oom whatever words
+	// the path in the message happens to contain.
+	case strings.Contains(s, "black_clip"):
+		return "black_clip"
+	case strings.Contains(s, "frozen_clip"):
+		return "frozen_clip"
+	case strings.Contains(s, "depth_frames_invalid"):
+		return "depth_frames_invalid"
+	case strings.Contains(s, "model_incompatible"):
+		return "model_incompatible"
+	case strings.Contains(s, "binary_not_absolute"):
+		return "binary_not_absolute"
+	case strings.Contains(s, "out_dir_unwritable"):
+		return "out_dir_unwritable"
 	// ggml_vulkan's allocation failure has neither "out of memory" nor "oom" in its text
 	// ("Device memory allocation of size N failed ... vk::Device::allocateMemory: ErrorOutOfDeviceMemory").
 	case strings.Contains(s, "out of memory") || strings.Contains(s, "cudamalloc") || strings.Contains(s, "oom") ||

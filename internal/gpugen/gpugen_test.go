@@ -137,6 +137,14 @@ func TestClassifyErr(t *testing.T) {
 		"TOKEN_CAP_EXCEEDED: 480x832x33 + reference needs 15600 latent tokens": "token_cap_exceeded",
 		"EXTRA_ARGS_REFUSED: --extra-args[0] \"--clip-on-cpu\"":                "extra_args_refused",
 		"ILLEGAL_INSTRUCTION: audiocpp_cli died with SIGILL (exit 132)":        "illegal_instruction",
+		// the output gates and input refusals: typed classes even when the path in the message
+		// carries a word a looser class would claim ("room", "timeout", "killed")
+		"SDCPP VIDEO FAILED: BLACK_CLIP: the clip is 100% black (/work/room/clip.mp4); the engine exited 0 but delivered a clip with no picture in it": "black_clip",
+		"SDCPP ANIMATE FAILED: FROZEN_CLIP: the clip is 100% frozen (no frame ever changes) (/work/timeout/a.mp4)":                                     "frozen_clip",
+		"SDCPP ANIMATE FAILED: DEPTH_FRAMES_INVALID: control frame 00002.png is 40x72 colour type 0":                                                   "depth_frames_invalid",
+		"SDCPP ANIMATE FAILED: MODEL_INCOMPATIBLE: sd-cli refused the model /models/wan2.1-vace-1.3b-q8_0.gguf: tensor 'x' is not in its metadata":     "model_incompatible",
+		"SDCPP VIDEO FAILED: BINARY_NOT_ABSOLUTE: --sd-bin \"sd-cli\" is not an absolute path":                                                         "binary_not_absolute",
+		"AUDIOCPP FAILED: OUT_DIR_UNWRITABLE: cannot use /x/y for the output":                                                                          "out_dir_unwritable",
 		// ggml_vulkan's own allocation failure is an oom too
 		"ggml_vulkan: Device memory allocation of size 5368709120 failed.\nvk::Device::allocateMemory: ErrorOutOfDeviceMemory": "oom",
 		// a signal death carries the signal and, for SIGKILL, the OOM hint: class oom

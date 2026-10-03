@@ -19,16 +19,67 @@ import (
 // whole Go path (family resolution, lease, gpugen, result shape) runs without a GPU, an
 // engine binary or ffmpeg.
 
+// writeIGPUArgStub is writeArgStub for the iGPU runners' argv shape: the flags first, then a bare
+// `--`, then the positionals, so the out path is the first positional AFTER the terminator. It
+// records the argv to "<out>.args" and a few env facts to "<out>.env", then writes the out file.
+func writeIGPUArgStub(t *testing.T, dir string) string {
+	t.Helper()
+	stub := filepath.Join(dir, "igpuargstub.mjs")
+	if err := os.WriteFile(stub, []byte(`import {writeFileSync} from "node:fs";
+const argv = process.argv.slice(2);
+const term = argv.indexOf("--");
+if (term < 0) { console.error("no -- terminator in " + JSON.stringify(argv)); process.exit(3); }
+const out = argv[term + 1];
+writeFileSync(out + ".args", argv.join("\n"));
+writeFileSync(out + ".env", JSON.stringify({ COMFY_DIR: process.env.COMFY_DIR ?? null, FFMPEG_PATH: process.env.FFMPEG_PATH ?? null }));
+writeFileSync(out, "stub-output");
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return stub
+}
+
+// igpuPositionals is everything after the runner's `--` terminator.
+func igpuPositionals(t *testing.T, args []string) []string {
+	t.Helper()
+	for i, a := range args {
+		if a == "--" {
+			return args[i+1:]
+		}
+	}
+	t.Fatalf("no -- terminator in %v", args)
+	return nil
+}
+
+// isolateLease points a test config at a private lease dir and state dir: these lanes take the
+// machine-wide media lease, and a test must never contend with (or hold) the real one.
+func isolateLease(cfg *config.Config, dir string) {
+	cfg.StateDir = filepath.Join(dir, "state")
+	cfg.GPULockPath = filepath.Join(dir, "gpu.lock")
+}
+
+// igpuBin writes an empty file standing in for an engine binary (the pipeline resolves the bound
+// value to an absolute path before the runner sees it) and returns its absolute path.
+func igpuBin(t *testing.T, dir, name string) string {
+	t.Helper()
+	p := filepath.Join(dir, name)
+	if err := os.WriteFile(p, []byte("x"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
 func sdcppVideoCfg(t *testing.T, dir string) config.Config {
 	t.Helper()
 	cfg := config.Default()
 	cfg.MediaDir = dir
 	cfg.VideoGenScript = "" // proves the sdcpp lane needs no ComfyUI runner
-	cfg.VideoGenSdcppScript = writeArgStub(t, dir)
+	cfg.VideoGenSdcppScript = writeIGPUArgStub(t, dir)
+	isolateLease(&cfg, dir)
 	cfg.VideoGenFamily = "fastwan"
 	yes := true
 	cfg.VideoGenFamilies = map[string]config.VideoFamilyBinding{"fastwan": {
-		Engine: config.EngineSdcpp, SdcppBin: "/opt/sdcpp/sd-cli", SdcppModel: "/models/wan-ti2v-5b-q8_0.gguf",
+		Engine: config.EngineSdcpp, SdcppBin: igpuBin(t, dir, "sd-cli"), SdcppModel: "/models/wan-ti2v-5b-q8_0.gguf",
 		SdcppHighNoiseModel: "/models/high.gguf", SdcppVAE: "/models/wan2.2_vae.safetensors", SdcppT5xxl: "/models/umt5.gguf",
 		SdcppBackend: "vulkan0", SdcppExtraArgs: []string{"--flag with space"},
 		Steps: 3, CFG: 1, FlowShift: 3, Sampler: "euler", FPS: 24, Width: 832, Height: 480, Frames: 49,
@@ -74,11 +125,11 @@ func TestRunGenerateVideo_SdcppFamilyRunsTheSdcppScriptWithBoundPathsAndNormaliz
 		t.Errorf("seed = %d, want the caller's 7", seed)
 	}
 	args := readArgs(t, out)
-	if args[0] != out || args[1] != still || args[2] != "a calm sea" {
-		t.Errorf("positionals = %v, want <out> <still> <prompt>", args[:3])
+	if pos := igpuPositionals(t, args); len(pos) != 3 || pos[0] != out || pos[1] != still || pos[2] != "a calm sea" {
+		t.Errorf("positionals = %v, want <out> <still> <prompt> after the -- terminator", pos)
 	}
 	want := map[string]string{
-		"sd-bin": "/opt/sdcpp/sd-cli", "model": "/models/wan-ti2v-5b-q8_0.gguf", "high-noise-model": "/models/high.gguf",
+		"sd-bin": p.cfg.VideoGenFamilies["fastwan"].SdcppBin, "model": "/models/wan-ti2v-5b-q8_0.gguf", "high-noise-model": "/models/high.gguf",
 		"vae": "/models/wan2.2_vae.safetensors", "t5xxl": "/models/umt5.gguf", "backend": "vulkan0",
 		"frames": "49", "width": "832", "height": "480", "fps": "24", "steps": "3", "cfg": "1", "flow-shift": "3",
 		"sampler": "euler", "seed": "7", "negative": "blurry", "extra-args": `["--flag with space"]`,
@@ -113,8 +164,8 @@ func TestRunGenerateVideo_APerRequestFamilyNamesTheSdcppBindingOnAComfyBox(t *te
 		t.Fatalf("model:fastwan must reach the sdcpp runner, got %v", args)
 	}
 	// T2V: no still positional
-	if args[1] != "a calm sea" {
-		t.Errorf("T2V positionals = %v", args[:2])
+	if pos := igpuPositionals(t, args); len(pos) != 2 || pos[1] != "a calm sea" {
+		t.Errorf("T2V positionals = %v", pos)
 	}
 	// and a request for a comfy family on the same box still goes to the comfy script
 	out2, _, _ := decodeVideo(t, p.Run(context.Background(), core.Request{
@@ -132,12 +183,13 @@ func TestRunAnimateCharacter_SdcppEngineRunsTheAnimateScript(t *testing.T) {
 	cfg.MediaDir = dir
 	cfg.AnimateGenScript = "" // no ComfyUI animate runner needed
 	cfg.AnimateGenEngine = config.EngineSdcpp
-	cfg.AnimateGenSdcppScript = writeArgStub(t, dir)
-	cfg.AnimateGenSdcppBin, cfg.AnimateGenSdcppModel = "/opt/sdcpp/sd-cli", "/models/wan2.1-vace-1.3b-q8_0.gguf"
+	cfg.AnimateGenSdcppScript = writeIGPUArgStub(t, dir)
+	isolateLease(&cfg, dir)
+	cfg.AnimateGenSdcppBin, cfg.AnimateGenSdcppModel = igpuBin(t, dir, "sd-cli"), "/models/wan2.1-vace-1.3b-q8_0.gguf"
 	cfg.AnimateGenSdcppVAE, cfg.AnimateGenSdcppT5xxl = "/models/wan_2.1_vae.safetensors", "/models/umt5.gguf"
 	cfg.AnimateGenSdcppBackend = "vulkan0"
 	cfg.AnimateGenSdcppExtraArgs = []string{"--x"}
-	cfg.AnimateGenDepthBin, cfg.AnimateGenDepthModel = "/opt/depth/da3-cli", "/models/depth.gguf"
+	cfg.AnimateGenDepthBin, cfg.AnimateGenDepthModel = igpuBin(t, dir, "da3-cli"), "/models/depth.gguf"
 	cfg.AnimateGenDepthExtraArgs = []string{"--y"}
 	cfg.AnimateGenSteps, cfg.AnimateGenCFG, cfg.AnimateGenFlowShift = 20, 6, 5
 	cfg.AnimateGenWidth, cfg.AnimateGenHeight = 854, 480
@@ -148,12 +200,12 @@ func TestRunAnimateCharacter_SdcppEngineRunsTheAnimateScript(t *testing.T) {
 	})
 	outPath, _, _ := decodeVideo(t, res)
 	args := readArgs(t, outPath)
-	if args[1] != "ref.png" || args[2] != "drive.mp4" || args[3] != "a knight" {
-		t.Errorf("positionals = %v", args[:4])
+	if pos := igpuPositionals(t, args); len(pos) != 4 || pos[0] != outPath || pos[1] != "ref.png" || pos[2] != "drive.mp4" || pos[3] != "a knight" {
+		t.Errorf("positionals = %v", pos)
 	}
 	want := map[string]string{
-		"sd-bin": "/opt/sdcpp/sd-cli", "model": "/models/wan2.1-vace-1.3b-q8_0.gguf", "vae": "/models/wan_2.1_vae.safetensors",
-		"t5xxl": "/models/umt5.gguf", "backend": "vulkan0", "depth-bin": "/opt/depth/da3-cli", "depth-model": "/models/depth.gguf",
+		"sd-bin": cfg.AnimateGenSdcppBin, "model": "/models/wan2.1-vace-1.3b-q8_0.gguf", "vae": "/models/wan_2.1_vae.safetensors",
+		"t5xxl": "/models/umt5.gguf", "backend": "vulkan0", "depth-bin": cfg.AnimateGenDepthBin, "depth-model": "/models/depth.gguf",
 		"frames": "81", "width": "832", "height": "480", "steps": "20", "cfg": "6", "flow-shift": "5", "seed": "9",
 		"extra-args": `["--x"]`, "depth-extra-args": `["--y"]`, "timeout-sec": "1785",
 	}
@@ -173,8 +225,9 @@ func audiocppCfg(t *testing.T, dir string) config.Config {
 	cfg.MediaDir = dir
 	cfg.VoiceGenScript, cfg.MusicGenScript = "", ""
 	cfg.VoiceGenEngine, cfg.MusicGenEngine = config.EngineAudiocpp, config.EngineAudiocpp
-	cfg.AudiocppScript = writeArgStub(t, dir)
-	cfg.AudiocppBin, cfg.AudiocppBackend, cfg.AudiocppDevice = "/opt/audiocpp/audiocpp_cli", "vulkan", "0"
+	cfg.AudiocppScript = writeIGPUArgStub(t, dir)
+	isolateLease(&cfg, dir)
+	cfg.AudiocppBin, cfg.AudiocppBackend, cfg.AudiocppDevice = igpuBin(t, dir, "audiocpp_cli"), "vulkan", "0"
 	cfg.AudiocppVoiceModel, cfg.AudiocppMusicModel = "/models/chatterbox-q8_0.gguf", "/models/ace-step-1.5-turbo-bf16.gguf"
 	cfg.AudiocppExtraArgs = []string{"--threads", "4"}
 	return cfg
@@ -202,10 +255,10 @@ func TestRunGenerateAudio_AudiocppVoiceAndMusicRouteToTheirScript(t *testing.T) 
 		t.Errorf("voice result = %+v", v)
 	}
 	args := readArgs(t, v.AudioPath)
-	if args[0] != v.AudioPath || args[1] != "hola mundo" || igpuFlag(args, "kind") != "voice" {
-		t.Errorf("voice positionals = %v", args[:4])
+	if pos := igpuPositionals(t, args); len(pos) != 2 || pos[0] != v.AudioPath || pos[1] != "hola mundo" || igpuFlag(args, "kind") != "voice" {
+		t.Errorf("voice positionals = %v", pos)
 	}
-	for k, w := range map[string]string{"bin": "/opt/audiocpp/audiocpp_cli", "family": "chatterbox", "model": "/models/chatterbox-q8_0.gguf",
+	for k, w := range map[string]string{"bin": p.cfg.AudiocppBin, "family": "chatterbox", "model": "/models/chatterbox-q8_0.gguf",
 		"backend": "vulkan", "device": "0", "clone": "/refs/me.wav", "lang": "es", "seed": "5", "extra-args": `["--threads","4"]`, "timeout-sec": "705"} {
 		if got := igpuFlag(args, k); got != w {
 			t.Errorf("voice --%s = %q, want %q", k, got, w)
@@ -287,7 +340,7 @@ func TestACPUBackendIsATypedDeferOnEveryIGPULane(t *testing.T) {
 		cfgA := config.Default()
 		cfgA.MediaDir = dir
 		cfgA.AnimateGenEngine = config.EngineSdcpp
-		cfgA.AnimateGenSdcppScript = writeArgStub(t, dir)
+		cfgA.AnimateGenSdcppScript = writeIGPUArgStub(t, dir)
 		cfgA.AnimateGenSdcppBin, cfgA.AnimateGenSdcppModel, cfgA.AnimateGenSdcppVAE, cfgA.AnimateGenSdcppT5xxl = "b", "m", "v", "t"
 		cfgA.AnimateGenDepthBin, cfgA.AnimateGenDepthModel = "d", "dm"
 		cfgA.AnimateGenSdcppBackend = backend
@@ -414,11 +467,12 @@ func animateCfg(t *testing.T, dir string) config.Config {
 	cfg.MediaDir = dir
 	cfg.AnimateGenScript = ""
 	cfg.AnimateGenEngine = config.EngineSdcpp
-	cfg.AnimateGenSdcppScript = writeArgStub(t, dir)
-	cfg.AnimateGenSdcppBin, cfg.AnimateGenSdcppModel = "/opt/sdcpp/sd-cli", "/models/wan2.1_vace_1.3B_fp16.safetensors"
+	cfg.AnimateGenSdcppScript = writeIGPUArgStub(t, dir)
+	isolateLease(&cfg, dir)
+	cfg.AnimateGenSdcppBin, cfg.AnimateGenSdcppModel = igpuBin(t, dir, "sd-cli"), "/models/wan2.1_vace_1.3B_fp16.safetensors"
 	cfg.AnimateGenSdcppVAE, cfg.AnimateGenSdcppT5xxl = "/models/wan_2.1_vae.safetensors", "/models/umt5.gguf"
 	cfg.AnimateGenSdcppBackend = "vulkan0"
-	cfg.AnimateGenDepthBin, cfg.AnimateGenDepthModel = "/opt/depth/da3-cli", "/models/depth.gguf"
+	cfg.AnimateGenDepthBin, cfg.AnimateGenDepthModel = igpuBin(t, dir, "da3-cli"), "/models/depth.gguf"
 	return cfg
 }
 
