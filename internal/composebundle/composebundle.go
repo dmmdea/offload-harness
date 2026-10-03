@@ -233,7 +233,7 @@ func Extract(bundle []byte, dir string, lim Limits) error {
 		}
 		name := path.Clean(hdr.Name)
 		dest := filepath.Join(root, filepath.FromSlash(name))
-		if rel, rerr := filepath.Rel(root, dest); rerr != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		if !inside(root, dest) {
 			return fmt.Errorf("member %q resolves outside the project", hdr.Name)
 		}
 		switch hdr.Typeflag {
@@ -277,6 +277,14 @@ func Extract(bundle []byte, dir string, lim Limits) error {
 	return nil
 }
 
+// inside reports whether dest, the path a member would be written to, stays under root. checkName
+// already refuses every name that could leave the project, so this zip-slip check on the joined path is
+// the second line: it holds if the name rule is ever loosened.
+func inside(root, dest string) bool {
+	rel, err := filepath.Rel(root, dest)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel)
+}
+
 func typeName(t byte) string {
 	switch t {
 	case tar.TypeSymlink:
@@ -292,9 +300,15 @@ func typeName(t byte) string {
 }
 
 var (
-	attrRef   = regexp.MustCompile(`(?i)(?:^|[\s"'<])(src|href|poster|data|background|srcset|xlink:href|data-composition-src|data-composition-file)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))`)
-	cssURLRef = regexp.MustCompile(`(?i)url\(\s*(?:"([^"]*)"|'([^']*)'|([^)\s]*))\s*\)`)
-	importRef = regexp.MustCompile(`(?i)@import\s+(?:"([^"]*)"|'([^']*)')`)
+	attrRef = regexp.MustCompile(`(?i)(?:^|[\s"'<])(src|href|poster|data|background|srcset|xlink:href|data-composition-src|data-composition-file)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))`)
+	// CSS strings may hold escaped quotes, and a hex escape in an unquoted url swallows one following
+	// space (`url(http\3a //host/x)` is one token to a browser), so both forms match escapes whole.
+	cssURLRef = regexp.MustCompile(`(?i)url\(\s*(?:"((?:\\.|[^"\\])*)"|'((?:\\.|[^'\\])*)'|((?:\\[0-9a-fA-F]{1,6}\s?|\\[^0-9a-fA-F]|[^)\s\\"'])*))\s*\)`)
+	importRef = regexp.MustCompile(`(?i)@import\s+(?:"((?:\\.|[^"\\])*)"|'((?:\\.|[^'\\])*)')`)
+	// image-set() (and -webkit-image-set()) names an image by a bare string as well as by url(); the
+	// argument list may hold one level of parentheses (a url() inside it).
+	imageSetRef  = regexp.MustCompile(`(?i)image-set\(((?:[^()]|\([^()]*\))*)\)`)
+	cssStringRef = regexp.MustCompile(`"((?:\\.|[^"\\])*)"|'((?:\\.|[^'\\])*)'`)
 	// A <base> element re-roots every relative path in the document, and srcdoc embeds a second
 	// document whose references this scan would not see: both are refused outright.
 	baseElem   = regexp.MustCompile(`(?i)<base[\s/>]`)
@@ -372,18 +386,25 @@ func Confine(dir, entry string) error {
 // refsOutside returns "file:line: ref (why)" for each reference in text that leaves the project.
 func refsOutside(file, text string, cssOnly bool) []string {
 	var out []string
-	lineOf := func(offset int) int { return strings.Count(text[:offset], "\n") + 1 }
+	seen := map[string]bool{}
+	add := func(s string) {
+		if !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	lineIn := func(src string, offset int) int { return strings.Count(src[:offset], "\n") + 1 }
 	if !cssOnly {
 		for _, re := range []struct {
 			re  *regexp.Regexp
 			why string
 		}{{baseElem, "a <base> element re-roots every relative path"}, {srcdocAttr, "an iframe srcdoc embeds a document this check cannot see"}} {
 			for _, m := range re.re.FindAllStringIndex(text, -1) {
-				out = append(out, fmt.Sprintf("%s:%d: %s", file, lineOf(m[0]), re.why))
+				add(fmt.Sprintf("%s:%d: %s", file, lineIn(text, m[0]), re.why))
 			}
 		}
 	}
-	check := func(ref string, offset int, srcset bool) {
+	check := func(ref string, line int, srcset bool) {
 		refs := []string{ref}
 		if srcset {
 			refs = nil
@@ -395,7 +416,7 @@ func refsOutside(file, text string, cssOnly bool) []string {
 		}
 		for _, r := range refs {
 			if why := outside(file, r); why != "" {
-				out = append(out, fmt.Sprintf("%s:%d: %q (%s)", file, lineOf(offset), r, why))
+				add(fmt.Sprintf("%s:%d: %q (%s)", file, line, r, why))
 			}
 		}
 	}
@@ -406,24 +427,44 @@ func refsOutside(file, text string, cssOnly bool) []string {
 				if m[g] >= 0 {
 					// An attribute value is read after its character references are decoded
 					// (`&#46;&#46;/` is `../`), so it is checked decoded too.
-					check(html.UnescapeString(text[m[g]:m[g+1]]), m[0], attr == "srcset")
+					check(html.UnescapeString(text[m[g]:m[g+1]]), lineIn(text, m[0]), attr == "srcset")
 					break
 				}
 			}
 		}
 	}
-	for _, re := range []*regexp.Regexp{cssURLRef, importRef} {
-		for _, m := range re.FindAllStringSubmatchIndex(text, -1) {
-			for g := 2; g < len(m); g += 2 {
-				if m[g] >= 0 {
-					v := cssUnescape(text[m[g]:m[g+1]])
-					if !cssOnly {
-						v = html.UnescapeString(v) // inside an HTML style attribute or block
-					}
-					check(v, m[0], false)
-					break
+	// firstGroup is the text of the first alternative that matched.
+	firstGroup := func(src string, m []int, from int) (string, bool) {
+		for g := from; g+1 < len(m); g += 2 {
+			if m[g] >= 0 {
+				return src[m[g]:m[g+1]], true
+			}
+		}
+		return "", false
+	}
+	scanCSS := func(src string) {
+		for _, re := range []*regexp.Regexp{cssURLRef, importRef} {
+			for _, m := range re.FindAllStringSubmatchIndex(src, -1) {
+				if v, ok := firstGroup(src, m, 2); ok {
+					check(cssUnescape(v), lineIn(src, m[0]), false)
 				}
 			}
+		}
+		for _, m := range imageSetRef.FindAllStringSubmatchIndex(src, -1) {
+			args := src[m[2]:m[3]]
+			for _, s := range cssStringRef.FindAllStringSubmatchIndex(args, -1) {
+				if v, ok := firstGroup(args, s, 2); ok {
+					check(cssUnescape(v), lineIn(src, m[0]), false)
+				}
+			}
+		}
+	}
+	scanCSS(text)
+	if !cssOnly {
+		// A style attribute's value is decoded before it is parsed as CSS (`url(&quot;../x&quot;)` is
+		// `url("../x")` there), while a <style> block is raw text: scanning both readings covers both.
+		if dec := html.UnescapeString(text); dec != text {
+			scanCSS(dec)
 		}
 	}
 	return out

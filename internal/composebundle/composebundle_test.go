@@ -92,26 +92,51 @@ func TestPackThenExtractRoundTripsAProject(t *testing.T) {
 }
 
 func TestExtractRefusesEveryUnsafeMember(t *testing.T) {
-	for name, ms := range map[string][]member{
-		"absolute path":     {{name: "/etc/cron.d/x", body: "x"}},
-		"climbs out":        {{name: "../x.html", body: "x"}},
-		"climbs out deeper": {{name: "a/../../x.html", body: "x"}},
-		"backslash":         {{name: `a\..\..\x`, body: "x"}},
-		"drive letter":      {{name: "C:/Windows/x", body: "x"}},
-		"colon (ADS)":       {{name: "index.html:evil", body: "x"}},
-		"reserved name":     {{name: "assets/con.txt", body: "x"}},
-		"trailing dot":      {{name: "assets/x.", body: "x"}},
-		"symlink":           {{name: "x", typ: tar.TypeSymlink, link: "/etc/passwd"}},
-		"hard link":         {{name: "index.html", body: "x"}, {name: "y", typ: tar.TypeLink, link: "index.html"}},
-		"device":            {{name: "dev", typ: tar.TypeChar}},
-		"fifo":              {{name: "pipe", typ: tar.TypeFifo}},
-		"duplicate member":  {{name: "index.html", body: "a"}, {name: "index.html", body: "b"}},
-		"not clean":         {{name: "a/./b.html", body: "x"}},
-		"double slash":      {{name: "a//b.html", body: "x"}},
+	// want is the refusal each case must get: several rules overlap (an absolute name also has an empty
+	// segment), so a case that only asserted "refused" would pass with its own rule gone.
+	for name, tc := range map[string]struct {
+		ms   []member
+		want string
+	}{
+		"absolute path":     {[]member{{name: "/etc/cron.d/x", body: "x"}}, "is an absolute path"},
+		"climbs out":        {[]member{{name: "../x.html", body: "x"}}, "climbs out of the project"},
+		"climbs out deeper": {[]member{{name: "a/../../x.html", body: "x"}}, "not a clean relative path"},
+		"backslash":         {[]member{{name: `a\..\..\x`, body: "x"}}, "backslashes, colons and NUL"},
+		"drive letter":      {[]member{{name: "C:/Windows/x", body: "x"}}, "backslashes, colons and NUL"},
+		"colon (ADS)":       {[]member{{name: "index.html:evil", body: "x"}}, "backslashes, colons and NUL"},
+		"reserved name":     {[]member{{name: "assets/con.txt", body: "x"}}, `refused path segment "con.txt"`},
+		"trailing dot":      {[]member{{name: "assets/x.", body: "x"}}, `refused path segment "x."`},
+		"trailing space":    {[]member{{name: "assets/x ", body: "x"}}, `refused path segment "x "`},
+		"symlink":           {[]member{{name: "x", typ: tar.TypeSymlink, link: "/etc/passwd"}}, "regular files and directories only"},
+		"hard link":         {[]member{{name: "index.html", body: "x"}, {name: "y", typ: tar.TypeLink, link: "index.html"}}, "regular files and directories only"},
+		"device":            {[]member{{name: "dev", typ: tar.TypeChar}}, "regular files and directories only"},
+		"fifo":              {[]member{{name: "pipe", typ: tar.TypeFifo}}, "regular files and directories only"},
+		"duplicate member":  {[]member{{name: "index.html", body: "a"}, {name: "index.html", body: "b"}}, `member "index.html": `},
+		"not clean":         {[]member{{name: "a/./b.html", body: "x"}}, "not a clean relative path"},
+		"double slash":      {[]member{{name: "a//b.html", body: "x"}}, "not a clean relative path"},
 	} {
 		dst := t.TempDir()
-		if err := Extract(rawBundle(t, ms...), dst, Limits{}); err == nil {
+		err := Extract(rawBundle(t, tc.ms...), dst, Limits{})
+		if err == nil {
 			t.Errorf("%s: Extract accepted it", name)
+			continue
+		}
+		if !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: refused for the wrong reason: %v (want %q)", name, err, tc.want)
+		}
+	}
+}
+
+// inside is the zip-slip check on the joined path; checkName refuses every escaping name before it is
+// reached, so it is tested here directly.
+func TestInsideRefusesAPathOutsideTheRoot(t *testing.T) {
+	root := t.TempDir()
+	if !inside(root, filepath.Join(root, "a", "b.html")) {
+		t.Error("a path under the root must be inside")
+	}
+	for _, p := range []string{filepath.Join(root, ".."), filepath.Join(root, "..", "x"), filepath.Join(filepath.Dir(root), "sibling", "x")} {
+		if inside(root, p) {
+			t.Errorf("%s is outside %s", p, root)
 		}
 	}
 }
@@ -171,6 +196,8 @@ func TestConfineAcceptsWhatAKitProjectUses(t *testing.T) {
 <img src="data:image/png;base64,AAAA">
 <img srcset="assets/a.png 1x, assets/a@2x.png 2x" src="assets/a.png">
 <div data-composition-src="compositions/intro.html" style="background:url('assets/bg.png')"></div>
+<div style="background:url(&quot;assets/bg.png&quot;);background-image:image-set(&quot;assets/a.png&quot; 1x)"></div>
+<style>.step::before{content:"Step 1: go"} .q{content:"\201C"} .i{background-image:image-set(url(assets/a.png) 1x, "assets/a@2x.png" 2x)}</style>
 <video src="assets/clip.mp4?v=1#t=2" poster="assets/poster.jpg"></video>
 <svg><use xlink:href="assets/sprite.svg#icon"></use></svg>
 </body></html>`,
@@ -204,8 +231,18 @@ func TestConfineRefusesEveryWayOut(t *testing.T) {
 		"inline style url":       `<div style="background:url(../secret.png)"></div>`,
 		"css escape in url":      `<div style="background:url(\2e\2e/secret.png)"></div>`,
 		"base element":           `<base href="/"><img src="x.png">`,
+		"base element, inner":    `<base href="sub/"><img src="x.png">`,
 		"srcdoc":                 `<iframe srcdoc="&lt;img src=&quot;../x&quot;&gt;"></iframe>`,
 		"legacy background":      `<body background="../secret.png">`,
+		// A CSS hex escape swallows one following space, so these are single url tokens to a browser.
+		"css escape and its space": `<div style="background:url(http\3a //127.0.0.1/x.png)"></div>`,
+		"css dots and a space":     `<style>.a{background:url(\2e\2e /secret.png)}</style>`,
+		"escaped quote in string":  `<style>.a{background:url("x\"y/../../../secret.png")}</style>`,
+		// A style attribute is decoded before it is parsed as CSS: &quot; quotes the url there.
+		"entity-quoted url":     `<div style="background:url(&quot;../secret.png&quot;)"></div>`,
+		"image-set string":      `<style>.a{background-image:-webkit-image-set("../secret.png" 1x)}</style>`,
+		"image-set in an attr":  `<div style="background-image:image-set(&quot;../secret.png&quot; 1x)"></div>`,
+		"image-set after a url": `<style>.a{background-image:image-set(url(ok.png) 1x, "../secret.png" 2x)}</style>`,
 	} {
 		d := project(t, map[string]string{"index.html": body})
 		err := Confine(d, "index.html")
@@ -221,6 +258,25 @@ func TestConfineRefusesEveryWayOut(t *testing.T) {
 	if err := Confine(css, "index.html"); err == nil || !strings.Contains(err.Error(), "s.css:1:") {
 		t.Errorf("a CSS @import out of the project must be refused with its file: %v", err)
 	}
+	sheet := project(t, map[string]string{"index.html": `<link href="s.css" rel="stylesheet">`, "s.css": `.a{background:image-set("../x.png" 1x)} .b{background:url(\2e\2e /y.png)}`})
+	if err := Confine(sheet, "index.html"); err == nil || !strings.Contains(err.Error(), `"../x.png"`) || !strings.Contains(err.Error(), `"../y.png"`) {
+		t.Errorf("a stylesheet's image-set string and escaped url must both be refused: %v", err)
+	}
+	// The drive-path rule names itself; the scheme rule would refuse it too, for another reason.
+	drive := project(t, map[string]string{"index.html": `<img src="C:/Users/x/secret.png">`})
+	if err := Confine(drive, "index.html"); err == nil || !strings.Contains(err.Error(), "an absolute filesystem path") {
+		t.Errorf("a drive path must be refused as an absolute filesystem path: %v", err)
+	}
+}
+
+func TestConfineRefusesASymlink(t *testing.T) {
+	d := project(t, map[string]string{"index.html": "<p>x</p>"})
+	if err := os.Symlink(filepath.Join(d, "index.html"), filepath.Join(d, "link.html")); err != nil {
+		t.Skipf("cannot create a symlink here: %v", err)
+	}
+	if err := Confine(d, "index.html"); err == nil || !strings.Contains(err.Error(), "link.html: a symlink") {
+		t.Fatalf("Confine must refuse a symlink in the project: %v", err)
+	}
 }
 
 func TestConfineChecksTheComposition(t *testing.T) {
@@ -230,6 +286,10 @@ func TestConfineChecksTheComposition(t *testing.T) {
 	}
 	if err := Confine(d, "../index.html"); err == nil {
 		t.Error("a composition outside the project accepted")
+	}
+	writeFile(t, d, "assets/a.png", "x")
+	if err := Confine(d, "assets"); err == nil {
+		t.Error("a directory accepted as the composition")
 	}
 	if err := Confine(d, ""); err != nil {
 		t.Errorf("the default composition is index.html: %v", err)
