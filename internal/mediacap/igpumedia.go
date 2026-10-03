@@ -35,19 +35,39 @@ func VideoFamilyRoute(name string) string { return "generate_video:" + name }
 // anyPathBinding: a file OR a directory (audio.cpp's --model may be a model package dir).
 const anyPathBinding bindingKind = 100
 
-// ffmpegBindings is the mp4 encode every sdcpp video/animate job ends with. An unset
-// ffmpeg_path adds nothing: the `media` route already reports it as NOT CONFIGURED, and the
-// runner then probes PATH on its own.
+// ffprobeBinding is resolved the way the runners do (render/audio-qa.mjs resolveFfprobe):
+// beside the configured ffmpeg first, else on PATH. value carries the ffmpeg_path.
+const ffprobeBinding bindingKind = 101
+
+// ffmpegBindings is what every iGPU job ends with: the mp4 encode and black/frozen-clip gate
+// (video, animate) or the trim / loudness / dead-air gate (audio) need ffmpeg AND ffprobe
+// (the VACE frame count, the dead-air measurement). An unset ffmpeg_path adds nothing: the
+// `media` route already reports it as NOT CONFIGURED, and the runner then probes PATH on its own.
 func ffmpegBindings(cfg config.Config) []binding {
 	if strings.TrimSpace(cfg.FFmpegPath) == "" {
 		return nil
 	}
-	return []binding{{key: "ffmpeg_path", value: cfg.FFmpegPath, kind: binaryBinding}}
+	return []binding{
+		{key: "ffmpeg_path", value: cfg.FFmpegPath, kind: binaryBinding},
+		{key: "ffprobe (beside ffmpeg_path, else PATH)", value: cfg.FFmpegPath, kind: ffprobeBinding},
+	}
+}
+
+// optionalTAEDetail words the opt-in tiny autoencoder: bound and present, bound and missing
+// (fast=true then decodes with the full VAE and says so; never a route failure), or unbound.
+func optionalTAEDetail(key, path string) string {
+	switch {
+	case strings.TrimSpace(path) == "":
+		return ""
+	case fileExists(path):
+		return fmt.Sprintf("; optional %s=%s (fast=true decodes with it)", key, path)
+	}
+	return fmt.Sprintf("; optional %s=%s is MISSING (fast=true falls back to the full VAE and says so)", key, path)
 }
 
 // engineRoute derives one iGPU route. required lists the (key, value) pairs the engine
 // cannot run without, in a stable order; bindings is the full set to stat once all are set.
-func engineRoute(name, engine, backendKey, backend string, required []struct{ key, value string }, bindings []binding, exeDir string) Route {
+func engineRoute(name, engine, backendKey, backend string, refuse func(string) error, required []struct{ key, value string }, bindings []binding, exeDir string) Route {
 	set := 0
 	var unset []string
 	for _, r := range required {
@@ -65,7 +85,7 @@ func engineRoute(name, engine, backendKey, backend string, required []struct{ ke
 		return Route{Name: name, Engine: engine, State: BoundButMissing,
 			Detail: fmt.Sprintf("%s is selected but %s is unset", engine, strings.Join(unset, ", "))}
 	}
-	if err := config.CPUBackendRefusal(backend); err != nil {
+	if err := refuse(backend); err != nil {
 		return Route{Name: name, Engine: engine, State: BoundButMissing,
 			Detail: fmt.Sprintf("%s: %v — every call defers", backendKey, err)}
 	}
@@ -96,11 +116,11 @@ func sdcppVideoRoute(name, family string, fb config.VideoFamilyBinding, scriptCf
 		binding{key: "videogen_sdcpp_script", value: scriptCfg, kind: scriptBinding})
 	bs = append(bs, ffmpegBindings(cfg)...)
 	prefix := fmt.Sprintf("videogen_families[%q].", family)
-	r := engineRoute(name, engineSdcpp, prefix+"sdcpp_backend", fb.SdcppBackend,
+	r := engineRoute(name, engineSdcpp, prefix+"sdcpp_backend", fb.SdcppBackend, config.CPUBackendRefusal,
 		[]kv{{prefix + "sdcpp_bin", fb.SdcppBin}, {prefix + "sdcpp_model", fb.SdcppModel}, {prefix + "sdcpp_vae", fb.SdcppVAE}, {prefix + "sdcpp_t5xxl", fb.SdcppT5xxl}},
 		bs, exeDir)
 	if r.State == Configured {
-		r.Detail = "family=" + family + "; " + r.Detail
+		r.Detail = "family=" + family + "; " + r.Detail + optionalTAEDetail("sdcpp_tae", fb.SdcppTAE)
 	}
 	r.Detail = licenseDetail(config.FamilyInfo{License: fb.License}) + r.Detail
 	return r
@@ -123,11 +143,20 @@ func sdcppAnimateRoute(cfg config.Config, exeDir string) Route {
 		{key: "animategen_sdcpp_script", value: script, kind: scriptBinding},
 	}
 	bs = append(bs, ffmpegBindings(cfg)...)
-	return engineRoute("animate_character", engineSdcpp, "animategen_sdcpp_backend", cfg.AnimateGenSdcppBackend,
+	r := engineRoute("animate_character", engineSdcpp, "animategen_sdcpp_backend", cfg.AnimateGenSdcppBackend, config.CPUBackendRefusal,
 		[]kv{{"animategen_sdcpp_bin", cfg.AnimateGenSdcppBin}, {"animategen_depth_bin", cfg.AnimateGenDepthBin},
 			{"animategen_sdcpp_model", cfg.AnimateGenSdcppModel}, {"animategen_sdcpp_vae", cfg.AnimateGenSdcppVAE},
 			{"animategen_sdcpp_t5xxl", cfg.AnimateGenSdcppT5xxl}, {"animategen_depth_model", cfg.AnimateGenDepthModel}},
 		bs, exeDir)
+	if r.State == Configured {
+		// the public Wan2.1 VACE GGUFs lack vace_patch_embedding.weight and sd-cli refuses them
+		// ("model metadata validation failed"): a .safetensors VACE model is the one that loads.
+		if strings.HasSuffix(strings.ToLower(cfg.AnimateGenSdcppModel), ".gguf") {
+			r.Detail += "; NOTE animategen_sdcpp_model is a .gguf: the public VACE GGUFs lack vace_patch_embedding.weight and sd-cli refuses them - use the .safetensors VACE model (wan2.1_vace_1.3B_fp16)"
+		}
+		r.Detail += optionalTAEDetail("animategen_sdcpp_tae", cfg.AnimateGenSdcppTAE)
+	}
+	return r
 }
 
 // audiocppRoute is generate_audio:voice or :music with the audiocpp engine.
@@ -146,7 +175,9 @@ func audiocppRoute(kind string, cfg config.Config, exeDir string) Route {
 		{key: modelKey, value: model, kind: anyPathBinding},
 		{key: "audiocpp_script", value: script, kind: scriptBinding},
 	}
-	r := engineRoute(name, engineAudiocpp, "audiocpp_backend", cfg.AudiocppBackend,
+	// both kinds end in ffmpeg: the trim / fade / loudness chain and the dead-air gate
+	bs = append(bs, ffmpegBindings(cfg)...)
+	r := engineRoute(name, engineAudiocpp, "audiocpp_backend", cfg.AudiocppBackend, config.AudiocppBackendRefusal,
 		[]kv{{"audiocpp_bin", cfg.AudiocppBin}, {modelKey, model}}, bs, exeDir)
 	if r.State == Configured {
 		r.Detail = "family=" + family + "; " + r.Detail
@@ -171,10 +202,13 @@ func sdcppVideoFamilyNames(cfg config.Config) []string {
 // replaced is keyed by route name; extra are appended after the loop's own routes.
 func igpuRoutes(cfg config.Config, exeDir string) (replaced map[string]Route, extra []Route) {
 	replaced = map[string]Route{}
-	defName := strings.TrimSpace(cfg.VideoGenFamily)
+	// The default is resolved the way the pipeline resolves a request that names no model
+	// (config.DefaultVideoSdcppFamily): an sdcpp family named like a ComfyUI one (wan22,
+	// ltx25, ...) is the default when videogen_family is unset or spelled differently.
+	defName, hasDef := cfg.DefaultVideoSdcppFamily()
 	for _, n := range sdcppVideoFamilyNames(cfg) {
 		fb := cfg.VideoGenFamilies[n]
-		if n == defName {
+		if hasDef && n == defName {
 			replaced["generate_video"] = sdcppVideoRoute("generate_video", n, fb, cfg.VideoGenSdcppScript, cfg, exeDir)
 			continue
 		}
@@ -194,7 +228,8 @@ func igpuRoutes(cfg config.Config, exeDir string) (replaced map[string]Route, ex
 
 // sdcppVideoFamilyRows are the VideoFamilyBindingRows entries for the sdcpp families:
 // what each binds, by config key, for doctor and offload_status.
-func sdcppVideoFamilyRows(cfg config.Config, defaultFamily string) []VideoFamilyBindingRow {
+func sdcppVideoFamilyRows(cfg config.Config) []VideoFamilyBindingRow {
+	defaultFamily, _ := cfg.DefaultVideoSdcppFamily()
 	var out []VideoFamilyBindingRow
 	for _, n := range sdcppVideoFamilyNames(cfg) {
 		fb := cfg.VideoGenFamilies[n]

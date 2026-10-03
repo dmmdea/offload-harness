@@ -111,61 +111,61 @@ func bound(key, value, builder, def string, classes []string) needFile {
 
 func isGGUF(name string) bool { return strings.HasSuffix(strings.ToLower(name), ".gguf") }
 
+// videoRunnerFamily maps videogen_family onto the family the ComfyUI runner dispatches on
+// (render/comfy-video.mjs matches ltx25 | h3 | hunyuan exactly; anything else renders Wan 2.2),
+// keeping "ace" as itself the way internal/pipeline.canonicalVideoFamily does.
+func videoRunnerFamily(fam string) string {
+	switch fam {
+	case "ltx25", "h3", "hunyuan", "ace":
+		return fam
+	}
+	return "wan22"
+}
+
 // videoNeeds is what the configured video family's graph loads, mirroring
 // render/comfy-video.mjs: the family is videogen_family (ltx25 | h3 | hunyuan, matched
 // exactly like the runner), anything else renders Wan 2.2. optional lists files only a
 // per-request mode loads (Wan fast=true), reported without failing the route.
+//
+// The files come from the SAME binding the pipeline renders with: runGenerateVideo resolves
+// config.ResolveVideoFamilyBinding(<canonical family>) and passes ITS weights, loader and pool
+// keys, so doctor reads that binding too (videoFamilyFilesLabeled) rather than the flat videogen_*
+// keys. A box whose videogen_family is spelled "wan" (the runner's own word for Wan 2.2) renders
+// through videogen_families["wan22"], and the flat keys here used to name files that render
+// never loads (G41).
 func videoNeeds(cfg config.Config) (family string, files []needFile, classes []string, optional []needFile) {
-	switch fam := strings.TrimSpace(cfg.VideoGenFamily); fam {
+	fam := strings.TrimSpace(cfg.VideoGenFamily)
+	family = videoRunnerFamily(fam)
+	render := ""
+	if fam != "" {
+		render = family
+	}
+	fb := cfg.ResolveVideoFamilyBinding(render)
+	files = videoFamilyFilesLabeled(family, fb, "videogen_")
+	switch family {
 	case "ltx25":
-		files = []needFile{
-			bound("videogen_transformer", cfg.VideoGenTransformer, "ltx25", ltxDefaults.transformer, classDiffusion),
-			bound("videogen_text_encoder", cfg.VideoGenTextEncoder, "ltx25", ltxDefaults.textEncoder, classTextEnc),
-			bound("videogen_video_vae", cfg.VideoGenVideoVAE, "ltx25", ltxDefaults.videoVae, classVAE),
-			bound("videogen_audio_vae", cfg.VideoGenAudioVAE, "ltx25", ltxDefaults.audioVae, classVAE),
-			bound("videogen_latent_upscaler", cfg.VideoGenLatentUpscaler, "ltx25", ltxDefaults.latentUpscaler, classLatentUp),
-		}
-		if cfg.VideoGenPoolVvramGB > 0 {
+		if fb.PoolVvramGB > 0 {
 			// The text encoder and both VAEs pin off ComfyUI's default device too
-			// (2026-09-24 fix, wf-ltx25-i2v.mjs) — same pack as the DiT loader.
+			// (2026-09-24 fix, wf-ltx25-i2v.mjs) - same pack as the DiT loader.
 			classes = []string{"UNETLoaderDisTorch2MultiGPU", "CLIPLoaderMultiGPU", "VAELoaderMultiGPU"}
 		}
 		return "ltx25", files, classes, nil
 	case "h3":
 		// The runner's h3 branch passes no per-machine weight flags: builder defaults only,
 		// and the turbo LoRA is the default recipe (hero is the per-request opt-out).
-		return "h3", []needFile{
-			{label: "h3 transformer (builder default)", classes: classDiffusion, name: h3Defaults.transformer},
-			{label: "h3 text encoder (builder default)", classes: classTextEnc, name: h3Defaults.textEncoder},
-			{label: "h3 video vae (builder default)", classes: classVAE, name: h3Defaults.videoVae},
-			{label: "h3 audio vae (builder default)", classes: classVAE, name: h3Defaults.audioVae},
-			{label: "h3 turbo lora (builder default)", classes: classLoRA, name: h3Defaults.turboLora},
-		}, nil, nil
+		return "h3", files, nil, nil
 	case "hunyuan":
-		return "hunyuan", []needFile{
-			{label: "hunyuan unet (builder default)", classes: classDiffusion, name: hunyuanDefaults.unet},
-			{label: "hunyuan vae (builder default)", classes: classVAE, name: hunyuanDefaults.vae},
-			{label: "hunyuan clip vision (builder default)", classes: classClipVis, name: hunyuanDefaults.clipVision},
-			bound("videogen_text_encoder", cfg.VideoGenTextEncoder, "hunyuan", hunyuanDefaults.textEncoder, classTextEnc),
-			{label: "hunyuan glyph encoder (builder default)", classes: classTextEnc, name: hunyuanDefaults.glyphEncoder},
-		}, []string{"UnetLoaderGGUF", "VHS_VideoCombine"}, nil
-	}
-	high := bound("videogen_unet_high", cfg.VideoGenUnetHigh, "wan22", wanDefaults.highUnet, classDiffusion)
-	low := bound("videogen_unet_low", cfg.VideoGenUnetLow, "wan22", wanDefaults.lowUnet, classDiffusion)
-	files = []needFile{
-		high, low,
-		bound("videogen_text_encoder", cfg.VideoGenTextEncoder, "wan22", wanDefaults.textEncoder, classTextEnc),
-		{label: "wan vae (builder default)", classes: classVAE, name: wanDefaults.vae},
+		return "hunyuan", files, []string{"UnetLoaderGGUF", "VHS_VideoCombine"}, nil
 	}
 	// The builder picks each expert's loader by extension AND videogen_wan_loader
 	// (wf-wan22-i2v.mjs): "gguf-distorch" forces the DisTorch2/MultiGPU wrapper on
 	// both experts (the historical behavior, still the default for a .gguf file
 	// under "auto"/unset); "native" (or "auto" on a .safetensors expert) uses the
 	// plain core UNETLoader, which needs NO custom-node class at all.
-	wanLoader := strings.TrimSpace(cfg.VideoGenWanLoader)
+	wanLoader := strings.TrimSpace(fb.WanLoader)
 	seen := map[string]bool{}
-	for _, u := range []string{high.name, low.name} {
-		gguf := isGGUF(u)
+	for _, f := range files[:2] { // the two experts, high then low
+		gguf := isGGUF(f.name)
 		if !gguf && wanLoader != "gguf-distorch" {
 			continue // native: core UNETLoader, no pack needed
 		}
@@ -195,14 +195,21 @@ func videoNeeds(cfg config.Config) (family string, files []needFile, classes []s
 // would this box load for family X" and "what does the box's bound family
 // need" can never name two different files for the same builder default.
 func videoFamilyFiles(family string, fb config.VideoFamilyBinding) []needFile {
+	return videoFamilyFilesLabeled(family, fb, "")
+}
+
+// videoFamilyFilesLabeled is videoFamilyFiles with a label prefix on the bound keys: doctor's
+// route detail names them by their flat config key ("videogen_text_encoder"), the per-family
+// rows by the bare binding field ("text_encoder").
+func videoFamilyFilesLabeled(family string, fb config.VideoFamilyBinding, prefix string) []needFile {
 	switch family {
 	case "ltx25":
 		return []needFile{
-			bound("transformer", fb.Transformer, "ltx25", ltxDefaults.transformer, classDiffusion),
-			bound("text_encoder", fb.TextEncoder, "ltx25", ltxDefaults.textEncoder, classTextEnc),
-			bound("video_vae", fb.VideoVAE, "ltx25", ltxDefaults.videoVae, classVAE),
-			bound("audio_vae", fb.AudioVAE, "ltx25", ltxDefaults.audioVae, classVAE),
-			bound("latent_upscaler", fb.LatentUpscaler, "ltx25", ltxDefaults.latentUpscaler, classLatentUp),
+			bound(prefix+"transformer", fb.Transformer, "ltx25", ltxDefaults.transformer, classDiffusion),
+			bound(prefix+"text_encoder", fb.TextEncoder, "ltx25", ltxDefaults.textEncoder, classTextEnc),
+			bound(prefix+"video_vae", fb.VideoVAE, "ltx25", ltxDefaults.videoVae, classVAE),
+			bound(prefix+"audio_vae", fb.AudioVAE, "ltx25", ltxDefaults.audioVae, classVAE),
+			bound(prefix+"latent_upscaler", fb.LatentUpscaler, "ltx25", ltxDefaults.latentUpscaler, classLatentUp),
 		}
 	case "h3":
 		// The runner's h3 branch binds no per-machine weights (routeneeds' own
@@ -219,14 +226,14 @@ func videoFamilyFiles(family string, fb config.VideoFamilyBinding) []needFile {
 			{label: "hunyuan unet (builder default)", classes: classDiffusion, name: hunyuanDefaults.unet},
 			{label: "hunyuan vae (builder default)", classes: classVAE, name: hunyuanDefaults.vae},
 			{label: "hunyuan clip vision (builder default)", classes: classClipVis, name: hunyuanDefaults.clipVision},
-			bound("text_encoder", fb.TextEncoder, "hunyuan", hunyuanDefaults.textEncoder, classTextEnc),
+			bound(prefix+"text_encoder", fb.TextEncoder, "hunyuan", hunyuanDefaults.textEncoder, classTextEnc),
 			{label: "hunyuan glyph encoder (builder default)", classes: classTextEnc, name: hunyuanDefaults.glyphEncoder},
 		}
 	default: // wan22
 		return []needFile{
-			bound("unet_high", fb.UnetHigh, "wan22", wanDefaults.highUnet, classDiffusion),
-			bound("unet_low", fb.UnetLow, "wan22", wanDefaults.lowUnet, classDiffusion),
-			bound("text_encoder", fb.TextEncoder, "wan22", wanDefaults.textEncoder, classTextEnc),
+			bound(prefix+"unet_high", fb.UnetHigh, "wan22", wanDefaults.highUnet, classDiffusion),
+			bound(prefix+"unet_low", fb.UnetLow, "wan22", wanDefaults.lowUnet, classDiffusion),
+			bound(prefix+"text_encoder", fb.TextEncoder, "wan22", wanDefaults.textEncoder, classTextEnc),
 			{label: "wan vae (builder default)", classes: classVAE, name: wanDefaults.vae},
 		}
 	}
@@ -266,6 +273,11 @@ func VideoFamilyBindingRows(cfg config.Config) []VideoFamilyBindingRow {
 	}
 	out := make([]VideoFamilyBindingRow, 0, len(videoFamilyNames))
 	for _, name := range videoFamilyNames {
+		// An sdcpp family named like a ComfyUI one (wan22, ltx25, ...) is the sdcpp row below, not
+		// a ComfyUI builder-default listing of files its renders never load.
+		if cfg.SdcppVideoFamily(name) {
+			continue
+		}
 		fb := cfg.ResolveVideoFamilyBinding(name)
 		files := make(map[string]string, 4)
 		for _, f := range videoFamilyFiles(name, fb) {
@@ -279,7 +291,7 @@ func VideoFamilyBindingRows(cfg config.Config) []VideoFamilyBindingRow {
 		out = append(out, row)
 	}
 	// The sdcpp families (CT-49) bind sd-cli files, not ComfyUI names: one row each.
-	return append(out, sdcppVideoFamilyRows(cfg, defaultFamily)...)
+	return append(out, sdcppVideoFamilyRows(cfg)...)
 }
 
 // animateNeeds: WAN-Animate-2's four files (the runner passes the animategen_* keys).

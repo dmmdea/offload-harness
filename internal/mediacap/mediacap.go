@@ -430,6 +430,11 @@ func (b binding) resolve(exeDir string) (got, why string, ok bool) {
 			return p, "", true
 		}
 		return "", fmt.Sprintf("%s=%s not found (no such file, and not on PATH)", b.key, b.value), false
+	case ffprobeBinding:
+		if p, found := resolveFfprobeBinding(b.value); found {
+			return p, "", true
+		}
+		return "", fmt.Sprintf("ffprobe not found next to ffmpeg_path=%s or on PATH (the runner's gates need it)", b.value), false
 	case anyPathBinding:
 		if _, err := os.Stat(b.value); err == nil {
 			return b.value, "", true
