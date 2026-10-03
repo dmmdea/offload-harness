@@ -6,6 +6,74 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.163.0] - 2026-10-03 - Thin clients render on the fleet: the compose-project door, `install client`, and a box with no seat never takes work itself
+
+### Added — the compose-project door (ADR 0071)
+
+A machine with no composition lane (a 2-core laptop, an arm64 board) can now have a whole HyperFrames project
+rendered on a node that has one. The template door (`compose-video` over `/fleet/dispatch`) is unchanged.
+
+- **`POST /fleet/compose-project`** takes a gzip-compressed tar of the project (base64, with its sha256), the
+  composition and the render options. It is closed (403) unless the node sets `fleet_compose_projects: true`, holds a
+  `fleet_auth_token` and has the lane bound, and it is never open on a tokenless node. The bearer is checked before the
+  body is read; only then does the request get a 15-minute read and write window (the server's blanket 30 seconds cut a
+  large bundle on an ordinary link). Bundles are capped by `fleet_compose_bundle_max_mb` (64 MiB compressed by default).
+- **Extraction** writes regular files and directories only, under safe names (no absolute path, drive letter, UNC path,
+  `..`, backslash, NUL, colon, Windows device name, trailing dot or space), with caps on entries (directories
+  included), files, each file and the total counted on the bytes written, and the decompressed stream bounded as a whole.
+  A conflict in the bundle itself is refused as the bundle's; a write the node cannot make answers 500, so the caller
+  reports infrastructure, never "refused".
+- **The reference check** (Confine) follows how HyperFrames' compiler reads a project: references anywhere in the
+  text (an attribute after `/` too), every file a `data-composition-src` names whatever its extension, a climb out of the
+  project from the file or, unless it starts with `../`, from the project root; UNC and protocol-relative paths,
+  `file:`, `<base>` and `srcdoc`; and hosts that are loopback in any numeric form a browser accepts, private, tailnet,
+  dotless or non-ASCII. Public `https` references stay allowed. The client runs the same check before sending.
+- **The jobs** are masked from tokenless polls and feeds, exempt from `fleet_max_concurrent_jobs` like `compose-video`,
+  and their extracted trees are removed when the job ends; fleet-serve sweeps any a crash left behind at startup.
+- New config keys: `fleet_compose_projects`, `fleet_compose_bundle_max_mb`.
+
+### Added — `offload_compose_video` places a render on the fleet
+
+- **`route`** (`local` | `auto` | `remote`; `--route` on the CLI). `auto`, the default, renders here when this machine
+  has the lane and on the least-queued node from `delegate_remotes` that advertises the door when it has none. A template
+  travels by name; a project directory or inline HTML travels as a bundle. The video and snapshots come back into the
+  media dir (or `out`) under plain file names only. With neither a lane nor remotes the call defers naming both fixes.
+
+### Added — the delegation client
+
+- **`local-offload install client`** writes a client's config (mode 0600, through a fresh temp file): the remotes, the
+  fleet token read from a file and never printed, delegation on, every model route and default script binding empty,
+  and ffmpeg bound only where the machine has it. It refuses remotes that are not fleet node bases (off the fleet port,
+  loopback, a `/v1` suffix) and removes what it wrote.
+- **`setup/install.sh --client --remotes ... --token-file ...`** installs the binary and that config, registers the MCP
+  server for Claude Code and runs `acceptance`: no tier detection, no llama.cpp, no model, no service.
+- `acceptance` and `doctor` skip their local-model checks on a box that names no model.
+
+### Fixed — a box with no agent seat is never a placement
+
+Placement treated a box with no agent seat as an idle one: route=auto (an idle local seat wins) and route=spread
+(subtask 0 stays local) put contracts on a seat that could only defer them, so a client's `agent_delegate` and
+`offload_research` deferred "no agent seat resolvable" with the fleet idle. Now every contract from such a box goes to
+the fleet or waits in line for it, and the reasons say the box has no seat.
+
+### Fixed — token-gated lanes mask their jobs on every path
+
+Jobs of every token-gated lane but the agent lane (vision, text, compose-project) are masked from tokenless pollers and
+feed readers whichever path admitted them; a vision or text job claimed from the pull queue was readable before.
+
+### Docs
+
+`docs/systems/delegation-client.md` (new), ADR 0071 and its amendment 1, ADR 0059 decision 6, the operator guide (the
+route, the bundle checks, seatless placement), `setup/SETUP-AGENT.md` (the client install).
+
+### Tests
+
+The door (closed states, bearer before body, caps, sha256, extraction, Confine, cleanup, masking, deadlines, node-side
+500, the sweep), the bundle package (every name, type, cap and reference rule, with the reason each case must give, the
+kit's projects and templates passing), the client (template and project round trips against a real node server,
+refusals before upload, plain output names), `install client` (rendering, refusals, token hiding, 0600 on `--force`,
+ffmpeg binding) and seatless placement on auto and spread. Every new guard was mutated at its call site and seen failing.
+
 ## [0.162.0] - 2026-10-03 - The compose lane pins HyperFrames 0.8.114, and `install hyperframes` puts a moved pin on every node
 
 ### Fixed — a pin move can no longer strand a node's composition lane

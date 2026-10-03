@@ -188,6 +188,8 @@ func (s *Server) claimSpec(taskType string, cleanup func()) AcceptSpec {
 		// pulled agent contract's result was readable without the token while
 		// the identical contract arriving by dispatch was gated.
 		Agent: taskType == string(core.TaskAgentRun),
+		// Gated masks a pulled token-gated job exactly as a dispatched one.
+		Gated: gatedJob(taskType),
 		// Uncapped keeps a pulled render off the concurrency cap that exists
 		// to protect the shared text endpoint it never touches.
 		Uncapped: !s.concurrencyCapped(taskType),

@@ -31,6 +31,12 @@ Afterburner is the recommended companion** on a fleet box — its per-process VR
 nvidia-smi cannot provide under WDDM) validates our recorded footprints and doubles as a live
 monitor; recommended, never required. Full guide: `docs/FLEET-NODE.md`.
 
+**Delegation client (a machine with no model):** a box with no room for a model, or no build of the
+composition lane's browser, installs the harness only to place work on the fleet:
+`setup/install.sh --client --remotes <node bases> --token-file <fleet token file>` (Linux; on Windows
+`local-offload install client` plus `claude mcp add`). None of the steps below run on it: no detect, no
+llama.cpp, no model, no service. What it can and cannot reach: `docs/systems/delegation-client.md`.
+
 ## Hard rules (read before running anything)
 
 1. **Verify, do not infer.** Parse the actual JSON each script prints. Never assume a step

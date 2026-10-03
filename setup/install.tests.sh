@@ -90,6 +90,23 @@ render_expr="$(awk '/"\$BIN" install render/,/--out "\$SWAP_YAML"/' "$INSTALL" |
 [ -n "$render_expr" ] && [ "$render_expr" = "$seed_expr" ] \
   && pass "render passes --rknpu-home like seed" || fail "render passes --rknpu-home like seed" "seed=[$seed_expr] render=[$render_expr]"
 
+# --client: a delegation client (ADR 0071) needs no tier, no llama.cpp build and no service.
+OUT="$(bash "$INSTALL" --bin "$STUB" --prefix "$TMP/client" --client --dry-run 2>&1)"; RC=$?
+[ "$RC" -ne 0 ] && printf '%s' "$OUT" | grep -q -- "--client requires --remotes" \
+  && pass "--client requires --remotes" || fail "--client requires --remotes" "rc=$RC: $OUT"
+OUT="$(bash "$INSTALL" --bin "$STUB" --prefix "$TMP/client" --client --remotes http://render-a:18811 --dry-run 2>&1)"; RC=$?
+[ "$RC" -ne 0 ] && printf '%s' "$OUT" | grep -q -- "--client requires --token-file" \
+  && pass "--client requires --token-file" || fail "--client requires --token-file" "rc=$RC: $OUT"
+OUT="$(bash "$INSTALL" --bin "$STUB" --prefix "$TMP/client" --client --remotes http://render-a:18811 --token-file "$TMP/tok" --dry-run 2>&1)"; RC=$?
+if [ "$RC" -eq 0 ] \
+  && printf '%s' "$OUT" | grep -q -- "local-offload install client --home $TMP/client --remotes http://render-a:18811 --token-file $TMP/tok --config $TMP/client/etc/config.json" \
+  && printf '%s' "$OUT" | grep -q -- "local-offload acceptance --config $TMP/client/etc/config.json" \
+  && ! printf '%s' "$OUT" | grep -q -E "^tier:|--llama-bin is required|systemd"; then
+  pass "--client renders a client config and gates it, with no tier, llama.cpp or service"
+else
+  fail "--client renders a client config and gates it, with no tier, llama.cpp or service" "rc=$RC: $OUT"
+fi
+
 if [ "$FAIL" -eq 0 ]; then
   echo "ALL PASS"
   exit 0

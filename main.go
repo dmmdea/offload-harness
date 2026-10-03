@@ -29,6 +29,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/buildinfo"
 	"github.com/dmmdea/offload-harness/internal/cache"
 	"github.com/dmmdea/offload-harness/internal/calibration"
+	"github.com/dmmdea/offload-harness/internal/composeremote"
 	"github.com/dmmdea/offload-harness/internal/confhead"
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
@@ -1415,6 +1416,7 @@ func runComposeVideo(args []string) error {
 	fs.IntVar(&f.fps, "fps", 0, "frame rate 1-240 (default: the composition's data-fps)")
 	fs.IntVar(&f.workers, "workers", 0, "Chrome workers 1-24 (default: compose_workers, else auto)")
 	fs.BoolVar(&f.strict, "strict", true, "fail on lint errors / a failed check (--strict=false to report only)")
+	route := fs.String("route", "auto", "local | auto (here when this machine has the composition lane, else a fleet node) | remote (a fleet node from delegate_remotes; ADR 0071)")
 	_ = fs.Parse(args)
 	params, perr := buildComposeParams(f)
 	if perr != nil {
@@ -1426,7 +1428,7 @@ func runComposeVideo(args []string) error {
 		return err
 	}
 	defer cleanup()
-	res := p.Run(context.Background(), core.Request{Task: core.TaskComposeVideo, Door: "cli:compose-video", Params: params})
+	res := composeremote.Run(context.Background(), cfg, p, core.Request{Task: core.TaskComposeVideo, Door: "cli:compose-video", Params: params}, *route)
 	emitResult(res, *asJSON, "", *compactFlag)
 	return nil
 }
@@ -2189,7 +2191,7 @@ func runDelegate(args []string) error {
 	fs := flag.NewFlagSet("delegate", flag.ExitOnError)
 	fs.String("config", "", "config file path")
 	contractPath := fs.String("contract", "", "path to the delegation contract JSON: one subtask object or an array of up to 8 (fields: goal, context, context_paths, output_schema, acceptance, profile, max_steps, timeout_sec)")
-	route := fs.String("route", "auto", "placement route: auto (idle-local wins) | spread (across the local seat AND every eligible fleet node, concurrently; subtask 0 stays local unless it names a layer this box does not declare, the remote slots are fit-scored from the goal text) | local (force in-process) | remote (force a fleet node)")
+	route := fs.String("route", "auto", "placement route: auto (idle-local wins) | spread (across the local seat AND every eligible fleet node, concurrently; subtask 0 stays local unless it names a layer this box does not declare, the remote slots are fit-scored from the goal text) | local (force in-process) | remote (force a fleet node). A box with no agent seat (a delegation client) is never a placement: auto and spread go to the fleet")
 	readRoot := fs.String("read-root", "", "directory context_paths may be read from (default: the current dir)")
 	var remotes repeatedFlag
 	fs.Var(&remotes, "remote", "remote fleet node base URL, tailnet-only (repeatable)")
@@ -2546,6 +2548,12 @@ func runFleetServe(args []string) error {
 	// one id is far cheaper than refusing to serve.
 	swept, kept, serr := fleetnode.SweepOrphanedPipelineJobs(cfg)
 	reportPipelineJobsSweep(os.Stderr, swept, kept, serr)
+	// Extracted compose-project trees (ADR 0071) a crash left behind; a warning, never fatal.
+	if n, perr := fleetnode.SweepOrphanedProjectDirs(cfg, time.Now()); perr != nil {
+		fmt.Fprintf(os.Stderr, "[fleet-serve] WARNING: sweeping compose-project dirs: %v\n", perr)
+	} else if n > 0 {
+		fmt.Fprintf(os.Stderr, "[fleet-serve] swept %d orphaned compose-project dir(s)\n", n)
+	}
 
 	listen, nodeID, err := fleetServeParams(*listenFlag, *nodeIDFlag, *trusted, cfg, os.Hostname)
 	if err != nil {
@@ -3108,11 +3116,15 @@ func doctorRunChecked(cfg config.Config, routes []mediacap.Route, w io.Writer, d
 	client := llamaclient.New(cfg.Endpoint, cfg.CompletionPath, cfg.Model, 5*time.Second)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err := client.Health(ctx); err != nil {
+	if !hasLocalModel(cfg) {
+		// A delegation client (install client) has no local endpoint to be healthy.
+		fmt.Fprintln(w, "health:     SKIP - no local model is configured (a delegation client); the fleet serves every model")
+	} else if err := client.Health(ctx); err != nil {
 		fmt.Fprintln(w, "health:     DOWN -", err)
 		return fmt.Errorf("endpoint down: %w", err)
+	} else {
+		fmt.Fprintln(w, "health:     OK")
 	}
-	fmt.Fprintln(w, "health:     OK")
 	// Fleet version skew (security standard L0, register R-06): informational,
 	// never an exit-code change — a node on another release is a parity finding
 	// for the operator, not a broken local box.

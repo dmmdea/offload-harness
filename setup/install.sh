@@ -35,6 +35,9 @@ SERVICE_USER="$(id -un)"
 BIN=""
 DRY_RUN=0
 NO_SERVICE=0
+CLIENT=0
+REMOTES=""
+TOKEN_FILE=""
 # The repo this script lives in, for `install vllm-seat --root` (it reads the seat
 # templates under setup/templates/vllm-seat/). Resolved from $0, not $PWD.
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -84,6 +87,11 @@ Usage: install.sh [options]
   --hf-home DIR       HF cache root (default: $HF_HOME, else <prefix>/hf). Keep it
                       short: LMCache page names embed the model path (NAME_MAX 255).
   --tailscale-ip ADDR literal address the vLLM engine binds (default: tailscale ip -4)
+  --client            install a DELEGATION CLIENT instead (ADR 0071): the binary and a config with
+                      no local model, no media lane and no service, delegating agent work and
+                      compositions to --remotes; registers the local-offload MCP for Claude Code
+  --remotes LIST      with --client: comma-separated fleet nodes (http://<node>:18811)
+  --token-file PATH   with --client: the file holding the fleet token (never printed)
   --dry-run           print every decision and command, change nothing
   -h, --help          this text
 USAGE
@@ -103,6 +111,9 @@ while [ $# -gt 0 ]; do
     --vllm-venv) VLLM_VENV="${2:?}"; shift 2 ;;
     --hf-home) HF_HOME_DIR="${2:?}"; shift 2 ;;
     --tailscale-ip) TS_IP="${2:?}"; shift 2 ;;
+    --client) CLIENT=1; shift ;;
+    --remotes) REMOTES="${2:?}"; shift 2 ;;
+    --token-file) TOKEN_FILE="${2:?}"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) die "unknown option $1 (try --help)" ;;
@@ -120,6 +131,45 @@ say "harness:   $("$BIN" --version)"
 say "identity:  $SERVICE_USER (services will run as this account)"
 
 command -v jq >/dev/null 2>&1 || die "jq is required (sudo apt install jq)"
+
+# ---- client mode: a delegation client (ADR 0071) ----------------------------
+# A machine too small for any local lane (a 2-core laptop, an arm64 single-board computer) still
+# runs the harness to place work on the fleet. It is a role, not a hardware tier: no detect, no
+# models, no llama.cpp, no service. `install client` renders its config from the binary.
+if [ "$CLIENT" -eq 1 ]; then
+  [ -n "$REMOTES" ] || die "--client requires --remotes (the fleet nodes this machine delegates to)"
+  [ -n "$TOKEN_FILE" ] || die "--client requires --token-file (the fleet token)"
+  [ "$DRY_RUN" -eq 1 ] || [ -r "$TOKEN_FILE" ] || die "--token-file $TOKEN_FILE is not readable"
+  if [ -z "$PREFIX" ]; then
+    VOL_JSON="$("$BIN" install volumes --json 2>/dev/null || true)"
+    ROOT="$(printf '%s' "$VOL_JSON" | jq -r '.choice.volume.root // empty')"
+    [ -n "$ROOT" ] || die "no eligible install volume; a one-volume machine needs an explicit --prefix (e.g. --prefix \$HOME/offload-client)"
+    PREFIX="${ROOT%/}/offload-client"
+  fi
+  say "mode:      delegation client (no local model, no media lane, no service)"
+  say "remotes:   $REMOTES"
+  say "prefix:    $PREFIX"
+  for d in "$PREFIX" "$PREFIX/etc" "$PREFIX/bin"; do run mkdir -p "$d"; done
+  run install -m 0755 "$BIN" "$PREFIX/bin/local-offload"
+  CLIENT_CFG="$PREFIX/etc/config.json"
+  if [ -f "$CLIENT_CFG" ]; then
+    say "config:    $CLIENT_CFG exists, left untouched (re-render: $PREFIX/bin/local-offload install client ... --force)"
+  else
+    run "$PREFIX/bin/local-offload" install client --home "$PREFIX" --remotes "$REMOTES" --token-file "$TOKEN_FILE" --config "$CLIENT_CFG"
+  fi
+  if command -v claude >/dev/null 2>&1; then
+    if [ "$DRY_RUN" -eq 0 ] && claude mcp list 2>/dev/null | grep -q '^local-offload:'; then
+      say "mcp:       local-offload is already registered for $(id -un)"
+    else
+      run claude mcp add local-offload --scope user -- "$PREFIX/bin/local-offload" mcp --config "$CLIENT_CFG"
+    fi
+  else
+    say "mcp:       claude is not on PATH; register later: claude mcp add local-offload --scope user -- $PREFIX/bin/local-offload mcp --config $CLIENT_CFG"
+  fi
+  run "$PREFIX/bin/local-offload" acceptance --config "$CLIENT_CFG"
+  say "done:      delegation client installed"
+  exit 0
+fi
 
 # ---- 1. which tier is this machine? -----------------------------------------
 DETECT_JSON="$("$BIN" install detect --json)"

@@ -908,6 +908,10 @@ func (s *Server) Handler() http.Handler {
 	// The text lane (0.154.0): classify / extract on this node's own pipeline. A route of
 	// its own so the payload is typed; dispatch's 1 MiB body cap, then the same admit path.
 	mux.HandleFunc("POST /fleet/text", s.handleText)
+	// The project-bundle door (ADR 0071): a whole HyperFrames project from a holder of
+	// the fleet token. Its own route for the body cap; the door and the bearer are
+	// checked before the body is read, then the same admit path as every job.
+	mux.HandleFunc("POST "+ComposeProjectPath, s.handleComposeProject)
 	// The cascade chat lane (C-41b): a SYNCHRONOUS forward, not a job — see
 	// chat_lane.go for why a single short cascade call does not belong in the
 	// job store, and why this node's loopback-only llama-swap needs a door of
@@ -1930,7 +1934,9 @@ func (s *Server) concurrencyCapped(taskType string) bool {
 	// `compose_busy`. Capped, a composition would hold a fleet execution slot for up
 	// to compose_timeout_sec (30 min) doing work the cap does not protect — starving
 	// the agent lane, the exact failure the exemption rule above exists to prevent.
-	case ComposeTask:
+	// compose-project (ADR 0071) is the same render on the same compose slot; a queued
+	// one would also hold its request body and extracted tree while it waited.
+	case ComposeTask, ComposeProjectTask:
 		return false
 	}
 	// Config-driven pipeline routes run through runPipelineJob, which takes the
@@ -2267,6 +2273,13 @@ func (s *Server) admit(w http.ResponseWriter, r *http.Request, env dispatchEnvel
 	req, cleanup, err := BuildRequest(r.Context(), s.opts.Cfg, s.opts.LoopbackListener, env.TaskType, env.Payload)
 	if err != nil {
 		cleanup()
+		// A failure that is this node's own (a disk that filled while unpacking a project) is not the
+		// request's: 500, so the caller reports infrastructure, never "refused".
+		var ns nodeSideError
+		if errors.As(err, &ns) {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -2351,7 +2364,7 @@ func (s *Server) admit(w http.ResponseWriter, r *http.Request, env dispatchEnvel
 	}
 	spec := AcceptSpec{
 		Agent:     env.TaskType == string(core.TaskAgentRun),
-		Gated:     env.TaskType == VisionTask || env.TaskType == TextTask,
+		Gated:     gatedJob(env.TaskType),
 		Uncapped:  !s.concurrencyCapped(env.TaskType),
 		OnDropped: cleanup,
 		Task:      env.TaskType,

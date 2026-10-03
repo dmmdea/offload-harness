@@ -27,6 +27,9 @@ where the code lives.
   job semantics, VRAM sampling
 - [systems/fleet-overview.md](systems/fleet-overview.md) — `fleet-ui` / `top` / `fleet-smoke`: the
   read-only operator page, its poller, and the jobs/errors feeds
+- [systems/delegation-client.md](systems/delegation-client.md) — `install client` / `install.sh --client`:
+  a machine with no model or lane that places agent contracts, research and compositions on the fleet,
+  and what stays out of its reach
 - [systems/node-swap.md](systems/node-swap.md) — `node-swap`: the reusable Windows fleet-node
   binary swap (verify hash, wait idle, backup+rename, restart, verify, auto-rollback), and its
   detached launcher for an SSH-session-proof run
