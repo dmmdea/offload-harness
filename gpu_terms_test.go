@@ -305,3 +305,48 @@ func TestStatusSaysTheTermAndWhyAnExpiredLeaseExpired(t *testing.T) {
 		t.Errorf("a lease inside its term:\n%s", got3)
 	}
 }
+
+// An expired lease is not sampled every heartbeat, and the holder says it ONCE: a wrapper that
+// printed (or ran nvidia-smi) on every 15 s tick of a lease that stays expired for a day would be
+// a notification loop in the session that wrapped it.
+func TestExpiredLeaseIsAskedAgainOnlyEveryRecheckInterval(t *testing.T) {
+	t.Setenv("CLAUDE_CODE_SESSION_ID", "")
+	t.Setenv("LOCAL_OFFLOAD_ORIGIN", "")
+	asked := termFixedUtil(t, false)
+	old := termRecheckEvery
+	termRecheckEvery = time.Hour
+	t.Cleanup(func() { termRecheckEvery = old })
+	_, m := leaseFixture(t)
+	pid := os.Getpid()
+	start, _ := gpulease.ProcessStart(pid)
+	l, err := m.TryAcquire(gpulease.ClassMedia, gpulease.Options{Reason: "x", TTL: 30 * time.Millisecond, Owner: gpulease.Owner{PID: pid, StartMs: start}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = l.Release() }()
+	time.Sleep(80 * time.Millisecond) // the term has ended
+
+	terms := newTermTicker(l)
+	out := captureStderr(t, func() {
+		for i := 0; i < 5; i++ {
+			terms.tick()
+		}
+	})
+	if *asked != 1 {
+		t.Fatalf("five ticks of an expired lease asked about its cards %d times, want once (the label is re-asked only every termRecheckEvery)", *asked)
+	}
+	if n := strings.Count(out, "not renewed"); n != 1 {
+		t.Fatalf("the holder must say once that the term ended unrenewed, said it %d times:\n%s", n, out)
+	}
+	if !m.Inspect().Expired {
+		t.Fatal("the lease should be labelled")
+	}
+
+	// Once the interval has passed, it asks again (an owner that came back, progress that resumed).
+	termRecheckEvery = 10 * time.Millisecond
+	time.Sleep(30 * time.Millisecond)
+	terms.tick()
+	if *asked != 2 {
+		t.Fatalf("after the recheck interval the lease must be asked again: asked %d", *asked)
+	}
+}

@@ -1042,8 +1042,9 @@ are DOING: a one-word `verdict` — `working` (a request or a registered agent r
 is running: seat idle, cards quiet — the holder is draining, queued, loading, or stalled), `loaded-idle`,
 `busy-outside` (no lease, cards busy with work the harness does not own), `stale-holder`, `free`, and for a held
 lease that is not healthy `held-stalled` (its progress file stopped moving), `held-orphaned` (its owner has been gone
-past `gpu_orphan_grace_min`), `held-overdue` (its declared window ended, its holder still renews) and `tree-orphan`
-(not produced yet) — see "Who asked for a lease" in docs/systems/gpu-lease.md — and an
+past `gpu_orphan_grace_min`), `held-overdue` (its declared window ended, its holder still heartbeats; a lease whose term was not renewed is labelled
+expired and says why) and `tree-orphan`
+(not produced yet) — see "Who asked for a lease" and "Terms" in docs/systems/gpu-lease.md — and an
 `activity` block with the seat's load state and in-flight count, every registered run (kind, pid, origin,
 goal excerpt, phase, step, tokens, age), a utilization/memory sample per card with the processes on them,
 and the holder's command (the wrapper form stamps its argv). Every agent loop registers itself in

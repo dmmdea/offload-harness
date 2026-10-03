@@ -473,6 +473,14 @@ still renews is the block's existing expiry-based `overdue` key (the routing cha
 time from the standing: one source for one wire key. They describe the lease and refuse nothing; a node one release behind
 omits them, which decodes to false. Ranking such a node behind a healthy one is the delegator's call.
 
+**Terms (plan P9).** The lease block also carries `expired`, absent unless true and read across every live lease (an
+expired sibling does not hide behind a healthy lower epoch): the holder's own tick found the lease's term ended and not
+renewable (its owner gone, or nothing running under it) and labelled it. An expired lease is still HELD: `busy` and
+`overdue` stay true beside it (the Busy rule is `remaining > threshold OR overdue`, unchanged), nothing is reclaimed or
+killed, and the key is a fact for the delegator and the operator, never a refusal. A lease that was renewed has a later
+`until` and no `expired`. A node one release behind omits the key, which decodes to false; the delegator does not read it
+yet.
+
 **`serving_config_spec_sha256`** / **`serving_config_state`** (0.123.0, ADR 0043) — the rendered llama-swap config's
 provenance. These are **new keys on this existing endpoint**: no new route, no new bind, and every pre-0.123.0
 delegator keeps decoding the payload unchanged. The spec hash is the config's identity (the sha256 of the closed

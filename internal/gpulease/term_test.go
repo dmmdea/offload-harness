@@ -47,13 +47,19 @@ func recordPath(m *Manager, l *Lease) string {
 	return m.metaPath()
 }
 
+// recordSum fingerprints the lease's record by its bytes AND its modification time: a rewrite
+// of identical bytes still replaces the file, and a tick that has nothing to say must not.
 func recordSum(t *testing.T, m *Manager, l *Lease) [32]byte {
 	t.Helper()
 	b, err := os.ReadFile(recordPath(m, l))
 	if err != nil {
 		t.Fatal(err)
 	}
-	return sha256.Sum256(b)
+	fi, err := os.Stat(recordPath(m, l))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sha256.Sum256(append(b, []byte(strconv.FormatInt(fi.ModTime().UnixNano(), 10))...))
 }
 
 // recordOfLease reads the lease's own record back from disk.
@@ -276,6 +282,7 @@ func TestTermEndWithLiveOwnerAndProgressExtendsOnce(t *testing.T) {
 			// Inside the term: nothing happens, nothing is written.
 			f.at(t, 30*time.Minute, true)
 			before := recordSum(t, f.m, f.l)
+			time.Sleep(20 * time.Millisecond) // so a rewrite always moves the modification time
 			if r, err := f.l.AdvanceTerm(TermSignals{UtilWorking: neverUtil(t)}); err != nil || r.Outcome != TermNotDue {
 				t.Fatalf("inside the term: %+v, %v", r, err)
 			}
@@ -351,6 +358,7 @@ func TestTermEndWithDeadOwnerSetsExpiredKeepsHeartbeat(t *testing.T) {
 			// A label is not a release: the heartbeat goes on, the holder's own fence still passes,
 			// and a second tick finds nothing new to write.
 			sum := recordSum(t, f.m, f.l)
+			time.Sleep(20 * time.Millisecond) // so a rewrite always moves the modification time
 			f.at(t, time.Hour+25*time.Second, false)
 			if err := f.l.Check(); err != nil {
 				t.Fatalf("an expired lease must still pass its holder's fence (or the job under it is killed): %v", err)
@@ -761,5 +769,23 @@ func TestOldReaderStillSeesAnExpiredWholeNodeLeaseAsHeld(t *testing.T) {
 	}
 	if _, err := legacyTryAcquire(t, f.m, ClassMedia); err == nil {
 		t.Fatal("an old writer must queue behind an expired lease that is still heartbeating")
+	}
+}
+
+// A holder that missed whole terms (a suspended machine, a descheduled wrapper) and wakes to a
+// healthy owner is renewed for a FRESH term from now, not for one term past an end that is
+// itself already in the past: a lease that was just renewed must not read overdue.
+func TestRenewalAfterAMissedTermStartsAFreshTerm(t *testing.T) {
+	f := newTermFixture(t, true, Options{TTL: time.Hour, MaxTotal: 10 * time.Hour})
+	f.at(t, 3*time.Hour+30*time.Minute, true) // the term ended at +1h; two more would have ended by now
+	r, err := f.l.AdvanceTerm(TermSignals{})
+	if err != nil || r.Outcome != TermExtended {
+		t.Fatalf("%+v, %v", r, err)
+	}
+	if want := f.now.Add(time.Hour); !r.End.Equal(want) {
+		t.Fatalf("renewed to %s, want a fresh term from now (%s)", r.End, want)
+	}
+	if st := f.m.StandingReadOnly(f.m.Inspect(), 0); st.Overdue {
+		t.Fatalf("a lease that was just renewed reads overdue: %+v", st)
 	}
 }

@@ -6,6 +6,36 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed — a lease has a term; a term ends in a renewal or a label, never a release; the detached holder stops releasing at `--for` (GPU routing P9)
+
+**The operator-visible change.** `gpu reserve --detach` used to hold the card until its `--for` deadline and then
+release it whether or not the work behind it had finished; on 2026-09-07 that freed a card under a running job. It no
+longer does. `--for` is now the lease's declared window and its first term, and when a term ends the holder's own tick
+(the wrapper form's 15 s heartbeat; the detached holder's renewal) does one of two things, never a release:
+
+- **renews it by one term** when its owner is alive and (its progress file is advancing or its cards are working), or
+  when it is unattended and its progress file is advancing, up to a maximum total from acquisition;
+- otherwise **labels it expired**, with the reason. An expired lease is still held and heartbeating, still passes its
+  holder's fence, reads `held-overdue` (no new verdict word) with a note that says why the term was not renewed, and is
+  open to a takeover (the command is a later change). It is **not reclaimable**: the reclaim rule is unchanged, nothing
+  is freed or killed, and the label clears itself if the term becomes renewable again.
+
+A request above the cap on a term is recorded, warned about on stderr, accepted whole and never shortened. The record
+gains `term_ms`, `requested_ms`, `max_total_ms`, `expired` and `expired_why` (all `omitempty`; an older reader ignores
+them). **`expired` is its own key and not a `State` value**, a deviation from the plan's wording: `state` is what
+`checkV2` and `render/gpu-lock.mjs` fence on, and every binary and Node copy built before this change fences out any
+state but `active`, so an `expired` state would stop a render running under an expired lease, which is the loss this
+change exists to prevent. The plan's umbrella `meta.json` was dropped in P2, so a renewal rewrites only the lease's own
+record.
+
+New config keys `gpu_max_term_min` (default 360) and `gpu_max_total_min` (default 2880), installed at config load. New
+flag `gpu reserve --detach --release-at-expiry` restores the old ending (refused without `--detach`). `/fleet/health`'s
+lease block gains `expired` (absent unless true; read across every live lease, with `busy` and `overdue` unchanged).
+`gpu status` prints the term and, for an expired lease, `term: EXPIRED ... ago and not renewed because ...`.
+
+Three existing holder tests ended by waiting for the old deadline exit; they now release the lease, which is what ends a
+holder. See [GPU lease](docs/systems/gpu-lease.md), "Terms", and ADR 0070.
+
 ## [0.161.0] - 2026-10-02 - GPU leases name their cards, free cards take queued work; agent audit trail, read floor and audit chain
 
 **The operator-visible change (GPU routing, milestone 1).** One job used to fence a whole box: a lease named no cards,
