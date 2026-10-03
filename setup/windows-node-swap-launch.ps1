@@ -43,6 +43,10 @@ param(
   [string]$RenderTarball = '',
   [string]$RenderDir = '',
   [string]$WaitIdleTimeout = '10m',
+  # Standalone node only: the GPU UUIDs this deploy touches, comma separated (node-swap --cards). A GPU
+  # lease on any other card is left alone and recorded; empty = the whole node, where any GPU lease
+  # holds the swap.
+  [string]$Cards = '',
   [string]$VerifyTimeout = '90s',
   [switch]$DryRun,
   [switch]$SkipHashCheck,
@@ -448,6 +452,7 @@ if ($RestartTask)     { $argList += @('-restart-task', $RestartTask) }
 if ($RestartCommand)  { $argList += @('-restart-command', $RestartCommand) }
 if ($RenderTarball)   { $argList += @('-render-tarball', $RenderTarball, '-render-dir', $RenderDir) }
 if ($WaitIdleTimeout) { $argList += @('-wait-idle-timeout', $WaitIdleTimeout) }
+if ($Cards)           { $argList += @('-cards', $Cards) }
 if ($VerifyTimeout)   { $argList += @('-verify-timeout', $VerifyTimeout) }
 if ($DryRun)          { $argList += '-dry-run' }
 if ($SkipHashCheck)   { $argList += '-skip-hash-check' }
