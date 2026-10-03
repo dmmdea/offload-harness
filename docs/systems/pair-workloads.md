@@ -293,6 +293,9 @@ answered. PAIR's own node-info service listens on loopback without a login and r
   with a 4xx (it is not a frame, so it opens no card); any HTTP answer, whatever its status, proves a
   listener. A box that has node-info but no ingress (a view-only node, or a PAIR whose worker has no
   ingress) therefore stays disabled instead of posting cards nobody receives.
+- **Known cost.** The probes run inside the identity reload, which holds the identity lock: on a box
+  where `:14318` is filtered (packets dropped, not refused) every identity reader waits the 1 s probe
+  timeouts once per 60 s. A refused connection, the common case, fails at once.
 - **Cached.** A successful node-info answer and a successful ingress probe are each trusted for 10 min,
   and the identity reload that asks is itself throttled to 60 s, so nothing is probed per call. A
   failed probe is retried on the 60 s reload. The first call on a cold process waits at most the two
@@ -308,9 +311,12 @@ answered. PAIR's own node-info service listens on loopback without a login and r
   "PAIR is not installed here", not "ask the default port": a test that points the app dir at a scratch
   directory can never reach a live PAIR. Name `pair_node_info_url` explicitly to use the fallback on
   such a box. An emitter built from a bare `pairworkloads.Config` (no `NodeInfoURL`) has no fallback.
-- **A clustered node.** node-info answers a clustered node's plaintext callers only when they are pinned
-  peers (`403` otherwise), so on a node that holds a cluster principal the fallback reads a refusal and
-  the emitter stays on its primary path; the fallback is for the node that cannot read PAIR's files.
+- **A clustered node still answers.** PAIR's broker spawns node-info with `--node-id` and deliberately
+  without `--cluster-dir` (fork `services/nvpair-ui-broker/broker.go`, `spawnNodeInfo`): it stays plain
+  HTTP on the fixed `:14318` even when the node is a cluster member, reports the broker's own resolved
+  UUID (the value in `node-id.json`), and gates callers only in the standalone `--cluster-dir` mode the
+  broker does not enable. So the fallback works on a cluster member; a node-info started by hand with
+  `--cluster-dir` would answer `403` and the emitter would stay disabled.
 
 ## Seat activity: traffic that bypasses the harness (0.133.0)
 

@@ -20,7 +20,7 @@ import (
 // node-id.json, so it asks PAIR's own loopback node-info for this node's UUID. Every server below is
 // an httptest listener; nothing here dials a live PAIR.
 
-const fbTestUUID = "8661676a-0d1c-4bd3-ac5e-4d370e6f1a9c"
+const fbTestUUID = "00000000-0000-4000-8000-00000000d5a1"
 
 const goodNodeInfo = `{"hostUuid":"` + fbTestUUID + `","clusterUuid":"","gpus":[]}`
 
@@ -205,7 +205,7 @@ func TestFallbackRejectsAnUnusableNodeInfoAnswer(t *testing.T) {
 		"no hostUuid":    {0, `{"clusterUuid":""}`},
 		"empty hostUuid": {0, `{"hostUuid":""}`},
 		"not a uuid":     {0, `{"hostUuid":"node-a"}`},
-		"short uuid":     {0, `{"hostUuid":"8661676a-0d1c-4bd3-ac5e-4d370e6f1a9"}`},
+		"short uuid":     {0, `{"hostUuid":"00000000-0000-4000-8000-00000000d5a"}`},
 		"braced uuid":    {0, `{"hostUuid":"{` + fbTestUUID + `}"}`},
 		"path in uuid":   {0, `{"hostUuid":"../` + fbTestUUID + `"}`},
 		"number":         {0, `{"hostUuid":12345}`},
