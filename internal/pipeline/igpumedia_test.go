@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -390,5 +391,277 @@ func TestNormalizeVideoFramesAndSizes(t *testing.T) {
 	}
 	if quantFromModelFile("/m/Wan-TI2V-5B-Q8_0.gguf") != "q8_0" || quantFromModelFile("/models-bf16/x.gguf") != "" || quantFromModelFile("a-BF16.gguf") != "bf16" {
 		t.Error("quantFromModelFile")
+	}
+}
+
+// ---- the safety core (A2/A3/A5): the token cap, extra-args screening and typed error classes
+
+// writeFailStub writes a node stub that behaves like a runner that failed: it prints msg to
+// stderr and exits 1, producing no output file.
+func writeFailStub(t *testing.T, dir, msg string) string {
+	t.Helper()
+	stub := filepath.Join(dir, "failstub.mjs")
+	body := "console.error(" + strconv.Quote(msg) + ");\nprocess.exit(1);\n"
+	if err := os.WriteFile(stub, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return stub
+}
+
+func animateCfg(t *testing.T, dir string) config.Config {
+	t.Helper()
+	cfg := config.Default()
+	cfg.MediaDir = dir
+	cfg.AnimateGenScript = ""
+	cfg.AnimateGenEngine = config.EngineSdcpp
+	cfg.AnimateGenSdcppScript = writeArgStub(t, dir)
+	cfg.AnimateGenSdcppBin, cfg.AnimateGenSdcppModel = "/opt/sdcpp/sd-cli", "/models/wan2.1_vace_1.3B_fp16.safetensors"
+	cfg.AnimateGenSdcppVAE, cfg.AnimateGenSdcppT5xxl = "/models/wan_2.1_vae.safetensors", "/models/umt5.gguf"
+	cfg.AnimateGenSdcppBackend = "vulkan0"
+	cfg.AnimateGenDepthBin, cfg.AnimateGenDepthModel = "/opt/depth/da3-cli", "/models/depth.gguf"
+	return cfg
+}
+
+func videoReq(dir string, params map[string]any) core.Request {
+	if params == nil {
+		params = map[string]any{}
+	}
+	if _, ok := params["out"]; !ok {
+		params["out"] = filepath.Join(dir, "v.mp4")
+	}
+	params["seed"] = 7
+	return core.Request{Task: core.TaskGenerateVideo, Input: "a calm sea", Params: params}
+}
+
+func animateReq(dir string, params map[string]any) core.Request {
+	if params == nil {
+		params = map[string]any{}
+	}
+	params["out"] = filepath.Join(dir, "a.mp4")
+	params["seed"] = 7
+	return core.Request{Task: core.TaskAnimateCharacter, Input: "a knight", Image: "ref.png", Video: "drive.mp4", Params: params}
+}
+
+func mustDeferWith(t *testing.T, res core.Result, class string, reasonHas ...string) {
+	t.Helper()
+	if res.OK || !res.Deferred {
+		t.Fatalf("want a typed defer, got ok=%v reason=%q", res.OK, res.Reason)
+	}
+	if res.Meta.ErrClass != class {
+		t.Errorf("ErrClass = %q, want %q (reason %q)", res.Meta.ErrClass, class, res.Reason)
+	}
+	for _, w := range reasonHas {
+		if !strings.Contains(res.Reason, w) {
+			t.Errorf("reason %q must contain %q", res.Reason, w)
+		}
+	}
+}
+
+func TestIGPUDefaultsMatchTheSharedTokenCapTable(t *testing.T) {
+	raw, err := os.ReadFile("../../render/testdata/token-cap-table.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tab struct {
+		Defaults struct{ Width, Height, Frames int } `json:"defaults"`
+	}
+	if err := json.Unmarshal(raw, &tab); err != nil {
+		t.Fatal(err)
+	}
+	if tab.Defaults.Width != defaultIGPUWidth || tab.Defaults.Height != defaultIGPUHeight || tab.Defaults.Frames != defaultIGPUFrames {
+		t.Errorf("the Go defaults %dx%dx%d drifted from the runners' (table: %+v)", defaultIGPUWidth, defaultIGPUHeight, defaultIGPUFrames, tab.Defaults)
+	}
+}
+
+func TestSdcppVideoTokenCapDefersBeforeTheRunnerWithTheComputedNumbers(t *testing.T) {
+	requireNodePipeline(t)
+	dir := t.TempDir()
+	cfg := sdcppVideoCfg(t, dir)
+	fb := cfg.VideoGenFamilies["fastwan"]
+	fb.SdcppVAEStride, fb.SdcppMaxTokens = 16, 5000
+	cfg.VideoGenFamilies["fastwan"] = fb
+	res := (&Pipeline{cfg: cfg}).Run(context.Background(), videoReq(dir, nil))
+	// the family renders 832x480x49 = 5070 tokens on a 16x VAE: over the cap of 5000
+	mustDeferWith(t, res, "token_cap_exceeded", "TOKEN_CAP_EXCEEDED", "needs 5070 latent tokens", "cap is 5000", "(sdcpp_max_tokens)", "up to 45 frames fit", "Not retried")
+	if _, err := os.Stat(filepath.Join(dir, "v.mp4")); err == nil {
+		t.Error("the runner ran although the request was over the cap")
+	}
+	// a request that fits (fewer frames) runs, and the runner gets the cap to check again
+	ok := (&Pipeline{cfg: cfg}).Run(context.Background(), videoReq(dir, map[string]any{"frames": 41}))
+	out, _, _ := decodeVideo(t, ok)
+	args := readArgs(t, out)
+	if igpuFlag(args, "max-tokens") != "5000" || igpuFlag(args, "vae-stride") != "16" {
+		t.Errorf("the runner must receive the cap: %v", args)
+	}
+}
+
+func TestSdcppVideoNoCapMeansNoCheckAndNoFlags(t *testing.T) {
+	requireNodePipeline(t)
+	dir := t.TempDir()
+	p := &Pipeline{cfg: sdcppVideoCfg(t, dir)}
+	out, _, _ := decodeVideo(t, p.Run(context.Background(), videoReq(dir, map[string]any{"width": 1920, "height": 1088, "frames": 121})))
+	args := readArgs(t, out)
+	if hasFlag(args, "max-tokens") || hasFlag(args, "vae-stride") {
+		t.Errorf("no cap configured: the runner must get no cap flags, got %v", args)
+	}
+}
+
+func TestSdcppAnimateTokenCapCountsTheReferenceFrame(t *testing.T) {
+	requireNodePipeline(t)
+	dir := t.TempDir()
+	cfg := animateCfg(t, dir)
+	cfg.AnimateGenSdcppVAEStride, cfg.AnimateGenSdcppMaxTokens = 8, 5760
+	p := &Pipeline{cfg: cfg}
+	// 480x832x33 + reference on an 8x VAE is 15600 tokens: the request that lost the device
+	res := p.Run(context.Background(), animateReq(dir, map[string]any{"width": 480, "height": 832, "frames": 33}))
+	mustDeferWith(t, res, "token_cap_exceeded", "needs 15600 latent tokens", "+ reference", "(animategen_sdcpp_max_tokens)")
+	if _, err := os.Stat(filepath.Join(dir, "a.mp4")); err == nil {
+		t.Error("the runner ran although the request was over the cap")
+	}
+	// 288x512x33 + reference is 5760 tokens: exactly at the cap
+	out, _, _ := decodeVideo(t, p.Run(context.Background(), animateReq(dir, map[string]any{"width": 288, "height": 512, "frames": 33})))
+	args := readArgs(t, out)
+	if igpuFlag(args, "max-tokens") != "5760" || igpuFlag(args, "vae-stride") != "8" {
+		t.Errorf("the runner must receive the cap: %v", args)
+	}
+	// no cap configured = no check
+	cfg.AnimateGenSdcppMaxTokens, cfg.AnimateGenSdcppVAEStride = 0, 0
+	out2, _, _ := decodeVideo(t, (&Pipeline{cfg: cfg}).Run(context.Background(), animateReq(dir, map[string]any{"width": 480, "height": 832, "frames": 33})))
+	if hasFlag(readArgs(t, out2), "max-tokens") {
+		t.Error("no cap configured: no cap flag")
+	}
+}
+
+// The Go formula and the runner's are one table: for every row a lane can express exactly (sizes a
+// multiple of 32, 4k+1 frames), a cap one under the row's tokens defers and a cap at it runs.
+func TestTokenCapAgreesWithTheSharedTableAtTheLaneLevel(t *testing.T) {
+	requireNodePipeline(t)
+	raw, err := os.ReadFile("../../render/testdata/token-cap-table.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tab struct {
+		Rows []struct {
+			Note                                       string
+			Width, Height, Frames, Stride, Ref, Tokens int
+		} `json:"rows"`
+	}
+	if err := json.Unmarshal(raw, &tab); err != nil {
+		t.Fatal(err)
+	}
+	checked := 0
+	for _, r := range tab.Rows {
+		if r.Width%32 != 0 || r.Height%32 != 0 || (r.Frames-1)%4 != 0 || r.Ref > 1 {
+			continue
+		}
+		dir := t.TempDir()
+		params := map[string]any{"width": r.Width, "height": r.Height, "frames": r.Frames}
+		run := func(capTokens int) core.Result {
+			if r.Ref == 1 {
+				cfg := animateCfg(t, dir)
+				cfg.AnimateGenSdcppVAEStride, cfg.AnimateGenSdcppMaxTokens = r.Stride, capTokens
+				return (&Pipeline{cfg: cfg}).Run(context.Background(), animateReq(dir, params))
+			}
+			cfg := sdcppVideoCfg(t, dir)
+			fb := cfg.VideoGenFamilies["fastwan"]
+			fb.SdcppVAEStride, fb.SdcppMaxTokens = r.Stride, capTokens
+			cfg.VideoGenFamilies["fastwan"] = fb
+			return (&Pipeline{cfg: cfg}).Run(context.Background(), videoReq(dir, params))
+		}
+		if res := run(r.Tokens); !res.OK {
+			t.Errorf("%s: a cap at the row's %d tokens must run, got %q", r.Note, r.Tokens, res.Reason)
+		}
+		if res := run(r.Tokens - 1); res.OK || res.Meta.ErrClass != "token_cap_exceeded" {
+			t.Errorf("%s: a cap one under %d tokens must defer token_cap_exceeded (ok=%v class=%q)", r.Note, r.Tokens, res.OK, res.Meta.ErrClass)
+		}
+		checked++
+	}
+	if checked < 4 {
+		t.Errorf("only %d table rows were expressible as lane requests", checked)
+	}
+}
+
+func TestIGPULanesRefuseExtraArgsThatChangeTheBackendBeforeTheRunner(t *testing.T) {
+	requireNodePipeline(t)
+	dir := t.TempDir()
+
+	cfgV := sdcppVideoCfg(t, dir)
+	fb := cfgV.VideoGenFamilies["fastwan"]
+	fb.SdcppExtraArgs = []string{"--vae-tiling", "--clip-on-cpu"}
+	cfgV.VideoGenFamilies["fastwan"] = fb
+
+	cfgA := animateCfg(t, dir)
+	cfgA.AnimateGenSdcppExtraArgs = []string{"--backend", "cpu"}
+
+	cfgD := animateCfg(t, dir)
+	cfgD.AnimateGenDepthExtraArgs = []string{"--vae-on-cpu"}
+
+	cfgU := audiocppCfg(t, dir)
+	cfgU.AudiocppExtraArgs = []string{"--device", "1"}
+
+	for name, c := range map[string]struct {
+		cfg  config.Config
+		req  core.Request
+		want string
+	}{
+		"video":   {cfgV, videoReq(dir, nil), "sdcpp_extra_args[1]"},
+		"animate": {cfgA, animateReq(dir, nil), "animategen_sdcpp_extra_args[0]"},
+		"depth":   {cfgD, animateReq(dir, nil), "animategen_depth_extra_args[0]"},
+		"voice":   {cfgU, core.Request{Task: core.TaskGenerateAudio, Input: "hola", Params: map[string]any{"kind": "voice", "out": filepath.Join(dir, "s.wav")}}, "audiocpp_extra_args[0]"},
+		"music":   {cfgU, core.Request{Task: core.TaskGenerateAudio, Input: "lofi", Params: map[string]any{"kind": "music", "out": filepath.Join(dir, "m.wav")}}, "audiocpp_extra_args[0]"},
+	} {
+		res := (&Pipeline{cfg: c.cfg}).Run(context.Background(), c.req)
+		mustDeferWith(t, res, "extra_args_refused", "EXTRA_ARGS_REFUSED", c.want)
+		for _, f := range []string{"v.mp4", "a.mp4", "s.wav", "m.wav"} {
+			if _, err := os.Stat(filepath.Join(dir, f)); err == nil {
+				t.Errorf("%s: the runner ran anyway (%s exists)", name, f)
+			}
+		}
+	}
+}
+
+// The runner's typed failures reach the ledger class through gpugen.ClassifyErr on EVERY lane
+// (the class a retry/footprint/routing decision keys on).
+func TestIGPULanesMapTheRunnersTypedFailuresToTheirErrClass(t *testing.T) {
+	requireNodePipeline(t)
+	cases := []struct{ name, msg, class string }{
+		{"cpu placement", "SDCPP VIDEO FAILED: CPU_PLACEMENT: the engine placed a model on the CPU (log line 8: t5 compute buffer size: 1.00 MB(RAM) on CPU)", "cpu_placement"},
+		{"no gpu evidence", "SDCPP VIDEO FAILED: CPU_PLACEMENT: no GPU evidence was seen in sd-cli's log", "cpu_placement"},
+		{"gpu reset", "SDCPP VIDEO FAILED: GPU_RESET: the GPU reset during the run (log line 303: ErrorDeviceLost). The amdgpu driver resets the compute ring when one GPU dispatch runs past its default 2 s lockup timeout; keep the request inside the configured token cap (sdcpp_max_tokens)", "gpu_reset"},
+		{"cpu backend", "SDCPP VIDEO FAILED: CPU_BACKEND_REFUSED: --backend \"cpu\"", "cpu_backend_refused"},
+		{"illegal instruction", "SDCPP VIDEO FAILED: ILLEGAL_INSTRUCTION: audiocpp_cli died with SIGILL (exit 132)", "illegal_instruction"},
+		{"runner token cap", "SDCPP VIDEO FAILED: TOKEN_CAP_EXCEEDED: 832x480x49 needs 5070 latent tokens", "token_cap_exceeded"},
+	}
+	for _, tc := range cases {
+		dir := t.TempDir()
+		fail := writeFailStub(t, dir, tc.msg)
+
+		cfgV := sdcppVideoCfg(t, dir)
+		cfgV.VideoGenSdcppScript = fail
+		cfgA := animateCfg(t, dir)
+		cfgA.AnimateGenSdcppScript = fail
+		cfgU := audiocppCfg(t, dir)
+		cfgU.AudiocppScript = fail
+		for lane, c := range map[string]struct {
+			cfg config.Config
+			req core.Request
+		}{
+			"video":   {cfgV, videoReq(dir, nil)},
+			"animate": {cfgA, animateReq(dir, nil)},
+			"voice":   {cfgU, core.Request{Task: core.TaskGenerateAudio, Input: "hola", Params: map[string]any{"kind": "voice", "out": filepath.Join(dir, "s.wav")}}},
+			"music":   {cfgU, core.Request{Task: core.TaskGenerateAudio, Input: "lofi", Params: map[string]any{"kind": "music", "out": filepath.Join(dir, "m.wav")}}},
+		} {
+			res := (&Pipeline{cfg: c.cfg}).Run(context.Background(), c.req)
+			if res.OK || !res.Deferred {
+				t.Errorf("%s/%s: want a defer, got ok=%v", tc.name, lane, res.OK)
+				continue
+			}
+			if res.Meta.ErrClass != tc.class {
+				t.Errorf("%s/%s: ErrClass = %q, want %q (reason %q)", tc.name, lane, res.Meta.ErrClass, tc.class, res.Reason)
+			}
+			if !strings.Contains(res.Reason, strings.SplitN(tc.msg, ": ", 3)[1]) {
+				t.Errorf("%s/%s: the runner's typed text must reach the defer reason, got %q", tc.name, lane, res.Reason)
+			}
+		}
 	}
 }

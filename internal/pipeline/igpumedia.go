@@ -29,6 +29,15 @@ import (
 
 const (
 	errClassCPUBackendRefused = "cpu_backend_refused"
+	errClassExtraArgsRefused  = "extra_args_refused"
+	errClassTokenCapExceeded  = "token_cap_exceeded"
+
+	// What the runners render when the caller names no size or length (render/sdcpp-video.mjs
+	// and sdcpp-animate.mjs DEFAULT_*): the token cap is computed on what the runner will
+	// actually render. render/testdata/token-cap-table.json pins the Go and Node sides together.
+	defaultIGPUFrames = 49
+	defaultIGPUWidth  = 832
+	defaultIGPUHeight = 480
 
 	defaultSdcppVideoScript   = "render/sdcpp-video.mjs"
 	defaultSdcppAnimateScript = "render/sdcpp-animate.mjs"
@@ -51,8 +60,23 @@ func (p *Pipeline) igpuEnv() []string {
 
 // deferCPUBackend is the typed defer for a CPU or unset backend.
 func (p *Pipeline) deferCPUBackend(req core.Request, meta core.Meta, start time.Time, what string, err error) core.Result {
-	meta.ErrClass = errClassCPUBackendRefused
+	return p.deferRefused(req, meta, start, errClassCPUBackendRefused, what, err)
+}
+
+// deferRefused is the typed, non-retryable defer for a request an iGPU lane refuses before it
+// takes the media lease or spawns anything: err_class names why (cpu_backend_refused,
+// extra_args_refused, token_cap_exceeded).
+func (p *Pipeline) deferRefused(req core.Request, meta core.Meta, start time.Time, class, what string, err error) core.Result {
+	meta.ErrClass = class
 	return p.deferGen(req, meta, start, len(req.Input), what+" refused: "+err.Error())
+}
+
+// orDefault is n when it is set, else the runner's own default.
+func orDefault(n, def int) int {
+	if n > 0 {
+		return n
+	}
+	return def
 }
 
 // resolveIGPUScript resolves a configured runner (relative to the executable dir like every
@@ -166,6 +190,9 @@ func (p *Pipeline) runIGPU(ctx context.Context, req core.Request, meta *core.Met
 		Out:           r.out,
 		Timeout:       r.timeout,
 		SkipFreeComfy: true,
+		// the engine is a native binary under the runner: signal the runner's whole group so a
+		// cancel or timeout reaches it (and its temp dirs) instead of killing node alone
+		OwnProcessGroup: true,
 	}
 	p.footprintSampling(r.fpFamily, r.fpQuant, r.fpTask).ApplyTo(&spec)
 	outPath, gerr := gpugen.Generate(ctx, spec)
@@ -203,6 +230,9 @@ func (p *Pipeline) runGenerateVideoSdcpp(ctx context.Context, req core.Request, 
 	}
 	if err := config.CPUBackendRefusal(fb.SdcppBackend); err != nil {
 		return p.deferCPUBackend(req, meta, start, "video generation", err)
+	}
+	if err := config.ExtraArgsRefusal("sdcpp_extra_args", config.ExtraArgsSdcpp, fb.SdcppExtraArgs); err != nil {
+		return p.deferRefused(req, meta, start, errClassExtraArgsRefused, "video generation", err)
 	}
 	for _, m := range []struct{ key, v string }{{"sdcpp_bin", fb.SdcppBin}, {"sdcpp_model", fb.SdcppModel}, {"sdcpp_vae", fb.SdcppVAE}, {"sdcpp_t5xxl", fb.SdcppT5xxl}} {
 		if strings.TrimSpace(m.v) == "" {
@@ -259,6 +289,17 @@ func (p *Pipeline) runGenerateVideoSdcpp(ctx context.Context, req core.Request, 
 	}
 	if v := floorTo32(pick("height", fb.Height)); v > 0 {
 		args = append(args, "--height", strconv.Itoa(v))
+	}
+	// The token cap keeps one GPU dispatch inside the amdgpu 2 s lockup timeout. It is
+	// computed here, on what the runner will render, BEFORE the media lease is taken; the
+	// runner computes it again from the same flags. No cap configured = no check.
+	if fb.SdcppMaxTokens > 0 {
+		if err := config.TokenCapRefusal("sdcpp_max_tokens", orDefault(floorTo32(pick("width", fb.Width)), defaultIGPUWidth),
+			orDefault(floorTo32(pick("height", fb.Height)), defaultIGPUHeight),
+			orDefault(normalizeVideoFrames(pick("frames", fb.Frames)), defaultIGPUFrames), fb.SdcppVAEStride, 0, fb.SdcppMaxTokens); err != nil {
+			return p.deferRefused(req, meta, start, errClassTokenCapExceeded, "video generation", err)
+		}
+		args = append(args, "--max-tokens", strconv.Itoa(fb.SdcppMaxTokens), "--vae-stride", strconv.Itoa(fb.SdcppVAEStride))
 	}
 	if fb.FPS > 0 {
 		args = append(args, "--fps", strconv.Itoa(fb.FPS))
@@ -322,6 +363,12 @@ func (p *Pipeline) runAnimateCharacterSdcpp(ctx context.Context, req core.Reques
 	if err := config.CPUBackendRefusal(cfg.AnimateGenSdcppBackend); err != nil {
 		return p.deferCPUBackend(req, meta, start, "character animation", err)
 	}
+	if err := config.ExtraArgsRefusal("animategen_sdcpp_extra_args", config.ExtraArgsSdcpp, cfg.AnimateGenSdcppExtraArgs); err != nil {
+		return p.deferRefused(req, meta, start, errClassExtraArgsRefused, "character animation", err)
+	}
+	if err := config.ExtraArgsRefusal("animategen_depth_extra_args", config.ExtraArgsDepth, cfg.AnimateGenDepthExtraArgs); err != nil {
+		return p.deferRefused(req, meta, start, errClassExtraArgsRefused, "character animation", err)
+	}
 	for _, m := range []struct{ key, v string }{
 		{"animategen_sdcpp_bin", cfg.AnimateGenSdcppBin}, {"animategen_sdcpp_model", cfg.AnimateGenSdcppModel},
 		{"animategen_sdcpp_vae", cfg.AnimateGenSdcppVAE}, {"animategen_sdcpp_t5xxl", cfg.AnimateGenSdcppT5xxl},
@@ -371,6 +418,16 @@ func (p *Pipeline) runAnimateCharacterSdcpp(ctx context.Context, req core.Reques
 	}
 	if v := floorTo32(pick("height", cfg.AnimateGenHeight)); v > 0 {
 		args = append(args, "--height", strconv.Itoa(v))
+	}
+	// The VACE reference image occupies one latent frame on top of the clip's (see the video
+	// lane's note on the token cap).
+	if cfg.AnimateGenSdcppMaxTokens > 0 {
+		if err := config.TokenCapRefusal("animategen_sdcpp_max_tokens", orDefault(floorTo32(pick("width", cfg.AnimateGenWidth)), defaultIGPUWidth),
+			orDefault(floorTo32(pick("height", cfg.AnimateGenHeight)), defaultIGPUHeight),
+			orDefault(normalizeVideoFrames(pick("frames", 0)), defaultIGPUFrames), cfg.AnimateGenSdcppVAEStride, 1, cfg.AnimateGenSdcppMaxTokens); err != nil {
+			return p.deferRefused(req, meta, start, errClassTokenCapExceeded, "character animation", err)
+		}
+		args = append(args, "--max-tokens", strconv.Itoa(cfg.AnimateGenSdcppMaxTokens), "--vae-stride", strconv.Itoa(cfg.AnimateGenSdcppVAEStride))
 	}
 	if v := pick("steps", cfg.AnimateGenSteps); v > 0 {
 		args = append(args, "--steps", strconv.Itoa(v))
@@ -434,6 +491,9 @@ func (p *Pipeline) runGenerateAudioAudiocpp(ctx context.Context, req core.Reques
 	}
 	if err := config.CPUBackendRefusal(cfg.AudiocppBackend); err != nil {
 		return p.deferCPUBackend(req, meta, start, "audio generation", err)
+	}
+	if err := config.ExtraArgsRefusal("audiocpp_extra_args", config.ExtraArgsAudiocpp, cfg.AudiocppExtraArgs); err != nil {
+		return p.deferRefused(req, meta, start, errClassExtraArgsRefused, "audio generation", err)
 	}
 	engineKey := map[string]string{"voice": "voicegen_engine", "music": "musicgen_engine"}[kind]
 	if strings.TrimSpace(cfg.AudiocppBin) == "" {
