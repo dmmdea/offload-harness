@@ -231,6 +231,8 @@ type Server struct {
 	// one-predicate discipline: health lists "stt-upload" and publishes stt_hq and
 	// stt_upload_max_mb exactly when POST /fleet/stt will admit.
 	sttUploadLane bool
+	// relayLimiter is the PAIR card relay's per-asker and global token bucket (pair_relay.go).
+	relayLimiter *pairworkloads.RelayLimiter
 	// sttGate is the node's stt concurrency cap (fleet_stt_max_concurrent), shared by the legacy
 	// path-taking lane and the upload door, pushed and pulled jobs alike (enterSTT).
 	sttGate *sttGate
@@ -478,6 +480,7 @@ func New(runner Runner, jobs *Jobs, opts Options) *Server {
 		visionLane:         VisionLaneAdmissible(opts.Cfg, opts.LoopbackListener),
 		textLane:           TextLaneAdmissible(opts.Cfg, opts.LoopbackListener),
 		sttUploadLane:      STTUploadAdmissible(opts.Cfg, opts.LoopbackListener),
+		relayLimiter:       pairworkloads.DefaultRelayLimiter(),
 		sttGate:            newSTTGate(opts.Cfg.EffectiveSTTMaxConcurrent()),
 		sttUploadSlots:     make(chan struct{}, sttUploadInFlightMax),
 		chatLane:           ChatLaneAdmissible(opts.Cfg, opts.LoopbackListener),
@@ -935,6 +938,10 @@ func (s *Server) Handler() http.Handler {
 	// can have this node transcribe. Its own route for the body cap and the longer delivery window;
 	// the bearer is checked before the body is read, then the same admit path as every job.
 	mux.HandleFunc("POST "+STTUploadPath, s.handleSTTUpload)
+	// The PAIR card relay (D26): one workload frame from a box with no PAIR identity, posted as a
+	// card from this node's own emitter. Token-gated, advertised in health (pair_relay) only when it
+	// admits, and rate limited per asker.
+	mux.HandleFunc("POST "+pairworkloads.RelayPath, s.handlePairRelay)
 	// The project-bundle door (ADR 0071): a whole HyperFrames project from a holder of
 	// the fleet token. Its own route for the body cap; the door and the bearer are
 	// checked before the body is read, then the same admit path as every job.
@@ -1370,6 +1377,10 @@ type healthPayload struct {
 	// has the door but no hq model) and an older node's absence stays distinguishable.
 	STTHQ          *bool `json:"stt_hq,omitempty"`
 	STTUploadMaxMB int   `json:"stt_upload_max_mb,omitempty"`
+	// PairRelay (D26) says this node serves POST /fleet/pair-relay: a box with no PAIR identity of
+	// its own can have its cards posted from here. Published exactly when the door would admit
+	// (PairRelayAdmissible); omitted otherwise, so a node without it is byte-identical to before.
+	PairRelay bool `json:"pair_relay,omitempty"`
 	// ChatLane says POST /fleet/chat will admit here (C-41b), published under
 	// the same one-predicate rule as vision_model. It is what a delegator's
 	// cascade lane reads to tell a FLEET NODE base from a plain llama-swap
@@ -1571,6 +1582,9 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.textLane {
 		payload.TextTasks = append([]string(nil), s.opts.Cfg.TextTasks...)
+	}
+	if s.pairRelayOpen() {
+		payload.PairRelay = true
 	}
 	if s.sttUploadLane {
 		hq := s.opts.Cfg.STTModelHQ != ""
