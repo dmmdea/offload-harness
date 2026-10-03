@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/dmmdea/offload-harness/internal/gpuprobe"
 )
 
 // GPU is one card as nvidia-smi reports it at the moment of the sample.
@@ -138,5 +140,26 @@ func ParseProcesses(out string) []GPUProcess {
 // and an unknown reading is not work. devices are lease ids (lower-case GPU uuids). It is the
 // reading a holder's tick gives the term check (gpulease.TermSignals.UtilWorking).
 func UtilWorking(gpus []GPU, devices []string) bool {
+	devs := make([]gpuprobe.Device, 0, len(gpus))
+	for _, g := range gpus {
+		devs = append(devs, gpuprobe.Device{UUID: g.UUID, DisplayActive: g.DisplayActive})
+	}
+	display := gpuprobe.DisplayCardUUIDs(devs)
+	var mine map[string]bool
+	if len(devices) > 0 {
+		mine = map[string]bool{}
+		for _, d := range devices {
+			mine[strings.ToLower(strings.TrimSpace(d))] = true
+		}
+	}
+	for _, g := range gpus {
+		if !g.UtilKnown || g.UtilPct < utilBusyPct || display[g.UUID] {
+			continue
+		}
+		if mine != nil && !mine[strings.ToLower(g.UUID)] {
+			continue
+		}
+		return true
+	}
 	return false
 }

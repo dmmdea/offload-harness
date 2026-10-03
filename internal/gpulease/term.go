@@ -34,6 +34,7 @@ package gpulease
 
 import (
 	"fmt"
+	"strings"
 	"sync/atomic"
 	"time"
 )
@@ -106,15 +107,113 @@ type TermPlan struct {
 
 // PlanTerm is what a lease asking for window comes to. hasProgress says the lease carries a
 // progress contract (24 h is then the least cap). maxTerm and maxTotal override the installed
-// limits; zero means the installed value.
+// limits; zero means the installed value. The window is never changed: a request above a limit
+// is recorded and warned about, and the caller gets the sentence to print.
 func PlanTerm(window time.Duration, hasProgress bool, maxTerm, maxTotal time.Duration) TermPlan {
-	return TermPlan{}
+	if window <= 0 {
+		window = DefaultTTL
+	}
+	if maxTerm <= 0 {
+		maxTerm = MaxTerm()
+	}
+	if maxTotal <= 0 {
+		maxTotal = MaxTotal()
+	}
+	limit := maxTerm
+	if hasProgress && limit < MaxProgressTerm {
+		limit = MaxProgressTerm
+	}
+	p := TermPlan{Window: window, Term: window, Cap: limit, MaxTotal: maxTotal}
+	var notes []string
+	if window > limit {
+		p.Term, p.Requested = limit, window
+		which := "gpu_max_term_min"
+		if hasProgress && maxTerm < MaxProgressTerm {
+			which += "; " + MaxProgressTerm.String() + " with a progress contract"
+		}
+		notes = append(notes, fmt.Sprintf("the requested window %s is above the %s cap on a term (%s): it is accepted whole and never shortened, and it renews in terms of %s, only while its owner is alive and the job is progressing, up to %s from now; a term that is not renewed is labelled expired, never released",
+			window, limit, which, limit, maxTotal))
+	}
+	if maxTotal < window {
+		p.MaxTotal = window
+		notes = append(notes, fmt.Sprintf("the requested window %s is above the %s maximum total (gpu_max_total_min): it is accepted whole and never shortened, and never renewed past its end",
+			window, maxTotal))
+	}
+	p.Warning = strings.Join(notes, "; and ")
+	return p
+}
+
+// stampTerm writes the plan for the window being declared onto a new record.
+func (m *Manager) stampTerm(meta *Meta, opts Options, window time.Duration) {
+	p := PlanTerm(window, opts.ProgressFile != "", opts.MaxTerm, opts.MaxTotal)
+	meta.TermMs = p.Term.Milliseconds()
+	meta.RequestedMs = p.Requested.Milliseconds()
+	meta.MaxTotalMs = p.MaxTotal.Milliseconds()
 }
 
 // hardEndOf is the instant after which the record is no longer renewed; zero when it carries
 // no maximum total.
 func hardEndOf(meta *Meta) time.Time {
-	return time.Time{}
+	if meta.MaxTotalMs <= 0 || meta.AcquiredAtMs <= 0 {
+		return time.Time{}
+	}
+	return time.UnixMilli(meta.AcquiredAtMs + meta.MaxTotalMs)
+}
+
+// totalMs is how long after acquisition the record may be renewed: its own stamp, else the
+// installed limit, and never less than the window it already declared (a request is never
+// judged past its end).
+func totalMs(rec *Meta) int64 {
+	if rec.MaxTotalMs > 0 {
+		return rec.MaxTotalMs
+	}
+	total := MaxTotal().Milliseconds()
+	if w := rec.ExpiresAtMs - rec.AcquiredAtMs; w > total {
+		total = w
+	}
+	return total
+}
+
+// termMs is how far one renewal moves the end: the record's own term, else its declared window
+// under the installed cap (a record written before terms was one term of its window).
+func termMs(rec *Meta) int64 {
+	if rec.TermMs > 0 {
+		return rec.TermMs
+	}
+	limit := MaxTerm().Milliseconds()
+	if w := rec.ExpiresAtMs - rec.AcquiredAtMs; w > 0 && w < limit {
+		return w
+	}
+	return limit
+}
+
+// nextEnd is the declared end after one renewal: one term past the old end (so terms run back
+// to back), or one term from now when the holder missed a whole term (a suspended machine),
+// clipped to the hard end. ok is false when the hard end leaves nothing to renew.
+func nextEnd(rec *Meta, now time.Time) (end int64, ok bool) {
+	hard := rec.AcquiredAtMs + totalMs(rec)
+	cur := rec.ExpiresAtMs
+	if cur >= hard {
+		return 0, false
+	}
+	nowMs := now.UnixMilli()
+	end = cur + termMs(rec)
+	if end <= nowMs {
+		end = nowMs + termMs(rec)
+	}
+	if end > hard {
+		end = hard
+	}
+	if end <= nowMs {
+		return 0, false
+	}
+	return end, true
+}
+
+// termDue reports whether the record's declared window has ended. A record that declares no
+// end has no term to end.
+func termDue(rec *Meta, now time.Time) bool {
+	return rec.ExpiresAtMs > 0 && now.UnixMilli() > rec.ExpiresAtMs
 }
 
 // TermOutcome says what one tick of the term check did.
@@ -155,7 +254,61 @@ type TermResult struct {
 // by restamping the lease's own record) only when something changed, so a holder may call it
 // every tick.
 func (m *Manager) AdvanceTerm(epoch uint64, sig TermSignals) (TermResult, error) {
-	return TermResult{Outcome: TermNotDue}, nil
+	rec, err := m.recordOf(epoch)
+	if err != nil {
+		return TermResult{}, err
+	}
+	now := m.now()
+	if !termDue(rec, now) {
+		return notDue(rec), nil
+	}
+
+	// The term has ended. Read what vouches for the lease BEFORE the lock (a registry read, a
+	// stat and perhaps a nvidia-smi sample are not for holding the epoch lock across); the lock
+	// then re-checks the record and applies the answer, so two ticks of one term end cannot
+	// renew it twice.
+	info := infoFrom(rec, now)
+	owner, _ := m.ownerStateWhy(info.Owner)
+	prog := m.progressOf(info, now)
+	renewable, why := termRenewable(rec, owner, prog, sig.UtilWorking)
+
+	// Already labelled, and for the same reason: nothing to write.
+	if !renewable && rec.Expired && rec.ExpiredWhy == why {
+		return TermResult{Outcome: TermStillExpired, PrevEnd: endOf(rec), End: endOf(rec), Why: why}, nil
+	}
+
+	var res TermResult
+	err = m.Restamp(epoch, func(cur *Meta) {
+		if !termDue(cur, now) { // another tick renewed it between our read and the lock
+			res = notDue(cur)
+			return
+		}
+		prev := endOf(cur)
+		reason := why
+		if renewable {
+			if end, ok := nextEnd(cur, now); ok {
+				// A record written before terms is pinned to its terms the first time it is
+				// renewed, so its hard end cannot slide forward with every renewal.
+				cur.TermMs, cur.MaxTotalMs = termMs(cur), totalMs(cur)
+				cur.ExpiresAtMs = end
+				cur.Expired, cur.ExpiredWhy = false, ""
+				res = TermResult{Outcome: TermExtended, PrevEnd: prev, End: endOf(cur), Why: why}
+				return
+			}
+			reason = fmt.Sprintf("it reached its maximum total of %s from acquisition (gpu_max_total_min): however healthy its owner and its progress look, it is no longer renewed",
+				time.Duration(totalMs(cur))*time.Millisecond)
+		}
+		outcome := TermExpired
+		if cur.Expired && cur.ExpiredWhy == reason {
+			outcome = TermStillExpired
+		}
+		cur.Expired, cur.ExpiredWhy = true, reason
+		res = TermResult{Outcome: outcome, PrevEnd: prev, End: endOf(cur), Why: reason}
+	})
+	if err != nil {
+		return TermResult{}, err
+	}
+	return res, nil
 }
 
 // AdvanceTerm is Manager.AdvanceTerm for the lease's own holder.
@@ -164,4 +317,73 @@ func (l *Lease) AdvanceTerm(sig TermSignals) (TermResult, error) {
 		return TermResult{}, fmt.Errorf("gpulease: lease already released")
 	}
 	return l.mgr.AdvanceTerm(l.epoch, sig)
+}
+
+func endOf(rec *Meta) time.Time {
+	if rec.ExpiresAtMs <= 0 {
+		return time.Time{}
+	}
+	return time.UnixMilli(rec.ExpiresAtMs)
+}
+
+func notDue(rec *Meta) TermResult {
+	return TermResult{Outcome: TermNotDue, PrevEnd: endOf(rec), End: endOf(rec)}
+}
+
+// recordOf reads the record of one live lease by epoch: its own e/<epoch>.json, else the
+// whole-node meta.json when that is its epoch.
+func (m *Manager) recordOf(epoch uint64) (*Meta, error) {
+	if rec, err := readEpochRecord(m.leaseDir(), epoch); err == nil {
+		return rec, nil
+	}
+	meta, err := m.readMeta()
+	if err != nil || meta == nil {
+		return nil, fmt.Errorf("gpulease: the lease is gone (epoch %d)", epoch)
+	}
+	if meta.Epoch != epoch {
+		return nil, fmt.Errorf("gpulease: epoch %d is not a lease held here (the whole-node record is epoch %d)", epoch, meta.Epoch)
+	}
+	return meta, nil
+}
+
+// termRenewable is the rule. An unattended lease is vouched for by its progress file alone: no
+// one is expected at the desk, so neither an owner nor a busy card says anything. An attended
+// one needs its owner alive AND something moving: its progress file advancing or, the weaker
+// evidence the plan allows, its cards working. A gone or unknown owner is never rescued by a
+// busy card: a card in use proves a process, not that anyone wants the result.
+func termRenewable(rec *Meta, owner OwnerState, prog ProgressView, util func() bool) (bool, string) {
+	advancing := prog.Declared && prog.State == ProgressAdvancing
+	if rec.Unattended || owner == OwnerRemote {
+		if advancing {
+			return true, "it is unattended and its progress file is advancing"
+		}
+		return false, "it is unattended and its progress contract is not advancing (" + progressSummary(prog) + ")"
+	}
+	switch owner {
+	case OwnerAlive:
+		if advancing {
+			return true, "its owner is alive and its progress file is advancing"
+		}
+		if util != nil && util() {
+			return true, "its owner is alive and its cards are working"
+		}
+		return false, "its owner is still there but neither its progress file nor its cards show work"
+	case OwnerGone:
+		return false, "its owner is gone"
+	}
+	return false, "no owner is recorded as present for it (its owner cannot be told), so nothing vouches for it"
+}
+
+// progressSummary is the clause behind a progress contract that is not advancing.
+func progressSummary(p ProgressView) string {
+	switch {
+	case !p.Declared:
+		return "it declares none"
+	case p.State == ProgressStalled:
+		return fmt.Sprintf("no activity for %s, past its %s stall window", p.Age.Round(time.Second), p.Stall)
+	}
+	if p.Problem != "" {
+		return "its progress file " + p.Problem
+	}
+	return "its progress file cannot be read"
 }

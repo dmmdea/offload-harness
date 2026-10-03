@@ -1496,6 +1496,7 @@ func (m *Manager) record(epoch uint64, class Class, opts Options) ([]byte, error
 		WrapperVersion: strings.TrimSpace(opts.WrapperVersion),
 	}
 	m.stampOwnership(&meta, opts)
+	m.stampTerm(&meta, opts, ttl)
 	if !m.legacyWriter {
 		meta.Format = RecordFormat
 	}

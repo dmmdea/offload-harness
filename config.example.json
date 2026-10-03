@@ -210,6 +210,8 @@
   "gpu_comfy_order": "",
   "gpu_host_ram_headroom_gib": 0,
   "gpu_orphan_grace_min": 0,
+  "gpu_max_term_min": 0,
+  "gpu_max_total_min": 0,
   "foreign_gpu_min_mib": 0,
   "home": "",
   "state_dir": "",

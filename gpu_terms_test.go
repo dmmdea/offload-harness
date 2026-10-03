@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dmmdea/offload-harness/internal/gpuactivity"
 	"github.com/dmmdea/offload-harness/internal/gpulease"
 )
 
@@ -265,5 +266,42 @@ func TestDetachedHolderIsToldToReleaseAtExpiryOnlyWhenAsked(t *testing.T) {
 	args := detachHoldArgs(fs, "media", time.Hour, 0, opts, nil, "")
 	if !strings.Contains(strings.Join(args, " "), "--release-at-expiry") || args[0] != "gpu" || args[1] != "hold" {
 		t.Errorf("asked, passed to `gpu hold`: %v", args)
+	}
+}
+
+// releaseAll releases every live lease the way an operator's `gpu release --epoch N` does: a
+// hidden holder notices its lease gone and exits. Holders no longer release at their deadline
+// (plan P9), so a test that wants one to end releases it.
+func releaseAll(t *testing.T, m *gpulease.Manager) {
+	t.Helper()
+	for _, l := range m.Leases() {
+		if _, err := m.ReleaseByEpoch(l.Epoch); err != nil {
+			t.Fatalf("release epoch %d: %v", l.Epoch, err)
+		}
+	}
+}
+
+// `gpu status` says what a lease's term is, and for an expired one why it was not renewed.
+func TestStatusSaysTheTermAndWhyAnExpiredLeaseExpired(t *testing.T) {
+	hardEnd := time.Now().Add(30 * time.Hour).UTC().Format(time.RFC3339)
+	h := &gpuactivity.Holder{Epoch: 41, OwnerState: "gone", Overdue: true, OverdueBySec: 3 * 3600,
+		Expired: true, ExpiredWhy: "its owner is gone", TermSec: 6 * 3600, RequestedSec: 20 * 3600, HardEnd: hardEnd}
+	got := strings.Join(ownershipStatusLines(h, gpulease.Info{Epochs: []uint64{41}}), "\n")
+	for _, want := range []string{"EXPIRED 3h0m0s ago", "its owner is gone", "nothing is reclaimed or killed", "6h0m0s terms", "asked for 20h0m0s", "accepted whole"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("status lacks %q:\n%s", want, got)
+		}
+	}
+	// A lease that is overdue but was never labelled keeps today's line and claims no expiry.
+	h2 := &gpuactivity.Holder{Epoch: 41, OwnerState: "unknown", Overdue: true, OverdueBySec: 600}
+	got2 := strings.Join(ownershipStatusLines(h2, gpulease.Info{Epochs: []uint64{41}}), "\n")
+	if !strings.Contains(got2, "window: past its declared end by 10m0s") || strings.Contains(got2, "EXPIRED") || strings.Contains(got2, "term:") {
+		t.Errorf("an unlabelled, term-less lease prints no term line:\n%s", got2)
+	}
+	// Inside its term a lease says what renews it, and nothing about expiry.
+	h3 := &gpuactivity.Holder{Epoch: 41, OwnerState: "alive", TermSec: 3600, HardEnd: hardEnd}
+	got3 := strings.Join(ownershipStatusLines(h3, gpulease.Info{Epochs: []uint64{41}}), "\n")
+	if !strings.Contains(got3, "term: renews in 1h0m0s terms") || strings.Contains(got3, "EXPIRED") || strings.Contains(got3, "asked for") {
+		t.Errorf("a lease inside its term:\n%s", got3)
 	}
 }

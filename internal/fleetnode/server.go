@@ -1778,6 +1778,13 @@ func busyLeaseThreshold(cfgSec int) (time.Duration, bool) {
 
 func leaseHealthOf(info gpulease.Info, now time.Time, cfgSec int) *LeaseHealth {
 	h := &LeaseHealth{Held: true, Class: string(info.Class), PID: info.PID, Reason: info.Reason, Until: info.ExpiresAt.UTC().Format(time.RFC3339)}
+	// Expired is read off EVERY live lease, not only the lowest epoch's: an expired sibling must
+	// not hide behind a healthy lower epoch (card-scoped leases hold several at once).
+	for _, l := range info.Each() {
+		if l.Expired {
+			h.Expired = true
+		}
+	}
 	// No declared end: nothing to be overdue against. The Unix-epoch test covers a
 	// caller that builds an Info from a raw record (time.UnixMilli(0) is 1970, and
 	// IsZero() is false for it); gpulease's own reader leaves the zero Time.
