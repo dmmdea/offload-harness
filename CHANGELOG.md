@@ -6,6 +6,621 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.161.0] - 2026-10-02 - GPU leases name their cards, free cards take queued work; agent audit trail, read floor and audit chain
+
+**The operator-visible change (GPU routing, milestone 1).** One job used to fence a whole box: a lease named no cards,
+so a render on one card of a three-card node held every card, queued every seat load and every other session, and a
+lease whose owner had gone read as a green "working" for as long as its wrapper lived. This release makes the lease
+card-scoped and owned:
+
+- A lease can name its cards (`gpu reserve --devices`, `--cards N`, the allocator), and every consumer that used to
+  read "a lease exists" now reads "a lease sits on THIS seat's cards": the text-load gate, placement, the agent-lane
+  fallback, drain, unload, the render lane and the per-card run cap. Free cards keep taking work.
+- `gpu status`, `gpu cards` and `offload_status` show a per-card table; the delegator ranks nodes on free cards and
+  ranks an overdue lease last.
+- A lease records its owner and a progress contract; a lease whose attended owner is gone reads `held-orphaned`, one
+  whose progress stopped reads `held-stalled`, one past its window `held-overdue`. These are reported, never acted on.
+- ComfyUI can run one instance per card (port, output and temp directory, ownership marker per card, pinned by GPU
+  uuid); nothing launches them yet (plan P13b).
+- **Off by default.** Card-scoped writing is behind `gpu_card_scoped_leases` and inferring the cards of a lease an
+  older binary wrote is behind `gpu_legacy_scope_inference`; both stay off on a host until `gpu doctor --write-audit`
+  is green there (plan P6). With both off, a whole-node lease fences what it always fenced and unloads no seat.
+- **Always on, by design** (with both switches off): the ownership verdicts (`held-orphaned`, `held-stalled`,
+  `held-overdue`, `tree-orphan`) and the `orphan.<epoch>` marker the first observer writes; fleet health publishes
+  `overdue` (and reads an overdue held lease as busy) plus `orphaned` and `stalled`, and the delegator ranks such a node
+  last (a 0.160.0 delegator, which decodes `busy`, excludes a node whose overdue lease is non-text); the per-card run cap
+  counts every seat's runs on a single-card seat's card on a box with layers; a placement reason names a lease holding the
+  home seat's cards; a wrapped command sees `GPU_LEASE_DEVICES` (empty for a whole-node lease).
+
+Also in this release: the broker decision audit trail on every agent door (`audit_all_doors`), a read floor for secret
+material on every agent read tool (`agent_read_floor`), a per-run hash chain over the audit trail with `agent-audit
+verify` (`audit_chain`), `agent_run` sizing its wall before it starts (D-102, partial), and Windows nodes keeping the
+harness's data off the OS drive (C-92).
+
+### Added — a hash chain over each agent run's audit rows, and `agent-audit verify` (register SF-08)
+
+- `audit_chain` (default `false`): every row a run writes on the broker audit trail carries `run_id`, `seq` and
+  `prev_sha256` (the SHA-256 of the run's previous row exactly as written), and a run that recorded anything closes
+  with one `run_end` row carrying its row count and head (a run with no decision writes nothing; a second close
+  writes nothing). One chain per run; concurrent runs interleave in the file and keep valid chains (eight
+  concurrent writers, and eight callers sharing one trail, verified). Off, the rows keep today's shape byte for
+  byte.
+- `local-offload agent-audit verify [--file PATH] [--json] [--strict]` checks every chained run and exits 1 naming
+  the run and the seq where a chain breaks inside a run, with the cause (a row edited; or removed, reordered or
+  inserted). A run with no `run_end` is reported OPEN (a crash, or a cut tail, which the chain alone cannot tell
+  apart) and `--strict` fails it; chained rows after a `run_end` are reported LATE (a tool that kept running after
+  its run closed), not broken.
+- What it cannot see, by design of an unkeyed per-run chain: a whole run removed, edits to a `run_end`'s other
+  fields, and an edit re-chained from that row onward. An off-node witness of run heads (S-08) closes that and is
+  not built.
+- Every door closes its run: `agent_run`, `agent_delegate`, fleet contracts, the local-agent CLI (single, two-tier
+  and queue runs before any exit; a `--serve` process is one run for its lifetime, closed when serving ends).
+- Tests: a clean chain; edit, delete, reorder and last-row edit each named by run, seq and cause; an edited
+  `run_end`; a failed write that does not advance the chain; eight concurrent writers and one shared trail; an
+  empty run and a second close writing nothing; a late row; a cut tail reported open and failed by `--strict`;
+  the off shape (no chain field); Build and the contract door chaining and closing a run; the verify verb.
+
+### Added — a read floor for secret material on every agent tool that reads files (register SF-07)
+
+The rule table gated writes, deletes, fetches and browse, but reads went through `os.Root` confinement alone: any
+agent run could read `.env`, private keys or credential files inside its worktree and hand them to the model.
+
+- One read gate, shared by every tool that reads file content: `read_file`, `summarize_file`, `search_files`,
+  `edit_file` (its old-content match would otherwise answer whether a guess is in a secret file) and
+  `github_upload_file` (it sends the file off the box).
+- The built-in floor: `.env*` (except `.env.example`, `.env.sample`), `*.pem`, `*.key`, `*.p12`, `*.pfx`, `id_rsa*`,
+  `id_ed25519*`, `id_ecdsa*`, `id_dsa*`, `.npmrc`, `.netrc`, `.pypirc`, `.git-credentials`, `.claude.json`, and
+  everything under a `.ssh`, `.aws`, `.gnupg`, `.kube` or `.env` directory, folded like the write floor. Each
+  path is checked as given and resolved, so a symlink to a secret and a Windows 8.3 short name (`ENV~1.PRO`,
+  `SSH~1`) are caught; under `enforce` a `~N` segment is refused outright too.
+- `agent_read_floor`: `warn` (the default) lets the read through unchanged and records a `warn` row and a log line,
+  and refuses a read an ENFORCING trail cannot record; `enforce` refuses (the broker's not-performed convention)
+  and records a `deny` row; `off` checks nothing. Under `enforce`, `search_files` never opens a floored file and
+  says nothing about what it skipped, so a pattern cannot probe a secret's content. `--rules off` turns the floor
+  off with the rest of the table, and the build says so; read rules loaded under `warn` are flagged as recorded,
+  not refused. An unknown value refuses the config load. Every door passes the key: `agent_run`,
+  `agent_delegate`, fleet contracts and the local-agent CLI.
+- Not covered, and said so: the run/shell cage (allowlisted interpreters can read any file they reach), hard
+  links, and the media tools that read an absolute image path. Tool sets built outside Build (the read-only
+  replay agent) check nothing.
+- Fixed with it: `search_files` on the ripgrep backend skipped dotfiles while the Go walk searched them; both now
+  search dotfiles (`rg --hidden`, `.git` excluded).
+- Tests: the floor's hits and misses, each mode per tool, the search oracle (a matching and a non-matching probe
+  give identical output), a search rooted in or above a credential directory, an 8.3 short name under enforce and
+  under warn (Windows), a symlink to a secret (where links can be made), the strict trail, the build notes, the
+  contract and MCP doors, and the config set; 23 mutants, each killed.
+
+### Added — the broker decision audit trail on every agent door, behind `audit_all_doors` (register SF-02)
+
+The agent doors attached the broker audit trail only when a run asked for browse, so a write-door contract
+(`agent_delegate`, fleet contracts) decided allow and deny on its writes with no record, and the trail had been an
+empty file for weeks. The new key `audit_all_doors` closes that, default off. Rows come only from brokered actions
+(write, delete, fetch, shell, run, browse): a read-only run attaches the trail and leaves no row.
+
+- `off` (the default, also an unset key): unchanged, a trail only when browse asks for one; zero new rows.
+- `warn`: every agent door attaches the trail and writes every decision; a failed write is reported once on the log
+  and never turns an allow into a deny (the doors keep their failure modes).
+- `enforce`: a failed write denies the action, as a browse run's trail always has, and the denial names the key and
+  the way out; a door whose trail cannot resolve defers by class `config`, naming the key and the way out. It adds a
+  failure mode, so it is the operator's call after a clean window under `warn`.
+- A browse run keeps its enforcing trail in every mode. An unknown value refuses the config load, naming the key,
+  and a one-shot verb that runs on past the load error gets a refusing door instead of a door with no trail.
+- The local-agent CLI keeps its own `--audit` behaviour and does not read the key.
+- Tests: config validation and resolution, advisory versus enforcing write failures (warned once), the door plan
+  per mode, a browse build never made advisory, a writing contract leaving rows under warn and enforce and none
+  under off, enforce with no home deferring before any seat call, a broken trail per mode at the contract door
+  (warn keeps the diff, enforce denies the write with the key named), the MCP `agent_run` handler refusing a
+  mistyped or unresolvable enforce, and the MCP door following the config. Mutants listed in the PR.
+### Fixed — `agent_run` sizes its wall before it starts and refuses one that cannot hold any answer (register D-102, PARTIAL)
+
+`agent_run` runs its loop under a context deadline (the delegation door's walls became expectations in 0.131.0, ADR 0055;
+this door never adopted the liveness monitor) and computed no sizing, so a 420 s wall against an estimate of 928 s
+(`min_turn_sec` 807 s) ran ten steps and died at the seat's deadline (2026-09-15).
+
+- **Sizing, before anything touches the seat.** `Pipeline.SizeRun` prices the call from the seat's remembered rate (the
+  rate store, else `agent_seat_tok_s` for the box's own agent seat only) with the delegation door's own arithmetic. It reads
+  one local file and dials nothing, so it runs ahead of the fence check, the cordon, the warm-up and every probe.
+- **A rate is never lent to another seat.** `agent_seat_tok_s` is the planner seat's rate. A model the caller names, or the
+  seat composite placement picks, that is not the box's agent seat is sized from its own seat-rates entry or not at all: no
+  rate means no floor, no refusal and no published estimate (`wall_note` says there is no sample). Before this a named model
+  was priced at the agent seat's rate, so a wall the named model could hold was refused with that model in the refusal.
+  The delegation door's node is NOT changed: `SeatPolicyFor` still applies `agent_seat_tok_s` to any seat the node runs (a
+  placed or overridden one) that the store has no entry for, so the node and this door still price such a seat differently.
+  Register C-56 plans a node-side refusal on `est.Below`; it must stop lending the rate first, or it refuses a wall at the
+  wrong seat's rate.
+- **The refusal.** A wall that cannot hold even one tool step and a 64-token final at the seat's rate (`seatrate.MinViableSec`)
+  is refused before step 1: `deferred: true`, `defer_class: budget`, `steps: 0`, zero requests to the seat, and a reason with the
+  wall given (`timeout_sec`, or the box default `agent_timeout_sec`), the floor it needs, the run's estimate and `min_turn_sec`,
+  and the `timeout_sec` that fits. The floor is one tool step plus the final whatever `max_steps` says, so a smaller step
+  budget never clears the refusal and the reason does not offer one. A seat with no rate has no floor and is never refused.
+- **The published numbers.** Every local `agent_run` call that gets past argument validation and seat placement carries `wall_estimate_sec`,
+  `min_turn_sec` and `wall_note` under the delegation wire's names, answered or deferred: the wall refusal, every deferral after
+  the gate (the served-roster check, the GPU fence, the cordon, the seat cap, both coherence deferrals, the window probe, the
+  profile) and a run that dies at its wall all say what the wall was weighed against, which is what a caller re-placing a
+  capacity defer needs. One closure (`deferSized`) stamps them, and a source guard fails when a deferral builds its own
+  result. A call refused before a seat is chosen (an empty goal, bad `setup_actions`, a bad `read_root`, the browse options, or
+  a composite placement guard refusing the seat: there is no seat to size) and a call sent through `route` (the node sizes that
+  contract, where the wall is an expectation) carry none.
+- **Deviation from the row, and why.** The row asks for the refusal when `timeout_sec < min_turn_sec`. That figure is a cold
+  load plus the configured max final, and the INV-5 rider (ADR 0050, recorded two days after the row) forbids refusing on it:
+  it would shut out every measured-working tier whose wall sits under its worst case (a 900 s wall on a 7 tok/s 27B seat).
+  The floor is therefore the rider's minimum viable final, the same one the delegator applies to a remote placement
+  (`feasibleFinal`); `TestMinViableSecMatchesTheDelegatorsFeasibilityFloor` fails when the two drift. A wall between the floor
+  and the estimate runs, with `wall_note` naming the gap.
+- **What this does NOT cure — D-102 stays PARTIAL.** The row's own case is still admitted: a 420 s wall against a
+  `min_turn_sec` of 807 s and an estimate of 928 s is above the floor (about 45 s at 5 tok/s, 13 s at 30 tok/s, and the
+  floor only exceeds 420 s below roughly 0.46 tok/s), so it runs and can still die at the hard deadline; the refusal fires
+  only on walls below the floor, which no default wall is. What the change adds for that case is the diagnosis, in
+  `wall_estimate_sec` / `min_turn_sec` / `wall_note`. The cure for a hard-deadline door is either to install the
+  final-budget fit (D-95: the final answer's token budget is fitted to the wall that is left, as the node's loop does) so a
+  short wall becomes usable,
+  or an operator decision to accept a literal `min_turn_sec` refusal and amend the INV-5 rider; this door does neither yet
+  (register D-134 carries the cure).
+- **Tool description and docs.** The `agent_run` description and its `timeout_sec` field now state the default chain, that the
+  wall is a hard deadline here, that slow seats defer on short walls, and the refusal; OPERATOR-GUIDE (the timeout chain),
+  `docs/systems/mcp-server.md` and the README row carry the same.
+### Fixed — Windows nodes no longer keep the harness's data on the OS drive (register C-92)
+
+Operator rule: C: holds Windows and program installs, never data. With no `home` key the harness keeps its cache, ledger,
+media and svg output, delegation log, pipeline jobs, footprints and the coding agent's audit trail under the user profile,
+which on Windows is the OS drive. `install.sh` has always written `home` from `install volumes`; `install.ps1` never did, the
+config template spelled sixteen data paths as `~/.local-offload/...`, and `doctor` said nothing.
+
+- **The default is decided once, by the installer, and recorded.** `install.ps1` Step 8 writes `home` into a fresh
+  `config.json` from `local-offload install volumes --data` (the same most-free-space, never-the-OS-drive rule `install.sh`
+  uses, plus the data-volume rule below), through the pure `Get-DataHome`. `OFFLOAD_DATA_HOME` names another directory; `OFFLOAD_ALLOW_OS_DATA=1` is the explicit,
+  recorded decision to keep the data on the OS drive. With neither and no qualifying volume the install FAILS at Step 8 and
+  names both, never a silent fallback to C:. The choice and its reason go into `installed.json` (`data_home`,
+  `data_home_because`). The runtime default does not change: a default that depended on the mounted volumes would re-point
+  every existing node at an empty tree on upgrade, which is moving live data silently. An existing `config.json` is never
+  rewritten and an explicit `home` is kept as written; the installer prints a NOTE when an existing config names none.
+- **`doctor` FAILs it.** A new `data volume` section (before the health probe, so a down serving layer cannot hide it) lists
+  every data location that resolves onto the OS drive while a data volume qualifies to hold it (see the data-volume rule below), prints the install root once
+  with the paths that follow it folded in, and gives the way off. A box with no other qualifying volume gets one note and no
+  FAIL; a non-Windows host prints nothing. `state_dir` and `gpu_lock_path` (the machine-wide lease root) are not data and are
+  never listed. New packages: `internal/datahome` (the audit and the copy), `internal/volumes` gains `DriveOf`, `OnDrive`,
+  `DriveRootOf` and `OSDriveRoot`.
+- **`local-offload data status` and `data migrate`.** `status` is the audit as a table or `--json`; it exits 1 exactly when
+  doctor would FAIL. `migrate [--from DIR] [--to DIR] [--apply] [--stopped]` is the way off C:: a COPY (never a move, never a
+  junction, the source tree is not touched), a dry run until `--apply`, to a fixed directory on the volume the install-volume
+  rule picks when `--to` is not given, and never onto the OS drive. The bbolt stores (`*.db`) are held back until `--stopped`
+  says fleet-serve and the MCP doors are stopped. Every file goes to a temp name, is verified by re-reading it, takes the
+  source's mtime and only then replaces the destination; a file that changes under the reader is retried and then reported;
+  a destination newer than its source is kept, so re-running after the switch cannot clobber live data; links are reported
+  and not followed; `config.json` is not carried. An apply that held back or could not read anything exits non-zero, and the
+  output ends with the exact `home` line to set.
+- **The template follows `home`.** `setup/templates/config.json` no longer spells its sixteen `~/.local-offload/...` data
+  paths. A path written in the file is an explicit value that `home` does not rebase; the literals only equalled the defaults,
+  so they rebased by luck and stopped doing so when `$LOCAL_OFFLOAD_HOME` was set. The defaults supply the same values.
+- **The coding agent's files follow `home`.** `local-agent`'s audit trail, ask queue and traces, and the browse grant's audit
+  path (`agent.DefaultAuditPath`, now taking the install root), were pinned to `~/.local-offload`; they hang off the install
+  root now (`agent.StateFile`), with the old location as the fallback when no root is known. **Behaviour change on nodes
+  that already set `home`** (every `install.sh` node): the trail, the ask queue and the traces start new files under `home`
+  and the old ones stay under `~/.local-offload`. Nothing moves or merges them, and `data migrate --from <home>` cannot carry
+  them because they sit outside that tree. `local-agent` (for a default path, not for `--audit`, `--ask-queue` or
+  `--traces`) and the browse audit path of `agent_run` / `agent_delegate` now write one note to stderr per process, naming
+  both paths, when the old file or directory exists; merge it into the new one by hand if you want one history, then delete it
+  to silence the note. A node with no `home` is unchanged.
+- **The data-volume rule: never a cloud-synced virtual drive or a FAT volume.** The FAIL text, the default `data migrate`
+  target and the install-time `home` all took the install-volume rule's most-free-space answer, and a sync client's virtual
+  drive (Google Drive for desktop reports FAT32, is neither removable nor a network share, and shows a cloud quota's free
+  space) can outrank every real disk. `volumes.PickData` is `Pick` over the volumes `DataVolumeReason` allows: it skips a
+  label or mount-path segment naming a sync client (the names the GPU lease already refuses as a state directory, kept in step
+  by a test that reads that source) and any FAT-family filesystem, records what it passed over in the choice's reason, and
+  names those volumes when nothing is left. `datahome.DataTarget` is the one filter doctor, `data status` and `data migrate`
+  share. `install volumes --data` applies it (marks the rows it will not use, puts `"data_target": true` in the JSON), and
+  `install.ps1` always passes it through `Get-DataVolumeArgs` while `Get-DataHome` refuses a choice without the marker.
+  Without `--data` the answer is unchanged (`install.sh`, model placement). `Pick` itself is untouched.
+- **Two defects found in review, fixed.** `DriveOf` and `DriveRootOf` stripped a long-path prefix spelled with one backslash
+  per side; Windows writes two before the question mark or the dot, so a config path or `--to` written
+  with a real verbatim or device prefix was not seen as being on the OS drive, and the tests passed because their fixtures
+  carried the same mistake (the UNC fixtures too). `data migrate` ran the OS-drive guard on the typed `--to`, which `DriveOf`
+  reads as drive-less when it is relative or rooted without a letter, so `--to relhome` from a directory on the OS drive was
+  accepted and, with `--apply`, copied onto it; `--from` and `--to` are now resolved to absolute paths before any check, and
+  the `home` line the verb prints is absolute.
+- **Out of scope, still open:** the ComfyUI `input`/`output` folders under the ComfyUI install (media-lane feedback item 4),
+  and the stack directory `$OFFLOAD_HOME` (default under the user profile), which `install volumes` does not yet place on
+  Windows.
+- **Proof.** 71 new Go tests and 35 new PowerShell assertions (`internal/volumes`, `internal/datahome`, the root package,
+  `internal/agent`, `internal/mcpserver`, `internal/pipeline`, `cmd/local-agent`, `setup/tests/install-config-seed.test.ps1`).
+  The drive helpers, the audit, the copy, the doctor section, the template test and the `StateFile` tests were written
+  before the code and failed by assertion on the pre-change tree: the template test lists the sixteen pinned paths and, with
+  `LOCAL_OFFLOAD_HOME` set, the media, cache and ledger landing on the user profile. The `data` verb tests and the three
+  wiring tests for the browse audit path and the agent's files were written after the code; they fail on the base tree too
+  (they call functions that are not there or lint for call sites that are not there). 61 mutants of the guarded lines
+  (exact-count replacement, restored by bytes and sha256, compile errors re-run as compile-safe mutants) were each killed by a
+  test except one that is equivalent (a guard `OnDrive` already makes redundant); two survivors at first, a same-size rewrite
+  the copy did not recopy and an unpinned `OFFLOAD_ALLOW_OS_DATA` line, each drove a test. An existing pipeline test caught
+  the one regression: with no user home `config.DefaultBase()` answers a bare `.local-offload`, so `StateFile` treats a
+  relative root as no root and the browse grant is still refused.
+  A second pass fixed what review found (22 of the 71 tests, 11 of the 35 assertions). Each fix has a test that failed by
+  assertion before it: the long-path cases against the one-backslash code (the fixtures are now built from the backslash code
+  point and pinned byte by byte), the relative and rooted `--to` against the unresolved guard (through a seam on any platform
+  and through the real working directory on Windows), a Google Drive FAT32 volume with the most free space against `Pick` in
+  the audit, `data migrate`, `install volumes --data` and the PowerShell gate (run against the pre-fix `install.ps1`), and the
+  split-trail note against a stub (that one, unlike the others, did not fail against the pre-fix code). 41 more mutants of
+  the new lines (exact-count replacement, restored by bytes and sha256) were each killed by a test in the end: 38 died on the
+  first run, one of those by a nil-writer panic rather than an assertion and one by a compile error that was re-run
+  compile-safe; three survived at first (a qualifier with no space before it, the error when the cloud drive is the only
+  volume, an unresolved `--from`) and each drove a case. A first red run of the relative-target test copied a fixture
+  tree to a drive root and into the package directory; the guard tests now run from a scratch directory and only plan a
+  rooted target, so a mutant cannot write outside it.
+- **Docs.** `docs/systems/setup-installer.md`, `docs/OPERATOR-GUIDE.md`, `docs/systems/coding-agent.md`, `setup/SETUP-AGENT.md`
+  and `README.md`; the four places that still gave the audit trail's location as fixed (`README.md`, `CLAUDE.md`,
+  `docs/OPERATOR-GUIDE.md`, `docs/systems/browse-lane.md`) and a dated amendment each to ADR 0004 and ADR 0060.
+### Added — per-card ComfyUI instances, render layer (plan P13a; nothing sets them yet)
+
+- **A keyed ComfyUI instance, one per card.** `COMFY_INSTANCE` (an explicit key) or `COMFY_CARD_UUID` (the card it is
+  bound to) names an instance that owns its port (`--api` / `COMFY_API`, else `COMFY_PORT_BASE` plus
+  `COMFY_INSTANCE_INDEX`), its own folder `<comfy dir>/instances/<key>` (`output` for `--output-directory`, and the
+  `--temp-directory` value whose `/temp` ComfyUI appends itself, so it can never sit under the default instance's
+  `temp`, which that instance wipes on every start), its launch marker (`.offload-launch-<key>.json`, with the owner pid
+  and the lease epoch from `GPU_LEASE_EPOCH`) and its console log (`offload-comfyui-<key>.log`). The port is bind-checked
+  before launch on the addresses ComfyUI will listen on (127.0.0.1 unless its `--listen` says otherwise, not the host the
+  api spells): a port held by something that is not ComfyUI is refused (`COMFY-PORT-TAKEN`) and the holder is never killed.
+- **Card pin by uuid.** A card-bound instance gets `CUDA_VISIBLE_DEVICES=<uuid>` in its child env and no `--cuda-device`
+  (that flag counts in CUDA's fastest-first order, not the driver's, so an index lands on the wrong card). A device index
+  with any instance key, explicit or card-derived, is refused (`COMFY-INSTANCE-CONFLICT`); an explicit key with no card is
+  allowed but logs that nothing pins it. A running instance is reused only on proof that it is that instance: a keyed
+  marker (this key and port, live pid, the exact argv, the instance's own `--port` and `--output-directory`) and, for a
+  card, the uuid it was launched on. A ComfyUI the harness did not launch (another key's, another launcher's, a foreign
+  one) is refused (`COMFY-PROFILE-MISMATCH`) and never stopped; one the harness launched on the wrong card is stopped and
+  relaunched only when its spawner is gone.
+- **Runners and Go.** Every render runner resolves its endpoint through the instance. For a keyed instance `withGpuSlot`
+  launches, frees and log-tails that instance (the launch and the post-run `/free` ignored `--api` before); an unkeyed
+  instance still launches through the environment's endpoint and its post-run `/free` follows `--api`. `run-graph` starts
+  and frees its own ComfyUI the same way (`instanceDeps`, tested by behaviour), and a bad instance env is a typed
+  `RUN_ERROR` defer, not an untyped exit 1. Runners stage their inputs under names unique across processes
+  (`render/comfy-input.mjs`: clock, pid, random suffix, sequence), since concurrent instances share one input directory.
+  `imagegen.ComfyLaunch` gains `API` and `CardUUID`, `gpugen.Spec` gains `CardUUID`; both reach the runner env and the
+  `/free` goes to the instance that ran.
+- **Unchanged by default.** With no instance env the default instance's argv, marker, log, spawn env and calls are the same
+  as before (pinned by tests). Docs: `docs/systems/media-generation.md` (per-card instances). The admission, per-card slot
+  and waiting-place token that give a caller a card to ask for are the next phase (P13b).
+### Fixed — review of the per-card consumers (plan P4 and P5, register C-86)
+
+The legacy-lease inference and the seat yield did more than the plan asked and less than they promised. What changed, all
+test-first, with the reads that write and the reads that can unload stated exactly.
+
+- **Inference reads only what an older binary wrote, and only when the host asks.** Every record this binary writes now carries
+  `Meta.Format` (`gpulease.RecordFormat`; `Info.Legacy` is the reading), and a whole-node record that carries it is the whole
+  node by its writer's word: an explicit `gpu reserve --whole-node`, a reserve on a host with the writer flag off and the
+  pipeline's own media lease were being narrowed by a `--cuda-device` in their command line or tree, which contradicted "a
+  whole-node lease fences what it always fenced". The inference is also **off by default**: new `gpu_legacy_scope_inference`
+  (`config.example.json`) turns it on per host, and `gpu status` names the key while it is off. The read-only capture of a real
+  legacy tree (plan P4 step 1) is still owed, so nothing narrows a lease on a guess before it.
+- **The sticky sidecar is shared state and is merged.** `seen.<epoch>` is read, unioned and written under the epoch lock, never
+  overwritten from a snapshot taken before the evidence was gathered, so a slow reader can no longer shrink a wider set; the
+  ledger line is written once, by the process that changed the set on disk; concurrent first readers share one gathering; no
+  sidecar is written for a lease that has ended; `seen.<epoch>` left behind by an older binary's release is swept by the next
+  acquirer (whole-node or device grant), which is why the old "removed when the lease is released" held only for this binary.
+- **Evidence is not trusted past what it proves.** One command line naming a card that cannot be placed keeps the lease
+  whole-node whatever else resolves (and no marker or sample may narrow it either); a record with no holder pid is never walked
+  (pid 0 is the system process); a wrapper root that started after the lease is a recycled pid and its tree is not read; an
+  unreadable process table is named in the reason, and an unwritable sidecar or ledger is warned and reported (`not sticky
+  across processes`), not folded into "inferred".
+- **Reads write no scope state, and nothing a read does unloads a model.** The inspectors (`gpu status`, `gpu cards`,
+  `offload_status`, the activity snapshot, `CardsHeld`, `delegate.LocalLease`) report the scope from the same evidence and
+  write no `seen.<epoch>` sidecar, no scope-ledger line and make no call to llama-swap. (One write remains on these read
+  paths by design, from lease ownership (P8, ADR 0070): the first reader that sees a lease's owner gone writes the
+  `orphan.<epoch>` marker that starts the orphan grace clock; it records an observation and never changes a lease.) (`modelaffinity.PeekLease`, `ScopeInfo`); only the load gate's own reader
+  (`InspectLease`) remembers what it sees. The widening sweep (`yieldOnScope`) is **removed**: it unloaded seats on a plain
+  status read and on scope *establishment* (the plan says only widening), and it was armed with the config's llama-swap
+  endpoint even for a config aimed at another box. A seat the scope has spread onto now yields on its own release, which is the
+  plan's seat race rule; an idle resident seat waits for its idle ttl. The seat-yield endpoint is no longer armed from config at
+  all (`SetYieldProtect` keeps only the memory stack).
+- **The vision pre-check is scoped.** `gpulock.WaitFreeScoped`: the pipeline waits, and defers `gpu_busy`, only for a lease on
+  the vision seat's cards. Before, the delegator's auto route ran a call locally because the lease did not touch the vision seat
+  and the pipeline then waited `vision_gpu_wait_sec` (90 s) on any live lease and deferred it, a call the fleet used to serve.
+- **`device-trespass` says "possible".** Card-scoped leases make text seats on the free cards legal, and the registry knows only
+  two doors' runs, so the note no longer states that the holder strayed; it names what it cannot rule out.
+- **Failures are said.** A seat whose state cannot be read on a held card, a card table, a roster or a lease epoch that the
+  scoped drain/unload cannot read (it falls back to the whole node), and a sidecar or ledger that cannot be written each print
+  one line instead of falling back silently.
+- **Known narrower than the plan.** The seat race rule re-checks after residency only for an `Admit`-gated batch's release and the
+  delegation door's warm-up, not for loads through `AwaitUpstream` or `AwaitModelRoute`; an idle seat on a card a scope just
+  spread onto is not swept. Both are listed in the gpu-lease Known gaps.
+
+### Added — drain, unload and the render lane clear the leased cards, not the node; per-card run cap; `device-trespass` (register C-86, plan P5)
+
+Draining one card no longer empties the others. A whole-node lease reads exactly as before.
+
+- **`--drain` and `--unload-seat` take the cards the lease holds.** `maintainSeatScoped` (the old entry points keep their
+  signatures) receives the lease's card ids from the wrapper and from the detached holder's maintain step. The configured agent
+  seat is drained and unloaded only when it is on the leased cards; the other resident models on the leased cards, and the ones
+  nobody declared a pin for, are unloaded; the rest are left resident and named; the memory stack is never unloaded; the
+  total `GET /unload` fallback is refused while a model that must stay is resident. A pin that cannot be placed, or a card table
+  that cannot be read, reads as "on the leased cards" (today's behaviour).
+- **The drain waits only for runs on the leased cards.** `gpuactivity.Run` gains `Devices` (the pins of the seat it runs on, set
+  by the delegation door and the `agent_run` door); a scoped drain waits for registered runs whose pins intersect the lease,
+  by seat name for a record that predates the field, and skips the agent seat's own gauge when that seat is on other cards.
+- **The render lane unloads the list the wrapper hands it.** `gpu reserve` exports `GPU_LEASE_UNLOAD_MODELS` to a command it
+  wraps under a card lease (the roster minus the memory stack minus the seats pinned to other cards). `render/gpu-lock.mjs`
+  `freeLlamaSwap` unloads that list (new `parseUnloadModels`: unset or empty is today's rule, `-` is none) instead of every
+  model off the memory stack; the stack never leaves whatever the list names, and the total-unload fallback is refused while a
+  model outside the list is resident. A whole-node lease or an unreadable roster exports nothing.
+- **A single-card seat's run-cap line is its card's.** `gpuactivity.Registry.OnSeatPinned` counts the runs on the card whatever
+  seat they run on, in the node's gate and in `delegate.localRunCapRoom`; a seat that spans cards keeps the per-seat line.
+- **`device-trespass`.** The activity view (`gpu status`, `offload_status.gpu_lease`) flags a card outside a bounded lease's cards
+  that is busy with nothing the harness knows of to explain it (not the display card, not a card another lease holds, not a card
+  a registered run is pinned to, nothing while the seat itself is busy); `device_trespass` in the JSON, `possible device-trespass:`
+  in the note, no new verdict word. With a bounded lease `held-working` now means its own cards are busy.
+- **Not in this change.** The pipeline's own media lease is whole-node until plan P13, so it exports no unload list; fleet health
+  per card is P7; nvidia-smi utilisation on Windows includes the desktop on every card but the display card, and the trespass
+  flag inherits that.
+
+### Added — consumers read a seat's cards, not the node: text gate, busy formula, agent-lane fallback, legacy-lease scope, seat yield (register C-86, plan P4)
+
+A lease on one card no longer fences the seats on the others. Until a host turns card-scoped leases on (plan P6) the leases on
+it are whole-node ones and fence what they always fenced, with one exception: a legacy lease (one an older binary wrote) on a
+host that has set `gpu_legacy_scope_inference` (off by default), whose cards the evidence rule below can name. Nothing narrows on a guess: a model nobody declared a pin for, a pin the card table cannot place, an
+unreadable card table, a whole-node lease and a long-context contract all read as every card, as before.
+
+- **The load gate asks about the seat's cards.** `config.ModelPins` reads a model's device pins from the layers (a seat's
+  model, a router seat's twins, the cascade rungs of the router seat that declares no model); `config.Load` arms them with
+  `gpu_comfy_order`, `comfy_dir` and the memory stack. `gpulease.Info` gains `EffectiveDevices`, `Touches` and `For`, and
+  `gpulease.ResolvePins` turns pins into lease ids; `Admit`, `AwaitRunSlot`, `AwaitUpstream` and `AwaitModelRoute` wait only
+  for a lease on the seat's cards. The card table is read only when a held lease names cards, memoised for 2 s.
+  `delegate.Fenced`, `ForeignFence`, `Reserved` and `modelaffinity.BlocksNewRun` keep their signatures; `...For` forms and
+  `modelaffinity.ScopeToPins` are the narrowed questions. The delegation door, the `agent_run` door and the review lane's local
+  loop pre-check the same narrowed lease the cordon reads.
+- **The delegator is busy for a contract only when every local agent seat it could use is on a held card.**
+  `delegate.LeaseForContract` and `placement.AgentChain` (the list the table walks) narrow the local lease per contract; the
+  busy formula in the auto deal, the capacity wait, the retry fence and the spread deal read it, and the text and vision auto
+  routes read the cards of their own seats. `LocalBusyFor` and `LocalLeaseFor` are the same questions for a caller that knows
+  its seat.
+- **The agent lane falls back to a free card.** Placement row 5c: when the home layer's agent seat fits and a lease holds its
+  cards, the next declared layer that is not opt-in or dormant, whose agent seat fits the window and whose cards are free,
+  takes the contract (the single layer's card-0 seat when a card-2 render holds the flagship's cards). With none free the
+  contract keeps the home seat and queues at its gate: a busy card is still a place in line, never a refusal. New
+  `placement.Live.CardsHeld`, armed from the local snapshot; a remote row's `Live` has none.
+- **Legacy whole-node leases are scoped on evidence.** `gpulease.Scoper` infers the cards of a lease an old binary wrote from
+  (a) the recorded command and the command lines of the wrapper's process tree (`--cuda-device N`, resolved through the
+  declared `gpu_comfy_order`, never guessed), (b) the ComfyUI launch marker only when it is tied to the lease (its pid or
+  launcher in the tree, or started after the lease and claimed by no other), (c) the tree's cards sampled twice five minutes
+  apart on a lease at least ten minutes old; otherwise it stays whole-node and says exactly why. Sticky and never shrinking
+  (`lease/seen.<epoch>`, removed on release by this binary and swept by the next acquirer otherwise), widening writes a line to `gpu/scope-ledger.jsonl`, the display card is never
+  reported free by an inference while the operator may be at the desk, and the record itself is never rewritten. New
+  `gpulease.ProcessTree` (Toolhelp and the PEB on Windows, `/proc` on Linux). `gpu status` (text and `--json`), the per-lease
+  rows and `offload_status` show `seat_scope`, `inferred_devices`, `scope_widened` and `scope_why`.
+- **The seat yields a race.** A load that passed the gate before a lease claim lands after the lease's unload, on its cards:
+  when the batch that may have loaded the model drains, and after the delegation door's cold-load warm-up (which then defers
+  `capacity`, re-placeable), the seat re-reads the lease and unloads itself if one it does not hold fences loads on its cards
+  and the engine shows nothing in flight. A widened inferred scope reaches a seat the same way, through its own release (no read
+  of the lease unloads anything). Never the memory stack, never the long job, never a process.
+- **Measured.** Of the three-card tier's nine declared seats, three stay placeable while a lease holds card 2 (the single
+  layer's router and agent on card 0, and the dormant display twin), three under card 0, seven under the display card
+  (`TestSeatsThatStayPlaceableUnderACardLease`).
+- **Not in this change.** The read-only capture on the three-card box of what a real legacy lease's tree shows (plan P4 step
+  1): the lease that prompted it has ended, so the rule is built on synthetic fixtures and the capture is deferred to the
+  milestone that enables card-scoped leases on a host (P6). The Windows process-tree reader was run against a child process the
+  tests start; the Linux reader is built and vetted, not run. Drain and unload scoped to the lease's cards are P5 (next entry above); fleet health
+  per card is P7; the cascade-lane busy gates still read any lease as busy; the load gate arms no presence reader, so an
+  inferred scope always keeps the display card.
+
+### Added — `gpu reserve --devices|--cards`, the per-card status, the card allocator and `gpu doctor` (register C-86, plan P3)
+
+A reservation can now name its cards, ask for N of them, or take the ones its command pins itself to, and `gpu doctor` is the
+audit that has to be green before a host may write a card-scoped lease. All of it sits behind the per-host switch from the
+change below: a host without it reads no card table for a reserve that names nothing, derives nothing from the command, and
+holds the whole node exactly as before (`TestPlanFlagOffHostNeitherReadsCardsNorDerivesDevices`,
+`TestGPUReserveFlagOffKeepsTheWholeNodeLeaseWhateverTheCommandSays`).
+
+- **Choosing cards.** `--devices` (nvidia-smi indices or UUID prefixes), `--cards N|MIN..MAX` (the allocator), `--whole-node`,
+  `--group`, `--vram` and `--ram` (per-card VRAM and host RAM the job needs, for the allocator). Mutually exclusive; on a host
+  without the switch the first two are `ErrCardScopedOff`, naming `--whole-node`, never a silent whole-node lease. With none of
+  them, the cards the wrapped command names itself become the lease: `CUDA_VISIBLE_DEVICES` (a UUID, or an index in PCI order
+  under `CUDA_DEVICE_ORDER=PCI_BUS_ID`, else in ComfyUI order), else `--cuda-device`, else `COMFY_CUDA_DEVICE`. Evidence that
+  cannot be resolved falls back to the whole node with a stderr note. The command is handed `GPU_LEASE_DEVICES`, and a command
+  that names no card of its own is pinned to the cards it named or was allocated (`CUDA_VISIBLE_DEVICES` by driver UUID and
+  `CUDA_DEVICE_ORDER=PCI_BUS_ID`); a lease alone confines nothing (see the review fixes below). The detached
+  holder (`gpu hold`) takes `--devices` and `--group`, and `--detach` finds its own lease by pid among every live lease instead
+  of reading the lowest epoch as the holder.
+- **The card table.** `gpu cards [--json]`, a card table in `gpu status`, and `gpu_cards` in `offload_status` with
+  `section: "brief"` (a new key; `gpu_lease_verdict` is unchanged and the full default answer is byte-identical): per card the
+  UUID, nvidia-smi index, name, display flag, free and total VRAM, the ComfyUI order, and the holding lease (epoch, class,
+  group, command, scope). `gpu status --json` gains `cards`, `leases`, `card_scoped_leases`, and its `queued` rows gain
+  `devices` and `scope`; no existing key changes type. Without nvidia-smi the verbs print the leases and say there is no table.
+- **The ComfyUI order is declared, not guessed.** nvidia-smi reports no FASTEST_FIRST position, so the table shows `?` and a
+  command naming `--cuda-device N` reserves the whole node until `gpu_comfy_order` names every card, fastest first (or the box
+  has one card). New config keys `gpu_comfy_order` and `gpu_host_ram_headroom_gib` (0 = 4 GiB).
+- **The allocator** (`internal/gpulease/allocator.go`, a pure function): unclaimed, not quarantined, not the display card
+  (unless the operator is away), not under a foreign compute process, VRAM fits, and the host has the declared RAM plus the
+  headroom (`gpuprobe.RAMHeadroom`; an unreadable counter refuses only when a need was declared). Order: no resident seat, then
+  the cheapest eviction, then the lowest id. `--cards` that cannot be met queues FIFO on a fixed set (the cards free right now,
+  topped up from the claimed ones that would fit), or polls until enough cards qualify for a reason a lease does not explain;
+  it refuses only at the end of `--wait`. Foreign-busy is Linux-only evidence (WDDM lists no
+  per-process rows). Elastic re-picking is the fan-out work.
+- **`gpu doctor [--scan dir]... [--write-audit] [--json]`** audits every reader of the lease directory: harness binaries (the
+  running one, the install directory's copies and node-swap backups, `PATH`, `--scan` directories, the images of running
+  harness processes and of lease holders and waiters) and every Node `gpu-lock.mjs`, by the literal
+  `gpu-lease-format-2/per-epoch-fence` (the build version cannot tell: it is the same string inside one release). Nothing found
+  is executed; finding nothing, an unreadable root or an unlistable process table is not green; exit status is non-zero when
+  not green; `--write-audit` records the verdict as the reader-audit marker, red as well as green, which is what enables the
+  writer. `render/gpu-lock.mjs` exports `LEASE_FORMAT_SIGNATURE`; a binary built from this tree is tested to carry the
+  signature and a build marker (`TestBuiltBinaryCarriesTheFormatSignatureAndBuildMarker`).
+- **Not in this change.** Consumers that take a device set (the text gate, drain and unload scoped to the lease's cards, fleet
+  health: P4 to P7), so a card-2 job still fences text work on card 0 until then; `--drain` and `--unload-seat` still act on the
+  agent seat as a whole. The acceptance checks on the three-card box (read-only `gpu status` and `gpu doctor` output) have not
+  been run from this branch.
+- **Review fixes: the audit now reaches every reader it claims to.**
+  - **The signature is in every binary that links the lease package.** It was kept only when the audit was reachable, so a
+    build of the agent binary (`cmd/local-agent`, which reads the lease through `modelaffinity` and is deployed beside the
+    harness) carried none and a pre-format agent and a current one read the same. An init function in `gpulease` pins it;
+    `TestEveryBinaryThatLinksTheLeaseReaderCarriesTheSignature` builds every `cmd/` binary that links the package and audits
+    it.
+  - **Discovery is by content as well as by name.** `local-agent*` joins `local-offload*` and `offload-harness*`, and under a
+    scan root any other executable of 1 MiB or more that carries the import path of a package that reads the lease is judged
+    by the signature whatever it is called (`TestAuditFindsAHarnessBinaryUnderAnyName`,
+    `TestARenamedCopyOfABuiltBinaryIsFoundAndJudged`). A running `local-agent` is audited by image.
+  - **Gaps are visible and unreadable entries are findings.** An entry whose stat fails, or an executable that cannot be read
+    to tell whether it is a harness binary, is now a reason (it was skipped silently). The report lists what the walk did not
+    enter (`not_searched`: past the depth cap, `node_modules`, `.git`), a green with gaps says so, and `gpu doctor --depth N`
+    widens the walk. The depth cap now means what it says: 3 levels below a scan root are searched (it was 2).
+  - **Documented honestly.** The audit header, `docs/systems/gpu-lease.md` and the operator guide say what is reached and what
+    is not, and that plan P6 needs a green that covers `local-agent` and every media repository's own wrapper copy.
+  - A fixture name that belonged to a private repository was replaced with a neutral one in the tests.
+- **Review fixes: `--cards` allocates and claims in one loop, and queues on the free card too.**
+  - **A queued `--cards N` no longer throws away idle cards.** The queue set was built from the claimed cards only, so with some
+    cards free and some claimed it queued on claimed cards while a free one sat idle, and with fewer claimed cards than N it
+    polled and never registered a place in line (a later `--devices` or whole-node request could jump it). The set is now the
+    cards that are free right now first, topped up from the claimed ones that would fit, and it is registered FIFO whenever it
+    is at least N large; it polls only for a shortfall a lease does not explain (display, quarantine, foreign process, host
+    RAM, VRAM). `TestAllocatorWaitableListsFreeCardsBeforeClaimedOnes`,
+    `TestPickAutoCardsQueuesOnTheFreeCardPlusTheFirstClaimedOne`, `TestPickAutoCardsQueuesWhenOneCardIsFreeAndOneIsClaimed`.
+  - **Allocation is atomic with the grant.** The allocator reads nvidia-smi, the compute processes, llama-swap and presence over
+    seconds and then picked the lowest-id card, so two simultaneous `--cards 1` reserves chose the same card and the loser
+    queued, or with `--wait 0` was refused, while another card was free (measured with the real binary: 3 of 3 runs). The claim
+    is now a non-blocking acquire inside a loop: a lost claim re-runs the allocator with the winner's claim visible, and the
+    request queues only when the allocator itself says no set is free (bounded at 16 re-allocations).
+    `TestGPUReserveConcurrentCardRequestsLandOnDistinctCards`, `TestAcquireAutoCardsRetriesWhenACompetitorWinsTheRace`. The
+    detached holder takes the request itself (`gpu hold --cards --vram --ram`) and runs the same loop in its own process, so its
+    lease is taken by the pid the parent reports.
+- **Review fixes: a lease holds cards, so the command is pinned to them.** A `--devices` or `--cards` lease held its cards while the
+  command ran wherever CUDA's default put it (on the reference box the display card, the one the allocator refuses to hand out),
+  and nothing read `GPU_LEASE_DEVICES`. The wrapper now also gives a command that names no card of its own
+  `CUDA_VISIBLE_DEVICES=<driver UUIDs of the held cards>` and `CUDA_DEVICE_ORDER=PCI_BUS_ID`. A command that pins itself keeps its
+  pin when it is the program's own (`--cuda-device`, `COMFY_CUDA_DEVICE`) and the wrapper says on stderr when that pin falls
+  outside the held cards or cannot be resolved, but a `CUDA_VISIBLE_DEVICES` merely inherited from the shell that reaches outside
+  the held cards (or cannot be resolved) is replaced with them; a whole-node lease and a set derived from the command's own pin
+  are not pinned. A program that sets its own pin after it starts is still not confined
+  (ComfyUI's `--cuda-device` overwrites the variable; one instance per card is plan P13). The `--devices` and `--cards` help and
+  `docs/systems/gpu-lease.md` say so. `TestGPUReserveDevicesPinsTheChildToTheHeldCards`, `TestConfineWrappedRules`.
+- **Review fixes: the per-card verbs are tested as verbs.** `gpu status` (text and `--json`), `gpu cards` (text and `--json`) and
+  the card table printer had only helper-level tests: dropping the per-card merge, the `card_scoped_leases` key, the text table,
+  the no-nvidia-smi path or `gpu cards`' failure without a table broke nothing. New verb-level tests (through new read seams
+  `statusActivityFn` and `statusForeignFn`, so no nvidia-smi is called) assert the per-card rows, that `queued` keeps its four
+  keys and gains `devices` and `scope`, that a held card shows its holder, and that the table is absent with a note when there
+  is no card table; each was mutation-checked.
+
+### Added — card-scoped GPU leases: lease record v2, per-epoch fence, conflict-aware queue (register C-86, plan P2)
+
+A lease may now name the cards it holds (by GPU UUID) instead of fencing the whole node, so a job on one card no longer
+queues work that could run on another. **Off by default** (`gpu_card_scoped_leases`, per host): with it unset no device
+lease is ever written, the whole-node record is unchanged but for the optional `wrapper_version` the wrapper now stamps,
+and the existing suite runs as it did. Nothing in this change takes a lease on a device yet; `gpu reserve --devices`, the
+allocator and the per-card status are the next change.
+
+- **Record v2.** `lease/e/<epoch>.json` (the record, with `devices`, `group`, `wrapper_version`, `state`) and one
+  exclusively created `lease/cards/<id>.claim` per card; `gpu/FORMAT` is `2` once the first one is written. A device lease
+  never writes `meta.json`. Two leases conflict when either is whole-node or their card sets intersect.
+- **Grant.** One critical section under the epoch lock: sweep debris, refuse on a live whole-node record or an
+  intersecting device lease, issue the epoch, write the record `granting`, claim every card exclusively (all or nothing),
+  flip to `active`. A whole-node grant verifies under the same lock that no device lease is live and withdraws its claim if
+  one is, so the two kinds can never both be granted. It first sweeps device leases the reclaim rule calls reclaimable, so
+  a stalled but living holder is fenced when the node is granted over it (its `Check` and `Renew` fail, its record, claims
+  and heartbeat are gone); and it verifies whenever `e/` cannot be proven absent, never skipping on a stat error.
+- **Per-epoch fence.** A device lease is current while its record is active and each card names its epoch. Applied in
+  `Lease.Check/Renew/Release/Restamp`, `ReleaseByEpoch`, `gpulease.EpochIsCurrent` (used by `gpulock` and the pipeline's
+  inherited-lease boundary) and `render/gpu-lock.mjs`. A higher-epoch lease is never fenced out by a lower one; releasing
+  one lease removes only its own heartbeat, unload marker and claims, and a record or claim that cannot be removed is a
+  failed release (reported, and the lease can be released again), as for a whole-node lease.
+- **Consumers judge every live lease; the inherited-lease exemption is per lease.** `Info` gains `Leases` and `Each()`;
+  the text gate, `Fenced`, `ForeignFence` and `Reserved` ask each live lease, and a process under lease A is exempt from A
+  alone (a first draft exempted it from every live lease). Known gap until plan P4: no device-set comparison, so a lease
+  on one card still fences a text call on another (over-fencing, the safe direction).
+- **Queue.** Waiters carry their device set: FIFO among waiters that conflict, disjoint backfill, a whole-node waiter is a
+  barrier. **Debris:** a `granting` record or a claim with no record, older than the 10 s claim grace, is removed by the
+  next acquirer; nothing expires a card and nothing kills a process.
+- **Readers.** `Inspect`, `InspectDir`, `InspectDirDetail` and `gpulock` report any live lease as held (the conservative
+  reading until the consumers take a device set); `Info` gains `Devices`, `Epochs`, `Group` and `WrapperVersion`;
+  `InspectLeases` and `Manager.InspectFor` list per lease and per request. `gpu status` shows the cards and the other live
+  epochs when there are any.
+- **Cross-version hazard, gated by code.** A binary that predates this reads a directory holding only device leases as a
+  free card. `gpu_card_scoped_leases` alone no longer enables the writer: it also needs the green reader audit marker
+  `gpu/reader-audit.json`, which `gpu doctor` (next change) writes once every binary copy (node-swap backups and running
+  images included), the media repository's wrapper copy and every Node reader is per-epoch-fence aware; without it the
+  writer stays off and the CLI warns. The pre-change reader is kept as a test fixture
+  (`internal/gpulease/oldreader_fixture_test.go`) and the hazard and its gate are pinned by test.
+- **Deviation from plan rev 2, pending the plan owner's or operator's acceptance.** The synthetic pid-0 `meta.json`
+  umbrella is not written. Its premise holds (verified with the real 0.158.3 and 0.160.0 binaries: a pid-0 record is held
+  for its declared window, reclaimed after it), so it was dropped as a second source of truth, not because it failed; a
+  pre-v2 writer the audit misses would double-book a switched-on host. P2's acceptance is not met until the deviation is
+  accepted; the audit marker is the interim mechanism.
+- **Config.** `gpu_card_scoped_leases` (default false) in `config.example.json` and `internal/config`; it takes effect only with the reader audit marker above.
+
+### Added — lease ownership: who asked, whether they are still there, orphaned and stalled leases surfaced (register C-32, C-33, plan P8, ADR 0070)
+
+A lease recorded who HELD it and nothing about who ASKED for it, so a wrapper that was alive and heartbeating read as working
+whether the session that launched the job was at the desk or long gone. A long render held a card for about twenty hours behind
+a label that read healthy. Everything below changes what is REPORTED: nothing reclaims, releases or kills a lease on it.
+
+- **Record.** `owner` (session, pid + start identity, `remote`, `tracked`), `unattended`, a progress contract (`progress`: file
+  and stall window) and `yield_grace_ms` / `on_yield` / `on_yield_dir`, all additive and `omitempty`: a record without an owner is an UNKNOWN
+  owner and is never orphaned. The progress file is recorded as an ABSOLUTE path (`gpu reserve` resolves a relative
+  `--progress-file` against its own working directory and the library refuses a relative one: every reader looks for the same
+  file from its own directory, and a path recorded as typed read `unknown` for the MCP server, the fleet node and another
+  session's `gpu status`). `on_yield` is stored verbatim, refused above 4096 bytes and never clipped, with the directory the
+  lease was taken in, because the takeover that runs it later does not share that directory. `gpu reserve` takes `--owner-session`, `--owner-pid`, `--owner-start-ms`, `--owner-remote`,
+  `--unattended`, `--progress-file`, `--stall`, `--yield-grace`, `--on-yield`; with no flags the owner is the session label the
+  ledger already resolves (`LOCAL_OFFLOAD_ORIGIN`, then `CLAUDE_CODE_SESSION_ID`) with no pid, so a short-lived shell is never
+  recorded as the owner. `--unattended` requires an explicit `--for`, a progress file and a stall window. `gpu owner-flags`
+  prints the flags for the calling tree (for a launcher that detaches before it takes the lease), and the detached `gpu hold`
+  child is passed the owner and the contract by its parent.
+- **Session registry.** Each MCP server writes `<state root>/owners/<session>.<pid>.json` at start and removes it at exit (no
+  timer). A session is alive while any registered process carries its id, by pid and start time, so a resumed or compacted
+  session under a new pid does not flap. One file per process rather than per session, so a resume does not have two writers of
+  one record. How a Claude Code session id maps to a live process is not verified beyond the environment variable the ledger
+  already relies on.
+- **Orphan marker.** The first reader to see an owner gone stamps `orphan.<epoch>` under the epoch lock with a second look
+  inside it (concurrent readers write one marker and agree on one moment); the owner reappearing clears it; release removes it.
+  Only the status surfaces stamp it (`gpu status`, `offload_status`, the `/fleet/health` handler): the inspectors the text gate
+  polls every second and the sentence a waiter or a refusal reads (`ErrHeld.Error()`, the gate's `LeaseError`) READ the marker
+  and never write it or take the epoch lock, so a lone waiter on an orphan nobody has looked at yet is told what the progress
+  file and the window say, and about the owner's absence once a status call has recorded it. Failures are reported, not
+  swallowed: a session registry that cannot be read reads the owner `unknown` (never `gone`), a marker that cannot be written
+  or cleared says so (`activity.holder.orphan_marker_error`, a `gpu status` warning, the verdict note), and the lease directory
+  is probed for writability before the epoch lock is taken (a permission error reads as contention there and cost about two
+  seconds per status call). `gpu_orphan_grace_min` (default 15) is installed at config load.
+- **Verdicts.** `held-stalled`, `held-orphaned`, `held-overdue` and `tree-orphan` join the vocabulary, in the order
+  `stale-holder`, `tree-orphan`, `held-stalled`, `held-orphaned`, `held-overdue`, `held-working`, `held-idle`; an unattended,
+  remote or unknown-owner lease is never `held-orphaned`; `working` is still reported first and its note leads with the lease's own
+  standing. With only card utilisation as evidence the note says `util only, no progress contract`. A progress file that does
+  not exist is `unknown`, never stalled, and the stall window counts from the lease's start at the earliest; the reading says why
+  it is unknown (not found, a directory, a permission error) and, once the lease outlives its stall window with the file still
+  missing, how long it has been missing, without changing the verdict. `gpu reserve` warns when the file's directory does not exist. `tree-orphan` is in
+  the vocabulary and is **not produced by this build**: it needs the wrapper to record its process tree.
+- **Legacy leases.** A lease with no owner and no contract shows two read-only facts, the age of the newest ComfyUI output and of
+  the ComfyUI log, only when the launch marker can be tied to the lease; they are never a verdict input.
+- **Surfaces.** `gpu status` and `--json` (owner, owner state, orphaned-since, progress age and last line, facts);
+  `offload_status` brief `gpu_lease_verdict` leads with `ORPHANED`, `OVERDUE` or `STALLED` whatever the verdict word is (a stalled
+  lease with work in flight reads `STALLED (working)`) and names the takeover command of the lease the verdict is about, and its
+  verdict JSON schema is pinned by a golden; with several live leases the epoch, owner and progress on `gpu status` and the
+  offload_status lease view (and the top-level fields of `gpu status --json`) are the most escalated lease's own; `/fleet/health` `lease` gains `orphaned` and `stalled` (absent
+  unless true, worst across live leases; `overdue` stays the expiry-based key of the routing change, one source for one wire key,
+  so merge that change first); a waiter refused by or queued behind an unhealthy lease (`gpu reserve`, a text admission) is told which
+  lease, what is wrong, for how long, what is running and `local-offload gpu takeover --epoch N`. **That command does not exist
+  yet** (the explicit takeover is a later change) and the message says so.
+- **Docs.** `TestVerdictDocTableComplete` fails a verdict added to `internal/gpuactivity/snapshot.go` without a row in the verdict
+  table of `docs/systems/gpu-lease.md`, and a row for a verdict that does not exist. New ADR 0070; ADR 0018's "a leaked lease
+  expires" is corrected (a live, heartbeating holder keeps its claim past its window).
+### Fixed — a held lease past its declared window no longer reads as free (GPU routing P1)
+
+`leaseHealthOf` clamped the remaining time to zero before comparing it with `fleet_busy_lease_sec`, and zero is below every threshold, so a
+lease whose holder was still alive and heartbeating but whose declared window had ended published `busy: false`: the node looked free for
+exactly the lease that was demonstrably still using the cards. The rule is now `busy = held AND (remaining > threshold OR overdue)`. The 120 s
+short-lease rule is the first clause and is unchanged, and a negative `fleet_busy_lease_sec` still turns the duration rule off. The lease block
+gains an additive, omitempty `overdue` flag (an unchanged lease publishes the same bytes). The delegator decodes it as `LeaseOverdue`, not as
+`LeaseBusy`, so the node is ranked last (a rung below a genuinely long lease) and never hard-excluded: an abandoned lease cannot make a node
+unroutable for longer than before, and the node still queues what it is sent: the overdue busy is not folded into the node's own refusing flag, so
+an overdue media-lease node keeps publishing `saturation.high: false` and its idle slot, and the capacity wait still asks it when it is the only remote.
+A lease record with no declared end (missing, zero or negative `expires_at_ms`) now reads as an unset end in `gpulease.Info` instead of 1970, so it is
+never busy or overdue. `offload_status` shows `gpu_lease_overdue` and reads such a node as `held-idle`. The fleet deploy does
+not read this verdict (its wait-idle step takes job counts from health and the lease from the lease directory); `healthwire_compat_test.go` now
+pins the raw JSON, the delegator's decode and the deploy's real health decoder against one overdue node.
+
+### Added — placement ranks on free cards, not one utilisation scalar (GPU routing P1)
+
+The delegator dropped a node's `gpu_devices[]` and ranked nodes on the busiest card, so a box with one busy card and two idle ones lost to a box
+with three cards at 30 % each. `NodeView` now carries the rows. A card is free when it is not a display card, its utilisation is known and under
+15 %, and it has the VRAM (the placement seat's published footprint split across its cards, else a quarter of the card); a layer whose seat spans
+N cards needs N free ones, and no seat pin is matched to a card by index. A seat the node says is loaded vouches for the VRAM of the idle cards it
+spans, so a warm node does not lose to a cold one for holding its own seat. `betterRemote` gains a per-node tier after the ETA key (free card, then a
+node that published no per-card truth, then none), `route=auto/remote` spends a node's free cards as it deals, and `route=spread` uses the tier as the first
+key inside a deal cycle without breaking the one-subtask-per-seat-per-cycle invariant. It ranks and never gates: `max_concurrent_jobs` stays
+the hard ceiling and a node with no free card still takes work. `offload_status` shows `free_cards` and `cards_total` per node. ADR 0057 amended.
+Per-card leases, which let the local box do the same, are later phases of the plan.
+
 ## [0.160.0] - 2026-10-02 - The public tree carries roles, not machine names, behind a keyed leak gate; blackwell-8 seeds its vision extras and Z-Image Turbo
 
 ### Added — the leak gate: real machine, person and brand names stay out of the tracked tree (register H-55)

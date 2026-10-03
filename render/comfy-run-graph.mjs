@@ -10,7 +10,7 @@ import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { withGpuSlot, freeComfy as _freeComfy } from "./gpu-lock.mjs";
-import { comfyUp as _comfyUp, ensureComfy as _ensureComfy, resolveComfyDir, resolveComfyPy } from "./comfy-lifecycle.mjs";
+import { comfyUp as _comfyUp, ensureComfy as _ensureComfy, resolveComfyDir, resolveComfyPy, comfyApi, resolveInstance } from "./comfy-lifecycle.mjs";
 import { parseManifest as _parse, manifestHash as _hash } from "./manifest.mjs";
 import { satisfyManifest, defaultSatisfyDeps } from "./manifest-satisfy.mjs";
 import { preflightGraph } from "./preflight-graph-file.mjs";
@@ -138,17 +138,32 @@ export async function runGraphFlow(args, deps) {
   }
 }
 
+// instanceDeps: run-graph's own ComfyUI start and free, bound to the instance its api and
+// env name. A keyed (per-card) instance is started and freed on ITS endpoint; the default
+// instance is called exactly as before (no api to ensureComfy, none to freeComfy). Throws
+// COMFY-INSTANCE-INVALID on an env that cannot name an instance. `real` is injectable so the
+// wiring is tested by behaviour.
+export function instanceDeps(api, env = process.env, real = { ensureComfy: _ensureComfy, freeComfy: _freeComfy }) {
+  const instance = resolveInstance({ api, env });
+  const startOpts = instance.key ? { api } : {};
+  const freeArgs = instance.key ? [api] : [];
+  return {
+    ensureComfy: (o) => real.ensureComfy({ ...o, ...startOpts }),
+    freeComfy: () => real.freeComfy(...freeArgs),
+  };
+}
+
 // --- CLI wiring (production deps) ------------------------------------------------------
 async function main() {
   const argv = process.argv.slice(2); const flags = {};
   for (let i = 0; i < argv.length; i++) if (argv[i].startsWith("--")) { flags[argv[i].slice(2)] = argv[i + 1]; i++; }
-  const api = flags.api || process.env.COMFY_API || "http://127.0.0.1:8188";
   // resolveCli throws LOUDLY on a set-but-wrong COMFYUI_PP_CLI (deliberate — explicit
-  // config never degrades silently), but run-graph's contract is "every failure is a
-  // typed DEFER in the result file + exit 0", so the throw must become a defer here
+  // config never degrades silently), and an env that cannot name an instance
+  // (COMFY-INSTANCE-INVALID) throws too, but run-graph's contract is "every failure is a
+  // typed DEFER in the result file + exit 0", so either throw must become a defer here
   // rather than escape as an untyped exit-1 the Go side cannot classify.
-  let cli = null;
-  try { cli = resolveCli(); } catch (e) {
+  let cli = null; let api; let deps;
+  try { api = comfyApi(flags.api); deps = instanceDeps(api); cli = resolveCli(); } catch (e) {
     const out = { deferred: true, code: "RUN_ERROR", ref: "", detail: String(e.message || e) };
     writeFileSync(flags.result || "run-graph-result.json", JSON.stringify(out));
     console.error("RUN-GRAPH DEFER", JSON.stringify(out));
@@ -170,9 +185,9 @@ async function main() {
     { graph, manifest, outDir: flags["out-dir"] || ".", resultPath: flags.result || "run-graph-result.json", api, comfyDir, reserveVram },
     {
       comfyUp: _comfyUp,
-      ensureComfy: _ensureComfy,
+      ensureComfy: deps.ensureComfy,
       killComfy: (c) => c.kill(),
-      freeComfy: _freeComfy,
+      freeComfy: deps.freeComfy,
       satisfy: (mm) => satisfyManifest(mm, satDeps),
       preflight: preflightGraph,
       // Submission/polling via the shared comfy-submit.mjs layer: CLI-preferred submit

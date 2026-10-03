@@ -129,7 +129,11 @@ type Waiter struct {
 	Class       Class  `json:"class"`
 	Reason      string `json:"reason,omitempty"`
 	SinceMs     int64  `json:"since_ms"`
-	path        string
+	// Devices are the cards the waiter wants (GPU UUIDs); empty = the whole node. A
+	// pre-v2 reader ignores the field, which reads the waiter as whole-node: the
+	// conservative direction.
+	Devices []string `json:"devices,omitempty"`
+	path    string
 }
 
 // Since is when the waiter started queueing.
@@ -167,7 +171,7 @@ func (m *Manager) registerWaiter(class Class, opts Options) (Waiter, func()) {
 		return Waiter{}, func() {}
 	}
 	pid := os.Getpid()
-	w := Waiter{PID: pid, Class: class, Reason: clipCommand(opts.Reason), SinceMs: m.now().UnixMilli()}
+	w := Waiter{PID: pid, Class: class, Reason: clipCommand(opts.Reason), SinceMs: m.now().UnixMilli(), Devices: opts.Devices}
 	if st, ok := m.procStart(pid); ok {
 		w.StartTimeMs = st
 	}
@@ -226,7 +230,10 @@ func (m *Manager) isFrontOfQueue(self Waiter) bool {
 		if w.path == self.path {
 			continue
 		}
-		if waiterBefore(w, self) {
+		// FIFO among waiters that CONFLICT. A waiter ahead of us that wants other
+		// cards is no reason to wait (disjoint backfill); a whole-node waiter wants
+		// everything, so it is a barrier that every later waiter queues behind.
+		if waiterBefore(w, self) && devicesConflict(w.Devices, self.Devices) {
 			return false
 		}
 	}

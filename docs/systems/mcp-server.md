@@ -139,7 +139,18 @@ runs on the admission deadline too (register S-24), because it is allowed to abs
 the wall context a slow seat spent the run's whole clock on it. `ctx_window_note` says which of the three
 windows that number IS — probed, configured, or the conservative fallback — because this door measured
 8,192 cold and 114,688 warm on the same seat minutes apart and neither result said which it was. A defer
-at the CORDON reports its `admission_wait_sec` / `admission_note` like every other admission exit. A resolved planner absent from the endpoint's served roster fails loud with
+at the CORDON reports its `admission_wait_sec` / `admission_note` like every other admission exit. **The wall is sized before any of that (register D-102):** this door's `timeout_sec`
+(else `agent_timeout_sec`, else 180 s) is a hard context deadline, so `pipeline.SizeRun` prices the run from the seat's
+rate store (else `agent_seat_tok_s`, for the box's own agent seat only: a named `model`, or a seat placement picks, with no
+rate of its own is not sized at all) before the fence check, the cordon or any seat request, and every call that gets past argument validation and seat
+placement, answered or deferred, carries `wall_estimate_sec` / `min_turn_sec` / `wall_note` — the delegation wire's own names
+(a call refused before a seat is chosen, by its arguments or a composite placement guard, and a `route`d one, carry none). A wall that cannot hold one tool step and a
+64-token final (`seatrate.MinViableSec`, the delegator's `feasibleFinal` floor, never the max-final `min_turn_sec` that
+ADR 0050 rejects as a refusal; it does not depend on `max_steps`) is refused with `deferred: true`, `defer_class: budget`,
+`steps: 0` and the numbers; a
+seat with no rate is never refused. D-102 is PARTIAL: a wall above that floor but below the estimate (the row's own 420 s
+against a `min_turn_sec` of 807 s) still runs and can still die at the hard deadline; the cure (the D-95 final-budget fit
+on this door, or an operator decision on a literal `min_turn_sec` refusal) is open as register D-134. A resolved planner absent from the endpoint's served roster fails loud with
 `deferred: true` naming the model, never a silent fall back to the workhorse — "served" means
 matched against canonical ids **or** `meta.llamaswap.aliases`, since a tier-seeded `agent_model`
 is normally an alias. Every response

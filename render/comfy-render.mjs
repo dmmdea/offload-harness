@@ -50,6 +50,7 @@
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { withGpuSlot } from "./gpu-lock.mjs";
+import { comfyApi } from "./comfy-lifecycle.mjs";
 import { buildHiDreamO1 } from "./wf-hidream-o1.mjs";
 import { buildKrea2 } from "./wf-krea2.mjs";
 import { buildQwenImage, QWEN_IMAGE_PRESETS } from "./wf-qwen-image.mjs";
@@ -396,7 +397,7 @@ async function generate(out, API, built, flags) {
 async function main() {
   const { pos, flags } = parseRenderArgs(process.argv.slice(2));
   const out = pos[0];
-  const API = flags.api || process.env.COMFY_API || "http://127.0.0.1:8188";
+  const API = comfyApi(flags.api);
   if (!out) { console.error('usage: node comfy-render.mjs <out.png> "<prompt>" [seed] [w] [h] [flags]   |   <out.png> --graph wf.json'); process.exit(2); }
   // Create the output parent UP-FRONT: a bad path must fail in 0s, not after the
   // render — an ENOENT at the write site used to discard a finished image after
@@ -429,7 +430,7 @@ async function main() {
   // reuse an already-fit running instance (comfy-lifecycle's reuse guard), take the
   // GPU slot, tear down after.
   await withGpuSlot(
-    { noLock: flags["no-lock"], keepComfy: flags["keep-comfy"], comfyManaged: true, reserveVram: flags["reserve-vram"] },
+    { noLock: flags["no-lock"], keepComfy: flags["keep-comfy"], comfyManaged: true, api: API, reserveVram: flags["reserve-vram"] },
     () => generate(out, API, built, flags),
   );
 }

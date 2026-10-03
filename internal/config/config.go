@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/dmmdea/offload-harness/internal/core"
+	"github.com/dmmdea/offload-harness/internal/gpulease"
 	"github.com/dmmdea/offload-harness/internal/modelaffinity"
 	"github.com/dmmdea/offload-harness/internal/netguard"
 	"github.com/dmmdea/offload-harness/internal/seatinflight"
@@ -373,6 +374,30 @@ type Config struct {
 	// opted in, an agent-door run needs a non-empty host allowlist and the browse
 	// lane configured (BrowseConfigured); the deny-list cannot be lifted there.
 	AgentAllowBrowse bool `json:"agent_allow_browse,omitempty"`
+	// AuditAllDoors (register SF-02) attaches the broker decision audit trail
+	// (<home>/.local-offload/agent-audit.jsonl) to EVERY agent door: agent_run,
+	// agent_delegate and fleet contracts, not only to a run that asks for browse.
+	// "" / "off" (the default) keeps today's behaviour: no trail unless browse asks
+	// for one, zero new rows, result payloads unchanged. "warn" writes every
+	// decision and reports a failed write once without changing any decision.
+	// "enforce" makes a failed write deny the action, as a browse run's trail
+	// always has; it is the operator's call (a new way for a door to fail).
+	AuditAllDoors string `json:"audit_all_doors,omitempty"`
+	// AgentReadFloor (register SF-07) is the read floor every agent read tool
+	// (read_file, summarize_file, search_files) consults: reads of secret material
+	// (.env* except .env.example/.env.sample, *.pem, *.key, id_rsa*, id_ed25519*,
+	// .npmrc, .git-credentials, .claude.json, anything under .ssh/) and of a rule
+	// table's read rules. "" / "warn" (the default) lets the read through and leaves a
+	// warn row on the audit trail and a log line; "enforce" refuses it; "off" checks
+	// nothing. The CLI's --rules off also switches it off.
+	AgentReadFloor string `json:"agent_read_floor,omitempty"`
+	// AuditChain (register SF-08) hash-chains each agent run's rows on the broker
+	// audit trail: every row carries run_id, seq and prev_sha256, and the run ends
+	// with a run_end row (count, head). `local-offload agent-audit verify` then names
+	// the run and seq of any edited, removed or reordered row. false (the default)
+	// writes today's rows unchanged. Applies wherever a trail is attached (see
+	// audit_all_doors); the local-agent CLI honours it for its own trail too.
+	AuditChain bool `json:"audit_chain,omitempty"`
 	// PairWorkloadsEnabled (0.126.0) reports every job this box runs or
 	// delegates to NVIDIA Personal AI Router's Jobs list, through the loopback
 	// workload ingress of PAIR's workload manager (fork
@@ -1142,6 +1167,40 @@ type Config struct {
 	// runner as the GPU_LOCK env, so the Go-side vision gate (LO-1) and the Node runners
 	// always contend on the SAME lock.
 	GPULockPath string `json:"gpu_lock_path,omitempty"`
+	// GPUCardScopedLeases (plan P2, default false) lets this host WRITE card-scoped GPU
+	// leases: a lease that names its cards (record v2, per-card claims) instead of
+	// fencing the whole node. Reading them is never gated. Setting this key is not
+	// enough: the writer also needs the green reader audit marker (gpu/reader-audit.json)
+	// that `gpu doctor` writes once no binary or Node reader on the host predates the
+	// format, because such a reader sees a directory holding only device leases as a
+	// free card. Without the marker the key is ignored with a warning.
+	GPUCardScopedLeases bool `json:"gpu_card_scoped_leases,omitempty"`
+	// GPULegacyScopeInference (plan P4, default false) lets the seat gates scope a LEGACY
+	// whole-node lease, one an older binary wrote, by what its process tree actually runs
+	// (a `--cuda-device N` on a command line, a launch marker tied to the lease, two sampled
+	// readings of the cards its processes hold) instead of fencing every card. Only such a
+	// record is ever scoped: a whole-node lease this binary wrote, an explicit --whole-node
+	// included, is the whole node by its writer's word. Off, a legacy lease fences every seat,
+	// exactly as it always did. It stays off until the read-only capture of what a real legacy
+	// tree shows (plan P4 step 1, milestone P6) has been made on the host.
+	GPULegacyScopeInference bool `json:"gpu_legacy_scope_inference,omitempty"`
+	// GPUComfyOrder declares ComfyUI's device order for this box (plan P3): a comma
+	// list naming EVERY card once, fastest first, each as an nvidia-smi index or a UUID
+	// prefix ("1,0,2"). nvidia-smi cannot report CUDA's FASTEST_FIRST order and two
+	// same-model cards cannot be ordered by anything it does report, so a command that
+	// says `--cuda-device N` or COMFY_CUDA_DEVICE=N is turned into a card only when this
+	// is set (or the box has one card). Unset, such a lease stays whole-node and says
+	// why; nothing is ever guessed. Measure it with a CUDA_VISIBLE_DEVICES=<uuid> probe.
+	GPUComfyOrder string `json:"gpu_comfy_order,omitempty"`
+	// GPUHostRAMHeadroomGiB is the host RAM the card allocator keeps free beyond a job's
+	// declared need (`gpu reserve --ram`), because a load that pushes the host into swap
+	// stalls every seat on the box. 0 = DefaultGPUHostRAMHeadroomGiB.
+	GPUHostRAMHeadroomGiB float64 `json:"gpu_host_ram_headroom_gib,omitempty"`
+	// GPUOrphanGraceMin (plan P8, default 15) is how many minutes an attended lease's
+	// owner may be gone before `gpu status`, offload_status and the fleet health read the
+	// lease as orphaned. It only changes what is REPORTED: nothing reclaims, releases or
+	// kills a lease on it. 0 or negative = 15. Load installs it where every reader sees it.
+	GPUOrphanGraceMin int `json:"gpu_orphan_grace_min,omitempty"`
 	// ForeignGPUMinMiB overrides the per-process VRAM floor `gpu status`/`gpu
 	// reserve`'s foreign-GPU-memory warning (gpu_foreign.go) uses to decide a
 	// resident desktop process is worth a line — see foreignDefaultMinMiB for
@@ -1729,6 +1788,15 @@ func DefaultBase() string {
 	return filepath.Join(home, ".local-offload")
 }
 
+// GPUOrphanGrace is gpu_orphan_grace_min as a duration; unset or negative is the
+// 15 minute default (gpulease.DefaultOrphanGrace).
+func (c Config) GPUOrphanGrace() time.Duration {
+	if c.GPUOrphanGraceMin <= 0 {
+		return gpulease.DefaultOrphanGrace
+	}
+	return time.Duration(c.GPUOrphanGraceMin) * time.Minute
+}
+
 // AgentPlannerModel resolves the coding agent's planner seat. Precedence:
 // an explicit per-call/per-flag override > the configured AgentModel seat >
 // the workhorse Model. The chain is resolved at call time, never persisted —
@@ -2049,10 +2117,33 @@ func loadArmed(path string) (Config, error) {
 			return c, fmt.Errorf("fleet_queue_holder: %w", err)
 		}
 	}
+	// The orphan grace is read by every lease reader (gpu status, offload_status, the fleet
+	// health, a waiter's refusal), so it is installed once here, like the lease directory.
+	gpulease.SetDefaultOrphanGrace(c.GPUOrphanGrace())
 	if lerr := modelaffinity.SetGPULease(c.GPULockPath, c.StateDir); lerr != nil {
 		fmt.Fprintf(os.Stderr, "warning: GPU load gate disabled: %v\n"+
 			"  Text calls will not wait for a media render to finish with the card.\n", lerr)
 	}
+	// The gate also learns which cards each seat sits on, so a lease on one card fences
+	// only the seats on that card (plan P4). Armed here for the same reason the lease
+	// directory is: the pins are a property of the box's layers, and a launcher that read
+	// them separately could disagree with the gate. A box with no layers arms nothing the
+	// gate can use, and every lease then fences every seat, as it always did.
+	modelaffinity.SetSeatPins(c.ModelPins)
+	modelaffinity.SetCardOrder(c.GPUComfyOrder)
+	modelaffinity.SetComfyDir(c.ComfyDir)
+	// The seat race rule never takes the memory stack (the same default `gpu reserve
+	// --unload-seat` keeps resident). The seat unloads through the endpoint its own
+	// admission named, so no endpoint is armed here: a config aimed at another box's engine
+	// can never make a lease on THIS box reach that engine.
+	memoryStack := c.MemoryStack
+	if len(memoryStack) == 0 {
+		memoryStack = Default().MemoryStack
+	}
+	modelaffinity.SetYieldProtect(memoryStack)
+	// Whether a legacy whole-node lease (one an older binary wrote) is scoped by what its
+	// process tree runs. Off by default: the live capture of a real tree is still owed.
+	modelaffinity.SetLegacyInference(c.GPULegacyScopeInference)
 	// A config whose endpoint is ANOTHER box's engine (a bench config aimed at
 	// <node-c>'s arm) makes no local load: this box's machine-wide lease has
 	// nothing to protect, and gating on it cordoned runs that never touched a
@@ -2187,6 +2278,12 @@ func load(path string) (Config, error) {
 	if err := validateCoherenceProbe(c.AgentCoherenceProbe); err != nil {
 		return c, err
 	}
+	if err := validateAuditAllDoors(c.AuditAllDoors); err != nil {
+		return c, err
+	}
+	if err := validateAgentReadFloor(c.AgentReadFloor); err != nil {
+		return c, err
+	}
 	// The WARN half of S-38, printed LAST so it can never be mistaken for the
 	// reason a load failed. These shapes load, dial, and then fail somewhere that
 	// names neither the key nor the value, so the operator gets a line here and a
@@ -2226,6 +2323,39 @@ func (c Config) CoherenceProbe() string {
 		return v
 	}
 	return "cold"
+}
+
+// validateAuditAllDoors refuses an audit_all_doors value by name (SF-02): an unknown
+// mode must fail the load, never fall back to off (no trail) or enforce (a new
+// failure mode on every agent door). Trimmed and lower-cased, as AuditAllDoorsMode.
+func validateAuditAllDoors(v string) error {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "", "off", "warn", "enforce":
+		return nil
+	}
+	return fmt.Errorf("audit_all_doors: unknown mode %q (valid: \"\" or \"off\" (default: no trail unless browse asks for one), \"warn\", \"enforce\")", v)
+}
+
+// validateAgentReadFloor refuses an agent_read_floor value by name (SF-07).
+func validateAgentReadFloor(v string) error {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "", "off", "warn", "enforce":
+		return nil
+	}
+	return fmt.Errorf("agent_read_floor: unknown mode %q (valid: \"\" or \"warn\" (default: record reads of secret material), \"enforce\", \"off\")", v)
+}
+
+// AuditAllDoorsMode resolves audit_all_doors to "off", "warn" or "enforce"; an unset
+// key is off. An unknown value comes back as written (trimmed, lower-cased), never as
+// off: a one-shot verb keeps going after a config load error, and a mistyped
+// "enforce" must make the door refuse (agent.DoorAudit), not run with no trail.
+func (c Config) AuditAllDoorsMode() string {
+	switch v := strings.ToLower(strings.TrimSpace(c.AuditAllDoors)); v {
+	case "", "off":
+		return "off"
+	default:
+		return v
+	}
 }
 
 // validateRawLayerKeys lifts the `layers` block out of the config file's bytes

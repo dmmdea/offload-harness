@@ -77,8 +77,13 @@ var HTTPClient = &http.Client{Transport: netguard.SafeTransport(nil), Timeout: B
 // localBusy is the auto route's trigger — the machine-wide GPU lease, read
 // exactly as agent placement reads it. A seam so tests drive both branches
 // without a lease directory.
+//
+// The reading is narrowed to the cards the vision seat is pinned to (plan P4): a render on
+// another card is not a reason to send an image off the box. A seat with no declared pin
+// reads every card, as before.
 var localBusy = func(cfg config.Config) bool {
-	return delegate.LocalBusy(cfg.GPULockPath, cfg.StateDir)
+	pins, _ := cfg.ModelPins(cfg.VisionModel)
+	return delegate.LocalBusyFor(cfg.GPULockPath, cfg.StateDir, pins)
 }
 
 // Runner runs one request in-process; *pipeline.Pipeline satisfies it.

@@ -27,10 +27,11 @@
 //   qwen: [--unet name] [--patch name] [--preset full|lightning4] [--steps N] [--cfg F]
 //         [--strength F] [--lora name] [--lora-strength F] [--clip name] [--qvae name]
 //   [--api http://127.0.0.1:8188] [--no-lock] [--keep-comfy] [--reserve-vram F]
-import { copyFileSync, writeFileSync, unlinkSync, readFileSync, appendFileSync, mkdirSync } from "node:fs";
-import { join, basename, dirname } from "node:path";
+import { writeFileSync, unlinkSync, readFileSync, appendFileSync, mkdirSync } from "node:fs";
+import { join, dirname } from "node:path";
 import { withGpuSlot } from "./gpu-lock.mjs";
-import { COMFY_DIR } from "./comfy-lifecycle.mjs";
+import { COMFY_DIR, comfyApi } from "./comfy-lifecycle.mjs";
+import { stageInput as stageToInput } from "./comfy-input.mjs";
 import { buildSDXLInpaint } from "./wf-sdxl-inpaint.mjs";
 import { buildQwenInpaint, QWEN_INPAINT_PRESETS } from "./wf-qwen-inpaint.mjs";
 import { parseInpaintJobs, qwenRecipe, batchAbort } from "./inpaint-jobs.mjs";
@@ -48,7 +49,7 @@ for (let i = 0; i < argv.length; i++) {
   } else pos.push(argv[i]);
 }
 const [out, imagePath, maskPath, prompt] = pos;
-const API = flags.api || process.env.COMFY_API || "http://127.0.0.1:8188";
+const API = comfyApi(flags.api);
 const FAMILY = flags.family || "sdxl";
 if (FAMILY !== "sdxl" && FAMILY !== "qwen") {
   console.error(`error: --family must be sdxl or qwen, got ${FAMILY}`);
@@ -70,14 +71,12 @@ if (FAMILY === "qwen" && !flags.unet) {
   process.exit(2);
 }
 
-// Per-call counter: Date.now() alone collides when image and mask share a basename
-// (both stage within the same millisecond → the mask copy overwrites the image copy
-// and BOTH LoadImage nodes read the mask — a silently-wrong "success").
-let stageN = 0;
+// The staged name carries a per-call counter (and the pid): the clock alone collides when image
+// and mask share a basename (both stage within the same millisecond → the mask copy overwrites
+// the image copy and BOTH LoadImage nodes read the mask — a silently-wrong "success"), and it
+// collides across the concurrent runner processes of per-card instances too (comfy-input.mjs).
 function stageInput(p) {
-  const name = "inpaint_in_" + Date.now() + "_" + (stageN++) + "_" + basename(p);
-  copyFileSync(p, join(COMFY_DIR, "input", name));
-  return name;
+  return stageToInput("inpaint_in", p);
 }
 
 function buildGraph(job, staged) {
@@ -208,7 +207,7 @@ if (flags.batch) {
   writeFileSync(resultsPath, "");
   const MAX_CONSEC_FAIL = Number(process.env.COMFY_BATCH_MAX_CONSEC_FAIL || 3);
   withGpuSlot(
-    { noLock: flags["no-lock"], keepComfy: flags["keep-comfy"], comfyManaged: true, reserveVram: flags["reserve-vram"], warm: true },
+    { noLock: flags["no-lock"], keepComfy: flags["keep-comfy"], comfyManaged: true, api: API, reserveVram: flags["reserve-vram"], warm: true },
     async () => {
       let okCount = 0, failCount = 0, consecFail = 0, firstErr = null;
       for (let i = 0; i < jobs.length; i++) {
@@ -252,7 +251,7 @@ if (flags.batch) {
     seed: Number(flags.seed != null ? flags.seed : Math.floor(Math.random() * 1e15)),
   };
   withGpuSlot(
-    { noLock: flags["no-lock"], keepComfy: flags["keep-comfy"], comfyManaged: true, reserveVram: flags["reserve-vram"] },
+    { noLock: flags["no-lock"], keepComfy: flags["keep-comfy"], comfyManaged: true, api: API, reserveVram: flags["reserve-vram"] },
     () => renderJob(job),
   ).catch((e) => { console.error("INPAINT FAILED:", e.message); process.exit(1); });
 }

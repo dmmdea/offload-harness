@@ -130,10 +130,14 @@ type Run struct {
 	// holder used to look healthy). LastProgressMs is the last streamed delta,
 	// tool call or phase change; TokS the smoothed decode rate over deltas;
 	// LivePhase/AllowanceMs the stall bound the run is under right now.
-	LastProgressMs int64   `json:"last_progress_ms,omitempty"`
-	TokS           float64 `json:"tok_s,omitempty"`
-	LivePhase      string  `json:"live_phase,omitempty"`
-	AllowanceMs    int64   `json:"allowance_ms,omitempty"`
+	// Devices are the pins of the seat the run is on (the layer seat's device, PCI-order
+	// indices or UUID prefixes), recorded when the run starts. Empty = no pin known (a
+	// record from a build that predates the field, or a seat nobody declared a pin for).
+	Devices        []string `json:"devices,omitempty"`
+	LastProgressMs int64    `json:"last_progress_ms,omitempty"`
+	TokS           float64  `json:"tok_s,omitempty"`
+	LivePhase      string   `json:"live_phase,omitempty"`
+	AllowanceMs    int64    `json:"allowance_ms,omitempty"`
 }
 
 // Liveness is the one-line reading of a run's job liveness, shared by every
@@ -563,6 +567,57 @@ func readRecord(path string) (Run, bool) {
 		time.Sleep(pause)
 	}
 	return Run{}, false
+}
+
+// OnPin reports whether the run's seat is pinned to the card pin names (the same pin space the
+// run recorded: a layer seat's device, an index or a UUID prefix).
+func (r Run) OnPin(pin string) bool {
+	pin = strings.TrimSpace(pin)
+	if pin == "" {
+		return false
+	}
+	for _, d := range r.Devices {
+		if strings.EqualFold(strings.TrimSpace(d), pin) {
+			return true
+		}
+	}
+	return false
+}
+
+// Where is List filtered by a predicate: the runs a drain or a cap reads when the question is
+// not "which seat" but "which cards".
+func (r *Registry) Where(now time.Time, pred func(Run) bool) []Run {
+	all := r.List(now)
+	out := all[:0]
+	for _, run := range all {
+		if pred(run) {
+			out = append(out, run)
+		}
+	}
+	return out
+}
+
+// OnSeatPinned is OnSeat for a seat whose pins are known (plan P5). A seat pinned to ONE card
+// shares that card with every other seat on it, so its line is the card's: the runs on the named
+// seats plus every run recorded against the same pin. A seat that spans cards, or whose pin is
+// unknown, keeps the per-seat line (OnSeat): counting by card there would mix lines that do not
+// contend.
+func (r *Registry) OnSeatPinned(now time.Time, pins []string, names ...string) []Run {
+	if len(pins) != 1 {
+		return r.OnSeat(now, names...)
+	}
+	pin := pins[0]
+	return r.Where(now, func(run Run) bool {
+		if run.OnPin(pin) {
+			return true
+		}
+		for _, n := range names {
+			if n != "" && strings.EqualFold(run.Seat, n) {
+				return true
+			}
+		}
+		return false
+	})
 }
 
 // OnSeat is List filtered to the runs on any of the named seats (id or alias,

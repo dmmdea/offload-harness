@@ -230,7 +230,7 @@ only**. On every agent door, the CLI included, the deny-list can never be lifted
 | Door | Attended? | `allow_labels` lifts the deny-list | Host allowlist | Extra requirement |
 |---|---|---|---|---|
 | MCP `offload_browse` | yes (the only one) | yes | optional (`allow_hosts`) | lane configured; `route` local |
-| CLI `local-agent --allow-browse` | no (always unattended) | never | required (`--browse-hosts host1,host2`); the grant is refused without it | lane configured on this box; an audit path (default `<HOME>/.local-offload/agent-audit.jsonl`) |
+| CLI `local-agent --allow-browse` | no (always unattended) | never | required (`--browse-hosts host1,host2`); the grant is refused without it | lane configured on this box; an audit path (default `agent-audit.jsonl` under the install root: `home`, else `<HOME>/.local-offload`) |
 | `agent_run` with `allow_browse` | no (unattended) | never | required (non-empty `browse_hosts`) | `agent_allow_browse: true` on this node; lane configured; an audit path |
 | `agent_delegate` with `allow_browse` | no (unattended) | never | required (non-empty `browse_hosts`) | `route` local (intake rejects otherwise); placement never picks a remote node |
 | Fleet contract with `allow_browse` | no (unattended) | never | required | the node refuses it at ACK unless `agent_allow_browse: true` |

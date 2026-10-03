@@ -51,9 +51,11 @@ import (
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/gpuactivity"
 	"github.com/dmmdea/offload-harness/internal/gpulease"
+	"github.com/dmmdea/offload-harness/internal/gpuprobe"
 	"github.com/dmmdea/offload-harness/internal/modelaffinity"
 	"github.com/dmmdea/offload-harness/internal/seatload"
 	"github.com/dmmdea/offload-harness/internal/seatrate"
+	"github.com/dmmdea/offload-harness/internal/swapclient"
 )
 
 // drainProbe is what one drain reads and where it reports.
@@ -77,6 +79,9 @@ type drainProbe struct {
 	// is the bound on a run that heartbeats but makes no progress, which the
 	// 8 h budget otherwise holds the card for.
 	stuckAfter time.Duration
+	// skipSeat (plan P5): the seat sits on cards the lease does not hold, so its own gauge is
+	// not what the drain waits for: only the runs p.runs returns (the ones on the leased cards).
+	skipSeat bool
 }
 
 // drainSeat is the gauge-only drain: the historical signature, kept for the
@@ -112,7 +117,11 @@ func drainUntil(ctx context.Context, p drainProbe, deadline time.Time) error {
 	stuckKey, stuckSince := "", start
 	for {
 		now := time.Now()
-		rd, err := seatload.Inflight(ctx, p.client, p.endpoint, p.model)
+		var rd seatload.Reading
+		var err error
+		if !p.skipSeat {
+			rd, err = seatload.Inflight(ctx, p.client, p.endpoint, p.model)
+		}
 		var runs []gpuactivity.Run
 		if p.runs != nil {
 			runs = p.runs(now, p.model, rd.Canonical)
@@ -306,7 +315,7 @@ func unloadSeat(ctx context.Context, client *http.Client, endpoint, model string
 		why = err.Error()
 	}
 	if len(protect) > 0 {
-		return fmt.Errorf("unload %s: the per-model route failed (%s), and the only other route, GET /unload, unloads everything: refused while the memory stack (%s) may be resident", model, why, strings.Join(protect, ", "))
+		return fmt.Errorf("unload %s: the per-model route failed (%s), and the only other route, GET /unload, unloads everything: refused while the memory stack or a seat that must stay (%s) may be resident", model, why, strings.Join(protect, ", "))
 	}
 	req, _ = http.NewRequestWithContext(ctx, http.MethodGet, base+"/unload?model="+url.QueryEscape(model), nil)
 	resp, err = client.Do(req)
@@ -401,6 +410,167 @@ var maintenanceClient = &http.Client{Timeout: 15 * time.Minute}
 // wrapper form; Manager.Restamp by epoch for the detached child's lease).
 type restamper func(fn func(*gpulease.Meta)) error
 
+// leaseScope says which seats sit on the cards a lease holds (plan P5, register C-86): `--drain`
+// and `--unload-seat` clear THOSE cards, not the node. A whole-node lease (no ids) reaches every
+// seat. A seat whose pin is unknown, cannot be placed on a card, or is read while the card
+// table cannot be, is on the leased cards: the direction of every doubt is today's behaviour.
+type leaseScope struct {
+	cfg     config.Config
+	ids     []string
+	cards   []gpuprobe.Card
+	cardsOK bool
+}
+
+func newLeaseScope(ctx context.Context, cfg config.Config, ids []string) leaseScope {
+	s := leaseScope{cfg: cfg, ids: ids}
+	if len(ids) == 0 {
+		return s
+	}
+	cards, _, err := cardTable(ctx, cfg)
+	s.cards, s.cardsOK = cards, err == nil && len(cards) > 0
+	if !s.cardsOK {
+		// The fallback is right (every doubt fences) and silent, until now: the operator would
+		// believe a seat on another card was spared.
+		why := "no card was listed"
+		if err != nil {
+			why = err.Error()
+		}
+		fmt.Fprintf(os.Stderr, "gpu reserve: the card table could not be read (%s): every seat is treated as sitting on the leased cards, so the drain and unload act as for the whole node\n", why)
+	}
+	return s
+}
+
+func (s leaseScope) bounded() bool { return len(s.ids) > 0 }
+
+func (s leaseScope) touchesPins(pins []string) bool {
+	if !s.bounded() || !s.cardsOK {
+		return true
+	}
+	rids, ok := gpulease.ResolvePins(pins, s.cards)
+	if !ok {
+		return true
+	}
+	return gpulease.Info{Held: true, Devices: s.ids}.Touches(rids)
+}
+
+// touches reports whether the seat serving model sits on the leased cards.
+func (s leaseScope) touches(model string) bool {
+	if !s.bounded() {
+		return true
+	}
+	pins, ok := s.cfg.ModelPins(model)
+	if !ok {
+		return true
+	}
+	return s.touchesPins(pins)
+}
+
+// touchesRun reports whether a registered run is on the leased cards: by the pins it recorded,
+// else by the seat it runs on.
+func (s leaseScope) touchesRun(r gpuactivity.Run) bool {
+	if len(r.Devices) > 0 {
+		return s.touchesPins(r.Devices)
+	}
+	return s.touches(r.Seat)
+}
+
+// split divides models into those on the leased cards and those that are not.
+func (s leaseScope) split(models []string) (on, off []string) {
+	for _, m := range models {
+		if s.touches(m) {
+			on = append(on, m)
+		} else {
+			off = append(off, m)
+		}
+	}
+	return on, off
+}
+
+// unloadModelsFor is the model-id list the render lane's freeLlamaSwap unloads under a lease
+// that holds leaseIDs: the llama-swap roster, minus the memory stack, minus every seat pinned to
+// cards the lease does not hold. A model nobody declared a pin for stays on the list (it could
+// be anywhere). ok is false for a whole-node lease (nothing to narrow: the render lane keeps its
+// own rule) and when the roster is empty.
+func unloadModelsFor(ctx context.Context, cfg config.Config, roster []string, leaseIDs []string) ([]string, bool) {
+	if len(leaseIDs) == 0 || len(roster) == 0 {
+		return nil, false
+	}
+	scope := newLeaseScope(ctx, cfg, leaseIDs)
+	keep := map[string]bool{}
+	for _, m := range effectiveMemoryStack(cfg) {
+		keep[strings.ToLower(strings.TrimSpace(m))] = true
+	}
+	var out []string
+	for _, id := range roster {
+		if keep[strings.ToLower(strings.TrimSpace(id))] {
+			continue
+		}
+		if scope.touches(id) {
+			out = append(out, id)
+		}
+	}
+	return out, true
+}
+
+// unloadModelsEnv renders the list as the environment variable the render lane reads
+// (GPU_LEASE_UNLOAD_MODELS): a comma list, `-` for "unload nothing", and no variable at all
+// when the list is unknown, which leaves the lane on its own rule.
+func unloadModelsEnv(models []string, known bool) string {
+	if !known {
+		return ""
+	}
+	if len(models) == 0 {
+		return "GPU_LEASE_UNLOAD_MODELS=-"
+	}
+	return "GPU_LEASE_UNLOAD_MODELS=" + strings.Join(models, ",")
+}
+
+// leaseDevicesOf is the cards the live lease with this epoch holds (lease ids), nil when the epoch
+// is not live or holds the whole node.
+func leaseDevicesOf(m *gpulease.Manager, epoch uint64) []string {
+	for _, l := range m.Leases() {
+		if l.Epoch == epoch {
+			return l.Devices
+		}
+	}
+	fmt.Fprintf(os.Stderr, "gpu hold: lease epoch %d is not live in this lease directory, so its cards cannot be read: the drain and unload act as for the whole node\n", epoch)
+	return nil
+}
+
+// detachMaintain is the detached holder's maintain step (`gpu reserve --detach --drain
+// --unload-seat`): the drain and unload of the lease the hidden child holds, scoped to that
+// lease's cards by epoch.
+func detachMaintain(m *gpulease.Manager, epoch uint64, cfg config.Config, drain bool, deadline time.Time, unload, exclusive bool) error {
+	return maintainSeatScoped(context.Background(), cfg, func(fn func(*gpulease.Meta)) error { return m.Restamp(epoch, fn) },
+		drain, deadline, unload, exclusive, markWarmOwed(m), leaseDevicesOf(m, epoch))
+}
+
+// rosterIDsFn reads the llama-swap roster ids; a variable so a test needs no llama-swap.
+var rosterIDsFn = func(ctx context.Context, endpoint string) ([]string, error) {
+	r, err := swapclient.FetchRoster(ctx, endpoint, 5*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	return r.IDs(), nil
+}
+
+// wrapperUnloadEnv is the GPU_LEASE_UNLOAD_MODELS entry a device lease's wrapped command is
+// handed (plan P5): the render lane's freeLlamaSwap unloads exactly that list instead of every
+// model off the memory stack. "" for a whole-node lease, and whenever the roster cannot be read
+// (the render lane then keeps its own rule, which only ever unloads more, never less).
+func wrapperUnloadEnv(ctx context.Context, cfg config.Config, leaseIDs []string) string {
+	if len(leaseIDs) == 0 || strings.TrimSpace(cfg.Endpoint) == "" {
+		return ""
+	}
+	roster, err := rosterIDsFn(ctx, cfg.Endpoint)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "gpu reserve: the llama-swap roster could not be read (%v): the render lane keeps its own rule and unloads every model off the memory stack, not only the seats on the leased cards\n", err)
+		return ""
+	}
+	models, known := unloadModelsFor(ctx, cfg, roster, leaseIDs)
+	return unloadModelsEnv(models, known)
+}
+
 // maintainSeat is maintainSeatCtx for a caller that nothing cancels.
 func maintainSeat(cfg config.Config, restamp restamper, drain bool, deadline time.Time, unload, exclusive bool, owed func(seat string)) error {
 	return maintainSeatCtx(context.Background(), cfg, restamp, drain, deadline, unload, exclusive, owed)
@@ -419,14 +589,30 @@ func maintainSeat(cfg config.Config, restamp restamper, drain bool, deadline tim
 // comes BEFORE the unload, so a lease that is already gone never gets as far
 // as clearing the seat under whoever holds the card now.
 func maintainSeatCtx(ctx context.Context, cfg config.Config, restamp restamper, drain bool, deadline time.Time, unload, exclusive bool, owed func(seat string)) error {
+	return maintainSeatScoped(ctx, cfg, restamp, drain, deadline, unload, exclusive, owed, nil)
+}
+
+// maintainSeatScoped is maintainSeatCtx for a lease that holds the cards in devices (lease ids):
+// the drain waits only for runs on those cards, and the unload takes only the seats that sit on
+// them (plan P5). nil devices is the whole node, exactly as before.
+func maintainSeatScoped(ctx context.Context, cfg config.Config, restamp restamper, drain bool, deadline time.Time, unload, exclusive bool, owed func(seat string), devices []string) error {
 	endpoint, model, err := seatTarget(cfg)
 	if err != nil {
 		return err
 	}
+	scope := newLeaseScope(ctx, cfg, devices)
+	agentOn := scope.touches(model)
+	if scope.bounded() && !agentOn {
+		fmt.Fprintf(os.Stderr, "gpu reserve: %s sits on cards this lease does not hold; it is neither drained nor unloaded\n", model)
+	}
 	if drain {
-		p := drainProbe{client: maintenanceClient, endpoint: endpoint, model: model, every: 2 * time.Second, out: os.Stderr, hint: seatTurnHint(cfg, model), stuckAfter: seatStuckAfter(cfg, model)}
+		p := drainProbe{client: maintenanceClient, endpoint: endpoint, model: model, every: 2 * time.Second, out: os.Stderr, hint: seatTurnHint(cfg, model), stuckAfter: seatStuckAfter(cfg, model), skipSeat: !agentOn}
 		if reg, rerr := gpuactivity.Open(cfg.GPULockPath, cfg.StateDir); rerr == nil {
 			p.runs = reg.OnSeat
+			if scope.bounded() {
+				// The runs that matter are the ones on the leased cards, whatever seat they run on.
+				p.runs = func(now time.Time, _ ...string) []gpuactivity.Run { return reg.Where(now, scope.touchesRun) }
+			}
 		} else {
 			fmt.Fprintf(os.Stderr, "gpu reserve: run registry unavailable (%v): draining on the seat's gauge alone\n", rerr)
 		}
@@ -445,7 +631,11 @@ func maintainSeatCtx(ctx context.Context, cfg config.Config, restamp restamper, 
 			}
 			return err
 		}
-		fmt.Fprintf(os.Stderr, "gpu reserve: %s drained (no request in flight, no run registered)\n", model)
+		if agentOn {
+			fmt.Fprintf(os.Stderr, "gpu reserve: %s drained (no request in flight, no run registered)\n", model)
+		} else {
+			fmt.Fprintf(os.Stderr, "gpu reserve: the leased cards are drained (no run registered on them)\n")
+		}
 	}
 	if restamp != nil && (drain || exclusive) {
 		if err := restamp(func(m *gpulease.Meta) {
@@ -467,7 +657,7 @@ func maintainSeatCtx(ctx context.Context, cfg config.Config, restamp restamper, 
 		// on all three cards after a video render, with nothing asking for it,
 		// and sat there until its ttl. A reading that fails or is ambiguous keeps
 		// the old behaviour (owed): "could not tell" must not cost a warm seat.
-		wasLoaded := seatWasResident(ctx, endpoint, model)
+		wasLoaded := agentOn && seatWasResident(ctx, endpoint, model)
 		// OTHER RESIDENTS, read before either unload so the record reflects
 		// what was ACTUALLY there (register D-1xx-3, 2026-09-23; R2/R3
 		// measured on <node-e>): `--unload-seat` cleared only the
@@ -484,15 +674,24 @@ func maintainSeatCtx(ctx context.Context, cfg config.Config, restamp restamper, 
 		if len(kept) > 0 {
 			fmt.Fprintf(os.Stderr, "gpu reserve: kept the memory stack resident (mem0 never yields to a lease): %s\n", strings.Join(kept, ", "))
 		}
+		// A lease that holds some cards takes the seats on those cards and leaves the rest
+		// resident (plan P5). A seat that stays is also protected from the total unload route:
+		// GET /unload ignores ?model=, so it would take the card-0 seat down with the card-2 one.
+		others, leftAlone := scope.split(others)
+		if len(leftAlone) > 0 {
+			fmt.Fprintf(os.Stderr, "gpu reserve: left resident (not on the leased cards): %s\n", strings.Join(leftAlone, ", "))
+		}
 		// The legacy GET /unload is total, so it may run only when no stack member
 		// is resident; an unreadable /running cannot show that, so it protects the
 		// whole configured stack.
-		protect := kept
+		protect := append(append([]string(nil), kept...), leftAlone...)
 		if !readable {
 			protect = stack
 		}
-		if err := unloadSeat(ctx, maintenanceClient, endpoint, model, protect); err != nil {
-			return err
+		if agentOn {
+			if err := unloadSeat(ctx, maintenanceClient, endpoint, model, protect); err != nil {
+				return err
+			}
 		}
 		unloadedOthers := unloadOthers(ctx, endpoint, others, protect)
 		if len(unloadedOthers) > 0 {
@@ -500,7 +699,11 @@ func maintainSeatCtx(ctx context.Context, cfg config.Config, restamp restamper, 
 				len(unloadedOthers), strings.Join(unloadedOthers, ", "))
 		}
 		if !wasLoaded {
-			fmt.Fprintf(os.Stderr, "gpu reserve: %s was not loaded; nothing to warm back after the window\n", model)
+			// A seat that sits on other cards was never this lease's to unload, so it is owed no
+			// warm-back and there is nothing to say about it here (it was announced above).
+			if agentOn {
+				fmt.Fprintf(os.Stderr, "gpu reserve: %s was not loaded; nothing to warm back after the window\n", model)
+			}
 			return nil
 		}
 		if owed != nil {

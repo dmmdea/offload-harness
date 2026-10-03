@@ -102,12 +102,18 @@ func Inspect(lockPath string) Info { return inspectAt(lockPath, DefaultTTL, time
 // gate would report a busy card as free. That is the same failure mode as the path split
 // (C5) and the schema split, one layer down. Delegating means there is one rule.
 func inspectAt(lockPath string, _ time.Duration, _ time.Time) Info {
+	return inspectWith(lockPath, gpulease.InspectDir)
+}
+
+// inspectWith is the inspection with the lease reader a caller chose: the one definition of
+// "held" (gpulease's) read through whatever narrowing the caller applies to it.
+func inspectWith(lockPath string, read func(dir string) gpulease.Info) Info {
 	// Delegate WHOLESALE, not just the rule. Reconstructing the judgement here from the
 	// record — even using the shared Reclaimable — was still a second reader, and it
 	// broke the moment the heartbeat moved into a per-epoch file: a record-only view
 	// sees a frozen RenewedAtMs and calls a live, renewing holder stale as soon as its
 	// declared window lapses. One inspection path, one answer.
-	i := gpulease.InspectDir(lockPath)
+	i := read(lockPath)
 	return Info{Held: i.Held, Age: i.Age, PID: i.PID, Class: string(i.Class), ExpiresAt: i.ExpiresAt}
 }
 
@@ -116,12 +122,21 @@ func inspectAt(lockPath string, _ time.Duration, _ time.Time) Info {
 // inspection: Held=false means the slot freed (proceed); Held=true means the
 // caller should defer, with Age available for the defer reason.
 func WaitFree(ctx context.Context, lockPath string, wait, poll time.Duration) Info {
+	return WaitFreeScoped(ctx, lockPath, wait, poll, gpulease.InspectDir)
+}
+
+// WaitFreeScoped is WaitFree for a caller whose work sits on some of the cards, not all of
+// them (plan P4): read is the lease reader, handed the lease directory and returning the leases
+// that matter to the caller (the vision gate passes the seat-narrowed reading the text gate
+// uses), so a render on a card the caller's seat is not pinned to is not a lease to wait for.
+// The held/not-held rule is still gpulease's; only which leases count changes.
+func WaitFreeScoped(ctx context.Context, lockPath string, wait, poll time.Duration, read func(dir string) gpulease.Info) Info {
 	if poll <= 0 {
 		poll = time.Millisecond
 	}
 	deadline := time.Now().Add(wait)
 	for {
-		info := Inspect(lockPath)
+		info := inspectWith(lockPath, read)
 		if !info.Held {
 			return info
 		}
@@ -153,4 +168,12 @@ func WaitFree(ctx context.Context, lockPath string, wait, poll time.Duration) In
 		case <-time.After(remain):
 		}
 	}
+}
+
+// EpochIsCurrent is the per-epoch fence for a caller that was handed a lease (an
+// inherited GPU_LEASE_EPOCH): that epoch is still a live lease and still its own. This
+// package never compared epochs itself (it only reports held/free), so the fence lives in
+// gpulease and is delegated to, like the rest of the inspection.
+func EpochIsCurrent(lockPath string, epoch uint64) bool {
+	return gpulease.EpochIsCurrent(lockPath, epoch)
 }

@@ -147,6 +147,13 @@ type Live struct {
 	// along so a delegator's defer can say what the node saw ("free 3.0 GiB −
 	// footprint 10.5 < floor 4"), not merely that it refused.
 	Verdict func(layer string) (verdict *bool, reason string)
+	// CardsHeld reports whether a lease this process does not hold sits on any card the
+	// pins name (PCI-order indices or UUID prefixes: a seat's Device split by DeviceList),
+	// and says why. It is how the table learns that the flagship layer's cards intersect a
+	// render's, so the agent lane takes the next layer whose cards are free (agent row 5).
+	// nil = unknown, which changes nothing: a remote row's Live carries none, and the node
+	// that owns the cards decides at admission.
+	CardsHeld func(pins []string) (held bool, why string)
 }
 
 // Decision is what the table hands back: the Placed block every result
@@ -223,6 +230,11 @@ func (r Request) need() int {
 	}
 	return r.EstTokens + mt
 }
+
+// Need is the tokens a window must hold for the request: the prompt estimate plus the
+// completion budget. Exported so the delegator sizes a local seat against a contract the
+// way the table does.
+func (r Request) Need() int { return r.need() }
 
 // budget is the contract's wall budget with the door's default applied.
 func (r Request) budget() int {
@@ -341,13 +353,65 @@ func (t table) admissible(l config.LayerSpec, s config.LayerSeat) (ok bool, reas
 // "the 3 card tier as the agent seat now and the 2 card tier to be the opt in
 // one"), so a triple that carries the agent seat is the default and the pair is
 // entered by name; a box whose triple is opt-in (or absent) keeps the pair.
-func (t table) agentHome() string {
-	if l, ok := findLayer(t.layers, LayerTriple); ok && !l.OptIn && !l.Dormant {
+func (t table) agentHome() string { return AgentHome(t.layers) }
+
+// AgentHome names the layer whose agent seat takes the free choice (see table.agentHome).
+func AgentHome(layers []config.LayerSpec) string {
+	if l, ok := findLayer(layers, LayerTriple); ok && !l.OptIn && !l.Dormant {
 		if _, ok := findSeat(l, RoleAgent); ok {
 			return LayerTriple
 		}
 	}
 	return LayerPair
+}
+
+// ChainSeat is one local agent seat a contract may run on.
+type ChainSeat struct {
+	Layer config.LayerSpec
+	Seat  config.LayerSeat
+}
+
+// AgentChain lists the local agent seats a contract may run on, in the order the table
+// tries them. named != "" is a contract that names its layer: that layer's agent seat alone
+// (it runs there or waits there). Otherwise the home layer's seat first, then every other
+// declared layer's agent seat in declared order, skipping opt-in layers (never entered
+// unnamed) and dormant ones. need > 0 drops a seat whose served window cannot hold the
+// contract (a seat that declares no window is kept: it cannot be sized, so it is not
+// excluded on a guess). The delegator reads it to decide whether the local box is busy for
+// a contract, and the table reads it to fall back when the home seat's cards are held, so
+// the two cannot disagree about which seats exist.
+func AgentChain(layers []config.LayerSpec, named string, need int) []ChainSeat {
+	if len(layers) == 0 {
+		return nil
+	}
+	fits := func(s config.LayerSeat) bool { return need <= 0 || s.CtxTokens <= 0 || need <= s.CtxTokens }
+	if named != "" {
+		l, ok := findLayer(layers, named)
+		if !ok || l.Dormant {
+			return nil
+		}
+		s, ok := findSeat(l, RoleAgent)
+		if !ok {
+			return nil
+		}
+		return []ChainSeat{{Layer: l, Seat: s}}
+	}
+	home := AgentHome(layers)
+	var out []ChainSeat
+	if l, ok := findLayer(layers, home); ok && !l.Dormant {
+		if s, ok := findSeat(l, RoleAgent); ok && fits(s) {
+			out = append(out, ChainSeat{Layer: l, Seat: s})
+		}
+	}
+	for _, l := range layers {
+		if l.Name == home || l.OptIn || l.Dormant {
+			continue
+		}
+		if s, ok := findSeat(l, RoleAgent); ok && fits(s) {
+			out = append(out, ChainSeat{Layer: l, Seat: s})
+		}
+	}
+	return out
 }
 
 // homeAgentModel names the default agent seat (agentHome's) for eviction and
@@ -464,6 +528,17 @@ func (t table) agent() Decision {
 		if need <= s.CtxTokens {
 			d := Decision{Placed: core.Placed{Tier: l.Tier, Layer: l.Name, Role: RoleAgent, Seat: s.Model, Devices: s.DeviceList(), CtxTokens: s.CtxTokens}}
 			reason := fmt.Sprintf("agent contract (~%d tokens) fits the %s's agent seat %s (window %d)", need, l.Name, s.Model, s.CtxTokens)
+			// Row 5c (plan P4): the home seat's cards are held by a lease this process does
+			// not hold. A card-2 render does not need the contract to wait when the single
+			// layer's card-0 seat is free: take the next declared layer whose cards are free;
+			// with none, keep the home seat and queue at its gate.
+			if held, why := t.cardsHeld(s); held {
+				if fb, ok := t.heldFallback(l, s, need, why); ok {
+					return fb
+				}
+				d.Reason = reason + fmt.Sprintf("; the %s's cards are held (%s) and no local layer has free cards for this contract: it queues at the seat's gate, and the delegator may route it to another node", l.Name, why)
+				return d
+			}
 			st := t.occupancy(l.Name, RoleAgent)
 			if st.Known && st.Loaded && s.MaxInflight > 0 && st.Inflight >= s.MaxInflight {
 				reason += fmt.Sprintf("; %s at %d/%d in flight — queued in the seat (recorded, not re-placed: no other layer can hold this contract beside a loaded %s)", l.Name, st.Inflight, s.MaxInflight, l.Name)
@@ -509,6 +584,40 @@ func (t table) agent() Decision {
 		return deferContract("", t.restricted("no layer serves an agent contract (roles agent / long)"))
 	}
 	return deferContract(largestLayer, t.restricted(fmt.Sprintf("contract needs ~%d tokens; no layer window holds it (largest %d)", need, largest)))
+}
+
+// cardsHeld asks the live reader whether a lease holds the cards a seat is pinned to. No
+// reader, or a seat with no pin, is not held: unknown changes nothing.
+func (t table) cardsHeld(s config.LayerSeat) (bool, string) {
+	if t.live.CardsHeld == nil {
+		return false, ""
+	}
+	pins := s.DeviceList()
+	if len(pins) == 0 {
+		return false, ""
+	}
+	return t.live.CardsHeld(pins)
+}
+
+// heldFallback is row 5c: the next declared layer, after the home layer whose cards a lease
+// holds, whose agent seat fits the contract and whose cards are free. A free choice only: a
+// contract that names its layer (t.only) runs there or waits there.
+func (t table) heldFallback(home config.LayerSpec, homeSeat config.LayerSeat, need int, why string) (Decision, bool) {
+	if t.only != "" {
+		return Decision{}, false
+	}
+	for _, c := range AgentChain(t.layers, "", need) {
+		if c.Layer.Name == home.Name {
+			continue
+		}
+		if held, _ := t.cardsHeld(c.Seat); held {
+			continue
+		}
+		return Decision{Placed: core.Placed{Tier: c.Layer.Tier, Layer: c.Layer.Name, Role: RoleAgent, Seat: c.Seat.Model, Devices: c.Seat.DeviceList(), CtxTokens: c.Seat.CtxTokens,
+			Reason: fmt.Sprintf("agent contract (~%d tokens): the %s's agent seat %s is on held cards (%s), so the fallback is the %s layer's agent seat %s on device %s, whose cards are free (window %d)",
+				need, home.Name, homeSeat.Model, why, c.Layer.Name, c.Seat.Model, c.Seat.Device, c.Seat.CtxTokens)}}, true
+	}
+	return Decision{}, false
 }
 
 // pairLong is the pair's long-seat row, shared by window overflow (row 6) and

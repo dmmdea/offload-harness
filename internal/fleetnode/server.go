@@ -158,6 +158,10 @@ type Options struct {
 	// Lease reads this node's machine-wide GPU lease (gpulease.InspectDir over
 	// the config's lease dir). nil = not advertised, never refused.
 	Lease func() gpulease.Info
+	// LeaseStanding derives what the held lease is doing (orphaned, overdue, stalled) so
+	// /fleet/health can publish it beside "held". nil = the lease block carries held,
+	// class and window only, as before.
+	LeaseStanding func(gpulease.Info) gpulease.Standing
 	// Store returns the store steward's last status; nil = no steward.
 	Store func() storesteward.Status
 	// ServingConfig reports the rendered serving config's provenance: its spec
@@ -1559,10 +1563,20 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if s.opts.Lease != nil {
 		if info := s.opts.Lease(); info.Held {
 			payload.Lease = leaseHealthOf(info, time.Now(), s.opts.Cfg.FleetBusyLeaseSec)
+			if s.opts.LeaseStanding != nil {
+				st := s.opts.LeaseStanding(info)
+				payload.Lease.LeaseStanding = LeaseStanding{Orphaned: st.Orphaned, Stalled: st.Stalled}
+			}
 			leasedText = info.Class == gpulease.ClassText
 			// Any class, judged by REMAINING time (0.113.27): a long media
 			// reservation takes the card just as completely as a text one.
-			leaseBusy = payload.Lease.Busy
+			// An OVERDUE lease publishes busy so a delegator ranks the node last,
+			// but it is not a refusal: dispatch does not turn work away for a
+			// media lease, so the node keeps advertising the room it has. Folding
+			// the overdue busy in here made saturation.high true and idle_slot
+			// false, and hasRoom() then kept the capacity wait from ever asking
+			// the one remote that would have taken the work.
+			leaseBusy = payload.Lease.Busy && !payload.Lease.Overdue
 			// What the reservation is DOING, beside what it declared.
 			payload.LeaseExclusive, payload.LeaseDraining = info.Exclusive, info.Draining
 		}
@@ -1697,6 +1711,8 @@ type LeaseHealth struct {
 	PID    int    `json:"pid"`
 	Reason string `json:"reason,omitempty"`
 	Until  string `json:"until"` // RFC3339
+	// LeaseStanding is embedded so its keys sit flat in the lease block (orphaned, stalled).
+	LeaseStanding
 	// RemainingSec and Busy are additive (0.113.27). RemainingSec is how much
 	// longer the card is spoken for; Busy is THIS NODE'S OWN verdict that the
 	// reservation is long enough to make it a non-target (fleet_busy_lease_sec).
@@ -1706,6 +1722,34 @@ type LeaseHealth struct {
 	// both — decoding to false, i.e. exactly the pre-0.113.27 behaviour.
 	RemainingSec int  `json:"remaining_sec,omitempty"`
 	Busy         bool `json:"busy,omitempty"`
+	// Overdue is additive (GPU routing P1): the lease is HELD and its declared
+	// window has already ended, so the holder is still using the cards past what
+	// it asked for. It travels beside Busy rather than being folded into it,
+	// because the two answer different delegator questions: Busy says "do not
+	// count on this card" (and hard-excludes a non-text lease from placement),
+	// Overdue says "the declared end is no evidence about when it frees", which a
+	// delegator uses to rank the node last without excluding it. A node one
+	// release behind omits it, which decodes to false.
+	Overdue bool `json:"overdue,omitempty"`
+}
+
+// LeaseStanding is what a held lease is DOING, published beside the fact that it is held
+// (plan P8). Each key is absent unless true, so a healthy lease puts nothing new on the
+// wire and a node one release behind simply omits them: a delegator decodes them as false.
+// They describe the lease, they never refuse work on their own: ranking a node whose lease
+// is orphaned or stalled behind one whose lease is healthy is the delegator's call.
+//
+// There is deliberately NO Overdue here. "The declared window ended while the holder still
+// renews" is the lease block's own expiry-based `overdue` key (the routing change, P1), read
+// from the same record: a second field under the same JSON key would be shadowed by the
+// shallower one when the two merge, leaving this one dead, and two sources for one wire key
+// is a defect whichever wins. The overdue standing is still computed and shown by `gpu
+// status` and offload_status; only the wire key has a single owner.
+type LeaseStanding struct {
+	// Orphaned: an attended lease whose owner has been gone past the grace.
+	Orphaned bool `json:"orphaned,omitempty"`
+	// Stalled: the lease's progress file did not move inside its stall window.
+	Stalled bool `json:"stalled,omitempty"`
 }
 
 // FleetBusyLeaseSecDefault is the remaining-time threshold above which a held
@@ -1729,16 +1773,31 @@ func busyLeaseThreshold(cfgSec int) (time.Duration, bool) {
 
 func leaseHealthOf(info gpulease.Info, now time.Time, cfgSec int) *LeaseHealth {
 	h := &LeaseHealth{Held: true, Class: string(info.Class), PID: info.PID, Reason: info.Reason, Until: info.ExpiresAt.UTC().Format(time.RFC3339)}
-	if info.ExpiresAt.IsZero() {
+	// No declared end: nothing to be overdue against. The Unix-epoch test covers a
+	// caller that builds an Info from a raw record (time.UnixMilli(0) is 1970, and
+	// IsZero() is false for it); gpulease's own reader leaves the zero Time.
+	if info.ExpiresAt.IsZero() || info.ExpiresAt.UnixMilli() <= 0 {
 		return h
 	}
 	remaining := info.ExpiresAt.Sub(now)
-	if remaining < 0 {
+	// Overdue is read BEFORE the clamp. Clamping first is what made a lease that
+	// outlived its declared window read as free: remaining 0 is below every
+	// threshold, so Busy came out false for the one lease that is demonstrably
+	// still holding the cards (a held lease means its holder is alive and
+	// heartbeating; a `--for` window is not a ceiling for a wrapper holder).
+	overdue := remaining < 0
+	if overdue {
 		remaining = 0
 	}
 	h.RemainingSec = int(remaining / time.Second)
+	h.Overdue = overdue
+	// Both ways of being busy live inside the one switch, so a negative
+	// fleet_busy_lease_sec still turns the whole duration rule off (text-only
+	// refusal, the pre-0.113.27 behaviour) and an operator who disabled it does
+	// not get overdue-busy back. The 120 s short-lease rule is the first
+	// clause and is unchanged.
 	if thr, on := busyLeaseThreshold(cfgSec); on {
-		h.Busy = remaining > thr
+		h.Busy = remaining > thr || overdue
 	}
 	return h
 }

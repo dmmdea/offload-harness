@@ -573,5 +573,88 @@ foreach ($tid in @($profiles.PSObject.Properties.Name)) {
   }
 }
 
+# ---------------------------------------------------------------------------
+# Data home (register C-92): C: holds Windows and program installs, never data. Step 8
+# used to write no `home` (install.sh always did), so a fresh Windows install kept its
+# cache, ledger, media and delegation log under the user profile. Get-DataHome is the
+# pure rule; the Step 8 call site only runs `install volumes --json` and feeds it.
+# ---------------------------------------------------------------------------
+Write-Host "== Get-DataHome: the data drive comes from the install-volume rule =="
+Assert ([bool](Get-Command Get-DataHome -ErrorAction SilentlyContinue)) 'dot-source seam defines Get-DataHome'
+$volOk = '{"data_target":true,"volumes":[{"root":"C:\\","is_os":true},{"root":"D:\\"}],"choice":{"volume":{"root":"D:\\","fs":"NTFS"},"because":"most free space of the non-OS volumes (900.0 GiB free of 2000.0 GiB)"}}'
+$dh = Get-DataHome -VolumesJson $volOk -OsDrive 'C:'
+Assert ($dh.Home -ceq 'D:/local-offload')                                  'home is a fixed directory under the chosen volume, forward slashes'
+Assert ($dh.Because -match 'most free space')                             'the rule''s reason is carried through so it can be recorded'
+Assert ([string]::IsNullOrEmpty($dh.Error))                                'a qualifying volume is not an error'
+$dhSlash = Get-DataHome -VolumesJson '{"data_target":true,"choice":{"volume":{"root":"E:/"},"because":"x"}}' -OsDrive 'C:'
+Assert ($dhSlash.Home -ceq 'E:/local-offload')                             'a root spelled with a trailing slash does not double it'
+
+Write-Host "== Get-DataHome: an explicit OFFLOAD_DATA_HOME wins, but never onto the OS drive silently =="
+$ov = Get-DataHome -Override 'E:\stack\data\' -OsDrive 'C:' -VolumesJson $volOk
+Assert ($ov.Home -ceq 'E:/stack/data' -and $ov.Because -match 'OFFLOAD_DATA_HOME') 'the override is used, normalised, and the record says who chose it'
+$ovOs = Get-DataHome -Override 'C:\data\offload' -OsDrive 'C:' -VolumesJson $volOk
+Assert ([string]::IsNullOrEmpty($ovOs.Home) -and $ovOs.Error -match 'OS drive')    'an override on the OS drive is refused'
+Assert ($ovOs.Error -match 'OFFLOAD_ALLOW_OS_DATA')                               'the refusal names the explicit way to keep data there'
+$ovOsOk = Get-DataHome -Override 'c:\data\offload' -OsDrive 'C:' -VolumesJson $volOk -AllowOS $true
+Assert ($ovOsOk.Home -ceq 'c:/data/offload' -and [string]::IsNullOrEmpty($ovOsOk.Error)) 'OFFLOAD_ALLOW_OS_DATA makes it a deliberate, accepted choice'
+$ovUnc = Get-DataHome -Override '\\srv\share\offload' -OsDrive 'C:' -VolumesJson $volOk
+Assert ([string]::IsNullOrEmpty($ovUnc.Error))                             'a UNC override is not on the OS drive'
+
+Write-Host "== Get-DataHome: nowhere acceptable is a loud error, never a silent C: =="
+$none = Get-DataHome -VolumesJson '{"volumes":[{"root":"C:\\","is_os":true}],"error":"no eligible install volume: only the OS volume C:\\ qualifies"}' -OsDrive 'C:'
+Assert ([string]::IsNullOrEmpty($none.Home) -and $none.Error -match 'no eligible data volume')  'no qualifying volume yields an error and no home'
+Assert ($none.Error -match 'only the OS volume')                           'the loader''s own reason is shown'
+Assert ($none.Error -match 'OFFLOAD_DATA_HOME' -and $none.Error -match 'OFFLOAD_ALLOW_OS_DATA') 'both ways forward are named'
+$bad = Get-DataHome -VolumesJson 'not json at all' -OsDrive 'C:'
+Assert ([string]::IsNullOrEmpty($bad.Home) -and $bad.Error -match 'could not read')              'unreadable volume output is an error, not a guess'
+$empty = Get-DataHome -VolumesJson '' -OsDrive 'C:'
+Assert ([string]::IsNullOrEmpty($empty.Home) -and $empty.Error -match 'could not read')          'an empty probe (binary failed) is an error, not a guess'
+$osChoice = Get-DataHome -VolumesJson '{"data_target":true,"choice":{"volume":{"root":"C:\\","is_os":true},"because":"OS volume, selected only because it was explicitly allowed and no other volume qualified"}}' -OsDrive 'C:' -AllowOS $true
+Assert ($osChoice.Home -ceq 'C:/local-offload' -and $osChoice.Because -match 'explicitly allowed')  'with the OS volume explicitly allowed, the rule''s own choice stands and says so'
+
+Write-Host "== Get-DataHome: the choice must come from the data-volume rule, not the plain install rule =="
+# `install volumes` without --data names the volume with the most free space, and a Google
+# Drive virtual drive (FAT32, not removable, a cloud quota's free space) usually has the most.
+# The data-volume rule skips it and says so with data_target; a choice without that marker
+# is the plain rule's answer and is refused rather than written as the node's home.
+$cloudPick = Get-DataHome -VolumesJson '{"volumes":[{"root":"E:/","fs":"FAT32","label":"Google Drive"}],"choice":{"volume":{"root":"E:/","fs":"FAT32","label":"Google Drive"},"because":"most free space of the non-OS volumes (900.0 GiB free of 2000.0 GiB)"}}' -OsDrive 'C:'
+Assert ([string]::IsNullOrEmpty($cloudPick.Home) -and $cloudPick.Error -match 'install volumes --data') 'a plain-rule choice (a Google Drive FAT32 volume with the most free space) is refused, never written as home'
+Assert ($cloudPick.Error -match 'OFFLOAD_DATA_HOME')                       'the refusal names the explicit way forward'
+$dataPick = Get-DataHome -VolumesJson '{"data_target":true,"volumes":[{"root":"E:/"},{"root":"D:/"}],"choice":{"volume":{"root":"D:/","fs":"NTFS"},"because":"most free space of the non-OS volumes (100.0 GiB free of 1000.0 GiB); passed over for data: E:/ is a cloud-synced virtual drive (label Google Drive)"}}' -OsDrive 'C:'
+Assert ($dataPick.Home -ceq 'D:/local-offload' -and [string]::IsNullOrEmpty($dataPick.Error)) 'a data-rule choice is accepted'
+Assert ($dataPick.Because -match 'passed over for data')                   'and its recorded reason says what the rule passed over'
+$onlyCloud = Get-DataHome -VolumesJson '{"data_target":true,"volumes":[{"root":"E:/"}],"error":"no eligible install volume: not usable for data: E:/ is a cloud-synced virtual drive (label Google Drive)"}' -OsDrive 'C:'
+Assert ([string]::IsNullOrEmpty($onlyCloud.Home) -and $onlyCloud.Error -match 'no eligible data volume' -and $onlyCloud.Error -match 'Google Drive') 'with only a cloud drive left the install fails loud and names it'
+$ovCloud = Get-DataHome -Override 'E:\stack\data' -OsDrive 'C:' -VolumesJson '{"volumes":[]}'
+Assert ($ovCloud.Home -ceq 'E:/stack/data' -and [string]::IsNullOrEmpty($ovCloud.Error)) 'an explicit OFFLOAD_DATA_HOME needs no probe at all: the operator chose the directory'
+
+Write-Host "== Get-DataVolumeArgs: the probe always asks the data-volume rule =="
+Assert ([bool](Get-Command Get-DataVolumeArgs -ErrorAction SilentlyContinue)) 'dot-source seam defines Get-DataVolumeArgs'
+$va = Get-DataVolumeArgs
+Assert ((($va -join ' ')) -ceq 'install volumes --json --data')            'without the allow flag: install volumes --json --data'
+$vaOs = Get-DataVolumeArgs -AllowOS $true
+Assert ($vaOs -contains '--data' -and $vaOs[-1] -ceq '--allow-os-volume')  'OFFLOAD_ALLOW_OS_DATA adds the explicit allow and keeps --data'
+
+Write-Host '== a fresh config carries home, and the template pins no data path =='
+$withHome = Merge-ConfigSeed -ConfigText $tplText -Seed ([pscustomobject]@{ home = $dh.Home })
+Assert ((($withHome | ConvertFrom-Json).home) -ceq 'D:/local-offload')    'Merge-ConfigSeed writes the home key'
+Assert (@(($tplText | ConvertFrom-Json).PSObject.Properties | Where-Object { $_.Value -is [string] -and $_.Value -match '\.local-offload' }).Count -eq 0) `
+  'the template spells no ~/.local-offload data path: a literal is an explicit value that `home` cannot rebase'
+$hadHome = ($tplText | ConvertFrom-Json).PSObject.Properties['home']
+Assert ($null -eq $hadHome)                                                'the template itself carries no home: it is chosen per machine, never shipped'
+
+# Step 8 itself needs a full install to run, so its wiring is read from the source: the same
+# way the Go side lints the call sites it cannot reach (a fresh config must get its home from
+# the rule, fail loud when there is none, and leave the record).
+Write-Host '== Step 8 wires the data home =='
+$installText = Get-Content -Raw (Join-Path $setupDir 'install.ps1')
+Assert ($installText -match [regex]::Escape('$dh = Get-DataHome -VolumesJson $volJson -Override $env:OFFLOAD_DATA_HOME')) 'Step 8 resolves the data home through Get-DataHome'
+Assert ($installText -match [regex]::Escape('if ($dh.Error) { throw "data home: $($dh.Error)" }'))                      'Step 8 fails loud when no data home is acceptable'
+Assert ($installText -match [regex]::Escape('-Seed ([pscustomobject]@{ home = $dh.Home })'))                           'Step 8 merges the chosen home into the fresh config'
+Assert ($installText -match [regex]::Escape('$volArgs = Get-DataVolumeArgs -AllowOS $allowOsData')) 'Step 8 builds the probe through Get-DataVolumeArgs, so --data cannot be dropped at the call site'
+Assert ($installText -match [regex]::Escape("if (`$AllowOS) { `$a += '--allow-os-volume' }")) 'OFFLOAD_ALLOW_OS_DATA (and only it) reaches the volume rule as its explicit allow'
+Assert ($installText -match [regex]::Escape("`$allowOsData = (`$env:OFFLOAD_ALLOW_OS_DATA -eq '1')")) 'the allow is the explicit env value, never a default'
+Assert ($installText -match [regex]::Escape("`$manifest['data_home'] = `$script:dataHomeChoice.Home"))                   'the choice is recorded in installed.json'
+
 if ($failures -eq 0) { Write-Host 'ALL PASS' -ForegroundColor Green; exit 0 }
 Write-Host "FAILURES: $failures" -ForegroundColor Red; exit 1

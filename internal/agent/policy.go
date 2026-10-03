@@ -2,6 +2,7 @@ package agent
 
 import (
 	"encoding/json"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -53,12 +54,22 @@ type Action struct {
 // (never proceed without a human), making approval-before-destructive a
 // mechanism rather than a hope.
 type Policy struct {
-	unattended bool
-	audit      *AuditLog
-	allow      Allowlist // P3 egress allowlist; the zero value permits nothing (default-deny)
-	allowShell bool      // P4.6 shell capability; off by default (default-deny)
-	allowBrowse bool     // ADR 0060 browse capability; off by default (default-deny)
-	askQueue   *AuditLog // P5b: optional reviewable queue of asks deferred on an unattended run
+	unattended  bool
+	audit       *AuditLog
+	allow       Allowlist // P3 egress allowlist; the zero value permits nothing (default-deny)
+	allowShell  bool      // P4.6 shell capability; off by default (default-deny)
+	allowBrowse bool      // ADR 0060 browse capability; off by default (default-deny)
+	askQueue    *AuditLog // P5b: optional reviewable queue of asks deferred on an unattended run
+
+	// auditAdvisory (register SF-02, audit_all_doors=warn): a failed audit write is
+	// reported once (auditWarn) and never changes the decision.
+	auditAdvisory bool
+	auditWarn     sync.Once
+	// readGate is the read floor (SF-07), shared with every tool that reads file
+	// content, the write and GitHub tools included.
+	readGate *readGate
+	// auditByKey: the enforcing trail came from audit_all_doors=enforce (SF-02).
+	auditByKey bool
 
 	allowOverwrite bool // open-write: Allow overwrite of an existing file within the worktree
 	allowDelete    bool // open-write: Allow delete of a file within the worktree
@@ -235,10 +246,22 @@ func (p *Policy) Decide(a Action) (Decision, string) {
 		}
 	}
 	if p.audit != nil {
-		if err := p.audit.record(a, eff, reason, fired); err != nil && eff == Allow {
-			eff = Deny
-			reason = "refusing to proceed: audit write failed (" + err.Error() + ")"
-			_ = p.audit.record(a, eff, reason, fired) // best-effort: try to log the downgrade itself
+		if err := p.audit.record(a, eff, reason, fired); err != nil {
+			switch {
+			case p.auditAdvisory:
+				// Warn mode reports a broken trail and keeps going: this door never had
+				// the audit-write failure mode, and adding it is the enforce step.
+				p.auditWarn.Do(func() {
+					log.Printf("agent broker: audit write failed, continuing without the trail (audit_all_doors=warn): %v", err)
+				})
+			case eff == Allow:
+				eff = Deny
+				reason = "refusing to proceed: audit write failed (" + err.Error() + ")"
+				if p.auditByKey {
+					reason += "; " + auditEnforcedHint
+				}
+				_ = p.audit.record(a, eff, reason, fired) // best-effort: try to log the downgrade itself
+			}
 		}
 	}
 	return eff, reason
@@ -265,6 +288,14 @@ func stricter(x, y Decision) bool {
 type AuditLog struct {
 	mu   sync.Mutex
 	path string
+	// Hash chain (register SF-08, config audit_chain): when runID is set every row
+	// carries run_id, seq and prev_sha256 (the SHA-256 of the previous row of the
+	// same run, exactly as written), and EndRun closes the run with a run_end row.
+	// One AuditLog per Build, so one chain per run; runs interleave in the file.
+	runID  string
+	seq    int
+	prev   string
+	closed bool // EndRun wrote the run_end; a second EndRun writes nothing
 }
 
 // NewAuditLog returns a logger writing to path (created on first record).
@@ -298,6 +329,14 @@ type auditEntry struct {
 	// without parsing prose. Empty when no rule fired.
 	Severity string `json:"severity,omitempty"`
 	Rule     string `json:"rule,omitempty"`
+	// The chain fields (SF-08); absent on an unchained trail, so its rows keep
+	// today's shape byte for byte.
+	RunID string `json:"run_id,omitempty"`
+	Seq   int    `json:"seq,omitempty"`
+	Prev  string `json:"prev_sha256,omitempty"`
+	// On the run_end row only: the run's decision rows and the hash of the last.
+	Count int    `json:"count,omitempty"`
+	Head  string `json:"head,omitempty"`
 }
 
 // Record appends one decision as a JSON line and RETURNS any error so the broker
@@ -313,13 +352,34 @@ func (l *AuditLog) record(a Action, d Decision, reason string, fired Rule) error
 	}
 	e := auditEntry{TS: time.Now().Unix(), Kind: string(a.Kind), Path: clampAudit(a.Path), Exists: a.Exists, Decision: string(d), Reason: reason,
 		Severity: string(fired.Severity), Rule: fired.Glob}
-	b, err := json.Marshal(e)
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.appendLocked(e)
+}
+
+// appendLocked writes one row, chaining it when the trail is chained. Called with
+// l.mu held, so a run's seq and prev_sha256 follow the order its rows reach the file.
+func (l *AuditLog) appendLocked(e auditEntry) error {
+	if l.runID != "" {
+		e.RunID, e.Seq, e.Prev = l.runID, l.seq+1, l.prev
+	}
+	row, err := json.Marshal(e)
 	if err != nil {
 		return err
 	}
-	b = append(b, '\n')
-	l.mu.Lock()
-	defer l.mu.Unlock()
+	if err := l.writeLineLocked(row); err != nil {
+		return err // the row is not there, so the chain does not advance past it
+	}
+	if l.runID != "" {
+		l.seq++
+		l.prev = rowHash(row)
+	}
+	return nil
+}
+
+// writeLineLocked appends one JSON line to the trail (l.mu held).
+func (l *AuditLog) writeLineLocked(row []byte) error {
+	b := append(append([]byte{}, row...), '\n')
 	if dir := filepath.Dir(l.path); dir != "" {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return err

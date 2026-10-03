@@ -25,10 +25,10 @@
 // Before anything is submitted, every node class the graph names is checked against the
 // running ComfyUI's /object_info (render/comfy-nodes.mjs): a missing custom-node pack is a
 // one-line MISSING_NODE defer naming the class and the pack, not a 400 at the POST.
-import { writeFileSync, copyFileSync, readFileSync, existsSync } from "node:fs";
-import { basename, join } from "node:path";
+import { writeFileSync, readFileSync, existsSync } from "node:fs";
 import { withGpuSlot } from "./gpu-lock.mjs";
-import { COMFY_DIR } from "./comfy-lifecycle.mjs";
+import { COMFY_DIR, comfyApi } from "./comfy-lifecycle.mjs";
+import { stageInput as stageToInput } from "./comfy-input.mjs";
 import { firstOutputFile } from "./comfy-output.mjs";
 import { assertNodeClasses } from "./comfy-nodes.mjs";
 import { buildHunyuan15I2V } from "./wf-hunyuan15-i2v.mjs";
@@ -73,9 +73,7 @@ export function wanVvramGb(flags) {
 
 // ComfyUI's LoadImage reads from <COMFY_DIR>/input. Stage the still there.
 function stageInput(stillPath) {
-  const name = "render_in_" + Date.now() + "_" + basename(stillPath);
-  copyFileSync(stillPath, join(COMFY_DIR, "input", name));
-  return name;
+  return stageToInput("render_in", stillPath);
 }
 
 // buildGraphFromArgs builds the API-format graph the flags describe. stage copies a still
@@ -213,10 +211,10 @@ async function generate(out, API, pos, flags) {
 async function main() {
   const { pos, flags } = parseArgs(process.argv.slice(2));
   const out = pos[0];
-  const API = flags.api || process.env.COMFY_API || "http://127.0.0.1:8188";
+  const API = comfyApi(flags.api);
   if (!out) { console.error('usage: node comfy-video.mjs <out.mp4> <still> "<prompt>" [--model hunyuan|wan] [flags]   |   <out.mp4> --graph wf.json'); process.exit(2); }
   await withGpuSlot(
-    { noLock: flags["no-lock"], keepComfy: flags["keep-comfy"], comfyManaged: true, reserveVram: flags["reserve-vram"] },
+    { noLock: flags["no-lock"], keepComfy: flags["keep-comfy"], comfyManaged: true, api: API, reserveVram: flags["reserve-vram"] },
     () => generate(out, API, pos, flags),
   );
 }

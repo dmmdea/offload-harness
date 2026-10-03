@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/gpulease"
 	"github.com/dmmdea/offload-harness/internal/modelaffinity"
@@ -176,6 +177,12 @@ func anyDeclaresLayer(views []NodeView, name string) bool {
 //     pre-0.113.0 node keeps its roster-order tie. A tie-breaker, never a
 //     primary signal — it only ever decides a case QueueDepth left tied.
 //
+// GPU routing P1 adds two more, both per node: the lease rung of key 0 now has
+// an OVERDUE step below a long lease (leaseDemotionRank), and a free-card key
+// (cardTier: a node with a card that can take the contract beats one whose cards
+// are all busy; a node that published no per-card truth sits between them) sits
+// after the ETA key and before QueueDepth.
+//
 // W-11 (register S-02, INV-5 rider clause (ii), eta.go) inserts a FIFTH key
 // between provablyStartsNow and QueueDepth: expected completion among seats
 // tied on capacity so far — eta.go's betterRanked, fed by st and seeded by
@@ -197,8 +204,14 @@ func betterRemote(seed string, st *Subtask, priorTokS float64, candidate, incumb
 	// gate has already excluded every OTHER lease-busy shape (exclusive,
 	// draining, non-text), so a lease-busy survivor is always the one case
 	// this key exists to demote.
-	if c, i := leaseBusyDemoted(candidate), leaseBusyDemoted(incumbent); c != i {
-		return i // candidate wins only when the incumbent is the demoted one
+	//
+	// An OVERDUE lease (GPU routing P1) is demoted one rung further down: its
+	// declared end has already passed, so nothing the node says about when the
+	// card frees is evidence, where a long lease at least names its end. It
+	// still ranks and still takes work when nothing better exists (the node
+	// queues it); it is never excluded.
+	if c, i := leaseDemotionRank(candidate), leaseDemotionRank(incumbent); c != i {
+		return c < i // candidate wins only when the incumbent is the lower-ranked one
 	}
 	if c, i := saturated(candidate), saturated(incumbent); c != i {
 		return i // candidate wins only when the incumbent is the saturated one
@@ -212,6 +225,16 @@ func betterRemote(seed string, st *Subtask, priorTokS float64, candidate, incumb
 		}
 	} else if better, decided := visionEtaBetter(seed, candidate, incumbent); decided {
 		return better
+	}
+	// Free cards (GPU routing P1): a node with a card that can take this
+	// contract beats one whose cards are all busy, and a node that published no
+	// per-card truth sits between them (cardTier: some > unknown > none), so an
+	// older node is neither credited nor blamed. This sits above the queue
+	// COUNT, which cannot see a card held by work the harness does not own, and
+	// ahead of the util scalar below, which answers "is there room" with the
+	// busiest card on the box.
+	if c, i := cardTier(candidate, layerOf(st)), cardTier(incumbent, layerOf(st)); c != i {
+		return c > i
 	}
 	if candidate.QueueDepth != incumbent.QueueDepth {
 		return candidate.QueueDepth < incumbent.QueueDepth
@@ -528,7 +551,25 @@ func leaseFenceReason(r NodeView) (fenced bool, why string) {
 // exclusive/draining/text conditions, because remoteEligible has already
 // excluded every other LeaseBusy shape (leaseFenceReason) before a node ever
 // reaches ranking — a lease-busy survivor here is always the plain-text case.
+//
+// An overdue lease is NOT a LeaseBusy survivor: NodeView decodes it onto
+// LeaseOverdue alone, so it is never hard-excluded as a busy non-text lease.
+// leaseDemotionRank is what ranks it.
 func leaseBusyDemoted(v NodeView) bool { return v.LeaseBusy }
+
+// leaseDemotionRank orders the lease shapes remoteEligible admits, lowest
+// first: no demotion (0), a genuinely long lease (1), an overdue lease (2). A
+// node whose lease is both reads as overdue, the worse of the two.
+func leaseDemotionRank(v NodeView) int {
+	switch {
+	case v.LeaseOverdue:
+		return 2
+	case leaseBusyDemoted(v):
+		return 1
+	default:
+		return 0
+	}
+}
 
 // PlaceVision picks the fleet node that runs ONE vision task (vqa / ocr /
 // assess_image, 0.116.0) when the caller has decided the work leaves the box
@@ -671,7 +712,73 @@ func LocalLease(gpuLockPath, stateDir string) gpulease.Info {
 	if err != nil {
 		return gpulease.Info{}
 	}
-	return gpulease.InspectDir(dir)
+	// With the inferred scope of a legacy whole-node lease filled in (modelaffinity.PeekLease):
+	// the narrowing the per-seat readers apply needs it, and a lease with no evidence reads
+	// exactly as InspectDir reads it. An inspection: the delegator's routing and offload_status
+	// read it, and neither writes the sidecar or the ledger; the load gate does that.
+	return modelaffinity.PeekLease(dir)
+}
+
+// LocalBusyFor is LocalBusy asked on behalf of a seat on the cards pins name: true only
+// when a live lease sits on one of them. A render on card 2 leaves the card-0 seat idle; an
+// unknown pin is every card, so the answer is LocalBusy's.
+func LocalBusyFor(gpuLockPath, stateDir string, pins []string) bool {
+	return LocalLeaseFor(gpuLockPath, stateDir, pins).Held
+}
+
+// LocalLeaseFor is LocalLease narrowed to the leases that sit on the cards pins name (a
+// layer seat's Device, split by DeviceList): a render on card 2 is not a lease on the card-0
+// seat. No pins is an unknown seat, which is every card, so the answer is LocalLease's.
+func LocalLeaseFor(gpuLockPath, stateDir string, pins []string) gpulease.Info {
+	return modelaffinity.ScopeToPins(LocalLease(gpuLockPath, stateDir), pins)
+}
+
+// LeaseForContract narrows a read of the local lease to what stands between a contract and
+// a local seat (plan P4): the delegator is busy for a contract only when EVERY local agent
+// seat it could run on sits on a held card, because the placement table falls back to the
+// next layer whose cards are free. The seats are placement.AgentChain's, the same list the
+// table walks, so the two cannot disagree. A contract that names its layer is asked of that
+// layer's seat alone. The result is the first seat's leases when every seat is held (the
+// holder a defer names), and the zero Info as soon as one seat is free of every lease.
+//
+// Unchanged, whole-node: a box that declares no layers, a long-context contract (it runs on
+// a long seat the agent chain does not describe), and a contract no agent seat's window can
+// hold. Nothing narrows on a guess.
+func LeaseForContract(cfg config.Config, info gpulease.Info, c core.AgentContract) gpulease.Info {
+	if !info.Held || !cfg.Composite() || c.ContextClass == core.ContextClassLong {
+		return info
+	}
+	need := placetable.RequestForContract(c, EstimateTokens(c), cfg.AgentMaxTokens).Need()
+	chain := placetable.AgentChain(cfg.Layers, c.Layer, need)
+	if len(chain) == 0 {
+		return info
+	}
+	var first gpulease.Info
+	for n, seat := range chain {
+		scoped := modelaffinity.ScopeToPins(info, seat.Seat.DeviceList())
+		if n == 0 {
+			first = scoped
+		}
+		if !scoped.Held {
+			return scoped
+		}
+	}
+	return first
+}
+
+// ReservedFor is Reserved asked on behalf of a seat on the cards pins name.
+func ReservedFor(info gpulease.Info, pins []string) bool {
+	return Reserved(modelaffinity.ScopeToPins(info, pins))
+}
+
+// FencedFor is Fenced asked on behalf of a seat on the cards pins name.
+func FencedFor(info gpulease.Info, pins []string) (bool, string) {
+	return Fenced(modelaffinity.ScopeToPins(info, pins))
+}
+
+// ForeignFenceFor is ForeignFence asked on behalf of a seat on the cards pins name.
+func ForeignFenceFor(info gpulease.Info, pins []string) (bool, string) {
+	return ForeignFence(modelaffinity.ScopeToPins(info, pins))
 }
 
 // Reserved reports whether info is a held TEXT-class lease: a benchmark, eval
@@ -696,8 +803,16 @@ func LocalLease(gpuLockPath, stateDir string) gpulease.Info {
 // since handed on exempts nothing; the holder's PID is deliberately not an
 // exemption (the MCP server holds leases and serves foreign calls in one
 // process).
+//
+// Asked of EACH live lease (Info.Each): with card-scoped leases several are live at once,
+// Info describes only the lowest, and the exemption is per lease.
 func Reserved(info gpulease.Info) bool {
-	return info.Held && info.Class == gpulease.ClassText && !inheritedLease(info)
+	for _, l := range info.Each() {
+		if l.Held && l.Class == gpulease.ClassText && !inheritedLease(l) {
+			return true
+		}
+	}
+	return false
 }
 
 // Fenced reports whether a lease REFUSES A NEW RUN on the local seat, and names
@@ -721,18 +836,24 @@ func Reserved(info gpulease.Info) bool {
 // A retry asks Reserved after Fenced as well (register C-81), for the one hold Fenced leaves alone:
 // a plain reservation does not refuse a run at the gate, but a first placement on route auto or
 // spread never takes the seat under one, and neither may a retry.
+//
+// With card-scoped leases the question is asked of each live lease (Info.Each) and the
+// reason names the first one that fences.
 func Fenced(info gpulease.Info) (bool, string) {
-	if !modelaffinity.BlocksNewRun(info) {
-		return false, ""
+	for _, l := range info.Each() {
+		if !modelaffinity.BlocksNewRun(l) {
+			continue
+		}
+		switch {
+		case l.Class == gpulease.ClassMedia:
+			return true, "media render holds the cards"
+		case l.Exclusive:
+			return true, "exclusive text lease (the holder cleared the cards)"
+		default:
+			return true, "draining text lease (the seat is cordoned; no new run is admitted)"
+		}
 	}
-	switch {
-	case info.Class == gpulease.ClassMedia:
-		return true, "media render holds the cards"
-	case info.Exclusive:
-		return true, "exclusive text lease (the holder cleared the cards)"
-	default:
-		return true, "draining text lease (the seat is cordoned; no new run is admitted)"
-	}
+	return false, ""
 }
 
 // ForeignFence is Fenced asked on behalf of a caller that is NOT the holder:
@@ -751,16 +872,29 @@ func Fenced(info gpulease.Info) (bool, string) {
 // review under a peer's lease waited the whole cordon bound and was filed as a
 // capacity defer for the lease's entire length. The verdict was on disk before
 // the dial — the same sentence D-94 wrote about the retry path.
+//
+// The exemption is PER LEASE. With card-scoped leases several are live at once; a child of
+// lease A is exempt from A's fence and from no other lease's, so one device lease's child
+// cannot walk through the fence another lease holds on other cards. (Until the consumers
+// compare device sets, plan P4, a foreign lease fences whatever its cards: over-fencing,
+// never under-fencing.)
 func ForeignFence(info gpulease.Info) (bool, string) {
-	if inheritedLease(info) {
-		return false, ""
+	for _, l := range info.Each() {
+		if inheritedLease(l) {
+			continue
+		}
+		if fenced, why := Fenced(l); fenced {
+			return true, why
+		}
 	}
-	return Fenced(info)
+	return false, ""
 }
 
-// inheritedLease reports whether this process runs under the lease info
+// inheritedLease reports whether this process runs under the ONE lease info
 // describes: GPU_LEASE_EPOCH (threaded to children by gpu reserve and the
-// pipeline's ambient lease env) equals the held epoch.
+// pipeline's ambient lease env) equals that lease's epoch. Callers with several
+// live leases walk Info.Each and ask it of each; "inside any live lease" is not an
+// exemption from every other lease's fence.
 func inheritedLease(info gpulease.Info) bool {
 	raw := strings.TrimSpace(os.Getenv("GPU_LEASE_EPOCH"))
 	if raw == "" {

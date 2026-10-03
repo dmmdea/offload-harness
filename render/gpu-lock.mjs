@@ -22,7 +22,14 @@
 // No npm dependencies.
 import { writeFileSync, readFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
-import { ensureComfy as defaultEnsureComfy, tailComfyLog, comfyLogPath, COMFY_LOG_TAIL_LINES } from "./comfy-lifecycle.mjs";
+import { ensureComfy as defaultEnsureComfy, tailComfyLog, comfyLogPath, COMFY_LOG_TAIL_LINES, resolveInstance } from "./comfy-lifecycle.mjs";
+
+// LEASE_FORMAT_SIGNATURE is what `local-offload gpu doctor` looks for in a copy of this
+// file (internal/gpulease/audit.go, FormatSignature, pinned by a Go test): a reader that
+// carries it understands lease record v2 and fences per epoch, so a host may write
+// card-scoped leases. A copy of this file without it reads a directory holding only
+// card-scoped leases as a free card. Do not edit one side without the other.
+export const LEASE_FORMAT_SIGNATURE = "gpu-lease-format-2/per-epoch-fence";
 
 function metaPath(lockPath) {
   return join(lockPath, "meta.json");
@@ -45,12 +52,56 @@ export function inheritedLease(env = process.env) {
   return { dir, epoch: Number(epoch), class: (env.GPU_LEASE_CLASS || "").trim() || undefined };
 }
 
+// readEpochRecord parses e/<epoch>.json: the record of a CARD-SCOPED lease (record v2).
+// A card-scoped lease never writes meta.json; this file and the per-card claims are its
+// whole record. Null when there is no such lease.
+export function readEpochRecord(lockPath, epoch) {
+  try {
+    return JSON.parse(readFileSync(join(lockPath, "e", `${epoch}.json`), "utf8"));
+  } catch { return null; }
+}
+
+// readCardClaim parses cards/<uuid>.claim: {epoch, at_ms}, or a bare epoch number.
+export function readCardClaim(lockPath, device) {
+  try {
+    const raw = readFileSync(join(lockPath, "cards", `${device}.claim`), "utf8").trim();
+    try {
+      const j = JSON.parse(raw);
+      if (j && typeof j === "object") return j;
+      if (typeof j === "number") return { epoch: j };
+    } catch { /* fall through to null */ }
+    return null;
+  } catch { return null; }
+}
+
+// A device id names a file under cards/, so it must be a plain token (mirrors
+// gpulease.NormalizeDevices): a record naming "../x" is not a lease we will open.
+const DEVICE_ID = /^[a-z0-9][a-z0-9._-]*$/;
+
 // checkInheritedLease is the FENCE. Before an irreversible action, confirm the epoch we
 // were handed is still current. A closing laptop lid is not a crash — the process
 // survives and resumes, and without this it would resume and unload models on top of
 // whoever holds the card now, which is the original incident replayed by a lid.
-export function checkInheritedLease(lease, read = readLease) {
+//
+// THE FENCE IS PER EPOCH. A card-scoped lease (record v2) lives in e/<epoch>.json plus
+// one cards/<uuid>.claim per card, and several can be live at once, so "the epoch in
+// meta.json is mine" is wrong for it: that compare would fence out every lease but one.
+// Such a lease is current while its own record is active and each card it names carries
+// a claim naming its epoch. A lease with no such record is a whole-node lease and keeps
+// the meta.json epoch compare.
+export function checkInheritedLease(lease, read = readLease, readRecord = readEpochRecord, readClaim = readCardClaim) {
   if (!lease) return true;
+  const rec = readRecord(lease.dir, lease.epoch);
+  if (rec) {
+    if (Number(rec.epoch) !== Number(lease.epoch)) return false;
+    if (rec.state !== "active") return false; // still being granted, or not a lease
+    for (const d of Array.isArray(rec.devices) ? rec.devices : []) {
+      if (typeof d !== "string" || !DEVICE_ID.test(d)) return false;
+      const c = readClaim(lease.dir, d);
+      if (!c || Number(c.epoch) !== Number(lease.epoch)) return false;
+    }
+    return true;
+  }
   const meta = read(lease.dir);
   if (!meta) return false;
   return Number(meta.epoch) === Number(lease.epoch);
@@ -97,6 +148,23 @@ export function memoryStack(env = process.env.MEMORY_STACK) {
     return new Set(env.split(",").map((s) => s.trim()).filter(Boolean));
   }
   return new Set(DEFAULT_MEMORY_STACK);
+}
+
+// GPU_LEASE_UNLOAD_MODELS: the models the Go wrapper says may leave under a lease that holds some
+// cards, not the whole node (plan P5, register C-86). `gpu reserve --devices <cards> -- <render>`
+// computes it (the roster, minus the memory stack, minus the seats pinned to cards the lease does
+// not hold) and exports it; freeLlamaSwap then unloads that list instead of every model off the
+// memory stack, so a card-2 render no longer empties the seats on card 0.
+//
+//   unset / empty -> null   today's rule: every model off the memory stack
+//   "-"           -> []     the wrapper says nothing may leave
+//   "a,b"         -> [a,b]  exactly these
+export function parseUnloadModels(raw = process.env.GPU_LEASE_UNLOAD_MODELS) {
+  if (raw === undefined || raw === null) return null;
+  const t = String(raw).trim();
+  if (t === "") return null;
+  if (t === "-") return [];
+  return t.split(",").map((s) => s.trim()).filter(Boolean);
 }
 
 // withTimeout: every network call here needs its own deadline. Node's fetch has NO
@@ -209,12 +277,16 @@ export async function freeLlamaSwap(api = process.env.LLAMA_SWAP_API || "http://
     log = (m) => console.error(m),
   } = opts;
   const keep = memoryStack();
+  // The list the wrapper handed over (null = today's rule). A list narrows what may leave; the
+  // memory stack still never does, whatever the list names.
+  const supplied = opts.unloadModels !== undefined ? opts.unloadModels : parseUnloadModels();
+  const allowed = supplied ? new Set(supplied) : null;
   let ids = [];
   try {
     const r = await fetch(api + "/v1/models", { signal: withTimeout(requestTimeoutMs) });
     if (!r.ok) { log(`freeLlamaSwap: /v1/models returned ${r.status}; NOT unloading (the render keeps a shared card)`); return; }
     const j = await r.json();
-    ids = (j.data || []).map((m) => m.id).filter((id) => id && !keep.has(id));
+    ids = (j.data || []).map((m) => m.id).filter((id) => id && !keep.has(id) && (!allowed || allowed.has(id)));
   } catch (e) {
     log(`freeLlamaSwap: could not list models (${e && e.message}); NOT unloading (the render keeps a shared card)`);
     return;
@@ -271,9 +343,12 @@ export async function freeLlamaSwap(api = process.env.LLAMA_SWAP_API || "http://
   }));
   if (failures.length === 0) return;
 
-  const keepResident = [...running].filter((id) => keep.has(id));
+  // GET /unload is total: it ignores which model was asked for. It may run only when nothing that
+  // has to stay is resident: the memory stack, and (under a card lease) every seat the wrapper
+  // left off the list because it sits on cards the lease does not hold.
+  const keepResident = [...running].filter((id) => keep.has(id) || (allowed && !allowed.has(id)));
   if (keepResident.length > 0) {
-    log(`freeLlamaSwap: per-model unload unavailable for ${failures.join(",")} and the memory stack (${keepResident.join(",")}) is resident — cannot unload-all; the render runs against whatever VRAM remains`);
+    log(`freeLlamaSwap: per-model unload unavailable for ${failures.join(",")} and a model that must stay (${keepResident.join(",")}: the memory stack or a seat on cards this lease does not hold) is resident — cannot unload-all; the render runs against whatever VRAM remains`);
     return;
   }
   try {
@@ -306,6 +381,12 @@ export async function freeComfy(api = process.env.COMFY_API || "http://127.0.0.1
 //   3. optionally ensureComfy(); warm:true is the BATCH-SESSION mode,
 //   4. await fn(),
 //   5. run ONE guarded teardown: freeComfy() + kill a ComfyUI we spawned.
+// `api` is the ComfyUI endpoint the runner talks to. Together with COMFY_INSTANCE /
+// COMFY_CARD_UUID it names the ComfyUI instance (comfy-lifecycle.mjs resolveInstance):
+// a keyed per-card instance is launched, freed and log-tailed on ITS endpoint and files. An
+// UNKEYED instance is launched exactly as before (ensureComfy gets no api: an unkeyed launch has
+// no --port, so it can only start the default endpoint); only its post-run /free follows `api`,
+// which is the same endpoint as before unless --api named another one.
 // Deps (freeLlamaSwap/ensureComfy/freeComfy/checkLease/claimUnload/tailLog) are
 // injectable for tests only.
 export async function withGpuSlot(opts, fn) {
@@ -315,6 +396,8 @@ export async function withGpuSlot(opts, fn) {
     comfyManaged = true,
     warm = false,
     reserveVram,
+    api,
+    instanceEnv = process.env,
     freeLlamaSwap: freeLS = freeLlamaSwap,
     ensureComfy = defaultEnsureComfy,
     freeComfy: freeCfy = freeComfy,
@@ -335,11 +418,15 @@ export async function withGpuSlot(opts, fn) {
       "Use --no-lock only when you know nothing else can touch the GPU.");
   }
 
+  // A lane with no ComfyUI (voice) never resolves an instance.
+  const instance = comfyManaged ? resolveInstance({ api, env: instanceEnv }) : null;
+  const instanceKey = instance ? instance.key : "";
+
   let comfyChild = null;
   let cleaning = false;
   const cleanup = async () => {
     if (cleaning) return; cleaning = true;
-    if (comfyManaged) { try { await freeCfy(); } catch {} }
+    if (comfyManaged) { try { await (instanceKey || api ? freeCfy(instance.api) : freeCfy()); } catch {} }
     if (comfyChild && !keepComfy) { try { comfyChild.kill(); } catch {} }
   };
   const onSig = async () => { await cleanup(); process.exit(130); };
@@ -363,6 +450,7 @@ export async function withGpuSlot(opts, fn) {
     }
     if (comfyManaged) {
       comfyChild = await ensureComfy({
+        ...(instanceKey ? { api: instance.api } : {}),
         ...(reserveVram != null ? { reserveVram } : {}),
         ...(warm ? { warm: true } : {}),
       });
@@ -379,10 +467,10 @@ export async function withGpuSlot(opts, fn) {
       // returns null), so the tail is always this render's own console, never
       // another job's leftover output.
       if (comfyManaged && comfyChild) {
-        const tail = tailLog();
+        const tail = instanceKey ? tailLog(undefined, undefined, instanceKey) : tailLog();
         if (tail) {
           const enriched = new Error(
-            `${err.message}\n\n--- last ${COMFY_LOG_TAIL_LINES} line(s) of ComfyUI's own console (${comfyLogPath()}) ---\n${tail}`,
+            `${err.message}\n\n--- last ${COMFY_LOG_TAIL_LINES} line(s) of ComfyUI's own console (${comfyLogPath(undefined, instanceKey)}) ---\n${tail}`,
             { cause: err },
           );
           enriched.stack = err.stack;
