@@ -19,7 +19,7 @@ var bareClientAllowlist = map[string]struct {
 }{
 	"gpu_drain.go:<file-scope>":                                  {1, "configured: the local llama-swap endpoint (drain and warm-back)"},
 	"internal/accelclient/accelclient.go:NewDevice":              {1, "configured: the local accelerator sidecar"},
-	"internal/accelremote/accelremote.go:<file-scope>":           {1, "configured: fleet nodes from delegate_remotes (accelerator lane)"},
+	"internal/accelremote/accelremote.go:<file-scope>":           {1, "configured: fleet nodes from delegate_remotes (accelerator lane; netguard.SafeTransport since D20)"},
 	"internal/agent/client.go:NewLLMClient":                      {1, "configured: the agent seat endpoint (llama-swap or a seat_endpoints entry under the tailnet guard)"},
 	"internal/agent/fetchtool.go:newFetchClient":                 {2, "guarded: the agent's web_fetch dials through netguard.PublicDialControl (ADR 0042)"},
 	"internal/agent/memory.go:NewMemoryClient":                   {1, "configured: the memory authority endpoint from config"},
@@ -64,4 +64,5 @@ var bareClientAllowlist = map[string]struct {
 	"internal/ttsclient/ttsclient.go:Speak":                      {1, "configured: the text-to-speech endpoint from config"},
 	"internal/visionremote/visionremote.go:<file-scope>":         {1, "configured: fleet nodes from delegate_remotes (vision lane)"},
 	"internal/textremote/textremote.go:<file-scope>":             {1, "configured: fleet nodes from delegate_remotes (text lane)"},
+	"internal/sttremote/sttremote.go:<file-scope>":               {1, "configured: fleet nodes from delegate_remotes (stt upload door; netguard.SafeTransport)"},
 }

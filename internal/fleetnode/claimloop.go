@@ -140,6 +140,14 @@ func (s *Server) claimOne(ctx context.Context, client *http.Client, holder, node
 		breq.FleetJobID = job.ID
 		breq.Door = dispatchDoor(breq.Door)
 		breq.Requester = asker
+		// The same stt cap the push door applies (enterSTT): a pulled stt job waits its turn too.
+		releaseSTT, gerr := s.enterSTT(rctx, job.TaskType)
+		if gerr != nil {
+			card.fail("the node shut down while this job waited for the stt slot")
+			s.settle(ctx, client, holder, cfg, "nack", job.ID, nodeID, nil, gerr.Error())
+			return nil, gerr
+		}
+		defer releaseSTT()
 		card.running()
 		finished := false
 		defer func() {
@@ -223,7 +231,7 @@ func (s *Server) claimSpec(taskType string, cleanup func()) AcceptSpec {
 		// the identical contract arriving by dispatch was gated.
 		Agent: taskType == string(core.TaskAgentRun),
 		// Gated masks a pulled token-gated job exactly as a dispatched one.
-		Gated: gatedJob(taskType),
+		Gated: gatedJob(s.opts.Cfg, taskType),
 		// Uncapped keeps a pulled render off the concurrency cap that exists
 		// to protect the shared text endpoint it never touches.
 		Uncapped: !s.concurrencyCapped(taskType),

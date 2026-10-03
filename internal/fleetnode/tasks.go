@@ -33,7 +33,7 @@ import (
 
 // fleetTaskOrder is the advertisement order (stable for health payloads + error
 // messages). Membership is decided per-config by taskConfiguredFor.
-var fleetTaskOrder = []string{"image-gen", "video-gen", "animate", "stt", "audio-gen", "run-graph", ComposeTask, ComposeProjectTask, "agent", "accel", VisionTask, TextTask}
+var fleetTaskOrder = []string{"image-gen", "video-gen", "animate", "stt", STTUploadTask, "audio-gen", "run-graph", ComposeTask, ComposeProjectTask, "agent", "accel", VisionTask, TextTask}
 
 // taskConfiguredFor reports whether THIS box actually serves taskType — the same
 // route gates the pipeline uses (empty script/model = the task defers there, so
@@ -63,6 +63,10 @@ func taskConfiguredFor(cfg config.Config, taskType string, loopbackListener bool
 		return cfg.AnimateGenScript != ""
 	case "stt":
 		return cfg.STTModel != ""
+	case STTUploadTask:
+		// The stt upload door (ADR 0072): advertised exactly when POST /fleet/stt would admit — a
+		// bound whisper model and the vision lane's reachability rule.
+		return STTUploadAdmissible(cfg, loopbackListener)
 	case "audio-gen":
 		return cfg.VoiceGenScript != "" || cfg.MusicGenScript != ""
 	case "run-graph":
@@ -259,7 +263,7 @@ func familyFor(cfg config.Config, taskType string) string {
 		// One shipped variant; must agree with what the pipeline writes into the
 		// footprint store (pipeline.runAnimateCharacter samples under this key).
 		return "wan-animate2"
-	case "stt":
+	case "stt", STTUploadTask:
 		return "whisper"
 	case "audio-gen":
 		return "acestep"
@@ -383,6 +387,8 @@ func BuildRequest(ctx context.Context, cfg config.Config, loopbackListener bool,
 		return buildAnimate(payload)
 	case "stt":
 		return buildSTT(payload)
+	case STTUploadTask:
+		return buildSTTUpload(cfg, payload)
 	case "audio-gen":
 		return buildAudioGen(payload)
 	case "run-graph":

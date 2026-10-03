@@ -231,7 +231,7 @@ func TestHealthScoreAndIdleSlotAgreeWithAnUncappedJobRunning(t *testing.T) {
 // shared text endpoint the cap protects, so it must not burn a fleet slot.
 func TestAnimateIsExemptFromTheConcurrencyCap(t *testing.T) {
 	s, _ := newTestServer(t, config.Config{}, &fakeRunner{}, nil)
-	for _, task := range []string{"image-gen", "video-gen", "animate", "audio-gen", "run-graph", "stt"} {
+	for _, task := range []string{"image-gen", "video-gen", "animate", "audio-gen", "run-graph", "stt", STTUploadTask} {
 		if s.concurrencyCapped(task) {
 			t.Errorf("%s is capped: it takes the media lease and would hold a fleet slot while parked in the single media slot", task)
 		}

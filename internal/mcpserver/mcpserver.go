@@ -47,6 +47,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/rig"
 	"github.com/dmmdea/offload-harness/internal/seatload"
 	"github.com/dmmdea/offload-harness/internal/seatrate"
+	"github.com/dmmdea/offload-harness/internal/sttremote"
 	"github.com/dmmdea/offload-harness/internal/swapclient"
 	"github.com/dmmdea/offload-harness/internal/textremote"
 	"github.com/dmmdea/offload-harness/internal/tokclient"
@@ -90,6 +91,10 @@ type Server struct {
 	// delegate.RunWith at call time; tests inject a fake so the handler is
 	// exercisable without a live fleet.
 	reviewFleet fleetDispatch
+	// sttRun is offload_transcribe's placement seam (ADR 0072): nil (production) resolves to
+	// sttremote.Run at call time; tests inject a fake so the handler is exercisable without a
+	// whisper, an ffmpeg or a fleet node.
+	sttRun func(ctx context.Context, cfg config.Config, runner sttremote.Runner, req core.Request, route string) core.Result
 	// foreignFence is the agent_run door's lease-fence seam: nil (production)
 	// resolves to delegate.ForeignFence at call time.
 	//
@@ -310,8 +315,8 @@ func (s *Server) buildServer(version string) *mcp.Server {
 
 	srv.AddTool(&mcp.Tool{
 		Name:        "offload_transcribe",
-		Description: "Transcribe a local AUDIO or VIDEO file to text on a free local whisper model (STT). audio is a LOCAL file path (mp3/m4a/wav/mp4/...); language is optional ('en','es', or 'auto' — default auto-detect); set hq=true for the higher-quality (slower) model on hard/noisy clips. Returns {gist (preview), language, duration_sec, num_segments, segments[{id,start,end,text}] (timestamped spans — pull only the ones you need), srt_path, text_path, json_path}. The full transcript + SRT are written to disk; read the spans/paths you need. If it can't transcribe confidently it returns deferred:true and you should handle the audio yourself.",
-		InputSchema: json.RawMessage(`{"type":"object","properties":{"audio":{"type":"string","description":"local audio or video file path"},"language":{"type":"string","description":"en, es, or auto (default auto-detect); ignored by an openai-protocol hq tier (mtmd ASR detects language itself)"},"hq":{"type":"boolean","description":"use the configured higher-accuracy STT tier (slower) for hard/noisy/multilingual audio; note the accuracy tier may return a single full-span segment instead of timestamps. Does not apply under engine:npu (one NPU model)"},"engine":{"type":"string","enum":["gpu","npu"],"description":"gpu (default): the local whisper seat (quality path, timestamps, long-form); npu: whisper-base on the Hailo-8L accelerator — fast preview tier (5 s chunks, no timestamps) WHERE the platform runs it; on Windows HailoRT 4.24 boxes the sidecar returns a typed platform-blocked diagnosis instead (whisper HEFs are Linux-validated upstream), so gpu remains the STT path there"},"select":{"type":"array","items":{"type":"string"},"description":"optional: return ONLY these top-level result fields (e.g. [\"gist\",\"language\",\"num_segments\",\"srt_path\"]) to skip the verbose segments[] and keep your context lean — read the full transcript/spans from srt_path or json_path when you need them"}},"required":["audio"]}`),
+		Description: "Transcribe a local AUDIO or VIDEO file to text on a free local whisper model (STT). audio is a LOCAL file path (mp3/m4a/wav/mp4/...); language is optional ('en','es', or 'auto' — default auto-detect); set hq=true for the higher-quality (slower) model on hard/noisy clips. Returns {gist (preview), language, duration_sec, num_segments, segments[{id,start,end,text}] (timestamped spans — pull only the ones you need), srt_path, text_path, json_path}. The full transcript + SRT are written to disk; read the spans/paths you need. route (default auto) places the work: this box's whisper when it is free, a fleet node's when a render or an exclusive hold would keep it waiting (every node serves the same whisper family, so that costs no quality; the audio is sent as 16 kHz mono Opus and the transcript files are written HERE, on this box); local pins it to this box, remote forces a fleet node. If it can't transcribe confidently it returns deferred:true and you should handle the audio yourself.",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"audio":{"type":"string","description":"local audio or video file path"},"language":{"type":"string","description":"en, es, or auto (default auto-detect); ignored by an openai-protocol hq tier (mtmd ASR detects language itself)"},"hq":{"type":"boolean","description":"use the configured higher-accuracy STT tier (slower) for hard/noisy/multilingual audio; note the accuracy tier may return a single full-span segment instead of timestamps. Does not apply under engine:npu (one NPU model)"},` + sttRouteSchema + `,"engine":{"type":"string","enum":["gpu","npu"],"description":"gpu (default): the local whisper seat (quality path, timestamps, long-form); npu: whisper-base on the Hailo-8L accelerator — fast preview tier (5 s chunks, no timestamps) WHERE the platform runs it; on Windows HailoRT 4.24 boxes the sidecar returns a typed platform-blocked diagnosis instead (whisper HEFs are Linux-validated upstream), so gpu remains the STT path there"},"select":{"type":"array","items":{"type":"string"},"description":"optional: return ONLY these top-level result fields (e.g. [\"gist\",\"language\",\"num_segments\",\"srt_path\"]) to skip the verbose segments[] and keep your context lean — read the full transcript/spans from srt_path or json_path when you need them"}},"required":["audio"]}`),
 	}, s.handleTranscribe)
 
 	srv.AddTool(&mcp.Tool{
@@ -1438,6 +1443,13 @@ func (s *Server) textRun(ctx context.Context, req core.Request, route string) co
 // passes it is unchanged.
 const textRouteSchema = `"route":{"type":"string","enum":["local","auto","remote"],"description":"where the call runs (0.154.0): local (default; this box's own cascade, unchanged behaviour), auto (an idle local card runs it; when the machine-wide GPU lease is held — a render in flight or a text reservation — a fleet node advertising the text lane for this task runs it instead, and with no eligible node it still runs local), remote (force a fleet node; with none eligible it returns deferred:true with defer_class capacity — or config when no delegate_remotes are configured — and never touches the local GPU). The text lane is dark until a node's tier declares it (text_tasks in its health), so on today's fleets auto stays local and remote defers. The node runs its own pipeline and returns its full result; meta.node / meta.placement say where it ran"}`
 
+// sttRouteSchema is the `route` property of offload_transcribe (ADR 0072). Unlike the vision and text
+// tools its default is AUTO, not local: every fleet node serves the same whisper family, so a spill to a
+// node costs no quality, while a transcription that waits behind a render holding the cards is the
+// failure this route exists to remove (five 90 s refusals in one morning). A caller that wants the old
+// behaviour passes route "local".
+const sttRouteSchema = `"route":{"type":"string","enum":["local","auto","remote"],"description":"where the whisper model runs (ADR 0072). auto (the DEFAULT): this box's own whisper when the request would be served at once, and when a render or an exclusive hold would keep it waiting (a resident whisper is still served locally) a fleet node that advertises the stt upload door transcribes it instead; with no eligible node it still runs local. The default is auto because every node serves the same whisper family, so a spill costs no quality. local: only this box's whisper, unchanged behaviour; a held card then defers gpu_busy and the reason says a fleet node could take it. remote: force a fleet node; with none eligible it returns deferred:true with defer_class capacity (config when no delegate_remotes are configured) and never touches the local GPU. The audio is read on THIS box and sent as 16 kHz mono Opus (the original file when conversion is impossible); srt_path, text_path and json_path are always files written on THIS box. meta.node / meta.placement say where it ran. Does not apply under engine:npu, which is this box's own Hailo sidecar: a route you name there other than local is refused"}`
+
 // visionRouteSchema is the `route` property every single-image vision tool
 // carries; one string so the three descriptions cannot drift.
 const visionRouteSchema = `"route":{"type":"string","enum":["local","auto","remote"],"description":"where the vision model runs (0.116.0): local (default; this box's vision seat, unchanged behaviour), auto (idle local card runs it; when the machine-wide GPU lease is held — a render in flight or a text reservation — the least-loaded fleet node advertising the vision lane runs it instead, and with no eligible node it still runs local), remote (force a fleet node; with none eligible it returns deferred:true with defer_class capacity — or config when no delegate_remotes are configured — and never touches the local GPU). The image is read on THIS box under vision_max_image_bytes and travels with the job; meta.node / meta.placement say where it ran"}`
@@ -1482,6 +1494,7 @@ func (s *Server) handleTranscribe(ctx context.Context, req *mcp.CallToolRequest)
 		HQ       bool     `json:"hq"`
 		Engine   string   `json:"engine"`
 		Select   []string `json:"select"`
+		Route    string   `json:"route"`
 	}
 	if bad := parseArgs(req.Params.Arguments, &in); bad != nil {
 		return bad, nil
@@ -1494,6 +1507,13 @@ func (s *Server) handleTranscribe(ctx context.Context, req *mcp.CallToolRequest)
 	case "", "gpu":
 		// fall through to the GPU seat below
 	case "npu":
+		// The route places the GPU whisper model; the NPU path is this box's own sidecar and never
+		// travels, as for OCR. An OMITTED route is the auto default and no request to travel (the
+		// handler reads it here as local, not as auto), so only a route the caller NAMED is refused,
+		// rather than silently run local under it.
+		if r, ok := sttremote.NormalizeRoute(in.Route); !ok || r != sttremote.RouteLocal {
+			return jsonResult(map[string]any{"deferred": true, "reason": fmt.Sprintf("route %q applies to engine gpu only; engine npu always runs this box's Hailo sidecar", in.Route)})
+		}
 		if !s.p.Cfg().HasAccelerator("hailo-8l") {
 			return jsonResult(map[string]any{"deferred": true, "reason": "engine:npu requested but this box lists no hailo-8l accelerator"})
 		}
@@ -1538,7 +1558,17 @@ func (s *Server) handleTranscribe(ctx context.Context, req *mcp.CallToolRequest)
 	// without one nothing is sent (register C-89).
 	stopHeartbeat := s.startHeartbeat(ctx, req, "offload_transcribe")
 	defer stopHeartbeat()
-	res := s.p.Run(ctx, core.Request{Task: core.TaskTranscribe, Door: "offload_transcribe", Audio: in.Audio, Params: params})
+	// The default route is auto (ADR 0072): this box's whisper when it is free, a fleet node's when it
+	// would keep the call waiting. An empty route is the caller not choosing.
+	route := strings.TrimSpace(in.Route)
+	if route == "" {
+		route = sttremote.RouteAuto
+	}
+	run := s.sttRun
+	if run == nil {
+		run = sttremote.Run
+	}
+	res := run(ctx, s.p.Cfg(), s.p, core.Request{Task: core.TaskTranscribe, Door: "offload_transcribe", Audio: in.Audio, Params: params}, route)
 	if len(in.Select) > 0 {
 		res.Data = core.ProjectFields(res.Data, in.Select)
 	}

@@ -1693,6 +1693,17 @@ type Config struct {
 	FleetComposeProjects bool `json:"fleet_compose_projects,omitempty"`
 	// FleetComposeBundleMaxMB caps one project bundle as sent (gzip-compressed), MiB; 0 = 64.
 	FleetComposeBundleMaxMB int `json:"fleet_compose_bundle_max_mb,omitempty"`
+	// FleetSTTUploadMaxMB caps one audio upload to POST /fleet/stt (the stt upload door, ADR 0072),
+	// MiB of decoded audio; 0 = 48. The request body is that cap in base64 (64 MiB at the default) plus
+	// slack, and 48 MiB is about 4.6 h of the 32 kbps Opus an asker sends. Published in health
+	// (stt_upload_max_mb) so an asker never sends a file the node would refuse.
+	FleetSTTUploadMaxMB int `json:"fleet_stt_upload_max_mb,omitempty"`
+	// FleetSTTMaxConcurrent caps how many fleet stt jobs run at once on this node, the legacy
+	// path-taking lane and the upload door counted together; 0 = 1. Whisper is one single-slot
+	// upstream: a job over the cap waits its turn in arrival order and is never refused. Inference
+	// itself stays serialized by the whisper client's process-wide mutex whatever this says, so a
+	// value above 1 only overlaps the jobs' ffmpeg conversions and queue time.
+	FleetSTTMaxConcurrent int `json:"fleet_stt_max_concurrent,omitempty"`
 	// KVSlotCapGiB bounds the node's kvslots/ directory (ADR 0056 Layer 2); 0 = 8 GiB.
 	KVSlotCapGiB int `json:"kvslot_cap_gib,omitempty"`
 	// FleetAgentEnabled opts this NODE into executing fleet "agent" tasks
@@ -2990,6 +3001,25 @@ func (c Config) EffectiveComposeBundleMaxBytes() int64 {
 		mb = 64
 	}
 	return int64(mb) << 20
+}
+
+// EffectiveSTTUploadMaxBytes is the cap on one audio upload to POST /fleet/stt, decoded: 48 MiB unless
+// fleet_stt_upload_max_mb says otherwise (zero and negative read as the built-in).
+func (c Config) EffectiveSTTUploadMaxBytes() int64 {
+	mb := c.FleetSTTUploadMaxMB
+	if mb <= 0 {
+		mb = 48
+	}
+	return int64(mb) << 20
+}
+
+// EffectiveSTTMaxConcurrent is how many fleet stt jobs this node runs at once: fleet_stt_max_concurrent,
+// 1 when it is zero or negative.
+func (c Config) EffectiveSTTMaxConcurrent() int {
+	if c.FleetSTTMaxConcurrent <= 0 {
+		return 1
+	}
+	return c.FleetSTTMaxConcurrent
 }
 
 // EffectiveComposeCacheDir is where the compose runner keeps its work dirs, the

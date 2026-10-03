@@ -59,7 +59,9 @@ import (
 	"github.com/dmmdea/offload-harness/internal/router"
 	"github.com/dmmdea/offload-harness/internal/shadow"
 	"github.com/dmmdea/offload-harness/internal/storesteward"
+	"github.com/dmmdea/offload-harness/internal/sttremote"
 	"github.com/dmmdea/offload-harness/internal/swapclient"
+	"github.com/dmmdea/offload-harness/internal/textremote"
 	"github.com/dmmdea/offload-harness/internal/trajectory"
 	"github.com/dmmdea/offload-harness/internal/visionremote"
 	"github.com/dmmdea/offload-harness/internal/volumes"
@@ -470,10 +472,11 @@ func runTask(task string, args []string) error {
 	schemaPath := fs.String("schema", "", "extract: path to a JSON schema file")
 	selectFlag := fs.String("select", "", "comma-separated top-level result fields to keep")
 	compactFlag := fs.Bool("compact", false, "compact (minified) JSON output")
+	route := fs.String("route", "", textRouteHelp)
 	// Go's flag pkg stops at the first positional, so split the input arg out
 	// first and parse the remaining flags (allows `summarize <file> --json`).
 	positional, flagArgs := splitArgs(args, map[string]bool{
-		"config": true, "labels": true, "question": true, "schema": true, "max-points": true, "select": true,
+		"config": true, "labels": true, "question": true, "schema": true, "max-points": true, "select": true, "route": true,
 	})
 	_ = fs.Parse(flagArgs)
 
@@ -513,10 +516,37 @@ func runTask(task string, args []string) error {
 	}
 	defer cleanup()
 
-	res := p.Run(context.Background(), core.Request{Task: core.TaskType(task), Door: "cli:" + task, Input: input, Params: params})
+	res, err := runCLITextTask(context.Background(), cfg, p, core.Request{Task: core.TaskType(task), Door: "cli:" + task, Input: input, Params: params}, *route)
+	if err != nil {
+		return err
+	}
 	emitResult(res, *asJSON, *selectFlag, *compactFlag)
 	return nil
 }
+
+// textRouteHelp is the --route flag text of classify and extract (0.154.0): the MCP tools carry the same
+// vocabulary (textremote).
+const textRouteHelp = "classify / extract only. Where the call runs: local (default), auto (a fleet node advertising the text lane when the local GPU lease is held), remote (force a fleet node; defers when none is eligible)"
+
+// runCLITextTask runs one cascade text task for a CLI verb. classify and extract ride the route lane
+// (textremote), as their MCP twins do; with no route that is the in-process pipeline, unchanged.
+// summarize and triage have no route on either surface (a fleet node refuses them), so a route given to
+// them is an error rather than a silent local run under a route the caller asked for.
+func runCLITextTask(ctx context.Context, cfg config.Config, runner textremote.Runner, req core.Request, route string) (core.Result, error) {
+	switch req.Task {
+	case core.TaskClassify, core.TaskExtract:
+		return textremote.Run(ctx, cfg, runner, req, route), nil
+	}
+	if strings.TrimSpace(route) != "" {
+		return core.Result{}, fmt.Errorf("--route applies to classify and extract; %s always runs on this box's cascade (no fleet node serves it)", req.Task)
+	}
+	return runner.Run(ctx, req), nil
+}
+
+// sttRouteHelp is the --route flag text of transcribe (ADR 0072). The CLI default is local, like the
+// vision verbs: a script that never passes --route is byte-identical to before the route existed (the
+// MCP tool defaults to auto).
+const sttRouteHelp = "where the whisper model runs: local (default), auto (a fleet node when a render would keep the local whisper waiting), remote (force a fleet node; defers when none is eligible)"
 
 // visionRouteHelp is the --route flag text shared by vqa / ocr / assess-image
 // (0.116.0) — the MCP tools carry the same vocabulary (visionremote).
@@ -652,8 +682,9 @@ func runVideoDescribe(args []string) error {
 }
 
 // runTranscribe handles `local-offload transcribe <audio-path> [--language es]
-// [--hq] [--json]`. The positional argument is a LOCAL AUDIO/VIDEO PATH (not
-// stdin); the pipeline converts it to 16kHz WAV and runs whisper-server over it.
+// [--hq] [--route local|auto|remote] [--json]`. The positional argument is a LOCAL
+// AUDIO/VIDEO PATH (not stdin); the pipeline converts it to 16kHz WAV and runs
+// whisper-server over it, or the route sends it to a fleet node (sttremote).
 func runTranscribe(args []string) error {
 	fs := flag.NewFlagSet("transcribe", flag.ExitOnError)
 	fs.String("config", "", "config file path")
@@ -662,8 +693,9 @@ func runTranscribe(args []string) error {
 	hq := fs.Bool("hq", false, "use the configured higher-accuracy STT tier (slower; may return one full-span segment instead of timestamps)")
 	selectFlag := fs.String("select", "", "comma-separated top-level result fields to keep (e.g. gist,language,srt_path — drops the verbose segments[])")
 	compactFlag := fs.Bool("compact", false, "compact (minified) JSON output")
+	route := fs.String("route", "", sttRouteHelp)
 	positional, flagArgs := splitArgs(args, map[string]bool{
-		"config": true, "language": true, "select": true,
+		"config": true, "language": true, "select": true, "route": true,
 	})
 	_ = fs.Parse(flagArgs)
 
@@ -685,12 +717,12 @@ func runTranscribe(args []string) error {
 	if *hq {
 		params["hq"] = true
 	}
-	res := p.Run(context.Background(), core.Request{
+	res := sttremote.Run(context.Background(), cfg, p, core.Request{
 		Task:   core.TaskTranscribe,
 		Door:   "cli:transcribe",
 		Audio:  positional,
 		Params: params,
-	})
+	}, *route)
 	emitResult(res, *asJSON, *selectFlag, *compactFlag)
 	return nil
 }
@@ -2556,6 +2588,12 @@ func runFleetServe(args []string) error {
 		fmt.Fprintf(os.Stderr, "[fleet-serve] WARNING: sweeping compose-project dirs: %v\n", perr)
 	} else if n > 0 {
 		fmt.Fprintf(os.Stderr, "[fleet-serve] swept %d orphaned compose-project dir(s)\n", n)
+	}
+	// Audio files the stt upload door (ADR 0072) wrote and a crash left behind; a warning, never fatal.
+	if n, perr := fleetnode.SweepOrphanedSTTUploads(cfg, time.Now()); perr != nil {
+		fmt.Fprintf(os.Stderr, "[fleet-serve] WARNING: sweeping stt upload files: %v\n", perr)
+	} else if n > 0 {
+		fmt.Fprintf(os.Stderr, "[fleet-serve] swept %d orphaned stt upload file(s)\n", n)
 	}
 
 	listen, nodeID, err := fleetServeParams(*listenFlag, *nodeIDFlag, *trusted, cfg, os.Hostname)
