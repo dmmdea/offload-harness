@@ -6,6 +6,23 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed — the display card is found with the screen asleep (GPU routing P13b)
+
+- **The allocator's "never auto-pick the display card" rule now fires at the desk.** On the 3-card box
+  `nvidia-smi` read `display_active` Disabled on every card while the screen slept, and `display_attached` Yes on the
+  card that drives the monitor, so the one shared rule (`gpuprobe.DisplayCardUUIDs`) found no display card and the
+  allocator could hand that card to a render. The per-device query now carries `display_attached`, and a card is the
+  display card when `display_active` reads Enabled **or** `display_attached` reads Yes (`Device.DrivesDisplay`, one
+  method every reader asks: the card table, the lease verdict's "that load is the operator's game", the fleet node's
+  `work_util_pct`, the delegator's free-card count, `offload_status`). Only an exact `Yes` counts; `[Not Supported]`,
+  `[N/A]` and a missing column are "unknown", never the operator's screen. A driver that refuses the field (an older one,
+  a headless Linux build) rejects the whole query, so both readers (`gpuprobe.Read` and the lease verdict's sampler)
+  retry without it through one fallback (`RunDisplayAware`) and the rule rests on `display_active` alone, as before; the
+  full query is tried again after ten minutes, so a 2 s sampler does not pay a doomed call every tick. The node
+  publishes `display_attached` in `gpu_devices[]` (omitted when false; a node that predates it reads as "unknown").
+  Explicit `--devices` naming the display card is unchanged. A box whose only card is the display card still runs its
+  seats there.
+
 ## [0.161.0] - 2026-10-02 - GPU leases name their cards, free cards take queued work; agent audit trail, read floor and audit chain
 
 **The operator-visible change (GPU routing, milestone 1).** One job used to fence a whole box: a lease named no cards,

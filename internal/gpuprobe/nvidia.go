@@ -17,6 +17,8 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 )
 
 // Device is one parsed nvidia-smi device line: the index/uuid/name nvidia-smi
@@ -45,13 +47,88 @@ type Device struct {
 	// already runs. False for a driver that does not report it and for a line
 	// from an older launcher that lacks the column: absent is never "yes".
 	DisplayActive bool `json:"display_active,omitempty"`
+	// DisplayAttached is nvidia-smi's display_attached: a physical monitor is
+	// connected to one of this card's connectors. It is the signal that holds at the
+	// desk, because display_active reads Disabled on every card of the 3-card box
+	// unless a display is initialised (a game, a lit screen) while display_attached
+	// stays Yes on the card that drives the monitor (measured 2026-10-03). Absent is
+	// never "yes": a driver without the field, and a line from the older query,
+	// leave it false. Read it through DrivesDisplay, never on its own.
+	DisplayAttached bool `json:"display_attached,omitempty"`
 }
+
+// DrivesDisplay is the ONE per-card answer to "is this the operator's screen":
+// display_active Enabled OR display_attached Yes. Every reader of a Device asks it
+// here (DisplayCardUUIDs, the card table, the delegator's free-card reading), so the
+// rule cannot drift between surfaces.
+func (d Device) DrivesDisplay() bool { return d.DisplayActive || d.DisplayAttached }
 
 // smiQueryArgs is the ONE per-device query every reader in the harness runs
 // (fleet-serve's 2 s health sampler and the placement guards alike): the uuid
 // is there so a card can be pinned across reboots/reseats, utilization so a
-// busy card can be told from an idle one.
-var smiQueryArgs = []string{"--query-gpu=index,uuid,name,memory.total,memory.used,utilization.gpu,display_active", "--format=csv,noheader,nounits"}
+// busy card can be told from an idle one, and the two display columns so the
+// operator's screen can be told from a card the harness may place work on.
+var smiQueryArgs = []string{"--query-gpu=index,uuid,name,memory.total,memory.used,utilization.gpu,display_active,display_attached", "--format=csv,noheader,nounits"}
+
+// smiQueryArgsNoAttached is the query before display_attached was added. A driver
+// that does not know the field (an older one, a headless Linux build) refuses the
+// whole query with a non-zero exit, so RunDisplayAware falls back to this one: the
+// reader still answers, with display_active alone.
+var smiQueryArgsNoAttached = []string{"--query-gpu=index,uuid,name,memory.total,memory.used,utilization.gpu,display_active", "--format=csv,noheader,nounits"}
+
+// attachedRetryEvery is how long the full query is skipped after a driver refused it
+// and the fallback worked. The 2 s health sampler would otherwise pay a doomed
+// nvidia-smi call every tick on an old driver; after the window the full query is tried
+// again, so a driver upgrade is picked up and one transient failure is never a
+// permanent downgrade.
+const attachedRetryEvery = 10 * time.Minute
+
+// smiClock is the clock the fallback window reads; a test injects its own.
+var smiClock = time.Now
+
+// attachedGate remembers that the driver refused the display_attached column.
+var attachedGate struct {
+	mu        sync.Mutex
+	skipUntil time.Time
+}
+
+func resetAttachedGate() {
+	attachedGate.mu.Lock()
+	attachedGate.skipUntil = time.Time{}
+	attachedGate.mu.Unlock()
+}
+
+// ResetDisplayAwareState forgets that a driver refused display_attached, so the next
+// query tries the full one again. A test seam for packages whose tests stub nvidia-smi;
+// production never calls it.
+func ResetDisplayAwareState() { resetAttachedGate() }
+
+// RunDisplayAware runs the per-device query with display_attached and, when the
+// driver refuses it, the same query without. run(true) must run the full query and
+// run(false) the fallback; both readers of the card table (this package's Read and
+// the lease verdict's sampler in gpuactivity) go through here so they degrade the
+// same way. When both fail nvidia-smi itself is the problem: the full query's error
+// is returned and nothing is remembered.
+func RunDisplayAware(run func(withAttached bool) (string, error)) (string, error) {
+	attachedGate.mu.Lock()
+	skip := smiClock().Before(attachedGate.skipUntil)
+	attachedGate.mu.Unlock()
+	if skip {
+		return run(false)
+	}
+	out, err := run(true)
+	if err == nil {
+		return out, nil
+	}
+	legacy, lerr := run(false)
+	if lerr != nil {
+		return "", err
+	}
+	attachedGate.mu.Lock()
+	attachedGate.skipUntil = smiClock().Add(attachedRetryEvery)
+	attachedGate.mu.Unlock()
+	return legacy, nil
+}
 
 // ParseSmiMemoryDevices parses `nvidia-smi --query-gpu=index,uuid,name,
 // memory.total,memory.used[,utilization.gpu] --format=csv,noheader,nounits`
@@ -94,8 +171,9 @@ func ParseSmiMemoryDevices(out string) ([]Device, error) {
 		}
 		fields := strings.Split(line, ",")
 		// 5 = an older launcher (no utilization), 6 = with utilization, 7 = with
-		// display_active as well. A line outside that range is not this query's.
-		if len(fields) < 5 || len(fields) > 7 {
+		// display_active as well, 8 = with display_attached. A line outside that
+		// range is not this query's.
+		if len(fields) < 5 || len(fields) > 8 {
 			continue
 		}
 		idx, err := strconv.Atoi(strings.TrimSpace(fields[0]))
@@ -150,6 +228,10 @@ func ParseSmiMemoryDevices(out string) ([]Device, error) {
 			// do not know", which must never read as "this is the operator's screen"
 			// — the whole point of excluding a display card is that we are SURE.
 			d.DisplayActive = strings.EqualFold(strings.TrimSpace(fields[6]), "Enabled")
+		}
+		if len(fields) >= 8 {
+			// Same discipline for display_attached: only an exact "Yes" is a yes.
+			d.DisplayAttached = strings.EqualFold(strings.TrimSpace(fields[7]), "Yes")
 		}
 		devices = append(devices, d)
 	}
@@ -285,9 +367,19 @@ func NvidiaSmiRunner() func() (string, error) {
 		if err != nil {
 			return "", err
 		}
-		out, err := exec.Command(bin, smiQueryArgs...).Output()
-		return string(out), err
+		return RunDisplayAware(func(withAttached bool) (string, error) {
+			out, err := exec.Command(bin, smiArgs(withAttached)...).Output()
+			return string(out), err
+		})
 	}
+}
+
+// smiArgs picks the per-device query: the full one, or the one without display_attached.
+func smiArgs(withAttached bool) []string {
+	if withAttached {
+		return smiQueryArgs
+	}
+	return smiQueryArgsNoAttached
 }
 
 // nvidiaSmiPath resolves the binary: PATH, then the Windows driver drop.
@@ -329,11 +421,13 @@ func Read(ctx context.Context) ([]Device, error) {
 		if err != nil {
 			return "", err
 		}
-		out, err := exec.CommandContext(ctx, bin, smiQueryArgs...).Output()
-		if err != nil && ctx.Err() != nil {
-			return "", fmt.Errorf("nvidia-smi: %w", ctx.Err())
-		}
-		return string(out), err
+		return RunDisplayAware(func(withAttached bool) (string, error) {
+			out, err := exec.CommandContext(ctx, bin, smiArgs(withAttached)...).Output()
+			if err != nil && ctx.Err() != nil {
+				return "", fmt.Errorf("nvidia-smi: %w", ctx.Err())
+			}
+			return string(out), err
+		})
 	})
 }
 

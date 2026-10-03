@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/dmmdea/offload-harness/internal/gpuprobe"
 )
 
 // GPU is one card as nvidia-smi reports it at the moment of the sample.
@@ -21,6 +23,10 @@ type GPU struct {
 	// so its utilization is never a lease holder's work — see
 	// gpuprobe.DisplayCardUUIDs, the one rule both surfaces read.
 	DisplayActive bool `json:"display_active,omitempty"`
+	// DisplayAttached is nvidia-smi's display_attached: a monitor is plugged into this
+	// card. It holds with the screen asleep, when display_active reads Disabled on every
+	// card; the rule that reads both is gpuprobe.Device.DrivesDisplay.
+	DisplayAttached bool `json:"display_attached,omitempty"`
 }
 
 // GPUProcess is one process nvidia-smi lists on a card. On Windows (WDDM) the
@@ -48,7 +54,15 @@ var smiRun = func(ctx context.Context, args ...string) (string, error) {
 func SampleGPUs(ctx context.Context) ([]GPU, error) {
 	sctx, cancel := context.WithTimeout(ctx, smiTimeout)
 	defer cancel()
-	out, err := smiRun(sctx, "--query-gpu=index,uuid,name,utilization.gpu,memory.used,memory.total,display_active", "--format=csv,noheader,nounits")
+	// Through the shared fallback: a driver that does not know display_attached refuses the
+	// whole query, and the sample is then taken without it (display_active alone, as before).
+	out, err := gpuprobe.RunDisplayAware(func(withAttached bool) (string, error) {
+		cols := "index,uuid,name,utilization.gpu,memory.used,memory.total,display_active"
+		if withAttached {
+			cols += ",display_attached"
+		}
+		return smiRun(sctx, "--query-gpu="+cols, "--format=csv,noheader,nounits")
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -98,6 +112,9 @@ func ParseGPUs(out string) []GPU {
 			// field answers "[Not Supported]", which must never read as "this is the
 			// operator's screen".
 			g.DisplayActive = strings.EqualFold(f[6], "Enabled")
+		}
+		if len(f) >= 8 {
+			g.DisplayAttached = strings.EqualFold(f[7], "Yes") // only an exact Yes
 		}
 		gpus = append(gpus, g)
 	}

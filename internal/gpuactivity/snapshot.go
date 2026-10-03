@@ -435,7 +435,7 @@ func describeCard(g GPU) string {
 func displayCards(v View) map[string]bool {
 	devs := make([]gpuprobe.Device, 0, len(v.GPUs))
 	for _, g := range v.GPUs {
-		devs = append(devs, gpuprobe.Device{UUID: g.UUID, DisplayActive: g.DisplayActive})
+		devs = append(devs, gpuprobe.Device{UUID: g.UUID, DisplayActive: g.DisplayActive, DisplayAttached: g.DisplayAttached})
 	}
 	return gpuprobe.DisplayCardUUIDs(devs)
 }

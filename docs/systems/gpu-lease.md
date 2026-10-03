@@ -473,7 +473,10 @@ plan P13), and `GPU_LEASE_DEVICES` is for a command that wants to read the set i
 the cards the lease holds and leave the seats on the others (plan P5, below).
 
 **The allocator.** A card is allocatable when it is not quarantined (`quarantine.<id>` sidecars, which P12 will write),
-not the display card, not claimed (a whole-node lease claims every card), not under a foreign compute process
+not the display card (the card whose `display_active` reads Enabled **or** whose `display_attached` reads Yes: with the screen asleep
+`display_active` reads Disabled on every card of the 3-card box while `display_attached` still marks the card that drives the monitor,
+measured 2026-10-03; one rule, `gpuprobe.DisplayCardUUIDs`, shared with the lease verdict and the fleet health), not claimed (a
+whole-node lease claims every card), not under a foreign compute process
 (`foreign-busy`, reported and skipped, never killed), its free VRAM fits `--vram` (GiB per card), and the **host** has the
 RAM `--ram` declares plus `gpu_host_ram_headroom_gib` (default 4) free. Among allocatable cards the order is: no resident
 seat first, then the cheapest eviction (the footprint of the configured layer seats loaded on it), then the lowest id. An

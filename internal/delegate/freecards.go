@@ -63,7 +63,7 @@ type cardRoom struct {
 // display, and utilisation known and below the working line (an unknown is never
 // idle).
 func cardIdle(d gpuprobe.Device) bool {
-	return !d.DisplayActive && d.UtilKnown && d.UtilPct < freeCardUtilBelowPct
+	return !d.DrivesDisplay() && d.UtilKnown && d.UtilPct < freeCardUtilBelowPct
 }
 
 // cardFree is cardIdle plus at least needGiB of VRAM free.
