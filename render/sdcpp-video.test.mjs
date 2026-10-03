@@ -21,7 +21,7 @@ test("buildSdVideoArgs: the full I2V argv in the verified master-929 spelling", 
     ...baseFlags, "high-noise-model": "/m/high.gguf", negative: "blurry", cfg: "1", steps: "3", sampler: "euler",
     "flow-shift": "3", width: "832", height: "480", frames: "49", fps: "24", seed: "7",
   };
-  const a = buildSdVideoArgs({ outFile: "/tmp/o.webm", still: "/in/still.png", prompt: "a calm sea", flags, extra: ["--clip-on-cpu-NOT"] });
+  const a = buildSdVideoArgs({ outFile: "/tmp/o.webm", still: "/in/still.png", prompt: "a calm sea", flags, extra: ["--some-extra-flag"] });
   assert.deepEqual(a.slice(0, 4), ["-M", "vid_gen", "--diffusion-model", "/m/wan2.2-ti2v-5b-q8_0.gguf"]);
   const at = (k) => a[a.indexOf(k) + 1];
   assert.equal(at("--high-noise-diffusion-model"), "/m/high.gguf");
@@ -42,7 +42,7 @@ test("buildSdVideoArgs: the full I2V argv in the verified master-929 spelling", 
   assert.equal(at("--backend"), "vulkan0");
   for (const f of ["--diffusion-fa", "--vae-tiling", "-v"]) assert.ok(a.includes(f), `${f} must be present (-v feeds the CPU-placement guard)`);
   // extras land before the output, which is last
-  assert.ok(a.indexOf("--clip-on-cpu-NOT") > a.indexOf("-v"));
+  assert.ok(a.indexOf("--some-extra-flag") > a.indexOf("-v"));
   assert.equal(a[a.length - 2], "-o");
   assert.equal(a[a.length - 1], "/tmp/o.webm");
 });
@@ -107,4 +107,38 @@ test("the script refuses a missing backend and missing required flags (exit 2)",
   const u = run([]);
   assert.equal(u.status, 2);
   assert.match(u.stderr, /usage/);
+});
+
+const videoBase = ["out.mp4", "p", "--sd-bin", "/no/such/sd-cli", "--model", "/no/such/m", "--vae", "/no/such/v", "--t5xxl", "/no/such/t", "--backend", "vulkan0", "--no-lock"];
+
+test("the script refuses a request over the token cap BEFORE any file check or spawn (TOKEN_CAP_EXCEEDED, exit 1); no cap = no check", () => {
+  // 832x480x49 on a 16x VAE is 5070 latent tokens
+  const over = run([...videoBase, "--max-tokens", "5000", "--vae-stride", "16"]);
+  assert.equal(over.status, 1, over.stderr);
+  assert.match(over.stderr, /TOKEN_CAP_EXCEEDED/);
+  assert.match(over.stderr, /needs 5070 latent tokens/);
+  assert.match(over.stderr, /cap is 5000/);
+  assert.doesNotMatch(over.stderr, /not found/, "the cap is checked before the file checks, so before any spawn");
+  // exactly at the cap passes the cap and moves on to the (missing) files
+  const at = run([...videoBase, "--max-tokens", "5070", "--vae-stride", "16"]);
+  assert.match(at.stderr, /not found/);
+  assert.doesNotMatch(at.stderr, /TOKEN_CAP_EXCEEDED/);
+  // no cap configured: a huge request is not checked
+  const none = run([...videoBase, "--width", "1920", "--height", "1088", "--frames", "121"]);
+  assert.match(none.stderr, /not found/);
+  // a cap without a stride is a usage error, not a silent pass
+  const noStride = run([...videoBase, "--max-tokens", "5000"]);
+  assert.equal(noStride.status, 1);
+  assert.match(noStride.stderr, /--vae-stride must be 8 or 16/);
+});
+
+test("the script refuses extra args that change the backend or placement (EXTRA_ARGS_REFUSED, exit 1) before any spawn", () => {
+  for (const extra of [["--backend", "cpu"], ["--clip-on-cpu"], ["--vae-on-cpu"], ["--offload-to-cpu"], ["--params-backend", "cpu"], ["-b", "vulkan0"]]) {
+    const r = run([...videoBase, "--extra-args", JSON.stringify(extra)]);
+    assert.equal(r.status, 1, `${extra}: ${r.stderr}`);
+    assert.match(r.stderr, /EXTRA_ARGS_REFUSED/);
+    assert.doesNotMatch(r.stderr, /not found/);
+  }
+  const ok = run([...videoBase, "--extra-args", JSON.stringify(["--vae-tile-overlap", "0.25"])]);
+  assert.match(ok.stderr, /not found/);
 });

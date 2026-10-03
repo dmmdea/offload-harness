@@ -2,15 +2,22 @@
 // sdcpp-animate.mjs, audiocpp-generate.mjs): the spawn-per-job native CLIs that serve
 // video, animate, voice and music on a box whose only GPU is a Vulkan iGPU.
 //
-// THE RULE THIS FILE ENFORCES: no model runs on CPU on these engines. Two guards:
-//   1. refuseCpuBackend — a cpu (or unset) --backend is refused before anything spawns
-//      (mirrors config.CPUBackendRefusal on the Go side; the Go side refuses first, this
-//      is the runner's own door for a hand-run or a stale config).
-//   2. detectCpuPlacement + runEngine — the engine's own log is read line by line while it
-//      runs, and the FIRST line that places a compute module on the CPU kills the process
-//      tree and fails the job with CPU_PLACEMENT, rather than letting a 4-minute render
-//      finish on the wrong silicon. gpugen.ClassifyErr maps the "CPU_PLACEMENT" text to the
-//      "cpu_placement" error class.
+// THE RULE THIS FILE ENFORCES: no model runs on CPU on these engines. The guards:
+//   1. refuseCpuBackend / refuseExtraArgs — a backend that is not a Vulkan device, and any
+//      *_extra_args element that changes the backend or placement, is refused before
+//      anything spawns (mirrors config.CPUBackendRefusal / config.ExtraArgsRefusal on the Go
+//      side; the Go side refuses first, this is the runner's own door for a hand-run or a
+//      stale config).
+//   2. createLogGuard + runEngine — a POSITIVE guard. The engine's own log is read line by
+//      line while it runs and a run PASSES only on affirmative evidence that the work ran on
+//      the GPU (per engine, see createLogGuard); a line that places compute on the CPU kills
+//      the process tree at once, and a run that ends without the positive evidence is
+//      CPU_PLACEMENT as well ("no GPU evidence was seen"). Silence is never a pass.
+//   3. token cap (latentTokens / checkTokenCap) — keeps one GPU dispatch inside the amdgpu
+//      2 s lockup timeout; a device reset in the log is GPU_RESET, never retried.
+//   4. lifecycle (installLifecycle) — SIGTERM/SIGINT/SIGHUP and the parent disappearing kill
+//      the engine tree and remove the temp dirs, so a cancelled job never leaves the iGPU
+//      held or frames behind.
 //
 // Dependency-free (Node 18+ built-ins only).
 import { spawn, spawnSync } from "node:child_process";
@@ -20,6 +27,10 @@ import { join } from "node:path";
 
 export const CPU_PLACEMENT = "CPU_PLACEMENT";
 export const CPU_BACKEND_REFUSED = "CPU_BACKEND_REFUSED";
+export const GPU_RESET = "GPU_RESET";
+export const TOKEN_CAP_EXCEEDED = "TOKEN_CAP_EXCEEDED";
+export const EXTRA_ARGS_REFUSED = "EXTRA_ARGS_REFUSED";
+export const ILLEGAL_INSTRUCTION = "ILLEGAL_INSTRUCTION";
 
 // parseArgs: positionals + --flags. `booleans` names the flags that take no value.
 // Every other --flag consumes the next token (a missing value is undefined, which every
@@ -57,17 +68,54 @@ export function parseExtraArgs(raw) {
   return v;
 }
 
-function isCpuName(v) {
-  // "best" / "auto" let the binary pick; on a box whose GPU it cannot open that is the CPU.
-  if (v === "best" || v === "auto") return true;
-  if (!v.startsWith("cpu")) return false;
-  return /^\d*$/.test(v.slice(3));
+// ---------------------------------------------------------------- extra-args screening
+
+// Flags that change the backend or the placement of a model. The runner supplies the
+// backend itself, so an extra-args element naming any of these is never legitimate: whatever
+// it is followed by overrides the GPU backend the script put in the argv.
+const PLACEMENT_FLAGS = new Set([
+  "--backend", "-b", "--params-backend", "--offload-to-cpu", "--clip-on-cpu", "--vae-on-cpu",
+  "--control-net-cpu", "--rpc",
+]);
+
+// screenExtraArgs: the first element of an *_extra_args list that changes the backend or
+// the placement, as {index, arg, why}; null when the list is clean. `engine` is "sdcpp",
+// "da3" or "audiocpp" (audio.cpp's --device is the runner's too). Pure. Mirrors
+// config.ExtraArgsRefusal.
+export function screenExtraArgs(args, { engine = "sdcpp" } = {}) {
+  const list = Array.isArray(args) ? args : [];
+  for (let i = 0; i < list.length; i++) {
+    const arg = String(list[i]);
+    const low = arg.toLowerCase().trim();
+    const name = low.split("=")[0].trim();
+    if (PLACEMENT_FLAGS.has(name)) return { index: i, arg, why: `${name} sets the backend or where a model lives` };
+    if (engine === "audiocpp" && name === "--device") return { index: i, arg, why: "--device is chosen by the audiocpp_device key" };
+    if (name.startsWith("-") && /cpu/.test(name)) return { index: i, arg, why: "a cpu-named flag places a model on the CPU" };
+    if (low.split(/[=,&:\s]+/).some((p) => /^cpu\d*$/.test(p))) return { index: i, arg, why: "cpu as a backend value" };
+  }
+  return null;
 }
 
-// refuseCpuBackend: throws CPU_BACKEND_REFUSED for a backend that is unset or places any
-// module on the CPU. sd-cli's --backend takes one value ("vulkan0") or per-module
-// assignments ("diffusion=vulkan0,vae=cpu"; "&" joins the devices of one module), so every
-// assignment is checked. Returns the trimmed backend when it is acceptable.
+// refuseExtraArgs: throws EXTRA_ARGS_REFUSED naming the offending element; returns the list.
+export function refuseExtraArgs(args, { engine = "sdcpp", key = "extra args" } = {}) {
+  const hit = screenExtraArgs(args, { engine });
+  if (hit) {
+    throw new Error(`${EXTRA_ARGS_REFUSED}: ${key}[${hit.index}] ${JSON.stringify(hit.arg)}: ${hit.why} (no model runs on CPU on this engine; backends and devices are set by the *_backend / *_device keys only)`);
+  }
+  return Array.isArray(args) ? args : [];
+}
+
+// ---------------------------------------------------------------- backend refusal
+
+// A backend assignment value is accepted only when it names a Vulkan device ("vulkan",
+// "vulkan0", ...): an allowlist, so "cpu", "best", "auto", "blas", "opencl", "rpc" and a typo
+// such as "vulcan" are all refused rather than left to the binary to resolve.
+const VULKAN_BACKEND = /^vulkan\d*$/;
+
+// refuseCpuBackend: throws CPU_BACKEND_REFUSED for a backend that is unset or anything but a
+// Vulkan device. sd-cli's --backend takes one value ("vulkan0") or per-module assignments
+// ("diffusion=vulkan0,vae=cpu"; "&" joins the devices of one module), so every assignment is
+// checked. Returns the trimmed backend when it is acceptable.
 export function refuseCpuBackend(backend) {
   const b = String(backend ?? "").trim();
   if (b === "") {
@@ -77,79 +125,290 @@ export function refuseCpuBackend(backend) {
     let v = part.trim();
     const eq = v.lastIndexOf("=");
     if (eq >= 0) v = v.slice(eq + 1).trim();
-    if (isCpuName(v)) {
-      throw new Error(CPU_BACKEND_REFUSED + `: --backend ${JSON.stringify(b)} places a model on the CPU (no model runs on CPU on this engine)`);
+    if (!VULKAN_BACKEND.test(v)) {
+      throw new Error(CPU_BACKEND_REFUSED + `: --backend ${JSON.stringify(b)} is not a Vulkan device (${JSON.stringify(v)}); no model runs on CPU on this engine, so only vulkan / vulkanN is accepted`);
     }
   }
   return b;
 }
 
-// Lines that mention "cpu" without placing a compute module on it. A line matching any of
-// these is never a CPU-placement finding:
-//   - the host description both engines print ("system_info: n_threads = 4 | CPU : AVX2 = 1"),
-//   - ggml listing every backend it loaded (the CPU backend is always registered, even on a
-//     Vulkan run: "load_backend: loaded CPU backend from ...", "registered backend CPU"),
-//   - RNG selection (--rng cpu, sampler_rng, brownian_tree_rng: the noise generator is not a
-//     model),
-//   - parameter STORAGE lines (params backend / offload / prefetch / weights): where bytes
-//     rest is the sanctioned RAM overflow, not where the compute runs.
-const NOT_PLACEMENT = [
-  /system[_ ]?info/i,
-  /\bCPU\s*:\s*[A-Za-z0-9_]+\s*=\s*\d/, // "CPU : SSE3 = 1 | AVX = 1" style host feature dumps
-  /load(?:ed)?_?backend|loaded\s+\S+\s+backend\s+from|registered\s+(?:\S+\s+)?backend|register_backend|backend\s+registry/i,
-  /\brng\b/i,
-  /params?[ _-]?backend|offload|prefetch|\bweights?\b|\bmmap\b/i,
-];
+// ---------------------------------------------------------------- the positive GPU-evidence guard
 
-// What a compute-module CPU placement looks like in the engines' logs:
-//   "<module>: Using CPU backend" / "using CPU backend"      (sd.cpp, per module)
-//   "<module> backend: CPU" / "backend = cpu0" / "backend -> CPU"  (assignment echo)
-//   "<module>=cpu"                                           (per-module --backend echo)
-//   "selected backend: cpu" / "Using backend: CPU"           (audio.cpp's backend line)
-//   "running on CPU" / "falling back to CPU" / "fallback to cpu"
-// The patterns are anchored on the word "cpu" as a whole token (so "cpufreq" and "mycpu"
-// never match) next to a placement word.
-const PLACEMENT = [
-  /\busing\s+cpu\b/i,
-  /\bcpu\s+backend\b/i,
-  /\bbackend\s*(?:[:=]|->|is)\s*cpu\d*\b/i,
-  /\b[a-z][\w.-]*\s*=\s*cpu\d*\b/i,
-  /\b(?:running|run|runs|computing|compute|placed|placing|fall(?:ing)?\s*back|fallback)\s+(?:on|to|onto)\s+cpu\b/i,
-  /\bfell\s+back\s+to\s+cpu\b/i,
-  // A software Vulkan ICD is the CPU in substance: ggml_vulkan names the device it opened,
-  // and on a box without a working GPU driver that device is llvmpipe/lavapipe/swiftshader.
-  /\bggml_vulkan\b.*\b(?:llvmpipe|lavapipe|swiftshader)\b/i,
-  /\bvulkan\d*\b.*\b(?:llvmpipe|lavapipe|swiftshader)\b/i,
-];
+// What counts as evidence, per engine (formats read from the engines' own source at the
+// pinned commits and confirmed against real logs in render/testdata, see its README):
+//
+//   sdcpp    (stable-diffusion.cpp 3f8527a)  PASS needs ALL of
+//              - "ggml_vulkan: <n> = <device> (...)" for a NON-software device,
+//              - a "<module> compute buffer size: ... on Vulkan<N>" line for a module that is
+//                not an auxiliary one (text encoder / VAE / TAE): the diffusion stage,
+//              - and no "compute buffer size ... on CPU" line.
+//            sd.cpp prints the backend via ggml_backend_name() (compute: "CPU" for the CPU
+//            backend, "Vulkan0" for the first Vulkan device) and the params buffer type via
+//            ggml_backend_buft_name() ("CPU", "Vulkan0", or "Vulkan_Host" for pinned host
+//            memory). Params resting in RAM with compute on the GPU is the sanctioned
+//            overflow, so a params line "on CPU" / "on Vulkan_Host" is neither evidence nor a
+//            placement.
+//   da3      (depth-anything.cpp da3-cli)    PASS needs "[da3] da::Backend using device: Vulkan<N>".
+//            "offload_weights: ... (N host-only tensors kept on CPU ...)" is a storage line.
+//   audiocpp (audio.cpp audiocpp_cli)        PASS needs a "<component>.weights.buffer_name
+//            Vulkan<N>" line, and ANY "<component>.weights.buffer_name CPU" line is a placement
+//            (upstream loads a second host copy of the ACE-Step planner for the prompt prefill).
+//
+// Never scanned for anything: ggml's "loaded CPU backend" registration, "Initializing
+// backend: CPU", the SDCliParams / SDContextParams / SDGenerationParams dump blocks, the
+// tokenizer echo lines ("split prompt ..." / "parse '...'"), and any line that contains the
+// request's prompt, negative prompt, TTS text or lyrics verbatim.
+export const GUARD_ENGINES = ["sdcpp", "da3", "audiocpp"];
 
-// detectCpuPlacement: the first log line (of `text`, any line separator) that places a
-// compute module on the CPU, as {line, lineNo}; null when none does. Pure.
-export function detectCpuPlacement(text) {
-  const lines = String(text ?? "").split(/\r\n|\r|\n/);
-  for (let i = 0; i < lines.length; i++) {
-    const hit = detectCpuPlacementLine(lines[i]);
-    if (hit) return { line: lines[i].trim(), lineNo: i + 1 };
-  }
-  return null;
+const SOFTWARE_DEVICE = /\b(?:llvmpipe|lavapipe|swiftshader)\b/i;
+const BLOCK_START = /\b(?:SDCliParams|SDContextParams|SDGenerationParams)\s*\{\s*$/;
+const LOG_PREFIX = /^\[(?:VERBOSE|INFO|WARN|WARNING|ERROR|DEBUG|TRACE)\s*\]/;
+const TOKENIZER_ECHO = [/\bsplit prompt\s+"/, /(?:^|\s)parse\s+'/];
+const GPU_RESET_RE = /ErrorDeviceLost|device lost|context is lost/i;
+const GGML_DEVICE_LINE = /^\s*ggml_vulkan:\s*(\d+)\s*=\s*(.+?)\s*(?:\||$)/;
+const NO_VULKAN_DEVICE = /ggml_vulkan:\s*Found\s+0\s+Vulkan\s+devices|ggml_vulkan:\s*No\s+devices\s+found/i;
+// stable-diffusion.cpp: a compute buffer on a backend, and the modules that are not the
+// diffusion stage.
+const SD_COMPUTE_BUFFER = /^(?:.*?\s-\s)?(.+?)\s+compute buffer size:.*?\bon\s+(\S+)/;
+const SD_AUX_MODULE = /(?:^|[\s_.-])(?:t5\w*|umt5\w*|clip\w*|llm\w*|\w*vae\w*|tae\w*|taehv|taesd|esrgan|text_?enc\w*|conditioner|control\w*|vision\w*)(?:[\s_.-]|$)/i;
+const SD_CPU_SHAPES = [
+  /\bloading CPU backend\b/i, // [WARN] ggml_extend_backend.cpp: the actual no-GPU fallback
+  /\bUsing CPU backend\b/i, // LOG_VERBOSE when the default compute backend is the CPU
+  /\bNo devices found!/i,
+  /->\s*compute\s+cpu\d*\b/i, // auto-fit plan: "... -> compute CPU, params RAM"
+  /auto-fit:\s*no GPU memory budget available;\s*using CPU/i,
+];
+const DA3_BACKEND = /da::Backend using device:\s*(\S+)/i;
+const DA3_CPU_SHAPES = [/offload_weights:.*->\s*CPU\b/i, /node\(s\) run on CPU\b/i];
+const AUDIO_BUFFER = /\.weights\.buffer_name\s+(\S+)/;
+
+function stripAnsi(s) {
+  // eslint-disable-next-line no-control-regex
+  return s.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "");
 }
 
-// detectCpuPlacementLine: the single-line predicate runEngine applies as output streams.
-export function detectCpuPlacementLine(line) {
-  const l = String(line ?? "");
-  if (!/cpu|llvmpipe|lavapipe|swiftshader/i.test(l)) return false;
-  if (NOT_PLACEMENT.some((re) => re.test(l))) return false;
-  return PLACEMENT.some((re) => re.test(l));
+// buildEchoMatcher: a predicate for log lines that merely repeat user text. A line drops when
+// it contains an echoed string verbatim (each line of a multi-line string counts too). A
+// string shorter than 6 characters is too likely to occur inside a real log line, so it only
+// drops a line that IS that string, or that holds it in quotes.
+function buildEchoMatcher(echoes) {
+  const full = [];
+  const short = [];
+  for (const raw of echoes || []) {
+    if (typeof raw !== "string" || raw.trim() === "") continue;
+    const pieces = new Set([raw.trim()]);
+    for (const part of raw.split(/\r\n|\r|\n/)) if (part.trim() !== "") pieces.add(part.trim());
+    for (const p of pieces) (p.length >= 6 ? full : short).push(p);
+  }
+  return (line) => {
+    const t = line.trim();
+    if (full.some((p) => line.includes(p))) return true;
+    return short.some((p) => t === p || line.includes(`"${p}"`) || line.includes(`'${p}'`));
+  };
+}
+
+// createLogGuard: a stateful line scanner. scan(line) returns null, or
+// {kind: "CPU_PLACEMENT" | "GPU_RESET", line, lineNo} for a line that must abort the run now;
+// verdict() is called when the engine exits and says whether the positive evidence was seen.
+export function createLogGuard({ engine, echoes = [] }) {
+  if (!GUARD_ENGINES.includes(engine)) throw new Error(`createLogGuard: unknown engine ${JSON.stringify(engine)} (want ${GUARD_ENGINES.join(", ")})`);
+  const echoed = buildEchoMatcher(echoes);
+  const st = { lineNo: 0, inBlock: false, device: false, diffusion: false, params: false, da3: false, audio: false };
+  const evidence = [];
+  const note = (s) => { if (evidence.length < 20) evidence.push(s); };
+
+  const cpu = (line) => ({ kind: CPU_PLACEMENT, line: line.trim(), lineNo: st.lineNo });
+
+  function scan(raw) {
+    st.lineNo++;
+    const line = stripAnsi(String(raw ?? ""));
+    if (st.inBlock) {
+      if (/^\}\s*$/.test(line)) { st.inBlock = false; return null; }
+      if (!LOG_PREFIX.test(line)) return null; // an indented dump line: never scanned
+      st.inBlock = false; // an unterminated dump: the next log record ends it
+    }
+    if (BLOCK_START.test(line)) { st.inBlock = true; return null; }
+    if (TOKENIZER_ECHO.some((re) => re.test(line))) return null;
+    if (echoed(line)) return null;
+
+    if (GPU_RESET_RE.test(line)) return { kind: GPU_RESET, line: line.trim(), lineNo: st.lineNo };
+
+    if (NO_VULKAN_DEVICE.test(line)) return cpu(line);
+    if (/\bggml_vulkan\b/i.test(line) && SOFTWARE_DEVICE.test(line)) return cpu(line);
+    const dev = GGML_DEVICE_LINE.exec(line);
+    if (dev) {
+      st.device = true;
+      note(`device ${dev[1]} = ${dev[2]}`);
+      return null;
+    }
+
+    if (engine === "sdcpp") {
+      if (SD_CPU_SHAPES.some((re) => re.test(line))) return cpu(line);
+      const cb = SD_COMPUTE_BUFFER.exec(line);
+      if (cb) {
+        const [, desc, on] = cb;
+        if (/^CPU\d*$/i.test(on)) return cpu(line);
+        if (/^Vulkan\d+$/i.test(on)) {
+          st.params = true;
+          if (!SD_AUX_MODULE.test(desc)) {
+            st.diffusion = true;
+            note(`${desc} compute on ${on}`);
+          }
+        }
+        return null;
+      }
+      if (/prepared params backend buffers\b.*\bon\s+Vulkan\d+\b/.test(line)) st.params = true;
+    } else if (engine === "da3") {
+      const b = DA3_BACKEND.exec(line);
+      if (b) {
+        if (/^Vulkan\d+$/i.test(b[1])) {
+          st.da3 = true;
+          note(`da3 backend ${b[1]}`);
+          return null;
+        }
+        return cpu(line);
+      }
+      if (DA3_CPU_SHAPES.some((re) => re.test(line))) return cpu(line);
+    } else {
+      const m = AUDIO_BUFFER.exec(line);
+      if (m) {
+        if (/^CPU\d*$/i.test(m[1])) return cpu(line);
+        if (/^Vulkan\d+$/i.test(m[1])) {
+          st.audio = true;
+          note(`${line.trim().split(/\s+/).slice(-2).join(" ")}`);
+        }
+      }
+    }
+    return null;
+  }
+
+  function verdict() {
+    let ok;
+    let expected;
+    if (engine === "sdcpp") {
+      ok = st.device && st.diffusion;
+      expected = `a non-software "ggml_vulkan: <n> = <device>" line${st.device ? " (seen)" : " (missing)"} and a diffusion-stage "compute buffer size ... on Vulkan<N>" line${st.diffusion ? " (seen)" : " (missing)"}`;
+    } else if (engine === "da3") {
+      ok = st.da3;
+      expected = `a "da::Backend using device: Vulkan<N>" line`;
+    } else {
+      ok = st.audio;
+      expected = `a "<component>.weights.buffer_name Vulkan<N>" line`;
+    }
+    return { ok, expected, evidence: evidence.slice() };
+  }
+
+  return { scan, verdict, engine };
+}
+
+// scanLog: run a whole log text through a fresh guard (tests and offline checks). Returns
+// {fatal, verdict}: the first aborting line as {kind, line, lineNo} (null when none) and the
+// end-of-run verdict. Pure.
+export function scanLog(text, opts) {
+  const g = createLogGuard(opts);
+  let fatal = null;
+  for (const l of String(text ?? "").split(/\r\n|\r|\n/)) {
+    fatal = g.scan(l);
+    if (fatal) break;
+  }
+  return { fatal, verdict: g.verdict() };
 }
 
 export function cpuPlacementError(hit) {
   return new Error(`${CPU_PLACEMENT}: the engine placed a model on the CPU (log line ${hit.lineNo}: ${hit.line}) — no model runs on CPU on this engine; aborted`);
 }
 
-// killTree: the whole process tree, not just the child (a Windows node-kill orphans the
-// grandchildren; the engines here are single processes today but ffmpeg/depth helpers are
-// not). Best-effort, never throws.
+export function noGpuEvidenceError(label, verdict) {
+  return new Error(`${CPU_PLACEMENT}: no GPU evidence was seen in ${label}'s log (expected ${verdict.expected}) — a run that cannot show it ran on the GPU is treated as a CPU run; no model runs on CPU on this engine`);
+}
+
+export function gpuResetError(hit) {
+  return new Error(`${GPU_RESET}: the GPU reset during the run (log line ${hit.lineNo}: ${hit.line}). The amdgpu driver resets the compute ring when one GPU dispatch runs past its default 2 s lockup timeout; keep the request inside the configured token cap (sdcpp_max_tokens, or animategen_sdcpp_max_tokens for animate) by lowering width/height/frames. This failure is never retried automatically.`);
+}
+
+// ---------------------------------------------------------------- token cap
+
+// latentTokens: the number of latent tokens one attention pass of a Wan-family DiT sees.
+// The VAE downsamples `stride` times per side, the DiT patch is 2x2, time is /4 with the
+// first frame kept, and a VACE reference image adds `refLatentFrames` latent frames:
+//   ceil(W/(stride*2)) * ceil(H/(stride*2)) * (floor((frames-1)/4) + 1 + refLatentFrames)
+// internal/config LatentTokens is the Go twin; render/testdata/token-cap-table.json pins both.
+export function latentTokens({ width, height, frames, stride, refLatentFrames = 0 }) {
+  const cell = stride * 2;
+  return Math.ceil(width / cell) * Math.ceil(height / cell) * (Math.floor((frames - 1) / 4) + 1 + refLatentFrames);
+}
+
+// fitAdvice: how a request over the cap can be made to fit (frames at this size first).
+function fitAdvice({ width, height, stride, refLatentFrames, cap }) {
+  const cell = stride * 2;
+  const perLatentFrame = Math.ceil(width / cell) * Math.ceil(height / cell);
+  const latentFrames = Math.floor(cap / perLatentFrame) - refLatentFrames;
+  if (latentFrames >= 2) return `at ${width}x${height} up to ${(latentFrames - 1) * 4 + 1} frames fit; or lower width/height`;
+  return `even 5 frames do not fit at ${width}x${height}: lower width and height`;
+}
+
+// tokenCapFromFlags: {cap, stride} from --max-tokens / --vae-stride, or null (no cap
+// configured = no check). A cap needs a stride of 8 or 16.
+export function tokenCapFromFlags(flags) {
+  const rawCap = flags["max-tokens"];
+  if (rawCap === undefined || rawCap === null || rawCap === "") return null;
+  const cap = Number(rawCap);
+  if (!Number.isInteger(cap) || cap <= 0) throw new Error(`--max-tokens must be a positive integer (got ${JSON.stringify(rawCap)})`);
+  const stride = Number(flags["vae-stride"]);
+  if (stride !== 8 && stride !== 16) throw new Error(`--vae-stride must be 8 or 16 when --max-tokens is set (got ${JSON.stringify(flags["vae-stride"])})`);
+  return { cap, stride };
+}
+
+// checkTokenCap: throws TOKEN_CAP_EXCEEDED when the request is over the configured cap, and
+// returns the token count (or 0 when no cap is configured). Runs before anything spawns.
+export function checkTokenCap({ flags, width, height, frames, refLatentFrames = 0 }) {
+  const c = tokenCapFromFlags(flags);
+  if (!c) return 0;
+  const tokens = latentTokens({ width, height, frames, stride: c.stride, refLatentFrames });
+  if (tokens > c.cap) {
+    throw new Error(`${TOKEN_CAP_EXCEEDED}: ${width}x${height}x${frames}${refLatentFrames ? " + reference" : ""} needs ${tokens} latent tokens (VAE stride ${c.stride}, patch 2) but the cap is ${c.cap}; one GPU dispatch that long would hit the amdgpu 2 s lockup timeout and reset the GPU. To fit: ${fitAdvice({ width, height, stride: c.stride, refLatentFrames, cap: c.cap })}. Not retried.`);
+  }
+  return tokens;
+}
+
+// ---------------------------------------------------------------- deadline
+
+// processStartMs: when this process started, so a deadline covers node start-up and every
+// pre-spawn step (the llama-swap drain, frame extraction) like gpugen's own does.
+export function processStartMs() {
+  return Date.now() - Math.round(process.uptime() * 1000);
+}
+
+// makeDeadline: a deadline `timeoutSec` after the runner process started (0/unset = none).
+export function makeDeadline(timeoutSec, startMs = processStartMs()) {
+  const sec = Number(timeoutSec);
+  const active = Number.isFinite(sec) && sec > 0;
+  const atMs = active ? startMs + Math.round(sec * 1000) : 0;
+  return {
+    active,
+    atMs,
+    // remainingMs: what is left, at least 1 ms while active (0 = no deadline, the form
+    // runEngine reads as "unbounded").
+    remainingMs: () => (active ? Math.max(1, atMs - Date.now()) : 0),
+    // enforce: throws a timeout when the budget is already spent before a step starts.
+    enforce: (what) => {
+      if (active && atMs - Date.now() <= 0) throw new Error(`${what} timeout: the ${Math.round(sec)}s budget (counted from the runner's start) was spent before it could start`);
+    },
+  };
+}
+
+// ---------------------------------------------------------------- lifecycle and kill
+
+const liveEngines = new Set();
+const cleanups = new Set();
+let exitHookInstalled = false;
+let lifecycleInstalled = false;
+
+// killTree: the whole process tree, not just the child. On Windows taskkill /T; elsewhere the
+// engine is spawned detached (its own process group), so the group is killed. Best-effort,
+// never throws.
 export function killTree(child) {
-  if (!child || child.pid === undefined || child.exitCode !== null) return;
+  if (!child || child.pid === undefined || child.exitCode !== null || child.signalCode) return;
   try {
     if (process.platform === "win32") {
       spawnSync("taskkill", ["/PID", String(child.pid), "/T", "/F"], { stdio: "ignore" });
@@ -159,37 +418,107 @@ export function killTree(child) {
   } catch { /* nothing more to do */ }
 }
 
+function killLiveEngines() {
+  for (const c of [...liveEngines]) killTree(c);
+}
+
+function runCleanups() {
+  for (const fn of [...cleanups]) {
+    try { fn(); } catch { /* best effort */ }
+  }
+}
+
+function ensureExitHook() {
+  if (exitHookInstalled) return;
+  exitHookInstalled = true;
+  process.on("exit", () => { killLiveEngines(); runCleanups(); });
+}
+
+function pidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return e && e.code === "EPERM";
+  }
+}
+
+// installLifecycle: make the runner kill its engine tree and remove its temp dirs when it is
+// told to stop (SIGTERM / SIGINT / SIGHUP) and when its parent disappears (process.ppid
+// changes, or the original parent no longer exists), so cleanup never depends on a graceful
+// exit by the parent. Idempotent. `pollMs` is the parent-watch interval.
+export function installLifecycle({ pollMs = Number(process.env.IGPU_PARENT_POLL_MS) || 1000 } = {}) {
+  ensureExitHook();
+  if (lifecycleInstalled) return;
+  lifecycleInstalled = true;
+  const die = (code, why) => {
+    try { process.stderr.write(`igpu-engine: ${why}; killing the engine tree and cleaning up\n`); } catch { /* stderr may be gone */ }
+    killLiveEngines();
+    runCleanups();
+    process.exit(code);
+  };
+  for (const [sig, code] of [["SIGTERM", 143], ["SIGINT", 130], ["SIGHUP", 129]]) {
+    process.on(sig, () => die(code, `received ${sig}`));
+  }
+  const parent = process.ppid;
+  if (parent > 1) {
+    const t = setInterval(() => {
+      if (process.ppid !== parent || !pidAlive(parent)) die(1, "the parent process is gone");
+    }, pollMs);
+    t.unref();
+  }
+}
+
 // runEngine: spawn `bin args`, tee every output line to stderr (that is the progress the Go
-// side tails), scan each line with `detect`, and settle:
-//   resolves {code, log}            the process exited (any code; the caller judges it)
-//   rejects  CPU_PLACEMENT          `detect` matched a line — the tree is killed first
-//   rejects  timeout                timeoutMs elapsed — the tree is killed first
-// stdout and stderr are both read (an engine may print its placement lines to either).
-export function runEngine({ bin, args, env, timeoutMs = 0, detect = detectCpuPlacementLine, label = "engine", spawnImpl = spawn }) {
+// side tails), feed each line to `guard` (createLogGuard) and settle:
+//   resolves {code, log}            the engine exited normally (any code; the caller judges it)
+//                                   and, for a clean exit, the guard saw its positive evidence
+//   rejects  CPU_PLACEMENT          a line placed compute on the CPU, or a clean exit showed no
+//                                   GPU evidence at all
+//   rejects  GPU_RESET              the log reports a lost GPU device
+//   rejects  ILLEGAL_INSTRUCTION    the engine died of SIGILL / exit 132
+//   rejects  signal                 the engine was killed by a signal (SIGKILL suggests the OOM
+//                                   killer on a UMA iGPU)
+//   rejects  timeout                timeoutMs elapsed
+// Every rejection that kills the engine waits for the process to be gone first (bounded), so
+// the GPU is free when the promise settles. stdout and stderr are both read.
+export function runEngine({ bin, args, env, timeoutMs = 0, guard, label = "engine", spawnImpl = spawn }) {
+  if (!guard) throw new Error("runEngine needs a log guard (createLogGuard): no engine runs unobserved");
   return new Promise((resolve, reject) => {
     let settled = false;
+    let aborted = null;
+    ensureExitHook();
     const child = spawnImpl(bin, args, {
       env: { ...process.env, ...(env || {}) },
       stdio: ["ignore", "pipe", "pipe"],
       detached: process.platform !== "win32",
       windowsHide: true,
     });
+    liveEngines.add(child);
     const chunks = [];
     let timer = null;
+    let deathTimer = null;
     const finish = (fn, v) => {
       if (settled) return;
       settled = true;
       if (timer) clearTimeout(timer);
+      if (deathTimer) clearTimeout(deathTimer);
+      liveEngines.delete(child);
       fn(v);
     };
+    // abort: kill the tree now and reject once it is dead (or after 5 s, whichever is first).
+    const abort = (err) => {
+      if (settled || aborted) return;
+      aborted = err;
+      killTree(child);
+      deathTimer = setTimeout(() => finish(reject, err), 5000);
+    };
     const onLine = (line) => {
-      if (settled) return;
+      if (settled || aborted) return;
       chunks.push(line);
       process.stderr.write(line + "\n");
-      if (detect(line)) {
-        killTree(child);
-        finish(reject, cpuPlacementError({ line: line.trim(), lineNo: chunks.length }));
-      }
+      const hit = guard.scan(line);
+      if (hit) abort(hit.kind === GPU_RESET ? gpuResetError(hit) : cpuPlacementError(hit));
     };
     const feed = (stream) => {
       let buf = "";
@@ -205,15 +534,30 @@ export function runEngine({ bin, args, env, timeoutMs = 0, detect = detectCpuPla
     feed(child.stdout);
     feed(child.stderr);
     child.on("error", (e) => finish(reject, new Error(`${label} failed to start: ${e.message}`)));
-    child.on("close", (code) => finish(resolve, { code, log: chunks.join("\n") }));
+    child.on("close", (code, signal) => {
+      if (aborted) return finish(reject, aborted);
+      if (signal === "SIGILL" || code === 132) {
+        return finish(reject, new Error(`${ILLEGAL_INSTRUCTION}: ${label} died with SIGILL (exit ${code ?? 132}): the binary uses CPU instructions this machine's CPU lacks (an instruction-set mismatch, e.g. the audio.cpp release build is AVX-512 and a Zen 3 CPU has none). Build the engine on the node instead of using a prebuilt release.`));
+      }
+      if (signal) {
+        const hint = signal === "SIGKILL" ? " (SIGKILL on a UMA iGPU box usually means the kernel out-of-memory (OOM) killer)" : "";
+        return finish(reject, new Error(`${label} was killed by signal ${signal}${hint}`));
+      }
+      if (code === 0) {
+        const v = guard.verdict();
+        if (!v.ok) return finish(reject, noGpuEvidenceError(label, v));
+      }
+      finish(resolve, { code, log: chunks.join("\n"), evidence: guard.verdict().evidence });
+    });
     if (timeoutMs > 0) {
       timer = setTimeout(() => {
-        killTree(child);
-        finish(reject, new Error(`${label} timeout after ${Math.round(timeoutMs / 1000)}s (killed)`));
+        abort(new Error(`${label} timeout after ${Math.round(timeoutMs / 1000)}s (killed)`));
       }, timeoutMs);
     }
   });
 }
+
+// ---------------------------------------------------------------- normalization helpers
 
 // normalizeFrames: a Wan-family video model takes 4k+1 frames. Round to the NEAREST 4k+1
 // (a tie goes up), minimum 5. A non-numeric or non-positive request returns `def`
@@ -264,25 +608,32 @@ export function mp4Args(src, dst, fps) {
     "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "16", "-r", String(fps), "-movflags", "+faststart", dst];
 }
 
-export function encodeMp4(ffmpeg, src, dst, fps) {
+// encodeMp4: `timeoutMs` (0 = none) bounds the encode, so the runner's deadline covers it too.
+export function encodeMp4(ffmpeg, src, dst, fps, timeoutMs = 0) {
   if (!ffmpeg) throw new Error("FFMPEG_UNAVAILABLE: ffmpeg could not be resolved (set ffmpeg_path, or put ffmpeg on PATH)");
-  const r = spawnSync(ffmpeg, mp4Args(src, dst, fps), { encoding: "utf8" });
+  const r = spawnSync(ffmpeg, mp4Args(src, dst, fps), {
+    encoding: "utf8", ...(timeoutMs > 0 ? { timeout: timeoutMs, killSignal: "SIGKILL" } : {}),
+  });
   if (r.error || r.status !== 0 || !existsSync(dst)) {
-    throw new Error("ffmpeg mp4 encode failed: " + (r.error ? r.error.message : String(r.stderr || "").trim().slice(-300)));
+    const timedOut = r.error && r.error.code === "ETIMEDOUT";
+    throw new Error((timedOut ? "ffmpeg mp4 encode timeout (killed): " : "ffmpeg mp4 encode failed: ") + (r.error ? r.error.message : String(r.stderr || "").trim().slice(-300)));
   }
 }
 
 // makeTempDir: a private work dir under the OS temp dir, removed by cleanup() on every
-// exit path: the caller's finally, AND a process 'exit' hook (withGpuSlot turns SIGINT /
-// SIGTERM into process.exit, which fires it), so a killed job leaves no frames behind.
+// exit path: the caller's finally, the process 'exit' hook, and installLifecycle's signal /
+// parent-gone handlers (which run every registered cleanup), so a killed job leaves no
+// frames behind.
 export function makeTempDir(prefix) {
   const dir = mkdtempSync(join(tmpdir(), prefix));
   let done = false;
   const cleanup = () => {
     if (done) return;
     done = true;
+    cleanups.delete(cleanup);
     try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
   };
-  process.on("exit", cleanup);
+  cleanups.add(cleanup);
+  ensureExitHook();
   return { dir, cleanup };
 }

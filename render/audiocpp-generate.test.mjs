@@ -129,3 +129,13 @@ test("finalizeAudio: with no ffmpeg the engine's wav is delivered as it is", () 
     assert.ok(existsSync(out));
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test("the script refuses extra args that change the backend or device (EXTRA_ARGS_REFUSED, exit 1) before any spawn", () => {
+  for (const extra of [["--backend", "cpu"], ["--device", "1"], ["--device=1"], ["--backend=vulkan"]]) {
+    const r = run(["--kind", "music", "o.wav", "t", "--bin", "/no/bin", "--family", "f", "--model", "/no/m", "--backend", "vulkan", "--no-lock",
+      "--extra-args", JSON.stringify(extra)]);
+    assert.equal(r.status, 1, `${extra}: ${r.stderr}`);
+    assert.match(r.stderr, /EXTRA_ARGS_REFUSED/);
+    assert.doesNotMatch(r.stderr, /not found/);
+  }
+});

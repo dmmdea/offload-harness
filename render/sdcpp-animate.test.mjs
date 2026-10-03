@@ -103,3 +103,32 @@ test("the script reports missing flags (exit 2) and a missing depth binary by na
   assert.equal(m.status, 1);
   assert.match(m.stderr, /not found/);
 });
+
+const animBase = ["o.mp4", "/no/ref.png", "/no/drive.mp4", "p", "--sd-bin", "/no/sd", "--model", "/no/m", "--vae", "/no/v", "--t5xxl", "/no/t",
+  "--depth-bin", "/no/d", "--depth-model", "/no/dm", "--backend", "vulkan0", "--no-lock"];
+
+test("animate: the token cap counts the VACE reference as one more latent frame, and refuses before any file check or spawn", () => {
+  // 480x832x33 + reference on an 8x VAE is 15600 tokens (device lost on the node); 288x512 is 5760
+  const over = run([...animBase, "--width", "480", "--height", "832", "--frames", "33", "--max-tokens", "5760", "--vae-stride", "8"]);
+  assert.equal(over.status, 1, over.stderr);
+  assert.match(over.stderr, /TOKEN_CAP_EXCEEDED/);
+  assert.match(over.stderr, /needs 15600 latent tokens/);
+  assert.match(over.stderr, /reference/);
+  assert.doesNotMatch(over.stderr, /not found/);
+  const fits = run([...animBase, "--width", "288", "--height", "512", "--frames", "33", "--max-tokens", "5760", "--vae-stride", "8"]);
+  assert.match(fits.stderr, /not found/);
+  assert.doesNotMatch(fits.stderr, /TOKEN_CAP_EXCEEDED/);
+  const none = run([...animBase, "--width", "480", "--height", "832", "--frames", "33"]);
+  assert.match(none.stderr, /not found/, "no cap configured = no check");
+});
+
+test("animate: extra args and depth extra args that change the backend or placement are refused before any spawn", () => {
+  const sd = run([...animBase, "--extra-args", JSON.stringify(["--clip-on-cpu"])]);
+  assert.equal(sd.status, 1);
+  assert.match(sd.stderr, /EXTRA_ARGS_REFUSED/);
+  assert.match(sd.stderr, /--extra-args\[0\]/);
+  const depth = run([...animBase, "--depth-extra-args", JSON.stringify(["--threads", "4", "--backend", "cpu"])]);
+  assert.equal(depth.status, 1);
+  assert.match(depth.stderr, /EXTRA_ARGS_REFUSED/);
+  assert.match(depth.stderr, /--depth-extra-args\[2\]/);
+});

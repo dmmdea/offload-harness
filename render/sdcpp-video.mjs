@@ -15,7 +15,7 @@
 //        --sd-bin PATH --model PATH [--high-noise-model PATH] --vae PATH --t5xxl PATH
 //        --backend vulkan0 [--frames N] [--width N] [--height N] [--fps N] [--steps N]
 //        [--cfg F] [--flow-shift F] [--sampler S] [--seed N] [--negative S]
-//        [--extra-args '<json array>'] [--timeout-sec N] [--no-lock]
+//        [--extra-args '<json array>'] [--max-tokens N --vae-stride 8|16] [--timeout-sec N] [--no-lock]
 // Env:   FFMPEG_PATH — ffmpeg (else ffmpeg on PATH). GPU_LEASE_* — the inherited lease.
 //
 // Normalization (documented, tested):
@@ -26,18 +26,25 @@
 // sd-cli writes a .webm; this script re-encodes it to H.264 mp4 (yuv420p, CRF 16, the
 // given fps) at <out.mp4>.
 //
-// THE NO-CPU RULE: a cpu (or unset) --backend is refused before anything spawns
-// (CPU_BACKEND_REFUSED), and the engine's log is scanned while it runs: the first line
-// that places a model on the CPU kills the process tree and fails the job with
-// CPU_PLACEMENT (igpu-engine.mjs detectCpuPlacement).
+// THE NO-CPU RULE: a non-Vulkan (cpu, unset, best/auto, ...) --backend, and any --extra-args
+// element that changes the backend or placement, is refused before anything spawns
+// (CPU_BACKEND_REFUSED / EXTRA_ARGS_REFUSED). The engine's log is a POSITIVE guard
+// (igpu-engine.mjs createLogGuard): the run passes only with the device line and a
+// diffusion-stage compute buffer on Vulkan, the first line placing compute on the CPU kills
+// the process tree (CPU_PLACEMENT), and a device reset is GPU_RESET.
+// TOKEN CAP: --max-tokens with --vae-stride (8 or 16) refuses a request whose latent token
+// count is over the cap (TOKEN_CAP_EXCEEDED) before sd-cli is spawned; no cap = no check.
+// DEADLINE: --timeout-sec counts from this process's start, so the llama-swap drain and every
+// pre-spawn step spend it; SIGTERM/SIGINT/SIGHUP and a vanished parent kill the engine tree
+// and remove the temp dir (installLifecycle).
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { withGpuSlot } from "./gpu-lock.mjs";
 import { resolveFfmpeg } from "./audio-qa.mjs";
 import {
-  parseArgs, parseExtraArgs, refuseCpuBackend, runEngine, normalizeFrames, normalizeSize,
-  finiteNum, encodeMp4, makeTempDir,
+  parseArgs, parseExtraArgs, refuseCpuBackend, refuseExtraArgs, runEngine, createLogGuard, checkTokenCap,
+  installLifecycle, makeDeadline, normalizeFrames, normalizeSize, finiteNum, encodeMp4, makeTempDir,
 } from "./igpu-engine.mjs";
 
 export { parseArgs };
@@ -94,7 +101,9 @@ export function missingFlags(flags, names) {
 }
 
 async function main() {
+  installLifecycle();
   const { pos, flags } = parseArgs(process.argv.slice(2));
+  const deadline = makeDeadline(flags["timeout-sec"]);
   const shape = splitPositionals(pos);
   if (!shape || !shape.prompt) {
     console.error('usage: node sdcpp-video.mjs <out.mp4> [<still>] "<prompt>" --sd-bin P --model P --vae P --t5xxl P --backend vulkan0 [flags]');
@@ -106,6 +115,9 @@ async function main() {
     process.exit(2);
   }
   refuseCpuBackend(flags.backend);
+  const extra = refuseExtraArgs(parseExtraArgs(flags["extra-args"]), { engine: "sdcpp", key: "--extra-args" });
+  const params = resolveParams(flags);
+  checkTokenCap({ flags, width: params.width, height: params.height, frames: params.frames });
   const bin = flags["sd-bin"];
   for (const [k, v] of [["--sd-bin", bin], ["--model", flags.model], ["--vae", flags.vae], ["--t5xxl", flags.t5xxl],
     ["--high-noise-model", flags["high-noise-model"]], ["image", shape.still]]) {
@@ -114,21 +126,22 @@ async function main() {
       process.exit(1);
     }
   }
-  const extra = parseExtraArgs(flags["extra-args"]);
   const ffmpeg = resolveFfmpeg();
   if (!ffmpeg) throw new Error("FFMPEG_UNAVAILABLE: ffmpeg could not be resolved (set ffmpeg_path, or put ffmpeg on PATH)");
-  const { fps } = resolveParams(flags);
-  const timeoutMs = Math.round((finiteNum(flags["timeout-sec"]) ?? 0) * 1000);
+  const { fps } = params;
   const tmp = makeTempDir("sdcpp-video-");
   try {
     const webm = join(tmp.dir, "out.webm");
     const args = buildSdVideoArgs({ outFile: webm, still: shape.still, prompt: shape.prompt, flags, extra });
     await withGpuSlot({ noLock: flags["no-lock"], comfyManaged: false }, async () => {
-      const { code } = await runEngine({ bin, args, timeoutMs, label: "sd-cli" });
+      deadline.enforce("sd-cli");
+      const guard = createLogGuard({ engine: "sdcpp", echoes: [shape.prompt, flags.negative] });
+      const { code } = await runEngine({ bin, args, timeoutMs: deadline.remainingMs(), label: "sd-cli", guard });
       if (code !== 0) throw new Error("sd-cli exited " + code);
       if (!existsSync(webm)) throw new Error("sd-cli exited 0 but produced no video at " + webm);
     });
-    encodeMp4(ffmpeg, webm, pos[0], fps);
+    deadline.enforce("ffmpeg mp4 encode");
+    encodeMp4(ffmpeg, webm, pos[0], fps, deadline.remainingMs());
     console.log("WROTE", pos[0]);
   } finally {
     tmp.cleanup();

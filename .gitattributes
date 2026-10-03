@@ -40,3 +40,7 @@ setup/templates/vllm-seat/lmcache-patches/** text eol=lf
 # Third-party licence texts kept verbatim (render/compose-templates/_third_party): the same bytes on every
 # checkout, so a Windows checkout never rewrites a licence text that must stay as received.
 render/compose-templates/_third_party/** text eol=lf
+
+# Engine log fixtures are byte-exact captures (progress bars carry bare CRs); the derived
+# negatives are compared against them byte for byte, so no line-ending conversion.
+render/testdata/*.log -text

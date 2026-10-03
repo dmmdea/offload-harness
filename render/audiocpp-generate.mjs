@@ -22,16 +22,24 @@
 // normalization keeps the engine's own wav (never withhold produced audio). Voice is
 // delivered as the engine wrote it.
 //
-// THE NO-CPU RULE: a cpu (or unset) --backend is refused before anything spawns
-// (CPU_BACKEND_REFUSED), and the engine's log (--log) is scanned while it runs: the first
-// line placing the model on the CPU kills the process and fails the job with CPU_PLACEMENT.
+// THE NO-CPU RULE: a non-Vulkan --backend, and any --extra-args element that changes the
+// backend or placement (--backend, --device, ...), is refused before anything spawns
+// (CPU_BACKEND_REFUSED / EXTRA_ARGS_REFUSED). The engine's log (--log) is a POSITIVE guard
+// (igpu-engine.mjs createLogGuard): the run passes only with a "<component>.weights.buffer_name
+// Vulkan<N>" line, ANY "*.weights.buffer_name CPU" line kills it with CPU_PLACEMENT, and a run
+// that ends with no GPU evidence is CPU_PLACEMENT too.
+// DEADLINE: --timeout-sec counts from this process's start (the llama-swap drain spends it);
+// SIGTERM/SIGINT/SIGHUP and a vanished parent kill the engine and remove the temp dir.
 import { existsSync, copyFileSync } from "node:fs";
 import { join, extname } from "node:path";
 import { spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { withGpuSlot } from "./gpu-lock.mjs";
 import { resolveFfmpeg, normalizeLoudness } from "./audio-qa.mjs";
-import { parseArgs, parseExtraArgs, refuseCpuBackend, runEngine, finiteNum, makeTempDir } from "./igpu-engine.mjs";
+import {
+  parseArgs, parseExtraArgs, refuseCpuBackend, refuseExtraArgs, runEngine, createLogGuard, installLifecycle,
+  makeDeadline, finiteNum, makeTempDir,
+} from "./igpu-engine.mjs";
 
 export { parseArgs };
 
@@ -89,7 +97,9 @@ export function finalizeAudio({ ffmpeg, wav, out, normalize, workDir }) {
 }
 
 async function main() {
+  installLifecycle();
   const { pos, flags } = parseArgs(process.argv.slice(2));
+  const deadline = makeDeadline(flags["timeout-sec"]);
   const [out, text] = pos;
   const kind = flags.kind;
   if (!out || !text || (kind !== "voice" && kind !== "music")) {
@@ -102,20 +112,21 @@ async function main() {
     process.exit(2);
   }
   refuseCpuBackend(flags.backend);
+  const extra = refuseExtraArgs(parseExtraArgs(flags["extra-args"]), { engine: "audiocpp", key: "--extra-args" });
   for (const [k, v] of [["--bin", flags.bin], ["--model", flags.model], ["--clone", flags.clone]]) {
     if (v && !existsSync(v)) {
       console.error(`AUDIOCPP FAILED: ${k} not found: ${v}`);
       process.exit(1);
     }
   }
-  const extra = parseExtraArgs(flags["extra-args"]);
-  const timeoutMs = Math.round((finiteNum(flags["timeout-sec"]) ?? 0) * 1000);
   const tmp = makeTempDir("audiocpp-");
   try {
     const wav = join(tmp.dir, "out.wav");
     const args = buildAudiocppArgs({ kind, outFile: wav, text, flags, extra });
     await withGpuSlot({ noLock: flags["no-lock"], comfyManaged: false }, async () => {
-      const { code } = await runEngine({ bin: flags.bin, args, timeoutMs, label: "audiocpp_cli" });
+      deadline.enforce("audiocpp_cli");
+      const guard = createLogGuard({ engine: "audiocpp", echoes: [text, flags.lyrics] });
+      const { code } = await runEngine({ bin: flags.bin, args, timeoutMs: deadline.remainingMs(), label: "audiocpp_cli", guard });
       if (code !== 0) throw new Error("audiocpp_cli exited " + code);
       if (!existsSync(wav)) throw new Error("audiocpp_cli exited 0 but produced no audio at " + wav);
     });
