@@ -411,6 +411,13 @@ type Config struct {
 	// PairWorkloadsEndpoint is the ingress URL; the default is the port every
 	// node's workload-ingress.json binds.
 	PairWorkloadsEndpoint string `json:"pair_workloads_endpoint,omitempty"`
+	// PairNodeInfoURL is PAIR's loopback node-info (default http://127.0.0.1:14318/v1/node-info),
+	// asked for this node's UUID (`hostUuid`) when PAIR's node-id.json is missing or unreadable: a box
+	// where the harness runs as a different OS user than PAIR (a small ARM node). The fallback identity counts
+	// only while the pair_workloads_endpoint ingress answers HTTP, so a box with node-info and no
+	// ingress stays off. Loopback only: any other host is refused at load. Empty = the default,
+	// except where OFFLOAD_PAIR_APPDIR is set (docs/systems/pair-workloads.md).
+	PairNodeInfoURL string `json:"pair_node_info_url,omitempty"`
 	// PairSeatActivityEnabled (0.133.0) makes fleet-serve report traffic that
 	// reaches this box's vLLM seats WITHOUT the harness (a curl soak, an editor
 	// pointed at llama-swap) as PAIR cards, one per busy stretch of a seat. The

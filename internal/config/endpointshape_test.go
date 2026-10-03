@@ -447,3 +447,45 @@ func TestFindingsWanVirtualVramNegative(t *testing.T) {
 		t.Fatalf("a measured value must load as written, got %g", measured.VideoGenWanVirtualVramGB)
 	}
 }
+
+// pair_node_info_url is read for this node's PAIR identity (the identity fallback), so it is held to
+// loopback: any other host fails the load naming the key and the value, and an unusable URL is refused
+// like every other configured base.
+func TestLoadHoldsPairNodeInfoURLToLoopback(t *testing.T) {
+	refused := []string{
+		"http://192.0.2.1:14318/v1/node-info",
+		"http://node-info.example.test:14318/v1/node-info",
+		"http://[2001:db8::1]:14318/v1/node-info",
+		"http://127.0.0.1.example.test/v1/node-info",
+		"node-a:14318",
+		"ftp://127.0.0.1/v1/node-info",
+		"http://127.0.0.1:9/v1/node-info",
+	}
+	for _, v := range refused {
+		_, err := Load(writeShapeCfg(t, `{"pair_node_info_url":`+quote(v)+`}`))
+		if err == nil {
+			t.Errorf("Load must refuse pair_node_info_url %q", v)
+			continue
+		}
+		for _, want := range []string{"pair_node_info_url", v} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("Load error %q must name %q", err, want)
+			}
+		}
+	}
+	for _, v := range []string{
+		"http://127.0.0.1:14318/v1/node-info",
+		"http://localhost:14318/v1/node-info",
+		"http://[::1]:14318/v1/node-info",
+		"",
+	} {
+		cfg, err := Load(writeShapeCfg(t, `{"pair_node_info_url":`+quote(v)+`}`))
+		if err != nil {
+			t.Errorf("a loopback (or unset) pair_node_info_url %q must load: %v", v, err)
+			continue
+		}
+		if cfg.PairNodeInfoURL != v {
+			t.Errorf("pair_node_info_url = %q, want %q", cfg.PairNodeInfoURL, v)
+		}
+	}
+}
