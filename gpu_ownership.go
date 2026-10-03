@@ -25,6 +25,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/gpuactivity"
 	"github.com/dmmdea/offload-harness/internal/gpulease"
 	"github.com/dmmdea/offload-harness/internal/ledger"
+	"github.com/dmmdea/offload-harness/internal/modelaffinity"
 )
 
 // ownershipFlags are the flags `gpu reserve` and its detached child `gpu hold` share, so
@@ -274,6 +275,24 @@ func ownershipStatusLines(h *gpuactivity.Holder, info gpulease.Info) []string {
 		out = append(out, "fact: "+f)
 	}
 	return out
+}
+
+// fleetLeaseReader is the lease reader a fleet node publishes its health from, enforces its
+// dispatch gate with and counts its saturation by (GPU routing P7). It reads THE one resolver's
+// directory (gpulease.LeaseDir, so the advertised lease is the one every acquirer contends on)
+// the way the delegator reads the local box (modelaffinity.PeekLease): every live lease with its
+// EFFECTIVE cards, declared or, when the host turned the evidence rule on, inferred, and nothing
+// written. A bare InspectDir never fills the inferred scope, so a legacy lease the box's own gates
+// treated as scoped was published as the whole node. A directory that cannot be resolved reads as
+// nothing held: the node fails toward serving.
+func fleetLeaseReader(cfg config.Config) func() gpulease.Info {
+	return func() gpulease.Info {
+		dir, err := gpulease.LeaseDir(cfg.GPULockPath, cfg.StateDir)
+		if err != nil {
+			return gpulease.Info{}
+		}
+		return modelaffinity.PeekLease(dir)
+	}
 }
 
 // fleetLeaseStanding is the standing reader a fleet node publishes its lease with: the
