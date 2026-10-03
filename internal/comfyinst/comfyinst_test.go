@@ -33,6 +33,9 @@ type instance struct {
 	freed int
 	argv  []string // what /system_stats reports
 	down  bool     // the endpoint stops answering
+	// onStats runs while /system_stats is being answered: the window between the proof and the
+	// stop, in which another lease can take the instance over.
+	onStats func()
 }
 
 func startInstance(t *testing.T, argv []string) *instance {
@@ -47,6 +50,9 @@ func startInstance(t *testing.T, argv []string) *instance {
 		}
 		switch {
 		case r.URL.Path == "/system_stats":
+			if in.onStats != nil {
+				in.onStats()
+			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"system": map[string]any{"argv": in.argv}})
 		case r.URL.Path == "/free" && r.Method == http.MethodPost:
 			in.freed++
@@ -179,6 +185,56 @@ func TestInstanceStoppedWithLease(t *testing.T) {
 	}
 	if _, err := os.Stat(marker); !os.IsNotExist(err) {
 		t.Errorf("the marker must be cleared once the instance is gone (stat err: %v)", err)
+	}
+}
+
+// A holder that is stopping epoch 7's instance proves it is ours (live pid, the exact argv), and
+// that proof takes a round trip to the instance. A lease that reuses the instance in that window
+// re-stamps its marker (render/comfy-lifecycle.mjs): the instance is epoch 8's now, and stopping
+// it would kill the job that lease is running on it. The marker is read again at the moment of
+// the stop, and an instance that changed hands is left alone.
+func TestAnInstanceThatChangedHandsDuringTheProofIsNotStopped(t *testing.T) {
+	dir := t.TempDir()
+	in := startInstance(t, testArgs)
+	host := newHost()
+	host.alive[4242] = true
+	host.start[4242] = 1_760_000_000_000 - 4000
+	marker := writeMarker(t, dir, ".offload-launch-gaaaa1111.json", keyedMarker(in.port(t), 4242, 7, nil))
+	in.onStats = func() { // the next lease reuses the instance and takes its marker over
+		writeMarker(t, dir, ".offload-launch-gaaaa1111.json", keyedMarker(in.port(t), 4242, 8, nil))
+	}
+
+	got := StopForLease(context.Background(), dir, 7, host.deps(in))
+
+	if len(got) != 1 || got[0].Stopped {
+		t.Fatalf("outcomes = %+v, want the instance reported and not stopped", got)
+	}
+	if !strings.Contains(got[0].Why, "changed hands") || !strings.Contains(got[0].Why, "8") {
+		t.Errorf("why = %q, want it to say the instance changed hands and name the new lease", got[0].Why)
+	}
+	if len(host.killedPIDs()) != 0 || in.timesFreed() != 0 {
+		t.Errorf("an instance another lease just took over was touched: killed %v, freed %d", host.killedPIDs(), in.timesFreed())
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Errorf("the new lease's marker must stay: %v", err)
+	}
+}
+
+// A marker that vanished (the instance was stopped by someone else) or became unreadable in the
+// same window is not proof of anything either.
+func TestAnInstanceWhoseMarkerVanishedDuringTheProofIsNotStopped(t *testing.T) {
+	dir := t.TempDir()
+	in := startInstance(t, testArgs)
+	host := newHost()
+	host.alive[4242] = true
+	host.start[4242] = 1_760_000_000_000 - 4000
+	marker := writeMarker(t, dir, ".offload-launch-gaaaa1111.json", keyedMarker(in.port(t), 4242, 7, nil))
+	in.onStats = func() { _ = os.Remove(marker) }
+
+	got := StopForLease(context.Background(), dir, 7, host.deps(in))
+
+	if len(got) != 1 || got[0].Stopped || len(host.killedPIDs()) != 0 {
+		t.Fatalf("outcomes = %+v killed %v, want nothing stopped", got, host.killedPIDs())
 	}
 }
 

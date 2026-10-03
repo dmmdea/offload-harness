@@ -775,8 +775,15 @@ func (p *Pipeline) grantCards(ctx context.Context, m *gpulease.Manager, lease *g
 		once.Do(func() {
 			stopHB()
 			// The instances kept under this lease go BEFORE it is released, so the next holder never
-			// finds one on its card.
-			p.stopKeptInstances(lease.Epoch())
+			// finds one on its card, and only while the lease is still this call's: a call whose lease
+			// was taken away (released from outside, reclaimed after a suspend) is a straggler, and
+			// the instance may already be the next lease's job. It leaves them, as Release leaves
+			// the claim.
+			if err := lease.Check(); err != nil {
+				log.Printf("media admission: leaving the ComfyUI instances kept under lease epoch %d running: the lease is no longer this call's (%v)", lease.Epoch(), err)
+			} else {
+				p.stopKeptInstances(lease.Epoch())
+			}
 			_ = lease.Release()
 			mediaSlots.release(ids)
 		})

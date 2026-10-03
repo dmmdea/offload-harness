@@ -1024,7 +1024,10 @@ hold its cards back from every later caller for the 30-second grace, and a node 
 seconds would keep newcomers behind a rolling set of them.
 
 **Who stops the instance.** The grant's release stops the ComfyUI instances kept under the lease
-(`internal/comfyinst`) before it releases the lease, so the next holder never finds one on its card. A
+(`internal/comfyinst`) before it releases the lease, so the next holder never finds one on its card, and only
+while the lease is still the call's own: a call whose lease was taken away leaves them running and logs which.
+A lease that reuses a kept instance (the previous holder died, or was fenced out, and the instance outlived it)
+takes it over: its marker is re-stamped with the reusing lease's epoch, so that lease's release stops it. A
 runner that does not keep its instance kills it itself, as before.
 
 ## Error handling

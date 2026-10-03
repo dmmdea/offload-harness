@@ -15,6 +15,18 @@ Versioning: [SemVer](https://semver.org/).
   and a refusal ends it before anything is touched. The order is resolve, stop the kept instances, warm the seat
   back, release: the instances go before the seat is loaded onto their cards (the documented order; it had been
   warm first). A release that fails after the stop says the instances were already stopped.
+- **A kept instance that outlived its lease is taken over by the lease that reuses it.** A kept instance is
+  detached, so it survives a holder that crashed or was fenced out, and the next lease on its card reuses it (a live
+  keyed instance with a marker that proves it is ours). The marker still named the dead lease, so that lease's release
+  (which stops by epoch) matched nothing and the instance outlived every later lease with its models resident, past the
+  5-minute idle-unload rule; and a fenced-out straggler of the old lease still matched it and could stop the instance
+  the new lease was using. `docs/systems/gpu-lease.md` said the next holder "launches over it"; the code reuses it,
+  and now takes it over: `ensureComfy` re-stamps the marker's `leaseEpoch` (only an instance that already belonged
+  to a lease; an epochless marker is not claimed), a re-stamp that fails and a kept launch whose marker cannot be
+  written both log `COMFY-KEEP-WARN`. A holder stops instances only while its lease is still its own (`gpu reserve`'s
+  wrapper, the detached holder and the pipeline's grant; they leave a lost lease's instances running and say which),
+  and `comfyinst` re-reads the marker at the moment of the stop. Left for the operator, as the plan marks it: whether
+  the next acquirer or `gpu doctor` should sweep markers whose epoch is dead (an explicit sweep, not a watcher).
 - **An unkeyed runner given a non-default `--api` no longer launches ComfyUI on 8188.** (Plan section 7, finding
   7, assigned to this phase.) With no `COMFY_INSTANCE` or `COMFY_CARD_UUID` the instance is unkeyed, `withGpuSlot`
   called `ensureComfy` with no endpoint, and an unkeyed launch has no `--port`: a blog batch run with

@@ -127,12 +127,12 @@ func StopForLease(ctx context.Context, comfyDir string, epoch uint64, d Deps) []
 			name != markerPrefix+m.Key+markerSuffix {
 			continue
 		}
-		out = append(out, stopOne(ctx, path, m, d))
+		out = append(out, stopOne(ctx, path, m, epoch, d))
 	}
 	return out
 }
 
-func stopOne(ctx context.Context, path string, m Marker, d Deps) Outcome {
+func stopOne(ctx context.Context, path string, m Marker, epoch uint64, d Deps) Outcome {
 	o := Outcome{Key: m.Key, PID: m.PID, Port: m.Port}
 	if !d.Alive(m.PID) {
 		_ = os.Remove(path)
@@ -160,6 +160,13 @@ func stopOne(ctx context.Context, path string, m Marker, d Deps) Outcome {
 		o.Why = fmt.Sprintf("the argv the instance on port %d reports differs from the launch marker's, so it is not shown to be the harness's own; left running", m.Port)
 		return o
 	}
+	// The proof above took a round trip to the instance. A lease that reuses a kept instance
+	// re-stamps its marker (render/comfy-lifecycle.mjs), so an instance that changed hands in that
+	// window is the next lease's and in use: read the marker again at the moment of the stop.
+	if why := stillThisLeases(path, m.PID, epoch); why != "" {
+		o.Why = why
+		return o
+	}
 	// Drop its models first: if the kill does not take, the card is at least empty.
 	postFree(ctx, client, base)
 	if err := d.Kill(m.PID); err != nil {
@@ -183,6 +190,30 @@ func stopOne(ctx context.Context, path string, m Marker, d Deps) Outcome {
 	}
 	o.Why = fmt.Sprintf("stop sent to process %d but it is still running", m.PID)
 	return o
+}
+
+// stillThisLeases re-reads the marker at path and says why the instance is no longer shown to be
+// this lease's ("" = it still is): the marker is gone or unreadable, names another process, or
+// names another lease (the next lease re-stamped it when it reused the instance).
+func stillThisLeases(path string, pid int, epoch uint64) string {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "its launch marker vanished while the instance was being checked, so it is not shown to still be this lease's; left running"
+	}
+	var now Marker
+	if json.Unmarshal(b, &now) != nil {
+		return "its launch marker became unreadable while the instance was being checked, so it is not shown to still be this lease's; left running"
+	}
+	if now.PID != pid {
+		return fmt.Sprintf("its launch marker now names process %d, not %d: the instance was relaunched while it was being checked; left running", now.PID, pid)
+	}
+	if now.LeaseEpoch == nil {
+		return "its launch marker no longer names any lease: the instance changed hands while it was being checked; left running"
+	}
+	if *now.LeaseEpoch != epoch {
+		return fmt.Sprintf("the instance changed hands while it was being checked (its marker now names lease epoch %d, not %d): it is in use by that lease; left running", *now.LeaseEpoch, epoch)
+	}
+	return ""
 }
 
 // systemArgv reads GET /system_stats system.argv, the launch fingerprint.

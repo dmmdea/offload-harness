@@ -10,7 +10,7 @@ import { existsSync, createWriteStream, renameSync, rmSync, readFileSync, mkdirS
 import { createServer } from "node:net";
 import { join } from "node:path";
 import { spawn as nodeSpawn, spawnSync as nodeSpawnSync } from "node:child_process";
-import { readLaunchOwner, writeLaunchOwner, clearLaunchOwner, harnessLaunched, pidAlive as defaultPidAlive } from "./comfy-ownership.mjs";
+import { readLaunchOwner, writeLaunchOwner, restampLaunchOwner, clearLaunchOwner, harnessLaunched, pidAlive as defaultPidAlive } from "./comfy-ownership.mjs";
 
 // resolveComfyDir: the ComfyUI install this machine drives. The old default was
 // "C:/ComfyUI" on EVERY platform, so a Linux node reported an install it cannot have and
@@ -645,6 +645,7 @@ export async function ensureComfy(opts = {}) {
     systemArgv = fetchSystemArgv,
     readLaunch = readLaunchOwner,
     writeLaunch = writeLaunchOwner,
+    restampLaunch = restampLaunchOwner,
     clearLaunch = clearLaunchOwner,
     alive = defaultPidAlive,
     killPid = (pid) => process.kill(pid),
@@ -684,7 +685,23 @@ export async function ensureComfy(opts = {}) {
   };
   if (await up(api)) {
     const v = await reuseVerdict({ api, comfyDir, profile, key, port: instance.port, systemArgv, readLaunch, alive });
-    if (v.reuse) return null; // already running and fit for this binding — don't manage it
+    if (v.reuse) {
+      // A kept instance outlives a lease whose holder died or was fenced out, and the next lease on
+      // its card finds it running. Reusing it makes it that lease's: re-stamp the marker, or the
+      // new holder's release (which stops by epoch) stops nothing and the instance outlives every
+      // later lease with its models resident. Only an instance that was already a lease's moves
+      // (restampLaunchOwner); outside a lease there is nothing to hand it to.
+      const epoch = key ? leaseEpochOf(env) : null;
+      if (epoch !== null) {
+        try {
+          const r = restampLaunch(comfyDir, key, epoch);
+          if (r && r.changed) log(`COMFY-KEEP: instance '${key}' outlived lease epoch ${r.previous}; it is lease epoch ${epoch}'s now and is stopped with it`);
+        } catch (e) {
+          log(`COMFY-KEEP-WARN: could not hand instance '${key}' to lease epoch ${epoch} (${e && e.message}); its marker still names lease epoch ${(readLaunch(comfyDir, key) || {}).leaseEpoch ?? "?"}, so this lease's release will not stop it`);
+        }
+      }
+      return null; // already running and fit for this binding — don't manage it
+    }
     if (!v.restart) {
       const line = "COMFY-PROFILE-MISMATCH: ComfyUI on " + api + ": " + v.reason;
       log(line);
@@ -794,7 +811,11 @@ export async function ensureComfy(opts = {}) {
       const epoch = leaseEpochOf(env);
       if (epoch !== null) rec.leaseEpoch = epoch;
     }
-    try { writeLaunch(comfyDir, rec); } catch {}
+    try { writeLaunch(comfyDir, rec); } catch (e) {
+      // A kept instance is detached and is stopped by its lease's holder, which finds it by this
+      // marker: without one nothing can stop it by its lease, and it would outlive it unseen.
+      if (keep) log(`COMFY-KEEP-WARN: could not record the launch marker for kept instance '${key || "default"}' (${e && e.message}); the lease it was launched under cannot stop it, stop it by hand`);
+    }
   }
   // Fail-fast dead-child watchdog (<node-e> stall, bigger-models-2026-09-24.md
   // "Phase 2 round 2" item 4): the poll loop below only ever asked "is the HTTP

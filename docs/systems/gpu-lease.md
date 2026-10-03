@@ -523,9 +523,19 @@ must be alive, must not have begun after the marker was written (a recycled pid)
 marker's port must report exactly the recorded argv (`GET /system_stats`); then `POST /free` and a stop
 (Windows: terminate; elsewhere SIGTERM, then SIGKILL after five seconds). Anything short of that proof is left
 running and printed with the reason, never killed: a foreign process on the port is not ours. A marker with no
-lease epoch (the default instance, an instance launched outside a lease) is never touched. A lease that ends
-because its holder died (no release runs) leaves its instance until the next holder of that epoch's card
-launches over it or an operator stops it: nothing here is a timer or a watcher (plan I5).
+lease epoch (the default instance, an instance launched outside a lease) is never touched. A holder stops
+instances only while its lease is still its own (`Lease.Check`): one that was released from outside or reclaimed
+after a suspend is a straggler, leaves them running and says which (the same rule `Lease.Release` follows for the
+claim: a fenced-out holder leaks rather than destroys), and `comfyinst` re-reads the marker at the moment of the
+stop and leaves an instance whose marker changed hands during its proof. A lease that ends because its holder died
+(no release runs) leaves its instance (a kept instance is detached, so it survives the holder). The next lease on
+that card REUSES it, it does not launch over it: a live keyed instance whose marker proves it is ours is reused, and
+reusing an instance that was a lease's takes it over (`restampLaunchOwner`: only the marker's `leaseEpoch` changes,
+to the reusing lease's), so that lease's release stops it. An instance that was never a lease's (a marker with no
+epoch) is not claimed by a lease that happens to reuse it. An instance nobody reuses stays up until an operator stops
+it: nothing here is a timer or a watcher (plan I5), and whether the next acquirer or `gpu doctor` should sweep
+markers whose epoch is dead is an operator decision (I5 forbids a watcher, not an explicit sweep). A kept launch
+whose marker cannot be written logs `COMFY-KEEP-WARN`, because nothing can then stop it by its lease.
 
 **Allocate and claim are one loop.** The allocator reads live state over a window of seconds, so another reserve can take
 the card it picked before this one claims it (two simultaneous `--cards 1` over free cards both choose the lowest id). So the

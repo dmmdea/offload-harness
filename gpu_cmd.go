@@ -462,7 +462,7 @@ func runGPUReserve(args []string) error {
 	finish := func() {
 		// The instances kept under this lease go first: they hold VRAM the seat's warm-back and
 		// the next holder both want, and they live no longer than the lease (gpu_instances.go).
-		stopKeptInstances(cfg, lease.Epoch(), os.Stderr)
+		stopInstancesOfLease(cfg, lease, os.Stderr)
 		if *unload {
 			warmBackGuarded(cfg, leaseWarmGuard(m, lease), os.Stderr)
 		}
@@ -866,7 +866,7 @@ func runGPUHold(args []string) error {
 	}
 	defer func() {
 		// The instances kept under this lease go with it (gpu_instances.go).
-		stopKeptInstances(loadCfg(fs), lease.Epoch(), os.Stderr)
+		stopInstancesOfLease(loadCfg(fs), lease, os.Stderr)
 		_ = lease.Release()
 	}()
 
