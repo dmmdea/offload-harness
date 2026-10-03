@@ -90,8 +90,6 @@ Tests: `TestAnInFlightMediaJobDoesNotPinItsRequestBody`, `TestMediaJobFileFields
 `TestAnimateCharacterVerbRoutesToAFleetNode`, `TestEveryMediaVerbPassesRouteAndRemotesToTheRouter`,
 `TestCacheDoesNotHoldOneLockAcrossEveryConfigsDerivation`.
 
-## [0.163.1] - 2026-10-03 - A warm-back never loads a seat over another card's lease
-
 ### Changed — second review round for the media-job work (register CT-50)
 
 - **The media-job body is read into one buffer of exactly `Content-Length` bytes.** `bytes.Buffer.ReadFrom` regrew a buffer sized
@@ -104,20 +102,33 @@ Tests: `TestAnInFlightMediaJobDoesNotPinItsRequestBody`, `TestMediaJobFileFields
 - **An empty `media_dir` means the current directory** for a fetch (it failed after the render with `mkdir : ...`).
 - **The caller's `out` is decided first and reserved.** An `out` inside `out_dir` that shares a base name with a secondary
   output no longer lets the secondary claim that name and be renamed over; the secondary takes the job-id-prefixed name.
-- **A budget or deadline that ends a call asks the node to withdraw the job** (`DELETE /fleet/jobs/{id}`, best effort, its own 5 s
-  timeout, failures logged, the node's answer in the defer text). A deadline that passes during the fetch now says the render
-  finished and the fetch ran out of time, and withdraws nothing. Today the node withdraws only an agent job that has not started
-  (ADR 0064), so for a media job the answer is usually 405 or 409 and the job may still hold its card.
+- **A budget or deadline that ends a call says what it cannot undo.** A media job cannot be withdrawn: it is claimed to running
+  as soon as it is admitted, and `DELETE /fleet/jobs/{id}` is for agent jobs only (ADR 0064, `TestWithdrawIsForAgentJobsOnly`),
+  so the node answers 405 and the job keeps its card until it ends. The client therefore sends no withdraw. A deadline that
+  passes while the job is sent or rendering defers as `budget`, names the node and the remote job, and says the node may still
+  be running the job and it cannot be recalled; one that passes during the fetch says the render finished and the fetch ran out
+  of time.
 - **Leftovers of a fetch that never finished are swept** from the destination directory before names are claimed: stale
-  `.media-fetch-*.part` temps and zero-byte `media-<16 hex>-*` claim files older than an hour (bounded to 4096 entries scanned and
-  256 removed, logged).
+  `.media-fetch-*.part` temps and zero-byte `media-<16 hex>-*` claim files (bounded to 4096 entries scanned and 256 removed,
+  logged). "Stale" is older than the longest call budget (2 to 6 hours, the same `Budgets` a call runs under) plus an hour, so
+  no call still running can lose its files, and a call refreshes the modification time of its own claims and finished temps
+  after each download, so a long multi-output fetch never ages toward it. Two limits are deliberate: a crash mid-fetch can leave
+  an empty claim under the node's bare file name (the primary), which the sweep does not remove because it cannot tell it from
+  an empty file the user made; and an empty `media-<16 hex>-*` file older than the threshold is indistinguishable from a claim.
+- **Replacing an existing `out` keeps that file's permission bits** (a private 0600 `out` stays 0600); a new `out` is 0644 less
+  the umask like every other fetched file.
 - **`compose-project` reports a deadline it cannot extend** like the media-job door does (it discarded the errors).
 
 Tests: `TestReadMediaJobBodyAllocatesExactlyContentLength`, `TestFetchedOutputsLandAs0644LessTheUmask`,
 `TestAnEmptyMediaDirIsTheCurrentDirectory`, `TestAnOutThatSharesANameWithASecondaryNeverDestroysIt`,
-`TestABudgetThatEndsTheCallAsksTheNodeToWithdrawTheJob`, `TestABudgetThatEndsDuringTheFetchSaysTheRenderFinishedAndWithdrawsNothing`,
-`TestAStaleFetchLeftoverIsSweptBeforeTheNextClaim`, `TestPollFailuresThatAlternateWithAnswersNeverEndTheWait`,
+`TestABudgetThatEndsTheCallSaysTheJobCannotBeRecalled`, `TestABudgetExpiryAgainstARealNodeSendsNoDeleteAndSaysTheJobCannotBeRecalled`,
+`TestABudgetThatEndsDuringTheFetchSaysTheRenderFinished`, `TestAStaleFetchLeftoverIsSweptBeforeTheNextClaim`,
+`TestTheSweepThresholdIsTheLongestBudgetPlusAnHour`, `TestSweepStaleKeepsAFileInsideTheThresholdAndTakesOneBeyondIt`,
+`TestTouchRefreshesTheClaimsAndFinishedTempsACallHolds`, `TestAMultiOutputFetchKeepsItsClaimsFresh`,
+`TestReplacingAnExistingOutKeepsItsPermissionBits`, `TestPollFailuresThatAlternateWithAnswersNeverEndTheWait`,
 `TestAGraphThatEscapesPastTheNodesBodyCapIsRefusedBeforeTheNetwork`, `TestComposeProjectReportsADeadlineItCannotExtend`.
+
+## [0.163.1] - 2026-10-03 - A warm-back never loads a seat over another card's lease
 
 ### Fixed — a warm-back waits for the last lease on the seat's cards (register C-86, plan P5 follow-up)
 

@@ -1344,17 +1344,21 @@ builders decode; `out` and `out_dir` never travel (`out_dir` is where the fetche
 caller's own `out`: each output is staged under a unique temp name, the primary takes the node's file name when it is free,
 every other output is prefixed with the remote job id (the caller's `out` is decided first, so no secondary can take its
 name), and a failure part-way removes every temp and names the files that already landed. Fetched files are mode 0644 less
-the umask, and an empty `media_dir` means the current directory. Before it claims a name the client sweeps leftovers of a fetch that never finished
-from the destination directory: `.media-fetch-*.part` temps and zero-byte `media-<16 hex>-*` claims older than an hour. The
+the umask (an `out` that already exists keeps that file's permission bits), and an empty `media_dir` means the current directory.
+Before it claims a name the client sweeps leftovers of a fetch that never finished from the destination directory:
+`.media-fetch-*.part` temps and zero-byte `media-<16 hex>-*` claims older than the longest call budget plus an hour (so a call
+that is still running never loses its files; each call also refreshes the modification time of its own claims and finished temps
+after every download). Two limits are deliberate: a crash mid-fetch can leave an empty claim under the node's bare file name
+(the primary output), which the sweep does not remove because it cannot tell it from an empty file the user made, and an empty
+`media-<16 hex>-*` file older than the threshold is indistinguishable from a claim and is removed. The
 result's paths are rewritten to the local copies and it gains `node`, `remote_job_id` and, when the node published no
 artifacts (an older node), `unverified: true`. `meta.node` names the node and `meta.placement` reads `remote: forced` or
 `remote: no <lane> lane on this machine`. A node's 503 or 429 is a `capacity` defer, a 400 or 413 a `contract` defer, a 401
 or 403 (on the dispatch, the poll or the fetch) a `config` defer, a call whose own deadline passed a `budget` defer naming the
-node and the remote job (while the job was sent or rendering the client first asks the node, best effort and with its own
-5 s timeout, to withdraw it with `DELETE /fleet/jobs/{id}` and the defer says whether the node confirmed; today a node
-withdraws only a job it has not started and only an agent job, so for a media job the answer is usually 405 or 409 and the
-job may still hold its card; a deadline that passes while the outputs are fetched says the render finished and withdraws
-nothing), and a transport failure an `infrastructure` defer. An input file this
+node and the remote job (while the job was sent or rendering the node may still be running it and the defer says
+it cannot be recalled: a media job cannot be withdrawn, because it is claimed to running as soon as it is admitted and the
+node's withdraw, `DELETE /fleet/jobs/{id}`, is for agent jobs only (ADR 0064), so the client sends none; a deadline that
+passes while the outputs are fetched says the render finished and the fetch ran out of time), and a transport failure an `infrastructure` defer. An input file this
 machine cannot read is `contract`; this machine's own temp directory, disk or packer failing is `infrastructure`. A defer the node itself returned (a render that
 deferred) comes back as the node sent it, with `meta.node`.
 
