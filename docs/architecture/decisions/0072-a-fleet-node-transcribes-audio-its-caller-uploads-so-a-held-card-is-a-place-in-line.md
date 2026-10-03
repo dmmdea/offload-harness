@@ -89,7 +89,7 @@ card per remote call on the serving node, one asker ledger row; `pair-workloads.
   hour of audio) and Opus instead of WAV on the node's side of the conversion. The transcript can differ slightly from a
   local run's for that reason, and only on a spilled call.
 - **A node with a `fleet_auth_token` now refuses a tokenless legacy `stt` dispatch (401) and masks its polls.** The only
-  external dispatcher known to send `stt` jobs (a separate service on the workstation tier node, port 18810) sends no
+  external dispatcher known to send `stt` jobs (a separate service on `<node-c>`, the Linux edge node, port 18810) sends no
   bearer token. No production use of `stt` through it was found: its web console form sends an empty payload, and the
   jobs seen on one node on 2026-10-01 were a burst of test ids. Such a dispatcher keeps working against a node with no
   token and needs the bearer against one that has it. > **Unverified:** where that dispatcher mints its job ids was not
