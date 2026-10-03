@@ -460,6 +460,9 @@ func runGPUReserve(args []string) error {
 	// The warm is heartbeat for its length; the lease outlives the command by
 	// exactly the warm.
 	finish := func() {
+		// The instances kept under this lease go first: they hold VRAM the seat's warm-back and
+		// the next holder both want, and they live no longer than the lease (gpu_instances.go).
+		stopKeptInstances(cfg, lease.Epoch(), os.Stderr)
 		if *unload {
 			warmBackGuarded(cfg, leaseWarmGuard(m, lease), os.Stderr)
 		}
@@ -861,7 +864,11 @@ func runGPUHold(args []string) error {
 	if err != nil {
 		return err
 	}
-	defer func() { _ = lease.Release() }()
+	defer func() {
+		// The instances kept under this lease go with it (gpu_instances.go).
+		stopKeptInstances(loadCfg(fs), lease.Epoch(), os.Stderr)
+		_ = lease.Release()
+	}()
 
 	// Poll FAST but renew slowly. These are two different clocks and conflating them
 	// was wrong: a single 15s ticker meant `gpu release` left the holder alive for up
@@ -905,6 +912,15 @@ func runGPURelease(args []string) error {
 	// again, and a warm against someone else's exclusive lease is the incident.
 	if *warm {
 		warmBackGuarded(loadCfg(fs), releaseWarmGuard(m, *epoch), os.Stderr)
+	}
+	// The instances kept under the lease being ended go with it. Which lease: the one named, or
+	// whatever is held when none is (the operator's override); nothing held, nothing to stop.
+	if info := m.Inspect(); info.Held && (*epoch == 0 || info.HoldsEpoch(*epoch)) {
+		stopEpoch := *epoch
+		if stopEpoch == 0 {
+			stopEpoch = info.Epoch
+		}
+		stopKeptInstances(loadCfg(fs), stopEpoch, os.Stderr)
 	}
 	released, err := m.ReleaseByEpoch(*epoch)
 	if err != nil {

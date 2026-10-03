@@ -6,6 +6,16 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added — the holder of a lease stops the ComfyUI instances kept under it (GPU routing P13b)
+
+- **`internal/comfyinst`.** A kept instance (see the fix below) lives no longer than the lease it was launched
+  under. Its launch marker records the lease epoch; the holder stops it on release: `gpu reserve` when the wrapped
+  command ends, the detached holder when it exits, `gpu release` when an operator ends a lease, and the pipeline
+  when a media lease is released. Only a keyed marker naming exactly that epoch is touched, and only after the
+  instance is shown to be the harness's own (pid alive, not started after the marker, and the endpoint on the
+  marker's port reporting exactly the recorded argv); then `POST /free` and a stop. Anything short of that is left
+  running and reported, never killed. A marker with no lease epoch is never touched.
+
 ### Fixed — a runner given --keep-comfy exits (GPU routing P13b)
 
 - **A runner that launched ComfyUI itself and was told to keep it no longer hangs.** The instance was a

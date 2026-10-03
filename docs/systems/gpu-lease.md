@@ -484,6 +484,21 @@ unreadable host-RAM counter refuses only when a RAM need was declared. On Window
 rows for compute apps, so `foreign-busy` is Linux-only evidence today; the measured N-instance host RAM that tunes the
 headroom term is a P13 acceptance item.
 
+**A kept ComfyUI instance lives no longer than its lease.** A runner that keeps the ComfyUI it launched
+(`--keep-comfy`) leaves a detached instance running after it exits, so the items of a batch under one
+lease load their models once; its launch marker (`.offload-launch-<key>.json`) records the lease epoch.
+The **holder** of that lease stops the instance when it lets go, before the release and before any seat
+warm-back (both want the VRAM): `gpu reserve` when its wrapped command ends, the detached holder when it
+exits, `gpu release` when an operator ends a lease from outside, and the pipeline when a media lease is
+released. `internal/comfyinst` does it, and only for a keyed marker that names exactly that epoch: the pid
+must be alive, must not have begun after the marker was written (a recycled pid), and the endpoint on the
+marker's port must report exactly the recorded argv (`GET /system_stats`); then `POST /free` and a stop
+(Windows: terminate; elsewhere SIGTERM, then SIGKILL after five seconds). Anything short of that proof is left
+running and printed with the reason, never killed: a foreign process on the port is not ours. A marker with no
+lease epoch (the default instance, an instance launched outside a lease) is never touched. A lease that ends
+because its holder died (no release runs) leaves its instance until the next holder of that epoch's card
+launches over it or an operator stops it: nothing here is a timer or a watcher (plan I5).
+
 **Allocate and claim are one loop.** The allocator reads live state over a window of seconds, so another reserve can take
 the card it picked before this one claims it (two simultaneous `--cards 1` over free cards both choose the lowest id). So the
 claim is a non-blocking acquire: when it loses, the winner's claim is visible on the next read and the allocator runs again,
