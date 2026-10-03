@@ -617,3 +617,48 @@ func TestAPerRequestStepsCountOverTheFamilysAndTheAnimateDefault(t *testing.T) {
 		t.Errorf("animate --steps = %q, want animategen_steps 20", got)
 	}
 }
+
+// ---------------------------------------------------------------- the config helper mirrors the pipeline
+
+// config.DefaultVideoSdcppFamily restates the pipeline's resolution (resolveVideoFamily, then
+// ResolveVideoFamilyBinding) for the callers that cannot import the pipeline (mediacap's verdict,
+// the fleet's bound helpers). This pins the two together over every spelling that matters: for a
+// request that names no model, the pipeline serves it by sdcpp exactly when the helper says so, and
+// under the family the helper names.
+func TestDefaultVideoSdcppFamilyMirrorsThePipeline(t *testing.T) {
+	sd := config.VideoFamilyBinding{Engine: config.EngineSdcpp, SdcppBin: "/b", SdcppModel: "/m", SdcppBackend: "vulkan0"}
+	cases := []struct {
+		name string
+		fam  string
+		fams map[string]config.VideoFamilyBinding
+	}{
+		{"nothing bound", "", nil},
+		{"free name, default", "fastwan", map[string]config.VideoFamilyBinding{"fastwan": sd}},
+		{"free name, not the default", "", map[string]config.VideoFamilyBinding{"fastwan": sd}},
+		{"wan22, videogen_family unset", "", map[string]config.VideoFamilyBinding{"wan22": sd}},
+		{"wan22, videogen_family wan22", "wan22", map[string]config.VideoFamilyBinding{"wan22": sd}},
+		{"wan22, videogen_family spelled wan", "wan", map[string]config.VideoFamilyBinding{"wan22": sd}},
+		{"ltx25 is the default", "ltx25", map[string]config.VideoFamilyBinding{"ltx25": sd}},
+		{"ltx25 sdcpp, comfy default", "", map[string]config.VideoFamilyBinding{"ltx25": sd}},
+		{"wan22 sdcpp, comfy ltx25 default", "ltx25", map[string]config.VideoFamilyBinding{"wan22": sd}},
+		{"hunyuan is the default", "hunyuan", map[string]config.VideoFamilyBinding{"hunyuan": sd}},
+		{"h3 is the default", "h3", map[string]config.VideoFamilyBinding{"h3": sd}},
+		{"a spelling the runner does not know", "foo", map[string]config.VideoFamilyBinding{"wan22": sd}},
+	}
+	for _, tc := range cases {
+		cfg := config.Default()
+		cfg.VideoGenFamily, cfg.VideoGenFamilies = tc.fam, tc.fams
+		render, _, ok := (&Pipeline{cfg: cfg}).sdcppVideoBinding(core.Request{Task: core.TaskGenerateVideo})
+		name, helperOK := cfg.DefaultVideoSdcppFamily()
+		if ok != helperOK {
+			t.Errorf("%s: the pipeline serves sdcpp=%v but DefaultVideoSdcppFamily says %v", tc.name, ok, helperOK)
+			continue
+		}
+		if ok && render != "" && render != name {
+			t.Errorf("%s: the pipeline renders family %q but the helper names %q", tc.name, render, name)
+		}
+		if !ok && name != "" {
+			t.Errorf("%s: the helper names %q for a request the pipeline does not serve by sdcpp", tc.name, name)
+		}
+	}
+}
