@@ -47,6 +47,17 @@ Versioning: [SemVer](https://semver.org/).
   and is ordered against a drop by an in-process lock so a touch cannot revive a spent place). The few milliseconds
   between a lease wait's waiter unregistering and the queued answer re-leaving the token remain; they cost
   fairness, never exclusivity.
+- **A call the allocator can find no card for gets a place in line, not a lease fault.** The host short of RAM,
+  a reading whose display state is unknown, every card the screen: the raw allocator error left through
+  `gpu_lease_unavailable` after the whole wait. A call that can resume keeps a place on the cards that would qualify
+  but for what is short (never the whole node, which would make its place a barrier) with the reason; a call no card
+  could ever take, and every call from a door that cannot resume, gets the `gpu_busy` defer carrying the reason.
+- **P13 acceptance that is still OPEN after this review pass** (they need a live box or the operator, and are listed
+  in `docs/systems/media-generation.md`, "Open acceptance of P13"): the seeded `comfy_cuda_device` on the 3x16 tier
+  (the operator decides whether a pin equal to the seed is treated as unset); a VRAM footprint and a host-RAM need
+  for the allocator, and the N-instance RAM measurement; the live two-card acceptance; a foreign-process reader on
+  the media path (Linux hosts only). The plan's "enqueue on the node daemon's queue" spike is recorded as not
+  adopted, with the reason.
 - **`offload_run_graph` with several `devices` holds the whole node.** The field was documented operator-only and
   nothing enforced it (the MCP door and the fleet dispatch both feed it for any caller), and several devices ran the
   graph in the DEFAULT instance, which sees every card, under a lease on only those cards: an arbitrary graph could

@@ -1033,6 +1033,46 @@ A lease that reuses a kept instance (the previous holder died, or was fenced out
 takes it over: its marker is re-stamped with the reusing lease's epoch, so that lease's release stops it. A
 runner that does not keep its instance kills it itself, as before.
 
+**A call with no card to take is a place in line too.** The allocator can find no card although the cards
+are idle: the host is short of RAM, a transient `nvidia-smi` failure left the monitor's card unknown
+(`display-unknown`), every card is the operator's screen or quarantined. That used to leave through the raw
+allocator error, classed `gpu_lease_unavailable` (a configuration fault). A call that can resume now keeps a
+place on the cards that would qualify but for what is short (the allocator's `Waitable` list, never the whole
+node, so it does not become a barrier) with the reason, and resumes it when the host recovers; when no card
+could qualify however long it waited (all of them the screen, quarantined, foreign-busy) there is nothing to
+hold a place on, and every call gets the plain `gpu_busy` defer carrying the reason.
+
+**Open acceptance of P13 (P13 is not complete until these are closed).** What the review pass could not close
+from a worktree, with no GPU and no live lease root:
+
+1. **The seeded `comfy_cuda_device` on the 3x16 tier.** The plan says the seed `"2"` becomes automatic
+   allocation. The branch makes an explicit pin a hard constraint, and a config cannot tell the seed from an
+   operator's own choice (no provenance), so on a stock 3x16 host every single-card call keeps the whole-node
+   lease, and with `gpu_comfy_order` declared the pinned calls serialise on card 2. The tier note says so. Whether
+   a pin equal to the seed is treated as unset on card-scoped hosts, or the enable step clears it, is the
+   operator's decision; until it is made the complaint this phase set out to fix stays open on that tier's seed.
+2. **The allocator is given no VRAM footprint and no RAM need for a media call** (`Need{}`: a footprint of 0 makes
+   the fit check always true, and a RAM need of 0 enforces only the headroom floor), so N concurrent instances are
+   gated by neither. A measured per-route VRAM peak does exist (the passive footprint store,
+   `vram_peak_gb` per family, quant and task), but it cannot simply be passed in: the fit check compares it with a
+   card's CURRENT free VRAM, which counts the text seats a media lease would unload, so on a box with a seat
+   resident on every card it would refuse cards the lease can take. The allocator first has to credit the
+   evictable resident seats (its `Resident` map already carries their cost). The RAM need has no figure at all, and
+   the N-instance host-RAM measurement the plan asks for is a live run.
+3. **The live two-card acceptance** (two `offload_generate_image` calls on two non-display cards in their own
+   instances, confirmed by `nvidia-smi` per-card memory, not pids, under WDDM) and the **UUID-pin spike on a
+   non-Windows host**.
+4. **A foreign compute process is not skipped on the media path.** `gpu reserve --cards` reads `nvidia-smi`'s
+   per-process rows (Linux only: WDDM lists none), but the media path's default `ForeignBusy` reader returns
+   nothing, so a Linux host that turns card-scoped leases on would hand a render a card another process is using.
+   The reader lives in the root package beside the foreign-load guard; moving it into `internal/gpualloc` is
+   the fix, and it matters on a Linux host only.
+5. **"Enqueue on the node daemon's job queue" (the plan's spike): not adopted, and why.** The daemon runs media
+   jobs inline in the request handler: `concurrencyCapped` is false for `image-gen`, `video-gen`, `animate`,
+   `audio-gen` and `run-graph` (a parked media job would hold an execution slot and starve the agent lane), so a
+   dispatch to the local daemon would wait in the same per-card slots and leases this admission already waits in
+   and add no queue of its own. The place in line is the token.
+
 ## Error handling
 
 Failures return typed Defers rather than crashing: a busy GPU lock defers with a distinct reason, a

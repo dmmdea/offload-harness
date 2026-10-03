@@ -635,6 +635,10 @@ func (p *Pipeline) acquireCards(ctx context.Context, m *gpulease.Manager, reason
 		if plan.auto {
 			picked, isFree, err := gpualloc.PickAuto(gpualloc.Plan{Min: 1, Max: 1}, remaining(), build, io.Discard, time.Sleep, time.Now)
 			if err != nil {
+				var none *gpulease.NoCardsError
+				if errors.As(err, &none) {
+					return mediaGrant{}, p.noCardsAnswer(m, none, since, tokenID, optsFor, reason, need.Resumable)
+				}
 				return mediaGrant{}, err
 			}
 			ids, free = picked, isFree
@@ -702,10 +706,34 @@ func (p *Pipeline) acquireCards(ctx context.Context, m *gpulease.Manager, reason
 	return p.grantCards(ctx, m, lease, ids, plan, cards, tokenID), nil
 }
 
+// noCardsAnswer is the answer for a call that waited its window and the allocator still found no
+// card for it although the cards may be idle: the host is short of RAM, a transient nvidia-smi
+// failure left the monitor's card unknown, every card is the operator's screen or quarantined. It
+// used to leave through the raw allocator error, classed as a lease fault
+// (gpu_lease_unavailable). A call that can resume keeps a place on the cards that would qualify
+// but for what is short (the allocator lists them as Waitable), with the reason; when no card
+// could qualify however long it waited there is nothing to hold a place on, and every call gets
+// the plain busy defer, with the reason.
+func (p *Pipeline) noCardsAnswer(m *gpulease.Manager, none *gpulease.NoCardsError, since time.Time, tokenID string,
+	optsFor func([]string) gpulease.Options, reason string, resumable bool) error {
+	why := "no card can take this call right now: " + gpualloc.SkipSummary(none)
+	ids := none.Waitable
+	if !resumable || len(ids) == 0 {
+		return &errGPUBusy{detail: why}
+	}
+	return p.queuedAnswerWhy(m, ids, since, tokenID, optsFor(ids), reason, nil, true, why)
+}
+
 // queuedAnswer leaves the place-keeping token for a call that waited its window and still has no
 // card, and builds the answer that carries it. A call whose door cannot resume a place (resumable
 // false) leaves nothing and gets the plain busy answer.
 func (p *Pipeline) queuedAnswer(m *gpulease.Manager, ids []string, since time.Time, tokenID string, opts gpulease.Options, reason string, held *gpulease.ErrHeld, resumable bool) error {
+	return p.queuedAnswerWhy(m, ids, since, tokenID, opts, reason, held, resumable, "")
+}
+
+// queuedAnswerWhy is queuedAnswer with the reason the call is queued stated by the caller, for a
+// wait that no lease explains (why != "").
+func (p *Pipeline) queuedAnswerWhy(m *gpulease.Manager, ids []string, since time.Time, tokenID string, opts gpulease.Options, reason string, held *gpulease.ErrHeld, resumable bool, why string) error {
 	if !resumable {
 		return busyAnswer(ids, held)
 	}
@@ -735,6 +763,8 @@ func (p *Pipeline) queuedAnswer(m *gpulease.Manager, ids []string, since time.Ti
 		subject = "card(s) " + strings.Join(ids, ", ")
 	}
 	switch {
+	case why != "":
+		e.Why = why
 	case held != nil:
 		e.Why = fmt.Sprintf("%s held by %s (%q)", subject, held.Info.Class, held.Info.Reason)
 	case len(e.HeldBy) > 0:
