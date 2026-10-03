@@ -20,7 +20,7 @@ import (
 // live? The answer was previously "$HOME", i.e. the OS drive, on every machine.
 func runInstall(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("install needs a subcommand: detect, plan, render, volumes, seed, vllm-seat, tier-info")
+		return fmt.Errorf("install needs a subcommand: detect, plan, render, volumes, seed, vllm-seat, tier-info, hyperframes")
 	}
 	switch args[0] {
 	case "detect":
@@ -37,8 +37,10 @@ func runInstall(args []string) error {
 		return runInstallVLLMSeat(args[1:])
 	case "tier-info":
 		return runInstallTierInfo(args[1:])
+	case "hyperframes":
+		return runInstallHyperframes(args[1:])
 	default:
-		return fmt.Errorf("unknown install subcommand %q (have: detect, plan, render, volumes, seed, vllm-seat, tier-info)", args[0])
+		return fmt.Errorf("unknown install subcommand %q (have: detect, plan, render, volumes, seed, vllm-seat, tier-info, hyperframes)", args[0])
 	}
 }
 

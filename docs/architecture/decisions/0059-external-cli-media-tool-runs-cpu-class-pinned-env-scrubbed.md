@@ -14,8 +14,8 @@ designed, text-exact motion graphics. That covers title cards, lower thirds, kin
 overlays to lay over LTX b-roll, and each render can be regression-tested with `framemd5`. It is
 also the first third-party CLI the harness runs as a media route, and its defaults assume an
 interactive developer machine rather than a harness node. Every behaviour below was read in the
-0.8.61 source. The pin moved to 0.8.108 on 2026-10-02, and the gates the runner depends on were
-checked again on that package: the telemetry, update and skills gates, the `--json` skip of the
+0.8.61 source. The pin moved to 0.8.108 and then to 0.8.114 on 2026-10-02, and the gates the runner
+depends on were checked again on each package: the telemetry, update and skills gates, the `--json` skip of the
 update block, the flags of the allowlisted commands, the chrome-headless-shell pin and the set of
 hosts the package names:
 
@@ -64,7 +64,12 @@ its runner.
    checks registry signatures and SLSA provenance, and its failure is fatal: an unverifiable install
    is never bound. The installer never runs `npm install -g`. The pinned Chrome is downloaded by
    `browser ensure` into the harness-owned home and bound explicitly (`hyperframes_browser_path`).
-   Bumping the pin is a lockfile change that the fleet-update sweep carries.
+   Bumping the pin is a lockfile change. The binary embeds the committed lockfile, and
+   `local-offload install hyperframes` re-runs this step on an installed node; a release that moves
+   the pin runs it, then `acceptance`, on every node with the lane. Until it runs, doctor and
+   `offload_status` read the route BOUND-BUT-MISSING, because the runner refuses an install that is
+   not its pin. (The first pin move, to 0.8.108, shipped without this: the deploy swapped the runner
+   but not the install, and a node refused every composition while its status read CONFIGURED.)
 3. **Env-scrubbed.** The CLI's environment is an allowlist: PATH, the Windows system variables,
    temp and home, and the application-data dirs. The harness sets telemetry, update, auto-install and
    skills off, and supplies the ffmpeg, ffprobe, browser and cache paths. No `*_API_KEY`, token,
