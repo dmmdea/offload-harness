@@ -781,3 +781,59 @@ func TestNodeInfoFallbackBeatsTheRelay(t *testing.T) {
 		t.Fatalf("ingress frames %d, relay frames %d: the fallback identity keeps the local ingress", len(ing.frameInfos()), r.count())
 	}
 }
+
+// After a member has a verdict, no call waits on it again: a stale verdict is answered at once and
+// refreshed in the background, so a member that goes offline never stalls the harness's own calls.
+func TestRelayStaleVerdictIsServedWhileItRefreshesInTheBackground(t *testing.T) {
+	const base = "http://192.0.2.7:18811"
+	e := New(Config{Enabled: true, AppDir: noPairAppDir(t), OpenDir: t.TempDir(),
+		Relay: RelayConfig{Auto: true, Remotes: []string{base}, Token: "t"}})
+	var mu sync.Mutex
+	probes := 0
+	release := make(chan struct{})
+	e.relay.probe = func(ctx context.Context, b, token string) (bool, error) {
+		mu.Lock()
+		probes++
+		n := probes
+		mu.Unlock()
+		if n > 1 {
+			<-release // the refresh hangs, as a probe of an offline member does
+		}
+		return true, nil
+	}
+	if got := e.relayCandidates(); len(got) != 1 {
+		t.Fatalf("cold candidates = %v", got)
+	}
+	// Age the verdict past its TTL.
+	e.relay.mu.Lock()
+	v := e.relay.verdicts[base]
+	v.at = time.Now().Add(-2 * relayProbeTTL)
+	e.relay.verdicts[base] = v
+	e.relay.mu.Unlock()
+
+	done := make(chan []string, 1)
+	go func() { done <- e.relayCandidates() }()
+	select {
+	case got := <-done:
+		if len(got) != 1 {
+			t.Fatalf("stale candidates = %v, want the previous verdict", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("a call waited on the refresh of a stale verdict")
+	}
+	// The refresh starts in the background (exactly one), and another call during it starts no second.
+	count := func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return probes
+	}
+	for deadline := time.Now().Add(2 * time.Second); count() < 2 && time.Now().Before(deadline); {
+		time.Sleep(5 * time.Millisecond)
+	}
+	e.relayCandidates()
+	time.Sleep(50 * time.Millisecond)
+	if n := count(); n != 2 {
+		t.Fatalf("probes = %d, want the cold probe and ONE background refresh", n)
+	}
+	close(release)
+}

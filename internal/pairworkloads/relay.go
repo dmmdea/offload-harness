@@ -148,8 +148,10 @@ type relayVerdict struct {
 type relayState struct {
 	mu       sync.Mutex
 	verdicts map[string]relayVerdict // base -> last health verdict
-	demoted  map[string]time.Time    // route URL -> when a post to it last failed
-	pinned   map[string]string       // job id -> the route URL its in-flight frames went to
+	// refreshing marks the bases a background refresh of a stale verdict is running for.
+	refreshing map[string]bool
+	demoted    map[string]time.Time // route URL -> when a post to it last failed
+	pinned     map[string]string    // job id -> the route URL its in-flight frames went to
 	// probe reads a member's health: does it advertise pair_relay. probeRelayHealth unless a test
 	// swaps it.
 	probe  func(ctx context.Context, base, token string) (bool, error)
@@ -194,15 +196,18 @@ func (e *Emitter) probeRelayHealth(ctx context.Context, base, token string) (boo
 	return h.PairRelay, nil
 }
 
-// autoAdvertising returns the Remotes whose health advertises pair_relay, probing the ones whose
-// verdict is stale, in parallel, outside every lock a caller of Enabled may hold.
+// autoAdvertising returns the Remotes whose health advertises pair_relay. A remote never probed is
+// probed now, in parallel with the other cold ones and bounded by relayProbeTimeout (the first call
+// of a cold process pays it once); one with a verdict is answered from it at once, and a stale
+// verdict is refreshed in the background, so no later call waits on a member that is offline. Never
+// holds a lock across a probe.
 func (e *Emitter) autoAdvertising() []string {
 	rc := e.cfg.Relay
 	if !rc.Auto || len(rc.Remotes) == 0 {
 		return nil
 	}
 	now := time.Now()
-	var stale []string
+	var cold, stale []string
 	e.relay.mu.Lock()
 	for _, b := range rc.Remotes {
 		v, ok := e.relay.verdicts[b]
@@ -210,32 +215,35 @@ func (e *Emitter) autoAdvertising() []string {
 		if ok && v.ok {
 			ttl = relayProbeTTL
 		}
-		if !ok || now.Sub(v.at) >= ttl {
+		switch {
+		case !ok:
+			cold = append(cold, b)
+		case now.Sub(v.at) >= ttl && !e.relay.refreshing[b]:
+			if e.relay.refreshing == nil {
+				e.relay.refreshing = map[string]bool{}
+			}
+			e.relay.refreshing[b] = true // single flight: one refresh per base at a time
 			stale = append(stale, b)
 		}
 	}
 	e.relay.mu.Unlock()
-	if len(stale) > 0 {
-		answers := make([]bool, len(stale))
+	for _, b := range stale {
+		go func(b string) {
+			ok, err := e.relay.probe(context.Background(), b, rc.Token)
+			e.storeVerdict(b, ok && err == nil)
+		}(b)
+	}
+	if len(cold) > 0 {
 		var wg sync.WaitGroup
-		for i, b := range stale {
+		for _, b := range cold {
 			wg.Add(1)
-			go func(i int, b string) {
+			go func(b string) {
 				defer wg.Done()
 				ok, err := e.relay.probe(context.Background(), b, rc.Token)
-				answers[i] = ok && err == nil
-			}(i, b)
+				e.storeVerdict(b, ok && err == nil)
+			}(b)
 		}
 		wg.Wait()
-		at := time.Now()
-		e.relay.mu.Lock()
-		if e.relay.verdicts == nil {
-			e.relay.verdicts = map[string]relayVerdict{}
-		}
-		for i, b := range stale {
-			e.relay.verdicts[b] = relayVerdict{ok: answers[i], at: at}
-		}
-		e.relay.mu.Unlock()
 	}
 	var out []string
 	e.relay.mu.Lock()
@@ -246,6 +254,16 @@ func (e *Emitter) autoAdvertising() []string {
 	}
 	e.relay.mu.Unlock()
 	return out
+}
+
+func (e *Emitter) storeVerdict(base string, ok bool) {
+	e.relay.mu.Lock()
+	if e.relay.verdicts == nil {
+		e.relay.verdicts = map[string]relayVerdict{}
+	}
+	e.relay.verdicts[base] = relayVerdict{ok: ok, at: time.Now()}
+	delete(e.relay.refreshing, base)
+	e.relay.mu.Unlock()
 }
 
 // relayCandidates is the route URLs frames may go to, in order: the explicit bases, then the auto
@@ -321,20 +339,11 @@ func (e *Emitter) demoteRelay(u string) {
 	e.relay.mu.Unlock()
 }
 
-// relayRoute decides where an event's frame goes when this emitter has no local identity: the relay
-// its job's in-flight frames went to (a terminal frame must land on the card those opened, even if
-// the first healthy member changed since), else the first healthy one. A terminal frame forgets the
-// pin. "" = no relay.
+// relayRoute picks the relay for the FIRST frame of a job (plan sends a job that is already pinned to
+// the relay its in-flight frames went to, so a terminal frame lands on the card those opened even if
+// the first healthy member changed since): the first healthy member, which an in-flight frame pins
+// the job to. "" = no relay.
 func (e *Emitter) relayRoute(ev Event) string {
-	e.relay.mu.Lock()
-	pinned, ok := e.relay.pinned[ev.JobID]
-	if ok && isTerminal(ev.State) {
-		delete(e.relay.pinned, ev.JobID)
-	}
-	e.relay.mu.Unlock()
-	if ok {
-		return pinned
-	}
 	u := e.pickRelay()
 	if u != "" && !isTerminal(ev.State) && ev.JobID != "" {
 		e.relay.mu.Lock()
