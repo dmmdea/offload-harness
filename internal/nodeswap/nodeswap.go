@@ -72,6 +72,21 @@ type Plan struct {
 	GPULockPath string
 	GPUStateDir string
 
+	// Cards are the cards this deploy touches, as GPU UUIDs (the lease ids a lease records,
+	// compared case-insensitively; the node-swap command resolves an index or a UUID prefix
+	// against the card table before a plan gets here, and refuses an entry that places on no
+	// card). Empty = the whole node, and every GPU lease holds the standalone wait, exactly as
+	// before. The OPERATOR says which cards, never the tool: a binary swap touches the exe and
+	// the processes it may stop, not a card. With cards named, a lease holds the deploy when it
+	// sits on one of them, names no cards (the whole node), or is held by a process the deploy
+	// would stop (the fleet node, an MCP helper: both take a lease in-process while they render,
+	// the lease records its holder's pid, and stopping that process ends the lease on whatever
+	// card it sits). The rest are left alone and recorded (Outcome.LeasesLeftAlone). If the
+	// processes running the image cannot be listed, nothing is narrowed. Cards with a health URL
+	// is refused (validatePlan): that wait is the job count, which is node-wide, because a
+	// restart of fleet-serve cuts every job the node is running, whichever card it runs on.
+	Cards []string
+
 	// Exactly one of RestartTaskName / RestartCommand should be set for a
 	// fleet node; both empty means a standalone binary-only swap (no restart
 	// at all — the <node-e> case named in the task).
@@ -139,6 +154,11 @@ type Outcome struct {
 	FinalPID         int          `json:"final_pid,omitempty"`
 	FinalImageSHA256 string       `json:"final_image_sha256,omitempty"`
 	HealthVersion    string       `json:"health_version,omitempty"`
+	// Cards are the cards the deploy declared it touches (Plan.Cards); absent for a whole-node
+	// deploy. LeasesLeftAlone names each live GPU lease the standalone wait did NOT wait for
+	// because it sits on other cards, so the record says what the swap ran beside.
+	Cards           []string `json:"cards,omitempty"`
+	LeasesLeftAlone []string `json:"leases_left_alone,omitempty"`
 }
 
 // StepResult is one line of the run's audit trail.
@@ -173,6 +193,24 @@ type HealthInfo struct {
 type GPULeaseInfo struct {
 	Held   bool
 	Reason string
+	// Leases is every live lease with the cards it sits on (empty Devices = the whole node).
+	// A caller that fills only Held and Reason (every Deps written before leases carried
+	// cards) is read as one whole-node lease.
+	Leases []GPULeaseOnCards
+}
+
+// GPULeaseOnCards is one live GPU lease as the standalone wait reads it.
+type GPULeaseOnCards struct {
+	Epoch  uint64
+	Class  string
+	Reason string
+	// PID is the process that holds the lease (the `gpu reserve` wrapper, or the MCP server or
+	// fleet node when it took the lease in-process), 0 when unknown. It is how a deploy tells a
+	// lease held by a process it is about to stop from one on another card it can leave alone.
+	PID int
+	// Devices are the cards the lease sits on, as lease ids (lower-cased GPU UUIDs). Empty is
+	// the whole node.
+	Devices []string
 }
 
 // Deps is the OS/network seam. Every field is a plain function so Run is
@@ -329,10 +367,21 @@ func Run(ctx context.Context, plan Plan, deps Deps, log *Logger) Outcome {
 		}
 		step("wait-idle", true, "queue depth 0")
 	} else if deps.InspectGPULease != nil {
-		if err := waitGPUFree(ctx, plan, deps, log); err != nil {
+		out.Cards = append([]string(nil), plan.Cards...)
+		leftAlone, err := waitGPUFree(ctx, plan, deps, log)
+		out.LeasesLeftAlone = leftAlone
+		if err != nil {
 			return fail("wait-idle", err.Error())
 		}
-		step("wait-idle", true, "standalone node (no --health-url); waited for the GPU lease to clear")
+		touches := "the whole node"
+		if len(plan.Cards) > 0 {
+			touches = fmt.Sprintf("%d card(s)", len(plan.Cards))
+		}
+		detail := fmt.Sprintf("standalone node (no --health-url); waited for the GPU lease to clear (this deploy touches %s)", touches)
+		if len(leftAlone) > 0 {
+			detail += "; left alone: " + strings.Join(leftAlone, "; ")
+		}
+		step("wait-idle", true, detail)
 	} else {
 		step("wait-idle", true, "standalone node (no --health-url); skipped")
 	}
@@ -447,6 +496,9 @@ func validatePlan(p Plan) error {
 	if p.RenderTarball != "" && p.RenderDir == "" {
 		return errors.New("--render-dir is required with --render-tarball")
 	}
+	if len(p.Cards) > 0 && p.HealthURL != "" {
+		return errors.New("--cards narrows the standalone GPU-lease wait and does not apply to a node with a health URL (given with --health-url or read from this node's config fleet_listen): its wait is the node's job count, whichever card the jobs run on. Drop --cards, or drop the health URL if this node runs no fleet-serve")
+	}
 	return nil
 }
 
@@ -489,12 +541,16 @@ func waitIdle(ctx context.Context, plan Plan, deps Deps, log *Logger) error {
 // the operator's own judgment ("gpu status" by hand, before and right before
 // the swap). Same timeout/interval/logging shape as waitIdle on purpose, so
 // the two paths read alike in --log.
-func waitGPUFree(ctx context.Context, plan Plan, deps Deps, log *Logger) error {
+//
+// It waits for the leases that sit on the cards the deploy touches (Plan.Cards; none declared
+// is the whole node, so every lease), and returns a line for each live lease it did NOT wait
+// for, so the outcome records what the swap ran beside (GPU routing P7).
+func waitGPUFree(ctx context.Context, plan Plan, deps Deps, log *Logger) (leftAlone []string, err error) {
 	if deps.InspectGPULease == nil {
 		// No dep wired (an older caller, or a test that only exercises the
 		// fleet-serve path): behave exactly as before this field existed —
 		// nothing to wait on, standalone swap proceeds unchecked.
-		return nil
+		return nil, nil
 	}
 	timeout := plan.WaitIdleTimeout
 	if timeout <= 0 {
@@ -508,24 +564,150 @@ func waitGPUFree(ctx context.Context, plan Plan, deps Deps, log *Logger) error {
 	var lastErr error
 	var lastReason string
 	for {
-		info, err := deps.InspectGPULease(plan.GPULockPath, plan.GPUStateDir)
-		if err == nil && !info.Held {
-			return nil
+		info, ierr := deps.InspectGPULease(plan.GPULockPath, plan.GPUStateDir)
+		var holding []string
+		if ierr == nil {
+			holding, leftAlone = splitLeases(info, plan.Cards, nil)
+			if len(leftAlone) > 0 {
+				// A lease on another card is left alone only when stopping what this deploy stops
+				// cannot end it: a process the deploy would stop (the fleet node, an MCP helper)
+				// takes a lease IN-PROCESS while it renders, and the lease records its holder.
+				if stoppable, serr := stoppableHolders(plan, deps); serr != nil {
+					// The processes running the image cannot be listed, so no lease can be shown
+					// not to be one of them: the whole-node wait, as before --cards existed.
+					log.Printf("wait-gpu-free: cannot list the processes running %s (%v); not narrowing the wait to the deploy's cards", plan.Target, serr)
+					holding, leftAlone = splitLeases(info, nil, nil)
+				} else {
+					holding, leftAlone = splitLeases(info, plan.Cards, stoppable)
+				}
+			}
+			if len(holding) == 0 {
+				return leftAlone, nil
+			}
 		}
-		if err != nil {
-			lastErr = err
+		if ierr != nil {
+			lastErr = ierr
 		} else {
-			lastReason = info.Reason
+			lastReason = strings.Join(holding, "; ")
 		}
 		if deps.Now().After(deadline) {
 			if lastErr != nil {
-				return fmt.Errorf("GPU lease never cleared within %s: last read failed: %w", timeout, lastErr)
+				return leftAlone, fmt.Errorf("GPU lease never cleared within %s: last read failed: %w", timeout, lastErr)
 			}
-			return fmt.Errorf("GPU lease never cleared within %s: held (%s)", timeout, lastReason)
+			return leftAlone, fmt.Errorf("GPU lease never cleared within %s: held (%s)", timeout, lastReason)
 		}
 		log.Printf("wait-gpu-free: still held (%s) err=%v; retrying", lastReason, lastErr)
 		deps.Sleep(interval)
 	}
+}
+
+// splitLeases sorts the live leases into the ones that hold a deploy touching cards (a lease
+// on one of them, or one that names no cards: the whole node) and the ones it leaves alone.
+// cards empty is the whole node, so every lease holds. A caller that reports Held with no
+// per-lease detail is read as one whole-node lease carrying info.Reason. Each line names the
+// lease: its epoch, class, how many cards it sits on and why.
+//
+// stoppable is the set of pids of the processes running the image being replaced that this
+// deploy would stop. A lease one of them holds is ended by the stop whatever cards it sits on,
+// so it holds the deploy even on cards the operator did not name. nil means none are known.
+func splitLeases(info GPULeaseInfo, cards []string, stoppable map[int]bool) (holding, leftAlone []string) {
+	if !info.Held && len(info.Leases) == 0 {
+		return nil, nil
+	}
+	leases := info.Leases
+	if len(leases) == 0 {
+		return []string{info.Reason}, nil
+	}
+	for _, l := range leases {
+		line := fmt.Sprintf("epoch %d %s lease on %s (%s)", l.Epoch, l.Class, leaseCardsPhrase(l.Devices), l.Reason)
+		switch {
+		case len(cards) == 0 || len(l.Devices) == 0 || sharesCard(l.Devices, cards):
+			holding = append(holding, line)
+		case l.PID > 0 && stoppable[l.PID]:
+			holding = append(holding, fmt.Sprintf("%s; held by pid %d, a process this deploy would stop", line, l.PID))
+		default:
+			leftAlone = append(leftAlone, line)
+		}
+	}
+	return holding, leftAlone
+}
+
+// mayStop reports whether this deploy may stop p: stopForSwap stops the node process (the
+// ProcessMatch class) and renameWithRetry stops an MCP helper (the MCPMatch class). A process
+// that matches neither, a `gpu reserve` wrapper for one, is never stopped: it keeps running its
+// old image, so a lease it holds is not ended by the deploy.
+func mayStop(plan Plan, p ProcessInfo) bool {
+	return strings.Contains(p.CommandLine, procMatch(plan)) || strings.Contains(p.CommandLine, mcpMatch(plan))
+}
+
+// stoppableHolders lists the pids of the processes running plan.Target that this deploy may stop.
+// It reads them the way the post-restart verification does (FindRunningByExe when wired, else
+// FindProcessesByExe), and an error means the processes cannot be listed.
+func stoppableHolders(plan Plan, deps Deps) (map[int]bool, error) {
+	find := deps.FindRunningByExe
+	if find == nil {
+		find = deps.FindProcessesByExe
+	}
+	if find == nil {
+		return nil, errors.New("no process finder is wired")
+	}
+	procs, err := find(plan.Target)
+	if err != nil {
+		return nil, err
+	}
+	out := map[int]bool{}
+	for _, p := range procs {
+		if p.PID > 0 && mayStop(plan, p) {
+			out[p.PID] = true
+		}
+	}
+	return out, nil
+}
+
+// leaseHolders maps each live lease's holder pid to its epoch, for the rename retry's guard: a
+// process that holds a lease is not idle, whatever cards the lease sits on. known is false when a
+// lease is held whose holder is not named (a caller that reports only Held), because then no
+// helper can be shown to hold nothing. A nil InspectGPULease (an older caller) reads as no leases.
+func leaseHolders(plan Plan, deps Deps) (byPID map[int]uint64, known bool, err error) {
+	if deps.InspectGPULease == nil {
+		return nil, true, nil
+	}
+	info, err := deps.InspectGPULease(plan.GPULockPath, plan.GPUStateDir)
+	if err != nil {
+		return nil, false, err
+	}
+	byPID = map[int]uint64{}
+	for _, l := range info.Leases {
+		if l.PID > 0 {
+			byPID[l.PID] = l.Epoch
+		}
+	}
+	if info.Held && len(info.Leases) == 0 {
+		return byPID, false, nil
+	}
+	return byPID, true, nil
+}
+
+func leaseCardsPhrase(devices []string) string {
+	switch len(devices) {
+	case 0:
+		return "the whole node"
+	case 1:
+		return "1 card"
+	default:
+		return fmt.Sprintf("%d cards", len(devices))
+	}
+}
+
+func sharesCard(a, b []string) bool {
+	for _, x := range a {
+		for _, y := range b {
+			if strings.EqualFold(strings.TrimSpace(x), strings.TrimSpace(y)) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func procMatch(plan Plan) string {
@@ -590,6 +772,12 @@ func stopForSwap(ctx context.Context, plan Plan, deps Deps, log *Logger) error {
 // match ProcessMatch — a live fleet-serve holder is never touched here, it
 // was already handled by stopForSwap); anything else is reported and left
 // running.
+//
+// "Idle" is checked, not assumed: an MCP helper takes a GPU lease in-process while it
+// renders, so a helper that holds a live lease (the lease records its holder's pid), on any
+// card, is left running, and the rename then fails and rolls back. Stopping it would end the
+// render. If the leases cannot be read, or a lease is held whose holder is not named, no
+// helper can be shown to hold none and none is stopped.
 func renameWithRetry(plan Plan, deps Deps, log *Logger, from, to string) error {
 	err := deps.RenameFile(from, to)
 	if err == nil {
@@ -604,10 +792,23 @@ func renameWithRetry(plan Plan, deps Deps, log *Logger, from, to string) error {
 		return fmt.Errorf("rename failed (%v) and no CIM-visible process holds %s — likely an external handle (antivirus, Explorer preview); not stopping anything blind", err, from)
 	}
 	mm, pm := mcpMatch(plan), procMatch(plan)
+	heldBy, heldKnown, lerr := leaseHolders(plan, deps)
 	var stopped []int
 	var left []string
 	for _, h := range holders {
 		if strings.Contains(h.CommandLine, mm) && !strings.Contains(h.CommandLine, pm) {
+			if lerr != nil {
+				left = append(left, fmt.Sprintf("pid %d (mcp, not stopped: the GPU leases could not be read, so it cannot be shown to hold none: %v)", h.PID, lerr))
+				continue
+			}
+			if epoch, holds := heldBy[h.PID]; holds {
+				left = append(left, fmt.Sprintf("pid %d (mcp, holds the epoch %d GPU lease in-process; not stopped: that would end the render)", h.PID, epoch))
+				continue
+			}
+			if !heldKnown {
+				left = append(left, fmt.Sprintf("pid %d (mcp, not stopped: a GPU lease is held and its holder is not named, so it cannot be shown to hold none)", h.PID))
+				continue
+			}
 			if serr := deps.StopProcess(h.PID); serr == nil {
 				stopped = append(stopped, h.PID)
 			} else {

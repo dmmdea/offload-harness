@@ -301,6 +301,7 @@ func TestGPUHoldCardsAllocatesAndClaimsInTheHolder(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("two holders over two free cards hold two different cards: %v", got)
 	}
+	releaseAll(t, m) // a holder no longer releases at its deadline (plan P9); a release is what ends it
 	for i := 0; i < 2; i++ {
 		if err := <-done; err != nil {
 			t.Fatalf("holder %d: %v", i, err)

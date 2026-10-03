@@ -1,6 +1,6 @@
 // render/comfy-ownership.mjs — durable marker so "did the harness start this ComfyUI?"
 // is decidable (spec §5). Makes the up-managed vs up-external restart branch sound.
-import { writeFileSync, readFileSync, rmSync } from "node:fs";
+import { writeFileSync, readFileSync, rmSync, renameSync } from "node:fs";
 import { join } from "node:path";
 
 const MARKER = ".offload-owned.json";
@@ -62,6 +62,31 @@ export function writeLaunchOwner(dir, { pid, ownerPid = process.pid, args, profi
 }
 export function readLaunchOwner(dir, key = "") {
   try { return JSON.parse(readFileSync(lp(dir, key), "utf8")); } catch { return null; }
+}
+/**
+ * restampLaunchOwner: hand a kept keyed instance to the lease that is reusing it. The marker
+ * records the lease epoch whose HOLDER stops the instance on release (internal/comfyinst matches
+ * the epoch exactly); an instance that outlived its lease (a crashed or fenced-out holder: it is
+ * detached) and is reused by the next lease must carry THAT lease's epoch, or the new holder's
+ * release stops nothing and the instance outlives every later lease. Only the epoch changes: the
+ * launch time, pid, argv and profile are the instance's own and are what prove it is ours.
+ *
+ * It claims only an instance that already belonged to a lease. A marker with no epoch (an instance
+ * kept outside any lease: whoever kept it owns it) is left alone, or the lease would stop an
+ * instance it never started. Written to a temporary file and renamed, so a reader never sees half
+ * a marker. Throws on an I/O failure; the caller says so and carries on.
+ */
+export function restampLaunchOwner(dir, key, leaseEpoch) {
+  const rec = readLaunchOwner(dir, key);
+  if (!key || !rec || rec.key !== key) return { changed: false, why: "no marker" };
+  if (typeof rec.leaseEpoch !== "number") return { changed: false, why: "the marker names no lease" };
+  if (rec.leaseEpoch === leaseEpoch) return { changed: false, why: "already this lease's" };
+  const previous = rec.leaseEpoch;
+  rec.leaseEpoch = leaseEpoch;
+  const path = lp(dir, key), tmp = path + ".tmp";
+  writeFileSync(tmp, JSON.stringify(rec));
+  try { renameSync(tmp, path); } catch (e) { try { rmSync(tmp, { force: true }); } catch {} throw e; }
+  return { changed: true, previous };
 }
 export function clearLaunchOwner(dir, key = "") {
   try { rmSync(lp(dir, key), { force: true }); } catch {}

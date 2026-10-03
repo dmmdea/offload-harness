@@ -86,6 +86,28 @@ a verdict. **That command is not part of this decision's first delivery**, and t
 explicit, human-authorised takeover of a later change, which will refuse a lease with an unknown owner without
 `--force`.
 
+**A window is a term, and a term ends in a renewal or a label, never a release (plan P9).** `--for` is the lease's
+declared window and its first term. `gpu_max_term_min` (default 360) is a renewal point, not a release point: a request
+above it is recorded (`requested_ms`), warned about, accepted whole and never shortened, and renews in terms of the cap
+(24 hours with a progress contract). The record also carries `term_ms` and `max_total_ms` (`gpu_max_total_min`, default
+2880, never less than the window). When a term ends, the holder's OWN tick (the wrapper's 15 s heartbeat, the detached
+holder's renewal; no timer, no watcher, no other process) renews it by one term if its owner is alive and (its progress
+file is advancing or its cards are working), or if its owner cannot be told and its progress is advancing, or if it is
+unattended and its progress is advancing, and the new end stays inside the maximum total. An owner who cannot be told (no
+owner recorded, a session the registry never held, a registry that could not be read) is neither gone nor shown present:
+nobody is objecting, so the job's own advancing progress file vouches for the lease, and a busy card alone does not (it
+proves a process, not that anyone wants the result). Otherwise the tick stamps the lease `expired` with the reason, a
+sentence that is compared at every recheck and so never quotes a value that moves with the clock; the cards it reads have
+three answers (working, idle, could not be read), and an unreadable look is worded as such, never as idle cards. The
+holder says it once per expiry. **Expired is a label, not a state:**
+the heartbeat goes on, the claim stays, the holder's fence still passes, the verdict is the existing `held-overdue`, the
+lease is takeover-eligible, and the reclaim conjunction of ADR 0018 is untouched, so a heartbeating expired lease keeps
+its cards and nothing is reclaimed or killed. It is its own record key, not a third `State`, because `state` is the
+fence's word and every reader built before this change (the Go `checkV2`, `render/gpu-lock.mjs`, each binary already
+running) fences out any state but `active`: an `expired` state would stop a render running under an expired lease. The
+detached holder (`gpu hold`) used to release the card at its `--for` deadline with the job still running (2026-09-07); it
+now ends only when its lease stops being its own, and `--release-at-expiry` restores the old ending.
+
 **ADR 0018 is corrected.** A lease does not expire. It is reclaimed when its holder is gone, or when its heartbeat
 is stale and its declared window has ended; a live holder keeps it, and the harness says so instead of staying
 silent.
@@ -99,8 +121,15 @@ silent.
 - A launcher that names a short-lived process as the owner reads orphaned when it exits. `gpu owner-flags` exists so
   a launcher names the right one; the verdict is information with a grace, not an action.
 - The `--for` default is 45 minutes, so a wrapper that never declared a window reads `held-overdue` after that
-  while it still renews. That is true (the window did end) and is not an accusation; terms and renewal are a later
-  change.
+  while it still heartbeats. That is true (the window did end) and is not an accusation. With terms (P9) its holder
+  also renews it when its owner is alive and the cards are working, and labels it expired, with the reason, when not;
+  an owner the registry never held is unknown, which is not alive, so such a lease is labelled at the end of its
+  window however busy its cards are, unless it carries a progress contract that is advancing: that alone keeps it
+  renewing (a gone owner is rescued by neither a progress file nor a busy card). Until the registry writer is wired into the
+  session hooks that is every attended lease a Claude session takes, so an attended job with no progress file reads
+  `expired` at the end of its first term while its cards are busy; its `held-overdue` verdict was already true from
+  that moment. The alternative, letting a busy card rescue an unknown owner too, would stop a busy job nobody can
+  vouch for from ever being called stale.
 - With several live leases every surface describes the MOST ESCALATED one from its own record: the epoch, the owner,
   the progress contract and the takeover command always belong to the lease the verdict names.
 - A waiter's sentence reads the marker a status surface recorded, so a lone waiter on an orphan nobody has looked
@@ -108,8 +137,8 @@ silent.
   recorded it.
 - A waiter is told a command that does not exist yet. That is deliberate: the sentence is the contract the takeover
   change implements, and until then the message names whoever to ask.
-- Remaining work, in order: terms and renewal (a window becomes a renewal point, never a release point), the process
-  tree record that produces `tree-orphan`, takeover and cooperative yield, `gpu release` routing.
+- Remaining work, in order: the process tree record that produces `tree-orphan`, takeover and cooperative yield (the
+  consumer of the expired label), `gpu release` routing.
 
 ## Alternatives considered
 
@@ -121,11 +150,17 @@ silent.
   read abandoned when the shell exits.
 - **One registry file per session.** Two writers of one record lose an entry in the resume window; one file per
   process needs no lock.
-- **A timer that expires leases.** No unattended schedulers, and it is the behaviour ADR 0018 rules out.
+- **A timer that expires leases.** No unattended schedulers, and it is the behaviour ADR 0018 rules out. The term tick is
+  the holder's own heartbeat, and what it can do at the end of a term is renew or label.
+- **`State = "expired"` on the record.** It is where the plan put the word, and it would have fenced out every reader
+  and render child built before it (see the Decision). A separate key costs one more field and no deployed binary.
+- **Shorten a request above the cap.** A 20 hour film is a legitimate request, and a shortened window is a lease that
+  ends under a job that did not know. The cap is where renewal is judged, not where a request is cut.
 
 ## Related code
 
 - `internal/gpulease/owner.go`: the record fields, the registry, the orphan marker, `Standing`.
+- `internal/gpulease/term.go`, `gpu_terms.go`, `gpu_cmd.go`: the terms, the renewal rule, the expired label, the holders' tick.
 - `internal/gpulease/explain.go`: the waiter's sentence and the installed grace.
 - `internal/gpuactivity/snapshot.go`, `holders.go`, `facts.go`: the verdicts and the legacy activity facts.
 - `gpu_ownership.go`, `gpu_cmd.go`: the flags, `gpu owner-flags`, `gpu status`.

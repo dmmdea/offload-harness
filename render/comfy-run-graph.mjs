@@ -10,7 +10,7 @@ import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { withGpuSlot, freeComfy as _freeComfy } from "./gpu-lock.mjs";
-import { comfyUp as _comfyUp, ensureComfy as _ensureComfy, resolveComfyDir, resolveComfyPy, comfyApi, resolveInstance } from "./comfy-lifecycle.mjs";
+import { comfyUp as _comfyUp, ensureComfy as _ensureComfy, resolveComfyDir, resolveComfyPy, comfyApi, resolveInstance, DEFAULT_COMFY_PORT } from "./comfy-lifecycle.mjs";
 import { parseManifest as _parse, manifestHash as _hash } from "./manifest.mjs";
 import { satisfyManifest, defaultSatisfyDeps } from "./manifest-satisfy.mjs";
 import { preflightGraph } from "./preflight-graph-file.mjs";
@@ -139,14 +139,16 @@ export async function runGraphFlow(args, deps) {
 }
 
 // instanceDeps: run-graph's own ComfyUI start and free, bound to the instance its api and
-// env name. A keyed (per-card) instance is started and freed on ITS endpoint; the default
-// instance is called exactly as before (no api to ensureComfy, none to freeComfy). Throws
-// COMFY-INSTANCE-INVALID on an env that cannot name an instance. `real` is injectable so the
-// wiring is tested by behaviour.
+// env name. A keyed (per-card) instance is started and freed on ITS endpoint, and so is an unkeyed
+// one on ANOTHER endpoint (ensureComfy would otherwise ensure, and the free would drop the models
+// of, the default 8188: plan section 7, finding 7); the default instance is called exactly as
+// before (no api to ensureComfy, none to freeComfy). Throws COMFY-INSTANCE-INVALID on an env that
+// cannot name an instance. `real` is injectable so the wiring is tested by behaviour.
 export function instanceDeps(api, env = process.env, real = { ensureComfy: _ensureComfy, freeComfy: _freeComfy }) {
   const instance = resolveInstance({ api, env });
-  const startOpts = instance.key ? { api } : {};
-  const freeArgs = instance.key ? [api] : [];
+  const own = Boolean(instance.key) || instance.port !== DEFAULT_COMFY_PORT;
+  const startOpts = own ? { api } : {};
+  const freeArgs = own ? [api] : [];
   return {
     ensureComfy: (o) => real.ensureComfy({ ...o, ...startOpts }),
     freeComfy: () => real.freeComfy(...freeArgs),

@@ -106,6 +106,13 @@ type NodeView struct {
 	// last without making it unroutable for longer than it was before. False on
 	// a node one release behind.
 	LeaseOverdue bool
+	// Leases is every live lease the node published (health leases[], GPU routing P7), each
+	// with the cards it sits on. nil means the node published none, which is an older node or
+	// no lease at all: the singular fields above are then the whole reading, exactly as before.
+	// They are the worst across the leases when this is set, so a reader that ignores Leases is
+	// never told less than is true. Read it through leasesHolding, never directly: whether a
+	// lease matters depends on the contract and on the node's seats.
+	Leases []LeaseView
 	// Devices is the node's per-card truth (health gpu_devices[], the nvidia-smi
 	// per-device rows): uuid, VRAM total/free, utilisation, display_active. nil
 	// when the node publishes none (an older node, or a source that cannot
@@ -188,6 +195,29 @@ type NodeView struct {
 	// genuine "no wait right now" answer and must read differently from
 	// "this node does not publish the estimate at all".
 	QueueWaitEstimateSec *float64
+}
+
+// LeaseView is one live lease of a node, as its health leases[] publishes it.
+type LeaseView struct {
+	Epoch uint64
+	Class string
+	// Devices are the cards the lease sits on, as lower-cased GPU UUIDs. Empty is the whole
+	// node, and every reader must take it as every card.
+	Devices []string
+	// Scope says where Devices came from: declared, inferred or whole-node.
+	Scope string
+	// Until is the declared term end; the zero Time when the lease declares none.
+	Until        time.Time
+	RemainingSec int
+	Busy         bool
+	Overdue      bool
+	Exclusive    bool
+	Draining     bool
+	Orphaned     bool
+	Stalled      bool
+	// Verdict is the node's one word for what the lease is doing (held, held-stalled,
+	// held-orphaned, held-overdue).
+	Verdict string
 }
 
 // VisionTask is the fleet task_type of the vision lane (0.116.0): a node
@@ -349,6 +379,23 @@ type healthWire struct {
 		Busy         bool `json:"busy"`
 		RemainingSec int  `json:"remaining_sec"`
 	} `json:"lease"`
+	// Additive (GPU routing P7): every live lease with its cards. Absent on an older node and
+	// on a node with no lease, decoding to nil = read the singular block above.
+	Leases []struct {
+		Epoch        uint64   `json:"epoch"`
+		Class        string   `json:"class"`
+		Devices      []string `json:"devices"`
+		Scope        string   `json:"scope"`
+		Until        string   `json:"until"`
+		RemainingSec int      `json:"remaining_sec"`
+		Busy         bool     `json:"busy"`
+		Overdue      bool     `json:"overdue"`
+		Exclusive    bool     `json:"exclusive"`
+		Draining     bool     `json:"draining"`
+		Orphaned     bool     `json:"orphaned"`
+		Stalled      bool     `json:"stalled"`
+		Verdict      string   `json:"verdict"`
+	} `json:"leases"`
 	// Additive (the node's per-device breakdown, long published for the fleet
 	// overview, decoded here by GPU routing P1). Absent on a node whose
 	// snapshot source cannot enumerate devices, decoding to nil = unknown.
@@ -446,6 +493,7 @@ func FetchNodeView(ctx context.Context, base, token string) (NodeView, error) {
 		// exclusion for a non-text one, which an abandoned lease must not become.
 		LeaseBusy:    w.Lease != nil && w.Lease.Held && w.Lease.Busy && !w.Lease.Overdue,
 		LeaseOverdue: w.Lease != nil && w.Lease.Held && w.Lease.Overdue,
+		Leases:       leaseViews(w),
 		Devices:      w.GpuDevices,
 		Tasks:        w.SupportedTaskTypes,
 		VisionModel:  w.VisionModel,
@@ -469,6 +517,31 @@ func FetchNodeView(ctx context.Context, base, token string) (NodeView, error) {
 		v.IdleSlot = w.Saturation.IdleSlot
 	}
 	return v, nil
+}
+
+// leaseViews maps the wire leases[] onto LeaseViews; nil when the node published none.
+func leaseViews(w healthWire) []LeaseView {
+	if len(w.Leases) == 0 {
+		return nil
+	}
+	out := make([]LeaseView, 0, len(w.Leases))
+	for _, l := range w.Leases {
+		v := LeaseView{
+			Epoch: l.Epoch, Class: strings.ToLower(l.Class), Scope: l.Scope, RemainingSec: l.RemainingSec,
+			Busy: l.Busy, Overdue: l.Overdue, Exclusive: l.Exclusive, Draining: l.Draining,
+			Orphaned: l.Orphaned, Stalled: l.Stalled, Verdict: l.Verdict,
+		}
+		for _, d := range l.Devices {
+			if d = strings.ToLower(strings.TrimSpace(d)); d != "" {
+				v.Devices = append(v.Devices, d)
+			}
+		}
+		if t, err := time.Parse(time.RFC3339, l.Until); err == nil {
+			v.Until = t
+		}
+		out = append(out, v)
+	}
+	return out
 }
 
 // probeUnreachable reports whether an error from FetchNodeView is a TRANSPORT

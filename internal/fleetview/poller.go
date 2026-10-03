@@ -210,6 +210,12 @@ func (p *Poller) fold(base string, h map[string]any, herr error, j map[string]an
 	n.VramTotal = num(h, "vram_total_gb")
 	n.VramFree = num(h, "vram_free_gb")
 	n.Devices = maps(h, "gpu_devices")
+	// Per-card tiles (GPU routing P7): each card joined with the lease that holds it. The one
+	// lease block is only consulted when the node publishes no leases[] (a node one release
+	// behind), and is then read as the whole node.
+	n.Leases = maps(h, "leases")
+	legacyLease, _ := h["lease"].(map[string]any)
+	n.Cards = CardTiles(n.Devices, n.Leases, legacyLease)
 	n.GpuUtil = int(num(h, "gpu_util_pct"))
 	n.GpuUtilKnown = boolv(h, "gpu_util_known")
 	n.HostCPU = int(num(h, "host_cpu_pct"))
@@ -333,6 +339,19 @@ func copyNode(n *Node) Node {
 	cp := *n
 	if n.Devices != nil {
 		cp.Devices = cloneMaps(n.Devices)
+	}
+	if n.Leases != nil {
+		cp.Leases = cloneMaps(n.Leases)
+	}
+	if n.Cards != nil {
+		cp.Cards = make([]CardTile, len(n.Cards))
+		for i, c := range n.Cards {
+			cp.Cards[i] = c
+			if c.Holder != nil {
+				h := *c.Holder
+				cp.Cards[i].Holder = &h
+			}
+		}
 	}
 	if n.ServedModels != nil {
 		cp.ServedModels = append([]string(nil), n.ServedModels...)

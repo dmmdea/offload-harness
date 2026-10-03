@@ -35,6 +35,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/fleetqueue"
 	"github.com/dmmdea/offload-harness/internal/gpuactivity"
 	"github.com/dmmdea/offload-harness/internal/gpulease"
+	"github.com/dmmdea/offload-harness/internal/gpuprobe"
 	"github.com/dmmdea/offload-harness/internal/hostsample"
 	"github.com/dmmdea/offload-harness/internal/netguard"
 	"github.com/dmmdea/offload-harness/internal/placement"
@@ -1188,6 +1189,12 @@ type healthPayload struct {
 	// a re-placeable 503 — the node stays up, keeps answering health, finishes
 	// what it holds, and is never "dropped" from the fleet for a measurement.
 	Lease *LeaseHealth `json:"lease,omitempty"`
+	// Leases is every live lease, one entry each (plan P7; see leases.go). With card-scoped
+	// leases several are live at once, each on its own cards, and the singular block above
+	// describes only the worst of them. A delegator that reads this fences the node only for
+	// the contracts whose seats sit on those cards; absent when no lease is held, and on a
+	// node one release behind, which a reader takes as "read the singular block".
+	Leases []LeaseEntry `json:"leases,omitempty"`
 	// LeaseExclusive / LeaseDraining are the two lease facts a placement
 	// actually needs and `busy` never carried: whether the reservation FENCES
 	// the cards (no model may be loaded onto them for its duration) and whether
@@ -1562,27 +1569,28 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	// GPU lease: a stat + a small file, the same read every acquirer does.
-	leasedText := false
-	leaseBusy := false
+	//
+	// leaseClosed is "the leases that refuse new work leave this node nothing to run on". A
+	// lease refuses by being a text reservation, or by being long enough to be called busy
+	// (any class, judged by REMAINING time, 0.113.27: a long media reservation takes its
+	// cards just as completely as a text one). An OVERDUE lease publishes busy so a delegator
+	// ranks the node last, but it is not a refusal: dispatch does not turn work away for a
+	// media lease, so the node keeps advertising the room it has. Folding the overdue busy in
+	// here made saturation.high true and idle_slot false, and hasRoom() then kept the capacity
+	// wait from ever asking the one remote that would have taken the work.
+	//
+	// Per card (plan P7): a lease on one card of three leaves the other two to take work, so
+	// the node is closed only when the refusing leases together hold every card it has. A
+	// whole-node lease, and a card-scoped one on a node that cannot enumerate its cards, close
+	// it exactly as the one block always did.
+	leaseClosed := false
 	if s.opts.Lease != nil {
 		if info := s.opts.Lease(); info.Held {
-			payload.Lease = leaseHealthOf(info, time.Now(), s.opts.Cfg.FleetBusyLeaseSec)
-			if s.opts.LeaseStanding != nil {
-				st := s.opts.LeaseStanding(info)
-				payload.Lease.LeaseStanding = LeaseStanding{Orphaned: st.Orphaned, Stalled: st.Stalled}
-			}
-			leasedText = info.Class == gpulease.ClassText
-			// Any class, judged by REMAINING time (0.113.27): a long media
-			// reservation takes the card just as completely as a text one.
-			// An OVERDUE lease publishes busy so a delegator ranks the node last,
-			// but it is not a refusal: dispatch does not turn work away for a
-			// media lease, so the node keeps advertising the room it has. Folding
-			// the overdue busy in here made saturation.high true and idle_slot
-			// false, and hasRoom() then kept the capacity wait from ever asking
-			// the one remote that would have taken the work.
-			leaseBusy = payload.Lease.Busy && !payload.Lease.Overdue
+			rd := readLeases(info, time.Now(), s.opts.Cfg.FleetBusyLeaseSec, s.opts.LeaseStanding)
+			payload.Lease, payload.Leases = rd.block, rd.entries
 			// What the reservation is DOING, beside what it declared.
-			payload.LeaseExclusive, payload.LeaseDraining = info.Exclusive, info.Draining
+			payload.LeaseExclusive, payload.LeaseDraining = rd.exclusive, rd.draining
+			leaseClosed = rd.closesNode(snap.Devices)
 		}
 	}
 	// Saturation (0.113.18): derived from the counters above and the two
@@ -1593,7 +1601,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	// me would start immediately", which is false while we refuse. Before
 	// 0.113.27 the two were computed independently, so a draining or leased
 	// node still advertised an idle slot and sheddable work was dealt to it.
-	refusing := s.jobs.Draining() || leasedText || leaseBusy
+	refusing := s.jobs.Draining() || leaseClosed
 	sat := saturationOf(queued, running, s.jobs.RunningCapped(), admitting, payload.MaxConcurrentJobs, payload.MaxQueueDepth,
 		refusing, s.jobs.IdleSlot() && !refusing)
 	payload.Saturation = &sat
@@ -1735,6 +1743,11 @@ type LeaseHealth struct {
 	// delegator uses to rank the node last without excluding it. A node one
 	// release behind omits it, which decodes to false.
 	Overdue bool `json:"overdue,omitempty"`
+	// Expired is additive (plan P9): the holder's own tick labelled the lease because its
+	// term ended and was not renewed (its owner gone, or nothing running under it). It is
+	// still HELD, and Busy and Overdue still say so; the key is the fact that nobody vouches
+	// for it. A node one release behind omits it, which decodes to false.
+	Expired bool `json:"expired,omitempty"`
 }
 
 // LeaseStanding is what a held lease is DOING, published beside the fact that it is held
@@ -1777,6 +1790,13 @@ func busyLeaseThreshold(cfgSec int) (time.Duration, bool) {
 
 func leaseHealthOf(info gpulease.Info, now time.Time, cfgSec int) *LeaseHealth {
 	h := &LeaseHealth{Held: true, Class: string(info.Class), PID: info.PID, Reason: info.Reason, Until: info.ExpiresAt.UTC().Format(time.RFC3339)}
+	// Expired is read off EVERY live lease, not only the lowest epoch's: an expired sibling must
+	// not hide behind a healthy lower epoch (card-scoped leases hold several at once).
+	for _, l := range info.Each() {
+		if l.Expired {
+			h.Expired = true
+		}
+	}
 	// No declared end: nothing to be overdue against. The Unix-epoch test covers a
 	// caller that builds an Info from a raw record (time.UnixMilli(0) is 1970, and
 	// IsZero() is false for it); gpulease's own reader leaves the zero Time.
@@ -1806,10 +1826,6 @@ func leaseHealthOf(info gpulease.Info, now time.Time, cfgSec int) *LeaseHealth {
 	return h
 }
 
-// textLeased reports whether this node's own card is reserved by a TEXT-class
-// lease. Media leases are renders arbitrated on the node itself and do not
-// refuse dispatch. A lease that cannot be read is NOT held (fail toward
-// serving, the same direction gpuLeaseHeld and LocalBusy take).
 // SeatBudgetHealth is the per-step / final completion budget and thinking
 // policy the node's agent loop runs at (config agent_max_tokens, the final
 // answer at agent.FinalBudgetFor, config agent_thinking or "auto").
@@ -1874,14 +1890,6 @@ func (s *Server) seatRate() *SeatRateHealth {
 	return s.seatRateCache
 }
 
-func (s *Server) textLeased() (gpulease.Info, bool) {
-	if s.opts.Lease == nil {
-		return gpulease.Info{}, false
-	}
-	info := s.opts.Lease()
-	return info, info.Held && info.Class == gpulease.ClassText
-}
-
 // concurrencyCapped reports whether a job of this task type counts against
 // fleet_max_concurrent_jobs.
 //
@@ -1893,20 +1901,23 @@ func (s *Server) textLeased() (gpulease.Info, bool) {
 //
 //   - image-gen / video-gen / audio-gen / run-graph and every configured
 //     pipeline route go through Pipeline.acquireMediaLease, which takes the
-//     in-process mediaSlot (capacity ONE) and then the machine-wide gpulease
-//     ClassMedia. They are already serialized far harder than this cap would
-//     serialize them.
+//     in-process media slots (one per card; a job that holds the whole node
+//     holds them all) and then the machine-wide gpulease ClassMedia. They are
+//     already serialized as hard as the cards they use, far harder than this cap
+//     would serialize them.
 //   - stt runs against whisper-server, a different process with a different
 //     endpoint. It never touches llama-swap.
 //
 // Capping those would be both redundant and actively harmful. A media job
-// blocked inside takeMediaSlot holds a fleet execution slot while doing NO
-// work; with mediaSlot at capacity one, four queued media dispatches would
-// occupy all four slots while three of them sit parked — starving the agent
-// lane, which is the lane the cap was written to protect. It would also destroy
-// media's own designed back-pressure: a media job that cannot get the card
-// waits gpu_wait_ms and defers `gpu_busy`, a bounded and well-tested signal a
-// job held in `accepted` never reaches.
+// blocked inside the media slots holds a fleet execution slot while doing NO
+// work; with every card taken, four queued media dispatches would occupy all
+// four slots while three of them sit parked — starving the agent lane, which is
+// the lane the cap was written to protect. It would also destroy media's own
+// designed back-pressure: a media job that cannot get a card waits gpu_wait_ms
+// and then defers `gpu_busy` (a dispatched job is not a door that can resume a
+// place in line, so it leaves none: core.Request.Resumable is false here and the
+// delegator re-places the job instead), a bounded and well-tested signal a job
+// held in `accepted` never reaches.
 //
 // DEFAULT IS CAPPED, deliberately. An unrecognized (future) task type is
 // assumed to contend for the text endpoint, because of the two ways to be
@@ -1940,7 +1951,7 @@ func (s *Server) concurrencyCapped(taskType string) bool {
 		return false
 	}
 	// Config-driven pipeline routes run through runPipelineJob, which takes the
-	// same mediaSlot. Their names are operator-chosen, so they cannot be listed
+	// same media slots (the whole node). Their names are operator-chosen, so they cannot be listed
 	// above and must be recognized from config.
 	if _, ok := s.opts.Cfg.Pipelines[taskType]; ok {
 		return false
@@ -2197,7 +2208,12 @@ func (s *Server) admit(w http.ResponseWriter, r *http.Request, env dispatchEnvel
 	// the expiry, so a delegator (any version — 503 has been re-placeable since
 	// 0.101.0) puts the subtask on another node instead of loading a reserved
 	// card. Known jobs re-acked above and result polls are never refused.
-	if info, held := s.textLeased(); held {
+	//
+	// Per card (plan P7): an agent contract is refused only when every seat it could run on
+	// sits on a card a text reservation holds (textLeaseAgainst), the same reading the
+	// delegator makes of this node's rows, so a reservation on card 2 does not turn away work
+	// whose seat is on card 0 and the two sides cannot disagree about where work may land.
+	if info, held := s.textLeaseAgainst(env.TaskType, env.Payload); held {
 		writeError(w, http.StatusServiceUnavailable,
 			fmt.Sprintf("node leased (gpu lease class=%s pid=%d reason=%q until %s): the card is reserved for a measurement; place elsewhere",
 				info.Class, info.PID, info.Reason, info.ExpiresAt.UTC().Format(time.RFC3339)))
@@ -2780,6 +2796,11 @@ func (s *Server) layerRows(snap Snapshot) []placement.LayerRow {
 	}
 	pres := placement.ProbePresence(cfg.PresenceMode(), cfg.OperatorIdle())
 	rows := placement.RowsFromConfig(cfg, placement.LiveFromReadings(snap.Devices, host, &pres))
+	// Each seat's pin as the lease ids of its cards, resolved HERE against this box's own card
+	// table (plan P7): a delegator comparing a lease's cards with a seat's cards must not guess
+	// which index space a bare pin is in. No card table, no ids: every card.
+	cards, _ := gpuprobe.BuildCards(snap.Devices, "")
+	rows = placement.WithDeviceIDs(rows, cards)
 	return placement.MarkServed(rows, s.servedModels())
 }
 

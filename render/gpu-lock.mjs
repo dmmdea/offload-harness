@@ -22,7 +22,7 @@
 // No npm dependencies.
 import { writeFileSync, readFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
-import { ensureComfy as defaultEnsureComfy, tailComfyLog, comfyLogPath, COMFY_LOG_TAIL_LINES, resolveInstance } from "./comfy-lifecycle.mjs";
+import { ensureComfy as defaultEnsureComfy, tailComfyLog, comfyLogPath, COMFY_LOG_TAIL_LINES, resolveInstance, DEFAULT_COMFY_PORT } from "./comfy-lifecycle.mjs";
 
 // LEASE_FORMAT_SIGNATURE is what `local-offload gpu doctor` looks for in a copy of this
 // file (internal/gpulease/audit.go, FormatSignature, pinned by a Go test): a reader that
@@ -384,9 +384,11 @@ export async function freeComfy(api = process.env.COMFY_API || "http://127.0.0.1
 // `api` is the ComfyUI endpoint the runner talks to. Together with COMFY_INSTANCE /
 // COMFY_CARD_UUID it names the ComfyUI instance (comfy-lifecycle.mjs resolveInstance):
 // a keyed per-card instance is launched, freed and log-tailed on ITS endpoint and files. An
-// UNKEYED instance is launched exactly as before (ensureComfy gets no api: an unkeyed launch has
-// no --port, so it can only start the default endpoint); only its post-run /free follows `api`,
-// which is the same endpoint as before unless --api named another one.
+// UNKEYED instance on the default endpoint is launched exactly as before (ensureComfy gets no api).
+// An UNKEYED instance whose `api` names ANOTHER endpoint is handed that endpoint: an unkeyed launch
+// has no --port, so it can only start 8188, and starting 8188 for a run that submits elsewhere put a
+// stray instance inside a card lease (plan section 7, finding 7). ensureComfy reuses the endpoint
+// if it answers and otherwise fails with COMFY-ENDPOINT-DOWN, never launching.
 // Deps (freeLlamaSwap/ensureComfy/freeComfy/checkLease/claimUnload/tailLog) are
 // injectable for tests only.
 export async function withGpuSlot(opts, fn) {
@@ -450,9 +452,13 @@ export async function withGpuSlot(opts, fn) {
     }
     if (comfyManaged) {
       comfyChild = await ensureComfy({
-        ...(instanceKey ? { api: instance.api } : {}),
+        ...(instanceKey || instance.port !== DEFAULT_COMFY_PORT ? { api: instance.api } : {}),
         ...(reserveVram != null ? { reserveVram } : {}),
         ...(warm ? { warm: true } : {}),
+        // A kept instance is spawned detached and unref'd (comfy-lifecycle.mjs): it must not hold
+        // this runner's event loop, and its lease's holder stops it. Absent unless asked, so the
+        // call is unchanged for a runner that tears its own ComfyUI down.
+        ...(keepComfy ? { keep: true } : {}),
       });
     }
     try {

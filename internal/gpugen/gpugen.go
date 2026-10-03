@@ -196,7 +196,7 @@ func Generate(ctx context.Context, spec Spec) (string, error) {
 	// Belt-and-suspenders VRAM free (invariant 3, layer 2). Skipped for runners that
 	// never launch ComfyUI (TTS) — there a /free is pointless, though harmless.
 	if !spec.SkipFreeComfy {
-		defer freeComfyVRAM(comfyAPI(spec.ComfyAPI))
+		defer freeComfyVRAM(comfyAPIOf(spec))
 	}
 
 	// tw bounds BOTH capture sites below to tailWriterCap (Fix: SP3 follow-up
@@ -344,6 +344,23 @@ func instanceEnv(spec Spec) []string {
 		env = append(env, "COMFY_CARD_UUID="+spec.CardUUID, "COMFY_CUDA_DEVICE=")
 	}
 	return env
+}
+
+// comfyAPIOf is the endpoint the post-run /free goes to: the one the Spec names, else the last
+// non-empty COMFY_API in the env the runner is given (the routes that hand a per-card instance
+// to their runner through Env, which is most of them, never set Spec.ComfyAPI; the runner talks
+// to that instance, so that is the one to free), else the process's own.
+func comfyAPIOf(spec Spec) string {
+	if spec.ComfyAPI != "" {
+		return spec.ComfyAPI
+	}
+	api := ""
+	for _, kv := range spec.Env {
+		if v, ok := strings.CutPrefix(kv, "COMFY_API="); ok && v != "" {
+			api = v
+		}
+	}
+	return comfyAPI(api)
 }
 
 // comfyAPI resolves the ComfyUI endpoint: explicit override, else COMFY_API, else the
