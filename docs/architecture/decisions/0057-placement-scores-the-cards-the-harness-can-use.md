@@ -131,5 +131,17 @@ on roster order:
   queue count and the utilisation figure above, which stays as the last tie-break. Per node, never per
   pair, for the same reason. A lease past its declared window is ranked last (`lease.overdue`), not
   excluded. See systems/fleet-node.md, "Overdue" and "Free cards".
+- Amendment (GPU routing P7, 2026-10-03): the same reading is now taken of which cards a LEASE holds. With
+  card-scoped leases several are live at once and the one `lease` block described only the lowest epoch, so a
+  render on one card of three made the whole node a non-target. A node publishes `leases[]` (each lease with
+  its cards, its term and its verdict) and each seat's cards as lease ids (`device_ids`); the delegator fences
+  a node only for a contract whose seats ALL sit on a card a fencing lease holds (the placement table falls
+  back to a seat whose cards are free), and ranks it by the leases that stand between that contract and its
+  seats, so an overdue lease on another card says nothing. The node's own closed reading and its text-
+  reservation refusal follow the same cards, or the delegator would route work its target then turns away.
+  The singular block stays and is the worst across the live leases, so a delegator one release behind is never
+  told less than is true; a node that publishes no `leases[]` is read as the whole node, as before. Every doubt
+  (no layer rows, a long-context contract, a seat whose cards cannot be placed, a lane that names no contract)
+  reads as every card. See systems/fleet-node.md, "Per-card lease truth".
 - Numbering note: this record's predecessor, the llama.cpp prompt-cache tiers, was briefly filed as
   a second ADR 0055 while ADR 0055 (liveness walls) already existed on main; it is now ADR 0056.

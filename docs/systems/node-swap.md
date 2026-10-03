@@ -79,6 +79,21 @@ restart, verify, automatic rollback on any failure) and, as an option, its rende
   polled with the SAME timeout/interval shape as the fleet-serve idle-wait, refusing to
   proceed while the lease is held. `Deps.InspectGPULease == nil` (an older caller) skips
   this exactly as before it existed — never a nil-function panic.
+- **What a deploy touches, and `--cards` (GPU routing P7)** — read from `deps.go` and
+  `nodeswap.go`, a swap touches (a) the binary file: a rename pair, no card; (b) the processes
+  running that binary which it may stop: the fleet-serve process on a node with a restart
+  configured (a restart cuts every job the node is running on whichever card it runs, and
+  health publishes the job count as one node-wide number, so that wait stays node-wide), and
+  the idle MCP helpers (a helper holds a lease in-process while it renders, and stopping it
+  would end that render); (c) nothing else: a lease held by a `gpu reserve` wrapper keeps
+  running its old image. The standalone wait was ANY lease, so a long render on one card of
+  three failed a deploy that touched no card. The tool still waits for every lease by
+  default, because it cannot tell whether a lease's wrapper is the very image being replaced;
+  the OPERATOR narrows it with `--cards <uuid,uuid>` (`Plan.Cards`): only a lease on one of
+  those cards, or a lease that names no cards (the whole node), holds the swap. Each live
+  lease it did not wait for is recorded in `Outcome.LeasesLeftAlone`, the declared cards in
+  `Outcome.Cards`, and a refusal names the lease that held the deploy (epoch, class, how
+  many cards, why). `--cards` has no effect on a node with a health URL.
 - **Auto-resolved `--health-url`** — when the caller leaves `--health-url` empty,
   `runNodeSwap` reads THIS node's own config `fleet_listen` (`--config`, same resolution
   precedence as every other command) and fills it in automatically — but ONLY when that
@@ -290,7 +305,8 @@ no real binary or fleet node needed.
 ## Source map
 
 - `internal/nodeswap/nodeswap.go` — the sequence, `Plan`/`Outcome`/`Deps`, rollback, the
-  standalone GPU-lease wait (`waitGPUFree`), `backupPathFor`'s doubled-`bak-` guard.
+  standalone GPU-lease wait (`waitGPUFree`, `splitLeases`: which leases hold a deploy that
+  names cards), `backupPathFor`'s doubled-`bak-` guard.
 - `internal/nodeswap/deps.go` — cross-platform real implementations (hash, health, rename,
   tar.gz extraction, `InspectGPULease` via `internal/gpulease`).
 - `internal/nodeswap/deps_windows.go` / `deps_other.go` — the CIM process-enumeration /

@@ -463,8 +463,57 @@ published no per-card truth sits between them, so an older node is neither credi
 as it deals subtasks (a node with two free cards is preferred for its first two, not its third) and `route=spread` uses the tier as the first
 key inside a deal cycle, so the one-subtask-per-seat-per-cycle invariant is untouched. This is ranking, never a gate: `max_concurrent_jobs`
 stays the hard ceiling, a node with no free card still takes work (it queues on the node), and `offload_status` shows `free_cards` and
-`cards_total` per node. What it does not do yet: the node's own admission and the local seat's gate still use the lease's whole-node scope; per-card leases
-are later phases of the GPU routing plan.
+`cards_total` per node. Which cards a LEASE holds, and what that means for a contract, is the next paragraph.
+
+**Per-card lease truth (GPU routing P7).** With card-scoped leases several leases are live at once, each on its own cards, and the one `lease`
+block described only the lowest epoch. A render on one card of three therefore read as the whole node spoken for, and a delegator routed nothing
+to the other two. `/fleet/health` now carries `leases[]` beside the block, one entry per live lease, omitted when none is held:
+`{"epoch","class","devices":[lower-cased GPU UUIDs],"scope":"declared|inferred|whole-node","until","remaining_sec","busy","overdue","exclusive","draining","orphaned","stalled","verdict"}`.
+`devices` ABSENT means the whole node and every reader must take it as every card; `scope` says where the cards came from (an inferred scope is the
+evidence rule's reading of a lease an older binary wrote, off unless `gpu_legacy_scope_inference` is on); `verdict` is the most escalated of
+`held-stalled`, `held-orphaned`, `held-overdue`, else `held`, where `held` is the absence of news and never a claim that the holder is working. Each
+seat row of `layers[]` gains `device_ids`, the lease ids of the cards its pin names, resolved on the node against its own card table, so a reader
+never guesses whether a bare `"0"` is a CUDA index or a PCI one; a pin the node cannot place publishes none, which reads as every card.
+
+*Old readers.* The singular `lease` block, `lease_exclusive` and `lease_draining` stay, and are now the WORST across the live leases (class `text` if
+any lease is, `busy`, `overdue`, `orphaned`, `stalled` if any is, the longest `remaining_sec` and `until`, exclusive/draining if any is); `pid` and
+`reason` stay the lowest epoch's. A delegator one release behind reads only those, so it is never told less than is true: with a short media render
+on one card and an exclusive reservation on another it sees a text, busy, exclusive hold. With ONE lease the block is byte for byte what it was.
+A new delegator reading a node that publishes no `leases[]` (an older node) takes that block as the whole node, which is today's rule.
+
+*The node's own gates follow the cards.* `saturation.high` and `idle_slot` close the node only when the leases that refuse new work (a text
+reservation, or a lease long enough to be `busy` and not overdue) are whole-node or together hold every card the node publishes; a node that
+cannot enumerate its cards cannot show one is left and stays closed. `/fleet/dispatch` refuses a TEXT reservation per contract: an agent
+contract is turned away only when every seat it could run on (`placement.AgentChain`: the home seat, then each layer's agent seat in turn)
+sits on a card some text reservation holds, because the placement table falls back to a seat whose cards are free; every text lease counts, not
+only the lowest epoch. Every other task type keeps the whole-node refusal (its cards are chosen later: unknown is every card), and a media lease
+still never refuses a dispatch, only fences at the seat's own pre-check.
+
+*The delegator's fence.* `NodeView.Leases` carries the entries. `leaseFenceReason` fences a node only for a contract whose seats ALL sit on a card a
+fencing lease (exclusive, draining, or busy and not overdue and not a plain text reservation) holds, reading the seats off the node's own layer rows
+(`placement.RemoteSeatCards`, the same chain rule the local box applies to itself); `leaseDemotionRank` ranks by the leases that stand between THIS
+contract and its seats, so an overdue lease on a card the contract does not need says nothing, and one on its cards ranks the node last and never
+excludes it. A node with no layer rows, a long-context contract, a layer the node does not declare and a seat whose cards cannot be placed all read as
+every card. The vision and text lanes carry no contract, so they keep the whole-node reading. The reason names the lease and how many cards it holds
+(`busy: media lease 7 on 1 card`).
+
+*The wasted local leg.* A lease this process does not hold that fences every local seat of a contract's chain turns the local run away at the
+seat's own pre-check after the delegator has spent an attempt, a ledger row and an intent record on it. The delegator now reads the same verdict first
+(`ForeignFence` over the chain, `fencedLocal`) at every site that used to fall back to the local seat: route=auto when nothing else could take it, the
+auto deal, the spread rotation, the re-placement's last resort and the capacity wait's local tick. It waits in line instead, and the fence clearing runs the
+contract locally. It applies only when there is another node to wait for (a delegator with no remotes has no leg to save, and the pre-check is the fast
+honest answer) and never to `route=local`; the holder's own child is exempt, as at the pre-check.
+
+*A wait that ends in a kept place.* When the capacity wait ends with nothing having taken the work, the defer (class `capacity`, unchanged) names the places
+the subtask stood in: `results[].place_keeping` lists `{node, on, detail, eta_sec}` for each node it stood behind (`lease` on its cards, `queue` for its own
+refusal or no room, `backlog`, `cooldown`) and `retry_after_sec` is the soonest known end, with the same facts in the reason. The durable token that resumes a
+place across calls belongs to media admission (plan P13); this is the delegator's half, the facts a re-call is placed by.
+
+*Deploy and reclaim.* A binary swap touches the executable and the processes it may stop, not a card (the table in [node-swap.md](node-swap.md)), so a standalone deploy's
+lease wait stays every lease unless the operator names the cards it touches (`node-swap --cards`); the fleet-serve wait is a job count, which is one node-wide number.
+`fleet_reclaim`'s idle baseline stays whole-node on purpose: it records the headline card's used VRAM when nothing of the harness is loaded, its llama-swap half already
+reads every card, and the error it exists to avoid is recording a baseline over a loaded model, which narrowing the lease half could only make more likely.
+`fleet-ui` and `top` show one tile per card with its holder ([fleet-overview.md](fleet-overview.md)).
 
 **What the lease is doing (plan P8, ADR 0070).** The lease block also carries `orphaned` and `stalled`, each absent unless
 true and the worst across the node's live leases: an attended lease whose owner has been gone past `gpu_orphan_grace_min`,
@@ -1484,6 +1533,10 @@ wait after ONE transient error, which is S-08 again, intermittently.
 
 - [`internal/fleetnode/server.go`](../../internal/fleetnode/server.go) — routes, payloads, duplicate
   semantics, agent-lane auth gates, agent health advertisement
+- [`internal/fleetnode/leases.go`](../../internal/fleetnode/leases.go) — `leases[]`, the folded singular block, the
+  node-level closed reading and the per-contract text-reservation gate (GPU routing P7)
+- [`internal/placement/leasecontract.go`](../../internal/placement/leasecontract.go) — which leases stand between a
+  contract and its seats: the chain reading the delegator, the node and a remote's rows share
 - [`internal/fleetnode/auth.go`](../../internal/fleetnode/auth.go) — the bearer credential check
 - [`internal/fleetnode/jobs.go`](../../internal/fleetnode/jobs.go) — state machine, the admit-then-
   schedule queue and its concurrency limit, eviction, drain, the agent job marker
