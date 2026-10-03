@@ -1,6 +1,8 @@
 package config
 
 import (
+	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 )
@@ -13,6 +15,8 @@ func TestCPUBackendRefusal(t *testing.T) {
 	refused := []string{
 		"", "  ", "cpu", "CPU", " cpu ", "cpu0", "best", "auto", "diffusion=best",
 		"diffusion=vulkan0,vae=cpu", "clip=cpu,diffusion=vulkan0", "vulkan0,cpu", "diffusion=cuda0&cpu",
+		// an allowlist: anything that is not vulkan / vulkanN is refused, not left to the binary
+		"cuda0", "hip", "blas", "opencl", "rpc", "vulcan", "bestest0", "cpufreq0x", "vulkan-0", "vulkan0 vulkan1",
 	}
 	for _, b := range refused {
 		if err := CPUBackendRefusal(b); err == nil {
@@ -20,9 +24,9 @@ func TestCPUBackendRefusal(t *testing.T) {
 		}
 	}
 	allowed := []string{
-		"vulkan0", "Vulkan1", "cuda0", "diffusion=vulkan0,vae=vulkan0", "diffusion=cuda0&cuda1", "vulkan", "hip", "bestest0",
-		// a device or module that merely contains the letters is not the CPU
-		"cpufreq0x", "mycpu=vulkan0",
+		"vulkan0", "Vulkan1", "diffusion=vulkan0,vae=vulkan0", "diffusion=vulkan0&vulkan1", "vulkan",
+		// a module whose NAME contains the letters is fine: the value is what is checked
+		"mycpu=vulkan0",
 	}
 	for _, b := range allowed {
 		if err := CPUBackendRefusal(b); err != nil {
@@ -159,5 +163,157 @@ func TestDefaultConfigSelectsNoIGPUEngine(t *testing.T) {
 	}
 	if fb := c.ResolveVideoFamilyBinding(""); fb.UsesSdcpp() {
 		t.Errorf("the default video binding must not use sdcpp: %+v", fb)
+	}
+}
+
+// ---- extra args (A5): nothing that changes the backend or the placement gets through
+
+func TestExtraArgsRefusal(t *testing.T) {
+	bad := [][]string{
+		{"--backend", "cpu"}, {"--backend", "vulkan0"}, {"--backend=vulkan0"}, {"-b", "vulkan0"}, {"-b=cpu"}, {"--BACKEND", "x"},
+		{"--params-backend", "cpu"}, {"--params-backend=vulkan0"}, {"--offload-to-cpu"}, {"--clip-on-cpu"}, {"--vae-on-cpu"},
+		{"--control-net-cpu"}, {"--rpc", "192.0.2.1:50052"}, {"--rpc=192.0.2.1:50052"}, {"--cpu-moe"}, {"--n-cpu-moe", "8"},
+		{"--offload-params-to-cpu"}, {"--some-flag", "cpu"}, {"--some-flag", "CPU0"}, {"--assign=te=cpu"}, {"--assign", "te=cpu,vae=vulkan0"},
+		{"--assign", "diffusion=vulkan0&cpu"},
+	}
+	for _, a := range bad {
+		if err := ExtraArgsRefusal("sdcpp_extra_args", ExtraArgsSdcpp, a); err == nil || !strings.HasPrefix(err.Error(), "EXTRA_ARGS_REFUSED") {
+			t.Errorf("%v must be refused with EXTRA_ARGS_REFUSED, got %v", a, err)
+		}
+	}
+	// --device belongs to the audiocpp_device key, and only audio.cpp has it
+	for _, a := range [][]string{{"--device", "1"}, {"--device=1"}} {
+		if ExtraArgsRefusal("audiocpp_extra_args", ExtraArgsAudiocpp, a) == nil {
+			t.Errorf("audiocpp %v must be refused", a)
+		}
+		if err := ExtraArgsRefusal("sdcpp_extra_args", ExtraArgsSdcpp, a); err != nil {
+			t.Errorf("sdcpp %v: --device is not an sd-cli placement flag here: %v", a, err)
+		}
+	}
+	good := [][]string{{"--vae-tiling"}, {"--vae-tile-overlap", "0.25"}, {"--flag with space"}, {"--diffusion-fa"}, {"--threads", "4"}, nil, {}}
+	for _, a := range good {
+		if err := ExtraArgsRefusal("sdcpp_extra_args", ExtraArgsSdcpp, a); err != nil {
+			t.Errorf("%v must pass: %v", a, err)
+		}
+	}
+	i, arg, _, ok := ScreenExtraArgs(ExtraArgsSdcpp, []string{"--threads", "4", "--clip-on-cpu"})
+	if !ok || i != 2 || arg != "--clip-on-cpu" {
+		t.Errorf("ScreenExtraArgs = %d %q %v", i, arg, ok)
+	}
+}
+
+func TestExtraArgsAreRefusedAtConfigLoadInEveryKey(t *testing.T) {
+	cases := []struct{ name, body, key string }{
+		{"video family backend", `{"videogen_families":{"fastwan":{"engine":"sdcpp","sdcpp_backend":"vulkan0","sdcpp_extra_args":["--backend","cpu"]}}}`, `videogen_families["fastwan"].sdcpp_extra_args[0]`},
+		{"video family clip-on-cpu", `{"videogen_families":{"fastwan":{"engine":"sdcpp","sdcpp_backend":"vulkan0","sdcpp_extra_args":["--vae-tiling","--clip-on-cpu"]}}}`, `sdcpp_extra_args[1]`},
+		{"animate", `{"animategen_engine":"sdcpp","animategen_sdcpp_backend":"vulkan0","animategen_sdcpp_extra_args":["--vae-on-cpu"]}`, "animategen_sdcpp_extra_args[0]"},
+		{"animate depth", `{"animategen_engine":"sdcpp","animategen_sdcpp_backend":"vulkan0","animategen_depth_extra_args":["--backend=cpu"]}`, "animategen_depth_extra_args[0]"},
+		{"audio backend", `{"voicegen_engine":"audiocpp","audiocpp_backend":"vulkan","audiocpp_extra_args":["--backend","cpu"]}`, "audiocpp_extra_args[0]"},
+		{"audio device", `{"musicgen_engine":"audiocpp","audiocpp_backend":"vulkan","audiocpp_extra_args":["--device","1"]}`, "audiocpp_extra_args[0]"},
+	}
+	for _, tc := range cases {
+		_, err := Load(writeCfg(t, tc.body))
+		if err == nil || !strings.Contains(err.Error(), "EXTRA_ARGS_REFUSED") || !strings.Contains(err.Error(), tc.key) {
+			t.Errorf("%s: err = %v, want EXTRA_ARGS_REFUSED naming %s", tc.name, err, tc.key)
+		}
+	}
+	// a clean list loads
+	if _, err := Load(writeCfg(t, `{"videogen_families":{"fastwan":{"engine":"sdcpp","sdcpp_backend":"vulkan0","sdcpp_extra_args":["--vae-tile-overlap","0.25"]}}}`)); err != nil {
+		t.Errorf("a clean extra-args list must load: %v", err)
+	}
+}
+
+// ---- token cap (A3)
+
+type tokenCapTable struct {
+	Defaults struct{ Width, Height, Frames int } `json:"defaults"`
+	Rows     []struct {
+		Note                                       string
+		Width, Height, Frames, Stride, Ref, Tokens int
+	} `json:"rows"`
+}
+
+func loadTokenCapTable(t *testing.T) tokenCapTable {
+	t.Helper()
+	raw, err := os.ReadFile("../../render/testdata/token-cap-table.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tab tokenCapTable
+	if err := json.Unmarshal(raw, &tab); err != nil {
+		t.Fatal(err)
+	}
+	return tab
+}
+
+// The Go and Node formulas are pinned to ONE table of inputs: render/igpu-engine.test.mjs reads
+// the same file.
+func TestLatentTokensAgreesWithTheSharedTable(t *testing.T) {
+	tab := loadTokenCapTable(t)
+	if len(tab.Rows) < 8 {
+		t.Fatalf("the shared table lost rows: %d", len(tab.Rows))
+	}
+	want := map[int]bool{5070: false, 15600: false, 5760: false}
+	for _, r := range tab.Rows {
+		if got := LatentTokens(r.Width, r.Height, r.Frames, r.Stride, r.Ref); got != r.Tokens {
+			t.Errorf("%s: LatentTokens(%dx%dx%d stride %d ref %d) = %d, want %d", r.Note, r.Width, r.Height, r.Frames, r.Stride, r.Ref, got, r.Tokens)
+		}
+		if _, ok := want[r.Tokens]; ok {
+			want[r.Tokens] = true
+		}
+	}
+	for k, seen := range want {
+		if !seen {
+			t.Errorf("the table must carry the measured row with %d tokens", k)
+		}
+	}
+}
+
+func TestTokenCapRefusal(t *testing.T) {
+	if err := TokenCapRefusal("sdcpp_max_tokens", 4096, 4096, 121, 16, 0, 0); err != nil {
+		t.Errorf("no cap configured = no check: %v", err)
+	}
+	if err := TokenCapRefusal("sdcpp_max_tokens", 832, 480, 49, 16, 0, 5070); err != nil {
+		t.Errorf("exactly at the cap passes: %v", err)
+	}
+	err := TokenCapRefusal("sdcpp_max_tokens", 832, 480, 49, 16, 0, 5000)
+	if err == nil {
+		t.Fatal("5070 tokens over a cap of 5000 must be refused")
+	}
+	for _, w := range []string{"TOKEN_CAP_EXCEEDED", "needs 5070 latent tokens", "cap is 5000", "(sdcpp_max_tokens)", "up to 45 frames fit", "Not retried"} {
+		if !strings.Contains(err.Error(), w) {
+			t.Errorf("message %q must contain %q", err, w)
+		}
+	}
+	err = TokenCapRefusal("animategen_sdcpp_max_tokens", 480, 832, 33, 8, 1, 3000)
+	if err == nil || !strings.Contains(err.Error(), "needs 15600") || !strings.Contains(err.Error(), "+ reference") || !strings.Contains(err.Error(), "even 5 frames do not fit") {
+		t.Errorf("animate refusal = %v", err)
+	}
+}
+
+func TestTokenCapKeysValidate(t *testing.T) {
+	cases := []struct{ name, body, want string }{
+		{"video cap without stride", `{"videogen_families":{"fastwan":{"engine":"sdcpp","sdcpp_backend":"vulkan0","sdcpp_max_tokens":5000}}}`, "sdcpp_vae_stride is not"},
+		{"video bad stride", `{"videogen_families":{"fastwan":{"engine":"sdcpp","sdcpp_backend":"vulkan0","sdcpp_max_tokens":5000,"sdcpp_vae_stride":4}}}`, "want 8 or 16"},
+		{"video negative cap", `{"videogen_families":{"fastwan":{"engine":"sdcpp","sdcpp_backend":"vulkan0","sdcpp_max_tokens":-1,"sdcpp_vae_stride":16}}}`, "must not be negative"},
+		{"video negative stride", `{"videogen_families":{"fastwan":{"engine":"sdcpp","sdcpp_backend":"vulkan0","sdcpp_vae_stride":-8}}}`, "must not be negative"},
+		{"cap keys on a comfy entry", `{"videogen_families":{"wan22":{"sdcpp_max_tokens":5000,"sdcpp_vae_stride":16}}}`, "sdcpp_* keys are set"},
+		{"animate cap without stride", `{"animategen_engine":"sdcpp","animategen_sdcpp_backend":"vulkan0","animategen_sdcpp_max_tokens":5760}`, "animategen_sdcpp_vae_stride is not"},
+		{"animate bad stride", `{"animategen_sdcpp_max_tokens":5760,"animategen_sdcpp_vae_stride":12}`, "want 8 or 16"},
+		{"animate negative cap", `{"animategen_sdcpp_max_tokens":-5,"animategen_sdcpp_vae_stride":8}`, "must not be negative"},
+	}
+	for _, tc := range cases {
+		_, err := Load(writeCfg(t, tc.body))
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: err = %v, want %q", tc.name, err, tc.want)
+		}
+	}
+	c, err := Load(writeCfg(t, `{"videogen_families":{"fastwan":{"engine":"sdcpp","sdcpp_backend":"vulkan0","sdcpp_max_tokens":5070,"sdcpp_vae_stride":16}},
+		"animategen_engine":"sdcpp","animategen_sdcpp_backend":"vulkan0","animategen_sdcpp_max_tokens":5760,"animategen_sdcpp_vae_stride":8}`))
+	if err != nil {
+		t.Fatalf("valid caps must load: %v", err)
+	}
+	if fb := c.VideoGenFamilies["fastwan"]; fb.SdcppMaxTokens != 5070 || fb.SdcppVAEStride != 16 || c.AnimateGenSdcppMaxTokens != 5760 || c.AnimateGenSdcppVAEStride != 8 {
+		t.Errorf("the cap keys did not round-trip: %+v %d %d", fb, c.AnimateGenSdcppMaxTokens, c.AnimateGenSdcppVAEStride)
 	}
 }

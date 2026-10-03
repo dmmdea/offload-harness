@@ -1169,8 +1169,14 @@ type Config struct {
 	AnimateGenSdcppVAE     string `json:"animategen_sdcpp_vae,omitempty"`
 	AnimateGenSdcppT5xxl   string `json:"animategen_sdcpp_t5xxl,omitempty"`
 	AnimateGenSdcppBackend string `json:"animategen_sdcpp_backend,omitempty"`
-	// AnimateGenSdcppExtraArgs are appended to the sd-cli invocation.
+	// AnimateGenSdcppExtraArgs are appended to the sd-cli invocation (an element that
+	// changes the backend or placement is refused).
 	AnimateGenSdcppExtraArgs []string `json:"animategen_sdcpp_extra_args,omitempty"`
+	// AnimateGenSdcppMaxTokens / AnimateGenSdcppVAEStride: the latent-token cap for the VACE
+	// animate route (the reference image adds one latent frame); see
+	// VideoFamilyBinding.SdcppMaxTokens. 0 = no cap; the stride (8 or 16) is required with a cap.
+	AnimateGenSdcppMaxTokens int `json:"animategen_sdcpp_max_tokens,omitempty"`
+	AnimateGenSdcppVAEStride int `json:"animategen_sdcpp_vae_stride,omitempty"`
 	// AnimateGenDepthBin / AnimateGenDepthModel are the depth-anything.cpp binary and its
 	// GGUF (full paths). AnimateGenDepthExtraArgs are appended to its invocation (its CLI
 	// flags are bound in render/sdcpp-animate.mjs; this is the escape hatch).

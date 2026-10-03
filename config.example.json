@@ -211,6 +211,8 @@
   "animategen_sdcpp_t5xxl": "",
   "animategen_sdcpp_backend": "",
   "animategen_sdcpp_extra_args": null,
+  "animategen_sdcpp_max_tokens": 0,
+  "animategen_sdcpp_vae_stride": 0,
   "animategen_depth_bin": "",
   "animategen_depth_model": "",
   "animategen_depth_extra_args": null,

@@ -122,7 +122,15 @@ type VideoFamilyBinding struct {
 	// (see CPUBackendRefusal).
 	SdcppBackend string `json:"sdcpp_backend,omitempty"`
 	// SdcppExtraArgs are appended to the sd-cli invocation after the script's own flags.
+	// An element that changes the backend or placement is refused (ExtraArgsRefusal).
 	SdcppExtraArgs []string `json:"sdcpp_extra_args,omitempty"`
+	// SdcppMaxTokens is the latent-token cap for this family on an iGPU whose driver resets
+	// the GPU when one dispatch outlives its 2 s lockup timeout (amdgpu's default): a request
+	// whose LatentTokens exceeds it is a typed non-retryable defer before anything spawns.
+	// 0 = no cap (no check). SdcppVAEStride (8 or 16: the VAE's spatial downsampling, 16 for
+	// the Wan2.2 VAE, 8 for Wan2.1) is REQUIRED when a cap is set.
+	SdcppMaxTokens int `json:"sdcpp_max_tokens,omitempty"`
+	SdcppVAEStride int `json:"sdcpp_vae_stride,omitempty"`
 	// Steps, CFG, FlowShift and Sampler are the family's sampling recipe (0 / ""
 	// = sd-cli's own default). A per-request `steps` wins over Steps.
 	Steps     int     `json:"steps,omitempty"`
