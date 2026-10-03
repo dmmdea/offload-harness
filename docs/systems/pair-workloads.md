@@ -204,7 +204,8 @@ side can know the producer died, so the harness retires its own orphans:
 
 - **Register.** Every in-flight frame (`queued`, `running`) writes one marker
   `<state root>/pair-open/<pid>-<job id>.json` — the machine-wide root `seat-inflight/` and the GPU
-  lease use — holding the frame's workloadInfo, the writer's pid and its process start identity.
+  lease use — holding the frame's workloadInfo, the writer's pid, its process start identity and
+  the **endpoint** (the ingress URL) the card was posted to.
   The terminal frame removes it once delivered. A terminal frame that could **not** be delivered
   (PAIR restarting, an answer slower than 2 s) replaces the marker as a *pending* terminal frame,
   which the next sweep resends as it is — the job's real verdict — without waiting for the
@@ -219,19 +220,42 @@ side can know the producer died, so the harness retires its own orphans:
   `failed`, error "harness process exited before the job finished", the in-flight frame's id,
   origin, node, engine, requester and timestamps unchanged (the same card), `completedAt` = now —
   then deletes the marker.
+- **Endpoint scoping.** A sweep closes only the markers of **its own endpoint**: the marker's
+  `endpoint` and the sweeper's `pair_workloads_endpoint` must name the same ingress (compared as
+  scheme, case-insensitive host, port — a scheme's default port is the same as none — and path). A
+  marker with no `endpoint` was written before the field existed and counts as the default ingress
+  (`http://127.0.0.1:14324/v1/workloads/events`). A foreign marker is left exactly as it is: not
+  locked, not posted, not deleted, not even dropped at the age caps. Closing means "post to my
+  endpoint, delete on success", so a sweeper that took another ingress's marker would close nothing
+  real and destroy the only record of the card.
 - **Who sweeps.** Every emitter once, on its first `Emit` (so every harness process that reports
   anything closes what a dead one left open; the process's `Wait` covers it), and fleet-serve
   every 45 s when `pair_workloads_enabled` or `pair_seat_activity_enabled` is on.
 - **Racing sweepers.** A claim is an O_EXCL `<marker>.lock`; the winner re-checks the marker,
   posts, removes the marker, then the lock — so one frame per orphan. Rename-to-claim does not
   work on Windows: two sweepers that opened the marker before either renamed it both succeed. A
-  failed post (PAIR down) releases the lock and keeps the marker for the next sweep; a marker PAIR
-  has not accepted for 48 h is dropped. A lock whose sweeper died, or older than 5 min, is removed
-  by a later pass.
+  post to an **unreachable** PAIR (transport error, HTTP 5xx, or 408/429) releases the lock, keeps
+  the marker and ends the pass — every later marker would fail the same way — and the next sweep
+  retries; a marker PAIR has not accepted for 48 h is dropped. A post PAIR **rejects** (any other
+  HTTP 4xx: it will never accept that frame) drops that one marker and its lock, logs one line
+  naming the job id and the status, and the pass goes on to the next marker; before this rule one
+  rejected marker starved every later one until the 48 h give-up. The same rule applies to a live
+  producer's terminal frame: rejected, it is dropped with a log line instead of being rewritten as a
+  pending marker; unreachable, it stays pending. A lock whose sweeper died, or older than 5 min, is
+  removed by a later pass.
 - **Seat-watch cards** go through the same `Emit`, so a fleet-serve killed with a direct-traffic
   card open leaves a marker the next sweep closes. A clean stop still completes open cards
   (`closeAll`).
 - A disabled emitter (key off, or PAIR not installed) writes and sweeps nothing.
+- **Tests must isolate their state root.** Every test that builds an **enabled** emitter (or runs
+  anything that does: a lease card, a delegation) must give it its own state root (`StateDir` or
+  `OpenDir` set to `t.TempDir()`, or `LOCAL_OFFLOAD_STATE_DIR` set by the package's `TestMain`),
+  because an emitter with no root resolves to the machine-wide `pair-open` directory and its first
+  sweep reads the operator's real markers. The lease-card test once did: it closed real orphan
+  markers into its own httptest ingress and deleted them, leaving the real cards "Running" for 31.9 h
+  (the endpoint scoping above now stops that second-hand, but the isolation is still the rule). The
+  root, `internal/delegate`, `internal/mcpserver`, `internal/pipeline` and `internal/pairworkloads`
+  packages each carry a `TestMain` that points the variable at a throwaway directory.
 
 ## The PAIR side (what has to be true on the box)
 
