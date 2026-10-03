@@ -1030,7 +1030,9 @@ func (p *Pipeline) runVisionGen(ctx context.Context, req core.Request, built tas
 			if rt.id == "" {
 				rt.id = mintJobID("vd")
 			}
-			row.ParentJobID = rt.id
+			// An inner row names the call; it is never the call (JobID empty), even
+			// on the second retried attempt, whose meta already carries the id.
+			row.ParentJobID, row.JobID = rt.id, ""
 		}
 		p.recordDefer(req.Task, row, len(req.Input), reason)
 		return core.Deferf(reason, "", meta)
@@ -4155,8 +4157,9 @@ func (p *Pipeline) runExtractImage(ctx context.Context, req core.Request, meta c
 //     that did no card work makes no card.
 //
 // A sub-call's own escalating attempts are inner rows too (flattened under this
-// composite), and their tokens are on rows no reader sums: only the answering
-// tier's figures are in res.Meta.
+// composite). Their prompt tokens still reach the savings summary (a non-deferred
+// inner row's TokensIn is added, C-62), but their output and card work are on no
+// call row: only the answering tier's figures are in res.Meta.
 func (p *Pipeline) recordExtractImageCall(task core.TaskType, meta core.Meta, start time.Time, res core.Result, subs []core.Result) {
 	if p.led == nil {
 		return

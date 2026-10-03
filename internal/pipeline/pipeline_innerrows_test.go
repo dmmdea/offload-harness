@@ -75,11 +75,12 @@ func assertOneCall(t *testing.T, rows []ledger.Entry, wantInner int) (ledger.Ent
 }
 
 // (b) video_describe: a clip too big for the context is retried at half the
-// frame width. The overflowed attempt is a step of the call (inner); the final
+// frame width, here twice (1024 -> 512 -> 256). Each overflowed attempt is a step
+// of the call (inner, naming the call and never carrying its id); the final
 // attempt is the call.
 func TestVideoDescribeOverflowRetryRowsAreInnerRows(t *testing.T) {
 	var calls int32
-	overflow := int32(1) // image requests that answer "context overflow" before one succeeds
+	overflow := int32(2) // image requests that answer "context overflow" before one succeeds
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&calls, 1)
 		if atomic.AddInt32(&overflow, -1) >= 0 {
@@ -93,16 +94,21 @@ func TestVideoDescribeOverflowRetryRowsAreInnerRows(t *testing.T) {
 	defer srv.Close()
 	ffmpeg, video := fakeFFmpeg(t, "10")
 	cfg := baseVisionCfg(srv, "fake-vlm")
-	cfg.FFmpegPath, cfg.VideoFrameWidth = ffmpeg, 512
+	cfg.FFmpegPath, cfg.VideoFrameWidth = ffmpeg, 1024
 	p, lpath := ledgerPipeline(t, cfg, srv)
 
 	res := p.Run(context.Background(), core.Request{Task: core.TaskVideoDescribe, Video: video, Door: "offload_video_describe", Params: map[string]any{"question": "what?"}})
 	if !res.OK {
 		t.Fatalf("deferred: %s", res.Reason)
 	}
-	call, inner := assertOneCall(t, readRows(t, lpath), 1)
-	if call.Deferred || !inner[0].Deferred {
-		t.Fatalf("the final attempt is the call (ok); the overflowed attempt is the inner row (deferred): call=%s inner=%s", rowStr(call), rowStr(inner[0]))
+	call, inner := assertOneCall(t, readRows(t, lpath), 2)
+	if call.Deferred || !inner[0].Deferred || !inner[1].Deferred {
+		t.Fatalf("the final attempt is the call (ok); the overflowed attempts are inner rows (deferred): call=%s inner=%s %s", rowStr(call), rowStr(inner[0]), rowStr(inner[1]))
+	}
+	for _, r := range inner {
+		if r.JobID != "" {
+			t.Fatalf("an inner row must not carry the call's id as its own job id: %s", rowStr(r))
+		}
 	}
 	s, err := ledger.SummarizeFile(lpath, 0, ledger.Prices{})
 	if err != nil {
@@ -408,6 +414,23 @@ func TestRunStampsTheCallIDOnTheCallsRow(t *testing.T) {
 	rows := readRows(t, lpath)
 	if len(rows) != 1 || rows[0].CallID != "call-test-1" {
 		t.Fatalf("the row must carry the call id Begin returned, got %s", rowsStr(rows))
+	}
+}
+
+// D15 where it was measured: a transcribe call's own row carries the call id
+// (runTranscribe records the meta Run built, so the stamp survives).
+func TestRunStampsTheCallIDOnATranscribeRow(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	defer srv.Close()
+	cfg := baseVisionCfg(srv, "fake-vlm")
+	cfg.STTModel = "" // the call defers at once, writing its row
+	p, lpath := ledgerPipeline(t, cfg, srv)
+	p.SetCallTracker(&recTracker{})
+
+	p.Run(context.Background(), core.Request{Task: core.TaskTranscribe, Audio: "x.wav"})
+	rows := readRows(t, lpath)
+	if len(rows) != 1 || rows[0].Task != "transcribe" || rows[0].CallID != "call-test-1" {
+		t.Fatalf("the transcribe row must carry the call id Begin returned, got %s", rowsStr(rows))
 	}
 }
 
