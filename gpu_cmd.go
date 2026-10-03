@@ -943,6 +943,7 @@ func leaseWarmGuard(m *gpulease.Manager, l *gpulease.Lease) warmGuard {
 		owed:       m.SeatWarmOwed,
 		clear:      m.ClearSeatWarmOwed,
 		onlyIfOwed: true,
+		others:     otherLeaseOnSeat(m, l.Epoch()),
 	}
 }
 
@@ -967,6 +968,7 @@ func releaseWarmGuard(m *gpulease.Manager, epoch uint64) warmGuard {
 		waiters: m.Waiters,
 		owed:    m.SeatWarmOwed,
 		clear:   m.ClearSeatWarmOwed,
+		others:  otherLeaseOnSeat(m, epoch),
 	}
 }
 
