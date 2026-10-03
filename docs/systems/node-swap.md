@@ -93,7 +93,8 @@ restart, verify, automatic rollback on any failure) and, as an option, its rende
   those cards, or a lease that names no cards (the whole node), holds the swap. Each live
   lease it did not wait for is recorded in `Outcome.LeasesLeftAlone`, the declared cards in
   `Outcome.Cards`, and a refusal names the lease that held the deploy (epoch, class, how
-  many cards, why). `--cards` has no effect on a node with a health URL.
+  many cards, why). `--cards` has no effect on a node with a health URL. Both detached launchers
+  forward it (`-Cards` in `windows-node-swap-launch.ps1`, `--cards` in `linux-node-swap-launch.sh`).
 - **Auto-resolved `--health-url`** — when the caller leaves `--health-url` empty,
   `runNodeSwap` reads THIS node's own config `fleet_listen` (`--config`, same resolution
   precedence as every other command) and fills it in automatically — but ONLY when that

@@ -41,7 +41,7 @@ other two. This change carries the per-card truth across the fleet. Old readers 
   `eta_sec`) and `retry_after_sec`, the soonest known end. The token that resumes a place across calls is the media-admission
   change and is not part of this.
 - **Deploy.** A binary swap touches the executable and the processes it may stop, not a card, so a standalone node's wait
-  stays every GPU lease unless the operator names the cards (`node-swap --cards <uuid,...>`); the lease it did not wait
+  stays every GPU lease unless the operator names the cards (`node-swap --cards <uuid,...>`, forwarded by both launchers); the lease it did not wait
   for is recorded in the outcome (`cards`, `leases_left_alone`) and a refusal names the lease that held it. `fleet_reclaim`
   stays whole-node on purpose (docs/systems/fleet-node.md, "Per-card lease truth").
 - **`fleet-ui` and `top` show one tile per card** with the lease that holds it (class, epoch, verdict, time left).
