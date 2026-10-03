@@ -64,7 +64,7 @@ endpoint. A dispatch is now **admitted** and waits its turn.
 |---|---|---|---|
 | `fleet_max_queue_depth` | `accepted` + `running` (health's `queue_depth`), **all task types** | 2x `fleet_max_concurrent_jobs` (8 with the default 4 workers — register S-04/C-25) | Yes — `503 queue full` |
 | `fleet_max_concurrent_jobs` | jobs actually executing, **`agent` only** | 4 | No — extra jobs WAIT in `accepted` |
-| `fleet_stt_max_concurrent` (0.164.0) | stt jobs actually executing, **both stt lanes** (`stt` and `stt-upload`, pushed and pulled) | 1 | No — extra jobs WAIT, in arrival order, inside their run (their card stays queued) |
+| `fleet_stt_max_concurrent` (0.164.0) | stt jobs actually executing, **both stt lanes** (`stt` and `stt-upload`, pushed and pulled) | 1 | No — extra jobs WAIT, in arrival order, inside their run (their card stays queued). Inference stays serialized by the whisper client's process-wide mutex whatever the value, so above 1 it only overlaps conversions and queue time |
 | `fleet_stt_upload_max_mb` (0.164.0) | the largest audio file `POST /fleet/stt` takes (decoded MiB; the body is that in base64 plus slack) | 48 | Yes — `400` naming the key |
 
 **The concurrency cap governs the text lane only.** It exists to protect one thing — the shared

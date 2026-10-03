@@ -1693,7 +1693,9 @@ type Config struct {
 	FleetSTTUploadMaxMB int `json:"fleet_stt_upload_max_mb,omitempty"`
 	// FleetSTTMaxConcurrent caps how many fleet stt jobs run at once on this node, the legacy
 	// path-taking lane and the upload door counted together; 0 = 1. Whisper is one single-slot
-	// upstream: a job over the cap waits its turn in arrival order and is never refused.
+	// upstream: a job over the cap waits its turn in arrival order and is never refused. Inference
+	// itself stays serialized by the whisper client's process-wide mutex whatever this says, so a
+	// value above 1 only overlaps the jobs' ffmpeg conversions and queue time.
 	FleetSTTMaxConcurrent int `json:"fleet_stt_max_concurrent,omitempty"`
 	// KVSlotCapGiB bounds the node's kvslots/ directory (ADR 0056 Layer 2); 0 = 8 GiB.
 	KVSlotCapGiB int `json:"kvslot_cap_gib,omitempty"`
