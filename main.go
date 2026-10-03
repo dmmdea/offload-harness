@@ -1776,7 +1776,7 @@ func runGenerateVideo(args []string) error {
 // runAnimateCharacter handles `local-offload animate-character <out.mp4> <ref.png>
 // <driver.mp4> "<prompt>" [--motion-prompt "..."] [--negative "..."] [--width N]
 // [--height N] [--frames 81] [--steps N] [--seed N] [--pose-strength F]
-// [--ref-strength F] [--reserve-vram F] [--json]`. The FOUR positionals are the
+// [--ref-strength F] [--reserve-vram F] [--route local|auto|remote] [--remote URL]... [--json]`. The FOUR positionals are the
 // output path, the reference character image, the driver video whose motion is
 // transferred, and the character/background prompt — mirroring the raw
 // `node render/comfy-animate.mjs` CLI. Runs the same runAnimateCharacter pipeline
@@ -1798,11 +1798,15 @@ func runAnimateCharacter(args []string) error {
 	refStrength := fs.Float64("ref-strength", 0, "0-1: how strongly the reference image pins identity (0 = builder default 1.0)")
 	reserveVRAM := fs.Float64("reserve-vram", 0, "VRAM held back for the display (per-workflow override)")
 	compactFlag := fs.Bool("compact", false, "compact (minified) JSON output")
+	route := fs.String("route", "auto", "local | auto (here when this machine has the lane, derived from the files its route loads, else a fleet node from delegate_remotes) | remote (a fleet node; the reference image and driver video travel in a hash-checked bundle and the clip is fetched back verified; ADR 0072)")
+	var remotes repeatedFlag
+	fs.Var(&remotes, "remote", "fleet node base URL for this call (repeatable); must be one of delegate_remotes")
 
 	out, ref, driver, prompt, flagArgs := splitFourArgs(args, map[string]bool{
 		"config": true, "motion-prompt": true, "negative": true, "width": true,
 		"height": true, "frames": true, "steps": true, "seed": true,
 		"pose-strength": true, "ref-strength": true, "reserve-vram": true,
+		"route": true, "remote": true,
 	})
 	_ = fs.Parse(flagArgs)
 
@@ -1838,14 +1842,14 @@ func runAnimateCharacter(args []string) error {
 	if *reserveVRAM > 0 {
 		params["reserve_vram"] = strconv.FormatFloat(*reserveVRAM, 'f', -1, 64)
 	}
-	res := p.Run(context.Background(), core.Request{
+	res := mediaremote.Run(context.Background(), cfg, p, core.Request{
 		Task:   core.TaskAnimateCharacter,
 		Door:   "cli:animate-character",
 		Input:  prompt,
 		Image:  ref,
 		Video:  driver,
 		Params: params,
-	})
+	}, *route, remotes)
 	emitResult(res, *asJSON, "", *compactFlag)
 	return nil
 }

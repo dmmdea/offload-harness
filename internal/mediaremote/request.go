@@ -31,6 +31,10 @@ const (
 // envelope and the rest of the payload need room.
 const maxGraphBytes = 900 << 10
 
+// maxDispatchBody is the node's POST /fleet/dispatch body cap (fleetnode.maxDispatchBody): the whole
+// envelope, payload included, must fit it.
+const maxDispatchBody = 1 << 20
+
 // contractError is a request this machine refuses to send: the caller's contract cannot be placed as given.
 type contractError struct{ msg string }
 
@@ -47,6 +51,9 @@ type planned struct {
 	fleetTask string
 	payload   map[string]any
 	inputs    []input
+	// outDir is run_graph's out_dir. It never travels (the node writes into its own media dir): it is where
+	// the fetched outputs land on this machine.
+	outDir string
 }
 
 // fleetTaskOf maps the pipeline task to the fleet task type.
@@ -231,6 +238,12 @@ func plan(req core.Request) (planned, error) {
 		}
 		setStr(p, "reserve_vram", out)
 		setStr(p, "model_family", out)
+		// The graph and the manifest share ONE dispatch body with the envelope and the other fields: each
+		// may be under its cap and the two together over what the node reads.
+		if total := len(graph) + len(manifest); total > maxGraphBytes {
+			return planned{}, &contractError{fmt.Sprintf("the graph (%d bytes) and the manifest (%d bytes) together are over the %d bytes a fleet dispatch carries inline", len(graph), len(manifest), maxGraphBytes)}
+		}
+		pl.outDir = str(p, "out_dir")
 	}
 	for _, in := range pl.inputs {
 		fi, err := os.Stat(in.path)

@@ -27,6 +27,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/url"
 	"os"
@@ -85,6 +86,23 @@ type Runner interface {
 // NormalizeRoute maps the caller's route to one of the three values; "" is auto.
 func NormalizeRoute(route string) (string, bool) { return composeremote.NormalizeRoute(route) }
 
+// routesFn derives this machine's media routes: the filesystem walk mediacap does. A var so tests can stand
+// in a derivation without building a ComfyUI tree.
+var routesFn = mediacap.Routes
+
+// localClock is the route cache's clock; tests move it.
+var localClock = time.Now
+
+// localRoutesTTL bounds how stale this machine's lane verdict may be, the freshness a fleet node's
+// advertisement has (60 s).
+const localRoutesTTL = 60 * time.Second
+
+// localRoutes memoizes the derivation, so a media call (and every default `auto` call on a box that has
+// the lane) does not walk the disk each time.
+var localRoutes = mediacap.NewCache(localRoutesTTL,
+	func() time.Time { return localClock() },
+	func(cfg config.Config) []mediacap.Route { return routesFn(cfg) })
+
 // LocalConfigured reports whether THIS machine has the lane req needs, by the same derivation the node's
 // advertisement uses (internal/mediacap reads the files, not only the config): the named image family
 // resolves, the video, animation or run-graph route is CONFIGURED, music has its script and weights, and
@@ -92,7 +110,7 @@ func NormalizeRoute(route string) (string, bool) { return composeremote.Normaliz
 // as having a lane only when the files behind the binding are really there.
 func LocalConfigured(cfg config.Config, req core.Request) bool {
 	routes := map[string]bool{}
-	for _, r := range mediacap.Routes(cfg) {
+	for _, r := range localRoutes.Routes(cfg) {
 		routes[r.Name] = r.OK()
 	}
 	switch req.Task {
@@ -245,6 +263,21 @@ func Call(ctx context.Context, cfg config.Config, req core.Request, remotes []st
 	if err != nil {
 		return core.Result{}, err
 	}
+	// Everything that can be refused from this machine alone is refused before the network is touched:
+	// the input files' total size against the cap, and an out_dir this machine cannot create (found
+	// after a render that took hours, it would cost the render).
+	if err := checkInputSizes(cfg, pl.inputs); err != nil {
+		return core.Result{}, err
+	}
+	if pl.outDir != "" {
+		if err := os.MkdirAll(pl.outDir, 0o755); err != nil {
+			return core.Result{}, &contractError{fmt.Sprintf("out_dir %s: %v", pl.outDir, err)}
+		}
+	}
+	rawPayload, err := json.Marshal(pl.payload)
+	if err != nil {
+		return core.Result{}, &contractError{fmt.Sprintf("the %s request cannot be encoded for the wire: %v", pl.fleetTask, err)}
+	}
 	if _, has := ctx.Deadline(); !has {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, Budgets[pl.fleetTask])
@@ -255,9 +288,18 @@ func Call(ctx context.Context, cfg config.Config, req core.Request, remotes []st
 		return core.Result{}, &placementError{core.DeferClassInfrastructure, "job id: " + err.Error()}
 	}
 
-	// The wire body: with input files, the media-job door with a bundle; without, the plain dispatch.
+	// The node is chosen BEFORE anything is packed: with no eligible node the call must cost one health
+	// probe, not a bundle's worth of memory and minutes. With input files the job goes through the
+	// media-job door (a node that opened it), without through the plain dispatch.
 	route, taskForNode := "/fleet/dispatch", pl.fleetTask
-	rawPayload, _ := json.Marshal(pl.payload)
+	if len(pl.inputs) > 0 {
+		route, taskForNode = "/fleet/media-job", taskMediaJob
+	}
+	base, node, err := pickNode(ctx, cfg, bases, pl.fleetTask, taskForNode, nodeRoutes(req))
+	if err != nil {
+		return core.Result{}, err
+	}
+
 	var body []byte
 	if len(pl.inputs) > 0 {
 		bundle, names, berr := buildBundle(cfg, pl.inputs)
@@ -269,39 +311,71 @@ func Call(ctx context.Context, cfg config.Config, req core.Request, remotes []st
 		for i, in := range pl.inputs {
 			inputs[in.field] = names[i]
 		}
-		body, _ = json.Marshal(map[string]any{
+		body, err = json.Marshal(map[string]any{
 			"job_id": jobID, "task_type": pl.fleetTask, "payload": json.RawMessage(rawPayload),
 			"bundle": base64.StdEncoding.EncodeToString(bundle), "bundle_sha256": hex.EncodeToString(sum[:]), "inputs": inputs,
 		})
-		route, taskForNode = "/fleet/media-job", taskMediaJob
 	} else {
-		body, _ = json.Marshal(map[string]any{"job_id": jobID, "task_type": pl.fleetTask, "payload": json.RawMessage(rawPayload)})
+		body, err = json.Marshal(map[string]any{"job_id": jobID, "task_type": pl.fleetTask, "payload": json.RawMessage(rawPayload)})
+		if err == nil && len(body) > maxDispatchBody {
+			// The node's /fleet/dispatch refuses a body over 1 MiB; a graph and a manifest that each fit
+			// can together not. Said here, by size, instead of as the node's 400 after a round trip.
+			return core.Result{}, &contractError{fmt.Sprintf("the %s request is %d bytes, over the %d bytes a fleet dispatch carries", pl.fleetTask, len(body), maxDispatchBody)}
+		}
+	}
+	if err != nil {
+		return core.Result{}, &contractError{fmt.Sprintf("the %s request cannot be encoded for the wire: %v", pl.fleetTask, err)}
 	}
 
-	base, node, err := pickNode(ctx, cfg, bases, pl.fleetTask, taskForNode, nodeRoutes(req))
-	if err != nil {
-		return core.Result{}, err
-	}
 	if err := post(ctx, cfg, base+route, body); err != nil {
+		if be := budgetEnded(ctx, "sending the job", node, jobID, err); be != nil {
+			return core.Result{}, be
+		}
 		return core.Result{}, err
 	}
 	res, data, err := wait(ctx, cfg, base, jobID)
 	if err != nil {
+		if be := budgetEnded(ctx, "the job was rendering", node, jobID, err); be != nil {
+			return core.Result{}, be
+		}
+		var pe *placementError
+		if errors.As(err, &pe) {
+			return core.Result{}, &placementError{pe.class, fmt.Sprintf("node %s (remote job %s): %s", node, jobID, pe.msg)}
+		}
 		return core.Result{}, &placementError{core.DeferClassInfrastructure, fmt.Sprintf("node %s: %v", node, err)}
 	}
 	if !res.OK {
 		res.Meta.Node = node
 		return res, nil
 	}
-	local, err := fetchOutputs(ctx, cfg, base, data, str(req.Params, "out"), jobID, node)
+	local, err := fetchOutputs(ctx, cfg, base, data, outputDest{out: str(req.Params, "out"), outDir: pl.outDir}, jobID, node)
 	if err != nil {
+		if be := budgetEnded(ctx, "its outputs were being fetched", node, jobID, err); be != nil {
+			return core.Result{}, be
+		}
 		var pe *placementError
 		if errors.As(err, &pe) {
 			return core.Result{}, &placementError{pe.class, fmt.Sprintf("node %s rendered the job but %s", node, pe.msg)}
 		}
+		var se *httpStatusError
+		if errors.As(err, &se) && se.rejectedToken() {
+			return core.Result{}, &placementError{core.DeferClassConfig, fmt.Sprintf("node %s rendered the job but refused to hand it over: %v (check fleet_auth_token)", node, err)}
+		}
 		return core.Result{}, &placementError{core.DeferClassInfrastructure, fmt.Sprintf("node %s rendered the job but fetching it failed: %v", node, err)}
 	}
 	return core.Result{OK: true, Data: local, Meta: core.Meta{Node: node, LatencyMs: time.Since(start).Milliseconds()}}, nil
+}
+
+// budgetEnded answers a failure that surfaced after this call's own deadline passed (the budget this call
+// set itself, or the caller's shorter one) as a budget defer naming the node and the remote job, whatever
+// transport error the expiry looked like on the way. The node is not told to stop: the job may still hold
+// its card, which the message says. nil when the deadline did not pass.
+func budgetEnded(ctx context.Context, doing, node, jobID string, cause error) error {
+	if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return nil
+	}
+	return &placementError{core.DeferClassBudget, fmt.Sprintf(
+		"the deadline for this call passed while %s on node %s (remote job %s); the node may still be running that job: %v", doing, node, jobID, cause)}
 }
 
 func newJobID() (string, error) {
@@ -346,9 +420,26 @@ func candidateBases(cfg config.Config, remotes []string) ([]string, error) {
 	return asked, nil
 }
 
+// checkInputSizes refuses, from the files' sizes alone and before anything is read or sent, input files
+// that cannot fit the bundle cap as this machine knows it (the node's own cap may differ).
+func checkInputSizes(cfg config.Config, inputs []input) error {
+	max := cfg.EffectiveMediaInputsMaxBytes()
+	var total int64
+	for _, in := range inputs {
+		if fi, err := os.Stat(in.path); err == nil {
+			total += fi.Size()
+		}
+	}
+	if total > max {
+		return &contractError{fmt.Sprintf("the input files are %d bytes, over fleet_media_inputs_max_mb (%d MiB); the node's own cap may differ", total, max>>20)}
+	}
+	return nil
+}
+
 // buildBundle copies each input file into a temp directory under its bundle name and packs the directory
 // (regular files only, within the node's cap as this machine knows it). names[i] is the name inputs[i]
-// travels under.
+// travels under. A file the caller named that cannot be read is the caller's (a contract defer); this
+// machine's own temp directory, disk and packer failing are infrastructure.
 func buildBundle(cfg config.Config, inputs []input) ([]byte, []string, error) {
 	tmp, err := os.MkdirTemp("", "media-bundle-")
 	if err != nil {
@@ -359,22 +450,20 @@ func buildBundle(cfg config.Config, inputs []input) ([]byte, []string, error) {
 	for i, in := range inputs {
 		names[i] = bundleName(in.field, in.path)
 		if err := copyFile(in.path, filepath.Join(tmp, names[i])); err != nil {
-			return nil, nil, &contractError{fmt.Sprintf("%s: %v", in.field, err)}
+			var ie *inputFileError
+			if errors.As(err, &ie) {
+				return nil, nil, &contractError{fmt.Sprintf("%s: %v", in.field, ie.err)}
+			}
+			return nil, nil, &placementError{core.DeferClassInfrastructure, fmt.Sprintf("bundling %s on this machine: %v", in.field, err)}
 		}
 	}
 	max := cfg.EffectiveMediaInputsMaxBytes()
-	var total int64
-	for _, in := range inputs {
-		if fi, err := os.Stat(in.path); err == nil {
-			total += fi.Size()
-		}
-	}
-	if total > max {
-		return nil, nil, &contractError{fmt.Sprintf("the input files are %d bytes, over fleet_media_inputs_max_mb (%d MiB); the node's own cap may differ", total, max>>20)}
-	}
-	bundle, err := composebundle.Pack(tmp, composebundle.Limits{MaxFiles: 8, MaxFileBytes: max, MaxTotal: max})
+	// Every way Pack refuses a file (not regular, over a limit, too many) was ruled out above (plan checked
+	// each input is a regular file, checkInputSizes the total), so what is left of a Pack error is this
+	// machine failing to read what it just copied.
+	bundle, err := packFn(tmp, composebundle.Limits{MaxFiles: 8, MaxFileBytes: max, MaxTotal: max})
 	if err != nil {
-		return nil, nil, &contractError{"media-job bundle: " + err.Error()}
+		return nil, nil, &placementError{core.DeferClassInfrastructure, "packing the input files on this machine: " + err.Error()}
 	}
 	if int64(len(bundle)) > max {
 		return nil, nil, &contractError{fmt.Sprintf("the bundle is %d bytes, over fleet_media_inputs_max_mb (%d MiB); the node's own cap may differ", len(bundle), max>>20)}
@@ -382,10 +471,20 @@ func buildBundle(cfg config.Config, inputs []input) ([]byte, []string, error) {
 	return bundle, names, nil
 }
 
+// packFn packs the staged input directory. A var so a test can make the packer fail or count its calls.
+var packFn = composebundle.Pack
+
+// inputFileError marks a copy failure that is about the caller's source file (it vanished or cannot be
+// opened), as opposed to this machine's destination side.
+type inputFileError struct{ err error }
+
+func (e *inputFileError) Error() string { return e.err.Error() }
+func (e *inputFileError) Unwrap() error { return e.err }
+
 func copyFile(from, to string) error {
 	src, err := os.Open(from)
 	if err != nil {
-		return err
+		return &inputFileError{err}
 	}
 	defer src.Close()
 	dst, err := os.OpenFile(to, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
@@ -531,8 +630,26 @@ type jobWire struct {
 	Error string          `json:"error"`
 }
 
+// httpStatusError is a node answering a GET with a status that is not 200.
+type httpStatusError struct {
+	code int
+	what string
+	body string
+}
+
+func (e *httpStatusError) Error() string {
+	return fmt.Sprintf("%s: status %d: %s", e.what, e.code, e.body)
+}
+
+// rejectedToken: the node refused the fleet bearer.
+func (e *httpStatusError) rejectedToken() bool {
+	return e.code == http.StatusUnauthorized || e.code == http.StatusForbidden
+}
+
 // wait polls the job until it is done or errored. A done media job's data is the pipeline's result object;
-// an errored one carries the node's typed reason, which comes back as a deferred result.
+// an errored one carries the node's typed reason, which comes back as a deferred result. A node that says
+// it does not hold the job (restarted, or evicted it) and one that refuses the bearer end the wait at once;
+// any other failure is tolerated until maxPollFailures of them happen in a row.
 func wait(ctx context.Context, cfg config.Config, base, jobID string) (core.Result, json.RawMessage, error) {
 	failures := 0
 	for {
@@ -543,8 +660,14 @@ func wait(ctx context.Context, cfg config.Config, base, jobID string) (core.Resu
 			if ctx.Err() != nil {
 				return core.Result{}, nil, fmt.Errorf("job %s: %w", jobID, ctx.Err())
 			}
-			if strings.Contains(err.Error(), "status 404") {
-				return core.Result{}, nil, fmt.Errorf("job %s: the node denies holding it (evicted or restarted): %w", jobID, err)
+			var se *httpStatusError
+			if errors.As(err, &se) {
+				switch {
+				case se.code == http.StatusNotFound:
+					return core.Result{}, nil, fmt.Errorf("job %s: the node denies holding it (evicted or restarted): %w", jobID, err)
+				case se.rejectedToken():
+					return core.Result{}, nil, &placementError{core.DeferClassConfig, fmt.Sprintf("the node refused the fleet token while polling job %s: %v (check fleet_auth_token)", jobID, err)}
+				}
 			}
 			failures++
 			if failures >= maxPollFailures {
@@ -575,17 +698,36 @@ func wait(ctx context.Context, cfg config.Config, base, jobID string) (core.Resu
 // outputKeys are the result keys that name one output file each; run-graph also names files under outputs.
 var outputKeys = []string{"video_path", "image_path", "audio_path"}
 
-// fetched is one output downloaded to a temp name and verified, waiting to be moved into place.
-type fetched struct {
+// outputDest is where the caller wants the outputs: out is the file for the primary output, outDir the
+// directory for the rest (run-graph's out_dir, which then replaces media_dir for every output).
+type outputDest struct {
+	out, outDir string
+}
+
+// renameFile moves a verified download into place. A var so a test can make a placement fail.
+var renameFile = os.Rename
+
+// staged is one output downloaded to a unique temp name beside its destination and verified, waiting to be
+// moved into place. reserved marks a destination this call created (empty) to claim the name.
+type staged struct {
+	name     string // the node's bare file name
 	tmp, dst string
+	reserved bool
+	explicit bool // the caller's own out: the one destination that may replace an existing file
 }
 
 // fetchOutputs downloads every file the node's result names, verifies each against the sha256 the node
-// published, and returns the result object with those paths rewritten to the local copies. Nothing lands
-// until every file is downloaded and verified: a mismatch deletes what was fetched and leaves the caller's
-// destination as it was. The primary output goes to `out` when the caller named one; the rest go to this
-// box's media dir under the node's file names.
-func fetchOutputs(ctx context.Context, cfg config.Config, base string, data json.RawMessage, out, jobID, node string) (json.RawMessage, error) {
+// published, and returns the result object with those paths rewritten to the local copies.
+//
+// Nothing lands until every file is downloaded and verified, and no file that already exists is replaced
+// except the caller's explicit out. Every output is staged under a unique temp name in its destination
+// directory. Each destination other than out is CLAIMED first by creating it exclusively, so two jobs (or
+// two nodes' counter names) can never write the same file: the primary takes the node's file name in
+// media_dir when it is free, every other output takes the remote job id as a prefix (an out_dir takes the
+// node's names, and the prefix only where a name is taken). A mismatch or a failed download removes every
+// temp and every claimed name and leaves the caller's destinations as they were; if a placement fails
+// part-way the error says which files already landed. The caller's out is placed last.
+func fetchOutputs(ctx context.Context, cfg config.Config, base string, data json.RawMessage, to outputDest, jobID, node string) (json.RawMessage, error) {
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.UseNumber()
 	var m map[string]any
@@ -639,63 +781,115 @@ func fetchOutputs(ctx context.Context, cfg config.Config, base string, data json
 		return nil, &placementError{core.DeferClassInfrastructure, errNoOutput.Error()}
 	}
 
-	// Primary = the first named output. Its destination is `out` when given.
-	dest := map[string]string{} // node path -> local path
-	taken := map[string]string{}
+	// Every name is checked before anything is created or fetched. The node serves a file by its bare name
+	// only, so two different paths with one base name would be one file under two claims: refused.
+	names := make([]string, len(named))
+	byName := map[string]string{}
 	for i, p := range named {
 		name, err := nodeName(p)
 		if err != nil {
 			return nil, err
 		}
-		dst := filepath.Join(cfg.MediaDir, name)
-		if i == 0 && out != "" {
-			dst = out
+		if prev, dup := byName[name]; dup && prev != p {
+			return nil, &placementError{core.DeferClassInfrastructure, fmt.Sprintf("the node named two different outputs with the file name %s", name)}
 		}
-		if prev, dup := taken[dst]; dup && prev != p {
-			return nil, &placementError{core.DeferClassInfrastructure, fmt.Sprintf("the node named two different outputs that map to %s", dst)}
-		}
-		taken[dst] = p
-		dest[p] = dst
+		byName[name] = p
+		names[i] = name
 	}
 
-	var pending []fetched
+	dir, prefixSecondaries := cfg.MediaDir, true
+	if to.outDir != "" {
+		dir, prefixSecondaries = to.outDir, false
+	}
+	var items []*staged
+	var landed []string
 	cleanup := func() {
-		for _, f := range pending {
-			os.Remove(f.tmp)
+		for _, it := range items {
+			if it.tmp != "" {
+				os.Remove(it.tmp)
+			}
+			if it.reserved {
+				os.Remove(it.dst)
+			}
 		}
 	}
-	unverified := false
-	for _, p := range named {
-		name, _ := nodeName(p)
-		dst := dest[p]
-		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+	for i := range named {
+		it := &staged{name: names[i]}
+		items = append(items, it)
+		if i == 0 && to.out != "" {
+			it.dst, it.explicit = to.out, true
+			if err := os.MkdirAll(filepath.Dir(it.dst), 0o755); err != nil {
+				cleanup()
+				return nil, err
+			}
+			continue
+		}
+		if err := os.MkdirAll(dir, 0o755); err != nil {
 			cleanup()
 			return nil, err
 		}
-		tmp, got, err := download(ctx, cfg, base, name, dst)
+		dst, err := claimName(dir, names[i], jobID, i != 0 && prefixSecondaries)
 		if err != nil {
 			cleanup()
 			return nil, err
 		}
-		pending = append(pending, fetched{tmp, dst})
-		if want, ok := expected[name]; ok {
+		it.dst, it.reserved = dst, true
+	}
+
+	unverified := false
+	for _, it := range items {
+		tmp, got, err := download(ctx, cfg, base, it.name, filepath.Dir(it.dst))
+		if err != nil {
+			cleanup()
+			return nil, err
+		}
+		it.tmp = tmp
+		if want, ok := expected[it.name]; ok {
 			if got != want {
 				cleanup()
-				return nil, &placementError{core.DeferClassInfrastructure, fmt.Sprintf("the file %s arrived with sha256 %s but the node published %s (job %s): it was discarded", name, got, want, jobID)}
+				return nil, &placementError{core.DeferClassInfrastructure, fmt.Sprintf("the file %s arrived with sha256 %s but the node published %s (job %s): it was discarded", it.name, got, want, jobID)}
 			}
 		} else {
 			unverified = true
 		}
 	}
-	for i, f := range pending {
-		if err := os.Rename(f.tmp, f.dst); err != nil {
-			for _, g := range pending[i:] {
-				os.Remove(g.tmp)
-			}
-			return nil, err
+
+	// Place the claimed names first and the caller's own out last, so a failure part-way never has
+	// replaced the one file this call was allowed to replace.
+	order := make([]*staged, 0, len(items))
+	for _, it := range items {
+		if !it.explicit {
+			order = append(order, it)
 		}
 	}
+	for _, it := range items {
+		if it.explicit {
+			order = append(order, it)
+		}
+	}
+	for k, it := range order {
+		if err := renameFile(it.tmp, it.dst); err != nil {
+			for _, rest := range order[k:] {
+				os.Remove(rest.tmp)
+				if rest.reserved {
+					os.Remove(rest.dst)
+				}
+			}
+			already := "none"
+			if len(landed) > 0 {
+				already = strings.Join(landed, ", ")
+			}
+			return nil, &placementError{core.DeferClassInfrastructure, fmt.Sprintf(
+				"placing %s failed: %v (files already in place: %s; every other download was removed)", it.dst, err, already)}
+		}
+		it.tmp = ""
+		landed = append(landed, it.dst)
+	}
 
+	dest := map[string]string{} // node path -> local path
+	for i, p := range named {
+		dest[p] = items[i].dst
+	}
 	rewrite := func(p string) string {
 		if l, ok := dest[p]; ok {
 			return l
@@ -727,6 +921,32 @@ func fetchOutputs(ctx context.Context, cfg config.Config, base string, data json
 	return json.Marshal(m)
 }
 
+// claimName creates, exclusively and empty, the file an output will be moved onto, and returns its path:
+// the node's own name when it is wanted and free, else the remote job id as a prefix, else that with a
+// counter. An existing file (or directory) of any of those names is never touched.
+func claimName(dir, name, jobID string, prefixed bool) (string, error) {
+	candidates := []string{name, jobID + "-" + name}
+	if prefixed {
+		candidates = candidates[1:]
+	}
+	for n := 2; n <= 9; n++ {
+		candidates = append(candidates, fmt.Sprintf("%s-%d-%s", jobID, n, name))
+	}
+	for _, c := range candidates {
+		p := filepath.Join(dir, c)
+		f, err := os.OpenFile(p, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+		if err == nil {
+			f.Close()
+			return p, nil
+		}
+		if errors.Is(err, fs.ErrExist) {
+			continue
+		}
+		return "", err
+	}
+	return "", fmt.Errorf("no free file name for %s in %s", name, dir)
+}
+
 // nodeName is the bare file name of a path the node reported, whichever OS wrote it. The path is the
 // node's, but the name becomes a file in this machine's media dir, so it must be a plain name: never ".",
 // "..", a root, or a name with a colon (a drive or an NTFS stream).
@@ -738,8 +958,9 @@ func nodeName(p string) (string, error) {
 	return n, nil
 }
 
-// download fetches one file into <dst>.part and returns that temp path and the sha256 of the bytes written.
-func download(ctx context.Context, cfg config.Config, base, name, dst string) (tmp, sum string, err error) {
+// download fetches one file into a unique temp file in dir and returns that temp path and the sha256 of
+// the bytes written. On any failure no temp file is left behind.
+func download(ctx context.Context, cfg config.Config, base, name, dir string) (tmp, sum string, err error) {
 	fctx, cancel := context.WithTimeout(ctx, fetchTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(fctx, http.MethodGet, base+"/fleet/media/"+url.PathEscape(name), nil)
@@ -754,13 +975,13 @@ func download(ctx context.Context, cfg config.Config, base, name, dst string) (t
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return "", "", fmt.Errorf("GET %s: status %d: %s", name, resp.StatusCode, truncate(b))
+		return "", "", &httpStatusError{code: resp.StatusCode, what: "GET " + name, body: truncate(b)}
 	}
-	tmp = dst + ".part"
-	f, err := os.Create(tmp)
+	f, err := os.CreateTemp(dir, ".media-fetch-*.part")
 	if err != nil {
 		return "", "", err
 	}
+	tmp = f.Name()
 	h := sha256.New()
 	if _, err := io.Copy(io.MultiWriter(f, h), resp.Body); err != nil {
 		f.Close()
@@ -791,7 +1012,7 @@ func getJSON[T any](ctx context.Context, cfg config.Config, u string) (T, error)
 		return zero, err
 	}
 	if resp.StatusCode != http.StatusOK {
-		return zero, fmt.Errorf("GET %s: status %d: %s", u, resp.StatusCode, truncate(body))
+		return zero, &httpStatusError{code: resp.StatusCode, what: "GET " + u, body: truncate(body)}
 	}
 	var v T
 	if err := json.Unmarshal(body, &v); err != nil {

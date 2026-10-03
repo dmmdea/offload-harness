@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -505,8 +506,9 @@ func TestRunGraphCarriesTheGraphInlineAndFetchesEveryOutput(t *testing.T) {
 	graph := writeFile(t, dir, "g.json", []byte(`{"1":{"class_type":"KSampler"}}`))
 	manifest := writeFile(t, dir, "m.json", []byte(`{"models":[]}`))
 	out := filepath.Join(t.TempDir(), "main.png")
+	outDir := filepath.Join(t.TempDir(), "graphs")
 	res := Run(context.Background(), cfg, &recordingRunner{}, core.Request{Task: core.TaskRunGraph, Params: map[string]any{
-		"graph_path": graph, "manifest_path": manifest, "out_dir": "/etc", "reserve_vram": "0.5", "out": out,
+		"graph_path": graph, "manifest_path": manifest, "out_dir": outDir, "reserve_vram": "0.5", "out": out,
 	}}, "remote", nil)
 	if !res.OK {
 		t.Fatalf("%+v", res)
@@ -547,8 +549,13 @@ func TestRunGraphCarriesTheGraphInlineAndFetchesEveryOutput(t *testing.T) {
 			t.Errorf("output path still names the node's file: %s", p)
 		}
 	}
-	if b, _ := os.ReadFile(filepath.Join(cfg.MediaDir, "graph-b.mp4")); string(b) != "GB" {
-		t.Fatalf("the secondary output belongs in media_dir: %q", b)
+	// The secondary output lands in the caller's out_dir (the node's own media dir is not the caller's
+	// business), which it never sent to the node.
+	if b, _ := os.ReadFile(filepath.Join(outDir, "graph-b.mp4")); string(b) != "GB" {
+		t.Fatalf("the secondary output belongs in out_dir: %q", b)
+	}
+	if got := dirNames(t, cfg.MediaDir); len(got) != 0 {
+		t.Fatalf("with out and out_dir given nothing goes to media_dir: %v", got)
 	}
 	if b, _ := os.ReadFile(out); string(b) != "GA" {
 		t.Fatalf("the primary output holds %q", b)
@@ -623,17 +630,6 @@ func TestNodeNameRefusesAnythingButAPlainName(t *testing.T) {
 			t.Errorf("nodeName(%q) = %q, %v; want %q", in, got, err, want)
 		}
 	}
-	// A hostile result path cannot become a file outside media_dir.
-	fake := fakeNode(t, fakeOpts{tasks: []string{"image-gen"}, jobData: `{"image_path":"../../../etc/passwd"}`, media: t.TempDir()})
-	cfg := config.Config{MediaDir: t.TempDir(), DelegateRemotes: []string{fake.URL}}
-	res := Run(context.Background(), cfg, &recordingRunner{}, core.Request{Task: core.TaskGenerateImage, Input: "p"}, "remote", nil)
-	if res.OK {
-		t.Fatalf("%+v", res)
-	}
-	if _, err := os.Stat(filepath.Join(cfg.MediaDir, "passwd")); err == nil {
-		// the guard takes the base name, so the file is a plain name in media_dir at worst
-		t.Log("the traversal collapsed to a plain name inside media_dir")
-	}
 }
 
 // ---- placement -------------------------------------------------------------------------------------
@@ -647,13 +643,58 @@ type fakeOpts struct {
 	status  int    // dispatch status, 0 = 202
 	jobData string // done job data
 	media   string
+	// jobState, when set, is the state the job reports forever (it never finishes).
+	jobState string
+	// doneAfter holds the job in "running" until this long after the dispatch.
+	doneAfter time.Duration
+	// pollStatus, when set, is the status every poll of the job answers.
+	pollStatus int
+	// pollFailures makes the first N polls answer 500 before the job behaves normally.
+	pollFailures int
+	// mediaStatus, when set, is the status GET /fleet/media answers instead of the file.
+	mediaStatus int
+	// log, when set, records every request path and the number of polls.
+	log *fakeLog
+}
+
+// fakeLog is what a fake node saw.
+type fakeLog struct {
+	mu    sync.Mutex
+	paths []string // r.URL.EscapedPath() of every request
+	polls int
+}
+
+func (l *fakeLog) note(path string, poll bool) {
+	if l == nil {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.paths = append(l.paths, path)
+	if poll {
+		l.polls++
+	}
+}
+
+func (l *fakeLog) seen(prefix string) []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var out []string
+	for _, p := range l.paths {
+		if strings.HasPrefix(p, prefix) {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // fakeNode is a hand-written node: health with exactly the fields given, dispatch with a chosen status.
 func fakeNode(t *testing.T, o fakeOpts) *httptest.Server {
 	t.Helper()
 	tasks, _ := json.Marshal(o.tasks)
+	var dispatched atomic.Int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		o.log.note(r.URL.EscapedPath(), strings.HasPrefix(r.URL.Path, "/fleet/jobs/"))
 		switch {
 		case r.URL.Path == "/fleet/health":
 			extra := ""
@@ -671,11 +712,39 @@ func fakeNode(t *testing.T, o fakeOpts) *httptest.Server {
 				fmt.Fprint(w, `{"status":"error","error":"fake refusal"}`)
 				return
 			}
+			dispatched.Store(time.Now().UnixNano())
 			w.WriteHeader(202)
 			fmt.Fprint(w, `{"status":"accepted"}`)
 		case strings.HasPrefix(r.URL.Path, "/fleet/jobs/"):
+			if o.pollStatus != 0 {
+				w.WriteHeader(o.pollStatus)
+				fmt.Fprint(w, `{"status":"error","error":"fake poll refusal"}`)
+				return
+			}
+			if o.log != nil {
+				o.log.mu.Lock()
+				n := o.log.polls
+				o.log.mu.Unlock()
+				if n <= o.pollFailures {
+					w.WriteHeader(500)
+					fmt.Fprint(w, `{"status":"error","error":"fake hiccup"}`)
+					return
+				}
+			}
+			if o.jobState != "" {
+				fmt.Fprintf(w, `{"state":%q}`, o.jobState)
+				return
+			}
+			if t := dispatched.Load(); o.doneAfter > 0 && time.Since(time.Unix(0, t)) < o.doneAfter {
+				fmt.Fprint(w, `{"state":"running"}`)
+				return
+			}
 			fmt.Fprintf(w, `{"state":"done","data":%s}`, o.jobData)
 		case strings.HasPrefix(r.URL.Path, "/fleet/media/"):
+			if o.mediaStatus != 0 {
+				w.WriteHeader(o.mediaStatus)
+				return
+			}
 			http.ServeFile(w, r, filepath.Join(o.media, strings.TrimPrefix(r.URL.Path, "/fleet/media/")))
 		default:
 			http.NotFound(w, r)

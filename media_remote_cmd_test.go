@@ -147,7 +147,10 @@ func TestMediaVerbsRouteToAFleetNode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	data, _ = resultOf(t, out)
+	data, meta = resultOf(t, out)
+	if meta["placement"] != "remote: forced" {
+		t.Fatalf("run-graph: --route remote must stamp the placement forced, meta %v", meta)
+	}
 	if got := data["image_path"]; got != filepath.Join(mediaDir, "g-1.png") {
 		t.Fatalf("run-graph image_path %v", got)
 	}
@@ -165,7 +168,10 @@ func TestMediaVerbsRouteToAFleetNode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	data, _ = resultOf(t, out)
+	data, meta = resultOf(t, out)
+	if meta["placement"] != "remote: forced" {
+		t.Fatalf("audio: --route remote must stamp the placement forced, meta %v", meta)
+	}
 	if data["audio_path"] != outPath {
 		t.Fatalf("audio_path %v, want %s", data["audio_path"], outPath)
 	}
@@ -188,7 +194,10 @@ func TestMediaVerbsRouteToAFleetNode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	data, _ = resultOf(t, out)
+	data, meta = resultOf(t, out)
+	if meta["placement"] != "remote: forced" {
+		t.Fatalf("video: --route remote must stamp the placement forced, meta %v", meta)
+	}
 	if data["video_path"] != clip {
 		t.Fatalf("video_path %v, want %s", data["video_path"], clip)
 	}
@@ -220,5 +229,126 @@ func TestParseGenerateVideoCarriesRouteAndRemotes(t *testing.T) {
 	}
 	if d.route != "auto" || len(d.remotes) != 0 {
 		t.Fatalf("defaults: route %q remotes %v", d.route, d.remotes)
+	}
+}
+
+// The animate-character verb takes --route and --remote like the others, and a remote run sends the
+// reference and the driver through the media-job door and lands the clip where the caller asked.
+func TestAnimateCharacterVerbRoutesToAFleetNode(t *testing.T) {
+	n := startMediaFakeNode(t, []string{"animate", "media-job"}, `{"video_path":"/node/media/a-1.mp4"}`, "a-1.mp4", "ANIMDATA")
+	cfgPath, _ := cliConfig(t, n.srv.URL, nil)
+	dir := t.TempDir()
+	ref := filepath.Join(dir, "fox.png")
+	driver := filepath.Join(dir, "dance.mp4")
+	if err := os.WriteFile(ref, append([]byte("\x89PNG\r\n\x1a\n"), make([]byte, 16)...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(driver, append([]byte("\x00\x00\x00\x18ftypmp42"), make([]byte, 16)...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	clip := filepath.Join(dir, "out", "fox.mp4")
+	out, err := captureVerbStdout(t, func() error {
+		return runAnimateCharacter([]string{"--config", cfgPath, "--route", "remote", "--remote", n.srv.URL, "--json",
+			clip, ref, driver, "a fox dancing", "--frames", "33", "--pose-strength", "0.8", "--motion-prompt", "a slow dance"})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, meta := resultOf(t, out)
+	if meta["node"] != "cli-node" || meta["placement"] != "remote: forced" {
+		t.Fatalf("meta %v", meta)
+	}
+	if data["video_path"] != clip {
+		t.Fatalf("video_path %v, want %s", data["video_path"], clip)
+	}
+	if b, _ := os.ReadFile(clip); string(b) != "ANIMDATA" {
+		t.Fatalf("the clip at out holds %q", b)
+	}
+	m := <-n.body
+	inputs, _ := m["inputs"].(map[string]any)
+	p, _ := m["payload"].(map[string]any)
+	if m["_path"] != "/fleet/media-job" || m["task_type"] != "animate" || inputs["ref"] != "ref.png" || inputs["driver"] != "driver.mp4" ||
+		p["prompt"] != "a fox dancing" || p["frames"] != float64(33) || p["pose_strength"] != "0.8" || p["motion_prompt"] != "a slow dance" {
+		t.Fatalf("animate wire %v", m)
+	}
+}
+
+// Ignoring --route or --remote must not survive: on every media verb a bad route and a remote outside
+// delegate_remotes are refused by Run (they never reach a render), and a good route is stamped forced.
+func TestEveryMediaVerbPassesRouteAndRemotesToTheRouter(t *testing.T) {
+	n := startMediaFakeNode(t, []string{"image-gen"}, `{"image_path":"x.png"}`, "x.png", "X")
+	cfgPath, _ := cliConfig(t, n.srv.URL, nil)
+	dir := t.TempDir()
+	graph := filepath.Join(dir, "g.json")
+	if err := os.WriteFile(graph, []byte(`{"1":{"class_type":"X"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	verbs := map[string]func(extra ...string) (string, error){
+		"generate-image": func(extra ...string) (string, error) {
+			return captureVerbStdout(t, func() error {
+				return runGenerateImage(append([]string{"--config", cfgPath, "--json", "a door"}, extra...))
+			})
+		},
+		"generate-video": func(extra ...string) (string, error) {
+			return captureVerbStdout(t, func() error {
+				return runGenerateVideo(append([]string{"--config", cfgPath, "--json", filepath.Join(dir, "o.mp4"), filepath.Join(dir, "s.png"), "pan"}, extra...))
+			})
+		},
+		"generate-audio": func(extra ...string) (string, error) {
+			return captureVerbStdout(t, func() error {
+				return runGenerateAudio(append([]string{"--config", cfgPath, "--json", filepath.Join(dir, "o.wav"), "hola"}, extra...))
+			})
+		},
+		"run-graph": func(extra ...string) (string, error) {
+			return captureVerbStdout(t, func() error {
+				return runRunGraph(append([]string{"--config", cfgPath, "--json", "--graph", graph}, extra...))
+			})
+		},
+		"animate-character": func(extra ...string) (string, error) {
+			return captureVerbStdout(t, func() error {
+				return runAnimateCharacter(append([]string{"--config", cfgPath, "--json", filepath.Join(dir, "o.mp4"), filepath.Join(dir, "r.png"), filepath.Join(dir, "d.mp4"), "a fox"}, extra...))
+			})
+		},
+	}
+	reason := func(t *testing.T, out string) string {
+		t.Helper()
+		var res struct {
+			Deferred bool   `json:"deferred"`
+			Reason   string `json:"reason"`
+		}
+		start := strings.Index(out, "{")
+		if start < 0 || json.Unmarshal([]byte(out[start:]), &res) != nil {
+			t.Fatalf("no JSON result in %q", out)
+		}
+		if !res.Deferred {
+			t.Fatalf("expected a defer, got %q", out)
+		}
+		return res.Reason
+	}
+	for name, run := range verbs {
+		t.Run(name, func(t *testing.T) {
+			out, err := run("--route", "sideways")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if r := reason(t, out); !strings.Contains(r, "unrecognized route") {
+				t.Errorf("--route did not reach the router: %s", r)
+			}
+			out, err = run("--route", "remote", "--remote", "http://192.0.2.77:18811")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if r := reason(t, out); !strings.Contains(r, "not in delegate_remotes") {
+				t.Errorf("--remote did not reach the router: %s", r)
+			}
+		})
+	}
+	// And the one verb whose job needs no input file places it: --route remote is stamped forced.
+	out, err := verbs["generate-image"]("--route", "remote", "--remote", n.srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, meta := resultOf(t, out); meta["placement"] != "remote: forced" {
+		t.Fatalf("meta %v", meta)
 	}
 }
