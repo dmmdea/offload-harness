@@ -134,6 +134,63 @@ func TestReleaseWarmSeatWithNoEpochWarmsOverTheOneLiveLease(t *testing.T) {
 	}
 }
 
+// With no epoch and two live leases the release itself refuses ("card-scoped leases are
+// held"), and the count that matters is the whole box's, not the seat's cards: even with
+// only one of the two on the seat's cards, the warm must not run (review of #530: it loaded
+// the seat over that lease and cleared the owed marker for a release that never happened).
+func TestReleaseWarmSeatWithNoEpochAndTwoLiveLeasesNeverWarms(t *testing.T) {
+	cfgPath, m, warms := warmCardFixture(t)
+	acquireCard(t, m, "on the seat", "gpu-aaaa0000-x")
+	acquireCard(t, m, "elsewhere", "gpu-cccc0000-x")
+	if err := m.MarkSeatWarmOwed("seat"); err != nil {
+		t.Fatal(err)
+	}
+	cfg := loadCfgPath(cfgPath)
+	pinSeat(t, "gpu-aaaa0000")
+	var out bytes.Buffer
+	warmBackGuarded(cfg, releaseWarmGuard(m, 0), &out)
+	if n := warms.Load(); n != 0 || m.SeatWarmOwed() != "seat" {
+		t.Fatalf("release --warm-seat with no epoch over two live leases warmed: warms=%d owed=%q: %s", n, m.SeatWarmOwed(), out.String())
+	}
+	if released, _ := m.ReleaseByEpoch(0); released {
+		t.Fatal("the premise moved: a release with no epoch over two live leases released one")
+	}
+}
+
+// A seat that DECLARES its cards is held by a lease on one of them (the pin path, not the
+// unknown-seat path every other skip test takes).
+func TestAWarmBackWaitsForALeaseOnADeclaredSeatCard(t *testing.T) {
+	cfgPath, m, warms := warmCardFixture(t)
+	a := acquireCard(t, m, "film card 0", "gpu-aaaa0000-x")
+	b := acquireCard(t, m, "film card 2", "gpu-cccc0000-x")
+	if err := m.MarkSeatWarmOwed("seat"); err != nil {
+		t.Fatal(err)
+	}
+	cfg := loadCfgPath(cfgPath)
+	pinSeat(t, "gpu-aaaa0000", "gpu-cccc0000")
+	var out bytes.Buffer
+	warmBackGuarded(cfg, leaseWarmGuard(m, a), &out)
+	if n := warms.Load(); n != 0 || !strings.Contains(out.String(), "epoch "+strconv.FormatUint(b.Epoch(), 10)) {
+		t.Fatalf("a lease on a declared seat card must hold the warm (warms=%d): %s", n, out.String())
+	}
+}
+
+// pinSeat declares the cards of the seat "seat" (after loadCfgPath, which arms the pins from
+// the config) over the three-card test table.
+func pinSeat(t *testing.T, pins ...string) {
+	t.Helper()
+	modelaffinity.SetSeatPins(func(model string) ([]string, bool) {
+		if model == "seat" {
+			return pins, true
+		}
+		return nil, false
+	})
+	t.Cleanup(func() { modelaffinity.SetSeatPins(nil) })
+	t.Cleanup(modelaffinity.SetCardTableReader(func(context.Context, string) ([]gpuprobe.Card, string, error) {
+		return statusCards(), "", nil
+	}))
+}
+
 // A release whose lease is already gone leaves a free card: the warm the operator asked
 // for runs (nothing held is nobody else's lease).
 func TestReleaseWarmSeatAfterTheLeaseEndedWarmsOnTheFreeCard(t *testing.T) {
