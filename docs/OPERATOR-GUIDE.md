@@ -462,7 +462,7 @@ renders); GIMP is needed only for `flatten_design`/`instantiate_design` (headles
 ### Compose motion graphics (compose-video, HyperFrames)
 
 ```powershell
-# a vetted template + typed variables (the only form the fleet task accepts)
+# a vetted template + typed variables (what a node's template door takes from any fleet caller)
 local-offload compose-video --template title-card --variables '{"title":"Launch day","subtitle":"Everything that shipped","accent":"#22c55e","duration":6}' --json
 # a transparent lower third for an editor (ProRes 4444) or the web (VP9 alpha), with two check frames
 local-offload compose-video --template lower-third --format webm --variables-file lt.json --snapshots 1,2.5 --out D:/renders/lt.webm
@@ -508,6 +508,20 @@ a short card, but a clip longer than about two minutes needs 1: above one worker
 frame, 8.3 MB at 1080p, and defers `DISK_HEADROOM`),
 `compose_timeout_sec` (1800; a 300 s caption chunk takes about 17 minutes at one worker) and `compose_cache_dir`
 (work dirs and frame cache; move it to a large drive if a render defers `DISK_HEADROOM`).
+
+**From a machine without the lane ([ADR 0070](architecture/decisions/0070-a-fleet-token-holder-may-send-a-whole-composition-project-to-render.md)).**
+`route` (`--route` on the CLI) picks where a composition renders: `auto`, the default, renders here when
+this machine has the lane and on a fleet node from `delegate_remotes` when it has none; `remote` always
+sends it; `local` never does. A template travels by name to any node that advertises `compose-video`. A
+project directory or an inline composition travels as a bundle to a node's project door, which a node
+opens only with `fleet_compose_projects: true` and a `fleet_auth_token`, and the caller must hold the same
+token. Both sides check the bundle: regular files only, no unsafe or reserved names, size caps
+(`fleet_compose_bundle_max_mb`, 64 MB by default), and no reference that leaves the project (`..`, an
+absolute or root-relative path, a `file:` URL, a `<base>` or `srcdoc`, or a URL to a loopback, private,
+tailnet or dotless host). Public `https` references (fonts, a CDN) stay allowed, and the node fetches
+them. The video and its snapshots come back into this machine's media dir, or to `out`. `png-sequence`
+renders only locally. A machine with no model or lane at all is a
+[delegation client](systems/delegation-client.md).
 
 **Adding a template.** Follow the contract in
 [`render/compose-templates/README.md`](../render/compose-templates/README.md): offline, deterministic,
@@ -1361,7 +1375,9 @@ Details: [`docs/systems/cache-server.md`](systems/cache-server.md), ADR 0033 (th
 Fan self-contained sub-agent contracts out to this box or to fleet nodes on your tailnet
 (never cloud — [ADR 0023](architecture/decisions/0023-agent-lane-tailnet-auth-and-locality.md)).
 Placement is **quality-first**: an idle local box always runs the work; a remote node is used
-only when the local GPU is busy *and* the node passes the capability gate. Wire details:
+only when the local GPU is busy *and* the node passes the capability gate. A box with no agent seat
+(a [delegation client](systems/delegation-client.md): `agent_model` and `model` both empty) is never a
+placement: route=auto and route=spread send every subtask to the fleet. Wire details:
 `docs/FLEET-NODE.md`. Template contracts to start from: [`contracts/`](../contracts/README.md).
 
 **A text-class GPU lease reserves the local seat (0.113.14).** `gpu reserve --class text` is how a
