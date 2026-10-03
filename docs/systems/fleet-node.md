@@ -1494,13 +1494,16 @@ in the bundle. The fields that may be files are `video-gen.still`, `animate.ref`
   (`config.MediaInputsAdmissible`; health lists `media-job` only while one inner task is also runnable). Closed, it answers
   403; without the bearer, 401; both before a byte of the body is read. `media-job` is token-gated, so the same task over
   `/fleet/dispatch` needs the bearer too, and its jobs are masked from tokenless polls and feeds.
-- The body is capped at `fleet_media_inputs_max_mb` (default 512, compressed) in base64 plus 64 KiB (413 over it), is JSON
-  only, and unknown fields are a 400. A token holder gets a 15-minute read and write window.
+- The body is capped at `fleet_media_inputs_max_mb` (default 256, compressed) in base64 plus 64 KiB (413 over it), is JSON
+  only, and unknown fields are a 400. A token holder gets a 15-minute read and write window; a writer that cannot carry the
+  extended deadlines is logged once per process per route. The body is held once while the job is admitted (the bundle is
+  base64-decoded straight out of it into the one decoded copy, and the admission closure keeps only the job id and task type),
+  so a running or queued job pins neither the body nor the bundle: the extracted directory is the only copy.
 - The bundle's sha256 must match; it is extracted into `<media_dir>/fleet-inputs/in-*` (regular files only, confined names,
   byte caps; a symlink or a traversal name is refused); each `inputs` value must be a regular file directly in that
   directory; and its first bytes must match the field's kind: image PNG, JPEG or WebP; video MP4/MOV or WebM/MKV; audio WAV,
-  FLAC, MP3, OGG or M4A. A payload that names a node-local path in a file field is refused: this door carries bytes, never
-  paths. The inner task is built by the same builder `/fleet/dispatch` uses, with each field rewritten to the extracted path.
+  FLAC, MP3, OGG or M4A. A payload that names a node-local path in a file field, in any casing (`Still` fills `still` in the
+  builders), is refused: this door carries bytes, never paths; a shipped file replaces every spelling of its field. The inner task is built by the same builder `/fleet/dispatch` uses, with each field rewritten to the extracted path.
 - The directory is removed when the job ends and on every refusal. `fleet-serve` removes `in-*` directories older than the
   longest media timeout plus an hour at startup. A node-side failure (a disk that filled) is a 500, not "refused".
 
@@ -1516,7 +1519,11 @@ missing weight, VAE or custom node is BOUND-BUT-MISSING and the task drops out; 
 predicate (`taskConfiguredFor`) serves health and dispatch, so a node never lists what it would refuse. `image-gen` keeps
 `ImageGenAdvertisable`. `/fleet/health` gains `media_routes: [{route, engine, state}]` (every task route, not the shared
 prerequisites; the `detail` paths stay on the node), and `supported_task_types` and `loadable_model_families` are derived per
-request from the same reading, which is cached for at most 60 seconds per config. A delegator reads `media_routes` through
+request from the same reading, which is cached for at most 60 seconds per config and read once per health request and once
+per admission (the node keys its cache once, at construction; the pull claim loop re-derives its task list on every claim). A
+media task the node binds whose route is not CONFIGURED is refused at admission with a `503` naming the route and its
+state (`task_type "video-gen" is bound on this node but its route is not ready: generate_video BOUND-BUT-MISSING ...`), which
+every delegator re-places; a task that is not bound at all keeps the `400 unsupported task_type`. A delegator reads `media_routes` through
 `delegate.NodeView` (`MediaRoutes`, `RouteState`); an absent field is unknown, never "no route".
 
 ## Source map

@@ -15,7 +15,7 @@ and CLI verbs called the local pipeline directly.
 - **Node: the media-job door.** `POST /fleet/media-job` (task `media-job`) takes one media task with its input files (a
   `video-gen` still, an `animate` reference and driver, an `audio-gen` clone sample) from a holder of the fleet token. It is
   closed unless `fleet_media_inputs` is true, `fleet_auth_token` is set and a media task is bound; the bearer is checked
-  before the body; the bundle is capped (`fleet_media_inputs_max_mb`, default 512 MiB), sha256-checked, extracted into
+  before the body; the bundle is capped (`fleet_media_inputs_max_mb`, default 256 MiB), sha256-checked, extracted into
   `<media_dir>/fleet-inputs/in-*` and sniffed by magic bytes per field kind; the inner task is built by the builder
   `/fleet/dispatch` uses; the directory is removed with the job and swept at startup. `media-job` is token-gated, so its jobs
   are masked from tokenless polls.
@@ -30,8 +30,8 @@ and CLI verbs called the local pipeline directly.
   text lease, held lease, queue and config order, every miss named; outputs fetched by name and verified against the node's
   sha256 before anything lands. `delegate.NodeView` decodes `media_routes` (absent = unknown) and any held lease.
 - **Doors.** `offload_generate_image`, `offload_generate_video`, `offload_animate_character`, `offload_generate_audio` and
-  `offload_run_graph` gain `route` and `remotes`; `generate-image`, `generate-video`, `generate-audio` and `run-graph` gain
-  `--route` and a repeatable `--remote`. No tool was added. `refine=false`, `tts_voice` and `transformer` defer on a remote
+  `offload_run_graph` gain `route` and `remotes`; `generate-image`, `generate-video`, `generate-audio`, `animate-character` and
+  `run-graph` gain `--route` and a repeatable `--remote`. No tool was added. `refine=false`, `tts_voice` and `transformer` defer on a remote
   route (the node's tasks cannot carry them).
 - Closes the input half of register C-90 for media inputs (STT stays a separate door).
 
@@ -42,6 +42,53 @@ Tests: `TestMediaJobDoorChecksTheDoorAndTheBearerBeforeReadingTheBody`, `TestMed
 `TestAStillTravelsAsAMediaJobBundleWhoseHashMatches`, `TestAShaMismatchDefersAndLeavesNoFile`,
 `TestANodeWithoutTheRouteIsSkippedAndNamed`, `TestCallerRemotesMustBeAmongDelegateRemotes`,
 `TestMediaToolsAdvertiseRouteAndRemotes`, `TestMediaVerbsRouteToAFleetNode`.
+
+### Changed — review round for the media-job work (register CT-50)
+
+Behaviour that differs from the first cut of the entry above (all of it unreleased):
+
+- **`fleet_media_inputs_max_mb` defaults to 256, not 512.** A node holds the base64 request body and the decoded bundle
+  together while it admits a job; the default keeps that peak under about 0.6 GiB. Raise it for a node with the RAM.
+- **A running or queued media job no longer pins its request body.** The admission closure keeps only the job id and task
+  type; the door decodes the head of the body without materialising the bundle and base64-decodes the bundle straight out of
+  the body, so the extracted directory is the only copy the job holds (a 24 MiB bundle held 64 MiB of heap for the job's
+  whole life before; the test bounds it).
+- **`run_graph`'s `out_dir` is honoured on a remote route.** It never travels to the node; the fetched outputs are written into
+  it (created if missing, refused before the network when it cannot be created). `out` still takes the primary output.
+- **A fetched output never replaces an existing local file.** Each is staged under a unique temp name in its destination
+  directory and its final name is claimed exclusively: the primary keeps the node's file name in `media_dir` when it is free,
+  every other output is prefixed with the remote job id (an `out_dir` keeps the node's names and prefixes only a taken one).
+  Only the caller's own `out` is replaced, and it is placed last; if a placement fails part-way every temp and claim is
+  removed and the defer names the files that already landed.
+- **A bound media task whose route is not CONFIGURED is a `503`, not a `400`.** The refusal names the route and its mediacap
+  state and is re-placeable; a task that is not bound at all keeps `400 unsupported task_type`. The `media-job` door answers
+  the same when every media task it carries is bound but not ready.
+- **The pull claim loop** advertises the tasks the node can run now (re-derived every claim) instead of the startup list.
+- **The `media-job` file-field guard** matches field names without regard to case (the builders do), so `{"Still":"/etc/passwd"}`
+  is refused; a shipped file replaces every spelling of its field.
+- **Defer classes.** A call whose own deadline passed is `budget` and names the node and remote job; a 401 or 403 on the poll or
+  the fetch is `config` (and a 404 or a repeated poll failure still ends the wait); an input file this machine cannot read is
+  `contract` while its own temp directory, disk or packer failing is `infrastructure`; an unencodable parameter is a `contract`
+  defer naming the cause; graph and manifest are checked together against the 1 MiB dispatch body.
+- **The node is chosen before the bundle is packed**, so a fleet with no eligible node costs one probe, not the bundle.
+- **Route verdicts are read once per health request and per admission** (the node keys its cache once at construction) and a
+  slow derivation no longer holds one lock for every config; `route: auto` caches this machine's lane verdict for at most
+  60 s instead of walking the files on every call. The door's read and write deadline extensions report a writer that cannot
+  carry them, once per route.
+- **`animate-character` takes `--route` and `--remote`** like the other media verbs.
+
+Tests: `TestAnInFlightMediaJobDoesNotPinItsRequestBody`, `TestMediaJobFileFieldsAreRefusedAsNodePathsInAnyCasing`,
+`TestMediaJobCarriesOnlyItsFiveTasks`, `TestABoundTaskWithANotReadyRouteIs503NamingTheRouteAnUnboundOneStays400`,
+`TestClaimAdvertisesTheMediaTasksTheNodeCanRunRightNow`, `TestPulledMediaJobIsAckedWithArtifacts`,
+`TestMediaVerdictsAreReadOncePerHealthRequestAndPerAdmission`, `TestEachMediaTaskIsAdvertisedOnlyForItsOwnRoute`,
+`TestSweepKeepsADirectoryYoungerThanTheLongestTimeoutPlusAnHour`, `TestAFetchedOutputNeverReplacesAFileThatIsAlreadyThere`,
+`TestAFailedPlacementRemovesEveryTempAndNamesWhatLanded`, `TestRunGraphOutDirReceivesTheFetchedOutputs`,
+`TestTheTaskBudgetEndsACallThatSetNoDeadlineAsABudgetDefer`, `TestACallersDeadlineIsHonouredInBothDirections`,
+`TestAPollThatIs404EndsTheWaitAtOnce`, `TestConsecutivePollFailuresEndTheWaitAfterFiveAndAResetByASuccess`,
+`TestEveryMCPParameterReachesTheNodeBuilderUnderItsFieldName`, `TestEveryMediaDoorParameterReachesTheWire`,
+`TestLocalConfiguredMapsEachTaskToItsOwnRoute`, `TestAHostileResultPathCollapsesToAPlainNameInsideMediaDir`,
+`TestAnimateCharacterVerbRoutesToAFleetNode`, `TestEveryMediaVerbPassesRouteAndRemotesToTheRouter`,
+`TestCacheDoesNotHoldOneLockAcrossEveryConfigsDerivation`.
 
 ## [0.163.1] - 2026-10-03 - A warm-back never loads a seat over another card's lease
 

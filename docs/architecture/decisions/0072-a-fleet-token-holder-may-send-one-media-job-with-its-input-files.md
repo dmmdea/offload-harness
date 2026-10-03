@@ -38,7 +38,7 @@ Three facts stood in the way.
    `fleet_media_inputs` is true, `fleet_auth_token` is set and at least one media task is bound
    (`config.MediaInputsAdmissible`, and in the advertisement at least one inner task this node can run right now). The door
    and the bearer are checked before any of the body is read; the body is capped at the bundle cap in base64 plus 64 KiB
-   (`fleet_media_inputs_max_mb`, default 512 MiB compressed); the decoder refuses unknown fields; a token holder gets a
+   (`fleet_media_inputs_max_mb`, default 256 MiB compressed); the decoder refuses unknown fields; a token holder gets a
    15-minute read and write window. `media-job` is token-gated like `compose-project` (`tokenGated`), so a dispatch of it
    over `/fleet/dispatch` needs the bearer too, and its jobs are masked from tokenless polls and feeds.
 3. **The bundle is verified, extracted into a fresh directory and sniffed.** The node checks the declared sha256, extracts
@@ -85,8 +85,8 @@ Three facts stood in the way.
   a file that begins like a PNG can still be malformed, and the decoder that opens it (ComfyUI's image loader, ffmpeg) is the
   boundary for that. The fleet token is held only by the operator's machines.
 - Some request fields cannot ride the fleet task and defer by name on a remote route instead of being dropped: `refine=false`
-  (image), `tts_voice` (audio), `transformer` (video); a run-graph's `out_dir` is ignored by design (the node writes into its
-  own media dir and the files come back).
+  (image), `tts_voice` (audio), `transformer` (video); a run-graph's `out_dir` is never sent (the node writes into its own
+  media dir) but is honoured on the calling machine: the fetched outputs are written into it, created if missing.
 - A node whose weights go missing stops advertising the task within a minute and says why in `media_routes`; a client that
   reads `media_routes` skips it and names it in the defer. A default config on a thin client no longer reads as having a
   lane, so `route: auto` goes to a node there. A box with no lane and no `delegate_remotes` still runs the call locally and

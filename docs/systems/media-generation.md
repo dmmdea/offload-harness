@@ -1332,18 +1332,23 @@ a reference and driver (`offload_animate_character`) or a clone sample (`offload
 bundle (each under its field name plus its extension, copied into a temp directory and packed with `composebundle`) and goes
 through `POST /fleet/media-job` ([fleet-node.md](fleet-node.md#the-media-job-door-artifacts-and-honest-advertisement-adr-0072)).
 `run-graph` carries its graph and manifest inline, so it never needs the door. The payload uses the field names the node's
-builders decode; `out` and `out_dir` never travel. Three request fields cannot ride the fleet task and defer by name
+builders decode; `out` and `out_dir` never travel (`out_dir` is where the fetched outputs land here). Three request fields cannot ride the fleet task and defer by name
 (`defer_class` `contract`) instead of being dropped: `refine=false`, `tts_voice` and `transformer`.
 
 **What comes back.** The client polls `/fleet/jobs/{id}` every 2 seconds inside a budget when the caller gave no deadline
 (image 2 h, video and animate 6 h, audio 1 h, run-graph 2 h), then fetches every output the result names by bare name from
 `/fleet/media`. Nothing lands until every file is downloaded and its sha256 equals the one the node published in
 `artifacts`: a mismatch deletes what was fetched, leaves any file already at `out` untouched, and defers as
-`infrastructure`. The primary output goes to the caller's `out` when given, the rest into this machine's `media_dir`; the
-result's paths are rewritten to the local copies and it gains `node`, `remote_job_id` and, when the node published no
+`infrastructure`. The primary output goes to the caller's `out` when given, the rest into this machine's `media_dir` (or, for
+`run_graph`, the caller's `out_dir`, created if missing); no fetched file ever replaces one that already exists except the
+caller's own `out`: each output is staged under a unique temp name, the primary takes the node's file name when it is free,
+every other output is prefixed with the remote job id, and a failure part-way removes every temp and names the files that
+already landed. The result's paths are rewritten to the local copies and it gains `node`, `remote_job_id` and, when the node published no
 artifacts (an older node), `unverified: true`. `meta.node` names the node and `meta.placement` reads `remote: forced` or
 `remote: no <lane> lane on this machine`. A node's 503 or 429 is a `capacity` defer, a 400 or 413 a `contract` defer, a 401
-or 403 a `config` defer, and a transport failure an `infrastructure` defer. A defer the node itself returned (a render that
+or 403 (on the dispatch, the poll or the fetch) a `config` defer, a call whose own deadline passed a `budget` defer naming the
+node and the remote job (which may still hold its card), and a transport failure an `infrastructure` defer. An input file this
+machine cannot read is `contract`; this machine's own temp directory, disk or packer failing is `infrastructure`. A defer the node itself returned (a render that
 deferred) comes back as the node sent it, with `meta.node`.
 
 ## Comfy workflow templates catalog (phase A)
