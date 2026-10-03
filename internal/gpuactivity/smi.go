@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dmmdea/offload-harness/internal/gpulease"
 	"github.com/dmmdea/offload-harness/internal/gpuprobe"
 )
 
@@ -134,12 +135,15 @@ func ParseProcesses(out string) []GPUProcess {
 	return procs
 }
 
-// UtilWorking reports whether a lease's cards are busy: any card of the lease, or any card at
-// all for a whole-node lease (devices empty), whose utilisation is at or above the verdict's
-// busy threshold. The display card is skipped (its load is the desktop's, never the lease's)
-// and an unknown reading is not work. devices are lease ids (lower-case GPU uuids). It is the
-// reading a holder's tick gives the term check (gpulease.TermSignals.UtilWorking).
-func UtilWorking(gpus []GPU, devices []string) bool {
+// CardsReadingOf is the look at a lease's cards the term check takes
+// (gpulease.TermSignals.Cards): any card of the lease, or any card at all for a whole-node lease
+// (devices empty), at or above the verdict's busy threshold is CardsWorking. The display card is
+// skipped (its load is the desktop's, never the lease's). Otherwise the cards are CardsIdle only
+// when every card the lease is judged by was actually read and found quiet; a card whose
+// utilisation is [N/A], a lease card the sample does not list, and a sample with no card to judge
+// by at all are CardsUnreadable, because an unknown must never read as idle. devices are lease
+// ids (lower-case GPU uuids).
+func CardsReadingOf(gpus []GPU, devices []string) gpulease.CardsReading {
 	devs := make([]gpuprobe.Device, 0, len(gpus))
 	for _, g := range gpus {
 		devs = append(devs, gpuprobe.Device{UUID: g.UUID, DisplayActive: g.DisplayActive})
@@ -152,14 +156,39 @@ func UtilWorking(gpus []GPU, devices []string) bool {
 			mine[strings.ToLower(strings.TrimSpace(d))] = true
 		}
 	}
+	read, unread := 0, false
+	listed := map[string]bool{}
 	for _, g := range gpus {
-		if !g.UtilKnown || g.UtilPct < utilBusyPct || display[g.UUID] {
+		id := strings.ToLower(g.UUID)
+		listed[id] = true
+		if mine != nil && !mine[id] {
 			continue
 		}
-		if mine != nil && !mine[strings.ToLower(g.UUID)] {
+		if display[g.UUID] {
 			continue
 		}
-		return true
+		if !g.UtilKnown {
+			unread = true
+			continue
+		}
+		if g.UtilPct >= utilBusyPct {
+			return gpulease.CardsWorking
+		}
+		read++
 	}
-	return false
+	for d := range mine {
+		if !listed[d] {
+			unread = true
+		}
+	}
+	if read == 0 || unread {
+		return gpulease.CardsUnreadable
+	}
+	return gpulease.CardsIdle
+}
+
+// UtilWorking reports whether a lease's cards are busy: CardsReadingOf is CardsWorking. An
+// unknown reading is not work, and neither is no reading.
+func UtilWorking(gpus []GPU, devices []string) bool {
+	return CardsReadingOf(gpus, devices) == gpulease.CardsWorking
 }

@@ -7,8 +7,11 @@ package main
 // window and a 40 ms poll); they are bounded by generous ceilings, not by sleeps.
 
 import (
+	"context"
+	"errors"
 	"flag"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -29,14 +32,23 @@ func termFastHolder(t *testing.T) {
 	t.Setenv("LOCAL_OFFLOAD_ORIGIN", "")
 }
 
-// noCards swaps the utilisation reading the term check uses for a fixed answer, and counts
-// how often it was asked.
+// termFixedUtil swaps the look the term check takes at the cards for a fixed answer (busy or
+// idle), and counts how often it was asked.
 func termFixedUtil(t *testing.T, busy bool) *int {
 	t.Helper()
+	if busy {
+		return termFixedCards(t, gpulease.CardsWorking)
+	}
+	return termFixedCards(t, gpulease.CardsIdle)
+}
+
+// termFixedCards is termFixedUtil for any of the three answers the cards can give.
+func termFixedCards(t *testing.T, r gpulease.CardsReading) *int {
+	t.Helper()
 	asked := new(int)
-	old := termUtilWorkingFn
-	termUtilWorkingFn = func(devices []string) bool { *asked++; return busy }
-	t.Cleanup(func() { termUtilWorkingFn = old })
+	old := termCardsFn
+	termCardsFn = func(devices []string) gpulease.CardsReading { *asked++; return r }
+	t.Cleanup(func() { termCardsFn = old })
 	return asked
 }
 
@@ -348,5 +360,178 @@ func TestExpiredLeaseIsAskedAgainOnlyEveryRecheckInterval(t *testing.T) {
 	terms.tick()
 	if *asked != 2 {
 		t.Fatalf("after the recheck interval the lease must be asked again: asked %d", *asked)
+	}
+}
+
+// A lease that stays expired is told about ONCE, however long its progress file stays silent. This
+// is the shape that repeated: an unattended lease (the pepi stopgap's), a progress file nobody
+// touches, a recheck every minute, and a reason that quoted how long the file had been silent, so
+// every recheck was "a different reason" and the wrapper wrote another "not renewed" line into
+// the stream the wrapping session reads as notifications. TIMING-SENSITIVE: it sleeps just over a
+// second, because the silence was quoted to the second and a shorter gap rounds to the same text.
+func TestStalledUnattendedLeaseIsToldOnceNotOncePerRecheck(t *testing.T) {
+	t.Setenv("CLAUDE_CODE_SESSION_ID", "")
+	t.Setenv("LOCAL_OFFLOAD_ORIGIN", "")
+	asked := termFixedUtil(t, true) // a busy card must not matter to an unattended lease
+	old := termRecheckEvery
+	termRecheckEvery = 10 * time.Millisecond
+	t.Cleanup(func() { termRecheckEvery = old })
+	_, m := leaseFixture(t)
+	prog := filepath.Join(t.TempDir(), "log.jsonl")
+	if err := os.WriteFile(prog, []byte(`{"done":1,"total":9}`+"\n"), 0o666); err != nil {
+		t.Fatal(err)
+	}
+	l, err := m.TryAcquire(gpulease.ClassMedia, gpulease.Options{Reason: "x", TTL: 30 * time.Millisecond, Unattended: true, ProgressFile: prog, Stall: 10 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = l.Release() }()
+	time.Sleep(80 * time.Millisecond) // the term has ended and the file is already past its stall window
+
+	terms := newTermTicker(l)
+	var whys []string
+	out := captureStderr(t, func() {
+		terms.tick()
+		whys = append(whys, m.Inspect().ExpiredWhy)
+		time.Sleep(1100 * time.Millisecond) // the silence, to the second, is now a different number
+		terms.tick()
+		whys = append(whys, m.Inspect().ExpiredWhy)
+		time.Sleep(30 * time.Millisecond)
+		terms.tick()
+		whys = append(whys, m.Inspect().ExpiredWhy)
+	})
+	if n := strings.Count(out, "not renewed"); n != 1 {
+		t.Fatalf("the holder said the term ended unrenewed %d times for one lease whose reason never changed, want once:\n%s", n, out)
+	}
+	// And the record was not rewritten with a new sentence either: what the label says is a fact
+	// about the lease, not a reading of the clock.
+	if whys[0] == "" || whys[1] != whys[0] || whys[2] != whys[0] {
+		t.Fatalf("the label changed with time although nothing about the lease did:\n%q", whys)
+	}
+	if *asked != 0 {
+		t.Fatalf("an unattended lease is judged by its progress file alone; the cards were asked %d times", *asked)
+	}
+	if !m.Inspect().Expired {
+		t.Fatal("the lease should be labelled")
+	}
+}
+
+// termExpiredFixture is a lease whose owner (this process) is alive, with no progress contract
+// and a 30 ms term that has already ended: the case the cards decide.
+func termExpiredFixture(t *testing.T) (*gpulease.Manager, *gpulease.Lease) {
+	t.Helper()
+	t.Setenv("CLAUDE_CODE_SESSION_ID", "")
+	t.Setenv("LOCAL_OFFLOAD_ORIGIN", "")
+	_, m := leaseFixture(t)
+	pid := os.Getpid()
+	start, _ := gpulease.ProcessStart(pid)
+	l, err := m.TryAcquire(gpulease.ClassMedia, gpulease.Options{Reason: "x", TTL: 30 * time.Millisecond, Owner: gpulease.Owner{PID: pid, StartMs: start}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Release() })
+	time.Sleep(80 * time.Millisecond) // the term has ended
+	return m, l
+}
+
+// The holder speaks when a lease BECOMES expired, not whenever the label is rewritten. The label
+// follows the evidence (a card that could not be read at one look and was quiet at the next is a
+// different sentence), and each change is written to the record where every status surface reads
+// it, but a wrapper whose stderr is the wrapping session's notification stream says it once.
+func TestHolderSaysOnceThatALeaseExpiredEvenWhenItsReasonChanges(t *testing.T) {
+	old := termRecheckEvery
+	termRecheckEvery = 10 * time.Millisecond
+	t.Cleanup(func() { termRecheckEvery = old })
+	reading := gpulease.CardsIdle
+	oldCards := termCardsFn
+	termCardsFn = func([]string) gpulease.CardsReading { return reading }
+	t.Cleanup(func() { termCardsFn = oldCards })
+	m, l := termExpiredFixture(t)
+
+	terms := newTermTicker(l)
+	var whys []string
+	out := captureStderr(t, func() {
+		for _, r := range []gpulease.CardsReading{gpulease.CardsIdle, gpulease.CardsUnreadable, gpulease.CardsUnreadable, gpulease.CardsIdle} {
+			reading = r
+			time.Sleep(25 * time.Millisecond) // past the recheck interval
+			terms.tick()
+			whys = append(whys, m.Inspect().ExpiredWhy)
+		}
+	})
+	if n := strings.Count(out, "not renewed"); n != 1 {
+		t.Fatalf("a lease that stayed expired was announced %d times, want once:\n%s", n, out)
+	}
+	// The record still follows the evidence, tick by tick.
+	if !strings.Contains(whys[0], "show work") || !strings.Contains(whys[1], "could not be read") || whys[2] != whys[1] || !strings.Contains(whys[3], "show work") {
+		t.Fatalf("the label should follow what the cards showed (idle, unreadable, unreadable, idle):\n%q", whys)
+	}
+}
+
+// And it speaks again when a lease becomes expired AGAIN: a renewal ends the episode.
+func TestHolderSaysItAgainWhenARenewedLeaseExpiresAgain(t *testing.T) {
+	old := termRecheckEvery
+	termRecheckEvery = 10 * time.Millisecond
+	t.Cleanup(func() { termRecheckEvery = old })
+	reading := gpulease.CardsIdle
+	oldCards := termCardsFn
+	termCardsFn = func([]string) gpulease.CardsReading { return reading }
+	t.Cleanup(func() { termCardsFn = oldCards })
+	m, l := termExpiredFixture(t)
+
+	terms := newTermTicker(l)
+	out := captureStderr(t, func() {
+		terms.tick() // expired
+		reading = gpulease.CardsWorking
+		time.Sleep(25 * time.Millisecond)
+		terms.tick() // the cards are at work: renewed
+		if m.Inspect().Expired {
+			t.Error("a renewed lease carries no label")
+		}
+		reading = gpulease.CardsIdle
+		time.Sleep(60 * time.Millisecond) // the renewed term (30 ms) ends
+		terms.tick()                      // expired again
+	})
+	if n := strings.Count(out, "not renewed"); n != 2 {
+		t.Fatalf("two separate expiries were announced %d times, want twice:\n%s", n, out)
+	}
+	if n := strings.Count(out, "was renewed to"); n != 1 {
+		t.Fatalf("the renewal between them was announced %d times, want once:\n%s", n, out)
+	}
+}
+
+// A failed nvidia-smi sample (a timeout under a saturated GPU, a box without the tool) reaches
+// the label as what it is. Through the real look, with only the driver replaced.
+func TestFailedCardSampleIsLabelledUnreadableNotIdle(t *testing.T) {
+	oldSample := termSampleGPUsFn
+	t.Cleanup(func() { termSampleGPUsFn = oldSample })
+	termSampleGPUsFn = func(context.Context) ([]gpuactivity.GPU, error) { return nil, errors.New("nvidia-smi: signal: killed") }
+	m, l := termExpiredFixture(t)
+
+	out := captureStderr(t, func() { newTermTicker(l).tick() })
+	why := m.Inspect().ExpiredWhy
+	for _, s := range []string{out, why} {
+		if !strings.Contains(s, "cards could not be read") || strings.Contains(s, "show work") {
+			t.Fatalf("a failed sample must be worded as unreadable, never as idle cards:\nstderr %q\nlabel  %q", out, why)
+		}
+	}
+
+	// A sample that works and shows quiet cards is the idle sentence, through the same path.
+	termSampleGPUsFn = func(context.Context) ([]gpuactivity.GPU, error) {
+		return []gpuactivity.GPU{{Index: 0, UUID: "GPU-AAAA", UtilPct: 2, UtilKnown: true}}, nil
+	}
+	m2, l2 := termExpiredFixture(t)
+	_ = captureStderr(t, func() { newTermTicker(l2).tick() })
+	if why := m2.Inspect().ExpiredWhy; !strings.Contains(why, "show work") || strings.Contains(why, "could not be read") {
+		t.Fatalf("quiet cards that were read: %q", why)
+	}
+	// And one that shows work renews.
+	termSampleGPUsFn = func(context.Context) ([]gpuactivity.GPU, error) {
+		return []gpuactivity.GPU{{Index: 0, UUID: "GPU-AAAA", UtilPct: 90, UtilKnown: true}}, nil
+	}
+	m3, l3 := termExpiredFixture(t)
+	before := m3.Inspect().ExpiresAt
+	_ = captureStderr(t, func() { newTermTicker(l3).tick() })
+	if in := m3.Inspect(); in.Expired || !in.ExpiresAt.After(before) {
+		t.Fatalf("cards at work renew the term (end %s before, %s after): %+v", before, in.ExpiresAt, in)
 	}
 }

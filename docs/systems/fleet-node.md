@@ -475,7 +475,8 @@ omits them, which decodes to false. Ranking such a node behind a healthy one is 
 
 **Terms (plan P9).** The lease block also carries `expired`, absent unless true and read across every live lease (an
 expired sibling does not hide behind a healthy lower epoch): the holder's own tick found the lease's term ended and not
-renewable (its owner gone, or nothing running under it) and labelled it. An expired lease is still HELD: `busy` and
+renewable (its owner gone, its owner not shown present and no progress advancing, nothing running under it, or its cards
+could not be read) and labelled it. An expired lease is still HELD: `busy` and
 `overdue` stay true beside it (the Busy rule is `remaining > threshold OR overdue`, unchanged), nothing is reclaimed or
 killed, and the key is a fact for the delegator and the operator, never a refusal. A lease that was renewed has a later
 `until` and no `expired`. A node one release behind omits the key, which decodes to false; the delegator does not read it

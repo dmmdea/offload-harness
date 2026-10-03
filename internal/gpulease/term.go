@@ -9,8 +9,16 @@ package gpulease
 // either renews it by one more term or labels the lease expired:
 //
 //	renew  iff  (the owner is alive and (its progress is advancing or its cards are working))
+//	            or (the owner cannot be told and its progress is advancing)
 //	            or (the lease is unattended and its progress is advancing)
 //	       and  the new end stays inside the maximum total (gpu_max_total_min) from acquisition
+//
+// An owner who cannot be told (the session never in the registry, which until the registry
+// writer is wired into the session hooks is every attended lease a Claude session takes) is not
+// an objection: a progress contract that is advancing is the job's own evidence of work, and
+// the lease declared it, so it vouches for the lease as it does for an unattended one. What an
+// owner who cannot be told does not get is the weaker leg: a busy card proves a process, not that
+// anyone wants the result. A GONE owner is not rescued by either.
 //
 // Expired is a LABEL (Meta.Expired). The heartbeat goes on, the claim stays, the lease still
 // fences and still passes its holder's Check, the verdict is held-overdue and the lease is
@@ -230,12 +238,31 @@ const (
 	TermStillExpired TermOutcome = "still-expired"
 )
 
+// CardsReading is what one look at a lease's cards found. It has three answers, not two,
+// because "the cards show no work" and "the cards could not be read" are different statements
+// and the label a lease wears says one of them aloud: a sample that failed or timed out (most
+// likely when the GPU is saturated, which is when the cards are busiest) must not be worded as a
+// card that is idle.
+type CardsReading int
+
+const (
+	// CardsIdle: the cards were read and none of them shows work.
+	CardsIdle CardsReading = iota
+	// CardsWorking: a card of the lease is at or above the verdict's busy threshold.
+	CardsWorking
+	// CardsUnreadable: the cards could not be read (the sample failed, timed out or returned
+	// nothing usable). It renews nothing, as an idle reading renews nothing, but it is worded as
+	// what it is.
+	CardsUnreadable
+)
+
 // TermSignals is the evidence the holder's tick supplies beyond what the lease directory holds.
 type TermSignals struct {
-	// UtilWorking reports whether the lease's cards are busy (the display card excluded). It is
-	// called only for an attended lease whose owner is alive and whose progress is not already
-	// advancing, the one case where it can change the answer. nil reads as "not working".
-	UtilWorking func() bool
+	// Cards looks at the lease's cards (the display card excluded). It is called only for an
+	// attended lease whose owner is alive and whose progress is not already advancing, the one
+	// case where it can change the answer. nil reads as "could not be read": a holder that
+	// supplies no look has not seen the cards, so it must not claim they are idle.
+	Cards func() CardsReading
 }
 
 // TermResult is what one tick found and did.
@@ -268,11 +295,13 @@ func (m *Manager) AdvanceTerm(epoch uint64, sig TermSignals) (TermResult, error)
 	// then re-checks the record and applies the answer, so two ticks of one term end cannot
 	// renew it twice.
 	info := infoFrom(rec, now)
-	owner, _ := m.ownerStateWhy(info.Owner)
+	owner, ownerNote := m.ownerStateWhy(info.Owner)
 	prog := m.progressOf(info, now)
-	renewable, why := termRenewable(rec, owner, prog, sig.UtilWorking)
+	renewable, why := termRenewable(rec, owner, ownerNote, prog, sig.Cards)
 
-	// Already labelled, and for the same reason: nothing to write.
+	// Already labelled, and for the same reason: nothing to write. The reason is compared as a
+	// sentence, so every part of it is a fact that holds until something changes and none is a
+	// reading that moves with the clock (see progressSummary).
 	if !renewable && rec.Expired && rec.ExpiredWhy == why {
 		return TermResult{Outcome: TermStillExpired, PrevEnd: endOf(rec), End: endOf(rec), Why: why}, nil
 	}
@@ -348,10 +377,13 @@ func (m *Manager) recordOf(epoch uint64) (*Meta, error) {
 
 // termRenewable is the rule. An unattended lease is vouched for by its progress file alone: no
 // one is expected at the desk, so neither an owner nor a busy card says anything. An attended
-// one needs its owner alive AND something moving: its progress file advancing or, the weaker
-// evidence the plan allows, its cards working. A gone or unknown owner is never rescued by a
-// busy card: a card in use proves a process, not that anyone wants the result.
-func termRenewable(rec *Meta, owner OwnerState, prog ProgressView, util func() bool) (bool, string) {
+// one with a live owner needs something moving: its progress file advancing or, the weaker
+// evidence the plan allows, its cards working. An attended one whose owner cannot be told
+// (ownerNote says why) is vouched for by an advancing progress file alone, like an unattended
+// one; a gone or unknown owner is never rescued by a busy card: a card in use proves a process,
+// not that anyone wants the result. The reason it returns is stored and compared (see
+// progressSummary), so it never quotes a value that moves with the clock.
+func termRenewable(rec *Meta, owner OwnerState, ownerNote string, prog ProgressView, cards func() CardsReading) (bool, string) {
 	advancing := prog.Declared && prog.State == ProgressAdvancing
 	if rec.Unattended || owner == OwnerRemote {
 		if advancing {
@@ -364,23 +396,51 @@ func termRenewable(rec *Meta, owner OwnerState, prog ProgressView, util func() b
 		if advancing {
 			return true, "its owner is alive and its progress file is advancing"
 		}
-		if util != nil && util() {
+		switch lookAtCards(cards) {
+		case CardsWorking:
 			return true, "its owner is alive and its cards are working"
+		case CardsUnreadable:
+			// Not "its cards show no work": nobody saw them. It renews nothing either way (an unknown
+			// is never work), but the label must not state a reading that was never taken.
+			return false, "its owner is still there, but its cards could not be read and its progress contract is not advancing (" + progressSummary(prog) + "), so nothing vouches for it"
 		}
 		return false, "its owner is still there but neither its progress file nor its cards show work"
 	case OwnerGone:
 		return false, "its owner is gone"
 	}
-	return false, "no owner is recorded as present for it (its owner cannot be told), so nothing vouches for it"
+	// The owner cannot be told: not gone (never orphaned), not shown present. Nobody is objecting,
+	// so the job's own progress file decides.
+	if advancing {
+		return true, "its owner cannot be told, but its progress file is advancing"
+	}
+	who := "it records no owner"
+	if ownerNote != "" {
+		who = "its owner cannot be told apart (" + ownerNote + ")"
+	}
+	return false, who + " and its progress contract is not advancing (" + progressSummary(prog) + "), so nothing vouches for it"
 }
 
-// progressSummary is the clause behind a progress contract that is not advancing.
+// lookAtCards takes the look the holder supplied; no look at all is a look that could not be
+// taken.
+func lookAtCards(cards func() CardsReading) CardsReading {
+	if cards == nil {
+		return CardsUnreadable
+	}
+	return cards()
+}
+
+// progressSummary is the clause behind a progress contract that is not advancing. It is part of
+// the STORED reason, and a stored reason is compared for equality at every recheck to decide
+// whether the label changed, so it holds nothing that moves with the clock: the stall window the
+// lease declared, never how long the file has been silent (a status surface's progress line
+// says that, live, from the file). A sentence that quoted the silence to the second was a new
+// sentence at every recheck: the record was rewritten and the holder spoke again, once a minute.
 func progressSummary(p ProgressView) string {
 	switch {
 	case !p.Declared:
 		return "it declares none"
 	case p.State == ProgressStalled:
-		return fmt.Sprintf("no activity for %s, past its %s stall window", p.Age.Round(time.Second), p.Stall)
+		return fmt.Sprintf("its progress file has been silent for longer than its %s stall window", p.Stall)
 	}
 	if p.Problem != "" {
 		return "its progress file " + p.Problem

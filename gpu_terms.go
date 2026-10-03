@@ -21,17 +21,22 @@ import (
 	"github.com/dmmdea/offload-harness/internal/gpulease"
 )
 
-// termUtilWorkingFn is how the term check asks whether a lease's cards are working: one
-// nvidia-smi sample over the lease's cards (the whole node when it names none), the display
-// card excluded. A variable so a test never reaches the driver. A sample that fails reads as
-// "not working": an unknown is never work, so a box without nvidia-smi renews nothing on this
-// evidence alone.
-var termUtilWorkingFn = func(devices []string) bool {
-	gpus, err := gpuactivity.SampleGPUs(context.Background())
+// termSampleGPUsFn is the one nvidia-smi sample the term check takes. A variable so a test never
+// reaches the driver.
+var termSampleGPUsFn = gpuactivity.SampleGPUs
+
+// termCardsFn is how the term check looks at a lease's cards: one nvidia-smi sample over the
+// lease's cards (the whole node when it names none), the display card excluded. A variable so a
+// test never reaches the driver. A sample that fails or times out (most likely when the GPU is
+// saturated, which is when the cards are busiest) is CardsUnreadable, not "idle": it renews
+// nothing, as an idle reading renews nothing, but the label it leaves says the cards could not
+// be read, not that they show no work.
+var termCardsFn = func(devices []string) gpulease.CardsReading {
+	gpus, err := termSampleGPUsFn(context.Background())
 	if err != nil {
-		return false
+		return gpulease.CardsUnreadable
 	}
-	return gpuactivity.UtilWorking(gpus, devices)
+	return gpuactivity.CardsReadingOf(gpus, devices)
 }
 
 // termRecheckEvery is how often a lease that is already labelled expired is asked again whether
@@ -40,7 +45,8 @@ var termUtilWorkingFn = func(devices []string) bool {
 // lease does not sample the cards every 15 s.
 var termRecheckEvery = time.Minute
 
-// termTicker runs the term check on a holder's tick and says, once per change, what it did.
+// termTicker runs the term check on a holder's tick and says what it did: a renewal when it happens,
+// and that a lease expired once per expiry (not each time the label's reason is rewritten).
 type termTicker struct {
 	lease *gpulease.Lease
 	// expiredAt is when the lease was last found labelled; zero while it is not.
@@ -57,7 +63,7 @@ func (t *termTicker) tick() {
 		return
 	}
 	devices := t.lease.Devices()
-	res, err := t.lease.AdvanceTerm(gpulease.TermSignals{UtilWorking: func() bool { return termUtilWorkingFn(devices) }})
+	res, err := t.lease.AdvanceTerm(gpulease.TermSignals{Cards: func() gpulease.CardsReading { return termCardsFn(devices) }})
 	if err != nil {
 		// A tick that cannot be answered is told once; the next heartbeat tries again. It is never a
 		// lost lease (Renew just proved it is ours) and never a reason to touch the command.
@@ -73,8 +79,16 @@ func (t *termTicker) tick() {
 		t.expiredAt = time.Time{}
 		fmt.Fprintf(os.Stderr, "gpu reserve: the lease's term ended and was renewed to %s (%s)\n", res.End.Local().Format("15:04:05"), res.Why)
 	case gpulease.TermExpired:
+		// Said when the lease BECOMES expired, not whenever the label is rewritten: the label follows
+		// the evidence (a look at the cards that failed and one that did not are different sentences),
+		// and every change reaches the record where each status surface reads it, but this stream is
+		// the wrapping session's notifications. A renewal ends the episode (TermExtended below), so
+		// the next expiry is said again.
+		becameExpired := t.expiredAt.IsZero()
 		t.expiredAt = time.Now()
-		fmt.Fprintf(os.Stderr, "gpu reserve: the lease's term ended and was not renewed: %s. It is labelled expired: still held and heartbeating, reading held-overdue and open to a takeover; nothing is released or killed\n", res.Why)
+		if becameExpired {
+			fmt.Fprintf(os.Stderr, "gpu reserve: the lease's term ended and was not renewed: %s. It is labelled expired: still held and heartbeating, reading held-overdue and open to a takeover; nothing is released or killed\n", res.Why)
+		}
 	case gpulease.TermStillExpired:
 		t.expiredAt = time.Now()
 	case gpulease.TermNotDue:

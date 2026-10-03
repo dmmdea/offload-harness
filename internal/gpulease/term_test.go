@@ -7,6 +7,7 @@ package gpulease
 import (
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -79,13 +80,16 @@ func recordOfLease(t *testing.T, m *Manager, l *Lease) Meta {
 // clockAt moves the fake clock to base+d.
 func clockAt(now *time.Time, base time.Time, d time.Duration) { *now = base.Add(d) }
 
-func neverUtil(t *testing.T) func() bool {
-	return func() bool {
+func neverCards(t *testing.T) func() CardsReading {
+	return func() CardsReading {
 		t.Helper()
 		t.Fatal("the cards' utilisation was consulted where it cannot change the answer")
-		return false
+		return CardsIdle
 	}
 }
+
+// cardsAre is a look at the cards that always finds the same thing.
+func cardsAre(r CardsReading) func() CardsReading { return func() CardsReading { return r } }
 
 // ---------------------------------------------------------------------------
 // The plan: what a request comes to
@@ -283,7 +287,7 @@ func TestTermEndWithLiveOwnerAndProgressExtendsOnce(t *testing.T) {
 			f.at(t, 30*time.Minute, true)
 			before := recordSum(t, f.m, f.l)
 			time.Sleep(20 * time.Millisecond) // so a rewrite always moves the modification time
-			if r, err := f.l.AdvanceTerm(TermSignals{UtilWorking: neverUtil(t)}); err != nil || r.Outcome != TermNotDue {
+			if r, err := f.l.AdvanceTerm(TermSignals{Cards: neverCards(t)}); err != nil || r.Outcome != TermNotDue {
 				t.Fatalf("inside the term: %+v, %v", r, err)
 			}
 			if recordSum(t, f.m, f.l) != before {
@@ -293,7 +297,7 @@ func TestTermEndWithLiveOwnerAndProgressExtendsOnce(t *testing.T) {
 			// The term ends with the owner alive and the progress file moving: ONE renewal, by one
 			// term, from the old end. Utilisation is not consulted: progress already says it.
 			f.at(t, time.Hour+10*time.Second, true)
-			r, err := f.l.AdvanceTerm(TermSignals{UtilWorking: neverUtil(t)})
+			r, err := f.l.AdvanceTerm(TermSignals{Cards: neverCards(t)})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -307,7 +311,7 @@ func TestTermEndWithLiveOwnerAndProgressExtendsOnce(t *testing.T) {
 			// The same tick again, and a hundred more inside the new term, renew nothing more.
 			for i := 0; i < 3; i++ {
 				f.at(t, time.Hour+10*time.Second+time.Duration(i)*15*time.Second, true)
-				if r, err := f.l.AdvanceTerm(TermSignals{UtilWorking: neverUtil(t)}); err != nil || r.Outcome != TermNotDue {
+				if r, err := f.l.AdvanceTerm(TermSignals{Cards: neverCards(t)}); err != nil || r.Outcome != TermNotDue {
 					t.Fatalf("a second tick in the same term: %+v, %v", r, err)
 				}
 			}
@@ -316,7 +320,7 @@ func TestTermEndWithLiveOwnerAndProgressExtendsOnce(t *testing.T) {
 			}
 			// The next term end renews again, by one term again.
 			f.at(t, 2*time.Hour+time.Second, true)
-			r, _ = f.l.AdvanceTerm(TermSignals{UtilWorking: neverUtil(t)})
+			r, _ = f.l.AdvanceTerm(TermSignals{Cards: neverCards(t)})
 			if r.Outcome != TermExtended || !r.End.Equal(end0.Add(2*time.Hour)) {
 				t.Fatalf("the second term: %+v", r)
 			}
@@ -339,7 +343,7 @@ func TestTermEndWithDeadOwnerSetsExpiredKeepsHeartbeat(t *testing.T) {
 			f.owner(termOwnerPID, false) // the session that asked for it is gone
 
 			f.at(t, time.Hour+10*time.Second, false)
-			r, err := f.l.AdvanceTerm(TermSignals{UtilWorking: neverUtil(t)}) // a gone owner is not rescued by a busy card
+			r, err := f.l.AdvanceTerm(TermSignals{Cards: neverCards(t)}) // a gone owner is not rescued by a busy card
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -377,7 +381,7 @@ func TestTermEndWithDeadOwnerSetsExpiredKeepsHeartbeat(t *testing.T) {
 			// cards are at work. It is information about the lease, not a one-way door.
 			f.owner(termOwnerPID, true)
 			f.at(t, time.Hour+40*time.Second, false)
-			r, err = f.l.AdvanceTerm(TermSignals{UtilWorking: func() bool { return true }})
+			r, err = f.l.AdvanceTerm(TermSignals{Cards: cardsAre(CardsWorking)})
 			if err != nil || r.Outcome != TermExtended || !r.End.Equal(end0.Add(time.Hour)) {
 				t.Fatalf("an owner that is back and a busy card renew the term: %+v, %v", r, err)
 			}
@@ -492,7 +496,7 @@ func TestIdleLiveOwnerWithoutProgressDoesNotRenew(t *testing.T) {
 	f := newTermFixtureNP(t, false, Options{})
 	f.at(t, time.Hour+time.Second, false)
 	asked := 0
-	r, err := f.l.AdvanceTerm(TermSignals{UtilWorking: func() bool { asked++; return false }})
+	r, err := f.l.AdvanceTerm(TermSignals{Cards: func() CardsReading { asked++; return CardsIdle }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -518,7 +522,7 @@ func TestLiveOwnerWithBusyCardsRenews(t *testing.T) {
 	// its cards are working.
 	f := newTermFixtureNP(t, true, Options{})
 	f.at(t, time.Hour+time.Second, false)
-	r, err := f.l.AdvanceTerm(TermSignals{UtilWorking: func() bool { return true }})
+	r, err := f.l.AdvanceTerm(TermSignals{Cards: cardsAre(CardsWorking)})
 	if err != nil || r.Outcome != TermExtended || !strings.Contains(r.Why, "cards") {
 		t.Fatalf("a live owner and busy cards renew: %+v, %v", r, err)
 	}
@@ -530,7 +534,7 @@ func TestUnattendedLeaseRenewsOnProgressAloneAndNeverOnUtilisation(t *testing.T)
 	f := newTermFixture(t, true, Options{Unattended: true, TTL: time.Hour})
 	f.owner(termOwnerPID, false)
 	f.at(t, time.Hour+time.Second, true) // the progress file moved
-	r, err := f.l.AdvanceTerm(TermSignals{UtilWorking: neverUtil(t)})
+	r, err := f.l.AdvanceTerm(TermSignals{Cards: neverCards(t)})
 	if err != nil || r.Outcome != TermExtended || !strings.Contains(r.Why, "progress") {
 		t.Fatalf("an unattended lease whose progress advances renews, owner gone or not: %+v, %v", r, err)
 	}
@@ -541,7 +545,7 @@ func TestUnattendedLeaseRenewsOnProgressAloneAndNeverOnUtilisation(t *testing.T)
 		t.Fatal(err)
 	}
 	touchProgress(t, f.prog, f.base.Add(time.Hour)) // last moved an hour ago; the stall window is 30m
-	r, _ = f.l.AdvanceTerm(TermSignals{UtilWorking: neverUtil(t)})
+	r, _ = f.l.AdvanceTerm(TermSignals{Cards: neverCards(t)})
 	if r.Outcome != TermExpired || !strings.Contains(r.Why, "progress") {
 		t.Fatalf("an unattended lease whose progress stalled expires whatever the cards do: %+v", r)
 	}
@@ -554,7 +558,7 @@ func TestMissingProgressFileIsNotProgress(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.at(t, time.Hour+time.Second, false)
-	if r, _ := f.l.AdvanceTerm(TermSignals{UtilWorking: neverUtil(t)}); r.Outcome != TermExpired {
+	if r, _ := f.l.AdvanceTerm(TermSignals{Cards: neverCards(t)}); r.Outcome != TermExpired {
 		t.Fatalf("a missing progress file is not progress: %+v", r)
 	}
 }
@@ -621,7 +625,7 @@ func TestExtensionRestampsOnlyTheExtendedLeaseAndWritesNoUmbrella(t *testing.T) 
 	}
 	defer func() { _ = wl.Release() }()
 	clockAt(wnow, wbase, time.Hour+time.Second)
-	if r, err := wl.AdvanceTerm(TermSignals{UtilWorking: func() bool { return true }}); err != nil || r.Outcome != TermExtended {
+	if r, err := wl.AdvanceTerm(TermSignals{Cards: cardsAre(CardsWorking)}); err != nil || r.Outcome != TermExtended {
 		t.Fatalf("whole node: %+v, %v", r, err)
 	}
 	if rec := recordOfLease(t, w, wl); rec.Epoch != wl.Epoch() || rec.ExpiresAtMs != wbase.Add(2*time.Hour).UnixMilli() {
@@ -680,7 +684,7 @@ func TestLegacyRecordWithoutTermFieldsIsOneTermOfItsWindow(t *testing.T) {
 		t.Fatal(err)
 	}
 	clockAt(now, base, 91*time.Minute)
-	r, err := m.AdvanceTerm(7, TermSignals{UtilWorking: func() bool { return true }})
+	r, err := m.AdvanceTerm(7, TermSignals{Cards: cardsAre(CardsWorking)})
 	if err != nil || r.Outcome != TermExtended || !r.End.Equal(base.Add(3*time.Hour)) {
 		t.Fatalf("a record with no term fields renews by its own window: %+v, %v", r, err)
 	}
@@ -811,5 +815,256 @@ func TestWaiterIsToldAnExpiredLeaseExpiredAndWhy(t *testing.T) {
 	g.at(t, time.Hour+time.Minute, false)
 	if s := g.m.ExplainHeld(g.m.Inspect(), 0); !strings.Contains(s, "past its declared window") || strings.Contains(s, "expired") {
 		t.Errorf("an unlabelled overdue lease keeps its sentence: %s", s)
+	}
+}
+
+// THE LABEL IS STABLE, SO THE HOLDER ASKS ONCE AND WRITES ONCE. A lease whose term ended
+// unrenewed is asked again every minute, and "already labelled for the same reason" is how that
+// asking stays free: nothing is rewritten and nothing is said. A reason that carries a value
+// which moves with the clock (how long the progress file has been silent) is a different
+// sentence at every recheck, so the record was rewritten under the epoch lock and the holder
+// printed "not renewed" again, once a minute, for as long as the progress file stayed quiet:
+// the very lease shape the pepi stopgap launches (unattended, with a progress file).
+func TestStalledUnattendedLeaseIsLabelledOnceAndNeverRewrittenByARecheck(t *testing.T) {
+	for _, scoped := range []bool{false, true} {
+		name := "whole node"
+		if scoped {
+			name = "card lease"
+		}
+		t.Run(name, func(t *testing.T) {
+			f := newTermFixture(t, scoped, Options{Unattended: true, TTL: time.Hour})
+			// The progress file was last touched at acquisition and the stall window is 30 minutes:
+			// at the end of the term it has been silent for an hour.
+			f.at(t, time.Hour+time.Second, false)
+			first, err := f.l.AdvanceTerm(TermSignals{Cards: neverCards(t)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if first.Outcome != TermExpired || !strings.Contains(first.Why, "progress") {
+				t.Fatalf("setup: the stalled unattended lease is labelled at the end of its term: %+v", first)
+			}
+			sum := recordSum(t, f.m, f.l)
+			time.Sleep(20 * time.Millisecond) // so a rewrite always moves the modification time
+			// Rechecks a minute apart, then hours apart: the progress file is only more silent.
+			for _, d := range []time.Duration{time.Hour + time.Minute, time.Hour + 2*time.Minute, 3 * time.Hour, 11 * time.Hour} {
+				f.at(t, d, false)
+				r, err := f.l.AdvanceTerm(TermSignals{Cards: neverCards(t)})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if r.Outcome != TermStillExpired {
+					t.Fatalf("at +%s the same lease for the same reason came back %q, want %q (the reason must not carry the clock): %+v", d, r.Outcome, TermStillExpired, r)
+				}
+				if r.Why != first.Why {
+					t.Fatalf("at +%s the reason changed with time:\n first %q\n now   %q", d, first.Why, r.Why)
+				}
+				if recordSum(t, f.m, f.l) != sum {
+					t.Fatalf("at +%s a recheck rewrote the record of a lease whose label had not changed", d)
+				}
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// An owner nobody can tell: the lease every Claude session takes today
+// ---------------------------------------------------------------------------
+
+// neverRegistered is an owner whose session the registry never held (an MCP server older than
+// the registry writer, a non-Claude caller): the owner state is UNKNOWN, with a note saying why.
+// Plan section 7 finding 5: today that is every attended lease taken from a Claude session.
+var neverRegistered = Owner{Session: "never-registered"}
+
+// An UNKNOWN owner is not an objection, so a progress contract that is advancing vouches for the
+// lease by itself, as it does for an unattended one (operator decision 4: a lease with a progress
+// contract renews by progress). Before this, an attended lease of an unknown owner was labelled
+// expired at the end of its first term with its progress file advancing and its cards busy, and
+// the waiter's sentence, `gpu status` and /fleet/health said "expired" about a healthy job.
+func TestUnknownOwnerWithAdvancingProgressRenews(t *testing.T) {
+	for _, scoped := range []bool{false, true} {
+		name := "whole node"
+		if scoped {
+			name = "card lease"
+		}
+		t.Run(name, func(t *testing.T) {
+			f := newTermFixture(t, scoped, Options{Owner: neverRegistered})
+			end0 := f.base.Add(time.Hour)
+			if st := f.m.OwnerState(f.m.Inspect().Owner); st != OwnerUnknown {
+				t.Fatalf("setup: the owner reads %q, want %q", st, OwnerUnknown)
+			}
+			f.at(t, time.Hour+10*time.Second, true) // the progress file moved
+			r, err := f.l.AdvanceTerm(TermSignals{Cards: neverCards(t)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if r.Outcome != TermExtended || !r.End.Equal(end0.Add(time.Hour)) || !strings.Contains(r.Why, "progress") {
+				t.Fatalf("an unknown owner with an advancing progress file renews by one term: %+v", r)
+			}
+			if rec := recordOfLease(t, f.m, f.l); rec.Expired || rec.ExpiredWhy != "" {
+				t.Fatalf("a renewed lease carries no label: %+v", rec)
+			}
+		})
+	}
+}
+
+// What an unknown owner does NOT get: a progress file that stopped moving, or a busy card with no
+// progress contract at all. A card in use proves a process, not that anyone wants the result, and
+// with the owner unknowable there is no one to say so; the declared window is what judges it.
+func TestUnknownOwnerNeedsProgressItIsNeverRescuedByBusyCards(t *testing.T) {
+	cases := []struct {
+		name  string
+		build func(*testing.T) *termFixture
+		moves bool
+		want  string
+	}{
+		{"no progress contract", func(t *testing.T) *termFixture { return newTermFixtureNP(t, false, Options{Owner: neverRegistered}) }, false, "session registry"},
+		{"progress contract that stalled", func(t *testing.T) *termFixture { return newTermFixture(t, false, Options{Owner: neverRegistered}) }, false, "session registry"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := tc.build(t)
+			f.at(t, time.Hour+10*time.Second, tc.moves)
+			r, err := f.l.AdvanceTerm(TermSignals{Cards: neverCards(t)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if r.Outcome != TermExpired || !strings.Contains(r.Why, tc.want) {
+				t.Fatalf("want an expired label that says why the owner could not be told (%q): %+v", tc.want, r)
+			}
+			if !f.m.Inspect().Expired {
+				t.Fatal("and the record carries it")
+			}
+		})
+	}
+}
+
+// A lease that records no owner at all (the zero Owner, a pre-P8 record) reads the same way: a
+// progress file that is advancing renews it; without one it is labelled, saying it has no owner.
+func TestLeaseWithNoOwnerRecordedRenewsOnProgressAlone(t *testing.T) {
+	m, now := newTestManager(t)
+	base := *now
+	prog := progressFileAt(t, base)
+	l, err := m.TryAcquire(ClassMedia, Options{Reason: "film", TTL: time.Hour, ProgressFile: prog, Stall: 30 * time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = l.Release() }()
+	clockAt(now, base, time.Hour+10*time.Second)
+	touchProgress(t, prog, *now)
+	if r, err := l.AdvanceTerm(TermSignals{Cards: neverCards(t)}); err != nil || r.Outcome != TermExtended {
+		t.Fatalf("no owner recorded, progress advancing: %+v, %v", r, err)
+	}
+	clockAt(now, base, 2*time.Hour+time.Minute) // the new term ended and the file did not move
+	r, err := l.AdvanceTerm(TermSignals{Cards: neverCards(t)})
+	if err != nil || r.Outcome != TermExpired || !strings.Contains(r.Why, "no owner") {
+		t.Fatalf("no owner recorded and nothing advancing is labelled, and says it records no owner: %+v, %v", r, err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// What the label says when the evidence could not be read
+// ---------------------------------------------------------------------------
+
+// A look at the cards that FAILED (the nvidia-smi sample timed out under a saturated GPU, or the
+// tool is absent) is not a card that is idle. It renews nothing either way, but the sentence a
+// waiter, `gpu status` and /fleet/health publish must not say "neither its progress file nor its
+// cards show work" about cards nobody could read: the next recheck, a minute later, may find them
+// busy and renew the lease, and until then the label would be a false statement about a job that
+// may be running flat out.
+func TestUnreadableCardsAreNotWordedAsIdleCards(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		signals TermSignals
+		want    string
+		notWant string
+	}{
+		{"cards that could not be read", TermSignals{Cards: cardsAre(CardsUnreadable)}, "could not be read", "show work"},
+		{"no look supplied at all", TermSignals{}, "could not be read", "show work"},
+		{"cards that were read and are quiet", TermSignals{Cards: cardsAre(CardsIdle)}, "neither its progress file nor its cards show work", "could not be read"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newTermFixtureNP(t, false, Options{}) // the owner is alive, no progress contract
+			f.at(t, time.Hour+time.Second, false)
+			r, err := f.l.AdvanceTerm(tc.signals)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if r.Outcome != TermExpired {
+				t.Fatalf("a reading that shows no work renews nothing, whatever it is called: %+v", r)
+			}
+			if !strings.Contains(r.Why, "owner is still there") {
+				t.Errorf("the owner is alive and the label says so: %q", r.Why)
+			}
+			if !strings.Contains(r.Why, tc.want) || strings.Contains(r.Why, tc.notWant) {
+				t.Errorf("the label must say %q and not %q: %q", tc.want, tc.notWant, r.Why)
+			}
+			// The same sentence reaches the record, the inspector and the waiter.
+			if got := f.m.Inspect().ExpiredWhy; got != r.Why {
+				t.Errorf("the record says %q, the tick said %q", got, r.Why)
+			}
+			if got := f.m.ExplainHeld(f.m.Inspect(), 0); !strings.Contains(got, tc.want) || strings.Contains(got, tc.notWant) {
+				t.Errorf("the waiter's sentence must say %q and not %q: %s", tc.want, tc.notWant, got)
+			}
+		})
+	}
+}
+
+// The owner state's own reason reaches the label. An owner nobody could tell because the
+// registry could not be read is a different statement from one the registry never held, and a
+// transient registry error must not be published as "no owner is recorded".
+func TestExpiredLabelCarriesWhyTheOwnerCouldNotBeTold(t *testing.T) {
+	t.Run("session never in the registry", func(t *testing.T) {
+		f := newTermFixtureNP(t, false, Options{Owner: neverRegistered})
+		f.at(t, time.Hour+time.Second, false)
+		r, _ := f.l.AdvanceTerm(TermSignals{})
+		if r.Outcome != TermExpired || !strings.Contains(r.Why, "was not in the session registry") || strings.Contains(r.Why, "could not be read") {
+			t.Fatalf("%+v", r)
+		}
+	})
+	t.Run("registry that could not be read", func(t *testing.T) {
+		denied := errors.New("access is denied")
+		old := readRegistryDir
+		readRegistryDir = func(string) ([]os.DirEntry, error) { return nil, denied }
+		t.Cleanup(func() { readRegistryDir = old })
+		f := newTermFixtureNP(t, false, Options{Owner: neverRegistered})
+		f.at(t, time.Hour+time.Second, false)
+		r, _ := f.l.AdvanceTerm(TermSignals{})
+		if r.Outcome != TermExpired || !strings.Contains(r.Why, "registry could not be read") || !strings.Contains(r.Why, "access is denied") {
+			t.Fatalf("a registry that could not be read is worded as such: %+v", r)
+		}
+		if strings.Contains(r.Why, "no owner is recorded") {
+			t.Fatalf("the owner IS recorded; it is the registry that could not be read: %q", r.Why)
+		}
+		// The registry comes back and the session is still not in it: the reason is a different
+		// statement now, and the record is rewritten once to say so.
+		readRegistryDir = old
+		if r, _ := f.l.AdvanceTerm(TermSignals{}); r.Outcome != TermExpired || !strings.Contains(r.Why, "was not in the session registry") {
+			t.Fatalf("after the registry is readable: %+v", r)
+		}
+	})
+}
+
+// A GONE owner is rescued by neither an advancing progress file nor a busy card: the session that
+// asked for the result is not there to want it. (An owner who merely cannot be told is the case
+// above; this is the one the registry positively saw leave.) The unattended and remote cases are
+// judged by their progress file alone, whatever their owner does.
+func TestGoneOwnerIsRescuedByNeitherProgressNorBusyCards(t *testing.T) {
+	for _, scoped := range []bool{false, true} {
+		name := "whole node"
+		if scoped {
+			name = "card lease"
+		}
+		t.Run(name, func(t *testing.T) {
+			f := newTermFixture(t, scoped, Options{}) // attended, progress contract, owner alive at acquisition
+			f.owner(termOwnerPID, false)              // and then the session that asked for it is gone
+			f.at(t, time.Hour+10*time.Second, true)   // the progress file is advancing
+			r, err := f.l.AdvanceTerm(TermSignals{Cards: neverCards(t)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if r.Outcome != TermExpired || r.Why != "its owner is gone" {
+				t.Fatalf("a gone owner's lease is labelled however well its progress file advances: %+v", r)
+			}
+		})
 	}
 }

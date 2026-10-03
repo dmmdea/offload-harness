@@ -874,22 +874,37 @@ holder's renewal, at the same cadence). There is no timer, no watcher and no oth
 passed, the tick renews the lease by **one term** when
 
 - its owner is alive **and** (its progress file is advancing **or** its cards are working), or
+- its owner cannot be told (see below) **and** its progress file is advancing, or
 - it is unattended **and** its progress file is advancing,
 
 and the new end stays inside `max_total_ms` from acquisition (it is clipped to the hard end, and a hard end already past
 renews nothing). Otherwise it stamps the lease **expired**. The renewal is one term from the old end (terms run back to
 back); a holder that slept through whole terms is renewed one term from now, so a lease that was just renewed never reads
 overdue. Readings: an owner is alive by the same rule `gpu status` uses (a registered process of its session, or its
-recorded pid, by pid and start time); an unknown owner is not alive, which is why a bare wrapper with no session in the
-registry is labelled at the end of its `--for` (it already read `held-overdue` from that moment; the label adds the
-sentence); "its cards are working" is one `nvidia-smi` sample over the lease's cards (the whole node for a whole-node
-lease), the display card excluded, at the verdict's 15 % threshold, taken only when it can change the answer (an attended
-lease, a live owner, progress not already advancing); an unattended lease never counts utilisation, and neither does a
-gone owner. A missing progress file is `unknown`, never advancing.
+recorded pid, by pid and start time). An owner who **cannot be told** (a lease that records no owner, a session the
+registry never held, or a registry that could not be read; today that is every attended lease taken from a Claude
+session, because the registry writer is not wired into the session hooks yet) is not an objection and is not shown
+present: an advancing progress file, which the job itself writes, vouches for the lease alone, as it does for an
+unattended one. What such an owner does **not** get is the weaker leg: a busy card proves a process, not that anyone
+wants the result, so a lease of an owner who cannot be told, with no progress contract or a stalled one, is labelled at
+the end of its `--for` however busy its cards are (it already read `held-overdue` from that moment; the label adds the
+sentence). A gone owner is rescued by neither. "Its cards are working" is one `nvidia-smi` sample over the lease's
+cards (the whole node for a whole-node lease), the display card excluded, at the verdict's 15 % threshold, taken only
+when it can change the answer (an attended lease, a live owner, progress not already advancing); an unattended lease
+never counts utilisation, and neither does a gone owner. The look has **three answers, not two**: *working*, *idle*
+(every card it is judged by was read and is quiet) and *could not be read* (the sample failed or timed out, which is
+likeliest when the GPU is saturated; a card that reports `[N/A]`; a lease card the sample does not list). Only *working*
+renews, but *could not be read* is worded as what it is and never as idle cards. A missing progress file is `unknown`,
+never advancing.
 
 **What expired means.** `expired: true` and `expired_why` (the sentence: `its owner is gone`, `its owner is still there
-but neither its progress file nor its cards show work`, `it is unattended and its progress contract is not advancing
-(...)`, `it reached its maximum total of 48h0m0s ...`) on the lease's own record. It is a **label**:
+but neither its progress file nor its cards show work`, `its owner is still there, but its cards could not be read and
+its progress contract is not advancing (...), so nothing vouches for it`, `it is unattended and its progress contract is
+not advancing (...)`, `its owner cannot be told apart (<why>) and its progress contract is not advancing (...), so
+nothing vouches for it`, `it reached its maximum total of 48h0m0s ...`) on the lease's own record. The sentence is
+**compared at every recheck** to decide whether the label changed, so it never quotes a value that moves with the clock:
+how long the progress file has been silent is not in it (the progress line of `gpu status` and the stalled sentence say
+that, live, from the file), only the stall window the lease declared. It is a **label**:
 
 - the heartbeat goes on, the claim stays, the holder's fence still passes (`Check`, `Renew`, the per-epoch fence of
   `render/gpu-lock.mjs`), and the command under a wrapper is never touched;
@@ -903,7 +918,10 @@ but neither its progress file nor its cards show work`, `it is unattended and it
   heartbeating is reclaimed by exactly the rule it was before;
 - it clears itself: if a later tick finds the term renewable (the owner is back, the progress file moves) the lease is
   renewed and the label removed. A lease already labelled is asked again only every minute, so a day-long expiry does not
-  sample the cards or print every 15 s; the holder says it once.
+  sample the cards or print every 15 s, and a recheck whose answer has not changed writes nothing. The holder says it
+  **once per expiry**: when the lease becomes expired, not each time the label's sentence is rewritten as the evidence
+  changes (a look at the cards that failed, then one that did not). A renewal ends the episode, so the next expiry is said
+  again.
 
 **Why a label and not `State = "expired"`.** A record's `state` is the fence's word: `checkV2` and `render/gpu-lock.mjs`
 fence out any state but `active`, and so does every binary and Node copy built before this change. An `expired` state
@@ -1268,11 +1286,17 @@ request posted straight to llama-swap by anything outside the harness is outside
 - **Terms: expiry is a label that only reports, and an attended lease with no progress contract is judged on one
   sample.** Nothing consumes the expired label yet except `gpu status`, `offload_status`, the waiter's sentence and
   `/fleet/health` (the takeover that acts on it is a later change). A lease whose owner the registry never held (an MCP
-  server older than the registry, a non-Claude caller; plan section 7 finding 5) has an unknown owner, which is not alive,
-  so it is labelled at the end of its `--for` however busy its cards are; only a progress contract (attended or not) or an
-  owner the registry can see keeps such a lease renewing. And for an attended lease with a live owner and no progress
-  contract, "its cards are working" is a single `nvidia-smi` sample taken at the end of the term: a job in a quiet CPU
-  phase at that instant is labelled, and the next check (a minute later) renews it if the cards are busy by then. Neither
+  server older than the registry, a non-Claude caller; plan section 7 finding 5) has an owner who cannot be told. It is
+  not shown present, so a busy card alone does not renew it (a card in use proves a process, not that anyone wants the
+  result) and it is labelled at the end of its `--for` unless it declares a progress contract that is advancing: that
+  alone keeps it renewing, as it does an unattended lease (operator decision 4: a progress contract renews by progress).
+  Until the registry writer is wired into the session hooks, that is every attended lease taken from a Claude session, so
+  an attended job without a progress file reads `expired` at the end of its first term even while its cards are busy
+  (the `held-overdue` verdict was already true from that moment; the label adds the sentence and the takeover
+  eligibility, and a takeover of an unknown owner will need `--force` anyway). And for an attended lease with a live owner
+  and no progress contract, "its cards are working" is a single `nvidia-smi` sample taken at the end of the term: a job in
+  a quiet CPU phase at that instant is labelled, and the next check (a minute later) renews it if the cards are busy by
+  then; a sample that could not be taken is labelled as unreadable, not as idle, and is asked again the same way. Neither
   gap frees or kills anything.
 - **Ownership is only as good as the registry.** A lease whose owner is a session id the registry never held (an MCP
   server older than the registry, a non-Claude caller) reads `unknown` and is never orphaned; a lease whose owner is a

@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/dmmdea/offload-harness/internal/gpulease"
 )
 
 func TestExpiredLeaseReadsHeldOverdueAndSaysWhy(t *testing.T) {
@@ -92,5 +94,48 @@ func TestUtilWorkingReadsOnlyTheLeaseCardsAndSkipsDisplay(t *testing.T) {
 	below := []GPU{{Index: 0, UUID: "GPU-AAAA", UtilPct: utilBusyPct - 1, UtilKnown: true}}
 	if !UtilWorking(edge, nil) || UtilWorking(below, nil) {
 		t.Error("the busy threshold is the verdict's own")
+	}
+}
+
+// The term check needs three answers from the cards, not two: a card that was read and is quiet
+// is a different statement from a card that could not be read, and the label a lease wears says
+// which. Unknown never reads as idle (the parse's own rule), so a lease is idle only when every
+// card it is judged by was actually read.
+func TestCardsReadingSeparatesIdleFromUnreadable(t *testing.T) {
+	gpus := []GPU{
+		{Index: 0, UUID: "GPU-AAAA", UtilPct: 3, UtilKnown: true},
+		{Index: 1, UUID: "GPU-BBBB", UtilPct: 90, UtilKnown: true, DisplayActive: true},
+		{Index: 2, UUID: "GPU-CCCC", UtilPct: 80, UtilKnown: true},
+		{Index: 3, UUID: "GPU-DDDD", UtilKnown: false},
+	}
+	quiet := []GPU{
+		{Index: 0, UUID: "GPU-AAAA", UtilPct: 3, UtilKnown: true},
+		{Index: 2, UUID: "GPU-CCCC", UtilPct: 0, UtilKnown: true},
+	}
+	cases := []struct {
+		name string
+		gpus []GPU
+		devs []string
+		want gpulease.CardsReading
+	}{
+		{"whole node, a non-display card is busy", gpus, nil, gpulease.CardsWorking},
+		{"lease on a busy card", gpus, []string{"gpu-aaaa", "gpu-cccc"}, gpulease.CardsWorking},
+		{"lease on a quiet card that was read", gpus, []string{"gpu-aaaa"}, gpulease.CardsIdle},
+		{"whole node, every card read and quiet", quiet, nil, gpulease.CardsIdle},
+		{"lease on the display card only: its load is the desktop's, so no reading counts", gpus, []string{"gpu-bbbb"}, gpulease.CardsUnreadable},
+		{"lease on a card whose utilisation is [N/A]", gpus, []string{"gpu-dddd"}, gpulease.CardsUnreadable},
+		{"a quiet card and one that could not be read is not idle", gpus, []string{"gpu-aaaa", "gpu-dddd"}, gpulease.CardsUnreadable},
+		{"a busy card wins over one that could not be read", gpus, []string{"gpu-cccc", "gpu-dddd"}, gpulease.CardsWorking},
+		{"lease on a card the sample does not list", gpus, []string{"gpu-eeee"}, gpulease.CardsUnreadable},
+		{"a quiet card and one the sample does not list is not idle", gpus, []string{"gpu-aaaa", "gpu-eeee"}, gpulease.CardsUnreadable},
+		{"no card in the sample at all", nil, nil, gpulease.CardsUnreadable},
+		{"whole node, a quiet card and one that could not be read", []GPU{quiet[0], gpus[3]}, nil, gpulease.CardsUnreadable},
+		{"at the verdict's busy threshold the card is working", []GPU{{Index: 0, UUID: "GPU-AAAA", UtilPct: utilBusyPct, UtilKnown: true}}, nil, gpulease.CardsWorking},
+		{"one point under it the card is idle", []GPU{{Index: 0, UUID: "GPU-AAAA", UtilPct: utilBusyPct - 1, UtilKnown: true}}, nil, gpulease.CardsIdle},
+	}
+	for _, tc := range cases {
+		if got := CardsReadingOf(tc.gpus, tc.devs); got != tc.want {
+			t.Errorf("%s: read %v, want %v", tc.name, got, tc.want)
+		}
 	}
 }

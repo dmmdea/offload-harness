@@ -92,8 +92,14 @@ above it is recorded (`requested_ms`), warned about, accepted whole and never sh
 (24 hours with a progress contract). The record also carries `term_ms` and `max_total_ms` (`gpu_max_total_min`, default
 2880, never less than the window). When a term ends, the holder's OWN tick (the wrapper's 15 s heartbeat, the detached
 holder's renewal; no timer, no watcher, no other process) renews it by one term if its owner is alive and (its progress
-file is advancing or its cards are working), or if it is unattended and its progress is advancing, and the new end stays
-inside the maximum total. Otherwise it stamps the lease `expired` with the reason. **Expired is a label, not a state:**
+file is advancing or its cards are working), or if its owner cannot be told and its progress is advancing, or if it is
+unattended and its progress is advancing, and the new end stays inside the maximum total. An owner who cannot be told (no
+owner recorded, a session the registry never held, a registry that could not be read) is neither gone nor shown present:
+nobody is objecting, so the job's own advancing progress file vouches for the lease, and a busy card alone does not (it
+proves a process, not that anyone wants the result). Otherwise the tick stamps the lease `expired` with the reason, a
+sentence that is compared at every recheck and so never quotes a value that moves with the clock; the cards it reads have
+three answers (working, idle, could not be read), and an unreadable look is worded as such, never as idle cards. The
+holder says it once per expiry. **Expired is a label, not a state:**
 the heartbeat goes on, the claim stays, the holder's fence still passes, the verdict is the existing `held-overdue`, the
 lease is takeover-eligible, and the reclaim conjunction of ADR 0018 is untouched, so a heartbeating expired lease keeps
 its cards and nothing is reclaimed or killed. It is its own record key, not a third `State`, because `state` is the
@@ -118,7 +124,12 @@ silent.
   while it still heartbeats. That is true (the window did end) and is not an accusation. With terms (P9) its holder
   also renews it when its owner is alive and the cards are working, and labels it expired, with the reason, when not;
   an owner the registry never held is unknown, which is not alive, so such a lease is labelled at the end of its
-  window however busy its cards are. A progress contract keeps a lease renewing without an owner.
+  window however busy its cards are, unless it carries a progress contract that is advancing: that alone keeps it
+  renewing (a gone owner is rescued by neither a progress file nor a busy card). Until the registry writer is wired into the
+  session hooks that is every attended lease a Claude session takes, so an attended job with no progress file reads
+  `expired` at the end of its first term while its cards are busy; its `held-overdue` verdict was already true from
+  that moment. The alternative, letting a busy card rescue an unknown owner too, would stop a busy job nobody can
+  vouch for from ever being called stale.
 - With several live leases every surface describes the MOST ESCALATED one from its own record: the epoch, the owner,
   the progress contract and the takeover command always belong to the lease the verdict names.
 - A waiter's sentence reads the marker a status surface recorded, so a lone waiter on an orphan nobody has looked
