@@ -15,6 +15,17 @@ Versioning: [SemVer](https://semver.org/).
   and a refusal ends it before anything is touched. The order is resolve, stop the kept instances, warm the seat
   back, release: the instances go before the seat is loaded onto their cards (the documented order; it had been
   warm first). A release that fails after the stop says the instances were already stopped.
+- **An unkeyed runner given a non-default `--api` no longer launches ComfyUI on 8188.** (Plan section 7, finding
+  7, assigned to this phase.) With no `COMFY_INSTANCE` or `COMFY_CARD_UUID` the instance is unkeyed, `withGpuSlot`
+  called `ensureComfy` with no endpoint, and an unkeyed launch has no `--port`: a blog batch run with
+  `--api http://127.0.0.1:8189` started a stray ComfyUI on 8188 inside its card-0 lease while every job went to
+  8189, and the stray holds a CUDA context on the leased card and makes a later card-bound default binding refuse with
+  `COMFY-PROFILE-MISMATCH` (it broke a real batch). The runner now passes the endpoint down; `ensureComfy` reuses it
+  when it answers and otherwise fails with `COMFY-ENDPOINT-DOWN`, naming the endpoint and the fix, launching
+  nothing. The operator's own `COMFY_EXTRA_ARGS` carrying that `--port` still launches, and an orphan that needs
+  replacing is refused before it is stopped when the relaunch could not land on its endpoint. `run-graph` shared the
+  defect (its start and its free went to 8188); `instanceDeps` follows the same rule. Two older tests that pinned
+  the old launch now pin the new rule.
 - **A resumed place no longer ages while its call waits.** The resumed call looked its token up (without
   consuming it) and then waited in-process for the card's slot, up to the whole window, with no waiter record and no
   refresh of the token's last poll, so after the 30 s grace the place read as absent and other processes' waiters and
@@ -422,7 +433,8 @@ config template spelled sixteen data paths as `~/.local-offload/...`, and `docto
   relaunched only when its spawner is gone.
 - **Runners and Go.** Every render runner resolves its endpoint through the instance. For a keyed instance `withGpuSlot`
   launches, frees and log-tails that instance (the launch and the post-run `/free` ignored `--api` before); an unkeyed
-  instance still launches through the environment's endpoint and its post-run `/free` follows `--api`. `run-graph` starts
+  instance on the default endpoint is unchanged, and one on another endpoint is reused when it answers and refused
+  otherwise (see the review pass above). `run-graph` starts
   and frees its own ComfyUI the same way (`instanceDeps`, tested by behaviour), and a bad instance env is a typed
   `RUN_ERROR` defer, not an untyped exit 1. Runners stage their inputs under names unique across processes
   (`render/comfy-input.mjs`: clock, pid, random suffix, sequence), since concurrent instances share one input directory.

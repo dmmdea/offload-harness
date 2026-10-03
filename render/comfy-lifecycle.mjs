@@ -670,6 +670,18 @@ export async function ensureComfy(opts = {}) {
   const instance = resolveInstance({ api: apiOpt || process.env.COMFY_API, env });
   const { api, key } = instance;
   const profile = resolveLaunchProfile(env);
+  // Can this call launch an instance on `api` at all? A keyed instance owns its --port; the
+  // default endpoint is what an unlaunched ComfyUI listens on; an UNKEYED instance on any other
+  // endpoint has no --port of its own, so only the operator's own extra args can put it there.
+  // Without this a launch would start ComfyUI on 8188 while the run submits to `api` (plan
+  // section 7, finding 7: a stray instance inside a card lease, then COMFY-PROFILE-MISMATCH).
+  const canLaunchHere = Boolean(key) || instance.port === DEFAULT_COMFY_PORT
+    || argvFlagValue(String(env.COMFY_EXTRA_ARGS || "").split(/\s+/).filter(Boolean), "--port") === String(instance.port);
+  const endpointDown = () => {
+    const line = `COMFY-ENDPOINT-DOWN: ComfyUI is not answering on ${api}, and an unkeyed runner can launch only the default endpoint (port ${DEFAULT_COMFY_PORT}): a launch with no --port would start 8188 while this run submits to ${api}. Start ComfyUI on that port yourself, or key the instance (COMFY_INSTANCE=<name>, or COMFY_CARD_UUID with this --api), which makes the runner launch it on its own port`;
+    log(line);
+    return new Error(line);
+  };
   if (await up(api)) {
     const v = await reuseVerdict({ api, comfyDir, profile, key, port: instance.port, systemArgv, readLaunch, alive });
     if (v.reuse) return null; // already running and fit for this binding — don't manage it
@@ -678,10 +690,17 @@ export async function ensureComfy(opts = {}) {
       log(line);
       throw new Error(line);
     }
+    // Replacing it means launching on `api` again; if this call cannot, stopping it first would
+    // leave the operator with neither instance.
+    if (!canLaunchHere) throw endpointDown();
     // Ours, orphaned (a --keep-comfy session or a crashed teardown), wrong profile:
     // replace it rather than render on the wrong card.
     await stopComfy({ api, comfyDir, key, pid: v.pid, reason: v.reason, up, killPid, clearLaunch, log, pollMs, stopPolls });
   }
+  // A runner given another endpoint (--api / COMFY_API) that nothing answers on must NOT launch
+  // (canLaunchHere above): the one launch that is honest is the operator's own, extra args that
+  // carry that very --port.
+  if (!canLaunchHere) throw endpointDown();
   // An unbound COMFY_DIR must fail with its reason, not with a bad cwd from spawn(): on a
   // machine with no ComfyUI binding the caller's defer should say WHY.
   if (!comfyDir) {

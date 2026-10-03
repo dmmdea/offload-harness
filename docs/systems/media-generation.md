@@ -886,13 +886,19 @@ Directory is outside this repository: update it with the host's other listeners)
 `-animate`, `-upscale`, `-music`, `-run-graph`) resolves its endpoint through `comfyApi(flags.api)` and
 hands it to `withGpuSlot`. For a **keyed** instance `withGpuSlot` launches, frees (`POST /free`) and
 tails the log of that instance (before this, the launch and the post-run free ignored `--api` and used
-the environment's endpoint). For an **unkeyed** instance nothing changes about the launch:
-`ensureComfy` is still called without an api (an unkeyed launch has no `--port`, so it can only start
-the default endpoint), and the post-run `/free` now goes to the endpoint the runner talked to. With no
-`--api` that is the same endpoint as before, so the calls are the old ones in value; with `--api`
-naming another port on an unkeyed instance, the launch still uses the environment's endpoint while the
-free follows `--api`. `run-graph` starts and frees its own ComfyUI through the same rule
-(`instanceDeps`), and an env that cannot name an instance is a typed `RUN_ERROR` defer in its result
+the environment's endpoint). For an **unkeyed** instance on the default endpoint nothing changes:
+`ensureComfy` is still called without an api and the post-run `/free` goes to the endpoint the runner talked
+to. An **unkeyed** instance on ANOTHER endpoint (`--api` or `COMFY_API` naming a port other than 8188, with
+no `COMFY_INSTANCE` or `COMFY_CARD_UUID`) used to be ensured on the default endpoint: an unkeyed launch has
+no `--port`, so a blog batch run with `--api http://127.0.0.1:8189` started a stray ComfyUI on 8188 inside its
+card lease while every job went to 8189, and the stray made a later card-bound default binding refuse with
+`COMFY-PROFILE-MISMATCH`. The runner now hands that endpoint to `ensureComfy`, which reuses it when it
+answers and otherwise fails with `COMFY-ENDPOINT-DOWN` (naming the endpoint and the fix: start it yourself,
+or key the instance, which makes the runner launch it on its own port), launching nothing; the one launch
+that stays is the operator's own, `COMFY_EXTRA_ARGS` carrying that very `--port`. An orphan on that endpoint
+that needs replacing is refused before it is stopped when the relaunch could not land there. `run-graph`
+starts and frees its own ComfyUI through the same rule (`instanceDeps`, and its free follows the endpoint
+it ran on, not 8188), and an env that cannot name an instance is a typed `RUN_ERROR` defer in its result
 file (exit 0), like every other `run-graph` failure. The Go side carries the optional endpoint and
 card in `imagegen.ComfyLaunch{API, CardUUID}` and `gpugen.Spec{ComfyAPI, CardUUID}`; the post-run
 `/free` goes to the instance that ran.

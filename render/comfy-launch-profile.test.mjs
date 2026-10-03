@@ -151,7 +151,9 @@ test("harness-launched, orphaned, wrong profile => stopped and relaunched with t
   let killed = null; let spawned = null; let closed = false;
   try {
     const child = await ensureComfy({
-      api: s.api, env: { COMFY_CUDA_DEVICE: "1", COMFY_DYNAMIC_VRAM: "on", COMFY_EXTRA_ARGS: "--disable-dynamic-vram" },
+      // An unkeyed instance on a port other than 8188 exists only because the operator's extra args
+      // gave it that --port (an unkeyed launch has none of its own), so the relaunch carries it too.
+      api: s.api, env: { COMFY_CUDA_DEVICE: "1", COMFY_DYNAMIC_VRAM: "on", COMFY_EXTRA_ARGS: `--disable-dynamic-vram --port ${new URL(s.api).port}` },
       comfyDir: dir, alive: (pid) => pid === 4242, pollMs: 1, log: () => {},
       comfyUp: async (api) => (closed ? spawned !== null : comfyUp(api)),
       killPid: (pid) => { killed = pid; s.close(); closed = true; },
