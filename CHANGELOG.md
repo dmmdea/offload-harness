@@ -6,6 +6,38 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added — iGPU media engines: video, animate, voice and music on a Vulkan-only box (CT-49)
+
+A box whose only GPU is a Vulkan iGPU (no CUDA, no ROCm, and an operator rule that no model runs on CPU) now serves
+`generate_video` (I2V and T2V), `animate_character` and `generate_audio` voice (with clone) and music through the same
+MCP tools, CLI verbs and fleet task types as a ComfyUI box. Each engine is a spawn-per-job native CLI under the existing media
+lease (nothing resident, no ComfyUI, no Python): a `videogen_families` entry with `"engine": "sdcpp"` renders through
+`render/sdcpp-video.mjs` (stable-diffusion.cpp `vid_gen`, Wan2.2 TI2V-5B or an A14B pair; the family may carry any name and
+`videogen_family` may name it as the box default); `animategen_engine: "sdcpp"` renders through
+`render/sdcpp-animate.mjs` (ffmpeg frames, depth-anything.cpp, sd.cpp Wan2.1 VACE 1.3B with the depth directory as the
+control video); `voicegen_engine` / `musicgen_engine: "audiocpp"` render through `render/audiocpp-generate.mjs` (audio.cpp
+`chatterbox` and `ace_step`, music loudness-normalized to -14 LUFS / -1 dBTP when ffmpeg is present). New keys: the
+`sdcpp_*`, `steps`, `cfg`, `flow_shift` and `sampler` fields of a video family binding, `videogen_sdcpp_script`,
+`animategen_engine`, `animategen_sdcpp_*`, `animategen_depth_*`, `animategen_steps/_cfg/_flow_shift`, `voicegen_engine`,
+`musicgen_engine` and `audiocpp_*` (`config.example.json` regenerated). A box that sets none of them behaves byte for byte
+as before (`TestEveryRouteWithNoEngineKeyKeepsItsExactArgv`, green on the unmodified base too). `doctor`, `offload_status` and
+`acceptance` derive a route per engine (CONFIGURED only when the runner, binaries and every bound model file exist; a non-default
+sdcpp video family gets `generate_video:<name>`). Not in this change: the fleet advertisement of these lanes (the media-remote
+branch owns `internal/fleetnode`), run-graph (stays ComfyUI-only) and per-node seeds.
+
+### Added — no model ever runs on CPU on these engines, enforced at four layers
+
+A `cpu` or unset backend (also `cpu0` and any per-module assignment such as `diffusion=vulkan0,vae=cpu`) is refused at config
+load (so `doctor` fails on it by name), reported BOUND-BUT-MISSING by the route derivation, a typed defer in the pipeline
+(`err_class` `cpu_backend_refused`), and refused again by each runner. The runners also read their engine's own log while it
+runs: the first line that places a compute module on the CPU kills the process tree and fails the job with `CPU_PLACEMENT`
+(`err_class` `cpu_placement`) instead of finishing a long render on the wrong silicon. Tests:
+`TestCPUBackendRefusal`, `TestSdcppVideoFamilyRefusesACPUBackend`, `TestAnimateAndAudioEnginesRefuseACPUBackend`,
+`TestACPUBackendIsATypedDeferOnEveryIGPULane`, `TestACPUOrUnsetBackendMakesEveryIGPURouteBoundButMissing` and the node tests in
+`render/igpu-engine.test.mjs` (each guard was broken once and seen red). Known limits: the CPU-placement line patterns and their
+fixtures are modelled on the engines' documented log shapes, not captured from the target node, and the depth-anything.cpp argv
+is bound from its README (it has no documented backend flag); both are named for the first live run.
+
 ## [0.163.1] - 2026-10-03 - A warm-back never loads a seat over another card's lease
 
 ### Fixed — a warm-back waits for the last lease on the seat's cards (register C-86, plan P5 follow-up)

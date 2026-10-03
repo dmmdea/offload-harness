@@ -515,6 +515,15 @@ clean 512² reference. **Media FORBIDDEN:** `--vae-conv-direct` on Vulkan (disto
 sd.cpp #1673); SD2-class models (RDNA3-adjacent crash, #1340); fp8 anything (Q8_0/Q4_K GGUF
 only); substituting quant builds or unpinned models (Hard rule 2).
 
+### iGPU media engines: video, animate, voice, music (CT-49)
+
+A Vulkan-only box (an iGPU such as the amd-gcn Vega 7 class: no CUDA, no ROCm) can serve `generate_video`, `animate_character` and `generate_audio` voice and music without ComfyUI or Python. Nothing here is seeded by the installer yet: the seeds carry measured values only after a live run, so an installing agent binds the keys by hand and checks them with `local-offload doctor`.
+
+1. **Download consent first (Hard rule 3).** The engines are the pinned stable-diffusion.cpp Vulkan build (`sd-cli`, already laid down by the media tier), the audio.cpp `audiocpp_cli` Vulkan build (Apache-2.0), and the depth-anything.cpp `da3-cli` build with a depth GGUF. Models: a Wan2.2 TI2V-5B GGUF with its VAE and umt5-xxl encoder for video, a Wan2.1 VACE 1.3B GGUF with the Wan2.1 VAE for animate, the audio.cpp `chatterbox` GGUF for voice and `ace_step` GGUF for music.
+2. **Check the GPU is visible.** `sd-cli --list-devices` and `audiocpp_cli --backend vulkan --list-devices` must list the iGPU. A backend of `cpu` is refused everywhere (config load, `doctor`, the pipeline, and the runner's own log guard); there is no CPU fallback to configure.
+3. **Bind the keys** from the examples in `docs/systems/media-generation.md` (section "iGPU media engines"): a `videogen_families` entry with `"engine": "sdcpp"` (then `videogen_family` may name it as the box default), `animategen_engine: "sdcpp"` with the `animategen_sdcpp_*` and `animategen_depth_*` keys, `voicegen_engine` / `musicgen_engine: "audiocpp"` with the `audiocpp_*` keys. `sdcpp_backend`, `animategen_sdcpp_backend` and `audiocpp_backend` are required and name a GPU device (`vulkan0`, `vulkan`).
+4. **Verify.** `local-offload doctor` must show the bound routes as CONFIGURED (`generate_video`, `animate_character`, `generate_audio:voice`, `generate_audio:music`) and no `FAIL`. Then run one job per lane and look at the output (watch the clip, listen to the audio); a `CPU_PLACEMENT` failure means the engine put a model on the CPU, so fix the build or the device, never the guard.
+
 ### Fleet membership (J3) — this box can join the fleet
 
 `local-offload fleet-serve` now works on AMD: the GPU memory source is a **resolved provider**

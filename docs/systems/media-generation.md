@@ -31,6 +31,8 @@ use and prints a `WARN` line when that device is an integrated GPU
 subprocess probe, so it is invoked directly from `doctor`, not from `mediacap.Routes` (which stays
 a pure config/filesystem derivation for `offload_status`/`acceptance`).
 
+**iGPU media engines (CT-49).** The video, animate, voice and music lanes also run on a Vulkan-only box (no CUDA, no ROCm) through spawn-per-job native engines (sd.cpp `vid_gen`, sd.cpp VACE with depth-anything.cpp, audio.cpp), under a hard rule that no model runs on CPU. See [iGPU media engines](#igpu-media-engines-video-animate-voice-music-ct-49).
+
 **Composition lane (ADR 0059).** `offload_compose_video` / `compose-video` renders
 designed HTML/CSS motion graphics to video with **HyperFrames**: title cards, lower thirds, kinetic
 type and alpha overlays. It is CPU-class: software GL and CPU encode, with no GPU lease. It is
@@ -48,6 +50,7 @@ pinned, env-scrubbed and machine-gated. See
 - Why is FLUX not an option?
 - How is a named opt-in family (Qwen-Image-2.1) selected, and what does its result carry?
 - Which card does a ComfyUI route render on, and how is that pinned per binding?
+- How do video, animate, voice and music run on an iGPU-only box, and how is CPU placement refused?
 
 ## Scope
 
@@ -906,6 +909,70 @@ cards, so confirm that an instance is on its card by per-card memory deltas, not
 | `COMFY-PORT-TAKEN: …` | the instance's port is held, on an address ComfyUI will listen on, by something that is not ComfyUI; nothing was launched or killed |
 | `COMFY-PROFILE-MISMATCH: …` | a ComfyUI answers on the instance's port but is not shown to be that instance (or is on the wrong card); refused, and stopped only when the harness's own marker proves it is the harness's and its spawner is gone |
 
+## iGPU media engines: video, animate, voice, music (CT-49)
+
+A box whose only GPU is a Vulkan iGPU (no CUDA, no ROCm) serves the same four lanes a ComfyUI box does, through the same MCP tools, CLI verbs and fleet task types: `generate_video` (I2V and T2V), `animate_character`, and `generate_audio` kind `voice` (with clone) and kind `music`. `run_graph` stays ComfyUI-only. Every engine is a spawn-per-job native CLI under the existing media lease: the process exits, the memory is gone, nothing is resident, no ComfyUI and no Python. A box that sets none of the keys below behaves byte for byte as before (`TestEveryRouteWithNoEngineKeyKeepsItsExactArgv` pins the four argv shapes, and passes on the unmodified base too).
+
+| Lane | Selected by | Runner | Engine |
+|---|---|---|---|
+| `generate_video` | a `videogen_families` entry with `"engine": "sdcpp"` | `render/sdcpp-video.mjs` | stable-diffusion.cpp `sd-cli -M vid_gen` (Wan2.2 TI2V-5B GGUF; also drives a Wan2.2 A14B high/low pair where the box has the memory) |
+| `animate_character` | `animategen_engine: "sdcpp"` | `render/sdcpp-animate.mjs` | ffmpeg frames, depth-anything.cpp depth PNGs, sd.cpp Wan2.1 VACE 1.3B with the depth directory as `--control-video` |
+| `generate_audio` voice | `voicegen_engine: "audiocpp"` | `render/audiocpp-generate.mjs --kind voice` | audio.cpp `audiocpp_cli`, `chatterbox` family, `--task tts` (`clon` with a clone reference) |
+| `generate_audio` music | `musicgen_engine: "audiocpp"` | `render/audiocpp-generate.mjs --kind music` | audio.cpp `audiocpp_cli`, `ace_step` family, `--task gen` |
+
+### No model runs on CPU
+
+The operator rule behind these lanes is that nothing runs on the CPU. It is enforced at four layers, each with a test that was seen red once:
+
+1. **Config load.** `config.CPUBackendRefusal` refuses an empty backend, `cpu`, `cpu0` and any per-module assignment that lands on the CPU (`diffusion=vulkan0,vae=cpu`). `local-offload doctor` loads the config first, so it fails on it by name.
+2. **mediacap.** A route whose backend is a CPU one is BOUND-BUT-MISSING (doctor FAIL), whatever the config loader said, so an in-process config cannot slip past `offload_status`.
+3. **Pipeline.** The same refusal is a typed defer (`meta.err_class` = `cpu_backend_refused`) before the runner spawns.
+4. **The runners read their engine's log.** Each runner scans every output line while the engine runs. The first line that places a compute module on the CPU kills the process tree and fails the job with `CPU_PLACEMENT` (`cpu_placement`), rather than letting a multi-minute render finish on the wrong silicon. The sd-cli and audiocpp_cli verbose flags (`-v`, `--log`) are therefore never optional in the argv. Host dumps (`system_info`), ggml's "loaded CPU backend" registration lines, RNG selection and parameter-storage lines are not placements. The line patterns are in `render/igpu-engine.mjs` (`detectCpuPlacement`) and are pinned by fixtures in `render/testdata/`.
+
+### Video (`render/sdcpp-video.mjs`)
+
+```json
+"videogen_family": "fastwan",
+"videogen_families": {
+  "fastwan": {
+    "engine": "sdcpp",
+    "sdcpp_bin": "/path/to/sd-cli",
+    "sdcpp_model": "/path/to/Wan2.2-TI2V-5B-Q8_0.gguf",
+    "sdcpp_vae": "/path/to/wan2.2_vae.safetensors",
+    "sdcpp_t5xxl": "/path/to/umt5-xxl-encoder-Q8_0.gguf",
+    "sdcpp_backend": "vulkan0",
+    "sdcpp_extra_args": [],
+    "steps": 3, "cfg": 1, "flow_shift": 3, "sampler": "euler",
+    "fps": 24, "width": 832, "height": 480, "frames": 49,
+    "license": "Apache-2.0", "commercial_use": true
+  }
+}
+```
+
+An sdcpp family may carry any name; `resolveVideoFamily` matches it by its own name, exactly, and its entry wins wholesale (the flat `videogen_*` ComfyUI weight keys never reach sd-cli). A request's `model` param selects it on a box whose default is ComfyUI. `sdcpp_high_noise_model` adds the Wan2.2 A14B high-noise expert. Non-default sdcpp families get their own `generate_video:<name>` route in `doctor` and `offload_status`.
+
+Argv contract (`sdcpp-video.mjs <out.mp4> [<still>] "<prompt>" --sd-bin ... --model ... --vae ... --t5xxl ... --backend ...`; optional `--high-noise-model --frames --width --height --fps --steps --cfg --flow-shift --sampler --seed --negative --extra-args <json array>`) maps to sd-cli master-929 as `-M vid_gen --diffusion-model [--high-noise-diffusion-model] --vae --t5xxl [-i <still>] -p [-n] [--cfg-scale] [--steps] [--sampling-method] [--flow-shift] -W -H --video-frames --fps [-s] --backend --diffusion-fa --vae-tiling -v -o <tmp>.webm`, then ffmpeg encodes the webm to H.264 mp4 (yuv420p, CRF 16, the given fps; `FFMPEG_PATH` or PATH). Frames are normalized to the nearest 4k+1 (ties up, minimum 5, default 49) and width and height are floored to a multiple of 32 (default 832x480); the Go side applies the same rule before it spawns, so the argv the runner receives is the argv sd-cli gets. The result is `{video_path, seed}` plus the family's license pair, like the ComfyUI route.
+
+Measured on the reference iGPU node (Vega 7), FastWan TI2V-5B q8_0, 832x480x49, 3 steps, cfg 1: sampling 232 s, text conditioning 15 s. Acceptance numbers for the runner itself are added by the conductor's live run.
+
+### Animate (`render/sdcpp-animate.mjs`)
+
+Config: `animategen_engine`, `animategen_sdcpp_bin/_model/_vae/_t5xxl/_backend/_extra_args`, `animategen_depth_bin`, `animategen_depth_model`, `animategen_depth_extra_args`, `animategen_steps`, `animategen_cfg`, `animategen_flow_shift` (plus the shared `animategen_width/_height`). `animategen_sdcpp_script` overrides the runner path.
+
+The runner extracts the driver's frames with ffmpeg (16 fps, scaled to cover W x H and centre-cropped, the first N = 4k+1 frames; a driver shorter than the request renders the largest 4k+1 it has, and fewer than 5 frames is an error), runs depth-anything.cpp once per frame, and renders `sd-cli -M vid_gen --diffusion-model <vace gguf> --vae --t5xxl -i <ref> --control-video <depth dir> ...`. The frames, depth and output temp directories are removed on every exit path, including a kill.
+
+Two honest limits. The depth step's argv (`da3-cli depth --model M --input frame.png --png depth.png`) is bound from the depth-anything.cpp README, not from the binary on the node, and that CLI documents no backend flag: the step is pinned to the sd backend's Vulkan device through `GGML_VK_VISIBLE_DEVICES` and its log is scanned for CPU placement like the others. And it runs once per frame, so its model is reloaded N times; on an iGPU that is real wall time. `animategen_depth_extra_args` is the config escape hatch while the first live run confirms the flags.
+
+### Voice and music (`render/audiocpp-generate.mjs`)
+
+Config: `voicegen_engine`, `musicgen_engine`, `audiocpp_bin`, `audiocpp_backend`, `audiocpp_device` (an index, default 0), `audiocpp_voice_family` (default `chatterbox`), `audiocpp_voice_model`, `audiocpp_music_family` (default `ace_step`), `audiocpp_music_model`, `audiocpp_extra_args`; `audiocpp_script` overrides the runner path. A model is a GGUF file or a model package directory.
+
+Argv contract: `--task tts|clon|gen --family F --model M --backend B --device N --text T [--language L] [--voice-ref R] [--lyrics L] [--duration-seconds S] [--seed N] --metrics --log --out <wav>`. Voice uses `clon` plus `--voice-ref` when a clone reference is given (the request's `clone`, else `voicegen_ref`); the language defaults to `es` like the Chatterbox worker. Music is loudness-normalized like `render/comfy-music.mjs` (-14 LUFS / -1 dBTP through `audio-qa.mjs`) when ffmpeg is present, then delivered at 48 kHz; a missing ffmpeg keeps the engine's wav. Output is a `.wav`. `voice=finetuned` keeps the Chatterbox python worker, `voice=endpoint` keeps the speech server, and a configured audiocpp voice engine is a local voice, so the endpoint is not the default on such a box.
+
+### Verdicts
+
+`doctor` and `offload_status` show each engine route as CONFIGURED only when the runner, the engine binaries and every bound model file exist (an ffmpeg that is set but absent counts for video and animate); an engine with nothing bound is NOT CONFIGURED, and a bound file that is missing, a half-bound engine or a CPU backend is BOUND-BUT-MISSING. These routes never claim ComfyUI as a prerequisite.
+
 ## Error handling
 
 Failures return typed Defers rather than crashing: a busy GPU lock defers with a distinct reason, a
@@ -1069,6 +1136,15 @@ recorded as known offenders with their reason rather than silently skipped — a
   lifecycle and its graph builder
 - [`render/sdcpp-generate.mjs`](../../render/sdcpp-generate.mjs) — the sdcpp engine (flag mapping
   to the pinned sd.cpp CLI lives here)
+- [`render/igpu-engine.mjs`](../../render/igpu-engine.mjs) — the iGPU runners' shared plumbing: the
+  backend refusal, `detectCpuPlacement`, `runEngine` (kill on the first CPU-placement line), the 4k+1
+  and /32 normalization; [`render/sdcpp-video.mjs`](../../render/sdcpp-video.mjs),
+  [`render/sdcpp-animate.mjs`](../../render/sdcpp-animate.mjs) and
+  [`render/audiocpp-generate.mjs`](../../render/audiocpp-generate.mjs) are the three runners
+- [`internal/pipeline/igpumedia.go`](../../internal/pipeline/igpumedia.go),
+  [`internal/config/igpumedia.go`](../../internal/config/igpumedia.go) and
+  [`internal/mediacap/igpumedia.go`](../../internal/mediacap/igpumedia.go) — the iGPU lanes' routing,
+  config contract (with the CPU refusal) and route verdicts
 - [`render/edit_image.py`](../../render/edit_image.py) — the edit ops
 - [`internal/pipeline/inpaint_autotext.go`](../../internal/pipeline/inpaint_autotext.go) — auto-text
   localization and its validation envelope
