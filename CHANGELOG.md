@@ -92,6 +92,33 @@ Tests: `TestAnInFlightMediaJobDoesNotPinItsRequestBody`, `TestMediaJobFileFields
 
 ## [0.163.1] - 2026-10-03 - A warm-back never loads a seat over another card's lease
 
+### Changed — second review round for the media-job work (register CT-50)
+
+- **The media-job body is read into one buffer of exactly `Content-Length` bytes.** `bytes.Buffer.ReadFrom` regrew a buffer sized
+  `Content-Length + 1` to about twice its size whenever the last reads left fewer than 512 bytes free (5 of 400 loopback
+  uploads), which broke the 0.6 GiB peak the 256 MiB default promises. The door now uses `io.ReadFull` and probes one byte past
+  the declared length; a body longer than it declared is refused `413 request body too large` like one over the cap, and one
+  shorter than it declared is a `400`.
+- **Fetched files are mode 0644 less the umask**, not the temp file's 0600, so a service reading `media_dir` (or the caller's
+  `out`) on Linux can read them, as before the staging change.
+- **An empty `media_dir` means the current directory** for a fetch (it failed after the render with `mkdir : ...`).
+- **The caller's `out` is decided first and reserved.** An `out` inside `out_dir` that shares a base name with a secondary
+  output no longer lets the secondary claim that name and be renamed over; the secondary takes the job-id-prefixed name.
+- **A budget or deadline that ends a call asks the node to withdraw the job** (`DELETE /fleet/jobs/{id}`, best effort, its own 5 s
+  timeout, failures logged, the node's answer in the defer text). A deadline that passes during the fetch now says the render
+  finished and the fetch ran out of time, and withdraws nothing. Today the node withdraws only an agent job that has not started
+  (ADR 0064), so for a media job the answer is usually 405 or 409 and the job may still hold its card.
+- **Leftovers of a fetch that never finished are swept** from the destination directory before names are claimed: stale
+  `.media-fetch-*.part` temps and zero-byte `media-<16 hex>-*` claim files older than an hour (bounded to 4096 entries scanned and
+  256 removed, logged).
+- **`compose-project` reports a deadline it cannot extend** like the media-job door does (it discarded the errors).
+
+Tests: `TestReadMediaJobBodyAllocatesExactlyContentLength`, `TestFetchedOutputsLandAs0644LessTheUmask`,
+`TestAnEmptyMediaDirIsTheCurrentDirectory`, `TestAnOutThatSharesANameWithASecondaryNeverDestroysIt`,
+`TestABudgetThatEndsTheCallAsksTheNodeToWithdrawTheJob`, `TestABudgetThatEndsDuringTheFetchSaysTheRenderFinishedAndWithdrawsNothing`,
+`TestAStaleFetchLeftoverIsSweptBeforeTheNextClaim`, `TestPollFailuresThatAlternateWithAnswersNeverEndTheWait`,
+`TestAGraphThatEscapesPastTheNodesBodyCapIsRefusedBeforeTheNetwork`, `TestComposeProjectReportsADeadlineItCannotExtend`.
+
 ### Fixed — a warm-back waits for the last lease on the seat's cards (register C-86, plan P5 follow-up)
 
 A lease that unloaded the agent seat owes it a warm-back, and the warm loads the seat on all its cards. With card-scoped
