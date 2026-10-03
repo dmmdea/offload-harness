@@ -158,8 +158,15 @@ type errGPUQueued struct {
 }
 
 func (e *errGPUQueued) Error() string {
-	return fmt.Sprintf("gpu queued: %s; your place in line is #%d (token %s), at most %ds until the first card frees; call again with waiter_token=%s to keep it",
-		e.Why, e.Position, e.Token, e.ETASec, e.Token)
+	// The estimate is the declared end of the LONGEST lease in the way: a request is served when
+	// every lease it conflicts with has ended. 0 means nothing in the way declares an end (the
+	// places ahead are callers, not leases), which is not "no wait".
+	wait := "no estimate (nothing ahead of you declares an end)"
+	if e.ETASec > 0 {
+		wait = fmt.Sprintf("at most %ds until the lease(s) in the way end", e.ETASec)
+	}
+	return fmt.Sprintf("gpu queued: %s; your place in line is #%d (token %s), %s; call again with waiter_token=%s to keep it",
+		e.Why, e.Position, e.Token, wait, e.Token)
 }
 
 // queuedPayload is the machine-readable half of the answer.
@@ -630,7 +637,10 @@ func (p *Pipeline) queuedAnswer(m *gpulease.Manager, ids []string, since time.Ti
 	e := &errGPUQueued{Token: tok.ID, Position: m.QueuePosition(ids, since, tok.ID), Devices: ids}
 	now := time.Now()
 	for _, l := range m.Leases() {
-		if len(l.Devices) != 0 && !intersects(l.Devices, ids) {
+		// A request that names cards is in the way of, and blocked by, the leases on those cards;
+		// a request for the whole node (no ids) is blocked by every lease, as conflict() in
+		// mediaslots.go has it. A whole-node lease (no devices) blocks everyone.
+		if len(ids) != 0 && len(l.Devices) != 0 && !intersects(l.Devices, ids) {
 			continue
 		}
 		e.HeldBy = append(e.HeldBy, l.Epoch)
@@ -640,13 +650,17 @@ func (p *Pipeline) queuedAnswer(m *gpulease.Manager, ids []string, since time.Ti
 			}
 		}
 	}
+	subject := "the whole node"
+	if len(ids) != 0 {
+		subject = "card(s) " + strings.Join(ids, ", ")
+	}
 	switch {
 	case held != nil:
-		e.Why = fmt.Sprintf("card(s) %s held by %s (%q)", strings.Join(ids, ", "), held.Info.Class, held.Info.Reason)
+		e.Why = fmt.Sprintf("%s held by %s (%q)", subject, held.Info.Class, held.Info.Reason)
 	case len(e.HeldBy) > 0:
-		e.Why = fmt.Sprintf("card(s) %s are in use", strings.Join(ids, ", "))
+		e.Why = fmt.Sprintf("%s in use", subject)
 	default:
-		e.Why = fmt.Sprintf("card(s) %s are promised to callers ahead of this one", strings.Join(ids, ", "))
+		e.Why = fmt.Sprintf("%s promised to callers ahead of this one", subject)
 	}
 	return e
 }

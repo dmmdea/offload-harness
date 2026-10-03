@@ -15,6 +15,12 @@ Versioning: [SemVer](https://semver.org/).
   and a refusal ends it before anything is touched. The order is resolve, stop the kept instances, warm the seat
   back, release: the instances go before the seat is loaded onto their cards (the documented order; it had been
   warm first). A release that fails after the stop says the instances were already stopped.
+- **A queued answer for a call that needs the whole node names the lease in its way.** It skipped every card
+  lease for such a call (an empty card set intersects nothing), so it reported `held_by: null`, `eta_s: 0` and
+  "card(s)  are promised to callers ahead of this one ... at most 0s" behind a lease with a declared hour. A
+  whole-node request is now blocked by every lease, the reason says "the whole node", `eta_s` is the longest
+  declared end among the leases in the way, and an answer with no declared end says it has no estimate instead of
+  printing "at most 0s".
 
 ### Added — per-card media admission, and a place in line instead of "gpu busy" (GPU routing P13b)
 
