@@ -49,14 +49,14 @@ func TestGatedMediaNames(t *testing.T) {
 		}
 	}
 	for _, n := range []string{
-		"render-0a1b2c3d.png",             // image-gen: a tokenless lane
-		"compose-0a1b2c3d.mp4",            // the vetted compose-video lane: tokenless
-		"stt-legacy-0a1b2c3d.srt",         // not an upload's stem (legacy path-taking lane names its own)
-		"stt-123-0a1b2c3d.wav",            // not a transcript output
-		"stt-123-0A1B2C3D.srt",            // the hash is lower-case hex
-		"stt-123.ogg",                     // the private upload itself (a dot directory holds it anyway)
-		"composeproj-xyz.mp4",             // not a 16-hex stem
-		"composeproj-0123456789abcdef",    // no extension
+		"render-0a1b2c3d.png",          // image-gen: a tokenless lane
+		"compose-0a1b2c3d.mp4",         // the vetted compose-video lane: tokenless
+		"stt-legacy-0a1b2c3d.srt",      // not an upload's stem (legacy path-taking lane names its own)
+		"stt-123-0a1b2c3d.wav",         // not a transcript output
+		"stt-123-0A1B2C3D.srt",         // the hash is lower-case hex
+		"stt-123.ogg",                  // the private upload itself (a dot directory holds it anyway)
+		"composeproj-xyz.mp4",          // not a 16-hex stem
+		"composeproj-0123456789abcdef", // no extension
 		"xcomposeproj-0123456789abcdef.mp4",
 		"x" + gatedSRT,
 	} {
@@ -185,13 +185,16 @@ func TestSTTUploadOutputsGoWhenTheJobRecordIsEvicted(t *testing.T) {
 	srt := writeMedia(t, cfg.MediaDir, gatedSRT, 0)
 	txt := writeMedia(t, cfg.MediaDir, gatedTXT, 0)
 	other := writeMedia(t, cfg.MediaDir, "render-0a1b2c3d.png", 0)
+	// The result names, besides the two transcript files, a file in media_dir that is NOT an upload
+	// output (a render) under json_path, and a file outside media_dir under another key: the node's
+	// own pipeline wrote the result, but nothing may delete a file the name does not vouch for.
 	data, _ := json.Marshal(map[string]any{
 		"language": "en", "num_segments": 1, "segments": []any{},
 		"srt_path": srt, "text_path": txt,
-		"json_path": filepath.ToSlash(outside), // outside media_dir
+		"json_path":  other,
+		"extra_path": filepath.ToSlash(outside),
 	})
-	// One more path inside media_dir that is not a gated name: the sweep must not trust the result.
-	data2 := strings.Replace(string(data), `"language"`, `"extra_path":"`+filepath.ToSlash(other)+`","language"`, 1)
+	data2 := string(data)
 
 	now := time.Now()
 	clock := func() time.Time { return now }
