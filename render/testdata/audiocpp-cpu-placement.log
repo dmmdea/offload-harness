@@ -1,0 +1,7 @@
+# Synthetic fixture: the same run when the engine fell back to the CPU. Replace with a captured log from the target node when one exists.
+audiocpp 0.9.0 (vulkan, cpu)
+registered backend CPU
+ggml_vulkan: Found 0 Vulkan devices:
+[audiocpp] threads: 4
+[audiocpp] backend: cpu
+[audiocpp] loading chatterbox-q8_0.gguf

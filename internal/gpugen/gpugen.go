@@ -381,6 +381,13 @@ func ClassifyErr(err error) string {
 	}
 	s := strings.ToLower(err.Error())
 	switch {
+	// The iGPU media runners' no-CPU guards (CT-49, render/igpu-engine.mjs): the engine's
+	// log placed a model on the CPU, or the backend itself was a CPU one. Checked first so
+	// the "killed" in a placement-abort message never reads as a timeout.
+	case strings.Contains(s, "cpu_placement"):
+		return "cpu_placement"
+	case strings.Contains(s, "cpu_backend_refused"):
+		return "cpu_backend_refused"
 	case strings.Contains(s, "out of memory") || strings.Contains(s, "cudamalloc") || strings.Contains(s, "oom"):
 		return "oom"
 	case strings.Contains(s, "timeout") || strings.Contains(s, "deadline") || strings.Contains(s, "context canceled") || strings.Contains(s, "killed") || strings.Contains(s, "signal:"):

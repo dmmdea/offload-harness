@@ -1,0 +1,16 @@
+# Synthetic fixture: the line shapes sd-cli -v prints for a Vulkan vid_gen run. Replace with a captured log from the target node when one exists.
+ggml_vulkan: Found 1 Vulkan devices:
+ggml_vulkan: 0 = AMD Radeon Graphics (RADV RENOIR) (radv) | uma: 1 | fp16: 1 | warp size: 64
+load_backend: loaded Vulkan backend from /opt/sdcpp/libggml-vulkan.so
+load_backend: loaded CPU backend from /opt/sdcpp/libggml-cpu-haswell.so
+[INFO ] stable-diffusion.cpp:215  - Version: stable-diffusion.cpp
+[INFO ] stable-diffusion.cpp:239  - System Info:
+    SSE3 = 1 | AVX = 1 | AVX2 = 1 | AVX512 = 0 | FMA = 1 | NEON = 0
+system_info: n_threads = 8 / 16 | CPU : SSE3 = 1 | SSSE3 = 1 | AVX = 1 | AVX2 = 1 | F16C = 1 | FMA = 1 |
+[INFO ] stable-diffusion.cpp:251  - Using Vulkan0 backend for the diffusion model
+[INFO ] stable-diffusion.cpp:252  - Using Vulkan0 backend for the text encoder
+[INFO ] stable-diffusion.cpp:253  - Using Vulkan0 backend for the VAE
+[INFO ] stable-diffusion.cpp:260  - sampler rng: cpu, rng: cpu
+[INFO ] stable-diffusion.cpp:271  - params backend: cpu (weights stream to the compute device on first use)
+[INFO ] stable-diffusion.cpp:301  - total params memory size = 5437.36MB (VRAM 0.00MB, RAM 5437.36MB): diffusion 4965.22MB(RAM)
+[INFO ] stable-diffusion.cpp:2410 - sampling completed, taking 232.10s

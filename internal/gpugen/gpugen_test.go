@@ -122,12 +122,15 @@ func TestKillTreeNilProcess(t *testing.T) {
 // TestClassifyErr maps common failure substrings to err classes (mirrors pipeline).
 func TestClassifyErr(t *testing.T) {
 	cases := map[string]string{
-		"CUDA out of memory":                                   "oom",
-		"context deadline exceeded":                            "timeout",
-		"dial tcp: connection refused":                         "conn_refused",
-		"DEAD_AIR: dead air persisted after a retry":           "dead_air",
-		"FFMPEG_UNAVAILABLE: ffmpeg/ffprobe could not resolve": "ffmpeg_unavailable",
-		"something else entirely":                              "other",
+		"CUDA out of memory":                                    "oom",
+		"context deadline exceeded":                             "timeout",
+		"dial tcp: connection refused":                          "conn_refused",
+		"DEAD_AIR: dead air persisted after a retry":            "dead_air",
+		"FFMPEG_UNAVAILABLE: ffmpeg/ffprobe could not resolve":  "ffmpeg_unavailable",
+		"CPU_PLACEMENT: the engine placed a model on the CPU":   "cpu_placement",
+		"CPU_BACKEND_REFUSED: --backend \"cpu\" places a model": "cpu_backend_refused",
+		"CPU_PLACEMENT: ... aborted (killed)":                   "cpu_placement",
+		"something else entirely":                               "other",
 	}
 	for msg, want := range cases {
 		if got := ClassifyErr(errString(msg)); got != want {

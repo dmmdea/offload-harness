@@ -1,0 +1,9 @@
+# Synthetic fixture: the line shapes audiocpp_cli --log prints for a Vulkan run. Replace with a captured log from the target node when one exists.
+audiocpp 0.9.0 (vulkan, cpu)
+registered backend CPU
+ggml_vulkan: Found 1 Vulkan devices:
+ggml_vulkan: 0 = AMD Radeon Graphics (RADV RENOIR) (radv) | uma: 1 | fp16: 1 | warp size: 64
+[audiocpp] threads: 4
+[audiocpp] backend: vulkan (device 0)
+[audiocpp] loading chatterbox-q8_0.gguf
+[audiocpp] wall 41.2 s, audio 12.0 s, RTF 3.43
