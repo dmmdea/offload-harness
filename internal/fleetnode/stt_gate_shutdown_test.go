@@ -204,6 +204,28 @@ func TestSTTUploadSlotWaitEndsInARePlaceable503(t *testing.T) {
 	}
 }
 
+// The 503 must reach a REAL client: net/http arms the blanket write timeout at header-read, so a slot
+// wait that outlasts it would be answered with a bare connection reset. The recorder test above cannot
+// see that; this one serves the node behind an http.Server whose blanket is shorter than the wait.
+func TestSTTUploadSlotWaitAnswerOutlivesTheBlanketWriteTimeout(t *testing.T) {
+	old := sttUploadSlotWait
+	sttUploadSlotWait = 600 * time.Millisecond
+	defer func() { sttUploadSlotWait = old }()
+	s, _ := newTestServer(t, sttCfg(t, ""), &sttRunner{res: sttOK}, authOpts(true))
+	for i := 0; i < sttUploadInFlightMax; i++ {
+		s.sttUploadSlots <- struct{}{}
+	}
+	base := serveOn(t, s, 200*time.Millisecond)
+	resp, err := http.Post(base+STTUploadPath, "application/json", strings.NewReader(sttBody("stt-late", []byte("OggS"), nil)))
+	if err != nil {
+		t.Fatalf("the slot-wait 503 never reached the caller (cut at the blanket write timeout): %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable || resp.Header.Get("Retry-After") == "" {
+		t.Fatalf("status %d, Retry-After %q, want a re-placeable 503", resp.StatusCode, resp.Header.Get("Retry-After"))
+	}
+}
+
 // The decode never copies the audio: parsing an 8 MiB base64 body allocates a small fraction of it,
 // and the audio field aliases the body. Two decoded copies of an 85 MiB body were the peak the
 // review measured; this holds the line at none.

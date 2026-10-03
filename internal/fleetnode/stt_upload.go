@@ -128,9 +128,16 @@ const sttUploadInFlightMax = 2
 // sttUploadSlotWait is a var only so a test can shorten it.
 var sttUploadSlotWait = 30 * time.Second
 
+// sttUploadSlotAnswerRoom is the write time left for the 503 once the slot wait has run out.
+const sttUploadSlotAnswerRoom = 10 * time.Second
+
 // takeSTTUploadSlot waits for an upload slot, or answers the 503 and reports false. The caller
 // releases the slot by receiving from s.sttUploadSlots.
 func (s *Server) takeSTTUploadSlot(w http.ResponseWriter, r *http.Request) bool {
+	// net/http arms the blanket 30 s WriteTimeout at header-read, so a slot wait of that length would
+	// expire it before the 503 below is written and the caller would read a bare connection reset, not
+	// the re-placeable refusal: the wait extends its own write deadline first, with room for the answer.
+	s.extendWrite(w, sttUploadSlotWait+sttUploadSlotAnswerRoom, "the stt upload slot wait")
 	wait := time.NewTimer(sttUploadSlotWait)
 	defer wait.Stop()
 	select {
