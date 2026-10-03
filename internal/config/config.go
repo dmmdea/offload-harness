@@ -1686,6 +1686,15 @@ type Config struct {
 	FleetComposeProjects bool `json:"fleet_compose_projects,omitempty"`
 	// FleetComposeBundleMaxMB caps one project bundle as sent (gzip-compressed), MiB; 0 = 64.
 	FleetComposeBundleMaxMB int `json:"fleet_compose_bundle_max_mb,omitempty"`
+	// FleetMediaInputs (ADR 0072) opens this node's media-job door, POST /fleet/media-job: a
+	// holder of the fleet token sends ONE image, video, animation, audio or ComfyUI-graph job
+	// together with the input files it reads (a still, a reference image, a driver video, a voice
+	// clone sample), which the node extracts into a fresh directory, sniffs by magic bytes and
+	// renders from. Off unless set, and never open on a node without fleet_auth_token or a bound
+	// media task (MediaInputsAdmissible).
+	FleetMediaInputs bool `json:"fleet_media_inputs,omitempty"`
+	// FleetMediaInputsMaxMB caps one media-job bundle as sent (gzip-compressed), MiB; 0 = 512.
+	FleetMediaInputsMaxMB int `json:"fleet_media_inputs_max_mb,omitempty"`
 	// KVSlotCapGiB bounds the node's kvslots/ directory (ADR 0056 Layer 2); 0 = 8 GiB.
 	KVSlotCapGiB int `json:"kvslot_cap_gib,omitempty"`
 	// FleetAgentEnabled opts this NODE into executing fleet "agent" tasks
@@ -2981,6 +2990,27 @@ func (c Config) EffectiveComposeBundleMaxBytes() int64 {
 	mb := c.FleetComposeBundleMaxMB
 	if mb <= 0 {
 		mb = 64
+	}
+	return int64(mb) << 20
+}
+
+// MediaInputsAdmissible reports whether THIS node's media-job door is open (ADR 0072): the
+// operator opted in, the node holds a fleet token for the door to check, and at least one media
+// task (image, video, animation, voice or music, run-graph) is bound. One predicate for the
+// route, the fleet advertisement and admission, so the door is never open without a token.
+func (c Config) MediaInputsAdmissible() bool {
+	if !c.FleetMediaInputs || c.FleetAuthToken == "" {
+		return false
+	}
+	return c.ImageGenAdvertisable() || c.VideoGenScript != "" || c.AnimateGenScript != "" ||
+		c.VoiceGenScript != "" || c.MusicGenScript != "" || c.TTSEndpoint != "" || c.RunGraphScript != ""
+}
+
+// EffectiveMediaInputsMaxBytes is the cap on one media-job bundle as sent.
+func (c Config) EffectiveMediaInputsMaxBytes() int64 {
+	mb := c.FleetMediaInputsMaxMB
+	if mb <= 0 {
+		mb = 512
 	}
 	return int64(mb) << 20
 }
