@@ -105,6 +105,12 @@ func Run(ctx context.Context, cfg config.Config, runner Runner, req core.Request
 	placement := "remote: forced"
 	if r == RouteAuto {
 		placement = "remote: no composition lane on this machine"
+		if len(cfg.DelegateRemotes) == 0 {
+			// Neither door is open: say both ways to open one, not only the fleet's.
+			res := core.Deferf("compose_video: no composition route on this machine (bind compose_script, hyperframes_dir and hyperframes_browser_path: local-offload install hyperframes) and no delegate_remotes to render it on a fleet node", "", core.Meta{Placement: placement})
+			res.DeferClass = core.DeferClassConfig
+			return res
+		}
 	}
 	res, err := Call(ctx, cfg, req)
 	if err != nil {

@@ -72,8 +72,22 @@ func runInstallClient(args []string) error {
 			return err
 		}
 	}
-	if err := os.WriteFile(path, append(b, '\n'), 0o600); err != nil {
+	// Written to a fresh temp file (created 0600) and renamed into place: os.WriteFile keeps the mode of
+	// a file it replaces, so --force over an old world-readable config would have left the token in one.
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".config-*.tmp")
+	if err != nil {
 		return err
+	}
+	_, werr := tmp.Write(append(b, '\n'))
+	if cerr := tmp.Close(); werr == nil {
+		werr = cerr
+	}
+	if werr == nil {
+		werr = os.Rename(tmp.Name(), path)
+	}
+	if werr != nil {
+		_ = os.Remove(tmp.Name())
+		return werr
 	}
 	// The file must load as a config the harness accepts, and its remotes must be fleet node bases: on
 	// a client they are the only thing it can reach, so what doctor would only warn about (a remote off

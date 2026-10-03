@@ -249,8 +249,9 @@ func TestRunPlacesByRoute(t *testing.T) {
 	}
 	empty := noLane
 	empty.DelegateRemotes = nil
-	if res := Run(context.Background(), empty, &localRunner{}, req, "auto"); res.OK || res.DeferClass != core.DeferClassConfig {
-		t.Errorf("no delegate_remotes is a config defer: %+v", res)
+	if res := Run(context.Background(), empty, &localRunner{}, req, "auto"); res.OK || res.DeferClass != core.DeferClassConfig ||
+		!strings.Contains(res.Reason, "hyperframes_dir") || !strings.Contains(res.Reason, "delegate_remotes") {
+		t.Errorf("no lane and no delegate_remotes is a config defer naming both fixes: %+v", res)
 	}
 }
 

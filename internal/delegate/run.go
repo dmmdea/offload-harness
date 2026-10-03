@@ -4290,6 +4290,9 @@ func (r *runner) placeSpreadWith(i int, st Subtask, localView NodeView, book *de
 		// the caller will not wait out, and the local seat declares no such layer: the overflow
 		// waits in line for the first of them to free (INV-4), as it does when the seat's own run
 		// cap is spent - never for the seat, which cannot take it.
+		if seatless(localView) {
+			return spreadSlot{placement: placement{view: localView, reason: fmt.Sprintf("route=spread: every remote that can take it is already dealt to its headroom or holds a backlog past the caller's patience (%s); %s", strings.Join(held, "; "), noLocalSeat)}, capacityWait: true}
+		}
 		return spreadSlot{placement: placement{view: localView, reason: fmt.Sprintf("route=spread: every remote that can take layer %s is already dealt to its headroom or holds a backlog past the caller's patience (%s); this box declares no such layer", st.Contract.Layer, strings.Join(held, "; "))}, capacityWait: true}
 	}
 	if len(nodes) == 0 || (len(nodes) == 1 && nodes[0].Local) {
@@ -4316,7 +4319,7 @@ func (r *runner) placeSpreadWith(i int, st Subtask, localView NodeView, book *de
 			// runs here. The slot is dealt local only so it has a view - the seat's own decision
 			// defers the contract naming the layer (runner.decide), with the fleet's verdict beside
 			// it. It takes no run-cap slot and waits on no lease.
-			return spreadSlot{placement: placement{view: localView, reason: fmt.Sprintf("route=spread: %s, and this box declares no layer %s so the seat cannot take it (%s)", what, st.Contract.Layer, why)}, deadFleet: dead}
+			return spreadSlot{placement: placement{view: localView, reason: fmt.Sprintf("route=spread: %s, and %s so the seat cannot take it (%s)", what, localRefusal(localView, st.Contract), why)}, deadFleet: dead}
 		}
 		if Reserved(r.spreadLease) {
 			// The one placement the lease exists to forbid. Dealt local so the

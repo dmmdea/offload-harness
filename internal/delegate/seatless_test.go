@@ -82,7 +82,15 @@ func TestASeatlessDealNeverGivesTheLocalSlot(t *testing.T) {
 			t.Errorf("auto subtask %d dealt the idle local slot of a seatless box (%s)", i, s.reason)
 		}
 	}
+	// With nothing eligible, the spread reason names the missing seat, not an empty layer name.
+	off := eligibleRemote()
+	off.NodeID, off.AgentEnabled = "node-off", false
+	r.spreadViews, r.spreadBases = []NodeView{off}, []string{"http://node-off"}
+	if s := r.dealSpread(contracts[:1], seatless); !strings.Contains(s[0].reason, "has no agent seat") || strings.Contains(s[0].reason, "declares no layer") {
+		t.Errorf("a seatless spread with no eligible remote must say the box has no seat: %q", s[0].reason)
+	}
 	// The same box with a seat keeps spread's guarantee: subtask 0 stays local.
+	r.spreadViews, r.spreadBases = []NodeView{a, b}, []string{"http://node-a", "http://node-b"}
 	seated := seatless
 	seated.AgentSeat = "local-seat"
 	if s := r.dealSpread(contracts[:1], seated); !s[0].view.Local {

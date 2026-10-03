@@ -101,8 +101,18 @@ func TestInstallClientRefusesBadInputAndKeepsAnExistingConfig(t *testing.T) {
 	if _, err := installClientInto(t, home); err == nil || !strings.Contains(err.Error(), "--force") {
 		t.Errorf("an existing config must not be replaced without --force: %v", err)
 	}
+	cfgPath := filepath.Join(home, "etc", "config.json")
+	_ = os.Chmod(cfgPath, 0o644) // an older, world-readable config
 	if _, err := installClientInto(t, home, "--force"); err != nil {
 		t.Errorf("--force replaces it: %v", err)
+	}
+	if runtime.GOOS != "windows" {
+		if fi, err := os.Stat(cfgPath); err != nil || fi.Mode().Perm() != 0o600 {
+			t.Errorf("--force over a 0644 config must leave it 0600 (it holds the token): %v %v", fi.Mode().Perm(), err)
+		}
+	}
+	if left, _ := filepath.Glob(filepath.Join(home, "etc", ".config-*.tmp")); len(left) > 0 {
+		t.Errorf("temp files left behind: %v", left)
 	}
 	// Each refusal is checked by its own reason: the rules run in order, so a case that only asserted
 	// "refused" would pass on an earlier rule with its own gone.
