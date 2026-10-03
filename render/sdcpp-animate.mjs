@@ -10,11 +10,13 @@
 //      exactly a depth control directory) writes a .webm that ffmpeg re-encodes to mp4.
 // Every temp directory (frames, depth, output) is removed on every exit path.
 //
-// Usage: node render/sdcpp-animate.mjs <out.mp4> <ref> <driver> "<prompt>"
-//        --sd-bin P --model P --vae P --t5xxl P --backend vulkan0 --depth-bin P --depth-model P
+// Usage: node render/sdcpp-animate.mjs [flags] -- <out.mp4> <ref> <driver> "<prompt>"
+//        --sd-bin ABS --model P --vae P --t5xxl P --backend vulkan0 --depth-bin ABS --depth-model P
 //        [--frames N] [--width N] [--height N] [--steps N] [--cfg F] [--flow-shift F]
 //        [--seed N] [--negative S] [--extra-args '<json>'] [--depth-extra-args '<json>']
+//        [--tae PATH] [--vae-tile-overlap F]
 //        [--max-tokens N --vae-stride 8|16] [--timeout-sec N] [--no-lock]
+// (the positionals may also come first when none starts with "--"; the harness sends `--` before them.)
 //
 // THE NO-CPU RULE (same guards as sdcpp-video.mjs): a non-Vulkan --backend and any extra-args
 // element that changes the backend or placement is refused before anything spawns, and BOTH
@@ -29,25 +31,38 @@
 // reference adds one latent frame) before anything spawns; DEADLINE: --timeout-sec counts
 // from this process's start; signals and a vanished parent kill the engines and clean up.
 //
-// UNVERIFIED (named in the CT-49 report): the depth step's argv below is bound from the
-// depth-anything.cpp README ("da3-cli depth --model M --input photo.jpg --png depth.png"),
-// not from a --help of the binary on the target node. It is isolated in buildDepthArgs so a
-// correction is one function (and animategen_depth_extra_args is the config escape hatch).
-// It runs once PER FRAME, so the depth model is reloaded N times (N = 49 by default); on an
-// iGPU that load is real wall time. The README also shows `--input a.jpg --input b.jpg
-// --out-prefix scene` for one process over many images; its output naming is not documented,
-// so it is not used until a conductor run confirms it.
-import { existsSync, mkdirSync, readdirSync } from "node:fs";
+// THE DEPTH STEP (verified on the target node, depth-anything.cpp 14f7461, DA_GGML_VULKAN):
+//   da3-cli depth --model M --input <one frame> --png <out.png> --no-invert
+// once PER FRAME. `--input a --input b` is MULTI-VIEW joint depth, not per-frame, and is never
+// used. --no-invert is required: the default writes near=dark / far=bright, --no-invert writes
+// near=bright / far=dark, which is the depth-control convention. The PNG is 1-channel at the
+// model's working size (518x896 for a 480x832 input) and sd-cli refuses 1-channel PNGs, so every
+// depth frame is converted to rgb24 at exactly W x H by ffmpeg into the directory sd-cli reads,
+// and the headers are read back (igpu-qa.mjs convertDepthFrames). The model is reloaded per
+// frame (about 1.5 s each, 33 frames in 51 s on the node).
+//
+// THE VACE ARGV (sd.cpp docs/wan.md "V2V with Wan2.1 VACE" at 3f8527a): the reference image is
+// `-i`, the depth frames are `--control-video <dir>`. The docs also pass --offload-to-cpu; this
+// runner never does (no model runs on the CPU, and extra args naming it are refused). The model
+// must be a .safetensors VACE checkpoint: the public GGUFs lack vace_patch_embedding.weight and
+// sd-cli refuses them ("model metadata validation failed"), surfaced here as MODEL_INCOMPATIBLE.
+// Frame count: sd.cpp samples N+4 frames with a reference image; the measured build trims the
+// reference latent itself and decodes exactly N, so the mp4 is trimmed only when the decoded
+// count is exactly N+4 (igpu-qa.mjs trimDecision, probed with ffprobe). The finished clip is
+// checked for black / frozen output before it is delivered.
+import { existsSync, mkdirSync, readdirSync, rmSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { withGpuSlot } from "./gpu-lock.mjs";
-import { resolveFfmpeg } from "./audio-qa.mjs";
+import { resolveFfmpeg, resolveFfprobe } from "./audio-qa.mjs";
 import {
   parseArgs, parseExtraArgs, refuseCpuBackend, refuseExtraArgs, runEngine, createLogGuard, checkTokenCap,
   installLifecycle, makeDeadline, normalizeFrames, floorFrames, normalizeSize, finiteNum, encodeMp4, makeTempDir,
-  vulkanDeviceFromBackend,
+  vulkanDeviceFromBackend, refuseRelativeBinary, ensureOutDir, modelMetadataError,
 } from "./igpu-engine.mjs";
+import { checkClip, convertDepthFrames, countVideoFrames, trimDecision } from "./igpu-qa.mjs";
+import { vaeTileOverlap } from "./sdcpp-video.mjs";
 
 export { parseArgs };
 
@@ -76,10 +91,10 @@ export function buildExtractArgs({ driver, framesDir, width, height, frames }) {
     "-frames:v", String(frames), join(framesDir, "%05d.png")];
 }
 
-// buildDepthArgs: depth-anything.cpp argv for ONE frame -> one depth PNG. UNVERIFIED against
-// the node's binary (see the header): bound from the project README.
+// buildDepthArgs: depth-anything.cpp argv for ONE frame -> one depth PNG, near=bright
+// (--no-invert), verified on the node. Never the multi-view form (--input a --input b).
 export function buildDepthArgs({ model, input, outPng, extra = [] }) {
-  return ["depth", "--model", model, "--input", input, "--png", outPng, ...extra];
+  return ["depth", "--model", model, "--input", input, "--png", outPng, "--no-invert", ...extra];
 }
 
 // depthEnv: pin the depth step to the Vulkan device the sd backend names (its CLI has no
@@ -95,6 +110,9 @@ export function depthEnv(backend, env = process.env) {
 // required: the CPU-placement guard reads the per-module backend lines it prints.
 export function buildSdAnimateArgs({ outFile, ref, depthDir, prompt, flags, extra = [] }) {
   const p = resolveParams(flags);
+  // `-i` is the VACE reference image (sd.cpp docs/wan.md "V2V": `-i <reference image>
+  // --control-video <dir of frames>`); `-r/--ref-image` is for Flux Kontext / MiniMax-H3 only.
+  // Never --offload-to-cpu, which that doc page also shows: no model runs on the CPU here.
   const a = ["-M", "vid_gen", "--diffusion-model", flags.model, "--vae", flags.vae, "--t5xxl", flags.t5xxl,
     "-i", ref, "--control-video", depthDir, "-p", prompt];
   if (flags.negative) a.push("-n", flags.negative);
@@ -103,7 +121,8 @@ export function buildSdAnimateArgs({ outFile, ref, depthDir, prompt, flags, extr
   if (finiteNum(flags["flow-shift"]) !== undefined) a.push("--flow-shift", String(finiteNum(flags["flow-shift"])));
   a.push("-W", String(p.width), "-H", String(p.height), "--video-frames", String(p.frames), "--fps", String(OUTPUT_FPS));
   if (finiteNum(flags.seed) !== undefined) a.push("-s", String(Math.round(finiteNum(flags.seed))));
-  a.push("--backend", flags.backend, "--diffusion-fa", "--vae-tiling", "-v");
+  a.push("--backend", flags.backend, "--diffusion-fa", "--vae-tiling", "--vae-tile-overlap", String(vaeTileOverlap(flags)), "-v");
+  if (flags.tae) a.push("--taesd", flags.tae);
   for (const e of extra) a.push(e);
   a.push("-o", outFile);
   return a;
@@ -142,17 +161,25 @@ async function main() {
   const p = resolveParams(flags);
   // the VACE reference image occupies one latent frame on top of the clip's
   checkTokenCap({ flags, width: p.width, height: p.height, frames: p.frames, refLatentFrames: 1 });
-  for (const [k, v] of [["--sd-bin", flags["sd-bin"]], ["--model", flags.model], ["--vae", flags.vae], ["--t5xxl", flags.t5xxl],
-    ["--depth-bin", flags["depth-bin"]], ["--depth-model", flags["depth-model"]], ["reference image", ref], ["driver clip", driver]]) {
-    if (!existsSync(v)) {
+  // one binary-resolution rule: the harness passes absolute paths, a runner refuses anything else
+  const sdBin = refuseRelativeBinary("--sd-bin", flags["sd-bin"]);
+  const depthBin = refuseRelativeBinary("--depth-bin", flags["depth-bin"]);
+  vaeTileOverlap(flags);
+  ensureOutDir(out);
+  for (const [k, v] of [["--model", flags.model], ["--vae", flags.vae], ["--t5xxl", flags.t5xxl], ["--tae", flags.tae],
+    ["--depth-model", flags["depth-model"]], ["reference image", ref], ["driver clip", driver]]) {
+    if (v && !existsSync(v)) {
       console.error(`SDCPP ANIMATE FAILED: ${k} not found: ${v}`);
       process.exit(1);
     }
   }
   const ffmpeg = resolveFfmpeg();
   if (!ffmpeg) throw new Error("FFMPEG_UNAVAILABLE: ffmpeg could not be resolved (set ffmpeg_path, or put ffmpeg on PATH)");
+  const ffprobe = resolveFfprobe(ffmpeg);
+  if (!ffprobe) throw new Error("FFMPEG_UNAVAILABLE: ffprobe could not be resolved (it counts the decoded VACE frames; put it beside ffmpeg or on PATH)");
 
   const framesTmp = makeTempDir("sdcpp-animate-frames-");
+  const depthRawTmp = makeTempDir("sdcpp-animate-depthraw-");
   const depthTmp = makeTempDir("sdcpp-animate-depth-");
   const outTmp = makeTempDir("sdcpp-animate-out-");
   try {
@@ -176,28 +203,44 @@ async function main() {
       for (let i = 0; i < n; i++) {
         deadline.enforce("depth-anything");
         const { code } = await runEngine({
-          bin: flags["depth-bin"],
-          args: buildDepthArgs({ model: flags["depth-model"], input: join(framesTmp.dir, frames[i]), outPng: join(depthTmp.dir, frames[i]), extra: depthExtra }),
+          bin: depthBin,
+          args: buildDepthArgs({ model: flags["depth-model"], input: join(framesTmp.dir, frames[i]), outPng: join(depthRawTmp.dir, frames[i]), extra: depthExtra }),
           env: denv, timeoutMs: deadline.remainingMs(), label: "depth-anything",
           guard: createLogGuard({ engine: "da3" }),
         });
         if (code !== 0) throw new Error(`depth-anything exited ${code} on frame ${i + 1}/${n}`);
-        if (!existsSync(join(depthTmp.dir, frames[i]))) throw new Error(`depth-anything produced no depth image for frame ${i + 1}/${n}`);
+        if (!existsSync(join(depthRawTmp.dir, frames[i]))) throw new Error(`depth-anything produced no depth image for frame ${i + 1}/${n}`);
         console.error(`sdcpp-animate: depth ${i + 1}/${n}`);
       }
+      // 2b. sd-cli refuses 1-channel PNGs: rgb24 at exactly W x H into the directory it reads
+      deadline.enforce("depth frame conversion");
+      convertDepthFrames({ ffmpeg, rawDir: depthRawTmp.dir, outDir: depthTmp.dir, width: p.width, height: p.height, count: n, timeoutMs: deadline.remainingMs() });
       // 3. VACE with the depth directory as the control video
       const args = buildSdAnimateArgs({ outFile: webm, ref, depthDir: depthTmp.dir, prompt, flags: finalFlags, extra });
       deadline.enforce("sd-cli");
       const guard = createLogGuard({ engine: "sdcpp", echoes: [prompt, flags.negative] });
-      const { code } = await runEngine({ bin: flags["sd-bin"], args, timeoutMs: deadline.remainingMs(), label: "sd-cli", guard });
-      if (code !== 0) throw new Error("sd-cli exited " + code);
+      const { code, log } = await runEngine({ bin: sdBin, args, timeoutMs: deadline.remainingMs(), label: "sd-cli", guard });
+      if (code !== 0) throw modelMetadataError(log, flags.model) || new Error("sd-cli exited " + code);
       if (!existsSync(webm)) throw new Error("sd-cli exited 0 but produced no video at " + webm);
     });
+    // the mp4 carries exactly N frames: probe what sd-cli decoded, drop the reference latent only if it is there
+    deadline.enforce("frame count");
+    const decoded = countVideoFrames(ffprobe, webm, { timeoutMs: deadline.remainingMs() });
+    const trim = trimDecision(decoded, n);
+    if (trim.note) console.error("sdcpp-animate: " + trim.note);
     deadline.enforce("ffmpeg mp4 encode");
-    encodeMp4(ffmpeg, webm, out, OUTPUT_FPS, deadline.remainingMs());
+    encodeMp4(ffmpeg, webm, out, OUTPUT_FPS, deadline.remainingMs(), { trimFirst: trim.trimFirst });
+    deadline.enforce("clip check");
+    try {
+      checkClip(ffmpeg, out, { timeoutMs: deadline.remainingMs() });
+    } catch (e) {
+      try { rmSync(out, { force: true }); } catch { /* best effort */ }
+      throw e;
+    }
     console.log("WROTE", out);
   } finally {
     framesTmp.cleanup();
+    depthRawTmp.cleanup();
     depthTmp.cleanup();
     outTmp.cleanup();
   }

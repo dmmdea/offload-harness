@@ -6,7 +6,7 @@
 // runEngine tests is a node one-liner; no real engine, GPU or lease is touched.
 import { test } from "node:test";
 import assert from "node:assert";
-import { readFileSync, existsSync, writeFileSync, mkdtempSync, rmSync } from "node:fs";
+import { readFileSync, existsSync, writeFileSync, mkdtempSync, rmSync, mkdirSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -15,6 +15,8 @@ import {
   parseArgs, parseExtraArgs, refuseCpuBackend, screenExtraArgs, refuseExtraArgs, createLogGuard, scanLog,
   runEngine, normalizeFrames, floorFrames, normalizeSize, vulkanDeviceFromBackend, finiteNum, mp4Args, makeTempDir,
   latentTokens, checkTokenCap, tokenCapFromFlags, makeDeadline, processStartMs,
+  refuseRelativeBinary, ensureOutDir, modelMetadataError, encodeMp4,
+  BINARY_NOT_ABSOLUTE, OUT_DIR_UNWRITABLE, MODEL_INCOMPATIBLE,
   CPU_PLACEMENT, CPU_BACKEND_REFUSED, GPU_RESET, TOKEN_CAP_EXCEEDED, EXTRA_ARGS_REFUSED, ILLEGAL_INSTRUCTION,
 } from "./igpu-engine.mjs";
 import { DERIVED, derive } from "./testdata/derive-cpu-fixtures.mjs";
@@ -533,6 +535,59 @@ test("parseArgs: positionals, value flags and booleans", () => {
   assert.equal(flags["no-lock"], true);
 });
 
+test("parseArgs: a bare -- ends flag parsing, so a prompt or lyrics starting with -- stays positional (G11)", () => {
+  const { pos, flags } = parseArgs(["--model", "/m.gguf", "--no-lock", "--", "out.wav", "--- Intro ---", "--seed", "-- x"]);
+  assert.deepEqual(pos, ["out.wav", "--- Intro ---", "--seed", "-- x"]);
+  assert.equal(flags.model, "/m.gguf");
+  assert.equal(flags["no-lock"], true);
+  assert.ok(!("seed" in flags) && !("Intro ---" in flags));
+  // without the terminator the same words are flags: the harness must send it
+  assert.deepEqual(parseArgs(["out.wav", "--seed", "5"]).pos, ["out.wav"]);
+  // a single dash and the lone "--" at the end are harmless
+  assert.deepEqual(parseArgs(["-x", "--"]).pos, ["-x"]);
+});
+
+test("refuseRelativeBinary: ONE resolution rule - an absolute existing path passes; a bare name or a relative path is BINARY_NOT_ABSOLUTE; a missing file is 'not found' (G10/G23)", () => {
+  const d = scratch();
+  try {
+    const bin = join(d, "sd-cli");
+    writeFileSync(bin, "x");
+    assert.equal(refuseRelativeBinary("--sd-bin", bin), bin);
+    for (const bare of ["sd-cli", "./sd-cli", "bin/sd-cli", "", undefined]) {
+      assert.throws(() => refuseRelativeBinary("--sd-bin", bare), (e) => e.message.startsWith(BINARY_NOT_ABSOLUTE) && e.message.includes("--sd-bin"), JSON.stringify(bare));
+    }
+    assert.throws(() => refuseRelativeBinary("--depth-bin", join(d, "nope")), /--depth-bin not found/);
+  } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
+test("ensureOutDir: creates the output's directory before anything spawns; an uncreatable one is OUT_DIR_UNWRITABLE naming it (G27)", () => {
+  const d = scratch();
+  try {
+    const out = join(d, "a", "b", "clip.mp4");
+    assert.equal(ensureOutDir(out), join(d, "a", "b"));
+    assert.ok(existsSync(join(d, "a", "b")));
+    assert.equal(ensureOutDir(out), join(d, "a", "b"), "idempotent");
+    writeFileSync(join(d, "file"), "x");
+    assert.throws(() => ensureOutDir(join(d, "file", "clip.mp4")), (e) => e.message.startsWith(OUT_DIR_UNWRITABLE) && e.message.includes(join(d, "file")));
+  } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
+test("modelMetadataError: sd-cli's 'not in model metadata' / 'model metadata validation failed' is a typed MODEL_INCOMPATIBLE naming the model file and the missing tensor; any other log is null", () => {
+  const log = [
+    "[INFO ] model.cpp:1203 - loading tensors from /models/wan2.1-vace-1.3b-q8_0.gguf",
+    "[ERROR] stable-diffusion.cpp: Diffusion model tensor 'model.diffusion_model.vace_patch_embedding.weight' not in model metadata",
+    "[ERROR] model metadata validation failed",
+  ].join("\n");
+  const e = modelMetadataError(log, "/models/wan2.1-vace-1.3b-q8_0.gguf");
+  assert.ok(e.message.startsWith(MODEL_INCOMPATIBLE));
+  assert.ok(e.message.includes("/models/wan2.1-vace-1.3b-q8_0.gguf"));
+  assert.match(e.message, /model\.diffusion_model\.vace_patch_embedding\.weight/);
+  assert.match(e.message, /\.safetensors VACE model/);
+  assert.match(modelMetadataError("model metadata validation failed", "m.gguf").message, /model metadata validation failed/);
+  assert.equal(modelMetadataError("[INFO] sampling step 3/20", "m.gguf"), null);
+  assert.equal(modelMetadataError(undefined, "m.gguf"), null);
+});
+
 test("parseExtraArgs: a JSON string array, nothing else", () => {
   assert.deepEqual(parseExtraArgs(undefined), []);
   assert.deepEqual(parseExtraArgs(""), []);
@@ -555,6 +610,15 @@ test("vulkanDeviceFromBackend / finiteNum / mp4Args", () => {
     assert.equal(a[a.indexOf(k) + 1], v);
   }
   assert.equal(a[a.length - 1], "out.mp4");
+  assert.ok(!a.includes("-vf"), "no trim unless asked");
+  const t = mp4Args("in.webm", "out.mp4", 16, { trimFirst: 4 });
+  assert.equal(t[t.indexOf("-vf") + 1], "trim=start_frame=4,setpts=PTS-STARTPTS", "drops the 4 reference-latent frames and restarts the clock");
+  assert.ok(t.indexOf("-vf") > t.indexOf("-i") && t.indexOf("-vf") < t.indexOf("-c:v"));
+});
+
+test("encodeMp4: a missing ffmpeg is FFMPEG_UNAVAILABLE; a failing one carries its stderr", () => {
+  assert.throws(() => encodeMp4("", "a.webm", "b.mp4", 16), /FFMPEG_UNAVAILABLE/);
+  assert.throws(() => encodeMp4(process.execPath, "a.webm", join(tmpdir(), "igpu-no-such-dir-xyz", "b.mp4"), 16), /ffmpeg mp4 encode failed/);
 });
 
 test("makeTempDir: cleanup removes the directory and is idempotent", () => {

@@ -21,9 +21,9 @@
 //
 // Dependency-free (Node 18+ built-ins only).
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, accessSync, constants as fsConstants } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 
 export const CPU_PLACEMENT = "CPU_PLACEMENT";
 export const CPU_BACKEND_REFUSED = "CPU_BACKEND_REFUSED";
@@ -31,15 +31,25 @@ export const GPU_RESET = "GPU_RESET";
 export const TOKEN_CAP_EXCEEDED = "TOKEN_CAP_EXCEEDED";
 export const EXTRA_ARGS_REFUSED = "EXTRA_ARGS_REFUSED";
 export const ILLEGAL_INSTRUCTION = "ILLEGAL_INSTRUCTION";
+export const BINARY_NOT_ABSOLUTE = "BINARY_NOT_ABSOLUTE";
+export const OUT_DIR_UNWRITABLE = "OUT_DIR_UNWRITABLE";
+export const MODEL_INCOMPATIBLE = "MODEL_INCOMPATIBLE";
 
 // parseArgs: positionals + --flags. `booleans` names the flags that take no value.
 // Every other --flag consumes the next token (a missing value is undefined, which every
-// consumer treats as unset).
+// consumer treats as unset). A bare `--` ends flag parsing: everything after it is
+// positional, so a prompt, TTS text or lyrics that starts with "--" (a lyrics section
+// marker such as "--- Intro ---") stays a positional. The harness emits its flags first
+// and `-- <out> [<still>] <text>` last for exactly that reason.
 export function parseArgs(argv, booleans = ["no-lock"]) {
   const pos = [];
   const flags = {};
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
+    if (a === "--") {
+      for (let j = i + 1; j < argv.length; j++) pos.push(argv[j]);
+      break;
+    }
     if (typeof a === "string" && a.startsWith("--") && a.length > 2) {
       const k = a.slice(2);
       if (booleans.includes(k)) flags[k] = true;
@@ -130,6 +140,48 @@ export function refuseCpuBackend(backend) {
     }
   }
   return b;
+}
+
+// ---------------------------------------------------------------- binaries and the out dir
+
+// refuseRelativeBinary: ONE resolution rule for every engine binary. The Go side resolves the
+// bound value with mediaops.ResolveBinary (an explicit path is stat'd, a bare name is looked up
+// on PATH) and passes the ABSOLUTE path; a runner refuses anything else instead of re-deriving
+// its own answer (a bare "sd-cli" used to read CONFIGURED in doctor and then fail every call in
+// existsSync). Returns the path when it is absolute and exists.
+export function refuseRelativeBinary(flag, path) {
+  const p = String(path ?? "");
+  if (!isAbsolute(p)) {
+    throw new Error(`${BINARY_NOT_ABSOLUTE}: ${flag} ${JSON.stringify(p)} is not an absolute path (the harness resolves a bare name on PATH and passes the absolute path; a hand run must do the same)`);
+  }
+  if (!existsSync(p)) throw new Error(`${flag} not found: ${p}`);
+  return p;
+}
+
+// ensureOutDir: create (mkdir -p) the directory the result will land in, before anything
+// spawns, so a minutes-long render never ends in "cannot write the output". Throws
+// OUT_DIR_UNWRITABLE naming the directory when it cannot be created or written.
+export function ensureOutDir(out) {
+  const dir = dirname(resolve(String(out)));
+  try {
+    mkdirSync(dir, { recursive: true });
+    accessSync(dir, fsConstants.W_OK);
+  } catch (e) {
+    throw new Error(`${OUT_DIR_UNWRITABLE}: cannot use ${dir} for the output: ${e.message}`);
+  }
+  return dir;
+}
+
+// modelMetadataError: sd-cli refuses a model whose tensors do not match what its architecture
+// needs ("Diffusion model tensor '...' not in model metadata" / "model metadata validation
+// failed": the public Wan2.1 VACE GGUFs lack vace_patch_embedding.weight). The guard cannot
+// know the file, so the runner calls this on a non-zero exit with the engine log. Returns a
+// MODEL_INCOMPATIBLE error naming the model file, or null.
+export function modelMetadataError(log, modelFile) {
+  const m = /not in model metadata|model metadata validation failed/i.exec(String(log ?? ""));
+  if (!m) return null;
+  const tensor = /tensor '([^']+)'/.exec(String(log))?.[1];
+  return new Error(`${MODEL_INCOMPATIBLE}: sd-cli refused the model ${modelFile}: ${tensor ? `tensor '${tensor}' is not in its metadata` : "model metadata validation failed"}. This file is not a complete checkpoint for this architecture (the public Wan2.1 VACE GGUFs lack vace_patch_embedding.weight; use the .safetensors VACE model). Not retried.`);
 }
 
 // ---------------------------------------------------------------- the positive GPU-evidence guard
@@ -602,16 +654,18 @@ export function finiteNum(v) {
   return Number.isFinite(n) ? n : undefined;
 }
 
-// ffmpegToMp4: re-encode a sd-cli .webm/.avi to an H.264 mp4 (yuv420p, CRF 16, `fps`).
-export function mp4Args(src, dst, fps) {
-  return ["-hide_banner", "-loglevel", "error", "-y", "-i", src,
+// mp4Args: re-encode a sd-cli .webm/.avi to an H.264 mp4 (yuv420p, CRF 16, `fps`).
+// `trimFirst` drops that many leading frames (the VACE reference latent when sd-cli keeps it).
+export function mp4Args(src, dst, fps, { trimFirst = 0 } = {}) {
+  const vf = trimFirst > 0 ? ["-vf", `trim=start_frame=${trimFirst},setpts=PTS-STARTPTS`] : [];
+  return ["-hide_banner", "-loglevel", "error", "-y", "-i", src, ...vf,
     "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "16", "-r", String(fps), "-movflags", "+faststart", dst];
 }
 
 // encodeMp4: `timeoutMs` (0 = none) bounds the encode, so the runner's deadline covers it too.
-export function encodeMp4(ffmpeg, src, dst, fps, timeoutMs = 0) {
+export function encodeMp4(ffmpeg, src, dst, fps, timeoutMs = 0, opts = {}) {
   if (!ffmpeg) throw new Error("FFMPEG_UNAVAILABLE: ffmpeg could not be resolved (set ffmpeg_path, or put ffmpeg on PATH)");
-  const r = spawnSync(ffmpeg, mp4Args(src, dst, fps), {
+  const r = spawnSync(ffmpeg, mp4Args(src, dst, fps, opts), {
     encoding: "utf8", ...(timeoutMs > 0 ? { timeout: timeoutMs, killSignal: "SIGKILL" } : {}),
   });
   if (r.error || r.status !== 0 || !existsSync(dst)) {

@@ -6,7 +6,7 @@ import assert from "node:assert";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { buildSdVideoArgs, resolveParams, splitPositionals, missingFlags, parseArgs } from "./sdcpp-video.mjs";
+import { buildSdVideoArgs, resolveParams, splitPositionals, missingFlags, parseArgs, vaeTileOverlap } from "./sdcpp-video.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const script = join(here, "sdcpp-video.mjs");
@@ -67,6 +67,34 @@ test("buildSdVideoArgs: frames are normalized to 4k+1 and width/height to multip
   assert.equal(b[b.indexOf("--video-frames") + 1], "81");
 });
 
+test("buildSdVideoArgs: the A14B high-noise expert's own recipe is mapped (and only with a high-noise model)", () => {
+  const flags = { ...baseFlags, "high-noise-model": "/m/high.gguf", cfg: "1", "high-noise-cfg": "1", "high-noise-steps": "2", "high-noise-sampler": "euler" };
+  const a = buildSdVideoArgs({ outFile: "o.webm", still: "", prompt: "p", flags });
+  const at = (k) => a[a.indexOf(k) + 1];
+  assert.equal(at("--high-noise-cfg-scale"), "1");
+  assert.equal(at("--high-noise-steps"), "2");
+  assert.equal(at("--high-noise-sampling-method"), "euler");
+  // without the high-noise model the keys name nothing: sd-cli would reject them
+  const b = buildSdVideoArgs({ outFile: "o.webm", still: "", prompt: "p", flags: { ...flags, "high-noise-model": "" } });
+  for (const f of ["--high-noise-cfg-scale", "--high-noise-steps", "--high-noise-sampling-method"]) assert.ok(!b.includes(f), f);
+  // a pair with no high-noise recipe leaves sd-cli's own defaults
+  const c = buildSdVideoArgs({ outFile: "o.webm", still: "", prompt: "p", flags: { ...baseFlags, "high-noise-model": "/m/high.gguf" } });
+  assert.ok(!c.includes("--high-noise-cfg-scale"));
+});
+
+test("buildSdVideoArgs: --vae-tile-overlap 0.25 by default (the measured best decode), overridable; --taesd only when a TAE is bound", () => {
+  const a = buildSdVideoArgs({ outFile: "o.webm", still: "", prompt: "p", flags: baseFlags });
+  assert.equal(a[a.indexOf("--vae-tile-overlap") + 1], "0.25");
+  assert.ok(a.includes("--vae-tiling"));
+  assert.ok(!a.includes("--taesd"));
+  const b = buildSdVideoArgs({ outFile: "o.webm", still: "", prompt: "p", flags: { ...baseFlags, "vae-tile-overlap": "0.5", tae: "/m/taew2_2.safetensors" } });
+  assert.equal(b[b.indexOf("--vae-tile-overlap") + 1], "0.5");
+  assert.equal(b[b.indexOf("--taesd") + 1], "/m/taew2_2.safetensors");
+  assert.equal(vaeTileOverlap({}), 0.25);
+  assert.equal(vaeTileOverlap({ "vae-tile-overlap": "0" }), 0);
+  for (const bad of ["1", "-0.1", "2"]) assert.throws(() => vaeTileOverlap({ "vae-tile-overlap": bad }), /\[0, 1\)/);
+});
+
 test("resolveParams: defaults and normalization", () => {
   assert.deepEqual(resolveParams({}), { frames: 49, width: 832, height: 480, fps: 24 });
   assert.deepEqual(resolveParams({ frames: "17", width: "100", height: "100", fps: "16" }), { frames: 17, width: 96, height: 96, fps: 16 });
@@ -91,6 +119,19 @@ test("missingFlags / parseArgs", () => {
 function run(args) {
   return spawnSync(process.execPath, [script, ...args], { encoding: "utf8", timeout: 30000 });
 }
+
+test("the -- terminator: a prompt that starts with -- is a positional, flags after the positionals still parse", () => {
+  const { pos, flags } = parseArgs(["--backend", "vulkan0", "--", "o.mp4", "--- Intro ---", "--not-a-flag"]);
+  assert.deepEqual(pos, ["o.mp4", "--- Intro ---", "--not-a-flag"]);
+  assert.equal(flags.backend, "vulkan0");
+  assert.ok(!("not-a-flag" in flags));
+});
+
+test("the script refuses a bare binary name (BINARY_NOT_ABSOLUTE): one resolution rule, the harness passes the absolute path", () => {
+  const r = run(["--sd-bin", "sd-cli", "--model", "x", "--vae", "x", "--t5xxl", "x", "--backend", "vulkan0", "--no-lock", "--", "out.mp4", "p"]);
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /BINARY_NOT_ABSOLUTE/);
+});
 
 test("the script refuses a cpu backend before touching anything (exit 1, CPU_BACKEND_REFUSED)", () => {
   for (const backend of ["cpu", "diffusion=vulkan0,vae=cpu"]) {

@@ -11,12 +11,23 @@
 // --video-frames, --fps, -s, --backend, --diffusion-fa, --vae-tiling, -v, -o. sd.cpp flag
 // drift on a pin bump is fixed HERE, never in Go.
 //
-// Usage: node render/sdcpp-video.mjs <out.mp4> [<still>] "<prompt>"
-//        --sd-bin PATH --model PATH [--high-noise-model PATH] --vae PATH --t5xxl PATH
+// Usage: node render/sdcpp-video.mjs [flags] -- <out.mp4> [<still>] "<prompt>"
+//        --sd-bin ABSOLUTE-PATH --model PATH [--high-noise-model PATH] --vae PATH --t5xxl PATH
 //        --backend vulkan0 [--frames N] [--width N] [--height N] [--fps N] [--steps N]
 //        [--cfg F] [--flow-shift F] [--sampler S] [--seed N] [--negative S]
+//        [--high-noise-cfg F] [--high-noise-steps N] [--high-noise-sampler S]
+//        [--tae PATH] [--vae-tile-overlap F]
 //        [--extra-args '<json array>'] [--max-tokens N --vae-stride 8|16] [--timeout-sec N] [--no-lock]
+// (the positionals may also come first when none of them starts with "--"; the harness always
+// sends `--` before them so a prompt such as "--- Intro ---" stays a prompt.)
 // Env:   FFMPEG_PATH — ffmpeg (else ffmpeg on PATH). GPU_LEASE_* — the inherited lease.
+//
+// A14B high/low pair: --high-noise-cfg / --high-noise-steps / --high-noise-sampler map to
+// sd-cli's --high-noise-cfg-scale / --high-noise-steps / --high-noise-sampling-method (only with
+// --high-noise-model; sd-cli's own default there is cfg 7.0, which doubles the iGPU time of a
+// distilled recipe). Decode: --vae-tiling with --vae-tile-overlap 0.25 by default (measured best:
+// 17 frames, overlap 0.5 = 364 s, 0.25 = 299 s, untiled = 355 s); --tae PATH is the OPT-IN tiny
+// autoencoder (sd-cli --taesd; taew2_2 decodes 17 frames in 2.8 s, SSIM 0.95 vs the full VAE).
 //
 // Normalization (documented, tested):
 //   frames  -> the NEAREST 4k+1 (a tie goes up), minimum 5; default 49. The Wan family
@@ -37,7 +48,7 @@
 // DEADLINE: --timeout-sec counts from this process's start, so the llama-swap drain and every
 // pre-spawn step spend it; SIGTERM/SIGINT/SIGHUP and a vanished parent kill the engine tree
 // and remove the temp dir (installLifecycle).
-import { existsSync } from "node:fs";
+import { existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { withGpuSlot } from "./gpu-lock.mjs";
@@ -45,7 +56,9 @@ import { resolveFfmpeg } from "./audio-qa.mjs";
 import {
   parseArgs, parseExtraArgs, refuseCpuBackend, refuseExtraArgs, runEngine, createLogGuard, checkTokenCap,
   installLifecycle, makeDeadline, normalizeFrames, normalizeSize, finiteNum, encodeMp4, makeTempDir,
+  refuseRelativeBinary, ensureOutDir, modelMetadataError,
 } from "./igpu-engine.mjs";
+import { checkClip } from "./igpu-qa.mjs";
 
 export { parseArgs };
 
@@ -53,6 +66,7 @@ export const DEFAULT_FRAMES = 49;
 export const DEFAULT_WIDTH = 832;
 export const DEFAULT_HEIGHT = 480;
 export const DEFAULT_FPS = 24;
+export const DEFAULT_VAE_TILE_OVERLAP = 0.25;
 
 // resolveParams: the normalized render parameters from the parsed flags. Pure.
 export function resolveParams(flags) {
@@ -79,12 +93,27 @@ export function buildSdVideoArgs({ outFile, still, prompt, flags, extra = [] }) 
   if (finiteNum(flags.steps) !== undefined) a.push("--steps", String(Math.round(finiteNum(flags.steps))));
   if (flags.sampler) a.push("--sampling-method", flags.sampler);
   if (finiteNum(flags["flow-shift"]) !== undefined) a.push("--flow-shift", String(finiteNum(flags["flow-shift"])));
+  // the high-noise expert's own recipe (A14B pair): without these sd-cli runs it at its defaults
+  if (flags["high-noise-model"]) {
+    if (finiteNum(flags["high-noise-cfg"]) !== undefined) a.push("--high-noise-cfg-scale", String(finiteNum(flags["high-noise-cfg"])));
+    if (finiteNum(flags["high-noise-steps"]) !== undefined) a.push("--high-noise-steps", String(Math.round(finiteNum(flags["high-noise-steps"]))));
+    if (flags["high-noise-sampler"]) a.push("--high-noise-sampling-method", flags["high-noise-sampler"]);
+  }
   a.push("-W", String(p.width), "-H", String(p.height), "--video-frames", String(p.frames), "--fps", String(p.fps));
   if (finiteNum(flags.seed) !== undefined) a.push("-s", String(Math.round(finiteNum(flags.seed))));
-  a.push("--backend", flags.backend, "--diffusion-fa", "--vae-tiling", "-v");
+  a.push("--backend", flags.backend, "--diffusion-fa", "--vae-tiling", "--vae-tile-overlap", String(vaeTileOverlap(flags)), "-v");
+  if (flags.tae) a.push("--taesd", flags.tae);
   for (const e of extra) a.push(e);
   a.push("-o", outFile);
   return a;
+}
+
+// vaeTileOverlap: the VAE tile overlap (fraction of a tile): --vae-tile-overlap or 0.25.
+export function vaeTileOverlap(flags) {
+  const v = finiteNum(flags["vae-tile-overlap"]);
+  if (v === undefined) return DEFAULT_VAE_TILE_OVERLAP;
+  if (v < 0 || v >= 1) throw new Error(`--vae-tile-overlap must be in [0, 1) (got ${v})`);
+  return v;
 }
 
 // splitPositionals: <out> [<still>] <prompt> -> {out, still, prompt}; null when the shape
@@ -118,8 +147,11 @@ async function main() {
   const extra = refuseExtraArgs(parseExtraArgs(flags["extra-args"]), { engine: "sdcpp", key: "--extra-args" });
   const params = resolveParams(flags);
   checkTokenCap({ flags, width: params.width, height: params.height, frames: params.frames });
-  const bin = flags["sd-bin"];
-  for (const [k, v] of [["--sd-bin", bin], ["--model", flags.model], ["--vae", flags.vae], ["--t5xxl", flags.t5xxl],
+  const bin = refuseRelativeBinary("--sd-bin", flags["sd-bin"]);
+  vaeTileOverlap(flags);
+  // the out dir is made (or refused) NOW: a render that ends in "cannot write the output" has spent minutes of GPU
+  ensureOutDir(shape.out);
+  for (const [k, v] of [["--model", flags.model], ["--vae", flags.vae], ["--t5xxl", flags.t5xxl], ["--tae", flags.tae],
     ["--high-noise-model", flags["high-noise-model"]], ["image", shape.still]]) {
     if (v && !existsSync(v)) {
       console.error(`SDCPP VIDEO FAILED: ${k} not found: ${v}`);
@@ -136,13 +168,21 @@ async function main() {
     await withGpuSlot({ noLock: flags["no-lock"], comfyManaged: false }, async () => {
       deadline.enforce("sd-cli");
       const guard = createLogGuard({ engine: "sdcpp", echoes: [shape.prompt, flags.negative] });
-      const { code } = await runEngine({ bin, args, timeoutMs: deadline.remainingMs(), label: "sd-cli", guard });
-      if (code !== 0) throw new Error("sd-cli exited " + code);
+      const { code, log } = await runEngine({ bin, args, timeoutMs: deadline.remainingMs(), label: "sd-cli", guard });
+      if (code !== 0) throw modelMetadataError(log, flags.model) || new Error("sd-cli exited " + code);
       if (!existsSync(webm)) throw new Error("sd-cli exited 0 but produced no video at " + webm);
     });
     deadline.enforce("ffmpeg mp4 encode");
-    encodeMp4(ffmpeg, webm, pos[0], fps, deadline.remainingMs());
-    console.log("WROTE", pos[0]);
+    encodeMp4(ffmpeg, webm, shape.out, fps, deadline.remainingMs());
+    // a clip that is entirely black or entirely frozen is a failed render that exited 0: never delivered
+    deadline.enforce("clip check");
+    try {
+      checkClip(ffmpeg, shape.out, { timeoutMs: deadline.remainingMs() });
+    } catch (e) {
+      try { rmSync(shape.out, { force: true }); } catch { /* best effort */ }
+      throw e;
+    }
+    console.log("WROTE", shape.out);
   } finally {
     tmp.cleanup();
   }

@@ -6,6 +6,7 @@ import assert from "node:assert";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { tmpdir } from "node:os";
 import {
   resolveParams, buildExtractArgs, buildDepthArgs, depthEnv, buildSdAnimateArgs, framesToRender, OUTPUT_FPS, DRIVER_FPS,
 } from "./sdcpp-animate.mjs";
@@ -35,9 +36,10 @@ test("buildExtractArgs: 16 fps, scaled to cover W x H and cropped, first N frame
   assert.match(a[a.length - 1].replace(/\\/g, "/"), /\/t\/frames\/%05d\.png$/);
 });
 
-test("buildDepthArgs: one frame in, one depth PNG out (README-bound; extra args last)", () => {
-  assert.deepEqual(buildDepthArgs({ model: "/d/depth.gguf", input: "f.png", outPng: "d.png" }),
-    ["depth", "--model", "/d/depth.gguf", "--input", "f.png", "--png", "d.png"]);
+test("buildDepthArgs: ONE frame in, one depth PNG out, --no-invert (near=bright); never the multi-view form; extra args last", () => {
+  const a = buildDepthArgs({ model: "/d/depth.gguf", input: "f.png", outPng: "d.png" });
+  assert.deepEqual(a, ["depth", "--model", "/d/depth.gguf", "--input", "f.png", "--png", "d.png", "--no-invert"]);
+  assert.equal(a.filter((x) => x === "--input").length, 1, "`--input a --input b` is multi-view joint depth, not per-frame");
   assert.deepEqual(buildDepthArgs({ model: "m", input: "i", outPng: "o", extra: ["--x", "1"] }).slice(-2), ["--x", "1"]);
 });
 
@@ -74,6 +76,17 @@ test("buildSdAnimateArgs: VACE with the depth directory as --control-video and t
   assert.equal(a[a.length - 1], "/t/o.webm");
 });
 
+test("buildSdAnimateArgs: --vae-tile-overlap 0.25 by default (override allowed), --taesd only with a TAE, never --offload-to-cpu", () => {
+  const base = { outFile: "o.webm", ref: "r.png", depthDir: "d", prompt: "p" };
+  const a = buildSdAnimateArgs({ ...base, flags });
+  assert.equal(a[a.indexOf("--vae-tile-overlap") + 1], "0.25");
+  assert.ok(!a.includes("--taesd") && !a.includes("--offload-to-cpu"));
+  const b = buildSdAnimateArgs({ ...base, flags: { ...flags, tae: "/m/taew2_2.safetensors", "vae-tile-overlap": "0.5" } });
+  assert.equal(b[b.indexOf("--taesd") + 1], "/m/taew2_2.safetensors");
+  assert.equal(b[b.indexOf("--vae-tile-overlap") + 1], "0.5");
+  assert.throws(() => buildSdAnimateArgs({ ...base, flags: { ...flags, "vae-tile-overlap": "1.5" } }), /vae-tile-overlap/);
+});
+
 test("framesToRender: the request when the driver has enough, else the largest 4k+1 that exists, else 0", () => {
   assert.equal(framesToRender(49, 49), 49);
   assert.equal(framesToRender(49, 80), 49);
@@ -94,14 +107,18 @@ test("the script refuses a cpu backend before touching anything (exit 1, CPU_BAC
   }
 });
 
-test("the script reports missing flags (exit 2) and a missing depth binary by name (exit 1)", () => {
+test("the script reports missing flags (exit 2), a bare binary name (BINARY_NOT_ABSOLUTE) and a missing depth binary by name (exit 1)", () => {
   const r = run(["o.mp4", "ref.png", "drive.mp4", "p", "--sd-bin", "x", "--model", "x", "--vae", "x", "--t5xxl", "x", "--backend", "vulkan0"]);
   assert.equal(r.status, 2);
   assert.match(r.stderr, /--depth-bin/);
-  const m = run(["o.mp4", "ref.png", "drive.mp4", "p", "--sd-bin", "x", "--model", "x", "--vae", "x", "--t5xxl", "x",
+  const bare = run(["o.mp4", "ref.png", "drive.mp4", "p", "--sd-bin", "x", "--model", "x", "--vae", "x", "--t5xxl", "x",
     "--depth-bin", "x", "--depth-model", "x", "--backend", "vulkan0", "--no-lock"]);
-  assert.equal(m.status, 1);
-  assert.match(m.stderr, /not found/);
+  assert.equal(bare.status, 1);
+  assert.match(bare.stderr, /BINARY_NOT_ABSOLUTE/);
+  const missing = run(["o.mp4", "ref.png", "drive.mp4", "p", "--sd-bin", process.execPath, "--model", "x", "--vae", "x", "--t5xxl", "x",
+    "--depth-bin", join(tmpdir(), "no-such-da3-cli"), "--depth-model", "x", "--backend", "vulkan0", "--no-lock"]);
+  assert.equal(missing.status, 1);
+  assert.match(missing.stderr, /--depth-bin not found/);
 });
 
 const animBase = ["o.mp4", "/no/ref.png", "/no/drive.mp4", "p", "--sd-bin", "/no/sd", "--model", "/no/m", "--vae", "/no/v", "--t5xxl", "/no/t",
