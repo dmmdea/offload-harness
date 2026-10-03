@@ -21,11 +21,13 @@ type GPU struct {
 	MemTotalMiB int    `json:"mem_total_mib"`
 	// DisplayActive is nvidia-smi's display_active: this card drives a screen,
 	// so its utilization is never a lease holder's work — see
-	// gpuprobe.DisplayCardUUIDs, the one rule both surfaces read.
+	// gpuprobe.DisplayCardUUIDs, the load-attribution rule every load surface reads.
 	DisplayActive bool `json:"display_active,omitempty"`
 	// DisplayAttached is nvidia-smi's display_attached: a monitor is plugged into this
 	// card. It holds with the screen asleep, when display_active reads Disabled on every
-	// card; the rule that reads both is gpuprobe.Device.DrivesDisplay.
+	// card, so the card table reads it to keep the allocator off the monitor's card
+	// (gpuprobe.ScreenCardUUIDs). The verdict's load attribution does NOT: an attached
+	// monitor is not a display in use.
 	DisplayAttached bool `json:"display_attached,omitempty"`
 }
 

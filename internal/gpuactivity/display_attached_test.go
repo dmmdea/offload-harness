@@ -10,11 +10,12 @@ import (
 	"github.com/dmmdea/offload-harness/internal/gpuprobe"
 )
 
-// The lease verdict and the allocator read ONE display rule (gpuprobe.DisplayCardUUIDs).
-// On the 3-card box display_active reads Disabled on every card while the screen sleeps and
-// display_attached marks the card that drives the monitor, so this surface has to read the
-// second column too or its "that load is the operator's game, not the holder's work" call
-// would disagree with the allocator's "never auto-pick the display card".
+// The lease verdict attributes load: "that load is the operator's game, not the holder's
+// work". That is a question about a display IN USE, so it reads display_active alone
+// (gpuprobe.DisplayCardUUIDs). display_attached is read and published (the card table marks
+// the monitor's card with it, so the allocator never auto-picks it), but it is true for the
+// whole life of the box: counting it as the operator's load would hide a holder's own work
+// on that card and change every verdict on a host with card-scoped leases OFF.
 
 func TestParseGPUsReadsDisplayAttached(t *testing.T) {
 	gpus := ParseGPUs("0, GPU-aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee, NVIDIA GeForce RTX 5060 Ti, 0, 100, 16311, Disabled, No\r\n" +
@@ -78,8 +79,9 @@ func TestSampleGPUsAsksForDisplayAttachedFirst(t *testing.T) {
 }
 
 // The screen is asleep: display_active is Disabled everywhere and display_attached marks
-// card 1. The game's 33% on card 1 is still not the holder's work.
-func TestAttachedCardLoadIsNotTheHoldersWork(t *testing.T) {
+// card 1. Nothing is being displayed, so the 33% on card 1 is whatever is computing there, and
+// the holder is the only one who says it is: the verdict reads it as the holder's work.
+func TestAttachedCardLoadIsStillTheHoldersWork(t *testing.T) {
 	const (
 		card0 = "GPU-aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee"
 		card1 = "GPU-bbbb2222-cccc-dddd-eeee-ffffffffffff"
@@ -96,10 +98,16 @@ func TestAttachedCardLoadIsNotTheHoldersWork(t *testing.T) {
 		},
 	}
 	verdict, note := Assess(view)
-	if verdict != VerdictHeldIdle {
-		t.Fatalf("verdict = %q, want %q\nnote: %s", verdict, VerdictHeldIdle, note)
+	if verdict == VerdictHeldIdle {
+		t.Fatalf("verdict = %q: an attached monitor alone must not hide the load on its card\nnote: %s", verdict, note)
 	}
-	if !strings.Contains(note, "display card") || !strings.Contains(note, "33% on card 1") {
-		t.Errorf("note should name the display card's 33%%: %s", note)
+	if strings.Contains(note, "display card") {
+		t.Errorf("nothing is displaying on card 1, the note must not call it the display card: %s", note)
+	}
+	// With the display INITIALISED on that card the load is the operator's, as it always was.
+	view.GPUs[1].DisplayAttached = false
+	view.GPUs[1].DisplayActive = true
+	if v, n := Assess(view); v != VerdictHeldIdle || !strings.Contains(n, "33% on card 1") {
+		t.Errorf("an initialised display on card 1 must still be excluded: %q\n%s", v, n)
 	}
 }

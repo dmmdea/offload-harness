@@ -45,14 +45,14 @@ type Card struct {
 // one file per card, and the file system may be case-insensitive).
 func (c Card) LeaseID() string { return strings.ToLower(strings.TrimSpace(c.UUID)) }
 
-// BuildCards turns parsed nvidia-smi devices into the card table. Display is the shared
-// DisplayCardUUIDs rule (a box whose only card is its display card excludes nothing).
+// BuildCards turns parsed nvidia-smi devices into the card table. Display is the placement
+// rule, ScreenCardUUIDs (a box whose only card is its display card excludes nothing).
 // comfyOrder is the operator's declaration of ComfyUI's order, a comma list of nvidia
 // indices or UUID prefixes with the fastest card first ("" = not declared). A spec that
 // does not name every card exactly once is rejected as a whole: warn says why and every
 // ComfyOrder stays unknown, because half an order answers no question.
 func BuildCards(devs []Device, comfyOrder string) (cards []Card, warn string) {
-	display := DisplayCardUUIDs(devs)
+	display := ScreenCardUUIDs(devs)
 	cards = make([]Card, 0, len(devs))
 	for _, d := range devs {
 		cards = append(cards, Card{

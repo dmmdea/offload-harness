@@ -475,7 +475,10 @@ the cards the lease holds and leave the seats on the others (plan P5, below).
 **The allocator.** A card is allocatable when it is not quarantined (`quarantine.<id>` sidecars, which P12 will write),
 not the display card (the card whose `display_active` reads Enabled **or** whose `display_attached` reads Yes: with the screen asleep
 `display_active` reads Disabled on every card of the 3-card box while `display_attached` still marks the card that drives the monitor,
-measured 2026-10-03; one rule, `gpuprobe.DisplayCardUUIDs`, shared with the lease verdict and the fleet health), not claimed (a
+measured 2026-10-03; the card table's rule, `gpuprobe.ScreenCardUUIDs`. The lease verdict and the fleet health attribute load by
+`display_active` alone, `gpuprobe.DisplayCardUUIDs`, so an attached monitor never hides a holder's own work; and a reading taken
+after a transient `nvidia-smi` failure carries no `display_attached` and marks its cards `display-unknown`: the allocator hands out none of
+them until the next good reading), not claimed (a
 whole-node lease claims every card), not under a foreign compute process
 (`foreign-busy`, reported and skipped, never killed), its free VRAM fits `--vram` (GiB per card), and the **host** has the
 RAM `--ram` declares plus `gpu_host_ram_headroom_gib` (default 4) free. Among allocatable cards the order is: no resident

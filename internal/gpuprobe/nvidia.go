@@ -54,7 +54,7 @@ type Device struct {
 	// unless a display is initialised (a game, a lit screen) while display_attached
 	// stays Yes on the card that drives the monitor (measured 2026-10-03). Absent is
 	// never "yes": a driver without the field, and a line from the older query,
-	// leave it false. Read it through DrivesDisplay, never on its own.
+	// leave it false. Read it through DrivesDisplay (the placement rule), never on its own.
 	DisplayAttached bool `json:"display_attached,omitempty"`
 	// AttachedUnknown is set on every device of a reading that carries no display_attached
 	// because the full query FAILED for a reason that does not name the field (a transient):
@@ -63,10 +63,10 @@ type Device struct {
 	AttachedUnknown bool `json:"attached_unknown,omitempty"`
 }
 
-// DrivesDisplay is the ONE per-card answer to "is this the operator's screen":
-// display_active Enabled OR display_attached Yes. Every reader of a Device asks it
-// here (DisplayCardUUIDs, the card table, the delegator's free-card reading), so the
-// rule cannot drift between surfaces.
+// DrivesDisplay is the placement answer to "is this the operator's screen": display_active
+// Enabled OR display_attached Yes. The card table asks it (ScreenCardUUIDs, so the allocator
+// never auto-picks the monitor's card). It is NOT the load-attribution rule: that reads
+// display_active alone (DisplayCardUUIDs), see display.go for why the two differ.
 func (d Device) DrivesDisplay() bool { return d.DisplayActive || d.DisplayAttached }
 
 // smiQueryArgs is the ONE per-device query every reader in the harness runs

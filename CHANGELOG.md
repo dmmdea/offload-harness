@@ -15,6 +15,16 @@ Versioning: [SemVer](https://semver.org/).
   and a refusal ends it before anything is touched. The order is resolve, stop the kept instances, warm the seat
   back, release: the instances go before the seat is loaded onto their cards (the documented order; it had been
   warm first). A release that fails after the stop says the instances were already stopped.
+- **`display_attached` no longer changes what a host with card-scoped leases OFF advertises.** The OR rule
+  (`display_active` Enabled or `display_attached` Yes) had been put behind `gpuprobe.DisplayCardUUIDs`, which the load
+  figures read too, so on any host whose monitor is plugged in the monitor's card left `work_util_pct`, the
+  delegator's free-card count, the lease verdict's "that load is the operator's game" and the foreign-load guard for
+  good, not only while a game ran: a node whose only busy card was the monitor card, working for its own seat or
+  lease, advertised itself idle. The rule is now two: `gpuprobe.ScreenCardUUIDs` (either column) for the card table
+  and the allocator, which is where plan invariant I6 lives, and `DisplayCardUUIDs` (`display_active` alone, as it
+  was) for every load figure. The change to the load figures was not asked for by anyone; if the operator wants the
+  attached monitor out of them, that is a fleet-visible change to decide, with a test that pins the new
+  `work_util_pct`.
 - **One transient `nvidia-smi` error no longer switches `display_attached` off for ten minutes.** The fallback
   to the query without the field was armed by ANY failure of the full query, silently, and the full query was then
   not tried again for ten minutes. `display_attached` is the only signal that marks the monitor's card while the
@@ -106,10 +116,14 @@ the text seats on the others. The display card is never auto-assigned while the 
 - **The allocator's "never auto-pick the display card" rule now fires at the desk.** On the 3-card box
   `nvidia-smi` read `display_active` Disabled on every card while the screen slept, and `display_attached` Yes on the
   card that drives the monitor, so the one shared rule (`gpuprobe.DisplayCardUUIDs`) found no display card and the
-  allocator could hand that card to a render. The per-device query now carries `display_attached`, and a card is the
-  display card when `display_active` reads Enabled **or** `display_attached` reads Yes (`Device.DrivesDisplay`, one
-  method every reader asks: the card table, the lease verdict's "that load is the operator's game", the fleet node's
-  `work_util_pct`, the delegator's free-card count, `offload_status`). Only an exact `Yes` counts; `[Not Supported]`,
+  allocator could hand that card to a render. The per-device query now carries `display_attached`, and the CARD TABLE
+  marks a card as the display card when `display_active` reads Enabled **or** `display_attached` reads Yes
+  (`gpuprobe.ScreenCardUUIDs`, read by the allocator, `gpu cards` and `offload_status`'s card table). The load
+  figures are NOT moved onto it: the fleet node's `work_util_pct`, the lease verdict's "that load is the operator's
+  game", the foreign-load guard and the delegator's free-card count keep reading `display_active` alone
+  (`gpuprobe.DisplayCardUUIDs`), because an attached monitor is true for the whole life of the box and counting it
+  there would hide a node's own work on that card and change what every host with card-scoped leases OFF
+  advertises. Only an exact `Yes` counts; `[Not Supported]`,
   `[N/A]` and a missing column are "unknown", never the operator's screen. A driver that refuses the field (an older one,
   a headless Linux build) rejects the whole query, so both readers (`gpuprobe.Read` and the lease verdict's sampler)
   retry without it through one fallback (`RunDisplayAware`) and the rule rests on `display_active` alone, as before; the

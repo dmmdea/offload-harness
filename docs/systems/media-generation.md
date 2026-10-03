@@ -954,7 +954,7 @@ is given:
 (`gpu_lease`, "The allocator"): not claimed by a live lease, not promised to a caller waiting in line
 (below), not held by another job in this process, with the free VRAM and host RAM, and never the display
 card while the operator is at the desk. The display card is the one whose `display_active` reads Enabled
-**or** whose `display_attached` reads Yes (`gpuprobe.DisplayCardUUIDs`); it is auto-assigned only when
+**or** whose `display_attached` reads Yes (`gpuprobe.ScreenCardUUIDs`, the card table's rule); it is auto-assigned only when
 `operator_presence` says the operator is away, and an explicit pin may always name it (the operator's
 word). Ties go to a card with no resident seat, then the cheapest eviction, then the lowest id.
 

@@ -11,8 +11,15 @@ import (
 // The display card on the 3-card box (measured 2026-10-03, operator's screen asleep):
 // display_active read Disabled on EVERY card while display_attached read Yes on the card
 // that drives the monitor. display_active is only true while a display is initialised
-// (a game, a lit screen), so a rule built on it alone never fires at the desk. The rule is
-// now "display_active Enabled OR display_attached Yes", in one place.
+// (a game, a lit screen), so a rule built on it alone never fires at the desk.
+//
+// TWO QUESTIONS, TWO RULES. "May a render be PLACED on this card" is answered for the card table
+// and the allocator (ScreenCardUUIDs, BuildCards): display_active Enabled OR display_attached
+// Yes, so the monitor's card is never auto-picked, screen on or off. "Whose load is this" (the
+// node's work_util_pct, the lease verdict, the foreign-load guard, the delegator's free-card
+// count) stays on display_active alone (DisplayCardUUIDs): display_attached is true for the
+// whole life of the box, so reading it there would hide the node's OWN work on that card and
+// change what every host with card-scoped leases OFF advertises.
 
 const (
 	attA = "GPU-aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee"
@@ -83,17 +90,28 @@ func TestDrivesDisplayIsActiveOrAttached(t *testing.T) {
 	}
 }
 
-// The measured case: display_active Disabled everywhere, display_attached Yes on card 1.
-func TestDisplayCardUUIDsCountsAnAttachedCardWhenActiveReadsDisabled(t *testing.T) {
-	got := DisplayCardUUIDs([]Device{
+// The measured case: display_active Disabled everywhere, display_attached Yes on card 1. The
+// card table and the allocator's rule see the monitor's card; the load-attribution rule does
+// NOT (an attached monitor is not a game being played).
+func TestOnlyTheCardTableCountsAnAttachedCardAsTheDisplayCard(t *testing.T) {
+	devs := []Device{
 		{Index: 0, UUID: attA},
 		{Index: 1, UUID: attB, DisplayAttached: true},
 		{Index: 2, UUID: attC},
-	})
-	if !got[attB] || got[attA] || got[attC] || len(got) != 1 {
-		t.Fatalf("want only card 1 flagged, got %v", got)
 	}
-	// And the card table (what the allocator reads) agrees: card 1 is the display card.
+	got := ScreenCardUUIDs(devs)
+	if !got[attB] || got[attA] || got[attC] || len(got) != 1 {
+		t.Fatalf("want only card 1 flagged by the placement rule, got %v", got)
+	}
+	if load := DisplayCardUUIDs(devs); load != nil {
+		t.Fatalf("an attached monitor is not a display in use: the load-attribution rule must flag nothing, got %v", load)
+	}
+	// And a display that IS initialised is flagged by both.
+	active := []Device{{Index: 0, UUID: attA}, {Index: 1, UUID: attB, DisplayActive: true}}
+	if a, b := DisplayCardUUIDs(active), ScreenCardUUIDs(active); !a[attB] || !b[attB] {
+		t.Fatalf("display_active must flag card 1 in both rules, got %v / %v", a, b)
+	}
+	// The card table (what the allocator reads) agrees with the placement rule.
 	cards, _ := BuildCards([]Device{
 		{Index: 0, UUID: attA, TotalGiB: 16}, {Index: 1, UUID: attB, TotalGiB: 16, DisplayAttached: true}, {Index: 2, UUID: attC, TotalGiB: 16},
 	}, "")
@@ -104,12 +122,12 @@ func TestDisplayCardUUIDsCountsAnAttachedCardWhenActiveReadsDisabled(t *testing.
 
 // The single-card guard is unchanged: a box whose only card is attached to the screen
 // runs its seats there by necessity.
-func TestDisplayCardUUIDsAttachedSoleCardExcludesNothing(t *testing.T) {
-	if got := DisplayCardUUIDs([]Device{{Index: 0, UUID: attB, DisplayAttached: true}}); got != nil {
+func TestScreenCardUUIDsAttachedSoleCardExcludesNothing(t *testing.T) {
+	if got := ScreenCardUUIDs([]Device{{Index: 0, UUID: attB, DisplayAttached: true}}); got != nil {
 		t.Fatalf("a single-card box must exclude nothing, got %v", got)
 	}
 	// Two cards, both on a screen: nothing is left to score, so nothing is excluded.
-	if got := DisplayCardUUIDs([]Device{{UUID: attA, DisplayAttached: true}, {UUID: attB, DisplayActive: true}}); got != nil {
+	if got := ScreenCardUUIDs([]Device{{UUID: attA, DisplayAttached: true}, {UUID: attB, DisplayActive: true}}); got != nil {
 		t.Fatalf("a box with no non-display card must exclude nothing, got %v", got)
 	}
 }
