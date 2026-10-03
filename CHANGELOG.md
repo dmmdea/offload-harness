@@ -37,6 +37,17 @@ material on every agent read tool (`agent_read_floor`), a per-run hash chain ove
 verify` (`audit_chain`), `agent_run` sizing its wall before it starts (D-102, partial), and Windows nodes keeping the
 harness's data off the OS drive (C-92).
 
+### Fixed — the tailnet zone a config load installs is safe for two loads at once
+
+Every config load installs `tailnet_suffix` into a process-wide value that the endpoint checks read. It was a plain string,
+so two loads in one process (a server re-reading its config while a request handler loads it; the card-lease tests that
+drive two `gpu reserve` calls in-process) raced on it. The Linux race gate on this release found it eight times in one run,
+all on that value, through `TestGPUReserveConcurrentCardRequestsLandOnDistinctCards`,
+`TestGPUHoldCardsAllocatesAndClaimsInTheHolder` and `TestGPUReserveDevicesRunsTwoDisjointLeasesAtOnce`. The zone is now
+an atomic value and `TailnetURL` reads it once per call, so its checks and its error message judge one value. Every other
+setter a config load calls was already behind a mutex or an atomic. Test: `TestTheTailnetSuffixIsSafeForConcurrentLoads`
+(a data race before the fix, clean after).
+
 ### Added — a hash chain over each agent run's audit rows, and `agent-audit verify` (register SF-08)
 
 - `audit_chain` (default `false`): every row a run writes on the broker audit trail carries `run_id`, `seq` and
