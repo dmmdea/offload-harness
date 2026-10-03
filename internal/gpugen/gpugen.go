@@ -393,7 +393,10 @@ func ClassifyErr(err error) string {
 		return "extra_args_refused"
 	case strings.Contains(s, "illegal_instruction"):
 		return "illegal_instruction"
-	case strings.Contains(s, "out of memory") || strings.Contains(s, "cudamalloc") || strings.Contains(s, "oom"):
+	// ggml_vulkan's allocation failure has neither "out of memory" nor "oom" in its text
+	// ("Device memory allocation of size N failed ... vk::Device::allocateMemory: ErrorOutOfDeviceMemory").
+	case strings.Contains(s, "out of memory") || strings.Contains(s, "cudamalloc") || strings.Contains(s, "oom") ||
+		strings.Contains(s, "erroroutofdevicememory") || strings.Contains(s, "erroroutofhostmemory") || strings.Contains(s, "device memory allocation of size"):
 		return "oom"
 	case strings.Contains(s, "timeout") || strings.Contains(s, "deadline") || strings.Contains(s, "context canceled") || strings.Contains(s, "killed") || strings.Contains(s, "signal:"):
 		return "timeout"

@@ -137,6 +137,8 @@ func TestClassifyErr(t *testing.T) {
 		"TOKEN_CAP_EXCEEDED: 480x832x33 + reference needs 15600 latent tokens": "token_cap_exceeded",
 		"EXTRA_ARGS_REFUSED: --extra-args[0] \"--clip-on-cpu\"":                "extra_args_refused",
 		"ILLEGAL_INSTRUCTION: audiocpp_cli died with SIGILL (exit 132)":        "illegal_instruction",
+		// ggml_vulkan's own allocation failure is an oom too
+		"ggml_vulkan: Device memory allocation of size 5368709120 failed.\nvk::Device::allocateMemory: ErrorOutOfDeviceMemory": "oom",
 		// a signal death carries the signal and, for SIGKILL, the OOM hint: class oom
 		"sd-cli was killed by signal SIGKILL (SIGKILL on a UMA iGPU box usually means the kernel out-of-memory (OOM) killer)": "oom",
 	}
