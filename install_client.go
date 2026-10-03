@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"sort"
@@ -147,6 +148,15 @@ func clientConfig(home string, remotes []string, token string) map[string]any {
 	}
 	for _, r := range def.ModelRoutes() {
 		m[r.Key] = ""
+	}
+	// ffmpeg is a local CPU tool (offload_media, and the kit's cut scripts run it beside the harness):
+	// the default stays when this machine has ffmpeg and ffprobe on PATH, and is unbound when it does
+	// not, so the media route never claims a binary the box does not have.
+	for _, bin := range []string{"ffmpeg", "ffprobe"} {
+		if _, err := exec.LookPath(bin); err != nil {
+			m["ffmpeg_path"] = ""
+			break
+		}
 	}
 	return m
 }

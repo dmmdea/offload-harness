@@ -159,6 +159,40 @@ func TestInstallClientRefusesRemotesThatAreNotFleetNodes(t *testing.T) {
 	}
 }
 
+// ffmpeg stays bound only where this machine has it: CI runners and bare clients often do not, and a
+// client must not claim a binary it lacks (the first CI run of this test failed on exactly that).
+func TestInstallClientBindsFFmpegOnlyWhereItIs(t *testing.T) {
+	t.Setenv("PATH", t.TempDir()) // nothing on PATH
+	home := t.TempDir()
+	if _, err := installClientInto(t, home); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(filepath.Join(home, "etc", "config.json"))
+	if err != nil || cfg.FFmpegPath != "" {
+		t.Fatalf("with no ffmpeg on PATH, ffmpeg_path must be unbound: %q, %v", cfg.FFmpegPath, err)
+	}
+
+	bin := t.TempDir()
+	for _, name := range []string{"ffmpeg", "ffprobe", "ffmpeg.exe", "ffprobe.exe"} {
+		if err := os.WriteFile(filepath.Join(bin, name), []byte("#!/bin/sh\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", bin)
+	home = t.TempDir()
+	if _, err := installClientInto(t, home); err != nil {
+		t.Fatal(err)
+	}
+	if cfg, err = config.Load(filepath.Join(home, "etc", "config.json")); err != nil || cfg.FFmpegPath != config.Default().FFmpegPath {
+		t.Fatalf("with ffmpeg and ffprobe on PATH, ffmpeg_path keeps its default: %q, %v", cfg.FFmpegPath, err)
+	}
+	for _, r := range mediacap.Routes(cfg) {
+		if r.State == mediacap.BoundButMissing && strings.HasPrefix(r.Name, "media") {
+			t.Errorf("route %s: %s", r.Name, r.Detail)
+		}
+	}
+}
+
 func TestHasLocalModel(t *testing.T) {
 	if !hasLocalModel(config.Default()) {
 		t.Error("the default config names a local model")

@@ -56,8 +56,10 @@ claude mcp add local-offload --scope user -- <dir>\bin\local-offload.exe mcp --c
 `install client` writes `<home>/etc/config.json` (mode 0600; it holds the token, which is never printed):
 `delegate_remotes`, `fleet_auth_token`, `agent_delegation_enabled`, the media, state, cache and ledger
 paths under the home, and every model route and every script binding that has a default written empty,
-so `doctor`, `offload_status` and `acceptance` never claim a lane the box does not have. It refuses to
-replace an existing config without `--force`.
+so `doctor`, `offload_status` and `acceptance` never claim a lane the box does not have. `ffmpeg_path` keeps
+its default only when ffmpeg and ffprobe are on PATH (`offload_media` and the kit's cut scripts run them
+locally). It refuses to replace an existing config without `--force`, and refuses remotes that are not
+fleet node bases (off the fleet port, loopback, a `/v1` suffix), removing what it wrote.
 
 ## The render nodes it uses
 
