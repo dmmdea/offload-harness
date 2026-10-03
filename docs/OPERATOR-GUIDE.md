@@ -515,11 +515,14 @@ this machine has the lane and on a fleet node from `delegate_remotes` when it ha
 sends it; `local` never does. A template travels by name to any node that advertises `compose-video`. A
 project directory or an inline composition travels as a bundle to a node's project door, which a node
 opens only with `fleet_compose_projects: true` and a `fleet_auth_token`, and the caller must hold the same
-token. Both sides check the bundle: regular files only, no unsafe or reserved names, size caps
-(`fleet_compose_bundle_max_mb`, 64 MB by default), and no reference that leaves the project (`..`, an
-absolute or root-relative path, a `file:` URL, a `<base>` or `srcdoc`, or a URL to a loopback, private,
-tailnet or dotless host). Public `https` references (fonts, a CDN) stay allowed, and the node fetches
-them. The video and its snapshots come back into this machine's media dir, or to `out`. `png-sequence`
+token. Both sides check the bundle: regular files only, no unsafe or reserved names, size and entry
+caps (`fleet_compose_bundle_max_mb`, 64 MB by default), and no reference that leaves the project (`..`
+from its file or, unless it starts with `../`, from the project root, where HyperFrames resolves it; an
+absolute, root-relative, UNC or protocol-relative path; a `file:` URL; a `<base>` or `srcdoc`; or a URL
+to a loopback host in any numeric form, a private, tailnet, dotless or non-ASCII host). Every file a
+`data-composition-src` names is checked as a composition whatever its extension. Public `https`
+references (fonts, a CDN) stay allowed, and the node fetches them. A project job's state and output are
+visible only with the token. The video and its snapshots come back into this machine's media dir, or to `out`. `png-sequence`
 renders only locally. A machine with no model or lane at all is a
 [delegation client](systems/delegation-client.md).
 

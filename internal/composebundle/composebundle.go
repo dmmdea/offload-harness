@@ -8,17 +8,23 @@
 //
 //   - Extract writes regular files and directories only (no symlink, hard link, device or FIFO), never
 //     outside the target (no absolute path, drive letter, UNC path, `..`, backslash, NUL or colon in a
-//     name), and within caps on the file count, each file and the total, counted on the bytes actually
-//     written, not on the headers.
-//   - Confine reads every reference an .html/.htm/.svg/.css file makes (src, href, poster, srcset,
-//     data, xlink:href, data-composition-src/-file, CSS url() and @import) and refuses one that points
-//     outside the project: a root-relative or absolute path, a relative path that resolves above the
-//     project root, a file: or other non-web URL, or an http(s) URL to a host that is not public
-//     (loopback, private, the shared 100.64/10 range the tailnet uses, link-local, a .ts.net, .local or
-//     .internal name, or a name with no dot). HyperFrames' compiler copies an asset referenced outside
-//     the project into its output; that copy is how a project could read a file off the render node,
-//     and Confine is what closes it. JavaScript is not parsed: at render time the page can reach only
-//     the project and its compiled copy (HyperFrames' file server confines every path to them).
+//     name), and within caps on the entries (directories included), the files, each file and the total,
+//     counted on the bytes actually written, not on the headers, with the whole decompressed stream
+//     bounded too.
+//   - Confine (confine.go) reads every reference the project's HTML, SVG and CSS make, and those of any
+//     file a composition attribute names whatever its extension (src, href, poster, srcset, data,
+//     xlink:href, data-composition-src/-file, CSS url(), @import and image-set strings, in a raw-text
+//     scan that does not depend on parsing HTML as the compiler's parser does), and refuses one that
+//     points outside the project: a root-relative, absolute, UNC or protocol-relative path, a relative
+//     path that climbs above the project root from its file or from the root (where HyperFrames'
+//     compiler resolves one that does not start with "../"), a file: or other non-web URL, or an
+//     http(s) URL to a host that is not public (loopback in any legacy numeric form, private, the
+//     shared 100.64/10 range the tailnet uses, link-local, a .ts.net, .local or .internal name, a name
+//     with no dot, or a non-ASCII name). HyperFrames' compiler copies an asset referenced outside the
+//     project into its output and reads a composition file by any path; those are how a project could
+//     read a file off the render node, and Confine is what closes them. JavaScript is not parsed: at
+//     render time the page can reach only the project and its compiled copy (HyperFrames' file server
+//     confines every path to them).
 package composebundle
 
 import (
@@ -27,11 +33,8 @@ import (
 	"compress/gzip"
 	"errors"
 	"fmt"
-	"html"
 	"io"
 	"io/fs"
-	"net"
-	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -43,6 +46,7 @@ import (
 // Limits bound a bundle. The zero value means the defaults below.
 type Limits struct {
 	MaxFiles     int   // files in the bundle
+	MaxEntries   int   // entries of any kind, directories included (default: twice MaxFiles)
 	MaxFileBytes int64 // one file, uncompressed
 	MaxTotal     int64 // all files, uncompressed
 }
@@ -57,6 +61,9 @@ func (l Limits) withDefaults() Limits {
 	if l.MaxFiles <= 0 {
 		l.MaxFiles = DefaultMaxFiles
 	}
+	if l.MaxEntries <= 0 {
+		l.MaxEntries = 2 * l.MaxFiles
+	}
 	if l.MaxFileBytes <= 0 {
 		l.MaxFileBytes = DefaultMaxFileBytes
 	}
@@ -64,6 +71,42 @@ func (l Limits) withDefaults() Limits {
 		l.MaxTotal = DefaultMaxTotal
 	}
 	return l
+}
+
+// ErrIO marks an Extract failure that is the target machine's own (a directory it could not create, a
+// write that failed, a disk that filled), never the bundle's: a node answers it as its own failure, not
+// as a refused bundle.
+var ErrIO = errors.New("i/o")
+
+// ioWriter tags a write failure with ErrIO, so io.Copy's error says which side failed.
+type ioWriter struct{ f *os.File }
+
+func (w ioWriter) Write(p []byte) (int, error) {
+	n, err := w.f.Write(p)
+	if err != nil {
+		err = fmt.Errorf("%w: %v", ErrIO, err)
+	}
+	return n, err
+}
+
+// capReader fails once more than max bytes have been read: the whole decompressed stream (headers and
+// padding included) is bounded, not only the file bodies the caps count.
+type capReader struct {
+	r   io.Reader
+	max int64
+	n   int64
+}
+
+func (c *capReader) Read(p []byte) (int, error) {
+	if c.n >= c.max {
+		return 0, fmt.Errorf("the bundle unpacks to more than %d bytes", c.max)
+	}
+	if rem := c.max - c.n; int64(len(p)) > rem {
+		p = p[:rem]
+	}
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+	return n, err
 }
 
 // skipDirs are never packed: version control, dependency trees and a kit project's own renders.
@@ -98,7 +141,10 @@ func Pack(dir string, lim Limits) ([]byte, error) {
 			return fmt.Errorf("%s is a symlink: a project bundle carries regular files only", filepath.ToSlash(rel))
 		}
 		if !d.Type().IsRegular() {
-			return nil
+			// A Windows junction, a socket or a device: refused like a symlink, never skipped, so
+			// what is sent is what the sender sees.
+			rel, _ := filepath.Rel(root, p)
+			return fmt.Errorf("%s is not a regular file (a junction, socket or device): a project bundle carries regular files only", filepath.ToSlash(rel))
 		}
 		info, ierr := d.Info()
 		if ierr != nil {
@@ -203,11 +249,11 @@ func Extract(bundle []byte, dir string, lim Limits) error {
 	lim = lim.withDefaults()
 	root, err := filepath.Abs(dir)
 	if err != nil {
-		return err
+		return fmt.Errorf("%w: %v", ErrIO, err)
 	}
 	entries, err := os.ReadDir(root)
 	if err != nil {
-		return err
+		return fmt.Errorf("%w: %v", ErrIO, err)
 	}
 	if len(entries) != 0 {
 		return fmt.Errorf("extract target %s is not empty", root)
@@ -217,9 +263,15 @@ func Extract(bundle []byte, dir string, lim Limits) error {
 		return fmt.Errorf("the bundle is not gzip data: %w", err)
 	}
 	defer gz.Close()
-	tr := tar.NewReader(gz)
-	files := 0
+	// The whole decompressed stream is bounded: the file bodies within MaxTotal, plus a header (with
+	// any PAX record) and block padding for each entry.
+	tr := tar.NewReader(&capReader{r: gz, max: lim.MaxTotal + int64(lim.MaxEntries+1)*4096})
+	files, nentries := 0, 0
 	var total int64
+	// The names this bundle wrote as files: a later member under one of them, or a directory entry
+	// with one's name, is the bundle's own conflict, refused as such before the filesystem reports it
+	// as if it were this machine's failure (ErrIO).
+	fileNames := map[string]bool{}
 	for {
 		hdr, err := tr.Next()
 		if errors.Is(err, io.EOF) {
@@ -227,6 +279,12 @@ func Extract(bundle []byte, dir string, lim Limits) error {
 		}
 		if err != nil {
 			return fmt.Errorf("reading the bundle: %w", err)
+		}
+		// Every entry counts, directories included: empty directory entries cost a gzip almost
+		// nothing, and no other cap would bound them.
+		nentries++
+		if nentries > lim.MaxEntries {
+			return fmt.Errorf("the bundle has more than %d entries", lim.MaxEntries)
 		}
 		if err := checkName(hdr.Name); err != nil {
 			return err
@@ -236,10 +294,18 @@ func Extract(bundle []byte, dir string, lim Limits) error {
 		if !inside(root, dest) {
 			return fmt.Errorf("member %q resolves outside the project", hdr.Name)
 		}
+		for p := path.Dir(name); p != "."; p = path.Dir(p) {
+			if fileNames[p] {
+				return fmt.Errorf("member %q is under %q, which the bundle wrote as a file", hdr.Name, p)
+			}
+		}
+		if hdr.Typeflag == tar.TypeDir && fileNames[name] {
+			return fmt.Errorf("member %q is a directory where the bundle wrote a file", hdr.Name)
+		}
 		switch hdr.Typeflag {
 		case tar.TypeDir:
 			if err := os.MkdirAll(dest, 0o755); err != nil {
-				return err
+				return fmt.Errorf("%w: member %q: %v", ErrIO, hdr.Name, err)
 			}
 			continue
 		case tar.TypeReg, tar.TypeRegA:
@@ -251,21 +317,28 @@ func Extract(bundle []byte, dir string, lim Limits) error {
 			return fmt.Errorf("the bundle has more than %d files", lim.MaxFiles)
 		}
 		if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
-			return err
+			return fmt.Errorf("%w: member %q: %v", ErrIO, hdr.Name, err)
 		}
 		f, err := os.OpenFile(dest, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
 		if err != nil {
-			return fmt.Errorf("member %q: %w", hdr.Name, err)
+			if errors.Is(err, fs.ErrExist) {
+				return fmt.Errorf("member %q: %w", hdr.Name, err) // a duplicate member: the bundle's fault
+			}
+			return fmt.Errorf("%w: member %q: %v", ErrIO, hdr.Name, err)
 		}
 		// The caps count the bytes written, never the header's claim.
-		n, cerr := io.Copy(f, io.LimitReader(tr, lim.MaxFileBytes+1))
-		f.Close()
+		n, cerr := io.Copy(ioWriter{f}, io.LimitReader(tr, lim.MaxFileBytes+1))
+		closeErr := f.Close()
 		if cerr != nil {
 			return fmt.Errorf("member %q: %w", hdr.Name, cerr)
+		}
+		if closeErr != nil {
+			return fmt.Errorf("%w: member %q: %v", ErrIO, hdr.Name, closeErr)
 		}
 		if n > lim.MaxFileBytes {
 			return fmt.Errorf("member %q is over the %d-byte limit for one file", hdr.Name, lim.MaxFileBytes)
 		}
+		fileNames[name] = true
 		total += n
 		if total > lim.MaxTotal {
 			return fmt.Errorf("the bundle unpacks to more than %d bytes", lim.MaxTotal)
@@ -297,255 +370,4 @@ func typeName(t byte) string {
 		return "FIFO"
 	}
 	return fmt.Sprintf("type %q entry", t)
-}
-
-var (
-	attrRef = regexp.MustCompile(`(?i)(?:^|[\s"'<])(src|href|poster|data|background|srcset|xlink:href|data-composition-src|data-composition-file)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))`)
-	// CSS strings may hold escaped quotes, and a hex escape in an unquoted url swallows one following
-	// space (`url(http\3a //host/x)` is one token to a browser), so both forms match escapes whole.
-	cssURLRef = regexp.MustCompile(`(?i)url\(\s*(?:"((?:\\.|[^"\\])*)"|'((?:\\.|[^'\\])*)'|((?:\\[0-9a-fA-F]{1,6}\s?|\\[^0-9a-fA-F]|[^)\s\\"'])*))\s*\)`)
-	importRef = regexp.MustCompile(`(?i)@import\s+(?:"((?:\\.|[^"\\])*)"|'((?:\\.|[^'\\])*)')`)
-	// image-set() (and -webkit-image-set()) names an image by a bare string as well as by url(); the
-	// argument list may hold one level of parentheses (a url() inside it).
-	imageSetRef  = regexp.MustCompile(`(?i)image-set\(((?:[^()]|\([^()]*\))*)\)`)
-	cssStringRef = regexp.MustCompile(`"((?:\\.|[^"\\])*)"|'((?:\\.|[^'\\])*)'`)
-	// A <base> element re-roots every relative path in the document, and srcdoc embeds a second
-	// document whose references this scan would not see: both are refused outright.
-	baseElem   = regexp.MustCompile(`(?i)<base[\s/>]`)
-	srcdocAttr = regexp.MustCompile(`(?i)(?:^|[\s"'<])srcdoc\s*=`)
-	cssEscape  = regexp.MustCompile(`\\([0-9a-fA-F]{1,6})\s?|\\(.)`)
-)
-
-// cssUnescape decodes CSS escapes (`\2e`, `\.`) the way a CSS parser does before resolving a URL.
-func cssUnescape(s string) string {
-	return cssEscape.ReplaceAllStringFunc(s, func(m string) string {
-		sub := cssEscape.FindStringSubmatch(m)
-		if sub[1] != "" {
-			var r rune
-			fmt.Sscanf(sub[1], "%x", &r)
-			return string(r)
-		}
-		return sub[2]
-	})
-}
-
-// Confine checks every reference the project's .html/.htm/.svg/.css files make and returns one error
-// listing each that points outside the project (file:line and why). entry is the composition the
-// render starts from; it must be a regular file inside the project.
-func Confine(dir, entry string) error {
-	root, err := filepath.Abs(dir)
-	if err != nil {
-		return err
-	}
-	if entry == "" {
-		entry = "index.html"
-	}
-	if err := checkName(filepath.ToSlash(entry)); err != nil {
-		return fmt.Errorf("composition: %w", err)
-	}
-	if fi, err := os.Lstat(filepath.Join(root, filepath.FromSlash(entry))); err != nil || !fi.Mode().IsRegular() {
-		return fmt.Errorf("the project has no composition file %q", entry)
-	}
-	var problems []string
-	err = filepath.WalkDir(root, func(p string, d fs.DirEntry, werr error) error {
-		if werr != nil {
-			return werr
-		}
-		if d.IsDir() {
-			return nil
-		}
-		if d.Type()&fs.ModeSymlink != 0 {
-			rel, _ := filepath.Rel(root, p)
-			problems = append(problems, filepath.ToSlash(rel)+": a symlink")
-			return nil
-		}
-		ext := strings.ToLower(filepath.Ext(p))
-		if ext != ".html" && ext != ".htm" && ext != ".svg" && ext != ".css" && ext != ".xhtml" {
-			return nil
-		}
-		b, rerr := os.ReadFile(p)
-		if rerr != nil {
-			return rerr
-		}
-		rel, _ := filepath.Rel(root, p)
-		problems = append(problems, refsOutside(filepath.ToSlash(rel), string(b), ext == ".css")...)
-		return nil
-	})
-	if err != nil {
-		return err
-	}
-	if len(problems) > 0 {
-		if len(problems) > 20 {
-			problems = append(problems[:20], fmt.Sprintf("… and %d more", len(problems)-20))
-		}
-		return fmt.Errorf("the project refers outside itself (a fleet render only reads files inside the project): %s", strings.Join(problems, "; "))
-	}
-	return nil
-}
-
-// refsOutside returns "file:line: ref (why)" for each reference in text that leaves the project.
-func refsOutside(file, text string, cssOnly bool) []string {
-	var out []string
-	seen := map[string]bool{}
-	add := func(s string) {
-		if !seen[s] {
-			seen[s] = true
-			out = append(out, s)
-		}
-	}
-	lineIn := func(src string, offset int) int { return strings.Count(src[:offset], "\n") + 1 }
-	if !cssOnly {
-		for _, re := range []struct {
-			re  *regexp.Regexp
-			why string
-		}{{baseElem, "a <base> element re-roots every relative path"}, {srcdocAttr, "an iframe srcdoc embeds a document this check cannot see"}} {
-			for _, m := range re.re.FindAllStringIndex(text, -1) {
-				add(fmt.Sprintf("%s:%d: %s", file, lineIn(text, m[0]), re.why))
-			}
-		}
-	}
-	check := func(ref string, line int, srcset bool) {
-		refs := []string{ref}
-		if srcset {
-			refs = nil
-			for _, part := range strings.Split(ref, ",") {
-				if f := strings.Fields(part); len(f) > 0 {
-					refs = append(refs, f[0])
-				}
-			}
-		}
-		for _, r := range refs {
-			if why := outside(file, r); why != "" {
-				add(fmt.Sprintf("%s:%d: %q (%s)", file, line, r, why))
-			}
-		}
-	}
-	if !cssOnly {
-		for _, m := range attrRef.FindAllStringSubmatchIndex(text, -1) {
-			attr := strings.ToLower(text[m[2]:m[3]])
-			for g := 4; g <= 8; g += 2 {
-				if m[g] >= 0 {
-					// An attribute value is read after its character references are decoded
-					// (`&#46;&#46;/` is `../`), so it is checked decoded too.
-					check(html.UnescapeString(text[m[g]:m[g+1]]), lineIn(text, m[0]), attr == "srcset")
-					break
-				}
-			}
-		}
-	}
-	// firstGroup is the text of the first alternative that matched.
-	firstGroup := func(src string, m []int, from int) (string, bool) {
-		for g := from; g+1 < len(m); g += 2 {
-			if m[g] >= 0 {
-				return src[m[g]:m[g+1]], true
-			}
-		}
-		return "", false
-	}
-	scanCSS := func(src string) {
-		for _, re := range []*regexp.Regexp{cssURLRef, importRef} {
-			for _, m := range re.FindAllStringSubmatchIndex(src, -1) {
-				if v, ok := firstGroup(src, m, 2); ok {
-					check(cssUnescape(v), lineIn(src, m[0]), false)
-				}
-			}
-		}
-		for _, m := range imageSetRef.FindAllStringSubmatchIndex(src, -1) {
-			args := src[m[2]:m[3]]
-			for _, s := range cssStringRef.FindAllStringSubmatchIndex(args, -1) {
-				if v, ok := firstGroup(args, s, 2); ok {
-					check(cssUnescape(v), lineIn(src, m[0]), false)
-				}
-			}
-		}
-	}
-	scanCSS(text)
-	if !cssOnly {
-		// A style attribute's value is decoded before it is parsed as CSS (`url(&quot;../x&quot;)` is
-		// `url("../x")` there), while a <style> block is raw text: scanning both readings covers both.
-		if dec := html.UnescapeString(text); dec != text {
-			scanCSS(dec)
-		}
-	}
-	return out
-}
-
-// outside returns why ref leaves the project, or "" when it stays inside (or is not a fetch at all).
-func outside(file, ref string) string {
-	r := strings.TrimSpace(ref)
-	if r == "" || strings.HasPrefix(r, "#") {
-		return ""
-	}
-	r = strings.ReplaceAll(r, `\`, "/") // browsers read a backslash as a slash in a web URL
-	low := strings.ToLower(r)
-	for _, p := range []string{"data:", "blob:", "javascript:", "about:", "mailto:", "tel:"} {
-		if strings.HasPrefix(low, p) {
-			return ""
-		}
-	}
-	if strings.HasPrefix(r, "//") {
-		r = "https:" + r
-		low = strings.ToLower(r)
-	}
-	if strings.HasPrefix(low, "http://") || strings.HasPrefix(low, "https://") {
-		u, err := url.Parse(r)
-		if err != nil || u.Hostname() == "" {
-			return "an unreadable URL"
-		}
-		if why := nonPublicHost(u.Hostname()); why != "" {
-			return why
-		}
-		return ""
-	}
-	if i := strings.Index(r, ":"); i > 0 && !strings.ContainsAny(r[:i], "/?#") {
-		if i == 1 {
-			return "an absolute filesystem path"
-		}
-		return "a " + strings.ToLower(r[:i]) + ": URL"
-	}
-	if strings.HasPrefix(r, "/") {
-		return "a root-relative path; use a path relative to the file"
-	}
-	p := r
-	if i := strings.IndexAny(p, "?#"); i >= 0 {
-		p = p[:i]
-	}
-	if dec, err := url.PathUnescape(p); err == nil {
-		p = dec
-	}
-	p = strings.ReplaceAll(p, `\`, "/")
-	resolved := path.Clean(path.Join(path.Dir(file), p))
-	if resolved == ".." || strings.HasPrefix(resolved, "../") || strings.HasPrefix(resolved, "/") {
-		return "it resolves outside the project"
-	}
-	return ""
-}
-
-// cgnat is the shared address range (100.64/10) a tailnet hands out.
-var cgnat = &net.IPNet{IP: net.IPv4(100, 64, 0, 0).To4(), Mask: net.CIDRMask(10, 32)}
-
-// nonPublicHost names why host is not a public internet host, or returns "".
-func nonPublicHost(host string) string {
-	h := strings.ToLower(strings.TrimSuffix(strings.Trim(host, "[]"), "."))
-	if ip := net.ParseIP(h); ip != nil {
-		switch {
-		case ip.IsLoopback(), ip.IsPrivate(), ip.IsLinkLocalUnicast(), ip.IsLinkLocalMulticast(), ip.IsUnspecified(), ip.IsMulticast(), ip.IsInterfaceLocalMulticast():
-			return "a non-public address"
-		case cgnat.Contains(ip):
-			return "an address in the shared 100.64/10 range (the tailnet uses it)"
-		}
-		return ""
-	}
-	if h == "localhost" || strings.HasSuffix(h, ".localhost") {
-		return "a loopback name"
-	}
-	for _, suf := range []string{".ts.net", ".local", ".internal", ".lan", ".home", ".corp", ".intranet", ".home.arpa"} {
-		if strings.HasSuffix(h, suf) {
-			return "a private name (" + suf + ")"
-		}
-	}
-	if !strings.Contains(h, ".") {
-		return "a dotless name (a LAN or tailnet host)"
-	}
-	return ""
 }

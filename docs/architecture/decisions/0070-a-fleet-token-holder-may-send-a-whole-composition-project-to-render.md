@@ -67,3 +67,34 @@ What a project can do on a render node was read in HyperFrames 0.8.114 before de
   delegation to go through the harness.
 - **Keep the door template-only.** Thin clients then render only the seven vetted templates; kit projects would have to
   be rendered from a session on a render node. Rejected by the operator in favour of this door.
+
+## Amendment 1 (2026-10-03): the check follows the compiler, not the file extension
+
+A review against the real compiler (HyperFrames 0.8.114) found three ways past decision 3's check, and the compiler copied an
+outside file for each: an attribute after `/` (`<img/src=...>`, which HTML allows); a `data-composition-src` file with
+another extension, which was never scanned; and a reference in a nested file that stays inside from its own directory but
+climbs out from the project root, which is where the compiler resolves any reference that does not start with `../` (it
+rewrites only those relative to their composition). Reading the compiler showed two more: it reads a
+`data-composition-src` file by any path, unconfined, and it fetches a `<script src>` on any host, so a numeric loopback a
+browser accepts (`127.1`, `0x7f.0.0.1`) reached a node's own services. The check now:
+
+- reads references in raw text wherever they are, an attribute name following whitespace, a quote, `<` or `/`, so it does
+  not depend on parsing HTML the way the compiler's parser does (a script's `name = "/x"` can be refused; the message
+  names the line);
+- reads every file a composition attribute names as a composition, whatever its extension, and follows the names it
+  makes;
+- refuses a reference that climbs out of the project from its own file or, unless it starts with `../`, from the
+  project root; and UNC and protocol-relative references;
+- reads a numeric host the way a browser does (decimal, octal and hex parts, one to four of them) before judging it, and
+  refuses one no browser accepts and any non-ASCII host name;
+- counts every bundle entry, directories included, against a cap of its own, and bounds the decompressed stream as a whole.
+
+The door also masks its jobs from tokenless polls and feeds, as every token-gated lane now does (`gatedJob`, for dispatch,
+the project door and queue claims alike); is exempt from `fleet_max_concurrent_jobs` like `compose-video`; gives a token
+holder a 15-minute read and write window, since the server's blanket 30 seconds cut a large bundle on an ordinary link;
+answers a failure that is the node's own (a disk that filled while unpacking) with 500, not "refused"; and fleet-serve
+sweeps orphaned project trees at startup.
+
+Accepted with decision 3's residual: the check is static and reads markup as text, so a difference between how it and
+the compiler's parser read a document could still let a reference through. The fleet token is the boundary; the check
+narrows what a mistake, or a leaked token, could read.
