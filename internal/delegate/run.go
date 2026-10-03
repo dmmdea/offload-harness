@@ -189,6 +189,11 @@ type PlacedResult struct {
 	// fleet is not, and route=auto used to discard that verdict entirely — so a
 	// fleet down for a week read green forever. Counted into
 	// Summary.Infrastructure, which is what makes it audible.
+	//
+	// On a waitCapacity sentinel it is the same fact carried forward: the remotes were
+	// failing their health probe when the placement was decided and the local seat was
+	// reserved or fenced by a lease, so the subtask waits instead of falling local. The wait
+	// stamps it on whatever ends it (awaitCapacity) unless a remote answered while it waited.
 	remotesUnreachable bool
 	// RetriedOn names the node a second attempt ran on after the first attempt
 	// came back failed_verification or an honest abstention. The published
@@ -2328,7 +2333,19 @@ func heldOutNote(held map[string]string, already string) string {
 // With the wait DISABLED (agent_placement_wait_sec < 0, and no lease wait)
 // the outcome is exactly the pre-0.113.18 one: "placement refused" for a
 // refused chain, the holder-naming deferral for a reserved seat.
-func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentContract, start time.Time, budget int, pl *placements, seed PlacedResult, refusals []string, why string) PlacedResult {
+func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentContract, start time.Time, budget int, pl *placements, seed PlacedResult, refusals []string, why string) (res PlacedResult) {
+	// The fleet was failing its health probe when the sentinel was raised (seed.remotesUnreachable).
+	// Whatever ends the wait carries that unless a remote answered while it waited: a local run
+	// after the lease cleared, the defer that ends it, a budget defer. `seed` is replaced by
+	// refused attempts, so the fact is taken here, and answered is declared up here so the
+	// deferred stamp can read it. A remote that answered means the fleet was not dead.
+	deadFleet := seed.remotesUnreachable
+	answered := map[string]bool{}
+	defer func() {
+		if deadFleet && len(answered) == 0 {
+			res.remotesUnreachable = true
+		}
+	}()
 	localView := r.localView()
 	st := Subtask{Contract: contract, EstTokens: EstimateTokens(contract)}
 	// p2cSeed is W-11's ranking seed for every betterRemote comparison this
@@ -2418,8 +2435,8 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 	// base: the tick used to drop these on the floor, so a wait that never
 	// reached a single node reported "0 refusal(s)".
 	probeFails := map[string]*probeFailTally{}
-	// answered is every base whose probe returned a view at least once in this wait.
-	answered := map[string]bool{}
+	// answered (declared at the top) is every base whose probe returned a view at least once in
+	// this wait.
 	var lease gpulease.Info
 	// localCan: this box can run the contract at all. One that names a layer the box does not declare
 	// (register A-108) never takes the local seat in this wait, whatever the seat's load or lease: the
@@ -4790,11 +4807,11 @@ func (r *runner) attempt(ctx context.Context, i int, contract core.AgentContract
 			if Reserved(r.localLease(contract)) {
 				// reason already names the holder and why no remote qualified
 				// (placeSpread built it); it is the deferral's text when nothing frees.
-				return PlacedResult{waitCapacity: true, pendingReason: reason, PlacementReason: reason}
+				return PlacedResult{waitCapacity: true, pendingReason: reason, PlacementReason: reason, remotesUnreachable: deadFleet}
 			}
 			if _, _, fenced := r.fencedLocal(contract); fenced {
 				// Dealt local under a fence (fencedLocalSpread) and still fenced.
-				return PlacedResult{waitCapacity: true, fenced: true, pendingReason: reason, PlacementReason: reason}
+				return PlacedResult{waitCapacity: true, fenced: true, pendingReason: reason, PlacementReason: reason, remotesUnreachable: deadFleet}
 			}
 			reason += " — lease cleared, running local"
 		}
@@ -4863,18 +4880,21 @@ func (r *runner) attempt(ctx context.Context, i int, contract core.AgentContract
 			// and is not "queued-local": the seat cannot take it. It lands here only so the seat's own
 			// decision defers it naming the layer, and the fleet's verdict rides beside that.
 			localServes := r.localServesLayer(localView, contract)
+			// The class of "no eligible remote" rides every branch below, the waits included: a fleet
+			// that fails every probe is reported whether the seat runs the work now or the subtask
+			// waits in line for a lease to end (a fallback must not hide a failure).
+			deadFleet = class == core.DeferClassInfrastructure
 			if localServes && Reserved(leaseInfo) {
-				return PlacedResult{waitCapacity: true, pendingReason: "local seat reserved (" + HolderLine(leaseInfo) + "); no eligible remote — " + why}
+				return PlacedResult{waitCapacity: true, pendingReason: "local seat reserved (" + HolderLine(leaseInfo) + "); no eligible remote — " + why, remotesUnreachable: deadFleet}
 			}
 			if fence, fenceWhy, fenced := r.fencedLocal(contract); localServes && fenced {
-				return PlacedResult{waitCapacity: true, fenced: true, pendingReason: "local seat fenced (" + fenceWhy + " — " + HolderLine(fence) + "); no eligible remote — " + why}
+				return PlacedResult{waitCapacity: true, fenced: true, pendingReason: "local seat fenced (" + fenceWhy + " — " + HolderLine(fence) + "); no eligible remote — " + why, remotesUnreachable: deadFleet}
 			}
 			chosen = localView
 			reason = "local busy; no eligible remote — " + why + " (queued-local beats ineligible-remote)"
 			if !localServes {
 				reason = fmt.Sprintf("no eligible remote, and this box declares no layer %s so the seat cannot take it (%s)", contract.Layer, why)
 			}
-			deadFleet = class == core.DeferClassInfrastructure
 		default:
 			chosen, base, reason = d.view, d.base, d.reason
 		}
@@ -4962,13 +4982,13 @@ func (r *runner) attempt(ctx context.Context, i int, contract core.AgentContract
 			// Since 0.113.18 the wait is the capacity wait (awaitCapacity):
 			// it watches the lease AND every remote's room, so a remote that
 			// frees while the local card is reserved takes the work.
-			why, _ := r.noEligibleRemote(st, views, probeErrs)
-			return PlacedResult{waitCapacity: true, pendingReason: "local seat reserved (" + HolderLine(leaseInfo) + "); no eligible remote — " + why}
+			why, class := r.noEligibleRemote(st, views, probeErrs)
+			return PlacedResult{waitCapacity: true, pendingReason: "local seat reserved (" + HolderLine(leaseInfo) + "); no eligible remote — " + why, remotesUnreachable: class == core.DeferClassInfrastructure}
 		case chosen.Local && fenced:
 			// A lease fences every local seat this contract could run on (fencedLocal): the same
 			// place in line as a reservation, without the dial that would be turned away.
-			why, _ := r.noEligibleRemote(st, views, probeErrs)
-			return PlacedResult{waitCapacity: true, fenced: true, pendingReason: "local seat fenced (" + fenceWhy + " — " + HolderLine(fence) + "); no eligible remote — " + why}
+			why, class := r.noEligibleRemote(st, views, probeErrs)
+			return PlacedResult{waitCapacity: true, fenced: true, pendingReason: "local seat fenced (" + fenceWhy + " — " + HolderLine(fence) + "); no eligible remote — " + why, remotesUnreachable: class == core.DeferClassInfrastructure}
 		case chosen.Local:
 			why, class := r.noEligibleRemote(st, views, probeErrs)
 			reason = "local busy; no eligible remote — " + why + " (queued-local beats ineligible-remote)"
