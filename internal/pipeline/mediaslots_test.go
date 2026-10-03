@@ -391,3 +391,69 @@ func TestTakeAnyRespectsTheWholeNodeAndTheQueue(t *testing.T) {
 		t.Fatal("the earlier waiter for a must be served when a frees")
 	}
 }
+
+// A candidate nobody HOLDS is still not free for takeAny when a waiter ahead wants it: that waiter
+// is first in line for it.
+func TestTakeAnySkipsACandidateAWaiterAheadWants(t *testing.T) {
+	s := &slotSet{}
+	s.tryTake([]string{"b"})
+	ahead := make(chan bool, 1)
+	go func() { ahead <- s.take([]string{"a", "b"}, 5*time.Second) }() // wants both: blocked by b, but ahead of us for a
+	waitQueued(t, s, 1)
+	id, ok := s.takeAny([]string{"a", "c"}, time.Second)
+	if !ok || id != "c" {
+		t.Fatalf("took %q ok=%v, want c: card a is free but the waiter ahead wants it", id, ok)
+	}
+	s.release([]string{"c"})
+	s.release([]string{"b"})
+	if !<-ahead {
+		t.Fatal("the waiter ahead must be served once b frees")
+	}
+}
+
+// A takeAny parked behind a whole-node holder runs the moment the holder lets go.
+func TestTakeAnyIsServedWhenTheWholeNodeReleases(t *testing.T) {
+	s := &slotSet{}
+	s.tryTake(nil)
+	got := make(chan string, 1)
+	go func() {
+		id, ok := s.takeAny([]string{"a", "b"}, 5*time.Second)
+		if !ok {
+			id = ""
+		}
+		got <- id
+	}()
+	waitQueued(t, s, 1)
+	if s.tryTake([]string{"a"}) {
+		t.Fatal("a card was handed out while the whole node is held")
+	}
+	s.release(nil)
+	select {
+	case id := <-got:
+		if id != "a" {
+			t.Fatalf("took %q, want a: the first candidate once the whole node is free", id)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the takeAny waiter was never woken by the whole-node release")
+	}
+	if s.tryTake([]string{"a"}) {
+		t.Fatal("card a is held by the waiter")
+	}
+}
+
+// A whole-node waiter is a barrier for takeAny too: a free candidate behind it is not taken.
+func TestTakeAnyWaitsBehindAWholeNodeWaiter(t *testing.T) {
+	s := &slotSet{}
+	s.tryTake([]string{"a"})
+	whole := make(chan bool, 1)
+	go func() { whole <- s.take(nil, 5*time.Second) }()
+	waitQueued(t, s, 1)
+	if id, ok := s.takeAny([]string{"b", "c"}, 0); ok {
+		t.Fatalf("took %q although a whole-node waiter is ahead", id)
+	}
+	s.release([]string{"a"})
+	if !<-whole {
+		t.Fatal("the whole-node waiter must be served once the card drains")
+	}
+	s.release(nil)
+}
