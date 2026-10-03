@@ -5,6 +5,7 @@ package fleetnode_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
@@ -18,8 +19,11 @@ import (
 	"time"
 
 	"github.com/dmmdea/offload-harness/internal/config"
+	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/fleetnode"
 	"github.com/dmmdea/offload-harness/internal/pipeline"
+	"github.com/dmmdea/offload-harness/internal/sttclient"
+	"github.com/dmmdea/offload-harness/internal/sttremote"
 )
 
 // The test binary doubles as a fake ffmpeg: started under a name whose stem is "ffmpeg" it writes a
@@ -148,8 +152,10 @@ func TestSTTUploadBurstThroughTheRealPipelineNeverFailsAndUnloadsOnce(t *testing
 	jobs := fleetnode.NewJobs(time.Hour, cfg.FleetConcurrencyLimit())
 	t.Cleanup(func() { jobs.DrainAndStop(2 * time.Second) })
 	s := fleetnode.New(pipeline.New(cfg, nil, nil, nil), jobs, fleetnode.Options{
-		NodeID:     "testnode",
-		Snapshot:   func() (fleetnode.Snapshot, bool) { return fleetnode.Snapshot{TotalGiB: 16, FreeGiB: 12, At: time.Now()}, true },
+		NodeID: "testnode",
+		Snapshot: func() (fleetnode.Snapshot, bool) {
+			return fleetnode.Snapshot{TotalGiB: 16, FreeGiB: 12, At: time.Now()}, true
+		},
 		Footprints: func() []fleetnode.FootprintEntry { return nil },
 		GpuVendor:  "nvidia",
 		GpuArch:    "ampere",
@@ -227,5 +233,110 @@ func TestSTTUploadBurstThroughTheRealPipelineNeverFailsAndUnloadsOnce(t *testing
 	}
 	if left, _ := os.ReadDir(filepath.Join(cfg.MediaDir, ".stt-upload")); len(left) != 0 {
 		t.Errorf("the private upload directory still holds %d file(s)", len(left))
+	}
+}
+
+// nodeOverRealPipeline serves a real fleetnode.Server over a real pipeline whose whisper is swap.
+func nodeOverRealPipeline(t *testing.T, swap *whisperSwap, mutate func(*config.Config)) (url string, cfg config.Config) {
+	t.Helper()
+	home := t.TempDir()
+	cfg = config.Default()
+	cfg.Home = home
+	cfg.LedgerPath = filepath.Join(home, "ledger.jsonl")
+	cfg.MediaDir = filepath.Join(home, "media")
+	cfg.FFmpegPath = fakeFFmpegBinary(t)
+	cfg.Endpoint = swap.srv.URL
+	cfg.STTModel = "whisper-stt"
+	cfg.FleetAuthToken = "tok"
+	if mutate != nil {
+		mutate(&cfg)
+	}
+	jobs := fleetnode.NewJobs(time.Hour, cfg.FleetConcurrencyLimit())
+	t.Cleanup(func() { jobs.DrainAndStop(2 * time.Second) })
+	s := fleetnode.New(pipeline.New(cfg, nil, nil, nil), jobs, fleetnode.Options{
+		NodeID: "node-e2e",
+		Snapshot: func() (fleetnode.Snapshot, bool) {
+			return fleetnode.Snapshot{TotalGiB: 16, FreeGiB: 12, At: time.Now()}, true
+		},
+		Footprints: func() []fleetnode.FootprintEntry { return nil },
+		GpuVendor:  "nvidia",
+		GpuArch:    "ampere",
+		Cfg:        cfg,
+	})
+	srv := httptest.NewServer(s.Handler())
+	t.Cleanup(srv.Close)
+	return srv.URL, cfg
+}
+
+type nopLocal struct{}
+
+func (nopLocal) Run(_ context.Context, _ core.Request) core.Result {
+	return core.Result{OK: false, Deferred: true, Reason: "the local runner must not run on route remote"}
+}
+
+// The asker (sttremote) against a REAL node over the real pipeline, so neither side is tested only
+// against a fake of the other: the payload the asker builds is the one the node's door decodes, the
+// result the real pipeline returns is the one the asker materializes, and a transcript the node cut at
+// stt_max_inline_segments is completed from the node's own /fleet/media before the asker writes files.
+func TestSTTRemoteAgainstARealNodeWritesLocalOutputs(t *testing.T) {
+	for name, inline := range map[string]int{"whole transcript inline": 0, "node truncated its inline list": 1} {
+		t.Run(name, func(t *testing.T) {
+			swap := newWhisperSwap(t, 10*time.Millisecond)
+			nodeURL, nodeCfg := nodeOverRealPipeline(t, swap, func(c *config.Config) { c.STTMaxInlineSegments = inline })
+
+			asker := config.Default()
+			asker.DelegateRemotes = []string{nodeURL}
+			asker.FleetAuthToken = "tok"
+			asker.MediaDir = filepath.Join(t.TempDir(), "asker-media")
+			asker.FFmpegPath = fakeFFmpegBinary(t)
+			src := filepath.Join(t.TempDir(), "interview.m4a")
+			if err := os.WriteFile(src, []byte("not really audio"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			res := sttremote.Run(context.Background(), asker, nopLocal{}, core.Request{
+				Task: core.TaskTranscribe, Door: "offload_transcribe", Audio: src, Params: map[string]any{},
+			}, "remote")
+			if !res.OK || res.Deferred {
+				t.Fatalf("result = %+v", res)
+			}
+			if res.Meta.Node != "node-e2e" || res.Meta.Placement != "remote: forced" || res.Meta.Model != "whisper-stt" {
+				t.Fatalf("meta = %+v", res.Meta)
+			}
+			var out struct {
+				Language    string              `json:"language"`
+				NumSegments int                 `json:"num_segments"`
+				Segments    []sttclient.Segment `json:"segments"`
+				SRT         string              `json:"srt_path"`
+				TXT         string              `json:"text_path"`
+				JSON        string              `json:"json_path"`
+			}
+			if err := json.Unmarshal(res.Data, &out); err != nil {
+				t.Fatal(err)
+			}
+			if out.NumSegments != 2 || len(out.Segments) == 0 {
+				t.Fatalf("data = %s", res.Data)
+			}
+			for _, p := range []string{out.SRT, out.TXT, out.JSON} {
+				if filepath.Dir(p) != asker.MediaDir {
+					t.Errorf("%s is not under the asker's media_dir %s", p, asker.MediaDir)
+				}
+				if strings.HasPrefix(p, nodeCfg.MediaDir) {
+					t.Errorf("%s names a path on the node", p)
+				}
+			}
+			srt, _ := os.ReadFile(out.SRT)
+			want := sttclient.SRT([]sttclient.Segment{{ID: 0, Start: 0, End: 1, Text: "hello"}, {ID: 1, Start: 1, End: 2, Text: "there"}})
+			if string(srt) != want {
+				t.Errorf("srt = %q, want %q: the asker's file must hold the node's WHOLE transcript", srt, want)
+			}
+			txt, _ := os.ReadFile(out.TXT)
+			if string(txt) != "hello there" {
+				t.Errorf("txt = %q", txt)
+			}
+			if left, _ := os.ReadDir(filepath.Join(nodeCfg.MediaDir, ".stt-upload")); len(left) != 0 {
+				t.Errorf("the node kept %d upload file(s)", len(left))
+			}
+		})
 	}
 }
