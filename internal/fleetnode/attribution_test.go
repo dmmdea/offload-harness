@@ -473,3 +473,40 @@ func TestPulledClaimOnADrainingNodeClosesItsCard(t *testing.T) {
 		t.Fatalf("a draining node ran %d jobs", got)
 	}
 }
+
+// L2 (class of H2-C1): a duplicate dispatch that raced the winner passed the handler's first lookup
+// too. Its queued frame, emitted before its refused Admit, would reopen the card the winner's terminal
+// frame closed (leaving an open-card marker nothing closes while the process lives) or regress a
+// running one. The seam admits the winner exactly where the race puts it: after the loser's first
+// lookup, before its Admit. The loser must emit no frame at all and answer the idempotent 202.
+func TestRacingDuplicateDispatchEmitsNoCardFrame(t *testing.T) {
+	pn := newPairNode(t, true)
+	fr := &fakeRunner{}
+	s, jobs := newTestServer(t, imageCfg(), fr, pairOpts(pn))
+	once := false
+	s.beforeCardAdmit = func() {
+		if once {
+			return
+		}
+		once = true
+		if !jobs.Admit("media-race", AcceptSpec{Task: "image-gen"}, func(context.Context) (json.RawMessage, error) {
+			return json.RawMessage(`{}`), nil
+		}) {
+			t.Error("the stand-in winner was not admitted")
+		}
+	}
+	rec := do(t, s, http.MethodPost, "/fleet/dispatch", `{"job_id":"media-race","task_type":"image-gen","payload":{"prompt":"hi"}}`, askerHeaders)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("the losing duplicate must be re-acked 202, got %d (body %s)", rec.Code, rec.Body.String())
+	}
+	waitJobState(t, jobs, "media-race", JobDone)
+	if n := pn.frameCount(); n != 0 {
+		t.Fatalf("the losing duplicate emitted %d card frame(s): it reopened a card it does not own", n)
+	}
+	if n := openMarkers(t, pn.open); n != 0 {
+		t.Fatalf("%d open-card marker(s) left by a refused duplicate", n)
+	}
+	if got := len(fr.requests()); got != 0 {
+		t.Fatalf("the loser ran %d time(s); the winner's job is the only one", got)
+	}
+}

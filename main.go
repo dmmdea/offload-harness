@@ -2811,14 +2811,24 @@ func runFleetServe(args []string) error {
 		go srv.StartClaimLoop(ctx, cfg)
 	}
 	go func() { errCh <- srv.Serve(ln) }()
+	return fleetServeAwait(ctx, errCh, ln, jobs, nodePair, 30*time.Second)
+}
+
+// fleetServeAwait blocks until fleet-serve stops, and drains on BOTH ways out. An interrupt drains
+// BEFORE closing the listener: new dispatches already 503, but pollers can still read states while
+// in-flight renders finish. A Serve that returns on its own (the listener failed) leaves the same jobs
+// in flight and the same card posts pending, so it drains too and then returns Serve's error: the
+// process exits either way, and without the drain the cards of the jobs it was running stay open
+// until the next process's orphan sweep closes them failed.
+func fleetServeAwait(ctx context.Context, errCh <-chan error, ln io.Closer, jobs *fleetnode.Jobs, pair *pairworkloads.Emitter, timeout time.Duration) error {
 	select {
 	case err := <-errCh:
+		fmt.Fprintf(os.Stderr, "[fleet-serve] server stopped (%v) — draining jobs (up to %s); survivors are marked error:\"interrupted\"\n", err, timeout)
+		fleetServeDrain(jobs, pair, timeout)
 		return err
 	case <-ctx.Done():
-		// Drain BEFORE closing the listener: new dispatches already 503, but
-		// pollers can still read states while in-flight renders finish.
-		fmt.Fprintln(os.Stderr, "[fleet-serve] interrupt — draining jobs (up to 30s); survivors are marked error:\"interrupted\"")
-		fleetServeDrain(jobs, nodePair, 30*time.Second)
+		fmt.Fprintf(os.Stderr, "[fleet-serve] interrupt — draining jobs (up to %s); survivors are marked error:\"interrupted\"\n", timeout)
+		fleetServeDrain(jobs, pair, timeout)
 		ln.Close()
 		<-errCh
 		return nil

@@ -186,6 +186,12 @@ type Server struct {
 	runner Runner
 	jobs   *Jobs
 	opts   Options
+	// cardAdmitMu makes a pushed dispatch's id lookup, its node card's queued frame and its Admit one
+	// step (handleDispatch), so a racing duplicate emits no frame of its own.
+	cardAdmitMu sync.Mutex
+	// beforeCardAdmit is a test seam: it runs in that window's lead-in, where a racing duplicate
+	// has already passed the handler's first lookup.
+	beforeCardAdmit func()
 	// queue is the Option B consolidated pull queue (ADR 0030) — non-nil ONLY
 	// when this node is the config-elected holder (fleet_queue_host). Opened
 	// by EnableQueueHost; the routes mount only when it is non-nil.
@@ -2408,8 +2414,27 @@ func (s *Server) admit(w http.ResponseWriter, r *http.Request, env dispatchEnvel
 	// The card opens BEFORE Admit, not after: the job can start (and even finish) on its own worker
 	// before Admit returns, and a queued frame emitted after a terminal one would re-create the
 	// open-card marker the terminal frame removed.
+	//
+	// The lookup at the top of this handler is not enough on its own: a duplicate dispatch of the same
+	// id that raced this one passed it too, and a queued frame emitted before its refused Admit would
+	// reopen a card the winner's terminal frame closed, or regress a running one (discard() cannot
+	// recall a frame). So the id is looked up again here and the lookup, the queued frame and Admit run
+	// under one lock: of two racing duplicates exactly one is admitted and carded, and the other sees
+	// the winner's job and emits nothing. Emit only queues the frame, so the lock is not held over a
+	// post. The claim loop makes the same lookup (claimOne); it is one goroutine, so it needs no lock.
+	if s.beforeCardAdmit != nil {
+		s.beforeCardAdmit()
+	}
+	s.cardAdmitMu.Lock()
+	if card != nil {
+		if _, known := s.jobs.Get(env.JobID); known {
+			card = nil
+		}
+	}
 	card.queued()
-	if !s.jobs.Admit(env.JobID, spec, run) {
+	admitted := s.jobs.Admit(env.JobID, spec, run)
+	s.cardAdmitMu.Unlock()
+	if !admitted {
 		cleanup() // duplicate/drain refusal: this request's materialized files never run
 		view, ok := s.jobs.Get(env.JobID)
 		if !ok {
