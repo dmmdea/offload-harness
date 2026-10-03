@@ -149,6 +149,11 @@ type ResultWire struct {
 	// CapacityWaitSec (0.113.18): how long this subtask waited for a node to
 	// have room (agent_placement_wait_sec) — not charged to timeout_sec.
 	CapacityWaitSec float64 `json:"capacity_wait_sec,omitempty"`
+	// PlaceKeeping / RetryAfterSec (GPU routing P7): when the capacity wait ended with nothing
+	// taking the work, the places in line it stood in (node, what it waited behind, when that is
+	// expected to clear) and the soonest of those in seconds. Absent on every other result.
+	PlaceKeeping  []PlaceWait `json:"place_keeping,omitempty"`
+	RetryAfterSec int         `json:"retry_after_sec,omitempty"`
 	// PollNote (register D-116) names the bound the DELEGATOR polled this
 	// subtask at and where that number came from: "sized from <node>'s
 	// seat_rate X tok/s: N s", "the node's own wall N s", or "cap: no seat
@@ -343,6 +348,8 @@ func WireResponse(results []PlacedResult, sum Summary, lints [][]string) Respons
 			Replacements:       pr.Replacements,
 			ReplacementNote:    pr.ReplacementNote,
 			CapacityWaitSec:    pr.CapacityWaitSec,
+			PlaceKeeping:       pr.PlaceKeeping,
+			RetryAfterSec:      pr.RetryAfterSec,
 			PollNote:           pr.PollNote,
 			Calls:              lastCalls(pr.Result.Calls, wireCallsMax),
 			AcceptanceLint:     lintFor(lints, i),

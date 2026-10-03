@@ -192,6 +192,10 @@ type fakeNode struct {
 	}
 	// lease, when non-nil, is published as health's `lease` block.
 	lease map[string]any
+	// leases and gpuDevices, when non-nil, are published as health's `leases` and
+	// `gpu_devices` (GPU routing P7): a node with card-scoped leases and its card table.
+	leases     []map[string]any
+	gpuDevices []map[string]any
 }
 
 // jobsRunningNow is the health payload's jobs_running: the live function when
@@ -246,6 +250,12 @@ func (f *fakeNode) server() *httptest.Server {
 		}
 		if f.lease != nil {
 			health["lease"] = f.lease
+		}
+		if f.leases != nil {
+			health["leases"] = f.leases
+		}
+		if f.gpuDevices != nil {
+			health["gpu_devices"] = f.gpuDevices
 		}
 		if f.recentAgentWallSec > 0 {
 			health["recent_agent_wall_sec"] = f.recentAgentWallSec
@@ -865,6 +875,7 @@ func TestRunAutoLocalFallbackReportsADeadFleet(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	runUnderLease(t, lease)
 	defer func() { _ = lease.Release() }()
 
 	cfg := testCfg(t)
@@ -1254,6 +1265,7 @@ func TestRunAutoBusyFallsLocalWhenNoEligibleRemote(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	runUnderLease(t, lease)
 	defer func() { _ = lease.Release() }()
 
 	cfg := testCfg(t)
@@ -1645,6 +1657,7 @@ func heldLease(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
+	runUnderLease(t, lease)
 	t.Cleanup(func() { _ = lease.Release() })
 	return dir
 }
