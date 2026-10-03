@@ -131,6 +131,14 @@ func TestClassifyErr(t *testing.T) {
 		"CPU_BACKEND_REFUSED: --backend \"cpu\" places a model": "cpu_backend_refused",
 		"CPU_PLACEMENT: ... aborted (killed)":                   "cpu_placement",
 		"something else entirely":                               "other",
+		// the iGPU runners' typed failures (render/igpu-engine.mjs). GPU_RESET names the 2 s
+		// lockup timeout and the token cap, and must still not read as a timeout.
+		"gpugen: sdcpp-video.mjs failed: exit status 1 (SDCPP VIDEO FAILED: GPU_RESET: the GPU reset during the run (log line 303: radv/amdgpu: The CS has been cancelled because the context is lost.). The amdgpu driver resets the compute ring when one GPU dispatch runs past its default 2 s lockup timeout; keep the request inside the configured token cap (sdcpp_max_tokens)": "gpu_reset",
+		"TOKEN_CAP_EXCEEDED: 480x832x33 + reference needs 15600 latent tokens": "token_cap_exceeded",
+		"EXTRA_ARGS_REFUSED: --extra-args[0] \"--clip-on-cpu\"":                "extra_args_refused",
+		"ILLEGAL_INSTRUCTION: audiocpp_cli died with SIGILL (exit 132)":        "illegal_instruction",
+		// a signal death carries the signal and, for SIGKILL, the OOM hint: class oom
+		"sd-cli was killed by signal SIGKILL (SIGKILL on a UMA iGPU box usually means the kernel out-of-memory (OOM) killer)": "oom",
 	}
 	for msg, want := range cases {
 		if got := ClassifyErr(errString(msg)); got != want {
