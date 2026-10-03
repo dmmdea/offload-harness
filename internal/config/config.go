@@ -418,6 +418,15 @@ type Config struct {
 	// ingress stays off. Loopback only: any other host is refused at load. Empty = the default,
 	// except where OFFLOAD_PAIR_APPDIR is set (docs/systems/pair-workloads.md).
 	PairNodeInfoURL string `json:"pair_node_info_url,omitempty"`
+	// PairWorkloadsRelay is where this box's PAIR frames go when it has NO PAIR identity of its own
+	// (no readable node-id.json and no node-info fallback: a view-only box, a thin client where PAIR
+	// is not installed): the base URLs of fleet-serve members that serve POST /fleet/pair-relay
+	// (docs/systems/pair-workloads.md, *The card relay*). Absent or empty = "auto": every
+	// delegate_remotes base whose /fleet/health advertises pair_relay. The entry "auto" says so
+	// outright, "off" turns the relay off, and any other entry is an explicit member base (a box with
+	// no delegate_remotes sets it by hand). Used only while pair_workloads_enabled is on and the box
+	// has no identity; the fleet_auth_token is the bearer.
+	PairWorkloadsRelay []string `json:"pair_workloads_relay,omitempty"`
 	// PairSeatActivityEnabled (0.133.0) makes fleet-serve report traffic that
 	// reaches this box's vLLM seats WITHOUT the harness (a curl soak, an editor
 	// pointed at llama-swap) as PAIR cards, one per busy stretch of a seat. The
@@ -1698,6 +1707,13 @@ type Config struct {
 	// slack, and 48 MiB is about 4.6 h of the 32 kbps Opus an asker sends. Published in health
 	// (stt_upload_max_mb) so an asker never sends a file the node would refuse.
 	FleetSTTUploadMaxMB int `json:"fleet_stt_upload_max_mb,omitempty"`
+	// FleetSTTTranscriptTTLMin is how long a node keeps the transcript files (.srt, .txt,
+	// .segments.json) of an stt upload job under media_dir, minutes; 0 = 30, negative = keep them for
+	// good. They are removed when the job record is evicted or once this old, swept at fleet-serve
+	// start and on the job store's janitor tick; /fleet/media serves them only to a bearer holder
+	// while they last (ADR 0072). The asker fetches the segment list within seconds of the job
+	// finishing, so the default is generous.
+	FleetSTTTranscriptTTLMin int `json:"fleet_stt_transcript_ttl_min,omitempty"`
 	// FleetSTTMaxConcurrent caps how many fleet stt jobs run at once on this node, the legacy
 	// path-taking lane and the upload door counted together; 0 = 1. Whisper is one single-slot
 	// upstream: a job over the cap waits its turn in arrival order and is never refused. Inference
@@ -3011,6 +3027,20 @@ func (c Config) EffectiveSTTUploadMaxBytes() int64 {
 		mb = 48
 	}
 	return int64(mb) << 20
+}
+
+// EffectiveSTTTranscriptTTL is how long an stt upload job's transcript files live on the node:
+// fleet_stt_transcript_ttl_min minutes, 30 when it is zero; 0 for a negative value, which means
+// "never remove".
+func (c Config) EffectiveSTTTranscriptTTL() time.Duration {
+	switch m := c.FleetSTTTranscriptTTLMin; {
+	case m < 0:
+		return 0
+	case m == 0:
+		return 30 * time.Minute
+	default:
+		return time.Duration(m) * time.Minute
+	}
 }
 
 // EffectiveSTTMaxConcurrent is how many fleet stt jobs this node runs at once: fleet_stt_max_concurrent,

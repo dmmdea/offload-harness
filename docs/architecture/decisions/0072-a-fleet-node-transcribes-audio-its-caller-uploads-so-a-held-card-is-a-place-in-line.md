@@ -38,10 +38,20 @@ card per remote call on the serving node, one asker ledger row; `pair-workloads.
    FULL `core.Result`, so a defer is a `done` job whose data says `deferred: true` with its `defer_class` and `err_class`,
    as on the vision lane. The file is removed when the job ends and on every refusal or drop, and fleet-serve sweeps
    orphans at startup. The node's `.srt`, `.txt` and `.segments.json` stay fetchable by bare name through
-   `GET /fleet/media/{name}`, as for every transcription. Those outputs persist in `media_dir` (this change adds no
-   retention) and `GET /fleet/media` is deliberately unauthenticated, protected only by the stem (`stt-` plus the random part of
-   an `os.CreateTemp` name, a 32-bit number, plus 8 hex of a content hash), which is hard to stumble on but not a secret: a peer that can reach the node and learns the name can read the
-   transcript of a gated upload without the bearer. The upload and the job poll are gated; the transcript file is not.
+   `GET /fleet/media/{name}`, as for every transcription. As first shipped those outputs persisted in `media_dir` with no
+   retention and `GET /fleet/media` served them without the bearer, protected only by the stem (`stt-` plus the random part of
+   an `os.CreateTemp` name, a 32-bit number, plus 8 hex of a content hash), which is hard to stumble on but not a secret.
+   > **Correction (2026-10-03, the PAIR card relay change):** both gaps are closed. A node removes an upload job's transcript
+   > files when the job record is evicted or after `fleet_stt_transcript_ttl_min` (default 30 minutes, swept at start and on the
+   > janitor tick), and on a node that has a `fleet_auth_token` `GET /fleet/media` serves those names (and a project render's,
+   > ADR 0071) only to a bearer holder. Media names of the tokenless lanes stay as they were. The decision above is unchanged.
+   >
+   > **Review follow-up (2026-10-03):** the gate fails closed on the spellings a Windows filesystem folds onto one file (another
+   > case, trailing dots and spaces; a non-ASCII, `~` or `:` name counts as gated), since a name that missed the pattern was
+   > otherwise served without the bearer after the filesystem resolved it. The bearer also covers the legacy path-taking
+   > `stt` lane's transcripts (`<basename>-<8 hex>.srt|txt|segments.json`): that lane is gated on a node with a token, and a
+   > transcript stem can carry the node's own file names. Those files are the pipeline's content-keyed cache shared with local
+   > transcriptions, so they are gated but never swept or removed with a job record.
 3. **The door is token-gated, and advertised only when it admits.** It rides the vision lane's rule (`tokenGated`: a
    `fleet_auth_token` for anything beyond loopback; loopback with no token stays open), the bearer is checked before a
    byte of the body is read, and a token holder gets a 10-minute delivery window (the server's blanket 30 seconds would
@@ -115,9 +125,11 @@ card per remote call on the serving node, one asker ledger row; `pair-workloads.
 - `stt-upload` is exempt from `fleet_max_concurrent_jobs`, as the legacy `stt` is: it waits behind its own
   `fleet_stt_max_concurrent` gate, and an upload parked there would otherwise hold a text execution slot while doing no
   work (`TestConcurrencyCappedRule`, `TestSTTUploadsWaitingAtTheGateDoNotHoldAFleetSlot`).
-- **The transcript of a gated upload stays on the node, readable by name without the bearer.** `.srt`, `.txt` and
-  `.segments.json` are written to `media_dir` (mode 0644) with no pruning, as for every transcription on the node.
-  Follow-ups, not done here: prune stt-upload outputs after the asker's fetch window, or gate `/fleet/media` for them.
+- **The transcript of a gated upload stayed on the node, readable by name without the bearer.** `.srt`, `.txt` and
+  `.segments.json` are written to `media_dir` (mode 0644). *Closed by the correction under decision 2:* the outputs are
+  removed after their retention and served only to a bearer holder on a node with a token. The pipeline's cache is keyed on
+  the audio's content, so a hit can name an earlier job's files: a finished job restarts its outputs' clock, and a cache hit
+  whose files are gone is treated as a miss and redone.
 
 ## Alternatives considered
 

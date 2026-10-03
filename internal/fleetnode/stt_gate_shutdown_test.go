@@ -103,12 +103,18 @@ func TestPulledSTTWaiterShutDownAtTheGateIsNackedAndItsCardClosed(t *testing.T) 
 	}))
 	defer holder.Close()
 	client := &http.Client{Timeout: 5 * time.Second, Transport: netguard.SafeTransport(nil)}
-	for i := 1; i <= 2; i++ {
-		if _, ok := s.claimOne(context.Background(), client, holder.URL, "testnode", cfg); !ok {
-			t.Fatalf("claimOne #%d did not claim", i)
-		}
+	// Claim one at a time: the run goroutine of a claimed job starts after claimOne returns, so two
+	// back-to-back claims could reach the gate in either order. The first must hold the slot before
+	// the second is claimed, which makes pulled-2 the waiter the shutdown then nacks.
+	if _, ok := s.claimOne(context.Background(), client, holder.URL, "testnode", cfg); !ok {
+		t.Fatal("claimOne #1 did not claim")
 	}
-	<-r.entered
+	if got := <-r.entered; got != "pulled-1" {
+		t.Fatalf("first run = %s, want pulled-1", got)
+	}
+	if _, ok := s.claimOne(context.Background(), client, holder.URL, "testnode", cfg); !ok {
+		t.Fatal("claimOne #2 did not claim")
+	}
 	sttWaitFor(t, "the second pulled job waiting at the gate", func() bool { return s.sttGate.waiting() == 1 })
 
 	jobs.DrainAndStop(200 * time.Millisecond)

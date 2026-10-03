@@ -51,6 +51,7 @@ var bareClientAllowlist = map[string]struct {
 	"internal/nodeswap/deps.go:readHealth":                       {1, "configured: the swapped node's own --health-url"},
 	"internal/pairworkloads/nodeinfo.go:probeClient":             {1, "configured: PAIR's own loopback node-info and ingress, loopback-guarded, no redirect followed"},
 	"internal/pairworkloads/pairworkloads.go:New":                {1, "configured: the local PAIR telemetry endpoint"},
+	"internal/pairworkloads/relay.go:newRelayClient":             {1, "configured: fleet-serve members from pair_workloads_relay / delegate_remotes (the PAIR card relay; netguard.SafeTransport)"},
 	"internal/pairworkloads/seatwatch.go:NewSeatWatcher":         {1, "configured: the local llama-swap"},
 	"internal/pipeline/agenttask.go:<file-scope>":                {1, "configured: the agent seat on the local llama-swap"},
 	"internal/pipeline/browse.go:newBrowseDecisionClient":        {2, "configured: the loopback browse decision endpoint (ADR 0060)"},

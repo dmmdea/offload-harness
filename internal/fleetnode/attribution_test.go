@@ -25,6 +25,7 @@ type pairNode struct {
 	frames []map[string]any
 	e      *pairworkloads.Emitter
 	open   string // the emitter's open-card register directory
+	app    string // the emitter's PAIR app dir
 }
 
 func newPairNode(t *testing.T, enabled bool) *pairNode {
@@ -53,6 +54,7 @@ func newPairNode(t *testing.T, enabled bool) *pairNode {
 		}
 	}
 	pn.open = t.TempDir()
+	pn.app = app
 	pn.e = pairworkloads.New(pairworkloads.Config{Enabled: enabled, Endpoint: srv.URL, AppDir: app, OpenDir: pn.open})
 	return pn
 }

@@ -587,9 +587,11 @@ read-only unless deliberately widened. See
 - **One block, or the brief form (0.137.0).** `offload_status` takes one optional argument,
   `section`. No argument (or `all`) is the whole payload, byte-identical to the answer before the
   argument existed. A block name (`local`, `media`, `remote`, `accelerators`, `reuse`, `fleet`,
-  `kv_cache_server`, `gpu_lease`) returns `{<block>: …}` and computes nothing else: the fleet block
+  `kv_cache_server`, `gpu_lease`, `pair`) returns `{<block>: …}` and computes nothing else: the fleet block
   runs no nvidia-smi, the lease block probes no node. `accelerators` asked for by name on a box that
-  lists none is `{}`, never `null`. `brief` is the sizing answer: the whole `fleet` block plus two
+  lists none is `{}`, never `null`. `pair` is reported only with `pair_workloads_enabled` on: `{mode, relay?, reason?}`, which way
+  this box's PAIR emitter reports (`local ingress`, `node-info fallback`, `relay` with the member's route URL, or `off` with
+  the reason; see [pair-workloads.md](pair-workloads.md)). `brief` is the sizing answer: the whole `fleet` block plus two
   one-line strings under their own keys, so nothing that decodes `gpu_lease` or `local` as an object
   meets a string there. `gpu_lease_verdict` leads with the verdict word, then what the cards are
   doing, the holder and its reason, the queue length and the queue command. `local_verdict` gives

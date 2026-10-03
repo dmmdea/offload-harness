@@ -489,3 +489,25 @@ func TestLoadHoldsPairNodeInfoURLToLoopback(t *testing.T) {
 		}
 	}
 }
+
+// pair_workloads_relay lists fleet-serve member bases (or the words auto and off): an entry that is
+// not a usable base is refused at load naming the key, the two words are never read as URLs.
+func TestLoadValidatesPairWorkloadsRelay(t *testing.T) {
+	for _, v := range []string{"node-a:18811", "ftp://192.0.2.9/", "http://192.0.2.9:9"} {
+		_, err := Load(writeShapeCfg(t, `{"pair_workloads_relay":[`+quote(v)+`]}`))
+		if err == nil {
+			t.Errorf("Load must refuse pair_workloads_relay entry %q", v)
+			continue
+		}
+		for _, want := range []string{"pair_workloads_relay", v} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("Load error %q must name %q", err, want)
+			}
+		}
+	}
+	for _, list := range []string{`["auto"]`, `["off"]`, `["http://192.0.2.9:18811"]`, `["AUTO","http://192.0.2.9:18811"]`, `[]`} {
+		if _, err := Load(writeShapeCfg(t, `{"pair_workloads_relay":`+list+`}`)); err != nil {
+			t.Errorf("pair_workloads_relay %s must load: %v", list, err)
+		}
+	}
+}

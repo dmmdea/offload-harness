@@ -66,6 +66,7 @@ endpoint. A dispatch is now **admitted** and waits its turn.
 | `fleet_max_concurrent_jobs` | jobs actually executing, **`agent` only** | 4 | No — extra jobs WAIT in `accepted` |
 | `fleet_stt_max_concurrent` (0.164.0) | stt jobs actually executing, **both stt lanes** (`stt` and `stt-upload`, pushed and pulled) | 1 | No — extra jobs WAIT, in arrival order, inside their run (their card stays queued). Inference stays serialized by the whisper client's process-wide mutex whatever the value, so above 1 it only overlaps conversions and queue time |
 | `fleet_stt_upload_max_mb` (0.164.0) | the largest audio file `POST /fleet/stt` takes (decoded MiB; the body is that in base64 plus slack) | 48 | Yes — `400` naming the key |
+| `fleet_stt_transcript_ttl_min` | how long an stt upload job's transcript files stay under `media_dir` (minutes); `0` = 30, negative = keep | 30 | No — files are removed at the next sweep after they pass it |
 
 **The concurrency cap governs the text lane only.** It exists to protect one thing — the shared
 llama-swap endpoint, where the measured defect was N simultaneous inferences against a single
@@ -665,7 +666,14 @@ No transcript field exists — remote reasoning never crosses the wire.
   withheld from the advertised `supported_task_types`. Loopback + no token stays open (same
   trust boundary as the local MCP surface).
 - **Media dispatch, media job polls, `/fleet/media/*`, and health never check the token** —
-  deployed tokenless media clients keep working byte-identically. Whole-fleet enforcement is a
+  deployed tokenless media clients keep working byte-identically — **except** that on a node with a token,
+  `GET /fleet/media/{name}` needs the bearer for the outputs of the token-gated lanes: an stt upload's transcripts
+  (`stt-<digits>-<8 hex>.*`), the legacy path-taking `stt` lane's transcripts (`<basename>-<8 hex>.srt|txt|segments.json`,
+  because that lane is gated and its stem can carry the node's own file names) and a project render's files
+  (`composeproj-<16 hex>.*`, the project door's own stem; the vetted `compose-video` lane keeps `compose-<hash8>` and stays
+  tokenless). The gate fails closed on spellings a Windows filesystem folds onto the same file: the name is matched
+  lower-cased with trailing dots and spaces removed, and a name that is not plain ASCII or carries `~` or `:` is treated as
+  gated (media this node writes is plain lower-case ASCII, so no tokenless lane is caught). Whole-fleet enforcement is a
   recorded follow-up for a coordinated whole-fleet deploy window (ADR 0023).
 
 ### Health advertisement (only when the lane is admissible)
@@ -1177,12 +1185,14 @@ the file when the job ends, on every refusal and on a drop; fleet-serve sweeps l
 directory is never listed or served. The done job's `data` is the node's **full `core.Result`**, defers included
 (`defer_class`, `meta.err_class`): a defer is a `done` job saying `deferred: true`, never an `error` job. The node's own
 outputs (`.srt`, `.txt`, `.segments.json`) stay in `media_dir` and are fetchable by bare name; the asker fetches the
-`.segments.json` when the inline segment list was truncated (`stt_max_inline_segments`). **Retention and read access:** those
-outputs stay in `media_dir` (mode 0644, no pruning, as for every transcription on the node) and `GET /fleet/media` is
-unauthenticated, protected only by the stem (`stt-` plus the random part of an `os.CreateTemp` name, a 32-bit number, plus 8 hex of a
-content hash), which is hard to stumble on but not a secret. The
-upload and the job poll are token-gated; the transcript file is readable by name, without the bearer, by any peer that
-can reach the node.
+`.segments.json` when the inline segment list was truncated (`stt_max_inline_segments`). **Retention and read access:** the outputs (`stt-<digits>-<8 hex>.srt`, `.txt`, `.segments.json`) are removed when the
+job record is evicted, or once older than `fleet_stt_transcript_ttl_min` (default 30; a negative value keeps them), swept
+at fleet-serve start and on the job store's 5-minute janitor tick; a finished job restarts its outputs' clock, so a second
+upload of a recording the pipeline's cache already holds keeps the first job's files a full TTL (and the pipeline treats a
+cache hit whose files are gone as a miss). On a node that has a `fleet_auth_token`, `GET /fleet/media/{name}` serves those
+names only to a bearer holder (a `401` otherwise, before the file is looked up, and for any case, trailing-dot or
+trailing-space spelling of the name, which a Windows node would open as the same file); the asker's fetch already sends the
+bearer. A node with no token serves them as it always did.
 
 **Advertisement.** `stt-upload` is in `supported_task_types`, with the additive, omitempty health fields `stt_hq` (the
 node has an hq model; `false` is published, so an asker can tell it from a node that predates the door) and
@@ -1194,7 +1204,10 @@ The legacy `stt` task joins the bearer rule **when the node has a `fleet_auth_to
 no longer make the node convert and transcribe any file it can read. A node with no token keeps its legacy lane open.
 Compatibility: the only external dispatcher known to send `stt` jobs sends no bearer token; no production use through it
 was found (its web console form sends an empty payload; the jobs seen on one node on 2026-10-01 were a test burst), so it
-keeps working against a tokenless node and needs the bearer against one that has a token.
+keeps working against a tokenless node and needs the bearer against one that has a token. The legacy lane's transcripts
+(`<basename>-<8 hex>.srt|txt|segments.json` in `media_dir`) are bearer-gated on `GET /fleet/media` on such a node too; unlike an
+upload's they are the pipeline's content-keyed cache, shared with local transcriptions, so the node's transcript sweep and
+eviction removal never touch them.
 
 **Concurrency.** Both stt lanes, pushed and pulled, share ONE cap: `fleet_stt_max_concurrent` (default 1), a FIFO gate
 inside the run closure. A job over the cap waits its turn in arrival order, its PAIR card still queued, and never fails
@@ -1223,6 +1236,25 @@ the result is a local file. It validates the node's answer first (at least one s
 starts never running backwards, a fetched list agreeing with the result's `num_segments`); a failure is a deferred result
 naming the node. `meta.node` / `meta.placement` say where it ran, and the call is one PAIR card on the serving node plus
 one asker ledger row (`route`, `placement`, `node`, `fleet_job_id`).
+
+## The PAIR card relay (`POST /fleet/pair-relay`)
+
+A box that is not a PAIR cluster member (a view-only box, a thin client where PAIR is not installed) has no PAIR identity
+to card its own work with. A fleet-serve on a PAIR member relays for it: the box posts each workload frame to the member,
+and the member's own emitter posts the card, resolving the node (a view-only node included) itself. The mechanism, the frame
+fields and the trust notes are in [pair-workloads.md](systems/pair-workloads.md#the-card-relay-a-box-that-is-not-a-pair-member-d26);
+what an operator of the node needs:
+
+- **Advertisement.** `pair_relay: true` in health (additive, omitted when false) exactly when the node has a PAIR identity of
+  its own (`pair_workloads_enabled` with PAIR installed here) and the reachability rule holds (a `fleet_auth_token`, or a
+  loopback listener). A node that itself relays does not advertise it.
+- **Auth.** Token-gated like the vision lane (`tokenGated`): `401` without the bearer, `403` on a tokenless node beyond
+  loopback, answered before the body is read. `X-Offload-Asker` is required (`400`). `503` when the node cannot relay.
+- **Limits.** Body at most 64 KiB (`413`), strict decode (`400`), and a token bucket per asker (5 frames/s, burst 60) and one
+  over all askers (50/s, burst 200): `429` with `Retry-After`, before the body is read. At most 128 relayed cards stay open per
+  asker and 512 overall: a frame that would open a new card past either is a `429` too; a terminal frame is always admitted.
+- **The relaying box** sets nothing when it has `delegate_remotes` (`pair_workloads_relay` defaults to `auto`); a box with none
+  names its members: `"pair_workloads_relay": ["http://<node>:18811"]`.
 
 ## Known limits (v1)
 

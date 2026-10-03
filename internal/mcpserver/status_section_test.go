@@ -41,7 +41,7 @@ import (
 // statusBlocks is every top-level block of the full payload, written out here
 // rather than imported so a wrong implementation list cannot make these tests
 // pass by agreeing with itself.
-var statusBlocks = []string{"local", "media", "remote", "accelerators", "reuse", "fleet", "kv_cache_server", "gpu_lease"}
+var statusBlocks = []string{"local", "media", "remote", "accelerators", "reuse", "fleet", "kv_cache_server", "gpu_lease", "pair"}
 
 const statusGoldenPath = "testdata/offload_status_default.golden.json"
 
@@ -246,7 +246,7 @@ func TestStatusSectionReturnsOnlyItsBlock(t *testing.T) {
 				// accelerators is absent from the full answer on a box that lists
 				// none; asked for by name, the block is an empty object — zero
 				// devices, never null (which would read as "unknown").
-				if key != "accelerators" {
+				if key != "accelerators" && key != "pair" {
 					t.Fatalf("fixture's full answer has no %q block", key)
 				}
 				want = map[string]any{}

@@ -231,6 +231,8 @@ type Server struct {
 	// one-predicate discipline: health lists "stt-upload" and publishes stt_hq and
 	// stt_upload_max_mb exactly when POST /fleet/stt will admit.
 	sttUploadLane bool
+	// relayLimiter is the PAIR card relay's per-asker and global token bucket (pair_relay.go).
+	relayLimiter *pairworkloads.RelayLimiter
 	// sttGate is the node's stt concurrency cap (fleet_stt_max_concurrent), shared by the legacy
 	// path-taking lane and the upload door, pushed and pulled jobs alike (enterSTT).
 	sttGate *sttGate
@@ -478,6 +480,7 @@ func New(runner Runner, jobs *Jobs, opts Options) *Server {
 		visionLane:         VisionLaneAdmissible(opts.Cfg, opts.LoopbackListener),
 		textLane:           TextLaneAdmissible(opts.Cfg, opts.LoopbackListener),
 		sttUploadLane:      STTUploadAdmissible(opts.Cfg, opts.LoopbackListener),
+		relayLimiter:       pairworkloads.DefaultRelayLimiter(),
 		sttGate:            newSTTGate(opts.Cfg.EffectiveSTTMaxConcurrent()),
 		sttUploadSlots:     make(chan struct{}, sttUploadInFlightMax),
 		chatLane:           ChatLaneAdmissible(opts.Cfg, opts.LoopbackListener),
@@ -487,6 +490,10 @@ func New(runner Runner, jobs *Jobs, opts Options) *Server {
 		setWriteDeadline:   controllerWriteDeadline,
 	}
 	s.admitting = s.admittingRuns
+	// The stt transcript retention rides the job store's janitor tick (and runs at fleet-serve start).
+	if jobs != nil {
+		jobs.OnSweep(func() { sweepTranscriptsOnTick(opts.Cfg) })
+	}
 	return s
 }
 
@@ -935,6 +942,10 @@ func (s *Server) Handler() http.Handler {
 	// can have this node transcribe. Its own route for the body cap and the longer delivery window;
 	// the bearer is checked before the body is read, then the same admit path as every job.
 	mux.HandleFunc("POST "+STTUploadPath, s.handleSTTUpload)
+	// The PAIR card relay (D26): one workload frame from a box with no PAIR identity, posted as a
+	// card from this node's own emitter. Token-gated, advertised in health (pair_relay) only when it
+	// admits, and rate limited per asker.
+	mux.HandleFunc("POST "+pairworkloads.RelayPath, s.handlePairRelay)
 	// The project-bundle door (ADR 0071): a whole HyperFrames project from a holder of
 	// the fleet token. Its own route for the body cap; the door and the bearer are
 	// checked before the body is read, then the same admit path as every job.
@@ -1370,6 +1381,10 @@ type healthPayload struct {
 	// has the door but no hq model) and an older node's absence stays distinguishable.
 	STTHQ          *bool `json:"stt_hq,omitempty"`
 	STTUploadMaxMB int   `json:"stt_upload_max_mb,omitempty"`
+	// PairRelay (D26) says this node serves POST /fleet/pair-relay: a box with no PAIR identity of
+	// its own can have its cards posted from here. Published exactly when the door would admit
+	// (PairRelayAdmissible); omitted otherwise, so a node without it is byte-identical to before.
+	PairRelay bool `json:"pair_relay,omitempty"`
 	// ChatLane says POST /fleet/chat will admit here (C-41b), published under
 	// the same one-predicate rule as vision_model. It is what a delegator's
 	// cascade lane reads to tell a FLEET NODE base from a plain llama-swap
@@ -1571,6 +1586,9 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.textLane {
 		payload.TextTasks = append([]string(nil), s.opts.Cfg.TextTasks...)
+	}
+	if s.pairRelayOpen() {
+		payload.PairRelay = true
 	}
 	if s.sttUploadLane {
 		hq := s.opts.Cfg.STTModelHQ != ""
@@ -2359,6 +2377,8 @@ func (s *Server) admit(w http.ResponseWriter, r *http.Request, env dispatchEnvel
 	// Who asked, and whether the asker wants THIS node to card the job (it signals that only when it
 	// will not card the job itself). The asker's name is recorded on this node's row either way.
 	asker, nodeCards := askerOf(r)
+	// An stt upload's transcript files, learned when the job finishes and released with its record.
+	var sttOut sttOutputs
 	card := s.newNodeCard(string(req.Task), specModel, env.JobID, asker, nodeCards)
 	// The payload is spent: the request is built. The run closure below captures env, and a queued
 	// stt upload's payload is up to 64 MiB, so the job must not keep it alive until it finishes.
@@ -2407,6 +2427,11 @@ func (s *Server) admit(w http.ResponseWriter, r *http.Request, env dispatchEnvel
 		res := s.runner.Run(ctx, req)
 		finished = true
 		card.finish(res)
+		if env.TaskType == STTUploadTask && res.OK {
+			names := sttOutputNames(res.Data)
+			sttOut.set(names)
+			refreshTranscripts(s.opts.Cfg, names, time.Now())
+		}
 		if env.TaskType == string(core.TaskAgentRun) && res.OK {
 			// The one fact this result proves about the advertised seat —
 			// a completed call on it — goes into the residency cache now,
@@ -2460,9 +2485,11 @@ func (s *Server) admit(w http.ResponseWriter, r *http.Request, env dispatchEnvel
 			cleanup()
 			card.fail("the job was dropped before it started (withdrawn, or the node drained)")
 		},
-		Task:   env.TaskType,
-		Model:  specModel,
-		Band:   band,
+		// An stt upload's transcript files go with its record (and, failing that, by the TTL sweep).
+		OnEvict: func() { removeTranscripts(s.opts.Cfg, sttOut.get()) },
+		Task:    env.TaskType,
+		Model:   specModel,
+		Band:    band,
 		Tenant: tenant,
 		// A pushed agent dispatch is polled for by the delegator that sent it, so
 		// the poll lease applies to it (ADR 0064). Media and vision jobs are polled
@@ -2808,6 +2835,13 @@ func (s *Server) handleMedia(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("filename")
 	if name == "" || strings.ContainsAny(name, `/\`) || strings.Contains(name, "..") {
 		writeError(w, http.StatusBadRequest, "filename must be a bare name")
+		return
+	}
+	// The outputs of the token-gated lanes (stt upload transcripts, project renders) need the bearer
+	// on a node that has a token; checked before the file is looked up, so the answer never says
+	// whether the name exists. Every other name, and every name on a tokenless node, is as it was.
+	if tok := s.opts.Cfg.FleetAuthToken; tok != "" && gatedMediaName(name) && !bearerOK(r, tok) {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
 	// A dot name is this node's own bookkeeping (the stt upload directory, the compose cache): never
