@@ -376,8 +376,10 @@ stayed invisible. A **relay** closes the gap with the same frames: a fleet-serve
   (this box's own work) sends this box's own name as the hint; a delegation's event sends the dispatch host and the fleet node
   id as the hint and its alias.
 - `pair_workloads_relay` selects the members: absent or empty is `auto` (every `delegate_remotes` base whose `/fleet/health`
-  advertises `pair_relay`, probed over `netguard.SafeTransport` with a 1 s bound and cached for 60 s, a failed probe retried
-  after 30 s, outside the identity lock), `"auto"` says so outright, `"off"` turns the relay off, and any other entry is an
+  advertises `pair_relay`, probed over `netguard.SafeTransport` with a 1 s bound, outside the identity lock; a member never
+  probed is probed on the first call, which pays the bound once, and afterwards a verdict is answered at once and refreshed
+  in the background when it is 60 s old (30 s after a failed probe), so no call waits on a member that went offline),
+  `"auto"` says so outright, `"off"` turns the relay off, and any other entry is an
   explicit member base URL (a box with no `delegate_remotes` sets it by hand; explicit members are used without a probe). The
   bearer is `fleet_auth_token`. `install client` seeds nothing for it: `auto` covers a client that has `delegate_remotes`.
   The probe is a small health reader in this package, not `delegate.FetchNodeView`, because `internal/delegate` imports this
