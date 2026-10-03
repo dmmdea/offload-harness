@@ -29,8 +29,11 @@ design is in `docs/systems/media-generation.md` (Composition).
   wired to this lane, with every paid or cloud step removed, and opened as a workspace rather than
   installed by an installer.
 - **`html` and `project_dir` are trusted code only.** HyperFrames' Chrome runs without a sandbox. Never
-  pass a third-party page. The fleet door accepts only the vetted templates under
-  `render/compose-templates/`, by name, with typed variables.
+  pass a third-party page. The tokenless fleet door renders only the vetted templates under
+  `render/compose-templates/`, by name, with typed variables. A project or inline HTML reaches a fleet
+  node only through the token-gated project door (ADR 0071), which a node opens with
+  `fleet_compose_projects`, and only with everything it uses inside the project; on a machine without
+  the lane, `route` auto sends the call there (`docs/systems/delegation-client.md`).
 - No hosted service, no scheduled job, no daemon: this lane is a CLI call that exits.
 
 ## Which tool
