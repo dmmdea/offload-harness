@@ -17,10 +17,14 @@ package fleetnode
 //     one verdict word. A delegator that reads it fences this node only for the contracts whose
 //     seats sit on those cards.
 //   - The singular lease block, lease_exclusive and lease_draining stay for every reader one
-//     release behind, and are the WORST across the live leases: class text if any lease is text,
-//     busy, overdue, orphaned or stalled if any lease is, exclusive or draining if any is, the
-//     longest remaining time. A reader that sees only that block is therefore never told less
-//     than is true; with one lease it is byte for byte what it always was.
+//     release behind (and every current reader that reads only the singular fields), and are
+//     the WORST across the live leases: class text if any lease is text, busy, orphaned or
+//     stalled if any lease is, exclusive or draining if any is, the longest remaining time.
+//     Overdue folds the other way, because those readers compute busy-and-not-overdue: it is
+//     set only when no live lease is a long hold of its own, so an abandoned lease on one card
+//     cannot hide a live long render on another. A reader that sees only that block is
+//     therefore never told less than is true; with one lease it is byte for byte what it
+//     always was.
 //   - saturation and dispatch follow the same cards: the node says it is closed only when the
 //     leases that refuse new work cover every card it has, and a text reservation refuses a
 //     contract only when it holds every seat that contract could run on (textLeaseAgainst).
@@ -125,16 +129,26 @@ func readLeases(info gpulease.Info, now time.Time, cfgSec int, standing func(gpu
 	// Several live leases: fold the block to the worst of them. A reader that sees only the
 	// block (a delegator one release behind) would otherwise be told the lowest epoch's story,
 	// which can be "a short media render" over an exclusive reservation on another card.
+	//
+	// Overdue folds the OTHER way from the rest. Every reader of the singular fields computes
+	// LeaseBusy = Busy && !Overdue (an overdue lease is ranked last, never fenced), so a block
+	// that said busy AND overdue because ANY lease is overdue would let an abandoned lease on
+	// one card hide a live long render on another: the node would read free to every one of them.
+	// The block is overdue only when no live lease is a long hold of its own (busy and not
+	// overdue); beside one, it is busy and not overdue, which is what that lease alone says.
+	anyOverdue, liveBusy := false, false
 	for _, e := range rd.entries {
 		if e.Class == string(gpulease.ClassText) {
 			rd.block.Class = string(gpulease.ClassText)
 		}
 		rd.block.Busy = rd.block.Busy || e.Busy
-		rd.block.Overdue = rd.block.Overdue || e.Overdue
+		anyOverdue = anyOverdue || e.Overdue
+		liveBusy = liveBusy || (e.Busy && !e.Overdue)
 		if e.RemainingSec > rd.block.RemainingSec {
 			rd.block.RemainingSec = e.RemainingSec
 		}
 	}
+	rd.block.Overdue = anyOverdue && !liveBusy
 	if !latest.IsZero() {
 		rd.block.Until = latest.UTC().Format(time.RFC3339)
 	}

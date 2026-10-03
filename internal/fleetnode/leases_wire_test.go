@@ -356,9 +356,12 @@ func TestHealthLeaseEntryOverdueIsPerLease(t *testing.T) {
 	if entries[0]["overdue"] == true {
 		t.Fatalf("the sibling's window has not ended: %v", entries[0])
 	}
+	// The singular block is overdue only when no live lease is a long hold of its own: every
+	// reader of it computes busy-and-not-overdue, so "overdue if ANY lease is" let the abandoned
+	// lease hide the sibling's live 3 h render (leases_fold_test.go).
 	block, _ := m["lease"].(map[string]any)
-	if block["overdue"] != true {
-		t.Fatalf("the singular block reads overdue if any lease is: %v", block)
+	if block["overdue"] == true || block["busy"] != true {
+		t.Fatalf("the singular block beside a live 3 h lease reads busy and not overdue: %v", block)
 	}
 }
 
