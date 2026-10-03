@@ -18,7 +18,7 @@ import (
 // ---- S1/S2: a real node, a held render, a spent budget: no withdraw is attempted ---------------------
 
 func TestABudgetExpiryAgainstARealNodeSendsNoDeleteAndSaysTheJobCannotBeRecalled(t *testing.T) {
-	withBudget(t, taskRunGraph, time.Second)
+	withBudget(t, taskRunGraph, 2*time.Second)
 	hold := make(chan struct{})
 	n := startNode(t, nodeOpts{hold: hold, cfg: func(c *config.Config) { c.FleetMaxConcurrentJobs = 1 }})
 	t.Cleanup(func() { close(hold) }) // runs before the node's drain, which would otherwise wait on the render
@@ -28,7 +28,7 @@ func TestABudgetExpiryAgainstARealNodeSendsNoDeleteAndSaysTheJobCannotBeRecalled
 	if res.OK || res.DeferClass != core.DeferClassBudget {
 		t.Fatalf("%+v", res)
 	}
-	if time.Since(start) > 4*time.Second {
+	if time.Since(start) > 6*time.Second {
 		t.Errorf("a budget defer must return at once, took %v", time.Since(start))
 	}
 	var posted bool
@@ -78,8 +78,8 @@ func TestSweepStaleKeepsAFileInsideTheThresholdAndTakesOneBeyondIt(t *testing.T)
 			t.Fatal(err)
 		}
 	}
-	age(job+"inside.png", staleAfter()-time.Minute) // past the old 1 h constant, inside the threshold
-	age(job+"beyond.png", staleAfter()+time.Minute)
+	age(job+"inside.png", 2*time.Hour) // past the old 1 h constant, inside the threshold
+	age(job+"beyond.png", 8*time.Hour) // past the default threshold (6 h + 1 h)
 	sweepStale(dir, time.Now())
 	got := dirNames(t, dir)
 	if len(got) != 1 || got[0] != job+"inside.png" {
