@@ -221,6 +221,13 @@ type Server struct {
 	// one-predicate discipline: health publishes text_tasks (and SupportedTasksFor lists
 	// "text") exactly when POST /fleet/text will admit.
 	textLane bool
+	// sttUploadLane is STTUploadAdmissible over the RESOLVED listener (ADR 0072), the same
+	// one-predicate discipline: health lists "stt-upload" and publishes stt_hq and
+	// stt_upload_max_mb exactly when POST /fleet/stt will admit.
+	sttUploadLane bool
+	// sttGate is the node's stt concurrency cap (fleet_stt_max_concurrent), shared by the legacy
+	// path-taking lane and the upload door, pushed and pulled jobs alike (enterSTT).
+	sttGate *sttGate
 	// chatLane is ChatLaneAdmissible over the RESOLVED listener (C-41b) — the
 	// same one-predicate discipline as agentLane and visionLane: health
 	// publishes `chat_lane` exactly when POST /fleet/chat will admit, because
@@ -462,6 +469,8 @@ func New(runner Runner, jobs *Jobs, opts Options) *Server {
 		agentLane:          AgentLaneAdmissible(opts.Cfg, opts.LoopbackListener),
 		visionLane:         VisionLaneAdmissible(opts.Cfg, opts.LoopbackListener),
 		textLane:           TextLaneAdmissible(opts.Cfg, opts.LoopbackListener),
+		sttUploadLane:      STTUploadAdmissible(opts.Cfg, opts.LoopbackListener),
+		sttGate:            newSTTGate(opts.Cfg.EffectiveSTTMaxConcurrent()),
 		chatLane:           ChatLaneAdmissible(opts.Cfg, opts.LoopbackListener),
 		rosterServes:       swapRosterServes,
 		rosterServedModels: swapRosterServedModels,
@@ -913,6 +922,10 @@ func (s *Server) Handler() http.Handler {
 	// The text lane (0.154.0): classify / extract on this node's own pipeline. A route of
 	// its own so the payload is typed; dispatch's 1 MiB body cap, then the same admit path.
 	mux.HandleFunc("POST /fleet/text", s.handleText)
+	// The stt upload door (ADR 0072): audio BYTES in the body, so a box whose own whisper is held
+	// can have this node transcribe. Its own route for the body cap and the longer delivery window;
+	// the bearer is checked before the body is read, then the same admit path as every job.
+	mux.HandleFunc("POST "+STTUploadPath, s.handleSTTUpload)
 	// The project-bundle door (ADR 0071): a whole HyperFrames project from a holder of
 	// the fleet token. Its own route for the body cap; the door and the bearer are
 	// checked before the body is read, then the same admit path as every job.
@@ -1340,6 +1353,14 @@ type healthPayload struct {
 	// lane, and every node that predates it, emits a byte-identical payload, and a
 	// delegator never places a text task on a node that does not list it.
 	TextTasks []string `json:"text_tasks,omitempty"`
+	// STTHQ says whether this node has an hq whisper model (stt_model_hq), and STTUploadMaxMB is
+	// the largest audio upload POST /fleet/stt takes, MiB decoded (fleet_stt_upload_max_mb). Both
+	// are published only when the upload door is admissible (the same moment "stt-upload" appears
+	// in supported_task_types): an asker keys on them, so a node that predates the door publishes
+	// neither and is never sent an upload. STTHQ is a pointer so false is published (a node that
+	// has the door but no hq model) and an older node's absence stays distinguishable.
+	STTHQ          *bool `json:"stt_hq,omitempty"`
+	STTUploadMaxMB int   `json:"stt_upload_max_mb,omitempty"`
 	// ChatLane says POST /fleet/chat will admit here (C-41b), published under
 	// the same one-predicate rule as vision_model. It is what a delegator's
 	// cascade lane reads to tell a FLEET NODE base from a plain llama-swap
@@ -1541,6 +1562,11 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.textLane {
 		payload.TextTasks = append([]string(nil), s.opts.Cfg.TextTasks...)
+	}
+	if s.sttUploadLane {
+		hq := s.opts.Cfg.STTModelHQ != ""
+		payload.STTHQ = &hq
+		payload.STTUploadMaxMB = int(s.opts.Cfg.EffectiveSTTUploadMaxBytes() >> 20)
 	}
 	// Chat lane (C-41b): the delegator's cascade lane reads `chat_lane` to
 	// learn this base is a fleet node it may route through, and served_models
@@ -2080,6 +2106,35 @@ func (s *Server) handleText(w http.ResponseWriter, r *http.Request) {
 	s.admit(w, r, dispatchEnvelope{JobID: p.JobID, TaskType: TextTask, Payload: body})
 }
 
+// authorizeGated is the token-gated lanes' auth, in one place so the doors that must check the bearer
+// before they read a large body (the stt upload door, the project door) run the SAME rule admit applies
+// to every job: fleet_auth_token required beyond loopback, loopback with no token stays open. It writes
+// the 401/403 itself and reports whether the request may go on. A task type that is not token-gated
+// passes untouched (media dispatch stays tokenless so deployed media clients keep working).
+func (s *Server) authorizeGated(w http.ResponseWriter, r *http.Request, taskType string) bool {
+	if tokenGated(s.opts.Cfg, taskType) {
+		if s.opts.Cfg.FleetAuthToken == "" {
+			// The reachability condition is CONSULTED, never re-derived:
+			// AgentLaneSafelyReachable is the same expression AgentLaneAdmissible
+			// applies to the same resolved listener, so this refusal can never
+			// disagree with what health advertised. (With no token configured it
+			// reduces to "is the listener loopback?" — a tokenless lane beyond
+			// loopback drives a coding-agent loop over an open port, an RCE-class
+			// surface. Misconfiguration must fail here, visibly, at ack time.)
+			if !AgentLaneSafelyReachable(s.opts.Cfg, s.opts.LoopbackListener) {
+				writeError(w, http.StatusForbidden, agentLaneTokenRequired)
+				return false
+			}
+			// Loopback + no token: the agent lane is reachable only from this
+			// box — the same trust boundary as the local MCP surface.
+		} else if !bearerOK(r, s.opts.Cfg.FleetAuthToken) {
+			writeError(w, http.StatusUnauthorized, "unauthorized")
+			return false
+		}
+	}
+	return true
+}
+
 // admit is the shared ack path behind /fleet/dispatch, /fleet/vision and /fleet/text: the
 // token-gated lanes' auth, the known-job re-ack/409, the drain/lease/band/
 // queue refusals, BuildRequest, and the job store's Admit. The two handlers
@@ -2096,25 +2151,8 @@ func (s *Server) admit(w http.ResponseWriter, r *http.Request, env dispatchEnvel
 	// gate, BuildRequest — so an unauthorized agent caller gets only the auth
 	// verdict (401/403), never a validation 400 to probe the envelope with
 	// and never a re-ack/409 that discloses job existence or state.
-	if tokenGated(env.TaskType) {
-		if s.opts.Cfg.FleetAuthToken == "" {
-			// The reachability condition is CONSULTED, never re-derived:
-			// AgentLaneSafelyReachable is the same expression AgentLaneAdmissible
-			// applies to the same resolved listener, so this refusal can never
-			// disagree with what health advertised. (With no token configured it
-			// reduces to "is the listener loopback?" — a tokenless lane beyond
-			// loopback drives a coding-agent loop over an open port, an RCE-class
-			// surface. Misconfiguration must fail here, visibly, at ack time.)
-			if !AgentLaneSafelyReachable(s.opts.Cfg, s.opts.LoopbackListener) {
-				writeError(w, http.StatusForbidden, agentLaneTokenRequired)
-				return
-			}
-			// Loopback + no token: the agent lane is reachable only from this
-			// box — the same trust boundary as the local MCP surface.
-		} else if !bearerOK(r, s.opts.Cfg.FleetAuthToken) {
-			writeError(w, http.StatusUnauthorized, "unauthorized")
-			return
-		}
+	if !s.authorizeGated(w, r, env.TaskType) {
+		return
 	}
 
 	if env.JobID == "" {
@@ -2311,6 +2349,9 @@ func (s *Server) admit(w http.ResponseWriter, r *http.Request, env dispatchEnvel
 	// will not card the job itself). The asker's name is recorded on this node's row either way.
 	asker, nodeCards := askerOf(r)
 	card := s.newNodeCard(string(req.Task), specModel, env.JobID, asker, nodeCards)
+	// The payload is spent: the request is built. The run closure below captures env, and a queued
+	// stt upload's payload is up to 64 MiB, so the job must not keep it alive until it finishes.
+	env.Payload = nil
 
 	run := func(ctx context.Context) (json.RawMessage, error) {
 		defer cleanup() // temp files live exactly as long as the job
@@ -2326,6 +2367,15 @@ func (s *Server) admit(w http.ResponseWriter, r *http.Request, env dispatchEnvel
 		// every poll of the RUNNING job, so the delegator can keep polling a
 		// producing job past any clock it sized in advance.
 		ctx = core.WithProgressReport(ctx, func(p core.LiveProgress) { s.jobs.SetProgress(jobID, p) })
+		// An stt job (either lane) takes its slot under the node's stt cap before it starts: a job over
+		// the cap waits here, in arrival order, with its card still queued, instead of failing against
+		// a whisper that another transcription just unloaded (D18). Other task types pass through.
+		releaseSTT, gerr := s.enterSTT(ctx, env.TaskType)
+		if gerr != nil {
+			card.fail("the node shut down while this job waited for the stt slot")
+			return nil, gerr
+		}
+		defer releaseSTT()
 		// Register A-102: stamp the DOOR this call came through so its ledger
 		// row is not one of the door-less cascade rows.
 		req.Door = dispatchDoor(req.Door)
@@ -2362,6 +2412,10 @@ func (s *Server) admit(w http.ResponseWriter, r *http.Request, env dispatchEnvel
 			// The same for the text lane — see textJobData.
 			return textJobData(res)
 		}
+		if env.TaskType == STTUploadTask {
+			// And for the stt upload door — see sttJobData: defer_class and err_class must survive.
+			return sttJobData(res)
+		}
 		if res.OK {
 			return res.Data, nil
 		}
@@ -2387,7 +2441,7 @@ func (s *Server) admit(w http.ResponseWriter, r *http.Request, env dispatchEnvel
 	// runs the cleanup.
 	spec := AcceptSpec{
 		Agent:    env.TaskType == string(core.TaskAgentRun),
-		Gated:    gatedJob(env.TaskType),
+		Gated:    gatedJob(s.opts.Cfg, env.TaskType),
 		Uncapped: !s.concurrencyCapped(env.TaskType),
 		// A job drained before it started never reaches the closure above, so the card it opened
 		// (queued, below) closes here.
@@ -2724,6 +2778,12 @@ func (s *Server) handleMedia(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("filename")
 	if name == "" || strings.ContainsAny(name, `/\`) || strings.Contains(name, "..") {
 		writeError(w, http.StatusBadRequest, "filename must be a bare name")
+		return
+	}
+	// A dot name is this node's own bookkeeping (the stt upload directory, the compose cache): never
+	// a media output, so never served, and never listed through http.ServeFile's directory index.
+	if strings.HasPrefix(name, ".") {
+		writeError(w, http.StatusNotFound, "not found")
 		return
 	}
 	mediaDir := s.opts.Cfg.MediaDir

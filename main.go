@@ -2557,6 +2557,12 @@ func runFleetServe(args []string) error {
 	} else if n > 0 {
 		fmt.Fprintf(os.Stderr, "[fleet-serve] swept %d orphaned compose-project dir(s)\n", n)
 	}
+	// Audio files the stt upload door (ADR 0072) wrote and a crash left behind; a warning, never fatal.
+	if n, perr := fleetnode.SweepOrphanedSTTUploads(cfg, time.Now()); perr != nil {
+		fmt.Fprintf(os.Stderr, "[fleet-serve] WARNING: sweeping stt upload files: %v\n", perr)
+	} else if n > 0 {
+		fmt.Fprintf(os.Stderr, "[fleet-serve] swept %d orphaned stt upload file(s)\n", n)
+	}
 
 	listen, nodeID, err := fleetServeParams(*listenFlag, *nodeIDFlag, *trusted, cfg, os.Hostname)
 	if err != nil {
