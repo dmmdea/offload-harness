@@ -512,7 +512,10 @@ lease load their models once; its launch marker (`.offload-launch-<key>.json`) r
 The **holder** of that lease stops the instance when it lets go, before the release and before any seat
 warm-back (both want the VRAM): `gpu reserve` when its wrapped command ends, the detached holder when it
 exits, `gpu release` when an operator ends a lease from outside, and the pipeline when a media lease is
-released. `internal/comfyinst` does it, and only for a keyed marker that names exactly that epoch: the pid
+released. `gpu release` settles WHICH lease it is ending first, by the release's own rule (`Manager.ReleaseTarget`:
+the epoch named, else the only lease held), so a refusal (several card leases held and no `--epoch`) ends the
+command before the instances are stopped or the seat is warmed; if the release itself then fails, the error says
+the instances were already stopped. `internal/comfyinst` does it, and only for a keyed marker that names exactly that epoch: the pid
 must be alive, must not have begun after the marker was written (a recycled pid), and the endpoint on the
 marker's port must report exactly the recorded argv (`GET /system_stats`); then `POST /free` and a stop
 (Windows: terminate; elsewhere SIGTERM, then SIGKILL after five seconds). Anything short of that proof is left

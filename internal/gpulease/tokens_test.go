@@ -414,6 +414,10 @@ func TestAnAcquireThatNeverReachedTheFrontIsStillQueued(t *testing.T) {
 		}
 	}()
 	defer close(stop)
+	// "Ahead" means an earlier arrival stamp. Two registrations in the same millisecond tie, and
+	// the tie is broken by a random file name, so without this pause the seat waiter was ahead of
+	// the call only about two runs in three (measured: 9 failures in 30 runs of this test alone).
+	time.Sleep(5 * time.Millisecond)
 
 	_, err := m.Acquire(ClassMedia, Options{Devices: []string{"gpu-aaaa"}, TTL: time.Hour, Wait: 150 * time.Millisecond, WaitOut: true})
 	if !errors.Is(err, ErrStillQueued) {

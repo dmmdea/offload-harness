@@ -1790,7 +1790,7 @@ func (m *Manager) ReleaseByEpoch(epoch uint64) (bool, error) {
 		return false, nil // nothing held
 	}
 	if epoch != 0 && meta.Epoch != epoch {
-		return false, fmt.Errorf("gpulease: lease has moved on (asked for epoch %d, current is %d)", epoch, meta.Epoch)
+		return false, errLeaseMovedOn(epoch, meta.Epoch)
 	}
 	// Drop the CLAIM only. Removing the container would delete a directory another
 	// acquirer may be working inside.
@@ -1799,6 +1799,52 @@ func (m *Manager) ReleaseByEpoch(epoch uint64) (bool, error) {
 		return false, fmt.Errorf("gpulease: releasing lease: %w", err)
 	}
 	return true, nil
+}
+
+// ReleaseTarget names the lease ReleaseByEpoch(epoch) would end, without ending it, or the
+// refusal ReleaseByEpoch would return. It is the question a caller asks BEFORE doing anything
+// destructive on a lease's behalf (`gpu release` stops the ComfyUI instances kept under the
+// lease, and must not when the release is going to be refused): act on the epoch returned,
+// never on a guess of your own at what "whatever is held" means.
+//
+// The rule is ReleaseByEpoch's, step for step: a named epoch is that lease (a card lease by its
+// record, a whole-node lease when it is the current one, else the "moved on" refusal); epoch 0
+// is the whole-node lease if one is recorded, else the only live card lease, and with several
+// card leases live it is the refusal that asks for --epoch. 0 with a nil error means nothing is
+// held (or the named epoch is not): there is nothing to end. It reads and never writes.
+func (m *Manager) ReleaseTarget(epoch uint64) (uint64, error) {
+	if epoch != 0 {
+		if _, serr := os.Stat(epochRecordPath(m.leaseDir(), epoch)); serr == nil {
+			return epoch, nil
+		}
+		meta, err := m.readMeta()
+		if err != nil || meta == nil {
+			return 0, nil
+		}
+		if meta.Epoch != epoch {
+			return 0, errLeaseMovedOn(epoch, meta.Epoch)
+		}
+		return epoch, nil
+	}
+	if meta, err := m.readMeta(); meta != nil {
+		if err != nil {
+			return 0, nil
+		}
+		return meta.Epoch, nil
+	}
+	switch live := m.liveCardLeaseEpochs(); len(live) {
+	case 0:
+		return 0, nil
+	case 1:
+		return live[0], nil
+	default:
+		return 0, errSeveralCardLeases(live)
+	}
+}
+
+// errLeaseMovedOn is the refusal for releasing an epoch that is no longer the current lease.
+func errLeaseMovedOn(asked, current uint64) error {
+	return fmt.Errorf("gpulease: lease has moved on (asked for epoch %d, current is %d)", asked, current)
 }
 
 // Release drops the lease — but ONLY if we still hold it. Releasing unconditionally

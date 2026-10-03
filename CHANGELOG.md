@@ -6,6 +6,16 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed — review pass on per-card media admission (GPU routing P13b)
+
+- **`gpu release` no longer kills a live job's ComfyUI instance and then refuses.** With several card leases
+  held and no `--epoch` it stopped the kept instance of the LOWEST epoch (and warmed the seat) before the release
+  refused with "pass --epoch N", so an operator's slip cost a clip of up to 80 minutes and left the lease held.
+  The verb now settles which lease it is ending first, by the release's own rule (`gpulease.Manager.ReleaseTarget`),
+  and a refusal ends it before anything is touched. The order is resolve, stop the kept instances, warm the seat
+  back, release: the instances go before the seat is loaded onto their cards (the documented order; it had been
+  warm first). A release that fails after the stop says the instances were already stopped.
+
 ### Added — per-card media admission, and a place in line instead of "gpu busy" (GPU routing P13b)
 
 **The operator-visible change.** On a host that leases cards (`gpu_card_scoped_leases` set and a green

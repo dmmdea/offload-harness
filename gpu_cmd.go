@@ -904,6 +904,23 @@ func runGPURelease(args []string) error {
 	if err != nil {
 		return err
 	}
+	// WHICH lease is being ended is settled first, by the rule the release itself uses
+	// (Manager.ReleaseTarget): a refusal (several card leases held and no --epoch to say which)
+	// ends the command here, before anything destructive has run. Stopping the kept instances
+	// and warming the seat both used to run ahead of that refusal, so an operator who forgot
+	// --epoch killed a live job's ComfyUI and still held the lease.
+	target, err := m.ReleaseTarget(*epoch)
+	if err != nil {
+		return err
+	}
+	// The instances kept under the lease being ended go with it, and BEFORE the seat is warmed
+	// back (both want the VRAM) and before the release (so the next holder never finds one on its
+	// card). Only a lease that is live is stopped for: nothing held, nothing to stop.
+	stopped := false
+	if info := m.Inspect(); target != 0 && info.HoldsEpoch(target) {
+		stopKeptInstances(loadCfg(fs), target, os.Stderr)
+		stopped = true
+	}
 	// Warm BEFORE the release so the seat is loaded by the time delegators see
 	// the card free again; a failed warm-back is reported and never blocks the
 	// release (a leaked lease costs every caller, a cold seat costs one load).
@@ -913,17 +930,13 @@ func runGPURelease(args []string) error {
 	if *warm {
 		warmBackGuarded(loadCfg(fs), releaseWarmGuard(m, *epoch), os.Stderr)
 	}
-	// The instances kept under the lease being ended go with it. Which lease: the one named, or
-	// whatever is held when none is (the operator's override); nothing held, nothing to stop.
-	if info := m.Inspect(); info.Held && (*epoch == 0 || info.HoldsEpoch(*epoch)) {
-		stopEpoch := *epoch
-		if stopEpoch == 0 {
-			stopEpoch = info.Epoch
-		}
-		stopKeptInstances(loadCfg(fs), stopEpoch, os.Stderr)
-	}
 	released, err := m.ReleaseByEpoch(*epoch)
 	if err != nil {
+		if stopped {
+			// The stop cannot be taken back: say so, so the operator does not read the failure
+			// as "nothing happened".
+			err = fmt.Errorf("%w (the ComfyUI instances kept under lease epoch %d were already stopped; the lease is still held)", err, target)
+		}
 		return err
 	}
 	if !released {
