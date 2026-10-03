@@ -28,7 +28,11 @@ type fakeNode struct {
 	payload map[string]any
 	auth    string
 	hdr     http.Header // header of the last dispatch (the attribution headers ride it)
-	srv     *httptest.Server
+	// runningFirst makes the first poll answer state "running" (the node says the job started)
+	// before the done answer.
+	runningFirst bool
+	polls        int
+	srv          *httptest.Server
 }
 
 func newFakeNode(t *testing.T, node string, tasks, ttasks []string, res core.Result) *fakeNode {
@@ -64,6 +68,14 @@ func newFakeNode(t *testing.T, node string, tasks, ttasks []string, res core.Res
 		_ = json.NewEncoder(w).Encode(map[string]any{"job_id": p["job_id"], "status": "accepted"})
 	})
 	mux.HandleFunc("GET /fleet/jobs/{id}", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		f.polls++
+		first := f.polls == 1
+		f.mu.Unlock()
+		if f.runningFirst && first {
+			_ = json.NewEncoder(w).Encode(map[string]any{"job_id": r.PathValue("id"), "state": "running"})
+			return
+		}
 		data, _ := json.Marshal(f.result)
 		_ = json.NewEncoder(w).Encode(map[string]any{"job_id": r.PathValue("id"), "state": "done", "data": json.RawMessage(data)})
 	})

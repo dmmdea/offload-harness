@@ -54,7 +54,9 @@ claude mcp add local-offload --scope user -- <dir>\bin\local-offload.exe mcp --c
 ```
 
 `install client` writes `<home>/etc/config.json` (mode 0600; it holds the token, which is never printed):
-`delegate_remotes`, `fleet_auth_token`, `agent_delegation_enabled`, the media, state, cache and ledger
+`delegate_remotes`, `fleet_auth_token`, `agent_delegation_enabled`, `pair_workloads_enabled` (so a client on
+a PAIR member cards the work it sends to the fleet; inert on a box with no PAIR installed, where the serving
+node cards the job instead, see [pair-workloads](pair-workloads.md)), the media, state, cache and ledger
 paths under the home, and every model route and every script binding that has a default written empty,
 so `doctor`, `offload_status` and `acceptance` never claim a lane the box does not have. `ffmpeg_path` keeps
 its default only when ffmpeg and ffprobe are on PATH (`offload_media` and the kit's cut scripts run them

@@ -236,3 +236,18 @@ func TestRemoteTextSendsTheAttributionHeaders(t *testing.T) {
 		t.Errorf("emitter enabled: asker %q, want the member name node-a", h.Get(core.AskerHeader))
 	}
 }
+
+// The node's own running state turns the card running, once, between queued and the terminal frame.
+func TestRemoteTextCardTurnsRunningWhenTheNodeSaysTheJobStarted(t *testing.T) {
+	setBusy(t, false)
+	node := newFakeNode(t, "node-b", []string{"text"}, []string{"classify", "extract"}, remoteOK)
+	node.runningFirst = true
+	rig := newPairRig(t, true, hostOf(t, node))
+	if res := Run(context.Background(), clientConfig(node), attrLocal{&localRunner{}, rig}, textReq(), "remote"); !res.OK {
+		t.Fatalf("Run: %+v", res)
+	}
+	cards := rig.cards()
+	if cards["queued"] == nil || cards["running"] == nil || cards["completed"] == nil || rig.frameCount() != 3 {
+		t.Fatalf("cards = %v (%d frames), want queued, running, completed", cards, rig.frameCount())
+	}
+}

@@ -31,7 +31,12 @@ pending work on the node that runs it. Off by default; two config keys turn it o
 | `internal/pairworkloads/seatwatch.go` | the seat watcher (0.133.0): direct traffic on this box's vLLM seats as cards, run by fleet-serve |
 | `internal/seatinflight/seatinflight.go` | the machine-wide register of the harness's own seat requests, written by `modelaffinity.Admit` and the fleet chat lane; the watcher subtracts it |
 | `internal/pairworkloads/orphans.go` | the open-card register (0.133.1): one marker per in-flight card under `<state root>/pair-open/`, and the sweep that closes the cards of a dead process (`SweepOrphans`, `RunOrphanSweeper`) |
+| `internal/pairworkloads/remote.go` | `RemoteCall`: the one card and the one asker ledger row of a call routed to a fleet node (source 5 below) |
+| `internal/pairworkloads/wire.go` | the attribution headers an asker sends (`SetWireHeaders`, `WireHeadersFor`), `AskerName`, and `NodeName` (the dispatch host a node card is reported under) |
+| `internal/core/remoteattr.go` | `RemoteAttribution` / `RemoteAttributor`: the seam the remote lanes report through; `*pipeline.Pipeline` implements it (`internal/pipeline/remoteattr.go`) |
+| `internal/fleetnode/nodecard.go` | the serving node's own card for a job whose asker will not card it (*The node's fallback card* below) |
 | `internal/pairworkloads/pairworkloads_test.go`, `internal/delegate/pair_events_test.go`, `internal/pairworkloads/seatwatch_test.go`, `internal/pairworkloads/orphans_test.go` | the contract tests |
+| `internal/pairworkloads/attribution_test.go`, `internal/pairworkloads/remote_test.go`, `internal/{composeremote,visionremote,textremote}/attribution_test.go`, `internal/fleetnode/attribution_test.go`, `internal/delegate/attribution_test.go` | the remote-call attribution tests: one card per call, the headers, the node card, view-only resolution |
 
 ## What problem this solves
 
@@ -53,7 +58,7 @@ already using. PAIR's workload manager now accepts the same frames on a **loopba
 | `engine` | the real engine, with the identifiers PAIR's upstream engine PRs use: `llamacpp`, `vllm` (seat name contains `vllm`, or — for a seat behind this box's own endpoint — a name the box declares in `vllm_seats` directly or through the alias the llama-swap roster resolves it to: <node-b>'s `agent-pool` is an alias of `qwen3.8-27b-vllm-3card`; `Emitter.LocalEngine`, 0.132.7. Remote placements keep the name-based label, since a node's aliases live in its own roster), `whispercpp` (transcribe / whisper seats), `comfyui` (image, video, audio generation and editing, `run_graph`), and the accelerator itself for an NPU call (`coral-edgetpu`, `hailo-8l`, `rknpu`) — never `llamacpp` for work no llama.cpp seat did |
 | `state` | `queued` → `workload:submitted`, `running` → `workload:started`, `completed` → `workload:completed`, `failed` → `workload:errored` |
 | `originatedFrom` | this box's PAIR UUID, read from PAIR's `node-id.json` |
-| `scheduledOn` | the PAIR UUID of the node the job runs on, resolved by name from PAIR's `cluster/members.json`: for a remote placement's in-flight frames the name is the **host of the dispatch URL** (the tailnet name in `delegate_remotes`, which is the hostname PAIR's members carry — never the fleet node id, which PAIR cannot resolve; 0.126.1), and for the terminal frame the name the node reported; the local UUID for local work. **Since 0.131.2 a node is resolved from every name it goes by** (`Event.NodeAliases`: dispatch host, fleet node id, wire name) against member names *and* member addresses; the emitter remembers per job what the in-flight frame resolved to, so the terminal frame keeps the card where the job ran; a remote run none of the names resolves is stamped `null` — PAIR draws no line and names no node — never the delegator (before 0.131.2 every terminal frame of a node that reports its fleet id re-pointed the card at the delegator). **A local run whose config `endpoint` is another box's engine** (a bench config aimed at <node-c>'s arm) carries that endpoint's host as the name, so the card lands on the box whose engine did the work, never on the delegator's (register C-58; `modelaffinity.EndpointHost`) |
+| `scheduledOn` | the PAIR UUID of the node the job runs on, resolved by name from PAIR's `cluster/members.json`: for a remote placement's in-flight frames the name is the **host of the dispatch URL** (the tailnet name in `delegate_remotes`, which is the hostname PAIR's members carry — never the fleet node id, which PAIR cannot resolve; 0.126.1), and for the terminal frame the name the node reported; the local UUID for local work. **Since 0.131.2 a node is resolved from every name it goes by** (`Event.NodeAliases`: dispatch host, fleet node id, wire name) against member names *and* member addresses; the emitter remembers per job what the in-flight frame resolved to, so the terminal frame keeps the card where the job ran; a remote run none of the names resolves is stamped `null` — PAIR draws no line and names no node — never the delegator (before 0.131.2 every terminal frame of a node that reports its fleet id re-pointed the card at the delegator). **A view-only node resolves too** (unreleased): the names are matched against `<appdir>/configs/view-only-nodes.json` — the list of nodes the desktop shows that are not cluster members, `[{name, address, port, nodeUuid}]` — by name or address, case-insensitively, AFTER the members, so a member always wins; the file is cached and reloaded exactly as `members.json` is, and a missing or malformed file only means no view-only nodes (256 cards of a view-only node read `scheduledOn` null before) **A local run whose config `endpoint` is another box's engine** (a bench config aimed at <node-c>'s arm) carries that endpoint's host as the name, so the card lands on the box whose engine did the work, never on the delegator's (register C-58; `modelaffinity.EndpointHost`) |
 | `createdAt`, `startedAt`, `completedAt` | epoch ms; the last two `null` until known |
 | `error` | the defer reason / wire error / first failed acceptance check, on `failed` only |
 | `requesterId` | `offload-harness/<session>` (the session the ledger already stamps), or `offload-harness` |
@@ -118,11 +123,70 @@ and the harness has nothing to gain by sending them.
    that process starts, for as long as it runs, and silence a whole session. The
    `--detach` form holds a card for nobody's command and opens none.
 
+5. **Calls routed to a fleet node** (unreleased, `internal/pairworkloads/remote.go`). A remote or
+   auto-spilled `compose_video`, vision (`vqa`, `ocr`, `assess_image`, ...) or text (`classify`,
+   `extract`) call never goes through `Pipeline.Run` on the asking box (`composeremote.Run`,
+   `visionremote.Run` and `textremote.Run` send the job and poll it), so before this the asker wrote
+   neither a ledger row nor a card for work it had spilled, and a plain row would have carded the
+   asker itself (`ledger.Entry` named no node). The lanes now report through
+   `core.RemoteAttribution`, which the `Runner` they receive (`*pipeline.Pipeline`) provides:
+   - **One card per dispatched call**, on the node that serves it: `Event.Node` is the host of the
+     dispatch URL (`pairworkloads.NodeName`, the same name a delegation reports under) and
+     `NodeAliases` is the fleet node id from its health; `id` is the fleet job id; the engine is fixed
+     when the card opens (`hyperframes` for a composition, otherwise the task's own); the model is the
+     task until the node's result names the seat. `queued` when the call is dispatched, `running`
+     when the node's job state turns `running`, then `completed`, or `failed` with the result's
+     reason (a node that answered counts as started, so a finished card never reads "never started").
+   - **One asker ledger row** (door, route, placement, `node`, `node_id`, `fleet_job_id`, latency,
+     the deferred and error fields), written for every remote call. It carries `card_by_caller`,
+     which `AttachLedger` skips, so the observer never cards it a second time.
+   - **No card when no node was chosen**: a placement defer before any dispatch (no eligible node, a
+     bundle the node would refuse, no `delegate_remotes`) writes its row and opens nothing.
+   - **The auto route falling back to the local seat stays as it was**: an attempt that reached no node
+     leaves nothing behind (the local run writes its own row through the pipeline); one that did reach
+     a node (refused at dispatch, poll failures) closes its card `failed` and keeps one deferred row.
+   - The local route, and an auto call that runs here, never touch any of this.
+
+   A `*pipeline.Pipeline` only opens the card when `SetPairEmitter` was called (`openPipeline` does); the
+   row is written either way.
+
 **Served work is the asker's card** (0.140.6): a fleet node stamps work it runs FOR another box
 with the door `fleet` (`pairworkloads.FleetDoor`); `Begin` opens nothing for it and the ledger
 observer skips its rows, exactly as it always skipped `agent` rows. That is what makes
 `pair_workloads_enabled` safe on EVERY box, fleet nodes included: their own work (a CLI render
 started over ssh, a lease job) reports, the delegations and dispatches they serve do not.
+
+**The node's fallback card** (unreleased, `internal/fleetnode/nodecard.go`). "The asker's card" fails
+when the asker reports nothing: a thin client, a scratch `install client` config, a box that is not a
+PAIR member. Two request headers (`core.AskerHeader`, `core.PairCardHeader`, beside `X-Offload-Tenant`)
+carry the attribution from the asker to the node:
+
+| Header | Value | Sent by |
+|---|---|---|
+| `X-Offload-Asker` | the asker's PAIR member name when its emitter is enabled and the box is a member (lowercased), else its short lowercase hostname | every asker, on every request that creates work: delegation dispatch and queue submit, compose (template and project), vision, text, accelerator forwards |
+| `X-Offload-Pair-Card` | `node` | ONLY an asker whose emitter is not enabled (key off, PAIR not installed): nothing on that box will card the job |
+
+The signal is inverted on purpose, for a staggered rollout: an older asker sends neither header, so it
+keeps today's behaviour (it cards the job, or nobody does) and can never be carded twice. The node
+reads both headers in `admit` (and, for a pulled job, from the queued job: `fleetqueue.Job.Asker` /
+`PairCard`, stored by the holder's submit handler). The asker name is untrusted, so it is reduced to
+printable text of at most 64 characters (`core.SanitizeAsker`) before it is used.
+
+- **The asker's name is recorded whenever the header is present**: the node's ledger row carries it as
+  `requester` (`core.Request.Requester` → `Meta.Requester` → `ledger.Entry.Requester`).
+- **The card is emitted only on the signal.** From the node's own emitter (`fleetnode.Options.Pair`,
+  `fleet-serve` builds it from the node's config, so an in-flight card of a killed `fleet-serve` still
+  has an orphan marker and is closed): `queued` before the job is admitted (not after: the job can finish
+  on its own worker before `Admit` returns, and a queued frame emitted after a terminal one would
+  re-create the marker the terminal frame removed), `running` when the job starts, then `completed` or
+  `failed` with the result's reason. A job dropped before it started (withdrawn, or the node drained)
+  closes failed through `OnDropped`; a refused admission closes failed too. `id` is the fleet job id, the
+  node is this box, the engine comes from the harness task (`EngineFor`), the model from the job (the
+  result's model replaces the admission-time guess on the terminal frame), and the requester reads
+  `offload-harness/fleet:<asker>`. A node whose emitter is not enabled drops the frames.
+- **`AttachLedger` keeps skipping `door=fleet` rows**, so the node's card and its ledger row never
+  double. A pulled (claim-loop) job now gets `door=fleet` exactly like a pushed one — it never had it, so
+  the node's pipeline could card a long pulled job as its own work while its asker carded it as well.
 
 The emitter (`internal/pairworkloads.Emitter`) is fire-and-forget: a goroutine per frame with
 a 2 s timeout, one warning per process on the first failure, nothing ever changes a harness
@@ -144,7 +208,7 @@ holds the queued one, and asserts that it landed so; register C-77).
 
 | Key | Default | Meaning |
 |---|---|---|
-| `pair_workloads_enabled` | `false` | opt in. Enable on **every** box with PAIR installed (0.140.6). Work a fleet node serves for another box (`agent` rows, the `fleet` door) is skipped, so a job never shows twice; before 0.140.6 this was delegator-only, and every fleet node's own work was invisible |
+| `pair_workloads_enabled` | `false` (`install client` seeds `true`; it is inert where PAIR's `node-id.json` is absent) | opt in. Enable on **every** box with PAIR installed (0.140.6). Work a fleet node serves for another box (`agent` rows, the `fleet` door) is skipped, so a job never shows twice; before 0.140.6 this was delegator-only, and every fleet node's own work was invisible |
 | `pair_workloads_endpoint` | `http://127.0.0.1:14324/v1/workloads/events` | the ingress URL |
 | `pair_seat_activity_enabled` | `false` | fleet-serve reports DIRECT traffic on this box's vLLM seats (see *Seat activity* below). Enable on every box that **serves** a vLLM seat; independent of `pair_workloads_enabled` |
 | env `OFFLOAD_PAIR_APPDIR` | platform default | PAIR's app-data dir when it is not at `%LOCALAPPDATA%\Nvidia Corporation\Personal AI Router` (Windows) / `~/.config/Nvidia Corporation/Personal AI Router` (Linux); tests use it |
@@ -281,6 +345,12 @@ appears in PAIR's Jobs list on this box **and** on the node that ran it, reading
   sweep closes it as `failed` within one fleet-serve sweep interval (45 s), or on the next emit of
   any harness process on the box. A card still stuck: check `<state root>/pair-open/` for its
   marker (`<pid>-<job id>.json`) and whether a harness process on the box has either key on.
+- **A remote call has no card on its asker**: the asker's emitter is not enabled (the node then cards it,
+  as `Requested from fleet:<asker>`, only when the node's own emitter is enabled), or no node was chosen
+  (a placement defer writes a row and no card), or the node is an older build that does not read the
+  signal. A card with no node line: the dispatch host and the fleet node id are in neither
+  `cluster/members.json` nor `configs/view-only-nodes.json`; the first failure logs one
+  `pairworkloads: no PAIR member is named ...` line.
 - **Nothing appears**: the key is off, PAIR is not installed (no `node-id.json`), or the
   stock worker is back after a PAIR update (`curl` returns connection refused on 14324).
   The first failed send logs one `pairworkloads:` line.

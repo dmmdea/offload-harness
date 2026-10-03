@@ -43,11 +43,12 @@ type nodeCard struct {
 	done    bool
 }
 
-// newNodeCard returns the card of job jobID of fleet task type task (model: the seat or family it
-// was admitted for, "" if unknown), or nil when none is due: the asker did not signal, or this node's
-// emitter is not enabled (the key is off, or PAIR is not installed here).
+// newNodeCard returns the card of job jobID of harness task task (model: the seat or family it was
+// admitted for, "" if unknown), or nil when none is due: the asker did not signal. A node whose
+// emitter is not enabled (the key is off, or PAIR is not installed here) gets a card whose frames
+// the emitter drops, so the one gate on enablement is the emitter's own.
 func (s *Server) newNodeCard(task, model, jobID, asker string, signalled bool) *nodeCard {
-	if !signalled || jobID == "" || !s.opts.Pair.Enabled() {
+	if !signalled || jobID == "" {
 		return nil
 	}
 	if model == "" {

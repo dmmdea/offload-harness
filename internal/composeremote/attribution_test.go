@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
@@ -200,3 +201,19 @@ func TestRemoteComposeSendsTheAttributionHeaders(t *testing.T) {
 type localOnly struct{}
 
 func (localOnly) Run(context.Context, core.Request) core.Result { return core.Result{OK: true} }
+
+// A render the node is still working on reads "running" on the first poll: the card turns running,
+// once, between queued and the terminal frame.
+func TestRemoteComposeCardTurnsRunningWhenTheNodeSaysTheJobStarted(t *testing.T) {
+	n := startNode(t, false)
+	n.runner.delay = 600 * time.Millisecond
+	rig := newPairRig(t, true, dispatchHost(t, n))
+	res := Run(context.Background(), clientCfg(t, n), rig.p, core.Request{Task: core.TaskComposeVideo, Params: map[string]any{"template": "title-card"}}, "remote")
+	if !res.OK {
+		t.Fatalf("Run: %+v", res)
+	}
+	cards := rig.cards()
+	if cards["queued"] == nil || cards["running"] == nil || cards["completed"] == nil || rig.frameCount() != 3 {
+		t.Fatalf("cards = %v (%d frames), want queued, running, completed", cards, rig.frameCount())
+	}
+}

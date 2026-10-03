@@ -24,6 +24,7 @@ type nodeRunner struct {
 	mu       sync.Mutex
 	media    string
 	defer_   string
+	delay    time.Duration // how long a render takes (the poll sees the job running meanwhile)
 	lastReq  core.Request
 	sawFiles []string
 }
@@ -32,6 +33,9 @@ func (n *nodeRunner) Run(_ context.Context, req core.Request) core.Result {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.lastReq = req
+	if n.delay > 0 {
+		time.Sleep(n.delay)
+	}
 	if dir, _ := req.Params["project_dir"].(string); dir != "" {
 		_ = filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
 			if err == nil && !d.IsDir() {

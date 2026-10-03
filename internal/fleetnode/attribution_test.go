@@ -213,7 +213,7 @@ func TestNodeSanitizesTheAskerName(t *testing.T) {
 	}
 	pollJob(t, s, "evil-1", JobDone)
 	req := fr.requests()[0]
-	if len([]rune(req.Requester)) > core.AskerMaxLen || strings.ContainsAny(req.Requester, "\x00\x1b\r\n") || !strings.HasPrefix(req.Requester, "node-q") {
+	if len([]rune(req.Requester)) > 64 || strings.ContainsAny(req.Requester, "\x00\x1b\r\n") || !strings.HasPrefix(req.Requester, "node-q") {
 		t.Fatalf("requester = %q", req.Requester)
 	}
 	cards := pn.cards(t)
@@ -231,8 +231,8 @@ func TestSanitizeAsker(t *testing.T) {
 		"node\x00-q":            "node-q",
 		"a \t\r\n b":            "a b",
 		"\x1b[31m":              "[31m",
-		long:                    long[:core.AskerMaxLen],
-		strings.Repeat("é", 70): strings.Repeat("é", core.AskerMaxLen),
+		long:                    long[:64],
+		strings.Repeat("é", 70): strings.Repeat("é", 64),
 	} {
 		if got := core.SanitizeAsker(in); got != want {
 			t.Errorf("SanitizeAsker(%q) = %q, want %q", in, got, want)

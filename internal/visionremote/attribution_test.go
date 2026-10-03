@@ -236,3 +236,18 @@ func TestRemoteVisionSendsTheAttributionHeaders(t *testing.T) {
 		t.Errorf("emitter enabled: asker %q, want the member name node-a", h.Get(core.AskerHeader))
 	}
 }
+
+// The node's own running state turns the card running, once, between queued and the terminal frame.
+func TestRemoteVisionCardTurnsRunningWhenTheNodeSaysTheJobStarted(t *testing.T) {
+	setBusy(t, false)
+	node := newFakeNode(t, "node-b", []string{"vision"}, remoteOK)
+	node.runningFirst = true
+	rig := newPairRig(t, true, hostOf(t, node))
+	if res := Run(context.Background(), clientConfig(node), attrLocal{&localRunner{}, rig}, visionReq(t), "remote"); !res.OK {
+		t.Fatalf("Run: %+v", res)
+	}
+	cards := rig.cards()
+	if cards["queued"] == nil || cards["running"] == nil || cards["completed"] == nil || rig.frameCount() != 3 {
+		t.Fatalf("cards = %v (%d frames), want queued, running, completed", cards, rig.frameCount())
+	}
+}
