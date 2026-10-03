@@ -317,3 +317,22 @@ func TestRejectedTerminalFrameIsDroppedNotPended(t *testing.T) {
 		t.Fatalf("marker must be pending: %s", raw)
 	}
 }
+
+// Only a status that is a verdict on the frame is a rejection: 408 and 429 ask
+// for a retry, and 5xx is PAIR failing, so none of them may drop a marker.
+func TestRetryableClientStatusesAreNotRejections(t *testing.T) {
+	for status, want := range map[int]bool{
+		http.StatusBadRequest:          true,
+		http.StatusUnprocessableEntity: true,
+		http.StatusNotFound:            true,
+		http.StatusRequestTimeout:      false,
+		http.StatusTooManyRequests:     false,
+		http.StatusInternalServerError: false,
+		http.StatusServiceUnavailable:  false,
+		http.StatusMovedPermanently:    false,
+	} {
+		if got := rejection(status); got != want {
+			t.Errorf("rejection(%d) = %v, want %v", status, got, want)
+		}
+	}
+}
