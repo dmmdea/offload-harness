@@ -301,3 +301,93 @@ func TestAGrantInTheInstantOfTheTimeoutIsKept(t *testing.T) {
 		t.Fatal("the caller holds card a: nobody else may take it")
 	}
 }
+
+// takeAny serves a job running under a lease its parent holds on SEVERAL cards: it runs on
+// whichever of them is free, and waits for the first to free when none is.
+
+func TestTakeAnyPicksTheFirstFreeCard(t *testing.T) {
+	s := &slotSet{}
+	s.tryTake([]string{"a"})
+	got, ok := s.takeAny([]string{"a", "b", "c"}, 0)
+	if !ok || got != "b" {
+		t.Fatalf("picked %q ok=%v, want b: the first candidate that is free", got, ok)
+	}
+	if s.tryTake([]string{"b"}) {
+		t.Fatal("the picked card is held")
+	}
+}
+
+func TestTakeAnyWaitsForTheFirstCardToFree(t *testing.T) {
+	s := &slotSet{}
+	s.tryTake([]string{"a"})
+	s.tryTake([]string{"b"})
+	type res struct {
+		id string
+		ok bool
+	}
+	got := make(chan res, 1)
+	go func() { id, ok := s.takeAny([]string{"a", "b"}, 5*time.Second); got <- res{id, ok} }()
+	waitQueued(t, s, 1)
+	s.release([]string{"b"})
+	select {
+	case r := <-got:
+		if !r.ok || r.id != "b" {
+			t.Fatalf("got %+v, want card b, the one that freed", r)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the waiter was never woken")
+	}
+	if s.tryTake([]string{"b"}) {
+		t.Fatal("card b is held by the waiter")
+	}
+	if !s.tryTake([]string{"c"}) {
+		t.Fatal("a card outside the candidates is untouched")
+	}
+}
+
+func TestTakeAnyTimesOutWithNothingHeld(t *testing.T) {
+	s := &slotSet{}
+	s.tryTake([]string{"a"})
+	if id, ok := s.takeAny([]string{"a"}, 30*time.Millisecond); ok {
+		t.Fatalf("took %q although the only candidate is held", id)
+	}
+	if s.queued() != 0 {
+		t.Fatal("a timed-out waiter lingers")
+	}
+	s.release([]string{"a"})
+	if !s.tryTake([]string{"a"}) {
+		t.Fatal("the card must be free: the timed-out waiter must not have been granted it")
+	}
+	if id, ok := (&slotSet{}).takeAny(nil, time.Second); ok || id != "" {
+		t.Fatal("no candidates, no card")
+	}
+}
+
+// The whole-node holder excludes it, and an earlier waiter for a card keeps its place.
+func TestTakeAnyRespectsTheWholeNodeAndTheQueue(t *testing.T) {
+	s := &slotSet{}
+	s.tryTake(nil)
+	if _, ok := s.takeAny([]string{"a", "b"}, 0); ok {
+		t.Fatal("no card while the whole node is held")
+	}
+	s.release(nil)
+	s.tryTake([]string{"a"})
+	first := make(chan bool, 1)
+	go func() { first <- s.take([]string{"b"}, 5*time.Second) }() // not free? it is: b is free, so this returns at once
+	if !<-first {
+		t.Fatal("setup: b is free")
+	}
+	// b is now held, a is held: a queued waiter for a, then takeAny over a and c: c is free and
+	// nobody ahead wants it.
+	queued := make(chan bool, 1)
+	go func() { queued <- s.take([]string{"a"}, 5*time.Second) }()
+	waitQueued(t, s, 1)
+	id, ok := s.takeAny([]string{"a", "c"}, time.Second)
+	if !ok || id != "c" {
+		t.Fatalf("took %q ok=%v, want c: a is held and wanted by the waiter ahead", id, ok)
+	}
+	s.release([]string{"a"})
+	if !<-queued {
+		t.Fatal("the earlier waiter for a must be served when a frees")
+	}
+}

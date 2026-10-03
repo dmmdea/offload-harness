@@ -261,3 +261,7 @@ func (m *Manager) QueuePosition(devices []string, since time.Time, exclude strin
 	}
 	return n
 }
+
+// TokenLive reports whether a token still holds its place in line: its poller left within the
+// grace. A token past it is absent: every waiter skips it.
+func (m *Manager) TokenLive(t Token) bool { return m.tokenLive(t) }

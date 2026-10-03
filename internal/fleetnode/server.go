@@ -1889,20 +1889,23 @@ func (s *Server) textLeased() (gpulease.Info, bool) {
 //
 //   - image-gen / video-gen / audio-gen / run-graph and every configured
 //     pipeline route go through Pipeline.acquireMediaLease, which takes the
-//     in-process mediaSlot (capacity ONE) and then the machine-wide gpulease
-//     ClassMedia. They are already serialized far harder than this cap would
-//     serialize them.
+//     in-process media slots (one per card; a job that holds the whole node
+//     holds them all) and then the machine-wide gpulease ClassMedia. They are
+//     already serialized as hard as the cards they use, far harder than this cap
+//     would serialize them.
 //   - stt runs against whisper-server, a different process with a different
 //     endpoint. It never touches llama-swap.
 //
 // Capping those would be both redundant and actively harmful. A media job
-// blocked inside takeMediaSlot holds a fleet execution slot while doing NO
-// work; with mediaSlot at capacity one, four queued media dispatches would
-// occupy all four slots while three of them sit parked — starving the agent
-// lane, which is the lane the cap was written to protect. It would also destroy
-// media's own designed back-pressure: a media job that cannot get the card
-// waits gpu_wait_ms and defers `gpu_busy`, a bounded and well-tested signal a
-// job held in `accepted` never reaches.
+// blocked inside the media slots holds a fleet execution slot while doing NO
+// work; with every card taken, four queued media dispatches would occupy all
+// four slots while three of them sit parked — starving the agent lane, which is
+// the lane the cap was written to protect. It would also destroy media's own
+// designed back-pressure: a media job that cannot get a card waits gpu_wait_ms
+// and then answers with a place in line (`gpu_queued` and a waiter_token; the
+// delegator re-places it) on a host that leases cards, or defers `gpu_busy` on
+// one that does not, a bounded and well-tested signal a job held in `accepted`
+// never reaches.
 //
 // DEFAULT IS CAPPED, deliberately. An unrecognized (future) task type is
 // assumed to contend for the text endpoint, because of the two ways to be
@@ -1934,7 +1937,7 @@ func (s *Server) concurrencyCapped(taskType string) bool {
 		return false
 	}
 	// Config-driven pipeline routes run through runPipelineJob, which takes the
-	// same mediaSlot. Their names are operator-chosen, so they cannot be listed
+	// same media slots (the whole node). Their names are operator-chosen, so they cannot be listed
 	// above and must be recognized from config.
 	if _, ok := s.opts.Cfg.Pipelines[taskType]; ok {
 		return false

@@ -29,6 +29,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/audioio"
 	"github.com/dmmdea/offload-harness/internal/breaker"
 	"github.com/dmmdea/offload-harness/internal/cache"
+	"github.com/dmmdea/offload-harness/internal/comfyinst"
 	"github.com/dmmdea/offload-harness/internal/confhead"
 	"github.com/dmmdea/offload-harness/internal/confidence"
 	"github.com/dmmdea/offload-harness/internal/config"
@@ -38,9 +39,11 @@ import (
 	"github.com/dmmdea/offload-harness/internal/exemplars"
 	"github.com/dmmdea/offload-harness/internal/fleetnode"
 	"github.com/dmmdea/offload-harness/internal/gbnf"
+	"github.com/dmmdea/offload-harness/internal/gpualloc"
 	"github.com/dmmdea/offload-harness/internal/gpugen"
 	"github.com/dmmdea/offload-harness/internal/gpulease"
 	"github.com/dmmdea/offload-harness/internal/gpulock"
+	"github.com/dmmdea/offload-harness/internal/gpuprobe"
 	"github.com/dmmdea/offload-harness/internal/grounding"
 	"github.com/dmmdea/offload-harness/internal/imagegen"
 	"github.com/dmmdea/offload-harness/internal/imageio"
@@ -70,6 +73,14 @@ type tierOverrides struct {
 }
 
 type Pipeline struct {
+	// Media admission (plan P13, mediaadmit.go). alloc is the seam for the live reads behind the
+	// card allocator (the zero value reads the real machine); instanceAPI names the endpoint of the
+	// ComfyUI instance bound to a card (nil = the base port plus the card's index); stopKept stops
+	// the ComfyUI instances kept under a lease when it is released (nil = internal/comfyinst).
+	alloc       gpualloc.Deps
+	instanceAPI func(gpuprobe.Card) string
+	stopKept    func(ctx context.Context, comfyDir string, epoch uint64) []comfyinst.Outcome
+
 	// seatRatesPath is the per-seat rate store under the state root, resolved
 	// by seatRates() on each agent run (empty = no usable root).
 	seatRatesPath string
@@ -1525,13 +1536,15 @@ func (p *Pipeline) runGenerateImage(ctx context.Context, req core.Request, meta 
 	// Passive fleet footprint: key this render by the machine's image binding
 	// (family + the O1 bf16 quant) so measured peaks accumulate during normal use.
 	imgFamily, imgQuant := imageFootprintKey(cfg)
-	leaseEnv, releaseLease, lerr := p.acquireMediaLease(ctx, "image-gen", timeout, p.gpuWait())
+	grant, lerr := p.acquireMediaLease(ctx, "image-gen", timeout, p.gpuWait(), imageNeed(cfg, paramStr(req.Params, "waiter_token")))
 	if lerr != nil {
 		return p.deferForLease(lerr, req.Task, meta, len(req.Input), start)
 	}
-	defer releaseLease()
+	defer grant.Release()
+	// On a per-card instance the launch names the instance and the card (and blanks the index).
+	model.Launch = grant.launch(model.Launch)
 	outPath, gerr := imagegen.Generate(ctx, cfg.NodePath, script, cfg.ComfyDir, out, renderPrompt, req.Params, model, timeout,
-		p.footprintSampling(imgFamily, imgQuant, "image-gen"), leaseEnv...)
+		p.footprintSampling(imgFamily, imgQuant, "image-gen"), grant.Env...)
 	if gerr != nil {
 		meta.LatencyMs = time.Since(start).Milliseconds()
 		meta.ErrClass = classifyErr(gerr)
@@ -1667,13 +1680,14 @@ func (p *Pipeline) runGenerateImageSdcpp(ctx context.Context, req core.Request, 
 		ExtraArgs: cfg.SdcppExtraArgs,
 	}
 	imgFamily, imgQuant := imageFootprintKey(cfg)
-	leaseEnv, releaseLease, lerr := p.acquireMediaLease(ctx, "image-gen (sdcpp)", timeout, p.gpuWait())
+	// sd.cpp has no ComfyUI instance to bind to a card: the whole node, as always.
+	grant, lerr := p.acquireMediaLease(ctx, "image-gen (sdcpp)", timeout, p.gpuWait(), wholeNeed(paramStr(req.Params, "waiter_token")))
 	if lerr != nil {
 		return p.deferForLease(lerr, req.Task, meta, len(req.Input), start)
 	}
-	defer releaseLease()
+	defer grant.Release()
 	outPath, gerr := imagegen.GenerateSdcpp(ctx, cfg.NodePath, script, out, renderPrompt, req.Params, m, timeout,
-		p.footprintSampling(imgFamily, imgQuant, "image-gen"), leaseEnv...)
+		p.footprintSampling(imgFamily, imgQuant, "image-gen"), grant.Env...)
 	if gerr != nil {
 		meta.ErrClass = classifyErr(gerr)
 		return deferf("image generation failed: " + gerr.Error())
@@ -1752,14 +1766,14 @@ func (p *Pipeline) runInpaintImage(ctx context.Context, req core.Request, meta c
 		CFG: p.cfg.InpaintCFG, Sampler: p.cfg.InpaintSampler, Scheduler: p.cfg.InpaintScheduler,
 	}
 	timeout := time.Duration(p.cfg.InpaintTimeoutSec) * time.Second
-	leaseEnv, releaseLease, lerr := p.acquireMediaLease(ctx, "inpaint", timeout, p.gpuWait())
+	grant, lerr := p.acquireMediaLease(ctx, "inpaint", timeout, p.gpuWait(), singleCardNeed(p.cfg, paramStr(req.Params, "waiter_token")))
 	if lerr != nil {
 		return p.deferForLease(lerr, req.Task, meta, len(req.Input), start)
 	}
-	defer releaseLease()
-	// Single-card route: the device pin applies (comfyLaunch).
+	defer grant.Release()
+	// Single-card route: the device pin applies (comfyLaunch), or the instance bound to the card.
 	outPath, gerr := imagegen.Inpaint(ctx, p.cfg.NodePath, script, p.cfg.ComfyDir, out, image, mask, prompt, req.Params, m, timeout,
-		append(leaseEnv, comfyLaunch(p.cfg, true).Env()...)...)
+		append(grant.Env, grant.launch(comfyLaunch(p.cfg, true)).Env()...)...)
 	if gerr != nil {
 		meta.ErrClass = classifyErr(gerr)
 		return defer1("inpaint failed: " + gerr.Error())
@@ -1851,14 +1865,14 @@ func (p *Pipeline) runUpscaleImage(ctx context.Context, req core.Request, meta c
 		out = filepath.Join(p.cfg.MediaDir, "upscale-"+sha256hex(image + tasks.StableParamsKey(req.Params))[:8]+".png")
 	}
 	timeout := time.Duration(p.cfg.UpscaleTimeoutSec) * time.Second
-	leaseEnv, releaseLease, lerr := p.acquireMediaLease(ctx, "upscale", timeout, p.gpuWait())
+	grant, lerr := p.acquireMediaLease(ctx, "upscale", timeout, p.gpuWait(), singleCardNeed(p.cfg, paramStr(req.Params, "waiter_token")))
 	if lerr != nil {
 		return p.deferForLease(lerr, req.Task, meta, len(req.Input), start)
 	}
-	defer releaseLease()
-	// Single-card route: the device pin applies (comfyLaunch).
+	defer grant.Release()
+	// Single-card route: the device pin applies (comfyLaunch), or the instance bound to the card.
 	outPath, gerr := imagegen.Upscale(ctx, p.cfg.NodePath, script, p.cfg.ComfyDir, out, image, req.Params, imagegen.UpscaleModel{Model: model}, timeout,
-		append(leaseEnv, comfyLaunch(p.cfg, true).Env()...)...)
+		append(grant.Env, grant.launch(comfyLaunch(p.cfg, true)).Env()...)...)
 	if gerr != nil {
 		meta.ErrClass = classifyErr(gerr)
 		return defer1("upscale failed: " + gerr.Error())
@@ -2037,12 +2051,13 @@ func (p *Pipeline) runEditImageGenerative(ctx context.Context, req core.Request,
 		Launch: comfyLaunch(cfg, true),
 	}
 	timeout := time.Duration(cfg.GenEditTimeoutSec) * time.Second
-	leaseEnv, releaseLease, lerr := p.acquireMediaLease(ctx, "edit", timeout, p.gpuWait())
+	grant, lerr := p.acquireMediaLease(ctx, "edit", timeout, p.gpuWait(), singleCardNeed(cfg, paramStr(req.Params, "waiter_token")))
 	if lerr != nil {
 		return p.deferForLease(lerr, req.Task, meta, len(req.Input), start)
 	}
-	defer releaseLease()
-	outPath, gerr := imagegen.Edit(ctx, cfg.NodePath, script, cfg.ComfyDir, out, image, prompt, req.Params, m, timeout, leaseEnv...)
+	defer grant.Release()
+	m.Launch = grant.launch(m.Launch)
+	outPath, gerr := imagegen.Edit(ctx, cfg.NodePath, script, cfg.ComfyDir, out, image, prompt, req.Params, m, timeout, grant.Env...)
 	if gerr != nil {
 		meta.ErrClass = classifyErr(gerr)
 		return defer1("generative edit failed: " + gerr.Error())
@@ -2330,12 +2345,13 @@ func (p *Pipeline) RunImageBatch(ctx context.Context, jobs []ImageBatchJob) ([]I
 	// 3,356 unloads in the server log.
 	// This helper returns items+error rather than a core.Result, so a busy card surfaces
 	// as an error for the caller to classify — no items were produced.
-	leaseEnv, releaseLease, lerr := p.acquireMediaLease(ctx, "image-gen batch", timeout, p.gpuWait())
+	grant, lerr := p.acquireMediaLease(ctx, "image-gen batch", timeout, p.gpuWait(), imageNeed(p.cfg, ""))
 	if lerr != nil {
 		return nil, lerr
 	}
-	defer releaseLease()
-	gerr := imagegen.GenerateBatch(ctx, p.cfg.NodePath, script, p.cfg.ComfyDir, jobsPath, resultsPath, model, timeout, leaseEnv...)
+	defer grant.Release()
+	model.Launch = grant.launch(model.Launch)
+	gerr := imagegen.GenerateBatch(ctx, p.cfg.NodePath, script, p.cfg.ComfyDir, jobsPath, resultsPath, model, timeout, grant.Env...)
 
 	raw, _ := os.ReadFile(resultsPath) // best-effort even on gerr: partial results are real work
 	items := parseBatchResults(raw, norm)
@@ -2443,15 +2459,17 @@ func (p *Pipeline) runRunGraph(ctx context.Context, req core.Request, meta core.
 	timeout := time.Duration(p.cfg.ImageGenTimeoutSec) * time.Second
 	// Passive fleet footprint: family from a payload-declared model_family (the
 	// fleet dispatch path threads it) else the generic comfy-graph bucket.
-	leaseEnv, releaseLease, lerr := p.acquireMediaLease(ctx, "run-graph", timeout, p.gpuWait())
+	// run-graph holds the whole node unless the operator DECLARES devices: the caller's graph owns
+	// its placement, so nothing here can know which cards it will use.
+	grant, lerr := p.acquireMediaLease(ctx, "run-graph", timeout, p.gpuWait(), declaredNeed(declaredDevices(req.Params), paramStr(req.Params, "waiter_token")))
 	if lerr != nil {
 		return p.deferForLease(lerr, req.Task, meta, len(req.Input), start)
 	}
-	defer releaseLease()
+	defer grant.Release()
 	// run-graph gets the launch-wide keys but never the device pin: the caller's graph
 	// owns its placement (comfyLaunch).
 	env, gerr := rungraph.Run(ctx, p.cfg.NodePath, script, p.cfg.ComfyDir, params, timeout,
-		p.footprintSampling(runGraphFootprintFamily(req.Params), "", "run-graph"), append(leaseEnv, comfyLaunch(p.cfg, false).Env()...)...)
+		p.footprintSampling(runGraphFootprintFamily(req.Params), "", "run-graph"), append(grant.Env, grant.launch(comfyLaunch(p.cfg, false)).Env()...)...)
 	if gerr != nil {
 		meta.ErrClass = gpugen.ClassifyErr(gerr)
 		return p.deferGen(req, meta, start, len(req.Input), "run-graph failed: "+gerr.Error())
@@ -2869,11 +2887,11 @@ func (p *Pipeline) runGenerateVideo(ctx context.Context, req core.Request, meta 
 	}
 
 	timeout := time.Duration(p.cfg.VideoGenTimeoutSec) * time.Second
-	leaseEnv, releaseLease, lerr := p.acquireMediaLease(ctx, "video-gen", timeout, p.gpuWait())
+	grant, lerr := p.acquireMediaLease(ctx, "video-gen", timeout, p.gpuWait(), videoNeed(p.cfg, paramStr(req.Params, "waiter_token")))
 	if lerr != nil {
 		return p.deferForLease(lerr, req.Task, meta, len(req.Input), start)
 	}
-	defer releaseLease()
+	defer grant.Release()
 	// COMFY_WAIT_SEC aligns the render script's poll budget with the harness timeout
 	// (quality-first: the native recipe at 720p legitimately exceeds the script's old
 	// hardcoded ceiling; the Go timeout stays the hard stop).
@@ -2882,7 +2900,7 @@ func (p *Pipeline) runGenerateVideo(ctx context.Context, req core.Request, meta 
 	// ComfyUI's default device (MultiGPU #220) — an un-pooled seat has no pool keys to
 	// place it and must not silently land on ComfyUI's default device instead, which
 	// on this box's enumeration is the display card.
-	env := append(p.comfyGenEnv(!p.cfg.VideoPooled()), leaseEnv...)
+	env := append(p.comfyGenEnvFor(grant, !p.cfg.VideoPooled()), grant.Env...)
 	if timeout > 0 {
 		env = append(env, "COMFY_WAIT_SEC="+strconv.Itoa(int(timeout/time.Second)))
 	}
@@ -3008,13 +3026,13 @@ func (p *Pipeline) runAnimateCharacter(ctx context.Context, req core.Request, me
 	}
 
 	timeout := time.Duration(p.cfg.AnimateGenTimeoutSec) * time.Second
-	leaseEnv, releaseLease, lerr := p.acquireMediaLease(ctx, "animate", timeout, p.gpuWait())
+	grant, lerr := p.acquireMediaLease(ctx, "animate", timeout, p.gpuWait(), singleCardNeed(p.cfg, paramStr(req.Params, "waiter_token")))
 	if lerr != nil {
 		return p.deferForLease(lerr, req.Task, meta, len(req.Input), start)
 	}
-	defer releaseLease()
-	// Single-card route: the device pin applies (comfyLaunch).
-	env := append(p.comfyGenEnv(true), leaseEnv...)
+	defer grant.Release()
+	// Single-card route: the device pin applies (comfyLaunch), or the instance bound to the card.
+	env := append(p.comfyGenEnvFor(grant, true), grant.Env...)
 	if timeout > 0 {
 		env = append(env, "COMFY_WAIT_SEC="+strconv.Itoa(int(timeout/time.Second)))
 	}
@@ -3166,23 +3184,29 @@ func (p *Pipeline) runGenerateAudio(ctx context.Context, req core.Request, meta 
 	}
 
 	timeout := time.Duration(p.cfg.AudioGenTimeoutSec) * time.Second
-	leaseEnv, releaseLease, lerr := p.acquireMediaLease(ctx, "audio-gen ("+kind+")", timeout, p.gpuWait())
+	// voice (Chatterbox TTS) has no ComfyUI instance to bind to a card: the whole node. music drives
+	// ComfyUI on a single card.
+	need := wholeNeed(paramStr(req.Params, "waiter_token"))
+	if kind == "music" {
+		need = singleCardNeed(p.cfg, paramStr(req.Params, "waiter_token"))
+	}
+	grant, lerr := p.acquireMediaLease(ctx, "audio-gen ("+kind+")", timeout, p.gpuWait(), need)
 	if lerr != nil {
 		return p.deferForLease(lerr, req.Task, meta, len(req.Input), start)
 	}
-	defer releaseLease()
+	defer grant.Release()
 	// voice never starts ComfyUI → skip the post-run ComfyUI /free (still tree-kills
 	// the python worker on timeout). music drives ComfyUI → keep the /free, and take the
-	// launch profile (a single-card route: the device pin applies).
+	// launch profile (a single-card route: the device pin applies, or the instance bound to the card).
 	audioGenEnv := p.genEnv()
 	if kind == "music" {
-		audioGenEnv = p.comfyGenEnv(true)
+		audioGenEnv = p.comfyGenEnvFor(grant, true)
 	}
 	spec := gpugen.Spec{
 		Exe:           p.cfg.NodePath,
 		Script:        script,
 		Args:          args,
-		Env:           append(audioGenEnv, leaseEnv...),
+		Env:           append(audioGenEnv, grant.Env...),
 		Out:           out,
 		Timeout:       timeout,
 		SkipFreeComfy: kind == "voice",
@@ -3360,7 +3384,8 @@ func (e *errGPUBusy) Error() string {
 // failure and exited non-zero, which is precisely what a defer exists to avoid.
 func IsGPUBusy(err error) bool {
 	var busy *errGPUBusy
-	return errors.As(err, &busy)
+	var queued *errGPUQueued
+	return errors.As(err, &busy) || errors.As(err, &queued)
 }
 
 // deferForLease turns a lease-acquisition failure into the same clean defer the render
@@ -3370,6 +3395,17 @@ func IsGPUBusy(err error) bool {
 // the two are distinguishable in the ledger.
 func (p *Pipeline) deferForLease(err error, task core.TaskType, meta core.Meta, inputChars int, start time.Time) core.Result {
 	meta.LatencyMs = time.Since(start).Milliseconds()
+	// A call that waited its window with no card is not refused: it holds a place in line, and the
+	// answer carries the token that resumes it (mediaadmit.go).
+	var queued *errGPUQueued
+	if errors.As(err, &queued) {
+		meta.ErrClass = "gpu_queued"
+		p.recordDefer(task, meta, inputChars, err.Error())
+		res := core.Deferf(err.Error(), "", meta)
+		res.DeferClass = core.DeferClassCapacity
+		res.Data = queued.payload()
+		return res
+	}
 	var busy *errGPUBusy
 	if errors.As(err, &busy) {
 		meta.ErrClass = "gpu_busy"
@@ -3380,8 +3416,10 @@ func (p *Pipeline) deferForLease(err error, task core.TaskType, meta core.Meta, 
 	return core.Deferf(err.Error(), "", meta)
 }
 
-// acquireMediaLease takes the machine-wide MEDIA lease for one generation job and
-// returns the env that hands it down to the render runner, plus a release func.
+// acquireWholeNode takes the machine-wide, WHOLE-NODE MEDIA lease for one generation job and
+// returns the env that hands it down to the render runner, plus a release func. It is what every
+// call did before cards could be leased, and what a call still does when it needs the whole node
+// or runs on a host that cannot lease cards (acquireMediaLease, mediaadmit.go, decides).
 //
 // THIS IS WHERE ARBITRATION MOVED TO. Acquisition used to live only in
 // render/gpu-lock.mjs, which meant the Go side could not refuse a job before spawning
@@ -3394,7 +3432,7 @@ func (p *Pipeline) deferForLease(err error, task core.TaskType, meta core.Meta, 
 // have waited and timed out. The heartbeat keeps a long render's lease alive; the
 // reclaim rule needs both a stale heartbeat and an expired window, so a missed tick
 // inside the declared window is harmless.
-func (p *Pipeline) acquireMediaLease(ctx context.Context, reason string, ttl, wait time.Duration) ([]string, func(), error) {
+func (p *Pipeline) acquireWholeNode(ctx context.Context, reason string, ttl, wait time.Duration, resume string) ([]string, func(), error) {
 	noop := func() {}
 	start := time.Now()
 
@@ -3443,8 +3481,10 @@ func (p *Pipeline) acquireMediaLease(ctx context.Context, reason string, ttl, wa
 	if remaining < 0 {
 		remaining = 0
 	}
+	// resume is a place-keeping token (gpulease/tokens.go): only a host that leases cards ever
+	// leaves one, so on any other host it names nothing and the call is what it always was.
 	lease, err := m.Acquire(gpulease.ClassMedia, gpulease.Options{
-		Reason: reason, Origin: "pipeline", TTL: ttl, Wait: remaining,
+		Reason: reason, Origin: "pipeline", TTL: ttl, Wait: remaining, ResumeToken: resume,
 	})
 	if err != nil {
 		var held *gpulease.ErrHeld
@@ -3664,6 +3704,37 @@ func comfyLaunch(cfg config.Config, singleCard bool) imagegen.ComfyLaunch {
 // build their env from genEnv (video, animate, music).
 func (p *Pipeline) comfyGenEnv(singleCard bool) []string {
 	return append(p.genEnv(), comfyLaunch(p.cfg, singleCard).Env()...)
+}
+
+// comfyGenEnvFor is comfyGenEnv for a call that holds a grant: on a per-card instance the launch
+// profile names the instance and the card.
+func (p *Pipeline) comfyGenEnvFor(g mediaGrant, singleCard bool) []string {
+	return append(p.genEnv(), g.launch(comfyLaunch(p.cfg, singleCard)).Env()...)
+}
+
+// declaredDevices reads the cards an operator declared for a call (run-graph "devices"): a list,
+// or a comma-separated string, of nvidia-smi indices or UUID prefixes. Absent = none declared.
+func declaredDevices(params map[string]any) []string {
+	var raw []string
+	switch v := params["devices"].(type) {
+	case string:
+		raw = strings.Split(v, ",")
+	case []string:
+		raw = v
+	case []any:
+		for _, x := range v {
+			if s, ok := x.(string); ok {
+				raw = append(raw, s)
+			}
+		}
+	}
+	var out []string
+	for _, d := range raw {
+		if d = strings.TrimSpace(d); d != "" {
+			out = append(out, d)
+		}
+	}
+	return out
 }
 
 // imageFootprintKey is this box's image-render footprint identity: the

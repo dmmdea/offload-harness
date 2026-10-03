@@ -484,6 +484,28 @@ unreadable host-RAM counter refuses only when a RAM need was declared. On Window
 rows for compute apps, so `foreign-busy` is Linux-only evidence today; the measured N-instance host RAM that tunes the
 headroom term is a P13 acceptance item.
 
+**A place in line for a caller that cannot stay (plan P13, invariant I4).** A media tool call waits its window
+(`gpu_wait_ms`, 90 s) and must then answer. On a host that leases cards it answers with a **token** instead of
+a refusal: a record of its place (the cards it wants, empty = the whole node, and the arrival time it joined
+the line with) that the caller re-presents to resume that place; see "Per-card media admission" in
+[media-generation.md](media-generation.md). A token has no process behind it (the MCP server that wrote it is
+alive for as long as the client's session is, which says nothing about whether the client is coming back), so
+its life is its **last poll**: for `TokenGrace` (30 s) after the poller left it holds its place, and every
+later waiter on the same cards queues behind it; after that it is **absent**, skipped by every waiter and
+ignored by a whole-node barrier, so a client that wandered off never blocks the line; for `TokenTTL`
+(10 min) it can still be resumed, with its original arrival time (the resumed waiter carries it, so it is
+ahead of everyone who arrived after it), and then it is pruned. `gpulease.LeaveToken`, `ResumeToken`,
+`DropToken`, `Tokens` and `QueuePosition` are the API; `Options.ResumeToken` and `QueuedSince` make a
+waiter carry a place. Tokens are files in `<state>/gpu/tokens`, never among the waiters in
+`<state>/gpu/waiters`: a binary that predates them prunes every waiter record whose process has stopped
+refreshing it, and would delete a token it cannot refresh. It does not honour tokens either, so on a host that
+mixes versions an older binary can take a card ahead of a token holder; that costs the holder its place and
+never exclusivity (the O_EXCL claim is still the only arbiter of who holds a card). A token id arrives from a
+tool caller and is checked against `tk-[a-z0-9]{8,32}` before it becomes a path. A queued `Acquire` whose
+whole window passed without reaching the front returns `ErrStillQueued`, which names who is ahead (a waiter
+that has not claimed, or a place held for another caller); callers that answer with a token treat it like
+`ErrHeld`.
+
 **A kept ComfyUI instance lives no longer than its lease.** A runner that keeps the ComfyUI it launched
 (`--keep-comfy`) leaves a detached instance running after it exits, so the items of a batch under one
 lease load their models once; its launch marker (`.offload-launch-<key>.json`) records the lease epoch.

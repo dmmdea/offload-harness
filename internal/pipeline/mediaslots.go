@@ -43,7 +43,9 @@ type slotSet struct {
 }
 
 type slotWaiter struct {
-	ids     []string // nil = the whole node
+	ids     []string // nil = the whole node; for an any-waiter, the candidates
+	any     bool     // wants ONE of ids, not all of them
+	picked  string   // the card an any-waiter was given
 	ready   chan struct{}
 	granted bool
 }
@@ -110,19 +112,59 @@ func (s *slotSet) grabLocked(ids []string) {
 func (s *slotSet) tryTake(ids []string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.freeLocked(ids) && !s.blockedLocked(ids, len(s.q)) {
-		s.grabLocked(ids)
+	if got, ok := s.availableLocked(&slotWaiter{ids: ids}, len(s.q)); ok {
+		s.grabLocked(got)
 		return true
 	}
 	return false
 }
 
+// availableLocked says which slots w could take right now, given the holders and the waiters
+// ahead of position upto. A waiter for a set takes exactly that set; an any-waiter takes the
+// first candidate that is free and wanted by nobody ahead.
+func (s *slotSet) availableLocked(w *slotWaiter, upto int) ([]string, bool) {
+	if !w.any {
+		if s.freeLocked(w.ids) && !s.blockedLocked(w.ids, upto) {
+			return w.ids, true
+		}
+		return nil, false
+	}
+	for _, c := range w.ids {
+		one := []string{c}
+		if s.freeLocked(one) && !s.blockedLocked(one, upto) {
+			return one, true
+		}
+	}
+	return nil, false
+}
+
 // take is tryTake that waits at most `wait` for the slots, in arrival order. Reports false on
 // timeout, which the caller turns into the same clean defer a busy card produces.
 func (s *slotSet) take(ids []string, wait time.Duration) bool {
+	return s.waitFor(&slotWaiter{ids: append([]string(nil), ids...)}, wait)
+}
+
+// takeAny takes ONE of the candidate cards, whichever is free first, waiting at most `wait`. It
+// serves a job that runs under a lease its parent holds on several cards: any of them will do.
+func (s *slotSet) takeAny(candidates []string, wait time.Duration) (string, bool) {
+	if len(candidates) == 0 {
+		return "", false
+	}
+	w := &slotWaiter{ids: append([]string(nil), candidates...), any: true}
+	if !s.waitFor(w, wait) {
+		return "", false
+	}
+	return w.picked, true
+}
+
+func (s *slotSet) waitFor(w *slotWaiter, wait time.Duration) bool {
 	s.mu.Lock()
-	if s.freeLocked(ids) && !s.blockedLocked(ids, len(s.q)) {
-		s.grabLocked(ids) // free: no timer allocated at all in the common case
+	if got, ok := s.availableLocked(w, len(s.q)); ok {
+		s.grabLocked(got) // free: no timer allocated at all in the common case
+		w.granted = true
+		if w.any {
+			w.picked = got[0]
+		}
 		s.mu.Unlock()
 		return true
 	}
@@ -130,7 +172,7 @@ func (s *slotSet) take(ids []string, wait time.Duration) bool {
 		s.mu.Unlock()
 		return false
 	}
-	w := &slotWaiter{ids: append([]string(nil), ids...), ready: make(chan struct{})}
+	w.ready = make(chan struct{})
 	s.q = append(s.q, w)
 	s.mu.Unlock()
 
@@ -181,9 +223,12 @@ func (s *slotSet) release(ids []string) {
 func (s *slotSet) dispatchLocked() {
 	for i := 0; i < len(s.q); {
 		w := s.q[i]
-		if s.freeLocked(w.ids) && !s.blockedLocked(w.ids, i) {
-			s.grabLocked(w.ids)
+		if got, ok := s.availableLocked(w, i); ok {
+			s.grabLocked(got)
 			w.granted = true
+			if w.any {
+				w.picked = got[0]
+			}
 			close(w.ready)
 			s.q = append(s.q[:i], s.q[i+1:]...)
 			continue

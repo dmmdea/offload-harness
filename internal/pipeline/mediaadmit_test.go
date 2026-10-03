@@ -32,6 +32,7 @@ const (
 	admitUUIDA = "GPU-aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee" // nvidia index 0
 	admitUUIDB = "GPU-bbbb2222-cccc-dddd-eeee-ffffffffffff" // nvidia index 1, the monitor is attached
 	admitUUIDC = "GPU-cccc3333-dddd-eeee-ffff-000000000000" // nvidia index 2
+	admitUUIDD = "GPU-dddd4444-eeee-ffff-0000-111111111111" // nvidia index 3, on the four-card box only
 )
 
 // admitProbe is what the stub runner reports about the process it was spawned as.
@@ -55,8 +56,12 @@ for (const k of ["COMFY_CARD_UUID", "COMFY_API", "COMFY_CUDA_DEVICE", "COMFY_DYN
 writeFileSync(join(dir, "started-" + process.pid + ".json"), JSON.stringify({pid: process.pid, argv: process.argv.slice(2), env}));
 const deadline = Date.now() + 30000;
 while (!existsSync(join(dir, "go")) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 20));
+const hold = Number(process.env.ADMIT_HOLD_MS || 0);
+if (hold > 0) await new Promise((r) => setTimeout(r, hold));
 const out = process.argv[2];
 if (out && !out.startsWith("--")) writeFileSync(out, "not-an-image");
+const ri = process.argv.indexOf("--result");
+if (ri > 0) writeFileSync(process.argv[ri + 1], JSON.stringify({outputs: {}, image_path: ""}));
 `
 
 type admitFixture struct {
@@ -103,17 +108,36 @@ func (s *admitStops) list() []stopCall {
 	return append([]stopCall(nil), s.calls...)
 }
 
+// admitSpec shapes the host a fixture builds.
+type admitSpec struct {
+	// order is the box's declared ComfyUI device order (config gpu_comfy_order), "" = not declared.
+	order string
+	// fourCards adds a fourth card (nvidia index 3) to the table.
+	fourCards bool
+	// noAudit leaves the reader audit out, so the card-scoped writer stays off.
+	noAudit bool
+	mutate  func(*config.Config)
+}
+
 // newAdmitFixture builds a pipeline on a card-scoped host: a scratch state root with a green
 // reader audit, a three-card table (card 1 is the display card), a roster and a /free recorder.
 func newAdmitFixture(t *testing.T, mutate func(*config.Config)) *admitFixture {
 	t.Helper()
+	return newAdmitFixtureWith(t, admitSpec{mutate: mutate})
+}
+
+func newAdmitFixtureWith(t *testing.T, spec admitSpec) *admitFixture {
+	t.Helper()
+	mutate := spec.mutate
 	requireNodePipeline(t)
 	f := &admitFixture{t: t, dir: t.TempDir(), root: t.TempDir()}
 	if err := os.MkdirAll(filepath.Join(f.root, "gpu"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(f.root, "gpu", "reader-audit.json"), []byte(`{"result":"green"}`), 0o644); err != nil {
-		t.Fatal(err)
+	if !spec.noAudit {
+		if err := os.WriteFile(filepath.Join(f.root, "gpu", "reader-audit.json"), []byte(`{"result":"green"}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
 	runner := filepath.Join(f.dir, "admit-runner.mjs")
 	if err := os.WriteFile(runner, []byte(admitRunnerSrc), 0o644); err != nil {
@@ -127,7 +151,10 @@ func newAdmitFixture(t *testing.T, mutate func(*config.Config)) *admitFixture {
 		{Index: 1, UUID: admitUUIDB, Name: "NVIDIA GeForce RTX 5070 Ti", TotalGiB: 16, FreeGiB: 14, UtilKnown: true, DisplayAttached: true},
 		{Index: 2, UUID: admitUUIDC, Name: "NVIDIA GeForce RTX 5060 Ti", TotalGiB: 16, FreeGiB: 15, UtilKnown: true},
 	}
-	f.cards, _ = gpuprobe.BuildCards(devs, "")
+	if spec.fourCards {
+		devs = append(devs, gpuprobe.Device{Index: 3, UUID: admitUUIDD, Name: "NVIDIA GeForce RTX 5060 Ti", TotalGiB: 16, FreeGiB: 15, UtilKnown: true})
+	}
+	f.cards, _ = gpuprobe.BuildCards(devs, spec.order)
 
 	f.frees = &admitFrees{}
 	f.frees.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -153,6 +180,7 @@ func newAdmitFixture(t *testing.T, mutate func(*config.Config)) *admitFixture {
 	cfg.ComfyDir = filepath.Join(f.dir, "comfy")
 	cfg.ImageGenScript = runner
 	cfg.GPUCardScopedLeases = true
+	cfg.GPUComfyOrder = spec.order
 	cfg.GPUWaitMs = 300
 	cfg.Endpoint = f.roster.URL
 	cfg.Layers = []config.LayerSpec{{Name: "single", Seats: []config.LayerSeat{
@@ -238,6 +266,14 @@ func (f *admitFixture) letRunnersGo() {
 	if err := os.WriteFile(filepath.Join(f.dir, "go"), []byte("go"), 0o644); err != nil {
 		f.t.Fatal(err)
 	}
+}
+
+// start runs any task in the background.
+func (f *admitFixture) start(task core.TaskType, input string, params map[string]any) <-chan core.Result {
+	f.t.Helper()
+	ch := make(chan core.Result, 1)
+	go func() { ch <- f.p.Run(context.Background(), core.Request{Task: task, Input: input, Params: params}) }()
+	return ch
 }
 
 func (f *admitFixture) await(ch <-chan core.Result) core.Result {
@@ -372,6 +408,17 @@ func TestThirdMediaCallQueuesWithToken(t *testing.T) {
 	}
 	if !payload.Queued || !strings.HasPrefix(payload.WaiterToken, "tk-") || payload.QueuePos != 1 || payload.ETASec == nil || len(payload.Devices) != 1 {
 		t.Errorf("payload = %+v, want queued with a token, position 1, an ETA and the one card it waits for", payload)
+	}
+	// The ETA is the declared window of the lease in the way (the render timeout, 720 s by default):
+	// a ceiling, and never zero for a card that is in use.
+	if payload.ETASec != nil && (*payload.ETASec < 300 || *payload.ETASec > 800) {
+		t.Errorf("eta_s = %d, want about the holders' declared window (720 s)", *payload.ETASec)
+	}
+	if !strings.Contains(payload.ResumeHint, payload.WaiterToken) || !strings.Contains(payload.ResumeHint, "waiter_token") {
+		t.Errorf("the payload must say how to resume: %q", payload.ResumeHint)
+	}
+	if len(payload.HeldByEpochs) != 1 {
+		t.Errorf("held_by = %v, want the one lease in the way", payload.HeldByEpochs)
 	}
 	if !strings.Contains(res.Reason, payload.WaiterToken) {
 		t.Errorf("the reason must carry the token so a reader of the text can resume: %q", res.Reason)

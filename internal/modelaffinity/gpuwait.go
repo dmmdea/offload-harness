@@ -259,7 +259,7 @@ func BlocksNewRun(info gpulease.Info) bool {
 // deadlock: the one text step on the media path — the image prompt refiner — is
 // hoisted ABOVE acquireMediaLease on both the single and batch routes precisely so
 // "the text call never contends with our own render", and runPipelineJob takes
-// only the in-process mediaSlot, never the machine-wide lease.
+// only the in-process media slots, never the machine-wide lease.
 //
 // info is ONE lease (callers walk Info.Each). The comparison is against that lease's own
 // epoch, never "any live epoch": a child of lease A is not inside lease B, and exempting

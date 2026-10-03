@@ -124,3 +124,35 @@ and `TestLocalBusyFalseWhenAFreeCardServesTheSeat`.
   "Exclusive text holds"
 - [ADR 0018](0018-machine-wide-fenced-gpu-lease.md), [ADR 0026](0026-text-load-admissions-wait-for-the-media-lease.md)
 - `docs/OPERATOR-GUIDE.md` — the delegate section's lease paragraphs
+
+## Amendment 2026-10-03 (GPU routing P13b, the place in line reaches the media tools)
+
+The Decision made the *reservation verb* queue. It left the other ingress, a media tool call, with a
+bounded wait and then a refusal: `gpu_wait_ms` (90 s), then `gpu_busy`, which sent the caller back
+to the end of a line it could not see, or away. That is the same defect one door over, and it sat on
+top of a second one: a media call took the whole-node lease even when it used one card.
+
+On a host that leases cards a media call now (1) asks the allocator for **one card**, or for the card
+an explicit `comfy_cuda_device` names (a hard constraint, never re-picked), and holds a lease on it,
+running in the ComfyUI instance bound to that card, so two calls run on two cards at once; and (2) when it
+has waited its window with no card it answers with a **place-keeping token** (`gpu_queued`, a capacity
+defer carrying `waiter_token`, `queue_position` and `eta_s`) instead of `gpu_busy`; the caller re-sends the
+request with the token and resumes the place it left. A token has no process behind it, so its life is its
+last poll: it holds its place for 30 s, is then skipped by every waiter (a whole-node barrier included) so
+an absent client never blocks the line, and can be resumed for 10 minutes. A host that does not lease cards
+keeps `gpu_busy` exactly as before. A call that holds the whole node leaves a token too on a host that
+leases cards.
+
+What is deliberately not scoped: the **default** ComfyUI instance (port 8188) is one process for the box,
+so a job that uses it holds the whole node, or (a pooled route, `run-graph` with several declared devices)
+cards that every other such job on a box of at most three cards must also hold, so two of them cannot run
+at once; on a larger box they hold the whole node. A pin that cannot be turned into a card (the box declares
+no `gpu_comfy_order`) keeps the whole node and today's `--cuda-device`; nothing is guessed from an index.
+The tokens live in their own directory because an older binary prunes any waiter whose process has stopped
+polling; on a host that mixes versions an older binary can take a card ahead of a token holder, which costs
+the holder its place and never exclusivity.
+
+Related code: `internal/pipeline/mediaadmit.go`, `mediaslots.go`, `internal/gpulease/tokens.go`,
+`internal/gpualloc`, `internal/comfyinst`. Related docs: [media-generation.md](../../systems/media-generation.md)
+("Per-card media admission"), [gpu-lease.md](../../systems/gpu-lease.md) ("A place in line for a caller that
+cannot stay").
