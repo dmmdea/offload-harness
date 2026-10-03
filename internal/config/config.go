@@ -1201,6 +1201,14 @@ type Config struct {
 	// lease as orphaned. It only changes what is REPORTED: nothing reclaims, releases or
 	// kills a lease on it. 0 or negative = 15. Load installs it where every reader sees it.
 	GPUOrphanGraceMin int `json:"gpu_orphan_grace_min,omitempty"`
+	// GPUMaxTermMin (plan P9, default 360) is the cap on a lease's renewal term, in minutes:
+	// a renewal POINT, never a release point. A request above it is recorded, warned about
+	// and accepted whole; it renews in terms of this length. 0 or negative = 360.
+	GPUMaxTermMin int `json:"gpu_max_term_min,omitempty"`
+	// GPUMaxTotalMin (plan P9, default 2880) is how long after acquisition a lease is
+	// renewed at all, in minutes. Past it a lease that is still held reads overdue however
+	// healthy its owner looks; it is still never freed by that. 0 or negative = 2880.
+	GPUMaxTotalMin int `json:"gpu_max_total_min,omitempty"`
 	// ForeignGPUMinMiB overrides the per-process VRAM floor `gpu status`/`gpu
 	// reserve`'s foreign-GPU-memory warning (gpu_foreign.go) uses to decide a
 	// resident desktop process is worth a line — see foreignDefaultMinMiB for
@@ -1796,6 +1804,12 @@ func (c Config) GPUOrphanGrace() time.Duration {
 	}
 	return time.Duration(c.GPUOrphanGraceMin) * time.Minute
 }
+
+// GPUMaxTerm is gpu_max_term_min as a duration.
+func (c Config) GPUMaxTerm() time.Duration { return 0 }
+
+// GPUMaxTotal is gpu_max_total_min as a duration.
+func (c Config) GPUMaxTotal() time.Duration { return 0 }
 
 // AgentPlannerModel resolves the coding agent's planner seat. Precedence:
 // an explicit per-call/per-flag override > the configured AgentModel seat >

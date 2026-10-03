@@ -1731,6 +1731,11 @@ type LeaseHealth struct {
 	// delegator uses to rank the node last without excluding it. A node one
 	// release behind omits it, which decodes to false.
 	Overdue bool `json:"overdue,omitempty"`
+	// Expired is additive (plan P9): the holder's own tick labelled the lease because its
+	// term ended and was not renewed (its owner gone, or nothing running under it). It is
+	// still HELD, and Busy and Overdue still say so; the key is the fact that nobody vouches
+	// for it. A node one release behind omits it, which decodes to false.
+	Expired bool `json:"expired,omitempty"`
 }
 
 // LeaseStanding is what a held lease is DOING, published beside the fact that it is held

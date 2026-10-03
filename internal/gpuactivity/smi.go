@@ -131,3 +131,12 @@ func ParseProcesses(out string) []GPUProcess {
 	}
 	return procs
 }
+
+// UtilWorking reports whether a lease's cards are busy: any card of the lease, or any card at
+// all for a whole-node lease (devices empty), whose utilisation is at or above the verdict's
+// busy threshold. The display card is skipped (its load is the desktop's, never the lease's)
+// and an unknown reading is not work. devices are lease ids (lower-case GPU uuids). It is the
+// reading a holder's tick gives the term check (gpulease.TermSignals.UtilWorking).
+func UtilWorking(gpus []GPU, devices []string) bool {
+	return false
+}

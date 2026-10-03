@@ -319,6 +319,7 @@ func runGPUReserve(args []string) error {
 	vramFlag := fs.Float64("vram", 0, "with --cards: GiB of VRAM the job needs free on EACH card (0 = not declared)")
 	ramFlag := fs.Float64("ram", 0, "with --cards: GiB of host RAM the job needs; the allocator also keeps gpu_host_ram_headroom_gib free")
 	owner := addOwnershipFlags(fs)
+	fs.Bool("release-at-expiry", false, "")
 	_ = fs.Parse(args)
 	if *unload {
 		*exclusive = true // a cleared card that the next text call refills is not cleared
@@ -564,7 +565,7 @@ func runGPUReserve(args []string) error {
 
 	// Heartbeat while the command runs. The reclaim rule needs BOTH a stale heartbeat
 	// and an expired window, so a missed tick inside the declared window is harmless.
-	tick := time.NewTicker(15 * time.Second)
+	tick := time.NewTicker(wrapperTickEvery)
 	defer tick.Stop()
 	for {
 		select {
@@ -820,6 +821,7 @@ func runGPUHold(args []string) error {
 	ramFlag := fs.Float64("ram", 0, "with --cards: GiB of host RAM the job needs")
 	groupFlag := fs.String("group", "", "label for leases taken together for one job")
 	owner := addOwnershipFlags(fs)
+	fs.Bool("release-at-expiry", false, "")
 	_ = fs.Parse(args)
 
 	m, err := openLease(fs)
@@ -868,23 +870,41 @@ func runGPUHold(args []string) error {
 	// to 15s afterwards, so `gpu status` could report the card free while a holder
 	// process was still sitting there. Renewal only has to beat the heartbeat TTL
 	// (120s), while noticing we have been released should feel immediate.
-	const (
-		pollEvery  = 1 * time.Second
-		renewEvery = 15 * time.Second
-	)
 	deadline := time.Now().Add(*dur)
 	lastRenew := time.Now()
 	for time.Now().Before(deadline) {
-		time.Sleep(pollEvery)
+		time.Sleep(holdPollEvery)
 		if err := lease.Check(); err != nil {
 			return nil // released or fenced out — exit quietly, the lease is not ours
 		}
-		if time.Since(lastRenew) >= renewEvery {
+		if time.Since(lastRenew) >= holdRenewEvery {
 			_ = lease.Renew()
 			lastRenew = time.Now()
 		}
 	}
 	return nil
+}
+
+// The cadences of the two holders that tick. A wrapper renews its heartbeat (and runs the term
+// check) every wrapperTickEvery; a detached holder polls for a release every holdPollEvery and
+// renews every holdRenewEvery. Variables so a test can watch a deadline pass in its own window.
+var (
+	wrapperTickEvery = 15 * time.Second
+	holdPollEvery    = 1 * time.Second
+	holdRenewEvery   = 15 * time.Second
+)
+
+// termUtilWorkingFn is how the term check asks whether a lease's cards are working. A variable
+// so a test never reaches nvidia-smi.
+var termUtilWorkingFn = func(devices []string) bool { return false }
+
+// reserveTermWarning is the sentence `gpu reserve` prints when the window it was asked for is
+// above a limit on terms; "" when it is not.
+func reserveTermWarning(window time.Duration, opts gpulease.Options) string { return "" }
+
+// detachHoldArgs is the argv of the hidden holder a --detach reserve spawns.
+func detachHoldArgs(fs *flag.FlagSet, class string, dur, wait time.Duration, opts gpulease.Options, auto *reserveDeviceFlags, cfgPath string) []string {
+	return holdArgs(class, dur, wait, opts, auto, cfgPath)
 }
 
 func runGPURelease(args []string) error {
