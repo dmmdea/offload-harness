@@ -36,7 +36,7 @@ pending work on the node that runs it. Off by default; two config keys turn it o
 | `internal/core/remoteattr.go` | `RemoteAttribution` / `RemoteAttributor`: the seam the remote lanes report through; `*pipeline.Pipeline` implements it (`internal/pipeline/remoteattr.go`) |
 | `internal/fleetnode/nodecard.go` | the serving node's own card for a job whose asker will not card it (*The node's fallback card* below) |
 | `internal/pairworkloads/pairworkloads_test.go`, `internal/delegate/pair_events_test.go`, `internal/pairworkloads/seatwatch_test.go`, `internal/pairworkloads/orphans_test.go` | the contract tests |
-| `internal/pairworkloads/attribution_test.go`, `internal/pairworkloads/remote_test.go`, `internal/{composeremote,visionremote,textremote}/attribution_test.go`, `internal/fleetnode/attribution_test.go`, `internal/delegate/attribution_test.go` | the remote-call attribution tests: one card per call, the headers, the node card, view-only resolution |
+| `internal/pairworkloads/attribution_test.go`, `internal/pairworkloads/remote_test.go`, `internal/{composeremote,visionremote,textremote,sttremote}/attribution_test.go`, `internal/fleetnode/attribution_test.go`, `internal/delegate/attribution_test.go` | the remote-call attribution tests: one card per call, the headers, the node card, view-only resolution |
 
 ## What problem this solves
 
@@ -161,9 +161,9 @@ and an `extract_image` row adds the same carried work of its sub-calls). A
    `--detach` form holds a card for nobody's command and opens none.
 
 5. **Calls routed to a fleet node** (unreleased, `internal/pairworkloads/remote.go`). A remote or
-   auto-spilled `compose_video`, vision (`vqa`, `ocr`, `assess_image`, ...) or text (`classify`,
-   `extract`) call never goes through `Pipeline.Run` on the asking box (`composeremote.Run`,
-   `visionremote.Run` and `textremote.Run` send the job and poll it), so before this the asker wrote
+   auto-spilled `compose_video`, vision (`vqa`, `ocr`, `assess_image`, ...), text (`classify`,
+   `extract`) or `transcribe` call (the card's engine is `whispercpp`) never goes through `Pipeline.Run` on the asking box (`composeremote.Run`,
+   `visionremote.Run`, `textremote.Run` and, since 0.164.0, `sttremote.Run` send the job and poll it), so before this the asker wrote
    neither a ledger row nor a card for work it had spilled, and a plain row would have carded the
    asker itself (`ledger.Entry` named no node). The lanes now report through
    `core.RemoteAttribution`, which the `Runner` they receive (`*pipeline.Pipeline`) provides:

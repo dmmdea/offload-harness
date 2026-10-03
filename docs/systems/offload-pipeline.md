@@ -230,7 +230,12 @@ transcriptions therefore shares one load and pays one cold start (register C-91;
 follow every call and landed on the next call's inference, which llama-swap answers
 `matrix: model unloaded`). A card a render holds is waited for
 `gpu_wait_ms` like every other GPU door (the HTTP timeout, `stt_request_timeout_sec`, only caps that wait), and the
-refusal is a `capacity` defer, `gpu busy: …` (register C-89). The verdict "no speech"
+refusal is a `capacity` defer, `gpu busy: …` (register C-89). Since 0.164.0 the call can leave the box:
+`offload_transcribe`'s `route` (default `auto`) runs the pipeline here or sends the audio to a fleet node through
+`internal/sttremote` (see [mcp-server.md](mcp-server.md) and
+[FLEET-NODE.md](../FLEET-NODE.md#the-stt-upload-door-post-fleetstt)); the node runs this same branch over the uploaded
+file, and the fleet node's own jobs wait at its stt gate (`sttclient.Queued` tells `UnloadIfIdle` they are coming, so the
+model stays loaded for them). The verdict "no speech"
 (`ErrUpstreamNoSpeech`, the defer reason `empty transcript (no speech detected)`) is an upstream that
 answered 200 with an empty transcript or, on the whisper protocol only, whisper.cpp's exit on audio with
 no speech content (an empty-body 5xx, the F-35 crash) in a call that ran alone: no other transcription was

@@ -64,11 +64,14 @@ endpoint. A dispatch is now **admitted** and waits its turn.
 |---|---|---|---|
 | `fleet_max_queue_depth` | `accepted` + `running` (health's `queue_depth`), **all task types** | 2x `fleet_max_concurrent_jobs` (8 with the default 4 workers — register S-04/C-25) | Yes — `503 queue full` |
 | `fleet_max_concurrent_jobs` | jobs actually executing, **`agent` only** | 4 | No — extra jobs WAIT in `accepted` |
+| `fleet_stt_max_concurrent` (0.164.0) | stt jobs actually executing, **both stt lanes** (`stt` and `stt-upload`, pushed and pulled) | 1 | No — extra jobs WAIT, in arrival order, inside their run (their card stays queued) |
+| `fleet_stt_upload_max_mb` (0.164.0) | the largest audio file `POST /fleet/stt` takes (decoded MiB; the body is that in base64 plus slack) | 48 | Yes — `400` naming the key |
 
 **The concurrency cap governs the text lane only.** It exists to protect one thing — the shared
 llama-swap endpoint, where the measured defect was N simultaneous inferences against a single
 serving slot. `image-gen`, `video-gen`, `audio-gen`, `run-graph`, `stt` and every configured
-pipeline route are **exempt**, because capping them would be both redundant and backwards: media
+pipeline route are **exempt** (stt has its own cap, `fleet_stt_max_concurrent`, see
+[The stt upload door](#the-stt-upload-door-post-fleetstt)), because capping them would be both redundant and backwards: media
 already serializes itself at capacity **one** (the in-process `mediaSlot`, under the machine-wide
 `gpulease` ClassMedia), and a media job blocked waiting for the card would hold a fleet execution
 slot while doing no work — four of them would starve the very lane the cap protects. It would also
@@ -412,7 +415,8 @@ is not advertised, so the dispatcher can't send work the box would defer:
 |---|---|---|---|
 | `image-gen` | `generate_image` | `imagegen_script`/sdcpp engine bound (the default binding) OR any `imagegen_families` entry configured — a family-only node (no default binding, e.g. an opt-in-family-only node) is advertised too | `imagegen_family` (else `sdxl`, only when the default binding is actually configured); quant `bf16` for the HiDream-O1 binding |
 | `video-gen` | `generate_video` | `videogen_script` set | the `videogen_family` binding (`ltx25`, …), else `wan2.2` for the runner default; quant `q8_0` only for the Wan family, when the bound unets are the Q8_0 GGUFs |
-| `stt` | `transcribe` | `stt_model` set | `whisper` (llama-swap-resident — no footprint sampling) |
+| `stt` | `transcribe` (a path on THIS node's disk) | `stt_model` set | `whisper` (llama-swap-resident — no footprint sampling). Bearer-gated when the node has a `fleet_auth_token` (0.164.0); shares the stt concurrency cap below. |
+| `stt-upload` (own route `POST /fleet/stt`, 0.164.0) | `transcribe` over audio bytes the caller sends | `stt_model` set **and** (loopback listener **or** `fleet_auth_token` set) | `whisper`, as `stt` |
 | `audio-gen` | `generate_audio` | voice or music script set | `acestep` (music) / `chatterbox` (voice) |
 | `run-graph` | `run_graph` | `run_graph_script` set | payload-declared `model_family`, else `comfy-graph` |
 | `agent` | `agent` | `fleet_agent_enabled` **and** a resolvable agent seat **and** (loopback listener **or** `fleet_auth_token` set) | none — llama-swap-resident text work, no render footprint |
@@ -1140,6 +1144,75 @@ older node and a node whose tier declares nothing are never picked, and its card
 schema) and turns a failure into a deferred result naming the node and the reason. A node declares a text task
 meaningfully only when its cascade for that task (`model`, `triage_model`, per-task rungs) routes to the unconstrained
 seat; measure through that same path.
+
+## The stt upload door (`POST /fleet/stt`)
+
+Since 0.164.0 a node transcribes audio its caller SENDS, so a box whose own whisper is held (a render owns its cards) can
+have an idle node do it. The legacy `stt` task of `/fleet/dispatch` takes only a path on the node's own disk under a
+1 MiB body cap and cannot be sent bytes. The delegator side is `internal/sttremote` (the `route` parameter on
+`offload_transcribe`, `--route` on `local-offload transcribe`); decision and alternatives in
+[ADR 0072](architecture/decisions/0072-a-fleet-node-transcribes-audio-its-caller-uploads-so-a-held-card-is-a-place-in-line.md).
+
+```
+POST /fleet/stt   Content-Type: application/json   (the vision lane's bearer rule, see below)
+{"job_id": "stt-…", "audio_b64": "<base64 of the audio file>", "audio_ext": "ogg", "language": "es", "hq": false}
+```
+
+`audio_ext` is 1 to 8 lowercase letters or digits (it only names the node's temp file; ffmpeg sniffs the content),
+`language` is `auto` or a language code, `hq` needs the node to have an `stt_model_hq` (else `400 … no stt_model_hq`).
+Unknown fields, bad base64, an empty file and a file over the cap are `400`s that name the problem; **nothing here reads a
+path on the caller's disk**. The body cap is `STTUploadBodyCap`: the node's `fleet_stt_upload_max_mb` (decoded MiB,
+default 48, which is 64 MiB of base64 on the wire plus 64 KiB of slack) in base64. The bearer is checked **before the body
+is read**, and a caller that passed it gets a 10-minute read and write window (the blanket 30 s would cut 64 MiB on an
+ordinary link). Everything after the body read is the shared `admit` path.
+
+The node writes the bytes to a private file (mode 0600) under `<media_dir>/.stt-upload/`, runs the pipeline's transcribe
+over it with `Door = fleet`, the fleet job id and the asker (the `X-Offload-Asker` header) as the requester, and removes
+the file when the job ends, on every refusal and on a drop; fleet-serve sweeps leftovers older than
+`stt_request_timeout_sec` plus an hour at startup. `GET /fleet/media/{name}` refuses any name starting with a dot, so the
+directory is never listed or served. The done job's `data` is the node's **full `core.Result`**, defers included
+(`defer_class`, `meta.err_class`): a defer is a `done` job saying `deferred: true`, never an `error` job. The node's own
+outputs (`.srt`, `.txt`, `.segments.json`) stay in `media_dir` and are fetchable by bare name; the asker fetches the
+`.segments.json` when the inline segment list was truncated (`stt_max_inline_segments`).
+
+**Advertisement.** `stt-upload` is in `supported_task_types`, with the additive, omitempty health fields `stt_hq` (the
+node has an hq model; `false` is published, so an asker can tell it from a node that predates the door) and
+`stt_upload_max_mb`, exactly when `STTUploadAdmissible` holds: a bound `stt_model` and the vision lane's reachability rule
+(loopback, or a `fleet_auth_token`). `stt` is NOT the signal: every node with a whisper model lists it.
+
+**Auth.** `stt-upload` is token-gated like the vision lane (`tokenGated`), on dispatch and on poll (`JobView.Gated`).
+The legacy `stt` task joins the bearer rule **when the node has a `fleet_auth_token`** (0.164.0, D17): a tailnet peer can
+no longer make the node convert and transcribe any file it can read. A node with no token keeps its legacy lane open.
+Compatibility: the only external dispatcher known to send `stt` jobs sends no bearer token; no production use through it
+was found (its web console form sends an empty payload; the jobs seen on one node on 2026-10-01 were a test burst), so it
+keeps working against a tokenless node and needs the bearer against one that has a token.
+
+**Concurrency.** Both stt lanes, pushed and pulled, share ONE cap: `fleet_stt_max_concurrent` (default 1), a FIFO gate
+inside the run closure. A job over the cap waits its turn in arrival order, its PAIR card still queued, and never fails
+(before the cap, a burst failed `whisper-server 500 … matrix: model unloaded`); a poller sees such a job as `running`. A
+waiter's context ending (shutdown) takes it out of the line. While jobs wait, `sttclient.Queued` keeps the model loaded
+for them, so a burst pays one cold start. `stt` and `stt-upload` stay outside `fleet_max_concurrent_jobs`.
+
+### Placement (asker side)
+
+`route: local` is byte-identical to before the route existed, except that a `gpu_busy` defer gains a hint (the reason ends
+`(route "auto" or "remote" lets a fleet node transcribe this)`) when `delegate_remotes` is configured. `auto` runs local
+unless the local whisper request would actually be held right now: `modelaffinity.WouldBlockUpstream`, the upstream fence's
+own first inspection (a lease fencing the cards over the model and the model not already resident), for the model the
+call uses (`stt_model_hq` for an hq call). With a held whisper it tries a node (`delegate.PlaceSTT`: advertises
+`stt-upload`, has an hq model when hq is asked, publishes an upload cap that fits the file, card not leased; ranked by
+`betterRemote` like vision) and with none eligible it still runs local. `remote` forces a node; none eligible ⇒
+`deferred: true, defer_class: capacity` (or `config` with no `delegate_remotes`), never a local run.
+
+The asker reads the audio on its own box, converts it to 16 kHz mono Opus at 32 kbps (`audioio.ConvertToOpus16k`, about
+14 MB an hour; the original file is sent when conversion is impossible and it fits the node's cap), sends it with the
+bearer and the attribution headers, and polls with a budget of 180 s plus half the audio's length, never more than
+`stt_request_timeout_sec`. On success it writes its OWN `.srt`, `.txt` and `.segments.json` under its `media_dir` (the
+stem is the source's name plus 8 hex of the uploaded bytes and the model) from the full segment list, so every path in
+the result is a local file. It validates the node's answer first (at least one segment, none ending before it starts,
+starts never running backwards, a fetched list agreeing with the result's `num_segments`); a failure is a deferred result
+naming the node. `meta.node` / `meta.placement` say where it ran, and the call is one PAIR card on the serving node plus
+one asker ledger row (`route`, `placement`, `node`, `fleet_job_id`).
 
 ## Known limits (v1)
 
