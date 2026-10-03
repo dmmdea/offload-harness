@@ -1207,7 +1207,7 @@ call uses (`stt_model_hq` for an hq call). With a held whisper it tries a node (
 The asker reads the audio on its own box, converts it to 16 kHz mono Opus at 32 kbps (`audioio.ConvertToOpus16k`, about
 14 MB an hour; the original file is sent when conversion is impossible and it fits the node's cap), sends it with the
 bearer and the attribution headers, and polls with a budget of 180 s plus half the audio's length, never more than
-`stt_request_timeout_sec`. On success it writes its OWN `.srt`, `.txt` and `.segments.json` under its `media_dir` (the
+`stt_request_timeout_sec` (an original sent as is has no known length and gets the whole `stt_request_timeout_sec`). On success it writes its OWN `.srt`, `.txt` and `.segments.json` under its `media_dir` (the
 stem is the source's name plus 8 hex of the uploaded bytes and the model) from the full segment list, so every path in
 the result is a local file. It validates the node's answer first (at least one segment, none ending before it starts,
 starts never running backwards, a fetched list agreeing with the result's `num_segments`); a failure is a deferred result
