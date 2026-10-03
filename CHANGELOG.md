@@ -25,6 +25,14 @@ as before (`TestEveryRouteWithNoEngineKeyKeepsItsExactArgv`, green on the unmodi
 sdcpp video family gets `generate_video:<name>`). Not in this change: the fleet advertisement of these lanes (the media-remote
 branch owns `internal/fleetnode`), run-graph (stays ComfyUI-only) and per-node seeds.
 
+### Added — the GPU-evidence guard is positive, with GPU_RESET, a token cap, real kill semantics and extra-args screening (CT-49 safety core)
+
+- **A run passes only on positive evidence it ran on the GPU.** sd.cpp needs a non-software `ggml_vulkan` device line and a diffusion-stage `compute buffer size ... on Vulkan<N>` line and no compute buffer `on CPU`; da3-cli needs `da::Backend using device: Vulkan<N>`; audio.cpp needs `<component>.weights.buffer_name Vulkan<N>` and any `*.weights.buffer_name CPU` is `CPU_PLACEMENT` (the real captured ACE-Step host-prefill case). No evidence by process end is `CPU_PLACEMENT` ("no GPU evidence was seen"). The parameter dump blocks, tokenizer echoes, ggml's CPU-backend registration, `Initializing backend: CPU` and any line repeating the request's prompt / negative / text / lyrics are never scanned. The format strings behind the sd.cpp lines were read at commit 3f8527a (the CPU backend prints `CPU`; `Vulkan_Host` is host-pinned memory). The synthetic fixtures are replaced by the real engine logs from the reference node (`render/testdata/`); the sd.cpp CPU negatives are derived from the healthy logs and say so.
+- **`GPU_RESET`** (`err_class` `gpu_reset`): `ErrorDeviceLost` / `device lost` / `context is lost` in an engine log kills the run with a typed error that names the amdgpu 2 s lockup timeout and the token cap; never retried.
+- **Token cap**: `sdcpp_max_tokens` + `sdcpp_vae_stride` (video families) and `animategen_sdcpp_max_tokens` + `animategen_sdcpp_vae_stride` (animate; the VACE reference adds a latent frame). Computed in Go before the media lease and again in the runner; a typed non-retryable defer (`token_cap_exceeded`) names tokens, cap and how to fit. The Go and Node formulas are pinned to one shared table. No cap configured = no check.
+- **Kill semantics**: the iGPU lanes start the runner as a process-group leader (`gpugen.Spec.OwnProcessGroup`, non-Windows) and a timeout or cancel SIGTERMs the group, then SIGKILLs it after 5 s; the runners kill the engine tree and remove temp dirs on SIGTERM/SIGINT/SIGHUP and when the parent disappears; a signal death names the signal (SIGKILL = OOM killer hint), exit 132 / SIGILL is `ILLEGAL_INSTRUCTION` (the audio.cpp release binary is AVX-512: build it on the node); the self-timeout is a deadline from runner start covering pre-spawn work and the ffmpeg encode.
+- **`*_extra_args` screening**: an element that changes the backend or placement (`--backend`/`-b`, `--params-backend`, `--offload-to-cpu`, `--clip-on-cpu`, `--vae-on-cpu`, `--control-net-cpu`, `--rpc`, `--device` for audio.cpp, any cpu-named flag or cpu value) is refused at config load (doctor FAIL), as a typed defer (`extra_args_refused`) and in each runner. Backends are now an allowlist (`vulkan` / `vulkanN`).
+
 ### Added — no model ever runs on CPU on these engines, enforced at four layers
 
 A `cpu` or unset backend (also `cpu0`, `best`, `auto` and any per-module assignment such as `diffusion=vulkan0,vae=cpu`) is refused at config
@@ -34,9 +42,8 @@ runs: the first line that places a compute module on the CPU (a software Vulkan 
 (`err_class` `cpu_placement`) instead of finishing a long render on the wrong silicon. Tests:
 `TestCPUBackendRefusal`, `TestSdcppVideoFamilyRefusesACPUBackend`, `TestAnimateAndAudioEnginesRefuseACPUBackend`,
 `TestACPUBackendIsATypedDeferOnEveryIGPULane`, `TestACPUOrUnsetBackendMakesEveryIGPURouteBoundButMissing` and the node tests in
-`render/igpu-engine.test.mjs` (each guard was broken once and seen red). Known limits: the CPU-placement line patterns and their
-fixtures are modelled on the engines' documented log shapes, not captured from the target node, and the depth-anything.cpp argv
-is bound from its README (it has no documented backend flag); both are named for the first live run.
+`render/igpu-engine.test.mjs` (each guard was broken once and seen red). The first cut of the log guard was negative-only and
+fixture-modelled; the entry above replaces it with the positive guard pinned to real captured logs.
 
 ## [0.163.1] - 2026-10-03 - A warm-back never loads a seat over another card's lease
 
