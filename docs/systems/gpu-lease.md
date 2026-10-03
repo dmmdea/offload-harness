@@ -1003,6 +1003,13 @@ exclusive card, and three measurement rows read the seat's 10 GiB as their own f
   queued`): the successor unloads the seat again anyway, and the marker makes the LAST releaser pay the warm. A holder
   that lost the card (an operator `gpu release`, a reclaim) never warms; the marker stays for the next last holder, and a
   plain `gpu release` prints a note when a warm is owed.
+- **With card-scoped leases, (3) no other live lease sits on the seat's cards.** Several holders share a box, and the
+  warm loads the seat on ALL its cards: the first of three per-card renders to finish would load the 3-card agent seat
+  over the two cards still rendering. The warm is skipped and said so (`NOT warming … back yet: <class> lease epoch N on
+  cards … still sits on its cards`), stays owed, and the last lease on those cards pays it. The seat's cards are its
+  declared pins (`modelaffinity.ScopeToModel`); a seat that declares none is on every card. A lease on a card the seat
+  does not use leaves the warm alone. `gpu release --warm-seat` with no epoch is the one live lease, never an "other".
+  Tests: `gpu_warm_lastholder_test.go`.
 - **The warm is heartbeat for its length** (`drainRenewEvery`, 15 s), so a 27B load of several minutes cannot go stale
   under the 120 s heartbeat TTL; losing the lease mid-warm cancels the request and is reported, while a heartbeat
   write that fails with the lease still ours is reported once and retried on the next tick (register C-59).

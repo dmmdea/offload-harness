@@ -6,6 +6,20 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed — a warm-back waits for the last lease on the seat's cards (register C-86, plan P5 follow-up)
+
+A lease that unloaded the agent seat owes it a warm-back, and the warm loads the seat on all its cards. With card-scoped
+leases several holders share a box, and the warm checked only its own lease and the queue behind it: the first of three
+per-card film renders to finish would have loaded the 3-card agent seat over the two cards still rendering (found while
+launching the SS-31 motion clips on three per-card leases, 2026-10-03; that run started with the seat cold, so nothing
+was owed). The warm now also skips while another live lease sits on the seat's cards, says which, leaves the warm owed,
+and the last lease on those cards pays it. The seat's cards are its declared pins; a seat that declares none is on
+every card, and a lease on a card the seat does not use leaves the warm alone. `gpu release --warm-seat` takes the same
+rule; with no epoch it means the one live lease. Tests: `TestAWarmBackWaitsForTheLastLeaseOnTheSeatsCards`,
+`TestAWarmBackIgnoresALeaseOffTheSeatsCards`, `TestReleaseWarmSeatWaitsForTheOtherLeaseOnTheSeatsCards`,
+`TestReleaseWarmSeatWithNoEpochWarmsOverTheOneLiveLease`, `TestReleaseWarmSeatAfterTheLeaseEndedWarmsOnTheFreeCard`
+(4 of 4 mutants killed).
+
 ## [0.163.0] - 2026-10-03 - Thin clients render on the fleet: the compose-project door, `install client`, and a box with no seat never takes work itself
 
 ### Added — the compose-project door (ADR 0071)

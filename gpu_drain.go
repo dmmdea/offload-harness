@@ -815,6 +815,37 @@ type warmGuard struct {
 	// resident when a lease unloaded it). The wrapper's automatic warm sets it;
 	// an explicit `gpu release --warm-seat` is the operator asking, and loads.
 	onlyIfOwed bool
+	// others reports a live lease, other than the one warming, that sits on the seat's
+	// cards. With card-scoped leases several holders share a box, and the warm loads the
+	// seat on all its cards: the first to finish must not load it over cards the others
+	// still use. The warm stays owed and the last lease on those cards pays it.
+	others func(model string) (busy bool, why string)
+}
+
+// otherLeaseOnSeat is warmGuard.others for the lease with epoch self: a held lease on the
+// seat's cards that is not self. Epoch 0 is `gpu release`'s "whatever is held", which the
+// release itself only accepts when exactly one lease is live, so one live lease on the
+// seat's cards is that one. A seat that declares no cards is on every card.
+func otherLeaseOnSeat(m *gpulease.Manager, self uint64) func(model string) (bool, string) {
+	return func(model string) (bool, string) {
+		var held []gpulease.Info
+		for _, l := range modelaffinity.ScopeToModel(m.Inspect(), model).Each() {
+			if l.Held {
+				held = append(held, l)
+			}
+		}
+		for _, l := range held {
+			if l.Epoch == self || (self == 0 && len(held) == 1) {
+				continue
+			}
+			cards := "the whole node"
+			if eff := l.EffectiveDevices(); len(eff) > 0 {
+				cards = "cards " + strings.Join(eff, ",")
+			}
+			return true, fmt.Sprintf("%s lease epoch %d on %s", l.Class, l.Epoch, cards)
+		}
+		return false, ""
+	}
 }
 
 // warmBackGuarded reloads the config's seat when the guard allows it and
@@ -843,6 +874,12 @@ func warmBackGuarded(cfg config.Config, g warmGuard, out io.Writer) {
 				names = append(names, fmt.Sprintf("pid %d (%s, queued %s)", w.PID, w.Class, time.Since(w.Since()).Round(time.Second)))
 			}
 			fmt.Fprintf(out, "gpu: NOT warming %s back: %d lease(s) queued behind this one — %s; the warm belongs to the last holder\n", model, len(ws), strings.Join(names, ", "))
+			return
+		}
+	}
+	if g.others != nil {
+		if busy, why := g.others(model); busy {
+			fmt.Fprintf(out, "gpu: NOT warming %s back yet: %s still sits on its cards; the warm stays owed and the last lease on them pays it\n", model, why)
 			return
 		}
 	}
