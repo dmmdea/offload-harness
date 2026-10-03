@@ -1,6 +1,7 @@
 package gpulease
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -384,4 +385,57 @@ func firstTokenID(t *testing.T, m *Manager) string {
 		t.Fatal("no token on disk")
 	}
 	return ts[0].ID
+}
+
+// ---------------------------------------------------------------------------
+// A wait that ends without ever reaching the front is a place in line, not a failure
+// ---------------------------------------------------------------------------
+
+// A waiter ahead of this call that never claims (a seat admission, say) keeps it off the front
+// for its whole window while the card sits free. That is still "queued", and a caller that
+// answers with a token must be able to tell it from a configuration fault.
+func TestAnAcquireThatNeverReachedTheFrontIsStillQueued(t *testing.T) {
+	m := realTimeTokenManager(t, 5*time.Second)
+	m.SetCardScoped(true)
+	ahead, unreg := m.registerWaiter(ClassSeat, Options{Reason: "seat admission"})
+	defer unreg()
+	if ahead.path == "" {
+		t.Fatal("waiter registration failed")
+	}
+	stop := make(chan struct{})
+	go func() { // a live waiter proves it is polling
+		for {
+			select {
+			case <-stop:
+				return
+			case <-time.After(20 * time.Millisecond):
+				m.refreshWaiter(ahead)
+			}
+		}
+	}()
+	defer close(stop)
+
+	_, err := m.Acquire(ClassMedia, Options{Devices: []string{"gpu-aaaa"}, TTL: time.Hour, Wait: 150 * time.Millisecond, WaitOut: true})
+	if !errors.Is(err, ErrStillQueued) {
+		t.Fatalf("err = %v, want ErrStillQueued", err)
+	}
+	if !strings.Contains(err.Error(), "seat admission") {
+		t.Errorf("the error should name who is ahead: %v", err)
+	}
+}
+
+func TestAnAcquireBehindOnlyALiveTokenIsStillQueuedAndNamesIt(t *testing.T) {
+	m := realTimeTokenManager(t, 5*time.Second)
+	m.SetCardScoped(true)
+	tok, err := m.LeaveToken(ClassMedia, Options{Devices: []string{"gpu-aaaa"}, Reason: "image-gen"}, time.Now().Add(-time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = m.Acquire(ClassMedia, Options{Devices: []string{"gpu-aaaa"}, TTL: time.Hour, Wait: 150 * time.Millisecond, WaitOut: true})
+	if !errors.Is(err, ErrStillQueued) {
+		t.Fatalf("err = %v, want ErrStillQueued", err)
+	}
+	if !strings.Contains(err.Error(), tok.ID) {
+		t.Errorf("the error should name the place held ahead (%s): %v", tok.ID, err)
+	}
 }

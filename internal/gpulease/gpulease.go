@@ -126,6 +126,12 @@ const (
 // flag. Defined here so the CLI and the MCP status tool cannot drift apart.
 const QueueHint = "local-offload gpu reserve --wait 8h --drain --unload-seat --for <window> --reason <why> -- <cmd>  (queues until the holder releases; --wait 0 fails fast; never refuse GPU work because a card is held)"
 
+// ErrStillQueued is what a queued Acquire returns when its whole window passed without it ever
+// reaching the front of the line, so no claim was attempted and no holder was seen: it waited
+// behind a waiter that has not claimed, or behind a place held for a caller who left. It is a
+// place in line and not a fault, like ErrHeld; callers that answer with a token treat the two alike.
+var ErrStillQueued = errors.New("gpulease: gave up waiting for the card: still queued")
+
 // ErrHeld is returned by TryAcquire when the card is legitimately held by someone
 // else. It carries the current holder so a caller can report an honest ETA rather
 // than a bare failure.
@@ -1407,7 +1413,13 @@ func queueTimeoutErr(m *Manager, self Waiter) error {
 		if w.path == self.path {
 			continue
 		}
-		return fmt.Errorf("gpulease: gave up waiting for the card: still queued behind pid %d (%s, reason %q), which has not claimed it", w.PID, w.Class, w.Reason)
+		return fmt.Errorf("%w: behind pid %d (%s, reason %q), which has not claimed the card", ErrStillQueued, w.PID, w.Class, w.Reason)
+	}
+	// A place held for a caller who left (tokens.go) keeps the line just as a waiter does.
+	for _, t := range m.Tokens() {
+		if t.ID != self.Token && m.tokenLive(t) && t.SinceMs < self.SinceMs && devicesConflict(t.Devices, self.Devices) {
+			return fmt.Errorf("%w: behind a place held for another caller (%s, %s, reason %q), who may still come back for it", ErrStillQueued, t.ID, t.Class, t.Reason)
+		}
 	}
 	// The card is free and no one else is in line: isFrontOfQueue would have
 	// been true and TryAcquire would have run, setting err — this is
