@@ -137,8 +137,10 @@ func (s *Server) handleMediaJob(w http.ResponseWriter, r *http.Request) {
 	s.admit(w, r, dispatchEnvelope{JobID: head.JobID, TaskType: MediaJobTask, Payload: body})
 }
 
-// readMediaJobBody reads the whole body into ONE buffer sized from Content-Length when the client sent it
-// (io.ReadAll would grow by doubling, leaving garbage the size of the body behind it).
+// readMediaJobBody reads the whole body into ONE buffer of exactly Content-Length bytes when the client sent
+// it (io.ReadAll would grow by doubling, and bytes.Buffer.ReadFrom regrows once fewer than 512 bytes are
+// free, either of which leaves garbage the size of the body behind it). After the declared length it probes
+// one more byte: a body longer than it declared is refused as too large, as one over the cap is.
 func readMediaJobBody(r *http.Request, limit int64) ([]byte, error) {
 	if r.ContentLength > limit {
 		// Let the MaxBytesReader produce the typed error the caller maps to 413.
@@ -146,11 +148,22 @@ func readMediaJobBody(r *http.Request, limit int64) ([]byte, error) {
 		return nil, err
 	}
 	if r.ContentLength > 0 {
-		buf := bytes.NewBuffer(make([]byte, 0, r.ContentLength+1))
-		if _, err := buf.ReadFrom(r.Body); err != nil {
+		buf := make([]byte, r.ContentLength)
+		if _, err := io.ReadFull(r.Body, buf); err != nil {
+			if errors.Is(err, io.ErrUnexpectedEOF) {
+				return nil, errors.New("body shorter than its Content-Length")
+			}
 			return nil, err
 		}
-		return buf.Bytes(), nil
+		var probe [1]byte
+		n, err := r.Body.Read(probe[:])
+		if n > 0 {
+			return nil, &http.MaxBytesError{Limit: r.ContentLength}
+		}
+		if err != nil && !errors.Is(err, io.EOF) {
+			return nil, err
+		}
+		return buf, nil
 	}
 	return io.ReadAll(r.Body)
 }

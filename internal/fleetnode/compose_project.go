@@ -90,9 +90,8 @@ func (s *Server) handleComposeProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Only a token holder gets the longer window; everyone else met the blanket timeouts above.
-	rc := http.NewResponseController(w)
-	_ = rc.SetReadDeadline(time.Now().Add(composeProjectWindow))
-	_ = rc.SetWriteDeadline(time.Now().Add(composeProjectWindow))
+	s.extendRead(w, composeProjectWindow, "the compose-project door")
+	s.extendWrite(w, composeProjectWindow, "the compose-project door")
 	limit := ComposeProjectBodyCap(s.opts.Cfg)
 	r.Body = http.MaxBytesReader(w, r.Body, limit)
 	if ct := r.Header.Get("Content-Type"); ct != "" {

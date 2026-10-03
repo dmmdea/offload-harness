@@ -569,3 +569,76 @@ func TestMediaJobBodyDecodeAcceptsEscapedBase64AndRefusesUnknownKeys(t *testing.
 		t.Errorf("an over-limit body must surface the typed MaxBytesError, got %v", err)
 	}
 }
+
+// ---- R1: the body lands in one buffer of exactly Content-Length bytes -----------------------------
+
+// bytes.Buffer.ReadFrom wants 512 free bytes before each read, so a buffer sized CL+1 regrew (to about
+// twice its size) when the last reads left less than that. Sizes around every 512 boundary must come back
+// in a buffer with no slack and no regrowth, and a body that outruns its declared length is refused.
+func TestReadMediaJobBodyAllocatesExactlyContentLength(t *testing.T) {
+	for _, cl := range []int{1, 510, 511, 512, 513, 1023, 1024, 1025, 4095, 4096, 4097, 70000} {
+		src := bytes.Repeat([]byte{'x'}, cl)
+		r := httptest.NewRequest("POST", "/", smallReads{bytes.NewReader(src)})
+		r.ContentLength = int64(cl)
+		got, err := readMediaJobBody(r, 1<<20)
+		if err != nil || !bytes.Equal(got, src) {
+			t.Fatalf("Content-Length %d: err %v, %d bytes back", cl, err, len(got))
+		}
+		if cap(got) != cl {
+			t.Errorf("Content-Length %d: buffer capacity %d, want exactly %d (a regrowth)", cl, cap(got), cl)
+		}
+	}
+	// Longer than it declared: refused as too large, the door's 413.
+	r := httptest.NewRequest("POST", "/", strings.NewReader("0123456789"))
+	r.ContentLength = 4
+	var maxErr *http.MaxBytesError
+	if _, err := readMediaJobBody(r, 1<<20); !errors.As(err, &maxErr) {
+		t.Errorf("a body longer than its Content-Length must be refused as too large, got %v", err)
+	}
+	// Shorter than it declared: an error, not a short buffer.
+	r = httptest.NewRequest("POST", "/", strings.NewReader("0123"))
+	r.ContentLength = 10
+	if _, err := readMediaJobBody(r, 1<<20); err == nil {
+		t.Error("a body shorter than its Content-Length was accepted")
+	}
+}
+
+// smallReads returns at most 509 bytes per Read, the pattern that leaves fewer than 512 free bytes at the
+// end of a buffer.
+type smallReads struct{ r *bytes.Reader }
+
+func (o smallReads) Read(p []byte) (int, error) {
+	if len(p) > 509 {
+		p = p[:509]
+	}
+	return o.r.Read(p)
+}
+
+// ---- R9: the compose-project door reports a deadline it cannot extend ------------------------------
+
+func TestComposeProjectReportsADeadlineItCannotExtend(t *testing.T) {
+	writeDeadlineUnsupported.Delete("the compose-project door")
+	writeDeadlineUnsupported.Delete("the compose-project door (read)")
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	defer log.SetOutput(os.Stderr)
+
+	s, _ := newTestServer(t, projectCfg(), &fakeRunner{}, nil)
+	for i := 0; i < 3; i++ {
+		if rec := do(t, s, "POST", ComposeProjectPath, "{}", bearer()); rec.Code != 400 {
+			t.Fatalf("status %d", rec.Code)
+		}
+	}
+	for _, want := range []string{"compose-project door runs under the blanket read timeout", "compose-project door runs under the blanket write timeout"} {
+		if n := strings.Count(buf.String(), want); n != 1 {
+			t.Errorf("%q logged %d times over three requests, want exactly once:\n%s", want, n, buf.String())
+		}
+	}
+	buf.Reset()
+	s.setReadDeadline = func(http.ResponseWriter, time.Time) error { return errors.New("boom-read") }
+	s.setWriteDeadline = func(http.ResponseWriter, time.Time) error { return errors.New("boom-write") }
+	do(t, s, "POST", ComposeProjectPath, "{}", bearer())
+	if !strings.Contains(buf.String(), "boom-read") || !strings.Contains(buf.String(), "boom-write") {
+		t.Errorf("a failed extension must be logged with its cause:\n%s", buf.String())
+	}
+}
