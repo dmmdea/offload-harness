@@ -33,6 +33,11 @@ type Node struct {
 	VramTotal float64          `json:"vram_total_gb"`
 	VramFree  float64          `json:"vram_free_gb"`
 	Devices   []map[string]any `json:"gpu_devices,omitempty"`
+	// Leases is the node's live leases as it published them (health leases[], GPU routing P7),
+	// kept raw for the page. Cards joins them to Devices: one tile per card with the lease that
+	// holds it. Both are absent from a node that publishes no lease or no devices.
+	Leases []map[string]any `json:"leases,omitempty"`
+	Cards  []CardTile       `json:"cards,omitempty"`
 
 	GpuUtil      int     `json:"gpu_util_pct"`
 	GpuUtilKnown bool    `json:"gpu_util_known"`
@@ -56,6 +61,36 @@ type Node struct {
 	Jobs    []map[string]any `json:"jobs"`
 
 	LastSeen int64 `json:"last_seen"`
+}
+
+// CardTile is one card of a node as the operator reads it: what the card is doing and which
+// lease, if any, holds it.
+type CardTile struct {
+	Index       int     `json:"index"`
+	UUID        string  `json:"uuid"`
+	Name        string  `json:"name"`
+	VramUsedGB  float64 `json:"vram_used_gb"`
+	VramTotalGB float64 `json:"vram_total_gb"`
+	UtilPct     int     `json:"util_pct"`
+	UtilKnown   bool    `json:"util_known"`
+	// Display marks the operator's display card: never free for work.
+	Display bool `json:"display,omitempty"`
+	// Free: no lease holds the card, it is not the display card, and it is measurably idle.
+	// A card that is busy under no lease is busy outside the harness, and is not free.
+	Free bool `json:"free"`
+	// Holder is the lease that holds this card; nil when none does.
+	Holder *CardHolder `json:"holder,omitempty"`
+}
+
+// CardHolder is the lease on a card: its epoch, class, the node's verdict word for what it is
+// doing, where its cards came from (declared, inferred, whole-node) and how long it has left.
+type CardHolder struct {
+	Epoch        uint64 `json:"epoch"`
+	Class        string `json:"class"`
+	Verdict      string `json:"verdict"`
+	Scope        string `json:"scope"`
+	RemainingSec int    `json:"remaining_sec,omitempty"`
+	Overdue      bool   `json:"overdue,omitempty"`
 }
 
 // Error is one operator-facing event: a probe failure, a job that finished
