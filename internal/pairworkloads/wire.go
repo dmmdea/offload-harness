@@ -74,15 +74,18 @@ var (
 
 // WireHeadersFor is SetWireHeaders for a caller that holds a config and no emitter (the
 // accelerator lane, the remote lanes' request builders). The emitter it asks is cached per
-// (enabled, endpoint, app dir, node-info URL), so the identity files are read once per identityTTL, not per call.
+// (enabled, endpoint, app dir, node-info URL, relay), so the identity files are read once per identityTTL, not per call.
+// A box that reports through a card relay (relay.go) has an enabled emitter, so it sends no
+// X-Offload-Pair-Card: the asker cards the job through its relay and the serving node must not card
+// it too (one job, one card).
 func WireHeadersFor(cfg config.Config, h http.Header) {
 	c := FromConfig(cfg)
-	key := strings.Join([]string{boolKey(c.Enabled), c.Endpoint, strings.TrimSpace(os.Getenv("OFFLOAD_PAIR_APPDIR")), c.NodeInfoURL}, "|")
+	key := strings.Join([]string{boolKey(c.Enabled), c.Endpoint, strings.TrimSpace(os.Getenv("OFFLOAD_PAIR_APPDIR")), c.NodeInfoURL, c.Relay.signature()}, "|")
 	wireMu.Lock()
 	e, ok := wireEmitters[key]
 	if !ok {
 		// No state dir: this emitter only reads identity, it never emits a frame.
-		e = New(Config{Enabled: c.Enabled, Endpoint: c.Endpoint, NodeInfoURL: c.NodeInfoURL})
+		e = New(Config{Enabled: c.Enabled, Endpoint: c.Endpoint, NodeInfoURL: c.NodeInfoURL, Relay: c.Relay})
 		wireEmitters[key] = e
 	}
 	wireMu.Unlock()

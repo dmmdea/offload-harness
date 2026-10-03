@@ -418,6 +418,15 @@ type Config struct {
 	// ingress stays off. Loopback only: any other host is refused at load. Empty = the default,
 	// except where OFFLOAD_PAIR_APPDIR is set (docs/systems/pair-workloads.md).
 	PairNodeInfoURL string `json:"pair_node_info_url,omitempty"`
+	// PairWorkloadsRelay is where this box's PAIR frames go when it has NO PAIR identity of its own
+	// (no readable node-id.json and no node-info fallback: a view-only box, a thin client where PAIR
+	// is not installed): the base URLs of fleet-serve members that serve POST /fleet/pair-relay
+	// (docs/systems/pair-workloads.md, *The card relay*). Absent or empty = "auto": every
+	// delegate_remotes base whose /fleet/health advertises pair_relay. The entry "auto" says so
+	// outright, "off" turns the relay off, and any other entry is an explicit member base (a box with
+	// no delegate_remotes sets it by hand). Used only while pair_workloads_enabled is on and the box
+	// has no identity; the fleet_auth_token is the bearer.
+	PairWorkloadsRelay []string `json:"pair_workloads_relay,omitempty"`
 	// PairSeatActivityEnabled (0.133.0) makes fleet-serve report traffic that
 	// reaches this box's vLLM seats WITHOUT the harness (a curl soak, an editor
 	// pointed at llama-swap) as PAIR cards, one per busy stretch of a seat. The

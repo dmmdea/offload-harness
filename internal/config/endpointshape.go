@@ -137,7 +137,24 @@ func validateConfiguredBases(c Config) error {
 	if err := validateLoopbackBase("pair_node_info_url", c.PairNodeInfoURL); err != nil {
 		return err
 	}
-	return validateEndpointList("delegate_remotes", c.DelegateRemotes, false)
+	if err := validateEndpointList("delegate_remotes", c.DelegateRemotes, false); err != nil {
+		return err
+	}
+	return validateEndpointList("pair_workloads_relay", relayExplicitBases(c.PairWorkloadsRelay), false)
+}
+
+// relayExplicitBases is pair_workloads_relay without its two words ("auto", "off"): the entries that
+// must be usable base URLs.
+func relayExplicitBases(entries []string) []string {
+	var out []string
+	for _, e := range entries {
+		switch strings.ToLower(strings.TrimSpace(e)) {
+		case "auto", "off":
+		default:
+			out = append(out, e)
+		}
+	}
+	return out
 }
 
 // validateLoopbackBase refuses a configured base that is not this box. pair_node_info_url is read

@@ -42,6 +42,11 @@ import (
 )
 
 const (
+	idSourceFile     = "file"
+	idSourceNodeInfo = "node-info"
+)
+
+const (
 	// DefaultEndpoint is the ingress every node's workload-ingress.json binds.
 	DefaultEndpoint = "http://127.0.0.1:14324/v1/workloads/events"
 	// identityTTL bounds how often the two identity files are re-read; a
@@ -84,6 +89,9 @@ type Config struct {
 	// "" = no fallback. FromConfig sets it; a bare Config does not, so a test that builds an emitter
 	// without it can never reach a live PAIR.
 	NodeInfoURL string
+	// Relay is the card relay (relay.go): where frames go when this box has no PAIR identity of
+	// its own (neither node-id.json nor the node-info fallback). The zero value is no relay.
+	Relay RelayConfig
 }
 
 // UnderLeaseEnv is set by `gpu reserve -- <cmd>` on the command it wraps. The
@@ -101,7 +109,7 @@ func FromConfig(cfg config.Config) Config {
 	enabled := cfg.PairWorkloadsEnabled && strings.TrimSpace(os.Getenv(UnderLeaseEnv)) == ""
 	return Config{Enabled: enabled, Endpoint: ep,
 		VLLMSeats: cfg.VLLMSeats, SwapEndpoint: cfg.Endpoint, StateDir: cfg.StateDir,
-		NodeInfoURL: nodeInfoURLFor(cfg)}
+		NodeInfoURL: nodeInfoURLFor(cfg), Relay: RelayFromConfig(cfg)}
 }
 
 // nodeInfoURLFor is the node-info URL the identity fallback uses: the configured
@@ -140,6 +148,10 @@ type Event struct {
 	CreatedAt   int64
 	StartedAt   int64
 	CompletedAt int64
+	// Remote marks a frame a card relay delivered on behalf of ANOTHER box's process (the member's
+	// side of relay.go). Its producer is not a process of this box, so its open-card marker carries
+	// no pid and is closed by its terminal frame or the age cap, never by a local pid probe.
+	Remote bool
 }
 
 // Emitter posts frames to PAIR's loopback ingress.
@@ -152,6 +164,8 @@ type Emitter struct {
 	idAt     time.Time
 	selfUUID string
 	// The identity fallback's cached answers (nodeinfo.go), guarded by idMu.
+	// idSource says where selfUUID came from: idSourceFile or idSourceNodeInfo.
+	idSource     string
 	fbUUID       string
 	fbUUIDAt     time.Time
 	fbIngress    bool
@@ -166,6 +180,8 @@ type Emitter struct {
 	// cluster members: lower(name) / lower(address) -> uuid. Consulted after the members.
 	viewName map[string]string
 	viewAddr map[string]string
+	// relay is the card relay's state (relay.go), under its own lock.
+	relay relayState
 	// resolved remembers, per job, the node UUID an in-flight frame resolved
 	// to, so a terminal frame whose names resolve to nothing (a node that
 	// reports its fleet id, not its hostname) keeps the card where the job
@@ -217,6 +233,8 @@ func New(c Config) *Emitter {
 	e := &Emitter{cfg: c, client: &http.Client{Timeout: sendTimeout}, appDir: c.AppDir,
 		fetchRoster: swapclient.FetchRoster,
 		alive:       gpulease.PIDAlive, procStart: gpulease.ProcessStart, now: time.Now}
+	e.relay.client = newRelayClient()
+	e.relay.probe = e.probeRelayHealth
 	if e.appDir == "" {
 		// OFFLOAD_PAIR_APPDIR points at a PAIR data dir that is not at the
 		// platform default (a portable install, a test fixture).
@@ -247,14 +265,18 @@ func defaultAppDir() string {
 	return filepath.Join(base, "Nvidia Corporation", "Personal AI Router")
 }
 
-// Enabled is true when the config opts in AND PAIR is installed on this box
-// (its node-id.json exists and names a UUID).
+// Enabled is true when the config opts in AND frames have somewhere to go: PAIR is installed on
+// this box (its node-id.json exists and names a UUID, or PAIR's node-info answers on loopback
+// beside a live ingress), or, with no identity of its own, a card relay member is reachable
+// (relay.go).
 func (e *Emitter) Enabled() bool {
 	if e == nil || !e.cfg.Enabled {
 		return false
 	}
-	self, _ := e.identity()
-	return self != ""
+	if self, _ := e.identity(); self != "" {
+		return true
+	}
+	return e.relayUsable()
 }
 
 func (e *Emitter) identity() (self string, members map[string]string) {
@@ -279,6 +301,7 @@ func (e *Emitter) loadIdentityLocked() {
 	}
 	e.idAt = time.Now()
 	e.selfUUID, e.members, e.byAddr, e.selfName, e.viewName, e.viewAddr = "", nil, nil, "", nil, nil
+	e.idSource = ""
 	raw, err := os.ReadFile(filepath.Join(e.appDir, "node-id.json"))
 	if err != nil {
 		// Missing or unreadable (PAIR is another OS user's, or not installed). The members files
@@ -288,6 +311,7 @@ func (e *Emitter) loadIdentityLocked() {
 			return
 		}
 		e.selfUUID = id
+		e.idSource = idSourceNodeInfo
 	} else {
 		var nid struct {
 			NodeUUID string `json:"node_uuid"`
@@ -296,6 +320,7 @@ func (e *Emitter) loadIdentityLocked() {
 			return
 		}
 		e.selfUUID = nid.NodeUUID
+		e.idSource = idSourceFile
 	}
 	e.members = map[string]string{}
 	e.byAddr = map[string]string{}
@@ -654,14 +679,66 @@ func (e *Emitter) Send(ctx context.Context, ev Event) error {
 	if !e.Enabled() {
 		return nil
 	}
-	body, info, err := e.build(ev)
+	pl, err := e.plan(ev)
 	if err != nil {
 		return err
 	}
-	done := e.track(ev, info)
-	err = e.post(ctx, body)
-	e.untrack(done, info, err)
+	done := e.track(ev, pl)
+	err = e.deliver(ctx, pl)
+	e.untrack(done, pl, err)
 	return err
+}
+
+// sendPlan is one frame ready to go: the body, the workloadInfo the open-card register keeps, where
+// it is posted (PAIR's loopback ingress, or a relay member's route URL) and, for a relayed frame, the
+// node hint its marker keeps so a sweep can rebuild the relay body.
+type sendPlan struct {
+	body  []byte
+	info  map[string]json.RawMessage
+	url   string
+	relay *relayMeta
+	// remote: the producer is another box's process (a frame a relay delivered to this member).
+	remote bool
+}
+
+// plan builds ev's frame for the way this emitter reports. With a PAIR identity the frame goes to
+// the local ingress (a job whose in-flight frames went through a relay keeps its terminal frame on
+// that relay, so one card is closed where it was opened); with none it is a relay body for the first
+// healthy relay member.
+func (e *Emitter) plan(ev Event) (sendPlan, error) {
+	self, _ := e.identity()
+	if !ev.Remote {
+		if u, ok := e.pinnedRelay(ev.JobID); ok {
+			return e.relayPlan(ev, u)
+		}
+	}
+	if self != "" || ev.Remote {
+		body, info, err := e.build(ev)
+		return sendPlan{body: body, info: info, url: e.cfg.Endpoint, remote: ev.Remote}, err
+	}
+	u := e.relayRoute(ev)
+	if u == "" {
+		return sendPlan{}, errNoRelay
+	}
+	return e.relayPlan(ev, u)
+}
+
+func (e *Emitter) relayPlan(ev Event, u string) (sendPlan, error) {
+	body, info, meta := e.buildRelay(ev)
+	if isTerminal(ev.State) {
+		e.relay.mu.Lock()
+		delete(e.relay.pinned, ev.JobID)
+		e.relay.mu.Unlock()
+	}
+	return sendPlan{body: body, info: info, url: u, relay: meta}, nil
+}
+
+// deliver posts a planned frame to where its plan says.
+func (e *Emitter) deliver(ctx context.Context, pl sendPlan) error {
+	if pl.relay != nil {
+		return e.postRelay(ctx, pl.url, pl.body)
+	}
+	return e.post(ctx, pl.body)
 }
 
 // post delivers one built frame within sendTimeout.
@@ -700,21 +777,21 @@ func (e *Emitter) Emit(ev Event) {
 		return
 	}
 	e.SweepOrphansAsync()
-	body, info, err := e.build(ev)
+	pl, err := e.plan(ev)
 	done := ""
 	if err == nil {
-		done = e.track(ev, info)
+		done = e.track(ev, pl)
 	}
 	e.inflight.Add(1)
 	go func() {
 		defer e.inflight.Done()
 		if err == nil {
-			err = e.post(context.Background(), body)
+			err = e.deliver(context.Background(), pl)
 		}
 		// The terminal marker goes only after the post was attempted: a
 		// process killed in between still leaves a marker to close the card,
 		// and a post that failed leaves the terminal frame for the sweep.
-		e.untrack(done, info, err)
+		e.untrack(done, pl, err)
 		if err != nil {
 			e.warnOnce.Do(func() {
 				log.Printf("pairworkloads: PAIR ingress unreachable; harness jobs will not appear in PAIR's Jobs list (%v)", err)

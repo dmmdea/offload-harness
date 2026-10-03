@@ -117,8 +117,15 @@ type openMarker struct {
 	// Endpoint is the ingress URL the card was posted to (the writing
 	// emitter's own). A sweep closes only the markers of its own endpoint: a
 	// marker without one predates this field and belongs to DefaultEndpoint.
-	Endpoint string                     `json:"endpoint,omitempty"`
-	Info     map[string]json.RawMessage `json:"workload_info"`
+	Endpoint string `json:"endpoint,omitempty"`
+	// Remote marks a card whose producer is ANOTHER box's process: a frame a card relay delivered
+	// to this member (relay.go). PID is 0 and ProcStart 0 on it, because a pid of this box says
+	// nothing about that producer; it closes by its terminal relayed frame or by RelayOpenMaxAge.
+	Remote bool `json:"remote,omitempty"`
+	// Relay is set on a marker the RELAYING box wrote: the node hint the member needs to place the
+	// card, kept so a sweep can rebuild the relay body (Endpoint is then the relay's route URL).
+	Relay *relayMeta                 `json:"relay,omitempty"`
+	Info  map[string]json.RawMessage `json:"workload_info"`
 }
 
 // markerEndpoint is the ingress a marker's card lives on: the endpoint it
@@ -206,7 +213,7 @@ func markerName(pid int, jobID string) string {
 // frame writes (or rewrites) the job's marker; a terminal frame forgets it and
 // returns its path, which the caller removes once the post was attempted
 // (untrack). Best-effort throughout.
-func (e *Emitter) track(ev Event, info map[string]json.RawMessage) (removeAfterPost string) {
+func (e *Emitter) track(ev Event, pl sendPlan) (removeAfterPost string) {
 	if ev.JobID == "" {
 		return ""
 	}
@@ -215,14 +222,24 @@ func (e *Emitter) track(ev Event, info map[string]json.RawMessage) (removeAfterP
 		p := e.open[ev.JobID]
 		delete(e.open, ev.JobID)
 		e.openMu.Unlock()
+		if p == "" && pl.remote {
+			// A relayed card's marker is found by name, not by this process's memory: the member may
+			// have restarted since the in-flight frame while the producer, on another box, did not.
+			if dir := e.registerDir(); dir != "" {
+				p = filepath.Join(dir, markerName(0, ev.JobID))
+			}
+		}
 		return p
 	}
 	dir := e.registerDir()
-	if dir == "" || info == nil {
+	if dir == "" || pl.info == nil {
 		return ""
 	}
 	pid, start := e.selfIdentity()
-	body, err := json.Marshal(openMarker{PID: pid, ProcStart: start, WrittenMs: e.now().UnixMilli(), Endpoint: e.cfg.Endpoint, Info: info})
+	if pl.remote {
+		pid, start = 0, 0
+	}
+	body, err := json.Marshal(openMarker{PID: pid, ProcStart: start, WrittenMs: e.now().UnixMilli(), Endpoint: pl.url, Remote: pl.remote, Relay: pl.relay, Info: pl.info})
 	if err != nil {
 		return ""
 	}
@@ -251,7 +268,8 @@ func (e *Emitter) track(ev Event, info map[string]json.RawMessage) (removeAfterP
 // answer, so a pending marker would only be retried and refused until the give-up
 // and would end every sweep pass in the meantime. The marker is dropped, with a
 // log line.
-func (e *Emitter) untrack(path string, terminal map[string]json.RawMessage, postErr error) {
+func (e *Emitter) untrack(path string, pl sendPlan, postErr error) {
+	terminal := pl.info
 	if path == "" {
 		return
 	}
@@ -266,7 +284,10 @@ func (e *Emitter) untrack(path string, terminal map[string]json.RawMessage, post
 		return
 	}
 	pid, start := e.selfIdentity()
-	body, err := json.Marshal(openMarker{PID: pid, ProcStart: start, WrittenMs: e.now().UnixMilli(), Pending: true, Endpoint: e.cfg.Endpoint, Info: terminal})
+	if pl.remote {
+		pid, start = 0, 0
+	}
+	body, err := json.Marshal(openMarker{PID: pid, ProcStart: start, WrittenMs: e.now().UnixMilli(), Pending: true, Endpoint: pl.url, Remote: pl.remote, Relay: pl.relay, Info: terminal})
 	if err != nil || !writeAtomic(filepath.Dir(path), path, body) {
 		removeRetrying(path)
 	}
@@ -332,6 +353,11 @@ func (e *Emitter) SweepOrphansAsync() {
 // orphaned reports whether a marker's producer is gone: its pid is dead, its
 // pid now belongs to a different process, or the marker is past the leak cap.
 func (e *Emitter) orphaned(m openMarker, now time.Time) bool {
+	if m.Remote {
+		// The producer is another box's process: no pid of this box can say it is gone, so a
+		// relayed card closes by its terminal frame or by the age cap, and only by those.
+		return now.Sub(time.UnixMilli(m.WrittenMs)) > RelayOpenMaxAge
+	}
 	if m.PID <= 0 || now.Sub(time.UnixMilli(m.WrittenMs)) > OpenMaxAge {
 		return true
 	}
@@ -400,7 +426,7 @@ func (e *Emitter) SweepOrphans(ctx context.Context) int {
 			}
 			continue
 		}
-		if !sameEndpoint(markerEndpoint(m), e.cfg.Endpoint) {
+		if !e.ownsEndpoint(markerEndpoint(m)) {
 			continue // another ingress's card: not ours to post, lock, delete or age-drop
 		}
 		if !m.Pending && !e.orphaned(m, now) {
@@ -432,7 +458,7 @@ func (e *Emitter) SweepOrphans(ctx context.Context) int {
 			removeRetrying(lock)
 			continue
 		}
-		if err = e.post(ctx, body); err != nil {
+		if err = e.postMarker(ctx, m, body); err != nil {
 			var rej *rejectedError
 			if errors.As(err, &rej) {
 				// PAIR will never accept this frame: drop the one marker, go on.
@@ -534,12 +560,32 @@ func (e *Emitter) reapLock(lock string, selfPID int) {
 // sweepFrame is the frame a sweep sends for a marker: a pending terminal
 // frame as its producer built it, or the "failed" frame of an orphan.
 func sweepFrame(m openMarker, now time.Time) ([]byte, error) {
+	method, info := MethodFor("failed"), orphanInfo(m.Info, now)
 	if m.Pending {
 		var state string
 		_ = json.Unmarshal(m.Info["state"], &state)
-		return frameBody(MethodFor(state), m.Info)
+		method, info = MethodFor(state), m.Info
 	}
-	return frameBody(MethodFor("failed"), orphanInfo(m.Info, now))
+	if m.Relay != nil {
+		// A card opened through a relay is closed through it, with the node hint the member needs.
+		return relayFrameBody(method, info, *m.Relay)
+	}
+	return frameBody(method, info)
+}
+
+// ownsEndpoint reports whether a marker's endpoint is one this emitter closes cards on: its own
+// ingress, or (relay.go) a relay member it is configured for.
+func (e *Emitter) ownsEndpoint(ep string) bool {
+	return sameEndpoint(ep, e.cfg.Endpoint) || e.relayOwns(ep)
+}
+
+// postMarker delivers a sweep's frame for m to the endpoint m's card lives on: the ingress, or the
+// relay route its marker names.
+func (e *Emitter) postMarker(ctx context.Context, m openMarker, body []byte) error {
+	if m.Relay != nil {
+		return e.postRelay(ctx, markerEndpoint(m), body)
+	}
+	return e.post(ctx, body)
 }
 
 // orphanInfo is the terminal workloadInfo for an orphaned card: the in-flight
