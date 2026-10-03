@@ -139,6 +139,15 @@ keyed test skips visibly, unless the run requires it (a push, or a pull request 
 to be confused with the older shape-only `TestTrackedTreeCarriesNoOperatorIdentity`, which names no value.
 See [systems/leak-gate.md](systems/leak-gate.md).
 
+## Inner row
+
+A ledger row that is a step of a call, not the call: it carries `parent_job_id`, the `job_id` of the
+call's own row (register C-62, extended to every call that writes several rows: a `video_watch`
+window, an escalating cascade attempt, an `extract_image` sub-call). Job counters count the call's own
+row and skip its inner rows, PAIR cards only the call's own row, and an orphan inner row (the call's
+own row never landed) still counts as a call. See
+[systems/pair-workloads.md](systems/pair-workloads.md).
+
 ## Ledger
 
 The append-only JSONL record of offload calls and their savings, `fsync`ed per entry. Carries

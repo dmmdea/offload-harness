@@ -130,3 +130,70 @@ func TestSummarizeCountsAnOrphanInnerRowAsItsJob(t *testing.T) {
 		t.Fatalf("the orphan's defer reason must be counted: %+v (%v)", reasons, err)
 	}
 }
+
+// Plan D12: the inner-row rule is not only for `agent` rows. A video_watch call
+// writes one row per window plus the call's own row; the windows name the call as
+// parent. The summary reads the call ONCE, each token once: the window prompts
+// from their inner rows (the savings an inner row keeps), the call row's own
+// prompt (the synthesis) and the call's whole output from the call row, and the
+// cards figure only on the call row (an inner row records 0).
+func TestSummarizeCountsAMultiRowVideoWatchCallOnce(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "ledger.jsonl")
+	l, err := Open(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		_ = l.Record(Entry{Task: "video_watch", ParentJobID: "vw-1", TokensIn: 100, TokensOut: 8})
+	}
+	// The call row: synthesis prompt 30 only on TokensIn; all output; the cards
+	// figure set by the writer (3 x 100 + 30 prompt + 32 out).
+	_ = l.Record(Entry{Task: "video_watch", JobID: "vw-1", TokensIn: 30, TokensOut: 32, CardsTokens: 362})
+	// An unrelated plain call beside it.
+	_ = l.Record(Entry{Task: "summarize", TokensIn: 500, TokensOut: 50})
+	l.Close()
+
+	s, err := SummarizeFile(p, 0, Prices{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Calls != 2 || s.ByTask["video_watch"] != 1 || s.Completed != 2 {
+		t.Fatalf("calls=%d by_task=%v completed=%d, want the call once beside the summarize", s.Calls, s.ByTask, s.Completed)
+	}
+	if s.TokensSaved != 3*100+30+500 {
+		t.Fatalf("tokens saved = %d, want %d (every prompt once)", s.TokensSaved, 3*100+30+500)
+	}
+	if s.TokensOut != 32+50 {
+		t.Fatalf("tokens out = %d, want %d (the call's output once)", s.TokensOut, 32+50)
+	}
+	rows, err := ReadAll(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := 0
+	for _, r := range JobRows(rows) {
+		sum += r.CardsTokens
+	}
+	if sum != 362+550 {
+		t.Fatalf("job rows' cards_tokens = %d, want %d: inner rows must add nothing", sum, 362+550)
+	}
+}
+
+// An orphaned window row (the call row never landed: a crash mid-sweep) is the
+// only record of that work and still counts as a call, as C-62 promises.
+func TestSummarizeCountsAnOrphanWindowRowAsACall(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "ledger.jsonl")
+	l, err := Open(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = l.Record(Entry{Task: "video_watch", ParentJobID: "vw-gone", TokensIn: 100, TokensOut: 8})
+	l.Close()
+	s, err := SummarizeFile(p, 0, Prices{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Calls != 1 || s.TokensSaved != 100 {
+		t.Fatalf("orphan window row: calls=%d saved=%d, want 1/100", s.Calls, s.TokensSaved)
+	}
+}

@@ -356,8 +356,12 @@ type cacheVal struct {
 // when the call ends (pairworkloads.Emitter.Begin). working turns the card
 // running once the lane holds its engine (core.MarkWorking); both are nil when
 // nothing was opened.
+//
+// callID is the id of the card Begin opened ("" when none was): Run stamps it on
+// the call's Meta, the ledger row carries it, and the row closes exactly that
+// card (pairworkloads.Emitter.claim) instead of the oldest open card of the task.
 type CallTracker interface {
-	Begin(task, door string) (working func(), end func(deferred bool, reason string))
+	Begin(task, door string) (callID string, working func(), end func(deferred bool, reason string))
 }
 
 // SetCallTracker wires the tracker Run reports call starts to; nil = none.
@@ -376,13 +380,15 @@ func closeCall(end func(deferred bool, reason string), res *core.Result) {
 
 func (p *Pipeline) Run(ctx context.Context, req core.Request) (res core.Result) {
 	start := time.Now()
+	callID := ""
 	if p.tracker != nil && req.Task.Valid() {
-		if working, end := p.tracker.Begin(string(req.Task), req.Door); end != nil {
+		if id, working, end := p.tracker.Begin(string(req.Task), req.Door); end != nil {
+			callID = id
 			ctx = core.WithWorkingMark(ctx, working)
 			defer closeCall(end, &res)
 		}
 	}
-	meta := core.Meta{Model: p.cfg.Model}
+	meta := core.Meta{Model: p.cfg.Model, CallID: callID, ParentJobID: req.ParentJobID}
 	// Register A-102: carry the caller's door into telemetry so the ledger row
 	// names the surface that admitted the call. Documentary only — nothing below
 	// reads it, and every sub-branch takes meta by value from here.
@@ -709,6 +715,11 @@ func (p *Pipeline) Run(ctx context.Context, req core.Request) (res core.Result) 
 			res, escalatable = p.attempt(ctx, req, built, ck, model, meta, start, true, entryLen)
 		}
 		tried[model] = true
+		// An escalating attempt that wrote an inner row minted the call's job id;
+		// every later row of this call (the answer, or the final defer) carries it.
+		if res.Meta.JobID != "" {
+			meta.JobID = res.Meta.JobID
+		}
 		// Phase 3/7: the breaker tracks INFRA health only (ErrClass set); a quality
 		// defer means the tier physically worked. Autoheal fires on infra failure.
 		// LO-9: a TIMEOUT on the first call to an idle tier is exempted from
@@ -976,7 +987,7 @@ func (p *Pipeline) runVisionGen(ctx context.Context, req core.Request, built tas
 	}
 	if info := gpulock.WaitFreeScoped(ctx, p.gpuLockPath, p.visionGPUWait, p.visionGPUPoll, readLease); info.Held {
 		meta.LatencyMs = time.Since(start).Milliseconds()
-		meta.ErrClass = "gpu_busy"
+		meta.ErrClass = errClassGPUBusy
 		reason := fmt.Sprintf("gpu busy: generation job holds the lock (%ds)", int(info.Age/time.Second))
 		p.recordDefer(req.Task, meta, len(req.Input), reason)
 		return core.Deferf(reason, "", meta)
@@ -1010,8 +1021,19 @@ func (p *Pipeline) runVisionGen(ctx context.Context, req core.Request, built tas
 	if gerr != nil {
 		meta.LatencyMs = time.Since(start).Milliseconds()
 		meta.ErrClass = classifyErr(gerr)
-		p.recordDefer(req.Task, meta, len(req.Input), "vision model call failed: "+gerr.Error())
-		return core.Deferf("vision model call failed: "+gerr.Error(), "", meta)
+		reason := "vision model call failed: " + gerr.Error()
+		// A context-overflow defer that runVideoDescribe is about to retry at a
+		// smaller frame width is a STEP of that call, not the call: its row is
+		// an inner row of the row the final attempt writes.
+		row := meta
+		if rt, _ := ctx.Value(visionRetryKey{}).(*visionRetry); rt != nil && rt.canRetry && row.ParentJobID == "" && isContextOverflow(reason) {
+			if rt.id == "" {
+				rt.id = mintJobID("vd")
+			}
+			row.ParentJobID = rt.id
+		}
+		p.recordDefer(req.Task, row, len(req.Input), reason)
+		return core.Deferf(reason, "", meta)
 	}
 	meta.TokensIn = gres.TokensIn
 	meta.TokensOut = gres.TokensOut
@@ -1078,7 +1100,18 @@ func (p *Pipeline) runVideoDescribe(ctx context.Context, req core.Request, built
 	// different identity than the attempt that looked it up, storing the result
 	// under a digest for bytes the model never saw.
 	vidID, vdErr := p.digestMedia(req.Video)
+	// The retry loop below writes one row per attempt. An overflowed attempt that
+	// WILL be retried (width above the floor) is an inner row of the call; the
+	// attempt that ends the loop is the call's row and carries the job id the
+	// inner rows named. Nothing is minted unless an attempt really is retried, so
+	// the common one-attempt call writes the same single plain row as before.
+	retry := &visionRetry{}
+	ctx = context.WithValue(ctx, visionRetryKey{}, retry)
 	for {
+		retry.canRetry = width > 256
+		if retry.id != "" {
+			meta.JobID = retry.id
+		}
 		frames, err := videoio.SampleFrames(req.Video, p.cfg.FFmpegPath, p.cfg.VideoFPS, p.cfg.VideoMaxFrames, width, p.cfg.VisionMaxImageBytes)
 		if err != nil {
 			meta.LatencyMs = time.Since(start).Milliseconds()
@@ -1717,7 +1750,10 @@ func (p *Pipeline) runInpaintImage(ctx context.Context, req core.Request, meta c
 	// cleanly on the vqa load limit. Evidence:
 	// docs/superpowers/evidence/2026-07-17-nightshift-run-graph.md.
 	if mask == "" && paramBool(req.Params, "auto_text") {
-		am, aerr := p.autoTextMask(ctx, image, req.Door)
+		// The detector's vqa row is an inner row of this call's row (plan D12):
+		// every exit below records through meta, so the job id rides on all of them.
+		meta.JobID = mintJobID("ip")
+		am, aerr := p.autoTextMask(ctx, image, req.Door, meta.JobID)
 		if aerr != nil {
 			return defer1("auto text localization failed: " + aerr.Error() + " — build a mask with edit-image mask_boxes instead")
 		}
@@ -4070,29 +4106,84 @@ func sha256hex(s string) string {
 // and the escalation/defer ladder all come for free. There is no new extraction
 // logic here; runExtractImage only composes ocr + extract.
 //
-// Telemetry: the two sub-calls each record their own ledger row (an `ocr` vision
-// row + an `extract` text row). That is the correct, honest accounting, so
-// runExtractImage adds NO recording of its own — meta/start are unused here.
+// Telemetry (plan D12): the two sub-calls still record their own ledger rows (an
+// `ocr` vision row + an `extract` text row), but as INNER rows of one row the
+// composite writes for itself on EVERY exit (recordExtractImageCall). One call,
+// one card; the sub-call rows stay for the per-task detail (register C-62).
 func (p *Pipeline) runExtractImage(ctx context.Context, req core.Request, meta core.Meta, start time.Time) core.Result {
-	_ = meta
-	_ = start
+	jobID := mintJobID("xi")
+	meta.JobID = jobID
+	var subs []core.Result
+	done := func(res core.Result) core.Result {
+		p.recordExtractImageCall(req.Task, meta, start, res, subs)
+		return res
+	}
 	// 1. OCR the image via the existing ocr task (reuses runVision + the vision
 	//    tier). A propagated defer covers image-load, empty-output, and model-fail.
-	ocrRes := p.Run(ctx, core.Request{Task: core.TaskOCR, Image: req.Image, Door: req.Door})
+	ocrRes := p.Run(ctx, core.Request{Task: core.TaskOCR, Image: req.Image, Door: req.Door, ParentJobID: jobID})
+	subs = append(subs, ocrRes)
 	if !ocrRes.OK {
-		return ocrRes
+		return done(ocrRes)
 	}
 	// 2. Pull the OCR text out of ocrRes.Data ({"text": "..."}).
 	var m map[string]string
 	_ = json.Unmarshal(ocrRes.Data, &m)
 	ocrText := m["text"]
 	if strings.TrimSpace(ocrText) == "" {
-		return core.Deferf("empty OCR text for extract_image", "", ocrRes.Meta)
+		return done(core.Deferf("empty OCR text for extract_image", "", ocrRes.Meta))
 	}
 	// 3. Run the EXISTING extract on the OCR text — grammar + grounding (against
 	//    ocrText) + schema validation, all reused. The caller's schema rides in
 	//    req.Params exactly as offload_extract passes it.
-	return p.Run(ctx, core.Request{Task: core.TaskExtract, Input: ocrText, Params: req.Params, Door: req.Door})
+	exRes := p.Run(ctx, core.Request{Task: core.TaskExtract, Input: ocrText, Params: req.Params, Door: req.Door, ParentJobID: jobID})
+	subs = append(subs, exRes)
+	return done(exRes)
+}
+
+// recordExtractImageCall writes the composite's own row: the parent the ocr and
+// extract rows name. Each token is counted once by every reader:
+//
+//   - TokensIn is only what no inner row carries: the prompts of sub-calls a cache
+//     hit answered (an inner cache-hit row saves nothing). The prompts of the
+//     sub-calls that ran stay on their inner rows, whose TokensIn the savings
+//     summary adds (C-62).
+//   - TokensOut is the call's whole output; an inner row's is never counted.
+//   - CardsTokens is the work the cards did across the sub-calls that ran,
+//     set explicitly because Record writes 0 on an inner row and would derive
+//     this row's figure from the reduced TokensIn.
+//   - The row is a cache hit only when every sub-call that ran was one, so a call
+//     that did no card work makes no card.
+//
+// A sub-call's own escalating attempts are inner rows too (flattened under this
+// composite), and their tokens are on rows no reader sums: only the answering
+// tier's figures are in res.Meta.
+func (p *Pipeline) recordExtractImageCall(task core.TaskType, meta core.Meta, start time.Time, res core.Result, subs []core.Result) {
+	if p.led == nil {
+		return
+	}
+	row := meta
+	row.Model = res.Meta.Model
+	row.ErrClass = res.Meta.ErrClass
+	row.LatencyMs = time.Since(start).Milliseconds()
+	row.TokensIn, row.TokensOut = 0, 0
+	row.CacheHit = len(subs) > 0
+	cards, cachedIn := 0, 0
+	for _, s := range subs {
+		row.TokensOut += s.Meta.TokensOut
+		if s.Meta.CacheHit {
+			cachedIn += s.Meta.TokensIn
+			continue
+		}
+		row.CacheHit = false
+		cards += s.Meta.TokensIn + s.Meta.TokensOut
+	}
+	row.TokensIn = cachedIn
+	e := entryFrom(task, row, res.Deferred, 0)
+	if res.Deferred {
+		e.Reason = res.Reason
+	}
+	e.CardsTokens = cards
+	_ = p.led.Record(e)
 }
 
 // attempt runs the grammar+retry loop for ONE model tier. It returns the result
@@ -4248,7 +4339,20 @@ func (p *Pipeline) attempt(ctx context.Context, req core.Request, built tasks.Bu
 					// 9,217 for 43 real firings. Same record gate as a success
 					// (counterfactual RunTier calls write nothing).
 					if record {
-						p.record(req.Task, meta, entryChars)
+						// The row is a step of the call, not the call (plan D12):
+						// an inner row of the row the tier that finally answers
+						// writes. The id is minted here, on the first climb, so a
+						// call that never climbs writes the same plain row as ever.
+						// A call already inner (a composite's sub-call) stays inner
+						// under its composite's id: rows never nest.
+						row := meta
+						if row.ParentJobID == "" {
+							if meta.JobID == "" {
+								meta.JobID = mintJobID("cs")
+							}
+							row.ParentJobID, row.JobID = meta.JobID, ""
+						}
+						p.record(req.Task, row, entryChars)
 					}
 					// a larger, more decisive tier may clear the threshold
 					return core.Deferf(reason, gen.Content, meta), true
@@ -4598,6 +4702,7 @@ func entryFrom(task core.TaskType, meta core.Meta, deferred bool, inputChars int
 		// empty — omitted — on a plain cascade call.
 		JobID:          meta.JobID,
 		ParentJobID:    meta.ParentJobID,
+		CallID:         meta.CallID,
 		QueuedMs:       meta.QueuedMs,
 		Placement:      meta.Placement,
 		Steps:          meta.Steps,

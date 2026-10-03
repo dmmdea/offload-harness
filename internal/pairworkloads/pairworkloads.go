@@ -625,7 +625,9 @@ func (e *Emitter) Wait() {
 
 // AttachLedger turns every non-delegation ledger row into one terminal frame.
 //
-// Skipped on purpose: agent_delegate rows (the delegate runner emits those,
+// Skipped on purpose: inner rows (ParentJobID set: one window of a video_watch,
+// an escalating attempt, a nested sub-call; the call's own row is its card);
+// agent_delegate rows (the delegate runner emits those,
 // together with the in-flight states, under one identity so PAIR shows one
 // card); agent rows (this box serving SOMEONE ELSE's delegation, already
 // reported by the box that asked); cache hits (no GPU work happened).
@@ -646,11 +648,16 @@ func (e *Emitter) AttachLedger(l *ledger.Ledger) {
 		if row.CacheHit {
 			return
 		}
+		// An inner row is a step of a call whose own row carries the card
+		// (register C-62 inner-row rule, extended to every multi-row call).
+		if row.ParentJobID != "" {
+			return
+		}
 		// FromLedger may read the llama-swap roster (LocalEngine); keep that
 		// off the ledger writer's path.
 		// A call that opened a running card (Begin) is closed by its own
 		// row, on the same card; claim it here, in row order.
-		open, started := e.claim(row.Task)
+		open, started := e.claim(row.Task, row.CallID)
 		e.inflight.Add(1)
 		go func() {
 			defer e.inflight.Done()

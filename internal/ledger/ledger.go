@@ -193,6 +193,13 @@ type Entry struct {
 	// counter skips it — until 0.143.0 each route=local job was counted twice
 	// (1,002 of 1,002 local rows paired, 2026-09-19..27).
 	ParentJobID string `json:"parent_job_id,omitempty"`
+	// CallID names the tool call whose PAIR card this row closes (pairworkloads
+	// Begin returns it, core.Meta carries it): the card's own job id. Without it
+	// the ledger observer could only close the OLDEST open card of the task, so
+	// under overlapping calls one call's row closed another's card. Omitted on a
+	// row written outside a call that opened a card, which a reader must treat as
+	// "no card was opened for this row", never as a call id.
+	CallID string `json:"call_id,omitempty"`
 	// QueuedMs (0.143.0, ADR 0061) is the wall an agent job's requests spent
 	// in the liveness monitor's busy hold — waiting on a seat whose engine was
 	// working for others — instead of being killed as a stall. The contention
