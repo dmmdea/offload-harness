@@ -71,6 +71,9 @@ type fleetDispatch func(ctx context.Context, cfg config.Config, local delegate.L
 
 type Server struct {
 	p *pipeline.Pipeline
+	// runHook is the seam the media doors run a request through: nil (production) is p.Run;
+	// tests inject one to see exactly what a door hands the pipeline.
+	runHook func(context.Context, core.Request) core.Result
 	// localAgent is the LOCAL execution seam shared by agent_delegate and offload_ask:
 	// nil (production)
 	// resolves to p.RunAgentContract at call time; tests inject a fake so the
@@ -192,6 +195,35 @@ func (s *Server) configGate(next mcp.MethodHandler) mcp.MethodHandler {
 // wrongly-typed "text" became an empty input and produced a misleading
 // "input too small to offload" defer). Absent/null arguments keep the prior
 // zero-value behavior: required-field validation stays with the task itself.
+// runTask runs a request through the pipeline, or the test seam.
+func (s *Server) runTask(ctx context.Context, req core.Request) core.Result {
+	if s.runHook != nil {
+		return s.runHook(ctx, req)
+	}
+	return s.p.Run(ctx, req)
+}
+
+// withMediaPlace threads the waiter_token a queued media answer returned into the request's params,
+// so the call resumes the place in line it left (internal/gpulease/tokens.go). Absent or blank is a
+// new arrival, and params comes back untouched.
+func withMediaPlace(raw json.RawMessage, params map[string]any) map[string]any {
+	var in struct {
+		WaiterToken string `json:"waiter_token"`
+	}
+	if len(raw) == 0 || json.Unmarshal(raw, &in) != nil {
+		return params
+	}
+	tok := strings.TrimSpace(in.WaiterToken)
+	if tok == "" {
+		return params
+	}
+	if params == nil {
+		params = map[string]any{}
+	}
+	params["waiter_token"] = tok
+	return params
+}
+
 func parseArgs(raw json.RawMessage, in any) *mcp.CallToolResult {
 	if len(raw) == 0 {
 		return nil
@@ -334,13 +366,13 @@ func (s *Server) buildServer(version string) *mcp.Server {
 	srv.AddTool(&mcp.Tool{
 		Name:        "offload_generate_image",
 		Description: "Generate an IMAGE from a text prompt on THIS machine's LOCAL image engine for FREE — no cloud, runs on the local GPU, using its configured model at its highest-quality settings (the engine is ComfyUI or stable-diffusion.cpp per machine; offload_status media.routes reports which one is bound here — e.g. HiDream-O1 bf16 at native 2048 via its official graph, SDXL on smaller boxes). QUALITY-FIRST: renders can take many minutes — that is intended; do not lower steps/resolution to speed things up unless the caller explicitly asks for a draft. prompt is required (prose sentences beat tag lists on DiT models; quoted text renders as literal text); optional: negative (active on models served with real CFG), width/height (default = the model's native resolution), steps, seed, out. It takes the shared single-slot GPU lock (and, on the ComfyUI engine, auto-starts ComfyUI), so it serializes with other local gen/inference and may wait. Where this machine configures a prompt-refiner model (imagegen_refiner_model), the prompt is first expanded with photographic detail on the free local text tier. Double-quoted text spans (straight or curly quotes) are guarded: if the refined text drops or alters one, or adds new quoted text, the raw prompt is rendered instead — same fallback as on any refiner error, recorded in the result as refine_fallback. The result then carries refined (plus refined_prompt when true); set refine=false to render your prompt verbatim. Caveat: unpaired quote marks used as inch marks can pair into unintended spans and force the (safe) raw-prompt fallback — spell out inches when a prompt also quotes text. NAMED FAMILIES: family selects one of this machine's opt-in bindings (offload_status media.image_families lists them); omit it for the default binding, which is what every call without it renders. transparent=true keeps an alpha channel (only a qwen-image-2.1 family has an RGBA VAE; any other binding defers rather than render opaque). Returns {image_path, width, height, seed, family} plus license/commercial_use when the binding declares a license — width/height are MEASURED from the written file (a family snaps sizes, e.g. qwen-image-2.1 floors to /32 and defaults to 2048x2048). On any failure (unknown family, transparent on a family without alpha, render error) it returns deferred:true — then generate the image another way.",
-		InputSchema: json.RawMessage(`{"type":"object","properties":{"prompt":{"type":"string","description":"positive text prompt describing the image"},"negative":{"type":"string","description":"hard exclusions, e.g. people, text, watermark"},"out":{"type":"string","description":"output PNG path (optional; default under the media dir)"},"width":{"type":"integer","description":"width px (default 1024)"},"height":{"type":"integer","description":"height px (default 1024)"},"steps":{"type":"integer","description":"sampler steps (default 30)"},"seed":{"type":"integer","description":"RNG seed for reproducibility"},"refine":{"type":"boolean","description":"set false to skip this machine's opt-in prompt refiner and render the prompt verbatim (default: refine when a refiner model is configured; no-op otherwise)"},"family":{"type":"string","description":"OPTIONAL named image family (offload_status media.image_families); omit for this machine's default binding"},"transparent":{"type":"boolean","description":"keep an alpha channel (RGBA PNG with a transparent background; the prompt is wrapped in the model's official RGBA template). Only a qwen-image-2.1 family supports it; default false = opaque RGB"}},"required":["prompt"]}`),
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"waiter_token":{"type":"string","description":"OPTIONAL. The waiter_token a QUEUED answer of this tool returned (err_class gpu_queued: every card was busy for the whole wait, so the call kept a place in line instead of failing). Re-send the SAME request with it within 10 minutes to resume that place with the arrival time it had; omit it on a first call."},"prompt":{"type":"string","description":"positive text prompt describing the image"},"negative":{"type":"string","description":"hard exclusions, e.g. people, text, watermark"},"out":{"type":"string","description":"output PNG path (optional; default under the media dir)"},"width":{"type":"integer","description":"width px (default 1024)"},"height":{"type":"integer","description":"height px (default 1024)"},"steps":{"type":"integer","description":"sampler steps (default 30)"},"seed":{"type":"integer","description":"RNG seed for reproducibility"},"refine":{"type":"boolean","description":"set false to skip this machine's opt-in prompt refiner and render the prompt verbatim (default: refine when a refiner model is configured; no-op otherwise)"},"family":{"type":"string","description":"OPTIONAL named image family (offload_status media.image_families); omit for this machine's default binding"},"transparent":{"type":"boolean","description":"keep an alpha channel (RGBA PNG with a transparent background; the prompt is wrapped in the model's official RGBA template). Only a qwen-image-2.1 family supports it; default false = opaque RGB"}},"required":["prompt"]}`),
 	}, s.handleGenerateImage)
 
 	srv.AddTool(&mcp.Tool{
 		Name:        "offload_run_graph",
 		Description: "Execute an arbitrary ComfyUI API-format graph on the LOCAL ComfyUI, satisfying a per-workflow node manifest (custom node packs @ pinned commits + model files) first. Generic: the caller owns ALL graph semantics — the harness passes the graph opaquely, provisions its environment, runs it under the shared single-slot GPU lock, and returns node-addressed outputs. Provide the graph as graph_path (a file) OR graph_json (inline API-format JSON); optionally manifest_path/manifest_json (the node manifest), out_dir (where output files land), reserve_vram (ComfyUI VRAM held back for the display). Returns {outputs:{node_id:[{path,type,kind}]}, image_path (first image, convenience alias), unverified_models[]}. On ANY failure it returns deferred:true with a typed reason (SATISFIER_UNAVAILABLE, VENV_INCOHERENT, SATISFIER_SPAWN_FAILED [a provisioning subprocess failed to START, retried once — transient/retryable, NOT a venv problem], NODE_CLASS_MISSING, PREFLIGHT_MISSING_INPUTS, MODEL_SHA_MISMATCH, GPU_BUSY, TIMEOUT, ...) — it NEVER falls back to cloud; then run the graph another way.",
-		InputSchema: json.RawMessage(`{"type":"object","properties":{"graph_path":{"type":"string","description":"path to a ComfyUI API-format graph JSON file (provide this or graph_json)"},"graph_json":{"type":"string","description":"inline ComfyUI API-format graph JSON (alternative to graph_path)"},"manifest_path":{"type":"string","description":"path to a node manifest JSON (custom node packs @ pinned commits + model files to provision)"},"manifest_json":{"type":"string","description":"inline node manifest JSON (alternative to manifest_path)"},"out_dir":{"type":"string","description":"directory for the graph's output files (optional; default under the media dir)"},"reserve_vram":{"type":"string","description":"ComfyUI --reserve-vram override (VRAM held back for the display; per-workflow)"}}}`),
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"waiter_token":{"type":"string","description":"OPTIONAL. The waiter_token a QUEUED answer of this tool returned (err_class gpu_queued: every card was busy for the whole wait, so the call kept a place in line instead of failing). Re-send the SAME request with it within 10 minutes to resume that place with the arrival time it had; omit it on a first call."},"devices":{"type":"array","items":{"type":"string"},"description":"OPERATOR ONLY, optional. Cards this graph may use (nvidia-smi indices or GPU uuid prefixes). Absent = the whole node, the default and the safe choice: the graph owns its own placement, so nothing else can know which cards it will use. One device runs in that card's own ComfyUI instance; several hold those cards on a box of at most three, else the whole node."},"graph_path":{"type":"string","description":"path to a ComfyUI API-format graph JSON file (provide this or graph_json)"},"graph_json":{"type":"string","description":"inline ComfyUI API-format graph JSON (alternative to graph_path)"},"manifest_path":{"type":"string","description":"path to a node manifest JSON (custom node packs @ pinned commits + model files to provision)"},"manifest_json":{"type":"string","description":"inline node manifest JSON (alternative to manifest_path)"},"out_dir":{"type":"string","description":"directory for the graph's output files (optional; default under the media dir)"},"reserve_vram":{"type":"string","description":"ComfyUI --reserve-vram override (VRAM held back for the display; per-workflow)"}}}`),
 	}, s.handleRunGraph)
 
 	srv.AddTool(&mcp.Tool{
@@ -352,19 +384,19 @@ func (s *Server) buildServer(version string) *mcp.Server {
 	srv.AddTool(&mcp.Tool{
 		Name:        "offload_generate_video",
 		Description: "Animate a still image into a short b-roll VIDEO clip on the LOCAL ComfyUI for FREE. The graph family comes from THIS machine's videogen_family binding (the 2x16 reference box is bound to LTX-2.5, which generates joint AAC audio); pass model ONLY to override that deliberately — no cloud, runs on the local GPU. QUALITY-FIRST DEFAULT: the native two-stage recipe (no distill LoRA, 20 steps, cfg 3.5, the model's official negative) — a render takes tens of minutes and that is intended; set fast=true ONLY when the caller explicitly wants a draft (8-step lightx2v distill — visibly weaker motion). still (a local image path) + prompt describe the motion (prose, one camera move, ~80-120 words works best); optional: model (h3|hunyuan|wan), frames (16fps; 81 ≈ 5s is the native ceiling), width/height (per-machine config may default 720p), steps, seed, negative (defaults to the model's official training negative), reserve_vram, out. It auto-starts ComfyUI and takes the shared single-slot GPU lock, so it serializes with other local gen/inference and may wait for the slot before deferring. Returns {video_path, seed} plus license/commercial_use when the family declares them. On any failure it returns deferred:true — then make the clip another way.",
-		InputSchema: json.RawMessage(`{"type":"object","properties":{"prompt":{"type":"string","description":"prose motion prompt (one camera move, ~80-120 words works best)"},"still":{"type":"string","description":"local path to the input still image (I2V)"},"model":{"type":"string","description":"OPTIONAL family override — omit to use this machine's configured videogen_family, which is the seated verdict. ltx25 (LTX-2.5 22B distilled, joint AV) | h3 (MiniMax-H3 joint AV — the T4-verdict opt-in: strongest prompt adherence/multi-shot direction and audio design, ~2x LTX wall; still is OPTIONAL for h3 — omit it for t2v storyboard direction) | wan (Wan 2.2 14B two-stage) | hunyuan (needs Hunyuan 1.5 files). An override changes the graph AND is recorded in the ledger as the family that rendered, so only pass it when you mean it"},"negative":{"type":"string","description":"hard exclusions (default: the model's official training-time negative)"},"out":{"type":"string","description":"output .mp4 path (optional; default under the media dir)"},"transformer":{"type":"string","description":"OPTIONAL per-request LTX-2.5 transformer file override (e.g. this machine's bf16 transformer for one hero render — the int8 default stays every other call's quality/speed tradeoff). Wins over this box's (or the resolved family's) bound file; a no-op on any other family's graph"},"frames":{"type":"integer","description":"frame count at 16fps (81 ~5s is the native ceiling)"},"width":{"type":"integer","description":"width px"},"height":{"type":"integer","description":"height px"},"steps":{"type":"integer","description":"sampler steps"},"seed":{"type":"integer","description":"RNG seed for reproducibility"},"reserve_vram":{"type":"number","description":"VRAM held back for the display (per-workflow override; default ~1.0, raise for Wan)"},"fast":{"type":"boolean","description":"OPT-IN draft mode: 8-step lightx2v distill (visibly weaker motion). The default is the native quality recipe — only set when the caller explicitly accepts draft quality"},"hero":{"type":"boolean","description":"deprecated: the native quality pass IS the default now; no-op kept for compatibility"},"upscale":{"type":"boolean","description":"post-decode upscale using this machine's configured upscale model (e.g. 720p->1080p; no-op if the machine has none)"}},"required":["prompt"]}`),
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"waiter_token":{"type":"string","description":"OPTIONAL. The waiter_token a QUEUED answer of this tool returned (err_class gpu_queued: every card was busy for the whole wait, so the call kept a place in line instead of failing). Re-send the SAME request with it within 10 minutes to resume that place with the arrival time it had; omit it on a first call."},"prompt":{"type":"string","description":"prose motion prompt (one camera move, ~80-120 words works best)"},"still":{"type":"string","description":"local path to the input still image (I2V)"},"model":{"type":"string","description":"OPTIONAL family override — omit to use this machine's configured videogen_family, which is the seated verdict. ltx25 (LTX-2.5 22B distilled, joint AV) | h3 (MiniMax-H3 joint AV — the T4-verdict opt-in: strongest prompt adherence/multi-shot direction and audio design, ~2x LTX wall; still is OPTIONAL for h3 — omit it for t2v storyboard direction) | wan (Wan 2.2 14B two-stage) | hunyuan (needs Hunyuan 1.5 files). An override changes the graph AND is recorded in the ledger as the family that rendered, so only pass it when you mean it"},"negative":{"type":"string","description":"hard exclusions (default: the model's official training-time negative)"},"out":{"type":"string","description":"output .mp4 path (optional; default under the media dir)"},"transformer":{"type":"string","description":"OPTIONAL per-request LTX-2.5 transformer file override (e.g. this machine's bf16 transformer for one hero render — the int8 default stays every other call's quality/speed tradeoff). Wins over this box's (or the resolved family's) bound file; a no-op on any other family's graph"},"frames":{"type":"integer","description":"frame count at 16fps (81 ~5s is the native ceiling)"},"width":{"type":"integer","description":"width px"},"height":{"type":"integer","description":"height px"},"steps":{"type":"integer","description":"sampler steps"},"seed":{"type":"integer","description":"RNG seed for reproducibility"},"reserve_vram":{"type":"number","description":"VRAM held back for the display (per-workflow override; default ~1.0, raise for Wan)"},"fast":{"type":"boolean","description":"OPT-IN draft mode: 8-step lightx2v distill (visibly weaker motion). The default is the native quality recipe — only set when the caller explicitly accepts draft quality"},"hero":{"type":"boolean","description":"deprecated: the native quality pass IS the default now; no-op kept for compatibility"},"upscale":{"type":"boolean","description":"post-decode upscale using this machine's configured upscale model (e.g. 720p->1080p; no-op if the machine has none)"}},"required":["prompt"]}`),
 	}, s.handleGenerateVideo)
 
 	srv.AddTool(&mcp.Tool{
 		Name:        "offload_animate_character",
 		Description: "CHARACTER ANIMATION on the LOCAL ComfyUI for FREE — retargets the motion of a driver VIDEO onto a reference character IMAGE (WAN-Animate-2 distilled: identity-preserving motion transfer, the only route that does video-driven retargeting; the other video tools generate motion from text). ref = a full-body image of the character to animate (person, mascot, stylized figure); driver = a video of a person performing the motion (full body in frame, static camera works best); prompt describes the CHARACTER + BACKGROUND the output should show. One call renders ONE native chunk (default 81 frames ≈ 3.4s at 24fps — the distilled recipe's unit; measured ~5min warm at the 482x854 template default on the reference box). Optional: motion_prompt (describe the driver's motion), negative, width/height, frames, steps, seed, pose_strength/ref_strength (0-1 floats as strings), reserve_vram, out. The output keeps the driver's own audio track. It auto-starts ComfyUI and takes the shared single-slot GPU lock, so it serializes with other local gen/inference and may wait for the slot before deferring. Returns {video_path, seed}. On any failure it returns deferred:true — then make the clip another way.",
-		InputSchema: json.RawMessage(`{"type":"object","properties":{"ref":{"type":"string","description":"local path to the reference character image (full body visible works best)"},"driver":{"type":"string","description":"local path to the driver video whose motion is transferred"},"prompt":{"type":"string","description":"character appearance + background description for the OUTPUT clip"},"motion_prompt":{"type":"string","description":"one-line description of the driver video's motion (default: a generic motion-reference line)"},"negative":{"type":"string","description":"hard exclusions (default: the model's official training negative)"},"width":{"type":"integer","description":"working width px (default 482, the official template's portrait default)"},"height":{"type":"integer","description":"working height px (default 854)"},"frames":{"type":"integer","description":"frame count (default 81 — one native chunk; longer needs multiple calls)"},"steps":{"type":"integer","description":"sampler steps (default 10 — the distilled lcm recipe; do not raise casually)"},"seed":{"type":"integer","description":"RNG seed for reproducibility"},"pose_strength":{"type":"string","description":"0-1: how strongly the driver's pose drives the output (default 1.0)"},"ref_strength":{"type":"string","description":"0-1: how strongly the reference image pins identity (default 1.0)"},"reserve_vram":{"type":"number","description":"VRAM held back for the display (per-workflow override)"},"out":{"type":"string","description":"output .mp4 path (optional; default under the media dir)"}},"required":["ref","driver","prompt"]}`),
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"waiter_token":{"type":"string","description":"OPTIONAL. The waiter_token a QUEUED answer of this tool returned (err_class gpu_queued: every card was busy for the whole wait, so the call kept a place in line instead of failing). Re-send the SAME request with it within 10 minutes to resume that place with the arrival time it had; omit it on a first call."},"ref":{"type":"string","description":"local path to the reference character image (full body visible works best)"},"driver":{"type":"string","description":"local path to the driver video whose motion is transferred"},"prompt":{"type":"string","description":"character appearance + background description for the OUTPUT clip"},"motion_prompt":{"type":"string","description":"one-line description of the driver video's motion (default: a generic motion-reference line)"},"negative":{"type":"string","description":"hard exclusions (default: the model's official training negative)"},"width":{"type":"integer","description":"working width px (default 482, the official template's portrait default)"},"height":{"type":"integer","description":"working height px (default 854)"},"frames":{"type":"integer","description":"frame count (default 81 — one native chunk; longer needs multiple calls)"},"steps":{"type":"integer","description":"sampler steps (default 10 — the distilled lcm recipe; do not raise casually)"},"seed":{"type":"integer","description":"RNG seed for reproducibility"},"pose_strength":{"type":"string","description":"0-1: how strongly the driver's pose drives the output (default 1.0)"},"ref_strength":{"type":"string","description":"0-1: how strongly the reference image pins identity (default 1.0)"},"reserve_vram":{"type":"number","description":"VRAM held back for the display (per-workflow override)"},"out":{"type":"string","description":"output .mp4 path (optional; default under the media dir)"}},"required":["ref","driver","prompt"]}`),
 	}, s.handleAnimateCharacter)
 
 	srv.AddTool(&mcp.Tool{
 		Name:        "offload_generate_audio",
 		Description: "Synthesize AUDIO on the LOCAL GPU for FREE — no cloud. kind=voice (default) is text-to-speech narration via Chatterbox Multilingual (commercial-safe, default Spanish; pass clone=<ref.wav> for zero-shot voice cloning, lang for the language). kind=music is a text-to-music bed via ACE-Step (style-tag prompt; seconds for length; optional lyrics). text is the narration text or the music style prompt. Optional: out (output path; default under the media dir), seed, reserve_vram (music only). It takes the shared single-slot GPU lock, so it serializes with other local gen/inference and may wait before deferring. Returns {audio_path, kind, seed}. On any failure (GPU busy, no route, worker error, timeout) it returns deferred:true — then synthesize it another way.",
-		InputSchema: json.RawMessage(`{"type":"object","properties":{"text":{"type":"string","description":"narration text (voice) or music style prompt (music)"},"kind":{"type":"string","description":"voice (default, Chatterbox TTS) | music (ACE-Step)"},"voice":{"type":"string","description":"generalist | finetuned | endpoint (default generalist — or endpoint by itself on a box with tts_endpoint and no voicegen_script; finetuned requires this machine's voicegen_ft_* config; endpoint renders through the configured OpenAI-compatible speech server, e.g. VoiceStudio, no media lease — pass tts_voice to name a server-side voice)"},"tts_voice":{"type":"string","description":"voice=endpoint only: the server-side voice/profile name (default: this box's tts_voice, else the server's default)"},"clone":{"type":"string","description":"voice: local path to a reference .wav for zero-shot voice cloning"},"lang":{"type":"string","description":"voice: language code (default es)"},"seconds":{"type":"integer","description":"music: clip length in seconds"},"out":{"type":"string","description":"output audio path (optional; default under the media dir)"},"seed":{"type":"integer","description":"RNG seed for reproducibility"},"reserve_vram":{"type":"number","description":"music: VRAM held back for the display (per-workflow override)"}},"required":["text"]}`),
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"waiter_token":{"type":"string","description":"OPTIONAL. The waiter_token a QUEUED answer of this tool returned (err_class gpu_queued: every card was busy for the whole wait, so the call kept a place in line instead of failing). Re-send the SAME request with it within 10 minutes to resume that place with the arrival time it had; omit it on a first call."},"text":{"type":"string","description":"narration text (voice) or music style prompt (music)"},"kind":{"type":"string","description":"voice (default, Chatterbox TTS) | music (ACE-Step)"},"voice":{"type":"string","description":"generalist | finetuned | endpoint (default generalist — or endpoint by itself on a box with tts_endpoint and no voicegen_script; finetuned requires this machine's voicegen_ft_* config; endpoint renders through the configured OpenAI-compatible speech server, e.g. VoiceStudio, no media lease — pass tts_voice to name a server-side voice)"},"tts_voice":{"type":"string","description":"voice=endpoint only: the server-side voice/profile name (default: this box's tts_voice, else the server's default)"},"clone":{"type":"string","description":"voice: local path to a reference .wav for zero-shot voice cloning"},"lang":{"type":"string","description":"voice: language code (default es)"},"seconds":{"type":"integer","description":"music: clip length in seconds"},"out":{"type":"string","description":"output audio path (optional; default under the media dir)"},"seed":{"type":"integer","description":"RNG seed for reproducibility"},"reserve_vram":{"type":"number","description":"music: VRAM held back for the display (per-workflow override)"}},"required":["text"]}`),
 	}, s.handleGenerateAudio)
 
 	srv.AddTool(&mcp.Tool{
@@ -376,19 +408,19 @@ func (s *Server) buildServer(version string) *mcp.Server {
 	srv.AddTool(&mcp.Tool{
 		Name:        "offload_inpaint_image",
 		Description: "Generatively INPAINT a local image on the LOCAL ComfyUI for FREE — re-renders ONLY the masked region from a prompt, leaving the rest untouched. Use to REMOVE unwanted content (gibberish text, objects, blemishes) or replace a region with new content. mask is a white-on-black image the same size as image (white = repaint). NOTE: diffusion cannot write specific legible text — inpaint-to-clean, then add real type with offload_edit_image's text op. Takes the shared single-slot GPU lock (serializes with other local gen). Returns {image_path, seed}. On any failure (no SDXL-class inpaint binding on this machine, missing files, render error) it returns deferred:true.",
-		InputSchema: json.RawMessage(`{"type":"object","properties":{"image":{"type":"string","description":"local path of the image to retouch"},"mask":{"type":"string","description":"local path of the white-on-black mask (white = repaint)"},"prompt":{"type":"string","description":"what the masked region should become"},"negative":{"type":"string","description":"hard exclusions for the repainted region"},"denoise":{"type":"number","description":"0-1; default 1.0 (full re-imagination inside the mask). Values well below 1.0 can produce muted/gray fill on the stock VAEEncodeForInpaint path — prefer 1.0 unless you know the tradeoff"},"grow_mask":{"type":"integer","description":"expand+feather the mask by N px in latent space (default 16; 0 = tight mask, no dilation — seam blending comes from this, not mask feathering)"},"steps":{"type":"integer","description":"sampler steps (default: machine binding)"},"seed":{"type":"integer","description":"RNG seed for reproducibility"},"out":{"type":"string","description":"output PNG path (optional; default under the media dir)"}},"required":["image","mask","prompt"]}`),
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"waiter_token":{"type":"string","description":"OPTIONAL. The waiter_token a QUEUED answer of this tool returned (err_class gpu_queued: every card was busy for the whole wait, so the call kept a place in line instead of failing). Re-send the SAME request with it within 10 minutes to resume that place with the arrival time it had; omit it on a first call."},"image":{"type":"string","description":"local path of the image to retouch"},"mask":{"type":"string","description":"local path of the white-on-black mask (white = repaint)"},"prompt":{"type":"string","description":"what the masked region should become"},"negative":{"type":"string","description":"hard exclusions for the repainted region"},"denoise":{"type":"number","description":"0-1; default 1.0 (full re-imagination inside the mask). Values well below 1.0 can produce muted/gray fill on the stock VAEEncodeForInpaint path — prefer 1.0 unless you know the tradeoff"},"grow_mask":{"type":"integer","description":"expand+feather the mask by N px in latent space (default 16; 0 = tight mask, no dilation — seam blending comes from this, not mask feathering)"},"steps":{"type":"integer","description":"sampler steps (default: machine binding)"},"seed":{"type":"integer","description":"RNG seed for reproducibility"},"out":{"type":"string","description":"output PNG path (optional; default under the media dir)"}},"required":["image","mask","prompt"]}`),
 	}, s.handleInpaintImage)
 
 	srv.AddTool(&mcp.Tool{
 		Name:        "offload_upscale_image",
 		Description: "AI-UPSCALE a local image on the LOCAL ComfyUI for FREE with an ESRGAN-family model (this machine's upscale_model binding, e.g. 4x-UltraSharp / RealESRGAN_x4plus). Use it to export a 1024-class render for delivery or print, to recover crispness before compositing, or to enlarge a small asset. It SYNTHESIZES plausible detail, so it is an enlargement tool, not a faithful photo restore; for an exact resample with no invented detail use offload_edit_image's resize op (CPU, free). Default output is the model's own factor (4x for a 4x model); scale sets the overall factor relative to the source exactly (the source is measured and the output size pinned), or pin width+height yourself. The written file's size is verified against the request before success is reported. Takes the shared single-slot GPU lock (serializes with other local gen; the render is seconds, a cold ComfyUI start adds ~1-2 min). Returns {image_path, model, width, height, factor} — factor is the MEASURED output/source ratio (factor_x/factor_y instead when a pinned size is non-uniform). On any failure (no upscale binding on this machine, missing file, half-given or out-of-range size, bad scale/method, render error, size mismatch) it returns deferred:true.",
-		InputSchema: json.RawMessage(`{"type":"object","properties":{"image":{"type":"string","description":"local path of the image to enlarge (.png/.jpg/.webp)"},"scale":{"type":"number","description":"overall factor relative to the SOURCE, made exact by measuring the source and pinning the output size (so it holds for any model). Omit for the model's own factor (4x for a 4x model). Must be > 0; the output is verified against source*scale and a mismatch defers"},"width":{"type":"integer","description":"exact output width (<= 16384) — give with height; wins over scale"},"height":{"type":"integer","description":"exact output height (<= 16384) — give with width; wins over scale"},"method":{"type":"string","description":"resampler for the scale/size step: lanczos (default) | bicubic | bilinear | area | nearest-exact"},"model":{"type":"string","description":"override this machine's upscale_model — a ComfyUI upscale_models name (subfolders allowed, e.g. ESRGAN/4x.pth; never an absolute path); works even on a box that binds none (offload_status then still reports the route NOT CONFIGURED for the default path)"},"out":{"type":"string","description":"output PNG path (optional; default under the media dir)"}},"required":["image"]}`),
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"waiter_token":{"type":"string","description":"OPTIONAL. The waiter_token a QUEUED answer of this tool returned (err_class gpu_queued: every card was busy for the whole wait, so the call kept a place in line instead of failing). Re-send the SAME request with it within 10 minutes to resume that place with the arrival time it had; omit it on a first call."},"image":{"type":"string","description":"local path of the image to enlarge (.png/.jpg/.webp)"},"scale":{"type":"number","description":"overall factor relative to the SOURCE, made exact by measuring the source and pinning the output size (so it holds for any model). Omit for the model's own factor (4x for a 4x model). Must be > 0; the output is verified against source*scale and a mismatch defers"},"width":{"type":"integer","description":"exact output width (<= 16384) — give with height; wins over scale"},"height":{"type":"integer","description":"exact output height (<= 16384) — give with width; wins over scale"},"method":{"type":"string","description":"resampler for the scale/size step: lanczos (default) | bicubic | bilinear | area | nearest-exact"},"model":{"type":"string","description":"override this machine's upscale_model — a ComfyUI upscale_models name (subfolders allowed, e.g. ESRGAN/4x.pth; never an absolute path); works even on a box that binds none (offload_status then still reports the route NOT CONFIGURED for the default path)"},"out":{"type":"string","description":"output PNG path (optional; default under the media dir)"}},"required":["image"]}`),
 	}, s.handleUpscaleImage)
 
 	srv.AddTool(&mcp.Tool{
 		Name:        "offload_edit_image_generative",
 		Description: "Rewrite a local image from a TEXT INSTRUCTION on the LOCAL ComfyUI for FREE — no mask (Qwen-Image-Edit class: the model reads the source through its own vision encoder and re-renders the whole frame). This is the route for instruction edits that have no drawable region: \"make it snowing heavily\", \"turn the leather into fur\", \"make it night\", \"change the sofa to green\". Pick between the three edit routes by what you have: offload_edit_image for DETERMINISTIC ops (crop/resize/text/composite — free, CPU, exact); offload_inpaint_image when you can supply a MASK and want the rest untouched pixel-for-pixel; THIS when the change is global or diffuse and you cannot draw a mask. Note it re-renders everything, so fine detail outside the intended change will shift — prefer inpaint when a mask is possible. On the default (Qwen-Image-Edit 2511) binding the working canvas follows the source within 0.9-2.0 MP (a smaller source is scaled up to ~0.9 MP, a larger one down to 2 MP, unless the machine pins gen_edit_megapixels); preset trades speed for fidelity there: lightning8 (default, ~4x faster) or full. NAMED FAMILIES: family selects one of this machine's opt-in edit bindings (offload_status media.edit_families); omit it for the default. A qwen-image-2.1 family edits with MULTIPLE references: image stays the edit TARGET (<image1> in the prompt) and images adds up to 9 references after it (<image2>..<image10>, 10 images in all); it has no presets (40 steps / cfg 1) and transparent=true keeps alpha. Takes the shared single-slot GPU lock (serializes with other local gen); expect several minutes, most of it fixed model-load overhead. Returns {image_path, seed, family, width, height} (MEASURED output size) plus images (the count, on a multi-reference edit) and license/commercial_use when the binding declares a license. On any failure (no edit binding on this machine, unknown family, images on a single-image family, more than 10 images, missing file, preset on a 2.1 family, render error) it returns deferred:true.",
-		InputSchema: json.RawMessage(`{"type":"object","properties":{"image":{"type":"string","description":"local path of the source image"},"prompt":{"type":"string","description":"the edit INSTRUCTION, e.g. 'make it snowing heavily, winter atmosphere' — describe the change, not the whole scene"},"negative":{"type":"string","description":"hard exclusions"},"preset":{"type":"string","description":"full | lightning8 | lightning4 — a MATCHED steps+cfg+LoRA triple (2511 binding only; a qwen-image-2.1 family has no presets). Prefer switching preset over setting steps/cfg by hand: half-overriding the pairing renders successfully and looks wrong"},"steps":{"type":"integer","description":"sampler steps (advanced; overrides the preset — see preset)"},"cfg":{"type":"number","description":"guidance (advanced; a Lightning preset needs 1.0 — see preset)"},"seed":{"type":"integer","description":"RNG seed for reproducibility"},"out":{"type":"string","description":"output PNG path (optional; default under the media dir)"},"family":{"type":"string","description":"OPTIONAL named edit family (offload_status media.edit_families); omit for this machine's default edit binding"},"images":{"type":"array","items":{"type":"string"},"maxItems":9,"description":"extra REFERENCE image paths after the target (qwen-image-2.1 families only; the target plus these is at most 10). Address them in the prompt as <image2>..<image10>; image is <image1>"},"transparent":{"type":"boolean","description":"keep an alpha channel in the output (qwen-image-2.1 families only)"}},"required":["image","prompt"]}`),
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"waiter_token":{"type":"string","description":"OPTIONAL. The waiter_token a QUEUED answer of this tool returned (err_class gpu_queued: every card was busy for the whole wait, so the call kept a place in line instead of failing). Re-send the SAME request with it within 10 minutes to resume that place with the arrival time it had; omit it on a first call."},"image":{"type":"string","description":"local path of the source image"},"prompt":{"type":"string","description":"the edit INSTRUCTION, e.g. 'make it snowing heavily, winter atmosphere' — describe the change, not the whole scene"},"negative":{"type":"string","description":"hard exclusions"},"preset":{"type":"string","description":"full | lightning8 | lightning4 — a MATCHED steps+cfg+LoRA triple (2511 binding only; a qwen-image-2.1 family has no presets). Prefer switching preset over setting steps/cfg by hand: half-overriding the pairing renders successfully and looks wrong"},"steps":{"type":"integer","description":"sampler steps (advanced; overrides the preset — see preset)"},"cfg":{"type":"number","description":"guidance (advanced; a Lightning preset needs 1.0 — see preset)"},"seed":{"type":"integer","description":"RNG seed for reproducibility"},"out":{"type":"string","description":"output PNG path (optional; default under the media dir)"},"family":{"type":"string","description":"OPTIONAL named edit family (offload_status media.edit_families); omit for this machine's default edit binding"},"images":{"type":"array","items":{"type":"string"},"maxItems":9,"description":"extra REFERENCE image paths after the target (qwen-image-2.1 families only; the target plus these is at most 10). Address them in the prompt as <image2>..<image10>; image is <image1>"},"transparent":{"type":"boolean","description":"keep an alpha channel in the output (qwen-image-2.1 families only)"}},"required":["image","prompt"]}`),
 	}, s.handleEditImageGenerative)
 
 	srv.AddTool(&mcp.Tool{
@@ -604,13 +636,13 @@ func statusMedia(cfg config.Config) map[string]any {
 // with no key of its own — whatever that local service fronts is the operator's choice.
 func statusRemote(cfg config.Config) map[string]any {
 	remote := map[string]any{
-		"nim_endpoint":            cfg.NIMEndpoint,
-		"nim_default_model":       cfg.NIMModel,
-		"nim_key_present":         nimclient.KeyForBase(cfg.NIMEndpoint) != "",
-		"browse_configured":       cfg.BrowseConfigured(),
-		"browse_decision_url":     cfg.BrowseDecisionURL,
-		"browse_activate_tab":     cfg.EffectiveBrowseActivateTab(),
-		"note":                    "offload_nim is the only remote MODEL tool on this server (opt-in escalation); offload_browse (opt-in, ADR 0060) sends a browse run's typed choices to the loopback decision endpoint above and holds no key",
+		"nim_endpoint":        cfg.NIMEndpoint,
+		"nim_default_model":   cfg.NIMModel,
+		"nim_key_present":     nimclient.KeyForBase(cfg.NIMEndpoint) != "",
+		"browse_configured":   cfg.BrowseConfigured(),
+		"browse_decision_url": cfg.BrowseDecisionURL,
+		"browse_activate_tab": cfg.EffectiveBrowseActivateTab(),
+		"note":                "offload_nim is the only remote MODEL tool on this server (opt-in escalation); offload_browse (opt-in, ADR 0060) sends a browse run's typed choices to the loopback decision endpoint above and holds no key",
 	}
 	// browse_activate_tab is the EFFECTIVE value (the sidecar is told to activate its tab only
 	// with a dedicated browse_cdp_url). A key that is set but has nothing to honour it against
@@ -1654,7 +1686,7 @@ func (s *Server) handleGenerateImage(ctx context.Context, req *mcp.CallToolReque
 	if in.Refine != nil && !*in.Refine {
 		params["refine"] = false
 	}
-	return result(s.p.Run(ctx, core.Request{Task: core.TaskGenerateImage, Door: "offload_generate_image", Input: in.Prompt, Params: params}))
+	return result(s.runTask(ctx, core.Request{Task: core.TaskGenerateImage, Door: "offload_generate_image", Input: in.Prompt, Params: withMediaPlace(req.Params.Arguments, params)}))
 }
 
 func (s *Server) handleEditImageGenerative(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -1709,7 +1741,7 @@ func (s *Server) handleEditImageGenerative(ctx context.Context, req *mcp.CallToo
 	if in.Out != "" {
 		params["out"] = in.Out
 	}
-	return result(s.p.Run(ctx, core.Request{Task: core.TaskEditImageGenerative, Door: "offload_edit_image_generative", Input: in.Prompt, Params: params}))
+	return result(s.runTask(ctx, core.Request{Task: core.TaskEditImageGenerative, Door: "offload_edit_image_generative", Input: in.Prompt, Params: withMediaPlace(req.Params.Arguments, params)}))
 }
 
 func (s *Server) handleInpaintImage(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -1752,7 +1784,7 @@ func (s *Server) handleInpaintImage(ctx context.Context, req *mcp.CallToolReques
 	if in.Out != "" {
 		params["out"] = in.Out
 	}
-	return result(s.p.Run(ctx, core.Request{Task: core.TaskInpaintImage, Door: "offload_inpaint_image", Input: in.Prompt, Params: params}))
+	return result(s.runTask(ctx, core.Request{Task: core.TaskInpaintImage, Door: "offload_inpaint_image", Input: in.Prompt, Params: withMediaPlace(req.Params.Arguments, params)}))
 }
 
 func (s *Server) handleUpscaleImage(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -1792,7 +1824,7 @@ func (s *Server) handleUpscaleImage(ctx context.Context, req *mcp.CallToolReques
 	if in.Out != "" {
 		params["out"] = in.Out
 	}
-	return result(s.p.Run(ctx, core.Request{Task: core.TaskUpscaleImage, Door: "offload_upscale_image", Params: params}))
+	return result(s.runTask(ctx, core.Request{Task: core.TaskUpscaleImage, Door: "offload_upscale_image", Params: withMediaPlace(req.Params.Arguments, params)}))
 }
 
 func (s *Server) handleRunGraph(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -1803,6 +1835,8 @@ func (s *Server) handleRunGraph(ctx context.Context, req *mcp.CallToolRequest) (
 		ManifestJSON string `json:"manifest_json"`
 		OutDir       string `json:"out_dir"`
 		ReserveVram  string `json:"reserve_vram"`
+		// Devices is operator-declared: absent = the whole node (see the schema).
+		Devices []string `json:"devices"`
 	}
 	if bad := parseArgs(req.Params.Arguments, &in); bad != nil {
 		return bad, nil
@@ -1829,7 +1863,10 @@ func (s *Server) handleRunGraph(ctx context.Context, req *mcp.CallToolRequest) (
 		"out_dir":       in.OutDir,
 		"reserve_vram":  in.ReserveVram,
 	}
-	return result(s.p.Run(ctx, core.Request{Task: core.TaskRunGraph, Door: "offload_run_graph", Params: params}))
+	if len(in.Devices) > 0 {
+		params["devices"] = in.Devices
+	}
+	return result(s.runTask(ctx, core.Request{Task: core.TaskRunGraph, Door: "offload_run_graph", Params: withMediaPlace(req.Params.Arguments, params)}))
 }
 
 // materialize returns path if set, else writes inline json to a temp file and returns
@@ -1931,7 +1968,7 @@ func (s *Server) handleGenerateVideo(ctx context.Context, req *mcp.CallToolReque
 	if in.ReserveVRAM > 0 {
 		params["reserve_vram"] = strconv.FormatFloat(in.ReserveVRAM, 'f', -1, 64)
 	}
-	return result(s.p.Run(ctx, core.Request{Task: core.TaskGenerateVideo, Door: "offload_generate_video", Input: in.Prompt, Image: in.Still, Params: params}))
+	return result(s.runTask(ctx, core.Request{Task: core.TaskGenerateVideo, Door: "offload_generate_video", Input: in.Prompt, Image: in.Still, Params: withMediaPlace(req.Params.Arguments, params)}))
 }
 
 func (s *Server) handleAnimateCharacter(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -1994,7 +2031,7 @@ func (s *Server) handleAnimateCharacter(ctx context.Context, req *mcp.CallToolRe
 	if in.ReserveVRAM > 0 {
 		params["reserve_vram"] = strconv.FormatFloat(in.ReserveVRAM, 'f', -1, 64)
 	}
-	return result(s.p.Run(ctx, core.Request{Task: core.TaskAnimateCharacter, Door: "offload_animate_character", Input: in.Prompt, Image: in.Ref, Video: in.Driver, Params: params}))
+	return result(s.runTask(ctx, core.Request{Task: core.TaskAnimateCharacter, Door: "offload_animate_character", Input: in.Prompt, Image: in.Ref, Video: in.Driver, Params: withMediaPlace(req.Params.Arguments, params)}))
 }
 
 func (s *Server) handleGenerateAudio(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -2041,7 +2078,7 @@ func (s *Server) handleGenerateAudio(ctx context.Context, req *mcp.CallToolReque
 	if in.ReserveVRAM > 0 {
 		params["reserve_vram"] = strconv.FormatFloat(in.ReserveVRAM, 'f', -1, 64)
 	}
-	return result(s.p.Run(ctx, core.Request{Task: core.TaskGenerateAudio, Door: "offload_generate_audio", Input: in.Text, Params: params}))
+	return result(s.runTask(ctx, core.Request{Task: core.TaskGenerateAudio, Door: "offload_generate_audio", Input: in.Text, Params: withMediaPlace(req.Params.Arguments, params)}))
 }
 
 func (s *Server) handleEditImage(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -2655,7 +2692,6 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 
 		// SF-02: a denial the enforcing trail causes names audit_all_doors.
 		AuditEnforcedByKey: audit.Enforced,
-
 	})
 	if err != nil {
 		return deferSized(map[string]any{"deferred": true, "reason": "building agent: " + err.Error()})
@@ -3996,13 +4032,13 @@ func untrustedOrNote(v any) any {
 // another has succeeded. A failed, lost or deferred PAGE never sets them; it is the
 // summary and its own result row that say so.
 type researchWire struct {
-	Summary       any               `json:"summary"`
-	Untrusted     string            `json:"untrusted"`
-	Partial       bool              `json:"partial,omitempty"`
-	Error         string            `json:"error,omitempty"`
-	Results       any               `json:"results"`
-	ResultSources []int             `json:"result_sources"`
-	Sources       any               `json:"sources"` // []research.Source after untrusted.Value
+	Summary       any    `json:"summary"`
+	Untrusted     string `json:"untrusted"`
+	Partial       bool   `json:"partial,omitempty"`
+	Error         string `json:"error,omitempty"`
+	Results       any    `json:"results"`
+	ResultSources []int  `json:"result_sources"`
+	Sources       any    `json:"sources"` // []research.Source after untrusted.Value
 }
 
 // handleResearch — offload_research. Fetch (guarded, delegator-side) → Build

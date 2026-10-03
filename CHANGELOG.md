@@ -6,6 +6,52 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added — per-card media admission, and a place in line instead of "gpu busy" (GPU routing P13b)
+
+**The operator-visible change.** On a host that leases cards (`gpu_card_scoped_leases` set and a green
+`gpu doctor --write-audit`), a generation call no longer takes the whole-node media lease. A single-card route
+(image, edit, inpaint, upscale, animate, music, un-pooled video) asks the allocator for ONE card, holds a lease on
+it and runs in the ComfyUI instance bound to that card (port 8189 plus the card's nvidia-smi index, pinned by GPU
+uuid, `COMFY_CUDA_DEVICE` blank), so two calls run on two cards at once and a render on one card no longer fences
+the text seats on the others. The display card is never auto-assigned while the operator is at the desk.
+
+- **An explicit `comfy_cuda_device` is a hard constraint.** Resolved through `gpu_comfy_order` to one card, the
+  call queues FIFO for that card however many others are free and is never re-picked. A pin that cannot be turned
+  into a card (no declared order, a comma list, not an index) keeps today's whole-node lease and `--cuda-device`,
+  with one logged reason. **On a box whose config pins `comfy_cuda_device`** (the 3x16 seed does) concurrent
+  renders therefore need the pin cleared: with the order declared the pinned calls serialise on that card while the
+  others stay free for text; without it they keep the whole node.
+- **Pooled routes** lease the cards their pool keys name and keep their launch unchanged (the default instance,
+  every card visible), only when every two such jobs must overlap (a pool of at least two cards on a box of at most
+  three); on a larger box they hold the whole node. `offload_run_graph` holds the whole node unless the operator
+  declares `devices` (one device: that card's instance). sd.cpp, voice, a host that does not lease cards and an
+  unreadable card table keep the whole-node lease byte for byte.
+- **The runner is told what it may unload.** The lease env carries `GPU_LEASE_DEVICES` and a
+  `GPU_LEASE_UNLOAD_MODELS` scoped to the leased cards (the roster minus the memory stack minus seats pinned to
+  other cards), so a render on one card stops emptying the seats on the others (register C-86). A process running
+  under its parent's multi-card lease (`gpu reserve --devices ... --`) runs each call on a free card of it.
+- **A place in line replaces the refusal.** A call that waited its `gpu_wait_ms` with no card answers deferred,
+  `err_class: gpu_queued`, `defer_class: capacity`, with a `waiter_token`, `queue_position` and `eta_s` (a
+  ceiling); re-sending the request with the token resumes the place with its original arrival time. A call that holds
+  the whole node leaves a token too. Every media MCP tool takes `waiter_token` (and `offload_run_graph` an
+  operator-only `devices`). Hosts that do not lease cards keep `gpu_busy`. The `generate-image` CLI verb and the
+  fleet dispatch cannot resume a token yet.
+- **`gpulease` place-keeping tokens** (`Options.ResumeToken`/`QueuedSince`, `LeaveToken`, `ResumeToken`,
+  `Tokens`, `QueuePosition`, `ErrStillQueued`): a token has no process behind it, so its life is its last poll. It
+  holds its place for 30 s, is then skipped by every waiter (a whole-node barrier included) so an absent client
+  never blocks the line, and can be resumed for 10 minutes. They live in `<state>/gpu/tokens`, apart from the waiters
+  an older binary prunes; on a mixed-version host an older binary can take a card ahead of a token holder (the holder
+  loses its place, exclusivity is never at risk).
+- **`internal/pipeline` media slots are a set, one per card** (`takeMediaSlot`/`releaseMediaSlot` keep the
+  whole-node meaning); two jobs on disjoint cards hold theirs together, waiters are served in arrival order with
+  disjoint backfill and a whole-node waiter is a barrier.
+- **`internal/gpualloc`**: the allocator's input builder, the pick-or-queue decision and the unload-scope rule moved
+  out of package main so `gpu reserve --cards` and the media path read one rule (no behaviour change for the verb).
+- **The post-run `/free` goes to the instance the runner was given** (it read the parent process's `COMFY_API`
+  when a route handed its instance through the Spec's env, which most do).
+- Deferred to the operator (live box): the two-card acceptance, host RAM with N concurrent instances, the Port
+  Directory entry for 8189 to 8191, and clearing `comfy_cuda_device` on the live config.
+
 ### Added — the holder of a lease stops the ComfyUI instances kept under it (GPU routing P13b)
 
 - **`internal/comfyinst`.** A kept instance (see the fix below) lives no longer than the lease it was launched
