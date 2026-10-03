@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/dmmdea/offload-harness/internal/modelaffinity"
 )
 
 func TestDefaultVideoFields(t *testing.T) {
@@ -103,6 +105,75 @@ func TestRetiredPerTaskWaitKeysAreIgnored(t *testing.T) {
 	if c.GPUWaitMs != Default().GPUWaitMs {
 		t.Errorf("GPUWaitMs = %d, want the default %d — a stale per-task key changed the ceiling",
 			c.GPUWaitMs, Default().GPUWaitMs)
+	}
+}
+
+// Card-scoped leases are a per-host switch that defaults OFF: a config that never
+// mentions the key must never write a device lease (an older reader on the host would
+// read it as a free card), and the key must load when it is set.
+func TestCardScopedLeasesDefaultOffAndLoadWhenSet(t *testing.T) {
+	if Default().GPUCardScopedLeases {
+		t.Fatal("gpu_card_scoped_leases must default to false")
+	}
+	p := filepath.Join(t.TempDir(), "cfg.json")
+	if err := os.WriteFile(p, []byte(`{}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if c, err := Load(p); err != nil || c.GPUCardScopedLeases {
+		t.Fatalf("empty config: %v, flag=%v", err, c.GPUCardScopedLeases)
+	}
+	if err := os.WriteFile(p, []byte(`{"gpu_card_scoped_leases": true}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if c, err := Load(p); err != nil || !c.GPUCardScopedLeases {
+		t.Fatalf("flag set: %v, flag=%v", err, c.GPUCardScopedLeases)
+	}
+}
+
+// Scoping a legacy whole-node lease by what its process tree runs is a per-host switch that
+// defaults OFF (plan P4, review fix): nothing narrows a lease on a guess before the live
+// capture of a real legacy tree has been made on the host. Load arms it for the seat gates.
+func TestLegacyScopeInferenceDefaultsOffAndLoadArmsIt(t *testing.T) {
+	if Default().GPULegacyScopeInference {
+		t.Fatal("gpu_legacy_scope_inference must default to false")
+	}
+	t.Cleanup(func() { modelaffinity.SetLegacyInference(false) })
+	p := filepath.Join(t.TempDir(), "cfg.json")
+	if err := os.WriteFile(p, []byte(`{}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	modelaffinity.SetLegacyInference(true) // a stale arming from an earlier load must not survive
+	if c, err := Load(p); err != nil || c.GPULegacyScopeInference || modelaffinity.LegacyInference() {
+		t.Fatalf("empty config: err=%v flag=%v armed=%v", err, c.GPULegacyScopeInference, modelaffinity.LegacyInference())
+	}
+	if err := os.WriteFile(p, []byte(`{"gpu_legacy_scope_inference": true}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if c, err := Load(p); err != nil || !c.GPULegacyScopeInference || !modelaffinity.LegacyInference() {
+		t.Fatalf("flag set: err=%v flag=%v armed=%v", err, c.GPULegacyScopeInference, modelaffinity.LegacyInference())
+	}
+}
+
+// The card allocator's two inputs (plan P3). Both default to "not set": the order is
+// then unknown (never guessed) and the host-RAM headroom is the built-in default.
+func TestCardAllocatorKeysDefaultAndLoad(t *testing.T) {
+	d := Default()
+	if d.GPUComfyOrder != "" {
+		t.Fatalf("gpu_comfy_order must default to unset, got %q", d.GPUComfyOrder)
+	}
+	if d.GPUHostRAMHeadroomGiB != 0 || d.GPUHostRAMHeadroom() != DefaultGPUHostRAMHeadroomGiB {
+		t.Fatalf("headroom: raw %v, effective %v, want raw 0 and effective %v", d.GPUHostRAMHeadroomGiB, d.GPUHostRAMHeadroom(), DefaultGPUHostRAMHeadroomGiB)
+	}
+	p := filepath.Join(t.TempDir(), "cfg.json")
+	if err := os.WriteFile(p, []byte(`{"gpu_comfy_order": "1,0,2", "gpu_host_ram_headroom_gib": 9.5}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.GPUComfyOrder != "1,0,2" || c.GPUHostRAMHeadroom() != 9.5 {
+		t.Fatalf("not loaded: %q %v", c.GPUComfyOrder, c.GPUHostRAMHeadroom())
 	}
 }
 

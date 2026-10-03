@@ -153,6 +153,58 @@ func (c Config) Composite() bool {
 	return len(c.Layers) > 0
 }
 
+// ModelPins is the device pin of a model name, read from the declared layers: the pins of
+// every seat that serves it (a model declared on two seats sits on the union of their
+// cards, in first-seen order). It is what the model-affinity load gate is armed with
+// (Load), so a render on one card fences only the seats on that card.
+//
+// A seat is matched by its model name, by a router seat's model_map twin, and, for the
+// router seat that declares neither (the single layer's, "its models come from the cascade"),
+// by the cascade's rung models: model, triage_model and escalation_model. Names compare
+// case-insensitively. ok is false for a model no layer declares, an alias a layer does not
+// spell, and a box with no layers at all: the gate reads that as every card, which is the
+// answer it gave before layers existed.
+func (c Config) ModelPins(model string) ([]string, bool) {
+	model = strings.TrimSpace(model)
+	if model == "" || len(c.Layers) == 0 {
+		return nil, false
+	}
+	rungs := []string{c.Model, c.TriageModel, c.EscalationModel}
+	var pins []string
+	seen := map[string]bool{}
+	for _, l := range c.Layers {
+		for _, s := range l.Seats {
+			match := s.Model != "" && strings.EqualFold(s.Model, model)
+			for _, twin := range s.ModelMap {
+				if strings.EqualFold(twin, model) {
+					match = true
+				}
+			}
+			if s.Role == "router" && s.Model == "" && len(s.ModelMap) == 0 {
+				for _, r := range rungs {
+					if r != "" && strings.EqualFold(r, model) {
+						match = true
+					}
+				}
+			}
+			if !match {
+				continue
+			}
+			devs := s.DeviceList()
+			if len(devs) == 0 {
+				return nil, false // a seat with no pin cannot be placed: unknown, never a guess
+			}
+			for _, d := range devs {
+				if !seen[d] {
+					seen[d] = true
+					pins = append(pins, d)
+				}
+			}
+		}
+	}
+	return pins, len(pins) > 0
+}
+
 // LayerSeatModels lists every model name the declared layers serve, in layer
 // order, router twins (model_map) included.
 func (c Config) LayerSeatModels() []string {

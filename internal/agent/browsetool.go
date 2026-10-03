@@ -5,22 +5,18 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 )
 
 // DefaultAuditPath is the broker audit trail's default home, outside any worktree
-// (Invariant 5): <home>/.local-offload/agent-audit.jsonl — the same file the
-// local-agent CLI defaults to. "" when the home dir cannot be resolved, which makes
-// Build refuse a browse grant (every browse run must leave a trail).
-func DefaultAuditPath() string {
-	home, err := os.UserHomeDir()
-	if err != nil || home == "" {
-		return ""
-	}
-	return filepath.Join(home, ".local-offload", "agent-audit.jsonl")
+// (Invariant 5): agent-audit.jsonl under the harness install root base (config
+// `home`), else <user home>/.local-offload — the same file the local-agent CLI
+// defaults to. "" when no root can be resolved, which makes Build refuse a browse
+// grant (every browse run must leave a trail). When an earlier release left a trail
+// at the old location, the first call in a process says so on stderr (DefaultStateFile).
+func DefaultAuditPath(base string) string {
+	return DefaultStateFile(base, "agent-audit.jsonl", noteWriter)
 }
 
 // BrowseInput is what the browse tool hands the browse lane (ADR 0060): the

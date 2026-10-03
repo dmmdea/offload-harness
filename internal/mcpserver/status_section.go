@@ -24,7 +24,11 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/dmmdea/offload-harness/internal/config"
+	"github.com/dmmdea/offload-harness/internal/gpuactivity"
+	"github.com/dmmdea/offload-harness/internal/gpucards"
 	"github.com/dmmdea/offload-harness/internal/gpulease"
+	"github.com/dmmdea/offload-harness/internal/gpuprobe"
+	"github.com/dmmdea/offload-harness/internal/modelaffinity"
 )
 
 const (
@@ -75,7 +79,7 @@ func statusSectionValues() []string {
 
 // statusSectionDoc is the section argument's schema description. Kept short on
 // purpose: clients that inline tool schemas pay for these bytes on every call.
-const statusSectionDoc = "all (default): everything. brief: fleet + one-line gpu_lease and local verdicts. Any other value: that block only."
+const statusSectionDoc = "all (default): everything. brief: fleet + one-line gpu_lease and local verdicts + the per-card table (gpu_cards). Any other value: that block only."
 
 // statusInputSchema is offload_status's input schema, its enum built from the
 // same table the handler dispatches on.
@@ -149,17 +153,64 @@ func (s *Server) statusPayload(ctx context.Context, cfg config.Config, section s
 
 // statusBrief is the sizing answer: the whole fleet block (who the delegation
 // seats are, their live ctx ceilings, their queues) plus ONE line each for this
-// box's GPU lease and its local serving state. The two lines get their own keys
-// rather than reusing gpu_lease/local, so a consumer that decodes those blocks
-// as objects never meets a string under the same name.
+// box's GPU lease and its local serving state, and the per-card table (gpu_cards:
+// each card, its holder, the per-lease device sets, the queue). The two lines get
+// their own keys rather than reusing gpu_lease/local, so a consumer that decodes
+// those blocks as objects never meets a string under the same name.
 func (s *Server) statusBrief(ctx context.Context, cfg config.Config) map[string]any {
 	fleet := s.fleetView(ctx, cfg)
 	seat, _ := fleet["local_agent_seat"].(map[string]any)
+	leaseView, act := localLeaseViewWithActivity(ctx, cfg)
 	return map[string]any{
 		"fleet":             fleet,
-		"gpu_lease_verdict": gpuLeaseVerdictLine(localLeaseView(ctx, cfg)),
-		"local_verdict":     localVerdictLine(ctx, cfg, seat),
+		"gpu_lease_verdict": gpuLeaseVerdictLine(leaseView),
+		// The per-card table (plan P3): which card each lease holds, free VRAM, the
+		// display card, the per-lease device sets and the queue with its device sets.
+		// A NEW key beside the verdict line; the line itself is unchanged.
+		"gpu_cards":     gpuCardsSection(cfg, act),
+		"local_verdict": localVerdictLine(ctx, cfg, seat),
 	}
+}
+
+// gpuCardsSection is the brief's per-card block. The card table comes from the same
+// nvidia-smi sample the lease verdict already took (act.GPUs), so the brief costs no
+// second call; without one the block says there is no table and still lists the leases.
+// The rows are gpucards.Section's, the same ones `gpu status` prints.
+func gpuCardsSection(cfg config.Config, act gpuactivity.View) map[string]any {
+	devs := make([]gpuprobe.Device, 0, len(act.GPUs))
+	for _, g := range act.GPUs {
+		devs = append(devs, gpuprobe.Device{
+			Index: g.Index, UUID: g.UUID, Name: g.Name,
+			TotalGiB: float64(g.MemTotalMiB) / 1024, FreeGiB: float64(g.MemTotalMiB-g.MemUsedMiB) / 1024,
+			UtilPct: g.UtilPct, UtilKnown: g.UtilKnown, DisplayActive: g.DisplayActive,
+		})
+	}
+	cards, note := gpuprobe.BuildCards(devs, cfg.GPUComfyOrder)
+	if len(devs) == 0 {
+		reason := act.GPUErr
+		if reason == "" {
+			reason = "the GPU sample was not taken"
+		}
+		note = "no card table (" + reason + ")"
+	}
+	var leases []gpulease.Info
+	var waiters []gpulease.Waiter
+	scoped := false
+	if m, err := gpulease.OpenAt(cfg.GPULockPath, cfg.StateDir); err == nil {
+		_ = m.ApplyCardScopedConfig(cfg.GPUCardScopedLeases)
+		leases, waiters, scoped = modelaffinity.ScopeLeases(m.Dir(), m.Leases()), m.Waiters(), m.CardScoped()
+	}
+	sec := gpucards.Section(cards, note, leases, waiters)
+	sec["card_scoped_leases"] = scoped
+	return sec
+}
+
+// standingLead maps the standing verdicts to the capitalised word the brief line leads with.
+var standingLead = map[string]string{
+	gpuactivity.VerdictHeldOrphaned: "ORPHANED",
+	gpuactivity.VerdictTreeOrphan:   "ORPHANED",
+	gpuactivity.VerdictHeldOverdue:  "OVERDUE",
+	gpuactivity.VerdictHeldStalled:  "STALLED",
 }
 
 // gpuLeaseVerdictLine renders the gpu_lease block as one line: the verdict word
@@ -169,14 +220,37 @@ func (s *Server) statusBrief(ctx context.Context, cfg config.Config) map[string]
 func gpuLeaseVerdictLine(view map[string]any) string {
 	var b strings.Builder
 	verdict, _ := view["verdict"].(string)
-	b.WriteString(verdict)
-	if act, ok := view["activity"].(map[string]any); ok {
-		if note, _ := act["note"].(string); note != "" {
-			// The holder tail Assess appends is rebuilt below without the
-			// holder's full command line, which is most of its length.
-			note, _, _ = strings.Cut(note, " [holder pid")
-			b.WriteString(" — " + oneLine(note, 240))
+	// A lease that is orphaned, overdue or stalled leads with that word in capitals
+	// (plan P8): "held" read as "busy, queue behind it" for the twenty hours an abandoned
+	// render sat on the cards, and the word it needed was one a skimming reader skips.
+	// The lead is driven by the lease the verdict is about, not only by the verdict word:
+	// `working` (work in flight on the seat) outranks the standing verdicts but must not hide
+	// them, so a stalled, orphaned or overdue holder leads with its word whatever the verdict.
+	act, _ := view["activity"].(map[string]any)
+	holder, _ := act["holder"].(*gpuactivity.Holder)
+	word := verdict
+	if _, own := standingLead[word]; !own {
+		word = holder.StandingWord()
+	}
+	lead, escalated := standingLead[word]
+	if escalated {
+		b.WriteString(lead + " (" + verdict + ")")
+	} else {
+		b.WriteString(verdict)
+	}
+	if note, _ := act["note"].(string); note != "" {
+		// The holder tail Assess appends is rebuilt below without the
+		// holder's full command line, which is most of its length.
+		note, _, _ = strings.Cut(note, " [holder pid")
+		// The takeover command is re-stated once, below, where it cannot be clipped.
+		note, _, _ = strings.Cut(note, "; to take it over")
+		// An escalated line keeps more of the note: what is wrong with the lease must not be
+		// the part a fixed width cuts off.
+		clip := 240
+		if escalated {
+			clip = 480
 		}
+		b.WriteString(" — " + oneLine(note, clip))
 	}
 	if held, _ := view["held"].(bool); held {
 		fmt.Fprintf(&b, "; held by pid %v (%v", view["pid"], view["class"])
@@ -195,6 +269,16 @@ func gpuLeaseVerdictLine(view map[string]any) string {
 	}
 	if q, _ := view["queued"].(int); q > 0 {
 		fmt.Fprintf(&b, "; %d queued", q)
+	}
+	if escalated {
+		// The epoch of the lease the verdict is about (the Holder), never the lowest live one.
+		epoch, _ := view["epoch"].(uint64)
+		if holder != nil && holder.Epoch != 0 {
+			epoch = holder.Epoch
+		}
+		if epoch != 0 {
+			fmt.Fprintf(&b, "; a human-authorised session frees it with: %s (not in this build yet: until it ships, ask whoever owns it or the operator)", gpulease.TakeoverCommand(epoch))
+		}
 	}
 	cmd, _, _ := strings.Cut(gpulease.QueueHint, "  (")
 	b.WriteString("; queue with: " + cmd)

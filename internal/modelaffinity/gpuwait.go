@@ -130,7 +130,9 @@ func awaitLease(ctx context.Context, base, model string, deadline time.Time, blo
 		// TestLoadArmsTheGPULoadGate in internal/config pins that.
 		return nil
 	}
-	info := gpulease.InspectDir(dir)
+	// The leases that sit on THIS seat's cards (seatscope.go): a render on another card is
+	// not a reason to wait.
+	info := ScopeToModel(InspectLease(dir), model)
 	if !blocks(info) {
 		return nil
 	}
@@ -158,18 +160,18 @@ func awaitLease(ctx context.Context, base, model string, deadline time.Time, blo
 	for {
 		remain := time.Until(deadline)
 		if remain <= 0 {
-			return leaseError(base, model, info, time.Since(start), bound, context.DeadlineExceeded)
+			return explained(dir, leaseError(base, model, blockingLease(info, blocks), time.Since(start), bound, context.DeadlineExceeded))
 		}
 		if remain > leasePollInterval {
 			remain = leasePollInterval
 		}
 		select {
 		case <-ctx.Done():
-			return leaseError(base, model, info, time.Since(start), bound, ctx.Err())
+			return explained(dir, leaseError(base, model, blockingLease(info, blocks), time.Since(start), bound, ctx.Err()))
 		case <-time.After(remain):
 		}
 		refresh()
-		if info = gpulease.InspectDir(dir); !blocks(info) {
+		if info = ScopeToModel(InspectLease(dir), model); !blocks(info) {
 			return nil
 		}
 	}
@@ -199,11 +201,27 @@ func awaitLease(ctx context.Context, base, model string, deadline time.Time, blo
 // for `gpu reserve --class media --drain`, because the lease record dropped the
 // draining stamp on a media lease and the media class then blocked from acquire.
 // The fence starts when maintainSeat clears the stamp, exactly as for text.
+//
+// With card-scoped leases several are live at once and Info describes only the lowest.
+// The question is asked of EACH live lease (Info.Each) and the exemption for "this process
+// runs under the lease" applies per lease: a child of lease A is not blocked by A and is
+// blocked by any other lease that blocks. blocksLoad is the whole-node reading (every card):
+// BlocksLoadFor narrows it to the cards one seat sits on.
 func blocksLoad(info gpulease.Info) bool {
-	if !info.Held || insideLease(info) || (info.Draining && !info.Exclusive) {
+	for _, l := range info.Each() {
+		if blocksLoadOne(l) {
+			return true
+		}
+	}
+	return false
+}
+
+// blocksLoadOne is blocksLoad for ONE lease.
+func blocksLoadOne(l gpulease.Info) bool {
+	if !l.Held || insideLease(l) || (l.Draining && !l.Exclusive) {
 		return false
 	}
-	return info.Class == gpulease.ClassMedia || (info.Class == gpulease.ClassText && info.Exclusive)
+	return l.Class == gpulease.ClassMedia || (l.Class == gpulease.ClassText && l.Exclusive)
 }
 
 // BlocksNewRun decides whether info describes a card no NEW agent run may start
@@ -215,10 +233,12 @@ func blocksLoad(info gpulease.Info) bool {
 // only by the run's 600 s wall). Requests of a registered run pass blocksLoad
 // under a draining lease; a run's first admission passes through here.
 func BlocksNewRun(info gpulease.Info) bool {
-	if blocksLoad(info) {
-		return true
+	for _, l := range info.Each() {
+		if blocksLoadOne(l) || (l.Held && !insideLease(l) && l.Draining) {
+			return true
+		}
 	}
-	return info.Held && !insideLease(info) && info.Draining
+	return false
 }
 
 // insideLease reports whether this process is running UNDER the very lease that
@@ -240,6 +260,10 @@ func BlocksNewRun(info gpulease.Info) bool {
 // hoisted ABOVE acquireMediaLease on both the single and batch routes precisely so
 // "the text call never contends with our own render", and runPipelineJob takes
 // only the in-process mediaSlot, never the machine-wide lease.
+//
+// info is ONE lease (callers walk Info.Each). The comparison is against that lease's own
+// epoch, never "any live epoch": a child of lease A is not inside lease B, and exempting
+// it from B's fence is the permissive direction.
 func insideLease(info gpulease.Info) bool {
 	raw := strings.TrimSpace(os.Getenv("GPU_LEASE_EPOCH"))
 	if raw == "" {
@@ -247,6 +271,17 @@ func insideLease(info gpulease.Info) bool {
 	}
 	epoch, err := strconv.ParseUint(raw, 10, 64)
 	return err == nil && epoch != 0 && epoch == info.Epoch
+}
+
+// blockingLease names the lease a refusal is about: the first live lease that blocks
+// under pred, else info itself.
+func blockingLease(info gpulease.Info, pred func(gpulease.Info) bool) gpulease.Info {
+	for _, l := range info.Each() {
+		if pred(l) {
+			return l
+		}
+	}
+	return info
 }
 
 // LeaseError is the outcome of an exhausted wait for the GPU. Like WaitError it is
@@ -270,7 +305,13 @@ type LeaseError struct {
 	// when it declared none. Rendered by window() — see there for why a number
 	// this package refuses to wait on is still worth reporting.
 	ExpiresAt time.Time
-	cause     error // context.DeadlineExceeded (our bound) or the caller's ctx.Err()
+	// Epoch is the holder's lease epoch. Explain, when non-empty, says what is wrong
+	// with a holder that is held but not healthy (its owner gone, its progress stalled,
+	// its window long past) and the command that frees it; it is appended to Error() and
+	// is empty for a lease that is fine.
+	Epoch   uint64
+	Explain string
+	cause   error // context.DeadlineExceeded (our bound) or the caller's ctx.Err()
 }
 
 // window renders the holder's declared end for the refusal message (register
@@ -313,12 +354,20 @@ func (e *LeaseError) Error() string {
 		return fmt.Sprintf(
 			"gpu-lease timeout after %s (bound %s): a %s holder is draining the seat (pid %d, held %s, reason %q)%s: "+
 				"no new run starts on %s at %s until the work already in flight finishes; running work is not interrupted",
-			e.Waited.Round(time.Millisecond), e.Bound, e.Class, e.PID, e.HeldFor.Round(time.Second), e.Reason, e.window(), e.Want, e.Base)
+			e.Waited.Round(time.Millisecond), e.Bound, e.Class, e.PID, e.HeldFor.Round(time.Second), e.Reason, e.window(), e.Want, e.Base) + e.explainTail()
 	}
 	return fmt.Sprintf(
 		"gpu-lease timeout after %s (bound %s): a %s job holds the GPU (pid %d, held %s, reason %q)%s, "+
 			"and admitting model %q on %s would load it into VRAM that render is using",
-		e.Waited.Round(time.Millisecond), e.Bound, e.Class, e.PID, e.HeldFor.Round(time.Second), e.Reason, e.window(), e.Want, e.Base)
+		e.Waited.Round(time.Millisecond), e.Bound, e.Class, e.PID, e.HeldFor.Round(time.Second), e.Reason, e.window(), e.Want, e.Base) + e.explainTail()
+}
+
+// explainTail is the standing of an unhealthy holder, after the pinned wording.
+func (e *LeaseError) explainTail() string {
+	if e.Explain == "" {
+		return ""
+	}
+	return " — " + e.Explain
 }
 
 // Unwrap exposes the cause so errors.Is(err, context.DeadlineExceeded) and
@@ -340,7 +389,25 @@ func leaseError(base, model string, info gpulease.Info, waited, bound time.Durat
 		Waited:    waited,
 		Draining:  info.Draining && !info.Exclusive,
 		ExpiresAt: info.ExpiresAt,
+		Epoch:     info.Epoch,
 		Bound:     bound,
 		cause:     cause,
 	}
+}
+
+// explained attaches the standing of the lease a refusal is about. The lease is read
+// again at the directory the gate is armed at, so the sentence reflects the lease the
+// caller waited on; a refusal that is not a *LeaseError passes through untouched.
+func explained(dir string, err error) error {
+	le, ok := err.(*LeaseError)
+	if !ok || le.Epoch == 0 {
+		return err
+	}
+	for _, l := range gpulease.InspectLeases(dir) {
+		if l.Epoch == le.Epoch {
+			le.Explain = gpulease.ExplainHeld(dir, l, 0)
+			break
+		}
+	}
+	return le
 }

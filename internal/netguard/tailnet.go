@@ -32,6 +32,7 @@ import (
 	"net/netip"
 	"net/url"
 	"strings"
+	"sync/atomic"
 )
 
 // tailnetCGNAT is the Tailscale-assigned CGNAT block (100.64.0.0/10) every
@@ -52,7 +53,11 @@ var tailnetCGNAT = netip.MustParsePrefix("100.64.0.0/10")
 // than a hardcoded default (loopback, 100.64.0.0/10 literals and dotless
 // MagicDNS names still pass; a dotted tailnet FQDN does not). Set it from the
 // config key `tailnet_suffix` via SetTailnetSuffix.
-var houseTailnetSuffix = ""
+//
+// Atomic because every config load installs it and two loads can run at once in one
+// process (a server re-reading its config while a handler loads it; in-process CLI
+// tests); a plain string was a data race the Linux race gate caught on 0.161.0.
+var houseTailnetSuffix atomic.Pointer[string]
 
 // SetTailnetSuffix installs the operator's tailnet DNS zone. Empty clears it
 // (back to fail-closed). The value is normalized the same way TailnetURL
@@ -63,19 +68,20 @@ var houseTailnetSuffix = ""
 // mind ("I set it, so my host is allowed") while failing closed in the gate.
 func SetTailnetSuffix(s string) error {
 	n := strings.ToLower(strings.Trim(strings.TrimSpace(s), "."))
-	if n == "" {
-		houseTailnetSuffix = ""
-		return nil
-	}
-	if !strings.Contains(n, ".") || strings.ContainsAny(n, " /:@") {
+	if n != "" && (!strings.Contains(n, ".") || strings.ContainsAny(n, " /:@")) {
 		return fmt.Errorf("tailnet_suffix %q is not a DNS zone (want something like tailnnnnnn.ts.net)", s)
 	}
-	houseTailnetSuffix = n
+	houseTailnetSuffix.Store(&n)
 	return nil
 }
 
 // TailnetSuffix reports the configured zone (normalized, "" when unset).
-func TailnetSuffix() string { return houseTailnetSuffix }
+func TailnetSuffix() string {
+	if p := houseTailnetSuffix.Load(); p != nil {
+		return *p
+	}
+	return ""
+}
 
 // TailnetURL vets a remote seat endpoint's base URL at CONFIG time, no DNS
 // touched. Allowed: http(s) with a loopback or 100.64.0.0/10 IP-literal host,
@@ -107,7 +113,8 @@ func TailnetURL(raw string) error {
 	// DNS names are case-insensitive (RFC 4343) and may carry a trailing
 	// root dot; normalize both before the suffix/dot checks.
 	name := strings.ToLower(strings.TrimSuffix(host, "."))
-	if houseTailnetSuffix != "" && strings.HasSuffix(name, "."+houseTailnetSuffix) {
+	zone := TailnetSuffix() // read once: the checks and the message judge one value
+	if zone != "" && strings.HasSuffix(name, "."+zone) {
 		return nil
 	}
 	if !strings.Contains(name, ".") {
@@ -115,11 +122,11 @@ func TailnetURL(raw string) error {
 		// prove where it resolves — SafeDialContext closes that at dial time.
 		return nil
 	}
-	if houseTailnetSuffix == "" {
+	if zone == "" {
 		return fmt.Errorf("hostname %q in %q not allowed (need loopback, a 100.64.0.0/10 literal, or a dotless MagicDNS name; set config `tailnet_suffix` to admit your own tailnet zone)", host, raw)
 	}
 	return fmt.Errorf("hostname %q in %q not allowed (need loopback, a 100.64.0.0/10 literal, a dotless MagicDNS name, or a host under %s)",
-		host, raw, houseTailnetSuffix)
+		host, raw, zone)
 }
 
 // tailnetAddrAllowed reports whether one literal/resolved address is inside

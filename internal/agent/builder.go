@@ -45,6 +45,20 @@ type BuildConfig struct {
 	Unattended   bool
 	AuditPath    string // append-only broker audit JSONL; must live OUTSIDE the worktree
 	AskQueuePath string // P5b: reviewable queue of asks deferred on an unattended run (optional)
+	// AuditAdvisory (register SF-02, audit_all_doors=warn): a failed audit write is
+	// reported once and never turns an allow into a deny. Ignored on a browse run,
+	// whose grant requires an enforcing trail.
+	AuditAdvisory bool
+	// AuditChain (register SF-08, config audit_chain): hash-chain this run's rows on the
+	// trail (run_id, seq, prev_sha256) and close the run with EndAudit.
+	AuditChain bool
+	// AuditEnforcedByKey (SF-02): the trail is enforcing because audit_all_doors=enforce
+	// asked for it; a denial it causes then names the key and the way out.
+	AuditEnforcedByKey bool
+	// ReadFloor (register SF-07, config agent_read_floor) is the read floor's mode for
+	// every read tool: "" or "warn" (the default) records reads of secret material,
+	// "enforce" refuses them, "off" checks nothing. --rules off also switches it off.
+	ReadFloor string
 	// RulesPath names the structural risk table (rules.go LoadRules); tighten-only.
 	// Empty on an UNATTENDED run loads the embedded default table
 	// (unattendedrules.go); the sentinel RulesOff ("off") explicitly disables it.
@@ -123,6 +137,8 @@ type BuildResult struct {
 	RunGranted    bool
 	BrowseGranted bool
 	Notes        []string
+	// Audit is the run's trail (nil when none is attached); EndAudit closes a chained run.
+	Audit *AuditLog
 }
 
 // Build assembles the agent loop for any drive mode. It is the SINGLE place the
@@ -154,7 +170,16 @@ func Build(cfg BuildConfig) (*BuildResult, error) {
 	if err != nil {
 		return nil, fmt.Errorf("bad ReadRoot %q: %w", cfg.ReadRoot, err)
 	}
-	tools, err := ReadOnlyToolsWithLanes(absRoot, cfg.Offload, cfg.NPU, cfg.Accel)
+	floorMode, ferr := validReadFloor(cfg.ReadFloor)
+	if ferr != nil {
+		return nil, ferr
+	}
+	requestedFloor := floorMode
+	if cfg.RulesPath == RulesOff {
+		floorMode = "off" // the documented off switch for the whole tighten-only table
+	}
+	gate := &readGate{mode: floorMode}
+	tools, err := readOnlyTools(absRoot, cfg.Offload, cfg.NPU, cfg.Accel, gate)
 	if err != nil {
 		return nil, fmt.Errorf("building read tools: %w", err)
 	}
@@ -185,8 +210,20 @@ func Build(cfg BuildConfig) (*BuildResult, error) {
 	var audit *AuditLog
 	if cfg.AuditPath != "" {
 		audit = NewAuditLog(cfg.AuditPath)
+		if cfg.AuditChain {
+			audit.WithChain(newRunID())
+		}
 	}
+	res.Audit = audit
 	pol := NewPolicyWithEgress(cfg.Unattended, audit, allow)
+	// Warn mode (SF-02) never applies to a browse run: its grant requires an
+	// enforcing trail (ADR 0060), so asking for browse keeps the trail enforcing.
+	if audit != nil && cfg.AuditAdvisory && !cfg.AllowBrowse {
+		pol.WithAuditAdvisory(true)
+	}
+	if audit != nil && cfg.AuditEnforcedByKey {
+		pol.WithAuditEnforcedByKey(true)
+	}
 	switch {
 	case cfg.RulesPath == RulesOff:
 		// Explicit escape hatch: the operator opted out of the default unattended
@@ -247,6 +284,28 @@ func Build(cfg BuildConfig) (*BuildResult, error) {
 					"writes queue for review; evidence/weights/workflow mutations and lockfile hand-edits "+
 					"deny. --rules <path> replaces it; --rules off disables it (see internal/agent/unattended-rules.json).", len(rs)))
 		}
+	}
+	// Bind the read floor (SF-07) to the trail and to the table's read rules now
+	// that both exist; the read tools built above hold the same gate.
+	gate.audit = audit
+	gate.strict = audit != nil && !pol.auditAdvisory // an enforcing trail refuses a read it cannot record
+	pol.readGate = gate                              // the write and GitHub tools built below share it
+	for _, r := range pol.rules {
+		if r.Kind == ActRead {
+			gate.rules = append(gate.rules, r)
+		}
+	}
+	switch {
+	case cfg.RulesPath == RulesOff && requestedFloor != "off":
+		res.Notes = append(res.Notes, "read floor OFF: --rules off disables it with the rest of the table (agent_read_floor="+requestedFloor+" is not applied)")
+	case floorMode == "enforce":
+		note := "read floor ENFORCED: reads of secret material (.env*, keys and certificates, .ssh/.aws/.gnupg/.kube, .npmrc/.netrc/.pypirc, .git-credentials) and the table's read rules are refused by read_file, summarize_file, search_files, edit_file and github_upload_file"
+		if cfg.AllowRun || cfg.AllowShell {
+			note += "; NOT by the run/shell cage, whose allowlisted interpreters can read any file they reach"
+		}
+		res.Notes = append(res.Notes, note)
+	case floorMode == "warn" && len(gate.rules) > 0:
+		res.Notes = append(res.Notes, fmt.Sprintf("%d read rule(s) loaded: under agent_read_floor=warn a read they catch is recorded, not refused", len(gate.rules)))
 	}
 	var askQueue *AuditLog
 	if cfg.AskQueuePath != "" {

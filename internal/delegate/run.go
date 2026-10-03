@@ -839,7 +839,7 @@ func RunWith(ctx context.Context, cfg config.Config, local LocalRunner, subtasks
 	// and could even deal two subtasks against different snapshots.
 	if route == "spread" {
 		r.spreadViews, r.spreadBases, r.spreadProbeErrs = r.fetchViews(ctx)
-		r.spreadLease = LocalLease(cfg.GPULockPath, cfg.StateDir)
+		r.spreadLease = LocalLease(cfg.GPULockPath, cfg.StateDir) // read whole, once; spreadLeaseFor narrows it per contract
 		// The local seat's load is read here, once, for the same reason the
 		// fleet is probed once: every subtask must deal against ONE snapshot.
 		if cfg.SpreadLocalSlot() == config.SpreadLocalAlways {
@@ -872,7 +872,7 @@ func RunWith(ctx context.Context, cfg config.Config, local LocalRunner, subtasks
 		localBusy := busyReading{}
 		if route == "auto" {
 			localBusy = r.probeLocalBusy(ctx)
-			busy = leaseInfo.Held || localBusy.inflight >= cfg.FleetConcurrencyLimit() || localBusy.loading
+			busy = r.anyLeaseHeld(leaseInfo, subtasks) || localBusy.inflight >= cfg.FleetConcurrencyLimit() || localBusy.loading
 			// One line per run, mirroring route=spread's own local-slot log
 			// (review round 1 item 4): before this the identical W-01 read had
 			// no trace at all, so an operator could not tell "busy" from
@@ -2079,7 +2079,7 @@ func (r *runner) placeAndRun(ctx context.Context, i int, contract core.AgentCont
 			// wait keeps that seat out (localCan), so it could place nothing and would spend its whole
 			// TTL to end as a capacity defer saying no node had room. `why` already says it.
 			reserved := r.route != "remote" && !pl.tried[""] && r.localServesLayer(r.localView(), contract) &&
-				Reserved(LocalLease(r.cfg.GPULockPath, r.cfg.StateDir))
+				Reserved(r.localLease(contract))
 			if pl.capacityRefusal || reserved {
 				return r.awaitCapacity(ctx, i, contract, start, budget, pl, pr, refusals, why)
 			}
@@ -2338,7 +2338,7 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 			return r.settle(contract, r.capacityDefer(localView, seed, 0, 0, refusals, waitEvidence{note: pl.waitNote}), pl, waitStart)
 		}
 		if seed.waitCapacity {
-			return r.settle(contract, r.reservedDefer(localView, LocalLease(r.cfg.GPULockPath, r.cfg.StateDir), 0, seed.pendingReason), pl, waitStart)
+			return r.settle(contract, r.reservedDefer(localView, r.localLease(contract), 0, seed.pendingReason), pl, waitStart)
 		}
 		return r.exhaustedSettled(contract, seed, refusals, why, waitStart)
 	}
@@ -2420,7 +2420,7 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 	}
 	for wait > 0 && ctx.Err() == nil {
 		if decided == nil && r.route != "remote" && !pl.tried[""] {
-			lease = LocalLease(r.cfg.GPULockPath, r.cfg.StateDir)
+			lease = r.localLease(contract)
 			if Reserved(lease) {
 				reservedSeen = true
 			}
@@ -2616,7 +2616,7 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 		// on the decided seat the moment nothing has to be evicted. A text
 		// lease that appeared mid-wait keeps the seat off limits; a decision
 		// that now DEFERS (a guard flipped) ends the wait as that defer.
-		if decided != nil && r.route != "remote" && ctx.Err() == nil && !Reserved(LocalLease(r.cfg.GPULockPath, r.cfg.StateDir)) {
+		if decided != nil && r.route != "remote" && ctx.Err() == nil && !Reserved(r.localLease(contract)) {
 			dec := r.decide(ctx, contract, st)
 			switch {
 			case dec.Defer:
@@ -2634,7 +2634,7 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 	}
 	credit()
 	if decided != nil && r.route != "remote" && !pl.tried[""] {
-		if info := LocalLease(r.cfg.GPULockPath, r.cfg.StateDir); Reserved(info) {
+		if info := r.localLease(contract); Reserved(info) {
 			// A text lease took the cards during the wait: the holder is real,
 			// and running on the reserved seat is the one thing the lease
 			// forbids. The established deferral, naming the holder.
@@ -3062,7 +3062,7 @@ func (r *runner) replacementNode(ctx context.Context, contract core.AgentContrac
 	// for first placement (0.113.18; before this a remote's 503 fell straight
 	// onto the reserved cards — the 2026-09-05 incident through a side door).
 	// The capacity wait, not this fall-back, is what watches for the release.
-	if info := LocalLease(r.cfg.GPULockPath, r.cfg.StateDir); Reserved(info) {
+	if info := r.localLease(contract); Reserved(info) {
 		return placement{}, head + ", and the local seat is reserved (" + HolderLine(info) + ")", false
 	}
 	if free, note := r.localSlotAhead(); !free {
@@ -3162,6 +3162,37 @@ func (r *runner) localSlotAhead() (free bool, note string) {
 	return free, note
 }
 
+// localLease is the machine-wide lease as it stands between THIS contract and a local seat
+// (LeaseForContract): the leases on the cards of the seats the contract could run on, and
+// nothing else. Every read of the local lease that asks "is the local seat reserved, fenced
+// or busy for this contract" goes through it, so a lease on one card is not a reason to
+// route, wait or defer work a free card can take.
+func (r *runner) localLease(c core.AgentContract) gpulease.Info {
+	return LeaseForContract(r.cfg, LocalLease(r.cfg.GPULockPath, r.cfg.StateDir), c)
+}
+
+// spreadLeaseFor narrows the spread run's ONE lease read (r.spreadLease: every subtask deals
+// against one snapshot) to a contract's own local seats.
+func (r *runner) spreadLeaseFor(c core.AgentContract) gpulease.Info {
+	return LeaseForContract(r.cfg, r.spreadLease, c)
+}
+
+// anyLeaseHeld is the deal's busy reading of the lease: true when ANY subtask has no local
+// seat free of every lease. One contract that cannot run locally is enough to consider the
+// fleet; a free seat for the others is not lost, because each subtask's own placement reads
+// its seats again.
+func (r *runner) anyLeaseHeld(info gpulease.Info, subtasks []core.AgentContract) bool {
+	if !info.Held {
+		return false
+	}
+	for _, c := range subtasks {
+		if LeaseForContract(r.cfg, info, c).Held {
+			return true
+		}
+	}
+	return len(subtasks) == 0 // nothing to narrow by: the whole-node reading
+}
+
 // localStillBusy is the deal's own reading of the local seat, taken again: the
 // capacity wait of a subtask a DEAL kept off the seat because it read busy
 // (PlacedResult.overflow) may take the seat only once the deal would have. route=spread
@@ -3237,8 +3268,17 @@ func (r *runner) localRunCapRoom() (room int, note string) {
 		})
 		return limit, fmt.Sprintf("run registry unreadable (%v), read as empty", err)
 	}
-	ahead := len(reg.OnSeat(time.Now(), seat))
-	return max(limit-ahead, 0), fmt.Sprintf("%d run(s) registered on seat %s, cap %d", ahead, seat, limit)
+	// A seat pinned to ONE card shares it with every other seat on it, so its line is the
+	// card's (plan P5): the same reading the node's own gate makes (OnSeatPinned). A seat that
+	// spans cards, or whose pin is unknown, keeps the per-seat line.
+	pins, _ := r.cfg.ModelPins(seat)
+	runs := reg.OnSeatPinned(time.Now(), pins, seat)
+	ahead := len(runs)
+	where := "on seat " + seat
+	if len(pins) == 1 {
+		where = "on card " + pins[0] + " (seat " + seat + ")"
+	}
+	return max(limit-ahead, 0), fmt.Sprintf("%d run(s) registered %s, cap %d", ahead, where, limit)
 }
 
 // untried filters a fleet snapshot down to the nodes this subtask has not
@@ -3620,7 +3660,7 @@ func (r *runner) alternativeNode(ctx context.Context, first PlacedResult, contra
 		// request at the affinity cordon for agent_lease_wait_sec and then
 		// deferring as capacity, which is five minutes of a retry's budget spent
 		// discovering something the lease record already said.
-		lease := LocalLease(r.cfg.GPULockPath, r.cfg.StateDir)
+		lease := r.localLease(contract)
 		if fenced, fence := Fenced(lease); fenced {
 			if chosen, base, found := r.remoteAlternative(ctx, st, pl); found {
 				return placement{view: chosen, base: base,
@@ -3906,7 +3946,7 @@ func (r *runner) placeAutoRemote(seed string, st Subtask, localView NodeView, vi
 	if !localBusy && r.localServesLayer(localView, st.Contract) {
 		return spreadSlot{placement: placement{view: localView, reason: "local idle"}}
 	}
-	var best NodeView
+	var best, bestRanked NodeView
 	var bestBase string
 	found, anyEligible := false, false
 	prior := fleetTokSPrior(views)
@@ -3925,8 +3965,14 @@ func (r *runner) placeAutoRemote(seed string, st Subtask, localView NodeView, vi
 		if headroom(v) <= dealt[bases[j]] {
 			continue // W-06: no floor — a node at 0 headroom gets nothing this deal
 		}
-		if !found || betterRemote(seed, &st, prior, v, best) {
-			best, bestBase, found = v, bases[j], true
+		// GPU routing P1: a node's cards are spent as the deal gives them out. The
+		// ranking copy carries how many subtasks this deal already put on the
+		// node's cards, so a node with two free cards is preferred for its first
+		// two subtasks and not its third. The stored view is never the copy:
+		// baseFor matches the chosen view against the roster by value.
+		ranked := v.withCardsDealt(dealt[bases[j]])
+		if !found || betterRemote(seed, &st, prior, ranked, bestRanked) {
+			best, bestRanked, bestBase, found = v, ranked, bases[j], true
 		}
 	}
 	// D-105 (review round 1, BLOCKER item 2): the verdict line is built ONCE,
@@ -3940,6 +3986,11 @@ func (r *runner) placeAutoRemote(seed string, st Subtask, localView NodeView, vi
 	if found {
 		dealt[bestBase]++
 		reason := fmt.Sprintf("route=%s → %s (headroom)", r.route, best.NodeID)
+		if room := cardRoomFor(best, st.Contract.Layer); room.known && cardTier(bestRanked, st.Contract.Layer) == tierSome {
+			// The basis, in the node's own numbers: what it published BEFORE this
+			// subtask was dealt to it.
+			reason += fmt.Sprintf(" [free cards %d of %d]", room.free, room.total)
+		}
 		if verdicts != "" {
 			reason += "; " + verdicts
 		}
@@ -4202,7 +4253,8 @@ func (r *runner) placeSpreadWith(i int, st Subtask, localView NodeView, book *de
 	// the layer idles. It deals among the remotes alone, and what they cannot take yet waits
 	// in line for them below.
 	localServes := r.localServesLayer(localView, st.Contract)
-	localIn := !Reserved(r.spreadLease) && localServes
+	spreadLease := r.spreadLeaseFor(st.Contract)
+	localIn := !Reserved(spreadLease) && localServes
 	// A BUSY local seat (0.113.20) leaves the rotation exactly like a leased
 	// one, but only while a remote with room exists to take its slots: the
 	// remotes are filtered by hasRoom (a sheddable run needs an idle slot), and
@@ -4321,10 +4373,10 @@ func (r *runner) placeSpreadWith(i int, st Subtask, localView NodeView, book *de
 			// it. It takes no run-cap slot and waits on no lease.
 			return spreadSlot{placement: placement{view: localView, reason: fmt.Sprintf("route=spread: %s, and %s so the seat cannot take it (%s)", what, localRefusal(localView, st.Contract), why)}, deadFleet: dead}
 		}
-		if Reserved(r.spreadLease) {
+		if spreadLease := r.spreadLeaseFor(st.Contract); Reserved(spreadLease) {
 			// The one placement the lease exists to forbid. Dealt local so the
 			// slot has a view, but flagged: attempt() waits or defers.
-			return spreadSlot{placement: placement{view: localView, reason: "route=spread: local seat reserved (" + HolderLine(r.spreadLease) + "); " + what + " — " + why}, deadFleet: dead, reserved: true}
+			return spreadSlot{placement: placement{view: localView, reason: "route=spread: local seat reserved (" + HolderLine(spreadLease) + "); " + what + " — " + why}, deadFleet: dead, reserved: true}
 		}
 		book.counts[""]++
 		return spreadSlot{placement: placement{view: localView, reason: "route=spread: " + what + " — local (" + why + ")"}, deadFleet: dead}
@@ -4337,14 +4389,14 @@ func (r *runner) placeSpreadWith(i int, st Subtask, localView NodeView, book *de
 		book.counts[""]++
 		return spreadSlot{placement: placement{view: localView, reason: fmt.Sprintf("route=spread → local (slot %d of %d)", slot+1, len(nodes))}}
 	}
-	k := fitPick(st, nodes, bases, slot, book.dealt)
+	k := fitPick(st, nodes, bases, slot, book.dealt, book.counts)
 	if k < 0 {
 		// Every eligible remote has already taken a subtask this cycle — which a
 		// ragged eligible set can reach without passing through a local slot.
 		// Reshuffle rather than stack: after the clear a pick always exists,
 		// because len(nodes) > 1 guarantees at least one remote.
 		clear(book.dealt)
-		k = fitPick(st, nodes, bases, slot, book.dealt)
+		k = fitPick(st, nodes, bases, slot, book.dealt, book.counts)
 	}
 	book.dealt[bases[k]] = true
 	book.counts[bases[k]]++
@@ -4362,22 +4414,34 @@ func (r *runner) placeSpreadWith(i int, st Subtask, localView NodeView, book *de
 	return spreadSlot{placement: placement{view: nodes[k], base: bases[k], reason: reason}}
 }
 
-// fitPick returns the index of the best-scoring seat in nodes that is neither
-// local nor already dealt this cycle, or -1 when the cycle has no seat left.
-// The scan starts at the rotation slot and wraps, and only a STRICTLY better
-// score displaces the incumbent — so equal seats are dealt in rotation order
-// and an all-equal roster behaves exactly as blind round-robin did.
+// fitPick returns the index of the best seat in nodes that is neither local
+// nor already dealt this cycle, or -1 when the cycle has no seat left. The scan
+// starts at the rotation slot and wraps, and only a STRICTLY better key
+// displaces the incumbent — so equal seats are dealt in rotation order and an
+// all-equal roster behaves exactly as blind round-robin did.
 // bases is parallel to nodes and is what `dealt` is keyed on — see dealSpread
 // for why the node id is not a usable key here.
-func fitPick(st Subtask, nodes []NodeView, bases []string, slot int, dealt map[string]bool) int {
-	k, best := -1, 0
+//
+// The key is the free-card tier (GPU routing P1) first, then the fit score:
+// among the seats still undealt this cycle, one whose cards can take the
+// contract goes before one whose cards are all busy, and fit orders seats
+// within a tier. The cycle invariant is untouched, because the tier only
+// chooses WHICH undealt seat takes the slot; every seat still takes exactly one
+// per cycle. counts is the deal's whole-run tally per dial base (nil = none
+// dealt yet), which spends a node's free cards as subtasks land on them. Nodes
+// that publish no per-card truth are one tier, so a fleet of them deals exactly
+// as it did before.
+func fitPick(st Subtask, nodes []NodeView, bases []string, slot int, dealt map[string]bool, counts map[string]int) int {
+	k, best, bestTier := -1, 0, 0
 	for c := 0; c < len(nodes); c++ {
 		j := (slot + c) % len(nodes)
 		if nodes[j].Local || dealt[bases[j]] {
 			continue
 		}
-		if s := scoreFit(st, nodes[j]); k < 0 || s > best {
-			k, best = j, s
+		tier := cardTier(nodes[j].withCardsDealt(counts[bases[j]]), st.Contract.Layer)
+		s := scoreFit(st, nodes[j])
+		if k < 0 || tier > bestTier || (tier == bestTier && s > best) {
+			k, best, bestTier = j, s, tier
 		}
 	}
 	return k
@@ -4522,7 +4586,7 @@ func (r *runner) attempt(ctx context.Context, i int, contract core.AgentContract
 			// Still reserved: hand the subtask to the capacity wait (0.113.18),
 			// which watches the lease AND every remote's room — not through
 			// finish(): nothing ran, so there is nothing to record.
-			if Reserved(LocalLease(r.cfg.GPULockPath, r.cfg.StateDir)) {
+			if Reserved(r.localLease(contract)) {
 				// reason already names the holder and why no remote qualified
 				// (placeSpread built it); it is the deferral's text when nothing frees.
 				return PlacedResult{waitCapacity: true, pendingReason: reason, PlacementReason: reason}
@@ -4588,7 +4652,7 @@ func (r *runner) attempt(ctx context.Context, i int, contract core.AgentContract
 			// the time this subtask's turn comes, same as the spread case
 			// above) still reserves the seat; otherwise queued-local beats
 			// ineligible-remote, exactly as before W-06.
-			leaseInfo := LocalLease(r.cfg.GPULockPath, r.cfg.StateDir)
+			leaseInfo := r.localLease(contract)
 			why, class := r.noEligibleRemote(st, r.autoViews, r.autoProbeErrs)
 			// A contract that names a layer this box does not declare (register A-108) waits on no lease
 			// and is not "queued-local": the seat cannot take it. It lands here only so the seat's own
@@ -4617,7 +4681,7 @@ func (r *runner) attempt(ctx context.Context, i int, contract core.AgentContract
 		case "remote":
 			busy = true // forced remote behaves as "local unavailable" for Place
 		case "auto":
-			leaseInfo = LocalLease(r.cfg.GPULockPath, r.cfg.StateDir)
+			leaseInfo = r.localLease(contract)
 			// W-01 (register S-01): a lease is one way the local seat is
 			// spoken for, but the overwhelming majority of runs hold no lease
 			// at all — and a local seat already carrying more in-flight
@@ -6250,6 +6314,11 @@ func leasedLanes(views []NodeView) []string {
 			// operator reading "why did nothing land there" needs the same
 			// sentence for it as for a text lease.
 			out = append(out, laneID(v)+" (long GPU lease held)")
+		case v.LeaseOverdue:
+			// GPU routing P1: the node is ranked last, not excluded, so it is not
+			// why a placement failed; it is named so an operator who sees work
+			// land on the worse node knows the lease behind the order.
+			out = append(out, laneID(v)+" (GPU lease overdue, ranked last)")
 		}
 	}
 	return out

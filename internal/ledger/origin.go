@@ -45,6 +45,14 @@ func ProcessOrigin() Origin {
 	return originVal
 }
 
+// OriginFromEnv resolves an origin from an arbitrary environment lookup, uncached, for a
+// caller that must read the session label of a process other than its own start-up
+// environment (a test, or a launcher helper that prints the flags for its caller). It is
+// the same resolver ProcessOrigin applies, so the two cannot name different sessions.
+func OriginFromEnv(getenv func(string) string) Origin {
+	return originFrom(getenv, os.Getpid(), os.Getppid())
+}
+
 // originFrom is the pure resolver behind ProcessOrigin; tests feed it a map.
 // The explicit label wins over the inherited session id so a wrapper that
 // knows better (a printed CLI, an opencode session) can name itself.

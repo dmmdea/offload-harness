@@ -221,6 +221,13 @@ identity to report.
 ]
 ```
 
+The delegator reads these rows (GPU routing P1): `delegate.NodeView.Devices` carries them, a card
+with `display_active` false, a known `util_pct` under 15 and enough `vram_free_gb` (or a loaded seat
+that explains its absence) counts as a free card, and placement prefers a node with one over a node whose busiest card reads lower. No
+`gpu_devices` key (an older node, or a source that cannot enumerate devices) is unknown, never
+"no free card". `offload_status` shows the count as `free_cards` of `cards_total`. See
+[systems/fleet-node.md](systems/fleet-node.md), "Free cards".
+
 `gpu_devices` is **additive** — `vram_total_gb`/`vram_free_gb` keep exactly the meaning they
 always had, and adding a new field breaks nothing on the consumer side in practice: the
 fleet-dispatcher decodes health with a plain `json.Decoder` (no `DisallowUnknownFields`
@@ -1087,8 +1094,8 @@ is a node considered, ranked by `delegate.PlaceVision` — eligible = advertises
 task (`NodeView.ServesVisionTask`: no `vision_tasks` in health = all three, so an older node stays
 eligible for every task; a published list serves only what it names) and its
 card is not leased (`lease.class: text` or `lease.busy`), ordered by the agent lane's
-`betterRemote` (not saturated → provably free slot → queue depth → GPU utilization → roster
-order) — and with no eligible node the work still runs local. `remote`: force a node; none
+`betterRemote` (lease rung: clean, then a long lease, then an overdue one → not saturated → provably
+free slot → a free card → queue depth → GPU utilization → roster order) — and with no eligible node the work still runs local. `remote`: force a node; none
 eligible ⇒ `deferred: true, defer_class: capacity` (or `config` with no `delegate_remotes`),
 never a local run. `meta.node` / `meta.placement` on the result say where it ran.
 

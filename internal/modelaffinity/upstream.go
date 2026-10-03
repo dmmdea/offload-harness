@@ -58,7 +58,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/dmmdea/offload-harness/internal/gpulease"
 	"github.com/dmmdea/offload-harness/internal/seatload"
 	"github.com/dmmdea/offload-harness/internal/swapclient"
 )
@@ -154,7 +153,7 @@ func awaitUpstream(ctx context.Context, endpoint, model string, deadline time.Ti
 	if dir == "" {
 		return nil // not armed: inert by construction, exactly like awaitCard
 	}
-	if !blocksLoad(gpulease.InspectDir(dir)) {
+	if !blocksLoad(ScopeToModel(InspectLease(dir), model)) {
 		return nil
 	}
 	if upstreamResident(ctx, endpoint, model) {

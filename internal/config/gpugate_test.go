@@ -1,6 +1,7 @@
 package config
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/dmmdea/offload-harness/internal/gpulease"
 	"github.com/dmmdea/offload-harness/internal/modelaffinity"
+	"github.com/dmmdea/offload-harness/internal/seatload"
 )
 
 // Load is the ONE place the model-affinity load gate is armed, because it is the
@@ -55,5 +57,42 @@ func TestLoadArmsTheGPULoadGateOnDefaults(t *testing.T) {
 	}
 	if got := modelaffinity.GPULeaseDir(); got != want {
 		t.Fatalf("gate armed at %q on default config, want the platform default %q", got, want)
+	}
+}
+
+// A config whose endpoint is ANOTHER box's engine (a bench config aimed at a remote node) leaves
+// this box's lease with nothing to protect, and nothing it loads may make a lease on THIS box
+// reach that engine: the seat race rule asks the lease directory first, and the directory is
+// disarmed under a remote endpoint. The unload goes through the endpoint the seat's own
+// admission named, never one armed from config.
+func TestRemoteEndpointConfigNeverReachesTheEngineThroughTheSeatYield(t *testing.T) {
+	root := t.TempDir()
+	body, err := json.Marshal(map[string]any{"state_dir": root, "endpoint": "http://other-box.example:8080"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "config.json")
+	if err := os.WriteFile(path, body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var calls int
+	t.Cleanup(modelaffinity.SetYieldSeams(modelaffinity.YieldSeams{
+		Read: func(context.Context, string, string) (seatload.Reading, error) {
+			calls++
+			return seatload.Reading{Loaded: true}, nil
+		},
+		Unload: func(context.Context, string, string) error { calls++; return nil },
+	}))
+	if _, err := Load(path); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := modelaffinity.GPULeaseDir(); got != "" {
+		t.Fatalf("a remote-endpoint config disarms this box's lease gate, got %q", got)
+	}
+	if yielded, why := modelaffinity.YieldIfFenced(context.Background(), "http://other-box.example:8080", "some-seat"); yielded || why != "" {
+		t.Fatalf("a remote endpoint must not be reachable through the seat yield: %v %q", yielded, why)
+	}
+	if calls != 0 {
+		t.Fatalf("the seat yield made %d call(s) to an engine on another box", calls)
 	}
 }

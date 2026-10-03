@@ -33,6 +33,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/confhead"
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
+	"github.com/dmmdea/offload-harness/internal/datahome"
 	"github.com/dmmdea/offload-harness/internal/delegate"
 	"github.com/dmmdea/offload-harness/internal/embedmemo"
 	"github.com/dmmdea/offload-harness/internal/eval"
@@ -61,6 +62,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/swapclient"
 	"github.com/dmmdea/offload-harness/internal/trajectory"
 	"github.com/dmmdea/offload-harness/internal/visionremote"
+	"github.com/dmmdea/offload-harness/internal/volumes"
 )
 
 // version aliases buildinfo.Version — the const moved to a shared package in
@@ -157,12 +159,16 @@ func main() {
 		err = runAuditYAML(args)
 	case "audit-config":
 		err = runAuditConfig(args)
+	case "agent-audit":
+		err = runAgentAudit(args)
 	case "report":
 		err = runReport(args)
 	case "acceptance":
 		err = runAcceptance(args)
 	case "install":
 		err = runInstall(args)
+	case "data":
+		err = runData(args)
 	case "models":
 		err = runModels(args)
 	case "calibrate":
@@ -298,12 +304,16 @@ Usage:
                                          compare this node's live config.json against the seed its tier would install; lists every seed-owned key that is DIFFERENT, LIVE-ONLY (hand-wired, never written back to profiles.json) or SEED-ONLY. Exit 1 on drift.
                                          --ram-tier defaults to THIS machine's detected RAM tier (the header names it, GB included); for another node's config (--config/--goos/--home) pass --ram-tier min|low|mid|high|none. A RAM probe that reads 0 GB is refused, never read as min.
                                          Exit 1 on a violation, a STALE config or a HAND-EDITED one; UNSTAMPED prints as a finding and does not fail. Flags come BEFORE the files.
+  local-offload agent-audit verify [--file PATH] [--json]
+                                         verify the hash chain of every agent run on the broker audit trail (audit_chain, register SF-08); exit 1 naming the run and seq of an edited, removed or reordered row. Open runs (no run_end) and unchained rows are reported, not failed.
   local-offload report [--out FILE]      READ-ONLY capability report for this machine (tier, serving, media routes) — Markdown, safe to send
   local-offload acceptance [--json]      the gate: EXERCISE every bound capability as this identity (lease writable, interpreters runnable, aliases live). Non-zero when a node must not be handed work.
   local-offload install detect [--json]  classify this machine into a hardware tier (works on every OS)
   local-offload install plan [--json]    the tier + the media bindings an install would seed here
   local-offload install render [--profile ID] [--llama-bin DIR] [--models DIR] [--out FILE]   render this tier's llama-swap serving config (templates embedded)
-  local-offload install volumes [--json] [--min-free-gb N] [--allow-os-volume]   where should this machine install? (most free space, never the OS drive by default)
+  local-offload install volumes [--json] [--min-free-gb N] [--allow-os-volume] [--data]   where should this machine install? (most free space, never the OS drive by default; --data picks the volume for harness DATA and also skips cloud-synced virtual drives and FAT volumes)
+  local-offload data status [--json]     where this node keeps its data, and whether any of it is on the OS drive (C: holds Windows and program installs, never data). Exit 1 when it is and a data volume qualifies.
+  local-offload data migrate [--from DIR] [--to DIR] [--apply] [--stopped] [--json]   COPY the data tree to a data drive (never a move, never a junction, source untouched; dry run unless --apply; bbolt stores only with --stopped), then print the "home" line to set
   local-offload models                   show configured offload model
   local-offload eval [--dir DIR]         code-based quality eval (AURC, deferral-curve AUDC/QNC)
   local-offload compaction-eval <harvest|run|freeze|check|ab|kvbench> --corpus C   compaction ladder eval: trace→corpus harvest (redacting), ratio/retention report, tokens ratchet, gated A/B, KV-reuse bench
@@ -2713,7 +2723,11 @@ func runFleetServe(args []string) error {
 		Reclaim:  reclaim,
 		Snapshot: sampler.Load,
 		Lease:    leaseRead,
-		Store:    storeStatus,
+		// What the lease is doing beside the fact that it is held (plan P8): orphaned,
+		// overdue and stalled ride /fleet/health so a delegator can tell an abandoned
+		// lease from a working one.
+		LeaseStanding: fleetLeaseStanding(cfg),
+		Store:         storeStatus,
 		// The rendered serving config's provenance (K-02): NEW KEYS on the
 		// existing /fleet/health payload, never a new listener. nil when
 		// serving_config_path is unset, which omits both fields.
@@ -2949,7 +2963,7 @@ func runDoctor(args []string) error {
 	// that produced it, so a file that FAILED validation is named here, verbatim, before
 	// anything else is printed.
 	tainted := doctorConfigRow(src, os.Stdout)
-	err := doctorRun(cfg, mediacap.RoutesChecked(cfg, mediacap.LiveNodeChecker(doctorComfyAPI(), 3*time.Second)), os.Stdout)
+	err := doctorRunChecked(cfg, mediacap.RoutesChecked(cfg, mediacap.LiveNodeChecker(doctorComfyAPI(), 3*time.Second)), os.Stdout, liveDataReport(cfg))
 	if err != nil {
 		return err
 	}
@@ -3042,6 +3056,20 @@ func modelAliases(cfg config.Config) []aliasCheck {
 // script that was not on disk it still printed green. Passing them in keeps the
 // filesystem probe at the caller's edge, so the check itself stays testable.
 func doctorRun(cfg config.Config, routes []mediacap.Route, w io.Writer) error {
+	return doctorRunChecked(cfg, routes, w, nil)
+}
+
+// Seams for the machine facts the data-volume audit reads: the drive Windows boots
+// from and the volumes this host mounts. A test stands in for the machine.
+var (
+	doctorOSDrive = volumes.OSDriveRoot
+	doctorVolumes = volumes.List
+)
+
+// doctorRunChecked is doctorRun plus the data-volume audit (register C-92). data is
+// nil when the caller did not audit, which is every test that predates the audit and
+// every host with no OS drive letter.
+func doctorRunChecked(cfg config.Config, routes []mediacap.Route, w io.Writer, data *datahome.Report) error {
 	fmt.Fprintf(w, "endpoint:   %s%s\nmodel:      %s\ncache:      %s\nledger:     %s\n",
 		cfg.Endpoint, cfg.CompletionPath, cfg.Model, cfg.CachePath, cfg.LedgerPath)
 	// Media first, and independent of everything below: these verdicts are pure
@@ -3082,6 +3110,9 @@ func doctorRun(cfg config.Config, routes []mediacap.Route, w io.Writer) error {
 	// finding is pure config, so an endpoint that happens to be down must not hide
 	// the value that EXPLAINS what the operator is looking at.
 	findings := writeConfigFindingsSection(w, cfg)
+	// Fourth in the band, for the same reason: where the data lives is config plus a
+	// volume list, so a serving layer that is down must not hide it (register C-92).
+	dataOnOS := writeDataHomeSection(w, data)
 	client := llamaclient.New(cfg.Endpoint, cfg.CompletionPath, cfg.Model, 5*time.Second)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -3135,7 +3166,72 @@ func doctorRun(cfg config.Config, routes []mediacap.Route, w io.Writer) error {
 	if findings > 0 {
 		return fmt.Errorf("%d configuration finding(s) — see the config findings section above", findings)
 	}
+	if dataOnOS > 0 {
+		return fmt.Errorf("%d data location(s) on the OS drive %s while %s qualifies to hold them — see the data volume section above", dataOnOS, data.OSDrive, data.Target.Volume.Root)
+	}
 	return nil
+}
+
+// liveDataReport audits THIS machine: nil when it has no OS drive letter (the rule is
+// about the drive Windows boots from), else the report built from the mounted volumes.
+// A volume list that cannot be read is an empty one, which the audit words as "no
+// other volume qualifies" rather than guessing a target.
+func liveDataReport(cfg config.Config) *datahome.Report {
+	osDrive := doctorOSDrive()
+	if osDrive == "" {
+		return nil
+	}
+	// The volume list is only worth enumerating when something sits on the OS drive: a
+	// clean node must not pay for a drive scan (a dead mapped share can stall one).
+	r := datahome.Audit(cfg, osDrive, nil)
+	if len(r.OnOS) == 0 {
+		return &r
+	}
+	vols, err := doctorVolumes()
+	if err != nil {
+		vols = nil
+	}
+	r = datahome.Audit(cfg, osDrive, vols)
+	return &r
+}
+
+// writeDataHomeSection prints the data-volume verdict (register C-92) and returns how
+// many data locations make doctor FAIL: those on the OS drive while a data volume
+// qualifies to take them. The operator rule is that C: holds Windows and program
+// installs, never data; the section names every config key whose resolved path sits
+// there and the way off it. A node with nowhere to move to gets one note and no FAIL,
+// and a clean node (or a host with no OS drive letter) prints nothing at all.
+func writeDataHomeSection(w io.Writer, r *datahome.Report) int {
+	if r == nil || len(r.OnOS) == 0 {
+		return 0
+	}
+	if r.Target == nil {
+		fmt.Fprintf(w, "data volume: -     %d data location(s) are on the OS drive %s but no other volume qualifies (%s); there is nowhere to move them to\n",
+			len(r.OnOS), r.OSDrive, r.Why)
+		return 0
+	}
+	home := datahome.ProposedHome(r.Target.Volume.Root)
+	fmt.Fprintf(w, "data volume (%s holds Windows and program installs, never data):\n", strings.TrimRight(r.OSDrive, `\/`))
+	root, under, others := r.Grouped()
+	if root != nil {
+		fmt.Fprintf(w, "  FAIL  %-28s %s\n", root.Key, root.Path)
+		if len(under) > 0 {
+			names := make([]string, len(under))
+			for i, l := range under {
+				names[i] = l.Key
+			}
+			fmt.Fprintf(w, "        and %d paths under it that follow it: %s\n", len(under), strings.Join(names, ", "))
+		}
+	}
+	for _, l := range others {
+		fmt.Fprintf(w, "  FAIL  %-28s %s\n", l.Key, l.Path)
+	}
+	fmt.Fprintf(w, "  move to %s (%s). The data is COPIED, never moved and never put behind a junction:\n", r.Target.Volume.Root, r.Target.Because)
+	fmt.Fprintf(w, "    1. stop fleet-serve and every MCP door (they hold the cache and the ledger open)\n")
+	fmt.Fprintf(w, "    2. local-offload data migrate --to %s --apply --stopped\n", home)
+	fmt.Fprintf(w, "    3. in config.json set  \"home\": \"%s\"  (a key you wrote by hand above keeps its value: change it too)\n", datahome.HomeValue(home))
+	fmt.Fprintf(w, "    4. restart the doors and re-run doctor; delete the old tree only after the new home has run clean\n")
+	return len(r.OnOS)
 }
 
 // writeFleetSkewSection prints one row per fleet remote (delegate_remotes): OK

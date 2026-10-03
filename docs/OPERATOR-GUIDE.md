@@ -128,14 +128,24 @@ server, so each message runs a full agent loop (see §4), not a bare completion.
 ### Moving the harness to another drive ✅
 
 ```powershell
-local-offload install volumes            # which volume should hold it?
-# copy the tree, then in config.json:  "home": "D:/offload-stack"
+local-offload install volumes --data     # which volume should hold its data? (never a cloud-synced or FAT volume)
+local-offload data status                # where is the data now, and is any of it on the OS drive?
+# stop fleet-serve and every MCP door, then COPY the tree (never move it, never a junction):
+local-offload data migrate --to D:/local-offload --apply --stopped
+# then in config.json:  "home": "D:/local-offload"   (the verb prints the exact line)
 local-offload doctor                     # every derived path now under the new root
 ```
 
 `home` (or `$LOCAL_OFFLOAD_HOME`) rebases every path still at its default; anything you set
 explicitly is left exactly as you typed it. The machine-wide GPU lease root is never
 rebased — it must stay machine-wide.
+
+On Windows the OS drive holds Windows and program installs, never data: a fresh `install.ps1` writes
+`home` onto the data drive `install volumes --data` picks (`OFFLOAD_DATA_HOME` names another;
+`OFFLOAD_ALLOW_OS_DATA=1` keeps it on the OS drive on purpose), and `doctor` FAILs a node whose data
+still sits on the OS drive while a data drive could take it. `data migrate` is a dry run until
+`--apply`, holds back the bbolt stores (`*.db`) until `--stopped`, verifies every copy, and leaves the
+old tree for you to delete once the new home has run clean.
 
 ### Capability report — send this instead of describing your box ✅
 
@@ -264,6 +274,14 @@ local-offload run-graph --graph wf.json --out-dir out/
 # you genuinely need a bare server (benchmarking) — hold the lease explicitly
 local-offload gpu reserve --class media -- <your command>
 ```
+
+On a host with card-scoped leases enabled, hold only the cards the job uses so the others keep working:
+`gpu reserve --class media --devices 2 -- <cmd>` (named cards), `--cards 2` (the allocator picks two free, non-display cards),
+or no flag at all when `<cmd>` pins itself with `CUDA_VISIBLE_DEVICES`, `--cuda-device` or `COMFY_CUDA_DEVICE`. `gpu cards`
+shows each card and its holder; `gpu doctor --write-audit` is what turns the feature on for a host (see
+[GPU lease](systems/gpu-lease.md#reserving-cards-the-card-table-and-the-reader-audit-plan-p3)). Point `gpu doctor --scan` at
+every repository that carries its own copy of the harness binary, and read its "not searched" list: a green audit covers only
+what it reached, and the deployed `local-agent` binary (section 4) is one of the readers it has to cover.
 
 If you started ComfyUI by hand, check that the process owning `:8188` is the one you think
 it is before rendering: a flagless instance can keep the port while a correctly-flagged one
@@ -548,7 +566,10 @@ swapped: the new runner refuses the old install, so until then that node's `doct
 ## 4. Drive the coding agent
 
 The agent plans with a local model and acts through tools confined to a workspace. Build it once:
-`go build -o local-agent ./cmd/local-agent` (or use `$OFFLOAD_HOME\harness\local-agent.exe`).
+`go build -o local-agent ./cmd/local-agent` (or use `$OFFLOAD_HOME\harness\local-agent.exe`). The agent reads the GPU lease
+before it loads a seat, so it is one of the readers `gpu doctor` audits (it is found by name, and a running one by image): a
+`local-agent` built before the per-epoch fence is reported `OLD` and keeps the host from enabling card-scoped leases until it
+is rebuilt or replaced.
 
 ### One-shot CLI (read-only by default) ✅
 
@@ -583,7 +604,7 @@ the final answer. The endpoint is **unauthenticated** — keep it loopback-only.
 | `--allow-run` | `run` — an allowlisted program run **directly** (no shell) in the OS sandbox | Linux **and** Windows. Allowlist + broker are the control (see "The runner" below). |
 | `--allow-shell` | `run_shell` in the OS sandbox | **Linux only**; no network, FS-confined, syscall-limited. |
 | `--allow-github` | `github_api` / `create_repo` / `upload_file` | token from `$GITHUB_TOKEN`, repo from `$GITHUB_REPO`. Use a least-privilege token. |
-| `--allow-browse` (+ `--browse-hosts host1,host2`) | `browse` — drive the operator's own running browser (ADR 0060) | Needs the browse lane configured (see "Browse lane" below). `--browse-hosts` is REQUIRED: the CLI always builds unattended, so the grant is refused without a host list, the deny-list can never be lifted, and an audit path is needed (default `<HOME>/.local-offload/agent-audit.jsonl`). `agent_run` / `agent_delegate` take `allow_browse` + `browse_hosts` and are unattended the same way; `route` must be `local` and the node needs `agent_allow_browse: true`. Only the MCP tool `offload_browse` is attended. |
+| `--allow-browse` (+ `--browse-hosts host1,host2`) | `browse` — drive the operator's own running browser (ADR 0060) | Needs the browse lane configured (see "Browse lane" below). `--browse-hosts` is REQUIRED: the CLI always builds unattended, so the grant is refused without a host list, the deny-list can never be lifted, and an audit path is needed (default `agent-audit.jsonl` under the install root: `home`, else `<HOME>/.local-offload`). `agent_run` / `agent_delegate` take `allow_browse` + `browse_hosts` and are unattended the same way; `route` must be `local` and the node needs `agent_allow_browse: true`. Only the MCP tool `offload_browse` is attended. |
 | `--listen-trusted-network` | bind `--serve` beyond loopback | prints a loud warning; only on a trusted LAN. |
 
 ### Browse lane (opt-in: drive your own browser)
@@ -727,7 +748,7 @@ to a single-model run of the original objective (logged as `fallback=…`). `--a
 ### Unattended runs: risk rules, parking, and the advisory judge
 
 The CLI is non-interactive, so every broker "ask" is **deny-and-queue** — deferred approvals and
-parked calls land in the ask queue (`--ask-queue`, default `~/.local-offload/agent-asks.jsonl`) for
+parked calls land in the ask queue (`--ask-queue`, default `agent-asks.jsonl` under the install root: `home`, else `~/.local-offload`) for
 your morning review. Three mechanisms bear on an unattended run, but **only the first actually
 gates** — the other two report:
 
@@ -822,6 +843,7 @@ does NOT contain:
 | admission + warm-up (`agent_admission_wait_sec`, default 300) | the node, BEFORE its wall starts (D-64) | another model's swap on the endpoint, then the seat's own cold load (`admission_wait_sec`, `admission_note`) | anything after the first token |
 | coherence probe (`agent_coherence_probe`, default `cold`) | the node, after the warm-up and still BEFORE its wall (D-118) | one ≤ 96-token completion asking the freshly loaded seat to call `read_file` and answer DONE (`coherence_note`; its time is added to `admission_wait_sec`) | the loop, the re-pack, anything the contract asked for |
 | node wall (0.131.0: the EXPECTATION, ADR 0055) | `timeout_sec` / the auto wall, reported as `wall_sec` | what the node expects the run to take — what the delegator sizes and anchors from | **it ends no run.** Until 0.130.x it was a context deadline over the loop, and a 27B seat streaming its 949th token at 984 s died at the 900 s cap exactly like a hung engine. One thing is held to it: the structured re-pack, by a token budget and a deadline check before each attempt against `min(ceiling, the wall's end + 30 s)` at the seat's rate (register C-80, ADR 0055 item 9); a request in flight is never cut, and a loop that ends after the wall plus its grace gets no node-side re-pack at all: a `budget` defer carrying the finished answer, which the delegator re-packs on the doors that wire the rescue (`agent_delegate`, `offload_research`, the `delegate` and `research` verbs) |
+| local `agent_run` wall (register D-102) | `timeout_sec`, else the box's `agent_timeout_sec`, else 180 | the loop: a HARD context deadline on this door, which never adopted the liveness monitor below — a run still producing at the wall is cut and deferred | admission (cordon, pre-flight, warm-up, probes), and the sizing refusal, which comes before any of it |
 | **stall allowance** (0.131.0) | the node, per phase, from the seat's measured rates | how long the seat may go without a progress event — a streamed token, a tool call, a phase change; on a seat listed in `vllm_seats`, every frame of generated token ids, including the ones vLLM's tool parser is still holding back (0.140.1: the loop asks for `return_token_ids`) — before the run is filed `stalled: no progress for Xs in <phase> (allowed Ys: …)` as **infrastructure**: admission → the admission budget; prefill → `prompt tokens ÷ prefill_tok_s × 1.5 + 30 s` (100 tok/s assumed until the seat-rates store has measured it — from the time to first delta, any engine); decoding → 20 deltas at the decode rate; a tool → its own cap + 30 s; the re-pack → `max(120 s × the seat's load, 1.5 × expected answer tokens ÷ the seat's decode rate + 30 s)` (register C-66: the re-pack streams, so this bounds silence, and it runs with no transport bound of its own; load 1 = `max(120 s, …)`, and the load stretches the flat 120 s only, never the answer estimate); floor 60 s; while other requests share the seat the prefill rate is divided by the load too (ADR 0066) | the ceiling; a producing seat, however slow; a seat that is LOADING (the cold-load hold below) |
 | **cold-load hold** (0.140.0) | the node, while a request may be waiting for its first byte (admission, prefill, re-pack): `/running` read every 5 s and before any stall is filed | two parts in phase `cold-load`. **Loading** requires positive evidence: the seat's row is `starting`/`stopping`, or it is absent while another row is `starting`/`stopping`. It is bounded by `max(600 s, 2 × the seat's measured cold_load_sec)` from the silence, clamped to the run ceiling, and a defer reads `stalled: seat still loading after Xs in cold-load (…)`. **Post-ready** follows the load, or the admission warm-up: the first completion gets `max(120 s, 2 × the phase's own allowance)`, and a defer reads `stalled: no byte for Xs after the seat read ready, in cold-load (…)`. Both are **infrastructure**; the first byte ends the hold | a seat merely absent from `/running` with nothing loading, or an unreadable `/running` with no load seen (the prefill clock then runs as before) |
 | **seat-down recovery** (ADR 0066) | the node, when the seat's engine goes down under a running call | a seat is DOWN when its engine's counters stayed flat for the flat bound while llama-swap still lists it ready (**wedged**), or when it left `/running` inside an established hold, or a call failed like a dead seat (stream cut, 5xx, refused connection) and a fresh read shows the seat starting, stopping, unlisted or refusing connections (**died**). The node cancels only that call and waits for the seat in phase `cold-load` as ONE episode, bounded by the cold-load ceiling counted from the first verdict (and the run's ceiling), then re-issues the same step; a recovery spends no step. A wedged seat must show a change (counters moving, or a restart) before the re-issue. A seat llama-swap does not list is started by the re-issue itself; if that start fails (the launcher refusing, every request an instant 500) the node waits one poll and triggers again until the bound, and a start that never succeeds is filed at the bound naming the attempts. A seat seen serving again earns exactly one re-issue: a second failure before the answer ends the run. A recovery is counted (`seat_recoveries`) when the re-issued call's first byte arrives, and `seat_down_wait_sec` books the whole episode; a run recovers at most twice. What does not recover is filed `seat down: …` as **infrastructure** (a seat lost during the structured re-pack files the same prefix, with `(during the structured re-pack)` appended and the finished answer flagged `schema_miss`: the delegator re-packs that answer itself first, and only when it cannot), and the delegator re-places that contract on another node with the wait credited back (and, after a failed rescue, the wall the rescue spent), even when the alternative node is busy (a full node answers 503 and the contract waits for room in the bounded, credited capacity wait; while this box's own run-cap line is full an untried remote is preferred to it) | a failed call on a seat that reads ready and readable (an ordinary error), a cut tool call (the engine answered), a thrash (the engine steps but produces no token: still the plain `stalled:` of ADR 0061), and absence from `/running` on the first look of a silent request (the ADR 0055 rule) |
@@ -896,6 +918,31 @@ travel with the contract. Reference (2026-09-10, ledger-01 on both
 seats): the <node-b> 27B TP2 seat at ~30 tok/s needs ≈ 600 s thinking off / ≈ 730 s auto INCLUDING a 210 s cold load for a
 12-step, 8,192-token-final contract — a 600 s box default is at the edge and 900 s is the honest wall; the <node-c> 4B at
 ~30 tok/s answers the same contract in one step in 250–380 s with a 34 s cold load.
+
+**The local `agent_run` door sizes the run before it starts (register D-102).** That door's wall is a hard context
+deadline, and until register D-102 it computed no sizing at all: a caller who named a 420 s wall against an estimate of 928 s
+(`min_turn_sec` 807 s) learned it from `context deadline exceeded` after ten steps. Now the door sizes the call from the
+seat's remembered rate (the rate store, else `agent_seat_tok_s` for the box's own agent seat only) with the node's own arithmetic, BEFORE the fence check,
+the cordon, the warm-up or any request to the seat, and every call that gets past argument validation and seat placement — answered or deferred — carries
+`wall_estimate_sec`, `min_turn_sec` and `wall_note` (`wall 420 s is BELOW the estimate 928 s …`). A wall that cannot hold
+even the smallest answer is REFUSED before step 1: one tool step (128 tokens plus a 6 s prefill) and a 64-token final at
+the seat's rate, with no think block, no re-pack and no cold load (`seatrate.MinViableSec`). The refusal is `deferred`,
+`defer_class: budget`, `steps: 0`, with nothing sent to the seat, and its reason names the wall (and whether it is
+`timeout_sec` or the box default `agent_timeout_sec`), the floor, the run's estimate with `min_turn_sec`, and the
+`timeout_sec` that fits. The floor is one tool step plus the final whatever `max_steps` says, so fewer steps never clear the
+refusal. It is the one the delegator applies to a remote placement (`feasibleFinal`); a parity test
+fails when the two drift. **It is not `min_turn_sec`.** That figure is a cold load plus the configured max final, and the
+INV-5 rider (ADR 0050) forbids refusing on it: a 900 s wall on a 7 tok/s 27B seat that completes its contracts sits under
+it. So a wall between the floor and the estimate runs, and `wall_note` says by how much; no rate means no floor and no
+refusal. `agent_seat_tok_s` is the agent seat's rate and is never lent to another seat: a model you name with `model`, or a
+seat composite placement picks, is sized from its own rate-store entry or not at all (no floor, no refusal, no published
+estimate). The delegation door's node does not do that yet: its own sizing (`SeatPolicyFor`) still applies the configured
+rate to any seat it runs that the store has not measured, and register C-56 (a node-side refusal) has to stop that before it
+refuses on the estimate. **Register D-102 is PARTIAL:** the row's own case, a 420 s wall against a `min_turn_sec` of 807 s, is above the
+floor (about 45 s at 5 tok/s, 13 s at 30 tok/s), so it still runs and can still die at the hard deadline, now with the
+diagnosis in the result. The cure is the final-budget fit (D-95) on this door, or an operator decision to refuse on
+`min_turn_sec` and amend the rider; neither is in yet (register D-134). A call refused before a seat is chosen (a bad argument, or a composite placement guard refusing the seat) carries no numbers, and the `route` forms are untouched: a contract sent
+through the fleet carries its wall to the node, where it is an expectation (ADR 0055).
 
 **One question before the wall: the seat coherence probe (register D-118).** A seat can be HEALTHY by every gate the
 harness had and still be numerically broken. On 2026-09-16/17 the blackwell-16 vLLM seat (Qwen3.8-27B GSQ, `fp8_e5m2` KV
@@ -1013,7 +1060,10 @@ a number to measure on a seat, not one to inherit fleet-wide.
 are DOING: a one-word `verdict` — `working` (a request or a registered agent run is in flight on the seat),
 `held-working` (a lease is held and the cards are busy under it), **`held-idle`** (a lease is held and nothing
 is running: seat idle, cards quiet — the holder is draining, queued, loading, or stalled), `loaded-idle`,
-`busy-outside` (no lease, cards busy with work the harness does not own), `stale-holder`, `free` — and an
+`busy-outside` (no lease, cards busy with work the harness does not own), `stale-holder`, `free`, and for a held
+lease that is not healthy `held-stalled` (its progress file stopped moving), `held-orphaned` (its owner has been gone
+past `gpu_orphan_grace_min`), `held-overdue` (its declared window ended, its holder still renews) and `tree-orphan`
+(not produced yet) — see "Who asked for a lease" in docs/systems/gpu-lease.md — and an
 `activity` block with the seat's load state and in-flight count, every registered run (kind, pid, origin,
 goal excerpt, phase, step, tokens, age), a utilization/memory sample per card with the processes on them,
 and the holder's command (the wrapper form stamps its argv). Every agent loop registers itself in
@@ -1138,6 +1188,9 @@ re-pack (ADR 0066); a 429 is contention by definition and is never second-guesse
 | `seat_contention_wait_sec` | `0` → 90 s | one wait budget per agent contract, shared by every chat step and the re-pack; `-1` = never wait (first busy answer defers) |
 | `agent_admission_wait_sec` | `0` → 300 s | pre-flight: wait while any model on the endpoint is mid-swap, then WARM the seat if it is not loaded (0.115.11: one passthrough GET makes llama-swap swap it in; a vLLM cold load is 125–250 s) — all BEFORE the contract's wall starts; `admission_wait_sec` / `admission_note` on the wire report it; `-1` = off |
 | `agent_warm_failure_defer` | `false` | ENFORCEMENT of a warm-up start failure (register C-76, R-05a; audit mode by default). When the warm request is refused with a 5xx and the evidence says the seat's process did not start — the answer is not one of llama-swap's busy shapes, `/running` lists no row for the seat and nothing else is mid-swap, `/running` was readable — `false` proceeds into the wall and `admission_note` says the run **would have deferred at once**; `true` defers at once as `seat warm-up failed: …` (infrastructure) and the delegator retries the contract once on another node. Count the would-be defers in `admission_note` (on every published result and in the delegation log) before turning it on |
+| `audit_chain` | `false` | HASH-CHAIN each agent run's rows on the broker audit trail (register SF-08): `run_id`, `seq`, `prev_sha256` on every row and a closing `run_end` row (a run with no decision writes nothing). `local-offload agent-audit verify [--file PATH] [--json] [--strict]` exits 1 naming the run and seq of an edited, removed or reordered row inside a run; an OPEN run (no `run_end`: a crash or a cut tail) is reported, and failed with `--strict`; LATE rows (chained, after the close) are reported. Unkeyed: it does not see a whole run removed or a re-chained edit; an off-node head witness (S-08) is not built |
+| `agent_read_floor` | `""` → `warn` | the READ FLOOR on every agent tool that reads file content (register SF-07): `read_file`, `summarize_file`, `search_files`, `edit_file`, `github_upload_file`. Secret material (`.env*` except `.env.example`/`.env.sample`, keys and certificates, `.npmrc`/`.netrc`/`.pypirc`, `.git-credentials`, `.claude.json`, anything under `.ssh`/`.aws`/`.gnupg`/`.kube`/`.env`) and a rule table's `read` rules, checked as given AND resolved (symlinks, Windows 8.3 short names). `warn` = the read goes through and a `warn` row is recorded (refused when an enforcing trail cannot record it); `enforce` = refused, and `search_files` never opens such a file and says nothing about it; `off` = nothing checked. `--rules off` also turns it off. Not covered: the run/shell cage, hard links, media tools reading absolute paths |
+| `audit_all_doors` | `""` → `off` | the broker decision AUDIT TRAIL on every agent door (register SF-02): `off` = a trail only when browse asks for one (unchanged); `warn` = `agent_run`, `agent_delegate` and fleet contracts all write `~/.local-offload/agent-audit.jsonl`, a failed write is logged once and never changes a decision; `enforce` = a failed write denies the action and a door with no resolvable trail defers `config`. An unknown value refuses the config load (and a verb that runs on past the load error refuses the door). Rows come only from brokered actions (write, delete, fetch, shell, run, browse), so a read-only run attaches the trail and writes no broker rows (read-floor rows aside, see `agent_read_floor`). Move to `enforce` only after a clean window under `warn` |
 | `agent_coherence_probe` | `""` → `cold` | post-warm SEAT COHERENCE probe (register D-118): after a cold load, ask the seat one ≤ 96-token question BEFORE the wall starts and defer `infrastructure` if it answers with the NaN shape. `cold` = only when this run loaded the seat, `always` = every run warm or cold, `off` = never. `coherence_note` on the wire reports the verdict |
 
 What you will see on the wire and in the ledger: `contention_wait_sec` and `admission_wait_sec`

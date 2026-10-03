@@ -78,17 +78,37 @@ type ComfyLaunch struct {
 	DynamicVRAM string
 	// ExtraArgs are verbatim ComfyUI flags; "" = inherit the process's COMFY_EXTRA_ARGS.
 	ExtraArgs string
+	// API is the endpoint of the per-card ComfyUI instance this launch drives
+	// (COMFY_API); "" = the default instance, exactly as before. It also names where the
+	// post-run /free goes (Spec.ComfyAPI), so the instance that ran is the one freed.
+	API string
+	// CardUUID is the GPU uuid the instance is pinned to (COMFY_CARD_UUID; the runner
+	// sets CUDA_VISIBLE_DEVICES to it). "" = not card-bound. A uuid pin replaces CudaDevice:
+	// an index counts in a different order, and the runner refuses a launch carrying both.
+	CardUUID string
 }
 
 // Env renders the profile. COMFY_CUDA_DEVICE and COMFY_DYNAMIC_VRAM are ALWAYS set,
 // empty when unbound, so a value inherited from the operator's shell can never pin
 // or reshape a route whose binding did not ask for it (the child env takes the last
 // entry per key). COMFY_EXTRA_ARGS is set only when bound, because inheriting it IS
-// the documented behaviour of an unbound box.
+// the documented behaviour of an unbound box. COMFY_API and COMFY_CARD_UUID are set only
+// for a per-card instance (the default instance keeps the two-entry env it always had);
+// a card pin by uuid blanks the legacy index.
 func (l ComfyLaunch) Env() []string {
-	env := []string{"COMFY_CUDA_DEVICE=" + l.CudaDevice, "COMFY_DYNAMIC_VRAM=" + l.DynamicVRAM}
+	cuda := l.CudaDevice
+	if l.CardUUID != "" {
+		cuda = ""
+	}
+	env := []string{"COMFY_CUDA_DEVICE=" + cuda, "COMFY_DYNAMIC_VRAM=" + l.DynamicVRAM}
 	if l.ExtraArgs != "" {
 		env = append(env, "COMFY_EXTRA_ARGS="+l.ExtraArgs)
+	}
+	if l.API != "" {
+		env = append(env, "COMFY_API="+l.API)
+	}
+	if l.CardUUID != "" {
+		env = append(env, "COMFY_CARD_UUID="+l.CardUUID)
 	}
 	return env
 }
@@ -114,12 +134,14 @@ func Generate(ctx context.Context, node, script, comfyDir, out, prompt string, p
 	}
 	env = append(env, m.Launch.Env()...)
 	spec := gpugen.Spec{
-		Exe:     node,
-		Script:  script,
-		Args:    args,
-		Env:     append(env, extraEnv...),
-		Out:     out,
-		Timeout: timeout,
+		Exe:      node,
+		Script:   script,
+		Args:     args,
+		Env:      append(env, extraEnv...),
+		Out:      out,
+		Timeout:  timeout,
+		ComfyAPI: m.Launch.API,
+		CardUUID: m.Launch.CardUUID,
 	}
 	samp.ApplyTo(&spec)
 	return gpugen.Generate(ctx, spec)
@@ -539,12 +561,14 @@ func Edit(ctx context.Context, node, script, comfyDir, out, image, prompt string
 	}
 	env = append(env, m.Launch.Env()...)
 	return gpugen.Generate(ctx, gpugen.Spec{
-		Exe:     node,
-		Script:  script,
-		Args:    editArgs(out, image, prompt, params, m),
-		Env:     append(env, extraEnv...),
-		Out:     out,
-		Timeout: timeout,
+		Exe:      node,
+		Script:   script,
+		Args:     editArgs(out, image, prompt, params, m),
+		Env:      append(env, extraEnv...),
+		Out:      out,
+		Timeout:  timeout,
+		ComfyAPI: m.Launch.API,
+		CardUUID: m.Launch.CardUUID,
 	})
 }
 
@@ -585,12 +609,14 @@ func GenerateBatch(ctx context.Context, node, script, comfyDir, jobsPath, result
 	}
 	env = append(env, m.Launch.Env()...)
 	_, err := gpugen.Generate(ctx, gpugen.Spec{
-		Exe:     node,
-		Script:  script,
-		Args:    batchArgs(jobsPath, resultsPath, m),
-		Env:     append(env, extraEnv...),
-		Out:     resultsPath,
-		Timeout: timeout,
+		Exe:      node,
+		Script:   script,
+		Args:     batchArgs(jobsPath, resultsPath, m),
+		Env:      append(env, extraEnv...),
+		Out:      resultsPath,
+		Timeout:  timeout,
+		ComfyAPI: m.Launch.API,
+		CardUUID: m.Launch.CardUUID,
 	})
 	return err
 }

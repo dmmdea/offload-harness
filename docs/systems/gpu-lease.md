@@ -7,9 +7,11 @@ ingress — the harness CLI, the Node render runners, the fleet node, and anythi
 takes it. It exists so a text measurement and a media generation can no longer destroy each
 other on a single shared card.
 
-- **CLI:** `local-offload gpu status|reserve|release`
+- **CLI:** `local-offload gpu status|cards|reserve|release|doctor` (`hold` is the detached holder's own entry)
 - **State:** `<state_dir>/gpu/{lease/meta.json, epoch}` — default `%ProgramData%\local-offload` on
-  Windows, `/var/lib/local-offload` on Linux (**see the one-time Linux setup below**)
+  Windows, `/var/lib/local-offload` on Linux (**see the one-time Linux setup below**). A card-scoped lease
+  (opt-in, [below](#card-scoped-leases-record-v2)) lives in `lease/e/<epoch>.json` and `lease/cards/<id>.claim`
+  instead, and the first one writes `gpu/FORMAT`.
 - **Decision record:** [ADR 0018](../architecture/decisions/0018-machine-wide-fenced-gpu-lease.md)
 
 ## Source map
@@ -17,18 +19,32 @@ other on a single shared card.
 | path | role |
 |---|---|
 | `internal/gpulease/gpulease.go` | **the only implementation**: `LeaseDir` (the one resolver), acquire/release, epoch fencing, the reclaim conjunction, `InspectDir` (the one read path) |
+| `internal/gpulease/devices.go` | **card-scoped leases (record v2)**: device-id normalisation, the conflict rule, the grant (one critical section under the epoch lock), the per-epoch fence, per-lease release and restamp, the debris sweep, and the one reader (`reader`) every inspector shares |
+| `internal/gpulease/allocator.go` | the **card allocator** behind `gpu reserve --cards`: a pure function over an input the CLI assembles (cards, claims, quarantine, foreign busy, resident seats, presence, host RAM), plus the quarantine sidecar reader |
+| `internal/gpulease/cmddevices.go` | the default card set of a wrapped command: `CUDA_VISIBLE_DEVICES`, `--cuda-device`, `COMFY_CUDA_DEVICE` turned into cards, refusing instead of guessing |
+| `internal/gpulease/effective.go`, `infer.go`, `proctree*.go` | **what a lease holds, as a seat reads it (plan P4)**: `Info.EffectiveDevices/Touches/For`, `ResolvePins`, the legacy-lease evidence rule (`Scoper`, applied only to a record an older binary wrote: `Info.Legacy`; the `seen.<epoch>` sidecar, the scope ledger) and the process-tree reader it runs on |
+| `internal/gpulease/audit.go`, `procimages_*.go` | the **reader audit** behind `gpu doctor`: finds harness binaries, Node readers and running images, and writes the reader-audit marker |
+| `internal/gpuprobe/cards.go`, `hostram.go` | the **card table** (UUID-keyed, index spaces side by side) and the host-RAM headroom term |
+| `internal/gpucards` | the per-card view (`Rows`, `LeaseRows`, `QueueRows`, `Table`, `Section`) that `gpu status`, `gpu cards` and `offload_status` brief all render |
 | `internal/gpulease/proc*.go` | per-platform liveness and process-start identity, exported so no consumer keeps a second copy |
 | `internal/pipeline/pipeline.go` | takes the `media` lease around **every** generation call site (image ComfyUI + sdcpp, inpaint, image batch, run-graph, video, audio) and threads `GPU_LEASE_*` to the runner; inherits an ambient lease instead of re-acquiring; owns the in-process slot (`mediaSlot`) that arbitrates jobs sharing one inherited lease |
 | `gpu_cmd.go` | the `gpu status\|reserve\|release\|hold` verbs, wrapper and `--detach` forms |
+| `gpu_reserve_devices.go`, `gpu_cards.go`, `gpu_doctor.go` | which cards a reserve holds (`--devices`, `--cards`, derivation, the queue), `gpu cards` and the status table, `gpu doctor` |
+| `internal/gpulease/owner.go` | **ownership (ADR 0070)**: who asked for a lease (`Owner`), the session registry, the first-observer orphan marker, the progress contract and `Standing`, the derived reading every status surface shares |
+| `internal/gpulease/explain.go` | the sentence a waiter reads when the lease it is queued behind is stalled, orphaned or overdue, and the installed orphan grace. READ-ONLY: it reads the orphan marker a status surface recorded and never writes it or takes the epoch lock |
+| `gpu_ownership.go` | the ownership flags (`--owner-*`, `--unattended`, `--progress-file`, `--stall`, `--yield-grace`, `--on-yield`), the `gpu owner-flags` verb, and the ownership lines of `gpu status` |
 | `gpu_drain.go` | `--drain`: waits until the seat's gauge AND the run registry are empty, inside the queue budget; restamps `draining` → `exclusive`; unload / warm-back |
-| `internal/gpuactivity` | the RUN REGISTRY (`<state root>/gpu/activity/`, one record per agent loop in flight) and the activity reading behind `gpu status` / `offload_status.gpu_lease` (`verdict`, `activity`) — ADR 0041 |
+| `internal/gpuactivity` | the RUN REGISTRY (`<state root>/gpu/activity/`, one record per agent loop in flight) and the activity reading behind `gpu status` / `offload_status.gpu_lease` (`verdict`, `activity`) — ADR 0041; `holders.go` derives each live lease's standing, `facts.go` the activity facts of a legacy lease |
 | `internal/seatload` | the seat's in-flight reading: llama-swap's `/running` (and the roster, for an alias), then the loaded seat's own `/metrics` or `/slots` at the `proxy` `/running` reports — never through `/upstream`, which resets the idle unload timer; a `starting` seat is reported without touching the seat |
 | `gpu_hide_windows.go`, `gpu_hide_other.go` | hidden spawn for the detached holder (a visible console gets closed, killing the hold) |
 | `render/gpu-lock.mjs` | READ-ONLY participant: honours + fences an inherited lease, elects one unloader, drains, ComfyUI lifecycle. **Does not acquire.** |
-| `internal/gpulock` | the read-only vision gate; delegates wholesale to `gpulease.InspectDir` |
+| `internal/gpulock` | the read-only vision gate; the held rule is `gpulease.InspectDir`'s, read through the caller's own narrowing (`WaitFreeScoped`: the vision pre-check passes the seat-narrowed reading the text gate uses) |
 | `internal/modelaffinity/gpuwait.go` | READ-ONLY: text admissions that would make llama-swap load a model wait out a `media` holder (ADR 0026); armed from `config.Load` via `LeaseDir` |
 | `internal/modelaffinity/upstream.go` | READ-ONLY: `AwaitUpstream`, the ONE builder of a llama-swap `/upstream/<model>/…` URL, and `AwaitModelRoute`, the builder for a model-dispatched route (`/v1/chat/completions`, `/v1/embeddings`, …) sent without `Admit` — every probe, tokenizer, warm-up, transcription, chat-lane forward and embedding passes the same fence as a generation (see "Probes pass the fence too") |
-| `internal/config` | `state_dir`, `gpu_lock_path` |
+| `gpu_drain.go` (`leaseScope`, `maintainSeatScoped`, `unloadModelsFor`), `render/gpu-lock.mjs` (`parseUnloadModels`) | plan P5: the drain and unload take only the seats on the leased cards, and the render lane unloads the list the wrapper exports (`GPU_LEASE_UNLOAD_MODELS`) |
+| `internal/modelaffinity/seatscope.go`, `scoper.go`, `seatyield.go` | the gate's per-seat reading (`SetSeatPins`, `ScopeToPins`, `SeatLease`, `CardsHeld`), the production wiring of the evidence rule (`InspectLease` for the load gate, which remembers what it sees; `PeekLease`, `ScopeInfo`, `ScopeFunc`, `ScopeLeases` for inspectors, which write nothing), and the seat race rule (`YieldIfFenced`) |
+| `internal/mcpserver` | registers the session this MCP server serves in the session registry at start and removes it at exit |
+| `internal/config` | `state_dir`, `gpu_lock_path`, `gpu_card_scoped_leases`, `gpu_legacy_scope_inference`, `gpu_comfy_order`, `gpu_host_ram_headroom_gib`, `gpu_orphan_grace_min`; `ModelPins` (a model's device pins, read from the layers) |
 
 ## Why it exists
 
@@ -192,7 +208,9 @@ the job refuses instead of quietly taking a fresh one, so a lost reservation is 
 | `text` | a benchmark, eval, or measured run | no |
 | `media` | image / video / audio / run-graph | **yes**, once per lease |
 
-Both are exclusive — one card, one holder. The label carries intent, not access control.
+Both are exclusive per card: a lease that names no cards holds the whole node, a card-scoped lease holds only the cards
+it names, and a card never has two holders (see [Card-scoped leases](#card-scoped-leases-record-v2)). The label carries
+intent, not access control.
 
 **Ordinary interactive text calls still do not ACQUIRE the lease.** There are thousands a day at
 ~46 ms and leasing them is untenable. That remains a known limit, not an oversight.
@@ -309,6 +327,525 @@ concurrency test rather than by reading:
 Neither of the first two is defensive padding: with waiters polling once a second, both races are
 ordinary traffic. Measured under six concurrent acquire/release workers, 1 in 48 cycles failed
 before the retries were added.
+
+## Card-scoped leases (record v2)
+
+*Plan P2 of the per-card routing work, register C-86. Off by default: with `gpu_card_scoped_leases` unset
+nothing in this section changes what a host does, and the existing whole-node suite runs unchanged.*
+
+**Why.** The lease was whole-node. A render on one card of a three-card box fenced the other two as well, so the box ran
+one job at a time while two cards sat free. A lease may now name the cards it holds, by GPU UUID (never by index: the
+three index spaces of `nvidia-smi`, `CUDA_VISIBLE_DEVICES` and ComfyUI disagree). Two leases conflict when either is
+whole-node or their card sets intersect; everything else runs side by side.
+
+**What is on disk.** A whole-node lease is exactly what it always was: `meta.json` is its record. A device lease never
+writes `meta.json`:
+
+| file (under `lease/`) | meaning |
+|---|---|
+| `e/<epoch>.json` | the lease record (the whole-node `Meta` plus `devices`, `group`, `wrapper_version`, `state`); authoritative |
+| `meta.json`'s `format` | on every record this binary writes, whole-node or device (`RecordFormat` = 2): who wrote it. A record without it was written by an older binary, which could not name cards, and is the only kind the legacy-scope inference may narrow (`Info.Legacy`) |
+| `cards/<id>.claim` | one per held card, `{"epoch":N,"at_ms":T}`; created exclusively |
+| `hb.<epoch>` | the per-epoch heartbeat, as for a whole-node lease |
+| `../FORMAT` | `2`, written with the first device lease on the host |
+
+**The writer is a per-host switch, and the config key alone does not turn it on.** `gpu_card_scoped_leases` (default
+`false`) asks for it; the writer is enabled only when the host also carries a **green reader audit**, the marker
+`gpu/reader-audit.json` (`{"result":"green"}`) beside the epoch counter, which `gpu doctor --write-audit` is the one writer of
+and writes only once no binary or Node reader on the host predates the per-epoch fence (`ApplyCardScopedConfig`). Off, or
+asked without the marker, an acquisition that names devices is refused with `ErrCardScopedOff` and the CLI warns, naming the
+marker. *Reading* is never gated: every inspector understands a card-scoped directory whether or not this process writes
+one.
+
+**The fence is per epoch.** A device lease is current while its record is `active` and every card it names carries a
+claim naming its epoch. Nothing compares two leases' epochs, so a higher-epoch lease is never fenced out by a lower one.
+The same rule is applied in `Lease.Check/Renew/Release/Restamp`, `ReleaseByEpoch`, `gpulease.EpochIsCurrent` (which
+`gpulock` and the pipeline's inherited-lease boundary call) and the `render/gpu-lock.mjs` reader.
+
+**Consumers judge every live lease, and the inherited-lease exemption is per lease.** `Info` describes the lowest live
+epoch; when more than one lease is live it also carries each of them (`Info.Leases`, walked with `Info.Each()`). The text
+gate (`modelaffinity.BlocksNewRun`), `delegate.Fenced`, `ForeignFence` and `Reserved` ask their question of each lease, and a
+process whose `GPU_LEASE_EPOCH` names lease A is exempt from A's fence and from no other lease's. (An earlier draft of this
+change read "inside any live lease" as an exemption from all of them, which let a child of one device lease walk through an
+exclusive or draining reservation on other cards; `TestForeignFenceExemptsOnlyTheLeaseTheProcessRunsUnder` pins the narrow
+rule.) The consumers compare device sets since plan P4: a lease on card 0 no longer fences a text call whose seat sits on card
+1 (see "Consumers read a seat's cards, not the node", below).
+
+**Grant.** One critical section under the epoch lock, after a read-only probe so a one-second poller does not spin the
+lock: create `e/` and `cards/`; sweep debris; refuse while a live `meta.json` exists; refuse while a live device lease
+intersects; issue the epoch; write the record `granting`; create each card claim exclusively (all or nothing: any failure
+removes what was made); flip the record to `active`. A whole-node grant keeps its own atomic token (`O_EXCL meta.json`)
+and, once a device lease has ever existed on the host (or whenever `e/` cannot be proven absent), verifies under the same
+epoch lock that no device lease is live and withdraws its claim if one is. Before it judges, it **sweeps** every device
+lease the shared rule calls reclaimable: a holder that is alive but stalled (a suspended or lid-closed session) has its
+record, claims and heartbeat removed, so when it resumes its per-epoch fence fails and it cannot renew over cards the
+whole-node holder now owns. A whole-node reclaim fenced the old holder by deleting `meta.json`; this is the same act. Because the device grant creates `e/` before it looks at `meta.json`, a whole-node claim
+that lands after that look is guaranteed to see the directory: the two paths cannot both win.
+
+**Debris.** A crash mid-grant leaves a `granting` record and/or claims. Past `claimGrace` (10 s) the next acquirer removes
+them, one lease at a time and only that lease's files; before it they count as a grant in flight. A dead holder's lease
+reads as free to every reader at once (the same reclaim rule as a whole-node lease), and an acquirer that wants its cards
+removes it; **expiry never frees a card and nothing here kills a process**.
+
+**Queue.** Waiters carry their device set. FIFO is among waiters that conflict: a waiter ahead of you that wants other
+cards does not hold you back (disjoint backfill), and a whole-node waiter wants everything, so it is a barrier that every
+later waiter queues behind. A waiter whose process is gone or stopped polling is skipped exactly as before.
+
+**What a reader that predates this format sees.** A directory holding only device leases reads as a **free** card to any
+binary older than this change (and to any Node reader that still compares `meta.json`). That is the one cross-version
+hazard, and it is gated by a mechanism, not by good intentions: the writer needs the green reader audit marker (above).
+
+**Deviation from the plan, pending acceptance.** Plan rev 2 (section 2, P2 scope) specified a synthetic pid-0 `meta.json`
+"umbrella" over any set of device leases, so that a pre-v2 writer would queue behind it. This change does **not** write
+one. The premise of the umbrella was checked against the real binaries on the build host and **holds**: a `meta.json`
+with `holder.pid = 0` and a future `expires_at_ms` makes `gpu reserve` of 0.158.3 and of 0.160.0 queue and then refuse
+("GPU held by media (pid 0 ...)"), and the same record with a past window is reclaimed and granted. So the umbrella was
+dropped for a design reason, not because it would not work: it is a second source of truth that would have to be
+re-stamped on every grant, release and extension and be judged by every reader as "not a real lease", and its only
+audience is a binary the audit is meant to find and replace. The cost of dropping it is that a pre-v2 writer that is
+**not** found by the audit double-books a host that has the switch on (measured with a byte-identical older wrapper in the
+review of this change). Until the plan owner or the operator accepts the deviation, plan P2's acceptance is **not**
+met; the umbrella can be restored later without a format change. No 0.152.x build is on the build host, so
+none was tested. Two hard gates stand in for the umbrella, and the second is now code:
+
+1. the switch stays off until the reader audit is green (`gpu doctor` scans every binary copy including the
+   node-swap backups an automatic rollback restores, the images of running fleet-node and MCP processes, the deployed
+   `local-agent` binary, a media repository's wrapper copy under whatever name it carries, and the Node readers; plan P6 is
+   blocked until it is green **and** that green covers `local-agent` and every media repository, see "What green does and
+   does not mean" below);
+2. `ApplyCardScopedConfig` refuses to enable the writer without the marker, so nothing in the process can write a device
+   lease on a host nobody audited. `TestApplyCardScopedConfigNeedsAGreenReaderAudit` and
+   `TestOpenLeaseKeepsTheWriterOffWithoutAGreenReaderAudit` pin it, and
+   `TestOldReaderFixtureSeesFreeOverV2DirAndTheFlagIsWhatGatesIt` pins the hazard itself against the preserved pre-change
+   reader.
+
+**Not in the record change (P2).** The CLI, the allocator, the per-card status and the audit (P3, below); consumers that take
+a device set instead of reading any live lease as a held node (the text gate, the delegator and the placement table: P4,
+below; drain and unload: P5, below; fleet health: P7); owners, terms and takeover (P8 to P12). A consumer that is not device-aware
+reads any live lease as fencing the whole node, which over-fences and is the safe direction; the one exemption is per lease
+(above).
+
+### Reserving cards, the card table and the reader audit (plan P3)
+
+*Everything here is behind the same per-host switch: a host that has not enabled card-scoped leases reads no card table
+for a reserve that names nothing, derives nothing from the command, and holds the whole node exactly as before.*
+
+**The card table.** `local-offload gpu cards [--json]` (and the table inside `gpu status`, and `offload_status` with
+`section: "brief"`, key `gpu_cards`) lists every card once: nvidia-smi index, name, the display flag, free and total VRAM,
+utilisation, the ComfyUI order, and the lease that holds it (epoch, class, group, command, and whether it holds the card
+by name or because it is a whole-node lease). The UUID is the key, because it is the only identity the three index
+spaces cannot disagree about. **The ComfyUI order is `?` unless it is declared**: nvidia-smi reports no FASTEST_FIRST
+position, and two same-model cards cannot be ordered by anything it does report, so the table never guesses; set
+`gpu_comfy_order` (every card once, fastest first, as nvidia-smi indices or UUID prefixes) after measuring it with a
+`CUDA_VISIBLE_DEVICES=<uuid>` probe. A box with one card needs no declaration. With no nvidia-smi the verbs still print the
+leases and say there is no table.
+
+**Choosing the cards of a reservation.**
+
+| form | meaning |
+|---|---|
+| `gpu reserve --devices 0,GPU-aaaa ...` | exactly these cards (an nvidia-smi index or a UUID prefix of at least four characters; ambiguous or unknown is an error). The operator's word: the display card is allowed, and a busy card is a place in line, FIFO behind its holder. |
+| `gpu reserve --cards 2` or `--cards 1..3` | the allocator picks (below). Never the display card while the operator is at the desk. |
+| `gpu reserve --whole-node ...` | everything, as before. |
+| `gpu reserve ... -- <cmd>` | the cards `<cmd>` names itself: `CUDA_VISIBLE_DEVICES` (a UUID, or an index in PCI order when `CUDA_DEVICE_ORDER=PCI_BUS_ID`, else in ComfyUI order), else `--cuda-device N`, else `COMFY_CUDA_DEVICE`. Nothing named means the whole node. |
+
+`--devices`, `--cards` and `--whole-node` are mutually exclusive. On a host without card-scoped leases `--devices` and
+`--cards` are a **hard error** (`ErrCardScopedOff`, naming `--whole-node`), because the reservation would not mean what it
+says. Evidence from the command that cannot be turned into a card (an index in an order nobody declared, a UUID no card
+carries, no nvidia-smi) degrades to a **whole-node lease with a stderr note**, never a guess and never a failed reserve:
+the wider fence is the safe direction. The wrapped command is handed `GPU_LEASE_DEVICES` (the lease ids it holds, comma
+separated, empty for the whole node). `--group` labels leases taken together for one job.
+
+**A lease holds cards; it does not confine the command.** Nothing in the lease stops a process from using a card it does not
+hold, and an unpinned CUDA job runs on the fastest-first card, which on the reference box is the display card (the card the
+allocator refuses to hand out) while the held cards sit idle. So when the cards were **named** (`--devices`) or **allocated**
+(`--cards`), the wrapper also gives the command `CUDA_VISIBLE_DEVICES=<driver UUIDs of the held cards>` and
+`CUDA_DEVICE_ORDER=PCI_BUS_ID`, which pins reliably (plan P13 spike). It does **not** when the lease is the whole node, or when
+the set was derived from the command's own pin. A command that pins itself keeps its pin when the pin is the program's own
+(`--cuda-device` on its command line, `COMFY_CUDA_DEVICE`, which ComfyUI turns into `CUDA_VISIBLE_DEVICES` itself, so an
+override would be futile): the wrapper warns on stderr when that pin falls outside the held cards or cannot be resolved. A
+`CUDA_VISIBLE_DEVICES` the command merely **inherits** from the operator's shell is replaced with the held cards when it
+reaches outside them or cannot be resolved (and the wrapper says so); one inside the held cards is tighter than the lease and
+is left alone (`TestConfineWrappedRules`, `TestGPUReserveDevicesPinsTheChildToTheHeldCards`,
+`TestGPUReserveReplacesAnInheritedPinThatReachesOutsideTheLease`). Two limits remain: a program that sets its own
+pin after it starts is not confined (ComfyUI's `--cuda-device` overwrites `CUDA_VISIBLE_DEVICES`; one instance per card is
+plan P13), and `GPU_LEASE_DEVICES` is for a command that wants to read the set itself. `--drain` and `--unload-seat` take
+the cards the lease holds and leave the seats on the others (plan P5, below).
+
+**The allocator.** A card is allocatable when it is not quarantined (`quarantine.<id>` sidecars, which P12 will write),
+not the display card, not claimed (a whole-node lease claims every card), not under a foreign compute process
+(`foreign-busy`, reported and skipped, never killed), its free VRAM fits `--vram` (GiB per card), and the **host** has the
+RAM `--ram` declares plus `gpu_host_ram_headroom_gib` (default 4) free. Among allocatable cards the order is: no resident
+seat first, then the cheapest eviction (the footprint of the configured layer seats loaded on it), then the lowest id. An
+unreadable host-RAM counter refuses only when a RAM need was declared. On Windows (WDDM) nvidia-smi lists no per-process
+rows for compute apps, so `foreign-busy` is Linux-only evidence today; the measured N-instance host RAM that tunes the
+headroom term is a P13 acceptance item.
+
+**Allocate and claim are one loop.** The allocator reads live state over a window of seconds, so another reserve can take
+the card it picked before this one claims it (two simultaneous `--cards 1` over free cards both choose the lowest id). So the
+claim is a non-blocking acquire: when it loses, the winner's claim is visible on the next read and the allocator runs again,
+and the request queues only when the allocator itself says no qualifying set is free. N simultaneous `--cards 1` reserves
+over N free cards therefore land on N distinct cards (`TestGPUReserveConcurrentCardRequestsLandOnDistinctCards`), and the
+detached holder (`gpu hold --cards`) runs the same loop in its own process, so the lease is taken by the pid the parent
+reports. The loop re-allocates at most 16 times and then queues on the set it last picked.
+
+**A busy card is a place in line.** `--cards N` that cannot be met right now does not refuse while `--wait` lasts: it queues
+FIFO on a fixed set of N cards, the cards that are **free right now first**, topped up from the best cards a live lease
+claims (so an idle card is held as part of the set, never thrown away while the request waits for busy ones, and the
+request has a place in line from the start); the set is registered like any named reservation. It polls every two seconds
+and re-runs the allocator only when too few cards qualify at all for a reason waiting does not fix (display, quarantine,
+foreign process, host RAM, VRAM). Elastic re-picking while queued, and a worker that takes cards as they free, are the
+fan-out work (P13/P14), not this change: the queued set is all-or-nothing. At the deadline, or with `--wait 0`, the error
+lists every card's reason and names `--wait`.
+
+**`gpu doctor`: the reader audit.** `local-offload gpu doctor [--scan dir]... [--depth N] [--write-audit] [--json]` finds the
+readers of this host's lease directory that it can reach and says which ones understand the format. How each is reached:
+
+| reached | what it finds |
+|---|---|
+| by **name** | `local-offload*`, `offload-harness*` and `local-agent*` (the agent binary reads the lease through the same package before it loads a seat and is deployed beside the harness): the running binary, the install directory with the node-swap backups `<exe>.bak-<suffix>` a rollback restores, every `PATH` entry, and every scan root |
+| by **content** | under a scan root (`--scan`, which is how a media repository's own copy is covered), any other executable of 1 MiB or more that carries the import path of a package that reads the lease: a wrapper copy under a name of its own is found and judged like any other |
+| by **image** | every running harness process (the agent binary included) and every lease holder or waiter, whatever its image is called |
+| Node | every `gpu-lock.mjs` under a scan root |
+
+The build **version cannot tell**: it is the same string before and after the format change inside one release, so each
+file is judged by the literal `gpu-lease-format-2/per-epoch-fence` (`gpulease.FormatSignature`), which `render/gpu-lock.mjs`
+exports as `LEASE_FORMAT_SIGNATURE` and which **every binary built from this tree that links the lease package carries**: the
+package pins it with an init function, so the linker keeps it whether or not the audit itself is part of that binary
+(`TestEveryBinaryThatLinksTheLeaseReaderCarriesTheSignature` builds each such binary, the agent among them, and audits it). A
+binary built before the format has no such literal. The build marker `offload-build-version=<version>` is shown beside each
+binary that has it. **Nothing found is executed.** **Fail closed:** finding no binary, a root, entry or file that cannot be
+read or examined, or a process table that cannot be listed is a finding, not a pass. The exit status is non-zero when the
+audit is not green. `--write-audit` records the verdict as `gpu/reader-audit.json`, **red as well as green**, so a stale green
+cannot outlive a newer old binary.
+
+**What green does and does not mean.** Green means every reader the audit *reached* is aware. The output lists what it
+scanned **and what it did not enter** (directories past the depth cap, 3 levels below a scan root unless `--depth` says
+otherwise, and `node_modules` and `.git`), and a green with gaps says so on the verdict line. By design it cannot reach: a
+renamed copy that is neither under a scan root nor running as a lease holder, a Node reader that is not called
+`gpu-lock.mjs`, a binary a packer has compressed, and a `PATH` entry under a name that is not a harness name (`PATH` is read
+by name, not walked). **Plan P6 (enabling the writer on a host) is therefore not unblocked by a green doctor alone**: it needs
+the green to include the deployed `local-agent` binary and every media repository's own wrapper copy, which means running
+`gpu doctor --scan <repository>` for each repository on the host and reading the "not searched" list.
+
+### Consumers read a seat's cards, not the node (plan P4)
+
+*Register C-86, question 1 of the operator order: a card-2 job stops fencing text on cards 0 and 1. The Go side only; drain and
+unload are scoped in the next section, and the fleet's own health is P7. Until a host turns card-scoped leases on (plan P6)
+the only lease on it is a whole-node one, which fences exactly what it always fenced, with one exception below: a legacy
+lease (one an **older binary** wrote) on a host that has turned the inference on (`gpu_legacy_scope_inference`, off by
+default) and whose cards the evidence rule can name.*
+
+**One question, asked in one place.** Every consumer that gates a seat used to ask "is a lease held". It now asks "does a
+held lease sit on a card **this seat** is pinned to". The seat's pin is the layer seat's `device` (the pin it is launched with:
+nvidia-smi indices under `CUDA_DEVICE_ORDER=PCI_BUS_ID`, or a GPU UUID prefix), read by `config.ModelPins(model)`: the pins
+of every seat that serves the model (the union when it is declared twice), a router seat's `model_map` twins, and, for the
+router seat that declares no model, the cascade's rung models. `config.Load` arms it into the load gate beside the lease
+directory (`modelaffinity.SetSeatPins`), with `gpu_comfy_order`, `comfy_dir` and the memory stack. The arithmetic is three
+methods on `gpulease.Info`: `EffectiveDevices` (the declared cards, else the inferred ones, else none, which is the whole
+node), `Touches(ids)` and `For(ids)`, which narrows an inspection to the leases that touch the cards and leaves every
+existing predicate (`Held`, `blocksLoad`, `BlocksNewRun`, `Reserved`, `Fenced`, `ForeignFence`) unchanged and unaware.
+`gpulease.ResolvePins` turns a seat's pins into lease ids through the card table.
+
+**The direction of every doubt is "fence".** A model nobody declared a pin for (an alias a layer does not spell, a seat on a
+box with no layers), a pin the card table cannot place (an index no card has, an ambiguous prefix, a card named twice), a
+card table that cannot be read, a whole-node lease, and a long-context contract (it runs on a long seat that the agent chain
+does not describe) all read as every card, which is the answer the gate gave before card-scoped leases existed. Narrowing
+happens only on a positive resolution. The card table is an nvidia-smi exec, so it is read only when a held lease actually
+names cards, and memoised for 2 s; an idle box and a whole-node lease never read it
+(`TestCardTableNotReadWhenNoLeaseIsHeld`, `TestWholeNodeLeaseStillFencesEverySeat`).
+
+**Where it applies.**
+
+| consumer | what changed |
+|---|---|
+| the load gate (`modelaffinity`: `Admit`, `AwaitRunSlot`, `AwaitUpstream`, `AwaitModelRoute`) | waits only for a lease on the seat's cards (`TestSeatOnFreeCardLoadsUnderMediaLeaseOnOtherCard`, `TestSeatWithUnknownPinStillBlocked`, `TestTripleSeatFencedByCard2Lease`) |
+| the delegation door, the `agent_run` door and the review lane's local loop | the fence pre-check reads the same narrowed lease the cordon does, so it still predicts what the cordon will do |
+| the delegator (`delegate`) | `LeaseForContract` narrows the local lease to the seats a contract could run on; the busy formula in the auto deal, the capacity wait, the retry fence and the spread deal read it per contract, and the local box is busy for a contract only when **every** local agent seat it could use sits on a held card (`TestLocalBusyFalseWhenAFreeCardServesTheSeat`). `LocalLeaseFor`, `LocalBusyFor`, `ReservedFor`, `FencedFor` and `ForeignFenceFor` are the same questions for a caller that knows its seat; `Reserved`, `Fenced` and `ForeignFence` keep their signatures and their whole-node reading |
+| the text and vision auto routes (`textremote`, `visionremote`) | the "local GPU is busy" trigger reads the cards of the workhorse and vision seats |
+| the pipeline's vision pre-check (`gpulock.WaitFreeScoped`) | waits, and defers `gpu_busy`, only for a lease on the vision seat's cards, the same reading the auto route made when it chose to run locally (`TestVisionGateIgnoresALeaseOnAnotherCard`, `TestVisionGateStillWaitsForALeaseOnItsOwnCard`); before this it waited `vision_gpu_wait_sec` on **any** live lease and deferred a call the delegator had just kept local |
+| the placement table | `Live.CardsHeld` (the local snapshot arms it from the same lease directory and card table) and agent row 5c, below |
+
+**The agent lane falls back to a card that is free.** When the home layer's agent seat fits the contract and a lease this
+process does not hold sits on its cards, the table takes the next declared layer, in declared order, that is not opt-in and not
+dormant, whose agent seat fits the contract's window and whose cards are free. On the three-card tier the flagship layer
+spans every card, so a card-2 render moves the lane to the single layer's agent seat on card 0
+(`TestAgentHomeFallsBackToNonIntersectingLayer`). With none free the contract **keeps the home seat and queues at its gate**,
+never a defer, and the reason says no local layer has free cards so the delegator may route it to another node
+(`TestNoFallbackQueuesAndRoutesRemote`; the delegator's own routing to the free-card node is plan P1, which is not part of this
+change). A contract that names its layer runs there or waits there; a remote row's `Live` carries no reader and so no fallback.
+`placement.AgentChain` is the one list the table walks and the delegator reads, so the two cannot disagree about which seats
+exist; the delegator's reading ignores nothing but the window of a seat that declares none.
+
+**What a legacy lease can still do: the evidence rule.** A lease written by a binary that predates card-scoped leases is a
+whole-node record, and the old wrapper cannot be taught anything, so a render that holds one card of the box for hours fences
+the other two for as long as it lives. `gpulease.Scoper` (`infer.go`) scopes such a lease to the cards its process tree
+demonstrably uses, on strong evidence only, and otherwise leaves it whole-node and says exactly why. It never rewrites the
+record: `Info.Devices` stays what the record declares (the card table, the allocator and every acquire still treat it as the
+whole node), and the inferred set lives beside it (`Info.Inferred`, `Scope`, `ScopeWhy`, `ScopeWidened`).
+
+**Which records, and when.** Only a record an **older binary** wrote, which could not have named cards, so its silence is not a
+statement. Every record this binary writes carries `Meta.Format` (`gpulease.RecordFormat`, read back as `Info.Legacy`), and a
+whole-node record that carries it is the whole node by its writer's word: an explicit `gpu reserve --whole-node`, a reserve on
+a host with the writer flag off (byte for byte as before), and the pipeline's own media lease are never narrowed by a command
+line (`TestExplicitWholeNodeLeaseIsNeverInferred`, `TestFlagOffWholeNodeFromThisBinaryIsNotInferred`). The rule is also **off
+unless the host sets `gpu_legacy_scope_inference`** (default false): the read-only capture of what a real legacy tree shows is
+still owed (plan P4 step 1, milestone P6), and nothing narrows a lease on a guess before it. **Transitional case:** a
+whole-node record written by a build that has record v2 but predates the `format` stamp (any build before this change; the
+pipeline's media lease set neither the stamp nor a wrapper version) also reads as legacy, so turn the switch on only once no
+such build still holds a lease on the host (plan P6 replaces the binary copies first). Off, `gpu status` says so and
+names the key (`TestLegacyInferenceIsOffUntilTheHostTurnsItOn`, `TestGPUStatusSaysAnOlderBinarysLeaseIsNotInferredWhileTheSwitchIsOff`).
+
+1. **A command line.** The lease's recorded wrapped command and the command line of every process in the wrapper's tree
+   (`gpulease.ProcessTree`: a Toolhelp snapshot and the PEB on Windows, `/proc` on Linux, parent links believed only when the
+   child began no earlier than its parent, so a recycled parent id cannot adopt a stranger), read for ComfyUI's
+   `--cuda-device N`. The environment of a foreign process is not readable, so `COMFY_CUDA_DEVICE` and `CUDA_VISIBLE_DEVICES`
+   are not evidence here. N is in ComfyUI's FASTEST_FIRST order, which nvidia-smi does not report: it resolves only on a box
+   that declared `gpu_comfy_order`, and an index that cannot be placed is named in the reason, never guessed onto a card. **One
+   process naming a card that cannot be placed spoils the whole reading**: the lease stays whole-node even when another process
+   names a card that does resolve, and no other evidence may narrow it either, because the card that process uses is unknown
+   (`TestPartialCommandLineEvidenceStaysWholeNode`).
+2. **The ComfyUI launch marker, only when it is tied to the lease:** its pid or the process that launched it is in the
+   wrapper's tree, or it started at or after the lease did and no other live lease claims the card it names. A leftover marker
+   proves nothing (`TestMarkerNotTiedToLeaseIsNotEvidence`).
+3. **The cards the tree holds memory on, sampled twice at least five minutes apart, on a lease at least ten minutes old.**
+   Under WDDM nvidia-smi often names no compute process at all, and an empty answer is no evidence, never "the tree uses no
+   card".
+
+If none holds the lease stays whole-node (`TestLegacyLeaseWithoutEvidenceStaysWholeNode`). Rules wrap it. **Sticky,
+never shrinking, across processes:** once a card has been inferred it stays in the set, carried by the sidecar
+`lease/seen.<epoch>`. Every process that reads the lease shares it, so a writer **reads the sidecar under the epoch lock,
+unions what it learned with what is there and writes the union**, never the snapshot it took before it gathered its evidence;
+a slow reader cannot shrink a wider set, and the ledger line is written once, by the process that changed the set on disk,
+before the sidecar is renamed into place (so an interrupted write repeats a line on the next reading instead of losing it:
+`TestInterleavedScopersNeverShrinkTheStickySet`). It is written only when a scope is established or widened or a sample is
+taken, and only for a lease that is still live. It is removed when this binary releases the lease; an older binary's release
+does not know it, so the **next acquirer** (a whole-node or a device grant) sweeps any `seen.<epoch>` whose lease is gone
+(`TestNextAcquirerSweepsASidecarThatAnOlderBinaryLeftBehind`, `TestDeviceGrantSweepsASidecarWhoseLeaseIsGone`). The set may
+**widen**, and each establishment and widening appends one line to the scope ledger `gpu/scope-ledger.jsonl`
+(`TestInferenceIsStickyAndWidensWithLedgerLine`); a sidecar or ledger that cannot be written is **said** (a stderr warning, and
+`not sticky across processes` in the reason), not folded away (`TestUnwritableSidecarIsReportedNotSilent`). **The wrapper is
+not trusted blindly:** a record that names no holder pid is never walked (pid 0 is the system process, and every command line
+on the box would become evidence: `TestRecordWithoutAHolderPidIsNeverWalked`), and a root that started after the lease was
+taken is a recycled pid whose tree is not read (`TestRecycledWrapperPidIsNotBelieved`); an unreadable process table is named in
+the reason (`TestUnreadableProcessTableIsNamedInTheReason`). **The display card is never reported free by
+an inference while the operator may be at the desk** (the presence reading, unknown = present): its silence is the desktop's
+noise, not the job's absence, and the reason says so (`TestDisplayCardNeverInferredFreeWhilePresent`). **Throttled:** the
+evidence is gathered at most once a minute per lease per process (concurrent first readers share one gathering,
+`TestConcurrentFirstReadsGatherTheEvidenceOnce`), and a lease that declares its devices, or no lease at all,
+costs nothing. `gpu status` shows it (`seats: fenced on cards ... (inferred [scope-widened])`, or `seats: the whole node (stays
+whole-node: ...)` with the missing evidence; `--json` and the per-lease rows carry `seat_scope`, `inferred_devices`,
+`scope_widened` and `scope_why`).
+
+**Which reads write, and which can unload.** Two kinds of reader, and only one of them writes. The **load gate's own reader**
+(`modelaffinity.InspectLease`: `Admit`, `AwaitRunSlot`, `AwaitUpstream`, `AwaitModelRoute`, the `agent_run` and delegation-door
+pre-checks, the seat yield) reads the lease because a process wants a card, and it remembers what it sees: the sticky sidecar
+and one ledger line per establishment or widening (`TestTheLoadGateRemembersTheScopeAndUnloadsNothing`). The **inspectors**
+(`gpu status`, `gpu cards`, `offload_status`, the activity snapshot, `CardsHeld`, and the delegator's own reads through
+`delegate.LocalLease`) report the same scope from the same evidence and write **nothing**: no sidecar, no ledger line, no call
+to llama-swap (`TestStatusReadsNeverWriteOrUnload`, `TestLocalLeaseIsAnInspectionAndWritesNothing`), so a read-only check of a
+live lease stays read-only. **No read of the lease, by either kind, unloads a model.**
+
+**The seat race rule: the seat yields, the long job never does.** The lease claims its cards first and then unloads the seats
+resident on them, so a text load that passed the gate a moment before the claim finishes loading **after** that unload, onto
+cards the lease now holds. The check-then-act window cannot be closed at the gate (the load is llama-swap's, one request
+later), so it is closed from the seat's side: once the model is resident the seat re-reads the lease and, if one this process
+does not hold now fences loads on its cards, **it unloads itself** (`modelaffinity.YieldIfFenced`). Only a lease that names
+cards (declared, or inferred for a legacy lease) moves a seat: a whole-node lease fences what it always fenced and unloads no
+seat, so a host with card-scoped leases off behaves as before (`TestAWholeNodeLeaseNeverYieldsASeat`). It runs at the moment the
+batch that may have loaded the model drains (`Ticket.Release`, never for a request that joined the resident batch) and after
+the delegation door's cold-load warm-up, where the contract then defers as a re-placeable capacity defer
+(`TestSeatLoadRacingDeviceGrantSeatYields`, `TestWarmUpRacingADeviceLeaseYieldsTheSeat`). The same rule covers a legacy lease
+whose inferred scope later widens onto a card a seat was admitted on, and **only through the seat's own release**: the next
+reading of the lease carries the wider scope, the seat re-reads it when its request completes, finds the lease on its card and
+unloads itself (`TestInferredScopeWideningEvictsSeatNotLongJob`). Nothing sweeps: establishing or widening a scope unloads
+nothing, so a seat that is resident and idle on a card the scope has just spread onto keeps it until its own idle ttl (five
+minutes) or its next request. What never yields: the memory stack (mem0 never yields to a lease), a model with requests in
+flight (the engine's own gauge; the next release picks it up: `TestWideningNeverPullsABusySeat`), a process running under the
+lease, and a model on a card the lease does not touch. A seat whose state cannot be read on a held card is **said** (one
+line per seat per five minutes) and left resident (`TestYieldIfFencedSaysWhenTheSeatCannotBeChecked`,
+`TestReleaseLogsASeatThatCouldNotBeCheckedOnAHeldCard`). **Scope of the rule, narrower than the plan's wording:** only an
+`Admit`-gated batch's release and the delegation door's warm-up re-check the lease after the model is resident. A load that
+goes through `AwaitUpstream` or `AwaitModelRoute` (speech, embeddings, the chat lane, tokenize, props, KV slots) passes the
+fence and then has no post-load check, and a batch that never drains (steady joiners) never reaches its release; see Known
+gaps. Nothing here signals or stops a process.
+
+**What this makes of the three-card tier, measured.** The shipped table declares nine seats (`TestSeatsThatStayPlaceableUnderACardLease`
+computes the counts through the code above). While a lease holds **card 2**, three stay placeable: the single layer's router
+and agent on card 0, and the dormant display layer's twin on the display card. The flagship (pinned to every card), the pair's
+three seats and the single layer's OCR and speech seats (card 2) are fenced, which is correct. While a lease holds **card 0**
+three stay placeable (the card-2 single seats and the display twin); while it holds the **display card** seven do. That
+closes the C-86 estimate of how much of the box one card-2 job takes: it used to take every seat, and now it takes six of the
+nine.
+
+**Not done here.** (1) The live capture on the three-card box. Plan P4 step 1 is a read-only capture of what the sampled
+processes and the wrapped command line show for the lease that was running when the plan was written; that lease has ended, so
+the rule above is the plan's, built on synthetic fixtures, and the capture of a real legacy tree is deferred to the milestone
+that enables card-scoped leases on the host (plan P6); until then `gpu_legacy_scope_inference` stays off. The process-tree
+reader was run read-only against a child process the test starts (the Windows path); the Linux path is built and vetted for it
+and not run in this session. (2) The cascade-lane and repack busy gates (`llamaclient.WithRemoteLanes`) still read any live
+lease as busy: they only choose a remote lane, never a fence. (3) Fleet health still publishes a single `lease` per node (plan P7). (4) A presence reader is not armed in the load
+gate, so an inferred scope always keeps the display card.
+
+### Drain, unload and the render lane clear the leased cards, not the node (plan P5)
+
+*Register C-86, question 1 of the operator order, the other half: draining one card does not empty the others. A whole-node
+lease reads exactly as before.*
+
+**`--drain` and `--unload-seat` take the cards the lease holds.** `gpu reserve --devices|--cards ... --drain --unload-seat`
+(and the detached holder's `maintain` step) pass the lease's card ids to `maintainSeatScoped`. A seat is **on the leased
+cards** when its declared pin (`config.ModelPins`, resolved through the card table) intersects them; a seat whose pin is
+unknown, cannot be placed, or is read while the card table cannot be, is on them (today's behaviour, the direction of every
+doubt). Then:
+
+- The configured agent seat is drained and unloaded only when it is on the leased cards. A seat on card 0 under a card-2
+  lease is neither drained nor unloaded, no warm-back is owed for it, and the wrapper says so on stderr
+  (`TestUnloadSeatLeavesAnAgentSeatOnAnotherCard`).
+- The other resident models are split the same way: those on the leased cards and those nobody declared a pin for are
+  unloaded; the rest are left resident and named (`gpu reserve: left resident (not on the leased cards): ...`)
+  (`TestUnloadSeatOnlyUnloadsIntersectingModels`). The memory stack is still never unloaded.
+- The legacy `GET /unload` is total (it ignores `?model=`), so it is refused while any model that has to stay is resident,
+  the seats left on other cards as well as the memory stack.
+- **The drain waits only for runs on the leased cards.** The run registry records each run's seat pins (`Run.Devices`, set by
+  the delegation door and the `agent_run` door); a scoped drain waits for registered runs whose pins intersect the lease, by
+  the seat they run on when a record predates the field, and skips the agent seat's own gauge when that seat is on other cards
+  (`TestDrainWaitsOnlyForIntersectingRuns`). A run on card 0 does not hold a card-2 lease.
+
+**The render lane unloads the list the wrapper hands it.** For a card lease the wrapper exports `GPU_LEASE_UNLOAD_MODELS` to
+the wrapped command: the llama-swap roster, minus the memory stack, minus the seats pinned to cards the lease does not hold
+(`unloadModelsFor`). `render/gpu-lock.mjs` `freeLlamaSwap` unloads exactly that list (drained first, as always) instead of every
+model off the memory stack. Unset or empty keeps today's rule, `-` means nothing may leave, the memory stack never leaves
+whatever the list names, and the total-unload fallback is refused while a model outside the list is resident
+(`render/gpu-lock.test.mjs`, "freeLlamaSwap honours the supplied list"). A whole-node lease, a host that cannot read the roster
+and a command that was not started by the wrapper export nothing, so the lane keeps its own rule. The pipeline's own media
+lease is whole-node until plan P13 takes one card per render, so it exports no list yet.
+
+**A single-card seat's run-cap line is its card's.** The cap (`fleet_max_concurrent_jobs`, the local run line) counted the runs
+registered on the seat by name. For a seat pinned to one card it now counts the runs on that card, whatever seat they run on
+(`gpuactivity.Registry.OnSeatPinned`), in the node's gate and in the delegator's reading of its room
+(`TestRunCapCountsPerCardForSingleCardSeats`); a seat that spans cards, or whose pin is unknown, keeps the per-seat line.
+
+**`device-trespass` (possible).** When a lease names its cards (declared, or inferred for a legacy lease) and a card **outside**
+them is busy with nothing the harness knows of to explain it, the activity view flags it as a **possibility**: the job may be
+using a card it did not claim, so a waiter handed that card as free could collide with it (`gpu status`,
+`offload_status.gpu_lease`, `device_trespass` in the JSON, `possible device-trespass:` in the note; `TestDeviceTrespassFlagged`).
+It is never an accusation. Card-scoped leases make text seats on the free cards legal, and the harness registers the runs of
+only two doors (`agent_run` and the delegation door) and watches only the planner seat's gauge, so a cascade call on a router
+seat, an OCR or speech seat, or the desktop looks the same from here; the note says it is not attributed to the holder and
+names what it cannot rule out (`TestTrespassIsOnlyPossibleAndNeverAccusesTheHolder`). Not flagged: the display card (the desktop's own use), a card
+another live lease holds, a card a registered run is pinned to, anything while the seat itself is busy (its card is unknown
+here), and a whole-node lease (it has no outside). It is a flag on the existing verdicts, not a new verdict word. With a
+bounded lease, `held-working` now means **its** cards are busy: a busy card outside the set is a seat's or another lease's,
+never the holder's own job.
+
+**Not done here.** The activity snapshot trusts the nvidia-smi utilisation of a card, which on Windows includes the desktop
+(only the display card is excluded); the trespass flag inherits that, and does not exclude a card that hosts a resident or busy
+llama-swap seat (the view has no per-seat card map, so it can only soften its wording). A drain or unload whose facts cannot be
+read (the card table, the roster, the lease's epoch) falls back to the whole-node behaviour and **says so on stderr**. The pipeline's own media lease exports no unload list
+until it holds one card per render (P13). Fleet health is still whole-node (P7).
+
+## Who asked for a lease, and whether they are still there (ADR 0070)
+
+*Plan P8 of the per-card routing work, registers C-32 and C-33. Everything here changes what is REPORTED. Nothing
+reclaims, releases or kills a lease on it: taking a lease from a living holder is a separate, explicit command, and it
+is not in this build.*
+
+**The gap.** A lease recorded who HELD it (a wrapper pid and a heartbeat the wrapper writes about itself) and nothing
+about who ASKED for it. A wrapper that is alive and heartbeating reads as healthy whether the session that launched the
+job is at the desk or died hours ago, so "running" could not be told from "abandoned": a long render whose launching
+session was long gone held a card for hours behind a label that read working, because card utilisation was its only
+evidence and a heartbeat the wrapper writes about itself proves only that the wrapper is alive.
+
+**What a lease now records** (additive and `omitempty`; a record without an owner is an UNKNOWN owner, never an orphan):
+
+| field | meaning |
+|---|---|
+| `owner` | who asked: `session` (a session id), `pid` + `start_ms` (a process, judged like a holder: a recycled pid reads as gone), `remote` (asked for from another host), `tracked` (the session was in the registry when the lease was taken) |
+| `unattended` | nobody is expected at the desk; the lease is judged by its progress contract and its window, never by its owner. `remote` implies it |
+| `progress` | the progress contract: `file` the job appends to (always an ABSOLUTE path: `gpu reserve` resolves a relative `--progress-file` against its own working directory before recording it, and the library refuses a relative one, because every reader looks for the same file from its own directory), `stall_ms` it may stay still |
+| `yield_grace_ms`, `on_yield`, `on_yield_dir` | the job's own terms for being asked to stop; recorded for the takeover command and read by nothing yet. `on_yield` is stored verbatim (refused above 4096 bytes, never clipped: the takeover will run it) with the directory the lease was taken in, because that takeover does not share it |
+
+**Where the owner comes from.** `gpu reserve --owner-session ID --owner-pid N --owner-start-ms MS [--owner-remote]`,
+else the session label the ledger already resolves (`LOCAL_OFFLOAD_ORIGIN`, then `CLAUDE_CODE_SESSION_ID`) with NO pid:
+the process a wrapper happens to run from is usually a short-lived shell, and recording it would read every lease as
+abandoned the moment the shell exits. With neither, the owner is unknown. `local-offload gpu owner-flags [--pid N]`
+prints the flags for the calling tree on one line (`--owner-session=ID --owner-pid=N --owner-start-ms=MS`), for a
+launcher that detaches before it takes the lease (a process created through WMI has no parent to ask and does not
+inherit the session). The hidden `gpu hold` child of a `--detach` reserve is passed the owner and the contract as flags
+by its parent, because its own parent exits.
+
+**The session registry.** Whether a session is alive cannot be read from its id. Each session's MCP server writes
+`<state root>/owners/<session>.<pid>.json` (pid and start identity) when it starts and removes it when it stops (no
+timer; a killed server leaves an entry whose pid reads as dead, which is the same answer). A session is alive while ANY
+registered process carries its id, or the pid recorded on the lease is alive by pid and start time. A resumed or
+compacted session starts a new process under the SAME id, so it does not flap. One file per process, not one per
+session, because the new server of a resumed session and the old one's exit would otherwise be two writers of one
+record. States: `alive`; `gone` (nothing alive, and the owner could be tracked: it was in the registry when the lease
+was taken, or a pid was recorded); `unknown` (it could not be tracked, or the registry could not be read, so it is never
+orphaned; `gpu status` says which: a session that was never in the registry is "recorded but cannot be tracked", and
+"no owner recorded" is said only when none is); `remote`. A registry that cannot be READ (a permission error, a wrong
+mount: anything but "the directory does not exist") is never read as "nobody in it"; a recorded process that is alive
+still stands. *Unverified
+beyond the environment variable the ledger already relies on: how a given Claude Code build maps a session to a live
+process. The registry is the mechanism; a server older than this change simply has no entry, and its leases read
+`unknown`.*
+
+**The orphan marker.** The first reader to see an owner gone stamps `orphan.<epoch>` beside the lease, under the epoch
+lock with a second look inside it, so concurrent readers write one marker and agree on one moment; the owner reappearing
+clears it, so a session that came back starts its grace afresh if it goes again (only on positive evidence the owner is
+back: an owner that merely cannot be told does not erase the moment it was seen gone). `held-orphaned` is
+`now - marker >= gpu_orphan_grace_min` for an attended lease. **Only the status surfaces stamp it: `gpu status`,
+`offload_status` and the `/fleet/health` handler.** It is a sidecar, and the one write in the read path. The plain
+inspectors the text gate polls every blocked second (`InspectDir` and its kin), the sentence a waiter reads and the text of
+a refusal (`ErrHeld.Error()`, the gate's `LeaseError`) stay read-only: they READ the marker a status surface recorded
+(`StandingReadOnly`) and never write it or take the epoch lock, so formatting a refusal is safe anywhere. The consequence
+is stated plainly: a gone owner nobody has looked at yet reads as inside its grace to a waiter, so a lone waiter on an
+unobserved orphan is told what the progress file and the window say, and about the owner's absence once any status call
+has recorded it. A marker that cannot be written or cleared is reported, never swallowed: `gpu status` and the verdict
+note say `orphan marker could not be recorded: ...` (and `activity.holder.orphan_marker_error` carries it), and the lease
+directory is probed for writability before the epoch lock is taken, because a permission error reads as contention there.
+The marker is removed with the lease.
+
+**The bounded-claim contract for unattended jobs.** `--unattended` requires an explicit `--for` (the 45 minute default
+is not a declared window), `--progress-file` and `--stall`; `--yield-grace` and `--on-yield` are recorded. A job nobody
+is watching has nobody to notice it going wrong, so its lease carries the terms it is judged by: `held-stalled` when the
+file did not move inside the stall window, `held-overdue` when its declared window ends. "Its owner is gone" is not an
+escape and not a verdict for it. The stall window counts from the later of the file's modification and the lease's
+start, so a log left over from an earlier run does not stall a fresh lease; a MISSING file is `unknown`, never stalled
+(the job may not have written its first line yet), and the reading says why it is unknown (`does not exist`, `is a
+directory`, `cannot be read: <error>`) and, once the lease has outlived its stall window with the file still missing, says
+so (`has not appeared in 3h0m0s, past its 2h0m0s stall window: the job has not written to it or the path is wrong`)
+without changing the verdict. `gpu reserve` warns when the progress file's directory does not exist. The last line of the file is shown ("clip 4 of 17"): a JSON line
+contributes its `detail`, else `done` of `total`, else the raw line.
+
+**Legacy leases and "is it stale?".** A lease with no owner and no progress contract (every lease written before this
+change) can honestly be judged by one thing: its declared window, plus card utilisation, and the note then says
+`util only, no progress contract`. Two read-only activity facts are shown as information and are never a verdict input:
+the age of the newest ComfyUI output (or, when the output directory is too large to scan whole, a statement that it could not be determined: a capped scan never names an old file as the newest) and of the ComfyUI log. They are shown only when the ComfyUI launch marker can be
+tied to the lease (the marker was written at or after the lease began and it is the only live lease): a marker left by
+an earlier job proves nothing about this one. Full stale detection needs the new wrapper and a progress contract.
+
+**Surfaces.** `gpu status` (and `--json`: `owner`, `unattended`, `progress`, and `activity.holder`) prints the owner,
+its state, orphaned-since, the progress file's age and last line, and the facts. `offload_status` brief
+`gpu_lease_verdict` leads with `ORPHANED`, `OVERDUE` or `STALLED` and names the takeover command, **whatever the verdict
+word is**: a stalled, orphaned or overdue holder leads with its word even when work in flight makes the verdict `working`
+(`STALLED (working) - the lease itself is not healthy (...), although work is in flight on the seat: ...`), and the takeover
+command names the epoch of the lease the verdict is about. `/fleet/health`'s `lease` block carries `orphaned` and `stalled`
+(each absent unless true; the worst across live leases); its `overdue` key is the expiry-based field of the routing change
+(P1), not a second source from the standing. With several live leases (card-scoped) `gpu status` and the `offload_status`
+lease view describe the MOST ESCALATED one from its own record (epoch, owner, progress contract), labelled with its epoch
+(`gpu status --json` takes its top-level `epoch`, `owner`, `unattended`, `progress` and `devices` from that lease too, so it
+never holds one lease's owner beside another's `activity.holder`; `epochs[]` lists every live lease and the text header
+is the lowest).
+A waiter refused by, or queued behind, an unhealthy lease (`gpu reserve`, `ErrHeld`, a text admission's `LeaseError`) is
+told which lease, what is wrong, for how long, what is running and the command that frees it:
+`local-offload gpu takeover --epoch N`. **That command does not exist in this build** (it is the explicit takeover of a
+later change), and the message says so: until it ships, ask whoever owns the lease or the operator.
+`gpu_orphan_grace_min` (default 15) is installed once at config load, so every surface reads the same grace.
+
+**Not in this change, on purpose:** terms and renewal, the process-tree record behind `tree-orphan`, the takeover and
+yield commands, `gpu release` routing. A lease past its window with a live holder is surfaced as `held-overdue` and
+nothing else happens to it.
 
 ## Node interop
 
@@ -563,16 +1100,32 @@ fence: the pre-0.117.0 warm-up loaded the seat straight past an exclusive hold.
 | verdict | meaning |
 |---|---|
 | `working` | a request or a registered run is in flight on the seat (lease held or not) |
-| `held-working` | a lease is held, the seat is idle, and the cards are busy under it (≥ 15 % utilization) — the holder's own job |
+| `held-working` | a lease is held, the seat is idle, and the cards are busy under it (≥ 15 % utilization) or its progress file is advancing — the holder's own job. With only card utilisation as evidence the note says so (`util only, no progress contract`): a live job and a hung one look alike |
 | `held-idle` | a lease is held and NOTHING is running: seat idle, cards quiet — the holder is waiting (a drain, a queue), loading, or stalled |
+| `held-stalled` | the lease carries a progress contract (`--progress-file` and `--stall`) and the file did not move inside its window. The holder is alive and heartbeating; nothing is reclaimed or killed |
+| `held-orphaned` | an ATTENDED lease whose owner (session or process) has been gone for longer than `gpu_orphan_grace_min` (default 15 minutes): nobody is expected back for it. Never produced for an unattended, remote or unknown-owner lease. Nothing is reclaimed or killed |
+| `held-overdue` | the declared window ended and the holder is still alive and renewing. Informational: a declared window is not a ceiling for a live holder, so nothing is reclaimed (the `--for` default is 45 minutes, so a wrapper that never declared a window reads overdue after that while it still renews) |
+| `tree-orphan` | the wrapper is gone but the job it started still holds the cards. In the vocabulary so the precedence is complete; **not produced by this build** (it needs the wrapper to record its process tree) |
 | `loaded-idle` | no lease; the seat is resident with nothing in flight (unloads at its ttl) |
 | `busy-outside` | no lease, seat idle, cards busy — work the harness does not own (the processes are listed) |
 | `stale-holder` | a lease record whose holder is gone; the next acquirer reclaims it |
 | `free` | no lease, nothing in flight, cards quiet |
 
+Precedence among a live lease's verdicts: `stale-holder` (the record's holder is gone, so it is not live at all),
+`tree-orphan`, `held-stalled`, `held-orphaned`, `held-overdue`, then `held-working` and `held-idle`. `working` (a
+request or registered run in flight on the seat) is reported first because it says what is happening right now; its note
+LEADS with the lease's own standing (`the lease itself is not healthy (... past its declared window by 3h0m0s), although
+work is in flight on the seat: ...`) and the brief line leads with the capitalised word, so an escalation is never hidden
+behind it. With several live leases (card-scoped leases) the verdict is about the most
+escalated one and `activity.leases[]` lists them all. The verdict words are pinned: `TestVerdictDocTableComplete` fails
+a change that adds one here without a row in this table.
+
 `activity` carries `seat` (name, loaded, starting, inflight, source), `runs[]` (kind, pid, origin, goal,
 phase, step, tokens_out, age), `gpus[]` (index, name, util_pct, mem), `gpu_processes[]`, and `holder`
-(pid, alive, command, heartbeat_age_s, draining, exclusive). The drain's progress line is built from the same
+(pid, alive, command, heartbeat_age_s, draining, exclusive, and the derived standing: `owner_state`,
+`owner_session`, `owner_note` (why a recorded owner cannot be told apart), `orphan_marker_error`, `orphaned`,
+`orphaned_since`, `orphaned_for_s`, `overdue`, `overdue_by_s`, `stalled`, `unattended`,
+`progress{file,state,age_s,stall_s,detail,problem}`, `activity_facts[]`). The drain's progress line is built from the same
 reading and printed on CHANGE (count, load state, a run's step), with a reminder every five minutes.
 
 ## Probes pass the fence too (2026-09-22)
@@ -636,6 +1189,36 @@ request posted straight to llama-swap by anything outside the harness is outside
 
 ## Known gaps
 
+- **Ownership is only as good as the registry.** A lease whose owner is a session id the registry never held (an MCP
+  server older than the registry, a non-Claude caller) reads `unknown` and is never orphaned; a lease whose owner is a
+  pid recorded by `--owner-pid` is judged by that process alone, so a launcher that names a short-lived shell reads
+  orphaned when the shell exits. The orphan verdict is information with a 15 minute grace, never an action. How a Claude
+  Code session id maps to a live process is not verified beyond the environment variable the ledger already uses.
+- **Card-scoped leases can be written, an older reader cannot see them, and not every consumer takes a device set yet.** The
+  record, the fence, `gpu reserve --devices|--cards`, the allocator, the per-card status and the audit exist (see
+  [Card-scoped leases](#card-scoped-leases-record-v2)), and the text gate, the delegator and the placement table read a seat's
+  cards (see [Consumers read a seat's cards](#consumers-read-a-seats-cards-not-the-node-plan-p4)); drain, unload and the render
+  lane's unload take the leased cards (see [Drain, unload and the render lane](#drain-unload-and-the-render-lane-clear-the-leased-cards-not-the-node-plan-p5));
+  fleet health (P7) is a later change and until then treats any live lease as fencing the whole node (over-fencing, the
+  safe direction). A binary or Node reader that predates the format reads a directory holding only device leases as a free
+  card, which is why `gpu_card_scoped_leases` stays off on a host until `gpu doctor --write-audit` is green.
+- **A legacy whole-node lease is scoped only on evidence, only for a record an older binary wrote, only when the host turns
+  it on, and the live evidence has not been captured.** The rule (a command line, a tied launch marker, two sampled readings
+  five minutes apart) is built and tested on synthetic fixtures; what a real legacy tree shows on the three-card box is
+  captured at plan P6. Until then `gpu_legacy_scope_inference` is off and a legacy lease fences every seat, and `gpu status`
+  names the key; with it on, a legacy lease stays whole-node unless its process tree names a card the box's declared ComfyUI
+  order can place.
+- **The seat race rule covers `Admit`-gated batches and the delegation door's warm-up, not every load.** A seat loaded through
+  `AwaitUpstream` or `AwaitModelRoute` (speech, embeddings, the chat lane, tokenize, props, KV slots) has no post-load check, so
+  it can stay resident on a card a lease claimed in the same instant until its idle ttl; a batch that never drains also never
+  reaches its release. The plan's wording ("a seat load that passed the gate re-checks after the model is resident") is wider
+  than what is built.
+- **An idle seat on a card an inferred scope has just spread onto is not swept.** It leaves at its own idle ttl or when its next
+  request completes; no read of the lease unloads anything.
+- **The cascade-lane and repack busy gates still read any live lease as busy.** They only choose a remote lane, never a fence.
+- **The ComfyUI order is not derivable.** Turning `--cuda-device N` / `COMFY_CUDA_DEVICE` into a card needs `gpu_comfy_order`
+  (or a one-card box); until it is declared such a command reserves the whole node and says why.
+- **`--cards N` queues on a fixed set.** It does not re-pick while queued; that is the fan-out work.
 - **The reservation is a convention.** A raw `curl :11436` loop, a graph posted straight to
   ComfyUI, or a forgotten `gpu reserve` gets no protection. Because the gap cannot be closed
   at the mechanism level, it is closed by RULE: posting to `:8188` directly is forbidden —

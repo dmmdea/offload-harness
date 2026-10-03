@@ -11,10 +11,10 @@ import { test } from "node:test";
 import assert from "node:assert";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { rmSync, mkdtempSync, writeFileSync } from "node:fs";
+import { rmSync, mkdtempSync, writeFileSync, mkdirSync, unlinkSync } from "node:fs";
 import {
-  memoryStack, quiesceLlamaSwap, freeLlamaSwap,
-  checkInheritedLease, claimLeaseUnload, readLease, inheritedLease,
+  memoryStack, quiesceLlamaSwap, freeLlamaSwap, parseUnloadModels,
+  checkInheritedLease, claimLeaseUnload, readLease, inheritedLease, LEASE_FORMAT_SIGNATURE,
 } from "./gpu-lock.mjs";
 
 test("MEMORY_STACK is sourced from env, not a buried const (invariant 1)", () => {
@@ -71,7 +71,72 @@ test("checkInheritedLease fences a resumed process out (the closing-lid case)", 
     "a vanished lease is not ours either");
 });
 
+// --- the fence is per epoch (card-scoped leases, record v2) -----------------
+// A card-scoped lease lives in e/<epoch>.json with one cards/<uuid>.claim per card and
+// never writes meta.json. Several can be live at once, so the fence is "my record exists
+// and each of my cards still names my epoch" - never a compare against one shared epoch.
+
+function v2Lease(dir, epoch, devices, { claimEpoch = epoch, state = "active" } = {}) {
+  mkdirSync(join(dir, "e"), { recursive: true });
+  mkdirSync(join(dir, "cards"), { recursive: true });
+  writeFileSync(join(dir, "e", `${epoch}.json`), JSON.stringify({ epoch, class: "media", holder: { pid: 1 }, devices, state }));
+  for (const d of devices) writeFileSync(join(dir, "cards", `${d}.claim`), JSON.stringify({ epoch: claimEpoch, at_ms: 1 }));
+}
+
+test("checkInheritedLease: a higher-epoch device lease is never fenced out by a lower one", () => {
+  const dir = mkdtempSync(join(tmpdir(), "gpulease-v2-"));
+  v2Lease(dir, 7, ["gpu-test-0"]);
+  v2Lease(dir, 9, ["gpu-test-1"]);
+  assert.equal(checkInheritedLease({ dir, epoch: 9 }), true, "the higher epoch must pass");
+  assert.equal(checkInheritedLease({ dir, epoch: 7 }), true, "the lower epoch must pass");
+  assert.equal(checkInheritedLease({ dir, epoch: 8 }), false, "an epoch nobody holds must not pass");
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("checkInheritedLease: a stolen or missing card claim fences the lease out", () => {
+  const dir = mkdtempSync(join(tmpdir(), "gpulease-v2-"));
+  v2Lease(dir, 7, ["gpu-test-0", "gpu-test-1"]);
+  assert.equal(checkInheritedLease({ dir, epoch: 7 }), true);
+  writeFileSync(join(dir, "cards", "gpu-test-1.claim"), JSON.stringify({ epoch: 12 }));
+  assert.equal(checkInheritedLease({ dir, epoch: 7 }), false, "a card that names another epoch");
+  unlinkSync(join(dir, "cards", "gpu-test-1.claim"));
+  assert.equal(checkInheritedLease({ dir, epoch: 7 }), false, "a card with no claim");
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("checkInheritedLease: a lease still being granted is not yet held", () => {
+  const dir = mkdtempSync(join(tmpdir(), "gpulease-v2-"));
+  v2Lease(dir, 7, ["gpu-test-0"], { state: "granting" });
+  assert.equal(checkInheritedLease({ dir, epoch: 7 }), false);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("checkInheritedLease: with no v2 record the legacy meta.json compare is unchanged", () => {
+  const dir = mkdtempSync(join(tmpdir(), "gpulease-v1-"));
+  writeFileSync(join(dir, "meta.json"), JSON.stringify({ epoch: 5, class: "media", holder: { pid: 1 } }));
+  assert.equal(checkInheritedLease({ dir, epoch: 5 }), true);
+  assert.equal(checkInheritedLease({ dir, epoch: 6 }), false);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("checkInheritedLease: a device id in a record that is not a plain token is refused", () => {
+  const dir = mkdtempSync(join(tmpdir(), "gpulease-v2-"));
+  mkdirSync(join(dir, "e"), { recursive: true });
+  writeFileSync(join(dir, "e", "7.json"), JSON.stringify({ epoch: 7, devices: ["../x"], state: "active" }));
+  // The path "../x" would resolve to <dir>/x.claim: plant a perfectly good claim there, so
+  // only the id check (not a missing file) can be what refuses the lease.
+  writeFileSync(join(dir, "x.claim"), JSON.stringify({ epoch: 7 }));
+  assert.equal(checkInheritedLease({ dir, epoch: 7 }), false);
+  rmSync(dir, { recursive: true, force: true });
+});
+
 // --- once-per-lease unload election ----------------------------------------
+
+test("the reader carries the format signature `gpu doctor` audits for", () => {
+  // The same literal as internal/gpulease/audit.go FormatSignature (a Go test pins the
+  // file side; this pins the export, so a stale copy cannot pass for aware).
+  assert.strictEqual(LEASE_FORMAT_SIGNATURE, "gpu-lease-format-2/per-epoch-fence");
+});
 
 test("claimLeaseUnload elects exactly one unloader per lease epoch", () => {
   const dir = mkdtempSync(join(tmpdir(), "gpulease-unload-"));
@@ -393,4 +458,101 @@ test("freeLlamaSwap refuses to unload anything when /running is unreadable", asy
   } finally { globalThis.fetch = realFetch; }
   assert.equal(calls.length, 0, "blind => no unload, no drain, no fallback");
   assert.ok(logged.some((m) => /NOT unloading/.test(m)), "and the refusal is loud");
+});
+
+// --- the list the Go wrapper hands over (plan P5, register C-86) ----------------------
+// `gpu reserve --devices <cards> -- <render>` computes which models may leave under a lease that
+// holds some cards (the roster minus the memory stack minus the seats pinned to other cards) and
+// exports GPU_LEASE_UNLOAD_MODELS. freeLlamaSwap unloads that list, not every model off the stack.
+// Absent (or empty) is today's rule; `-` is an explicit "nothing may leave".
+
+function fakeSwap({ roster, running, onUnload, unloadStatus = 200 }) {
+  const calls = { unloads: [], bulk: 0, drained: [] };
+  const fetchImpl = async (url) => {
+    const u = String(url);
+    if (u.endsWith("/v1/models")) return { ok: true, status: 200, json: async () => ({ data: roster.map((id) => ({ id })) }) };
+    if (u.endsWith("/running")) return { ok: true, status: 200, json: async () => ({ running: running.map((model) => ({ model })) }) };
+    if (u.includes("/api/models/unload/")) {
+      const id = u.split("/api/models/unload/")[1];
+      calls.unloads.push(id);
+      if (onUnload) onUnload(id);
+      return { ok: unloadStatus < 300, status: unloadStatus, json: async () => ({}) };
+    }
+    if (u.endsWith("/unload")) { calls.bulk += 1; return { ok: true, status: 200, json: async () => ({}) }; }
+    return { ok: true, status: 200, json: async () => ({}) };
+  };
+  return { calls, fetchImpl };
+}
+
+async function withFetch(fetchImpl, fn) {
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = fetchImpl;
+  try { return await fn(); } finally { globalThis.fetch = realFetch; }
+}
+
+test("parseUnloadModels: absent and empty are today's rule, '-' is none, a list is a list", () => {
+  assert.equal(parseUnloadModels(undefined), null);
+  assert.equal(parseUnloadModels(""), null);
+  assert.equal(parseUnloadModels("   "), null);
+  assert.deepEqual(parseUnloadModels("-"), []);
+  assert.deepEqual(parseUnloadModels("a, b ,c,"), ["a", "b", "c"]);
+});
+
+test("freeLlamaSwap honours the supplied list: only listed models are drained and unloaded", async () => {
+  const { calls, fetchImpl } = fakeSwap({
+    roster: ["agent-pool", "qwen3-vl-8b", "gemma-4-26b-agent", "embeddinggemma"],
+    running: ["agent-pool", "qwen3-vl-8b", "gemma-4-26b-agent", "embeddinggemma"],
+  });
+  const drained = [];
+  await withFetch(fetchImpl, () => freeLlamaSwap("http://x", {
+    unloadModels: ["agent-pool", "qwen3-vl-8b"],
+    quiesce: async (ids) => { drained.push(...ids); return { drained: true, waitedMs: 0, unknown: [] }; },
+  }));
+  assert.deepEqual(calls.unloads.sort(), ["agent-pool", "qwen3-vl-8b"], "the card-0 seat is neither unloaded nor drained");
+  assert.deepEqual(drained.sort(), ["agent-pool", "qwen3-vl-8b"]);
+});
+
+test("freeLlamaSwap reads the list from GPU_LEASE_UNLOAD_MODELS when none is passed", async () => {
+  const { calls, fetchImpl } = fakeSwap({ roster: ["a", "b"], running: ["a", "b"] });
+  const prev = process.env.GPU_LEASE_UNLOAD_MODELS;
+  process.env.GPU_LEASE_UNLOAD_MODELS = "b";
+  try {
+    await withFetch(fetchImpl, () => freeLlamaSwap("http://x", { quiesce: async () => ({ drained: true, waitedMs: 0, unknown: [] }) }));
+  } finally { if (prev === undefined) delete process.env.GPU_LEASE_UNLOAD_MODELS; else process.env.GPU_LEASE_UNLOAD_MODELS = prev; }
+  assert.deepEqual(calls.unloads, ["b"]);
+});
+
+test("freeLlamaSwap with the explicit none list unloads nothing", async () => {
+  const { calls, fetchImpl } = fakeSwap({ roster: ["a", "b"], running: ["a", "b"] });
+  await withFetch(fetchImpl, () => freeLlamaSwap("http://x", { unloadModels: [], quiesce: async () => ({ drained: true, waitedMs: 0, unknown: [] }) }));
+  assert.equal(calls.unloads.length, 0);
+  assert.equal(calls.bulk, 0);
+});
+
+test("freeLlamaSwap never unloads the memory stack, even when the list names it", async () => {
+  const { calls, fetchImpl } = fakeSwap({ roster: ["a", "embeddinggemma"], running: ["a", "embeddinggemma"] });
+  await withFetch(fetchImpl, () => freeLlamaSwap("http://x", { unloadModels: ["a", "embeddinggemma"], quiesce: async () => ({ drained: true, waitedMs: 0, unknown: [] }) }));
+  assert.deepEqual(calls.unloads, ["a"]);
+});
+
+test("freeLlamaSwap with no list keeps today's rule: everything off the memory stack", async () => {
+  const { calls, fetchImpl } = fakeSwap({ roster: ["a", "b", "embeddinggemma"], running: ["a", "b", "embeddinggemma"] });
+  const prev = process.env.GPU_LEASE_UNLOAD_MODELS;
+  delete process.env.GPU_LEASE_UNLOAD_MODELS;
+  try {
+    await withFetch(fetchImpl, () => freeLlamaSwap("http://x", { quiesce: async () => ({ drained: true, waitedMs: 0, unknown: [] }) }));
+  } finally { if (prev !== undefined) process.env.GPU_LEASE_UNLOAD_MODELS = prev; }
+  assert.deepEqual(calls.unloads.sort(), ["a", "b"]);
+});
+
+test("freeLlamaSwap refuses the unload-all fallback while a model outside the list is resident", async () => {
+  // The per-model route is missing (an older llama-swap), and the only other route is TOTAL: it
+  // would take the card-0 seat down with the card-2 one. Refused, loudly.
+  const { calls, fetchImpl } = fakeSwap({ roster: ["a", "b"], running: ["a", "b"], unloadStatus: 404 });
+  const logged = [];
+  await withFetch(fetchImpl, () => freeLlamaSwap("http://x", {
+    unloadModels: ["a"], log: (m) => logged.push(m), quiesce: async () => ({ drained: true, waitedMs: 0, unknown: [] }),
+  }));
+  assert.equal(calls.bulk, 0, "GET /unload is total and must not run beside a seat that has to stay");
+  assert.ok(logged.some((m) => /cannot unload-all/.test(m) && /b/.test(m)), "and it says why: " + JSON.stringify(logged));
 });

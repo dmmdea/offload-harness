@@ -36,7 +36,7 @@ func WriteToolsLimited(worktreeRoot string, pol *Policy, limit *WriteLimit) ([]T
 	if err != nil {
 		return nil, err
 	}
-	s := &scope{root: absRoot}
+	s := &scope{root: absRoot, gate: policyReadGate(pol)}
 
 	write := Tool{
 		ToolSpec: ToolSpec{
@@ -160,6 +160,12 @@ func WriteToolsLimited(worktreeRoot string, pol *Policy, limit *WriteLimit) ([]T
 			}
 			if in.OldString == "" {
 				return "NOT performed: old_string is empty; use write_file to create or fully overwrite", nil
+			}
+			// The read floor (SF-07): edit_file reads the old content to match
+			// old_string, and "not found" vs a policy denial would answer whether a
+			// guess is in a secret file. Refuse before reading.
+			if err := s.gate.check(s.root, in.Path); err != nil {
+				return "", err
 			}
 			r, rel, err := s.open(in.Path)
 			if err != nil {

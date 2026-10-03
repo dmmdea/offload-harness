@@ -140,7 +140,7 @@ func main() {
 	allowOverwrite := fs.Bool("allow-overwrite", false, "open-write: allow overwriting existing files + edit_file in the worktree (requires --allow-write). Default off.")
 	allowDelete := fs.Bool("allow-delete", false, "open-write: allow deleting files in the worktree (requires --allow-write). Default off.")
 	worktree := fs.String("worktree", "", "writable worktree for write_file/delete_file (default: --root)")
-	auditPath := fs.String("audit", "", "policy audit log path (default: ~/.local-offload/agent-audit.jsonl)")
+	auditPath := fs.String("audit", "", "policy audit log path (default: agent-audit.jsonl under the harness install root: config home, else ~/.local-offload)")
 	allowFetch := fs.Bool("allow-fetch", false, "P3: enable web_fetch (egress-allowlist gated). Default off (no network).")
 	var egressHosts multiFlag
 	fs.Var(&egressHosts, "egress-host", "allowlisted egress host for web_fetch (repeatable); bare host or *.host. Default: none (deny-all).")
@@ -152,11 +152,11 @@ func main() {
 	fs.Var(&browseHosts, "browse-hosts", "with --allow-browse: host the browse tool may visit, subdomains included (repeatable, or comma-separated). Required with --allow-browse.")
 	allowGitHub := fs.Bool("allow-github", false, "enable GitHub tools (github_api/create_repo/upload_file). Token from $GITHUB_TOKEN, default repo from $GITHUB_REPO. Default off.")
 	queuePath := fs.String("queue", "", "P5b standalone: drain a JSONL goal queue UNATTENDED (the capability flags become the pre-authorization envelope) instead of a single objective. No resume — a re-run reprocesses the whole queue.")
-	askQueuePath := fs.String("ask-queue", "", "file where asks deferred on the unattended run are parked for review (default when any mutating capability is enabled: ~/.local-offload/agent-asks.jsonl)")
+	askQueuePath := fs.String("ask-queue", "", "file where asks deferred on the unattended run are parked for review (default when any mutating capability is enabled: agent-asks.jsonl under the harness install root)")
 	rulesPath := fs.String("rules", "", "structural risk rule table (JSON array of {kind,glob,decision,severity,reason}; tighten-only — rules may deny or ask, never allow). Fails closed on a bad or missing file. Default (empty): the built-in unattended table loads (deletes + config/manifest writes queue for review; evidence/weights/workflow/lockfile mutations deny). Pass a path to REPLACE it, or 'off' to run ungated (measured 2026-08-11: the model's own security_risk annotation is a constant 'low' — 0% recall on destructive calls).")
 	envRulesPath := fs.String("env-rules", "", "environment-rule table (JSON, the config key agent_env_rules) that REPLACES the config's table for this run — the rigger's scratch validation; 'off' runs with no env rules. Validated on load; a bad file exits 2 by name.")
 	setupPath := fs.String("setup", "", "setup actions (JSON array of {tool, args}) REPLAYED before the model's first turn (ADR 0036 P2) — the contract field setup_actions for a CLI run; each runs through the env rules and dispatch like a model call and seeds the transcript as a tool call + result, spending no step. Validated on load; a bad file exits 2 by name. Empty = none.")
-	tracesDir := fs.String("traces", "", "standalone: directory for per-goal trace JSON (default: ~/.local-offload/agent-traces)")
+	tracesDir := fs.String("traces", "", "standalone: directory for per-goal trace JSON (default: agent-traces under the harness install root)")
 	goalTimeoutSec := fs.Int("goal-timeout", 300, "standalone: per-goal wall-clock budget in seconds")
 	totalTimeoutSec := fs.Int("total-timeout", 0, "standalone: optional cumulative wall-clock budget for the WHOLE drain in seconds (0 = unbounded; --goal-timeout still bounds each goal)")
 	resume := fs.Bool("resume", false, "standalone: skip goals already completed in the checkpoint (and record completions) so a re-run RESUMES instead of reprocessing. Give each goal an explicit id (bare goals get positional ids that shift if the queue is reordered). Resume is goal-granular, not transactional: an interrupted goal re-runs in full over any partial side effects.")
@@ -285,9 +285,7 @@ func main() {
 	// run gets a worktree and github_upload_file — an outward-facing write
 	// surface that must not run without an audit trail.
 	if auditP == "" && (*allowWrite || *allowFetch || *allowShell || *allowRun || *allowGitHub || *allowBrowse) {
-		if home, e := os.UserHomeDir(); e == nil {
-			auditP = filepath.Join(home, ".local-offload", "agent-audit.jsonl")
-		}
+		auditP = agent.DefaultStateFile(cfg.BaseDir(), "agent-audit.jsonl", os.Stderr)
 	}
 
 	// Default the ask-queue for EVERY run with a mutating capability, not just
@@ -298,14 +296,10 @@ func main() {
 	// morning review. Traces stay --queue-only.
 	askQ, tracesD := *askQueuePath, *tracesDir
 	if askQ == "" && (*allowWrite || *allowFetch || *allowShell || *allowRun || *allowGitHub || *allowBrowse) {
-		if home, e := os.UserHomeDir(); e == nil {
-			askQ = filepath.Join(home, ".local-offload", "agent-asks.jsonl")
-		}
+		askQ = agent.DefaultStateFile(cfg.BaseDir(), "agent-asks.jsonl", os.Stderr)
 	}
 	if *queuePath != "" && tracesD == "" {
-		if home, e := os.UserHomeDir(); e == nil {
-			tracesD = filepath.Join(home, ".local-offload", "agent-traces")
-		}
+		tracesD = agent.DefaultStateFile(cfg.BaseDir(), "agent-traces", os.Stderr)
 	}
 
 	// Optional mem0 memory (opt-in via --memory). Keep it a nil INTERFACE when off
@@ -352,6 +346,8 @@ func main() {
 		Accel:          pipeline.NewLoopAccel(cfg),
 		Unattended:     true, // non-interactive CLI: ask → deny-and-queue
 		AuditPath:      auditP,
+		ReadFloor:      cfg.AgentReadFloor,
+		AuditChain:     cfg.AuditChain,
 		AskQueuePath:   askQ,
 		RulesPath:      *rulesPath,
 		AllowWrite:     *allowWrite,
@@ -460,7 +456,11 @@ func main() {
 			fmt.Fprintf(os.Stderr, "[local-agent] WARNING: --listen-trusted-network set — the UNAUTHENTICATED agent "+
 				"endpoint is exposed beyond loopback on %q. Anyone who can reach it can drive the agent's write/GitHub tools.\n", *listen)
 		}
-		if err := serveOpenAI(*listen, loop, plannerModel); err != nil {
+		// The served process is ONE chained run for its whole lifetime (SF-08): every
+		// request shares this Build's trail, and the run closes only when serving ends.
+		err := serveOpenAI(*listen, loop, plannerModel)
+		built.EndAudit()
+		if err != nil {
 			fmt.Fprintln(os.Stderr, "error:", err)
 			os.Exit(1)
 		}
@@ -494,7 +494,7 @@ func main() {
 		if built.RunGranted {
 			envelope = append(envelope, "run")
 		}
-		if err := runStandalone(dctx, loop, standaloneOpts{
+		err := runStandalone(dctx, loop, standaloneOpts{
 			queuePath:        *queuePath,
 			tracesDir:        tracesD,
 			askQueuePath:     askQ,
@@ -506,7 +506,9 @@ func main() {
 			captureRate:      cfg.AgentTrajectoryRate,
 			captureQueuePath: cfg.AgentTrajectoryQueuePath,
 			envelope:         envelope,
-		}); err != nil {
+		})
+		built.EndAudit() // the whole drain is one chained run (SF-08); close it before any exit
+		if err != nil {
 			fmt.Fprintln(os.Stderr, "error:", err)
 			os.Exit(1)
 		}
@@ -537,6 +539,8 @@ func main() {
 			Accel:                pipeline.NewLoopAccel(cfg),
 			Unattended:           true,
 			AuditPath:            auditP,
+			ReadFloor:            cfg.AgentReadFloor,
+			AuditChain:           cfg.AuditChain,
 			AskQueuePath:         askQ,
 			RulesPath:            *rulesPath,
 			AllowSearch:          *allowSearch, // read/search only; NO write for the architect
@@ -567,6 +571,8 @@ func main() {
 			Accel:                pipeline.NewLoopAccel(cfg),
 			Unattended:           true,
 			AuditPath:            auditP,
+			ReadFloor:            cfg.AgentReadFloor,
+			AuditChain:           cfg.AuditChain,
 			AskQueuePath:         askQ,
 			RulesPath:            *rulesPath,
 			AllowWrite:           *allowWrite,
@@ -612,6 +618,8 @@ func main() {
 		fmt.Fprintf(os.Stderr, "[local-agent] two-tier: architect=%s editor=%s (one swap)\n", archModel, edModel)
 
 		res, err := agent.RunTwoTier(ctx, objective, architect, editor)
+		archBuilt.EndAudit() // close both tiers' chains (SF-08) before any exit below
+		editBuilt.EndAudit()
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "error:", err)
 			// The degrade note matters MOST on the death path — a run that fell
@@ -638,6 +646,7 @@ func main() {
 	}
 
 	res, err := loop.Run(ctx, objective)
+	built.EndAudit() // close this run's chain (SF-08) before any exit below
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		printTokenizerDegrade("", res.TokenizerPath) // most diagnostic exactly on the death path (round-3 finding)
