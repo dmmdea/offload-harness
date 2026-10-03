@@ -322,6 +322,12 @@ type Meta struct {
 	// Empty for a call that opened no card; omitempty, so such a call publishes
 	// byte-identically to before.
 	CallID string `json:"call_id,omitempty"`
+	// CardsCarried is the work, in tokens through the cards, of this call's EARLIER
+	// attempts whose rows went to the ledger as inner rows (a cascade climb,
+	// plan D12). Record writes cards_tokens 0 on an inner row, so the call's own row
+	// adds this figure to its own and a share reader's total counts that work once.
+	// In-process bookkeeping only (`json:"-"`): never published.
+	CardsCarried int `json:"-"`
 	// QueuedMs is the agent run's busy-hold wall (ADR 0061): time its requests
 	// waited on a seat whose engine was working for others.
 	QueuedMs   int64  `json:"queued_ms,omitempty"`

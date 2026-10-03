@@ -720,6 +720,7 @@ func (p *Pipeline) Run(ctx context.Context, req core.Request) (res core.Result) 
 		if res.Meta.JobID != "" {
 			meta.JobID = res.Meta.JobID
 		}
+		meta.CardsCarried = res.Meta.CardsCarried
 		// Phase 3/7: the breaker tracks INFRA health only (ErrClass set); a quality
 		// defer means the tier physically worked. Autoheal fires on infra failure.
 		// LO-9: a TIMEOUT on the first call to an idle tier is exempted from
@@ -4157,9 +4158,10 @@ func (p *Pipeline) runExtractImage(ctx context.Context, req core.Request, meta c
 //     that did no card work makes no card.
 //
 // A sub-call's own escalating attempts are inner rows too (flattened under this
-// composite). Their prompt tokens still reach the savings summary (a non-deferred
-// inner row's TokensIn is added, C-62), but their output and card work are on no
-// call row: only the answering tier's figures are in res.Meta.
+// composite). Their prompt tokens reach the savings summary (a non-deferred inner
+// row's TokensIn is added, C-62) and their card work reaches CardsTokens through
+// the sub-call's Meta.CardsCarried; their output is on no call row, because only
+// the answering tier's figures are in res.Meta.
 func (p *Pipeline) recordExtractImageCall(task core.TaskType, meta core.Meta, start time.Time, res core.Result, subs []core.Result) {
 	if p.led == nil {
 		return
@@ -4179,6 +4181,11 @@ func (p *Pipeline) recordExtractImageCall(task core.TaskType, meta core.Meta, st
 		}
 		row.CacheHit = false
 		cards += s.Meta.TokensIn + s.Meta.TokensOut
+	}
+	for _, s := range subs {
+		// A sub-call's own climbing attempts (inner rows under this composite) did
+		// card work that no row but the answering tier's could carry.
+		cards += s.Meta.CardsCarried
 	}
 	row.TokensIn = cachedIn
 	e := entryFrom(task, row, res.Deferred, 0)
@@ -4356,6 +4363,9 @@ func (p *Pipeline) attempt(ctx context.Context, req core.Request, built tasks.Bu
 							row.ParentJobID, row.JobID = meta.JobID, ""
 						}
 						p.record(req.Task, row, entryChars)
+						// The inner row's cards_tokens is written 0: the row of the tier
+						// that answers carries this attempt's work (Meta.CardsCarried).
+						meta.CardsCarried += ledger.CardsTokensOf(entryFrom(req.Task, row, false, entryChars))
 					}
 					// a larger, more decisive tier may clear the threshold
 					return core.Deferf(reason, gen.Content, meta), true
@@ -4676,7 +4686,7 @@ func (p *Pipeline) RecordAccel(task, modelTier string, latencyMs int64, deferred
 
 // entryFrom builds a ledger entry from per-call meta + the enriched signals.
 func entryFrom(task core.TaskType, meta core.Meta, deferred bool, inputChars int) ledger.Entry {
-	return ledger.Entry{
+	e := ledger.Entry{
 		Task: string(task), TokensIn: meta.TokensIn, TokensOut: meta.TokensOut, SeatTokensIn: meta.SeatTokensIn,
 		LatencyMs: meta.LatencyMs, TokPerSec: meta.TokPerSec, CacheHit: meta.CacheHit,
 		Deferred: deferred,
@@ -4724,6 +4734,13 @@ func entryFrom(task core.TaskType, meta core.Meta, deferred bool, inputChars int
 		// every row consistently, and an untagged process writes nothing.
 		Arm: strings.TrimSpace(os.Getenv("OFFLOAD_DELEGATE_ARM")),
 	}
+	// The call's own row adds the card work of its earlier attempts' inner rows
+	// (whose cards_tokens Record zeroes) to its own, so the call's row holds all
+	// of the call's work and a total over the ledger counts each token once.
+	if meta.CardsCarried > 0 && meta.ParentJobID == "" {
+		e.CardsTokens = meta.CardsCarried + ledger.CardsTokensOf(e)
+	}
+	return e
 }
 
 // placedLayer is the ledger's read of a placed block: the layer, or "" (the

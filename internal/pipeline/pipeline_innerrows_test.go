@@ -452,3 +452,78 @@ func TestRequestParentJobIDIsNeverOnTheWire(t *testing.T) {
 		t.Fatalf("a wire request set its own ParentJobID: %q", r.ParentJobID)
 	}
 }
+
+// ownTokens is the work a row did through the cards by its own figures.
+func ownTokens(e ledger.Entry) int { return e.TokensIn + e.TokensOut }
+
+// sumCards is what a share reader totals over the ledger.
+func sumCards(rows []ledger.Entry) int {
+	n := 0
+	for _, r := range rows {
+		n += r.CardsTokens
+	}
+	return n
+}
+
+// (c) the card work of the climbing attempt is not lost when its row goes inner:
+// Record writes cards_tokens 0 on an inner row, so the call's row carries the
+// attempt's work and a share reader's total over the ledger equals the work done.
+func TestCascadeEscalatedCallCarriesTheInnerAttemptsCardWork(t *testing.T) {
+	const entryModel, escModel = "fake-e2b", "fake-e4b"
+	srv := cascadeServer(entryModel, escModel, fakeChat{content: `{"decision":"yes","reason":"confirmed"}`, finishReason: "stop", promptTokens: 120})
+	defer srv.Close()
+	p, lpath := ledgerPipeline(t, cascadeCfg(srv, entryModel, escModel), srv)
+
+	if res := p.Run(context.Background(), escTriageReq); !res.OK {
+		t.Fatalf("cascade must succeed on the escalation tier: %+v", res)
+	}
+	rows := readRows(t, lpath)
+	call, inner := assertOneCall(t, rows, 1)
+	if ownTokens(inner[0]) == 0 {
+		t.Fatalf("fixture: the climbing attempt must have run on the cards: %s", rowStr(inner[0]))
+	}
+	if inner[0].CardsTokens != 0 {
+		t.Fatalf("an inner row carries no card work of its own: %s", rowStr(inner[0]))
+	}
+	if want := ownTokens(inner[0]) + ownTokens(call); call.CardsTokens != want {
+		t.Fatalf("call cards_tokens = %d, want %d (the climbing attempt's work plus the answering tier's)", call.CardsTokens, want)
+	}
+	if want := ownTokens(inner[0]) + ownTokens(call); sumCards(rows) != want {
+		t.Fatalf("total cards_tokens over the ledger = %d, want %d (each token of work once)", sumCards(rows), want)
+	}
+}
+
+// (c) the same when the ladder fails: the final defer is the call and carries the
+// climbing attempt's work too.
+func TestCascadeEscalatedDeferCarriesTheInnerAttemptsCardWork(t *testing.T) {
+	const entryModel, escModel = "fake-e2b", "fake-e4b"
+	srv := cascadeServer(entryModel, escModel, fakeChat{content: "not json at all", finishReason: "stop", promptTokens: 120})
+	defer srv.Close()
+	p, lpath := ledgerPipeline(t, cascadeCfg(srv, entryModel, escModel), srv)
+
+	if res := p.Run(context.Background(), escTriageReq); res.OK {
+		t.Fatal("want a defer")
+	}
+	rows := readRows(t, lpath)
+	call, inner := assertOneCall(t, rows, 1)
+	if want := ownTokens(inner[0]) + ownTokens(call); call.CardsTokens != want || want == 0 {
+		t.Fatalf("call cards_tokens = %d, want %d: %s", call.CardsTokens, want, rowsStr(rows))
+	}
+}
+
+// (d) an extract_image whose sub-call climbed: the composite's card figure adds
+// the sub-call's carried work to what the answering tier did.
+func TestExtractImageCardsIncludeASubCallsCarriedWork(t *testing.T) {
+	lpath := filepath.Join(t.TempDir(), "ledger.jsonl")
+	led, err := ledger.Open(lpath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer led.Close()
+	p := &Pipeline{led: led}
+	sub := core.Result{OK: true, Meta: core.Meta{TokensIn: 60, TokensOut: 8, CardsCarried: 40}}
+	p.recordExtractImageCall(core.TaskExtractImage, core.Meta{JobID: "xi-1"}, time.Now(), sub, []core.Result{sub})
+	if got := sumCards(readRows(t, lpath)); got != 60+8+40 {
+		t.Fatalf("composite cards_tokens = %d, want 108", got)
+	}
+}

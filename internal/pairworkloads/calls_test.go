@@ -182,7 +182,7 @@ func terminalsByID(c *capture) (opened map[string]bool, terminal map[string]map[
 // Matched first-in first-out it closed the OLDER call's card (swapping model and
 // timings), the shorter call's End then closed its own still-open card with no
 // row data, and when the older call's row finally came the queue was empty, so
-// it got a THIRD card (11 surplus on 2026-10-01, ~80 concurrent transcribes).
+// it got a THIRD card (11 surplus cards on 2026-10-01).
 // A row now names its call, and claims exactly that card.
 func TestOverlappingCallsEachRowClosesItsOwnCard(t *testing.T) {
 	c := &capture{}

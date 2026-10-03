@@ -103,6 +103,14 @@ func stampOrigin(e *Entry) {
 // prompt) is estimated from input_chars the way the share gate always did
 // (chars/4); a row that deferred before any model ran is 0, not an estimate.
 func cardsTokens(e Entry) int {
+	return CardsTokensOf(e)
+}
+
+// CardsTokensOf is the row's own card work by the figures it carries, for a
+// writer that must add work Record cannot see (a call's earlier inner rows,
+// whose cards_tokens Record zeroes): the call's row then sets CardsTokens to
+// that carried work plus this figure, and Record keeps it.
+func CardsTokensOf(e Entry) int {
 	if e.CacheHit {
 		return 0
 	}

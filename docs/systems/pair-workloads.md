@@ -105,8 +105,8 @@ and the harness has nothing to gain by sending them.
    the whisper POSTs queue only inside one process), so a later call can finish first, and the
    shorter call's row closed the OLDER call's card, its own
    `End` then closed its own card with no row data, and when the older row finally landed the queue
-   was empty and it opened a third card (11 surplus cards over 773 calls on 2026-10-01, in bursts of
-   up to about 80 concurrent calls). Now a row with a `call_id` whose card is not open (already
+   was empty and it opened a third card (11 surplus cards in the retained history, all on 2026-10-01).
+   Now a row with a `call_id` whose card is not open (already
    closed, or another process's) claims nothing and gets its own card; it never closes someone
    else's. Only a row with no `call_id` (a writer that stamps none) falls back to first in, first
    out. `End` never closes a card its own row already closed, and closes its own card when the row
@@ -134,7 +134,9 @@ job), `agent_delegate` already follows the rule with its own `agd-` card, and ev
 writes exactly one row. Token accounting follows the call's own row so no token is counted twice:
 an inner row keeps the prompt tokens it processed as savings, and the call's own row carries only
 what no inner row carries (the synthesis prompt, a cache-hit window's stored figure) plus the whole
-output, with `cards_tokens` set to the work the cards actually did (an inner row records 0). A
+output, with `cards_tokens` set to the work the cards actually did (an inner row records 0; a
+cascade call's row adds the card work of its climbing attempts, carried in `core.Meta.CardsCarried`,
+and an `extract_image` row adds the same carried work of its sub-calls). A
 `video_watch` result still reports the whole call's tokens to the caller.
 4. **Jobs under the GPU lease** (0.140.6, `gpu_leasecard.go`). `gpu reserve -- <cmd>` is how every
    bench, render and measurement runs on every node, and none of it reached PAIR: on 2026-09-23 the
