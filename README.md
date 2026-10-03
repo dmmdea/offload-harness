@@ -156,6 +156,7 @@ offload-harness install detect           # what is this machine, and which hardw
 offload-harness install render           # render this tier's llama-swap serving config (Linux included)
 offload-harness install volumes          # where should this machine install? (most free space, never the OS drive by default)
 offload-harness install hyperframes      # (re)install the pinned HyperFrames for the composition lane: staged, verified, then swapped
+offload-harness install client           # a delegation client: no model, no lane; contracts, research and renders go to the fleet (docs/systems/delegation-client.md)
 offload-harness data status              # where this node keeps its data; on Windows, is any of it on the OS drive?
 offload-harness data migrate            # COPY the data tree to a data drive (dry run unless --apply; never a move, never a junction)
 offload-harness models                   # show configured models + serving flags
