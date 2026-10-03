@@ -77,10 +77,19 @@ func TestAStaleFetchLeftoverIsSweptBeforeTheNextClaim(t *testing.T) {
 	n := startNode(t, nodeOpts{})
 	cfg := clientCfg(t, n)
 	dir := cfg.MediaDir
-	old := time.Now().Add(-2 * time.Hour)
+	// Stale is past the sweep's threshold (the longest call budget plus an hour); "mid" is older than the
+	// old one-hour constant but still inside the threshold, so a call that is still running keeps its files.
+	old := time.Now().Add(-staleAfter() - time.Minute)
+	mid := time.Now().Add(-2 * time.Hour)
 	age := func(name string) {
 		t.Helper()
 		if err := os.Chtimes(filepath.Join(dir, name), old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ageMid := func(name string) {
+		t.Helper()
+		if err := os.Chtimes(filepath.Join(dir, name), mid, mid); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -88,6 +97,8 @@ func TestAStaleFetchLeftoverIsSweptBeforeTheNextClaim(t *testing.T) {
 	for name, body := range map[string]string{
 		".media-fetch-aaaa.part":  "partial",  // stale temp: swept
 		".media-fetch-fresh.part": "partial",  // a download that may still be running: kept
+		".media-fetch-mid.part":   "partial",  // 2 h old, inside the threshold (a 6 h call may still hold it): kept
+		jobA + "mid.png":          "",         // 2 h old empty claim, inside the threshold: kept
 		jobA + "x.png":            "",         // stale empty claim: swept
 		jobA + "full.png":         "REAL",     // a fetched file: kept however old
 		jobB + "fresh.png":        "",         // an empty claim that is not stale: kept
@@ -99,6 +110,8 @@ func TestAStaleFetchLeftoverIsSweptBeforeTheNextClaim(t *testing.T) {
 	for _, name := range []string{".media-fetch-aaaa.part", jobA + "x.png", jobA + "full.png", "graph-a.png", "notes.part"} {
 		age(name)
 	}
+	ageMid(".media-fetch-mid.part")
+	ageMid(jobA + "mid.png")
 	res := Run(context.Background(), cfg, &recordingRunner{}, graphJob(t, nil), "remote", nil)
 	if !res.OK {
 		t.Fatalf("%+v", res)
@@ -112,7 +125,7 @@ func TestAStaleFetchLeftoverIsSweptBeforeTheNextClaim(t *testing.T) {
 			t.Errorf("stale leftover %s was not swept: %v", gone, dirNames(t, dir))
 		}
 	}
-	for _, kept := range []string{".media-fetch-fresh.part", jobA + "full.png", jobB + "fresh.png", "graph-a.png", "notes.part"} {
+	for _, kept := range []string{".media-fetch-fresh.part", ".media-fetch-mid.part", jobA + "mid.png", jobA + "full.png", jobB + "fresh.png", "graph-a.png", "notes.part"} {
 		if !have[kept] {
 			t.Errorf("%s must not be swept: %v", kept, dirNames(t, dir))
 		}
@@ -122,37 +135,40 @@ func TestAStaleFetchLeftoverIsSweptBeforeTheNextClaim(t *testing.T) {
 	}
 }
 
-// ---- R5: a budget that ends the call asks the node to withdraw the job -------------------------------
+// ---- R5: a budget that ends the call says what it cannot undo ---------------------------------------
 
-func TestABudgetThatEndsTheCallAsksTheNodeToWithdrawTheJob(t *testing.T) {
+// A media job cannot be withdrawn (ADR 0064), so the call does not try: it names the job and says the node
+// may still be running it. The fake answers 405 to a DELETE, as a real node does, and must never see one.
+func TestABudgetThatEndsTheCallSaysTheJobCannotBeRecalled(t *testing.T) {
 	withBudget(t, taskImage, 300*time.Millisecond)
-	for name, tc := range map[string]struct {
-		status int
-		want   string
-	}{
-		"the node confirms":   {200, "confirmed it withdrew the job before it started"},
-		"the node refuses":    {409, "may still be running that job"},
-		"an older node (405)": {0, "may still be running that job"},
-	} {
+	for name, state := range map[string]string{"rendering": "running", "queued": "queued"} {
 		log := &fakeLog{}
-		fake := fakeNode(t, fakeOpts{tasks: []string{"image-gen"}, jobState: "running", log: log, deleteStatus: tc.status})
+		fake := fakeNode(t, fakeOpts{tasks: []string{"image-gen"}, jobState: state, log: log})
 		cfg := config.Config{MediaDir: t.TempDir(), FleetAuthToken: "tok", DelegateRemotes: []string{fake.URL}}
+		start := time.Now()
 		res := Run(context.Background(), cfg, &recordingRunner{}, imageReq(), "remote", nil)
 		if res.OK || res.DeferClass != core.DeferClassBudget {
 			t.Fatalf("%s: %+v", name, res)
 		}
-		del := log.withdraws()
-		if len(del) != 1 || !strings.HasPrefix(del[0].path, "/fleet/jobs/media-") || del[0].auth != "Bearer tok" {
-			t.Fatalf("%s: the node must be asked once, with the fleet bearer, to withdraw the job: %+v", name, del)
+		if time.Since(start) > 3*time.Second {
+			t.Errorf("%s: a budget defer must not spend extra time on a request of its own: %v", name, time.Since(start))
 		}
-		if !strings.Contains(res.Reason, strings.TrimPrefix(del[0].path, "/fleet/jobs/")) || !strings.Contains(res.Reason, tc.want) {
-			t.Errorf("%s: the defer must name the job and say %q: %s", name, tc.want, res.Reason)
+		if del := log.deleted(); len(del) != 0 {
+			t.Fatalf("%s: a media job is never withdrawn, so no DELETE may be sent: %+v", name, del)
+		}
+		for _, want := range []string{"remote job media-", "may still be running the job", "cannot be recalled", "ADR 0064"} {
+			if !strings.Contains(res.Reason, want) {
+				t.Errorf("%s: the defer must say %q: %s", name, want, res.Reason)
+			}
+		}
+		if strings.Contains(res.Reason, "withdrew") || strings.Contains(res.Reason, "finished the render") {
+			t.Errorf("%s: wrong phase wording: %s", name, res.Reason)
 		}
 	}
 }
 
-// A deadline that passes while the outputs are fetched is not a job to withdraw: the render is finished.
-func TestABudgetThatEndsDuringTheFetchSaysTheRenderFinishedAndWithdrawsNothing(t *testing.T) {
+// A deadline that passes while the outputs are fetched is not a job still running: the render is finished.
+func TestABudgetThatEndsDuringTheFetchSaysTheRenderFinished(t *testing.T) {
 	withBudget(t, taskImage, 500*time.Millisecond)
 	log := &fakeLog{}
 	fake := fakeNode(t, fakeOpts{tasks: []string{"image-gen"}, jobData: `{"image_path":"x.png"}`, mediaHang: true, log: log})
@@ -162,11 +178,11 @@ func TestABudgetThatEndsDuringTheFetchSaysTheRenderFinishedAndWithdrawsNothing(t
 	if time.Since(start) > 10*time.Second || res.OK || res.DeferClass != core.DeferClassBudget {
 		t.Fatalf("%v %+v", time.Since(start), res)
 	}
-	if !strings.Contains(res.Reason, "finished the render") || !strings.Contains(res.Reason, "fetched") || strings.Contains(res.Reason, "may still be running") {
+	if !strings.Contains(res.Reason, "finished the render") || !strings.Contains(res.Reason, "fetched") || strings.Contains(res.Reason, "may still be running") || strings.Contains(res.Reason, "cannot be recalled") {
 		t.Errorf("the fetch-phase expiry must say the render finished and the fetch ran out of time: %s", res.Reason)
 	}
-	if del := log.withdraws(); len(del) != 0 {
-		t.Errorf("a finished job is not withdrawn: %+v", del)
+	if del := log.deleted(); len(del) != 0 {
+		t.Errorf("no DELETE is ever sent: %+v", del)
 	}
 	noTempLeft(t, cfg.MediaDir)
 	if got := dirNames(t, cfg.MediaDir); len(got) != 0 {

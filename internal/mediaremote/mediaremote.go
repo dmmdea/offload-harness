@@ -331,14 +331,14 @@ func Call(ctx context.Context, cfg config.Config, req core.Request, remotes []st
 	}
 
 	if err := post(ctx, cfg, base+route, body); err != nil {
-		if be := budgetEnded(ctx, cfg, base, phaseSending, node, jobID, err); be != nil {
+		if be := budgetEnded(ctx, phaseSending, node, jobID, err); be != nil {
 			return core.Result{}, be
 		}
 		return core.Result{}, err
 	}
 	res, data, err := wait(ctx, cfg, base, jobID)
 	if err != nil {
-		if be := budgetEnded(ctx, cfg, base, phaseRendering, node, jobID, err); be != nil {
+		if be := budgetEnded(ctx, phaseRendering, node, jobID, err); be != nil {
 			return core.Result{}, be
 		}
 		var pe *placementError
@@ -353,7 +353,7 @@ func Call(ctx context.Context, cfg config.Config, req core.Request, remotes []st
 	}
 	local, err := fetchOutputs(ctx, cfg, base, data, outputDest{out: str(req.Params, "out"), outDir: pl.outDir}, jobID, node)
 	if err != nil {
-		if be := budgetEnded(ctx, cfg, base, phaseFetching, node, jobID, err); be != nil {
+		if be := budgetEnded(ctx, phaseFetching, node, jobID, err); be != nil {
 			return core.Result{}, be
 		}
 		var pe *placementError
@@ -378,18 +378,15 @@ const (
 	phaseFetching
 )
 
-// withdrawTimeout bounds the best-effort withdraw sent when a call's budget ends; the call's own context is
-// already expired by then, so the request runs on one of its own.
-const withdrawTimeout = 5 * time.Second
-
 // budgetEnded answers a failure that surfaced after this call's own deadline passed (the budget this call
 // set itself, or the caller's shorter one) as a budget defer naming the node and the remote job, whatever
-// transport error the expiry looked like on the way. While the job is sent or rendering the node is asked,
-// best effort, to withdraw it (a job it has not started never will, instead of rendering for hours into
-// an output nobody fetches); the message says whether it confirmed. A deadline that passes while the
-// outputs are fetched is a different thing: the render is finished and the files are still on the node, so
-// nothing is withdrawn and the message says so. nil when the deadline did not pass.
-func budgetEnded(ctx context.Context, cfg config.Config, base string, ph phase, node, jobID string, cause error) error {
+// transport error the expiry looked like on the way. While the job is sent or rendering, the node may
+// still be running it, and it cannot be recalled: a media job is claimed to running as soon as it is
+// admitted, and the node's withdraw (DELETE /fleet/jobs/{id}) is for agent jobs only (ADR 0064), so the
+// message says so rather than the call spending time on a request the node always refuses. A deadline
+// that passes while the outputs are fetched is a different thing: the render is finished and the files
+// are still on the node. nil when the deadline did not pass.
+func budgetEnded(ctx context.Context, ph phase, node, jobID string, cause error) error {
 	if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		return nil
 	}
@@ -397,41 +394,12 @@ func budgetEnded(ctx context.Context, cfg config.Config, base string, ph phase, 
 		return &placementError{core.DeferClassBudget, fmt.Sprintf(
 			"node %s (remote job %s) finished the render, but the deadline for this call passed while its outputs were being fetched; the files are still on the node and none was kept here: %v", node, jobID, cause)}
 	}
-	doing, note := "sending the job", "the node may still be running that job"
+	doing := "sending the job"
 	if ph == phaseRendering {
 		doing = "the job was rendering"
 	}
-	if withdrawJob(cfg, base, jobID) {
-		note = "the node confirmed it withdrew the job before it started"
-	}
 	return &placementError{core.DeferClassBudget, fmt.Sprintf(
-		"the deadline for this call passed while %s on node %s (remote job %s); %s: %v", doing, node, jobID, note, cause)}
-}
-
-// withdrawJob asks the node to take back a job it has not started (DELETE /fleet/jobs/{id}). Best effort:
-// the request has a short timeout of its own, and any failure is logged, never returned, because the call
-// is already ending on its budget. True only when the node confirmed the withdrawal.
-func withdrawJob(cfg config.Config, base, jobID string) bool {
-	ctx, cancel := context.WithTimeout(context.Background(), withdrawTimeout)
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, base+"/fleet/jobs/"+url.PathEscape(jobID), nil)
-	if err != nil {
-		log.Printf("mediaremote: withdraw of remote job %s not sent: %v", jobID, err)
-		return false
-	}
-	auth(cfg, req)
-	resp, err := HTTPClient.Do(req)
-	if err != nil {
-		log.Printf("mediaremote: withdraw of remote job %s on %s failed: %v", jobID, base, err)
-		return false
-	}
-	defer resp.Body.Close()
-	b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-	if resp.StatusCode == http.StatusOK {
-		return true
-	}
-	log.Printf("mediaremote: node %s did not withdraw remote job %s: status %d: %s", base, jobID, resp.StatusCode, truncate(b))
-	return false
+		"the deadline for this call passed while %s on node %s (remote job %s); the node may still be running the job and it cannot be recalled (a media job cannot be withdrawn, ADR 0064): %v", doing, node, jobID, cause)}
 }
 
 func newJobID() (string, error) {
@@ -783,7 +751,8 @@ type staged struct {
 // node's names, and the prefix only where a name is taken). The caller's out is decided first and no other
 // output may claim its path. A mismatch or a failed download removes every temp and every claimed name and
 // leaves the caller's destinations as they were; if a placement fails part-way the error says which files
-// already landed. The caller's out is placed last. Fetched files are 0644 less the umask. Before claiming
+// already landed. The caller's out is placed last. Fetched files are 0644 less the umask, except that an
+// out which already exists keeps that file's permission bits. Before claiming
 // in a directory, leftovers of a fetch that never finished (stale temps and empty job-prefixed claims) are
 // swept.
 func fetchOutputs(ctx context.Context, cfg config.Config, base string, data json.RawMessage, to outputDest, jobID, node string) (json.RawMessage, error) {
@@ -914,12 +883,23 @@ func fetchOutputs(ctx context.Context, cfg config.Config, base string, data json
 
 	unverified := false
 	for _, it := range items {
-		tmp, got, err := download(ctx, cfg, base, it.name, filepath.Dir(it.dst))
+		perm := stagePerm
+		if it.explicit {
+			// Replacing a file the caller already has keeps its permission bits (a private 0600 out stays
+			// 0600); a new out is 0644 less the umask like every other fetched file.
+			if fi, err := os.Stat(it.dst); err == nil && fi.Mode().IsRegular() {
+				perm = fi.Mode().Perm()
+			}
+		}
+		tmp, got, err := download(ctx, cfg, base, it.name, filepath.Dir(it.dst), perm)
 		if err != nil {
 			cleanup()
 			return nil, err
 		}
 		it.tmp = tmp
+		// A long multi-output fetch must never look stale to another call's sweep: refresh the mtime of
+		// everything this call holds (its claims and its finished temps) after each download.
+		touch(items)
 		if want, ok := expected[it.name]; ok {
 			if got != want {
 				cleanup()
@@ -1041,7 +1021,7 @@ func nodeName(p string) (string, error) {
 
 // download fetches one file into a unique temp file in dir and returns that temp path and the sha256 of
 // the bytes written. On any failure no temp file is left behind.
-func download(ctx context.Context, cfg config.Config, base, name, dir string) (tmp, sum string, err error) {
+func download(ctx context.Context, cfg config.Config, base, name, dir string, perm os.FileMode) (tmp, sum string, err error) {
 	fctx, cancel := context.WithTimeout(ctx, fetchTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(fctx, http.MethodGet, base+"/fleet/media/"+url.PathEscape(name), nil)
@@ -1058,7 +1038,7 @@ func download(ctx context.Context, cfg config.Config, base, name, dir string) (t
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return "", "", &httpStatusError{code: resp.StatusCode, what: "GET " + name, body: truncate(b)}
 	}
-	f, err := createStage(dir)
+	f, err := createStage(dir, perm)
 	if err != nil {
 		return "", "", err
 	}
@@ -1082,16 +1062,20 @@ const (
 	stageSuffix = ".part"
 )
 
-// createStage creates a download's temp file under a unique name in dir with mode 0644 (less the umask), so
-// a fetched file is readable by whoever reads this machine's media dir, as the old direct write was. (A
-// temp made by os.CreateTemp is always 0600, and the rename carries that mode onto the output.)
-func createStage(dir string) (*os.File, error) {
+// stagePerm is the mode a fetched file gets when no file of that name existed: 0644 less the umask.
+const stagePerm os.FileMode = 0o644
+
+// createStage creates a download's temp file under a unique name in dir with mode perm (less the umask):
+// 0644 for a new file, so it is readable by whoever reads this machine's media dir as the old direct write
+// was, or the permission bits of the file it is going to replace. (A temp made by os.CreateTemp is always
+// 0600, and the rename carries that mode onto the output.)
+func createStage(dir string, perm os.FileMode) (*os.File, error) {
 	for range 100 {
 		var rnd [8]byte
 		if _, err := rand.Read(rnd[:]); err != nil {
 			return nil, err
 		}
-		f, err := os.OpenFile(filepath.Join(dir, stagePrefix+hex.EncodeToString(rnd[:])+stageSuffix), os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o644)
+		f, err := os.OpenFile(filepath.Join(dir, stagePrefix+hex.EncodeToString(rnd[:])+stageSuffix), os.O_RDWR|os.O_CREATE|os.O_EXCL, perm)
 		if err == nil {
 			return f, nil
 		}
@@ -1119,21 +1103,51 @@ func samePath(a, b string) bool {
 }
 
 const (
-	// staleAfter is how old a fetch leftover must be before the sweep takes it: far longer than any one
-	// download (fetchTimeout is 30 minutes) so a concurrent fetch of another job is never touched.
-	staleAfter = time.Hour
+	// staleMargin is added to the longest call budget to get the sweep's threshold.
+	staleMargin = time.Hour
 	// sweepScan bounds how many directory entries one sweep looks at, and sweepRemove how many files it removes.
 	sweepScan, sweepRemove = 4096, 256
 )
+
+// staleAfter is how old a fetch leftover must be before the sweep takes it: the longest call budget (the
+// same Budgets the client runs a call under, 2 to 6 hours) plus an hour, so that no call another process
+// is still running can have its claims or temps taken. A call also refreshes the mtime of everything it
+// holds after each download (touch), so a long multi-output fetch never ages toward the threshold.
+func staleAfter() time.Duration {
+	var longest time.Duration
+	for _, b := range Budgets {
+		longest = max(longest, b)
+	}
+	return longest + staleMargin
+}
+
+// touch refreshes the modification time of the claims and the finished temps a call holds, best effort.
+func touch(items []*staged) {
+	now := time.Now()
+	for _, it := range items {
+		if it.tmp != "" {
+			_ = os.Chtimes(it.tmp, now, now)
+		}
+		if it.reserved {
+			_ = os.Chtimes(it.dst, now, now)
+		}
+	}
+}
 
 // claimedName matches the names claimName gives an output that took the remote job id as a prefix.
 var claimedName = regexp.MustCompile(`^media-[0-9a-f]{16}-`)
 
 // sweepStale removes what a fetch that never finished left in dir: staged `.media-fetch-*.part` temps and
-// zero-byte job-prefixed claim files, both older than staleAfter. A SIGINT, a kill or a crash between the
+// zero-byte job-prefixed claim files, both older than staleAfter(). A SIGINT, a kill or a crash between the
 // claim and the rename skips the cleanup that error returns do, and an empty claim left behind pushes every
 // later job onto a prefixed name. Bounded (entries scanned, files removed) and logged; a failure is only a
 // log line, since the fetch it precedes does not depend on it.
+//
+// Two limits are deliberate. A crash mid-fetch can leave an empty claim that carries the node's bare name
+// (the primary output takes it in media_dir): the sweep does not remove it, because an empty file with a
+// plain name cannot be told from one the user made, and removing it could destroy theirs. And an empty
+// `media-<id>-*` file older than the threshold is indistinguishable from a claim, so it is removed even if
+// something else made it empty.
 func sweepStale(dir string, now time.Time) {
 	d, err := os.Open(dir)
 	if err != nil {
@@ -1141,6 +1155,7 @@ func sweepStale(dir string, now time.Time) {
 	}
 	defer d.Close()
 	entries, _ := d.ReadDir(sweepScan)
+	threshold := staleAfter()
 	var removed []string
 	for _, e := range entries {
 		if len(removed) >= sweepRemove {
@@ -1152,7 +1167,7 @@ func sweepStale(dir string, now time.Time) {
 			continue
 		}
 		fi, err := e.Info()
-		if err != nil || !fi.Mode().IsRegular() || now.Sub(fi.ModTime()) < staleAfter {
+		if err != nil || !fi.Mode().IsRegular() || now.Sub(fi.ModTime()) < threshold {
 			continue
 		}
 		if !stage && fi.Size() != 0 {

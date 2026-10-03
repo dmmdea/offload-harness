@@ -64,9 +64,14 @@ type nodeRunner struct {
 	reqs    []core.Request
 	inputs  map[string][]byte // field -> bytes the pipeline read from the extracted file
 	deferAs string
+	// hold, when set, blocks every run until it is closed (a render that never finishes during the test).
+	hold chan struct{}
 }
 
 func (n *nodeRunner) Run(_ context.Context, req core.Request) core.Result {
+	if n.hold != nil {
+		<-n.hold
+	}
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.reqs = append(n.reqs, req)
@@ -119,6 +124,7 @@ type nodeOpts struct {
 	mediaInputs bool
 	cfg         func(*config.Config)
 	routes      func(config.Config) []mediacap.Route
+	hold        chan struct{} // see nodeRunner.hold; the test closes it
 }
 
 // bindOnly is the derivation a fixture node runs on: a route is CONFIGURED when its script is bound.
@@ -154,7 +160,7 @@ func startNode(t *testing.T, o nodeOpts) *node {
 	if o.cfg != nil {
 		o.cfg(&cfg)
 	}
-	r := &nodeRunner{media: media}
+	r := &nodeRunner{media: media, hold: o.hold}
 	jobs := fleetnode.NewJobs(time.Hour, cfg.FleetConcurrencyLimit())
 	t.Cleanup(func() { jobs.DrainAndStop(2 * time.Second) })
 	s := fleetnode.New(r, jobs, fleetnode.Options{
@@ -658,9 +664,6 @@ type fakeOpts struct {
 	// alternate makes polls 1..2*alternate alternate a 500 (odd polls) with a running answer (even polls),
 	// then the job behaves normally: more than maxPollFailures failures, never maxPollFailures in a row.
 	alternate int
-	// deleteStatus is the status a DELETE /fleet/jobs/{id} (a withdraw) answers; 0 = 405, which is what a
-	// real node answers for a job it will not withdraw.
-	deleteStatus int
 	// mediaHang makes GET /fleet/media block until the client gives up.
 	mediaHang bool
 }
@@ -670,7 +673,7 @@ type fakeLog struct {
 	mu      sync.Mutex
 	paths   []string // r.URL.EscapedPath() of every request
 	polls   int
-	deletes []seen // every DELETE (a withdraw), with the bearer it carried
+	deletes []seen // every DELETE, with the bearer it carried (the client never sends one)
 }
 
 func (l *fakeLog) noteDelete(path, auth string) {
@@ -682,7 +685,7 @@ func (l *fakeLog) noteDelete(path, auth string) {
 	l.deletes = append(l.deletes, seen{method: http.MethodDelete, path: path, auth: auth})
 }
 
-func (l *fakeLog) withdraws() []seen {
+func (l *fakeLog) deleted() []seen {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return append([]seen(nil), l.deletes...)
@@ -720,15 +723,7 @@ func fakeNode(t *testing.T, o fakeOpts) *httptest.Server {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodDelete {
 			o.log.noteDelete(r.URL.EscapedPath(), r.Header.Get("Authorization"))
-			if o.deleteStatus == http.StatusOK {
-				fmt.Fprint(w, `{"state":"withdrawn","withdrawn":true}`)
-				return
-			}
-			status := o.deleteStatus
-			if status == 0 {
-				status = http.StatusMethodNotAllowed
-			}
-			w.WriteHeader(status)
+			w.WriteHeader(http.StatusMethodNotAllowed) // what a real node answers for a media job (ADR 0064)
 			return
 		}
 		o.log.note(r.URL.EscapedPath(), strings.HasPrefix(r.URL.Path, "/fleet/jobs/"))

@@ -44,3 +44,35 @@ func TestFetchedOutputsLandAs0644LessTheUmask(t *testing.T) {
 		}
 	}
 }
+
+// ---- S7: replacing an existing out keeps that file's permission bits -------------------------------
+
+func TestReplacingAnExistingOutKeepsItsPermissionBits(t *testing.T) {
+	prev := syscall.Umask(0o022)
+	defer syscall.Umask(prev)
+	for _, mode := range []os.FileMode{0o600, 0o640} {
+		n := startNode(t, nodeOpts{})
+		cfg := clientCfg(t, n)
+		out := filepath.Join(t.TempDir(), "main.png")
+		if err := os.WriteFile(out, []byte("OLD"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(out, mode); err != nil {
+			t.Fatal(err)
+		}
+		res := Run(context.Background(), cfg, &recordingRunner{}, graphJob(t, map[string]any{"out": out}), "remote", nil)
+		if !res.OK {
+			t.Fatalf("%+v", res)
+		}
+		if got := readString(t, out); got != "GA" {
+			t.Fatalf("out must hold the new render, got %q", got)
+		}
+		fi, err := os.Stat(out)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := fi.Mode().Perm(); got != mode {
+			t.Errorf("an existing out of mode %04o came back %04o", mode, got)
+		}
+	}
+}
