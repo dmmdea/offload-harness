@@ -188,6 +188,9 @@ func routesWith(cfg config.Config, exeDir string, nodes NodeChecker) []Route {
 	// (routeneeds.go). run_graph runs the CALLER's graph, so its script is the whole
 	// binding; its manifest satisfaction is the runner's own preflight.
 	family, vFiles, vClasses, vOptional := videoNeeds(cfg)
+	// The iGPU engines (CT-49) replace the ComfyUI/python route of the same name; an
+	// engine route never marks comfyUsed, only nodeUsed (its runner is a node script).
+	igpu, igpuExtra := igpuRoutes(cfg, exeDir)
 	for _, s := range []struct {
 		name, engine, key, value string
 		comfy                    bool
@@ -210,6 +213,11 @@ func routesWith(cfg config.Config, exeDir string, nodes NodeChecker) []Route {
 		}},
 		{"run_graph", "comfyui", "run_graph_script", cfg.RunGraphScript, true, nil},
 	} {
+		if r, ok := igpu[s.name]; ok {
+			out = append(out, r)
+			nodeUsed = true
+			continue
+		}
 		if s.value == "" {
 			out = append(out, Route{Name: s.name, Engine: s.engine, State: NotConfigured,
 				Detail: s.key + " is unset"})
@@ -224,6 +232,12 @@ func routesWith(cfg config.Config, exeDir string, nodes NodeChecker) []Route {
 			r = s.derive(r)
 		}
 		out = append(out, r)
+	}
+
+	// Non-default sdcpp video families: one verdict each, beside generate_video.
+	if len(igpuExtra) > 0 {
+		out = append(out, igpuExtra...)
+		nodeUsed = true
 	}
 
 	// --- edit_image (PIL): an explicit python is a binding; an unset one derives
@@ -241,7 +255,7 @@ func routesWith(cfg config.Config, exeDir string, nodes NodeChecker) []Route {
 		if cfg.TTSVoice != "" {
 			detail += " voice=" + cfg.TTSVoice
 		}
-		if cfg.VoiceGenScript == "" {
+		if cfg.VoiceGenScript == "" && cfg.VoiceGenEngine != config.EngineAudiocpp {
 			detail += " (the voice default on this box: no voicegen_script)"
 		} else {
 			detail += " (selected by voice=endpoint; voicegen_script stays the default)"
@@ -416,6 +430,11 @@ func (b binding) resolve(exeDir string) (got, why string, ok bool) {
 			return p, "", true
 		}
 		return "", fmt.Sprintf("%s=%s not found (no such file, and not on PATH)", b.key, b.value), false
+	case anyPathBinding:
+		if _, err := os.Stat(b.value); err == nil {
+			return b.value, "", true
+		}
+		return "", fmt.Sprintf("%s=%s does not exist", b.key, b.value), false
 	default:
 		if fi, err := os.Stat(b.value); err == nil && !fi.IsDir() {
 			return b.value, "", true

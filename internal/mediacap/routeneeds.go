@@ -278,7 +278,8 @@ func VideoFamilyBindingRows(cfg config.Config) []VideoFamilyBindingRow {
 		}
 		out = append(out, row)
 	}
-	return out
+	// The sdcpp families (CT-49) bind sd-cli files, not ComfyUI names: one row each.
+	return append(out, sdcppVideoFamilyRows(cfg, defaultFamily)...)
 }
 
 // animateNeeds: WAN-Animate-2's four files (the runner passes the animategen_* keys).
