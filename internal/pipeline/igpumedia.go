@@ -108,6 +108,25 @@ func floorTo32(n int) int {
 
 func fmtFloat(f float64) string { return strconv.FormatFloat(f, 'f', -1, 64) }
 
+// timeoutArgs arms the runner's own deadline a margin BEFORE gpugen's. gpugen kills only the
+// node process on a non-Windows host, so a runner killed from outside leaves its engine
+// running on the iGPU; a runner that times itself out kills the engine's whole tree first.
+// The margin is 15 s (a quarter of the budget when that is under a minute); no timeout, no flag.
+func timeoutArgs(timeout time.Duration) []string {
+	if timeout <= 0 {
+		return nil
+	}
+	margin := 15 * time.Second
+	if timeout < time.Minute {
+		margin = timeout / 4
+	}
+	secs := int((timeout - margin) / time.Second)
+	if secs < 1 {
+		secs = 1
+	}
+	return []string{"--timeout-sec", strconv.Itoa(secs)}
+}
+
 // extraArgsFlag is the JSON-array form the runners parse (a token with spaces survives).
 func extraArgsFlag(extra []string) []string {
 	if len(extra) == 0 {
@@ -258,6 +277,7 @@ func (p *Pipeline) runGenerateVideoSdcpp(ctx context.Context, req core.Request, 
 	}
 	args = append(args, "--seed", strconv.Itoa(seed))
 	args = append(args, extraArgsFlag(fb.SdcppExtraArgs)...)
+	args = append(args, timeoutArgs(timeout)...)
 
 	outPath, dres := p.runIGPU(ctx, req, &meta, start, igpuRun{
 		leaseReason: "video-gen (sdcpp)", failVerb: "video generation failed",
@@ -363,6 +383,7 @@ func (p *Pipeline) runAnimateCharacterSdcpp(ctx context.Context, req core.Reques
 	}
 	args = append(args, "--seed", strconv.Itoa(seed))
 	args = append(args, extraArgsFlag(cfg.AnimateGenSdcppExtraArgs)...)
+	args = append(args, timeoutArgs(timeout)...)
 	if len(cfg.AnimateGenDepthExtraArgs) > 0 {
 		b, _ := json.Marshal(cfg.AnimateGenDepthExtraArgs)
 		args = append(args, "--depth-extra-args", string(b))
@@ -466,6 +487,7 @@ func (p *Pipeline) runGenerateAudioAudiocpp(ctx context.Context, req core.Reques
 	}
 	args = append(args, "--seed", strconv.Itoa(seed))
 	args = append(args, extraArgsFlag(cfg.AudiocppExtraArgs)...)
+	args = append(args, timeoutArgs(timeout)...)
 
 	outPath, dres := p.runIGPU(ctx, req, &meta, start, igpuRun{
 		leaseReason: "audio-gen (" + kind + ", audiocpp)", failVerb: "audio generation failed",

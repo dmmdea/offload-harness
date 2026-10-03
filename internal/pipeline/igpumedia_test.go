@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
@@ -79,6 +81,8 @@ func TestRunGenerateVideo_SdcppFamilyRunsTheSdcppScriptWithBoundPathsAndNormaliz
 		"vae": "/models/wan2.2_vae.safetensors", "t5xxl": "/models/umt5.gguf", "backend": "vulkan0",
 		"frames": "49", "width": "832", "height": "480", "fps": "24", "steps": "3", "cfg": "1", "flow-shift": "3",
 		"sampler": "euler", "seed": "7", "negative": "blurry", "extra-args": `["--flag with space"]`,
+		// the runner times itself out 15 s before gpugen's kill (videogen_timeout_sec default 1500)
+		"timeout-sec": "1485",
 	}
 	for k, v := range want {
 		if got := igpuFlag(args, k); got != v {
@@ -150,7 +154,7 @@ func TestRunAnimateCharacter_SdcppEngineRunsTheAnimateScript(t *testing.T) {
 		"sd-bin": "/opt/sdcpp/sd-cli", "model": "/models/wan2.1-vace-1.3b-q8_0.gguf", "vae": "/models/wan_2.1_vae.safetensors",
 		"t5xxl": "/models/umt5.gguf", "backend": "vulkan0", "depth-bin": "/opt/depth/da3-cli", "depth-model": "/models/depth.gguf",
 		"frames": "81", "width": "832", "height": "480", "steps": "20", "cfg": "6", "flow-shift": "5", "seed": "9",
-		"extra-args": `["--x"]`, "depth-extra-args": `["--y"]`,
+		"extra-args": `["--x"]`, "depth-extra-args": `["--y"]`, "timeout-sec": "1785",
 	}
 	for k, v := range want {
 		if got := igpuFlag(args, k); got != v {
@@ -201,7 +205,7 @@ func TestRunGenerateAudio_AudiocppVoiceAndMusicRouteToTheirScript(t *testing.T) 
 		t.Errorf("voice positionals = %v", args[:4])
 	}
 	for k, w := range map[string]string{"bin": "/opt/audiocpp/audiocpp_cli", "family": "chatterbox", "model": "/models/chatterbox-q8_0.gguf",
-		"backend": "vulkan", "device": "0", "clone": "/refs/me.wav", "lang": "es", "seed": "5", "extra-args": `["--threads","4"]`} {
+		"backend": "vulkan", "device": "0", "clone": "/refs/me.wav", "lang": "es", "seed": "5", "extra-args": `["--threads","4"]`, "timeout-sec": "705"} {
 		if got := igpuFlag(args, k); got != w {
 			t.Errorf("voice --%s = %q, want %q", k, got, w)
 		}
@@ -354,6 +358,22 @@ func TestResolveVideoFamilyKnowsAnSdcppFamilyByItsOwnName(t *testing.T) {
 	// an unbound name is still the closed set's Wan fallback, exactly as before
 	if arg, fam := resolveVideoFamily(config.Default(), "fastwan"); arg != "fastwan" || fam != videoFamilyWanSentinel {
 		t.Errorf("unbound name: %q %q", arg, fam)
+	}
+}
+
+func TestTimeoutArgsArmTheRunnerBeforeGpugenKills(t *testing.T) {
+	cases := map[time.Duration][]string{
+		0:                  nil,
+		-time.Second:       nil,
+		1500 * time.Second: {"--timeout-sec", "1485"},
+		61 * time.Second:   {"--timeout-sec", "46"},
+		40 * time.Second:   {"--timeout-sec", "30"},
+		time.Second:        {"--timeout-sec", "1"},
+	}
+	for in, want := range cases {
+		if got := timeoutArgs(in); !reflect.DeepEqual(got, want) {
+			t.Errorf("timeoutArgs(%v) = %v, want %v", in, got, want)
+		}
 	}
 }
 

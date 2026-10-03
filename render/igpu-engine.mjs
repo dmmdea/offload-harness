@@ -58,6 +58,8 @@ export function parseExtraArgs(raw) {
 }
 
 function isCpuName(v) {
+  // "best" / "auto" let the binary pick; on a box whose GPU it cannot open that is the CPU.
+  if (v === "best" || v === "auto") return true;
   if (!v.startsWith("cpu")) return false;
   return /^\d*$/.test(v.slice(3));
 }
@@ -114,6 +116,10 @@ const PLACEMENT = [
   /\b[a-z][\w.-]*\s*=\s*cpu\d*\b/i,
   /\b(?:running|run|runs|computing|compute|placed|placing|fall(?:ing)?\s*back|fallback)\s+(?:on|to|onto)\s+cpu\b/i,
   /\bfell\s+back\s+to\s+cpu\b/i,
+  // A software Vulkan ICD is the CPU in substance: ggml_vulkan names the device it opened,
+  // and on a box without a working GPU driver that device is llvmpipe/lavapipe/swiftshader.
+  /\bggml_vulkan\b.*\b(?:llvmpipe|lavapipe|swiftshader)\b/i,
+  /\bvulkan\d*\b.*\b(?:llvmpipe|lavapipe|swiftshader)\b/i,
 ];
 
 // detectCpuPlacement: the first log line (of `text`, any line separator) that places a
@@ -130,7 +136,7 @@ export function detectCpuPlacement(text) {
 // detectCpuPlacementLine: the single-line predicate runEngine applies as output streams.
 export function detectCpuPlacementLine(line) {
   const l = String(line ?? "");
-  if (!/cpu/i.test(l)) return false;
+  if (!/cpu|llvmpipe|lavapipe|swiftshader/i.test(l)) return false;
   if (NOT_PLACEMENT.some((re) => re.test(l))) return false;
   return PLACEMENT.some((re) => re.test(l));
 }

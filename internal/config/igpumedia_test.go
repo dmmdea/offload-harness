@@ -11,7 +11,7 @@ import (
 
 func TestCPUBackendRefusal(t *testing.T) {
 	refused := []string{
-		"", "  ", "cpu", "CPU", " cpu ", "cpu0",
+		"", "  ", "cpu", "CPU", " cpu ", "cpu0", "best", "auto", "diffusion=best",
 		"diffusion=vulkan0,vae=cpu", "clip=cpu,diffusion=vulkan0", "vulkan0,cpu", "diffusion=cuda0&cpu",
 	}
 	for _, b := range refused {
@@ -20,7 +20,7 @@ func TestCPUBackendRefusal(t *testing.T) {
 		}
 	}
 	allowed := []string{
-		"vulkan0", "Vulkan1", "cuda0", "diffusion=vulkan0,vae=vulkan0", "diffusion=cuda0&cuda1", "vulkan", "hip", "best",
+		"vulkan0", "Vulkan1", "cuda0", "diffusion=vulkan0,vae=vulkan0", "diffusion=cuda0&cuda1", "vulkan", "hip", "bestest0",
 		// a device or module that merely contains the letters is not the CPU
 		"cpufreq0x", "mycpu=vulkan0",
 	}

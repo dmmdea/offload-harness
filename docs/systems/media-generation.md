@@ -924,10 +924,12 @@ A box whose only GPU is a Vulkan iGPU (no CUDA, no ROCm) serves the same four la
 
 The operator rule behind these lanes is that nothing runs on the CPU. It is enforced at four layers, each with a test that was seen red once:
 
-1. **Config load.** `config.CPUBackendRefusal` refuses an empty backend, `cpu`, `cpu0` and any per-module assignment that lands on the CPU (`diffusion=vulkan0,vae=cpu`). `local-offload doctor` loads the config first, so it fails on it by name.
+1. **Config load.** `config.CPUBackendRefusal` refuses an empty backend, `cpu`, `cpu0`, `best`, `auto` (the binary's own pick is the CPU on a box whose GPU it cannot open) and any per-module assignment that lands on the CPU (`diffusion=vulkan0,vae=cpu`). `local-offload doctor` loads the config first, so it fails on it by name.
 2. **mediacap.** A route whose backend is a CPU one is BOUND-BUT-MISSING (doctor FAIL), whatever the config loader said, so an in-process config cannot slip past `offload_status`.
 3. **Pipeline.** The same refusal is a typed defer (`meta.err_class` = `cpu_backend_refused`) before the runner spawns.
-4. **The runners read their engine's log.** Each runner scans every output line while the engine runs. The first line that places a compute module on the CPU kills the process tree and fails the job with `CPU_PLACEMENT` (`cpu_placement`), rather than letting a multi-minute render finish on the wrong silicon. The sd-cli and audiocpp_cli verbose flags (`-v`, `--log`) are therefore never optional in the argv. Host dumps (`system_info`), ggml's "loaded CPU backend" registration lines, RNG selection and parameter-storage lines are not placements. The line patterns are in `render/igpu-engine.mjs` (`detectCpuPlacement`) and are pinned by fixtures in `render/testdata/`.
+4. **The runners read their engine's log.** Each runner scans every output line while the engine runs. The first line that places a compute module on the CPU kills the process tree and fails the job with `CPU_PLACEMENT` (`cpu_placement`), rather than letting a multi-minute render finish on the wrong silicon. The sd-cli and audiocpp_cli verbose flags (`-v`, `--log`) are therefore never optional in the argv. A software Vulkan device (`llvmpipe`, `lavapipe`, `swiftshader`) counts as the CPU too. Host dumps (`system_info`), ggml's "loaded CPU backend" registration lines, RNG selection and parameter-storage lines are not placements. The line patterns are in `render/igpu-engine.mjs` (`detectCpuPlacement`) and are pinned by fixtures in `render/testdata/`.
+
+Every runner takes `--timeout-sec`; the pipeline passes its timeout minus a 15 s margin (a quarter of the budget under a minute), so the runner kills its engine's whole process tree before gpugen's own kill, which on a non-Windows host ends only the node process and would leave the engine holding the iGPU.
 
 ### Video (`render/sdcpp-video.mjs`)
 

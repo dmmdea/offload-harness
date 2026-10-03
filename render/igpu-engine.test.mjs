@@ -18,7 +18,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const fixture = (n) => readFileSync(join(here, "testdata", n), "utf8");
 
 test("refuseCpuBackend: cpu, unset and any per-module cpu assignment are refused", () => {
-  for (const b of ["cpu", "CPU", " cpu ", "cpu0", "", "  ", undefined, "diffusion=vulkan0,vae=cpu", "clip=cpu", "vulkan0,cpu", "diffusion=cuda0&cpu"]) {
+  for (const b of ["cpu", "CPU", " cpu ", "cpu0", "", "  ", undefined, "diffusion=vulkan0,vae=cpu", "clip=cpu", "vulkan0,cpu", "diffusion=cuda0&cpu", "best", "auto", "diffusion=best"]) {
     assert.throws(() => refuseCpuBackend(b), new RegExp(CPU_BACKEND_REFUSED), `backend ${JSON.stringify(b)} must be refused`);
   }
   for (const b of ["vulkan0", "Vulkan1", "cuda0", "diffusion=vulkan0,vae=vulkan0", "diffusion=cuda0&cuda1", "vulkan", "mycpu=vulkan0"]) {
@@ -54,6 +54,8 @@ test("detectCpuPlacementLine: the shapes in and out", () => {
     "fell back to CPU for the text encoder",
     "running on CPU",
     "Using CPU backend with 4 threads",
+    "ggml_vulkan: 0 = llvmpipe (LLVM 17.0.6, 256 bits) (llvmpipe) | uma: 0 | fp16: 1",
+    "Vulkan0: lavapipe (software rasterizer)",
   ];
   for (const l of yes) assert.equal(detectCpuPlacementLine(l), true, l);
   const no = [

@@ -11,7 +11,7 @@
 // --task takes `clon`, the CLI enum, not the model-spec word `clone`). The mapping lives
 // HERE: audio.cpp flag drift on a pin bump is fixed in this file, never in Go.
 //
-// Usage: node render/audiocpp-generate.mjs --kind voice|music <out.wav> "<text>"
+// Usage: node render/audiocpp-generate.mjs <out.wav> "<text>" --kind voice|music
 //        --bin P --family F --model P --backend vulkan --device 0
 //        [--clone <ref.wav>] [--lang es] [--seconds N] [--lyrics S] [--seed N]
 //        [--extra-args '<json array>'] [--timeout-sec N] [--no-lock]
@@ -93,7 +93,7 @@ async function main() {
   const [out, text] = pos;
   const kind = flags.kind;
   if (!out || !text || (kind !== "voice" && kind !== "music")) {
-    console.error('usage: node audiocpp-generate.mjs --kind voice|music <out.wav> "<text>" --bin P --family F --model P --backend vulkan [--device 0] [flags]');
+    console.error('usage: node audiocpp-generate.mjs <out.wav> "<text>" --kind voice|music --bin P --family F --model P --backend vulkan [--device 0] [flags]');
     process.exit(2);
   }
   const need = ["bin", "family", "model", "backend"].filter((n) => !flags[n]);

@@ -36,7 +36,7 @@ const (
 // sd-cli's --backend takes either one value ("vulkan0") or per-module assignments
 // ("diffusion=vulkan0,vae=cpu", with "&" joining devices of one module), so every
 // assignment is checked, not just the bare word. "cpu" followed by digits ("cpu0")
-// is the same refusal.
+// is the same refusal, and so are "best" and "auto" (the binary's own choice).
 func CPUBackendRefusal(backend string) error {
 	b := strings.ToLower(strings.TrimSpace(backend))
 	if b == "" {
@@ -55,6 +55,11 @@ func CPUBackendRefusal(backend string) error {
 }
 
 func isCPUBackendName(v string) bool {
+	// "best" and "auto" let the binary pick, and its pick on a box whose GPU it cannot open
+	// is the CPU (audio.cpp does not log the resolution): refused like the CPU itself.
+	if v == "best" || v == "auto" {
+		return true
+	}
 	if !strings.HasPrefix(v, "cpu") {
 		return false
 	}

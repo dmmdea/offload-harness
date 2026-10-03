@@ -27,10 +27,10 @@ branch owns `internal/fleetnode`), run-graph (stays ComfyUI-only) and per-node s
 
 ### Added — no model ever runs on CPU on these engines, enforced at four layers
 
-A `cpu` or unset backend (also `cpu0` and any per-module assignment such as `diffusion=vulkan0,vae=cpu`) is refused at config
+A `cpu` or unset backend (also `cpu0`, `best`, `auto` and any per-module assignment such as `diffusion=vulkan0,vae=cpu`) is refused at config
 load (so `doctor` fails on it by name), reported BOUND-BUT-MISSING by the route derivation, a typed defer in the pipeline
 (`err_class` `cpu_backend_refused`), and refused again by each runner. The runners also read their engine's own log while it
-runs: the first line that places a compute module on the CPU kills the process tree and fails the job with `CPU_PLACEMENT`
+runs: the first line that places a compute module on the CPU (a software Vulkan device such as llvmpipe included) kills the process tree and fails the job with `CPU_PLACEMENT`
 (`err_class` `cpu_placement`) instead of finishing a long render on the wrong silicon. Tests:
 `TestCPUBackendRefusal`, `TestSdcppVideoFamilyRefusesACPUBackend`, `TestAnimateAndAudioEnginesRefuseACPUBackend`,
 `TestACPUBackendIsATypedDeferOnEveryIGPULane`, `TestACPUOrUnsetBackendMakesEveryIGPURouteBoundButMissing` and the node tests in
