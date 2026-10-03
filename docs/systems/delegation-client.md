@@ -1,5 +1,7 @@
 # Delegation client
 
+## Purpose
+
 A delegation client is a machine that runs the harness only to place work on the fleet. It has no
 local model, no media lane and no fleet service of its own: a 2-core laptop with no room for a model
 or a Chrome worker beside its desktop, or an arm64 single-board computer, which has no
@@ -74,3 +76,15 @@ The client picks, among its `delegate_remotes` that advertise the task, the one 
   names it in `node` and `placement`, never the local seat.
 - One render: `local-offload compose-video --config ... --template title-card --snapshots 2.5 --json`
   returns `video_path` in this box's media dir and `meta.node` naming the node that rendered it.
+
+## Source map
+
+| path | role |
+|---|---|
+| `install_client.go` | `install client`: the config it writes, `hasLocalModel` |
+| `setup/install.sh`, `setup/install.tests.sh` | `--client`, `--remotes`, `--token-file`, and their dry-run tests |
+| `acceptance_cmd.go`, `main.go` (`doctorRun`) | the alias check and the endpoint health line that SKIP with no local model |
+| `internal/delegate/run.go` (`localServesLayer`, `seatless`) | a view that names no agent seat is never a placement |
+| `internal/composeremote/` | `offload_compose_video`'s `route`: node choice, the template and project doors, fetching the outputs back |
+| `internal/composebundle/` | packing a project, and the extract and reference checks both sides run |
+| `internal/fleetnode/compose_project.go` | the node's project door (ADR 0070) |

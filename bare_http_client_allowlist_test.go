@@ -25,6 +25,7 @@ var bareClientAllowlist = map[string]struct {
 	"internal/agent/memory.go:NewMemoryClient":                   {1, "configured: the memory authority endpoint from config"},
 	"internal/agent/props.go:<file-scope>":                       {1, "configured: the seat's /props on the local llama-swap"},
 	"internal/agent/window.go:probeWindow":                       {2, "configured: the seat's served-window probe on the local llama-swap"},
+	"internal/composeremote/composeremote.go:<file-scope>":       {1, "configured: fleet nodes from delegate_remotes (composition lane)"},
 	"internal/delegate/nodeview.go:<file-scope>":                 {1, "configured: fleet nodes from delegate_remotes (health reads)"},
 	"internal/delegate/run.go:<file-scope>":                      {2, "configured: fleet nodes from delegate_remotes (dispatch and poll)"},
 	"internal/fleetnode/chat_lane.go:<file-scope>":               {1, "configured: the node's own llama-swap (chat lane proxy)"},
