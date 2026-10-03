@@ -41,10 +41,9 @@ import (
 
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/gpuactivity"
+	"github.com/dmmdea/offload-harness/internal/gpualloc"
 	"github.com/dmmdea/offload-harness/internal/gpulease"
 	"github.com/dmmdea/offload-harness/internal/gpuprobe"
-	"github.com/dmmdea/offload-harness/internal/placement"
-	"github.com/dmmdea/offload-harness/internal/seatload"
 )
 
 // reserveDeviceFlags are the flags that choose the card set.
@@ -260,45 +259,16 @@ func containsID(list []string, id string) bool {
 // --cards N: allocate, or queue
 // ---------------------------------------------------------------------------
 
-// pickAutoCards turns an Auto plan into a concrete set, from live state. free reports which
-// kind of set it is: true = cards that qualify and are free right now (the caller claims
-// them and, if another reserve got there first, picks again); false = no qualifying set is
-// free, and ids is the fixed set to queue FIFO on (the free cards first, topped up from the
-// cards a live lease claims). When too few cards qualify for a reason waiting for a lease
-// does not fix (a display card, quarantine, host RAM, VRAM) it polls until they do or wait
-// runs out.
+// pickAutoCards turns an Auto plan into a concrete set, from live state (internal/gpualloc.PickAuto,
+// the one rule the media admission path reads too). free reports which kind of set it is: true =
+// cards that qualify and are free right now (the caller claims them and, if another reserve got
+// there first, picks again); false = no qualifying set is free, and ids is the fixed set to queue
+// FIFO on. When too few cards qualify for a reason waiting for a lease does not fix (a display
+// card, quarantine, host RAM, VRAM) it polls until they do or wait runs out.
 func pickAutoCards(plan devicePlan, wait time.Duration, build func() (gpulease.AllocInput, error),
 	out io.Writer, sleep func(time.Duration), now func() time.Time) (ids []string, free bool, err error) {
-	deadline := now().Add(wait)
-	told := false
-	for {
-		in, err := build()
-		if err != nil {
-			return nil, false, err
-		}
-		in.Min, in.Max = plan.Min, plan.Max
-		a, aerr := gpulease.Allocate(in)
-		if aerr == nil {
-			return a.Devices, true, nil
-		}
-		var none *gpulease.NoCardsError
-		if !errors.As(aerr, &none) {
-			return nil, false, aerr
-		}
-		if none.HostReason == "" && len(none.Waitable) >= plan.Min {
-			target := none.Waitable[:plan.Min]
-			fmt.Fprintf(out, "gpu reserve: no %d card(s) are free right now; queueing for %s (%s)\n", plan.Min, strings.Join(target, ", "), skipSummary(none))
-			return target, false, nil
-		}
-		if wait <= 0 || !now().Before(deadline) {
-			return nil, false, fmt.Errorf("%w; pass --wait <duration> to keep waiting for cards to qualify", none)
-		}
-		if !told {
-			told = true
-			fmt.Fprintf(out, "gpu reserve: fewer than %d card(s) qualify (%s); waiting up to %s for that to change\n", plan.Min, skipSummary(none), wait)
-		}
-		sleep(2 * time.Second)
-	}
+	return gpualloc.PickAuto(gpualloc.Plan{Min: plan.Min, Max: plan.Max, Hint: "; pass --wait <duration> to keep waiting for cards to qualify"},
+		wait, build, out, sleep, now)
 }
 
 // acquireAutoCards allocates AND claims, as one loop, for a `--cards` request: the
@@ -348,19 +318,7 @@ func acquireAutoCards(m *gpulease.Manager, class gpulease.Class, opts gpulease.O
 // claim race before it queues on the set it last picked.
 const maxAutoClaimRetries = 16
 
-func skipSummary(e *gpulease.NoCardsError) string {
-	var parts []string
-	if e.HostReason != "" {
-		parts = append(parts, e.HostReason)
-	}
-	for _, s := range e.Skipped {
-		parts = append(parts, fmt.Sprintf("card %d %s", s.Index, s.Reason))
-	}
-	if len(parts) == 0 {
-		return "no card qualifies"
-	}
-	return strings.Join(parts, ", ")
-}
+func skipSummary(e *gpulease.NoCardsError) string { return gpualloc.SkipSummary(e) }
 
 // Seams for the live reads behind the allocator's input, so tests assemble a host.
 var (
@@ -369,38 +327,16 @@ var (
 	hostFreeRAMFn   = gpuprobe.HostFreeRAMGiB
 )
 
-// buildAllocInput assembles the allocator's input from live state: the card table, the
-// live leases, quarantine sidecars, foreign compute processes, resident seats, the
-// presence guard and host RAM. Every read is best-effort except the card table, which is
-// the point; an unreadable extra reads as "nothing to report" (and, for foreign
-// processes, is empty on Windows by nvidia-smi's own limit).
+// buildAllocInput assembles the allocator's input from live state (internal/gpualloc.BuildInput):
+// the card table, the live leases, quarantine sidecars, foreign compute processes, resident seats,
+// the presence guard and host RAM, through this package's seams so a test assembles a host.
 func buildAllocInput(ctx context.Context, m *gpulease.Manager, cfg config.Config, f reserveDeviceFlags) (gpulease.AllocInput, error) {
-	cards, _, err := cardTable(ctx, cfg)
-	if err != nil {
-		return gpulease.AllocInput{}, fmt.Errorf("the card table: %w", err)
-	}
-	in := gpulease.AllocInput{
-		Cards:           cards,
-		Claimed:         map[string]bool{},
-		Quarantined:     m.QuarantinedCards(),
-		ForeignBusy:     foreignBusyFn(ctx, cfg),
-		Resident:        residentSeatsFn(ctx, cfg, cards),
-		FootprintGiB:    f.vramGiB,
-		HostNeedGiB:     f.ramGiB,
-		HostHeadroomGiB: cfg.GPUHostRAMHeadroom(),
-	}
-	for _, l := range m.Leases() {
-		if len(l.Devices) == 0 {
-			in.WholeNodeHeld = true
-		}
-		for _, d := range l.Devices {
-			in.Claimed[d] = true
-		}
-	}
-	in.HostFreeGiB, in.HostFreeOK = hostFreeRAMFn()
-	p := placement.ProbePresence(cfg.PresenceMode(), cfg.OperatorIdle())
-	in.AllowDisplay = p.Known && p.Away
-	return in, nil
+	return gpualloc.BuildInput(ctx, m, cfg, gpualloc.Need{VRAMGiB: f.vramGiB, RAMGiB: f.ramGiB}, gpualloc.Deps{
+		Cards:       cardTable,
+		ForeignBusy: foreignBusyFn,
+		Resident:    residentSeatsFn,
+		HostFreeRAM: hostFreeRAMFn,
+	})
 }
 
 // foreignBusyByCard maps a card (lease id) to the first non-harness compute process the
@@ -428,45 +364,8 @@ func foreignBusyByCard(ctx context.Context, cfg config.Config) map[string]string
 }
 
 // residentSeatsByCard maps each card to the configured layer seats that are loaded in
-// llama-swap right now and pinned to it. Pins are read as nvidia-smi indices or UUID
-// prefixes (the placement package's own convention). Best-effort: an unreadable
-// /running or a pin that does not resolve contributes nothing.
+// llama-swap right now and pinned to it (internal/gpualloc.ResidentSeats, over the drain verbs'
+// shared client).
 func residentSeatsByCard(ctx context.Context, cfg config.Config, cards []gpuprobe.Card) map[string]gpulease.ResidentInfo {
-	out := map[string]gpulease.ResidentInfo{}
-	if len(cfg.Layers) == 0 || cfg.Endpoint == "" {
-		return out
-	}
-	rctx, cancel := context.WithTimeout(ctx, 3*time.Second)
-	defer cancel()
-	rows, err := seatload.Occupants(rctx, maintenanceClient, cfg.Endpoint)
-	if err != nil {
-		return out
-	}
-	loaded := map[string]bool{}
-	for _, r := range rows {
-		switch strings.ToLower(r.State) {
-		case "stopped", "shutdown":
-			continue
-		}
-		loaded[strings.ToLower(r.Model)] = true
-	}
-	for _, l := range cfg.Layers {
-		for _, s := range l.Seats {
-			if !loaded[strings.ToLower(s.Model)] {
-				continue
-			}
-			pinned, perr := gpuprobe.ResolveCards(cards, s.DeviceList())
-			if perr != nil {
-				continue
-			}
-			for _, c := range pinned {
-				id := c.LeaseID()
-				r := out[id]
-				r.Seats = append(r.Seats, s.Model)
-				r.CostGiB += s.FootprintGiB
-				out[id] = r
-			}
-		}
-	}
-	return out
+	return gpualloc.ResidentSeats(ctx, cfg, cards, maintenanceClient)
 }

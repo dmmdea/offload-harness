@@ -50,8 +50,8 @@ import (
 
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/gpuactivity"
+	"github.com/dmmdea/offload-harness/internal/gpualloc"
 	"github.com/dmmdea/offload-harness/internal/gpulease"
-	"github.com/dmmdea/offload-harness/internal/gpuprobe"
 	"github.com/dmmdea/offload-harness/internal/modelaffinity"
 	"github.com/dmmdea/offload-harness/internal/seatload"
 	"github.com/dmmdea/offload-harness/internal/seatrate"
@@ -411,119 +411,34 @@ var maintenanceClient = &http.Client{Timeout: 15 * time.Minute}
 type restamper func(fn func(*gpulease.Meta)) error
 
 // leaseScope says which seats sit on the cards a lease holds (plan P5, register C-86): `--drain`
-// and `--unload-seat` clear THOSE cards, not the node. A whole-node lease (no ids) reaches every
-// seat. A seat whose pin is unknown, cannot be placed on a card, or is read while the card
-// table cannot be, is on the leased cards: the direction of every doubt is today's behaviour.
-type leaseScope struct {
-	cfg     config.Config
-	ids     []string
-	cards   []gpuprobe.Card
-	cardsOK bool
-}
+// and `--unload-seat` clear THOSE cards, not the node. The rule is internal/gpualloc.LeaseScope,
+// shared with the media admission path; this is the verbs' view of it, reading the card table
+// through this package's seam and saying so on stderr when it cannot.
+type leaseScope struct{ gpualloc.LeaseScope }
 
 func newLeaseScope(ctx context.Context, cfg config.Config, ids []string) leaseScope {
-	s := leaseScope{cfg: cfg, ids: ids}
-	if len(ids) == 0 {
-		return s
-	}
-	cards, _, err := cardTable(ctx, cfg)
-	s.cards, s.cardsOK = cards, err == nil && len(cards) > 0
-	if !s.cardsOK {
-		// The fallback is right (every doubt fences) and silent, until now: the operator would
-		// believe a seat on another card was spared.
-		why := "no card was listed"
-		if err != nil {
-			why = err.Error()
-		}
-		fmt.Fprintf(os.Stderr, "gpu reserve: the card table could not be read (%s): every seat is treated as sitting on the leased cards, so the drain and unload act as for the whole node\n", why)
-	}
-	return s
+	return leaseScope{gpualloc.NewLeaseScope(ctx, cfg, ids, gpualloc.Deps{Cards: cardTable}, os.Stderr)}
 }
 
-func (s leaseScope) bounded() bool { return len(s.ids) > 0 }
-
-func (s leaseScope) touchesPins(pins []string) bool {
-	if !s.bounded() || !s.cardsOK {
-		return true
-	}
-	rids, ok := gpulease.ResolvePins(pins, s.cards)
-	if !ok {
-		return true
-	}
-	return gpulease.Info{Held: true, Devices: s.ids}.Touches(rids)
-}
-
-// touches reports whether the seat serving model sits on the leased cards.
-func (s leaseScope) touches(model string) bool {
-	if !s.bounded() {
-		return true
-	}
-	pins, ok := s.cfg.ModelPins(model)
-	if !ok {
-		return true
-	}
-	return s.touchesPins(pins)
-}
-
-// touchesRun reports whether a registered run is on the leased cards: by the pins it recorded,
-// else by the seat it runs on.
-func (s leaseScope) touchesRun(r gpuactivity.Run) bool {
-	if len(r.Devices) > 0 {
-		return s.touchesPins(r.Devices)
-	}
-	return s.touches(r.Seat)
-}
-
-// split divides models into those on the leased cards and those that are not.
-func (s leaseScope) split(models []string) (on, off []string) {
-	for _, m := range models {
-		if s.touches(m) {
-			on = append(on, m)
-		} else {
-			off = append(off, m)
-		}
-	}
-	return on, off
-}
+func (s leaseScope) bounded() bool                            { return s.Bounded() }
+func (s leaseScope) touchesPins(pins []string) bool           { return s.TouchesPins(pins) }
+func (s leaseScope) touches(model string) bool                { return s.Touches(model) }
+func (s leaseScope) touchesRun(r gpuactivity.Run) bool        { return s.TouchesRun(r) }
+func (s leaseScope) split(models []string) (on, off []string) { return s.Split(models) }
 
 // unloadModelsFor is the model-id list the render lane's freeLlamaSwap unloads under a lease
-// that holds leaseIDs: the llama-swap roster, minus the memory stack, minus every seat pinned to
-// cards the lease does not hold. A model nobody declared a pin for stays on the list (it could
-// be anywhere). ok is false for a whole-node lease (nothing to narrow: the render lane keeps its
-// own rule) and when the roster is empty.
+// that holds leaseIDs (internal/gpualloc.UnloadModels): the llama-swap roster, minus the memory
+// stack, minus every seat pinned to cards the lease does not hold. A model nobody declared a pin
+// for stays on the list (it could be anywhere). ok is false for a whole-node lease (nothing to
+// narrow: the render lane keeps its own rule) and when the roster is empty.
 func unloadModelsFor(ctx context.Context, cfg config.Config, roster []string, leaseIDs []string) ([]string, bool) {
-	if len(leaseIDs) == 0 || len(roster) == 0 {
-		return nil, false
-	}
-	scope := newLeaseScope(ctx, cfg, leaseIDs)
-	keep := map[string]bool{}
-	for _, m := range effectiveMemoryStack(cfg) {
-		keep[strings.ToLower(strings.TrimSpace(m))] = true
-	}
-	var out []string
-	for _, id := range roster {
-		if keep[strings.ToLower(strings.TrimSpace(id))] {
-			continue
-		}
-		if scope.touches(id) {
-			out = append(out, id)
-		}
-	}
-	return out, true
+	return gpualloc.UnloadModels(ctx, cfg, roster, leaseIDs, gpualloc.Deps{Cards: cardTable}, os.Stderr)
 }
 
 // unloadModelsEnv renders the list as the environment variable the render lane reads
 // (GPU_LEASE_UNLOAD_MODELS): a comma list, `-` for "unload nothing", and no variable at all
 // when the list is unknown, which leaves the lane on its own rule.
-func unloadModelsEnv(models []string, known bool) string {
-	if !known {
-		return ""
-	}
-	if len(models) == 0 {
-		return "GPU_LEASE_UNLOAD_MODELS=-"
-	}
-	return "GPU_LEASE_UNLOAD_MODELS=" + strings.Join(models, ",")
-}
+func unloadModelsEnv(models []string, known bool) string { return gpualloc.UnloadEnv(models, known) }
 
 // leaseDevicesOf is the cards the live lease with this epoch holds (lease ids), nil when the epoch
 // is not live or holds the whole node.
@@ -719,12 +634,7 @@ func maintainSeatScoped(ctx context.Context, cfg config.Config, restamp restampe
 // reading shared by `gpu reserve --unload-seat` and fleet reclaim (register C-94),
 // and it matches the render side: the pipeline exports MEMORY_STACK only when the
 // list is non-empty, so render/gpu-lock.mjs then keeps its own default.
-func effectiveMemoryStack(cfg config.Config) []string {
-	if len(cfg.MemoryStack) == 0 {
-		return config.Default().MemoryStack
-	}
-	return cfg.MemoryStack
-}
+func effectiveMemoryStack(cfg config.Config) []string { return gpualloc.EffectiveMemoryStack(cfg) }
 
 // otherResidentModels lists every model llama-swap's /running reports besides
 // the agent seat (skipping states already leaving/gone: stopped, shutdown),
