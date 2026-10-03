@@ -23,8 +23,8 @@ pending work on the node that runs it. Off by default; two config keys turn it o
 | `internal/delegate/run.go` | the call sites: `runRemote` (queued; running from the poll loop), `runLocal` (queued; running through `pairStartGate`), `attempt().finish` (terminal); `runner.pair` |
 | `gpu_leasecard.go` | the lease card: `leaseCardIdentity`, `newLeaseCard`, `running`, `finish`; wired into `runGPUReserve` (`gpu_cmd.go`) |
 | `internal/core/workmark.go` | `WithWorkingMark` / `MarkWorking`: the lane's "my work started" signal a call card turns running on |
-| `internal/pairworkloads/calls.go` | running cards for long tool calls: `Begin`, the per-task open-card queue the ledger observer `claim`s from |
-| `internal/pipeline/pipeline.go` | `CallTracker`, `SetCallTracker`, the `Begin` at the top of `Run` |
+| `internal/pairworkloads/calls.go` | running cards for long tool calls: `Begin` (returns the call id), the per-task open-card queue the ledger observer `claim`s from (by call id first) |
+| `internal/pipeline/pipeline.go` | `CallTracker`, `SetCallTracker`, the `Begin` at the top of `Run` (stamps the call id on `core.Meta`) |
 | `internal/ledger/ledger.go` | `Ledger.Observe`, called after every durable `Record` |
 | `internal/config/config.go` | `PairWorkloadsEnabled`, `PairWorkloadsEndpoint` |
 | `main.go` | attaches the ledger observer where the CLI/MCP ledger is opened |
@@ -88,7 +88,7 @@ and the harness has nothing to gain by sending them.
    row into one terminal frame: `completedAt` = the row's timestamp, `createdAt` =
    `startedAt` = that minus the latency. Skipped on purpose: `agent_delegate` rows (source 1
    owns them), `agent` rows (this box serving someone else's delegation, already reported by
-   the box that asked), cache hits (no GPU work).
+   the box that asked), cache hits (no GPU work), and **inner rows** (below).
 3. **Long tool calls while they run** (0.140.5; queued-then-running 0.140.6,
    `internal/pairworkloads/calls.go`). A row is written when a call ends, so source 2 alone left
    a ten-minute render with no card until it finished. `Pipeline.Run` calls
@@ -99,13 +99,50 @@ and the harness has nothing to gain by sending them.
    moment `acquireMediaLease` hands them the GPU, `compose_video` when it takes its slot. A render
    waiting behind another job's lease therefore reads "queued", not "Running". `transcribe` never
    marks (its wait is a whisper load inside llama-swap, which the lane cannot see), so its card
-   stays queued until it ends. The call's own ledger row then closes THAT card (`claim`, oldest
-   first per task): same id, engine and creation, the start the mark recorded (none if it never
-   started), the row's model and outcome. A call that wrote no
-   row (a cache hit) is closed when `Run` returns (`closeCall`; a panic closes it failed). Rows are
-   matched to open cards per task, not per call: two concurrent calls of one task (they serialize
-   on the media slot) can trade model and timings, but both cards close. Text and vision calls open
-   nothing: PAIR keys a card on its engine, and they learn llamacpp vs vllm only as they run.
+   stays queued until it ends. The call's own ledger row then closes THAT card (`claim`): same id,
+   engine and creation, the start the mark recorded (none if it never started), the row's model and
+   outcome. A call that wrote no row (a cache hit) is closed when `Run` returns (`closeCall`; a
+   panic closes it failed). **A row names its call.** `Begin` returns the call id (the card's own
+   job id), `Run` stamps it on `core.Meta.CallID`, the ledger row carries it as `call_id`, and
+   `claim(task, callID)` closes exactly that card. Matching the oldest open card of the task
+   instead (the rule before this change) let overlapping calls of one task trade cards: concurrent
+   `transcribe` calls do not serialize on the media slot (transcribe never takes the GPU lease, and
+   the whisper POSTs queue only inside one process), so a later call can finish first, and the
+   shorter call's row closed the OLDER call's card, its own
+   `End` then closed its own card with no row data, and when the older row finally landed the queue
+   was empty and it opened a third card (11 surplus cards in the retained history, all on 2026-10-01).
+   Now a row with a `call_id` whose card is not open (already
+   closed, or another process's) claims nothing and gets its own card; it never closes someone
+   else's. Only a row with no `call_id` (a writer that stamps none) falls back to first in, first
+   out. `End` never closes a card its own row already closed, and closes its own card when the row
+   never comes. Text and vision calls open nothing: PAIR keys a card on its engine, and they learn
+   llamacpp vs vllm only as they run.
+
+**Inner rows: one call is one card.** A call that writes several ledger rows names its own row
+as the call and marks every other row `parent_job_id = <the call's job_id>` (the register C-62
+inner-row rule, extended from `agent` rows to every multi-row call). `AttachLedger` skips any
+row with a `parent_job_id`, so the call's own row is its one card; the job counters
+(`ledger.JobRows`, `SummarizeFile`) already count the call's own row and skip its inner rows,
+and an orphan inner row (the call's own row never landed) still counts as a call. Paths that
+write several rows and how each follows the rule:
+
+| Call | Rows | Call's own row | Inner rows |
+|---|---|---|---|
+| `video_watch` | one per window, plus one | the summary (or the all-deferred defer), `job_id` minted per call | every window row |
+| `video_describe` | one per context-overflow retry (frame width halved), plus the last attempt | the attempt that ends the loop; the id is minted only when an attempt is retried, so the usual one-attempt call writes one plain row | each overflowed attempt that was retried |
+| text cascade (`summarize`, `classify`, `extract`, `triage`) | an escalating attempt writes its own row (D-127), the climbed tier another, a final all-fail defer a third | the row of the tier that answered, or the final defer | each escalating attempt; minted on the first climb, so a call that never climbs writes one plain row |
+| `extract_image` | the `ocr` and `extract` sub-calls | a row the composite writes for itself on every exit (task `extract_image`) | the two sub-call rows, marked through `core.Request.ParentJobID` (in-process only, never on the wire) |
+| `inpaint_image` with `auto_text` | the vqa box-detector sub-call | the inpaint row, which every exit writes | the detector's vqa row |
+
+Left alone on purpose: `RunImageBatch` writes one row per item by design (each item is its own
+job), `agent_delegate` already follows the rule with its own `agd-` card, and every other media call
+writes exactly one row. Token accounting follows the call's own row so no token is counted twice:
+an inner row keeps the prompt tokens it processed as savings, and the call's own row carries only
+what no inner row carries (the synthesis prompt, a cache-hit window's stored figure) plus the whole
+output, with `cards_tokens` set to the work the cards actually did (an inner row records 0; a
+cascade call's row adds the card work of its climbing attempts, carried in `core.Meta.CardsCarried`,
+and an `extract_image` row adds the same carried work of its sub-calls). A
+`video_watch` result still reports the whole call's tokens to the caller.
 4. **Jobs under the GPU lease** (0.140.6, `gpu_leasecard.go`). `gpu reserve -- <cmd>` is how every
    bench, render and measurement runs on every node, and none of it reached PAIR: on 2026-09-23 the
    <node-a> ran a seat bench and a ComfyUI diagnostic and <node-c> a Wan 2.2 smoke render, each at

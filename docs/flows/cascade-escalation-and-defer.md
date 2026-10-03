@@ -116,6 +116,14 @@ confidence gate sent up lands in the ledger as a non-deferred row on ITS tier, w
 (entry tier: `escalations: 0`, `margin` set; successor: `escalations: 1`, the carried `esc_source`).
 Until this the defer returned before the record and the only trace of a margin escalation was the
 successor's row and the labels sidecar (4 `esc_source` rows in 9,217 for 43 real firings).
+That row is an **inner row** of the call: it carries `parent_job_id`, and the row of the tier that
+finally answers (or the final defer) carries the matching `job_id`, minted on the first climb. One
+escalated call is therefore one call to every counter and one PAIR card; a call that never climbs
+writes the same single plain row as ever. The climbing attempt's prompt tokens stay on its own row
+(savings), and `tokens_out` of the call is the answering tier's. Its card work is not lost: the
+ledger writes `cards_tokens` 0 on an inner row, so the pipeline carries the attempt's work forward
+(`core.Meta.CardsCarried`, never published) and the call's own row sets `cards_tokens` to that plus
+its own, which keeps a total of `cards_tokens` over the ledger equal to the work the cards did.
 
 `esc_source` names WHICH gate sent a call up a tier, and it is the one field written on **successful**
 escalations too — that was the measured gap it closed: a call that escalated and then succeeded

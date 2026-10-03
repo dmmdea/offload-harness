@@ -51,9 +51,9 @@ type recTracker struct {
 	deferred   bool
 }
 
-func (r *recTracker) Begin(task, door string) (func(), func(bool, string)) {
+func (r *recTracker) Begin(task, door string) (string, func(), func(bool, string)) {
 	r.task, r.door = task, door
-	return func() {}, func(d bool, _ string) { r.ended++; r.deferred = d }
+	return "call-test-1", func() {}, func(d bool, _ string) { r.ended++; r.deferred = d }
 }
 
 // Run hands the tracker the call's door (so a fleet-served call can be

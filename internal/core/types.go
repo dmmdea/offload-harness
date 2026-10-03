@@ -192,6 +192,13 @@ type Request struct {
 	// node's row says who the work was for. Documentary only, like Door and FleetJobID: it never
 	// routes, gates or keys a cache.
 	Requester string `json:"requester,omitempty"`
+	// ParentJobID is set by a COMPOSITE call (extract_image, inpaint's auto-text
+	// mask) on the sub-request it issues: the sub-call's ledger row is then an
+	// INNER row of the composite's own row (register C-62), never a second call
+	// and never a PAIR card of its own. In-process only (`json:"-"`): a wire
+	// request must not be able to mark its own row inner, which would hide it
+	// from every job counter and every card.
+	ParentJobID string `json:"-"`
 }
 
 // Meta is per-call telemetry returned to the caller and recorded in the ledger.
@@ -314,6 +321,18 @@ type Meta struct {
 	// on the box's own seat (register C-62): the ledger then writes this row
 	// as an INNER row of that job instead of a second job.
 	ParentJobID string `json:"parent_job_id,omitempty"`
+	// CallID is the id of the PAIR card the call opened when it started (the
+	// CallTracker returns it from Begin): stamped by Pipeline.Run, mapped onto
+	// ledger.Entry.CallID, so the call's own row closes that card and no other.
+	// Empty for a call that opened no card; omitempty, so such a call publishes
+	// byte-identically to before.
+	CallID string `json:"call_id,omitempty"`
+	// CardsCarried is the work, in tokens through the cards, of this call's EARLIER
+	// attempts whose rows went to the ledger as inner rows (a cascade climb,
+	// plan D12). Record writes cards_tokens 0 on an inner row, so the call's own row
+	// adds this figure to its own and a share reader's total counts that work once.
+	// In-process bookkeeping only (`json:"-"`): never published.
+	CardsCarried int `json:"-"`
 	// QueuedMs is the agent run's busy-hold wall (ADR 0061): time its requests
 	// waited on a seat whose engine was working for others.
 	QueuedMs   int64  `json:"queued_ms,omitempty"`

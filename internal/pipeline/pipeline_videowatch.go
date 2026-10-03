@@ -28,6 +28,13 @@ import (
 // so the notes cite real seconds, then synthesizes the per-window notes into one
 // answer on the TEXT seat. A window that defers is reported, not fatal; the
 // whole call defers only when every window did (or nothing could be planned).
+//
+// One call is ONE call (plan D12-D15). The call mints a job id; its own ledger
+// row (the summary, or the all-deferred defer) carries it, and every window row
+// names it as ParentJobID: an INNER row (register C-62), which no job counter
+// counts and PAIR never cards. A held GPU ends the sweep at the first window
+// that reports it (D13): re-waiting the whole gate for each remaining window
+// cost 12 x 90 s = 18 min for one call on 2026-10-03.
 
 // Defaults. window_sec × fps ≈ frames per window; 8 s @ 1 fps = 8 frames keeps a
 // window well inside an 8k-ctx VLM at 512px, and 1 fps is one frame per second
@@ -141,11 +148,33 @@ func (p *Pipeline) runVideoWatch(ctx context.Context, req core.Request, built ta
 	// and a mid-sweep rotation must not store a hybrid under one digest).
 	vidID, vdErr := p.digestMedia(req.Video)
 
+	// The call's own id: the call row carries it as JobID, each window row as
+	// ParentJobID. Caller-facing too, so a result can be joined to its rows.
+	jobID := mintJobID("vw")
+	meta.JobID = jobID
+
 	notes := make([]videoWatchNote, 0, len(windows))
-	var tokIn, tokOut, framesTotal, deferred int
+	// classes[i] is the err_class window i deferred with ("" = none); lastReason
+	// is the reason of the most recent window that actually ran and deferred;
+	// busyReason, once set, is the gpu_busy reason that stopped the sweep.
+	var classes []string
+	var lastReason, busyReason string
+	// ranIn / cachedIn split the windows' prompt tokens: work the cards did vs a
+	// cache hit's stored figure. tokIn (their sum) is what the caller is shown.
+	var tokIn, tokOut, framesTotal, deferred, ranIn, cachedIn, skipped int
 	for _, w := range windows {
 		if ctx.Err() != nil {
 			break
+		}
+		if busyReason != "" {
+			// D13: the card is held and the gate already waited its full bound for
+			// an earlier window. Asking the vision seat again can only wait again.
+			// Report the window deferred, write no row, call nothing.
+			notes = append(notes, videoWatchNote{Start: w.Start, End: w.End, Deferred: true, Reason: "skipped: " + busyReason})
+			classes = append(classes, errClassGPUBusy)
+			deferred++
+			skipped++
+			continue
 		}
 		wdur := w.End - w.Start
 		wframes := int(math.Ceil(wdur * fps))
@@ -156,6 +185,7 @@ func (p *Pipeline) runVideoWatch(ctx context.Context, req core.Request, built ta
 			wframes = 1
 		}
 		note := videoWatchNote{Start: w.Start, End: w.End}
+		wclass := ""
 		wwidth := width
 		for {
 			frames, serr := videoio.SampleFramesWindow(req.Video, p.cfg.FFmpegPath, w.Start, wdur, fps, wframes, wwidth, p.cfg.VisionMaxImageBytes)
@@ -174,12 +204,18 @@ func (p *Pipeline) runVideoWatch(ctx context.Context, req core.Request, built ta
 			}
 			// A-102: per-window rows are recorded by runVisionGen from THIS meta,
 			// not the caller-facing one, so the door must be carried here too.
-			wmeta := core.Meta{Model: p.cfg.VisionModel, Door: req.Door}
+			// ParentJobID makes the row an inner row of this call's own row.
+			wmeta := core.Meta{Model: p.cfg.VisionModel, Door: req.Door, ParentJobID: jobID}
 			res := p.runVisionGen(ctx, req, built, wmeta, time.Now(), extra, cacheable, func(gctx context.Context) (llamaclient.GenResult, error) {
 				return p.client.GenerateVisionInterleaved(gctx, p.cfg.VisionModel, built.System, labels, frames, built.User, built.Grammar, built.MaxTokens, p.cfg.Temperature, 0, llamaclient.WithoutThinking())
 			})
 			tokIn += res.Meta.TokensIn
 			tokOut += res.Meta.TokensOut
+			if res.Meta.CacheHit {
+				cachedIn += res.Meta.TokensIn
+			} else {
+				ranIn += res.Meta.TokensIn
+			}
 			if res.OK {
 				var got map[string]string
 				_ = json.Unmarshal(res.Data, &got)
@@ -206,22 +242,36 @@ func (p *Pipeline) runVideoWatch(ctx context.Context, req core.Request, built ta
 				break
 			}
 			note.Deferred, note.Reason = true, res.Reason
+			wclass = res.Meta.ErrClass
+			if wclass == errClassGPUBusy {
+				busyReason = res.Reason
+			}
 			break
 		}
 		if note.Deferred {
 			deferred++
+			lastReason = note.Reason
 			log.Printf("video_watch: window %.1f-%.1fs deferred: %s", w.Start, w.End, note.Reason)
 		}
+		classes = append(classes, wclass)
 		notes = append(notes, note)
+	}
+	if skipped > 0 {
+		log.Printf("video_watch: gpu busy: %d window(s) skipped after the first reported it", skipped)
 	}
 	meta.TokensIn, meta.TokensOut = tokIn, tokOut
 	if deferred == len(notes) {
 		meta.LatencyMs = time.Since(start).Milliseconds()
+		// The most recent window's reason, not the first's: a gpu-busy reason
+		// carries the holder's age, which only grows over the sweep.
 		reason := "every window deferred"
-		if len(notes) > 0 {
-			reason += ": " + notes[0].Reason
+		if lastReason != "" {
+			reason += ": " + lastReason
 		}
-		p.recordDefer(req.Task, meta, len(req.Input), reason)
+		// D14: the call's class is the windows' common class, so health analytics
+		// grouped on err_class see the call as what it was.
+		meta.ErrClass = commonErrClass(classes)
+		p.recordVideoWatchCall(req.Task, meta, len(req.Input), true, reason, ranIn, cachedIn, 0)
 		return core.Deferf(reason, "", meta)
 	}
 
@@ -237,6 +287,7 @@ func (p *Pipeline) runVideoWatch(ctx context.Context, req core.Request, built ta
 	}
 	// Synthesis on the TEXT seat: the per-window notes are the evidence; the
 	// answer must cite seconds from them and never invent a window it lacks.
+	synthIn := 0
 	if synthesize {
 		var sb strings.Builder
 		for _, n := range notes {
@@ -266,10 +317,53 @@ func (p *Pipeline) runVideoWatch(ctx context.Context, req core.Request, built ta
 			}
 			meta.TokensIn += gres.TokensIn
 			meta.TokensOut += gres.TokensOut
+			synthIn = gres.TokensIn
 		}
 	}
 	data, _ := json.Marshal(out)
 	meta.LatencyMs = time.Since(start).Milliseconds()
-	p.record(req.Task, meta, len(req.Input))
+	p.recordVideoWatchCall(req.Task, meta, len(req.Input), false, "", ranIn, cachedIn, synthIn)
 	return core.Result{OK: true, Data: data, Meta: meta}
+}
+
+// recordVideoWatchCall writes the call's own ledger row (the one carrying the
+// job id its window rows name as parent). meta holds the WHOLE call's tokens, as
+// the caller sees them; the row splits them so every token is counted once by
+// every reader:
+//
+//   - TokensIn (the savings column) is only what no inner row carries: the
+//     synthesis prompt, plus the windows a cache hit answered (an inner cache-hit
+//     row saves nothing). The window prompts stay on their own inner rows, whose
+//     TokensIn the savings summary adds (C-62).
+//   - TokensOut is the call's whole output; an inner row's is never counted.
+//   - CardsTokens is the work the cards actually did, set explicitly because
+//     Record writes 0 on an inner row and would otherwise derive this row's figure
+//     from the reduced TokensIn: the windows that ran, the synthesis, all output.
+func (p *Pipeline) recordVideoWatchCall(task core.TaskType, meta core.Meta, inputChars int, deferred bool, reason string, ranIn, cachedIn, synthIn int) {
+	if p.led == nil {
+		return
+	}
+	row := meta
+	row.TokensIn = synthIn + cachedIn
+	e := entryFrom(task, row, deferred, inputChars)
+	if deferred {
+		e.Reason = reason
+	}
+	e.CardsTokens = ranIn + synthIn + meta.TokensOut
+	_ = p.led.Record(e)
+}
+
+// commonErrClass is the err_class every window agrees on, or "" when they
+// differ, when any window had none, or when there are none. A call that mixes
+// classes (a busy card, then a timeout) has no single one to claim.
+func commonErrClass(classes []string) string {
+	if len(classes) == 0 || classes[0] == "" {
+		return ""
+	}
+	for _, c := range classes[1:] {
+		if c != classes[0] {
+			return ""
+		}
+	}
+	return classes[0]
 }
