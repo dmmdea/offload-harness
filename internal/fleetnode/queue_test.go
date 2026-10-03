@@ -414,6 +414,8 @@ func TestConcurrencyCappedRule(t *testing.T) {
 		{"run-graph", false, "acquireMediaLease"},
 		{"stt", false, "whisper-server: a different process on a different endpoint"},
 		{"scene-swap", false, "a configured pipeline route — runPipelineJob takes the same mediaSlot"},
+		{ComposeTask, false, "HyperFrames renders on the CPU on its own compose slot"},
+		{ComposeProjectTask, false, "the same render on the same compose slot (ADR 0070)"},
 		{"some-task-from-2027", true, "unknown task types are capped by default (fail safe for the text endpoint)"},
 	} {
 		if got := s.concurrencyCapped(tc.task); got != tc.want {

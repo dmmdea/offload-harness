@@ -1875,7 +1875,9 @@ func (s *Server) concurrencyCapped(taskType string) bool {
 	// `compose_busy`. Capped, a composition would hold a fleet execution slot for up
 	// to compose_timeout_sec (30 min) doing work the cap does not protect — starving
 	// the agent lane, the exact failure the exemption rule above exists to prevent.
-	case ComposeTask:
+	// compose-project (ADR 0070) is the same render on the same compose slot; a queued
+	// one would also hold its request body and extracted tree while it waited.
+	case ComposeTask, ComposeProjectTask:
 		return false
 	}
 	// Config-driven pipeline routes run through runPipelineJob, which takes the
@@ -2212,6 +2214,13 @@ func (s *Server) admit(w http.ResponseWriter, r *http.Request, env dispatchEnvel
 	req, cleanup, err := BuildRequest(r.Context(), s.opts.Cfg, s.opts.LoopbackListener, env.TaskType, env.Payload)
 	if err != nil {
 		cleanup()
+		// A failure that is this node's own (a disk that filled while unpacking a project) is not the
+		// request's: 500, so the caller reports infrastructure, never "refused".
+		var ns nodeSideError
+		if errors.As(err, &ns) {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -2296,7 +2305,7 @@ func (s *Server) admit(w http.ResponseWriter, r *http.Request, env dispatchEnvel
 	}
 	spec := AcceptSpec{
 		Agent:     env.TaskType == string(core.TaskAgentRun),
-		Gated:     env.TaskType == VisionTask || env.TaskType == TextTask,
+		Gated:     gatedJob(env.TaskType),
 		Uncapped:  !s.concurrencyCapped(env.TaskType),
 		OnDropped: cleanup,
 		Task:      env.TaskType,

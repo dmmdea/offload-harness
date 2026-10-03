@@ -466,8 +466,5 @@ func (p *Pipeline) runComposeVideo(ctx context.Context, req core.Request, meta c
 }
 
 func (p *Pipeline) composeTimeoutSec() int {
-	if p.cfg.ComposeTimeoutSec > 0 {
-		return p.cfg.ComposeTimeoutSec
-	}
-	return 1800
+	return p.cfg.EffectiveComposeTimeoutSec()
 }

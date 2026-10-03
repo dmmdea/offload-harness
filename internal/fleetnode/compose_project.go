@@ -23,11 +23,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"mime"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/dmmdea/offload-harness/internal/composebundle"
 	"github.com/dmmdea/offload-harness/internal/config"
@@ -63,6 +65,19 @@ func ComposeProjectBodyCap(cfg config.Config) int64 {
 
 const composeProjectClosed = "compose-project is not open on this node (it needs fleet_compose_projects, fleet_auth_token and a bound compose route)"
 
+// composeProjectWindow is how long a token holder's request may take to arrive and be admitted (the
+// extract and the reference check run before the 202). The server's blanket 30 s read and write
+// timeouts would cut a large bundle on an ordinary link: 85 MiB on the wire in 30 s needs 23 Mbit/s.
+const composeProjectWindow = 15 * time.Minute
+
+// nodeSideError marks a BuildRequest failure that is this node's own (a directory it could not create, a
+// disk that filled), never the request's: admission answers it 500, so the caller reports an
+// infrastructure failure instead of a refused bundle.
+type nodeSideError struct{ err error }
+
+func (e nodeSideError) Error() string { return e.err.Error() }
+func (e nodeSideError) Unwrap() error { return e.err }
+
 // handleComposeProject checks the door and the bearer BEFORE reading the body, then decodes the
 // typed payload and joins the shared admission path.
 func (s *Server) handleComposeProject(w http.ResponseWriter, r *http.Request) {
@@ -74,6 +89,10 @@ func (s *Server) handleComposeProject(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
+	// Only a token holder gets the longer window; everyone else met the blanket timeouts above.
+	rc := http.NewResponseController(w)
+	_ = rc.SetReadDeadline(time.Now().Add(composeProjectWindow))
+	_ = rc.SetWriteDeadline(time.Now().Add(composeProjectWindow))
 	limit := ComposeProjectBodyCap(s.opts.Cfg)
 	r.Body = http.MaxBytesReader(w, r.Body, limit)
 	if ct := r.Header.Get("Content-Type"); ct != "" {
@@ -131,15 +150,22 @@ func buildComposeProject(_ context.Context, cfg config.Config, payload json.RawM
 	}
 	base := filepath.Join(cfg.EffectiveComposeCacheDir(), "fleet-projects")
 	if err := os.MkdirAll(base, 0o755); err != nil {
-		return core.Request{}, noop, fmt.Errorf("compose-project: %w", err)
+		return core.Request{}, noop, nodeSideError{fmt.Errorf("compose-project: %w", err)}
 	}
 	dir, err := os.MkdirTemp(base, "proj-")
 	if err != nil {
-		return core.Request{}, noop, fmt.Errorf("compose-project: %w", err)
+		return core.Request{}, noop, nodeSideError{fmt.Errorf("compose-project: %w", err)}
 	}
-	cleanup := func() { _ = os.RemoveAll(dir) }
+	cleanup := func() {
+		if rerr := os.RemoveAll(dir); rerr != nil {
+			log.Printf("fleet: compose-project: removing %s: %v (the startup sweep retries it)", dir, rerr)
+		}
+	}
 	if err := composebundle.Extract(raw, dir, composebundle.Limits{}); err != nil {
 		cleanup()
+		if errors.Is(err, composebundle.ErrIO) {
+			return core.Request{}, noop, nodeSideError{fmt.Errorf("compose-project: unpacking the bundle on this node: %w", err)}
+		}
 		return core.Request{}, noop, fmt.Errorf("compose-project bundle refused: %w", err)
 	}
 	composition := strings.TrimSpace(in.Composition)
@@ -169,4 +195,40 @@ func buildComposeProject(_ context.Context, cfg config.Config, payload json.RawM
 		params["snapshots"] = in.Snapshots
 	}
 	return core.Request{Task: core.TaskComposeVideo, Params: params}, cleanup, nil
+}
+
+// SweepOrphanedProjectDirs removes extracted project trees no job holds any more: fleet-serve calls it
+// at startup, so a crash never leaves them for good. Only trees older than the compose timeout plus an
+// hour go, so a second process sharing the compose cache keeps the ones it is rendering. Every failure
+// is collected and none stops the rest of the sweep.
+func SweepOrphanedProjectDirs(cfg config.Config, now time.Time) (swept int, err error) {
+	dir := filepath.Join(cfg.EffectiveComposeCacheDir(), "fleet-projects")
+	entries, rerr := os.ReadDir(dir)
+	if rerr != nil {
+		if os.IsNotExist(rerr) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("sweep fleet-projects: %w", rerr)
+	}
+	maxAge := time.Duration(cfg.EffectiveComposeTimeoutSec())*time.Second + time.Hour
+	var failures []error
+	for _, e := range entries {
+		if !e.IsDir() || !strings.HasPrefix(e.Name(), "proj-") {
+			continue
+		}
+		info, ierr := e.Info()
+		if ierr != nil {
+			failures = append(failures, fmt.Errorf("sweep fleet-projects: %s: %w", e.Name(), ierr))
+			continue
+		}
+		if now.Sub(info.ModTime()) < maxAge {
+			continue
+		}
+		if rmErr := os.RemoveAll(filepath.Join(dir, e.Name())); rmErr != nil {
+			failures = append(failures, fmt.Errorf("sweep fleet-projects: %s: %w", e.Name(), rmErr))
+			continue
+		}
+		swept++
+	}
+	return swept, errors.Join(failures...)
 }

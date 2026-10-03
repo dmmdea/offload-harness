@@ -95,6 +95,14 @@ func tokenGated(taskType string) bool {
 	return taskType == string(core.TaskAgentRun) || taskType == VisionTask || taskType == TextTask || taskType == ComposeProjectTask
 }
 
+// gatedJob reports whether a job of this task type is masked from a poller or feed reader without the
+// bearer (JobView.Gated): every token-gated lane but the agent lane, which has its own marker. Derived
+// from tokenGated so a door that needs the token can never leave its jobs' state, error text or output
+// paths readable without it, whichever path admitted them (dispatch, the project door, a queue claim).
+func gatedJob(taskType string) bool {
+	return tokenGated(taskType) && taskType != string(core.TaskAgentRun)
+}
+
 // visionTaskOf maps the payload's task name to the pipeline task, refusing
 // anything that is not one of the three single-image vision tasks.
 func visionTaskOf(name string) (core.TaskType, bool) {

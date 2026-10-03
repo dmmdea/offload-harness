@@ -2538,6 +2538,12 @@ func runFleetServe(args []string) error {
 	// one id is far cheaper than refusing to serve.
 	swept, kept, serr := fleetnode.SweepOrphanedPipelineJobs(cfg)
 	reportPipelineJobsSweep(os.Stderr, swept, kept, serr)
+	// Extracted compose-project trees (ADR 0070) a crash left behind; a warning, never fatal.
+	if n, perr := fleetnode.SweepOrphanedProjectDirs(cfg, time.Now()); perr != nil {
+		fmt.Fprintf(os.Stderr, "[fleet-serve] WARNING: sweeping compose-project dirs: %v\n", perr)
+	} else if n > 0 {
+		fmt.Fprintf(os.Stderr, "[fleet-serve] swept %d orphaned compose-project dir(s)\n", n)
+	}
 
 	listen, nodeID, err := fleetServeParams(*listenFlag, *nodeIDFlag, *trusted, cfg, os.Hostname)
 	if err != nil {

@@ -2865,6 +2865,14 @@ func (c Config) EffectiveComposeCacheDir() string {
 	return filepath.Join(c.MediaDir, ".compose-cache")
 }
 
+// EffectiveComposeTimeoutSec bounds one composition end to end: compose_timeout_sec, else 1800.
+func (c Config) EffectiveComposeTimeoutSec() int {
+	if c.ComposeTimeoutSec > 0 {
+		return c.ComposeTimeoutSec
+	}
+	return 1800
+}
+
 // ComposeQualities / ComposeFormats are the closed sets the compose lane accepts
 // (HyperFrames' own names; `looks`/`delivery` aliases and `hls` are deliberately
 // not exposed). Exported so the pipeline, the MCP schema tests and the config

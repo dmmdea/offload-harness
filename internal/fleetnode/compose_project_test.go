@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
@@ -234,5 +235,116 @@ func TestComposeProjectRefusesBadPayloadsAndLeavesNothing(t *testing.T) {
 	rec := do(t, s, "POST", ComposeProjectPath, string(cases["ref outside"]), map[string]string{"Authorization": "Bearer tok"})
 	if rec.Code != 400 || !strings.Contains(rec.Body.String(), "refers outside itself") {
 		t.Fatalf("over HTTP an unsafe project is a 400 naming the reason, got %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// A project render's state, error text and video_path belong to the token holder that sent it: a poll
+// or a feed read without the bearer must not see them (review M5), whichever path admitted the job.
+func TestComposeProjectJobsAreMaskedWithoutTheBearer(t *testing.T) {
+	s, jobs := newTestServer(t, projectCfg(), &dirRunner{}, nil)
+	rec := do(t, s, "POST", ComposeProjectPath, string(projectPayload(func(p *ComposeProjectPayload) { p.JobID = "proj-masked" }, map[string]string{"index.html": "<p>x</p>"})), map[string]string{"Authorization": "Bearer tok"})
+	if rec.Code != 202 {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+	if v, ok := jobs.Get("proj-masked"); !ok || !v.Gated {
+		t.Fatalf("a compose-project job must be gated: %+v", v)
+	}
+	if rec := do(t, s, "GET", "/fleet/jobs/proj-masked", "", nil); rec.Code != 401 {
+		t.Errorf("a poll without the bearer: status %d, want 401: %s", rec.Code, rec.Body.String())
+	}
+	if rec := do(t, s, "GET", "/fleet/jobs/proj-masked", "", map[string]string{"Authorization": "Bearer tok"}); rec.Code != 200 {
+		t.Errorf("a poll with the bearer: status %d: %s", rec.Code, rec.Body.String())
+	}
+	if got := s.claimSpec(ComposeProjectTask, func() {}); !got.Gated || got.Uncapped != true {
+		t.Errorf("a pulled compose-project job must be gated and uncapped like a dispatched one: %+v", got)
+	}
+	for _, task := range []string{VisionTask, TextTask} {
+		if !s.claimSpec(task, func() {}).Gated {
+			t.Errorf("a pulled %s job must be gated", task)
+		}
+	}
+	if s.claimSpec(ComposeTask, func() {}).Gated {
+		t.Error("the template door stays tokenless: its jobs are not gated")
+	}
+}
+
+// deadlineRecorder is a ResponseWriter http.NewResponseController can set deadlines on.
+type deadlineRecorder struct {
+	*httptest.ResponseRecorder
+	read, write time.Time
+}
+
+func (d *deadlineRecorder) SetReadDeadline(t time.Time) error  { d.read = t; return nil }
+func (d *deadlineRecorder) SetWriteDeadline(t time.Time) error { d.write = t; return nil }
+
+// A large bundle on an ordinary link outlasts the server's blanket 30 s timeouts, so a token holder's
+// request gets the door's own window (review M2); a request without the bearer never does.
+func TestComposeProjectGivesATokenHolderTimeToUpload(t *testing.T) {
+	s, _ := newTestServer(t, projectCfg(), &dirRunner{}, nil)
+	body := string(projectPayload(func(p *ComposeProjectPayload) { p.JobID = "proj-window" }, map[string]string{"index.html": "<p>x</p>"}))
+	rec := &deadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
+	req := httptest.NewRequest("POST", ComposeProjectPath, strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer tok")
+	s.handleComposeProject(rec, req)
+	if rec.Code != 202 {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+	if until := time.Until(rec.read); until < 10*time.Minute {
+		t.Errorf("read deadline %v ahead, want the door's window", until)
+	}
+	if until := time.Until(rec.write); until < 10*time.Minute {
+		t.Errorf("write deadline %v ahead, want the door's window", until)
+	}
+	anon := &deadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
+	s.handleComposeProject(anon, httptest.NewRequest("POST", ComposeProjectPath, strings.NewReader(body)))
+	if anon.Code != 401 || !anon.read.IsZero() {
+		t.Errorf("without the bearer: status %d, read deadline %v; want 401 and the blanket timeout", anon.Code, anon.read)
+	}
+}
+
+// A node that cannot unpack (here: its compose cache is a file) answers 500, its own failure, not 400
+// "refused" (review L7).
+func TestComposeProjectNodeSideFailureIsNotARefusal(t *testing.T) {
+	cfg := projectCfg()
+	blocker := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(blocker, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg.ComposeCacheDir = blocker
+	s, _ := newTestServer(t, cfg, &dirRunner{}, nil)
+	rec := do(t, s, "POST", ComposeProjectPath, string(projectPayload(func(p *ComposeProjectPayload) { p.JobID = "proj-disk" }, map[string]string{"index.html": "<p>x</p>"})), map[string]string{"Authorization": "Bearer tok"})
+	if rec.Code != 500 {
+		t.Fatalf("status %d, want 500 for the node's own failure: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// A crash leaves extracted trees behind; the startup sweep removes the old ones and keeps a tree young
+// enough to be another process's running job (review L4).
+func TestSweepOrphanedProjectDirs(t *testing.T) {
+	cfg := config.Config{ComposeCacheDir: t.TempDir(), ComposeTimeoutSec: 60}
+	base := filepath.Join(cfg.ComposeCacheDir, "fleet-projects")
+	for _, d := range []string{"proj-old", "proj-young", "keep-me"} {
+		if err := os.MkdirAll(filepath.Join(base, d, "assets"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	now := time.Now()
+	old := now.Add(-2 * time.Hour)
+	for _, d := range []string{"proj-old", "keep-me"} {
+		if err := os.Chtimes(filepath.Join(base, d), old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	n, err := SweepOrphanedProjectDirs(cfg, now)
+	if err != nil || n != 1 {
+		t.Fatalf("swept %d, %v; want 1", n, err)
+	}
+	for d, want := range map[string]bool{"proj-old": false, "proj-young": true, "keep-me": true} {
+		if _, err := os.Stat(filepath.Join(base, d)); (err == nil) != want {
+			t.Errorf("%s present=%v, want %v", d, err == nil, want)
+		}
+	}
+	if n, err := SweepOrphanedProjectDirs(config.Config{ComposeCacheDir: t.TempDir()}, now); n != 0 || err != nil {
+		t.Errorf("no fleet-projects dir: %d, %v", n, err)
 	}
 }
