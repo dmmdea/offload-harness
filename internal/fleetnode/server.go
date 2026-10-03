@@ -1735,6 +1735,11 @@ type LeaseHealth struct {
 	// delegator uses to rank the node last without excluding it. A node one
 	// release behind omits it, which decodes to false.
 	Overdue bool `json:"overdue,omitempty"`
+	// Expired is additive (plan P9): the holder's own tick labelled the lease because its
+	// term ended and was not renewed (its owner gone, or nothing running under it). It is
+	// still HELD, and Busy and Overdue still say so; the key is the fact that nobody vouches
+	// for it. A node one release behind omits it, which decodes to false.
+	Expired bool `json:"expired,omitempty"`
 }
 
 // LeaseStanding is what a held lease is DOING, published beside the fact that it is held
@@ -1777,6 +1782,13 @@ func busyLeaseThreshold(cfgSec int) (time.Duration, bool) {
 
 func leaseHealthOf(info gpulease.Info, now time.Time, cfgSec int) *LeaseHealth {
 	h := &LeaseHealth{Held: true, Class: string(info.Class), PID: info.PID, Reason: info.Reason, Until: info.ExpiresAt.UTC().Format(time.RFC3339)}
+	// Expired is read off EVERY live lease, not only the lowest epoch's: an expired sibling must
+	// not hide behind a healthy lower epoch (card-scoped leases hold several at once).
+	for _, l := range info.Each() {
+		if l.Expired {
+			h.Expired = true
+		}
+	}
 	// No declared end: nothing to be overdue against. The Unix-epoch test covers a
 	// caller that builds an Info from a raw record (time.UnixMilli(0) is 1970, and
 	// IsZero() is false for it); gpulease's own reader leaves the zero Time.

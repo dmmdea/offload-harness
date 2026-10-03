@@ -267,8 +267,26 @@ func ownershipStatusLines(h *gpuactivity.Holder, info gpulease.Info) []string {
 		}
 		out = append(out, line)
 	}
-	if h.Overdue {
+	switch {
+	case h.Overdue && h.Expired:
+		why := h.ExpiredWhy
+		if why == "" {
+			why = "nothing vouched for it"
+		}
+		out = append(out, fmt.Sprintf("term: EXPIRED %s ago and not renewed because %s (the holder is still alive and heartbeating; the lease is held until its holder lets go or it is taken over, and nothing is reclaimed or killed)",
+			(time.Duration(h.OverdueBySec)*time.Second).Round(time.Second), why))
+	case h.Overdue:
 		out = append(out, fmt.Sprintf("window: past its declared end by %s (the holder is still renewing; nothing is reclaimed)", (time.Duration(h.OverdueBySec)*time.Second).Round(time.Second)))
+	}
+	if h.TermSec > 0 {
+		line := fmt.Sprintf("term: renews in %s terms while its owner is alive and the job is progressing", (time.Duration(h.TermSec) * time.Second).Round(time.Second))
+		if t, err := time.Parse(time.RFC3339, h.HardEnd); err == nil {
+			line += ", not past " + t.Local().Format("Mon 15:04")
+		}
+		if h.RequestedSec > 0 {
+			line += fmt.Sprintf("; it asked for %s, above the cap on a term, and was accepted whole", (time.Duration(h.RequestedSec) * time.Second).Round(time.Second))
+		}
+		out = append(out, line)
 	}
 	for _, f := range h.Facts {
 		out = append(out, "fact: "+f)

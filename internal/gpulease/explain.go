@@ -109,6 +109,14 @@ func (m *Manager) ExplainHeld(info Info, grace time.Duration) string {
 		why = fmt.Sprintf("its owner (%s) has been gone for %s, past the %s grace", who, roundDur(now.Sub(st.OrphanedSince)), roundDur(grace))
 	case "held-overdue":
 		why = fmt.Sprintf("it is past its declared window by %s and its holder is still renewing", roundDur(st.OverdueBy))
+		if info.Expired {
+			// The holder's own tick found the term ended and not renewable (plan P9) and said why.
+			reason := info.ExpiredWhy
+			if reason == "" {
+				reason = "nothing vouched for it"
+			}
+			why = fmt.Sprintf("it has expired: its term ended %s ago and was not renewed because %s, and its holder is still heartbeating", roundDur(st.OverdueBy), reason)
+		}
 	}
 	s := fmt.Sprintf("lease epoch %d is %s: %s; held %s", info.Epoch, word, why, roundDur(info.Age))
 	if c := strings.Join(strings.Fields(info.Command), " "); c != "" {

@@ -319,16 +319,20 @@ func runGPUReserve(args []string) error {
 	vramFlag := fs.Float64("vram", 0, "with --cards: GiB of VRAM the job needs free on EACH card (0 = not declared)")
 	ramFlag := fs.Float64("ram", 0, "with --cards: GiB of host RAM the job needs; the allocator also keeps gpu_host_ram_headroom_gib free")
 	owner := addOwnershipFlags(fs)
+	releaseAtExpiry := fs.Bool("release-at-expiry", false, "with --detach: the hidden holder releases the card at --for, as it did before leases had terms (default: it renews its term while the owner vouches for the job, else labels the lease expired and keeps holding; nothing is ever released by a deadline)")
 	_ = fs.Parse(args)
 	if *unload {
 		*exclusive = true // a cleared card that the next text call refills is not cleared
 	}
-	// A DETACHED holder exits at --for and releases, whether or not the work is
-	// still running (the loop below). With the 45-minute default that silently
-	// frees the card mid-job: the next render then claims it and unloads the
-	// seat on top of the running work, and the node is left advertising a seat
-	// that is not there (2026-09-07 audit). The wrapper form ties the hold to a
-	// process and needs no window, so the requirement lands only on --detach.
+	// A DETACHED holder used to exit at --for and release, whether or not the work was
+	// still running. With the 45-minute default that silently freed the card mid-job: the
+	// next render then claimed it and unloaded the seat on top of the running work, and the
+	// node was left advertising a seat that was not there (2026-09-07 audit). It no longer
+	// releases at the deadline (it renews its term while its owner vouches for the job, else
+	// labels the lease expired and holds on; --release-at-expiry restores the old behaviour),
+	// but its window is still the term the lease is judged by, so the requirement stays: the
+	// default would read a long job as overdue from the 45th minute. The wrapper form ties the
+	// hold to a process and needs no window, so the requirement lands only on --detach.
 	forGiven := false
 	fs.Visit(func(f *flag.Flag) {
 		if f.Name == "for" {
@@ -336,7 +340,10 @@ func runGPUReserve(args []string) error {
 		}
 	})
 	if *detach && !forGiven {
-		return errors.New("--detach requires an explicit --for: a detached holder releases the card at that deadline whether or not the work has finished, and the default window would free it mid-job. Declare the real window (e.g. --for 8h), or use the wrapper form `gpu reserve ... -- <command>`, which holds the lease exactly as long as the command runs")
+		return errors.New("--detach requires an explicit --for: the window is the term the lease is judged by, and the 45-minute default would label a long job overdue from its 45th minute. Declare the real window (e.g. --for 8h), or use the wrapper form `gpu reserve ... -- <command>`, which holds the lease exactly as long as the command runs")
+	}
+	if *releaseAtExpiry && !*detach {
+		return errors.New("--release-at-expiry is for --detach: a detached holder releases the card at its --for deadline with it, instead of renewing or labelling the lease expired; the wrapper form holds the lease exactly as long as its command runs, so it has no deadline to release at")
 	}
 	if *unload && !*drain {
 		return errors.New("--unload-seat requires --drain: never unload a seat with a request in flight")
@@ -373,6 +380,11 @@ func runGPUReserve(args []string) error {
 		return err
 	}
 	if w := progressFileWarning(opts.ProgressFile); w != "" {
+		fmt.Fprintln(os.Stderr, w)
+	}
+	// A window above the cap on a term is accepted whole and never shortened; say so once, here,
+	// where it is asked for (the hidden holder of --detach would print into a log nobody reads).
+	if w := reserveTermWarning(*dur, opts); w != "" {
 		fmt.Fprintln(os.Stderr, w)
 	}
 	queuedAt := time.Now()
@@ -420,8 +432,9 @@ func runGPUReserve(args []string) error {
 		// here), then the seat is drained and unloaded. A failed drain leaves the
 		// lease held on purpose — the card stays reserved, work keeps routing
 		// elsewhere — and the exit code tells the caller not to start. When the
-		// lease itself is what was lost (the child releases at --for whether or
-		// not the drain is done), nothing is held and the error says so.
+		// lease itself is what was lost (an operator release, a reclaim, or with
+		// --release-at-expiry the child letting go at --for), nothing is held and
+		// the error says so.
 		if *drain || *unload {
 			if err := detachMaintain(m, epoch, loadCfg(fs), *drain, drainDeadline(*drainTimeout, queuedAt, *wait), *unload, exclusiveAfter); err != nil {
 				return detachedMaintainError(m, epoch, err)
@@ -567,8 +580,9 @@ func runGPUReserve(args []string) error {
 
 	// Heartbeat while the command runs. The reclaim rule needs BOTH a stale heartbeat
 	// and an expired window, so a missed tick inside the declared window is harmless.
-	tick := time.NewTicker(15 * time.Second)
+	tick := time.NewTicker(wrapperTickEvery)
 	defer tick.Stop()
+	terms := newTermTicker(lease)
 	for {
 		select {
 		case err := <-done:
@@ -594,6 +608,10 @@ func runGPUReserve(args []string) error {
 					"gpu reserve: LEASE LOST (%v) — the GPU is no longer reserved for this command; killing it\n", err)
 				why = " (lease lost)"
 				_ = cmd.Process.Kill()
+			} else {
+				// The heartbeat is the proof the lease is still ours; only then is its term asked
+				// about. A term that ends is renewed or labelled, never a reason to stop the command.
+				terms.tick()
 			}
 		}
 	}
@@ -665,7 +683,7 @@ func detachHolder(fs *flag.FlagSet, class string, dur, wait time.Duration, opts 
 		cfgPath = f.Value.String()
 	}
 	// The child outlives this process, so the owner and the contract travel as flags.
-	child := exec.Command(self, holdArgs(class, dur, wait, opts, auto, cfgPath)...)
+	child := exec.Command(self, detachHoldArgs(fs, class, dur, wait, opts, auto, cfgPath)...)
 	hideWindow(child) // no console window may ever appear; one gets closed and the hold dies
 
 	// A hidden child with nil Stderr writes to NUL, so a holder that fails to start
@@ -822,6 +840,7 @@ func runGPUHold(args []string) error {
 	vramFlag := fs.Float64("vram", 0, "with --cards: GiB of VRAM the job needs free on EACH card")
 	ramFlag := fs.Float64("ram", 0, "with --cards: GiB of host RAM the job needs")
 	groupFlag := fs.String("group", "", "label for leases taken together for one job")
+	releaseAtExpiry := fs.Bool("release-at-expiry", false, "release the lease at --for (the pre-terms behaviour; the parent passes its --release-at-expiry)")
 	owner := addOwnershipFlags(fs)
 	_ = fs.Parse(args)
 
@@ -875,24 +894,42 @@ func runGPUHold(args []string) error {
 	// to 15s afterwards, so `gpu status` could report the card free while a holder
 	// process was still sitting there. Renewal only has to beat the heartbeat TTL
 	// (120s), while noticing we have been released should feel immediate.
-	const (
-		pollEvery  = 1 * time.Second
-		renewEvery = 15 * time.Second
-	)
+	//
+	// A DEADLINE IS A TERM, NOT A RELEASE (plan P9). This loop used to end at --for and release
+	// the card with the job still running behind it (2026-09-07). It now ends only when the
+	// lease stops being ours: at the end of a term the holder's tick renews it (owner alive and
+	// the job progressing or the cards working, or unattended and progressing) or labels it
+	// expired and carries on holding, heartbeat included. --release-at-expiry restores the old
+	// ending for a caller that wants exactly that.
 	deadline := time.Now().Add(*dur)
 	lastRenew := time.Now()
-	for time.Now().Before(deadline) {
-		time.Sleep(pollEvery)
+	terms := newTermTicker(lease)
+	for {
+		if *releaseAtExpiry && !time.Now().Before(deadline) {
+			return nil // the old ending: the deferred Release lets the card go
+		}
+		time.Sleep(holdPollEvery)
 		if err := lease.Check(); err != nil {
 			return nil // released or fenced out — exit quietly, the lease is not ours
 		}
-		if time.Since(lastRenew) >= renewEvery {
+		if time.Since(lastRenew) >= holdRenewEvery {
 			_ = lease.Renew()
 			lastRenew = time.Now()
+			if !*releaseAtExpiry {
+				terms.tick()
+			}
 		}
 	}
-	return nil
 }
+
+// The cadences of the two holders that tick. A wrapper renews its heartbeat (and runs the term
+// check) every wrapperTickEvery; a detached holder polls for a release every holdPollEvery and
+// renews every holdRenewEvery. Variables so a test can watch a deadline pass in its own window.
+var (
+	wrapperTickEvery = 15 * time.Second
+	holdPollEvery    = 1 * time.Second
+	holdRenewEvery   = 15 * time.Second
+)
 
 func runGPURelease(args []string) error {
 	fs := flag.NewFlagSet("gpu release", flag.ExitOnError)

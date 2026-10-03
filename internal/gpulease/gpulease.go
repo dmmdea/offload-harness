@@ -241,8 +241,35 @@ type Meta struct {
 	// WrapperVersion is the build of the process that holds the lease.
 	WrapperVersion string `json:"wrapper_version,omitempty"`
 	// State is "granting" while a v2 grant is in flight under the epoch lock and
-	// "active" once every card claim exists. Empty on a whole-node record.
+	// "active" once every card claim exists. Empty on a whole-node record. It is the
+	// FENCE's word and nothing else: whether the lease's term was renewed is Expired
+	// below, never a third State, because a reader that predates terms (checkV2,
+	// render/gpu-lock.mjs) fences out any state but "active".
 	State string `json:"state,omitempty"`
+
+	// --- terms (plan P9). Additive and omitempty: a record without them is read as one
+	// term of its declared window under the installed limits (term.go). ---
+
+	// TermMs is the renewal term: how far a renewal moves the declared end. It is the
+	// request capped at the installed gpu_max_term (24 h with a progress contract), never
+	// more than the declared window.
+	TermMs int64 `json:"term_ms,omitempty"`
+	// RequestedMs is the window the caller asked for when that is above the cap on a term.
+	// The declared window (ExpiresAtMs) is still the whole request: a request is
+	// recorded, warned about and accepted, never shortened. Zero when the request was at or
+	// under the cap.
+	RequestedMs int64 `json:"requested_ms,omitempty"`
+	// MaxTotalMs is how long after AcquiredAtMs the lease may be renewed at all (gpu_max_total,
+	// never less than the declared window). Past it a lease that is still held reads
+	// overdue however healthy its owner and progress look; it is still not freed.
+	MaxTotalMs int64 `json:"max_total_ms,omitempty"`
+	// Expired is stamped by the holder's own tick when the lease's term ended and was NOT
+	// renewed (term.go). It is a LABEL: the heartbeat goes on, the claim stays, the lease is
+	// still fenced and still current, and a later tick that finds the term renewable again
+	// clears it. Nothing is freed or killed by it.
+	Expired bool `json:"expired,omitempty"`
+	// ExpiredWhy is the sentence behind Expired, recorded with it.
+	ExpiredWhy string `json:"expired_why,omitempty"`
 
 	// --- ownership (plan P8). Additive and omitempty: a record without Owner is an
 	// UNKNOWN owner, never an orphan. See owner.go. ---
@@ -335,6 +362,17 @@ type Info struct {
 	YieldGraceMs int64
 	OnYield      string
 	OnYieldDir   string
+	// Term, Requested and HardEnd mirror the record's terms (term.go): the renewal term, the
+	// window the caller asked for when that was above the cap on a term (zero otherwise), and
+	// the instant after which the lease is no longer renewed (AcquiredAt plus the maximum
+	// total; zero for a record that carries none). Expired and ExpiredWhy mirror the label the
+	// holder's tick stamped when the term ended unrenewed: held, fenced and heartbeating all
+	// the same.
+	Term       time.Duration
+	Requested  time.Duration
+	HardEnd    time.Time
+	Expired    bool
+	ExpiredWhy string
 	// Leases lists every live lease on its own (lowest epoch first) when MORE THAN ONE
 	// is live; it is nil otherwise. Info itself describes only the lowest, so a consumer
 	// that decides "does a lease fence me" from Class, Exclusive and Draining must walk
@@ -455,6 +493,11 @@ type Options struct {
 	// if not, the call is a new arrival. LeaveToken reuses the id, so a caller keeps one name for
 	// its place across re-calls.
 	ResumeToken string
+	// MaxTerm and MaxTotal override the installed term limits (config gpu_max_term_min and
+	// gpu_max_total_min, SetDefaultTerms) for this acquisition; zero means the installed
+	// value. See PlanTerm for what each one bounds. Neither shortens the window asked for.
+	MaxTerm  time.Duration
+	MaxTotal time.Duration
 }
 
 // Manager binds a resolved state root. Construct with Open, which performs the
@@ -1007,6 +1050,11 @@ func infoFrom(meta *Meta, now time.Time) Info {
 		Owner:          cloneOwner(meta.Owner),
 		Progress:       cloneProgress(meta.Progress),
 		Legacy:         len(meta.Devices) == 0 && meta.Format < RecordFormat && strings.TrimSpace(meta.WrapperVersion) == "",
+		Term:           time.Duration(meta.TermMs) * time.Millisecond,
+		Requested:      time.Duration(meta.RequestedMs) * time.Millisecond,
+		HardEnd:        hardEndOf(meta),
+		Expired:        meta.Expired,
+		ExpiredWhy:     meta.ExpiredWhy,
 	}
 }
 
@@ -1470,6 +1518,7 @@ func (m *Manager) record(epoch uint64, class Class, opts Options) ([]byte, error
 		WrapperVersion: strings.TrimSpace(opts.WrapperVersion),
 	}
 	m.stampOwnership(&meta, opts)
+	m.stampTerm(&meta, opts, ttl)
 	if !m.legacyWriter {
 		meta.Format = RecordFormat
 	}

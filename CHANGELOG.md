@@ -6,6 +6,48 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed — a lease has a term; a term ends in a renewal or a label, never a release; the detached holder stops releasing at `--for` (GPU routing P9)
+
+**The operator-visible change.** `gpu reserve --detach` used to hold the card until its `--for` deadline and then
+release it whether or not the work behind it had finished; on 2026-09-07 that freed a card under a running job. It no
+longer does. `--for` is now the lease's declared window and its first term, and when a term ends the holder's own tick
+(the wrapper form's 15 s heartbeat; the detached holder's renewal) does one of two things, never a release:
+
+- **renews it by one term** when its owner is alive and (its progress file is advancing or its cards are working), or
+  when its owner cannot be told (no owner recorded, a session the registry never held) and its progress file is
+  advancing, or when it is unattended and its progress file is advancing, up to a maximum total from acquisition;
+- otherwise **labels it expired**, with the reason. An expired lease is still held and heartbeating, still passes its
+  holder's fence, reads `held-overdue` (no new verdict word) with a note that says why the term was not renewed, and is
+  open to a takeover (the command is a later change). It is **not reclaimable**: the reclaim rule is unchanged, nothing
+  is freed or killed, and the label clears itself if the term becomes renewable again.
+
+A request above the cap on a term is recorded, warned about on stderr, accepted whole and never shortened. The record
+gains `term_ms`, `requested_ms`, `max_total_ms`, `expired` and `expired_why` (all `omitempty`; an older reader ignores
+them). **`expired` is its own key and not a `State` value**, a deviation from the plan's wording: `state` is what
+`checkV2` and `render/gpu-lock.mjs` fence on, and every binary and Node copy built before this change fences out any
+state but `active`, so an `expired` state would stop a render running under an expired lease, which is the loss this
+change exists to prevent. The plan's umbrella `meta.json` was dropped in P2, so a renewal rewrites only the lease's own
+record.
+
+New config keys `gpu_max_term_min` (default 360) and `gpu_max_total_min` (default 2880), installed at config load. New
+flag `gpu reserve --detach --release-at-expiry` restores the old ending (refused without `--detach`). `/fleet/health`'s
+lease block gains `expired` (absent unless true; read across every live lease, with `busy` and `overdue` unchanged).
+`gpu status` prints the term and, for an expired lease, `term: EXPIRED ... ago and not renewed because ...`.
+
+**The label is stable and does not state what nobody saw.** The reason a lease was labelled is compared at every recheck
+(once a minute while it stays expired) to decide whether anything changed, so it never quotes a value that moves with the
+clock: a stalled progress file used to put "no activity for 1h2m0s" into it, a different sentence every minute, so the
+record was rewritten and the wrapper printed "not renewed" again, indefinitely, into the stream the wrapping session reads
+as notifications. It now holds only the stall window the lease declared, and the holder says it once per expiry (a
+renewal ends the episode). The cards the check reads have three answers, working, idle and could not be read: a failed or
+timed-out `nvidia-smi` sample (likeliest when the GPU is saturated) is worded "its cards could not be read", never "no
+work", and the reason the owner could not be told (the session was not in the registry, or the registry could not be
+read) reaches the label instead of "no owner is recorded as present". An owner who cannot be told is not an objection:
+an advancing progress file renews its lease, as it does an unattended one; a busy card alone still does not.
+
+Three existing holder tests ended by waiting for the old deadline exit; they now release the lease, which is what ends a
+holder. See [GPU lease](docs/systems/gpu-lease.md), "Terms", and ADR 0070.
+
 ### Fixed — review pass on per-card media admission (GPU routing P13b)
 
 - **`gpu release` no longer kills a live job's ComfyUI instance and then refuses.** With several card leases
