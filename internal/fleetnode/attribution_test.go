@@ -268,18 +268,29 @@ func TestNodeCardOfAJobDroppedBeforeItStartedClosesFailed(t *testing.T) {
 	if rec := do(t, s, http.MethodDelete, "/fleet/jobs/queued-1", "", withdrawAuth); rec.Code != http.StatusOK && rec.Code != http.StatusNoContent && rec.Code != http.StatusAccepted {
 		t.Fatalf("withdraw = %d (body %s)", rec.Code, rec.Body.String())
 	}
-	pn.e.Wait()
-	pn.mu.Lock()
-	byID := map[string]map[string]bool{}
-	for _, f := range pn.frames {
-		wi := f["params"].(map[string]any)["workloadInfo"].(map[string]any)
-		id := wi["id"].(string)
-		if byID[id] == nil {
-			byID[id] = map[string]bool{}
+	// The job store flips running-1 to "running" before its run closure emits the running frame, so
+	// waiting on the state alone races the frame under load: wait for the two frames themselves.
+	states := func() map[string]map[string]bool {
+		pn.mu.Lock()
+		defer pn.mu.Unlock()
+		byID := map[string]map[string]bool{}
+		for _, f := range pn.frames {
+			wi := f["params"].(map[string]any)["workloadInfo"].(map[string]any)
+			id := wi["id"].(string)
+			if byID[id] == nil {
+				byID[id] = map[string]bool{}
+			}
+			byID[id][wi["state"].(string)] = true
 		}
-		byID[id][wi["state"].(string)] = true
+		return byID
 	}
-	pn.mu.Unlock()
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+		if s := states(); s["running-1"]["running"] && s["queued-1"]["failed"] {
+			break
+		}
+	}
+	pn.e.Wait()
+	byID := states()
 	if !byID["queued-1"]["queued"] || !byID["queued-1"]["failed"] || byID["queued-1"]["running"] {
 		t.Fatalf("the withdrawn job's card = %v, want queued then failed, never running", byID["queued-1"])
 	}
