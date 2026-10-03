@@ -141,7 +141,8 @@ an inner row keeps the prompt tokens it processed as savings, and the call's own
 what no inner row carries (the synthesis prompt, a cache-hit window's stored figure) plus the whole
 output, with `cards_tokens` set to the work the cards actually did (an inner row records 0; a
 cascade call's row adds the card work of its climbing attempts, carried in `core.Meta.CardsCarried`,
-and an `extract_image` row adds the same carried work of its sub-calls). A
+and an `extract_image` row adds the same carried work of its sub-calls; only the call's own row does,
+never the entry tier's correctness-label snapshot, whose `cards_tokens` is the 0 it always carried). A
 `video_watch` result still reports the whole call's tokens to the caller.
 4. **Jobs under the GPU lease** (0.140.6, `gpu_leasecard.go`). `gpu reserve -- <cmd>` is how every
    bench, render and measurement runs on every node, and none of it reached PAIR: on 2026-09-23 the

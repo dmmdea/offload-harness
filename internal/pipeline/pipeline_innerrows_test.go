@@ -527,3 +527,39 @@ func TestExtractImageCardsIncludeASubCallsCarriedWork(t *testing.T) {
 		t.Fatalf("composite cards_tokens = %d, want 108", got)
 	}
 }
+
+// L3 (H3 delta): the carried-work accounting belongs to the call's OWN ledger row. The entry tier's
+// correctness-label snapshot is built from the same meta (its CardsCarried already holds the climbing
+// attempt's work), and it is not a row of the call: it keeps the figure it always had, so the work is
+// not counted twice there. Both figures are pinned in one escalated call: the call's row carries the
+// attempt's work plus its own, and the label snapshot carries neither.
+func TestCascadeCarriedWorkIsOnTheCallRowNotTheLabelSnapshot(t *testing.T) {
+	const entryModel, escModel = "fake-e2b", "fake-e4b"
+	srv := cascadeServer(entryModel, escModel, fakeChat{content: `{"decision":"yes","reason":"confirmed"}`, finishReason: "stop", promptTokens: 120})
+	defer srv.Close()
+	cfg := cascadeCfg(srv, entryModel, escModel)
+	cfg.ConfHeadLabelsPath = filepath.Join(t.TempDir(), "confhead-labels.jsonl")
+	p, lpath := ledgerPipeline(t, cfg, srv)
+
+	if res := p.Run(context.Background(), escTriageReq); !res.OK {
+		t.Fatalf("cascade must succeed on the escalation tier: %+v", res)
+	}
+	rows := readRows(t, lpath)
+	call, inner := assertOneCall(t, rows, 1)
+	if want := ownTokens(inner[0]) + ownTokens(call); want == 0 || call.CardsTokens != want {
+		t.Fatalf("call cards_tokens = %d, want %d: %s", call.CardsTokens, want, rowsStr(rows))
+	}
+	labels, err := ledger.ReadLabelFile(cfg.ConfHeadLabelsPath)
+	if err != nil {
+		t.Fatalf("ReadLabelFile: %v", err)
+	}
+	if len(labels) != 1 {
+		t.Fatalf("want exactly one label snapshot, got %d", len(labels))
+	}
+	if labels[0].TokensIn != inner[0].TokensIn || labels[0].TokensIn == 0 {
+		t.Fatalf("fixture: the snapshot is the entry tier's attempt (tokens_in %d vs the inner row's %d)", labels[0].TokensIn, inner[0].TokensIn)
+	}
+	if labels[0].CardsTokens != 0 {
+		t.Fatalf("the label snapshot cards_tokens = %d, want the 0 it carried before the carried-work change: the climbing attempt's work was added to a row that is not the call's", labels[0].CardsTokens)
+	}
+}

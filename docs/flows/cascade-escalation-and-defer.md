@@ -123,7 +123,11 @@ writes the same single plain row as ever. The climbing attempt's prompt tokens s
 (savings), and `tokens_out` of the call is the answering tier's. Its card work is not lost: the
 ledger writes `cards_tokens` 0 on an inner row, so the pipeline carries the attempt's work forward
 (`core.Meta.CardsCarried`, never published) and the call's own row sets `cards_tokens` to that plus
-its own, which keeps a total of `cards_tokens` over the ledger equal to the work the cards did.
+its own, which keeps a total of `cards_tokens` over the ledger equal to the work the cards did. Only
+the two writers of a call's row add it (`callRowFrom`: the answering tier's `record`, and `recordDefer`);
+`entryFrom`, which every snapshot shares (the entry tier's correctness-label snapshot, the confidence
+head's feature row, the shadow capture), adds nothing, because a snapshot's own figures already hold the
+attempt's work and adding the carried work to them counts it twice.
 
 `esc_source` names WHICH gate sent a call up a tier, and it is the one field written on **successful**
 escalations too — that was the measured gap it closed: a call that escalated and then succeeded
