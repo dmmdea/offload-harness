@@ -138,6 +138,15 @@ type relayMeta struct {
 	Aliases []string `json:"node_aliases,omitempty"`
 }
 
+// relayPin is a job's relay: chosen with the job's first in-flight frame (unconfirmed), confirmed by
+// the first post a relay took. An unconfirmed pin dies with a failed post, so the next frame re-picks
+// a relay that is not known to be down; a confirmed one stays, because the card is open THERE and
+// its terminal frame must reach it (a pending marker retries it against that relay).
+type relayPin struct {
+	url       string
+	confirmed bool
+}
+
 type relayVerdict struct {
 	ok bool
 	at time.Time
@@ -151,7 +160,7 @@ type relayState struct {
 	// refreshing marks the bases a background refresh of a stale verdict is running for.
 	refreshing map[string]bool
 	demoted    map[string]time.Time // route URL -> when a post to it last failed
-	pinned     map[string]string    // job id -> the route URL its in-flight frames went to
+	pinned     map[string]relayPin  // job id -> the relay its in-flight frames go to
 	// probe reads a member's health: does it advertise pair_relay. probeRelayHealth unless a test
 	// swaps it.
 	probe  func(ctx context.Context, base, token string) (bool, error)
@@ -342,13 +351,13 @@ func (e *Emitter) demoteRelay(u string) {
 // relayRoute picks the relay for the FIRST frame of a job (plan sends a job that is already pinned to
 // the relay its in-flight frames went to, so a terminal frame lands on the card those opened even if
 // the first healthy member changed since): the first healthy member, which an in-flight frame pins
-// the job to. "" = no relay.
+// the job to (unconfirmed until a post to it succeeds: settlePin). "" = no relay.
 func (e *Emitter) relayRoute(ev Event) string {
 	u := e.pickRelay()
 	if u != "" && !isTerminal(ev.State) && ev.JobID != "" {
 		e.relay.mu.Lock()
 		if e.relay.pinned == nil {
-			e.relay.pinned = map[string]string{}
+			e.relay.pinned = map[string]relayPin{}
 		}
 		if len(e.relay.pinned) >= relayPinsMax {
 			for k := range e.relay.pinned { // a job that never closed: drop an arbitrary old pin
@@ -356,7 +365,7 @@ func (e *Emitter) relayRoute(ev Event) string {
 				break
 			}
 		}
-		e.relay.pinned[ev.JobID] = u
+		e.relay.pinned[ev.JobID] = relayPin{url: u}
 		e.relay.mu.Unlock()
 	}
 	return u
@@ -366,8 +375,36 @@ func (e *Emitter) relayRoute(ev Event) string {
 func (e *Emitter) pinnedRelay(jobID string) (string, bool) {
 	e.relay.mu.Lock()
 	defer e.relay.mu.Unlock()
-	u, ok := e.relay.pinned[jobID]
-	return u, ok
+	p, ok := e.relay.pinned[jobID]
+	return p.url, ok
+}
+
+// settlePin applies one delivered relay frame's outcome to its job's pin: a post a relay took
+// confirms the pin; a post that FAILED (transport error, 5xx) on a still unconfirmed pin drops it,
+// so no later frame is pinned to a relay that has never taken one of this job's frames (nothing is
+// open there, and its terminal frame would only wait in a pending marker for a relay that is down
+// while another is healthy). A rejected frame says nothing about the relay and leaves the pin.
+func (e *Emitter) settlePin(jobID, u string, err error) {
+	if jobID == "" {
+		return
+	}
+	var rej *rejectedError
+	if err != nil && errors.As(err, &rej) {
+		return
+	}
+	e.relay.mu.Lock()
+	defer e.relay.mu.Unlock()
+	p, ok := e.relay.pinned[jobID]
+	if !ok || p.url != u {
+		return
+	}
+	switch {
+	case err == nil:
+		p.confirmed = true
+		e.relay.pinned[jobID] = p
+	case !p.confirmed:
+		delete(e.relay.pinned, jobID)
+	}
 }
 
 // relaySelfName is the node name a relayed event with no node carries: this box's own short
@@ -390,17 +427,17 @@ func (e *Emitter) buildRelay(ev Event) ([]byte, map[string]json.RawMessage, *rel
 		errRaw = mustJSON(CardError(ev.Error))
 	}
 	if ev.Requester != "" {
-		reqRaw = mustJSON(ev.Requester)
+		reqRaw = mustJSON(relayText(ev.Requester, relayFieldMax))
 	}
 	created := ev.CreatedAt
 	if created == 0 {
 		created = time.Now().UnixMilli()
 	}
 	info := map[string]json.RawMessage{
-		"id":             mustJSON(ev.JobID),
-		"model":          mustJSON(ev.Model),
+		"id":             mustJSON(relayID(ev.JobID)),
+		"model":          mustJSON(relayText(ev.Model, relayFieldMax)),
 		"engine":         mustJSON(ev.Engine),
-		"runId":          mustJSON(ev.JobID),
+		"runId":          mustJSON(relayID(ev.JobID)),
 		"state":          mustJSON(ev.State),
 		"originatedFrom": null,
 		"scheduledOn":    null,
@@ -421,6 +458,40 @@ func (e *Emitter) buildRelay(ev Event) ([]byte, map[string]json.RawMessage, *rel
 	}
 	body, _ := relayFrameBody(MethodFor(ev.State), info, *meta)
 	return body, info, meta
+}
+
+// relayText bounds a free-text card field to max bytes on a rune boundary and replaces every
+// non-printing rune with a space, so the member's strict decode (ParseRelay: length and printable
+// checks, a 400 it treats as permanent) never refuses a frame the local path would have posted: a
+// lease card's model is the wrapped script's file name, which has no length bound of its own, and a
+// requester carries a session name. A card then shows a shortened name instead of never existing.
+func relayText(s string, max int) string {
+	if len(s) <= max && strings.IndexFunc(s, func(r rune) bool { return !unicode.IsPrint(r) }) < 0 {
+		return s
+	}
+	var b strings.Builder
+	for _, r := range s {
+		if !unicode.IsPrint(r) {
+			r = ' '
+		}
+		if b.Len()+len(string(r)) > max {
+			break
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+// relayID is a job id as the relay body carries it: unchanged when it fits the member's bound, else
+// cut with a digest of the whole id appended, so a long id still names exactly one card (the same
+// cut on every frame of the job) instead of every frame being refused.
+func relayID(id string) string {
+	if len(id) <= relayFieldMax {
+		return id
+	}
+	sum := sha256.Sum256([]byte(id))
+	h := hex.EncodeToString(sum[:])[:8]
+	return relayText(id, relayFieldMax-1-len(h)) + "-" + h
 }
 
 // relayFrameBody wraps a workloadInfo and its node hint in the relay body.
@@ -763,7 +834,36 @@ type RelayLimiter struct {
 	// that never sends a terminal frame) lives until RelayOpenMaxAge.
 	openPer, openAll int
 	open             map[string]map[string]time.Time // asker -> namespaced job id -> last in-flight frame
+
+	// closed remembers, for relayClosedTTL, the cards a terminal frame just closed (asker + id -> when).
+	// Frames of one job are not ordered on the wire (the emitter posts each on its own goroutine, by
+	// design: PAIR merges a job's frames by lifecycle rank), so an in-flight frame can land at the
+	// member AFTER its job's terminal frame. PAIR drops it, but the member's emitter would write a
+	// fresh remote marker for it that nothing ever closes (a "failed" frame at the age cap for a job
+	// that completed) and count it as a card open for 24 h. A late in-flight frame of a closed card is
+	// therefore answered and ignored.
+	closed map[string]time.Time
 }
+
+// relayClosedTTL is how long a closed card's id is remembered: far past the milliseconds to seconds
+// in which a late frame arrives, short enough that a job id a producer reuses reopens its card.
+const (
+	relayClosedTTL = 10 * time.Minute
+	relayClosedMax = 4096
+)
+
+// CardAdmission is AdmitCard's verdict on one relayed frame.
+type CardAdmission int
+
+const (
+	// CardAdmitted: post the frame.
+	CardAdmitted CardAdmission = iota
+	// CardCapped: the frame would open a card past the open-card cap (answer 429).
+	CardCapped
+	// CardStale: an in-flight frame of a card whose terminal frame already arrived. Answer it as
+	// received and post nothing.
+	CardStale
+)
 
 type bucket struct {
 	tokens float64
@@ -786,7 +886,8 @@ const RelayBuckets = 1024
 func NewRelayLimiter(rate float64, burst int, gRate float64, gBurst int) *RelayLimiter {
 	return &RelayLimiter{rate: rate, burst: float64(burst), gRate: gRate, gBurst: float64(gBurst),
 		b: map[string]*bucket{}, now: time.Now,
-		openPer: RelayOpenPerAsker, openAll: RelayOpenGlobal, open: map[string]map[string]time.Time{}}
+		openPer: RelayOpenPerAsker, openAll: RelayOpenGlobal, open: map[string]map[string]time.Time{},
+		closed: map[string]time.Time{}}
 }
 
 // SetOpenCaps replaces the open-card caps (a value <= 0 leaves that cap as it was).
@@ -824,9 +925,16 @@ func (l *RelayLimiter) OpenCards(asker string) int {
 // so the count and the register agree; a member restart empties the count, and the markers it
 // leaves are the sweep's.
 func (l *RelayLimiter) AdmitCard(asker, jobID, state string) bool {
+	return l.Admit(asker, jobID, state) == CardAdmitted
+}
+
+// Admit is AdmitCard with the reason a frame is not admitted: CardCapped (over the open-card cap) or
+// CardStale (an in-flight frame of a card its terminal frame already closed, see closed).
+func (l *RelayLimiter) Admit(asker, jobID, state string) CardAdmission {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	now := l.now()
+	key := asker + "\x00" + jobID
 	if isTerminal(state) {
 		if m := l.open[asker]; m != nil {
 			delete(m, jobID)
@@ -834,25 +942,55 @@ func (l *RelayLimiter) AdmitCard(asker, jobID, state string) bool {
 				delete(l.open, asker)
 			}
 		}
-		return true
+		l.rememberClosedLocked(key, now)
+		return CardAdmitted
 	}
 	l.expireLocked(now)
+	if at, ok := l.closed[key]; ok && now.Sub(at) <= relayClosedTTL {
+		return CardStale
+	}
 	if _, known := l.open[asker][jobID]; known {
 		l.open[asker][jobID] = now
-		return true
+		return CardAdmitted
 	}
 	total := 0
 	for _, m := range l.open {
 		total += len(m)
 	}
 	if len(l.open[asker]) >= l.openPer || total >= l.openAll {
-		return false
+		return CardCapped
 	}
 	if l.open[asker] == nil {
 		l.open[asker] = map[string]time.Time{}
 	}
 	l.open[asker][jobID] = now
-	return true
+	return CardAdmitted
+}
+
+// rememberClosedLocked records a terminal frame's card, dropping the expired entries first and, over
+// relayClosedMax, the oldest.
+func (l *RelayLimiter) rememberClosedLocked(key string, now time.Time) {
+	if l.closed == nil {
+		l.closed = map[string]time.Time{}
+	}
+	if len(l.closed) >= relayClosedMax {
+		for k, at := range l.closed {
+			if now.Sub(at) > relayClosedTTL {
+				delete(l.closed, k)
+			}
+		}
+		for len(l.closed) >= relayClosedMax {
+			oldest, first := "", true
+			var oldestAt time.Time
+			for k, at := range l.closed {
+				if first || at.Before(oldestAt) {
+					oldest, oldestAt, first = k, at, false
+				}
+			}
+			delete(l.closed, oldest)
+		}
+	}
+	l.closed[key] = now
 }
 
 // expireLocked forgets cards whose last in-flight frame is older than RelayOpenMaxAge.

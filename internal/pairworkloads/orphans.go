@@ -38,6 +38,10 @@ package pairworkloads
 // the only record of the open card on the first failed post. A lock whose
 // sweeper died is removed by a later pass, and the pass after that claims.
 //
+// RELAYED MARKERS (relay.go). A card another box's process opened through this box's relay has a
+// marker with pid 0 and Remote set, named `0-<job>.remote`, not `.json`: a harness built before the
+// relay sweeps this directory too and reads a pid <= 0 marker as orphaned (see remoteSuffix).
+//
 // WHOSE MARKER. A marker records the ingress URL its card was posted to, and a
 // sweep closes only the markers of ITS OWN ingress (a marker with no endpoint
 // predates the field and counts as DefaultEndpoint). Closing is posting to the
@@ -51,8 +55,8 @@ package pairworkloads
 // it will never accept; 401/403/404/405 describe the route, not the frame, and
 // stay retryable) is different from PAIR being unreachable (transport error or
 // 5xx): the first drops that one marker and the pass goes on to the next, the
-// second releases the claim and ends the pass, since every later marker would
-// fail the same way. Treating both as "down" let one rejected marker starve
+// second releases the claim and skips the rest of that endpoint's markers for the pass, since
+// they would fail the same way (the other endpoints' markers go on). Treating both as "down" let one rejected marker starve
 // every marker behind it until the 48 h give-up.
 //
 // SAFE BY CONSTRUCTION. Every register error is swallowed: a marker that cannot
@@ -104,6 +108,13 @@ const (
 
 	lockSuffix = ".lock"
 	tmpInfix   = ".tmp-"
+	// remoteSuffix ends the file name of a RELAYED card's marker (pid 0, producer on another box).
+	// It is deliberately NOT ".json": a harness built before the relay sweeps this same directory
+	// (a long-lived MCP server or CLI the upgrade did not restart), reads every ".json" marker with
+	// pid <= 0 as orphaned and posts "failed" for a job that is still running, and it ignores the
+	// unknown "remote" field. Those binaries skip every file that is not ".json", so the suffix
+	// keeps a relayed marker out of their reach while this build's sweep reads it.
+	remoteSuffix = ".remote"
 )
 
 // openMarker is one register file.
@@ -196,6 +207,16 @@ func isTerminal(state string) bool { return state != "queued" && state != "runni
 // share a file, and job-scoped so a job's queued and running frames rewrite
 // one marker.
 func markerName(pid int, jobID string) string {
+	return markerStem(pid, jobID) + ".json"
+}
+
+// remoteMarkerName is the file name of a relayed card's marker: the pid-0 name with remoteSuffix
+// in place of ".json" (see remoteSuffix: an older harness on this box must not read it).
+func remoteMarkerName(jobID string) string {
+	return markerStem(0, jobID) + remoteSuffix
+}
+
+func markerStem(pid int, jobID string) string {
 	b := make([]byte, 0, len(jobID))
 	for i := 0; i < len(jobID) && len(b) < 160; i++ {
 		c := jobID[i]
@@ -206,7 +227,7 @@ func markerName(pid int, jobID string) string {
 			b = append(b, '_')
 		}
 	}
-	return fmt.Sprintf("%d-%s.json", pid, b)
+	return fmt.Sprintf("%d-%s", pid, b)
 }
 
 // track updates the register for a frame about to be posted: an in-flight
@@ -226,7 +247,17 @@ func (e *Emitter) track(ev Event, pl sendPlan) (removeAfterPost string) {
 			// A relayed card's marker is found by name, not by this process's memory: the member may
 			// have restarted since the in-flight frame while the producer, on another box, did not.
 			if dir := e.registerDir(); dir != "" {
-				p = filepath.Join(dir, markerName(0, ev.JobID))
+				p = filepath.Join(dir, remoteMarkerName(ev.JobID))
+			}
+		}
+		if p == "" && pl.relay != nil {
+			// A terminal frame through a relay with no marker of its own (its in-flight frames never
+			// went out: the relay was down or just demoted, or another process sent them) still gets
+			// one if the post fails, so the sweep retries the frame instead of losing it: the card
+			// then appears, closed, once the relay answers. A delivered frame removes it again.
+			if dir := e.registerDir(); dir != "" {
+				pid, _ := e.selfIdentity()
+				p = filepath.Join(dir, markerName(pid, ev.JobID))
 			}
 		}
 		return p
@@ -244,6 +275,9 @@ func (e *Emitter) track(ev Event, pl sendPlan) (removeAfterPost string) {
 		return ""
 	}
 	path := filepath.Join(dir, markerName(pid, ev.JobID))
+	if pl.remote {
+		path = filepath.Join(dir, remoteMarkerName(ev.JobID))
+	}
 	if writeAtomic(dir, path, body) {
 		e.openMu.Lock()
 		if e.open == nil {
@@ -377,9 +411,11 @@ func (e *Emitter) orphaned(m openMarker, now time.Time) bool {
 // deletes the marker. It returns the number of frames delivered. It leaves
 // every marker of another endpoint alone. A marker whose closing frame cannot
 // be built, and a post PAIR REJECTED (HTTP 400, 413 or 422), drop that marker
-// and go on; any other failed post releases the claim and ends
-// the pass (PAIR is down; the next sweep retries). A disabled emitter does
-// nothing.
+// and go on; any other failed post releases the claim and skips every later
+// marker of the SAME endpoint for the rest of the pass (that ingress or relay
+// is down; the next sweep retries), while the markers of the other endpoints
+// go on: with several relays, one dead relay must not starve the healthy ones'
+// cards or the local ingress's. A disabled emitter does nothing.
 func (e *Emitter) SweepOrphans(ctx context.Context) int {
 	if !e.Enabled() {
 		return 0
@@ -395,6 +431,7 @@ func (e *Emitter) SweepOrphans(ctx context.Context) int {
 	now := e.now()
 	selfPID, _ := e.selfIdentity()
 	sent := 0
+	down := map[string]bool{} // endpoint keys that failed a post in this pass
 	for _, de := range entries {
 		if ctx.Err() != nil {
 			break
@@ -412,7 +449,7 @@ func (e *Emitter) SweepOrphans(ctx context.Context) int {
 		case strings.HasSuffix(name, lockSuffix):
 			e.reapLock(path, selfPID)
 			continue
-		case !strings.HasSuffix(name, ".json"):
+		case !strings.HasSuffix(name, ".json") && !strings.HasSuffix(name, remoteSuffix):
 			continue
 		}
 		raw, err := os.ReadFile(path)
@@ -431,6 +468,10 @@ func (e *Emitter) SweepOrphans(ctx context.Context) int {
 		}
 		if !m.Pending && !e.orphaned(m, now) {
 			continue
+		}
+		epKey := endpointKey(markerEndpoint(m))
+		if down[epKey] {
+			continue // its ingress failed a post earlier in this pass: the next sweep retries it
 		}
 		lock := path + lockSuffix
 		if !claimLock(lock, selfPID) {
@@ -473,8 +514,9 @@ func (e *Emitter) SweepOrphans(ctx context.Context) int {
 				log.Printf("pairworkloads: dropped an orphaned PAIR card marker PAIR has not accepted for %s (%s): %v", openGiveUp, name, err)
 				continue
 			}
-			removeRetrying(lock) // PAIR down: the marker stays for the next sweep
-			break
+			removeRetrying(lock) // this endpoint is down: the marker stays for the next sweep
+			down[epKey] = true
+			continue
 		}
 		removeRetrying(path) // the marker BEFORE the lock: see RACING SWEEPERS
 		removeRetrying(lock)

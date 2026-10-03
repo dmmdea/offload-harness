@@ -105,9 +105,16 @@ func (s *Server) handlePairRelay(w http.ResponseWriter, r *http.Request) {
 	}
 	// The call rate is bounded above; this bounds the cards a token holder can leave open (each is a
 	// PAIR card and a register marker for up to the age cap). A terminal frame is always admitted.
-	if !s.relayLimiter.AdmitCard(asker, ev.JobID, ev.State) {
+	switch s.relayLimiter.Admit(asker, ev.JobID, ev.State) {
+	case pairworkloads.CardCapped:
 		w.Header().Set("Retry-After", "60")
 		writeError(w, http.StatusTooManyRequests, fmt.Sprintf("pair-relay: %q (or this node) already holds the most relayed cards it keeps open; finish or fail one first", asker))
+		return
+	case pairworkloads.CardStale:
+		// An in-flight frame that overtook its card's terminal frame on the wire (frames of a job are
+		// not ordered): the card is closed, so posting it would write a marker nothing closes. Answer
+		// as for any frame taken, because a refusal would make the relaying box demote a healthy relay.
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 		return
 	}
 	// The member's own emitter posts it: the card is the member's, the orphan register covers it.

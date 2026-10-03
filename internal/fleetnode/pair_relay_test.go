@@ -296,6 +296,32 @@ func TestPairRelayCapsTheCardsLeftOpen(t *testing.T) {
 	}
 }
 
+// Frames of a job are not ordered on the wire, so an in-flight frame can land after its card's terminal
+// frame. The member answers it 200 (a refusal would demote a healthy relay) and posts nothing: no
+// frame to PAIR, no marker nothing would close.
+func TestPairRelayIgnoresAnInFlightFrameThatArrivesAfterTheTerminalFrame(t *testing.T) {
+	pn := newPairNode(t, true)
+	s, _ := newTestServer(t, relayCfg("t"), &fakeRunner{}, relayOpts(pn, true))
+	post := func(body string) {
+		t.Helper()
+		if rec := do(t, s, http.MethodPost, pairworkloads.RelayPath, body, relayHeaders("t", "node-v")); rec.Code != http.StatusOK {
+			t.Fatalf("relay = %d (%s)", rec.Code, rec.Body.String())
+		}
+		pn.e.Wait()
+	}
+	completed := strings.Replace(strings.Replace(relayBodyQueued, `"state":"queued"`, `"state":"completed"`, 1), "workload:submitted", "workload:completed", 1)
+	running := strings.Replace(strings.Replace(relayBodyQueued, `"state":"queued"`, `"state":"running"`, 1), "workload:submitted", "workload:started", 1)
+	post(completed)
+	before := len(pn.cards(t))
+	post(running) // the late frame
+	if got := len(pn.cards(t)); got != before {
+		t.Fatalf("the late in-flight frame was posted to PAIR (%d card states, was %d)", got, before)
+	}
+	if ents, _ := os.ReadDir(pn.open); len(ents) != 0 {
+		t.Fatalf("register = %v: the late frame left a marker nothing closes", ents)
+	}
+}
+
 // A relayed in-flight card's marker is a remote producer's: pid 0, flagged remote, so the member's
 // sweep never judges it by a pid of this box.
 func TestPairRelayInFlightMarkerHasNoLocalPid(t *testing.T) {

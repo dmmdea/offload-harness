@@ -697,6 +697,8 @@ type sendPlan struct {
 	info  map[string]json.RawMessage
 	url   string
 	relay *relayMeta
+	// jobID is the job a relayed frame belongs to (its relay pin is settled by the post's outcome).
+	jobID string
 	// remote: the producer is another box's process (a frame a relay delivered to this member).
 	remote bool
 }
@@ -730,13 +732,15 @@ func (e *Emitter) relayPlan(ev Event, u string) (sendPlan, error) {
 		delete(e.relay.pinned, ev.JobID)
 		e.relay.mu.Unlock()
 	}
-	return sendPlan{body: body, info: info, url: u, relay: meta}, nil
+	return sendPlan{body: body, info: info, url: u, relay: meta, jobID: ev.JobID}, nil
 }
 
 // deliver posts a planned frame to where its plan says.
 func (e *Emitter) deliver(ctx context.Context, pl sendPlan) error {
 	if pl.relay != nil {
-		return e.postRelay(ctx, pl.url, pl.body)
+		err := e.postRelay(ctx, pl.url, pl.body)
+		e.settlePin(pl.jobID, pl.url, err)
+		return err
 	}
 	return e.post(ctx, pl.body)
 }

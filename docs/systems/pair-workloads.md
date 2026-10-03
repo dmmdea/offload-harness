@@ -368,9 +368,19 @@ stayed invisible. A **relay** closes the gap with the same frames: a fleet-serve
 - **A relayed in-flight marker belongs to a remote producer.** The member cannot see whether the producer's process, on
   another box, is alive, so its marker carries `pid` 0 and `remote: true`, is **never judged by the member's pid table**,
   and closes only by its terminal relayed frame or by the age cap `RelayOpenMaxAge` (24 h, the register's leak cap: a lease
-  card legitimately runs for hours). The terminal frame finds the marker **by name** (`0-<job id>.json`), so it still
+  card legitimately runs for hours). The terminal frame finds the marker **by name** (`0-<job id>.remote`), so it still
   closes the card after the member restarted since the in-flight frame. A terminal frame PAIR could not take is kept as a
-  pending frame of the same remote kind. Known cost: a relaying box that dies leaves its card "Running" on the desktop until
+  pending frame of the same remote kind.
+- **A relayed marker is not a `.json` file** (`0-<job id>.remote`, `remoteSuffix`). A harness built before the relay sweeps
+  the same `pair-open/` directory on the same box (a long-lived MCP server or CLI the upgrade did not restart), reads every
+  `.json` marker with `pid <= 0` as orphaned, and ignores the unknown `remote` field, so it would post `failed` for a relayed
+  job that is still running. Those binaries skip every file that is not `.json`; this build's sweep reads both.
+- **A late in-flight frame is ignored.** Frames of a job are not ordered on the wire (above), so a `queued` or `running` frame
+  can reach the member after the job's terminal frame. PAIR drops it, but the member would write a fresh remote marker for it
+  that nothing closes until the age cap and count it as an open card. The member's limiter remembers the cards a terminal
+  frame closed for 10 minutes (`relayClosedTTL`, at most 4096) and answers a later in-flight frame of one `200` without posting
+  it (a refusal would make the relaying box demote a healthy relay). A producer that reuses a job id after that window opens a
+  card again. Known cost: a relaying box that dies leaves its card "Running" on the desktop until
   it is closed by the box's own sweep (below) or the cap.
 
 **The relaying side** (`internal/pairworkloads/relay.go`):
@@ -396,7 +406,19 @@ stayed invisible. A **relay** closes the gap with the same frames: a fleet-serve
   and it keeps the node hint, so the relaying box's own sweeper closes only the cards it opened through a relay (H1's endpoint
   scoping keeps these apart from local-ingress markers), through that relay, as an `errored` relay frame carrying the hint.
   A job's terminal frame goes to the relay its in-flight frames went to, even when the first healthy member changed since.
-  A relay that fails a post goes behind the others for 30 s.
+  The pin is confirmed by the first post a relay takes: a job's first frame that FAILS on its relay drops the pin, so the
+  next frame picks a relay not known to be down (a relay that never took a frame of the job holds no card), while a
+  confirmed pin stays through a later failure (the card is open there; its terminal frame waits as a pending marker).
+  A relay that fails a post goes behind the others for 30 s. A **terminal frame through a relay with no marker of its own**
+  (its in-flight frames never went out) is kept as a pending frame when the relay does not take it, so the sweep delivers it
+  once the relay answers instead of the card never appearing.
+- **Overlong text is shortened, never refused.** The member's strict decode refuses a `model`, `requesterId` or id over 128
+  bytes with a `400`, which the sender treats as permanent, so a lease card named for a long script file name would never
+  exist. The relaying side cuts `model` and `requesterId` to 128 bytes on a rune boundary (non-printing characters become
+  spaces) and an id longer than that to a prefix plus 8 hex of a digest of the whole id, the same on every frame of a job.
+- **One dead relay does not stall the sweep.** A sweep pass that fails a post to one endpoint skips that endpoint's remaining
+  markers for the pass and goes on to the markers of the other relays and of the local ingress; the skipped ones are retried
+  by the next sweep (before this, the first failed post ended the pass for every marker behind it, until the 48 h give-up).
 - `offload_status` has a `pair` block (absent unless `pair_workloads_enabled` is on): `mode` is `local ingress`,
   `node-info fallback`, `relay` (with the route URL) or `off` (with the reason).
 
@@ -458,7 +480,7 @@ heartbeat, and the broker's staleness sweep exempts records of its own origin. N
 side can know the producer died, so the harness retires its own orphans:
 
 - **Register.** Every in-flight frame (`queued`, `running`) writes one marker
-  `<state root>/pair-open/<pid>-<job id>.json` — the machine-wide root `seat-inflight/` and the GPU
+  `<state root>/pair-open/<pid>-<job id>.json` (a relayed card's marker is `0-<job id>.remote`, *The card relay*) — the machine-wide root `seat-inflight/` and the GPU
   lease use — holding the frame's workloadInfo, the writer's pid, its process start identity and
   the **endpoint** (the ingress URL) the card was posted to.
   The terminal frame removes it once delivered. A terminal frame that could **not** be delivered
@@ -490,7 +512,7 @@ side can know the producer died, so the harness retires its own orphans:
   posts, removes the marker, then the lock — so one frame per orphan. Rename-to-claim does not
   work on Windows: two sweepers that opened the marker before either renamed it both succeed. A
   post to an **unreachable** PAIR (transport error, HTTP 5xx, or any 4xx that does not judge the frame: 401, 403, 404, 405, 408, 429 ...) releases the lock, keeps
-  the marker and ends the pass — every later marker would fail the same way — and the next sweep
+  the marker and skips every later marker of the same endpoint for the pass — they would fail the same way; other endpoints' markers go on — and the next sweep
   retries; a marker PAIR has not accepted for 48 h is dropped. A post PAIR **rejects** (HTTP 400, 413 or 422:
   it will never accept that frame; 401/403/404/405 describe the route, not the frame, so a PAIR
   mid-deploy or a wrong endpoint cannot make the sweeper delete every marker) drops that one marker and its lock, logs one line
