@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/dmmdea/offload-harness/internal/gpugen"
 	"github.com/dmmdea/offload-harness/internal/hfinstall"
@@ -35,6 +36,7 @@ func runInstallHyperframes(args []string) error {
 	fs.String("config", "", "config file path")
 	dir := fs.String("dir", "", "install directory (default: the config's hyperframes_dir)")
 	asJSON := fs.Bool("json", false, "print the result as JSON")
+	timeout := fs.Duration("timeout", 45*time.Minute, "give up after this long (npm ci, the signature audit and the browser download included)")
 	_ = fs.Parse(args)
 	cfg, _ := loadCfgWithSource(fs)
 
@@ -53,20 +55,28 @@ func runInstallHyperframes(args []string) error {
 	if node == "" {
 		node = "node"
 	}
-	res, err := hfinstall.Install(context.Background(), hfinstall.Options{
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	defer cancel()
+	res, err := hfinstall.Install(ctx, hfinstall.Options{
 		Dir: target, Runner: runner, Node: node, Npm: npmBeside(node),
 		PackageJSON: hyperframesPackageJSON, PackageLock: hyperframesPackageLock,
 		Log: os.Stderr,
 	})
 
 	// The installers never rewrite an existing config, so say what this one should bind.
+	// A config bound to ANOTHER Chrome build than the pin resolves is an error, not a note:
+	// the runner would keep rendering with the old browser and status would not notice.
 	var notes []string
 	if err == nil {
-		if !samePath(cfg.HyperframesDir, target) {
-			notes = append(notes, fmt.Sprintf("hyperframes_dir in the config is %q; this install is %q", cfg.HyperframesDir, target))
+		if !samePath(cfg.HyperframesDir, res.Dir) {
+			notes = append(notes, fmt.Sprintf("hyperframes_dir in the config is %q; this install is %q", cfg.HyperframesDir, res.Dir))
 		}
 		if !samePath(cfg.HyperframesBrowserPath, res.BrowserPath) {
-			notes = append(notes, fmt.Sprintf("set hyperframes_browser_path to %q (the config holds %q)", res.BrowserPath, cfg.HyperframesBrowserPath))
+			if res.ChromeVersion != "" && !strings.Contains(filepath.ToSlash(cfg.HyperframesBrowserPath), res.ChromeVersion) {
+				err = fmt.Errorf("the config binds hyperframes_browser_path %q, which is not the pinned Chrome %s: set it to %q", cfg.HyperframesBrowserPath, res.ChromeVersion, res.BrowserPath)
+			} else {
+				notes = append(notes, fmt.Sprintf("the config binds the same Chrome build at another path (%q); the pinned one is %q", cfg.HyperframesBrowserPath, res.BrowserPath))
+			}
 		}
 	}
 	if *asJSON {
@@ -87,14 +97,18 @@ func runInstallHyperframes(args []string) error {
 	}
 	fmt.Printf("OK    hyperframes %s %s in %s (chrome-headless-shell %s at %s; the runner's version check matches its pin)\n",
 		res.Version, verb, res.Dir, res.ChromeVersion, res.BrowserPath)
+	if res.PreviousTree != "" {
+		fmt.Printf("NOTE  the replaced tree is kept at %s; to roll back with an older release, rename it to node_modules and put package.json.prev and package-lock.json.prev back\n", res.PreviousTree)
+	}
 	for _, n := range notes {
 		fmt.Printf("NOTE  %s\n", n)
 	}
 	return nil
 }
 
-// npmBeside finds the npm that ships beside node, so an absolute node_path never pairs
-// with another installation's npm on PATH. Empty = let PATH decide.
+// npmBeside prefers the npm that ships beside an absolute node_path; otherwise it is the
+// npm on PATH (or "" to let PATH decide). Either way hfinstall puts node's directory first
+// on PATH for every command, so npm and the scripts it starts run under the configured node.
 func npmBeside(node string) string {
 	if !filepath.IsAbs(node) {
 		return ""

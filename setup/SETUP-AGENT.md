@@ -690,11 +690,23 @@ failure. What the step does:
 
 On a node that is already installed, `local-offload install hyperframes` runs steps 1-5 on their own,
 from the `package.json` and lock the binary carries, so a node with no repository checkout can do it.
-It installs into the config's `hyperframes_dir` (or `--dir`), refuses when the runner beside the
-binary pins another version, verifies the result with the runner's `version` op, and prints a `NOTE`
-for each config key that should change. A release that moves the pin needs it on every node with the
-lane: until it runs, `doctor` reads `compose_video` BOUND-BUT-MISSING ("holds hyperframes X, not the
-runner's pin Y") and every composition defers `CLI_MISSING`.
+It works in the config's `hyperframes_dir` (or `--dir`) and never leaves the node worse off:
+
+- it refuses before touching anything when the runner beside the binary pins another version, or when
+  the directory holds something other than a harness install;
+- a healthy install (the committed package files, the pinned version and a tree `npm ls` accepts) is
+  kept and only re-verified;
+- anything else is built in `<dir>/.install-staging`, where `npm ci` and `npm audit signatures` run, so
+  a failure there leaves the live install exactly as it was; only a verified tree is swapped in, and the
+  replaced one is kept as `<dir>/node_modules.prev` (with `package.json.prev` and `package-lock.json.prev`)
+  for a rollback to an older release;
+- `npm rebuild esbuild` and the runner's `browser` and `version` ops then run on the new tree, and if one
+  fails the previous install is put back.
+
+It fails when the config binds another Chrome build than the pin resolves (it names the value to set),
+and gives up after `--timeout` (45 minutes by default). A release that moves the pin needs it on every
+node with the lane: until it runs, `doctor` reads `compose_video` BOUND-BUT-MISSING ("holds hyperframes
+X, not the runner's pin Y") and every composition defers `CLI_MISSING`.
 
 Rules for the installing agent:
 
