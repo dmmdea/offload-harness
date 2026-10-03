@@ -169,6 +169,27 @@ func TestAnAnsweringButIneligibleRemoteIsNotADeadFleetUnderAFence(t *testing.T) 
 	}
 }
 
+// The same control with the wait switched off: no tick runs, so nothing but the class the
+// placement carried can say whether the fleet was dead. A remote that answered the placement's
+// probe and could not take the contract is not a dead fleet, and the fenced defer is not counted.
+func TestAnAnsweringButIneligibleRemoteIsNotADeadFleetUnderAFenceWithNoWait(t *testing.T) {
+	compressPolls(t, 5*time.Millisecond, time.Second)
+	b := newFlagshipLeaseBox(t)
+	b.hold(gpulease.ClassMedia, leaseCard0)
+	cfg := b.cfg
+	cfg.AgentPlacementWaitSec, cfg.AgentLeaseWaitSec = -1, 0
+	_, url := ineligibleNode(t)
+	var localCalls atomic.Int64
+	_, sum, err := RunWith(t.Context(), cfg, passingLocal(&localCalls),
+		[]core.AgentContract{remoteContract()}, "auto", []string{url}, fencedRunOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if localCalls.Load() != 0 || sum.Deferred != 1 || sum.Infrastructure != 0 {
+		t.Fatalf("local=%d summary=%+v, want the fenced defer and nothing infrastructure: the remote answered", localCalls.Load(), sum)
+	}
+}
+
 // Control: a remote that fails health at first and comes back during the wait took the work, so
 // the fleet was not dead: the run reports no infrastructure failure.
 func TestARemoteThatComesBackDuringTheWaitIsNotADeadFleet(t *testing.T) {
