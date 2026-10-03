@@ -164,7 +164,8 @@ func TestGPUReleaseOfAFreeCardStopsNothing(t *testing.T) {
 func TestDetachedHolderStopsItsKeptInstancesWhenItExits(t *testing.T) {
 	cfgPath, comfyDir, m := comfyFixture(t)
 	calls := recordStops(t, m, nil)
-	args := holdArgs("media", 1500*time.Millisecond, 0, gpulease.Options{Reason: "kept"}, nil, cfgPath)
+	// Since the bounded terms (P9) a detached holder exits at its window only with --release-at-expiry.
+	args := append(holdArgs("media", 1500*time.Millisecond, 0, gpulease.Options{Reason: "kept"}, nil, cfgPath), "--release-at-expiry")
 	done := make(chan error, 1)
 	go func() { done <- runGPUHold(args[2:]) }()
 	ls := waitForLeases(t, m, 1)
