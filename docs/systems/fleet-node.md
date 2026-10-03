@@ -354,15 +354,18 @@ implications.
     30 s, then a re-placeable `503`). The transcript outputs (`stt-<digits>-<8 hex>.srt|txt|segments.json`) are removed when
     the job record is evicted or after `fleet_stt_transcript_ttl_min` (default 30, a negative value keeps them; swept at
     startup and on the janitor tick), and on a node with a token `GET /fleet/media` serves them only to a bearer holder
-    (so does a project render, `composeproj-<16 hex>.*`; every other media name stays tokenless). `GET /fleet/media` refuses a
+    (so does a project render, `composeproj-<16 hex>.*`, and the legacy path-taking `stt` lane's transcripts,
+    `<basename>-<8 hex>.srt|txt|segments.json`; every other media name stays tokenless; the match folds case and trailing
+    dots and spaces and treats a non-ASCII, `~` or `:` name as gated, because NTFS opens one file under those spellings).
+    `GET /fleet/media` refuses a
     dot name. Details: [FLEET-NODE.md](../FLEET-NODE.md#the-stt-upload-door-post-fleetstt),
     [ADR 0072](../architecture/decisions/0072-a-fleet-node-transcribes-audio-its-caller-uploads-so-a-held-card-is-a-place-in-line.md).
 
 13. The PAIR card relay (`POST /fleet/pair-relay`, D26) posts ONE workload frame from a box that is not a PAIR cluster member
     as a card from this node's own emitter. It is bearer-gated (`tokenGated`, checked before the body), advertised as
     `pair_relay` in health exactly when it admits (`PairRelayAdmissible`: this node has a PAIR identity of its own and the
-    reachability rule holds), strictly decoded and capped at 64 KiB, rate limited per asker (`429`), and needs
-    `X-Offload-Asker`. Not a job: nothing reaches the job store. Details: [pair-workloads.md](pair-workloads.md#the-card-relay-a-box-that-is-not-a-pair-member-d26).
+    reachability rule holds), strictly decoded and capped at 64 KiB, rate limited per asker (`429`), capped on the cards it leaves open (128 per asker, 512 overall, `429` past them; a terminal
+    frame always goes through), and needs `X-Offload-Asker`. Not a job: nothing reaches the job store. Details: [pair-workloads.md](pair-workloads.md#the-card-relay-a-box-that-is-not-a-pair-member-d26).
 
 ## Security and privacy notes
 
@@ -1308,8 +1311,10 @@ learns the capability just to eat a 403. Loopback with no token is the
 local-MCP trust boundary and stays open. Every media path — media dispatch, media job polls, `/fleet/media/*`, health — ignores
 the token, so already-deployed tokenless media clients keep working byte-identically
 (pinned by test), with ONE exception since the stt transcript change: on a node that HAS a token, `GET /fleet/media/{name}`
-needs the bearer for the outputs of the token-gated lanes (an stt upload's transcripts, a project render's
-`composeproj-<16 hex>` files; `gatedMediaName`), while `render-*`, `compose-*` and every other name stay tokenless;
+needs the bearer for the outputs of the token-gated lanes (an stt upload's transcripts, the legacy `stt` lane's
+`<basename>-<8 hex>` transcripts, a project render's `composeproj-<16 hex>` files; `gatedMediaName`, which folds case and
+trailing dots and spaces and fails closed on a non-ASCII, `~` or `:` name, since a Windows node opens one file under those
+spellings), while `render-*`, `compose-*` and every other name stay tokenless;
 whole-fleet enforcement is a recorded follow-up
 ([ADR 0023](../architecture/decisions/0023-agent-lane-tailnet-auth-and-locality.md)).
 

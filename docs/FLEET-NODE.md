@@ -668,8 +668,12 @@ No transcript field exists — remote reasoning never crosses the wire.
 - **Media dispatch, media job polls, `/fleet/media/*`, and health never check the token** —
   deployed tokenless media clients keep working byte-identically — **except** that on a node with a token,
   `GET /fleet/media/{name}` needs the bearer for the outputs of the token-gated lanes: an stt upload's transcripts
-  (`stt-<digits>-<8 hex>.*`) and a project render's files (`composeproj-<16 hex>.*`, the project door's own stem; the vetted
-  `compose-video` lane keeps `compose-<hash8>` and stays tokenless). Whole-fleet enforcement is a
+  (`stt-<digits>-<8 hex>.*`), the legacy path-taking `stt` lane's transcripts (`<basename>-<8 hex>.srt|txt|segments.json`,
+  because that lane is gated and its stem can carry the node's own file names) and a project render's files
+  (`composeproj-<16 hex>.*`, the project door's own stem; the vetted `compose-video` lane keeps `compose-<hash8>` and stays
+  tokenless). The gate fails closed on spellings a Windows filesystem folds onto the same file: the name is matched
+  lower-cased with trailing dots and spaces removed, and a name that is not plain ASCII or carries `~` or `:` is treated as
+  gated (media this node writes is plain lower-case ASCII, so no tokenless lane is caught). Whole-fleet enforcement is a
   recorded follow-up for a coordinated whole-fleet deploy window (ADR 0023).
 
 ### Health advertisement (only when the lane is admissible)
@@ -1186,7 +1190,8 @@ job record is evicted, or once older than `fleet_stt_transcript_ttl_min` (defaul
 at fleet-serve start and on the job store's 5-minute janitor tick; a finished job restarts its outputs' clock, so a second
 upload of a recording the pipeline's cache already holds keeps the first job's files a full TTL (and the pipeline treats a
 cache hit whose files are gone as a miss). On a node that has a `fleet_auth_token`, `GET /fleet/media/{name}` serves those
-names only to a bearer holder (a `401` otherwise, before the file is looked up); the asker's fetch already sends the
+names only to a bearer holder (a `401` otherwise, before the file is looked up, and for any case, trailing-dot or
+trailing-space spelling of the name, which a Windows node would open as the same file); the asker's fetch already sends the
 bearer. A node with no token serves them as it always did.
 
 **Advertisement.** `stt-upload` is in `supported_task_types`, with the additive, omitempty health fields `stt_hq` (the
@@ -1199,7 +1204,10 @@ The legacy `stt` task joins the bearer rule **when the node has a `fleet_auth_to
 no longer make the node convert and transcribe any file it can read. A node with no token keeps its legacy lane open.
 Compatibility: the only external dispatcher known to send `stt` jobs sends no bearer token; no production use through it
 was found (its web console form sends an empty payload; the jobs seen on one node on 2026-10-01 were a test burst), so it
-keeps working against a tokenless node and needs the bearer against one that has a token.
+keeps working against a tokenless node and needs the bearer against one that has a token. The legacy lane's transcripts
+(`<basename>-<8 hex>.srt|txt|segments.json` in `media_dir`) are bearer-gated on `GET /fleet/media` on such a node too; unlike an
+upload's they are the pipeline's content-keyed cache, shared with local transcriptions, so the node's transcript sweep and
+eviction removal never touch them.
 
 **Concurrency.** Both stt lanes, pushed and pulled, share ONE cap: `fleet_stt_max_concurrent` (default 1), a FIFO gate
 inside the run closure. A job over the cap waits its turn in arrival order, its PAIR card still queued, and never fails
@@ -1243,7 +1251,8 @@ what an operator of the node needs:
 - **Auth.** Token-gated like the vision lane (`tokenGated`): `401` without the bearer, `403` on a tokenless node beyond
   loopback, answered before the body is read. `X-Offload-Asker` is required (`400`). `503` when the node cannot relay.
 - **Limits.** Body at most 64 KiB (`413`), strict decode (`400`), and a token bucket per asker (5 frames/s, burst 60) and one
-  over all askers (50/s, burst 200): `429` with `Retry-After`, before the body is read.
+  over all askers (50/s, burst 200): `429` with `Retry-After`, before the body is read. At most 128 relayed cards stay open per
+  asker and 512 overall: a frame that would open a new card past either is a `429` too; a terminal frame is always admitted.
 - **The relaying box** sets nothing when it has `delegate_remotes` (`pair_workloads_relay` defaults to `auto`); a box with none
   names its members: `"pair_workloads_relay": ["http://<node>:18811"]`.
 

@@ -348,7 +348,13 @@ stayed invisible. A **relay** closes the gap with the same frames: a fleet-serve
 - The relaying box names itself in `X-Offload-Asker` (**required**, sanitized and bounded to 64 printable characters as
   H2's requester is). A token bucket per asker (5 frames/s, burst 60) and a global one (50/s, burst 200) answer `429` with
   `Retry-After` **before the body is read**; the asker name is a header the caller chooses, so the global bucket is what a
-  rotating name meets.
+  rotating name meets. The rate bounds the calls, not the cards left open, so a second bound counts the open relayed cards:
+  at most 128 per asker and 512 over all askers (`RelayOpenPerAsker`, `RelayOpenGlobal`). A frame that would open a NEW card
+  past either cap is a `429` with `Retry-After`; the next frame of a card already open only refreshes it, and a terminal frame
+  is always admitted and frees its slot (refusing it would strand the card it ends). An entry ages out after
+  `RelayOpenMaxAge` (24 h), the age at which the member's sweep closes the marker it mirrors. The count is in memory, so a
+  member restart empties it; the markers a restart leaves are the sweep's, so a flood is bounded by the caps plus what one
+  restart forgets, never unbounded.
 - What the member posts, through its own emitter (so its orphan register covers the in-flight card):
 
   | Field | Value |
@@ -395,7 +401,7 @@ stayed invisible. A **relay** closes the gap with the same frames: a fleet-serve
   `node-info fallback`, `relay` (with the route URL) or `off` (with the reason).
 
 Trust: a holder of the fleet token can make this member post a card named for any asker, on any node PAIR knows. The frame
-carries no prompt, context or output, and the member checks its shape, namespaces its id and bounds its rate; the token is
+carries no prompt, context or output, and the member checks its shape, namespaces its id, bounds its rate and the cards it leaves open; the token is
 the same one that already lets its holder run renders and agent contracts on the node.
 
 ## Seat activity: traffic that bypasses the harness (0.133.0)

@@ -45,6 +45,13 @@ card per remote call on the serving node, one asker ledger row; `pair-workloads.
    > files when the job record is evicted or after `fleet_stt_transcript_ttl_min` (default 30 minutes, swept at start and on the
    > janitor tick), and on a node that has a `fleet_auth_token` `GET /fleet/media` serves those names (and a project render's,
    > ADR 0071) only to a bearer holder. Media names of the tokenless lanes stay as they were. The decision above is unchanged.
+   >
+   > **Review follow-up (2026-10-03):** the gate fails closed on the spellings a Windows filesystem folds onto one file (another
+   > case, trailing dots and spaces; a non-ASCII, `~` or `:` name counts as gated), since a name that missed the pattern was
+   > otherwise served without the bearer after the filesystem resolved it. The bearer also covers the legacy path-taking
+   > `stt` lane's transcripts (`<basename>-<8 hex>.srt|txt|segments.json`): that lane is gated on a node with a token, and a
+   > transcript stem can carry the node's own file names. Those files are the pipeline's content-keyed cache shared with local
+   > transcriptions, so they are gated but never swept or removed with a job record.
 3. **The door is token-gated, and advertised only when it admits.** It rides the vision lane's rule (`tokenGated`: a
    `fleet_auth_token` for anything beyond loopback; loopback with no token stays open), the bearer is checked before a
    byte of the body is read, and a token holder gets a 10-minute delivery window (the server's blanket 30 seconds would

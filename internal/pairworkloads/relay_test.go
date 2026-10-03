@@ -376,6 +376,51 @@ func TestRelayLimiterBoundsItsBuckets(t *testing.T) {
 	}
 }
 
+// The call rate is not the only bound: a token holder that opens cards and never ends them is held to a
+// cap of open cards per asker and overall. A terminal frame always goes through and frees its slot, a
+// frame of an already-open card never counts twice, and an entry ages out with the marker it mirrors.
+func TestRelayLimiterCapsOpenCards(t *testing.T) {
+	now := time.Unix(1000, 0)
+	l := NewRelayLimiter(1000, 1000, 1e6, 1_000_000)
+	l.now = func() time.Time { return now }
+	l.SetOpenCaps(3, 5)
+	for i := 0; i < 3; i++ {
+		if !l.AdmitCard("node-q", "j"+string(rune('a'+i)), "queued") {
+			t.Fatalf("card %d refused below the per-asker cap", i)
+		}
+	}
+	if l.AdmitCard("node-q", "jz", "queued") {
+		t.Fatal("a 4th open card was admitted past the per-asker cap of 3")
+	}
+	if !l.AdmitCard("node-q", "ja", "running") {
+		t.Fatal("the next frame of an already-open card was refused: it must only refresh")
+	}
+	if l.OpenCards("node-q") != 3 {
+		t.Fatalf("open cards = %d, want 3", l.OpenCards("node-q"))
+	}
+	if !l.AdmitCard("node-q", "jnever", "completed") {
+		t.Fatal("a terminal frame was refused: it must always be admitted")
+	}
+	if !l.AdmitCard("node-q", "ja", "completed") || l.OpenCards("node-q") != 2 {
+		t.Fatalf("a terminal frame did not free its slot (open = %d)", l.OpenCards("node-q"))
+	}
+	if !l.AdmitCard("node-q", "jz", "queued") {
+		t.Fatal("a freed slot was not reusable")
+	}
+	// The global cap holds over askers: one name per card must not slip under the per-asker cap.
+	if !l.AdmitCard("node-r", "r1", "queued") || !l.AdmitCard("node-r", "r2", "queued") {
+		t.Fatal("another asker was starved below the global cap")
+	}
+	if l.AdmitCard("node-s", "s1", "queued") {
+		t.Fatal("a 6th open card overall was admitted past the global cap of 5")
+	}
+	// Entries age out with the marker the member's sweep closes.
+	now = now.Add(RelayOpenMaxAge + time.Minute)
+	if !l.AdmitCard("node-s", "s1", "queued") || l.OpenCards("") != 1 {
+		t.Fatalf("expired cards still counted (open = %d)", l.OpenCards(""))
+	}
+}
+
 // --- the relaying side ----------------------------------------------------------------------------
 
 // relayHit is one request a stand-in relay member received.

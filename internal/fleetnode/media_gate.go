@@ -13,6 +13,12 @@ package fleetnode
 //     compose-video lane keeps compose-<hash8>, which a node cannot tell from a project render's), so
 //     a name alone says which lane wrote it, from the first byte, and across a restart.
 //
+//   - the legacy path-taking stt lane's transcripts (<basename>-<8 hex>.srt|txt|segments.json): that
+//     lane is token-gated on a node with a token, so its outputs ride the bearer too (they are never
+//     swept: the pipeline's content-keyed cache, shared with local transcription, owns them).
+//
+// The match fails closed on the spellings a Windows filesystem folds onto one file (gatedMediaName).
+//
 // On a node WITH a fleet_auth_token those names now need the bearer; a node with no token, and every
 // other name, answer as they always did. The transcripts are also removed: when the job record is
 // evicted, and once older than fleet_stt_transcript_ttl_min (default 30), swept at fleet-serve start
@@ -49,9 +55,27 @@ var (
 // projectOutputPrefix is the stem every project render's output starts with.
 const projectOutputPrefix = "composeproj-"
 
-// gatedMediaName reports whether a file in media_dir is an output of a token-gated lane.
+// legacySTTOutputRe is what the LEGACY path-taking stt lane names its transcripts:
+// <sanitized-basename>-<8 hex of the content identity>.srt|txt|segments.json (pipeline's mediaBase).
+// That lane is token-gated on a node with a token, so its outputs ride the bearer too (the stem can
+// carry the node's own file names). It is deliberately NOT used by the sweep or the eviction removal:
+// those files are the pipeline's content-keyed cache, which a local transcription shares.
+var legacySTTOutputRe = regexp.MustCompile(`^.+-[0-9a-f]{8}\.(srt|txt|segments\.json)$`)
+
+// gatedMediaName reports whether a file in media_dir is an output of a token-gated lane. It fails
+// closed: a Windows filesystem resolves one file under several spellings (another case, trailing
+// dots and spaces, an 8.3 short name, a ":stream" suffix, the case folding of non-ASCII letters), so
+// the name is matched in its folded form and any name that is not plain ASCII, or that carries a
+// "~" or ":", is treated as gated rather than guessed at. Media this node writes is plain lower-case
+// ASCII, so no tokenless lane's file is caught by that.
 func gatedMediaName(name string) bool {
-	return sttOutputRe.MatchString(name) || projectOutputRe.MatchString(name)
+	for i := 0; i < len(name); i++ {
+		if c := name[i]; c < 0x20 || c > 0x7e || c == '~' || c == ':' {
+			return true
+		}
+	}
+	n := strings.ToLower(strings.TrimRight(name, ". "))
+	return sttOutputRe.MatchString(n) || projectOutputRe.MatchString(n) || legacySTTOutputRe.MatchString(n)
 }
 
 // SweepSTTTranscripts removes the transcript files of stt upload jobs that are older than the node's

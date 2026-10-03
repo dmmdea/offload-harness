@@ -756,12 +756,27 @@ type RelayLimiter struct {
 	gBurst float64
 	b      map[string]*bucket
 	now    func() time.Time
+
+	// The open-card cap (AdmitCard): the rate limit above bounds the CALL rate, this bounds how many
+	// relayed cards stay open at once. Each open card is a PAIR card, a marker file in the member's
+	// register and a map entry, and one that never closes (a relaying box that died, a token holder
+	// that never sends a terminal frame) lives until RelayOpenMaxAge.
+	openPer, openAll int
+	open             map[string]map[string]time.Time // asker -> namespaced job id -> last in-flight frame
 }
 
 type bucket struct {
 	tokens float64
 	at     time.Time
 }
+
+// Open relayed cards a member holds at once: per asker and over every asker. A box runs a handful of
+// jobs at a time (a lease card, a few delegations), so the per-asker cap is far above any honest
+// producer and the global one is a few honest boxes' worth.
+const (
+	RelayOpenPerAsker = 128
+	RelayOpenGlobal   = 512
+)
 
 // RelayBuckets bounds the askers a limiter tracks; the least recently seen is dropped past it.
 const RelayBuckets = 1024
@@ -770,7 +785,88 @@ const RelayBuckets = 1024
 // rate and burst over all askers together.
 func NewRelayLimiter(rate float64, burst int, gRate float64, gBurst int) *RelayLimiter {
 	return &RelayLimiter{rate: rate, burst: float64(burst), gRate: gRate, gBurst: float64(gBurst),
-		b: map[string]*bucket{}, now: time.Now}
+		b: map[string]*bucket{}, now: time.Now,
+		openPer: RelayOpenPerAsker, openAll: RelayOpenGlobal, open: map[string]map[string]time.Time{}}
+}
+
+// SetOpenCaps replaces the open-card caps (a value <= 0 leaves that cap as it was).
+func (l *RelayLimiter) SetOpenCaps(perAsker, global int) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if perAsker > 0 {
+		l.openPer = perAsker
+	}
+	if global > 0 {
+		l.openAll = global
+	}
+}
+
+// OpenCards is how many relayed cards the limiter counts as open for asker ("" = every asker).
+func (l *RelayLimiter) OpenCards(asker string) int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.expireLocked(l.now())
+	if asker != "" {
+		return len(l.open[asker])
+	}
+	n := 0
+	for _, m := range l.open {
+		n += len(m)
+	}
+	return n
+}
+
+// AdmitCard accounts one relayed frame against the open-card caps and reports whether the member
+// may post it. A terminal frame closes its card and is always admitted (refusing it would strand the
+// card it ends). A non-terminal frame of a card already open only refreshes it; one that would open
+// a NEW card is refused once the asker, or the member as a whole, holds its cap of open cards. An
+// entry ages out after RelayOpenMaxAge, the same age at which the member's sweep closes its marker,
+// so the count and the register agree; a member restart empties the count, and the markers it
+// leaves are the sweep's.
+func (l *RelayLimiter) AdmitCard(asker, jobID, state string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := l.now()
+	if isTerminal(state) {
+		if m := l.open[asker]; m != nil {
+			delete(m, jobID)
+			if len(m) == 0 {
+				delete(l.open, asker)
+			}
+		}
+		return true
+	}
+	l.expireLocked(now)
+	if _, known := l.open[asker][jobID]; known {
+		l.open[asker][jobID] = now
+		return true
+	}
+	total := 0
+	for _, m := range l.open {
+		total += len(m)
+	}
+	if len(l.open[asker]) >= l.openPer || total >= l.openAll {
+		return false
+	}
+	if l.open[asker] == nil {
+		l.open[asker] = map[string]time.Time{}
+	}
+	l.open[asker][jobID] = now
+	return true
+}
+
+// expireLocked forgets cards whose last in-flight frame is older than RelayOpenMaxAge.
+func (l *RelayLimiter) expireLocked(now time.Time) {
+	for a, m := range l.open {
+		for id, at := range m {
+			if now.Sub(at) > RelayOpenMaxAge {
+				delete(m, id)
+			}
+		}
+		if len(m) == 0 {
+			delete(l.open, a)
+		}
+	}
 }
 
 // DefaultRelayLimiter is the member's production limit: 5 frames/s per asker (burst 60), 50/s

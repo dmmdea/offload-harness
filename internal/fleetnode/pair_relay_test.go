@@ -257,6 +257,45 @@ func TestPairRelayIsRateLimitedPerAsker(t *testing.T) {
 	}
 }
 
+// The call rate is not the only bound: past the cap of cards a token holder leaves open, a NEW card is a
+// 429 (the register and PAIR's Jobs list stay bounded), while the terminal frame of an open card still
+// goes through and frees its slot.
+func TestPairRelayCapsTheCardsLeftOpen(t *testing.T) {
+	pn := newPairNode(t, true)
+	s, _ := newTestServer(t, relayCfg("t"), &fakeRunner{}, relayOpts(pn, true))
+	s.relayLimiter = pairworkloads.NewRelayLimiter(1000, 1000, 1e6, 1_000_000)
+	s.relayLimiter.SetOpenCaps(2, 100)
+	frame := func(id, method, state string) string {
+		return `{"jsonrpc":"2.0","method":"` + method + `","params":{"workloadInfo":{"id":"` + id + `","model":"gemma-4-e4b",` +
+			`"engine":"llamacpp","runId":"` + id + `","state":"` + state + `","originatedFrom":null,"scheduledOn":null,` +
+			`"createdAt":1000,"startedAt":null,"completedAt":null,"error":null,"requesterId":"offload-harness/sess-9"}},"node":"node-v"}`
+	}
+	post := func(body string) *httptest.ResponseRecorder {
+		return do(t, s, http.MethodPost, pairworkloads.RelayPath, body, relayHeaders("t", "node-v"))
+	}
+	for _, id := range []string{"c1", "c2"} {
+		if rec := post(frame(id, "workload:submitted", "queued")); rec.Code != http.StatusOK {
+			t.Fatalf("card %s = %d", id, rec.Code)
+		}
+	}
+	rec := post(frame("c3", "workload:submitted", "queued"))
+	if rec.Code != http.StatusTooManyRequests || rec.Header().Get("Retry-After") == "" {
+		t.Fatalf("a 3rd open card = %d (Retry-After %q), want 429 with Retry-After", rec.Code, rec.Header().Get("Retry-After"))
+	}
+	if rec := post(frame("c1", "workload:started", "running")); rec.Code != http.StatusOK {
+		t.Fatalf("the next frame of an open card = %d, want 200", rec.Code)
+	}
+	if rec := post(frame("c1", "workload:completed", "completed")); rec.Code != http.StatusOK {
+		t.Fatalf("a terminal frame = %d, want 200", rec.Code)
+	}
+	if rec := post(frame("c3", "workload:submitted", "queued")); rec.Code != http.StatusOK {
+		t.Fatalf("a card after a slot freed = %d, want 200", rec.Code)
+	}
+	if rec := do(t, s, http.MethodPost, pairworkloads.RelayPath, frame("c9", "workload:submitted", "queued"), relayHeaders("t", "node-w")); rec.Code != http.StatusOK {
+		t.Fatalf("another asker's first card = %d: the cap is per asker", rec.Code)
+	}
+}
+
 // A relayed in-flight card's marker is a remote producer's: pid 0, flagged remote, so the member's
 // sweep never judges it by a pid of this box.
 func TestPairRelayInFlightMarkerHasNoLocalPid(t *testing.T) {

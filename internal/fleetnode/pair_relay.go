@@ -9,7 +9,9 @@ package fleetnode
 // The door is token-gated like every other gated lane (tokenGated: a fleet_auth_token for anything
 // beyond loopback, loopback with no token stays open), checked before a byte of the body is read; the
 // relaying box names itself in X-Offload-Asker (required); a per-asker token bucket and a global one
-// answer 429 before the body is read, so a token holder cannot flood PAIR. It is advertised in health
+// answer 429 before the body is read, so a token holder cannot flood PAIR, and a cap on the cards left
+// open at once (per asker and overall, 429 past it; a terminal frame is always admitted) stops a slow
+// flood of cards that never close. It is advertised in health
 // (pair_relay) exactly when it would admit: this node has a PAIR identity of its own (an emitter that
 // itself relays never relays for another) and the reachability rule holds.
 //
@@ -99,6 +101,13 @@ func (s *Server) handlePairRelay(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	// The call rate is bounded above; this bounds the cards a token holder can leave open (each is a
+	// PAIR card and a register marker for up to the age cap). A terminal frame is always admitted.
+	if !s.relayLimiter.AdmitCard(asker, ev.JobID, ev.State) {
+		w.Header().Set("Retry-After", "60")
+		writeError(w, http.StatusTooManyRequests, fmt.Sprintf("pair-relay: %q (or this node) already holds the most relayed cards it keeps open; finish or fail one first", asker))
 		return
 	}
 	// The member's own emitter posts it: the card is the member's, the orphan register covers it.

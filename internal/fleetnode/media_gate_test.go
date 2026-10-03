@@ -50,22 +50,40 @@ func TestGatedMediaNames(t *testing.T) {
 	if sttOutputRe.String() != sttOutputShape {
 		t.Fatalf("sttOutputRe = %s, want %s: update internal/pipeline's producer pin with it", sttOutputRe, sttOutputShape)
 	}
-	for _, n := range []string{gatedSRT, gatedTXT, gatedJSON, gatedMP4, gatedSnap, "composeproj-0123456789abcdef.webm", "stt-7-ffffffff.srt"} {
+	for _, n := range []string{gatedSRT, gatedTXT, gatedJSON, gatedMP4, gatedSnap, "composeproj-0123456789abcdef.webm", "stt-7-ffffffff.srt",
+		// the LEGACY path-taking stt lane's outputs: <basename>-<8 hex>.<ext>, gated when the node has a token
+		"stt-legacy-0a1b2c3d.srt", "recording-0a1b2c3d.segments.json", "x" + gatedSRT,
+	} {
 		if !gatedMediaName(n) {
 			t.Errorf("%q must be a gated output", n)
 		}
 	}
+	// A Windows filesystem opens one file under many spellings, so the gate fails closed on them: another
+	// case, trailing dots and spaces, an 8.3 short name, an alternate-stream suffix, non-ASCII letters
+	// (U+017F folds to S), a control byte.
 	for _, n := range []string{
-		"render-0a1b2c3d.png",          // image-gen: a tokenless lane
-		"compose-0a1b2c3d.mp4",         // the vetted compose-video lane: tokenless
-		"stt-legacy-0a1b2c3d.srt",      // not an upload's stem (legacy path-taking lane names its own)
-		"stt-123-0a1b2c3d.wav",         // not a transcript output
-		"stt-123-0A1B2C3D.srt",         // the hash is lower-case hex
+		"STT-1234567890-0A1B2C3D.SRT", "Stt-1234567890-0a1b2c3d.Srt", "STT-1234567890-0a1b2c3d.srt",
+		gatedSRT + ".", gatedSRT + "..", gatedSRT + " ", gatedSRT + ". .", gatedJSON + " ",
+		"COMPOSEPROJ-0123456789ABCDEF.MP4", "composeproj-0123456789abcdef.mp4.", gatedMP4 + " ",
+		"ComposeProj-0123456789abcdef-snap-0001.PNG",
+		"STT-1234~1.SRT", "stt-1~1.srt", gatedSRT + "::$DATA", gatedSRT + ":stream",
+		"\u017ftt-1234567890-0a1b2c3d.srt", "stt-1234567890-0a1b2c3d.sr\u212a", "stt-1\x00.srt",
+	} {
+		if !gatedMediaName(n) {
+			t.Errorf("%q must be gated: a case, dot, space, short-name or stream spelling of a gated file is the same file on NTFS", n)
+		}
+	}
+	for _, n := range []string{
+		"render-0a1b2c3d.png",      // image-gen: a tokenless lane
+		"compose-0a1b2c3d.mp4",     // the vetted compose-video lane: tokenless
+		"stt-123-0a1b2c3d.wav",     // not a transcript output
+		"stt-123-0a1b2c3d.srt.bak", // not a transcript output
+		"render-0a1b2c3d.png.",     // a tokenless lane's name stays tokenless, whatever the spelling
+		"RENDER-0A1B2C3D.PNG",
 		"stt-123.ogg",                  // the private upload itself (a dot directory holds it anyway)
 		"composeproj-xyz.mp4",          // not a 16-hex stem
 		"composeproj-0123456789abcdef", // no extension
 		"xcomposeproj-0123456789abcdef.mp4",
-		"x" + gatedSRT,
 	} {
 		if gatedMediaName(n) {
 			t.Errorf("%q must stay an ungated media name", n)
@@ -78,11 +96,12 @@ func TestGatedMediaNames(t *testing.T) {
 func TestMediaOfGatedLanesNeedsTheBearer(t *testing.T) {
 	cfg := tokenCfg("s3cret")
 	cfg.MediaDir = t.TempDir()
-	for _, n := range []string{gatedSRT, gatedTXT, gatedJSON, gatedMP4, gatedSnap, "render-0a1b2c3d.png", "compose-0a1b2c3d.mp4"} {
+	for _, n := range []string{gatedSRT, gatedTXT, gatedJSON, gatedMP4, gatedSnap, "render-0a1b2c3d.png", "compose-0a1b2c3d.mp4", "interview-0a1b2c3d.srt"} {
 		writeMedia(t, cfg.MediaDir, n, 0)
 	}
 	s, _ := newTestServer(t, cfg, &fakeRunner{}, authOpts(true))
-	for _, n := range []string{gatedSRT, gatedTXT, gatedJSON, gatedMP4, gatedSnap} {
+	// "interview-<hash8>.srt" is the legacy path-taking stt lane's name (that lane is token-gated too).
+	for _, n := range []string{gatedSRT, gatedTXT, gatedJSON, gatedMP4, gatedSnap, "interview-0a1b2c3d.srt"} {
 		if rec := do(t, s, http.MethodGet, "/fleet/media/"+n, "", nil); rec.Code != http.StatusUnauthorized {
 			t.Errorf("GET %s with no bearer = %d, want 401", n, rec.Code)
 		}
@@ -97,6 +116,13 @@ func TestMediaOfGatedLanesNeedsTheBearer(t *testing.T) {
 	for _, n := range []string{"render-0a1b2c3d.png", "compose-0a1b2c3d.mp4"} {
 		if rec := do(t, s, http.MethodGet, "/fleet/media/"+n, "", nil); rec.Code != http.StatusOK {
 			t.Errorf("ungated GET %s = %d, want 200: media of the tokenless lanes stays tokenless", n, rec.Code)
+		}
+	}
+	// The spellings a Windows filesystem folds onto a real gated file get no bearer-free read either
+	// (and are 401 on every OS: the gate runs before the file is looked up).
+	for _, n := range []string{"STT-1234567890-0A1B2C3D.SRT", gatedSRT + ".", gatedSRT + "%20", "COMPOSEPROJ-0123456789ABCDEF.MP4", gatedMP4 + ".", gatedJSON + "%20.", "stt-1234~1.srt"} {
+		if rec := do(t, s, http.MethodGet, "/fleet/media/"+n, "", nil); rec.Code != http.StatusUnauthorized {
+			t.Errorf("GET %s with no bearer = %d, want 401 (a folded spelling of a gated name)", n, rec.Code)
 		}
 	}
 	// A missing gated file is still a 401 without the bearer: the answer must not say whether it exists.
