@@ -6,6 +6,19 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed — a runner given --keep-comfy exits (GPU routing P13b)
+
+- **A runner that launched ComfyUI itself and was told to keep it no longer hangs.** The instance was a
+  non-detached child with piped stdout/stderr, so the runner's event loop stayed attached to a process meant to
+  outlive it; in a real film run the per-shot timeout then killed the tree and deleted the finished clip. A kept
+  instance (`withGpuSlot` passes `keep` to `ensureComfy`) is now spawned detached, its console going to its own
+  log file, unref'd, with its window hidden: it holds nobody's event loop and has no pipe to close under it. The
+  non-kept path is unchanged. The log is bounded by rotation (each launch rotates; each archive is cut to its
+  last 5 MB), not by a capture that stops at 5 MB, and `tailComfyLog` reads only the last 256 KB. A kept instance
+  lives no longer than its lease, whose holder stops it on release (see media-generation.md, "A kept instance").
+  A node test runs a real runner against a stub ComfyUI process and asserts the runner exits while the instance
+  stays up and keeps writing.
+
 ### Fixed — the display card is found with the screen asleep (GPU routing P13b)
 
 - **The allocator's "never auto-pick the display card" rule now fires at the desk.** On the 3-card box

@@ -453,6 +453,10 @@ export async function withGpuSlot(opts, fn) {
         ...(instanceKey ? { api: instance.api } : {}),
         ...(reserveVram != null ? { reserveVram } : {}),
         ...(warm ? { warm: true } : {}),
+        // A kept instance is spawned detached and unref'd (comfy-lifecycle.mjs): it must not hold
+        // this runner's event loop, and its lease's holder stops it. Absent unless asked, so the
+        // call is unchanged for a runner that tears its own ComfyUI down.
+        ...(keepComfy ? { keep: true } : {}),
       });
     }
     try {

@@ -6,7 +6,7 @@
 // caller still tears the session down at the batch boundary). tts.mjs does
 // NOT use this (its Chatterbox worker is not ComfyUI; it passes comfyManaged:false to
 // withGpuSlot). Dependency-free; deps are injectable purely for tests.
-import { existsSync, createWriteStream, renameSync, rmSync, readFileSync, mkdirSync } from "node:fs";
+import { existsSync, createWriteStream, renameSync, rmSync, readFileSync, mkdirSync, openSync, closeSync, readSync, fstatSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { join } from "node:path";
 import { spawn as nodeSpawn, spawnSync as nodeSpawnSync } from "node:child_process";
@@ -495,17 +495,58 @@ export function rotateComfyLog(comfyDir = COMFY_DIR, key = "") {
   } catch {}
 }
 
+/** trimRotatedLog: keep the archived copy of the previous run's console (`<log>.1`, the file
+ * rotateComfyLog just made) to its last COMFY_LOG_CAP_BYTES. A KEPT instance writes its console
+ * straight to its log file (no pipe, so no capture that could stop at the cap): the file is
+ * therefore bounded by ROTATION, not by truncation mid-run. Each launch rotates, and each
+ * archive is cut to the cap here, so the disk holds at most COMFY_LOG_KEEP archives of 5 MB
+ * plus the live file of the run in progress; the live file is not truncated under its writer,
+ * because the instance lives no longer than its lease. Best-effort, like the rotation. */
+export function trimRotatedLog(comfyDir = COMFY_DIR, key = "") {
+  const archive = `${comfyLogPath(comfyDir, key)}.1`;
+  let fd;
+  try {
+    fd = openSync(archive, "r");
+    const { size } = fstatSync(fd);
+    if (size <= COMFY_LOG_CAP_BYTES) return;
+    const buf = Buffer.alloc(COMFY_LOG_CAP_BYTES);
+    readSync(fd, buf, 0, COMFY_LOG_CAP_BYTES, size - COMFY_LOG_CAP_BYTES);
+    closeSync(fd);
+    fd = undefined;
+    writeFileSync(archive, buf);
+  } catch {
+    /* absent, or held open on Windows: the archive stays as it is */
+  } finally {
+    if (fd !== undefined) { try { closeSync(fd); } catch {} }
+  }
+}
+
+/** The window tailComfyLog reads from the END of the log. A kept instance writes its console
+ * to the file for as long as its lease lives, so the log can be far larger than the 20 lines
+ * a failure message needs: reading all of it into one string is not an option. */
+const COMFY_LOG_TAIL_WINDOW_BYTES = 256 * 1024;
+
 /** tailComfyLog: the last `n` lines of THIS run's ComfyUI console capture, or ""
  * when there is none (no harness-managed launch this run, or nothing captured yet).
- * Synchronous — only ever called once, on a render failure, never on the happy path. */
+ * Synchronous — only ever called once, on a render failure, never on the happy path.
+ * Reads only the last COMFY_LOG_TAIL_WINDOW_BYTES of the file; when that window starts
+ * inside a line, the cut line is dropped rather than shown half. */
 export function tailComfyLog(comfyDir = COMFY_DIR, n = COMFY_LOG_TAIL_LINES, key = "") {
+  let fd;
   try {
-    const text = readFileSync(comfyLogPath(comfyDir, key), "utf8");
-    const lines = text.split(/\r?\n/);
+    fd = openSync(comfyLogPath(comfyDir, key), "r");
+    const { size } = fstatSync(fd);
+    const len = Math.min(size, COMFY_LOG_TAIL_WINDOW_BYTES);
+    const buf = Buffer.alloc(len);
+    if (len > 0) readSync(fd, buf, 0, len, size - len);
+    const lines = buf.toString("utf8").split(/\r?\n/);
+    if (size > len && lines.length > 1) lines.shift(); // the window began mid-line
     if (lines.length && lines[lines.length - 1] === "") lines.pop();
     return lines.slice(-n).join("\n");
   } catch {
     return "";
+  } finally {
+    if (fd !== undefined) { try { closeSync(fd); } catch {} }
   }
 }
 
@@ -608,6 +649,13 @@ export async function ensureComfy(opts = {}) {
     alive = defaultPidAlive,
     killPid = (pid) => process.kill(pid),
     portFree = portIsFree,
+    // keep: the caller will leave this instance running after its job (runners' --keep-comfy).
+    // A kept instance outlives the process that launched it, so it is spawned detached with its
+    // console going to its own log FILE and unref'd (see the spawn below); openLogFd/closeFd are
+    // the file seams for tests.
+    keep = false,
+    openLogFd = (p) => openSync(p, "a"),
+    closeFd = closeSync,
     mkdirs = (d) => mkdirSync(d, { recursive: true }),
     log = (line) => console.error(line),
     pollMs = 2000,
@@ -683,8 +731,38 @@ export async function ensureComfy(opts = {}) {
       && !flags.includes("--disable-pinned-memory")) {
     flags.push("--disable-pinned-memory");
   }
-  const child = spawn(py, ["main.py", ...flags], { cwd: comfyDir, stdio: ["ignore", "pipe", "pipe"], detached: false, env: spawnEnv });
-  captureComfyOutput(child, comfyDir, key);
+  let child;
+  if (keep) {
+    // A KEPT instance must not be a piped child of a runner that is about to exit. As one it held
+    // the runner's event loop (the runner never exited after writing its output: the P6 rollout
+    // lost a finished clip to the per-shot timeout that then killed the tree), and when the runner
+    // did go, the pipe closed under a process still writing to it. So: its console goes to its own
+    // log file (a descriptor, not a stream, so there is no pipe to break), it is detached from the
+    // runner's process group and unref'd (the runner's loop no longer waits for it), and its
+    // window is hidden (a detached console process opens one on Windows). The log is bounded by
+    // rotation at each launch, not by a capture that stops at 5 MB (see trimRotatedLog).
+    //
+    // WHO STOPS IT: the instance lives no longer than the GPU lease it was launched under (the
+    // marker records that epoch). The holder of the lease stops it on release: `gpu reserve`
+    // when its wrapped command ends, and the pipeline when its media lease is released
+    // (internal/comfyinst). A kept default instance (no key) has no lease epoch in its marker and
+    // is stopped by its operator, as before.
+    rotateComfyLog(comfyDir, key);
+    trimRotatedLog(comfyDir, key);
+    let fd = null;
+    try { fd = openLogFd(comfyLogPath(comfyDir, key)); } catch (e) {
+      log(`COMFY-KEEP-WARN: cannot open ${comfyLogPath(comfyDir, key)} (${e && e.message}); this instance's console goes nowhere`);
+    }
+    try {
+      child = spawn(py, ["main.py", ...flags], { cwd: comfyDir, stdio: ["ignore", fd ?? "ignore", fd ?? "ignore"], detached: true, windowsHide: true, env: spawnEnv });
+    } finally {
+      if (fd !== null) { try { closeFd(fd); } catch {} } // the child holds its own copy
+    }
+    try { child?.unref?.(); } catch {}
+  } else {
+    child = spawn(py, ["main.py", ...flags], { cwd: comfyDir, stdio: ["ignore", "pipe", "pipe"], detached: false, env: spawnEnv });
+    captureComfyOutput(child, comfyDir, key);
+  }
   // Record the launch so a later job can tell this instance from a foreign one (the
   // fingerprint is pid + this exact argv). Best-effort: without it, a later profile
   // mismatch refuses instead of restarting — the safe direction. A keyed instance's record

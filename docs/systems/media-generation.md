@@ -895,6 +895,31 @@ file (exit 0), like every other `run-graph` failure. The Go side carries the opt
 card in `imagegen.ComfyLaunch{API, CardUUID}` and `gpugen.Spec{ComfyAPI, CardUUID}`; the post-run
 `/free` goes to the instance that ran.
 
+**A kept instance (`--keep-comfy`) is detached, not a pipe-fed child (P13b).** A runner told to keep the
+ComfyUI it launched used to never exit: the instance was a non-detached child with piped stdout and stderr, so
+the runner's event loop stayed attached to a process meant to outlive it, and its parent saw a hang until a
+per-shot timeout killed the tree (and deleted the finished clip: caught on a real film run, 2026-10-03). Now,
+and only when the runner keeps the instance (`withGpuSlot` passes `keep` to `ensureComfy`), the instance is
+spawned **detached** (its own process group), with its console going to **its own log file** (a descriptor, so
+there is no pipe for a runner's exit to close under it: a process still printing into a closed pipe dies with
+`EPIPE`), **unref'd** (the runner's loop no longer waits for it) and with its window hidden (a detached console
+process opens one on Windows). The non-kept path is byte-for-byte what it was: piped, attached, killed with its
+runner. A kept instance that never answers is still killed, since a half-started instance is nobody's.
+
+- **The log is bounded by rotation, not by a capture that stops at 5 MB.** A piped child can be capped as it
+  is written; a descriptor handed to another process cannot be truncated under it without a helper process
+  to pump the stream, and this harness does not add a long-lived helper for a log. Each launch rotates the
+  log (`.1` to `.3`, as before) and cuts the archived copy to its last 5 MB (`trimRotatedLog`), so the disk
+  holds at most three 5 MB archives plus the run in progress. The live file of a run is not truncated: the
+  instance lives no longer than its lease, which bounds it. `tailComfyLog` (the lines a failure message
+  carries) reads only the last 256 KB of the file, so a long-lived instance's log is never read whole.
+- **Who stops it.** A kept instance lives no longer than the GPU lease it was launched under; its marker
+  records that lease epoch (`leaseEpoch`). The **holder of the lease stops it on release**: `gpu reserve`
+  when its wrapped command ends, and the pipeline when its media lease is released
+  (`internal/comfyinst`: the marker is matched to the epoch, the instance is shown to be the harness's by pid
+  and exact argv on its own endpoint, freed with `POST /free`, then stopped). A kept **default** instance
+  (no key) records no lease epoch and is stopped by whoever kept it, as it always was.
+
 **Verifying a pin on Windows.** The driver reports no per-process rows for graphics-mode (WDDM)
 cards, so confirm that an instance is on its card by per-card memory deltas, not process ids.
 
