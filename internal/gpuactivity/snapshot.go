@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -36,10 +37,23 @@ type Options struct {
 	// on/off) inject idle or busy cards without touching the real driver. See
 	// internal/mcpserver's statusGPUSampler var for how offload_status wires it.
 	Sampler func(ctx context.Context) ([]GPU, error)
+	// Scope fills in the effective cards of a legacy whole-node lease (the evidence rule lives
+	// in modelaffinity, which imports this package, so the caller hands it in). nil = the
+	// lease's declared devices only.
+	Scope func(gpulease.Info) gpulease.Info
+	// OrphanGrace is how long an attended lease's owner may be gone before the lease
+	// reads as orphaned (config gpu_orphan_grace_min). Zero = gpulease.DefaultOrphanGrace.
+	OrphanGrace time.Duration
+	// ComfyDir is the ComfyUI install, read for the activity facts of a lease that has no
+	// owner and no progress contract. "" = none.
+	ComfyDir string
 }
 
 // Holder describes the lease holder beyond the lease record.
 type Holder struct {
+	// Devices are the cards the lease sits on as seats read it (lease ids): the declared
+	// devices, else the inferred ones; empty = the whole node.
+	Devices         []string  `json:"devices,omitempty"`
 	PID             int       `json:"pid"`
 	Alive           bool      `json:"alive"`
 	Class           string    `json:"class"`
@@ -52,6 +66,40 @@ type Holder struct {
 	AgeSec          int       `json:"age_s"`
 	HeartbeatAgeSec int       `json:"heartbeat_age_s"`
 	ExpiresAt       time.Time `json:"-"`
+
+	// --- ownership and standing (plan P8): derived by gpulease.Standing, never stored. ---
+	Unattended    bool   `json:"unattended,omitempty"`
+	OwnerState    string `json:"owner_state,omitempty"` // alive | gone | unknown | remote
+	OwnerSession  string `json:"owner_session,omitempty"`
+	OwnerPID      int    `json:"owner_pid,omitempty"`
+	OrphanGraceS  int    `json:"orphan_grace_s,omitempty"`
+	OrphanedSince string `json:"orphaned_since,omitempty"` // RFC3339, when the owner was first seen gone
+	OrphanedForS  int    `json:"orphaned_for_s,omitempty"`
+	Orphaned      bool   `json:"orphaned,omitempty"`
+	Overdue       bool   `json:"overdue,omitempty"`
+	OverdueBySec  int    `json:"overdue_by_s,omitempty"`
+	Stalled       bool   `json:"stalled,omitempty"`
+	// OwnerNote says why a RECORDED owner cannot be told apart (the session was never in the
+	// registry, or the registry could not be read); OrphanMarkErr says the moment the owner
+	// was first seen gone could not be recorded.
+	OwnerNote     string         `json:"owner_note,omitempty"`
+	OrphanMarkErr string         `json:"orphan_marker_error,omitempty"`
+	TreeOrphan    bool           `json:"tree_orphan,omitempty"`
+	Progress      *ProgressState `json:"progress,omitempty"`
+	// Facts are information about a lease that has no owner and no progress contract
+	// (newest ComfyUI output, ComfyUI log): never an input to the verdict.
+	Facts []string `json:"activity_facts,omitempty"`
+}
+
+// ProgressState is the reading of a lease's progress contract.
+type ProgressState struct {
+	File     string `json:"file"`
+	State    string `json:"state"` // advancing | stalled | unknown
+	AgeSec   int    `json:"age_s"`
+	StallSec int    `json:"stall_s"`
+	Detail   string `json:"detail,omitempty"`
+	// Problem says why an unknown state is unknown ("does not exist", "cannot be read: ...").
+	Problem string `json:"problem,omitempty"`
 }
 
 // SeatState is what llama-swap and the engine say about the agent seat.
@@ -68,10 +116,13 @@ type SeatState struct {
 
 // View is one point-in-time answer.
 type View struct {
-	At        time.Time
-	Held      bool
-	Stale     bool // a lease record exists but its holder is provably gone or silent past its window
-	Holder    *Holder
+	At     time.Time
+	Held   bool
+	Stale  bool // a lease record exists but its holder is provably gone or silent past its window
+	Holder *Holder
+	// Leases lists every live lease when MORE THAN ONE is held (card-scoped leases), each
+	// with its own standing; Holder is the one the verdict is about (the most escalated).
+	Leases    []Holder
 	Seat      SeatState
 	Runs      []Run
 	GPUs      []GPU
@@ -81,6 +132,78 @@ type View struct {
 	// it. See Assess for the vocabulary.
 	Verdict string
 	Note    string
+	// OtherDevices are the cards every OTHER live lease sits on (lease ids): work on them is
+	// not the primary lease's holder's.
+	OtherDevices []string
+}
+
+// trespassOf lists the cards that are busy under a bounded lease but outside its cards, with
+// nothing the harness knows of to explain them (plan P5, `device-trespass`): the job MAY be using
+// a card it did not claim, so a waiter that was handed that card as free could collide with it.
+// It is a possibility, never an accusation: card-scoped leases make text seats on the free cards
+// legal, and the harness registers the runs of only two doors (agent_run and the delegation
+// door) and watches only the planner seat's gauge, so a cascade call on a router seat, an OCR or
+// speech seat, or the desktop looks the same from here. Not flagged: the display card (the
+// desktop's own use), a card another live lease holds, a card a registered run is pinned to,
+// anything while the seat itself is busy (its card is unknown here, so the busy card cannot be
+// attributed), and a whole-node lease (it has no outside).
+func trespassOf(v View) []GPU {
+	if !v.Held || v.Holder == nil || len(v.Holder.Devices) == 0 {
+		return nil
+	}
+	if v.Seat.Inflight > 0 || (v.Seat.Starting && !v.Seat.Stopping) {
+		return nil
+	}
+	held := map[string]bool{}
+	for _, d := range v.Holder.Devices {
+		held[strings.ToLower(strings.TrimSpace(d))] = true
+	}
+	for _, d := range v.OtherDevices {
+		held[strings.ToLower(strings.TrimSpace(d))] = true
+	}
+	display := displayCards(v)
+	var out []GPU
+	for _, g := range v.GPUs {
+		if !g.UtilKnown || g.UtilPct < utilBusyPct || display[g.UUID] || held[strings.ToLower(g.UUID)] {
+			continue
+		}
+		if runOnCard(v.Runs, g) {
+			continue
+		}
+		out = append(out, g)
+	}
+	return out
+}
+
+// runOnCard reports whether any registered run is pinned to the card (by index or UUID prefix).
+func runOnCard(runs []Run, g GPU) bool {
+	idx := strconv.Itoa(g.Index)
+	uuid := strings.ToLower(g.UUID)
+	for _, r := range runs {
+		if r.OnPin(idx) {
+			return true
+		}
+		for _, d := range r.Devices {
+			d = strings.ToLower(strings.TrimSpace(d))
+			if len(d) >= 4 && strings.HasPrefix(uuid, d) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// trespassTail is the note for a trespass: empty when there is none.
+func trespassTail(v View) string {
+	t := trespassOf(v)
+	if len(t) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(t))
+	for _, g := range t {
+		parts = append(parts, describeCard(g))
+	}
+	return "; possible device-trespass: " + strings.Join(parts, ", ") + " is busy outside this lease's cards with nothing registered to explain it; this is not attributed to the holder (a text seat, another process or the desktop could be serving on it), so treat the card as possibly in use before handing it to a waiter"
 }
 
 // Verdict vocabulary.
@@ -92,6 +215,12 @@ const (
 	VerdictHeldIdle    = "held-idle"    // a lease is held and NOTHING is running: seat idle, cards quiet
 	VerdictBusyOutside = "busy-outside" // no lease, seat idle, but the cards are busy — work the harness does not own
 	VerdictStaleHolder = "stale-holder" // a lease record whose holder is gone; the next acquirer reclaims it
+	// Standing verdicts (plan P8). Highest precedence first: stale-holder, tree-orphan,
+	// held-stalled, held-orphaned, held-overdue, then held-working and held-idle.
+	VerdictTreeOrphan   = "tree-orphan"   // the wrapper is gone but its job tree is alive and keeps the cards
+	VerdictHeldStalled  = "held-stalled"  // a progress contract exists and its file did not move inside its window
+	VerdictHeldOrphaned = "held-orphaned" // an attended lease whose owner has been gone past the grace
+	VerdictHeldOverdue  = "held-overdue"  // the declared window ended and the holder still holds the cards
 	// utilBusyPct is the utilization above which a card counts as working for
 	// the verdict. Below it a lease is held over an idle card.
 	utilBusyPct = 15
@@ -107,17 +236,19 @@ func Snapshot(ctx context.Context, opts Options) View {
 	leaseDir, lerr := gpulease.LeaseDir(opts.LockOverride, opts.StateDir)
 	if lerr == nil {
 		info, meta, reclaimable := gpulease.InspectDirDetail(leaseDir)
+		if opts.Scope != nil && info.Held {
+			info = opts.Scope(info)
+		}
 		switch {
 		case info.Held:
 			v.Held = true
-			v.Holder = &Holder{
-				PID: info.PID, Alive: gpulease.PIDAlive(info.PID), Class: string(info.Class), Epoch: info.Epoch,
-				Reason: info.Reason, Origin: info.Origin, Command: info.Command,
-				Exclusive: info.Exclusive, Draining: info.Draining,
-				AgeSec: int(info.Age.Seconds()), ExpiresAt: info.ExpiresAt,
-			}
-			if !info.HeartbeatAt.IsZero() {
-				v.Holder.HeartbeatAgeSec = int(now.Sub(info.HeartbeatAt).Seconds())
+			v.Leases, v.Holder = holdersOf(leaseDir, info, opts, now)
+			if v.Holder != nil {
+				for _, l := range info.Each() {
+					if l.Epoch != v.Holder.Epoch {
+						v.OtherDevices = append(v.OtherDevices, l.EffectiveDevices()...)
+					}
+				}
 			}
 		case meta != nil && reclaimable:
 			v.Stale = true
@@ -188,6 +319,15 @@ func Assess(v View) (verdict, note string) {
 	// exactly this case could never fire on a box anyone was using, and three
 	// jobs queued behind a holder that was doing nothing.
 	display := displayCards(v)
+	// A lease that names its cards is working when THOSE cards are: a busy card outside the
+	// set is a seat's, another lease's, or a trespass (below), never the holder's own job.
+	var leaseCards map[string]bool
+	if v.Held && v.Holder != nil && len(v.Holder.Devices) > 0 {
+		leaseCards = map[string]bool{}
+		for _, d := range v.Holder.Devices {
+			leaseCards[strings.ToLower(strings.TrimSpace(d))] = true
+		}
+	}
 	maxUtil, utilKnown, busyCard := -1, false, ""
 	workUtil, workKnown, workCard := -1, false, ""
 	for _, g := range v.GPUs {
@@ -200,6 +340,9 @@ func Assess(v View) (verdict, note string) {
 			busyCard = describeCard(g)
 		}
 		if display[g.UUID] {
+			continue
+		}
+		if leaseCards != nil && !leaseCards[strings.ToLower(g.UUID)] {
 			continue
 		}
 		workKnown = true
@@ -226,11 +369,26 @@ func Assess(v View) (verdict, note string) {
 	if v.Stale && v.Holder != nil {
 		staleTail = fmt.Sprintf("; a lease record left over from a holder that is gone (pid %d, reason %q) sits beside it — the next `gpu reserve` reclaims it", v.Holder.PID, v.Holder.Reason)
 	}
+	h := v.Holder
+	progressAdvancing := v.Held && h != nil && h.Progress != nil && h.Progress.State == "advancing"
 	switch {
 	case v.Held && (seatBusy || runs > 0):
+		if head := standingHead(v); head != "" {
+			return VerdictWorking, head + work + holderTail(v)
+		}
 		return VerdictWorking, "the lease is held AND work is in flight on the seat: " + work + holderTail(v)
+	case v.Held && h != nil && h.TreeOrphan:
+		return VerdictTreeOrphan, "the lease's wrapper is gone but the job it started is still alive and holds the cards: the claim is kept until that job ends or is taken over" + takeoverHint(h) + holderTail(v)
+	case v.Held && h != nil && h.Stalled:
+		return VerdictHeldStalled, stalledNote(h) + takeoverHint(h) + factsTail(h) + holderTail(v)
+	case v.Held && h != nil && h.Orphaned:
+		return VerdictHeldOrphaned, orphanedNote(h) + takeoverHint(h) + factsTail(h) + holderTail(v)
+	case v.Held && h != nil && h.Overdue:
+		return VerdictHeldOverdue, overdueNote(h) + takeoverHint(h) + factsTail(h) + holderTail(v)
 	case v.Held && workCardsBusy:
-		return VerdictHeldWorking, "the lease is held and the cards are busy under it — " + workCard + "; the seat is idle, so this is the holder's own job" + holderTail(v)
+		return VerdictHeldWorking, "the lease is held and the cards are busy under it — " + workCard + "; the seat is idle, so this is the holder's own job" + trespassTail(v) + evidenceTail(h) + ownerCaveat(h) + factsTail(h) + holderTail(v)
+	case progressAdvancing:
+		return VerdictHeldWorking, "the lease is held and its progress file is advancing (" + progressSentence(h) + "); the seat is idle and the cards are quiet" + ownerCaveat(h) + factsTail(h) + holderTail(v)
 	case v.Held:
 		n := "the lease is held but NOTHING is running on the cards right now: no request in flight on the seat"
 		if v.Seat.Name == "" {
@@ -244,7 +402,7 @@ func Assess(v View) (verdict, note string) {
 			n += " (GPU utilization unknown: " + v.GPUErr + ")"
 		}
 		n += foreignTail
-		n += " — the holder is waiting (a drain, a queue), loading, or stalled" + holderTail(v)
+		n += " — the holder is waiting (a drain, a queue), loading, or stalled" + trespassTail(v) + evidenceTail(h) + ownerCaveat(h) + factsTail(h) + holderTail(v)
 		return VerdictHeldIdle, n
 	case seatBusy || runs > 0:
 		return VerdictWorking, "unreserved, and work is in flight on the seat: " + work + staleTail
@@ -370,6 +528,9 @@ func (v View) Map() map[string]any {
 	if v.Holder != nil {
 		m["holder"] = v.Holder
 	}
+	if len(v.Leases) > 1 {
+		m["leases"] = v.Leases
+	}
 	if v.Stale {
 		m["stale_lease"] = true
 	}
@@ -381,6 +542,9 @@ func (v View) Map() map[string]any {
 	}
 	if v.GPUErr != "" {
 		m["gpu_error"] = v.GPUErr
+	}
+	if t := trespassOf(v); len(t) > 0 {
+		m["device_trespass"] = t
 	}
 	return m
 }

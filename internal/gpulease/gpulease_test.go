@@ -918,3 +918,21 @@ func TestAcquireWithoutAWaitIsASingleTry(t *testing.T) {
 		t.Errorf("slept %d times with Wait unset", slept)
 	}
 }
+
+// A record with no declared end must read as an unset end, the zero Time, in the
+// public view. time.UnixMilli(0) is 1970, which IsZero() rejects, so every
+// reader that guards "no declared end" with IsZero was dead code for a real
+// record: the 1970 end reads as a window that lapsed 56 years ago.
+func TestInfoFromLeavesAnUnsetDeclaredEndZero(t *testing.T) {
+	now := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
+	for _, ms := range []int64{0, -1} {
+		info := infoFrom(&Meta{Class: ClassMedia, Holder: Holder{PID: 1}, ExpiresAtMs: ms}, now)
+		if !info.ExpiresAt.IsZero() {
+			t.Fatalf("expires_at_ms %d gave ExpiresAt %s, want the zero Time (no declared end)", ms, info.ExpiresAt)
+		}
+	}
+	end := now.Add(time.Hour)
+	if got := infoFrom(&Meta{ExpiresAtMs: end.UnixMilli()}, now).ExpiresAt; !got.Equal(end) {
+		t.Fatalf("a declared end changed: got %s, want %s", got, end)
+	}
+}

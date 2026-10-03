@@ -10,9 +10,14 @@ package main
 // WAITS instead of tearing the tier down.
 //
 //	local-offload gpu status [--json]
+//	local-offload gpu cards [--json]
 //	local-offload gpu reserve --class text --for 45m --reason "kv bench" -- <command...>
 //	local-offload gpu reserve --class text --for 45m --reason "kv bench" --detach
+//	local-offload gpu reserve --class media --devices 0,2 --for 2h -- <command...>
+//	local-offload gpu reserve --class media --cards 2 --for 2h -- <command...>
 //	local-offload gpu release [--epoch N]
+//	local-offload gpu doctor [--scan dir] [--write-audit] [--json]
+//	local-offload gpu owner-flags [--pid N]
 //
 // The WRAPPER form is the one to prefer: the lease lives exactly as long as the
 // command and cannot be leaked by forgetting to release, the way `timeout` or `nice`
@@ -29,19 +34,23 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/gpuactivity"
+	"github.com/dmmdea/offload-harness/internal/gpucards"
 	"github.com/dmmdea/offload-harness/internal/gpulease"
+	"github.com/dmmdea/offload-harness/internal/gpuprobe"
+	"github.com/dmmdea/offload-harness/internal/modelaffinity"
 	"github.com/dmmdea/offload-harness/internal/pairworkloads"
 )
 
 func runGPU(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: local-offload gpu <status|reserve|release> [flags]")
+		return errors.New("usage: local-offload gpu <status|cards|reserve|release|doctor|owner-flags> [flags]")
 	}
 	switch args[0] {
 	case "status":
@@ -52,8 +61,14 @@ func runGPU(args []string) error {
 		return runGPURelease(args[1:])
 	case "hold":
 		return runGPUHold(args[1:])
+	case "cards":
+		return runGPUCards(args[1:])
+	case "doctor":
+		return runGPUDoctor(args[1:])
+	case "owner-flags":
+		return runGPUOwnerFlags(args[1:])
 	default:
-		return fmt.Errorf("unknown gpu subcommand %q (want status, reserve or release)", args[0])
+		return fmt.Errorf("unknown gpu subcommand %q (want status, cards, reserve, release, doctor or owner-flags)", args[0])
 	}
 }
 
@@ -65,8 +80,27 @@ func openLease(fs *flag.FlagSet) (*gpulease.Manager, error) {
 	// vision gate obeyed it put the reservation verb on a different directory from the
 	// renders it is supposed to arbitrate against — they never contended, which is the
 	// original incident with no warning.
-	return gpulease.OpenAt(cfg.GPULockPath, cfg.StateDir)
+	m, err := gpulease.OpenAt(cfg.GPULockPath, cfg.StateDir)
+	if err != nil {
+		return nil, err
+	}
+	// The per-host switch for card-scoped leases (config gpu_card_scoped_leases, default
+	// off). Reading a card-scoped directory is never gated; only writing one is, and the
+	// config key alone does not enable it: the host also needs a green reader audit
+	// (see gpulease.ApplyCardScopedConfig). A host that asked and has none keeps the
+	// writer off and is told why, once per command.
+	if err := m.ApplyCardScopedConfig(cfg.GPUCardScopedLeases); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: %v\n", err)
+	}
+	return m, nil
 }
+
+// Seams for the live reads behind `gpu status`, so a test prints a synthetic host instead of
+// calling nvidia-smi and the Windows performance counters.
+var (
+	statusActivityFn = gpuactivity.Snapshot
+	statusForeignFn  = foreignGPUHolders
+)
 
 func runGPUStatus(args []string) error {
 	fs := flag.NewFlagSet("gpu status", flag.ExitOnError)
@@ -77,10 +111,12 @@ func runGPUStatus(args []string) error {
 	if err != nil {
 		return err
 	}
-	info := m.Inspect()
+	// With the scope the seat gates read (plan P4): a legacy whole-node lease arrives with the
+	// cards the evidence rule scoped it to, or with the reason it stayed whole-node.
+	info := modelaffinity.ScopeInfo(m.Dir(), m.Inspect())
 	// What the cards are DOING (0.117.0, register D-93): the seat's in-flight
 	// count, the registered runs, a utilization sample and one verdict.
-	act := gpuactivity.Snapshot(context.Background(), activityOptions(loadCfg(fs)))
+	act := statusActivityFn(context.Background(), activityOptions(loadCfg(fs)))
 	// Who is queued (register D-124): the line behind the holder, and whether
 	// the agent seat is owed a warm-back by the last of them.
 	waiters := m.Waiters()
@@ -89,28 +125,79 @@ func runGPUStatus(args []string) error {
 	// D-1xx-4, 2026-09-23): visible here too, not only at acquire, because a
 	// session reading `gpu status` mid-investigation deserves the same
 	// evidence a fresh `gpu reserve` would have printed.
-	foreign := foreignGPUHolders(context.Background(), loadCfg(fs))
+	foreign := statusForeignFn(context.Background(), loadCfg(fs))
+	// The per-card table (plan P3): which card each lease holds, and what is free.
+	// Read-only, and never a reason for status to fail: no nvidia-smi prints the leases
+	// and says there is no table.
+	cards, cardsNote, cardsErr := cardTable(context.Background(), loadCfg(fs))
+	if cardsErr != nil {
+		cards, cardsNote = nil, fmt.Sprintf("no card table (%v)", cardsErr)
+	}
+	leases := modelaffinity.ScopeLeases(m.Dir(), m.Leases())
 	if *asJSON {
-		queued := make([]map[string]any, 0, len(waiters))
-		for _, w := range waiters {
-			queued = append(queued, map[string]any{"pid": w.PID, "class": w.Class, "reason": w.Reason, "since": w.Since().Format(time.RFC3339)})
-		}
+		queued := gpucards.QueueRows(waiters)
 		foreignJSON := make([]map[string]any, 0, len(foreign))
 		for _, h := range foreign {
 			foreignJSON = append(foreignJSON, map[string]any{"name": h.Name, "pid": h.PID, "mib": h.MiB})
 		}
-		b, _ := json.MarshalIndent(map[string]any{
-			"held": info.Held, "class": info.Class, "epoch": info.Epoch, "pid": info.PID,
-			"age_s": int(info.Age.Seconds()), "reason": info.Reason, "origin": info.Origin,
-			"job_id": info.JobID, "expires_at": info.ExpiresAt.Format(time.RFC3339),
-			"exclusive": info.Exclusive, "draining": info.Draining, "command": info.Command, "state_root": m.Root(),
+		// With several live leases (card-scoped) `info` is the LOWEST epoch while the verdict
+		// and activity.holder are about the most escalated one: the top-level lease fields
+		// describe that lease, from its own record, so one JSON never holds one lease's owner
+		// beside another's standing. epochs[] lists every live lease.
+		hl := gpuactivity.HeadlineOf(info, act.Holder)
+		out := map[string]any{
+			"held": hl.Held, "class": hl.Class, "epoch": hl.Epoch, "pid": hl.PID,
+			"age_s": int(hl.Age.Seconds()), "reason": hl.Reason, "origin": hl.Origin,
+			"job_id": hl.JobID, "expires_at": hl.ExpiresAt.Format(time.RFC3339),
+			"exclusive": hl.Exclusive, "draining": hl.Draining, "command": hl.Command, "state_root": m.Root(),
 			"queued": queued, "seat_warm_owed": warmOwed,
 			"foreign_gpu_holders": foreignJSON,
 			"verdict":             act.Verdict, "activity": act.Map(),
 			// The next step, spelled out: a session reading "held" used to conclude
 			// "refuse the work"; the honest answer is "queue behind it".
 			"queue_with": queueHint,
-		}, "", "  ")
+		}
+		// Card-scoped leases (P2): the cards a lease holds and every live epoch. Only
+		// present when they matter, so a whole-node host's output is unchanged.
+		if len(hl.Devices) > 0 {
+			out["devices"] = hl.Devices
+		}
+		// Ownership (P8): who asked for the lease and the contract it is judged by. The
+		// derived standing (owner state, orphaned-since, progress age) is under
+		// activity.holder, from the same reading as the verdict, and about the same lease.
+		if hl.Owner != nil {
+			out["owner"] = hl.Owner
+		}
+		if hl.Unattended {
+			out["unattended"] = true
+		}
+		if hl.Progress != nil {
+			out["progress"] = hl.Progress
+		}
+		if len(info.Epochs) > 1 || len(hl.Devices) > 0 {
+			out["epochs"] = info.Epochs
+		}
+		// What the seat gates read (plan P4). seat_scope is declared, inferred or whole-node;
+		// scope_why is the evidence, or the exact reason a legacy lease stayed whole-node.
+		if info.Held {
+			out["seat_scope"] = string(info.ScopeKind())
+			if len(info.Inferred) > 0 && len(info.Devices) == 0 {
+				out["inferred_devices"] = info.Inferred
+			}
+			if info.ScopeWidened {
+				out["scope_widened"] = true
+			}
+			if info.ScopeWhy != "" {
+				out["scope_why"] = info.ScopeWhy
+			}
+		}
+		// The per-card table, the per-lease list and the card-scoped switch (P3). Keys
+		// are only ever added: `queued` keeps its four keys and gains devices/scope.
+		for k, v := range statusLeaseSection(m, cards, cardsNote, waiters) {
+			out[k] = v
+		}
+		out["card_scoped_leases"] = m.CardScoped()
+		b, _ := json.MarshalIndent(out, "", "  ")
 		fmt.Println(string(b))
 		return nil
 	}
@@ -121,7 +208,11 @@ func runGPUStatus(args []string) error {
 		if len(waiters) > 0 {
 			parts := make([]string, 0, len(waiters))
 			for _, w := range waiters {
-				parts = append(parts, fmt.Sprintf("pid %d (%s, %s in line)", w.PID, w.Class, time.Since(w.Since()).Round(time.Second)))
+				scope := ""
+				if len(w.Devices) > 0 {
+					scope = ", cards " + strings.Join(w.Devices, ",")
+				}
+				parts = append(parts, fmt.Sprintf("pid %d (%s%s, %s in line)", w.PID, w.Class, scope, time.Since(w.Since()).Round(time.Second)))
 			}
 			fmt.Printf("  queued: %d — %s\n", len(waiters), strings.Join(parts, ", "))
 		}
@@ -137,6 +228,7 @@ func runGPUStatus(args []string) error {
 		// take it, so an unreserved card is exactly when a bench is exposed — that
 		// should be visible, not inferred from silence.
 		fmt.Printf("GPU: free (unreserved)  state root: %s\n", m.Root())
+		printCardTable(cards, cardsNote, cardsErr, leases)
 		queueLines()
 		printActivity(act)
 		return nil
@@ -154,6 +246,41 @@ func runGPUStatus(args []string) error {
 	fmt.Printf("GPU: held by %s  pid %d  epoch %d  for %s  expires %s%s\n  reason: %s\n  queue behind it: %s\n",
 		info.Class, info.PID, info.Epoch, info.Age.Round(time.Second),
 		info.ExpiresAt.Format(time.Kitchen), excl, info.Reason, queueHint)
+	if len(info.Devices) > 0 {
+		fmt.Printf("  cards: %s (a card-scoped lease; other cards are not fenced by it)\n", strings.Join(info.Devices, ", "))
+	}
+	if len(info.Devices) == 0 && info.ScopeWhy != "" {
+		// A legacy whole-node record: what the text seats treat it as, and why.
+		if len(info.Inferred) > 0 {
+			widened := ""
+			if info.ScopeWidened {
+				widened = " [scope-widened]"
+			}
+			fmt.Printf("  seats: fenced on cards %s only (inferred%s); %s\n", strings.Join(info.Inferred, ", "), widened, info.ScopeWhy)
+		} else {
+			fmt.Printf("  seats: the whole node (%s)\n", info.ScopeWhy)
+		}
+	}
+	for _, ln := range ownershipStatusLines(act.Holder, info) {
+		fmt.Println("  " + ln)
+	}
+	if len(info.Epochs) > 1 {
+		fmt.Printf("  live leases: epochs %v (this line shows the lowest; `gpu status --json` lists them all)\n", info.Epochs)
+	}
+	if len(leases) > 1 || len(info.Devices) > 0 {
+		for _, l := range leases {
+			scope := "whole node"
+			if len(l.Devices) > 0 {
+				scope = "cards " + strings.Join(l.Devices, ", ")
+			}
+			group := ""
+			if l.Group != "" {
+				group = " group " + l.Group
+			}
+			fmt.Printf("  lease epoch %d: %s pid %d, %s%s\n", l.Epoch, l.Class, l.PID, scope, group)
+		}
+	}
+	printCardTable(cards, cardsNote, cardsErr, leases)
 	queueLines()
 	printActivity(act)
 	return nil
@@ -185,6 +312,13 @@ func runGPUReserve(args []string) error {
 	wait := fs.Duration("wait", defaultReserveWait, "how long to QUEUE behind a current holder before giving up (0 = fail fast); the holder's declared window is reported, not trusted — the wait runs its full length")
 	exclusive := fs.Bool("exclusive", false, "stamp a text lease exclusive: the harness's text-load gate then keeps models off these cards for the lease's length (loads ride a cascade remote lane or wait their own budget); implied by --unload-seat")
 	asJSON := fs.Bool("json", false, "emit JSON")
+	devicesFlag := fs.String("devices", "", "hold only these cards (nvidia-smi indices or GPU UUID prefixes, comma-separated) instead of the whole node; needs card-scoped leases on this host (config gpu_card_scoped_leases and a green `gpu doctor --write-audit`); the command is pinned to them with CUDA_VISIBLE_DEVICES unless it pins itself")
+	cardsFlag := fs.String("cards", "", "hold N cards (or MIN..MAX) chosen by the allocator: not claimed, not the display card, no foreign compute process, VRAM and host RAM that fit; queues when none qualify; the command is pinned to them with CUDA_VISIBLE_DEVICES unless it pins itself")
+	wholeNode := fs.Bool("whole-node", false, "hold the whole node (the default when the command names no card)")
+	groupFlag := fs.String("group", "", "label for leases taken together for one job (shown in `gpu status`)")
+	vramFlag := fs.Float64("vram", 0, "with --cards: GiB of VRAM the job needs free on EACH card (0 = not declared)")
+	ramFlag := fs.Float64("ram", 0, "with --cards: GiB of host RAM the job needs; the allocator also keeps gpu_host_ram_headroom_gib free")
+	owner := addOwnershipFlags(fs)
 	_ = fs.Parse(args)
 	if *unload {
 		*exclusive = true // a cleared card that the next text call refills is not cleared
@@ -207,6 +341,11 @@ func runGPUReserve(args []string) error {
 	if *unload && !*drain {
 		return errors.New("--unload-seat requires --drain: never unload a seat with a request in flight")
 	}
+	// The bounded-claim contract for an unattended job is checked before anything is
+	// acquired: a lease nobody is watching must carry the terms it is judged by.
+	if err := owner.validate(forGiven); err != nil {
+		return err
+	}
 
 	cmdArgs := fs.Args() // everything after `--`
 	if len(cmdArgs) == 0 && !*detach {
@@ -228,11 +367,51 @@ func runGPUReserve(args []string) error {
 	// was waiting for (2026-09-14, register D-93).
 	exclusiveAfter := (*exclusive || *unload) && *drain
 	opts := gpulease.Options{Reason: *reason, Origin: *origin, TTL: *dur,
-		Exclusive: *exclusive && !*drain, Draining: *drain, Command: strings.Join(cmdArgs, " ")}
+		Exclusive: *exclusive && !*drain, Draining: *drain, Command: strings.Join(cmdArgs, " "),
+		WrapperVersion: version, Group: strings.TrimSpace(*groupFlag)}
+	if err := owner.apply(&opts, os.Getenv); err != nil {
+		return err
+	}
+	if w := progressFileWarning(opts.ProgressFile); w != "" {
+		fmt.Fprintln(os.Stderr, w)
+	}
 	queuedAt := time.Now()
 
+	// Which cards (plan P3). A host without card-scoped leases takes none of this path:
+	// no card table is read and the lease is whole-node, as before.
+	devFlags := reserveDeviceFlags{devices: *devicesFlag, cards: *cardsFlag, wholeNode: *wholeNode, vramGiB: *vramFlag, ramGiB: *ramFlag}
+	reserveCfg := loadCfg(fs)
+	cmdEnv := os.Getenv
 	if *detach {
-		epoch, err := detachHolder(fs, *class, *dur, *wait, opts, *asJSON, m)
+		cmdEnv = func(string) string { return "" } // a detached holder runs no command to read cards from
+	}
+	plan, perr := planReserveDevices(devFlags, cmdArgs, cmdEnv, m.CardScoped(), func() ([]gpuprobe.Card, string, error) {
+		return cardTable(context.Background(), reserveCfg)
+	})
+	if perr != nil {
+		return perr
+	}
+	if plan.Note != "" {
+		fmt.Fprintf(os.Stderr, "gpu reserve: %s\n", plan.Note)
+	}
+	// A `--cards` request is allocated AND claimed in one loop (acquireAutoCards, below):
+	// choosing the cards here and claiming them later lets two simultaneous reserves pick
+	// the same one. A detached holder takes the request to the holder process, which runs
+	// that loop itself, so its lease is taken by the pid the parent reports.
+	opts.Devices = plan.IDs
+	if len(plan.IDs) > 0 {
+		fmt.Fprintf(os.Stderr, "gpu reserve: holding cards %s (%s); the other cards stay free\n", strings.Join(plan.IDs, ", "), plan.Source)
+	}
+	buildAlloc := func() (gpulease.AllocInput, error) {
+		return buildAllocInput(context.Background(), m, reserveCfg, devFlags)
+	}
+
+	if *detach {
+		var auto *reserveDeviceFlags
+		if plan.Auto {
+			auto = &devFlags
+		}
+		epoch, err := detachHolderFn(fs, *class, *dur, *wait, opts, auto, *asJSON, m)
 		if err != nil {
 			return err
 		}
@@ -244,7 +423,7 @@ func runGPUReserve(args []string) error {
 		// lease itself is what was lost (the child releases at --for whether or
 		// not the drain is done), nothing is held and the error says so.
 		if *drain || *unload {
-			if err := maintainSeat(loadCfg(fs), func(fn func(*gpulease.Meta)) error { return m.Restamp(epoch, fn) }, *drain, drainDeadline(*drainTimeout, queuedAt, *wait), *unload, exclusiveAfter, markWarmOwed(m)); err != nil {
+			if err := detachMaintain(m, epoch, loadCfg(fs), *drain, drainDeadline(*drainTimeout, queuedAt, *wait), *unload, exclusiveAfter); err != nil {
 				return detachedMaintainError(m, epoch, err)
 			}
 		}
@@ -255,7 +434,17 @@ func runGPUReserve(args []string) error {
 	// drain; running once the command starts; closed with its exit.
 	cfg := loadCfg(fs)
 	card := newLeaseCard(cfg, cmdArgs, *origin)
-	lease, err := acquireQueued(m, gpulease.Class(*class), opts, *wait)
+	var lease *gpulease.Lease
+	if plan.Auto {
+		lease, err = acquireAutoCards(m, gpulease.Class(*class), opts, plan, *wait, buildAlloc, os.Stderr, time.Sleep, time.Now)
+		if err == nil {
+			// A lease lost during the drain is taken again on the cards this one held.
+			opts.Devices = lease.Devices()
+			fmt.Fprintf(os.Stderr, "gpu reserve: holding cards %s (%s); the other cards stay free\n", strings.Join(lease.Devices(), ", "), plan.Source)
+		}
+	} else {
+		lease, err = acquireQueued(m, gpulease.Class(*class), opts, *wait)
+	}
 	if err != nil {
 		card.finish(err)
 		return err
@@ -290,7 +479,7 @@ func runGPUReserve(args []string) error {
 			// the failure to the restamp, hours later, and the command never started.
 			mctx, cancelMaintain := context.WithCancel(context.Background())
 			stopRenew := renewWhile(lease, drainRenewEvery, func(error) { cancelMaintain() })
-			merr := maintainSeatCtx(mctx, cfg, lease.Restamp, *drain, drainDeadline(*drainTimeout, queuedAt, *wait), *unload, exclusiveAfter, markWarmOwed(m))
+			merr := maintainSeatScoped(mctx, cfg, lease.Restamp, *drain, drainDeadline(*drainTimeout, queuedAt, *wait), *unload, exclusiveAfter, markWarmOwed(m), lease.Devices())
 			stopRenew()
 			cancelMaintain()
 			if merr == nil {
@@ -338,7 +527,26 @@ func runGPUReserve(args []string) error {
 		// hold it is running under; the unload is elected per lease inside the render
 		// path (claimLeaseUnload), so exactly one job per lease tears the tier down.
 		"GPU_LEASE_CLASS="+string(lease.Class()),
+		// The cards the lease holds (lease ids, comma-separated; empty = the whole node).
+		"GPU_LEASE_DEVICES="+strings.Join(lease.Devices(), ","),
 	)
+	// The models the render lane's unload may take under a card lease (plan P5): the roster minus
+	// the memory stack minus the seats pinned to cards this lease does not hold. A whole-node
+	// lease hands over nothing, and the lane keeps its own rule.
+	if e := wrapperUnloadEnv(context.Background(), cfg, lease.Devices()); e != "" {
+		cmd.Env = append(cmd.Env, e)
+	}
+	// A lease holds cards; it does not confine the command. A reservation that named or
+	// allocated its cards pins the command to them unless the command pins itself (see
+	// confineWrapped), and the wrapper says so when a pin of its own falls outside them.
+	if plan.Explicit {
+		launchCards, _, _ := cardTable(context.Background(), cfg) // best-effort: the UUID is rebuilt without it
+		conf := confineWrapped(true, lease.Devices(), cmdArgs, os.Getenv, launchCards)
+		cmd.Env = append(cmd.Env, conf.Env...)
+		if conf.Note != "" {
+			fmt.Fprintf(os.Stderr, "gpu reserve: %s\n", conf.Note)
+		}
+	}
 	if silencesWrapped(cmdArgs) {
 		// This lease's card stands for the command: a one-shot harness verb
 		// under it reports no card of its own.
@@ -433,25 +641,28 @@ func heldHint(err error, wait time.Duration) error {
 // a real, observable process rather than this short-lived CLI invocation. With a
 // positive wait the CHILD queues (gpu hold acquires with the same --wait) and this
 // parent waits for it to win the card, so "reserved" is printed only once it is true.
-func detachHolder(fs *flag.FlagSet, class string, dur, wait time.Duration, opts gpulease.Options, asJSON bool, m *gpulease.Manager) (uint64, error) {
-	if info := m.Inspect(); info.Held && wait <= 0 {
-		return 0, heldHint(&gpulease.ErrHeld{Info: info}, wait)
+// detachHolderFn is detachHolder; a test substitutes an in-process holder (the real one spawns a
+// hidden child process).
+var detachHolderFn = detachHolder
+
+func detachHolder(fs *flag.FlagSet, class string, dur, wait time.Duration, opts gpulease.Options, auto *reserveDeviceFlags, asJSON bool, m *gpulease.Manager) (uint64, error) {
+	// With a named set the parent can tell at once that a fail-fast request has no chance;
+	// an allocated one is the holder's to decide (it may find another free card).
+	if auto == nil {
+		if info := m.InspectFor(opts.Devices); info.Held && wait <= 0 {
+			return 0, heldHint(m.HeldError(info), wait)
+		}
 	}
 	self, err := os.Executable()
 	if err != nil {
 		return 0, err
 	}
-	child := exec.Command(self, "gpu", "hold",
-		"--class", class, "--for", dur.String(), "--wait", wait.String(), "--reason", opts.Reason, "--origin", opts.Origin)
-	if opts.Exclusive {
-		child.Args = append(child.Args, "--exclusive")
+	cfgPath := ""
+	if f := fs.Lookup("config"); f != nil {
+		cfgPath = f.Value.String()
 	}
-	if opts.Draining {
-		child.Args = append(child.Args, "--draining")
-	}
-	if cfgPath := fs.Lookup("config").Value.String(); cfgPath != "" {
-		child.Args = append(child.Args, "--config", cfgPath)
-	}
+	// The child outlives this process, so the owner and the contract travel as flags.
+	child := exec.Command(self, holdArgs(class, dur, wait, opts, auto, cfgPath)...)
 	hideWindow(child) // no console window may ever appear; one gets closed and the hold dies
 
 	// A hidden child with nil Stderr writes to NUL, so a holder that fails to start
@@ -503,7 +714,21 @@ func detachHolder(fs *flag.FlagSet, class string, dur, wait time.Duration, opts 
 			return 0, fmt.Errorf("detached holder (pid %d) gave up before taking the lease: %v; its output is at %s", childPID, werr, errLog)
 		default:
 		}
-		info := m.Inspect()
+		// With card-scoped leases several are live at once, so "the" holder is not the
+		// lowest epoch: ours is the lease whose holder pid is the child, wherever it
+		// sits; otherwise the lease that conflicts with the cards we asked for. An
+		// allocated request names no cards yet, so a lease on some other card is not
+		// the line we are standing in: only the child's own lease, or its exit, counts.
+		var info gpulease.Info
+		if auto == nil {
+			info = m.InspectFor(opts.Devices)
+		}
+		for _, l := range m.Leases() {
+			if l.PID == childPID {
+				info = l
+				break
+			}
+		}
 		// THE HOLDER MUST BE OURS. Without comparing pids, a parent reported someone
 		// else's reservation as its own and printed a release command that would kill
 		// the winner's hold. With a queue window a foreign holder is not a racer but
@@ -517,19 +742,27 @@ func detachHolder(fs *flag.FlagSet, class string, dur, wait time.Duration, opts 
 			if queuedBehind != info.PID {
 				queuedBehind = info.PID
 				fmt.Fprintf(os.Stderr, "gpu reserve: queued behind %v — the holder (pid %d) takes the card when it frees; waiting up to %s\n",
-					&gpulease.ErrHeld{Info: info}, childPID, wait)
+					m.HeldError(info), childPID, wait)
 			}
 		}
 		if info.Held && info.PID == childPID {
 			if asJSON {
-				b, _ := json.Marshal(map[string]any{
+				out := map[string]any{
 					"held": true, "class": info.Class, "epoch": info.Epoch,
 					"pid": info.PID, "expires_at": info.ExpiresAt.Format(time.RFC3339),
-				})
+				}
+				if len(info.Devices) > 0 {
+					out["devices"] = info.Devices
+				}
+				b, _ := json.Marshal(out)
 				fmt.Println(string(b))
 			} else {
-				fmt.Printf("reserved: %s epoch %d (pid %d) until %s\n  release with: local-offload gpu release --epoch %d\n",
-					info.Class, info.Epoch, info.PID, info.ExpiresAt.Format(time.Kitchen), info.Epoch)
+				cardsText := ""
+				if len(info.Devices) > 0 {
+					cardsText = ", cards " + strings.Join(info.Devices, ", ")
+				}
+				fmt.Printf("reserved: %s epoch %d (pid %d%s) until %s\n  release with: local-offload gpu release --epoch %d\n",
+					info.Class, info.Epoch, info.PID, cardsText, info.ExpiresAt.Format(time.Kitchen), info.Epoch)
 			}
 			reported = true // the holder is ours and reported; leave it running
 			return info.Epoch, nil
@@ -537,6 +770,35 @@ func detachHolder(fs *flag.FlagSet, class string, dur, wait time.Duration, opts 
 		time.Sleep(150 * time.Millisecond)
 	}
 	return 0, fmt.Errorf("detached holder (pid %d) did not take the lease within %s; its output is at %s", childPID, (10*time.Second + wait).Round(time.Second), errLog)
+}
+
+// holdArgs is the argv of the detached holder (`gpu hold ...`). A named card set travels as
+// --devices; an allocated one (auto != nil) travels as the request itself (--cards, --vram,
+// --ram), so the holder allocates and claims in one loop and nothing is decided in the
+// parent that another reserve can take first.
+func holdArgs(class string, dur, wait time.Duration, opts gpulease.Options, auto *reserveDeviceFlags, cfgPath string) []string {
+	args := []string{"gpu", "hold",
+		"--class", class, "--for", dur.String(), "--wait", wait.String(), "--reason", opts.Reason, "--origin", opts.Origin}
+	if opts.Exclusive {
+		args = append(args, "--exclusive")
+	}
+	if opts.Draining {
+		args = append(args, "--draining")
+	}
+	switch {
+	case auto != nil:
+		args = append(args, "--cards", auto.cards,
+			"--vram", strconv.FormatFloat(auto.vramGiB, 'f', -1, 64), "--ram", strconv.FormatFloat(auto.ramGiB, 'f', -1, 64))
+	case len(opts.Devices) > 0:
+		args = append(args, "--devices", strings.Join(opts.Devices, ","))
+	}
+	if opts.Group != "" {
+		args = append(args, "--group", opts.Group)
+	}
+	if cfgPath != "" {
+		args = append(args, "--config", cfgPath)
+	}
+	return append(args, ownerHoldArgs(opts)...)
 }
 
 // runGPUHold is the detached holder itself (internal; spawned by --detach). It holds
@@ -552,6 +814,12 @@ func runGPUHold(args []string) error {
 	wait := fs.Duration("wait", 0, "queue behind a current holder for up to this long (the parent passes its --wait)")
 	exclusive := fs.Bool("exclusive", false, "stamp the text lease exclusive (the parent passes its --exclusive)")
 	draining := fs.Bool("draining", false, "stamp the text lease draining (the parent passes its --drain; it restamps exclusive when the drain completes)")
+	devicesFlag := fs.String("devices", "", "the cards to hold, as lease ids (the parent resolved them; empty = the whole node)")
+	cardsFlag := fs.String("cards", "", "hold N cards (or MIN..MAX) chosen by the allocator, allocating and claiming in this process (the parent passes its --cards)")
+	vramFlag := fs.Float64("vram", 0, "with --cards: GiB of VRAM the job needs free on EACH card")
+	ramFlag := fs.Float64("ram", 0, "with --cards: GiB of host RAM the job needs")
+	groupFlag := fs.String("group", "", "label for leases taken together for one job")
+	owner := addOwnershipFlags(fs)
 	_ = fs.Parse(args)
 
 	m, err := openLease(fs)
@@ -561,9 +829,35 @@ func runGPUHold(args []string) error {
 	// The queue lives HERE, in the process that will hold the card, so the lease is
 	// taken by the pid the parent reports and a parent that dies mid-wait leaves
 	// nothing behind but a holder that will release at its own deadline.
-	lease, err := m.Acquire(gpulease.Class(*class), gpulease.Options{
+	var holdDevices []string
+	if strings.TrimSpace(*devicesFlag) != "" {
+		holdDevices = strings.Split(*devicesFlag, ",")
+	}
+	holdOpts := gpulease.Options{
 		Reason: *reason, Origin: *origin, TTL: *dur, Wait: *wait, WaitOut: true, Exclusive: *exclusive, Draining: *draining,
-	})
+		WrapperVersion: version, Devices: holdDevices, Group: strings.TrimSpace(*groupFlag),
+	}
+	// The parent resolved the owner and the contract and passed them as flags: this
+	// process's own parent is about to exit and says nothing about who asked.
+	if err := owner.apply(&holdOpts, os.Getenv); err != nil {
+		return err
+	}
+	var lease *gpulease.Lease
+	if strings.TrimSpace(*cardsFlag) != "" {
+		min, max, perr := parseCardCount(*cardsFlag)
+		if perr != nil {
+			return perr
+		}
+		holdCfg := loadCfg(fs)
+		holdFlags := reserveDeviceFlags{cards: *cardsFlag, vramGiB: *vramFlag, ramGiB: *ramFlag}
+		lease, err = acquireAutoCards(m, gpulease.Class(*class), holdOpts, devicePlan{Auto: true, Min: min, Max: max, Source: "--cards " + strings.TrimSpace(*cardsFlag)}, *wait,
+			func() (gpulease.AllocInput, error) {
+				return buildAllocInput(context.Background(), m, holdCfg, holdFlags)
+			},
+			os.Stderr, time.Sleep, time.Now)
+	} else {
+		lease, err = m.Acquire(gpulease.Class(*class), holdOpts)
+	}
 	if err != nil {
 		return err
 	}
@@ -659,7 +953,7 @@ func leaseWarmGuard(m *gpulease.Manager, l *gpulease.Lease) warmGuard {
 func releaseWarmGuard(m *gpulease.Manager, epoch uint64) warmGuard {
 	held := func() error {
 		info := m.Inspect()
-		if epoch != 0 && info.Held && info.Epoch != epoch {
+		if epoch != 0 && info.Held && !info.HoldsEpoch(epoch) {
 			return fmt.Errorf("the lease has moved on (asked to release epoch %d, current is %d)", epoch, info.Epoch)
 		}
 		return nil
@@ -698,7 +992,7 @@ func drainDeadline(explicit time.Duration, queuedAt time.Time, wait time.Duratio
 // activityOptions is the activity read the gpu verbs make: this box's lease
 // root, its llama-swap and its agent seat, with a utilization sample.
 func activityOptions(cfg config.Config) gpuactivity.Options {
-	return gpuactivity.Options{LockOverride: cfg.GPULockPath, StateDir: cfg.StateDir, Endpoint: cfg.Endpoint, Seat: cfg.AgentPlannerModel(""), SampleGPU: true}
+	return gpuactivity.Options{LockOverride: cfg.GPULockPath, StateDir: cfg.StateDir, Endpoint: cfg.Endpoint, Seat: cfg.AgentPlannerModel(""), SampleGPU: true, Scope: modelaffinity.ScopeFunc(cfg.GPULockPath, cfg.StateDir), OrphanGrace: cfg.GPUOrphanGrace(), ComfyDir: cfg.ComfyDir}
 }
 
 func printActivity(v gpuactivity.View) {
@@ -793,7 +1087,7 @@ func requeueWait(queuedAt time.Time, wait time.Duration) time.Duration {
 // nothing of this reservation is held, and telling the caller to `gpu release`
 // would release someone else's lease.
 func detachedMaintainError(m *gpulease.Manager, epoch uint64, err error) error {
-	if info := m.Inspect(); info.Held && info.Epoch == epoch {
+	if info := m.Inspect(); info.Held && info.HoldsEpoch(epoch) {
 		return fmt.Errorf("%w (the lease is still held; `gpu release` frees it)", err)
 	}
 	return fmt.Errorf("%w (the lease is no longer this reservation's: it was released, or another holder took the card; reserve again to queue for it)", err)

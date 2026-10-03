@@ -9,6 +9,7 @@ import (
 
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/gpuprobe"
+	"github.com/dmmdea/offload-harness/internal/modelaffinity"
 	"github.com/dmmdea/offload-harness/internal/seatload"
 )
 
@@ -172,7 +173,9 @@ func LiveFromConfig(cfg config.Config) Live {
 }
 
 // Live exposes the snapshot as the table's reader contract. Verdict stays nil:
-// a local box has no remote verdict to carry.
+// a local box has no remote verdict to carry. CardsHeld is the local box's own reading of
+// the machine-wide lease (the directory the load gate is armed at, the cards its seats are
+// pinned to): the agent row's fallback when a lease holds the flagship's cards (plan P4).
 func (s *Snapshot) Live() Live {
 	return Live{
 		Seat:        s.Seat,
@@ -180,6 +183,7 @@ func (s *Snapshot) Live() Live {
 		DeviceIndex: s.DeviceIndex,
 		HostFree:    s.HostFree,
 		Presence:    s.Presence,
+		CardsHeld:   modelaffinity.CardsHeld,
 	}
 }
 

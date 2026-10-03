@@ -106,8 +106,11 @@ test("stageInputs/unstageInputs: every source staged under a unique name and eve
   mkdirSync(inputDir);
   const srcs = ["t.png", "a.png", "b.png"].map((n) => { const p = join(root, n); writeFileSync(p, n); return p; });
   const staged = [];
-  stageInputs(srcs, staged, { inputDir, now: () => 123 });
-  assert.deepEqual(staged, ["edit_in_123_0_t.png", "edit_in_123_1_a.png", "edit_in_123_2_b.png"]);
+  stageInputs(srcs, staged, { inputDir, now: () => 123, pid: 7, rand: () => "ab" });
+  assert.deepEqual(staged, ["edit_in_123-7-ab_0_t.png", "edit_in_123-7-ab_1_a.png", "edit_in_123-7-ab_2_b.png"]);
+  const other = []; stageInputs(srcs.slice(0, 1), other, { inputDir, now: () => 123, pid: 8, rand: () => "ab" });
+  assert.notEqual(other[0], staged[0], "the same source staged by another process in the same millisecond is another name");
+  unstageInputs(other, { inputDir });
   for (const n of staged) assert.ok(existsSync(join(inputDir, n)));
   unstageInputs(staged, { inputDir });
   assert.deepEqual(readdirSync(inputDir), []);
@@ -120,8 +123,8 @@ test("a copy failure half-way still leaves the staged list complete for the fina
   const good = join(root, "t.png");
   writeFileSync(good, "x");
   const staged = [];
-  assert.throws(() => stageInputs([good, join(root, "missing.png")], staged, { inputDir, now: () => 1 }), /ENOENT/);
-  assert.deepEqual(staged, ["edit_in_1_0_t.png"], "the first copy landed and is recorded");
+  assert.throws(() => stageInputs([good, join(root, "missing.png")], staged, { inputDir, now: () => 1, pid: 7, rand: () => "ab" }), /ENOENT/);
+  assert.deepEqual(staged, ["edit_in_1-7-ab_0_t.png"], "the first copy landed and is recorded");
   unstageInputs(staged, { inputDir });
   assert.deepEqual(readdirSync(inputDir), []);
 });

@@ -43,11 +43,17 @@ func ReadOnlyTools(root string, offload OffloadFunc, npu NPUFunc) ([]Tool, error
 // ignored; a nil lane list keeps the pre-Coral behaviour (the Hailo lane alone
 // via npu) so every existing caller and test is unchanged.
 func ReadOnlyToolsWithLanes(root string, offload OffloadFunc, npu NPUFunc, lanes []AccelLane) ([]Tool, error) {
+	return readOnlyTools(root, offload, npu, lanes, nil)
+}
+
+// readOnlyTools is ReadOnlyToolsWithLanes with the read floor's gate (SF-07), which
+// Build supplies; every read tool in the set consults the same gate.
+func readOnlyTools(root string, offload OffloadFunc, npu NPUFunc, lanes []AccelLane, gate *readGate) ([]Tool, error) {
 	absRoot, err := filepath.Abs(root)
 	if err != nil {
 		return nil, err
 	}
-	s := &scope{root: absRoot}
+	s := &scope{root: absRoot, gate: gate}
 
 	tools := []Tool{
 		{
@@ -68,7 +74,7 @@ func ReadOnlyToolsWithLanes(root string, offload OffloadFunc, npu NPUFunc, lanes
 		},
 	}
 
-	searchTool, err := SearchTool(absRoot)
+	searchTool, err := gatedSearchTool(absRoot, gate)
 	if err != nil {
 		return nil, err
 	}
@@ -142,6 +148,9 @@ func summarizeFileTool(s *scope, offload OffloadFunc) Tool {
 // can't silently truncate). It returns the escape/IO error unchanged so callers
 // surface os.Root's fail-closed rejection.
 func (s *scope) readBounded(rel string) (string, error) {
+	if err := s.gate.check(s.root, rel); err != nil {
+		return "", err
+	}
 	r, name, err := s.open(rel)
 	if err != nil {
 		return "", err
@@ -160,7 +169,11 @@ func (s *scope) readBounded(rel string) (string, error) {
 }
 
 // scope confines file access to root using an OS root handle (os.Root).
-type scope struct{ root string }
+type scope struct {
+	root string
+	// gate is the read floor every read tool consults (register SF-07); nil checks nothing.
+	gate *readGate
+}
 
 // open returns the root handle plus the validated relative name, or an error.
 // It rejects absolute and volume-qualified inputs (e.g. "C:\\x", "C:x",
@@ -232,6 +245,9 @@ func (s *scope) readFile(_ context.Context, args string) (string, error) {
 	}
 	if strings.TrimSpace(in.Path) == "" {
 		return "", fmt.Errorf("read_file requires a path")
+	}
+	if err := s.gate.check(s.root, in.Path); err != nil {
+		return "", err
 	}
 	offset := in.Offset
 	if offset < 1 {

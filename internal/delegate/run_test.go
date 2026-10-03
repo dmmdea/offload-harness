@@ -190,6 +190,8 @@ type fakeNode struct {
 		High     bool    `json:"high"`
 		IdleSlot bool    `json:"idle_slot"`
 	}
+	// lease, when non-nil, is published as health's `lease` block.
+	lease map[string]any
 }
 
 // jobsRunningNow is the health payload's jobs_running: the live function when
@@ -241,6 +243,9 @@ func (f *fakeNode) server() *httptest.Server {
 		}
 		if f.saturation != nil {
 			health["saturation"] = f.saturation
+		}
+		if f.lease != nil {
+			health["lease"] = f.lease
 		}
 		if f.recentAgentWallSec > 0 {
 			health["recent_agent_wall_sec"] = f.recentAgentWallSec

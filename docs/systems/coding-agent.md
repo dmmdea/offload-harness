@@ -521,7 +521,7 @@ front a hosted decision model.
 | `agent_run` / `agent_delegate` with `allow_browse` and `browse_hosts` | unattended | can never be lifted | required, non-empty |
 
 Every agent door is unattended for browse and needs an audit path (the CLI defaults to
-`<HOME>/.local-offload/agent-audit.jsonl`). The only attended browse door is the MCP tool
+`agent-audit.jsonl` under the harness install root: config `home`, else `<HOME>/.local-offload`). The only attended browse door is the MCP tool
 `offload_browse`. The contract doors also need the node's `agent_allow_browse: true` and the lane
 configured on the node that runs the browse. A contract carrying `allow_browse` must have `route: local` (intake rejects any
 other), delegation placement never sends it to a remote node, and a fleet node refuses it at ACK
@@ -628,9 +628,36 @@ hop limit structural. Contract wire shape, auth, and placement:
 
 ## Data and state
 
-- **Audit trail** — append-only JSONL, mode `0600`, at `~/.local-offload/agent-audit.jsonl` by
-  default. Resolved only when a mutating capability is enabled.
-- **Ask queue** — sibling file for deferred approvals and parked high-risk calls.
+- **Audit trail** — append-only JSONL, mode `0600`, at `agent-audit.jsonl` under the harness install
+  root by default (config `home`, else `~/.local-offload`; on Windows `home` is on a data drive, never the
+  OS drive). Resolved only when a mutating capability is enabled (the CLI) or browse is asked for (the
+  agent doors), unless `audit_all_doors` says otherwise (register SF-02): `off` (the default) keeps
+  that behaviour; `warn` attaches the trail to every agent door (`agent_run`, `agent_delegate`, fleet
+  contracts), writes every broker decision and reports a failed write once on the log without changing
+  any decision; `enforce` makes a failed write deny the action, as a browse run's trail always has, and
+  refuses the run (a `config`-class defer naming the key) when no audit path resolves. A browse run keeps
+  its enforcing trail in every mode. `enforce` is the operator's call: it adds a failure mode to doors
+  that never had one, so it follows a measured clean window under `warn`. A row is written only for a
+  BROKERED action (write, delete, fetch, shell, run, browse, park): a read-only run (`agent_run` without
+  browse, a contract without `write_root`) attaches the trail but leaves no row, so a clean window under
+  `warn` vouches for the write-door contracts that ran in it, not for read-only ones. The local-agent CLI
+  keeps its own `--audit` behaviour (a trail when a mutating flag is set) and does not read this key.
+  With `audit_chain` on (register SF-08) every row of a run carries `run_id`, `seq` and `prev_sha256`
+  (the SHA-256 of the run's previous row as written) and a run that recorded anything closes with a
+  `run_end` row (`count`, `head`); a run with no decision writes nothing. `local-offload agent-audit verify
+  [--strict]` names the run and seq of an edited, removed or reordered row INSIDE a run, reports a run with no
+  `run_end` as OPEN (a crash, or a cut tail: the chain alone cannot tell them apart, so `--strict` fails open
+  runs) and rows that still chain after their `run_end` as LATE (a tool goroutine abandoned at a timeout). It
+  cannot see a whole run removed, edits to a `run_end`'s other fields, or an edit re-chained from that row on:
+  the chain is unkeyed, and an off-node witness of run heads (register S-08) closes that and is not built. The
+  local-agent CLI's `--serve` mode is one chained run for the server's lifetime, closed when serving ends.
+- **Ask queue** — sibling file for deferred approvals and parked high-risk calls. Until the install root governed these
+  files they all lived under `~/.local-offload`, so on a node that sets `home` the trail, the ask queue
+  and the traces start new files under it and the old ones stay where they were: nothing moves or merges
+  them (merge by hand if you want one history, then delete the old file). The agent says so once per
+  process, naming both paths, whenever it finds the old one.
+- **Ask queue** — sibling file (`agent-asks.jsonl`, same root) for deferred approvals and parked high-risk
+  calls.
 - **Worktree memory** — an `AGENT.md` loaded into context on a re-injection cadence.
 - **Traces** — optional per-run transcripts.
 
@@ -713,6 +740,28 @@ copy-by-name allowlist (`SystemRoot`, `SystemDrive`, `windir`, `PATH`, `PATHEXT`
 0.117.7 the Windows side passed a nil `lpEnvironment`, which means "inherit the caller's block",
 so a `run` child received the delegator's whole environment.
 
+**Reads of secret material pass a read floor** (register SF-07, `internal/agent/readfloor.go`).
+Every tool that reads file content consults one gate: `read_file`, `summarize_file`, `search_files`,
+`edit_file` (it reads the old content, and "not found" versus a refusal would answer whether a guess is in
+the file) and `github_upload_file` (it sends the file off the box). The built-in floor covers `.env*`
+(except `.env.example` and `.env.sample`), `*.pem`, `*.key`, `*.p12`, `*.pfx`, `id_rsa*`, `id_ed25519*`,
+`id_ecdsa*`, `id_dsa*`, `.npmrc`, `.netrc`, `.pypirc`, `.git-credentials`, `.claude.json`, and everything under a
+`.ssh`, `.aws`, `.gnupg`, `.kube` or `.env` directory, folded the way the write floor folds names (case,
+trailing dots and spaces); a rule table may add rules of kind `read` (tighten-only). A path is checked as given
+and in its resolved form, so a symlink to a secret and a Windows 8.3 short name (`ENV~1.PRO`, `SSH~1`) are the
+file they name; under `enforce` a `~N` short-name segment is refused outright as well. The mode is
+`agent_read_floor`: `warn` (the default) lets the read through unchanged and records a `warn` row on the audit
+trail (when one is attached, see `audit_all_doors`) plus a log line, and on an ENFORCING trail (a browse grant or
+`audit_all_doors=enforce`) a read the trail cannot record is refused; `enforce` refuses the read (the broker's
+not-performed convention, `read refused: <reason>`, a `deny` row recorded). Under `enforce`, `search_files`
+walks the tree and skips a floored file or directory before reading a byte of it, and says nothing about what it
+skipped, so a pattern cannot probe a secret. `off` checks nothing, and `--rules off` switches the floor off with
+the rest of the table (the build says so). NOT covered: the run/shell cage (an allowlisted `python`, `node` or
+`git` can read any file it reaches, and on native Windows reads outside the worktree are not confined either),
+hard links (a second name for the same content, which no path check can see), and the media tools that read an
+absolute image path. Both search backends now search dotfiles (`rg --hidden`, `.git` excluded), as the Go walk
+always did.
+
 > **Known gap:** the read-only `.git` mask that protects the shell path is Linux-only. On native
 > Windows the `run` path has no equivalent, while `git` is on the allowlist and the worktree is
 > temporarily low-integrity during a run. The broker's `.git` denial still covers the file tools on
@@ -764,6 +813,8 @@ replaces the default. `cmd/local-agent/serve_test.go` covers the loopback guard.
 - [`internal/agent/policy.go`](../../internal/agent/policy.go) — broker, `.git` denial, audit append
 - [`internal/agent/rules.go`](../../internal/agent/rules.go) — the tighten-only risk-rule table and
   the built-in `defaultRules()` secret-material floor
+- [`internal/agent/readfloor.go`](../../internal/agent/readfloor.go) — the read floor (`ActRead`, the
+  shared read gate every read tool consults, `agent_read_floor` modes)
 - [`internal/agent/unattendedrules.go`](../../internal/agent/unattendedrules.go) — the embedded
   default unattended table and the `RulesOff` escape hatch
 - [`examples/agent-rules.json`](../../examples/agent-rules.json) — the shipped starter table for

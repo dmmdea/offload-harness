@@ -100,7 +100,14 @@ type Spec struct {
 	// ComfyAPI is the ComfyUI endpoint freeComfyVRAM hits after the run. "" =>
 	// the COMFY_API env or the 127.0.0.1:8188 default. Set "" to inherit; a runner
 	// with no ComfyUI (TTS) can leave it — /free on a dead endpoint is a no-op.
+	// When set (a per-card instance) it is also exported to the runner as COMFY_API,
+	// so the runner talks to, launches and frees the same instance the /free targets.
 	ComfyAPI string
+	// CardUUID is the GPU uuid the runner pins its ComfyUI instance to (exported as
+	// COMFY_CARD_UUID; the runner sets CUDA_VISIBLE_DEVICES from it, never an index).
+	// "" = not card-bound. It also blanks COMFY_CUDA_DEVICE: a uuid pin replaces the
+	// legacy index, and the runner refuses a launch that carries both.
+	CardUUID string
 	// SkipFreeComfy, when true, suppresses the post-run ComfyUI /free (the TTS/voice
 	// path never starts ComfyUI, so there is nothing to free). The killTree + output
 	// stat still apply — the python worker still gets process-tree-killed on timeout.
@@ -180,6 +187,8 @@ func Generate(ctx context.Context, spec Spec) (string, error) {
 	} else {
 		cmd.Env = append(os.Environ(), spec.Env...)
 	}
+	// Last, so nothing earlier in the env can shadow the instance this Spec names.
+	cmd.Env = append(cmd.Env, instanceEnv(spec)...)
 	// On timeout/cancel kill the WHOLE process tree (invariant 3): a bare kill on
 	// Windows orphans the ComfyUI python grandchild and bypasses node's finally.
 	cmd.Cancel = func() error { return killTree(cmd.Process) }
@@ -321,6 +330,20 @@ func killTree(p *os.Process) error {
 		return nil
 	}
 	return p.Kill()
+}
+
+// instanceEnv is the env a Spec's per-card ComfyUI instance adds to the child: its endpoint
+// and its card, and a blank legacy index when a card is named. A Spec that names neither
+// (every caller today) adds nothing.
+func instanceEnv(spec Spec) []string {
+	var env []string
+	if spec.ComfyAPI != "" {
+		env = append(env, "COMFY_API="+spec.ComfyAPI)
+	}
+	if spec.CardUUID != "" {
+		env = append(env, "COMFY_CARD_UUID="+spec.CardUUID, "COMFY_CUDA_DEVICE=")
+	}
+	return env
 }
 
 // comfyAPI resolves the ComfyUI endpoint: explicit override, else COMFY_API, else the

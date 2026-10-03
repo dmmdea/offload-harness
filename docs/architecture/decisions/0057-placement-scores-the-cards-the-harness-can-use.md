@@ -124,5 +124,12 @@ on roster order:
   metric from the PAIR instead of from the node.
 - A node that publishes no `seat_rate` is placed on an assumption that a single real run replaces,
   so a fresh or re-imaged node neither starves nor captures the queue.
+- Amendment (GPU routing P1, 2026-10-02): the figure this record chose, the busiest harness card, still
+  answers "is the node busy" with one scalar, which a box with one busy card and two idle ones loses to a
+  box with three cards at 30 %. The delegator now also reads the per-card rows the node has always
+  published (`gpu_devices[]`) and ranks on a per-NODE tier (free card, unknown, none) ahead of the
+  queue count and the utilisation figure above, which stays as the last tie-break. Per node, never per
+  pair, for the same reason. A lease past its declared window is ranked last (`lease.overdue`), not
+  excluded. See systems/fleet-node.md, "Overdue" and "Free cards".
 - Numbering note: this record's predecessor, the llama.cpp prompt-cache tiers, was briefly filed as
   a second ADR 0055 while ADR 0055 (liveness walls) already existed on main; it is now ADR 0056.

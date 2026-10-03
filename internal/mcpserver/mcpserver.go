@@ -35,6 +35,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/embedmemo"
 	"github.com/dmmdea/offload-harness/internal/gpuactivity"
 	"github.com/dmmdea/offload-harness/internal/gpulease"
+	"github.com/dmmdea/offload-harness/internal/ledger"
 	"github.com/dmmdea/offload-harness/internal/mediacap"
 	"github.com/dmmdea/offload-harness/internal/modelaffinity"
 	"github.com/dmmdea/offload-harness/internal/netguard"
@@ -44,6 +45,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/reviewlane"
 	"github.com/dmmdea/offload-harness/internal/rig"
 	"github.com/dmmdea/offload-harness/internal/seatload"
+	"github.com/dmmdea/offload-harness/internal/seatrate"
 	"github.com/dmmdea/offload-harness/internal/swapclient"
 	"github.com/dmmdea/offload-harness/internal/textremote"
 	"github.com/dmmdea/offload-harness/internal/tokclient"
@@ -133,10 +135,16 @@ type Server struct {
 	// adding a required input to the one-call tool whose entire purpose is
 	// having no arguments to think about. See internal/askcache.
 	askCache *askcache.Cache
+
+	// originSession names the session this server serves (the ledger's rule:
+	// LOCAL_OFFLOAD_ORIGIN, else CLAUDE_CODE_SESSION_ID). A field so a test names its own
+	// session instead of reading the developer's.
+	originSession func() string
 }
 
 func New(p *pipeline.Pipeline) *Server {
-	return &Server{p: p, askCache: askcache.New(), quarantine: delegate.NewQuarantine(0), tenant: delegate.DefaultTenant()}
+	return &Server{p: p, askCache: askcache.New(), quarantine: delegate.NewQuarantine(0), tenant: delegate.DefaultTenant(),
+		originSession: func() string { return ledger.ProcessOrigin().Session }}
 }
 
 // WithConfigError records the config validation error this server is running
@@ -197,7 +205,43 @@ func parseArgs(raw json.RawMessage, in any) *mcp.CallToolResult {
 
 // Run serves the MCP tools on stdin/stdout until the client disconnects.
 func (s *Server) Run(ctx context.Context, version string) error {
-	return s.buildServer(version).Run(ctx, &mcp.StdioTransport{})
+	return s.serve(ctx, version, &mcp.StdioTransport{})
+}
+
+// serve is Run over any transport. It puts this process in the session registry for as
+// long as it serves: a GPU lease records which session asked for it, and a session is
+// alive exactly while some registered process carries its id (gpulease.RegisterOwner).
+// The entry is removed when the server stops (a client disconnect, a signal); a server
+// that is killed leaves an entry whose pid reads as dead, which is the same answer.
+func (s *Server) serve(ctx context.Context, version string, t mcp.Transport) error {
+	defer s.registerSession()()
+	return s.buildServer(version).Run(ctx, t)
+}
+
+// registerSession records this server's process under its session and returns the
+// function that removes the record. Best effort and silent on the protocol (stdout is
+// JSON-RPC): a registry that cannot be written costs the lease readers one fact, never the
+// tool surface. A server with no session (a bare shell, a service) registers nothing.
+func (s *Server) registerSession() func() {
+	noop := func() {}
+	if s.p == nil || s.originSession == nil {
+		return noop
+	}
+	session := s.originSession()
+	if session == "" {
+		return noop
+	}
+	cfg := s.p.Cfg()
+	dir, err := gpulease.LeaseDir(cfg.GPULockPath, cfg.StateDir)
+	if err != nil {
+		return noop
+	}
+	unreg, err := gpulease.RegisterOwner(dir, session, os.Getpid())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "local-offload: session registry not written (%v); GPU leases taken for this session will read its owner as unknown\n", err)
+		return noop
+	}
+	return unreg
 }
 
 // buildServer assembles the tool surface. Split from Run so the registration
@@ -217,7 +261,7 @@ func (s *Server) buildServer(version string) *mcp.Server {
 	// + which media engines this machine has + the (only) remote surface.
 	srv.AddTool(&mcp.Tool{
 		Name:        "offload_status",
-		Description: "Discover this harness's capability — call this FIRST when inspecting what the harness can do. To size or place a contract, pass section:\"brief\" (fleet + one-line gpu_lease/local verdicts); section:<block> returns one block. Returns {local:{endpoint, roster{workhorse,agent,triage,escalation,reasoning,vision,ocr,stt,stt_hq,embed}, served_now[...] (live model ids from the LOCAL llama-swap endpoint)}, fleet:{delegation_enabled, local_agent_seat{model, loaded, ctx_tokens?}, nodes[{base, reachable, node_id, agent_enabled, agent_seat, agent_ctx_tokens, agent_seat_resident, queue_depth}], agent_capable_nodes, idle_agent_nodes} — the LIVE delegation roster, probed at call time: who the delegation seats are, their real context ceilings, and how deep their queues run. Trust it over any rules file or written figure; idle_agent_nodes > 0 means paid-for capacity is sitting unused, media:{...this machine's configured generation engines}, remote:{nim_endpoint, nim_default_model, nim_key_present}, accelerators:{...} (present only when this box lists an accelerator device, e.g. hailo-8l: its endpoint, sidecar config, owned tools and a live health probe), gpu_lease:{held, verdict, activity, queue_with} — verdict is ONE WORD for what this box's cards are doing right now: working | held-working | held-idle (a lease held over idle cards: the holder is draining, queued, loading or stalled) | loaded-idle | busy-outside | stale-holder | free; activity carries the seat's in-flight count and load state, the registered agent runs (kind, pid, origin, step, tokens), a per-card utilization sample with the processes on them, and the holder's command. Read verdict before concluding anything from \"held\"; a held card is queued behind with queue_with, never refused}. Every offload_* tool except offload_nim and offload_browse runs LOCAL — the GPU roster or a listed accelerator (free, on-box, no cloud); offload_nim is the only remote MODEL surface, and offload_browse (opt-in, present only when configured) drives the operator's own local browser with typed choices from a loopback decision endpoint the operator runs. An empty roster entry means that capability defers on this machine. On a composite box (ADR 0039) local carries tier_profile, tiers and layers[] rows (spec + live occupancy + admissibility, including a dormant display layer the operator may enable), nodes[] carry layers[] when the node publishes them, and every agent_run/agent_delegate result carries `placed` {tier, layer, role, seat, devices, reason, evicts}.",
+		Description: "Discover this harness's capability — call this FIRST when inspecting what the harness can do. To size or place a contract, pass section:\"brief\" (fleet + one-line gpu_lease/local verdicts + per-card gpu_cards); section:<block> returns one block. Returns {local:{endpoint, roster{workhorse,agent,triage,escalation,reasoning,vision,ocr,stt,stt_hq,embed}, served_now[...] (live model ids from the LOCAL llama-swap endpoint)}, fleet:{delegation_enabled, local_agent_seat{model, loaded, ctx_tokens?}, nodes[{base, reachable, node_id, agent_enabled, agent_seat, agent_ctx_tokens, agent_seat_resident, queue_depth}], agent_capable_nodes, idle_agent_nodes} — the LIVE delegation roster, probed at call time: who the delegation seats are, their real context ceilings, and how deep their queues run. Trust it over any rules file or written figure; idle_agent_nodes > 0 means paid-for capacity is sitting unused, media:{...this machine's configured generation engines}, remote:{nim_endpoint, nim_default_model, nim_key_present}, accelerators:{...} (present only when this box lists an accelerator device, e.g. hailo-8l: its endpoint, sidecar config, owned tools and a live health probe), gpu_lease:{held, verdict, activity, queue_with} — verdict is ONE WORD for what this box's cards are doing right now: working | held-working | held-idle (a lease held over idle cards: the holder is draining, queued, loading or stalled) | held-stalled (a progress contract exists and its file stopped moving) | held-orphaned (an attended lease whose owner has been gone past the grace) | held-overdue (the declared window ended, the holder still renews) | tree-orphan (the wrapper is gone, its job still holds the cards) | loaded-idle | busy-outside | stale-holder | free (the held-stalled, held-orphaned, held-overdue and tree-orphan verdicts lead the brief line in capitals and name the takeover command; nothing reclaims or kills a lease on them); activity carries the seat's in-flight count and load state, the registered agent runs (kind, pid, origin, step, tokens), a per-card utilization sample with the processes on them, and the holder's command. Read verdict before concluding anything from \"held\"; a held card is queued behind with queue_with, never refused}. Every offload_* tool except offload_nim and offload_browse runs LOCAL — the GPU roster or a listed accelerator (free, on-box, no cloud); offload_nim is the only remote MODEL surface, and offload_browse (opt-in, present only when configured) drives the operator's own local browser with typed choices from a loopback decision endpoint the operator runs. An empty roster entry means that capability defers on this machine. On a composite box (ADR 0039) local carries tier_profile, tiers and layers[] rows (spec + live occupancy + admissibility, including a dormant display layer the operator may enable), nodes[] carry layers[] when the node publishes them, and every agent_run/agent_delegate result carries `placed` {tier, layer, role, seat, devices, reason, evicts}.",
 		InputSchema: statusInputSchema(),
 	}, s.handleStatus)
 
@@ -394,8 +438,8 @@ func (s *Server) buildServer(version string) *mcp.Server {
 
 	srv.AddTool(&mcp.Tool{
 		Name:        "agent_run",
-		Description: "Run the LOCAL autonomous agent loop on a goal: a free local model plans and iterates over read-only tools (list_dir, read_file) plus the offload_* cascade, multi-step, and returns a final answer. NOTE the advertised set may be NARROWED: a box can set a default agent_profile (small-seat tiers do, because an un-narrowed tool list measurably collapses a small planner), and a narrowed profile such as \"research\" drops search_files and the whole offload_* cascade. The response reports the profile applied and the post-narrowing tool count, so check those rather than assuming the full set. DELEGATE a bounded multi-step read-and-reason job — map how X flows through a repo, summarize a doc set, extract facts across many files — to the local stack to keep that work out of your own context. It is READ-ONLY: it cannot write files, run commands, or touch the network. The savings ledger is untouched (the agent's offload calls run record=false). Returns {output, steps, stop_reason, tools, model}; on any failure it returns deferred:true with a reason and you do the task yourself. On a composite box (ADR 0039) the result also carries `placed` — which layer and seat ran it and why — and an explicitly named seat that belongs to an opt-in layer is admitted only if that layer's guards admit it right now.",
-		InputSchema: json.RawMessage(`{"type":"object","properties":{"route":{"type":"string","enum":["","local","auto","remote","spread","queue"],"description":"WHERE the run goes (register C-46): omit/local = this box's agent seat with read_root (the default); remote/auto/spread/queue = one contract through the delegator's placement — read_root and model do NOT travel (the executing node reads its own root and runs its own seat), so use it for self-contained goals and setup_actions; the response names node, placement and seat"},"goal":{"type":"string","description":"the task for the local agent to accomplish"},"read_root":{"type":"string","description":"absolute directory the agent may read; it cannot read outside it (default: the server working dir)"},"max_steps":{"type":"integer","description":"hard step budget (default 12)"},"model":{"type":"string","description":"planner model id; must support tool-calling (default: the tier's agent seat (agent_model), falling back to the configured workhorse)"},"timeout_sec":{"type":"integer","description":"wall-clock budget in seconds (default: the tier's agent_timeout_sec, else 180)"},"context_class":{"type":"string","enum":["","long"],"description":"long = ask for the box's biggest long-context layer (the three-card seat where a box declares one, otherwise the pair's 262k seat) under its display-floor, host-RAM and presence guards and a prefill feasibility check; omit for the default placement"},"setup_actions":{"type":"array","maxItems":8,"items":{"type":"object","properties":{"tool":{"type":"string"},"args":{"type":"object"}},"required":["tool"]},"description":"tool calls REPLAYED before the model's first turn (ADR 0036 P2): each runs through the seat's env rules and dispatch like a model call and lands in the transcript as an assistant tool_call + its result, so the first turn already holds what the model would otherwise spend its first steps fetching (e.g. read_file of the document it must digest). Not charged to max_steps; bounded to half the compaction budget (the rest are recorded not-run). A failing action is an observation, never an abort. Response carries setup_ran and step-0 trace entries with setup:true"},"profile":{"type":"string","enum":["general","edit","build","research","github"],"description":"task profile: narrows the tool list and injects worked examples. MEASURED: a small planner given the full tool set often calls NO tool at all, so a narrowed profile is the single most effective lever. Prefer \"build\" for reading and reasoning over a codebase; \"general\" advertises everything. OMITTING this falls back to the box's configured agent_profile, and only then to \"general\" — so a small-seat tier seeded with a narrowed profile gets it without every caller remembering to ask. Tools this read-only front door does not grant are dropped, along with their examples."},"thinking":{"type":"string","enum":["auto","on","off"],"description":"planner think-block policy (0.115.8). auto (default; or the box's agent_thinking): every step thinks, and an EMPTY final is re-issued once with thinking off at 4x the step budget, then the run stops as reasoning_starved/empty (a defer, never an empty answer). off: every planner call renders in non-thinking mode (chat_template_kwargs enable_thinking:false) — use for grounded extraction on a thinking seat that spends its budget in the think block. on: never send the kwarg"},"judge":{"type":"boolean","description":"end-of-run ADVISORY audit: one extra same-seat completion grading the run's flagged effects (parked/failed/unknown/self-flagged) for the operator review. Never gates anything. Default false"},"allow_browse":{"type":"boolean","description":"grant the browse tool (ADR 0060): the seat may drive THIS machine's own browser through the browse lane. Local route only; needs agent_allow_browse on this box, a configured lane and browse_hosts. Judged unattended: publish/send-class controls are always refused. Every call is audited (the audit trail defaults to the operator's agent-audit.jsonl)"},"browse_hosts":{"type":"array","items":{"type":"string"},"description":"with allow_browse: the bare host names (subdomains included) the browse tool may visit; required"}},"required":["goal"]}`),
+		Description: "Run the LOCAL autonomous agent loop on a goal: a free local model plans and iterates over read-only tools (list_dir, read_file) plus the offload_* cascade, multi-step, and returns a final answer. NOTE the advertised set may be NARROWED: a box can set a default agent_profile (small-seat tiers do, because an un-narrowed tool list measurably collapses a small planner), and a narrowed profile such as \"research\" drops search_files and the whole offload_* cascade. The response reports the profile applied and the post-narrowing tool count, so check those rather than assuming the full set. DELEGATE a bounded multi-step read-and-reason job — map how X flows through a repo, summarize a doc set, extract facts across many files — to the local stack to keep that work out of your own context. It is READ-ONLY: it cannot write files, run commands, or touch the network. The savings ledger is untouched (the agent's offload calls run record=false). Returns {output, steps, stop_reason, tools, model}; on any failure it returns deferred:true with a reason and you do the task yourself. A call that gets past argument validation and seat placement also carries {wall_estimate_sec?, min_turn_sec?, wall_note?}, answered or deferred (a call refused before a seat is chosen, by its arguments or a placement guard, and a route'd one, carries none). THE WALL IS A HARD DEADLINE on this door: a run still working when timeout_sec ends is cut and deferred (the reason says so), and a slow seat (the 27B) needs far more than the default for a many-step run. So the call is SIZED before it starts from the seat's own measured decode rate (the configured agent_seat_tok_s stands in only for the box's own agent seat: a model you name, or a seat placement picks, that has no measured rate of its own is not sized, never refused, and publishes no estimate): wall_estimate_sec is what the run needs, min_turn_sec is a cold load plus one worst-case final turn, and wall_note is the arithmetic (it says wall N s is BELOW the estimate M s when your wall is short); a wall that cannot hold even one tool step and a minimal answer is REFUSED before step 1 (deferred, defer_class budget, steps 0, nothing sent to the seat) with the wall it needs. Size timeout_sec from wall_estimate_sec. On a composite box (ADR 0039) the result also carries `placed` — which layer and seat ran it and why — and an explicitly named seat that belongs to an opt-in layer is admitted only if that layer's guards admit it right now.",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"route":{"type":"string","enum":["","local","auto","remote","spread","queue"],"description":"WHERE the run goes (register C-46): omit/local = this box's agent seat with read_root (the default); remote/auto/spread/queue = one contract through the delegator's placement — read_root and model do NOT travel (the executing node reads its own root and runs its own seat), so use it for self-contained goals and setup_actions; the response names node, placement and seat"},"goal":{"type":"string","description":"the task for the local agent to accomplish"},"read_root":{"type":"string","description":"absolute directory the agent may read; it cannot read outside it (default: the server working dir)"},"max_steps":{"type":"integer","description":"hard step budget (default 12)"},"model":{"type":"string","description":"planner model id; must support tool-calling (default: the tier's agent seat (agent_model), falling back to the configured workhorse)"},"timeout_sec":{"type":"integer","description":"wall-clock budget in seconds, a HARD deadline on this door (default: the tier's agent_timeout_sec, else 180). A wall shorter than the seat's one-step-plus-minimal-answer floor is refused before step 1 with the numbers; a wall below the full-run estimate runs, and the result's wall_note says by how much. Slow seats (the 27B) defer on short walls: size it from wall_estimate_sec"},"context_class":{"type":"string","enum":["","long"],"description":"long = ask for the box's biggest long-context layer (the three-card seat where a box declares one, otherwise the pair's 262k seat) under its display-floor, host-RAM and presence guards and a prefill feasibility check; omit for the default placement"},"setup_actions":{"type":"array","maxItems":8,"items":{"type":"object","properties":{"tool":{"type":"string"},"args":{"type":"object"}},"required":["tool"]},"description":"tool calls REPLAYED before the model's first turn (ADR 0036 P2): each runs through the seat's env rules and dispatch like a model call and lands in the transcript as an assistant tool_call + its result, so the first turn already holds what the model would otherwise spend its first steps fetching (e.g. read_file of the document it must digest). Not charged to max_steps; bounded to half the compaction budget (the rest are recorded not-run). A failing action is an observation, never an abort. Response carries setup_ran and step-0 trace entries with setup:true"},"profile":{"type":"string","enum":["general","edit","build","research","github"],"description":"task profile: narrows the tool list and injects worked examples. MEASURED: a small planner given the full tool set often calls NO tool at all, so a narrowed profile is the single most effective lever. Prefer \"build\" for reading and reasoning over a codebase; \"general\" advertises everything. OMITTING this falls back to the box's configured agent_profile, and only then to \"general\" — so a small-seat tier seeded with a narrowed profile gets it without every caller remembering to ask. Tools this read-only front door does not grant are dropped, along with their examples."},"thinking":{"type":"string","enum":["auto","on","off"],"description":"planner think-block policy (0.115.8). auto (default; or the box's agent_thinking): every step thinks, and an EMPTY final is re-issued once with thinking off at 4x the step budget, then the run stops as reasoning_starved/empty (a defer, never an empty answer). off: every planner call renders in non-thinking mode (chat_template_kwargs enable_thinking:false) — use for grounded extraction on a thinking seat that spends its budget in the think block. on: never send the kwarg"},"judge":{"type":"boolean","description":"end-of-run ADVISORY audit: one extra same-seat completion grading the run's flagged effects (parked/failed/unknown/self-flagged) for the operator review. Never gates anything. Default false"},"allow_browse":{"type":"boolean","description":"grant the browse tool (ADR 0060): the seat may drive THIS machine's own browser through the browse lane. Local route only; needs agent_allow_browse on this box, a configured lane and browse_hosts. Judged unattended: publish/send-class controls are always refused. Every call is audited (the audit trail defaults to the operator's agent-audit.jsonl)"},"browse_hosts":{"type":"array","items":{"type":"string"},"description":"with allow_browse: the bare host names (subdomains included) the browse tool may visit; required"}},"required":["goal"]}`),
 	}, s.handleAgentRun)
 
 	// offload_ask: the ONE-CALL delegation entry. Registered unconditionally and
@@ -721,14 +765,23 @@ func (s *Server) statusReuse(cfg config.Config) map[string]any {
 // Held or free, the block ends with the queue command: a held card is a place in
 // line, and the line is one flag. Read-only (delegate.LocalLease never acquires).
 func localLeaseView(ctx context.Context, cfg config.Config) map[string]any {
+	view, _ := localLeaseViewWithActivity(ctx, cfg)
+	return view
+}
+
+// localLeaseViewWithActivity is localLeaseView plus the activity reading behind it, so a
+// caller that also wants the per-card table (the brief) reuses the one nvidia-smi sample
+// instead of taking a second.
+func localLeaseViewWithActivity(ctx context.Context, cfg config.Config) (map[string]any, gpuactivity.View) {
 	info := delegate.LocalLease(cfg.GPULockPath, cfg.StateDir)
 	// What the cards are DOING, not only whether they are held (0.117.0,
 	// register D-93): the seat's in-flight count and load state, the runs the
 	// harness itself has registered, a utilization sample, and one verdict a
 	// session can branch on — working / held-idle / held-working / loaded-idle /
-	// busy-outside / stale-holder / free. A session used to read "held" as
+	// busy-outside / stale-holder / free, and for a held lease that is not healthy
+	// held-stalled / held-orphaned / held-overdue / tree-orphan. A session used to read "held" as
 	// "refuse"; now it can read whether the holder is actually using the cards.
-	act := gpuactivity.Snapshot(ctx, gpuactivity.Options{LockOverride: cfg.GPULockPath, StateDir: cfg.StateDir, Endpoint: cfg.Endpoint, Seat: cfg.AgentPlannerModel(""), SampleGPU: statusSamplesGPU, Sampler: statusGPUSampler})
+	act := gpuactivity.Snapshot(ctx, gpuactivity.Options{LockOverride: cfg.GPULockPath, StateDir: cfg.StateDir, Endpoint: cfg.Endpoint, Seat: cfg.AgentPlannerModel(""), SampleGPU: statusSamplesGPU, Sampler: statusGPUSampler, Scope: modelaffinity.ScopeFunc(cfg.GPULockPath, cfg.StateDir), OrphanGrace: cfg.GPUOrphanGrace(), ComfyDir: cfg.ComfyDir})
 	view := map[string]any{
 		"held":       info.Held,
 		"queue_with": gpulease.QueueHint,
@@ -747,8 +800,13 @@ func localLeaseView(ctx context.Context, cfg config.Config) map[string]any {
 	}
 	if !info.Held {
 		view["note"] = "free (unreserved): a bench or training run on this box is exposed until it takes the lease — wrap it in the queue_with command"
-		return view
+		return view, act
 	}
+	// With several live leases (card-scoped), `info` is the LOWEST epoch while the verdict and
+	// `activity.holder` are about the MOST ESCALATED one. Everything below describes that
+	// lease, from its own record, so the epoch, the owner and the progress contract on this
+	// view and the takeover command built from it always belong to the lease the verdict names.
+	info = gpuactivity.HeadlineOf(info, act.Holder)
 	view["class"] = string(info.Class)
 	view["epoch"] = info.Epoch
 	view["pid"] = info.PID
@@ -760,11 +818,22 @@ func localLeaseView(ctx context.Context, cfg config.Config) map[string]any {
 	if info.Command != "" {
 		view["command"] = info.Command
 	}
+	// Who asked for the lease and the contract it is judged by (plan P8); the derived
+	// standing (owner state, orphaned-since, progress age) is under activity.holder.
+	if info.Owner != nil {
+		view["owner"] = info.Owner
+	}
+	if info.Unattended {
+		view["unattended"] = true
+	}
+	if info.Progress != nil {
+		view["progress"] = info.Progress
+	}
 	if !info.ExpiresAt.IsZero() {
 		view["expires_at"] = info.ExpiresAt.Format(time.RFC3339)
 	}
 	view["note"] = "held: delegations already route to other nodes; a bench or render here must QUEUE behind the holder with queue_with, never be refused or deferred; `verdict`/`activity` say whether the holder is actually using the cards (held-working) or sitting on them idle (held-idle)"
-	return view
+	return view, act
 }
 
 // kvCacheServerView reports the OPTIONAL cache-server tier (config.KVCacheServers):
@@ -1060,6 +1129,21 @@ func (s *Server) fleetView(ctx context.Context, cfg config.Config) map[string]an
 			// text flag so "idle_agent_nodes 0" is never unexplained.
 			n["gpu_lease_busy"] = true
 		}
+		if r.view.LeaseOverdue {
+			// GPU routing P1: the lease is held past its declared window. The node
+			// is ranked last for placement, not excluded; the flag says why a
+			// placement preferred another node.
+			n["gpu_lease_overdue"] = true
+		}
+		// GPU routing P1: per-node free cards, from the node's own gpu_devices[].
+		// A free card is idle (utilisation under the working line), not the display
+		// and has room for a seat; placement prefers a node with one over a node
+		// whose busiest card reads lower. Absent when the node publishes no per-card
+		// utilisation, which is UNKNOWN, never zero.
+		if free, total, known := r.view.FreeCards(); known {
+			n["free_cards"] = free
+			n["cards_total"] = total
+		}
 		// W-31 (item 9): the PAIR-adopted in-flight signal — a job registry
 		// count, never utilization or a lease alone — plus the one-word
 		// verdict every surface (gpu status, fleet-ui/top, here) now shares.
@@ -1109,7 +1193,9 @@ func nodeVerdict(v delegate.NodeView) (inFlight int, verdict string) {
 	switch {
 	case inFlight > 0:
 		return inFlight, "busy"
-	case v.LeaseExclusive || v.LeaseDraining || v.LeaseBusy:
+	case v.LeaseExclusive || v.LeaseDraining || v.LeaseBusy || v.LeaseOverdue:
+		// An overdue lease (GPU routing P1) is a held lease: the holder is alive
+		// and the cards are spoken for, whatever its declared end says.
 		return inFlight, "held-idle"
 	case v.SeatLoaded != nil && *v.SeatLoaded:
 		return inFlight, "loaded-idle"
@@ -2099,14 +2185,12 @@ func browseDoorRefusal(cfg config.Config, route string, emptyIsLocal bool, hosts
 	return ""
 }
 
-// browseAuditPath is the audit trail an agent door hands Build when browse is asked
-// for (the grant requires one); "" otherwise, so a run without browse builds exactly
-// as before.
-func browseAuditPath(allowBrowse bool) string {
-	if !allowBrowse {
-		return ""
-	}
-	return agent.DefaultAuditPath()
+// doorAuditFor is the broker audit trail this agent door hands Build (register
+// SF-02): with audit_all_doors off (the default) a run without browse builds
+// exactly as before; warn attaches an advisory trail, enforce an enforcing one, and
+// a browse run keeps the enforcing trail its grant requires in every mode.
+func doorAuditFor(cfg config.Config, allowBrowse bool) agent.DoorAuditPlan {
+	return agent.DoorAudit(cfg.AuditAllDoorsMode(), allowBrowse, cfg.BaseDir())
 }
 
 // handleBrowse — offload_browse (ADR 0060). The pipeline validates everything before
@@ -2295,6 +2379,48 @@ func withAdmission(out map[string]any, admitted time.Duration, note string) {
 	}
 }
 
+// withSizing stamps an agent_run result with the D-03 wall sizing under the
+// delegation wire's own field names (core.AgentWireResult wall_estimate_sec /
+// min_turn_sec / wall_note): what the run was estimated to need on this seat,
+// the least a one-turn retry is worth, and the arithmetic — or why there is no
+// number. A caller who then hits the wall reads the cause here instead of
+// guessing (register D-102). No rate = no numbers, only the note.
+func withSizing(out map[string]any, est seatrate.Estimate) {
+	if est.TotalSec > 0 {
+		out["wall_estimate_sec"] = est.TotalSec
+	}
+	if est.MinTurnSec > 0 {
+		out["min_turn_sec"] = est.MinTurnSec
+	}
+	if est.Note != "" {
+		out["wall_note"] = est.Note
+	}
+}
+
+// wallRefusalReason is the agent_run door's refusal of a wall that cannot hold
+// even the smallest answer on the seat (register D-102): the wall it was given
+// and where that number came from, the least wall one answer needs, what the
+// whole run is estimated to need, and the argument to change. The arithmetic
+// itself rides in wall_note beside it.
+func wallRefusalReason(cfg config.Config, explicit bool, wallSec int, model string, maxSteps int, sz pipeline.RunSizing) string {
+	source := "timeout_sec"
+	if !explicit {
+		source = "the box default: agent_timeout_sec is unset, so the built-in 180 s"
+		if cfg.AgentTimeoutSec > 0 {
+			source = "the box default agent_timeout_sec"
+		}
+	}
+	est := sz.Estimate
+	// The wall to ask for is the whole run's estimate, never less than the floor
+	// itself (a very fast seat on a one-step run can estimate under it).
+	ask := est.TotalSec
+	if sz.MinViableSec > ask {
+		ask = sz.MinViableSec
+	}
+	return fmt.Sprintf("wall %d s (%s) cannot hold even the smallest answer on %s: one tool step and a %d-token final need %d s at %.1f tok/s, and a %d-step run is estimated at %d s (min_turn %d s) — the run was not started; pass timeout_sec of at least %d s, arithmetic in wall_note",
+		wallSec, source, model, seatrate.MinimalFinalTokens, sz.MinViableSec, est.TokS, maxSteps, est.TotalSec, est.MinTurnSec, ask)
+}
+
 // joinAdmissionNotes concatenates the admission steps' notes the way the
 // delegation door does — "; " between them, empties dropped — so one
 // admission_note can carry what the pre-flight AND the warm-up each found.
@@ -2430,6 +2556,47 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 		maxSteps = 64 // a self-standing ceiling so the step budget doesn't rely solely on the timeout
 	}
 	timeout := agentTimeout(in.TimeoutSec, cfg)
+	// THE WALL GATE (register D-102), BEFORE anything touches the seat. This
+	// door runs its loop under a context deadline, so the wall is a hard kill
+	// here (the delegation door's walls are expectations since ADR 0055), and
+	// until now the door computed no sizing at all: a caller who named a wall the
+	// seat could not hold learned it from `context deadline exceeded` after ten
+	// steps (2026-09-15, a 420 s wall against an estimate of 928 s). The run is
+	// sized from the seat's own rate with the delegation door's arithmetic
+	// (pipeline.SizeRun reads one local file and dials nothing); a wall that
+	// cannot hold even one tool step and a minimal final is refused with the
+	// numbers, so a refusal costs no cordon wait, no load and no chat request.
+	//
+	// The floor is the INV-5 rider's minimum viable final (ADR 0050), the same
+	// one the delegator applies to a remote placement — NOT the published
+	// min_turn_sec, which is a cold load plus the configured max final and which
+	// the rider forbids refusing on (a 900 s wall on a 7 tok/s 27B completes
+	// its contracts and sits under it). Every wall above the floor runs, and the
+	// result carries wall_estimate_sec / min_turn_sec / wall_note so a run that
+	// then hits its wall says why. No rate = no floor = no refusal.
+	wallSec := int(timeout / time.Second)
+	sizing := s.p.SizeRun(core.AgentContract{MaxSteps: maxSteps, Thinking: in.Thinking}, model, wallSec)
+	// deferSized is how EVERY deferral past this point leaves the door: it stamps the
+	// run's sizing (wall_estimate_sec / min_turn_sec / wall_note) before the result is
+	// built, so a capacity defer a caller re-places, a seat that fails the probe and a
+	// run that died at its wall all say what the wall was weighed against, and the
+	// published promise ("every result that reached the gate") has one place that keeps
+	// it. A deferral that calls jsonResult itself drops the numbers silently;
+	// TestEveryAgentRunDeferralPastTheWallGateGoesThroughTheSizingStamp fails on that.
+	deferSized := func(dout map[string]any) (*mcp.CallToolResult, error) {
+		withSizing(dout, sizing.Estimate)
+		return jsonResult(dout)
+	}
+	if sizing.Refuses(wallSec) {
+		dout := map[string]any{
+			"deferred":    true,
+			"defer_class": core.DeferClassBudget,
+			"reason":      wallRefusalReason(cfg, in.TimeoutSec > 0, wallSec, model, maxSteps, sizing),
+			"steps":       0,
+		}
+		withPlaced(dout, placed)
+		return deferSized(dout)
+	}
 	// Fail LOUD when the resolved planner is not in the served roster — a seat
 	// that silently fell back to the workhorse would ship the exact silent
 	// downgrade this seat exists to cure. Roster unreachable = proceed (the
@@ -2441,7 +2608,7 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 		if in.Model != "" {
 			reason = fmt.Sprintf("explicitly requested model %q is not in the endpoint's served roster — pick a served model (offload_status lists them)", model)
 		}
-		return jsonResult(map[string]any{"deferred": true, "reason": reason})
+		return deferSized(map[string]any{"deferred": true, "reason": reason})
 	}
 	// In-process offload (nil LEDGER; shared result cache) + the SHARED loop
 	// builder — identical construction to the CLI and the standalone runner, so
@@ -2452,6 +2619,13 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 	// holds the bbolt lock, so re-opening by path here would lose a lock race
 	// against itself and silently fall back to no cache on every agent_run.
 	offload := pipeline.NewInLoopOffloadForPlanner(cfg, model, timeout, s.p.Cache())
+	audit := doorAuditFor(cfg, in.AllowBrowse)
+	if audit.Refuse != "" {
+		return deferSized(map[string]any{"deferred": true, "defer_class": string(core.DeferClassConfig), "reason": audit.Refuse})
+	}
+	if audit.Note != "" {
+		log.Printf("agent_run: %s", audit.Note)
+	}
 	built, err := agent.Build(agent.BuildConfig{
 		PlannerBase:   cfg.Endpoint,
 		Model:         model,
@@ -2474,22 +2648,31 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 		Browse:          pipeline.NewLoopBrowse(cfg, "agent_run"),
 		BrowseTimeout:   pipeline.LoopBrowseTimeout(cfg),
 		BrowseAgentDoor: true,
-		AuditPath:       browseAuditPath(in.AllowBrowse),
+		AuditPath:       audit.Path,
+		AuditAdvisory:   audit.Advisory,
+		ReadFloor:       cfg.AgentReadFloor,
+		AuditChain:      cfg.AuditChain,
+
+		// SF-02: a denial the enforcing trail causes names audit_all_doors.
+		AuditEnforcedByKey: audit.Enforced,
+
 	})
 	if err != nil {
-		return jsonResult(map[string]any{"deferred": true, "reason": "building agent: " + err.Error()})
+		return deferSized(map[string]any{"deferred": true, "reason": "building agent: " + err.Error()})
 	}
 	if in.AllowBrowse && !built.BrowseGranted {
-		return jsonResult(map[string]any{"deferred": true, "defer_class": core.DeferClassConfig,
+		return deferSized(map[string]any{"deferred": true, "defer_class": core.DeferClassConfig,
 			"reason": "browse was asked for but not granted: " + strings.Join(built.Notes, "; ")})
 	}
+	defer built.EndAudit() // close this run's chain on the trail (SF-08, audit_chain)
 	// Register the run and hold at the cordon (0.117.0, register D-93): a
 	// draining or exclusive text hold, or a media lease, admits no NEW run;
 	// running work completes. The wait runs on the caller's ctx with its own
 	// deadline (the admission budget) and the wall below starts only after it
 	// — waiting on the wall's context charged the cordon to the run (reviewer
 	// finding, 0.117.0), the exact defect class D-64 removed from the other door.
-	act := gpuactivity.Start(cfg.GPULockPath, cfg.StateDir, gpuactivity.Run{Seat: model, Kind: "agent_run", Origin: agentRunOrigin(), Goal: in.Goal, MaxSteps: maxSteps, Phase: gpuactivity.PhaseAdmission})
+	seatPins, _ := modelaffinity.PinsFor(model) // the run records its seat's cards (plan P5)
+	act := gpuactivity.Start(cfg.GPULockPath, cfg.StateDir, gpuactivity.Run{Seat: model, Kind: "agent_run", Origin: agentRunOrigin(), Goal: in.Goal, MaxSteps: maxSteps, Phase: gpuactivity.PhaseAdmission, Devices: seatPins})
 	defer act.End()
 	// THE FENCE CHECK (register S-26), BEFORE the cordon below — the same read
 	// the review lane has made since 0.125.0 (D-110) and the delegation door now
@@ -2515,7 +2698,9 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 		fence = delegate.ForeignFence
 	}
 	if dir := modelaffinity.GPULeaseDir(); dir != "" {
-		lease := gpulease.InspectDir(dir)
+		// Narrowed to the cards this seat is pinned to (plan P4), the same read AwaitRunSlot
+		// makes below: a render on another card is not a fence on this seat.
+		lease := modelaffinity.ScopeToModel(modelaffinity.InspectLease(dir), model)
 		if fenced, why := fence(lease); fenced {
 			dout := map[string]any{
 				"deferred":    true,
@@ -2525,7 +2710,7 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 				"steps": 0,
 			}
 			withPlaced(dout, placed)
-			return jsonResult(dout)
+			return deferSized(dout)
 		}
 	}
 	admitStart := time.Now()
@@ -2554,7 +2739,7 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 		}
 		withAdmission(dout, cordonWait(), "held at the cordon for the admission budget")
 		withPlaced(dout, placed)
-		return jsonResult(dout)
+		return deferSized(dout)
 	}
 	// The LOCAL run cap (register C-42): the fleet caps the jobs it sends
 	// here, nothing capped the runs this door starts — sixteen could land on
@@ -2567,7 +2752,10 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 	if reg, rerr := gpuactivity.Open(cfg.GPULockPath, cfg.StateDir); rerr == nil {
 		capStart := time.Now()
 		capEnd := modelaffinity.SeatCapDeadline(ctx, capStart, timeout, admitDeadline)
-		if serr := modelaffinity.AwaitSeatSlot(ctx, reg.OnSeat, model, "", act.ID(), cfg.FleetConcurrencyLimit(), capEnd); serr != nil {
+		seatRuns := func(now time.Time, names ...string) []gpuactivity.Run {
+			return reg.OnSeatPinned(now, seatPins, names...)
+		}
+		if serr := modelaffinity.AwaitSeatSlot(ctx, seatRuns, model, "", act.ID(), cfg.FleetConcurrencyLimit(), capEnd); serr != nil {
 			dout := map[string]any{
 				"deferred":    true,
 				"defer_class": string(core.DeferClassCapacity),
@@ -2576,7 +2764,7 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 			}
 			withAdmission(dout, cordonWait(), "held at the seat cap for the run's wall")
 			withPlaced(dout, placed)
-			return jsonResult(dout)
+			return deferSized(dout)
 		}
 		admitDeadline = admitDeadline.Add(time.Since(capStart))
 	}
@@ -2637,7 +2825,7 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 			withAdmission(dout, admitted+v.Spent, admitNote)
 			withCoherence(dout, coherenceNote)
 			withPlaced(dout, placed)
-			return jsonResult(dout)
+			return deferSized(dout)
 		}
 		admitted += v.Spent // charged to admission, never to the wall
 		act.Phase("running")
@@ -2653,7 +2841,7 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 		withAdmission(dout, admitted, admitNote)
 		withCoherence(dout, coherenceNote)
 		withPlaced(dout, placed)
-		return jsonResult(dout)
+		return deferSized(dout)
 	}
 	// Budget compaction against the SERVED window (probe; conservative fallback
 	// inside ResolveContextTokens when unanswerable) and run the measured-ON
@@ -2687,7 +2875,7 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 		}
 		withAdmission(dout, admitted, joinAdmissionNotes(admitNote, "window probe held behind the GPU lease for the admission budget"))
 		withPlaced(dout, placed)
-		return jsonResult(dout)
+		return deferSized(dout)
 	}
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -2723,7 +2911,7 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 	// behavior for any box that does not set the key.
 	prof, perr := agent.LookupProfile(cfg.AgentTaskProfile(strings.TrimSpace(in.Profile)))
 	if perr != nil {
-		return jsonResult(map[string]any{"deferred": true, "reason": perr.Error()})
+		return deferSized(map[string]any{"deferred": true, "reason": perr.Error()})
 	}
 	built.Loop.WithProfile(prof)
 	if in.Judge {
@@ -2754,7 +2942,7 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 		if len(res.RuleHits) > 0 {
 			dout["rules_fired"] = len(res.RuleHits)
 		}
-		return jsonResult(dout)
+		return deferSized(dout) // a run that died at its wall says what the wall was weighed against (D-102)
 	}
 	out := map[string]any{
 		"output":      res.Output,
@@ -2776,6 +2964,7 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 	}
 	withAdmission(out, admitted, admitNote)
 	withCoherence(out, coherenceNote)
+	withSizing(out, sizing.Estimate)
 	if res.TokenizerPath != "" {
 		// Which drop rung the ladder is on — same visibility rule as ctx_window:
 		// a sticky fail-open downgrade must be reportable, not inferred.
@@ -3122,7 +3311,10 @@ func (s *Server) handleReviewDiff(ctx context.Context, req *mcp.CallToolRequest)
 	// these cards.
 	cfg := s.p.Cfg()
 	var fleetNote map[string]any
-	if fenced, why := delegate.ForeignFence(delegate.LocalLease(cfg.GPULockPath, cfg.StateDir)); fenced {
+	// The local loop runs on the planner seat, so the fence is asked of that seat's cards
+	// (plan P4): a render on another card does not send the review off the box.
+	reviewSeatPins, _ := modelaffinity.PinsFor(cfg.AgentPlannerModel(""))
+	if fenced, why := delegate.ForeignFenceFor(delegate.LocalLease(cfg.GPULockPath, cfg.StateDir), reviewSeatPins); fenced {
 		wire, extra, note, ok := s.reviewOnFleet(ctx, contract, why)
 		if ok {
 			return s.publishReview(wire, diff, in.MaxFindings, extra)

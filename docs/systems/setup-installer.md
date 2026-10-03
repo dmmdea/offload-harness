@@ -127,7 +127,19 @@ gpu-vae promotion trial mirroring the H3 canary pattern.
 ## Data and state
 
 `$OFFLOAD_HOME` holds the serving config and binaries; `~/.local-offload/config.json` holds harness
-config. Templates in `setup/templates/` carry placeholders substituted at install time.
+config (the one file the harness finds by a fixed path). The harness's own **data** (cache, ledger,
+media and svg output, delegation log, pipeline jobs, footprints, the coding agent's audit trail) hangs
+off one install root, the `home` key. On Windows a fresh `install.ps1` writes `home` onto the data drive
+that `local-offload install volumes --data` picks (never a cloud-synced virtual drive or a FAT
+volume): C: holds Windows and program installs, never data
+(operator rule, register C-92). `OFFLOAD_DATA_HOME` names another directory, and
+`OFFLOAD_ALLOW_OS_DATA=1` is the explicit, recorded decision to keep the data on the OS drive (a
+one-disk machine); with neither and no qualifying volume the install FAILS at Step 8 rather than
+falling back to C:. The choice and its reason land in `installed.json` (`data_home`,
+`data_home_because`). An existing `config.json` is never rewritten, so a node that already has one keeps
+whatever `home` it names and is told, with a NOTE, when it names none. Templates in `setup/templates/`
+carry placeholders substituted at install time; the config template spells no data path, because a
+path written in the file is an explicit value that `home` does not rebase.
 
 ## Interfaces and entry points
 
@@ -183,15 +195,30 @@ a services box fills its root while a 250 GB pool sits idle next to it.
    ZFS, where every dataset of a pool reports the same free space: without it the harness lands
    under whatever sorts first (`apps/adventurelog` on the measured box) instead of the pool root.
 
+`--data` asks the same question for the harness's **data** (a bbolt cache, an append-only ledger,
+media that grows by gigabytes a day) and adds two refusals, because the roomiest volume is not always
+a disk: a **cloud-synced virtual drive** (a volume label or mount-path segment naming Google Drive,
+OneDrive, Dropbox, iCloud, pCloud, Nextcloud and the other sync roots the GPU lease already refuses as
+a state directory) is a view of an account, and Google Drive for desktop reports FAT32, not removable,
+with a cloud quota's free space; and a **FAT-family filesystem** (FAT, FAT32, exFAT) has no journal for
+a store written continuously and, for FAT32, a 4 GiB file ceiling. `--json` then carries
+`"data_target": true`, the choice's `because` names what was passed over, and with only such volumes
+left the error names them. `install.ps1` always passes `--data` (and `Get-DataHome` refuses a choice
+without the marker); doctor's FAIL text and `local-offload data migrate` use the same rule
+(`datahome.DataTarget`). Without `--data` the answer is unchanged, which is what `install.sh` and the
+model placement use.
+
 Selection is pure and unit-tested (`internal/volumes`); only enumeration is platform-specific
 (kernel32 on Windows, `/proc/mounts` + `statfs` on Unix), so the policy cannot drift between
 operating systems. `--json` emits the full enumeration plus `{volume, because}` for a wrapper to
 consume; the console view shows the roomiest few and says how many it withheld.
 
 `because` is meant to be stored with the install, so a later operator can see why the tree is where
-it is rather than re-deriving it. Wiring the choice into `install.ps1` (and recording it in
-`installed.json`) needs the bootstrap to fetch the binary before it picks a target, and belongs with
-the detection move — this verb is the decision engine those wrappers will call.
+it is rather than re-deriving it. `install.sh` writes the chosen prefix as `home`; `install.ps1`
+Step 8 does the same for a fresh config (the pure rule is `Get-DataHome`, fed by
+`install volumes --json --data`) and records `data_home` and its `because` in `installed.json`. The stack
+directory (`$OFFLOAD_HOME`, default under the user profile) is a separate install-root decision this
+verb does not make for Windows yet.
 
 ### Serving config on Linux (`install render`)
 
@@ -548,9 +575,46 @@ stay unset so `internal/gpulease` resolves them machine-wide (`%ProgramData%` /
 `/var/lib`). Rebasing the GPU lease under a home directory is the per-user trap that
 silently un-serializes the GPU — 0.24.1 added a warning for exactly that.
 
+#### Windows: data never lives on the OS drive (register C-92)
+
+The runtime default does not pick a drive. A default that depended on the volumes mounted at load time
+would re-point every existing node at an empty tree the moment the binary was upgraded, which is moving
+live data silently; the path would also change when a drive was added. The decision is made once, by the
+installer, and recorded as an explicit `home` (existing configs keep theirs). Three surfaces keep it
+honest:
+
+- **`local-offload doctor`** prints a `data volume` section and exits non-zero when any data location
+  resolves onto the OS drive while a volume qualifies to hold it: a non-OS volume that is neither a
+  cloud-synced virtual drive nor a FAT volume (`internal/datahome`, `internal/volumes`). It prints the install root once with the paths that follow it folded in, and any
+  key written elsewhere on the OS drive on its own row, because moving `home` does not move it. A box
+  with no other qualifying volume gets one note and no FAIL, and a non-Windows host prints nothing.
+  `state_dir` and `gpu_lock_path` are not data and are never listed. A junction does not count as a fix:
+  the audit reads the path you wrote.
+- **`local-offload data status`** is the same audit as a full table (`--json` for scripts); it exits 1
+  exactly when doctor would FAIL.
+- **`local-offload data migrate [--from DIR] [--to DIR] [--apply] [--stopped]`** is the way off C:.
+  Without `--to` the target is a fixed directory on the volume the data-volume rule picks
+  (`install volumes --data`), never the OS drive, a cloud-synced virtual drive or a FAT volume. `--from`
+  and `--to` are resolved to absolute paths before anything is checked, so a relative `--to` that lands on
+  the OS drive is refused and the `home` line it prints is absolute. It is a **copy**: cached transcribe results embed absolute paths into the old media tree and
+  the result cache is a bbolt file a running door holds open, so nothing is moved, deleted or rewritten
+  under the source, and no link is created or followed. It is a dry run until `--apply`. The bbolt
+  stores (`*.db`) are held back until `--stopped` says fleet-serve and every MCP door are stopped.
+  Each file goes to a temp name, is verified by re-reading it, takes the source's mtime and only then
+  replaces the destination; a file that changes under the reader is retried and then reported, never
+  accepted as a torn copy; a destination newer than its source is kept, so re-running after the switch
+  cannot clobber live data. `config.json` is not carried (the harness finds its config by a fixed path).
+  An apply that held back or could not read anything exits non-zero.
+
+The migration, in order: stop fleet-serve and the MCP doors, `data migrate --apply --stopped`, set the
+`home` line the verb prints, restart the doors, run `doctor`, and delete the old tree yourself once the
+new home has run clean. The ComfyUI side (its `input` and `output` folders under the ComfyUI install) is a
+separate surface and is not covered here.
+
 ## Observability and debugging
 
-`local-offload doctor` verifies the serving layer end to end and reports per-alias reachability.
+`local-offload doctor` verifies the serving layer end to end and reports per-alias reachability, and on
+Windows says where the harness keeps its data (the `data volume` section above).
 `local-offload models` prints the resolved tier routing table. Both are the fastest way to tell a
 serving problem from a harness problem.
 

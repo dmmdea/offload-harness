@@ -528,3 +528,43 @@ func TestPageBackoffUntilNeverReadsZero(t *testing.T) {
 		t.Fatalf("%d page records kept after the backoff passed for all but one, want the stale ones pruned", len(c.pages))
 	}
 }
+
+// TestCapacityWaitStillAsksTheSoleOverdueRemote: "ranked last, never excluded" has
+// to hold past the first deal. A node whose held lease outlived its declared window
+// publishes lease.overdue, and (since the node's refusing flag no longer reads the
+// overdue busy) a saturation block that says it has room. The first dispatch is
+// refused for an unrelated reason; the capacity wait must ask the node again and
+// land the work there, not defer on capacity as it did when the node advertised
+// itself saturated.
+func TestCapacityWaitStillAsksTheSoleOverdueRemote(t *testing.T) {
+	compressPolls(t, 5*time.Millisecond, time.Second)
+	compressWait(t, 20*time.Millisecond, 0)
+	over, overURL := acceptingNode(t, "node-overdue", "answer from the overdue node", func(f *fakeNode) {
+		f.maxConcurrentJobs, f.maxQueueDepth = 4, 8
+		f.saturation = &struct {
+			Score    float64 `json:"score"`
+			High     bool    `json:"high"`
+			IdleSlot bool    `json:"idle_slot"`
+		}{Score: 0, High: false, IdleSlot: true}
+		f.lease = map[string]any{"held": true, "class": "media", "busy": true, "overdue": true}
+		f.dispatchRetryAfter = "1"
+		f.dispatchHook = func(n int64) int {
+			if n == 1 {
+				return http.StatusServiceUnavailable
+			}
+			return 0
+		}
+	})
+	cfg := testCfg(t)
+	cfg.AgentPlacementWaitSec = 10
+	results, sum, err := RunWith(t.Context(), cfg, neverLocal(t), []core.AgentContract{plainContract()}, "remote", []string{overURL}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum.Succeeded != 1 || sum.Deferred != 0 || results[0].Node != "node-overdue" {
+		t.Fatalf("summary = %+v node = %q, want the work on the overdue node: it is the only remote and it said it has room", sum, results[0].Node)
+	}
+	if got := over.dispatches.Load(); got < 2 {
+		t.Fatalf("the overdue node saw %d dispatches, want the refused first one and the wait's retry", got)
+	}
+}

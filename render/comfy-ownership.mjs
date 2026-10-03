@@ -42,17 +42,29 @@ export function clearOwner(dir) {
 // the pid is alive AND /system_stats reports the very argv recorded here. A stale
 // marker (the instance died, or a different server now holds the port) therefore never
 // makes a foreign ComfyUI look like ours.
+//
+// PER-CARD INSTANCES (plan P13a). The default instance (key "") keeps this exact file
+// and record. Every other instance keeps its own `.offload-launch-<key>.json`, so two
+// ComfyUI processes on one box never share, overwrite or clear each other's fingerprint;
+// its record also names the port and, when the launch ran under a GPU lease, the lease
+// epoch (GPU_LEASE_EPOCH), so a later reader can tell whose lease an instance belongs to.
 const LAUNCH_MARKER = ".offload-launch.json";
-const lp = (dir) => join(dir, LAUNCH_MARKER);
+const lp = (dir, key = "") => join(dir, key ? `.offload-launch-${key}.json` : LAUNCH_MARKER);
 
-export function writeLaunchOwner(dir, { pid, ownerPid = process.pid, args, profile = {} }) {
-  writeFileSync(lp(dir), JSON.stringify({ startedAt: Date.now(), pid, ownerPid, args, profile }));
+export function writeLaunchOwner(dir, { pid, ownerPid = process.pid, args, profile = {}, key = "", port, leaseEpoch }) {
+  const rec = { startedAt: Date.now(), pid, ownerPid, args, profile };
+  if (key) {
+    rec.key = key;
+    if (typeof port === "number") rec.port = port;
+    if (typeof leaseEpoch === "number") rec.leaseEpoch = leaseEpoch;
+  }
+  writeFileSync(lp(dir, key), JSON.stringify(rec));
 }
-export function readLaunchOwner(dir) {
-  try { return JSON.parse(readFileSync(lp(dir), "utf8")); } catch { return null; }
+export function readLaunchOwner(dir, key = "") {
+  try { return JSON.parse(readFileSync(lp(dir, key), "utf8")); } catch { return null; }
 }
-export function clearLaunchOwner(dir) {
-  try { rmSync(lp(dir), { force: true }); } catch {}
+export function clearLaunchOwner(dir, key = "") {
+  try { rmSync(lp(dir, key), { force: true }); } catch {}
 }
 
 /** sameArgv: the recorded spawn argv and the server's sys.argv, element for element. */

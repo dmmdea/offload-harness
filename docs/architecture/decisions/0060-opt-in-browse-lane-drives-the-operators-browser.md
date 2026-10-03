@@ -75,7 +75,8 @@ every model call, every limit and every door.
    `agent_delegate` and fleet contracts with `allow_browse`. There a non-empty host list
    (`--browse-hosts` or `browse_hosts`) is required and the grant is refused without one,
    `allow_labels` can never lift the deny-list, and an audit path is required (the CLI defaults to
-   `<HOME>/.local-offload/agent-audit.jsonl`). The agent doors driven by a contract also need the node
+   `<HOME>/.local-offload/agent-audit.jsonl` *(amended 2026-10-02: under the harness install root, see the
+   amendment below)*). The agent doors driven by a contract also need the node
    opt-in of item 5. The policy broker gains the action kind `browse`
    (subject: the start URL's lowercased host), so a `--rules` entry such as
    `{"kind":"browse","glob":"*.bank.example","decision":"deny"}` works, and every agent-door browse
@@ -159,3 +160,12 @@ every model call, every limit and every door.
 - [ADR 0003 — single policy broker; capability flags off by default](0003-policy-broker-and-capability-flags-off-by-default.md)
 - [ADR 0059 — an external-CLI media tool runs pinned and env-scrubbed](0059-external-cli-media-tool-runs-cpu-class-pinned-env-scrubbed.md)
 - [Glossary: Browse lane, Deny-list](../../glossary.md)
+
+## Amendment 2026-10-02 (register C-92, the audit path follows the install root)
+
+The audit path an agent door requires, and the CLI defaults, is now `agent-audit.jsonl` under the harness
+install root (`home` in the config, else `~/.local-offload`, the earlier location), not always
+`~/.local-offload`. The requirement is unchanged: every agent-door browse run leaves a trail, outside any
+worktree, and the grant is refused when no audit path can be resolved. An earlier trail left at the old
+location on a node that sets `home` is not moved; see the amendment to
+[ADR 0004](0004-worktree-confinement-audit-outside.md).

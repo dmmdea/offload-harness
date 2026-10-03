@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dmmdea/offload-harness/internal/gpuprobe"
 	"github.com/dmmdea/offload-harness/internal/netguard"
 	placetable "github.com/dmmdea/offload-harness/internal/placement"
 )
@@ -96,6 +97,26 @@ type NodeView struct {
 	// idle, so placement routed work toward the busy box (2026-09-07 audit).
 	// False on an older node, which is exactly the previous behaviour.
 	LeaseBusy bool
+	// LeaseOverdue is true when the node publishes a HELD lease whose declared
+	// window has already ended (health lease.overdue, GPU routing P1): the
+	// holder is still using the cards, so the declared end says nothing about
+	// when they free. It is decoded SEPARATELY from LeaseBusy on purpose. The
+	// node also publishes busy=true for such a lease, but a busy non-text lease
+	// is a hard exclusion in the gate, and an abandoned lease must rank the node
+	// last without making it unroutable for longer than it was before. False on
+	// a node one release behind.
+	LeaseOverdue bool
+	// Devices is the node's per-card truth (health gpu_devices[], the nvidia-smi
+	// per-device rows): uuid, VRAM total/free, utilisation, display_active. nil
+	// when the node publishes none (an older node, or a source that cannot
+	// enumerate devices), which is UNKNOWN and never "no free card". Read it
+	// through FreeCards / cardTier, never directly.
+	Devices []gpuprobe.Device
+	// cardsDealt is how many subtasks the deal in progress has already
+	// committed to this node's cards. Set only on the copies a deal hands to
+	// betterRemote, never on a view that is stored, returned or compared, so it
+	// is always zero outside placeAutoRemote's ranking.
+	cardsDealt int
 	// Saturation* decode health's `saturation` block (0.113.18). SaturationKnown
 	// is false on an older node, and an unknown saturation is neither credited
 	// nor blamed — the same rule every other capacity field follows. High means
@@ -319,12 +340,19 @@ type healthWire struct {
 	Lease *struct {
 		Held  bool   `json:"held"`
 		Class string `json:"class"`
+		// Overdue is additive (GPU routing P1): held and past its declared
+		// window. Absent on an older node, decoding to false.
+		Overdue bool `json:"overdue"`
 		// Busy is the NODE's own verdict (0.113.27) that its lease is long
 		// enough to make it a non-target, whatever the class. Absent on an
 		// older node, decoding to false = the pre-0.113.27 text-only rule.
 		Busy         bool `json:"busy"`
 		RemainingSec int  `json:"remaining_sec"`
 	} `json:"lease"`
+	// Additive (the node's per-device breakdown, long published for the fleet
+	// overview, decoded here by GPU routing P1). Absent on a node whose
+	// snapshot source cannot enumerate devices, decoding to nil = unknown.
+	GpuDevices []gpuprobe.Device `json:"gpu_devices"`
 	// Additive (0.113.18). nil on a node that does not publish saturation.
 	Saturation *struct {
 		Score    float64 `json:"score"`
@@ -412,13 +440,19 @@ func FetchNodeView(ctx context.Context, base, token string) (NodeView, error) {
 		WorkUtilPct:       w.WorkUtilPct,
 		WorkUtilKnown:     w.WorkUtilKnown,
 		LeasedText:        w.Lease != nil && w.Lease.Held && strings.EqualFold(w.Lease.Class, "text"),
-		LeaseBusy:         w.Lease != nil && w.Lease.Held && w.Lease.Busy,
-		Tasks:             w.SupportedTaskTypes,
-		VisionModel:       w.VisionModel,
-		VisionTasks:       w.VisionTasks,
-		TextTasks:         w.TextTasks,
-		Layers:            w.Layers,
-		Local:             false,
+		// An overdue lease also publishes busy=true (the clamp to zero used to make
+		// it read free), but for the delegator that busy is the OVERDUE flag's
+		// to carry: LeaseBusy means a genuinely long lease and is a hard
+		// exclusion for a non-text one, which an abandoned lease must not become.
+		LeaseBusy:    w.Lease != nil && w.Lease.Held && w.Lease.Busy && !w.Lease.Overdue,
+		LeaseOverdue: w.Lease != nil && w.Lease.Held && w.Lease.Overdue,
+		Devices:      w.GpuDevices,
+		Tasks:        w.SupportedTaskTypes,
+		VisionModel:  w.VisionModel,
+		VisionTasks:  w.VisionTasks,
+		TextTasks:    w.TextTasks,
+		Layers:       w.Layers,
+		Local:        false,
 
 		JobsAdmitting:        w.JobsAdmitting,
 		SeatLoaded:           w.SeatLoaded,

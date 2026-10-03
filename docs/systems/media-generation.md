@@ -787,6 +787,125 @@ between the two 5060 Tis the B5:00.0 card is the operator's choice (2026-09-22) 
 far better (the 17:00.0 card, `cuda:1`, reached 82 °C under a 2.1 render). And `TestTripleBlackwellNeverSchedulesOntoTheDisplayCard` fails a tier that
 seeds a single-card ComfyUI route without a non-display pin.
 
+### Per-card ComfyUI instances (plan P13a, render layer)
+
+One ComfyUI per card lets two media jobs run on two cards at once instead of queueing on one. The
+render layer now knows how to run, find, reuse and stop such an instance. **Nothing sets it yet:**
+the lease admission that picks a card, the per-card in-process slot and the waiting-place token are
+the next phase (P13b), so a box behaves exactly as before until a caller exports the instance env.
+
+**The default instance is unchanged.** With no instance env the key is empty and everything is as it
+was: one ComfyUI on its default port, the argv `launchFlags` always built, the `.offload-launch.json`
+marker with the same four fields, `offload-comfyui.log`, the same spawn env, no bind check. A test
+pins each of those against literals taken from the code before the change.
+
+**What names an instance.** Only an explicit `COMFY_INSTANCE` key (letters, digits, `-`, `_`, up to
+48), or the card the instance is bound to (`COMFY_CARD_UUID`, key derived from the head of the
+uuid). A port on its own (`--api` / `COMFY_API`) does not make an instance: it keeps its old
+behaviour. A keyed instance owns:
+
+| thing | keyed instance | default instance |
+|---|---|---|
+| endpoint | `--api` / `COMFY_API`, else `COMFY_PORT_BASE` (default the first port after the default one) plus `COMFY_INSTANCE_INDEX`; never the default port | the default port |
+| launch flags | `--port`, `--output-directory <comfy dir>/instances/<key>/output`, `--temp-directory <comfy dir>/instances/<key>`, before the extra args | none of these |
+| launch marker | `.offload-launch-<key>.json`: pid, the spawning process, argv, profile, key, port and the lease epoch (`GPU_LEASE_EPOCH`) when launched under a lease | `.offload-launch.json`, unchanged |
+| console log | `offload-comfyui-<key>.log`, rotated on its own | `offload-comfyui.log` |
+| input directory | shared; runners stage under names unique across processes (clock, process id, random suffix, sequence number: `render/comfy-input.mjs`) | shared |
+
+A `--port`, `--output-directory` or `--temp-directory` in `COMFY_EXTRA_ARGS` is dropped (with a
+`COMFY-INSTANCE-WARN:` line) for a keyed instance, because the last occurrence wins and would put it
+back on a shared port or directory.
+
+**Why one folder per instance, outside `temp` and `output`.** ComfyUI appends `/temp` to the value of
+`--temp-directory` itself, so the temp directory a keyed instance really uses is
+`<comfy dir>/instances/<key>/temp`. The default instance deletes `<comfy dir>/temp` on every start
+(assets disabled, the harness default), and the harness launches the default instance per job, so a
+keyed temp directory nested under `<comfy dir>/temp` would be wiped whenever the default instance
+started. A test pins that no keyed directory is inside the default instance's `temp` or `output`
+tree, and that the directories the launcher creates are the ones ComfyUI really uses.
+
+**Pin by uuid, never by index.** A card-bound instance gets `CUDA_VISIBLE_DEVICES=<GPU uuid>` in its
+child env and **no** `--cuda-device` flag (and a `--cuda-device` / `--default-device` in the extra
+args is dropped). `--cuda-device N` counts in CUDA's default fastest-first order, which is not the
+driver's: on the three-card tier index 0 is the display card, so any index taken from the driver or
+from a lease lands on the wrong card. The uuid names one card in every ordering; measured on that
+tier (2026-10-02), the process sees exactly one device, of that uuid's model. A device index
+(`COMFY_CUDA_DEVICE`) together with an instance key, whether the key is an explicit `COMFY_INSTANCE`
+or a card in `COMFY_CARD_UUID`, is refused (`COMFY-INSTANCE-CONFLICT`): the render layer never takes
+an index for a keyed instance. The legacy `comfy_cuda_device` path is untouched for the default
+instance. The Go side blanks the index whenever a card is named (`imagegen.ComfyLaunch.Env`,
+`gpugen.instanceEnv`).
+
+**An explicit key with no card is not pinned.** `COMFY_INSTANCE` on its own gives an instance its
+own port, directories, marker and log, but nothing binds it to a card: it sees every card its
+environment shows, the display card included, and the launcher logs a `COMFY-INSTANCE-WARN:` line
+saying so. That is the operator's own choice (a side-by-side instance, a test); an instance meant to
+run on a card is created by naming the card (`COMFY_CARD_UUID`). A `CUDA_VISIBLE_DEVICES` in the
+environment, or a `--cuda-device` the operator wrote in `COMFY_EXTRA_ARGS`, counts as the operator's
+own pin and is passed through without the warning (a card-bound instance drops the latter).
+
+**Reuse needs proof of ownership.** A ComfyUI that already answers on a keyed instance's port is
+reused only when it is shown to be that instance, because whatever answers could be another key's
+instance, another launcher's ComfyUI or a foreign one, none of which uses this instance's
+directories, marker or log. The proof is the keyed launch marker: this key and this port, a live
+pid, the exact recorded argv as `GET /system_stats` reports it, and that argv carrying the instance's
+own `--port` and `--output-directory`. It is required whether or not a card pin was asked for, so two
+explicit keys that resolve to the same port do not share one ComfyUI. Anything short of it is refused
+(`COMFY-PROFILE-MISMATCH`) and never stopped.
+
+**Reuse by uuid.** `GET /system_stats` lists device names, not uuids, and two cards of one model are
+indistinguishable, so a card pin cannot be read off a running process. `reuseVerdict` proves it from
+the keyed launch marker as above and, in addition, that the marker records this uuid. A ComfyUI the
+harness did not launch (no marker proving the pid and the exact argv) is refused and never stopped,
+whatever its argv. One the marker proves is the harness's own, but that was launched on another card,
+without a pin, or with an argv carrying `--cuda-device`, is stopped and relaunched on the right card
+when its spawner is gone, and refused while another process still holds it.
+
+**Bind check.** Before launching a keyed instance whose endpoint did not answer as ComfyUI, the
+runner tries to bind the port on every address ComfyUI will listen on: `127.0.0.1` unless its
+`--listen` flag (in `COMFY_EXTRA_ARGS`) says otherwise, each address of a comma list, or every
+interface for a bare `--listen`. It does not probe the host the runner spells in its api, because
+that is where a client reaches ComfyUI, not where ComfyUI binds (`localhost` can resolve to `::1`
+first and miss a holder on `127.0.0.1`). If something holds the port the launch fails with
+`COMFY-PORT-TAKEN`; the holder is never signalled or killed. The default instance does not bind-check
+(that would change its failure mode).
+
+**Ports and other launchers.** A keyed instance's port comes from `--api` / `COMFY_API`, else
+`COMFY_PORT_BASE` (default 8189) plus `COMFY_INSTANCE_INDEX`; the index is assigned by whatever
+launches the instance (the admission phase, P13b), not derived from a card's ordinal, and
+`COMFY_PORT_BASE` moves the whole range. The harness reserves 8189 to 8192 on a host for this, so a
+hand-started set of per-card ComfyUI processes on the same ports (an older stopgap launcher that
+numbers them by card ordinal and uses its own output directories) is never reused or stopped: it
+fails the ownership proof above and is refused with `COMFY-PROFILE-MISMATCH`. The two launchers must
+not run in one lease window until that stopgap is retired. The host's record of the ports it listens
+on must name the harness as the owner of that range in the change that first sets the instance env.
+
+**Runners.** Every render runner (`comfy-generate`, `-render`, `-video`, `-edit`, `-inpaint`,
+`-animate`, `-upscale`, `-music`, `-run-graph`) resolves its endpoint through `comfyApi(flags.api)` and
+hands it to `withGpuSlot`. For a **keyed** instance `withGpuSlot` launches, frees (`POST /free`) and
+tails the log of that instance (before this, the launch and the post-run free ignored `--api` and used
+the environment's endpoint). For an **unkeyed** instance nothing changes about the launch:
+`ensureComfy` is still called without an api (an unkeyed launch has no `--port`, so it can only start
+the default endpoint), and the post-run `/free` now goes to the endpoint the runner talked to. With no
+`--api` that is the same endpoint as before, so the calls are the old ones in value; with `--api`
+naming another port on an unkeyed instance, the launch still uses the environment's endpoint while the
+free follows `--api`. `run-graph` starts and frees its own ComfyUI through the same rule
+(`instanceDeps`), and an env that cannot name an instance is a typed `RUN_ERROR` defer in its result
+file (exit 0), like every other `run-graph` failure. The Go side carries the optional endpoint and
+card in `imagegen.ComfyLaunch{API, CardUUID}` and `gpugen.Spec{ComfyAPI, CardUUID}`; the post-run
+`/free` goes to the instance that ran.
+
+**Verifying a pin on Windows.** The driver reports no per-process rows for graphics-mode (WDDM)
+cards, so confirm that an instance is on its card by per-card memory deltas, not process ids.
+
+| line | meaning |
+|---|---|
+| `COMFY-INSTANCE-INVALID: …` | a key, uuid, port base or index that cannot name an instance, or a keyed instance on the default port |
+| `COMFY-INSTANCE-CONFLICT: …` | an instance key (explicit, or a card uuid) and a device index both given |
+| `COMFY-INSTANCE-WARN: …` | extra args that would override the instance's pin, port or directories were dropped, or an instance with no card pin was launched |
+| `COMFY-PORT-TAKEN: …` | the instance's port is held, on an address ComfyUI will listen on, by something that is not ComfyUI; nothing was launched or killed |
+| `COMFY-PROFILE-MISMATCH: …` | a ComfyUI answers on the instance's port but is not shown to be that instance (or is on the wrong card); refused, and stopped only when the harness's own marker proves it is the harness's and its spawner is gone |
+
 ## Error handling
 
 Failures return typed Defers rather than crashing: a busy GPU lock defers with a distinct reason, a
@@ -934,6 +1053,11 @@ recorded as known offenders with their reason rather than silently skipped — a
 - [`render/comfy-lifecycle.mjs`](../../render/comfy-lifecycle.mjs) — cold start, warm flag, the
   launch profile (`launchFlags`, `reuseVerdict`, `COMFY-PROFILE-MISMATCH`)
 - [`render/comfy-ownership.mjs`](../../render/comfy-ownership.mjs) — the harness-launch fingerprint
+  (per-instance marker files)
+- [`render/comfy-input.mjs`](../../render/comfy-input.mjs) — staging a runner's inputs under names
+  unique across processes
+- [`render/comfy-instance.test.mjs`](../../render/comfy-instance.test.mjs) — per-card instances: the
+  default instance pinned to its old behaviour, and the keyed one
 - [`render/comfy-render.mjs`](../../render/comfy-render.mjs) — the image family switch (closed
   `KNOWN_FAMILIES`; unknown `--family` exits 2)
 - [`render/wf-qwen-image-21.mjs`](../../render/wf-qwen-image-21.mjs) — the Qwen-Image-2.1 T2I and

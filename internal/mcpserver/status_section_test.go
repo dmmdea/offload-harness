@@ -268,18 +268,18 @@ func TestStatusSectionIsCaseAndSpaceTolerant(t *testing.T) {
 	}
 }
 
-// TestStatusBriefIsTheFleetPlusTwoVerdictLines: brief is the sizing answer — the
+// TestStatusBriefIsTheFleetPlusTwoVerdictLinesAndTheCardTable: brief is the sizing answer — the
 // whole fleet block (seats, ctx ceilings, queues) plus ONE line each for this
 // box's lease and its local serving state.
-func TestStatusBriefIsTheFleetPlusTwoVerdictLines(t *testing.T) {
+func TestStatusBriefIsTheFleetPlusTwoVerdictLinesAndTheCardTable(t *testing.T) {
 	s, cfg, norm := statusFixture(t)
 	fullRaw := norm(statusCall(t, s, nil))
 	full := decodeObject(t, fullRaw)
 	briefRaw := norm(statusCall(t, s, json.RawMessage(`{"section":"brief"}`)))
 	brief := decodeObject(t, briefRaw)
 
-	if keys := sortedKeys(brief); !reflect.DeepEqual(keys, []string{"fleet", "gpu_lease_verdict", "local_verdict"}) {
-		t.Fatalf("brief keys = %v, want [fleet gpu_lease_verdict local_verdict]", keys)
+	if keys := sortedKeys(brief); !reflect.DeepEqual(keys, []string{"fleet", "gpu_cards", "gpu_lease_verdict", "local_verdict"}) {
+		t.Fatalf("brief keys = %v, want [fleet gpu_cards gpu_lease_verdict local_verdict]", keys)
 	}
 	if !reflect.DeepEqual(brief["fleet"], full["fleet"]) {
 		t.Fatalf("brief.fleet must be the full fleet block.\n got: %v\nwant: %v", brief["fleet"], full["fleet"])
@@ -475,5 +475,84 @@ func TestStatusSchemaPublishesTheSectionEnum(t *testing.T) {
 	}
 	if !strings.Contains(status.Description, `section:"brief"`) {
 		t.Errorf("offload_status's description must name the brief form")
+	}
+}
+
+// The brief carries the per-card table (plan P3): a NEW key beside the unchanged verdict
+// line. A card-scoped lease on card 2 shows on card 2 only; every other card reads free.
+func TestStatusBriefCarriesThePerCardTable(t *testing.T) {
+	s, cfg, _ := statusFixture(t)
+	statusSamplesGPU = true
+	statusGPUSampler = func(context.Context) ([]gpuactivity.GPU, error) {
+		return []gpuactivity.GPU{
+			{Index: 0, UUID: "GPU-aaaa0000-x", Name: "Test Card", MemTotalMiB: 16384, MemUsedMiB: 1024, UtilKnown: true},
+			{Index: 1, UUID: "GPU-bbbb0000-x", Name: "Test Card", MemTotalMiB: 16384, MemUsedMiB: 2048, UtilKnown: true, DisplayActive: true},
+			{Index: 2, UUID: "GPU-cccc0000-x", Name: "Test Card", MemTotalMiB: 16384, MemUsedMiB: 0, UtilKnown: true},
+		}, nil
+	}
+	t.Cleanup(func() { statusGPUSampler = nil })
+
+	m, err := gpulease.OpenAt("", cfg.StateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.SetCardScoped(true)
+	l, err := m.TryAcquire(gpulease.ClassMedia, gpulease.Options{Reason: "batch", Devices: []string{"gpu-cccc0000-x"}, TTL: time.Hour, Group: "grp"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = l.Release() }()
+
+	brief := decodeObject(t, statusCall(t, s, json.RawMessage(`{"section":"brief"}`)))
+	cards, _ := brief["gpu_cards"].(map[string]any)
+	rows, _ := cards["cards"].([]any)
+	if len(rows) != 3 {
+		t.Fatalf("one row per card: %v", cards)
+	}
+	for _, r := range rows {
+		row := r.(map[string]any)
+		idx := int(row["index"].(float64))
+		holder, _ := row["holder"].(map[string]any)
+		switch idx {
+		case 2:
+			if row["state"] != "held" || holder == nil || holder["scope"] != "card" || holder["group"] != "grp" || holder["class"] != "media" {
+				t.Errorf("card 2 must show its holder: %v", row)
+			}
+		default:
+			if row["state"] != "free" || holder != nil {
+				t.Errorf("card %d must be free: %v", idx, row)
+			}
+		}
+		if idx == 1 && row["display"] != true {
+			t.Errorf("the display card must be flagged: %v", row)
+		}
+		if idx == 0 && row["vram_free_gb"].(float64) != 15 {
+			t.Errorf("free VRAM must be carried: %v", row)
+		}
+	}
+	leases, _ := cards["leases"].([]any)
+	if len(leases) != 1 || leases[0].(map[string]any)["scope"] != "card" {
+		t.Errorf("the per-lease device set: %v", cards["leases"])
+	}
+	if cards["card_scoped_leases"] != false {
+		t.Errorf("the writer switch is reported (off here: no config, no audit marker): %v", cards["card_scoped_leases"])
+	}
+	// The verdict line is what it always was.
+	if gl, _ := brief["gpu_lease_verdict"].(string); !strings.Contains(gl, "held") {
+		t.Errorf("gpu_lease_verdict unchanged and held: %q", gl)
+	}
+}
+
+// With no card table (the sample was skipped or nvidia-smi is absent) the block says so
+// and still lists the leases: status never fails for want of a table.
+func TestStatusBriefSaysSoWhenThereIsNoCardTable(t *testing.T) {
+	s, _, _ := statusFixture(t) // statusSamplesGPU = false
+	brief := decodeObject(t, statusCall(t, s, json.RawMessage(`{"section":"brief"}`)))
+	cards, _ := brief["gpu_cards"].(map[string]any)
+	if rows, _ := cards["cards"].([]any); len(rows) != 0 {
+		t.Fatalf("no sample, no rows: %v", rows)
+	}
+	if note, _ := cards["cards_note"].(string); !strings.Contains(note, "no card table") {
+		t.Fatalf("it must say why: %v", cards)
 	}
 }

@@ -72,6 +72,7 @@ package modelaffinity
 import (
 	"context"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 
@@ -102,8 +103,19 @@ func (t Ticket) Release() {
 	if t.end != nil {
 		t.end()
 	}
-	if t.g != nil {
-		t.g.release()
+	if t.g == nil {
+		return
+	}
+	if base, model, due := t.g.release(); due {
+		// The model is resident now (the request that could have loaded it has completed)
+		// and nothing else of its batch is in flight: the one moment a seat that raced a
+		// lease claim can still get out of the way (seatyield.go). Bounded, and silent
+		// unless it acted.
+		ctx, cancel := context.WithTimeout(context.Background(), 2*yieldTimeout)
+		defer cancel()
+		if _, why := YieldIfFenced(ctx, base, model); why != "" {
+			log.Printf("model-affinity: %s", why)
+		}
 	}
 }
 
@@ -134,6 +146,12 @@ type gate struct {
 	// residency and tryJoin must refuse.
 	pending int
 	queue   []*waiter
+	// mayLoad is set when an on-box admission that could have changed what llama-swap holds
+	// resident (an idle base, a promoted switch) was granted, and cleared when the batch
+	// drains and the seat-yield check has been taken (release). loadBase is the base it was
+	// admitted against. A request joining the resident batch never sets it.
+	mayLoad  bool
+	loadBase string
 }
 
 var (
@@ -229,6 +247,7 @@ func admit(ctx context.Context, base, model string, budget time.Duration, waitCa
 	if g.inflight == 0 {
 		g.current = model
 		g.inflight = 1
+		g.mayLoad, g.loadBase = waitCard, base
 		g.mu.Unlock()
 		return Ticket{g: g}, nil
 	}
@@ -357,6 +376,11 @@ func admitPromoted(ctx context.Context, g *gate, base, model string, deadline ti
 		tk.Release()
 		return Ticket{}, err
 	}
+	// A promotion is a model SWITCH: the load this admission is about to cause is the one a
+	// lease claim can race.
+	g.mu.Lock()
+	g.mayLoad, g.loadBase = waitCard, base
+	g.mu.Unlock()
 	return tk, nil
 }
 
@@ -399,8 +423,10 @@ func waitBound(batchesAhead int, budget time.Duration) time.Duration {
 	return time.Duration(batchesAhead+1) * budget
 }
 
-// release ends one admission and, when the batch is empty, promotes the next.
-func (g *gate) release() {
+// release ends one admission and, when the batch is empty, promotes the next. due reports
+// that the batch which may have loaded its model has now fully drained with nobody promoted
+// into its place: the seat yield check (seatyield.go) is owed for (base, model), once.
+func (g *gate) release() (base, model string, due bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if g.inflight > 0 {
@@ -409,6 +435,11 @@ func (g *gate) release() {
 	if g.inflight == 0 {
 		g.promoteLocked()
 	}
+	if g.inflight == 0 && g.mayLoad {
+		g.mayLoad = false
+		return g.loadBase, g.current, true
+	}
+	return "", "", false
 }
 
 // promoteLocked hands an idle base to the oldest parked caller and to every

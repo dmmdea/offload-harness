@@ -13,10 +13,11 @@
 //   node render/comfy-upscale.mjs <out.png> <image> --model 4x-UltraSharp.pth \
 //        [--scale F] [--width N --height N] [--method lanczos|bicubic|bilinear|area|nearest-exact] \
 //        [--api http://127.0.0.1:8188] [--no-lock] [--reserve-vram F]
-import { copyFileSync, readFileSync, writeFileSync, unlinkSync, mkdirSync } from "node:fs";
-import { join, basename, dirname } from "node:path";
+import { readFileSync, writeFileSync, unlinkSync, mkdirSync } from "node:fs";
+import { join, dirname } from "node:path";
 import { withGpuSlot } from "./gpu-lock.mjs";
-import { COMFY_DIR } from "./comfy-lifecycle.mjs";
+import { COMFY_DIR, comfyApi } from "./comfy-lifecycle.mjs";
+import { stageInput as stageToInput } from "./comfy-input.mjs";
 import { buildUpscale } from "./wf-upscale.mjs";
 import { imageSize } from "./image-size.mjs";
 import { firstOutputFile } from "./comfy-output.mjs";
@@ -32,7 +33,7 @@ for (let i = 0; i < argv.length; i++) {
   } else pos.push(argv[i]);
 }
 const [out, imagePath] = pos;
-const API = flags.api || process.env.COMFY_API || "http://127.0.0.1:8188";
+const API = comfyApi(flags.api);
 if (!out || !imagePath) {
   console.error("usage: node comfy-upscale.mjs <out.png> <image> --model <upscale_models filename> [flags]");
   process.exit(2);
@@ -71,11 +72,8 @@ if (opts.scale != null && opts.width == null) {
 try { buildUpscale({ image: "preflight.png", ...opts }); }
 catch (e) { console.error("error: " + e.message); process.exit(2); }
 
-let stageN = 0;
 function stageInput(p) {
-  const name = "upscale_in_" + Date.now() + "_" + (stageN++) + "_" + basename(p);
-  copyFileSync(p, join(COMFY_DIR, "input", name));
-  return name;
+  return stageToInput("upscale_in", p);
 }
 
 async function render() {
@@ -109,6 +107,6 @@ async function render() {
 }
 
 withGpuSlot(
-  { noLock: flags["no-lock"], comfyManaged: true, reserveVram: flags["reserve-vram"] },
+  { noLock: flags["no-lock"], comfyManaged: true, api: API, reserveVram: flags["reserve-vram"] },
   render,
 ).catch((e) => { console.error("UPSCALE FAILED:", e.message); process.exit(1); });

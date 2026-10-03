@@ -594,6 +594,9 @@ Two validated **non-bindings** (as load-bearing as the bindings):
 #   $env:OFFLOAD_HOME='C:\Users\<you>\offload-stack'   # default: $HOME\offload-stack
 #   $env:OFFLOAD_WITH_FAMILY='0'                        # RAM<32GB or to skip E2B+26B (~4.5GB vs ~21GB)
 #   $env:OFFLOAD_BACKEND='vulkan'                       # override detect (cuda|vulkan|cpu)
+#   $env:OFFLOAD_DATA_HOME='D:\local-offload'           # where a FRESH config's `home` points (data: cache, ledger, media);
+#                                                       #   default: a directory on the data drive `install volumes --data` picks
+#   $env:OFFLOAD_ALLOW_OS_DATA='1'                      # keep that data on the OS drive on purpose (one-disk machine)
 pwsh -NoProfile -File setup\install.ps1
 ```
 
@@ -620,7 +623,14 @@ Last stdout line: `{"installed":true,"backend":"...","home":"...","next":"run se
 `llama\llama-server.exe`, `llama-swap\llama-swap.exe`, `models\*.gguf`, `harness\local-offload.exe`,
 `harness\local-agent.exe`, rendered `llama-swap.yaml`, `installed.json` (version manifest),
 `install.log` (full transcript). The harness config is copied to `$HOME\.local-offload\config.json`
-(not overwritten if present — prints SKIP).
+(not overwritten if present — prints SKIP). The harness's **data** (cache, ledger, media, delegation
+log, pipeline jobs) is NOT left under the user profile on the OS drive: a fresh config gets
+`"home": "<data drive>/local-offload"`, the drive chosen by `local-offload install volumes --data` (most
+free space, never the OS drive, a cloud-synced virtual drive such as Google Drive, or a FAT volume), recorded with its reason as `data_home` / `data_home_because` in
+`installed.json`. With no qualifying drive, Step 8 stops with `data home: no eligible data volume`;
+set `OFFLOAD_DATA_HOME` to a directory on a data drive, or `OFFLOAD_ALLOW_OS_DATA=1` to keep it on the
+OS drive on purpose, and re-run. An existing config that names no `home` prints a NOTE pointing at
+`local-offload data status` / `data migrate` (a copy, never a move).
 
 **Idempotency & re-run:** re-running is safe. A satisfied step prints `SKIP`. A component only
 SKIPs when **both** the artifact exists on disk **and** `installed.json` records the currently
@@ -907,6 +917,8 @@ difference between a good first impression and a confused user.
 | Symptom | Cause | Fix |
 |---|---|---|
 | `detect.ps1` exits 1, `need >=25GB` | disk full on target drive | Free space or set `$env:OFFLOAD_HOME` to a bigger drive; re-run. |
+| `install.ps1`: `data home: no eligible data volume` | only the OS drive, a cloud-synced virtual drive or a FAT volume qualifies (or `install volumes --data` could not run; the error names each volume it passed over) | Set `$env:OFFLOAD_DATA_HOME` to a directory on a data drive, or `$env:OFFLOAD_ALLOW_OS_DATA='1'` to keep the data on the OS drive on purpose; re-run. |
+| `doctor`: `data volume ... FAIL` | the harness's data sits on the OS drive while a data drive could hold it | `local-offload data migrate --apply --stopped` (stop fleet-serve and the MCP doors first), then set the `home` line it prints. |
 | `install.ps1`: `winget unavailable` | no package manager | Human installs Git + Go 1.26+ manually; re-run. |
 | `install.ps1`: SHA/size mismatch | corrupt/wrong asset | Do not substitute. Delete the `.part` / component dir, re-run once; recurs → STOP. |
 | HF download 429 / timeout | rate-limited | Re-run (idempotent); persistent → STOP, ask human. |

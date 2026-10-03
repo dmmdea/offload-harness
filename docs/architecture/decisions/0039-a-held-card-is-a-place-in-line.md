@@ -81,6 +81,20 @@ told a session what to do with a held card other than not use it.
   session would otherwise have spent not doing the work. `--wait 0` is there for the caller
   that genuinely wants an answer now.
 
+## Extended 2026-10-02: a card is a place in line, so the agent lane takes a free one (register C-86, plan P4)
+
+A held card is a place in line, and with card-scoped leases a lease holds some cards, not the box. The delegator therefore
+asks whether the contract has a free local card before it asks whether the box is busy: `delegate.LeaseForContract` narrows the
+local lease to the seats the contract could run on (`placement.AgentChain`, the list the placement table walks), and the local
+box is busy for a contract only when **every** local agent seat it could use sits on a held card. The placement table gains
+row 5c: when the home layer's agent seat fits the contract and its cards are held, the next declared layer that is not opt-in
+and not dormant, whose agent seat fits the window and whose cards are free, takes it (on the three-card tier a card-2 render
+moves the flagship lane to the single layer's card-0 seat). With none free the contract keeps the home seat and **queues at its
+gate**, never a refusal, and the reason says the delegator may route it to another node. A contract that names its layer runs
+there or waits there. See [GPU lease](../../systems/gpu-lease.md), "Consumers read a seat's cards, not the node". Pinned by
+`TestAgentHomeFallsBackToNonIntersectingLayer`, `TestNoFallbackQueuesAndRoutesRemote`, `TestPlacementKeepsLocalSeatOnFreeCard`
+and `TestLocalBusyFalseWhenAFreeCardServesTheSeat`.
+
 ## Alternatives considered
 
 - **Keep fail-fast, document the queue.** Rejected: the same documentation has existed

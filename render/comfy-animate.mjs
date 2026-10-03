@@ -12,10 +12,10 @@
 //        [--api http://127.0.0.1:8188] [--no-lock] [--keep-comfy]
 //   <prompt> describes the CHARACTER + BACKGROUND (what the output should show);
 //   --motion-prompt describes the driver video (what motion is being transferred).
-import { writeFileSync, copyFileSync } from "node:fs";
-import { basename, join } from "node:path";
+import { writeFileSync } from "node:fs";
 import { withGpuSlot } from "./gpu-lock.mjs";
-import { COMFY_DIR } from "./comfy-lifecycle.mjs";
+import { comfyApi } from "./comfy-lifecycle.mjs";
+import { stageInput as stageToInput } from "./comfy-input.mjs";
 import { firstOutputFile } from "./comfy-output.mjs";
 import { buildWanAnimate2 } from "./wf-wan-animate2.mjs";
 import { resolveCli, submitGraph, pollOutputs, fetchView, finalizeRun } from "./comfy-submit.mjs";
@@ -31,7 +31,7 @@ for (let i = 0; i < argv.length; i++) {
 }
 const [out, ref, driver, promptPos] = pos;
 const prompt = promptPos || flags.prompt;
-const API = flags.api || process.env.COMFY_API || "http://127.0.0.1:8188";
+const API = comfyApi(flags.api);
 if (!out || !ref || !driver || !prompt) {
   console.error('usage: node comfy-animate.mjs <out.mp4> <ref.png> <driver.mp4> "<prompt>" [flags]');
   process.exit(2);
@@ -39,9 +39,7 @@ if (!out || !ref || !driver || !prompt) {
 
 // ComfyUI's LoadImage/LoadVideo read from C:\ComfyUI\input. Stage both there.
 function stageInput(srcPath) {
-  const name = "render_in_" + Date.now() + "_" + basename(srcPath);
-  copyFileSync(srcPath, join(COMFY_DIR, "input", name));
-  return name;
+  return stageToInput("render_in", srcPath);
 }
 
 async function animate() {
@@ -88,6 +86,6 @@ async function animate() {
 }
 
 withGpuSlot(
-  { noLock: flags["no-lock"], keepComfy: flags["keep-comfy"], comfyManaged: true, reserveVram: flags["reserve-vram"] },
+  { noLock: flags["no-lock"], keepComfy: flags["keep-comfy"], comfyManaged: true, api: API, reserveVram: flags["reserve-vram"] },
   animate,
 ).catch((e) => { console.error("ANIMATE FAILED:", e.message); process.exit(1); });
