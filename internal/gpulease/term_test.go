@@ -789,3 +789,27 @@ func TestRenewalAfterAMissedTermStartsAFreshTerm(t *testing.T) {
 		t.Fatalf("a lease that was just renewed reads overdue: %+v", st)
 	}
 }
+
+// A waiter queued behind an expired lease is told it expired and why, in the sentence it already
+// reads for an overdue one (the verdict word is unchanged: held-overdue).
+func TestWaiterIsToldAnExpiredLeaseExpiredAndWhy(t *testing.T) {
+	f := newTermFixtureNP(t, false, Options{})
+	f.owner(termOwnerPID, false)
+	f.at(t, time.Hour+time.Minute, false)
+	if r, _ := f.l.AdvanceTerm(TermSignals{}); r.Outcome != TermExpired {
+		t.Fatalf("setup: %+v", r)
+	}
+	got := f.m.ExplainHeld(f.m.Inspect(), 0)
+	for _, want := range []string{"held-overdue", "expired", "its owner is gone", "nothing reclaims or kills it"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the waiter's sentence lacks %q: %s", want, got)
+		}
+	}
+	// A lease that is merely past its window and was never labelled keeps the old sentence.
+	g := newTermFixtureNP(t, false, Options{})
+	g.owner(termOwnerPID, false)
+	g.at(t, time.Hour+time.Minute, false)
+	if s := g.m.ExplainHeld(g.m.Inspect(), 0); !strings.Contains(s, "past its declared window") || strings.Contains(s, "expired") {
+		t.Errorf("an unlabelled overdue lease keeps its sentence: %s", s)
+	}
+}
