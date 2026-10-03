@@ -44,3 +44,6 @@ render/compose-templates/_third_party/** text eol=lf
 # Engine log fixtures are byte-exact captures (progress bars carry bare CRs); the derived
 # negatives are compared against them byte for byte, so no line-ending conversion.
 render/testdata/*.log -text
+
+# Patches are applied with `patch` on Linux nodes: a CRLF checkout would break them.
+setup/patches/*.patch text eol=lf
