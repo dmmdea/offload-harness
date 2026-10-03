@@ -47,8 +47,9 @@ package pairworkloads
 // a 31.9 h ghost card). A foreign marker is left untouched: not locked, not
 // posted, not even age-dropped.
 //
-// REJECTED IS NOT DOWN. PAIR answering a close with HTTP 4xx (a frame it will
-// never accept) is different from PAIR being unreachable (transport error or
+// REJECTED IS NOT DOWN. PAIR answering a close with HTTP 400, 413 or 422 (a frame
+// it will never accept; 401/403/404/405 describe the route, not the frame, and
+// stay retryable) is different from PAIR being unreachable (transport error or
 // 5xx): the first drops that one marker and the pass goes on to the next, the
 // second releases the claim and ends the pass, since every later marker would
 // fail the same way. Treating both as "down" let one rejected marker starve
@@ -246,7 +247,7 @@ func (e *Emitter) track(ev Event, info map[string]json.RawMessage) (removeAfterP
 // running; leaving the in-flight marker would later close a finished job as
 // "failed".
 //
-// A frame PAIR REJECTED (HTTP 4xx) is the exception: no resend can change that
+// A frame PAIR REJECTED (HTTP 400, 413 or 422) is the exception: no resend can change that
 // answer, so a pending marker would only be retried and refused until the give-up
 // and would end every sweep pass in the meantime. The marker is dropped, with a
 // log line.
@@ -348,7 +349,7 @@ func (e *Emitter) orphaned(m openMarker, now time.Time) bool {
 // SweepOrphans closes every card whose producer is gone: it claims the
 // marker, sends the terminal "failed" frame the producer never sent, and
 // deletes the marker. It returns the number of frames delivered. It leaves
-// every marker of another endpoint alone. A post PAIR REJECTED (HTTP 4xx) drops
+// every marker of another endpoint alone. A post PAIR REJECTED (HTTP 400, 413 or 422) drops
 // that marker and goes on; any other failed post releases the claim and ends
 // the pass (PAIR is down; the next sweep retries). A disabled emitter does
 // nothing.
@@ -446,7 +447,7 @@ func (e *Emitter) SweepOrphans(ctx context.Context) int {
 	return sent
 }
 
-// rejectedError is a close PAIR answered with an HTTP 4xx: the frame itself is
+// rejectedError is a close PAIR answered with an HTTP 400, 413 or 422: the frame itself is
 // refused, which no retry changes. It is distinct from every other post failure
 // (transport error, 5xx), where PAIR may yet accept the same frame.
 type rejectedError struct {
@@ -458,10 +459,18 @@ func (r *rejectedError) Error() string {
 	return fmt.Sprintf("pairworkloads: %s answered %d", r.endpoint, r.status)
 }
 
-// rejection is whether an HTTP status is a verdict on the frame. 408 and 429
-// say "try again", not "never", so they stay with the retryable failures.
+// rejection is whether an HTTP status is a verdict on the FRAME: 400, 413 and
+// 422 say this body will never be accepted. The rest of 4xx describes the route,
+// the auth, the service on the port or a moment (401, 403, 404, 405 from a PAIR
+// mid-deploy or a wrong endpoint; 408, 429 "try again"), so it stays with the
+// retryable failures: dropping on it would delete the only record of every open
+// card, one marker after another, while the 48 h give-up bounds the loss.
 func rejection(status int) bool {
-	return status >= 400 && status < 500 && status != http.StatusRequestTimeout && status != http.StatusTooManyRequests
+	switch status {
+	case http.StatusBadRequest, http.StatusRequestEntityTooLarge, http.StatusUnprocessableEntity:
+		return true
+	}
+	return false
 }
 
 // infoJobID names a frame's job for a log line, falling back to fallback.

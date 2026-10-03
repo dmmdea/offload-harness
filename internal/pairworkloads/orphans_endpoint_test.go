@@ -230,7 +230,7 @@ func (a *answerByID) ids() []string {
 	return append([]string(nil), a.seen...)
 }
 
-// D4: one marker PAIR rejects (HTTP 4xx) must not starve the markers behind it.
+// D4: one marker PAIR rejects (HTTP 400) must not starve the markers behind it.
 // ReadDir order is by name, so the rejected job sorts FIRST.
 func TestSweepContinuesPastARejectedMarker(t *testing.T) {
 	r := newOrphanRig(t)
@@ -280,7 +280,7 @@ func TestSweepStillStopsWhenPairIsFailing(t *testing.T) {
 	}
 }
 
-// D4 for a live producer: its terminal frame rejected with 4xx is dropped with
+// D4 for a live producer: its terminal frame rejected (400, 413, 422) is dropped with
 // a log line, not parked as a pending marker that could never be delivered.
 func TestRejectedTerminalFrameIsDroppedNotPended(t *testing.T) {
 	r := newOrphanRig(t)
@@ -318,21 +318,67 @@ func TestRejectedTerminalFrameIsDroppedNotPended(t *testing.T) {
 	}
 }
 
-// Only a status that is a verdict on the frame is a rejection: 408 and 429 ask
-// for a retry, and 5xx is PAIR failing, so none of them may drop a marker.
-func TestRetryableClientStatusesAreNotRejections(t *testing.T) {
+// Only a status that judges the FRAME is a rejection (400, 413, 422). Everything
+// else describes the route, the auth, the service on the port or a moment (401,
+// 403, 404, 405, 408, 409, 410, 429, 5xx), and PAIR may accept the same frame
+// once that changes, so none of them may drop a marker.
+func TestOnlyFrameVerdictStatusesAreRejections(t *testing.T) {
 	for status, want := range map[int]bool{
-		http.StatusBadRequest:          true,
-		http.StatusUnprocessableEntity: true,
-		http.StatusNotFound:            true,
-		http.StatusRequestTimeout:      false,
-		http.StatusTooManyRequests:     false,
-		http.StatusInternalServerError: false,
-		http.StatusServiceUnavailable:  false,
-		http.StatusMovedPermanently:    false,
+		http.StatusBadRequest:            true,
+		http.StatusRequestEntityTooLarge: true,
+		http.StatusUnprocessableEntity:   true,
+		http.StatusUnauthorized:          false,
+		http.StatusForbidden:             false,
+		http.StatusNotFound:              false,
+		http.StatusMethodNotAllowed:      false,
+		http.StatusRequestTimeout:        false,
+		http.StatusConflict:              false,
+		http.StatusGone:                  false,
+		http.StatusTooManyRequests:       false,
+		http.StatusInternalServerError:   false,
+		http.StatusServiceUnavailable:    false,
+		http.StatusMovedPermanently:      false,
 	} {
 		if got := rejection(status); got != want {
 			t.Errorf("rejection(%d) = %v, want %v", status, got, want)
 		}
+	}
+}
+
+// A route that is not there yet (a PAIR mid-deploy, or a wrong endpoint) answers
+// every close with 404: that must keep every marker and end the pass, not delete
+// the only record of each open card one after another.
+func TestSweepKeepsEveryMarkerWhenTheRouteAnswers404(t *testing.T) {
+	r := newOrphanRig(t)
+	ans := &answerByID{status: map[string]int{"agd-1-a": http.StatusNotFound, "agd-2-b": http.StatusNotFound}}
+	srv := httptest.NewServer(http.HandlerFunc(ans.handler))
+	t.Cleanup(srv.Close)
+	r.url = srv.URL
+	for _, id := range []string{"agd-1-a", "agd-2-b"} {
+		plantMarker(t, r.dir, id, srv.URL)
+	}
+	s := r.emitter(dead, nil)
+	if n := s.SweepOrphans(context.Background()); n != 0 {
+		t.Fatalf("closed %d against a 404 route", n)
+	}
+	if got := strings.Join(ans.ids(), ","); got != "agd-1-a" {
+		t.Fatalf("a 404 is not a verdict on the frame: the pass must end at once, asked %s", got)
+	}
+	if files := r.files(t); len(files) != 2 {
+		t.Fatalf("both markers stay, with no lock left behind: %v", files)
+	}
+}
+
+// The live-producer half: a terminal frame answered 404 stays a pending marker.
+func TestUntrackKeepsPendingWhenTheRouteAnswers404(t *testing.T) {
+	r := newOrphanRig(t)
+	p := r.emitter(nil, nil)
+	runningJob(p, "agd-404")
+	p.client = answerWith(http.StatusNotFound)
+	p.Emit(Event{JobID: "agd-404", Model: "agent-pool", Engine: "vllm", State: "completed", CreatedAt: 1_000, StartedAt: 2_000, CompletedAt: 3_000})
+	p.Wait()
+	files := r.files(t)
+	if len(files) != 1 {
+		t.Fatalf("a terminal frame answered 404 must stay pending: %v", files)
 	}
 }

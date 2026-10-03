@@ -234,10 +234,11 @@ side can know the producer died, so the harness retires its own orphans:
 - **Racing sweepers.** A claim is an O_EXCL `<marker>.lock`; the winner re-checks the marker,
   posts, removes the marker, then the lock — so one frame per orphan. Rename-to-claim does not
   work on Windows: two sweepers that opened the marker before either renamed it both succeed. A
-  post to an **unreachable** PAIR (transport error, HTTP 5xx, or 408/429) releases the lock, keeps
+  post to an **unreachable** PAIR (transport error, HTTP 5xx, or any 4xx that does not judge the frame: 401, 403, 404, 405, 408, 429 ...) releases the lock, keeps
   the marker and ends the pass — every later marker would fail the same way — and the next sweep
-  retries; a marker PAIR has not accepted for 48 h is dropped. A post PAIR **rejects** (any other
-  HTTP 4xx: it will never accept that frame) drops that one marker and its lock, logs one line
+  retries; a marker PAIR has not accepted for 48 h is dropped. A post PAIR **rejects** (HTTP 400, 413 or 422:
+  it will never accept that frame; 401/403/404/405 describe the route, not the frame, so a PAIR
+  mid-deploy or a wrong endpoint cannot make the sweeper delete every marker) drops that one marker and its lock, logs one line
   naming the job id and the status, and the pass goes on to the next marker; before this rule one
   rejected marker starved every later one until the 48 h give-up. The same rule applies to a live
   producer's terminal frame: rejected, it is dropped with a log line instead of being rewritten as a
@@ -255,7 +256,9 @@ side can know the producer died, so the harness retires its own orphans:
   markers into its own httptest ingress and deleted them, leaving the real cards "Running" for 31.9 h
   (the endpoint scoping above now stops that second-hand, but the isolation is still the rule). The
   root, `internal/delegate`, `internal/mcpserver`, `internal/pipeline` and `internal/pairworkloads`
-  packages each carry a `TestMain` that points the variable at a throwaway directory.
+  packages each carry a `TestMain` that points the variable at a throwaway directory and fails closed:
+  when that directory or the variable cannot be set up it exits 1 without running a test, instead of
+  falling back to the machine-wide root.
 
 ## The PAIR side (what has to be true on the box)
 
