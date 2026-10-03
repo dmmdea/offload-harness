@@ -9,8 +9,10 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/dmmdea/offload-harness/internal/config"
+	"github.com/dmmdea/offload-harness/internal/pairworkloads"
 )
 
 func TestLeaseCardIdentity(t *testing.T) {
@@ -53,7 +55,11 @@ func TestLeaseCardLifecycle(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
-	cfg := config.Config{PairWorkloadsEnabled: true, PairWorkloadsEndpoint: srv.URL}
+	// StateDir isolates the open-card register: without it the register
+	// resolves to the machine-wide pair-open directory, and this emitter's
+	// first sweep closes the operator's REAL orphan markers into srv and
+	// deletes them (the 31.9 h ghost card, and `frames = 4`).
+	cfg := config.Config{PairWorkloadsEnabled: true, PairWorkloadsEndpoint: srv.URL, StateDir: t.TempDir()}
 
 	card := newLeaseCard(cfg, []string{"./local-offload", "generate-video", "o.mp4"}, "ai-ecosystem-test")
 	if card == nil {
@@ -90,6 +96,72 @@ func TestLeaseCardLifecycle(t *testing.T) {
 	off.finish(nil) // a nil card is inert
 	if off != nil {
 		t.Fatal("reporting off must open no card")
+	}
+}
+
+// A lease card's emitter sweeps the open-card register on its first frame. A
+// dead producer's marker that names the DEFAULT ingress belongs to the real
+// PAIR, not to this test's httptest server, so the sweep must leave it alone:
+// no frame to srv, marker kept. (Belt and braces for the StateDir isolation of
+// TestLeaseCardLifecycle: even an emitter that did share a root with real
+// markers would not close them into the wrong ingress.)
+func TestLeaseCardLeavesAnotherIngressMarkerAlone(t *testing.T) {
+	appDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(appDir, "node-id.json"), []byte(`{"node_uuid":"self-uuid","created_at":1}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("OFFLOAD_PAIR_APPDIR", appDir)
+	var mu sync.Mutex
+	frames := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		frames++
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	state := t.TempDir()
+	openDir := filepath.Join(state, "pair-open")
+	if err := os.MkdirAll(openDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// pid 0 reads as a dead producer whatever the machine runs; the endpoint is
+	// the real ingress's, not srv's.
+	marker, err := json.Marshal(map[string]any{
+		"pid": 0, "written_ms": time.Now().UnixMilli(), "endpoint": pairworkloads.DefaultEndpoint,
+		"workload_info": map[string]any{"id": "ghost-card", "state": "running"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	planted := filepath.Join(openDir, "0-ghost-card.json")
+	if err := os.WriteFile(planted, marker, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := config.Config{PairWorkloadsEnabled: true, PairWorkloadsEndpoint: srv.URL, StateDir: state}
+	card := newLeaseCard(cfg, []string{"./local-offload", "generate-video", "o.mp4"}, "ai-ecosystem-test")
+	if card == nil {
+		t.Fatal("an enabled box must open a lease card")
+	}
+	card.running()
+	card.finish(nil)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if frames != 3 {
+		t.Fatalf("frames = %d, want queued, running, completed: a marker of another ingress was closed into this one", frames)
+	}
+	after, err := os.ReadFile(planted)
+	if err != nil {
+		t.Fatalf("the marker of another ingress must survive the sweep: %v", err)
+	}
+	if string(after) != string(marker) {
+		t.Fatalf("the marker of another ingress was rewritten: %s", after)
+	}
+	if ents, _ := os.ReadDir(openDir); len(ents) != 1 {
+		t.Fatalf("pair-open must hold only the planted marker (no lock, no leftover): %v", ents)
 	}
 }
 

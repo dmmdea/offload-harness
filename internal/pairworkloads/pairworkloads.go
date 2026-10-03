@@ -575,6 +575,9 @@ func (e *Emitter) post(ctx context.Context, body []byte) error {
 	}
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
+		if rejection(resp.StatusCode) {
+			return &rejectedError{endpoint: e.cfg.Endpoint, status: resp.StatusCode}
+		}
 		return fmt.Errorf("pairworkloads: %s answered %d", e.cfg.Endpoint, resp.StatusCode)
 	}
 	return nil
