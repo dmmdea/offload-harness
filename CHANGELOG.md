@@ -6,6 +6,34 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.163.1] - 2026-10-03 - A warm-back never loads a seat over another card's lease
+
+### Fixed — a warm-back waits for the last lease on the seat's cards (register C-86, plan P5 follow-up)
+
+A lease that unloaded the agent seat owes it a warm-back, and the warm loads the seat on all its cards. With card-scoped
+leases several holders share a box, and the warm checked only its own lease and the queue behind it: the first of three
+per-card film renders to finish would have loaded the 3-card agent seat over the two cards still rendering (found while
+launching the SS-31 motion clips on three per-card leases, 2026-10-03; that run started with the seat cold, so nothing
+was owed). The warm now also skips while another live lease sits on the seat's cards, says which, and leaves the warm
+owed for the next holder that warms (a later `--unload-seat` wrapper, `gpu release --warm-seat`); otherwise the seat
+loads on its next request. The seat's cards are its declared pins; a seat that declares none is on every card, and a
+lease on a card the seat does not use leaves the warm alone. `gpu release --warm-seat` takes the same rule; with no
+epoch it counts the whole box, as the release itself does, so over two live leases it neither warms nor releases.
+Known limits, both in the cold direction (the seat loads on its next request; an idle seat unloads after 5 minutes
+anyway): two leases ending in the same instant can each see the other and both skip, and a last lease without
+`--unload-seat` never warms. Tests: `TestAWarmBackWaitsForTheLastLeaseOnTheSeatsCards`,
+`TestAWarmBackWaitsForALeaseOnADeclaredSeatCard`, `TestAWarmBackIgnoresALeaseOffTheSeatsCards`,
+`TestReleaseWarmSeatWaitsForTheOtherLeaseOnTheSeatsCards`, `TestReleaseWarmSeatWithNoEpochWarmsOverTheOneLiveLease`,
+`TestReleaseWarmSeatWithNoEpochAndTwoLiveLeasesNeverWarms`, `TestReleaseWarmSeatAfterTheLeaseEndedWarmsOnTheFreeCard`
+(8 of 8 mutants killed, across the first cut and the review fix).
+
+### Fixed — a drain test no longer races the lease acquire
+
+`TestReserveRenewsTheLeaseWhileDraining` ended its fake in-flight request 400 ms after the test started, so on a loaded
+Windows box (about 900 processes; a scratch-root reserve plus release measured 850-960 ms) the request was over before
+the drain had renewed once, and the test failed on main as well. The request now lasts until the heartbeat is seen to
+move, capped at 5 s; with the drain's renew removed the test still fails. Test-only.
+
 ## [0.163.0] - 2026-10-03 - Thin clients render on the fleet: the compose-project door, `install client`, and a box with no seat never takes work itself
 
 ### Added — the compose-project door (ADR 0071)
