@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -225,6 +226,65 @@ func TestRunTranscribeCachesWhenIdentifiable(t *testing.T) {
 	}
 	if n := countEntries(t, ca); n == 0 {
 		t.Fatal("an identifiable input stored nothing — the gate disabled caching instead of scoping it")
+	}
+}
+
+// A cached transcript names files on disk. A node that removes a finished upload job's transcript
+// files (fleet_stt_transcript_ttl_min) leaves the cache entry pointing at nothing, and a second upload
+// of the same recording would be answered with paths that do not exist: a hit whose files are gone is
+// a miss, and the transcription is redone (and its files written again).
+func TestTranscribeCacheHitWithMissingFilesIsAMiss(t *testing.T) {
+	ffmpeg := lookFFmpeg()
+	if ffmpeg == "" {
+		t.Skip("ffmpeg not on PATH")
+	}
+	wav := makeSilentWav(t, ffmpeg)
+	cfg := gateCfg(t)
+	cfg.MediaDir = t.TempDir()
+	cfg.FFmpegPath = ffmpeg
+	cfg.Endpoint = fakeWhisper(t)
+	p := gatePipeline(t, cfg, gateCache(t))
+	run := func() (core.Result, map[string]any) {
+		res := p.Run(context.Background(), core.Request{Task: core.TaskTranscribe, Audio: wav})
+		if !res.OK {
+			t.Fatalf("transcribe deferred: %s", res.Reason)
+		}
+		var data map[string]any
+		if err := json.Unmarshal(res.Data, &data); err != nil {
+			t.Fatal(err)
+		}
+		return res, data
+	}
+
+	first, data := run()
+	if first.Meta.CacheHit {
+		t.Fatal("a cold call reported a cache hit")
+	}
+	paths := []string{data["srt_path"].(string), data["text_path"].(string), data["json_path"].(string)}
+	for _, f := range paths {
+		if _, err := os.Stat(f); err != nil {
+			t.Fatalf("the first call left no %s: %v", f, err)
+		}
+	}
+
+	hit, _ := run()
+	if !hit.Meta.CacheHit {
+		t.Fatal("the same recording with its files in place must be a cache hit")
+	}
+
+	for _, f := range paths {
+		if err := os.Remove(f); err != nil {
+			t.Fatal(err)
+		}
+	}
+	redo, data2 := run()
+	if redo.Meta.CacheHit {
+		t.Fatal("a cache hit whose transcript files are gone was served: its paths point at nothing")
+	}
+	for _, k := range []string{"srt_path", "text_path", "json_path"} {
+		if _, err := os.Stat(data2[k].(string)); err != nil {
+			t.Errorf("the redone call's %s is missing: %v", k, err)
+		}
 	}
 }
 

@@ -16,6 +16,7 @@ package fleetnode
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -28,6 +29,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -194,7 +196,42 @@ func buildComposeProject(_ context.Context, cfg config.Config, payload json.RawM
 	if len(in.Snapshots) > 0 {
 		params["snapshots"] = in.Snapshots
 	}
+	// The render is written under a stem of the door's own choosing, never the pipeline's
+	// compose-<hash8> (which the tokenless compose-video lane shares): /fleet/media then tells a
+	// project render by its name alone and serves it only to a bearer holder (media_gate.go). The
+	// renderer names its snapshots <stem>-snap-<n>.png beside it, so they carry the stem too.
+	if out, oerr := projectOutputPath(cfg, in.Format); oerr != nil {
+		cleanup()
+		return core.Request{}, noop, nodeSideError{fmt.Errorf("compose-project: %w", oerr)}
+	} else if out != "" {
+		params["out"] = out
+	}
 	return core.Request{Task: core.TaskComposeVideo, Params: params}, cleanup, nil
+}
+
+var projectFormatRe = regexp.MustCompile(`^[a-z0-9]{1,8}$`)
+
+// projectOutputPath is the output file a project render is given: composeproj-<16 hex>.<format>
+// directly under media_dir. "" when the node has no media_dir, or the format is not an extension
+// (the pipeline refuses an unknown format itself, and names its own output as before).
+func projectOutputPath(cfg config.Config, format string) (string, error) {
+	if strings.TrimSpace(cfg.MediaDir) == "" {
+		return "", nil
+	}
+	if format == "" {
+		format = "mp4"
+	}
+	if !projectFormatRe.MatchString(format) {
+		return "", nil
+	}
+	if err := os.MkdirAll(cfg.MediaDir, 0o755); err != nil {
+		return "", err
+	}
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	return filepath.Join(cfg.MediaDir, projectOutputPrefix+hex.EncodeToString(b[:])+"."+format), nil
 }
 
 // SweepOrphanedProjectDirs removes extracted project trees no job holds any more: fleet-serve calls it

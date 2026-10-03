@@ -1274,7 +1274,10 @@ func (p *Pipeline) runTranscribe(ctx context.Context, req core.Request, meta cor
 	if p.cache != nil && identifiable {
 		if raw, ok := p.cache.Get(ck); ok {
 			var cv cacheVal
-			if json.Unmarshal(raw, &cv) == nil && len(cv.Data) > 0 {
+			// A hit names transcript files on disk: one whose files are gone (a fleet node removes an
+			// upload job's transcripts after their retention) would answer with paths that point at
+			// nothing, so it is a miss and the transcription is redone.
+			if json.Unmarshal(raw, &cv) == nil && len(cv.Data) > 0 && transcriptFilesPresent(cv.Data) {
 				meta.CacheHit = true
 				meta.LatencyMs = time.Since(start).Milliseconds()
 				p.record(req.Task, meta, len(req.Audio))
@@ -1431,6 +1434,25 @@ func (p *Pipeline) runTranscribe(ctx context.Context, req core.Request, meta cor
 	meta.LatencyMs = time.Since(start).Milliseconds()
 	p.record(req.Task, meta, len(req.Audio))
 	return core.Result{OK: true, Data: data, Meta: meta}
+}
+
+// transcriptFilesPresent reports whether every transcript file a cached result names still exists.
+// A result that names none (an older entry, or a payload this build cannot read) counts as present:
+// the check only refuses a hit it can prove dangles.
+func transcriptFilesPresent(data json.RawMessage) bool {
+	var r transcribeResult
+	if json.Unmarshal(data, &r) != nil {
+		return true
+	}
+	for _, p := range []string{r.SRTPath, r.TextPath, r.JSONPath} {
+		if p == "" {
+			continue
+		}
+		if _, err := os.Stat(p); err != nil {
+			return false
+		}
+	}
+	return true
 }
 
 // transcribeResult is the offload_transcribe payload (the {gist, segments[]}

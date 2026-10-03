@@ -120,6 +120,8 @@ type job struct {
 	// ever being called. Cleared at claim — from then on the run's own defer
 	// owns the cleanup and calling both would double-free.
 	onDropped func()
+	// onEvict is AcceptSpec.OnEvict.
+	onEvict func()
 	// capped records whether this job's EXECUTION counts against
 	// maxConcurrent. See AcceptSpec.Uncapped.
 	capped bool
@@ -208,6 +210,9 @@ type Jobs struct {
 	// onFinish, when set, is called (outside the lock) each time a job reaches a
 	// terminal state — the store steward counts turns with it (0.113.16).
 	onFinish func()
+	// onSweep, when set, runs after every janitor sweep (outside the lock): the server hangs the
+	// stt transcript retention sweep on the janitor's tick.
+	onSweep func()
 
 	// served is the tenant round-robin state (0.113.18): tenant → the claim
 	// sequence number at which that tenant was LAST handed a slot. claimLocked
@@ -244,6 +249,14 @@ const DefaultPollLease = 60 * time.Second
 func (j *Jobs) OnFinish(fn func()) {
 	j.mu.Lock()
 	j.onFinish = fn
+	j.mu.Unlock()
+}
+
+// OnSweep registers fn to run after every janitor sweep (the 5-minute tick, and any direct sweep).
+// It is called outside the store's lock and must return quickly.
+func (j *Jobs) OnSweep(fn func()) {
+	j.mu.Lock()
+	j.onSweep = fn
 	j.mu.Unlock()
 }
 
@@ -379,6 +392,11 @@ type AcceptSpec struct {
 	// promise true now that admission and execution are separate. Never called
 	// for a job that was claimed: the run's own defer owns cleanup from then on.
 	OnDropped func()
+	// OnEvict is invoked once, outside the store's lock, when the janitor evicts this job's record
+	// after its terminal state outlived the ttl. It is where a job releases what it left on disk for
+	// its poller (an stt upload's transcript files), so the record and its outputs do not outlive
+	// one another by more than a janitor tick.
+	OnEvict func()
 	// Task/Model are the /fleet/jobs feed's metadata (see JobView). Task is
 	// the dispatch's task_type verbatim; Model is the agent seat for
 	// core.TaskAgentRun (the seat is the meaningful "model" for an agent run,
@@ -472,6 +490,7 @@ func (j *Jobs) Admit(id string, spec AcceptSpec, run func(context.Context) (json
 		capped:     !spec.Uncapped,
 		run:        run,
 		onDropped:  spec.OnDropped,
+		onEvict:    spec.OnEvict,
 		task:       spec.Task,
 		model:      spec.Model,
 		acceptedAt: j.now(),
@@ -1221,10 +1240,24 @@ func (j *Jobs) janitor(tick time.Duration) {
 // evicted, whatever their age (they are still ours to finish).
 func (j *Jobs) sweep() {
 	cutoff := j.now().Add(-j.ttl)
+	var evicted []func()
 	j.mu.Lock()
-	defer j.mu.Unlock()
+	// The hooks run after the lock is released, whichever way this returns.
+	defer func() {
+		after := j.onSweep
+		j.mu.Unlock()
+		for _, fn := range evicted {
+			fn()
+		}
+		if after != nil {
+			after()
+		}
+	}()
 	for id, jb := range j.m {
 		if (jb.state == JobDone || jb.state == JobError) && jb.terminalAt.Before(cutoff) {
+			if jb.onEvict != nil {
+				evicted = append(evicted, jb.onEvict)
+			}
 			delete(j.m, id)
 		}
 	}

@@ -490,6 +490,10 @@ func New(runner Runner, jobs *Jobs, opts Options) *Server {
 		setWriteDeadline:   controllerWriteDeadline,
 	}
 	s.admitting = s.admittingRuns
+	// The stt transcript retention rides the job store's janitor tick (and runs at fleet-serve start).
+	if jobs != nil {
+		jobs.OnSweep(func() { sweepTranscriptsOnTick(opts.Cfg) })
+	}
 	return s
 }
 
@@ -2373,6 +2377,8 @@ func (s *Server) admit(w http.ResponseWriter, r *http.Request, env dispatchEnvel
 	// Who asked, and whether the asker wants THIS node to card the job (it signals that only when it
 	// will not card the job itself). The asker's name is recorded on this node's row either way.
 	asker, nodeCards := askerOf(r)
+	// An stt upload's transcript files, learned when the job finishes and released with its record.
+	var sttOut sttOutputs
 	card := s.newNodeCard(string(req.Task), specModel, env.JobID, asker, nodeCards)
 	// The payload is spent: the request is built. The run closure below captures env, and a queued
 	// stt upload's payload is up to 64 MiB, so the job must not keep it alive until it finishes.
@@ -2421,6 +2427,11 @@ func (s *Server) admit(w http.ResponseWriter, r *http.Request, env dispatchEnvel
 		res := s.runner.Run(ctx, req)
 		finished = true
 		card.finish(res)
+		if env.TaskType == STTUploadTask && res.OK {
+			names := sttOutputNames(res.Data)
+			sttOut.set(names)
+			refreshTranscripts(s.opts.Cfg, names, time.Now())
+		}
 		if env.TaskType == string(core.TaskAgentRun) && res.OK {
 			// The one fact this result proves about the advertised seat —
 			// a completed call on it — goes into the residency cache now,
@@ -2474,9 +2485,11 @@ func (s *Server) admit(w http.ResponseWriter, r *http.Request, env dispatchEnvel
 			cleanup()
 			card.fail("the job was dropped before it started (withdrawn, or the node drained)")
 		},
-		Task:   env.TaskType,
-		Model:  specModel,
-		Band:   band,
+		// An stt upload's transcript files go with its record (and, failing that, by the TTL sweep).
+		OnEvict: func() { removeTranscripts(s.opts.Cfg, sttOut.get()) },
+		Task:    env.TaskType,
+		Model:   specModel,
+		Band:    band,
 		Tenant: tenant,
 		// A pushed agent dispatch is polled for by the delegator that sent it, so
 		// the poll lease applies to it (ADR 0064). Media and vision jobs are polled
@@ -2822,6 +2835,13 @@ func (s *Server) handleMedia(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("filename")
 	if name == "" || strings.ContainsAny(name, `/\`) || strings.Contains(name, "..") {
 		writeError(w, http.StatusBadRequest, "filename must be a bare name")
+		return
+	}
+	// The outputs of the token-gated lanes (stt upload transcripts, project renders) need the bearer
+	// on a node that has a token; checked before the file is looked up, so the answer never says
+	// whether the name exists. Every other name, and every name on a tokenless node, is as it was.
+	if tok := s.opts.Cfg.FleetAuthToken; tok != "" && gatedMediaName(name) && !bearerOK(r, tok) {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
 	// A dot name is this node's own bookkeeping (the stt upload directory, the compose cache): never

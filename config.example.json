@@ -301,6 +301,7 @@
   "fleet_compose_projects": false,
   "fleet_compose_bundle_max_mb": 0,
   "fleet_stt_upload_max_mb": 0,
+  "fleet_stt_transcript_ttl_min": 0,
   "fleet_stt_max_concurrent": 0,
   "kvslot_cap_gib": 0,
   "fleet_agent_enabled": false,

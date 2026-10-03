@@ -2595,6 +2595,13 @@ func runFleetServe(args []string) error {
 	} else if n > 0 {
 		fmt.Fprintf(os.Stderr, "[fleet-serve] swept %d orphaned stt upload file(s)\n", n)
 	}
+	// Transcripts of stt upload jobs (ADR 0072) older than their retention, which a stopped node did
+	// not get to sweep; the running node sweeps them on the job store's janitor tick. A warning, never fatal.
+	if n, perr := fleetnode.SweepSTTTranscripts(cfg, time.Now()); perr != nil {
+		fmt.Fprintf(os.Stderr, "[fleet-serve] WARNING: sweeping stt transcripts: %v\n", perr)
+	} else if n > 0 {
+		fmt.Fprintf(os.Stderr, "[fleet-serve] swept %d expired stt transcript file(s)\n", n)
+	}
 
 	listen, nodeID, err := fleetServeParams(*listenFlag, *nodeIDFlag, *trusted, cfg, os.Hostname)
 	if err != nil {
