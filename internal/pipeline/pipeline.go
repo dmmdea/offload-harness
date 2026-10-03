@@ -469,7 +469,7 @@ func (p *Pipeline) Run(ctx context.Context, req core.Request) (res core.Result) 
 	// for (internal/config Config.Pipelines, Task 4) as a fleet task — 100%
 	// config-driven, unlike every hardcoded route above. Its own branch — no text
 	// cascade, no grammar, no machine-wide GPU lease (only the in-process
-	// mediaSlot; see runPipelineJob's doc comment).
+	// media slot, the whole node; see runPipelineJob's doc comment).
 	if req.Task == core.TaskPipelineJob {
 		return p.runPipelineJob(ctx, req, meta, start)
 	}
@@ -2511,14 +2511,14 @@ const sceneSwapFailPrefix = "SCENE-SWAP-FAIL"
 // there; this function never re-validates the payload.
 //
 // GPU arbitration is DELIBERATELY narrower than every other GPU-gen route:
-// only the in-process mediaSlot is acquired (takeMediaSlot/releaseMediaSlot),
+// only the in-process media slot (the whole node) is acquired (takeMediaSlot/releaseMediaSlot),
 // NEVER the machine-wide media lease (acquireMediaLease is not called). The
 // CMP CLI's own nested per-stage calls take the machine-wide lease themselves
 // for each stage (mirroring how a manual scene-swap run already works today —
 // see the brief); acquiring it AGAIN here would self-deadlock the same
 // process waiting on its own nested acquisition. A second concurrent
 // pipeline-job in this process still can't race the first: it queues on
-// mediaSlot for up to gpuWait() and then defers as gpu_busy, exactly like
+// the media slot for up to gpuWait() and then defers as gpu_busy, exactly like
 // every other route's busy-card behavior.
 //
 // On a CHILD RENDER failure (non-zero exit) this returns a PLAIN failure —
@@ -3438,7 +3438,7 @@ func (p *Pipeline) acquireWholeNode(ctx context.Context, reason string, ttl, wai
 
 	// THE IN-PROCESS SLOT COMES FIRST, on both paths. Blocking here is free — no timer
 	// in the uncontended case, no polling in the contended one — and it is the only
-	// thing arbitrating two jobs that INHERIT the same lease. See mediaSlot.
+	// thing arbitrating two jobs that INHERIT the same lease. See slotSet (mediaslots.go).
 	if !takeMediaSlot(wait) {
 		return nil, noop, &errGPUBusy{detail: fmt.Sprintf(
 			"another generation job in this process still holds the card after %s", wait)}
@@ -3494,9 +3494,11 @@ func (p *Pipeline) acquireWholeNode(ctx context.Context, reason string, ttl, wai
 		return nil, noop, err
 	}
 
-	// The heartbeat exists only while a render is actually running, and one media job
-	// runs at a time per process, so this is at most ONE 15s timer for the duration of
-	// GPU work that lasts minutes. Nothing ticks while the harness is idle.
+	// The heartbeat exists only while a render is actually running, and a whole-node lease
+	// (this function) is held by one media job at a time per process, so this is at most ONE
+	// 15s timer for the duration of GPU work that lasts minutes (a card-scoped host holds one
+	// lease, and one such timer, per card in use: startHeartbeat). Nothing ticks while the
+	// harness is idle.
 	stop := make(chan struct{})
 	stopped := make(chan struct{})
 	go func() {
