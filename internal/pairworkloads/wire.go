@@ -74,15 +74,15 @@ var (
 
 // WireHeadersFor is SetWireHeaders for a caller that holds a config and no emitter (the
 // accelerator lane, the remote lanes' request builders). The emitter it asks is cached per
-// (enabled, endpoint, app dir), so the identity files are read once per identityTTL, not per call.
+// (enabled, endpoint, app dir, node-info URL), so the identity files are read once per identityTTL, not per call.
 func WireHeadersFor(cfg config.Config, h http.Header) {
 	c := FromConfig(cfg)
-	key := strings.Join([]string{boolKey(c.Enabled), c.Endpoint, strings.TrimSpace(os.Getenv("OFFLOAD_PAIR_APPDIR"))}, "|")
+	key := strings.Join([]string{boolKey(c.Enabled), c.Endpoint, strings.TrimSpace(os.Getenv("OFFLOAD_PAIR_APPDIR")), c.NodeInfoURL}, "|")
 	wireMu.Lock()
 	e, ok := wireEmitters[key]
 	if !ok {
 		// No state dir: this emitter only reads identity, it never emits a frame.
-		e = New(Config{Enabled: c.Enabled, Endpoint: c.Endpoint})
+		e = New(Config{Enabled: c.Enabled, Endpoint: c.Endpoint, NodeInfoURL: c.NodeInfoURL})
 		wireEmitters[key] = e
 	}
 	wireMu.Unlock()

@@ -4689,8 +4689,12 @@ func (p *Pipeline) RecordAccel(task, modelTier string, latencyMs int64, deferred
 }
 
 // entryFrom builds a ledger entry from per-call meta + the enriched signals.
+//
+// It is shared by every caller that snapshots a row (the entry tier's correctness-label snapshot, the
+// confidence head's feature row, the shadow capture), so it carries no card work of earlier attempts:
+// those are the call's own row's business (callRowFrom).
 func entryFrom(task core.TaskType, meta core.Meta, deferred bool, inputChars int) ledger.Entry {
-	e := ledger.Entry{
+	return ledger.Entry{
 		Task: string(task), TokensIn: meta.TokensIn, TokensOut: meta.TokensOut, SeatTokensIn: meta.SeatTokensIn,
 		LatencyMs: meta.LatencyMs, TokPerSec: meta.TokPerSec, CacheHit: meta.CacheHit,
 		Deferred: deferred,
@@ -4740,9 +4744,16 @@ func entryFrom(task core.TaskType, meta core.Meta, deferred bool, inputChars int
 		// every row consistently, and an untagged process writes nothing.
 		Arm: strings.TrimSpace(os.Getenv("OFFLOAD_DELEGATE_ARM")),
 	}
-	// The call's own row adds the card work of its earlier attempts' inner rows
-	// (whose cards_tokens Record zeroes) to its own, so the call's row holds all
-	// of the call's work and a total over the ledger counts each token once.
+}
+
+// callRowFrom is entryFrom for a row the ledger will hold as the CALL's row (the answering tier's, or
+// the final defer): it adds the card work of the call's earlier attempts' inner rows (whose
+// cards_tokens Record zeroes) to its own, so the call's row holds all of the call's work and a total
+// over the ledger counts each token once. An inner row (ParentJobID set) adds nothing. Only the two
+// writers of a call's row use it; a snapshot built by entryFrom already has the attempt's work in
+// its own figures, and adding the carried work to it counts that work twice.
+func callRowFrom(task core.TaskType, meta core.Meta, deferred bool, inputChars int) ledger.Entry {
+	e := entryFrom(task, meta, deferred, inputChars)
 	if meta.CardsCarried > 0 && meta.ParentJobID == "" {
 		e.CardsTokens = meta.CardsCarried + ledger.CardsTokensOf(e)
 	}
@@ -4762,7 +4773,7 @@ func (p *Pipeline) record(task core.TaskType, meta core.Meta, inputChars int) {
 	if p.led == nil {
 		return
 	}
-	_ = p.led.Record(entryFrom(task, meta, false, inputChars))
+	_ = p.led.Record(callRowFrom(task, meta, false, inputChars))
 }
 
 // recordDefer logs a single deferred ledger entry for the final cascade
@@ -4773,7 +4784,7 @@ func (p *Pipeline) recordDefer(task core.TaskType, meta core.Meta, inputChars in
 	if p.led == nil {
 		return
 	}
-	e := entryFrom(task, meta, true, inputChars)
+	e := callRowFrom(task, meta, true, inputChars)
 	e.Reason = reason
 	_ = p.led.Record(e)
 }

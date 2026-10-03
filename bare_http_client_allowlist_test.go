@@ -49,6 +49,7 @@ var bareClientAllowlist = map[string]struct {
 	"internal/modelaffinity/upstream.go:upstreamResident":        {1, "configured: the local llama-swap /running (the upstream fence)"},
 	"internal/nimclient/nimclient.go:New":                        {1, "guarded: offload_nim's caller-named base is checked against the S-30 allowlist (NVIDIA hosted API, nim_endpoint, nim_bases; audit by default, enforce by nim_base_policy) and the key only reaches NVIDIA's exact hosts (S-01)"},
 	"internal/nodeswap/deps.go:readHealth":                       {1, "configured: the swapped node's own --health-url"},
+	"internal/pairworkloads/nodeinfo.go:probeClient":             {1, "configured: PAIR's own loopback node-info and ingress, loopback-guarded, no redirect followed"},
 	"internal/pairworkloads/pairworkloads.go:New":                {1, "configured: the local PAIR telemetry endpoint"},
 	"internal/pairworkloads/seatwatch.go:NewSeatWatcher":         {1, "configured: the local llama-swap"},
 	"internal/pipeline/agenttask.go:<file-scope>":                {1, "configured: the agent seat on the local llama-swap"},

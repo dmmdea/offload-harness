@@ -79,6 +79,11 @@ type Config struct {
 	// (tests).
 	StateDir string
 	OpenDir  string
+	// NodeInfoURL is PAIR's loopback node-info, read for this node's UUID when node-id.json is
+	// missing or unreadable (the harness runs as a different OS user than PAIR; nodeinfo.go).
+	// "" = no fallback. FromConfig sets it; a bare Config does not, so a test that builds an emitter
+	// without it can never reach a live PAIR.
+	NodeInfoURL string
 }
 
 // UnderLeaseEnv is set by `gpu reserve -- <cmd>` on the command it wraps. The
@@ -95,7 +100,24 @@ func FromConfig(cfg config.Config) Config {
 	}
 	enabled := cfg.PairWorkloadsEnabled && strings.TrimSpace(os.Getenv(UnderLeaseEnv)) == ""
 	return Config{Enabled: enabled, Endpoint: ep,
-		VLLMSeats: cfg.VLLMSeats, SwapEndpoint: cfg.Endpoint, StateDir: cfg.StateDir}
+		VLLMSeats: cfg.VLLMSeats, SwapEndpoint: cfg.Endpoint, StateDir: cfg.StateDir,
+		NodeInfoURL: nodeInfoURLFor(cfg)}
+}
+
+// nodeInfoURLFor is the node-info URL the identity fallback uses: the configured
+// pair_node_info_url, else PAIR's default loopback port. The default is NOT applied when
+// OFFLOAD_PAIR_APPDIR names the PAIR data dir (a portable install, a test fixture): that is a box
+// whose PAIR files are located on purpose, and where they are missing the answer is "PAIR is not
+// installed", not "ask the default port" (a test that points the app dir at a scratch directory must
+// never reach a live PAIR). Name pair_node_info_url explicitly to use the fallback there.
+func nodeInfoURLFor(cfg config.Config) string {
+	if u := strings.TrimSpace(cfg.PairNodeInfoURL); u != "" {
+		return u
+	}
+	if strings.TrimSpace(os.Getenv("OFFLOAD_PAIR_APPDIR")) != "" {
+		return ""
+	}
+	return DefaultNodeInfoURL
 }
 
 // Event is one workload lifecycle frame's content. JobID doubles as PAIR's
@@ -129,8 +151,15 @@ type Emitter struct {
 	idMu     sync.Mutex
 	idAt     time.Time
 	selfUUID string
-	members  map[string]string // lower(name) -> uuid
-	byAddr   map[string]string // lower(ipAddress) -> uuid
+	// The identity fallback's cached answers (nodeinfo.go), guarded by idMu.
+	fbUUID       string
+	fbUUIDAt     time.Time
+	fbIngress    bool
+	fbIngressAt  time.Time
+	nodeInfoWarn sync.Once
+	nodeInfoLog  sync.Once
+	members      map[string]string // lower(name) -> uuid
+	byAddr       map[string]string // lower(ipAddress) -> uuid
 	// selfName is this box's own member name (members.json entry carrying selfUUID), lowercased.
 	selfName string
 	// viewName / viewAddr are PAIR's VIEW-ONLY nodes (configs/view-only-nodes.json), which are not
@@ -170,6 +199,9 @@ type Emitter struct {
 	alive     func(pid int) bool
 	procStart func(pid int) (int64, bool)
 	now       func() time.Time
+	// sweepFrameFn builds a sweep's closing frame for a marker; sweepFrame unless a
+	// test swaps it (a build failure cannot otherwise be provoked from data).
+	sweepFrameFn func(m openMarker, now time.Time) ([]byte, error)
 }
 
 type engineAnswer struct {
@@ -249,15 +281,22 @@ func (e *Emitter) loadIdentityLocked() {
 	e.selfUUID, e.members, e.byAddr, e.selfName, e.viewName, e.viewAddr = "", nil, nil, "", nil, nil
 	raw, err := os.ReadFile(filepath.Join(e.appDir, "node-id.json"))
 	if err != nil {
-		return
+		// Missing or unreadable (PAIR is another OS user's, or not installed). The members files
+		// below stay best-effort: unreadable, only this node resolves.
+		id := e.fallbackIdentityLocked(err)
+		if id == "" {
+			return
+		}
+		e.selfUUID = id
+	} else {
+		var nid struct {
+			NodeUUID string `json:"node_uuid"`
+		}
+		if json.Unmarshal(raw, &nid) != nil || nid.NodeUUID == "" {
+			return
+		}
+		e.selfUUID = nid.NodeUUID
 	}
-	var nid struct {
-		NodeUUID string `json:"node_uuid"`
-	}
-	if json.Unmarshal(raw, &nid) != nil || nid.NodeUUID == "" {
-		return
-	}
-	e.selfUUID = nid.NodeUUID
 	e.members = map[string]string{}
 	e.byAddr = map[string]string{}
 	if raw, err := os.ReadFile(filepath.Join(e.appDir, "cluster", "members.json")); err == nil {
