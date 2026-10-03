@@ -6,6 +6,72 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.162.0] - 2026-10-03 - The compose lane pins HyperFrames 0.8.114, and `install hyperframes` puts a moved pin on every node
+
+### Fixed — a pin move can no longer strand a node's composition lane
+
+After 0.159.0 moved the HyperFrames pin to 0.8.108, the deploy swapped each node's binary and render tree but
+not the install under `hyperframes_dir`. The new runner refuses any install that is not its pin, so a node that
+missed the hand re-install answered every composition with `CLI_MISSING` while `doctor` and `offload_status`
+read `compose_video` CONFIGURED: they checked that the files existed, never which version they held.
+
+- **`doctor` and `offload_status` now give the runner's answer.** mediacap reads the installed version and the
+  runner's `PINNED_VERSION`; when they differ the route is BOUND-BUT-MISSING with both versions and the fix
+  (`run local-offload install hyperframes`).
+- **`local-offload install hyperframes` (new)** is the installers' HyperFrames step for an installed node, from
+  the `package.json` and lock the binary embeds, so a node that runs from a binary drop needs no checkout. It never
+  leaves a node worse off: it refuses up front when the runner beside the binary pins another version or the
+  directory is not a harness install; keeps a healthy install (committed package files, the pinned version, a
+  tree `npm ls --all` accepts) and only re-verifies it; otherwise builds the new tree in
+  `<dir>/.install-staging`, where `npm ci --ignore-scripts` and `npm audit signatures` (fatal) run, and swaps in
+  only a verified tree, keeping the replaced one as `node_modules.prev` (with `package*.json.prev`) for a
+  rollback; then runs `npm rebuild esbuild` and the runner's `browser` and `version` ops on the new tree and puts
+  the previous install back if one fails. npm runs with the configured node first on PATH; a config bound to
+  another Chrome build than the pin resolves is an error that names the value to set; `--timeout` bounds the
+  whole step (45 minutes).
+- The release procedure runs it, then `acceptance`, on every node with the lane right after that node's swap.
+
+### Changed — HyperFrames 0.8.108 -> 0.8.114
+
+- The lock's integrity equals the registry's; `npm audit signatures` passes; esbuild stays 0.25.12, so the
+  `allowScripts` approval holds; chrome-headless-shell stays 152.0.7977.30 (the second Chrome string in the
+  package is macOS 12's). The guards the runner depends on were re-read on the package: every environment gate
+  and the `--json` skip of the update and skills checks appear as in 0.8.108, the 45 hosts the package names are
+  identical, and `--help` for lint, check, render, snapshot and browser differs only in `snapshot --at` (each
+  timestamp is now captured at that exact instant).
+- **Measured through the runner.** captions-bar's default sample: lint 0/0, check passed, VP9 `yuva420p`
+  1920x1080, 240 frames, 15/15 identical decoded-frame pairs across 1, 2, 4, 6 and `auto` (twice) workers, and 0
+  of 240 frames different from a 0.8.108 render; the frame at 1.5 s reads "Captions follow the words". All seven
+  templates at their defaults and with every string variable at its maxLength gave the same lint and check
+  verdicts on both versions (14/14).
+- **One behaviour change reaches the templates:** since 0.8.112 an alpha export keeps the composition root's
+  background. The four opaque templates exported to `webm`, `mov` or `png-sequence` are now opaque, as their
+  `alpha: false` says (title-card `webm`: alpha plane mean 10-14 on 0.8.108, 255 everywhere on 0.8.114); the
+  alpha templates are unchanged.
+- A Linux node rendered through the lane on 0.8.114 after installing it with the new subcommand into an empty
+  directory (title-card mp4, lower-third webm with alpha), so the setup guide's "no Linux node has been
+  verified" line is gone.
+
+### Changed — the house skill and the kit's provenance
+
+- `skill/hyperframes-compose` keeps its ban on skill installers (`npx skills add`, `claude plugin install`,
+  `hyperframes skills`/`init`) and no longer forbids an operator-kept, pinned copy of a teaching kit wired to
+  this lane with its paid and cloud steps removed. The kit's `PROVENANCE.md` says the same for this repository.
+
+### Docs
+
+`setup/SETUP-AGENT.md` (the subcommand, the integrity and Chrome lines, Linux), ADR 0059 (the pin history and
+how a moved pin reaches a node), `docs/OPERATOR-GUIDE.md` (the bump procedure ends with `install hyperframes` and
+`acceptance` per node), the templates README, `_shared/README.md` (the font chunk is byte-identical in both
+versions), captions-bar's Measured section.
+
+### Tests
+
+`internal/hfinstall` (stage, swap and rollback paths, the ownership guard, the runner argv, stdout-only result
+parsing through a real child process, PATH), mediacap's drift verdict, and a root test that the embedded
+`package.json`, the embedded lock and the runner's pin agree. Fourteen mutants across the new guards were each
+seen failing a test. With 0.161.0 merged in: Node 885 pass / 0 fail / 1 skipped (886); Go all packages green.
+
 ## [0.161.0] - 2026-10-02 - GPU leases name their cards, free cards take queued work; agent audit trail, read floor and audit chain
 
 **The operator-visible change (GPU routing, milestone 1).** One job used to fence a whole box: a lease named no cards,
