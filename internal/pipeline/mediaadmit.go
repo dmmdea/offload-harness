@@ -430,7 +430,14 @@ func (p *Pipeline) acquireMediaLease(ctx context.Context, reason string, ttl, wa
 			}
 		}
 	}
+	// The place a whole-node call resumed is kept held while it waits, as a single-card call's is
+	// (keepPlace); the keeper is stopped before the place is spent or left again.
+	stopKeep := func() {}
+	if place != nil {
+		stopKeep = keepPlace(place.m, place.tok.ID)
+	}
 	env, release, err := p.acquireWholeNode(ctx, reason, ttl, wait, need.Token)
+	stopKeep()
 	if err != nil {
 		return mediaGrant{}, p.wholeNodeBusy(err, reason, ttl, start, place, need.Resumable)
 	}
@@ -546,6 +553,45 @@ func queuedClaims(m *gpulease.Manager, cards []gpuprobe.Card, ownToken string) m
 	return out
 }
 
+// placeKeepEvery is how often a call that resumed a place in line re-asserts it while it waits in
+// this process: a third of the grace, so one missed tick still leaves the place held. A var so a
+// test can shorten it.
+var placeKeepEvery = gpulease.TokenGrace / 3
+
+// keepPlace re-asserts the place in line token id holds, every placeKeepEvery, until the returned
+// func is called (which also JOINS the goroutine, so nothing touches the token after the caller
+// moves on to spend, consume or re-leave it). A token's life is its last poll; a resumed call that
+// then waits for the card (in this process, for its slot) polls nothing, so without this its place
+// read as absent after the grace and later callers and other processes' waiters skipped it. It is
+// one timer for the length of a wait that is already bounded by gpu_wait_ms, and it only ever
+// refreshes a token that still exists (gpulease.TouchToken). An empty id keeps nothing.
+func keepPlace(m *gpulease.Manager, id string) (stop func()) {
+	if id == "" {
+		return func() {}
+	}
+	done, stopped := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(stopped)
+		t := time.NewTicker(placeKeepEvery)
+		defer t.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-t.C:
+				m.TouchToken(id)
+			}
+		}
+	}()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			close(done)
+			<-stopped
+		})
+	}
+}
+
 // acquireCards holds a lease on the planned cards, allocating the card when the plan says so.
 func (p *Pipeline) acquireCards(ctx context.Context, m *gpulease.Manager, reason string, ttl, wait time.Duration,
 	need mediaNeed, plan mediaPlan, cards []gpuprobe.Card) (mediaGrant, error) {
@@ -557,11 +603,16 @@ func (p *Pipeline) acquireCards(ctx context.Context, m *gpulease.Manager, reason
 		}
 		return 0
 	}
-	// A call that resumes a place keeps the arrival time it left with.
+	// A call that resumes a place keeps the arrival time it left with, and keeps the place itself
+	// held while it waits (keepPlace). The keeper is stopped before the call spends the place
+	// (grantCards), consumes it (the lease wait registers a waiter) or leaves it again.
 	since, tokenID := start, ""
+	stopKeep := func() {}
 	if tok, ok := m.ResumeToken(need.Token); ok {
 		since, tokenID = tok.Since(), tok.ID
+		stopKeep = keepPlace(m, tok.ID)
 	}
+	defer stopKeep()
 	optsFor := func(ids []string) gpulease.Options {
 		return gpulease.Options{Reason: reason, Origin: "pipeline", TTL: ttl, Devices: ids, ResumeToken: tokenID}
 	}
@@ -605,6 +656,7 @@ func (p *Pipeline) acquireCards(ctx context.Context, m *gpulease.Manager, reason
 			} else {
 				lease, err := m.TryAcquire(gpulease.ClassMedia, optsFor(ids))
 				if err == nil {
+					stopKeep()
 					return p.grantCards(ctx, m, lease, ids, plan, cards, tokenID), nil
 				}
 				mediaSlots.release(ids)
@@ -632,6 +684,7 @@ func (p *Pipeline) acquireCards(ctx context.Context, m *gpulease.Manager, reason
 	}
 	qo := optsFor(ids)
 	qo.Wait, qo.WaitOut = remaining(), true
+	stopKeep() // the waiter the lease wait registers stands for the place from here
 	lease, err := m.Acquire(gpulease.ClassMedia, qo)
 	if err != nil {
 		mediaSlots.release(ids)

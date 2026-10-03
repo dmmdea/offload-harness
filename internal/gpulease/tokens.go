@@ -39,6 +39,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -174,8 +175,13 @@ func (m *Manager) DropToken(id string) {
 	if !tokenIDPattern.MatchString(id) {
 		return
 	}
+	tokenFileMu.Lock()
+	defer tokenFileMu.Unlock()
 	_ = removeClaim(tokenPath(m.tokensDir(), id))
 }
+
+// tokenFileMu orders a touch against a drop of the same token within this process (TouchToken).
+var tokenFileMu sync.Mutex
 
 // Tokens lists the places in line that can still be resumed (not past TokenTTL since their last
 // poll), oldest arrival first. Expired and unreadable records are removed as they are read. A
@@ -214,6 +220,43 @@ func (m *Manager) Tokens() []Token {
 		return out[i].ID < out[j].ID
 	})
 	return out
+}
+
+// TouchToken records that the call holding token id is still here, so the place keeps holding
+// against later callers: a call that resumed a place and then WAITS (in-process, for the card's
+// slot) polls nothing, and a token's life is its last poll. It refreshes a token that still
+// exists and never writes one: a token that was dropped (served, or consumed by a waiter), pruned
+// or never existed answers false and stays gone. The arrival time is untouched. Callers join
+// whatever repeats it before they drop the token, so a touch cannot bring a spent place back.
+func (m *Manager) TouchToken(id string) bool {
+	id = strings.TrimSpace(id)
+	if !tokenIDPattern.MatchString(id) {
+		return false
+	}
+	path := tokenPath(m.tokensDir(), id)
+	// A touch is a read-modify-write of the file; a drop between its read and its rename would
+	// have the rename write the spent token back. In this process the two take the same lock, and
+	// no other process touches or drops a token it did not leave.
+	tokenFileMu.Lock()
+	defer tokenFileMu.Unlock()
+	t, st := readToken(path)
+	if st != tokenOK {
+		return false
+	}
+	t.PolledMs = m.now().UnixMilli()
+	b, err := json.Marshal(t)
+	if err != nil {
+		return false
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o666); err != nil {
+		return false
+	}
+	if err := renameReplacing(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return false
+	}
+	return true
 }
 
 // tokenLive reports whether t still holds its place: its poller left within the grace.

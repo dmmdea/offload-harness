@@ -15,6 +15,15 @@ Versioning: [SemVer](https://semver.org/).
   and a refusal ends it before anything is touched. The order is resolve, stop the kept instances, warm the seat
   back, release: the instances go before the seat is loaded onto their cards (the documented order; it had been
   warm first). A release that fails after the stop says the instances were already stopped.
+- **A resumed place no longer ages while its call waits.** The resumed call looked its token up (without
+  consuming it) and then waited in-process for the card's slot, up to the whole window, with no waiter record and no
+  refresh of the token's last poll, so after the 30 s grace the place read as absent and other processes' waiters and
+  newcomers skipped it: a caller that did everything right lost its turn while standing in it (the common case on a
+  box with a pinned card, where every single-card call contends on one in-process slot). The wait now re-asserts the
+  place every ten seconds (`gpulease.Manager.TouchToken`, which refreshes a token that exists and never writes one,
+  and is ordered against a drop by an in-process lock so a touch cannot revive a spent place). The few milliseconds
+  between a lease wait's waiter unregistering and the queued answer re-leaving the token remain; they cost
+  fairness, never exclusivity.
 - **A refused call that can never resume a place no longer leaves one.** The queued answer was unconditional, so
   the `generate-image` CLI verb, the fleet-node dispatch (the delegator re-places, it never resumes) and the image
   batch each left a token nobody could claim, and a live token holds its cards back from later callers for the 30 s

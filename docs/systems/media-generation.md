@@ -1001,7 +1001,10 @@ does not fail with `gpu busy`. It leaves a place-keeping token and answers with 
 it left, with the arrival time it had. A token lives ten minutes after the last time its caller polled it;
 for the first 30 seconds of that it holds its place against later callers for the same cards, and after
 that it is skipped by everyone (a whole-node barrier included), so a client that wandered off never blocks
-the line. Tokens are in `<state>/gpu/tokens`, not among the waiters (an older binary prunes any waiter
+the line. A call that RESUMED a place and is now waiting for its card inside this process (the card's slot
+is held by another job here) re-asserts its place every ten seconds until it is served, hands it to its lease
+wait, or gives it up again, so a caller that is standing in its place never loses it to that grace. A place that
+was not resumed is not invented: a first-time call leaves one only when it gives up. Tokens are in `<state>/gpu/tokens`, not among the waiters (an older binary prunes any waiter
 whose process stopped polling); a binary that predates them does not honour them, so on a host that mixes
 versions it can take a card ahead of a token holder, which costs the holder its place and never
 exclusivity. A call that holds the whole node on such a host leaves the same kind of token. A host that
