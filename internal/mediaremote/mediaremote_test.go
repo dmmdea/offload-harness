@@ -655,13 +655,37 @@ type fakeOpts struct {
 	mediaStatus int
 	// log, when set, records every request path and the number of polls.
 	log *fakeLog
+	// alternate makes polls 1..2*alternate alternate a 500 (odd polls) with a running answer (even polls),
+	// then the job behaves normally: more than maxPollFailures failures, never maxPollFailures in a row.
+	alternate int
+	// deleteStatus is the status a DELETE /fleet/jobs/{id} (a withdraw) answers; 0 = 405, which is what a
+	// real node answers for a job it will not withdraw.
+	deleteStatus int
+	// mediaHang makes GET /fleet/media block until the client gives up.
+	mediaHang bool
 }
 
 // fakeLog is what a fake node saw.
 type fakeLog struct {
-	mu    sync.Mutex
-	paths []string // r.URL.EscapedPath() of every request
-	polls int
+	mu      sync.Mutex
+	paths   []string // r.URL.EscapedPath() of every request
+	polls   int
+	deletes []seen // every DELETE (a withdraw), with the bearer it carried
+}
+
+func (l *fakeLog) noteDelete(path, auth string) {
+	if l == nil {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.deletes = append(l.deletes, seen{method: http.MethodDelete, path: path, auth: auth})
+}
+
+func (l *fakeLog) withdraws() []seen {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]seen(nil), l.deletes...)
 }
 
 func (l *fakeLog) note(path string, poll bool) {
@@ -694,6 +718,19 @@ func fakeNode(t *testing.T, o fakeOpts) *httptest.Server {
 	tasks, _ := json.Marshal(o.tasks)
 	var dispatched atomic.Int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			o.log.noteDelete(r.URL.EscapedPath(), r.Header.Get("Authorization"))
+			if o.deleteStatus == http.StatusOK {
+				fmt.Fprint(w, `{"state":"withdrawn","withdrawn":true}`)
+				return
+			}
+			status := o.deleteStatus
+			if status == 0 {
+				status = http.StatusMethodNotAllowed
+			}
+			w.WriteHeader(status)
+			return
+		}
 		o.log.note(r.URL.EscapedPath(), strings.HasPrefix(r.URL.Path, "/fleet/jobs/"))
 		switch {
 		case r.URL.Path == "/fleet/health":
@@ -730,6 +767,15 @@ func fakeNode(t *testing.T, o fakeOpts) *httptest.Server {
 					fmt.Fprint(w, `{"status":"error","error":"fake hiccup"}`)
 					return
 				}
+				if n <= 2*o.alternate {
+					if n%2 == 1 {
+						w.WriteHeader(500)
+						fmt.Fprint(w, `{"status":"error","error":"fake hiccup"}`)
+						return
+					}
+					fmt.Fprint(w, `{"state":"running"}`)
+					return
+				}
 			}
 			if o.jobState != "" {
 				fmt.Fprintf(w, `{"state":%q}`, o.jobState)
@@ -741,6 +787,10 @@ func fakeNode(t *testing.T, o fakeOpts) *httptest.Server {
 			}
 			fmt.Fprintf(w, `{"state":"done","data":%s}`, o.jobData)
 		case strings.HasPrefix(r.URL.Path, "/fleet/media/"):
+			if o.mediaHang {
+				<-r.Context().Done()
+				return
+			}
 			if o.mediaStatus != 0 {
 				w.WriteHeader(o.mediaStatus)
 				return

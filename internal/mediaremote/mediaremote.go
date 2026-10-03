@@ -28,11 +28,14 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -328,14 +331,14 @@ func Call(ctx context.Context, cfg config.Config, req core.Request, remotes []st
 	}
 
 	if err := post(ctx, cfg, base+route, body); err != nil {
-		if be := budgetEnded(ctx, "sending the job", node, jobID, err); be != nil {
+		if be := budgetEnded(ctx, cfg, base, phaseSending, node, jobID, err); be != nil {
 			return core.Result{}, be
 		}
 		return core.Result{}, err
 	}
 	res, data, err := wait(ctx, cfg, base, jobID)
 	if err != nil {
-		if be := budgetEnded(ctx, "the job was rendering", node, jobID, err); be != nil {
+		if be := budgetEnded(ctx, cfg, base, phaseRendering, node, jobID, err); be != nil {
 			return core.Result{}, be
 		}
 		var pe *placementError
@@ -350,7 +353,7 @@ func Call(ctx context.Context, cfg config.Config, req core.Request, remotes []st
 	}
 	local, err := fetchOutputs(ctx, cfg, base, data, outputDest{out: str(req.Params, "out"), outDir: pl.outDir}, jobID, node)
 	if err != nil {
-		if be := budgetEnded(ctx, "its outputs were being fetched", node, jobID, err); be != nil {
+		if be := budgetEnded(ctx, cfg, base, phaseFetching, node, jobID, err); be != nil {
 			return core.Result{}, be
 		}
 		var pe *placementError
@@ -366,16 +369,69 @@ func Call(ctx context.Context, cfg config.Config, req core.Request, remotes []st
 	return core.Result{OK: true, Data: local, Meta: core.Meta{Node: node, LatencyMs: time.Since(start).Milliseconds()}}, nil
 }
 
+// phase is the step of a call a deadline can end.
+type phase int
+
+const (
+	phaseSending phase = iota
+	phaseRendering
+	phaseFetching
+)
+
+// withdrawTimeout bounds the best-effort withdraw sent when a call's budget ends; the call's own context is
+// already expired by then, so the request runs on one of its own.
+const withdrawTimeout = 5 * time.Second
+
 // budgetEnded answers a failure that surfaced after this call's own deadline passed (the budget this call
 // set itself, or the caller's shorter one) as a budget defer naming the node and the remote job, whatever
-// transport error the expiry looked like on the way. The node is not told to stop: the job may still hold
-// its card, which the message says. nil when the deadline did not pass.
-func budgetEnded(ctx context.Context, doing, node, jobID string, cause error) error {
+// transport error the expiry looked like on the way. While the job is sent or rendering the node is asked,
+// best effort, to withdraw it (a job it has not started never will, instead of rendering for hours into
+// an output nobody fetches); the message says whether it confirmed. A deadline that passes while the
+// outputs are fetched is a different thing: the render is finished and the files are still on the node, so
+// nothing is withdrawn and the message says so. nil when the deadline did not pass.
+func budgetEnded(ctx context.Context, cfg config.Config, base string, ph phase, node, jobID string, cause error) error {
 	if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		return nil
 	}
+	if ph == phaseFetching {
+		return &placementError{core.DeferClassBudget, fmt.Sprintf(
+			"node %s (remote job %s) finished the render, but the deadline for this call passed while its outputs were being fetched; the files are still on the node and none was kept here: %v", node, jobID, cause)}
+	}
+	doing, note := "sending the job", "the node may still be running that job"
+	if ph == phaseRendering {
+		doing = "the job was rendering"
+	}
+	if withdrawJob(cfg, base, jobID) {
+		note = "the node confirmed it withdrew the job before it started"
+	}
 	return &placementError{core.DeferClassBudget, fmt.Sprintf(
-		"the deadline for this call passed while %s on node %s (remote job %s); the node may still be running that job: %v", doing, node, jobID, cause)}
+		"the deadline for this call passed while %s on node %s (remote job %s); %s: %v", doing, node, jobID, note, cause)}
+}
+
+// withdrawJob asks the node to take back a job it has not started (DELETE /fleet/jobs/{id}). Best effort:
+// the request has a short timeout of its own, and any failure is logged, never returned, because the call
+// is already ending on its budget. True only when the node confirmed the withdrawal.
+func withdrawJob(cfg config.Config, base, jobID string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), withdrawTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, base+"/fleet/jobs/"+url.PathEscape(jobID), nil)
+	if err != nil {
+		log.Printf("mediaremote: withdraw of remote job %s not sent: %v", jobID, err)
+		return false
+	}
+	auth(cfg, req)
+	resp, err := HTTPClient.Do(req)
+	if err != nil {
+		log.Printf("mediaremote: withdraw of remote job %s on %s failed: %v", jobID, base, err)
+		return false
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if resp.StatusCode == http.StatusOK {
+		return true
+	}
+	log.Printf("mediaremote: node %s did not withdraw remote job %s: status %d: %s", base, jobID, resp.StatusCode, truncate(b))
+	return false
 }
 
 func newJobID() (string, error) {
@@ -724,9 +780,12 @@ type staged struct {
 // directory. Each destination other than out is CLAIMED first by creating it exclusively, so two jobs (or
 // two nodes' counter names) can never write the same file: the primary takes the node's file name in
 // media_dir when it is free, every other output takes the remote job id as a prefix (an out_dir takes the
-// node's names, and the prefix only where a name is taken). A mismatch or a failed download removes every
-// temp and every claimed name and leaves the caller's destinations as they were; if a placement fails
-// part-way the error says which files already landed. The caller's out is placed last.
+// node's names, and the prefix only where a name is taken). The caller's out is decided first and no other
+// output may claim its path. A mismatch or a failed download removes every temp and every claimed name and
+// leaves the caller's destinations as they were; if a placement fails part-way the error says which files
+// already landed. The caller's out is placed last. Fetched files are 0644 less the umask. Before claiming
+// in a directory, leftovers of a fetch that never finished (stale temps and empty job-prefixed claims) are
+// swept.
 func fetchOutputs(ctx context.Context, cfg config.Config, base string, data json.RawMessage, to outputDest, jobID, node string) (json.RawMessage, error) {
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.UseNumber()
@@ -801,6 +860,21 @@ func fetchOutputs(ctx context.Context, cfg config.Config, base string, data json
 	if to.outDir != "" {
 		dir, prefixSecondaries = to.outDir, false
 	}
+	if dir == "" {
+		dir = "." // config validation tolerates an empty media_dir; MkdirAll("") is an error on every OS
+	}
+	// The caller's out is the FIRST destination decided: its path is reserved, so no other output of this
+	// job can claim that name (an out inside out_dir that shares a base name with a secondary would
+	// otherwise be renamed over it last, destroying it). out itself is not created empty: it may replace
+	// an existing file.
+	reservedOut := to.out
+	swept := map[string]bool{}
+	sweep := func(d string) {
+		if k := filepath.Clean(d); !swept[k] {
+			swept[k] = true
+			sweepStale(d, time.Now())
+		}
+	}
 	var items []*staged
 	var landed []string
 	cleanup := func() {
@@ -822,13 +896,15 @@ func fetchOutputs(ctx context.Context, cfg config.Config, base string, data json
 				cleanup()
 				return nil, err
 			}
+			sweep(filepath.Dir(it.dst))
 			continue
 		}
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			cleanup()
 			return nil, err
 		}
-		dst, err := claimName(dir, names[i], jobID, i != 0 && prefixSecondaries)
+		sweep(dir)
+		dst, err := claimName(dir, names[i], jobID, i != 0 && prefixSecondaries, reservedOut)
 		if err != nil {
 			cleanup()
 			return nil, err
@@ -923,8 +999,10 @@ func fetchOutputs(ctx context.Context, cfg config.Config, base string, data json
 
 // claimName creates, exclusively and empty, the file an output will be moved onto, and returns its path:
 // the node's own name when it is wanted and free, else the remote job id as a prefix, else that with a
-// counter. An existing file (or directory) of any of those names is never touched.
-func claimName(dir, name, jobID string, prefixed bool) (string, error) {
+// counter. An existing file (or directory) of any of those names is never touched, and neither is the path
+// in reserved (the caller's explicit out, which this call is going to write): a candidate that is that path
+// counts as taken.
+func claimName(dir, name, jobID string, prefixed bool, reserved string) (string, error) {
 	candidates := []string{name, jobID + "-" + name}
 	if prefixed {
 		candidates = candidates[1:]
@@ -934,6 +1012,9 @@ func claimName(dir, name, jobID string, prefixed bool) (string, error) {
 	}
 	for _, c := range candidates {
 		p := filepath.Join(dir, c)
+		if reserved != "" && samePath(p, reserved) {
+			continue
+		}
 		f, err := os.OpenFile(p, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
 		if err == nil {
 			f.Close()
@@ -977,7 +1058,7 @@ func download(ctx context.Context, cfg config.Config, base, name, dir string) (t
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return "", "", &httpStatusError{code: resp.StatusCode, what: "GET " + name, body: truncate(b)}
 	}
-	f, err := os.CreateTemp(dir, ".media-fetch-*.part")
+	f, err := createStage(dir)
 	if err != nil {
 		return "", "", err
 	}
@@ -993,6 +1074,99 @@ func download(ctx context.Context, cfg config.Config, base, name, dir string) (t
 		return "", "", err
 	}
 	return tmp, hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// stagePrefix and stageSuffix name a download's temp file; sweepStale recognises its leftovers by them.
+const (
+	stagePrefix = ".media-fetch-"
+	stageSuffix = ".part"
+)
+
+// createStage creates a download's temp file under a unique name in dir with mode 0644 (less the umask), so
+// a fetched file is readable by whoever reads this machine's media dir, as the old direct write was. (A
+// temp made by os.CreateTemp is always 0600, and the rename carries that mode onto the output.)
+func createStage(dir string) (*os.File, error) {
+	for range 100 {
+		var rnd [8]byte
+		if _, err := rand.Read(rnd[:]); err != nil {
+			return nil, err
+		}
+		f, err := os.OpenFile(filepath.Join(dir, stagePrefix+hex.EncodeToString(rnd[:])+stageSuffix), os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o644)
+		if err == nil {
+			return f, nil
+		}
+		if !errors.Is(err, fs.ErrExist) {
+			return nil, err
+		}
+	}
+	return nil, fmt.Errorf("no free temp file name in %s", dir)
+}
+
+// samePath reports whether two paths name the same file, without either existing (case-insensitive where
+// the usual file system is).
+func samePath(a, b string) bool {
+	if abs, err := filepath.Abs(a); err == nil {
+		a = abs
+	}
+	if abs, err := filepath.Abs(b); err == nil {
+		b = abs
+	}
+	a, b = filepath.Clean(a), filepath.Clean(b)
+	if runtime.GOOS == "windows" || runtime.GOOS == "darwin" {
+		return strings.EqualFold(a, b)
+	}
+	return a == b
+}
+
+const (
+	// staleAfter is how old a fetch leftover must be before the sweep takes it: far longer than any one
+	// download (fetchTimeout is 30 minutes) so a concurrent fetch of another job is never touched.
+	staleAfter = time.Hour
+	// sweepScan bounds how many directory entries one sweep looks at, and sweepRemove how many files it removes.
+	sweepScan, sweepRemove = 4096, 256
+)
+
+// claimedName matches the names claimName gives an output that took the remote job id as a prefix.
+var claimedName = regexp.MustCompile(`^media-[0-9a-f]{16}-`)
+
+// sweepStale removes what a fetch that never finished left in dir: staged `.media-fetch-*.part` temps and
+// zero-byte job-prefixed claim files, both older than staleAfter. A SIGINT, a kill or a crash between the
+// claim and the rename skips the cleanup that error returns do, and an empty claim left behind pushes every
+// later job onto a prefixed name. Bounded (entries scanned, files removed) and logged; a failure is only a
+// log line, since the fetch it precedes does not depend on it.
+func sweepStale(dir string, now time.Time) {
+	d, err := os.Open(dir)
+	if err != nil {
+		return
+	}
+	defer d.Close()
+	entries, _ := d.ReadDir(sweepScan)
+	var removed []string
+	for _, e := range entries {
+		if len(removed) >= sweepRemove {
+			break
+		}
+		name := e.Name()
+		stage := strings.HasPrefix(name, stagePrefix) && strings.HasSuffix(name, stageSuffix)
+		if !stage && !claimedName.MatchString(name) {
+			continue
+		}
+		fi, err := e.Info()
+		if err != nil || !fi.Mode().IsRegular() || now.Sub(fi.ModTime()) < staleAfter {
+			continue
+		}
+		if !stage && fi.Size() != 0 {
+			continue // a job-prefixed name with content is a fetched file, not a claim
+		}
+		if err := os.Remove(filepath.Join(dir, name)); err != nil {
+			log.Printf("mediaremote: could not remove stale fetch leftover %s: %v", filepath.Join(dir, name), err)
+			continue
+		}
+		removed = append(removed, name)
+	}
+	if len(removed) > 0 {
+		log.Printf("mediaremote: removed %d stale fetch leftover(s) from %s: %s", len(removed), dir, strings.Join(removed, ", "))
+	}
 }
 
 func getJSON[T any](ctx context.Context, cfg config.Config, u string) (T, error) {
