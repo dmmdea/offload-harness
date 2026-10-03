@@ -7,7 +7,7 @@
 // endpoint (agent_model, model, reasoning_model, escalation_model, triage_model,
 // vision_model, all on http://127.0.0.1:11436), and llama-swap serializes model
 // residency: two lanes naming different models force an evict-and-reload. The
-// harness had nothing that serialized by model — mediaSlot is media-only,
+// harness had nothing that serialized by model — the media slot set is media-only,
 // gpulease's ClassMedia never covers interactive text, sttclient's inferMu
 // guards a different process, pipeline's swapMu guards a timestamp map, and
 // internal/mcpserver has no limiter at all.

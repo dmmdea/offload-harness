@@ -460,6 +460,9 @@ func runGPUReserve(args []string) error {
 	// The warm is heartbeat for its length; the lease outlives the command by
 	// exactly the warm.
 	finish := func() {
+		// The instances kept under this lease go first: they hold VRAM the seat's warm-back and
+		// the next holder both want, and they live no longer than the lease (gpu_instances.go).
+		stopInstancesOfLease(cfg, lease, os.Stderr)
 		if *unload {
 			warmBackGuarded(cfg, leaseWarmGuard(m, lease), os.Stderr)
 		}
@@ -861,7 +864,11 @@ func runGPUHold(args []string) error {
 	if err != nil {
 		return err
 	}
-	defer func() { _ = lease.Release() }()
+	defer func() {
+		// The instances kept under this lease go with it (gpu_instances.go).
+		stopInstancesOfLease(loadCfg(fs), lease, os.Stderr)
+		_ = lease.Release()
+	}()
 
 	// Poll FAST but renew slowly. These are two different clocks and conflating them
 	// was wrong: a single 15s ticker meant `gpu release` left the holder alive for up
@@ -897,6 +904,23 @@ func runGPURelease(args []string) error {
 	if err != nil {
 		return err
 	}
+	// WHICH lease is being ended is settled first, by the rule the release itself uses
+	// (Manager.ReleaseTarget): a refusal (several card leases held and no --epoch to say which)
+	// ends the command here, before anything destructive has run. Stopping the kept instances
+	// and warming the seat both used to run ahead of that refusal, so an operator who forgot
+	// --epoch killed a live job's ComfyUI and still held the lease.
+	target, err := m.ReleaseTarget(*epoch)
+	if err != nil {
+		return err
+	}
+	// The instances kept under the lease being ended go with it, and BEFORE the seat is warmed
+	// back (both want the VRAM) and before the release (so the next holder never finds one on its
+	// card). Only a lease that is live is stopped for: nothing held, nothing to stop.
+	stopped := false
+	if info := m.Inspect(); target != 0 && info.HoldsEpoch(target) {
+		stopKeptInstances(loadCfg(fs), target, os.Stderr)
+		stopped = true
+	}
 	// Warm BEFORE the release so the seat is loaded by the time delegators see
 	// the card free again; a failed warm-back is reported and never blocks the
 	// release (a leaked lease costs every caller, a cold seat costs one load).
@@ -908,6 +932,11 @@ func runGPURelease(args []string) error {
 	}
 	released, err := m.ReleaseByEpoch(*epoch)
 	if err != nil {
+		if stopped {
+			// The stop cannot be taken back: say so, so the operator does not read the failure
+			// as "nothing happened".
+			err = fmt.Errorf("%w (the ComfyUI instances kept under lease epoch %d were already stopped; the lease is still held)", err, target)
+		}
 		return err
 	}
 	if !released {

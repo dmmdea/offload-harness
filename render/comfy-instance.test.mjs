@@ -394,15 +394,28 @@ test("keyed ensureComfy: an instance that nothing pins to a card says so, and on
   assert.deepEqual(await warnOf({ COMFY_INSTANCE: "side", COMFY_CARD_UUID: U0 }), [], "bound to a card by uuid");
 });
 
-test("an --api on another port with no key behaves as it always did: unkeyed argv, no --port, the default marker", async () => {
+test("an --api on another port with no key launches only when the operator's own extra args carry that --port: unkeyed argv, the default marker", async () => {
   const dir = scratch(); let spawned = null; let up = false;
   await L.ensureComfy({
-    api: "http://localhost:8190", env: {}, comfyDir: dir, py: "py", pollMs: 1, envFor: () => ({}), comfyUp: async () => up,
+    api: "http://localhost:8190", env: { COMFY_EXTRA_ARGS: "--port 8190" }, comfyDir: dir, py: "py", pollMs: 1, envFor: () => ({}), comfyUp: async () => up,
     portFree: boom("no bind check without a key"), mkdirs: boom("no directories without a key"),
     spawn: (py, args) => { spawned = args; up = true; return { pid: 5, kill() {} }; },
   });
-  assert.deepEqual(spawned, ["main.py", ...BASE_FLAGS]);
+  assert.deepEqual(spawned, ["main.py", ...BASE_FLAGS, "--port", "8190"]);
   assert.deepEqual(readdirSync(dir).filter((f) => f.startsWith(".offload-launch")), [".offload-launch.json"]);
+});
+
+test("an --api on another port with no key and no --port of the operator's own is refused, never launched on 8188 (plan section 7, finding 7)", async () => {
+  const dir = scratch(); let spawned = 0; const asked = [];
+  await assert.rejects(L.ensureComfy({
+    api: "http://localhost:8190", env: {}, comfyDir: dir, py: "py", pollMs: 1, log: () => {}, envFor: () => ({}),
+    comfyUp: async (a) => { asked.push(a); return false; },
+    portFree: boom("no bind check without a key"), mkdirs: boom("no directories without a key"),
+    spawn: () => { spawned++; return { pid: 5, kill() {} }; },
+  }), /COMFY-ENDPOINT-DOWN/);
+  assert.equal(spawned, 0);
+  assert.deepEqual(asked, ["http://localhost:8190"]);
+  assert.deepEqual(readdirSync(dir).filter((f) => f.startsWith(".offload-launch")), []);
 });
 
 test("portIsFree: false while something listens, true once it has closed", async () => {
@@ -714,7 +727,7 @@ test("keyed ensureComfy: a foreign holder of 127.0.0.1:port is detected even whe
 
 // ---- 11. withGpuSlot with an api on an unkeyed instance -------------------------------------
 
-test("withGpuSlot: an unkeyed instance on another port still launches through the env default, and only the free follows --api", async () => {
+test("withGpuSlot: an unkeyed instance on another port is ensured on THAT endpoint, and the free follows it too", async () => {
   let ensureOpts = null; let freeArgs = null;
   await withGpuSlot({
     api: "http://localhost:8190", lease: { dir: "X", epoch: 7, class: "media" }, checkLease: () => true, claimUnload: () => true,
@@ -722,6 +735,6 @@ test("withGpuSlot: an unkeyed instance on another port still launches through th
     ensureComfy: async (o) => { ensureOpts = o; return null; },
     freeComfy: async (...a) => { freeArgs = a; },
   }, async () => {});
-  assert.deepEqual(ensureOpts, {}, "ensureComfy gets no api: an unkeyed launch has no --port, so it can only start the default endpoint");
+  assert.deepEqual(ensureOpts, { api: "http://localhost:8190" }, "ensureComfy is told the endpoint: an unkeyed launch has no --port, so left to itself it ensures 8188");
   assert.deepEqual(freeArgs, ["http://localhost:8190"], "the post-run free goes to the endpoint the runner talked to");
 });

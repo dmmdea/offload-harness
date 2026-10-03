@@ -473,13 +473,69 @@ plan P13), and `GPU_LEASE_DEVICES` is for a command that wants to read the set i
 the cards the lease holds and leave the seats on the others (plan P5, below).
 
 **The allocator.** A card is allocatable when it is not quarantined (`quarantine.<id>` sidecars, which P12 will write),
-not the display card, not claimed (a whole-node lease claims every card), not under a foreign compute process
+not the display card (the card whose `display_active` reads Enabled **or** whose `display_attached` reads Yes: with the screen asleep
+`display_active` reads Disabled on every card of the 3-card box while `display_attached` still marks the card that drives the monitor,
+measured 2026-10-03; the card table's rule, `gpuprobe.ScreenCardUUIDs`. The lease verdict and the fleet health attribute load by
+`display_active` alone, `gpuprobe.DisplayCardUUIDs`, so an attached monitor never hides a holder's own work; and a reading taken
+after a transient `nvidia-smi` failure carries no `display_attached` and marks its cards `display-unknown`: the allocator hands out none of
+them until the next good reading), not claimed (a
+whole-node lease claims every card), not under a foreign compute process
 (`foreign-busy`, reported and skipped, never killed), its free VRAM fits `--vram` (GiB per card), and the **host** has the
 RAM `--ram` declares plus `gpu_host_ram_headroom_gib` (default 4) free. Among allocatable cards the order is: no resident
 seat first, then the cheapest eviction (the footprint of the configured layer seats loaded on it), then the lowest id. An
 unreadable host-RAM counter refuses only when a RAM need was declared. On Windows (WDDM) nvidia-smi lists no per-process
 rows for compute apps, so `foreign-busy` is Linux-only evidence today; the measured N-instance host RAM that tunes the
 headroom term is a P13 acceptance item.
+
+**A place in line for a caller that cannot stay (plan P13, invariant I4).** A media tool call waits its window
+(`gpu_wait_ms`, 90 s) and must then answer. On a host that leases cards it answers with a **token** instead of
+a refusal: a record of its place (the cards it wants, empty = the whole node, and the arrival time it joined
+the line with) that the caller re-presents to resume that place; see "Per-card media admission" in
+[media-generation.md](media-generation.md). A token has no process behind it (the MCP server that wrote it is
+alive for as long as the client's session is, which says nothing about whether the client is coming back), so
+its life is its **last poll**: for `TokenGrace` (30 s) after the poller left it holds its place, and every
+later waiter on the same cards queues behind it; after that it is **absent**, skipped by every waiter and
+ignored by a whole-node barrier, so a client that wandered off never blocks the line; for `TokenTTL`
+(10 min) it can still be resumed, with its original arrival time (the resumed waiter carries it, so it is
+ahead of everyone who arrived after it), and then it is pruned. `gpulease.LeaveToken`, `ResumeToken`,
+`DropToken`, `Tokens` and `QueuePosition` are the API; `Options.ResumeToken` and `QueuedSince` make a
+waiter carry a place. Tokens are files in `<state>/gpu/tokens`, never among the waiters in
+`<state>/gpu/waiters`: a binary that predates them prunes every waiter record whose process has stopped
+refreshing it, and would delete a token it cannot refresh. It does not honour tokens either, so on a host that
+mixes versions an older binary can take a card ahead of a token holder; that costs the holder its place and
+never exclusivity (the O_EXCL claim is still the only arbiter of who holds a card). A token id arrives from a
+tool caller and is checked against `tk-[a-z0-9]{8,32}` before it becomes a path. A queued `Acquire` whose
+whole window passed without reaching the front returns `ErrStillQueued`, which names who is ahead (a waiter
+that has not claimed, or a place held for another caller); callers that answer with a token treat it like
+`ErrHeld`.
+
+**A kept ComfyUI instance lives no longer than its lease.** A runner that keeps the ComfyUI it launched
+(`--keep-comfy`) leaves a detached instance running after it exits, so the items of a batch under one
+lease load their models once; its launch marker (`.offload-launch-<key>.json`) records the lease epoch.
+The **holder** of that lease stops the instance when it lets go, before the release and before any seat
+warm-back (both want the VRAM): `gpu reserve` when its wrapped command ends, the detached holder when it
+exits, `gpu release` when an operator ends a lease from outside, and the pipeline when a media lease is
+released. `gpu release` settles WHICH lease it is ending first, by the release's own rule (`Manager.ReleaseTarget`:
+the epoch named, else the only lease held), so a refusal (several card leases held and no `--epoch`) ends the
+command before the instances are stopped or the seat is warmed; if the release itself then fails, the error says
+the instances were already stopped. `internal/comfyinst` does it, and only for a keyed marker that names exactly that epoch: the pid
+must be alive, must not have begun after the marker was written (a recycled pid), and the endpoint on the
+marker's port must report exactly the recorded argv (`GET /system_stats`); then `POST /free` and a stop
+(Windows: terminate; elsewhere SIGTERM, then SIGKILL after five seconds). Anything short of that proof is left
+running and printed with the reason, never killed: a foreign process on the port is not ours. A marker with no
+lease epoch (the default instance, an instance launched outside a lease) is never touched. A holder stops
+instances only while its lease is still its own (`Lease.Check`): one that was released from outside or reclaimed
+after a suspend is a straggler, leaves them running and says which (the same rule `Lease.Release` follows for the
+claim: a fenced-out holder leaks rather than destroys), and `comfyinst` re-reads the marker at the moment of the
+stop and leaves an instance whose marker changed hands during its proof. A lease that ends because its holder died
+(no release runs) leaves its instance (a kept instance is detached, so it survives the holder). The next lease on
+that card REUSES it, it does not launch over it: a live keyed instance whose marker proves it is ours is reused, and
+reusing an instance that was a lease's takes it over (`restampLaunchOwner`: only the marker's `leaseEpoch` changes,
+to the reusing lease's), so that lease's release stops it. An instance that was never a lease's (a marker with no
+epoch) is not claimed by a lease that happens to reuse it. An instance nobody reuses stays up until an operator stops
+it: nothing here is a timer or a watcher (plan I5), and whether the next acquirer or `gpu doctor` should sweep
+markers whose epoch is dead is an operator decision (I5 forbids a watcher, not an explicit sweep). A kept launch
+whose marker cannot be written logs `COMFY-KEEP-WARN`, because nothing can then stop it by its lease.
 
 **Allocate and claim are one loop.** The allocator reads live state over a window of seconds, so another reserve can take
 the card it picked before this one claims it (two simultaneous `--cards 1` over free cards both choose the lowest id). So the
