@@ -12,13 +12,18 @@ A lease that unloaded the agent seat owes it a warm-back, and the warm loads the
 leases several holders share a box, and the warm checked only its own lease and the queue behind it: the first of three
 per-card film renders to finish would have loaded the 3-card agent seat over the two cards still rendering (found while
 launching the SS-31 motion clips on three per-card leases, 2026-10-03; that run started with the seat cold, so nothing
-was owed). The warm now also skips while another live lease sits on the seat's cards, says which, leaves the warm owed,
-and the last lease on those cards pays it. The seat's cards are its declared pins; a seat that declares none is on
-every card, and a lease on a card the seat does not use leaves the warm alone. `gpu release --warm-seat` takes the same
-rule; with no epoch it means the one live lease. Tests: `TestAWarmBackWaitsForTheLastLeaseOnTheSeatsCards`,
-`TestAWarmBackIgnoresALeaseOffTheSeatsCards`, `TestReleaseWarmSeatWaitsForTheOtherLeaseOnTheSeatsCards`,
-`TestReleaseWarmSeatWithNoEpochWarmsOverTheOneLiveLease`, `TestReleaseWarmSeatAfterTheLeaseEndedWarmsOnTheFreeCard`
-(4 of 4 mutants killed).
+was owed). The warm now also skips while another live lease sits on the seat's cards, says which, and leaves the warm
+owed for the next holder that warms (a later `--unload-seat` wrapper, `gpu release --warm-seat`); otherwise the seat
+loads on its next request. The seat's cards are its declared pins; a seat that declares none is on every card, and a
+lease on a card the seat does not use leaves the warm alone. `gpu release --warm-seat` takes the same rule; with no
+epoch it counts the whole box, as the release itself does, so over two live leases it neither warms nor releases.
+Known limits, both in the cold direction (the seat loads on its next request; an idle seat unloads after 5 minutes
+anyway): two leases ending in the same instant can each see the other and both skip, and a last lease without
+`--unload-seat` never warms. Tests: `TestAWarmBackWaitsForTheLastLeaseOnTheSeatsCards`,
+`TestAWarmBackWaitsForALeaseOnADeclaredSeatCard`, `TestAWarmBackIgnoresALeaseOffTheSeatsCards`,
+`TestReleaseWarmSeatWaitsForTheOtherLeaseOnTheSeatsCards`, `TestReleaseWarmSeatWithNoEpochWarmsOverTheOneLiveLease`,
+`TestReleaseWarmSeatWithNoEpochAndTwoLiveLeasesNeverWarms`, `TestReleaseWarmSeatAfterTheLeaseEndedWarmsOnTheFreeCard`
+(8 of 8 mutants killed, across the first cut and the review fix).
 
 ## [0.163.0] - 2026-10-03 - Thin clients render on the fleet: the compose-project door, `install client`, and a box with no seat never takes work itself
 

@@ -818,24 +818,40 @@ type warmGuard struct {
 	// others reports a live lease, other than the one warming, that sits on the seat's
 	// cards. With card-scoped leases several holders share a box, and the warm loads the
 	// seat on all its cards: the first to finish must not load it over cards the others
-	// still use. The warm stays owed and the last lease on those cards pays it.
+	// still use. The warm stays owed: the next holder that warms (a later `--unload-seat`
+	// wrapper, `gpu release --warm-seat`) pays it, else the seat loads on its next request.
+	// Two leases ending in the same instant can both see the other and both skip, and a
+	// last lease without --unload-seat never warms; both leave the seat cold, never loaded
+	// over live work.
 	others func(model string) (busy bool, why string)
 }
 
 // otherLeaseOnSeat is warmGuard.others for the lease with epoch self: a held lease on the
-// seat's cards that is not self. Epoch 0 is `gpu release`'s "whatever is held", which the
-// release itself only accepts when exactly one lease is live, so one live lease on the
-// seat's cards is that one. A seat that declares no cards is on every card.
+// seat's cards that is not self. A seat that declares no cards is on every card.
+//
+// Epoch 0 is `gpu release`'s "whatever is held", which the release accepts only when exactly
+// one lease is live ANYWHERE on the box (releaseByEpochV2 counts the whole directory, not the
+// seat's cards). So with epoch 0 the count is unscoped: one live lease is the one being
+// released and nothing else can sit on the seat; more than one and the release refuses, so
+// the warm must not run either (it would load the seat over a live lease and clear the
+// owed marker for a release that never happens).
 func otherLeaseOnSeat(m *gpulease.Manager, self uint64) func(model string) (bool, string) {
 	return func(model string) (bool, string) {
-		var held []gpulease.Info
-		for _, l := range modelaffinity.ScopeToModel(m.Inspect(), model).Each() {
-			if l.Held {
-				held = append(held, l)
+		info := m.Inspect()
+		if self == 0 {
+			live := 0
+			for _, l := range info.Each() {
+				if l.Held {
+					live++
+				}
 			}
+			if live > 1 {
+				return true, fmt.Sprintf("%d live leases (a release with no --epoch names none of them)", live)
+			}
+			return false, ""
 		}
-		for _, l := range held {
-			if l.Epoch == self || (self == 0 && len(held) == 1) {
+		for _, l := range modelaffinity.ScopeToModel(info, model).Each() {
+			if !l.Held || l.Epoch == self {
 				continue
 			}
 			cards := "the whole node"
