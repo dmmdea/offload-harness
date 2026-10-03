@@ -439,8 +439,8 @@ test("the runner's pin IS the committed lockfile's pin (one version, three place
   assert.equal(lock.packages["node_modules/hyperframes"].version, PINNED_VERSION);
   assert.equal(lock.packages[""].dependencies.hyperframes, PINNED_VERSION);
   assert.equal(lock.packages["node_modules/hyperframes"].integrity,
-    "sha512-RvHMA6aEHNyBUm9g8fB7UW9kL0UCnqy/7QCWBlCjvMxiyaSeJQqOcTJS1VBPwM/2v49rvK293jdHT5091y80xw==",
-    "the lock carries the registry integrity verified for 0.8.108 — a bump must re-verify it");
+    "sha512-dIHdDQ//Wapovreuc0q2B+xLS5gbDUSles3ysXafkvxC4YXzZjc3NPvMqweEi5IZQDXefxZOJws5AgDByOiRAQ==",
+    "the lock carries the registry integrity verified for 0.8.114 — a bump must re-verify it");
   assert.equal(pkg.private, true);
   assert.deepEqual(Object.keys(pkg.dependencies), ["hyperframes"], "exactly one dependency");
   // npm >= 11 blocks dependency install scripts unless package.json approves them, which turns the
