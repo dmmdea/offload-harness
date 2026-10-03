@@ -3330,48 +3330,7 @@ func ambientLeaseEnv() ([]string, error) {
 	}, nil
 }
 
-// mediaSlot is the IN-PROCESS half of GPU mutual exclusion: one media job at a time
-// inside this process, whatever else is true.
-//
-// The file claim serializes across processes. An INHERITED lease has no claim to
-// contend on — every job under `gpu reserve -- <cmd>` already holds the same one — so
-// without this, concurrency inside one process is unarbitrated. That is fine for the
-// one-shot command the wrapper was written for and wrong for a long-running server:
-// fleet-serve runs Pipeline.Run inline in a net/http handler goroutine, so two
-// dispatches under one reservation would both proceed, spawn two ComfyUI instances on
-// one card, and race the unload election so one render runs with models still resident
-// — precisely the condition the lease exists to prevent. The docs also recommend the
-// wrapper form, which steers straight into it.
-//
-// It is a buffered channel rather than a Mutex for two reasons: a waiter BLOCKS instead
-// of polling (no timers, no wakeups, no file reads — it is handed the slot the moment
-// the holder releases), and the wait can be bounded, which a Mutex cannot.
-//
-// LOCK ORDER IS ALWAYS slot -> file lease, never the reverse, so the two cannot deadlock.
-var mediaSlot = make(chan struct{}, 1)
-
-// takeMediaSlot claims the in-process slot, waiting at most wait. Reports false on
-// timeout, which the caller turns into the same clean defer a busy card produces.
-func takeMediaSlot(wait time.Duration) bool {
-	select {
-	case mediaSlot <- struct{}{}:
-		return true // free: no timer allocated at all in the common case
-	default:
-	}
-	if wait <= 0 {
-		return false
-	}
-	timer := time.NewTimer(wait)
-	defer timer.Stop()
-	select {
-	case mediaSlot <- struct{}{}:
-		return true
-	case <-timer.C:
-		return false
-	}
-}
-
-func releaseMediaSlot() { <-mediaSlot }
+// The in-process media slots (one per card) live in mediaslots.go.
 
 // errGPUBusy reports that the card is legitimately held by someone else. Callers turn
 // it into a clean defer rather than a failure — the work is not broken, it waited its
