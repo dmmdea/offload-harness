@@ -6,6 +6,80 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.164.0] - 2026-10-03 - PAIR shows every job where it ran: remote calls card, fleet nodes card for askers that cannot, transcription spills to an idle node
+
+An audit of PAIR's Jobs list against every node's ledger (2026-10-03) found it drew every card it received correctly, and
+that whole classes of work never reached it: 13 jobs a fleet node served for a thin client, every remote compose / vision /
+text call, everything on a box that is not a PAIR member, and one card left "queued" for 31.9 h. It also found that a box
+whose three cards were leased refused five transcriptions while two nodes' whisper seats sat idle. Defect ids are those of
+the fixes plan; the release notes name each.
+
+### Fixed — a test run no longer eats real PAIR cards (D1-D4)
+
+- `TestLeaseCardLifecycle` built an enabled emitter with no state root, so its sweep claimed the machine-wide
+  `pair-open` register's real orphan markers, posted their close to its own test server and deleted them: the real card
+  stayed open (the 31.9 h ghost; reproduced exactly as the recorded `frames = 4` flake). The root, `internal/delegate`
+  and `internal/mcpserver` suites now point `LOCAL_OFFLOAD_STATE_DIR` at a throwaway dir in a TestMain that fails
+  closed (about 55 mcpserver tests and one delegate test touched the real root; a per-package sweep with `ProgramData`
+  redirected now leaves the scratch root empty for all eight packages checked).
+- An orphan marker records the endpoint it was posted to; a sweeper closes only markers of its own endpoint (a legacy
+  marker counts as the default endpoint), so no test server or second ingress can consume a real card.
+- A close PAIR rejects (400 / 413 / 422) drops that marker and the pass continues; a marker whose frame cannot be built
+  is dropped the same way; transport errors, 5xx, 408 and 429 keep the marker. One bad marker no longer starves the rest.
+
+### Fixed — remote work is carded where it ran (D5-D11)
+
+- Remote compose, vision and text calls (`route: remote` or an auto spill) wrote no asker ledger row and no PAIR card.
+  They now emit exactly one card (queued → running → terminal) whose node is the dispatch host with the fleet node id as
+  an alias, plus one asker ledger row (`node`, `node_id`, `route`, `placement`, `fleet_job_id`, `card_by_caller`).
+- New wire headers: `X-Offload-Asker` (the asking box's PAIR member name or short host name) on every work-creating
+  fleet request, and `X-Offload-Pair-Card: node` ONLY when the asker will not card the job itself. On that signal the
+  serving node cards the job (requester `offload-harness/fleet:<asker>`) and records the asker on its ledger row
+  (`requester`). Old askers send nothing and keep today's behaviour, so a rolling deploy never double-cards.
+- Pulled (claim-loop) jobs get `Door = fleet` and carry the same signal; a duplicate admission can no longer leave a
+  node card open on the push or the pull path; fleet-serve drains its emitter on every shutdown branch.
+- `install client` seeds `pair_workloads_enabled: true` (inert without a PAIR identity).
+- Cards for work on a view-only PAIR node resolve through `<appdir>/configs/view-only-nodes.json`.
+
+### Fixed — one card per call (D12-D15)
+
+- A `video_watch` call wrote one ledger row per window and PAIR showed every row as a card (13 cards for one call on
+  2026-10-03). Window rows, video_describe's overflow retries, the text cascade's escalating attempts, extract_image's
+  sub-calls and inpaint's auto-text vqa are now inner rows (`parent_job_id`) of their call: one card, one job in the
+  savings summary, each token counted once.
+- `video_watch` stops waiting after the first window that defers `gpu_busy` (each window had re-waited the 90 s gate:
+  18 minutes for one refused call); the defer carries `err_class` and the latest reason.
+- A call's card is closed by its own ledger row (a `call_id` stamped on the row), not by the oldest open card of the
+  task: concurrent transcriptions no longer produce a third card.
+
+### Added — transcription can run on an idle fleet node (D16-D20, ADR 0072)
+
+- New token-gated node route `POST /fleet/stt` (task `stt-upload`, advertised in `/fleet/health` with `stt_hq` and
+  `stt_upload_max_mb`): the asker uploads 16 kHz mono Opus (or the original file under the cap), the node transcribes
+  it through its own pipeline and returns the whole result. Config `fleet_stt_upload_max_mb` (default 48),
+  `fleet_stt_max_concurrent` (default 1: stt jobs on a node queue in order across both lanes instead of failing
+  "model unloaded").
+- `offload_transcribe` gains `route` (`local` | `auto` | `remote`, default `auto`: every node serves the same whisper
+  family, so a spill costs no quality); `auto` spills only when the local whisper admission would actually block
+  (`modelaffinity.WouldBlockUpstream`). The asker writes its own `.srt/.txt/.segments.json`. CLI `transcribe --route`
+  (default local); `classify` / `extract` gain `--route` like their MCP twins. A local gpu-busy defer now names the route.
+- Behaviour change: on a node WITH a `fleet_auth_token` the legacy path-taking `stt` dispatch lane now needs the bearer.
+  The only known external dispatcher sends no token, but no real stt use through it exists.
+- Transcripts a node writes for an upload are removed after `fleet_stt_transcript_ttl_min` / when the job is evicted;
+  `/fleet/media` needs the bearer for gated lanes' outputs (stt uploads, legacy stt transcripts, compose projects) on a
+  node with a token, matching names fail-closed.
+- `internal/accelremote` dials through `netguard.SafeTransport` like every other fleet client.
+
+### Added — boxes outside the PAIR cluster report through a member (D24, D26)
+
+- Identity fallback: when `node-id.json` is unreadable (the harness runs as another OS user than PAIR), the emitter
+  reads this node's UUID from PAIR's loopback node-info and uses it only when the loopback ingress answers.
+- Card relay: a member advertises `pair_relay` and serves token-gated `POST /fleet/pair-relay`; a box with no PAIR
+  identity relays its cards there (`pair_workloads_relay`, default auto from `delegate_remotes`). The member namespaces
+  the id, names the asker, resolves the node itself (including view-only nodes), rate-limits and caps open cards per
+  asker; relayed markers are `.remote` files a pre-relay sweeper skips. `offload_status` gains a `pair` block naming
+  the emitter's mode (local ingress / node-info fallback / relay / off).
+
 ## [0.163.1] - 2026-10-03 - A warm-back never loads a seat over another card's lease
 
 ### Fixed — a warm-back waits for the last lease on the seat's cards (register C-86, plan P5 follow-up)
