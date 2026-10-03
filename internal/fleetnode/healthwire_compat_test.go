@@ -363,3 +363,209 @@ func TestOverdueLeaseWireIsReadByEveryHealthReader(t *testing.T) {
 		t.Fatal("the deploy's lease read is no longer gpulease Inspect() on the lease directory; re-check what it does with an overdue lease")
 	}
 }
+
+// TestLeasesWireIsReadByEveryHealthReader is the wire proof for GPU routing P7 (per-card lease
+// truth). One node, one REAL health handler, two live leases on different cards of a three-card
+// flagship box (a long media render on card C, a short reservation on card A), read by every
+// reader that ships:
+//
+//   - the raw JSON: leases[] has one entry per lease with its cards, and the SINGULAR lease block
+//     and lease_exclusive are the worst across them, which is everything a delegator one
+//     release behind reads - so that delegator is never told less than is true;
+//   - the delegator's decoder (delegate.FetchNodeView) and the real gate (delegate.Place): a
+//     contract whose seats are not all on a leased card stays routable to the node, where the
+//     whole-node reading would have refused it;
+//   - the fleet deploy's decoder (nodeswap's real ReadHealth), undisturbed by the new keys.
+func TestLeasesWireIsReadByEveryHealthReader(t *testing.T) {
+	cfg := config.FlagshipFixture()
+	cfg.FleetAgentEnabled = true
+	cfg.AgentModel = "agent-pool"
+	cfg.AgentCtxTokens = 262144
+	cfg.FleetAuthToken = "wire-token"
+	// The test's own home, state and lease directories: nothing here reads or writes the machine's.
+	home := t.TempDir()
+	cfg.Home, cfg.StateDir, cfg.GPULockPath = home, filepath.Join(home, "state"), filepath.Join(home, "gpu-lease")
+	jobs := fleetnode.NewJobs(time.Hour, cfg.FleetConcurrencyLimit())
+	t.Cleanup(func() { jobs.DrainAndStop(2 * time.Second) })
+
+	devs := []fleetnode.GPUDevice{
+		{Index: 0, UUID: "GPU-1111AAAA-2222-3333-4444-555566667777", Name: "synthetic 16 GB", TotalGiB: 16, FreeGiB: 15, UtilPct: 0, UtilKnown: true},
+		{Index: 1, UUID: "GPU-2222BBBB-3333-4444-5555-666677778888", Name: "synthetic 16 GB", TotalGiB: 16, FreeGiB: 15, UtilPct: 0, UtilKnown: true},
+		{Index: 2, UUID: "GPU-3333CCCC-4444-5555-6666-777788889999", Name: "synthetic 16 GB", TotalGiB: 16, FreeGiB: 2, UtilPct: 97, UtilKnown: true},
+	}
+	cardA, cardC := "gpu-1111aaaa-2222-3333-4444-555566667777", "gpu-3333cccc-4444-5555-6666-777788889999"
+	media := gpulease.Info{Held: true, Class: gpulease.ClassMedia, Epoch: 7, Epochs: []uint64{7}, PID: 4242,
+		ExpiresAt: time.Now().Add(6 * time.Hour), Devices: []string{cardC}}
+	text := gpulease.Info{Held: true, Class: gpulease.ClassText, Epoch: 9, Epochs: []uint64{9}, PID: 4243,
+		ExpiresAt: time.Now().Add(20 * time.Second), Devices: []string{cardA}, Exclusive: true}
+	both := media
+	both.Leases = []gpulease.Info{media, text}
+	both.Epochs = []uint64{7, 9}
+
+	roster := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"agent-pool","object":"model"},{"id":"gemma-4-26b-agent","object":"model"}]}`))
+	}))
+	defer roster.Close()
+	cfg.Endpoint = roster.URL
+
+	srv := fleetnode.New(nopRunner{}, jobs, fleetnode.Options{
+		NodeID:  "lease-node",
+		Version: "test",
+		Snapshot: func() (fleetnode.Snapshot, bool) {
+			return fleetnode.Snapshot{TotalGiB: 16, FreeGiB: 15, Devices: devs, At: time.Now()}, true
+		},
+		Lease:            func() gpulease.Info { return both },
+		LoopbackListener: true,
+		Cfg:              cfg,
+	})
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	// The roster probe is a background refresh: one health read to start it, then wait for it.
+	for i := 0; i < 200; i++ {
+		resp, err := http.Get(ts.URL + "/fleet/health")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var probe struct {
+			Resident bool `json:"agent_seat_resident"`
+		}
+		_ = json.NewDecoder(resp.Body).Decode(&probe)
+		resp.Body.Close()
+		if probe.Resident {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// 1) The raw JSON.
+	resp, err := http.Get(ts.URL + "/fleet/health")
+	if err != nil {
+		t.Fatalf("health GET: %v", err)
+	}
+	defer resp.Body.Close()
+	var raw struct {
+		Lease     map[string]any   `json:"lease"`
+		Leases    []map[string]any `json:"leases"`
+		Exclusive bool             `json:"lease_exclusive"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		t.Fatalf("health not JSON: %v", err)
+	}
+	if len(raw.Leases) != 2 || raw.Leases[0]["epoch"] != float64(7) || raw.Leases[1]["epoch"] != float64(9) {
+		t.Fatalf("leases = %v, want both live leases, lowest epoch first", raw.Leases)
+	}
+	if raw.Lease["class"] != "text" || raw.Lease["busy"] != true || raw.Lease["held"] != true || !raw.Exclusive {
+		t.Fatalf("singular lease block = %v exclusive=%v: a reader one release behind must see the worst of the two (a text, busy, exclusive hold), not the lowest epoch's short media render", raw.Lease, raw.Exclusive)
+	}
+
+	// 2) The delegator's decoder and the real gate.
+	view, err := delegate.FetchNodeView(context.Background(), ts.URL, "")
+	if err != nil {
+		t.Fatalf("the delegator's health decoder rejected the payload: %v", err)
+	}
+	if len(view.Leases) != 2 || len(view.Leases[0].Devices) != 1 || view.Leases[0].Devices[0] != cardC || !view.Leases[1].Exclusive {
+		t.Fatalf("delegator decoded the leases as %+v", view.Leases)
+	}
+	if !view.LeaseExclusive || !view.LeasedText {
+		t.Fatalf("the singular fields still decode (exclusive=%v text=%v)", view.LeaseExclusive, view.LeasedText)
+	}
+	if len(view.Layers) == 0 {
+		t.Fatal("the node published no layer rows: the per-card fence has nothing to read the seats from")
+	}
+	// The node resolves each seat's pin against its own card table and publishes the lease ids.
+	seatIDs := 0
+	for _, row := range view.Layers {
+		if row.Name != "triple" {
+			continue
+		}
+		for _, s := range row.Seats {
+			if s.Role == "agent" {
+				seatIDs = len(s.DeviceIDs)
+			}
+		}
+	}
+	if seatIDs != 3 {
+		t.Fatalf("the three-card agent seat published %d device ids, want its three cards resolved on the node", seatIDs)
+	}
+	local := delegate.NodeView{NodeID: "local-box", Local: true}
+	st := delegate.Subtask{Contract: core.AgentContract{
+		SchemaVersion: core.AgentWireSchemaVersion,
+		Goal:          "summarize the docs",
+		OutputSchema:  json.RawMessage(`{"type":"object"}`),
+	}, EstTokens: 1000}
+	// The default chain is the three-card seat, then the single layer's card-0 seat. The
+	// exclusive reservation holds card A, which holds BOTH, so the node is fenced for this
+	// contract, exactly as the whole-node reading would have it.
+	if got := delegate.Place("seed", st, local, []delegate.NodeView{view}, true); !got.Local {
+		t.Fatalf("Place chose %q: an exclusive reservation on card 0 holds every seat of the default chain", got.NodeID)
+	}
+	// With the reservation gone, the media render on card C holds only the three-card seat; the
+	// single layer's card-0 seat is free, so the node stays routable.
+	view.Leases = view.Leases[:1]
+	view.LeaseExclusive = false
+	if got := delegate.Place("seed", st, local, []delegate.NodeView{view}, true); got.NodeID != "lease-node" {
+		t.Fatalf("Place chose %q: a long render on card 2 leaves the single layer's card-0 seat free, so the node must stay a target", got.NodeID)
+	}
+	// And the very same view read the way a node one release behind publishes it (no leases[],
+	// only the singular block) is fenced as a whole node: the old reading is untouched.
+	view.Leases = nil
+	view.LeaseBusy, view.LeasedText = true, false
+	if got := delegate.Place("seed", st, local, []delegate.NodeView{view}, true); !got.Local {
+		t.Fatalf("Place chose %q: without leases[] a busy non-text lease still fences the whole node", got.NodeID)
+	}
+
+	// 3) The deploy's decoder, the real one its wait-idle step calls.
+	info, err := nodeswap.DefaultDeps().ReadHealth(context.Background(), ts.URL+"/fleet/health")
+	if err != nil {
+		t.Fatalf("the deploy's health decoder rejected the payload: %v", err)
+	}
+	if !info.OK || info.NodeID != "lease-node" {
+		t.Fatalf("deploy read %+v: the leases[] keys must not disturb it", info)
+	}
+}
+
+// TestHealthPayloadOfAnOlderNodeDecodesWithNoLeases is the other direction: a node at 0.160.0 or
+// 0.161.0 publishes only the singular lease block. The delegator's decoder must read it with
+// Leases nil and keep fencing it as a whole node, and a payload from the future carrying keys
+// nobody has seen must still decode.
+func TestHealthPayloadOfAnOlderNodeDecodesWithNoLeases(t *testing.T) {
+	older := `{"node_id":"old-node","queue_depth":0,"agent_enabled":true,"agent_seat":"offload-e4b","agent_seat_resident":true,"agent_ctx_tokens":8192,` +
+		`"lease":{"held":true,"class":"media","pid":99,"until":"2099-01-01T00:00:00Z","remaining_sec":21600,"busy":true},` +
+		`"gpu_devices":[{"index":0,"uuid":"GPU-1111AAAA","name":"x","vram_total_gb":16,"vram_free_gb":15,"util_pct":0,"util_known":true}]}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(older))
+	}))
+	defer srv.Close()
+	view, err := delegate.FetchNodeView(context.Background(), srv.URL, "")
+	if err != nil {
+		t.Fatalf("an older node's health was rejected: %v", err)
+	}
+	if view.Leases != nil || !view.LeaseBusy {
+		t.Fatalf("Leases = %v LeaseBusy = %v, want nil and busy: the singular block is the whole reading", view.Leases, view.LeaseBusy)
+	}
+	st := delegate.Subtask{Contract: core.AgentContract{
+		SchemaVersion: core.AgentWireSchemaVersion,
+		Goal:          "summarize the docs",
+		OutputSchema:  json.RawMessage(`{"type":"object"}`),
+	}, EstTokens: 1000}
+	local := delegate.NodeView{NodeID: "local-box", Local: true}
+	if got := delegate.Place("seed", st, local, []delegate.NodeView{view}, true); !got.Local {
+		t.Fatalf("Place chose %q: an older node under a long media lease is fenced as a whole node, as it always was", got.NodeID)
+	}
+
+	future := `{"node_id":"future-node","leases":[{"epoch":1,"class":"media","a_key_from_2027":{"x":[1]}}],"another_key":true}`
+	fs := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(future))
+	}))
+	defer fs.Close()
+	fv, err := delegate.FetchNodeView(context.Background(), fs.URL, "")
+	if err != nil {
+		t.Fatalf("a lease entry carrying a key nobody has seen broke the decoder: %v", err)
+	}
+	if len(fv.Leases) != 1 || fv.Leases[0].Epoch != 1 {
+		t.Fatalf("future payload decoded as %+v", fv.Leases)
+	}
+}

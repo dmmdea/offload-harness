@@ -32,9 +32,12 @@ import (
 const (
 	ReasonQuarantined = "quarantined"
 	ReasonDisplay     = "display"
-	ReasonClaimed     = "claimed"
-	ReasonForeignBusy = "foreign-busy"
-	ReasonVRAM        = "vram"
+	// ReasonDisplayUnknown: the reading could not say which card the monitor is on
+	// (gpuprobe.Card.DisplayUnknown), so no card is vouched for.
+	ReasonDisplayUnknown = "display-unknown"
+	ReasonClaimed        = "claimed"
+	ReasonForeignBusy    = "foreign-busy"
+	ReasonVRAM           = "vram"
 )
 
 // ResidentInfo is what is loaded on one card that taking it would evict.
@@ -138,6 +141,8 @@ func Allocate(in AllocInput) (Allocation, error) {
 			skip(c, id, ReasonQuarantined, "")
 		case c.Display && !in.AllowDisplay:
 			skip(c, id, ReasonDisplay, "the operator's screen; never auto-assigned while they are at the desk")
+		case c.DisplayUnknown && !in.AllowDisplay:
+			skip(c, id, ReasonDisplayUnknown, "this reading could not say which card the monitor is on; no card is auto-assigned until one can")
 		case in.WholeNodeHeld || in.Claimed[id]:
 			detail := "held by a live lease"
 			if in.WholeNodeHeld {

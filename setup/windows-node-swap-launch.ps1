@@ -43,6 +43,12 @@ param(
   [string]$RenderTarball = '',
   [string]$RenderDir = '',
   [string]$WaitIdleTimeout = '10m',
+  # Standalone node only: the cards this deploy touches, comma separated (node-swap --cards): each an
+  # nvidia-smi index, a GPU UUID or an unambiguous UUID prefix, resolved against this box's card table
+  # (an entry that places on no card refuses the deploy). A GPU lease on any other card is left alone and
+  # recorded, unless a process the deploy would stop holds it; empty = the whole node, where any GPU
+  # lease holds the swap. Refused with a health URL.
+  [string]$Cards = '',
   [string]$VerifyTimeout = '90s',
   [switch]$DryRun,
   [switch]$SkipHashCheck,
@@ -448,6 +454,7 @@ if ($RestartTask)     { $argList += @('-restart-task', $RestartTask) }
 if ($RestartCommand)  { $argList += @('-restart-command', $RestartCommand) }
 if ($RenderTarball)   { $argList += @('-render-tarball', $RenderTarball, '-render-dir', $RenderDir) }
 if ($WaitIdleTimeout) { $argList += @('-wait-idle-timeout', $WaitIdleTimeout) }
+if ($Cards)           { $argList += @('-cards', $Cards) }
 if ($VerifyTimeout)   { $argList += @('-verify-timeout', $VerifyTimeout) }
 if ($DryRun)          { $argList += '-dry-run' }
 if ($SkipHashCheck)   { $argList += '-skip-hash-check' }

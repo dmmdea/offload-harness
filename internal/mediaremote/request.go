@@ -221,6 +221,9 @@ func plan(req core.Request) (planned, error) {
 			pl.inputs = append(pl.inputs, input{"clone", clone})
 		}
 	case core.TaskRunGraph:
+		if hasDevices(p) {
+			return planned{}, &contractError{"devices is not carried by the fleet run-graph task (a card id names a card on this machine, and a node places the graph on its own cards); use route local to name a card"}
+		}
 		graph, err := readJSONObject(str(p, "graph_path"), "graph")
 		if err != nil {
 			return planned{}, err
@@ -255,6 +258,20 @@ func plan(req core.Request) (planned, error) {
 		}
 	}
 	return pl, nil
+}
+
+// hasDevices reports whether the caller declared cards (run_graph's operator-only devices): a non-empty list
+// or a non-blank string.
+func hasDevices(p map[string]any) bool {
+	switch v := p["devices"].(type) {
+	case []string:
+		return len(v) > 0
+	case []any:
+		return len(v) > 0
+	case string:
+		return strings.TrimSpace(v) != ""
+	}
+	return false
 }
 
 // readJSONObject reads a graph or manifest file the caller named as raw JSON the node takes inline. An empty

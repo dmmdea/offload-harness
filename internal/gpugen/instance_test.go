@@ -101,3 +101,67 @@ func TestGenerateUnboundSpecAddsNoInstanceEnv(t *testing.T) {
 		}
 	}
 }
+
+// TestPostRunFreeFollowsTheEnvTheRunnerWasGiven: a route that hands its runner a per-card
+// instance through the Spec's own Env (inpaint, upscale, run-graph, video, animate and music
+// do; they never set Spec.ComfyAPI) must free THAT instance after the run. Before this the free
+// read the PARENT process's COMFY_API, which is another instance (or none).
+func TestPostRunFreeFollowsTheEnvTheRunnerWasGiven(t *testing.T) {
+	requireNode(t)
+	var mine, theirs atomic.Int32
+	hit := func(c *atomic.Int32) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodPost && r.URL.Path == "/free" {
+				c.Add(1)
+			}
+		}))
+	}
+	instance, parent := hit(&mine), hit(&theirs)
+	defer instance.Close()
+	defer parent.Close()
+	t.Setenv("COMFY_API", parent.URL) // the harness process's own endpoint: not this run's instance
+
+	write := `require('fs').writeFileSync(process.argv[1], 'x')`
+	run := func(spec Spec) {
+		t.Helper()
+		spec.Exe, spec.Script, spec.Timeout = "node", "-e", 10*time.Second
+		out := filepath.Join(t.TempDir(), "o.txt")
+		spec.Args, spec.Out = []string{write, out}, out
+		if _, err := Generate(context.Background(), spec); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The later COMFY_API entry in the Env is the one the child sees, and the one freed.
+	run(Spec{Env: []string{"COMFY_API=http://stale.invalid:1", "COMFY_API=" + instance.URL}})
+	if mine.Load() != 1 || theirs.Load() != 0 {
+		t.Fatalf("freed instance %d time(s) and the parent's endpoint %d time(s), want 1 and 0", mine.Load(), theirs.Load())
+	}
+	// An explicit Spec.ComfyAPI still wins.
+	run(Spec{Env: []string{"COMFY_API=http://stale.invalid:1"}, ComfyAPI: instance.URL})
+	if mine.Load() != 2 {
+		t.Fatalf("the explicit endpoint was not freed: %d", mine.Load())
+	}
+	// With neither, the process's own endpoint, exactly as before.
+	run(Spec{})
+	if theirs.Load() != 1 {
+		t.Fatalf("with no instance named the parent's endpoint is freed, as it always was: %d", theirs.Load())
+	}
+}
+
+func TestComfyAPIOfASpecReadsTheLastEnvEntry(t *testing.T) {
+	t.Setenv("COMFY_API", "http://parent.invalid:8188")
+	for _, tc := range []struct {
+		name string
+		spec Spec
+		want string
+	}{
+		{"explicit wins", Spec{ComfyAPI: "http://a:1", Env: []string{"COMFY_API=http://b:2"}}, "http://a:1"},
+		{"last env entry", Spec{Env: []string{"COMFY_API=http://b:2", "OTHER=x", "COMFY_API=http://c:3"}}, "http://c:3"},
+		{"empty entry is no entry", Spec{Env: []string{"COMFY_API=http://b:2", "COMFY_API="}}, "http://b:2"},
+		{"parent env", Spec{Env: []string{"OTHER=x"}}, "http://parent.invalid:8188"},
+	} {
+		if got := comfyAPIOf(tc.spec); got != tc.want {
+			t.Errorf("%s: comfyAPIOf = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}

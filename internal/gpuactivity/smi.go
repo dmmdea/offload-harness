@@ -6,6 +6,9 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/dmmdea/offload-harness/internal/gpulease"
+	"github.com/dmmdea/offload-harness/internal/gpuprobe"
 )
 
 // GPU is one card as nvidia-smi reports it at the moment of the sample.
@@ -19,8 +22,14 @@ type GPU struct {
 	MemTotalMiB int    `json:"mem_total_mib"`
 	// DisplayActive is nvidia-smi's display_active: this card drives a screen,
 	// so its utilization is never a lease holder's work — see
-	// gpuprobe.DisplayCardUUIDs, the one rule both surfaces read.
+	// gpuprobe.DisplayCardUUIDs, the load-attribution rule every load surface reads.
 	DisplayActive bool `json:"display_active,omitempty"`
+	// DisplayAttached is nvidia-smi's display_attached: a monitor is plugged into this
+	// card. It holds with the screen asleep, when display_active reads Disabled on every
+	// card, so the card table reads it to keep the allocator off the monitor's card
+	// (gpuprobe.ScreenCardUUIDs). The verdict's load attribution does NOT: an attached
+	// monitor is not a display in use.
+	DisplayAttached bool `json:"display_attached,omitempty"`
 }
 
 // GPUProcess is one process nvidia-smi lists on a card. On Windows (WDDM) the
@@ -48,7 +57,15 @@ var smiRun = func(ctx context.Context, args ...string) (string, error) {
 func SampleGPUs(ctx context.Context) ([]GPU, error) {
 	sctx, cancel := context.WithTimeout(ctx, smiTimeout)
 	defer cancel()
-	out, err := smiRun(sctx, "--query-gpu=index,uuid,name,utilization.gpu,memory.used,memory.total,display_active", "--format=csv,noheader,nounits")
+	// Through the shared fallback: a driver that does not know display_attached refuses the
+	// whole query, and the sample is then taken without it (display_active alone, as before).
+	out, err := gpuprobe.RunDisplayAware(func(withAttached bool) (string, error) {
+		cols := "index,uuid,name,utilization.gpu,memory.used,memory.total,display_active"
+		if withAttached {
+			cols += ",display_attached"
+		}
+		return smiRun(sctx, "--query-gpu="+cols, "--format=csv,noheader,nounits")
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -99,6 +116,9 @@ func ParseGPUs(out string) []GPU {
 			// operator's screen".
 			g.DisplayActive = strings.EqualFold(f[6], "Enabled")
 		}
+		if len(f) >= 8 {
+			g.DisplayAttached = strings.EqualFold(f[7], "Yes") // only an exact Yes
+		}
 		gpus = append(gpus, g)
 	}
 	return gpus
@@ -130,4 +150,62 @@ func ParseProcesses(out string) []GPUProcess {
 		procs = append(procs, p)
 	}
 	return procs
+}
+
+// CardsReadingOf is the look at a lease's cards the term check takes
+// (gpulease.TermSignals.Cards): any card of the lease, or any card at all for a whole-node lease
+// (devices empty), at or above the verdict's busy threshold is CardsWorking. The display card is
+// skipped (its load is the desktop's, never the lease's). Otherwise the cards are CardsIdle only
+// when every card the lease is judged by was actually read and found quiet; a card whose
+// utilisation is [N/A], a lease card the sample does not list, and a sample with no card to judge
+// by at all are CardsUnreadable, because an unknown must never read as idle. devices are lease
+// ids (lower-case GPU uuids).
+func CardsReadingOf(gpus []GPU, devices []string) gpulease.CardsReading {
+	devs := make([]gpuprobe.Device, 0, len(gpus))
+	for _, g := range gpus {
+		devs = append(devs, gpuprobe.Device{UUID: g.UUID, DisplayActive: g.DisplayActive})
+	}
+	display := gpuprobe.DisplayCardUUIDs(devs)
+	var mine map[string]bool
+	if len(devices) > 0 {
+		mine = map[string]bool{}
+		for _, d := range devices {
+			mine[strings.ToLower(strings.TrimSpace(d))] = true
+		}
+	}
+	read, unread := 0, false
+	listed := map[string]bool{}
+	for _, g := range gpus {
+		id := strings.ToLower(g.UUID)
+		listed[id] = true
+		if mine != nil && !mine[id] {
+			continue
+		}
+		if display[g.UUID] {
+			continue
+		}
+		if !g.UtilKnown {
+			unread = true
+			continue
+		}
+		if g.UtilPct >= utilBusyPct {
+			return gpulease.CardsWorking
+		}
+		read++
+	}
+	for d := range mine {
+		if !listed[d] {
+			unread = true
+		}
+	}
+	if read == 0 || unread {
+		return gpulease.CardsUnreadable
+	}
+	return gpulease.CardsIdle
+}
+
+// UtilWorking reports whether a lease's cards are busy: CardsReadingOf is CardsWorking. An
+// unknown reading is not work, and neither is no reading.
+func UtilWorking(gpus []GPU, devices []string) bool {
+	return CardsReadingOf(gpus, devices) == gpulease.CardsWorking
 }

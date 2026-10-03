@@ -790,9 +790,9 @@ seeds a single-card ComfyUI route without a non-display pin.
 ### Per-card ComfyUI instances (plan P13a, render layer)
 
 One ComfyUI per card lets two media jobs run on two cards at once instead of queueing on one. The
-render layer now knows how to run, find, reuse and stop such an instance. **Nothing sets it yet:**
-the lease admission that picks a card, the per-card in-process slot and the waiting-place token are
-the next phase (P13b), so a box behaves exactly as before until a caller exports the instance env.
+render layer now knows how to run, find, reuse and stop such an instance. The admission that picks a card, the per-card in-process slot and the
+waiting-place token are P13b ("Per-card media admission", below); a host that does not lease cards behaves
+exactly as before.
 
 **The default instance is unchanged.** With no instance env the key is empty and everything is as it
 was: one ComfyUI on its default port, the argv `launchFlags` always built, the `.offload-launch.json`
@@ -871,29 +871,62 @@ first and miss a holder on `127.0.0.1`). If something holds the port the launch 
 (that would change its failure mode).
 
 **Ports and other launchers.** A keyed instance's port comes from `--api` / `COMFY_API`, else
-`COMFY_PORT_BASE` (default 8189) plus `COMFY_INSTANCE_INDEX`; the index is assigned by whatever
-launches the instance (the admission phase, P13b), not derived from a card's ordinal, and
+`COMFY_PORT_BASE` (default 8189) plus `COMFY_INSTANCE_INDEX`; the harness's own admission (P13b) gives
+the endpoint explicitly as the base plus the card's nvidia-smi index, so a card always has the same port
+(the ownership proof refuses to reuse an instance whose launch marker records another one), and
 `COMFY_PORT_BASE` moves the whole range. The harness reserves 8189 to 8192 on a host for this, so a
 hand-started set of per-card ComfyUI processes on the same ports (an older stopgap launcher that
 numbers them by card ordinal and uses its own output directories) is never reused or stopped: it
 fails the ownership proof above and is refused with `COMFY-PROFILE-MISMATCH`. The two launchers must
 not run in one lease window until that stopgap is retired. The host's record of the ports it listens
-on must name the harness as the owner of that range in the change that first sets the instance env.
+on must name the harness as the owner of that range before a host enables card-scoped leases (the Port
+Directory is outside this repository: update it with the host's other listeners).
 
 **Runners.** Every render runner (`comfy-generate`, `-render`, `-video`, `-edit`, `-inpaint`,
 `-animate`, `-upscale`, `-music`, `-run-graph`) resolves its endpoint through `comfyApi(flags.api)` and
 hands it to `withGpuSlot`. For a **keyed** instance `withGpuSlot` launches, frees (`POST /free`) and
 tails the log of that instance (before this, the launch and the post-run free ignored `--api` and used
-the environment's endpoint). For an **unkeyed** instance nothing changes about the launch:
-`ensureComfy` is still called without an api (an unkeyed launch has no `--port`, so it can only start
-the default endpoint), and the post-run `/free` now goes to the endpoint the runner talked to. With no
-`--api` that is the same endpoint as before, so the calls are the old ones in value; with `--api`
-naming another port on an unkeyed instance, the launch still uses the environment's endpoint while the
-free follows `--api`. `run-graph` starts and frees its own ComfyUI through the same rule
-(`instanceDeps`), and an env that cannot name an instance is a typed `RUN_ERROR` defer in its result
+the environment's endpoint). For an **unkeyed** instance on the default endpoint nothing changes:
+`ensureComfy` is still called without an api and the post-run `/free` goes to the endpoint the runner talked
+to. An **unkeyed** instance on ANOTHER endpoint (`--api` or `COMFY_API` naming a port other than 8188, with
+no `COMFY_INSTANCE` or `COMFY_CARD_UUID`) used to be ensured on the default endpoint: an unkeyed launch has
+no `--port`, so a blog batch run with `--api http://127.0.0.1:8189` started a stray ComfyUI on 8188 inside its
+card lease while every job went to 8189, and the stray made a later card-bound default binding refuse with
+`COMFY-PROFILE-MISMATCH`. The runner now hands that endpoint to `ensureComfy`, which reuses it when it
+answers and otherwise fails with `COMFY-ENDPOINT-DOWN` (naming the endpoint and the fix: start it yourself,
+or key the instance, which makes the runner launch it on its own port), launching nothing; the one launch
+that stays is the operator's own, `COMFY_EXTRA_ARGS` carrying that very `--port`. An orphan on that endpoint
+that needs replacing is refused before it is stopped when the relaunch could not land there. `run-graph`
+starts and frees its own ComfyUI through the same rule (`instanceDeps`, and its free follows the endpoint
+it ran on, not 8188), and an env that cannot name an instance is a typed `RUN_ERROR` defer in its result
 file (exit 0), like every other `run-graph` failure. The Go side carries the optional endpoint and
 card in `imagegen.ComfyLaunch{API, CardUUID}` and `gpugen.Spec{ComfyAPI, CardUUID}`; the post-run
 `/free` goes to the instance that ran.
+
+**A kept instance (`--keep-comfy`) is detached, not a pipe-fed child (P13b).** A runner told to keep the
+ComfyUI it launched used to never exit: the instance was a non-detached child with piped stdout and stderr, so
+the runner's event loop stayed attached to a process meant to outlive it, and its parent saw a hang until a
+per-shot timeout killed the tree (and deleted the finished clip: caught on a real film run, 2026-10-03). Now,
+and only when the runner keeps the instance (`withGpuSlot` passes `keep` to `ensureComfy`), the instance is
+spawned **detached** (its own process group), with its console going to **its own log file** (a descriptor, so
+there is no pipe for a runner's exit to close under it: a process still printing into a closed pipe dies with
+`EPIPE`), **unref'd** (the runner's loop no longer waits for it) and with its window hidden (a detached console
+process opens one on Windows). The non-kept path is byte-for-byte what it was: piped, attached, killed with its
+runner. A kept instance that never answers is still killed, since a half-started instance is nobody's.
+
+- **The log is bounded by rotation, not by a capture that stops at 5 MB.** A piped child can be capped as it
+  is written; a descriptor handed to another process cannot be truncated under it without a helper process
+  to pump the stream, and this harness does not add a long-lived helper for a log. Each launch rotates the
+  log (`.1` to `.3`, as before) and cuts the archived copy to its last 5 MB (`trimRotatedLog`), so the disk
+  holds at most three 5 MB archives plus the run in progress. The live file of a run is not truncated: the
+  instance lives no longer than its lease, which bounds it. `tailComfyLog` (the lines a failure message
+  carries) reads only the last 256 KB of the file, so a long-lived instance's log is never read whole.
+- **Who stops it.** A kept instance lives no longer than the GPU lease it was launched under; its marker
+  records that lease epoch (`leaseEpoch`). The **holder of the lease stops it on release**: `gpu reserve`
+  when its wrapped command ends, and the pipeline when its media lease is released
+  (`internal/comfyinst`: the marker is matched to the epoch, the instance is shown to be the harness's by pid
+  and exact argv on its own endpoint, freed with `POST /free`, then stopped). A kept **default** instance
+  (no key) records no lease epoch and is stopped by whoever kept it, as it always was.
 
 **Verifying a pin on Windows.** The driver reports no per-process rows for graphics-mode (WDDM)
 cards, so confirm that an instance is on its card by per-card memory deltas, not process ids.
@@ -905,6 +938,140 @@ cards, so confirm that an instance is on its card by per-card memory deltas, not
 | `COMFY-INSTANCE-WARN: …` | extra args that would override the instance's pin, port or directories were dropped, or an instance with no card pin was launched |
 | `COMFY-PORT-TAKEN: …` | the instance's port is held, on an address ComfyUI will listen on, by something that is not ComfyUI; nothing was launched or killed |
 | `COMFY-PROFILE-MISMATCH: …` | a ComfyUI answers on the instance's port but is not shown to be that instance (or is on the wrong card); refused, and stopped only when the harness's own marker proves it is the harness's and its spawner is gone |
+
+### Per-card media admission (plan P13b)
+
+On a host that leases cards (`gpu_card_scoped_leases` set **and** a green reader audit, see
+[gpu-lease.md](gpu-lease.md)), a generation call no longer takes the whole-node media lease by default.
+It asks for what it needs, and the answer decides the lease, the ComfyUI instance and the env its runner
+is given:
+
+| the call | asks for | holds | runs in |
+|---|---|---|---|
+| a single-card route (image, edit, inpaint, upscale, animate, music, un-pooled video) with **no** `comfy_cuda_device` | one card, chosen by the allocator | a lease on that card | the instance bound to that card |
+| the same with `comfy_cuda_device` set and resolvable | exactly the card the pin names, and no other | a lease on that card | the instance bound to that card |
+| the same with a pin that cannot be resolved (no `gpu_comfy_order`, a comma list, not an index, a position the box does not have) | the whole node, with today's `--cuda-device` | the whole node | the default instance, as before |
+| a pooled image or video route | the cards its pool keys name, when the pool has at least two cards and the box has at most three | a lease on those cards | the default instance, **launch unchanged** (every card visible) |
+| `run-graph` with ONE declared device | that card | a lease on it | its instance, pinned by uuid |
+| `run-graph` with several declared devices, or none, sd.cpp, voice | the whole node | the whole node | the default instance (none for sd.cpp and voice) |
+| any call on a host that does not lease cards, or whose card table cannot be read | the whole node | the whole node | exactly as before this change |
+
+**The allocator and the display card.** An unpinned single-card call takes the allocator's card
+(`gpu_lease`, "The allocator"): not claimed by a live lease, not promised to a caller waiting in line
+(below), not held by another job in this process, with the free VRAM and host RAM, and never the display
+card while the operator is at the desk. The display card is the one whose `display_active` reads Enabled
+**or** whose `display_attached` reads Yes (`gpuprobe.ScreenCardUUIDs`, the card table's rule); it is auto-assigned only when
+`operator_presence` says the operator is away, and an explicit pin may always name it (the operator's
+word). Ties go to a card with no resident seat, then the cheapest eviction, then the lowest id.
+
+**An explicit pin is a hard constraint.** It is never re-picked: the call queues, FIFO, for the card it
+names, however many others are free. It still runs in the per-card instance, not in the default one, so
+a pinned call never meets another job on port 8188. The pin is in ComfyUI's device order, so turning it
+into a card needs the order the box declares (`gpu_comfy_order`); without it the call falls back to the
+whole node and says so once in the log. Nothing is ever guessed from an index.
+
+**Why the default instance is not for a partial lease.** One ComfyUI serves one port, one output
+directory and one launch marker for the whole box. Two jobs that both use it contend on all three; a
+second job whose launch profile differs is refused (`COMFY-PROFILE-MISMATCH`), and one that asks for no
+profile silently reuses the first one's instance, on the first one's cards. A job that holds only some
+cards must therefore not run in it. Every single-card job gets an instance of its own; the jobs that do
+use the default instance hold the whole node, or (pooled routes only) cards that every other such job on a
+box of at most three cards also needs, so two of them cannot run at once. On a larger box a pool takes the
+whole node, because two disjoint pools could. A `run-graph` with several declared devices is NOT in that
+class: its graph is the caller's, the default instance sees every card, and a lease on only some of them would
+not keep the graph off the others (a card another call's own instance holds, the display card), so it holds
+the whole node; one declared device runs in that card's own instance, which sees no other card.
+
+**What the runner is given.** `GPU_LEASE_DIR/EPOCH/CLASS` as before, plus `GPU_LEASE_DEVICES` (the cards
+the lease holds, lease ids) for a card lease; for a per-card instance `COMFY_CARD_UUID` (the driver's GPU
+uuid, never an index: `COMFY_CUDA_DEVICE` is blank) and `COMFY_API` (the instance's endpoint: the base
+port, 8189, plus the card's nvidia-smi index, so 8189, 8190 and 8191 on the 3-card box; `COMFY_PORT_BASE`
+moves the range). The port is stable per card because the render layer refuses to reuse an instance whose
+launch marker records another port. And `GPU_LEASE_UNLOAD_MODELS`: the models the runner's unload may
+take, which is the llama-swap roster minus the memory stack minus the seats pinned to cards the lease
+does not hold (`gpualloc.UnloadModels`, the rule `gpu reserve --devices` uses). Without it the runner
+unloads every model off the memory stack and a render on one card empties the seats on the others
+(register C-86). The post-run `/free` goes to the endpoint the runner was given.
+
+**In-process slots.** `mediaSlot`, a single slot for the whole process, is now a set with one slot per
+card: two jobs on different cards hold theirs at once, a job that holds the whole node conflicts with every
+card, waiters are served in arrival order with disjoint backfill, and a whole-node waiter is a barrier. A
+process that runs under its parent's lease (`gpu reserve --devices 0,2 -- ...`, `GPU_LEASE_DEVICES`) picks
+a free card among the lease's and waits for one when none is; a third call then answers busy, because the
+lease is the parent's and there is no queue to hold a place in. A pin outside the parent's cards, or a lease
+that holds the whole node, is served by the old path exactly as before.
+
+**A call that cannot get a card keeps its place.** After its `gpu_wait_ms` (90 s) a call that has no card
+does not fail with `gpu busy`. It leaves a place-keeping token and answers with a deferred result,
+`err_class: gpu_queued`, `defer_class: capacity`, whose data carries `waiter_token`, `queue_position`
+(1 = next), `eta_s` (the declared window left on the lease in the way: a ceiling, not a promise),
+`devices` (the cards it waits for; empty = the whole node), `held_by` (the leases in the way) and a
+`resume` sentence. The caller re-sends the same request with `waiter_token`, and the call resumes the place
+it left, with the arrival time it had. A token lives ten minutes after the last time its caller polled it;
+for the first 30 seconds of that it holds its place against later callers for the same cards, and after
+that it is skipped by everyone (a whole-node barrier included), so a client that wandered off never blocks
+the line. A call that RESUMED a place and is now waiting for its card inside this process (the card's slot
+is held by another job here) re-asserts its place every ten seconds until it is served, hands it to its lease
+wait, or gives it up again, so a caller that is standing in its place never loses it to that grace. A place that
+was not resumed is not invented: a first-time call leaves one only when it gives up. Tokens are in `<state>/gpu/tokens`, not among the waiters (an older binary prunes any waiter
+whose process stopped polling); a binary that predates them does not honour them, so on a host that mixes
+versions it can take a card ahead of a token holder, which costs the holder its place and never
+exclusivity. A call that holds the whole node on such a host leaves the same kind of token. A host that
+does not lease cards keeps the `gpu busy` answer byte for byte.
+
+**Only a door that can resume leaves a place.** A token is claimed by sending it back, which only an MCP tool
+can do (`core.Request.Resumable`, set by the MCP server and by nothing that arrives over the wire). The
+`generate-image` CLI verbs, the fleet-node dispatch (the delegator re-places a refused subtask, it never resumes
+one) and the image batch get the plain `gpu busy` defer and leave nothing behind: a token nobody can claim would
+hold its cards back from every later caller for the 30-second grace, and a node a delegator retries every few
+seconds would keep newcomers behind a rolling set of them.
+
+**Who stops the instance.** The grant's release stops the ComfyUI instances kept under the lease
+(`internal/comfyinst`) before it releases the lease, so the next holder never finds one on its card, and only
+while the lease is still the call's own: a call whose lease was taken away leaves them running and logs which.
+A lease that reuses a kept instance (the previous holder died, or was fenced out, and the instance outlived it)
+takes it over: its marker is re-stamped with the reusing lease's epoch, so that lease's release stops it. A
+runner that does not keep its instance kills it itself, as before.
+
+**A call with no card to take is a place in line too.** The allocator can find no card although the cards
+are idle: the host is short of RAM, a transient `nvidia-smi` failure left the monitor's card unknown
+(`display-unknown`), every card is the operator's screen or quarantined. That used to leave through the raw
+allocator error, classed `gpu_lease_unavailable` (a configuration fault). A call that can resume now keeps a
+place on the cards that would qualify but for what is short (the allocator's `Waitable` list, never the whole
+node, so it does not become a barrier) with the reason, and resumes it when the host recovers; when no card
+could qualify however long it waited (all of them the screen, quarantined, foreign-busy) there is nothing to
+hold a place on, and every call gets the plain `gpu_busy` defer carrying the reason.
+
+**Open acceptance of P13 (P13 is not complete until these are closed).** What the review pass could not close
+from a worktree, with no GPU and no live lease root:
+
+1. **The seeded `comfy_cuda_device` on the 3x16 tier.** The plan says the seed `"2"` becomes automatic
+   allocation. The branch makes an explicit pin a hard constraint, and a config cannot tell the seed from an
+   operator's own choice (no provenance), so on a stock 3x16 host every single-card call keeps the whole-node
+   lease, and with `gpu_comfy_order` declared the pinned calls serialise on card 2. The tier note says so. Whether
+   a pin equal to the seed is treated as unset on card-scoped hosts, or the enable step clears it, is the
+   operator's decision; until it is made the complaint this phase set out to fix stays open on that tier's seed.
+2. **The allocator is given no VRAM footprint and no RAM need for a media call** (`Need{}`: a footprint of 0 makes
+   the fit check always true, and a RAM need of 0 enforces only the headroom floor), so N concurrent instances are
+   gated by neither. A measured per-route VRAM peak does exist (the passive footprint store,
+   `vram_peak_gb` per family, quant and task), but it cannot simply be passed in: the fit check compares it with a
+   card's CURRENT free VRAM, which counts the text seats a media lease would unload, so on a box with a seat
+   resident on every card it would refuse cards the lease can take. The allocator first has to credit the
+   evictable resident seats (its `Resident` map already carries their cost). The RAM need has no figure at all, and
+   the N-instance host-RAM measurement the plan asks for is a live run.
+3. **The live two-card acceptance** (two `offload_generate_image` calls on two non-display cards in their own
+   instances, confirmed by `nvidia-smi` per-card memory, not pids, under WDDM) and the **UUID-pin spike on a
+   non-Windows host**.
+4. **A foreign compute process is not skipped on the media path.** `gpu reserve --cards` reads `nvidia-smi`'s
+   per-process rows (Linux only: WDDM lists none), but the media path's default `ForeignBusy` reader returns
+   nothing, so a Linux host that turns card-scoped leases on would hand a render a card another process is using.
+   The reader lives in the root package beside the foreign-load guard; moving it into `internal/gpualloc` is
+   the fix, and it matters on a Linux host only.
+5. **"Enqueue on the node daemon's job queue" (the plan's spike): not adopted, and why.** The daemon runs media
+   jobs inline in the request handler: `concurrencyCapped` is false for `image-gen`, `video-gen`, `animate`,
+   `audio-gen` and `run-graph` (a parked media job would hold an execution slot and starve the agent lane), so a
+   dispatch to the local daemon would wait in the same per-card slots and leases this admission already waits in
+   and add no queue of its own. The place in line is the token.
 
 ## Error handling
 
@@ -1332,8 +1499,8 @@ a reference and driver (`offload_animate_character`) or a clone sample (`offload
 bundle (each under its field name plus its extension, copied into a temp directory and packed with `composebundle`) and goes
 through `POST /fleet/media-job` ([fleet-node.md](fleet-node.md#the-media-job-door-artifacts-and-honest-advertisement-adr-0072)).
 `run-graph` carries its graph and manifest inline, so it never needs the door. The payload uses the field names the node's
-builders decode; `out` and `out_dir` never travel (`out_dir` is where the fetched outputs land here). Three request fields cannot ride the fleet task and defer by name
-(`defer_class` `contract`) instead of being dropped: `refine=false`, `tts_voice` and `transformer`.
+builders decode; `out` and `out_dir` never travel (`out_dir` is where the fetched outputs land here). Four request fields cannot ride the fleet task and defer by name
+(`defer_class` `contract`) instead of being dropped: `refine=false`, `tts_voice`, `transformer` and (`run_graph`) `devices`, whose card ids name cards on the calling machine.
 
 **What comes back.** The client polls `/fleet/jobs/{id}` every 2 seconds inside a budget when the caller gave no deadline
 (image 2 h, video and animate 6 h, audio 1 h, run-graph 2 h), then fetches every output the result names by bare name from

@@ -556,7 +556,7 @@ caps the bundle, 256 MB by default: the node holds the base64 body and the decod
 door. The outputs come back by name, each checked against the sha256 the node published; a mismatch defers and leaves no
 file. A node advertises `video-gen`, `animate`, `audio-gen` and `run-graph` only while its media route is CONFIGURED, so a
 node with a missing weight drops the task and `/fleet/health` `media_routes` says which route and why; `doctor` and
-`offload_status` print the same verdicts. `refine=false`, `tts_voice` and `transformer` cannot travel and defer on a remote
+`offload_status` print the same verdicts. `refine=false`, `tts_voice`, `transformer` and `run_graph`'s `devices` cannot travel and defer on a remote
 route; `run_graph`'s `out_dir` is where the fetched outputs land on the calling machine (created if missing, never sent to the node). A node that binds a media task but whose route is not CONFIGURED refuses a job for it with a 503 naming the route and its state (a delegator re-places that), not the 400 an unbound task gets. See [media-generation.md](systems/media-generation.md#remote-routing-and-the-media-job-door-adr-0072).
 
 **Adding a template.** Follow the contract in
@@ -1077,8 +1077,9 @@ are DOING: a one-word `verdict` — `working` (a request or a registered agent r
 is running: seat idle, cards quiet — the holder is draining, queued, loading, or stalled), `loaded-idle`,
 `busy-outside` (no lease, cards busy with work the harness does not own), `stale-holder`, `free`, and for a held
 lease that is not healthy `held-stalled` (its progress file stopped moving), `held-orphaned` (its owner has been gone
-past `gpu_orphan_grace_min`), `held-overdue` (its declared window ended, its holder still renews) and `tree-orphan`
-(not produced yet) — see "Who asked for a lease" in docs/systems/gpu-lease.md — and an
+past `gpu_orphan_grace_min`), `held-overdue` (its declared window ended, its holder still heartbeats; a lease whose term was not renewed is labelled
+expired and says why) and `tree-orphan`
+(not produced yet) — see "Who asked for a lease" and "Terms" in docs/systems/gpu-lease.md — and an
 `activity` block with the seat's load state and in-flight count, every registered run (kind, pid, origin,
 goal excerpt, phase, step, tokens, age), a utilization/memory sample per card with the processes on them,
 and the holder's command (the wrapper form stamps its argv). Every agent loop registers itself in

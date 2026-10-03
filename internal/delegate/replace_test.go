@@ -147,6 +147,7 @@ func TestRunRefusalFallsBackToLocalWhenNoRemoteIsLeft(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	runUnderLease(t, lease)
 	defer func() { _ = lease.Release() }()
 
 	cfg := testCfg(t)
@@ -304,8 +305,27 @@ func TestRunReplacementNeverExceedsTheContractBudget(t *testing.T) {
 }
 
 // busyLocal holds the machine-wide GPU lease for the test's duration, so
-// LocalBusy reads busy=true inside Run and route=auto will consider remotes.
+// LocalBusy reads busy=true inside Run and route=auto will consider remotes. The lease is held
+// by somebody else: it FENCES the local seat, so the delegator does not dial the seat while it
+// stands (GPU routing P7), and a retry cannot go there.
 func busyLocal(t *testing.T) string {
+	t.Helper()
+	dir, _ := busyLocalLease(t)
+	return dir
+}
+
+// busyLocalAsHolder is busyLocal for a test that makes the GPU read busy and then expects the
+// local seat to take the work as the fallback (a fake local runner stands in for a seat that
+// WOULD run): the test process runs under the lease (runUnderLease), as a delegation launched by
+// `gpu reserve -- ...` does, so the lease is busy but fences nothing against it.
+func busyLocalAsHolder(t *testing.T) string {
+	t.Helper()
+	dir, lease := busyLocalLease(t)
+	runUnderLease(t, lease)
+	return dir
+}
+
+func busyLocalLease(t *testing.T) (string, *gpulease.Lease) {
 	t.Helper()
 	dir := filepath.Join(t.TempDir(), "lease")
 	m, err := gpulease.OpenAt(dir, "")
@@ -317,7 +337,7 @@ func busyLocal(t *testing.T) string {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = lease.Release() })
-	return dir
+	return dir, lease
 }
 
 // TestRunRetryNeverLandsOnASeatTheSubtaskAlreadyUsed is the round-3 review's
@@ -339,7 +359,7 @@ func TestRunRetryNeverLandsOnASeatTheSubtaskAlreadyUsed(t *testing.T) {
 	b, bURL := refusingNode(t, "node-b", http.StatusServiceUnavailable, nil)
 
 	cfg := testCfg(t)
-	cfg.GPULockPath = busyLocal(t)
+	cfg.GPULockPath = busyLocalAsHolder(t)
 
 	var localCalls atomic.Int64
 	results, sum, err := Run(t.Context(), cfg, failingLocal(&localCalls),
@@ -398,7 +418,7 @@ func TestRunReplacementBoundIsPerSubtaskNotPerAttempt(t *testing.T) {
 	}
 
 	cfg := testCfg(t)
-	cfg.GPULockPath = busyLocal(t)
+	cfg.GPULockPath = busyLocalAsHolder(t)
 
 	var localCalls atomic.Int64
 	results, sum, err := Run(t.Context(), cfg, failingLocal(&localCalls), []core.AgentContract{remoteContract()}, "auto", urls)

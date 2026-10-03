@@ -59,6 +59,7 @@ func TestHoldChildCarriesCardsAndOwner(t *testing.T) {
 		go func() { done <- runGPUHold(args[2:]) }()
 		ls := waitForLeases(t, m, 1)
 		assert(t, ls[0], 1)
+		releaseAll(t, m) // a holder no longer releases at its deadline (plan P9); a release is what ends it
 		if err := <-done; err != nil {
 			t.Fatal(err)
 		}
@@ -72,6 +73,7 @@ func TestHoldChildCarriesCardsAndOwner(t *testing.T) {
 		go func() { done <- runGPUHold(args[2:]) }()
 		ls := waitForLeases(t, m, 1)
 		assert(t, ls[0], 1)
+		releaseAll(t, m) // a holder no longer releases at its deadline (plan P9); a release is what ends it
 		if err := <-done; err != nil {
 			t.Fatal(err)
 		}
@@ -83,6 +85,7 @@ func TestHoldChildCarriesCardsAndOwner(t *testing.T) {
 		go func() { done <- runGPUHold(args[2:]) }()
 		ls := waitForLeases(t, m, 1)
 		assert(t, ls[0], 0)
+		releaseAll(t, m)
 		if err := <-done; err != nil {
 			t.Fatal(err)
 		}

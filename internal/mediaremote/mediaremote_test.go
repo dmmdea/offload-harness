@@ -957,6 +957,7 @@ func TestWhatTheNodeCannotCarryIsRefusedByNameNotDropped(t *testing.T) {
 		"refine false":           {core.Request{Task: core.TaskGenerateImage, Input: "p", Params: map[string]any{"refine": false}}, "refine=false"},
 		"tts_voice":              {core.Request{Task: core.TaskGenerateAudio, Input: "p", Params: map[string]any{"tts_voice": "ana"}}, "tts_voice"},
 		"transformer":            {video(map[string]any{"transformer": "bf16.safetensors"}), "transformer"},
+		"run_graph devices":      {core.Request{Task: core.TaskRunGraph, Params: map[string]any{"graph_path": writeFile(t, dir, "g.json", []byte(`{"1":{}}`)), "devices": []string{"0"}}}, "devices"},
 		"missing still":          {video(map[string]any{"still": filepath.Join(dir, "gone.png")}), "still"},
 		"a directory":            {video(map[string]any{"still": dir}), "not a regular file"},
 		"animate needs both":     {core.Request{Task: core.TaskAnimateCharacter, Input: "p", Params: map[string]any{"ref": still}}, "ref and driver"},

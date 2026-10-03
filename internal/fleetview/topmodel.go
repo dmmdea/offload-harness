@@ -66,6 +66,26 @@ func RenderTop(o Overview, width int) string {
 			name, n.AgentSeat, res, gpu, vram, n.HostCPU, ram, runq)
 	}
 
+	// CARDS (GPU routing P7): one line per card a node publishes, with the lease that holds it.
+	// A node that published no devices has no lines: nothing is invented.
+	cardsHeader := false
+	for _, n := range o.Nodes {
+		if !n.Reachable || len(n.Cards) == 0 {
+			continue
+		}
+		if !cardsHeader {
+			b.WriteString("\nCARDS\n")
+			cardsHeader = true
+		}
+		name := n.NodeID
+		if name == "" {
+			name = n.Base
+		}
+		for _, c := range n.Cards {
+			fmt.Fprintf(&b, "%-20s card %d  %-14s %5.1f/%-5.1f %-5s %s\n", name, c.Index, truncate(c.Name, 14), c.VramUsedGB, c.VramTotalGB, cardUtil(c), cardState(c))
+		}
+	}
+
 	b.WriteString("\nJOBS\n")
 	for _, j := range recentJobs(o, 15) {
 		wall := ""
@@ -88,6 +108,50 @@ func RenderTop(o Overview, width int) string {
 	}
 
 	return b.String()
+}
+
+// cardUtil is a tile's utilisation as the table prints it: "?" for a card that reported none.
+func cardUtil(c CardTile) string {
+	if !c.UtilKnown {
+		return "?"
+	}
+	return fmt.Sprintf("%d%%", c.UtilPct)
+}
+
+// cardState is what a tile says about its card: the lease that holds it (class, epoch, the node's
+// verdict word, what is left of its term), the display card that is never free for work, a free
+// card, or a card busy under no lease.
+func cardState(c CardTile) string {
+	switch {
+	case c.Holder != nil:
+		h := c.Holder
+		s := fmt.Sprintf("%s lease %d  %s", h.Class, h.Epoch, h.Verdict)
+		if h.Scope == "whole-node" {
+			s += "  (whole node)"
+		}
+		if h.RemainingSec > 0 {
+			s += "  " + tileDur(h.RemainingSec) + " left"
+		}
+		return s
+	case c.Display:
+		return "display"
+	case c.Free:
+		return "free"
+	default:
+		return "busy, no lease"
+	}
+}
+
+// tileDur words a number of seconds for a tile.
+func tileDur(sec int) string {
+	switch {
+	case sec >= 3600:
+		return fmt.Sprintf("%dh%02dm", sec/3600, sec%3600/60)
+	case sec >= 90:
+		return fmt.Sprintf("%dm", (sec+30)/60)
+	default:
+		return fmt.Sprintf("%ds", sec)
+	}
 }
 
 // truncate clips s to at most w runes, appending an ellipsis when it does —

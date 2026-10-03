@@ -109,9 +109,20 @@ response — and skips that node's job-key pruning that tick too, since `pruneSe
 validity from `n.Jobs`, which is unchanged.
 
 **Deep-copy on read.** `Poller.Snapshot()` returns a full copy: node structs are copied by value, and
-every `[]map[string]any` field (`gpu_devices`, `jobs`, `delegations`) is deep-cloned recursively
-(`cloneAnyMap`/`cloneAnyValue`) so a caller mutating the returned `Overview` can never race the
-poller's own goroutine mutating the same maps on the next tick.
+every `[]map[string]any` field (`gpu_devices`, `leases`, `jobs`, `delegations`) is deep-cloned recursively
+(`cloneAnyMap`/`cloneAnyValue`) and the per-card tiles are copied with their holders, so a caller mutating
+the returned `Overview` can never race the poller's own goroutine mutating the same maps on the next tick.
+
+**Per-card tiles (GPU routing P7).** A node used to read as one gauge, the busiest card. `fold` now joins each
+card the node publishes (`gpu_devices[]`) with the lease that holds it (`leases[]`, matched on the lower-cased
+GPU UUID) into `Node.Cards`: index, name, VRAM used and total, utilisation, the display flag, `free`, and a
+`holder` (epoch, class, the node's verdict word, scope, time left, overdue). A lease that names no cards holds
+every card; a node one release behind publishes only the one lease block, which is read as the whole node, the
+way the delegator reads it. `free` means no lease holds the card, it is not the display card and its measured
+utilisation is under 15 %: a card busy under no lease is busy outside the harness and is never shown free, and a
+node that published no devices gets no tiles. The page shows the holder line under each card's bar and `top`
+prints a CARDS section with one line per card. This package still does not import the delegator, so the join is
+its own (`CardTiles`, `internal/fleetview/cards.go`).
 
 **The delegation-log fold** (`errors.go`) reads today's and yesterday's day-sharded corpus files
 (`BaseDir()/delegation-log/YYYY-MM-DD.jsonl`), keeps the last `maxDelegations` rows, and loosely
@@ -318,6 +329,8 @@ and by loading `fleet-ui` in a browser or running `top` against it.
 
 - [`internal/fleetview/overview.go`](../../internal/fleetview/overview.go) — the `Overview`/`Node`/
   `Error`/`Point` types (JSON tags are exact — the embedded page reads them verbatim)
+- [`internal/fleetview/cards.go`](../../internal/fleetview/cards.go) — `CardTiles`: the card-by-lease join
+  behind the per-card tiles
 - [`internal/fleetview/poller.go`](../../internal/fleetview/poller.go) — poll cadence, per-node
   parallel probing, dedupe (`seenErr`), pruning, the deep-copy `Snapshot`
 - [`internal/fleetview/errors.go`](../../internal/fleetview/errors.go) — the delegation-log corpus

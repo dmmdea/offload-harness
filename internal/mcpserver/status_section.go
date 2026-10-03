@@ -182,7 +182,7 @@ func gpuCardsSection(cfg config.Config, act gpuactivity.View) map[string]any {
 		devs = append(devs, gpuprobe.Device{
 			Index: g.Index, UUID: g.UUID, Name: g.Name,
 			TotalGiB: float64(g.MemTotalMiB) / 1024, FreeGiB: float64(g.MemTotalMiB-g.MemUsedMiB) / 1024,
-			UtilPct: g.UtilPct, UtilKnown: g.UtilKnown, DisplayActive: g.DisplayActive,
+			UtilPct: g.UtilPct, UtilKnown: g.UtilKnown, DisplayActive: g.DisplayActive, DisplayAttached: g.DisplayAttached,
 		})
 	}
 	cards, note := gpuprobe.BuildCards(devs, cfg.GPUComfyOrder)

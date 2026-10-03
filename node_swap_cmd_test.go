@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -90,6 +91,29 @@ func TestParseNodeSwapFlags_AllFlagsThread(t *testing.T) {
 	}
 	if out.resultPath != "out.json" || out.logPath != "out.log" || !out.asJSON {
 		t.Errorf("output flags = %+v", out)
+	}
+}
+
+// --cards names the cards a standalone deploy touches (GPU routing P7): a comma list, spaces
+// and blanks tolerated, case kept as given (the wait compares case-insensitively). Absent is the
+// whole node.
+func TestParseNodeSwapFlags_CardsThread(t *testing.T) {
+	plan, _, err := parseNodeSwapFlags([]string{
+		"--staged", "s.exe", "--target", "t.exe", "--sha256", "DEAD",
+		"--cards", " GPU-AAAA0000 , ,gpu-cccc0000",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Cards) != 2 || plan.Cards[0] != "GPU-AAAA0000" || plan.Cards[1] != "gpu-cccc0000" {
+		t.Fatalf("Cards = %q, want the two cards trimmed with the blank dropped", plan.Cards)
+	}
+	whole, _, err := parseNodeSwapFlags([]string{"--staged", "s.exe", "--target", "t.exe", "--sha256", "DEAD"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(whole.Cards) != 0 {
+		t.Fatalf("Cards = %q with no flag, want the whole node (none)", whole.Cards)
 	}
 }
 
@@ -403,5 +427,30 @@ func TestRunNodeSwap_ConfigAutoResolveIsHermeticWithAnExplicitConfigFlag(t *test
 	got, gerr := os.ReadFile(target)
 	if gerr != nil || string(got) != "new" {
 		t.Errorf("target.exe = %q (err %v), want the staged content swapped in", got, gerr)
+	}
+}
+
+// node-swap is normally launched DETACHED through the two launchers, and both enumerate the flags
+// they forward: a flag the engine accepts but a launcher does not name never reaches it. --cards
+// (GPU routing P7) is the operator's statement of which cards a standalone deploy touches, so a
+// launcher that drops it leaves the documented lever dead on the real launch path.
+func TestNodeSwapLaunchersForwardCards(t *testing.T) {
+	ps1, err := os.ReadFile(filepath.Join("setup", "windows-node-swap-launch.ps1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"[string]$Cards = ''", "if ($Cards)", "'-cards', $Cards"} {
+		if !strings.Contains(string(ps1), want) {
+			t.Errorf("windows-node-swap-launch.ps1 does not forward -Cards (%q missing)", want)
+		}
+	}
+	sh, err := os.ReadFile(filepath.Join("setup", "linux-node-swap-launch.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`--cards) CARDS="$2"; shift 2 ;;`, `[ -n "$CARDS" ] && ARGS+=(--cards "$CARDS")`} {
+		if !strings.Contains(string(sh), want) {
+			t.Errorf("linux-node-swap-launch.sh does not forward --cards (%q missing)", want)
+		}
 	}
 }

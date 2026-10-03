@@ -2742,13 +2742,7 @@ func runFleetServe(args []string) error {
 	// The node's own GPU lease, advertised in health and enforced at dispatch
 	// (0.113.16). Read through THE one resolver (gpulease.LeaseDir) so the
 	// advertised lease is the same one every acquirer contends on.
-	leaseRead := func() gpulease.Info {
-		dir, err := gpulease.LeaseDir(cfg.GPULockPath, cfg.StateDir)
-		if err != nil {
-			return gpulease.Info{}
-		}
-		return gpulease.InspectDir(dir)
-	}
+	leaseRead := fleetLeaseReader(cfg)
 	srv := fleetnode.New(p, jobs, fleetnode.Options{
 		NodeID:   nodeID,
 		Version:  version,

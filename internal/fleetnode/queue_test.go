@@ -346,7 +346,7 @@ func TestDispatchAdmitsWhileWorkersBusyRefusesOnlyWhenFull(t *testing.T) {
 // decision, and it is the one that would silently regress: with
 // fleet_max_concurrent_jobs at 1, three MEDIA dispatches must all execute
 // concurrently. Media serializes itself far harder than this cap would (the
-// in-process mediaSlot has capacity ONE, under a machine-wide gpulease), so a
+// in-process media slot set holds one slot per card, under a machine-wide gpulease), so a
 // media job held in `accepted` is not protecting anything — it is occupying a
 // fleet execution slot while doing no work, and with the cap applied four such
 // jobs would starve the agent lane the cap exists to protect.
@@ -408,12 +408,12 @@ func TestConcurrencyCappedRule(t *testing.T) {
 		why  string
 	}{
 		{"agent", true, "the llama-swap text lane — the only thing the cap was written for"},
-		{"image-gen", false, "acquireMediaLease: mediaSlot (cap 1) + gpulease ClassMedia"},
+		{"image-gen", false, "acquireMediaLease: media slots (per card) + gpulease ClassMedia"},
 		{"video-gen", false, "acquireMediaLease"},
 		{"audio-gen", false, "acquireMediaLease"},
 		{"run-graph", false, "acquireMediaLease"},
 		{"stt", false, "whisper-server: a different process on a different endpoint"},
-		{"scene-swap", false, "a configured pipeline route — runPipelineJob takes the same mediaSlot"},
+		{"scene-swap", false, "a configured pipeline route — runPipelineJob takes the same media slots (the whole node)"},
 		{ComposeTask, false, "HyperFrames renders on the CPU on its own compose slot"},
 		{ComposeProjectTask, false, "the same render on the same compose slot (ADR 0071)"},
 		{MediaJobTask, false, "one of the five media tasks above, behind the token-gated input door (ADR 0072)"},

@@ -1201,6 +1201,14 @@ type Config struct {
 	// lease as orphaned. It only changes what is REPORTED: nothing reclaims, releases or
 	// kills a lease on it. 0 or negative = 15. Load installs it where every reader sees it.
 	GPUOrphanGraceMin int `json:"gpu_orphan_grace_min,omitempty"`
+	// GPUMaxTermMin (plan P9, default 360) is the cap on a lease's renewal term, in minutes:
+	// a renewal POINT, never a release point. A request above it is recorded, warned about
+	// and accepted whole; it renews in terms of this length. 0 or negative = 360.
+	GPUMaxTermMin int `json:"gpu_max_term_min,omitempty"`
+	// GPUMaxTotalMin (plan P9, default 2880) is how long after acquisition a lease is
+	// renewed at all, in minutes. Past it a lease that is still held reads overdue however
+	// healthy its owner looks; it is still never freed by that. 0 or negative = 2880.
+	GPUMaxTotalMin int `json:"gpu_max_total_min,omitempty"`
 	// ForeignGPUMinMiB overrides the per-process VRAM floor `gpu status`/`gpu
 	// reserve`'s foreign-GPU-memory warning (gpu_foreign.go) uses to decide a
 	// resident desktop process is worth a line — see foreignDefaultMinMiB for
@@ -1818,6 +1826,24 @@ func (c Config) GPUOrphanGrace() time.Duration {
 	return time.Duration(c.GPUOrphanGraceMin) * time.Minute
 }
 
+// GPUMaxTerm is gpu_max_term_min as a duration; unset or negative is the 6 hour default
+// (gpulease.DefaultMaxTerm).
+func (c Config) GPUMaxTerm() time.Duration {
+	if c.GPUMaxTermMin <= 0 {
+		return gpulease.DefaultMaxTerm
+	}
+	return time.Duration(c.GPUMaxTermMin) * time.Minute
+}
+
+// GPUMaxTotal is gpu_max_total_min as a duration; unset or negative is the 48 hour default
+// (gpulease.DefaultMaxTotal).
+func (c Config) GPUMaxTotal() time.Duration {
+	if c.GPUMaxTotalMin <= 0 {
+		return gpulease.DefaultMaxTotal
+	}
+	return time.Duration(c.GPUMaxTotalMin) * time.Minute
+}
+
 // AgentPlannerModel resolves the coding agent's planner seat. Precedence:
 // an explicit per-call/per-flag override > the configured AgentModel seat >
 // the workhorse Model. The chain is resolved at call time, never persisted —
@@ -2141,6 +2167,9 @@ func loadArmed(path string) (Config, error) {
 	// The orphan grace is read by every lease reader (gpu status, offload_status, the fleet
 	// health, a waiter's refusal), so it is installed once here, like the lease directory.
 	gpulease.SetDefaultOrphanGrace(c.GPUOrphanGrace())
+	// The term limits are read by every acquirer (a record is stamped with them) and by every
+	// holder's tick, so they are installed here too.
+	gpulease.SetDefaultTerms(c.GPUMaxTerm(), c.GPUMaxTotal())
 	if lerr := modelaffinity.SetGPULease(c.GPULockPath, c.StateDir); lerr != nil {
 		fmt.Fprintf(os.Stderr, "warning: GPU load gate disabled: %v\n"+
 			"  Text calls will not wait for a media render to finish with the card.\n", lerr)

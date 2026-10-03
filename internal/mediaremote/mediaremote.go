@@ -67,7 +67,7 @@ const (
 var pollEvery = 2 * time.Second
 
 // Budgets bound one remote job end to end when the caller set no deadline: a render's own wall, its queue
-// behind the node's media slot, and the transfers.
+// behind the node's media slots, and the transfers.
 var Budgets = map[string]time.Duration{
 	taskImage:    2 * time.Hour,
 	taskVideo:    6 * time.Hour,

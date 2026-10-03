@@ -191,13 +191,26 @@ bound route is advertised only while `internal/mediacap` reads it CONFIGURED fro
 They differ exactly when someone is using the machine. On 2026-09-20 <node-b> read
 `gpu_util_pct: 33` from a game on its display card while every card the harness could use sat at
 0%, and because placement broke ties on that number the node lost work it should have won. A
-display card is identified by the card's OWN property, not by config and not by inference:
-`nvidia-smi --query-gpu=display_active` rides the per-device query the health sampler already
-runs, and `gpuprobe.DisplayCardUUIDs` reads it — the SAME function the GPU lease verdict uses.
-Only an exact `Enabled` counts; `[Not Supported]` and `[N/A]` mean "we do not know", which never
-reads as "this is the operator's screen". Nothing is refreshed on a separate cadence and nothing
-is carried forward: the answer comes from the sample the tick already took. On a headless box
-every card answers `Disabled`, nothing is flagged, and the two figures agree.
+display card is identified by the card's OWN properties, not by config and not by inference:
+`nvidia-smi --query-gpu=display_active,display_attached` rides the per-device query the health
+sampler already runs, and `gpuprobe.DisplayCardUUIDs` reads `display_active` from it — the SAME
+function the GPU lease verdict, the foreign-load guard and the delegator's free-card count use. A
+card is the display card FOR LOAD ATTRIBUTION when `display_active` reads `Enabled` (a display is
+initialised: a game, a lit screen). `display_attached` (`Yes`: a monitor is plugged into one of its
+connectors) is read too, but only by the card table and the allocator (`gpuprobe.ScreenCardUUIDs`),
+which must not auto-pick the monitor's card even while `display_active` reads `Disabled` on every
+card because the screen sleeps (measured 2026-10-03 on the 3-card box). It is deliberately not part
+of the load rule: an attached monitor is true for the whole life of the box, and counting it would
+take that card out of `work_util_pct` and the free-card count even while the node's own seat or
+lease works on it. Only an exact `Enabled` / `Yes`
+counts; `[Not Supported]` and `[N/A]` mean "we do not know", which never reads as "this is the
+operator's screen". A driver that refuses the `display_attached` field (an older one, a headless
+Linux build) rejects the whole query, so the reader retries without it and the rule rests on
+`display_active` alone, as before; the full query is tried again after ten minutes. The node
+publishes `display_attached` in `gpu_devices[]` (omitted when false; an older node omits it and
+reads as "unknown"). Nothing is refreshed on a separate cadence and nothing is carried forward:
+the answer comes from the sample the tick already took. On a headless box every card answers
+`Disabled` / `No`, nothing is flagged, and the two figures agree.
 
 A display card is excluded only when a non-display card exists: a single-GPU box runs its seats
 on its display card by necessity, and there the two figures are equal by construction.
@@ -225,7 +238,7 @@ identity to report.
 ```
 
 The delegator reads these rows (GPU routing P1): `delegate.NodeView.Devices` carries them, a card
-with `display_active` false, a known `util_pct` under 15 and enough `vram_free_gb` (or a loaded seat
+that drives no display in use (`display_active` false; `display_attached` is not read here), a known `util_pct` under 15 and enough `vram_free_gb` (or a loaded seat
 that explains its absence) counts as a free card, and placement prefers a node with one over a node whose busiest card reads lower. No
 `gpu_devices` key (an older node, or a source that cannot enumerate devices) is unknown, never
 "no free card". `offload_status` shows the count as `free_cards` of `cards_total`. See

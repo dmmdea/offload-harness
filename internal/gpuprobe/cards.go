@@ -35,26 +35,31 @@ type Card struct {
 	// ComfyOrder is the card's position in CUDA's FASTEST_FIRST order (what ComfyUI's
 	// --cuda-device counts), or -1 when it is not known. See the file comment.
 	ComfyOrder int `json:"comfy_order"`
+	// DisplayUnknown marks a card of a reading that could not say which card the monitor is
+	// on (Device.AttachedUnknown). The allocator does not auto-assign such a card: "unknown" is
+	// never "not the operator's screen".
+	DisplayUnknown bool `json:"display_unknown,omitempty"`
 }
 
 // LeaseID is the form a lease records for this card: the UUID lower-cased (a claim is
 // one file per card, and the file system may be case-insensitive).
 func (c Card) LeaseID() string { return strings.ToLower(strings.TrimSpace(c.UUID)) }
 
-// BuildCards turns parsed nvidia-smi devices into the card table. Display is the shared
-// DisplayCardUUIDs rule (a box whose only card is its display card excludes nothing).
+// BuildCards turns parsed nvidia-smi devices into the card table. Display is the placement
+// rule, ScreenCardUUIDs (a box whose only card is its display card excludes nothing).
 // comfyOrder is the operator's declaration of ComfyUI's order, a comma list of nvidia
 // indices or UUID prefixes with the fastest card first ("" = not declared). A spec that
 // does not name every card exactly once is rejected as a whole: warn says why and every
 // ComfyOrder stays unknown, because half an order answers no question.
 func BuildCards(devs []Device, comfyOrder string) (cards []Card, warn string) {
-	display := DisplayCardUUIDs(devs)
+	display := ScreenCardUUIDs(devs)
 	cards = make([]Card, 0, len(devs))
 	for _, d := range devs {
 		cards = append(cards, Card{
 			UUID: d.UUID, NvidiaIndex: d.Index, Name: d.Name,
-			Display:      display[d.UUID],
-			VRAMTotalGiB: d.TotalGiB, VRAMFreeGiB: d.FreeGiB,
+			Display:        display[d.UUID],
+			DisplayUnknown: d.AttachedUnknown,
+			VRAMTotalGiB:   d.TotalGiB, VRAMFreeGiB: d.FreeGiB,
 			UtilPct: d.UtilPct, UtilKnown: d.UtilKnown,
 			ComfyOrder: -1,
 		})
