@@ -38,6 +38,22 @@ package pairworkloads
 // the only record of the open card on the first failed post. A lock whose
 // sweeper died is removed by a later pass, and the pass after that claims.
 //
+// WHOSE MARKER. A marker records the ingress URL its card was posted to, and a
+// sweep closes only the markers of ITS OWN ingress (a marker with no endpoint
+// predates the field and counts as DefaultEndpoint). Closing is posting to the
+// sweeper's endpoint and deleting on success, so a sweeper that closed another
+// ingress's marker would close nothing real and destroy the only record of the
+// card: a test's httptest emitter did exactly that to live markers (2026-10-02,
+// a 31.9 h ghost card). A foreign marker is left untouched: not locked, not
+// posted, not even age-dropped.
+//
+// REJECTED IS NOT DOWN. PAIR answering a close with HTTP 4xx (a frame it will
+// never accept) is different from PAIR being unreachable (transport error or
+// 5xx): the first drops that one marker and the pass goes on to the next, the
+// second releases the claim and ends the pass, since every later marker would
+// fail the same way. Treating both as "down" let one rejected marker starve
+// every marker behind it until the 48 h give-up.
+//
 // SAFE BY CONSTRUCTION. Every register error is swallowed: a marker that cannot
 // be written only means a card that cannot be closed after a crash — what
 // happened before this register existed — and never a failed or slowed job. A
@@ -46,8 +62,12 @@ package pairworkloads
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
+	"net"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -92,8 +112,46 @@ type openMarker struct {
 	WrittenMs int64 `json:"written_ms"`
 	// Pending marks a terminal frame its producer could not deliver: the
 	// sweep sends Info as it is, whatever the producer's liveness.
-	Pending bool                       `json:"pending_terminal,omitempty"`
-	Info    map[string]json.RawMessage `json:"workload_info"`
+	Pending bool `json:"pending_terminal,omitempty"`
+	// Endpoint is the ingress URL the card was posted to (the writing
+	// emitter's own). A sweep closes only the markers of its own endpoint: a
+	// marker without one predates this field and belongs to DefaultEndpoint.
+	Endpoint string                     `json:"endpoint,omitempty"`
+	Info     map[string]json.RawMessage `json:"workload_info"`
+}
+
+// markerEndpoint is the ingress a marker's card lives on: the endpoint it
+// recorded, or DefaultEndpoint for a legacy marker that recorded none.
+func markerEndpoint(m openMarker) string {
+	if strings.TrimSpace(m.Endpoint) == "" {
+		return DefaultEndpoint
+	}
+	return m.Endpoint
+}
+
+// sameEndpoint reports whether two ingress URLs name the same ingress: scheme,
+// host (case-insensitive) and port (a scheme's default port is the same as none)
+// and path. An unparseable URL is compared as its trimmed text.
+func sameEndpoint(a, b string) bool {
+	return endpointKey(a) == endpointKey(b)
+}
+
+func endpointKey(raw string) string {
+	raw = strings.TrimSpace(raw)
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return raw
+	}
+	scheme := strings.ToLower(u.Scheme)
+	port := u.Port()
+	if (scheme == "http" && port == "80") || (scheme == "https" && port == "443") {
+		port = ""
+	}
+	host := strings.ToLower(u.Hostname())
+	if port != "" {
+		host = net.JoinHostPort(host, port)
+	}
+	return scheme + "://" + host + u.EscapedPath()
 }
 
 // registerDir resolves the register directory once; "" = no register.
@@ -163,7 +221,7 @@ func (e *Emitter) track(ev Event, info map[string]json.RawMessage) (removeAfterP
 		return ""
 	}
 	pid, start := e.selfIdentity()
-	body, err := json.Marshal(openMarker{PID: pid, ProcStart: start, WrittenMs: e.now().UnixMilli(), Info: info})
+	body, err := json.Marshal(openMarker{PID: pid, ProcStart: start, WrittenMs: e.now().UnixMilli(), Endpoint: e.cfg.Endpoint, Info: info})
 	if err != nil {
 		return ""
 	}
@@ -187,6 +245,11 @@ func (e *Emitter) track(ev Event, info map[string]json.RawMessage) (removeAfterP
 // Removing it instead would drop the only record of a card PAIR still shows as
 // running; leaving the in-flight marker would later close a finished job as
 // "failed".
+//
+// A frame PAIR REJECTED (HTTP 4xx) is the exception: no resend can change that
+// answer, so a pending marker would only be retried and refused until the give-up
+// and would end every sweep pass in the meantime. The marker is dropped, with a
+// log line.
 func (e *Emitter) untrack(path string, terminal map[string]json.RawMessage, postErr error) {
 	if path == "" {
 		return
@@ -195,8 +258,14 @@ func (e *Emitter) untrack(path string, terminal map[string]json.RawMessage, post
 		removeRetrying(path)
 		return
 	}
+	var rej *rejectedError
+	if errors.As(postErr, &rej) {
+		log.Printf("pairworkloads: PAIR rejected the terminal frame of card %s (HTTP %d); dropped its marker", infoJobID(terminal, path), rej.status)
+		removeRetrying(path)
+		return
+	}
 	pid, start := e.selfIdentity()
-	body, err := json.Marshal(openMarker{PID: pid, ProcStart: start, WrittenMs: e.now().UnixMilli(), Pending: true, Info: terminal})
+	body, err := json.Marshal(openMarker{PID: pid, ProcStart: start, WrittenMs: e.now().UnixMilli(), Pending: true, Endpoint: e.cfg.Endpoint, Info: terminal})
 	if err != nil || !writeAtomic(filepath.Dir(path), path, body) {
 		removeRetrying(path)
 	}
@@ -278,9 +347,11 @@ func (e *Emitter) orphaned(m openMarker, now time.Time) bool {
 
 // SweepOrphans closes every card whose producer is gone: it claims the
 // marker, sends the terminal "failed" frame the producer never sent, and
-// deletes the marker. It returns the number of frames delivered. A failed
-// post releases the claim and ends the pass (PAIR is down; the next sweep
-// retries). A disabled emitter does nothing.
+// deletes the marker. It returns the number of frames delivered. It leaves
+// every marker of another endpoint alone. A post PAIR REJECTED (HTTP 4xx) drops
+// that marker and goes on; any other failed post releases the claim and ends
+// the pass (PAIR is down; the next sweep retries). A disabled emitter does
+// nothing.
 func (e *Emitter) SweepOrphans(ctx context.Context) int {
 	if !e.Enabled() {
 		return 0
@@ -327,6 +398,9 @@ func (e *Emitter) SweepOrphans(ctx context.Context) int {
 			}
 			continue
 		}
+		if !sameEndpoint(markerEndpoint(m), e.cfg.Endpoint) {
+			continue // another ingress's card: not ours to post, lock, delete or age-drop
+		}
 		if !m.Pending && !e.orphaned(m, now) {
 			continue
 		}
@@ -345,6 +419,14 @@ func (e *Emitter) SweepOrphans(ctx context.Context) int {
 			err = e.post(ctx, body)
 		}
 		if err != nil {
+			var rej *rejectedError
+			if errors.As(err, &rej) {
+				// PAIR will never accept this frame: drop the one marker, go on.
+				log.Printf("pairworkloads: PAIR rejected the close of orphaned card %s (HTTP %d); dropped its marker", infoJobID(m.Info, name), rej.status)
+				removeRetrying(path)
+				removeRetrying(lock)
+				continue
+			}
 			if now.Sub(time.UnixMilli(m.WrittenMs)) > openGiveUp {
 				removeRetrying(path)
 				removeRetrying(lock)
@@ -362,6 +444,33 @@ func (e *Emitter) SweepOrphans(ctx context.Context) int {
 		log.Printf("pairworkloads: closed %d PAIR card(s) whose harness process exited before the job finished", sent)
 	}
 	return sent
+}
+
+// rejectedError is a close PAIR answered with an HTTP 4xx: the frame itself is
+// refused, which no retry changes. It is distinct from every other post failure
+// (transport error, 5xx), where PAIR may yet accept the same frame.
+type rejectedError struct {
+	endpoint string
+	status   int
+}
+
+func (r *rejectedError) Error() string {
+	return fmt.Sprintf("pairworkloads: %s answered %d", r.endpoint, r.status)
+}
+
+// rejection is whether an HTTP status is a verdict on the frame. 408 and 429
+// say "try again", not "never", so they stay with the retryable failures.
+func rejection(status int) bool {
+	return status >= 400 && status < 500 && status != http.StatusRequestTimeout && status != http.StatusTooManyRequests
+}
+
+// infoJobID names a frame's job for a log line, falling back to fallback.
+func infoJobID(info map[string]json.RawMessage, fallback string) string {
+	var id string
+	if json.Unmarshal(info["id"], &id) != nil || id == "" {
+		return fallback
+	}
+	return id
 }
 
 // claimLock creates lock exclusively, recording the claimant's pid.
