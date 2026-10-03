@@ -502,7 +502,7 @@ func FetchNodeView(ctx context.Context, base, token string) (NodeView, error) {
 
 		STTHQ:          w.STTHQ,
 		STTUploadMaxMB: w.STTUploadMaxMB,
-		Local:        false,
+		Local:          false,
 
 		JobsAdmitting:        w.JobsAdmitting,
 		SeatLoaded:           w.SeatLoaded,

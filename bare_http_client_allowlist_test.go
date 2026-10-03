@@ -63,4 +63,5 @@ var bareClientAllowlist = map[string]struct {
 	"internal/ttsclient/ttsclient.go:Speak":                      {1, "configured: the text-to-speech endpoint from config"},
 	"internal/visionremote/visionremote.go:<file-scope>":         {1, "configured: fleet nodes from delegate_remotes (vision lane)"},
 	"internal/textremote/textremote.go:<file-scope>":             {1, "configured: fleet nodes from delegate_remotes (text lane)"},
+	"internal/sttremote/sttremote.go:<file-scope>":               {1, "configured: fleet nodes from delegate_remotes (stt upload door; netguard.SafeTransport)"},
 }

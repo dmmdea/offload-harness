@@ -110,7 +110,7 @@ func TestConvertToOpus16kRefusesAMissingInput(t *testing.T) {
 func TestConvertToOpus16kFailuresLeaveNothingBehind(t *testing.T) {
 	ff := fakeFFmpegBin(t)
 	for name, env := range map[string]map[string]string{
-		"ffmpeg fails":      {"LO_FAKE_FAIL": "1"},
+		"ffmpeg fails":       {"LO_FAKE_FAIL": "1"},
 		"ffmpeg writes zero": {"LO_FAKE_OUT_BYTES": "0"},
 	} {
 		t.Run(name, func(t *testing.T) {
