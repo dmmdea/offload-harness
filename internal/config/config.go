@@ -1618,6 +1618,15 @@ type Config struct {
 	// so it must never be reachable unauthenticated beyond the box itself.
 	// Set the SAME value on every node and in the delegator's config.
 	FleetAuthToken string `json:"fleet_auth_token,omitempty"`
+	// FleetComposeProjects (ADR 0070) opens this node's project-bundle door, POST
+	// /fleet/compose-project: a holder of the fleet token sends a whole HyperFrames
+	// project — trusted code HyperFrames' Chrome runs without a sandbox — which the
+	// node extracts into a fresh directory, confines to itself and renders. Off unless
+	// set, and never open on a node without fleet_auth_token or a bound compose route
+	// (ComposeProjectsAdmissible).
+	FleetComposeProjects bool `json:"fleet_compose_projects,omitempty"`
+	// FleetComposeBundleMaxMB caps one project bundle as sent (gzip-compressed), MiB; 0 = 64.
+	FleetComposeBundleMaxMB int `json:"fleet_compose_bundle_max_mb,omitempty"`
 	// KVSlotCapGiB bounds the node's kvslots/ directory (ADR 0056 Layer 2); 0 = 8 GiB.
 	KVSlotCapGiB int `json:"kvslot_cap_gib,omitempty"`
 	// FleetAgentEnabled opts this NODE into executing fleet "agent" tasks
@@ -2827,6 +2836,23 @@ func (c Config) ImageGenAdvertisable() bool {
 // composition lane dispatch would defer.
 func (c Config) ComposeRouteConfigured() bool {
 	return c.ComposeScript != "" && c.HyperframesDir != "" && c.HyperframesBrowserPath != ""
+}
+
+// ComposeProjectsAdmissible reports whether THIS node's project-bundle door is open
+// (ADR 0070): the operator opted in, the node holds a fleet token for the door to
+// check, and the composition lane is bound. One predicate for the route, the fleet
+// advertisement and admission, so no door is ever open without a token.
+func (c Config) ComposeProjectsAdmissible() bool {
+	return c.FleetComposeProjects && c.FleetAuthToken != "" && c.ComposeRouteConfigured()
+}
+
+// EffectiveComposeBundleMaxBytes is the cap on one project bundle as sent.
+func (c Config) EffectiveComposeBundleMaxBytes() int64 {
+	mb := c.FleetComposeBundleMaxMB
+	if mb <= 0 {
+		mb = 64
+	}
+	return int64(mb) << 20
 }
 
 // EffectiveComposeCacheDir is where the compose runner keeps its work dirs, the

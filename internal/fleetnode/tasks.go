@@ -33,7 +33,7 @@ import (
 
 // fleetTaskOrder is the advertisement order (stable for health payloads + error
 // messages). Membership is decided per-config by taskConfiguredFor.
-var fleetTaskOrder = []string{"image-gen", "video-gen", "animate", "stt", "audio-gen", "run-graph", ComposeTask, "agent", "accel", VisionTask, TextTask}
+var fleetTaskOrder = []string{"image-gen", "video-gen", "animate", "stt", "audio-gen", "run-graph", ComposeTask, ComposeProjectTask, "agent", "accel", VisionTask, TextTask}
 
 // taskConfiguredFor reports whether THIS box actually serves taskType — the same
 // route gates the pipeline uses (empty script/model = the task defers there, so
@@ -71,6 +71,10 @@ func taskConfiguredFor(cfg config.Config, taskType string, loopbackListener bool
 		// The composition lane: the runner, the pinned install and the pinned browser
 		// all bound — config.ComposeRouteConfigured, the pipeline's own gate.
 		return cfg.ComposeRouteConfigured()
+	case ComposeProjectTask:
+		// The project-bundle door (ADR 0070): opted in, a fleet token to check, the lane
+		// bound. Never advertised or admitted on a tokenless node.
+		return cfg.ComposeProjectsAdmissible()
 	case "agent":
 		return AgentLaneAdmissible(cfg, loopbackListener)
 	case "accel":
@@ -385,6 +389,8 @@ func BuildRequest(ctx context.Context, cfg config.Config, loopbackListener bool,
 		return buildRunGraph(payload)
 	case ComposeTask:
 		return buildComposeVideo(payload)
+	case ComposeProjectTask:
+		return buildComposeProject(ctx, cfg, payload)
 	case "agent":
 		return buildAgentRun(cfg, payload)
 	case "accel":

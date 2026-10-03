@@ -91,7 +91,7 @@ func visionTaskServed(cfg config.Config, task core.TaskType) bool {
 // (v1 scope), since 0.116.0 the vision lane, and since 0.154.0 the text lane. Every
 // media task stays tokenless so deployed media clients keep working byte-identically.
 func tokenGated(taskType string) bool {
-	return taskType == string(core.TaskAgentRun) || taskType == VisionTask || taskType == TextTask
+	return taskType == string(core.TaskAgentRun) || taskType == VisionTask || taskType == TextTask || taskType == ComposeProjectTask
 }
 
 // visionTaskOf maps the payload's task name to the pipeline task, refusing

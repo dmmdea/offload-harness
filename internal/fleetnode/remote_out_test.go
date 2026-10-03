@@ -33,6 +33,10 @@ func remoteOutCfg() config.Config {
 	cfg.ComposeScript = "render/compose-hyperframes.mjs"
 	cfg.HyperframesDir = "/opt/offload/hyperframes"
 	cfg.HyperframesBrowserPath = "/opt/offload/hyperframes/chs"
+	// The project-bundle door writes too (it extracts a bundle), so it is open here.
+	cfg.FleetComposeProjects = true
+	cfg.FleetAuthToken = "tok"
+	cfg.ComposeCacheDir = composeProjectTestCache
 	return cfg
 }
 

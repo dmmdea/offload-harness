@@ -904,6 +904,10 @@ func (s *Server) Handler() http.Handler {
 	// The text lane (0.154.0): classify / extract on this node's own pipeline. A route of
 	// its own so the payload is typed; dispatch's 1 MiB body cap, then the same admit path.
 	mux.HandleFunc("POST /fleet/text", s.handleText)
+	// The project-bundle door (ADR 0070): a whole HyperFrames project from a holder of
+	// the fleet token. Its own route for the body cap; the door and the bearer are
+	// checked before the body is read, then the same admit path as every job.
+	mux.HandleFunc("POST "+ComposeProjectPath, s.handleComposeProject)
 	// The cascade chat lane (C-41b): a SYNCHRONOUS forward, not a job — see
 	// chat_lane.go for why a single short cascade call does not belong in the
 	// job store, and why this node's loopback-only llama-swap needs a door of
