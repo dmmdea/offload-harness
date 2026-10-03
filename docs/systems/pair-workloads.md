@@ -228,8 +228,16 @@ printable text of at most 64 characters (`core.SanitizeAsker`) before it is used
   duplicate admission: the claim loop looks the id up first (as `handleDispatch` does), so a second
   `queued` frame can never reopen a card the terminal frame closed or regress a running one. A claim a
   draining node refuses closes its card `failed` ("node draining"); the lease requeues the job.
+  The pushed path (`handleDispatch`) has the same guarantee against a **racing** duplicate: two
+  dispatches of one id both pass the handler's first lookup, so the id is looked up again and the
+  `queued` frame and `Admit` run under one lock (`Server.cardAdmitMu`). Of two racing duplicates one
+  is admitted and carded; the other finds the winner's job, emits no frame (a `queued` frame cannot be
+  recalled once posted, and one landing after the winner's terminal frame reopens its card) and gets the
+  idempotent 202.
 - **`fleet-serve` waits for the node emitter on shutdown** (`fleetServeDrain`: `DrainAndStop`, then
-  `Emitter.Wait`, each post bounded at 2 s), so the terminal frames of the jobs that finished during the
+  `Emitter.Wait`, each post bounded at 2 s) on both ways out of `fleetServeAwait`: an interrupt, and a
+  `Serve` that returns an error on its own (the listener failed; the process exits with that error and
+  the same jobs in flight), so the terminal frames of the jobs that finished during the
   drain, and the failed frames of the ones it dropped, are posted before the process exits instead of
   being left to the next process's orphan sweep (which would close a completed card `failed`).
 
@@ -351,7 +359,11 @@ side can know the producer died, so the harness retires its own orphans:
   naming the job id and the status, and the pass goes on to the next marker; before this rule one
   rejected marker starved every later one until the 48 h give-up. The same rule applies to a live
   producer's terminal frame: rejected, it is dropped with a log line instead of being rewritten as a
-  pending marker; unreachable, it stays pending. A lock whose sweeper died, or older than 5 min, is
+  pending marker; unreachable, it stays pending. A marker whose closing frame cannot even be **built**
+  (`sweepFrame` returns an error) is the same permanent verdict, because no PAIR can accept a frame that
+  does not exist: the sweep logs the job id and the cause, drops the marker and its lock, and goes on,
+  instead of reading it as an unreachable PAIR and ending the pass at that marker every sweep until the
+  48 h give-up. A lock whose sweeper died, or older than 5 min, is
   removed by a later pass.
 - **Seat-watch cards** go through the same `Emit`, so a fleet-serve killed with a direct-traffic
   card open leaves a marker the next sweep closes. A clean stop still completes open cards

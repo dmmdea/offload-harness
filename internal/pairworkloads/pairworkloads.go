@@ -170,6 +170,9 @@ type Emitter struct {
 	alive     func(pid int) bool
 	procStart func(pid int) (int64, bool)
 	now       func() time.Time
+	// sweepFrameFn builds a sweep's closing frame for a marker; sweepFrame unless a
+	// test swaps it (a build failure cannot otherwise be provoked from data).
+	sweepFrameFn func(m openMarker, now time.Time) ([]byte, error)
 }
 
 type engineAnswer struct {

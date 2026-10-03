@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -380,5 +381,41 @@ func TestUntrackKeepsPendingWhenTheRouteAnswers404(t *testing.T) {
 	files := r.files(t)
 	if len(files) != 1 {
 		t.Fatalf("a terminal frame answered 404 must stay pending: %v", files)
+	}
+}
+
+// L1 (class of D4): a marker whose closing frame cannot even be BUILT is as
+// permanent as a rejected one. It is dropped with a log line naming the job and
+// the sweep goes on; it must not read as an unreachable PAIR (release the lock,
+// end the pass), which would starve every marker behind it until the 48 h
+// give-up. ReadDir order is by name, so the unbuildable job sorts FIRST.
+func TestSweepContinuesPastAMarkerWhoseFrameCannotBeBuilt(t *testing.T) {
+	r := newOrphanRig(t)
+	ans := &answerByID{}
+	srv := httptest.NewServer(http.HandlerFunc(ans.handler))
+	t.Cleanup(srv.Close)
+	r.url = srv.URL
+	for _, id := range []string{"agd-1-unbuildable", "agd-2-ok", "agd-3-ok"} {
+		plantMarker(t, r.dir, id, srv.URL)
+	}
+	logs := captureLogs(t)
+	s := r.emitter(dead, nil)
+	s.sweepFrameFn = func(m openMarker, now time.Time) ([]byte, error) {
+		if infoJobID(m.Info, "") == "agd-1-unbuildable" {
+			return nil, errors.New("synthetic build failure")
+		}
+		return sweepFrame(m, now)
+	}
+	if n := s.SweepOrphans(context.Background()); n != 2 {
+		t.Fatalf("the sweep closed %d cards, want the 2 behind the unbuildable one (seen %v)", n, ans.ids())
+	}
+	if got := strings.Join(ans.ids(), ","); got != "agd-2-ok,agd-3-ok" {
+		t.Fatalf("the unbuildable frame is never posted and the rest are, in the one pass: got %s", got)
+	}
+	if files := r.files(t); len(files) != 0 {
+		t.Fatalf("an unbuildable marker is dropped (no PAIR can accept it) and its lock released, left %v", files)
+	}
+	if out := logs.String(); !strings.Contains(out, "agd-1-unbuildable") || !strings.Contains(out, "synthetic build failure") {
+		t.Fatalf("the drop must be logged with the job id and the cause: %q", out)
 	}
 }

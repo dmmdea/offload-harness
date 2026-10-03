@@ -349,8 +349,9 @@ func (e *Emitter) orphaned(m openMarker, now time.Time) bool {
 // SweepOrphans closes every card whose producer is gone: it claims the
 // marker, sends the terminal "failed" frame the producer never sent, and
 // deletes the marker. It returns the number of frames delivered. It leaves
-// every marker of another endpoint alone. A post PAIR REJECTED (HTTP 400, 413 or 422) drops
-// that marker and goes on; any other failed post releases the claim and ends
+// every marker of another endpoint alone. A marker whose closing frame cannot
+// be built, and a post PAIR REJECTED (HTTP 400, 413 or 422), drop that marker
+// and go on; any other failed post releases the claim and ends
 // the pass (PAIR is down; the next sweep retries). A disabled emitter does
 // nothing.
 func (e *Emitter) SweepOrphans(ctx context.Context) int {
@@ -415,11 +416,23 @@ func (e *Emitter) SweepOrphans(ctx context.Context) int {
 			removeRetrying(lock)
 			continue
 		}
-		body, err := sweepFrame(m, now)
-		if err == nil {
-			err = e.post(ctx, body)
+		build := e.sweepFrameFn
+		if build == nil {
+			build = sweepFrame
 		}
+		body, err := build(m, now)
 		if err != nil {
+			// The closing frame cannot even be built from this marker, so no
+			// PAIR, up or down, can ever accept it: the same permanent verdict
+			// as a rejected post. Treating it as an unreachable PAIR would
+			// release the lock and end the pass at this marker every sweep
+			// until the 48 h give-up, starving every marker behind it.
+			log.Printf("pairworkloads: the close of orphaned card %s cannot be built (%v); dropped its marker", infoJobID(m.Info, name), err)
+			removeRetrying(path)
+			removeRetrying(lock)
+			continue
+		}
+		if err = e.post(ctx, body); err != nil {
 			var rej *rejectedError
 			if errors.As(err, &rej) {
 				// PAIR will never accept this frame: drop the one marker, go on.
