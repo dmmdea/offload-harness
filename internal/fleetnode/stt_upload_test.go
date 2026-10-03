@@ -507,13 +507,16 @@ func TestSTTJobsOverTheCapWaitInOrderAcrossBothLanes(t *testing.T) {
 	if got := <-r.entered; got != "stt-q1" {
 		t.Fatalf("first run = %s", got)
 	}
-	// The next three queue behind it, alternating lanes; they are admitted in this order.
+	// The next three queue behind it, alternating lanes. A job is registered (jobs.Get) before its run
+	// goroutine reaches the gate, so "admitted" does not fix the arrival order at the gate: each one is
+	// awaited at the gate itself (waiting == n) before the next is submitted, which makes the order the
+	// test asserts the order the gate actually saw.
 	uploadSTT(t, s, "stt-q2", nil)
-	sttWaitFor(t, "stt-q2 admitted", func() bool { _, ok := s.jobs.Get("stt-q2"); return ok })
+	sttWaitFor(t, "stt-q2 waiting at the gate", func() bool { return s.sttGate.waiting() == 1 })
 	legacySTT(t, s, "stt-q3", nil)
-	sttWaitFor(t, "stt-q3 admitted", func() bool { _, ok := s.jobs.Get("stt-q3"); return ok })
+	sttWaitFor(t, "stt-q3 waiting at the gate", func() bool { return s.sttGate.waiting() == 2 })
 	uploadSTT(t, s, "stt-q4", nil)
-	sttWaitFor(t, "stt-q4 admitted", func() bool { _, ok := s.jobs.Get("stt-q4"); return ok })
+	sttWaitFor(t, "stt-q4 waiting at the gate", func() bool { return s.sttGate.waiting() == 3 })
 
 	time.Sleep(150 * time.Millisecond) // a second run beside the first would have started by now
 	// The three waiters are counted on the whisper client, so the call ahead of them keeps the model
