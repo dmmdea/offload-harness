@@ -6,6 +6,8 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.163.1] - 2026-10-03 - A warm-back never loads a seat over another card's lease
+
 ### Fixed — a warm-back waits for the last lease on the seat's cards (register C-86, plan P5 follow-up)
 
 A lease that unloaded the agent seat owes it a warm-back, and the warm loads the seat on all its cards. With card-scoped
