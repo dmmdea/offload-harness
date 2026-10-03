@@ -30,6 +30,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/cache"
 	"github.com/dmmdea/offload-harness/internal/calibration"
 	"github.com/dmmdea/offload-harness/internal/confhead"
+	"github.com/dmmdea/offload-harness/internal/composeremote"
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/delegate"
@@ -1405,6 +1406,7 @@ func runComposeVideo(args []string) error {
 	fs.IntVar(&f.fps, "fps", 0, "frame rate 1-240 (default: the composition's data-fps)")
 	fs.IntVar(&f.workers, "workers", 0, "Chrome workers 1-24 (default: compose_workers, else auto)")
 	fs.BoolVar(&f.strict, "strict", true, "fail on lint errors / a failed check (--strict=false to report only)")
+	route := fs.String("route", "auto", "local | auto (here when this machine has the composition lane, else a fleet node) | remote (a fleet node from delegate_remotes; ADR 0070)")
 	_ = fs.Parse(args)
 	params, perr := buildComposeParams(f)
 	if perr != nil {
@@ -1416,7 +1418,7 @@ func runComposeVideo(args []string) error {
 		return err
 	}
 	defer cleanup()
-	res := p.Run(context.Background(), core.Request{Task: core.TaskComposeVideo, Door: "cli:compose-video", Params: params})
+	res := composeremote.Run(context.Background(), cfg, p, core.Request{Task: core.TaskComposeVideo, Door: "cli:compose-video", Params: params}, *route)
 	emitResult(res, *asJSON, "", *compactFlag)
 	return nil
 }
