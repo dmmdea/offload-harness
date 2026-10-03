@@ -3,7 +3,7 @@ status: Accepted
 date: "2026-10-02"
 ---
 
-# ADR 0070 — A fleet-token holder may send a whole composition project to render; the template door stays as it was
+# ADR 0071 — A fleet-token holder may send a whole composition project to render; the template door stays as it was
 
 ## Context
 

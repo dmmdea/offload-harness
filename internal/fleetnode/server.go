@@ -904,7 +904,7 @@ func (s *Server) Handler() http.Handler {
 	// The text lane (0.154.0): classify / extract on this node's own pipeline. A route of
 	// its own so the payload is typed; dispatch's 1 MiB body cap, then the same admit path.
 	mux.HandleFunc("POST /fleet/text", s.handleText)
-	// The project-bundle door (ADR 0070): a whole HyperFrames project from a holder of
+	// The project-bundle door (ADR 0071): a whole HyperFrames project from a holder of
 	// the fleet token. Its own route for the body cap; the door and the bearer are
 	// checked before the body is read, then the same admit path as every job.
 	mux.HandleFunc("POST "+ComposeProjectPath, s.handleComposeProject)
@@ -1875,7 +1875,7 @@ func (s *Server) concurrencyCapped(taskType string) bool {
 	// `compose_busy`. Capped, a composition would hold a fleet execution slot for up
 	// to compose_timeout_sec (30 min) doing work the cap does not protect — starving
 	// the agent lane, the exact failure the exemption rule above exists to prevent.
-	// compose-project (ADR 0070) is the same render on the same compose slot; a queued
+	// compose-project (ADR 0071) is the same render on the same compose slot; a queued
 	// one would also hold its request body and extracted tree while it waited.
 	case ComposeTask, ComposeProjectTask:
 		return false

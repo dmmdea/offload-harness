@@ -1618,7 +1618,7 @@ type Config struct {
 	// so it must never be reachable unauthenticated beyond the box itself.
 	// Set the SAME value on every node and in the delegator's config.
 	FleetAuthToken string `json:"fleet_auth_token,omitempty"`
-	// FleetComposeProjects (ADR 0070) opens this node's project-bundle door, POST
+	// FleetComposeProjects (ADR 0071) opens this node's project-bundle door, POST
 	// /fleet/compose-project: a holder of the fleet token sends a whole HyperFrames
 	// project — trusted code HyperFrames' Chrome runs without a sandbox — which the
 	// node extracts into a fresh directory, confines to itself and renders. Off unless
@@ -2839,7 +2839,7 @@ func (c Config) ComposeRouteConfigured() bool {
 }
 
 // ComposeProjectsAdmissible reports whether THIS node's project-bundle door is open
-// (ADR 0070): the operator opted in, the node holds a fleet token for the door to
+// (ADR 0071): the operator opted in, the node holds a fleet token for the door to
 // check, and the composition lane is bound. One predicate for the route, the fleet
 // advertisement and admission, so no door is ever open without a token.
 func (c Config) ComposeProjectsAdmissible() bool {

@@ -15,7 +15,7 @@ installed by its own mode rather than by a profile.
 | agent contracts (read, reason, write a diff) | `agent_delegate`. This box has no agent seat, so it is never a placement: the default `auto` route and `spread` send every subtask to `delegate_remotes`, ranked as on any delegator |
 | web research | `offload_research`: pages are fetched here and digested by contracts on the fleet's seats |
 | a vetted template rendered to video | `offload_compose_video` with the default `route` auto: this box has no lane, so the template goes through a node's template door (`compose-video` over `/fleet/dispatch`) and the video and snapshots come back into this box's media dir |
-| a whole HyperFrames project or an inline composition | the same call with `project_dir` or `html`: packed into a bundle, checked here, sent to a node's token-gated project door ([ADR 0070](../architecture/decisions/0070-a-fleet-token-holder-may-send-a-whole-composition-project-to-render.md)); the video and snapshots come back |
+| a whole HyperFrames project or an inline composition | the same call with `project_dir` or `html`: packed into a bundle, checked here, sent to a node's token-gated project door ([ADR 0071](../architecture/decisions/0071-a-fleet-token-holder-may-send-a-whole-composition-project-to-render.md)); the video and snapshots come back |
 | questions about one image (VQA, OCR, assessment) | `offload_vqa`, `offload_ocr`, `offload_assess_image` with `route: "remote"`: the image is sent to a node that advertises the vision lane. Their `auto` route leaves the box only while a local card is busy, so a client names `remote` |
 | classify and extract | `offload_classify`, `offload_extract` with `route: "remote"`, on a node that advertises the text lane |
 
@@ -89,4 +89,4 @@ The client picks, among its `delegate_remotes` that advertise the task, the one 
 | `internal/delegate/run.go` (`localServesLayer`, `seatless`) | a view that names no agent seat is never a placement |
 | `internal/composeremote/` | `offload_compose_video`'s `route`: node choice, the template and project doors, fetching the outputs back |
 | `internal/composebundle/` | packing a project, and the extract and reference checks both sides run |
-| `internal/fleetnode/compose_project.go` | the node's project door (ADR 0070) |
+| `internal/fleetnode/compose_project.go` | the node's project door (ADR 0071) |

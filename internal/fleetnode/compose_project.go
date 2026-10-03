@@ -1,6 +1,6 @@
 package fleetnode
 
-// The project-bundle door (ADR 0070): POST /fleet/compose-project renders a whole HyperFrames
+// The project-bundle door (ADR 0071): POST /fleet/compose-project renders a whole HyperFrames
 // project a holder of the fleet token sends, so a machine with no composition lane of its own (a
 // thin client) can have any composition rendered on a node that has one. The template door
 // (compose-video over /fleet/dispatch) stays as it was: tokenless and vetted templates only.

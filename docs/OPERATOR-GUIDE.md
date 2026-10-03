@@ -509,7 +509,7 @@ frame, 8.3 MB at 1080p, and defers `DISK_HEADROOM`),
 `compose_timeout_sec` (1800; a 300 s caption chunk takes about 17 minutes at one worker) and `compose_cache_dir`
 (work dirs and frame cache; move it to a large drive if a render defers `DISK_HEADROOM`).
 
-**From a machine without the lane ([ADR 0070](architecture/decisions/0070-a-fleet-token-holder-may-send-a-whole-composition-project-to-render.md)).**
+**From a machine without the lane ([ADR 0071](architecture/decisions/0071-a-fleet-token-holder-may-send-a-whole-composition-project-to-render.md)).**
 `route` (`--route` on the CLI) picks where a composition renders: `auto`, the default, renders here when
 this machine has the lane and on a fleet node from `delegate_remotes` when it has none; `remote` always
 sends it; `local` never does. A template travels by name to any node that advertises `compose-video`. A

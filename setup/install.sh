@@ -87,7 +87,7 @@ Usage: install.sh [options]
   --hf-home DIR       HF cache root (default: $HF_HOME, else <prefix>/hf). Keep it
                       short: LMCache page names embed the model path (NAME_MAX 255).
   --tailscale-ip ADDR literal address the vLLM engine binds (default: tailscale ip -4)
-  --client            install a DELEGATION CLIENT instead (ADR 0070): the binary and a config with
+  --client            install a DELEGATION CLIENT instead (ADR 0071): the binary and a config with
                       no local model, no media lane and no service, delegating agent work and
                       compositions to --remotes; registers the local-offload MCP for Claude Code
   --remotes LIST      with --client: comma-separated fleet nodes (http://<node>:18811)
@@ -132,7 +132,7 @@ say "identity:  $SERVICE_USER (services will run as this account)"
 
 command -v jq >/dev/null 2>&1 || die "jq is required (sudo apt install jq)"
 
-# ---- client mode: a delegation client (ADR 0070) ----------------------------
+# ---- client mode: a delegation client (ADR 0071) ----------------------------
 # A machine too small for any local lane (a 2-core laptop, an arm64 single-board computer) still
 # runs the harness to place work on the fleet. It is a role, not a hardware tier: no detect, no
 # models, no llama.cpp, no service. `install client` renders its config from the binary.

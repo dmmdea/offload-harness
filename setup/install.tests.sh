@@ -90,7 +90,7 @@ render_expr="$(awk '/"\$BIN" install render/,/--out "\$SWAP_YAML"/' "$INSTALL" |
 [ -n "$render_expr" ] && [ "$render_expr" = "$seed_expr" ] \
   && pass "render passes --rknpu-home like seed" || fail "render passes --rknpu-home like seed" "seed=[$seed_expr] render=[$render_expr]"
 
-# --client: a delegation client (ADR 0070) needs no tier, no llama.cpp build and no service.
+# --client: a delegation client (ADR 0071) needs no tier, no llama.cpp build and no service.
 OUT="$(bash "$INSTALL" --bin "$STUB" --prefix "$TMP/client" --client --dry-run 2>&1)"; RC=$?
 [ "$RC" -ne 0 ] && printf '%s' "$OUT" | grep -q -- "--client requires --remotes" \
   && pass "--client requires --remotes" || fail "--client requires --remotes" "rc=$RC: $OUT"

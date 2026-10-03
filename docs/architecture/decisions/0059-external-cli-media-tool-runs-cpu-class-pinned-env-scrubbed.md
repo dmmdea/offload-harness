@@ -90,7 +90,7 @@ its runner.
    back to the cloud.
 6. **Trusted code.** Compositions run in an unsandboxed Chrome. `html` and `project_dir` are
    accepted from the local MCP and CLI doors, which are trusted callers like `run_graph`. (Amended by
-   [ADR 0070](0070-a-fleet-token-holder-may-send-a-whole-composition-project-to-render.md): a holder of
+   [ADR 0071](0071-a-fleet-token-holder-may-send-a-whole-composition-project-to-render.md): a holder of
    the fleet token may also send a whole project through the opt-in, token-gated `compose-project`
    door, confined to a fresh directory.) The template fleet
    door, which is not token-gated, accepts **only** the node's vetted templates, with typed and

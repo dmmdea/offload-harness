@@ -1406,7 +1406,7 @@ func runComposeVideo(args []string) error {
 	fs.IntVar(&f.fps, "fps", 0, "frame rate 1-240 (default: the composition's data-fps)")
 	fs.IntVar(&f.workers, "workers", 0, "Chrome workers 1-24 (default: compose_workers, else auto)")
 	fs.BoolVar(&f.strict, "strict", true, "fail on lint errors / a failed check (--strict=false to report only)")
-	route := fs.String("route", "auto", "local | auto (here when this machine has the composition lane, else a fleet node) | remote (a fleet node from delegate_remotes; ADR 0070)")
+	route := fs.String("route", "auto", "local | auto (here when this machine has the composition lane, else a fleet node) | remote (a fleet node from delegate_remotes; ADR 0071)")
 	_ = fs.Parse(args)
 	params, perr := buildComposeParams(f)
 	if perr != nil {
@@ -2538,7 +2538,7 @@ func runFleetServe(args []string) error {
 	// one id is far cheaper than refusing to serve.
 	swept, kept, serr := fleetnode.SweepOrphanedPipelineJobs(cfg)
 	reportPipelineJobsSweep(os.Stderr, swept, kept, serr)
-	// Extracted compose-project trees (ADR 0070) a crash left behind; a warning, never fatal.
+	// Extracted compose-project trees (ADR 0071) a crash left behind; a warning, never fatal.
 	if n, perr := fleetnode.SweepOrphanedProjectDirs(cfg, time.Now()); perr != nil {
 		fmt.Fprintf(os.Stderr, "[fleet-serve] WARNING: sweeping compose-project dirs: %v\n", perr)
 	} else if n > 0 {

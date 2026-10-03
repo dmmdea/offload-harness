@@ -1,6 +1,6 @@
 // Package composeremote places a composition on a fleet node and brings the video back, so a machine
 // with no composition lane of its own (a thin client) calls offload_compose_video exactly as a render
-// node does (ADR 0070). It mirrors visionremote: probe delegate_remotes through /fleet/health, pick a
+// node does (ADR 0071). It mirrors visionremote: probe delegate_remotes through /fleet/health, pick a
 // node that advertises the task, dispatch with the fleet bearer, poll the job, and map every failure
 // to a typed defer.
 //

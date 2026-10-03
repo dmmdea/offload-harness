@@ -1,6 +1,6 @@
 // Package composebundle carries a HyperFrames project between machines: Pack turns a project
 // directory into a gzip-compressed tar, Extract unpacks one into a fresh directory, and Confine
-// checks that the project only refers to files inside itself (ADR 0070).
+// checks that the project only refers to files inside itself (ADR 0071).
 //
 // A project is trusted code: HyperFrames' Chrome runs without a sandbox and executes the project's
 // JavaScript. The fleet's project door (fleetnode compose-project) accepts one only from a holder of

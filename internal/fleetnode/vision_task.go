@@ -89,7 +89,7 @@ func visionTaskServed(cfg config.Config, task core.TaskType) bool {
 
 // tokenGated reports whether a task_type rides the bearer rule: the agent lane
 // (v1 scope), since 0.116.0 the vision lane, since 0.154.0 the text lane, and the
-// project-bundle door (compose-project, ADR 0070). Every other media task stays
+// project-bundle door (compose-project, ADR 0071). Every other media task stays
 // tokenless so deployed media clients keep working byte-identically.
 func tokenGated(taskType string) bool {
 	return taskType == string(core.TaskAgentRun) || taskType == VisionTask || taskType == TextTask || taskType == ComposeProjectTask

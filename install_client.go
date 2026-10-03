@@ -17,7 +17,7 @@ import (
 
 // runInstallClient renders the config of a delegation client: a machine that runs the harness only to
 // place work on fleet nodes (agent_delegate, and offload_compose_video with no lane of its own, ADR
-// 0070). It has no local model, no media lane and no fleet service, and its config says so explicitly:
+// 0071). It has no local model, no media lane and no fleet service, and its config says so explicitly:
 // every model route and every script binding that has a default is written empty, so status and
 // acceptance never claim a lane this box does not have. The fleet token is read from a file and never
 // printed; the config is written with mode 0600.

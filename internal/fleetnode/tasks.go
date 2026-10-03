@@ -72,7 +72,7 @@ func taskConfiguredFor(cfg config.Config, taskType string, loopbackListener bool
 		// all bound — config.ComposeRouteConfigured, the pipeline's own gate.
 		return cfg.ComposeRouteConfigured()
 	case ComposeProjectTask:
-		// The project-bundle door (ADR 0070): opted in, a fleet token to check, the lane
+		// The project-bundle door (ADR 0071): opted in, a fleet token to check, the lane
 		// bound. Never advertised or admitted on a tokenless node.
 		return cfg.ComposeProjectsAdmissible()
 	case "agent":
