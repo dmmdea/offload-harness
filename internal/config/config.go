@@ -1169,6 +1169,12 @@ type Config struct {
 	AnimateGenSdcppVAE     string `json:"animategen_sdcpp_vae,omitempty"`
 	AnimateGenSdcppT5xxl   string `json:"animategen_sdcpp_t5xxl,omitempty"`
 	AnimateGenSdcppBackend string `json:"animategen_sdcpp_backend,omitempty"`
+	// AnimateGenSdcppModel is the VACE model: a .safetensors file (the Comfy-Org
+	// wan2.1_vace_1.3B_fp16 loads) because the public VACE GGUFs lack
+	// vace_patch_embedding.weight and sd-cli refuses them.
+	// AnimateGenSdcppTAE is the OPT-IN tiny-autoencoder decode (sd-cli --taesd): a request
+	// with fast=true uses it. Unset, fast is a no-op on this lane and the result says so.
+	AnimateGenSdcppTAE string `json:"animategen_sdcpp_tae,omitempty"`
 	// AnimateGenSdcppExtraArgs are appended to the sd-cli invocation (an element that
 	// changes the backend or placement is refused).
 	AnimateGenSdcppExtraArgs []string `json:"animategen_sdcpp_extra_args,omitempty"`
@@ -2795,7 +2801,7 @@ func pathFields(c *Config) []*string {
 		&c.ImageGenScript, &c.NodePath, &c.ComfyDir,
 		&c.SdcppScript, &c.SdcppBin, &c.SdcppModel, &c.SdcppVAE, &c.SdcppClipL, &c.SdcppClipG, &c.SdcppT5, &c.SdcppLLM,
 		&c.InpaintScript, &c.GenEditScript, &c.UpscaleScript,
-		&c.AnimateGenSdcppBin, &c.AnimateGenSdcppModel, &c.AnimateGenSdcppVAE, &c.AnimateGenSdcppT5xxl,
+		&c.AnimateGenSdcppBin, &c.AnimateGenSdcppModel, &c.AnimateGenSdcppVAE, &c.AnimateGenSdcppT5xxl, &c.AnimateGenSdcppTAE,
 		&c.AnimateGenDepthBin, &c.AnimateGenDepthModel, &c.AnimateGenSdcppScript, &c.VideoGenSdcppScript,
 		&c.AudiocppScript, &c.AudiocppBin, &c.AudiocppVoiceModel, &c.AudiocppMusicModel,
 		&c.VideoGenScript, &c.AnimateGenScript, &c.RunGraphScript, &c.VoiceGenScript, &c.MusicGenScript, &c.GPULockPath, &c.StateDir,

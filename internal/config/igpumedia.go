@@ -62,6 +62,42 @@ func CPUBackendRefusal(backend string) error {
 	return nil
 }
 
+// audiocppBackends is the allowlist of audio.cpp --backend values: the GPU backends of
+// `audiocpp_cli --backend cpu|cuda|hip|rocm|vulkan|metal|best` (rocm is an alias of hip).
+// audio.cpp takes the device index SEPARATELY (--device N, the audiocpp_device key), so
+// "vulkan0" is not a valid audio.cpp backend even though sd.cpp's --backend wants exactly that.
+// cpu and best (which may pick the CPU) are not on the list: no model runs on CPU.
+var audiocppBackends = map[string]bool{"vulkan": true, "cuda": true, "hip": true, "rocm": true, "metal": true}
+
+// AudiocppBackendRefusal returns an error unless backend is one of audio.cpp's GPU backends
+// (vulkan, cuda, hip, rocm, metal). It is the audiocpp_backend twin of CPUBackendRefusal,
+// which validates sd.cpp's vulkanN spelling.
+func AudiocppBackendRefusal(backend string) error {
+	b := strings.ToLower(strings.TrimSpace(backend))
+	if b == "" {
+		return fmt.Errorf("backend is unset (an audio.cpp GPU backend such as \"vulkan\" is required; no model runs on CPU on this engine)")
+	}
+	if !audiocppBackends[b] {
+		hint := ""
+		if vulkanBackendRe.MatchString(b) {
+			hint = fmt.Sprintf(" - audio.cpp takes the device index separately: set audiocpp_backend \"vulkan\" and audiocpp_device %q", strings.TrimPrefix(b, "vulkan"))
+		}
+		return fmt.Errorf("backend %q is not an audio.cpp GPU backend (want vulkan, cuda, hip, rocm or metal; cpu and best are refused: no model runs on CPU on this engine)%s", backend, hint)
+	}
+	return nil
+}
+
+var deviceIndexRe = regexp.MustCompile(`^\d+$`)
+
+// AudiocppDeviceRefusal validates audiocpp_device: empty (= device 0) or a non-negative index.
+func AudiocppDeviceRefusal(device string) error {
+	d := strings.TrimSpace(device)
+	if d == "" || deviceIndexRe.MatchString(d) {
+		return nil
+	}
+	return fmt.Errorf("audiocpp_device %q is not a device index (a non-negative integer such as \"0\")", device)
+}
+
 // Engines whose extra args are screened (ExtraArgsRefusal): they differ only in which flags
 // the runner owns (audio.cpp's --device is the audiocpp_device key's).
 const (
@@ -187,7 +223,8 @@ func validateVideoFamilyEngine(name string, b VideoFamilyBinding) error {
 	switch b.Engine {
 	case "", EngineComfy:
 		if b.SdcppBin != "" || b.SdcppModel != "" || b.SdcppHighNoiseModel != "" || b.SdcppVAE != "" ||
-			b.SdcppT5xxl != "" || b.SdcppBackend != "" || len(b.SdcppExtraArgs) > 0 || b.SdcppMaxTokens != 0 || b.SdcppVAEStride != 0 {
+			b.SdcppT5xxl != "" || b.SdcppBackend != "" || len(b.SdcppExtraArgs) > 0 || b.SdcppMaxTokens != 0 || b.SdcppVAEStride != 0 ||
+			b.SdcppTAE != "" || b.HighNoiseCFG != 0 || b.HighNoiseSteps != 0 || b.HighNoiseSampler != "" {
 			return fmt.Errorf("videogen_families[%q]: sdcpp_* keys are set but engine is %q — set \"engine\": \"sdcpp\" or remove them", name, b.Engine)
 		}
 		return nil
@@ -203,6 +240,12 @@ func validateVideoFamilyEngine(name string, b VideoFamilyBinding) error {
 	}
 	if b.Steps < 0 || b.CFG < 0 || b.FlowShift < 0 {
 		return fmt.Errorf("videogen_families[%q]: steps, cfg and flow_shift must not be negative", name)
+	}
+	if b.HighNoiseCFG < 0 || b.HighNoiseSteps < 0 {
+		return fmt.Errorf("videogen_families[%q]: high_noise_cfg and high_noise_steps must not be negative", name)
+	}
+	if (b.HighNoiseCFG != 0 || b.HighNoiseSteps != 0 || b.HighNoiseSampler != "") && b.SdcppHighNoiseModel == "" {
+		return fmt.Errorf("videogen_families[%q]: high_noise_cfg / high_noise_steps / high_noise_sampler tune the high-noise expert, but sdcpp_high_noise_model is not set", name)
 	}
 	if err := ExtraArgsRefusal(fmt.Sprintf("videogen_families[%q].sdcpp_extra_args", name), ExtraArgsSdcpp, b.SdcppExtraArgs); err != nil {
 		return err
@@ -244,9 +287,12 @@ func validateIGPUMedia(c Config) error {
 		}
 	}
 	if c.VoiceGenEngine == EngineAudiocpp || c.MusicGenEngine == EngineAudiocpp {
-		if err := CPUBackendRefusal(c.AudiocppBackend); err != nil {
+		if err := AudiocppBackendRefusal(c.AudiocppBackend); err != nil {
 			return fmt.Errorf("audiocpp_backend: %w", err)
 		}
+	}
+	if err := AudiocppDeviceRefusal(c.AudiocppDevice); err != nil {
+		return err
 	}
 	return nil
 }
@@ -286,6 +332,70 @@ func expandVideoFamilyPaths(c *Config, home string) {
 		b.SdcppHighNoiseModel = ExpandTilde(b.SdcppHighNoiseModel, home)
 		b.SdcppVAE = ExpandTilde(b.SdcppVAE, home)
 		b.SdcppT5xxl = ExpandTilde(b.SdcppT5xxl, home)
+		b.SdcppTAE = ExpandTilde(b.SdcppTAE, home)
 		c.VideoGenFamilies[k] = b
 	}
+}
+
+// canonicalVideoFamily mirrors internal/pipeline.canonicalVideoFamily: the runner's closed
+// dispatch set maps to itself and everything else renders Wan 2.2.
+// TestDefaultVideoSdcppFamilyMirrorsThePipeline (internal/pipeline) keeps the two together.
+func canonicalVideoFamily(fam string) string {
+	switch fam {
+	case "ltx25", "h3", "hunyuan", "ace":
+		return fam
+	}
+	return videoFamilyWanSentinel
+}
+
+// DefaultVideoSdcppFamily reports the sdcpp family a generate_video request that names no
+// model resolves to, exactly as the pipeline resolves it (resolveVideoFamily, then
+// ResolveVideoFamilyBinding): an sdcpp family may be named like a ComfyUI family (wan22,
+// ltx25, ...), and an unset videogen_family means wan22. mediacap's generate_video verdict
+// and the fleet's bound helpers both ask this, so none of them re-derives the default.
+func (c Config) DefaultVideoSdcppFamily() (string, bool) {
+	fam := strings.TrimSpace(c.VideoGenFamily)
+	render := ""
+	if fam != "" {
+		if c.SdcppVideoFamily(fam) {
+			return fam, true
+		}
+		render = canonicalVideoFamily(fam)
+	}
+	if !c.ResolveVideoFamilyBinding(render).UsesSdcpp() {
+		return "", false
+	}
+	if render == "" {
+		render = c.defaultVideoFamily()
+	}
+	return render, true
+}
+
+// The four *Bound methods say whether a lane has ANY renderer bound on this box: its
+// ComfyUI/python script (voice: or the TTS endpoint) OR the CT-49 engine that replaces it.
+// They are the seam the fleet advertisement and fleet-measure key on (CT-51), so a box
+// whose only video is the sdcpp engine is not told it has no video lane.
+
+// VideoGenBound: videogen_script, or the default video family is bound to sdcpp.
+func (c Config) VideoGenBound() bool {
+	if c.VideoGenScript != "" {
+		return true
+	}
+	_, ok := c.DefaultVideoSdcppFamily()
+	return ok
+}
+
+// AnimateGenBound: animategen_script, or animategen_engine sdcpp.
+func (c Config) AnimateGenBound() bool {
+	return c.AnimateGenScript != "" || c.AnimateGenEngine == EngineSdcpp
+}
+
+// VoiceGenBound: voicegen_script, tts_endpoint, or voicegen_engine audiocpp.
+func (c Config) VoiceGenBound() bool {
+	return c.VoiceGenScript != "" || c.TTSEndpoint != "" || c.VoiceGenEngine == EngineAudiocpp
+}
+
+// MusicGenBound: musicgen_script, or musicgen_engine audiocpp.
+func (c Config) MusicGenBound() bool {
+	return c.MusicGenScript != "" || c.MusicGenEngine == EngineAudiocpp
 }

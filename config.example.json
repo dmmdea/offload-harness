@@ -210,6 +210,7 @@
   "animategen_sdcpp_vae": "",
   "animategen_sdcpp_t5xxl": "",
   "animategen_sdcpp_backend": "",
+  "animategen_sdcpp_tae": "",
   "animategen_sdcpp_extra_args": null,
   "animategen_sdcpp_max_tokens": 0,
   "animategen_sdcpp_vae_stride": 0,

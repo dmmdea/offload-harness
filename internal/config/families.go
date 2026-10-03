@@ -131,6 +131,18 @@ type VideoFamilyBinding struct {
 	// the Wan2.2 VAE, 8 for Wan2.1) is REQUIRED when a cap is set.
 	SdcppMaxTokens int `json:"sdcpp_max_tokens,omitempty"`
 	SdcppVAEStride int `json:"sdcpp_vae_stride,omitempty"`
+	// SdcppTAE is the OPT-IN tiny autoencoder (sd-cli --taesd; lightx2v taew2_2 is the
+	// verified one, lighttaew2_2 is broken in this sd.cpp: never bind it). A request with
+	// fast=true decodes with it (299 s -> 2.8 s for 17 frames at SSIM 0.95); the full VAE
+	// stays the default, and without this key fast is a no-op on the sdcpp lane that says so.
+	SdcppTAE string `json:"sdcpp_tae,omitempty"`
+	// HighNoiseCFG, HighNoiseSteps and HighNoiseSampler are the A14B high-noise expert's own
+	// sampling recipe (sd-cli --high-noise-cfg-scale / --high-noise-steps /
+	// --high-noise-sampling-method; sd-cli's default there is cfg 7.0, which doubles the
+	// iGPU time of a distilled recipe). They need sdcpp_high_noise_model.
+	HighNoiseCFG     float64 `json:"high_noise_cfg,omitempty"`
+	HighNoiseSteps   int     `json:"high_noise_steps,omitempty"`
+	HighNoiseSampler string  `json:"high_noise_sampler,omitempty"`
 	// Steps, CFG, FlowShift and Sampler are the family's sampling recipe (0 / ""
 	// = sd-cli's own default). A per-request `steps` wins over Steps.
 	Steps     int     `json:"steps,omitempty"`
