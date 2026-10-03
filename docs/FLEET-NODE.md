@@ -174,7 +174,10 @@ of repeating).
 
 The advertisement (`/fleet/health` `supported_task_types`) is derived from the node's OWN
 config at process start — a route bound in the config after the process started (e.g. adding
-`imagegen_script`) does not advertise until the process is restarted the hard way above.
+`imagegen_script`) does not advertise until the process is restarted the hard way above. Since ADR 0072
+the media tasks (`video-gen`, `animate`, `audio-gen`, `run-graph`) are the exception in the other direction: a
+bound route is advertised only while `internal/mediacap` reads it CONFIGURED from the disk (re-read at most every
+60 seconds), so a weight that goes missing drops the task without a restart and `media_routes` says why.
 
 ## Two utilization figures, and which one answers which question
 

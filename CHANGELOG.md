@@ -6,6 +6,43 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added — media jobs run on a fleet node, with their input files, and come back verified (ADR 0072, register CT-50)
+
+A machine with no render lane, or a caller who names a node, can now render an image, a clip, a character animation, a voice
+or music clip or a ComfyUI graph on the fleet. Nothing in the repository dispatched the five media tasks before: the MCP doors
+and CLI verbs called the local pipeline directly.
+
+- **Node: the media-job door.** `POST /fleet/media-job` (task `media-job`) takes one media task with its input files (a
+  `video-gen` still, an `animate` reference and driver, an `audio-gen` clone sample) from a holder of the fleet token. It is
+  closed unless `fleet_media_inputs` is true, `fleet_auth_token` is set and a media task is bound; the bearer is checked
+  before the body; the bundle is capped (`fleet_media_inputs_max_mb`, default 512 MiB), sha256-checked, extracted into
+  `<media_dir>/fleet-inputs/in-*` and sniffed by magic bytes per field kind; the inner task is built by the builder
+  `/fleet/dispatch` uses; the directory is removed with the job and swept at startup. `media-job` is token-gated, so its jobs
+  are masked from tokenless polls.
+- **Node: artifacts.** A finished media job's data gains `artifacts: [{name, bytes, sha256}]` for every output inside
+  `media_dir`. Additive.
+- **Node: honest advertisement.** `video-gen`, `animate`, `audio-gen` and `run-graph` are advertised and admitted only while
+  `internal/mediacap` derives their route CONFIGURED (default configs ship every script bound, so a box listed tasks whose
+  weights were missing and failed the first job). `/fleet/health` gains `media_routes`; its task and family lists are derived
+  per request from the same reading, cached at most 60 s. An endpoint-only voice node now advertises `audio-gen`.
+- **Client: `internal/mediaremote`** mirrors `composeremote`: `route` local, auto (here when this machine has the lane,
+  read from the files; with no lane and no fleet it still runs here) or remote; node pick by task, `media-job`, route verdict,
+  text lease, held lease, queue and config order, every miss named; outputs fetched by name and verified against the node's
+  sha256 before anything lands. `delegate.NodeView` decodes `media_routes` (absent = unknown) and any held lease.
+- **Doors.** `offload_generate_image`, `offload_generate_video`, `offload_animate_character`, `offload_generate_audio` and
+  `offload_run_graph` gain `route` and `remotes`; `generate-image`, `generate-video`, `generate-audio` and `run-graph` gain
+  `--route` and a repeatable `--remote`. No tool was added. `refine=false`, `tts_voice` and `transformer` defer on a remote
+  route (the node's tasks cannot carry them).
+- Closes the input half of register C-90 for media inputs (STT stays a separate door).
+
+Tests: `TestMediaJobDoorChecksTheDoorAndTheBearerBeforeReadingTheBody`, `TestMediaJobRefusesBadPayloadsAndLeavesNothing`,
+`TestMediaJobRewritesTheInputFieldsAndRemovesTheDirectory`, `TestSweepOrphanedInputDirs`,
+`TestWithArtifactsListsEveryOutputInsideMediaDir`, `TestFinishedMediaJobDataCarriesArtifacts`,
+`TestAMissingWeightDropsVideoGenFromTheAdvertisement`, `TestMediaRoutesAreCachedForAtMostSixtySeconds`,
+`TestAStillTravelsAsAMediaJobBundleWhoseHashMatches`, `TestAShaMismatchDefersAndLeavesNoFile`,
+`TestANodeWithoutTheRouteIsSkippedAndNamed`, `TestCallerRemotesMustBeAmongDelegateRemotes`,
+`TestMediaToolsAdvertiseRouteAndRemotes`, `TestMediaVerbsRouteToAFleetNode`.
+
 ## [0.163.1] - 2026-10-03 - A warm-back never loads a seat over another card's lease
 
 ### Fixed — a warm-back waits for the last lease on the seat's cards (register C-86, plan P5 follow-up)

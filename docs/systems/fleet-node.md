@@ -1480,11 +1480,57 @@ survived for months. The alias resolution in particular retries on the next poll
 budget: latching "already tried" on a failed roster read disabled the alias match for the rest of the
 wait after ONE transient error, which is S-08 again, intermittently.
 
+## The media-job door, artifacts and honest advertisement (ADR 0072)
+
+Three additions to the media tasks, all additive on the wire.
+
+**The media-job door.** `POST /fleet/media-job` (task `media-job`) takes one `image-gen`, `video-gen`, `animate`,
+`audio-gen` or `run-graph` job together with the input files it reads, from a holder of the fleet token. The body is
+`{job_id, task_type, payload, bundle?, bundle_sha256?, inputs?}`: `payload` is the inner task's payload exactly as
+`/fleet/dispatch` takes it, `bundle` is base64 of a gzip-tar of the files, and `inputs` maps a payload field to a bare name
+in the bundle. The fields that may be files are `video-gen.still`, `animate.ref`, `animate.driver` and `audio-gen.clone`.
+
+- It is open only when `fleet_media_inputs` is true, `fleet_auth_token` is set and a media task is bound
+  (`config.MediaInputsAdmissible`; health lists `media-job` only while one inner task is also runnable). Closed, it answers
+  403; without the bearer, 401; both before a byte of the body is read. `media-job` is token-gated, so the same task over
+  `/fleet/dispatch` needs the bearer too, and its jobs are masked from tokenless polls and feeds.
+- The body is capped at `fleet_media_inputs_max_mb` (default 512, compressed) in base64 plus 64 KiB (413 over it), is JSON
+  only, and unknown fields are a 400. A token holder gets a 15-minute read and write window.
+- The bundle's sha256 must match; it is extracted into `<media_dir>/fleet-inputs/in-*` (regular files only, confined names,
+  byte caps; a symlink or a traversal name is refused); each `inputs` value must be a regular file directly in that
+  directory; and its first bytes must match the field's kind: image PNG, JPEG or WebP; video MP4/MOV or WebM/MKV; audio WAV,
+  FLAC, MP3, OGG or M4A. A payload that names a node-local path in a file field is refused: this door carries bytes, never
+  paths. The inner task is built by the same builder `/fleet/dispatch` uses, with each field rewritten to the extracted path.
+- The directory is removed when the job ends and on every refusal. `fleet-serve` removes `in-*` directories older than the
+  longest media timeout plus an hour at startup. A node-side failure (a disk that filled) is a 500, not "refused".
+
+**Artifacts.** When a media job finishes, its stored `data` gains `artifacts: [{name, bytes, sha256}]`, one per output the
+result names (`image_path`, `video_path`, `audio_path`, run-graph `outputs`) that is a regular file directly inside
+`media_dir`. A path outside it, a symlink or a file that cannot be hashed is left out and never fails the job. The poll
+returns it with the rest of `data`, so the machine that fetches `GET /fleet/media/{name}` can verify the bytes.
+
+**Honest advertisement.** `video-gen`, `animate`, `audio-gen` and `run-graph` are advertised, and admitted, only while
+`internal/mediacap` reads the matching route as CONFIGURED: `generate_video`, `animate_character`, `run_graph`, and for
+audio any of `generate_audio:voice`, `generate_audio:voice:endpoint` and `generate_audio:music`. A bound script over a
+missing weight, VAE or custom node is BOUND-BUT-MISSING and the task drops out; restoring the file brings it back. One
+predicate (`taskConfiguredFor`) serves health and dispatch, so a node never lists what it would refuse. `image-gen` keeps
+`ImageGenAdvertisable`. `/fleet/health` gains `media_routes: [{route, engine, state}]` (every task route, not the shared
+prerequisites; the `detail` paths stay on the node), and `supported_task_types` and `loadable_model_families` are derived per
+request from the same reading, which is cached for at most 60 seconds per config. A delegator reads `media_routes` through
+`delegate.NodeView` (`MediaRoutes`, `RouteState`); an absent field is unknown, never "no route".
+
 ## Source map
 
 - [`internal/fleetnode/server.go`](../../internal/fleetnode/server.go) — routes, payloads, duplicate
   semantics, agent-lane auth gates, agent health advertisement
 - [`internal/fleetnode/auth.go`](../../internal/fleetnode/auth.go) — the bearer credential check
+- [`internal/fleetnode/media_job.go`](../../internal/fleetnode/media_job.go) — the media-job door: the body, the
+  bundle checks, the magic-byte sniff, the sweep of orphaned input directories
+- [`internal/fleetnode/media_artifacts.go`](../../internal/fleetnode/media_artifacts.go) — `artifacts` on a finished
+  media job
+- [`internal/fleetnode/media_ready.go`](../../internal/fleetnode/media_ready.go) — the cached mediacap reading behind
+  the honest advertisement and `media_routes`
+- [`internal/mediaremote/`](../../internal/mediaremote/) — the client that places a media job on a node
 - [`internal/fleetnode/jobs.go`](../../internal/fleetnode/jobs.go) — state machine, the admit-then-
   schedule queue and its concurrency limit, eviction, drain, the agent job marker
 - [`internal/fleetnode/tasks.go`](../../internal/fleetnode/tasks.go) — `agentTaskConfigured`,
@@ -1522,6 +1568,7 @@ wait after ONE transient error, which is S-08 again, intermittently.
 
 - [../FLEET-NODE.md](../FLEET-NODE.md) — operator guide
 - [../flows/fleet-job-lifecycle.md](../flows/fleet-job-lifecycle.md)
+- [../architecture/decisions/0072-a-fleet-token-holder-may-send-one-media-job-with-its-input-files.md](../architecture/decisions/0072-a-fleet-token-holder-may-send-one-media-job-with-its-input-files.md)
 - [../architecture/decisions/0008-pdh-primary-vram-sampling.md](../architecture/decisions/0008-pdh-primary-vram-sampling.md)
 - [fleet-overview.md](fleet-overview.md) — the delegator-side operator page that reads these health
   and jobs fields

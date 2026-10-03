@@ -1302,6 +1302,50 @@ an editor; the overlay itself is silent.
   with `@font-face` from the shared kit. An undeclared family makes the compiler request the Google
   Fonts CSS API, with the page's character set in the query.
 
+## Remote routing and the media-job door (ADR 0072)
+
+`offload_generate_image`, `offload_generate_video`, `offload_animate_character`, `offload_generate_audio` and
+`offload_run_graph` (CLI `generate-image`, `generate-video`, `generate-audio`, `run-graph`) take `route` and
+`remotes` (`--route`, repeatable `--remote`). A machine with no lane for the job, or a caller who names a node, can
+render on a fleet node and get the output back hash-verified. The other media tools (`offload_edit_image`,
+`offload_generate_svg`, `offload_media`, `offload_upscale_image`, the inpaint and generative-edit routes) stay local.
+
+**Where a job runs.**
+
+- `local` always runs here. It never touches the network.
+- `auto` (the default) runs here when this machine has the lane, and the call is then byte-identical to one made before
+  the route existed. "Has the lane" is read from the files, not the binding: `mediacap` derives the route (the script,
+  the weights its graph loads, the custom nodes it names), so a default config, which binds every script, does not make a
+  thin client look like a render box. With no lane here, `auto` goes to a node from `delegate_remotes`; with no lane and
+  no fleet configured it runs here and returns the pipeline's own deferral, as before.
+- `remote` always goes to a node. `remotes` narrows the nodes for one call; each must already be in `delegate_remotes`,
+  and the call is refused before any probe otherwise.
+
+**Which node.** The client reads each candidate's `/fleet/health` and keeps the nodes that list the task (and `media-job`
+when input files travel), report every route the task needs as CONFIGURED when they report routes at all (a node that
+predates `media_routes` is unknown, not refused), and do not hold a TEXT lease (they would answer 503). Among those, a node
+with no held lease ranks first, then the shorter queue (queued plus running), then config order. Every miss is named in the
+defer, with `defer_class` `capacity`.
+
+**What travels.** A job with no input file goes through `POST /fleet/dispatch`. A job with a still (`offload_generate_video`),
+a reference and driver (`offload_animate_character`) or a clone sample (`offload_generate_audio`) packs the files into a
+bundle (each under its field name plus its extension, copied into a temp directory and packed with `composebundle`) and goes
+through `POST /fleet/media-job` ([fleet-node.md](fleet-node.md#the-media-job-door-artifacts-and-honest-advertisement-adr-0072)).
+`run-graph` carries its graph and manifest inline, so it never needs the door. The payload uses the field names the node's
+builders decode; `out` and `out_dir` never travel. Three request fields cannot ride the fleet task and defer by name
+(`defer_class` `contract`) instead of being dropped: `refine=false`, `tts_voice` and `transformer`.
+
+**What comes back.** The client polls `/fleet/jobs/{id}` every 2 seconds inside a budget when the caller gave no deadline
+(image 2 h, video and animate 6 h, audio 1 h, run-graph 2 h), then fetches every output the result names by bare name from
+`/fleet/media`. Nothing lands until every file is downloaded and its sha256 equals the one the node published in
+`artifacts`: a mismatch deletes what was fetched, leaves any file already at `out` untouched, and defers as
+`infrastructure`. The primary output goes to the caller's `out` when given, the rest into this machine's `media_dir`; the
+result's paths are rewritten to the local copies and it gains `node`, `remote_job_id` and, when the node published no
+artifacts (an older node), `unverified: true`. `meta.node` names the node and `meta.placement` reads `remote: forced` or
+`remote: no <lane> lane on this machine`. A node's 503 or 429 is a `capacity` defer, a 400 or 413 a `contract` defer, a 401
+or 403 a `config` defer, and a transport failure an `infrastructure` defer. A defer the node itself returned (a render that
+deferred) comes back as the node sent it, with `meta.node`.
+
 ## Comfy workflow templates catalog (phase A)
 
 `render/templates-catalog.mjs` is a read-only catalog of the ComfyUI workflow templates a node
