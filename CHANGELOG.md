@@ -27,6 +27,13 @@ anyway): two leases ending in the same instant can each see the other and both s
 `TestReleaseWarmSeatWithNoEpochAndTwoLiveLeasesNeverWarms`, `TestReleaseWarmSeatAfterTheLeaseEndedWarmsOnTheFreeCard`
 (8 of 8 mutants killed, across the first cut and the review fix).
 
+### Fixed — a drain test no longer races the lease acquire
+
+`TestReserveRenewsTheLeaseWhileDraining` ended its fake in-flight request 400 ms after the test started, so on a loaded
+Windows box (about 900 processes; a scratch-root reserve plus release measured 850-960 ms) the request was over before
+the drain had renewed once, and the test failed on main as well. The request now lasts until the heartbeat is seen to
+move, capped at 5 s; with the drain's renew removed the test still fails. Test-only.
+
 ## [0.163.0] - 2026-10-03 - Thin clients render on the fleet: the compose-project door, `install client`, and a box with no seat never takes work itself
 
 ### Added — the compose-project door (ADR 0071)

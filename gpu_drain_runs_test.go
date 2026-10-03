@@ -220,6 +220,7 @@ func TestReserveRenewsTheLeaseWhileDraining(t *testing.T) {
 	t.Cleanup(func() { drainRenewEvery = old })
 	var first, latest time.Time
 	stop := make(chan struct{})
+	moved := make(chan struct{})
 	go func() {
 		for {
 			select {
@@ -233,12 +234,27 @@ func TestReserveRenewsTheLeaseWhileDraining(t *testing.T) {
 				}
 				if info.HeartbeatAt.After(latest) {
 					latest = info.HeartbeatAt
+					if latest.After(first) {
+						select {
+						case <-moved:
+						default:
+							close(moved)
+						}
+					}
 				}
 			}
 		}
 	}()
+	// The in-flight request lasts until the heartbeat is seen to move, capped at 5 s; a
+	// drain that never renews still runs into the cap and fails below. A fixed 400 ms window
+	// was flaky: on a loaded Windows box (about 900 processes) a scratch-root reserve plus
+	// release measured 850-960 ms, and the drain's own iterations outlasted 400 ms, so the
+	// "request" ended before the drain had renewed once.
 	go func() {
-		time.Sleep(400 * time.Millisecond)
+		select {
+		case <-moved:
+		case <-time.After(5 * time.Second):
+		}
 		f.inflight.Store(0)
 	}()
 	t.Setenv("LO_HELPER_SLEEP_MS", "0")
