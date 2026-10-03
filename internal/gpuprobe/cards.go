@@ -35,6 +35,10 @@ type Card struct {
 	// ComfyOrder is the card's position in CUDA's FASTEST_FIRST order (what ComfyUI's
 	// --cuda-device counts), or -1 when it is not known. See the file comment.
 	ComfyOrder int `json:"comfy_order"`
+	// DisplayUnknown marks a card of a reading that could not say which card the monitor is
+	// on (Device.AttachedUnknown). The allocator does not auto-assign such a card: "unknown" is
+	// never "not the operator's screen".
+	DisplayUnknown bool `json:"display_unknown,omitempty"`
 }
 
 // LeaseID is the form a lease records for this card: the UUID lower-cased (a claim is
@@ -53,8 +57,9 @@ func BuildCards(devs []Device, comfyOrder string) (cards []Card, warn string) {
 	for _, d := range devs {
 		cards = append(cards, Card{
 			UUID: d.UUID, NvidiaIndex: d.Index, Name: d.Name,
-			Display:      display[d.UUID],
-			VRAMTotalGiB: d.TotalGiB, VRAMFreeGiB: d.FreeGiB,
+			Display:        display[d.UUID],
+			DisplayUnknown: d.AttachedUnknown,
+			VRAMTotalGiB:   d.TotalGiB, VRAMFreeGiB: d.FreeGiB,
 			UtilPct: d.UtilPct, UtilKnown: d.UtilKnown,
 			ComfyOrder: -1,
 		})

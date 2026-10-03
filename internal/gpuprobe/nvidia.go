@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"os/exec"
 	"path/filepath"
 	"runtime"
@@ -55,6 +56,11 @@ type Device struct {
 	// never "yes": a driver without the field, and a line from the older query,
 	// leave it false. Read it through DrivesDisplay, never on its own.
 	DisplayAttached bool `json:"display_attached,omitempty"`
+	// AttachedUnknown is set on every device of a reading that carries no display_attached
+	// because the full query FAILED for a reason that does not name the field (a transient):
+	// the reading cannot say which card the monitor is on. A driver that refuses the field has
+	// no such mark (the rule rests on display_active alone, as it always did).
+	AttachedUnknown bool `json:"attached_unknown,omitempty"`
 }
 
 // DrivesDisplay is the ONE per-card answer to "is this the operator's screen":
@@ -76,25 +82,36 @@ var smiQueryArgs = []string{"--query-gpu=index,uuid,name,memory.total,memory.use
 // reader still answers, with display_active alone.
 var smiQueryArgsNoAttached = []string{"--query-gpu=index,uuid,name,memory.total,memory.used,utilization.gpu,display_active", "--format=csv,noheader,nounits"}
 
-// attachedRetryEvery is how long the full query is skipped after a driver refused it
+// attachedRetryEvery is how long the full query is skipped after the driver refused it
 // and the fallback worked. The 2 s health sampler would otherwise pay a doomed
 // nvidia-smi call every tick on an old driver; after the window the full query is tried
-// again, so a driver upgrade is picked up and one transient failure is never a
-// permanent downgrade.
+// again, so a driver upgrade is picked up and a wrong guess is never a permanent downgrade.
 const attachedRetryEvery = 10 * time.Minute
+
+// attachedRefusalLimit is how many failures of the full query IN A ROW, each followed by a
+// fallback that worked, are taken as a refusal even though no failure named the field (a
+// driver whose refusal reads differently). Fewer than that are transients, remembered by
+// nobody.
+const attachedRefusalLimit = 3
 
 // smiClock is the clock the fallback window reads; a test injects its own.
 var smiClock = time.Now
 
-// attachedGate remembers that the driver refused the display_attached column.
+// smiLogf is where the one line about an armed downgrade goes; a test captures it.
+var smiLogf = log.Printf
+
+// attachedGate remembers that the driver does not give display_attached: the window in which
+// the full query is skipped, and the unexplained failures counted toward arming it.
 var attachedGate struct {
 	mu        sync.Mutex
 	skipUntil time.Time
+	fails     int
 }
 
 func resetAttachedGate() {
 	attachedGate.mu.Lock()
 	attachedGate.skipUntil = time.Time{}
+	attachedGate.fails = 0
 	attachedGate.mu.Unlock()
 }
 
@@ -103,31 +120,108 @@ func resetAttachedGate() {
 // production never calls it.
 func ResetDisplayAwareState() { resetAttachedGate() }
 
-// RunDisplayAware runs the per-device query with display_attached and, when the
-// driver refuses it, the same query without. run(true) must run the full query and
-// run(false) the fallback; both readers of the card table (this package's Read and
-// the lease verdict's sampler in gpuactivity) go through here so they degrade the
-// same way. When both fail nvidia-smi itself is the problem: the full query's error
-// is returned and nothing is remembered.
+// AttachedState says what one reading knows about display_attached.
+type AttachedState int
+
+const (
+	// AttachedRead: the full query ran, and the output carries display_attached.
+	AttachedRead AttachedState = iota
+	// AttachedUnsupported: the driver does not give the field (it refused it, or has failed
+	// the full query so often that it is treated as refusing). The display rule rests on
+	// display_active alone, as it did before the field was read.
+	AttachedUnsupported
+	// AttachedUnknown: the full query failed once for a reason that does not name the field.
+	// This reading carries no display_attached, and it is NOT because the driver lacks it, so
+	// the card the monitor is plugged into cannot be told from the others by it.
+	AttachedUnknown
+)
+
+// refusesAttached reports whether a failed full query is the driver saying it does not know
+// display_attached, as opposed to nvidia-smi failing for some other reason. nvidia-smi names the
+// field (`Field "display_attached" is not a valid field to query.`, on STDOUT, status 2), so the
+// output, the error text and an ExitError's stderr are all read.
+func refusesAttached(out string, err error) bool {
+	text := strings.ToLower(out)
+	if err != nil {
+		text += " " + strings.ToLower(err.Error())
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
+			text += " " + strings.ToLower(string(ee.Stderr))
+		}
+	}
+	if !strings.Contains(text, "display_attached") {
+		return false
+	}
+	for _, w := range []string{"not a valid", "invalid", "unknown field", "unrecognized", "unrecognised", "unsupported"} {
+		if strings.Contains(text, w) {
+			return true
+		}
+	}
+	return false
+}
+
+// RunDisplayAware runs the per-device query with display_attached and, when the driver
+// refuses it, the same query without. See RunDisplayAwareReport; this is the form for a
+// caller that does not need to know which of the two it got.
 func RunDisplayAware(run func(withAttached bool) (string, error)) (string, error) {
+	out, _, err := RunDisplayAwareReport(run)
+	return out, err
+}
+
+// RunDisplayAwareReport is RunDisplayAware that also says what the reading knows about
+// display_attached. run(true) must run the full query and run(false) the fallback; both readers
+// of the card table (this package's Read and the lease verdict's sampler in gpuactivity) go
+// through here so they degrade the same way.
+//
+// WHAT ARMS THE DEGRADE. Only a failure of the full query that names the field (the driver
+// refusing it), or attachedRefusalLimit unexplained failures in a row, makes the full query be
+// skipped for attachedRetryEvery, and the downgrade is logged once when it is armed. Any other
+// failure answers THIS call from the fallback and is remembered by nobody: display_attached is
+// the only signal that marks the monitor's card while the screen sleeps, so one transient
+// nvidia-smi error must not cost ten minutes of it. That one reading says so
+// (AttachedUnknown). When both queries fail nvidia-smi itself is the problem: the full
+// query's error is returned and nothing is remembered.
+func RunDisplayAwareReport(run func(withAttached bool) (string, error)) (string, AttachedState, error) {
 	attachedGate.mu.Lock()
 	skip := smiClock().Before(attachedGate.skipUntil)
 	attachedGate.mu.Unlock()
 	if skip {
-		return run(false)
+		out, err := run(false)
+		return out, AttachedUnsupported, err
 	}
 	out, err := run(true)
 	if err == nil {
-		return out, nil
+		attachedGate.mu.Lock()
+		attachedGate.fails = 0
+		attachedGate.mu.Unlock()
+		return out, AttachedRead, nil
 	}
 	legacy, lerr := run(false)
 	if lerr != nil {
-		return "", err
+		return "", AttachedRead, err
 	}
+	var why string
 	attachedGate.mu.Lock()
-	attachedGate.skipUntil = smiClock().Add(attachedRetryEvery)
+	switch {
+	case refusesAttached(out, err):
+		why = "the driver refused the field"
+	default:
+		attachedGate.fails++
+		if attachedGate.fails >= attachedRefusalLimit {
+			why = fmt.Sprintf("the full query failed %d times in a row (%v)", attachedGate.fails, err)
+		}
+	}
+	armed := why != ""
+	if armed {
+		attachedGate.skipUntil = smiClock().Add(attachedRetryEvery)
+		attachedGate.fails = 0
+	}
 	attachedGate.mu.Unlock()
-	return legacy, nil
+	if armed {
+		smiLogf("gpuprobe: nvidia-smi display_attached is not being read: %s. The display rule rests on display_active alone for %s, then the full query is tried again", why, attachedRetryEvery)
+		return legacy, AttachedUnsupported, nil
+	}
+	return legacy, AttachedUnknown, nil
 }
 
 // ParseSmiMemoryDevices parses `nvidia-smi --query-gpu=index,uuid,name,
@@ -416,19 +510,36 @@ func Read(ctx context.Context) ([]Device, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	return ReadWith(func() (string, error) {
-		bin, err := nvidiaSmiPath()
-		if err != nil {
-			return "", err
+	bin, err := nvidiaSmiPath()
+	if err != nil {
+		return nil, fmt.Errorf("nvidia-smi: %w", err)
+	}
+	return readDisplayAware(func(withAttached bool) (string, error) {
+		out, err := exec.CommandContext(ctx, bin, smiArgs(withAttached)...).Output()
+		if err != nil && ctx.Err() != nil {
+			return "", fmt.Errorf("nvidia-smi: %w", ctx.Err())
 		}
-		return RunDisplayAware(func(withAttached bool) (string, error) {
-			out, err := exec.CommandContext(ctx, bin, smiArgs(withAttached)...).Output()
-			if err != nil && ctx.Err() != nil {
-				return "", fmt.Errorf("nvidia-smi: %w", ctx.Err())
-			}
-			return string(out), err
-		})
+		return string(out), err
 	})
+}
+
+// readDisplayAware is Read over an injected per-device runner (run(true) the full query,
+// run(false) the one without display_attached). A reading taken from the fallback after the full
+// query failed for a reason that does not name the field cannot say which card the monitor is
+// on, so every device of it is marked AttachedUnknown (see RunDisplayAwareReport).
+func readDisplayAware(run func(withAttached bool) (string, error)) ([]Device, error) {
+	var state AttachedState
+	devs, err := ReadWith(func() (string, error) {
+		out, st, err := RunDisplayAwareReport(run)
+		state = st
+		return out, err
+	})
+	if err == nil && state == AttachedUnknown {
+		for i := range devs {
+			devs[i].AttachedUnknown = true
+		}
+	}
+	return devs, err
 }
 
 // ReadWith is Read over an injected runner (a recorded nvidia-smi output in

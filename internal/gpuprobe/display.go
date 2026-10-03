@@ -36,6 +36,11 @@ package gpuprobe
 // A driver that refuses the display_attached field (an older one, a headless
 // Linux build) rejects the whole query, so the reader retries without it
 // (RunDisplayAware) and the rule then rests on display_active alone, as before.
+// Only a failure that names the field (or a run of them) arms that for ten
+// minutes, and it is logged when it does. One transient failure of the full
+// query answers that call from the fallback and is forgotten, and the reading it
+// produced says so (Device.AttachedUnknown, Card.DisplayUnknown): it cannot tell
+// the monitor's card from the others, so the allocator hands out no card from it.
 //
 // Measured with `--query-gpu=display_active[,display_attached]`:
 //

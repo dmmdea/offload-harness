@@ -15,6 +15,16 @@ Versioning: [SemVer](https://semver.org/).
   and a refusal ends it before anything is touched. The order is resolve, stop the kept instances, warm the seat
   back, release: the instances go before the seat is loaded onto their cards (the documented order; it had been
   warm first). A release that fails after the stop says the instances were already stopped.
+- **One transient `nvidia-smi` error no longer switches `display_attached` off for ten minutes.** The fallback
+  to the query without the field was armed by ANY failure of the full query, silently, and the full query was then
+  not tried again for ten minutes. `display_attached` is the only signal that marks the monitor's card while the
+  screen sleeps, so in that window the allocator could hand the desktop card to a render with the operator at the
+  desk. The window is now armed only when the failure names the field (nvidia-smi prints `Field
+  "display_attached" is not a valid field to query.` on stdout, status 2; the recogniser reads stdout, the error
+  text and an ExitError's stderr) or after three unexplained failures in a row, and it logs one line when it
+  arms. Any other failure answers that call from the fallback and is forgotten, and the reading says so
+  (`Device.AttachedUnknown`, `Card.DisplayUnknown`): the allocator skips every card of such a reading
+  (`display-unknown`, not a card to wait on) until the next good one, unless the operator is away.
 - **A queued answer for a call that needs the whole node names the lease in its way.** It skipped every card
   lease for such a call (an empty card set intersects nothing), so it reported `held_by: null`, `eta_s: 0` and
   "card(s)  are promised to callers ahead of this one ... at most 0s" behind a lease with a declared hour. A
