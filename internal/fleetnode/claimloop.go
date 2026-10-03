@@ -133,8 +133,11 @@ func (s *Server) claimOne(ctx context.Context, client *http.Client, holder, node
 			s.settle(ctx, client, holder, cfg, "ack", job.ID, nodeID, nil, res.Reason)
 			return nil, fmt.Errorf("%s", res.Reason)
 		}
-		s.settle(ctx, client, holder, cfg, "ack", job.ID, nodeID, res.Data, "")
-		return res.Data, nil
+		// The same artifacts the push door adds (server.go's dispatch run closure), computed before
+		// the holder is told so it stores the verified result too.
+		data := withArtifacts(cfg, job.TaskType, res.Data)
+		s.settle(ctx, client, holder, cfg, "ack", job.ID, nodeID, data, "")
+		return data, nil
 	}
 	// The SAME AcceptSpec the push path builds (server.go's handleDispatch),
 	// because this is the same surface: before 0.113.27 this called bare

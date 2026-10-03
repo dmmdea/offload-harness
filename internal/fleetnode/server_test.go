@@ -171,6 +171,14 @@ func TestHealthGoldenShape(t *testing.T) {
 		"work_util_pct": 0, "work_util_known": false,
 		"supported_task_types": ["image-gen", "run-graph"],
 		"loadable_model_families": ["sdxl", "comfy-graph"],
+		"media_routes": [
+			{"route":"generate_video","engine":"comfyui","state":"NOT CONFIGURED"},
+			{"route":"animate_character","engine":"comfyui","state":"NOT CONFIGURED"},
+			{"route":"generate_audio:voice","engine":"chatterbox-tts","state":"NOT CONFIGURED"},
+			{"route":"generate_audio:music","engine":"acestep","state":"NOT CONFIGURED"},
+			{"route":"run_graph","engine":"comfyui","state":"CONFIGURED"},
+			{"route":"generate_audio:voice:endpoint","engine":"openai-compatible-tts","state":"NOT CONFIGURED"}
+		],
 		"model_footprints": [{"model_family":"sdxl","quant":"bf16","task_type":"image-gen","vram_peak_gb":9.6}],
 		"queue_depth": 0,
 		"jobs_queued": 0, "jobs_running": 0,

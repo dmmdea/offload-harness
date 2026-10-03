@@ -912,6 +912,9 @@ func (s *Server) Handler() http.Handler {
 	// the fleet token. Its own route for the body cap; the door and the bearer are
 	// checked before the body is read, then the same admit path as every job.
 	mux.HandleFunc("POST "+ComposeProjectPath, s.handleComposeProject)
+	// The media-job door (ADR 0072): one media task with its input files from a holder of the
+	// fleet token. The same shape as the project door above: door and bearer before the body.
+	mux.HandleFunc("POST "+MediaJobPath, s.handleMediaJob)
 	// The cascade chat lane (C-41b): a SYNCHRONOUS forward, not a job — see
 	// chat_lane.go for why a single short cascade call does not belong in the
 	// job store, and why this node's loopback-only llama-swap needs a door of
@@ -1098,6 +1101,11 @@ type healthPayload struct {
 	WorkUtilKnown         bool             `json:"work_util_known"`
 	SupportedTaskTypes    []string         `json:"supported_task_types"`
 	LoadableModelFamilies []string         `json:"loadable_model_families"`
+	// MediaRoutes (ADR 0072) is each file-backed media route this node derives from its own disk and
+	// its verdict (CONFIGURED / NOT CONFIGURED / BOUND-BUT-MISSING), cached at most 60 s: the reason a
+	// media task is absent from supported_task_types. Additive; a node that predates it omits the key,
+	// which a reader takes as unknown, never as "none".
+	MediaRoutes []MediaRouteHealth `json:"media_routes,omitempty"`
 	ModelFootprints       []FootprintEntry `json:"model_footprints"`
 	// ImageFamilies are the bindings an image-gen payload's `family` can select
 	// (ADR 0058), each with its license: a dispatcher routing brand work must skip
@@ -1395,11 +1403,14 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 			fps = e
 		}
 	}
-	tasks := s.tasks
+	// The media tasks are advertised only while mediacap derives their route CONFIGURED (ADR 0072), and
+	// that is a disk read that can change under a running node (a weight removed or restored), so the
+	// lists are derived per request from the same cached readings the admission path consults.
+	tasks := SupportedTasksFor(s.opts.Cfg, s.opts.LoopbackListener)
 	if tasks == nil {
 		tasks = []string{}
 	}
-	families := s.families
+	families := Families(s.opts.Cfg)
 	if families == nil {
 		families = []string{}
 	}
@@ -1445,6 +1456,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		GpuDevices:            snap.Devices,
 		SupportedTaskTypes:    tasks,
 		LoadableModelFamilies: families,
+		MediaRoutes:           MediaRoutesHealth(s.opts.Cfg),
 		ImageFamilies:         s.imageFamilies,
 		ModelFootprints:       fps,
 		QueueDepth:            queued + running,
@@ -1938,6 +1950,11 @@ func (s *Server) concurrencyCapped(taskType string) bool {
 	// one would also hold its request body and extracted tree while it waited.
 	case ComposeTask, ComposeProjectTask:
 		return false
+	// media-job (ADR 0072) is one of the five media tasks above behind the token-gated input door:
+	// the inner task serializes on the media slot and the lease exactly as it does through
+	// /fleet/dispatch, so capping it would park a fleet execution slot behind that slot.
+	case MediaJobTask:
+		return false
 	}
 	// Config-driven pipeline routes run through runPipelineJob, which takes the
 	// same mediaSlot. Their names are operator-chosen, so they cannot be listed
@@ -2323,7 +2340,9 @@ func (s *Server) admit(w http.ResponseWriter, r *http.Request, env dispatchEnvel
 			return textJobData(res)
 		}
 		if res.OK {
-			return res.Data, nil
+			// A media result names its files with size and sha256 (ADR 0072) so the machine that
+			// fetches them can verify what it received.
+			return withArtifacts(s.opts.Cfg, env.TaskType, res.Data), nil
 		}
 		reason := res.Reason
 		if reason == "" {

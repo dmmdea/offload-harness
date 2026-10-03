@@ -90,6 +90,16 @@ type NodeView struct {
 	// gate treats it as ineligible. Absent (older node) or a media lease decodes
 	// to false — a render is arbitrated on the node, never a placement refusal.
 	LeasedText bool
+	// LeaseHeld is true when the node publishes a held GPU lease of ANY class (health
+	// "lease".held). A media client (mediaremote) ranks a node with no held lease ahead of one
+	// with a short media lease; placement of agent work keeps reading LeasedText and LeaseBusy.
+	LeaseHeld bool
+	// MediaRoutes is the node's own verdict on each file-backed media route (health
+	// `media_routes`, ADR 0072): CONFIGURED, NOT CONFIGURED or BOUND-BUT-MISSING. It is only
+	// meaningful when MediaRoutesKnown: a node that predates the field publishes none, which is
+	// UNKNOWN, never "no route is configured".
+	MediaRoutes      []MediaRouteView
+	MediaRoutesKnown bool
 	// LeaseBusy is the node's own "my card is spoken for long enough that you
 	// should place elsewhere" verdict (0.113.27), true for a LONG lease of any
 	// class. It exists because LeasedText alone left the harness's longest job
@@ -288,6 +298,31 @@ var healthClient = &http.Client{
 	Timeout:   fetchNodeViewTimeout,
 }
 
+// MediaRouteView mirrors fleetnode.MediaRouteHealth: one media route and its verdict on that node.
+type MediaRouteView struct {
+	Route  string `json:"route"`
+	Engine string `json:"engine"`
+	State  string `json:"state"`
+}
+
+// MediaRouteConfigured is the state string of a route that can run right now.
+const MediaRouteConfigured = "CONFIGURED"
+
+// RouteState reports the node's verdict on a media route. known is false when the node published no
+// media_routes at all (an older node) and ALSO when it published a list that omits the route; state is
+// then "".
+func (v NodeView) RouteState(route string) (state string, known bool) {
+	if !v.MediaRoutesKnown {
+		return "", false
+	}
+	for _, r := range v.MediaRoutes {
+		if r.Route == route {
+			return r.State, true
+		}
+	}
+	return "", false
+}
+
 // SeatRateView mirrors fleetnode.SeatRateHealth.
 type SeatRateView struct {
 	TokS        float64 `json:"tok_s"`
@@ -369,6 +404,9 @@ type healthWire struct {
 	// Additive (0.154.0): the classify / extract tasks the node's text lane serves.
 	// Absent on an older node and on any node whose tier declares none (the lane is dark).
 	TextTasks []string `json:"text_tasks"`
+	// Additive (ADR 0072): the node's media route verdicts. A pointer so an absent key (an older
+	// node) stays distinguishable from a published list.
+	MediaRoutes *[]MediaRouteView `json:"media_routes"`
 	// Additive (0.116.0, ADR 0039). nil on a plain or pre-0.116 node; the ONE
 	// row shape fleetnode publishes and offload_status echoes.
 	Layers []placetable.LayerRow `json:"layers"`
@@ -446,6 +484,7 @@ func FetchNodeView(ctx context.Context, base, token string) (NodeView, error) {
 		// exclusion for a non-text one, which an abandoned lease must not become.
 		LeaseBusy:    w.Lease != nil && w.Lease.Held && w.Lease.Busy && !w.Lease.Overdue,
 		LeaseOverdue: w.Lease != nil && w.Lease.Held && w.Lease.Overdue,
+		LeaseHeld:    w.Lease != nil && w.Lease.Held,
 		Devices:      w.GpuDevices,
 		Tasks:        w.SupportedTaskTypes,
 		VisionModel:  w.VisionModel,
@@ -461,6 +500,9 @@ func FetchNodeView(ctx context.Context, base, token string) (NodeView, error) {
 		LeaseDraining:        w.LeaseDraining,
 		RecentAgentWallSec:   w.RecentAgentWallSec,
 		QueueWaitEstimateSec: w.QueueWaitEstimateSec,
+	}
+	if w.MediaRoutes != nil {
+		v.MediaRoutes, v.MediaRoutesKnown = *w.MediaRoutes, true
 	}
 	if w.Saturation != nil {
 		v.SaturationKnown = true

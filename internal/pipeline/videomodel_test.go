@@ -25,6 +25,7 @@ import (
 
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/fleetnode"
+	"github.com/dmmdea/offload-harness/internal/mediacap"
 )
 
 // TestResolveVideoFamilyPrecedence pins the precedence itself: request beats
@@ -170,6 +171,12 @@ func TestVideoProvenanceNamespaceMapping(t *testing.T) {
 // config), because that is exactly the subspace where the passthrough advertiser
 // and the folding writer used to split.
 func TestVideoFootprintFamilyMatchesTheAdvertisedFamily(t *testing.T) {
+	// The advertiser only lists a media task whose route mediacap derives CONFIGURED (ADR 0072), and a
+	// fixture binding a script that is not on this machine's disk would read as missing. The family
+	// namespace is the subject here, so the derivation stands in for "the files are there".
+	defer fleetnode.SetMediaRoutesSourceForTest(func(config.Config) []mediacap.Route {
+		return []mediacap.Route{{Name: "generate_video", Engine: "comfyui", State: mediacap.Configured}}
+	})()
 	for _, cfgFamily := range []string{
 		"", "wan22", "ltx25", "hunyuan", "ace", // the recognized space
 		"wan", "LTX25", "ltx2.5", " ltx25 ", "Wan22", // the split-prone space

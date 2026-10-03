@@ -33,7 +33,7 @@ import (
 
 // fleetTaskOrder is the advertisement order (stable for health payloads + error
 // messages). Membership is decided per-config by taskConfiguredFor.
-var fleetTaskOrder = []string{"image-gen", "video-gen", "animate", "stt", "audio-gen", "run-graph", ComposeTask, ComposeProjectTask, "agent", "accel", VisionTask, TextTask}
+var fleetTaskOrder = []string{"image-gen", "video-gen", "animate", "stt", "audio-gen", "run-graph", MediaJobTask, ComposeTask, ComposeProjectTask, "agent", "accel", VisionTask, TextTask}
 
 // taskConfiguredFor reports whether THIS box actually serves taskType — the same
 // route gates the pipeline uses (empty script/model = the task defers there, so
@@ -58,15 +58,24 @@ func taskConfiguredFor(cfg config.Config, taskType string, loopbackListener bool
 		// CONFIGURED (<node-f> wave session 5d227d30 §2a).
 		return cfg.ImageGenAdvertisable()
 	case "video-gen":
-		return cfg.VideoGenScript != ""
+		// Bound AND derived CONFIGURED by internal/mediacap (the script, the weights its graph loads
+		// and the custom nodes it names are on this machine): a bound script over a missing weight is
+		// not a capability, and advertising it sent jobs to a node that failed them (ADR 0072).
+		return cfg.VideoGenScript != "" && mediaTaskRouteReady(cfg, taskType)
 	case "animate":
-		return cfg.AnimateGenScript != ""
+		return cfg.AnimateGenScript != "" && mediaTaskRouteReady(cfg, taskType)
 	case "stt":
 		return cfg.STTModel != ""
 	case "audio-gen":
-		return cfg.VoiceGenScript != "" || cfg.MusicGenScript != ""
+		// Voice (script or the OpenAI-compatible speech server) or music, whichever is derived
+		// CONFIGURED: a node serving only one kind still serves audio-gen.
+		return (cfg.VoiceGenScript != "" || cfg.MusicGenScript != "" || cfg.TTSEndpoint != "") && mediaTaskRouteReady(cfg, taskType)
 	case "run-graph":
-		return cfg.RunGraphScript != ""
+		return cfg.RunGraphScript != "" && mediaTaskRouteReady(cfg, taskType)
+	case MediaJobTask:
+		// The input door (ADR 0072): opted in, a fleet token to check, and at least one media
+		// task this node can run right now. Never advertised or admitted on a tokenless node.
+		return cfg.MediaInputsAdmissible() && anyMediaTaskConfigured(cfg, loopbackListener)
 	case ComposeTask:
 		// The composition lane: the runner, the pinned install and the pinned browser
 		// all bound — config.ComposeRouteConfigured, the pipeline's own gate.
@@ -100,6 +109,17 @@ func taskConfiguredFor(cfg config.Config, taskType string, loopbackListener bool
 	// Anything else is only "configured" when it is a VALID cfg.Pipelines key
 	// (Task 6): 100% config-driven, so a new pipeline needs no new case here.
 	return pipelineNameConfigured(cfg, taskType)
+}
+
+// anyMediaTaskConfigured reports whether at least one task the media-job door carries is served by this
+// node right now (the same predicates dispatch applies), so the door is not advertised over nothing.
+func anyMediaTaskConfigured(cfg config.Config, loopbackListener bool) bool {
+	for _, t := range mediaJobTasks {
+		if taskConfiguredFor(cfg, t, loopbackListener) {
+			return true
+		}
+	}
+	return false
 }
 
 // AgentLaneAdmissible is THE ONE predicate behind the fleet "agent" lane
@@ -391,6 +411,8 @@ func BuildRequest(ctx context.Context, cfg config.Config, loopbackListener bool,
 		return buildComposeVideo(payload)
 	case ComposeProjectTask:
 		return buildComposeProject(ctx, cfg, payload)
+	case MediaJobTask:
+		return buildMediaJob(ctx, cfg, loopbackListener, payload)
 	case "agent":
 		return buildAgentRun(cfg, payload)
 	case "accel":

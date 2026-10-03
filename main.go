@@ -2554,6 +2554,12 @@ func runFleetServe(args []string) error {
 	} else if n > 0 {
 		fmt.Fprintf(os.Stderr, "[fleet-serve] swept %d orphaned compose-project dir(s)\n", n)
 	}
+	// Extracted media-job inputs (ADR 0072) a crash left behind; a warning, never fatal.
+	if n, perr := fleetnode.SweepOrphanedInputDirs(cfg, time.Now()); perr != nil {
+		fmt.Fprintf(os.Stderr, "[fleet-serve] WARNING: sweeping media-job input dirs: %v\n", perr)
+	} else if n > 0 {
+		fmt.Fprintf(os.Stderr, "[fleet-serve] swept %d orphaned media-job input dir(s)\n", n)
+	}
 
 	listen, nodeID, err := fleetServeParams(*listenFlag, *nodeIDFlag, *trusted, cfg, os.Hostname)
 	if err != nil {
