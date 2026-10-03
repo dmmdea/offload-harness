@@ -209,6 +209,7 @@ func TestHealthLeaseVerdictFollowsThePrecedence(t *testing.T) {
 		{"orphaned and overdue", gpulease.Standing{Orphaned: true, Overdue: true}, "held-orphaned"},
 		{"stalled and orphaned", gpulease.Standing{Stalled: true, Orphaned: true}, "held-stalled"},
 		{"overdue only", gpulease.Standing{Overdue: true}, "held-overdue"},
+		{"tree-orphan outranks every other word", gpulease.Standing{TreeOrphan: true, Stalled: true, Orphaned: true, Overdue: true}, "tree-orphan"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			info := liveLease(1, gpulease.ClassMedia, []string{leaseIDOf(testUUIDa)}, 3*time.Hour)
@@ -542,5 +543,27 @@ func TestDispatchOfANonAgentTaskKeepsTheWholeNodeTextRefusal(t *testing.T) {
 	s, _ := newTestServer(t, imageCfg(), &fakeRunner{}, opts)
 	if rec := dispatchImage(t, s, "j-image"); rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("an image job under a card-scoped text reservation = %d, want 503 (its card is chosen later: unknown is every card)", rec.Code)
+	}
+}
+
+// A lease whose wrapper is gone over a live job is published as a tree-orphan, flat on its entry
+// and on the singular block old readers read, and it still refuses work: the card is in use.
+func TestHealthPublishesATreeOrphanLease(t *testing.T) {
+	info := liveLease(7, gpulease.ClassMedia, []string{leaseIDOf(testUUIDa)}, 3*time.Hour)
+	m := rawHealth(t, leasedNode(t, info, func(gpulease.Info) gpulease.Standing {
+		return gpulease.Standing{TreeOrphan: true}
+	}, nil))
+	entries := leaseEntries(t, m)
+	if len(entries) != 1 || entries[0]["tree_orphan"] != true || entries[0]["verdict"] != "tree-orphan" || entries[0]["busy"] != true {
+		t.Fatalf("the entry says tree-orphan and still busy: %v", entries)
+	}
+	block, _ := m["lease"].(map[string]any)
+	if block["tree_orphan"] != true || block["busy"] != true {
+		t.Fatalf("the singular block carries it too: %v", block)
+	}
+	// A lease that is not one publishes nothing new.
+	plain := leaseEntries(t, rawHealth(t, leasedNode(t, info, nil, nil)))
+	if _, present := plain[0]["tree_orphan"]; present {
+		t.Fatalf("a healthy lease puts no tree_orphan key on the wire: %v", plain[0])
 	}
 }

@@ -350,6 +350,10 @@ type Meta struct {
 	// is a statement by a binary that could have declared cards, so a whole-node record
 	// carrying it means the whole node and is never narrowed by inference.
 	Format int `json:"format,omitempty"`
+
+	// Tree is the process tree the wrapper started, recorded by the wrapper (plan P10): pid and
+	// start identity of each member, rewritten when the set changes. See tree.go.
+	Tree []TreeMember `json:"tree,omitempty"`
 }
 
 // RecordFormat is the Meta.Format every binary that understands card-scoped leases stamps.
@@ -436,6 +440,12 @@ type Info struct {
 	// Each(), or it judges one lease and is blind to the rest. Each entry carries its own
 	// epoch only (Epochs has one element) and no Leases of its own.
 	Leases []Info
+	// TreeOrphan: the lease's wrapper is gone (dead, or its pid recycled) but a process of the
+	// job it started is still alive, so the claim is kept. TreeLive are those processes and
+	// TreeWhy the evidence for them (tree.go).
+	TreeOrphan bool
+	TreeLive   []TreeMember
+	TreeWhy    string
 }
 
 // Each returns the leases an Info describes, one Info per lease: Leases when several are
@@ -1097,15 +1107,12 @@ func Reclaimable(m *Meta, now time.Time, heartbeatTTL time.Duration, procStart f
 		// No identifiable holder: fall back to the declared window alone.
 		return now.UnixMilli() > m.ExpiresAtMs
 	}
-	if !pidAlive(m.Holder.PID) {
-		return true // provably gone
-	}
-	// Alive pid, but is it the SAME process? A recycled pid otherwise reads as a
-	// live holder forever.
-	if m.Holder.StartTimeMs != 0 {
-		if st, ok := procStart(m.Holder.PID); ok && st != m.Holder.StartTimeMs {
-			return true // pid was recycled; the original holder is gone
-		}
+	if wrapperGone(m, procStart) {
+		// The wrapper is provably gone (its pid is dead, or alive but recycled for another
+		// process). That proves the WRAPPER is gone, not the job it started: while a member of
+		// the tree it recorded is still alive the card is in use and the claim is kept (plan
+		// P10, tree.go). A lease that recorded no tree is freed at once, as it always was.
+		return len(liveMembers(m.Tree, procStart)) == 0
 	}
 	nowMs := now.UnixMilli()
 	heartbeatStale := m.RenewedAtMs > 0 && nowMs-m.RenewedAtMs > heartbeatTTL.Milliseconds()
@@ -1125,8 +1132,9 @@ func (m *Manager) reclaimable(meta *Meta, now time.Time) bool {
 	if meta == nil {
 		return true
 	}
-	effective := *meta
-	effective.RenewedAtMs = m.lastHeartbeat(meta)
+	r := m.reader()
+	r.now = now
+	effective, _ := r.judge(meta)
 	return Reclaimable(&effective, now, m.heartbeatTTL, m.procStart)
 }
 
@@ -1274,6 +1282,8 @@ type Lease struct {
 	// per-card claims, not meta.json. devices are the cards it holds.
 	v2      bool
 	devices []string
+	// tree is the last process tree this holder recorded (tree.go).
+	tree treeState
 	// done is set once by the first Release. Atomic because a holder's
 	// release paths can run concurrently (a deferred Release beside a cleanup
 	// or signal path) — a plain bool was a data race under -race.

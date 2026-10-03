@@ -240,7 +240,8 @@ func TestBriefDescribesTheEscalatedLeaseNotTheLowestEpoch(t *testing.T) {
 }
 
 // An escalated lease's standing is the one thing the brief must not cut: every standing clause
-// at once, with a real (long) session id, still reaches the line whole.
+// at once, with a real (long) session id, still reaches the line whole. The holder here is also a
+// tree-orphan, which outranks the other words, so the command at the end is the one that frees it.
 func TestBriefDoesNotClipTheStandingOfAnEscalatedLease(t *testing.T) {
 	h := &gpuactivity.Holder{PID: 77, Alive: true, Class: "media", Epoch: 43, Stalled: true, Orphaned: true, Overdue: true, TreeOrphan: true,
 		OwnerState: "gone", OwnerSession: "00000000-0000-4000-8000-000000000001", OrphanedForS: 2400, OrphanGraceS: 900, OverdueBySec: 7200,
@@ -253,7 +254,7 @@ func TestBriefDoesNotClipTheStandingOfAnEscalatedLease(t *testing.T) {
 	view := map[string]any{"verdict": verdict, "held": true, "pid": 77, "class": "media", "age_s": 1, "reason": "film",
 		"activity": map[string]any{"note": note, "holder": h}}
 	line := gpuLeaseVerdictLine(view)
-	for _, want := range []string{"no activity for 3h0m0s", "gone for 40m0s", "past its declared window by 2h0m0s", "gpu takeover --epoch 43"} {
+	for _, want := range []string{"no activity for 3h0m0s", "gone for 40m0s", "past its declared window by 2h0m0s", "gpu release --epoch 43"} {
 		if !strings.Contains(line, want) {
 			t.Errorf("the escalated line was clipped before %q:\n%s", want, line)
 		}
@@ -276,5 +277,28 @@ func TestBriefVerdictLineNamesALeaseOfAClass(t *testing.T) {
 	text := gpuLeaseVerdictLine(map[string]any{"verdict": "held-working", "held": true, "pid": 9, "class": "text", "age_s": 3})
 	if want := "; held by a text-class lease (pid 9, 3s)"; !strings.Contains(text, want) {
 		t.Errorf("a text lease reads %q:\n%s", want, text)
+	}
+}
+
+// A tree-orphan leads the brief line with ORPHANED and is sent to the one command that frees it today, `gpu release`,
+// with what that command leaves running; the takeover verb is not in this build and is not offered for it.
+func TestBriefLineSendsATreeOrphanToTheReleaseCommand(t *testing.T) {
+	h := &gpuactivity.Holder{Epoch: 41, PID: 5555, TreeOrphan: true, TreePIDs: []int{9001}}
+	note := "the lease's wrapper (pid 5555) is gone but the job it started is still alive (pid 9001) and holds the cards"
+	view := map[string]any{
+		"verdict": gpuactivity.VerdictTreeOrphan, "held": true, "pid": 5555, "class": "media", "age_s": 600, "epoch": uint64(41),
+		"activity": map[string]any{"note": note, "holder": h},
+	}
+	line := gpuLeaseVerdictLine(view)
+	if !strings.HasPrefix(line, "ORPHANED (tree-orphan)") {
+		t.Errorf("the line leads with the capitalised word and keeps the verdict:\n%s", line)
+	}
+	for _, want := range []string{"gpu release --epoch 41", "the rest of the job keeps running", "frees itself", "queue with:"} {
+		if !strings.Contains(line, want) {
+			t.Errorf("brief line lacks %q:\n%s", want, line)
+		}
+	}
+	if strings.Contains(line, "takeover") {
+		t.Errorf("a tree-orphan is not sent to a command that is not in this build:\n%s", line)
 	}
 }

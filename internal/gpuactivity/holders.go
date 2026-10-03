@@ -42,6 +42,12 @@ func holdersOf(leaseDir string, info gpulease.Info, opts Options, now time.Time)
 			h.OwnerPID = l.Owner.PID
 		}
 		h.applyStanding(obs.Standing(l, opts.OrphanGrace), opts.OrphanGrace, now)
+		if l.TreeOrphan {
+			h.TreeOrphan, h.TreeWhy = true, l.TreeWhy
+			for _, mem := range l.TreeLive {
+				h.TreePIDs = append(h.TreePIDs, mem.PID)
+			}
+		}
 		h.Facts = legacyFacts(opts.ComfyDir, l, len(leases) == 1, now)
 		hs = append(hs, h)
 	}
@@ -112,6 +118,12 @@ func takeoverHint(h *Holder) string {
 	return fmt.Sprintf("; to take it over, a human-authorised session runs: local-offload gpu takeover --epoch %d (not in this build yet: until it ships, ask whoever owns it or the operator)", h.Epoch)
 }
 
+// treeOrphanHint is takeoverHint for a tree-orphan: the one command that frees it today, and what it leaves running.
+// It keeps the "; to take it over" lead the status line cuts the note at, so the command is stated once at its end.
+func treeOrphanHint(h *Holder) string {
+	return "; to take it over, " + gpulease.TreeOrphanFreeing(h.Epoch)
+}
+
 func secs(n int) string { return (time.Duration(n) * time.Second).Round(time.Second).String() }
 
 func ownerWho(h *Holder) string {
@@ -127,6 +139,23 @@ func ownerWho(h *Holder) string {
 func orphanedNote(h *Holder) string {
 	return fmt.Sprintf("the lease's owner (%s) has been gone for %s, past the %s grace: nobody is expected back for it. Its holder is still alive and heartbeating, so nothing is reclaimed or killed",
 		ownerWho(h), secs(h.OrphanedForS), secs(h.OrphanGraceS))
+}
+
+// treeOrphanNote says why a lease whose wrapper is gone is still held: the job it started lives.
+func treeOrphanNote(h *Holder) string {
+	pids := make([]string, len(h.TreePIDs))
+	for i, p := range h.TreePIDs {
+		pids[i] = fmt.Sprintf("pid %d", p)
+	}
+	n := fmt.Sprintf("the lease's wrapper (pid %d) is gone but the job it started is still alive", h.PID)
+	if len(pids) > 0 {
+		n += " (" + strings.Join(pids, ", ") + ")"
+	}
+	n += " and holds the cards: the claim is kept until that job ends or is taken over; nothing is reclaimed or killed"
+	if h.TreeWhy != "" {
+		n += "; evidence: " + h.TreeWhy
+	}
+	return n
 }
 
 func stalledNote(h *Holder) string {

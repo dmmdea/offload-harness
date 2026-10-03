@@ -213,6 +213,17 @@ func ownershipStatusLines(h *gpuactivity.Holder, info gpulease.Info) []string {
 	if n := len(info.Epochs); n > 1 && h.Epoch != 0 {
 		out = append(out, fmt.Sprintf("standing of lease epoch %d (the most escalated of %d live leases; the header above shows the lowest, epoch %d):", h.Epoch, n, info.Epoch))
 	}
+	if h.TreeOrphan {
+		pids := make([]string, len(h.TreePIDs))
+		for i, p := range h.TreePIDs {
+			pids[i] = "pid " + strconv.Itoa(p)
+		}
+		out = append(out, fmt.Sprintf("wrapper: pid %d is GONE, but the job it started is still running (%s): TREE-ORPHAN, the claim is kept until they exit or is ended by hand (nothing is reclaimed or killed); %s",
+			h.PID, strings.Join(pids, ", "), gpulease.TreeOrphanFreeing(h.Epoch)))
+		if h.TreeWhy != "" {
+			out = append(out, "evidence: "+h.TreeWhy)
+		}
+	}
 	who := "unknown"
 	switch {
 	case h.OwnerState == "remote":

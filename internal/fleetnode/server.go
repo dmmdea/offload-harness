@@ -1972,6 +1972,9 @@ type LeaseStanding struct {
 	Orphaned bool `json:"orphaned,omitempty"`
 	// Stalled: the lease's progress file did not move inside its stall window.
 	Stalled bool `json:"stalled,omitempty"`
+	// TreeOrphan: the lease's wrapper is gone but the job it started is still running, so the
+	// claim is kept (plan P10). The card is in use: it is Busy like any held lease, never freed.
+	TreeOrphan bool `json:"tree_orphan,omitempty"`
 }
 
 // FleetBusyLeaseSecDefault is the remaining-time threshold above which a held
