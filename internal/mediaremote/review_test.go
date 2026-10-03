@@ -334,18 +334,18 @@ func TestACallersDeadlineIsHonouredInBothDirections(t *testing.T) {
 		t.Fatalf("a caller's 300 ms deadline must end the call as a budget defer within seconds (class %q, %v): %+v", res.DeferClass, time.Since(start), res)
 	}
 
-	// The reverse: the task budget is 50 ms but the caller allowed an hour and the node finishes in 400 ms.
-	withBudget(t, taskImage, 50*time.Millisecond)
+	// The reverse: the task budget is 150 ms but the caller allowed an hour and the node finishes in 700 ms.
+	withBudget(t, taskImage, 150*time.Millisecond)
 	media := t.TempDir()
 	writeFile(t, media, "x.png", []byte("PNG"))
-	fake := fakeNode(t, fakeOpts{tasks: []string{"image-gen"}, doneAfter: 400 * time.Millisecond, jobData: `{"image_path":"x.png"}`, media: media})
+	fake := fakeNode(t, fakeOpts{tasks: []string{"image-gen"}, doneAfter: 700 * time.Millisecond, jobData: `{"image_path":"x.png"}`, media: media})
 	cfg2 := config.Config{MediaDir: t.TempDir(), DelegateRemotes: []string{fake.URL}}
 	ctx2, cancel2 := context.WithTimeout(context.Background(), time.Hour)
 	defer cancel2()
 	if res := Run(ctx2, cfg2, &recordingRunner{}, imageReq(), "remote", nil); !res.OK {
 		t.Fatalf("a caller's longer deadline must not be cut to the task budget: %+v", res)
 	}
-	// And with no deadline at all the 50 ms budget does apply to the same slow node.
+	// And with no deadline at all the 150 ms budget does apply to the same slow node.
 	if res := Run(context.Background(), cfg2, &recordingRunner{}, imageReq(), "remote", nil); res.OK || res.DeferClass != core.DeferClassBudget {
 		t.Fatalf("the budget must apply when the caller set none: %+v", res)
 	}
