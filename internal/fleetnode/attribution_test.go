@@ -24,6 +24,7 @@ type pairNode struct {
 	mu     sync.Mutex
 	frames []map[string]any
 	e      *pairworkloads.Emitter
+	open   string // the emitter's open-card register directory
 }
 
 func newPairNode(t *testing.T, enabled bool) *pairNode {
@@ -51,7 +52,8 @@ func newPairNode(t *testing.T, enabled bool) *pairNode {
 			t.Fatal(err)
 		}
 	}
-	pn.e = pairworkloads.New(pairworkloads.Config{Enabled: enabled, Endpoint: srv.URL, AppDir: app, OpenDir: t.TempDir()})
+	pn.open = t.TempDir()
+	pn.e = pairworkloads.New(pairworkloads.Config{Enabled: enabled, Endpoint: srv.URL, AppDir: app, OpenDir: pn.open})
 	return pn
 }
 
@@ -367,5 +369,107 @@ func TestPulledJobWithoutTheSignalIsNotCarded(t *testing.T) {
 	}
 	if n := pn.frameCount(); n != 0 {
 		t.Fatalf("frames = %d, want none", n)
+	}
+}
+
+// claimServing returns a holder that serves job once per entry of ids (the same job id may repeat: a
+// lease-expiry re-claim hands a node the job it already holds) and then answers 204.
+func claimServing(t *testing.T, ids ...string) *httptest.Server {
+	t.Helper()
+	var mu sync.Mutex
+	i := 0
+	h := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/fleet/queue/claim" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if i >= len(ids) {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		id := ids[i]
+		i++
+		_ = json.NewEncoder(w).Encode(fleetqueue.Job{
+			ID: id, TaskType: "agent", Asker: "node-q", PairCard: core.PairCardNode,
+			Payload: json.RawMessage(`{"schema_version":1,"goal":"g","output_schema":` + agentSchemaJSON + `}`),
+		})
+	}))
+	t.Cleanup(h.Close)
+	return h
+}
+
+func openMarkers(t *testing.T, dir string) int {
+	t.Helper()
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return len(ents)
+}
+
+// A lease-expiry re-claim of a job this node already holds is a duplicate admission: it must not
+// emit a second queued frame, which would reopen a card its terminal frame closed (and leave an
+// open-card marker nothing closes while this process lives) or regress a running card to queued.
+func TestPulledReclaimOfAFinishedJobEmitsNoSecondCard(t *testing.T) {
+	pn := newPairNode(t, true)
+	fr := &fakeRunner{}
+	cfg := imageCfg()
+	cfg.Home = t.TempDir()
+	cfg.FleetAgentEnabled = true
+	cfg.AgentModel = "agent-seat"
+	cfg.FleetAuthToken = "tok"
+	s, jobs := newTestServer(t, cfg, fr, pairOpts(pn))
+	holder := claimServing(t, "pulled-5", "pulled-5")
+	client := &http.Client{Timeout: 5 * time.Second, Transport: netguard.SafeTransport(nil)}
+	if id, ok := s.claimOne(context.Background(), client, holder.URL, "testnode", cfg); !ok || id != "pulled-5" {
+		t.Fatalf("first claimOne = %q, %v", id, ok)
+	}
+	waitJobState(t, jobs, "pulled-5", JobDone)
+	pn.e.Wait()
+	if n := pn.frameCount(); n != 3 {
+		t.Fatalf("frames after the first run = %d, want queued, running, completed", n)
+	}
+	if id, ok := s.claimOne(context.Background(), client, holder.URL, "testnode", cfg); !ok || id != "pulled-5" {
+		t.Fatalf("re-claim = %q, %v", id, ok)
+	}
+	if n := pn.frameCount(); n != 3 {
+		t.Fatalf("frames after the re-claim = %d, want still 3: a duplicate admission opened a card", n)
+	}
+	if n := openMarkers(t, pn.open); n != 0 {
+		t.Fatalf("%d open-card markers left: a duplicate claim reopened a closed card", n)
+	}
+	if got := len(fr.requests()); got != 1 {
+		t.Fatalf("runner ran %d times, want 1", got)
+	}
+}
+
+// A draining node refuses the claim: the card it would have opened closes failed rather than
+// staying queued with no terminal frame (the lease requeues the job elsewhere).
+func TestPulledClaimOnADrainingNodeClosesItsCard(t *testing.T) {
+	pn := newPairNode(t, true)
+	fr := &fakeRunner{}
+	cfg := imageCfg()
+	cfg.Home = t.TempDir()
+	cfg.FleetAgentEnabled = true
+	cfg.AgentModel = "agent-seat"
+	cfg.FleetAuthToken = "tok"
+	s, jobs := newTestServer(t, cfg, fr, pairOpts(pn))
+	jobs.DrainAndStop(time.Second)
+	holder := claimServing(t, "pulled-6")
+	client := &http.Client{Timeout: 5 * time.Second, Transport: netguard.SafeTransport(nil)}
+	if _, ok := s.claimOne(context.Background(), client, holder.URL, "testnode", cfg); !ok {
+		t.Fatal("claimOne reported no claim")
+	}
+	cards := pn.cards(t)
+	if cards["failed"] == nil || cards["failed"]["error"] != "node draining" {
+		t.Fatalf("cards = %v, want the card closed failed with %q", cards, "node draining")
+	}
+	if n := openMarkers(t, pn.open); n != 0 {
+		t.Fatalf("%d open-card markers left on a refused claim", n)
+	}
+	if got := len(fr.requests()); got != 0 {
+		t.Fatalf("a draining node ran %d jobs", got)
 	}
 }

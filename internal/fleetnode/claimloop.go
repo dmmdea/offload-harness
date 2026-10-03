@@ -120,7 +120,15 @@ func (s *Server) claimOne(ctx context.Context, client *http.Client, holder, node
 	// The submitter's headers reached us on the queued job.
 	asker := core.SanitizeAsker(job.Asker)
 	spec := s.claimSpec(job.TaskType, cleanup)
-	card := s.newNodeCard(string(breq.Task), spec.Model, job.ID, asker, job.PairCard == core.PairCardNode)
+	// A job this node already holds (a lease-expiry re-claim of our own job) has its own card, or its
+	// own finished one: opening another would emit a queued frame that reopens a card its terminal
+	// frame closed (and leaves an open-card marker nothing closes while this process lives) or
+	// regresses a running one. The push path makes the same up-front lookup (handleDispatch). The
+	// claim loop is one goroutine, so nothing admits this id between the lookup and Admit below.
+	var card *nodeCard
+	if _, known := s.jobs.Get(job.ID); !known {
+		card = s.newNodeCard(string(breq.Task), spec.Model, job.ID, asker, job.PairCard == core.PairCardNode)
+	}
 	spec.OnDropped = func() {
 		cleanup()
 		card.fail("the job was dropped before it started (withdrawn, or the node drained)")
@@ -179,7 +187,10 @@ func (s *Server) claimOne(ctx context.Context, client *http.Client, holder, node
 	// the default band, which is what it did before this change.
 	card.queued()
 	if created := s.jobs.Admit(job.ID, spec, run); !created {
-		card.discard()
+		// card is nil for a job already known (above). A card that is open here means the refusal
+		// was a drain: the job is not ours to run (the lease requeues it), so the card closes failed
+		// instead of staying queued with no terminal frame, as the push path does.
+		card.fail("node draining")
 		// Already known locally (a lease-expiry re-claim of our own job):
 		// the original run's settle will ack; nothing to RUN.
 		//

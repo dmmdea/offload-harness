@@ -525,7 +525,8 @@ running at start, terminal at finish; `fleetnode/nodecard.go`). Asking boxes sen
 `/fleet/vision`, `/fleet/text`, `/fleet/compose-project` and `/fleet/queue/submit`; the queue holder stores both
 on the job (`fleetqueue.Job.Asker`, `PairCard`), so the claim loop applies them to a pulled job exactly as
 `admit` does to a pushed one — and now also stamps a pulled job's door `fleet` (`dispatchDoor`), which it did
-not before. Details and the rollout reasoning: [pair-workloads](pair-workloads.md).
+not before. A claim of a job the node already holds (a lease-expiry re-claim) opens no card, and a claim a
+draining node refuses closes its card failed. Details and the rollout reasoning: [pair-workloads](pair-workloads.md).
 
 **The store claims by band → tenant → arrival** (`Jobs.claimLocked`): highest effective band first (a sheddable job that has
 waited `bandAgingAfter` = 60 s counts as band 0), then the claimable tenant served least recently (`Jobs.served`, a claim

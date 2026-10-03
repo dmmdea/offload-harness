@@ -187,6 +187,14 @@ printable text of at most 64 characters (`core.SanitizeAsker`) before it is used
 - **`AttachLedger` keeps skipping `door=fleet` rows**, so the node's card and its ledger row never
   double. A pulled (claim-loop) job now gets `door=fleet` exactly like a pushed one — it never had it, so
   the node's pipeline could card a long pulled job as its own work while its asker carded it as well.
+- **A claimed job this node already holds opens no card.** A lease-expiry re-claim of its own job is a
+  duplicate admission: the claim loop looks the id up first (as `handleDispatch` does), so a second
+  `queued` frame can never reopen a card the terminal frame closed or regress a running one. A claim a
+  draining node refuses closes its card `failed` ("node draining"); the lease requeues the job.
+- **`fleet-serve` waits for the node emitter on shutdown** (`fleetServeDrain`: `DrainAndStop`, then
+  `Emitter.Wait`, each post bounded at 2 s), so the terminal frames of the jobs that finished during the
+  drain, and the failed frames of the ones it dropped, are posted before the process exits instead of
+  being left to the next process's orphan sweep (which would close a completed card `failed`).
 
 The emitter (`internal/pairworkloads.Emitter`) is fire-and-forget: a goroutine per frame with
 a 2 s timeout, one warning per process on the first failure, nothing ever changes a harness
