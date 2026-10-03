@@ -147,16 +147,28 @@ func upstreamURL(endpoint, model, path string) (string, error) {
 	return b + "/upstream/" + url.PathEscape(model) + path, nil
 }
 
-// awaitUpstream is the fence itself; see the file header.
-func awaitUpstream(ctx context.Context, endpoint, model string, deadline time.Time) error {
+// WouldBlockUpstream reports, without waiting and without sending anything to a model route,
+// whether a request for model through AwaitUpstream (or AwaitModelRoute) would be held at the
+// fence right now: a lease that fences the card over model is held, this process does not
+// inherit it, and llama-swap does not already list model as ready. It is the fence's own first
+// inspection (awaitUpstream calls it), so a caller that chooses between waiting here and going
+// elsewhere (the stt route's auto mode spills to a fleet node) reads the verdict the request
+// itself would meet: a resident model is served at once and does not block. The residency read
+// is taken only when a fence is up, as in the fence.
+func WouldBlockUpstream(ctx context.Context, endpoint, model string) bool {
 	dir := gpuLeaseDir()
 	if dir == "" {
-		return nil // not armed: inert by construction, exactly like awaitCard
+		return false // not armed: inert by construction, exactly like awaitCard
 	}
 	if !blocksLoad(ScopeToModel(InspectLease(dir), model)) {
-		return nil
+		return false
 	}
-	if upstreamResident(ctx, endpoint, model) {
+	return !upstreamResident(ctx, endpoint, model)
+}
+
+// awaitUpstream is the fence itself; see the file header.
+func awaitUpstream(ctx context.Context, endpoint, model string, deadline time.Time) error {
+	if !WouldBlockUpstream(ctx, endpoint, model) {
 		return nil
 	}
 	return awaitLease(ctx, swapclient.BaseURL(endpoint), model, deadline, blocksLoad)
