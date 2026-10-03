@@ -14,9 +14,11 @@ package fleetnode
 // only when it would admit, so an asker never picks a node that cannot take the job; a node that
 // predates the door never lists it.
 //
-// The node's outputs (.srt, .txt, .segments.json) stay under media_dir and are fetchable through
+// The node's outputs (.srt, .txt, .segments.json) are written under media_dir and fetchable through
 // GET /fleet/media/{name}, as for every transcription: the asker fetches the segment list from
-// there when the inline copy was truncated.
+// there when the inline copy was truncated. They do not stay: they are removed when the job record
+// is evicted or after fleet_stt_transcript_ttl_min, and on a node with a token the media route
+// serves them only to a bearer holder (media_gate.go).
 //
 // Concurrency: the legacy lane and this door share ONE cap (fleet_stt_max_concurrent, default 1):
 // whisper is a single-slot upstream, and a job over the cap waits its turn in arrival order.

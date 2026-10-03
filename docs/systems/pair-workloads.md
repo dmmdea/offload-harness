@@ -15,6 +15,8 @@ pending work on the node that runs it. Off by default; two config keys turn it o
 - How is it enabled, on which boxes, and how is it verified or diagnosed?
 - Why does a box whose harness runs as a different OS user than PAIR still get cards (the identity
   fallback), and when does it apply?
+- How does a box that is not a PAIR member at all (a view-only box, a thin client) get cards (the card relay), and how is a
+  relayed card kept from being closed by the wrong pid check?
 
 ## Source map
 
@@ -32,12 +34,15 @@ pending work on the node that runs it. Off by default; two config keys turn it o
 | `main.go` | attaches the ledger observer where the CLI/MCP ledger is opened |
 | `internal/pairworkloads/seatwatch.go` | the seat watcher (0.133.0): direct traffic on this box's vLLM seats as cards, run by fleet-serve |
 | `internal/seatinflight/seatinflight.go` | the machine-wide register of the harness's own seat requests, written by `modelaffinity.Admit` and the fleet chat lane; the watcher subtracts it |
+| `internal/pairworkloads/relay.go` | the card relay (D26): `RelayConfig`, relay mode of the emitter (`relayRoute`, `buildRelay`, `postRelay`, `Mode`, `LocalIdentity`) and the member's decode (`ParseRelay`, `RelayJobID`, `RelayRequester`, `RelayLimiter`) |
+| `internal/fleetnode/pair_relay.go` | `POST /fleet/pair-relay`: the door (token gate, `PairRelayAdmissible`, asker, rate limit, body cap) |
 | `internal/pairworkloads/nodeinfo.go` | the identity fallback: this node's UUID from PAIR's loopback node-info when `node-id.json` is missing or unreadable, gated on the ingress answering (*Identity when the harness user is not PAIR's user*) |
 | `internal/pairworkloads/orphans.go` | the open-card register (0.133.1): one marker per in-flight card under `<state root>/pair-open/`, and the sweep that closes the cards of a dead process (`SweepOrphans`, `RunOrphanSweeper`) |
 | `internal/pairworkloads/remote.go` | `RemoteCall`: the one card and the one asker ledger row of a call routed to a fleet node (source 5 below) |
 | `internal/pairworkloads/wire.go` | the attribution headers an asker sends (`SetWireHeaders`, `WireHeadersFor`), `AskerName`, and `NodeName` (the dispatch host a node card is reported under) |
 | `internal/core/remoteattr.go` | `RemoteAttribution` / `RemoteAttributor`: the seam the remote lanes report through; `*pipeline.Pipeline` implements it (`internal/pipeline/remoteattr.go`) |
 | `internal/fleetnode/nodecard.go` | the serving node's own card for a job whose asker will not card it (*The node's fallback card* below) |
+| `internal/pairworkloads/relay_test.go`, `internal/fleetnode/pair_relay_test.go` | the relay's tests: the member's decode and resolution, the remote marker, the rate limit, relay mode, the route's token gate |
 | `internal/pairworkloads/pairworkloads_test.go`, `internal/delegate/pair_events_test.go`, `internal/pairworkloads/seatwatch_test.go`, `internal/pairworkloads/orphans_test.go` | the contract tests |
 | `internal/pairworkloads/attribution_test.go`, `internal/pairworkloads/remote_test.go`, `internal/{composeremote,visionremote,textremote,sttremote}/attribution_test.go`, `internal/fleetnode/attribution_test.go`, `internal/delegate/attribution_test.go` | the remote-call attribution tests: one card per call, the headers, the node card, view-only resolution |
 
@@ -269,6 +274,7 @@ holds the queued one, and asserts that it landed so; register C-77).
 | `pair_workloads_endpoint` | `http://127.0.0.1:14324/v1/workloads/events` | the ingress URL |
 | `pair_seat_activity_enabled` | `false` | fleet-serve reports DIRECT traffic on this box's vLLM seats (see *Seat activity* below). Enable on every box that **serves** a vLLM seat; independent of `pair_workloads_enabled` |
 | `pair_node_info_url` | `""` = `http://127.0.0.1:14318/v1/node-info`, except where `OFFLOAD_PAIR_APPDIR` is set | PAIR's loopback node-info, read for this node's UUID only when `node-id.json` is missing or unreadable (*Identity when the harness user is not PAIR's user*). Loopback only: any other host fails the config load naming the key |
+| `pair_workloads_relay` | absent = `auto` | where this box's frames go when it has **no** PAIR identity (*The card relay*): `auto` / absent = every `delegate_remotes` base whose health advertises `pair_relay`; `"off"` = no relay; other entries = explicit member base URLs. Each entry is validated like `delegate_remotes`. The bearer is `fleet_auth_token` |
 | env `OFFLOAD_PAIR_APPDIR` | platform default | PAIR's app-data dir when it is not at `%LOCALAPPDATA%\Nvidia Corporation\Personal AI Router` (Windows) / `~/.config/Nvidia Corporation/Personal AI Router` (Linux); tests use it |
 
 ## Identity when the harness user is not PAIR's user
@@ -317,6 +323,78 @@ answered. PAIR's own node-info service listens on loopback without a login and r
   UUID (the value in `node-id.json`), and gates callers only in the standalone `--cluster-dir` mode the
   broker does not enable. So the fallback works on a cluster member; a node-info started by hand with
   `--cluster-dir` would answer `403` and the emitter would stay disabled.
+
+## The card relay: a box that is not a PAIR member (D26)
+
+A box with no PAIR identity of its own (no readable `node-id.json`, and no node-info and ingress on loopback: a
+view-only box, a thin client built by `install client` where PAIR is not installed) could never card its own work. The
+operator's desktop showed that box's view-only card idle while its `gpu reserve` leases, CLI calls and fleet-served jobs
+stayed invisible. A **relay** closes the gap with the same frames: a fleet-serve on a PAIR member posts them for it.
+
+**The member's side** (`internal/fleetnode/pair_relay.go`, `pairworkloads.ParseRelay`):
+
+- `POST /fleet/pair-relay` takes ONE workload lifecycle frame, exactly the JSON-RPC notification this package builds
+  (`workload:submitted|started|completed|errored`, `params.workloadInfo` with the documented keys), plus an optional
+  top-level `node` (a node name hint) and `node_aliases` (other names of the same node) **beside** the frame, never inside
+  `workloadInfo`. The decode is strict: an unknown key at any level, a method that disagrees with the state, a bad type,
+  a control character or a body over 64 KiB (`RelayBodyMax`) is refused (`400`, `413` for the size).
+- The route is **token-gated** like every other gated lane (`tokenGated`; the bearer is checked before the body is read; a
+  tokenless node beyond loopback answers `403`, a tokenless loopback node stays open) and **advertised in health as
+  `pair_relay: true` exactly when it would admit** (`PairRelayAdmissible`: the node has a PAIR identity of its own, via
+  `Emitter.LocalIdentity`, and the reachability rule holds). A node that itself reports through a relay never relays for
+  another. The identity read behind the advertisement is the emitter's cached one (re-read at most once a minute; its cost
+  is the node-info probes of *Identity when the harness user is not PAIR's user* on a box whose `node-id.json` is
+  unreadable).
+- The relaying box names itself in `X-Offload-Asker` (**required**, sanitized and bounded to 64 printable characters as
+  H2's requester is). A token bucket per asker (5 frames/s, burst 60) and a global one (50/s, burst 200) answer `429` with
+  `Retry-After` **before the body is read**; the asker name is a header the caller chooses, so the global bucket is what a
+  rotating name meets.
+- What the member posts, through its own emitter (so its orphan register covers the in-flight card):
+
+  | Field | Value |
+  |---|---|
+  | `id`, `runId` | `relay-<asker>-<id>` bounded to 160 characters, with 8 hex of a digest of the exact (asker, id) pair appended, so two different pairs never share a card whatever the concatenation or the bound |
+  | `originatedFrom` | the member's own UUID. A value in the body is checked for shape and ignored: the relay never chooses an origin |
+  | `requesterId` | `offload-harness/fleet:<asker>`, plus `/` and the relayed requester's own suffix (its session) when it has one, bounded |
+  | `scheduledOn` | resolved **by the member**, by its own resolver (`members.json`, then `view-only-nodes.json`), from the `node` hint and its aliases; with no hint, from the asker's own name (a view-only box's name resolves there); otherwise `null`. Never the member itself for a job that did not run there. The body's `scheduledOn` is ignored |
+  | the rest | `model`, `engine` (a lower-case name), `state`, the three timestamps and `error` as relayed, `error` cut to the card's one line |
+
+- **A relayed in-flight marker belongs to a remote producer.** The member cannot see whether the producer's process, on
+  another box, is alive, so its marker carries `pid` 0 and `remote: true`, is **never judged by the member's pid table**,
+  and closes only by its terminal relayed frame or by the age cap `RelayOpenMaxAge` (24 h, the register's leak cap: a lease
+  card legitimately runs for hours). The terminal frame finds the marker **by name** (`0-<job id>.json`), so it still
+  closes the card after the member restarted since the in-flight frame. A terminal frame PAIR could not take is kept as a
+  pending frame of the same remote kind. Known cost: a relaying box that dies leaves its card "Running" on the desktop until
+  it is closed by the box's own sweep (below) or the cap.
+
+**The relaying side** (`internal/pairworkloads/relay.go`):
+
+- It is used **only when the emitter has no local identity** (the primary `node-id.json` and the node-info fallback both
+  fail); a box with either keeps reporting to PAIR's loopback ingress and never relays. In relay mode `Enabled()` is true,
+  and a frame is a relay body (the same workloadInfo keys with `originatedFrom` and `scheduledOn` null, plus the hint) sent to
+  the **first healthy member** with the fleet bearer and `X-Offload-Asker` (this box's short name). An event with no node
+  (this box's own work) sends this box's own name as the hint; a delegation's event sends the dispatch host and the fleet node
+  id as the hint and its alias.
+- `pair_workloads_relay` selects the members: absent or empty is `auto` (every `delegate_remotes` base whose `/fleet/health`
+  advertises `pair_relay`, probed over `netguard.SafeTransport` with a 1 s bound and cached for 60 s, a failed probe retried
+  after 30 s, outside the identity lock), `"auto"` says so outright, `"off"` turns the relay off, and any other entry is an
+  explicit member base URL (a box with no `delegate_remotes` sets it by hand; explicit members are used without a probe). The
+  bearer is `fleet_auth_token`. `install client` seeds nothing for it: `auto` covers a client that has `delegate_remotes`.
+  The probe is a small health reader in this package, not `delegate.FetchNodeView`, because `internal/delegate` imports this
+  package.
+- **One job, one card.** `WireHeadersFor` stops sending `X-Offload-Pair-Card: node` in relay mode (the emitter is enabled),
+  so the serving node does not card a job the asker cards through its relay.
+- **The orphan register records the relay.** A relay marker's `endpoint` is the relay's **route URL** (`<base>/fleet/pair-relay`),
+  and it keeps the node hint, so the relaying box's own sweeper closes only the cards it opened through a relay (H1's endpoint
+  scoping keeps these apart from local-ingress markers), through that relay, as an `errored` relay frame carrying the hint.
+  A job's terminal frame goes to the relay its in-flight frames went to, even when the first healthy member changed since.
+  A relay that fails a post goes behind the others for 30 s.
+- `offload_status` has a `pair` block (absent unless `pair_workloads_enabled` is on): `mode` is `local ingress`,
+  `node-info fallback`, `relay` (with the route URL) or `off` (with the reason).
+
+Trust: a holder of the fleet token can make this member post a card named for any asker, on any node PAIR knows. The frame
+carries no prompt, context or output, and the member checks its shape, namespaces its id and bounds its rate; the token is
+the same one that already lets its holder run renders and agent contracts on the node.
 
 ## Seat activity: traffic that bypasses the harness (0.133.0)
 
@@ -487,6 +565,11 @@ appears in PAIR's Jobs list on this box **and** on the node that ran it, reading
   signal. A card with no node line: the dispatch host and the fleet node id are in neither
   `cluster/members.json` nor `configs/view-only-nodes.json`; the first failure logs one
   `pairworkloads: no PAIR member is named ...` line.
+- **A box with no PAIR gets no card**: `offload_status` `pair` says why (`off` with the reason). In `auto` no `delegate_remotes`
+  member advertises `pair_relay` (it needs a PAIR identity of its own and a `fleet_auth_token`, or a loopback listener), or
+  the box has no `delegate_remotes` and no explicit `pair_workloads_relay`. A card Running long after its box went away is
+  a relayed card whose producer died: the relaying box's sweep closes it through the relay when that box comes back, and
+  the member's age cap (24 h) otherwise.
 - **Nothing appears**: the key is off, PAIR is not installed (no `node-id.json`, and on a box
   where the harness user is not PAIR's user, node-info and the ingress are not both answering on
   loopback: `curl http://127.0.0.1:14318/v1/node-info` must show a `hostUuid`), or the
