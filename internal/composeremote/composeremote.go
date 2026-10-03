@@ -423,8 +423,12 @@ func fetchOutputs(ctx context.Context, cfg config.Config, base string, data json
 	if remote == "" {
 		return nil, errors.New("the node's result names no video_path")
 	}
+	name, err := nodeName(remote)
+	if err != nil {
+		return nil, err
+	}
 	dir := cfg.MediaDir
-	video := filepath.Join(dir, nodeName(remote))
+	video := filepath.Join(dir, name)
 	if out != "" {
 		video = out
 		dir = filepath.Dir(out)
@@ -432,7 +436,7 @@ func fetchOutputs(ctx context.Context, cfg config.Config, base string, data json
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
 	}
-	if err := download(ctx, cfg, base, nodeName(remote), video); err != nil {
+	if err := download(ctx, cfg, base, name, video); err != nil {
 		return nil, err
 	}
 	m["video_path"] = video
@@ -443,8 +447,12 @@ func fetchOutputs(ctx context.Context, cfg config.Config, base string, data json
 			if rs == "" {
 				continue
 			}
-			dst := filepath.Join(dir, nodeName(rs))
-			if err := download(ctx, cfg, base, nodeName(rs), dst); err != nil {
+			sn, err := nodeName(rs)
+			if err != nil {
+				return nil, err
+			}
+			dst := filepath.Join(dir, sn)
+			if err := download(ctx, cfg, base, sn, dst); err != nil {
 				return nil, err
 			}
 			local = append(local, dst)
@@ -454,9 +462,15 @@ func fetchOutputs(ctx context.Context, cfg config.Config, base string, data json
 	return json.Marshal(m)
 }
 
-// nodeName is the bare file name of a path the node reported, whichever OS wrote it.
-func nodeName(p string) string {
-	return path.Base(strings.ReplaceAll(p, `\`, "/"))
+// nodeName is the bare file name of a path the node reported, whichever OS wrote it. The path is the
+// node's, but the name becomes a file in this machine's media dir, so it must be a plain name: never
+// ".", "..", a root, or a name with a colon (a drive or an NTFS stream).
+func nodeName(p string) (string, error) {
+	n := path.Base(strings.ReplaceAll(p, `\`, "/"))
+	if n == "." || n == ".." || n == "/" || strings.ContainsAny(n, ":\x00") {
+		return "", fmt.Errorf("the node named an output %q that is not a plain file name", p)
+	}
+	return n, nil
 }
 
 func download(ctx context.Context, cfg config.Config, base, name, dst string) error {

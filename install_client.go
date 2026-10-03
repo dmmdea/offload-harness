@@ -80,12 +80,10 @@ func runInstallClient(args []string) error {
 	// reported and the file, which holds the token, removed rather than left half-valid.
 	cfg, err := config.Load(path)
 	if err != nil {
-		_ = os.Remove(path)
-		return fmt.Errorf("install client: the rendered config does not load: %w", err)
+		return refuseConfig(path, fmt.Errorf("install client: the rendered config does not load: %w", err))
 	}
 	if warns := config.EndpointWarnings(cfg); len(warns) > 0 {
-		_ = os.Remove(path)
-		return fmt.Errorf("install client: the remotes are not fleet node bases: %s", strings.Join(warns, "; "))
+		return refuseConfig(path, fmt.Errorf("install client: the remotes are not fleet node bases: %s", strings.Join(warns, "; ")))
 	}
 	unbound := []string{}
 	for k, v := range m {
@@ -105,6 +103,15 @@ func runInstallClient(args []string) error {
 	fmt.Printf("      unbound here (served by the fleet): %s\n", strings.Join(unbound, ", "))
 	fmt.Printf("NEXT  register the MCP server: claude mcp add local-offload --scope user -- <this binary> mcp --config %s\n", path)
 	return nil
+}
+
+// refuseConfig removes a refused config, which holds the token, and returns why it was refused; a file
+// that could not be removed is named, so it is never left behind unsaid.
+func refuseConfig(path string, why error) error {
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("%w (and %s, which holds the fleet token, could not be removed: %v)", why, path, err)
+	}
+	return why
 }
 
 // hasLocalModel reports whether the config names any local model at all. A delegation client names

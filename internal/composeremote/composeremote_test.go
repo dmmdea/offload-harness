@@ -253,3 +253,22 @@ func TestRunPlacesByRoute(t *testing.T) {
 		t.Errorf("no delegate_remotes is a config defer: %+v", res)
 	}
 }
+
+// The node's output path is its own, but its name becomes a file here: only a plain name may.
+func TestNodeNameIsAPlainFileName(t *testing.T) {
+	for in, want := range map[string]string{
+		`C:\offload\media\compose-1.mp4`:         "compose-1.mp4",
+		"/srv/offload/media/compose-1.png":       "compose-1.png",
+		"../../evil.mp4":                         "evil.mp4",
+		`D:\media\compose-1-snap-00-at-1.5s.png`: "compose-1-snap-00-at-1.5s.png",
+	} {
+		if got, err := nodeName(in); err != nil || got != want {
+			t.Errorf("nodeName(%q) = %q, %v; want %q", in, got, err, want)
+		}
+	}
+	for _, in := range []string{"", ".", "..", "/", "a/..", `C:`, "media/x:y.mp4", "x\x00.mp4"} {
+		if got, err := nodeName(in); err == nil {
+			t.Errorf("nodeName(%q) = %q: must be refused (not a plain file name)", in, got)
+		}
+	}
+}

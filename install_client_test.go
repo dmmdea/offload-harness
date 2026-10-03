@@ -104,16 +104,24 @@ func TestInstallClientRefusesBadInputAndKeepsAnExistingConfig(t *testing.T) {
 	if _, err := installClientInto(t, home, "--force"); err != nil {
 		t.Errorf("--force replaces it: %v", err)
 	}
-	if err := runInstallClient([]string{"--home", t.TempDir(), "--token-file", "x"}); err == nil {
-		t.Error("no remotes accepted")
-	}
+	// Each refusal is checked by its own reason: the rules run in order, so a case that only asserted
+	// "refused" would pass on an earlier rule with its own gone.
 	empty := filepath.Join(t.TempDir(), "empty")
 	_ = os.WriteFile(empty, []byte("  \n"), 0o600)
-	if err := runInstallClient([]string{"--home", t.TempDir(), "--remotes", "http://render-a:18811", "--token-file", empty}); err == nil {
-		t.Error("an empty token accepted")
-	}
-	if err := runInstallClient([]string{"--remotes", "http://render-a:18811", "--token-file", empty}); err == nil {
-		t.Error("no home accepted")
+	for name, tc := range map[string]struct {
+		args []string
+		want string
+	}{
+		"no remotes":    {[]string{"--home", t.TempDir(), "--token-file", empty}, "--remotes is required"},
+		"blank remotes": {[]string{"--home", t.TempDir(), "--remotes", " , ", "--token-file", empty}, "--remotes is required"},
+		"no token file": {[]string{"--home", t.TempDir(), "--remotes", "http://render-a:18811"}, "--token-file is required"},
+		"missing token": {[]string{"--home", t.TempDir(), "--remotes", "http://render-a:18811", "--token-file", filepath.Join(t.TempDir(), "absent")}, "reading the token file"},
+		"empty token":   {[]string{"--home", t.TempDir(), "--remotes", "http://render-a:18811", "--token-file", empty}, "the token file is empty"},
+		"no home":       {[]string{"--remotes", "http://render-a:18811", "--token-file", empty}, "--home is required"},
+	} {
+		if err := runInstallClient(tc.args); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: want a refusal naming %q, got %v", name, tc.want, err)
+		}
 	}
 }
 
