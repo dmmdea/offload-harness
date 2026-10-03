@@ -16,7 +16,9 @@ other two. This change carries the per-card truth across the fleet. Old readers 
   absent means the whole node), where they came from, its term, `busy`, `overdue`, `exclusive`, `draining`, its own
   `orphaned`/`stalled` and one `verdict` word. Each layer seat gains `device_ids`, the lease ids of the cards its pin
   names, resolved on the node. The singular `lease` block, `lease_exclusive` and `lease_draining` stay and are now the
-  WORST across the live leases, so a delegator at 0.160.0 or 0.161.0 is never told less than is true; with one lease the
+  WORST across the live leases (busy, orphaned, stalled, exclusive and draining if any lease is; `overdue` only when no
+  live lease is a long hold of its own, because every reader computes busy-and-not-overdue and an abandoned lease on one
+  card must not hide a live render on another), so a delegator at 0.160.0 or 0.161.0 is never told less than is true; with one lease the
   block is byte for byte what it was. A node's lease reader now includes the cards a legacy lease was scoped to by
   evidence (when `gpu_legacy_scope_inference` is on), as the box's own gates already read it.
 - **The node's own gates follow the cards.** `saturation.high` and `idle_slot` close the node only when the leases that
@@ -41,11 +43,33 @@ other two. This change carries the per-card truth across the fleet. Old readers 
   `eta_sec`) and `retry_after_sec`, the soonest known end. The token that resumes a place across calls is the media-admission
   change and is not part of this.
 - **Deploy.** A binary swap touches the executable and the processes it may stop, not a card, so a standalone node's wait
-  stays every GPU lease unless the operator names the cards (`node-swap --cards <uuid,...>`, forwarded by both launchers); the lease it did not wait
+  stays every GPU lease unless the operator names the cards (`node-swap --cards`, forwarded by both launchers); the lease it did not wait
   for is recorded in the outcome (`cards`, `leases_left_alone`) and a refusal names the lease that held it. `fleet_reclaim`
-  stays whole-node on purpose (docs/systems/fleet-node.md, "Per-card lease truth").
+  stays whole-node on purpose (docs/systems/fleet-node.md, "Per-card lease truth"). Three guards make the flag safe to
+  use on a box that runs renders:
+  - A lease held by a process the deploy would stop holds it whatever its cards. The fleet node and an MCP helper take a
+    lease in-process while they render, the lease records its holder's pid, and the rename retry stops any helper that
+    holds the exe: with `--cards` a lease on another card used to be left alone while the helper holding it was stopped,
+    ending the render. Now such a lease holds the deploy, the rename retry never stops a process that holds a lease (nor
+    any helper when the leases cannot be read), and the wait does not narrow when the processes running the image cannot
+    be listed.
+  - Each `--cards` entry is resolved against the box's card table (an nvidia-smi index, a GPU UUID or an unambiguous UUID
+    prefix, as `gpu reserve --devices` does). An entry that places on no card, or a box with no card table, refuses the
+    deploy before anything is touched; before, a typo or an index matched no lease and the deploy went ahead past the
+    render the operator meant.
+  - `--cards` with a health URL (given, or read from the node's config) is refused; it was silently ignored.
+- **The singular `lease` block no longer hides a live render behind an abandoned lease.** `overdue` in the folded block
+  is set only when no live lease is a long hold of its own. Every reader of the singular fields computes busy-and-not-overdue,
+  so "overdue if any lease is" made an abandoned lease on one card mask a live long render on another from the text and
+  vision remotes, the MCP door's fleet view and `leasedLanes` too, not only from a delegator one release behind.
+- **A dead fleet is still reported when the local seat is fenced.** Before the wasted-local-leg change, route=auto with
+  every remote failing its health probe and the local seat busy under somebody else's lease fell through to the local
+  placement, which counted the run as Infrastructure; the fenced wait dropped that class, so the same dead fleet ended as a
+  plain capacity defer and exited zero. The class now rides the wait sentinel (the fenced and the text-reservation ones, on
+  every placement path) and is stamped on whatever ends the wait, unless a remote answered while it waited.
 - **`fleet-ui` and `top` show one tile per card** with the lease that holds it (class, epoch, verdict, time left).
-- Tests: the existing delegate fixtures that held a media lease to make the local GPU read busy while expecting the local
+- Tests: `TestHealthLeaseEntryOverdueIsPerLease` used to assert the defect (the folded block reads overdue beside a live
+  3 h lease) and now asserts the fold above. The existing delegate fixtures that held a media lease to make the local GPU read busy while expecting the local
   fallback now run under that lease (`runUnderLease`, `busyLocalAsHolder`), since a lease held by somebody else fences the
   seat and the delegator no longer dials it; `TestRunAutoMediaLeaseStillRunsLocal` and `TestRunSpreadMediaLeaseDealsAsBefore`
   became the tests of the new rule.

@@ -476,9 +476,14 @@ seat row of `layers[]` gains `device_ids`, the lease ids of the cards its pin na
 never guesses whether a bare `"0"` is a CUDA index or a PCI one; a pin the node cannot place publishes none, which reads as every card.
 
 *Old readers.* The singular `lease` block, `lease_exclusive` and `lease_draining` stay, and are now the WORST across the live leases (class `text` if
-any lease is, `busy`, `overdue`, `orphaned`, `stalled` if any is, the longest `remaining_sec` and `until`, exclusive/draining if any is); `pid` and
-`reason` stay the lowest epoch's. A delegator one release behind reads only those, so it is never told less than is true: with a short media render
-on one card and an exclusive reservation on another it sees a text, busy, exclusive hold. With ONE lease the block is byte for byte what it was.
+any lease is, `busy`, `orphaned`, `stalled` if any is, the longest `remaining_sec` and `until`, exclusive/draining if any is); `pid` and
+`reason` stay the lowest epoch's. `overdue` is the one field that folds the other way: every reader of the singular fields (a delegator one release
+behind, and in the current binary the text and vision remotes, the MCP door's fleet view and `leasedLanes`) computes `LeaseBusy = busy AND NOT overdue`,
+so the block says `overdue` only when no live lease is a long hold of its own (busy and not overdue). "Overdue if ANY lease is" would let an abandoned
+lease on one card hide a live long render on another: the block would read busy-and-overdue, which every one of those readers takes as not busy, ranked
+last, never fenced. Beside a live long lease the block is therefore busy and not overdue, which is what that lease alone says; with every busy lease
+abandoned it is busy and overdue, as for one. A delegator one release behind reads only those, so it is never told less than is true: with a short media
+render on one card and an exclusive reservation on another it sees a text, busy, exclusive hold. With ONE lease the block is byte for byte what it was.
 A new delegator reading a node that publishes no `leases[]` (an older node) takes that block as the whole node, which is today's rule.
 
 *The node's own gates follow the cards.* `saturation.high` and `idle_slot` close the node only when the leases that refuse new work (a text
@@ -502,7 +507,10 @@ seat's own pre-check after the delegator has spent an attempt, a ledger row and 
 (`ForeignFence` over the chain, `fencedLocal`) at every site that used to fall back to the local seat: route=auto when nothing else could take it, the
 auto deal, the spread rotation, the re-placement's last resort and the capacity wait's local tick. It waits in line instead, and the fence clearing runs the
 contract locally. It applies only when there is another node to wait for (a delegator with no remotes has no leg to save, and the pre-check is the fast
-honest answer) and never to `route=local`; the holder's own child is exempt, as at the pre-check.
+honest answer) and never to `route=local`; the holder's own child is exempt, as at the pre-check. A fallback must not hide a failure: when the remotes
+were failing their health probe at the placement, that class rides the wait and is stamped on whatever ends it (the capacity defer, the fenced defer, a
+local run after the fence cleared), so a fleet that has been down for a week still counts as `Summary.Infrastructure` and exits non-zero, as the local
+fall-through it replaces did. A remote that answered while the subtask waited clears it (the fleet was not dead).
 
 *A wait that ends in a kept place.* When the capacity wait ends with nothing having taken the work, the defer (class `capacity`, unchanged) names the places
 the subtask stood in: `results[].place_keeping` lists `{node, on, detail, eta_sec}` for each node it stood behind (`lease` on its cards, `queue` for its own
@@ -510,7 +518,8 @@ refusal or no room, `backlog`, `cooldown`) and `retry_after_sec` is the soonest 
 place across calls belongs to media admission (plan P13); this is the delegator's half, the facts a re-call is placed by.
 
 *Deploy and reclaim.* A binary swap touches the executable and the processes it may stop, not a card (the table in [node-swap.md](node-swap.md)), so a standalone deploy's
-lease wait stays every lease unless the operator names the cards it touches (`node-swap --cards`); the fleet-serve wait is a job count, which is one node-wide number.
+lease wait stays every lease unless the operator names the cards it touches (`node-swap --cards`, resolved against the card table, and still holding for a lease
+a process the deploy would stop holds: that stop ends it whatever its cards); the fleet-serve wait is a job count, which is one node-wide number.
 `fleet_reclaim`'s idle baseline stays whole-node on purpose: it records the headline card's used VRAM when nothing of the harness is loaded, its llama-swap half already
 reads every card, and the error it exists to avoid is recording a baseline over a loaded model, which narrowing the lease half could only make more likely.
 `fleet-ui` and `top` show one tile per card with its holder ([fleet-overview.md](fleet-overview.md)).

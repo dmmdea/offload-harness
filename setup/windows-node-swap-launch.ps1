@@ -43,9 +43,11 @@ param(
   [string]$RenderTarball = '',
   [string]$RenderDir = '',
   [string]$WaitIdleTimeout = '10m',
-  # Standalone node only: the GPU UUIDs this deploy touches, comma separated (node-swap --cards). A GPU
-  # lease on any other card is left alone and recorded; empty = the whole node, where any GPU lease
-  # holds the swap.
+  # Standalone node only: the cards this deploy touches, comma separated (node-swap --cards): each an
+  # nvidia-smi index, a GPU UUID or an unambiguous UUID prefix, resolved against this box's card table
+  # (an entry that places on no card refuses the deploy). A GPU lease on any other card is left alone and
+  # recorded, unless a process the deploy would stop holds it; empty = the whole node, where any GPU
+  # lease holds the swap. Refused with a health URL.
   [string]$Cards = '',
   [string]$VerifyTimeout = '90s',
   [switch]$DryRun,

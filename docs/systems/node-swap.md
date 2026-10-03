@@ -81,20 +81,37 @@ restart, verify, automatic rollback on any failure) and, as an option, its rende
   this exactly as before it existed — never a nil-function panic.
 - **What a deploy touches, and `--cards` (GPU routing P7)** — read from `deps.go` and
   `nodeswap.go`, a swap touches (a) the binary file: a rename pair, no card; (b) the processes
-  running that binary which it may stop: the fleet-serve process on a node with a restart
-  configured (a restart cuts every job the node is running on whichever card it runs, and
-  health publishes the job count as one node-wide number, so that wait stays node-wide), and
-  the idle MCP helpers (a helper holds a lease in-process while it renders, and stopping it
-  would end that render); (c) nothing else: a lease held by a `gpu reserve` wrapper keeps
-  running its old image. The standalone wait was ANY lease, so a long render on one card of
-  three failed a deploy that touched no card. The tool still waits for every lease by
-  default, because it cannot tell whether a lease's wrapper is the very image being replaced;
-  the OPERATOR narrows it with `--cards <uuid,uuid>` (`Plan.Cards`): only a lease on one of
-  those cards, or a lease that names no cards (the whole node), holds the swap. Each live
-  lease it did not wait for is recorded in `Outcome.LeasesLeftAlone`, the declared cards in
-  `Outcome.Cards`, and a refusal names the lease that held the deploy (epoch, class, how
-  many cards, why). `--cards` has no effect on a node with a health URL. Both detached launchers
-  forward it (`-Cards` in `windows-node-swap-launch.ps1`, `--cards` in `linux-node-swap-launch.sh`).
+  running that binary which it may stop: the fleet-serve process (stopped by `stopForSwap`; a
+  restart cuts every job the node is running on whichever card it runs, and health publishes the
+  job count as one node-wide number, so a health-URL wait stays node-wide), and an MCP helper
+  that blocks the rename (`renameWithRetry`); both take a lease IN-PROCESS while they render,
+  and stopping the process ends that render; (c) nothing else: a lease held by a `gpu reserve`
+  wrapper keeps running its old image, because the tool never stops it. The standalone wait was
+  ANY lease, so a long render on one card of three failed a deploy that touched no card. It
+  still is by default; the OPERATOR narrows it with `--cards` (`Plan.Cards`), and then a lease
+  holds the swap when it sits on one of those cards, names no cards (the whole node), **or is
+  held by a process the deploy would stop**. The lease records its holder's pid
+  (`GPULeaseOnCards.PID`) and the tool lists the processes running the image it replaces, so it
+  CAN tell: a lease on another card held by pid 300, an MCP helper on the target image, holds
+  the deploy, because stopping pid 300 would end it. If the processes cannot be listed nothing
+  is narrowed. The rename retry has its own guard for a lease taken between the wait and the
+  rename, or on a node with a health URL (which never ran the lease wait): "idle" means it
+  holds no live lease, so a helper that holds one, on any card, is left running (the rename then
+  fails and rolls back, which is the fail-loud answer), and so is every helper when the leases
+  cannot be read or a lease is held whose holder is not named. Each live lease it did not wait
+  for is recorded in `Outcome.LeasesLeftAlone`, the declared cards in `Outcome.Cards`, and a
+  refusal names the lease that held the deploy (epoch, class, how many cards, why, and the pid
+  when that is what held it).
+  **`--cards` is checked, not trusted.** `node-swap` resolves each entry against the box's card
+  table the way `gpu reserve --devices` does (an nvidia-smi index, a GPU UUID, or an
+  unambiguous UUID prefix, any case) and records the lease ids it resolved; an entry that
+  places on no card (an unknown index, a prefix no card has or that fits two cards, a card
+  named twice, a blank) or a box with no card table refuses the deploy before anything is
+  touched, because a string that matched no lease would read as "no lease there" and the deploy
+  would go ahead past the render the operator meant. `--cards` with a health URL, given or
+  read from the node's config `fleet_listen`, is refused too (that wait is the job count, so
+  the flag could only be ignored). Both detached launchers forward it (`-Cards` in
+  `windows-node-swap-launch.ps1`, `--cards` in `linux-node-swap-launch.sh`).
 - **Auto-resolved `--health-url`** — when the caller leaves `--health-url` empty,
   `runNodeSwap` reads THIS node's own config `fleet_listen` (`--config`, same resolution
   precedence as every other command) and fills it in automatically — but ONLY when that
@@ -307,7 +324,8 @@ no real binary or fleet node needed.
 
 - `internal/nodeswap/nodeswap.go` — the sequence, `Plan`/`Outcome`/`Deps`, rollback, the
   standalone GPU-lease wait (`waitGPUFree`, `splitLeases`: which leases hold a deploy that
-  names cards), `backupPathFor`'s doubled-`bak-` guard.
+  names cards, `stoppableHolders`: the leases a process the deploy would stop holds,
+  `leaseHolders`: the rename retry's idle check), `backupPathFor`'s doubled-`bak-` guard.
 - `internal/nodeswap/deps.go` — cross-platform real implementations (hash, health, rename,
   tar.gz extraction, `InspectGPULease` via `internal/gpulease`).
 - `internal/nodeswap/deps_windows.go` / `deps_other.go` — the CIM process-enumeration /

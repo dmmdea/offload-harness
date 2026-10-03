@@ -31,7 +31,7 @@
 #     [--config /path/to/config.json] \
 #     [--backup-suffix pre-<sha>] [--render-tarball render.tar.gz --render-dir /opt/offload/render] \
 #     [--wait-idle-timeout 10m] [--verify-timeout 90s] [--dry-run] [--skip-hash-check] \
-#     [--cards GPU-uuid,GPU-uuid  (standalone node: the cards this deploy touches; default = the whole node)] \
+#     [--cards 0,GPU-uuid-prefix  (standalone node: the cards this deploy touches, each an nvidia-smi index, a GPU UUID or an unambiguous UUID prefix; default = the whole node)] \
 #     [--runner-exe /opt/offload/bin/local-offload] [--log-dir /opt/offload/bin] [--node-swap-bin local-offload]
 #
 # --health-url is OPTIONAL here on purpose (unlike the Windows launcher, which has
