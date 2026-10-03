@@ -3079,11 +3079,15 @@ func doctorRun(cfg config.Config, routes []mediacap.Route, w io.Writer) error {
 	client := llamaclient.New(cfg.Endpoint, cfg.CompletionPath, cfg.Model, 5*time.Second)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err := client.Health(ctx); err != nil {
+	if !hasLocalModel(cfg) {
+		// A delegation client (install client) has no local endpoint to be healthy.
+		fmt.Fprintln(w, "health:     SKIP - no local model is configured (a delegation client); the fleet serves every model")
+	} else if err := client.Health(ctx); err != nil {
 		fmt.Fprintln(w, "health:     DOWN -", err)
 		return fmt.Errorf("endpoint down: %w", err)
+	} else {
+		fmt.Fprintln(w, "health:     OK")
 	}
-	fmt.Fprintln(w, "health:     OK")
 	// Fleet version skew (security standard L0, register R-06): informational,
 	// never an exit-code change — a node on another release is a parity finding
 	// for the operator, not a broken local box.

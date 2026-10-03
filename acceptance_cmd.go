@@ -118,6 +118,11 @@ func runAcceptance(args []string) error {
 // doctor's alias set so the two verbs cannot disagree about what is configured.
 func aliasCheck2(ctx context.Context, cfg config.Config) acceptance.Check {
 	const name = "model aliases live"
+	// A delegation client (install client) configures no local model at all: there is no roster
+	// to check, and a box with no local endpoint must not fail for it.
+	if !hasLocalModel(cfg) {
+		return acceptance.Check{Name: name, Status: acceptance.Skip, Detail: "no local model is configured (a delegation client); the fleet serves every model"}
+	}
 	cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	roster, err := swapclient.FetchRoster(cctx, cfg.Endpoint, 10*time.Second)
