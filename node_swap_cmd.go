@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/dmmdea/offload-harness/internal/config"
+	"github.com/dmmdea/offload-harness/internal/gpuprobe"
 	"github.com/dmmdea/offload-harness/internal/nodeswap"
 )
 
@@ -58,7 +59,7 @@ func parseNodeSwapFlags(args []string) (nodeswap.Plan, nodeSwapOutput, error) {
 
 	healthURL := fs.String("health-url", "", "this node's GET /fleet/health URL — waits for queue=0 before swapping and verifies health after restart; omit for a standalone node with no fleet-serve endpoint")
 	waitIdleTimeout := fs.Duration("wait-idle-timeout", 10*time.Minute, "max time to wait for the node to go idle before swapping")
-	cardsFlag := fs.String("cards", "", "standalone node only: comma list of the GPU UUIDs this deploy touches — a GPU lease on any other card is left alone and recorded; default (none) is the whole node, where any GPU lease holds the swap. A lease that names no cards is the whole node and always holds it")
+	cardsFlag := fs.String("cards", "", "standalone node only (refused with a health URL, given or read from the node's config): comma list of the cards this deploy touches, each an nvidia-smi index, a GPU UUID or an unambiguous UUID prefix, resolved against this box's card table (an entry that places on no card refuses the deploy) — a GPU lease on any other card is left alone and recorded, unless a process the deploy would stop (the fleet node, an MCP helper) holds it; default (none) is the whole node, where any GPU lease holds the swap. A lease that names no cards is the whole node and always holds it")
 
 	restartTask := fs.String("restart-task", "", "Windows scheduled task to Stop/Start around the swap (e.g. offload-fleet-node); mutually exclusive with --restart-command")
 	restartCommand := fs.String("restart-command", "", "a command that stops+relaunches the node itself (e.g. a launcher script that restarts the node out of session via WMI/CIM); mutually exclusive with --restart-task. Neither flag = standalone binary-only swap, nothing restarted")
@@ -115,6 +116,41 @@ func splitCards(s string) []string {
 		}
 	}
 	return out
+}
+
+// resolveNodeSwapCards turns the cards the operator named (--cards) into the lease ids a lease
+// records, against THIS box's card table: each entry is an nvidia-smi index, a GPU UUID or an
+// unambiguous UUID prefix, resolved the way `gpu reserve --devices` resolves it. The default of
+// the standalone wait is to hold for every lease and naming cards only narrows it, so an entry
+// that places on no card (a typo, an unknown index, a prefix that fits two cards) must refuse
+// the deploy: left as a string it would match no lease, and the deploy would go ahead past the
+// very render the operator meant to wait for. With no card table nothing can be checked, so that
+// refuses too (dropping --cards gives the whole-node wait).
+//
+// A plan that names no cards is the whole node and a plan with a health URL is refused by the
+// engine (--cards only narrows the standalone wait), so neither reads the table.
+func resolveNodeSwapCards(ctx context.Context, plan nodeswap.Plan, cfg config.Config, log func(string)) (nodeswap.Plan, error) {
+	if len(plan.Cards) == 0 || plan.HealthURL != "" {
+		return plan, nil
+	}
+	if log == nil {
+		log = func(string) {}
+	}
+	cards, _, err := cardTable(ctx, cfg)
+	if err != nil {
+		return plan, fmt.Errorf("--cards needs the card table to resolve %q and nvidia-smi gave none: %w (drop --cards to wait for every GPU lease)", strings.Join(plan.Cards, ","), err)
+	}
+	got, err := gpuprobe.ResolveCards(cards, plan.Cards)
+	if err != nil {
+		return plan, fmt.Errorf("--cards %q: %w", strings.Join(plan.Cards, ","), err)
+	}
+	ids := make([]string, 0, len(got))
+	for i, c := range got {
+		ids = append(ids, c.LeaseID())
+		log(fmt.Sprintf("resolved --cards entry %q to card %d (%s)", plan.Cards[i], c.NvidiaIndex, c.LeaseID()))
+	}
+	plan.Cards = ids
+	return plan, nil
 }
 
 // loopbackOrWildcardHost reports a host that cannot be dialed FROM ANOTHER
@@ -232,6 +268,16 @@ func runNodeSwap(args []string) error {
 		logger.Printf("config auto-resolve: %s failed to load (%v) — --health-url and the GPU-lease paths stay exactly as passed", cfgSrc.Path, cfgSrc.LoadErr)
 	} else {
 		plan = resolveNodeSwapDefaults(plan, cfg, func(s string) { logger.Printf("%s", s) })
+	}
+
+	// The cards the operator named must place on cards this box has: an entry that does not
+	// would match no lease, and the deploy would go ahead past a lease on the card meant.
+	plan, err = resolveNodeSwapCards(context.Background(), plan, cfg, func(s string) { logger.Printf("%s", s) })
+	if err != nil {
+		reason := err.Error()
+		logger.Printf("[startup] ok=false %s", reason)
+		writeEarlyFailure(resultPath, "", reason)
+		return err
 	}
 
 	outcome := nodeswap.Run(context.Background(), plan, nodeswap.DefaultDeps(), logger)

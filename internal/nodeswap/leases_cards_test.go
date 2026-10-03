@@ -15,8 +15,9 @@ package nodeswap
 // A standalone node (no health URL) waits for the GPU lease to clear before it swaps. That used
 // to be ANY lease, so a 20-hour render on one card of three failed a deploy that touched no
 // card. The wait is still every lease unless the OPERATOR says which cards the deploy touches
-// (Plan.Cards, --cards): the harness cannot know that a wrapper holding a lease is not the very
-// image being replaced, so it never narrows on its own.
+// (Plan.Cards, --cards), so it never narrows on its own. Even then a lease held by a process the
+// deploy would stop holds it whatever its cards: the lease records its holder's pid and the
+// deploy lists the processes running the image it replaces (leases_holders_test.go).
 
 import (
 	"context"

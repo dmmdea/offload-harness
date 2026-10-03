@@ -198,9 +198,10 @@ func inspectGPULease(lockPath, stateDir string) (GPULeaseInfo, error) {
 	}
 	// Every live lease with the cards it sits on (GPU routing P7). The declared cards only:
 	// a legacy lease an older binary wrote names none and so reads as the whole node, which is
-	// the direction of every doubt for a deploy.
+	// the direction of every doubt for a deploy. The holder's pid rides along: a lease held by a
+	// process the deploy is about to stop is ended by the stop, on any card.
 	for _, l := range info.Each() {
-		out.Leases = append(out.Leases, GPULeaseOnCards{Epoch: l.Epoch, Class: string(l.Class), Reason: l.Reason, Devices: l.Devices})
+		out.Leases = append(out.Leases, GPULeaseOnCards{Epoch: l.Epoch, Class: string(l.Class), Reason: l.Reason, PID: l.PID, Devices: l.Devices})
 	}
 	return out, nil
 }
