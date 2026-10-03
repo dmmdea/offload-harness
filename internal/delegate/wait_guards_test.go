@@ -367,7 +367,7 @@ func TestExhaustedLocalCapacityDeferShape(t *testing.T) {
 	compressPolls(t, 5*time.Millisecond, time.Second)
 	_, url := refusingNode(t, "node-full", http.StatusServiceUnavailable, nil)
 	cfg := testCfg(t)
-	cfg.GPULockPath = busyLocal(t) // media lease: route=auto asks the remote first
+	cfg.GPULockPath = busyLocalAsHolder(t) // media lease: route=auto asks the remote first
 	var localCalls atomic.Int64
 	results, sum, err := Run(t.Context(), cfg, capacityDeferLocal(&localCalls), []core.AgentContract{plainContract()}, "auto", []string{url})
 	if err != nil {

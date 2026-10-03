@@ -61,7 +61,7 @@ func TestNonCapacityRefusalThenABusyNodeWaitsInsteadOfFailing(t *testing.T) {
 		compressWait(t, 20*time.Millisecond, 0)
 		_, url := refusingNode(t, "node-broken", http.StatusInternalServerError, nil)
 		cfg := testCfg(t)
-		cfg.GPULockPath = busyLocal(t)
+		cfg.GPULockPath = busyLocalAsHolder(t)
 		cfg.FleetMaxConcurrentJobs = 1
 		cfg.AgentPlacementWaitSec = 10
 		seatRun := gpuactivity.Start(cfg.GPULockPath, cfg.StateDir, gpuactivity.Run{Seat: cfg.AgentPlannerModel(""), Kind: "contract", Goal: "occupies the seat", Phase: gpuactivity.PhaseRunning})

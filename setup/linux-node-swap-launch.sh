@@ -31,6 +31,7 @@
 #     [--config /path/to/config.json] \
 #     [--backup-suffix pre-<sha>] [--render-tarball render.tar.gz --render-dir /opt/offload/render] \
 #     [--wait-idle-timeout 10m] [--verify-timeout 90s] [--dry-run] [--skip-hash-check] \
+#     [--cards 0,GPU-uuid-prefix  (standalone node: the cards this deploy touches, each an nvidia-smi index, a GPU UUID or an unambiguous UUID prefix; default = the whole node)] \
 #     [--runner-exe /opt/offload/bin/local-offload] [--log-dir /opt/offload/bin] [--node-swap-bin local-offload]
 #
 # --health-url is OPTIONAL here on purpose (unlike the Windows launcher, which has
@@ -165,7 +166,7 @@ real_log() { echo "[node-swap-launch] $1" >&2; }
 main() {
   local STAGED="" TARGET="" SHA256="" BACKUP_SUFFIX="" HEALTH_URL="" CONFIG_PATH=""
   local RESTART_COMMAND="" RENDER_TARBALL="" RENDER_DIR=""
-  local WAIT_IDLE_TIMEOUT="10m" VERIFY_TIMEOUT="90s"
+  local WAIT_IDLE_TIMEOUT="10m" VERIFY_TIMEOUT="90s" CARDS=""
   local DRY_RUN=0 SKIP_HASH_CHECK=0
   local RUNNER_EXE="" LOG_DIR="" NODE_SWAP_BIN=""
 
@@ -181,6 +182,7 @@ main() {
       --render-tarball) RENDER_TARBALL="$2"; shift 2 ;;
       --render-dir) RENDER_DIR="$2"; shift 2 ;;
       --wait-idle-timeout) WAIT_IDLE_TIMEOUT="$2"; shift 2 ;;
+      --cards) CARDS="$2"; shift 2 ;;
       --verify-timeout) VERIFY_TIMEOUT="$2"; shift 2 ;;
       --dry-run) DRY_RUN=1; shift ;;
       --skip-hash-check) SKIP_HASH_CHECK=1; shift ;;
@@ -228,6 +230,7 @@ main() {
         --wait-idle-timeout "$WAIT_IDLE_TIMEOUT" --verify-timeout "$VERIFY_TIMEOUT")
   [ -n "$BACKUP_SUFFIX" ] && ARGS+=(--backup-suffix "$BACKUP_SUFFIX")
   [ -n "$HEALTH_URL" ] && ARGS+=(--health-url "$HEALTH_URL")
+  [ -n "$CARDS" ] && ARGS+=(--cards "$CARDS")
   [ -n "$CONFIG_PATH" ] && ARGS+=(--config "$CONFIG_PATH")
   [ -n "$RESTART_COMMAND" ] && ARGS+=(--restart-command "$RESTART_COMMAND")
   if [ -n "$RENDER_TARBALL" ]; then

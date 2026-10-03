@@ -157,6 +157,17 @@ arithmetic, or an ordering key among seats that already passed the adequacy gate
 - A stale ETA can still misjudge a node between the read and the dispatch. The 503 and the re-placement
   are the net for that, as they were.
 
+## Amendment (GPU routing P7, 2026-10-03): a seat a lease fences is a place in line, not a dial
+
+A lease this process does not hold that fences every local seat a contract could run on turns the local run away
+at the seat's own pre-check, after the delegator has spent an attempt, a ledger row and an intent record on it.
+The delegator now reads that verdict first (`ForeignFence` over the contract's chain of seats) at every site that
+used to fall back to the local seat, and waits in line instead; this applies only when another node exists to wait
+for and never to `route=local`. A capacity wait that ends with nothing having taken the work no longer ends in a
+bare defer: it names the places the subtask stood in (`place_keeping`: node, what it stood behind, when that is
+expected to clear) and the soonest of them (`retry_after_sec`). The defer's class (`capacity`) and prefix are
+unchanged. The durable token that resumes a place across calls is the media-admission change and is not part of this.
+
 ## Alternatives considered
 
 - **Keep the courtesy sleep and credit it.** Rejected: it still sleeps on a node that just refused while

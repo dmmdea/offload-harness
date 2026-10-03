@@ -428,7 +428,7 @@ none was tested. Two hard gates stand in for the umbrella, and the second is now
 
 **Not in the record change (P2).** The CLI, the allocator, the per-card status and the audit (P3, below); consumers that take
 a device set instead of reading any live lease as a held node (the text gate, the delegator and the placement table: P4,
-below; drain and unload: P5, below; fleet health: P7); owners, terms and takeover (P8 to P12). A consumer that is not device-aware
+below; drain and unload: P5, below; fleet health: P7, since shipped: see "The fleet reads leases per card"); owners, terms and takeover (P8 to P12). A consumer that is not device-aware
 reads any live lease as fencing the whole node, which over-fences and is the safe direction; the one exemption is per lease
 (above).
 
@@ -594,7 +594,7 @@ the green to include the deployed `local-agent` binary and every media repositor
 ### Consumers read a seat's cards, not the node (plan P4)
 
 *Register C-86, question 1 of the operator order: a card-2 job stops fencing text on cards 0 and 1. The Go side only; drain and
-unload are scoped in the next section, and the fleet's own health is P7. Until a host turns card-scoped leases on (plan P6)
+unload are scoped in the next section, and the fleet's own health is P7 (since shipped: see "The fleet reads leases per card"). Until a host turns card-scoped leases on (plan P6)
 the only lease on it is a whole-node one, which fences exactly what it always fenced, with one exception below: a legacy
 lease (one an **older binary** wrote) on a host that has turned the inference on (`gpu_legacy_scope_inference`, off by
 default) and whose cards the evidence rule can name.*
@@ -747,7 +747,7 @@ the rule above is the plan's, built on synthetic fixtures, and the capture of a 
 that enables card-scoped leases on the host (plan P6); until then `gpu_legacy_scope_inference` stays off. The process-tree
 reader was run read-only against a child process the test starts (the Windows path); the Linux path is built and vetted for it
 and not run in this session. (2) The cascade-lane and repack busy gates (`llamaclient.WithRemoteLanes`) still read any live
-lease as busy: they only choose a remote lane, never a fence. (3) Fleet health still publishes a single `lease` per node (plan P7). (4) A presence reader is not armed in the load
+lease as busy: they only choose a remote lane, never a fence. (3) Fleet health publishes every live lease with its cards since plan P7 (see "The fleet reads leases per card"). (4) A presence reader is not armed in the load
 gate, so an inferred scope always keeps the display card.
 
 ### Drain, unload and the render lane clear the leased cards, not the node (plan P5)
@@ -805,7 +805,7 @@ never the holder's own job.
 (only the display card is excluded); the trespass flag inherits that, and does not exclude a card that hosts a resident or busy
 llama-swap seat (the view has no per-seat card map, so it can only soften its wording). A drain or unload whose facts cannot be
 read (the card table, the roster, the lease's epoch) falls back to the whole-node behaviour and **says so on stderr**. The pipeline's own media lease exports no unload list
-until it holds one card per render (P13). Fleet health is still whole-node (P7).
+until it holds one card per render (P13). Fleet health reads the cards since P7 (see "The fleet reads leases per card").
 
 ## Who asked for a lease, and whether they are still there (ADR 0070)
 
@@ -995,6 +995,20 @@ lease like the wrapper does and carries on holding. `--release-at-expiry` (on `g
 holder) restores the old ending; it is refused for the wrapper form, which has no deadline to release at. `--for` stays
 required with `--detach`: it is the term the lease is judged by. A hold that nothing ever releases stays held until it is
 released or taken over, which is the point.
+
+## The fleet reads leases per card (plan P7)
+
+What the lease says about a box used to stop at the box: another node saw one `lease` block, the lowest epoch's, and read the
+whole node as spoken for. Now `/fleet/health` carries `leases[]` (one entry per live lease: its cards as lower-cased GPU UUIDs,
+absent for the whole node; where they came from; its term; `busy`, `overdue`, `exclusive`, `draining`, `orphaned`, `stalled`; one
+verdict word) and each seat's cards as `device_ids`. The delegator fences a node only for a contract whose seats ALL sit on a card a
+fencing lease holds, because the node's placement table falls back to a seat whose cards are free, and the node's own closed
+reading and text-reservation refusal follow the same cards. The singular block stays, as the worst across the live leases, so a
+reader one release behind is never told less than is true; a node that publishes no `leases[]` is read as the whole node. On the
+local box the delegator does not dial a seat that a lease it does not hold fences for the contract (the seat's own fence pre-check
+would turn the run away): it waits in line, and a wait that ends with nothing taken names the places it stood in. A standalone
+deploy still waits for every lease unless the operator names the cards it touches (`node-swap --cards`). The whole account, with
+the wire shapes and the limits, is in [fleet-node.md](fleet-node.md), "Per-card lease truth (GPU routing P7)".
 
 ## Node interop
 
@@ -1376,8 +1390,9 @@ request posted straight to llama-swap by anything outside the harness is outside
   [Card-scoped leases](#card-scoped-leases-record-v2)), and the text gate, the delegator and the placement table read a seat's
   cards (see [Consumers read a seat's cards](#consumers-read-a-seats-cards-not-the-node-plan-p4)); drain, unload and the render
   lane's unload take the leased cards (see [Drain, unload and the render lane](#drain-unload-and-the-render-lane-clear-the-leased-cards-not-the-node-plan-p5));
-  fleet health (P7) is a later change and until then treats any live lease as fencing the whole node (over-fencing, the
-  safe direction). A binary or Node reader that predates the format reads a directory holding only device leases as a free
+  fleet health (P7) publishes every live lease with its cards and a delegator fences a node per contract (see "The fleet
+  reads leases per card"); a node or delegator one release behind reads the one lease block as the whole node (over-fencing,
+  the safe direction). A binary or Node reader that predates the format reads a directory holding only device leases as a free
   card, which is why `gpu_card_scoped_leases` stays off on a host until `gpu doctor --write-audit` is green.
 - **A legacy whole-node lease is scoped only on evidence, only for a record an older binary wrote, only when the host turns
   it on, and the live evidence has not been captured.** The rule (a command line, a tied launch marker, two sampled readings

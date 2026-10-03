@@ -32,6 +32,18 @@ func holdLease(t *testing.T, class gpulease.Class, reason string) (string, *gpul
 	return dir, lease
 }
 
+// runUnderLease marks this test process as running UNDER lease - GPU_LEASE_EPOCH, the way a
+// delegation launched by `gpu reserve -- ...` runs. The lease is still held, so placement reads
+// the local GPU as busy and consults the fleet; but ForeignFence exempts the holder's own child,
+// so the delegator does not treat the local seat as fenced against the run. This is how a test
+// with a fake local runner makes "the GPU is busy, then fall back local" true: a lease held by
+// somebody ELSE fences the seat, a real local run would be turned away at once at the seat's own
+// pre-check (S-26), and the delegator no longer dials it (GPU routing P7).
+func runUnderLease(t *testing.T, lease *gpulease.Lease) {
+	t.Helper()
+	t.Setenv("GPU_LEASE_EPOCH", strconv.FormatUint(lease.Epoch(), 10))
+}
+
 // TestReserved pins the class rule: only a HELD TEXT lease reserves the seat.
 // Media steers placement (LocalBusy) and is arbitrated at the affinity gate;
 // an idle or unresolvable lease reads as not reserved.
@@ -160,10 +172,14 @@ func TestRunAutoReservedLocalWaitsForRelease(t *testing.T) {
 	}
 }
 
-// TestRunAutoMediaLeaseStillRunsLocal pins the deliberate non-change: a MEDIA
-// lease with no eligible remote keeps today's behaviour (local, arbitrated at
-// the affinity gate) — the reservation rule is text-only.
-func TestRunAutoMediaLeaseStillRunsLocal(t *testing.T) {
+// TestRunAutoMediaLeaseThatFencesTheSeatIsAPlaceInLineNotADial: a MEDIA lease with no eligible
+// remote used to run locally, "arbitrated at the affinity gate" (the reservation rule was
+// text-only). Since the seat's own fence pre-check (S-26) that local run is turned away at once,
+// so the dial only wasted an attempt, a ledger row and an intent record. The delegator now reads
+// the same verdict first (GPU routing P7): with another node to wait for, the subtask stands in
+// line and ends as the capacity defer the pre-check would have filed, naming the fence. With the
+// wait off (this suite's default) that is immediate.
+func TestRunAutoMediaLeaseThatFencesTheSeatIsAPlaceInLineNotADial(t *testing.T) {
 	off := &fakeNode{t: t, agentEnabled: false, resident: true, ctxTokens: 32768, nodeID: "node-off"}
 	url := off.server().URL
 	dir, _ := holdLease(t, gpulease.ClassMedia, "render")
@@ -174,11 +190,32 @@ func TestRunAutoMediaLeaseStillRunsLocal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if localCalls.Load() != 1 || sum.Succeeded != 1 {
-		t.Fatalf("local=%d summary=%+v, want the media-lease case to run locally as before", localCalls.Load(), sum)
+	if localCalls.Load() != 0 || sum.Succeeded != 0 || sum.Deferred != 1 {
+		t.Fatalf("local=%d summary=%+v, want nothing dialled onto the fenced seat and one capacity defer", localCalls.Load(), sum)
 	}
-	if !strings.Contains(results[0].PlacementReason, "queued-local beats ineligible-remote") {
-		t.Errorf("placement reason = %q, want the unchanged local-busy wording", results[0].PlacementReason)
+	res := results[0].Result
+	if res.DeferClass != core.DeferClassCapacity || !strings.Contains(res.Reason, "fenced") || !strings.Contains(res.Reason, "media render holds the cards") {
+		t.Errorf("result = %+v, want a capacity defer naming the fence", res)
+	}
+}
+
+// TestRunAutoMediaLeaseWithNoRemoteStillRunsLocal: with no remote configured there is no other
+// node to wait for, so nothing is saved by not dialling: the local run's own pre-check is the
+// fast, honest answer, and the delegator leaves it to it.
+func TestRunAutoMediaLeaseWithNoRemoteStillRunsLocal(t *testing.T) {
+	dir, _ := holdLease(t, gpulease.ClassMedia, "render")
+	cfg := testCfg(t)
+	cfg.GPULockPath = dir
+	var localCalls atomic.Int64
+	results, sum, err := Run(context.Background(), cfg, passingLocal(&localCalls), []core.AgentContract{remoteContract()}, "auto", nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if localCalls.Load() != 1 || sum.Succeeded != 1 {
+		t.Fatalf("local=%d summary=%+v, want the local run when there is no node to wait for", localCalls.Load(), sum)
+	}
+	if !strings.Contains(results[0].PlacementReason, "queued-local beats ineligible-remote") && !strings.Contains(results[0].PlacementReason, "no remote") {
+		t.Errorf("placement reason = %q", results[0].PlacementReason)
 	}
 }
 
@@ -255,11 +292,15 @@ func TestRunLocalRouteIsNotGated(t *testing.T) {
 
 var _ = json.RawMessage(nil) // keep the import set identical to the sibling test files
 
-// TestRunSpreadMediaLeaseDealsAsBefore (review 2026-09-06): a MEDIA lease
-// never entered the spread deal before 0.113.14 and still does not — with two
-// eligible remotes, four subtasks deal local, A, B, local exactly as with no
-// lease at all. Only a TEXT reservation removes the local slot.
-func TestRunSpreadMediaLeaseDealsAsBefore(t *testing.T) {
+// TestRunSpreadMediaLeaseThatFencesTheSeatTakesItOutOfTheDeal (review 2026-09-06, amended by
+// GPU routing P7): a MEDIA lease never entered the spread deal before 0.113.14, because its
+// render was "arbitrated at the affinity gate" - the gate waited for the render and admitted the
+// load. Since the seat's fence pre-check (S-26) that gate turns a run away at once, so a slot
+// dealt onto a fenced seat was a leg spent on nothing. A lease that fences every local seat of
+// a contract's chain now removes the local slot exactly as a text reservation does; with two
+// eligible remotes four subtasks deal A, B, A, B. (A lease on a card the contracts do not need
+// leaves the slot in: TestSpreadKeepsALocalSeatTheLeaseDoesNotFence.)
+func TestRunSpreadMediaLeaseThatFencesTheSeatTakesItOutOfTheDeal(t *testing.T) {
 	compressPolls(t, 10*time.Millisecond, 2*time.Second)
 	nodeA, urlA := eligibleNode(t, "node-a", "zorblax from A")
 	nodeB, urlB := eligibleNode(t, "node-b", "zorblax from B")
@@ -271,7 +312,7 @@ func TestRunSpreadMediaLeaseDealsAsBefore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if sum.Succeeded != 4 || localCalls.Load() != 2 || nodeA.dispatches.Load() != 1 || nodeB.dispatches.Load() != 1 {
-		t.Fatalf("summary=%+v local=%d A=%d B=%d, want 4 succeeded dealt 2/1/1 — a media lease must not change the spread deal", sum, localCalls.Load(), nodeA.dispatches.Load(), nodeB.dispatches.Load())
+	if sum.Succeeded != 4 || localCalls.Load() != 0 || nodeA.dispatches.Load() != 2 || nodeB.dispatches.Load() != 2 {
+		t.Fatalf("summary=%+v local=%d A=%d B=%d, want 4 succeeded dealt 0/2/2 — the fenced seat is out of the deal", sum, localCalls.Load(), nodeA.dispatches.Load(), nodeB.dispatches.Load())
 	}
 }
