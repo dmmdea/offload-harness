@@ -20,9 +20,11 @@ package pipeline
 //   - a POOLED route computes on cards its pool keys name (also ComfyUI order), through the
 //     default instance with every card visible, so its launch is unchanged. It leases the
 //     pool's cards when that is provably safe (see poolMayBeScoped) and otherwise the whole node;
-//   - everything else (run-graph unless the operator declares devices, sdcpp, voice, a host with
-//     card-scoped leases off or no card table) takes the whole-node lease exactly as before,
-//     byte for byte.
+//   - run-graph with ONE declared device runs in that card's own instance; with several, or none,
+//     it holds the whole node (a graph in the default instance sees every card, so a lease on
+//     some of them would not confine it);
+//   - everything else (sdcpp, voice, a host with card-scoped leases off or no card table) takes
+//     the whole-node lease exactly as before, byte for byte.
 //
 // A call that cannot get a card inside its window does not fail with "gpu busy". It leaves a
 // place-keeping token (gpulease/tokens.go) and answers with it, its position and an ETA; the
@@ -281,13 +283,16 @@ func planMedia(need mediaNeed, cards []gpuprobe.Card, tableErr error) (mediaPlan
 			ids = append(ids, c.LeaseID())
 		}
 		sort.Strings(ids)
-		switch {
-		case len(ids) == 1:
+		// One device runs in that card's own instance, pinned by uuid: the graph sees one card and
+		// can touch no other. Several would run in the DEFAULT instance, which sees every card, and
+		// an arbitrary graph may place work on any of them, including a card another call's own
+		// instance holds and the display card; a lease on only some of the cards would not stop
+		// that, so several devices hold the whole node (unlike a pooled route, whose graph the
+		// harness itself builds for its pool's cards).
+		if len(ids) == 1 {
 			return mediaPlan{ids: ids, instance: true}, nil
-		case poolMayBeScoped(len(ids), len(cards)):
-			return mediaPlan{ids: ids}, nil
 		}
-		return whole(fmt.Sprintf("devices %q name several cards of a box with %d: this call holds the whole node", strings.Join(need.Devices, ","), len(cards)))
+		return whole(fmt.Sprintf("devices %q name several cards of a box with %d: the graph runs in the default instance, which sees every card, so a lease on some of them would not keep it off the others: this call holds the whole node", strings.Join(need.Devices, ","), len(cards)))
 	}
 	return whole("")
 }

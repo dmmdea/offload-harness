@@ -222,13 +222,29 @@ func TestRunGraphStaysWholeNodeUnlessDevicesDeclared(t *testing.T) {
 		f.letRunnersGo()
 		f.await(ch)
 	})
-	t.Run("two declared devices: those cards, the default instance", func(t *testing.T) {
+	// Several declared devices run in the DEFAULT instance, which sees every card, and an arbitrary
+	// graph can place work on any of them: a lease on only some would not keep it off the others
+	// (the card another call's own instance holds, the display card). So several devices hold the
+	// whole node; only a single device, run in that card's own pinned instance, is scoped.
+	t.Run("two declared devices: the whole node, because the graph sees every card", func(t *testing.T) {
 		f := newAdmitFixtureWith(t, admitSpec{order: admitOrder})
 		ch := graph(f, "2, 0")
 		probes := f.waitStarted(1)
-		want := leaseIDOf(admitUUIDA) + "," + leaseIDOf(admitUUIDC)
-		if env := probes[0].Env; env["GPU_LEASE_DEVICES"] != want || env["COMFY_CARD_UUID"] != "" {
-			t.Errorf("env = %v, want a lease on %s and the default instance", env, want)
+		if devs := f.leaseDevices(); len(devs) != 1 || len(devs[0]) != 0 {
+			t.Errorf("leases = %v, want ONE whole-node lease", devs)
+		}
+		if env := probes[0].Env; env["GPU_LEASE_DEVICES"] != "" || env["COMFY_CARD_UUID"] != "" {
+			t.Errorf("env = %v, want nothing per-card: a lease on some cards does not confine a graph that sees all of them", env)
+		}
+		f.letRunnersGo()
+		f.await(ch)
+	})
+	t.Run("two declared devices on a four-card box: the whole node as well", func(t *testing.T) {
+		f := newAdmitFixtureWith(t, admitSpec{order: admitOrder, fourCards: true})
+		ch := graph(f, []any{"0", "1"})
+		f.waitStarted(1)
+		if devs := f.leaseDevices(); len(devs) != 1 || len(devs[0]) != 0 {
+			t.Errorf("leases = %v, want ONE whole-node lease", devs)
 		}
 		f.letRunnersGo()
 		f.await(ch)

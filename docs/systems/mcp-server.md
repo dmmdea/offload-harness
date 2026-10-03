@@ -65,8 +65,8 @@ declared window left on the lease in the way: a ceiling), `devices` and `held_by
 request with that `waiter_token` and the call resumes the place it left. The token lives ten minutes after its last
 poll and holds its place against later callers for the first 30 seconds of that; see
 [media-generation.md](media-generation.md), "Per-card media admission". `offload_run_graph` also takes an
-operator-only `devices` (nvidia-smi indices or GPU uuid prefixes): absent, the graph holds the whole node; one device
-runs in that card's own ComfyUI instance. A host that does not lease cards answers `gpu_busy` as it always did, and
+`devices` (for the operator's use; nvidia-smi indices or GPU uuid prefixes): absent or several, the graph holds the whole
+node; one device runs in that card's own ComfyUI instance, which sees no other card. A host that does not lease cards answers `gpu_busy` as it always did, and
 so does any call that did not come through this server (the CLI verbs, the fleet dispatch, the image batch): the
 server marks its requests resumable (`core.Request.Resumable`), and only those leave a place in line.
 

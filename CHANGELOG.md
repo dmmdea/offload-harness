@@ -47,6 +47,14 @@ Versioning: [SemVer](https://semver.org/).
   and is ordered against a drop by an in-process lock so a touch cannot revive a spent place). The few milliseconds
   between a lease wait's waiter unregistering and the queued answer re-leaving the token remain; they cost
   fairness, never exclusivity.
+- **`offload_run_graph` with several `devices` holds the whole node.** The field was documented operator-only and
+  nothing enforced it (the MCP door and the fleet dispatch both feed it for any caller), and several devices ran the
+  graph in the DEFAULT instance, which sees every card, under a lease on only those cards: an arbitrary graph could
+  place work on a card another call's own instance held, or on the display card, the two-jobs-on-one-card case the
+  lease exists to prevent. One device still runs in that card's own instance, pinned by uuid, which sees no other card, so
+  a caller can no longer reach past its lease with this field; several devices, and any a card table cannot
+  resolve, hold the whole node. (Naming the display card stays the explicit word it always was.) The tool text no
+  longer claims an enforcement it does not have.
 - **A refused call that can never resume a place no longer leaves one.** The queued answer was unconditional, so
   the `generate-image` CLI verb, the fleet-node dispatch (the delegator re-places, it never resumes) and the image
   batch each left a token nobody could claim, and a live token holds its cards back from later callers for the 30 s

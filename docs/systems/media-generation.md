@@ -952,8 +952,8 @@ is given:
 | the same with `comfy_cuda_device` set and resolvable | exactly the card the pin names, and no other | a lease on that card | the instance bound to that card |
 | the same with a pin that cannot be resolved (no `gpu_comfy_order`, a comma list, not an index, a position the box does not have) | the whole node, with today's `--cuda-device` | the whole node | the default instance, as before |
 | a pooled image or video route | the cards its pool keys name, when the pool has at least two cards and the box has at most three | a lease on those cards | the default instance, **launch unchanged** (every card visible) |
-| `run-graph` with the operator's `devices` | one device: that card; several: those cards (same rule as a pool) | a lease on them | one device: its instance; several: the default instance |
-| `run-graph` without `devices`, sd.cpp, voice | the whole node | the whole node | the default instance (none for sd.cpp and voice) |
+| `run-graph` with ONE declared device | that card | a lease on it | its instance, pinned by uuid |
+| `run-graph` with several declared devices, or none, sd.cpp, voice | the whole node | the whole node | the default instance (none for sd.cpp and voice) |
 | any call on a host that does not lease cards, or whose card table cannot be read | the whole node | the whole node | exactly as before this change |
 
 **The allocator and the display card.** An unpinned single-card call takes the allocator's card
@@ -975,9 +975,12 @@ directory and one launch marker for the whole box. Two jobs that both use it con
 second job whose launch profile differs is refused (`COMFY-PROFILE-MISMATCH`), and one that asks for no
 profile silently reuses the first one's instance, on the first one's cards. A job that holds only some
 cards must therefore not run in it. Every single-card job gets an instance of its own; the jobs that do
-use the default instance hold the whole node, or (pooled, `run-graph` with several devices) cards that
-every other such job on a box of at most three cards also needs, so two of them cannot run at once. On a
-larger box a pool takes the whole node, because two disjoint pools could.
+use the default instance hold the whole node, or (pooled routes only) cards that every other such job on a
+box of at most three cards also needs, so two of them cannot run at once. On a larger box a pool takes the
+whole node, because two disjoint pools could. A `run-graph` with several declared devices is NOT in that
+class: its graph is the caller's, the default instance sees every card, and a lease on only some of them would
+not keep the graph off the others (a card another call's own instance holds, the display card), so it holds
+the whole node; one declared device runs in that card's own instance, which sees no other card.
 
 **What the runner is given.** `GPU_LEASE_DIR/EPOCH/CLASS` as before, plus `GPU_LEASE_DEVICES` (the cards
 the lease holds, lease ids) for a card lease; for a per-card instance `COMFY_CARD_UUID` (the driver's GPU

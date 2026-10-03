@@ -146,9 +146,10 @@ one: the CLI verbs, the fleet dispatch and the image batch keep `gpu_busy`, beca
 claim would only hold a card back from the next caller for the grace.
 
 What is deliberately not scoped: the **default** ComfyUI instance (port 8188) is one process for the box,
-so a job that uses it holds the whole node, or (a pooled route, `run-graph` with several declared devices)
-cards that every other such job on a box of at most three cards must also hold, so two of them cannot run
-at once; on a larger box they hold the whole node. A pin that cannot be turned into a card (the box declares
+so a job that uses it holds the whole node, or (a pooled route) cards that every other such job on a box
+of at most three cards must also hold, so two of them cannot run at once; on a larger box they hold the whole
+node. A `run-graph` with several declared devices holds the whole node too: its graph is the caller's and the
+default instance sees every card, so a lease on some of them would not confine it. A pin that cannot be turned into a card (the box declares
 no `gpu_comfy_order`) keeps the whole node and today's `--cuda-device`; nothing is guessed from an index.
 The tokens live in their own directory because an older binary prunes any waiter whose process has stopped
 polling; on a host that mixes versions an older binary can take a card ahead of a token holder, which costs
