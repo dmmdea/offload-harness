@@ -15,6 +15,14 @@ Versioning: [SemVer](https://semver.org/).
   and a refusal ends it before anything is touched. The order is resolve, stop the kept instances, warm the seat
   back, release: the instances go before the seat is loaded onto their cards (the documented order; it had been
   warm first). A release that fails after the stop says the instances were already stopped.
+- **A refused call that can never resume a place no longer leaves one.** The queued answer was unconditional, so
+  the `generate-image` CLI verb, the fleet-node dispatch (the delegator re-places, it never resumes) and the image
+  batch each left a token nobody could claim, and a live token holds its cards back from later callers for the 30 s
+  grace: a busy node retried every few seconds by a delegator kept newcomers behind a rolling set of ghosts, and a
+  free card could read as claimed for half a minute. A place is now kept only for a request that came through a door
+  that can hand the token back and take it again (`core.Request.Resumable`, set by the MCP server, never decoded from
+  or encoded to the wire, so a remote payload cannot ask for one); every other caller gets the `gpu busy` defer
+  it always had, and the batch's `IsGPUBusy` refusal is unchanged.
 - **`display_attached` no longer changes what a host with card-scoped leases OFF advertises.** The OR rule
   (`display_active` Enabled or `display_attached` Yes) had been put behind `gpuprobe.DisplayCardUUIDs`, which the load
   figures read too, so on any host whose monitor is plugged in the monitor's card left `work_util_pct`, the
@@ -70,8 +78,8 @@ the text seats on the others. The display card is never auto-assigned while the 
   `err_class: gpu_queued`, `defer_class: capacity`, with a `waiter_token`, `queue_position` and `eta_s` (a
   ceiling); re-sending the request with the token resumes the place with its original arrival time. A call that holds
   the whole node leaves a token too. Every media MCP tool takes `waiter_token` (and `offload_run_graph` an
-  operator-only `devices`). Hosts that do not lease cards keep `gpu_busy`. The `generate-image` CLI verb and the
-  fleet dispatch cannot resume a token yet.
+  operator-only `devices`). Hosts that do not lease cards keep `gpu_busy`. Only MCP calls leave a place (see the
+  review pass above): the CLI verbs, the fleet dispatch and the image batch keep `gpu_busy`.
 - **`gpulease` place-keeping tokens** (`Options.ResumeToken`/`QueuedSince`, `LeaveToken`, `ResumeToken`,
   `Tokens`, `QueuePosition`, `ErrStillQueued`): a token has no process behind it, so its life is its last poll. It
   holds its place for 30 s, is then skipped by every waiter (a whole-node barrier included) so an absent client

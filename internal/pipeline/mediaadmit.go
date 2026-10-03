@@ -84,6 +84,17 @@ type mediaNeed struct {
 	Devices []string
 	// Token is the waiter_token the caller got from an earlier queued answer ("" = a new arrival).
 	Token string
+	// Resumable says the call came through a door that can hand a place in line back and take it
+	// again (core.Request.Resumable). Only then is a place kept for a call that waited its window
+	// with no card; any other gets the plain "gpu busy" and leaves nothing behind, because a
+	// token it can never claim would hold a card back from the next caller for the grace.
+	Resumable bool
+}
+
+// resumableBy marks the need with whether the request's door can resume a place in line.
+func (n mediaNeed) resumableBy(req core.Request) mediaNeed {
+	n.Resumable = req.Resumable
+	return n
 }
 
 // wholeNeed is a call that holds the whole node. token is the waiter_token it resumes, if any.
@@ -421,7 +432,7 @@ func (p *Pipeline) acquireMediaLease(ctx context.Context, reason string, ttl, wa
 	}
 	env, release, err := p.acquireWholeNode(ctx, reason, ttl, wait, need.Token)
 	if err != nil {
-		return mediaGrant{}, p.wholeNodeBusy(err, reason, ttl, start, place)
+		return mediaGrant{}, p.wholeNodeBusy(err, reason, ttl, start, place, need.Resumable)
 	}
 	if place != nil {
 		place.m.DropToken(place.tok.ID) // served: the place is spent (a grant without a wait never consumed it)
@@ -439,10 +450,17 @@ type wholePlace struct {
 // leases cards: the token replaces the refusal there, for a call that holds the whole node as for
 // one that holds a card. A host that cannot lease cards (no flag, or no green reader audit) keeps
 // the refusal byte for byte, and any other error is returned as it is.
-func (p *Pipeline) wholeNodeBusy(err error, reason string, ttl time.Duration, start time.Time, place *wholePlace) error {
+func (p *Pipeline) wholeNodeBusy(err error, reason string, ttl time.Duration, start time.Time, place *wholePlace, resumable bool) error {
 	var busy *errGPUBusy
 	if !errors.As(err, &busy) && !errors.Is(err, gpulease.ErrStillQueued) {
 		return err
+	}
+	if !resumable {
+		// No door to hand a token back through: the refusal it always got.
+		if busy != nil {
+			return err
+		}
+		return &errGPUBusy{detail: err.Error()}
 	}
 	m, merr := p.scopedManager()
 	if merr != nil || !m.CardScoped() {
@@ -453,7 +471,7 @@ func (p *Pipeline) wholeNodeBusy(err error, reason string, ttl time.Duration, st
 		since, tokenID = place.tok.Since(), place.tok.ID
 	}
 	opts := gpulease.Options{Reason: reason, Origin: "pipeline", TTL: ttl, ResumeToken: tokenID}
-	if qerr := p.queuedAnswer(m, nil, since, tokenID, opts, reason, nil); qerr != nil {
+	if qerr := p.queuedAnswer(m, nil, since, tokenID, opts, reason, nil, true); qerr != nil {
 		return qerr
 	}
 	return err
@@ -606,11 +624,11 @@ func (p *Pipeline) acquireCards(ctx context.Context, m *gpulease.Manager, reason
 	// Nothing is free: take a place in line. The in-process slots first (bounded, FIFO among this
 	// process's callers), then the lease queue, FIFO across processes, keeping the arrival time.
 	if !mediaSlots.take(ids, remaining()) {
-		return mediaGrant{}, p.queuedAnswer(m, ids, since, tokenID, optsFor(ids), reason, nil)
+		return mediaGrant{}, p.queuedAnswer(m, ids, since, tokenID, optsFor(ids), reason, nil, need.Resumable)
 	}
 	if remaining() <= 0 {
 		mediaSlots.release(ids)
-		return mediaGrant{}, p.queuedAnswer(m, ids, since, tokenID, optsFor(ids), reason, nil)
+		return mediaGrant{}, p.queuedAnswer(m, ids, since, tokenID, optsFor(ids), reason, nil, need.Resumable)
 	}
 	qo := optsFor(ids)
 	qo.Wait, qo.WaitOut = remaining(), true
@@ -619,7 +637,7 @@ func (p *Pipeline) acquireCards(ctx context.Context, m *gpulease.Manager, reason
 		mediaSlots.release(ids)
 		var held *gpulease.ErrHeld
 		if errors.As(err, &held) || errors.Is(err, gpulease.ErrStillQueued) {
-			return mediaGrant{}, p.queuedAnswer(m, ids, since, tokenID, optsFor(ids), reason, held)
+			return mediaGrant{}, p.queuedAnswer(m, ids, since, tokenID, optsFor(ids), reason, held, need.Resumable)
 		}
 		return mediaGrant{}, err
 	}
@@ -627,8 +645,12 @@ func (p *Pipeline) acquireCards(ctx context.Context, m *gpulease.Manager, reason
 }
 
 // queuedAnswer leaves the place-keeping token for a call that waited its window and still has no
-// card, and builds the answer that carries it.
-func (p *Pipeline) queuedAnswer(m *gpulease.Manager, ids []string, since time.Time, tokenID string, opts gpulease.Options, reason string, held *gpulease.ErrHeld) error {
+// card, and builds the answer that carries it. A call whose door cannot resume a place (resumable
+// false) leaves nothing and gets the plain busy answer.
+func (p *Pipeline) queuedAnswer(m *gpulease.Manager, ids []string, since time.Time, tokenID string, opts gpulease.Options, reason string, held *gpulease.ErrHeld, resumable bool) error {
+	if !resumable {
+		return busyAnswer(ids, held)
+	}
 	tok, err := m.LeaveToken(gpulease.ClassMedia, opts, since)
 	if err != nil {
 		// Without a place to keep, the honest answer is the old one: the card is busy.
@@ -663,6 +685,19 @@ func (p *Pipeline) queuedAnswer(m *gpulease.Manager, ids []string, since time.Ti
 		e.Why = fmt.Sprintf("%s promised to callers ahead of this one", subject)
 	}
 	return e
+}
+
+// busyAnswer is the refusal a call gets when it waited its window with no card and keeps no place:
+// the holder when there is one, else the cards (or the node) it was waiting for.
+func busyAnswer(ids []string, held *gpulease.ErrHeld) error {
+	if held != nil {
+		return &errGPUBusy{info: held.Info}
+	}
+	subject := "the whole node"
+	if len(ids) != 0 {
+		subject = "card(s) " + strings.Join(ids, ", ")
+	}
+	return &errGPUBusy{detail: subject + " are held, or promised to callers ahead of this one, and the wait ended before they freed"}
 }
 
 func intersects(a, b []string) bool {

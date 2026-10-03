@@ -66,7 +66,9 @@ request with that `waiter_token` and the call resumes the place it left. The tok
 poll and holds its place against later callers for the first 30 seconds of that; see
 [media-generation.md](media-generation.md), "Per-card media admission". `offload_run_graph` also takes an
 operator-only `devices` (nvidia-smi indices or GPU uuid prefixes): absent, the graph holds the whole node; one device
-runs in that card's own ComfyUI instance. A host that does not lease cards answers `gpu_busy` as it always did.
+runs in that card's own ComfyUI instance. A host that does not lease cards answers `gpu_busy` as it always did, and
+so does any call that did not come through this server (the CLI verbs, the fleet dispatch, the image batch): the
+server marks its requests resumable (`core.Request.Resumable`), and only those leave a place in line.
 
 **Named media families (ADR 0058).** `offload_generate_image` and `offload_edit_image_generative`
 take a `family` param that selects one of the box's opt-in bindings beside its default one; the

@@ -187,6 +187,16 @@ type Request struct {
 	// because Params feeds the result-cache key, and a job-unique id there would
 	// make every dispatched request miss.
 	FleetJobID string `json:"fleet_job_id,omitempty"`
+	// Resumable says the door that admitted this call can hand a place in line back to its
+	// caller AND take it again: it returns the answer's data (the waiter_token) and accepts
+	// waiter_token on the next call. Only the MCP server sets it. A media call that waited its
+	// window with no card leaves a place-keeping token only for such a door; for the CLI verbs,
+	// the fleet dispatch (the delegator re-places, it never resumes) and the image batch a
+	// token could never be claimed, and would hold a card back from the next caller for the
+	// 30 s grace, so they get the plain "gpu busy" defer. It is never decoded from, or encoded
+	// to, the wire: a remote delegator cannot ask a node to keep a place for it. Like Door it
+	// never routes, gates or selects a tier.
+	Resumable bool `json:"-"`
 }
 
 // Meta is per-call telemetry returned to the caller and recorded in the ledger.

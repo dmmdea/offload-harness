@@ -197,6 +197,10 @@ func (s *Server) configGate(next mcp.MethodHandler) mcp.MethodHandler {
 // zero-value behavior: required-field validation stays with the task itself.
 // runTask runs a request through the pipeline, or the test seam.
 func (s *Server) runTask(ctx context.Context, req core.Request) core.Result {
+	// This door returns a queued media answer's waiter_token to its caller and takes it again on
+	// the next call (withMediaPlace), so a place in line is worth keeping for its callers. No other
+	// door does: the CLI verbs, the fleet dispatch and the image batch leave Resumable false.
+	req.Resumable = true
 	if s.runHook != nil {
 		return s.runHook(ctx, req)
 	}

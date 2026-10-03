@@ -141,7 +141,9 @@ request with the token and resumes the place it left. A token has no process beh
 last poll: it holds its place for 30 s, is then skipped by every waiter (a whole-node barrier included) so
 an absent client never blocks the line, and can be resumed for 10 minutes. A host that does not lease cards
 keeps `gpu_busy` exactly as before. A call that holds the whole node leaves a token too on a host that
-leases cards.
+leases cards. Only a call that came through a door able to send the token back (the MCP server) leaves
+one: the CLI verbs, the fleet dispatch and the image batch keep `gpu_busy`, because a token nobody can
+claim would only hold a card back from the next caller for the grace.
 
 What is deliberately not scoped: the **default** ComfyUI instance (port 8188) is one process for the box,
 so a job that uses it holds the whole node, or (a pooled route, `run-graph` with several declared devices)

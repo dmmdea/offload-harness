@@ -1902,10 +1902,10 @@ func (s *Server) textLeased() (gpulease.Info, bool) {
 // four slots while three of them sit parked — starving the agent lane, which is
 // the lane the cap was written to protect. It would also destroy media's own
 // designed back-pressure: a media job that cannot get a card waits gpu_wait_ms
-// and then answers with a place in line (`gpu_queued` and a waiter_token; the
-// delegator re-places it) on a host that leases cards, or defers `gpu_busy` on
-// one that does not, a bounded and well-tested signal a job held in `accepted`
-// never reaches.
+// and then defers `gpu_busy` (a dispatched job is not a door that can resume a
+// place in line, so it leaves none: core.Request.Resumable is false here and the
+// delegator re-places the job instead), a bounded and well-tested signal a job
+// held in `accepted` never reaches.
 //
 // DEFAULT IS CAPPED, deliberately. An unrecognized (future) task type is
 // assumed to contend for the text endpoint, because of the two ways to be

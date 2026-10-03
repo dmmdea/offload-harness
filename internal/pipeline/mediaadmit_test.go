@@ -224,7 +224,8 @@ func (f *admitFixture) image(extra map[string]any) <-chan core.Result {
 	}
 	ch := make(chan core.Result, 1)
 	go func() {
-		ch <- f.p.Run(context.Background(), core.Request{Task: core.TaskGenerateImage, Input: "a calm ocean at dawn", Params: params})
+		// Resumable: this stands in for an MCP door, the only kind that can hand a token back.
+		ch <- f.p.Run(context.Background(), core.Request{Task: core.TaskGenerateImage, Input: "a calm ocean at dawn", Params: params, Resumable: true})
 	}()
 	return ch
 }
@@ -272,7 +273,9 @@ func (f *admitFixture) letRunnersGo() {
 func (f *admitFixture) start(task core.TaskType, input string, params map[string]any) <-chan core.Result {
 	f.t.Helper()
 	ch := make(chan core.Result, 1)
-	go func() { ch <- f.p.Run(context.Background(), core.Request{Task: task, Input: input, Params: params}) }()
+	go func() {
+		ch <- f.p.Run(context.Background(), core.Request{Task: task, Input: input, Params: params, Resumable: true})
+	}()
 	return ch
 }
 

@@ -1005,8 +1005,14 @@ the line. Tokens are in `<state>/gpu/tokens`, not among the waiters (an older bi
 whose process stopped polling); a binary that predates them does not honour them, so on a host that mixes
 versions it can take a card ahead of a token holder, which costs the holder its place and never
 exclusivity. A call that holds the whole node on such a host leaves the same kind of token. A host that
-does not lease cards keeps the `gpu busy` answer byte for byte, and the `generate-image` CLI verb and the
-fleet-node dispatch cannot resume a token yet (the CLI prints the refusal; the delegator re-places).
+does not lease cards keeps the `gpu busy` answer byte for byte.
+
+**Only a door that can resume leaves a place.** A token is claimed by sending it back, which only an MCP tool
+can do (`core.Request.Resumable`, set by the MCP server and by nothing that arrives over the wire). The
+`generate-image` CLI verbs, the fleet-node dispatch (the delegator re-places a refused subtask, it never resumes
+one) and the image batch get the plain `gpu busy` defer and leave nothing behind: a token nobody can claim would
+hold its cards back from every later caller for the 30-second grace, and a node a delegator retries every few
+seconds would keep newcomers behind a rolling set of them.
 
 **Who stops the instance.** The grant's release stops the ComfyUI instances kept under the lease
 (`internal/comfyinst`) before it releases the lease, so the next holder never finds one on its card. A

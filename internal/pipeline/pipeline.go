@@ -1536,7 +1536,7 @@ func (p *Pipeline) runGenerateImage(ctx context.Context, req core.Request, meta 
 	// Passive fleet footprint: key this render by the machine's image binding
 	// (family + the O1 bf16 quant) so measured peaks accumulate during normal use.
 	imgFamily, imgQuant := imageFootprintKey(cfg)
-	grant, lerr := p.acquireMediaLease(ctx, "image-gen", timeout, p.gpuWait(), imageNeed(cfg, paramStr(req.Params, "waiter_token")))
+	grant, lerr := p.acquireMediaLease(ctx, "image-gen", timeout, p.gpuWait(), imageNeed(cfg, paramStr(req.Params, "waiter_token")).resumableBy(req))
 	if lerr != nil {
 		return p.deferForLease(lerr, req.Task, meta, len(req.Input), start)
 	}
@@ -1681,7 +1681,7 @@ func (p *Pipeline) runGenerateImageSdcpp(ctx context.Context, req core.Request, 
 	}
 	imgFamily, imgQuant := imageFootprintKey(cfg)
 	// sd.cpp has no ComfyUI instance to bind to a card: the whole node, as always.
-	grant, lerr := p.acquireMediaLease(ctx, "image-gen (sdcpp)", timeout, p.gpuWait(), wholeNeed(paramStr(req.Params, "waiter_token")))
+	grant, lerr := p.acquireMediaLease(ctx, "image-gen (sdcpp)", timeout, p.gpuWait(), wholeNeed(paramStr(req.Params, "waiter_token")).resumableBy(req))
 	if lerr != nil {
 		return p.deferForLease(lerr, req.Task, meta, len(req.Input), start)
 	}
@@ -1766,7 +1766,7 @@ func (p *Pipeline) runInpaintImage(ctx context.Context, req core.Request, meta c
 		CFG: p.cfg.InpaintCFG, Sampler: p.cfg.InpaintSampler, Scheduler: p.cfg.InpaintScheduler,
 	}
 	timeout := time.Duration(p.cfg.InpaintTimeoutSec) * time.Second
-	grant, lerr := p.acquireMediaLease(ctx, "inpaint", timeout, p.gpuWait(), singleCardNeed(p.cfg, paramStr(req.Params, "waiter_token")))
+	grant, lerr := p.acquireMediaLease(ctx, "inpaint", timeout, p.gpuWait(), singleCardNeed(p.cfg, paramStr(req.Params, "waiter_token")).resumableBy(req))
 	if lerr != nil {
 		return p.deferForLease(lerr, req.Task, meta, len(req.Input), start)
 	}
@@ -1865,7 +1865,7 @@ func (p *Pipeline) runUpscaleImage(ctx context.Context, req core.Request, meta c
 		out = filepath.Join(p.cfg.MediaDir, "upscale-"+sha256hex(image + tasks.StableParamsKey(req.Params))[:8]+".png")
 	}
 	timeout := time.Duration(p.cfg.UpscaleTimeoutSec) * time.Second
-	grant, lerr := p.acquireMediaLease(ctx, "upscale", timeout, p.gpuWait(), singleCardNeed(p.cfg, paramStr(req.Params, "waiter_token")))
+	grant, lerr := p.acquireMediaLease(ctx, "upscale", timeout, p.gpuWait(), singleCardNeed(p.cfg, paramStr(req.Params, "waiter_token")).resumableBy(req))
 	if lerr != nil {
 		return p.deferForLease(lerr, req.Task, meta, len(req.Input), start)
 	}
@@ -2051,7 +2051,7 @@ func (p *Pipeline) runEditImageGenerative(ctx context.Context, req core.Request,
 		Launch: comfyLaunch(cfg, true),
 	}
 	timeout := time.Duration(cfg.GenEditTimeoutSec) * time.Second
-	grant, lerr := p.acquireMediaLease(ctx, "edit", timeout, p.gpuWait(), singleCardNeed(cfg, paramStr(req.Params, "waiter_token")))
+	grant, lerr := p.acquireMediaLease(ctx, "edit", timeout, p.gpuWait(), singleCardNeed(cfg, paramStr(req.Params, "waiter_token")).resumableBy(req))
 	if lerr != nil {
 		return p.deferForLease(lerr, req.Task, meta, len(req.Input), start)
 	}
@@ -2461,7 +2461,7 @@ func (p *Pipeline) runRunGraph(ctx context.Context, req core.Request, meta core.
 	// fleet dispatch path threads it) else the generic comfy-graph bucket.
 	// run-graph holds the whole node unless the operator DECLARES devices: the caller's graph owns
 	// its placement, so nothing here can know which cards it will use.
-	grant, lerr := p.acquireMediaLease(ctx, "run-graph", timeout, p.gpuWait(), declaredNeed(declaredDevices(req.Params), paramStr(req.Params, "waiter_token")))
+	grant, lerr := p.acquireMediaLease(ctx, "run-graph", timeout, p.gpuWait(), declaredNeed(declaredDevices(req.Params), paramStr(req.Params, "waiter_token")).resumableBy(req))
 	if lerr != nil {
 		return p.deferForLease(lerr, req.Task, meta, len(req.Input), start)
 	}
@@ -2887,7 +2887,7 @@ func (p *Pipeline) runGenerateVideo(ctx context.Context, req core.Request, meta 
 	}
 
 	timeout := time.Duration(p.cfg.VideoGenTimeoutSec) * time.Second
-	grant, lerr := p.acquireMediaLease(ctx, "video-gen", timeout, p.gpuWait(), videoNeed(p.cfg, paramStr(req.Params, "waiter_token")))
+	grant, lerr := p.acquireMediaLease(ctx, "video-gen", timeout, p.gpuWait(), videoNeed(p.cfg, paramStr(req.Params, "waiter_token")).resumableBy(req))
 	if lerr != nil {
 		return p.deferForLease(lerr, req.Task, meta, len(req.Input), start)
 	}
@@ -3026,7 +3026,7 @@ func (p *Pipeline) runAnimateCharacter(ctx context.Context, req core.Request, me
 	}
 
 	timeout := time.Duration(p.cfg.AnimateGenTimeoutSec) * time.Second
-	grant, lerr := p.acquireMediaLease(ctx, "animate", timeout, p.gpuWait(), singleCardNeed(p.cfg, paramStr(req.Params, "waiter_token")))
+	grant, lerr := p.acquireMediaLease(ctx, "animate", timeout, p.gpuWait(), singleCardNeed(p.cfg, paramStr(req.Params, "waiter_token")).resumableBy(req))
 	if lerr != nil {
 		return p.deferForLease(lerr, req.Task, meta, len(req.Input), start)
 	}
@@ -3186,9 +3186,9 @@ func (p *Pipeline) runGenerateAudio(ctx context.Context, req core.Request, meta 
 	timeout := time.Duration(p.cfg.AudioGenTimeoutSec) * time.Second
 	// voice (Chatterbox TTS) has no ComfyUI instance to bind to a card: the whole node. music drives
 	// ComfyUI on a single card.
-	need := wholeNeed(paramStr(req.Params, "waiter_token"))
+	need := wholeNeed(paramStr(req.Params, "waiter_token")).resumableBy(req)
 	if kind == "music" {
-		need = singleCardNeed(p.cfg, paramStr(req.Params, "waiter_token"))
+		need = singleCardNeed(p.cfg, paramStr(req.Params, "waiter_token")).resumableBy(req)
 	}
 	grant, lerr := p.acquireMediaLease(ctx, "audio-gen ("+kind+")", timeout, p.gpuWait(), need)
 	if lerr != nil {
