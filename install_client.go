@@ -74,11 +74,18 @@ func runInstallClient(args []string) error {
 	if err := os.WriteFile(path, append(b, '\n'), 0o600); err != nil {
 		return err
 	}
-	// The file must load as a config the harness accepts; a refusal (a remote that is not a usable
-	// URL, say) is reported and the file removed rather than left half-valid.
-	if _, err := config.Load(path); err != nil {
+	// The file must load as a config the harness accepts, and its remotes must be fleet node bases: on
+	// a client they are the only thing it can reach, so what doctor would only warn about (a remote off
+	// the fleet port, a loopback base, a /v1 suffix) is a client that can do nothing. Either refusal is
+	// reported and the file, which holds the token, removed rather than left half-valid.
+	cfg, err := config.Load(path)
+	if err != nil {
 		_ = os.Remove(path)
 		return fmt.Errorf("install client: the rendered config does not load: %w", err)
+	}
+	if warns := config.EndpointWarnings(cfg); len(warns) > 0 {
+		_ = os.Remove(path)
+		return fmt.Errorf("install client: the remotes are not fleet node bases: %s", strings.Join(warns, "; "))
 	}
 	unbound := []string{}
 	for k, v := range m {

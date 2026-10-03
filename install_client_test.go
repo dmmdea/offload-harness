@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
@@ -113,6 +114,40 @@ func TestInstallClientRefusesBadInputAndKeepsAnExistingConfig(t *testing.T) {
 	}
 	if err := runInstallClient([]string{"--remotes", "http://render-a:18811", "--token-file", empty}); err == nil {
 		t.Error("no home accepted")
+	}
+}
+
+func TestInstallClientNeverPrintsTheTokenInJSON(t *testing.T) {
+	out, err := installClientInto(t, t.TempDir(), "--json")
+	if err != nil {
+		t.Fatalf("install client --json: %v", err)
+	}
+	if strings.Contains(out, "sekrit") {
+		t.Fatalf("--json printed the token: %s", out)
+	}
+	var res map[string]any
+	if err := json.Unmarshal([]byte(out), &res); err != nil || res["ok"] != true {
+		t.Fatalf("--json must print one JSON result with ok true: %v: %s", err, out)
+	}
+}
+
+func TestInstallClientRefusesRemotesThatAreNotFleetNodes(t *testing.T) {
+	for remote, want := range map[string]string{
+		// The seat port instead of the fleet node port is the operator's likely slip.
+		"http://render-a:11436":    "fleet node port",
+		"http://127.0.0.1:18811":   "loopback base",
+		"http://render-a:18811/v1": "/v1 suffix",
+		"http://render-a:9":        "does not load", // the discard port: the config's own validation refuses it
+	} {
+		home := t.TempDir()
+		_, err := installClientInto(t, home, "--remotes", remote)
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%s: want a refusal naming %q, got %v", remote, want, err)
+		}
+		// No half-valid file holding the token may stay behind.
+		if _, serr := os.Stat(filepath.Join(home, "etc", "config.json")); !os.IsNotExist(serr) {
+			t.Errorf("%s: the refused config must be removed: %v", remote, serr)
+		}
 	}
 }
 
