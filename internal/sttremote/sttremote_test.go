@@ -114,6 +114,7 @@ type fakeNode struct {
 	polls        int
 	mediaReqs    []string
 	mediaAuth    []string
+	jobAuth      []string // the Authorization header of every job poll
 	srv          *httptest.Server
 }
 
@@ -156,6 +157,7 @@ func newFakeNode(t *testing.T, node string, tasks []string, res core.Result) *fa
 		f.mu.Lock()
 		f.polls++
 		first := f.polls == 1
+		f.jobAuth = append(f.jobAuth, r.Header.Get("Authorization"))
 		f.mu.Unlock()
 		if f.jobStatus != 0 {
 			http.Error(w, "job poll refused for the test", f.jobStatus)
@@ -765,6 +767,48 @@ func TestRemoteWaitEndsOnTheDeadlineAndOnAnEvictedJob(t *testing.T) {
 	got = Run(context.Background(), askerCfg(t, flaky, fakeFFmpeg(t, false)), &localRunner{}, sttReq(srcAudio(t), nil), "remote")
 	if !got.Deferred || !strings.Contains(got.Reason, "consecutive poll failures") {
 		t.Fatalf("result = %+v, want the poll-failure cap named", got)
+	}
+}
+
+// A real node token-gates the job poll (a stt-upload job's result is masked without the bearer), so
+// every poll of the job must carry it: an asker that sent the dispatch with the token and polled
+// without would hang or defer in production. The fake node records each poll's header.
+func TestRemoteJobPollsCarryTheBearer(t *testing.T) {
+	setBusy(t, false)
+	node := newFakeNode(t, "node-poll", sttTasks, okResult(sampleSegments, false))
+	node.runningFirst = true // at least two polls: the running answer and the done one
+	got := Run(context.Background(), askerCfg(t, node, fakeFFmpeg(t, false)), &localRunner{}, sttReq(srcAudio(t), nil), "remote")
+	if got.Deferred || !got.OK {
+		t.Fatalf("result = %+v, want a served job", got)
+	}
+	node.mu.Lock()
+	defer node.mu.Unlock()
+	if len(node.jobAuth) < 2 {
+		t.Fatalf("job polls = %v, want at least two", node.jobAuth)
+	}
+	for i, a := range node.jobAuth {
+		if a != "Bearer tok" {
+			t.Errorf("poll %d carried Authorization %q, want the bearer", i+1, a)
+		}
+	}
+}
+
+// Every request this lane makes rides sttremote's OWN client, whose transport is the dial gate. The
+// test below only proves pickNode's probe is guarded (delegate's client); this one drives dispatch,
+// the job poll and the segment fetch against a public literal, so a bare client in this package
+// cannot pass. 192.0.2.x is TEST-NET-1: unroutable, so a regression fails slowly and differently.
+func TestOwnClientRefusesAnOffTailnetBaseOnEveryRequest(t *testing.T) {
+	const base = "http://192.0.2.10:9"
+	cfg := config.Default()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	_, derr := dispatch(ctx, cfg, base, "node-x", sttReq("a.wav", nil), "ogg", []byte("OggS"), false, core.NopAttribution{})
+	_, perr := getJSON[jobWire](ctx, cfg, base+"/fleet/jobs/stt-1")
+	_, ferr := fetchSegments(ctx, cfg, base, "a.segments.json")
+	for name, err := range map[string]error{"dispatch": derr, "job poll": perr, "segment fetch": ferr} {
+		if err == nil || !strings.Contains(err.Error(), "tailnet guard") {
+			t.Errorf("%s to a public literal: err = %v, want the tailnet dial gate's refusal", name, err)
+		}
 	}
 }
 

@@ -1164,7 +1164,11 @@ Unknown fields, bad base64, an empty file and a file over the cap are `400`s tha
 path on the caller's disk**. The body cap is `STTUploadBodyCap`: the node's `fleet_stt_upload_max_mb` (decoded MiB,
 default 48, which is 64 MiB of base64 on the wire plus 64 KiB of slack) in base64. The bearer is checked **before the body
 is read**, and a caller that passed it gets a 10-minute read and write window (the blanket 30 s would cut 64 MiB on an
-ordinary link). Everything after the body read is the shared `admit` path.
+ordinary link). The body is read before the admission gates (a known job id must still re-ack, so the id is read
+first), so at most two uploads are in flight (`sttUploadInFlightMax`): a third waits for a slot up to 30 s, then gets a
+re-placeable `503` with `Retry-After`. The audio is parsed in place and decoded once (no string or second buffer of the
+base64), so the peak per upload is the body plus the decoded bytes. Everything after the body read is the shared `admit`
+path.
 
 The node writes the bytes to a private file (mode 0600) under `<media_dir>/.stt-upload/`, runs the pipeline's transcribe
 over it with `Door = fleet`, the fleet job id and the asker (the `X-Offload-Asker` header) as the requester, and removes
@@ -1173,7 +1177,12 @@ the file when the job ends, on every refusal and on a drop; fleet-serve sweeps l
 directory is never listed or served. The done job's `data` is the node's **full `core.Result`**, defers included
 (`defer_class`, `meta.err_class`): a defer is a `done` job saying `deferred: true`, never an `error` job. The node's own
 outputs (`.srt`, `.txt`, `.segments.json`) stay in `media_dir` and are fetchable by bare name; the asker fetches the
-`.segments.json` when the inline segment list was truncated (`stt_max_inline_segments`).
+`.segments.json` when the inline segment list was truncated (`stt_max_inline_segments`). **Retention and read access:** those
+outputs stay in `media_dir` (mode 0644, no pruning, as for every transcription on the node) and `GET /fleet/media` is
+unauthenticated, protected only by the stem (`stt-` plus the random part of an `os.CreateTemp` name, a 32-bit number, plus 8 hex of a
+content hash), which is hard to stumble on but not a secret. The
+upload and the job poll are token-gated; the transcript file is readable by name, without the bearer, by any peer that
+can reach the node.
 
 **Advertisement.** `stt-upload` is in `supported_task_types`, with the additive, omitempty health fields `stt_hq` (the
 node has an hq model; `false` is published, so an asker can tell it from a node that predates the door) and
@@ -1191,7 +1200,8 @@ keeps working against a tokenless node and needs the bearer against one that has
 inside the run closure. A job over the cap waits its turn in arrival order, its PAIR card still queued, and never fails
 (before the cap, a burst failed `whisper-server 500 … matrix: model unloaded`); a poller sees such a job as `running`. A
 waiter's context ending (shutdown) takes it out of the line. While jobs wait, `sttclient.Queued` keeps the model loaded
-for them, so a burst pays one cold start. `stt` and `stt-upload` stay outside `fleet_max_concurrent_jobs`.
+for them, so a burst pays one cold start. `stt` and `stt-upload` stay outside `fleet_max_concurrent_jobs` (an upload
+parked at the stt gate must not hold a text execution slot while doing no work; `concurrencyCapped` lists both).
 
 ### Placement (asker side)
 

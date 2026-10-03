@@ -28,7 +28,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"mime"
 	"net/http"
@@ -57,10 +56,93 @@ const STTUploadPath = "/fleet/stt"
 // file); language and hq mirror offload_transcribe's parameters.
 type STTUploadPayload struct {
 	JobID    string `json:"job_id"`
-	AudioB64 string `json:"audio_b64"`
+	AudioB64 sttB64 `json:"audio_b64"`
 	AudioExt string `json:"audio_ext,omitempty"`
 	Language string `json:"language,omitempty"`
 	HQ       bool   `json:"hq,omitempty"`
+}
+
+// sttB64 is the audio_b64 field decoded WITHOUT a copy: the body of an upload is up to 85 MiB of base64,
+// and an ordinary string field would unquote it into a second buffer on every decode. The slice
+// aliases the JSON the caller handed to Unmarshal, which the handler owns and never mutates for the
+// life of the request (the documented hazard of keeping UnmarshalJSON's argument does not arise).
+// A value carrying a JSON escape (an encoder that writes "\/") takes the ordinary copying path.
+type sttB64 []byte
+
+func (f *sttB64) UnmarshalJSON(b []byte) error {
+	if string(b) == "null" {
+		*f = nil
+		return nil
+	}
+	if len(b) < 2 || b[0] != '"' {
+		return errors.New("audio_b64 must be a string")
+	}
+	inner := b[1 : len(b)-1]
+	if bytes.IndexByte(inner, byte(0x5c)) >= 0 { // a backslash
+		var str string
+		if err := json.Unmarshal(b, &str); err != nil {
+			return err
+		}
+		*f = sttB64(str)
+		return nil
+	}
+	*f = sttB64(inner)
+	return nil
+}
+
+// sttSkip discards a JSON value without keeping it: parseSTTUpload uses it to list a body's keys.
+type sttSkip struct{}
+
+func (*sttSkip) UnmarshalJSON([]byte) error { return nil }
+
+var sttUploadKeys = map[string]bool{"job_id": true, "audio_b64": true, "audio_ext": true, "language": true, "hq": true}
+
+// parseSTTUpload is the door's strict decode (unknown fields refused, as on every fleet door) that
+// never copies the audio: two passes over the same bytes, one to list the keys and one into the
+// payload, whose audio field aliases body. The handler calls it to learn the job id and again, at
+// admission, through buildSTTUpload.
+func parseSTTUpload(body []byte) (STTUploadPayload, error) {
+	var keys map[string]sttSkip
+	if err := json.Unmarshal(body, &keys); err != nil {
+		return STTUploadPayload{}, err
+	}
+	for k := range keys {
+		if !sttUploadKeys[k] {
+			return STTUploadPayload{}, fmt.Errorf("unknown field %q", k)
+		}
+	}
+	var p STTUploadPayload
+	if err := json.Unmarshal(body, &p); err != nil {
+		return STTUploadPayload{}, err
+	}
+	return p, nil
+}
+
+// sttUploadInFlightMax bounds the uploads one node holds in memory at once. The body is read and
+// decoded BEFORE the admission gates (a known job id must still re-ack, so the id has to be read
+// first), so without a bound N concurrent uploads hold N times the peak. A caller over the bound
+// waits for a slot (a waiter holds a goroutine, not a body), so a burst is served in turn like the
+// jobs behind it; one that waits longer than sttUploadSlotWait gets a re-placeable 503.
+const sttUploadInFlightMax = 2
+
+// sttUploadSlotWait is a var only so a test can shorten it.
+var sttUploadSlotWait = 30 * time.Second
+
+// takeSTTUploadSlot waits for an upload slot, or answers the 503 and reports false. The caller
+// releases the slot by receiving from s.sttUploadSlots.
+func (s *Server) takeSTTUploadSlot(w http.ResponseWriter, r *http.Request) bool {
+	wait := time.NewTimer(sttUploadSlotWait)
+	defer wait.Stop()
+	select {
+	case s.sttUploadSlots <- struct{}{}:
+		return true
+	case <-r.Context().Done():
+		return false // the caller left: nobody is listening for an answer
+	case <-wait.C:
+		w.Header().Set("Retry-After", "5")
+		writeError(w, http.StatusServiceUnavailable, fmt.Sprintf("node busy receiving stt uploads (%d in flight for over %s): retry shortly or place elsewhere", sttUploadInFlightMax, sttUploadSlotWait))
+		return false
+	}
 }
 
 // sttUploadBodySlack is the envelope room on top of the base64-inflated audio cap: the other fields
@@ -109,6 +191,12 @@ func (s *Server) handleSTTUpload(w http.ResponseWriter, r *http.Request) {
 	if !s.authorizeGated(w, r, STTUploadTask) {
 		return
 	}
+	// A caller that passed the bearer check holds one of the node's few upload slots from before the
+	// first body byte until the job is admitted (or refused): see sttUploadInFlightMax.
+	if !s.takeSTTUploadSlot(w, r) {
+		return
+	}
+	defer func() { <-s.sttUploadSlots }()
 	rc := http.NewResponseController(w)
 	_ = rc.SetReadDeadline(time.Now().Add(sttUploadWindow))
 	_ = rc.SetWriteDeadline(time.Now().Add(sttUploadWindow))
@@ -120,7 +208,13 @@ func (s *Server) handleSTTUpload(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	body, err := io.ReadAll(r.Body)
+	// One buffer sized from Content-Length: io.ReadAll would grow by doubling and peak near twice the body.
+	var buf bytes.Buffer
+	if cl := r.ContentLength; cl > 0 && cl <= limit {
+		buf.Grow(int(cl))
+	}
+	_, err := buf.ReadFrom(r.Body)
+	body := buf.Bytes()
 	if err != nil {
 		var maxErr *http.MaxBytesError
 		if errors.As(err, &maxErr) {
@@ -130,10 +224,8 @@ func (s *Server) handleSTTUpload(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "reading stt body: "+err.Error())
 		return
 	}
-	dec := json.NewDecoder(bytes.NewReader(body))
-	dec.DisallowUnknownFields()
-	var p STTUploadPayload
-	if err := dec.Decode(&p); err != nil {
+	p, err := parseSTTUpload(body)
+	if err != nil {
 		writeError(w, http.StatusBadRequest, "malformed stt body: "+err.Error())
 		return
 	}
@@ -147,13 +239,11 @@ func (s *Server) handleSTTUpload(w http.ResponseWriter, r *http.Request) {
 // every refusal or drop before that.
 func buildSTTUpload(cfg config.Config, payload json.RawMessage) (core.Request, func(), error) {
 	noop := func() {}
-	var p STTUploadPayload
-	dec := json.NewDecoder(bytes.NewReader(payload))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&p); err != nil {
+	p, err := parseSTTUpload(payload)
+	if err != nil {
 		return core.Request{}, noop, fmt.Errorf("stt: payload: %w", err)
 	}
-	if strings.TrimSpace(p.AudioB64) == "" {
+	if len(bytes.TrimSpace(p.AudioB64)) == 0 {
 		return core.Request{}, noop, errors.New("stt: audio_b64 required (the audio file's bytes, base64: nothing here reads a path on the caller's disk)")
 	}
 	ext := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(p.AudioExt)), ".")
@@ -174,10 +264,12 @@ func buildSTTUpload(cfg config.Config, payload json.RawMessage) (core.Request, f
 	if est := int64(len(p.AudioB64)) * 3 / 4; est > limit+3 {
 		return core.Request{}, noop, fmt.Errorf("stt: the audio is about %d bytes, cap %d (fleet_stt_upload_max_mb on this node)", est, limit)
 	}
-	raw, err := base64.StdEncoding.DecodeString(p.AudioB64)
+	raw := make([]byte, base64.StdEncoding.DecodedLen(len(p.AudioB64)))
+	n, err := base64.StdEncoding.Decode(raw, p.AudioB64)
 	if err != nil {
 		return core.Request{}, noop, fmt.Errorf("stt: audio_b64 is not valid base64: %w", err)
 	}
+	raw = raw[:n]
 	if len(raw) == 0 {
 		return core.Request{}, noop, errors.New("stt: audio_b64 decodes to no bytes")
 	}

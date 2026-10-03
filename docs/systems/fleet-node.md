@@ -349,7 +349,9 @@ implications.
     (decoded MiB, default 48), the bytes live in a private file under `<media_dir>/.stt-upload/` removed when the job
     ends (and swept at startup), and the done job's data is the node's FULL `core.Result`. The legacy path-taking `stt`
     joins the bearer rule when the node has a `fleet_auth_token` (a node with none is unchanged), and both stt lanes,
-    pushed and pulled, share one FIFO cap, `fleet_stt_max_concurrent` (default 1): a job over it waits and never fails.
+    pushed and pulled, share one FIFO cap, `fleet_stt_max_concurrent` (default 1): a job over it waits and never fails,
+    and neither lane counts against `fleet_max_concurrent_jobs`. At most two uploads are in flight (a third waits up to
+    30 s, then a re-placeable `503`). The transcript outputs stay in `media_dir` and read by name without the bearer.
     `GET /fleet/media` refuses a dot name. Details: [FLEET-NODE.md](../FLEET-NODE.md#the-stt-upload-door-post-fleetstt),
     [ADR 0072](../architecture/decisions/0072-a-fleet-node-transcribes-audio-its-caller-uploads-so-a-held-card-is-a-place-in-line.md).
 

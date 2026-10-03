@@ -228,6 +228,8 @@ type Server struct {
 	// sttGate is the node's stt concurrency cap (fleet_stt_max_concurrent), shared by the legacy
 	// path-taking lane and the upload door, pushed and pulled jobs alike (enterSTT).
 	sttGate *sttGate
+	// sttUploadSlots bounds the stt uploads in flight on this node (sttUploadInFlightMax).
+	sttUploadSlots chan struct{}
 	// chatLane is ChatLaneAdmissible over the RESOLVED listener (C-41b) — the
 	// same one-predicate discipline as agentLane and visionLane: health
 	// publishes `chat_lane` exactly when POST /fleet/chat will admit, because
@@ -471,6 +473,7 @@ func New(runner Runner, jobs *Jobs, opts Options) *Server {
 		textLane:           TextLaneAdmissible(opts.Cfg, opts.LoopbackListener),
 		sttUploadLane:      STTUploadAdmissible(opts.Cfg, opts.LoopbackListener),
 		sttGate:            newSTTGate(opts.Cfg.EffectiveSTTMaxConcurrent()),
+		sttUploadSlots:     make(chan struct{}, sttUploadInFlightMax),
 		chatLane:           ChatLaneAdmissible(opts.Cfg, opts.LoopbackListener),
 		rosterServes:       swapRosterServes,
 		rosterServedModels: swapRosterServedModels,
@@ -1927,8 +1930,10 @@ func (s *Server) textLeased() (gpulease.Info, bool) {
 //     in-process mediaSlot (capacity ONE) and then the machine-wide gpulease
 //     ClassMedia. They are already serialized far harder than this cap would
 //     serialize them.
-//   - stt runs against whisper-server, a different process with a different
-//     endpoint. It never touches llama-swap.
+//   - stt and stt-upload run against whisper-server, a different process with a
+//     different endpoint. They never touch llama-swap, and they wait behind their own
+//     cap (fleet_stt_max_concurrent, sttGate): capped here too, an upload parked at
+//     that gate would hold a text execution slot while doing no work.
 //
 // Capping those would be both redundant and actively harmful. A media job
 // blocked inside takeMediaSlot holds a fleet execution slot while doing NO
@@ -1951,7 +1956,7 @@ func (s *Server) concurrencyCapped(taskType string) bool {
 	// touching the shared text endpoint the cap protects. Capping it made it
 	// hold a fleet execution slot while parked in the capacity-1 media slot —
 	// verbatim the failure the rule above says the exemption exists to prevent.
-	case "image-gen", "video-gen", "animate", "audio-gen", "run-graph", "stt":
+	case "image-gen", "video-gen", "animate", "audio-gen", "run-graph", "stt", STTUploadTask:
 		return false
 	// accel (0.115.0) drives a loopback accelerator sidecar — Coral or RKNPU;
 	// the Hailo-8L is local-only and never served here (register E-08) — and never

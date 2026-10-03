@@ -38,11 +38,17 @@ card per remote call on the serving node, one asker ledger row; `pair-workloads.
    FULL `core.Result`, so a defer is a `done` job whose data says `deferred: true` with its `defer_class` and `err_class`,
    as on the vision lane. The file is removed when the job ends and on every refusal or drop, and fleet-serve sweeps
    orphans at startup. The node's `.srt`, `.txt` and `.segments.json` stay fetchable by bare name through
-   `GET /fleet/media/{name}`, as for every transcription.
+   `GET /fleet/media/{name}`, as for every transcription. Those outputs persist in `media_dir` (this change adds no
+   retention) and `GET /fleet/media` is deliberately unauthenticated, protected only by the stem (`stt-` plus the random part of
+   an `os.CreateTemp` name, a 32-bit number, plus 8 hex of a content hash), which is hard to stumble on but not a secret: a peer that can reach the node and learns the name can read the
+   transcript of a gated upload without the bearer. The upload and the job poll are gated; the transcript file is not.
 3. **The door is token-gated, and advertised only when it admits.** It rides the vision lane's rule (`tokenGated`: a
    `fleet_auth_token` for anything beyond loopback; loopback with no token stays open), the bearer is checked before a
    byte of the body is read, and a token holder gets a 10-minute delivery window (the server's blanket 30 seconds would
-   cut 64 MiB on an ordinary link). Health lists `stt-upload` in `supported_task_types` and publishes `stt_hq` (the node
+   cut 64 MiB on an ordinary link). Because the body is read before the admission gates (a known job id must still
+   re-ack, so the id is read first), at most two uploads are in flight on a node (`sttUploadInFlightMax`); a third waits
+   for a slot, up to 30 seconds, then gets a re-placeable `503` with `Retry-After`. The audio is never copied by the
+   decode: it is parsed in place and decoded once, straight into the buffer that becomes the private file. Health lists `stt-upload` in `supported_task_types` and publishes `stt_hq` (the node
    has an `stt_model_hq`) and `stt_upload_max_mb` exactly when `STTUploadAdmissible` holds (a bound `stt_model` and the
    reachability rule). An asker keys on these, never on `stt` (every node with a whisper model lists that), so a node
    that predates the door is never sent an upload. An `hq` upload to a node with no hq model is a `400`, never a silent
@@ -95,12 +101,23 @@ card per remote call on the serving node, one asker ledger row; `pair-workloads.
   token and needs the bearer against one that has it. > **Unverified:** where that dispatcher mints its job ids was not
   traced.
 - A spilled call is visible: one card on the node that served it ("Requested from" the asker), one ledger row with
-  `route`, `placement`, `node` and `fleet_job_id`, and `meta.node` / `meta.placement` on the result.
+  `route`, `placement`, `node` and `fleet_job_id`, and `meta.node` / `meta.placement` on the result. `meta.route` is
+  deliberately not carried: `core.Meta` is the wire and ledger shape every lane shares (vision, text and compose stamp
+  node and placement only), the placement reason already says which way the route went (`remote: forced`, `remote:
+  local gpu busy`, `local: gpu idle`), and the route the caller asked for is on the asker's ledger row.
 - A job that waits at the stt gate reads `running` to a poller (it is inside its run closure) while its card is still
   queued on the node; the asker's card therefore turns running when the job is admitted, not when whisper starts.
 - `GET /fleet/media` now refuses any name that starts with a dot.
 - The MCP `tools/list` changes on every box (the `route` property and the description).
-- A node that serves the door holds up to 64 MiB of request body, plus its decoded copy, while it admits a job.
+- A node that serves the door holds, per upload in flight, the request body (up to 64 MiB) plus the decoded audio (up to
+  48 MiB) while it admits a job, and at most two uploads are in flight at once, so the peak is about 224 MiB. A job
+  waiting at the stt gate holds neither: the body is released at admission and the audio is on disk.
+- `stt-upload` is exempt from `fleet_max_concurrent_jobs`, as the legacy `stt` is: it waits behind its own
+  `fleet_stt_max_concurrent` gate, and an upload parked there would otherwise hold a text execution slot while doing no
+  work (`TestConcurrencyCappedRule`, `TestSTTUploadsWaitingAtTheGateDoNotHoldAFleetSlot`).
+- **The transcript of a gated upload stays on the node, readable by name without the bearer.** `.srt`, `.txt` and
+  `.segments.json` are written to `media_dir` (mode 0644) with no pruning, as for every transcription on the node.
+  Follow-ups, not done here: prune stt-upload outputs after the asker's fetch window, or gate `/fleet/media` for them.
 
 ## Alternatives considered
 
