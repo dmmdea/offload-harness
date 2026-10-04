@@ -42,6 +42,11 @@ import (
 )
 
 const (
+	idSourceFile     = "file"
+	idSourceNodeInfo = "node-info"
+)
+
+const (
 	// DefaultEndpoint is the ingress every node's workload-ingress.json binds.
 	DefaultEndpoint = "http://127.0.0.1:14324/v1/workloads/events"
 	// identityTTL bounds how often the two identity files are re-read; a
@@ -79,6 +84,14 @@ type Config struct {
 	// (tests).
 	StateDir string
 	OpenDir  string
+	// NodeInfoURL is PAIR's loopback node-info, read for this node's UUID when node-id.json is
+	// missing or unreadable (the harness runs as a different OS user than PAIR; nodeinfo.go).
+	// "" = no fallback. FromConfig sets it; a bare Config does not, so a test that builds an emitter
+	// without it can never reach a live PAIR.
+	NodeInfoURL string
+	// Relay is the card relay (relay.go): where frames go when this box has no PAIR identity of
+	// its own (neither node-id.json nor the node-info fallback). The zero value is no relay.
+	Relay RelayConfig
 }
 
 // UnderLeaseEnv is set by `gpu reserve -- <cmd>` on the command it wraps. The
@@ -95,7 +108,24 @@ func FromConfig(cfg config.Config) Config {
 	}
 	enabled := cfg.PairWorkloadsEnabled && strings.TrimSpace(os.Getenv(UnderLeaseEnv)) == ""
 	return Config{Enabled: enabled, Endpoint: ep,
-		VLLMSeats: cfg.VLLMSeats, SwapEndpoint: cfg.Endpoint, StateDir: cfg.StateDir}
+		VLLMSeats: cfg.VLLMSeats, SwapEndpoint: cfg.Endpoint, StateDir: cfg.StateDir,
+		NodeInfoURL: nodeInfoURLFor(cfg), Relay: RelayFromConfig(cfg)}
+}
+
+// nodeInfoURLFor is the node-info URL the identity fallback uses: the configured
+// pair_node_info_url, else PAIR's default loopback port. The default is NOT applied when
+// OFFLOAD_PAIR_APPDIR names the PAIR data dir (a portable install, a test fixture): that is a box
+// whose PAIR files are located on purpose, and where they are missing the answer is "PAIR is not
+// installed", not "ask the default port" (a test that points the app dir at a scratch directory must
+// never reach a live PAIR). Name pair_node_info_url explicitly to use the fallback there.
+func nodeInfoURLFor(cfg config.Config) string {
+	if u := strings.TrimSpace(cfg.PairNodeInfoURL); u != "" {
+		return u
+	}
+	if strings.TrimSpace(os.Getenv("OFFLOAD_PAIR_APPDIR")) != "" {
+		return ""
+	}
+	return DefaultNodeInfoURL
 }
 
 // Event is one workload lifecycle frame's content. JobID doubles as PAIR's
@@ -118,6 +148,10 @@ type Event struct {
 	CreatedAt   int64
 	StartedAt   int64
 	CompletedAt int64
+	// Remote marks a frame a card relay delivered on behalf of ANOTHER box's process (the member's
+	// side of relay.go). Its producer is not a process of this box, so its open-card marker carries
+	// no pid and is closed by its terminal frame or the age cap, never by a local pid probe.
+	Remote bool
 }
 
 // Emitter posts frames to PAIR's loopback ingress.
@@ -129,8 +163,25 @@ type Emitter struct {
 	idMu     sync.Mutex
 	idAt     time.Time
 	selfUUID string
-	members  map[string]string // lower(name) -> uuid
-	byAddr   map[string]string // lower(ipAddress) -> uuid
+	// The identity fallback's cached answers (nodeinfo.go), guarded by idMu.
+	// idSource says where selfUUID came from: idSourceFile or idSourceNodeInfo.
+	idSource     string
+	fbUUID       string
+	fbUUIDAt     time.Time
+	fbIngress    bool
+	fbIngressAt  time.Time
+	nodeInfoWarn sync.Once
+	nodeInfoLog  sync.Once
+	members      map[string]string // lower(name) -> uuid
+	byAddr       map[string]string // lower(ipAddress) -> uuid
+	// selfName is this box's own member name (members.json entry carrying selfUUID), lowercased.
+	selfName string
+	// viewName / viewAddr are PAIR's VIEW-ONLY nodes (configs/view-only-nodes.json), which are not
+	// cluster members: lower(name) / lower(address) -> uuid. Consulted after the members.
+	viewName map[string]string
+	viewAddr map[string]string
+	// relay is the card relay's state (relay.go), under its own lock.
+	relay relayState
 	// resolved remembers, per job, the node UUID an in-flight frame resolved
 	// to, so a terminal frame whose names resolve to nothing (a node that
 	// reports its fleet id, not its hostname) keeps the card where the job
@@ -164,6 +215,9 @@ type Emitter struct {
 	alive     func(pid int) bool
 	procStart func(pid int) (int64, bool)
 	now       func() time.Time
+	// sweepFrameFn builds a sweep's closing frame for a marker; sweepFrame unless a
+	// test swaps it (a build failure cannot otherwise be provoked from data).
+	sweepFrameFn func(m openMarker, now time.Time) ([]byte, error)
 }
 
 type engineAnswer struct {
@@ -179,6 +233,8 @@ func New(c Config) *Emitter {
 	e := &Emitter{cfg: c, client: &http.Client{Timeout: sendTimeout}, appDir: c.AppDir,
 		fetchRoster: swapclient.FetchRoster,
 		alive:       gpulease.PIDAlive, procStart: gpulease.ProcessStart, now: time.Now}
+	e.relay.client = newRelayClient()
+	e.relay.probe = e.probeRelayHealth
 	if e.appDir == "" {
 		// OFFLOAD_PAIR_APPDIR points at a PAIR data dir that is not at the
 		// platform default (a portable install, a test fixture).
@@ -209,14 +265,18 @@ func defaultAppDir() string {
 	return filepath.Join(base, "Nvidia Corporation", "Personal AI Router")
 }
 
-// Enabled is true when the config opts in AND PAIR is installed on this box
-// (its node-id.json exists and names a UUID).
+// Enabled is true when the config opts in AND frames have somewhere to go: PAIR is installed on
+// this box (its node-id.json exists and names a UUID, or PAIR's node-info answers on loopback
+// beside a live ingress), or, with no identity of its own, a card relay member is reachable
+// (relay.go).
 func (e *Emitter) Enabled() bool {
 	if e == nil || !e.cfg.Enabled {
 		return false
 	}
-	self, _ := e.identity()
-	return self != ""
+	if self, _ := e.identity(); self != "" {
+		return true
+	}
+	return e.relayUsable()
 }
 
 func (e *Emitter) identity() (self string, members map[string]string) {
@@ -229,22 +289,39 @@ func (e *Emitter) identity() (self string, members map[string]string) {
 func (e *Emitter) identityFull() (self string, members, byAddr map[string]string) {
 	e.idMu.Lock()
 	defer e.idMu.Unlock()
+	e.loadIdentityLocked()
+	return e.selfUUID, e.members, e.byAddr
+}
+
+// loadIdentityLocked (re)reads PAIR's identity files when the cache is older than
+// identityTTL. Caller holds idMu.
+func (e *Emitter) loadIdentityLocked() {
 	if !e.idAt.IsZero() && time.Since(e.idAt) < identityTTL {
-		return e.selfUUID, e.members, e.byAddr
+		return
 	}
 	e.idAt = time.Now()
-	e.selfUUID, e.members, e.byAddr = "", nil, nil
+	e.selfUUID, e.members, e.byAddr, e.selfName, e.viewName, e.viewAddr = "", nil, nil, "", nil, nil
+	e.idSource = ""
 	raw, err := os.ReadFile(filepath.Join(e.appDir, "node-id.json"))
 	if err != nil {
-		return "", nil, nil
+		// Missing or unreadable (PAIR is another OS user's, or not installed). The members files
+		// below stay best-effort: unreadable, only this node resolves.
+		id := e.fallbackIdentityLocked(err)
+		if id == "" {
+			return
+		}
+		e.selfUUID = id
+		e.idSource = idSourceNodeInfo
+	} else {
+		var nid struct {
+			NodeUUID string `json:"node_uuid"`
+		}
+		if json.Unmarshal(raw, &nid) != nil || nid.NodeUUID == "" {
+			return
+		}
+		e.selfUUID = nid.NodeUUID
+		e.idSource = idSourceFile
 	}
-	var nid struct {
-		NodeUUID string `json:"node_uuid"`
-	}
-	if json.Unmarshal(raw, &nid) != nil || nid.NodeUUID == "" {
-		return "", nil, nil
-	}
-	e.selfUUID = nid.NodeUUID
 	e.members = map[string]string{}
 	e.byAddr = map[string]string{}
 	if raw, err := os.ReadFile(filepath.Join(e.appDir, "cluster", "members.json")); err == nil {
@@ -260,6 +337,9 @@ func (e *Emitter) identityFull() (self string, members, byAddr map[string]string
 				}
 				if m.Name != "" {
 					e.members[strings.ToLower(m.Name)] = m.NodeUUID
+					if m.NodeUUID == e.selfUUID {
+						e.selfName = strings.ToLower(strings.TrimSpace(m.Name))
+					}
 				}
 				if a := strings.ToLower(strings.TrimSpace(m.IPAddress)); a != "" && a != "127.0.0.1" && a != "::1" {
 					e.byAddr[a] = m.NodeUUID
@@ -267,7 +347,41 @@ func (e *Emitter) identityFull() (self string, members, byAddr map[string]string
 			}
 		}
 	}
-	return e.selfUUID, e.members, e.byAddr
+	e.loadViewOnlyLocked()
+}
+
+// viewOnlyNodesFile is PAIR's list of nodes the desktop can see but that are not cluster members
+// (fork desktop/src/electron/service-bridge/view-only-nodes.ts), relative to the app dir.
+var viewOnlyNodesFile = filepath.Join("configs", "view-only-nodes.json")
+
+// loadViewOnlyLocked reads the view-only list: a JSON array of {name, address, port, nodeUuid}. A
+// missing, empty or malformed file means no view-only nodes, never an error: the members still
+// resolve. An entry without a nodeUuid, or naming neither a name nor an address, is skipped.
+func (e *Emitter) loadViewOnlyLocked() {
+	raw, err := os.ReadFile(filepath.Join(e.appDir, viewOnlyNodesFile))
+	if err != nil {
+		return
+	}
+	var list []struct {
+		Name     string `json:"name"`
+		Address  string `json:"address"`
+		NodeUUID string `json:"nodeUuid"`
+	}
+	if json.Unmarshal(raw, &list) != nil {
+		return
+	}
+	e.viewName, e.viewAddr = map[string]string{}, map[string]string{}
+	for _, n := range list {
+		if strings.TrimSpace(n.NodeUUID) == "" {
+			continue
+		}
+		if k := strings.ToLower(strings.TrimSpace(n.Name)); k != "" {
+			e.viewName[k] = n.NodeUUID
+		}
+		if k := strings.ToLower(strings.TrimSpace(n.Address)); k != "" {
+			e.viewAddr[k] = n.NodeUUID
+		}
+	}
 }
 
 // resolveNode turns the names a job's node is known by into the PAIR UUID
@@ -301,6 +415,18 @@ func (e *Emitter) resolveNode(ev Event) (uuid string, ok bool) {
 			return u, true
 		}
 		if u, hit := byAddr[n]; hit {
+			e.remember(ev.JobID, u, terminal)
+			return u, true
+		}
+	}
+	// A view-only node is not a cluster member, so the members above always win; a job that ran on
+	// one still names it (D10: 256 cards of a view-only node read scheduledOn null).
+	for _, n := range names {
+		if u, hit := e.viewName[n]; hit {
+			e.remember(ev.JobID, u, terminal)
+			return u, true
+		}
+		if u, hit := e.viewAddr[n]; hit {
 			e.remember(ev.JobID, u, terminal)
 			return u, true
 		}
@@ -359,6 +485,9 @@ func MethodFor(state string) string {
 // job, and the card's engine badge is how PAIR tells them apart. An rkllm seat
 // (chat and vision on the RK3588 NPU, named "<model>-npu") is the same device.
 func EngineFor(task, seat string) string {
+	// A fleet task type spells its words with dashes (compose-video, run-graph); the harness task
+	// names use underscores.
+	task = strings.ReplaceAll(task, "-", "_")
 	s := strings.ToLower(seat)
 	name, _, _ := strings.Cut(s, "@") // a failed forward is recorded "<seat>@fleet"
 	switch {
@@ -370,14 +499,14 @@ func EngineFor(task, seat string) string {
 		return "rknpu"
 	case strings.Contains(s, "vllm"):
 		return "vllm"
-	case strings.Contains(s, "whisper"), task == "transcribe":
+	case strings.Contains(s, "whisper"), task == "transcribe", task == "stt":
 		return "whispercpp"
 	}
 	switch task {
 	case "generate_image", "inpaint_image", "edit_image_generative", "upscale_image",
 		"generate_video", "animate_character", "generate_audio", "run_graph":
 		return "comfyui"
-	case "compose_video":
+	case "compose_video", "compose_project":
 		// HyperFrames on the CPU (ADR 0059): no model and no llama.cpp job.
 		return "hyperframes"
 	}
@@ -550,14 +679,70 @@ func (e *Emitter) Send(ctx context.Context, ev Event) error {
 	if !e.Enabled() {
 		return nil
 	}
-	body, info, err := e.build(ev)
+	pl, err := e.plan(ev)
 	if err != nil {
 		return err
 	}
-	done := e.track(ev, info)
-	err = e.post(ctx, body)
-	e.untrack(done, info, err)
+	done := e.track(ev, pl)
+	err = e.deliver(ctx, pl)
+	e.untrack(done, pl, err)
 	return err
+}
+
+// sendPlan is one frame ready to go: the body, the workloadInfo the open-card register keeps, where
+// it is posted (PAIR's loopback ingress, or a relay member's route URL) and, for a relayed frame, the
+// node hint its marker keeps so a sweep can rebuild the relay body.
+type sendPlan struct {
+	body  []byte
+	info  map[string]json.RawMessage
+	url   string
+	relay *relayMeta
+	// jobID is the job a relayed frame belongs to (its relay pin is settled by the post's outcome).
+	jobID string
+	// remote: the producer is another box's process (a frame a relay delivered to this member).
+	remote bool
+}
+
+// plan builds ev's frame for the way this emitter reports. With a PAIR identity the frame goes to
+// the local ingress (a job whose in-flight frames went through a relay keeps its terminal frame on
+// that relay, so one card is closed where it was opened); with none it is a relay body for the first
+// healthy relay member.
+func (e *Emitter) plan(ev Event) (sendPlan, error) {
+	self, _ := e.identity()
+	if !ev.Remote {
+		if u, ok := e.pinnedRelay(ev.JobID); ok {
+			return e.relayPlan(ev, u)
+		}
+	}
+	if self != "" || ev.Remote {
+		body, info, err := e.build(ev)
+		return sendPlan{body: body, info: info, url: e.cfg.Endpoint, remote: ev.Remote}, err
+	}
+	u := e.relayRoute(ev)
+	if u == "" {
+		return sendPlan{}, errNoRelay
+	}
+	return e.relayPlan(ev, u)
+}
+
+func (e *Emitter) relayPlan(ev Event, u string) (sendPlan, error) {
+	body, info, meta := e.buildRelay(ev)
+	if isTerminal(ev.State) {
+		e.relay.mu.Lock()
+		delete(e.relay.pinned, ev.JobID)
+		e.relay.mu.Unlock()
+	}
+	return sendPlan{body: body, info: info, url: u, relay: meta, jobID: ev.JobID}, nil
+}
+
+// deliver posts a planned frame to where its plan says.
+func (e *Emitter) deliver(ctx context.Context, pl sendPlan) error {
+	if pl.relay != nil {
+		err := e.postRelay(ctx, pl.url, pl.body)
+		e.settlePin(pl.jobID, pl.url, err)
+		return err
+	}
+	return e.post(ctx, pl.body)
 }
 
 // post delivers one built frame within sendTimeout.
@@ -575,6 +760,9 @@ func (e *Emitter) post(ctx context.Context, body []byte) error {
 	}
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
+		if rejection(resp.StatusCode) {
+			return &rejectedError{endpoint: e.cfg.Endpoint, status: resp.StatusCode}
+		}
 		return fmt.Errorf("pairworkloads: %s answered %d", e.cfg.Endpoint, resp.StatusCode)
 	}
 	return nil
@@ -593,21 +781,21 @@ func (e *Emitter) Emit(ev Event) {
 		return
 	}
 	e.SweepOrphansAsync()
-	body, info, err := e.build(ev)
+	pl, err := e.plan(ev)
 	done := ""
 	if err == nil {
-		done = e.track(ev, info)
+		done = e.track(ev, pl)
 	}
 	e.inflight.Add(1)
 	go func() {
 		defer e.inflight.Done()
 		if err == nil {
-			err = e.post(context.Background(), body)
+			err = e.deliver(context.Background(), pl)
 		}
 		// The terminal marker goes only after the post was attempted: a
 		// process killed in between still leaves a marker to close the card,
 		// and a post that failed leaves the terminal frame for the sweep.
-		e.untrack(done, info, err)
+		e.untrack(done, pl, err)
 		if err != nil {
 			e.warnOnce.Do(func() {
 				log.Printf("pairworkloads: PAIR ingress unreachable; harness jobs will not appear in PAIR's Jobs list (%v)", err)
@@ -625,7 +813,9 @@ func (e *Emitter) Wait() {
 
 // AttachLedger turns every non-delegation ledger row into one terminal frame.
 //
-// Skipped on purpose: agent_delegate rows (the delegate runner emits those,
+// Skipped on purpose: inner rows (ParentJobID set: one window of a video_watch,
+// an escalating attempt, a nested sub-call; the call's own row is its card);
+// agent_delegate rows (the delegate runner emits those,
 // together with the in-flight states, under one identity so PAIR shows one
 // card); agent rows (this box serving SOMEONE ELSE's delegation, already
 // reported by the box that asked); cache hits (no GPU work happened).
@@ -643,14 +833,23 @@ func (e *Emitter) AttachLedger(l *ledger.Ledger) {
 		if row.Door == FleetDoor {
 			return
 		}
+		// A remote call's writer carded it (or deliberately did not: no node was chosen).
+		if row.CardByCaller {
+			return
+		}
 		if row.CacheHit {
+			return
+		}
+		// An inner row is a step of a call whose own row carries the card
+		// (register C-62 inner-row rule, extended to every multi-row call).
+		if row.ParentJobID != "" {
 			return
 		}
 		// FromLedger may read the llama-swap roster (LocalEngine); keep that
 		// off the ledger writer's path.
 		// A call that opened a running card (Begin) is closed by its own
 		// row, on the same card; claim it here, in row order.
-		open, started := e.claim(row.Task)
+		open, started := e.claim(row.Task, row.CallID)
 		e.inflight.Add(1)
 		go func() {
 			defer e.inflight.Done()

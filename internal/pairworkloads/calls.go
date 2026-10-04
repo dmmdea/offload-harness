@@ -59,15 +59,21 @@ type openCall struct {
 	closed    bool
 }
 
+// callID is the card's own job id: the one id a ledger row needs to name to
+// close exactly this card.
+func (c *openCall) callID() string { return c.jobID }
+
 // Begin opens a queued card for a call of task admitted through door, and
-// returns the two functions that move it on: working (the lane holds its
-// engine: the card turns running, once) and end (the call returned: the card
-// closes with its outcome, unless the call's ledger row already closed it).
-// Both are nil when nothing was opened: emitter disabled, a task whose engine
-// is not fixed by the task, or work this box serves for another (FleetDoor).
-func (e *Emitter) Begin(task, door string) (working func(), end func(deferred bool, reason string)) {
+// returns the call id (the card's job id: the caller stamps it on the call's
+// ledger row so that row closes THIS card) and the two functions that move the
+// card on: working (the lane holds its engine: the card turns running, once)
+// and end (the call returned: the card closes with its outcome, unless the
+// call's ledger row already closed it). The id is "" and both functions are nil
+// when nothing was opened: emitter disabled, a task whose engine is not fixed
+// by the task, or work this box serves for another (FleetDoor).
+func (e *Emitter) Begin(task, door string) (callID string, working func(), end func(deferred bool, reason string)) {
 	if !e.Enabled() || !longCallTasks[task] || door == FleetDoor {
-		return nil, nil
+		return "", nil, nil
 	}
 	now := e.now().UnixMilli()
 	c := &openCall{
@@ -113,21 +119,42 @@ func (e *Emitter) Begin(task, door string) (working func(), end func(deferred bo
 			Requester: c.requester, CreatedAt: c.created, StartedAt: started,
 			CompletedAt: e.now().UnixMilli()})
 	}
-	return working, end
+	return c.callID(), working, end
 }
 
-// claim takes the oldest open card for task, for its ledger row to close, and
-// reports when that card started (0 = never marked working). Concurrent calls
-// of one task are matched first-in first-out; a row for a task with no open
-// card (a batch's second image) gets its own card as before.
-func (e *Emitter) claim(task string) (*openCall, int64) {
+// claim takes the open card a ledger row closes, and reports when that card
+// started (0 = never marked working).
+//
+// A row that names its call (callID, stamped from Begin's return) claims exactly
+// that card. Matching the oldest open card instead let one call's row close
+// another's under overlapping calls of the same task (the shorter call's row
+// closed the older call's card, its own End then closed its own card empty, and
+// the older row found no card at all: 3 cards for 2 calls). A named row whose
+// card is not open (already closed, or another process's) claims nothing and
+// gets its own card: it must never close someone else's.
+//
+// Only a row that carries no call id (a writer that does not stamp one) is
+// matched first-in first-out. A row for a task with no open card (a batch's
+// second image) gets its own card as before.
+func (e *Emitter) claim(task, callID string) (*openCall, int64) {
 	e.callMu.Lock()
 	defer e.callMu.Unlock()
 	q := e.calls[task]
-	if len(q) == 0 {
+	var c *openCall
+	switch {
+	case callID != "":
+		for _, x := range q {
+			if x.callID() == callID {
+				c = x
+				break
+			}
+		}
+	case len(q) > 0:
+		c = q[0]
+	}
+	if c == nil {
 		return nil, 0
 	}
-	c := q[0]
 	c.closed = true
 	e.dropLocked(c)
 	return c, c.started

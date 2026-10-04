@@ -128,12 +128,48 @@ func validateConfiguredBases(c Config) error {
 		{"coral_endpoint", c.CoralEndpoint},
 		{"rknpu_endpoint", c.RknpuEndpoint},
 		{"pair_workloads_endpoint", c.PairWorkloadsEndpoint},
+		{"pair_node_info_url", c.PairNodeInfoURL},
 	} {
 		if err := validateBaseURL(kv.key, kv.val); err != nil {
 			return err
 		}
 	}
-	return validateEndpointList("delegate_remotes", c.DelegateRemotes, false)
+	if err := validateLoopbackBase("pair_node_info_url", c.PairNodeInfoURL); err != nil {
+		return err
+	}
+	if err := validateEndpointList("delegate_remotes", c.DelegateRemotes, false); err != nil {
+		return err
+	}
+	return validateEndpointList("pair_workloads_relay", relayExplicitBases(c.PairWorkloadsRelay), false)
+}
+
+// relayExplicitBases is pair_workloads_relay without its two words ("auto", "off"): the entries that
+// must be usable base URLs.
+func relayExplicitBases(entries []string) []string {
+	var out []string
+	for _, e := range entries {
+		switch strings.ToLower(strings.TrimSpace(e)) {
+		case "auto", "off":
+		default:
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// validateLoopbackBase refuses a configured base that is not this box. pair_node_info_url is read
+// for this node's PAIR identity and must never be a way to reach another host. An empty value is
+// unset; a value validateBaseURL already refused never gets here.
+func validateLoopbackBase(label, raw string) error {
+	v := strings.TrimSpace(raw)
+	if v == "" {
+		return nil
+	}
+	u, _ := inspectBase(v)
+	if u == nil || !loopbackBase(u) {
+		return fmt.Errorf("%s: %q is not a loopback address; PAIR's node-info is read on this box only (127.0.0.1, ::1 or localhost)", label, v)
+	}
+	return nil
 }
 
 // loopbackBase reports whether a parsed base URL points at this box. It asks

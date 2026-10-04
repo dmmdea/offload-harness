@@ -13,6 +13,10 @@ pending work on the node that runs it. Off by default; two config keys turn it o
 - Which harness events produce frames, and why do delegations and plain tool calls use
   different sources?
 - How is it enabled, on which boxes, and how is it verified or diagnosed?
+- Why does a box whose harness runs as a different OS user than PAIR still get cards (the identity
+  fallback), and when does it apply?
+- How does a box that is not a PAIR member at all (a view-only box, a thin client) get cards (the card relay), and how is a
+  relayed card kept from being closed by the wrong pid check?
 
 ## Source map
 
@@ -23,15 +27,24 @@ pending work on the node that runs it. Off by default; two config keys turn it o
 | `internal/delegate/run.go` | the call sites: `runRemote` (queued; running from the poll loop), `runLocal` (queued; running through `pairStartGate`), `attempt().finish` (terminal); `runner.pair` |
 | `gpu_leasecard.go` | the lease card: `leaseCardIdentity`, `newLeaseCard`, `running`, `finish`; wired into `runGPUReserve` (`gpu_cmd.go`) |
 | `internal/core/workmark.go` | `WithWorkingMark` / `MarkWorking`: the lane's "my work started" signal a call card turns running on |
-| `internal/pairworkloads/calls.go` | running cards for long tool calls: `Begin`, the per-task open-card queue the ledger observer `claim`s from |
-| `internal/pipeline/pipeline.go` | `CallTracker`, `SetCallTracker`, the `Begin` at the top of `Run` |
+| `internal/pairworkloads/calls.go` | running cards for long tool calls: `Begin` (returns the call id), the per-task open-card queue the ledger observer `claim`s from (by call id first) |
+| `internal/pipeline/pipeline.go` | `CallTracker`, `SetCallTracker`, the `Begin` at the top of `Run` (stamps the call id on `core.Meta`) |
 | `internal/ledger/ledger.go` | `Ledger.Observe`, called after every durable `Record` |
 | `internal/config/config.go` | `PairWorkloadsEnabled`, `PairWorkloadsEndpoint` |
 | `main.go` | attaches the ledger observer where the CLI/MCP ledger is opened |
 | `internal/pairworkloads/seatwatch.go` | the seat watcher (0.133.0): direct traffic on this box's vLLM seats as cards, run by fleet-serve |
 | `internal/seatinflight/seatinflight.go` | the machine-wide register of the harness's own seat requests, written by `modelaffinity.Admit` and the fleet chat lane; the watcher subtracts it |
+| `internal/pairworkloads/relay.go` | the card relay (D26): `RelayConfig`, relay mode of the emitter (`relayRoute`, `buildRelay`, `postRelay`, `Mode`, `LocalIdentity`) and the member's decode (`ParseRelay`, `RelayJobID`, `RelayRequester`, `RelayLimiter`) |
+| `internal/fleetnode/pair_relay.go` | `POST /fleet/pair-relay`: the door (token gate, `PairRelayAdmissible`, asker, rate limit, body cap) |
+| `internal/pairworkloads/nodeinfo.go` | the identity fallback: this node's UUID from PAIR's loopback node-info when `node-id.json` is missing or unreadable, gated on the ingress answering (*Identity when the harness user is not PAIR's user*) |
 | `internal/pairworkloads/orphans.go` | the open-card register (0.133.1): one marker per in-flight card under `<state root>/pair-open/`, and the sweep that closes the cards of a dead process (`SweepOrphans`, `RunOrphanSweeper`) |
+| `internal/pairworkloads/remote.go` | `RemoteCall`: the one card and the one asker ledger row of a call routed to a fleet node (source 5 below) |
+| `internal/pairworkloads/wire.go` | the attribution headers an asker sends (`SetWireHeaders`, `WireHeadersFor`), `AskerName`, and `NodeName` (the dispatch host a node card is reported under) |
+| `internal/core/remoteattr.go` | `RemoteAttribution` / `RemoteAttributor`: the seam the remote lanes report through; `*pipeline.Pipeline` implements it (`internal/pipeline/remoteattr.go`) |
+| `internal/fleetnode/nodecard.go` | the serving node's own card for a job whose asker will not card it (*The node's fallback card* below) |
+| `internal/pairworkloads/relay_test.go`, `internal/fleetnode/pair_relay_test.go` | the relay's tests: the member's decode and resolution, the remote marker, the rate limit, relay mode, the route's token gate |
 | `internal/pairworkloads/pairworkloads_test.go`, `internal/delegate/pair_events_test.go`, `internal/pairworkloads/seatwatch_test.go`, `internal/pairworkloads/orphans_test.go` | the contract tests |
+| `internal/pairworkloads/attribution_test.go`, `internal/pairworkloads/remote_test.go`, `internal/{composeremote,visionremote,textremote,sttremote}/attribution_test.go`, `internal/fleetnode/attribution_test.go`, `internal/delegate/attribution_test.go` | the remote-call attribution tests: one card per call, the headers, the node card, view-only resolution |
 
 ## What problem this solves
 
@@ -53,7 +66,7 @@ already using. PAIR's workload manager now accepts the same frames on a **loopba
 | `engine` | the real engine, with the identifiers PAIR's upstream engine PRs use: `llamacpp`, `vllm` (seat name contains `vllm`, or — for a seat behind this box's own endpoint — a name the box declares in `vllm_seats` directly or through the alias the llama-swap roster resolves it to: <node-b>'s `agent-pool` is an alias of `qwen3.8-27b-vllm-3card`; `Emitter.LocalEngine`, 0.132.7. Remote placements keep the name-based label, since a node's aliases live in its own roster), `whispercpp` (transcribe / whisper seats), `comfyui` (image, video, audio generation and editing, `run_graph`), and the accelerator itself for an NPU call (`coral-edgetpu`, `hailo-8l`, `rknpu`) — never `llamacpp` for work no llama.cpp seat did |
 | `state` | `queued` → `workload:submitted`, `running` → `workload:started`, `completed` → `workload:completed`, `failed` → `workload:errored` |
 | `originatedFrom` | this box's PAIR UUID, read from PAIR's `node-id.json` |
-| `scheduledOn` | the PAIR UUID of the node the job runs on, resolved by name from PAIR's `cluster/members.json`: for a remote placement's in-flight frames the name is the **host of the dispatch URL** (the tailnet name in `delegate_remotes`, which is the hostname PAIR's members carry — never the fleet node id, which PAIR cannot resolve; 0.126.1), and for the terminal frame the name the node reported; the local UUID for local work. **Since 0.131.2 a node is resolved from every name it goes by** (`Event.NodeAliases`: dispatch host, fleet node id, wire name) against member names *and* member addresses; the emitter remembers per job what the in-flight frame resolved to, so the terminal frame keeps the card where the job ran; a remote run none of the names resolves is stamped `null` — PAIR draws no line and names no node — never the delegator (before 0.131.2 every terminal frame of a node that reports its fleet id re-pointed the card at the delegator). **A local run whose config `endpoint` is another box's engine** (a bench config aimed at <node-c>'s arm) carries that endpoint's host as the name, so the card lands on the box whose engine did the work, never on the delegator's (register C-58; `modelaffinity.EndpointHost`) |
+| `scheduledOn` | the PAIR UUID of the node the job runs on, resolved by name from PAIR's `cluster/members.json`: for a remote placement's in-flight frames the name is the **host of the dispatch URL** (the tailnet name in `delegate_remotes`, which is the hostname PAIR's members carry — never the fleet node id, which PAIR cannot resolve; 0.126.1), and for the terminal frame the name the node reported; the local UUID for local work. **Since 0.131.2 a node is resolved from every name it goes by** (`Event.NodeAliases`: dispatch host, fleet node id, wire name) against member names *and* member addresses; the emitter remembers per job what the in-flight frame resolved to, so the terminal frame keeps the card where the job ran; a remote run none of the names resolves is stamped `null` — PAIR draws no line and names no node — never the delegator (before 0.131.2 every terminal frame of a node that reports its fleet id re-pointed the card at the delegator). **A view-only node resolves too** (unreleased): the names are matched against `<appdir>/configs/view-only-nodes.json` — the list of nodes the desktop shows that are not cluster members, `[{name, address, port, nodeUuid}]` — by name or address, case-insensitively, AFTER the members, so a member always wins; the file is cached and reloaded exactly as `members.json` is, and a missing or malformed file only means no view-only nodes (256 cards of a view-only node read `scheduledOn` null before) **A local run whose config `endpoint` is another box's engine** (a bench config aimed at <node-c>'s arm) carries that endpoint's host as the name, so the card lands on the box whose engine did the work, never on the delegator's (register C-58; `modelaffinity.EndpointHost`) |
 | `createdAt`, `startedAt`, `completedAt` | epoch ms; the last two `null` until known |
 | `error` | the defer reason / wire error / first failed acceptance check, on `failed` only |
 | `requesterId` | `offload-harness/<session>` (the session the ledger already stamps), or `offload-harness` |
@@ -83,7 +96,7 @@ and the harness has nothing to gain by sending them.
    row into one terminal frame: `completedAt` = the row's timestamp, `createdAt` =
    `startedAt` = that minus the latency. Skipped on purpose: `agent_delegate` rows (source 1
    owns them), `agent` rows (this box serving someone else's delegation, already reported by
-   the box that asked), cache hits (no GPU work).
+   the box that asked), cache hits (no GPU work), and **inner rows** (below).
 3. **Long tool calls while they run** (0.140.5; queued-then-running 0.140.6,
    `internal/pairworkloads/calls.go`). A row is written when a call ends, so source 2 alone left
    a ten-minute render with no card until it finished. `Pipeline.Run` calls
@@ -94,13 +107,51 @@ and the harness has nothing to gain by sending them.
    moment `acquireMediaLease` hands them the GPU, `compose_video` when it takes its slot. A render
    waiting behind another job's lease therefore reads "queued", not "Running". `transcribe` never
    marks (its wait is a whisper load inside llama-swap, which the lane cannot see), so its card
-   stays queued until it ends. The call's own ledger row then closes THAT card (`claim`, oldest
-   first per task): same id, engine and creation, the start the mark recorded (none if it never
-   started), the row's model and outcome. A call that wrote no
-   row (a cache hit) is closed when `Run` returns (`closeCall`; a panic closes it failed). Rows are
-   matched to open cards per task, not per call: two concurrent calls of one task (they serialize
-   on the media slot) can trade model and timings, but both cards close. Text and vision calls open
-   nothing: PAIR keys a card on its engine, and they learn llamacpp vs vllm only as they run.
+   stays queued until it ends. The call's own ledger row then closes THAT card (`claim`): same id,
+   engine and creation, the start the mark recorded (none if it never started), the row's model and
+   outcome. A call that wrote no row (a cache hit) is closed when `Run` returns (`closeCall`; a
+   panic closes it failed). **A row names its call.** `Begin` returns the call id (the card's own
+   job id), `Run` stamps it on `core.Meta.CallID`, the ledger row carries it as `call_id`, and
+   `claim(task, callID)` closes exactly that card. Matching the oldest open card of the task
+   instead (the rule before this change) let overlapping calls of one task trade cards: concurrent
+   `transcribe` calls do not serialize on the media slot (transcribe never takes the GPU lease, and
+   the whisper POSTs queue only inside one process), so a later call can finish first, and the
+   shorter call's row closed the OLDER call's card, its own
+   `End` then closed its own card with no row data, and when the older row finally landed the queue
+   was empty and it opened a third card (11 surplus cards in the retained history, all on 2026-10-01).
+   Now a row with a `call_id` whose card is not open (already
+   closed, or another process's) claims nothing and gets its own card; it never closes someone
+   else's. Only a row with no `call_id` (a writer that stamps none) falls back to first in, first
+   out. `End` never closes a card its own row already closed, and closes its own card when the row
+   never comes. Text and vision calls open nothing: PAIR keys a card on its engine, and they learn
+   llamacpp vs vllm only as they run.
+
+**Inner rows: one call is one card.** A call that writes several ledger rows names its own row
+as the call and marks every other row `parent_job_id = <the call's job_id>` (the register C-62
+inner-row rule, extended from `agent` rows to every multi-row call). `AttachLedger` skips any
+row with a `parent_job_id`, so the call's own row is its one card; the job counters
+(`ledger.JobRows`, `SummarizeFile`) already count the call's own row and skip its inner rows,
+and an orphan inner row (the call's own row never landed) still counts as a call. Paths that
+write several rows and how each follows the rule:
+
+| Call | Rows | Call's own row | Inner rows |
+|---|---|---|---|
+| `video_watch` | one per window, plus one | the summary (or the all-deferred defer), `job_id` minted per call | every window row |
+| `video_describe` | one per context-overflow retry (frame width halved), plus the last attempt | the attempt that ends the loop; the id is minted only when an attempt is retried, so the usual one-attempt call writes one plain row | each overflowed attempt that was retried |
+| text cascade (`summarize`, `classify`, `extract`, `triage`) | an escalating attempt writes its own row (D-127), the climbed tier another, a final all-fail defer a third | the row of the tier that answered, or the final defer | each escalating attempt; minted on the first climb, so a call that never climbs writes one plain row |
+| `extract_image` | the `ocr` and `extract` sub-calls | a row the composite writes for itself on every exit (task `extract_image`) | the two sub-call rows, marked through `core.Request.ParentJobID` (in-process only, never on the wire) |
+| `inpaint_image` with `auto_text` | the vqa box-detector sub-call | the inpaint row, which every exit writes | the detector's vqa row |
+
+Left alone on purpose: `RunImageBatch` writes one row per item by design (each item is its own
+job), `agent_delegate` already follows the rule with its own `agd-` card, and every other media call
+writes exactly one row. Token accounting follows the call's own row so no token is counted twice:
+an inner row keeps the prompt tokens it processed as savings, and the call's own row carries only
+what no inner row carries (the synthesis prompt, a cache-hit window's stored figure) plus the whole
+output, with `cards_tokens` set to the work the cards actually did (an inner row records 0; a
+cascade call's row adds the card work of its climbing attempts, carried in `core.Meta.CardsCarried`,
+and an `extract_image` row adds the same carried work of its sub-calls; only the call's own row does,
+never the entry tier's correctness-label snapshot, whose `cards_tokens` is the 0 it always carried). A
+`video_watch` result still reports the whole call's tokens to the caller.
 4. **Jobs under the GPU lease** (0.140.6, `gpu_leasecard.go`). `gpu reserve -- <cmd>` is how every
    bench, render and measurement runs on every node, and none of it reached PAIR: on 2026-09-23 the
    <node-a> ran a seat bench and a ComfyUI diagnostic and <node-c> a Wan 2.2 smoke render, each at
@@ -118,11 +169,86 @@ and the harness has nothing to gain by sending them.
    that process starts, for as long as it runs, and silence a whole session. The
    `--detach` form holds a card for nobody's command and opens none.
 
+5. **Calls routed to a fleet node** (unreleased, `internal/pairworkloads/remote.go`). A remote or
+   auto-spilled `compose_video`, vision (`vqa`, `ocr`, `assess_image`, ...), text (`classify`,
+   `extract`) or `transcribe` call (the card's engine is `whispercpp`) never goes through `Pipeline.Run` on the asking box (`composeremote.Run`,
+   `visionremote.Run`, `textremote.Run` and, since 0.164.0, `sttremote.Run` send the job and poll it), so before this the asker wrote
+   neither a ledger row nor a card for work it had spilled, and a plain row would have carded the
+   asker itself (`ledger.Entry` named no node). The lanes now report through
+   `core.RemoteAttribution`, which the `Runner` they receive (`*pipeline.Pipeline`) provides:
+   - **One card per dispatched call**, on the node that serves it: `Event.Node` is the host of the
+     dispatch URL (`pairworkloads.NodeName`, the same name a delegation reports under) and
+     `NodeAliases` is the fleet node id from its health; `id` is the fleet job id; the engine is fixed
+     when the card opens (`hyperframes` for a composition, otherwise the task's own); the model is the
+     task until the node's result names the seat. `queued` when the call is dispatched, `running`
+     when the node's job state turns `running`, then `completed`, or `failed` with the result's
+     reason (a node that answered counts as started, so a finished card never reads "never started").
+   - **One asker ledger row** (door, route, placement, `node`, `node_id`, `fleet_job_id`, latency,
+     the deferred and error fields), written for every remote call. It carries `card_by_caller`,
+     which `AttachLedger` skips, so the observer never cards it a second time.
+   - **No card when no node was chosen**: a placement defer before any dispatch (no eligible node, a
+     bundle the node would refuse, no `delegate_remotes`) writes its row and opens nothing.
+   - **The auto route falling back to the local seat stays as it was**: an attempt that reached no node
+     leaves nothing behind (the local run writes its own row through the pipeline); one that did reach
+     a node (refused at dispatch, poll failures) closes its card `failed` and keeps one deferred row.
+   - The local route, and an auto call that runs here, never touch any of this.
+
+   A `*pipeline.Pipeline` only opens the card when `SetPairEmitter` was called (`openPipeline` does); the
+   row is written either way.
+
 **Served work is the asker's card** (0.140.6): a fleet node stamps work it runs FOR another box
 with the door `fleet` (`pairworkloads.FleetDoor`); `Begin` opens nothing for it and the ledger
 observer skips its rows, exactly as it always skipped `agent` rows. That is what makes
 `pair_workloads_enabled` safe on EVERY box, fleet nodes included: their own work (a CLI render
 started over ssh, a lease job) reports, the delegations and dispatches they serve do not.
+
+**The node's fallback card** (unreleased, `internal/fleetnode/nodecard.go`). "The asker's card" fails
+when the asker reports nothing: a thin client, a scratch `install client` config, a box that is not a
+PAIR member. Two request headers (`core.AskerHeader`, `core.PairCardHeader`, beside `X-Offload-Tenant`)
+carry the attribution from the asker to the node:
+
+| Header | Value | Sent by |
+|---|---|---|
+| `X-Offload-Asker` | the asker's PAIR member name when its emitter is enabled and the box is a member (lowercased), else its short lowercase hostname | every asker, on every request that creates work: delegation dispatch and queue submit, compose (template and project), vision, text, accelerator forwards |
+| `X-Offload-Pair-Card` | `node` | ONLY an asker whose emitter is not enabled (key off, PAIR not installed): nothing on that box will card the job |
+
+The signal is inverted on purpose, for a staggered rollout: an older asker sends neither header, so it
+keeps today's behaviour (it cards the job, or nobody does) and can never be carded twice. The node
+reads both headers in `admit` (and, for a pulled job, from the queued job: `fleetqueue.Job.Asker` /
+`PairCard`, stored by the holder's submit handler). The asker name is untrusted, so it is reduced to
+printable text of at most 64 characters (`core.SanitizeAsker`) before it is used.
+
+- **The asker's name is recorded whenever the header is present**: the node's ledger row carries it as
+  `requester` (`core.Request.Requester` → `Meta.Requester` → `ledger.Entry.Requester`).
+- **The card is emitted only on the signal.** From the node's own emitter (`fleetnode.Options.Pair`,
+  `fleet-serve` builds it from the node's config, so an in-flight card of a killed `fleet-serve` still
+  has an orphan marker and is closed): `queued` before the job is admitted (not after: the job can finish
+  on its own worker before `Admit` returns, and a queued frame emitted after a terminal one would
+  re-create the marker the terminal frame removed), `running` when the job starts, then `completed` or
+  `failed` with the result's reason. A job dropped before it started (withdrawn, or the node drained)
+  closes failed through `OnDropped`; a refused admission closes failed too. `id` is the fleet job id, the
+  node is this box, the engine comes from the harness task (`EngineFor`), the model from the job (the
+  result's model replaces the admission-time guess on the terminal frame), and the requester reads
+  `offload-harness/fleet:<asker>`. A node whose emitter is not enabled drops the frames.
+- **`AttachLedger` keeps skipping `door=fleet` rows**, so the node's card and its ledger row never
+  double. A pulled (claim-loop) job now gets `door=fleet` exactly like a pushed one — it never had it, so
+  the node's pipeline could card a long pulled job as its own work while its asker carded it as well.
+- **A claimed job this node already holds opens no card.** A lease-expiry re-claim of its own job is a
+  duplicate admission: the claim loop looks the id up first (as `handleDispatch` does), so a second
+  `queued` frame can never reopen a card the terminal frame closed or regress a running one. A claim a
+  draining node refuses closes its card `failed` ("node draining"); the lease requeues the job.
+  The pushed path (`handleDispatch`) has the same guarantee against a **racing** duplicate: two
+  dispatches of one id both pass the handler's first lookup, so the id is looked up again and the
+  `queued` frame and `Admit` run under one lock (`Server.cardAdmitMu`). Of two racing duplicates one
+  is admitted and carded; the other finds the winner's job, emits no frame (a `queued` frame cannot be
+  recalled once posted, and one landing after the winner's terminal frame reopens its card) and gets the
+  idempotent 202.
+- **`fleet-serve` waits for the node emitter on shutdown** (`fleetServeDrain`: `DrainAndStop`, then
+  `Emitter.Wait`, each post bounded at 2 s) on both ways out of `fleetServeAwait`: an interrupt, and a
+  `Serve` that returns an error on its own (the listener failed; the process exits with that error and
+  the same jobs in flight), so the terminal frames of the jobs that finished during the
+  drain, and the failed frames of the ones it dropped, are posted before the process exits instead of
+  being left to the next process's orphan sweep (which would close a completed card `failed`).
 
 The emitter (`internal/pairworkloads.Emitter`) is fire-and-forget: a goroutine per frame with
 a 2 s timeout, one warning per process on the first failure, nothing ever changes a harness
@@ -144,10 +270,161 @@ holds the queued one, and asserts that it landed so; register C-77).
 
 | Key | Default | Meaning |
 |---|---|---|
-| `pair_workloads_enabled` | `false` | opt in. Enable on **every** box with PAIR installed (0.140.6). Work a fleet node serves for another box (`agent` rows, the `fleet` door) is skipped, so a job never shows twice; before 0.140.6 this was delegator-only, and every fleet node's own work was invisible |
+| `pair_workloads_enabled` | `false` (`install client` seeds `true`; it is inert where PAIR's `node-id.json` is absent) | opt in. Enable on **every** box with PAIR installed (0.140.6). Work a fleet node serves for another box (`agent` rows, the `fleet` door) is skipped, so a job never shows twice; before 0.140.6 this was delegator-only, and every fleet node's own work was invisible |
 | `pair_workloads_endpoint` | `http://127.0.0.1:14324/v1/workloads/events` | the ingress URL |
 | `pair_seat_activity_enabled` | `false` | fleet-serve reports DIRECT traffic on this box's vLLM seats (see *Seat activity* below). Enable on every box that **serves** a vLLM seat; independent of `pair_workloads_enabled` |
+| `pair_node_info_url` | `""` = `http://127.0.0.1:14318/v1/node-info`, except where `OFFLOAD_PAIR_APPDIR` is set | PAIR's loopback node-info, read for this node's UUID only when `node-id.json` is missing or unreadable (*Identity when the harness user is not PAIR's user*). Loopback only: any other host fails the config load naming the key |
+| `pair_workloads_relay` | absent = `auto` | where this box's frames go when it has **no** PAIR identity (*The card relay*): `auto` / absent = every `delegate_remotes` base whose health advertises `pair_relay`; `"off"` = no relay; other entries = explicit member base URLs. Each entry is validated like `delegate_remotes`. The bearer is `fleet_auth_token` |
 | env `OFFLOAD_PAIR_APPDIR` | platform default | PAIR's app-data dir when it is not at `%LOCALAPPDATA%\Nvidia Corporation\Personal AI Router` (Windows) / `~/.config/Nvidia Corporation/Personal AI Router` (Linux); tests use it |
+
+## Identity when the harness user is not PAIR's user
+
+The emitter's identity is PAIR's `node-id.json`, and PAIR rewrites that file `0600`. On a box where the
+harness runs as a **different OS user** than PAIR (a small ARM node: the fleet node runs as its own
+service user, PAIR as the logged-in one) the file is unreadable, or the harness user's own default app dir
+does not exist, so the emitter stayed disabled forever although PAIR's worker was up and its ingress
+answered. PAIR's own node-info service listens on loopback without a login and reports the same UUID as
+`hostUuid` (fork `services/nvpair-node-info`, `GET /v1/node-info`, plaintext HTTP on `:14318`), so:
+
+- **When it applies.** Only when `node-id.json` cannot be **read** (missing, or any read error such as a
+  permission denial). A readable `node-id.json` is the primary path and never touches node-info or the
+  ingress probe; a readable file that names no UUID is a broken PAIR, not a permission problem, and
+  stays disabled as before.
+- **What it reads.** `hostUuid` from node-info, with a 1 s timeout, no redirect followed, and accepted
+  only as a canonical UUID (8-4-4-4-12 hex). `pair_node_info_url` overrides the URL and must be a
+  loopback address (127.0.0.0/8, `::1`, `localhost`): any other host fails the config load naming the
+  key, and the emitter refuses it again at run time.
+- **Only while the ingress answers.** The fallback identity is accepted only when the configured
+  ingress answers HTTP at all: one `POST {}` with `Content-Type: application/json`, which PAIR refuses
+  with a 4xx (it is not a frame, so it opens no card); any HTTP answer, whatever its status, proves a
+  listener. A box that has node-info but no ingress (a view-only node, or a PAIR whose worker has no
+  ingress) therefore stays disabled instead of posting cards nobody receives.
+- **Known cost.** The probes run inside the identity reload, which holds the identity lock: on a box
+  where `:14318` is filtered (packets dropped, not refused) every identity reader waits the 1 s probe
+  timeouts once per 60 s. A refused connection, the common case, fails at once.
+- **Cached.** A successful node-info answer and a successful ingress probe are each trusted for 10 min,
+  and the identity reload that asks is itself throttled to 60 s, so nothing is probed per call. A
+  failed probe is retried on the 60 s reload. The first call on a cold process waits at most the two
+  1 s timeouts; a refused connection (PAIR not installed, the common case) fails at once.
+- **Members.** `cluster/members.json` is read exactly as on the primary path. Where it is unreadable
+  only this node resolves: a card for any other node carries `scheduledOn` null, as for any node PAIR
+  does not know.
+- **The asker's wire headers follow the same identity** (`WireHeadersFor` builds its emitter with the
+  same node-info URL): an asker enabled through the fallback does not ask the serving node to card the
+  job, so one job is still one card.
+- **The default URL is not applied where `OFFLOAD_PAIR_APPDIR` is set.** That variable names the PAIR
+  data dir on purpose (a portable install, a test fixture), and a missing `node-id.json` there means
+  "PAIR is not installed here", not "ask the default port": a test that points the app dir at a scratch
+  directory can never reach a live PAIR. Name `pair_node_info_url` explicitly to use the fallback on
+  such a box. An emitter built from a bare `pairworkloads.Config` (no `NodeInfoURL`) has no fallback.
+- **A clustered node still answers.** PAIR's broker spawns node-info with `--node-id` and deliberately
+  without `--cluster-dir` (fork `services/nvpair-ui-broker/broker.go`, `spawnNodeInfo`): it stays plain
+  HTTP on the fixed `:14318` even when the node is a cluster member, reports the broker's own resolved
+  UUID (the value in `node-id.json`), and gates callers only in the standalone `--cluster-dir` mode the
+  broker does not enable. So the fallback works on a cluster member; a node-info started by hand with
+  `--cluster-dir` would answer `403` and the emitter would stay disabled.
+
+## The card relay: a box that is not a PAIR member (D26)
+
+A box with no PAIR identity of its own (no readable `node-id.json`, and no node-info and ingress on loopback: a
+view-only box, a thin client built by `install client` where PAIR is not installed) could never card its own work. The
+operator's desktop showed that box's view-only card idle while its `gpu reserve` leases, CLI calls and fleet-served jobs
+stayed invisible. A **relay** closes the gap with the same frames: a fleet-serve on a PAIR member posts them for it.
+
+**The member's side** (`internal/fleetnode/pair_relay.go`, `pairworkloads.ParseRelay`):
+
+- `POST /fleet/pair-relay` takes ONE workload lifecycle frame, exactly the JSON-RPC notification this package builds
+  (`workload:submitted|started|completed|errored`, `params.workloadInfo` with the documented keys), plus an optional
+  top-level `node` (a node name hint) and `node_aliases` (other names of the same node) **beside** the frame, never inside
+  `workloadInfo`. The decode is strict: an unknown key at any level, a method that disagrees with the state, a bad type,
+  a control character or a body over 64 KiB (`RelayBodyMax`) is refused (`400`, `413` for the size).
+- The route is **token-gated** like every other gated lane (`tokenGated`; the bearer is checked before the body is read; a
+  tokenless node beyond loopback answers `403`, a tokenless loopback node stays open) and **advertised in health as
+  `pair_relay: true` exactly when it would admit** (`PairRelayAdmissible`: the node has a PAIR identity of its own, via
+  `Emitter.LocalIdentity`, and the reachability rule holds). A node that itself reports through a relay never relays for
+  another. The identity read behind the advertisement is the emitter's cached one (re-read at most once a minute; its cost
+  is the node-info probes of *Identity when the harness user is not PAIR's user* on a box whose `node-id.json` is
+  unreadable).
+- The relaying box names itself in `X-Offload-Asker` (**required**, sanitized and bounded to 64 printable characters as
+  H2's requester is). A token bucket per asker (5 frames/s, burst 60) and a global one (50/s, burst 200) answer `429` with
+  `Retry-After` **before the body is read**; the asker name is a header the caller chooses, so the global bucket is what a
+  rotating name meets. The rate bounds the calls, not the cards left open, so a second bound counts the open relayed cards:
+  at most 128 per asker and 512 over all askers (`RelayOpenPerAsker`, `RelayOpenGlobal`). A frame that would open a NEW card
+  past either cap is a `429` with `Retry-After`; the next frame of a card already open only refreshes it, and a terminal frame
+  is always admitted and frees its slot (refusing it would strand the card it ends). An entry ages out after
+  `RelayOpenMaxAge` (24 h), the age at which the member's sweep closes the marker it mirrors. The count is in memory, so a
+  member restart empties it; the markers a restart leaves are the sweep's, so a flood is bounded by the caps plus what one
+  restart forgets, never unbounded.
+- What the member posts, through its own emitter (so its orphan register covers the in-flight card):
+
+  | Field | Value |
+  |---|---|
+  | `id`, `runId` | `relay-<asker>-<id>` bounded to 160 characters, with 8 hex of a digest of the exact (asker, id) pair appended, so two different pairs never share a card whatever the concatenation or the bound |
+  | `originatedFrom` | the member's own UUID. A value in the body is checked for shape and ignored: the relay never chooses an origin |
+  | `requesterId` | `offload-harness/fleet:<asker>`, plus `/` and the relayed requester's own suffix (its session) when it has one, bounded |
+  | `scheduledOn` | resolved **by the member**, by its own resolver (`members.json`, then `view-only-nodes.json`), from the `node` hint and its aliases; with no hint, from the asker's own name (a view-only box's name resolves there); otherwise `null`. Never the member itself for a job that did not run there. The body's `scheduledOn` is ignored |
+  | the rest | `model`, `engine` (a lower-case name), `state`, the three timestamps and `error` as relayed, `error` cut to the card's one line |
+
+- **A relayed in-flight marker belongs to a remote producer.** The member cannot see whether the producer's process, on
+  another box, is alive, so its marker carries `pid` 0 and `remote: true`, is **never judged by the member's pid table**,
+  and closes only by its terminal relayed frame or by the age cap `RelayOpenMaxAge` (24 h, the register's leak cap: a lease
+  card legitimately runs for hours). The terminal frame finds the marker **by name** (`0-<job id>.remote`), so it still
+  closes the card after the member restarted since the in-flight frame. A terminal frame PAIR could not take is kept as a
+  pending frame of the same remote kind.
+- **A relayed marker is not a `.json` file** (`0-<job id>.remote`, `remoteSuffix`). A harness built before the relay sweeps
+  the same `pair-open/` directory on the same box (a long-lived MCP server or CLI the upgrade did not restart), reads every
+  `.json` marker with `pid <= 0` as orphaned, and ignores the unknown `remote` field, so it would post `failed` for a relayed
+  job that is still running. Those binaries skip every file that is not `.json`; this build's sweep reads both.
+- **A late in-flight frame is ignored.** Frames of a job are not ordered on the wire (above), so a `queued` or `running` frame
+  can reach the member after the job's terminal frame. PAIR drops it, but the member would write a fresh remote marker for it
+  that nothing closes until the age cap and count it as an open card. The member's limiter remembers the cards a terminal
+  frame closed for 10 minutes (`relayClosedTTL`, at most 4096) and answers a later in-flight frame of one `200` without posting
+  it (a refusal would make the relaying box demote a healthy relay). A producer that reuses a job id after that window opens a
+  card again. Known cost: a relaying box that dies leaves its card "Running" on the desktop until
+  it is closed by the box's own sweep (below) or the cap.
+
+**The relaying side** (`internal/pairworkloads/relay.go`):
+
+- It is used **only when the emitter has no local identity** (the primary `node-id.json` and the node-info fallback both
+  fail); a box with either keeps reporting to PAIR's loopback ingress and never relays. In relay mode `Enabled()` is true,
+  and a frame is a relay body (the same workloadInfo keys with `originatedFrom` and `scheduledOn` null, plus the hint) sent to
+  the **first healthy member** with the fleet bearer and `X-Offload-Asker` (this box's short name). An event with no node
+  (this box's own work) sends this box's own name as the hint; a delegation's event sends the dispatch host and the fleet node
+  id as the hint and its alias.
+- `pair_workloads_relay` selects the members: absent or empty is `auto` (every `delegate_remotes` base whose `/fleet/health`
+  advertises `pair_relay`, probed over `netguard.SafeTransport` with a 1 s bound, outside the identity lock; a member never
+  probed is probed on the first call, which pays the bound once, and afterwards a verdict is answered at once and refreshed
+  in the background when it is 60 s old (30 s after a failed probe), so no call waits on a member that went offline),
+  `"auto"` says so outright, `"off"` turns the relay off, and any other entry is an
+  explicit member base URL (a box with no `delegate_remotes` sets it by hand; explicit members are used without a probe). The
+  bearer is `fleet_auth_token`. `install client` seeds nothing for it: `auto` covers a client that has `delegate_remotes`.
+  The probe is a small health reader in this package, not `delegate.FetchNodeView`, because `internal/delegate` imports this
+  package.
+- **One job, one card.** `WireHeadersFor` stops sending `X-Offload-Pair-Card: node` in relay mode (the emitter is enabled),
+  so the serving node does not card a job the asker cards through its relay.
+- **The orphan register records the relay.** A relay marker's `endpoint` is the relay's **route URL** (`<base>/fleet/pair-relay`),
+  and it keeps the node hint, so the relaying box's own sweeper closes only the cards it opened through a relay (H1's endpoint
+  scoping keeps these apart from local-ingress markers), through that relay, as an `errored` relay frame carrying the hint.
+  A job's terminal frame goes to the relay its in-flight frames went to, even when the first healthy member changed since.
+  The pin is confirmed by the first post a relay takes: a job's first frame that FAILS on its relay drops the pin, so the
+  next frame picks a relay not known to be down (a relay that never took a frame of the job holds no card), while a
+  confirmed pin stays through a later failure (the card is open there; its terminal frame waits as a pending marker).
+  A relay that fails a post goes behind the others for 30 s. A **terminal frame through a relay with no marker of its own**
+  (its in-flight frames never went out) is kept as a pending frame when the relay does not take it, so the sweep delivers it
+  once the relay answers instead of the card never appearing.
+- **Overlong text is shortened, never refused.** The member's strict decode refuses a `model`, `requesterId` or id over 128
+  bytes with a `400`, which the sender treats as permanent, so a lease card named for a long script file name would never
+  exist. The relaying side cuts `model` and `requesterId` to 128 bytes on a rune boundary (non-printing characters become
+  spaces) and an id longer than that to a prefix plus 8 hex of a digest of the whole id, the same on every frame of a job.
+- **One dead relay does not stall the sweep.** A sweep pass that fails a post to one endpoint skips that endpoint's remaining
+  markers for the pass and goes on to the markers of the other relays and of the local ingress; the skipped ones are retried
+  by the next sweep (before this, the first failed post ended the pass for every marker behind it, until the 48 h give-up).
+- `offload_status` has a `pair` block (absent unless `pair_workloads_enabled` is on): `mode` is `local ingress`,
+  `node-info fallback`, `relay` (with the route URL) or `off` (with the reason).
+
+Trust: a holder of the fleet token can make this member post a card named for any asker, on any node PAIR knows. The frame
+carries no prompt, context or output, and the member checks its shape, namespaces its id, bounds its rate and the cards it leaves open; the token is
+the same one that already lets its holder run renders and agent contracts on the node.
 
 ## Seat activity: traffic that bypasses the harness (0.133.0)
 
@@ -203,8 +480,9 @@ heartbeat, and the broker's staleness sweep exempts records of its own origin. N
 side can know the producer died, so the harness retires its own orphans:
 
 - **Register.** Every in-flight frame (`queued`, `running`) writes one marker
-  `<state root>/pair-open/<pid>-<job id>.json` — the machine-wide root `seat-inflight/` and the GPU
-  lease use — holding the frame's workloadInfo, the writer's pid and its process start identity.
+  `<state root>/pair-open/<pid>-<job id>.json` (a relayed card's marker is `0-<job id>.remote`, *The card relay*) — the machine-wide root `seat-inflight/` and the GPU
+  lease use — holding the frame's workloadInfo, the writer's pid, its process start identity and
+  the **endpoint** (the ingress URL) the card was posted to.
   The terminal frame removes it once delivered. A terminal frame that could **not** be delivered
   (PAIR restarting, an answer slower than 2 s) replaces the marker as a *pending* terminal frame,
   which the next sweep resends as it is — the job's real verdict — without waiting for the
@@ -219,19 +497,49 @@ side can know the producer died, so the harness retires its own orphans:
   `failed`, error "harness process exited before the job finished", the in-flight frame's id,
   origin, node, engine, requester and timestamps unchanged (the same card), `completedAt` = now —
   then deletes the marker.
+- **Endpoint scoping.** A sweep closes only the markers of **its own endpoint**: the marker's
+  `endpoint` and the sweeper's `pair_workloads_endpoint` must name the same ingress (compared as
+  scheme, case-insensitive host, port — a scheme's default port is the same as none — and path). A
+  marker with no `endpoint` was written before the field existed and counts as the default ingress
+  (`http://127.0.0.1:14324/v1/workloads/events`). A foreign marker is left exactly as it is: not
+  locked, not posted, not deleted, not even dropped at the age caps. Closing means "post to my
+  endpoint, delete on success", so a sweeper that took another ingress's marker would close nothing
+  real and destroy the only record of the card.
 - **Who sweeps.** Every emitter once, on its first `Emit` (so every harness process that reports
   anything closes what a dead one left open; the process's `Wait` covers it), and fleet-serve
   every 45 s when `pair_workloads_enabled` or `pair_seat_activity_enabled` is on.
 - **Racing sweepers.** A claim is an O_EXCL `<marker>.lock`; the winner re-checks the marker,
   posts, removes the marker, then the lock — so one frame per orphan. Rename-to-claim does not
   work on Windows: two sweepers that opened the marker before either renamed it both succeed. A
-  failed post (PAIR down) releases the lock and keeps the marker for the next sweep; a marker PAIR
-  has not accepted for 48 h is dropped. A lock whose sweeper died, or older than 5 min, is removed
-  by a later pass.
+  post to an **unreachable** PAIR (transport error, HTTP 5xx, or any 4xx that does not judge the frame: 401, 403, 404, 405, 408, 429 ...) releases the lock, keeps
+  the marker and skips every later marker of the same endpoint for the pass — they would fail the same way; other endpoints' markers go on — and the next sweep
+  retries; a marker PAIR has not accepted for 48 h is dropped. A post PAIR **rejects** (HTTP 400, 413 or 422:
+  it will never accept that frame; 401/403/404/405 describe the route, not the frame, so a PAIR
+  mid-deploy or a wrong endpoint cannot make the sweeper delete every marker) drops that one marker and its lock, logs one line
+  naming the job id and the status, and the pass goes on to the next marker; before this rule one
+  rejected marker starved every later one until the 48 h give-up. The same rule applies to a live
+  producer's terminal frame: rejected, it is dropped with a log line instead of being rewritten as a
+  pending marker; unreachable, it stays pending. A marker whose closing frame cannot even be **built**
+  (`sweepFrame` returns an error) is the same permanent verdict, because no PAIR can accept a frame that
+  does not exist: the sweep logs the job id and the cause, drops the marker and its lock, and goes on,
+  instead of reading it as an unreachable PAIR and ending the pass at that marker every sweep until the
+  48 h give-up. A lock whose sweeper died, or older than 5 min, is
+  removed by a later pass.
 - **Seat-watch cards** go through the same `Emit`, so a fleet-serve killed with a direct-traffic
   card open leaves a marker the next sweep closes. A clean stop still completes open cards
   (`closeAll`).
 - A disabled emitter (key off, or PAIR not installed) writes and sweeps nothing.
+- **Tests must isolate their state root.** Every test that builds an **enabled** emitter (or runs
+  anything that does: a lease card, a delegation) must give it its own state root (`StateDir` or
+  `OpenDir` set to `t.TempDir()`, or `LOCAL_OFFLOAD_STATE_DIR` set by the package's `TestMain`),
+  because an emitter with no root resolves to the machine-wide `pair-open` directory and its first
+  sweep reads the operator's real markers. The lease-card test once did: it closed real orphan
+  markers into its own httptest ingress and deleted them, leaving the real cards "Running" for 31.9 h
+  (the endpoint scoping above now stops that second-hand, but the isolation is still the rule). The
+  root, `internal/delegate`, `internal/mcpserver`, `internal/pipeline` and `internal/pairworkloads`
+  packages each carry a `TestMain` that points the variable at a throwaway directory and fails closed:
+  when that directory or the variable cannot be set up it exits 1 without running a test, instead of
+  falling back to the machine-wide root.
 
 ## The PAIR side (what has to be true on the box)
 
@@ -281,7 +589,20 @@ appears in PAIR's Jobs list on this box **and** on the node that ran it, reading
   sweep closes it as `failed` within one fleet-serve sweep interval (45 s), or on the next emit of
   any harness process on the box. A card still stuck: check `<state root>/pair-open/` for its
   marker (`<pid>-<job id>.json`) and whether a harness process on the box has either key on.
-- **Nothing appears**: the key is off, PAIR is not installed (no `node-id.json`), or the
+- **A remote call has no card on its asker**: the asker's emitter is not enabled (the node then cards it,
+  as `Requested from fleet:<asker>`, only when the node's own emitter is enabled), or no node was chosen
+  (a placement defer writes a row and no card), or the node is an older build that does not read the
+  signal. A card with no node line: the dispatch host and the fleet node id are in neither
+  `cluster/members.json` nor `configs/view-only-nodes.json`; the first failure logs one
+  `pairworkloads: no PAIR member is named ...` line.
+- **A box with no PAIR gets no card**: `offload_status` `pair` says why (`off` with the reason). In `auto` no `delegate_remotes`
+  member advertises `pair_relay` (it needs a PAIR identity of its own and a `fleet_auth_token`, or a loopback listener), or
+  the box has no `delegate_remotes` and no explicit `pair_workloads_relay`. A card Running long after its box went away is
+  a relayed card whose producer died: the relaying box's sweep closes it through the relay when that box comes back, and
+  the member's age cap (24 h) otherwise.
+- **Nothing appears**: the key is off, PAIR is not installed (no `node-id.json`, and on a box
+  where the harness user is not PAIR's user, node-info and the ingress are not both answering on
+  loopback: `curl http://127.0.0.1:14318/v1/node-info` must show a `hostUuid`), or the
   stock worker is back after a PAIR update (`curl` returns connection refused on 14324).
   The first failed send logs one `pairworkloads:` line.
 

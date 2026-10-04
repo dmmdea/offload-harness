@@ -751,6 +751,34 @@ func PlaceText(remotes []NodeView, task string) (int, bool) {
 	return best, best >= 0
 }
 
+// PlaceSTT picks the fleet node that transcribes ONE uploaded audio file (the stt upload door, ADR
+// 0072) when the caller has decided the work leaves the box (route remote, or route auto while the
+// local whisper admission would block). It is PlaceVision with the door's own gate: the node must
+// ADVERTISE the door (ServesSTTUpload: an older node lists only the legacy path-taking "stt", which
+// cannot be sent bytes, so it is never a target), have an hq model when hq is asked, take a file this
+// size (size bytes against its published cap), and have a card that is not spoken for (the same
+// LeasedText / LeaseBusy refusals). Ranking is betterRemote, as for vision, and the return is the
+// INDEX into remotes, for the same reason.
+func PlaceSTT(remotes []NodeView, hq bool, size int64) (int, bool) {
+	seed := mintP2CSeed()
+	best := -1
+	for i, r := range remotes {
+		if !sttEligible(r, hq, size) {
+			continue
+		}
+		if best < 0 || betterRemote(seed, nil, 0, r, remotes[best]) {
+			best = i
+		}
+	}
+	return best, best >= 0
+}
+
+// sttEligible is PlaceSTT's hard gate: the door advertised and able to take this file, the card not
+// reserved.
+func sttEligible(r NodeView, hq bool, size int64) bool {
+	return r.ServesSTTUploadOf(hq, size) && !r.LeasedText && !r.LeaseBusy
+}
+
 // textEligible is PlaceText's hard gate: the lane advertised and the task served, the card not
 // reserved.
 func textEligible(r NodeView, task string) bool {

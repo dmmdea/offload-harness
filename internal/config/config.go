@@ -411,6 +411,22 @@ type Config struct {
 	// PairWorkloadsEndpoint is the ingress URL; the default is the port every
 	// node's workload-ingress.json binds.
 	PairWorkloadsEndpoint string `json:"pair_workloads_endpoint,omitempty"`
+	// PairNodeInfoURL is PAIR's loopback node-info (default http://127.0.0.1:14318/v1/node-info),
+	// asked for this node's UUID (`hostUuid`) when PAIR's node-id.json is missing or unreadable: a box
+	// where the harness runs as a different OS user than PAIR (a small ARM node). The fallback identity counts
+	// only while the pair_workloads_endpoint ingress answers HTTP, so a box with node-info and no
+	// ingress stays off. Loopback only: any other host is refused at load. Empty = the default,
+	// except where OFFLOAD_PAIR_APPDIR is set (docs/systems/pair-workloads.md).
+	PairNodeInfoURL string `json:"pair_node_info_url,omitempty"`
+	// PairWorkloadsRelay is where this box's PAIR frames go when it has NO PAIR identity of its own
+	// (no readable node-id.json and no node-info fallback: a view-only box, a thin client where PAIR
+	// is not installed): the base URLs of fleet-serve members that serve POST /fleet/pair-relay
+	// (docs/systems/pair-workloads.md, *The card relay*). Absent or empty = "auto": every
+	// delegate_remotes base whose /fleet/health advertises pair_relay. The entry "auto" says so
+	// outright, "off" turns the relay off, and any other entry is an explicit member base (a box with
+	// no delegate_remotes sets it by hand). Used only while pair_workloads_enabled is on and the box
+	// has no identity; the fleet_auth_token is the bearer.
+	PairWorkloadsRelay []string `json:"pair_workloads_relay,omitempty"`
 	// PairSeatActivityEnabled (0.133.0) makes fleet-serve report traffic that
 	// reaches this box's vLLM seats WITHOUT the harness (a curl soak, an editor
 	// pointed at llama-swap) as PAIR cards, one per busy stretch of a seat. The
@@ -1694,6 +1710,24 @@ type Config struct {
 	FleetComposeProjects bool `json:"fleet_compose_projects,omitempty"`
 	// FleetComposeBundleMaxMB caps one project bundle as sent (gzip-compressed), MiB; 0 = 64.
 	FleetComposeBundleMaxMB int `json:"fleet_compose_bundle_max_mb,omitempty"`
+	// FleetSTTUploadMaxMB caps one audio upload to POST /fleet/stt (the stt upload door, ADR 0072),
+	// MiB of decoded audio; 0 = 48. The request body is that cap in base64 (64 MiB at the default) plus
+	// slack, and 48 MiB is about 4.6 h of the 32 kbps Opus an asker sends. Published in health
+	// (stt_upload_max_mb) so an asker never sends a file the node would refuse.
+	FleetSTTUploadMaxMB int `json:"fleet_stt_upload_max_mb,omitempty"`
+	// FleetSTTTranscriptTTLMin is how long a node keeps the transcript files (.srt, .txt,
+	// .segments.json) of an stt upload job under media_dir, minutes; 0 = 30, negative = keep them for
+	// good. They are removed when the job record is evicted or once this old, swept at fleet-serve
+	// start and on the job store's janitor tick; /fleet/media serves them only to a bearer holder
+	// while they last (ADR 0072). The asker fetches the segment list within seconds of the job
+	// finishing, so the default is generous.
+	FleetSTTTranscriptTTLMin int `json:"fleet_stt_transcript_ttl_min,omitempty"`
+	// FleetSTTMaxConcurrent caps how many fleet stt jobs run at once on this node, the legacy
+	// path-taking lane and the upload door counted together; 0 = 1. Whisper is one single-slot
+	// upstream: a job over the cap waits its turn in arrival order and is never refused. Inference
+	// itself stays serialized by the whisper client's process-wide mutex whatever this says, so a
+	// value above 1 only overlaps the jobs' ffmpeg conversions and queue time.
+	FleetSTTMaxConcurrent int `json:"fleet_stt_max_concurrent,omitempty"`
 	// KVSlotCapGiB bounds the node's kvslots/ directory (ADR 0056 Layer 2); 0 = 8 GiB.
 	KVSlotCapGiB int `json:"kvslot_cap_gib,omitempty"`
 	// FleetAgentEnabled opts this NODE into executing fleet "agent" tasks
@@ -3012,6 +3046,39 @@ func (c Config) EffectiveComposeBundleMaxBytes() int64 {
 		mb = 64
 	}
 	return int64(mb) << 20
+}
+
+// EffectiveSTTUploadMaxBytes is the cap on one audio upload to POST /fleet/stt, decoded: 48 MiB unless
+// fleet_stt_upload_max_mb says otherwise (zero and negative read as the built-in).
+func (c Config) EffectiveSTTUploadMaxBytes() int64 {
+	mb := c.FleetSTTUploadMaxMB
+	if mb <= 0 {
+		mb = 48
+	}
+	return int64(mb) << 20
+}
+
+// EffectiveSTTTranscriptTTL is how long an stt upload job's transcript files live on the node:
+// fleet_stt_transcript_ttl_min minutes, 30 when it is zero; 0 for a negative value, which means
+// "never remove".
+func (c Config) EffectiveSTTTranscriptTTL() time.Duration {
+	switch m := c.FleetSTTTranscriptTTLMin; {
+	case m < 0:
+		return 0
+	case m == 0:
+		return 30 * time.Minute
+	default:
+		return time.Duration(m) * time.Minute
+	}
+}
+
+// EffectiveSTTMaxConcurrent is how many fleet stt jobs this node runs at once: fleet_stt_max_concurrent,
+// 1 when it is zero or negative.
+func (c Config) EffectiveSTTMaxConcurrent() int {
+	if c.FleetSTTMaxConcurrent <= 0 {
+		return 1
+	}
+	return c.FleetSTTMaxConcurrent
 }
 
 // EffectiveComposeCacheDir is where the compose runner keeps its work dirs, the

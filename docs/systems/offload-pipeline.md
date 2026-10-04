@@ -200,6 +200,21 @@ empty = OCR rides `vision_model`, byte-identical to before. The alias is resolve
 through, so the call, the cache key, the circuit breaker, and the ledger all name the model that
 actually ran; `offload_status`'s roster reports the effective `ocr` model, falling back to vision.
 
+**Whole-video watching** (`offload_video_watch`, `runVideoWatch`) sweeps a video window by window
+(8 s at 1 fps by default), sends each window through the same per-call vision machinery as
+`video_describe`, then synthesizes the per-window notes on the text seat. One call is one call:
+it mints a job id, its own ledger row (the summary, or the all-deferred defer) carries it, and each
+window row names it as `parent_job_id` (an inner row, see
+[pair-workloads](pair-workloads.md)), so a call reads as one call
+and one PAIR card, and its tokens are counted once. **It fails fast on a held GPU.** The first
+window that defers with `err_class: gpu_busy` (a render holds the lock for longer than the
+`vision_gpu_wait` bound) stops the sweep: the remaining windows are reported deferred with a
+`skipped: <that reason>` note, call nothing and write no row. When every window deferred the call
+returns ONE defer carrying `err_class` (the windows' common class, `gpu_busy` for a held card) and
+the reason of the most recent window that actually ran; windows that were answered before the card
+was taken keep the partial result as before. Without this a held card cost one full gate wait per
+window (12 windows x 90 s = 18 min for one call on 2026-10-03).
+
 **Transcription** (`offload_transcribe`) is its own branch: the audio is converted to a 16 kHz mono wav
 and posted to the whisper upstream through llama-swap's per-model passthrough (`internal/sttclient`),
 never to the text cascade. The upstream is single-slot, so one process-wide mutex serializes the
@@ -215,7 +230,12 @@ transcriptions therefore shares one load and pays one cold start (register C-91;
 follow every call and landed on the next call's inference, which llama-swap answers
 `matrix: model unloaded`). A card a render holds is waited for
 `gpu_wait_ms` like every other GPU door (the HTTP timeout, `stt_request_timeout_sec`, only caps that wait), and the
-refusal is a `capacity` defer, `gpu busy: …` (register C-89). The verdict "no speech"
+refusal is a `capacity` defer, `gpu busy: …` (register C-89). Since 0.164.0 the call can leave the box:
+`offload_transcribe`'s `route` (default `auto`) runs the pipeline here or sends the audio to a fleet node through
+`internal/sttremote` (see [mcp-server.md](mcp-server.md) and
+[FLEET-NODE.md](../FLEET-NODE.md#the-stt-upload-door-post-fleetstt)); the node runs this same branch over the uploaded
+file, and the fleet node's own jobs wait at its stt gate (`sttclient.Queued` tells `UnloadIfIdle` they are coming, so the
+model stays loaded for them). The verdict "no speech"
 (`ErrUpstreamNoSpeech`, the defer reason `empty transcript (no speech detected)`) is an upstream that
 answered 200 with an empty transcript or, on the whisper protocol only, whisper.cpp's exit on audio with
 no speech content (an empty-body 5xx, the F-35 crash) in a call that ran alone: no other transcription was

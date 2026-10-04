@@ -27,7 +27,12 @@ type fakeNode struct {
 	mu      sync.Mutex
 	payload map[string]any
 	auth    string
-	srv     *httptest.Server
+	hdr     http.Header // header of the last dispatch (the attribution headers ride it)
+	// runningFirst makes the first poll answer state "running" (the node says the job started)
+	// before the done answer.
+	runningFirst bool
+	polls        int
+	srv          *httptest.Server
 }
 
 func newFakeNode(t *testing.T, node string, tasks, ttasks []string, res core.Result) *fakeNode {
@@ -52,6 +57,7 @@ func newFakeNode(t *testing.T, node string, tasks, ttasks []string, res core.Res
 		f.mu.Lock()
 		f.payload = p
 		f.auth = r.Header.Get("Authorization")
+		f.hdr = r.Header.Clone()
 		f.mu.Unlock()
 		if f.refuse != 0 {
 			w.WriteHeader(f.refuse)
@@ -62,12 +68,26 @@ func newFakeNode(t *testing.T, node string, tasks, ttasks []string, res core.Res
 		_ = json.NewEncoder(w).Encode(map[string]any{"job_id": p["job_id"], "status": "accepted"})
 	})
 	mux.HandleFunc("GET /fleet/jobs/{id}", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		f.polls++
+		first := f.polls == 1
+		f.mu.Unlock()
+		if f.runningFirst && first {
+			_ = json.NewEncoder(w).Encode(map[string]any{"job_id": r.PathValue("id"), "state": "running"})
+			return
+		}
 		data, _ := json.Marshal(f.result)
 		_ = json.NewEncoder(w).Encode(map[string]any{"job_id": r.PathValue("id"), "state": "done", "data": json.RawMessage(data)})
 	})
 	f.srv = httptest.NewServer(mux)
 	t.Cleanup(f.srv.Close)
 	return f
+}
+
+func (f *fakeNode) dispatchHeader() http.Header {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.hdr.Clone()
 }
 
 func (f *fakeNode) dispatched() (map[string]any, string) {

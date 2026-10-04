@@ -187,6 +187,18 @@ type Request struct {
 	// because Params feeds the result-cache key, and a job-unique id there would
 	// make every dispatched request miss.
 	FleetJobID string `json:"fleet_job_id,omitempty"`
+	// Requester is the asker's name (AskerHeader, sanitized), stamped by a fleet node on the request it
+	// builds for a job another box asked for. It rides to the ledger row as Meta.Requester so the
+	// node's row says who the work was for. Documentary only, like Door and FleetJobID: it never
+	// routes, gates or keys a cache.
+	Requester string `json:"requester,omitempty"`
+	// ParentJobID is set by a COMPOSITE call (extract_image, inpaint's auto-text
+	// mask) on the sub-request it issues: the sub-call's ledger row is then an
+	// INNER row of the composite's own row (register C-62), never a second call
+	// and never a PAIR card of its own. In-process only (`json:"-"`): a wire
+	// request must not be able to mark its own row inner, which would hide it
+	// from every job counter and every card.
+	ParentJobID string `json:"-"`
 	// Resumable says the door that admitted this call can hand a place in line back to its
 	// caller AND take it again: it returns the answer's data (the waiter_token) and accepts
 	// waiter_token on the next call. Only the MCP server sets it. A media call that waited its
@@ -319,6 +331,18 @@ type Meta struct {
 	// on the box's own seat (register C-62): the ledger then writes this row
 	// as an INNER row of that job instead of a second job.
 	ParentJobID string `json:"parent_job_id,omitempty"`
+	// CallID is the id of the PAIR card the call opened when it started (the
+	// CallTracker returns it from Begin): stamped by Pipeline.Run, mapped onto
+	// ledger.Entry.CallID, so the call's own row closes that card and no other.
+	// Empty for a call that opened no card; omitempty, so such a call publishes
+	// byte-identically to before.
+	CallID string `json:"call_id,omitempty"`
+	// CardsCarried is the work, in tokens through the cards, of this call's EARLIER
+	// attempts whose rows went to the ledger as inner rows (a cascade climb,
+	// plan D12). Record writes cards_tokens 0 on an inner row, so the call's own row
+	// adds this figure to its own and a share reader's total counts that work once.
+	// In-process bookkeeping only (`json:"-"`): never published.
+	CardsCarried int `json:"-"`
 	// QueuedMs is the agent run's busy-hold wall (ADR 0061): time its requests
 	// waited on a seat whose engine was working for others.
 	QueuedMs   int64  `json:"queued_ms,omitempty"`
@@ -443,6 +467,9 @@ type Meta struct {
 	// in Pipeline.Run and mapped onto ledger.Entry.FleetJobID; omitempty, so a call
 	// no fleet node dispatched publishes byte-identically to before.
 	FleetJobID string `json:"fleet_job_id,omitempty"`
+	// Requester is the Request.Requester carried through to telemetry: who a fleet node's
+	// row was run for. Copied in Pipeline.Run and mapped onto ledger.Entry.Requester; omitempty.
+	Requester string `json:"requester,omitempty"`
 	// License is the license of the media binding that produced this result (ADR
 	// 0058: a named family always declares one; a default binding may). Mapped onto
 	// ledger.Entry.License so the ledger can answer "which renders came out of a

@@ -151,6 +151,9 @@ func clientConfig(home string, remotes []string, token string) map[string]any {
 		"delegate_remotes":         remotes,
 		"fleet_auth_token":         token,
 		"agent_delegation_enabled": true,
+		// Cards the work this client sends to the fleet in PAIR's Jobs list (D8). Enabled() still
+		// requires PAIR's node-id.json, so the key is inert on a box with no PAIR installed.
+		"pair_workloads_enabled": true,
 	}
 	def := config.Default()
 	v, t := reflect.ValueOf(def), reflect.TypeOf(def)

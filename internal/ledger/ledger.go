@@ -193,6 +193,13 @@ type Entry struct {
 	// counter skips it — until 0.143.0 each route=local job was counted twice
 	// (1,002 of 1,002 local rows paired, 2026-09-19..27).
 	ParentJobID string `json:"parent_job_id,omitempty"`
+	// CallID names the tool call whose PAIR card this row closes (pairworkloads
+	// Begin returns it, core.Meta carries it): the card's own job id. Without it
+	// the ledger observer could only close the OLDEST open card of the task, so
+	// under overlapping calls one call's row closed another's card. Omitted on a
+	// row written outside a call that opened a card, which a reader must treat as
+	// "no card was opened for this row", never as a call id.
+	CallID string `json:"call_id,omitempty"`
 	// QueuedMs (0.143.0, ADR 0061) is the wall an agent job's requests spent
 	// in the liveness monitor's busy hold — waiting on a seat whose engine was
 	// working for others — instead of being killed as a stall. The contention
@@ -219,6 +226,18 @@ type Entry struct {
 	// joining the two ledgers is one equality instead of a guess on latency. Empty
 	// on a job that never left this box.
 	FleetJobID string `json:"fleet_job_id,omitempty"`
+	// Node and NodeID say where a REMOTE call ran, on the asker's row for it (PAIR routing fixes,
+	// D5/D6): Node is the host of the dispatch URL (the name PAIR's members carry), NodeID the fleet
+	// node id its health reported. Empty on every row of a call that ran on this box.
+	Node   string `json:"node,omitempty"`
+	NodeID string `json:"node_id,omitempty"`
+	// Requester is who a fleet node ran the row's work for: the asker name the dispatch carried
+	// (X-Offload-Asker, sanitized). Written on the NODE's row; empty on an asker's own row.
+	Requester string `json:"requester,omitempty"`
+	// CardByCaller marks a row whose PAIR card the writer already decided and emitted (or chose not
+	// to emit: a remote call that never reached a node has none): the ledger observer must not card
+	// it a second time. Absent on every row the observer cards.
+	CardByCaller bool `json:"card_by_caller,omitempty"`
 	// ReasonCode is the closed-set code for why the job ended the way it did (see
 	// reasoncode.go), written on every agent_delegate row: ReasonOK for a job that
 	// completed, so its presence never depends on the job having failed.

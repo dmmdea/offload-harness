@@ -19,7 +19,7 @@ var bareClientAllowlist = map[string]struct {
 }{
 	"gpu_drain.go:<file-scope>":                                  {1, "configured: the local llama-swap endpoint (drain and warm-back)"},
 	"internal/accelclient/accelclient.go:NewDevice":              {1, "configured: the local accelerator sidecar"},
-	"internal/accelremote/accelremote.go:<file-scope>":           {1, "configured: fleet nodes from delegate_remotes (accelerator lane)"},
+	"internal/accelremote/accelremote.go:<file-scope>":           {1, "configured: fleet nodes from delegate_remotes (accelerator lane; netguard.SafeTransport since D20)"},
 	"internal/agent/client.go:NewLLMClient":                      {1, "configured: the agent seat endpoint (llama-swap or a seat_endpoints entry under the tailnet guard)"},
 	"internal/agent/fetchtool.go:newFetchClient":                 {2, "guarded: the agent's web_fetch dials through netguard.PublicDialControl (ADR 0042)"},
 	"internal/agent/memory.go:NewMemoryClient":                   {1, "configured: the memory authority endpoint from config"},
@@ -50,7 +50,9 @@ var bareClientAllowlist = map[string]struct {
 	"internal/modelaffinity/upstream.go:upstreamResident":        {1, "configured: the local llama-swap /running (the upstream fence)"},
 	"internal/nimclient/nimclient.go:New":                        {1, "guarded: offload_nim's caller-named base is checked against the S-30 allowlist (NVIDIA hosted API, nim_endpoint, nim_bases; audit by default, enforce by nim_base_policy) and the key only reaches NVIDIA's exact hosts (S-01)"},
 	"internal/nodeswap/deps.go:readHealth":                       {1, "configured: the swapped node's own --health-url"},
+	"internal/pairworkloads/nodeinfo.go:probeClient":             {1, "configured: PAIR's own loopback node-info and ingress, loopback-guarded, no redirect followed"},
 	"internal/pairworkloads/pairworkloads.go:New":                {1, "configured: the local PAIR telemetry endpoint"},
+	"internal/pairworkloads/relay.go:newRelayClient":             {1, "configured: fleet-serve members from pair_workloads_relay / delegate_remotes (the PAIR card relay; netguard.SafeTransport)"},
 	"internal/pairworkloads/seatwatch.go:NewSeatWatcher":         {1, "configured: the local llama-swap"},
 	"internal/pipeline/agenttask.go:<file-scope>":                {1, "configured: the agent seat on the local llama-swap"},
 	"internal/pipeline/browse.go:newBrowseDecisionClient":        {2, "configured: the loopback browse decision endpoint (ADR 0060)"},
@@ -64,4 +66,5 @@ var bareClientAllowlist = map[string]struct {
 	"internal/ttsclient/ttsclient.go:Speak":                      {1, "configured: the text-to-speech endpoint from config"},
 	"internal/visionremote/visionremote.go:<file-scope>":         {1, "configured: fleet nodes from delegate_remotes (vision lane)"},
 	"internal/textremote/textremote.go:<file-scope>":             {1, "configured: fleet nodes from delegate_remotes (text lane)"},
+	"internal/sttremote/sttremote.go:<file-scope>":               {1, "configured: fleet nodes from delegate_remotes (stt upload door; netguard.SafeTransport)"},
 }

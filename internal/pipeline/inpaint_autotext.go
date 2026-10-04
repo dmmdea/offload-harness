@@ -131,7 +131,7 @@ func imageDims(path string) (int, int, error) {
 // autoTextMask runs the vision→mask_boxes chain: detect rendered-text boxes on
 // image, validate them, and render a feathered white-on-black mask file under
 // MediaDir. Returns the mask path; any failure errors (the caller defers).
-func (p *Pipeline) autoTextMask(ctx context.Context, imagePath, door string) (string, error) {
+func (p *Pipeline) autoTextMask(ctx context.Context, imagePath, door, parentJobID string) (string, error) {
 	w, h, err := imageDims(imagePath)
 	if err != nil {
 		return "", err
@@ -145,6 +145,8 @@ func (p *Pipeline) autoTextMask(ctx context.Context, imagePath, door string) (st
 		Image:  imagePath,
 		Params: map[string]any{"question": instr},
 		Door:   door, // the inpaint call's own door: this sub-call is its row too (A-102 (e))
+		// ...but only as an inner row of the inpaint call's own row (plan D12).
+		ParentJobID: parentJobID,
 	})
 	if !res.OK {
 		return "", fmt.Errorf("vision box detection deferred: %s", res.Reason)

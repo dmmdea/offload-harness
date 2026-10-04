@@ -87,20 +87,30 @@ func visionTaskServed(cfg config.Config, task core.TaskType) bool {
 	return false
 }
 
-// tokenGated reports whether a task_type rides the bearer rule: the agent lane
-// (v1 scope), since 0.116.0 the vision lane, since 0.154.0 the text lane, and the
-// project-bundle door (compose-project, ADR 0071). Every other media task stays
-// tokenless so deployed media clients keep working byte-identically.
-func tokenGated(taskType string) bool {
-	return taskType == string(core.TaskAgentRun) || taskType == VisionTask || taskType == TextTask || taskType == ComposeProjectTask
+// tokenGated reports whether a task_type rides the bearer rule on a node configured as cfg: the
+// agent lane (v1 scope), since 0.116.0 the vision lane, since 0.154.0 the text lane, the
+// project-bundle door (compose-project, ADR 0071), the stt upload door (ADR 0072) and the PAIR card
+// relay (pair-relay, D26: not a job, the door's own name). The legacy
+// path-taking "stt" lane joins them when the node HAS a fleet_auth_token (D17): it reads an arbitrary
+// path on this node's disk, which is the shape the other lanes were gated to avoid. A node with no
+// token keeps its legacy stt lane open, so no deployed tokenless node starts refusing. Every other
+// media task stays tokenless so deployed media clients keep working byte-identically.
+func tokenGated(cfg config.Config, taskType string) bool {
+	switch taskType {
+	case string(core.TaskAgentRun), VisionTask, TextTask, ComposeProjectTask, STTUploadTask, PairRelayTask:
+		return true
+	case "stt":
+		return cfg.FleetAuthToken != ""
+	}
+	return false
 }
 
 // gatedJob reports whether a job of this task type is masked from a poller or feed reader without the
 // bearer (JobView.Gated): every token-gated lane but the agent lane, which has its own marker. Derived
 // from tokenGated so a door that needs the token can never leave its jobs' state, error text or output
 // paths readable without it, whichever path admitted them (dispatch, the project door, a queue claim).
-func gatedJob(taskType string) bool {
-	return tokenGated(taskType) && taskType != string(core.TaskAgentRun)
+func gatedJob(cfg config.Config, taskType string) bool {
+	return tokenGated(cfg, taskType) && taskType != string(core.TaskAgentRun)
 }
 
 // visionTaskOf maps the payload's task name to the pipeline task, refusing

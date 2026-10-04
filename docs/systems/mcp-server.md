@@ -113,6 +113,23 @@ eligible). The fleet text lane behind it is dark until a node's tier declares te
 stays local and `remote` defers. summarize and triage take no `route`. See
 [FLEET-NODE.md](../FLEET-NODE.md#the-text-task-post-fleettext).
 
+`offload_transcribe` takes an optional `route` too (0.164.0, [ADR 0072](../architecture/decisions/0072-a-fleet-node-transcribes-audio-its-caller-uploads-so-a-held-card-is-a-place-in-line.md);
+this changed `tools/list` on every box), with one difference from the vision and text tools: **the default is `auto`**,
+not `local`. Every fleet node serves the same whisper family, so a spill costs no quality, and a transcription held
+behind a render's lease is the failure the route removes (a caller that never passed a route used to wait the whole
+90 s gate and get `gpu_busy`). `auto` runs on this box's whisper unless that request would actually be held (a lease
+fencing the cards over the model while the model is not already resident, `modelaffinity.WouldBlockUpstream`), in
+which case a fleet node that advertises the stt upload door transcribes it, and with none eligible it still runs
+local. `local` pins the call to this box (a held card then defers `gpu_busy` with a reason that ends by saying route
+`auto` or `remote` would let a fleet node take it, when `delegate_remotes` is configured); `remote` forces a node and,
+with none eligible, returns `deferred: true` with `defer_class: capacity` (or `config` with no remotes) without touching
+the local GPU. The audio is read on this box and sent as 16 kHz mono Opus; `srt_path`, `text_path` and `json_path` are
+always files this box wrote under its own `media_dir`, and `meta.node` / `meta.placement` say where the call ran.
+`select` still projects the result here, whichever box ran it. `engine: "npu"` is this box's own Hailo sidecar and never
+travels: a route named there other than `local` is refused (an omitted route is not a request to travel). The CLI
+`local-offload transcribe --route` carries the same vocabulary and defaults to `local`. See
+[FLEET-NODE.md](../FLEET-NODE.md#the-stt-upload-door-post-fleetstt).
+
 `agent_run` drives the coding agent loop. Its default planner is the **agent seat** (config
 `agent_model`, else the workhorse `model`; a per-call `model` argument overrides both — and on a
 composite box (ADR 0052) the placement table decides when no per-call model is given, its seat
@@ -584,9 +601,11 @@ read-only unless deliberately widened. See
 - **One block, or the brief form (0.137.0).** `offload_status` takes one optional argument,
   `section`. No argument (or `all`) is the whole payload, byte-identical to the answer before the
   argument existed. A block name (`local`, `media`, `remote`, `accelerators`, `reuse`, `fleet`,
-  `kv_cache_server`, `gpu_lease`) returns `{<block>: …}` and computes nothing else: the fleet block
+  `kv_cache_server`, `gpu_lease`, `pair`) returns `{<block>: …}` and computes nothing else: the fleet block
   runs no nvidia-smi, the lease block probes no node. `accelerators` asked for by name on a box that
-  lists none is `{}`, never `null`. `brief` is the sizing answer: the whole `fleet` block plus two
+  lists none is `{}`, never `null`. `pair` is reported only with `pair_workloads_enabled` on: `{mode, relay?, reason?}`, which way
+  this box's PAIR emitter reports (`local ingress`, `node-info fallback`, `relay` with the member's route URL, or `off` with
+  the reason; see [pair-workloads.md](pair-workloads.md)). `brief` is the sizing answer: the whole `fleet` block plus two
   one-line strings under their own keys, so nothing that decodes `gpu_lease` or `local` as an object
   meets a string there. `gpu_lease_verdict` leads with the verdict word, then what the cards are
   doing, the holder and its reason, the queue length and the queue command. `local_verdict` gives

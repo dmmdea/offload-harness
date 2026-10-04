@@ -341,6 +341,31 @@ implications.
     binds loopback only, so a delegator cannot reach it directly; the caller's half is
     `llamaclient.FleetLaneGates` (see
     [offload-pipeline.md](offload-pipeline.md#security-and-privacy-notes)).
+12. The stt upload door (`POST /fleet/stt`, task `stt-upload`, 0.164.0) carries audio BYTES (base64 in JSON) so a box
+    whose own whisper is held can have this node transcribe. It is advertised — `stt-upload` in
+    `supported_task_types`, `stt_hq` and `stt_upload_max_mb` in health — exactly when `STTUploadAdmissible` holds (a
+    bound `stt_model` and the vision lane's reachability rule); an asker keys on those, never on the legacy `stt`. It is
+    bearer-gated, and the bearer is checked BEFORE the body is read; the body is capped by `fleet_stt_upload_max_mb`
+    (decoded MiB, default 48), the bytes live in a private file under `<media_dir>/.stt-upload/` removed when the job
+    ends (and swept at startup), and the done job's data is the node's FULL `core.Result`. The legacy path-taking `stt`
+    joins the bearer rule when the node has a `fleet_auth_token` (a node with none is unchanged), and both stt lanes,
+    pushed and pulled, share one FIFO cap, `fleet_stt_max_concurrent` (default 1): a job over it waits and never fails,
+    and neither lane counts against `fleet_max_concurrent_jobs`. At most two uploads are in flight (a third waits up to
+    30 s, then a re-placeable `503`). The transcript outputs (`stt-<digits>-<8 hex>.srt|txt|segments.json`) are removed when
+    the job record is evicted or after `fleet_stt_transcript_ttl_min` (default 30, a negative value keeps them; swept at
+    startup and on the janitor tick), and on a node with a token `GET /fleet/media` serves them only to a bearer holder
+    (so does a project render, `composeproj-<16 hex>.*`, and the legacy path-taking `stt` lane's transcripts,
+    `<basename>-<8 hex>.srt|txt|segments.json`; every other media name stays tokenless; the match folds case and trailing
+    dots and spaces and treats a non-ASCII, `~` or `:` name as gated, because NTFS opens one file under those spellings).
+    `GET /fleet/media` refuses a
+    dot name. Details: [FLEET-NODE.md](../FLEET-NODE.md#the-stt-upload-door-post-fleetstt),
+    [ADR 0072](../architecture/decisions/0072-a-fleet-node-transcribes-audio-its-caller-uploads-so-a-held-card-is-a-place-in-line.md).
+
+13. The PAIR card relay (`POST /fleet/pair-relay`, D26) posts ONE workload frame from a box that is not a PAIR cluster member
+    as a card from this node's own emitter. It is bearer-gated (`tokenGated`, checked before the body), advertised as
+    `pair_relay` in health exactly when it admits (`PairRelayAdmissible`: this node has a PAIR identity of its own and the
+    reachability rule holds), strictly decoded and capped at 64 KiB, rate limited per asker (`429`), capped on the cards it leaves open (128 per asker, 512 overall, `429` past them; a terminal
+    frame always goes through), and needs `X-Offload-Asker`. Not a job: nothing reaches the job store. Details: [pair-workloads.md](pair-workloads.md#the-card-relay-a-box-that-is-not-a-pair-member-d26).
 
 ## Security and privacy notes
 
@@ -376,7 +401,10 @@ real `FetchNodeView` decoder against the real health handler: the additive capac
 break a reader that has never heard of them. `auth_test.go` pins the agent-lane auth matrix and the media lane's tokenless
 bypass; `tasks_agent_test.go` the advertisement gate and contract materialization;
 `internal/pipeline/agenttask_test.go` the defer shapes over a fake chat client.
-`fleet_verbs_test.go` covers parameter resolution and the bind guard.
+`fleet_verbs_test.go` covers parameter resolution and the bind guard. `stt_upload_test.go` covers the upload door
+(advertisement == admission over the listener/token matrix, the bearer before the body, the body and upload caps, payload
+validation, the private file's life, the full result with its defer classes), the legacy stt lane's bearer rule, and the
+shared stt cap (strict arrival order across both lanes and the pulled path, a cancelled waiter, the cap key).
 
 ## Common pitfalls
 
@@ -580,6 +608,21 @@ behind. Bands (`core.Band*`): `-1` sheddable (measurement / gate traffic), `0` p
 delegator sends), `+1` urgent; anything else is clamped, and a non-integer `priority` reads as 0 (lenient on purpose — it
 was ignored before). The tenant is printable ASCII ≤ 96 bytes, else anonymous; the delegator sends `host-pid-start`
 (`delegate.DefaultTenant`, `LOCAL_OFFLOAD_TENANT` overrides) — one MCP server = one Claude session = one tenant.
+
+**Every dispatch also names its asker (unreleased).** Two more headers ride the request that creates work,
+for the same reason the tenant does (a header is ignored by a node one release behind; a new envelope field
+would `400` on it): `X-Offload-Asker` carries who asked (the asker's PAIR member name when it reports to PAIR
+and is a member, else its short lowercase hostname), and `X-Offload-Pair-Card: node` is sent ONLY by an asker
+that will not card the job itself (its PAIR emitter is not enabled). `admit` records the sanitized asker
+(printable, at most 64 characters, `core.SanitizeAsker`) as `requester` on the node's ledger row and, on the
+signal, when the node's own emitter is enabled, emits the job's one PAIR card from the node (queued at admit,
+running at start, terminal at finish; `fleetnode/nodecard.go`). Asking boxes send them on `/fleet/dispatch`,
+`/fleet/vision`, `/fleet/text`, `/fleet/compose-project` and `/fleet/queue/submit`; the queue holder stores both
+on the job (`fleetqueue.Job.Asker`, `PairCard`), so the claim loop applies them to a pulled job exactly as
+`admit` does to a pushed one — and now also stamps a pulled job's door `fleet` (`dispatchDoor`), which it did
+not before. A claim of a job the node already holds (a lease-expiry re-claim) opens no card, and a claim a
+draining node refuses closes its card failed; a pushed dispatch gets the same guarantee against a racing
+duplicate (the id lookup, the queued frame and `Admit` run under one lock). Details and the rollout reasoning: [pair-workloads](pair-workloads.md).
 
 **The store claims by band → tenant → arrival** (`Jobs.claimLocked`): highest effective band first (a sheddable job that has
 waited `bandAgingAfter` = 60 s counts as band 0), then the claimable tenant served least recently (`Jobs.served`, a claim
@@ -1316,8 +1359,8 @@ above) re-packed it, in which case it is a success and is not counted.
 ### Auth (v1 scope: the agent lane — joined by the vision lane in 0.116.0)
 
 `fleet_auth_token`, when set, bearer-gates exactly two lanes: agent dispatches (and the vision
-and text lanes' `POST /fleet/vision` and `POST /fleet/text`, which ride the same rule through
-`tokenGated`), and
+and text lanes' `POST /fleet/vision` and `POST /fleet/text`, the stt upload door's `POST /fleet/stt` and, since 0.164.0,
+the legacy path-taking `stt` task, which ride the same rule through `tokenGated`), and
 `/fleet/jobs/{id}` polls of jobs those dispatches created (the job record carries an agent
 marker — or, for a vision job, the `Gated` marker — written atomically at creation and evicted
 with the record). The comparison hashes both
@@ -1333,8 +1376,13 @@ With **no token configured**, a non-loopback listener refuses agent dispatches o
 the four `agent_*` health fields below, so neither a task-list-driven dispatcher nor a delegator
 learns the capability just to eat a 403. Loopback with no token is the
 local-MCP trust boundary and stays open. Every media path — media dispatch, media job polls, `/fleet/media/*`, health — ignores
-the token entirely, so already-deployed tokenless media clients keep working byte-identically
-(pinned by test); whole-fleet enforcement is a recorded follow-up
+the token, so already-deployed tokenless media clients keep working byte-identically
+(pinned by test), with ONE exception since the stt transcript change: on a node that HAS a token, `GET /fleet/media/{name}`
+needs the bearer for the outputs of the token-gated lanes (an stt upload's transcripts, the legacy `stt` lane's
+`<basename>-<8 hex>` transcripts, a project render's `composeproj-<16 hex>` files; `gatedMediaName`, which folds case and
+trailing dots and spaces and fails closed on a non-ASCII, `~` or `:` name, since a Windows node opens one file under those
+spellings), while `render-*`, `compose-*` and every other name stay tokenless;
+whole-fleet enforcement is a recorded follow-up
 ([ADR 0023](../architecture/decisions/0023-agent-lane-tailnet-auth-and-locality.md)).
 
 **Because media dispatch is tokenless, a remote media task never picks the node's output path.**
@@ -1556,6 +1604,17 @@ wait after ONE transient error, which is S-08 again, intermittently.
 - [`internal/placement/leasecontract.go`](../../internal/placement/leasecontract.go) — which leases stand between a
   contract and its seats: the chain reading the delegator, the node and a remote's rows share
 - [`internal/fleetnode/auth.go`](../../internal/fleetnode/auth.go) — the bearer credential check
+- [`internal/fleetnode/nodecard.go`](../../internal/fleetnode/nodecard.go) — the asker headers
+  (`askerOf`) and the node's fallback PAIR card for a job its asker will not card
+- [`internal/fleetnode/stt_upload.go`](../../internal/fleetnode/stt_upload.go) — the stt upload door: payload,
+  body cap, `buildSTTUpload` (the private file), the stt gate (`sttGate`, `enterSTT`) and the startup sweep
+- [`internal/fleetnode/media_gate.go`](../../internal/fleetnode/media_gate.go) — which media names belong to gated lanes
+  (`gatedMediaName`), the stt transcript retention (`SweepSTTTranscripts`, eviction hook, mtime refresh)
+- [`internal/fleetnode/pair_relay.go`](../../internal/fleetnode/pair_relay.go) — the PAIR card relay door
+- [`internal/fleetnode/vision_task.go`](../../internal/fleetnode/vision_task.go) — `tokenGated` / `gatedJob` (which
+  task types ride the bearer rule, the legacy `stt` when the node has a token), the vision lane
+- [`internal/sttremote/sttremote.go`](../../internal/sttremote/sttremote.go) — the asker of the upload door: routes,
+  Opus conversion, placement, wait, validation and the asker's own output files
 - [`internal/fleetnode/jobs.go`](../../internal/fleetnode/jobs.go) — state machine, the admit-then-
   schedule queue and its concurrency limit, eviction, drain, the agent job marker
 - [`internal/fleetnode/tasks.go`](../../internal/fleetnode/tasks.go) — `agentTaskConfigured`,

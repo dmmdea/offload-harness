@@ -29,6 +29,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/gpulease"
 	"github.com/dmmdea/offload-harness/internal/gpuprobe"
 	"github.com/dmmdea/offload-harness/internal/modelaffinity"
+	"github.com/dmmdea/offload-harness/internal/pairworkloads"
 )
 
 const (
@@ -66,6 +67,9 @@ var statusBlockTable = []statusBlock{
 	{"fleet", func(s *Server, ctx context.Context, cfg config.Config) any { return s.fleetView(ctx, cfg) }},
 	{"kv_cache_server", func(_ *Server, ctx context.Context, cfg config.Config) any { return kvCacheServerView(ctx, cfg) }},
 	{"gpu_lease", func(_ *Server, ctx context.Context, cfg config.Config) any { return localLeaseView(ctx, cfg) }},
+	// How this box's PAIR cards are reported (docs/systems/pair-workloads.md): reported only when
+	// pair_workloads_enabled is on, so a box that never opted in answers byte-identically to before.
+	{"pair", func(_ *Server, _ context.Context, cfg config.Config) any { return statusPair(cfg) }},
 }
 
 // statusSectionValues is the section enum: the two composites, then every block.
@@ -337,4 +341,23 @@ func oneLine(s string, max int) string {
 		return string(r[:max]) + "…"
 	}
 	return s
+}
+
+// statusPair is the "pair" block: which way this box's PAIR emitter reports (local ingress, node-info
+// fallback, relay <member route URL>, or off with the reason). nil (absent from the full answer) when
+// pair_workloads_enabled is off. It reads the per-config emitter the wire headers use (identity, and in
+// auto relay mode the delegate_remotes' health, cached), so a status call probes nothing a call just did.
+func statusPair(cfg config.Config) any {
+	if !cfg.PairWorkloadsEnabled {
+		return nil
+	}
+	m := pairworkloads.ModeFor(cfg)
+	out := map[string]any{"mode": m.Mode}
+	if m.Relay != "" {
+		out["relay"] = m.Relay
+	}
+	if m.Reason != "" {
+		out["reason"] = m.Reason
+	}
+	return out
 }

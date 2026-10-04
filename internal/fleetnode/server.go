@@ -38,6 +38,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/gpuprobe"
 	"github.com/dmmdea/offload-harness/internal/hostsample"
 	"github.com/dmmdea/offload-harness/internal/netguard"
+	"github.com/dmmdea/offload-harness/internal/pairworkloads"
 	"github.com/dmmdea/offload-harness/internal/placement"
 	"github.com/dmmdea/offload-harness/internal/seatload"
 	"github.com/dmmdea/offload-harness/internal/seatrate"
@@ -149,6 +150,10 @@ type Options struct {
 	// media lane never consults it.
 	LoopbackListener bool
 	Cfg              config.Config
+	// Pair is this node's PAIR emitter (pairworkloads.New(FromConfig(cfg))). The node uses it for ONE
+	// thing: the card of a job whose asker signalled core.PairCardHeader = "node" because it will not
+	// card the job itself. nil, or an emitter that is not Enabled, cards nothing.
+	Pair *pairworkloads.Emitter
 	// KVSlotDir is the directory the seats' --slot-save-path points at (ADR 0056
 	// Layer 2); empty = the kvslot lane answers 501. KVSlotCapGiB bounds it (0 = 8).
 	KVSlotDir    string
@@ -182,6 +187,12 @@ type Server struct {
 	runner Runner
 	jobs   *Jobs
 	opts   Options
+	// cardAdmitMu makes a pushed dispatch's id lookup, its node card's queued frame and its Admit one
+	// step (handleDispatch), so a racing duplicate emits no frame of its own.
+	cardAdmitMu sync.Mutex
+	// beforeCardAdmit is a test seam: it runs in that window's lead-in, where a racing duplicate
+	// has already passed the handler's first lookup.
+	beforeCardAdmit func()
 	// queue is the Option B consolidated pull queue (ADR 0030) — non-nil ONLY
 	// when this node is the config-elected holder (fleet_queue_host). Opened
 	// by EnableQueueHost; the routes mount only when it is non-nil.
@@ -217,6 +228,17 @@ type Server struct {
 	// one-predicate discipline: health publishes text_tasks (and SupportedTasksFor lists
 	// "text") exactly when POST /fleet/text will admit.
 	textLane bool
+	// sttUploadLane is STTUploadAdmissible over the RESOLVED listener (ADR 0072), the same
+	// one-predicate discipline: health lists "stt-upload" and publishes stt_hq and
+	// stt_upload_max_mb exactly when POST /fleet/stt will admit.
+	sttUploadLane bool
+	// relayLimiter is the PAIR card relay's per-asker and global token bucket (pair_relay.go).
+	relayLimiter *pairworkloads.RelayLimiter
+	// sttGate is the node's stt concurrency cap (fleet_stt_max_concurrent), shared by the legacy
+	// path-taking lane and the upload door, pushed and pulled jobs alike (enterSTT).
+	sttGate *sttGate
+	// sttUploadSlots bounds the stt uploads in flight on this node (sttUploadInFlightMax).
+	sttUploadSlots chan struct{}
 	// chatLane is ChatLaneAdmissible over the RESOLVED listener (C-41b) — the
 	// same one-predicate discipline as agentLane and visionLane: health
 	// publishes `chat_lane` exactly when POST /fleet/chat will admit, because
@@ -458,6 +480,10 @@ func New(runner Runner, jobs *Jobs, opts Options) *Server {
 		agentLane:          AgentLaneAdmissible(opts.Cfg, opts.LoopbackListener),
 		visionLane:         VisionLaneAdmissible(opts.Cfg, opts.LoopbackListener),
 		textLane:           TextLaneAdmissible(opts.Cfg, opts.LoopbackListener),
+		sttUploadLane:      STTUploadAdmissible(opts.Cfg, opts.LoopbackListener),
+		relayLimiter:       pairworkloads.DefaultRelayLimiter(),
+		sttGate:            newSTTGate(opts.Cfg.EffectiveSTTMaxConcurrent()),
+		sttUploadSlots:     make(chan struct{}, sttUploadInFlightMax),
 		chatLane:           ChatLaneAdmissible(opts.Cfg, opts.LoopbackListener),
 		rosterServes:       swapRosterServes,
 		rosterServedModels: swapRosterServedModels,
@@ -465,6 +491,10 @@ func New(runner Runner, jobs *Jobs, opts Options) *Server {
 		setWriteDeadline:   controllerWriteDeadline,
 	}
 	s.admitting = s.admittingRuns
+	// The stt transcript retention rides the job store's janitor tick (and runs at fleet-serve start).
+	if jobs != nil {
+		jobs.OnSweep(func() { sweepTranscriptsOnTick(opts.Cfg) })
+	}
 	return s
 }
 
@@ -909,6 +939,14 @@ func (s *Server) Handler() http.Handler {
 	// The text lane (0.154.0): classify / extract on this node's own pipeline. A route of
 	// its own so the payload is typed; dispatch's 1 MiB body cap, then the same admit path.
 	mux.HandleFunc("POST /fleet/text", s.handleText)
+	// The stt upload door (ADR 0072): audio BYTES in the body, so a box whose own whisper is held
+	// can have this node transcribe. Its own route for the body cap and the longer delivery window;
+	// the bearer is checked before the body is read, then the same admit path as every job.
+	mux.HandleFunc("POST "+STTUploadPath, s.handleSTTUpload)
+	// The PAIR card relay (D26): one workload frame from a box with no PAIR identity, posted as a
+	// card from this node's own emitter. Token-gated, advertised in health (pair_relay) only when it
+	// admits, and rate limited per asker.
+	mux.HandleFunc("POST "+pairworkloads.RelayPath, s.handlePairRelay)
 	// The project-bundle door (ADR 0071): a whole HyperFrames project from a holder of
 	// the fleet token. Its own route for the body cap; the door and the bearer are
 	// checked before the body is read, then the same admit path as every job.
@@ -1342,6 +1380,18 @@ type healthPayload struct {
 	// lane, and every node that predates it, emits a byte-identical payload, and a
 	// delegator never places a text task on a node that does not list it.
 	TextTasks []string `json:"text_tasks,omitempty"`
+	// STTHQ says whether this node has an hq whisper model (stt_model_hq), and STTUploadMaxMB is
+	// the largest audio upload POST /fleet/stt takes, MiB decoded (fleet_stt_upload_max_mb). Both
+	// are published only when the upload door is admissible (the same moment "stt-upload" appears
+	// in supported_task_types): an asker keys on them, so a node that predates the door publishes
+	// neither and is never sent an upload. STTHQ is a pointer so false is published (a node that
+	// has the door but no hq model) and an older node's absence stays distinguishable.
+	STTHQ          *bool `json:"stt_hq,omitempty"`
+	STTUploadMaxMB int   `json:"stt_upload_max_mb,omitempty"`
+	// PairRelay (D26) says this node serves POST /fleet/pair-relay: a box with no PAIR identity of
+	// its own can have its cards posted from here. Published exactly when the door would admit
+	// (PairRelayAdmissible); omitted otherwise, so a node without it is byte-identical to before.
+	PairRelay bool `json:"pair_relay,omitempty"`
 	// ChatLane says POST /fleet/chat will admit here (C-41b), published under
 	// the same one-predicate rule as vision_model. It is what a delegator's
 	// cascade lane reads to tell a FLEET NODE base from a plain llama-swap
@@ -1543,6 +1593,14 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.textLane {
 		payload.TextTasks = append([]string(nil), s.opts.Cfg.TextTasks...)
+	}
+	if s.pairRelayOpen() {
+		payload.PairRelay = true
+	}
+	if s.sttUploadLane {
+		hq := s.opts.Cfg.STTModelHQ != ""
+		payload.STTHQ = &hq
+		payload.STTUploadMaxMB = int(s.opts.Cfg.EffectiveSTTUploadMaxBytes() >> 20)
 	}
 	// Chat lane (C-41b): the delegator's cascade lane reads `chat_lane` to
 	// learn this base is a fleet node it may route through, and served_models
@@ -1905,8 +1963,10 @@ func (s *Server) seatRate() *SeatRateHealth {
 //     holds them all) and then the machine-wide gpulease ClassMedia. They are
 //     already serialized as hard as the cards they use, far harder than this cap
 //     would serialize them.
-//   - stt runs against whisper-server, a different process with a different
-//     endpoint. It never touches llama-swap.
+//   - stt and stt-upload run against whisper-server, a different process with a
+//     different endpoint. They never touch llama-swap, and they wait behind their own
+//     cap (fleet_stt_max_concurrent, sttGate): capped here too, an upload parked at
+//     that gate would hold a text execution slot while doing no work.
 //
 // Capping those would be both redundant and actively harmful. A media job
 // blocked inside the media slots holds a fleet execution slot while doing NO
@@ -1931,7 +1991,7 @@ func (s *Server) concurrencyCapped(taskType string) bool {
 	// touching the shared text endpoint the cap protects. Capping it made it
 	// hold a fleet execution slot while parked in the capacity-1 media slot —
 	// verbatim the failure the rule above says the exemption exists to prevent.
-	case "image-gen", "video-gen", "animate", "audio-gen", "run-graph", "stt":
+	case "image-gen", "video-gen", "animate", "audio-gen", "run-graph", "stt", STTUploadTask:
 		return false
 	// accel (0.115.0) drives a loopback accelerator sidecar — Coral or RKNPU;
 	// the Hailo-8L is local-only and never served here (register E-08) — and never
@@ -2086,6 +2146,35 @@ func (s *Server) handleText(w http.ResponseWriter, r *http.Request) {
 	s.admit(w, r, dispatchEnvelope{JobID: p.JobID, TaskType: TextTask, Payload: body})
 }
 
+// authorizeGated is the token-gated lanes' auth, in one place so the doors that must check the bearer
+// before they read a large body (the stt upload door, the project door) run the SAME rule admit applies
+// to every job: fleet_auth_token required beyond loopback, loopback with no token stays open. It writes
+// the 401/403 itself and reports whether the request may go on. A task type that is not token-gated
+// passes untouched (media dispatch stays tokenless so deployed media clients keep working).
+func (s *Server) authorizeGated(w http.ResponseWriter, r *http.Request, taskType string) bool {
+	if tokenGated(s.opts.Cfg, taskType) {
+		if s.opts.Cfg.FleetAuthToken == "" {
+			// The reachability condition is CONSULTED, never re-derived:
+			// AgentLaneSafelyReachable is the same expression AgentLaneAdmissible
+			// applies to the same resolved listener, so this refusal can never
+			// disagree with what health advertised. (With no token configured it
+			// reduces to "is the listener loopback?" — a tokenless lane beyond
+			// loopback drives a coding-agent loop over an open port, an RCE-class
+			// surface. Misconfiguration must fail here, visibly, at ack time.)
+			if !AgentLaneSafelyReachable(s.opts.Cfg, s.opts.LoopbackListener) {
+				writeError(w, http.StatusForbidden, agentLaneTokenRequired)
+				return false
+			}
+			// Loopback + no token: the agent lane is reachable only from this
+			// box — the same trust boundary as the local MCP surface.
+		} else if !bearerOK(r, s.opts.Cfg.FleetAuthToken) {
+			writeError(w, http.StatusUnauthorized, "unauthorized")
+			return false
+		}
+	}
+	return true
+}
+
 // admit is the shared ack path behind /fleet/dispatch, /fleet/vision and /fleet/text: the
 // token-gated lanes' auth, the known-job re-ack/409, the drain/lease/band/
 // queue refusals, BuildRequest, and the job store's Admit. The two handlers
@@ -2102,25 +2191,8 @@ func (s *Server) admit(w http.ResponseWriter, r *http.Request, env dispatchEnvel
 	// gate, BuildRequest — so an unauthorized agent caller gets only the auth
 	// verdict (401/403), never a validation 400 to probe the envelope with
 	// and never a re-ack/409 that discloses job existence or state.
-	if tokenGated(env.TaskType) {
-		if s.opts.Cfg.FleetAuthToken == "" {
-			// The reachability condition is CONSULTED, never re-derived:
-			// AgentLaneSafelyReachable is the same expression AgentLaneAdmissible
-			// applies to the same resolved listener, so this refusal can never
-			// disagree with what health advertised. (With no token configured it
-			// reduces to "is the listener loopback?" — a tokenless lane beyond
-			// loopback drives a coding-agent loop over an open port, an RCE-class
-			// surface. Misconfiguration must fail here, visibly, at ack time.)
-			if !AgentLaneSafelyReachable(s.opts.Cfg, s.opts.LoopbackListener) {
-				writeError(w, http.StatusForbidden, agentLaneTokenRequired)
-				return
-			}
-			// Loopback + no token: the agent lane is reachable only from this
-			// box — the same trust boundary as the local MCP surface.
-		} else if !bearerOK(r, s.opts.Cfg.FleetAuthToken) {
-			writeError(w, http.StatusUnauthorized, "unauthorized")
-			return
-		}
+	if !s.authorizeGated(w, r, env.TaskType) {
+		return
 	}
 
 	if env.JobID == "" {
@@ -2300,6 +2372,34 @@ func (s *Server) admit(w http.ResponseWriter, r *http.Request, env dispatchEnvel
 		return
 	}
 
+	specModel := env.ModelFamily
+	if env.TaskType == string(core.TaskAgentRun) {
+		specModel = s.agentSeat
+		// A contract dispatched AT A LAYER runs on that layer's seat, so the
+		// feed names it rather than the planner default (ADR 0039). This is
+		// the DECLARED seat: the authoritative decision — guards, window, the
+		// long-seat choice — is made at execution with the live readers
+		// (pipeline.runAgentTask), and a refusal there is published on the
+		// result's placed block. Admission metadata may not wait on a probe,
+		// and a row that says "agent-pool" while the 262k twin holds the
+		// cards is the untruth this build exists to end.
+		if s.opts.Cfg.Composite() {
+			if seat, ok := placement.SeatOnLayer(s.opts.Cfg.Layers, dispatchedLayer(env.Payload)); ok {
+				specModel = seat
+			}
+		}
+	}
+
+	// Who asked, and whether the asker wants THIS node to card the job (it signals that only when it
+	// will not card the job itself). The asker's name is recorded on this node's row either way.
+	asker, nodeCards := askerOf(r)
+	// An stt upload's transcript files, learned when the job finishes and released with its record.
+	var sttOut sttOutputs
+	card := s.newNodeCard(string(req.Task), specModel, env.JobID, asker, nodeCards)
+	// The payload is spent: the request is built. The run closure below captures env, and a queued
+	// stt upload's payload is up to 64 MiB, so the job must not keep it alive until it finishes.
+	env.Payload = nil
+
 	run := func(ctx context.Context) (json.RawMessage, error) {
 		defer cleanup() // temp files live exactly as long as the job
 		// The wall report (register D-116): the executing lane publishes the
@@ -2314,6 +2414,15 @@ func (s *Server) admit(w http.ResponseWriter, r *http.Request, env dispatchEnvel
 		// every poll of the RUNNING job, so the delegator can keep polling a
 		// producing job past any clock it sized in advance.
 		ctx = core.WithProgressReport(ctx, func(p core.LiveProgress) { s.jobs.SetProgress(jobID, p) })
+		// An stt job (either lane) takes its slot under the node's stt cap before it starts: a job over
+		// the cap waits here, in arrival order, with its card still queued, instead of failing against
+		// a whisper that another transcription just unloaded (D18). Other task types pass through.
+		releaseSTT, gerr := s.enterSTT(ctx, env.TaskType)
+		if gerr != nil {
+			card.fail("the node shut down while this job waited for the stt slot")
+			return nil, gerr
+		}
+		defer releaseSTT()
 		// Register A-102: stamp the DOOR this call came through so its ledger
 		// row is not one of the door-less cascade rows.
 		req.Door = dispatchDoor(req.Door)
@@ -2321,7 +2430,24 @@ func (s *Server) admit(w http.ResponseWriter, r *http.Request, env dispatchEnvel
 		// under, so this node's ledger row joins to the delegator's row on one
 		// equality instead of on a guess at latency.
 		req.FleetJobID = jobID
+		// D11: who the job was for, on this node's row; D7: the card, when the asker signalled that
+		// it will not card the job itself. A run that panics closes the card failed on its way out.
+		req.Requester = asker
+		card.running()
+		finished := false
+		defer func() {
+			if !finished {
+				card.fail("the node's job run failed unexpectedly")
+			}
+		}()
 		res := s.runner.Run(ctx, req)
+		finished = true
+		card.finish(res)
+		if env.TaskType == STTUploadTask && res.OK {
+			names := sttOutputNames(res.Data)
+			sttOut.set(names)
+			refreshTranscripts(s.opts.Cfg, names, time.Now())
+		}
 		if env.TaskType == string(core.TaskAgentRun) && res.OK {
 			// The one fact this result proves about the advertised seat —
 			// a completed call on it — goes into the residency cache now,
@@ -2337,6 +2463,10 @@ func (s *Server) admit(w http.ResponseWriter, r *http.Request, env dispatchEnvel
 		if env.TaskType == TextTask {
 			// The same for the text lane — see textJobData.
 			return textJobData(res)
+		}
+		if env.TaskType == STTUploadTask {
+			// And for the stt upload door — see sttJobData: defer_class and err_class must survive.
+			return sttJobData(res)
 		}
 		if res.OK {
 			return res.Data, nil
@@ -2361,47 +2491,63 @@ func (s *Server) admit(w http.ResponseWriter, r *http.Request, env dispatchEnvel
 	// strands a directory under pipeline-jobs/ until the next start sweeps it.
 	// The store clears the hook at claim, so exactly one of the two paths ever
 	// runs the cleanup.
-	specModel := env.ModelFamily
-	if env.TaskType == string(core.TaskAgentRun) {
-		specModel = s.agentSeat
-		// A contract dispatched AT A LAYER runs on that layer's seat, so the
-		// feed names it rather than the planner default (ADR 0039). This is
-		// the DECLARED seat: the authoritative decision — guards, window, the
-		// long-seat choice — is made at execution with the live readers
-		// (pipeline.runAgentTask), and a refusal there is published on the
-		// result's placed block. Admission metadata may not wait on a probe,
-		// and a row that says "agent-pool" while the 262k twin holds the
-		// cards is the untruth this build exists to end.
-		if s.opts.Cfg.Composite() {
-			if seat, ok := placement.SeatOnLayer(s.opts.Cfg.Layers, dispatchedLayer(env.Payload)); ok {
-				specModel = seat
-			}
-		}
-	}
 	spec := AcceptSpec{
-		Agent:     env.TaskType == string(core.TaskAgentRun),
-		Gated:     gatedJob(env.TaskType),
-		Uncapped:  !s.concurrencyCapped(env.TaskType),
-		OnDropped: cleanup,
-		Task:      env.TaskType,
-		Model:     specModel,
-		Band:      band,
-		Tenant:    tenant,
+		Agent:    env.TaskType == string(core.TaskAgentRun),
+		Gated:    gatedJob(s.opts.Cfg, env.TaskType),
+		Uncapped: !s.concurrencyCapped(env.TaskType),
+		// A job drained before it started never reaches the closure above, so the card it opened
+		// (queued, below) closes here.
+		OnDropped: func() {
+			cleanup()
+			card.fail("the job was dropped before it started (withdrawn, or the node drained)")
+		},
+		// An stt upload's transcript files go with its record (and, failing that, by the TTL sweep).
+		OnEvict: func() { removeTranscripts(s.opts.Cfg, sttOut.get()) },
+		Task:    env.TaskType,
+		Model:   specModel,
+		Band:    band,
+		Tenant: tenant,
 		// A pushed agent dispatch is polled for by the delegator that sent it, so
 		// the poll lease applies to it (ADR 0064). Media and vision jobs are polled
 		// by other clients on cadences this node does not control, and a job the
 		// pull queue claimed is never polled at all — neither is leased.
 		PollLeased: env.TaskType == string(core.TaskAgentRun),
 	}
-	if !s.jobs.Admit(env.JobID, spec, run) {
+	// The card opens BEFORE Admit, not after: the job can start (and even finish) on its own worker
+	// before Admit returns, and a queued frame emitted after a terminal one would re-create the
+	// open-card marker the terminal frame removed.
+	//
+	// The lookup at the top of this handler is not enough on its own: a duplicate dispatch of the same
+	// id that raced this one passed it too, and a queued frame emitted before its refused Admit would
+	// reopen a card the winner's terminal frame closed, or regress a running one (discard() cannot
+	// recall a frame). So the id is looked up again here and the lookup, the queued frame and Admit run
+	// under one lock: of two racing duplicates exactly one is admitted and carded, and the other sees
+	// the winner's job and emits nothing. Emit only queues the frame, so the lock is not held over a
+	// post. The claim loop makes the same lookup (claimOne); it is one goroutine, so it needs no lock.
+	if s.beforeCardAdmit != nil {
+		s.beforeCardAdmit()
+	}
+	s.cardAdmitMu.Lock()
+	if card != nil {
+		if _, known := s.jobs.Get(env.JobID); known {
+			card = nil
+		}
+	}
+	card.queued()
+	admitted := s.jobs.Admit(env.JobID, spec, run)
+	s.cardAdmitMu.Unlock()
+	if !admitted {
 		cleanup() // duplicate/drain refusal: this request's materialized files never run
 		view, ok := s.jobs.Get(env.JobID)
 		if !ok {
 			// Accept refused but the id is absent: drain began between the
 			// Draining() check and Accept.
+			card.fail("node draining")
 			writeError(w, http.StatusServiceUnavailable, "node draining")
 			return
 		}
+		// A duplicate of a job this node already holds: its own card (if it has one) stands.
+		card.discard()
 		// Contract refusal semantics: the dispatcher treats ANY non-202
 		// dispatch response as a REFUSAL, and the media dispatcher may then
 		// re-dispatch the same job_id to another node. So a duplicate for a
@@ -2705,6 +2851,19 @@ func (s *Server) handleMedia(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("filename")
 	if name == "" || strings.ContainsAny(name, `/\`) || strings.Contains(name, "..") {
 		writeError(w, http.StatusBadRequest, "filename must be a bare name")
+		return
+	}
+	// The outputs of the token-gated lanes (stt upload transcripts, project renders) need the bearer
+	// on a node that has a token; checked before the file is looked up, so the answer never says
+	// whether the name exists. Every other name, and every name on a tokenless node, is as it was.
+	if tok := s.opts.Cfg.FleetAuthToken; tok != "" && gatedMediaName(name) && !bearerOK(r, tok) {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	// A dot name is this node's own bookkeeping (the stt upload directory, the compose cache): never
+	// a media output, so never served, and never listed through http.ServeFile's directory index.
+	if strings.HasPrefix(name, ".") {
+		writeError(w, http.StatusNotFound, "not found")
 		return
 	}
 	mediaDir := s.opts.Cfg.MediaDir

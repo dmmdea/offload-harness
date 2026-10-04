@@ -6001,6 +6001,9 @@ func (r *runner) dispatchDetailed(ctx context.Context, base, jobID string, paylo
 		if r.tenant != "" {
 			req.Header.Set(core.TenantHeader, r.tenant)
 		}
+		// Who asked, and whether the serving node must card the job because this box will not
+		// (D7/D11): a header, for the same reason the tenant is one.
+		r.pair.SetWireHeaders(req.Header)
 		resp, derr := fleetClient.Do(req)
 		if derr != nil {
 			cancel()

@@ -54,10 +54,10 @@ func TestSupportedTasksDerivation(t *testing.T) {
 		want []string
 	}{
 		{"nothing configured", config.Config{}, nil},
-		{"all configured", fullCfg(), []string{"image-gen", "video-gen", "stt", "audio-gen", "run-graph"}},
+		{"all configured", fullCfg(), []string{"image-gen", "video-gen", "stt", STTUploadTask, "audio-gen", "run-graph"}},
 		{"image only", config.Config{ImageGenScript: "x.mjs"}, []string{"image-gen"}},
 		{"video only", config.Config{VideoGenScript: "x.mjs"}, []string{"video-gen"}},
-		{"stt only", config.Config{STTModel: "large-v3-turbo"}, []string{"stt"}},
+		{"stt only", config.Config{STTModel: "large-v3-turbo"}, []string{"stt", STTUploadTask}},
 		{"audio via voice", config.Config{VoiceGenScript: "tts.mjs"}, []string{"audio-gen"}},
 		{"audio via music", config.Config{MusicGenScript: "music.mjs"}, []string{"audio-gen"}},
 		{"run-graph only", config.Config{RunGraphScript: "rg.mjs"}, []string{"run-graph"}},

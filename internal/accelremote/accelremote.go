@@ -29,6 +29,8 @@ import (
 
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
+	"github.com/dmmdea/offload-harness/internal/netguard"
+	"github.com/dmmdea/offload-harness/internal/pairworkloads"
 )
 
 // Budget bounds one forwarded call end to end: a cold sidecar spawn on the
@@ -42,8 +44,12 @@ const (
 	maxBody         = 32 << 20
 )
 
-// HTTPClient is the transport every request uses; tests swap it.
-var HTTPClient = &http.Client{Timeout: Budget}
+// HTTPClient is the transport every request uses; tests swap it. It rides
+// netguard.SafeTransport like every other fleet client (health, vision, text, compose):
+// the lane may only ever reach loopback or the operator's tailnet (never-cloud, ADR 0001),
+// enforced at dial time, so a delegate_remotes entry that drifts to a public address dies
+// at the dial gate instead of carrying an image there.
+var HTTPClient = &http.Client{Transport: netguard.SafeTransport(nil), Timeout: Budget}
 
 var safeName = regexp.MustCompile(`[^A-Za-z0-9._-]`)
 
@@ -169,6 +175,8 @@ func dispatch(ctx context.Context, cfg config.Config, base string, payload []byt
 	}
 	req.Header.Set("Content-Type", "application/json")
 	auth(cfg, req)
+	// Who asked, and whether the serving node must card the job because this box will not (D7/D11).
+	pairworkloads.WireHeadersFor(cfg, req.Header)
 	resp, err := HTTPClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("dispatch %s: %w", base, err)
