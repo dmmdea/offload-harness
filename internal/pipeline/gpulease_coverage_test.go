@@ -246,11 +246,11 @@ func gpuLeaseCases() []gpuLeaseCase {
 		{
 			name:   "generate_video (sdcpp)",
 			runner: "sdcpp-video.mjs",
-			setup: func(_ *testing.T, cfg *config.Config, stub, _ string) {
+			setup: func(t *testing.T, cfg *config.Config, stub, dir string) {
 				cfg.VideoGenSdcppScript = stub
 				cfg.VideoGenFamily = "fastwan"
 				cfg.VideoGenFamilies = map[string]config.VideoFamilyBinding{"fastwan": {
-					Engine: config.EngineSdcpp, SdcppBin: "sd-cli", SdcppModel: "m.gguf", SdcppVAE: "v.st", SdcppT5xxl: "t.gguf", SdcppBackend: "vulkan0"}}
+					Engine: config.EngineSdcpp, SdcppBin: igpuBin(t, dir, "sd-cli"), SdcppModel: "m.gguf", SdcppVAE: "v.st", SdcppT5xxl: "t.gguf", SdcppBackend: "vulkan0"}}
 			},
 			invoke: genReq(core.TaskGenerateVideo, nil),
 		},
@@ -261,8 +261,8 @@ func gpuLeaseCases() []gpuLeaseCase {
 				t.Helper()
 				cfg.AnimateGenEngine = config.EngineSdcpp
 				cfg.AnimateGenSdcppScript = stub
-				cfg.AnimateGenSdcppBin, cfg.AnimateGenSdcppModel, cfg.AnimateGenSdcppVAE, cfg.AnimateGenSdcppT5xxl = "sd-cli", "m.gguf", "v.st", "t.gguf"
-				cfg.AnimateGenDepthBin, cfg.AnimateGenDepthModel, cfg.AnimateGenSdcppBackend = "da3-cli", "d.gguf", "vulkan0"
+				cfg.AnimateGenSdcppBin, cfg.AnimateGenSdcppModel, cfg.AnimateGenSdcppVAE, cfg.AnimateGenSdcppT5xxl = igpuBin(t, dir, "sd-cli"), "m.gguf", "v.st", "t.gguf"
+				cfg.AnimateGenDepthBin, cfg.AnimateGenDepthModel, cfg.AnimateGenSdcppBackend = igpuBin(t, dir, "da3-cli"), "d.gguf", "vulkan0"
 				for _, n := range []string{"ref.png", "drive.mp4"} {
 					if err := os.WriteFile(filepath.Join(dir, n), []byte("x"), 0o644); err != nil {
 						t.Fatal(err)
@@ -279,20 +279,20 @@ func gpuLeaseCases() []gpuLeaseCase {
 		{
 			name:   "generate_audio (voice, audiocpp)",
 			runner: "audiocpp-generate.mjs",
-			setup: func(_ *testing.T, cfg *config.Config, stub, _ string) {
+			setup: func(t *testing.T, cfg *config.Config, stub, dir string) {
 				cfg.VoiceGenEngine = config.EngineAudiocpp
 				cfg.AudiocppScript = stub
-				cfg.AudiocppBin, cfg.AudiocppBackend, cfg.AudiocppVoiceModel = "audiocpp_cli", "vulkan", "m.gguf"
+				cfg.AudiocppBin, cfg.AudiocppBackend, cfg.AudiocppVoiceModel = igpuBin(t, dir, "audiocpp_cli"), "vulkan", "m.gguf"
 			},
 			invoke: genReq(core.TaskGenerateAudio, map[string]any{"kind": "voice"}),
 		},
 		{
 			name:   "generate_audio (music, audiocpp)",
 			runner: "audiocpp-generate.mjs",
-			setup: func(_ *testing.T, cfg *config.Config, stub, _ string) {
+			setup: func(t *testing.T, cfg *config.Config, stub, dir string) {
 				cfg.MusicGenEngine = config.EngineAudiocpp
 				cfg.AudiocppScript = stub
-				cfg.AudiocppBin, cfg.AudiocppBackend, cfg.AudiocppMusicModel = "audiocpp_cli", "vulkan", "m.gguf"
+				cfg.AudiocppBin, cfg.AudiocppBackend, cfg.AudiocppMusicModel = igpuBin(t, dir, "audiocpp_cli"), "vulkan", "m.gguf"
 			},
 			invoke: genReq(core.TaskGenerateAudio, map[string]any{"kind": "music"}),
 		},
