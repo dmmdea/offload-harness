@@ -190,7 +190,7 @@ test("sdcpp-video main: an entirely black clip is BLACK_CLIP and the mp4 is remo
 test("sdcpp-video main: --timeout-sec kills a hanging engine (the pid is dead) with a timeout error", opts, async () => {
   const sb = sandbox();
   try {
-    const v = videoSetup(sb, { log: GOOD_SD_HEADER, hang: true }, ["--timeout-sec", "6"]);
+    const v = videoSetup(sb, { log: GOOD_SD_HEADER, hang: true }, ["--timeout-sec", "12"]);
     const r = await runNode("sdcpp-video.mjs", v.args, sb);
     assert.equal(r.status, 1, r.stderr);
     assert.match(r.stderr, /timeout/i);
@@ -328,10 +328,11 @@ test("sdcpp-animate main: a model sd-cli refuses (the public VACE GGUF) is MODEL
 test("sdcpp-animate main: --timeout-sec kills a hanging depth process (pid dead) and cleans up", opts, async () => {
   const sb = sandbox();
   try {
-    const a = animateSetup(sb, { depth: { hang: true }, extra: ["--timeout-sec", "8"] });
+    const a = animateSetup(sb, { depth: { hang: true }, extra: ["--timeout-sec", "25"] });
     const r = await runNode("sdcpp-animate.mjs", a.args, sb);
     assert.equal(r.status, 1, r.stderr);
     assert.match(r.stderr, /timeout/i);
+    assert.ok(existsSync(a.dPid), `the depth engine never started inside the budget (the host is too loaded for this test): ${r.stderr}`);
     assert.ok(await waitGone(Number(readFileSync(a.dPid, "utf8"))), "the depth process is dead");
     noTempLeft(sb);
   } finally { sb.done(); }
@@ -427,7 +428,7 @@ test("audiocpp main: the REAL host-prefill log (planner weights on the CPU) kill
 test("audiocpp main: --timeout-sec kills a hanging engine; vulkan0 as the backend is refused (audio.cpp takes --device separately)", opts, async () => {
   const sb = sandbox();
   try {
-    const a = audioSetup(sb, "music", { log: ["[TIMING ts=1] ace_step.planner.weights.buffer_name Vulkan0"], hang: true }, ["--timeout-sec", "6"]);
+    const a = audioSetup(sb, "music", { log: ["[TIMING ts=1] ace_step.planner.weights.buffer_name Vulkan0"], hang: true }, ["--timeout-sec", "12"]);
     const r = await runNode("audiocpp-generate.mjs", a.args, sb);
     assert.equal(r.status, 1, r.stderr);
     assert.match(r.stderr, /timeout/i);

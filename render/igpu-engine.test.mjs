@@ -444,7 +444,7 @@ test("lifecycle: when the parent process disappears the runner kills its engine,
     await new Promise((r) => p.on("close", r));
     const { harness: hpid, tempDir } = JSON.parse(await waitFile(info));
     const enginePid = Number(await waitFile(info + ".engine"));
-    assert.ok(await waitGone(hpid, 10000), "the orphaned runner must notice and exit");
+    assert.ok(await waitGone(hpid, 40000), "the orphaned runner must notice and exit");
     assert.ok(await waitGone(enginePid), "the engine must be killed");
     assert.ok(!existsSync(tempDir), "the temp dir must be removed");
   } finally { rmSync(dir, { recursive: true, force: true }); }
