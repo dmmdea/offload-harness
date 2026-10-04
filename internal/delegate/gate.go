@@ -17,6 +17,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/gpulease"
+	"github.com/dmmdea/offload-harness/internal/gpuprobe"
 	"github.com/dmmdea/offload-harness/internal/modelaffinity"
 	placetable "github.com/dmmdea/offload-harness/internal/placement"
 )
@@ -210,7 +211,7 @@ func betterRemote(seed string, st *Subtask, priorTokS float64, candidate, incumb
 	// card frees is evidence, where a long lease at least names its end. It
 	// still ranks and still takes work when nothing better exists (the node
 	// queues it); it is never excluded.
-	if c, i := leaseDemotionRank(candidate), leaseDemotionRank(incumbent); c != i {
+	if c, i := leaseDemotionRank(candidate, st), leaseDemotionRank(incumbent, st); c != i {
 		return c < i // candidate wins only when the incumbent is the lower-ranked one
 	}
 	if c, i := saturated(candidate), saturated(incumbent); c != i {
@@ -450,7 +451,7 @@ func eligibilityVerdict(st Subtask, r NodeView) (eligible bool, word, detail str
 	// leaseFenceReason (W-14, register S-15) is what decides whether the lease
 	// is a HARD refusal here — see its own doc for the exclusive/draining/media
 	// cases that still fence, and the plain-text-busy case that no longer does.
-	if fenced, why := leaseFenceReason(r); fenced {
+	if fenced, why := leaseFenceReason(r, &st); fenced {
 		return false, "lease", why
 	}
 	if len(st.Contract.OutputSchema) == 0 {
@@ -533,17 +534,119 @@ func remoteDecision(st Subtask, r NodeView) (placetable.Decision, bool) {
 // lease whose cards were idle in 10 of them (register S-15) — because `busy`
 // says "spoken for until 15:04", not "the cards are working". That case stays
 // eligible and is demoted instead (betterRemote's leaseBusyDemoted key).
-func leaseFenceReason(r NodeView) (fenced bool, why string) {
-	switch {
-	case r.LeaseExclusive:
-		return true, "exclusive"
-	case r.LeaseDraining:
-		return true, "draining"
-	case r.LeaseBusy && !r.LeasedText:
-		return true, "busy"
-	default:
+//
+// Per card (GPU routing P7): a node that publishes its leases (NodeView.Leases) is fenced
+// only for a contract whose seats ALL sit on a card a fencing lease holds, because the node's
+// placement table falls back to a seat whose cards are free. The reason names the lease and
+// how many cards it holds. A node that publishes none (an older node) is read exactly as
+// before: its one lease block is the whole node.
+func leaseFenceReason(r NodeView, st *Subtask) (fenced bool, why string) {
+	if len(r.Leases) == 0 {
+		switch {
+		case r.LeaseExclusive:
+			return true, "exclusive"
+		case r.LeaseDraining:
+			return true, "draining"
+		case r.LeaseBusy && !r.LeasedText:
+			return true, "busy"
+		default:
+			return false, ""
+		}
+	}
+	holding := r.leasesHolding(st, func(l LeaseView) bool {
+		return l.Exclusive || l.Draining || (l.Busy && !l.Overdue && l.Class != "text")
+	})
+	if len(holding) == 0 {
 		return false, ""
 	}
+	// The same precedence the one-block rule has: exclusive, then draining, then busy.
+	pick := holding[0]
+	word := "busy"
+	for _, l := range holding {
+		switch {
+		case l.Exclusive:
+			pick, word = l, "exclusive"
+		case l.Draining:
+			pick, word = l, "draining"
+		}
+		if word == "exclusive" {
+			break
+		}
+	}
+	return true, fmt.Sprintf("%s: %s lease %d on %s", word, pick.Class, pick.Epoch, leaseCardsPhrase(pick))
+}
+
+// leaseCardsPhrase says how much of the node a lease holds, for a reason an operator reads.
+func leaseCardsPhrase(l LeaseView) string {
+	switch len(l.Devices) {
+	case 0:
+		return "the whole node"
+	case 1:
+		return "1 card"
+	default:
+		return fmt.Sprintf("%d cards", len(l.Devices))
+	}
+}
+
+// leasesHolding returns the node's leases (those pick accepts) that stand between st and
+// every seat it could run on, or nil when some seat sits on no such lease: the placement
+// table falls back to it. The seats are the node's own rows' agent chain, each with the
+// cards the node published for it (placement.RemoteSeatCards), so this is the node's own
+// reading of its layout and the rule the local box applies to itself.
+//
+// Whole-node wherever nothing narrows: a nil contract (the vision and text lanes have none),
+// a node that published no layer rows, a long-context contract, a layer the node does not
+// declare, and any seat whose cards cannot be placed. A lease that names no cards holds every
+// seat. The direction of every doubt is "held".
+func (v NodeView) leasesHolding(st *Subtask, pick func(LeaseView) bool) []LeaseView {
+	var picked []LeaseView
+	for _, l := range v.Leases {
+		if pick(l) {
+			picked = append(picked, l)
+		}
+	}
+	if len(picked) == 0 || st == nil {
+		return picked
+	}
+	cards, _ := gpuprobe.BuildCards(v.Devices, "")
+	seats, ok := placetable.RemoteSeatCards(v.Layers, cards, st.Contract, st.EstTokens)
+	if !ok {
+		return picked
+	}
+	var first []LeaseView
+	for n, ids := range seats {
+		on := leasesOnCards(picked, ids)
+		if n == 0 {
+			first = on
+		}
+		if len(on) == 0 {
+			return nil
+		}
+	}
+	return first
+}
+
+// leasesOnCards are the leases that sit on any of ids. An empty ids is a seat whose cards are
+// unknown, which is every card; a lease that names no cards is the whole node.
+func leasesOnCards(ls []LeaseView, ids []string) []LeaseView {
+	var out []LeaseView
+	for _, l := range ls {
+		if len(ids) == 0 || len(l.Devices) == 0 || sharesCard(l.Devices, ids) {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
+func sharesCard(a, b []string) bool {
+	for _, x := range a {
+		for _, y := range b {
+			if strings.EqualFold(x, y) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // leaseBusyDemoted is betterRemote's read of the ONE lease shape remoteEligible
@@ -560,11 +663,25 @@ func leaseBusyDemoted(v NodeView) bool { return v.LeaseBusy }
 // leaseDemotionRank orders the lease shapes remoteEligible admits, lowest
 // first: no demotion (0), a genuinely long lease (1), an overdue lease (2). A
 // node whose lease is both reads as overdue, the worse of the two.
-func leaseDemotionRank(v NodeView) int {
+//
+// A node that publishes its leases is ranked by the ones that stand between THIS contract and
+// its seats (leasesHolding): a long or overdue lease on a card the contract does not use says
+// nothing about when this contract would start there.
+func leaseDemotionRank(v NodeView, st *Subtask) int {
+	if len(v.Leases) == 0 {
+		switch {
+		case v.LeaseOverdue:
+			return 2
+		case leaseBusyDemoted(v):
+			return 1
+		default:
+			return 0
+		}
+	}
 	switch {
-	case v.LeaseOverdue:
+	case len(v.leasesHolding(st, func(l LeaseView) bool { return l.Overdue })) > 0:
 		return 2
-	case leaseBusyDemoted(v):
+	case len(v.leasesHolding(st, func(l LeaseView) bool { return l.Busy && !l.Overdue })) > 0:
 		return 1
 	default:
 		return 0
@@ -773,25 +890,9 @@ func LocalLeaseFor(gpuLockPath, stateDir string, pins []string) gpulease.Info {
 // a long seat the agent chain does not describe), and a contract no agent seat's window can
 // hold. Nothing narrows on a guess.
 func LeaseForContract(cfg config.Config, info gpulease.Info, c core.AgentContract) gpulease.Info {
-	if !info.Held || !cfg.Composite() || c.ContextClass == core.ContextClassLong {
-		return info
-	}
-	need := placetable.RequestForContract(c, EstimateTokens(c), cfg.AgentMaxTokens).Need()
-	chain := placetable.AgentChain(cfg.Layers, c.Layer, need)
-	if len(chain) == 0 {
-		return info
-	}
-	var first gpulease.Info
-	for n, seat := range chain {
-		scoped := modelaffinity.ScopeToPins(info, seat.Seat.DeviceList())
-		if n == 0 {
-			first = scoped
-		}
-		if !scoped.Held {
-			return scoped
-		}
-	}
-	return first
+	// The chain reading lives in placement (plan P7): the fleet node reads the same rule at
+	// dispatch, and the delegator reads a remote's version of it off that node's rows.
+	return placetable.LeasesAgainstContract(cfg, info, c, nil)
 }
 
 // ReservedFor is Reserved asked on behalf of a seat on the cards pins name.

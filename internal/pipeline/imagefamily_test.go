@@ -31,7 +31,7 @@ func writeProbeRunner(t *testing.T, dir string) string {
 	stub := filepath.Join(dir, "probe-runner.mjs")
 	if err := os.WriteFile(stub, []byte(`import {writeFileSync, copyFileSync} from "node:fs";
 const env = {};
-for (const k of ["COMFY_CUDA_DEVICE", "COMFY_DYNAMIC_VRAM", "COMFY_EXTRA_ARGS", "COMFY_DIR"]) {
+for (const k of ["COMFY_CUDA_DEVICE", "COMFY_DYNAMIC_VRAM", "COMFY_EXTRA_ARGS", "COMFY_DIR", "COMFY_CARD_UUID", "COMFY_API", "GPU_LEASE_DEVICES", "GPU_LEASE_UNLOAD_MODELS"]) {
   if (k in process.env) env[k] = process.env[k];
 }
 if (process.env.RUNNER_PROBE) writeFileSync(process.env.RUNNER_PROBE, JSON.stringify({ argv: process.argv.slice(2), env }));

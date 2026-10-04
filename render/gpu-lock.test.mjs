@@ -76,10 +76,10 @@ test("checkInheritedLease fences a resumed process out (the closing-lid case)", 
 // never writes meta.json. Several can be live at once, so the fence is "my record exists
 // and each of my cards still names my epoch" - never a compare against one shared epoch.
 
-function v2Lease(dir, epoch, devices, { claimEpoch = epoch, state = "active" } = {}) {
+function v2Lease(dir, epoch, devices, { claimEpoch = epoch, state = "active", extra = {} } = {}) {
   mkdirSync(join(dir, "e"), { recursive: true });
   mkdirSync(join(dir, "cards"), { recursive: true });
-  writeFileSync(join(dir, "e", `${epoch}.json`), JSON.stringify({ epoch, class: "media", holder: { pid: 1 }, devices, state }));
+  writeFileSync(join(dir, "e", `${epoch}.json`), JSON.stringify({ epoch, class: "media", holder: { pid: 1 }, devices, state, ...extra }));
   for (const d of devices) writeFileSync(join(dir, "cards", `${d}.claim`), JSON.stringify({ epoch: claimEpoch, at_ms: 1 }));
 }
 
@@ -109,6 +109,21 @@ test("checkInheritedLease: a lease still being granted is not yet held", () => {
   v2Lease(dir, 7, ["gpu-test-0"], { state: "granting" });
   assert.equal(checkInheritedLease({ dir, epoch: 7 }), false);
   rmSync(dir, { recursive: true, force: true });
+});
+
+test("checkInheritedLease: a lease whose term ended unrenewed is still held (the expired label is not a fence)", () => {
+  // Plan P9. An expired lease is held and heartbeating; the render child running under it
+  // must keep working. The label is its own key (`expired`); the record's state stays
+  // "active", which is the only word a reader built before terms accepts.
+  const expired = { expired: true, expired_why: "its owner is gone", term_ms: 21600000 };
+  const dir = mkdtempSync(join(tmpdir(), "gpulease-v2-"));
+  v2Lease(dir, 7, ["gpu-test-0"], { extra: expired });
+  assert.equal(checkInheritedLease({ dir, epoch: 7 }), true, "a card lease labelled expired");
+  rmSync(dir, { recursive: true, force: true });
+  const whole = mkdtempSync(join(tmpdir(), "gpulease-v1-"));
+  writeFileSync(join(whole, "meta.json"), JSON.stringify({ epoch: 5, class: "media", holder: { pid: 1 }, ...expired }));
+  assert.equal(checkInheritedLease({ dir: whole, epoch: 5 }), true, "a whole-node lease labelled expired");
+  rmSync(whole, { recursive: true, force: true });
 });
 
 test("checkInheritedLease: with no v2 record the legacy meta.json compare is unchanged", () => {

@@ -126,6 +126,12 @@ const (
 // flag. Defined here so the CLI and the MCP status tool cannot drift apart.
 const QueueHint = "local-offload gpu reserve --wait 8h --drain --unload-seat --for <window> --reason <why> -- <cmd>  (queues until the holder releases; --wait 0 fails fast; never refuse GPU work because a card is held)"
 
+// ErrStillQueued is what a queued Acquire returns when its whole window passed without it ever
+// reaching the front of the line, so no claim was attempted and no holder was seen: it waited
+// behind a waiter that has not claimed, or behind a place held for a caller who left. It is a
+// place in line and not a fault, like ErrHeld; callers that answer with a token treat the two alike.
+var ErrStillQueued = errors.New("gpulease: gave up waiting for the card: still queued")
+
 // ErrHeld is returned by TryAcquire when the card is legitimately held by someone
 // else. It carries the current holder so a caller can report an honest ETA rather
 // than a bare failure.
@@ -235,8 +241,35 @@ type Meta struct {
 	// WrapperVersion is the build of the process that holds the lease.
 	WrapperVersion string `json:"wrapper_version,omitempty"`
 	// State is "granting" while a v2 grant is in flight under the epoch lock and
-	// "active" once every card claim exists. Empty on a whole-node record.
+	// "active" once every card claim exists. Empty on a whole-node record. It is the
+	// FENCE's word and nothing else: whether the lease's term was renewed is Expired
+	// below, never a third State, because a reader that predates terms (checkV2,
+	// render/gpu-lock.mjs) fences out any state but "active".
 	State string `json:"state,omitempty"`
+
+	// --- terms (plan P9). Additive and omitempty: a record without them is read as one
+	// term of its declared window under the installed limits (term.go). ---
+
+	// TermMs is the renewal term: how far a renewal moves the declared end. It is the
+	// request capped at the installed gpu_max_term (24 h with a progress contract), never
+	// more than the declared window.
+	TermMs int64 `json:"term_ms,omitempty"`
+	// RequestedMs is the window the caller asked for when that is above the cap on a term.
+	// The declared window (ExpiresAtMs) is still the whole request: a request is
+	// recorded, warned about and accepted, never shortened. Zero when the request was at or
+	// under the cap.
+	RequestedMs int64 `json:"requested_ms,omitempty"`
+	// MaxTotalMs is how long after AcquiredAtMs the lease may be renewed at all (gpu_max_total,
+	// never less than the declared window). Past it a lease that is still held reads
+	// overdue however healthy its owner and progress look; it is still not freed.
+	MaxTotalMs int64 `json:"max_total_ms,omitempty"`
+	// Expired is stamped by the holder's own tick when the lease's term ended and was NOT
+	// renewed (term.go). It is a LABEL: the heartbeat goes on, the claim stays, the lease is
+	// still fenced and still current, and a later tick that finds the term renewable again
+	// clears it. Nothing is freed or killed by it.
+	Expired bool `json:"expired,omitempty"`
+	// ExpiredWhy is the sentence behind Expired, recorded with it.
+	ExpiredWhy string `json:"expired_why,omitempty"`
 
 	// --- ownership (plan P8). Additive and omitempty: a record without Owner is an
 	// UNKNOWN owner, never an orphan. See owner.go. ---
@@ -329,6 +362,17 @@ type Info struct {
 	YieldGraceMs int64
 	OnYield      string
 	OnYieldDir   string
+	// Term, Requested and HardEnd mirror the record's terms (term.go): the renewal term, the
+	// window the caller asked for when that was above the cap on a term (zero otherwise), and
+	// the instant after which the lease is no longer renewed (AcquiredAt plus the maximum
+	// total; zero for a record that carries none). Expired and ExpiredWhy mirror the label the
+	// holder's tick stamped when the term ended unrenewed: held, fenced and heartbeating all
+	// the same.
+	Term       time.Duration
+	Requested  time.Duration
+	HardEnd    time.Time
+	Expired    bool
+	ExpiredWhy string
 	// Leases lists every live lease on its own (lowest epoch first) when MORE THAN ONE
 	// is live; it is nil otherwise. Info itself describes only the lowest, so a consumer
 	// that decides "does a lease fence me" from Class, Exclusive and Draining must walk
@@ -440,6 +484,20 @@ type Options struct {
 	// the takeover that reads them.
 	YieldGrace time.Duration
 	OnYield    string
+
+	// QueuedSince, when set, is the arrival time the waiter this call registers carries instead
+	// of now: a call that is handed a place in line keeps the position that place had.
+	QueuedSince time.Time
+	// ResumeToken names a place-keeping token (tokens.go) this call resumes. If the token can
+	// still be resumed the waiter carries its original arrival time and the token is consumed;
+	// if not, the call is a new arrival. LeaveToken reuses the id, so a caller keeps one name for
+	// its place across re-calls.
+	ResumeToken string
+	// MaxTerm and MaxTotal override the installed term limits (config gpu_max_term_min and
+	// gpu_max_total_min, SetDefaultTerms) for this acquisition; zero means the installed
+	// value. See PlanTerm for what each one bounds. Neither shortens the window asked for.
+	MaxTerm  time.Duration
+	MaxTotal time.Duration
 }
 
 // Manager binds a resolved state root. Construct with Open, which performs the
@@ -464,6 +522,8 @@ type Manager struct {
 	// set this directly to observe heartbeat staleness without a real 15s wait,
 	// the same seam pattern as sleep/pollEvery.
 	waiterHeartbeatTTL time.Duration
+	// tokenGrace overrides TokenGrace (tokens.go); zero means the default. Tests shrink it.
+	tokenGrace time.Duration
 	// cardScoped is the per-host switch (config gpu_card_scoped_leases). Off, a
 	// device-scoped acquisition is refused and nothing but whole-node records is ever
 	// written. Reading is never gated: a reader must understand a v2 directory whether
@@ -990,6 +1050,11 @@ func infoFrom(meta *Meta, now time.Time) Info {
 		Owner:          cloneOwner(meta.Owner),
 		Progress:       cloneProgress(meta.Progress),
 		Legacy:         len(meta.Devices) == 0 && meta.Format < RecordFormat && strings.TrimSpace(meta.WrapperVersion) == "",
+		Term:           time.Duration(meta.TermMs) * time.Millisecond,
+		Requested:      time.Duration(meta.RequestedMs) * time.Millisecond,
+		HardEnd:        hardEndOf(meta),
+		Expired:        meta.Expired,
+		ExpiredWhy:     meta.ExpiredWhy,
 	}
 }
 
@@ -1396,7 +1461,13 @@ func queueTimeoutErr(m *Manager, self Waiter) error {
 		if w.path == self.path {
 			continue
 		}
-		return fmt.Errorf("gpulease: gave up waiting for the card: still queued behind pid %d (%s, reason %q), which has not claimed it", w.PID, w.Class, w.Reason)
+		return fmt.Errorf("%w: behind pid %d (%s, reason %q), which has not claimed the card", ErrStillQueued, w.PID, w.Class, w.Reason)
+	}
+	// A place held for a caller who left (tokens.go) keeps the line just as a waiter does.
+	for _, t := range m.Tokens() {
+		if t.ID != self.Token && m.tokenLive(t) && t.SinceMs < self.SinceMs && devicesConflict(t.Devices, self.Devices) {
+			return fmt.Errorf("%w: behind a place held for another caller (%s, %s, reason %q), who may still come back for it", ErrStillQueued, t.ID, t.Class, t.Reason)
+		}
 	}
 	// The card is free and no one else is in line: isFrontOfQueue would have
 	// been true and TryAcquire would have run, setting err — this is
@@ -1447,6 +1518,7 @@ func (m *Manager) record(epoch uint64, class Class, opts Options) ([]byte, error
 		WrapperVersion: strings.TrimSpace(opts.WrapperVersion),
 	}
 	m.stampOwnership(&meta, opts)
+	m.stampTerm(&meta, opts, ttl)
 	if !m.legacyWriter {
 		meta.Format = RecordFormat
 	}
@@ -1767,7 +1839,7 @@ func (m *Manager) ReleaseByEpoch(epoch uint64) (bool, error) {
 		return false, nil // nothing held
 	}
 	if epoch != 0 && meta.Epoch != epoch {
-		return false, fmt.Errorf("gpulease: lease has moved on (asked for epoch %d, current is %d)", epoch, meta.Epoch)
+		return false, errLeaseMovedOn(epoch, meta.Epoch)
 	}
 	// Drop the CLAIM only. Removing the container would delete a directory another
 	// acquirer may be working inside.
@@ -1776,6 +1848,52 @@ func (m *Manager) ReleaseByEpoch(epoch uint64) (bool, error) {
 		return false, fmt.Errorf("gpulease: releasing lease: %w", err)
 	}
 	return true, nil
+}
+
+// ReleaseTarget names the lease ReleaseByEpoch(epoch) would end, without ending it, or the
+// refusal ReleaseByEpoch would return. It is the question a caller asks BEFORE doing anything
+// destructive on a lease's behalf (`gpu release` stops the ComfyUI instances kept under the
+// lease, and must not when the release is going to be refused): act on the epoch returned,
+// never on a guess of your own at what "whatever is held" means.
+//
+// The rule is ReleaseByEpoch's, step for step: a named epoch is that lease (a card lease by its
+// record, a whole-node lease when it is the current one, else the "moved on" refusal); epoch 0
+// is the whole-node lease if one is recorded, else the only live card lease, and with several
+// card leases live it is the refusal that asks for --epoch. 0 with a nil error means nothing is
+// held (or the named epoch is not): there is nothing to end. It reads and never writes.
+func (m *Manager) ReleaseTarget(epoch uint64) (uint64, error) {
+	if epoch != 0 {
+		if _, serr := os.Stat(epochRecordPath(m.leaseDir(), epoch)); serr == nil {
+			return epoch, nil
+		}
+		meta, err := m.readMeta()
+		if err != nil || meta == nil {
+			return 0, nil
+		}
+		if meta.Epoch != epoch {
+			return 0, errLeaseMovedOn(epoch, meta.Epoch)
+		}
+		return epoch, nil
+	}
+	if meta, err := m.readMeta(); meta != nil {
+		if err != nil {
+			return 0, nil
+		}
+		return meta.Epoch, nil
+	}
+	switch live := m.liveCardLeaseEpochs(); len(live) {
+	case 0:
+		return 0, nil
+	case 1:
+		return live[0], nil
+	default:
+		return 0, errSeveralCardLeases(live)
+	}
+}
+
+// errLeaseMovedOn is the refusal for releasing an epoch that is no longer the current lease.
+func errLeaseMovedOn(asked, current uint64) error {
+	return fmt.Errorf("gpulease: lease has moved on (asked for epoch %d, current is %d)", asked, current)
 }
 
 // Release drops the lease — but ONLY if we still hold it. Releasing unconditionally

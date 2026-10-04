@@ -22,6 +22,7 @@ svg.spark{width:100%;height:110px;background:#0b0d11;border-radius:6px}
 table{width:100%;border-collapse:collapse;font-size:12px}th,td{text-align:left;padding:6px 8px;border-bottom:1px solid #262a33}th{color:var(--mut);font-weight:500}
 .sev-error{color:var(--err)}.sev-warn{color:var(--warn)}
 .models{font-size:11px;color:var(--mut);word-break:break-all}
+.holder{font-size:11px;color:var(--mut);margin:0 0 4px}.holder.held{color:var(--warn)}
 </style></head><body>
 <header><h1>Fleet overview</h1><span id="cluster">connecting…</span></header>
 <main>
@@ -39,6 +40,15 @@ function spark(hist,n){
   const line=(key,max,color)=>{const pts=hist.map((p,i)=>`${x(i).toFixed(1)},${(H-pad-(H-2*pad)*Math.min(1,(p[key]||0)/max)).toFixed(1)}`).join(' ');return `<polyline fill="none" stroke="${color}" stroke-width="1.5" points="${pts}"/>`};
   return `<svg class="spark" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">${line('gpu_util',100,'var(--gpu)')}${line('cpu',100,'var(--cpu)')}${line('vram_free_gb',n.vram_total_gb||1,'var(--vram)')}${line('ram_used_gb',n.host_ram_total_gb||1,'var(--ram)')}</svg>`;
 }
+// The holder line under a card's bar (GPU routing P7): the lease that holds it, the display card
+// that is never free for work, a free card, or a card busy under no lease.
+function dur(s){return s>=3600?Math.floor(s/3600)+'h'+String(Math.floor(s%3600/60)).padStart(2,'0')+'m':s>=90?Math.round(s/60)+'m':s+'s'}
+function holder(c){
+  if(c.holder){const h=c.holder;const left=h.remaining_sec>0?' · '+dur(h.remaining_sec)+' left':(h.overdue?' · past its window':'');
+    return `<div class="holder held">${esc(h.class)} lease ${esc(h.epoch)} · ${esc(h.verdict)}${h.scope==='whole-node'?' · whole node':''}${left}</div>`}
+  if(c.display)return '<div class="holder">display card · never free for work</div>';
+  return `<div class="holder">${c.free?'free':'busy · no lease'}</div>`;
+}
 function card(n){
   const st=n.reachable?'<span class="badge ok">online</span>':'<span class="badge err">unreachable</span>';
   // "served"/"not served", never "resident"/"cold": agent_seat_resident is a probe of
@@ -49,7 +59,8 @@ function card(n){
   // an hour chasing an imagined "cold seat deadlock" while the real fault was a node whose
   // llama-swap config had been truncated to zero models (2026-09-08).
   const seat=n.agent_enabled?`<span class="badge ${n.agent_seat_resident?'ok':'err'}" title="${n.agent_seat_resident?'llama-swap’s roster names this seat (alias-aware). Says nothing about VRAM — a seat idled out by ttl still reads served.':'this node’s llama-swap does not name this seat: it is down, unreachable, or serving a roster without it. The node takes no agent work until this clears.'}">${esc(n.agent_seat)} ${n.agent_seat_resident?'served':'not served'}</span>`:'<span class="badge">no agent lane</span>';
-  const devs=(n.gpu_devices||[]).map(d=>{const tot=d.vram_total_gb||0;const free=d.vram_free_gb||0;const pct=tot?100*(1-free/tot):0;return `<div class="kv"><span>${esc(d.name)}</span><b>${(tot-free).toFixed(1)} / ${tot.toFixed(1)} GB${d.util_known?` · ${esc(d.util_pct)}%`:''}</b></div><div class="bar"><i style="width:${pct.toFixed(0)}%"></i></div>`}).join('');
+  const tiles=Object.fromEntries((n.cards||[]).map(c=>[String(c.uuid||'').toLowerCase(),c]));
+  const devs=(n.gpu_devices||[]).map(d=>{const tot=d.vram_total_gb||0;const free=d.vram_free_gb||0;const pct=tot?100*(1-free/tot):0;const t=tiles[String(d.uuid||'').toLowerCase()];return `<div class="kv"><span>${esc(d.name)}</span><b>${(tot-free).toFixed(1)} / ${tot.toFixed(1)} GB${d.util_known?` · ${esc(d.util_pct)}%`:''}</b></div><div class="bar"><i style="width:${pct.toFixed(0)}%"></i></div>${t?holder(t):''}`}).join('');
   return `<div class="card"><h2>${esc(n.node_id||n.base)} ${st} ${seat} <span class="badge">${esc(n.harness_version||'')}</span></h2>
   ${n.reachable?'':`<div class="sev-error">${esc(n.probe_error)}</div>`}
   ${spark(n.history,n)}<div class="legend"><span><i style="background:var(--gpu)"></i>GPU ${n.gpu_util_known?n.gpu_util_pct+'%':'n/a'}</span><span><i style="background:var(--cpu)"></i>CPU ${n.host_cpu_pct}%</span><span><i style="background:var(--vram)"></i>VRAM free ${(n.vram_free_gb||0).toFixed(1)} GB</span><span><i style="background:var(--ram)"></i>RAM ${(n.host_ram_used_gb||0).toFixed(0)} / ${(n.host_ram_total_gb||0).toFixed(0)} GB</span></div>

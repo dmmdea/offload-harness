@@ -301,7 +301,7 @@ func TestReplacementDoesNotLandOnAFullLocalSeat(t *testing.T) {
 	compressWait(t, 20*time.Millisecond, 0)
 	_, url := refusingNode(t, "node-full", http.StatusServiceUnavailable, nil)
 	cfg := testCfg(t)
-	cfg.GPULockPath = busyLocal(t) // a media lease: the local seat is "busy", so route=auto asks the remote first
+	cfg.GPULockPath = busyLocalAsHolder(t) // a media lease: the local seat is "busy", so route=auto asks the remote first
 	cfg.FleetMaxConcurrentJobs = 1
 	cfg.AgentPlacementWaitSec = 10
 

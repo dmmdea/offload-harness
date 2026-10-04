@@ -27,7 +27,7 @@ import (
 //     load-triggering text admissions wait (ADR 0026) for work that never touches a card.
 //     The runner forces software GL (--no-browser-gpu, PRODUCER_BROWSER_GPU_MODE=software)
 //     and CPU encode, and refuses --gpu/--browser-gpu outright.
-//   - Serialized in-process by composeSlot (capacity one) — NOT mediaSlot, which would park
+//   - Serialized in-process by composeSlot (capacity one) — NOT the media slots, which would park
 //     a composition behind a 30-minute video render it does not contend with.
 //   - One door: render/compose-hyperframes.mjs builds the allowlisted env, puts --json on
 //     every call, refuses every subcommand outside lint/check/render/snapshot/browser/
@@ -38,7 +38,7 @@ import (
 
 // composeSlot is compose_video's in-process slot: one composition at a time per process
 // (each render already fans out over up to 24 Chrome workers). A buffered channel for the
-// same reasons mediaSlot is one: a bounded wait, and a waiter handed the slot on release.
+// same reasons the media slots are channel-like: a bounded wait, and a waiter handed the slot on release.
 var composeSlot = make(chan struct{}, 1)
 
 func takeComposeSlot(wait time.Duration) bool {

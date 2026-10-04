@@ -8,26 +8,68 @@ package gpuprobe
 // placement guards and the health sampler already read every card through one
 // parser here, for the same reason.
 //
-// It reads nvidia-smi's display_active: the card property itself. The first cut
-// inferred it from the process list instead — "nvidia-smi could not size this
-// process, so it is the desktop" — and that was wrong twice over. `[N/A]`
-// memory is a WDDM property, not a graphics-process property: nvidia-smi cannot
-// size ANY process on Windows, and it types every one of <node-b>'s 24 desktop
-// rows `C+G`, compute AND graphics. A native-Windows CUDA seat (ComfyUI is
-// exactly that, and the 3-card law pins it to card 0 or 2) produces the same
+// It reads two card properties from nvidia-smi, never the process list. The
+// first cut inferred the display card from the process list — "nvidia-smi could
+// not size this process, so it is the desktop" — and that was wrong twice over.
+// `[N/A]` memory is a WDDM property, not a graphics-process property: nvidia-smi
+// cannot size ANY process on Windows, and it types every one of <node-b>'s 24
+// desktop rows `C+G`, compute AND graphics. A native-Windows CUDA seat (ComfyUI
+// is exactly that, and the 3-card law pins it to card 0 or 2) produces the same
 // `[N/A]`, so the heuristic would have flagged the card the harness was working
 // on, dropped it from work_util_pct, and made a SATURATED node advertise itself
 // as idle — inverting the defect it was written to cure.
 //
-// Measured 2026-09-21 with `--query-gpu=display_active`:
+// THE TWO PROPERTIES, and why one is not enough:
 //
-//	<node-b>, 3 cards, operator gaming ... Disabled / ENABLED / Disabled  (card 1, exactly)
-//	<node-c>, headless Linux, A2 ......... Disabled                        (nothing flagged)
-//	<node-a>, laptop, screen on the iGPU . Disabled                        (the RTX is scored)
+//   - display_active ("Enabled"/"Disabled") says a display is INITIALISED on the
+//     card: memory is allocated for it. It is true while a game or a lit screen is
+//     being driven and false when the screen sleeps, so on its own it fires only
+//     part of the time.
+//   - display_attached ("Yes"/"No") says a physical monitor is connected to one of
+//     the card's connectors. It does not depend on the screen being awake, and it is
+//     what holds at the desk.
+//
+// Two questions are asked of them, and they get two rules (Device.DrivesDisplay is the
+// OR of the two columns):
+//
+//   - "may a render be PLACED on this card" (the card table and the allocator, plan
+//     invariant I6): display_active OR display_attached, so the monitor's card is never
+//     auto-picked, screen lit or asleep (ScreenCardUUIDs);
+//   - "whose load is this" (work_util_pct, the lease verdict, the foreign-load guard, the
+//     delegator's free-card count): display_active alone (DisplayCardUUIDs). display_attached
+//     is true for the whole life of the box, so reading it here would hide the node's own
+//     work on that card and change what a host with card-scoped leases OFF advertises.
+//
+// Only an exact "Enabled" / "Yes" counts; "[Not Supported]", "[N/A]" and a missing column
+// mean "we do not know", and an unknown is never the operator's screen.
+//
+// A driver that refuses the display_attached field (an older one, a headless
+// Linux build) rejects the whole query, so the reader retries without it
+// (RunDisplayAware) and the rule then rests on display_active alone, as before.
+// Only a failure that names the field (or a run of them) arms that for ten
+// minutes, and it is logged when it does. One transient failure of the full
+// query answers that call from the fallback and is forgotten, and the reading it
+// produced says so (Device.AttachedUnknown, Card.DisplayUnknown): it cannot tell
+// the monitor's card from the others, so the allocator hands out no card from it.
+//
+// Measured with `--query-gpu=display_active[,display_attached]`:
+//
+//	2026-09-21  <node-b>, 3 cards, operator gaming ... Disabled / ENABLED / Disabled  (card 1, exactly)
+//	2026-09-21  <node-c>, headless Linux, A2 ......... Disabled                        (nothing flagged)
+//	2026-09-21  <node-a>, laptop, screen on the iGPU . Disabled                        (the RTX is scored)
+//	2026-10-03  the 3-card box, screen asleep ........ active Disabled on all three,
+//	                                                   attached No / YES / No          (card 1: the monitor)
+//
+// The last row is why the rule has two inputs: with the screen asleep the 3-card
+// box reported no display card at all through display_active, so the allocator's
+// never-auto-pick-the-display-card rule (plan invariant I6) had nothing to act on.
 
-// DisplayCardUUIDs returns, by UUID, the cards driving a display — the ones the
-// 3-card law forbids seats from using, so utilization on them is never the
-// harness's own work.
+// DisplayCardUUIDs returns, by UUID, the cards driving a display IN USE (display_active
+// Enabled: a game or a lit screen has initialised one) — the ones the 3-card law forbids seats
+// from using, so utilization on them is never the harness's own work. It answers "whose load is
+// this": the node's work_util_pct, the lease verdict, the foreign-load guard and the delegator's
+// free-card count read it. It deliberately does NOT read display_attached, which is true for the
+// whole life of the box and would hide the node's own work on that card.
 //
 // The guard matters as much as the rule: a box whose ONLY card is its display
 // card runs its seats there by necessity (a single-GPU desktop, an iGPU node).
@@ -37,10 +79,23 @@ package gpuprobe
 // A nil result means "exclude nothing" — which is also what a driver that does
 // not report display_active yields, because absent evidence is never a yes.
 func DisplayCardUUIDs(devices []Device) map[string]bool {
+	return displayCards(devices, func(d Device) bool { return d.DisplayActive })
+}
+
+// ScreenCardUUIDs returns, by UUID, the cards the operator's screen is on or can be on:
+// display_active Enabled OR display_attached Yes (Device.DrivesDisplay). It answers "may a
+// render be PLACED on this card": the card table (BuildCards) and so the allocator read it, and
+// the monitor's card is never auto-picked, with the screen asleep as with it lit. The same
+// single-card guard applies as in DisplayCardUUIDs.
+func ScreenCardUUIDs(devices []Device) map[string]bool {
+	return displayCards(devices, Device.DrivesDisplay)
+}
+
+func displayCards(devices []Device, isDisplay func(Device) bool) map[string]bool {
 	display := make(map[string]bool)
 	eligible := 0
 	for _, d := range devices {
-		if d.DisplayActive {
+		if isDisplay(d) {
 			// A display card with no UUID cannot be keyed, so it cannot be
 			// excluded — but it is still not a card the harness may place a seat
 			// on, so counting it as one would let the guard below exclude the

@@ -6,7 +6,7 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
-## [0.164.0] - 2026-10-03 - PAIR shows every job where it ran: remote calls card, fleet nodes card for askers that cannot, transcription spills to an idle node
+## [0.165.0] - 2026-10-03 - PAIR shows every job where it ran: remote calls card, fleet nodes card for askers that cannot, transcription spills to an idle node
 
 An audit of PAIR's Jobs list against every node's ledger (2026-10-03) found it drew every card it received correctly, and
 that whole classes of work never reached it: 13 jobs a fleet node served for a thin client, every remote compose / vision /
@@ -79,6 +79,317 @@ the fixes plan; the release notes name each.
   the id, names the asker, resolves the node itself (including view-only nodes), rate-limits and caps open cards per
   asker; relayed markers are `.remote` files a pre-relay sweeper skips. `offload_status` gains a `pair` block naming
   the emitter's mode (local ingress / node-info fallback / relay / off).
+
+## [0.164.0] - 2026-10-03 - Media calls take one card, leases have bounded terms, the fleet reports per card
+
+**GPU routing, milestone 2, wave A.** Three phases of the routing plan, each built test-first, reviewed and fixed:
+
+- **Per-card media admission (P13b).** A harness media call (image, edit, inpaint, upscale, animate, music, un-pooled
+  video) now leases ONE card through the allocator and runs on that card's own ComfyUI instance, instead of fencing the
+  whole box. Waiters keep their place with a waiter token instead of a `gpu_busy` defer. A kept instance no longer holds
+  its runner open, and the lease holder stops it at release. The desktop card counts as a display card when a monitor is
+  attached, so it is never auto-picked. An unkeyed runner given a non-default `--api` no longer starts a stray default
+  instance. Hosts without card-scoped leases keep the whole-node behaviour byte for byte.
+- **Bounded terms (P9).** A lease is granted one term at a time and renewed while its owner or its progress vouches for
+  it. A lease past its window is labelled expired and the queue is told why; nothing is ever freed, reclaimed or killed
+  by a deadline. A detached holder keeps holding when its window ends unless it was started with `--release-at-expiry`.
+- **Fleet per-card truth (P7).** Nodes report their leases per card, so a remote lease fences only the contracts whose
+  cards it sits on; `node-swap --cards` never stops a process that holds a lease on a card it would touch.
+
+### Changed — a lease on one card fences a remote node only for the contracts that run on it (GPU routing P7, register C-86)
+
+With card-scoped leases several leases are live at once, but a node's health described only the lowest epoch in one
+block, so a long render on one card of three made the whole node a non-target and the delegator routed nothing to the
+other two. This change carries the per-card truth across the fleet. Old readers keep working in both directions.
+
+- **The node publishes `leases[]`** in `/fleet/health`: one entry per live lease with its cards (lower-cased GPU UUIDs;
+  absent means the whole node), where they came from, its term, `busy`, `overdue`, `exclusive`, `draining`, its own
+  `orphaned`/`stalled` and one `verdict` word. Each layer seat gains `device_ids`, the lease ids of the cards its pin
+  names, resolved on the node. The singular `lease` block, `lease_exclusive` and `lease_draining` stay and are now the
+  WORST across the live leases (busy, orphaned, stalled, exclusive and draining if any lease is; `overdue` only when no
+  live lease is a long hold of its own, because every reader computes busy-and-not-overdue and an abandoned lease on one
+  card must not hide a live render on another), so a delegator at 0.160.0 or 0.161.0 is never told less than is true; with one lease the
+  block is byte for byte what it was. A node's lease reader now includes the cards a legacy lease was scoped to by
+  evidence (when `gpu_legacy_scope_inference` is on), as the box's own gates already read it.
+- **The node's own gates follow the cards.** `saturation.high` and `idle_slot` close the node only when the leases that
+  refuse new work are whole-node or together hold every card it has, and `/fleet/dispatch` refuses a text reservation
+  for an agent contract only when every seat that contract could run on sits on a card a reservation holds (every
+  live text lease counts, not only the lowest epoch). Other task types keep the whole-node refusal.
+- **The delegator fences per contract.** `NodeView.Leases` carries the entries; `leaseFenceReason` fences a node only for
+  a contract whose seats ALL sit on a card a fencing lease holds, reading the seats off the node's own rows, and
+  `leaseDemotionRank` ranks by the leases between that contract and its seats (an overdue lease is ranked last and never
+  excluded, as before). A node that publishes no `leases[]`, no layer rows, no seat ids or a lane with no contract is read
+  as the whole node. The chain rule moved to `placement.LeasesAgainstContract`, shared by the delegator, the node and the
+  remote reading.
+- **The wasted local leg is gone.** A lease that fences every local seat of a contract's chain turns the local run away at
+  the seat's own pre-check, after the delegator had spent an attempt, a ledger row and an intent record on it. The
+  delegator reads the same verdict first, at the route=auto fallback, the auto deal, the spread rotation, the
+  re-placement's last resort and the capacity wait's local tick, and waits in line instead (only when another node exists,
+  never for `route=local`; the holder's own child is exempt). A media lease on the seat's cards now takes the local slot out
+  of a spread deal, as a text reservation did; this reverses the 2026-09-06 review note that a media lease changes nothing
+  about a spread, whose premise (the gate waits for the render) the S-26 pre-check ended.
+- **A capacity wait ends in a kept place.** When nothing took the work, the defer (class `capacity`, unchanged) names the
+  places the subtask stood in: `results[].place_keeping` (`node`, `on`: lease, queue, backlog or cooldown, `detail`,
+  `eta_sec`) and `retry_after_sec`, the soonest known end. The token that resumes a place across calls is the media-admission
+  change and is not part of this.
+- **Deploy.** A binary swap touches the executable and the processes it may stop, not a card, so a standalone node's wait
+  stays every GPU lease unless the operator names the cards (`node-swap --cards`, forwarded by both launchers); the lease it did not wait
+  for is recorded in the outcome (`cards`, `leases_left_alone`) and a refusal names the lease that held it. `fleet_reclaim`
+  stays whole-node on purpose (docs/systems/fleet-node.md, "Per-card lease truth"). Three guards make the flag safe to
+  use on a box that runs renders:
+  - A lease held by a process the deploy would stop holds it whatever its cards. The fleet node and an MCP helper take a
+    lease in-process while they render, the lease records its holder's pid, and the rename retry stops any helper that
+    holds the exe: with `--cards` a lease on another card used to be left alone while the helper holding it was stopped,
+    ending the render. Now such a lease holds the deploy, the rename retry never stops a process that holds a lease (nor
+    any helper when the leases cannot be read), and the wait does not narrow when the processes running the image cannot
+    be listed.
+  - Each `--cards` entry is resolved against the box's card table (an nvidia-smi index, a GPU UUID or an unambiguous UUID
+    prefix, as `gpu reserve --devices` does). An entry that places on no card, or a box with no card table, refuses the
+    deploy before anything is touched; before, a typo or an index matched no lease and the deploy went ahead past the
+    render the operator meant.
+  - `--cards` with a health URL (given, or read from the node's config) is refused; it was silently ignored.
+- **The singular `lease` block no longer hides a live render behind an abandoned lease.** `overdue` in the folded block
+  is set only when no live lease is a long hold of its own. Every reader of the singular fields computes busy-and-not-overdue,
+  so "overdue if any lease is" made an abandoned lease on one card mask a live long render on another from the text and
+  vision remotes, the MCP door's fleet view and `leasedLanes` too, not only from a delegator one release behind.
+- **A dead fleet is still reported when the local seat is fenced.** Before the wasted-local-leg change, route=auto with
+  every remote failing its health probe and the local seat busy under somebody else's lease fell through to the local
+  placement, which counted the run as Infrastructure; the fenced wait dropped that class, so the same dead fleet ended as a
+  plain capacity defer and exited zero. The class now rides the wait sentinel (the fenced and the text-reservation ones, on
+  every placement path) and is stamped on whatever ends the wait, unless a remote answered while it waited.
+- **`fleet-ui` and `top` show one tile per card** with the lease that holds it (class, epoch, verdict, time left).
+- Tests: `TestHealthLeaseEntryOverdueIsPerLease` used to assert the defect (the folded block reads overdue beside a live
+  3 h lease) and now asserts the fold above. The existing delegate fixtures that held a media lease to make the local GPU read busy while expecting the local
+  fallback now run under that lease (`runUnderLease`, `busyLocalAsHolder`), since a lease held by somebody else fences the
+  seat and the delegator no longer dials it; `TestRunAutoMediaLeaseStillRunsLocal` and `TestRunSpreadMediaLeaseDealsAsBefore`
+  became the tests of the new rule.
+
+### Changed — a lease has a term; a term ends in a renewal or a label, never a release; the detached holder stops releasing at `--for` (GPU routing P9)
+
+**The operator-visible change.** `gpu reserve --detach` used to hold the card until its `--for` deadline and then
+release it whether or not the work behind it had finished; on 2026-09-07 that freed a card under a running job. It no
+longer does. `--for` is now the lease's declared window and its first term, and when a term ends the holder's own tick
+(the wrapper form's 15 s heartbeat; the detached holder's renewal) does one of two things, never a release:
+
+- **renews it by one term** when its owner is alive and (its progress file is advancing or its cards are working), or
+  when its owner cannot be told (no owner recorded, a session the registry never held) and its progress file is
+  advancing, or when it is unattended and its progress file is advancing, up to a maximum total from acquisition;
+- otherwise **labels it expired**, with the reason. An expired lease is still held and heartbeating, still passes its
+  holder's fence, reads `held-overdue` (no new verdict word) with a note that says why the term was not renewed, and is
+  open to a takeover (the command is a later change). It is **not reclaimable**: the reclaim rule is unchanged, nothing
+  is freed or killed, and the label clears itself if the term becomes renewable again.
+
+A request above the cap on a term is recorded, warned about on stderr, accepted whole and never shortened. The record
+gains `term_ms`, `requested_ms`, `max_total_ms`, `expired` and `expired_why` (all `omitempty`; an older reader ignores
+them). **`expired` is its own key and not a `State` value**, a deviation from the plan's wording: `state` is what
+`checkV2` and `render/gpu-lock.mjs` fence on, and every binary and Node copy built before this change fences out any
+state but `active`, so an `expired` state would stop a render running under an expired lease, which is the loss this
+change exists to prevent. The plan's umbrella `meta.json` was dropped in P2, so a renewal rewrites only the lease's own
+record.
+
+New config keys `gpu_max_term_min` (default 360) and `gpu_max_total_min` (default 2880), installed at config load. New
+flag `gpu reserve --detach --release-at-expiry` restores the old ending (refused without `--detach`). `/fleet/health`'s
+lease block gains `expired` (absent unless true; read across every live lease, with `busy` and `overdue` unchanged).
+`gpu status` prints the term and, for an expired lease, `term: EXPIRED ... ago and not renewed because ...`.
+
+**The label is stable and does not state what nobody saw.** The reason a lease was labelled is compared at every recheck
+(once a minute while it stays expired) to decide whether anything changed, so it never quotes a value that moves with the
+clock: a stalled progress file used to put "no activity for 1h2m0s" into it, a different sentence every minute, so the
+record was rewritten and the wrapper printed "not renewed" again, indefinitely, into the stream the wrapping session reads
+as notifications. It now holds only the stall window the lease declared, and the holder says it once per expiry (a
+renewal ends the episode). The cards the check reads have three answers, working, idle and could not be read: a failed or
+timed-out `nvidia-smi` sample (likeliest when the GPU is saturated) is worded "its cards could not be read", never "no
+work", and the reason the owner could not be told (the session was not in the registry, or the registry could not be
+read) reaches the label instead of "no owner is recorded as present". An owner who cannot be told is not an objection:
+an advancing progress file renews its lease, as it does an unattended one; a busy card alone still does not.
+
+Three existing holder tests ended by waiting for the old deadline exit; they now release the lease, which is what ends a
+holder. See [GPU lease](docs/systems/gpu-lease.md), "Terms", and ADR 0070.
+
+### Fixed — review pass on per-card media admission (GPU routing P13b)
+
+- **`gpu release` no longer kills a live job's ComfyUI instance and then refuses.** With several card leases
+  held and no `--epoch` it stopped the kept instance of the LOWEST epoch (and warmed the seat) before the release
+  refused with "pass --epoch N", so an operator's slip cost a clip of up to 80 minutes and left the lease held.
+  The verb now settles which lease it is ending first, by the release's own rule (`gpulease.Manager.ReleaseTarget`),
+  and a refusal ends it before anything is touched. The order is resolve, stop the kept instances, warm the seat
+  back, release: the instances go before the seat is loaded onto their cards (the documented order; it had been
+  warm first). A release that fails after the stop says the instances were already stopped.
+- **A kept instance that outlived its lease is taken over by the lease that reuses it.** A kept instance is
+  detached, so it survives a holder that crashed or was fenced out, and the next lease on its card reuses it (a live
+  keyed instance with a marker that proves it is ours). The marker still named the dead lease, so that lease's release
+  (which stops by epoch) matched nothing and the instance outlived every later lease with its models resident, past the
+  5-minute idle-unload rule; and a fenced-out straggler of the old lease still matched it and could stop the instance
+  the new lease was using. `docs/systems/gpu-lease.md` said the next holder "launches over it"; the code reuses it,
+  and now takes it over: `ensureComfy` re-stamps the marker's `leaseEpoch` (only an instance that already belonged
+  to a lease; an epochless marker is not claimed), a re-stamp that fails and a kept launch whose marker cannot be
+  written both log `COMFY-KEEP-WARN`. A holder stops instances only while its lease is still its own (`gpu reserve`'s
+  wrapper, the detached holder and the pipeline's grant; they leave a lost lease's instances running and say which),
+  and `comfyinst` re-reads the marker at the moment of the stop. Left for the operator, as the plan marks it: whether
+  the next acquirer or `gpu doctor` should sweep markers whose epoch is dead (an explicit sweep, not a watcher).
+- **An unkeyed runner given a non-default `--api` no longer launches ComfyUI on 8188.** (Plan section 7, finding
+  7, assigned to this phase.) With no `COMFY_INSTANCE` or `COMFY_CARD_UUID` the instance is unkeyed, `withGpuSlot`
+  called `ensureComfy` with no endpoint, and an unkeyed launch has no `--port`: a blog batch run with
+  `--api http://127.0.0.1:8189` started a stray ComfyUI on 8188 inside its card-0 lease while every job went to
+  8189, and the stray holds a CUDA context on the leased card and makes a later card-bound default binding refuse with
+  `COMFY-PROFILE-MISMATCH` (it broke a real batch). The runner now passes the endpoint down; `ensureComfy` reuses it
+  when it answers and otherwise fails with `COMFY-ENDPOINT-DOWN`, naming the endpoint and the fix, launching
+  nothing. The operator's own `COMFY_EXTRA_ARGS` carrying that `--port` still launches, and an orphan that needs
+  replacing is refused before it is stopped when the relaunch could not land on its endpoint. `run-graph` shared the
+  defect (its start and its free went to 8188); `instanceDeps` follows the same rule. Two older tests that pinned
+  the old launch now pin the new rule.
+- **A resumed place no longer ages while its call waits.** The resumed call looked its token up (without
+  consuming it) and then waited in-process for the card's slot, up to the whole window, with no waiter record and no
+  refresh of the token's last poll, so after the 30 s grace the place read as absent and other processes' waiters and
+  newcomers skipped it: a caller that did everything right lost its turn while standing in it (the common case on a
+  box with a pinned card, where every single-card call contends on one in-process slot). The wait now re-asserts the
+  place every ten seconds (`gpulease.Manager.TouchToken`, which refreshes a token that exists and never writes one,
+  and is ordered against a drop by an in-process lock so a touch cannot revive a spent place). The few milliseconds
+  between a lease wait's waiter unregistering and the queued answer re-leaving the token remain; they cost
+  fairness, never exclusivity.
+- **A call the allocator can find no card for gets a place in line, not a lease fault.** The host short of RAM,
+  a reading whose display state is unknown, every card the screen: the raw allocator error left through
+  `gpu_lease_unavailable` after the whole wait. A call that can resume keeps a place on the cards that would qualify
+  but for what is short (never the whole node, which would make its place a barrier) with the reason; a call no card
+  could ever take, and every call from a door that cannot resume, gets the `gpu_busy` defer carrying the reason.
+- **P13 acceptance that is still OPEN after this review pass** (they need a live box or the operator, and are listed
+  in `docs/systems/media-generation.md`, "Open acceptance of P13"): the seeded `comfy_cuda_device` on the 3x16 tier
+  (the operator decides whether a pin equal to the seed is treated as unset); a VRAM footprint and a host-RAM need
+  for the allocator, and the N-instance RAM measurement; the live two-card acceptance; a foreign-process reader on
+  the media path (Linux hosts only). The plan's "enqueue on the node daemon's queue" spike is recorded as not
+  adopted, with the reason.
+- **`offload_run_graph` with several `devices` holds the whole node.** The field was documented operator-only and
+  nothing enforced it (the MCP door and the fleet dispatch both feed it for any caller), and several devices ran the
+  graph in the DEFAULT instance, which sees every card, under a lease on only those cards: an arbitrary graph could
+  place work on a card another call's own instance held, or on the display card, the two-jobs-on-one-card case the
+  lease exists to prevent. One device still runs in that card's own instance, pinned by uuid, which sees no other card, so
+  a caller can no longer reach past its lease with this field; several devices, and any a card table cannot
+  resolve, hold the whole node. (Naming the display card stays the explicit word it always was.) The tool text no
+  longer claims an enforcement it does not have.
+- **A refused call that can never resume a place no longer leaves one.** The queued answer was unconditional, so
+  the `generate-image` CLI verb, the fleet-node dispatch (the delegator re-places, it never resumes) and the image
+  batch each left a token nobody could claim, and a live token holds its cards back from later callers for the 30 s
+  grace: a busy node retried every few seconds by a delegator kept newcomers behind a rolling set of ghosts, and a
+  free card could read as claimed for half a minute. A place is now kept only for a request that came through a door
+  that can hand the token back and take it again (`core.Request.Resumable`, set by the MCP server, never decoded from
+  or encoded to the wire, so a remote payload cannot ask for one); every other caller gets the `gpu busy` defer
+  it always had, and the batch's `IsGPUBusy` refusal is unchanged.
+- **`display_attached` no longer changes what a host with card-scoped leases OFF advertises.** The OR rule
+  (`display_active` Enabled or `display_attached` Yes) had been put behind `gpuprobe.DisplayCardUUIDs`, which the load
+  figures read too, so on any host whose monitor is plugged in the monitor's card left `work_util_pct`, the
+  delegator's free-card count, the lease verdict's "that load is the operator's game" and the foreign-load guard for
+  good, not only while a game ran: a node whose only busy card was the monitor card, working for its own seat or
+  lease, advertised itself idle. The rule is now two: `gpuprobe.ScreenCardUUIDs` (either column) for the card table
+  and the allocator, which is where plan invariant I6 lives, and `DisplayCardUUIDs` (`display_active` alone, as it
+  was) for every load figure. The change to the load figures was not asked for by anyone; if the operator wants the
+  attached monitor out of them, that is a fleet-visible change to decide, with a test that pins the new
+  `work_util_pct`.
+- **One transient `nvidia-smi` error no longer switches `display_attached` off for ten minutes.** The fallback
+  to the query without the field was armed by ANY failure of the full query, silently, and the full query was then
+  not tried again for ten minutes. `display_attached` is the only signal that marks the monitor's card while the
+  screen sleeps, so in that window the allocator could hand the desktop card to a render with the operator at the
+  desk. The window is now armed only when the failure names the field (nvidia-smi prints `Field
+  "display_attached" is not a valid field to query.` on stdout, status 2; the recogniser reads stdout, the error
+  text and an ExitError's stderr) or after three unexplained failures in a row, and it logs one line when it
+  arms. Any other failure answers that call from the fallback and is forgotten, and the reading says so
+  (`Device.AttachedUnknown`, `Card.DisplayUnknown`): the allocator skips every card of such a reading
+  (`display-unknown`, not a card to wait on) until the next good one, unless the operator is away.
+- **A queued answer for a call that needs the whole node names the lease in its way.** It skipped every card
+  lease for such a call (an empty card set intersects nothing), so it reported `held_by: null`, `eta_s: 0` and
+  "card(s)  are promised to callers ahead of this one ... at most 0s" behind a lease with a declared hour. A
+  whole-node request is now blocked by every lease, the reason says "the whole node", `eta_s` is the longest
+  declared end among the leases in the way, and an answer with no declared end says it has no estimate instead of
+  printing "at most 0s".
+
+### Added — per-card media admission, and a place in line instead of "gpu busy" (GPU routing P13b)
+
+**The operator-visible change.** On a host that leases cards (`gpu_card_scoped_leases` set and a green
+`gpu doctor --write-audit`), a generation call no longer takes the whole-node media lease. A single-card route
+(image, edit, inpaint, upscale, animate, music, un-pooled video) asks the allocator for ONE card, holds a lease on
+it and runs in the ComfyUI instance bound to that card (port 8189 plus the card's nvidia-smi index, pinned by GPU
+uuid, `COMFY_CUDA_DEVICE` blank), so two calls run on two cards at once and a render on one card no longer fences
+the text seats on the others. The display card is never auto-assigned while the operator is at the desk.
+
+- **An explicit `comfy_cuda_device` is a hard constraint.** Resolved through `gpu_comfy_order` to one card, the
+  call queues FIFO for that card however many others are free and is never re-picked. A pin that cannot be turned
+  into a card (no declared order, a comma list, not an index) keeps today's whole-node lease and `--cuda-device`,
+  with one logged reason. **On a box whose config pins `comfy_cuda_device`** (the 3x16 seed does) concurrent
+  renders therefore need the pin cleared: with the order declared the pinned calls serialise on that card while the
+  others stay free for text; without it they keep the whole node.
+- **Pooled routes** lease the cards their pool keys name and keep their launch unchanged (the default instance,
+  every card visible), only when every two such jobs must overlap (a pool of at least two cards on a box of at most
+  three); on a larger box they hold the whole node. `offload_run_graph` holds the whole node unless the operator
+  declares `devices` (one device: that card's instance). sd.cpp, voice, a host that does not lease cards and an
+  unreadable card table keep the whole-node lease byte for byte.
+- **The runner is told what it may unload.** The lease env carries `GPU_LEASE_DEVICES` and a
+  `GPU_LEASE_UNLOAD_MODELS` scoped to the leased cards (the roster minus the memory stack minus seats pinned to
+  other cards), so a render on one card stops emptying the seats on the others (register C-86). A process running
+  under its parent's multi-card lease (`gpu reserve --devices ... --`) runs each call on a free card of it.
+- **A place in line replaces the refusal.** A call that waited its `gpu_wait_ms` with no card answers deferred,
+  `err_class: gpu_queued`, `defer_class: capacity`, with a `waiter_token`, `queue_position` and `eta_s` (a
+  ceiling); re-sending the request with the token resumes the place with its original arrival time. A call that holds
+  the whole node leaves a token too. Every media MCP tool takes `waiter_token` (and `offload_run_graph` an
+  operator-only `devices`). Hosts that do not lease cards keep `gpu_busy`. Only MCP calls leave a place (see the
+  review pass above): the CLI verbs, the fleet dispatch and the image batch keep `gpu_busy`.
+- **`gpulease` place-keeping tokens** (`Options.ResumeToken`/`QueuedSince`, `LeaveToken`, `ResumeToken`,
+  `Tokens`, `QueuePosition`, `ErrStillQueued`): a token has no process behind it, so its life is its last poll. It
+  holds its place for 30 s, is then skipped by every waiter (a whole-node barrier included) so an absent client
+  never blocks the line, and can be resumed for 10 minutes. They live in `<state>/gpu/tokens`, apart from the waiters
+  an older binary prunes; on a mixed-version host an older binary can take a card ahead of a token holder (the holder
+  loses its place, exclusivity is never at risk).
+- **`internal/pipeline` media slots are a set, one per card** (`takeMediaSlot`/`releaseMediaSlot` keep the
+  whole-node meaning); two jobs on disjoint cards hold theirs together, waiters are served in arrival order with
+  disjoint backfill and a whole-node waiter is a barrier.
+- **`internal/gpualloc`**: the allocator's input builder, the pick-or-queue decision and the unload-scope rule moved
+  out of package main so `gpu reserve --cards` and the media path read one rule (no behaviour change for the verb).
+- **The post-run `/free` goes to the instance the runner was given** (it read the parent process's `COMFY_API`
+  when a route handed its instance through the Spec's env, which most do).
+- Deferred to the operator (live box): the two-card acceptance, host RAM with N concurrent instances, the Port
+  Directory entry for 8189 to 8191, and clearing `comfy_cuda_device` on the live config.
+
+### Added — the holder of a lease stops the ComfyUI instances kept under it (GPU routing P13b)
+
+- **`internal/comfyinst`.** A kept instance (see the fix below) lives no longer than the lease it was launched
+  under. Its launch marker records the lease epoch; the holder stops it on release: `gpu reserve` when the wrapped
+  command ends, the detached holder when it exits, `gpu release` when an operator ends a lease, and the pipeline
+  when a media lease is released. Only a keyed marker naming exactly that epoch is touched, and only after the
+  instance is shown to be the harness's own (pid alive, not started after the marker, and the endpoint on the
+  marker's port reporting exactly the recorded argv); then `POST /free` and a stop. Anything short of that is left
+  running and reported, never killed. A marker with no lease epoch is never touched.
+
+### Fixed — a runner given --keep-comfy exits (GPU routing P13b)
+
+- **A runner that launched ComfyUI itself and was told to keep it no longer hangs.** The instance was a
+  non-detached child with piped stdout/stderr, so the runner's event loop stayed attached to a process meant to
+  outlive it; in a real film run the per-shot timeout then killed the tree and deleted the finished clip. A kept
+  instance (`withGpuSlot` passes `keep` to `ensureComfy`) is now spawned detached, its console going to its own
+  log file, unref'd, with its window hidden: it holds nobody's event loop and has no pipe to close under it. The
+  non-kept path is unchanged. The log is bounded by rotation (each launch rotates; each archive is cut to its
+  last 5 MB), not by a capture that stops at 5 MB, and `tailComfyLog` reads only the last 256 KB. A kept instance
+  lives no longer than its lease, whose holder stops it on release (see media-generation.md, "A kept instance").
+  A node test runs a real runner against a stub ComfyUI process and asserts the runner exits while the instance
+  stays up and keeps writing.
+
+### Fixed — the display card is found with the screen asleep (GPU routing P13b)
+
+- **The allocator's "never auto-pick the display card" rule now fires at the desk.** On the 3-card box
+  `nvidia-smi` read `display_active` Disabled on every card while the screen slept, and `display_attached` Yes on the
+  card that drives the monitor, so the one shared rule (`gpuprobe.DisplayCardUUIDs`) found no display card and the
+  allocator could hand that card to a render. The per-device query now carries `display_attached`, and the CARD TABLE
+  marks a card as the display card when `display_active` reads Enabled **or** `display_attached` reads Yes
+  (`gpuprobe.ScreenCardUUIDs`, read by the allocator, `gpu cards` and `offload_status`'s card table). The load
+  figures are NOT moved onto it: the fleet node's `work_util_pct`, the lease verdict's "that load is the operator's
+  game", the foreign-load guard and the delegator's free-card count keep reading `display_active` alone
+  (`gpuprobe.DisplayCardUUIDs`), because an attached monitor is true for the whole life of the box and counting it
+  there would hide a node's own work on that card and change what every host with card-scoped leases OFF
+  advertises. Only an exact `Yes` counts; `[Not Supported]`,
+  `[N/A]` and a missing column are "unknown", never the operator's screen. A driver that refuses the field (an older one,
+  a headless Linux build) rejects the whole query, so both readers (`gpuprobe.Read` and the lease verdict's sampler)
+  retry without it through one fallback (`RunDisplayAware`) and the rule rests on `display_active` alone, as before; the
+  full query is tried again after ten minutes, so a 2 s sampler does not pay a doomed call every tick. The node
+  publishes `display_attached` in `gpu_devices[]` (omitted when false; a node that predates it reads as "unknown").
+  Explicit `--devices` naming the display card is unchanged. A box whose only card is the display card still runs its
+  seats there.
 
 ## [0.163.1] - 2026-10-03 - A warm-back never loads a seat over another card's lease
 
@@ -515,7 +826,8 @@ config template spelled sixteen data paths as `~/.local-offload/...`, and `docto
   relaunched only when its spawner is gone.
 - **Runners and Go.** Every render runner resolves its endpoint through the instance. For a keyed instance `withGpuSlot`
   launches, frees and log-tails that instance (the launch and the post-run `/free` ignored `--api` before); an unkeyed
-  instance still launches through the environment's endpoint and its post-run `/free` follows `--api`. `run-graph` starts
+  instance on the default endpoint is unchanged, and one on another endpoint is reused when it answers and refused
+  otherwise (see the review pass above). `run-graph` starts
   and frees its own ComfyUI the same way (`instanceDeps`, tested by behaviour), and a bad instance env is a typed
   `RUN_ERROR` defer, not an untyped exit 1. Runners stage their inputs under names unique across processes
   (`render/comfy-input.mjs`: clock, pid, random suffix, sequence), since concurrent instances share one input directory.

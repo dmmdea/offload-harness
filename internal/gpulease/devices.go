@@ -949,13 +949,7 @@ func (m *Manager) releaseByEpochV2(epoch uint64) (released, handled bool, err er
 	if meta, _ := m.readMeta(); meta != nil {
 		return false, false, nil
 	}
-	var live []uint64
-	for _, j := range m.reader().v2() {
-		if j.Live {
-			live = append(live, j.Meta.Epoch)
-		}
-	}
-	switch len(live) {
+	switch live := m.liveCardLeaseEpochs(); len(live) {
 	case 0:
 		return false, false, nil
 	case 1:
@@ -964,11 +958,28 @@ func (m *Manager) releaseByEpochV2(epoch uint64) (released, handled bool, err er
 		}
 		return true, true, nil
 	default:
-		parts := make([]string, len(live))
-		for i, e := range live {
-			parts[i] = strconv.FormatUint(e, 10)
-		}
-		return false, true, fmt.Errorf("gpulease: %d card-scoped leases are held (epochs %s); pass --epoch N to release one",
-			len(live), strings.Join(parts, ", "))
+		return false, true, errSeveralCardLeases(live)
 	}
+}
+
+// liveCardLeaseEpochs lists the epochs of the live card-scoped leases, lowest first.
+func (m *Manager) liveCardLeaseEpochs() []uint64 {
+	var live []uint64
+	for _, j := range m.reader().v2() {
+		if j.Live {
+			live = append(live, j.Meta.Epoch)
+		}
+	}
+	return live
+}
+
+// errSeveralCardLeases is the refusal for "release whatever is held" when several card leases
+// are live: which one is meant is the operator's to say.
+func errSeveralCardLeases(live []uint64) error {
+	parts := make([]string, len(live))
+	for i, e := range live {
+		parts[i] = strconv.FormatUint(e, 10)
+	}
+	return fmt.Errorf("gpulease: %d card-scoped leases are held (epochs %s); pass --epoch N to release one",
+		len(live), strings.Join(parts, ", "))
 }

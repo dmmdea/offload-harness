@@ -23,12 +23,14 @@ other on a single shared card.
 | `internal/gpulease/allocator.go` | the **card allocator** behind `gpu reserve --cards`: a pure function over an input the CLI assembles (cards, claims, quarantine, foreign busy, resident seats, presence, host RAM), plus the quarantine sidecar reader |
 | `internal/gpulease/cmddevices.go` | the default card set of a wrapped command: `CUDA_VISIBLE_DEVICES`, `--cuda-device`, `COMFY_CUDA_DEVICE` turned into cards, refusing instead of guessing |
 | `internal/gpulease/effective.go`, `infer.go`, `proctree*.go` | **what a lease holds, as a seat reads it (plan P4)**: `Info.EffectiveDevices/Touches/For`, `ResolvePins`, the legacy-lease evidence rule (`Scoper`, applied only to a record an older binary wrote: `Info.Legacy`; the `seen.<epoch>` sidecar, the scope ledger) and the process-tree reader it runs on |
+| `internal/gpulease/term.go` | **terms (plan P9)**: `PlanTerm` (what a requested window comes to), the installed limits (`SetDefaultTerms`), and `AdvanceTerm`, the one place a term ends in a renewal or the expired label (see [Terms](#terms-a-window-is-a-term-and-a-term-ends-in-a-renewal-or-a-label-adr-0070)) |
 | `internal/gpulease/audit.go`, `procimages_*.go` | the **reader audit** behind `gpu doctor`: finds harness binaries, Node readers and running images, and writes the reader-audit marker |
 | `internal/gpuprobe/cards.go`, `hostram.go` | the **card table** (UUID-keyed, index spaces side by side) and the host-RAM headroom term |
 | `internal/gpucards` | the per-card view (`Rows`, `LeaseRows`, `QueueRows`, `Table`, `Section`) that `gpu status`, `gpu cards` and `offload_status` brief all render |
 | `internal/gpulease/proc*.go` | per-platform liveness and process-start identity, exported so no consumer keeps a second copy |
 | `internal/pipeline/pipeline.go` | takes the `media` lease around **every** generation call site (image ComfyUI + sdcpp, inpaint, image batch, run-graph, video, audio) and threads `GPU_LEASE_*` to the runner; inherits an ambient lease instead of re-acquiring; owns the in-process slot (`mediaSlot`) that arbitrates jobs sharing one inherited lease |
 | `gpu_cmd.go` | the `gpu status\|reserve\|release\|hold` verbs, wrapper and `--detach` forms |
+| `gpu_terms.go` | the holders' side of terms: the tick the wrapper form and the detached holder run at the end of a term, the over-cap warning, and the argv of the hidden holder (`--release-at-expiry`) |
 | `gpu_reserve_devices.go`, `gpu_cards.go`, `gpu_doctor.go` | which cards a reserve holds (`--devices`, `--cards`, derivation, the queue), `gpu cards` and the status table, `gpu doctor` |
 | `internal/gpulease/owner.go` | **ownership (ADR 0070)**: who asked for a lease (`Owner`), the session registry, the first-observer orphan marker, the progress contract and `Standing`, the derived reading every status surface shares |
 | `internal/gpulease/explain.go` | the sentence a waiter reads when the lease it is queued behind is stalled, orphaned or overdue, and the installed orphan grace. READ-ONLY: it reads the orphan marker a status surface recorded and never writes it or takes the epoch lock |
@@ -44,7 +46,7 @@ other on a single shared card.
 | `gpu_drain.go` (`leaseScope`, `maintainSeatScoped`, `unloadModelsFor`), `render/gpu-lock.mjs` (`parseUnloadModels`) | plan P5: the drain and unload take only the seats on the leased cards, and the render lane unloads the list the wrapper exports (`GPU_LEASE_UNLOAD_MODELS`) |
 | `internal/modelaffinity/seatscope.go`, `scoper.go`, `seatyield.go` | the gate's per-seat reading (`SetSeatPins`, `ScopeToPins`, `SeatLease`, `CardsHeld`), the production wiring of the evidence rule (`InspectLease` for the load gate, which remembers what it sees; `PeekLease`, `ScopeInfo`, `ScopeFunc`, `ScopeLeases` for inspectors, which write nothing), and the seat race rule (`YieldIfFenced`) |
 | `internal/mcpserver` | registers the session this MCP server serves in the session registry at start and removes it at exit |
-| `internal/config` | `state_dir`, `gpu_lock_path`, `gpu_card_scoped_leases`, `gpu_legacy_scope_inference`, `gpu_comfy_order`, `gpu_host_ram_headroom_gib`, `gpu_orphan_grace_min`; `ModelPins` (a model's device pins, read from the layers) |
+| `internal/config` | `state_dir`, `gpu_lock_path`, `gpu_card_scoped_leases`, `gpu_legacy_scope_inference`, `gpu_comfy_order`, `gpu_host_ram_headroom_gib`, `gpu_orphan_grace_min`, `gpu_max_term_min`, `gpu_max_total_min`; `ModelPins` (a model's device pins, read from the layers) |
 
 ## Why it exists
 
@@ -66,10 +68,13 @@ local-offload gpu reserve --class text --for 45m --reason "kv bench" -- <command
 
 `--detach` holds the card in a hidden background process for an interactive session. It is the
 weaker form by design — nothing ties the lease to a command's lifetime, so **`--for` is REQUIRED with
-`--detach` (0.113.27)**: the holder exits at that deadline and releases whether or not the work has
-finished, and the old 45-minute default silently freed the card mid-job, after which the next render
-claimed it and unloaded the seat on top of the running work. Declare the real window, or wrap the
-command:
+`--detach` (0.113.27)**. Until terms (plan P9) the holder exited at that deadline and released whether or not the
+work had finished, and the old 45-minute default silently freed the card mid-job, after which the next render
+claimed it and unloaded the seat on top of the running work (2026-09-07). **It no longer releases at the
+deadline**: at the end of the term it renews the lease if its owner vouches for the job, else labels it expired
+and keeps holding (see [Terms](#terms-a-window-is-a-term-and-a-term-ends-in-a-renewal-or-a-label-adr-0070));
+`--release-at-expiry` restores the old ending for a caller that wants exactly that. The window is still the
+term the lease is judged by, so declare the real one, or wrap the command:
 
 ```
 local-offload gpu reserve --class text --for 45m --reason "kv bench" --detach
@@ -185,11 +190,13 @@ Every timer below exists only while real work is in flight, and stops with it:
 | your job is queued behind another process | one probe per second, capped by `gpu_wait_ms` | two small file reads / s, ≤90 s |
 | your job is queued behind one in the same process | blocks on a channel | zero — no polling |
 | `gpu reserve -- <cmd>` | one 15 s heartbeat for the command's lifetime | one small file write / 15 s |
-| `gpu reserve --detach` | a hidden holder polls once a second until released or expired | the only continuous poller; exits on its own |
+| `gpu reserve --detach` | a hidden holder polls once a second until released | the only continuous poller; exits on its own |
 
 `--detach` is the sole thing that keeps running after the command that started it, which is why
 the wrapper form is preferred. It is an ordinary process, not a registered service: it exits by
-itself when released, when fenced out, or at its declared deadline, and nothing respawns it.
+itself when released or fenced out (and at its declared deadline only with `--release-at-expiry`;
+by default a lease past its term is renewed or labelled expired and the holder stays), and nothing
+respawns it.
 
 Running the harness under a reservation **inherits** that lease:
 
@@ -421,7 +428,7 @@ none was tested. Two hard gates stand in for the umbrella, and the second is now
 
 **Not in the record change (P2).** The CLI, the allocator, the per-card status and the audit (P3, below); consumers that take
 a device set instead of reading any live lease as a held node (the text gate, the delegator and the placement table: P4,
-below; drain and unload: P5, below; fleet health: P7); owners, terms and takeover (P8 to P12). A consumer that is not device-aware
+below; drain and unload: P5, below; fleet health: P7, since shipped: see "The fleet reads leases per card"); owners, terms and takeover (P8 to P12). A consumer that is not device-aware
 reads any live lease as fencing the whole node, which over-fences and is the safe direction; the one exemption is per lease
 (above).
 
@@ -473,13 +480,69 @@ plan P13), and `GPU_LEASE_DEVICES` is for a command that wants to read the set i
 the cards the lease holds and leave the seats on the others (plan P5, below).
 
 **The allocator.** A card is allocatable when it is not quarantined (`quarantine.<id>` sidecars, which P12 will write),
-not the display card, not claimed (a whole-node lease claims every card), not under a foreign compute process
+not the display card (the card whose `display_active` reads Enabled **or** whose `display_attached` reads Yes: with the screen asleep
+`display_active` reads Disabled on every card of the 3-card box while `display_attached` still marks the card that drives the monitor,
+measured 2026-10-03; the card table's rule, `gpuprobe.ScreenCardUUIDs`. The lease verdict and the fleet health attribute load by
+`display_active` alone, `gpuprobe.DisplayCardUUIDs`, so an attached monitor never hides a holder's own work; and a reading taken
+after a transient `nvidia-smi` failure carries no `display_attached` and marks its cards `display-unknown`: the allocator hands out none of
+them until the next good reading), not claimed (a
+whole-node lease claims every card), not under a foreign compute process
 (`foreign-busy`, reported and skipped, never killed), its free VRAM fits `--vram` (GiB per card), and the **host** has the
 RAM `--ram` declares plus `gpu_host_ram_headroom_gib` (default 4) free. Among allocatable cards the order is: no resident
 seat first, then the cheapest eviction (the footprint of the configured layer seats loaded on it), then the lowest id. An
 unreadable host-RAM counter refuses only when a RAM need was declared. On Windows (WDDM) nvidia-smi lists no per-process
 rows for compute apps, so `foreign-busy` is Linux-only evidence today; the measured N-instance host RAM that tunes the
 headroom term is a P13 acceptance item.
+
+**A place in line for a caller that cannot stay (plan P13, invariant I4).** A media tool call waits its window
+(`gpu_wait_ms`, 90 s) and must then answer. On a host that leases cards it answers with a **token** instead of
+a refusal: a record of its place (the cards it wants, empty = the whole node, and the arrival time it joined
+the line with) that the caller re-presents to resume that place; see "Per-card media admission" in
+[media-generation.md](media-generation.md). A token has no process behind it (the MCP server that wrote it is
+alive for as long as the client's session is, which says nothing about whether the client is coming back), so
+its life is its **last poll**: for `TokenGrace` (30 s) after the poller left it holds its place, and every
+later waiter on the same cards queues behind it; after that it is **absent**, skipped by every waiter and
+ignored by a whole-node barrier, so a client that wandered off never blocks the line; for `TokenTTL`
+(10 min) it can still be resumed, with its original arrival time (the resumed waiter carries it, so it is
+ahead of everyone who arrived after it), and then it is pruned. `gpulease.LeaveToken`, `ResumeToken`,
+`DropToken`, `Tokens` and `QueuePosition` are the API; `Options.ResumeToken` and `QueuedSince` make a
+waiter carry a place. Tokens are files in `<state>/gpu/tokens`, never among the waiters in
+`<state>/gpu/waiters`: a binary that predates them prunes every waiter record whose process has stopped
+refreshing it, and would delete a token it cannot refresh. It does not honour tokens either, so on a host that
+mixes versions an older binary can take a card ahead of a token holder; that costs the holder its place and
+never exclusivity (the O_EXCL claim is still the only arbiter of who holds a card). A token id arrives from a
+tool caller and is checked against `tk-[a-z0-9]{8,32}` before it becomes a path. A queued `Acquire` whose
+whole window passed without reaching the front returns `ErrStillQueued`, which names who is ahead (a waiter
+that has not claimed, or a place held for another caller); callers that answer with a token treat it like
+`ErrHeld`.
+
+**A kept ComfyUI instance lives no longer than its lease.** A runner that keeps the ComfyUI it launched
+(`--keep-comfy`) leaves a detached instance running after it exits, so the items of a batch under one
+lease load their models once; its launch marker (`.offload-launch-<key>.json`) records the lease epoch.
+The **holder** of that lease stops the instance when it lets go, before the release and before any seat
+warm-back (both want the VRAM): `gpu reserve` when its wrapped command ends, the detached holder when it
+exits, `gpu release` when an operator ends a lease from outside, and the pipeline when a media lease is
+released. `gpu release` settles WHICH lease it is ending first, by the release's own rule (`Manager.ReleaseTarget`:
+the epoch named, else the only lease held), so a refusal (several card leases held and no `--epoch`) ends the
+command before the instances are stopped or the seat is warmed; if the release itself then fails, the error says
+the instances were already stopped. `internal/comfyinst` does it, and only for a keyed marker that names exactly that epoch: the pid
+must be alive, must not have begun after the marker was written (a recycled pid), and the endpoint on the
+marker's port must report exactly the recorded argv (`GET /system_stats`); then `POST /free` and a stop
+(Windows: terminate; elsewhere SIGTERM, then SIGKILL after five seconds). Anything short of that proof is left
+running and printed with the reason, never killed: a foreign process on the port is not ours. A marker with no
+lease epoch (the default instance, an instance launched outside a lease) is never touched. A holder stops
+instances only while its lease is still its own (`Lease.Check`): one that was released from outside or reclaimed
+after a suspend is a straggler, leaves them running and says which (the same rule `Lease.Release` follows for the
+claim: a fenced-out holder leaks rather than destroys), and `comfyinst` re-reads the marker at the moment of the
+stop and leaves an instance whose marker changed hands during its proof. A lease that ends because its holder died
+(no release runs) leaves its instance (a kept instance is detached, so it survives the holder). The next lease on
+that card REUSES it, it does not launch over it: a live keyed instance whose marker proves it is ours is reused, and
+reusing an instance that was a lease's takes it over (`restampLaunchOwner`: only the marker's `leaseEpoch` changes,
+to the reusing lease's), so that lease's release stops it. An instance that was never a lease's (a marker with no
+epoch) is not claimed by a lease that happens to reuse it. An instance nobody reuses stays up until an operator stops
+it: nothing here is a timer or a watcher (plan I5), and whether the next acquirer or `gpu doctor` should sweep
+markers whose epoch is dead is an operator decision (I5 forbids a watcher, not an explicit sweep). A kept launch
+whose marker cannot be written logs `COMFY-KEEP-WARN`, because nothing can then stop it by its lease.
 
 **Allocate and claim are one loop.** The allocator reads live state over a window of seconds, so another reserve can take
 the card it picked before this one claims it (two simultaneous `--cards 1` over free cards both choose the lowest id). So the
@@ -531,7 +594,7 @@ the green to include the deployed `local-agent` binary and every media repositor
 ### Consumers read a seat's cards, not the node (plan P4)
 
 *Register C-86, question 1 of the operator order: a card-2 job stops fencing text on cards 0 and 1. The Go side only; drain and
-unload are scoped in the next section, and the fleet's own health is P7. Until a host turns card-scoped leases on (plan P6)
+unload are scoped in the next section, and the fleet's own health is P7 (since shipped: see "The fleet reads leases per card"). Until a host turns card-scoped leases on (plan P6)
 the only lease on it is a whole-node one, which fences exactly what it always fenced, with one exception below: a legacy
 lease (one an **older binary** wrote) on a host that has turned the inference on (`gpu_legacy_scope_inference`, off by
 default) and whose cards the evidence rule can name.*
@@ -685,7 +748,7 @@ the rule above is the plan's, built on synthetic fixtures, and the capture of a 
 that enables card-scoped leases on the host (plan P6); until then `gpu_legacy_scope_inference` stays off. The process-tree
 reader was run read-only against a child process the test starts (the Windows path); the Linux path is built and vetted for it
 and not run in this session. (2) The cascade-lane and repack busy gates (`llamaclient.WithRemoteLanes`) still read any live
-lease as busy: they only choose a remote lane, never a fence. (3) Fleet health still publishes a single `lease` per node (plan P7). (4) A presence reader is not armed in the load
+lease as busy: they only choose a remote lane, never a fence. (3) Fleet health publishes every live lease with its cards since plan P7 (see "The fleet reads leases per card"). (4) A presence reader is not armed in the load
 gate, so an inferred scope always keeps the display card.
 
 ### Drain, unload and the render lane clear the leased cards, not the node (plan P5)
@@ -743,7 +806,7 @@ never the holder's own job.
 (only the display card is excluded); the trespass flag inherits that, and does not exclude a card that hosts a resident or busy
 llama-swap seat (the view has no per-seat card map, so it can only soften its wording). A drain or unload whose facts cannot be
 read (the card table, the roster, the lease's epoch) falls back to the whole-node behaviour and **says so on stderr**. The pipeline's own media lease exports no unload list
-until it holds one card per render (P13). Fleet health is still whole-node (P7).
+until it holds one card per render (P13). Fleet health reads the cards since P7 (see "The fleet reads leases per card").
 
 ## Who asked for a lease, and whether they are still there (ADR 0070)
 
@@ -810,7 +873,8 @@ The marker is removed with the lease.
 **The bounded-claim contract for unattended jobs.** `--unattended` requires an explicit `--for` (the 45 minute default
 is not a declared window), `--progress-file` and `--stall`; `--yield-grace` and `--on-yield` are recorded. A job nobody
 is watching has nobody to notice it going wrong, so its lease carries the terms it is judged by: `held-stalled` when the
-file did not move inside the stall window, `held-overdue` when its declared window ends. "Its owner is gone" is not an
+file did not move inside the stall window, `held-overdue` when its declared window ends without its progress having
+renewed the term (see [Terms](#terms-a-window-is-a-term-and-a-term-ends-in-a-renewal-or-a-label-adr-0070)). "Its owner is gone" is not an
 escape and not a verdict for it. The stall window counts from the later of the file's modification and the lease's
 start, so a log left over from an earlier run does not stall a fresh lease; a MISSING file is `unknown`, never stalled
 (the job may not have written its first line yet), and the reading says why it is unknown (`does not exist`, `is a
@@ -832,7 +896,7 @@ its state, orphaned-since, the progress file's age and last line, and the facts.
 word is**: a stalled, orphaned or overdue holder leads with its word even when work in flight makes the verdict `working`
 (`STALLED (working) - the lease itself is not healthy (...), although work is in flight on the seat: ...`), and the takeover
 command names the epoch of the lease the verdict is about. `/fleet/health`'s `lease` block carries `orphaned` and `stalled`
-(each absent unless true; the worst across live leases); its `overdue` key is the expiry-based field of the routing change
+(each absent unless true; the worst across live leases) and `expired` (plan P9, absent unless true, read across every live lease; see [Terms](#terms-a-window-is-a-term-and-a-term-ends-in-a-renewal-or-a-label-adr-0070)); its `overdue` key is the expiry-based field of the routing change
 (P1), not a second source from the standing. With several live leases (card-scoped) `gpu status` and the `offload_status`
 lease view describe the MOST ESCALATED one from its own record (epoch, owner, progress contract), labelled with its epoch
 (`gpu status --json` takes its top-level `epoch`, `owner`, `unattended`, `progress` and `devices` from that lease too, so it
@@ -844,9 +908,108 @@ told which lease, what is wrong, for how long, what is running and the command t
 later change), and the message says so: until it ships, ask whoever owns the lease or the operator.
 `gpu_orphan_grace_min` (default 15) is installed once at config load, so every surface reads the same grace.
 
-**Not in this change, on purpose:** terms and renewal, the process-tree record behind `tree-orphan`, the takeover and
-yield commands, `gpu release` routing. A lease past its window with a live holder is surfaced as `held-overdue` and
-nothing else happens to it.
+**Not in this change, on purpose:** the process-tree record behind `tree-orphan`, the takeover and yield commands,
+`gpu release` routing. A lease past its window with a live holder is surfaced as `held-overdue` and nothing else happens
+to it; what its holder does at the end of a term is the next section.
+
+## Terms: a window is a term, and a term ends in a renewal or a label (ADR 0070)
+
+*Plan P9 of the per-card routing work. Leases still are never freed by expiry: **expired is a label, nothing reclaims.***
+
+**The rule.** `--for` is the lease's declared window and its first term. `gpu_max_term_min` (default 360, six hours) is a
+**renewal point, never a release point**: a request above it is recorded (`requested_ms`), warned about on stderr by
+`gpu reserve`, **accepted whole and never shortened**, and renews in terms of the cap. A lease that declares a progress
+contract (`--progress-file` and `--stall`) may declare up to 24 hours at the start without a word (the cap is the larger
+of `gpu_max_term_min` and 24 hours for it): its progress file, not its window, is what judges it. The record carries
+three additive keys (`omitempty`, ignored by every older reader): `term_ms` (what one renewal adds), `requested_ms` (only
+when the request was over the cap) and `max_total_ms` (how long after acquisition the lease is renewed at all,
+`gpu_max_total_min`, default 2880, 48 hours, and never less than the window it declared: a request is never judged past
+its end). Both limits are installed at config load, like the orphan grace.
+
+**What happens when a term ends.** Only the holder's own tick asks (the wrapper form's 15 s heartbeat; the detached
+holder's renewal, at the same cadence). There is no timer, no watcher and no other process. Once the declared end has
+passed, the tick renews the lease by **one term** when
+
+- its owner is alive **and** (its progress file is advancing **or** its cards are working), or
+- its owner cannot be told (see below) **and** its progress file is advancing, or
+- it is unattended **and** its progress file is advancing,
+
+and the new end stays inside `max_total_ms` from acquisition (it is clipped to the hard end, and a hard end already past
+renews nothing). Otherwise it stamps the lease **expired**. The renewal is one term from the old end (terms run back to
+back); a holder that slept through whole terms is renewed one term from now, so a lease that was just renewed never reads
+overdue. Readings: an owner is alive by the same rule `gpu status` uses (a registered process of its session, or its
+recorded pid, by pid and start time). An owner who **cannot be told** (a lease that records no owner, a session the
+registry never held, or a registry that could not be read; today that is every attended lease taken from a Claude
+session, because the registry writer is not wired into the session hooks yet) is not an objection and is not shown
+present: an advancing progress file, which the job itself writes, vouches for the lease alone, as it does for an
+unattended one. What such an owner does **not** get is the weaker leg: a busy card proves a process, not that anyone
+wants the result, so a lease of an owner who cannot be told, with no progress contract or a stalled one, is labelled at
+the end of its `--for` however busy its cards are (it already read `held-overdue` from that moment; the label adds the
+sentence). A gone owner is rescued by neither. "Its cards are working" is one `nvidia-smi` sample over the lease's
+cards (the whole node for a whole-node lease), the display card excluded, at the verdict's 15 % threshold, taken only
+when it can change the answer (an attended lease, a live owner, progress not already advancing); an unattended lease
+never counts utilisation, and neither does a gone owner. The look has **three answers, not two**: *working*, *idle*
+(every card it is judged by was read and is quiet) and *could not be read* (the sample failed or timed out, which is
+likeliest when the GPU is saturated; a card that reports `[N/A]`; a lease card the sample does not list). Only *working*
+renews, but *could not be read* is worded as what it is and never as idle cards. A missing progress file is `unknown`,
+never advancing.
+
+**What expired means.** `expired: true` and `expired_why` (the sentence: `its owner is gone`, `its owner is still there
+but neither its progress file nor its cards show work`, `its owner is still there, but its cards could not be read and
+its progress contract is not advancing (...), so nothing vouches for it`, `it is unattended and its progress contract is
+not advancing (...)`, `its owner cannot be told apart (<why>) and its progress contract is not advancing (...), so
+nothing vouches for it`, `it reached its maximum total of 48h0m0s ...`) on the lease's own record. The sentence is
+**compared at every recheck** to decide whether the label changed, so it never quotes a value that moves with the clock:
+how long the progress file has been silent is not in it (the progress line of `gpu status` and the stalled sentence say
+that, live, from the file), only the stall window the lease declared. It is a **label**:
+
+- the heartbeat goes on, the claim stays, the holder's fence still passes (`Check`, `Renew`, the per-epoch fence of
+  `render/gpu-lock.mjs`), and the command under a wrapper is never touched;
+- the verdict is `held-overdue` (no new word), the note starts `the lease has expired: its term ended 3h0m0s ago and its
+  holder did not renew it because ...`, `gpu status` prints `term: EXPIRED ... ago and not renewed because ...`, and
+  `/fleet/health`'s lease block gains `expired` (absent unless true; read across every live lease) beside `busy` and
+  `overdue`, which stay true;
+- it is takeover-eligible, which is a statement about a command a later change adds;
+- it is **not reclaimable**: the reclaim conjunction is untouched (*holder provably gone* OR *heartbeat stale AND window
+  expired*), so a heartbeating expired lease keeps its cards against any second job, and a holder that stops
+  heartbeating is reclaimed by exactly the rule it was before;
+- it clears itself: if a later tick finds the term renewable (the owner is back, the progress file moves) the lease is
+  renewed and the label removed. A lease already labelled is asked again only every minute, so a day-long expiry does not
+  sample the cards or print every 15 s, and a recheck whose answer has not changed writes nothing. The holder says it
+  **once per expiry**: when the lease becomes expired, not each time the label's sentence is rewritten as the evidence
+  changes (a look at the cards that failed, then one that did not). A renewal ends the episode, so the next expiry is said
+  again.
+
+**Why a label and not `State = "expired"`.** A record's `state` is the fence's word: `checkV2` and `render/gpu-lock.mjs`
+fence out any state but `active`, and so does every binary and Node copy built before this change. An `expired` state
+would make a render running under an expired lease read itself fenced out and stop, which is the mid-job loss this phase
+exists to prevent, and no audit recalls a binary that is already running. A separate key is invisible to them. (The plan
+drafted a `State`; this is the deviation, and `TestExpiredLabelNeverChangesTheFenceState` and the JS fence test pin it.)
+The same reasoning leaves nothing to restamp on an extension: P2 dropped the pid-0 `meta.json` umbrella, so a renewal
+rewrites only the lease's own record (`meta.json` for a whole-node lease, `e/<epoch>.json` for a card lease) and no
+sibling lease's record or the legacy file.
+
+**The detached holder.** `gpu hold` (the hidden child of `gpu reserve --detach`) used to exit at its `--for` deadline and
+release the card whether or not the work behind it had finished; on 2026-09-07 that freed the card mid-job. It now ends
+only when its lease stops being its own (an operator release, a fence-out). At the end of a term it renews or labels the
+lease like the wrapper does and carries on holding. `--release-at-expiry` (on `gpu reserve --detach`, passed to the
+holder) restores the old ending; it is refused for the wrapper form, which has no deadline to release at. `--for` stays
+required with `--detach`: it is the term the lease is judged by. A hold that nothing ever releases stays held until it is
+released or taken over, which is the point.
+
+## The fleet reads leases per card (plan P7)
+
+What the lease says about a box used to stop at the box: another node saw one `lease` block, the lowest epoch's, and read the
+whole node as spoken for. Now `/fleet/health` carries `leases[]` (one entry per live lease: its cards as lower-cased GPU UUIDs,
+absent for the whole node; where they came from; its term; `busy`, `overdue`, `exclusive`, `draining`, `orphaned`, `stalled`; one
+verdict word) and each seat's cards as `device_ids`. The delegator fences a node only for a contract whose seats ALL sit on a card a
+fencing lease holds, because the node's placement table falls back to a seat whose cards are free, and the node's own closed
+reading and text-reservation refusal follow the same cards. The singular block stays, as the worst across the live leases, so a
+reader one release behind is never told less than is true; a node that publishes no `leases[]` is read as the whole node. On the
+local box the delegator does not dial a seat that a lease it does not hold fences for the contract (the seat's own fence pre-check
+would turn the run away): it waits in line, and a wait that ends with nothing taken names the places it stood in. A standalone
+deploy still waits for every lease unless the operator names the cards it touches (`node-swap --cards`). The whole account, with
+the wire shapes and the limits, is in [fleet-node.md](fleet-node.md), "Per-card lease truth (GPU routing P7)".
 
 ## Node interop
 
@@ -1034,7 +1197,8 @@ exclusive card, and three measurement rows read the seat's 10 GiB as their own f
      release, never ahead of its command.
   3. *`gpu release --warm-seat --epoch N` with the detached holder alive:* the warm runs under that holder's lease and
      the release follows it.
-  4. *`gpu release --warm-seat` on a FREE card* (the detached holder's `--for` window ended first): nothing holds the
+  4. *`gpu release --warm-seat` on a FREE card* (the detached holder was started with `--release-at-expiry` and its
+     `--for` window ended first, or it was released by someone else): nothing holds the
      card, so the warm runs unleased and an acquirer is not ordered behind it. This is the operator-explicit path and
      is left as it is; the acquirer's drain still waits out a load that llama-swap lists as `starting`
      (`TestDrainWaitsThroughAStartingSeatWithoutTouchingTheUpstream`), so what is unordered there is only the
@@ -1053,9 +1217,9 @@ exclusive card, and three measurement rows read the seat's 10 GiB as their own f
   re-queues the next loss gives up loudly. A seat fault with the lease still ours (a drain that misses its deadline) is not a
   loss and is returned as before. The heartbeat itself ends only for a lease that is actually gone: one failed
   heartbeat write with the record still ours is reported once and retried, where it used to end the loop and leave a
-  multi-hour drain without a heartbeat. The detach form cannot re-queue (its hidden holder releases at `--for`
-  whether or not the drain is done), so its error now says whether the lease is still held instead of always
-  pointing at `gpu release`.
+  multi-hour drain without a heartbeat. The detach form cannot re-queue (a lease it lost is gone: released by an
+  operator, or with `--release-at-expiry` let go by the holder at `--for`), so its error now says whether the lease is
+  still held instead of always pointing at `gpu release`.
 
 **A failed drain is not a cordon, and a stuck run is not a wait (register C-50).** A drain that misses its deadline
 clears the `draining` stamp before returning — the detach form keeps the lease held and non-exclusive, so new runs are
@@ -1117,7 +1281,7 @@ fence: the pre-0.117.0 warm-up loaded the seat straight past an exclusive hold.
 | `held-idle` | a lease is held and NOTHING is running: seat idle, cards quiet — the holder is waiting (a drain, a queue), loading, or stalled |
 | `held-stalled` | the lease carries a progress contract (`--progress-file` and `--stall`) and the file did not move inside its window. The holder is alive and heartbeating; nothing is reclaimed or killed |
 | `held-orphaned` | an ATTENDED lease whose owner (session or process) has been gone for longer than `gpu_orphan_grace_min` (default 15 minutes): nobody is expected back for it. Never produced for an unattended, remote or unknown-owner lease. Nothing is reclaimed or killed |
-| `held-overdue` | the declared window ended and the holder is still alive and renewing. Informational: a declared window is not a ceiling for a live holder, so nothing is reclaimed (the `--for` default is 45 minutes, so a wrapper that never declared a window reads overdue after that while it still renews) |
+| `held-overdue` | the declared window ended and the holder is still alive and heartbeating. Informational: a declared window is not a ceiling for a live holder, so nothing is reclaimed. A holder whose owner vouches for the job renews its term instead (see [Terms](#terms-a-window-is-a-term-and-a-term-ends-in-a-renewal-or-a-label-adr-0070)); when it does not, the lease is labelled **expired** and the note says why (the `--for` default is 45 minutes, so a wrapper that never declared a window and has no live owner reads overdue after that while it still heartbeats) |
 | `tree-orphan` | the wrapper is gone but the job it started still holds the cards. In the vocabulary so the precedence is complete; **not produced by this build** (it needs the wrapper to record its process tree) |
 | `loaded-idle` | no lease; the seat is resident with nothing in flight (unloads at its ttl) |
 | `busy-outside` | no lease, seat idle, cards busy — work the harness does not own (the processes are listed) |
@@ -1202,6 +1366,21 @@ request posted straight to llama-swap by anything outside the harness is outside
 
 ## Known gaps
 
+- **Terms: expiry is a label that only reports, and an attended lease with no progress contract is judged on one
+  sample.** Nothing consumes the expired label yet except `gpu status`, `offload_status`, the waiter's sentence and
+  `/fleet/health` (the takeover that acts on it is a later change). A lease whose owner the registry never held (an MCP
+  server older than the registry, a non-Claude caller; plan section 7 finding 5) has an owner who cannot be told. It is
+  not shown present, so a busy card alone does not renew it (a card in use proves a process, not that anyone wants the
+  result) and it is labelled at the end of its `--for` unless it declares a progress contract that is advancing: that
+  alone keeps it renewing, as it does an unattended lease (operator decision 4: a progress contract renews by progress).
+  Until the registry writer is wired into the session hooks, that is every attended lease taken from a Claude session, so
+  an attended job without a progress file reads `expired` at the end of its first term even while its cards are busy
+  (the `held-overdue` verdict was already true from that moment; the label adds the sentence and the takeover
+  eligibility, and a takeover of an unknown owner will need `--force` anyway). And for an attended lease with a live owner
+  and no progress contract, "its cards are working" is a single `nvidia-smi` sample taken at the end of the term: a job in
+  a quiet CPU phase at that instant is labelled, and the next check (a minute later) renews it if the cards are busy by
+  then; a sample that could not be taken is labelled as unreadable, not as idle, and is asked again the same way. Neither
+  gap frees or kills anything.
 - **Ownership is only as good as the registry.** A lease whose owner is a session id the registry never held (an MCP
   server older than the registry, a non-Claude caller) reads `unknown` and is never orphaned; a lease whose owner is a
   pid recorded by `--owner-pid` is judged by that process alone, so a launcher that names a short-lived shell reads
@@ -1212,8 +1391,9 @@ request posted straight to llama-swap by anything outside the harness is outside
   [Card-scoped leases](#card-scoped-leases-record-v2)), and the text gate, the delegator and the placement table read a seat's
   cards (see [Consumers read a seat's cards](#consumers-read-a-seats-cards-not-the-node-plan-p4)); drain, unload and the render
   lane's unload take the leased cards (see [Drain, unload and the render lane](#drain-unload-and-the-render-lane-clear-the-leased-cards-not-the-node-plan-p5));
-  fleet health (P7) is a later change and until then treats any live lease as fencing the whole node (over-fencing, the
-  safe direction). A binary or Node reader that predates the format reads a directory holding only device leases as a free
+  fleet health (P7) publishes every live lease with its cards and a delegator fences a node per contract (see "The fleet
+  reads leases per card"); a node or delegator one release behind reads the one lease block as the whole node (over-fencing,
+  the safe direction). A binary or Node reader that predates the format reads a directory holding only device leases as a free
   card, which is why `gpu_card_scoped_leases` stays off on a host until `gpu doctor --write-audit` is green.
 - **A legacy whole-node lease is scoped only on evidence, only for a record an older binary wrote, only when the host turns
   it on, and the live evidence has not been captured.** The rule (a command line, a tied launch marker, two sampled readings

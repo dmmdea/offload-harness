@@ -89,6 +89,16 @@ type Holder struct {
 	// Facts are information about a lease that has no owner and no progress contract
 	// (newest ComfyUI output, ComfyUI log): never an input to the verdict.
 	Facts []string `json:"activity_facts,omitempty"`
+
+	// Terms (plan P9), from the lease record. Expired is the label the holder's tick stamped
+	// when the term ended unrenewed; ExpiredWhy is its sentence. TermSec is the renewal term,
+	// RequestedSec the window asked for when that was above the cap on a term, HardEnd (RFC3339)
+	// the instant after which the lease is no longer renewed.
+	Expired      bool   `json:"expired,omitempty"`
+	ExpiredWhy   string `json:"expired_why,omitempty"`
+	TermSec      int    `json:"term_s,omitempty"`
+	RequestedSec int    `json:"requested_s,omitempty"`
+	HardEnd      string `json:"hard_end,omitempty"`
 }
 
 // ProgressState is the reading of a lease's progress contract.

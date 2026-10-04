@@ -199,6 +199,16 @@ type Request struct {
 	// request must not be able to mark its own row inner, which would hide it
 	// from every job counter and every card.
 	ParentJobID string `json:"-"`
+	// Resumable says the door that admitted this call can hand a place in line back to its
+	// caller AND take it again: it returns the answer's data (the waiter_token) and accepts
+	// waiter_token on the next call. Only the MCP server sets it. A media call that waited its
+	// window with no card leaves a place-keeping token only for such a door; for the CLI verbs,
+	// the fleet dispatch (the delegator re-places, it never resumes) and the image batch a
+	// token could never be claimed, and would hold a card back from the next caller for the
+	// 30 s grace, so they get the plain "gpu busy" defer. It is never decoded from, or encoded
+	// to, the wire: a remote delegator cannot ask a node to keep a place for it. Like Door it
+	// never routes, gates or selects a tier.
+	Resumable bool `json:"-"`
 }
 
 // Meta is per-call telemetry returned to the caller and recorded in the ledger.
@@ -304,7 +314,7 @@ type Meta struct {
 	Truncated          bool    `json:"truncated,omitempty"`        // hit token limit
 	Grounded           *bool   `json:"grounded,omitempty"`         // extract/summary values appear in source (nil = N/A)
 	EscalatedAgreed    *bool   `json:"escalated_agreed,omitempty"` // higher tier agreed with the smaller (nil = no escalation)
-	ErrClass           string  `json:"err_class,omitempty"`        // oom|timeout|http_5xx|conn_refused on infra failure; gpu_busy = vision call skipped, a gen job held the GPU lock (LO-1)
+	ErrClass           string  `json:"err_class,omitempty"`        // oom|timeout|http_5xx|conn_refused on infra failure; gpu_busy = vision call skipped, a gen job held the GPU lock (LO-1); gpu_queued = a media call with no card yet, holding a place in line (the answer carries a waiter_token)
 	// Node / Placement say WHERE a vision task ran when the route decided
 	// (0.116.0): Node is the fleet node_id that served it, Placement the
 	// route's reason ("remote: local gpu busy", "remote: forced", "local: no

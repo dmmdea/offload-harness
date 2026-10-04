@@ -29,6 +29,11 @@ func holdersOf(leaseDir string, info gpulease.Info, opts Options, now time.Time)
 			Reason: l.Reason, Origin: l.Origin, Command: l.Command,
 			Exclusive: l.Exclusive, Draining: l.Draining,
 			AgeSec: int(l.Age.Seconds()), ExpiresAt: l.ExpiresAt,
+			Expired: l.Expired, ExpiredWhy: l.ExpiredWhy,
+			TermSec: int(l.Term / time.Second), RequestedSec: int(l.Requested / time.Second),
+		}
+		if !l.HardEnd.IsZero() {
+			h.HardEnd = l.HardEnd.UTC().Format(time.RFC3339)
 		}
 		if !l.HeartbeatAt.IsZero() {
 			h.HeartbeatAgeSec = int(now.Sub(l.HeartbeatAt).Seconds())
@@ -136,8 +141,21 @@ func stalledNote(h *Holder) string {
 }
 
 func overdueNote(h *Holder) string {
+	if h.Expired {
+		return fmt.Sprintf("the lease has expired: its term ended %s ago and its holder did not renew it because %s. The holder is still alive and heartbeating, so nothing is reclaimed or killed (an expired lease is a label, not a release: it is held until its holder lets go or it is taken over). Queue behind it, or ask who holds it",
+			secs(h.OverdueBySec), expiredWhy(h))
+	}
 	return fmt.Sprintf("the lease is past its declared window by %s and its holder is still renewing: nothing is reclaimed or killed (a declared window is not a ceiling for a holder that is alive). Queue behind it, or ask who holds it",
 		secs(h.OverdueBySec))
+}
+
+// expiredWhy is the recorded reason a term was not renewed, or the plain fact when a tick
+// stamped the label without one.
+func expiredWhy(h *Holder) string {
+	if h.ExpiredWhy != "" {
+		return h.ExpiredWhy
+	}
+	return "nothing vouched for it"
 }
 
 // progressSentence is "<file> moved <age> ago[, <detail>]".
@@ -234,7 +252,9 @@ func standingParts(h *Holder) []string {
 	if h.Orphaned {
 		parts = append(parts, fmt.Sprintf("its owner (%s) has been gone for %s", ownerWho(h), secs(h.OrphanedForS)))
 	}
-	if h.Overdue {
+	if h.Overdue && h.Expired {
+		parts = append(parts, fmt.Sprintf("its term ended %s ago and was not renewed (%s)", secs(h.OverdueBySec), expiredWhy(h)))
+	} else if h.Overdue {
 		parts = append(parts, fmt.Sprintf("it is past its declared window by %s", secs(h.OverdueBySec)))
 	}
 	return parts

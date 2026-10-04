@@ -56,6 +56,20 @@ than any number written down:
 | Remote (opt-in) | `offload_nim` |
 | Status | `offload_status` |
 
+**A place in line (`waiter_token`, GPU routing P13b).** Every media tool (`offload_generate_image`,
+`offload_edit_image_generative`, `offload_inpaint_image`, `offload_upscale_image`, `offload_generate_video`,
+`offload_animate_character`, `offload_generate_audio`, `offload_run_graph`) takes an optional `waiter_token`. On a
+host that leases cards, a call that has no card after its `gpu_wait_ms` does not fail with `gpu busy`: it answers
+`deferred`, `err_class: gpu_queued`, `defer_class: capacity`, with `waiter_token`, `queue_position`, `eta_s` (the
+declared window left on the lease in the way: a ceiling), `devices` and `held_by` in its data. Re-send the same
+request with that `waiter_token` and the call resumes the place it left. The token lives ten minutes after its last
+poll and holds its place against later callers for the first 30 seconds of that; see
+[media-generation.md](media-generation.md), "Per-card media admission". `offload_run_graph` also takes an
+`devices` (for the operator's use; nvidia-smi indices or GPU uuid prefixes): absent or several, the graph holds the whole
+node; one device runs in that card's own ComfyUI instance, which sees no other card. A host that does not lease cards answers `gpu_busy` as it always did, and
+so does any call that did not come through this server (the CLI verbs, the fleet dispatch, the image batch): the
+server marks its requests resumable (`core.Request.Resumable`), and only those leave a place in line.
+
 **Named media families (ADR 0058).** `offload_generate_image` and `offload_edit_image_generative`
 take a `family` param that selects one of the box's opt-in bindings beside its default one; the
 edit tool also takes `images` (multi-reference, qwen-image-2.1 families) and both take
