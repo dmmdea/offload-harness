@@ -223,7 +223,9 @@ func (s *Server) mediaCfg() config.Config {
 	return s.p.Cfg()
 }
 
-func (r runTaskAs) Run(ctx context.Context, req core.Request) core.Result { return r.s.runTask(ctx, req) }
+func (r runTaskAs) Run(ctx context.Context, req core.Request) core.Result {
+	return r.s.runTask(ctx, req)
+}
 
 // withMediaPlace threads the waiter_token a queued media answer returned into the request's params,
 // so the call resumes the place in line it left (internal/gpulease/tokens.go). Absent or blank is a
@@ -1859,12 +1861,12 @@ func (s *Server) handleUpscaleImage(ctx context.Context, req *mcp.CallToolReques
 
 func (s *Server) handleRunGraph(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	var in struct {
-		GraphPath    string   `json:"graph_path"`
-		GraphJSON    string   `json:"graph_json"`
-		ManifestPath string   `json:"manifest_path"`
-		ManifestJSON string   `json:"manifest_json"`
-		OutDir       string   `json:"out_dir"`
-		ReserveVram  string   `json:"reserve_vram"`
+		GraphPath    string `json:"graph_path"`
+		GraphJSON    string `json:"graph_json"`
+		ManifestPath string `json:"manifest_path"`
+		ManifestJSON string `json:"manifest_json"`
+		OutDir       string `json:"out_dir"`
+		ReserveVram  string `json:"reserve_vram"`
 		// Devices is operator-declared: absent = the whole node (see the schema).
 		Devices []string `json:"devices"`
 		Route   string   `json:"route"`

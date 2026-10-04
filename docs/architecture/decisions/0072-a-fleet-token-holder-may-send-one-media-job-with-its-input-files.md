@@ -85,8 +85,10 @@ Three facts stood in the way.
   a file that begins like a PNG can still be malformed, and the decoder that opens it (ComfyUI's image loader, ffmpeg) is the
   boundary for that. The fleet token is held only by the operator's machines.
 - Some request fields cannot ride the fleet task and defer by name on a remote route instead of being dropped: `refine=false`
-  (image), `tts_voice` (audio), `transformer` (video); a run-graph's `out_dir` is never sent (the node writes into its own
-  media dir) but is honoured on the calling machine: the fetched outputs are written into it, created if missing.
+  (image), `tts_voice` (audio), `transformer` (video), a run-graph's `devices` (a card id names a card on the calling
+  machine); a run-graph's `out_dir` is never sent (the node writes into its own media dir) but is honoured on the calling
+  machine: the fetched outputs are written into it, created if missing. A `waiter_token` is not carried either, by design:
+  it resumes a place in line on the calling machine, and a call that goes to a node leaves that place.
 - A node whose weights go missing stops advertising the task within a minute and says why in `media_routes`; a client that
   reads `media_routes` skips it and names it in the defer. A default config on a thin client no longer reads as having a
   lane, so `route: auto` goes to a node there. A box with no lane and no `delegate_remotes` still runs the call locally and
