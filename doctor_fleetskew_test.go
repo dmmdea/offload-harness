@@ -31,10 +31,10 @@ func TestDoctorFleetSkewRows(t *testing.T) {
 	out := b.String()
 	for _, want := range []string{
 		"fleet versions (this binary 1.2.3):",
-		"OK           http://192.0.2.1:18811 1.2.3",
-		"SKEW         http://192.0.2.2:18811 runs 1.2.2 (this binary 1.2.3)",
-		"UNKNOWN      http://192.0.2.3:18811",
-		"UNREACHABLE  http://192.0.2.4:18811 — connection refused",
+		"OK           delegate_remotes[0] http://192.0.2.1:18811 1.2.3",
+		"SKEW         delegate_remotes[1] http://192.0.2.2:18811 runs 1.2.2 (this binary 1.2.3)",
+		"UNKNOWN      delegate_remotes[2] http://192.0.2.3:18811",
+		"UNREACHABLE  delegate_remotes[3] http://192.0.2.4:18811 — connection refused",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("doctor fleet rows lack %q:\n%s", want, out)

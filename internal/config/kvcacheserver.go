@@ -263,12 +263,17 @@ func privateHost(host string) error {
 	if !strings.Contains(host, ".") || strings.HasSuffix(lower, ".local") {
 		return nil
 	}
-	suf := strings.ToLower(strings.TrimSpace(netguard.TailnetSuffix()))
-	if suf == "" {
+	zones := netguard.TailnetSuffixes()
+	if len(zones) == 0 {
 		return fmt.Errorf("%s is a dotted hostname and no tailnet_suffix is configured — use the store's LAN IP, a bare hostname, or set config `tailnet_suffix` to your tailnet zone", host)
 	}
-	if strings.HasSuffix(lower, "."+suf) {
-		return nil
+	for _, zone := range zones {
+		if strings.HasSuffix(lower, "."+zone) {
+			return nil
+		}
 	}
-	return fmt.Errorf("%s is neither a private/tailnet address nor a bare, .local or %s hostname", host, suf)
+	if len(zones) > 1 {
+		return fmt.Errorf("%s is neither a private/tailnet address nor a bare, .local or one of %s hostname", host, strings.Join(zones, ", "))
+	}
+	return fmt.Errorf("%s is neither a private/tailnet address nor a bare, .local or %s hostname", host, zones[0])
 }

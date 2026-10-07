@@ -286,7 +286,7 @@ every offender, and nothing is written:
    `n_cpu_moe_max` is a separate number from `n_cpu_moe` on purpose: the placement a tier ships and the
    ceiling its measurement supports are two decisions, and one field cannot check itself. No shipped tier
    declares a partial spill today.
-3. **The layer check (ADR 0039, D5).** A tier that declares layers must render the seats they name, on the
+3. **The layer check (ADR 0052, D5).** A tier that declares layers must render the seats they name, on the
    cards they name. It runs for any tier that declares layers, not only one that composes others: the
    `ampere-16` tier's `fast` layer would otherwise route to a seat the config never defined.
 

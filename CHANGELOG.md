@@ -6,6 +6,151 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.167.0] - 2026-10-07 - truth and guards outside the delegator: tailnet zones, redacted roster URLs, faster probes, doctor rows, OCR off Q4 seats
+
+### Truth and guards outside the delegator (fleet-first, track B; ADR 0074)
+
+- **The tailnet guard admits a configured list of zones.** A node shared in from another tailnet is named by Tailscale
+  under the SHARER's zone, and `tailnet_suffix` held one zone, so the only form that passed every guard for such a node
+  was its raw `100.x` address. The new key `tailnet_suffixes` lists further zones beside `tailnet_suffix` (which keeps its
+  meaning and keeps working alone); load installs the union, the own zone first, before any endpoint is vetted, and a
+  malformed entry refuses the load naming `tailnet_suffixes[i]` and changes nothing. Every consumer of the zone judges the
+  whole list: `netguard.TailnetURL` (a new `TailnetURLIn` takes the list as an argument), the research lane's by-name
+  refusal (a host under ANY listed zone is the tailnet, not web), and the cache-store host check. The default is
+  unchanged and fail-closed, the dial gate is untouched (a name that resolves outside loopback and the tailnet CGNAT range is
+  still refused at dial time), and a generic `.ts.net` rule is still rejected. `doctor` prints one `tailnet zones:` row
+  naming each zone and its key (nothing when none is configured).
+  Docs: ADR 0074 (new; amends 0023, whose decision text carries a pointer), `OPERATOR-GUIDE.md`, `mcp-server.md`,
+  `config.example.json`. Tests: `tailnet_zones_test.go` (netguard), `tailnetzones_test.go` (config: every guarded key,
+  the install, malformed entries, the cache-store host), `fetch_tailnet_test.go` (research), `doctor_tailnetzones_test.go`;
+  each new branch mutated red.
+- **Every single-shot lane admits a roster entry the way the agent lane does.** The vision, text, stt-upload, compose
+  and accelerator lanes dialled `delegate_remotes` through the dial gate alone, so one entry was refused by the agent
+  lane's shape check and used by five others, and a bad entry got no message naming it. They now share
+  `internal/rosterprobe`: every entry is judged by `netguard.TailnetURL` before any dial, and a refused one is a named
+  miss in the lane's defer reason (`<base>: not dialled, refused by the tailnet guard (<why>)`), never a failed call;
+  the entries after it still serve. Blank slots are left out, and configured order and slot numbers are kept (compose
+  breaks queue ties by slot; the accelerator lane takes the first listing node). The agent lane still fails a whole
+  call on a refused entry: that is `internal/delegate`'s, not changed here (reported for the delegator track).
+  Docs: ADR 0074 decision 4, `FLEET-NODE.md` (vision placement), `fleet-node.md`, `accelerators.md`. Tests:
+  `rosterprobe_test.go` and one `roster_test.go` per lane; the accelerator dial-gate proof now goes through the lane's
+  own request helper (the shape check refuses its old input first). Each guard, five lane sites and `Members`,
+  mutated red.
+- **The single-shot lanes probe the roster at once, through one shared cache.** Each lane probed `delegate_remotes`
+  serially (k dead members cost k x 5 s before any node was chosen, k x 2 s per accelerator call), per call, sharing
+  nothing with the other lanes (membership review F06). `rosterprobe.Probe` reads every admitted entry's health
+  concurrently (the lane's own bound: 5 s, 2 s for the accelerator lane), returns the readings in configured order, memoises a
+  good answer for 2 s and negative-caches a transport failure for 30 s, process-wide: the delegator's own windows, and
+  one lane's discovery of a dead node saves every other lane the wait. A node that answered with a status is never
+  cached as down, nothing is cached once the caller's context is done, and a timeout is not held against a caller willing
+  to wait longer (a 2 s accelerator failure never turns a 5 s vision call away). A call over a roster with three hung
+  members places in about one bound instead of three, and a second call dials none of them. `healthTimeout` is a var in
+  each lane for tests. Timings are tabled in `fleet-node.md`.
+- **The cascade lane's dead base costs one probe, and only for itself.** `cascade_remote_lanes` read a base's health, and
+  when that got no answer asked its roster too (two bounds under one mutex shared by every lane base: membership review
+  F08). A base that does not answer the health GET at all (no dial, no route, a timeout, a reset, a body that stalls) is
+  no longer asked for a roster, and the probe runs outside the cache lock with one probe in flight per base, so a call
+  that needs one base never waits on another. A base that ANSWERED but is not a node (a llama-swap 404s the route) is
+  read through its roster as before. `laneProbeTimeout` is a var for tests; the stale "bounded by laneProbeTimeout"
+  comments are corrected.
+  Docs: ADR 0074 decisions 5 and 6, `fleet-node.md` (the timings table), `OPERATOR-GUIDE.md` (the lane section). Tests:
+  `probe_test.go` (rosterprobe: concurrency, order, both caches and their guards), `roster_test.go` per lane (a black-holed
+  roster placed once, in parallel, dial counts), `lanes_probe_test.go` (llamaclient: one probe not two, no head-of-line
+  blocking, single flight, a dropped or stalled health reply); every new branch mutated red. The race detector is not
+  available on the machine this was built on (no C toolchain), so the concurrency tests ran without `-race`.
+- **`doctor` shows a wrong or missing fleet token, and names a refused roster entry by slot.** `/fleet/health` ignores
+  the bearer, so a `fleet_auth_token` that was missing or wrong read healthy on every doctor row and first showed as a
+  401 on dispatch, which the delegator does not re-place (membership review F11). `doctor` now reads the roster once,
+  concurrently, through `rosterprobe` (it was serial at 5 s a remote), then asks each reachable node the one question
+  health cannot: `rosterprobe.CheckToken` sends an agent dispatch with no `job_id`, which the node answers after its
+  bearer check and before it creates anything (401 other token, 403 no token beyond loopback, 400 `job_id required`
+  accepted; no job is queued). Rows `OK` / `MISMATCH` / `NO-TOKEN` / `UNKNOWN` / `UNCHECKED` name the entry by its
+  `delegate_remotes[i]` slot, and a box with no token prints one `NOT SET` line. The token and a node's reply text are
+  never printed, and the bearer is sent only to a base the tailnet guard admits. The fleet-versions rows name entries by
+  slot too and show a guard-refused one as `REFUSED ... not dialled` instead of `UNREACHABLE`. At config load, a
+  `delegate_remotes` entry the tailnet guard refuses is now a finding (`delegate_remotes[i] is refused by the tailnet
+  guard`, judged against the zones the config itself names), so it is learned at load and not at the first call; it
+  warns and does not refuse, like every finding there. Every message about a roster entry prints it redacted
+  (userinfo, query and fragment removed), and a dial error's quotation of the raw base is scrubbed.
+  Docs: ADR 0074 decisions 7 and 8, `OPERATOR-GUIDE.md` (troubleshooting rows). Tests: `doctor_fleettoken_test.go` (rows
+  by slot, nothing asked of a refused or unreachable entry, no token printed, the real node handler end to end),
+  `rosterprobe/token_test.go` (the three answers through the real handler, nothing queued, bearer only in the header,
+  never sent to a refused base), `endpointshape_tailnet_test.go`; each new branch mutated red.
+- **No message about a roster entry carries a credential it was pasted with, and the bearer never follows a redirect.**
+  A roster entry is a base URL, and nothing stops one being pasted with `?token=` or `user:password@`. The tailnet
+  guard's own refusal quoted it (a `url.Error` quotes the whole input), `Member.Miss`, `Reading.Miss`, the lanes'
+  "probed ..." lines and dispatch errors printed the raw base, and the negative cache replayed a dial error that quotes
+  the URL. `netguard.RedactBase` (moved below `internal/config`, which delegates to it) is the one redaction, now also
+  covering the scheme-less `user:pw@host` form; `TailnetURLIn` quotes only that and words a parse failure without the
+  input, `validateEndpointValue` and the loader inherit it, `rosterprobe.Scrub` (the doctor's scrub moved here) also masks
+  every other URL left in a message, the cache scrubs a dial error before it is cached, and the doctor, the five lanes
+  and the lane/loopback config findings use them. Separately, the token probe and the five single-shot lane clients
+  followed redirects, so a node answering 3xx could have the client replay the request and its `Authorization` header at
+  a `Location` it chose; they now return the 3xx as the answer (`rosterprobe.NoRedirect`); the health read in
+  `internal/delegate` has the same gap and is that package's to change. ADR 0074 now says plainly that
+  the one `fleet_auth_token` is sent to every admitted roster node, including nodes under a sharer's tailnet zone, whose
+  administrator therefore receives a token that opens every node on the roster: list only nodes you trust with it (a
+  per-remote token is future work).
+  Docs: ADR 0074 (decisions 5, 7 and 9, consequences), `fleet-node.md`. Tests: `redact_test.go` and
+  `tailnet_zones_test.go` (netguard), `endpointshape_tailnet_test.go` (config), `scrub_test.go` and
+  `token_redirect_test.go` (rosterprobe), `doctor_fleettoken_test.go`, `redirect_test.go` per lane; each new branch
+  mutated red.
+- **A tailnet zone must be a zone.** `ParseZone` took any dotted string without a space, slash, colon or `@`, so
+  `*.x.ts.net`, `x.ts.net?`, a trailing backslash and the bare generic `ts.net` all loaded as "a zone" that matched
+  nothing, or (the bare domain) every tailnet's hostnames. A zone is now dot-separated `[a-z0-9-]` labels, and the bare
+  `ts.net` is refused by name; the load refuses the entry naming `tailnet_suffix[es][i]`. `EndpointWarnings` now says
+  what `TailnetZones` does on a malformed list (no zones, all-or-nothing) and prints the zone error as the first finding.
+- **The negative cache holds a busy or restarting node out for seconds, not half a minute, and a cold burst costs one
+  probe.** A node that timed out or refused the dial sat out the whole 30 s window, so a box that rebooted stayed
+  invisible to the single-shot lanes long after it was back. A timeout, a refused or an unroutable dial (classified by
+  error type, since Windows reports ECONNREFUSED as a different errno) is now held at most 5 s; a name that does not
+  resolve keeps 30 s. `Cache.Forget(base)` drops the verdict, and the five lanes call it when a dispatch is accepted.
+  Concurrent cold probes of one base under one bound share one request (a waiter's own context still ends its wait, a
+  prober that leaves does not hand its cancellation to a waiter, and callers with different bounds do not share).
+  `MemoTTL` and `NegativeTTL` are constants now: the windows and the clock are per-cache, so the timing tests run on a
+  fake clock and on gates, assert counts, and no longer mutate a package variable; the lane roster tests got the same
+  slack for a loaded CI runner.
+
+- **A Q4 seat its tier page calls inadequate for OCR no longer answers remote OCR.** The fleet vision lane advertises
+  `vqa`, `ocr` and `assess_image` on any node whose seed binds a vision seat without `tasks`, so the `ampere-8` node
+  (Qwen3-VL-4B Q4_K_M) was handed remote `ocr` although its own page records the omitted `ocr` alias as a quality
+  statement and Q4 as the measured OCR-fidelity cliff (fleet-first review R3-F14). Its vision seat now declares `tasks`
+  `vqa` and `assess_image`, which the seed writes as `vision_tasks`: the node refuses `ocr` at ack time naming the
+  allowed set, publishes the list in health, and a delegator places remote `ocr` on another node or defers. A local
+  `ocr` call is unaffected (routing uses `vision_model`). The declaration is dropped when an ocrprobe measurement clears
+  the seat. NOT changed, on purpose: `ampere-6`, `amd-gcn`, `amd-rdna3`, `amd-rdna3-dgpu`, `cpu` and `dual-gpu` also
+  run a Q4 vision seat, but their pages make no statement about OCR quality (the review calls them unmeasured), so they
+  keep all three tasks until a measurement or a page says otherwise. A node only picks this up when its config is
+  re-seeded from the tier.
+  Docs: `FLEET-NODE.md`, `fleet-node.md`, `docs/tiers/ampere-8.md` (regenerated). Tests:
+  `vision_tasks_tier_test.go` (a row for every shipped tier that binds a vision seat, so a new tier must decide; the
+  ampere-8 declaration stays tied to its page's statement); the declaration, the ocr-restored case and the rewritten
+  statement each mutated red.
+
+- **A `linux-amdgpu` node publishes `gpu_devices[]`.** ADR 0053 decision 4 and `FLEET-NODE.md` say a Linux AMD node
+  reports its cards the way an nvidia-smi node does, and `AmdgpuSysfsDeviceProbe` existed to do it, but
+  `chooseSamplerKind` routed only `nvidia-smi` to the device sampler, so the probe was never started and the amd-gcn
+  node published no per-card rows. `fleet-serve` now starts its sampler
+  through `startVRAMSampler`, which sends `linux-amdgpu` to the device sampler: one row per amdgpu card (index, name,
+  memory composed as the node's memory probe composes it), an empty uuid and no utilisation, so the delegator still reads
+  the cards as unknown rather than busy. If the per-device read fails at startup though the gate probe worked, the node
+  keeps the single reading and logs why. `linux-meminfo` (the RK3588 SoC: one RAM pool, no cards) deliberately stays on
+  the single-value sampler, and the docs now say so instead of naming windows-generic as the only source without rows.
+  Docs: `FLEET-NODE.md`, `fleet-node.md`, ADR 0053 decision 4. Tests: `fleet_sampler_test.go` (a fake sysfs tree
+  through `startVRAMSampler`: one device row, APU and discrete composition, the fallback, the two single sources; a
+  pin that `runFleetServe` starts its sampler through the chooser), `TestChooseSamplerKind`; each new branch and the
+  call site mutated red.
+- **Composite-tier citations point at ADR 0052.** The composite tier (a box as the union of its tiers, the device
+  layers, the display layer and the placement table) was drafted as "ADR 0039" and recorded as ADR 0052, because 0039 was
+  already "A held card is a place in line". About fifty comments, the tier pages and their generators
+  (`tierdocs`, `profiles.json`), the setup scripts and ADR 0054 kept the draft number, so a reader following "ADR 0039"
+  from `internal/config/layers.go` landed on the lease queue. They now cite 0052; references that mean the real 0039
+  (ADR 0041, the lease-queue line in `gpuactivity` and one older entry in this file) are untouched. Comment and prose
+  changes only, plus the regenerated tier pages. Not changed, on purpose: the dated plan and spec under
+  `docs/superpowers/` (they record the number the work was drafted under), ADR 0061's "ADR 0039 (placement)" (it can
+  be read either way), and the citations inside `internal/delegate` and `internal/mcpserver/mcpserver.go`, which
+  belong to the tracks editing those files.
+
 ## [0.166.0] - 2026-10-07 - the capacity wait runs to the call's deadline; the spread deal and the roster get their guards
 
 - **The capacity wait runs to the call's deadline, not to a fixed 120 s (ADR 0073; the diagnosis' M1).** 85 of one day's 281 deferred delegate rows were `capacity wait: no node had room within 2m0s`, for subtasks a node freeing a minute later would have taken, inside a call that has 1,500 s. A call that has a whole-call deadline (`agent_delegate`, `offload_research`) now waits for capacity until that deadline less a 15 s reserve, whatever `agent_placement_wait_sec` says, so band-0 work no longer defers for capacity while the call still has time to place it; only the last subtask to start waits that long, because a wait holds one of the call's four run slots and four of them waiting to the horizon would keep the rest of the call (and every later chunk of a batched one) from starting until it was too late to place anything: the earlier ones keep the bound the wait had before (the larger of `agent_placement_wait_sec` and `agent_lease_wait_sec`, or the call's end if sooner) and their defer says why; no subtask is started inside the reserve either (it ends at once as a `capacity` defer, `not started: the call's deadline left no room`; a call that never had more than the reserve is exempt); nothing is dispatched inside the reserve (a job placed there could only be cut, and would run on in its node with nobody waiting for it), and a call with no more than the reserve left does not wait. `agent_placement_wait_sec` is now the wait of a call with no deadline (the `delegate` CLI verb, `agent_run` and `offload_ask` with a route), 0 = 120 s; a negative value is still the off switch for every call. A composite box's eviction wait, a verification retry's wait for a busy seat and a wait that holds a run slot keep their TTL, and an `agent_lease_wait_sec` longer than the call no longer extends a wait the call bounds. Sheddable work is still shed at once. The capacity defer keeps its class and prefix and now says what bounded it (`bounded by the call's deadline, not by agent_placement_wait_sec`) instead of telling the caller to raise a setting that never bounded the wait; the holder-naming deferral of a reserved seat words the same fact. To shorten the wait of the MCP doors, shorten `agent_call_deadline_sec`. Docs: `fleet-node.md` ("What bounds the wait"), `OPERATOR-GUIDE.md`, `gpu-lease.md`, `opencode-integration.md`, `glossary.md`, the `agent_delegate` schema, forward links in ADR 0063 and 0065. Tests: `callwait_slots_test.go` (five subtasks on a fleet that never frees: the first four defer at the TTL and say why, the fifth waits for the horizon; a subtask that gets a slot inside the reserve is not started, nor a later chunk; the reserve is taken only out of a call longer than it), `callwait_test.go` (a fleet full for 1.5 s lands the subtask inside a 4 s call although the configured TTL is 1 s; the same with the setting unset; the no-deadline control arm; a wait that never frees ends before the deadline as a capacity defer with nothing dispatched in the reserve; sheddable shed at once; the off switch stays off; a call with less left than the reserve; a lease wait; nothing placed at the wait's last look; the bound itself, row by row); the six tests that pin the CUT of a wait by the deadline set the reserve to zero; each new branch mutated red.
@@ -1368,7 +1513,7 @@ loaded one counted as reclaimable capacity: a job placed on that figure could ta
   the seat of the node's own layers and deferred `agent seat "..." is not in the endpoint's
   served roster`. Confirmed cause: a copied config that kept the node's `layers`. The explicit
   file was in fact the only one read; on a composite box the placement table picks the seat from
-  the layers and `agent_model` applies only when a decision names none (ADR 0039, unchanged), so
+  the layers and `agent_model` applies only when a decision names none (ADR 0052, unchanged), so
   the copy's `agent_model` was shadowed by a layer's agent seat, which the repointed
   endpoint did not serve. The harness now prints a stderr note naming the config file when its
   `agent_model` is not a seat of any of its layers, and a roster-miss defer on a placed (or

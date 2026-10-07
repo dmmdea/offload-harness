@@ -95,7 +95,10 @@ func ValidateURL(ctx context.Context, raw string) (*url.URL, error) {
 	if host == "localhost" || strings.HasSuffix(host, ".localhost") || strings.HasSuffix(host, ".local") || strings.HasSuffix(host, ".internal") {
 		return nil, fmt.Errorf("host %q is not public", host)
 	}
-	if suffix := netguard.TailnetSuffix(); suffix != "" && (host == suffix || strings.HasSuffix(host, "."+suffix)) {
+	// Every configured zone, not only the primary one: a node shared in from another
+	// tailnet lives under that tailnet's zone (ADR 0074), and the research lane must not
+	// read it as web either.
+	if netguard.InTailnetZone(host) {
 		return nil, fmt.Errorf("host %q is on the tailnet — the research lane reads the public web only", host)
 	}
 	if ip := net.ParseIP(host); ip != nil {

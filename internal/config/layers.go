@@ -12,7 +12,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/core"
 )
 
-// LayerSeat is one served seat inside a layer (ADR 0039): the model, the device
+// LayerSeat is one served seat inside a layer (ADR 0052): the model, the device
 // PIN it is launched on and the measured numbers a placement decision needs.
 // Seats carry their own device pin (not the layer) because a layer's "devices"
 // is a documentary list of the sets it MAY occupy while a seat is launched with
@@ -80,7 +80,7 @@ func (s LayerSeat) DeviceList() []string {
 	return out
 }
 
-// LayerSpec is one device layer of a composite box (ADR 0039): the composed
+// LayerSpec is one device layer of a composite box (ADR 0052): the composed
 // tier it stands for, the device sets it may occupy, its seats and the guards
 // that gate admission. A box declares layers by seeding them into config from
 // the tier table (tierseed), so at runtime everything reads config — a box that
@@ -146,7 +146,7 @@ const defaultOperatorIdle = 15 * time.Minute
 // grow past what a single JSON-RPC message reasonably carries.
 const agentContextCapCeilingBytes = 2 << 20
 
-// Composite reports whether this box declares device layers (ADR 0039). It is
+// Composite reports whether this box declares device layers (ADR 0052). It is
 // THE gate every new surface keys on: a false here means every result, health
 // row, status view and ledger entry is byte-identical to the pre-layer build.
 func (c Config) Composite() bool {
@@ -597,7 +597,7 @@ func isCUDAIndex(s string) bool {
 	return true
 }
 
-// stripComposite zeroes the five composite keys (ADR 0039) on a config that
+// stripComposite zeroes the five composite keys (ADR 0052) on a config that
 // Load hands back WITH an error. LoadWithSource returns that value to every
 // subcommand and records the error only in Source.LoadErr, which main's loadCfg
 // discards — so without this `local-offload mcp` would place work onto the exact

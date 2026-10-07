@@ -40,9 +40,9 @@ import (
 	"github.com/dmmdea/offload-harness/internal/composebundle"
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
-	"github.com/dmmdea/offload-harness/internal/delegate"
 	"github.com/dmmdea/offload-harness/internal/netguard"
 	"github.com/dmmdea/offload-harness/internal/pairworkloads"
+	"github.com/dmmdea/offload-harness/internal/rosterprobe"
 )
 
 const (
@@ -55,8 +55,12 @@ const (
 	taskProject  = "compose-project"
 )
 
+// healthTimeout is how long one call waits for one node's /fleet/health: the single-shot lanes'
+// shared bound, probed concurrently and cached (internal/rosterprobe). A var so a test compresses
+// it; production never mutates it.
+var healthTimeout = rosterprobe.DefaultTimeout
+
 const (
-	healthTimeout   = 5 * time.Second
 	dispatchTimeout = 10 * time.Minute // a project bundle may be tens of MB
 	pollTimeout     = 20 * time.Second
 	fetchTimeout    = 15 * time.Minute
@@ -70,7 +74,7 @@ const (
 
 // HTTPClient is the transport every request uses; tests swap it. netguard.SafeTransport limits the lane to
 // loopback and the operator's tailnet at dial time (never cloud, ADR 0001).
-var HTTPClient = &http.Client{Transport: netguard.SafeTransport(nil)}
+var HTTPClient = &http.Client{Transport: netguard.SafeTransport(nil), CheckRedirect: rosterprobe.NoRedirect}
 
 // Runner runs one request in-process; *pipeline.Pipeline satisfies it.
 type Runner interface {
@@ -221,7 +225,7 @@ func callWith(ctx context.Context, cfg config.Config, req core.Request, h core.R
 		route = "/fleet/compose-project"
 	}
 	h.Dispatched(base, node, jobID)
-	if err := post(ctx, cfg, base+route, body); err != nil {
+	if err := post(ctx, cfg, base, route, body); err != nil {
 		return core.Result{}, err
 	}
 	res, data, err := wait(ctx, cfg, base, jobID, h)
@@ -310,27 +314,21 @@ func pickNode(ctx context.Context, cfg config.Config, task string) (base, node s
 		cands  []cand
 		misses []string
 	)
-	for i, b := range cfg.DelegateRemotes {
-		b = strings.TrimRight(strings.TrimSpace(b), "/")
-		if b == "" {
-			continue
-		}
-		hctx, cancel := context.WithTimeout(ctx, healthTimeout)
-		v, herr := delegate.FetchNodeView(hctx, b, cfg.FleetAuthToken)
-		cancel()
-		if herr != nil {
-			misses = append(misses, b+": "+herr.Error())
+	for _, r := range rosterprobe.Probe(ctx, cfg.DelegateRemotes, cfg.FleetAuthToken, healthTimeout) {
+		b, v := r.Base, r.View
+		if r.Err != nil {
+			misses = append(misses, r.Miss())
 			continue
 		}
 		if !contains(v.Tasks, task) {
-			misses = append(misses, fmt.Sprintf("%s (%s): does not serve %s", b, v.NodeID, task))
+			misses = append(misses, fmt.Sprintf("%s (%s): does not serve %s", r.Shown(), v.NodeID, task))
 			continue
 		}
 		id := v.NodeID
 		if id == "" {
 			id = b
 		}
-		cands = append(cands, cand{b, id, v.QueueDepth + v.JobsRunning, i})
+		cands = append(cands, cand{b, id, v.QueueDepth + v.JobsRunning, r.Index})
 	}
 	if len(cands) == 0 {
 		why := "no fleet node serves " + task
@@ -357,7 +355,8 @@ func contains(xs []string, x string) bool {
 	return false
 }
 
-func post(ctx context.Context, cfg config.Config, url string, body []byte) error {
+func post(ctx context.Context, cfg config.Config, base, route string, body []byte) error {
+	url := base + route
 	dctx, cancel := context.WithTimeout(ctx, dispatchTimeout)
 	defer cancel()
 	hreq, err := http.NewRequestWithContext(dctx, http.MethodPost, url, bytes.NewReader(body))
@@ -370,7 +369,7 @@ func post(ctx context.Context, cfg config.Config, url string, body []byte) error
 	pairworkloads.WireHeadersFor(cfg, hreq.Header)
 	resp, err := HTTPClient.Do(hreq)
 	if err != nil {
-		return &placementError{core.DeferClassInfrastructure, fmt.Sprintf("dispatch %s: %v", url, err)}
+		return &placementError{core.DeferClassInfrastructure, rosterprobe.Scrub(base, fmt.Errorf("dispatch %s: %w", url, err))}
 	}
 	rb, _ := io.ReadAll(io.LimitReader(resp.Body, maxBody))
 	resp.Body.Close()
@@ -382,8 +381,10 @@ func post(ctx context.Context, cfg config.Config, url string, body []byte) error
 		case http.StatusBadRequest, http.StatusRequestEntityTooLarge:
 			class = core.DeferClassContract
 		}
-		return &placementError{class, fmt.Sprintf("dispatch %s: status %d: %s", url, resp.StatusCode, truncate(rb))}
+		return &placementError{class, rosterprobe.Scrub(base, fmt.Errorf("dispatch %s: status %d: %s", url, resp.StatusCode, truncate(rb)))}
 	}
+	// The node accepted the job: whatever the negative cache holds against it is out of date.
+	rosterprobe.Default.Forget(base)
 	return nil
 }
 

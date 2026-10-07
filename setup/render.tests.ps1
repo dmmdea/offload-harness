@@ -191,7 +191,7 @@ if ($r.verdict -and $r.verdict.render_backend -eq 'triple-blackwell') { Ok 'b3x1
 # THE placement law, asserted mechanically: device 1 is the DISPLAY card. A silent
 # flip here starves the operator's desktop - measured 2026-09-04, Windows fell to a
 # 720p-class mode and the box needed a reboot. The ONLY seats allowed on it are the
-# display layer's dormant twins (ADR 0039): they exist so a small mechanical call has
+# display layer's dormant twins (ADR 0052): they exist so a small mechanical call has
 # somewhere to run while the pair holds its cards, placement never routes to them
 # until the operator sets dormant:false, and every placement onto them is fenced by
 # the display_floor and presence guards.
@@ -482,7 +482,7 @@ Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue
 
 Write-Host ""
 
-Write-Host "== composite tier (ADR 0039): fresh seed-merge writes tier_profile/tiers/layers in PARITY with internal/tierseed =="
+Write-Host "== composite tier (ADR 0052): fresh seed-merge writes tier_profile/tiers/layers in PARITY with internal/tierseed =="
 # The runtime reads the composite identity from CONFIG — placement, the health
 # rows, offload_status, the ledger's layer column — and Step 8's raw-merge path
 # bypasses tierseed, so this asserts the mirror actually writes them. Without it

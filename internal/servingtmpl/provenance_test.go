@@ -58,7 +58,7 @@ func TestParamsBasisMirrorsParams(t *testing.T) {
 	p.ExtraVLLMSeats = []*vllmseat.Spec{{ID: "extra-seat", Unit: "u2", Port: 18797, MaxModelLen: 32768}}
 	p.VLLMRuntime = vllmseat.Runtime{User: "someone", ProxyHost: "203.0.113.9"}
 	p.IncludeQ38, p.IncludeQ359B, p.IncludeMimo9B, p.DisableCUDAGraphs = true, true, true, true
-	// The composite tier’s display layer (ADR 0039) rides in the hashed set too:
+	// The composite tier’s display layer (ADR 0052) rides in the hashed set too:
 	// left nil here, a BasisOf that forgot to carry it would round-trip cleanly
 	// and hash nil forever on the one tier that actually sets it.
 	p.DisplayLayer = &config.LayerSpec{

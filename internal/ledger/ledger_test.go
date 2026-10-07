@@ -312,7 +312,7 @@ func TestSummaryHonestValueLabel(t *testing.T) {
 	}
 }
 
-// TestLedgerRoundTripsLayer (ADR 0039): the layer a composite box served a
+// TestLedgerRoundTripsLayer (ADR 0052): the layer a composite box served a
 // call on persists, is OMITTED when empty (a plain box's row is byte-identical
 // to the pre-layer build), and old lines without the field still parse.
 func TestLedgerRoundTripsLayer(t *testing.T) {

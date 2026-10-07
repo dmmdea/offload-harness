@@ -181,8 +181,8 @@ func TestFleetServeSweepReport(t *testing.T) {
 // TestChooseSamplerKind locks the routing decision runFleetServe's sampler
 // switch is built on: it is the ONLY thing that decides whether
 // /fleet/health's gpu_devices[] is present or omitted, so the docs' claim
-// ("always present for nvidia-smi, including single-GPU; omitted only for
-// windows-generic") is a fact about THIS function, not a hand-checked
+// ("always present for nvidia-smi, including single-GPU, and for linux-amdgpu;
+// omitted for windows-generic and linux-meminfo") is a fact about THIS function, not a hand-checked
 // assertion about main.go's control flow.
 func TestChooseSamplerKind(t *testing.T) {
 	cases := []struct {
@@ -191,7 +191,10 @@ func TestChooseSamplerKind(t *testing.T) {
 	}{
 		{"nvidia-smi", samplerKindDevice},
 		{"windows-generic", samplerKindSingle},
-		// The SoC provider has no per-device signal either: one RAM pool, no gpu_devices[].
+		// The amdgpu sysfs provider enumerates its cards: gpu_devices[] like an nvidia-smi node
+		// (ADR 0053 decision 4; it was routed to the single-value sampler until fleet-first R2).
+		{"linux-amdgpu", samplerKindAmdgpuDevice},
+		// The SoC provider has no per-device signal: one RAM pool, no gpu_devices[].
 		{"linux-meminfo", samplerKindSingle},
 		// Defensive: an unrecognized/empty source (should never happen —
 		// ResolveProvider only ever sets these two strings) still degrades to

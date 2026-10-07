@@ -118,7 +118,7 @@ type servingProfile struct {
 	MediaSeats []mediaseat.Seat `json:"media_seats"`
 	// GPUEnv is added to every model in the rendered config.
 	GPUEnv []string `json:"gpu_env"`
-	// Composes / Layers are the composite declaration (ADR 0039): the tiers
+	// Composes / Layers are the composite declaration (ADR 0052): the tiers
 	// this one is a complete instance of, and the device layers it places work
 	// on. Absent on every ordinary tier, where the render is unchanged.
 	Composes []string           `json:"composes"`
@@ -409,7 +409,7 @@ type renderResult struct {
 	Config     string // rendered, UNSTAMPED -- the bytes body_sha256 covers
 	Basis      servingtmpl.SpecBasis
 	Include26B bool
-	// Layers / Composed are the composite declaration (ADR 0039) as the render
+	// Layers / Composed are the composite declaration (ADR 0052) as the render
 	// resolved it: the SEEDED layers the config was rendered from, and the
 	// capabilities of the tiers the composite claims to be a complete instance
 	// of. They are carried out of the derivation because the composition check
@@ -647,7 +647,7 @@ func runInstallRender(args []string) error {
 //   - The spill ceiling (H-01, INV-1): `--n-cpu-moe` above the tier's measured spill
 //     (`n_cpu_moe_max`), and a partial placement that names no N (which renders the
 //     every-expert form), are refused.
-//   - D5 (ADR 0039): a tier that declares layers must render the CHECKED UNION of what it
+//   - D5 (ADR 0052): a tier that declares layers must render the CHECKED UNION of what it
 //     declares: every layer seat defined, every seat on the cards its layer declares, every
 //     composed capability present. The tier shipped a media block copied from the 2-card tier
 //     once (0.113.33) and nothing read the result; this reads it. It runs for a tier that

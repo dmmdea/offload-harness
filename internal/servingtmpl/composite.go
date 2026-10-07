@@ -1,4 +1,4 @@
-// composite.go — D5 of the composite-tier design (ADR 0039): a composite
+// composite.go — D5 of the composite-tier design (ADR 0052): a composite
 // tier's rendered serving config must be the CHECKED UNION of the tiers it
 // composes, not a copy that drifted from them.
 //

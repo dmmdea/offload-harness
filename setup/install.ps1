@@ -810,7 +810,7 @@ function Get-AcceleratorSeed {
 }
 
 # Media-seat bindings: deliberate PARITY COPY of the FINAL layer of
-# Composite identity + layers (ADR 0039): parity copy of the composite branch of
+# Composite identity + layers (ADR 0052): parity copy of the composite branch of
 # internal/tierseed.Resolve (authoritative — change Go FIRST, then mirror here).
 # A composite tier is a box that IS several tiers at once, and everything at
 # runtime — placement, the health rows, offload_status, the ledger's layer
@@ -1786,7 +1786,7 @@ Step 'harness config -> ~/.local-offload/config.json' `
       $cfgText = Merge-ConfigSeed -ConfigText $cfgText -Seed ([pscustomobject]@{ agent_model = $agentSeat })
       Write-Host "      agent seat ($profileId): agent_model=$agentSeat (derived from resident_tier)" -ForegroundColor DarkGray
     }
-    # Composite identity + layers (ADR 0039), the same keys tierseed seeds. The
+    # Composite identity + layers (ADR 0052), the same keys tierseed seeds. The
     # vLLM seat is NOT active on this path by construction: the render call above
     # passes no --vllm-user/--vllm-proxy-host, so the renderer binds the tier's
     # declared fallback seat — and the layer's agent seat must name the seat the

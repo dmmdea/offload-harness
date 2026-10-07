@@ -10,7 +10,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/config"
 )
 
-// TestCompositeTierSeedsIdentityAndLayersAndPlainTiersDoNot pins the ADR 0039
+// TestCompositeTierSeedsIdentityAndLayersAndPlainTiersDoNot pins the ADR 0052
 // contract at the table's edge: the composite tier seeds its identity
 // (tier_profile, tiers) and its layers into config, the pair's agent seat is
 // DERIVED from vllm_seat so the window and the concurrency live in one place,

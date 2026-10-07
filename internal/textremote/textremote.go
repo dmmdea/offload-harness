@@ -39,6 +39,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/delegate"
 	"github.com/dmmdea/offload-harness/internal/netguard"
 	"github.com/dmmdea/offload-harness/internal/pairworkloads"
+	"github.com/dmmdea/offload-harness/internal/rosterprobe"
 )
 
 // Route values. RouteLocal is the default: an empty route means local.
@@ -54,8 +55,12 @@ const (
 // request_timeout_sec.
 const Budget = 300 * time.Second
 
+// healthTimeout is how long one call waits for one node's /fleet/health: the single-shot lanes'
+// shared bound, probed concurrently and cached (internal/rosterprobe). A var so a test compresses
+// it; production never mutates it.
+var healthTimeout = rosterprobe.DefaultTimeout
+
 const (
-	healthTimeout   = 5 * time.Second
 	dispatchTimeout = 20 * time.Second
 	pollEvery       = 500 * time.Millisecond
 	maxBody         = 4 << 20
@@ -71,7 +76,7 @@ const (
 // netguard.SafeTransport for the same reason the delegator's health client
 // does: the lane may only ever reach loopback or the operator's tailnet
 // (never-cloud, ADR 0001), enforced at dial time.
-var HTTPClient = &http.Client{Transport: netguard.SafeTransport(nil), Timeout: Budget}
+var HTTPClient = &http.Client{Transport: netguard.SafeTransport(nil), Timeout: Budget, CheckRedirect: rosterprobe.NoRedirect}
 
 // localBusy is the auto route's trigger — the machine-wide GPU lease, read
 // exactly as agent placement reads it. A seam so tests drive both branches
@@ -304,27 +309,21 @@ func pickNode(ctx context.Context, cfg config.Config, task string) (base, node s
 		views  []delegate.NodeView
 		misses []string
 	)
-	for _, b := range cfg.DelegateRemotes {
-		b = strings.TrimRight(strings.TrimSpace(b), "/")
-		if b == "" {
-			continue
-		}
-		hctx, cancel := context.WithTimeout(ctx, healthTimeout)
-		v, herr := delegate.FetchNodeView(hctx, b, cfg.FleetAuthToken)
-		cancel()
-		if herr != nil {
-			misses = append(misses, b+": "+herr.Error())
+	for _, r := range rosterprobe.Probe(ctx, cfg.DelegateRemotes, cfg.FleetAuthToken, healthTimeout) {
+		b, v := r.Base, r.View
+		if r.Err != nil {
+			misses = append(misses, r.Miss())
 			continue
 		}
 		switch {
 		case !v.ServesText():
-			misses = append(misses, fmt.Sprintf("%s (%s): no text lane (tasks %v)", b, v.NodeID, v.Tasks))
+			misses = append(misses, fmt.Sprintf("%s (%s): no text lane (tasks %v)", r.Shown(), v.NodeID, v.Tasks))
 			continue
 		case !v.ServesTextTask(task):
-			misses = append(misses, fmt.Sprintf("%s (%s): its text lane does not serve %s (text_tasks %v)", b, v.NodeID, task, v.TextTasks))
+			misses = append(misses, fmt.Sprintf("%s (%s): its text lane does not serve %s (text_tasks %v)", r.Shown(), v.NodeID, task, v.TextTasks))
 			continue
 		case v.LeasedText || v.LeaseBusy:
-			misses = append(misses, fmt.Sprintf("%s (%s): card leased", b, v.NodeID))
+			misses = append(misses, fmt.Sprintf("%s (%s): card leased", r.Shown(), v.NodeID))
 			continue
 		}
 		bases = append(bases, b)
@@ -390,7 +389,7 @@ func dispatch(ctx context.Context, cfg config.Config, base string, body []byte) 
 	pairworkloads.WireHeadersFor(cfg, hreq.Header)
 	resp, err := HTTPClient.Do(hreq)
 	if err != nil {
-		return &placementError{core.DeferClassInfrastructure, fmt.Sprintf("dispatch %s: %v", base, err)}
+		return &placementError{core.DeferClassInfrastructure, rosterprobe.Scrub(base, fmt.Errorf("dispatch %s: %w", base, err))}
 	}
 	rb, _ := io.ReadAll(io.LimitReader(resp.Body, maxBody))
 	resp.Body.Close()
@@ -405,8 +404,10 @@ func dispatch(ctx context.Context, cfg config.Config, base string, body []byte) 
 		case http.StatusBadRequest:
 			class = core.DeferClassConfig
 		}
-		return &placementError{class, fmt.Sprintf("dispatch %s: status %d: %s", base, resp.StatusCode, truncate(rb))}
+		return &placementError{class, rosterprobe.Scrub(base, fmt.Errorf("dispatch %s: status %d: %s", base, resp.StatusCode, truncate(rb)))}
 	}
+	// The node accepted the job: whatever the negative cache holds against it is out of date.
+	rosterprobe.Default.Forget(base)
 	return nil
 }
 

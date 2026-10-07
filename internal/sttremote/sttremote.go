@@ -50,6 +50,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/modelaffinity"
 	"github.com/dmmdea/offload-harness/internal/netguard"
 	"github.com/dmmdea/offload-harness/internal/pairworkloads"
+	"github.com/dmmdea/offload-harness/internal/rosterprobe"
 	"github.com/dmmdea/offload-harness/internal/sttclient"
 )
 
@@ -60,11 +61,15 @@ const (
 	RouteRemote = "remote"
 )
 
+// healthTimeout is how long one call waits for one node's /fleet/health: the single-shot lanes'
+// shared bound, probed concurrently and cached (internal/rosterprobe). A var so a test compresses
+// it; production never mutates it.
+var healthTimeout = rosterprobe.DefaultTimeout
+
 const (
-	healthTimeout = 5 * time.Second
-	pollEvery     = 500 * time.Millisecond
-	pollTimeout   = 20 * time.Second
-	maxBody       = 32 << 20
+	pollEvery   = 500 * time.Millisecond
+	pollTimeout = 20 * time.Second
+	maxBody     = 32 << 20
 	// maxMediaBody bounds the node's .segments.json read: a long recording with word timestamps is tens
 	// of MB.
 	maxMediaBody = 256 << 20
@@ -91,7 +96,7 @@ const (
 // (never-cloud, ADR 0001), enforced at dial time. It carries no client-level Timeout on purpose: a
 // transcription is waited on for up to stt_request_timeout_sec, so every request bounds itself with
 // its own context.
-var HTTPClient = &http.Client{Transport: netguard.SafeTransport(nil)}
+var HTTPClient = &http.Client{Transport: netguard.SafeTransport(nil), CheckRedirect: rosterprobe.NoRedirect}
 
 // localBusy is the auto route's trigger: would the local whisper request be held at the upstream fence
 // right now. It reads the same thing the request itself will meet (modelaffinity.WouldBlockUpstream),
@@ -349,30 +354,24 @@ func pickNode(ctx context.Context, cfg config.Config, hq bool, size int64) (base
 		views  []delegate.NodeView
 		misses []string
 	)
-	for _, b := range cfg.DelegateRemotes {
-		b = strings.TrimRight(strings.TrimSpace(b), "/")
-		if b == "" {
-			continue
-		}
-		hctx, cancel := context.WithTimeout(ctx, healthTimeout)
-		v, herr := delegate.FetchNodeView(hctx, b, cfg.FleetAuthToken)
-		cancel()
-		if herr != nil {
-			misses = append(misses, b+": "+herr.Error())
+	for _, r := range rosterprobe.Probe(ctx, cfg.DelegateRemotes, cfg.FleetAuthToken, healthTimeout) {
+		b, v := r.Base, r.View
+		if r.Err != nil {
+			misses = append(misses, r.Miss())
 			continue
 		}
 		switch {
 		case !v.ServesSTTUpload():
-			misses = append(misses, fmt.Sprintf("%s (%s): no stt upload door (an older build, or no whisper model; tasks %v)", b, v.NodeID, v.Tasks))
+			misses = append(misses, fmt.Sprintf("%s (%s): no stt upload door (an older build, or no whisper model; tasks %v)", r.Shown(), v.NodeID, v.Tasks))
 			continue
 		case hq && !v.ServesSTTUploadOf(true, 0):
-			misses = append(misses, fmt.Sprintf("%s (%s): no hq whisper model", b, v.NodeID))
+			misses = append(misses, fmt.Sprintf("%s (%s): no hq whisper model", r.Shown(), v.NodeID))
 			continue
 		case !v.ServesSTTUploadOf(hq, size):
-			misses = append(misses, fmt.Sprintf("%s (%s): takes uploads up to %d MiB, this one is %d bytes", b, v.NodeID, nodeCapMB(v), size))
+			misses = append(misses, fmt.Sprintf("%s (%s): takes uploads up to %d MiB, this one is %d bytes", r.Shown(), v.NodeID, nodeCapMB(v), size))
 			continue
 		case v.LeasedText || v.LeaseBusy:
-			misses = append(misses, fmt.Sprintf("%s (%s): card leased", b, v.NodeID))
+			misses = append(misses, fmt.Sprintf("%s (%s): card leased", r.Shown(), v.NodeID))
 			continue
 		}
 		bases = append(bases, b)
@@ -448,8 +447,10 @@ func dispatch(ctx context.Context, cfg config.Config, base, node string, req cor
 		if resp.StatusCode == http.StatusServiceUnavailable || resp.StatusCode == http.StatusTooManyRequests {
 			class = core.DeferClassCapacity
 		}
-		return "", &placementError{class, fmt.Sprintf("dispatch %s: status %d: %s", base, resp.StatusCode, truncate(rb))}
+		return "", &placementError{class, rosterprobe.Scrub(base, fmt.Errorf("dispatch %s: status %d: %s", base, resp.StatusCode, truncate(rb)))}
 	}
+	// The node accepted the job: whatever the negative cache holds against it is out of date.
+	rosterprobe.Default.Forget(base)
 	return p.JobID, nil
 }
 

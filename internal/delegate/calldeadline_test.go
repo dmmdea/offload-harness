@@ -103,11 +103,14 @@ func TestRunWithDeadlineReturnsFinishedAndDefersUnfinished(t *testing.T) {
 		}
 		return localOK(), nil
 	}
-	results, sum, elapsed := runWithin(t, 4*time.Second, cfg, local,
-		[]core.AgentContract{{Goal: "fast one"}, {Goal: "slow one"}}, "local", nil, deadlineIn(300*time.Millisecond), nil)
+	results, sum, elapsed := runWithin(t, 6*time.Second, cfg, local,
+		// One second, not 300 ms: under a full `go test ./...` on a shared CI runner the instant "fast one" was
+		// once still unscheduled at 300 ms and read as unfinished (2026-10-07); the rule pinned here is the
+		// same at any deadline the finished subtask fits inside.
+		[]core.AgentContract{{Goal: "fast one"}, {Goal: "slow one"}}, "local", nil, deadlineIn(time.Second), nil)
 
-	if elapsed < 250*time.Millisecond || elapsed > 2*time.Second {
-		t.Fatalf("RunWith returned after %s, want ~300ms (the deadline) plus a short unwind", elapsed)
+	if elapsed < 900*time.Millisecond || elapsed > 3*time.Second {
+		t.Fatalf("RunWith returned after %s, want ~1s (the deadline) plus a short unwind", elapsed)
 	}
 	if sum != (Summary{Succeeded: 1, Deferred: 1}) {
 		t.Fatalf("summary = %+v, want one success and one defer (a deadline is never a failure)", sum)
@@ -161,7 +164,7 @@ func TestRunWithDeadlineDoesNotWaitForARunnerThatIgnoresItsContext(t *testing.T)
 		}
 		return localOK(), nil
 	}
-	results, sum, elapsed := runWithin(t, 4*time.Second, cfg, local,
+	results, sum, elapsed := runWithin(t, 6*time.Second, cfg, local,
 		[]core.AgentContract{{Goal: "fast one"}, {Goal: "slow one"}}, "local", nil, deadlineIn(300*time.Millisecond), unblock)
 
 	if elapsed > 2*time.Second {
@@ -290,7 +293,7 @@ func TestRunWithDeadlineKeepsAResultThatFinishesInTheUnwind(t *testing.T) {
 		}
 		return localOK(), nil
 	}
-	results, sum, _ := runWithin(t, 4*time.Second, cfg, local,
+	results, sum, _ := runWithin(t, 6*time.Second, cfg, local,
 		[]core.AgentContract{{Goal: "fast one"}, {Goal: "slow one"}}, "local", nil, deadlineIn(300*time.Millisecond), nil)
 	if sum != (Summary{Succeeded: 2}) {
 		t.Fatalf("summary = %+v, want both answers kept", sum)

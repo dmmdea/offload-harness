@@ -108,7 +108,7 @@ type Params struct {
 	// <Home>/rknpu, the layout `install seed` uses when no RKNPU_HOME says otherwise.
 	RknpuHome string
 
-	// DisplayLayer is the tier's display layer (ADR 0039) when it declares one:
+	// DisplayLayer is the tier's display layer (ADR 0052) when it declares one:
 	// the dormant rungs pinned to the display card. nil — the common case, and
 	// every tier but the composite one — renders the template's display fences
 	// away entirely, so the output is byte-identical to a build with no display

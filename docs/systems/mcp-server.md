@@ -336,7 +336,8 @@ across the local seat and every eligible fleet node).
 
 The guard's two halves are the point (ADR 0042, 0.117.3). By NAME,
 `internal/research.ValidateURL` takes http/https only and refuses `localhost`, `.local`,
-`.internal` and the configured tailnet zone — shapes an address cannot express — and it
+`.internal` and every configured tailnet zone (`tailnet_suffix` and `tailnet_suffixes`) —
+shapes an address cannot express — and it
 refuses without spending a connection. By ADDRESS, the client rides
 `netguard.PublicTransport`: the host is resolved at DIAL time through netguard's single
 resolution seam, every answer is judged by `netguard.CheckPublicIP` (loopback, RFC 1918,
