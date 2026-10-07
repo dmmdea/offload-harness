@@ -466,12 +466,23 @@ type Config struct {
 	// says so), "auto" (console session locked ⇒ away; else last input idle
 	// ≥ operator_idle_sec and the shell not busy/fullscreen ⇒ away). Defaults
 	// to present — the display card fails closed until the operator has read
-	// the probe's readings in offload_status and set auto or away.
+	// the probe's readings in offload_status and set auto or away. The key has two
+	// readers: the layer's presence guard and the card allocator (gpu reserve --cards,
+	// an auto-placed media call), which takes the display card only while this reads
+	// away, and then only above the layers' desktop floor (DisplayFloorGiB).
 	OperatorPresence string `json:"operator_presence,omitempty"`
 	// OperatorIdleSec is the last-input idle threshold behind presence mode
 	// "auto". 0 = 900 (15 min): long enough that a coffee break does not admit
 	// a 10 GB load onto the desktop's card.
 	OperatorIdleSec int `json:"operator_idle_sec,omitempty"`
+	// DisplayWatchSec (ADR 0075) is how often fleet-serve re-checks the display layer's desktop
+	// guards (presence and the display_floor) WHILE one of the layer's seats is loaded, and unloads
+	// the seat when either refuses. The admission guards decide once, at the placement; a twin
+	// then sits on the desktop's card until llama-swap's 300 s idle ttl, however soon the operator
+	// is back or a game takes the card's memory. 0 = 10 s; negative = off (the layer then has its
+	// admission guards and the idle ttl only); above 300 is refused, since a check slower than the
+	// idle ttl guards nothing the ttl does not.
+	DisplayWatchSec int `json:"display_watch_sec,omitempty"`
 	// AgentLeaseWaitSec bounds how long a LOCAL agent placement (agent_delegate /
 	// delegate, route auto or spread) waits for a foreign TEXT-class GPU lease to
 	// clear before deferring. `gpu reserve --class text` (a benchmark, eval or

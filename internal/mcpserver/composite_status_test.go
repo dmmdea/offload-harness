@@ -158,7 +158,7 @@ func TestStatusOnAPlainBoxCarriesNoLayerKeys(t *testing.T) {
 		t.Fatalf("handleStatus error: %v", err)
 	}
 	local, _ := decodeResult(t, res)["local"].(map[string]any)
-	for _, k := range []string{"tier_profile", "tiers", "layers"} {
+	for _, k := range []string{"tier_profile", "tiers", "layers", "operator_presence", "display_guard"} {
 		if _, present := local[k]; present {
 			t.Fatalf("a plain box must not publish local.%s: %v", k, local[k])
 		}

@@ -205,6 +205,22 @@ func (c Config) ModelPins(model string) ([]string, bool) {
 	return pins, len(pins) > 0
 }
 
+// DisplayFloorGiB is the desktop floor the declared layers keep on the display card: the largest
+// display_floor_gib among the layers guarded by display_floor, 0 when none declares one. The card
+// allocator reads it, so that a display card the presence key has opened (gpu reserve --cards, an
+// auto-placed media call) is held to the SAME free-VRAM floor the display layer's own guard keeps,
+// not only to the layer's placement path. A floor with no display_floor guard behind it is not in
+// force (the guard is what applies it), exactly as ValidateLayers reads the pair.
+func (c Config) DisplayFloorGiB() float64 {
+	floor := 0.0
+	for _, l := range c.Layers {
+		if containsString(l.Guards, "display_floor") && l.DisplayFloorGiB > floor {
+			floor = l.DisplayFloorGiB
+		}
+	}
+	return floor
+}
+
 // LayerSeatModels lists every model name the declared layers serve, in layer
 // order, router twins (model_map) included.
 func (c Config) LayerSeatModels() []string {
@@ -304,6 +320,35 @@ func (c Config) OperatorIdle() time.Duration {
 	return time.Duration(c.OperatorIdleSec) * time.Second
 }
 
+// defaultDisplayWatch is the re-check period behind display_watch_sec 0: 10 seconds, short enough
+// that the operator sitting down is not kept waiting on a twin's VRAM for long, long enough that
+// the check (one /running read, and presence and the card only while a twin is loaded) is noise.
+const defaultDisplayWatch = 10 * time.Second
+
+// maxDisplayWatch is the slowest period display_watch_sec may name: llama-swap's own idle ttl
+// (300 s) already takes an idle twin down, so a check that comes round slower guards nothing.
+const maxDisplayWatch = 300 * time.Second
+
+// maxDisplayWatchSec is maxDisplayWatch in whole seconds, the unit the key is declared in.
+const maxDisplayWatchSec = int(maxDisplayWatch / time.Second)
+
+// DisplayWatchInterval is the period of the display layer's post-admission check with the default
+// applied: display_watch_sec 0 = 10 s, a positive value is that many seconds, and a negative one
+// turns the check off, returned as 0 (a caller must not start a ticker on it).
+func (c Config) DisplayWatchInterval() time.Duration {
+	switch {
+	case c.DisplayWatchSec < 0:
+		return 0
+	case c.DisplayWatchSec == 0:
+		return defaultDisplayWatch
+	case c.DisplayWatchSec > maxDisplayWatchSec:
+		// ValidateLayers refuses this at load. A value that got here unvalidated is clamped to the
+		// slowest period instead of being multiplied into an overflow that wraps negative and reads as off.
+		return maxDisplayWatch
+	}
+	return time.Duration(c.DisplayWatchSec) * time.Second
+}
+
 // AgentContextCapBytes is the inline-context cap every agent door validates a
 // contract against. On a plain box it is core.AgentContextMaxBytes (256 KiB)
 // unchanged; on a composite box it scales with the largest declared seat window
@@ -344,6 +389,12 @@ func (c Config) ValidateLayers() error {
 	}
 	if c.OperatorIdleSec < 0 {
 		return fmt.Errorf("operator_idle_sec: %d must not be negative (0 = 900)", c.OperatorIdleSec)
+	}
+	// Compared as integers, before any multiplication: seconds * time.Second overflows int64 for a value
+	// above about 9.2e9 and wraps NEGATIVE, which read as "off" here and in DisplayWatchInterval, so an
+	// absurd value switched the check off silently instead of being refused.
+	if c.DisplayWatchSec > maxDisplayWatchSec {
+		return fmt.Errorf("display_watch_sec: %d is slower than llama-swap's 300 s idle ttl, which takes an idle twin down anyway, so it would guard nothing (0 = 10, negative = off)", c.DisplayWatchSec)
 	}
 	if len(c.Tiers) > 0 {
 		if c.TierProfile == "" {

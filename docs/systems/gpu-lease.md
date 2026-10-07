@@ -452,7 +452,7 @@ leases and say there is no table.
 | form | meaning |
 |---|---|
 | `gpu reserve --devices 0,GPU-aaaa ...` | exactly these cards (an nvidia-smi index or a UUID prefix of at least four characters; ambiguous or unknown is an error). The operator's word: the display card is allowed, and a busy card is a place in line, FIFO behind its holder. |
-| `gpu reserve --cards 2` or `--cards 1..3` | the allocator picks (below). Never the display card while the operator is at the desk. |
+| `gpu reserve --cards 2` or `--cards 1..3` | the allocator picks (below). Never the display card while the operator is at the desk; with `operator_presence` reading away it may take that card, but only while the display layer's desktop floor stays free after `--vram`, and never with no `--vram` ("The display card, once the operator is away", below). |
 | `gpu reserve --whole-node ...` | everything, as before. |
 | `gpu reserve ... -- <cmd>` | the cards `<cmd>` names itself: `CUDA_VISIBLE_DEVICES` (a UUID, or an index in PCI order when `CUDA_DEVICE_ORDER=PCI_BUS_ID`, else in ComfyUI order), else `--cuda-device N`, else `COMFY_CUDA_DEVICE`. Nothing named means the whole node. |
 
@@ -493,6 +493,47 @@ seat first, then the cheapest eviction (the footprint of the configured layer se
 unreadable host-RAM counter refuses only when a RAM need was declared. On Windows (WDDM) nvidia-smi lists no per-process
 rows for compute apps, so `foreign-busy` is Linux-only evidence today; the measured N-instance host RAM that tunes the
 headroom term is a P13 acceptance item.
+
+**The display card, once the operator is away.** `operator_presence` is one key with two readers: the display layer's
+`presence` guard ([composite-tier.md](composite-tier.md)) and this allocator. Set to `auto` (the console locked, or idle
+past `operator_idle_sec`, and nothing fullscreen) or to `away` (the operator's override, which reads away whatever the desk is
+doing), it lets the allocator take the display card too, and an opened card is still the desktop's, so it is held to the floor
+the display layer keeps: allocatable only while its free VRAM, less `--vram`, still leaves `display_floor_gib` (the largest
+floor declared by a layer guarded by `display_floor`; a box that declares none is judged as it was before this rule). The
+arithmetic is the layer's own (`free − footprint ≥ floor`), so the two doors onto the card cannot disagree about it, and it
+applies to the display card alone: a pair card is judged by the footprint, as it always was. A job that gives no `--vram`
+never takes the display card, because a footprint nobody declared cannot be shown to leave the floor (the layer's guard
+refuses a seat with no display footprint the same way); a media call whose `comfy_cuda_device` is empty declares none, so
+it picks among the other cards. `--devices` names the card on the operator's word and is never second-guessed. The skip
+reads `vram` and names the floor, and a display card that could not clear the floor is not queued on while a lease holds it
+(waiting would not fix it). A display twin that is loaded counts as a resident seat of the display card, each loaded
+twin costed at the layer's `display_footprint_gib` (both twins loaded cost twice that), so the card is not ranked as an
+empty one while it holds a twin: taking it would evict the twins, and the order prices that. When llama-swap's `/running`
+cannot be read the display layer's models are counted as loaded, so the display card sorts as occupied rather than as the
+empty card it might be; other layers' seats contribute nothing then, as before
+(`TestAnOpenedDisplayCardIsHeldToTheDesktopFloor`, `TestALoadedTwinOnTheDisplayCardIsAnEvictionNotAnEmptyCard`,
+`TestResidentFromCountsALoadedModelMapTwinOnItsCard`, `TestPickAutoDoesNotHandOutTheDisplayCardBelowTheLayersFloor`).
+
+**A queued request is asked again at the grant.** The cards a `--cards` request or an auto-placed media call queues on
+are chosen from the operator's presence and the display card's free VRAM as they are at the enqueue, and a place in line
+can be hours long. When the cards come free the grant puts the desktop rule again from fresh readings
+(`gpulease.Options.GrantCheck`, `gpulease.DesktopRefusals`, built by `gpualloc.GrantCheck`): the display card, or a card
+that may be it on a reading that could not say, while the operator is back at the desk, and the display card under its
+floor. The check runs with the cards already claimed by the request, because a claim that is checked before it is made can
+be skipped by a lease that is mid-release; a refused grant is released at once and the request chooses again from the same
+fresh readings, so it takes another card it still fits, queues on what qualifies now, or keeps polling for the display card
+to qualify until its `--wait` ends. The second choice keeps the arrival time of the first (`Options.QueuedSince`), so the
+place in line is not lost to it. `--devices` is the operator's word and carries no check
+(`TestAQueuedLeaseIsNotGrantedTheDisplayCardOnceTheOperatorIsBack`, `TestAQueuedMediaCallIsNotGrantedTheDisplayCardOnceTheOperatorIsBack`).
+
+**A lease already running on the display card is not revoked when the operator returns.** The post-admission watcher
+([composite-tier.md](composite-tier.md), ADR 0075) unloads the display layer's llama-swap twins and nothing else: it never
+stops a process and never releases a lease. A `--cards` job or a media render that took the display card while the operator
+was away keeps it after they come back. The desktop floor was checked once, when the card was claimed
+(`free - footprint >= floor`), so what protects the desktop afterwards is the footprint the job declared with `--vram`, the
+window it declared with `--for` (the lease expires then), and the operator, who can end it with `gpu release`. A job that
+grows past its declared footprint, or a game that takes the memory, can break the floor while the lease runs, and nothing
+here will notice. Declare `--vram` honestly and keep `--for` short on the display card.
 
 **A place in line for a caller that cannot stay (plan P13, invariant I4).** A media tool call waits its window
 (`gpu_wait_ms`, 90 s) and must then answer. On a host that leases cards it answers with a **token** instead of

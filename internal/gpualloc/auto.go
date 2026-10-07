@@ -61,6 +61,37 @@ func PickAuto(plan Plan, wait time.Duration, build func() (gpulease.AllocInput, 
 	}
 }
 
+// GrantCheck is the check a queued request makes when its turn comes (gpulease.Options.GrantCheck).
+// The set it was queued on was chosen against the operator's presence and the desktop floor as they
+// were at the enqueue, and a place in line can be hours long: the allocator's input is built again
+// (build, the same reader that chose the set), so presence and the display card's free VRAM are read
+// as they are at the grant, and the desktop rule (gpulease.DesktopRefusals) is put to ids. A card
+// table that cannot be read refuses too: a grant that cannot be shown to keep the desktop its floor
+// is not made.
+//
+// The check runs with the cards already granted to the request (gpulease.VetGrant), so the lease
+// directory lists them as claimed; those claims are the request's own and are not read as a rival's.
+func GrantCheck(build func() (gpulease.AllocInput, error), ids []string) func() error {
+	return func() error {
+		in, err := build()
+		if err != nil {
+			return fmt.Errorf("the grant-time reading failed: %w", err)
+		}
+		for _, id := range ids {
+			delete(in.Claimed, id)
+		}
+		refusals := gpulease.DesktopRefusals(in, ids)
+		if len(refusals) == 0 {
+			return nil
+		}
+		parts := make([]string, 0, len(refusals))
+		for _, r := range refusals {
+			parts = append(parts, fmt.Sprintf("card %d %s (%s)", r.Index, r.Reason, r.Detail))
+		}
+		return errors.New(strings.Join(parts, "; "))
+	}
+}
+
 // SkipSummary is the one line that says why cards were skipped.
 func SkipSummary(e *gpulease.NoCardsError) string {
 	var parts []string

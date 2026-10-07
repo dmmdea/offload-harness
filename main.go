@@ -2739,6 +2739,12 @@ func runFleetServe(args []string) error {
 	reclaim := startReclaimTracking(ctx, cfg, sampler.Load, 5*time.Second)
 	// Host CPU/RAM, same background-sampler rule: health only ever Loads.
 	host := hostsample.Start(ctx, 5*time.Second)
+	// The display layer's post-admission guard (ADR 0075): while a twin of the layer is loaded, the
+	// layer's presence and display_floor guards are asked again every display_watch_sec (10 s), and the
+	// twin is unloaded when either refuses. Inert on a box with no display layer; stopped before
+	// fleet-serve returns. See fleet_displaywatch.go.
+	stopDisplayWatch := startDisplayWatch(ctx, cfg, sampler)
+	defer stopDisplayWatch()
 	// PAIR seat activity (0.133.0): direct traffic on this box's vLLM seats
 	// becomes PAIR cards. Stopped and flushed before fleet-serve returns, so
 	// an open card is closed rather than left running.

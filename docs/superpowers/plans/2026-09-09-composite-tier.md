@@ -608,7 +608,7 @@ Orchestrator-executed. Standing rules: never a display-card seat while the opera
 - [ ] **Step 4: Live gates** (record every JSON in `Ecosystem/Benchmarks and Optimizations/2026-09-09-composite-tier-gates/` and the ledger with the clock):
   - **G0 control (must fail):** `placed` absent on a delegate row from the 0.115.1 binary; present from the branch binary. A config with `layers` on the plain `<node-c>` → health shows nothing new (byte-identity, measured by diffing two health bodies).
   - **G1 (mechanical under a saturated pair):** `scripts\seat-saturate.ps1 -Model agent-pool -N 32 -MaxTokens 1500` in the background; confirm `layers[pair].seats[agent].inflight ≥ 32` in status; `summarize` → `meta.placed.layer == single`, `role == router`, `devices == ["0"]`, `reason` names the time-share AND `evicts == agent-pool`; record the summarize wall AND the agent-pool reload time on the next contract. This is the cost the dormant display layer exists to remove.
-  - **G1b (the display measurement — the number for the operator):** with the operator away (probe readings recorded), add to the LIVE llama-swap yaml (backup `llama-swap.yaml.bak-2026-09-09-pre-display-twin`) the `gemma-4-e4b-display` twin pinned by the 5070 Ti UUID and the set `display: "+residents & q38v & ge4d"`; reload llama-swap's config WITHOUT restarting the service (check `tools/llamaswap` for a config-reload verb; if none exists, the restart must follow memory `forced-llama-swap-restart-orphans-vllm-seat` — stop the vLLM seat cleanly first); set `dormant:false` on the display layer in the live config; rerun G1: `placed.layer == display`, rung `gemma-4-e4b-display`, summarize wall (seconds, not minutes), desktop free on the 5070 Ti ≥ 4 GiB throughout (nvidia-smi sampled every 2 s during the run), agent-pool NOT evicted (its 32 streams complete, no reload). Control: set the floor to 20 GiB → refused by name. Then RESTORE `dormant:true` and revert the live yaml to its backup; verify the twin is gone from `/v1/models`. Report both numbers side by side.
+  - **G1b (the display measurement — the number for the operator):** with the operator away (probe readings recorded), add to the LIVE llama-swap yaml (backup `llama-swap.yaml.bak-2026-09-09-pre-display-twin`) the `gemma-4-e4b-display` twin pinned by the 5070 Ti UUID and the set `display: "+residents & q38v & ge4d"`; reload llama-swap's config WITHOUT restarting the service (check `tools/llamaswap` for a config-reload verb; if none exists, the restart must follow memory `forced-llama-swap-restart-orphans-vllm-seat` — stop the vLLM seat cleanly first); set `dormant:false` on the display layer in the live config; rerun G1: `placed.layer == display`, rung `gemma-4-e4b-display`, summarize wall (seconds, not minutes), desktop free on the 5070 Ti ≥ 4 GiB throughout (nvidia-smi sampled every 2 s during the run), agent-pool NOT evicted (its 32 streams complete, no reload). Control: set the floor to 20 GiB → refused by name. Then RESTORE `dormant:true` and revert the live yaml to its backup; verify the twin is gone from `/v1/models`. Report both numbers side by side. **Superseded 2026-10-07 by the refreshed recipe under "OPEN — needs the operator away from the desk" below (presence `auto`, the CLI syntax, baselines, the assertions, the preconditions).**
   - **G2 (saturation recorded, not acted):** with the 32 streams running, one quality-gated contract → runs on `agent-pool`, `placed.reason` contains "queued in the seat", verified output, no remote dispatch (`<node-c>`'s `/fleet/jobs` shows nothing new).
   - **G3a (window overflow):** the ~600 KB needle doc as `context` (+ `setup_actions` read) FIRST while the 32 streams run → `Wait` observed (`capacity_wait_sec > 0`, `placed.evicts == agent-pool`), then on `qwen3.8-27b-262k`, needle token answered, wall recorded; then the same contract on an idle box → no wait. Control: the same contract on the 0.115.1 binary → refused by the 256 KiB cap.
   - **G3b/G3c (explicit long under guards):** the 45 KB needle with `context_class: long`: with `operator_presence` unset → defer `guard=presence` (control); with `operator_presence: away` and the probe readings recorded → `placed.layer=triple`, `seat=qwen3.8-flash-next-262k`, needle answered, `reason` carries free GiB − footprint vs floor and host RAM; then floor set to 20 → refused by name. Restore.
@@ -654,44 +654,80 @@ Tasks 1–7 landed earlier. This pass executed 8–12 and the non-GPU half of 13
 
 ### OPEN — needs the operator away from the desk (G1b, the display measurement)
 
-Not run, by rule: no display-card seat while the operator is at the desk. Run it in one sitting,
-with the probe's own readings recorded first (`offload_status` → `local.layers[display]` and the
-presence block). The exact sequence:
+Not run, by rule: no display-card seat while the operator is at the desk. Run it in one sitting, with the
+probe's own readings recorded first (`offload_status` → `local.layers[display]`, `local.operator_presence`
+and `local.display_guard`). The enable steps themselves are written once, in
+[composite-tier.md](../../systems/composite-tier.md) ("Opening the display layer"); this recipe is the
+measurement wrapped around them. Refreshed 2026-10-07 against the code as it now stands (the presence step, the
+CLI syntax, the baselines, what to assert, the precondition).
+
+**Preconditions.**
+
+- The three-card seat is **not loaded** (it spans the display card, so the card would not be the quiet one this
+  measurement needs). Read `offload_status` `local.layers` and `/running`; unload it
+  through its own route if it is up.
+- `fleet-serve` runs in the operator's console session, with the layers seeded before it started, so
+  `local.display_guard.watching` reads `true` (it is what unloads the twin when the operator comes back).
+- **Presence is `auto`, not `away`.** `away` is an unconditional override that admits at the desk; `auto` is the
+  supported mode and the only one whose reading this measurement can vouch for. Record the reading: mode,
+  `locked`, `idle_sec` against `idle_threshold_sec`, and `admits`. The run starts only on `admits: true`.
+- The dormant flag and the yaml twins are the last things changed (step 3 below).
 
 ```pwsh
 # 0. Readings first, and a dated backup of every file this touches.
-local-offload status        # record: presence mode, idle seconds, console lock state, free VRAM on the 5070 Ti
-Copy-Item C:\llama-swap\llama-swap.yaml C:\llama-swap\llama-swap.yaml.bak-<date>-pre-display-twin
+#    offload_status (the MCP tool):
+#    record presence mode and reading, idle seconds, console lock state, and the free VRAM on the display
+#    card at rest with no twin loaded (nvidia-smi sampled every 2 s for a minute is the idle baseline).
+Copy-Item <llama-swap dir>\llama-swap.yaml <llama-swap dir>\llama-swap.yaml.bak-<date>-pre-display-twin
+Copy-Item <live config.json> <live config.json>.bak-<date>-pre-display
 
 # 1. Saturate the pair, so the measurement is taken in the state the layer exists for.
 pwsh -NoProfile -File scripts/seat-saturate.ps1 -Model agent-pool -N 32 -MaxTokens 1500
 
-# 2. BASELINE (the cost the layer would remove): a mechanical call while the pair holds its cards.
-#    Record the summarize wall AND the agent-pool reload time on the next contract.
-local-offload summarize --file <a ~4 KB doc>
+# 2. BASELINES (the cost the layer would remove), with the layer still dormant:
+#    - a mechanical call while the pair holds its cards. The CLI takes the file as a positional argument:
+local-offload summarize <a ~4 KB doc> --json
+#    Record the wall, `meta.placed` (expect layer single, role router, evicts agent-pool) and the
+#    agent-pool reload time on the NEXT contract.
+#    - the pair's own idle VRAM and the display card's free VRAM, for the side-by-side at the end.
 
-# 3. Add the twin to the LIVE yaml (pin the display card BY UUID on this box, never by index),
-#    reload llama-swap's config without restarting the service, and wake the layer:
-#      - llama-swap.yaml: the gemma-4-e4b-display entry + the set  display: "+residents & <vllm var> & (e4bd | e2bd)"
-#      - config.json:     layers[display].dormant = false
-#    A restart (if no config-reload verb exists) must stop the vLLM seat cleanly FIRST.
+# 3. OPEN THE LAYER: composite-tier.md "Opening the display layer", steps 2 to 6
+#    (seed the layers, UUID-pinned twins in the yaml, restart llama-swap with the vLLM seat stopped
+#    cleanly first, operator_presence auto, dormant false, fleet-serve in the console session).
+#    Assert before measuring: /v1/models lists gemma-4-e4b-display and gemma-4-e2b-display; the pair
+#    seat serves again; offload_status local.display_guard.watching is true.
 
 # 4. MEASURED RUN, with nvidia-smi sampled every 2 s for the whole window:
-local-offload summarize --file <the same doc>
-#    Record: placed.layer == display, the rung that served it, the wall, the 5070 Ti's free VRAM
-#    floor throughout (must stay >= 4 GiB), and that agent-pool was NOT evicted (its 32 streams
-#    complete, no reload).
+local-offload summarize <the same doc> --json
+#    Assert, in this order:
+#      placed.layer == "display"            (not single: the layer was reached, not the time-share)
+#      placed.seat  == the twin             (gemma-4-e4b-display for the workhorse routes,
+#                                            gemma-4-e2b-display for triage; from layers[display].seats[].model_map)
+#      /v1/models lists that twin           (the yaml really serves what the placement named)
+#      free VRAM on the display card >= the floor (4 GiB) in EVERY 2 s sample
+#      agent-pool was NOT evicted           (its 32 streams complete, no reload)
+#    Record the wall next to the step-2 wall.
 
-# 5. CONTROL that must fail: set layers[display].display_floor_gib = 20 and rerun step 4.
-#    Expect a defer whose placed.guard == "display_floor" and whose reason carries the arithmetic.
+# 5. CONTROLS that must fail:
+#    a) layers[display].display_floor_gib = 20 -> rerun step 4 -> a defer with placed.guard == "display_floor"
+#       and a reason carrying the arithmetic.
+#    b) operator_presence = present -> rerun step 4 -> a defer with placed.guard == "presence".
+#    Restore both values afterwards.
 
-# 6. RESTORE: dormant = true, floor = 4, revert the yaml to the backup, confirm the twin is gone
-#    from /v1/models, and confirm the pair seat is serving again.
+# 5b. UNLOAD ON RETURN (ADR 0075): with the twin loaded and idle, come back to the desk (unlock the console,
+#    touch the keyboard). Within display_watch_sec (10 s) plus one check: /running no longer lists the twin,
+#    offload_status local.display_guard.last_action names the model and the presence reason, and the fleet-serve
+#    log has the matching `display-watch: unloaded` line. A twin loaded by a non-harness llama-swap client
+#    (a plain request naming gemma-4-e4b-display) is taken down the same way: that is the intended behaviour.
+
+# 6. RESTORE: dormant = true, floor = 4, operator_presence back to its prior value, revert the yaml to the
+#    backup and restart llama-swap by the same clean-seat procedure, confirm the twin is gone from /v1/models
+#    and the pair seat is serving again.
 ```
 
-Report both walls side by side. The layer stays only if it held the desktop floor AND cut the
-wall while the pair kept serving; if it did not, delete the layer (profiles.json, the template
-fence, the decision row) and record why.
+Report both walls side by side, with the display card's free-VRAM minimum from the 2 s samples. The layer stays
+only if it held the desktop floor AND cut the wall while the pair kept serving; if it did not, delete the layer
+(profiles.json, the template fence, the decision row) and record why.
 
 ### Prepared, not run — the rest of the live gates
 

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"embed"
 	"encoding/json"
 	"flag"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/dmmdea/offload-harness/internal/buildinfo"
 	"github.com/dmmdea/offload-harness/internal/config"
+	"github.com/dmmdea/offload-harness/internal/gpuprobe"
 	"github.com/dmmdea/offload-harness/internal/hwdetect"
 	"github.com/dmmdea/offload-harness/internal/mediaseat"
 	"github.com/dmmdea/offload-harness/internal/servingtmpl"
@@ -664,11 +666,38 @@ func renderGate(res renderResult) error {
 	if len(res.Profile.Composes) > 0 || len(res.Layers) > 0 {
 		if err := servingtmpl.CheckComposite(res.Config, servingtmpl.CompositeDecl{
 			Tier: res.TierID, Composes: res.Profile.Composes, Layers: res.Layers, MediaKinds: seatKinds(res.Profile.MediaSeats),
+			ResolvePin: localPinResolver(),
 		}, res.Composed); err != nil {
 			return fmt.Errorf("tier %s: %w — not written", res.TierID, err)
 		}
 	}
 	return nil
+}
+
+// renderCardTable reads this machine's card table for the one comparison a render cannot make from its
+// own text: a UUID-rendered pin against an index-declared one. A seam so a test supplies a box; the
+// production read is nvidia-smi through gpuprobe, bounded, and an error is "no card table".
+var renderCardTable = func() ([]gpuprobe.Device, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	return gpuprobe.Read(ctx)
+}
+
+// localPinResolver resolves a rendered GPU UUID (or prefix) to its CUDA index through this machine's
+// card table, reading the table once and only if a comparison needs it, so a render that pins nothing
+// by UUID never runs nvidia-smi. A table that cannot be read resolves nothing, and the comparison is
+// then refused (servingtmpl.CheckComposite) instead of passed.
+func localPinResolver() func(string) (string, bool) {
+	var once sync.Once
+	var devs []gpuprobe.Device
+	return func(pin string) (string, bool) {
+		once.Do(func() {
+			if d, err := renderCardTable(); err == nil {
+				devs = d
+			}
+		})
+		return gpuprobe.IndexOf(devs, pin)
+	}
 }
 
 // spillViolations is the INV-1 spill rule for one resolved render: the text-level ceiling
