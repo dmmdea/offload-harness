@@ -34,34 +34,32 @@ func TestCompositeTierSeedsIdentityAndLayersAndPlainTiersDoNot(t *testing.T) {
 		t.Fatalf("tiers = %v", seed["tiers"])
 	}
 	layers, ok := seed["layers"].([]config.LayerSpec)
-	if !ok || len(layers) != 4 {
+	if !ok || len(layers) != 3 {
 		t.Fatalf("layers = %#v", seed["layers"])
 	}
-	// The flagship (operator 2026-09-19): the three-card vLLM seat is the tier's agent
-	// seat, declared as a NON-opt-in triple layer whose bare agent seat is derived from
-	// vllm_seat, and the pair is opt-in. (The earlier "no triple layer" rule held while
-	// the only three-card seat was the Flash-Next arm that parked experts in host RAM;
-	// the pipeline seat keeps every weight in VRAM.)
-	var tripleAgent, pairAgent config.LayerSeat
-	var triple, pair config.LayerSpec
+	// The harness runs on the two-card pair (operator 2026-10-04: "runs on 2 cards again
+	// (3 card should remain exclusive as an opencode configuration)"). The tier declares NO
+	// triple layer, so the pair is the home: NOT opt-in, its bare agent seat derived from
+	// vllm_seat. (0.132.6 to 2026-10-04 declared the three-card flagship as a non-opt-in
+	// triple with the pair opt-in; before 0.132.6 the only three-card seat was the Flash-Next
+	// arm the 2026-09-10 RAM rule removed.)
+	var pairAgent config.LayerSeat
+	var pair config.LayerSpec
 	for _, l := range layers {
+		if l.Name == "triple" {
+			t.Fatalf("blackwell-3x16 must declare no triple layer: the three-card seat is opencode's: %+v", l)
+		}
+		if l.Name != "pair" {
+			continue
+		}
 		for _, s := range l.Seats {
-			if s.Role != "agent" {
-				continue
-			}
-			switch l.Name {
-			case "triple":
-				triple, tripleAgent = l, s
-			case "pair":
+			if s.Role == "agent" {
 				pair, pairAgent = l, s
 			}
 		}
 	}
-	if triple.OptIn || tripleAgent.Model != "agent-pool" || tripleAgent.CtxTokens != 262144 || tripleAgent.MaxInflight != 32 || tripleAgent.Device != "2,1,0" {
-		t.Fatalf("triple/agent must be the flagship derived from vllm_seat (opt-in %v): %+v", triple.OptIn, tripleAgent)
-	}
-	if !pair.OptIn || pairAgent.Model != "qwen3.8-27b" || pairAgent.Device != "0,2" {
-		t.Fatalf("pair must be opt-in with the llama.cpp 27B the tier renders on it (opt-in %v): %+v", pair.OptIn, pairAgent)
+	if pair.OptIn || pairAgent.Model != "agent-pool" || pairAgent.CtxTokens != 163840 || pairAgent.MaxInflight != 32 || pairAgent.Device != "0,2" {
+		t.Fatalf("pair/agent must be the home seat derived from vllm_seat (opt-in %v): %+v", pair.OptIn, pairAgent)
 	}
 	b, _ := json.Marshal(seed)
 	var c config.Config
@@ -99,7 +97,7 @@ func TestPairAgentFallsBackToTheLlamaCppSeatWhenVLLMIsAbsent(t *testing.T) {
 	layers, _ := seed["layers"].([]config.LayerSpec)
 	var pairAgent config.LayerSeat
 	for _, l := range layers {
-		if l.Name == "triple" {
+		if l.Name == "pair" {
 			for _, s := range l.Seats {
 				if s.Role == "agent" {
 					pairAgent = s
@@ -107,10 +105,8 @@ func TestPairAgentFallsBackToTheLlamaCppSeatWhenVLLMIsAbsent(t *testing.T) {
 			}
 		}
 	}
-	// The flagship's bare agent seat is the one derived from vllm_seat; without the venv it
-	// is the declared llama.cpp fallback, with no vLLM concurrency count.
-	if pairAgent.Model != "qwen3.8-27b" || pairAgent.CtxTokens != 131072 || pairAgent.MaxInflight != 0 {
-		t.Fatalf("triple/agent must be derived from the vllm_seat fallback: %+v", pairAgent)
+	if pairAgent.Model != "qwen3.8-27b" || pairAgent.CtxTokens != 131072 || pairAgent.MaxInflight != 0 || pairAgent.Device != "0,2" {
+		t.Fatalf("pair/agent must be derived from the vllm_seat fallback: %+v", pairAgent)
 	}
 	if seed["agent_model"] != pairAgent.Model {
 		t.Fatalf("the pair agent seat (%q) and agent_model (%v) must name the same seat", pairAgent.Model, seed["agent_model"])
@@ -122,7 +118,7 @@ func TestPairAgentFallsBackToTheLlamaCppSeatWhenVLLMIsAbsent(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, l := range again["layers"].([]config.LayerSpec) {
-		if l.Name == "triple" {
+		if l.Name == "pair" {
 			for _, s := range l.Seats {
 				if s.Role == "agent" && s.Model != "agent-pool" {
 					t.Fatalf("fillPairAgent mutated the table row: second resolve got %+v", s)
@@ -257,7 +253,7 @@ func TestParseDocRefusesAMisspeltLayerKey(t *testing.T) {
 		from, to string
 		want     []string
 	}{
-		{withThreeCard, "host_ram_gib", "host_ram_gb", []string{`tier "blackwell-3x16"`, `layers[4] "triple-long"`, `seats[0] "long"`, `unknown key "host_ram_gb"`}},
+		{withThreeCard, "host_ram_gib", "host_ram_gb", []string{`tier "blackwell-3x16"`, `layers[3] "triple-long"`, `seats[0] "long"`, `unknown key "host_ram_gb"`}},
 		{raw, "prefill_tps", "prefill_tp", []string{`tier "blackwell-3x16"`, `layers[1] "pair"`, `seats[1] "long"`, `unknown key "prefill_tp"`}},
 		{raw, "footprint_gib", "footprint_gb", []string{`tier "blackwell-3x16"`, `layers[0] "single"`, `unknown key "footprint_gb"`}},
 		{raw, "dormant", "dormnt", []string{`tier "blackwell-3x16"`, `layers[2] "display"`, `unknown key "dormnt"`}},
@@ -292,7 +288,7 @@ func TestParseDocRefusesAMisspeltLayerKey(t *testing.T) {
 	if err := json.Unmarshal(withThreeCard, &doc); err != nil {
 		t.Fatal(err)
 	}
-	three := doc["profiles"].(map[string]any)["blackwell-3x16"].(map[string]any)["layers"].([]any)[4].(map[string]any)
+	three := doc["profiles"].(map[string]any)["blackwell-3x16"].(map[string]any)["layers"].([]any)[3].(map[string]any)
 	delete(three["seats"].([]any)[0].(map[string]any), "host_ram_gib")
 	b, _ := json.Marshal(doc)
 	if _, err := ParseDoc(b); err == nil || !strings.Contains(err.Error(), "host_ram_gib is undeclared") {

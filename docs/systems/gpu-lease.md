@@ -632,8 +632,9 @@ names cards, and memoised for 2 s; an idle box and a whole-node lease never read
 
 **The agent lane falls back to a card that is free.** When the home layer's agent seat fits the contract and a lease this
 process does not hold sits on its cards, the table takes the next declared layer, in declared order, that is not opt-in and not
-dormant, whose agent seat fits the contract's window and whose cards are free. On the three-card tier the flagship layer
-spans every card, so a card-2 render moves the lane to the single layer's agent seat on card 0
+dormant, whose agent seat fits the contract's window and whose cards are free. On the three-card tier the home layer is the
+pair (cards 0 and 2; it was the three-card layer, which spans every card, from 0.132.6 until 2026-10-04), so a card-2 render
+moves the lane to the single layer's agent seat on card 0
 (`TestAgentHomeFallsBackToNonIntersectingLayer`). With none free the contract **keeps the home seat and queues at its gate**,
 never a defer, and the reason says no local layer has free cards so the delegator may route it to another node
 (`TestNoFallbackQueuesAndRoutesRemote`; the delegator's own routing to the free-card node is plan P1, which is not part of this
@@ -734,13 +735,13 @@ goes through `AwaitUpstream` or `AwaitModelRoute` (speech, embeddings, the chat 
 fence and then has no post-load check, and a batch that never drains (steady joiners) never reaches its release; see Known
 gaps. Nothing here signals or stops a process.
 
-**What this makes of the three-card tier, measured.** The shipped table declares nine seats (`TestSeatsThatStayPlaceableUnderACardLease`
-computes the counts through the code above). While a lease holds **card 2**, three stay placeable: the single layer's router
-and agent on card 0, and the dormant display layer's twin on the display card. The flagship (pinned to every card), the pair's
-three seats and the single layer's OCR and speech seats (card 2) are fenced, which is correct. While a lease holds **card 0**
-three stay placeable (the card-2 single seats and the display twin); while it holds the **display card** seven do. That
-closes the C-86 estimate of how much of the box one card-2 job takes: it used to take every seat, and now it takes six of the
-nine.
+**What this makes of the three-card tier, measured.** The shipped table declares eight seats (`TestSeatsThatStayPlaceableUnderACardLease`
+computes the counts through the code above; it declared nine while the three-card seat was a `triple` layer, 0.132.6 to
+2026-10-04). While a lease holds **card 2**, three stay placeable: the single layer's router and agent on card 0, and the
+dormant display layer's twin on the display card. The pair's three seats and the single layer's OCR and speech seats (card 2)
+are fenced, which is correct. While a lease holds **card 0** three stay placeable (the card-2 single seats and the display
+twin); while it holds the **display card** seven do. That closes the C-86 estimate of how much of the box one card-2 job
+takes: it used to take every seat, and now it takes five of the eight.
 
 **Not done here.** (1) The live capture on the three-card box. Plan P4 step 1 is a read-only capture of what the sampled
 processes and the wrapped command line show for the lease that was running when the plan was written; that lease has ended, so

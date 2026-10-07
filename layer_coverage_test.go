@@ -44,7 +44,11 @@ var layerSetTiers = map[string]map[string][]string{
 		"single":  {"agent", "ocr", "router", "stt"},
 		"pair":    {"agent", "long", "vision"},
 		"display": {"router"},
-		"triple":  {"agent"},
+		// No "triple" since 2026-10-04, on the operator's explicit instruction ("modify the
+		// <node-b> offload harness tier so it runs on 2 cards again (3 card should remain
+		// exclusive as an opencode configuration)"): the pair's agent seat is the home again,
+		// and the three-card seat (0.132.6's triple, 2026-09-21..10-04) is opencode's model,
+		// hand-wired on the reference box and placed by no harness layer.
 	},
 }
 
