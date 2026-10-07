@@ -30,7 +30,8 @@ Versioning: [SemVer](https://semver.org/).
 - **Docs:** the generated tier page, `composite-tier.md` (why there is no triple), `cache-server.md` (L1 staging per
   seat), `gpu-lease.md` (the home layer and the 8-seat counts), `OPERATOR-GUIDE.md`, and the code comments that named
   the three-card seat as the current `agent-pool`. Tests: `TestDualBlackwellSeedsThePairSeatWithTheCacheServer` compares the two tiers' pair seat directly
-  again, `layerSetTiers` drops the triple on this instruction, `TestSeatsThatStayPlaceableUnderACardLease` counts 8.
+  again, `layerSetTiers` drops the triple on this instruction, `TestSeatsThatStayPlaceableUnderACardLease` counts 8,
+  and the installer self-test (`setup/render.tests.ps1`) expects three layers with the bare agent seat on the pair.
 
 ## [0.165.0] - 2026-10-03 - PAIR shows every job where it ran: remote calls card, fleet nodes card for askers that cannot, transcription spills to an idle node
 
