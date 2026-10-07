@@ -104,6 +104,20 @@ decision fails a test in `internal/tierseed`. Not in this amendment: refusing `f
 box, or knowing which other boxes name it in `delegate_remotes` — the harness cannot read another box's
 config, so that half stays an operating rule.
 
+## Amendment 2026-10-07 (a caller cannot name a node the roster does not list)
+
+The standalone box is never delegated to, by operator decision (register J-13). The amendment above made the device
+unpublishable and the node unaddressable on the fleet's own paths; one path stayed open by habit: a model-named
+`remotes` list on `agent_delegate` REPLACED `delegate_remotes` after a check of each URL's SHAPE alone (loopback, the
+tailnet's range or zone, a dotless name), so any tailnet host passed and was dialled, the fleet bearer riding its health
+read. The list may now only NARROW the fleet: every entry must be in `delegate_remotes`, one outside it is refused with a
+message that says so before anything is dialled, and a box that configures no roster accepts no list
+(`delegate.CheckRosterRemotes`, applied by the door and again by the engine for a call that says its list came from a
+model, `RunOptions.RosterOnly`). The operator's CLI verbs keep naming any tailnet node: `fleet-smoke --remote` is how a
+node that has not joined the roster is tested, and an operator is not the caller this rule is about. What stays an
+operating rule, as above, is never listing the standalone box in a delegator's `delegate_remotes`, and refusing
+`fleet-serve` on it; there is still no discovery, and nothing here adds one.
+
 ## Related
 
 - [ADR 0024](0024-accelerators-are-additive-to-the-gpu-tier.md) — accelerators are additive

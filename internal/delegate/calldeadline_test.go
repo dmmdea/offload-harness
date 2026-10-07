@@ -453,6 +453,7 @@ func TestRunWithDeadlineCancelsAnOutstandingRemoteJob(t *testing.T) {
 func TestRunWithDeadlineEndsTheCapacityWaitAsACallDeadlineDefer(t *testing.T) {
 	compressPolls(t, 5*time.Millisecond, time.Second)
 	compressWait(t, 20*time.Millisecond, 50*time.Millisecond)
+	withCallReserve(t, 0) // pins the CUT: with a reserve the wait ends before the deadline (callwait_test.go)
 	_, url := refusingNode(t, "node-full", http.StatusServiceUnavailable, nil)
 	cfg := testCfg(t)
 	cfg.AgentPlacementWaitSec = 30 // would hold the subtask for half a minute
@@ -530,6 +531,7 @@ func TestRunQueueRouteHonoursTheCallDeadline(t *testing.T) {
 func TestRunWithDeadlineRecordsACapacityWaitCutBeforeAnyAttempt(t *testing.T) {
 	compressPolls(t, 5*time.Millisecond, time.Second)
 	compressWait(t, 20*time.Millisecond, 50*time.Millisecond)
+	withCallReserve(t, 0) // pins the CUT: with a reserve the wait ends before the deadline (callwait_test.go)
 	_, url := refusingNode(t, "node-full", http.StatusServiceUnavailable, func(f *fakeNode) {
 		f.maxConcurrentJobs, f.jobsRunning = 1, 1 // no headroom: the deal sends it straight to the wait
 		f.maxQueueDepth, f.queueDepth = 2, 2      // and the wait sees it saturated on every tick

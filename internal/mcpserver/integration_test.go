@@ -207,20 +207,22 @@ func deadSeatURL(t *testing.T) string {
 // local runner that FAILS the test — this run must land on the fleet node. Its
 // own seat (the one the delegator's rescue of a finished answer would use) is
 // dead: a test that wants a live one passes it to integrationDelegatorWithSeat.
-func integrationDelegator(t *testing.T, token string) *Server {
+func integrationDelegator(t *testing.T, token, node string) *Server {
 	t.Helper()
-	return integrationDelegatorWithSeat(t, token, deadSeatURL(t))
+	return integrationDelegatorWithSeat(t, token, deadSeatURL(t), node)
 }
 
 // integrationDelegatorWithSeat is integrationDelegator whose OWN agent seat — the
-// delegator's endpoint and model, distinct from the node's — is at seatURL.
-func integrationDelegatorWithSeat(t *testing.T, token, seatURL string) *Server {
+// delegator's endpoint and model, distinct from the node's — is at seatURL. node is the one fleet node
+// the delegator is configured with (delegate_remotes): a call's own remotes list may only narrow it.
+func integrationDelegatorWithSeat(t *testing.T, token, seatURL, node string) *Server {
 	t.Helper()
 	home := t.TempDir()
 	cfg := config.Default()
 	cfg.Home = home
 	cfg.LedgerPath = filepath.Join(home, "ledger.jsonl")
 	cfg.AgentDelegationEnabled = true
+	cfg.DelegateRemotes = []string{node}
 	cfg.FleetAuthToken = token
 	cfg.Endpoint = seatURL
 	cfg.AgentModel = integrationSeat
@@ -277,7 +279,7 @@ func TestDelegationEndToEndAcrossPackages(t *testing.T) {
 	base, nodeCfg := startIntegrationNode(t, seat.URL)
 	wantNode, wantSeat := advertisedIdentity(t, base)
 
-	s := integrationDelegator(t, integrationToken)
+	s := integrationDelegator(t, integrationToken, base)
 	res, err := s.handleAgentDelegate(context.Background(), callReq(integrationArgs(base)))
 	if err != nil {
 		t.Fatalf("handleAgentDelegate: %v", err)
@@ -363,7 +365,7 @@ func TestDelegationEndToEndRejectsAMissingToken(t *testing.T) {
 	base, _ := startIntegrationNode(t, seat.URL)
 	advertisedIdentity(t, base) // health stays OPEN: the lane is advertised either way
 
-	s := integrationDelegator(t, "") // no fleet_auth_token on the delegator
+	s := integrationDelegator(t, "", base) // no fleet_auth_token on the delegator
 	res, err := s.handleAgentDelegate(context.Background(), callReq(integrationArgs(base)))
 	if err != nil {
 		t.Fatalf("handleAgentDelegate: %v", err)
@@ -422,7 +424,7 @@ func TestDelegationEndToEndRepackUnreachableIsLostWorkOnlyWhenTheRescueAlsoFails
 	base, _ := startIntegrationNode(t, seat.URL)
 	advertisedIdentity(t, base)
 
-	s := integrationDelegator(t, integrationToken)
+	s := integrationDelegator(t, integrationToken, base)
 	res, err := s.handleAgentDelegate(context.Background(), callReq(integrationArgs(base)))
 	if err != nil {
 		t.Fatalf("handleAgentDelegate: %v", err)
@@ -565,7 +567,7 @@ func TestDelegationEndToEndRepackStallIsRescuedOnTheDelegator(t *testing.T) {
 	advertisedIdentity(t, base)
 	delegatorSeat := integrationSeatServer(t, &delegatorLoop, 0) // the delegator's own seat answers the rescue
 
-	s := integrationDelegatorWithSeat(t, integrationToken, delegatorSeat.URL)
+	s := integrationDelegatorWithSeat(t, integrationToken, delegatorSeat.URL, base)
 	res, err := s.handleAgentDelegate(context.Background(), callReq(integrationArgs(base)))
 	if err != nil {
 		t.Fatalf("handleAgentDelegate: %v", err)
@@ -587,7 +589,7 @@ func TestDelegationEndToEndLegacyNodeRepackStallIsRescuedOnTheDelegator(t *testi
 	base, stripped := legacyNodeProxy(t, nodeBase)
 	delegatorSeat := integrationSeatServer(t, &delegatorLoop, 0)
 
-	s := integrationDelegatorWithSeat(t, integrationToken, delegatorSeat.URL)
+	s := integrationDelegatorWithSeat(t, integrationToken, delegatorSeat.URL, base)
 	res, err := s.handleAgentDelegate(context.Background(), callReq(integrationArgs(base)))
 	if err != nil {
 		t.Fatalf("handleAgentDelegate: %v", err)

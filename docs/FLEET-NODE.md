@@ -925,7 +925,8 @@ node)`) and say nothing extra when there was none.
 
 The wait is **bounded** — a job may wait for a slot at most as long as it was allowed to run, and
 the wait it is given is derived from the node's own ETA: `clamp(1.5 x etaStart + 30 s, 60 s, that limit)`, where
-`etaStart` is the node's `queue_wait_estimate_sec` (or the arithmetic over its jobs and recent wall), read again when
+`etaStart` is the wait the node publishes for a NEW job (`new_job_wait_sec`; an older node's `queue_wait_estimate_sec`
+plus one slot, ADR 0073) or the arithmetic over its jobs and recent wall, read again when
 the job is first seen queued; a node that publishes no ETA keeps **5 minutes** (ADR 0063). Hitting that bound while
 the job is *still queued* is a **failure**,
 not a defer, with its own stable prefix:

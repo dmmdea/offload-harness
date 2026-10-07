@@ -202,6 +202,12 @@ type NodeView struct {
 	// genuine "no wait right now" answer and must read differently from
 	// "this node does not publish the estimate at all".
 	QueueWaitEstimateSec *float64
+	// NewJobWaitSec is the node's OWN estimate of how long a job submitted NOW waits for a worker -
+	// health `new_job_wait_sec` (ADR 0073), one slot deeper than QueueWaitEstimateSec, which is the
+	// wait of the deepest job ALREADY queued. nil on a node that predates it, and on any node while
+	// a worker is free (omitempty). publishedStartWait prefers it as-is; without it the older
+	// estimate gets the slot added.
+	NewJobWaitSec *float64
 }
 
 // LeaseView is one live lease of a node, as its health leases[] publishes it.
@@ -476,6 +482,7 @@ type healthWire struct {
 	LeaseDraining        bool     `json:"lease_draining"`
 	RecentAgentWallSec   float64  `json:"recent_agent_wall_sec"`
 	QueueWaitEstimateSec *float64 `json:"queue_wait_estimate_sec"`
+	NewJobWaitSec        *float64 `json:"new_job_wait_sec"`
 }
 
 // FetchNodeView reads one node's /fleet/health into a NodeView (Local=false —
@@ -559,6 +566,7 @@ func FetchNodeView(ctx context.Context, base, token string) (NodeView, error) {
 		LeaseDraining:        w.LeaseDraining,
 		RecentAgentWallSec:   w.RecentAgentWallSec,
 		QueueWaitEstimateSec: w.QueueWaitEstimateSec,
+		NewJobWaitSec:        w.NewJobWaitSec,
 	}
 	if w.Saturation != nil {
 		v.SaturationKnown = true

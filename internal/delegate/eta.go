@@ -175,10 +175,11 @@ func etaFor(st Subtask, v NodeView) (etaSec float64, ok bool) {
 }
 
 // queueWaitFor is the node's own admission backlog translated into an
-// expected wait: the node's published queue_wait_estimate_sec when it
-// publishes one (a future node, 0.128+ — PR-6's own estimate, preferred
-// outright because the node knows its live backlog better than this
-// arithmetic over a health snapshot ever can), else
+// expected wait for a NEW job: what the node publishes for it when it
+// publishes one (publishedStartWait: new_job_wait_sec as-is, or the older
+// queue_wait_estimate_sec one slot deeper, ADR 0073 — preferred outright
+// because the node knows its live backlog better than this arithmetic over a
+// health snapshot ever can), else
 //
 //	max(0, jobs_running + jobs_queued − max_concurrent_jobs + 1) ×
 //	  recent_agent_wall_sec / max(1, max_concurrent_jobs)
@@ -190,8 +191,8 @@ func etaFor(st Subtask, v NodeView) (etaSec float64, ok bool) {
 // as every other unknown field here — it does not make etaFor's ok=false,
 // because cold/gen may still be known).
 func queueWaitFor(v NodeView) float64 {
-	if estimateKnown(v) {
-		return *v.QueueWaitEstimateSec
+	if sec, ok, _ := publishedStartWait(v); ok {
+		return sec
 	}
 	if v.RecentAgentWallSec <= 0 {
 		return 0
@@ -491,15 +492,16 @@ const (
 )
 
 // etaStartFor is how long a NEW job dispatched to v waits before it STARTS, in
-// seconds: the node's own queue_wait_estimate_sec when it publishes one, else the
-// arithmetic over its jobs and recent wall (queueWaitFor). known=false when the
+// seconds: the node's own estimate for a new job when it publishes one
+// (publishedStartWait), else the arithmetic over its jobs and recent wall
+// (queueWaitFor). known=false when the
 // node publishes neither - no opinion, never a wait of 0 and never a penalty,
 // the house rule every capacity field in this package follows. A node that
 // publishes a recent wall and no estimate means genuinely 0 (a worker is free
 // now), which is a known zero.
 func etaStartFor(v NodeView) (sec float64, known bool) {
-	if estimateKnown(v) {
-		return *v.QueueWaitEstimateSec, true
+	if sec, ok, _ := publishedStartWait(v); ok {
+		return sec, true
 	}
 	if v.RecentAgentWallSec <= 0 {
 		return 0, false
@@ -517,11 +519,43 @@ func estimateKnown(v NodeView) bool {
 	return v.QueueWaitEstimateSec != nil && *v.QueueWaitEstimateSec >= 0
 }
 
+// publishedStartWait is how long a NEW job dispatched to v waits for a worker, as v itself says, and which
+// of its numbers said it; ok=false when v publishes none. A job submitted now queues behind everything
+// already admitted, so the number that prices it is one slot deeper than the wait of the deepest job
+// already in line, and two published shapes mean that:
+//
+//   - new_job_wait_sec (ADR 0073): the node computed it for the new job. Used as-is, and a negative
+//     one is a node bug and no opinion, like a negative estimate;
+//   - queue_wait_estimate_sec alone (a node that predates the field): the wait of the deepest job
+//     ALREADY queued, which a delegator pricing the job it is about to send under-counted by one wall
+//     / workers (4 running + 3 queued, a 300 s wall, 4 workers: the node says 225 s and a new job
+//     waits 300 s). The slot is added from the node's own recent wall and ceiling, and only to a
+//     positive estimate (0 is "a worker is free" there, and omitted, so a node at depth ==
+//     max_concurrent_jobs publishes nothing and the derived arithmetic prices it).
+//
+// So a published number and the arithmetic over the same counters (queueWaitFor) are the same number,
+// whichever side of the rollout the node is on, and a new delegator never adds a slot to a number a new
+// node already computed for the new job.
+func publishedStartWait(v NodeView) (sec float64, ok bool, source string) {
+	if v.NewJobWaitSec != nil && *v.NewJobWaitSec >= 0 {
+		return *v.NewJobWaitSec, true, fmt.Sprintf("the node's own new_job_wait_sec %.0f s", *v.NewJobWaitSec)
+	}
+	if !estimateKnown(v) {
+		return 0, false, ""
+	}
+	est := *v.QueueWaitEstimateSec
+	if est > 0 && v.RecentAgentWallSec > 0 {
+		slot := v.RecentAgentWallSec / float64(max(v.MaxConcurrentJobs, 1))
+		return est + slot, true, fmt.Sprintf("the node's own queue_wait_estimate_sec %.0f s (the wait of its deepest queued job) plus one slot of %.0f s for the new job", est, slot)
+	}
+	return est, true, fmt.Sprintf("the node's own queue_wait_estimate_sec %.0f s", est)
+}
+
 // startArithmetic renders where etaStartFor's number came from, for the gate's
 // reason: the node's own estimate, or the numbers the delegator derived it from.
 func startArithmetic(v NodeView) string {
-	if estimateKnown(v) {
-		return fmt.Sprintf("the node's own queue_wait_estimate_sec %.0f s", *v.QueueWaitEstimateSec)
+	if _, ok, source := publishedStartWait(v); ok {
+		return source
 	}
 	workers := v.MaxConcurrentJobs
 	if workers < 1 {

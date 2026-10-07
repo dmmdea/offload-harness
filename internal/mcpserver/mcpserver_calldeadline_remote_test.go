@@ -98,7 +98,7 @@ func TestCallDeadlineCancelsAndWithdrawsOutstandingJobs(t *testing.T) {
 	s := deadlineServer(t, 1, func(context.Context, core.AgentContract, delegate.LocalOptions) (core.AgentWireResult, error) {
 		t.Error("the local seat ran although both subtasks were placed on the fleet node")
 		return core.AgentWireResult{}, nil
-	})
+	}, url)
 	schema := map[string]any{"properties": map[string]any{"answer": map[string]any{"type": "string"}}}
 	args, _ := json.Marshal(map[string]any{
 		"subtasks": []any{

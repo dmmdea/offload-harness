@@ -229,7 +229,8 @@ measurement of the client.
   `call deadline reached`. A code of its own would be an additive change, left for a later decision.
 - `agent_call_deadline_sec` at or above the client's abort, or a negative that was meant as a number,
   loads (it never refuses) but is a `doctor` finding and a startup warning.
-- Not solved here: the capacity wait still ends on its own TTL rather than on this deadline; a
+- Not solved here: the capacity wait still ends on its own TTL rather than on this deadline (solved since: [ADR 0073](0073-the-capacity-wait-runs-to-the-calls-deadline.md)
+  runs it to this deadline, less a reserve); a
   producing job is still polled to its node ceiling when no deadline is set (the CLI); and the other
   doors that call the same engine (`agent_run` and `offload_ask` with a route, the review lane's fleet
   path) carry no deadline, because the plan names the two delegation doors, so a call through them can

@@ -720,6 +720,41 @@ func queueWaitEstimateSec(cappedDepth, maxConcurrent int, recentWallSec float64)
 	return float64(excess) * recentWallSec / float64(maxConcurrent)
 }
 
+// newJobWaitSec is how long a job submitted NOW waits for a worker, on the same arithmetic as
+// queueWaitEstimateSec but for the arrival and not for the job already at the back of the line: one
+// slot deeper, because the new job queues behind everything admitted. queueWaitEstimateSec answers
+// "how long does the deepest QUEUED job wait" (excess x wall / workers), which a delegator reads as
+// the wait of the job it is about to send and so under-prices by exactly one wall / workers; and at
+// depth == max_concurrent_jobs (every worker busy, nothing queued) it is 0 and omitted although a new
+// job still waits for a worker to retire, so that estimate was also discontinuous. This one is
+// (depth - max + 1) x wall / workers, and it is the arithmetic internal/delegate derives from the
+// counters when a node publishes nothing (queueWaitFor), so a published number and a derived one are
+// the same number. 0 (no claim) when maxConcurrent is unlimited, a worker is free, or the node has no
+// recent wall sample.
+func newJobWaitSec(cappedDepth, maxConcurrent int, recentWallSec float64) float64 {
+	if maxConcurrent <= 0 || recentWallSec <= 0 {
+		return 0
+	}
+	ahead := cappedDepth - maxConcurrent + 1
+	if ahead <= 0 {
+		return 0
+	}
+	return float64(ahead) * recentWallSec / float64(maxConcurrent)
+}
+
+// publishedNewJobWait is newJobWaitSec as health publishes it, rounded to the hundredth: nil when the
+// node has no number to give (max_concurrent_jobs unlimited, or no recent wall sample), else a pointer
+// to it, 0 included. The pointer is the point: a plain float64 with omitempty drops a genuine 0, and a
+// delegator that finds the field absent falls back to counters (jobs_running + jobs_queued) that include
+// uncapped jobs, pricing the wait of an idle agent lane from a dozen renders.
+func publishedNewJobWait(cappedDepth, maxConcurrent int, recentWallSec float64) *float64 {
+	if maxConcurrent <= 0 || recentWallSec <= 0 {
+		return nil
+	}
+	sec := math.Round(newJobWaitSec(cappedDepth, maxConcurrent, recentWallSec)*100) / 100
+	return &sec
+}
+
 // retryAfterFor computes the "queue full" 503's Retry-After header value AND
 // the human-readable suffix appended to the refusal message, from ONE
 // evaluation of the node's own measured recent wall — so the header and the
@@ -1353,6 +1388,18 @@ type healthPayload struct {
 	// re-placement candidates and the capacity wait while a new job could not start
 	// inside the caller's patience (startsWithinPatience).
 	QueueWaitEstimateSec float64 `json:"queue_wait_estimate_sec,omitempty"`
+	// NewJobWaitSec is how long a job submitted NOW waits for a worker: newJobWaitSec over the same
+	// capped backlog and wall sample as QueueWaitEstimateSec, one slot deeper (that field is the wait of
+	// the deepest job ALREADY queued, which a delegator pricing the job it is about to send under-
+	// counts by one wall / workers). Additive: absent when the node cannot say (max_concurrent_jobs is
+	// unlimited, or no agent job has finished yet, so there is no wall sample), and PRESENT - including
+	// as 0 - whenever it can. A published 0 is not noise: it says "a worker is free", and a delegator
+	// that finds the field absent derives the wait itself from jobs_running and jobs_queued, which count
+	// every job on the node (an uncapped render included) and so read an idle agent lane as busy. A
+	// delegator that predates the field ignores it and keeps reading queue_wait_estimate_sec as before,
+	// and one that has it prefers it as-is, so no combination double-counts or loses a slot
+	// (internal/delegate publishedStartWait).
+	NewJobWaitSec *float64 `json:"new_job_wait_sec,omitempty"`
 	// ServedModels is the CACHED roster name list — canonical ids AND every
 	// alias (agentResidency.served, from swapclient.Roster.Names) —
 	// refreshed on the same TTL/single-flight as AgentResident. Absent/empty
@@ -1513,6 +1560,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		MaxQueueDepth:         s.opts.Cfg.FleetQueueLimit(),
 		HarnessVersion:        s.opts.Version,
 		QueueWaitEstimateSec:  math.Round(queueWaitEstimateSec(cappedQueued+cappedRunning, maxConcurrentJobs, recentWall)*100) / 100,
+		NewJobWaitSec:         publishedNewJobWait(cappedQueued+cappedRunning, maxConcurrentJobs, recentWall),
 	}
 	if s.opts.ServingConfig != nil {
 		if sha, state := s.opts.ServingConfig(); state != "" {

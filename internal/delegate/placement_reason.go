@@ -57,7 +57,20 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
+
+	"github.com/dmmdea/offload-harness/internal/core"
 )
+
+// patienceFn answers, for contract c on node v, how long the caller will wait for a job to START
+// there and, when something shorter than the contract's own poll budget set that (the time the
+// call has left, ADR 0073), the clause a reason prints behind the gate's arithmetic. The runner's
+// patience method is the gate's own; the narration takes the same function so the two read one
+// number and cannot diverge.
+type patienceFn func(c core.AgentContract, v NodeView) (time.Duration, string)
+
+// ownPatience is the contract's poll budget, unclamped: what a caller with no call deadline gets.
+func ownPatience(c core.AgentContract, v NodeView) (time.Duration, string) { return patienceFor(c, v), "" }
 
 // oneWordVerdict is st's placement verdict for v (dial base `base`) against
 // one deal's state: "chosen" when base == chosenBase, else
@@ -66,6 +79,15 @@ import (
 // dealtSoFar is however many subtasks THIS deal has already committed to
 // base, read at the moment v was considered (never mutated here).
 func oneWordVerdict(st Subtask, v NodeView, base, chosenBase string, dealtSoFar int) string {
+	return oneWordVerdictWith(st, v, base, chosenBase, dealtSoFar, ownPatience)
+}
+
+// oneWordVerdictWith is oneWordVerdict judged against the patience the gate used (a nil
+// patienceFn is the contract's own poll budget).
+func oneWordVerdictWith(st Subtask, v NodeView, base, chosenBase string, dealtSoFar int, patience patienceFn) string {
+	if patience == nil {
+		patience = ownPatience
+	}
 	if base != "" && base == chosenBase {
 		return "chosen " + chosenVerdictDetail(st, v)
 	}
@@ -81,8 +103,9 @@ func oneWordVerdict(st Subtask, v NodeView, base, chosenBase string, dealtSoFar 
 		}
 		return "queue (saturation.high)"
 	}
-	if ok, why := startsWithinPatience(v, patienceFor(st.Contract, v)); !ok {
-		return "backlog (" + why + ")"
+	p, clamp := patience(st.Contract, v)
+	if ok, why := startsWithinPatience(v, p); !ok {
+		return "backlog (" + why + clamp + ")"
 	}
 	if headroom(v) <= dealtSoFar {
 		return fmt.Sprintf("cap (%d/%d running, headroom %d, dealt %d)", v.JobsRunning, v.MaxConcurrentJobs, headroom(v), dealtSoFar)
@@ -121,7 +144,7 @@ func chosenVerdictDetail(st Subtask, v NodeView) string {
 // negative cache's own "<why> (cached Ns ago, re-dial in Ms)" — so the same
 // arithmetic that decides whether to re-dial is what an operator reads
 // here. Empty when there is nothing to report at all.
-func placementVerdictLine(st Subtask, views []NodeView, bases []string, chosenBase string, dealtSoFar map[string]int, failed map[string]string) string {
+func placementVerdictLine(st Subtask, views []NodeView, bases []string, chosenBase string, dealtSoFar map[string]int, failed map[string]string, patience patienceFn) string {
 	if len(views) == 0 && len(failed) == 0 {
 		return ""
 	}
@@ -132,7 +155,7 @@ func placementVerdictLine(st Subtask, views []NodeView, bases []string, chosenBa
 		if name == "" {
 			name = base
 		}
-		parts = append(parts, fmt.Sprintf("%s: %s", name, oneWordVerdict(st, v, base, chosenBase, dealtSoFar[base])))
+		parts = append(parts, fmt.Sprintf("%s: %s", name, oneWordVerdictWith(st, v, base, chosenBase, dealtSoFar[base], patience)))
 	}
 	deadBases := make([]string, 0, len(failed))
 	for base := range failed {

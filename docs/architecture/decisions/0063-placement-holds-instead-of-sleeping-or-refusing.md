@@ -45,7 +45,8 @@ arithmetic, or an ordering key among seats that already passed the adequacy gate
    capped at that ceiling, and the ceiling holds after the jitter (the excess is folded back under it, so
    the re-asks stay spread and a node is never held out for more than 300 s): the comparison is the
    header's number against the delegator's constant, never the node's wording. A wait that ends with a
-   node still cooling down says so in its defer.
+   node still cooling down says so in its defer. (A health read taken after the refusal that proves a free worker lifts the
+   cooldown: [ADR 0073](0073-the-capacity-wait-runs-to-the-calls-deadline.md) decision 8.)
 2. **Re-placement reads the fleet again, for every route.** A snapshot taken before the refusal is never
    reused; one taken after it is (the 2 s probe memo), but siblings that refuse together each read the
    fleet once, the cost the Consequences name. A candidate must be eligible,
@@ -135,7 +136,8 @@ arithmetic, or an ordering key among seats that already passed the adequacy gate
 - Refusals become latency in the capacity wait, which is credited and re-reads the fleet every tick. The
   wait is still bounded by `agent_placement_wait_sec` (120 s by default); a wait that runs to the call's
   deadline is a separate change, and the two ship in that order because an open-ended wait can outlive the
-  client's abort.
+  client's abort. That change shipped as [ADR 0073](0073-the-capacity-wait-runs-to-the-calls-deadline.md): a call that
+  has a deadline waits until it, less a reserve, and `agent_placement_wait_sec` bounds only a call with none.
 - The delegator stops creating the abandoned runs that fed the loop, but it does not clean up the ones
   already on a node by itself: taking a never-started job back is
   [ADR 0064](0064-a-delegator-takes-back-what-it-has-not-started.md)'s change, and against a node that
