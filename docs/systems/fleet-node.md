@@ -239,11 +239,12 @@ memory.used`, one line per GPU — `nvidiaSmiMemoryDevices`/`fleetnode.ParseSmiM
 0.116.0 the command and parser live in the leaf `internal/gpuprobe`, and the fleetnode names are
 aliases over it so the composite tier's placement guards read cards through the same parser) on
 that same 2-second sampler instead of the single-value query, and publishes the full breakdown as
-`gpu_devices[]` in health — additive, and **always present when nvidia-smi is the resolved
+`gpu_devices[]` in health — additive, and **always present when nvidia-smi or linux-amdgpu is the resolved
 source, including a single-GPU box** (a one-element array; there is no single-GPU special case —
-`chooseSamplerKind` in `main.go` is the exact routing decision, unit-tested in
-`fleet_verbs_test.go`). It is omitted only on windows-generic, which has no per-adapter signal to
-enumerate. A new field is additive in practice too: the fleet-dispatcher decodes health with a
+`chooseSamplerKind` and `startVRAMSampler` in `main.go` are the exact routing decision, unit-tested in
+`fleet_verbs_test.go` and `fleet_sampler_test.go`; a linux-amdgpu row has an empty uuid and no utilisation). It is
+omitted on windows-generic, which has no per-adapter signal to enumerate, and on linux-meminfo, the SoC's one
+RAM pool with no cards. A new field is additive in practice too: the fleet-dispatcher decodes health with a
 plain `json.Decoder` and sets `DisallowUnknownFields` nowhere in its `internal/`, so an extra
 field on any node — single-GPU included — is silently ignored, not a wire break. The headline
 `vram_total_gb`/`vram_free_gb` pair is picked by
@@ -329,7 +330,8 @@ implications.
    (`vision_max_image_bytes` × 4/3 + slack), not dispatch's 1 MiB; everything after the body read
    is the shared `admit` path. A seat whose runtime cannot do one of the three tasks narrows the lane
    with the config key `vision_tasks` (0.153.0, written by the tier's media seat: the RK3588 NPU seat
-   serves `vqa` and `ocr`, never `assess_image`): the node refuses any other task at ack time with a
+   serves `vqa` and `ocr`, never `assess_image`; the ampere-8 Q4 seat serves `vqa` and `assess_image`, never
+   `ocr`, on its tier page's quality statement): the node refuses any other task at ack time with a
    `400` naming the allowed set, publishes the list in health as `vision_tasks` (additive, omitempty,
    lane-gated like `vision_model`), and a delegator skips the node for a task it does not list —
    absent means all three, so a node that predates the field is unchanged. Details:
@@ -823,6 +825,53 @@ read, not for being busy. Four changes, none of which adds a probe:
   wait and folded into the capacity defer as their own clause, `; N probe(s) failed during the wait: <base>:
   <reason> (last of 3)`, kept distinct from refusals because a probe failure is not a refusal: nobody
   declined the work.
+
+**The single-shot lanes read the same roster, by the same rules (ADR 0074).** The vision, text, stt-upload, compose
+and accelerator lanes each pick ONE node for ONE call from `delegate_remotes`, and each used to carry its own copy of
+the loop. They now share `internal/rosterprobe`:
+
+- **Admission.** Every entry is judged by `netguard.TailnetURL`, the shape check the agent lane applies at intake,
+  before it is dialled; the lanes used to rely on the dial gate alone, so one entry was refused by one lane and used by
+  five. A refused entry is a MISS, never a failed call: the lane's defer reason names it as `<base>: not dialled,
+  refused by the tailnet guard (<why>)` and the entries after it still serve. Blank slots are unset and left out;
+  configured order and slot numbers are kept, because compose breaks queue ties by slot and the accelerator lane takes
+  the first listing node. (The agent lane still fails a whole call on a refused entry; that is `internal/delegate`'s
+  and is not changed here.)
+- **Reading.** `rosterprobe.Probe` reads every admitted entry's `/fleet/health` AT ONCE, each bounded by the lane's own
+  health timeout, and returns the readings in configured order, so a roster with k dead members costs the slowest
+  member, not k bounds in series on the critical path of every call (it used to be serial: k x 5 s before any node was
+  chosen, k x 2 s per accelerator call, with nothing shared between calls or lanes). A good answer is memoised for 2 s
+  and a TRANSPORT failure (dial refused, no route, DNS, a reset, the per-member timeout) is negative-cached,
+  process-wide, so what one lane learns about a dead node saves every other lane the wait; the reason is replayed into
+  the lane's "probed ..." line with how stale it is. The window is 30 s, capped at 5 s for a timeout or a refused or
+  unroutable dial (a busy or restarting box is back in rotation in seconds; a name that does not resolve keeps the 30 s).
+  A lane whose dispatch to a node is accepted calls `Cache.Forget`, which drops the verdict held against that node, and
+  callers that find a probe of the same base and bound already in flight wait for its answer instead of dialling again. A node that ANSWERED (a 401, 404, 503, a body that is not health)
+  is never cached as down, and nothing is cached once the caller's own context is done. A timeout is held only against
+  callers who would not wait longer than the probe that failed (the accelerator lane's 2 s failure is not held against a
+  vision call that waits 5 s); a refusal holds for everyone.
+- **What is printed, and where the bearer goes.** A roster entry is a base URL, and nothing stops one being pasted with
+  `?token=` or `user:password@`. Every message about an entry prints it redacted (`netguard.RedactBase`: userinfo, query
+  and fragment dropped) and every dial error through `rosterprobe.Scrub`, which also masks any other URL left in the
+  text: the tailnet guard's refusal, the lanes' "probed ..." lines and dispatch errors, and the doctor rows. The single
+  `fleet_auth_token` is sent to EVERY admitted roster node, including nodes under a sharer's tailnet zone, so the
+  administrator of such a node receives a token that opens all of this roster's nodes (ADR 0074, decision 9): list only
+  nodes you trust with it. A per-remote token is future work. The token probe and the single-shot lane clients never
+  follow a redirect (`rosterprobe.NoRedirect`), so a 3xx cannot carry the bearer to another address from them. The
+  health read itself (`delegate.healthClient` in `internal/delegate`, which also sends the bearer) is not changed
+  here and still follows redirects.
+- **The cascade lane's probe** (`cascade_remote_lanes`, `internal/llamaclient`) follows the same economy: a base that
+  does not answer its health GET at all is not asked for a roster, so a dead base costs one probe bound per 30 s window
+  instead of two, and the probe runs outside the lane cache's lock with one probe in flight per base, so a call that
+  needs one base never waits on another.
+
+| surface | per-member bound | probes | memo | negative cache |
+|---|---|---|---|---|
+| agent lane (`internal/delegate`, per Run) | 15 s | concurrent | 2 s per Run | 30 s per Run |
+| vision, text, stt-upload, compose lanes | 5 s | concurrent, one in flight per base and bound | 2 s, process-wide | 30 s, process-wide; 5 s after a timeout or a refused dial; dropped by an accepted dispatch |
+| accelerator lane | 2 s | concurrent, one in flight per base and bound | 2 s, process-wide | the same (a 2 s timeout is not held against a longer-waiting caller) |
+| cascade lane (`cascade_remote_lanes`) | 5 s per request, one request when nothing answers | one per base, outside the lock | 30 s per base (failures included) | the same entry |
+| `offload_status` nodes section | 8 s for the whole section | concurrent | none | none |
 
 **The fixed sleeps are jittered (2026-09-17).** `pollEvery`, `placementPollInterval` and `refusalCooldown` are
 the same numbers in every dispatcher, so K sessions started within a second of each other re-read health,

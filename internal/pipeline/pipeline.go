@@ -146,7 +146,7 @@ type Pipeline struct {
 	vllmSeatMu     sync.Mutex
 	vllmSeatCache  map[string]vllmSeatAnswer
 	vllmSeatWarned map[string]bool
-	// Composite tier (ADR 0039): placementLive is the seam tests use to inject
+	// Composite tier (ADR 0052): placementLive is the seam tests use to inject
 	// the machine's live readers (occupancy, free VRAM, host RAM, presence);
 	// nil = the PROCESS-WIDE memoised Snapshot over cfg
 	// (placement.SharedSnapshot: one 2 s reading serves every decision in
@@ -659,7 +659,7 @@ func (p *Pipeline) Run(ctx context.Context, req core.Request) (res core.Result) 
 	if kn, _ := p.knnSnap(); kn != nil {
 		knnSkip = p.knnPreferLargerEntry(req.Task, req.Input)
 	}
-	// Composite tier (ADR 0039): ONE placement decision for this call — the
+	// Composite tier (ADR 0052): ONE placement decision for this call — the
 	// chain is built from it and every rung's result is stamped with it.
 	placed := p.cascadePlacement()
 	chain := p.modelChainOn(req.Task, meta.Feat, knnSkip, placed)

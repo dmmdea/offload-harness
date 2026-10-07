@@ -2,6 +2,7 @@
   "endpoint": "http://127.0.0.1:11436",
   "completion_path": "/v1/chat/completions",
   "tailnet_suffix": "",
+  "tailnet_suffixes": null,
   "seat_endpoints": null,
   "cascade_remote_lanes": null,
   "cascade_seat_guard": null,

@@ -16,7 +16,7 @@
 
 ## Layers
 
-This tier declares device LAYERS (ADR 0039) on the card(s) it already has: the layer decides which seat
+This tier declares device LAYERS (ADR 0052) on the card(s) it already has: the layer decides which seat
 serves a task, and a layer's seat is seeded only while the box actually runs it.
 
 Placement decides per task which LAYER and seat serve it, and records that decision on

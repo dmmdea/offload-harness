@@ -5,7 +5,7 @@
 // (internal/fleetnode) and the composite tier's placement guards
 // (internal/placement) read the same numbers through the same parser — one
 // parser, one set of pins, no second "nvidia-smi reader" that could disagree
-// with the first about what a card's free memory is. ADR 0039 / plan Task 4.
+// with the first about what a card's free memory is. ADR 0052 / plan Task 4.
 package gpuprobe
 
 import (

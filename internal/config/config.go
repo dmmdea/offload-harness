@@ -119,8 +119,18 @@ type Config struct {
 	// rule is deliberately NOT the fallback: it would admit ANY tailnet's
 	// Funnel-published hostname, i.e. a public-internet endpoint wearing a
 	// tailnet-looking name.
-	TailnetSuffix string            `json:"tailnet_suffix,omitempty"`
-	SeatEndpoints map[string]string `json:"seat_endpoints,omitempty"`
+	TailnetSuffix string `json:"tailnet_suffix,omitempty"`
+	// TailnetSuffixes are MORE tailnet DNS zones netguard.TailnetURL admits dotted
+	// hostnames under, beside tailnet_suffix (ADR 0074). Tailscale names a node shared in
+	// from another tailnet under the SHARER's zone and nowhere else, so a delegator that
+	// takes such a node by name needs that zone listed; before this list the only form
+	// that passed was the node's raw tailnet CGNAT-range address. Every entry is a zone the
+	// operator names on purpose, normalized like tailnet_suffix and refused at load when
+	// it is not a DNS zone; empty (the default) adds none. It does NOT loosen the dial
+	// gate, which still refuses any name that resolves outside loopback and
+	// the tailnet CGNAT range, and it is not a generic ".ts.net" rule.
+	TailnetSuffixes []string          `json:"tailnet_suffixes,omitempty"`
+	SeatEndpoints   map[string]string `json:"seat_endpoints,omitempty"`
 	// CascadeRemoteLanes maps a model seat (same key rule as SeatEndpoints) to a
 	// remote OpenAI-compatible base URL that ALSO serves that model — the
 	// busy-aware failover lane for the daily cascade (roast delta 7), distinct
@@ -434,7 +444,7 @@ type Config struct {
 	// harness job never shows twice. Unlike pair_workloads_enabled it belongs on
 	// every box that SERVES a vLLM seat. Off by default; same ingress URL.
 	PairSeatActivityEnabled bool `json:"pair_seat_activity_enabled,omitempty"`
-	// TierProfile (0.116.0, ADR 0039) is the tier this box is INSTALLED as
+	// TierProfile (0.116.0, ADR 0052) is the tier this box is INSTALLED as
 	// (installed.json's profile, e.g. "blackwell-3x16"), seeded by tierseed so
 	// status, health and every placement record carry the identity from CONFIG
 	// rather than re-reading the install. "" = not recorded (a pre-0.116.0 box,
@@ -2162,7 +2172,7 @@ func Default() Config {
 // (LO-4: config.example.json ships "~/.local-offload/..." paths that were
 // previously taken literally, silently creating a "~" directory in the cwd).
 //
-// A config returned WITH an error never carries the composite keys (ADR 0039):
+// A config returned WITH an error never carries the composite keys (ADR 0052):
 // LoadWithSource hands the value to every subcommand whatever the error, so the
 // layers are stripped here, in the wrapper, for the same reason the GPU gate is
 // armed in one — no exit path (decode, any validator, the fleet_queue_holder
@@ -2306,13 +2316,17 @@ func load(path string) (Config, error) {
 	if err := validateFamilies(c); err != nil {
 		return c, err
 	}
-	// Install the operator's tailnet zone BEFORE any endpoint is vetted — the
-	// endpoint checks below consult it, so setting it afterwards would judge this
+	// Install the operator's tailnet zones BEFORE any endpoint is vetted — the
+	// endpoint checks below consult them, so setting them afterwards would judge this
 	// load's endpoints against the PREVIOUS value (empty on a first load, i.e.
 	// every dotted tailnet FQDN wrongly rejected). A malformed zone is refused
 	// here rather than stored, so it can be attributed to its key.
-	if err := netguard.SetTailnetSuffix(c.TailnetSuffix); err != nil {
-		return c, fmt.Errorf("tailnet_suffix: %w", err)
+	zones, zerr := c.TailnetZones()
+	if zerr != nil {
+		return c, zerr
+	}
+	if err := netguard.SetTailnetSuffixes(zones); err != nil {
+		return c, err
 	}
 	if err := validateTailnetEndpoints("seat_endpoints", c.SeatEndpoints); err != nil {
 		return c, err

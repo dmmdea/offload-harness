@@ -38,10 +38,14 @@ import (
 // coarse enough that a burst of cascade calls costs one probe, not one each.
 const laneResidencyTTL = 30 * time.Second
 
-// laneProbeTimeout bounds one roster GET — swapclient's probe discipline: a
-// probe that outlives the call it informs is a hang, not a check. Shorter
-// than any generation budget, so a dead lane costs at most this once per TTL.
-const laneProbeTimeout = 5 * time.Second
+// laneProbeTimeout bounds ONE request of a lane probe (the health GET, or the roster
+// GET) — swapclient's probe discipline: a probe that outlives the call it informs is a
+// hang, not a check. Shorter than any generation budget. What a dead lane base costs is
+// this ONCE per laneResidencyTTL, not twice: a base that does not answer the health GET
+// at all skips the roster GET (probeLane), and the probe runs outside the cache lock
+// with one probe in flight per base, so a dead base never delays a call that only needs
+// another one. A var so a test compresses it; production never mutates it.
+var laneProbeTimeout = 5 * time.Second
 
 // WithRemoteLanes installs the busy-aware lane table and its gates, returning
 // the client (chainable at construction, like WithSeatEndpoints).
@@ -330,9 +334,15 @@ func (e laneProbe) serves(model string) bool {
 //     one whose own llama-swap endpoint is unset, or a tokenless listener past
 //     loopback — is NOT resident: the door it would 403/404 is never used, the
 //     calls stay local, and the reason is logged once per window.
-//  2. Anything else: the base is a plain llama-swap and residency is its
-//     roster, exactly as before node lanes existed (GET /v1/models through
-//     FetchRosterGuarded).
+//  2. Anything else that ANSWERED: the base is a plain llama-swap and
+//     residency is its roster, exactly as before node lanes existed (GET
+//     /v1/models through FetchRosterGuarded). A base that does not answer the
+//     health GET at all (no dial, no route, a timeout, the dial gate's refusal)
+//     is not resident and is not asked for a roster: it costs one
+//     laneProbeTimeout per window, not two.
+//
+// The probe runs OUTSIDE the cache lock with one probe in flight per base, so a
+// dead base delays only the calls that need that base.
 //
 // fleetToken is this box's fleet_auth_token. A node lane beyond loopback with
 // NO token is treated as not resident rather than called: the node would
@@ -343,25 +353,52 @@ func (e laneProbe) serves(model string) bool {
 // FetchRosterGuarded): a lane base is operator config, and only a per-dial
 // check can prove the name still lands inside the tailnet.
 func FleetLaneGates(fleetToken string) (resident func(base, model string) bool, route func(base string) (path, token string)) {
+	// mu guards cache and inflight and NOTHING ELSE: it is never held across a probe.
+	// It used to be, so one dead lane base (a probe that cannot answer costs its whole
+	// timeout) held every OTHER lane base's residency and route reads behind it.
 	var mu sync.Mutex
 	cache := make(map[string]laneProbe)
+	inflight := make(map[string]chan struct{})
 	hc := &http.Client{Timeout: laneProbeTimeout, Transport: netguard.SafeTransport(nil)}
-	// get runs at most one probe per base per TTL; the caller holds mu. The
-	// probe runs inline under the lock for the same reason RosterResident's
-	// always has: it is bounded by laneProbeTimeout, happens once per window,
-	// and only ever on the busy path, where the alternative is queueing behind
-	// a held card anyway.
+	// get runs at most one probe per base per TTL, and at most one at a time per base: a
+	// call that finds its base being probed waits for that probe and reads its answer
+	// from the cache, so a burst of cascade calls on the busy path costs one probe, and
+	// calls on other bases do not wait at all.
 	get := func(base string) laneProbe {
-		if e, cached := cache[base]; cached && time.Since(e.at) <= laneResidencyTTL {
+		for {
+			mu.Lock()
+			if e, cached := cache[base]; cached && time.Since(e.at) <= laneResidencyTTL {
+				mu.Unlock()
+				return e
+			}
+			if probing, ok := inflight[base]; ok {
+				mu.Unlock()
+				<-probing
+				continue
+			}
+			done := make(chan struct{})
+			inflight[base] = done
+			mu.Unlock()
+
+			e := func() laneProbe {
+				// Cleanup is deferred so a probe that panics cannot leave the base
+				// marked in flight, which would hang every later call on it.
+				defer func() {
+					mu.Lock()
+					delete(inflight, base)
+					mu.Unlock()
+					close(done)
+				}()
+				e := probeLane(base, hc, fleetToken)
+				mu.Lock()
+				cache[base] = e
+				mu.Unlock()
+				return e
+			}()
 			return e
 		}
-		e := probeLane(base, hc, fleetToken)
-		cache[base] = e
-		return e
 	}
 	resident = func(base, model string) bool {
-		mu.Lock()
-		defer mu.Unlock()
 		e := get(base)
 		if e.node && !fleetTokenUsable(base, fleetToken) {
 			return false
@@ -369,8 +406,6 @@ func FleetLaneGates(fleetToken string) (resident func(base, model string) bool, 
 		return e.serves(model)
 	}
 	route = func(base string) (string, string) {
-		mu.Lock()
-		defer mu.Unlock()
 		e := get(base)
 		if e.ok && e.node && e.chat && fleetTokenUsable(base, fleetToken) {
 			return FleetChatPath, fleetToken
@@ -409,7 +444,17 @@ func fleetTokenUsable(base, token string) bool {
 // stay local — always the safe answer) and logs once per TTL window per base,
 // because a lane that never engages used to leave no evidence anywhere at all.
 func probeLane(base string, hc *http.Client, fleetToken string) laneProbe {
-	if h, ok := probeFleetHealth(base, hc); ok {
+	h, outcome, herr := probeFleetHealth(base, hc)
+	if outcome == healthUnreachable {
+		// NOTHING answered: not a node, and not a llama-swap with a 404 either. A base that
+		// cannot answer one GET does not answer a second, so the roster probe below would
+		// only spend a second laneProbeTimeout finding out (a dead base used to cost two,
+		// not one). The reason is the health probe's own, so a dial-gate refusal still says
+		// "tailnet guard".
+		log.Printf("cascade remote lane: nothing answered %s%s (%v); lane treated as NOT resident for %s (calls stay local), and its roster probe is skipped: a base that does not answer at all serves no roster", base, fleetHealthPath, herr, laneResidencyTTL)
+		return laneProbe{at: time.Now(), ok: false}
+	}
+	if outcome == healthNode {
 		switch {
 		case !h.ChatLane:
 			log.Printf("cascade remote lane: fleet node %s (%s) does not advertise chat_lane; the lane is treated as NOT resident for %s (calls stay local) — the node needs a bound endpoint and, past loopback, a fleet_auth_token", base, h.NodeID, laneResidencyTTL)
@@ -438,35 +483,53 @@ func probeLane(base string, hc *http.Client, fleetToken string) laneProbe {
 	return laneProbe{at: time.Now(), ok: err == nil, roster: roster}
 }
 
-// probeFleetHealth asks whether base is a FLEET NODE. ok is false for every
-// other answer — a plain llama-swap 404s this route, a dead base refuses the
-// dial — and the caller then reads the base as a llama-swap, so a deployment
-// with no node lanes behaves exactly as it did before. A node is recognized by
-// a node_id in a 200 body, not by the status alone: something else answering
-// 200 at that path must not be mistaken for one.
-func probeFleetHealth(base string, hc *http.Client) (fleetHealthWire, bool) {
+// healthOutcome is what the /fleet/health probe of a lane base found.
+type healthOutcome int
+
+const (
+	// healthNode: a fleet node answered with its node_id.
+	healthNode healthOutcome = iota
+	// healthNotNode: something ANSWERED, but it is not a fleet node — a plain llama-swap
+	// 404s this route, another service answers something else. The base is then read as a
+	// llama-swap, so a deployment with no node lanes behaves exactly as it did before.
+	healthNotNode
+	// healthUnreachable: nothing answered at all — the dial was refused or refused by the
+	// dial gate, no route, DNS, a reset, or the timeout. Roster fallback is pointless.
+	healthUnreachable
+)
+
+// probeFleetHealth asks whether base is a FLEET NODE, and says which of three things it
+// found (healthOutcome); err is set only for healthUnreachable, and is the transport's own
+// error. A node is recognized by a node_id in a 200 body, not by the status alone:
+// something else answering 200 at that path must not be mistaken for one.
+func probeFleetHealth(base string, hc *http.Client) (fleetHealthWire, healthOutcome, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), laneProbeTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+fleetHealthPath, nil)
 	if err != nil {
-		return fleetHealthWire{}, false
+		return fleetHealthWire{}, healthUnreachable, err
 	}
 	resp, err := hc.Do(req)
 	if err != nil {
-		return fleetHealthWire{}, false
+		return fleetHealthWire{}, healthUnreachable, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return fleetHealthWire{}, false
+		return fleetHealthWire{}, healthNotNode, nil
 	}
 	var h fleetHealthWire
 	if err := json.NewDecoder(io.LimitReader(resp.Body, fleetHealthCap)).Decode(&h); err != nil {
-		return fleetHealthWire{}, false
+		if ctx.Err() != nil {
+			// Headers arrived and then the body stalled until the bound: a peer that stops
+			// answering mid-reply is no more a roster than one that never answered.
+			return fleetHealthWire{}, healthUnreachable, err
+		}
+		return fleetHealthWire{}, healthNotNode, nil
 	}
 	if strings.TrimSpace(h.NodeID) == "" {
-		return fleetHealthWire{}, false
+		return fleetHealthWire{}, healthNotNode, nil
 	}
-	return h, true
+	return h, healthNode, nil
 }
 
 // laneBusyTTL is how long ONE reading of this box's llama-swap backs the

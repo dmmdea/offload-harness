@@ -238,7 +238,7 @@ models:
 # cuda:0 is the 5070 Ti and cuda:1/cuda:2 are the pair. The same digit means different
 # cards in the two namespaces, and confusing them is how the media block ended up
 # pointing at the display card twice.
-  # __DISPLAY_TWINS_BEGIN__ — the DISPLAY layer (ADR 0039). These two rungs are the
+  # __DISPLAY_TWINS_BEGIN__ — the DISPLAY layer (ADR 0052). These two rungs are the
   # only work this template will ever put on device 1, the RTX 5070 Ti that drives the
   # desktop: they exist so a small mechanical call has somewhere to run while the pair
   # holds its cards, instead of time-sharing them with the agent seat and paying its

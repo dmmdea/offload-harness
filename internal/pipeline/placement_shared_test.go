@@ -1,4 +1,4 @@
-// Composite tier (ADR 0039, Task 6): the placement memo is process-wide. The
+// Composite tier (ADR 0052, Task 6): the placement memo is process-wide. The
 // in-loop offload builds a fresh Pipeline per contract (NewInLoopPipeline per
 // agent_run, NewRecordlessOffload per node-side contract), so a memo owned by
 // the pipeline would give every in-flight contract its own readers — 32

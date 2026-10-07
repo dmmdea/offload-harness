@@ -448,7 +448,8 @@ registers locally — MCP surface and agent loop alike, so the parity test still
 1. **`image_path` is read on THIS box** and its bytes travel inside the job (cap 8 MiB); a
    caller-side `out_path` is dropped. There is no shared filesystem and no mount.
 2. **Placement is a live probe**: `delegate_remotes` in order, first node whose
-   `/fleet/health` lists the id (2 s per probe; every miss is named in the defer).
+   `/fleet/health` lists the id (2 s per probe; every miss is named in the defer, and an entry the tailnet guard
+   refuses is named as not dialled, ADR 0074).
 3. **The node runs a fleet task `accel`** — `{accelerator, tool, args, image_b64, image_name}`
    — on its **local** lane only (a forwarded call never forwards again), in a job-scoped dir
    that lives as long as the job; a mask the tool writes there returns as `mask_b64`. `accel`

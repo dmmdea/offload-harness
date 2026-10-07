@@ -76,7 +76,7 @@ type Entry struct {
 	// the field parse fine.
 	TierPack string `json:"tier_pack,omitempty"`
 	// Layer names the device layer a composite box served this call on (ADR
-	// 0039: single | pair | triple | display), copied from core.Meta.Placed so
+	// 0052: single | pair | triple | display), copied from core.Meta.Placed so
 	// the utilization scoreboard can later sum work per layer (council R8 held
 	// the by_layer summary; the column is what makes it summable). Empty — and
 	// omitted — on a plain box, so its rows stay byte-identical; old lines

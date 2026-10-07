@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
@@ -62,9 +63,9 @@ func validateBaseURL(label, raw string) error {
 	}
 	u, why := inspectBase(v)
 	if u == nil {
-		return fmt.Errorf("%s: %q is not a usable URL: %s", label, v, why)
+		return fmt.Errorf("%s: %q is not a usable URL: %s", label, RedactBase(v), why)
 	}
-	return deadPortErr(label, v, u)
+	return deadPortErr(label, RedactBase(v), u)
 }
 
 // deadPortErr refuses a parsed base whose port cannot answer.
@@ -167,7 +168,7 @@ func validateLoopbackBase(label, raw string) error {
 	}
 	u, _ := inspectBase(v)
 	if u == nil || !loopbackBase(u) {
-		return fmt.Errorf("%s: %q is not a loopback address; PAIR's node-info is read on this box only (127.0.0.1, ::1 or localhost)", label, v)
+		return fmt.Errorf("%s: %q is not a loopback address; PAIR's node-info is read on this box only (127.0.0.1, ::1 or localhost)", label, RedactBase(v))
 	}
 	return nil
 }
@@ -196,6 +197,18 @@ func loopbackBase(u *url.URL) bool {
 // four remotes must not leave the operator guessing which one is wrong.
 func EndpointWarnings(c Config) []string {
 	var out []string
+	// The zones this CONFIG names, not whichever the process installed last: the verdict a
+	// loaded config reaches and the one doctor prints for it are the same function of the same
+	// file. A zone that failed to parse already refused the load, so an error here is only a
+	// config built by hand. TailnetZones is all-or-nothing (as netguard.SetTailnetSuffixes is):
+	// on an error it returns NO zones, so every dotted roster entry below is judged against an
+	// empty list and reads as refused, which is fail-closed. The zone error itself is the first
+	// finding, so the refused entries that follow it have a cause printed beside them.
+	zones, zerr := c.TailnetZones()
+	if zerr != nil {
+		zones = nil
+		out = append(out, fmt.Sprintf("%v; no tailnet zone is in force until it is fixed, so every dotted delegate_remotes hostname is refused by the tailnet guard", zerr))
+	}
 	for i, raw := range c.DelegateRemotes {
 		if strings.TrimSpace(raw) == "" {
 			continue // unset optional slot — validateBaseURL exempts it too; see inspectBase.
@@ -203,17 +216,29 @@ func EndpointWarnings(c Config) []string {
 		label := fmt.Sprintf("delegate_remotes[%d]", i)
 		u, why := inspectBase(raw)
 		if u == nil {
-			out = append(out, fmt.Sprintf("%s %q is not a usable URL: %s", label, raw, why))
+			out = append(out, fmt.Sprintf("%s %q is not a usable URL: %s", label, RedactBase(raw), why))
 			continue
 		}
+		// What is printed for an entry never carries credentials a URL can hold (userinfo, a
+		// query, a fragment): a roster entry is a base URL, but nothing stops one being pasted
+		// with a token in it, and doctor output gets shared.
+		shown := RedactBase(raw)
+		// The agent lane refuses a roster entry the tailnet guard does not admit, at intake, for
+		// every call that reaches it; the single-shot lanes skip it with this reason. Loading it
+		// clean and failing there is how a bad entry used to cost a whole fleet's delegation
+		// before anything named it, so the load says so (ADR 0023 says the guard runs at load;
+		// ADR 0074). It warns rather than refuses, as every finding in this function does.
+		if err := netguard.TailnetURLIn(zones, strings.TrimSpace(shown)); err != nil {
+			out = append(out, fmt.Sprintf("%s is refused by the tailnet guard, so no fleet lane will use it: %v; name the node by a hostname under a zone you listed in tailnet_suffix / tailnet_suffixes, by its dotless MagicDNS name, or by its 100.x address", label, err))
+		}
 		if loopbackBase(u) {
-			out = append(out, fmt.Sprintf("%s %q is a loopback base — a delegate REMOTE is another box, so this places \"remote\" work back on this one; name the node by its tailnet hostname", label, raw))
+			out = append(out, fmt.Sprintf("%s %q is a loopback base — a delegate REMOTE is another box, so this places \"remote\" work back on this one; name the node by its tailnet hostname", label, shown))
 		}
 		if u.Port() != FleetNodePort {
-			out = append(out, fmt.Sprintf("%s %q is not on the fleet node port :%s — delegate_remotes are fleet NODE base URLs (the node's fleet_listen), and the job routes do not exist on any other port", label, raw, FleetNodePort))
+			out = append(out, fmt.Sprintf("%s %q is not on the fleet node port :%s — delegate_remotes are fleet NODE base URLs (the node's fleet_listen), and the job routes do not exist on any other port", label, shown, FleetNodePort))
 		}
 		if hasV1Suffix(u) {
-			out = append(out, fmt.Sprintf("%s %q carries a /v1 suffix — a fleet node base is a ROOT (its routes hang off /fleet/); /v1 belongs to an OpenAI-compatible seat, not to a node", label, raw))
+			out = append(out, fmt.Sprintf("%s %q carries a /v1 suffix — a fleet node base is a ROOT (its routes hang off /fleet/); /v1 belongs to an OpenAI-compatible seat, not to a node", label, shown))
 		}
 	}
 	ownPort := endpointPort(c)
@@ -225,7 +250,7 @@ func EndpointWarnings(c Config) []string {
 		label := fmt.Sprintf("cascade_remote_lanes[%q]", key)
 		u, why := inspectBase(raw)
 		if u == nil {
-			out = append(out, fmt.Sprintf("%s %q is not a usable URL: %s", label, raw, why))
+			out = append(out, fmt.Sprintf("%s %q is not a usable URL: %s", label, RedactBase(raw), why))
 			continue
 		}
 		// A lane base is one of exactly two things (internal/llamaclient
@@ -234,14 +259,21 @@ func EndpointWarnings(c Config) []string {
 		// port is neither, which is how a lane survived pointed at a serving
 		// unit retired weeks earlier.
 		if port := u.Port(); port != FleetNodePort && port != ownPort {
-			out = append(out, fmt.Sprintf("%s %q is on neither shape a lane can be: a fleet node (:%s) or a llama-swap on this box's own endpoint port (:%s)", label, raw, FleetNodePort, ownPort))
+			out = append(out, fmt.Sprintf("%s %q is on neither shape a lane can be: a fleet node (:%s) or a llama-swap on this box's own endpoint port (:%s)", label, RedactBase(raw), FleetNodePort, ownPort))
 		}
 		if hasV1Suffix(u) {
-			out = append(out, fmt.Sprintf("%s %q carries a /v1 suffix — a lane base is a ROOT; the client appends the completion path itself, so a /v1 base dials /v1/v1/chat/completions", label, raw))
+			out = append(out, fmt.Sprintf("%s %q carries a /v1 suffix — a lane base is a ROOT; the client appends the completion path itself, so a /v1 base dials /v1/v1/chat/completions", label, RedactBase(raw)))
 		}
 	}
 	return out
 }
+
+// RedactBase is a configured base URL as it may be PRINTED: unchanged unless it carries what a
+// URL can carry that is a secret (userinfo, a query string, a fragment), in which case those are
+// dropped and the scheme, host, port and path remain. It is netguard.RedactBase, which lives below
+// this package so the tailnet guard's own refusal can use it; every message that names a
+// configured base goes through this one function.
+func RedactBase(raw string) string { return netguard.RedactBase(raw) }
 
 // sortedLaneKeys visits a base-URL map in SORTED order, for the same reason
 // validateTailnetEndpoints does: Go randomizes map iteration, and a doctor row
@@ -263,6 +295,10 @@ func sortedLaneKeys(m map[string]string) []string {
 //
 // u.Hostname() and not u.Host: "http://:18811" has a non-empty Host and no host
 // at all, which is precisely the shape a half-substituted template leaves.
+//
+// The clause never quotes the value back with what a URL can carry that is a secret: a url.Error
+// quotes the whole input, credentials and all, so the parse failure is reported by its reason alone
+// (the callers already print the value, redacted), and the scheme clause quotes the redacted value.
 func inspectBase(raw string) (*url.URL, string) {
 	v := strings.TrimSpace(raw)
 	if v == "" {
@@ -270,10 +306,14 @@ func inspectBase(raw string) (*url.URL, string) {
 	}
 	u, err := url.Parse(v)
 	if err != nil {
+		var uerr *url.Error
+		if errors.As(err, &uerr) {
+			return nil, uerr.Err.Error()
+		}
 		return nil, err.Error()
 	}
 	if u.Scheme != "http" && u.Scheme != "https" {
-		return nil, fmt.Sprintf("scheme %q is not http or https (a base with no scheme parses as one: %q reads as scheme %q, not as a host)", u.Scheme, v, u.Scheme)
+		return nil, fmt.Sprintf("scheme %q is not http or https (a base with no scheme parses as one: %q reads as scheme %q, not as a host)", u.Scheme, RedactBase(v), u.Scheme)
 	}
 	if u.Hostname() == "" {
 		return nil, "it names no host"

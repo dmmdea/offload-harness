@@ -44,6 +44,10 @@ model. What delegation may reach is enforced structurally, in two layers
   names, and hostnames under the operator's **own** tailnet DNS zone (`houseTailnetSuffix`).
   A generic `.ts.net` rule was rejected: it would accept any tailnet's Funnel-published
   hostname — a public-internet endpoint wearing a tailnet-looking name.
+  > **Amended (2026-10-07, [ADR 0074](0074-every-fleet-client-admits-the-same-roster-under-a-configured-list-of-tailnet-zones.md)):**
+  > the zone is a configured LIST, `tailnet_suffix` plus `tailnet_suffixes`, so a node shared in from another tailnet
+  > (named under the sharer's zone) can be named too. Every zone is one the operator listed; the generic rule is still
+  > rejected, and the dial-time guard below is unchanged.
 - **`SafeDialContext` / `SafeTransport`** re-check at **every dial**: a hostname that passed the
   shape check is resolved, any answer outside loopback/CGNAT is discarded, and the connection
   goes to the vetted IP **literal** — never back through the name. This is the resolve-and-pin

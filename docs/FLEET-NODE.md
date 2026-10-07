@@ -222,13 +222,18 @@ see ADR 0057.
 
 ## Multi-GPU: `gpu_devices[]` and the headline VRAM numbers
 
-On any node whose VRAM source is `nvidia-smi`, `/fleet/health` always adds a per-device
+On any node whose VRAM source is `nvidia-smi` or `linux-amdgpu`, `/fleet/health` always adds a per-device
 breakdown — **including a single-GPU box**, which reports a one-element array. There is no
-single-vs-multi-GPU special case: `gpu_devices[]` is present whenever nvidia-smi is the resolved
-source, full stop (`chooseSamplerKind` in `main.go`, unit-tested at that exact seam in
-`fleet_verbs_test.go`). It is **absent** only on a source that cannot enumerate devices at all —
-today, only the Windows PDH/windows-generic path (`vram_windows.go`), which has no per-adapter
-identity to report.
+single-vs-multi-GPU special case: `gpu_devices[]` is present whenever one of those is the resolved
+source, full stop (`chooseSamplerKind` and `startVRAMSampler` in `main.go`, unit-tested at that exact seam in
+`fleet_verbs_test.go` and `fleet_sampler_test.go`). A `linux-amdgpu` row carries the card's index, name
+(`product_name`, else `amdgpu <pci device id>`) and memory composed as the node's memory probe composes it
+(an APU: carve-out plus the GTT pool; a discrete card: VRAM alone); its `uuid` is empty and it carries no utilisation, so
+`primary_gpu_uuid` has no effect there and the delegator reads its cards as unknown, never as busy. It is
+**absent** on a source that cannot enumerate devices: the Windows PDH/windows-generic path
+(`vram_windows.go`), which has no per-adapter identity to report, and `linux-meminfo`, the RK3588 SoC's one
+RAM pool, which has no cards to list. A `linux-amdgpu` node whose per-device read fails at startup, though
+the gate probe just worked, keeps the single reading and omits the array (it logs why).
 
 ```json
 "vram_total_gb": 15.93, "vram_free_gb": 15.08,
@@ -1086,6 +1091,12 @@ whose decoded size exceeds the node's cap is refused `400` at ack time naming
 A node whose config sets `vision_tasks` (0.153.0) serves only the tasks it lists: any other `task` is
 refused `400` at ack time with the set named — `vision: task "assess_image" is not served by this node's
 vision seat (vision_tasks: vqa, ocr)` — and never reaches the pipeline. Empty or absent = all three.
+Two tiers narrow it in their data: the RK3588 NPU seat (`vqa`, `ocr`: the runtime cannot take the grammar
+`assess_image` sends) and the `ampere-8` Qwen3-VL-4B Q4 seat (`vqa`, `assess_image`: its tier page records the
+omitted `ocr` alias as a quality statement and Q4 as the measured OCR-fidelity cliff, so a remote `ocr` goes to
+another node or defers instead of being answered there; a local call is unaffected). The other Q4 vision seats
+(`ampere-6`, `amd-gcn`, `amd-rdna3`, `amd-rdna3-dgpu`, `cpu`, `dual-gpu`) keep all three: their pages say nothing
+about OCR quality, and silence is not a verdict.
 
 ### Result
 
@@ -1124,6 +1135,11 @@ card is not leased (`lease.class: text` or `lease.busy`), ordered by the agent l
 free slot → a free card → queue depth → GPU utilization → roster order) — and with no eligible node the work still runs local. `remote`: force a node; none
 eligible ⇒ `deferred: true, defer_class: capacity` (or `config` with no `delegate_remotes`),
 never a local run. `meta.node` / `meta.placement` on the result say where it ran.
+
+Every `delegate_remotes` entry is first judged by the tailnet shape check the agent lane applies
+(`netguard.TailnetURL`), through `internal/rosterprobe`; an entry it refuses is named in the defer reason as
+`not dialled, refused by the tailnet guard` and the others still serve (the text, stt-upload, compose and accelerator
+lanes do the same, [ADR 0074](architecture/decisions/0074-every-fleet-client-admits-the-same-roster-under-a-configured-list-of-tailnet-zones.md)).
 
 ## The text task (`POST /fleet/text`)
 

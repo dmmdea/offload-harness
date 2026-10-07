@@ -170,7 +170,7 @@ func gatherReport(cfg config.Config, src config.Source, routes []mediacap.Route,
 		// A hand-built box legitimately has no manifest; say which, don't guess a tier.
 		in.ManifestNote = "no installer manifest at that path (" + err.Error() + ")"
 		// …unless the CONFIG names the tier (tier_profile, seeded by tierseed
-		// — ADR 0039). That is not a guess: it is the identity the box routes,
+		// — ADR 0052). That is not a guess: it is the identity the box routes,
 		// seeds and advertises on, and the composite box this tier was built
 		// for reported "hardware tier UNKNOWN" while every placement decision
 		// it made was keyed on blackwell-3x16. The manifest still wins when it

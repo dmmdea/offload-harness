@@ -1,5 +1,5 @@
 // Package placement is the ONE decision table of the composite tier (ADR
-// 0039, 0.116.0): it turns (task class, token need, quality gate,
+// 0052, 0.116.0): it turns (task class, token need, quality gate,
 // context_class, budget, live occupancy, live guards) into a Decision — which
 // layer, which seat, on which device pin, and why. It exists as a pure package
 // because three callers must agree on the same answer: the local box placing

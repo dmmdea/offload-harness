@@ -133,7 +133,7 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		return core.Result{OK: false, Reason: "agent task: params carry no context_dir (fleetnode.buildAgentRun owns materialization)", Meta: meta}
 	}
 
-	// Seat resolution (ADR 0039): the planner default, overridden by a seat a
+	// Seat resolution (ADR 0052): the planner default, overridden by a seat a
 	// delegator already decided (Params "seat"/"placed", from RunAgentContract's
 	// options — the decision was made once, over the same table, and is
 	// published verbatim), else — on a composite box — by the layer a dispatched
@@ -1502,7 +1502,7 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 }
 
 // AgentContractOptions is what a caller that already DECIDED where a contract
-// runs hands RunAgentContract (ADR 0039): the seat and the placed block. It is
+// runs hands RunAgentContract (ADR 0052): the seat and the placed block. It is
 // delegate.LocalOptions by alias — the same type, not a copy — so the method
 // value p.RunAgentContract satisfies delegate.LocalRunner directly and the
 // delegate runner, the MCP doors and the fleet smoke all hand over one shape.

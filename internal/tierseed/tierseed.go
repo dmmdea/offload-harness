@@ -116,7 +116,7 @@ type Profile struct {
 	// or store binding; the layers name it by id or alias.
 	ExtraVLLMSeats []vllmseat.Spec `json:"extra_vllm_seats,omitempty"`
 	// Composes lists the tiers this tier is a COMPLETE instance of at the same
-	// time (ADR 0039: blackwell-3x16 composes blackwell-16 and blackwell-2x16).
+	// time (ADR 0052: blackwell-3x16 composes blackwell-16 and blackwell-2x16).
 	// It is seeded as `tiers` = Composes + the tier's own id and `tier_profile`
 	// = the id, so health and status can advertise every tier the box is while
 	// installed.json keeps ONE id and the matrix keeps one row per tier.

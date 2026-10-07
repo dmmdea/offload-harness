@@ -1448,7 +1448,7 @@ type healthPayload struct {
 	// byte-identical payload.
 	ChatLane bool `json:"chat_lane,omitempty"`
 	// Tiers is every hardware tier this node is a COMPLETE instance of
-	// (config `tiers`, ADR 0039): the composite box is a full blackwell-16
+	// (config `tiers`, ADR 0052): the composite box is a full blackwell-16
 	// and a full blackwell-2x16 as well as the tier it installed as, and a
 	// fleet that reads one row per box cannot see that. Additive, lane-gated
 	// and omitempty: a plain node emits a byte-identical payload.
@@ -2424,7 +2424,7 @@ func (s *Server) admit(w http.ResponseWriter, r *http.Request, env dispatchEnvel
 	if env.TaskType == string(core.TaskAgentRun) {
 		specModel = s.agentSeat
 		// A contract dispatched AT A LAYER runs on that layer's seat, so the
-		// feed names it rather than the planner default (ADR 0039). This is
+		// feed names it rather than the planner default (ADR 0052). This is
 		// the DECLARED seat: the authoritative decision — guards, window, the
 		// long-seat choice — is made at execution with the live readers
 		// (pipeline.runAgentTask), and a refusal there is published on the

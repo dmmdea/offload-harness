@@ -22,6 +22,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -56,6 +57,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/pipeline"
 	"github.com/dmmdea/offload-harness/internal/report"
 	"github.com/dmmdea/offload-harness/internal/research"
+	"github.com/dmmdea/offload-harness/internal/rosterprobe"
 	"github.com/dmmdea/offload-harness/internal/router"
 	"github.com/dmmdea/offload-harness/internal/shadow"
 	"github.com/dmmdea/offload-harness/internal/storesteward"
@@ -2257,7 +2259,7 @@ func runDelegate(args []string) error {
 	contracts := make([]core.AgentContract, 0, len(specs))
 	lints := make([][]string, 0, len(specs))
 	for i, spec := range specs {
-		// The BOX's cap (ADR 0039): a composite box admits a contract sized
+		// The BOX's cap (ADR 0052): a composite box admits a contract sized
 		// for its long seats; a plain box keeps the 256 KiB transport cap.
 		c, perr := delegate.PrepareContractWithCap(spec, *readRoot, cfg.AgentContextCapBytes())
 		if perr != nil {
@@ -2418,7 +2420,16 @@ const (
 	// which has no per-adapter identity to enumerate (vram_windows.go).
 	// gpu_devices[] is omitted (Snapshot.Devices stays nil) on this path.
 	samplerKindSingle
+	// samplerKindAmdgpuDevice runs the per-device amdgpu sysfs query
+	// (fleetnode.AmdgpuSysfsDeviceProbe) through the same device sampler, so a linux-amdgpu
+	// node publishes gpu_devices[] the way an nvidia-smi node does (ADR 0053 decision 4). The
+	// card's identity is its sysfs index and name: there is no UUID to pin a headline to.
+	samplerKindAmdgpuDevice
 )
+
+// amdgpuSource is the generic provider's Source on a Linux box that reads the amdgpu driver's
+// sysfs counters: what genericMemProvider names it and what chooseSamplerKind recognises.
+const amdgpuSource = "linux-amdgpu"
 
 // genericMemProvider picks the generic GPU memory source for this OS and the
 // installed tier — pulled out of runFleetServe, like chooseSamplerKind, so the
@@ -2433,7 +2444,7 @@ const (
 func genericMemProvider(goos, profile string, uma bool, umaReserveGiB float64, procRoot string) fleetnode.GenericProvider {
 	generic := fleetnode.GenericProvider{Probe: fleetnode.GenericWindowsProbe(uma), Source: "windows-generic"}
 	if goos == "linux" {
-		generic = fleetnode.GenericProvider{Probe: fleetnode.AmdgpuSysfsProbe("/sys/class/drm", uma), Source: "linux-amdgpu"}
+		generic = fleetnode.GenericProvider{Probe: fleetnode.AmdgpuSysfsProbe("/sys/class/drm", uma), Source: amdgpuSource}
 	}
 	switch profile {
 	case "rockchip-rk3588":
@@ -2450,12 +2461,41 @@ func genericMemProvider(goos, profile string, uma bool, umaReserveGiB float64, p
 // nvidia-smi always gets samplerKindDevice — a single-GPU nvidia-smi box is
 // NOT special-cased to the single-value sampler; it runs the per-device query
 // and /fleet/health reports gpu_devices[] with one entry, same as any other
-// nvidia-smi node. Every other source falls through to samplerKindSingle.
+// nvidia-smi node. linux-amdgpu gets samplerKindAmdgpuDevice, the same shape from the
+// driver's sysfs. Every other source (windows-generic, which has no per-adapter identity, and
+// linux-meminfo, one RAM pool with no cards) falls through to samplerKindSingle.
 func chooseSamplerKind(source string) samplerKind {
-	if source == "nvidia-smi" {
+	switch source {
+	case "nvidia-smi":
 		return samplerKindDevice
+	case amdgpuSource:
+		return samplerKindAmdgpuDevice
 	}
 	return samplerKindSingle
+}
+
+// startVRAMSampler starts the ongoing health sampler for the resolved provider: the routing
+// decision (chooseSamplerKind) and the sampler it implies, in one place so the tested seam is
+// the shipped one. drmRoot is /sys/class/drm in production and a temp tree in tests; uma is the
+// memory model the amdgpu probe composes (APU: VRAM + GTT; discrete: VRAM alone).
+//
+// A linux-amdgpu node whose device probe cannot read at startup, though the gate probe just did,
+// keeps the single-value sampler and says so: gpu_devices[] omitted is today's behaviour, and a
+// node must never lose its memory reading to the per-device path.
+func startVRAMSampler(ctx context.Context, interval time.Duration, prov fleetnode.ResolvedProvider, uma bool, drmRoot, primaryGPUUUID string) *fleetnode.Sampler {
+	switch chooseSamplerKind(prov.Source) {
+	case samplerKindDevice:
+		return fleetnode.StartDeviceProbeSampler(ctx, interval, fleetnode.SmiDeviceProbe(nvidiaSmiMemoryDevices), primaryGPUUUID)
+	case samplerKindAmdgpuDevice:
+		probe := fleetnode.AmdgpuSysfsDeviceProbe(drmRoot, uma)
+		if _, err := probe(); err != nil {
+			fmt.Fprintf(os.Stderr, "[fleet-serve] warning: %s per-device read failed (%v); publishing the single memory reading and no gpu_devices[]\n", prov.Source, err)
+			return fleetnode.StartProbeSampler(ctx, interval, prov.Probe)
+		}
+		return fleetnode.StartDeviceProbeSampler(ctx, interval, probe, primaryGPUUUID)
+	default:
+		return fleetnode.StartProbeSampler(ctx, interval, prov.Probe)
+	}
 }
 
 // gpuArchFromName maps an nvidia-smi product name to the architecture CLASS
@@ -2671,18 +2711,14 @@ func runFleetServe(args []string) error {
 	// unset/unmatched, the LARGEST one (fleetnode.HeadlineDevice) — never
 	// trusting nvidia-smi's PCI-bus-order "index 0". See vram.go's
 	// SelectHeadlineDevice/HeadlineDevice doc comments for why that distinction
-	// matters. windows-generic has no per-device signal (vram_windows.go), so it
-	// stays on the single-value sampler (gpu_devices[] omitted), and
-	// PrimaryGPUUUID has no effect there. chooseSamplerKind is the tested seam
-	// for this routing decision (fleet_verbs_test.go) — this switch is its only
+	// matters. A linux-amdgpu node publishes gpu_devices[] the same way from the
+	// driver's sysfs (no UUID, so the largest card heads). windows-generic has no
+	// per-device signal (vram_windows.go) and linux-meminfo is one RAM pool with no
+	// cards, so both stay on the single-value sampler (gpu_devices[] omitted), and
+	// PrimaryGPUUUID has no effect there. startVRAMSampler is the tested seam
+	// for this routing decision (fleet_verbs_test.go) — this is its only
 	// caller, so the tested logic is the shipped logic.
-	var sampler *fleetnode.Sampler
-	switch chooseSamplerKind(prov.Source) {
-	case samplerKindDevice:
-		sampler = fleetnode.StartDeviceProbeSampler(ctx, 2*time.Second, fleetnode.SmiDeviceProbe(nvidiaSmiMemoryDevices), cfg.PrimaryGPUUUID)
-	default:
-		sampler = fleetnode.StartProbeSampler(ctx, 2*time.Second, prov.Probe)
-	}
+	sampler := startVRAMSampler(ctx, 2*time.Second, prov, uma, "/sys/class/drm", cfg.PrimaryGPUUUID)
 	// total for the startup banner below: prefer the live sampler's headline
 	// reading (multi-device-aware) over prov.TotalGiB (the gate probe's
 	// single-value, first-line reading) so the banner never disagrees with
@@ -3176,6 +3212,9 @@ func doctorRunChecked(cfg config.Config, routes []mediacap.Route, w io.Writer, d
 	// finding is pure config, so an endpoint that happens to be down must not hide
 	// the value that EXPLAINS what the operator is looking at.
 	findings := writeConfigFindingsSection(w, cfg)
+	// The tailnet zones the guard admits dotted hostnames under: pure config as well, and
+	// the first thing to read when a roster entry by name is refused.
+	writeTailnetZonesSection(w, cfg)
 	// Fourth in the band, for the same reason: where the data lives is config plus a
 	// volume list, so a serving layer that is down must not hide it (register C-92).
 	dataOnOS := writeDataHomeSection(w, data)
@@ -3194,11 +3233,19 @@ func doctorRunChecked(cfg config.Config, routes []mediacap.Route, w io.Writer, d
 	// Fleet version skew (security standard L0, register R-06): informational,
 	// never an exit-code change — a node on another release is a parity finding
 	// for the operator, not a broken local box.
-	writeFleetSkewSection(w, cfg, buildinfo.Version, func(base string) (string, error) {
-		hctx, hcancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer hcancel()
-		v, err := delegate.FetchNodeView(hctx, base, cfg.FleetAuthToken)
-		return v.HarnessVersion, err
+	//
+	// The roster is read ONCE, concurrently, through the same admission and cache the single-shot
+	// lanes use (internal/rosterprobe): doctor used to read it serially at 5 s a remote, so a
+	// roster with dead members made the one verb an operator runs to find out what is wrong slow
+	// in proportion to what was wrong. The version rows and the token rows below read that one answer.
+	fleetRoster := rosterprobe.Probe(context.Background(), cfg.DelegateRemotes, cfg.FleetAuthToken, doctorFleetProbeTimeout)
+	writeFleetSkewSection(w, cfg, buildinfo.Version, rosterVersionReader(fleetRoster))
+	// Whether the nodes accept THIS box's fleet token: health ignores the bearer, so a wrong or
+	// missing token reads healthy everywhere above and first shows as a 401 on dispatch.
+	writeFleetTokenSection(w, cfg, fleetRoster, func(base string) (int, string, error) {
+		tctx, tcancel := context.WithTimeout(context.Background(), doctorFleetProbeTimeout)
+		defer tcancel()
+		return rosterprobe.CheckToken(tctx, base, cfg.FleetAuthToken)
 	})
 	roster, err := swapclient.FetchRoster(ctx, cfg.Endpoint, 10*time.Second)
 	if err != nil {
@@ -3307,21 +3354,119 @@ func writeDataHomeSection(w io.Writer, r *datahome.Report) int {
 // merge landed between deploys); the session-start audit catches it, and now
 // so does any session that runs doctor. No remotes prints nothing.
 func writeFleetSkewSection(w io.Writer, cfg config.Config, self string, read func(base string) (string, error)) {
-	if len(cfg.DelegateRemotes) == 0 {
+	members := rosterprobe.Members(cfg.DelegateRemotes)
+	if len(members) == 0 {
 		return
 	}
 	fmt.Fprintf(w, "fleet versions (this binary %s):\n", self)
-	for _, base := range cfg.DelegateRemotes {
-		v, err := read(base)
+	for _, m := range members {
+		v, err := read(m.Base)
+		base := rosterLabel(m)
 		switch {
+		case rosterprobe.IsRefusal(err):
+			fmt.Fprintf(w, "  REFUSED      %s — not dialled, %s\n", base, rosterprobe.Scrub(m.Base, err))
 		case err != nil:
-			fmt.Fprintf(w, "  UNREACHABLE  %s — %v\n", base, err)
+			fmt.Fprintf(w, "  UNREACHABLE  %s — %s\n", base, rosterprobe.Scrub(m.Base, err))
 		case v == "":
 			fmt.Fprintf(w, "  UNKNOWN      %s — the node publishes no harness_version\n", base)
 		case v != self:
 			fmt.Fprintf(w, "  SKEW         %s runs %s (this binary %s): redeploy to parity (plans/fleet-parity-deploy.sh)\n", base, v, self)
 		default:
 			fmt.Fprintf(w, "  OK           %s %s\n", base, v)
+		}
+	}
+}
+
+// doctorFleetProbeTimeout is how long doctor waits for one node's health, and for its answer to the
+// token probe. The roster is read concurrently, so this is the whole section's worst case.
+const doctorFleetProbeTimeout = 5 * time.Second
+
+// rosterLabel is how doctor names a roster entry: its slot in delegate_remotes (the number the config
+// findings use, blank slots counted) and its base with whatever a URL can carry that is a secret
+// removed, so an operator can find the line to fix and the output is safe to paste. The redaction
+// is the roster package's (Member.Shown, rosterprobe.Scrub), shared with the lanes' "probed ..." lines.
+func rosterLabel(m rosterprobe.Member) string {
+	return fmt.Sprintf("delegate_remotes[%d] %s", m.Index, m.Shown())
+}
+
+// rosterVersionReader answers writeFleetSkewSection from one roster reading: a node's published
+// harness_version, or why there is none (the entry was refused and never dialled, or the node did not
+// answer).
+func rosterVersionReader(roster []rosterprobe.Reading) func(base string) (string, error) {
+	byBase := make(map[string]rosterprobe.Reading, len(roster))
+	for _, r := range roster {
+		byBase[r.Base] = r
+	}
+	return func(base string) (string, error) {
+		r, ok := byBase[base]
+		switch {
+		case !ok:
+			return "", fmt.Errorf("not read")
+		case r.Err != nil:
+			return "", r.Err
+		}
+		return r.View.HarnessVersion, nil
+	}
+}
+
+// writeFleetTokenSection prints whether each reachable node accepts this box's fleet_auth_token, and
+// says plainly when this box has none.
+//
+// /fleet/health ignores the Authorization header, so a token that is missing, wrong or absent on the
+// node reads healthy on every other row; the first sign was a 401 on dispatch, which the delegator does
+// not re-place. check asks the node the one question health cannot (rosterprobe.CheckToken: an agent
+// dispatch with no job_id, which the node answers after its bearer check and before it creates
+// anything). Only nodes whose health was read are asked, concurrently; a refused or unreachable
+// entry is named UNCHECKED, with the reason the version rows already gave.
+//
+// Informational, like the version rows: it never changes doctor's exit code, because a node that
+// disagrees about a token is a finding about the pair, not a broken local box. The token itself and
+// the node's reply text are never printed, only the status class.
+func writeFleetTokenSection(w io.Writer, cfg config.Config, roster []rosterprobe.Reading, check func(base string) (status int, body string, err error)) {
+	if len(roster) == 0 {
+		return
+	}
+	if cfg.FleetAuthToken == "" {
+		fmt.Fprintln(w, "fleet token: NOT SET here (fleet_auth_token) — a node that listens beyond loopback refuses the agent, vision, text, stt-upload and compose-project lanes without it (403, or 401 when it has one); only the media lanes stay open")
+		return
+	}
+	type verdict struct {
+		state  rosterprobe.TokenState
+		status int
+		err    error
+	}
+	out := make([]verdict, len(roster))
+	var wg sync.WaitGroup
+	for i, r := range roster {
+		if r.Err != nil {
+			continue
+		}
+		wg.Add(1)
+		go func(i int, base string) {
+			defer wg.Done()
+			status, body, err := check(base)
+			out[i] = verdict{state: rosterprobe.ClassifyToken(status, body), status: status, err: err}
+		}(i, r.Base)
+	}
+	wg.Wait()
+	fmt.Fprintln(w, "fleet token (fleet_auth_token is set here; its value is never printed):")
+	for i, r := range roster {
+		base, v := rosterLabel(r.Member), out[i]
+		switch {
+		case rosterprobe.IsRefusal(r.Err):
+			fmt.Fprintf(w, "  UNCHECKED    %s — not asked: the entry is refused by the tailnet guard (see fleet versions)\n", base)
+		case r.Err != nil:
+			fmt.Fprintf(w, "  UNCHECKED    %s — not asked: the node's health could not be read (see fleet versions)\n", base)
+		case v.err != nil:
+			fmt.Fprintf(w, "  UNKNOWN      %s — the token probe failed: %s\n", base, rosterprobe.Scrub(r.Base, v.err))
+		case v.state == rosterprobe.TokenAccepted:
+			fmt.Fprintf(w, "  OK           %s — the node accepts this box's token\n", base)
+		case v.state == rosterprobe.TokenMismatch:
+			fmt.Fprintf(w, "  MISMATCH     %s — the node answered 401: its fleet_auth_token is not this box's, so every agent, vision, text, stt-upload and compose-project call to it fails until the two match\n", base)
+		case v.state == rosterprobe.TokenNodeHasNone:
+			fmt.Fprintf(w, "  NO-TOKEN     %s — the node answered 403: it listens beyond loopback with no fleet_auth_token, so it refuses those lanes for every caller; set the same token on the node\n", base)
+		default:
+			fmt.Fprintf(w, "  UNKNOWN      %s — the node answered %d to the token probe, which does not say whether the token is right (an older node?)\n", base, v.status)
 		}
 	}
 }
@@ -3354,6 +3499,36 @@ func writeConfigFindingsSection(w io.Writer, cfg config.Config) int {
 		fmt.Fprintf(w, "  FAIL  %s\n", f)
 	}
 	return len(findings)
+}
+
+// writeTailnetZonesSection prints the tailnet DNS zones this config admits hostnames under, one
+// row, with the key each came from: tailnet_suffix is this operator's own tailnet and each
+// tailnet_suffixes entry is another tailnet that shared a node in (ADR 0074). Those are the zones
+// netguard.TailnetURL, the cache-store host check and the research lane's refusal all judge, so a
+// roster entry that is refused by name is read against this row first.
+//
+// It prints nothing when no zone is configured, so a green doctor stays as short as it is today:
+// loopback, tailnet CGNAT-range address literals and dotless MagicDNS names need no zone, and a dotted name
+// that does is reported as a finding on its own row.
+func writeTailnetZonesSection(w io.Writer, cfg config.Config) {
+	var parts []string
+	seen := map[string]bool{}
+	add := func(raw, key string) {
+		z, err := netguard.ParseZone(key, raw)
+		if err != nil || z == "" || seen[z] {
+			return // a malformed zone already failed the config row; a repeat is one zone
+		}
+		seen[z] = true
+		parts = append(parts, fmt.Sprintf("%s (%s)", z, key))
+	}
+	add(cfg.TailnetSuffix, "tailnet_suffix")
+	for i, s := range cfg.TailnetSuffixes {
+		add(s, fmt.Sprintf("tailnet_suffixes[%d]", i))
+	}
+	if len(parts) == 0 {
+		return
+	}
+	fmt.Fprintf(w, "tailnet zones: %s\n", strings.Join(parts, ", "))
 }
 
 // writeCacheServerSection prints ONE LINE PER vLLM SEAT of this box and returns how

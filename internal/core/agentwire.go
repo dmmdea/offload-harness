@@ -349,7 +349,7 @@ type AgentContract struct {
 	// it only on route "local".
 	AllowBrowse bool     `json:"allow_browse,omitempty"`
 	BrowseHosts []string `json:"browse_hosts,omitempty"`
-	// ContextClass (ADR 0039, 0.116.0) is the caller's explicit ask for a
+	// ContextClass (ADR 0052, 0.116.0) is the caller's explicit ask for a
 	// long-window seat: "" (the placement table decides from the token
 	// estimate) or ContextClassLong. It is an INPUT to placement, never a seat
 	// name — on a composite box "long" enters the triple layer's 262k seat
@@ -644,7 +644,7 @@ type AgentWireResult struct {
 	// result shape, so a starved run's arithmetic is in the corpus rather than
 	// reconstructed from token totals. Omitempty: a pre-0.115.8 node emits none.
 	Calls []AgentCallRecord `json:"calls,omitempty"`
-	// Placed (ADR 0039, 0.116.0) is the placement decision the node made for
+	// Placed (ADR 0052, 0.116.0) is the placement decision the node made for
 	// this run — layer, seat, device pin and the reason, or the guard that
 	// refused on a defer. nil and omitted on a non-composite node, so a
 	// pre-0.116 node's result and a plain box's result are byte-identical;

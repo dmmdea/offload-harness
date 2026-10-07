@@ -34,7 +34,11 @@ shared budget ADR 0014 approximates with RAM/2 on Windows).
 3. **Vendor/arch still come from the manifest** (`installed.json` profile), never from a product
    string; the `cpu` profile still gets no generic source on any OS.
 4. **`AmdgpuSysfsDeviceProbe`** lists every AMD card with the same composition, so a per-device
-   `gpu_devices[]` is available on Linux the way it is with nvidia-smi.
+   `gpu_devices[]` is available on Linux the way it is with nvidia-smi. *Wired 2026-10-07 (0.166.x):* the probe
+   existed and nothing started it, because `chooseSamplerKind` knew only nvidia-smi, so a linux-amdgpu node
+   published no `gpu_devices[]` at all. `fleet-serve` now routes `linux-amdgpu` to the device sampler
+   (`startVRAMSampler`); a node whose per-device read fails at startup keeps the single reading. `linux-meminfo`
+   (the SoC) has no cards and stays on the single-value sampler by design.
 
 ## Consequences
 
