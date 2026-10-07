@@ -39,8 +39,9 @@ The two vLLM seats need the same cards and share one llama-swap port and its mut
 set, so they are never loaded together, and loading one unloads the other (a cold load of minutes each way).
 Since 0.165.2 the harness keeps its own work off an opencode session's seat: while the three-card seat is
 loaded, the local agent seat reads as occupied (the seat guard's verdict), so `agent_delegate` (route `auto` or
-`spread`) deals to a remote with room, waits in line when every remote is full, and loads the pair only when no
-remote can take the contract; `offload_ask` with no route takes `auto` the same way. Two doors still load the
+`spread`) deals to a remote with room and otherwise waits in line: for a remote to free, or for opencode's seat to
+unload (then it loads the pair), ending as a capacity defer at `agent_placement_wait_sec` (0.165.3; before it, a
+fleet with no eligible node loaded the pair anyway). `offload_ask` with no route takes `auto` the same way. Two doors still load the
 pair here: an explicit `route:"local"`, and `agent_run` with no route, whose `read_root` cannot travel. Name
 `route:"auto"` on a self-contained `agent_run` while a session is live on the three-card seat.
 

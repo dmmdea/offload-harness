@@ -913,6 +913,9 @@ func RunWith(ctx context.Context, cfg config.Config, local LocalRunner, subtasks
 			// occupiedBy: another vLLM seat holds the cards and loading this one would evict it.
 			busy = r.anyLeaseHeld(leaseInfo, subtasks) || localBusy.inflight >= cfg.FleetConcurrencyLimit() || localBusy.loading || localBusy.occupiedBy != ""
 			r.autoDealBusy = localBusy
+			// The seat's LOAD only: a lease is the wait's own business (Reserved, fencedLocal),
+			// and a lease this process holds must not keep its own subtasks off the seat.
+			r.autoDealReadBusy.Store(localBusy.inflight >= cfg.FleetConcurrencyLimit() || localBusy.loading || localBusy.occupiedBy != "")
 			// One line per run, mirroring route=spread's own local-slot log
 			// (review round 1 item 4): before this the identical W-01 read had
 			// no trace at all, so an operator could not tell "busy" from
@@ -1201,6 +1204,10 @@ type runner struct {
 	// autoDealBusy is the reading route=auto's one deal was made from (RunWith), kept
 	// so a remote placement can say the local seat was occupied, not merely busy.
 	autoDealBusy busyReading
+	// autoDealReadBusy records that route=auto's deal (or a per-subtask placement) read the
+	// local seat busy and placed around it (dealReadLocalBusy). Atomic: subtask goroutines
+	// set it while the capacity wait of a sibling reads it.
+	autoDealReadBusy atomic.Bool
 	// autoLocalBusyOnce/autoLocalBusy cache route=auto's ONE read of the local
 	// seat's load (W-01, register S-01): every subtask of this Run must see
 	// the SAME reading — the same one-probe-per-Run invariant spreadLocalBusy
@@ -2461,6 +2468,13 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 	// The seat stays off limits until it stops reading busy (localStillBusy) - the
 	// wait exists to spare the subtask that pile-up, not to rebuild it at tick zero.
 	overflow := seed.overflow
+	// dealBusy: the deal read the local seat busy (spread's busy rule, route=auto's busy
+	// formula) and dealt around it. A subtask it sent to a remote that then turned out full
+	// (the process gate, a refusal) stands in this wait exactly like an overflow subtask and
+	// keeps the same rule: the seat is taken only once it stops reading busy. Before this only
+	// an overflow subtask kept it, so a gate turn-away took the busy seat at the first tick
+	// (the TestOverflowStaysOffABusySeatWhoseLoadBecomesUnreadable CI flake, also on main).
+	dealBusy := overflow || r.dealReadLocalBusy()
 	// reservedSeen: the wait began under, or saw, a text lease on the local seat -
 	// it names the placement "lease cleared" when the seat opens. A gate turn-away
 	// and a deal's overflow are not leases: no lease is held.
@@ -2534,19 +2548,28 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 			// the seat still reads busy by the deal's own reading: the registry above
 			// counts only delegated runs, and a seat busy with anyone else's requests
 			// shows nothing there.
-			stillBusy := false
-			if overflow && free && !Reserved(lease) {
-				stillBusy, _ = r.localStillBusy(ctx, lease)
-			}
-			// Whatever started the wait (a refusal, a lease, a deal), a seat another vLLM seat
-			// occupies is no candidate while there is a node to wait for: taking it unloads that
-			// seat (probeLocalBusy's occupiedBy). It becomes one when the occupant leaves.
+			// Whatever started the wait (a refusal, a lease, a deal, no remote at all), a seat
+			// another vLLM seat occupies is no candidate: taking it unloads that seat
+			// (probeLocalBusy's occupiedBy; operator 2026-10-06: "wait in line"). It becomes one
+			// when the occupant leaves. Read first, so the reason can name the occupant.
 			occupied := false
-			if !Reserved(lease) && !fenced && free && !stillBusy && r.route != "local" && len(r.remotes) > 0 {
+			if !Reserved(lease) && !fenced && free && r.route != "local" {
 				if rd := r.busyReadingNow(ctx); rd.occupiedBy != "" {
 					occupied, occupiedSeen = true, rd.occupiedBy
 					places[""] = PlaceWait{Node: localView.NodeID, On: "seat", Detail: rd.why()}
 				}
+			}
+			stillBusy := false
+			if !occupied && dealBusy && free && !Reserved(lease) {
+				// The overflow keeps the deal's whole reading; a subtask that reached the wait
+				// another way (the gate, a refusal) keeps only the seat's load: a lease is judged
+				// by the wait itself above (Reserved, fenced), and one this process holds is no
+				// reason to stay off the seat.
+				readLease := lease
+				if !overflow {
+					readLease = gpulease.Info{}
+				}
+				stillBusy, _ = r.localStillBusy(ctx, readLease)
 			}
 			if !Reserved(lease) && !fenced && free && !stillBusy && !occupied {
 				credit()
@@ -2569,7 +2592,7 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 					reason = fmt.Sprintf("local seat was fenced by a lease, fence cleared after %s — running local (capacity wait)", idle.Round(time.Second))
 				case occupiedSeen != "":
 					reason = fmt.Sprintf("local seat was occupied by the vLLM seat %s, which left after %s — running local (capacity wait)", occupiedSeen, idle.Round(time.Second))
-				case overflow:
+				case dealBusy:
 					reason = fmt.Sprintf("local seat was busy when the deal kept this subtask off it, idle after %s — running local (capacity wait)", idle.Round(time.Second))
 				}
 				forced := placement{view: localView, reason: reason + noteSuffix}
@@ -4551,6 +4574,20 @@ func (r *runner) probeLocalBusy(ctx context.Context) busyReading {
 	return busyReading{busy: rd.Inflight > 0, inflight: rd.Inflight, note: rd.Source}
 }
 
+// dealReadLocalBusy reports whether this run's placement read the local seat busy and
+// dealt around it: spread's busy rule (skipsBusyLocal), or route=auto's busy formula at the
+// deal or a per-subtask placement. The capacity wait keeps that reading for every subtask
+// it holds, not only the deal's overflow (awaitCapacity's dealBusy).
+func (r *runner) dealReadLocalBusy() bool {
+	switch r.route {
+	case "spread":
+		return r.skipsBusyLocal()
+	case "auto":
+		return r.autoDealReadBusy.Load()
+	}
+	return false
+}
+
 // autoOccupant is route=auto's reading when it found the local seat occupied: the joint
 // deal's (autoDealBusy) or the per-subtask placement's (autoLocalBusy); zero otherwise.
 func (r *runner) autoOccupant() busyReading {
@@ -4671,6 +4708,15 @@ func (r *runner) placeSpreadWith(i int, st Subtask, localView NodeView, book *de
 			// waits in line (the capacity wait, INV-4) instead of stacking on the
 			// busy seat or on a node that would refuse it.
 			return spreadSlot{placement: placement{view: localView, reason: fmt.Sprintf("route=spread: every remote with room is already dealt to its headroom (%s); %s", strings.Join(atCap, "; "), r.spreadLocalBusy.why())}, capacityWait: true}
+		}
+		// An occupied seat is never the fallback (operator 2026-10-06: "wait in line"): the
+		// subtask waits for the occupant to leave or a remote to free, whichever comes first.
+		if r.spreadLocalBusy.occupiedBy != "" {
+			what := "no remote with room"
+			if eligible == 0 {
+				what = "no eligible remote"
+			}
+			return spreadSlot{placement: placement{view: localView, reason: fmt.Sprintf("route=spread: %s; %s — waiting in line", r.spreadLocalBusy.why(), what)}, capacityWait: true}
 		}
 		// The reason must not send an operator chasing capacity when no remote
 		// could take this contract at all.
@@ -5027,11 +5073,14 @@ func (r *runner) attempt(ctx context.Context, i int, contract core.AgentContract
 			if fence, fenceWhy, fenced := r.fencedLocal(contract); localServes && fenced {
 				return PlacedResult{waitCapacity: true, fenced: true, pendingReason: "local seat fenced (" + fenceWhy + " — " + HolderLine(fence) + "); no eligible remote — " + why, remotesUnreachable: deadFleet}
 			}
+			// An occupied seat (operator 2026-10-06: "wait in line") is a place in line too, never
+			// "queued-local": loading it would unload the vLLM seat holding the cards. The wait takes
+			// it once the occupant leaves (localStillBusy reads occupiedBy) or a remote frees.
+			if occ := r.autoOccupant(); localServes && occ.occupiedBy != "" {
+				return PlacedResult{waitCapacity: true, overflow: true, pendingReason: occ.why() + "; no eligible remote — " + why, remotesUnreachable: deadFleet}
+			}
 			chosen = localView
 			reason = "local busy; no eligible remote — " + why + " (queued-local beats ineligible-remote)"
-			if occ := r.autoOccupant(); occ.occupiedBy != "" {
-				reason = occ.why() + "; no eligible remote — " + why + " (queued-local beats ineligible-remote, so the occupant is unloaded)"
-			}
 			if !localServes {
 				reason = fmt.Sprintf("no eligible remote, and %s so the seat cannot take it (%s)", localRefusal(localView, contract), why)
 			}
@@ -5063,6 +5112,9 @@ func (r *runner) attempt(ctx context.Context, i int, contract core.AgentContract
 			r.autoLocalBusyOnce.Do(func() { r.autoLocalBusy = r.probeLocalBusy(ctx) })
 			local := r.autoLocalBusy
 			busy = leaseInfo.Held || local.inflight >= r.cfg.FleetConcurrencyLimit() || local.loading || local.occupiedBy != ""
+			if local.inflight >= r.cfg.FleetConcurrencyLimit() || local.loading || local.occupiedBy != "" {
+				r.autoDealReadBusy.Store(true) // the seat's load, never the lease (see the joint deal)
+			}
 		}
 		var views []NodeView
 		var bases []string
@@ -5129,12 +5181,14 @@ func (r *runner) attempt(ctx context.Context, i int, contract core.AgentContract
 			// place in line as a reservation, without the dial that would be turned away.
 			why, class := r.noEligibleRemote(st, views, probeErrs)
 			return PlacedResult{waitCapacity: true, fenced: true, pendingReason: "local seat fenced (" + fenceWhy + " — " + HolderLine(fence) + "); no eligible remote — " + why, remotesUnreachable: class == core.DeferClassInfrastructure}
+		case chosen.Local && r.route == "auto" && r.autoOccupant().occupiedBy != "" && r.localServesLayer(localView, contract):
+			// The occupied seat waits in line like a reservation (operator 2026-10-06: "wait in
+			// line"): never loaded over the vLLM seat holding the cards while that seat stays.
+			why, class := r.noEligibleRemote(st, views, probeErrs)
+			return PlacedResult{waitCapacity: true, overflow: true, pendingReason: r.autoOccupant().why() + "; no eligible remote — " + why, remotesUnreachable: class == core.DeferClassInfrastructure}
 		case chosen.Local:
 			why, class := r.noEligibleRemote(st, views, probeErrs)
 			reason = "local busy; no eligible remote — " + why + " (queued-local beats ineligible-remote)"
-			if occ := r.autoOccupant(); occ.occupiedBy != "" {
-				reason = occ.why() + "; no eligible remote — " + why + " (queued-local beats ineligible-remote, so the occupant is unloaded)"
-			}
 			// USE the class here too. route=remote already exits non-zero on a
 			// fleet that failed every probe; route=auto discarded the identical
 			// verdict (`why, _ :=`), so a fleet that had been down for a week read
