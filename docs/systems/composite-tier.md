@@ -25,11 +25,15 @@ desktop. It declares itself a complete instance of three tiers, and three layers
 | `pair` | `blackwell-2x16` | 0,2 | agent = the tier's vLLM seat (163,840, 32 in flight), long `qwen3.8-27b-262k` (262,144, prefill 1,197 t/s), vision `qwen3-vl-32b` | every agent contract that fits; window overflow and `context_class: long` take the long seat | active |
 | `display` | `blackwell-16` | 1 | router twins `gemma-4-e4b-display` / `gemma-4-e2b-display` | a mechanical call while the pair holds its cards — once the operator enables it | **dormant** |
 
-There is no three-card layer: its only seats parked 28–32 expert layers in host RAM, and the
-operator rule of 2026-09-10 is that the cards do the inference and RAM is overflow only
-(0.115.4 removed them). The placement table still serves a three-card layer — a box that
-declares one gets it, under its guards — so the day a three-card seat fits inside VRAM the
-tier declares it again and nothing else changes.
+There is no three-card layer. The three-card vLLM pipeline seat (`qwen3.8-27b-vllm-3card`, pipeline 3
+on devices 2,1,0, 262,144 tokens) does fit inside VRAM and was this tier's agent seat from 2026-09-21
+to 2026-10-04 (0.132.6 declared it as a `triple` layer); on 2026-10-04 the operator moved the harness
+back to two cards and kept the three-card seat as opencode's own model, so the tier declares no triple
+and the harness never places on it. Its measured layout is in the tier's notes
+([`docs/tiers/blackwell-3x16.md`](../tiers/blackwell-3x16.md)). Before it, the only three-card seats
+parked 28–32 expert layers in host RAM and the 2026-09-10 rule (the cards do the inference, RAM is
+overflow only) removed them (0.115.4). The placement table still serves a three-card layer — a box
+that declares one with a non-opt-in agent seat homes its agent lane there, under its guards.
 
 ## The layers on the `ampere-16` node
 

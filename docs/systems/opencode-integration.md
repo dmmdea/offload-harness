@@ -26,6 +26,21 @@ plus one lever Claude Code cannot offer: the three-lane dispatch protocol is inj
 | Instrument | `~/.claude/state/dispatch-log.jsonl` | Rows tagged `harness:"opencode"` — one adherence read across both harnesses; the Claude Code hooks own the file's rotation, the plugin is append-only |
 | Context instrument | [`cmd/opencode-context`](../../cmd/opencode-context/) over [`internal/occontext`](../../internal/occontext/) | Read-only per-call token, cache, growth, compaction and TTFT report from a copy of opencode's session db — see [Measuring context](#measuring-context) |
 
+## Which seat opencode runs on (the three-card reference box)
+
+opencode's primary, `small_model` and the `offload` agent name the three-card vLLM seat
+`qwen3.8-27b-vllm-3card` **by id** in `opencode.jsonc`, never by an alias. Since 2026-10-04 that seat is
+opencode's alone (operator: the harness runs on two cards, the three-card layout stays an opencode
+configuration): the harness's `agent-pool` is the two-card pair `qwen3.8-27b-vllm` again (the blackwell-3x16
+`vllm_seat`), and no harness layer declares the three-card seat, so the placement table never puts a contract on
+it. From 2026-09-21 to 2026-10-04 both names were one seat.
+
+One consequence to plan around: the two vLLM seats need the same cards and share one llama-swap port and its
+mutually exclusive `interactive` set, so they are never loaded together. A harness contract that runs locally
+(`harness_agent_run`, or the local slot of an `agent_delegate` spread) while an opencode session holds the
+three-card seat makes llama-swap unload it and cold-load the pair, and the session's next turn swaps back; each
+cold load is minutes. Route such legs to the fleet's other nodes when a session is live on the three-card seat.
+
 ## Behavior (verified live 2026-08-24, local primaries)
 
 - `offload_plugin_status` called by a local model → `PLUGIN_OK 0.1.0`.

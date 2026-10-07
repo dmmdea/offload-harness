@@ -74,32 +74,41 @@ func TestDualBlackwellSeedsThePairSeatWithTheCacheServer(t *testing.T) {
 		t.Errorf("vllm_seat has no fs_native cache server — every workstation-class tier benefits from the <node-c> store (got %+v)", s.CacheServer)
 	}
 	// Same operating point as <node-b>'s 2-card pair seat (seat-tp2.env): the numbers were
-	// measured on this exact silicon, so a divergence is a typo, not a decision. Until
-	// 2026-09-21 the 3-card tier seeded that pair and this test compared the two tiers
-	// directly; the 3-card tier now seeds the three-card FLAGSHIP (operator 2026-09-19) and
-	// the pair became its opt-in seat, so the pair's figures are pinned here instead.
+	// measured on this exact silicon, so a divergence is a typo, not a decision. The 3-card
+	// tier seeded that pair until 2026-09-21, then the three-card FLAGSHIP (operator
+	// 2026-09-19) with the pair as its opt-in seat, and since 2026-10-04 the pair again
+	// (operator: the harness runs on 2 cards, the 3-card layout stays opencode's), so the
+	// two tiers are compared directly once more: the same seat on devices 0,2 there.
 	r := three.VLLMSeat
 	for _, c := range []struct{ name, got, want string }{
 		{"id", s.ID, "qwen3.8-27b-vllm"},
 		{"model_repo", s.ModelRepo, r.ModelRepo},
 		{"kv_cache_dtype", s.KVCacheDtype, r.KVCacheDtype},
 		{"cache_server.address", s.CacheServer.Address, "/mnt/kvcache/lmcache-seat-tp2-fp8"},
+		{"blackwell-3x16 id", r.ID, s.ID},
+		{"blackwell-3x16 device", r.Device, "0,2"},
+		{"blackwell-3x16 cache_server.address", r.CacheServer.Address, s.CacheServer.Address},
 	} {
 		if c.got != c.want {
 			t.Errorf("vllm_seat.%s = %q, want %q", c.name, c.got, c.want)
 		}
 	}
+	if r.TensorParallel != 2 || r.MaxModelLen != s.MaxModelLen {
+		t.Errorf("blackwell-3x16 vllm_seat (tensor_parallel %d, max_model_len %d) is not the pair seat (2, %d)",
+			r.TensorParallel, r.MaxModelLen, s.MaxModelLen)
+	}
 	// L1 staging is measured per seat, not a tier default (register B-02). On 2026-09-21 a
 	// 2 GB cut starved the pair's staging (the stores came up short by 34 blocks and nothing
-	// reached L2), so the pair runs 8; the three-card flagship needs 16 (8 at the 0.80
-	// watermark could not stage an L2 hit back). A seat with no measured value keeps the
-	// 2 GB launcher default (internal/vllmseat/launcher_l1_default_test.go).
+	// reached L2), so the pair runs 8 on both tiers; the hand-wired three-card seat needs 16
+	// (8 at the 0.80 watermark could not stage an L2 hit back) but no tier seeds it any more.
+	// A seat with no measured value keeps the 2 GB launcher default
+	// (internal/vllmseat/launcher_l1_default_test.go).
 	if s.CacheServer != nil && s.CacheServer.L1StagingGB != 8 {
 		t.Errorf("blackwell-2x16 cache_server.l1_staging_gb = %d, want 8: the pair's measured staging (2 GB starved it)",
 			s.CacheServer.L1StagingGB)
 	}
-	if r.CacheServer == nil || r.CacheServer.L1StagingGB != 16 {
-		t.Errorf("blackwell-3x16 cache_server must seed l1_staging_gb 16, the flagship's measured staging (got %+v)", r.CacheServer)
+	if r.CacheServer == nil || r.CacheServer.L1StagingGB != 8 {
+		t.Errorf("blackwell-3x16 cache_server must seed l1_staging_gb 8, the pair's measured staging (got %+v)", r.CacheServer)
 	}
 	if s.MaxModelLen != 163840 || s.TTLSeconds != r.TTLSeconds {
 		t.Errorf("vllm_seat operating point (max_model_len %d, ttl %d) differs from the pair's measured (163840, %d)",
@@ -129,10 +138,12 @@ func TestDualBlackwellSeedsThePairSeatWithTheCacheServer(t *testing.T) {
 			"two-card box it is taken out of the card that also draws the desktop",
 			s.GPUMemoryUtilization, pairUtil, tripleUtil)
 	}
-	// tripleUtil was the 3-card tier's PAIR seat (display card outside it). The tier's seat
-	// is now the pipeline flagship, which pins kv_cache_memory_bytes and so ignores
-	// utilization; 0.90 stays the figure for <node-b>'s opt-in pair, recorded in seat-tp2.env.
-	_ = tripleUtil
+	// tripleUtil is the 3-card tier's PAIR seat (display card outside it): that tier seeds
+	// the pair again since 2026-10-04, at the figure <node-b>'s seat-tp2.env records.
+	if r.GPUMemoryUtilization != tripleUtil {
+		t.Errorf("blackwell-3x16 vllm_seat gpu_memory_utilization = %.2f, want %.2f: the A-28 soak-verified figure "+
+			"for the pair with the display card outside the seat", r.GPUMemoryUtilization, tripleUtil)
+	}
 	if !strings.Contains(s.Aliases[0]+strings.Join(s.Aliases, ","), "agent-pool") {
 		t.Errorf("vllm_seat aliases %v lack agent-pool — the harness binds to that alias", s.Aliases)
 	}

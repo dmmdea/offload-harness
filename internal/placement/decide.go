@@ -349,10 +349,13 @@ func (t table) admissible(l config.LayerSpec, s config.LayerSeat) (ok bool, reas
 
 // agentHome names the layer whose agent seat takes the free choice: the triple
 // when it declares an agent seat and is neither opt-in nor dormant, otherwise
-// the pair. <node-b>'s flagship is the three-card seat (operator 2026-09-19:
-// "the 3 card tier as the agent seat now and the 2 card tier to be the opt in
-// one"), so a triple that carries the agent seat is the default and the pair is
-// entered by name; a box whose triple is opt-in (or absent) keeps the pair.
+// the pair. From 2026-09-21 to 2026-10-04 <node-b>'s home was its three-card
+// seat (operator 2026-09-19: "the 3 card tier as the agent seat now and the 2
+// card tier to be the opt in one"); since 2026-10-04 the harness runs on the
+// pair again and the three-card seat is opencode's alone, so the blackwell-3x16
+// seed declares no triple. The rule stays for any box that declares one: a
+// triple carrying a non-opt-in agent seat is the default and the pair is entered
+// by name; a box whose triple is opt-in (or absent) keeps the pair.
 func (t table) agentHome() string { return AgentHome(t.layers) }
 
 // AgentHome names the layer whose agent seat takes the free choice (see table.agentHome).

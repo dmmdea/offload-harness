@@ -65,8 +65,10 @@ func TestSeatsThatStayPlaceableUnderACardLease(t *testing.T) {
 	t.Logf("declared seats: %d; placeable under a card-0 lease: %v; card-1 (display): %v; card-2: %v",
 		len(seats), name(free["gpu-aaaa0000"]), name(free["gpu-bbbb0000"]), name(free["gpu-cccc0000"]))
 
-	if len(seats) != 9 {
-		t.Fatalf("the tier declares %d seats, the docs quote 9: re-measure and update docs/systems/gpu-lease.md", len(seats))
+	// Eight since 2026-10-04: the three-card layer (its one agent seat pinned to every card)
+	// left the tier when the harness moved back to the pair; it declared nine while it stood.
+	if len(seats) != 8 {
+		t.Fatalf("the tier declares %d seats, the docs quote 8: re-measure and update docs/systems/gpu-lease.md", len(seats))
 	}
 	for card, want := range map[string]int{"gpu-aaaa0000": 3, "gpu-bbbb0000": 7, "gpu-cccc0000": 3} {
 		if got := len(free[card]); got != want {

@@ -1414,7 +1414,7 @@ and after a restart — hit counters alone do not prove the context came back in
 
 **Pipeline seats and the store (measured 2026-09-03, served since 2026-09-22):** stock LMCache sizes L2
 reads from one layout per model, but the stages of a pipeline-parallel seat hold different numbers of
-full-attention layers — the 3-card agent seat's 28,13,23 split of a 64-layer model with full attention every
+full-attention layers — the 3-card seat's 28,13,23 split (opencode's seat since 2026-10-04, the agent seat before) of a 64-layer model with full attention every
 4th layer puts **7/3/6** attention layers on its three ranks — so reads failed for every rank whose layout
 differed and the evict phase got 0 external hits. With the per-rank layout overlay patch (each rank's layout
 bound to its own pages; loaded through `SEAT_LMCACHE_PYTHONPATH`) the 3-card pipeline seat is bound to its
@@ -1843,7 +1843,7 @@ seat loaded keeps protecting it for 300 s.
 The call rides its lane when one serves it; otherwise **the configured rung runs unguarded**. If a
 seat really is loaded at that moment, that rung can evict it. This is deliberate: the guard never
 refuses a call, and substituting a seat it cannot see would ask an unreadable llama-swap to
-cold-load the flagship. The line `-> the configured rung runs: … no loaded seat is known to
+cold-load the agent seat. The line `-> the configured rung runs: … no loaded seat is known to
 substitute` marks every such call.
 
 **A lane that disappears between the plan and the send.** The guard reads lane residency from the

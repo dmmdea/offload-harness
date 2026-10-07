@@ -118,7 +118,7 @@ func (k KVCacheServer) StoreName() string {
 // value (register B-02: on 2026-09-18 the pair's 2 / 4 / 8 GB arms restored the
 // same context at 3.1 / 5.1 / 9.1 GiB of MP-server RSS over 24 contracts). It is
 // not enough for every seat: on 2026-09-21 2 GB starved the pair's staging under
-// production load, so the pair seeds 8 and the three-card flagship 16.
+// production load, so the pair seeds 8 (the hand-wired three-card seat runs 16).
 func (k KVCacheServer) EffectiveL1StagingGB() int {
 	if k.L1StagingGB <= 0 {
 		return 2

@@ -120,9 +120,12 @@ func TestFlagshipSeatRendersIntoItsOwnTemplate(t *testing.T) {
 			"got %d — if the operating point genuinely moved, move this number with the evidence",
 			m.ConcurrencyLimit)
 	}
-	if spec.MaxModelLen != 262144 {
-		t.Errorf("the flagship's measured window is 262,144 (pp3 28/13/23 on 2,1,0, fp8 KV pinned "+
-			"at 3.75 GiB per card, pool 269,676 tokens; W1 campaign 2026-09-21); got %d", spec.MaxModelLen)
+	// Since 2026-10-04 the tier's seat is the tp2 pair again (the operator moved the harness
+	// back to two cards; the three-card seat, 262,144 tokens, is opencode's and unseeded).
+	if spec.MaxModelLen != 163840 || spec.TensorParallel != 2 || spec.Device != "0,2" {
+		t.Errorf("the tier's measured seat is the tp2 pair on 0,2 at 163,840 tokens (fp8 pool 177,766 at "+
+			"util 0.90, the reference box's seat-tp2.env); got device %q tp %d window %d",
+			spec.Device, spec.TensorParallel, spec.MaxModelLen)
 	}
 	// `agent-pool` is not decoration: it is the name the harness config binds
 	// (`agent_model: agent-pool`), so dropping it from the tier silently unbinds the agent

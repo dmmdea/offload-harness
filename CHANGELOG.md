@@ -6,6 +6,32 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.165.1] - 2026-10-06 - blackwell-3x16 runs the harness on two cards again; the three-card seat is opencode's
+
+- **The operator's order, in the table.** 2026-10-04: "modify the <node-b> offload harness tier so it runs on 2 cards again
+  (3 card should remain exclusive as an opencode configuration)". It reverses the 2026-09-19 order that 0.132.6 wired
+  ("the 3 card tier as the agent seat now and the 2 card tier to be the opt in one"). blackwell-3x16 seeds the tp2 PAIR
+  as its `vllm_seat` again: `qwen3.8-27b-vllm` on devices `0,2` (the two 5060 Tis, never the display card), window
+  **163,840** at util 0.90 (soak-verified there because the display card is outside the seat), batched 3135, fp8 KV,
+  L1 staging 8 GB, the tp2 store; `agent_ctx_tokens` 262,144 -> 163,840. It keeps `agent-pool-2card` and
+  `27b-vllm-2card` as aliases (what callers named it while it was opt-in) and carries the fold-system chat template and
+  prompt-token details over from the three-card seat, so the agent seat's request handling does not change.
+- **Layers.** The `pair` layer is the home again (not opt-in; its agent seat is filled from the `vllm_seat` at install,
+  as before 0.132.6), and the `triple` layer is gone from the seed, so `placement.AgentHome` resolves to the pair and no
+  contract can name a three-card layer. The table declares 8 seats (9 with the triple): a card-2 lease leaves 3
+  placeable, a card-0 lease 3, a display-card lease 7. The placement code is unchanged; a box that declares a
+  non-opt-in triple still homes its agent lane there.
+- **The three-card seat stays, as opencode's.** Its measured layout (pipeline 3 on `2,1,0`, `28,13,23`, fp8 KV pinned
+  at 3.75 GiB per card, 262,144, util 0.84, L1 16 GB, its own store) is kept in the tier notes; on the reference box it
+  is hand-wired and named by id in `opencode.jsonc`. The pipeline schema (`pipeline_parallel`, `layer_partition`,
+  `kv_cache_memory_bytes`) is unchanged. `docs/systems/opencode-integration.md` gains the seat note, including the
+  consequence that the two vLLM seats are mutually exclusive in llama-swap, so a harness contract placed locally while
+  an opencode session holds the three-card seat swaps the seats (a cold load each way).
+- **Docs:** the generated tier page, `composite-tier.md` (why there is no triple), `cache-server.md` (L1 staging per
+  seat), `gpu-lease.md` (the home layer and the 8-seat counts), `OPERATOR-GUIDE.md`, and the code comments that named
+  the three-card seat as the current `agent-pool`. Tests: `TestDualBlackwellSeedsThePairSeatWithTheCacheServer` compares the two tiers' pair seat directly
+  again, `layerSetTiers` drops the triple on this instruction, `TestSeatsThatStayPlaceableUnderACardLease` counts 8.
+
 ## [0.165.0] - 2026-10-03 - PAIR shows every job where it ran: remote calls card, fleet nodes card for askers that cannot, transcription spills to an idle node
 
 An audit of PAIR's Jobs list against every node's ledger (2026-10-03) found it drew every card it received correctly, and
