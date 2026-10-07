@@ -6,6 +6,130 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.168.0] - 2026-10-07 - the display layer opens under the presence guard and leaves when the operator returns
+
+### The display layer opens under its presence guard and leaves when the operator returns (ADR 0075)
+
+- **The card allocator keeps the desktop floor on a display card it opens.** `operator_presence` `auto` or `away` already
+  opened the display card to `gpu reserve --cards N` and to an auto-placed media call, with no floor: with the pair seat
+  loaded on the other two cards the display card sorted first as the card with nothing to evict, and a 10 GiB job could
+  take it to about 2 GiB free. The allocator now holds an opened display card to the display layer's own arithmetic,
+  `free − footprint ≥ display_floor_gib` (`config.DisplayFloorGiB()`: the largest floor of a layer guarded by
+  `display_floor`, 0 when none is declared, which leaves a box without one exactly as it was). A job that declares no
+  footprint (`--vram`) cannot be shown to leave the floor and is not given the card, as the layer's guard refuses a seat
+  with no display footprint; `--devices` still names the card on the operator's word. The skip reads `vram` and names the
+  floor, and a display card that could not clear the floor is not queued on while a lease holds it.
+- **A loaded display twin is a resident seat of its card.** `gpualloc.ResidentFrom` counted a seat only by its `model`,
+  and the display layer's router names its twins only in `model_map`, so a loaded twin left the display card reading as an
+  empty one. Twins now count, each loaded twin costed at `footprint_gib`, else `display_footprint_gib`, so taking the card is
+  priced as the eviction it is.
+- Docs: `gpu-lease.md` ("The display card, once the operator is away"), `media-generation.md`. Tests: the allocator floor
+  table (`TestAnOpenedDisplayCardIsHeldToTheDesktopFloor` and its siblings in `internal/gpulease`), `ResidentFrom` over a
+  twin, `BuildInput` carrying the floor and the end-to-end picker (`internal/gpualloc`), `TestDisplayFloorGiB…`
+  (`internal/config`); each new branch mutated red.
+- **The `display_floor` guard checks the card the config names against the card the driver says drives the monitor.** The
+  floor guarded `layers[display].display_device` and never asked the driver which card the screen is on, so a board that
+  re-enumerated after a power loss, or a cable that moved, left the floor protecting a card that is not the desktop's. The
+  guard now refuses, before any arithmetic, naming both cards (`display_device 1 is CUDA index 1, but the driver reports
+  the monitor on index 0`) when the driver singles out cards that drive a monitor and the declared one is not among them.
+  It contradicts only on positive evidence: a reading that cannot say (no card flagged, a transient failure that left
+  `display_attached` unknown, no reader) trusts the declaration, and a second monitor on another card does not contradict a
+  declared card that also drives one. Index and UUID pins are both resolved first, and the node publishes the same verdict
+  in its `layers` rows (`gpuprobe.ScreenCardIndexes`, `placement.Live.ScreenCards`).
+- **`CheckComposite` reads UUID pins.** The checked union read only digits after `CUDA_VISIBLE_DEVICES=`, so a render that
+  pins a seat by GPU UUID (this box's rule, and what the twin template tells an operator to substitute) read as "pins no
+  CUDA_VISIBLE_DEVICES" and was refused. A UUID pin is now a pin: two UUID lists are compared as the same cards (a declared
+  prefix stands for the id that extends it), a UUID list must name as many cards as the declaration, and a UUID against an
+  index declaration is compared through this machine's card table or refused (see the review fixes below).
+- Docs: `composite-tier.md` (the guard, "The rendered config is checked"). Tests: `TestDisplayFloorCrossChecks…`,
+  `TestLiveFromReadingsCarriesTheScreenCards…`, `TestANodePublishesAMismatchedDisplayCardAsInadmissible`,
+  `TestSnapshotServesTheScreenCardsFromItsMemoisedProbe` (`internal/placement`), `TestScreenCardIndexes`
+  (`internal/gpuprobe`), `TestCheckCompositeReadsUUIDPins` (`internal/servingtmpl`); each new branch mutated red.
+- **A loaded display twin is unloaded when the operator returns or the desktop's memory goes.** The layer's guards decide
+  once, at the placement; a twin then sat on the desktop's card until llama-swap's 300 s idle ttl however soon the operator
+  was back, and a twin another llama-swap client loaded was never asked at all. `fleet-serve` now runs a watcher
+  (`internal/displaywatch`, `fleet_displaywatch.go`): every `display_watch_sec` (0 = 10 s, negative = off, above 300
+  refused at load) it reads llama-swap's `/running`, and only while a model of the display layer (its seats' own models
+  and router `model_map` twins) is loaded does it ask the layer's own desktop guards again through
+  `placement.ResidentVerdict`: presence reads present or unknown, or free VRAM on the display card is below the floor. It
+  uses the same readers, card resolution and fail-closed reading as admission, but tests `free ≥ floor` and does not
+  subtract the footprint again (a resident seat is already out of the free number), and leaves `host_ram` alone. On a
+  refusal it unloads the layer's loaded models through llama-swap's per-model route (never the total one, no drain: the
+  desktop needs the memory now), logs each one with the reason, and retries a failed unload at the next check. It
+  unloads nothing else, and an unreadable `/running` unloads nothing. It checks once at start, so a twin loaded before
+  fleet-serve came up is not exempt.
+- **`offload_status` shows the guard.** `local.display_guard` (omitted on a box with no display layer, and on a dormant
+  layer that never acted) carries `watching` (a heartbeat the watcher wrote recently, so a box whose fleet-serve is not
+  running reads `false` with the reason), the check period and `last_action` (the models, the reasons, what came down and
+  any error). `local.operator_presence` publishes the presence reading and mode on a composite box, with the caution
+  that `away` is the operator's unconditional override and `auto` the supported mode. A plain box's payload is unchanged.
+- Tests: `internal/displaywatch` (presence flips, the floor falls, fail-closed inputs, a failed unload
+  retried, a stopping twin ignored, only the display layer's models, the per-model route and never the total one, the
+  state file and the status view), `TestResidentVerdict…` and `TestPresenceAllowsIsTheGuardsRule` (`internal/placement`),
+  `TestStartDisplayWatch…` (root), `TestDisplayWatch…` (`internal/config`), `TestStatusPublishes…` (`internal/mcpserver`);
+  each new branch mutated red.
+- **Docs: the real enable sequence for the display layer, and the `away` caution.** `composite-tier.md` gains "Opening the
+  display layer" (back up; seed `tier_profile`/`tiers`/`layers` into the live config; UUID-pinned display twins in the
+  llama-swap yaml; restart llama-swap with the vLLM seat stopped cleanly; `operator_presence` `auto`; `dormant` false;
+  read it back), and "The guards keep holding after the load". `operator_presence` `away` is documented as an
+  unconditional override that admits at the desk, and `auto` as the supported mode. A rendered twin is loadable by any
+  llama-swap client whatever `dormant` and `operator_presence` say; the unload-on-return check also takes down a twin a
+  non-harness client loaded. The G1b recipe in the composite-tier plan is refreshed: the presence step, the
+  `summarize <file>` syntax, baselines, the assertions (`placed.seat` is the twin, `/v1/models` lists it, the floor holds
+  in every sample, the pair is not evicted), the unload-on-return check, and the precondition that the three-card seat is
+  not loaded.
+- **ADR 0075, "The display layer opens under the presence guard and leaves when the operator returns".** Records the
+  operator's 2026-10-07 "yes" to opening the display-card seat under its presence guard (it takes work only while the
+  console is locked or idle and nothing is fullscreen, with a 4 GiB desktop floor), that this amends the earlier operator
+  rule keeping single-card seats off the display card for the display layer only, and the terms: the gaps closed before it
+  opens (allocator floor and twin residents, the screen cross-check, UUID pins), the post-admission check (per-model unload,
+  no drain, fail loud, nothing else touched), `auto` as the supported presence mode with `away` documented as an override,
+  and the rendered-twin-is-loadable-by-any-client caveat. Indexed in the ADR README; `composite-tier.md` links it.
+- **Review fixes: the desktop rule holds when the card is unknown, at the grant, and when nothing is watching.**
+  - **A display-unknown card is held to the floor.** After a transient display query failure every card is `DisplayUnknown`
+    and none is `Display`, so the floor (`c.Display && floor > 0`) was skipped on exactly the reading where no card can be
+    vouched for as not the monitor. The floor now applies to a card that is `Display` or `DisplayUnknown`.
+  - **A queued request is asked again at the grant.** A `--cards` request or an auto-placed media call that queued on the
+    display card while the operator was away was decided at the enqueue and never again; FIFO can take hours. The grant now
+    vets the cards it just handed over (`Options.GrantCheck`, `Manager.VetGrant`, `gpulease.DesktopRefusals`, built by
+    `gpualloc.GrantCheck`): a card that no longer qualifies (the operator is back, the floor is gone) is released and the
+    request chooses again from fresh readings, taking another card it still fits or waiting for what qualifies, with its
+    arrival time kept. The check runs after the claim because a check before it can be skipped by a lease that is
+    mid-release. Wired into the reserve verb (including its immediate-grant path) and the media admission queue. A lease
+    already RUNNING on the display card is not revoked when the operator returns (the watcher unloads llama-swap twins and
+    nothing else); `gpu-lease.md` and ADR 0075 say so.
+  - **A blind watcher is not watching.** An unreadable `/running` used to leave `watching: true` on a fresh heartbeat. The
+    state file now records `read_err` and `blind_since` (written at once on the first failed read and on recovery) and
+    `local.display_guard` shows `watching: false` with a note while it is blind. A state path that cannot be resolved is
+    no longer dropped: it is logged at start and carried in the status note.
+  - **The display layer does not open while nothing is watching it.** Its `presence` guard now also refuses when the
+    watcher's heartbeat is absent or stale, the watcher is blind, or `display_watch_sec` is negative
+    (`internal/displaystate.Alive`, read through `placement.Live.WatcherAlive`; a new leaf package so `placement` needs no
+    import of `displaywatch`). The post-admission check itself never asks. A node publishes the same verdict in its health
+    rows. Closing the card (`operator_presence` back to `present`) reaches the watcher only on a `fleet-serve` restart; the
+    docs say so. The watcher covers only the layer named `display`; the docs say that too.
+  - **A UUID pin the render cannot compare is refused, not passed.** `comparePins` let a UUID-rendered pin against an
+    index-declared one through. The gate now resolves the UUIDs through this machine's card table (`nvidia-smi`, read once
+    and only when a comparison needs it) and compares index sets; without a table, or with a UUID the table does not list, it
+    refuses and says to declare UUID pins in `layers` or render on the box. The `display_floor` guard resolves a seat's UUID
+    `device` through the probe too (one it cannot resolve counts as on the display card), so that advice does not turn the
+    floor's arithmetic into `free - 0`.
+  - **An unreadable `/running` reads the display card as occupied; every loaded twin is costed.** `ResidentSeats` returned
+    nothing when llama-swap could not be read, so the display card sorted first as the card with nothing to evict. The
+    display layer's models are now counted as loaded then (other layers contribute nothing, as before), and `ResidentFrom`
+    costs each loaded twin at its footprint instead of once per seat.
+  - **`display_watch_sec` that overflows a `Duration` is refused.** `seconds * time.Second` wraps negative above about 9.2e9,
+    which read as off and passed validation. The value is compared as an integer first, and `DisplayWatchInterval` clamps an
+    unvalidated one to 300 s.
+  - Tests: `TestAnUnknownDisplayCardIsHeldToTheDesktopFloor`, `TestDesktopRefusals…`, `TestAcquireRefusesTheGrant…`,
+    `TestVetGrant…` (`internal/gpulease`); `TestAQueuedLease…`, `TestARefusedGrantKeepsTheArrivalTime…`,
+    `TestAnImmediateGrantIsVettedToo`, `TestRenderGate…UUIDPin…` (root); `TestAQueuedMediaCall…` (`internal/pipeline`);
+    `TestABlindWatcher…`, `TestTheWatcherSeesAgain…`, `TestAStatePathThatCannotBeResolved…` (`internal/displaywatch`);
+    `internal/displaystate`; `TestTheDisplayLayerDoesNotOpenWhileTheWatcherIsNotAlive` and siblings, `TestAUUIDPinnedSeat…`
+    (`internal/placement`); `TestTheDisplayRowCarriesThisNodesWatcherLiveness` (`internal/fleetnode`);
+    `TestCheckCompositeReadsUUIDPins` (`internal/servingtmpl`); `TestResidentSeatsTreatsTheDisplayCard…` (`internal/gpualloc`);
+    `TestValidateLayersRefusesADisplayWatchThatOverflowsADuration` (`internal/config`); each new branch mutated red.
+
 ## [0.167.0] - 2026-10-07 - truth and guards outside the delegator: tailnet zones, redacted roster URLs, faster probes, doctor rows, OCR off Q4 seats
 
 ### Truth and guards outside the delegator (fleet-first, track B; ADR 0074)

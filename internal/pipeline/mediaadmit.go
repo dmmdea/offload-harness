@@ -629,81 +629,97 @@ func (p *Pipeline) acquireCards(ctx context.Context, m *gpulease.Manager, reason
 		return gpualloc.BuildInput(ctx, m, p.cfg, gpualloc.Need{Claimed: claimed}, p.alloc)
 	}
 
-	var ids []string
-	for lost := 0; ; lost++ {
-		free := true
-		if plan.auto {
-			picked, isFree, err := gpualloc.PickAuto(gpualloc.Plan{Min: 1, Max: 1}, remaining(), build, io.Discard, time.Sleep, time.Now)
-			if err != nil {
-				var none *gpulease.NoCardsError
-				if errors.As(err, &none) {
-					return mediaGrant{}, p.noCardsAnswer(m, none, since, tokenID, optsFor, reason, need.Resumable)
+	// An auto plan chooses its card from the operator's presence and the desktop floor as they are
+	// when it chooses, and the place in line it takes can be long. The grant puts the same rule again
+	// (GrantCheck): a card that no longer qualifies is given back and the choice is made again from
+	// fresh readings, with the arrival time kept, so the screen's card is never granted because it was
+	// open when the call joined the line.
+	for refusals := 0; ; refusals++ {
+		var ids []string
+		for lost := 0; ; lost++ {
+			free := true
+			if plan.auto {
+				picked, isFree, err := gpualloc.PickAuto(gpualloc.Plan{Min: 1, Max: 1}, remaining(), build, io.Discard, time.Sleep, time.Now)
+				if err != nil {
+					var none *gpulease.NoCardsError
+					if errors.As(err, &none) {
+						return mediaGrant{}, p.noCardsAnswer(m, none, since, tokenID, optsFor, reason, need.Resumable)
+					}
+					return mediaGrant{}, err
 				}
-				return mediaGrant{}, err
+				ids, free = picked, isFree
+			} else {
+				ids = plan.ids
+				in, err := build()
+				if err != nil {
+					return mediaGrant{}, err
+				}
+				free = !in.WholeNodeHeld
+				for _, id := range ids {
+					if in.Claimed[id] {
+						free = false
+					}
+				}
 			}
-			ids, free = picked, isFree
-		} else {
-			ids = plan.ids
-			in, err := build()
-			if err != nil {
-				return mediaGrant{}, err
-			}
-			free = !in.WholeNodeHeld
-			for _, id := range ids {
-				if in.Claimed[id] {
+			if free {
+				if !mediaSlots.tryTake(ids) {
+					// A job in this process holds it and has no lease record to show: it is claimed.
+					if plan.auto && lost < mediaClaimRetries {
+						continue
+					}
+					free = false
+				} else {
+					lease, err := m.TryAcquire(gpulease.ClassMedia, optsFor(ids))
+					if err == nil {
+						stopKeep()
+						return p.grantCards(ctx, m, lease, ids, plan, cards, tokenID), nil
+					}
+					mediaSlots.release(ids)
+					var held *gpulease.ErrHeld
+					if !errors.As(err, &held) {
+						return mediaGrant{}, err
+					}
+					if plan.auto && lost < mediaClaimRetries {
+						continue // another claimant took it first: allocate again with its claim visible
+					}
 					free = false
 				}
 			}
+			break
 		}
-		if free {
-			if !mediaSlots.tryTake(ids) {
-				// A job in this process holds it and has no lease record to show: it is claimed.
-				if plan.auto && lost < mediaClaimRetries {
-					continue
-				}
-				free = false
-			} else {
-				lease, err := m.TryAcquire(gpulease.ClassMedia, optsFor(ids))
-				if err == nil {
-					stopKeep()
-					return p.grantCards(ctx, m, lease, ids, plan, cards, tokenID), nil
-				}
-				mediaSlots.release(ids)
-				var held *gpulease.ErrHeld
-				if !errors.As(err, &held) {
-					return mediaGrant{}, err
-				}
-				if plan.auto && lost < mediaClaimRetries {
-					continue // another claimant took it first: allocate again with its claim visible
-				}
-				free = false
-			}
-		}
-		break
-	}
 
-	// Nothing is free: take a place in line. The in-process slots first (bounded, FIFO among this
-	// process's callers), then the lease queue, FIFO across processes, keeping the arrival time.
-	if !mediaSlots.take(ids, remaining()) {
-		return mediaGrant{}, p.queuedAnswer(m, ids, since, tokenID, optsFor(ids), reason, nil, need.Resumable)
-	}
-	if remaining() <= 0 {
-		mediaSlots.release(ids)
-		return mediaGrant{}, p.queuedAnswer(m, ids, since, tokenID, optsFor(ids), reason, nil, need.Resumable)
-	}
-	qo := optsFor(ids)
-	qo.Wait, qo.WaitOut = remaining(), true
-	stopKeep() // the waiter the lease wait registers stands for the place from here
-	lease, err := m.Acquire(gpulease.ClassMedia, qo)
-	if err != nil {
-		mediaSlots.release(ids)
-		var held *gpulease.ErrHeld
-		if errors.As(err, &held) || errors.Is(err, gpulease.ErrStillQueued) {
-			return mediaGrant{}, p.queuedAnswer(m, ids, since, tokenID, optsFor(ids), reason, held, need.Resumable)
+		// Nothing is free: take a place in line. The in-process slots first (bounded, FIFO among this
+		// process's callers), then the lease queue, FIFO across processes, keeping the arrival time.
+		if !mediaSlots.take(ids, remaining()) {
+			return mediaGrant{}, p.queuedAnswer(m, ids, since, tokenID, optsFor(ids), reason, nil, need.Resumable)
 		}
-		return mediaGrant{}, err
+		if remaining() <= 0 {
+			mediaSlots.release(ids)
+			return mediaGrant{}, p.queuedAnswer(m, ids, since, tokenID, optsFor(ids), reason, nil, need.Resumable)
+		}
+		qo := optsFor(ids)
+		qo.Wait, qo.WaitOut = remaining(), true
+		if plan.auto {
+			// The set was chosen from the presence and the floor as they were; the grant asks again.
+			qo.QueuedSince = since
+			qo.GrantCheck = gpualloc.GrantCheck(build, ids)
+		}
+		stopKeep() // the waiter the lease wait registers stands for the place from here
+		lease, err := m.Acquire(gpulease.ClassMedia, qo)
+		if err != nil {
+			mediaSlots.release(ids)
+			var refused *gpulease.ErrGrantRefused
+			if plan.auto && errors.As(err, &refused) && refusals < mediaClaimRetries {
+				continue // the card no longer qualifies: choose again from fresh readings
+			}
+			var held *gpulease.ErrHeld
+			if errors.As(err, &held) || errors.Is(err, gpulease.ErrStillQueued) {
+				return mediaGrant{}, p.queuedAnswer(m, ids, since, tokenID, optsFor(ids), reason, held, need.Resumable)
+			}
+			return mediaGrant{}, err
+		}
+		return p.grantCards(ctx, m, lease, ids, plan, cards, tokenID), nil
 	}
-	return p.grantCards(ctx, m, lease, ids, plan, cards, tokenID), nil
 }
 
 // noCardsAnswer is the answer for a call that waited its window and the allocator still found no

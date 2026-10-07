@@ -50,7 +50,11 @@ type statusBlock struct {
 // map and marshals sorted). The section enum and the dispatch both read it, so
 // a new block cannot be reachable in one and missing from the other.
 var statusBlockTable = []statusBlock{
-	{"local", func(s *Server, ctx context.Context, cfg config.Config) any { return s.statusLocal(ctx, cfg) }},
+	// withDisplayStatus (layers_view.go) adds the composite box's presence reading and the display
+	// guard's last action to the block; it returns a plain box's block untouched.
+	{"local", func(s *Server, ctx context.Context, cfg config.Config) any {
+		return withDisplayStatus(ctx, cfg, s.statusLocal(ctx, cfg))
+	}},
 	{"media", func(_ *Server, _ context.Context, cfg config.Config) any { return statusMedia(cfg) }},
 	{"remote", func(_ *Server, _ context.Context, cfg config.Config) any { return statusRemote(cfg) }},
 	// Accelerators (ADR 0024): reported only when listed, one entry per device

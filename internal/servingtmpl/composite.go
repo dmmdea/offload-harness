@@ -29,6 +29,11 @@ type CompositeDecl struct {
 	Composes   []string
 	Layers     []config.LayerSpec
 	MediaKinds []string
+	// ResolvePin turns a rendered GPU UUID (or UUID prefix) into the CUDA index this box's card table
+	// gives it, when a card table is available (the render runs on the box, with nvidia-smi). It is
+	// what lets a UUID-rendered pin be compared with an index-declared one. nil, or !ok for a pin, means
+	// the two cannot be compared and the render is refused for it (comparePins).
+	ResolvePin func(pin string) (index string, ok bool)
 }
 
 // ComposedTier is one tier the composite claims to be a complete instance of,
@@ -111,7 +116,12 @@ func CheckComposite(rendered string, decl CompositeDecl, composed []ComposedTier
 				layer.Name, role, model, want, e.id))
 			return
 		}
-		if !sameDeviceSet(e.devices, want) {
+		same, comparable := comparePins(e.devices, want, decl.ResolvePin)
+		switch {
+		case !comparable:
+			problems = append(problems, fmt.Sprintf("layer %s seat %s (%s): declared device pin %q, rendered %q: one names cards by CUDA index and the other by GPU UUID, and nothing here can show they are the same cards (this board re-enumerates indices on a power loss, which is why a box pins by UUID at all). Declare the seat's device as the GPU UUID in layers (and display_device), or render on the box so its card table can resolve the UUIDs",
+				layer.Name, role, model, want, e.devices))
+		case !same:
 			problems = append(problems, fmt.Sprintf("layer %s seat %s (%s): declared device pin %q, rendered %q",
 				layer.Name, role, model, want, e.devices))
 		}
@@ -176,7 +186,11 @@ func CheckComposite(rendered string, decl CompositeDecl, composed []ComposedTier
 		decl.Tier, strings.Join(decl.Composes, ", "), strings.Join(problems, "\n  - "))
 }
 
-var cudaDevicesRe = regexp.MustCompile(`CUDA_VISIBLE_DEVICES=([0-9,]*)`)
+// cudaDevicesRe captures the value of a CUDA_VISIBLE_DEVICES assignment: CUDA indices ("0,2") or
+// GPU UUIDs ("GPU-…,GPU-…", the form a box that pins by UUID renders, and the one the template's
+// own header tells an operator to substitute when the cards move). Reading only digits made a
+// UUID-pinned entry read as one that pins nothing.
+var cudaDevicesRe = regexp.MustCompile(`CUDA_VISIBLE_DEVICES=([0-9A-Za-z,_-]*)`)
 
 // cudaDevicesOf reads a rendered entry's device pin from its env list first and
 // its cmd second (a seat wrapper may export the variable inline). "" = the
@@ -193,6 +207,134 @@ func cudaDevicesOf(env []string, cmd string) string {
 		return m[1]
 	}
 	return ""
+}
+
+// comparePins compares a rendered CUDA_VISIBLE_DEVICES list with a declared seat pin.
+//
+//   - Two lists of CUDA indices are the same SET or they are not (sameDeviceSet), as ever.
+//   - When either list carries a GPU UUID, the two must name the same NUMBER of cards: that much a
+//     render can prove, and "one card declared, two UUIDs rendered" is a real defect.
+//   - Two UUID lists are then compared as sets of cards, one to one, a UUID prefix standing for the
+//     card it names (a declaration may carry a prefix; the rendered pin is usually the whole id).
+//   - A UUID against an index is settled only through a card table: nothing in the rendered text maps
+//     an index to a card (the board reorders them, which is why a box pins by UUID at all). With
+//     resolve (the box's own nvidia-smi table), every UUID is turned into its index and the two are
+//     compared as index sets. Without it, or when a UUID does not resolve to exactly one card,
+//     comparable is false and the caller REFUSES, because a pin that cannot be shown to be the declared
+//     one is not the declared one; it used to pass here, which let a twin render onto any card.
+func comparePins(rendered, declared string, resolve func(string) (string, bool)) (same, comparable bool) {
+	r, d := pinElems(rendered), pinElems(declared)
+	if allIndexes(r) && allIndexes(d) {
+		return sameDeviceSet(rendered, declared), true
+	}
+	if len(r) != len(d) {
+		return false, true
+	}
+	if noIndexes(r) && noIndexes(d) {
+		return sameUUIDSet(r, d), true
+	}
+	ri, rok := pinIndexes(r, resolve)
+	di, dok := pinIndexes(d, resolve)
+	if !rok || !dok {
+		return false, false
+	}
+	return sameDeviceSet(strings.Join(ri, ","), strings.Join(di, ",")), true
+}
+
+// pinIndexes turns a pin list into CUDA indices: an index stays, a UUID goes through resolve. ok is
+// false when any element cannot be turned into an index.
+func pinIndexes(elems []string, resolve func(string) (string, bool)) ([]string, bool) {
+	out := make([]string, 0, len(elems))
+	for _, e := range elems {
+		if isIndexElem(e) {
+			out = append(out, e)
+			continue
+		}
+		if resolve == nil {
+			return nil, false
+		}
+		idx, ok := resolve(e)
+		if !ok || !isIndexElem(idx) {
+			return nil, false
+		}
+		out = append(out, idx)
+	}
+	return out, true
+}
+
+// pinElems splits a pin list into trimmed, non-empty elements.
+func pinElems(s string) []string {
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func isIndexElem(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func allIndexes(elems []string) bool {
+	for _, e := range elems {
+		if !isIndexElem(e) {
+			return false
+		}
+	}
+	return true
+}
+
+func noIndexes(elems []string) bool {
+	for _, e := range elems {
+		if isIndexElem(e) {
+			return false
+		}
+	}
+	return true
+}
+
+// sameUUIDSet reports whether two equal-length UUID lists name the same cards: sorted, then matched
+// one to one, case-insensitively, a prefix standing for the id that extends it.
+func sameUUIDSet(a, b []string) bool {
+	x, y := lowerSorted(a), lowerSorted(b)
+	for i := range x {
+		if !uuidPrefixMatch(x[i], y[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func lowerSorted(in []string) []string {
+	out := make([]string, len(in))
+	for i, s := range in {
+		out[i] = strings.ToLower(s)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// uuidPrefixMatch: one id is the other, or a prefix of it. A prefix shorter than four characters
+// after "GPU-" names no card (the probe refuses it too: "GPU-" alone would match every card).
+func uuidPrefixMatch(a, b string) bool {
+	short := a
+	if len(b) < len(a) {
+		short = b
+	}
+	if len(strings.TrimPrefix(short, "gpu-")) < 4 {
+		return a == b
+	}
+	return strings.HasPrefix(a, b) || strings.HasPrefix(b, a)
 }
 
 // sameDeviceSet compares two CUDA_VISIBLE_DEVICES lists as SETS: "0,2" and

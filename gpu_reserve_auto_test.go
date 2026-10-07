@@ -222,8 +222,8 @@ func TestAcquireAutoCardsQueuesFIFOWhenNoCardIsFree(t *testing.T) {
 	if !strings.Contains(out.String(), "queueing") {
 		t.Errorf("say that it queued: %q", out.String())
 	}
-	if builds != 1 {
-		t.Errorf("the allocator says no set is free: that is one read and a queue, not a claim loop (%d reads)", builds)
+	if builds != 2 {
+		t.Errorf("the allocator says no set is free: that is one read to choose, a queue, and one read at the grant (GrantCheck), not a claim loop (%d reads)", builds)
 	}
 }
 

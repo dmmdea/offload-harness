@@ -125,6 +125,8 @@ func TestCascadeSubstitutesTheDisplayTwinsWhenTheLayerIsAwake(t *testing.T) {
 			DeviceIndex: func(d string) (string, bool) { return d, true },
 			HostFree:    func() (float64, bool) { return 100, true },
 			Presence:    func() placement.Presence { return placement.ProbePresence(cfg.PresenceMode(), cfg.OperatorIdle()) },
+			// The display layer opens only while its watcher is alive (internal/displaystate).
+			WatcherAlive: func() (bool, string) { return true, "watcher heartbeat 3s old" },
 		}
 	}
 

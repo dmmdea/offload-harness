@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/dmmdea/offload-harness/internal/config"
+	"github.com/dmmdea/offload-harness/internal/displaystate"
 	"github.com/dmmdea/offload-harness/internal/gpuprobe"
 	"github.com/dmmdea/offload-harness/internal/modelaffinity"
 	"github.com/dmmdea/offload-harness/internal/seatload"
@@ -153,6 +154,7 @@ func LiveFromReadings(devs []gpuprobe.Device, hostFreeGiB *float64, pres *Presen
 	if len(devs) > 0 {
 		l.DeviceFree = func(device string) (float64, bool) { return gpuprobe.FreeGiB(devs, device) }
 		l.DeviceIndex = func(device string) (string, bool) { return gpuprobe.IndexOf(devs, device) }
+		l.ScreenCards = func() []string { return gpuprobe.ScreenCardIndexes(devs) }
 	}
 	if hostFreeGiB != nil {
 		free := *hostFreeGiB
@@ -178,12 +180,14 @@ func LiveFromConfig(cfg config.Config) Live {
 // pinned to): the agent row's fallback when a lease holds the flagship's cards (plan P4).
 func (s *Snapshot) Live() Live {
 	return Live{
-		Seat:        s.Seat,
-		DeviceFree:  s.DeviceFree,
-		DeviceIndex: s.DeviceIndex,
-		HostFree:    s.HostFree,
-		Presence:    s.Presence,
-		CardsHeld:   modelaffinity.CardsHeld,
+		Seat:         s.Seat,
+		DeviceFree:   s.DeviceFree,
+		DeviceIndex:  s.DeviceIndex,
+		ScreenCards:  s.ScreenCards,
+		WatcherAlive: func() (bool, string) { return displaystate.Alive(s.cfg, s.now()) },
+		HostFree:     s.HostFree,
+		Presence:     s.Presence,
+		CardsHeld:    modelaffinity.CardsHeld,
 	}
 }
 
@@ -226,6 +230,16 @@ func (s *Snapshot) DeviceIndex(device string) (string, bool) {
 		return "", false
 	}
 	return gpuprobe.IndexOf(devs, device)
+}
+
+// ScreenCards names the cards the memoised probe says drive the monitor
+// (gpuprobe.ScreenCardIndexes); nil when the probe failed or cannot say.
+func (s *Snapshot) ScreenCards() []string {
+	devs, ok := s.devices()
+	if !ok {
+		return nil
+	}
+	return gpuprobe.ScreenCardIndexes(devs)
 }
 
 // HostFree reads free host RAM from the memoised reader.

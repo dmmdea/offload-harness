@@ -961,8 +961,10 @@ is given:
 (below), not held by another job in this process, with the free VRAM and host RAM, and never the display
 card while the operator is at the desk. The display card is the one whose `display_active` reads Enabled
 **or** whose `display_attached` reads Yes (`gpuprobe.ScreenCardUUIDs`, the card table's rule); it is auto-assigned only when
-`operator_presence` says the operator is away, and an explicit pin may always name it (the operator's
-word). Ties go to a card with no resident seat, then the cheapest eviction, then the lowest id.
+`operator_presence` says the operator is away, and then only while the display layer's desktop floor stays free
+after the call's footprint (a media call declares none, so an unpinned call never takes it: it picks among the other
+cards; `gpu_lease`, "The display card, once the operator is away"). An explicit pin may always name it (the
+operator's word). Ties go to a card with no resident seat, then the cheapest eviction, then the lowest id.
 
 **An explicit pin is a hard constraint.** It is never re-picked: the call queues, FIFO, for the card it
 names, however many others are free. It still runs in the per-card instance, not in the default one, so

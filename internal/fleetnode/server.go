@@ -32,6 +32,7 @@ import (
 
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
+	"github.com/dmmdea/offload-harness/internal/displaystate"
 	"github.com/dmmdea/offload-harness/internal/fleetqueue"
 	"github.com/dmmdea/offload-harness/internal/gpuactivity"
 	"github.com/dmmdea/offload-harness/internal/gpulease"
@@ -3002,7 +3003,11 @@ func (s *Server) layerRows(snap Snapshot) []placement.LayerRow {
 		}
 	}
 	pres := placement.ProbePresence(cfg.PresenceMode(), cfg.OperatorIdle())
-	rows := placement.RowsFromConfig(cfg, placement.LiveFromReadings(snap.Devices, host, &pres))
+	live := placement.LiveFromReadings(snap.Devices, host, &pres)
+	// This node's own watcher is what its display layer's admission relies on, so the row it publishes
+	// carries the same liveness reading the local decision uses (internal/displaystate).
+	live.WatcherAlive = func() (bool, string) { return displaystate.Alive(cfg, time.Now()) }
+	rows := placement.RowsFromConfig(cfg, live)
 	// Each seat's pin as the lease ids of its cards, resolved HERE against this box's own card
 	// table (plan P7): a delegator comparing a lease's cards with a seat's cards must not guess
 	// which index space a bare pin is in. No card table, no ids: every card.

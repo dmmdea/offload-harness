@@ -29,6 +29,7 @@ var bareClientAllowlist = map[string]struct {
 	"internal/composeremote/composeremote.go:<file-scope>":       {1, "configured: fleet nodes from delegate_remotes (composition lane)"},
 	"internal/delegate/nodeview.go:<file-scope>":                 {1, "configured: fleet nodes from delegate_remotes (health reads)"},
 	"internal/delegate/run.go:<file-scope>":                      {2, "configured: fleet nodes from delegate_remotes (dispatch and poll)"},
+	"internal/displaywatch/displaywatch.go:Production":           {1, "configured: the node's own llama-swap /running (display layer post-admission check)"},
 	"internal/fleetnode/chat_lane.go:<file-scope>":               {1, "configured: the node's own llama-swap (chat lane proxy)"},
 	"internal/fleetnode/claimloop.go:Server.StartClaimLoop":      {1, "configured: the fleet queue holder from config"},
 	"internal/fleetnode/ingress.go:newIngressClient":             {1, "guarded: every ref is checked against the IP-literal allowlist before any dial, redirects refused, no proxy (ingress.go)"},

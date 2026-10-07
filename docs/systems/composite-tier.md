@@ -216,13 +216,79 @@ missing, a card the probe cannot see, a presence the OS cannot report all REFUSE
   A display device pinned by GPU-UUID (the reference box pins it that way, because the board
   reorders CUDA indices on power loss) is resolved to an index through the probe; unresolvable
   or ambiguous refuses.
+  **The declared card is checked against the driver's own reading.** The floor protects the card the
+  config names, so a config that names the wrong card would guard the wrong one: when the driver
+  singles out other cards as the ones driving the monitor (`display_active` Enabled or
+  `display_attached` Yes, the same rule the card table uses) and the declared card is not among them,
+  the guard refuses before any arithmetic and names both (`display_device 1 is CUDA index 1, but the
+  driver reports the monitor on index 0`). It contradicts only on positive evidence: a reading that
+  cannot say (no card drives a display, or a transient failure left `display_attached` unknown) trusts
+  the declaration, and a second monitor on another card does not contradict a declared card that also
+  drives one. The node publishes the same verdict in its `layers` rows, so a delegator is told.
 - **`host_ram`** — free host RAM ≥ the seat's declared `host_ram_gib`.
 - **`presence`** — `operator_presence` is `present` (never), `away` (always), or `auto`:
   console session LOCKED ⇒ away; else last input idle ≥ `operator_idle_sec` (default 900)
-  AND the shell not in a busy/fullscreen/presentation state ⇒ away.
+  AND the shell not in a busy/fullscreen/presentation state ⇒ away. An unreadable reading is not away.
 
 **`operator_presence` defaults to `present`.** The display card is closed until the operator
-has read the probe's own readings in `offload_status` and set `auto` or `away`.
+has read the probe's own readings in `offload_status` (`local.operator_presence`) and set `auto`.
+
+**`away` is an unconditional override, and `auto` is the supported mode.** `away` never reads the
+session: it admits at the keyboard exactly as it does in an empty room, with no lock, idle or fullscreen
+test, so a load can start on the desktop's card while the operator is working. It exists for the operator
+who has decided that, and `offload_status` prints that caution beside it. `auto` is the mode that takes
+work only while the console is locked or idle and nothing is fullscreen, which is the guard the layer was
+built around ([ADR 0075](../architecture/decisions/0075-the-display-layer-opens-under-the-presence-guard-and-leaves-when-the-operator-returns.md)).
+
+### The guards keep holding after the load
+
+The guards above decide once, at the placement. A twin that passed them then sits on the desktop's card
+until llama-swap's 300 s idle ttl, however soon the operator is back or a game takes the card's memory, so
+`fleet-serve` asks again (`internal/displaywatch`, [ADR 0075](../architecture/decisions/0075-the-display-layer-opens-under-the-presence-guard-and-leaves-when-the-operator-returns.md)):
+
+- **When.** Every `display_watch_sec` (0 = 10 s; negative turns it off; above 300 is refused, since a check
+  slower than the idle ttl guards nothing the ttl does not). It reads llama-swap's `/running` first and
+  does nothing else while no model of the display layer is loaded, so an idle layer costs one local GET.
+- **What it asks.** Only while a model of the layer is loaded: the layer's `presence` and `display_floor`
+  guards again (`placement.ResidentVerdict`), through the same readers and the same fail-closed reading.
+  Presence reading present or unknown refuses; so does free VRAM on the display card below the floor.
+  The floor is `free ≥ display_floor_gib`, not the admission arithmetic `free − footprint`, because a
+  resident twin's footprint is already out of the free number. `host_ram` bounds a load and is not asked.
+- **What it does.** Unloads the layer's loaded models (its seats' models and the router `model_map`
+  twins, nothing else) through llama-swap's per-model unload route. There is no drain: the desktop needs
+  the memory now, so a request in flight on the twin ends with llama-swap's 502, which a mechanical call
+  answers as a defer. It never uses the total unload route, never unloads another layer's seat, the pair
+  seat or the memory stack, and unloads nothing when `/running` cannot be read.
+- **Fail loud.** Each unload is logged with its reason; one that fails stays on the card, is recorded and
+  is retried at the next check. Nothing else is unloaded to make room.
+- **What you see.** `offload_status` `local.display_guard` (omitted on a box with no display layer, and on a
+  dormant layer that never acted): `watching` (a heartbeat `fleet-serve` wrote recently; `false` with a
+  reason when it is not running, or was started before the layers were seeded), the period, and
+  `last_action` (models, reasons, what came down, any error). A watcher that is running but cannot read
+  llama-swap's `/running` cannot see a twin to unload, so it is **not** watching however fresh its heartbeat:
+  the state file records `read_err` and `blind_since` from the first failed read, and the field then reads
+  `watching: false` with `read_err`, `blind_since` and a note, until the first good read clears them. When
+  the state file's path cannot be resolved (the state root is refused, for instance a cloud-synced folder),
+  the watcher logs it at start and the note says so, because with no file there is no heartbeat to show.
+- **Admission needs the watcher.** The display layer's `presence` guard also asks whether a watcher is alive
+  (`internal/displaystate.Alive`, the same heartbeat `watching` reads) and refuses, naming the reason, when
+  there is no heartbeat, the last one is older than three beats plus the check budget, the watcher is blind
+  (above), or `display_watch_sec` is negative: a twin admitted with nothing watching it stays on the
+  operator's card until llama-swap's idle ttl, so switching the check off closes the layer rather than
+  leaving it guarded by admission alone. `local.layers` shows the display row inadmissible with that reason,
+  and a node publishes the same verdict in its health rows. The post-admission check itself never asks:
+  it must not unload twins because of its own bookkeeping.
+- **It covers only the layer named `display`.** The watcher (and the liveness gate above) match the layer by
+  that name. A layer with another name that declares the same guards and twins has its admission guards and
+  nothing re-checking it afterwards.
+- **Where it runs.** In `fleet-serve`, the one always-on process of a node, which must run in the
+  operator's console session: `auto` reads the console's lock state and last input, which a process in
+  another session cannot see (it logs a warning at start when presence cannot be read from there, and every
+  check would then unload a loaded twin). It is built from the config `fleet-serve` started with and does
+  not re-read it: **closing the card, setting `operator_presence` back to `present` or changing
+  `display_watch_sec`, needs a `fleet-serve` restart** before the watcher judges by the new mode. Until
+  then it keeps applying the old one to a twin that is already loaded; the processes that place work read
+  their own config.
 
 ## What every result carries
 
@@ -256,6 +322,23 @@ has no reader of its own, and a live reading always wins.
 `offload_status.local` carries `tier_profile`, `tiers` and `layers` for the box you are on;
 `fleet.nodes[].layers` carries what each node publishes.
 
+## The rendered config is checked
+
+`install render` refuses a composite render whose seat is pinned to different cards than its layer
+declares (`servingtmpl.CheckComposite`, ADR 0052 D5: it reads the rendered text, which is what llama-swap
+loads). A render may pin by GPU UUID (`CUDA_VISIBLE_DEVICES=GPU-…`, which is what a box whose cards
+reorder uses, and what the twin template's header tells an operator to substitute): a UUID pin is a pin,
+never "pins nothing". Two UUID lists are the same cards when each id matches one of the other's (a
+declared prefix stands for the id that extends it), and a UUID list must name as many cards as the
+declaration does. A UUID against an index declaration cannot be settled from rendered text, so the
+gate settles it through this machine's own card table (`nvidia-smi`, read once and only when such a
+comparison is needed): each UUID becomes its CUDA index and the two are compared as sets. When no table
+can be read, or it does not list the card, the render is **refused**, naming the seat and the way out:
+declare the seat's `device` (and `display_device`) as the GPU UUID in `layers`, or render on the box.
+It used to pass such a pin unexamined, which let a twin render onto any card. The `display_floor`
+guard resolves a seat's UUID `device` through the probe too; one it cannot resolve counts as on the
+display card, so the footprint is required rather than the arithmetic reading `free - 0`.
+
 ## What did not change
 
 - A box with no `layers` publishes not one new key on `/fleet/health`, `offload_status`, any
@@ -277,15 +360,53 @@ has no reader of its own, and a live reading always wins.
   A 256 KiB contract estimates ~87k tokens, which is why a composite box raises its own
   contract cap to `min(2 MiB, largest layer window × 3)`.
 
+## Opening the display layer
+
+`blackwell-3x16` ships the layer declared but **dormant**, and `operator_presence` defaults to `present`: two
+gates, both shut. Opening them is a sequence, in this order, and it is the operator's to run. The G1b recipe in
+[the composite-tier plan](../superpowers/plans/2026-09-09-composite-tier.md) measures the result.
+
+1. **Back up, dated:** the live config and the llama-swap yaml. `local-offload doctor` names the config file
+   the harness loaded first; edit that one, since a second copy elsewhere is not read.
+2. **Seed `tier_profile`, `tiers` and `layers` into the live config.** `local-offload install seed --profile
+   blackwell-3x16 --home <install root>` prints the fragment; merge those three keys. A box with no `layers` has
+   no display layer to open. The layer arrives `dormant: true` with `display_device` as an index; on a board
+   whose cards re-enumerate after a power loss, name the display card by UUID there. `local-offload doctor`
+   must stay clean, and `offload_status` `local.layers` must list `display` as not admissible (dormant).
+3. **Put the display twins in the llama-swap yaml, pinned by UUID.** `install render` emits `gemma-4-e4b-display`
+   and `gemma-4-e2b-display`, their vars and the `display` set for a tier that declares the layer (the template
+   renders them with `CUDA_VISIBLE_DEVICES=1`). Replace that pin on each twin with `CUDA_VISIBLE_DEVICES=GPU-<uuid of
+   the display card>` (`nvidia-smi -L`): an index follows the board's enumeration, so after a re-enumeration a
+   twin pinned by index loads onto a card the floor does not guard. The render check accepts a UUID pin (see
+   "The rendered config is checked").
+4. **Restart llama-swap, with the vLLM seat stopped cleanly first.** The twins exist only in the file, so
+   llama-swap has to re-read it, and a forced llama-swap restart orphans the vLLM seat's engine process
+   with its cards still held. Stop the seat through its own unit, wait until its cards read free, restart
+   llama-swap the way the node normally does, verify the new process is the one answering, and confirm
+   `/v1/models` lists both twins and the pair seat serves again.
+5. **Set `operator_presence` to `auto`.** Not `away` (see Guards): `away` admits at the desk.
+6. **Set `layers[display].dormant` to `false`**, last, because it is the step that lets the harness place on
+   the card. Then (re)start `fleet-serve` in the operator's console session, so the post-admission check is
+   built from the config that has the layer in it. The layer stays closed (inadmissible, naming the watcher)
+   until that restart has written its first heartbeat.
+7. **Read it back.** `offload_status`: `local.operator_presence` (mode `auto`, the reading and whether it
+   admits), `local.layers` (`display` admissible exactly when the readings say so) and
+   `local.display_guard.watching` `true`.
+
+**A rendered twin is loadable by any llama-swap client.** Once step 3 is done the twin is an ordinary
+llama-swap model: a request from any client that names `gemma-4-e4b-display` loads it onto the display
+card, whatever `dormant` and `operator_presence` say, because those two gate the harness's placement and
+nothing in front of llama-swap. The post-admission check is what reaches that case: it asks about every
+loaded model of the layer, whoever loaded it, so a twin a non-harness client loaded at the desk is
+unloaded within `display_watch_sec` like one the harness placed. It cannot stop the load, only end it.
+
 ## Operator decisions surfaced
 
-- **The dormant display layer.** It renders (two twins pinned to device 1, a matrix set that
-  runs them beside the pair seat) and stays closed. Enabling it is one edit — `dormant: false`
-  on that layer in `config.json` — and it is the operator's, after reading the G1b measurement
-  (does the desktop hold its floor, and does the small call get faster than time-sharing the
-  pair's cards?).
-- **`operator_presence`.** Until it is set to `auto` or `away`, no placement touches the
-  display card.
+- **The dormant display layer.** Opening it is the sequence above, and it is the operator's, after reading
+  the G1b measurement (does the desktop hold its floor, and does the small call get faster than
+  time-sharing the pair's cards?).
+- **`operator_presence`.** Until it is set to `auto` (or the override `away`), no placement touches the
+  display card. `auto` is the supported mode.
 - **No installer path downloads three-card weights.** Any three-card seat is opt-in and
   operator-installed.
 
@@ -295,6 +416,7 @@ has no reader of its own, and a live reading always wins.
 |---|---|
 | `internal/placement/` | the decision table, the guards, the presence probe, the live snapshot, the health rows |
 | `internal/config/layers.go` | `LayerSpec` / `LayerSeat`, the five config keys, `ValidateLayers`, `AgentContextCapBytes` |
+| `internal/displaywatch/`, `fleet_displaywatch.go` | the post-admission check: `/running`, `placement.ResidentVerdict`, the per-model unload, the state file `offload_status` reads |
 | `internal/gpuprobe/` | the nvidia-smi parser and runner, host free RAM, index/UUID resolution |
 | `internal/core/placed.go` | `core.Placed`, the block every result publishes |
 | `internal/servingtmpl/composite.go` | the checked union (`CheckComposite`) and the display-twin fences |
@@ -305,3 +427,4 @@ has no reader of its own, and a live reading always wins.
 | `setup/templates/profiles.json` | `composes` and `layers` for `blackwell-3x16`; `layers`, `vllm_seat` and `extra_vllm_seats` for `ampere-16` |
 | `setup/install.ps1` | the Windows parity copy of the composite seed |
 | [ADR 0052](../architecture/decisions/0052-a-box-is-the-union-of-its-tiers-and-placement-is-a-per-task-decision.md) | the decision record |
+| [ADR 0075](../architecture/decisions/0075-the-display-layer-opens-under-the-presence-guard-and-leaves-when-the-operator-returns.md) | the display layer opens under the presence guard and leaves when the operator returns |

@@ -446,6 +446,30 @@ func FreeGiB(devs []Device, key string) (float64, bool) {
 	return found.FreeGiB, true
 }
 
+// ScreenCardIndexes lists, as nvidia-smi indices in the order the probe lists them, the cards the
+// driver says drive a monitor: display_active Enabled OR display_attached Yes (Device.DrivesDisplay,
+// the placement rule). It is how the display_floor guard learns that the card a config NAMES is not
+// the card the screen is on (the board reorders on a power loss, a cable moves): the guard
+// contradicts a declaration on this evidence, never assumes one from it.
+//
+// So it answers only when the reading can: nil when no card drives a display (headless, or the
+// screen is on an iGPU), and nil when any device of the reading is AttachedUnknown (the query that
+// carries display_attached failed once, so the reading cannot tell the monitor's card from the
+// others, and a display_active that happens to read Enabled is not evidence either). Several cards
+// are named when several drive a display; a declared card among them is not contradicted.
+func ScreenCardIndexes(devs []Device) []string {
+	var out []string
+	for _, d := range devs {
+		if d.AttachedUnknown {
+			return nil
+		}
+		if d.DrivesDisplay() {
+			out = append(out, strconv.Itoa(d.Index))
+		}
+	}
+	return out
+}
+
 // NvidiaSmiRunner returns the function that shells the per-device query —
 // the exact command fleet-serve's health sampler has always run — resolving
 // nvidia-smi from PATH first and, on Windows, falling back to
