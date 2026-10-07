@@ -35,11 +35,14 @@ configuration): the harness's `agent-pool` is the two-card pair `qwen3.8-27b-vll
 `vllm_seat`), and no harness layer declares the three-card seat, so the placement table never puts a contract on
 it. From 2026-09-21 to 2026-10-04 both names were one seat.
 
-One consequence to plan around: the two vLLM seats need the same cards and share one llama-swap port and its
-mutually exclusive `interactive` set, so they are never loaded together. A harness contract that runs locally
-(`harness_agent_run`, or the local slot of an `agent_delegate` spread) while an opencode session holds the
-three-card seat makes llama-swap unload it and cold-load the pair, and the session's next turn swaps back; each
-cold load is minutes. Route such legs to the fleet's other nodes when a session is live on the three-card seat.
+The two vLLM seats need the same cards and share one llama-swap port and its mutually exclusive `interactive`
+set, so they are never loaded together, and loading one unloads the other (a cold load of minutes each way).
+Since 0.165.2 the harness keeps its own work off an opencode session's seat: while the three-card seat is
+loaded, the local agent seat reads as occupied (the seat guard's verdict), so `agent_delegate` (route `auto` or
+`spread`) deals to a remote with room, waits in line when every remote is full, and loads the pair only when no
+remote can take the contract; `offload_ask` with no route takes `auto` the same way. Two doors still load the
+pair here: an explicit `route:"local"`, and `agent_run` with no route, whose `read_root` cannot travel. Name
+`route:"auto"` on a self-contained `agent_run` while a session is live on the three-card seat.
 
 ## Behavior (verified live 2026-08-24, local primaries)
 
