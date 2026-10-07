@@ -254,8 +254,12 @@ doors ran local unconditionally before, so a remote seat could not be named from
 single-contract path, and the response names `node`, `placement`, `seat` and `executed_on`. The two
 doors put different things on the wire: for `agent_run` neither `read_root` nor `model` travels — the
 executing node reads its own root and runs its own seat, so it is for self-contained goals and
-`setup_actions` — while for `offload_ask` the files ride inline, so any node can answer. Omitted, or
-`local`, keeps the old behaviour exactly.
+`setup_actions` — while for `offload_ask` the files ride inline, so any node can answer. `local` keeps
+the old behaviour exactly, and so does an omitted route on `agent_run`. An omitted route on `offload_ask`
+runs local too, except when loading the agent seat would unload another vLLM seat that holds the cards
+(the seat guard's verdict; 0.165.2): the ask then takes `auto`, and the response carries a `route_note`
+naming that seat. The ask is self-contained, so nothing is lost by moving it; `agent_run` reads its
+`read_root` on this box and stays.
 
 #### The whole-call deadline (ADR 0065)
 

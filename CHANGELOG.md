@@ -6,6 +6,30 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.165.2] - 2026-10-06 - an agent seat whose load would evict another vLLM seat counts as busy
+
+- **The defect, on the reference box.** The harness's agent seat (`agent-pool`, the two-card pair) and opencode's
+  three-card seat share the same cards, one llama-swap port and a mutually exclusive set. The local-busy probe read
+  only the agent seat's own in-flight count, so while opencode held the three-card seat the agent seat read as
+  not loaded, which meant idle: `agent_delegate` (route `auto` and `spread`) dealt the contract to the local seat and
+  llama-swap unloaded the operator's session to load the pair. The cascade already had a guard for exactly this
+  (`internal/seatguard`); the agent doors never asked it.
+- **The fix.** `probeLocalBusy` asks the seat guard when the agent seat is not loaded. When the load would unload a
+  loaded vLLM seat, the reading is busy and names that seat (`occupiedBy`). Route `auto` (the joint deal and the
+  per-subtask placement), `spread`, the capacity wait and the retry treat it as they treat a busy seat: a remote with
+  room first, a place in line when every remote is full, the local seat only when no remote can take the contract.
+  Reasons say `local seat occupied: loading it would evict the loaded vLLM seat <seat>`; an unoccupied seat's wording
+  is unchanged. An unknown guard reading names no seat and deals as before.
+- **`offload_ask` with no route.** Its files ride inline, so when the local seat is occupied an ask with no route takes
+  `auto` and the response carries a `route_note` naming the seat. An explicit `route:"local"` still runs here, and
+  `agent_run` with no route stays local (its `read_root` does not travel); docs say to name `route:"auto"` on a
+  self-contained `agent_run` while an opencode session holds the three-card seat.
+- **Off switch.** `cascade_seat_guard: false` turns this off together with the cascade guard.
+- Docs: `fleet-node.md` (the local slot), `mcp-server.md` (C-46 routes), `opencode-integration.md`, and the
+  `offload_ask` / `agent_delegate` route descriptions. Tests: `occupied_seat_test.go` (the real probe and guard against a
+  fake llama-swap: occupied, idle, guard off, undeclared occupant; `auto`, `spread`, the per-subtask path and the
+  no-fleet fallback through `Run`) and `ask_occupied_test.go`.
+
 ## [0.165.1] - 2026-10-06 - blackwell-3x16 runs the harness on two cards again; the three-card seat is opencode's
 
 - **The operator's order, in the table.** 2026-10-04: "modify the <node-b> offload harness tier so it runs on 2 cards again
