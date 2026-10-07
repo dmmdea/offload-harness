@@ -180,22 +180,55 @@ func TestRunSpreadDealsAwayFromAnOccupiedLocalSeat(t *testing.T) {
 	}
 }
 
-// TestRunAutoOccupiedWithNoFleetStillRunsLocal pins the last resort: with no
-// remote that could take the contract the busy rule never loses work, so the
-// contract runs on the local seat (evicting the occupant) and says why.
-func TestRunAutoOccupiedWithNoFleetStillRunsLocal(t *testing.T) {
+// TestRunOccupiedWithNoFleetWaitsInLine: with no remote that could take the
+// contract, an occupied seat is a place in line (operator 2026-10-06: "wait in
+// line"), never the fallback: nothing loads over the occupant. With the wait off
+// the place in line ends at once, naming the occupant.
+func TestRunOccupiedWithNoFleetWaitsInLine(t *testing.T) {
 	compressPolls(t, 10*time.Millisecond, 2*time.Second)
-	cfg := occupiedCfg(t, occupiedSwap(t, "opencode-seat"))
+	for _, route := range []string{"auto", "spread"} {
+		t.Run(route, func(t *testing.T) {
+			cfg := occupiedCfg(t, occupiedSwap(t, "opencode-seat"))
+			var localCalls atomic.Int64
+			results, sum, err := Run(context.Background(), cfg, passingLocal(&localCalls), contracts(1), route, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if localCalls.Load() != 0 || sum.Succeeded != 0 {
+				t.Fatalf("summary=%+v local=%d: the occupied seat must not be loaded over the occupant", sum, localCalls.Load())
+			}
+			pr := results[0]
+			if all := pr.Err + pr.PlacementReason + pr.Result.Reason; !strings.Contains(all, "would evict the loaded vLLM seat opencode-seat") {
+				t.Fatalf("err=%q placement=%q reason=%q: the outcome must name the occupant", pr.Err, pr.PlacementReason, pr.Result.Reason)
+			}
+		})
+	}
+}
+
+// TestRunOneOccupiedWithNoFleetTakesTheSeatOnceTheOccupantLeaves: the per-subtask
+// placement with no remote waits in line, and the wait runs the subtask on the
+// local seat the moment the occupant leaves.
+func TestRunOneOccupiedWithNoFleetTakesTheSeatOnceTheOccupantLeaves(t *testing.T) {
+	compressPolls(t, 5*time.Millisecond, time.Second)
+	compressWait(t, 10*time.Millisecond, 20*time.Millisecond)
+	cfg := testCfg(t)
+	cfg.AgentPlacementWaitSec = 10
+	var occupied atomic.Bool
+	occupied.Store(true)
 	var localCalls atomic.Int64
-	results, sum, err := Run(context.Background(), cfg, passingLocal(&localCalls), contracts(1), "auto", nil)
-	if err != nil {
-		t.Fatal(err)
+	local := func(ctx context.Context, c core.AgentContract, o LocalOptions) (core.AgentWireResult, error) {
+		if occupied.Load() {
+			t.Error("the local seat ran while it was occupied")
+		}
+		return passingLocal(&localCalls)(ctx, c, o)
 	}
-	if sum.Succeeded != 1 || localCalls.Load() != 1 {
-		t.Fatalf("summary=%+v local=%d: with no fleet the work must still run", sum, localCalls.Load())
-	}
-	if r := results[0].PlacementReason; !strings.Contains(r, "no eligible remote") || !strings.Contains(r, "would evict the loaded vLLM seat opencode-seat") || !strings.Contains(r, "so the occupant is unloaded") {
-		t.Fatalf("placement reason %q must say no remote could take it AND that the occupant is unloaded", r)
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		occupied.Store(false)
+	}()
+	pr := occupiedRunner(t, cfg, local, nil, &occupied).runOne(context.Background(), 0, remoteContract())
+	if localCalls.Load() != 1 || pr.Result.Deferred {
+		t.Fatalf("local=%d err=%q result=%+v: once the occupant left, the waiting subtask must run local", localCalls.Load(), pr.Err, pr.Result)
 	}
 }
 

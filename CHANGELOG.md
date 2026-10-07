@@ -6,6 +6,28 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.165.3] - 2026-10-06 - an occupied seat waits in line; a gate turn-away keeps the deal's busy reading
+
+- **An occupied seat is never the fallback (operator 2026-10-06: "wait in line").** 0.165.2 still loaded the local
+  agent seat over another vLLM seat when no remote could take the contract at all. Now route `auto` (the joint deal
+  and the per-subtask placement) and `spread` hand that subtask to the capacity wait instead: it runs on a remote that
+  frees, or on the local seat once the occupant has left (`local seat was occupied by the vLLM seat <seat>, which left
+  after <t>`), and ends as a capacity defer at `agent_placement_wait_sec`. The wait checks occupancy whatever started
+  it, with or without remotes configured. An explicit `route:"local"` and `agent_run` with no route are unchanged.
+- **A process-gate turn-away keeps the deal's busy reading.** The capacity wait re-read the local seat's load only for
+  the deal's overflow subtask. A subtask the deal had sent to a remote because the seat read busy, and that the
+  process gate then turned away (this process already held the node's admission slot) or a remote refused, took the
+  busy seat at the first tick. `dealReadLocalBusy` now carries the deal's reading of the seat's LOAD (in flight,
+  loading, occupied; never a lease, which the wait judges itself, and one this process holds must not keep its own
+  subtasks off the seat) into the wait for every subtask. The first draft carried the lease too and a review caught
+  it: a held media lease kept a refused subtask off a seat whose run-cap line had freed. This was the CI-only flake of
+  `TestOverflowStaysOffABusySeatWhoseLoadBecomesUnreadable` (red on main 2026-10-01 and on #535);
+  `TestAGateTurnAwayKeepsTheDealsBusyReading` reproduces it deterministically (old rule: 3 of 3 runs red on both
+  routes).
+- Docs: `fleet-node.md` (the capacity wait, the occupied seat), `opencode-integration.md`. Tests:
+  `TestRunOccupiedWithNoFleetWaitsInLine` (auto, spread), `TestRunOneOccupiedWithNoFleetTakesTheSeatOnceTheOccupantLeaves`,
+  `TestAGateTurnAwayKeepsTheDealsBusyReading` (spread, auto); each new branch mutated red.
+
 ## [0.165.2] - 2026-10-06 - an agent seat whose load would evict another vLLM seat counts as busy
 
 - **The defect, on the reference box.** The harness's agent seat (`agent-pool`, the two-card pair) and opencode's
