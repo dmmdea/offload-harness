@@ -94,13 +94,15 @@ func TestAgentDelegateRegistrationGated(t *testing.T) {
 // delegateTestServer builds a Server with the delegation flag on, every side
 // effect rooted in a temp dir, and a fake local runner injected through the
 // localAgent seam.
-func delegateTestServer(t *testing.T, local func(context.Context, core.AgentContract, delegate.LocalOptions) (core.AgentWireResult, error)) *Server {
+func delegateTestServer(t *testing.T, local func(context.Context, core.AgentContract, delegate.LocalOptions) (core.AgentWireResult, error), roster ...string) *Server {
 	t.Helper()
 	home := t.TempDir()
 	cfg := config.Default()
 	cfg.Home = home
 	cfg.LedgerPath = filepath.Join(home, "ledger.jsonl")
 	cfg.AgentDelegationEnabled = true
+	// roster is the configured fleet (delegate_remotes): a call's own remotes list may only narrow it.
+	cfg.DelegateRemotes = roster
 	s := New(pipeline.New(cfg, nil, nil, nil))
 	s.localAgent = local
 	return s

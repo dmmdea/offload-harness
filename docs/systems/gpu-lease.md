@@ -251,8 +251,8 @@ remote takes the contract; with none, the runner waits up to `agent_lease_wait_s
 where three foreign contracts landed on a reserved two-card seat mid-measurement. `route=local` is
 not gated, and a `media` holder only steers (the affinity gate above arbitrates it), so the sentence
 before this one still holds for interactive text calls: a `text` reservation does not block them.
-Since 0.113.18 that wait is the delegator's **capacity wait** (`agent_placement_wait_sec`, default
-120 s, or `agent_lease_wait_sec` when longer): it watches the lease AND every remote's room, so a
+Since 0.113.18 that wait is the delegator's **capacity wait** (until the call's deadline less a reserve when the call has one,
+ADR 0073, else `agent_placement_wait_sec`, default 120 s, or `agent_lease_wait_sec` when longer): it watches the lease AND every remote's room, so a
 remote that frees while the local card is reserved takes the work; the holder-naming deferral is what
 remains when nothing frees. The re-placement path's local last resort honours the lease too (it did
 not before). See docs/systems/fleet-node.md, "Bands, tenants, saturation and the capacity wait".

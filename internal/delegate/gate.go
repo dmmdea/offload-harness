@@ -382,6 +382,17 @@ func provablyStartsNow(v NodeView) bool {
 	return v.MaxConcurrentJobs > 0 && v.JobsRunning < v.MaxConcurrentJobs && v.JobsQueued == 0
 }
 
+// freeWorkerProven reports whether v's own numbers PROVE a free execution slot with nobody
+// ahead of a new job: it publishes its worker ceiling, fewer jobs run than that, none waits in
+// its backlog, and it does not report itself saturated. It is the second proof provablyStartsNow
+// accepts and not the first: a node whose queue is empty because it publishes no counters at all
+// (an older node, a fake) proves nothing about its workers, and "unknown is never a yes" is the
+// rule every capacity reader in this package follows. A Retry-After cooldown is lifted only on
+// this proof (cooldowns.lift, ADR 0073).
+func freeWorkerProven(v NodeView) bool {
+	return !saturated(v) && v.MaxConcurrentJobs > 0 && v.JobsRunning < v.MaxConcurrentJobs && v.JobsQueued == 0
+}
+
 // remoteEligible is the §S3 HARD gate — every condition must hold, and each
 // one fails toward local:
 //
@@ -395,7 +406,7 @@ func provablyStartsNow(v NodeView) bool {
 //     fits the advertised ceiling with room for the loop itself. An
 //     unadvertised ceiling (0) can never fit — "unknown" is not a capacity.
 //     The arithmetic lives in fit.go's adequate() so the gate and the
-//     smallest-ADEQUATE-seat fit score can never drift apart on what "fits"
+//     ADEQUATE-seat fit score can never drift apart on what "fits"
 //     means.
 //   - OutputSchema present (len>0 — bytes, not merely non-nil): the reshaped
 //     verifiability requirement (roast delta 3). Remote output merges only

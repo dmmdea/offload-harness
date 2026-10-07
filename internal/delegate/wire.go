@@ -79,7 +79,8 @@ type SummaryWire struct {
 	Batches              int `json:"batches,omitempty"`
 	Skipped              int `json:"skipped,omitempty"`
 	// Waited / Shed (0.113.18): subtasks that waited for fleet capacity before a
-	// node took them (the capacity wait, agent_placement_wait_sec), and
+	// node took them (the capacity wait: the call's deadline less a reserve, else
+	// agent_placement_wait_sec, ADR 0073), and
 	// sheddable subtasks (priority -1) that found no idle node and were shed
 	// (defer_class capacity). omitempty — a run that neither waited nor shed
 	// publishes byte-identically to before. `waited: 5` on a green run is the
@@ -147,7 +148,7 @@ type ResultWire struct {
 	Replacements    int    `json:"replacements,omitempty"`
 	ReplacementNote string `json:"replacement_note,omitempty"`
 	// CapacityWaitSec (0.113.18): how long this subtask waited for a node to
-	// have room (agent_placement_wait_sec) — not charged to timeout_sec.
+	// have room (the call's deadline less a reserve, else agent_placement_wait_sec) — not charged to timeout_sec.
 	CapacityWaitSec float64 `json:"capacity_wait_sec,omitempty"`
 	// PlaceKeeping / RetryAfterSec (GPU routing P7): when the capacity wait ended with nothing
 	// taking the work, the places in line it stood in (node, what it waited behind, when that is

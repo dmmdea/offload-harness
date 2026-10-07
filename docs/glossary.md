@@ -16,8 +16,9 @@ see [flows/fleet-job-lifecycle.md](flows/fleet-job-lifecycle.md).
 ## Backlog gate
 
 The delegator's rule that holds a fleet node out of a placement when a new job would wait longer to START
-there than the caller will wait (`startsWithinPatience`): the node's own `queue_wait_estimate_sec`, or the
-arithmetic over its jobs and recent wall, against the contract's poll budget. A placement feasibility
+there than the caller will wait (`startsWithinPatience`): the node's own estimate for a new job (`new_job_wait_sec`, or
+an older node's `queue_wait_estimate_sec` plus one slot), or the arithmetic over its jobs and recent wall, against the
+contract's poll budget (clamped to the time the call has left, ADR 0073). A placement feasibility
 refusal that prints its arithmetic, in the same class as the wall check in `feasibleFinal`, never a
 preference for a faster seat; a held-out node is read again every tick and never refused for good. The same
 ETA sizes a job's queue budget. See [ADR 0063](architecture/decisions/0063-placement-holds-instead-of-sleeping-or-refusing.md).
@@ -33,11 +34,12 @@ local-only. Not a headless scraper: it uses the operator's real session. See
 
 ## Capacity wait
 
-The delegator's queue (`agent_placement_wait_sec`, 120 s by default): a subtask every node that could run it
+The delegator's queue (until the call's whole-call deadline less a short reserve when the call has one, ADR 0073; else
+`agent_placement_wait_sec`, 120 s by default): a subtask every node that could run it
 refused for capacity, or whose only placements are nodes that are merely busy, a reserved local seat or a full
 local run-cap line, waits here, re-reading the
 fleet's health every few seconds, and lands on the first node that has room. The time it idles is credited,
-never charged to the contract's `timeout_sec`; a node inside its `Retry-After` cooldown or held out by the
+never charged to the contract's `timeout_sec`; a node inside its `Retry-After` cooldown (unless a health read after the refusal proves a free worker, ADR 0073) or held out by the
 backlog gate is skipped. See [ADR 0063](architecture/decisions/0063-placement-holds-instead-of-sleeping-or-refusing.md).
 
 ## Cascade

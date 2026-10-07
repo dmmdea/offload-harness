@@ -10,6 +10,7 @@ package delegate
 
 import (
 	"encoding/json"
+	"math"
 	"testing"
 
 	"github.com/dmmdea/offload-harness/internal/core"
@@ -137,9 +138,11 @@ func TestScoreFitMechanicalPrefersTheFasterSeatWhenRatesArePublished(t *testing.
 	}
 }
 
-// TestQueueWaitForFormula pins the queueWait arithmetic directly: the node's
-// published queue_wait_estimate_sec wins outright when present; otherwise
-// max(0, running+queued-max+1) × recent_wall / max(1, max).
+// TestQueueWaitForFormula pins the queueWait arithmetic directly: what the node
+// publishes for a NEW job wins outright when present (new_job_wait_sec as-is; the
+// older queue_wait_estimate_sec, the wait of its deepest QUEUED job, one slot
+// deeper - ADR 0073); otherwise max(0, running+queued-max+1) × recent_wall /
+// max(1, max).
 func TestQueueWaitForFormula(t *testing.T) {
 	v := NodeView{JobsRunning: 3, JobsQueued: 2, MaxConcurrentJobs: 4, RecentAgentWallSec: 40}
 	// ahead = 3+2-4+1 = 2; workers = 4 → 2*40/4 = 20
@@ -154,29 +157,43 @@ func TestQueueWaitForFormula(t *testing.T) {
 	if got := queueWaitFor(noWall); got != 0 {
 		t.Fatalf("queueWaitFor(no recent wall) = %v, want 0 — unmeasured backlog is no opinion, not a penalty", got)
 	}
+	// An older node's estimate is the wait of the deepest job ALREADY queued, so a new job waits one slot
+	// (wall 40 s / 4 workers = 10 s) longer: the node's own number plus the slot, not the bare estimate.
 	published := 7.5
 	v.QueueWaitEstimateSec = &published
-	if got := queueWaitFor(v); got != 7.5 {
-		t.Fatalf("queueWaitFor must prefer the node's own published estimate: got %v, want 7.5", got)
+	if got := queueWaitFor(v); got != 17.5 {
+		t.Fatalf("queueWaitFor must prefer the node's own published estimate, priced one slot deeper for a new job: got %v, want 7.5 + 10", got)
+	}
+	// A node that publishes the wait of a NEW job is believed as it stands: it already counted the slot.
+	forNew := 12.0
+	v.NewJobWaitSec = &forNew
+	if got := queueWaitFor(v); got != 12 {
+		t.Fatalf("queueWaitFor must use new_job_wait_sec as it stands: got %v, want 12", got)
 	}
 }
 
-// TestEtaRankingIsAStrictWeakOrdering brute-forces the property the ranking
-// has to have and twice did not. bestRemote FOLDS betterRemote over a roster,
-// and Go states the requirement for any comparison used to order a set
-// (slices.SortFunc: a strict weak ordering, transitive incomparability
-// included). Two defects broke it:
-//
-//   - the near-tie coin hashed the SEED alone, so it answered the same
-//     whichever way round it was asked and P beat Q while Q beat P;
-//   - a seat with no measured rate fell back to comparing WINDOWS for that pair
-//     only, so a mixed roster was ranked on two different metrics depending on
-//     who was being compared, and cycled.
-//
-// The roster mixes measured and unmeasured seats, four window sizes, backlogs
-// and cold loads — the shapes a real fleet mid-rollout actually has.
-func TestEtaRankingIsAStrictWeakOrdering(t *testing.T) {
-	st := oneStepSubtask("extract every field from the report", 300)
+// TestAPublishedZeroNewJobWaitIsBelievedOverTheCounters: a node that says a new job waits 0 s is believed,
+// whatever jobs_running says. Those counters include uncapped jobs (ten renders on a node whose four agent
+// slots are idle read as 10 running against 4 workers), which is why the node publishes the zero at all.
+// Without the field the counters price the node: (10 + 0 - 4 + 1) x 60 s / 4 = 105 s.
+func TestAPublishedZeroNewJobWaitIsBelievedOverTheCounters(t *testing.T) {
+	zero := 0.0
+	v := NodeView{JobsRunning: 10, JobsQueued: 0, MaxConcurrentJobs: 4, RecentAgentWallSec: 60, NewJobWaitSec: &zero}
+	if got := queueWaitFor(v); got != 0 {
+		t.Fatalf("queueWaitFor with a published new_job_wait_sec of 0 = %v, want 0: the node counted its capped backlog", got)
+	}
+	if sec, known := etaStartFor(v); !known || sec != 0 {
+		t.Fatalf("etaStartFor = %v (known %v), want a known 0", sec, known)
+	}
+	v.NewJobWaitSec = nil
+	if got := queueWaitFor(v); got != 105 {
+		t.Fatalf("queueWaitFor without the field = %v, want the counters' 105 s: the misreading the explicit zero prevents", got)
+	}
+}
+
+// mixedFleetRoster is the roster the ordering tests share: measured and unmeasured seats, four window
+// sizes, backlogs and cold loads - the shapes a real fleet mid-rollout actually has.
+func mixedFleetRoster() []NodeView {
 	mk := func(id string, ctx int, tokS float64) NodeView { return etaFixtureRemote(id, ctx, tokS, 0) }
 	nodes := []NodeView{
 		mk("a", 8192, 10), mk("b", 8192, 11), mk("c", 8192, 12), mk("d", 8192, 13),
@@ -202,7 +219,26 @@ func TestEtaRankingIsAStrictWeakOrdering(t *testing.T) {
 	busyNoRate := eligibleRemote()
 	busyNoRate.NodeID = "busy-norate"
 	busyNoRate.JobsRunning, busyNoRate.JobsQueued, busyNoRate.RecentAgentWallSec = 2, 3, 90
-	nodes = append(nodes, busy, cold, coldNoRate, busyNoRate)
+	return append(nodes, busy, cold, coldNoRate, busyNoRate)
+}
+
+// TestEtaRankingIsAStrictWeakOrdering brute-forces the property the ranking
+// has to have and twice did not. bestRemote FOLDS betterRemote over a roster,
+// and Go states the requirement for any comparison used to order a set
+// (slices.SortFunc: a strict weak ordering, transitive incomparability
+// included). Two defects broke it:
+//
+//   - the near-tie coin hashed the SEED alone, so it answered the same
+//     whichever way round it was asked and P beat Q while Q beat P;
+//   - a seat with no measured rate fell back to comparing WINDOWS for that pair
+//     only, so a mixed roster was ranked on two different metrics depending on
+//     who was being compared, and cycled.
+//
+// The roster mixes measured and unmeasured seats, four window sizes, backlogs
+// and cold loads — the shapes a real fleet mid-rollout actually has.
+func TestEtaRankingIsAStrictWeakOrdering(t *testing.T) {
+	st := oneStepSubtask("extract every field from the report", 300)
+	nodes := mixedFleetRoster()
 
 	prior := fleetTokSPrior(nodes)
 	if prior <= 0 {
@@ -274,5 +310,105 @@ func TestFleetPriorRanksAnUnmeasuredSeatAmongTheRest(t *testing.T) {
 	}
 	if r := rankFor(st, quiet, 0); r.etaKnown {
 		t.Fatal("with no prior available a seat must stay unranked, not be invented a rate")
+	}
+}
+
+// TestScoreFitOrdersAMixedFleetAsThePairwiseRankingDoes extends the brute force above to the int fold
+// route=spread deals by (ADR 0057, the diagnosis' F04). scoreFit used to rate a seat with no published
+// rate on its window alone while rankFor priced it at the fleet's median, so the same roster was
+// ordered one way by Place and another by the spread deal: an unmeasured seat's -window (about -3e4)
+// sat five orders of magnitude above a measured seat's -eta x 10 x 2^24 and took every mechanical
+// slot, and on reasoning work a measured 32k seat beat an unmeasured 131k one. Over the shared roster
+// the fold now agrees with betterRanked for every pair the pairwise ranking decides without its
+// seeded draw: reasoning pairs on different windows, and mechanical pairs whose expected completions
+// are further apart than the draw can move them (p2cNearTieFrac, nudged +/-10 % either way).
+func TestScoreFitOrdersAMixedFleetAsThePairwiseRankingDoes(t *testing.T) {
+	nodes := mixedFleetRoster()
+	prior := fleetTokSPrior(nodes)
+	if prior <= 0 {
+		t.Fatal("fixture bug: this roster publishes rates, so it must have a prior")
+	}
+	for _, goal := range []string{"extract every field from the report", "explain why the build failed across these files"} {
+		st := oneStepSubtask(goal, 300)
+		kind := inferKind(st)
+		agree, checked := 0, 0
+		for _, a := range nodes {
+			for _, b := range nodes {
+				if a.NodeID == b.NodeID {
+					continue
+				}
+				sa, sb := scoreFitWith(st, a, prior), scoreFitWith(st, b, prior)
+				ra, rb := rankFor(st, a, prior), rankFor(st, b, prior)
+				if sa == fitInadequate || sb == fitInadequate {
+					t.Fatalf("%s: %s or %s is inadequate for a 1,000-token contract: fixture bug", goal, a.NodeID, b.NodeID)
+				}
+				if !ra.etaKnown || !rb.etaKnown {
+					t.Fatalf("%s: %s or %s has no assumed rate although the roster has a prior", goal, a.NodeID, b.NodeID)
+				}
+				// A pair the pairwise ranking may decide by its seeded draw is not comparable here.
+				if kind == KindReasoning && ra.window == rb.window {
+					continue
+				}
+				if kind == KindMechanical && math.Abs(ra.eta-rb.eta) <= 0.25*math.Max(ra.eta, rb.eta) {
+					continue
+				}
+				if sa == sb {
+					t.Errorf("%s: %s and %s tie on the fold although the pairwise ranking separates them (windows %d/%d, etas %.1f/%.1f)", goal, a.NodeID, b.NodeID, ra.window, rb.window, ra.eta, rb.eta)
+					continue
+				}
+				checked++
+				for i := 0; i < 8; i++ {
+					seed := "job-" + string(rune('a'+i))
+					better, decided := betterRanked(seed, kind, ra, rb)
+					if !decided || better != (sa > sb) {
+						t.Fatalf("%s seed %s: the fold ranks %s (%d) vs %s (%d) but the pairwise ranking says %v (decided %v)", goal, seed, a.NodeID, sa, b.NodeID, sb, better, decided)
+					}
+				}
+				agree++
+			}
+		}
+		if checked == 0 || agree != checked {
+			t.Fatalf("%s: %d of %d comparable pairs agreed", goal, agree, checked)
+		}
+	}
+}
+
+// TestSpreadDealRanksAnUnmeasuredSeatOnTheFleetMedian is the same defect through the deal itself, in
+// the two shapes the brute force summarises. A seat that publishes no rate (the sixth PC joins with
+// samples == 0) must neither take the only remote slot of a mechanical fan-out from a measured 40
+// tok/s seat nor lose a reasoning slot to a measured seat with a smaller window.
+func TestSpreadDealRanksAnUnmeasuredSeatOnTheFleetMedian(t *testing.T) {
+	remoteSlot := func(r *runner, goal string) string {
+		contracts := []core.AgentContract{fitSubtask(goal, 100).Contract, fitSubtask(goal, 100).Contract}
+		slots := r.dealSpread(contracts, fitLocal())
+		if !slots[0].view.Local {
+			t.Fatalf("slot 0 = %s, want the local rotation slot", slots[0].view.NodeID)
+		}
+		return slots[1].view.NodeID
+	}
+	rated := func(id string, ctx int, tokS float64) NodeView {
+		v := etaFixtureRemote(id, ctx, tokS, 0)
+		v.QueueDepth = 0
+		return v
+	}
+	unmeasured := func(id string, ctx int) NodeView {
+		v := eligibleRemote()
+		v.NodeID, v.AgentCtxTokens, v.QueueDepth = id, ctx, 0
+		return v
+	}
+
+	// Mechanical: roster order puts the unmeasured seat last, so a rotation tie cannot hide the defect.
+	mech := fitRunner(rated("slow", 32768, 5), rated("fast", 32768, 40), unmeasured("unmeasured", 32768))
+	if got := remoteSlot(mech, fitMechGoal); got != "fast" {
+		t.Errorf("mechanical: the remote slot went to %q, want the measured 40 tok/s seat", got)
+	}
+	// Reasoning: the roomiest adequate seat first - an unmeasured seat with the biggest window.
+	reason := fitRunner(rated("small-measured", 32768, 40), unmeasured("big-unmeasured", 131072))
+	if got := remoteSlot(reason, fitReasonGoal); got != "big-unmeasured" {
+		t.Errorf("reasoning: the remote slot went to %q, want the roomier seat although it publishes no rate", got)
+	}
+	// The old API is the prior-less rule, uniformly: with nobody measured it is still window-only.
+	if a, b := scoreFit(fitSubtask(fitMechGoal, 100), unmeasured("u1", 8192)), scoreFit(fitSubtask(fitMechGoal, 100), unmeasured("u2", 32768)); a <= b {
+		t.Errorf("scoreFit without a prior: the smaller unmeasured seat scored %d against %d, want it to win mechanical work as before", a, b)
 	}
 }

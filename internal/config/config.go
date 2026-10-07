@@ -473,7 +473,12 @@ type Config struct {
 	// work; with none, the placement waits up to this many seconds (re-reading the
 	// lease once a second) and then defers, class infrastructure, naming the holder
 	// and its expiry. The wait is the larger of this and agent_placement_wait_sec
-	// (default 120 s), so 0 (the default) leaves it to the placement wait. route=local is the caller's
+	// (default 120 s), so 0 (the default) leaves it to the placement wait. Both are
+	// the wait of a call with no whole-call deadline, and of a subtask that holds a
+	// run slot while others of its call have not started (ADR 0073). A wait that the
+	// call's own deadline bounds (the MCP doors, for the last subtask to start) ends
+	// at that deadline less a reserve even when this key is longer: a wait past the
+	// deadline cannot help, the call is over before it ends. route=local is the caller's
 	// explicit choice and is not gated; a media lease is arbitrated by the
 	// model-affinity gate as before (ADR 0026) and is not a placement gate either.
 	AgentLeaseWaitSec int `json:"agent_lease_wait_sec,omitempty"`
@@ -508,9 +513,18 @@ type Config struct {
 	// released), so a contract is no longer lost because one node was busy for
 	// the minute it was dispatched ("<node-b> timed out", 2026-09-06). The wait is
 	// NOT charged to the contract's timeout_sec (like time provably spent queued
-	// on a node); it is bounded by this key alone. 0 = the built-in default
-	// (120 s); negative = do not wait (the pre-0.113.18 behaviour). A sheddable
-	// contract (priority -1) never waits: with no idle node it is shed at once.
+	// on a node). What bounds it depends on the call (ADR 0073): a call that has a
+	// whole-call deadline (the MCP doors agent_delegate and offload_research,
+	// agent_call_deadline_sec) waits until that deadline less a short reserve for
+	// a placed job to run in, whatever this key says, so production work never
+	// defers for capacity while the call still has time to place it (once every
+	// subtask of the call has started: see below); this key is
+	// the wait of a call with NO deadline (the CLI verbs, agent_run, offload_ask),
+	// where 0 = the built-in default (120 s), and the wait of a subtask that holds
+	// one of the call's run slots while others have not started (only the last
+	// subtask to start waits for the deadline). Negative = do not wait (the
+	// pre-0.113.18 behaviour), for every call. A sheddable contract (priority -1)
+	// never waits: with no idle node it is shed at once.
 	AgentPlacementWaitSec int `json:"agent_placement_wait_sec,omitempty"`
 	// AgentCallDeadlineSec (ADR 0065, register C-67) is the WHOLE-CALL deadline of
 	// the MCP doors agent_delegate and offload_research: how long one call may run
@@ -2854,14 +2868,20 @@ func DefaultComfyDir() string {
 	return ""
 }
 
+// DefaultPlacementWait is the capacity wait of a call that has no whole-call deadline when
+// agent_placement_wait_sec is unset. A call WITH a deadline waits until it instead (ADR 0073).
+const DefaultPlacementWait = 120 * time.Second
+
 // PlacementWait resolves AgentPlacementWaitSec: 0 → the built-in default
-// (120 s), negative → 0 meaning "do not wait".
+// (DefaultPlacementWait), negative → 0 meaning "do not wait". It is the wait of a call
+// with no whole-call deadline; a call that has one is bounded by it (ADR 0073) and reads
+// this only for the off switch.
 func (c Config) PlacementWait() time.Duration {
 	switch {
 	case c.AgentPlacementWaitSec < 0:
 		return 0
 	case c.AgentPlacementWaitSec == 0:
-		return 120 * time.Second
+		return DefaultPlacementWait
 	default:
 		return time.Duration(c.AgentPlacementWaitSec) * time.Second
 	}

@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/ledger"
 	"github.com/dmmdea/offload-harness/internal/pairworkloads"
@@ -28,6 +29,7 @@ import (
 func TestAWaitCutAfterARefusalIsRecordedLikeAnyOtherCut(t *testing.T) {
 	compressPolls(t, 5*time.Millisecond, time.Second)
 	compressWait(t, 20*time.Millisecond, 50*time.Millisecond)
+	withCallReserve(t, 0) // pins the CUT: with a reserve the wait ends before the deadline (callwait_test.go)
 	url := oneRefusalThenNoRoom(t)
 	cfg := testCfg(t)
 	cfg.AgentPlacementWaitSec = 30
@@ -76,25 +78,40 @@ func TestAWaitCutAfterARefusalIsRecordedLikeAnyOtherCut(t *testing.T) {
 }
 
 // TestASettledOutcomeThatIsNotACutKeepsItsAttemptsRow: the closing row is for a CUT only.
-// A capacity wait that ran out of its own TTL after a refused attempt (no deadline in
-// sight) is still recorded by the attempt's row alone, exactly as before.
+// A capacity wait that ran out of its own bound after a refused attempt is still recorded
+// by the attempt's row alone, exactly as before. Two bounds end a wait short of the call
+// deadline: its own TTL (a call with no deadline, agent_placement_wait_sec) and, since ADR
+// 0073, the call's deadline less the reserve (a call that has one).
 func TestASettledOutcomeThatIsNotACutKeepsItsAttemptsRow(t *testing.T) {
-	compressPolls(t, 5*time.Millisecond, time.Second)
-	compressWait(t, 20*time.Millisecond, 50*time.Millisecond)
-	url := oneRefusalThenNoRoom(t)
-	cfg := testCfg(t)
-	cfg.AgentPlacementWaitSec = 1
-
-	results, _, _ := runWithin(t, 8*time.Second, cfg, neverLocal(t),
-		[]core.AgentContract{remoteContract()}, "remote", []string{url}, deadlineIn(time.Hour), nil)
-	if r := results[0].Result; !r.Deferred || r.DeferClass != core.DeferClassCapacity {
-		t.Fatalf("result %+v, want the capacity wait's own TTL defer", r)
+	cases := []struct {
+		name string
+		opts func() *RunOptions
+		cfg  func(*config.Config)
+	}{
+		{"its own TTL, no call deadline", func() *RunOptions { return nil }, func(c *config.Config) { c.AgentPlacementWaitSec = 1 }},
+		{"the call's deadline less the reserve", func() *RunOptions { return deadlineIn(1800 * time.Millisecond) }, func(c *config.Config) { c.AgentPlacementWaitSec = 0 }},
 	}
-	rows, _ := ledger.ReadAll(cfg.LedgerPath)
-	for _, row := range rows {
-		if row.JobID == results[0].JobID && strings.HasPrefix(row.Reason, "capacity wait") {
-			t.Fatalf("a wait that ended on its own TTL was recorded by a closing row too: %+v", row)
-		}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			compressPolls(t, 5*time.Millisecond, time.Second)
+			compressWait(t, 20*time.Millisecond, 50*time.Millisecond)
+			withCallReserve(t, 700*time.Millisecond) // the wait ends 1.1 s in, well before the 1.8 s deadline
+			url := oneRefusalThenNoRoom(t)
+			cfg := testCfg(t)
+			tc.cfg(&cfg)
+
+			results, _, _ := runWithin(t, 8*time.Second, cfg, neverLocal(t),
+				[]core.AgentContract{remoteContract()}, "remote", []string{url}, tc.opts(), nil)
+			if r := results[0].Result; !r.Deferred || r.DeferClass != core.DeferClassCapacity || results[0].deadlineCut {
+				t.Fatalf("result %+v (cut %v), want the capacity wait's own defer, not a call-deadline cut", r, results[0].deadlineCut)
+			}
+			rows, _ := ledger.ReadAll(cfg.LedgerPath)
+			for _, row := range rows {
+				if row.JobID == results[0].JobID && strings.HasPrefix(row.Reason, "capacity wait") {
+					t.Fatalf("a wait that ended on its own bound was recorded by a closing row too: %+v", row)
+				}
+			}
+		})
 	}
 }
 
