@@ -20,6 +20,11 @@ Versioning: [SemVer](https://semver.org/).
   room first, a place in line when every remote is full, the local seat only when no remote can take the contract.
   Reasons say `local seat occupied: loading it would evict the loaded vLLM seat <seat>`; an unoccupied seat's wording
   is unchanged. An unknown guard reading names no seat and deals as before.
+- **Refusals and the wait.** A remote that refuses (a 503 from a full fleet) no longer drops the contract onto the
+  occupied seat: re-placement treats it as a place in line, as it treats a lease fence, and the capacity wait takes
+  the local seat only once the occupant has left (`local seat was occupied by the vLLM seat <seat>, which left after
+  <t>`). The guard is asked before the probe's roster-ambiguity fallback, because it resolves names from the serving
+  config: a failed roster read no longer hides the occupant. Found by review; the first draft fixed only the deal.
 - **`offload_ask` with no route.** Its files ride inline, so when the local seat is occupied an ask with no route takes
   `auto` and the response carries a `route_note` naming the seat. An explicit `route:"local"` still runs here, and
   `agent_run` with no route stays local (its `read_root` does not travel); docs say to name `route:"auto"` on a
@@ -27,8 +32,9 @@ Versioning: [SemVer](https://semver.org/).
 - **Off switch.** `cascade_seat_guard: false` turns this off together with the cascade guard.
 - Docs: `fleet-node.md` (the local slot), `mcp-server.md` (C-46 routes), `opencode-integration.md`, and the
   `offload_ask` / `agent_delegate` route descriptions. Tests: `occupied_seat_test.go` (the real probe and guard against a
-  fake llama-swap: occupied, idle, guard off, undeclared occupant; `auto`, `spread`, the per-subtask path and the
-  no-fleet fallback through `Run`) and `ask_occupied_test.go`.
+  fake llama-swap: occupied, idle, guard off, undeclared occupant, unreadable roster; `auto`, `spread`, the per-subtask
+  path and the no-fleet fallback through `Run`; a refusing remote with the wait off and on; the retry note) and
+  `ask_occupied_test.go`.
 
 ## [0.165.1] - 2026-10-06 - blackwell-3x16 runs the harness on two cards again; the three-card seat is opencode's
 

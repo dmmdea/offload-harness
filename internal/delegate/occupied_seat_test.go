@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/dmmdea/offload-harness/internal/config"
+	"github.com/dmmdea/offload-harness/internal/core"
 )
 
 // occupiedMatrix is the reference box's routing in miniature: the agent seat
@@ -44,6 +45,14 @@ matrix:
 // probe reads the agent seat as NOT loaded without any ambiguity.
 func occupiedSwap(t *testing.T, running string) string {
 	t.Helper()
+	return occupiedSwapRoster(t, running, true)
+}
+
+// occupiedSwapRoster is occupiedSwap with the roster (/v1/models) answering 503
+// when rosterOK is false: the probe then cannot resolve agent-pool, the case the
+// seat guard must still answer from the serving config.
+func occupiedSwapRoster(t *testing.T, running string, rosterOK bool) string {
+	t.Helper()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/running", func(w http.ResponseWriter, r *http.Request) {
 		if running == "" {
@@ -53,6 +62,10 @@ func occupiedSwap(t *testing.T, running string) string {
 		_, _ = w.Write([]byte(`{"running":[{"model":"` + running + `","state":"ready","proxy":"http://` + r.Host + `/direct/` + running + `"}]}`))
 	})
 	mux.HandleFunc("/v1/models", func(w http.ResponseWriter, r *http.Request) {
+		if !rosterOK {
+			http.Error(w, "roster unavailable", http.StatusServiceUnavailable)
+			return
+		}
 		_, _ = w.Write([]byte(`{"object":"list","data":[` +
 			`{"id":"local-seat","object":"model","meta":{"llamaswap":{"aliases":["agent-pool"]}}},` +
 			`{"id":"opencode-seat","object":"model"}]}`))
@@ -181,8 +194,8 @@ func TestRunAutoOccupiedWithNoFleetStillRunsLocal(t *testing.T) {
 	if sum.Succeeded != 1 || localCalls.Load() != 1 {
 		t.Fatalf("summary=%+v local=%d: with no fleet the work must still run", sum, localCalls.Load())
 	}
-	if r := results[0].PlacementReason; !strings.Contains(r, "no eligible remote") {
-		t.Fatalf("placement reason %q must say no remote could take it", r)
+	if r := results[0].PlacementReason; !strings.Contains(r, "no eligible remote") || !strings.Contains(r, "would evict the loaded vLLM seat opencode-seat") || !strings.Contains(r, "so the occupant is unloaded") {
+		t.Fatalf("placement reason %q must say no remote could take it AND that the occupant is unloaded", r)
 	}
 }
 
@@ -206,5 +219,100 @@ func TestRunOneAutoTreatsAnOccupiedSeatAsBusy(t *testing.T) {
 	}
 	if !strings.Contains(pr.PlacementReason, "would evict the loaded vLLM seat opencode-seat") {
 		t.Fatalf("placement reason %q must name the occupant", pr.PlacementReason)
+	}
+}
+
+// TestProbeLocalBusyAsksTheGuardWhenTheRosterIsUnreadable: a failed roster read
+// used to return "ambiguous" before the guard was asked, so an occupied box
+// dealt local. The guard resolves names from the serving config, so it answers.
+// And when the agent seat is itself the one running (listed under its id while
+// the box binds its alias), the guard names nothing and the reading stays the
+// old ambiguous-idle one.
+func TestProbeLocalBusyAsksTheGuardWhenTheRosterIsUnreadable(t *testing.T) {
+	ctx := context.Background()
+	rd := (&runner{cfg: occupiedCfg(t, occupiedSwapRoster(t, "opencode-seat", false))}).probeLocalBusy(ctx)
+	if !rd.busy || rd.occupiedBy != "opencode-seat" {
+		t.Fatalf("roster unreadable, opencode's seat loaded: want occupied by opencode-seat, got %+v", rd)
+	}
+	own := (&runner{cfg: occupiedCfg(t, occupiedSwapRoster(t, "local-seat", false))}).probeLocalBusy(ctx)
+	if own.busy || own.occupiedBy != "" || !own.unknown {
+		t.Fatalf("roster unreadable, the agent seat itself running: want the ambiguous idle reading, got %+v", own)
+	}
+}
+
+// occupiedRunner is a route=auto runner whose local seat reads occupied while
+// *occupied is true, against the given remotes.
+func occupiedRunner(t *testing.T, cfg config.Config, local LocalRunner, remotes []string, occupied *atomic.Bool) *runner {
+	t.Helper()
+	return &runner{
+		cfg: cfg, local: local, route: "auto", remotes: remotes,
+		intent: openIntentLedger(cfg),
+		localBusyProbe: func(context.Context) busyReading {
+			if occupied.Load() {
+				return busyReading{busy: true, occupiedBy: "opencode-seat", note: "local seat not loaded; would evict"}
+			}
+			return busyReading{note: "local seat not loaded"}
+		},
+	}
+}
+
+// TestReplacementAfterARefusalLeavesAnOccupiedSeatAlone is the review's repro:
+// the deal sends the contract to the remote, the remote refuses (503, a full
+// fleet), and the re-placement used to fall back to the local seat, unloading
+// the occupant. Now the occupied seat is a place in line, like a fence.
+func TestReplacementAfterARefusalLeavesAnOccupiedSeatAlone(t *testing.T) {
+	compressPolls(t, 5*time.Millisecond, time.Second)
+	_, url := refusingNode(t, "node-full", http.StatusServiceUnavailable, nil)
+	var occupied atomic.Bool
+	occupied.Store(true)
+	cfg := testCfg(t) // capacity wait off: the place in line ends at once as a refused placement
+	pr := occupiedRunner(t, cfg, neverLocal(t), []string{url}, &occupied).runOne(context.Background(), 0, remoteContract())
+	// neverLocal fails the test if the seat ran. With no wait the subtask ends as a refused
+	// placement, and the refusal names the occupant as the reason the local seat was no last resort.
+	if !strings.Contains(pr.Err, "placement refused") || !strings.Contains(pr.Err, "would evict the loaded vLLM seat opencode-seat") {
+		t.Fatalf("err=%q placement=%q result=%+v: want a refused placement naming the occupant", pr.Err, pr.PlacementReason, pr.Result)
+	}
+}
+
+// TestCapacityWaitTakesTheLocalSeatOnlyOnceTheOccupantLeaves: with the wait on,
+// a refused subtask stands in line; the occupied local seat is no candidate, and
+// it becomes one the moment the occupant leaves (its reason says so).
+func TestCapacityWaitTakesTheLocalSeatOnlyOnceTheOccupantLeaves(t *testing.T) {
+	compressPolls(t, 5*time.Millisecond, time.Second)
+	compressWait(t, 10*time.Millisecond, 20*time.Millisecond)
+	_, url := refusingNode(t, "node-full", http.StatusServiceUnavailable, nil)
+	cfg := testCfg(t)
+	cfg.AgentPlacementWaitSec = 10
+	var occupied atomic.Bool
+	occupied.Store(true)
+	var localCalls atomic.Int64
+	local := func(ctx context.Context, c core.AgentContract, o LocalOptions) (core.AgentWireResult, error) {
+		if occupied.Load() {
+			t.Error("the local seat ran while it was occupied")
+		}
+		return passingLocal(&localCalls)(ctx, c, o)
+	}
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		occupied.Store(false)
+	}()
+	pr := occupiedRunner(t, cfg, local, []string{url}, &occupied).runOne(context.Background(), 0, remoteContract())
+	if localCalls.Load() != 1 || pr.Result.Deferred {
+		t.Fatalf("local=%d result=%+v: once the occupant left, the waiting subtask must run local", localCalls.Load(), pr.Result)
+	}
+	if !strings.Contains(pr.PlacementReason, "occupied by the vLLM seat opencode-seat, which left after") {
+		t.Fatalf("placement reason %q must say the seat was occupied and the occupant left", pr.PlacementReason)
+	}
+}
+
+// TestRetryNoteNamesTheOccupant: the verification retry's seat check reports an
+// occupied local seat by name, not as an anonymous busy seat.
+func TestRetryNoteNamesTheOccupant(t *testing.T) {
+	var occupied atomic.Bool
+	occupied.Store(true)
+	r := occupiedRunner(t, testCfg(t), neverLocal(t), nil, &occupied)
+	busy, note := r.retrySeatBusy(context.Background(), placement{})
+	if !busy || !strings.Contains(note, "would evict the loaded vLLM seat opencode-seat") {
+		t.Fatalf("retrySeatBusy = %v, %q: want busy, naming the occupant", busy, note)
 	}
 }
