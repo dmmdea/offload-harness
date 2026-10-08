@@ -429,3 +429,99 @@ func TestNoEngineKeyLeavesTheFullRouteListByteIdentical(t *testing.T) {
 		t.Errorf("the route list changed for a box with no iGPU engine key:\n--- got\n%s--- want\n%s", got, goldenRoutes)
 	}
 }
+
+// ---- TST18: each family entry is read for ITS family --------------------------------------------
+
+// The G41 tests above give every family entry the same text encoder, so they cannot tell WHICH entry
+// doctor reads. Here each entry names a different file: doctor must check the file of the family the
+// pipeline renders (and the runner's closed family set must map ltx25 / h3 / hunyuan to themselves).
+func TestVideoNeedsMapsEachRunnerFamilyToItsOwnEntryAndFiles(t *testing.T) {
+	for _, tc := range []struct {
+		videogenFamily, wantFamily, wantLabel string
+	}{
+		{"ltx25", "ltx25", "videogen_text_encoder"},
+		{"h3", "h3", "h3 text encoder (builder default)"},
+		{"hunyuan", "hunyuan", "videogen_text_encoder"},
+		{"wan22", "wan22", "videogen_text_encoder"},
+		{"wan", "wan22", "videogen_text_encoder"},
+		{"", "wan22", "videogen_text_encoder"},
+	} {
+		cfg := bare()
+		cfg.VideoGenFamily = tc.videogenFamily
+		cfg.VideoGenTextEncoder = "flat-te.safetensors"
+		cfg.VideoGenFamilies = map[string]config.VideoFamilyBinding{
+			"ltx25": {TextEncoder: "ltx-te.safetensors"}, "hunyuan": {TextEncoder: "hunyuan-te.safetensors"},
+			"wan22": {TextEncoder: "wan-te.safetensors"}, "h3": {TextEncoder: "h3-te.safetensors"},
+		}
+		family, files, _, _ := videoNeeds(cfg)
+		if family != tc.wantFamily {
+			t.Errorf("videogen_family %q: runner family = %q, want %q", tc.videogenFamily, family, tc.wantFamily)
+			continue
+		}
+		found := false
+		for _, f := range files {
+			if f.label == tc.wantLabel {
+				found = true
+				// h3 binds no weights (builder defaults only); the others read the binding the pipeline resolves
+				if want := cfg.ResolveVideoFamilyBinding(pipelineRenderFamily(cfg)).TextEncoder; tc.wantFamily != "h3" && f.name != want {
+					t.Errorf("videogen_family %q: doctor checks %q, the pipeline renders with %q", tc.videogenFamily, f.name, want)
+				}
+			}
+		}
+		if !found {
+			t.Errorf("videogen_family %q: no %q need in %+v", tc.videogenFamily, tc.wantLabel, files)
+		}
+	}
+}
+
+// videogen_wan_loader decides the node classes: the loader of the entry the pipeline renders with
+// (the wan22 entry for videogen_family "wan"), not the flat key.
+func TestVideoNeedsReadsTheWanLoaderOfTheBoundEntry(t *testing.T) {
+	mk := func(flat, entry string) config.Config {
+		cfg := bare()
+		cfg.VideoGenFamily = "wan"
+		cfg.VideoGenWanLoader = flat
+		cfg.VideoGenFamilies = map[string]config.VideoFamilyBinding{
+			"wan22": {UnetHigh: "high.safetensors", UnetLow: "low.safetensors", WanLoader: entry},
+		}
+		return cfg
+	}
+	hasDisTorch := func(classes []string) bool {
+		for _, c := range classes {
+			if strings.Contains(c, "DisTorch2") {
+				return true
+			}
+		}
+		return false
+	}
+	// the entry says native, the flat key says distorch: native wins for the family that renders
+	if _, _, classes, _ := videoNeeds(mk("gguf-distorch", "native")); hasDisTorch(classes) {
+		t.Errorf("the wan22 entry binds the native loader: no DisTorch class expected, got %v", classes)
+	}
+	// the entry says distorch, the flat key says native: distorch wins
+	if _, _, classes, _ := videoNeeds(mk("native", "gguf-distorch")); !hasDisTorch(classes) {
+		t.Errorf("the wan22 entry binds gguf-distorch: a DisTorch class is expected, got %v", classes)
+	}
+}
+
+// SIL13: audio.cpp's other GPU backends have no evidence pattern in the runner's log guard, so a box
+// bound to one would read CONFIGURED and then end every call CPU_PLACEMENT. The route is BOUND-BUT-
+// MISSING for them, naming the key, exactly as for a cpu backend.
+func TestAudiocppRouteRefusesABackendTheEvidenceGuardCannotRead(t *testing.T) {
+	for _, backend := range []string{"cuda", "hip", "rocm", "metal", "vulkan0", "cpu", ""} {
+		cfg, exeDir := boundEverything(t)
+		cfg.AudiocppBackend = backend
+		got := byName(routesIn(cfg, exeDir))
+		for _, name := range []string{"generate_audio:voice", "generate_audio:music"} {
+			r := got[name]
+			if r.State != BoundButMissing || !strings.Contains(r.Detail, "audiocpp_backend") {
+				t.Errorf("audiocpp_backend %q, %s: state %v detail %q, want BOUND-BUT-MISSING naming audiocpp_backend", backend, name, r.State, r.Detail)
+			}
+		}
+	}
+	cfg, exeDir := boundEverything(t)
+	cfg.AudiocppBackend = "vulkan"
+	if r := byName(routesIn(cfg, exeDir))["generate_audio:music"]; r.State != Configured {
+		t.Errorf("vulkan is the one allowed audio.cpp backend, got %v %q", r.State, r.Detail)
+	}
+}

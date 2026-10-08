@@ -19,9 +19,11 @@
 // before them so lyrics or text such as "--- Intro ---" stay positional.)
 // Env:   FFMPEG_PATH — ffmpeg (else ffmpeg on PATH); ffprobe beside it or on PATH.
 //
-// BACKEND VALUES ARE audio.cpp's OWN: --backend vulkan|cuda|hip|rocm|metal and the device index
-// as a separate --device N. "vulkan0" is sd.cpp's spelling and is refused here (the CLI would
-// reject it at run time); cpu and best are refused (no model runs on CPU).
+// BACKEND VALUES ARE audio.cpp's OWN: --backend vulkan and the device index as a separate
+// --device N. "vulkan0" is sd.cpp's spelling and is refused here (the CLI would reject it at run
+// time); cpu and best are refused (no model runs on CPU); cuda / hip / rocm / metal are refused
+// too, because the GPU-evidence guard (igpu-engine.mjs) only recognises Vulkan buffer names, so a
+// run on another backend would end as CPU_PLACEMENT "no GPU evidence" even when it ran on that GPU.
 //
 // THE NO-CPU RULE: a non-GPU --backend, and any --extra-args element that changes the backend or
 // placement (--backend, --device, ...), is refused before anything spawns
@@ -51,14 +53,16 @@ import {
 import {
   parseArgs, parseExtraArgs, refuseExtraArgs, runEngine, createLogGuard, installLifecycle,
   makeDeadline, finiteNum, makeTempDir, refuseRelativeBinary, ensureOutDir, CPU_BACKEND_REFUSED,
-  engineExitError, reportFatal,
+  engineExitError, reportFatal, DEVICE_INVALID,
 } from "./igpu-engine.mjs";
 import { defaultRun, runFailure } from "./igpu-qa.mjs";
 
 export { parseArgs };
 
 export const DEFAULT_LANG = "es";
-export const AUDIO_BACKENDS = ["vulkan", "cuda", "hip", "rocm", "metal"];
+// vulkan only: see the header. Add a backend together with a real log of its buffer names and the
+// matching evidence pattern in createLogGuard (and config.audiocppBackends).
+export const AUDIO_BACKENDS = ["vulkan"];
 // the trailing-silence threshold, the kept tail and the fade-out length of the music chain
 export const TAIL_SILENCE_DB = -45;
 export const TAIL_KEEP_SEC = 0.15;
@@ -72,7 +76,7 @@ export function refuseAudioBackend(backend) {
   if (b === "") throw new Error(`${CPU_BACKEND_REFUSED}: --backend is unset (name an audio.cpp GPU backend such as vulkan; no model runs on CPU on this engine)`);
   if (!AUDIO_BACKENDS.includes(b.toLowerCase())) {
     const hint = /^vulkan\d+$/i.test(b) ? ` audio.cpp takes the device index separately: --backend vulkan --device ${b.replace(/^vulkan/i, "")}.` : "";
-    throw new Error(`${CPU_BACKEND_REFUSED}: --backend ${JSON.stringify(b)} is not an audio.cpp GPU backend (want ${AUDIO_BACKENDS.join(", ")}; cpu and best are refused: no model runs on CPU on this engine).${hint}`);
+    throw new Error(`${CPU_BACKEND_REFUSED}: --backend ${JSON.stringify(b)} is not an allowed audio.cpp backend (want ${AUDIO_BACKENDS.join(", ")}: the GPU-evidence guard only recognises Vulkan buffers; cpu and best are refused: no model runs on CPU on this engine).${hint}`);
   }
   return b.toLowerCase();
 }
@@ -81,7 +85,7 @@ export function refuseAudioBackend(backend) {
 export function refuseAudioDevice(device) {
   const d = String(device ?? "").trim();
   if (d === "") return "0";
-  if (!/^\d+$/.test(d)) throw new Error(`--device ${JSON.stringify(d)} is not a device index (a non-negative integer such as 0; audio.cpp takes the backend and the device separately)`);
+  if (!/^\d+$/.test(d)) throw new Error(`${DEVICE_INVALID}: --device ${JSON.stringify(d)} is not a device index (a non-negative integer such as 0; audio.cpp takes the backend and the device separately); a configuration error, not a backend refusal`);
   return d;
 }
 

@@ -220,15 +220,17 @@ func TestABoundBinaryThatResolvesToNothingIsADeferNamingTheKeyAndNothingRuns(t *
 func TestAudiocppBackendIsValidatedAgainstAudioCppsValuesAtThePipelineToo(t *testing.T) {
 	requireNodePipeline(t)
 	dir := t.TempDir()
-	for _, backend := range []string{"vulkan", "cuda", "hip", "rocm", "metal"} {
+	for _, backend := range []string{"vulkan"} {
 		cfg := audiocppCfg(t, dir)
 		cfg.AudiocppBackend = backend
 		res := (&Pipeline{cfg: cfg}).Run(context.Background(), audioReq(dir, "music", "lofi", map[string]any{"out": filepath.Join(dir, backend+".wav")}))
 		if !res.OK {
-			t.Errorf("audiocpp_backend %q is one of audio.cpp's own values and must run: %s", backend, res.Reason)
+			t.Errorf("audiocpp_backend %q is the one backend the runner's evidence guard recognises and must run: %s", backend, res.Reason)
 		}
 	}
-	for _, backend := range []string{"vulkan0", "vulkan1", "cpu", "best", ""} {
+	// SIL13: cuda / hip / rocm / metal have no evidence pattern in the runner's log guard, so every
+	// call would end CPU_PLACEMENT "no GPU evidence": refused up front with the backend class
+	for _, backend := range []string{"vulkan0", "vulkan1", "cpu", "best", "", "cuda", "hip", "rocm", "metal"} {
 		cfg := audiocppCfg(t, dir)
 		cfg.AudiocppBackend = backend
 		res := (&Pipeline{cfg: cfg}).Run(context.Background(), audioReq(dir, "voice", "hola", map[string]any{"out": filepath.Join(dir, "bad-"+strconv.Quote(backend)+".wav")}))
@@ -240,7 +242,8 @@ func TestAudiocppBackendIsValidatedAgainstAudioCppsValuesAtThePipelineToo(t *tes
 	mustDeferWith(t, (&Pipeline{cfg: cfg}).Run(context.Background(), audioReq(dir, "voice", "hola", nil)), "cpu_backend_refused", "audiocpp_device")
 	cfg = audiocppCfg(t, dir)
 	cfg.AudiocppDevice = "gpu0"
-	mustDeferWith(t, (&Pipeline{cfg: cfg}).Run(context.Background(), audioReq(dir, "voice", "hola", nil)), "cpu_backend_refused", "not a device index")
+	// a bad device index is its own class, not a backend refusal (SIL13)
+	mustDeferWith(t, (&Pipeline{cfg: cfg}).Run(context.Background(), audioReq(dir, "voice", "hola", nil)), "device_invalid", "not a device index")
 }
 
 // ---------------------------------------------------------------- G27: the out dir

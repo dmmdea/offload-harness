@@ -92,7 +92,7 @@ import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import {
   finalizeAudio, gateDeadAir, buildTrimTailArgs, buildMasterArgs, buildConvertArgs, fadeSeconds,
-  refuseAudioBackend, refuseAudioDevice, TAIL_SILENCE_DB,
+  refuseAudioBackend, refuseAudioDevice, AUDIO_BACKENDS, TAIL_SILENCE_DB,
 } from "./audiocpp-generate.mjs";
 
 function work() {
@@ -221,14 +221,19 @@ test("the ffmpeg argv builders: trim, master and convert", () => {
 });
 
 test("refuseAudioBackend: audio.cpp's own values only; vulkan0 is sd.cpp's spelling and is refused with the --device hint; cpu and best are refused", () => {
-  for (const b of ["vulkan", "Vulkan", "cuda", "hip", "rocm", "metal"]) assert.equal(refuseAudioBackend(b), b.toLowerCase());
-  for (const b of ["vulkan0", "vulkan1", "cpu", "best", "auto", "", undefined, "blas", "vulcan"]) {
+  for (const b of ["vulkan", "Vulkan"]) assert.equal(refuseAudioBackend(b), b.toLowerCase());
+  assert.deepEqual(AUDIO_BACKENDS, ["vulkan"], "SIL13: the evidence guard only recognises Vulkan buffers");
+  // cuda / hip / rocm / metal would read CONFIGURED and end every call CPU_PLACEMENT "no GPU evidence"
+  for (const b of ["vulkan0", "vulkan1", "cpu", "best", "auto", "", undefined, "blas", "vulcan", "cuda", "hip", "rocm", "metal"]) {
     assert.throws(() => refuseAudioBackend(b), /CPU_BACKEND_REFUSED/, String(b));
   }
   assert.throws(() => refuseAudioBackend("vulkan1"), /--backend vulkan --device 1/);
   assert.equal(refuseAudioDevice(undefined), "0");
   assert.equal(refuseAudioDevice("2"), "2");
-  for (const d of ["-1", "x", "0.5", "vulkan0"]) assert.throws(() => refuseAudioDevice(d), /device index/);
+  // SIL13: a bad device is its own class (DEVICE_INVALID), not a backend refusal
+  for (const d of ["-1", "x", "0.5", "vulkan0"]) {
+    assert.throws(() => refuseAudioDevice(d), (e) => /^DEVICE_INVALID:/.test(e.message) && /device index/.test(e.message) && !/CPU_BACKEND_REFUSED/.test(e.message), d);
+  }
 });
 
 test("the -- terminator: lyrics or text that start with -- stay positional", () => {

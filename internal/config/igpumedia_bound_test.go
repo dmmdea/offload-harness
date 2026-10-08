@@ -9,12 +9,14 @@ import (
 // the TAE / high-noise keys, the default sdcpp family and the four *Bound helpers (B4).
 
 func TestAudiocppBackendRefusal(t *testing.T) {
-	for _, b := range []string{"vulkan", "Vulkan", " cuda ", "hip", "rocm", "metal"} {
+	for _, b := range []string{"vulkan", "Vulkan", " vulkan "} {
 		if err := AudiocppBackendRefusal(b); err != nil {
 			t.Errorf("AudiocppBackendRefusal(%q) = %v, want nil", b, err)
 		}
 	}
-	for _, b := range []string{"", " ", "cpu", "CPU", "best", "auto", "vulkan0", "vulkan1", "cuda0", "blas", "opencl", "vulcan", "vulkan,cpu"} {
+	// SIL13: only vulkan has an evidence pattern in the runner's log guard, so cuda / hip / rocm /
+	// metal are refused until a real log of theirs exists (they would end every call as CPU_PLACEMENT)
+	for _, b := range []string{"", " ", "cpu", "CPU", "best", "auto", "vulkan0", "vulkan1", "cuda0", "cuda", "hip", "rocm", "metal", "blas", "opencl", "vulcan", "vulkan,cpu"} {
 		if err := AudiocppBackendRefusal(b); err == nil {
 			t.Errorf("AudiocppBackendRefusal(%q) = nil, want a refusal", b)
 		}
@@ -33,8 +35,14 @@ func TestAudiocppDeviceRefusal(t *testing.T) {
 		}
 	}
 	for _, d := range []string{"-1", "vulkan0", "0,1", "1.5", "cpu"} {
-		if err := AudiocppDeviceRefusal(d); err == nil {
+		err := AudiocppDeviceRefusal(d)
+		if err == nil {
 			t.Errorf("AudiocppDeviceRefusal(%q) = nil, want a refusal", d)
+			continue
+		}
+		// SIL13: its own class, not a backend refusal
+		if !strings.Contains(err.Error(), "DEVICE_INVALID") || strings.Contains(strings.ToUpper(err.Error()), "BACKEND_REFUSED") {
+			t.Errorf("AudiocppDeviceRefusal(%q) = %v, want DEVICE_INVALID and no backend-refusal wording", d, err)
 		}
 	}
 }

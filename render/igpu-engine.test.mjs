@@ -643,3 +643,14 @@ test("makeTempDir: cleanup removes the directory and is idempotent", () => {
   assert.ok(!existsSync(t.dir));
   t.cleanup();
 });
+
+// ---------------------------------------------------------------- Go / Node parity
+
+test("the screens agree with the shared parity table (internal/config reads the same file): empty per-module parts, unicode spaces", () => {
+  const t = JSON.parse(fixture("screen-parity-table.json"));
+  assert.ok(t.backend_refused.length >= 20 && t.extra_args_refused.length >= 10);
+  for (const b of t.backend_refused) assert.throws(() => refuseCpuBackend(b), new RegExp(CPU_BACKEND_REFUSED), `backend ${JSON.stringify(b)}`);
+  for (const b of t.backend_allowed) assert.equal(refuseCpuBackend(b), b.trim(), `backend ${JSON.stringify(b)}`);
+  for (const a of t.extra_args_refused) assert.ok(screenExtraArgs(a, { engine: "sdcpp" }), `extra args ${JSON.stringify(a)} must be refused`);
+  for (const a of t.extra_args_allowed) assert.equal(screenExtraArgs(a, { engine: "sdcpp" }), null, `extra args ${JSON.stringify(a)} must pass`);
+});
