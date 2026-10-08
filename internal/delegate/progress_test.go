@@ -33,10 +33,10 @@ func TestOutcomeWordSpeaksTheSummaryBucketsVocabulary(t *testing.T) {
 	}
 }
 
-// TestShiftedProgressCountsAgainstTheWholeCall: RunBatched runs consecutive chunks of
-// eight, and a client counting "n of 9" must not see each chunk start over. The second
-// chunk's first subtask is the call's ninth: its index, the running done count and the
-// total are all rebased.
+// TestShiftedProgressCountsAgainstTheWholeCall: RunBatched runs a list longer than one
+// batch as consecutive chunks, and a client counting "n of 9" must not see each chunk start
+// over. The second chunk's first subtask is the call's ninth (here the chunk before it
+// held eight): its index, the running done count and the total are all rebased.
 func TestShiftedProgressCountsAgainstTheWholeCall(t *testing.T) {
 	var got ProgressEvent
 	fn := shiftedProgress(func(ev ProgressEvent) { got = ev }, 8, 9)

@@ -997,9 +997,18 @@ func (p *Pipeline) runVisionGen(ctx context.Context, req core.Request, built tas
 	// The wait is for a lease on the cards THIS seat is pinned to (plan P4): the delegator's auto
 	// route reads the lease the same way, and a render on another card is not one to wait for
 	// (reading it whole-node here deferred a call the fleet used to serve).
+	//
+	// A lease this process runs UNDER is not one to wait for: `gpu reserve ... -- local-offload
+	// vqa|ocr|assess-image` is the command the lease was taken for, exactly as the render runners
+	// inherit it (ambientLeaseEnv) and the delegator exempts it (delegate.ForeignFence). Waiting
+	// on it deferred every call of a vision bake run under its own lease (2026-09-12), so a
+	// measured vision run had to stop the fleet node instead of queueing like every other GPU
+	// job. Per lease: a child of lease A still waits for any other lease on the seat's cards.
 	visionModel := meta.Model
 	readLease := func(dir string) gpulease.Info {
-		return modelaffinity.ScopeToModel(modelaffinity.InspectLease(dir), visionModel)
+		return modelaffinity.ScopeToModel(modelaffinity.InspectLease(dir), visionModel).Where(func(l gpulease.Info) bool {
+			return !gpulease.Inherited(l)
+		})
 	}
 	if info := gpulock.WaitFreeScoped(ctx, p.gpuLockPath, p.visionGPUWait, p.visionGPUPoll, readLease); info.Held {
 		meta.LatencyMs = time.Since(start).Milliseconds()

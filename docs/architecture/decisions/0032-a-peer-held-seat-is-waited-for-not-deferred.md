@@ -79,7 +79,10 @@ validating contracts), no daemon, every wait counted on the wire:
 3. **`delegate.RunBatched`** runs sequential chunks of `MaxSubtasks` (order kept, `Summary` summed
    by reflection, first error returned *with* the results already obtained); `offload_research` and
    `local-offload research` use it and render a chunk error as `partial: true` instead of dropping
-   everything. Sequential on purpose: two chunks in flight would be a 16-wide fan-out.
+   everything. Sequential on purpose: two chunks in flight would be a 16-wide fan-out. *(Amended 2026-10-07 by
+   [0076](0076-a-calls-width-is-sized-from-its-deal-a-batch-of-up-to-16-is-one-deal-and-auto-counts-the-local-run-cap-line.md):
+   up to 16 subtasks are ONE joint deal, sized by the deal and not by a constant, so the 12 pages of `offload_research` are never
+   chunked and no page waits for the slowest page of another; only a longer list is cut, into consecutive deals of 16.)*
 4. **Document fingerprint + quarantine.** `research.DocFingerprint` appends two regex acceptance
    checks per page — the 12 most frequent distinctive tokens (≥ 6 letters, alphabetic, not in a
    boilerplate stop-list) split alternately, each half an `(?i)` alternation tagged

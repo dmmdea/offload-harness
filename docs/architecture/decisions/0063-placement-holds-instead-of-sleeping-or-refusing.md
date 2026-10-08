@@ -170,6 +170,17 @@ bare defer: it names the places the subtask stood in (`place_keeping`: node, wha
 expected to clear) and the soonest of them (`retry_after_sec`). The defer's class (`capacity`) and prefix are
 unchanged. The durable token that resumes a place across calls is the media-admission change and is not part of this.
 
+## Amendment (2026-10-07): the local seat's line is counted by `route=auto` too, and the call is as wide as its deal
+
+Decision 6 counted the local seat's run-cap line for the spread deal and left `route=auto` dealing every subtask to an idle seat,
+so 8 subtasks against a cap of 4 and one remote with 4 free slots made 8 local and 0 remote. `route=auto`'s joint deal now counts
+what it commits to an idle seat against the same room (`localRunCapRoom`, read once per call): the first `room` subtasks stay on
+the seat and the overflow goes to the remotes that have headroom, to the capacity wait when none has, and stays on the seat only
+while no remote could run the contract at all. The per-Run bound the Context names (`runConcurrency`, four goroutines) is now the
+floor of a width that follows the deal, and `RunBatched` deals up to 16 subtasks as one deal; decision 7's process gate and decision
+6's headroom count are what keep a wider call inside each node's ceiling
+([ADR 0076](0076-a-calls-width-is-sized-from-its-deal-a-batch-of-up-to-16-is-one-deal-and-auto-counts-the-local-run-cap-line.md)).
+
 ## Alternatives considered
 
 - **Keep the courtesy sleep and credit it.** Rejected: it still sleeps on a node that just refused while

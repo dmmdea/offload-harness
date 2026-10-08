@@ -9,8 +9,6 @@ package delegate
 
 import (
 	"fmt"
-	"os"
-	"strconv"
 	"strings"
 	"time"
 
@@ -1031,17 +1029,12 @@ func ForeignFence(info gpulease.Info) (bool, string) {
 }
 
 // inheritedLease reports whether this process runs under the ONE lease info
-// describes: GPU_LEASE_EPOCH (threaded to children by gpu reserve and the
-// pipeline's ambient lease env) equals that lease's epoch. Callers with several
-// live leases walk Info.Each and ask it of each; "inside any live lease" is not an
-// exemption from every other lease's fence.
+// describes (gpulease.Inherited, the one comparison every gate that exempts the
+// holder's own child shares). Callers with several live leases walk Info.Each and
+// ask it of each; "inside any live lease" is not an exemption from every other
+// lease's fence.
 func inheritedLease(info gpulease.Info) bool {
-	raw := strings.TrimSpace(os.Getenv("GPU_LEASE_EPOCH"))
-	if raw == "" {
-		return false
-	}
-	epoch, err := strconv.ParseUint(raw, 10, 64)
-	return err == nil && epoch != 0 && epoch == info.Epoch
+	return gpulease.Inherited(info)
 }
 
 // HolderLine names a lease holder for a placement reason: class, pid, the
