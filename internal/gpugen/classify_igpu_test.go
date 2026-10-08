@@ -3,6 +3,9 @@ package gpugen
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -138,5 +141,79 @@ func TestClientCancelOfARunnerThatExits143IsATimeout(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "canceled") {
 		t.Errorf("the reason should say the run was cancelled: %v", err)
+	}
+}
+
+// endingCtx is a context whose end (DeadlineExceeded or Canceled) arrives at a moment the test chooses:
+// when the child has printed its tail. A real deadline would have to be sized against node's start-up
+// time, which a loaded host stretches.
+type endingCtx struct {
+	context.Context
+	done chan struct{}
+	err  error
+}
+
+func (c *endingCtx) Done() <-chan struct{} { return c.done }
+func (c *endingCtx) Err() error {
+	select {
+	case <-c.done:
+		return c.err
+	default:
+		return nil
+	}
+}
+
+// F3: the deadline and the cancel gpugen itself observes are TYPED timeouts. The message embeds the
+// child's last 400 bytes, and ClassifyErr's substring match reads the "oom" inside "room", "boom" and
+// "zoom" as an out-of-memory failure, so a run killed at its deadline while its log said "a living
+// room" was filed as oom, and retried as one.
+func TestDeadlineAndCancelAreTypedTimeoutsWhateverTheTailSays(t *testing.T) {
+	requireNode(t)
+	const tailText = "engine log: a living room, a boom, the zoom lens"
+	for _, c := range []struct {
+		name string
+		end  error
+		word string // what the human message says about how it ended
+	}{
+		{"deadline", context.DeadlineExceeded, "deadline exceeded"},
+		{"cancel", context.Canceled, "context canceled"},
+	} {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			sentinel := filepath.Join(t.TempDir(), "printed")
+			// the sentinel is written once the tail has gone out to the pipe
+			js := fmt.Sprintf(`process.stderr.write(%q + "\n", () => require("fs").writeFileSync(%q, "x")); setInterval(() => {}, 1000);`, tailText, sentinel)
+			ctx := &endingCtx{Context: context.Background(), done: make(chan struct{}), err: c.end}
+			go func() {
+				for i := 0; i < 1200; i++ {
+					if _, err := os.Stat(sentinel); err == nil {
+						break
+					}
+					time.Sleep(25 * time.Millisecond)
+				}
+				close(ctx.done)
+			}()
+			_, err := Generate(ctx, Spec{Exe: "node", Script: "-e", Args: []string{js}, Out: filepath.Join(t.TempDir(), "x"), Timeout: time.Minute, SkipFreeComfy: true, OwnProcessGroup: true})
+			if err == nil {
+				t.Fatal("a run ended by its context must fail")
+			}
+			if !strings.Contains(err.Error(), "a living room") || !strings.Contains(err.Error(), c.word) {
+				t.Fatalf("the premise is gone: the message must carry the child's tail and say %q: %v", c.word, err)
+			}
+			if got := ClassifyErr(errors.New(err.Error())); got != "oom" {
+				t.Fatalf("the premise is gone: the same words as a plain error must read as oom (the wording is what the type overrides), got %q", got)
+			}
+			var re *RunError
+			if !errors.As(err, &re) || re.Class != "timeout" {
+				t.Errorf("want a *RunError with Class timeout, got %T %v", err, err)
+			}
+			if got := ClassifyErr(err); got != "timeout" {
+				t.Errorf("ClassifyErr = %q, want timeout: %v", got, err)
+			}
+			var ee *exec.ExitError
+			if !errors.As(err, &ee) {
+				t.Errorf("the process error must stay in the chain (%%w): %v", err)
+			}
+		})
 	}
 }

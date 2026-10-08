@@ -241,17 +241,22 @@ func Generate(ctx context.Context, spec Spec) (string, error) {
 		// other crash. Folding "deadline exceeded" into the error text here makes
 		// EVERY gpugen caller's ClassifyErr(gerr) == "timeout" reliable, on every OS
 		// and whatever exit code the kill happens to produce — not just audio.
+		//
+		// The class is TYPED (a *RunError), not left to ClassifyErr's substring match: the message
+		// embeds the child's last 400 bytes, and an engine log that ends "...a living room, boom"
+		// would otherwise read as "oom" through the "oom" in "room" / "boom".
 		if cctx.Err() == context.DeadlineExceeded {
-			return "", fmt.Errorf("gpugen: %s timeout after %s (deadline exceeded, process tree killed): %w (%s)",
-				baseName(spec.Script), spec.Timeout, err, tailDetail(tw))
+			return "", &RunError{Class: "timeout", err: fmt.Errorf("gpugen: %s timeout after %s (deadline exceeded, process tree killed): %w (%s)",
+				baseName(spec.Script), spec.Timeout, err, tailDetail(tw))}
 		}
 		// A client cancel (the caller's own context) is the same event as a timeout for the class:
 		// on an OwnProcessGroup lane the runner answers the SIGTERM with exit 143 ("exit status
 		// 143"), which carries neither "killed" nor "signal:" and would read as "other", while
-		// every other lane's cancel ends "signal: killed" and reads as a timeout.
+		// every other lane's cancel ends "signal: killed" and reads as a timeout. Typed for the same
+		// reason as the deadline above ("...canceled...(the zoom lens)" must not read as oom).
 		if cctx.Err() == context.Canceled {
-			return "", fmt.Errorf("gpugen: %s canceled (context canceled, process tree killed): %w (%s)",
-				baseName(spec.Script), err, tailDetail(tw))
+			return "", &RunError{Class: "timeout", err: fmt.Errorf("gpugen: %s canceled (context canceled, process tree killed): %w (%s)",
+				baseName(spec.Script), err, tailDetail(tw))}
 		}
 		// The iGPU runners end a typed failure with one short "IGPU_CLASS=<class>" line. The class
 		// is read from the whole retained output, never from the 400-byte display tail: a real
@@ -289,8 +294,10 @@ func tailDetail(tw *tailWriter) string {
 // classTag is the label a typed failure carries in its message ("[class=gpu_reset]") for a reader.
 const classTag = "class="
 
-// RunError is a runner failure whose class the runner itself reported (the IGPU_CLASS= line).
-// ClassifyErr returns Class for it, whatever words the rest of the message happens to contain.
+// RunError is a failure whose class was decided structurally, not by the words of its message: the
+// class the runner itself reported (the IGPU_CLASS= line), or "timeout" for the deadline and the
+// cancel gpugen itself observed. ClassifyErr returns Class for it, whatever words the rest of the
+// message (which embeds the child's last output) happens to contain.
 type RunError struct {
 	Class string
 	err   error
