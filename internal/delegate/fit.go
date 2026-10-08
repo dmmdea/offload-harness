@@ -14,7 +14,6 @@
 package delegate
 
 import (
-	"math"
 	"regexp"
 
 	"github.com/dmmdea/offload-harness/internal/core"
@@ -171,13 +170,34 @@ func adequate(st Subtask, v NodeView) bool {
 	return st.EstTokens+specReserve <= v.AgentCtxTokens
 }
 
-// fitInadequate ranks a seat that cannot hold the contract below every seat
-// that can, for BOTH kinds — below -AgentCtxTokens (mechanical) as well as
-// below +AgentCtxTokens (reasoning). It is far past any plausible ceiling in
-// tokens, so no advertised number can collide with it.
-const fitInadequate = math.MinInt32
+// fitKey is a seat's place in the ranking for one contract: whether the seat can hold the contract at all,
+// and, among the seats that can, its score. Adequacy is a KEY of its own and not a value inside the score.
+//
+// It used to be one int, with math.MinInt32 standing for "cannot hold the contract" on the premise that no
+// advertised number could reach it. The score of an adequate, rated seat is -int(eta x 10) x 2^24 - window
+// (mechanical work), which passes MinInt32 once the eta exceeds about 12.8 s: a probe scored a rated adequate
+// seat at -8,724,160,512 on ADR 0079's definition of the eta and -4,362,084,352 on the one before it. On every
+// build such a seat then ranked BELOW a seat that cannot hold the contract. It stayed latent only because
+// placeSpreadWith filters the roster through remoteEligible before it scores, and a ranking must not depend
+// on the caller having done that.
+type fitKey struct {
+	// adequate: the seat's advertised ceiling (or the layer decision its node publishes) holds the contract.
+	adequate bool
+	// score is scoreFitRanked's fold, meaningful only when adequate is true.
+	score int
+}
 
-// scoreFit rates seat v for subtask st; higher wins. The ranking axis is the
+// beats reports whether k ranks above other. Adequacy decides first, whatever either score reads; adequate
+// seats are then ordered by score; two seats that cannot hold the contract tie, and the deal's rotation
+// decides between them.
+func (k fitKey) beats(other fitKey) bool {
+	if k.adequate != other.adequate {
+		return k.adequate
+	}
+	return k.adequate && k.score > other.score
+}
+
+// scoreFit ranks seat v for subtask st as a fitKey; the key that beats the other wins. The ranking axis is the
 // seat's ADVERTISED context ceiling, which is the only capability number the
 // nodes actually publish:
 //
@@ -191,7 +211,9 @@ const fitInadequate = math.MinInt32
 //
 // A seat is only ranked once it is adequate, so a ranking can never prefer a seat
 // that is "too small". Callers still hand scoreFit an already-eligible roster —
-// this is the second line of that defence, not the first.
+// this is the second line of that defence, not the first, and it holds on its own:
+// adequacy is the first key of the comparison (fitKey), so a seat that cannot hold
+// the contract ranks below every seat that can, however slow those are.
 //
 // Note it never ranks the LOCAL seat above anything: local advertises no
 // ceiling in a delegator run, so it reads as inadequate here. That is why
@@ -218,7 +240,7 @@ const fitInadequate = math.MinInt32
 // scoreFit ranks a seat with no published rate on its window alone, which is only right when no seat
 // of the roster publishes one. A roster that mixes measured and unmeasured seats is scored with
 // scoreFitWith and the fleet's median rate, as every other ranking is (ADR 0057).
-func scoreFit(st Subtask, v NodeView) int { return scoreFitWith(st, v, 0) }
+func scoreFit(st Subtask, v NodeView) fitKey { return scoreFitWith(st, v, 0) }
 
 // scoreFitWith is scoreFit with the fleet's assumed rate (fleetTokSPrior over the roster being dealt):
 // a seat that publishes no rate is ranked as if it ran at that median, exactly as rankFor does for
@@ -227,16 +249,16 @@ func scoreFit(st Subtask, v NodeView) int { return scoreFitWith(st, v, 0) }
 // which route asked). Without it the int fold compared an unmeasured seat's -window (about -3e4)
 // with a measured seat's -eta x 10 x 2^24 (about -5e9), so an unmeasured seat beat every measured
 // one on mechanical work and lost to every one on reasoning work. It orders; it never admits
-// (eligibility and adequacy are decided before it, and a seat that fails them is fitInadequate here
-// as it always was). A zero prior is no prior: the original rule, applied uniformly.
-func scoreFitWith(st Subtask, v NodeView, priorTokS float64) int {
+// (eligibility and adequacy are decided before it, and a seat that fails them is an inadequate fitKey
+// here, which ranks below every adequate one). A zero prior is no prior: the original rule, applied uniformly.
+func scoreFitWith(st Subtask, v NodeView, priorTokS float64) fitKey {
 	if dec, ok := remoteDecision(st, v); ok {
 		if dec.Defer || dec.Wait {
-			return fitInadequate
+			return fitKey{}
 		}
 	} else if !adequate(st, v) {
-		return fitInadequate
+		return fitKey{}
 	}
 	ri := rankFor(st, v, priorTokS)
-	return scoreFitRanked(inferKind(st), ri.window, ri.eta, ri.etaKnown)
+	return fitKey{adequate: true, score: scoreFitRanked(inferKind(st), ri.window, ri.eta, ri.etaKnown)}
 }

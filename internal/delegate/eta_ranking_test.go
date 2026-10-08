@@ -5,11 +5,17 @@
 // keeps window first, eta as its tie-break; two near-tied etas are decided by
 // a seeded per-Run draw (power-of-two-choices) so independent dispatchers do
 // not herd onto the single fastest seat.
+//
+// The eta every test here ranks by is the one ADR 0079 defines: cold + the
+// node's own wait + the time to produce a reference final at the seat's rate,
+// capped at no wall (it was capped at the wall until then). The tests that call
+// etaFor/rankFor directly state what they assume of it where they do.
 
 package delegate
 
 import (
 	"encoding/json"
+	"fmt"
 	"math"
 	"testing"
 
@@ -69,17 +75,18 @@ func TestPlaceMechanicalPrefersTheFasterSeatOnEqualWindows(t *testing.T) {
 }
 
 // TestPlaceReasoningPrefersTheRoomierSeatEvenWhenSlower: a roomier but slower
-// seat, whose fitted final does NOT floor (StepTokens=512 clears the wall
-// comfortably at either rate), must win reasoning-shaped work over a smaller,
-// faster seat — window is the PRIMARY key for reasoning, not eta.
+// seat that stays FEASIBLE (one step and a minimal answer fit the 300 s wall
+// comfortably at either rate; the wall decides feasibility and is not an eta
+// input) must win reasoning-shaped work over a smaller, faster seat — window
+// is the PRIMARY key for reasoning, not eta.
 func TestPlaceReasoningPrefersTheRoomierSeatEvenWhenSlower(t *testing.T) {
 	st := oneStepSubtask("explain why the build failed across these files", 300)
 	small := etaFixtureRemote("node-a", 8192, 34, 0) // small window, fast
-	roomy := etaFixtureRemote("node-c", 32768, 5, 0) // roomy window, slow — must still not floor
+	roomy := etaFixtureRemote("node-c", 32768, 5, 0) // roomy window, slow — must still be feasible
 	small.QueueDepth, roomy.QueueDepth = 1, 1
 
 	if ok, reason := feasibleFinal(st, roomy); !ok {
-		t.Fatalf("fixture bug: the roomy slow seat must not floor; reason=%q", reason)
+		t.Fatalf("fixture bug: the roomy slow seat must stay feasible; reason=%q", reason)
 	}
 
 	got := Place("job-b", st, localNode(), []NodeView{small, roomy}, true)
@@ -132,8 +139,8 @@ func TestScoreFitMechanicalPrefersTheFasterSeatWhenRatesArePublished(t *testing.
 	st := oneStepSubtask("list every exported function name in these files", 300)
 	smallSlow := etaFixtureRemote("small-slow", 8192, 5, 0)
 	bigFast := etaFixtureRemote("big-fast", 32768, 34, 0)
-	if scoreFit(st, bigFast) <= scoreFit(st, smallSlow) {
-		t.Fatalf("mechanical scoreFit must prefer the faster seat when both publish a rate: big-fast=%d small-slow=%d",
+	if !scoreFit(st, bigFast).beats(scoreFit(st, smallSlow)) {
+		t.Fatalf("mechanical scoreFit must prefer the faster seat when both publish a rate: big-fast=%+v small-slow=%+v",
 			scoreFit(st, bigFast), scoreFit(st, smallSlow))
 	}
 }
@@ -238,8 +245,30 @@ func mixedFleetRoster() []NodeView {
 // and cold loads — the shapes a real fleet mid-rollout actually has.
 func TestEtaRankingIsAStrictWeakOrdering(t *testing.T) {
 	st := oneStepSubtask("extract every field from the report", 300)
-	nodes := mixedFleetRoster()
+	assertStrictWeakOrdering(t, st, mixedFleetRoster())
+}
 
+// TestEtaRankingIsAStrictWeakOrderingAcrossSeatsPastTheWall: the same property over a roster whose slow seats
+// read past the 300 s wall, which the uncapped eta of ADR 0079 now orders by rate (under the cap they all read
+// the wall and tied), mixed with a seat that publishes no rate.
+func TestEtaRankingIsAStrictWeakOrderingAcrossSeatsPastTheWall(t *testing.T) {
+	st := oneStepSubtask("extract every field from the report", 300)
+	var nodes []NodeView
+	for _, r := range []float64{43, 20, 12, 6.57, 3.9} {
+		nodes = append(nodes, etaSeat(fmt.Sprintf("seat-%v", r), r))
+	}
+	unmeasured := eligibleRemote()
+	unmeasured.NodeID = "unmeasured"
+	nodes = append(nodes, unmeasured)
+	if eta, _ := etaFor(st, nodes[len(nodes)-2]); eta <= 300 {
+		t.Fatalf("fixture bug: the slowest seat reads %.0f s, inside the 300 s wall", eta)
+	}
+	assertStrictWeakOrdering(t, st, nodes)
+}
+
+// assertStrictWeakOrdering is the brute force above over any roster.
+func assertStrictWeakOrdering(t *testing.T, st Subtask, nodes []NodeView) {
+	t.Helper()
 	prior := fleetTokSPrior(nodes)
 	if prior <= 0 {
 		t.Fatal("fixture bug: this roster publishes rates, so it must have a prior")
@@ -339,7 +368,7 @@ func TestScoreFitOrdersAMixedFleetAsThePairwiseRankingDoes(t *testing.T) {
 				}
 				sa, sb := scoreFitWith(st, a, prior), scoreFitWith(st, b, prior)
 				ra, rb := rankFor(st, a, prior), rankFor(st, b, prior)
-				if sa == fitInadequate || sb == fitInadequate {
+				if !sa.adequate || !sb.adequate {
 					t.Fatalf("%s: %s or %s is inadequate for a 1,000-token contract: fixture bug", goal, a.NodeID, b.NodeID)
 				}
 				if !ra.etaKnown || !rb.etaKnown {
@@ -352,7 +381,7 @@ func TestScoreFitOrdersAMixedFleetAsThePairwiseRankingDoes(t *testing.T) {
 				if kind == KindMechanical && math.Abs(ra.eta-rb.eta) <= 0.25*math.Max(ra.eta, rb.eta) {
 					continue
 				}
-				if sa == sb {
+				if sa.score == sb.score {
 					t.Errorf("%s: %s and %s tie on the fold although the pairwise ranking separates them (windows %d/%d, etas %.1f/%.1f)", goal, a.NodeID, b.NodeID, ra.window, rb.window, ra.eta, rb.eta)
 					continue
 				}
@@ -360,8 +389,8 @@ func TestScoreFitOrdersAMixedFleetAsThePairwiseRankingDoes(t *testing.T) {
 				for i := 0; i < 8; i++ {
 					seed := "job-" + string(rune('a'+i))
 					better, decided := betterRanked(seed, kind, ra, rb)
-					if !decided || better != (sa > sb) {
-						t.Fatalf("%s seed %s: the fold ranks %s (%d) vs %s (%d) but the pairwise ranking says %v (decided %v)", goal, seed, a.NodeID, sa, b.NodeID, sb, better, decided)
+					if !decided || better != sa.beats(sb) {
+						t.Fatalf("%s seed %s: the fold ranks %s (%d) vs %s (%d) but the pairwise ranking says %v (decided %v)", goal, seed, a.NodeID, sa.score, b.NodeID, sb.score, better, decided)
 					}
 				}
 				agree++
@@ -408,7 +437,7 @@ func TestSpreadDealRanksAnUnmeasuredSeatOnTheFleetMedian(t *testing.T) {
 		t.Errorf("reasoning: the remote slot went to %q, want the roomier seat although it publishes no rate", got)
 	}
 	// The old API is the prior-less rule, uniformly: with nobody measured it is still window-only.
-	if a, b := scoreFit(fitSubtask(fitMechGoal, 100), unmeasured("u1", 8192)), scoreFit(fitSubtask(fitMechGoal, 100), unmeasured("u2", 32768)); a <= b {
-		t.Errorf("scoreFit without a prior: the smaller unmeasured seat scored %d against %d, want it to win mechanical work as before", a, b)
+	if a, b := scoreFit(fitSubtask(fitMechGoal, 100), unmeasured("u1", 8192)), scoreFit(fitSubtask(fitMechGoal, 100), unmeasured("u2", 32768)); !a.beats(b) {
+		t.Errorf("scoreFit without a prior: the smaller unmeasured seat scored %+v against %+v, want it to win mechanical work as before", a, b)
 	}
 }

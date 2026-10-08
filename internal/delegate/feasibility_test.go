@@ -9,6 +9,7 @@
 package delegate
 
 import (
+	"math"
 	"strings"
 	"testing"
 
@@ -75,7 +76,8 @@ func TestFeasibleFinalExcludesAWallTooShortForOneStepAndAMinimalAnswer(t *testin
 // refused "fitted final 0 < floor 1024" although the seat completes it in ~25 s;
 // the cold load was subtracted from a wall that never pays it, and a floor sized
 // for a full answer was applied to a one-token reply. Feasibility asks only
-// whether one step and a minimal answer fit; the fitted final is the eta's.
+// whether one step and a minimal answer fit; how much final the wall buys is the
+// node's to decide when it runs the job, and the eta (ADR 0079) reads no wall.
 func TestFeasibleFinalAdmitsAShortExplicitWallOnAColdSeat(t *testing.T) {
 	v := eligibleRemote()
 	loaded := false
@@ -100,18 +102,24 @@ func TestFeasibleFinalAdmitsAShortExplicitWallOnAColdSeat(t *testing.T) {
 	}
 }
 
-// The eta never exceeds cold + wall: the wall is the stop, so a floored fit on a
-// slow seat reads as "cold, then the whole wall", never as the configured
-// budgets' arithmetic (0.128.0 printed "eta 4682 s" for a 60 s wall).
-func TestEtaForNeverExceedsColdPlusWall(t *testing.T) {
+// The ranking eta is not capped at the wall (ADR 0079, superseding the cap clause of ADR 0050 decision 3).
+// It used to read "cold, then the whole wall" for any seat that could not finish inside it, which is what
+// made 12, 6.57 and 3.9 tok/s seats tie; since ADR 0055 decision 2 the wall is an expectation, not a kill.
+// A 5.4 tok/s seat on a 60 s wall now reads cold 69 + the time to produce the reference final and its
+// re-pack (2 x 1,024 tokens: 380 s), above cold + wall. It still reads at least the cold load it must pay,
+// and it is a ranking number only: feasibleFinal keeps judging the wall (the tests around this one).
+func TestEtaForIsNotCappedAtTheWall(t *testing.T) {
 	v := nodeCShapedSlow()
 	st := oneStepSchemaContract(60, false)
 	eta, ok := etaFor(st, v)
 	if !ok {
 		t.Fatal("a published rate must yield an eta")
 	}
-	if eta > 69+60+0.5 {
-		t.Fatalf("eta = %.0f s, want <= cold 69 + wall 60", eta)
+	if want := 69 + math.Ceil(2*seatrate.FinalBudgetFloor/5.4); eta != want {
+		t.Fatalf("eta = %.0f s, want cold 69 + the reference final and re-pack at 5.4 tok/s = %.0f", eta, want)
+	}
+	if eta <= 69+60 {
+		t.Fatalf("eta = %.0f s, want above cold 69 + wall 60: the wall is no cap on the ranking eta", eta)
 	}
 	if eta < 69 {
 		t.Fatalf("eta = %.0f s, want >= the cold load it must pay", eta)

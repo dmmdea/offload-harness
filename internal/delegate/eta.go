@@ -32,9 +32,11 @@ const minimalFinalTokens = 64
 // measured rate — no think block, no structured re-pack, and NO cold load,
 // because admission pays the cold load OUTSIDE the wall (D-64 warms the seat
 // on the admission budget), so a wall shorter than the load is not
-// infeasible. Everything above that floor — how much of the configured final
-// the wall actually buys, the cold load, the queue wait — is a RANKING
-// matter for etaFor, never a refusal.
+// infeasible. Everything above that floor is not a refusal: the cold load and
+// the queue wait are RANKING terms of etaFor, which reads no wall, and how much
+// of the configured final the wall buys is the node's to decide when it RUNS the
+// job (internal/pipeline/agenttask.go fits the final to the wall then). The wall
+// decides FEASIBILITY here and is not an eta input.
 //
 // ok=true, reason="" — NO OPINION — when the rate is unknown (nil SeatRate,
 // or zero tok_s/samples) or the contract's wall cannot be sized at all: the
@@ -76,20 +78,28 @@ func feasibleFinal(st Subtask, v NodeView) (ok bool, reason string) {
 	return false, fmt.Sprintf("one step and a %d-token answer need %d s at %.1f tok/s, the wall is %d s", minimalFinalTokens, need, policy.TokS, wallSec)
 }
 
-// seatWallFor builds the seatrate policy/input for st on v and sizes the
-// EFFECTIVE wall it would actually run under — the shared setup feasibleFinal
-// and etaFor both need. known=false when v publishes no usable rate (nil
-// SeatRate, or zero tok_s/samples) — the caller then has no opinion.
-func seatWallFor(st Subtask, v NodeView) (policy seatrate.SeatPolicy, in seatrate.Input, wallSec int, known bool) {
+// seatPolicyFor builds the seatrate policy and the estimate input for st on v: the setup feasibleFinal,
+// seatWallFor and etaParts all need. known=false when v publishes no usable rate (nil SeatRate, or zero
+// tok_s/samples) - the caller then has no opinion. It reads no wall: sizing one is seatWallFor's job.
+func seatPolicyFor(st Subtask, v NodeView) (policy seatrate.SeatPolicy, in seatrate.Input, known bool) {
 	sr := v.SeatRate
 	if sr == nil || sr.TokS <= 0 || sr.Samples <= 0 {
-		return seatrate.SeatPolicy{}, seatrate.Input{}, 0, false
+		return seatrate.SeatPolicy{}, seatrate.Input{}, false
 	}
 	policy = seatrate.SeatPolicy{Seat: v.AgentSeat, TokS: sr.TokS, RateSamples: sr.Samples, RateSource: "health seat_rate", ColdLoadSec: sr.ColdLoadSec}
 	if b := v.SeatBudget; b != nil {
 		policy.StepTokens, policy.Thinking = b.StepTokens, b.Thinking
 	}
-	in = seatrate.InputFor(policy, st.Contract)
+	return policy, seatrate.InputFor(policy, st.Contract), true
+}
+
+// seatWallFor is seatPolicyFor plus the EFFECTIVE wall st would actually run under on v - feasibleFinal's
+// input. The ranking eta does not call it: the wall is not an input to the eta (etaParts).
+func seatWallFor(st Subtask, v NodeView) (policy seatrate.SeatPolicy, in seatrate.Input, wallSec int, known bool) {
+	policy, in, known = seatPolicyFor(st, v)
+	if !known {
+		return seatrate.SeatPolicy{}, seatrate.Input{}, 0, false
+	}
 	wallSec = st.Contract.TimeoutSec
 	if st.Contract.TimeoutAuto {
 		wallSec, _ = seatrate.AutoWallFor(policy, st.Contract)
@@ -97,7 +107,7 @@ func seatWallFor(st Subtask, v NodeView) (policy seatrate.SeatPolicy, in seatrat
 	return policy, in, wallSec, true
 }
 
-// fitColdSec is the cold-load charge feasibleFinal and etaFor use:
+// fitColdSec is the cold-load charge etaParts uses:
 // policy.ColdLoadSec ONLY when SeatLoaded is KNOWN false — a positive
 // statement that the seat is not resident right now — never on an unknown
 // reading, the same "never credit a penalty toward an unmeasured field" rule
@@ -116,62 +126,52 @@ func fitColdSec(p seatrate.SeatPolicy, v NodeView) float64 {
 	return 0
 }
 
-// otherSecExcludingCold is the "prefill + steps + think" seconds
-// seatrate.Compute bakes into Estimate.OtherSec ALONGSIDE the cold load.
-// Cold is charged separately (fitColdSec) because whether it applies at all
-// depends on the seat's CURRENT residency (NodeView), a fact seatrate.Input
-// has no field for. Zeroing ColdLoadSec before calling Compute isolates
-// exactly the think+step terms — nothing else in Compute's formula reads
-// ColdLoadSec, so this changes no other term.
-func otherSecExcludingCold(in seatrate.Input) float64 {
-	coldFree := in
-	coldFree.ColdLoadSec = 0
-	return float64(seatrate.Compute(coldFree).OtherSec)
-}
-
-// etaFor is W-11's expected-completion estimate for st on v: the cold load
-// (fitColdSec's tri-state rule) + the node's own queue wait + the generation
-// time for a final answer FITTED to v's own wall at v's measured rate — the
-// same fit feasibleFinal computes, so a node that floors here is never the
-// one an eta comparison prefers on a technicality (a floored fit still
-// produces SOME budget, seatrate.FinalBudgetFloor, and its generation time
-// is priced honestly; remoteEligible has already excluded it if it cannot
-// even hold the floor).
+// etaParts is W-11's expected-completion estimate for st on v, in its three terms (ADR 0079; ADR 0050 decision 3):
 //
-// ok=false when v publishes no usable rate — the caller then keeps today's
-// window-only ordering (rankFor/scoreFit).
-func etaFor(st Subtask, v NodeView) (etaSec float64, ok bool) {
-	policy, in, wallSec, known := seatWallFor(st, v)
+//	cold - fitColdSec's tri-state rule (charged only on a KNOWN cold seat)
+//	wait - the node's own admission backlog (queueWaitFor)
+//	gen  - the time to produce a REFERENCE final at the seat's measured rate: seatrate.FinalBudgetFloor tokens
+//	       for the final and the same again for the structured re-pack when the contract carries a schema,
+//	       plus the seat's own tool steps and think block (the step budget and thinking policy it publishes)
+//
+// The eta is a RANKING number: it says which seat finishes the same work sooner, and it stops at no wall.
+// It used to price the final fitted to the contract's wall and then clamp the sum at the wall, so every seat
+// that could not finish inside the wall read as exactly the wall (a 22 tok/s seat and a 40 tok/s seat tied at
+// 270 s on a 300 s wall) and ordering among slow seats fell to queue estimates and the near-tie draw. Since
+// ADR 0055 decision 2 the wall is an expectation and not a kill, so the premise of that cap is gone. Feasibility
+// (feasibleFinal, decision 2) is untouched and still reads the wall; so are the patience gates (etaStartFor,
+// queueBudgetFor), which read the node's wait only; and the node still fits the final to the wall when it RUNS
+// the job (internal/pipeline/agenttask.go). The reference ignores a seat's configured final on purpose: the
+// work is the same on every seat, and a seat's step budget and thinking still enter through Compute.
+//
+// The contract's wall is not an input: the same seat and contract at any timeout_sec, or under timeout_auto,
+// give the same parts. Nor may the eta become one (a patience or gate input reads the node's wait, never this).
+//
+// ok=false when v publishes no usable rate - the caller then keeps today's window-only ordering
+// (rankFor/scoreFit).
+func etaParts(st Subtask, v NodeView) (cold, wait, gen float64, ok bool) {
+	policy, in, known := seatPolicyFor(st, v)
 	if !known {
-		return 0, false
-	}
-	cold := fitColdSec(policy, v)
-	fitBudget := in.FinalBudget
-	if wallSec > 0 {
-		// The final the node will actually budget (D-95): fitted to the WALL, not
-		// to the wall minus the cold load — the wall starts after admission.
-		fit := seatrate.FitFinalBudget(seatrate.FinalFit{
-			ConfiguredFinal: in.FinalBudget,
-			RemainingSec:    float64(wallSec),
-			OtherSec:        otherSecExcludingCold(in),
-			TokS:            policy.TokS,
-			Schema:          len(st.Contract.OutputSchema) > 0,
-		})
-		fitBudget = fit.Budget
+		return 0, 0, 0, false
 	}
 	genIn := in
-	genIn.ColdLoadSec = 0
-	genIn.FinalBudget = fitBudget
+	genIn.ColdLoadSec = 0 // admission pays the cold load, and cold is charged above from the seat's residency
+	genIn.TimeoutSec = 0  // the wall is not an input: Compute reads it for its note only
+	genIn.FinalBudget = seatrate.FinalBudgetFloor
 	if in.RepackBudget > 0 {
-		genIn.RepackBudget = fitBudget
+		genIn.RepackBudget = seatrate.FinalBudgetFloor
 	}
-	gen := float64(seatrate.Compute(genIn).TotalSec)
-	if wallSec > 0 && gen > float64(wallSec) {
-		// The wall is the stop: a run never generates longer than its wall,
-		// whatever the configured budgets add up to (a floored fit still runs).
-		gen = float64(wallSec)
+	return fitColdSec(policy, v), queueWaitFor(v), float64(seatrate.Compute(genIn).TotalSec), true
+}
+
+// etaFor is etaParts summed: cold + the node's own wait + the reference generation. ok=false when v
+// publishes no usable rate.
+func etaFor(st Subtask, v NodeView) (etaSec float64, ok bool) {
+	cold, wait, gen, ok := etaParts(st, v)
+	if !ok {
+		return 0, false
 	}
-	return cold + queueWaitFor(v) + gen, true
+	return cold + wait + gen, true
 }
 
 // queueWaitFor is the node's own admission backlog translated into an
@@ -431,11 +431,13 @@ const (
 )
 
 // scoreFitRanked is scoreFit's W-11 replacement for an ADEQUATE seat (the
-// caller has already returned fitInadequate for anything that fails
-// adequate()/the layer decision): folds rankFor's window+eta into one
-// maximisable int, per kind, exactly as betterRanked orders a pairwise
-// comparison. Unknown eta on v degrades to the ORIGINAL rule (-window /
-// window) unchanged.
+// caller has already ranked anything that fails adequate()/the layer decision
+// with an inadequate fitKey, which no score can outrank): folds rankFor's
+// window+eta into one maximisable int, per kind, exactly as betterRanked orders
+// a pairwise comparison. Unknown eta on v degrades to the ORIGINAL rule
+// (-window / window) unchanged. The int is only ever compared between adequate
+// seats; it cannot also say "inadequate", because a slow seat's mechanical score
+// (-int(eta x 10) x 2^24 - window) falls below any fixed marker.
 func scoreFitRanked(kind Kind, window int, eta float64, etaKnown bool) int {
 	if kind == KindReasoning {
 		if !etaKnown {

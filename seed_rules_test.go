@@ -124,11 +124,12 @@ func TestAmdGcnSeedsTheSeatItWasMeasuredOn(t *testing.T) {
 		t.Errorf("amd-gcn resident_tier = %q, want \"offload-e4b\" (the E4B measured on <node-f>)", p.ResidentTier)
 	}
 	want := map[string]any{
-		"agent_model":         "mimo-9b-agent",
-		"agent_seat_tok_s":    float64(6.57),
-		"agent_max_tokens":    float64(2048),
-		"agent_timeout_sec":   float64(900),
-		"fleet_agent_enabled": true,
+		"agent_model":               "mimo-9b-agent",
+		"agent_seat_tok_s":          float64(6.57),
+		"agent_max_tokens":          float64(2048),
+		"agent_timeout_sec":         float64(900),
+		"fleet_agent_enabled":       true,
+		"fleet_max_concurrent_jobs": float64(1), // one slot, one worker: TestTheSingleSlotLlamaCppTiersSeedAOneWorkerFleetNode derives the rule
 	}
 	for key, w := range want {
 		raw, ok := p.ConfigSeed[key]

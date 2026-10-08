@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/gpulease"
 )
 
@@ -51,6 +52,16 @@ func runIsolated(m suiteRunner, mkdirTemp func(dir, pattern string) (string, err
 	if err := setenv("LOCAL_OFFLOAD_STATE_DIR", filepath.Clean(dir)); err != nil {
 		os.Stderr.WriteString("mcpserver tests: could not set LOCAL_OFFLOAD_STATE_DIR: " + err.Error() + "\n")
 		return 1
+	}
+	// The offload home holds the ledger, the delegation corpus and every other config.Default() path (DefaultBase),
+	// and config.Default() fixes them when it is called: a test that builds its config with it and sets Home
+	// afterwards still wrote the operator's real ledger (2026-10-03: 1,204 agent_run fixture rows read as fleet
+	// traffic). LOCAL_OFFLOAD_ORIGIN labels any row that still escapes.
+	for _, kv := range [][2]string{{"LOCAL_OFFLOAD_HOME", filepath.Join(filepath.Clean(dir), "home")}, {"LOCAL_OFFLOAD_ORIGIN", "go-test"}} {
+		if err := setenv(kv[0], kv[1]); err != nil {
+			os.Stderr.WriteString("mcpserver tests: could not set " + kv[0] + ": " + err.Error() + "\n")
+			return 1
+		}
 	}
 	return m.Run()
 }
@@ -108,5 +119,21 @@ func TestMainIsolatesTheStateRoot(t *testing.T) {
 	}
 	if got != want {
 		t.Fatalf("default state root = %q, want the isolated %q", got, want)
+	}
+}
+
+// TestMainIsolatesTheHomeAndTheLedger pins the second half of the safety net: the offload home, and with it the
+// ledger config.Default() names, is inside the TestMain's throwaway directory, not the operator's.
+func TestMainIsolatesTheHomeAndTheLedger(t *testing.T) {
+	state := filepath.Clean(os.Getenv("LOCAL_OFFLOAD_STATE_DIR"))
+	home := filepath.Clean(os.Getenv("LOCAL_OFFLOAD_HOME"))
+	if os.Getenv("LOCAL_OFFLOAD_HOME") == "" || !strings.HasPrefix(home, state+string(filepath.Separator)) {
+		t.Fatalf("LOCAL_OFFLOAD_HOME = %q: TestMain must point it inside its throwaway state root %q", home, state)
+	}
+	if got := filepath.Clean(config.Default().LedgerPath); !strings.HasPrefix(got, home+string(filepath.Separator)) {
+		t.Fatalf("config.Default().LedgerPath = %q, want it under the isolated home %q", got, home)
+	}
+	if got := os.Getenv("LOCAL_OFFLOAD_ORIGIN"); got != "go-test" {
+		t.Fatalf("LOCAL_OFFLOAD_ORIGIN = %q, want go-test so an escaped row names its writer", got)
 	}
 }

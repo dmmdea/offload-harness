@@ -16,6 +16,7 @@ func TestAgentRunDoorAuditFollowsTheConfig(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("USERPROFILE", home)
 	t.Setenv("HOME", home)
+	t.Setenv("LOCAL_OFFLOAD_HOME", "") // this test reads the user-home fallback; TestMain points the home elsewhere
 	want := filepath.Join(home, ".local-offload", "agent-audit.jsonl")
 	for _, tc := range []struct {
 		mode     string
@@ -47,6 +48,7 @@ func TestAgentRunDoorRefusesAMistypedOrUnresolvableEnforce(t *testing.T) {
 	}
 	t.Setenv("USERPROFILE", "")
 	t.Setenv("HOME", "")
+	t.Setenv("LOCAL_OFFLOAD_HOME", "") // this test reads the user-home fallback; TestMain points the home elsewhere
 	cfg := config.Default()
 	cfg.Endpoint = "http://127.0.0.1:1" // unreachable: the roster check proceeds, as it does on a dead seat
 	cfg.AuditAllDoors = "enforce"
