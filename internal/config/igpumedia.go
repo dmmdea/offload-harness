@@ -110,9 +110,17 @@ const (
 // itself, so an extra-args element naming any of these is never legitimate: whatever follows
 // it overrides the GPU backend the runner put in the argv. Mirrors render/igpu-engine.mjs.
 var placementFlags = map[string]bool{
-	"--backend": true, "-b": true, "--params-backend": true, "--offload-to-cpu": true,
+	"--backend": true, "-b": true, "--params-backend": true,
 	"--clip-on-cpu": true, "--vae-on-cpu": true, "--control-net-cpu": true, "--rpc": true,
 }
+
+// sanctionedSpillFlags are cpu-named flags that are NOT placements. sd.cpp's --offload-to-cpu
+// parks the weights in RAM and stages them to the device step by step; every compute buffer
+// stays on the GPU, and the log guard still kills a run that shows one on the CPU. The house
+// rule (2026-10-07) allows RAM as overflow while it adds capability, so the screen lets the
+// flag through; whether a box should use it is a per-seat measurement, not a screen (on a UMA
+// iGPU box "VRAM" is the same memory, so it only adds copies and the bindings leave it off).
+var sanctionedSpillFlags = map[string]bool{"--offload-to-cpu": true}
 
 var extraArgSplitRe = regexp.MustCompile(`[=,&:\s]+`)
 var cpuTokenRe = regexp.MustCompile(`^cpu\d*$`)
@@ -125,6 +133,8 @@ func ScreenExtraArgs(engine string, args []string) (index int, arg, why string, 
 		low := strings.ToLower(strings.TrimSpace(a))
 		name := strings.TrimSpace(strings.SplitN(low, "=", 2)[0])
 		switch {
+		case sanctionedSpillFlags[name]:
+			// not a placement: fall through to the value check below
 		case placementFlags[name]:
 			return i, a, name + " sets the backend or where a model lives", true
 		case engine == ExtraArgsAudiocpp && name == "--device":

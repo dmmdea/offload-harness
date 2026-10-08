@@ -68,9 +68,9 @@ test("refuseCpuBackend: only vulkan / vulkanN is accepted; cpu, unset, best/auto
 test("screenExtraArgs: anything that changes the backend or the placement is refused, in every spelling", () => {
   const bad = [
     ["--backend", "cpu"], ["--backend", "vulkan0"], ["--backend=vulkan0"], ["-b", "vulkan0"], ["-b=cpu"], ["--BACKEND", "x"],
-    ["--params-backend", "cpu"], ["--params-backend=vulkan0"], ["--offload-to-cpu"], ["--clip-on-cpu"], ["--vae-on-cpu"],
+    ["--params-backend", "cpu"], ["--params-backend=vulkan0"], ["--clip-on-cpu"], ["--vae-on-cpu"],
     ["--control-net-cpu"], ["--rpc", "192.0.2.1:50052"], ["--rpc=192.0.2.1:50052"], ["--cpu-moe"], ["--n-cpu-moe", "8"],
-    ["--offload-params-to-cpu"], ["--some-flag", "cpu"], ["--some-flag", "CPU0"], ["--assign=te=cpu"], ["--assign", "te=cpu,vae=vulkan0"],
+    ["--offload-params-to-cpu"], ["--offload-to-cpu=cpu"], ["--some-flag", "cpu"], ["--some-flag", "CPU0"], ["--assign=te=cpu"], ["--assign", "te=cpu,vae=vulkan0"],
     ["--assign", "diffusion=vulkan0&cpu"],
   ];
   for (const a of bad) {
@@ -82,6 +82,14 @@ test("screenExtraArgs: anything that changes the backend or the placement is ref
   assert.ok(screenExtraArgs(["--device", "1"], { engine: "audiocpp" }));
   assert.ok(screenExtraArgs(["--device=1"], { engine: "audiocpp" }));
   assert.equal(screenExtraArgs(["--device", "1"], { engine: "sdcpp" }), null);
+  // --offload-to-cpu is sanctioned spill (weights parked in RAM, staged to the device, all compute on
+  // the GPU): accepted on every engine, and it never masks a placement flag that follows it
+  for (const engine of ["sdcpp", "da3", "audiocpp"]) {
+    assert.equal(screenExtraArgs(["--vae-tiling", "--offload-to-cpu", "--diffusion-fa"], { engine }), null, engine);
+    assert.equal(screenExtraArgs(["--OFFLOAD-TO-CPU"], { engine }), null, engine);
+  }
+  assert.deepEqual(refuseExtraArgs(["--offload-to-cpu"], { engine: "sdcpp" }), ["--offload-to-cpu"]);
+  assert.equal(screenExtraArgs(["--offload-to-cpu", "--clip-on-cpu"], { engine: "sdcpp" }).index, 1);
   const good = [["--vae-tiling"], ["--vae-tile-overlap", "0.25"], ["--flag with space"], ["--diffusion-fa"], ["--lora-model-dir", "/models/loras"], ["--threads", "4"], []];
   for (const a of good) assert.equal(screenExtraArgs(a, { engine: "sdcpp" }), null, JSON.stringify(a));
   assert.deepEqual(refuseExtraArgs(["--threads", "4"], { engine: "da3" }), ["--threads", "4"]);
@@ -148,6 +156,13 @@ test("scanLog: params in host RAM with the compute on Vulkan is the sanctioned o
   assert.equal(r.verdict.ok, true);
   const host = scanLog(fixture("sdcpp-video-healthy.log").replace(/VRAM\) on Vulkan0\s*$/m, "RAM) on Vulkan_Host"), { engine: "sdcpp" });
   assert.equal(host.fatal, null, "Vulkan_Host is host-pinned memory, not a CPU placement");
+  assert.equal(host.verdict.ok, true, "--offload-to-cpu's log shape (params on the host, compute on Vulkan) is a pass");
+  // the same host-resident params with a diffusion-stage COMPUTE buffer on the CPU is still a placement
+  const hostCompute = fixture("sdcpp-video-healthy.log").replace(/VRAM\) on Vulkan0\s*$/m, "RAM) on Vulkan_Host")
+    .replace(/(Wan\S* compute buffer size: [\d.]+ MB)\(VRAM\) on Vulkan0/, "$1(RAM) on CPU");
+  assert.match(hostCompute, /compute buffer size: .*\(RAM\) on CPU/);
+  const bad = scanLog(hostCompute, { engine: "sdcpp" });
+  assert.equal(bad.fatal?.kind, CPU_PLACEMENT, "params on the host never excuses compute on the CPU");
 });
 
 test("scanLog: no positive line fails (sd.cpp, da3, audio.cpp) and the message says no GPU evidence was seen", () => {

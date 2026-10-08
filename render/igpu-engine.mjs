@@ -84,9 +84,18 @@ export function parseExtraArgs(raw) {
 // backend itself, so an extra-args element naming any of these is never legitimate: whatever
 // it is followed by overrides the GPU backend the script put in the argv.
 const PLACEMENT_FLAGS = new Set([
-  "--backend", "-b", "--params-backend", "--offload-to-cpu", "--clip-on-cpu", "--vae-on-cpu",
+  "--backend", "-b", "--params-backend", "--clip-on-cpu", "--vae-on-cpu",
   "--control-net-cpu", "--rpc",
 ]);
+
+// cpu-named flags that are NOT placements. sd.cpp's --offload-to-cpu parks the weights in RAM
+// and stages them to the device step by step; every compute buffer stays on the GPU, and the
+// log guard still kills a run that shows one on the CPU. The house rule (2026-10-07) allows
+// RAM as overflow while it adds capability, so the screen lets the flag through; whether a
+// box should use it is a per-seat measurement, not a screen (on a UMA iGPU box "VRAM" is the
+// same memory, so it only adds copies and the bindings leave it off). Mirrors
+// config.sanctionedSpillFlags.
+const SANCTIONED_SPILL_FLAGS = new Set(["--offload-to-cpu"]);
 
 // screenExtraArgs: the first element of an *_extra_args list that changes the backend or
 // the placement, as {index, arg, why}; null when the list is clean. `engine` is "sdcpp",
@@ -98,9 +107,9 @@ export function screenExtraArgs(args, { engine = "sdcpp" } = {}) {
     const arg = String(list[i]);
     const low = arg.toLowerCase().trim();
     const name = low.split("=")[0].trim();
-    if (PLACEMENT_FLAGS.has(name)) return { index: i, arg, why: `${name} sets the backend or where a model lives` };
+    if (!SANCTIONED_SPILL_FLAGS.has(name) && PLACEMENT_FLAGS.has(name)) return { index: i, arg, why: `${name} sets the backend or where a model lives` };
     if (engine === "audiocpp" && name === "--device") return { index: i, arg, why: "--device is chosen by the audiocpp_device key" };
-    if (name.startsWith("-") && /cpu/.test(name)) return { index: i, arg, why: "a cpu-named flag places a model on the CPU" };
+    if (!SANCTIONED_SPILL_FLAGS.has(name) && name.startsWith("-") && /cpu/.test(name)) return { index: i, arg, why: "a cpu-named flag places a model on the CPU" };
     if (low.split(/[=,&:\s]+/).some((p) => /^cpu\d*$/.test(p))) return { index: i, arg, why: "cpu as a backend value" };
   }
   return null;

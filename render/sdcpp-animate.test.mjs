@@ -140,6 +140,10 @@ test("animate: the token cap counts the VACE reference as one more latent frame,
 });
 
 test("animate: extra args and depth extra args that change the backend or placement are refused before any spawn", () => {
+  // sanctioned spill (weights in RAM, compute on the GPU) is not refused: it reaches the file checks
+  const spill = run([...animBase, "--extra-args", JSON.stringify(["--offload-to-cpu"])]);
+  assert.doesNotMatch(spill.stderr, /EXTRA_ARGS_REFUSED/);
+  assert.match(spill.stderr, /not found/);
   const sd = run([...animBase, "--extra-args", JSON.stringify(["--clip-on-cpu"])]);
   assert.equal(sd.status, 1);
   assert.match(sd.stderr, /EXTRA_ARGS_REFUSED/);

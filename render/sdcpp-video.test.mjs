@@ -174,7 +174,7 @@ test("the script refuses a request over the token cap BEFORE any file check or s
 });
 
 test("the script refuses extra args that change the backend or placement (EXTRA_ARGS_REFUSED, exit 1) before any spawn", () => {
-  for (const extra of [["--backend", "cpu"], ["--clip-on-cpu"], ["--vae-on-cpu"], ["--offload-to-cpu"], ["--params-backend", "cpu"], ["-b", "vulkan0"]]) {
+  for (const extra of [["--backend", "cpu"], ["--clip-on-cpu"], ["--vae-on-cpu"], ["--offload-to-cpu", "--clip-on-cpu"], ["--params-backend", "cpu"], ["-b", "vulkan0"]]) {
     const r = run([...videoBase, "--extra-args", JSON.stringify(extra)]);
     assert.equal(r.status, 1, `${extra}: ${r.stderr}`);
     assert.match(r.stderr, /EXTRA_ARGS_REFUSED/);
@@ -182,4 +182,9 @@ test("the script refuses extra args that change the backend or placement (EXTRA_
   }
   const ok = run([...videoBase, "--extra-args", JSON.stringify(["--vae-tile-overlap", "0.25"])]);
   assert.match(ok.stderr, /not found/);
+  // --offload-to-cpu is sanctioned spill (weights in RAM, compute on the GPU): it gets past the
+  // screen to the file checks, and it does not mask a placement flag after it
+  const spill = run([...videoBase, "--extra-args", JSON.stringify(["--offload-to-cpu"])]);
+  assert.match(spill.stderr, /not found/);
+  assert.doesNotMatch(spill.stderr, /EXTRA_ARGS_REFUSED/);
 });

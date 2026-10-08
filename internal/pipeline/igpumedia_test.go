@@ -676,6 +676,36 @@ func TestIGPULanesRefuseExtraArgsThatChangeTheBackendBeforeTheRunner(t *testing.
 
 // The runner's typed failures reach the ledger class through gpugen.ClassifyErr on EVERY lane
 // (the class a retry/footprint/routing decision keys on).
+// --offload-to-cpu is sanctioned spill (weights parked in RAM and staged to the device, all
+// compute on the GPU): the lanes hand it to the runner when a binding's extra args carry it,
+// and still refuse a placement flag next to it.
+func TestIGPULanesAcceptOffloadToCPUAsSanctionedSpill(t *testing.T) {
+	requireNodePipeline(t)
+	dir := t.TempDir()
+
+	cfgV := sdcppVideoCfg(t, dir)
+	fb := cfgV.VideoGenFamilies["fastwan"]
+	fb.SdcppExtraArgs = []string{"--vae-tiling", "--offload-to-cpu"}
+	cfgV.VideoGenFamilies["fastwan"] = fb
+	out, _, _ := decodeVideo(t, (&Pipeline{cfg: cfgV}).Run(context.Background(), videoReq(dir, nil)))
+	if got := igpuFlag(readArgs(t, out), "extra-args"); got != `["--vae-tiling","--offload-to-cpu"]` {
+		t.Errorf("video lane extra-args = %q, want the binding's list verbatim", got)
+	}
+
+	cfgA := animateCfg(t, dir)
+	cfgA.AnimateGenSdcppExtraArgs = []string{"--offload-to-cpu"}
+	out, _, _ = decodeVideo(t, (&Pipeline{cfg: cfgA}).Run(context.Background(), animateReq(dir, nil)))
+	if got := igpuFlag(readArgs(t, out), "extra-args"); got != `["--offload-to-cpu"]` {
+		t.Errorf("animate lane extra-args = %q, want the binding's list verbatim", got)
+	}
+
+	cfgM := sdcppVideoCfg(t, dir)
+	fb = cfgM.VideoGenFamilies["fastwan"]
+	fb.SdcppExtraArgs = []string{"--offload-to-cpu", "--vae-on-cpu"}
+	cfgM.VideoGenFamilies["fastwan"] = fb
+	mustDeferWith(t, (&Pipeline{cfg: cfgM}).Run(context.Background(), videoReq(dir, nil)), "extra_args_refused", "EXTRA_ARGS_REFUSED", "sdcpp_extra_args[1]")
+}
+
 func TestIGPULanesMapTheRunnersTypedFailuresToTheirErrClass(t *testing.T) {
 	requireNodePipeline(t)
 	cases := []struct{ name, msg, class string }{

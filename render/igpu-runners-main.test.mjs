@@ -136,6 +136,23 @@ test("sdcpp-video main: without --tae there is no --taesd (the full VAE is the d
   } finally { sb.done(); }
 });
 
+test("sdcpp-video main: --offload-to-cpu in the extra args is sanctioned spill: it reaches sd-cli, the run passes (params on the host, compute on Vulkan)", opts, async () => {
+  const sb = sandbox();
+  try {
+    const log = readFileSync(fixture("sdcpp-video-healthy.log"), "utf8")
+      .split("\n").map((l) => (/prepared params backend buffers/.test(l) ? l.replace(/VRAM\) on Vulkan0/, "RAM) on Vulkan_Host") : l)).join("\n");
+    assert.match(log, /RAM\) on Vulkan_Host/);
+    const logFile = join(sb.work, "host-params.log");
+    writeFileSync(logFile, log);
+    const v = videoSetup(sb, { logFile }, ["--extra-args", JSON.stringify(["--offload-to-cpu"])]);
+    const r = await runNode("sdcpp-video.mjs", v.args, sb);
+    assert.equal(r.status, 0, r.stderr);
+    const [call] = records(v.rec);
+    assert.ok(call.argv.includes("--offload-to-cpu"), "the binding's extra args carry it, so sd-cli gets it");
+    assert.equal(at(call.argv, "--backend"), "vulkan0");
+  } finally { sb.done(); }
+});
+
 test("sdcpp-video main: a CPU compute line kills the engine (its pid is dead), exits 1 CPU_PLACEMENT, writes no mp4 and leaves no temp dir", opts, async () => {
   const sb = sandbox();
   try {

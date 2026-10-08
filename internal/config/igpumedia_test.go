@@ -171,9 +171,9 @@ func TestDefaultConfigSelectsNoIGPUEngine(t *testing.T) {
 func TestExtraArgsRefusal(t *testing.T) {
 	bad := [][]string{
 		{"--backend", "cpu"}, {"--backend", "vulkan0"}, {"--backend=vulkan0"}, {"-b", "vulkan0"}, {"-b=cpu"}, {"--BACKEND", "x"},
-		{"--params-backend", "cpu"}, {"--params-backend=vulkan0"}, {"--offload-to-cpu"}, {"--clip-on-cpu"}, {"--vae-on-cpu"},
+		{"--params-backend", "cpu"}, {"--params-backend=vulkan0"}, {"--clip-on-cpu"}, {"--vae-on-cpu"},
 		{"--control-net-cpu"}, {"--rpc", "192.0.2.1:50052"}, {"--rpc=192.0.2.1:50052"}, {"--cpu-moe"}, {"--n-cpu-moe", "8"},
-		{"--offload-params-to-cpu"}, {"--some-flag", "cpu"}, {"--some-flag", "CPU0"}, {"--assign=te=cpu"}, {"--assign", "te=cpu,vae=vulkan0"},
+		{"--offload-params-to-cpu"}, {"--offload-to-cpu=cpu"}, {"--some-flag", "cpu"}, {"--some-flag", "CPU0"}, {"--assign=te=cpu"}, {"--assign", "te=cpu,vae=vulkan0"},
 		{"--assign", "diffusion=vulkan0&cpu"},
 	}
 	for _, a := range bad {
@@ -189,6 +189,19 @@ func TestExtraArgsRefusal(t *testing.T) {
 		if err := ExtraArgsRefusal("sdcpp_extra_args", ExtraArgsSdcpp, a); err != nil {
 			t.Errorf("sdcpp %v: --device is not an sd-cli placement flag here: %v", a, err)
 		}
+	}
+	// --offload-to-cpu is sanctioned spill (weights parked in RAM, staged to the device, all compute
+	// on the GPU), so it is accepted on every engine and alongside the flags that stay refused.
+	for _, eng := range []string{ExtraArgsSdcpp, ExtraArgsDepth, ExtraArgsAudiocpp} {
+		if err := ExtraArgsRefusal("x_extra_args", eng, []string{"--vae-tiling", "--offload-to-cpu", "--diffusion-fa"}); err != nil {
+			t.Errorf("%s: --offload-to-cpu is sanctioned spill and must pass: %v", eng, err)
+		}
+		if err := ExtraArgsRefusal("x_extra_args", eng, []string{"--OFFLOAD-TO-CPU"}); err != nil {
+			t.Errorf("%s: the flag name is case-insensitive: %v", eng, err)
+		}
+	}
+	if i, a, _, ok := ScreenExtraArgs(ExtraArgsSdcpp, []string{"--offload-to-cpu", "--clip-on-cpu"}); !ok || i != 1 || a != "--clip-on-cpu" {
+		t.Errorf("--offload-to-cpu must not mask the placement flag after it: %d %q %v", i, a, ok)
 	}
 	good := [][]string{{"--vae-tiling"}, {"--vae-tile-overlap", "0.25"}, {"--flag with space"}, {"--diffusion-fa"}, {"--threads", "4"}, nil, {}}
 	for _, a := range good {

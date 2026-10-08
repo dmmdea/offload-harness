@@ -43,7 +43,8 @@
 //
 // THE VACE ARGV (sd.cpp docs/wan.md "V2V with Wan2.1 VACE" at 3f8527a): the reference image is
 // `-i`, the depth frames are `--control-video <dir>`. The docs also pass --offload-to-cpu; this
-// runner never does (no model runs on the CPU, and extra args naming it are refused). The model
+// runner never adds it (on a UMA iGPU it only adds copies); it reaches sd-cli only when a binding's
+// extra args carry it, which the screen allows as sanctioned spill (weights in RAM, compute on the GPU). The model
 // must be a .safetensors VACE checkpoint: the public GGUFs lack vace_patch_embedding.weight and
 // sd-cli refuses them ("model metadata validation failed"), surfaced here as MODEL_INCOMPATIBLE.
 // Frame count: sd.cpp samples N+4 frames with a reference image; the measured build trims the
@@ -112,7 +113,7 @@ export function buildSdAnimateArgs({ outFile, ref, depthDir, prompt, flags, extr
   const p = resolveParams(flags);
   // `-i` is the VACE reference image (sd.cpp docs/wan.md "V2V": `-i <reference image>
   // --control-video <dir of frames>`); `-r/--ref-image` is for Flux Kontext / MiniMax-H3 only.
-  // Never --offload-to-cpu, which that doc page also shows: no model runs on the CPU here.
+  // Never adds --offload-to-cpu, which that doc page also shows (sanctioned spill, a per-seat choice in extra args).
   const a = ["-M", "vid_gen", "--diffusion-model", flags.model, "--vae", flags.vae, "--t5xxl", flags.t5xxl,
     "-i", ref, "--control-video", depthDir, "-p", prompt];
   if (flags.negative) a.push("-n", flags.negative);
