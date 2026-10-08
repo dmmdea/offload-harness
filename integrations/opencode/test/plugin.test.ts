@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { classifyLeg } from "../src/classify.ts";
 import { PROTOCOL_MARKER } from "../src/protocol.ts";
 import { appendDispatchLog, newInstrumentStats } from "../src/instrument.ts";
-import { createHooks, DEFAULTS, delegateDigest, LocalOffloadPlugin, resolveOptions, taskEscalated, taskFailed, type Options } from "../src/plugin.ts";
+import { createHooks, DEFAULTS, delegateDigest, LocalOffloadPlugin, ranLocally, resolveOptions, taskEscalated, taskFailed, type Options } from "../src/plugin.ts";
 
 const tmpLog = () => join(mkdtempSync(join(tmpdir(), "olo-")), "dispatch-log.jsonl");
 const opts = (over: Partial<Options> = {}): Options => ({ ...DEFAULTS, dispatchLog: tmpLog(), ...over });
@@ -297,6 +297,41 @@ describe("delegate digest", () => {
     expect(d).toContain("2 contract(s) deferred");
   });
   it("returns null on non-JSON", () => expect(delegateDigest("no json here")).toBeNull());
+
+  // ADR 0078: a route local or remote without a pin_reason is a hint, and every result of such a call opens its placement with
+  // a clause naming the route the caller hinted. The word "local" in it (or in the reason behind it) says nothing about where
+  // the result ran.
+  const results = (...placements: string[]) => JSON.stringify({ summary: { infrastructure: 0 }, results: placements.map((placement) => ({ placement })) });
+  const spent = "; route=auto → node-a (headroom); the idle local seat's run-cap line is spent by this deal (4 of 4 free slot(s) dealt; 4 run(s) registered on seat s, cap 4)";
+  it("counts a local hint that was placed on nodes as remote, whatever the clause and the reason say", () => {
+    const d = delegateDigest(results("route=local was a hint (no pin_reason), overridden: placed on node-a" + spent, "route=local was a hint (no pin_reason), overridden: placed on node-b" + spent));
+    expect(d).toContain("0 local, 2 remote of 2");
+    expect(d).toContain("pair landed");
+    expect(d).not.toContain("did NOT land");
+  });
+  it("counts the seat's share of a local hint as local and the rest as remote", () => {
+    const d = delegateDigest(results("route=local was a hint (no pin_reason), honoured: placed on the local seat; local idle", "route=local was a hint (no pin_reason), overridden: placed on node-a" + spent));
+    expect(d).toContain("1 local, 1 remote of 2");
+    expect(d).toContain("pair landed");
+  });
+  it("counts a remote hint that fell back to the seat as local, and says the pair did not land", () => {
+    const fell = "route=remote was a hint (no pin_reason), overridden: placed on the local seat; no eligible remote — nothing answered (a remote hint falls back to the local seat)";
+    const d = delegateDigest(results(fell, fell));
+    expect(d).toContain("2 local, 0 remote of 2");
+    expect(d).toContain("did NOT land");
+  });
+  it("counts a remote hint honoured on a node as remote even when the node's name contains local", () => {
+    const d = delegateDigest(results("route=remote was a hint (no pin_reason), honoured: placed on local-box; route=auto → local-box (headroom)"));
+    expect(d).toContain("0 local, 1 remote of 1");
+  });
+  it("judges the reason behind a hint nothing ran as every placement is", () => {
+    const d = delegateDigest(results("route=local was a hint (no pin_reason): placed as route=auto, and no node took it; capacity wait: no node had room within 2m0s", "route=remote was a hint (no pin_reason): placed remotes-first, and where it was running is not known; local seat busy"));
+    expect(d).toContain("1 local, 1 remote of 2");
+  });
+  it("ranLocally reads a placement that opens with no hint clause as it always was", () => {
+    for (const p of ["local", "local idle", "route=local forced", "route=spread → local (slot 1 of 2)", "retry on local after node-a failed_verification"]) expect(ranLocally(p)).toBe(true);
+    for (const p of ["route=spread → node-c (slot 2 of 2)", "route=auto → node-a (headroom)", "", "capacity wait → node-a (room after 3s)"]) expect(ranLocally(p)).toBe(false);
+  });
 });
 
 describe("instrument", () => {

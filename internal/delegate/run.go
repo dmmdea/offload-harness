@@ -148,11 +148,18 @@ type PlacedResult struct {
 	nodeTerminal    bool
 	queuedWait      time.Duration
 	PlacementReason string
+	// PinReason is the closed reason the call was pinned under (RunOptions.PinReason, ADR 0078), stamped on the
+	// result as the caller receives it and on its ledger row; "" for a call with no reasoned pin.
+	PinReason string
 	// deadlineCut marks a result the whole-call deadline (RunOptions.Deadline)
 	// published as a budget defer instead of an answer: the subtask was still
 	// running, waiting or not yet started when the call ended. Set by
 	// cutByDeadline and the deadline's own constructors; never published.
 	deadlineCut bool
+	// abandoned marks the result the call published for a subtask whose goroutine had not returned when the unwind
+	// allowance ran out (abandoned in calldeadline.go): a seat or a node may still be running it, so the call cannot say
+	// where it was placed, and a hinted call's clause says that instead of "no node took it" (hintClause). Never published.
+	abandoned bool
 	// queueSeen is what the queue holder said about this job when the call deadline
 	// took a last look (calldeadline.go lookAtHolder): "accepted", "running", "absent"
 	// (no such job) or "unknown" (no answer inside the look). "" = never looked.
@@ -696,6 +703,19 @@ type RunOptions struct {
 	// operator's own surfaces (the CLI verbs, fleet-smoke) leave it false and keep naming any tailnet
 	// node, which is how a node that has not joined the roster yet is tested.
 	RosterOnly bool
+	// PinReason is the closed reason (privacy, locality, measurement, operator: PinReasons) a caller gave for
+	// pinning the call with route local or remote (ADR 0078). A reasoned pin is authoritative, exactly as the route
+	// always was, and the reason is recorded on every ledger row and result. CheckPinReason refuses a value outside
+	// the set, one the route does not take, and one given with a route that is not a pin, before any placement.
+	PinReason string
+	// PinNeedsReason is set by the doors that offer pin_reason (agent_delegate, offload_research and their CLI
+	// verbs): a route local or remote WITHOUT a PinReason is then a hint that placement may override (see pin.go).
+	// The zero value keeps today's authoritative pin for every caller that has no reason channel (fleet-smoke, the
+	// review lane's remote fallthrough, offload_ask and agent_run).
+	PinNeedsReason bool
+	// PinTally, when set, is the accounting the call's pins are added to (the MCP server's, which offload_status
+	// publishes). nil = not counted: the CLI verbs and fleet-smoke are one-call processes with nobody to report to.
+	PinTally *PinTally
 	// call is the deadline's shared state (calldeadline.go): RunBatched builds it
 	// once so every chunk of a batched call counts its unfinished subtasks against
 	// the whole call. Nil = RunWith builds its own from Deadline.
@@ -808,6 +828,19 @@ func runWith(ctx context.Context, cfg config.Config, local LocalRunner, subtasks
 	default:
 		return nil, Summary{}, fmt.Errorf("delegate: route %q not recognized (want auto, spread, local, remote, or queue)", route)
 	}
+	// A pin_reason is checked against the route before anything is read or spent (ADR 0078), and a local or remote
+	// route that has none, through a door that offers one, becomes a hint placed as auto (pin.go). From here `route`
+	// is the route the run APPLIES; pin keeps what the caller asked.
+	pin, route, perr := resolvePin(route, opts)
+	if perr != nil {
+		return nil, Summary{}, perr
+	}
+	// A browse grant is local work by construction (ADR 0060): the browse tool drives THIS machine's own browser, so a
+	// call that carries one cannot have its local route overridden onto another node's. The grant is the reason: a bare
+	// local that would have been a hint is pinned under the implied reason locality, and says so on its rows and results.
+	if pin.hint && pin.asked == "local" && anyBrowse(subtasks) {
+		pin.hint, pin.reason, route = false, PinLocality, "local"
+	}
 	if len(subtasks) == 0 {
 		return nil, Summary{}, fmt.Errorf("delegate: at least one subtask required")
 	}
@@ -894,7 +927,7 @@ func runWith(ctx context.Context, cfg config.Config, local LocalRunner, subtasks
 	// additions — a nil ledger and a failed recovery change nothing about how
 	// this run places or reports.
 	maybeRecoverOrphans(cfg)
-	r := &runner{cfg: cfg, local: local, route: route, remotes: remotes, intent: openIntentLedger(cfg), led: led, ledgerUnopened: ledgerUnopened, pair: pairworkloads.New(pairworkloads.FromConfig(cfg))}
+	r := &runner{cfg: cfg, local: local, route: route, pin: pin, remotes: remotes, intent: openIntentLedger(cfg), led: led, ledgerUnopened: ledgerUnopened, pair: pairworkloads.New(pairworkloads.FromConfig(cfg))}
 	// Deliver every PAIR frame before returning: the delegate CLI exits right
 	// after this, and a frame still in flight dies with the process — PAIR then
 	// shows the card "running" until its staleness sweep fails it. Each send is
@@ -907,6 +940,7 @@ func runWith(ctx context.Context, cfg config.Config, local LocalRunner, subtasks
 	r.call = dl
 	if opts != nil {
 		r.quarantine = opts.Quarantine
+		r.tally = opts.PinTally
 		r.priority = core.ClampBand(opts.Priority)
 		r.tenant = opts.Tenant
 		r.decider = opts.LocalDecider
@@ -954,6 +988,16 @@ func runWith(ctx context.Context, cfg config.Config, local LocalRunner, subtasks
 		if route == "auto" {
 			busy = r.readAutoLocalSlot(ctx, leaseInfo, subtasks)
 			room, roomNote = r.localRunCapRoom()
+			// A remote hint (ADR 0078) is placed remotes-first, as route=remote is: the deal treats the seat as
+			// unavailable whatever it read. The reading is still taken and kept, unlike route=remote's, because the
+			// hint may fall back to the seat where remote would defer, and that fallback must still wait for a lease
+			// or for the vLLM seat that holds the cards (autoDealBusy), never load over them. hintSeatFree is what
+			// the seat read BEFORE the forcing: the deal may give the seat what no remote has room for only if it
+			// is free, and a lease, a full line, a load in progress or an occupant each make it not free.
+			if r.remoteHint() {
+				r.hintSeatFree = !busy
+				busy = true
+			}
 		}
 		// The fleet is read when the local seat is busy; for an idle one, when some contract names a layer
 		// this box does not declare (register A-108), because that contract is dealt to the node that declares
@@ -1048,6 +1092,14 @@ launch:
 			progress.finished(i, results[i])
 		}
 	}
+	// The call's pin (ADR 0078) goes on every result the caller receives, once, here: the reason a pinned call carries
+	// and the plain-words clause a hinted call's placement reason opens with. record() puts the same on the ledger
+	// row of each attempt, from the same function. The pin accounting offload_status publishes counts these
+	// published results, so a retried or re-placed subtask is one and a hint is judged by where it was placed.
+	for i := range results {
+		results[i] = r.stampPin(results[i])
+	}
+	r.tallyPins(results)
 
 	var sum Summary
 	for _, pr := range results {
@@ -1157,6 +1209,17 @@ type runner struct {
 	local   LocalRunner
 	route   string
 	remotes []string
+	// pin is what the caller asked of placement with route local or remote (ADR 0078), resolved once at intake.
+	// route above is the route the run APPLIES: a reasonless local or remote through a door that offers pin_reason
+	// is a hint and is applied as auto (pin.go), so every site below that reads r.route sees the route placement
+	// uses, and pin is what the ledger rows, the results and the pin accounting say the caller asked.
+	pin pinCall
+	// tally is RunOptions.PinTally; nil = the call's pins are not counted.
+	tally *PinTally
+	// hintSeatFree is, for a remote hint, whether the local seat read free (no lease, no full line, no load in
+	// progress, no vLLM seat to evict) when the deal was made, before the hint dealt it as unavailable: the deal
+	// may fall back to the seat only then. Written once before any goroutine starts, read-only after.
+	hintSeatFree bool
 	// intent is the delegator-death durability ledger (Option A, intent.go).
 	// nil = inert (state root unresolvable); dispatch never depends on it.
 	intent *intentLedger
@@ -1502,10 +1565,19 @@ func (r *runner) runOne(ctx context.Context, i int, contract core.AgentContract)
 			// other node the caller must be told it was considered and why it did not
 			// happen, not left with a retryable defer and an empty note.
 			why := "every eligible node was already tried or is not eligible"
-			if r.route == "local" {
+			switch {
+			case r.route == "local":
 				why = "route local places nothing on another node"
+			case r.remotePinned():
+				why += "; " + r.remotePinWhy()
 			}
 			first.RetryNote = fmt.Sprintf("retry skipped: the seat on %s went down and no other node could take the contract (%s)", nodeLabel(first), why)
+		case r.remotePinned():
+			// A reasoned remote pin retries on another fleet node or not at all (alternativeNode): when there is no other
+			// node, a failed verification, an abstention or an admission defer would otherwise be published with no note
+			// and read as a retry nobody considered. The pin is the reason there is no local retry, so the note names it.
+			first.RetryNote = fmt.Sprintf("retry skipped: no other fleet node could take the contract after the first attempt on %s (%s); %s",
+				nodeLabel(first), attemptOutcome(first), r.remotePinWhy())
 		}
 		return first
 	}
@@ -1584,7 +1656,13 @@ func (r *runner) runOne(ctx context.Context, i int, contract core.AgentContract)
 	retryContract.TimeoutSec = remaining
 	retryContract.TimeoutAuto = false // a retry's wall is what is left — explicit, never auto (D-03)
 	second := r.placeAndRun(ctx, i, retryContract, &alt, start, budget, pl)
-	return mergeAttempts(first, second)
+	merged := mergeAttempts(first, second)
+	if r.remotePinned() {
+		// The retry ran on a fleet node because the pin allows no other place (alternativeNode), and the note says so whichever
+		// attempt is published: the first attempt it annotates, or the retry that recovered it.
+		merged.RetryNote += "; " + r.remotePinWhy()
+	}
+	return merged
 }
 
 // retryWait is what awaitRetrySeat found: how long the retry waited in line (time the
@@ -2525,6 +2603,11 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 	// hand back the sentinel as a result.
 	decided := seed.decided
 	if r.priority < core.BandNormal {
+		// A sheddable run never waits, so a remote hint the process gate turned away has no tick to take the idle seat in:
+		// it takes it here, under the deal's own guards, or it is shed.
+		if pr, ok := r.hintSeatWithoutAWait(ctx, i, contract, start, budget, pl, seed, refusals, fmt.Sprintf("sheddable work (priority %d) does not wait", r.priority)); ok {
+			return pr
+		}
 		return r.settle(contract, r.shedResult(localView, seed, refusals), pl, waitStart)
 	}
 	// How long the wait runs, and what bounds it (ADR 0073): a call that has a whole-call deadline waits
@@ -2552,6 +2635,12 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 			return r.runDecided(ctx, i, contract, start, budget, pl, seed, refusals, 0, *decided, false, note, waitStart)
 		}
 		if seed.gated || seed.overflow {
+			// A remote hint the process gate turned away has no wait to take the idle seat in either: the operator switched
+			// it off (agent_placement_wait_sec), and the choice is the seat or a defer.
+			if pr, ok := r.hintSeatWithoutAWait(ctx, i, contract, start, budget, pl, seed, refusals,
+				fmt.Sprintf("the capacity wait is switched off (agent_placement_wait_sec=%d)", r.cfg.AgentPlacementWaitSec)); ok {
+				return pr
+			}
 			// Nothing is held and nobody refused: the subtask simply has nowhere to
 			// wait. That is a capacity defer - the fleet is healthy, it was not this
 			// contract's turn - never the holder-naming deferral of a lease nobody holds.
@@ -2664,13 +2753,18 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 	// deadline cuts short leaves the last good reading standing, and only that survives to the
 	// defer that ends the wait, which publishes it (placeKept).
 	places := map[string]PlaceWait{}
+	// fleetFirst: a remote hint (ADR 0078) is placed remotes-first, and a subtask the process gate turned away has had
+	// no look at the fleet since the deal: its node is full for THIS process, which says nothing about the others. So
+	// the first tick reads the fleet before it takes the idle seat. Every other way into the wait (a deal's overflow,
+	// a refusal, a lease) has just established that no remote has room, and keeps the seat's place in line at once.
+	fleetFirst := r.remoteHint() && seed.gated
 	for wait > 0 && ctx.Err() == nil {
 		if cw.call != nil && !time.Now().Before(deadline) {
 			// The last tick of a TTL wait still looks once more after its sleep; a wait bounded by the call
 			// does not, because what it would place now is placed in the reserve it exists to keep.
 			break
 		}
-		if decided == nil && r.route != "remote" && !pl.tried[""] {
+		if decided == nil && r.route != "remote" && !pl.tried[""] && !fleetFirst {
 			delete(places, "")
 			lease = r.localLease(contract)
 			if Reserved(lease) {
@@ -2753,6 +2847,10 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 					reason = fmt.Sprintf("local seat was fenced by a lease, fence cleared after %s — running local (capacity wait)", idle.Round(time.Second))
 				case occupiedSeen != "":
 					reason = fmt.Sprintf("local seat was occupied by the vLLM seat %s, which left after %s — running local (capacity wait)", occupiedSeen, idle.Round(time.Second))
+				case r.remoteHint() && !r.dealReadLocalBusy():
+					// The deal kept the subtask off a seat that never read busy: a remote hint prefers the remotes
+					// (ADR 0078), and none had room.
+					reason = fmt.Sprintf("no remote had room and the local seat was free after %s — a remote hint falls back to it (capacity wait)", idle.Round(time.Second))
 				case dealBusy:
 					reason = fmt.Sprintf("local seat was busy when the deal kept this subtask off it, idle after %s — running local (capacity wait)", idle.Round(time.Second))
 				}
@@ -2787,6 +2885,7 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 			tickCtx, cancelTick := context.WithTimeout(ctx, probeTickBound(deadline))
 			views, bases, _, failed, readAfter := r.fleetReadForWait(tickCtx)
 			cancelTick()
+			fleetFirst = false // the fleet has been read once: from the next tick the seat may take its place in line
 			if ctx.Err() != nil || !time.Now().Before(deadline) {
 				// The tick's probe is bounded by the wait's own deadline, and by the
 				// context the wait runs under (the call's deadline, ADR 0065, or the
@@ -2974,6 +3073,60 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 		return r.settle(contract, placeKept(r.reservedDefer(localView, lease, idle, "no eligible remote had room — "+strings.Join(refusals, "; ")+noteSuffix, cw.call), places), pl, waitStart)
 	}
 	return r.settle(contract, placeKept(r.capacityDefer(localView, seed, idle, wait, refusals, waitEvidence{note: pl.waitNote, probeFails: probeFails, heldOut: heldOut, cooling: cooling, call: cw.call, held: cw.held}), places), pl, waitStart)
+}
+
+// hintSeatWithoutAWait is the remote hint's seat fallback (ADR 0078 decision 5) for a subtask the process gate turned
+// away when the capacity wait cannot carry it: the operator switched the wait off, or the run is sheddable and never
+// waits. The deal gave the subtask a node because its health showed headroom, and never asked the gate; this is the
+// first place the hint learns that node is full for THIS process. A remote pin would defer here while the seat idles, and
+// the hint's whole difference is that the seat may run what no remote can take, so with no wait to read the fleet in
+// and take the seat on a later tick, the choice is the seat now or a defer (a shed, for a sheddable run).
+//
+// The seat is taken under the guards of the deal's own fallback (dealAutoRemoteRoom): the seat read free when the deal was
+// made (hintSeatFree: no lease, no full line, no load in progress, no vLLM seat to evict), and it serves the contract's
+// layer. The deal's picture can be minutes old, so the conditions that can change are read again now: no lease reserves
+// or fences the seat, it is not at its run cap, loading or occupied, and its run-cap line has a free slot ahead of a
+// newcomer. An unreadable seat keeps the deal's answer (free), as the deal does. ok=false leaves the caller's outcome (the
+// shed, the capacity defer) as it was, and nothing has run or been recorded: that includes a composite decision that
+// asks the seat to wait, which is the wait's business and not this fallback's.
+func (r *runner) hintSeatWithoutAWait(ctx context.Context, i int, contract core.AgentContract, start time.Time, budget int, pl *placements, seed PlacedResult, refusals []string, why string) (PlacedResult, bool) {
+	if !r.remoteHint() || !seed.gated || !r.hintSeatFree || pl.tried[""] {
+		return PlacedResult{}, false
+	}
+	localView := r.localView()
+	if !r.localServesLayer(localView, contract) {
+		return PlacedResult{}, false
+	}
+	if Reserved(r.localLease(contract)) {
+		return PlacedResult{}, false
+	}
+	if _, _, fenced := r.fencedLocal(contract); fenced {
+		return PlacedResult{}, false
+	}
+	if rd := r.busyReadingNow(ctx); rd.occupiedBy != "" || r.atRunCap(rd.inflight) || rd.loading {
+		return PlacedResult{}, false
+	}
+	if free, _ := r.localSlotAhead(); !free {
+		return PlacedResult{}, false
+	}
+	remaining := pl.remaining(start, budget)
+	if remaining < minRetrySec {
+		return PlacedResult{}, false
+	}
+	replaced := contract
+	replaced.TimeoutSec = remaining
+	replaced.TimeoutAuto = false // what is left — explicit, never auto (D-03)
+	reason := "the dealt node was full for this process and " + why + " — the idle local seat takes it instead, a remote hint falling back where no remote has room"
+	if pl.waitNote != "" {
+		reason += "; " + pl.waitNote
+	}
+	pr := r.attempt(ctx, i, replaced, &placement{view: localView, reason: reason})
+	if pr.waitCapacity {
+		return PlacedResult{}, false
+	}
+	pl.tried[""] = true
+	pl.attempts++
+	return annotateLanding(pr, refusals), true
 }
 
 // localPlace is the place the local seat holds in line while a lease keeps the contract off it:
@@ -4289,6 +4442,12 @@ func retryHeldWhy(clause string) string {
 // latency. That is accepted deliberately (local is the one seat always able to
 // take the contract, and a second remote hop would need a fresh gate pass
 // mid-timeout), but it is a real cost, not a free retry.
+//
+// The one exception is a REASONED remote pin (remotePinned, ADR 0078 decision 3): the caller
+// said why this call runs on a fleet node, and the ledger rows and offload_status say placement
+// obeyed it, so its second chance is another fleet node or none, never the local seat. The bare
+// remote route of a caller with no reason channel keeps the asymmetry above.
+//
 // It consults the SUBTASK's placement ledger, which is what makes "a DIFFERENT
 // node" true rather than merely intended: a seat the first attempt already RAN
 // on — including one it reached by re-placement, and including the local seat — is
@@ -4301,6 +4460,17 @@ func (r *runner) alternativeNode(ctx context.Context, first PlacedResult, contra
 	localView := r.localView()
 	why := attemptOutcome(first)
 	if !first.ranLocal {
+		// A reasoned remote pin never retries on the local seat (ADR 0078 decision 3). Checked before the layer, fence and
+		// reservation questions, which are all about a seat this call may not use: the retry is the best untried remote, and
+		// with none there is no retry (runOne words the note). Keyed on the reasoned pin and not on r.route == "remote": the
+		// bare remote route keeps remote -> local (retry_reserved_test.go, TestRunRetryRemoteFailureFallsBackToLocal).
+		if r.remotePinned() {
+			if chosen, base, found := r.remoteAlternative(ctx, st, pl); found {
+				return placement{view: chosen, base: base,
+					reason: "retry on " + chosen.NodeID + " after " + nodeLabel(first) + " " + why + " — " + r.remotePinWhy()}, "", true
+			}
+			return placement{}, "", false
+		}
 		// A contract that names a layer this box does not declare (register A-108) has no local retry:
 		// the seat would only defer it by name. A different node that declares the layer is the retry,
 		// and with none there is no retry.
@@ -4667,6 +4837,16 @@ func (r *runner) dealAutoRemoteRoom(contracts []core.AgentContract, localView No
 		if spent {
 			slot.reason += fmt.Sprintf("; the idle local seat's run-cap line is spent by this deal (%d of %d free slot(s) dealt; %s)", dealt[""], room, note)
 		}
+		// A remote hint (ADR 0078) is placed on the remotes first and may fall back to the local seat where route=remote
+		// would have deferred. Where no remote has room the subtask goes to the seat HERE, in the deal, when the seat
+		// read free and its run-cap line has room, and not to the capacity wait: the wait would start it only after a
+		// dealt subtask finished (the overflow counts nothing in the width), and with the wait switched off it would
+		// defer while the seat idled. A seat that read busy, leased or occupied, or whose line this deal has spent,
+		// leaves the subtask to the wait, as for an auto call.
+		if slot.capacityWait && r.remoteHint() && r.hintSeatFree && dealt[""] < room && r.localServesLayer(localView, c) {
+			dealt[""]++
+			slot = spreadSlot{placement: placement{view: localView, reason: slot.reason + fmt.Sprintf("; the idle local seat takes it instead, a remote hint falling back where no remote has room (%d of %d free slot(s) dealt; %s)", dealt[""], room, note)}}
+		}
 		slot.jobID = jobID
 		out[i] = slot
 	}
@@ -4982,15 +5162,24 @@ func (r *runner) probeLocalBusy(ctx context.Context) busyReading {
 	if r.localBusyProbe != nil {
 		return r.localBusyProbe(ctx)
 	}
-	endpoint, seat := strings.TrimSpace(r.cfg.Endpoint), strings.TrimSpace(r.cfg.AgentPlannerModel(""))
+	seat := strings.TrimSpace(r.cfg.AgentPlannerModel(""))
 	if seat == "" {
 		// Nothing to probe and nothing to deal: a box with no agent seat is never given a slot
 		// (localServesLayer), so "idle" would misreport it.
 		return busyReading{note: noLocalSeat}
 	}
+	return probeSeatBusy(ctx, r.cfg, seat, "agent seat", r.checkSeatGuard)
+}
+
+// probeSeatBusy is the reading behind every "is this local seat busy" question the harness asks of a seat: the
+// delegator's own (probeLocalBusy, for the agent seat) and the lane doors' (LocalSeatBusy, for the seat a single call
+// runs on, ADR 0078). One function, so the two cannot disagree about what busy is. `what` names the seat's role in the
+// log and the note ("agent seat", "vision seat"); guard is the seat guard's verdict for a model.
+func probeSeatBusy(ctx context.Context, cfg config.Config, seat, what string, guard func(context.Context, string) seatguard.Verdict) busyReading {
+	endpoint := strings.TrimSpace(cfg.Endpoint)
 	if endpoint == "" {
-		log.Printf("delegate: local seat busy probe skipped (endpoint %q, agent seat %q); dealing the local slot as idle", endpoint, seat)
-		return busyReading{note: "no local endpoint or agent seat configured"}
+		log.Printf("delegate: local seat busy probe skipped (endpoint %q, %s %q); dealing the local slot as idle", endpoint, what, seat)
+		return busyReading{note: "no local endpoint or " + what + " configured"}
 	}
 	pctx, cancel := context.WithTimeout(ctx, localBusyProbeTimeout)
 	defer cancel()
@@ -5012,7 +5201,7 @@ func (r *runner) probeLocalBusy(ctx context.Context) busyReading {
 		// A /running it cannot read names no seat and changes nothing (the deal fails
 		// open, as the probe always has); a serving config it cannot read makes it
 		// protect whatever vLLM seat is loaded, which only sends the work to the fleet.
-		if v := r.checkSeatGuard(pctx, seat); v.Protect && v.Seat != "" {
+		if v := guard(pctx, seat); v.Protect && v.Seat != "" {
 			return busyReading{busy: true, occupiedBy: v.Seat, note: "local seat not loaded; " + v.Reason}
 		}
 		if rd.Ambiguous {
@@ -5523,10 +5712,16 @@ func (r *runner) attempt(ctx context.Context, i int, contract core.AgentContract
 			// The existing capacity wait watches for room to free — the same
 			// mechanism a 503 refusal or a held lease already sends work to.
 			return PlacedResult{waitCapacity: true, overflow: true, pendingReason: d.reason, PlacementReason: d.reason}
-		case d.noRemote && r.route == "remote":
+		case d.noRemote && (r.route == "remote" || (r.remoteHint() && seatless(localView))):
 			// Nothing in the fleet could ever take this contract (capability,
 			// not capacity): the established "route=remote: no eligible
-			// remote" Unplaced defer, unchanged.
+			// remote" Unplaced defer, unchanged. A remote HINT gets it too on a
+			// box with no agent seat (a delegation client): the seat is the
+			// hint's fallback only where there is one, and sending the contract
+			// to a seat that does not exist would answer "configure an agent
+			// seat" to a client built to have none, count a placement on the
+			// local seat that never happened, and leave the fleet's verdict in
+			// the placement text alone.
 			why, class := r.noEligibleRemote(st, r.autoViews, r.autoProbeErrs)
 			// The deal narrated every node it saw (D-105); keep that beside the
 			// aggregate verdict so the operator reads WHICH gate refused WHOM.
@@ -5575,7 +5770,7 @@ func (r *runner) attempt(ctx context.Context, i int, contract core.AgentContract
 				return PlacedResult{waitCapacity: true, overflow: true, pendingReason: occ.why() + "; no eligible remote — " + why, remotesUnreachable: deadFleet}
 			}
 			chosen = localView
-			reason = "local busy; no eligible remote — " + why + " (queued-local beats ineligible-remote)"
+			reason = r.queuedLocalReason(why)
 			if !localServes {
 				reason = fmt.Sprintf("no eligible remote, and %s so the seat cannot take it (%s)", localRefusal(localView, contract), why)
 			}
@@ -5609,6 +5804,11 @@ func (r *runner) attempt(ctx context.Context, i int, contract core.AgentContract
 			busy = leaseInfo.Held || r.atRunCap(local.inflight) || local.loading || local.occupiedBy != ""
 			if r.atRunCap(local.inflight) || local.loading || local.occupiedBy != "" {
 				r.autoDealReadBusy.Store(true) // the seat's load, never the lease (see the joint deal)
+			}
+			// A remote hint (ADR 0078) is placed remotes-first: the seat is unavailable whatever it read, and the
+			// reading above is kept for the fallback to wait on a lease or an occupant.
+			if r.remoteHint() {
+				busy = true
 			}
 		}
 		var views []NodeView
@@ -5683,7 +5883,7 @@ func (r *runner) attempt(ctx context.Context, i int, contract core.AgentContract
 			return PlacedResult{waitCapacity: true, overflow: true, pendingReason: r.autoOccupant().why() + "; no eligible remote — " + why, remotesUnreachable: class == core.DeferClassInfrastructure}
 		case chosen.Local:
 			why, class := r.noEligibleRemote(st, views, probeErrs)
-			reason = "local busy; no eligible remote — " + why + " (queued-local beats ineligible-remote)"
+			reason = r.queuedLocalReason(why)
 			// USE the class here too. route=remote already exits non-zero on a
 			// fleet that failed every probe; route=auto discarded the identical
 			// verdict (`why, _ :=`), so a fleet that had been down for a week read
@@ -5695,6 +5895,9 @@ func (r *runner) attempt(ctx context.Context, i int, contract core.AgentContract
 			deadFleet = class == core.DeferClassInfrastructure
 		default:
 			reason = "local busy; placed on " + chosen.NodeID
+			if r.remoteHint() {
+				reason = "remotes first; placed on " + chosen.NodeID
+			}
 			if r.route == "auto" && r.autoLocalBusy.occupiedBy != "" {
 				reason = r.autoLocalBusy.why() + "; placed on " + chosen.NodeID
 			}
@@ -7428,12 +7631,18 @@ type delegationLogLine struct {
 // ledger row (task=agent_delegate). Best-effort by design — telemetry must
 // never fail the work it describes (pipeline.record's exact posture).
 func (r *runner) record(contract core.AgentContract, pr PlacedResult) {
+	// The row says what the caller pinned (ADR 0078): the hint clause opens the placement note, so the ledger's
+	// short form of it (120 bytes) keeps it, and the closed reason and the asked route are columns of their own.
+	// Only the note is read from the stamped copy: the reason code is decided from the result as the engine made it
+	// (reasonCodeFor matches the placement text "refused before placement" exactly).
+	placement := r.stampPin(pr).PlacementReason
+	pinReason, routeAsked := r.pinLedgerFields()
 	line := delegationLogLine{
 		TS:                 time.Now().Unix(),
 		JobID:              pr.JobID,
 		Node:               pr.Node,
 		Seat:               pr.Seat,
-		PlacementReason:    pr.PlacementReason,
+		PlacementReason:    placement,
 		Deferred:           pr.Result.Deferred,
 		DeferClass:         pr.Result.DeferClass,
 		AcceptancePass:     pr.Err == "" && !pr.Result.Deferred && len(pr.AcceptanceFailures) == 0,
@@ -7518,7 +7727,9 @@ func (r *runner) record(contract core.AgentContract, pr PlacedResult) {
 			FleetJobID:       fleetJobIDOf(pr),
 			ReasonCode:       reasonCodeFor(pr),
 			Route:            r.route,
-			Placement:        pr.PlacementReason,
+			RouteAsked:       routeAsked,
+			PinReason:        pinReason,
+			Placement:        placement,
 			Steps:            pr.Result.Steps,
 			StopReason:       pr.Result.StopReason,
 			RepackMs:         pr.Result.RepackMs,

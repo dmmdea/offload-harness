@@ -6,6 +6,127 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.170.0] - 2026-10-08 - a placement pin needs a reason; without one it is a hint
+
+### A placement pin needs a reason; without one it is a hint (fleet-first, track R4e; ADR 0078)
+
+- **`route:"local"` and `route:"remote"` are a pin only with a `pin_reason`; without one they are a hint placement may override ([ADR
+  0078](docs/architecture/decisions/0078-a-placement-pin-needs-a-reason-without-one-it-is-a-hint.md); the 2026-10-07 incident).** A
+  session passed `route:"local"` to a 78-page `offload_research` call: 46 ledger rows read `route=local forced`, and 32 pages ended
+  `not started: the call ended first`, because the whole fan-out queued on one seat while four fleet nodes had free workers. The
+  operator's directive: a caller may not narrow placement with no reason recorded. `agent_delegate`, `offload_research` and the
+  `delegate` and `research` verbs (`--pin-reason`) now take `pin_reason`, a closed set: `privacy` and `locality` with `local` only,
+  `measurement` and `operator` with `local` or `remote`. A value outside the set, a reason with the wrong route, and a reason with a
+  route that is not a pin (`auto`, `spread`, `queue`, research's default `spread`) are refused at intake with the valid set listed,
+  before a `context_paths` file is read, a page is fetched or the config is loaded (`delegate.CheckPinReason`, checked again in
+  `runWith`). A reasoned pin places as it always did, and its retry now obeys it too: a remote pin retries on another fleet node or not at
+  all, never on the local seat. That part is new: a `route=remote` retry used to be able to land on the local seat, so a node's wrong
+  answer under a reasoned remote pin now ends `failed_verification` where the seat used to recover it. A reasonless `local` is applied as `auto` (ADR 0076): the idle seat takes the
+  first `room` subtasks of its run-cap line and the overflow goes through the unchanged `remoteEligible` gate to the remotes with room,
+  else to the capacity wait, so a call that fits the line stays local and reads no node's health, a reserved, fenced, full, loading or
+  occupied seat sends the work to the fleet, and a failed verification can be retried on another node. A reasonless `remote` is placed
+  fleet-first (the deal treats the seat as unavailable by preference, as `route=remote` always did), and where `remote` would have
+  deferred the idle local seat may run the subtask: at once when no remote is eligible, and, when every eligible remote is at its
+  headroom, in the deal itself up to the seat's run-cap room (counted like a remote's headroom, so it does not wait for a dealt
+  subtask to finish and does not depend on the capacity wait being on), never over a lease or an occupant; a dispatch the process gate
+  turned away reads the fleet once in the capacity wait before the subtask takes the idle seat (with the wait switched off, or for a
+  sheddable run, it takes the idle seat at once under the same guards instead of deferring or being shed). Only the four surfaces that
+  offer `pin_reason` opt in (`RunOptions.PinNeedsReason`): `fleet-smoke`, the review lane's remote fallthrough, `offload_ask` and
+  `agent_run` hand the engine a bare route and keep their authoritative pins. A call that carries a browse grant (`allow_browse`,
+  which drives this machine's own browser) is pinned under the implied reason `locality`, so ADR 0060's rule that such a contract
+  never reaches another node survives a bare `local` being a hint. Tests: the acceptance, a reasonless `local` fan-out with a free
+  remote dispatching remotely with the rows saying so, and a reasoned pin behaving as before
+  (`TestAReasonlessLocalFanOutWithAFreeRemoteDispatchesRemotelyAndTheRowSaysSo`, `TestAReasonedLocalPinBehavesAsItAlwaysDid`,
+  `TestACallThroughADoorWithNoReasonChannelKeepsItsAuthoritativePin`), the small call that stays local
+  (`TestASmallReasonlessLocalCallStaysLocalAndSaysSo`), a reserved seat and a busy seat
+  (`TestAReasonlessLocalCallDoesNotRunOnASeatAnotherSessionReserved`, `TestAReasonlessLocalCallLeavesABusySeatForTheFleet`), the
+  research-sized batch (`TestAHintedResearchSizedBatchIsOneDealAcrossTheFleet`), the retry
+  (`TestAHintedLocalCallMayRetryOnAFleetNodeWhereAPinMayNot`), the remote hint at each place it can fall back
+  (`TestAReasonlessRemoteRouteIsPlacedFleetFirst`, `...FallsBackToTheLocalSeatWhereRemoteWouldDefer`,
+  `...GivesTheIdleSeatWhatNoRemoteHasRoomFor`, `...CountsTheIdleSeatsLineLikeARemotesHeadroom`,
+  `...DoesNotGiveTheSeatAContractItCannotRun`, `...FallsBackFromTheCapacityWaitToo`, `...NeverRunsOnASeatAnotherSessionReserved`,
+  `TestThePerSubtaskPlacementOfARemoteHintAlsoPrefersTheFleet`, `TestARemoteHintTurnedAwayByTheProcessGateReadsTheFleetBeforeItTakesTheIdleSeat`),
+  the browse grant
+  (`TestABrowseGrantPinsALocalRouteUnderTheImpliedReasonLocality`), and intake at every door
+  (`TestCheckPinReason*`, `TestARefusedPinReasonSpendsNothing`, `TestAgentDelegateRefusesABadPinReasonBeforeReadingAnyContext`,
+  `TestOffloadResearchRefusesABadPinReasonBeforeFetchingAnyPage`, `TestDelegateAndResearchVerbsRefuseABadPinReasonBeforeLoadingAnything`);
+  each new branch mutated red at its real call site: 97 mutations across the closed set, the intake checks of all four doors, the hint and its remote-first forcing, the deal's fallback and each of its conditions, the stamp, the tally and the ledger columns, and the lane door's seat reading, every one red and every file restored byte-identical.
+- **Every result and ledger row says what happened to a hint.** Each result's placement reason opens with a plain-words clause:
+  `route=local was a hint (no pin_reason), honoured: placed on the local seat`, `... overridden: placed on <node>`, `route=remote was
+  a hint (no pin_reason), ...`, or `... and no node took it`. The clause opens the note because the ledger keeps 120 bytes of a
+  placement. A ledger row of a call through a door that offers `pin_reason` with route `local` or `remote` gains `route_asked` and
+  `pin_reason` (empty for a hint), as does its dispatch marker; `route` stays the route the engine applied, so a hint's row says
+  `auto`; every other row is byte-identical. A reasoned pin's reason is also on every result as `results[].pin_reason`. Tests:
+  `TestTheHintClauseSaysHonouredOverriddenOrThatNoNodeTookIt`, `TestTheLedgerKeepsTheHintClauseInItsShortFormOfThePlacement`,
+  `TestADispatchMarkerCarriesThePinReasonOfAReasonedPin`, `TestAHintedCallRefusedBeforePlacementKeepsItsReasonCode` (the reason
+  code is read from the result as the engine made it), `TestAHintWhoseOnlyNodeRefusedItSaysNoNodeTookItAndCountsNoOverride` (a node that
+  refused a subtask has not taken it, alone or as the end of a refusal chain), `TestAPinnedResultCarriesItsReasonOnTheWire`.
+- **`offload_status` counts the pins.** The fleet block has a `pins` object: this server's counts since it started (`started_at`,
+  and the block says so), in subtasks, `reasoned` by reason, `hints`, `hints_overridden` and `unreasoned` (pins through the callers
+  above that run inside the server). It is one `delegate.PinTally` per MCP server that each door hands the engine, counted once per
+  published result (a retried subtask is one), and nothing scans the ledger. The default `offload_status` golden moved by that block
+  alone (856 bytes); the block is absent when delegation is off. Tests: `TestOffloadStatusPublishesThePinAccountingOfThisServer`,
+  `TestOffloadStatusHasNoPinsBlockWhenDelegationIsOff`, `TestAPinTallyListsEveryReasonOfTheClosedSetAndCountsOnlyPublishedResults`,
+  `TestTheFleetDispatchOfAskAndReviewStaysAPinAndIsCounted`.
+- **The tools say it.** The `route` text of `agent_delegate` and `offload_research` no longer calls `local` "force in-process": it
+  says a pin needs a `pin_reason`, what a hint is, and that each result says whether it was honoured or overridden; `pin_reason` is
+  an `enum` of the closed set with each reason's meaning. The measurement scripts that must run on one seat
+  (`scripts/parallel-sessions-gate.ps1`, `scripts/write-door-gate.ps1`) and the `contracts/` examples pass `--pin-reason
+  measurement`. Tests: `TestBothDelegationToolsOfferPinReasonAsTheClosedSet`, `TestBothDelegationToolDescriptionsSayAPinNeedsAReason`.
+- **The vision lane's `auto` route also reads the vision seat (ADR 0078 decision 9; amends ADR 0040 decision 6).** It sent a call to
+  a fleet node only while the machine-wide GPU lease was held, so a seat serving other requests with no lease anywhere queued the
+  next image behind them while a node with an idle vision seat sat free. It now also asks the delegator's own question of the seat the
+  task would run on (`delegate.LocalSeatBusy`, through the one `probeSeatBusy` that the delegator reads its agent seat with): a
+  request in flight, a load or unload in progress, or a load that would unload another loaded vLLM seat reads busy, an unreadable seat
+  reads idle. The seat is the one the pipeline picks for the task (`ocr` has its own binding when the machine has one). The lease is
+  read first and keeps its words (`remote: local gpu busy`); a busy seat places `remote: local vision seat busy (<what>)`. A box
+  with no `delegate_remotes` has no node to choose and does not read the seat. The threshold is the seat's own, any request in flight, not the agent run cap, which counts registered agent loops and cannot see a
+  single-shot vision call. STT keeps its own trigger (ADR 0072), compose chooses by capability, and the text lane is left alone: the
+  cascade's entry rung is chosen per request inside the pipeline, so the door cannot name a seat to read. Tests:
+  `TestAutoGoesRemoteWhenTheVisionSeatIsBusyWithNoLeaseAnywhere`, `TestTheProductionReadingSendsAnImageOffTheBoxWhileItsSeatServesAnother`,
+  `TestAHeldLeaseKeepsItsWordsAndSkipsTheSeatRead`, `TestRouteLocalAndRemoteNeverReadTheSeat`, `TestVisionSeatForFollowsThePipelinesPick`,
+  `TestAutoNeverReadsTheSeatOfABoxWithNoNodeToSendTheImageTo`, `TestLocalSeatBusyReadsTheNamedSeatsOwnLoad`,
+  `TestTheLaneReadingIsTheReadingTheDelegatorMakesOfItsAgentSeat`; each new branch mutated red.
+- **Review fixes before release (adversarial review of the four R4e commits).**
+  - *A reasoned remote pin is authoritative on its retry too.* `alternativeNode` sent the retry of a first attempt that ran on a node (a
+    failed verification, an abstention, an admission defer, a seat-down defer) to the local seat, so a call pinned to a node under
+    `measurement` or `operator` could publish the local seat's answer with `route=remote` and the reason on its rows, and
+    `offload_status` counted it as obeyed; with a second idle node the untried node was never asked either. The retry now goes to the
+    best untried fleet node or is skipped, and the `retry_note` (and, when it ran, the retry's placement) name the pin. The guard is keyed on the
+    reason (`runner.remotePinned`), not on the route: the bare remote route of `fleet-smoke`, the review lane, `offload_ask` and
+    `agent_run`, and a reasonless remote hint, keep `remote -> local` (a route-keyed guard turns ten existing tests red). The tool
+    text, the CLI help, the glossary and `fleet-node.md` now say where a pin runs, retry included. Tests: `pin_retry_test.go`.
+  - *A remote hint the process gate turned away takes the idle seat where no wait can carry it.* With the capacity wait switched off
+    (`agent_placement_wait_sec` negative) the subtask was deferred, and a sheddable run (priority -1) was shed, both while the idle
+    seat had room. `hintSeatWithoutAWait` takes the seat at those two exits under the deal's own guards (the seat read free at the
+    deal, serves the layer, and, read again, no lease reserves or fences it, it is not at its run cap, loading or occupied, and its
+    run-cap line has a slot); a composite decision that asks the seat to wait leaves the exit's outcome alone. Tests: `pin_gate_test.go`.
+  - *The remote hint's seat guard is pinned.* A full node with the wait on and a seat that another vLLM seat occupies, that has 4 in
+    flight at a cap of 4, or that is loading, waits in line and ends as a capacity defer that says no node took it; an idle seat runs
+    it. A refused dispatch falling back to the idle seat, which the docs list as tested, now is, with the remote pin that fails there
+    as the contrast. Tests: `pin_fallback_test.go`.
+  - *Three narrations.* A remote hint on a box with no agent seat (a delegation client) and no eligible remote ends as the fleet's
+    defer a pin gets, not as a run on a seat that does not exist counted as an override. An abandoned hinted subtask (the call gave up
+    while a seat was still running it) says where it was running is not known, not that no node took it. With no remote eligible at
+    all, a full or loading seat takes the subtask at once, as route `auto` does, and only a lease, a fence or an occupant hold it
+    back: the code was right and ADR 0078 decision 5 and `fleet-node.md` said otherwise, so the text is aligned to the code.
+  - *Two surviving mutants killed.* `LocalSeatBusy`'s production wiring (the seat guard) and the stamped placement on the delegation-log
+    corpus row each had no test that could fail.
+  - *The opencode plugin's digest.* It counted a result as local when its placement contained "local", which every result of a local
+    hint now does, so it told the model the pair did not land for a call whose subtasks all ran on nodes. It reads the hint clause
+    first (`ranLocally`). Tests: `integrations/opencode/test/plugin.test.ts`.
+  - *Texts made true.* The vision tools' `route` schema, the vision verbs' help and `docs/FLEET-NODE.md` name the busy-seat trigger of
+    the `auto` route; `docs/FLEET-NODE.md`, `opencode-integration.md` and `gpu-lease.md` say a bare `route=local` or `route=remote` is
+    a hint through the doors that offer `pin_reason`; `unreasoned` is documented as what it counts (the review lane's fallthrough and
+    the remote route of `offload_ask` and `agent_run`; their explicit local route never reaches the engine and is not counted, and the
+    status golden moved by that note alone). ADR 0078's Alternatives considered records why the closed set has no reason for "the
+    local seat is the better model": placement chooses among adequate seats and does not rank them by a quality nothing measures.
+  - Every new or changed branch was mutated at its call site: 63 distinct mutations (twelve for the pin guard, 24 for the gate fallback, 15
+    for the guards and narrations, seven for the plugin, five for the tool and help texts), each red and each file restored byte-identical; one of them (the deal
+    fallback's guard never true) is not reached by the new tests and is killed by three existing ones.
+- Docs: ADR 0078; amendment notes in ADRs 0040, 0060, 0063 and 0076 where their text describes the old route or trigger;
+  `fleet-node.md` ("A placement pin needs a reason"); `OPERATOR-GUIDE.md`; `contracts/README.md`.
+
 ## [0.169.0] - 2026-10-07 - a call is as wide as its deal, and a vision verb runs under its own lease
 
 ### A call is as wide as its deal, and a research call is one deal (fleet-first, track R3; ADR 0076)

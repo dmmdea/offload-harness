@@ -131,6 +131,13 @@ grounding would be noise.
 Text is matched as a phrase; numbers are compared by value across locales (`2.354,40` and `2,354.40`
 are one amount), never as substrings of other numbers.
 
+## Hint
+
+A `local` or `remote` route that came without a pin reason through a door that offers one (`agent_delegate`,
+`offload_research`, the `delegate` and `research` verbs). Placement may override it: a hinted `local` is placed as
+`auto` places it and a hinted `remote` fleet-first, and each result's placement opens by saying whether the hint was
+honoured or overridden. See [architecture/decisions/0078-a-placement-pin-needs-a-reason-without-one-it-is-a-hint.md](architecture/decisions/0078-a-placement-pin-needs-a-reason-without-one-it-is-a-hint.md).
+
 ## Leak gate
 
 The test that keeps the names of the operator's machines, people and brands out of this public repository.
@@ -220,6 +227,15 @@ annotation was a constant `low` across 54/54 emitted declarations — including 
 destructive calls — so park-gate recall was 0%. The structural gate is the risk-rule table
 (`--rules`); parking is the fail-safe residue around it. See
 [systems/coding-agent.md](systems/coding-agent.md).
+
+## Pin
+
+A `local` or `remote` route that carries a `pin_reason` (`privacy`, `locality`, `measurement` or `operator`). A pin is
+authoritative to the end of the subtask: a `local` pin runs on this box's seat and nowhere else (it is never retried on another
+node), a `remote` pin runs on a fleet node and nowhere else (its failed-verification retry goes to another fleet node or is
+skipped, never to the local seat), and the reason is recorded on every ledger row and result. A route with no reason is a Hint.
+See
+[architecture/decisions/0078-a-placement-pin-needs-a-reason-without-one-it-is-a-hint.md](architecture/decisions/0078-a-placement-pin-needs-a-reason-without-one-it-is-a-hint.md).
 
 ## Policy broker
 

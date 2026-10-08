@@ -161,6 +161,14 @@ every model call, every limit and every door.
 - [ADR 0059 — an external-CLI media tool runs pinned and env-scrubbed](0059-external-cli-media-tool-runs-cpu-class-pinned-env-scrubbed.md)
 - [Glossary: Browse lane, Deny-list](../../glossary.md)
 
+## Amendment 2026-10-07 (ADR 0078, a pin needs a reason)
+
+Decision 5's `route: local` is the pin, and it stays one for a browse grant without the caller having to say why: a call that carries
+`allow_browse` on `route: local` with no `pin_reason` is pinned under the implied reason `locality`
+([ADR 0078](0078-a-placement-pin-needs-a-reason-without-one-it-is-a-hint.md) decision 3), because a reasonless local is otherwise a hint
+placement may override, and a hint could have placed the run on another node's browser. Delegation placement still never sends such a
+contract to a remote node.
+
 ## Amendment 2026-10-02 (register C-92, the audit path follows the install root)
 
 The audit path an agent door requires, and the CLI defaults, is now `agent-audit.jsonl` under the harness
