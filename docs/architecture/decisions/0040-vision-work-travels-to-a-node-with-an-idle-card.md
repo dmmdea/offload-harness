@@ -66,6 +66,16 @@ job.
 - The agent loop's own `offload_vqa` tool twin still runs on the executing node's seat — the loop
   runs ON the node, so there is nothing to forward.
 
+## Amendment (2026-10-07): the auto route reads the vision seat too
+
+Decision 6 sent an `auto` call to a node only while the machine-wide GPU lease was held. It now also does when the vision seat the
+task would run on is busy: a request in flight, a load or unload in progress, or a load that would unload another loaded vLLM seat,
+read the way the delegator reads its own agent seat (`delegate.LocalSeatBusy`). The lease is read first and keeps its placement words
+(`remote: local gpu busy`); a busy seat places `remote: local vision seat busy (<what>)`. Quality-first is unchanged: an idle seat
+under no lease still runs the work, a box with no `delegate_remotes` has no node to choose and does not read the seat, and with no
+eligible node the work still runs local
+([ADR 0078](0078-a-placement-pin-needs-a-reason-without-one-it-is-a-hint.md) decision 9, which also records why the text lane is left alone).
+
 ## Alternatives considered
 
 - **Expose the node's llama-swap (`:11436`) beyond loopback, or proxy `/v1/chat/completions`

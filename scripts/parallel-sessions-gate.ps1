@@ -43,7 +43,7 @@ $runs = 1..$K | ForEach-Object {
     # stdout and stderr to SEPARATE files: merged, the CLI's trailing error line interleaves into
     # the JSON and the run becomes unparseable (seen 2026-09-02 on every run that deferred)
     $errLog = [System.IO.Path]::ChangeExtension($log, '.stderr.txt')
-    $out = & $bin delegate --contract $c --route local 2>$errLog
+    $out = & $bin delegate --contract $c --route local --pin-reason measurement 2>$errLog
     $ms = [int]([DateTime]::UtcNow - $t).TotalMilliseconds
     $out | Out-File -Encoding UTF8 $log
     [pscustomobject]@{ run = $i; wall_ms = $ms; exit = $LASTEXITCODE; log = $log }

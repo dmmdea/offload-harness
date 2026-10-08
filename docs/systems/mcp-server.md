@@ -238,7 +238,8 @@ prose has not, so a review defer stays bare.
 `agent_delegate`'s `route` argument picks the placement rule (see
 [fleet-node.md](fleet-node.md#placement-routes-and-the-retry-delegator-side) for the mechanics):
 `auto` (default) runs local while the local seat is idle and considers the fleet only while it is
-busy; `local`/`remote` force one side; `spread` deals every subtask across the local seat and every
+busy; `local`/`remote` pin one side only with a `pin_reason` (`privacy`, `locality`, `measurement` or `operator`; without one they
+are hints that placement may override, [ADR 0078](../architecture/decisions/0078-a-placement-pin-needs-a-reason-without-one-it-is-a-hint.md)); `spread` deals every subtask across the local seat and every
 eligible remote in one pass. Since PR-5 (ADR
 [0050](../architecture/decisions/0050-placement-ranks-adequate-seats-by-expected-completion.md)),
 `auto` and `remote` compute that placement for the WHOLE call in one joint deal respecting each

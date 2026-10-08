@@ -250,8 +250,9 @@ resolves the lease through the same `LeaseDir` + `InspectDir` path (`LocalLease`
 on route=auto and route=spread, a held `text` lease removes the local seat from placement: an eligible
 remote takes the contract; with none, the runner waits up to `agent_lease_wait_sec` and then defers
 (class `infrastructure`, holder named) rather than loading the reserved cards — the 2026-09-05 case
-where three foreign contracts landed on a reserved two-card seat mid-measurement. `route=local` is
-not gated, and a `media` holder only steers (the affinity gate above arbitrates it), so the sentence
+where three foreign contracts landed on a reserved two-card seat mid-measurement. A pinned `route=local` (one with a `pin_reason`,
+or through `offload_ask` and `agent_run`) is not gated; a reasonless `route=local` through `agent_delegate` or `offload_research` is
+a hint, placed as `route=auto`, and reads the lease like any other auto call (ADR 0078). A `media` holder only steers (the affinity gate above arbitrates it), so the sentence
 before this one still holds for interactive text calls: a `text` reservation does not block them.
 Since 0.113.18 that wait is the delegator's **capacity wait** (until the call's deadline less a reserve when the call has one,
 ADR 0073, else `agent_placement_wait_sec`, default 120 s, or `agent_lease_wait_sec` when longer): it watches the lease AND every remote's room, so a

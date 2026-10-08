@@ -553,7 +553,7 @@ const sttRouteHelp = "where the whisper model runs: local (default), auto (a fle
 
 // visionRouteHelp is the --route flag text shared by vqa / ocr / assess-image
 // (0.116.0) — the MCP tools carry the same vocabulary (visionremote).
-const visionRouteHelp = "where the vision model runs: local (default), auto (a fleet node when the local GPU lease is held), remote (force a fleet node; defers when none is eligible)"
+const visionRouteHelp = "where the vision model runs: local (default), auto (a fleet node when the local GPU lease is held or the local vision seat is busy), remote (force a fleet node; defers when none is eligible)"
 
 // runVQA handles `local-offload vqa <image-path> --question "..." [--route local|auto|remote] [--json]`.
 // Unlike the text tasks, the positional argument is an IMAGE PATH (or data URI),
@@ -2254,7 +2254,8 @@ func runDelegate(args []string) error {
 	fs := flag.NewFlagSet("delegate", flag.ExitOnError)
 	fs.String("config", "", "config file path")
 	contractPath := fs.String("contract", "", "path to the delegation contract JSON: one subtask object or an array of up to 8 (fields: goal, context, context_paths, output_schema, acceptance, profile, max_steps, timeout_sec)")
-	route := fs.String("route", "auto", "placement route: auto (idle-local wins) | spread (across the local seat AND every eligible fleet node, concurrently; subtask 0 stays local unless it names a layer this box does not declare, the remote slots are placed by the goal's shape, no model call: reasoning-shaped goals take the roomiest eligible seat, mechanical ones the seat expected to finish first, and the window decides only a tie or a fleet that publishes no rate) | local (force in-process) | remote (force a fleet node). A box with no agent seat (a delegation client) is never a placement: auto and spread go to the fleet")
+	route := fs.String("route", "auto", "placement route: auto (idle-local wins) | spread (across the local seat AND every eligible fleet node, concurrently; subtask 0 stays local unless it names a layer this box does not declare, the remote slots are placed by the goal's shape, no model call: reasoning-shaped goals take the roomiest eligible seat, mechanical ones the seat expected to finish first, and the window decides only a tie or a fleet that publishes no rate) | local | remote (a PIN only with --pin-reason: local runs on this box's seat and nowhere else, remote on a fleet node and nowhere else, and a remote pin's failed-verification retry goes to another node and never to the local seat; without one they are hints that placement may override, local placed as auto places it and remote fleet-first with the local seat as the fallback). A box with no agent seat (a delegation client) is never a placement: auto and spread go to the fleet")
+	pinReason := fs.String("pin-reason", "", "why this call is pinned to --route local or remote: "+strings.Join(delegate.PinReasons(), " | ")+" (privacy and locality take --route local only; measurement and operator take either). Without it local and remote are hints. Refused with any other route")
 	readRoot := fs.String("read-root", "", "directory context_paths may be read from (default: the current dir)")
 	var remotes repeatedFlag
 	fs.Var(&remotes, "remote", "remote fleet node base URL, tailnet-only (repeatable)")
@@ -2262,6 +2263,10 @@ func runDelegate(args []string) error {
 	tenant := fs.String("tenant", "", "tenant id the fleet round-robins across (default: host-pid-start, or LOCAL_OFFLOAD_TENANT)")
 	_ = fs.Parse(args)
 	if err := leftoverArgErr(fs, "delegate"); err != nil {
+		return err
+	}
+	// Before the config is loaded or a contract is read (ADR 0078): the engine checks again.
+	if err := delegate.CheckPinReason(*route, *pinReason); err != nil {
 		return err
 	}
 	if *tenant == "" {
@@ -2303,7 +2308,7 @@ func runDelegate(args []string) error {
 	}
 	defer cleanup()
 	results, sum, err := delegate.RunWith(context.Background(), cfg, p.RunAgentContract, contracts, *route, remotes,
-		&delegate.RunOptions{Priority: *priority, Tenant: *tenant, Rescue: p.RescueRepack})
+		cliPinOptions(*priority, *tenant, p.RescueRepack, *pinReason))
 	if err != nil {
 		return err
 	}
@@ -2313,6 +2318,14 @@ func runDelegate(args []string) error {
 	}
 	fmt.Println(string(out))
 	return delegateExitErr(sum)
+}
+
+// cliPinOptions builds the engine's options for the delegate and research verbs, the CLI doors that offer pin_reason (ADR
+// 0078): a --route local or remote without --pin-reason is a hint that placement may override, exactly as it is on the MCP
+// tools; with one it is the pin it always was, and the reason is recorded. One builder, so the rescue and the door's half
+// of the pin contract are wired in one place (TestEveryDelegatorSurfaceWiresTheRescue reads it one hop away).
+func cliPinOptions(priority int, tenant string, rescue delegate.RescueFunc, pinReason string) *delegate.RunOptions {
+	return &delegate.RunOptions{Priority: priority, Tenant: tenant, Rescue: rescue, PinReason: pinReason, PinNeedsReason: true}
 }
 
 // delegateExitErr maps a run summary onto the verb's exit code. Two things
@@ -4783,11 +4796,16 @@ func runResearch(args []string) error {
 	var accept repeatedFlag
 	fs.Var(&accept, "accept", "extra acceptance check appended to the grounded default (repeatable)")
 	schemaPath := fs.String("schema", "", "path to a JSON Schema for the per-page digest (default: key_facts/numbers/quotes/verdict)")
-	route := fs.String("route", "spread", "placement: spread (default) | auto | local | remote")
+	route := fs.String("route", "spread", "placement: spread (default) | auto | local | remote (local and remote are a PIN only with --pin-reason; without one they are hints that placement may override)")
+	pinReason := fs.String("pin-reason", "", "why this call is pinned to --route local or remote: "+strings.Join(delegate.PinReasons(), " | ")+" (privacy and locality take --route local only; measurement and operator take either). Without it local and remote are hints. Refused with any other route")
 	timeout := fs.Int("timeout", 0, "per-page contract budget in seconds (default 300, cap 900)")
 	fetchTimeout := fs.Int("fetch-timeout", 0, "per-page fetch timeout in seconds (default 30)")
 	_ = fs.Parse(args)
 	if err := leftoverArgErr(fs, "research"); err != nil {
+		return err
+	}
+	// Before the config is loaded or a page is fetched (ADR 0078): the engine checks again.
+	if err := delegate.CheckPinReason(*route, *pinReason); err != nil {
 		return err
 	}
 	cfg := loadCfg(fs)
@@ -4837,7 +4855,8 @@ func runResearch(args []string) error {
 		return err
 	}
 	defer cleanup()
-	results, sum, err := delegate.RunBatched(context.Background(), cfg, p.RunAgentContract, contracts, *route, nil, &delegate.RunOptions{Rescue: p.RescueRepack})
+	results, sum, err := delegate.RunBatched(context.Background(), cfg, p.RunAgentContract, contracts, *route, nil,
+		cliPinOptions(0, "", p.RescueRepack, *pinReason))
 	if err != nil && len(results) == 0 {
 		return err
 	}

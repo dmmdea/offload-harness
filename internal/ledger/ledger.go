@@ -204,8 +204,17 @@ type Entry struct {
 	// in the liveness monitor's busy hold — waiting on a seat whose engine was
 	// working for others — instead of being killed as a stall. The contention
 	// column beside latency_ms.
-	QueuedMs   int64  `json:"queued_ms,omitempty"`
-	Route      string `json:"route,omitempty"`
+	QueuedMs int64 `json:"queued_ms,omitempty"`
+	// Route is the route the delegator APPLIED to the call. For a call whose local or remote route had no
+	// pin_reason (a hint, ADR 0078) it is auto, and RouteAsked is what the caller named.
+	Route string `json:"route,omitempty"`
+	// RouteAsked is the route the caller named, written only on a call that went through a door offering pin_reason
+	// with route local or remote, whether it gave a reason or not; Route is then what the delegator applied.
+	// PinReason is the closed reason (privacy, locality, measurement, operator) the caller gave for pinning the
+	// call, empty on a hint (RouteAsked set, no reason). Neither is set on any other row, which a reader must treat
+	// as "the route was not a pin or a hint", never as a hint.
+	RouteAsked string `json:"route_asked,omitempty"`
+	PinReason  string `json:"pin_reason,omitempty"`
 	Placement  string `json:"placement,omitempty"`
 	Steps      int    `json:"steps,omitempty"`
 	StopReason string `json:"stop_reason,omitempty"`

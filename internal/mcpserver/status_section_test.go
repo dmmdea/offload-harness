@@ -25,6 +25,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -44,6 +45,9 @@ import (
 var statusBlocks = []string{"local", "media", "remote", "accelerators", "reuse", "fleet", "kv_cache_server", "gpu_lease", "pair"}
 
 const statusGoldenPath = "testdata/offload_status_default.golden.json"
+
+// pinsStartedAt matches the one run-specific field of the fleet block's pin accounting.
+var pinsStartedAt = regexp.MustCompile(`"started_at":"[^"]*"`)
 
 // statusFixture is a server whose status answer depends on nothing but this
 // function: a fake llama-swap, one fake fleet node, a temp state dir, every media
@@ -133,6 +137,8 @@ func statusFixture(t *testing.T) (*Server, config.Config, func(string) string) {
 	norm := func(s string) string {
 		s = strings.ReplaceAll(s, upstream.URL, "@ENDPOINT@")
 		s = strings.ReplaceAll(s, node.URL, "@NODE@")
+		// The fleet block's pin accounting (ADR 0078) opens its window when the server is built.
+		s = pinsStartedAt.ReplaceAllString(s, `"started_at":"@PINS_START@"`)
 		return strings.ReplaceAll(s, tmpJSON, "@TMP@")
 	}
 	return New(pipeline.New(cfg, nil, nil, nil)), cfg, norm

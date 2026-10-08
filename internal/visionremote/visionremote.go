@@ -10,8 +10,11 @@
 //     existed — every caller that never passes a route is byte-identical.
 //   - auto: an idle local card ALWAYS runs the work; only when the machine-wide
 //     GPU lease is held (delegate.LocalBusy — a render in flight or a text
-//     reservation) is a fleet node considered, and when no node is eligible
-//     the work still runs local. Queued-local beats ineligible-remote.
+//     reservation) or the vision seat the call would run on is busy (another
+//     request in flight, a load in progress, or a load that would unload a
+//     loaded vLLM seat: delegate.LocalSeatBusy, the reading the delegator makes
+//     of its own seat, ADR 0078) is a fleet node considered, and when no node
+//     is eligible the work still runs local. Queued-local beats ineligible-remote.
 //   - remote: force a fleet node; with none eligible the call DEFERS
 //     (defer_class capacity — or config when no remotes are configured at
 //     all), never a silent local run: "remote" is the caller saying its own
@@ -80,9 +83,9 @@ const (
 // (never-cloud, ADR 0001), enforced at dial time.
 var HTTPClient = &http.Client{Transport: netguard.SafeTransport(nil), Timeout: Budget, CheckRedirect: rosterprobe.NoRedirect}
 
-// localBusy is the auto route's trigger — the machine-wide GPU lease, read
-// exactly as agent placement reads it. A seam so tests drive both branches
-// without a lease directory.
+// localBusy is the auto route's first trigger — the machine-wide GPU lease, read
+// exactly as agent placement reads it (seatBusy below is the second). A seam so
+// tests drive both branches without a lease directory.
 //
 // The reading is narrowed to the cards the vision seat is pinned to (plan P4): a render on
 // another card is not a reason to send an image off the box. A seat with no declared pin
@@ -90,6 +93,42 @@ var HTTPClient = &http.Client{Transport: netguard.SafeTransport(nil), Timeout: B
 var localBusy = func(cfg config.Config) bool {
 	pins, _ := cfg.ModelPins(cfg.VisionModel)
 	return delegate.LocalBusyFor(cfg.GPULockPath, cfg.StateDir, pins)
+}
+
+// seatBusy is the auto route's second trigger (ADR 0078): the vision seat THIS call would run on is busy, read the way
+// the delegator reads its own agent seat (delegate.LocalSeatBusy). The lease above says the cards are spoken for; this
+// says the seat is serving someone else, which a lease never shows (a single-shot vision call holds none). A seam so
+// tests drive both branches without a llama-swap.
+var seatBusy = func(ctx context.Context, cfg config.Config, task string) (bool, string) {
+	rd := delegate.LocalSeatBusy(ctx, cfg, visionSeatFor(cfg, task), "vision seat")
+	return rd.Busy, rd.Why
+}
+
+// visionSeatFor is the seat a vision task runs on, as the pipeline picks it (visionModelFor): ocr has its own binding
+// when the machine has one, every other vision task rides the vision model.
+func visionSeatFor(cfg config.Config, task string) string {
+	if task == string(core.TaskOCR) && cfg.OCRModel != "" {
+		return cfg.OCRModel
+	}
+	return cfg.VisionModel
+}
+
+// laneBusy is the auto route's trigger: the lease (localBusy) or the seat (seatBusy). why is the reason the placement
+// note carries: "local gpu busy" for the lease, as it always said, and "local vision seat busy (<what>)" for the seat.
+// The seat is read to choose between this box and a node, so a box with no delegate_remotes does not read it: there is
+// no node to choose (callWith would refuse with a config defer and the call would run here), and the round trip to
+// llama-swap would be paid for nothing.
+func laneBusy(ctx context.Context, cfg config.Config, req core.Request) (busy bool, why string) {
+	if localBusy(cfg) {
+		return true, "local gpu busy"
+	}
+	if len(cfg.DelegateRemotes) == 0 {
+		return false, ""
+	}
+	if seatIsBusy, what := seatBusy(ctx, cfg, string(req.Task)); seatIsBusy {
+		return true, "local vision seat busy (" + what + ")"
+	}
+	return false, ""
 }
 
 // Runner runs one request in-process; *pipeline.Pipeline satisfies it.
@@ -140,7 +179,8 @@ func Run(ctx context.Context, cfg config.Config, runner Runner, req core.Request
 		return res
 	}
 	// auto
-	if !localBusy(cfg) {
+	busy, why := laneBusy(ctx, cfg, req)
+	if !busy {
 		res := runner.Run(ctx, req)
 		res.Meta.Placement = "local: gpu idle"
 		return res
@@ -148,7 +188,7 @@ func Run(ctx context.Context, cfg config.Config, runner Runner, req core.Request
 	h := core.BeginRemote(runner, req, r)
 	res, err := callWith(ctx, cfg, req, h)
 	if err == nil {
-		res.Meta.Placement = "remote: local gpu busy"
+		res.Meta.Placement = "remote: " + why
 		h.Finish(res)
 		return res
 	}
@@ -158,7 +198,7 @@ func Run(ctx context.Context, cfg config.Config, runner Runner, req core.Request
 	// reached a node leaves nothing behind, one that did leaves a failed card.
 	h.Discard(err.Error())
 	res = runner.Run(ctx, req)
-	res.Meta.Placement = "local: gpu busy, " + err.Error()
+	res.Meta.Placement = "local: " + strings.TrimPrefix(why, "local ") + ", " + err.Error()
 	return res
 }
 

@@ -128,7 +128,7 @@ func TestAgentDelegateSchemaSaysRemotesNarrowAndReplace(t *testing.T) {
 // dropping the field would go unseen.
 func TestAgentDelegateTellsTheEngineTheListCameFromAModel(t *testing.T) {
 	s := delegateTestServer(t, neverDialled(t))
-	opts := s.agentDelegateOptions(1, time.Time{}, nil)
+	opts := s.agentDelegateOptions(1, "", time.Time{}, nil)
 	if !opts.RosterOnly {
 		t.Fatal("agent_delegate's RunOptions leave RosterOnly false: a model-named remotes list could then reach the engine unchecked")
 	}

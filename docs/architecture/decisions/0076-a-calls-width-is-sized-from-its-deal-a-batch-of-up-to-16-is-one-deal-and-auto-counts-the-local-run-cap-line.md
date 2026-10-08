@@ -123,6 +123,12 @@ counted the local seat's line for the spread deal only) and [ADR 0032](0032-a-pe
 - The width is no longer a property tests can assume. The tests that pinned the eight-subtask chunk boundary moved to 16, and
   the ones that pinned "four at a time" are the ones that have no deal (`route=local`) or a node that publishes no ceiling.
 
+## Amendment (2026-10-07): a reasonless `local` has a deal
+
+`route=local` with no `pin_reason`, through the doors that offer one, is a hint applied as `auto`
+([ADR 0078](0078-a-placement-pin-needs-a-reason-without-one-it-is-a-hint.md)), so decisions 1, 3 and 4 above apply to it. It is the
+pinned `route=local`, one with a reason, that has no deal to read and keeps `runConcurrency`.
+
 ## Alternatives considered
 
 - **Count the overflow in the width, so every subtask starts at once and waits in the capacity wait together.** Rejected for

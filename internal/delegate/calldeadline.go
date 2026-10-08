@@ -631,7 +631,7 @@ func (r *runner) unlaunched(contract core.AgentContract, stop launchStop) Placed
 // running.
 func (r *runner) abandoned(i int, contract core.AgentContract) PlacedResult {
 	pr := PlacedResult{
-		Unplaced: true, deadlineCut: true,
+		Unplaced: true, deadlineCut: true, abandoned: true,
 		PlacementReason: "call deadline reached before this subtask stopped",
 	}
 	if id, ok := r.lastJob.Load(i); ok {

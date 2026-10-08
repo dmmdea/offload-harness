@@ -811,8 +811,10 @@ one. A fleet running mismatched tokens gets no re-placement out of an auth refus
 
 **Where it goes.** Another eligible remote first — chosen by the same capability gate and the same
 capacity-aware ranking as the original placement, excluding every node already tried — and then the
-local seat. `route=remote` never falls back to local: an explicit remote route is not silently
-overridden, exactly as with "no eligible remote".
+local seat. A remote PIN never falls back to local: an explicit remote route (`route=remote` with a `pin_reason`, or through a
+caller with no reason channel) is not silently overridden, exactly as with "no eligible remote". A reasonless `route=remote` through
+`agent_delegate`, `offload_research` or their CLI verbs is a hint (ADR 0078), and does fall back to the idle local seat, saying so in
+the result's placement.
 
 **The bound, per SUBTASK.** The bound and the exclusion set live in ONE per-subtask ledger that every
 placement consults — the first attempt's re-placement loop and the verification retry's both — so the
@@ -1138,8 +1140,9 @@ constrain sampling and `assess_image` always sends a grammar
 ### Placement (delegator side)
 
 `route: local` (default) is byte-identical to before the route existed. `auto`: an idle local
-card always runs the work; only while the machine-wide GPU lease is held (`delegate.LocalBusy`)
-is a node considered, ranked by `delegate.PlaceVision` — eligible = advertises the lane, serves THIS
+card always runs the work; only while the machine-wide GPU lease is held (`delegate.LocalBusy`), or the vision seat the task would
+run on is busy (`delegate.LocalSeatBusy`: a request in flight, a load or unload in progress, or a load that would unload a loaded
+vLLM seat; ADR 0078 decision 9), is a node considered, ranked by `delegate.PlaceVision` — eligible = advertises the lane, serves THIS
 task (`NodeView.ServesVisionTask`: no `vision_tasks` in health = all three, so an older node stays
 eligible for every task; a published list serves only what it names) and its
 card is not leased (`lease.class: text` or `lease.busy`), ordered by the agent lane's

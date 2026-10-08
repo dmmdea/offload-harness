@@ -983,7 +983,7 @@ it was caught before the contract's WALL started. The budget is delegator wall c
 there — cordon, pre-flight, the cold load that triggered the probe (125–250 s for a vLLM seat) and the probe itself — is
 credited back to the subtask's `timeout_sec` ledger from the `admission_wait_sec` the node reports, exactly as a
 capacity wait is credited; without that credit the retry floor (the alternate seat's own `min_turn`) would refuse the
-retry this defer exists for. It is still a broken stack — `--route remote` exits non-zero and an operator has to fix the
+retry this defer exists for. It is still a broken stack — `--route remote --pin-reason operator` exits non-zero and an operator has to fix the
 box (on that seat the fix was `kv_cache_dtype: fp8` instead of `fp8_e5m2`; see ADR 0048 Amendment 1).
 
 Note what `cold` does and does not cover: it protects the contract that LOADS the seat, and the defer unloads nothing,
@@ -1455,6 +1455,22 @@ a remote node is also used whenever the local GPU is busy; either way it must pa
 placement: route=auto and route=spread send every subtask to the fleet. Wire details:
 `docs/FLEET-NODE.md`. Template contracts to start from: [`contracts/`](../contracts/README.md).
 
+**A pin needs a reason (ADR 0078).** `route: local` and `route: remote` pin a call to this box's seat or to a fleet node, and a
+call that does that must say why: `pin_reason` (`--pin-reason` on the `delegate` and `research` verbs) is `privacy` (the material
+may not leave this box) or `locality` (the work needs something only this box has), both with `local`; or `measurement` (the call
+measures a specific place: a benchmark, a bake, a seat A/B) or `operator` (you named this placement), with `local` or `remote`. A
+reason with any other route, or a value outside the set, is refused before anything is read or fetched, and the error lists the set.
+**Without a reason a local or remote route is only a hint**: `local` is placed as `auto` places it (the idle seat takes its run-cap line
+and the rest of a wider call goes to the nodes with room; a call that fits the line stays on the box), and `remote` is placed
+fleet-first, with the idle local seat taking what no remote has room for where `remote` would have deferred. A hint never runs on a seat
+a text lease reserves, a pin is authoritative to the end (a failed verification of a subtask pinned to a node is retried on another
+node or not at all, never on the local seat), and a call that carries a browse grant (`allow_browse`, which drives this machine's own browser) is pinned under
+the implied reason `locality`. Every result's `placement` opens by saying whether the hint was honoured or overridden, and the ledger row carries
+`route_asked`, `pin_reason` (empty for a hint) and, as `route`, the route the engine applied (`auto` for a hint). `offload_status`'s
+fleet block has a `pins` object with this server's counts since it started. This is the cure for a fan-out queued on one seat while
+the fleet idled (2026-10-07: 32 of 78 pages `not started`). A measurement script that has to run on one seat says
+`--pin-reason measurement`, as `scripts/parallel-sessions-gate.ps1` and `scripts/write-door-gate.ps1` do.
+
 **A text-class GPU lease reserves the local seat (0.113.14).** `gpu reserve --class text` is how a
 benchmark, eval or measured run keeps everyone else off its cards. Until 0.113.14 delegate placement
 read the lease only to *prefer* a remote (route=auto) — and on route=spread not at all — so a
@@ -1468,8 +1484,8 @@ pid, reason, origin, expiry) so the caller can wait, route elsewhere, or ask. A 
 reserved seat either (register C-81), but it is not held in line for the holder as a first placement is:
 a verification retry, or the re-issue of a seat-down defer, whose first attempt ran on a fleet node goes
 to an untried node and, with none, is skipped at once with a `retry_note` that names the holder, and the
-first attempt's result stands. `route=local` is the
-caller's explicit choice and is never gated. A **media** lease is not a placement gate: it keeps
+first attempt's result stands. A pinned `route=local` (one with a `pin_reason`) is the
+caller's explicit choice and is never gated; a reasonless one is a hint, placed as `auto`, which does read the lease. A **media** lease is not a placement gate: it keeps
 steering toward remotes as before and is arbitrated at the model-affinity gate (ADR 0026), so
 single-box render behaviour is unchanged. The local seat's window is probed live before each run —
 llama-server `/props`, else the backend's `/v1/models` `max_model_len` (a vLLM seat behind
@@ -1724,6 +1740,7 @@ CLI equivalent:
 
 ```powershell
 local-offload delegate --contract contracts/research-digest.json --route auto --remote http://<node-b>:18811
+local-offload delegate --contract contracts/research-digest.json --route local --pin-reason measurement   # a pin, with its reason
 ```
 
 Exit 0 covers honest defers (`abstention` / `budget`) and failed verification — the JSON says
@@ -1764,7 +1781,7 @@ cross-seat comparisons must refuse rows whose pins differ or are absent; absent 
 | `403 agent lane requires fleet_auth_token on a non-loopback listener` | The worker is bound beyond loopback with no token. Set `fleet_auth_token` (same value) on both sides and restart `fleet-serve`. |
 | `401 unauthorized` on dispatch or poll | Token mismatch between delegator and worker configs. `local-offload doctor` shows it before a call is spent: its `fleet token` rows ask each reachable node whether it accepts this box's token (`OK`, `MISMATCH` = the node has another token, `NO-TOKEN` = the node listens beyond loopback with none, `UNKNOWN`, `UNCHECKED` = refused or unreachable, not asked), one row per `delegate_remotes` slot, never printing a token; a box with no `fleet_auth_token` prints one `NOT SET` line instead. `/fleet/health` ignores the token, so every other row reads healthy either way. |
 | `agent delegation is disabled on this box` | Set `"agent_delegation_enabled": true` in the **delegator's** config. |
-| Everything places local although a remote exists | Usually correct — idle-local always wins. Force `--route remote` to surface the gate's verdict: the defer reason now names the actual cause — no remotes configured, every remote failing its health probe (each error quoted), or a healthy remote failing the gate (`agent_enabled` + `agent_seat_resident` + `output_schema` + the ctx arithmetic above). |
+| Everything places local although a remote exists | Usually correct — idle-local always wins. Force `--route remote --pin-reason operator` to surface the gate's verdict (without a reason `remote` is a hint and the idle local seat takes what no remote can): the defer reason now names the actual cause — no remotes configured, every remote failing its health probe (each error quoted), or a healthy remote failing the gate (`agent_enabled` + `agent_seat_resident` + `output_schema` + the ctx arithmetic above). |
 | `remote "…": hostname … not allowed` | Non-tailnet URL. Loopback, a tailnet CGNAT-range address, a dotless MagicDNS name, or a hostname under a tailnet zone you listed only: `tailnet_suffix` for your own tailnet, `tailnet_suffixes` for another tailnet that shared a node in (it names that node under the SHARER's zone, ADR 0074). `doctor` prints the zones it read. |
 | failed `queue deadline after …: the node accepted the job but never started it` | The node admitted the job but never gave it an execution slot — every poll said `accepted`. It is **saturated**, not broken. Check `jobs_running` / `jobs_queued` / `max_concurrent_jobs` on that node's `/fleet/health`; raise `fleet_max_concurrent_jobs` if the box can genuinely run more at once, or spread the fan-out across more nodes. Queued time is credited back to the budget, so this only fires after a real wait, bounded by the node's own ETA (`clamp(1.5 x etaStart + 30 s, 60 s, timeout_sec + grace)`; `min(timeout_sec + grace, 5 min)` for a node that publishes no ETA — ADR 0063). A node whose ETA to start a job already exceeds the wait the contract will give it is not sent the job at all: it is held out and re-read every few seconds, and the placement reason names it as `backlog (…)` with its arithmetic. When the message carries `the queue budget was derived from the placement snapshot`, the node's health could not be read again once the job was seen queued, so the budget was never re-checked: look at why that node stopped answering health. A job the node took back when asked is re-placed on another node and never surfaces as this failure; one whose text ends `; withdraw not confirmed: <why>` is a job the delegator asked the node to take back (ADR 0064) and the node did not, so it may still start later for nobody: `HTTP 405` is a node that predates the route (upgrade it), `HTTP 401` is a `fleet_auth_token` mismatch, `no answer` is a node that sat on the request. |
 | `503 queue full (… limit N)` | `fleet_max_queue_depth` reached — default is now `2x fleet_max_concurrent_jobs` (8 with the default 4 workers), not a flat 32, so a busier node hits this sooner than it used to. The node publishes a `Retry-After` header sized from its own `recent_agent_wall_sec` (bounded `[5, 300]`, worded so you can tell a real estimate from the flat 30s default or a clamped-high one), and health separately publishes the same formula's RAW, unbounded value as `queue_wait_estimate_sec`. The delegator consumes both (ADR 0063): a 503 re-places the subtask on a node with room at once, its `Retry-After` becomes that node's cooldown for the capacity wait, and `queue_wait_estimate_sec` sizes the queue budget and holds out a node that cannot start the job in time. Raise `fleet_max_queue_depth` only if the box should hold a deeper backlog. Never size your own retry from `seat_rate.min_turn_sec`; that is a per-seat retry floor, not a queue-depth signal. |
