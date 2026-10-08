@@ -1049,8 +1049,23 @@ func normalizeDocName(name string) string {
 //	regex:<re>            output matches Go regexp re
 //	min_items:<field>:<n> structured.<field> is an array with ≥ n items
 //	nonempty:<field>      structured.<field> is present and non-empty
+//	nonempty:<f1>|<f2>|…  at least ONE of the named fields is present and non-empty
 //	diff_touches:<prefix> the write set holds a path starting with <prefix>
 //	diff_max_files:<n>    the write set is NON-EMPTY and touches <= n files
+//
+// The any-of form of nonempty is the guard for "did the answer say anything at
+// all": it passes when at least one named field has a value, by the SAME
+// emptiness rules as the single form (null, "", [] and {} are empty; a present
+// 0 or false is a value), and an absent field is empty for its alternative.
+// Names are exact (no trimming). An empty alternative (a||b, |a, a|) and a
+// repeated name (a|a) are parse errors: the first is a typo, not a field, and
+// the second cannot change the outcome. A single name is the one-field check as
+// it always was, failure reasons included, and only nonempty alternates:
+// min_items:<field>:<n> takes its field name literally. Evaluation is the
+// delegator's alone; a node only PARSES a contract's acceptance when it ACKs
+// it, and the parser accepted any non-empty argument after nonempty: before
+// this form existed, so a node one release behind admits a contract that
+// carries it unchanged.
 //
 // The two diff verbs read the run's write set (write_root, D-06). Both fail
 // CLOSED on a read-only or empty write set, diff_max_files included: a cap
@@ -1144,6 +1159,18 @@ func ParseAcceptanceCheck(s string) (AcceptanceCheck, error) {
 		if rest == "" {
 			return AcceptanceCheck{}, fmt.Errorf("acceptance check %q: field name is required", s)
 		}
+		if strings.Contains(rest, "|") {
+			named := map[string]bool{}
+			for _, name := range strings.Split(rest, "|") {
+				if name == "" {
+					return AcceptanceCheck{}, fmt.Errorf("acceptance check %q: empty alternative (want nonempty:<f1>|<f2> with every name filled in)", s)
+				}
+				if named[name] {
+					return AcceptanceCheck{}, fmt.Errorf("acceptance check %q: field %q is named twice", s, name)
+				}
+				named[name] = true
+			}
+		}
 	case AccDiffTouches:
 		if rest == "" {
 			return AcceptanceCheck{}, fmt.Errorf("acceptance check %q: empty path prefix matches every write", s)
@@ -1172,6 +1199,25 @@ func ParseAcceptanceCheck(s string) (AcceptanceCheck, error) {
 // of recompiling, which would re-introduce a can-never-fail error branch
 // whose correctness silently depends on staying dead.
 func (c AcceptanceCheck) Pattern() *regexp.Regexp { return c.re }
+
+// Fields returns the structured fields the check reads, in the order named:
+// one for min_items and for a single-name nonempty, one per alternative for the
+// any-of nonempty, and none for every verb that reads no field. Exposed so the
+// schema helpers (AcceptedFields) read the check the way Eval does instead of
+// splitting the argument a second time.
+func (c AcceptanceCheck) Fields() []string {
+	switch c.Kind {
+	case AccMinItems:
+		if c.Arg != "" {
+			return []string{c.Arg}
+		}
+	case AccNonempty:
+		if c.Arg != "" {
+			return strings.Split(c.Arg, "|")
+		}
+	}
+	return nil
+}
 
 // Eval runs the check against a result. reason is empty exactly when pass is
 // true; on failure it names the check and what was observed, because these
@@ -1209,6 +1255,9 @@ func (c AcceptanceCheck) Eval(res AgentWireResult) (pass bool, reason string) {
 		}
 		return true, ""
 	case AccNonempty:
+		if strings.Contains(c.Arg, "|") {
+			return anyNonempty(structured, c.Fields(), c.raw)
+		}
 		field, reason := structuredField(structured, c.Arg, c.raw)
 		if reason != "" {
 			return false, reason
@@ -1252,12 +1301,9 @@ func evalText(structured json.RawMessage, output string) string {
 // absent field). v1 addresses top-level fields only — the gbnf subset only
 // produces flat objects anyway, so nesting cannot occur in a validated result.
 func structuredField(structured json.RawMessage, name, raw string) (json.RawMessage, string) {
-	if len(structured) == 0 {
-		return nil, fmt.Sprintf("%s: no structured output to check", raw)
-	}
-	var obj map[string]json.RawMessage
-	if err := json.Unmarshal(structured, &obj); err != nil {
-		return nil, fmt.Sprintf("%s: structured output is not a JSON object", raw)
+	obj, reason := structuredObject(structured, raw)
+	if reason != "" {
+		return nil, reason
 	}
 	field, ok := obj[name]
 	if !ok {
@@ -1266,30 +1312,85 @@ func structuredField(structured json.RawMessage, name, raw string) (json.RawMess
 	return field, ""
 }
 
+// structuredObject decodes the structured result into its top-level fields,
+// with the failure reason of each layer that is shared by every field verb
+// (absent result / not an object). The any-of nonempty reads the object once
+// through it, so its two precondition failures are the single-name check's
+// reasons word for word.
+func structuredObject(structured json.RawMessage, raw string) (map[string]json.RawMessage, string) {
+	if len(structured) == 0 {
+		return nil, fmt.Sprintf("%s: no structured output to check", raw)
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(structured, &obj); err != nil {
+		return nil, fmt.Sprintf("%s: structured output is not a JSON object", raw)
+	}
+	return obj, ""
+}
+
+// anyNonempty is the any-of form of nonempty: it passes when at least one of
+// the named fields is present and non-empty. A missing or unparseable object
+// fails with the single-name check's reason (structuredObject). Otherwise the
+// failure is ONE string that names the check and says, field by field, why
+// each is empty or absent: these reasons surface verbatim in the delegator's
+// merge decision and the ledger, and "none of them" without the why is
+// unactionable.
+func anyNonempty(structured json.RawMessage, names []string, raw string) (bool, string) {
+	obj, reason := structuredObject(structured, raw)
+	if reason != "" {
+		return false, reason
+	}
+	why := make([]string, 0, len(names))
+	for _, name := range names {
+		field, ok := obj[name]
+		if !ok {
+			why = append(why, fmt.Sprintf("field %q is absent", name))
+			continue
+		}
+		empty := emptiness(field)
+		if empty == "" {
+			return true, ""
+		}
+		why = append(why, fmt.Sprintf("field %q is %s", name, empty))
+	}
+	return false, fmt.Sprintf("%s: none of the fields is present and non-empty (%s)", raw, strings.Join(why, "; "))
+}
+
 // nonemptyValue decides emptiness by JSON kind: null and "" and [] and {}
 // are empty; a present scalar — INCLUDING 0 and false — is a value.
 // nonempty guards against omission, not against zero: a count of 0 is an
 // answer, an absent count is a non-answer.
 func nonemptyValue(field json.RawMessage, name, raw string) (bool, string) {
+	if empty := emptiness(field); empty != "" {
+		return false, fmt.Sprintf("%s: field %q is %s", raw, name, empty)
+	}
+	return true, ""
+}
+
+// emptiness is the one place the emptiness rules live, shared by the one-field
+// and the any-of nonempty: it names what makes a present field empty ("null",
+// "an empty string", "an empty array", "an empty object") and returns "" when
+// the field is a value.
+func emptiness(field json.RawMessage) string {
 	trimmed := strings.TrimSpace(string(field))
 	switch {
 	case trimmed == "" || trimmed == "null":
-		return false, fmt.Sprintf("%s: field %q is null", raw, name)
+		return "null"
 	case strings.HasPrefix(trimmed, `"`):
 		var s string
 		if err := json.Unmarshal(field, &s); err != nil || s == "" {
-			return false, fmt.Sprintf("%s: field %q is an empty string", raw, name)
+			return "an empty string"
 		}
 	case strings.HasPrefix(trimmed, "["):
 		var items []json.RawMessage
 		if err := json.Unmarshal(field, &items); err != nil || len(items) == 0 {
-			return false, fmt.Sprintf("%s: field %q is an empty array", raw, name)
+			return "an empty array"
 		}
 	case strings.HasPrefix(trimmed, "{"):
 		var obj map[string]json.RawMessage
 		if err := json.Unmarshal(field, &obj); err != nil || len(obj) == 0 {
-			return false, fmt.Sprintf("%s: field %q is an empty object", raw, name)
+			return "an empty object"
 		}
 	}
-	return true, ""
+	return ""
 }

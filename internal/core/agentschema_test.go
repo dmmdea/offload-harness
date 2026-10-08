@@ -26,6 +26,41 @@ func TestAcceptedFieldsReadsOnlyTheFieldVerbs(t *testing.T) {
 	}
 }
 
+// The any-of nonempty reads every field it names, so each is a field the schema
+// must declare required; min_items takes a pipe in its field name literally.
+func TestAcceptedFieldsSplitsTheNonemptyAlternation(t *testing.T) {
+	got := AcceptedFields([]string{
+		"nonempty:key_facts|numbers|quotes|verdict",
+		"min_items:key_facts:2",  // already listed by the alternation: not repeated
+		"nonempty:verdict|extra", // verdict is a repeat, extra is new
+		"nonempty:a||b",          // does not parse: skipped, never a panic
+		"min_items:left|right:1", // a literal field name
+	})
+	want := []string{"key_facts", "numbers", "quotes", "verdict", "extra", "left|right"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("AcceptedFields = %v, want %v", got, want)
+	}
+}
+
+// The any-of check declares each name it lists, presence only (a field the
+// schema never declares is left out, as for every other check), and a schema
+// that already requires them all comes back byte for byte: the default research
+// digest, which carries this check, must not be reshaped by it.
+func TestRequireAcceptanceFieldsDeclaresEachAlternativeAndIsANoOpWhenAllAreRequired(t *testing.T) {
+	check := []string{"nonempty:key_facts|numbers|quotes|verdict"}
+
+	allRequired := json.RawMessage(`{"type":"object","properties":{"key_facts":{"type":"array","items":{"type":"string"}},"numbers":{"type":"array","items":{"type":"string"}},"quotes":{"type":"array","items":{"type":"string"}},"verdict":{"type":"string"}},"required":["key_facts","numbers","quotes","verdict"]}`)
+	if got := RequireAcceptanceFields(allRequired, check); !bytes.Equal(got, allRequired) {
+		t.Fatalf("a schema that already requires every alternative was reshaped:\n got %s\nwant %s", got, allRequired)
+	}
+
+	partial := json.RawMessage(`{"type":"object","properties":{"key_facts":{"type":"array"},"verdict":{"type":"string"},"other":{"type":"string"}},"required":["other"]}`)
+	got := requiredList(t, RequireAcceptanceFields(partial, check))
+	if want := []string{"other", "key_facts", "verdict"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("required = %v, want %v (numbers and quotes are not declared, so they are not required)", got, want)
+	}
+}
+
 func requiredList(t *testing.T, schema json.RawMessage) []string {
 	t.Helper()
 	var s struct {
