@@ -6,7 +6,7 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
-## [0.171.0] - 2026-10-08 - Remote media routing, the media-job door, and iGPU media engines (sd.cpp video and animate, audio.cpp voice and music)
+## [0.172.0] - 2026-10-08 - Remote media routing, the media-job door, and iGPU media engines (sd.cpp video and animate, audio.cpp voice and music)
 
 A caller on any machine can now send one render to a fleet node together with its input files, name the node or let the roster place it, and get the output back with its bytes verified (the media-job door, ADR 0077); a node advertises and admits a media task only while its route is actually CONFIGURED, so a missing weight drops the task out of the roster instead of failing jobs. A box whose only GPU is a Vulkan iGPU, with no CUDA, no ROCm and no model on the CPU, now serves video (I2V and T2V), character animation, voice with cloning and music through stable-diffusion.cpp and audio.cpp, advertises those lanes to the fleet, and ships the measured amd-gcn seed for them.
 
@@ -24,7 +24,7 @@ its `commercial_use` stays unset and the tier notes say it must be checked at th
 weights are pinned (url, name, size, sha256, version) in `setup/install.ps1`'s `$PINNED` table, the one place the repo pins media
 models (the Linux install has no media leg yet, so they are pin-only: no gate downloads them), and their sizes are mirrored in
 `internal/mediacap/modelsizes.go` (`TestKnownModelSizesMatchInstaller`) except `wan_2.1_vae.safetensors`, which every ComfyUI Wan
-route also binds. The seed needs 0.171.0: 0.168.0 does not know the keys. Tier pages: `animategen_*` and `audiocpp_*` keys are media
+route also binds. The seed needs 0.172.0: 0.168.0 does not know the keys. Tier pages: `animategen_*` and `audiocpp_*` keys are media
 keys (they were filed under the non-media heading, so `ampere-16` listed its `animategen_script` there), a nested seed object renders as
 compact JSON instead of a Go map dump, and the README media column names the iGPU engines. Tests (`internal/tierseed`):
 `TestAmdGcnMediaSeedRoutesFollowTheFiles` (the resolved seed derives the four routes BOUND-BUT-MISSING on a fresh install and
@@ -230,7 +230,7 @@ Tests: `TestRemoteMediaCallIsOneCardOnTheServingNodeAndOneRow`, `TestRemoteMedia
 `TestMediaJobOutputNeedsTheBearerAPlainDispatchOutputDoesNot`, `TestAMediaJobOutputIsFetchedWithTheBearerAndRefusedWithout`,
 `TestGatedMediaNames`.
 
-### Fixed — release review of 0.171.0 (register CT-51)
+### Fixed — release review of 0.172.0 (register CT-51)
 
 The release reviewer and the round-4 reviewers of the integrated branch found the items below; each is fixed before the release, and
 each guard was broken once at its real call site and seen red.
@@ -371,6 +371,51 @@ runs: the first line that places a compute module on the CPU (a software Vulkan 
 `TestACPUBackendIsATypedDeferOnEveryIGPULane`, `TestACPUOrUnsetBackendMakesEveryIGPURouteBoundButMissing` and the node tests in
 `render/igpu-engine.test.mjs` (each guard was broken once and seen red). The first cut of the log guard was negative-only and
 fixture-modelled; the entry above replaces it with the positive guard pinned to real captured logs.
+
+## [0.171.0] - 2026-10-08 - a research page that said something is no longer failed for lacking a verdict
+
+### Fixed — a research page with populated lists is no longer failed for lacking a verdict
+
+- **The default research digest now fails only when it said nothing, and its goal asks for the verdict.** Since
+  2026-09-30, 36 default-digest pages failed `nonempty:verdict` (the guard 0.147.0 gave the harness's own digest). None
+  was an empty page: every one had populated lists (`key_facts` median 10.5 items) and `verdict: ""`. All 36 came from
+  the vLLM json_schema re-pack lane. The research goal never asks for a verdict, and the re-pack prompt says "Use empty
+  values when a field is absent", so the extractor writes `""` when the loop's final text has none. An acceptance-only
+  research failure is not retried, so each one discarded a whole run: 4.07 h of seat wall time in total. The check
+  exists only to catch the silent-empty digest (every list empty and no verdict), which occurred 0 times in 687 pages;
+  on that data, failing only when every list AND the verdict are empty turns 35 failures into passes and turns no pass
+  into a failure. `Build` now derives `nonempty:key_facts|numbers|quotes|verdict` for the default digest and ends its
+  goal with one sentence asking for the verdict ("Always end with a one-sentence verdict that answers the goal from
+  this page, or says plainly that the page does not address it."); a caller-supplied schema is unchanged (no sentence,
+  the same `nonEmptyChecks`). The anchor words still come from the caller's goal alone, and the default schema already
+  requires all four fields, so it comes through byte for byte.
+- **The acceptance DSL gains the any-of form `nonempty:<f1>|<f2>|…`.** It passes when at least one named field is
+  present and non-empty, under the same emptiness rules as the one-field check (`null`, `""`, `[]`, `{}` are empty; a
+  present `0` or `false` is a value), and an absent field counts as empty for its alternative. A failure is one reason
+  that names the check and says why each field is empty or absent; a missing or unparseable structured object still
+  fails with the one-field check's reason, word for word. An empty alternative (`a||b`, `|a`, `a|`) and a repeated name
+  (`a|a`) are parse errors. A single name is the one-field check unchanged, failure reasons included. `AcceptedFields`
+  and `RequireFields` declare each name an any-of check lists (presence only), through a new
+  `AcceptanceCheck.Fields()`; `min_items` keeps a pipe in its field name literally. Only the delegator evaluates
+  acceptance (`delegate.EvalAcceptance`); a node only parses it when it ACKs a contract, and the parser accepted any
+  non-empty argument after `nonempty:`, so a node one release behind admits the new spelling unchanged (verified at
+  3568a530 by running that parser on the default digest's check: `ParseAcceptanceCheck`, `Validate` and
+  `DecodeAgentContract` all accepted it).
+- Tests: `TestNonemptyAlternationPassesWhenAtLeastOneNamedFieldHasAValue`, `TestParseAcceptanceCheck` (the any-of
+  rows), `TestASingleNameNonemptyCheckKeepsItsFailureReasonsByteForByte` (written and run green against the released
+  parser first), `TestNonemptyAlternationReadsEveryNamedFieldAndOnlyNonemptyAlternates`,
+  `TestAContractCarryingTheAnyOfCheckPassesTheNodesACKValidation`, `TestAcceptedFieldsSplitsTheNonemptyAlternation`,
+  `TestRequireAcceptanceFieldsDeclaresEachAlternativeAndIsANoOpWhenAllAreRequired` in `internal/core`;
+  `TestADigestWithPopulatedListsAndNoVerdictPassesAcceptance` (the live failure shape, on an anchored and a thin page),
+  `TestAThinPageWithEmptyListsAndAVerdictPasses`, `TestAllEmptyDefaultDigestFailsButAFaithfulEmptyOneStillPasses`,
+  `TestDefaultDigestCarriesTheAnyOfGuardOnEveryPage` (was `TestDefaultDigestCarriesAVerdictCheckOnEveryPage`),
+  `TestTheDefaultDigestGoalAsksForAVerdictAndACallersSchemaGoalDoesNot` and
+  `TestTheDefaultDigestContractPassesTheNodesACKAndKeepsItsSchemaByteForByte` in `internal/research`. Fifteen
+  mutations at their call sites (any-of as all-of, an absent field passing or dropped from the reason, an empty or
+  repeated alternative accepted, a single name through the any-of path, `Fields()` not splitting or splitting
+  `min_items`, an array never empty, the shared structured-object reasons dropped, `Build` deriving the old check, the
+  goal sentence dropped, doubled or added to a caller's schema, the check drifting from the schema) each turned a test
+  red and were restored byte for byte.
 
 ## [0.170.0] - 2026-10-08 - a placement pin needs a reason; without one it is a hint
 

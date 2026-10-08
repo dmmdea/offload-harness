@@ -2,6 +2,7 @@ package core
 
 import (
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -342,6 +343,15 @@ func TestParseAcceptanceCheck(t *testing.T) {
 		{"regex:^v[0-9]+\\.", false},
 		{"min_items:findings:3", false},
 		{"nonempty:digest", false},
+		{"nonempty:a|b", false}, // the any-of form: every name filled in
+		{"nonempty:key_facts|numbers|quotes|verdict", false},
+		{"nonempty:a||b", true}, // an empty alternative is a typo, not a field
+		{"nonempty:|a", true},
+		{"nonempty:a|", true},
+		{"nonempty:|", true},
+		{"nonempty:a|a", true}, // a repeat cannot change the outcome
+		{"nonempty:a|b|a", true},
+		{"min_items:a|b:2", false}, // only nonempty alternates; min_items takes its name literally
 		{"", true},
 		{"contains:", true},           // matches everything — cannot gate
 		{"not_contains:", true},       // matches nothing — cannot pass
@@ -484,5 +494,145 @@ func TestAgentWireJSONTags(t *testing.T) {
 	}
 	if len(got) != len(wantResult) {
 		t.Errorf("result emits %d keys, want %d: %v", len(got), len(wantResult), got)
+	}
+}
+
+// TestASingleNameNonemptyCheckKeepsItsFailureReasonsByteForByte pins the exact
+// reason of every way the one-field form fails (and the two ways it passes). The
+// any-of form was added beside it, and a delegator's merge decision and the
+// ledger quote these strings, so a refactor of the emptiness rules must not
+// move one of them. These expectations were written against the parser as
+// released, before the any-of form existed.
+func TestASingleNameNonemptyCheckKeepsItsFailureReasonsByteForByte(t *testing.T) {
+	structured := json.RawMessage(`{"s":"x","empty":"","none":[],"obj":{},"nul":null,"zero":0,"flag":false}`)
+	tests := []struct {
+		check      string
+		structured json.RawMessage
+		wantPass   bool
+		wantReason string
+	}{
+		{"nonempty:s", structured, true, ""},
+		{"nonempty:zero", structured, true, ""},
+		{"nonempty:flag", structured, true, ""},
+		{"nonempty:empty", structured, false, `nonempty:empty: field "empty" is an empty string`},
+		{"nonempty:none", structured, false, `nonempty:none: field "none" is an empty array`},
+		{"nonempty:obj", structured, false, `nonempty:obj: field "obj" is an empty object`},
+		{"nonempty:nul", structured, false, `nonempty:nul: field "nul" is null`},
+		{"nonempty:absent", structured, false, `nonempty:absent: field "absent" absent from structured output`},
+		{"nonempty:s", nil, false, `nonempty:s: no structured output to check`},
+		{"nonempty:s", json.RawMessage(`[1,2]`), false, `nonempty:s: structured output is not a JSON object`},
+	}
+	for _, tt := range tests {
+		c, err := ParseAcceptanceCheck(tt.check)
+		if err != nil {
+			t.Fatalf("parse %q: %v", tt.check, err)
+		}
+		if want := strings.TrimPrefix(tt.check, "nonempty:"); c.Kind != AccNonempty || c.Arg != want {
+			t.Fatalf("%q parsed to kind %q arg %q, want nonempty with arg %q", tt.check, c.Kind, c.Arg, want)
+		}
+		pass, reason := c.Eval(AgentWireResult{Structured: tt.structured})
+		if pass != tt.wantPass || reason != tt.wantReason {
+			t.Fatalf("Eval(%q on %s) = %v, %q; want %v, %q", tt.check, tt.structured, pass, reason, tt.wantPass, tt.wantReason)
+		}
+	}
+}
+
+// TestNonemptyAlternationPassesWhenAtLeastOneNamedFieldHasAValue pins the any-of
+// form: one value among the named fields is enough, under the same emptiness
+// rules as the one-field check (a present 0 and false are values), an absent
+// field counts as empty for its alternative, and the failure is ONE string that
+// names the check and says why each field is empty or absent.
+func TestNonemptyAlternationPassesWhenAtLeastOneNamedFieldHasAValue(t *testing.T) {
+	structured := json.RawMessage(`{"s":"x","empty":"","none":[],"obj":{},"nul":null,"zero":0,"flag":false,"full":["a"]}`)
+	tests := []struct {
+		name       string
+		check      string
+		structured json.RawMessage
+		wantPass   bool
+		wantReason string
+	}{
+		{"the first field alone carries a value", "nonempty:s|empty", structured, true, ""},
+		{"the last field alone carries a value", "nonempty:empty|none|full", structured, true, ""},
+		{"a middle field alone carries a value", "nonempty:empty|s|none", structured, true, ""},
+		{"an absent field does not sink a field that has a value", "nonempty:absent|s", structured, true, ""},
+		{"a present zero is a value", "nonempty:empty|zero", structured, true, ""},
+		{"a present false is a value", "nonempty:none|flag", structured, true, ""},
+		{"every field empty fails and says why for each", "nonempty:empty|none|obj|nul", structured, false,
+			`nonempty:empty|none|obj|nul: none of the fields is present and non-empty (field "empty" is an empty string; field "none" is an empty array; field "obj" is an empty object; field "nul" is null)`},
+		{"an absent field counts as empty and is named as absent", "nonempty:none|ghost", structured, false,
+			`nonempty:none|ghost: none of the fields is present and non-empty (field "none" is an empty array; field "ghost" is absent)`},
+		{"every field absent fails", "nonempty:ghost|phantom", structured, false,
+			`nonempty:ghost|phantom: none of the fields is present and non-empty (field "ghost" is absent; field "phantom" is absent)`},
+		{"no structured output keeps the single-name reason", "nonempty:s|full", nil, false,
+			`nonempty:s|full: no structured output to check`},
+		{"a structured result that is not an object keeps the single-name reason", "nonempty:s|full", json.RawMessage(`["x"]`), false,
+			`nonempty:s|full: structured output is not a JSON object`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c, err := ParseAcceptanceCheck(tt.check)
+			if err != nil {
+				t.Fatalf("parse %q: %v", tt.check, err)
+			}
+			pass, reason := c.Eval(AgentWireResult{Structured: tt.structured})
+			if pass != tt.wantPass || reason != tt.wantReason {
+				t.Fatalf("Eval(%q on %s) = %v, %q; want %v, %q", tt.check, tt.structured, pass, reason, tt.wantPass, tt.wantReason)
+			}
+		})
+	}
+}
+
+// TestNonemptyAlternationReadsEveryNamedFieldAndOnlyNonemptyAlternates pins the
+// accessor the schema helpers use: the any-of form lists every name in the
+// order written, a single name lists itself, and min_items keeps a pipe in its
+// field name (it is a literal there, not a separator).
+func TestNonemptyAlternationReadsEveryNamedFieldAndOnlyNonemptyAlternates(t *testing.T) {
+	tests := []struct {
+		check string
+		want  []string
+	}{
+		{"nonempty:key_facts|numbers|quotes|verdict", []string{"key_facts", "numbers", "quotes", "verdict"}},
+		{"nonempty:verdict", []string{"verdict"}},
+		{"min_items:findings:3", []string{"findings"}},
+		{"min_items:a|b:2", []string{"a|b"}},
+		{"contains:a|b", nil},
+		{"diff_touches:internal/", nil},
+	}
+	for _, tt := range tests {
+		c, err := ParseAcceptanceCheck(tt.check)
+		if err != nil {
+			t.Fatalf("parse %q: %v", tt.check, err)
+		}
+		if got := c.Fields(); !reflect.DeepEqual(got, tt.want) {
+			t.Fatalf("%q reads %v, want %v", tt.check, got, tt.want)
+		}
+	}
+}
+
+// TestAContractCarryingTheAnyOfCheckPassesTheNodesACKValidation pins the
+// compatibility claim the spelling rests on: a node never EVALUATES acceptance
+// (the delegator does), it only parses it when it ACKs a contract, through
+// DecodeAgentContract and Validate. The any-of check must get through both, as
+// it did through the parser of the release before it, which accepted any
+// non-empty argument after nonempty:. A malformed alternative is refused at the
+// same door.
+func TestAContractCarryingTheAnyOfCheckPassesTheNodesACKValidation(t *testing.T) {
+	const wire = `{"schema_version":1,"goal":"g","output_schema":{"type":"object","properties":{"key_facts":{"type":"array","items":{"type":"string"}},"verdict":{"type":"string"}},"required":["key_facts","verdict"]},"acceptance":["nonempty:key_facts|numbers|quotes|verdict"]}`
+	c, err := DecodeAgentContract(strings.NewReader(wire))
+	if err != nil {
+		t.Fatalf("a node refused a contract carrying the any-of check: %v", err)
+	}
+	if len(c.Acceptance) != 1 || c.Acceptance[0] != "nonempty:key_facts|numbers|quotes|verdict" {
+		t.Fatalf("acceptance came back as %v", c.Acceptance)
+	}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("Validate refused it: %v", err)
+	}
+	if err := c.ValidateWithCap(AgentContextMaxBytes * 2); err != nil {
+		t.Fatalf("ValidateWithCap refused it: %v", err)
+	}
+	bad := strings.Replace(wire, "key_facts|numbers", "key_facts||numbers", 1)
+	if _, err := DecodeAgentContract(strings.NewReader(bad)); err == nil || !strings.Contains(err.Error(), "acceptance[0]") {
+		t.Fatalf("an empty alternative must be refused at the ACK with its acceptance index, got %v", err)
 	}
 }

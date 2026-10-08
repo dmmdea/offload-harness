@@ -32,6 +32,20 @@ var DefaultSchema = json.RawMessage(`{"type":"object","properties":{` +
 	`"verdict":{"type":"string"}},` +
 	`"required":["key_facts","numbers","quotes","verdict"]}`)
 
+// defaultDigestCheck is the acceptance Build derives for the default digest on
+// EVERY page, anchored or not: the digest said something, a value in any one of
+// its four fields. It fails only the silent-empty digest (every list empty and
+// no verdict), which is what it exists to catch; see Build for why it is not
+// the verdict alone.
+const defaultDigestCheck = "nonempty:key_facts|numbers|quotes|verdict"
+
+// defaultVerdictAsk ends the default digest's goal. The research goal is the
+// caller's and never asks for a verdict, and the re-pack writes an empty value
+// for a field the loop's final text did not carry, so the digest is asked for
+// the statement outright. A caller-supplied schema owns what it asks for and
+// gets no sentence.
+const defaultVerdictAsk = " Always end with a one-sentence verdict that answers the goal from this page, or says plainly that the page does not address it."
+
 // Request is one research call: a goal applied to every fetched source.
 type Request struct {
 	Goal         string
@@ -103,16 +117,29 @@ func Build(req Request, fetched []Fetched) (specs []delegate.SubtaskSpec, source
 	// digest is a success. The same checks are derived once here because they do
 	// not depend on the page.
 	//
-	// The harness's own digest asks for one statement on every page: a verdict.
-	// A page too thin to anchor carries no anchor check, so without this its
-	// acceptance was empty and a digest that said nothing (every list empty, no
-	// verdict) was delivered as a success. Empty lists stay a complete answer; the
-	// verdict is where a digest of an empty page says so.
+	// The harness's own digest owes one thing on every page: that it said
+	// something. A page too thin to anchor carries no anchor check, so without a
+	// guard its acceptance was empty and a digest that said nothing (every list
+	// empty, no verdict) was delivered as a success. Empty lists stay a complete
+	// answer; the verdict is where a digest of an empty page says so.
+	//
+	// The guard first asked for the verdict alone (nonempty:verdict, 0.147.0), and
+	// that failed digests that had said plenty. The research goal never asked for a
+	// verdict and the re-pack prompt tells the extractor to use empty values for a
+	// field that is absent, so a loop whose final text carried none re-packed to
+	// verdict "": since 2026-09-30, 36 default-digest pages failed it with their
+	// lists populated (key_facts median 10.5 items), every one from the vLLM
+	// json_schema re-pack lane, and an acceptance-only failure is not retried, so
+	// each one discarded a whole run (4.07 h of seat wall time). The guard now
+	// fails what it was written for, every list empty AND no verdict (0 of 687
+	// pages), by passing when any of the four fields has a value, and the goal
+	// asks for the verdict (defaultVerdictAsk) so it is normally there.
+	defaultDigest := len(req.OutputSchema) == 0
 	var derived []string
-	if len(req.OutputSchema) > 0 {
-		derived = nonEmptyChecks(req.OutputSchema)
+	if defaultDigest {
+		derived = []string{defaultDigestCheck}
 	} else {
-		derived = []string{"nonempty:verdict"}
+		derived = nonEmptyChecks(req.OutputSchema)
 	}
 	schema = core.RequireAcceptanceFields(schema, append(append([]string{}, derived...), req.Acceptance...))
 	goal := strings.TrimSpace(req.Goal)
@@ -141,6 +168,9 @@ func Build(req Request, fetched []Fetched) (specs []delegate.SubtaskSpec, source
 		// (2026-08-30, "invalid json: unexpected end of JSON input") — the seat
 		// abstained, not the caller. Bounded lists fit every seat's re-pack budget.
 		fullGoal := head + goal + " Answer only from the file; omit anything it does not contain rather than inventing it. Keep every list to at most 6 items of at most 18 words each — the most important first — and every string field under 40 words."
+		if defaultDigest {
+			fullGoal += defaultVerdictAsk
+		}
 
 		acc := []string{}
 		if anchor != "" {
@@ -179,8 +209,9 @@ func Build(req Request, fetched []Fetched) (specs []delegate.SubtaskSpec, source
 // says so in their own acceptance (min_items: / nonempty:), which Build appends
 // and declares required as well. The harness's default schema is not a caller's
 // mark and asks for no items: a digest of a page with nothing to say is complete
-// with empty lists and a verdict that says so, and Build asks for that verdict
-// (nonempty:verdict) on every page of the default digest instead.
+// with empty lists and a verdict that says so, and Build guards the default
+// digest on every page with defaultDigestCheck (a value in any one of its four
+// fields) and asks for that verdict in the goal instead.
 func nonEmptyChecks(schema json.RawMessage) []string {
 	var s struct {
 		Required   []string                   `json:"required"`

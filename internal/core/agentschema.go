@@ -7,8 +7,11 @@ import (
 
 // Acceptance-named fields and the schema's `required` list (register C-74).
 //
-// An acceptance check that names a field (min_items:<f>:<n>, nonempty:<f>)
-// reads it from the structured answer and FAILS CLOSED when it is absent. A
+// An acceptance check that names a field (min_items:<f>:<n>, nonempty:<f>, or
+// the any-of nonempty:<f1>|<f2>) reads it from the structured answer and FAILS
+// CLOSED when it is absent (the any-of form counts an absent field as empty and
+// asks for a value in only one of them, but it still declares each name, so
+// a seat that omits one is sent to the re-pack rather than delivered). A
 // schema that does not declare that field required lets a seat's direct JSON
 // answer omit it, validates, skips the structured re-pack, and then fails
 // acceptance at the delegator after a whole run; vLLM's structured_outputs
@@ -23,8 +26,9 @@ import (
 // is pressure to invent items.
 
 // AcceptedFields returns the schema fields the acceptance checks read
-// (min_items and nonempty), in check order, without repeats. Checks that do not
-// parse, and checks that read no field (contains, regex, diff_*), are skipped.
+// (min_items and nonempty; the any-of nonempty reads every name it lists), in
+// check order, without repeats. Checks that do not parse, and checks that read
+// no field (contains, regex, diff_*), are skipped.
 func AcceptedFields(acceptance []string) []string {
 	var out []string
 	seen := map[string]bool{}
@@ -33,14 +37,13 @@ func AcceptedFields(acceptance []string) []string {
 		if err != nil {
 			continue
 		}
-		if chk.Kind != AccMinItems && chk.Kind != AccNonempty {
-			continue
+		for _, name := range chk.Fields() {
+			if seen[name] {
+				continue
+			}
+			seen[name] = true
+			out = append(out, name)
 		}
-		if chk.Arg == "" || seen[chk.Arg] {
-			continue
-		}
-		seen[chk.Arg] = true
-		out = append(out, chk.Arg)
 	}
 	return out
 }
