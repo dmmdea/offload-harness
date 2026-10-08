@@ -178,7 +178,7 @@ of repeating).
 
 The advertisement (`/fleet/health` `supported_task_types`) is derived from the node's OWN
 config at process start — a route bound in the config after the process started (e.g. adding
-`imagegen_script`) does not advertise until the process is restarted the hard way above. Since ADR 0076
+`imagegen_script`) does not advertise until the process is restarted the hard way above. Since ADR 0077
 the media tasks (`video-gen`, `animate`, `audio-gen`, `run-graph`) are the exception in the other direction: a
 bound route is advertised only while `internal/mediacap` reads it CONFIGURED from the disk (re-read at most every
 60 seconds), so a weight that goes missing drops the task without a restart and `media_routes` says why.
@@ -905,7 +905,7 @@ demoted below a loaded node that does.
 Saturation is a RANKING input, not a capability: `remoteEligible` is unchanged, and a saturated node
 is still chosen when nothing better exists. The reason is that the **delegator's copy** of these
 numbers is stale by construction — the snapshot ages between the health `GET` and the dispatch `POST`
-(placement is not atomic with admission), and this run's own concurrent siblings (`runConcurrency`)
+(placement is not atomic with admission), and this run's own concurrent siblings (the call's width, `dealParallelism`)
 eat the headroom it measured, since they probe within milliseconds of each other and can all read the
 same free slot. Hard-excluding on a number that is stale by construction would strand a node that has
 since drained, on evidence that was never current; demoting costs nothing when the reading was right

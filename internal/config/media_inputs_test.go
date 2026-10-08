@@ -2,7 +2,7 @@ package config
 
 import "testing"
 
-// The media-job door (ADR 0076) is open only with the opt-in, a fleet token and a bound media task.
+// The media-job door (ADR 0077) is open only with the opt-in, a fleet token and a bound media task.
 func TestMediaInputsAdmissibleNeedsOptInTokenAndATask(t *testing.T) {
 	open := Config{FleetMediaInputs: true, FleetAuthToken: "tok", VideoGenScript: "render/comfy-video.mjs"}
 	if !open.MediaInputsAdmissible() {

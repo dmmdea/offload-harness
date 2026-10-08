@@ -95,7 +95,7 @@ type NodeView struct {
 	// with a short media lease; placement of agent work keeps reading LeasedText and LeaseBusy.
 	LeaseHeld bool
 	// MediaRoutes is the node's own verdict on each file-backed media route (health
-	// `media_routes`, ADR 0076): CONFIGURED, NOT CONFIGURED or BOUND-BUT-MISSING. It is only
+	// `media_routes`, ADR 0077): CONFIGURED, NOT CONFIGURED or BOUND-BUT-MISSING. It is only
 	// meaningful when MediaRoutesKnown: a node that predates the field publishes none, which is
 	// UNKNOWN, never "no route is configured".
 	MediaRoutes      []MediaRouteView
@@ -501,7 +501,7 @@ type healthWire struct {
 	// Additive (0.154.0): the classify / extract tasks the node's text lane serves.
 	// Absent on an older node and on any node whose tier declares none (the lane is dark).
 	TextTasks []string `json:"text_tasks"`
-	// Additive (ADR 0076): the node's media route verdicts. A pointer so an absent key (an older
+	// Additive (ADR 0077): the node's media route verdicts. A pointer so an absent key (an older
 	// node) stays distinguishable from a published list.
 	MediaRoutes *[]MediaRouteView `json:"media_routes"`
 	// Additive (ADR 0072): the stt upload door's capability. Absent on an older node.

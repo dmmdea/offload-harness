@@ -709,10 +709,10 @@ node with nobody waiting for it. A call with less left than the reserve does not
 the wait off for every call, and a deadline does not switch it back on. Sheddable work is still shed at once. Three waits keep
 their old bound under a deadline: a composite decision's eviction wait (its expiry RUNS the contract on the decided seat, which needs the
 time the reserve takes away), the verification retry's wait for a busy seat (an optional second opinion on an answer the subtask
-already holds), and a wait that holds a run slot while subtasks of the call have not started. A call runs four subtasks at a time
-and a waiter holds its slot, so four subtasks waiting to the horizon would keep the rest of the call, and every later chunk of a
-batched one, from starting until the waiters ended, and then from starting with more than the reserve left: only the **last subtask
-to start** waits to the horizon, the earlier ones wait the larger of `agent_placement_wait_sec` and `agent_lease_wait_sec` (or the
+already holds), and a wait that holds a run slot while subtasks of the call have not started. A call runs only as many subtasks at a
+time as its deal committed (never fewer than four, below) and a waiter holds its slot, so that many subtasks waiting to the horizon
+would keep the rest of the call, and every later chunk of a batched one, from starting until the waiters ended, and then from
+starting with more than the reserve left: only the **last subtask to start** waits to the horizon, the earlier ones wait the larger of `agent_placement_wait_sec` and `agent_lease_wait_sec` (or the
 call's end, if sooner), and their defer says `N subtask(s) of the call had not started, so this wait could not hold its run slot to the
 call's deadline`. A wait the call bounds ends at the horizon even when `agent_lease_wait_sec` is longer: a wait past the deadline helps no
 one. Nor does anything start inside the reserve: a subtask (or a later chunk) that would begin with no more than the reserve left ends
@@ -720,6 +720,34 @@ at once as a `capacity` defer, `not started: the call's deadline left no room`, 
 than the reserve keeps starting its subtasks). One consequence to know: a subtask whose only places in line
 are leases that outlast the call holds the call until the horizon, then ends as the holder-naming deferral (the holder and the
 soonest end are in it); the lease wait is not shortened by a guess at when the holder will release.
+
+**How wide a call is, and how a list of pages is dealt ([ADR 0076](../architecture/decisions/0076-a-calls-width-is-sized-from-its-deal-a-batch-of-up-to-16-is-one-deal-and-auto-counts-the-local-run-cap-line.md)).** A call's semaphore was the constant
+`runConcurrency` (4) whatever the joint deal had committed: four nodes of four slots could be dealt two subtasks each and ran one at a
+time on each, and `RunBatched` cut a 12-page `offload_research` call into chunks of eight that ran one after the other, so a page of the
+second chunk waited for the slowest page of the first. The call is now as wide as its deal (`dealParallelism`, never below four), the sum
+of what the deal committed to each place:
+
+- a remote that **publishes** `max_concurrent_jobs` counts every subtask dealt to it (the deal already holds that to `max_concurrent_jobs
+  - jobs_running`, and the process gate holds this process's open dispatches to the node's `max_queue_depth`);
+- a remote that publishes **none** counts at most four **per node**, because an unpublished ceiling is unknown and never a limit: two such
+  nodes give eight, and a call whose only remote publishes none is held to four on it, as it was. The process gate keeps it there once
+  the call's other legs finish: a node that publishes neither `max_queue_depth` nor `max_concurrent_jobs` is held to four open
+  dispatches, across every call of this process;
+- the **local seat** counts `min(dealt, run-cap room)`: past its room a local run waits in the seat's own first-come-first-served line
+  (`fleet_max_concurrent_jobs`, `AwaitSeatSlotReporting`), and holding a run slot for that wait is what the constant bounded. A seat
+  with no run cap (`fleet_max_concurrent_jobs` < 0) counts at most four;
+- a subtask the deal gave **no place** (the overflow handed to the capacity wait, a local slot a text lease reserves) counts nothing. It
+  starts behind the dealt subtasks as their slots free, so the rules of the paragraph above hold at any width: the wait of a slot-holder
+  keeps its TTL while a subtask has not started, only the last waits to the horizon, and nothing starts inside the reserve.
+
+`route=local` has no deal and keeps four (`route=queue` hands its subtasks to the pull holders before any semaphore exists, ADR 0030).
+The width is logged (`fan-out width N for M subtask(s)`) when it is not four. `RunBatched` (`offload_research`, `local-offload research`) deals up to **16** subtasks as ONE joint deal, so a research call's 12
+pages are never chunked; a longer list is consecutive deals of 16, and `batches` in the summary counts the deals. `agent_delegate` and
+the `delegate` CLI verb call `RunWith` and keep their bound of eight: a ninth subtask is refused, and the tool's input schema (`maxItems` 8) is unchanged.
+`route=auto` counts the idle seat's line too: it gives an idle local seat at most `localRunCapRoom` subtasks of a call (the first ones;
+read once, the runs already registered on the seat taken off the cap) and deals the rest as it would a busy seat's, through the ranking
+over the unchanged `remoteEligible` gate to the remotes with headroom, to the capacity wait when none has, and to the seat only while no
+remote could run the contract at all. A call that fits the seat's line reads no node's health, as before.
 
 **Holds, never sleeps or refuses (ADR 0063).** Six changes to the wait and what feeds it:
 
@@ -1123,7 +1151,7 @@ tokenless) is not a hole: the auth guard `403`s it before `BuildRequest` runs at
 
 | route | placement |
 |---|---|
-| `auto` (default) | `gate.Place`: an idle local seat always wins; remotes are considered only while the local seat is busy — since PR-5 (W-01) that reading is `probeLocalBusy`'s own in-flight count at or past `FleetConcurrencyLimit()` (an unlimited cap, `fleet_max_concurrent_jobs < 0`, is never reached: `runner.atRunCap`), or a load in progress, OR'd with the GPU lease, read ONCE per Run — and only the ones passing the hard gate (agent lane on, seat resident, contract fits the advertised ctx, output_schema present, origin hop, and — PR-5's W-05, as corrected in 0.128.1 — the seat can produce one tool step and a minimal answer inside the contract's own effective wall). No eligible remote → queued-local. A contract that names a `layer` the delegator's own box does not declare is not idle-local work (register A-108): the roster is read for it although nothing is busy, and it goes to the best remote that declares the layer; with none it defers naming the layer. See "Expected-completion ranking and the joint deal" below for how `auto`/`remote` now place a WHOLE Run's subtasks in one pass. |
+| `auto` (default) | `gate.Place`: an idle local seat always wins; remotes are considered only while the local seat is busy — since PR-5 (W-01) that reading is `probeLocalBusy`'s own in-flight count at or past `FleetConcurrencyLimit()` (an unlimited cap, `fleet_max_concurrent_jobs < 0`, is never reached: `runner.atRunCap`), or a load in progress, OR'd with the GPU lease, read ONCE per Run — and only the ones passing the hard gate (agent lane on, seat resident, contract fits the advertised ctx, output_schema present, origin hop, and — PR-5's W-05, as corrected in 0.128.1 — the seat can produce one tool step and a minimal answer inside the contract's own effective wall). No eligible remote → queued-local. A contract that names a `layer` the delegator's own box does not declare is not idle-local work (register A-108): the roster is read for it although nothing is busy, and it goes to the best remote that declares the layer; with none it defers naming the layer. See "Expected-completion ranking and the joint deal" below for how `auto`/`remote` now place a WHOLE Run's subtasks in one pass. The idle seat wins the first `localRunCapRoom` subtasks of a call, not all of them: past its run-cap line the overflow is dealt to the remotes with headroom (ADR 0076, "How wide a call is" above). |
 | `spread` (0.80.0, fit-scored 0.99.0) | one `Run` fetches every remote's health ONCE, then deals the subtasks across the local seat AND every remote that passes the hard gate for that subtask. The deal is computed for the WHOLE run in one pass before dispatch, and within each cycle of `len(nodes)` slots every eligible seat takes at most one subtask — so an N-contract fan-out genuinely runs on N seats at the same time, and the fit score can reorder a cycle but never collapse it (see "Fit-scored remote slots" below). The local rotation slot is never contested by shape: with the local seat IDLE, slot 0 is always the local seat (pinned by `TestDealSpreadKeepsSubtaskZeroLocal`, `TestDealSpreadSameShapedFanOutReachesEverySeat` and `TestRunSpreadDealsAcrossLocalAndEveryEligibleRemote`) and a 2-contract spread with an eligible remote is still guaranteed one local + one remote — the pair shape. It IS contested by load (0.113.20, `agent_spread_local_slot`): a local seat already holding a request at deal time loses its slots to the best-fit eligible remote with room — see "The local slot under load" below. It is contested by the contract's layer too (register A-108): a subtask that names a layer the delegator's own box does not declare never takes the local slot — see "The local slot and a named layer" below. Per-subtask eligibility means a contract failing the gate (no `output_schema`, over-size) silently takes the local slot instead; `results[].placement` names where each landed and, for a remote, which shape the fit score read. Measured before spread existed: `auto` put four concurrent contracts on one box, `remote` put four on the other one. No eligible remote → every subtask runs local and the reason says so. Since ADR 0063 the deal also counts each remote's headroom (never more subtasks than `max_concurrent_jobs - jobs_running`; the overflow goes to the capacity wait) and holds out a node that cannot start the job inside the caller's patience. |
 | `local` | forced in-process, no network. |
 | `remote` | forced fleet node; with no eligible remote the subtask DEFERS loudly. |
@@ -1210,7 +1238,7 @@ survivors are RANKED and how many of one Run's subtasks one node can take.
   tried. Three outcomes per subtask: a resolved node; `capacityWait` (something was eligible but every one of
   them is at headroom right now — routed to the existing `awaitCapacity`, which watches for room to free exactly
   as it already does for a 503 or a held lease); or `noRemote` (nothing in the fleet could ever take it —
-  unrelated to headroom, the pre-PR-5 "no eligible remote" outcome, unchanged).
+  unrelated to headroom, the pre-PR-5 "no eligible remote" outcome, unchanged). An idle local seat is counted like a node (ADR 0076): the deal gives it at most `localRunCapRoom` subtasks, read once, and deals the rest as a busy seat's.
 - **A feasibility floor that asks only for a minimum viable final, never the seat's worst case (W-05, register
   S-03/S-05).** A seat whose published `seat_rate` implies it cannot produce one tool step plus a minimal
   64-token final within the contract's own EFFECTIVE wall — `timeout_sec` as given, or `seatrate.AutoWallFor`'s
@@ -1709,7 +1737,7 @@ survived for months. The alias resolution in particular retries on the next poll
 budget: latching "already tried" on a failed roster read disabled the alias match for the rest of the
 wait after ONE transient error, which is S-08 again, intermittently.
 
-## The media-job door, artifacts and honest advertisement (ADR 0076)
+## The media-job door, artifacts and honest advertisement (ADR 0077)
 
 Three additions to the media tasks, all additive on the wire.
 
@@ -1819,7 +1847,7 @@ every delegator re-places; a task that is not bound at all keeps the `400 unsupp
 
 - [../FLEET-NODE.md](../FLEET-NODE.md) — operator guide
 - [../flows/fleet-job-lifecycle.md](../flows/fleet-job-lifecycle.md)
-- [../architecture/decisions/0076-a-fleet-token-holder-may-send-one-media-job-with-its-input-files.md](../architecture/decisions/0076-a-fleet-token-holder-may-send-one-media-job-with-its-input-files.md)
+- [../architecture/decisions/0077-a-fleet-token-holder-may-send-one-media-job-with-its-input-files.md](../architecture/decisions/0077-a-fleet-token-holder-may-send-one-media-job-with-its-input-files.md)
 - [../architecture/decisions/0008-pdh-primary-vram-sampling.md](../architecture/decisions/0008-pdh-primary-vram-sampling.md)
 - [fleet-overview.md](fleet-overview.md) — the delegator-side operator page that reads these health
   and jobs fields

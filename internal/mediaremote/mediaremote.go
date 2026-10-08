@@ -1,6 +1,6 @@
 // Package mediaremote places one image, video, character-animation, audio or ComfyUI-graph job on a fleet
 // node and brings the output back, so a machine with no render lane of its own (or one the caller names a
-// node for) calls offload_generate_* exactly as a render node does (ADR 0076). It mirrors composeremote:
+// node for) calls offload_generate_* exactly as a render node does (ADR 0077). It mirrors composeremote:
 // probe delegate_remotes through /fleet/health, pick a node that advertises the task and the route, send
 // the job with the fleet bearer, poll it, and map every failure to a typed defer.
 //

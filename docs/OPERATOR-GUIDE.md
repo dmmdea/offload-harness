@@ -544,7 +544,7 @@ visible only with the token. The video and its snapshots come back into this mac
 renders only locally. A machine with no model or lane at all is a
 [delegation client](systems/delegation-client.md).
 
-**Media jobs on a fleet node ([ADR 0076](architecture/decisions/0076-a-fleet-token-holder-may-send-one-media-job-with-its-input-files.md)).**
+**Media jobs on a fleet node ([ADR 0077](architecture/decisions/0077-a-fleet-token-holder-may-send-one-media-job-with-its-input-files.md)).**
 `offload_generate_image`, `offload_generate_video`, `offload_animate_character`, `offload_generate_audio` and
 `offload_run_graph` take `route` and `remotes` (CLI `generate-image`, `generate-video`, `generate-audio`, `run-graph`:
 `--route` and a repeatable `--remote`). `auto`, the default, runs here when this machine has the lane (read from the files
@@ -557,7 +557,7 @@ door. The outputs come back by name, each checked against the sha256 the node pu
 file. A node advertises `video-gen`, `animate`, `audio-gen` and `run-graph` only while its media route is CONFIGURED, so a
 node with a missing weight drops the task and `/fleet/health` `media_routes` says which route and why; `doctor` and
 `offload_status` print the same verdicts. `refine=false`, `tts_voice`, `transformer` and `run_graph`'s `devices` cannot travel and defer on a remote
-route; `run_graph`'s `out_dir` is where the fetched outputs land on the calling machine (created if missing, never sent to the node). A node that binds a media task but whose route is not CONFIGURED refuses a job for it with a 503 naming the route and its state (a delegator re-places that), not the 400 an unbound task gets. See [media-generation.md](systems/media-generation.md#remote-routing-and-the-media-job-door-adr-0076).
+route; `run_graph`'s `out_dir` is where the fetched outputs land on the calling machine (created if missing, never sent to the node). A node that binds a media task but whose route is not CONFIGURED refuses a job for it with a 503 naming the route and its state (a delegator re-places that), not the 400 an unbound task gets. See [media-generation.md](systems/media-generation.md#remote-routing-and-the-media-job-door-adr-0077).
 
 **Adding a template.** Follow the contract in
 [`render/compose-templates/README.md`](../render/compose-templates/README.md): offline, deterministic,
@@ -1190,7 +1190,8 @@ over the projected table when they differ.
 ### Parallel sessions on one llama-swap (0.111.0)
 
 Several Claude Code sessions each run their own `local-offload mcp` process and fan out
-(`runConcurrency = 4`) against the SAME llama-swap. llama-swap answers **429** once a model's
+against the SAME llama-swap (a call is as wide as its deal, [ADR 0076](architecture/decisions/0076-a-calls-width-is-sized-from-its-deal-a-batch-of-up-to-16-is-one-deal-and-auto-counts-the-local-run-cap-line.md),
+but its local legs are held to the seat's own run-cap line, `fleet_max_concurrent_jobs`, 4 by default). llama-swap answers **429** once a model's
 reserved requests (queued + in-flight) reach its `concurrencyLimit` (default **10**), queues
 requests *silently* while it swaps a model, answers **503 "process is not ready"** while a process
 is starting, and **500** with `src:"llama-swap"` when a health check times out. While the seat is
@@ -1446,8 +1447,10 @@ Details: [`docs/systems/cache-server.md`](systems/cache-server.md), ADR 0033 (th
 
 Fan self-contained sub-agent contracts out to this box or to fleet nodes on your tailnet
 (never cloud — [ADR 0023](architecture/decisions/0023-agent-lane-tailnet-auth-and-locality.md)).
-Placement is **quality-first**: an idle local box always runs the work; a remote node is used
-only when the local GPU is busy *and* the node passes the capability gate. A box with no agent seat
+Placement is **quality-first**: an idle local box runs the work up to its run-cap line
+(`fleet_max_concurrent_jobs`, 4 by default) and the rest of a wider call goes to the nodes that have room
+([ADR 0076](architecture/decisions/0076-a-calls-width-is-sized-from-its-deal-a-batch-of-up-to-16-is-one-deal-and-auto-counts-the-local-run-cap-line.md));
+a remote node is also used whenever the local GPU is busy; either way it must pass the capability gate. A box with no agent seat
 (a [delegation client](systems/delegation-client.md): `agent_model` and `model` both empty) is never a
 placement: route=auto and route=spread send every subtask to the fleet. Wire details:
 `docs/FLEET-NODE.md`. Template contracts to start from: [`contracts/`](../contracts/README.md).

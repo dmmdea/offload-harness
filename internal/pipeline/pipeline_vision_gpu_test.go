@@ -123,7 +123,12 @@ func TestVisionGPULockReleasedMidWaitProceeds(t *testing.T) {
 
 	go func() {
 		time.Sleep(80 * time.Millisecond)
-		_ = os.RemoveAll(lock) // the gen job's release()
+		// The gen job's release(). On Windows a gate poll that has meta.json open at this instant
+		// fails the remove with a sharing violation; production's removeClaim retries that (20 x 5 ms),
+		// so the test's release does too instead of leaving the lock held for the whole window.
+		for attempt := 0; os.RemoveAll(lock) != nil && attempt < 20; attempt++ {
+			time.Sleep(5 * time.Millisecond)
+		}
 	}()
 	begin := time.Now()
 	res := p.Run(context.Background(), vqaReq())
@@ -132,6 +137,55 @@ func TestVisionGPULockReleasedMidWaitProceeds(t *testing.T) {
 	}
 	if el := time.Since(begin); el >= 5*time.Second {
 		t.Errorf("took the full wait window (%v) despite the release", el)
+	}
+}
+
+// TestVisionUnderItsOwnLeaseDoesNotWaitForIt: a vision verb run as the command of the lease that
+// holds the card (`gpu reserve ... -- local-offload vqa`, GPU_LEASE_EPOCH = that lease's epoch) is the
+// work the lease was taken for. It calls the model at once instead of waiting out its own lease and
+// deferring gpu_busy, which is how a vision bake run under its own lease lost every call (2026-09-12).
+func TestVisionUnderItsOwnLeaseDoesNotWaitForIt(t *testing.T) {
+	srv := visionServer(t, fakeChat{content: "seven", finishReason: "stop", promptTokens: 50})
+	defer srv.Close()
+
+	cfg := baseVisionCfg(srv, "fake-vlm")
+	cfg.GPULockPath = holdGPULock(t) // epoch 1
+	t.Setenv("GPU_LEASE_EPOCH", "1")
+	client := llamaclient.New(srv.URL, cfg.CompletionPath, "", 10*time.Second)
+	p := New(cfg, client, nil, nil)
+	p.visionGPUWait = 5 * time.Second
+	p.visionGPUPoll = 10 * time.Millisecond
+
+	begin := time.Now()
+	res := p.Run(context.Background(), vqaReq())
+	if !res.OK {
+		t.Fatalf("a vision call under its own lease must run, got defer: %s (class %q)", res.Reason, res.Meta.ErrClass)
+	}
+	if el := time.Since(begin); el >= time.Second {
+		t.Errorf("took %v: the call waited on the lease it runs under", el)
+	}
+}
+
+// TestVisionUnderAnotherLeasesEpochStillWaits: the exemption is the holder's own epoch, compared, never
+// the variable's presence. A child of another lease, or a stale GPU_LEASE_EPOCH from a lease since handed
+// on, still waits for the live holder and defers gpu_busy without calling the model.
+func TestVisionUnderAnotherLeasesEpochStillWaits(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("the model must NOT be called while another lease holds the card")
+	}))
+	defer srv.Close()
+
+	cfg := baseVisionCfg(srv, "fake-vlm")
+	cfg.GPULockPath = holdGPULock(t) // epoch 1
+	t.Setenv("GPU_LEASE_EPOCH", "2")
+	client := llamaclient.New(srv.URL, cfg.CompletionPath, "", 10*time.Second)
+	p := New(cfg, client, nil, nil)
+	p.visionGPUWait = 150 * time.Millisecond
+	p.visionGPUPoll = 20 * time.Millisecond
+
+	res := p.Run(context.Background(), vqaReq())
+	if res.OK || !res.Deferred || res.Meta.ErrClass != "gpu_busy" {
+		t.Fatalf("expected the gpu_busy defer under another lease's holder, got OK=%v deferred=%v class=%q", res.OK, res.Deferred, res.Meta.ErrClass)
 	}
 }
 

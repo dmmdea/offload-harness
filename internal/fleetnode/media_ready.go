@@ -1,6 +1,6 @@
 package fleetnode
 
-// Honest media advertisement (ADR 0076). config.Default() ships non-empty render scripts, so a box
+// Honest media advertisement (ADR 0077). config.Default() ships non-empty render scripts, so a box
 // advertised video-gen, animate and run-graph it had never set up: the script path was bound, the
 // weights or custom nodes it loads were not, and the first job failed on the node. A media task is
 // advertised, and admitted, only when internal/mediacap — the same derivation offload_status and

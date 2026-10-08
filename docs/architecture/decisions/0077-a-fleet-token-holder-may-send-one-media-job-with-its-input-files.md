@@ -3,7 +3,7 @@ status: Accepted
 date: "2026-10-03"
 ---
 
-# ADR 0076 — A fleet-token holder may send one media job with its input files; a node advertises only the media routes it can run
+# ADR 0077 — A fleet-token holder may send one media job with its input files; a node advertises only the media routes it can run
 
 ## Context
 

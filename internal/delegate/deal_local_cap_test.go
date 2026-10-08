@@ -226,3 +226,139 @@ func TestSpreadDealBacklogGateHoldsBackANodeThatHasHeadroom(t *testing.T) {
 		}
 	}
 }
+
+// ---- route=auto's deal counts the idle seat's line too (ADR 0076, the diagnosis' F02) --------------------------------
+//
+// route=auto dealt every subtask to an idle local seat without counting what it had committed to it: 8 subtasks, a run cap of
+// 4 and one remote with 4 free slots made 8 local and 0 remote, and 4 of them stood in the seat's own FIFO for up to the run's
+// wall while the remote idled. Concurrent callers made it worse, each reading the seat idle at its own start. The idle seat
+// still wins the first `room` subtasks (ADR 0050 decision 1); what the deal commits past that goes through the unchanged
+// remoteEligible gate to the remotes with headroom.
+
+// autoDealRunner is a route=auto runner whose local seat is idle and whose run-cap line takes `limit` runs.
+func autoDealRunner(t *testing.T, limit int) *runner {
+	t.Helper()
+	cfg := testCfg(t)
+	cfg.FleetMaxConcurrentJobs = limit
+	return &runner{route: "auto", cfg: cfg}
+}
+
+// dealAuto runs the REAL dealAutoRemote over n mechanical contracts and these remotes, with the local seat idle.
+func dealAuto(r *runner, n int, views ...NodeView) []spreadSlot {
+	contracts := make([]core.AgentContract, n)
+	for i := range contracts {
+		contracts[i] = fitSubtask(fitMechGoal, 100).Contract
+	}
+	bases := make([]string, len(views))
+	for i, v := range views {
+		bases[i] = "http://" + v.NodeID + ":18811"
+	}
+	return r.dealAutoRemote(contracts, fitLocal(), views, bases, false, nil)
+}
+
+// TestAutoDealCountsTheIdleLocalSeatAgainstItsRunCap is the defect (scratch proof S2): 8 subtasks, a run cap of 4, one remote
+// with headroom 4. The seat takes the first 4 and the remote the other 4; the deal used to hand the seat all 8.
+func TestAutoDealCountsTheIdleLocalSeatAgainstItsRunCap(t *testing.T) {
+	r := autoDealRunner(t, 4)
+	slots := dealAuto(r, 8, headroomRemote(fitBigRemote, "big-remote", 4, 0))
+	dealt, waiting := dealCounts(slots)
+	if dealt[fitLocal().NodeID] != 4 || dealt["big-remote"] != 4 || waiting != 0 {
+		t.Fatalf("dealt %v, capacity wait %d, want the idle seat held to its run cap of 4 and the remote given the other 4", dealt, waiting)
+	}
+	for i, sl := range slots {
+		switch {
+		case i < 4 && (!sl.view.Local || sl.reason != "local idle"):
+			t.Errorf("subtask %d = %+v, want the idle seat to win the first 4 (reason %q)", i, sl.placement, "local idle")
+		case i >= 4 && sl.view.Local:
+			t.Errorf("subtask %d was dealt to the local seat past its run cap", i)
+		case i >= 4:
+			for _, want := range []string{"route=auto → big-remote (headroom)", "the idle local seat's run-cap line is spent by this deal (4 of 4 free slot(s) dealt;"} {
+				if !strings.Contains(sl.reason, want) {
+					t.Errorf("subtask %d reason = %q, want it to contain %q", i, sl.reason, want)
+				}
+			}
+		}
+	}
+}
+
+// TestAutoDealIsUnchangedWhileTheLocalSeatHasRoom is the control arm: with the line to spare every subtask is the idle
+// seat's, as it always was, and nothing says otherwise.
+func TestAutoDealIsUnchangedWhileTheLocalSeatHasRoom(t *testing.T) {
+	r := autoDealRunner(t, 4)
+	slots := dealAuto(r, 4, headroomRemote(fitBigRemote, "big-remote", 64, 0))
+	for i, sl := range slots {
+		if !sl.view.Local || sl.reason != "local idle" || sl.capacityWait {
+			t.Errorf("subtask %d = %+v (wait %v), want the idle seat: its line has room for all 4", i, sl.placement, sl.capacityWait)
+		}
+	}
+}
+
+// TestAutoDealDoesNotCapTheLocalSeatWhenNoRemoteCouldTakeTheContract: the cap exists to hand the overflow to a node that will
+// free. With no remote able to run the contract at all the seat's own line IS the queue, exactly as before.
+func TestAutoDealDoesNotCapTheLocalSeatWhenNoRemoteCouldTakeTheContract(t *testing.T) {
+	off := fitBigRemote
+	off.AgentEnabled = false
+	r := autoDealRunner(t, 2)
+	slots := dealAuto(r, 8, off)
+	for i, sl := range slots {
+		if !sl.view.Local || sl.reason != "local idle" || sl.capacityWait || sl.noRemote {
+			t.Errorf("subtask %d = %+v (wait %v, noRemote %v), want the idle seat: no remote could take it", i, sl.placement, sl.capacityWait, sl.noRemote)
+		}
+	}
+}
+
+// TestAutoDealCountsWhatIsAlreadyRegisteredOnTheLocalSeat: the seat's room is what its run cap leaves after the runs already
+// registered on it (another caller's, a fleet job's), not the whole cap - the case of K sessions each reading the seat idle.
+func TestAutoDealCountsWhatIsAlreadyRegisteredOnTheLocalSeat(t *testing.T) {
+	r := autoDealRunner(t, 4)
+	for i := 0; i < 3; i++ {
+		run := gpuactivity.Start(r.cfg.GPULockPath, r.cfg.StateDir, gpuactivity.Run{Seat: r.cfg.AgentPlannerModel(""), Kind: "contract", Goal: "another run's", Phase: gpuactivity.PhaseRunning})
+		if run == nil {
+			t.Fatal("fixture: could not register a run on the local seat")
+		}
+		t.Cleanup(run.End)
+	}
+	slots := dealAuto(r, 6, headroomRemote(fitBigRemote, "big-remote", 64, 0), headroomRemote(fitMidRemote, "mid-remote", 64, 0))
+	dealt, waiting := dealCounts(slots)
+	if dealt[fitLocal().NodeID] != 1 || waiting != 0 {
+		t.Fatalf("dealt %v, capacity wait %d, want the idle seat given 1 (three of its four run-cap slots are taken) and the rest dealt to the remotes", dealt, waiting)
+	}
+}
+
+// TestAutoDealOverflowWaitsInLineWhenTheSeatAndEveryRemoteAreSpent: past the seat's line AND every remote's headroom the
+// subtask is handed to the capacity wait, which places it on the first node that frees (the seat too), and says why.
+func TestAutoDealOverflowWaitsInLineWhenTheSeatAndEveryRemoteAreSpent(t *testing.T) {
+	r := autoDealRunner(t, 4)
+	slots := dealAuto(r, 8, headroomRemote(fitBigRemote, "big-remote", 2, 0))
+	dealt, waiting := dealCounts(slots)
+	if dealt[fitLocal().NodeID] != 4 || dealt["big-remote"] != 2 || waiting != 2 {
+		t.Fatalf("dealt %v, capacity wait %d, want the seat 4, the remote its headroom 2, and 2 subtasks waiting in line", dealt, waiting)
+	}
+	for i, sl := range slots {
+		if !sl.capacityWait {
+			continue
+		}
+		for _, want := range []string{"every eligible remote is at headroom", "the idle local seat's run-cap line is spent by this deal (4 of 4 free slot(s) dealt;"} {
+			if !strings.Contains(sl.reason, want) {
+				t.Errorf("subtask %d reason = %q, want it to contain %q", i, sl.reason, want)
+			}
+		}
+	}
+}
+
+// TestAutoDealDoesNotBlameTheSpentLineForALayerTheSeatCannotTake: a subtask that names a layer this box does not declare was
+// never the idle seat's work, so its placement reason does not say the seat's line was spent when the line happened to be.
+func TestAutoDealDoesNotBlameTheSpentLineForALayerTheSeatCannotTake(t *testing.T) {
+	r := autoDealRunner(t, 1)
+	views, bases := []NodeView{fastRemoteView(t)}, []string{"http://fast-node:18811"}
+	slots := r.dealAutoRemote([]core.AgentContract{layerContract("digest page A", ""), layerContract("digest page B", "fast"), layerContract("digest page C", "")}, fitLocal(), views, bases, false, nil)
+	if !slots[0].view.Local || slots[0].reason != "local idle" {
+		t.Fatalf("subtask 0 = %+v, want the idle seat's one free slot", slots[0].placement)
+	}
+	if slots[1].view.NodeID != "fast-node" || strings.Contains(slots[1].reason, "run-cap line is spent") {
+		t.Errorf("the layer-naming subtask = %+v, want fast-node with no word about the seat's line: the seat could never have taken it", slots[1].placement)
+	}
+	if slots[2].view.NodeID != "fast-node" || !strings.Contains(slots[2].reason, "the idle local seat's run-cap line is spent by this deal (1 of 1 free slot(s) dealt;") {
+		t.Errorf("subtask 2 = %+v, want fast-node and the spent line named: the seat's one slot went to subtask 0", slots[2].placement)
+	}
+}

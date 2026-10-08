@@ -467,7 +467,8 @@ type Summary struct {
 	ReplacementRecovered int
 	// Quarantined counts nodes that FLIPPED into quarantine during this run
 	// (two document-fingerprint failures inside the TTL). Batches counts the
-	// sequential chunks RunBatched ran (1 for a plain Run).
+	// deals RunBatched ran: 1 for a batched call of up to MaxBatchSubtasks (it was
+	// 2 for 9 to 12 pages), more only for a longer list (ADR 0076); 0 for a plain Run.
 	Quarantined int
 	Batches     int
 	// Skipped counts subtasks RunBatched never attempted because an earlier
@@ -479,10 +480,21 @@ type Summary struct {
 const (
 	// maxSubtasks bounds one Run (the MCP arg schema mirrors it).
 	maxSubtasks = 8
-	// MaxSubtasks is the same bound, exported for callers that batch (RunBatched).
+	// MaxSubtasks is the same bound, exported for callers that size a call against RunWith's.
 	MaxSubtasks = maxSubtasks
-	// runConcurrency bounds the fan-out. 4: enough to overlap remote polls,
-	// small enough that a local fallback burst cannot stampede the one GPU.
+	// maxBatchSubtasks is how many subtasks RunBatched deals in ONE joint deal (ADR 0076): twice RunWith's
+	// bound, because the one caller that batches (offload_research, at most 12 pages) used to be cut into
+	// sequential chunks of eight, and a chunk waited on the slowest page of the one before it. A longer list
+	// is still cut, into consecutive deals of this size.
+	maxBatchSubtasks = 16
+	// MaxBatchSubtasks is the same bound, exported for callers that batch (RunBatched).
+	MaxBatchSubtasks = maxBatchSubtasks
+	// runConcurrency is the FLOOR of a call's fan-out and the most one node that publishes no
+	// max_concurrent_jobs is given of it. 4 overlaps remote polls, and it is all a call has when nothing sizes
+	// it: a call that has a deal (route=auto, remote or spread) is as wide as the deal (dealParallelism, ADR
+	// 0076). It once also stood for "small enough that a local fallback burst cannot stampede the one GPU";
+	// that is the local run-cap line's job now (pipeline/agenttask.go, register C-42/C-60: runs past
+	// fleet_max_concurrent_jobs wait their turn in the seat's own FIFO), and the deal counts that line.
 	runConcurrency = 4
 	// dispatchAttempts: the initial POST + one retry on transport doubt
 	// (roast delta 14's 202-reack — same job id, so the store dedupes).
@@ -713,14 +725,19 @@ func Run(ctx context.Context, cfg config.Config, local LocalRunner, subtasks []c
 	return RunWith(ctx, cfg, local, subtasks, route, remotes, nil)
 }
 
-// RunBatched runs contracts in consecutive chunks of MaxSubtasks, in order.
+// RunBatched runs contracts in order as ONE joint deal of up to MaxBatchSubtasks
+// (16), and a longer list as consecutive deals of that size (ADR 0076).
 // offload_research builds ONE contract per usable page and allows 12 URLs per
 // call, so a 9–12-page call hit Run's 8-subtask refusal and every page was
-// lost (2026-09-01, three sessions). Chunks run SEQUENTIALLY on purpose: the
-// fan-out bound exists to keep one GPU from being stampeded, and two chunks in
-// flight would be a 16-wide fan-out by another name. Results come back in
-// input order; Summary counters are summed; the first error is returned WITH
-// the results collected before it, so a caller can render the partial work.
+// lost (2026-09-01, three sessions); the fix cut it into chunks of eight and
+// ran them SEQUENTIALLY, which left chunk two waiting on the slowest page of
+// chunk one and a 12-page call using at most four of the fleet's slots. The
+// whole list is now dealt at once, across every node, and sized by that deal
+// (dealParallelism): the bound the sequential chunks kept, that a burst cannot
+// stampede a GPU, is the node's published ceiling and the local seat's run-cap
+// line, both of which the deal counts. Results come back in input order;
+// Summary counters are summed; the first error is returned WITH the results
+// collected before it, so a caller can render the partial work.
 func RunBatched(ctx context.Context, cfg config.Config, local LocalRunner, subtasks []core.AgentContract, route string, remotes []string, opts *RunOptions) ([]PlacedResult, Summary, error) {
 	var all []PlacedResult
 	var total Summary
@@ -733,11 +750,8 @@ func RunBatched(ctx context.Context, cfg config.Config, local LocalRunner, subta
 		o.call = dl
 		opts = &o
 	}
-	for start := 0; start < len(subtasks); start += MaxSubtasks {
-		end := start + MaxSubtasks
-		if end > len(subtasks) {
-			end = len(subtasks)
-		}
+	for start := 0; start < len(subtasks); start += MaxBatchSubtasks {
+		end := min(start+MaxBatchSubtasks, len(subtasks))
 		chunkOpts := opts
 		if opts != nil && opts.OnProgress != nil {
 			// Progress counts against the whole call, not against each chunk.
@@ -745,7 +759,7 @@ func RunBatched(ctx context.Context, cfg config.Config, local LocalRunner, subta
 			o.OnProgress = shiftedProgress(opts.OnProgress, len(all), len(subtasks))
 			chunkOpts = &o
 		}
-		res, sum, err := RunWith(ctx, cfg, local, subtasks[start:end], route, remotes, chunkOpts)
+		res, sum, err := runWith(ctx, cfg, local, subtasks[start:end], route, remotes, chunkOpts, MaxBatchSubtasks)
 		all = append(all, res...)
 		total = addSummary(total, sum)
 		total.Batches++
@@ -758,7 +772,7 @@ func RunBatched(ctx context.Context, cfg config.Config, local LocalRunner, subta
 		}
 	}
 	if len(subtasks) == 0 {
-		return RunWith(ctx, cfg, local, subtasks, route, remotes, opts) // the "at least one subtask" error, unchanged
+		return runWith(ctx, cfg, local, subtasks, route, remotes, opts, MaxBatchSubtasks) // the "at least one subtask" error, unchanged
 	}
 	return all, total, nil
 }
@@ -777,8 +791,16 @@ func addSummary(a, b Summary) Summary {
 	return a
 }
 
-// RunWith is Run with caller-owned options (see RunOptions).
+// RunWith is Run with caller-owned options (see RunOptions). It refuses more than MaxSubtasks (8) subtasks, which
+// is the bound of the MCP door (agent_delegate) and of the CLI verb; RunBatched is the entry that lifts it.
 func RunWith(ctx context.Context, cfg config.Config, local LocalRunner, subtasks []core.AgentContract, route string, remotes []string, opts *RunOptions) ([]PlacedResult, Summary, error) {
+	return runWith(ctx, cfg, local, subtasks, route, remotes, opts, maxSubtasks)
+}
+
+// runWith is RunWith with the subtask bound as a parameter: RunWith passes maxSubtasks and RunBatched
+// maxBatchSubtasks, so a research call's pages are one deal and the doors that cap a call at eight keep doing so
+// (ADR 0076). Nothing else about a call depends on the bound.
+func runWith(ctx context.Context, cfg config.Config, local LocalRunner, subtasks []core.AgentContract, route string, remotes []string, opts *RunOptions, limit int) ([]PlacedResult, Summary, error) {
 	switch route {
 	case "":
 		route = "auto"
@@ -789,8 +811,8 @@ func RunWith(ctx context.Context, cfg config.Config, local LocalRunner, subtasks
 	if len(subtasks) == 0 {
 		return nil, Summary{}, fmt.Errorf("delegate: at least one subtask required")
 	}
-	if len(subtasks) > maxSubtasks {
-		return nil, Summary{}, fmt.Errorf("delegate: %d subtasks exceeds the max of %d", len(subtasks), maxSubtasks)
+	if len(subtasks) > limit {
+		return nil, Summary{}, fmt.Errorf("delegate: %d subtasks exceeds the max of %d", len(subtasks), limit)
 	}
 	// The whole-call deadline (ADR 0065): from here every placement, probe, poll
 	// and local run answers to a context that ends at RunOptions.Deadline. nil =
@@ -925,15 +947,22 @@ func RunWith(ctx context.Context, cfg config.Config, local LocalRunner, subtasks
 		// now read once so the whole batch agrees. route=remote forces busy
 		// unconditionally: local is never a placement for an explicit remote.
 		busy := route == "remote"
+		// The local seat's run-cap room is read ONCE here, for the whole run (ADR 0076): the gate below needs it
+		// before the deal, and the deal counts what it commits to the seat against it. route=remote never deals
+		// the seat, so it reads none.
+		room, roomNote := 0, ""
 		if route == "auto" {
 			busy = r.readAutoLocalSlot(ctx, leaseInfo, subtasks)
+			room, roomNote = r.localRunCapRoom()
 		}
-		// The fleet is read when the local seat is busy and, for an idle one, only when some
-		// contract names a layer this box does not declare (register A-108): that contract is dealt
-		// to the node that declares it, and nothing else about an idle box needs the roster. A box
-		// with no agent seat at all (a delegation client) reads it for every contract, the same way.
+		// The fleet is read when the local seat is busy; for an idle one, when some contract names a layer
+		// this box does not declare (register A-108), because that contract is dealt to the node that declares
+		// it; and when the call has more subtasks than the seat's run-cap line takes (ADR 0076), because the
+		// overflow is dealt to the remotes with room instead of into a line it could not leave. Nothing else
+		// about an idle box needs the roster. A box with no agent seat at all (a delegation client) reads it
+		// for every contract, the same way.
 		localView := r.localView()
-		readFleet := busy
+		readFleet := busy || len(subtasks) > room
 		for _, c := range subtasks {
 			if !r.localServesLayer(localView, c) {
 				readFleet = true
@@ -944,11 +973,17 @@ func RunWith(ctx context.Context, cfg config.Config, local LocalRunner, subtasks
 		if readFleet {
 			r.autoViews, r.autoBases, r.autoProbeErrs, failed = r.fetchViewsDetailed(ctx)
 		}
-		r.autoDeal = r.dealAutoRemote(subtasks, localView, r.autoViews, r.autoBases, busy, failed)
+		r.autoDeal = r.dealAutoRemoteRoom(subtasks, localView, r.autoViews, r.autoBases, busy, failed, room, roomNote)
 	}
 	board := newResultBoard(len(subtasks))
 	progress := newProgressor(opts, len(subtasks))
-	sem := make(chan struct{}, runConcurrency)
+	// The call is as wide as its deal (ADR 0076), not a constant: dealParallelism reads what the deal committed to
+	// each node. A call with no deal to read (route=local) keeps runConcurrency.
+	width := r.dealParallelism()
+	if width != runConcurrency {
+		log.Printf("delegate: fan-out width %d for %d subtask(s), sized from the %s deal (floor %d)", width, len(subtasks), route, runConcurrency)
+	}
+	sem := make(chan struct{}, width)
 	var wg sync.WaitGroup
 	launched := 0
 	var stop launchStop
@@ -1246,6 +1281,10 @@ type runner struct {
 	autoBases     []string
 	autoProbeErrs []string
 	autoDeal      []spreadSlot
+	// dealRoom is the local seat's run-cap room (localRunCapRoom) as the run's deal read it, ONCE, before any
+	// goroutine started (ADR 0076): what the auto deal may commit to an idle seat, what the spread deal gives its
+	// local slots, and the local share of the call's width (dealParallelism). Written by the deal, read-only after.
+	dealRoom int
 
 	// rescue is RunOptions.Rescue; nil = no rescue.
 	rescue RescueFunc
@@ -2578,10 +2617,12 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 	// (register A-108) never takes the local seat in this wait, whatever the seat's load or lease: the
 	// wait is for a node that declares the layer.
 	localCan := r.localServesLayer(localView, contract)
-	// overflow: a deal kept this subtask off the local seat because it read busy, and
-	// handed it over because every node with room was already dealt to its headroom.
-	// The seat stays off limits until it stops reading busy (localStillBusy) - the
-	// wait exists to spare the subtask that pile-up, not to rebuild it at tick zero.
+	// overflow: a deal kept this subtask off the local seat - because it read busy, or because
+	// the deal had already spent an idle seat's run-cap line (ADR 0076) - and handed it over
+	// because every node with room was already dealt to its headroom. The seat stays off limits
+	// until it stops reading busy (localStillBusy) and its run-cap line has a free slot
+	// (localSlotAhead, read every tick) - the wait exists to spare the subtask that pile-up, not
+	// to rebuild it at tick zero.
 	overflow := seed.overflow
 	// dealBusy: the deal read the local seat busy (spread's busy rule, route=auto's busy
 	// formula) and dealt around it. A subtask it sent to a remote that then turned out full
@@ -4508,6 +4549,67 @@ func headroom(v NodeView) int {
 	return 0
 }
 
+// dealParallelism is how many subtasks of the call run at once: the width of RunWith's semaphore, sized from the
+// deal instead of a constant (ADR 0076, the diagnosis' F01). The old constant, 4, let the joint deal commit two
+// subtasks to each of four nodes while only four goroutines ran, so each node saw about one and a 12-page research
+// call used four of the fleet's slots.
+//
+// The width is the sum, over the deal's dealt slots, of what each place takes at once, never less than
+// runConcurrency:
+//
+//   - a remote that PUBLISHES max_concurrent_jobs counts every subtask dealt to it: the deal already held that
+//     count to the node's headroom (ADR 0050 decision 4), and the process gate holds the dispatches this process
+//     has open to its admission ceiling (ADR 0063 decision 7);
+//   - a remote that publishes none counts at most runConcurrency, per node: an unpublished ceiling is unknown and
+//     never a limit (headroom), so the deal can send it every subtask, and the bound the constant gave a call is
+//     all the evidence there is that it can take them. Two such nodes give eight, not four. The semaphore is one
+//     pool, so once the call's other legs finish only the process gate keeps such a node at four: admissionCeiling
+//     holds a node that publishes neither ceiling to runConcurrency open dispatches;
+//   - the local seat counts min(dealt, run-cap room): past its room a subtask waits in the seat's own FIFO (register
+//     C-60), and holding a run slot for that wait is what the constant was bounding. A seat with no run cap
+//     (fleet_max_concurrent_jobs < 0) has unlimited room, so it counts at most runConcurrency, the bound the
+//     constant gave it;
+//   - a slot the deal gave no place (capacityWait: every node with room was already dealt to its headroom; reserved:
+//     a lease holds the seat) counts nothing. It reaches the wait only when a slot frees, so the launch loop still
+//     starts it behind the dealt ones and ADR 0073 decision 9 holds as written: a wait keeps its TTL while a subtask of
+//     the call has not started, and only the last to start waits to the call's horizon.
+//
+// A call with no deal to read (route=local, which has none) has runConcurrency.
+func (r *runner) dealParallelism() int {
+	var deal []spreadSlot
+	switch r.route {
+	case "spread":
+		deal = r.spreadDeal
+	case "auto", "remote":
+		deal = r.autoDeal
+	}
+	local := 0
+	perNode := make(map[string]int, len(deal))
+	published := make(map[string]bool, len(deal))
+	for _, sl := range deal {
+		switch {
+		case sl.capacityWait || sl.reserved:
+		case sl.view.Local:
+			local++
+		default:
+			perNode[sl.base]++
+			published[sl.base] = sl.view.MaxConcurrentJobs > 0
+		}
+	}
+	room := r.dealRoom
+	if room >= unlimitedHeadroom {
+		room = runConcurrency
+	}
+	width := min(local, room)
+	for base, n := range perNode {
+		if !published[base] {
+			n = min(n, runConcurrency)
+		}
+		width += n
+	}
+	return max(runConcurrency, width)
+}
+
 // dealAutoRemote computes route=auto/remote's placement for EVERY subtask of
 // the run in ONE ordered pass over ONE fleet snapshot — auto/remote's own
 // version of dealSpread's invariant (W-06, register S-11/S-13). Before this,
@@ -4524,8 +4626,27 @@ func headroom(v NodeView) int {
 // even considered, so a run that fans 8 subtasks at a 4-worker node deals it
 // AT MOST 4, and the rest fall to the next-best eligible node instead of
 // queuing behind siblings that have not even dispatched yet.
+//
+// An IDLE local seat takes the work it can run only while its run-cap line has room (ADR 0076, the diagnosis'
+// F02): the deal counts every subtask it gives the seat against localRunCapRoom, read once, exactly as it counts a
+// remote's headroom (ADR 0063 decision 6 did the same for the spread deal). Dealing the seat all of them put
+// the overflow into a FIFO the subtasks could not leave while eligible remotes idled. The overflow goes through
+// the ranking below, the remoteEligible gate unchanged, to the remotes with headroom, and with none to the capacity
+// wait; only while no remote could run the contract at all is the seat's own line the only queue there is.
 func (r *runner) dealAutoRemote(contracts []core.AgentContract, localView NodeView, views []NodeView, bases []string, localBusy bool, failed map[string]string) []spreadSlot {
-	dealt := make(map[string]int, len(views))
+	room, note := 0, ""
+	if !localBusy {
+		room, note = r.localRunCapRoom()
+	}
+	return r.dealAutoRemoteRoom(contracts, localView, views, bases, localBusy, failed, room, note)
+}
+
+// dealAutoRemoteRoom is dealAutoRemote over a run-cap room the caller already read: RunWith reads it before the
+// deal, to decide whether the roster is needed at all, and the deal must count against that same reading
+// (note is what the reading was, for the reason a spent line gives).
+func (r *runner) dealAutoRemoteRoom(contracts []core.AgentContract, localView NodeView, views []NodeView, bases []string, localBusy bool, failed map[string]string, room int, note string) []spreadSlot {
+	r.dealRoom = room
+	dealt := make(map[string]int, len(views)+1)
 	out := make([]spreadSlot, len(contracts))
 	for i, c := range contracts {
 		st := Subtask{Contract: c, EstTokens: EstimateTokens(c)}
@@ -4536,11 +4657,31 @@ func (r *runner) dealAutoRemote(contracts []core.AgentContract, localView NodeVi
 		// so the seed the ranking drew on and the id the published
 		// placement/ledger/corpus row names are the SAME value.
 		jobID := mintJobID()
-		slot := r.placeAutoRemote(jobID, st, localView, views, bases, localBusy, dealt, failed)
+		// The seat is dealt as a busy one for this subtask once the deal has spent its line AND some remote could
+		// run the contract: placeAutoRemote then ranks the remotes and never takes the idle shortcut.
+		busy, spent := localBusy, false
+		if !localBusy && dealt[""] >= room && r.localServesLayer(localView, c) && anyRemoteEligible(st, views) {
+			busy, spent = true, true
+		}
+		slot := r.placeAutoRemote(jobID, st, localView, views, bases, busy, dealt, failed)
+		if spent {
+			slot.reason += fmt.Sprintf("; the idle local seat's run-cap line is spent by this deal (%d of %d free slot(s) dealt; %s)", dealt[""], room, note)
+		}
 		slot.jobID = jobID
 		out[i] = slot
 	}
 	return out
+}
+
+// anyRemoteEligible reports whether some remote in views could run st at all: capability (remoteEligible), not
+// capacity. It is the question that decides whether a seat whose line is spent has anywhere else to send the work.
+func anyRemoteEligible(st Subtask, views []NodeView) bool {
+	for _, v := range views {
+		if remoteEligible(st, v) {
+			return true
+		}
+	}
+	return false
 }
 
 // placeAutoRemote deals ONE subtask within dealAutoRemote's joint pass: an
@@ -4565,6 +4706,7 @@ func (r *runner) dealAutoRemote(contracts []core.AgentContract, localView NodeVi
 //     (r.noEligibleRemote) over this same snapshot; unrelated to headroom.
 func (r *runner) placeAutoRemote(seed string, st Subtask, localView NodeView, views []NodeView, bases []string, localBusy bool, dealt map[string]int, failed map[string]string) spreadSlot {
 	if !localBusy && r.localServesLayer(localView, st.Contract) {
+		dealt[""]++ // the local seat's run-cap line is counted like a remote's headroom (ADR 0076)
 		return spreadSlot{placement: placement{view: localView, reason: "local idle"}}
 	}
 	var best, bestRanked NodeView
@@ -4665,6 +4807,7 @@ func (r *runner) placeAutoRemote(seed string, st Subtask, localView NodeView, vi
 // spreadViews snapshot), and the same contracts always produce the same deal.
 func (r *runner) dealSpread(contracts []core.AgentContract, localView NodeView) []spreadSlot {
 	room, note := r.localRunCapRoom()
+	r.dealRoom = room
 	book := &dealBook{
 		// dealt holds the DIAL BASES already given a subtask in the CURRENT cycle.
 		//

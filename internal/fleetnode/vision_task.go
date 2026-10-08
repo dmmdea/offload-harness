@@ -89,7 +89,7 @@ func visionTaskServed(cfg config.Config, task core.TaskType) bool {
 
 // tokenGated reports whether a task_type rides the bearer rule on a node configured as cfg: the
 // agent lane (v1 scope), since 0.116.0 the vision lane, since 0.154.0 the text lane, the
-// project-bundle door (compose-project, ADR 0071), the media-input door (media-job, ADR 0076:
+// project-bundle door (compose-project, ADR 0071), the media-input door (media-job, ADR 0077:
 // it writes a caller's bytes to this node's disk, like compose-project), the
 // stt upload door (ADR 0072) and the PAIR card relay (pair-relay, D26: not a job, the door's own name).
 // The legacy path-taking "stt" lane joins them when the node HAS a fleet_auth_token (D17): it reads an

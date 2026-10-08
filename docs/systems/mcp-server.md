@@ -69,7 +69,7 @@ poll and holds its place against later callers for the first 30 seconds of that;
 node; one device runs in that card's own ComfyUI instance, which sees no other card. A host that does not lease cards answers `gpu_busy` as it always did, and
 so does any call that did not come through this server (the CLI verbs, the fleet dispatch, the image batch): the
 server marks its requests resumable (`core.Request.Resumable`), and only those leave a place in line. A call routed to
-a fleet node (`route: "remote"`, or `auto` that leaves this machine; ADR 0076) carries no `waiter_token`: the token
+a fleet node (`route: "remote"`, or `auto` that leaves this machine; ADR 0077) carries no `waiter_token`: the token
 names a place in line on this machine, and a resumed call that goes to a node gives that place up.
 
 **Named media families (ADR 0058).** `offload_generate_image` and `offload_edit_image_generative`

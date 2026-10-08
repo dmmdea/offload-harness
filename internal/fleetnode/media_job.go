@@ -1,6 +1,6 @@
 package fleetnode
 
-// The media-job door (ADR 0076): POST /fleet/media-job takes ONE image, video, animation, audio or
+// The media-job door (ADR 0077): POST /fleet/media-job takes ONE image, video, animation, audio or
 // ComfyUI-graph job from a holder of the fleet token TOGETHER WITH the input files that job reads, so a
 // machine with no render lane of its own can have a still animated, a character retargeted onto a
 // driver video or a voice cloned from a sample, with the files a node cannot otherwise get.

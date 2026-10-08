@@ -426,11 +426,12 @@ func TestNeverStartedRowCarriesTheJobIDTheCallerWasGiven(t *testing.T) {
 		}
 		return localOK(), nil
 	}
-	contracts := make([]core.AgentContract, 9)
+	pages := MaxBatchSubtasks + 1 // one page past a batch: the last never starts
+	contracts := make([]core.AgentContract, pages)
 	for i := range contracts {
 		contracts[i] = core.AgentContract{Goal: "fast one"}
 	}
-	contracts[7] = core.AgentContract{Goal: "slow one"}
+	contracts[MaxBatchSubtasks-1] = core.AgentContract{Goal: "slow one"}
 	res, _, err := RunBatched(t.Context(), cfg, local, contracts, "local", nil, deadlineIn(400*time.Millisecond))
 	if err != nil {
 		t.Fatal(err)
@@ -438,7 +439,7 @@ func TestNeverStartedRowCarriesTheJobIDTheCallerWasGiven(t *testing.T) {
 	rows, _ := ledger.ReadAll(cfg.LedgerPath)
 	found := false
 	for _, row := range rows {
-		if row.JobID == res[8].JobID {
+		if row.JobID == res[pages-1].JobID {
 			found = true
 			if !strings.HasPrefix(row.Reason, deadlinePrefix+"2 unfinished") {
 				t.Fatalf("the never-started page's row reads %q, want the call-deadline wording", row.Reason)
@@ -446,7 +447,7 @@ func TestNeverStartedRowCarriesTheJobIDTheCallerWasGiven(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Fatalf("no ledger row carries the job id (%q) the caller was given for the never-started page", res[8].JobID)
+		t.Fatalf("no ledger row carries the job id (%q) the caller was given for the never-started page", res[pages-1].JobID)
 	}
 }
 

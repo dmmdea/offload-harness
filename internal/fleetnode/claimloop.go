@@ -82,7 +82,7 @@ func (s *Server) StartClaimLoop(ctx context.Context, cfg config.Config) {
 // still consumed a poll).
 func (s *Server) claimOne(ctx context.Context, client *http.Client, holder, nodeID string, cfg config.Config) (string, bool) {
 	// The tasks advertised on a claim are derived NOW, by the predicate health and admission use: the
-	// media tasks follow a cached disk read (ADR 0076), so a node whose weight went missing must stop
+	// media tasks follow a cached disk read (ADR 0077), so a node whose weight went missing must stop
 	// claiming that task and one whose weight returned must start, with no restart.
 	body, _ := json.Marshal(map[string]any{"node_id": nodeID, "task_types": SupportedTasksFor(cfg, s.opts.LoopbackListener)})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, holder+"/fleet/queue/claim", bytes.NewReader(body))

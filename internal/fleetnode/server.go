@@ -201,7 +201,7 @@ type Server struct {
 	queue *fleetqueue.Queue
 	// The advertised task and family lists are NOT fields: they are derived per health request and per
 	// claim (SupportedTasksFor, Families), because the media tasks depend on a disk read that can change
-	// under a running node (ADR 0076).
+	// under a running node (ADR 0077).
 	//
 	// accelerators is Options.Accelerators minus the local-only devices
 	// (config.FleetVisibleAccelerators, register E-08), computed once at construction:
@@ -477,7 +477,7 @@ func (s *Server) noteAgentResult(data json.RawMessage) {
 
 // New builds a Server. The lane verdicts and the image-family list are computed here — the config
 // cannot change under a running server. The supported-task and family lists are not: they are derived
-// per health request and per claim, because the media tasks follow a cached disk read (ADR 0076).
+// per health request and per claim, because the media tasks follow a cached disk read (ADR 0077).
 func New(runner Runner, jobs *Jobs, opts Options) *Server {
 	s := &Server{
 		runner:             runner,
@@ -1006,7 +1006,7 @@ func (s *Server) Handler() http.Handler {
 	// the fleet token. Its own route for the body cap; the door and the bearer are
 	// checked before the body is read, then the same admit path as every job.
 	mux.HandleFunc("POST "+ComposeProjectPath, s.handleComposeProject)
-	// The media-job door (ADR 0076): one media task with its input files from a holder of the
+	// The media-job door (ADR 0077): one media task with its input files from a holder of the
 	// fleet token. The same shape as the project door above: door and bearer before the body.
 	mux.HandleFunc("POST "+MediaJobPath, s.handleMediaJob)
 	// The cascade chat lane (C-41b): a SYNCHRONOUS forward, not a job — see
@@ -1221,7 +1221,7 @@ type healthPayload struct {
 	WorkUtilKnown         bool     `json:"work_util_known"`
 	SupportedTaskTypes    []string `json:"supported_task_types"`
 	LoadableModelFamilies []string `json:"loadable_model_families"`
-	// MediaRoutes (ADR 0076) is each file-backed media route this node derives from its own disk and
+	// MediaRoutes (ADR 0077) is each file-backed media route this node derives from its own disk and
 	// its verdict (CONFIGURED / NOT CONFIGURED / BOUND-BUT-MISSING), cached at most 60 s: the reason a
 	// media task is absent from supported_task_types. Additive; a node that predates it omits the key,
 	// which a reader takes as unknown, never as "none".
@@ -1553,7 +1553,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 			fps = e
 		}
 	}
-	// The media tasks are advertised only while mediacap derives their route CONFIGURED (ADR 0076), and
+	// The media tasks are advertised only while mediacap derives their route CONFIGURED (ADR 0077), and
 	// that is a disk read that can change under a running node (a weight removed or restored), so the
 	// lists are derived per request from the same cached readings the admission path consults.
 	// ONE view of the media verdicts for the whole request: the task list, the family list and
@@ -2118,7 +2118,7 @@ func (s *Server) concurrencyCapped(taskType string) bool {
 	// one would also hold its request body and extracted tree while it waited.
 	case ComposeTask, ComposeProjectTask:
 		return false
-	// media-job (ADR 0076) is one of the five media tasks above behind the token-gated input door:
+	// media-job (ADR 0077) is one of the five media tasks above behind the token-gated input door:
 	// the inner task takes its card's media slot and the lease exactly as it does through
 	// /fleet/dispatch, so capping it would park a fleet execution slot behind that slot.
 	case MediaJobTask:
@@ -2594,7 +2594,7 @@ func (s *Server) admit(w http.ResponseWriter, r *http.Request, env dispatchEnvel
 			return sttJobData(res)
 		}
 		if res.OK {
-			// A media result names its files with size and sha256 (ADR 0076) so the machine that
+			// A media result names its files with size and sha256 (ADR 0077) so the machine that
 			// fetches them can verify what it received.
 			return withArtifacts(s.opts.Cfg, taskType, res.Data), nil
 		}

@@ -171,7 +171,7 @@ func TestVideoProvenanceNamespaceMapping(t *testing.T) {
 // config), because that is exactly the subspace where the passthrough advertiser
 // and the folding writer used to split.
 func TestVideoFootprintFamilyMatchesTheAdvertisedFamily(t *testing.T) {
-	// The advertiser only lists a media task whose route mediacap derives CONFIGURED (ADR 0076), and a
+	// The advertiser only lists a media task whose route mediacap derives CONFIGURED (ADR 0077), and a
 	// fixture binding a script that is not on this machine's disk would read as missing. The family
 	// namespace is the subject here, so the derivation stands in for "the files are there".
 	defer fleetnode.SetMediaRoutesSourceForTest(func(config.Config) []mediacap.Route {

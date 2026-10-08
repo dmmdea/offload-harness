@@ -1,6 +1,6 @@
 package fleetnode
 
-// Artifacts (ADR 0076): a finished media job's stored data names every output file it produced together
+// Artifacts (ADR 0077): a finished media job's stored data names every output file it produced together
 // with its size and sha256, so the machine that fetches the file from GET /fleet/media can prove the bytes
 // it received are the bytes the node wrote. The field is additive: a consumer that does not read it sees
 // exactly the result it always saw, and a result that names no file inside media_dir is stored untouched.

@@ -1471,7 +1471,7 @@ an editor; the overlay itself is silent.
   with `@font-face` from the shared kit. An undeclared family makes the compiler request the Google
   Fonts CSS API, with the page's character set in the query.
 
-## Remote routing and the media-job door (ADR 0076)
+## Remote routing and the media-job door (ADR 0077)
 
 `offload_generate_image`, `offload_generate_video`, `offload_animate_character`, `offload_generate_audio` and
 `offload_run_graph` (CLI `generate-image`, `generate-video`, `generate-audio`, `run-graph`) take `route` and
@@ -1499,7 +1499,7 @@ defer, with `defer_class` `capacity`.
 **What travels.** A job with no input file goes through `POST /fleet/dispatch`. A job with a still (`offload_generate_video`),
 a reference and driver (`offload_animate_character`) or a clone sample (`offload_generate_audio`) packs the files into a
 bundle (each under its field name plus its extension, copied into a temp directory and packed with `composebundle`) and goes
-through `POST /fleet/media-job` ([fleet-node.md](fleet-node.md#the-media-job-door-artifacts-and-honest-advertisement-adr-0076)).
+through `POST /fleet/media-job` ([fleet-node.md](fleet-node.md#the-media-job-door-artifacts-and-honest-advertisement-adr-0077)).
 `run-graph` carries its graph and manifest inline, so it never needs the door. The payload uses the field names the node's
 builders decode; `out` and `out_dir` never travel (`out_dir` is where the fetched outputs land here). Four request fields cannot ride the fleet task and defer by name
 (`defer_class` `contract`) instead of being dropped: `refine=false`, `tts_voice`, `transformer` and (`run_graph`) `devices`, whose card ids name cards on the calling machine.

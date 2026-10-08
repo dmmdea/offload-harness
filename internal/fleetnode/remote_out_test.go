@@ -22,7 +22,7 @@ var remoteMediaPayloads = map[string]string{
 	"audio-gen": `{"text":"hola"}`,
 	"run-graph": `{"graph":{"1":{"class_type":"X"}}}`,
 	ComposeTask: `{"template":"title-card"}`,
-	// The media-input door extracts a bundle onto this node (ADR 0076); with no bundle it is the
+	// The media-input door extracts a bundle onto this node (ADR 0077); with no bundle it is the
 	// inner task alone, which is the shape every hostile `out` below is tried against.
 	MediaJobTask: `{"job_id":"mj-out","task_type":"image-gen","payload":{"prompt":"p"}}`,
 }
@@ -43,7 +43,7 @@ func remoteOutCfg() config.Config {
 	cfg.FleetComposeProjects = true
 	cfg.FleetAuthToken = "tok"
 	cfg.ComposeCacheDir = composeProjectTestCache
-	// ... and so does the media-input door (ADR 0076).
+	// ... and so does the media-input door (ADR 0077).
 	cfg.FleetMediaInputs = true
 	cfg.MediaDir = composeProjectTestCache
 	return cfg

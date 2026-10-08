@@ -9,7 +9,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/pipeline"
 )
 
-// tools/list changed on every box (ADR 0076): the five media doors gained `route` and `remotes`. This pins
+// tools/list changed on every box (ADR 0077): the five media doors gained `route` and `remotes`. This pins
 // the change deliberately, and pins that the other media tools did NOT gain it: an edit, an SVG or an
 // ffmpeg op is never placed on a fleet node by this door.
 func TestMediaToolsAdvertiseRouteAndRemotes(t *testing.T) {

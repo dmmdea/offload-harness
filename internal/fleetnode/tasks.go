@@ -67,7 +67,7 @@ func taskConfiguredIn(v *mediaView, taskType string, loopbackListener bool) bool
 	case "video-gen":
 		// Bound AND derived CONFIGURED by internal/mediacap (the script, the weights its graph loads
 		// and the custom nodes it names are on this machine): a bound script over a missing weight is
-		// not a capability, and advertising it sent jobs to a node that failed them (ADR 0076).
+		// not a capability, and advertising it sent jobs to a node that failed them (ADR 0077).
 		return mediaTaskBound(cfg, taskType) && mediaTaskRouteReady(v, taskType)
 	case "animate":
 		return mediaTaskBound(cfg, taskType) && mediaTaskRouteReady(v, taskType)
@@ -84,7 +84,7 @@ func taskConfiguredIn(v *mediaView, taskType string, loopbackListener bool) bool
 	case "run-graph":
 		return mediaTaskBound(cfg, taskType) && mediaTaskRouteReady(v, taskType)
 	case MediaJobTask:
-		// The input door (ADR 0076): opted in, a fleet token to check, and at least one media
+		// The input door (ADR 0077): opted in, a fleet token to check, and at least one media
 		// task this node can run right now. Never advertised or admitted on a tokenless node.
 		return cfg.MediaInputsAdmissible() && anyMediaTaskConfigured(v, loopbackListener)
 	case ComposeTask:

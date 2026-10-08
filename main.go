@@ -874,7 +874,7 @@ func runGenerateImage(args []string) error {
 	family := fs.String("family", "", "named image family to render with (ADR 0058; offload_status media.image_families / doctor list them); default = this machine's default binding")
 	transparent := fs.Bool("transparent", false, "keep an alpha channel (RGBA PNG; qwen-image-2.1 families only — any other binding defers)")
 	batchFile := fs.String("batch", "", "render a JSONL batch of jobs through ONE warm ComfyUI session (one line per job: {\"prompt\":...,\"out\"?,\"negative\"?,\"width\"?,\"height\"?,\"steps\"?,\"seed\"?,\"refine\"?})")
-	route := fs.String("route", "auto", "local | auto (here when this machine has the lane, derived from the files its route loads, else a fleet node from delegate_remotes) | remote (a fleet node; input files travel in a hash-checked bundle and the output is fetched back verified; ADR 0076)")
+	route := fs.String("route", "auto", "local | auto (here when this machine has the lane, derived from the files its route loads, else a fleet node from delegate_remotes) | remote (a fleet node; input files travel in a hash-checked bundle and the output is fetched back verified; ADR 0077)")
 	var remotes repeatedFlag
 	fs.Var(&remotes, "remote", "fleet node base URL for this call (repeatable); must be one of delegate_remotes")
 	positional, flagArgs := splitArgs(args, map[string]bool{
@@ -1172,7 +1172,7 @@ func runRunGraph(args []string) error {
 	fs.String("manifest-json", "", "inline node manifest JSON (alternative to --manifest)")
 	fs.String("out-dir", "", "directory for output files (default under the media dir)")
 	fs.String("reserve-vram", "", "ComfyUI --reserve-vram override")
-	route := fs.String("route", "auto", "local | auto (here when this machine has the lane, derived from the files its route loads, else a fleet node from delegate_remotes) | remote (a fleet node; input files travel in a hash-checked bundle and the output is fetched back verified; ADR 0076)")
+	route := fs.String("route", "auto", "local | auto (here when this machine has the lane, derived from the files its route loads, else a fleet node from delegate_remotes) | remote (a fleet node; input files travel in a hash-checked bundle and the output is fetched back verified; ADR 0077)")
 	var remotes repeatedFlag
 	fs.Var(&remotes, "remote", "fleet node base URL for this call (repeatable); must be one of delegate_remotes")
 	_ = fs.Parse(args)
@@ -1597,7 +1597,7 @@ func runGenerateAudio(args []string) error {
 	seed := fs.Int("seed", 0, "RNG seed for reproducibility")
 	reserveVRAM := fs.Float64("reserve-vram", 0, "music: VRAM held back for the display")
 	compactFlag := fs.Bool("compact", false, "compact (minified) JSON output")
-	route := fs.String("route", "auto", "local | auto (here when this machine has the lane, derived from the files its route loads, else a fleet node from delegate_remotes) | remote (a fleet node; input files travel in a hash-checked bundle and the output is fetched back verified; ADR 0076)")
+	route := fs.String("route", "auto", "local | auto (here when this machine has the lane, derived from the files its route loads, else a fleet node from delegate_remotes) | remote (a fleet node; input files travel in a hash-checked bundle and the output is fetched back verified; ADR 0077)")
 	var remotes repeatedFlag
 	fs.Var(&remotes, "remote", "fleet node base URL for this call (repeatable); must be one of delegate_remotes")
 
@@ -1752,7 +1752,7 @@ func parseGenerateVideo(args []string, errorHandling flag.ErrorHandling) (genera
 	hero := fs.Bool("hero", false, "deprecated: the native quality pass IS the default now; accepted as a no-op")
 	upscale := fs.Bool("upscale", false, "post-decode upscale using this machine's configured upscale model (e.g. 720p->1080p)")
 	compactFlag := fs.Bool("compact", false, "compact (minified) JSON output")
-	route := fs.String("route", "auto", "local | auto (here when this machine has the lane, derived from the files its route loads, else a fleet node from delegate_remotes) | remote (a fleet node; input files travel in a hash-checked bundle and the output is fetched back verified; ADR 0076)")
+	route := fs.String("route", "auto", "local | auto (here when this machine has the lane, derived from the files its route loads, else a fleet node from delegate_remotes) | remote (a fleet node; input files travel in a hash-checked bundle and the output is fetched back verified; ADR 0077)")
 	remotes := new(repeatedFlag)
 	fs.Var(remotes, "remote", "fleet node base URL for this call (repeatable); must be one of delegate_remotes")
 
@@ -1835,7 +1835,7 @@ func runAnimateCharacter(args []string) error {
 	refStrength := fs.Float64("ref-strength", 0, "0-1: how strongly the reference image pins identity (0 = builder default 1.0)")
 	reserveVRAM := fs.Float64("reserve-vram", 0, "VRAM held back for the display (per-workflow override)")
 	compactFlag := fs.Bool("compact", false, "compact (minified) JSON output")
-	route := fs.String("route", "auto", "local | auto (here when this machine has the lane, derived from the files its route loads, else a fleet node from delegate_remotes) | remote (a fleet node; the reference image and driver video travel in a hash-checked bundle and the clip is fetched back verified; ADR 0076)")
+	route := fs.String("route", "auto", "local | auto (here when this machine has the lane, derived from the files its route loads, else a fleet node from delegate_remotes) | remote (a fleet node; the reference image and driver video travel in a hash-checked bundle and the clip is fetched back verified; ADR 0077)")
 	var remotes repeatedFlag
 	fs.Var(&remotes, "remote", "fleet node base URL for this call (repeatable); must be one of delegate_remotes")
 
@@ -2655,7 +2655,7 @@ func runFleetServe(args []string) error {
 	} else if n > 0 {
 		fmt.Fprintf(os.Stderr, "[fleet-serve] swept %d orphaned compose-project dir(s)\n", n)
 	}
-	// Extracted media-job inputs (ADR 0076) a crash left behind; a warning, never fatal.
+	// Extracted media-job inputs (ADR 0077) a crash left behind; a warning, never fatal.
 	if n, perr := fleetnode.SweepOrphanedInputDirs(cfg, time.Now()); perr != nil {
 		fmt.Fprintf(os.Stderr, "[fleet-serve] WARNING: sweeping media-job input dirs: %v\n", perr)
 	} else if n > 0 {

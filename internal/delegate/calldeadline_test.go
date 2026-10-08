@@ -627,8 +627,8 @@ func TestCutByDeadlineNeverRewritesAFinishedAnswer(t *testing.T) {
 	}
 }
 
-// TestRunBatchedDefersLaterChunksAtTheDeadline: offload_research runs its pages
-// in consecutive chunks of eight. The deadline covers the WHOLE call: chunk two
+// TestRunBatchedDefersLaterChunksAtTheDeadline: a list past one batch (16, ADR 0076)
+// runs in consecutive chunks. The deadline covers the WHOLE call: chunk two
 // must not start after it, the pages it held are published as unfinished (not
 // skipped, not an error — the finished digests keep their order), and the count
 // in every reason spans both chunks.
@@ -643,11 +643,12 @@ func TestRunBatchedDefersLaterChunksAtTheDeadline(t *testing.T) {
 		}
 		return localOK(), nil
 	}
-	contracts := make([]core.AgentContract, 9)
+	pages, slow := MaxBatchSubtasks+1, MaxBatchSubtasks-1
+	contracts := make([]core.AgentContract, pages)
 	for i := range contracts {
 		contracts[i] = core.AgentContract{Goal: "fast one"}
 	}
-	contracts[7] = core.AgentContract{Goal: "slow one"} // the last page of chunk one
+	contracts[slow] = core.AgentContract{Goal: "slow one"} // the last page of chunk one
 
 	type outcome struct {
 		res []PlacedResult
@@ -668,32 +669,32 @@ func TestRunBatchedDefersLaterChunksAtTheDeadline(t *testing.T) {
 	if o.err != nil {
 		t.Fatalf("RunBatched: %v", o.err)
 	}
-	if len(o.res) != 9 {
-		t.Fatalf("got %d results, want one per page (9)", len(o.res))
+	if len(o.res) != pages {
+		t.Fatalf("got %d results, want one per page (%d)", len(o.res), pages)
 	}
-	if o.sum.Succeeded != 7 || o.sum.Deferred != 2 || o.sum.Skipped != 0 || o.sum.Failed != 0 {
-		t.Fatalf("summary = %+v, want 7 digests and 2 call-deadline defers, nothing skipped or failed", o.sum)
+	if o.sum.Succeeded != pages-2 || o.sum.Deferred != 2 || o.sum.Skipped != 0 || o.sum.Failed != 0 {
+		t.Fatalf("summary = %+v, want %d digests and 2 call-deadline defers, nothing skipped or failed", o.sum, pages-2)
 	}
-	if got := ran.Load(); got != 8 {
-		t.Fatalf("the seat ran %d subtasks, want 8: chunk two must not start once the call is over", got)
+	if got := ran.Load(); got != int64(MaxBatchSubtasks) {
+		t.Fatalf("the seat ran %d subtasks, want %d: chunk two must not start once the call is over", got, MaxBatchSubtasks)
 	}
-	for _, i := range []int{7, 8} {
+	for _, i := range []int{slow, pages - 1} {
 		r := o.res[i].Result
 		if !r.Deferred || r.DeferClass != core.DeferClassBudget || !strings.HasPrefix(r.Reason, deadlinePrefix+"2 unfinished") {
 			t.Fatalf("result %d = %+v, want the call-deadline defer counting BOTH chunks (2 unfinished)", i, r)
 		}
 	}
-	if !strings.Contains(o.res[8].Result.Reason, "never started") {
-		t.Fatalf("result 8 reason = %q, want it to say the page never started", o.res[8].Result.Reason)
+	if !strings.Contains(o.res[pages-1].Result.Reason, "never started") {
+		t.Fatalf("the last result's reason = %q, want it to say the page never started", o.res[pages-1].Result.Reason)
 	}
 	// Every outcome has a row, the never-started page included (the precedent
 	// settle() set: a subtask that produced no attempt is still recorded).
 	rows, err := readFinished(cfg.LedgerPath)
-	if err != nil || len(rows) != 9 {
-		t.Fatalf("ledger rows = %d (%v), want one per page (9)", len(rows), err)
+	if err != nil || len(rows) != pages {
+		t.Fatalf("ledger rows = %d (%v), want one per page (%d)", len(rows), err, pages)
 	}
 	for _, row := range rows {
-		if row.JobID == o.res[8].JobID && !strings.HasPrefix(row.Reason, deadlinePrefix+"2 unfinished") {
+		if row.JobID == o.res[pages-1].JobID && !strings.HasPrefix(row.Reason, deadlinePrefix+"2 unfinished") {
 			t.Fatalf("the never-started page's row = %q, want the call-deadline wording", row.Reason)
 		}
 	}
