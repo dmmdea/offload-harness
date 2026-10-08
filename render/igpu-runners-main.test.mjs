@@ -138,6 +138,38 @@ test("sdcpp-video main: without --tae there is no --taesd (the full VAE is the d
   } finally { sb.done(); }
 });
 
+// CT-49 round 3: sd.cpp master-945 prints "[V] <message> --- file.cpp:N" instead of "[VERBOSE] file.cpp:N - <message>".
+// The REAL master-945 logs, replayed by the stub engine, go through the real runner: the guard must pass the healthy run
+// (before the fix the dump blocks' "} --- main.cpp:699" never closed and the run ended "no GPU evidence"), and a CPU
+// placement in the new shape must still kill the engine.
+test("sdcpp-video main: a REAL master-945 log (one-letter tags, source tails, the auto-fit plan) passes the guard end to end - the mp4 lands", opts, async () => {
+  const sb = sandbox();
+  try {
+    const v = videoSetup(sb, { logFile: fixture("sdcpp945-video-healthy.log") });
+    const r = await runNode("sdcpp-video.mjs", v.args, sb);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /WROTE .*clip\.mp4/);
+    assert.match(r.stderr, /^\} --- main\.cpp:699$/m, "the log was replayed on the runner's stderr, dump blocks and all");
+    assert.ok(existsSync(v.out));
+    assert.equal(frameCount(v.out), 5);
+    noTempLeft(sb);
+  } finally { sb.done(); }
+});
+
+test("sdcpp-video main: the master-945 log with the diffusion stage on the CPU (derived) kills the engine at that line - CPU_PLACEMENT, pid dead, nothing delivered", opts, async () => {
+  const sb = sandbox();
+  try {
+    const v = videoSetup(sb, { logFile: fixture("sdcpp945-video-cpu-compute-derived.log"), hang: true });
+    const r = await runNode("sdcpp-video.mjs", v.args, sb);
+    assert.equal(r.status, 1, r.stderr);
+    assert.match(r.stderr, /CPU_PLACEMENT: the engine placed a model on the CPU \(log line \d+: \[V\] Wan2\.2-TI2V-5B compute buffer size: 192\.53 MB\(RAM\) on CPU/);
+    assert.equal(lastLine(r.stderr), "IGPU_CLASS=cpu_placement");
+    assert.ok(!existsSync(v.out));
+    assert.ok(await waitGone(Number(readFileSync(v.pid, "utf8"))), "the engine process is dead");
+    noTempLeft(sb);
+  } finally { sb.done(); }
+});
+
 test("sdcpp-video main: --offload-to-cpu in the extra args is sanctioned spill: it reaches sd-cli, the run passes (params on the host, compute on Vulkan)", opts, async () => {
   const sb = sandbox();
   try {
@@ -288,6 +320,21 @@ test("sdcpp-animate main: depth runs once per frame with --no-invert on the pinn
     for (const h of sd.controlFrames) {
       assert.deepEqual([h.width, h.height, h.bitDepth, h.colorType], [64, 64, 8, 2], `control frame ${h.name} is 8-bit RGB at exactly 64x64`);
     }
+    noTempLeft(sb);
+  } finally { sb.done(); }
+});
+
+test("sdcpp-animate main: a REAL master-945 VACE log passes the sd-cli guard end to end (the depth step first, on its own log) - the mp4 lands with N frames", opts, async () => {
+  const sb = sandbox();
+  try {
+    const a = animateSetup(sb, { sd: { logFile: fixture("sdcpp945-vace-healthy.log") } });
+    const r = await runNode("sdcpp-animate.mjs", a.args, sb);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stderr, /^\} --- main\.cpp:699$/m, "the log was replayed on the runner's stderr, dump blocks and all");
+    assert.ok(existsSync(a.out));
+    assert.equal(frameCount(a.out), 5);
+    assert.equal(records(a.dRec).length, 5, "one depth process per frame");
+    assert.equal(records(a.sdRec).length, 1);
     noTempLeft(sb);
   } finally { sb.done(); }
 });
