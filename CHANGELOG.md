@@ -6,6 +6,10 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.170.0] - 2026-10-08 - Remote media routing, the media-job door, and iGPU media engines (sd.cpp video and animate, audio.cpp voice and music)
+
+A caller on any machine can now send one render to a fleet node together with its input files, name the node or let the roster place it, and get the output back with its bytes verified (the media-job door, ADR 0077); a node advertises and admits a media task only while its route is actually CONFIGURED, so a missing weight drops the task out of the roster instead of failing jobs. A box whose only GPU is a Vulkan iGPU, with no CUDA, no ROCm and no model on the CPU, now serves video (I2V and T2V), character animation, voice with cloning and music through stable-diffusion.cpp and audio.cpp, advertises those lanes to the fleet, and ships the measured amd-gcn seed for them.
+
 ### Added — the amd-gcn tier seeds its measured iGPU media set (register CT-51, I5)
 
 `setup/templates/profiles.json` `profiles.amd-gcn.config_seed` now carries the lanes measured on the Vega 7 reference box (no model on
