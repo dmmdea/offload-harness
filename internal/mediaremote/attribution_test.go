@@ -143,7 +143,8 @@ func TestAutoSpilledMediaCallIsOneCardAndOneRow(t *testing.T) {
 
 // A forced remote call is recorded under "remote" however it was spelled.
 func TestAForcedRemoteMediaCallIsRecordedUnderTheNormalisedRoute(t *testing.T) {
-	dead := config.Config{MediaDir: t.TempDir(), DelegateRemotes: []string{"http://127.0.0.1:1"}, FleetAuthToken: "tok"}
+	// an RFC 5737 address: the tailnet guard refuses it before any dial, so no node answers, at once
+	dead := config.Config{MediaDir: t.TempDir(), DelegateRemotes: []string{"http://192.0.2.1:1"}, FleetAuthToken: "tok"}
 	for _, route := range []string{"remote", "REMOTE", " Remote "} {
 		t.Run(fmt.Sprintf("route %q", route), func(t *testing.T) {
 			rig := newPairRig(t, true)
