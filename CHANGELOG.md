@@ -300,6 +300,12 @@ each guard was broken once at its real call site and seen red.
   the output itself, and the door now always supplies `out`, so an input-less job from a client other than `mediaremote` on a node whose
   `media_dir` does not exist yet would be handed a path in a missing directory. Deleting the `MkdirAll`, or the guard that keeps an
   empty `media_dir` from reaching it, left the suite green. `TestMediaJobOutputPathCreatesAMissingMediaDirAndToleratesNone` pins both.
+- **The asker row's route is pinned to the normalised one (C5C6, low).** `mediaremote.Run` and `composeremote.Run` open the remote call's
+  attribution with the normalised route (`local|auto|remote`, the contract in `core/remoteattr.go`). Passing the raw string instead left
+  every test green, and the MCP doors omit `route`, so the commonest remote spill would have written its asker ledger row with
+  `Route: ""`. `TestAutoSpilledMediaCallIsOneCardAndOneRow` now runs the routes `auto`, `""` and `"  AUTO "`,
+  `TestAForcedRemoteMediaCallIsRecordedUnderTheNormalisedRoute` the spellings of `remote`, and
+  `TestARemoteComposeCallIsRecordedUnderTheNormalisedRoute` both for the compose lane (the identical gap); the raw route fails them.
 
 ### Changed — `--offload-to-cpu` is sanctioned spill on the iGPU media engines
 

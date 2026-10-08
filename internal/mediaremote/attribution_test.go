@@ -3,6 +3,7 @@ package mediaremote
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
@@ -115,20 +116,44 @@ func TestRemoteMediaCardResolvesThroughTheFleetNodeID(t *testing.T) {
 	}
 }
 
-// auto sent to a node because this machine has no lane is attributed like remote, with the auto route.
+// auto sent to a node because this machine has no lane is attributed like remote, with the auto route. The route
+// the ledger records is the NORMALISED one (local|auto|remote, core/remoteattr.go), whatever the caller typed: the
+// MCP doors omit `route` and send "", and a caller may spell it with case or spaces. Handing the raw string to
+// core.BeginRemote wrote the row with Route "" for the commonest remote spill and failed nothing (review of 0.170.0,
+// C5C6).
 func TestAutoSpilledMediaCallIsOneCardAndOneRow(t *testing.T) {
-	n := startNode(t, nodeOpts{})
-	rig := newPairRig(t, true, hostOf(t, n))
-	res := Run(context.Background(), clientCfg(t, n), rig.p, video(nil), "auto", nil)
-	if !res.OK || res.Meta.Placement != "remote: no video lane on this machine" {
-		t.Fatalf("Run: %+v", res)
+	for _, route := range []string{"auto", "", "  AUTO "} {
+		t.Run(fmt.Sprintf("route %q", route), func(t *testing.T) {
+			n := startNode(t, nodeOpts{})
+			rig := newPairRig(t, true, hostOf(t, n))
+			res := Run(context.Background(), clientCfg(t, n), rig.p, video(nil), route, nil)
+			if !res.OK || res.Meta.Placement != "remote: no video lane on this machine" {
+				t.Fatalf("Run: %+v", res)
+			}
+			if cards := rig.cards(); cards["queued"] == nil || cards["completed"] == nil {
+				t.Fatalf("cards = %v", cards)
+			}
+			rows := rig.rows()
+			if len(rows) != 1 || rows[0].Route != "auto" || rows[0].Placement != "remote: no video lane on this machine" || !rows[0].CardByCaller {
+				t.Fatalf("rows = %+v, want one row with the normalised route \"auto\"", rows)
+			}
+		})
 	}
-	if cards := rig.cards(); cards["queued"] == nil || cards["completed"] == nil {
-		t.Fatalf("cards = %v", cards)
-	}
-	rows := rig.rows()
-	if len(rows) != 1 || rows[0].Route != "auto" || rows[0].Placement != "remote: no video lane on this machine" || !rows[0].CardByCaller {
-		t.Fatalf("rows = %+v", rows)
+}
+
+// A forced remote call is recorded under "remote" however it was spelled.
+func TestAForcedRemoteMediaCallIsRecordedUnderTheNormalisedRoute(t *testing.T) {
+	dead := config.Config{MediaDir: t.TempDir(), DelegateRemotes: []string{"http://127.0.0.1:1"}, FleetAuthToken: "tok"}
+	for _, route := range []string{"remote", "REMOTE", " Remote "} {
+		t.Run(fmt.Sprintf("route %q", route), func(t *testing.T) {
+			rig := newPairRig(t, true)
+			if res := Run(context.Background(), dead, rig.p, video(nil), route, nil); !res.Deferred {
+				t.Fatalf("Run: %+v, want a defer: no node answers", res)
+			}
+			if rows := rig.rows(); len(rows) != 1 || rows[0].Route != "remote" {
+				t.Fatalf("rows = %+v, want one row with the normalised route \"remote\"", rows)
+			}
+		})
 	}
 }
 
