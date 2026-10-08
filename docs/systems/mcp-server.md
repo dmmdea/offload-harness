@@ -359,8 +359,8 @@ vocabulary, and never from the goal (0.141.1, register C-65), so an echoed goal 
 verified while a faithful digest passes by restating any one of about two dozen words.
 
 What a digest owes beyond that is one design (register C-74): **presence is declared,
-non-emptiness is asked for only where the caller marked it, and the default digest owes one
-statement.** The default schema `{key_facts[], numbers[], quotes[], verdict}` declares all four
+non-emptiness is asked for only where the caller marked it, and the default digest owes that it
+said something.** The default schema `{key_facts[], numbers[], quotes[], verdict}` declares all four
 fields `required`, and a caller's `output_schema` keeps its own `required` entries and gains every
 field its own `min_items:` / `nonempty:` acceptance reads, so a seat's direct JSON answer that
 leaves one out fails validation and goes to the structured re-pack instead of being delivered and
@@ -369,10 +369,19 @@ required of the digest only for the FIRST array the caller's own schema lists in
 check, never more than before) or through the caller's own `acceptance`; the default schema asks
 for no items and a schema that marks nothing gets none, so a faithful "nothing on this page"
 digest is a success (the old rule demanded an item from the alphabetically first array of any
-schema). What the default digest does owe, on EVERY page anchored or not, is a `nonempty:verdict`:
-a page too thin to anchor would otherwise carry no check at all, and a digest that said nothing
-(every list empty, no verdict) would be delivered as a success. Empty lists with a verdict that
-says so still pass.
+schema). What the default digest does owe, on EVERY page anchored or not, is
+`nonempty:key_facts|numbers|quotes|verdict`, a value in any one of its four fields: a page too
+thin to anchor would otherwise carry no check at all, and a digest that said nothing (every list
+empty, no verdict) would be delivered as a success. Empty lists with a verdict that says so still
+pass, and so do populated lists with no verdict. The check began as `nonempty:verdict` alone
+(0.147.0), and that failed digests that had said plenty: the research goal never asked for a
+verdict and the re-pack writes an empty value for a field the loop's text did not carry, so from
+2026-09-30, 36 default-digest pages failed with populated lists (`key_facts` median 10.5 items),
+and an acceptance-only failure is not retried, so each one discarded a whole run (4.07 h of seat
+wall time). The silent-empty digest itself occurred 0 times in 687 pages. The default digest's
+goal now also ends with one sentence asking for the verdict (a caller's schema gets none), so
+the verdict is normally there. The any-of `nonempty:` is evaluated by the delegator like every
+other check; a node only parses it at the ACK, so a node one release behind admits the contract.
 
 A research page that fails only its own checks (a shape, an item count) is not re-run on another
 node: a second seat given the same page mostly repeats the verdict at the cost of a whole second

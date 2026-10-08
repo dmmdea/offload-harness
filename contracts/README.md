@@ -35,12 +35,21 @@ JSON carries no comments, so the field guidance lives here.
 | `regex:<re>` | Go regexp matches output | shape demands, e.g. `regex:[0-9]` = "carries a number" |
 | `min_items:<field>:<n>` | `structured.<field>` is an array with ≥ n items (n ≥ 1) | minimum yield from an extraction |
 | `nonempty:<field>` | `structured.<field>` present and non-empty (`0`/`false` count as values) | required fields that must not be omitted |
+| `nonempty:<f1>\|<f2>\|…` | at least ONE of the named fields is present and non-empty (same rules; an absent field counts as empty) | "the answer said something": a digest whose every field is empty fails, one with a single value passes |
 | `diff_touches:<prefix>` | the write set holds a changed path starting with `prefix` | a `write_root` contract: the leg changed the file it was pointed at |
 | `diff_max_files:<n>` | the write set is NON-EMPTY and touches ≤ n files | a `write_root` contract: the leg stayed in its lane |
 
 Text verbs read the final `output`, falling back to the raw `structured` bytes when `output`
 is empty; the field verbs require `structured` and fail closed without it. Unfalsifiable
 checks (`contains:`, `min_items:f:0`) are rejected at validation.
+
+The any-of form of `nonempty:` uses the same emptiness rules as the one-field form, and a
+failure is one reason that names the check and says why each field is empty or absent. An empty
+alternative (`a||b`, `|a`, `a|`) and a repeated name (`a|a`) are rejected at validation, names
+are exact (no trimming), and a single name is the one-field check unchanged. Only `nonempty:`
+alternates: `min_items:` takes its field name literally. A node parses a contract's acceptance
+when it ACKs it and never evaluates it, so a node one release behind admits a contract that
+carries the any-of form.
 
 The two diff verbs read the run's WRITE SET and are the only checks a talkative seat cannot
 satisfy by talking. Both fail closed on an empty write set, `diff_max_files` included: a cap

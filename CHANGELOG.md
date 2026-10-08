@@ -6,6 +6,51 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.171.0] - 2026-10-08 - a research page that said something is no longer failed for lacking a verdict
+
+### Fixed — a research page with populated lists is no longer failed for lacking a verdict
+
+- **The default research digest now fails only when it said nothing, and its goal asks for the verdict.** Since
+  2026-09-30, 36 default-digest pages failed `nonempty:verdict` (the guard 0.147.0 gave the harness's own digest). None
+  was an empty page: every one had populated lists (`key_facts` median 10.5 items) and `verdict: ""`. All 36 came from
+  the vLLM json_schema re-pack lane. The research goal never asks for a verdict, and the re-pack prompt says "Use empty
+  values when a field is absent", so the extractor writes `""` when the loop's final text has none. An acceptance-only
+  research failure is not retried, so each one discarded a whole run: 4.07 h of seat wall time in total. The check
+  exists only to catch the silent-empty digest (every list empty and no verdict), which occurred 0 times in 687 pages;
+  on that data, failing only when every list AND the verdict are empty turns 35 failures into passes and turns no pass
+  into a failure. `Build` now derives `nonempty:key_facts|numbers|quotes|verdict` for the default digest and ends its
+  goal with one sentence asking for the verdict ("Always end with a one-sentence verdict that answers the goal from
+  this page, or says plainly that the page does not address it."); a caller-supplied schema is unchanged (no sentence,
+  the same `nonEmptyChecks`). The anchor words still come from the caller's goal alone, and the default schema already
+  requires all four fields, so it comes through byte for byte.
+- **The acceptance DSL gains the any-of form `nonempty:<f1>|<f2>|…`.** It passes when at least one named field is
+  present and non-empty, under the same emptiness rules as the one-field check (`null`, `""`, `[]`, `{}` are empty; a
+  present `0` or `false` is a value), and an absent field counts as empty for its alternative. A failure is one reason
+  that names the check and says why each field is empty or absent; a missing or unparseable structured object still
+  fails with the one-field check's reason, word for word. An empty alternative (`a||b`, `|a`, `a|`) and a repeated name
+  (`a|a`) are parse errors. A single name is the one-field check unchanged, failure reasons included. `AcceptedFields`
+  and `RequireFields` declare each name an any-of check lists (presence only), through a new
+  `AcceptanceCheck.Fields()`; `min_items` keeps a pipe in its field name literally. Only the delegator evaluates
+  acceptance (`delegate.EvalAcceptance`); a node only parses it when it ACKs a contract, and the parser accepted any
+  non-empty argument after `nonempty:`, so a node one release behind admits the new spelling unchanged (verified at
+  3568a530 by running that parser on the default digest's check: `ParseAcceptanceCheck`, `Validate` and
+  `DecodeAgentContract` all accepted it).
+- Tests: `TestNonemptyAlternationPassesWhenAtLeastOneNamedFieldHasAValue`, `TestParseAcceptanceCheck` (the any-of
+  rows), `TestASingleNameNonemptyCheckKeepsItsFailureReasonsByteForByte` (written and run green against the released
+  parser first), `TestNonemptyAlternationReadsEveryNamedFieldAndOnlyNonemptyAlternates`,
+  `TestAContractCarryingTheAnyOfCheckPassesTheNodesACKValidation`, `TestAcceptedFieldsSplitsTheNonemptyAlternation`,
+  `TestRequireAcceptanceFieldsDeclaresEachAlternativeAndIsANoOpWhenAllAreRequired` in `internal/core`;
+  `TestADigestWithPopulatedListsAndNoVerdictPassesAcceptance` (the live failure shape, on an anchored and a thin page),
+  `TestAThinPageWithEmptyListsAndAVerdictPasses`, `TestAllEmptyDefaultDigestFailsButAFaithfulEmptyOneStillPasses`,
+  `TestDefaultDigestCarriesTheAnyOfGuardOnEveryPage` (was `TestDefaultDigestCarriesAVerdictCheckOnEveryPage`),
+  `TestTheDefaultDigestGoalAsksForAVerdictAndACallersSchemaGoalDoesNot` and
+  `TestTheDefaultDigestContractPassesTheNodesACKAndKeepsItsSchemaByteForByte` in `internal/research`. Fifteen
+  mutations at their call sites (any-of as all-of, an absent field passing or dropped from the reason, an empty or
+  repeated alternative accepted, a single name through the any-of path, `Fields()` not splitting or splitting
+  `min_items`, an array never empty, the shared structured-object reasons dropped, `Build` deriving the old check, the
+  goal sentence dropped, doubled or added to a caller's schema, the check drifting from the schema) each turned a test
+  red and were restored byte for byte.
+
 ## [0.170.0] - 2026-10-08 - a placement pin needs a reason; without one it is a hint
 
 ### A placement pin needs a reason; without one it is a hint (fleet-first, track R4e; ADR 0078)
