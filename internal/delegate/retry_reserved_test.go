@@ -182,9 +182,10 @@ func TestARetryStillRunsOnAReservedLocalSeatForTheHoldersOwnChild(t *testing.T) 
 
 	// route=auto, not remote: the held lease reads the local seat as busy, so the deal sends the first
 	// attempt to the fleet node, and the inherited lease exempts the seat for the retry. Route remote
-	// would also land the retry here, but only because alternativeNode has no route=remote guard in its
-	// "first ran on a fleet node" branch (replacementNode refuses to fall local on route=remote), so a
-	// control on it would turn red the day that is fixed, for a reason that has nothing to do with C-81.
+	// would also land the retry here, but only because alternativeNode has no guard for the bare route=remote
+	// in its "first ran on a fleet node" branch (replacementNode refuses to fall local on route=remote, and
+	// alternativeNode guards a REASONED remote pin alone: remotePinned, ADR 0078), so a control on it would
+	// turn red the day that is fixed, for a reason that has nothing to do with C-81.
 	results, sum, err := Run(context.Background(), cfg, reservedRetryLocal(&localCalls), []core.AgentContract{verifiedContract()}, "auto", []string{urlA})
 	if err != nil {
 		t.Fatal(err)

@@ -8,11 +8,14 @@ package main
 // the file is the CLI's whole intake surface.
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/delegate"
 )
 
@@ -199,5 +202,68 @@ func TestDelegateExitErrReportsEveryLoudCount(t *testing.T) {
 	if only := delegateExitErr(delegate.Summary{Deferred: 1, Infrastructure: 1}); only == nil ||
 		!strings.Contains(only.Error(), "1 subtask") {
 		t.Errorf("infrastructure-only err = %v, want the infrastructure count named", only)
+	}
+}
+
+// TestTheVisionVerbsSayTheirAutoRouteAlsoReadsTheVisionSeat is the CLI help's half of the MCP route text: the flag shared by
+// vqa, ocr and assess-image names both triggers of the auto route, the lease and the busy vision seat.
+func TestTheVisionVerbsSayTheirAutoRouteAlsoReadsTheVisionSeat(t *testing.T) {
+	for _, want := range []string{"local GPU lease is held", "the local vision seat is busy"} {
+		if !strings.Contains(visionRouteHelp, want) {
+			t.Errorf("visionRouteHelp = %q, want it to say %q", visionRouteHelp, want)
+		}
+	}
+}
+
+// TestDelegateAndResearchVerbsRefuseABadPinReasonBeforeLoadingAnything (ADR 0078): --pin-reason is checked against
+// --route before the config is read or a contract or a page is touched, and the refusal lists the valid set. The
+// config path does not exist: had the check come after the config load, the error would be about the file.
+func TestDelegateAndResearchVerbsRefuseABadPinReasonBeforeLoadingAnything(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "no-such-config.json")
+	for _, tc := range []struct {
+		name string
+		run  func([]string) error
+		args []string
+	}{
+		{"delegate: a value outside the set", runDelegate, []string{"--route", "local", "--pin-reason", "because"}},
+		{"delegate: privacy with remote", runDelegate, []string{"--route", "remote", "--pin-reason", "privacy"}},
+		{"delegate: a reason with the default route (auto)", runDelegate, []string{"--pin-reason", "operator"}},
+		{"delegate: a reason with spread", runDelegate, []string{"--route", "spread", "--pin-reason", "operator"}},
+		{"delegate: a reason with queue", runDelegate, []string{"--route", "queue", "--pin-reason", "measurement"}},
+		{"research: a value outside the set", runResearch, []string{"--route", "local", "--pin-reason", "because"}},
+		{"research: locality with remote", runResearch, []string{"--route", "remote", "--pin-reason", "locality"}},
+		{"research: a reason with the default route (spread)", runResearch, []string{"--pin-reason", "operator"}},
+		{"research: a reason with auto", runResearch, []string{"--route", "auto", "--pin-reason", "operator"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.run(append([]string{"--config", missing}, tc.args...))
+			if err == nil {
+				t.Fatal("a bad pin_reason was accepted")
+			}
+			for _, want := range []string{"pin_reason", "privacy (route local)", "operator (route local or remote)"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("err = %q, want it to contain %q", err, want)
+				}
+			}
+			if strings.Contains(err.Error(), "no-such-config") {
+				t.Errorf("err = %q is about the config file: the pin_reason must be refused before anything is loaded", err)
+			}
+		})
+	}
+}
+
+// TestTheCLIVerbsOfferPinReasonToTheEngine: --pin-reason is carried into the engine's options together with the
+// door's half of the contract, PinNeedsReason, without which a bare --route local would stay a hard pin on the verbs while
+// the MCP tools treat it as a hint.
+func TestTheCLIVerbsOfferPinReasonToTheEngine(t *testing.T) {
+	rescue := delegate.RescueFunc(func(context.Context, core.AgentContract, string, time.Duration) (delegate.Rescued, error) {
+		return delegate.Rescued{}, nil
+	})
+	opts := cliPinOptions(1, "t", rescue, "measurement")
+	if opts.PinReason != "measurement" || !opts.PinNeedsReason || opts.Priority != 1 || opts.Tenant != "t" || opts.Rescue == nil {
+		t.Fatalf("options = %+v, want the reason, the door's opt-in and the caller's own fields", opts)
+	}
+	if bare := cliPinOptions(0, "", rescue, ""); bare.PinReason != "" || !bare.PinNeedsReason {
+		t.Fatalf("options = %+v, want no reason but still the door's opt-in: a bare route is a hint here too", bare)
 	}
 }

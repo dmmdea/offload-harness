@@ -130,8 +130,11 @@ code identifier from the mechanism anchor (`evict_costs`, `LOCAL_OFFLOAD_ORIGIN`
 one- or two-digit integer. Same inline `context`, `timeout_sec` 900 (three documents on a 4 tok/s seat need it):
 
 ```powershell
-local-offload delegate --contract contracts/digest-adr-hard-8.json --route local
+local-offload delegate --contract contracts/digest-adr-hard-8.json --route local --pin-reason measurement
 ```
+
+(`--pin-reason measurement` is what keeps `--route local` a pin: without a reason, `local` and `remote` are hints that
+placement may override, which a measurement of one seat cannot have.)
 
 Built by `2026-09-01-vllm-lmcache-results/stage3d-drivers/build_adr_hard_set.py` in the results folder; regenerate
 there when an ADR changes, never edit the JSON by hand (the ground truth the judge reads is the inlined bytes).
@@ -154,8 +157,8 @@ old fixture (same seats, same day) for three K×8 passes before it replaces the 
 is then attributable to the acceptance, not to the seats. Same inline `context`, no `--read-root`:
 
 ```powershell
-local-offload delegate --contract contracts/digest-8-grounded.json --route local     # this box's seat
-local-offload delegate --contract contracts/digest-8-grounded.json --route remote --remote http://<node>:18811
+local-offload delegate --contract contracts/digest-8-grounded.json --route local --pin-reason measurement     # this box's seat
+local-offload delegate --contract contracts/digest-8-grounded.json --route remote --pin-reason measurement --remote http://<node>:18811
 ```
 
 ## Changing the inline text of a digest set

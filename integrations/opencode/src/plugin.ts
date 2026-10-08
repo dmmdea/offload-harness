@@ -759,6 +759,21 @@ export function createHooks(o: Options, diagnostics: Diagnostics = newDiagnostic
   return hooks;
 }
 
+// A call whose route was a hint (ADR 0078) opens every result's placement with a clause that says where the result was placed
+// in its own words: "route=local was a hint (no pin_reason), honoured: placed on the local seat; <reason>" or "..., overridden:
+// placed on <node>; <reason>". The word "local" is no evidence there: the clause names the route the caller hinted, and the
+// reason behind it says "the idle local seat's run-cap line is spent" for a result that ran on a node. So the clause is read
+// first. A hint nothing ran ("...: placed as route=auto, and no node took it", "...and where it was running is not known")
+// has no verdict, and the reason behind it is judged as every placement is. Anything that does not open with the clause is
+// read exactly as before.
+const HINT_CLAUSE = /^route=(?:local|remote) was a hint \(no pin_reason\)(?:, (?:honoured|overridden): placed on ([^;]+))?/;
+
+export function ranLocally(placement: string): boolean {
+  const clause = HINT_CLAUSE.exec(placement);
+  if (clause?.[1] !== undefined) return clause[1] === "the local seat";
+  return /local/i.test(clause ? placement.slice(clause[0].length) : placement);
+}
+
 // Reads a harness agent_delegate result and states whether the local+server pair landed —
 // the verification step the protocol demands, done for the model so it cannot skip it.
 export function delegateDigest(raw: string): string | null {
@@ -768,7 +783,7 @@ export function delegateDigest(raw: string): string | null {
     const parsed = JSON.parse(raw.slice(start)) as { summary?: Record<string, number>; results?: Array<{ placement?: string; deferred?: boolean; reason?: string; retried_on?: string; failed?: boolean }> };
     const results = parsed.results ?? [];
     if (results.length === 0) return null;
-    const local = results.filter((r) => /local/i.test(r.placement ?? "")).length;
+    const local = results.filter((r) => ranLocally(r.placement ?? "")).length;
     const remote = results.length - local;
     const infra = parsed.summary?.infrastructure ?? 0;
     const deferred = results.filter((r) => r.deferred).length;

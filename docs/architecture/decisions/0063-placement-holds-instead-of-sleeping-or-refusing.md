@@ -181,6 +181,14 @@ floor of a width that follows the deal, and `RunBatched` deals up to 16 subtasks
 6's headroom count are what keep a wider call inside each node's ceiling
 ([ADR 0076](0076-a-calls-width-is-sized-from-its-deal-a-batch-of-up-to-16-is-one-deal-and-auto-counts-the-local-run-cap-line.md)).
 
+## Amendment (2026-10-07): `route=local` and `route=remote` here are the pins
+
+Through the doors that offer `pin_reason`, a local or remote route without a reason is a hint that placement may override
+([ADR 0078](0078-a-placement-pin-needs-a-reason-without-one-it-is-a-hint.md)): a reasonless `local` is placed as `route=auto` is, so
+decisions 2, 6 and 7 and the amendment above apply to it, and a reasonless `remote` is placed fleet-first with the idle local seat as
+the fallback where `remote` would have deferred. What this ADR says of `route=local` waiting in place, and of `route=remote` never
+falling back to the local seat, is the pin, which a `pin_reason` keeps authoritative.
+
 ## Alternatives considered
 
 - **Keep the courtesy sleep and credit it.** Rejected: it still sleeps on a node that just refused while

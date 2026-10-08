@@ -42,7 +42,9 @@ loaded, the local agent seat reads as occupied (the seat guard's verdict), so `a
 `spread`) deals to a remote with room and otherwise waits in line: for a remote to free, or for opencode's seat to
 unload (then it loads the pair), ending as a capacity defer when the wait's bound is reached (the call's deadline less a reserve, ADR 0073, else `agent_placement_wait_sec`; 0.165.3; before it, a
 fleet with no eligible node loaded the pair anyway). `offload_ask` with no route takes `auto` the same way. Two doors still load the
-pair here: an explicit `route:"local"`, and `agent_run` with no route, whose `read_root` cannot travel. Name
+pair here: an explicit `route:"local"` on `offload_ask` or `agent_run` (and, through `agent_delegate` or `offload_research`, a
+`route:"local"` pinned with a `pin_reason`; a reasonless one is a hint, placed as `auto`, which reads the occupied seat and waits for it
+like any other call, ADR 0078), and `agent_run` with no route, whose `read_root` cannot travel. Name
 `route:"auto"` on a self-contained `agent_run` while a session is live on the three-card seat.
 
 ## Behavior (verified live 2026-08-24, local primaries)

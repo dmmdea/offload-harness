@@ -40,6 +40,7 @@ func (r *runner) recordStarted(contract core.AgentContract, jobID, fleetJobID, n
 	if r.led == nil {
 		return
 	}
+	pinReason, routeAsked := r.pinLedgerFields()
 	if err := r.led.Record(ledger.Entry{
 		Task:       "agent_delegate",
 		Phase:      ledger.PhaseStarted,
@@ -48,6 +49,8 @@ func (r *runner) recordStarted(contract core.AgentContract, jobID, fleetJobID, n
 		JobID:      jobID,
 		FleetJobID: fleetJobID,
 		Route:      r.route,
+		RouteAsked: routeAsked,
+		PinReason:  pinReason,
 		Placement:  placement,
 		ModelTier:  node + ":" + seat,
 	}); err != nil {

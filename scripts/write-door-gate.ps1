@@ -38,7 +38,8 @@ $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
 function Invoke-Task([string]$name) {
   $dir = Join-Path $root $name
   $cliArgs = @("delegate", "-config", $Config, "-contract", (Join-Path $dir "contract.json"), "-read-root", $dir)
-  if ($Remote) { $cliArgs += @("-route", "remote", "-remote", $Remote) } else { $cliArgs += @("-route", "local") }
+  # A measurement of ONE seat: the pin is the point, so it carries its reason (without one, route local or remote is a hint).
+  if ($Remote) { $cliArgs += @("-route", "remote", "-pin-reason", "measurement", "-remote", $Remote) } else { $cliArgs += @("-route", "local", "-pin-reason", "measurement") }
   $t = [DateTime]::UtcNow
   $raw = (& $Binary @cliArgs 2> (Join-Path $OutDir "$name.stderr.txt")) -join "`n"
   $cliExit = $LASTEXITCODE

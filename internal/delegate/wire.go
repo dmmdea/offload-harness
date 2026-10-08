@@ -100,6 +100,11 @@ type ResultWire struct {
 	// fleet_smoke read it as text (council R4), so the composite decision is
 	// published beside it as Placed, never folded into it.
 	Placement string `json:"placement"`
+	// PinReason (ADR 0078) is the closed reason the caller pinned the call under (privacy, locality, measurement,
+	// operator). Present only on a call pinned with one; a route local or remote that gave none is a hint, and the
+	// placement above opens by saying whether it was honoured or overridden. omitempty — every other result
+	// publishes byte-identically to before.
+	PinReason string `json:"pin_reason,omitempty"`
 	// Placed (ADR 0039, 0.116.0) is the composite placement block: tier,
 	// layer, role, seat, device pin, reason, and on a defer the guard that
 	// refused. omitempty — a plain box publishes byte-identically to before.
@@ -328,6 +333,7 @@ func WireResponse(results []PlacedResult, sum Summary, lints [][]string) Respons
 			Node:               pr.Node,
 			Seat:               pr.Seat,
 			Placement:          pr.PlacementReason,
+			PinReason:          pr.PinReason,
 			Placed:             pr.Placed,
 			JobID:              pr.JobID,
 			Output:             pr.Result.Output,
