@@ -251,7 +251,9 @@ function runAsEngine() {
     setInterval(() => {}, 1000);
     return;
   }
-  process.exit(spec.exit ?? 0);
+  // not process.exit(): a big log written to a pipe that is full is queued, and exit() would drop the
+  // end of it (the runner then sees a truncated log); the code is applied when the loop drains
+  process.exitCode = spec.exit ?? 0;
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] || "").href) runAsEngine();

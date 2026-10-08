@@ -60,7 +60,7 @@ import { resolveFfmpeg, resolveFfprobe } from "./audio-qa.mjs";
 import {
   parseArgs, parseExtraArgs, refuseCpuBackend, refuseExtraArgs, runEngine, createLogGuard, checkTokenCap,
   installLifecycle, makeDeadline, normalizeFrames, floorFrames, normalizeSize, finiteNum, encodeMp4, makeTempDir,
-  vulkanDeviceFromBackend, refuseRelativeBinary, ensureOutDir, engineExitError, reportFatal,
+  vulkanDeviceFromBackend, refuseRelativeBinary, ensureOutDir, engineExitError, failAndExit,
 } from "./igpu-engine.mjs";
 import { checkClip, convertDepthFrames, countVideoFrames, trimDecision } from "./igpu-qa.mjs";
 import { vaeTileOverlap } from "./sdcpp-video.mjs";
@@ -250,7 +250,6 @@ async function main() {
 // Run only as the main module — importing this file (tests) has no side effects.
 if (import.meta.url === pathToFileURL(process.argv[1] || "").href) {
   main().catch((e) => {
-    reportFatal("SDCPP ANIMATE", e);
-    process.exit(1);
+    failAndExit("SDCPP ANIMATE", e);
   });
 }

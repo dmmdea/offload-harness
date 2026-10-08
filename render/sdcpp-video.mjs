@@ -56,7 +56,7 @@ import { resolveFfmpeg } from "./audio-qa.mjs";
 import {
   parseArgs, parseExtraArgs, refuseCpuBackend, refuseExtraArgs, runEngine, createLogGuard, checkTokenCap,
   installLifecycle, makeDeadline, normalizeFrames, normalizeSize, finiteNum, encodeMp4, makeTempDir,
-  refuseRelativeBinary, ensureOutDir, engineExitError, reportFatal,
+  refuseRelativeBinary, ensureOutDir, engineExitError, failAndExit,
 } from "./igpu-engine.mjs";
 import { checkClip } from "./igpu-qa.mjs";
 
@@ -191,7 +191,6 @@ async function main() {
 // Run only as the main module — importing this file (tests) has no side effects.
 if (import.meta.url === pathToFileURL(process.argv[1] || "").href) {
   main().catch((e) => {
-    reportFatal("SDCPP VIDEO", e);
-    process.exit(1);
+    failAndExit("SDCPP VIDEO", e);
   });
 }

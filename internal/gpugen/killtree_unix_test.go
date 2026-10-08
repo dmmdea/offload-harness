@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -142,5 +143,54 @@ func TestSetProcessGroupMakesTheChildItsOwnLeader(t *testing.T) {
 	pgid, err := syscall.Getpgid(cmd.Process.Pid)
 	if err != nil || pgid != cmd.Process.Pid {
 		t.Fatalf("pgid = %d (err %v), want the child's own pid %d", pgid, err, cmd.Process.Pid)
+	}
+}
+
+// TST24: the production grace is 5 s (the tests shorten the var, so a typo in the default would
+// otherwise go unseen) - it must be shorter than the runner's own wait for its engine (3 s) is long
+// enough, and longer than that wait.
+func TestTermGraceDefaultIsFiveSeconds(t *testing.T) {
+	if termGrace != 5*time.Second {
+		t.Fatalf("termGrace = %v, want 5s: the runner waits up to 3 s for its engine after a SIGTERM, so the grace must exceed that", termGrace)
+	}
+}
+
+// TST24: the SIGKILL escalation fires only while the process is still alive. An exited and reaped
+// process may have had its pid recycled by a stranger's group, so a late SIGKILL of -pid would hit it.
+func TestKillTreeDoesNotEscalateAgainstAnExitedProcess(t *testing.T) {
+	old, oldFn := termGrace, killGroupFn
+	termGrace = 300 * time.Millisecond
+	var mu sync.Mutex
+	var sent []syscall.Signal
+	killGroupFn = func(pid int, sig syscall.Signal) error {
+		mu.Lock()
+		sent = append(sent, sig)
+		mu.Unlock()
+		return syscall.Kill(pid, sig)
+	}
+	t.Cleanup(func() { termGrace, killGroupFn = old, oldFn })
+
+	cmd := exec.Command("sh", "-c", `trap 'exit 0' TERM; while true; do sleep 0.1; done`)
+	setProcessGroup(cmd)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	waited := make(chan struct{})
+	go func() { _ = cmd.Wait(); close(waited) }()
+	time.Sleep(300 * time.Millisecond) // let sh install its trap
+	if err := killTree(cmd.Process); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-waited:
+	case <-time.After(10 * time.Second):
+		_ = cmd.Process.Kill()
+		t.Fatal("the process did not exit on SIGTERM")
+	}
+	time.Sleep(3 * termGrace) // well past the grace: the escalation timer has fired by now
+	mu.Lock()
+	defer mu.Unlock()
+	if len(sent) != 1 || sent[0] != syscall.SIGTERM {
+		t.Fatalf("signals sent to the group = %v, want only SIGTERM (no SIGKILL to an exited process's group)", sent)
 	}
 }

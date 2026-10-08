@@ -104,3 +104,27 @@ test("gpuResetError: the advice fits the engine - a token cap for sd.cpp, a shor
   assert.ok(!/sdcpp_max_tokens/.test(audio), "audio.cpp has no token cap to name");
   assert.match(audio, /shorten the request/);
 });
+
+test("failAndExit: the end of a failure survives a stderr pipe that is full and read slowly (process.exit would drop it)", async () => {
+  const mod = pathToFileURL(join(here, "igpu-engine.mjs")).href;
+  // 400 KB of engine chatter, then the typed failure and its class line, then exit
+  const code = `
+    import { failAndExit } from ${JSON.stringify(mod)};
+    for (let i = 0; i < 4000; i++) process.stderr.write("engine log line " + i + " " + "x".repeat(90) + "\\n");
+    failAndExit("SDCPP VIDEO", new Error("GPU_RESET: the GPU reset"));`;
+  const { spawn } = await import("node:child_process");
+  const child = spawn(process.execPath, ["--input-type=module", "-e", code], { stdio: ["ignore", "ignore", "pipe"] });
+  let err = "";
+  // a slow reader: one chunk, then a pause - the child's writes outrun it and queue up
+  child.stderr.on("data", (d) => {
+    err += d;
+    child.stderr.pause();
+    setTimeout(() => child.stderr.resume(), 20);
+  });
+  const status = await new Promise((r) => child.on("close", r));
+  assert.equal(status, 1);
+  const lines = err.trim().split(/\r?\n/);
+  assert.equal(lines[lines.length - 1], "IGPU_CLASS=gpu_reset", "the class line is the last line and it arrived");
+  assert.match(lines[lines.length - 2], /^SDCPP VIDEO FAILED: GPU_RESET:/);
+  assert.ok(err.includes("engine log line 3999 "), "and so did all the log before it");
+});

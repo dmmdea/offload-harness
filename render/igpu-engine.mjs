@@ -21,7 +21,7 @@
 //
 // Dependency-free (Node 18+ built-ins only).
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, renameSync, accessSync, constants as fsConstants } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, renameSync, writeFileSync, accessSync, constants as fsConstants } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, resolve } from "node:path";
 
@@ -67,12 +67,27 @@ export function errorClass(message) {
 }
 
 // reportFatal: print a runner's failure the way every iGPU runner ends: the human line, then the class
-// line when the failure is typed. The caller exits non-zero.
-export function reportFatal(label, e) {
+// line when the failure is typed. `then`, when given, runs once the LAST line has been written out.
+export function reportFatal(label, e, then) {
   const msg = e && e.message ? e.message : String(e);
-  console.error(`${label} FAILED:`, msg);
   const cls = errorClass(msg);
-  if (cls) console.error(CLASS_MARKER + cls);
+  const human = `${label} FAILED: ${msg}\n`;
+  if (cls) {
+    process.stderr.write(human);
+    process.stderr.write(CLASS_MARKER + cls + "\n", then);
+  } else {
+    process.stderr.write(human, then);
+  }
+}
+
+// failAndExit: report a runner's failure and exit with `code` once it has been written out.
+// process.exit() right after a write drops output that a full pipe could not take at once (it is
+// queued), and the class line at the end of a failure is the one part gpugen reads its class from.
+// Writes complete in order, so the callback of the last write means all of it is out; the timer is the
+// bound for a pipe nobody reads.
+export function failAndExit(label, e, code = 1) {
+  setTimeout(() => process.exit(code), 3000).unref();
+  reportFatal(label, e, () => process.exit(code));
 }
 
 // parseArgs: positionals + --flags. `booleans` names the flags that take no value.
@@ -542,22 +557,123 @@ const cleanups = new Set();
 let exitHookInstalled = false;
 let lifecycleInstalled = false;
 
-// killTree: the whole process tree, not just the child. On Windows taskkill /T; elsewhere the
-// engine is spawned detached (its own process group), so the group is killed. Best-effort,
-// never throws.
+// How long a runner that is told to stop waits for its engine to be gone before it exits, and so
+// before the media lease is released: long enough for the kernel to tear down an engine's Vulkan
+// context (the amdgpu lockup timeout is 2 s), shorter than gpugen's SIGTERM grace (5 s) so the
+// runner is not SIGKILLed in the middle of the wait.
+export const ENGINE_EXIT_WAIT_MS = 3000;
+
+// processTable: pid -> ppid for every process (POSIX only; empty on Windows or on failure):
+// /proc on Linux, `ps` elsewhere.
+export function processTable() {
+  const table = new Map();
+  if (process.platform === "win32") return table;
+  try {
+    if (existsSync("/proc/self/stat")) {
+      for (const name of readdirSync("/proc")) {
+        if (!/^\d+$/.test(name)) continue;
+        try {
+          const stat = readFileSync(`/proc/${name}/stat`, "utf8");
+          // "pid (comm) S ppid ...": comm may hold spaces and parentheses, so cut at the LAST ")"
+          table.set(Number(name), Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[1]));
+        } catch { /* gone while we looked */ }
+      }
+    } else {
+      const r = spawnSync("ps", ["-A", "-o", "pid=,ppid="], { encoding: "utf8" });
+      for (const line of String(r.stdout || "").split("\n")) {
+        const m = /^\s*(\d+)\s+(\d+)\s*$/.exec(line);
+        if (m) table.set(Number(m[1]), Number(m[2]));
+      }
+    }
+  } catch { /* best effort */ }
+  return table;
+}
+
+// descendantsOf: every descendant of `pid`, deepest first (so a parent is never killed before its
+// children can be found). Pure over `table`.
+export function descendantsOf(pid, table = processTable()) {
+  const children = new Map();
+  for (const [p, pp] of table) {
+    if (!children.has(pp)) children.set(pp, []);
+    children.get(pp).push(p);
+  }
+  const order = [];
+  const walk = (p) => { for (const c of children.get(p) || []) { order.push(c); walk(c); } };
+  walk(pid);
+  return order.reverse();
+}
+
+// killTree: the engine and everything it started, not just the child. On Windows taskkill /T.
+// Elsewhere the engine is NOT detached: it stays in the runner's process group, so that gpugen's
+// SIGKILL of that group (when the runner itself cannot answer a SIGTERM) takes the engine with it
+// (a detached engine would survive it and keep the iGPU). The runner therefore walks the engine's
+// descendants itself. A child that does lead its own group (a caller-supplied spawn) has that group
+// killed too. Best-effort, never throws.
 export function killTree(child) {
   if (!child || child.pid === undefined || child.exitCode !== null || child.signalCode) return;
   try {
     if (process.platform === "win32") {
       spawnSync("taskkill", ["/PID", String(child.pid), "/T", "/F"], { stdio: "ignore" });
-    } else {
-      try { process.kill(-child.pid, "SIGKILL"); } catch { child.kill("SIGKILL"); }
+      return;
     }
+    try { process.kill(-child.pid, "SIGKILL"); } catch { /* not a group leader: the normal case */ }
+    for (const p of descendantsOf(child.pid)) {
+      try { process.kill(p, "SIGKILL"); } catch { /* already gone */ }
+    }
+    try { process.kill(child.pid, "SIGKILL"); } catch { /* already gone */ }
   } catch { /* nothing more to do */ }
 }
 
 function killLiveEngines() {
   for (const c of [...liveEngines]) killTree(c);
+}
+
+// enginePids: the pids of every live engine and its descendants (what a shutdown must see gone).
+export function enginePids() {
+  const table = processTable();
+  const out = [];
+  for (const c of liveEngines) {
+    if (c.pid === undefined || c.exitCode !== null || c.signalCode) continue;
+    out.push(c.pid, ...descendantsOf(c.pid, table));
+  }
+  return out;
+}
+
+// pidGone: the process does not exist, or is only a zombie waiting to be reaped (a killed child of
+// this very process stays one until the event loop runs, and the shutdown paths below are
+// synchronous).
+export function pidGone(pid) {
+  try {
+    process.kill(pid, 0);
+  } catch (e) {
+    return !(e && e.code === "EPERM");
+  }
+  if (process.platform === "win32") return false;
+  try {
+    if (existsSync("/proc/self/stat")) {
+      const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+      return /^[ZX]/.test(stat.slice(stat.lastIndexOf(")") + 2));
+    }
+    const r = spawnSync("ps", ["-o", "stat=", "-p", String(pid)], { encoding: "utf8" });
+    return r.status !== 0 || /^\s*Z/.test(String(r.stdout || ""));
+  } catch {
+    return true; // /proc/<pid> vanished between the two calls
+  }
+}
+
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+// waitUntilGone: block (at most maxMs) until every pid is gone. Returns {gone, waitedMs}.
+export function waitUntilGone(pids, { maxMs = ENGINE_EXIT_WAIT_MS, pollMs = 25, isGone = pidGone, sleep = sleepSync, now = Date.now } = {}) {
+  const t0 = now();
+  let alive = pids.filter((p) => !isGone(p));
+  while (alive.length > 0 && now() - t0 < maxMs) {
+    sleep(pollMs);
+    alive = alive.filter((p) => !isGone(p));
+  }
+  return { gone: alive.length === 0, waitedMs: now() - t0, alive };
 }
 
 function runCleanups() {
@@ -566,10 +682,31 @@ function runCleanups() {
   }
 }
 
+// stopEngines: kill every live engine tree and WAIT for it to be gone. A runner that exits (and so
+// lets the lease go) while its engine is still tearing down its Vulkan context lets the next job
+// start a second engine on the same iGPU.
+function stopEngines(deps) {
+  const pids = deps.pids();
+  deps.kill();
+  return pids.length ? deps.wait(pids) : { gone: true, waitedMs: 0, alive: [] };
+}
+
+const defaultDeps = {
+  pids: enginePids,
+  kill: killLiveEngines,
+  wait: (pids) => waitUntilGone(pids),
+  cleanup: runCleanups,
+  exit: (code) => process.exit(code),
+};
+
 function ensureExitHook() {
   if (exitHookInstalled) return;
   exitHookInstalled = true;
-  process.on("exit", () => { killLiveEngines(); runCleanups(); });
+  process.on("exit", () => {
+    // an engine still live when the process exits (a crash, an uncaught error) is killed AND waited for
+    stopEngines(defaultDeps);
+    runCleanups();
+  });
 }
 
 function pidAlive(pid) {
@@ -584,16 +721,25 @@ function pidAlive(pid) {
 // installLifecycle: make the runner kill its engine tree and remove its temp dirs when it is
 // told to stop (SIGTERM / SIGINT / SIGHUP) and when its parent disappears (process.ppid
 // changes, or the original parent no longer exists), so cleanup never depends on a graceful
-// exit by the parent. Idempotent. `pollMs` is the parent-watch interval.
-export function installLifecycle({ pollMs = Number(process.env.IGPU_PARENT_POLL_MS) || 1000 } = {}) {
+// exit by the parent. It exits only AFTER the engine tree is gone (bounded by ENGINE_EXIT_WAIT_MS).
+// Idempotent. `pollMs` is the parent-watch interval; `deps` replaces the pieces a test observes
+// (pids, kill, wait, cleanup, exit).
+export function installLifecycle({ pollMs = Number(process.env.IGPU_PARENT_POLL_MS) || 1000, deps = {} } = {}) {
   ensureExitHook();
   if (lifecycleInstalled) return;
   lifecycleInstalled = true;
+  const d = { ...defaultDeps, ...deps };
+  let dying = false;
   const die = (code, why) => {
+    if (dying) return;
+    dying = true;
     try { process.stderr.write(`igpu-engine: ${why}; killing the engine tree and cleaning up\n`); } catch { /* stderr may be gone */ }
-    killLiveEngines();
-    runCleanups();
-    process.exit(code);
+    const w = stopEngines(d);
+    if (!w.gone) {
+      try { process.stderr.write(`igpu-engine: engine process(es) ${w.alive.join(",")} still present after ${w.waitedMs} ms\n`); } catch { /* ignore */ }
+    }
+    d.cleanup();
+    d.exit(code);
   };
   for (const [sig, code] of [["SIGTERM", 143], ["SIGINT", 130], ["SIGHUP", 129]]) {
     process.on(sig, () => die(code, `received ${sig}`));
@@ -656,7 +802,10 @@ export function runEngine({ bin, args, env, timeoutMs = 0, guard, label = "engin
     const child = spawnImpl(bin, args, {
       env: { ...process.env, ...(env || {}) },
       stdio: ["ignore", "pipe", "pipe"],
-      detached: process.platform !== "win32",
+      // NOT detached: the engine stays in the runner's process group, so a SIGKILL of that group (gpugen's
+      // escalation when the runner cannot answer a SIGTERM) takes the engine with it. killTree walks its
+      // descendants itself.
+      detached: false,
       windowsHide: true,
     });
     liveEngines.add(child);
@@ -833,12 +982,37 @@ export function encodeMp4(ffmpeg, src, dst, fps, timeoutMs = 0, opts = {}) {
   }
 }
 
+const OWNER_FILE = ".igpu-owner";
+
+// sweepStaleTempDirs: remove the leftovers of runners that died without cleaning up (SIGKILL,
+// power loss): directories in `base` named `prefix*` whose owner marker names a process that no
+// longer exists. A directory with no marker, or whose owner is alive (another job, this one), is
+// left alone. Returns the directories removed. Best effort, never throws.
+export function sweepStaleTempDirs(prefix, base = tmpdir()) {
+  const removed = [];
+  try {
+    for (const name of readdirSync(base)) {
+      if (!name.startsWith(prefix)) continue;
+      const dir = join(base, name);
+      let owner;
+      try { owner = Number(readFileSync(join(dir, OWNER_FILE), "utf8").trim()); } catch { continue; }
+      if (!Number.isInteger(owner) || owner <= 0 || owner === process.pid || pidAlive(owner)) continue;
+      try { rmSync(dir, { recursive: true, force: true }); removed.push(dir); } catch { /* best effort */ }
+    }
+  } catch { /* the base dir may not be listable */ }
+  return removed;
+}
+
 // makeTempDir: a private work dir under the OS temp dir, removed by cleanup() on every
 // exit path: the caller's finally, the process 'exit' hook, and installLifecycle's signal /
 // parent-gone handlers (which run every registered cleanup), so a killed job leaves no
 // frames behind.
 export function makeTempDir(prefix) {
+  sweepStaleTempDirs(prefix);
   const dir = mkdtempSync(join(tmpdir(), prefix));
+  // the owner marker lets a LATER runner tell this dir from a dead one's (a runner that was SIGKILLed
+  // cannot clean up after itself)
+  try { writeFileSync(join(dir, OWNER_FILE), String(process.pid)); } catch { /* best effort */ }
   let done = false;
   const cleanup = () => {
     if (done) return;

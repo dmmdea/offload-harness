@@ -53,7 +53,7 @@ import {
 import {
   parseArgs, parseExtraArgs, refuseExtraArgs, runEngine, createLogGuard, installLifecycle,
   makeDeadline, finiteNum, makeTempDir, refuseRelativeBinary, ensureOutDir, CPU_BACKEND_REFUSED,
-  engineExitError, reportFatal, DEVICE_INVALID, partialPath, registerCleanup, deliverFile,
+  engineExitError, failAndExit, DEVICE_INVALID, partialPath, registerCleanup, deliverFile,
 } from "./igpu-engine.mjs";
 import { defaultRun, runFailure, UNMEASURABLE } from "./igpu-qa.mjs";
 
@@ -274,7 +274,6 @@ async function main() {
 // Run only as the main module — importing this file (tests) has no side effects.
 if (import.meta.url === pathToFileURL(process.argv[1] || "").href) {
   main().catch((e) => {
-    reportFatal("AUDIOCPP", e);
-    process.exit(1);
+    failAndExit("AUDIOCPP", e);
   });
 }
