@@ -61,6 +61,34 @@ test("music: --task gen with the ace_step family, lyrics and --duration-seconds;
   assert.equal(a[a.length - 1], "o.wav");
 });
 
+// What parseArgs hands over for a flag given with no value is `undefined` (a key that is present), and
+// --seconds may arrive empty, as text, zero or negative: none of it may reach audiocpp_cli as an option
+// or as the word "undefined".
+test("music: --lyrics, --duration-seconds and --seed never reach the argv when unset, empty, not a number or not positive", () => {
+  const base = { family: "ace_step", model: "m", backend: "vulkan", device: "0" };
+  for (const [name, flags] of [
+    ["absent", base],
+    ["unset", { ...base, lyrics: undefined, seconds: undefined, seed: undefined, lang: undefined }],
+    ["empty", { ...base, lyrics: "", seconds: "", seed: "" }],
+    ["not a number", { ...base, seconds: "abc", seed: "x" }],
+    ["not positive", { ...base, seconds: "0" }],
+    ["negative", { ...base, seconds: "-5" }],
+  ]) {
+    const a = buildAudiocppArgs({ kind: "music", outFile: "o.wav", text: "t", flags });
+    for (const x of a) assert.ok(!/undefined|NaN|null/.test(String(x)), `${name}: ${JSON.stringify(x)} must not reach the argv`);
+    for (const o of ["--lyrics", "--duration-seconds", "--seed"]) assert.ok(!a.includes(o), `${name}: ${o} must be omitted`);
+  }
+  // and the same options do reach it when they are real
+  const a = buildAudiocppArgs({ kind: "music", outFile: "o.wav", text: "t", flags: { ...base, lyrics: "la", seconds: "12.5", seed: "3.4" } });
+  assert.equal(a[a.indexOf("--lyrics") + 1], "la");
+  assert.equal(a[a.indexOf("--duration-seconds") + 1], "12.5");
+  assert.equal(a[a.indexOf("--seed") + 1], "3", "the seed is rounded to an integer");
+  const v = buildAudiocppArgs({ kind: "voice", outFile: "o.wav", text: "t", flags: { ...base, family: "chatterbox", lang: undefined, clone: undefined, seconds: "30", lyrics: "ignored" } });
+  assert.equal(v[v.indexOf("--language") + 1], "es", "an unset language is the house default, not 'undefined'");
+  assert.ok(!v.includes("--voice-ref") && !v.includes("--duration-seconds") && !v.includes("--lyrics"), "a voice job takes none of the music options");
+  for (const x of v) assert.ok(!/undefined|NaN|null/.test(String(x)), JSON.stringify(x));
+});
+
 test("an unknown kind throws", () => {
   assert.throws(() => buildAudiocppArgs({ kind: "sfx", outFile: "o", text: "t", flags: {} }), /voice or music/);
 });

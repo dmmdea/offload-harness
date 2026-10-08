@@ -87,6 +87,20 @@ test("buildSdAnimateArgs: --vae-tile-overlap 0.25 by default (override allowed),
   assert.throws(() => buildSdAnimateArgs({ ...base, flags: { ...flags, "vae-tile-overlap": "1.5" } }), /vae-tile-overlap/);
 });
 
+// What parseArgs hands over for a flag given with no value is `undefined` (a key that is present), and a
+// numeric option may arrive as "" or text: none of it may reach sd-cli as an option or as the word "undefined".
+test("buildSdAnimateArgs: options that are unset, empty or not a number never reach the argv", () => {
+  const base = { outFile: "o.webm", ref: "r.png", depthDir: "d", prompt: "p" };
+  const unset = { ...flags, negative: undefined, cfg: undefined, steps: undefined, "flow-shift": undefined, seed: undefined, tae: undefined };
+  const empty = { ...flags, negative: "", cfg: "", steps: "", "flow-shift": "", seed: "", tae: "" };
+  const text = { ...flags, cfg: "abc", steps: "x", "flow-shift": "y", seed: "z" };
+  for (const [name, f] of [["absent", flags], ["unset", unset], ["empty", empty], ["not a number", text]]) {
+    const a = buildSdAnimateArgs({ ...base, flags: f });
+    for (const x of a) assert.ok(!/undefined|NaN|null/.test(String(x)), `${name}: ${JSON.stringify(x)} must not reach the argv`);
+    for (const o of ["-n", "--cfg-scale", "--steps", "--flow-shift", "-s", "--taesd"]) assert.ok(!a.includes(o), `${name}: ${o} must be omitted`);
+  }
+});
+
 test("framesToRender: the request when the driver has enough, else the largest 4k+1 that exists, else 0", () => {
   assert.equal(framesToRender(49, 49), 49);
   assert.equal(framesToRender(49, 80), 49);

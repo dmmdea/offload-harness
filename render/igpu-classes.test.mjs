@@ -52,7 +52,8 @@ const guard = () => createLogGuard({ engine: "sdcpp" });
 const deviceLine = "console.error('ggml_vulkan: 0 = AMD Radeon Graphics (RADV RENOIR) (radv) | uma: 1');";
 
 test("runEngine: a crash signal is ENGINE_CRASHED, never a timeout through the word 'killed'", { skip: isWin && "POSIX signals" }, async () => {
-  for (const sig of ["SIGSEGV", "SIGABRT", "SIGBUS"]) {
+  // each of the six crash signals on its own: dropping any one from CRASH_SIGNALS turns it into "killed by signal"
+  for (const sig of ["SIGSEGV", "SIGABRT", "SIGBUS", "SIGFPE", "SIGTRAP", "SIGSYS"]) {
     await assert.rejects(
       runEngine({ bin: process.execPath, args: ["-e", `${deviceLine}process.kill(process.pid,'${sig}');setInterval(()=>{},1000)`], guard: guard(), label: "sd-cli" }),
       (e) => new RegExp(ENGINE_CRASHED).test(e.message) && e.message.includes(sig) && !/killed/i.test(e.message) && errorClass(e.message) === "engine_crashed",

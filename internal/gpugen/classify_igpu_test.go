@@ -20,6 +20,10 @@ func TestClassifyErrIGPUWordingTable(t *testing.T) {
 		{"sd-cli was killed by signal SIGSEGV", "engine_crashed"},
 		{"sd-cli was killed by signal SIGABRT", "engine_crashed"},
 		{"audiocpp_cli was killed by signal SIGBUS", "engine_crashed"},
+		// each of the six crash signals on its own: the regexp lists them one by one
+		{"sd-cli was killed by signal SIGFPE", "engine_crashed"},
+		{"sd-cli was killed by signal SIGTRAP", "engine_crashed"},
+		{"audiocpp_cli was killed by signal SIGSYS", "engine_crashed"},
 		{"ENGINE_CRASHED: sd-cli died of signal SIGSEGV: an engine crash, not a timeout", "engine_crashed"},
 		// ... but a stop or a kill from outside still is one
 		{"sd-cli was killed by signal SIGTERM", "timeout"},
