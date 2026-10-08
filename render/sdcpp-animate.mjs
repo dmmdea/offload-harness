@@ -51,7 +51,7 @@
 // reference latent itself and decodes exactly N, so the mp4 is trimmed only when the decoded
 // count is exactly N+4 (igpu-qa.mjs trimDecision, probed with ffprobe). The finished clip is
 // checked for black / frozen output before it is delivered.
-import { existsSync, mkdirSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -230,14 +230,14 @@ async function main() {
     const trim = trimDecision(decoded, n);
     if (trim.note) console.error("sdcpp-animate: " + trim.note);
     deadline.enforce("ffmpeg mp4 encode");
-    encodeMp4(ffmpeg, webm, out, OUTPUT_FPS, deadline.remainingMs(), { trimFirst: trim.trimFirst });
-    deadline.enforce("clip check");
-    try {
-      checkClip(ffmpeg, out, { timeoutMs: deadline.remainingMs() });
-    } catch (e) {
-      try { rmSync(out, { force: true }); } catch { /* best effort */ }
-      throw e;
-    }
+    // encode to a partial beside --out, reject a black / frozen clip before it replaces anything
+    encodeMp4(ffmpeg, webm, out, OUTPUT_FPS, deadline.remainingMs(), {
+      trimFirst: trim.trimFirst,
+      verify: (partial) => {
+        deadline.enforce("clip check");
+        checkClip(ffmpeg, partial, { timeoutMs: deadline.remainingMs(), label: out });
+      },
+    });
     console.log("WROTE", out);
   } finally {
     framesTmp.cleanup();

@@ -25,6 +25,7 @@ import { join } from "node:path";
 export const BLACK_CLIP = "BLACK_CLIP";
 export const FROZEN_CLIP = "FROZEN_CLIP";
 export const DEPTH_FRAMES_INVALID = "DEPTH_FRAMES_INVALID";
+export const UNMEASURABLE = "UNMEASURABLE";
 
 // defaultRun: spawnSync with text output; `timeoutMs` (0 = none) bounds the call.
 export function defaultRun(cmd, args, { timeoutMs = 0 } = {}) {
@@ -195,7 +196,7 @@ function coverage(segments, duration, snap = 0.125) {
 // entirely frozen (>= `entirely` of its length) fails; partial black or frozen stretches are
 // ordinary content (a fade, a held frame) and pass. Pure.
 export function assessClip({ duration, black, frozen, fps = 0 }, { entirely = 0.95 } = {}) {
-  if (!(duration > 0)) return { ok: false, kind: "UNMEASURABLE", reason: "the clip has no measurable duration" };
+  if (!(duration > 0)) return { ok: false, kind: UNMEASURABLE, reason: "ffmpeg reported no duration for the clip" };
   const snap = snapSeconds(fps);
   const b = coverage(black, duration, snap) / duration;
   const f = coverage(frozen, duration, snap) / duration;
@@ -212,14 +213,19 @@ export function buildClipCheckArgs(file) {
 }
 
 // checkClip: run the detectors over the whole clip and throw BLACK_CLIP / FROZEN_CLIP (typed,
-// not retried) for an entirely black or frozen one. Returns the verdict when the clip is alive.
-export function checkClip(ffmpeg, file, { timeoutMs = 0, run = defaultRun } = {}) {
+// not retried) for an entirely black or frozen one, and UNMEASURABLE when the clip's length could
+// not be read (it was not checked, so it is not delivered either). Returns the verdict when the
+// clip is alive. `label` names the clip in an error (the delivery path, when `file` is a partial).
+export function checkClip(ffmpeg, file, { timeoutMs = 0, run = defaultRun, label = file } = {}) {
   const r = run(ffmpeg, buildClipCheckArgs(file), { timeoutMs });
   if (r.error || r.status !== 0) throw runFailure("clip check", r);
   const text = String(r.stderr || "");
   const verdict = assessClip({ duration: parseDuration(text), black: parseBlackSegments(text), frozen: parseFreezeSegments(text), fps: parseFps(text) });
+  if (verdict.kind === UNMEASURABLE) {
+    throw new Error(`${UNMEASURABLE}: ${verdict.reason} (${label}), so the clip could not be checked for a black or frozen picture; it is not delivered. This says nothing about the picture itself. Not retried automatically.`);
+  }
   if (!verdict.ok) {
-    throw new Error(`${verdict.kind}: ${verdict.reason} (${file}); the engine exited 0 but delivered a clip with no picture in it, which is a failed render. Not retried automatically.`);
+    throw new Error(`${verdict.kind}: ${verdict.reason} (${label}); the engine exited 0 but delivered a clip with no picture in it, which is a failed render. Not retried automatically.`);
   }
   return verdict;
 }

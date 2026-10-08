@@ -23,6 +23,8 @@
 //     {kind:"video", extraFrames, black, frozen, ffmpeg}   a real clip at `-o` (frames = --video-frames + extraFrames)
 //     {kind:"wav", seconds, tailSilence, silent}    a PCM16 wav at `--out`
 //     {kind:"gray_png"}                              a 1-channel PNG at `--png`
+//     {kind:"last_arg", content}                     `content` written to the LAST argument (a fake ffmpeg)
+//   stdout:  [lines] printed to stdout (a fake ffprobe answers its duration there)
 //   inspectControlVideo: record the PNG headers found in the directory after --control-video
 // }
 //
@@ -216,8 +218,14 @@ function runAsEngine() {
     if (v) for (const l of v.split(/\r\n|\r|\n/)) process.stderr.write(l + "\n");
   }
 
+  // stdout: lines printed to stdout (a fake ffprobe answers its duration there)
+  for (const l of spec.stdout || []) process.stdout.write(l + "\n");
+
   const w = spec.writes;
-  if (w && w.kind === "gray_png") {
+  if (w && w.kind === "last_arg") {
+    // a fake ffmpeg: writes `content` to its last argument (the destination), then exits as told
+    writeFileSync(argv[argv.length - 1], w.content ?? "PARTIAL-BYTES");
+  } else if (w && w.kind === "gray_png") {
     const out = argAfter(argv, "--png");
     const input = argAfter(argv, "--input");
     // a depth map at the model's own working size, not the frame's

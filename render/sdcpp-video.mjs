@@ -48,7 +48,7 @@
 // DEADLINE: --timeout-sec counts from this process's start, so the llama-swap drain and every
 // pre-spawn step spend it; SIGTERM/SIGINT/SIGHUP and a vanished parent kill the engine tree
 // and remove the temp dir (installLifecycle).
-import { existsSync, rmSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { withGpuSlot } from "./gpu-lock.mjs";
@@ -173,15 +173,15 @@ async function main() {
       if (!existsSync(webm)) throw new Error("sd-cli exited 0 but produced no video at " + webm);
     });
     deadline.enforce("ffmpeg mp4 encode");
-    encodeMp4(ffmpeg, webm, shape.out, fps, deadline.remainingMs());
-    // a clip that is entirely black or entirely frozen is a failed render that exited 0: never delivered
-    deadline.enforce("clip check");
-    try {
-      checkClip(ffmpeg, shape.out, { timeoutMs: deadline.remainingMs() });
-    } catch (e) {
-      try { rmSync(shape.out, { force: true }); } catch { /* best effort */ }
-      throw e;
-    }
+    // The encode goes to a partial file beside the delivery path; a clip that is entirely black or
+    // entirely frozen is a failed render that exited 0, and is rejected BEFORE it replaces anything:
+    // a failed or rejected run never leaves a partial at --out nor overwrites a good clip already there.
+    encodeMp4(ffmpeg, webm, shape.out, fps, deadline.remainingMs(), {
+      verify: (partial) => {
+        deadline.enforce("clip check");
+        checkClip(ffmpeg, partial, { timeoutMs: deadline.remainingMs(), label: shape.out });
+      },
+    });
     console.log("WROTE", shape.out);
   } finally {
     tmp.cleanup();

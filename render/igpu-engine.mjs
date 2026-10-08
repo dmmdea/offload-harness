@@ -21,9 +21,9 @@
 //
 // Dependency-free (Node 18+ built-ins only).
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, accessSync, constants as fsConstants } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, renameSync, accessSync, constants as fsConstants } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, extname, isAbsolute, join, resolve } from "node:path";
 
 export const CPU_PLACEMENT = "CPU_PLACEMENT";
 export const CPU_BACKEND_REFUSED = "CPU_BACKEND_REFUSED";
@@ -782,15 +782,54 @@ export function mp4Args(src, dst, fps, { trimFirst = 0 } = {}) {
     "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "16", "-r", String(fps), "-movflags", "+faststart", dst];
 }
 
-// encodeMp4: `timeoutMs` (0 = none) bounds the encode, so the runner's deadline covers it too.
+// partialPath: where a result is written before it is delivered: a hidden sibling of `dst` in the
+// SAME directory (so the final rename is atomic and never crosses a drive), with dst's extension
+// last (ffmpeg picks the container from it). The pid keeps two runners apart.
+export function partialPath(dst) {
+  const ext = extname(dst);
+  return join(dirname(dst), `.${basename(dst, ext)}.${process.pid}.part${ext}`);
+}
+
+// registerCleanup: run `fn` on every exit path of the runner (the process 'exit' hook and the signal /
+// parent-gone handlers, like the temp dirs). Returns the function that unregisters it.
+export function registerCleanup(fn) {
+  cleanups.add(fn);
+  ensureExitHook();
+  return () => cleanups.delete(fn);
+}
+
+// deliverFile: make `partial` the file at `dst`, atomically (rename). A result is only ever PUBLISHED
+// by this, so a failed or killed run never leaves a half-written file at the delivery path and a
+// re-run of the same request never overwrites a good clip with a partial one.
+export function deliverFile(partial, dst) {
+  renameSync(partial, dst);
+}
+
+// encodeMp4: `timeoutMs` (0 = none) bounds the encode, so the runner's deadline covers it too. The
+// encode writes to a partial file beside `dst`; `opts.verify(partialPath)` (optional) may throw to
+// reject it (the black / frozen clip gate); only then is it renamed onto `dst`. Any failure, a
+// rejection or a deadline kill removes the partial and leaves whatever was at `dst` untouched.
 export function encodeMp4(ffmpeg, src, dst, fps, timeoutMs = 0, opts = {}) {
   if (!ffmpeg) throw new Error("FFMPEG_UNAVAILABLE: ffmpeg could not be resolved (set ffmpeg_path, or put ffmpeg on PATH)");
-  const r = spawnSync(ffmpeg, mp4Args(src, dst, fps, opts), {
-    encoding: "utf8", ...(timeoutMs > 0 ? { timeout: timeoutMs, killSignal: "SIGKILL" } : {}),
-  });
-  if (r.error || r.status !== 0 || !existsSync(dst)) {
-    const timedOut = r.error && r.error.code === "ETIMEDOUT";
-    throw new Error((timedOut ? "ffmpeg mp4 encode timeout (killed): " : "ffmpeg mp4 encode failed: ") + (r.error ? r.error.message : String(r.stderr || "").trim().slice(-300)));
+  const { verify, ...mp4Opts } = opts;
+  const partial = partialPath(dst);
+  const rm = () => { try { rmSync(partial, { force: true }); } catch { /* best effort */ } };
+  const unregister = registerCleanup(rm);
+  try {
+    const r = spawnSync(ffmpeg, mp4Args(src, partial, fps, mp4Opts), {
+      encoding: "utf8", ...(timeoutMs > 0 ? { timeout: timeoutMs, killSignal: "SIGKILL" } : {}),
+    });
+    if (r.error || r.status !== 0 || !existsSync(partial)) {
+      const timedOut = r.error && r.error.code === "ETIMEDOUT";
+      throw new Error((timedOut ? "ffmpeg mp4 encode timeout (killed): " : "ffmpeg mp4 encode failed: ") + (r.error ? r.error.message : String(r.stderr || "").trim().slice(-300)));
+    }
+    if (verify) verify(partial);
+    deliverFile(partial, dst);
+  } catch (e) {
+    rm();
+    throw e;
+  } finally {
+    unregister();
   }
 }
 

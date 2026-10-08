@@ -41,7 +41,7 @@
 // wrote it (re-encoded only for a non-wav extension). Both kinds then pass the repo's dead-air gate
 // (audio-qa.mjs, the way comfy-music.mjs applies it) on the file as delivered: a render that
 // is silent (a Vulkan fp16 / NaN failure writes zeros and exits 0) fails typed as DEAD_AIR and
-// the file is removed. ffmpeg AND ffprobe are required up front (FFMPEG_UNAVAILABLE, before the
+// nothing is delivered. ffmpeg AND ffprobe are required up front (FFMPEG_UNAVAILABLE, before the
 // lease): audio nobody can verify is not a usable result.
 import { existsSync, copyFileSync, rmSync } from "node:fs";
 import { join, extname } from "node:path";
@@ -53,9 +53,9 @@ import {
 import {
   parseArgs, parseExtraArgs, refuseExtraArgs, runEngine, createLogGuard, installLifecycle,
   makeDeadline, finiteNum, makeTempDir, refuseRelativeBinary, ensureOutDir, CPU_BACKEND_REFUSED,
-  engineExitError, reportFatal, DEVICE_INVALID,
+  engineExitError, reportFatal, DEVICE_INVALID, partialPath, registerCleanup, deliverFile,
 } from "./igpu-engine.mjs";
-import { defaultRun, runFailure } from "./igpu-qa.mjs";
+import { defaultRun, runFailure, UNMEASURABLE } from "./igpu-qa.mjs";
 
 export { parseArgs };
 
@@ -154,12 +154,20 @@ function runStep(run, ffmpeg, args, dst, what) {
   if (!existsSync(dst)) throw new Error(`${what} failed: ffmpeg exited 0 but wrote no ${dst}`);
 }
 
-// gateDeadAir: the repo's dead-air gate (audio-qa.mjs) on the file as delivered. A file the
-// gate cannot measure (ffprobe sees no duration) is a failure too: ffprobe was verified up
-// front, so "cannot measure" means the audio is empty or unreadable.
+// gateDeadAir: the repo's dead-air gate (audio-qa.mjs) on the file as delivered. FAIL CLOSED: a file
+// the gate could not measure is never "clean". Two shapes of that: ffprobe sees no duration (the
+// audio is empty or unreadable: DEAD_AIR), and the measuring ffmpeg pass printed no loudness
+// summary (it exited non-zero, was killed, or lacks silencedetect / ebur128: UNMEASURABLE; measure()
+// reports only an ffmpeg that failed to SPAWN as null, and shares its code with comfy-music.mjs, so
+// the check lives here). A silent file still has a summary (ebur128 prints I: -70.0 LUFS for it), so
+// it keeps failing as dead air.
 export function gateDeadAir({ ffmpeg, ffprobe, file, measureFn = measure }) {
-  const verdict = assessDeadAir(measureFn(ffmpeg, ffprobe, file));
+  const measured = measureFn(ffmpeg, ffprobe, file);
+  const verdict = assessDeadAir(measured);
   if (verdict.skipped) throw new Error(`DEAD_AIR: the delivered audio could not be measured (${verdict.reason}): it is empty or unreadable`);
+  if (measured.integratedLUFS === null || measured.integratedLUFS === undefined) {
+    throw new Error(`${UNMEASURABLE}: the dead-air gate could not measure ${file}: ffmpeg's silencedetect/ebur128 pass printed no loudness summary (it failed, was killed, or this ffmpeg lacks the filters), so the audio was NOT checked and is not delivered. Not retried automatically.`);
+  }
   if (verdict.deadAir) throw new Error(`DEAD_AIR: ${verdict.reason}; the engine exited 0 but the audio is not usable. Not retried automatically.`);
   return verdict;
 }
@@ -168,16 +176,20 @@ export function gateDeadAir({ ffmpeg, ffprobe, file, measureFn = measure }) {
 // {did: "mastered" | "converted" | "copied", trimmedSec, verdict}.
 //   music  trim trailing silence -> fade-out + loudnorm -14 LUFS / -1 dBTP + 48 kHz -> dead-air gate
 //   voice  the engine's wav as it is (re-encoded for a non-wav extension) -> dead-air gate
-// On a failed gate the delivered file is removed (a QA gate on our own broken output).
+// Everything is written to a PARTIAL file beside `out` and renamed onto it only after the gate has
+// passed: a failed step, a failed gate or a kill never leaves a half-written file at `out`, and
+// never removes a good file that was already there (a re-run of the same request has the same path).
 export function finalizeAudio({ ffmpeg, ffprobe, wav, out, kind, workDir, run = defaultRun, measureFn = measure, durationFn = durationSec, log = (m) => console.error(m) }) {
   if (!ffmpeg || !ffprobe) {
     throw new Error("FFMPEG_UNAVAILABLE: ffmpeg/ffprobe could not be resolved (set ffmpeg_path, or put both on PATH): the audio's trim / loudness / dead-air checks cannot run");
   }
   const wantWav = extname(out).toLowerCase() === ".wav";
+  const partial = partialPath(out);
+  const rm = () => { try { rmSync(partial, { force: true }); } catch { /* best effort */ } };
+  const unregister = registerCleanup(rm);
   let did;
   let trimmedSec = 0;
   let verdict;
-  let touched = false; // `out` is only ours to remove once a step has started writing it
   try {
     if (kind === "music") {
       const trimmed = join(workDir, "trimmed.wav");
@@ -187,25 +199,23 @@ export function finalizeAudio({ ffmpeg, ffprobe, wav, out, kind, workDir, run = 
       if (!(after > 0)) throw new Error("DEAD_AIR: the trailing-silence trim left no audio: the whole render is silence");
       trimmedSec = Math.max(0, before - after);
       if (trimmedSec > 0.05) log(`audiocpp-generate: trimmed ${trimmedSec.toFixed(2)}s of trailing silence`);
-      touched = true;
-      runStep(run, ffmpeg, buildMasterArgs({ src: trimmed, dst: out, duration: after }), out, "ffmpeg fade/loudness master");
+      runStep(run, ffmpeg, buildMasterArgs({ src: trimmed, dst: partial, duration: after }), partial, "ffmpeg fade/loudness master");
       did = "mastered";
     } else if (wantWav) {
-      touched = true;
-      copyFileSync(wav, out);
+      copyFileSync(wav, partial);
       did = "copied";
     } else {
-      touched = true;
-      runStep(run, ffmpeg, buildConvertArgs({ src: wav, dst: out }), out, "ffmpeg re-encode");
+      runStep(run, ffmpeg, buildConvertArgs({ src: wav, dst: partial }), partial, "ffmpeg re-encode");
       did = "converted";
     }
-    verdict = gateDeadAir({ ffmpeg, ffprobe, file: out, measureFn });
+    verdict = gateDeadAir({ ffmpeg, ffprobe, file: partial, measureFn });
+    deliverFile(partial, out);
   } catch (e) {
     // a QA gate on our own broken output, or a failed step that left a partial file: nothing is delivered
-    if (touched) {
-      try { rmSync(out, { force: true }); } catch { /* best effort */ }
-    }
+    rm();
     throw e;
+  } finally {
+    unregister();
   }
   return { did, trimmedSec, verdict };
 }

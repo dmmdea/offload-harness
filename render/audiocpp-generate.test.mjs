@@ -88,7 +88,8 @@ test("the script reports a bad kind and missing flags with exit 2", () => {
 // finalizeAudio takes an injectable `run` / `measureFn` / `durationFn`, so every decision is
 // tested against captured-shape tool results without spawning ffmpeg; the real chain is run
 // end to end by igpu-runners-main.test.mjs.
-import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, readdirSync } from "node:fs";
+import { extname } from "node:path";
 import { tmpdir } from "node:os";
 import {
   finalizeAudio, gateDeadAir, buildTrimTailArgs, buildMasterArgs, buildConvertArgs, fadeSeconds,
@@ -179,7 +180,12 @@ test("finalizeAudio voice: a .wav is the engine's file byte for byte (no ffmpeg 
     const f = finalizeAudio({ ...base, wav: w.wav, out: w.out("v.flac"), kind: "voice", workDir: w.dir, run: flacRun.run });
     assert.equal(f.did, "converted");
     assert.equal(flacRun.calls.length, 1);
-    assert.equal(flacRun.calls[0].args[flacRun.calls[0].args.length - 1], w.out("v.flac"));
+    // ffmpeg writes a PARTIAL beside the delivery path (same directory, same extension), which is then
+    // renamed onto it - never the delivery path itself
+    const dst = flacRun.calls[0].args[flacRun.calls[0].args.length - 1];
+    assert.equal(dirname(dst), dirname(w.out("v.flac")));
+    assert.ok(dst !== w.out("v.flac") && dst.endsWith(".flac") && dst.includes(".part."), dst);
+    assert.ok(!existsSync(dst), "the partial is gone once it has been renamed onto the result");
     assert.equal(readFileSync(w.out("v.flac"), "utf8"), "stub-output-0", "ffmpeg's output, not the raw wav bytes under a .flac name");
   } finally { w.done(); }
 });
@@ -191,7 +197,10 @@ test("finalizeAudio: the dead-air gate runs on the DELIVERED file for voice and 
     try {
       const seen = [];
       assert.throws(() => finalizeAudio({ ...base, wav: w.wav, out: w.out(out), kind, workDir: w.dir, run: stubRun().run, measureFn: (_f, _p, file) => { seen.push(file); return silent; } }), /DEAD_AIR: .*silence/);
-      assert.deepEqual(seen, [w.out(out)], "measured on the file as delivered");
+      assert.equal(seen.length, 1);
+      assert.equal(dirname(seen[0]), dirname(w.out(out)), "measured on the file that would be delivered (the partial beside the result)");
+      assert.ok(seen[0].endsWith(extname(out)) && seen[0].includes(".part."), seen[0]);
+      assert.ok(!existsSync(seen[0]), "the rejected partial is removed");
       assert.ok(!existsSync(w.out(out)), `${kind}: a failed gate removes what it rejects`);
       assert.throws(() => finalizeAudio({ ...base, wav: w.wav, out: w.out(out), kind, workDir: w.dir, run: stubRun().run, measureFn: () => null }), /DEAD_AIR: the delivered audio could not be measured/);
     } finally { w.done(); }
