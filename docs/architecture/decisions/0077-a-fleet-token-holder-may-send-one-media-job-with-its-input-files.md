@@ -36,7 +36,10 @@ Three facts stood in the way.
    `video-gen.still`, `animate.ref`, `animate.driver` and `audio-gen.clone`; `image-gen` and `run-graph` take none.
 2. **Closed unless the node opts in, and never open without a token.** The door is advertised and admitted only when
    `fleet_media_inputs` is true, `fleet_auth_token` is set and at least one media task is bound
-   (`config.MediaInputsAdmissible`, and in the advertisement at least one inner task this node can run right now). The door
+   (`config.MediaInputsAdmissible`, and in the advertisement at least one inner task this node can run right now). "Bound" is the
+   advertisement's own notion: a ComfyUI/python script, the speech endpoint, or the sd.cpp / audio.cpp engine that replaces it
+   (`VideoGenBound`, `AnimateGenBound`, `VoiceGenBound`, `MusicGenBound`), so a node whose only renderers are the engines, with
+   every script key blank, opens the door too. The door
    and the bearer are checked before any of the body is read; the body is capped at the bundle cap in base64 plus 64 KiB
    (`fleet_media_inputs_max_mb`, default 256 MiB compressed); the decoder refuses unknown fields; a token holder gets a
    15-minute read and write window. `media-job` is token-gated like `compose-project` (`tokenGated`), so a dispatch of it

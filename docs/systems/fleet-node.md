@@ -1748,7 +1748,9 @@ Three additions to the media tasks, all additive on the wire.
 in the bundle. The fields that may be files are `video-gen.still`, `animate.ref`, `animate.driver` and `audio-gen.clone`.
 
 - It is open only when `fleet_media_inputs` is true, `fleet_auth_token` is set and a media task is bound
-  (`config.MediaInputsAdmissible`; health lists `media-job` only while one inner task is also runnable). Closed, it answers
+  (`config.MediaInputsAdmissible`; "bound" is the advertisement's own notion, a script, the speech endpoint or the sd.cpp /
+  audio.cpp engine, so an engine-only node with every script key blank opens it; health lists `media-job` only while one inner
+  task is also runnable). Closed, it answers
   403; without the bearer, 401; both before a byte of the body is read. `media-job` is token-gated, so the same task over
   `/fleet/dispatch` needs the bearer too, and its jobs are masked from tokenless polls and feeds.
 - The body is capped at `fleet_media_inputs_max_mb` (default 256, compressed) in base64 plus 64 KiB (413 over it), is JSON

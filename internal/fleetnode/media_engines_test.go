@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"os"
 	"path/filepath"
 	"slices"
@@ -207,6 +208,50 @@ func TestABoxWithNeitherScriptNorEngineKeepsItsBehaviour(t *testing.T) {
 	cfg.VideoGenFamily = "fastwan"
 	if cfg.VideoGenBound() || mediaTaskBound(cfg, "video-gen") {
 		t.Error("a family name with no binding is not a bound video lane")
+	}
+}
+
+// The media-job door binds a task the way the advertisement does (CT-51, REL4): an engine-only box, with no
+// script key of any kind, that opted in and holds a fleet token advertises media-job and takes a bearer'd job
+// whose input file travels in the bundle (a still, a driver video, a clone sample). Before, the door looked only
+// at the script keys, so the box advertised video-gen, animate and audio-gen and could not be sent their inputs.
+// A box with nothing bound, or without the opt-in or the token, keeps the door shut.
+func TestAnEngineOnlyBoxOpensTheMediaJobDoor(t *testing.T) {
+	useRealMediaRoutes(t)
+	box := engineOnlyBox(t)
+	if c := box.cfg; c.VideoGenScript != "" || c.AnimateGenScript != "" || c.VoiceGenScript != "" || c.MusicGenScript != "" ||
+		c.TTSEndpoint != "" || c.RunGraphScript != "" || c.ImageGenAdvertisable() {
+		t.Fatal("the fixture binds a script or an image lane, so it no longer proves an engine-only box")
+	}
+	box.cfg.FleetMediaInputs = true
+	s, _ := newTestServer(t, box.cfg, &inputRunner{}, nil)
+
+	tasks, _ := mediaHealthOf(t, s)
+	if !slices.Contains(tasks, MediaJobTask) {
+		t.Fatalf("an opted-in engine-only box with a token must advertise media-job: %v", tasks)
+	}
+	if rec := do(t, s, http.MethodPost, MediaJobPath, mjStillBody(t, "mj-engine"), bearer()); rec.Code != http.StatusAccepted {
+		t.Fatalf("media-job on an engine-only box = %d (%s), want 202: a remote caller could not send a still", rec.Code, rec.Body.String())
+	}
+	if rec := do(t, s, http.MethodPost, MediaJobPath, mjStillBody(t, "mj-engine-anon"), nil); rec.Code != http.StatusUnauthorized {
+		t.Errorf("media-job without the bearer = %d, want 401", rec.Code)
+	}
+
+	nothing := config.Config{NodePath: "node", FleetMediaInputs: true, FleetAuthToken: "tok", MediaDir: t.TempDir()}
+	for name, cfg := range map[string]config.Config{
+		"nothing bound":     nothing,
+		"engine, no opt-in": func() config.Config { c := box.cfg; c.FleetMediaInputs = false; return c }(),
+		"engine, no token":  func() config.Config { c := box.cfg; c.FleetAuthToken = ""; return c }(),
+	} {
+		t.Run(name, func(t *testing.T) {
+			s, _ := newTestServer(t, cfg, &inputRunner{}, nil)
+			if tasks, _ := mediaHealthOf(t, s); slices.Contains(tasks, MediaJobTask) {
+				t.Errorf("media-job advertised: %v", tasks)
+			}
+			if rec := do(t, s, http.MethodPost, MediaJobPath, mjStillBody(t, "mj-closed"), bearer()); rec.Code != http.StatusForbidden {
+				t.Errorf("media-job = %d (%s), want 403: the door is closed", rec.Code, rec.Body.String())
+			}
+		})
 	}
 }
 

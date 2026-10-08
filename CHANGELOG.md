@@ -256,6 +256,15 @@ each guard was broken once at its real call site and seen red.
   a synchronous `writeSync(2, ...)` that retries a momentarily full pipe (EAGAIN) and stops quietly when the reader is gone (EPIPE).
   The production runners were never at fault (they read until the stream closes). Run under Linux (Node 22.23.1): 2 of 20 failed before
   (`--offload-to-cpu` sanctioned spill, device reset), 20 of 20 pass after, none skipped; Windows (Node 26.7.0) stays 20 of 20.
+- **An engine-only node opens the media-job door (REL4).** `config.MediaInputsAdmissible` bound a task only through the ComfyUI script
+  keys, the speech endpoint and `run_graph_script`, while `fleetnode.mediaTaskBound` had moved onto the engine-aware helpers (CT-51 I1),
+  so the repository held two notions of "bound". A node whose renderers are the sd.cpp and audio.cpp engines, with every script key
+  blank (the shape of the CT-49 tests and the rockchip seed), advertised `video-gen`, `animate` and `audio-gen` but not `media-job`, and
+  a remote caller could not send it a still, a reference and driver pair or a clone sample. The predicate now binds through
+  `VideoGenBound`, `AnimateGenBound`, `VoiceGenBound` (which includes `tts_endpoint`), `MusicGenBound` and `run_graph_script`; a node
+  with nothing bound, no opt-in or no token keeps the door closed. Tests: `TestMediaInputsAdmissibleBindsThroughTheEngineAwareHelpers`
+  and `TestAnEngineOnlyBoxOpensTheMediaJobDoor` (an engine-only box advertises `media-job` and takes a bearer'd still); with the old
+  predicate restored both fail, the second with `[video-gen animate audio-gen]` advertised and no `media-job`.
 
 ### Changed — `--offload-to-cpu` is sanctioned spill on the iGPU media engines
 

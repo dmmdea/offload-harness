@@ -3206,12 +3206,18 @@ func (c Config) EffectiveComposeBundleMaxBytes() int64 {
 // operator opted in, the node holds a fleet token for the door to check, and at least one media
 // task (image, video, animation, voice or music, run-graph) is bound. One predicate for the
 // route, the fleet advertisement and admission, so the door is never open without a token.
+//
+// "Bound" is the notion the fleet advertisement binds a task with (fleetnode.mediaTaskBound): a
+// ComfyUI/python script, the speech endpoint, OR the CT-49 engine that replaces it (the *Bound
+// helpers), so a node whose only renderers are sd.cpp and audio.cpp, with every script key blank,
+// opens the door like any other. Two notions of bound would leave it advertising video-gen,
+// animate and audio-gen but unable to take a still, a driver video or a clone sample.
 func (c Config) MediaInputsAdmissible() bool {
 	if !c.FleetMediaInputs || c.FleetAuthToken == "" {
 		return false
 	}
-	return c.ImageGenAdvertisable() || c.VideoGenScript != "" || c.AnimateGenScript != "" ||
-		c.VoiceGenScript != "" || c.MusicGenScript != "" || c.TTSEndpoint != "" || c.RunGraphScript != ""
+	return c.ImageGenAdvertisable() || c.VideoGenBound() || c.AnimateGenBound() ||
+		c.VoiceGenBound() || c.MusicGenBound() || c.RunGraphScript != ""
 }
 
 // DefaultMediaInputsMaxMB is the media-job bundle cap when fleet_media_inputs_max_mb is unset.
