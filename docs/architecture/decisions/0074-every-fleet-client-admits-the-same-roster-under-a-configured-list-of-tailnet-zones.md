@@ -99,7 +99,8 @@ every lane the harness has, and a roster entry must mean the same thing to all o
    caller instead of following it (`rosterprobe.NoRedirect`), so a node, or a proxy in front of one, cannot have the
    client replay the request and its `Authorization` header at a `Location` it chose. The health read
    (`delegate.healthClient` in `internal/delegate`, which also sends the bearer) is that package's, was not changed, and
-   still follows redirects; giving it the same policy belongs to that package's owner.
+   still follows redirects; giving it the same policy belongs to that package's owner. (Since 0.173.0 it does not:
+   the health read and the dispatch, poll and withdraw client both refuse redirects, `delegate.refuseRedirect`.)
 
 ## Consequences
 

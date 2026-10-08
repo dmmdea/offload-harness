@@ -374,8 +374,9 @@ const maxHealthBody = 1 << 20
 // the dial-time gate holds even when a MagicDNS name's resolution drifts —
 // the URL-shape check alone cannot promise that.
 var healthClient = &http.Client{
-	Transport: netguard.SafeTransport(nil),
-	Timeout:   fetchNodeViewTimeout,
+	Transport:     netguard.SafeTransport(nil),
+	Timeout:       fetchNodeViewTimeout,
+	CheckRedirect: refuseRedirect,
 }
 
 // MediaRouteView mirrors fleetnode.MediaRouteHealth: one media route and its verdict on that node.
@@ -402,6 +403,13 @@ func (v NodeView) RouteState(route string) (state string, known bool) {
 	}
 	return "", false
 }
+
+// refuseRedirect hands a 3xx back to the caller instead of following it (ADR 0074 decision 9). Every request the
+// delegator sends a roster node carries fleet_auth_token, so following a Location would let a node, or a proxy in
+// front of one, have the client replay the request and its Authorization header wherever it chose. The callers
+// read the 3xx as the failure or refusal any other non-2xx status is. rosterprobe.NoRedirect is the same rule; it
+// cannot be shared from there because rosterprobe imports this package.
+func refuseRedirect(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 
 // SeatRateView mirrors fleetnode.SeatRateHealth.
 type SeatRateView struct {

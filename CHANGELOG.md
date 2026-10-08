@@ -6,7 +6,7 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
-## [0.172.0] - 2026-10-08 - Remote media routing, the media-job door, and iGPU media engines (sd.cpp video and animate, audio.cpp voice and music)
+## [0.173.0] - 2026-10-08 - Remote media routing, the media-job door, and iGPU media engines (sd.cpp video and animate, audio.cpp voice and music)
 
 A caller on any machine can now send one render to a fleet node together with its input files, name the node or let the roster place it, and get the output back with its bytes verified (the media-job door, ADR 0077); a node advertises and admits a media task only while its route is actually CONFIGURED, so a missing weight drops the task out of the roster instead of failing jobs. A box whose only GPU is a Vulkan iGPU, with no CUDA, no ROCm and no model on the CPU, now serves video (I2V and T2V), character animation, voice with cloning and music through stable-diffusion.cpp and audio.cpp, advertises those lanes to the fleet, and ships the measured amd-gcn seed for them.
 
@@ -371,6 +371,124 @@ runs: the first line that places a compute module on the CPU (a software Vulkan 
 `TestACPUBackendIsATypedDeferOnEveryIGPULane`, `TestACPUOrUnsetBackendMakesEveryIGPURouteBoundButMissing` and the node tests in
 `render/igpu-engine.test.mjs` (each guard was broken once and seen red). The first cut of the log guard was negative-only and
 fixture-modelled; the entry above replaces it with the positive guard pinned to real captured logs.
+
+## [0.172.0] - 2026-10-08 - a single-slot node publishes one worker, and the ranking eta stops at no wall
+
+### Fixed — a node whose agent seat serves one request at a time now publishes one worker, and doctor shows the mismatch
+
+- **Ten tiers seed `fleet_max_concurrent_jobs: 1`.** A node publishes `fleet_max_concurrent_jobs` workers (default 4) and the
+  delegator deals it as many jobs as that leaves free. Over an agent seat that serves `--parallel 1` those are one worker and
+  three jobs waiting inside the seat, charged to their wall, while the delegator counted them as parallel. Seen 2026-10-08
+  during a 12-page research call: one single-slot node published 4 and held 3 running, another held 4 running plus 1 queued.
+  The scope is a rule, not a list: every tier whose agent seat, resolved through its aliases, is a single-slot llama.cpp entry
+  of the rendered serving template (`--parallel 1`, `--parallel=1`, `-np 1` or `LLAMA_ARG_N_PARALLEL=1`, on every OS the tier
+  renders for) seeds 1. That selects `amd-gcn`, `amd-rdna3-dgpu`, `ampere-6`, `ampere-8`, `blackwell-8`, `blackwell-32`,
+  `blackwell-48`, `blackwell-72`, `dual-gpu` and `volta-16`. Out of scope, with the reason in the test: the four tiers that
+  declare a vLLM agent seat (`ampere-16`, `blackwell-16`, `blackwell-2x16`, `blackwell-3x16`: that seat serves many requests at
+  once, so a one-worker cap there is the opposite defect), and the tiers that seed no agent seat, which are three cases and not
+  one. `rockchip-rk3588` serves its NPU seat (`qwen3.5-2b-npu`, one generation at a time), not an agent seat, and already seeds 1
+  for it. `amd-rdna3` and `cpu` seed no agent seat at all: their agent lane falls back to the workhorse (`offload-e4b`, which
+  also serves `--parallel 1`) and their cap stays at the default 4, a known gap that is a separate decision and not fixed here.
+  `fleet_max_queue_depth` stays unseeded (one running, one waiting, the rk3588 precedent). `docs/tiers/*.md` gain one row each.
+- **The key is also the delegator's own run-cap line, on purpose.** On such a box the local seat takes one run at a time and the
+  rest of a call goes to the fleet, because a single-slot seat serves one request at a time. It governs the text-endpoint lanes
+  (agent and text jobs), not media, stt or pipeline routes. `OPERATOR-GUIDE.md`, `FLEET-NODE.md` and `systems/fleet-node.md` no
+  longer state a default of 4 workers as if universal.
+- **A seed reaches fresh configs only.** A live node keeps its own value until `fleet_max_concurrent_jobs` is set in its
+  `config.json` and `fleet-serve` is restarted; `local-offload audit-config` lists the key as `SEED-ONLY` or `DIFFERENT` until then.
+- **`doctor` prints a `capacity:` row on a box with an agent seat.** It compares the published cap with the slots of the agent
+  seat in the LIVE serving config (`serving_config_path`; `--parallel N`, `--parallel=N`, `-np N`, `LLAMA_ARG_N_PARALLEL`; macros
+  expanded, alias-aware, a command-line flag beats the env twin): `OK` when the cap equals the slots, `OK` (saying so) when it is
+  below them, `WARN` with the value to set when it exceeds them or is unlimited, `UNKNOWN` naming why when the slots cannot be read
+  (the path is unset or unreadable, no entry answers to the seat, it is not a llama.cpp entry, or it states no slot flag). It never
+  changes the exit code and is silent on a config with no agent seat. `servingtmpl.SeatParallel` and `SeatParallelWhy` are the reader.
+- **The doctor row follows the seat the box serves.** A box of a vLLM tier (`ampere-16`, `blackwell-16`, `blackwell-2x16`,
+  `blackwell-3x16`) whose vLLM venv is not installed serves the tier's llama.cpp fallback at `--parallel 1`, so the row correctly
+  warns that a cap of 4 exceeds one slot; an operator who followed it and installed the venv later would have ended at a cap of 1
+  over a `max_num_seqs` of 32 (4 on `ampere-16`). The WARN now says the cap must match the seat served now and be changed again whenever the seat changes
+  (to `max_num_seqs` on a vLLM seat), and a box whose tier (the installer's `installed.json`, else the config's `tier_profile`)
+  declares a vLLM seat it is not serving says so: the seat, its `max_num_seqs`, the fallback it serves, and the cap to raise to when
+  the seat takes over. With no provable tier the row names none. It stays informational; the exit code never changes.
+- **The row reads what a config states.** A stated `--parallel -1` or `auto` is read as the 4 slots llama-server serves for it
+  (it printed `states no --parallel` although one was stated), and an entry that is not llama.cpp reads as its llama-swap
+  `concurrencyLimit`, which a vLLM seat's installer sets to `max_num_seqs` (it printed that the slots were not in the file). A cap
+  above a limit is described as llama-swap answering 429, not as a wait. The new reader is `servingtmpl.SeatSlotsWhy`;
+  `SeatParallel` and `SeatParallelWhy` stay llama.cpp-only and now read `-1` and `auto` as 4 too.
+- Tests: `TestTheSingleSlotLlamaCppTiersSeedAOneWorkerFleetNode` (derives the tiers; pins `fleet_max_queue_depth` unseeded and the
+  vLLM-tier exemption), `TestEverySeededCapFitsTheSlotsOfTheSeatItsTierServes`, `TestAmdGcnSeedsTheSeatItWasMeasuredOn` (the cap),
+  `TestSeatParallelReadsTheSlotsOfTheEntryThatAnswersToTheAlias`, `TestACapOfOneGivesTheLocalSeatOneRunAtATime`,
+  `TestDoctorWarnsWhenTheFleetCapExceedsTheAgentSeatsSlots`, `TestDoctorCapacityRowIsOKWhenTheCapEqualsTheSeatsSlots`,
+  `TestDoctorCapacityRowIsOKWhenTheCapIsBelowTheSeatsSlots`, `TestDoctorCapacityRowWarnsOnAnUnlimitedCap`,
+  `TestDoctorCapacityRowSaysUnknownWhenTheServingConfigIsUnsetOrHoldsNoSuchSeat`, `TestDoctorCapacityRowNeverChangesTheExitCode`,
+  `TestDoctorStaysSilentAboutCapacityOnADefaultConfig`, `TestTierDocsAreCurrent` (after `go generate`),
+  `TestDoctorCapacityRowReadsAStatedAutoParallelAsFourSlots`, `TestDoctorCapacityRowReadsAVLLMSeatsConcurrencyLimit`,
+  `TestDoctorCapacityRowNamesTheVLLMSeatOfATierThatServesItsFallback`, `TestDoctorCapacityRowOnTheVLLMSeatItselfNamesMaxNumSeqs`,
+  `TestDoctorCapacityRowNamesNoVLLMTierItCannotProve`, `TestSeatSlotsWhyReadsAVLLMSeatsConcurrencyLimitAndNamesAnAutoCount`. Tested
+  against fixtures; no live node ran it before this release.
+
+### Fixed — the delegator never follows a redirect with the fleet bearer (ADR 0074 decision 9)
+
+- **The health read and the dispatch, poll and withdraw client refuse a 3xx instead of following it.** Every request the
+  delegator sends a roster node carries `fleet_auth_token`. ADR 0074 gave the token probe and the single-shot lane clients
+  that rule and left `delegate.healthClient` following redirects; `delegate.fleetClient`, which sends the contract itself,
+  followed them too. A node, or a proxy in front of one, could have had the client replay the request and its
+  `Authorization` header at a `Location` it chose. Both clients now hand the 3xx back (`refuseRedirect`), and the callers
+  read it as the failed health read or the refusal any other non-2xx status already is. Test:
+  `TestTheDelegatorNeverReplaysTheFleetBearerAtARedirectTarget`.
+
+### Fixed — test runs no longer write the operator's ledger
+
+- **The delegate, mcpserver and root test suites isolate the offload home as well as the state root.** On 2026-10-03,
+  1,204 `agent_run` rows written by `go test` runs of a development branch landed in the real ledger and read as fleet
+  traffic: 160 "no fleet node serves seat" deferrals and 46 "the result came from" verification failures, all against
+  fixture nodes, which a placement diagnosis then took for a wrong-seat routing defect. `config.Default()` fixes the
+  ledger and corpus paths from `DefaultBase()` when it is called, so a test that sets `Home` afterwards still wrote the
+  real files, and each `TestMain` guarded only `LOCAL_OFFLOAD_STATE_DIR`. Each now also points `LOCAL_OFFLOAD_HOME`
+  inside its throwaway directory (fail-closed, like the state root) and sets `LOCAL_OFFLOAD_ORIGIN=go-test`, so a row that
+  still escapes names its writer. Test: `TestMainIsolatesTheHomeAndTheLedger` in each package (red when the home is not
+  set).
+
+### Fixed — the ranking eta stops at no wall (ADR 0079)
+
+- **Seats that cannot finish inside the wall are ordered by speed again.** `etaFor` priced the final fitted to the contract's wall
+  and clamped the sum at the wall, so every such seat read the wall. Modelled with fixture rates (not live `seat_rate` readings),
+  a schema contract with an 8,192-token configured final, loaded seats, an explicit 300 s wall: seats at 43 / 40 / 22.5 / 20 / 12
+  tok/s all read 270 s and 6.57 / 3.9 tok/s read 300 s; they now read 48 / 52 / 92 / 103 / 171 and 312 / 526 s. The cap came with
+  0.128.1 (`d34a149a`), when the wall was a kill; ADR 0055 decision 2 made it an expectation. Placement ordered those seats by
+  queue estimates and the near-tie draw instead of speed.
+- **The new eta is `etaParts`: cold + the node's own wait + a reference final at the seat's rate.** The reference is
+  `seatrate.FinalBudgetFloor` tokens, and the same again for a schema's re-pack, plus the seat's own tool steps and think block;
+  no `FitFinalBudget`, no clamp, and the contract's wall is not an input (the same seat and contract at any `timeout_sec`, or
+  under `timeout_auto`, give the same parts). `otherSecExcludingCold`, whose only caller was the fit, is gone.
+  `chosenVerdictDetail` prints `eta N s (cold C + G gen)` from the same parts, and the bare total it printed for a contract with
+  no wall is gone. Unchanged: `feasibleFinal` still judges the wall, patience and the gates still read the node's wait, the node
+  still fits the final to the wall when it runs the job, and an idle slow seat still beats a busy fast one. The eta stays a
+  ranking number and must not become a patience or gate input.
+- **ADR 0079 supersedes the cap clause of ADR 0050 decision 3.** ADR 0050 carries only a link to it, and ADR 0073 a pointer.
+  `docs/systems/fleet-node.md` and `docs/systems/coding-agent.md` say the new definition. Every route that ranks by eta re-ranks
+  at once (auto, remote, the capacity wait, the retry, spread); there is no flag, because the old definition was the defect.
+  Placement among near-tied seats changes with it: the near-tie draw moves an eta by at most 10 % either way, so seats more than
+  about 22 % apart can no longer swap in it, and seats that used to tie at the wall (and were spread by the draw) now go to the
+  fastest unless it is busier or not idle (`provablyStartsNow` still ranks first, so an idle slow seat beats a busy fast one).
+- **Adequacy is a ranking key, not a number inside the score.** `fitInadequate = math.MinInt32` ranked a seat that cannot hold the
+  contract below every seat that can, on the premise that no score could reach it. A rated, adequate seat's mechanical score is
+  `-int(eta x 10) x 2^24 - window`, which passes that value once its eta exceeds about 12.8 s, on every build (a probe: -8,724,160,512
+  under the uncapped eta, -4,362,084,352 under the capped one), so such a seat ranked BELOW one that cannot hold the contract. It
+  was latent, because `placeSpreadWith` filters through `remoteEligible` before `fitPickWith` scores; the ranking no longer depends
+  on that. `scoreFit` and `scoreFitWith` return a `fitKey` (`adequate`, then `score`), `fitKey.beats` compares adequacy first, and
+  `fitPickWith` ranks adequacy ahead of the lease, saturation and free-card keys. An inadequate seat is still never excluded, only
+  ranked last. Placement over an already-eligible roster is unchanged. ADR 0079 said this was only a 32-bit overflow; it now says
+  what it is.
+- Tests: `TestAnInadequateSeatRanksLastBesideARatedSlowAdequateSeat` (a rated adequate seat with an eta above 13 s beside an
+  inadequate one; `TestScoreFitRanksAnInadequateSeatLast` only ever passed because its fixtures publish no rate),
+  `TestAdequacyOutranksEveryDemotionKeyOfTheSpreadPick`, `TestALayerDecisionThatDefersOrWaitsIsAnInadequateKey`,
+  `TestEtaForRanksSeatsByRateWhenNoneCanFinishInsideTheWall`, `TestEtaForSeparatesTwoSeatsTheOldCapTiedAtTheWall`,
+  `TestEtaForDoesNotDependOnTheContractsWall`, `TestEtaForHasNoOpinionWithoutARate`, `TestEtaForIsTheSumOfItsParts`,
+  `TestChosenVerdictDetailReportsColdWaitAndGenerationFromTheSameParts`, `TestPlaceRanksTwoSeatsThatCannotFinishInsideTheWallByRate`,
+  `TestEtaRankingIsAStrictWeakOrderingAcrossSeatsPastTheWall`. Rewritten to state the new rule: `TestEtaForNeverExceedsColdPlusWall`
+  is now `TestEtaForIsNotCappedAtTheWall`, `TestEtaForDoesNotDoubleCountAFittedRepack` is now
+  `TestEtaForChargesTheRepackOnceAtTheReferenceSize`, and `TestEtaForUnchangedWhenTheFinalIsNotFloored` (false under the new
+  rule) is now `TestEtaForPricesTheReferenceFinalWhateverTheSeatsConfiguredFinalIs`.
 
 ## [0.171.0] - 2026-10-08 - a research page that said something is no longer failed for lacking a verdict
 

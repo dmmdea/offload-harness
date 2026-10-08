@@ -156,8 +156,8 @@ func TestRemoteEligibilityRunsTheSameTableOverTheNodesRows(t *testing.T) {
 		t.Fatal("a small contract is eligible on both the implicit layer and the rows")
 	}
 	// The fit score ranks the DECIDED seat's window for a node with rows.
-	if s := scoreFit(st, both); s != -262144 {
-		t.Fatalf("scoreFit over rows = %d, want -(the long seat's window): the goal reads mechanical, so the smallest ADEQUATE seat wins", s)
+	if s := scoreFit(st, both); !s.adequate || s.score != -262144 {
+		t.Fatalf("scoreFit over rows = %+v, want an adequate -(the long seat's window): the goal reads mechanical, so the smallest ADEQUATE seat wins", s)
 	}
 }
 

@@ -184,7 +184,8 @@ call deadline instead of a fixed TTL)", and listed the wait under "Not solved he
   cuts, with no reserve; the reserve is exactly the guard that matters near the end of a call.
 - **A reserve sized from the node's `min_turn_sec` or the contract's wall.** Rejected for now: `etaFor` is capped at the
   wall and priced on a wall-fitted final (the diagnosis' F06, which needs its own ADR 0050 amendment), so a per-node
-  reserve built on it would inherit that. A flat reserve is a floor, not a promise that the job finishes.
+  reserve built on it would inherit that ([ADR 0079](0079-the-ranking-eta-is-not-capped-at-the-wall.md) has since ended the cap and the wall fit; building a
+  reserve on the new eta is a separate decision). A flat reserve is a floor, not a promise that the job finishes.
 - **End the wait early when every place in line has a known end past the call.** Rejected: a lease's declared end and a
   node's estimate are upper bounds, and "provably hopeless" is not provable. The defer carries the soonest end
   (`retry_after_sec`) either way.

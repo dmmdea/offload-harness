@@ -24,7 +24,7 @@ func mjStillBody(t *testing.T, id string) string {
 // The bound was the stt upload door's 2, copied unscaled. A media-job body is far larger than an stt upload's:
 // at the 256 MiB default cap one body holds the base64 text (a third larger than the bundle) beside the decoded
 // bundle, about 0.58 GiB, so the node-wide peak is slots x that figure. The door takes ONE body at a time, which
-// keeps its peak at the "under about 0.6 GiB" the config key and the docs promise (review of 0.172.0, C5S1).
+// keeps its peak at the "under about 0.6 GiB" the config key and the docs promise (review of 0.173.0, C5S1).
 func TestMediaJobDoorHoldsOneBodyAtATimeSoItsPeakIsTheDocumentedFigure(t *testing.T) {
 	const gib = int64(1) << 30
 	var def config.Config // the defaults: fleet_media_inputs_max_mb unset = 256

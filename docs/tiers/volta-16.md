@@ -71,6 +71,7 @@ here so they are never mistaken for a media capability:
 |---|---|
 | `agent_model` | `gemma-4-26b-agent` |
 | `agent_thinking` | `off` |
+| `fleet_max_concurrent_jobs` | `1` |
 
 ## Operator notes
 

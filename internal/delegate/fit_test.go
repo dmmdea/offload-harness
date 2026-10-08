@@ -2,6 +2,7 @@ package delegate
 
 import (
 	"encoding/json"
+	"math"
 	"strings"
 	"testing"
 
@@ -76,12 +77,12 @@ func TestScoreFitOrdersSeatsByShape(t *testing.T) {
 	small := NodeView{NodeID: "small-seat", AgentEnabled: true, AgentResident: true, AgentCtxTokens: 32768}
 
 	reason := fitSubtask("explain how these modules interact and why the guard fires", 100)
-	if scoreFit(reason, big) <= scoreFit(reason, small) {
-		t.Errorf("reasoning must prefer the roomier seat: big=%d small=%d", scoreFit(reason, big), scoreFit(reason, small))
+	if !scoreFit(reason, big).beats(scoreFit(reason, small)) {
+		t.Errorf("reasoning must prefer the roomier seat: big=%+v small=%+v", scoreFit(reason, big), scoreFit(reason, small))
 	}
 	mech := fitSubtask("list every exported function name in these files", 100)
-	if scoreFit(mech, small) <= scoreFit(mech, big) {
-		t.Errorf("mechanical must prefer the smaller adequate seat: small=%d big=%d", scoreFit(mech, small), scoreFit(mech, big))
+	if !scoreFit(mech, small).beats(scoreFit(mech, big)) {
+		t.Errorf("mechanical must prefer the smaller adequate seat: small=%+v big=%+v", scoreFit(mech, small), scoreFit(mech, big))
 	}
 }
 
@@ -102,11 +103,125 @@ func TestScoreFitRanksAnInadequateSeatLast(t *testing.T) {
 		if adequate(st, tooSmall) {
 			t.Fatalf("%q: 8000+%d must not fit a 4096 seat", goal, specReserve)
 		}
-		if scoreFit(st, tooSmall) >= scoreFit(st, adequateSeat) {
+		if !scoreFit(st, adequateSeat).beats(scoreFit(st, tooSmall)) {
 			t.Errorf("%q: an inadequate seat outranked an adequate one", goal)
 		}
-		if scoreFit(st, unadvertised) >= scoreFit(st, adequateSeat) {
+		if !scoreFit(st, adequateSeat).beats(scoreFit(st, unadvertised)) {
 			t.Errorf("%q: an UNADVERTISED ceiling outranked an advertised, adequate one", goal)
+		}
+	}
+}
+
+// TestAnInadequateSeatRanksLastBesideARatedSlowAdequateSeat is the same promise with a RATED adequate seat, which
+// the test above never exercised (its fixtures publish no rate). The score of a rated mechanical seat is
+// -int(eta x 10) x 2^24 - window, and past an eta of about 12.8 s that is below math.MinInt32: when "cannot hold
+// the contract" was that number, a slow adequate seat ranked BELOW a seat that could not hold the contract at
+// all, and the spread pick dealt the contract to the seat that cannot run it. The pick below is driven directly
+// (fitPickWith does no eligibility filtering), because that is where the collision was latent: placeSpreadWith
+// filters through remoteEligible first, and a ranking must not depend on that.
+func TestAnInadequateSeatRanksLastBesideARatedSlowAdequateSeat(t *testing.T) {
+	for _, goal := range []string{fitMechGoal, fitReasonGoal} {
+		st := fitSubtask(goal, 8000) // 8000 + specReserve is over 4096
+		slow := etaFixtureRemote("slow-adequate", 32768, 5, 0)
+		small := etaFixtureRemote("small-inadequate", 4096, 40, 0) // rated, and 8x faster: eta cannot be what ranks it
+		eta, rated := etaFor(st, slow)
+		if !rated || eta <= 13 {
+			t.Fatalf("%q: fixture bug: the adequate seat must be rated with an eta above 13 s, got %.1f s (rated %v)", goal, eta, rated)
+		}
+		if !adequate(st, slow) || adequate(st, small) {
+			t.Fatalf("%q: fixture bug: adequate(slow)=%v adequate(small)=%v", goal, adequate(st, slow), adequate(st, small))
+		}
+		ks, kt := scoreFit(st, slow), scoreFit(st, small)
+		if inferKind(st) == KindMechanical {
+			// The collision itself: the adequate seat's raw score sits below the value the inadequate seat used to carry.
+			if int64(ks.score) >= math.MinInt32 {
+				t.Fatalf("%q: fixture bug: the adequate seat's score %d is not below math.MinInt32, so this case would not have collided", goal, ks.score)
+			}
+		}
+		if !ks.adequate || kt.adequate {
+			t.Fatalf("%q: adequacy: slow=%+v small=%+v", goal, ks, kt)
+		}
+		if !ks.beats(kt) || kt.beats(ks) {
+			t.Errorf("%q: the adequate seat %+v must beat the inadequate one %+v, and not the reverse", goal, ks, kt)
+		}
+		// The spread pick, in both roster orders and from either rotation slot, so the incumbent is each seat in turn.
+		for _, order := range [][]NodeView{{small, slow}, {slow, small}} {
+			bases := []string{"http://" + order[0].NodeID, "http://" + order[1].NodeID}
+			for slot := 0; slot < 2; slot++ {
+				k := fitPick(st, order, bases, slot, map[string]bool{}, nil)
+				if k < 0 || order[k].NodeID != "slow-adequate" {
+					t.Errorf("%q: fitPick(slot %d, %s first) chose index %d, want the adequate seat although it is slower", goal, slot, order[0].NodeID, k)
+				}
+			}
+			// Ranking last is not excluding: once the adequate seat has taken its turn this cycle, the other still gets its slot.
+			dealt := map[string]bool{"http://slow-adequate": true}
+			if k := fitPick(st, order, bases, 0, dealt, nil); k < 0 || order[k].NodeID != "small-inadequate" {
+				t.Errorf("%q: fitPick with the adequate seat dealt chose index %d, want the remaining seat", goal, k)
+			}
+		}
+	}
+}
+
+// TestAdequacyOutranksEveryDemotionKeyOfTheSpreadPick: the keys fitPickWith leads with (an overdue lease, a
+// saturated node, free cards) order the seats that CAN hold the contract. None of them may lift a seat that
+// cannot hold it above one that can: it would fail at dispatch however free its cards are.
+func TestAdequacyOutranksEveryDemotionKeyOfTheSpreadPick(t *testing.T) {
+	st := fitSubtask(fitMechGoal, 8000)
+	for _, tc := range []struct {
+		name string
+		edit func(slow, small *NodeView)
+	}{
+		{"the inadequate seat has a free card and the adequate seat has none", func(slow, small *NodeView) {
+			slow.Devices, small.Devices = threeCards(97, 97, 97), threeCards(97, 0, 97)
+		}},
+		{"the adequate seat is saturated", func(slow, small *NodeView) {
+			slow.MaxQueueDepth, slow.QueueDepth = 1, 1
+		}},
+		{"the adequate seat holds an overdue lease", func(slow, small *NodeView) {
+			slow.LeaseOverdue = true
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			slow := etaFixtureRemote("slow-adequate", 32768, 5, 0)
+			small := etaFixtureRemote("small-inadequate", 4096, 40, 0)
+			tc.edit(&slow, &small)
+			for _, order := range [][]NodeView{{small, slow}, {slow, small}} {
+				bases := []string{"http://" + order[0].NodeID, "http://" + order[1].NodeID}
+				k := fitPick(st, order, bases, 0, map[string]bool{}, nil)
+				if k < 0 || order[k].NodeID != "slow-adequate" {
+					t.Errorf("fitPick (%s first) chose index %d, want the adequate seat: adequacy is the first key", order[0].NodeID, k)
+				}
+			}
+		})
+	}
+}
+
+// A node that publishes layer rows is judged by the table's decision, and a decision that defers or waits is
+// inadequate for the ranking exactly as it is for the gate.
+func TestALayerDecisionThatDefersOrWaitsIsAnInadequateKey(t *testing.T) {
+	big := Subtask{Contract: contractOfTokens(200_000)}
+	big.EstTokens = EstimateTokens(big.Contract)
+	deferred := eligibleRemote()
+	deferred.Layers = pairOnlyRows(t) // largest window 163,840: a defer
+	if dec, ok := remoteDecision(big, deferred); !ok || !dec.Defer {
+		t.Fatalf("fixture bug: want a defer, got %+v (ok %v)", dec, ok)
+	}
+	waiting := eligibleRemote()
+	waiting.Layers = fixtureRows(t, busyPair(2)) // overflow to the long seat evicts a mid-flight agent seat: a wait
+	if dec, ok := remoteDecision(big, waiting); !ok || !dec.Wait || dec.Defer {
+		t.Fatalf("fixture bug: want a wait, got %+v (ok %v)", dec, ok)
+	}
+	idle := eligibleRemote()
+	idle.Layers = fixtureRows(t, idlePair())
+	if k := scoreFit(big, idle); !k.adequate {
+		t.Fatalf("fixture bug: an idle pair holds the contract on its long seat, got %+v", k)
+	}
+	for name, v := range map[string]NodeView{"defer": deferred, "wait": waiting} {
+		if k := scoreFit(big, v); k.adequate {
+			t.Errorf("a %s decision is adequate: %+v", name, k)
+		}
+		if !scoreFit(big, idle).beats(scoreFit(big, v)) {
+			t.Errorf("a %s decision ranks level with or above a seat that holds the contract", name)
 		}
 	}
 }

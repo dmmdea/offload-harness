@@ -78,6 +78,7 @@ here so they are never mistaken for a media capability:
 | key | value |
 |---|---|
 | `agent_model` | `gemma4-26b-a4b` |
+| `fleet_max_concurrent_jobs` | `1` |
 
 ## Operator notes
 

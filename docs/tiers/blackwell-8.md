@@ -109,6 +109,7 @@ here so they are never mistaken for a media capability:
 | `agent_profile` | `research` |
 | `audiogen_timeout_sec` | `1500` |
 | `escalation_model` | `qwen3.5-9b-agent` |
+| `fleet_max_concurrent_jobs` | `1` |
 | `reasoning_model` | `qwen3.5-9b-agent` |
 
 ## Operator notes

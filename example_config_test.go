@@ -15,6 +15,7 @@ import (
 // code (go generate .) and has not drifted (the old file still said
 // the current escalation_model default after LO-17-class drift).
 func TestConfigExampleRoundTrips(t *testing.T) {
+	t.Setenv("LOCAL_OFFLOAD_HOME", "") // this test reads the user-home fallback; TestMain points the home elsewhere
 	cfg, err := config.Load("config.example.json")
 	if err != nil {
 		t.Fatal(err)

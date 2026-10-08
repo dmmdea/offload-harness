@@ -538,7 +538,7 @@ over the operator's tailnet. Two surfaces exist, both delegator-side:
   `tools/list` is byte-identical when the delegator role is off. Fans out 1–8 subtasks with
   bounded concurrency; placement is quality-first, then by expected completion (ADR 0050, 0.128.0):
   seats that fail the adequacy gate are never candidates; among adequate seats the one with the
-  earliest expected completion wins (cold load + queue wait + the fitted final's generation time),
+  earliest expected completion wins (cold load + queue wait + the time to produce a reference final at the seat's rate, ADR 0079),
   two candidates within 20 % are resolved by a seeded power-of-two draw, and a local seat counts as
   busy when a job is in flight or loading, not only when the GPU lease is held;
   results are verified against the contract's acceptance DSL **by the delegator** before

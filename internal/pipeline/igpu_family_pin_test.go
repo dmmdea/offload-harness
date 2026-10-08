@@ -63,7 +63,7 @@ func TestEngineLaneFamiliesMatchTheAdvertisedOnes(t *testing.T) {
 		// Run the real lane (a stub runner, an injected sampler) and read back the family it recorded the
 		// footprint under, which is what runAnimateCharacterSdcpp passes as fpFamily. The advertiser's family is
 		// compared with THAT, not with the config constant both sides happen to read today, so a lane that
-		// records under another name fails here (release 0.172.0 review, REL5).
+		// records under another name fails here (release 0.173.0 review, REL5).
 		requireNodePipeline(t)
 		dir := t.TempDir()
 		cfg := animateCfg(t, dir)

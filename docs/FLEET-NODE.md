@@ -62,8 +62,8 @@ endpoint. A dispatch is now **admitted** and waits its turn.
 
 | Key | Bounds | Default | Refuses? |
 |---|---|---|---|
-| `fleet_max_queue_depth` | `accepted` + `running` (health's `queue_depth`), **all task types** | 2x `fleet_max_concurrent_jobs` (8 with the default 4 workers — register S-04/C-25) | Yes — `503 queue full` |
-| `fleet_max_concurrent_jobs` | jobs actually executing, **`agent` only** | 4 | No — extra jobs WAIT in `accepted` |
+| `fleet_max_queue_depth` | `accepted` + `running` (health's `queue_depth`), **all task types** | 2x `fleet_max_concurrent_jobs` (8 with the default 4 workers, 2 with one — register S-04/C-25) | Yes — `503 queue full` |
+| `fleet_max_concurrent_jobs` | jobs actually executing, **`agent` and `text` jobs** (every task type that reaches the shared text endpoint, and a task type nobody has listed yet; media, stt, accel, compose and configured pipeline routes are exempt) | 4 (1 on a tier whose agent seat serves one slot: a node publishes the workers its seat really has, see [OPERATOR-GUIDE](OPERATOR-GUIDE.md)) | No — extra jobs WAIT in `accepted` |
 | `fleet_stt_max_concurrent` (0.164.0) | stt jobs actually executing, **both stt lanes** (`stt` and `stt-upload`, pushed and pulled) | 1 | No — extra jobs WAIT, in arrival order, inside their run (their card stays queued). Inference stays serialized by the whisper client's process-wide mutex whatever the value, so above 1 it only overlaps conversions and queue time |
 | `fleet_stt_upload_max_mb` (0.164.0) | the largest audio file `POST /fleet/stt` takes (decoded MiB; the body is that in base64 plus slack) | 48 | Yes — `400` naming the key |
 | `fleet_stt_transcript_ttl_min` | how long an stt upload job's transcript files stay under `media_dir` (minutes); `0` = 30, negative = keep | 30 | No — files are removed at the next sweep after they pass it |
@@ -93,7 +93,8 @@ or equal to what the same config produced in 0.99.0.
 
 A **busy node is not a full node**: with `fleet_max_concurrent_jobs: 4` and its default
 `fleet_max_queue_depth: 8`, the 5th dispatch is accepted and queued, and only the 9th is
-refused. The refusal check runs before request materialization; re-acks of jobs this node
+refused (a one-worker node, the seed of a tier whose agent seat serves one slot, runs 1, queues 1 and
+refuses the 3rd). The refusal check runs before request materialization; re-acks of jobs this node
 owns and result polls are never refused by it. The default is sized FROM the concurrency the
 node actually has — twice its worker count — rather than a flat number regardless of box
 size: a node admitting 32 deep behind 4 workers could pile up 28 jobs with no hope of
