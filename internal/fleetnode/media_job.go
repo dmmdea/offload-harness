@@ -19,6 +19,7 @@ package fleetnode
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -421,10 +422,59 @@ func buildMediaJob(ctx context.Context, v *mediaView, loopbackListener bool, pay
 		cleanup()
 		return core.Request{}, noop, err
 	}
+	// The render is written under a stem of the door's own choosing, never the pipeline's <task>-<hash8>
+	// (which the tokenless /fleet/dispatch lane shares): GET /fleet/media then tells a media-job render by
+	// its name alone and serves it only to a bearer holder (media_gate.go). The renders are made from the
+	// caller's private input files, so they must not be readable by whoever learns a name.
+	if out, oerr := mediaJobOutputPath(cfg, task, req.Params); oerr != nil {
+		innerCleanup()
+		cleanup()
+		return core.Request{}, noop, nodeSideError{fmt.Errorf("media-job: %w", oerr)}
+	} else if out != "" {
+		if req.Params == nil {
+			req.Params = map[string]any{}
+		}
+		req.Params["out"] = out
+	}
 	return req, func() {
 		innerCleanup()
 		cleanup()
 	}, nil
+}
+
+// mediaJobOutputExt is the extension the pipeline gives a render of task when no `out` is named. "" for a
+// task whose outputs the door cannot name: run-graph writes whatever files its graph names, takes no input
+// file through this door, and so renders nothing from the caller's private bytes.
+func mediaJobOutputExt(task string, params map[string]any) string {
+	switch task {
+	case "image-gen":
+		return "png"
+	case "video-gen", "animate":
+		return "mp4"
+	case "audio-gen":
+		if kind, _ := params["kind"].(string); strings.EqualFold(strings.TrimSpace(kind), "music") {
+			return "flac"
+		}
+		return "wav"
+	}
+	return ""
+}
+
+// mediaJobOutputPath is the output file a media-job render is given: mediajob-<16 hex>.<ext> directly under
+// media_dir. "" when the node has no media_dir or the task's outputs are not named by `out`.
+func mediaJobOutputPath(cfg config.Config, task string, params map[string]any) (string, error) {
+	ext := mediaJobOutputExt(task, params)
+	if ext == "" || strings.TrimSpace(cfg.MediaDir) == "" {
+		return "", nil
+	}
+	if err := os.MkdirAll(cfg.MediaDir, 0o755); err != nil {
+		return "", err
+	}
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	return filepath.Join(cfg.MediaDir, mediaJobOutputPrefix+hex.EncodeToString(b[:])+"."+ext), nil
 }
 
 func containsString(xs []string, x string) bool {

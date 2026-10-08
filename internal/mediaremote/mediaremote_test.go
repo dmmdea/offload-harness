@@ -88,8 +88,13 @@ func (n *nodeRunner) Run(_ context.Context, req core.Request) core.Result {
 	if n.deferAs != "" {
 		return core.Deferf(n.deferAs, "", core.Meta{})
 	}
+	// A render is written where the pipeline is told to put it (`out`, which the media-job door sets to a
+	// name of its own) and under the pipeline's own name when it is told nothing, like the real one.
 	write := func(name, body string) string {
 		p := filepath.Join(n.media, name)
+		if out, _ := req.Params["out"].(string); out != "" && req.Task != core.TaskRunGraph {
+			p = out
+		}
 		_ = os.WriteFile(p, []byte(body), 0o644)
 		return p
 	}
