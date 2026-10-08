@@ -1,5 +1,5 @@
 // audiocpp-generate.mjs — voice and music on the iGPU tier via audio.cpp `audiocpp_cli`
-// (CT-49; v0.9.0, Apache-2.0). A spawn-per-job native binary under the shared GPU lease:
+// (CT-49; v0.9.0 and v0.9.1, the measured release; Apache-2.0). A spawn-per-job native binary under the shared GPU lease:
 // zero-warm, nothing resident, no Python, no ComfyUI.
 //
 //   voice  --task tts           --family chatterbox --model <gguf> --text T --language L
