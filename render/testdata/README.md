@@ -45,8 +45,8 @@ master-945  [V] Wan2.2-TI2V-5B compute buffer size: 192.53 MB(VRAM) on Vulkan0 (
 - **Level tag.** `[VERBOSE]` / `[INFO   ]` / `[WARN   ]` / `[ERROR  ]` (padded to 7) became `[V]` / `[I]` /
   `[W]` / `[E]` (and `[D]`), unpadded (sd.cpp #2104).
 - **Source.** `file.cpp:N - ` in front of the message (the line number padded to 4) moved behind it, as
-  ` --- file.cpp:N` (#2104 moved it; #2106 made the separator ` --- `, it was ` - ` in the one release
-  between them, which no capture here covers: the guard reads that shape from the upstream commit alone).
+  ` --- file.cpp:N` (#2104 moved it; #2106 made the separator ` --- `, it was ` - ` in a build
+  between them, if one was cut, which no capture here covers: the guard reads that shape from the upstream commits alone).
 - **Records of several lines** carry the tag on the FIRST line and the source on the LAST: the parameter
   dumps open with `[V] SDCliParams {` and close with `} --- main.cpp:699`; `System Info:` ends its second
   line with ` --- main.cpp:698`. The lines in between have neither.

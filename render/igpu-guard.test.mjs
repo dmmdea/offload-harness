@@ -251,7 +251,7 @@ test("SIL9: audio.cpp never opens a dump block, even on an sd.cpp-shaped header;
 
 // master-945 line: "[V] <message> --- <source>"; the tail is on the LAST line of a record
 const head945 = (m, src = "ggml_runner.cpp:1019") => `[V] ${m} --- ${src}`;
-// the release between #2104 and #2106 put " - " in front of the source (read from the upstream commit; no log of it was captured)
+// a build between #2104 and #2106 puts " - " in front of the source (read from the upstream commits; no log of it was captured)
 const head944 = (m, src = "ggml_runner.cpp:1019") => `[V] ${m} - ${src}`;
 const COMPUTE = "Wan2.2-TI2V-5B compute buffer size: 192.53 MB(VRAM) on Vulkan0 (peak across 1 segment)";
 const planLine = (shape, component, compute, params) => (shape === "945"
@@ -281,7 +281,7 @@ test("normalizeSdLine: one head and one tail are cut, in either record shape, an
   assert.deepEqual(n("   SSE3 = 1 |    SSSE3 = 1 |  --- main.cpp:698"), { text: "   SSE3 = 1 |    SSSE3 = 1 |", tagged: false });
   assert.deepEqual(n("  embeddings: {"), { text: "  embeddings: {", tagged: false });
   assert.equal(n("  } --- main.cpp:699").text, "  }", "an indented brace stays indented: it is not the dump's close");
-  // the release between #2104 and #2106 separated the source with " - "
+  // a build between #2104 and #2106 separates the source with " - " (read from the upstream commits alone)
   assert.deepEqual(n("[V] hello - ggml_runner.cpp:1019"), { text: "hello", tagged: true });
   // at most one head and one tail, only at the two ends of the line
   assert.equal(n("[V] a --- x.cpp:1 b").text, "a --- x.cpp:1 b", "a tail-like text in the middle is text");
@@ -500,7 +500,7 @@ test("the head and the tail of a record do not dilute the share the request's te
   }
 });
 
-test("the release between #2104 and #2106 (' - <source>' behind the message) is read like the other two shapes", () => {
+test("a build between #2104 and #2106 (' - <source>' behind the message) is read like the other two shapes", () => {
   const log = (...lines) => [DEVICE, ...lines].join("\n");
   assert.equal(scanLog(log(head944(COMPUTE)), { engine: "sdcpp" }).verdict.ok, true);
   assert.equal(scanLog(log(head944("t5 compute buffer size: 297.00 MB(RAM) on CPU (peak across 1 segment)")), { engine: "sdcpp" }).fatal?.kind, CPU_PLACEMENT);

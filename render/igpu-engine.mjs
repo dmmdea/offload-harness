@@ -272,7 +272,7 @@ export function modelMetadataError(log, modelFile) {
 //                                      "[INFO   ]", "[WARN   ]", "[ERROR  ]"; the line number is padded too)
 //              master-945 and after    "[V] <message> --- ggml_runner.cpp:1019"       (#2104: one-letter tags [D] [V]
 //                                      [I] [W] [E], and the source location moved to the END, unpadded; #2106: the
-//                                      separator is " --- " (the one release between the two had " - "), and the
+//                                      separator is " --- " (a build between the two commits has " - "), and the
 //                                      newlines of a prompt echo are escaped, "\n" as the two characters)
 //            A record of several lines (a parameter dump, "System Info") carries its tag on the FIRST line and its
 //            tail on the LAST ("} --- main.cpp:699"). So every sd.cpp line is NORMALISED before an anchored shape reads
@@ -313,7 +313,7 @@ const AUDIO_HEAD = String.raw`(?:\[[A-Z]+(?:\s+ts=[^\]\s]*)?\s*\]\s*)*`;
 // MIDDLE of some other line can neither forge a shape nor, by being a substring of a real one, hide it.
 //   old head   "[VERBOSE] ggml_runner.cpp:1019 - ", "[INFO   ] main.cpp:699  - ": the long tag and the source it prints in front
 //   new head   "[V] ": the one-letter tag alone (the bare lines of the tests and of ggml itself have none)
-//   tail       " --- ggml_runner.cpp:1019": the new source, behind the message (" - ..." in the one release before #2106)
+//   tail       " --- ggml_runner.cpp:1019": the new source, behind the message (" - ..." in a build between #2104 and #2106)
 const SD_OLD_HEAD = /^\[(?:DEBUG|VERBOSE|INFO|WARN|WARNING|ERROR)\s*\]\s+[\w./+-]+:\d+\s+-\s+/;
 const SD_NEW_TAG = /^\[[DVIWE?]\](?:\s|$)/;
 // (one whitespace char in front of the dashes, the run before it is cut by hand: a `\s+` here would make a
