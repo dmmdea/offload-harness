@@ -84,6 +84,9 @@ tie-breakers `betterRemote` already had:
    > branch on the pair. "An unknown rate keeps window-only ordering" was the same per-pair mistake: an
    > unmeasured seat is now ranked on `fleetTokSPrior`, the median rate the roster publishes, and window
    > decides only when NO node publishes a rate.
+
+   > **Superseded in part by [ADR 0079](0079-the-ranking-eta-is-not-capped-at-the-wall.md).** The clause that fits the final to the whole wall and
+   > caps the eta at it no longer holds: the ranking eta stops at no wall. The rest of this decision stands.
 4. **One joint deal for route=auto/remote, respecting per-node headroom** (W-06): `RunWith` now computes the
    WHOLE Run's `auto`/`remote` placement in one pass over one fleet snapshot (`dealAutoRemote`), the same
    invariant `route=spread`'s `dealSpread` already held. Per-node headroom (`max_concurrent_jobs − jobs_running

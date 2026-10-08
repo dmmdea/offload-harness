@@ -62,6 +62,7 @@ here so they are never mistaken for a media capability:
 | `agent_model` | `qwen3.5-4b-agent` |
 | `agent_profile` | `research` |
 | `escalation_model` | `` |
+| `fleet_max_concurrent_jobs` | `1` |
 | `reasoning_model` | `` |
 
 ## Operator notes

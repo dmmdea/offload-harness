@@ -1,14 +1,18 @@
 // eta_repack_fit_test.go: review round 2, BUG item 7 — etaFor must not
-// double-count a schema contract's re-pack turn at its UNFITTED size once
-// the final has been fitted/floored to the wall.
+// double-count a schema contract's re-pack turn. That review was about a re-pack
+// charged at its UNFITTED size once the final had been fitted to the wall. Since
+// ADR 0079 the eta fits nothing to the wall: the final AND the re-pack are both
+// priced at the reference size (seatrate.FinalBudgetFloor), once each.
 
 package delegate
 
 import (
+	"math"
 	"strings"
 	"testing"
 
 	"github.com/dmmdea/offload-harness/internal/core"
+	"github.com/dmmdea/offload-harness/internal/seatrate"
 )
 
 // nodeCShapedGSQ mirrors the diagnosis's <node-c> GSQ shape: 5.4 tok/s, 69 s
@@ -40,18 +44,18 @@ func mechanicalSchemaAutoContract() Subtask {
 	}
 }
 
-// TestEtaForDoesNotDoubleCountAFittedRepack is the exact worked example from
-// the review: a 900 s auto wall on the <node-c>-shaped seat fits the final to
-// ~2187 tokens: the eta must stay AT OR UNDER the wall it was fitted to, not
-// ~1960 s from charging the re-pack at its unfitted 8192-token size on top of
-// the fitted final.
-func TestEtaForDoesNotDoubleCountAFittedRepack(t *testing.T) {
+// TestEtaForChargesTheRepackOnceAtTheReferenceSize is the review's worked example under the rule that
+// replaced the wall fit (ADR 0079): the <node-c>-shaped seat (5.4 tok/s, configured final 8192) on a 900 s
+// auto wall. The old assertion was "eta at or under the wall the final was fitted to"; that bound WAS the
+// cap, and it is gone. What the review protected is kept: the re-pack is charged ONCE, and never at the
+// unfitted 8192-token size (~3,100 s). A schema contract pays the reference final plus the same again for
+// the re-pack; a contract without a schema pays the final only.
+func TestEtaForChargesTheRepackOnceAtTheReferenceSize(t *testing.T) {
 	st := mechanicalSchemaAutoContract()
 	v := nodeCShapedGSQ()
 
-	// Confirm the fixture actually reaches the auto-wall cap (900 s) and a
-	// final genuinely NARROWED below its configured 8192, matching the worked example —
-	// otherwise this test would not exercise the bug at all.
+	// Confirm the fixture still reaches the auto-wall cap (900 s) with a configured final of 8192, the
+	// worked example: the eta below must be independent of both.
 	policy, in, wallSec, known := seatWallFor(st, v)
 	if !known {
 		t.Fatal("fixture bug: the seat must publish a usable rate")
@@ -68,8 +72,18 @@ func TestEtaForDoesNotDoubleCountAFittedRepack(t *testing.T) {
 	if !ok {
 		t.Fatal("etaFor must have an opinion: the seat publishes a rate")
 	}
-	if eta > float64(wallSec) {
-		t.Fatalf("eta = %.0f s, want <= the %d s wall it was fitted to — the re-pack turn must be charged at the SAME fitted size as the final, not its unfitted 8192-token configured size", eta, wallSec)
+	const cold = 69.0
+	once := math.Ceil(seatrate.FinalBudgetFloor / 5.4)
+	both := math.Ceil(2 * seatrate.FinalBudgetFloor / 5.4)
+	if eta != cold+both {
+		t.Fatalf("eta = %.0f s, want cold %.0f + the reference final and ONE re-pack %.0f = %.0f (not the re-pack twice, not at the unfitted 8192 tokens)", eta, cold, both, cold+both)
+	}
+	// Without a schema there is no re-pack: the final only.
+	plain := st
+	plain.Contract.OutputSchema = nil
+	etaPlain, ok := etaFor(plain, v)
+	if !ok || etaPlain != cold+once {
+		t.Fatalf("a contract with no schema reads eta %.0f s (ok=%v), want cold %.0f + the reference final %.0f = %.0f", etaPlain, ok, cold, once, cold+once)
 	}
 
 	// The placement_reason narration must report the same fixed number.
@@ -79,20 +93,30 @@ func TestEtaForDoesNotDoubleCountAFittedRepack(t *testing.T) {
 	}
 }
 
-// TestEtaForUnchangedWhenTheFinalIsNotFloored is the control: a fast seat
-// whose fitted final comfortably holds the configured budget (fit >= cfg, so
-// FitFinalBudget returns the CONFIGURED budget unchanged) must see its eta
-// completely unaffected by this fix — RepackBudget was already correct
-// (equal to the unfitted final) in that case.
-func TestEtaForUnchangedWhenTheFinalIsNotFloored(t *testing.T) {
-	st := oneStepSchemaContract(300, false) // explicit 300 s wall, small step budget (512)
-	v := etaFixtureRemote("fast-adequate", 8192, 34, 0)
+// TestEtaForPricesTheReferenceFinalWhateverTheSeatsConfiguredFinalIs replaces
+// TestEtaForUnchangedWhenTheFinalIsNotFloored, which said a fast seat whose wall fit held its configured
+// budget saw an eta "completely unaffected" by the re-pack fix. That is false under ADR 0079: every seat
+// prices the SAME work, a reference final (and re-pack) of seatrate.FinalBudgetFloor tokens, so a seat
+// configured with a 512-token final and one configured with 8,192 read the same eta at the same rate.
+// The sanity bound of the old test stays: a fast seat's eta is a small positive number under the wall.
+func TestEtaForPricesTheReferenceFinalWhateverTheSeatsConfiguredFinalIs(t *testing.T) {
+	st := oneStepSchemaContract(300, false)                    // explicit 300 s wall
+	small := etaFixtureRemote("fast-small-final", 8192, 34, 0) // step budget 512: configured final 512
+	big := etaFixtureRemote("fast-big-final", 8192, 34, 0)
+	big.SeatBudget = &SeatBudgetView{StepTokens: 8192, Thinking: "off"} // configured final 8192
 
-	eta, ok := etaFor(st, v)
+	eta, ok := etaFor(st, small)
 	if !ok {
 		t.Fatal("etaFor must have an opinion")
 	}
 	if eta <= 0 || eta > 300 {
-		t.Fatalf("eta = %.1f, want a small positive number well under the 300 s wall (34 tok/s, 512-token step/final/repack)", eta)
+		t.Fatalf("eta = %.1f, want a small positive number well under the 300 s wall (34 tok/s)", eta)
+	}
+	want := math.Ceil(2 * seatrate.FinalBudgetFloor / 34.0) // the reference final and its re-pack
+	if eta != want {
+		t.Fatalf("eta = %.1f, want %.0f: the reference final and re-pack (2 x %d tokens) at 34 tok/s, not the seat's configured 512-token ones", eta, want, seatrate.FinalBudgetFloor)
+	}
+	if etaBig, _ := etaFor(st, big); etaBig != eta {
+		t.Fatalf("a seat configured with an 8,192-token final reads eta %.1f, a seat configured with 512 reads %.1f: the same work at the same rate must cost the same", etaBig, eta)
 	}
 }

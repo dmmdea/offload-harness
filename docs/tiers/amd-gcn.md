@@ -55,6 +55,7 @@ here so they are never mistaken for a media capability:
 | `agent_timeout_sec` | `900` |
 | `escalation_model` | `` |
 | `fleet_agent_enabled` | `true` |
+| `fleet_max_concurrent_jobs` | `1` |
 | `reasoning_model` | `` |
 
 ## Operator notes

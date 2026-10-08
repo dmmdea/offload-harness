@@ -137,3 +137,30 @@ func TestRunCapCountsPerCardForSingleCardSeats(t *testing.T) {
 		t.Fatalf("a seat that spans cards keeps the per-seat line: room = %d (%q), want 2", room, note)
 	}
 }
+
+// The installer seeds fleet_max_concurrent_jobs 1 on a tier whose agent seat serves one slot
+// (fleet_cap_seed_test.go in the root package derives which), and the same key is the delegator's
+// own run-cap line on that box: a single-slot seat serves one request at a time, so the local seat
+// takes ONE run and the rest of a call goes to the fleet. This is that second effect of the seed,
+// pinned at the number the seed resolves to.
+func TestACapOfOneGivesTheLocalSeatOneRunAtATime(t *testing.T) {
+	r := &runner{cfg: testCfg(t)}
+	r.cfg.FleetMaxConcurrentJobs = 1
+	if room, note := r.localRunCapRoom(); room != 1 {
+		t.Fatalf("an empty line at a cap of 1 has room %d (%q), want 1", room, note)
+	}
+	if r.atRunCap(0) || !r.atRunCap(1) {
+		t.Fatalf("atRunCap(0)=%v atRunCap(1)=%v: the seat is idle with no run and at its line with one", r.atRunCap(0), r.atRunCap(1))
+	}
+	run := gpuactivity.Start(r.cfg.GPULockPath, r.cfg.StateDir, gpuactivity.Run{Seat: r.cfg.AgentPlannerModel(""), Kind: "contract", Goal: "x", Phase: gpuactivity.PhaseRunning})
+	if run == nil {
+		t.Fatal("fixture: could not register a run")
+	}
+	t.Cleanup(run.End)
+	if room, note := r.localRunCapRoom(); room != 0 || !strings.Contains(note, "cap 1") {
+		t.Fatalf("one run on the seat leaves room %d (%q), want 0: the second run of the call belongs to the fleet", room, note)
+	}
+	if free, _ := r.readLocalSlot(); free {
+		t.Fatal("the local seat reads a slot free with one run on a cap of 1")
+	}
+}

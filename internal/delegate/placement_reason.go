@@ -115,22 +115,16 @@ func oneWordVerdictWith(st Subtask, v NodeView, base, chosenBase string, dealtSo
 
 // chosenVerdictDetail renders the winner's own eta breakdown ("eta 41 s
 // (cold 15 + 26 gen)"), or just the bare word when the seat publishes no
-// usable rate — the same "unknown rate, no opinion" reading etaFor follows.
+// usable rate - the same "unknown rate, no opinion" reading etaParts follows.
+// The figures are etaParts' own terms: the total is cold + wait + gen, and the
+// breakdown names the cold load and the reference generation (the node's wait is
+// the remainder), so what is printed is exactly what the ranking compared.
 func chosenVerdictDetail(st Subtask, v NodeView) string {
-	eta, ok := etaFor(st, v)
+	cold, wait, gen, ok := etaParts(st, v)
 	if !ok {
 		return "(no rate published)"
 	}
-	policy, _, wallSec, known := seatWallFor(st, v)
-	if !known || wallSec <= 0 {
-		return fmt.Sprintf("eta %.0f s", eta)
-	}
-	cold := fitColdSec(policy, v)
-	gen := eta - cold - queueWaitFor(v)
-	if gen < 0 {
-		gen = 0
-	}
-	return fmt.Sprintf("eta %.0f s (cold %.0f + %.0f gen)", eta, cold, gen)
+	return fmt.Sprintf("eta %.0f s (cold %.0f + %.0f gen)", cold+wait+gen, cold, gen)
 }
 
 // placementVerdictLine is D-105's full listing: every base in views, in

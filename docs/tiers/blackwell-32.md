@@ -78,6 +78,7 @@ here so they are never mistaken for a media capability:
 |---|---|
 | `agent_model` | `gemma4-26b-a4b` |
 | `animategen_script` | `render/comfy-animate.mjs` |
+| `fleet_max_concurrent_jobs` | `1` |
 
 ## Operator notes
 

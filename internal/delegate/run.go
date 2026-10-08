@@ -637,8 +637,10 @@ const maxQueuedWait = 5 * time.Minute
 // fleetClient rides netguard.SafeTransport like the health client: the
 // delegation lane may only ever reach loopback or the operator's tailnet
 // (never-cloud, ADR 0001), enforced at every dial. No client-level Timeout —
-// per-request ctx deadlines own the budget.
-var fleetClient = &http.Client{Transport: netguard.SafeTransport(nil)}
+// per-request ctx deadlines own the budget. Like the health client it never
+// follows a redirect: a dispatch, a poll and a withdraw carry the fleet bearer
+// (refuseRedirect).
+var fleetClient = &http.Client{Transport: netguard.SafeTransport(nil), CheckRedirect: refuseRedirect}
 
 // Run executes subtasks (bounded concurrency), placing each per route:
 //
@@ -5492,7 +5494,12 @@ func fitPick(st Subtask, nodes []NodeView, bases []string, slot int, dealt map[s
 // score does not move as nodes at their headroom leave the rotation (Place and the joint auto deal
 // take the median over the whole roster too).
 //
-// Two demotion keys come before all of it, the two betterRemote leads with (gate.go): a node a lease
+// Adequacy comes before all of it: a seat that cannot hold the contract (fitKey) ranks below every seat
+// that can, whatever its cards, leases or queue read. Such a seat is never excluded, so a cycle whose
+// other seats are all dealt still hands it its slot, and the deal does not depend on its caller having
+// filtered the roster through remoteEligible first.
+//
+// Two demotion keys come next, the two betterRemote leads with (gate.go): a node a lease
 // demotes (a long text lease, then an overdue one), then a node whose own advertisement says the next
 // dispatch is refused (saturated: its admission ceiling is met, or it reports saturation.high). Both
 // DEMOTE and never exclude, as there (see saturated): the
@@ -5502,7 +5509,8 @@ func fitPick(st Subtask, nodes []NodeView, bases []string, slot int, dealt map[s
 // queue-capped node kept its cycle slot while a healthy node idled: a refused dispatch, a cooldown on
 // that node, one of the subtask's maxRemoteReplacements spent, and the cycle's order broken.
 func fitPickWith(st Subtask, nodes []NodeView, bases []string, slot int, dealt map[string]bool, counts map[string]int, prior float64) int {
-	k, best, bestTier := -1, 0, 0
+	k, bestTier := -1, 0
+	var best fitKey
 	bestLease, bestSat := 0, false
 	for c := 0; c < len(nodes); c++ {
 		j := (slot + c) % len(nodes)
@@ -5516,6 +5524,8 @@ func fitPickWith(st Subtask, nodes []NodeView, bases []string, slot int, dealt m
 		switch {
 		case k < 0:
 			better = true
+		case s.adequate != best.adequate:
+			better = s.adequate
 		case lease != bestLease:
 			better = lease < bestLease
 		case sat != bestSat:
@@ -5523,7 +5533,7 @@ func fitPickWith(st Subtask, nodes []NodeView, bases []string, slot int, dealt m
 		case tier != bestTier:
 			better = tier > bestTier
 		default:
-			better = s > best
+			better = s.beats(best)
 		}
 		if better {
 			k, best, bestTier, bestLease, bestSat = j, s, tier, lease, sat

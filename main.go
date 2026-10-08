@@ -3234,6 +3234,10 @@ func doctorRunChecked(cfg config.Config, routes []mediacap.Route, w io.Writer, d
 	// The tailnet zones the guard admits dotted hostnames under: pure config as well, and
 	// the first thing to read when a roster entry by name is refused.
 	writeTailnetZonesSection(w, cfg)
+	// The workers this box publishes against the slots its agent seat serves, read from the live serving
+	// config: pure config plus one file, informational like the skew and token rows, and silent without an
+	// agent seat.
+	writeFleetCapacitySection(w, cfg)
 	// Fourth in the band, for the same reason: where the data lives is config plus a
 	// volume list, so a serving layer that is down must not hide it (register C-92).
 	dataOnOS := writeDataHomeSection(w, data)
