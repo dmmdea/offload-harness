@@ -6,6 +6,25 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added — the amd-gcn tier seeds its measured iGPU media set (register CT-51, I5)
+
+`setup/templates/profiles.json` `profiles.amd-gcn.config_seed` now carries the lanes measured on the Vega 7 reference box (no model on
+CPU, every backend Vulkan): video family `fastwan` (engine sdcpp, FastWan2.2-TI2V-5B q8_0 + Wan2.2 VAE + umt5-xxl Q8_0 + the opt-in
+`taew2_2` fast decode; 3 steps, cfg 1, flow_shift 5, euler, 832x480x49 at 24 fps; token cap 5200 / stride 16; Apache-2.0,
+`commercial_use` true; `videogen_timeout_sec` 7200), animate on sd.cpp (Wan2.1 VACE 1.3B fp16 `.safetensors`, Apache-2.0, with the
+depth-anything.cpp control video: 288x512, 20 steps, cfg 6, token cap 5800 / stride 8; `animategen_timeout_sec` 5400) and voice + music
+on audio.cpp (Chatterbox q8_0, ACE-Step 1.5 turbo bf16; backend `vulkan`, device 0). Paths follow the seed convention
+(`__OFFLOAD_HOME__/models/<subdir>/<file>`, engines under `__OFFLOAD_HOME__` with `__EXE__`). The ACE-Step licence is not verified, so
+its `commercial_use` stays unset and the tier notes say it must be checked at the ACE-Step source before anything records it. The nine
+weights are pinned (url, name, size, sha256, version) in `setup/install.ps1`'s `$PINNED` table, the one place the repo pins media
+models (the Linux install has no media leg yet, so they are pin-only: no gate downloads them), and their sizes are mirrored in
+`internal/mediacap/modelsizes.go` (`TestKnownModelSizesMatchInstaller`) except `wan_2.1_vae.safetensors`, which every ComfyUI Wan
+route also binds. The seed needs 0.170.0: 0.168.0 does not know the keys. Tier pages: `animategen_*` and `audiocpp_*` keys are media
+keys (they were filed under the non-media heading, so `ampere-16` listed its `animategen_script` there), a nested seed object renders as
+compact JSON instead of a Go map dump, and the README media column names the iGPU engines. Tests (`internal/tierseed`):
+`TestAmdGcnMediaSeedRoutesFollowTheFiles` (the resolved seed derives the four routes BOUND-BUT-MISSING on a fresh install and
+CONFIGURED once the files are placed), `TestAmdGcnMediaSeedValues`, `TestAmdGcnMediaSeedWeightsArePinned`; each was broken once and seen red.
+
 ### Added — a node whose lanes run on the native engines advertises and admits them (register CT-51, I1)
 
 `internal/fleetnode` bound a media task only through its ComfyUI/python script (`videogen_script`, `animategen_script`,

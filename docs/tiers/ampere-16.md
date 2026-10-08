@@ -133,6 +133,7 @@ The installer seeds this tier's media bindings (`config_seed`):
 
 | key | value |
 |---|---|
+| `animategen_script` | `render/comfy-animate.mjs` |
 | `compose_script` | `render/compose-hyperframes.mjs` |
 | `gen_edit_preset` | `lightning8` |
 | `gen_edit_script` | `render/comfy-edit.mjs` |
@@ -168,7 +169,6 @@ here so they are never mistaken for a media capability:
 | `agent_max_tokens` | `1024` |
 | `agent_model` | `qwen3.5-4b-agent` |
 | `agent_profile` | `research` |
-| `animategen_script` | `render/comfy-animate.mjs` |
 | `escalation_model` | `` |
 | `reasoning_model` | `` |
 

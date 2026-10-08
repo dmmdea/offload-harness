@@ -22,6 +22,9 @@ package mediacap
 // Keep this in sync with setup/install.ps1's $PINNED whenever a pinned model's
 // size changes (a version bump) — TestKnownModelSizesMatchInstaller parses that
 // file directly and fails if the two disagree on any name both claim to track.
+// wan_2.1_vae.safetensors (253815318 bytes, pinned in install.ps1 as model-wan21-vae for the amd-gcn
+// animate lane) is deliberately NOT sized here: it is also the builder-default VAE of every ComfyUI Wan
+// route, and sizing it would change those routes' verdicts on hosts that hold another copy of it.
 var knownModelSizes = map[string]int64{
 	"z_image_turbo-Q8_0.gguf":            7224707136,
 	"Qwen3-4B-Instruct-2507-Q4_K_M.gguf": 2497281120,
@@ -29,4 +32,12 @@ var knownModelSizes = map[string]int64{
 	"v1-5-pruned-emaonly.safetensors":    4265146304,
 	"sd_xl_base_1.0.safetensors":         6938078334,
 	"sdxl_vae_fp16_fix.safetensors":      334641162,
+	"FastWan2.2-TI2V-5B-q8_0.gguf":       5412844128,
+	"Wan2.2_VAE.safetensors":             1409400960,
+	"umt5-xxl-encoder-Q8_0.gguf":         6043068256,
+	"taew2_2.safetensors":                22848048,
+	"wan2.1_vace_1.3B_fp16.safetensors":  4309519800,
+	"depth-anything2-small-q8_0.gguf":    36780864,
+	"chatterbox-q8_0.gguf":               2088393668,
+	"ace-step-1.5-turbo-bf16.gguf":       10090398272,
 }
