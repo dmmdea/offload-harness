@@ -265,6 +265,17 @@ each guard was broken once at its real call site and seen red.
   with nothing bound, no opt-in or no token keeps the door closed. Tests: `TestMediaInputsAdmissibleBindsThroughTheEngineAwareHelpers`
   and `TestAnEngineOnlyBoxOpensTheMediaJobDoor` (an engine-only box advertises `media-job` and takes a bearer'd still); with the old
   predicate restored both fail, the second with `[video-gen animate audio-gen]` advertised and no `media-job`.
+- **The merge-time fix in `runIGPU` is pinned (REL3).** The iGPU lanes take their lease in one place, which takes the whole node with the
+  request's `waiter_token` and its door's resumability, as the sdcpp image lane does (the merge fixed it; it had taken a bare whole-node
+  lease). Nothing pinned it: `TestEveryMediaDoorThreadsTheRequestsResumability` scanned `pipeline.go` only, and replacing the need with
+  `wholeNeed("")` and, separately, dropping `.resumableBy(req)` both left the pipeline, mcpserver and mediaremote suites green. The scan
+  now covers `igpumedia.go` with a per-file minimum, and `TestAnIGPULaneKeepsAPlaceInLineAndResumesIt` runs the sd.cpp video, sd.cpp
+  animate and audio.cpp voice lanes against a held node: a resumable caller is queued with a token, a caller that cannot resume gets the
+  plain busy answer and leaves no place, and the token resumes the place once the node frees. Each mutation fails it on all three lanes.
+- **The sd.cpp animate family pin reads what the lane records (REL5).** The pin compared the family `fleetnode` advertises with
+  `config.AnimateSdcppFootprintFamily`, the constant both sides read, so a lane recording under another name kept it green (the video and
+  audio legs read the writers' own helpers). The leg now runs the lane and reads back the family its footprint was recorded under;
+  `fpFamily: "wan-vace2"` in the lane fails it.
 
 ### Changed — `--offload-to-cpu` is sanctioned spill on the iGPU media engines
 

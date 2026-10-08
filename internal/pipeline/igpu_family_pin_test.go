@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"context"
 	"testing"
 
 	"github.com/dmmdea/offload-harness/internal/config"
@@ -14,7 +15,7 @@ import (
 // store is the family fleetnode ADVERTISES on /fleet/health, so a dispatcher admitting against the
 // advertised family finds the measurements the lane wrote. Every writer-side value comes from the
 // pipeline's own helpers (the ones runGenerateVideoSdcpp / runGenerateAudioAudiocpp call), never from
-// a literal restated here.
+// a literal restated here; the animate leg runs the lane itself and reads back what it recorded.
 func TestEngineLaneFamiliesMatchTheAdvertisedOnes(t *testing.T) {
 	defer fleetnode.SetMediaRoutesSourceForTest(func(config.Config) []mediacap.Route {
 		return []mediacap.Route{
@@ -58,12 +59,29 @@ func TestEngineLaneFamiliesMatchTheAdvertisedOnes(t *testing.T) {
 		}
 	})
 
-	t.Run("sdcpp animate", func(t *testing.T) {
-		cfg := config.Config{AnimateGenEngine: config.EngineSdcpp}
-		adv := fleetnode.Families(cfg)
-		// the writer's family is the shared constant the lane passes as fpFamily
-		if len(adv) != 1 || adv[0] != config.AnimateSdcppFootprintFamily {
-			t.Errorf("animate: ADVERTISES %v, the lane WRITES %q", adv, config.AnimateSdcppFootprintFamily)
+	t.Run("sdcpp animate, as the lane records it", func(t *testing.T) {
+		// Run the real lane (a stub runner, an injected sampler) and read back the family it recorded the
+		// footprint under, which is what runAnimateCharacterSdcpp passes as fpFamily. The advertiser's family is
+		// compared with THAT, not with the config constant both sides happen to read today, so a lane that
+		// records under another name fails here (release 0.170.0 review, REL5).
+		requireNodePipeline(t)
+		dir := t.TempDir()
+		cfg := animateCfg(t, dir)
+		p := footprintTestPipeline(t, cfg, 2.0)
+		if res := p.Run(context.Background(), animateReq(dir, nil)); !res.OK {
+			t.Fatalf("the sdcpp animate lane deferred: %s", res.Reason)
+		}
+		var wrote []string
+		for _, e := range p.FootprintStore().Entries() {
+			if e.TaskType == "animate" {
+				wrote = append(wrote, e.ModelFamily)
+			}
+		}
+		// the family a node whose animate lane is the sd.cpp engine advertises (a config that binds only that lane,
+		// as the other legs do: Families lists every lane the config binds)
+		adv := fleetnode.Families(config.Config{AnimateGenEngine: cfg.AnimateGenEngine})
+		if len(wrote) != 1 || len(adv) != 1 || adv[0] != wrote[0] {
+			t.Errorf("animate: the lane WROTE footprint family %v but fleetnode ADVERTISES %v", wrote, adv)
 		}
 	})
 

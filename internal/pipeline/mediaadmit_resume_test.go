@@ -145,23 +145,31 @@ func TestAnImageBatchOnABusyCardLeavesNoPlace(t *testing.T) {
 // the request's resumability: a door that forgot would silently stop keeping places for the MCP
 // callers (or, built the other way, start leaving ghosts). The behavioural tests above
 // reach image generation and run-graph; inpaint, upscale, edit, video, animate, audio and sd.cpp
-// are pinned at the source: no line may read the token without also reading the door.
+// are pinned at the source: no line may read the token without also reading the door. The iGPU
+// lanes (igpumedia.go) take their lease in one place, runIGPU, which TestAnIGPULaneKeepsAPlaceInLineAndResumesIt
+// also pins by behaviour; the scan below keeps that file honest too, and a file that stops reading the
+// token at all fails its minimum instead of passing with nothing to check.
 func TestEveryMediaDoorThreadsTheRequestsResumability(t *testing.T) {
-	src, err := os.ReadFile("pipeline.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	n := 0
-	for i, line := range strings.Split(string(src), "\n") {
-		if !strings.Contains(line, `paramStr(req.Params, "waiter_token")`) {
-			continue
+	for _, file := range []struct {
+		name string
+		min  int
+	}{{"pipeline.go", 10}, {"igpumedia.go", 1}} {
+		src, err := os.ReadFile(file.name)
+		if err != nil {
+			t.Fatal(err)
 		}
-		n++
-		if !strings.Contains(line, ".resumableBy(req)") {
-			t.Errorf("pipeline.go:%d reads the waiter_token but not the request's resumability:\n\t%s", i+1, strings.TrimSpace(line))
+		n := 0
+		for i, line := range strings.Split(string(src), "\n") {
+			if !strings.Contains(line, `paramStr(req.Params, "waiter_token")`) {
+				continue
+			}
+			n++
+			if !strings.Contains(line, ".resumableBy(req)") {
+				t.Errorf("%s:%d reads the waiter_token but not the request's resumability:\n\t%s", file.name, i+1, strings.TrimSpace(line))
+			}
 		}
-	}
-	if n < 10 {
-		t.Fatalf("found %d door(s) reading the waiter_token, expected at least 10: the scan is looking for the wrong text", n)
+		if n < file.min {
+			t.Errorf("found %d door(s) in %s reading the waiter_token, expected at least %d: the scan is looking for the wrong text, or a lane stopped threading the token", n, file.name, file.min)
+		}
 	}
 }
