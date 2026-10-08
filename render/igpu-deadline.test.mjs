@@ -144,6 +144,20 @@ test("audiocpp main: the budget spent after the engine refuses the finalize step
   assert.ok(!existsSync(s.out));
 });
 
+test("audiocpp main: the budget spent inside the finalize refuses the next ffmpeg / ffprobe step, by name, and delivers nothing", opts, async () => {
+  const mk = (sb) => audioSetup(sb, "music", { log: ["[TIMING ts=1] ace_step.planner.weights.buffer_name Vulkan0"], writes: { kind: "wav", seconds: 3 } });
+  for (const [jump, step] of [
+    ["spawnSync:silenceremove:1", "ffprobe duration"], // after the trailing-silence trim
+    ["spawnSync:loudnorm:1", "dead-air gate"], // after the master
+  ]) {
+    const { r, s } = await spentAfter("audiocpp-generate.mjs", mk, jump);
+    assert.equal(r.status, 1, `${jump}: ${r.stderr.slice(-400)}`);
+    assert.match(r.stderr, new RegExp(`${step} timeout: the 600s budget`), `${jump}: ${r.stderr.slice(-400)}`);
+    assert.equal(lastLine(r.stderr), "IGPU_CLASS=timeout");
+    assert.ok(!existsSync(s.out), `${jump}: an unchecked render is not delivered`);
+  }
+});
+
 // -------------------------------------------------------------- every external call is bounded
 
 test("the runners bound every ffmpeg / ffprobe call by what is left of the budget", opts, async () => {
@@ -171,6 +185,24 @@ test("the runners bound every ffmpeg / ffprobe call by what is left of the budge
     // the driver frame extraction, the RGB conversion, the ffprobe frame count, the encode, the clip check
     bounded(records(rec), ["force_original_aspect_ratio", "bicubic", "nb_read_frames", "libx264", "blackdetect"]);
   } finally { sb.done(); }
+  // the audio runner: the trim, both duration probes, the master and the dead-air measurement (music), and the
+  // re-encode of a non-wav delivery (voice to flac)
+  for (const [kind, flac, needles] of [
+    ["music", false, ["silenceremove", "format=duration", "loudnorm", "silencedetect"]],
+    ["voice", true, ["48000", "silencedetect"]],
+  ]) {
+    sb = sandbox();
+    try {
+      const rec = join(sb.work, "calls.jsonl");
+      const a = audioSetup(sb, kind, { log: ["[TIMING ts=1] ace_step.planner.weights.buffer_name Vulkan0"], writes: { kind: "wav", seconds: 3 } }, ["--timeout-sec", BUDGET]);
+      const args = flac ? a.args.map((x) => (x === a.out ? x.replace(/\.wav$/, ".flac") : x)) : a.args;
+      const r = await runNode("audiocpp-generate.mjs", args, sb, { preload, env: { IGPU_TEST_RECORD: rec } });
+      assert.equal(r.status, 0, r.stderr);
+      const rows = records(rec).filter((x) => !x.line.includes("-version")); // resolving the binaries is not a media call
+      bounded(rows, needles);
+      for (const row of rows) assert.ok(typeof row.timeout === "number" && row.timeout > 0, `${kind}: unbounded call ${row.line.slice(0, 100)}`);
+    } finally { sb.done(); }
+  }
   // and without --timeout-sec nothing is bounded (no deadline = unbounded, as before)
   sb = sandbox();
   try {
@@ -180,5 +212,15 @@ test("the runners bound every ffmpeg / ffprobe call by what is left of the budge
     assert.equal(r.status, 0, r.stderr);
     for (const row of records(rec)) assert.equal(row.timeout, null, row.line.slice(0, 80));
     assert.ok(readFileSync(rec, "utf8").length > 0);
+  } finally { sb.done(); }
+  sb = sandbox();
+  try {
+    const rec = join(sb.work, "calls.jsonl");
+    const a = audioSetup(sb, "music", { log: ["[TIMING ts=1] ace_step.planner.weights.buffer_name Vulkan0"], writes: { kind: "wav", seconds: 3 } });
+    const r = await runNode("audiocpp-generate.mjs", a.args, sb, { preload, env: { IGPU_TEST_RECORD: rec } });
+    assert.equal(r.status, 0, r.stderr);
+    const rows = records(rec).filter((x) => x.line.includes("silenceremove") || x.line.includes("format=duration") || x.line.includes("loudnorm") || x.line.includes("silencedetect"));
+    assert.ok(rows.length >= 5, "the audio finalize calls were recorded");
+    for (const row of rows) assert.equal(row.timeout, null, row.line.slice(0, 80));
   } finally { sb.done(); }
 });

@@ -31,8 +31,10 @@
 // (igpu-engine.mjs createLogGuard): the run passes only with a "<component>.weights.buffer_name
 // Vulkan<N>" line, ANY "*.weights.buffer_name CPU" line kills it with CPU_PLACEMENT, and a run
 // that ends with no GPU evidence is CPU_PLACEMENT too.
-// DEADLINE: --timeout-sec counts from this process's start (the llama-swap drain spends it);
-// SIGTERM/SIGINT/SIGHUP and a vanished parent kill the engine and remove the temp dir.
+// DEADLINE: --timeout-sec counts from this process's start (the llama-swap drain spends it); the engine
+// AND every ffmpeg / ffprobe call after it (trim, master, convert, the duration probes, the dead-air
+// measurement) are bounded by what is left of it; SIGTERM/SIGINT/SIGHUP and a vanished parent kill the
+// engine and remove the temp dir.
 //
 // FINALIZE (finalizeAudio): every ffmpeg step must succeed or the job fails with its stderr tail
 // (never a silent copy of the raw engine file). Music: trim trailing silence below -45 dB (the
@@ -41,8 +43,9 @@
 // wrote it (re-encoded only for a non-wav extension). Both kinds then pass the repo's dead-air gate
 // (audio-qa.mjs, the way comfy-music.mjs applies it) on the file as delivered: a render that
 // is silent (a Vulkan fp16 / NaN failure writes zeros and exits 0) fails typed as DEAD_AIR and
-// nothing is delivered. ffmpeg AND ffprobe are required up front (FFMPEG_UNAVAILABLE, before the
-// lease): audio nobody can verify is not a usable result.
+// nothing is delivered. The gate fails closed: a measuring ffmpeg pass that did not exit 0 or did not
+// print ebur128's Summary block is UNMEASURABLE, never "no silence found". ffmpeg AND ffprobe are
+// required up front (FFMPEG_UNAVAILABLE, before the lease): audio nobody can verify is not a usable result.
 import { existsSync, copyFileSync, rmSync } from "node:fs";
 import { join, extname } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -147,26 +150,44 @@ export function buildConvertArgs({ src, dst }) {
 }
 
 // runStep: one ffmpeg step; any failure is an error carrying the stderr tail, and the output it
-// was meant to produce must exist.
-function runStep(run, ffmpeg, args, dst, what) {
-  const r = run(ffmpeg, args);
+// was meant to produce must exist. `timeoutMs` (0 = none) bounds the call.
+function runStep(run, ffmpeg, args, dst, what, timeoutMs = 0) {
+  const r = run(ffmpeg, args, { timeoutMs });
   if (r.error || r.status !== 0) throw runFailure(what, r);
   if (!existsSync(dst)) throw new Error(`${what} failed: ffmpeg exited 0 but wrote no ${dst}`);
 }
 
+// unmeasuredReason: why a measurement of the delivered audio cannot be trusted ("" = it can). The
+// measuring ffmpeg pass must have EXITED 0 and printed ebur128's Summary block (measure() reads the
+// integrated loudness from that block alone, so a value means the Summary was printed). Both, because
+// either alone is a pass that did not finish: ebur128 prints a loudness line every 100 ms, so a pass
+// that was OOM-killed or died half way still printed a loudness and left an EMPTY silence list, which
+// reads as "no silence found"; and the Summary is printed only at the very end, so a pass that has it
+// but exited non-zero failed after (or while) writing it.
+export function unmeasuredReason(measured) {
+  if (measured.exitSignal) return `the measuring ffmpeg pass was ended by ${measured.exitSignal}`;
+  if (measured.exitStatus !== 0) return `the measuring ffmpeg pass exited ${measured.exitStatus}`;
+  if (measured.integratedLUFS === null || measured.integratedLUFS === undefined) {
+    return "the measuring ffmpeg pass printed no loudness Summary (it was cut short, or this ffmpeg lacks silencedetect / ebur128)";
+  }
+  return "";
+}
+
 // gateDeadAir: the repo's dead-air gate (audio-qa.mjs) on the file as delivered. FAIL CLOSED: a file
 // the gate could not measure is never "clean". Two shapes of that: ffprobe sees no duration (the
-// audio is empty or unreadable: DEAD_AIR), and the measuring ffmpeg pass printed no loudness
-// summary (it exited non-zero, was killed, or lacks silencedetect / ebur128: UNMEASURABLE; measure()
-// reports only an ffmpeg that failed to SPAWN as null, and shares its code with comfy-music.mjs, so
-// the check lives here). A silent file still has a summary (ebur128 prints I: -70.0 LUFS for it), so
-// it keeps failing as dead air.
-export function gateDeadAir({ ffmpeg, ffprobe, file, measureFn = measure }) {
-  const measured = measureFn(ffmpeg, ffprobe, file);
+// audio is empty or unreadable: DEAD_AIR), and a measuring ffmpeg pass that did not run to the end
+// (a non-zero exit or a signal, or no Summary block: UNMEASURABLE, see unmeasuredReason). measure()
+// reports only an ffmpeg that failed to SPAWN as null and shares its code with comfy-music.mjs, so it
+// reports the facts of the pass and the decision lives here. A silent file still has a Summary
+// (ebur128 prints I: -70.0 LUFS for it), so it keeps failing as dead air. `timeoutMs` (0 = none)
+// bounds the measurement.
+export function gateDeadAir({ ffmpeg, ffprobe, file, measureFn = measure, timeoutMs = 0 }) {
+  const measured = measureFn(ffmpeg, ffprobe, file, { timeoutMs });
   const verdict = assessDeadAir(measured);
   if (verdict.skipped) throw new Error(`DEAD_AIR: the delivered audio could not be measured (${verdict.reason}): it is empty or unreadable`);
-  if (measured.integratedLUFS === null || measured.integratedLUFS === undefined) {
-    throw new Error(`${UNMEASURABLE}: the dead-air gate could not measure ${file}: ffmpeg's silencedetect/ebur128 pass printed no loudness summary (it failed, was killed, or this ffmpeg lacks the filters), so the audio was NOT checked and is not delivered. Not retried automatically.`);
+  const why = unmeasuredReason(measured);
+  if (why) {
+    throw new Error(`${UNMEASURABLE}: the dead-air gate could not measure ${file}: ${why}, so the audio was NOT checked and is not delivered. Not retried automatically.`);
   }
   if (verdict.deadAir) throw new Error(`DEAD_AIR: ${verdict.reason}; the engine exited 0 but the audio is not usable. Not retried automatically.`);
   return verdict;
@@ -179,7 +200,10 @@ export function gateDeadAir({ ffmpeg, ffprobe, file, measureFn = measure }) {
 // Everything is written to a PARTIAL file beside `out` and renamed onto it only after the gate has
 // passed: a failed step, a failed gate or a kill never leaves a half-written file at `out`, and
 // never removes a good file that was already there (a re-run of the same request has the same path).
-export function finalizeAudio({ ffmpeg, ffprobe, wav, out, kind, workDir, run = defaultRun, measureFn = measure, durationFn = durationSec, log = (m) => console.error(m) }) {
+// `deadline` (makeDeadline, optional) bounds every ffmpeg / ffprobe call like the video and animate runners
+// do: a step whose budget is already spent refuses to start (deadline.enforce), and a call that outlives
+// what was left when it started is killed (a timeout). No deadline = unbounded, as before.
+export function finalizeAudio({ ffmpeg, ffprobe, wav, out, kind, workDir, deadline = null, run = defaultRun, measureFn = measure, durationFn = durationSec, log = (m) => console.error(m) }) {
   if (!ffmpeg || !ffprobe) {
     throw new Error("FFMPEG_UNAVAILABLE: ffmpeg/ffprobe could not be resolved (set ffmpeg_path, or put both on PATH): the audio's trim / loudness / dead-air checks cannot run");
   }
@@ -187,28 +211,35 @@ export function finalizeAudio({ ffmpeg, ffprobe, wav, out, kind, workDir, run = 
   const partial = partialPath(out);
   const rm = () => { try { rmSync(partial, { force: true }); } catch { /* best effort */ } };
   const unregister = registerCleanup(rm);
+  // budget: the milliseconds the next external call may take (0 = no deadline), after the deadline has
+  // been asked whether the step may start at all
+  const budget = (what) => {
+    if (!deadline) return 0;
+    deadline.enforce(what);
+    return deadline.remainingMs();
+  };
   let did;
   let trimmedSec = 0;
   let verdict;
   try {
     if (kind === "music") {
       const trimmed = join(workDir, "trimmed.wav");
-      runStep(run, ffmpeg, buildTrimTailArgs({ src: wav, dst: trimmed }), trimmed, "ffmpeg trailing-silence trim");
-      const before = durationFn(ffprobe, wav);
-      const after = durationFn(ffprobe, trimmed);
+      runStep(run, ffmpeg, buildTrimTailArgs({ src: wav, dst: trimmed }), trimmed, "ffmpeg trailing-silence trim", budget("ffmpeg trailing-silence trim"));
+      const before = durationFn(ffprobe, wav, { timeoutMs: budget("ffprobe duration") });
+      const after = durationFn(ffprobe, trimmed, { timeoutMs: budget("ffprobe duration") });
       if (!(after > 0)) throw new Error("DEAD_AIR: the trailing-silence trim left no audio: the whole render is silence");
       trimmedSec = Math.max(0, before - after);
       if (trimmedSec > 0.05) log(`audiocpp-generate: trimmed ${trimmedSec.toFixed(2)}s of trailing silence`);
-      runStep(run, ffmpeg, buildMasterArgs({ src: trimmed, dst: partial, duration: after }), partial, "ffmpeg fade/loudness master");
+      runStep(run, ffmpeg, buildMasterArgs({ src: trimmed, dst: partial, duration: after }), partial, "ffmpeg fade/loudness master", budget("ffmpeg fade/loudness master"));
       did = "mastered";
     } else if (wantWav) {
       copyFileSync(wav, partial);
       did = "copied";
     } else {
-      runStep(run, ffmpeg, buildConvertArgs({ src: wav, dst: partial }), partial, "ffmpeg re-encode");
+      runStep(run, ffmpeg, buildConvertArgs({ src: wav, dst: partial }), partial, "ffmpeg re-encode", budget("ffmpeg re-encode"));
       did = "converted";
     }
-    verdict = gateDeadAir({ ffmpeg, ffprobe, file: partial, measureFn });
+    verdict = gateDeadAir({ ffmpeg, ffprobe, file: partial, measureFn, timeoutMs: budget("dead-air gate") });
     deliverFile(partial, out);
   } catch (e) {
     // a QA gate on our own broken output, or a failed step that left a partial file: nothing is delivered
@@ -264,7 +295,7 @@ async function main() {
       if (!existsSync(wav)) throw new Error("audiocpp_cli exited 0 but produced no audio at " + wav);
     });
     deadline.enforce("audio finalize");
-    finalizeAudio({ ffmpeg, ffprobe, wav, out, kind, workDir: tmp.dir });
+    finalizeAudio({ ffmpeg, ffprobe, wav, out, kind, workDir: tmp.dir, deadline });
     console.log("WROTE", out);
   } finally {
     tmp.cleanup();

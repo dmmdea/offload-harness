@@ -114,7 +114,7 @@ function stubRun({ failAt = -1, status = 1, stderr = "boom", noWrite = false } =
   };
   return { run, calls };
 }
-const CLEAN = { duration: 26.6, silences: [], integratedLUFS: -14, truePeakDBFS: -1.2 };
+const CLEAN = { duration: 26.6, silences: [], integratedLUFS: -14, truePeakDBFS: -1.2, exitStatus: 0, exitSignal: null };
 const base = { ffmpeg: "ffmpeg", ffprobe: "ffprobe", measureFn: () => CLEAN, durationFn: (_p, f) => (f.endsWith("trimmed.wav") ? 26.55 : 30), log: () => {} };
 
 test("finalizeAudio music: trim the trailing silence below -45 dB, then fade-out + loudnorm -14 LUFS / -1 dBTP at 48 kHz, then the dead-air gate", () => {
@@ -191,7 +191,7 @@ test("finalizeAudio voice: a .wav is the engine's file byte for byte (no ffmpeg 
 });
 
 test("finalizeAudio: the dead-air gate runs on the DELIVERED file for voice and music; a silent or unmeasurable render is DEAD_AIR and the file is removed (G26)", () => {
-  const silent = { duration: 20, silences: [{ start: 0, end: 20, duration: 20 }], integratedLUFS: -70, truePeakDBFS: -70 };
+  const silent = { duration: 20, silences: [{ start: 0, end: 20, duration: 20 }], integratedLUFS: -70, truePeakDBFS: -70, exitStatus: 0, exitSignal: null };
   for (const [kind, out] of [["voice", "v.wav"], ["music", "m.wav"]]) {
     const w = work();
     try {
