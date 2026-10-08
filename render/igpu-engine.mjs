@@ -630,6 +630,7 @@ function killLiveEngines() {
 
 // enginePids: the pids of every live engine and its descendants (what a shutdown must see gone).
 export function enginePids() {
+  if (liveEngines.size === 0) return []; // nothing to find: skip the process table scan on a normal exit
   const table = processTable();
   const out = [];
   for (const c of liveEngines) {
