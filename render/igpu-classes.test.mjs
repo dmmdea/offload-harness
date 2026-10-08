@@ -108,24 +108,29 @@ test("gpuResetError: the advice fits the engine - a token cap for sd.cpp, a shor
 
 test("failAndExit: the end of a failure survives a stderr pipe that is full and read slowly (process.exit would drop it)", async () => {
   const mod = pathToFileURL(join(here, "igpu-engine.mjs")).href;
-  // 400 KB of engine chatter, then the typed failure and its class line, then exit
+  // About 175 KB of engine chatter (more than twice a 64 KiB pipe buffer, so most of it can only be queued),
+  // then the typed failure and its class line, then exit. failAndExit gives a pipe nobody drains 3 s, so the
+  // reader below has to be slow RELATIVE TO THE WRITER and cheap in absolute time: it takes the 3 s bound
+  // out of reach of a loaded host (this test failed once in eight parallel runs with 400 KB and 20 ms pauses,
+  // when the host stretched each of those pauses far past 20 ms).
   const code = `
     import { failAndExit } from ${JSON.stringify(mod)};
-    for (let i = 0; i < 4000; i++) process.stderr.write("engine log line " + i + " " + "x".repeat(90) + "\\n");
+    for (let i = 0; i < 1600; i++) process.stderr.write("engine log line " + i + " " + "x".repeat(90) + "\\n");
     failAndExit("SDCPP VIDEO", new Error("GPU_RESET: the GPU reset"));`;
   const { spawn } = await import("node:child_process");
   const child = spawn(process.execPath, ["--input-type=module", "-e", code], { stdio: ["ignore", "ignore", "pipe"] });
   let err = "";
-  // a slow reader: one chunk, then a pause - the child's writes outrun it and queue up
+  // a slow reader: one chunk, then a short pause - the child's writes outrun it and queue up
   child.stderr.on("data", (d) => {
     err += d;
     child.stderr.pause();
-    setTimeout(() => child.stderr.resume(), 20);
+    setTimeout(() => child.stderr.resume(), 5);
   });
   const status = await new Promise((r) => child.on("close", r));
   assert.equal(status, 1);
   const lines = err.trim().split(/\r?\n/);
   assert.equal(lines[lines.length - 1], "IGPU_CLASS=gpu_reset", "the class line is the last line and it arrived");
   assert.match(lines[lines.length - 2], /^SDCPP VIDEO FAILED: GPU_RESET:/);
-  assert.ok(err.includes("engine log line 3999 "), "and so did all the log before it");
+  assert.ok(err.includes("engine log line 1599 "), "and so did all the log before it");
+  assert.ok(err.length > 2 * 65536, "the premise: more than two pipe buffers went through a reader that could not take it at once");
 });
