@@ -253,17 +253,33 @@ export function modelMetadataError(log, modelFile) {
 // What counts as evidence, per engine (formats read from the engines' own source at the
 // pinned commits and confirmed against real logs in render/testdata, see its README):
 //
-//   sdcpp    (stable-diffusion.cpp 3f8527a)  PASS needs ALL of
+//   sdcpp    (stable-diffusion.cpp 3f8527a "master-929", a1ded76 "master-945")  PASS needs ALL of
 //              - "ggml_vulkan: <n> = <device> (...)" for a NON-software device,
-//              - a "<module> compute buffer size: ... on Vulkan<N>" line for a module that is
-//                not an auxiliary one (text encoder / VAE / TAE): the diffusion stage,
-//              - and no "compute buffer size ... on CPU" line.
+//              - the diffusion stage on a Vulkan device: a "<module> compute buffer size: ... on
+//                Vulkan<N>" line for a module that is not an auxiliary one (text encoder / VAE /
+//                TAE), or the auto-fit plan's line for the diffusion component ("DiT   params ...
+//                -> compute Vulkan<N>, params ..."),
+//              - and no "compute buffer size ... on CPU" line and no plan line "-> compute CPU".
 //            sd.cpp prints the backend via ggml_backend_name() (compute: "CPU" for the CPU
 //            backend, "Vulkan0" for the first Vulkan device) and the params buffer type via
 //            ggml_backend_buft_name() ("CPU", "Vulkan0", or "Vulkan_Host" for pinned host
 //            memory). Params resting in RAM with compute on the GPU is the sanctioned
-//            overflow, so a params line "on CPU" / "on Vulkan_Host" is neither evidence nor a
-//            placement.
+//            overflow, so a params line "on CPU" / "on Vulkan_Host" and a plan line
+//            "params RAM" / "params CPU" are neither evidence nor a placement.
+//            sd.cpp's log record has two shapes and BOTH are read for good, because nodes upgrade at
+//            different times (a fleet update moves one node to the next release while the rest stay):
+//              master-929 and before   "[VERBOSE] ggml_runner.cpp:1019 - <message>"   (the tag is padded to 7:
+//                                      "[INFO   ]", "[WARN   ]", "[ERROR  ]"; the line number is padded too)
+//              master-945 and after    "[V] <message> --- ggml_runner.cpp:1019"       (#2104: one-letter tags [D] [V]
+//                                      [I] [W] [E], and the source location moved to the END, unpadded; #2106: the
+//                                      separator is " --- " (the one release between the two had " - "), and the
+//                                      newlines of a prompt echo are escaped, "\n" as the two characters)
+//            A record of several lines (a parameter dump, "System Info") carries its tag on the FIRST line and its
+//            tail on the LAST ("} --- main.cpp:699"). So every sd.cpp line is NORMALISED before an anchored shape reads
+//            it (normalizeSdLine): one leading level tag in either spelling (with the "file.cpp:N - " source prefix
+//            after the old one) and one trailing source tail are cut, and the raw line is kept for the error
+//            messages. The shapes that are anchored at the start of a record read the normalised line; the plain
+//            words (a CPU backend, a lost device) read the whole raw line.
 //   da3      (depth-anything.cpp da3-cli)    PASS needs "[da3] da::Backend using device: Vulkan<N>".
 //            "offload_weights: ... (N host-only tensors kept on CPU ...)" is a storage line.
 //   audiocpp (audio.cpp audiocpp_cli)        PASS needs a "<component>.weights.buffer_name
@@ -273,31 +289,77 @@ export function modelMetadataError(log, modelFile) {
 // Never scanned for anything: ggml's "loaded CPU backend" registration, "Initializing
 // backend: CPU", and (sd.cpp only, on its own record shapes) the SDCliParams / SDContextParams /
 // SDGenerationParams dump blocks and the tokenizer echo lines ("split prompt ..." / "parse '...'").
+// A dump block opens on the record whose whole message is "SDCliParams {" (or the other two) and
+// closes on a normalised "}" at column 0: the bare "}" of the old shape, "} --- main.cpp:699" of the
+// new one. A block that is never closed ends at the next LONG-tag record (the old shape's valve)
+// and, in the new shape, ONLY at its close: the one-letter tags are deliberately not a valve. A new-shape
+// record ends with its tail, so the "}" always carries one; a block that does not close is a record shape
+// this guard does not understand, and the loud outcome is the right one (the rest of the log is skipped,
+// the run ends without its evidence and fails CPU_PLACEMENT "no GPU evidence", the way this very shape
+// first showed), where a valve would pass the run on a guess and hide that the closing line changed.
 //
 // The request's own text (prompt, negative prompt, TTS text, lyrics) never switches the CPU detector
 // off: every other line is scanned whole, the placement and evidence shapes are anchored at the start
-// of the line (after the record head), and a line that echoes the request can only fail to count as
+// of the record (after its head), and a line that echoes the request can only fail to count as
 // POSITIVE evidence. A plain-words shape (a device reset) is read with the request's text taken out.
+// A record that IS a line of the request ("[V] SDCliParams {" as a prompt line) opens no dump block.
 export const GUARD_ENGINES = ["sdcpp", "da3", "audiocpp"];
 
 const SOFTWARE_DEVICE = /\b(?:llvmpipe|lavapipe|swiftshader)\b/i;
-// The head of an sd.cpp log record: "[VERBOSE] ggml_runner.cpp:1019 - " (the bare lines of older builds
-// and of the tests have none). Every placement and evidence shape below starts at the line's start
-// (after the head), so text the request echoes in the MIDDLE of some other line can neither forge
-// a shape nor, by being a substring of a real one, hide it.
-const HEAD = String.raw`(?:\[[A-Z]+\s*\]\s+[\w./-]+:\d+\s+-\s+)?`;
 // audio.cpp's own record heads: "[TIMING ts=20261003-172137] ", "[TRACE ts=...] "
 const AUDIO_HEAD = String.raw`(?:\[[A-Z]+(?:\s+ts=[^\]\s]*)?\s*\]\s*)*`;
-// sd.cpp's parameter dumps: only the engine that prints them (sdcpp) opens a block, and only on its
-// own record shape, so text echoed elsewhere that happens to end in "SDCliParams {" opens nothing.
-const BLOCK_START = new RegExp(String.raw`^\[[A-Z]+\s*\]\s+[\w./-]+:\d+\s+-\s+(?:SDCliParams|SDContextParams|SDGenerationParams)\s*\{\s*$`);
+// sd.cpp's record head and tail, in the two shapes (see the comment above). Every placement and evidence
+// shape below starts at the beginning of the record (after the head), so text the request echoes in the
+// MIDDLE of some other line can neither forge a shape nor, by being a substring of a real one, hide it.
+//   old head   "[VERBOSE] ggml_runner.cpp:1019 - ", "[INFO   ] main.cpp:699  - ": the long tag and the source it prints in front
+//   new head   "[V] ": the one-letter tag alone (the bare lines of the tests and of ggml itself have none)
+//   tail       " --- ggml_runner.cpp:1019": the new source, behind the message (" - ..." in the one release before #2106)
+const SD_OLD_HEAD = /^\[(?:DEBUG|VERBOSE|INFO|WARN|WARNING|ERROR)\s*\]\s+[\w./+-]+:\d+\s+-\s+/;
+const SD_NEW_TAG = /^\[[DVIWE?]\](?:\s|$)/;
+// (one whitespace char in front of the dashes, the run before it is cut by hand: a `\s+` here would make a
+// line of thousands of spaces, such as a padded prompt in a dump, cost the square of its length)
+const SD_TAIL = /\s(?:---|-)\s+[\w./+-]+:\d+\s*$/;
+
+// normalizeSdLine: an sd.cpp log line without its record head and its source tail. Pure; cuts at most
+// one head and one tail, and only at the two ends of the line.
+//   text    the rest. Leading whitespace is kept: a dump's indented "  }" is not its closing "}".
+//   tagged  the line carried a head, i.e. it STARTS a record (a bare "SDCliParams {" is only text).
+// A record of several lines has its head on the first line and its tail on the last, so a middle line
+// has neither and the last one is its tail alone ("} --- main.cpp:699" is "}").
+export function normalizeSdLine(line) {
+  let text = String(line ?? "");
+  let tagged = false;
+  const head = SD_OLD_HEAD.exec(text) || SD_NEW_TAG.exec(text);
+  if (head) {
+    text = text.slice(head[0].length);
+    tagged = true;
+  }
+  const tail = SD_TAIL.exec(text);
+  if (tail) {
+    let end = tail.index;
+    while (end > 0 && /\s/.test(text[end - 1])) end--; // the space(s) the tail was appended after go with it
+    text = text.slice(0, end);
+  }
+  return { text, tagged };
+}
+
+// sd.cpp's parameter dumps: only the engine that prints them (sdcpp) opens a block, and only on a
+// record whose whole message is the header, so text echoed elsewhere that happens to end in
+// "SDCliParams {" opens nothing. Matched against the NORMALISED text of a tagged line.
+const BLOCK_START = /^(?:SDCliParams|SDContextParams|SDGenerationParams)\s*\{\s*$/;
+// The long-tag record heads that end an unterminated dump block (the old shape's valve; the new
+// shape's one-letter tags are not in it on purpose, see above), plus audio.cpp's own heads.
 const LOG_PREFIX = /^\[(?:VERBOSE|INFO|WARN|WARNING|ERROR|DEBUG|TRACE|TIMING)(?:\s+ts=[^\]\s]*)?\s*\]/;
-const TOKENIZER_ECHO = [new RegExp("^" + HEAD + String.raw`split prompt\s+"`), new RegExp("^" + HEAD + String.raw`parse\s+'`)];
+const TOKENIZER_ECHO = [/^split prompt\s+"/, /^parse\s+'/];
 const GPU_RESET_RE = /ErrorDeviceLost|device lost|context is lost/i;
 const GGML_DEVICE_LINE = /^\s*ggml_vulkan:\s*(\d+)\s*=\s*(.+?)\s*(?:\||$)/;
 const NO_VULKAN_DEVICE = /ggml_vulkan:\s*Found\s+0\s+Vulkan\s+devices|ggml_vulkan:\s*No\s+devices\s+found/i;
-// stable-diffusion.cpp: a compute buffer on a backend; the module name is one word.
-const SD_COMPUTE_BUFFER = new RegExp("^" + HEAD + String.raw`([\w.+-]+)\s+compute buffer size:.*?\bon\s+(\S+)`);
+// stable-diffusion.cpp: a compute buffer on a backend; the module name is one word. Read on the normalised text.
+const SD_COMPUTE_BUFFER = /^([\w.+-]+)\s+compute buffer size:.*?\bon\s+(\S+)/;
+// The auto-fit plan's line of the diffusion component, "DiT   params 5162 MiB, compute reserve 2048 MiB ->
+// compute Vulkan0, params Vulkan0" (the old shape's head eats its indentation, the new one keeps it). The
+// compute backend is group 1. Read on the normalised text; "-> compute CPU" is a placement (SD_CPU_SHAPES).
+const SD_PLAN_DIT = /^\s*DiT\s+params\b.*?->\s*compute\s+([A-Za-z_]+\d*)\b/i;
 // The modules that are NOT the diffusion stage, by sd.cpp's own runner names (get_desc()), matched
 // against the WHOLE module name: the text encoders (t5, umt5, clip, llm), the VAEs (vae, wan_vae,
 // flux_vae, ...), the tiny autoencoders (tae*, taesd, taehv), the control-net runner (control_net),
@@ -331,11 +393,16 @@ function stripAnsi(s) {
 //                 reset), so a prompt about "device lost" cannot end a healthy run.
 // A piece shorter than 6 characters is ignored: no evidence line is that short, so it can forge
 // nothing, and stripping it would only eat real words.
+// The pieces of a text are the text, each of its lines, and the text as sd.cpp (master-945+) prints
+// a prompt: on ONE line, with every newline escaped to the two characters "\n" (and a CR to "\r").
+// Without that spelling a two-line prompt echoed on one line would be two half-covered pieces
+// (under 60% each) and no echo at all.
+const escapeNewlines = (s) => s.replace(/\r/g, "\\r").replace(/\n/g, "\\n");
 function buildEchoMatcher(echoes) {
   const pieces = new Set();
   for (const raw of echoes || []) {
     if (typeof raw !== "string") continue;
-    for (const part of [raw, ...raw.split(/\r\n|\r|\n/)]) if (part.trim().length >= 6) pieces.add(part.trim());
+    for (const part of [raw, escapeNewlines(raw), ...raw.split(/\r\n|\r|\n/)]) if (part.trim().length >= 6) pieces.add(part.trim());
   }
   const full = [...pieces].sort((x, y) => y.length - x.length);
   return {
@@ -366,18 +433,25 @@ export function createLogGuard({ engine, echoes = [] }) {
   function scan(raw) {
     st.lineNo++;
     const line = stripAnsi(String(raw ?? ""));
+    // `text` is what the shapes anchored at the start of a record read. For sd.cpp it is the line
+    // without its record head and its source tail (normalizeSdLine); the other engines' lines as they are.
+    let text = line;
     if (engine === "sdcpp") {
+      const rec = normalizeSdLine(line);
+      text = rec.text;
       // the parameter dumps and the tokenizer echoes repeat the request's text and every path:
       // the only lines that are skipped outright, and only on sd.cpp's own record shapes
       if (st.inBlock) {
-        if (/^\}\s*$/.test(line)) { st.inBlock = false; return null; }
-        if (!LOG_PREFIX.test(line)) return null; // an indented dump line: never scanned
-        st.inBlock = false; // an unterminated dump: the next log record ends it
+        if (/^\}\s*$/.test(text)) { st.inBlock = false; return null; } // the old "}" and the new "} --- main.cpp:699"
+        if (!LOG_PREFIX.test(line)) return null; // a dump line, or the lines of a new-shape record: never scanned
+        st.inBlock = false; // an unterminated old-shape dump: the next long-tag record ends it
       }
-      if (BLOCK_START.test(line)) { st.inBlock = true; return null; }
-      if (TOKENIZER_ECHO.some((re) => re.test(line))) return null;
+      if (rec.tagged && BLOCK_START.test(text) && !echo.isEcho(line)) { st.inBlock = true; return null; }
+      if (TOKENIZER_ECHO.some((re) => re.test(text))) return null;
     }
-    const isEcho = echo.isEcho(line);
+    // the head and the tail of an sd.cpp record dilute the share the request's text has of the line, so
+    // the message alone is asked too
+    const isEcho = echo.isEcho(line) || (text !== line && echo.isEcho(text));
 
     // a lost device is plain words: read it with the request's own text taken out
     if (GPU_RESET_RE.test(echo.strip(line))) return { kind: GPU_RESET, line: line.trim(), lineNo: st.lineNo };
@@ -397,7 +471,7 @@ export function createLogGuard({ engine, echoes = [] }) {
 
     if (engine === "sdcpp") {
       if (SD_CPU_SHAPES.some((re) => re.test(line))) return cpu(line);
-      const cb = SD_COMPUTE_BUFFER.exec(line);
+      const cb = SD_COMPUTE_BUFFER.exec(text);
       if (cb) {
         const [, desc, on] = cb;
         if (/^CPU\d*$/i.test(on)) return cpu(line);
@@ -405,6 +479,13 @@ export function createLogGuard({ engine, echoes = [] }) {
           st.diffusion = true;
           note(`${desc} compute on ${on}`);
         }
+      }
+      // the auto-fit plan puts the diffusion component on a device before anything is loaded: a second
+      // way to show the diffusion stage is on the GPU ("-> compute CPU" was a placement above)
+      const plan = SD_PLAN_DIT.exec(text);
+      if (plan && /^Vulkan\d+$/i.test(plan[1]) && !isEcho) {
+        st.diffusion = true;
+        note(`DiT plan: compute on ${plan[1]}`);
       }
     } else if (engine === "da3") {
       const b = DA3_BACKEND.exec(line);
@@ -437,7 +518,7 @@ export function createLogGuard({ engine, echoes = [] }) {
     let expected;
     if (engine === "sdcpp") {
       ok = st.device && st.diffusion;
-      expected = `a non-software "ggml_vulkan: <n> = <device>" line${st.device ? " (seen)" : " (missing)"} and a diffusion-stage "compute buffer size ... on Vulkan<N>" line${st.diffusion ? " (seen)" : " (missing)"}`;
+      expected = `a non-software "ggml_vulkan: <n> = <device>" line${st.device ? " (seen)" : " (missing)"} and a diffusion-stage "compute buffer size ... on Vulkan<N>" line (or the auto-fit plan's DiT "-> compute Vulkan<N>" line)${st.diffusion ? " (seen)" : " (missing)"}`;
     } else if (engine === "da3") {
       ok = st.da3;
       expected = `a "da::Backend using device: Vulkan<N>" line`;

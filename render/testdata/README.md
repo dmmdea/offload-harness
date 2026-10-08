@@ -3,33 +3,82 @@
 The fixtures the no-CPU guard (`render/igpu-engine.mjs`, `createLogGuard`) is pinned to.
 Everything here is a REAL capture from the amd-gcn reference node (Vega 7 iGPU through
 RADV, Ubuntu, 32 GB UMA), scrubbed of local paths (`/models/...`, `/work/...`, `/opt/...`
-are placeholders), except the three `*-derived.log` files, which are derived and say so
+are placeholders), except the `*-derived.log` files, which are derived and say so
 in their first line.
+
+sd.cpp's log record has two shapes and the fixtures hold both (see "The two sd.cpp record
+shapes" below): the `sdcpp-*` captures are master-929 (`3f8527a`), the `sdcpp945-*` ones
+master-945 (`a1ded76`).
 
 | file | what it is | the guard's verdict |
 |---|---|---|
-| `sdcpp-video-healthy.log` | stable-diffusion.cpp `3f8527a`, FastWan2.2 TI2V-5B I2V 832x480x49, full VAE | passes |
+| `sdcpp-video-healthy.log` | stable-diffusion.cpp `3f8527a` (master-929), FastWan2.2 TI2V-5B I2V 832x480x49, full VAE | passes |
 | `sdcpp-video-tae.log` | same model, tiny autoencoder decode (`--taesd`) | passes |
+| `sdcpp945-video-healthy.log` | stable-diffusion.cpp `a1ded76` (master-945), FastWan2.2 TI2V-5B I2V 832x480x17, 3 steps, tiled full VAE (overlap 0.25); prompt "waves crash on the rocks around the lighthouse, golden hour" | passes |
+| `sdcpp945-video-tae.log` | same model and prompt, tiny autoencoder decode (`--taesd`, `taew2_2`) | passes |
+| `sdcpp945-vace-healthy.log` | master-945, Wan2.1 VACE 1.3B (fp16 safetensors) 288x512x17, 20 steps, a depth control video and a reference image; prompt "a clay figure of a bearded man in a plaid shirt waves hello, stop-motion clay style, warm evening light" | passes |
 | `sdcpp-vace-device-lost.log` | Wan2.1 VACE 1.3B at 15,600 tokens: the GPU reset in the first step | `GPU_RESET` |
 | `da3-healthy.log` | depth-anything.cpp `14f7461`, one frame | passes |
 | `audiocpp-voice-clone.log` | audio.cpp v0.9.0 chatterbox voice clone | passes |
+| `audiocpp091-voice-clone.log` | audio.cpp v0.9.1 chatterbox voice clone (7.36 s of audio); text "Every clip on this node now renders on the integrated graphics, and nothing runs on the processor. This is the first voice test." | passes |
+| `audiocpp091-music.log` | audio.cpp v0.9.1 ace_step, 30 s of audio, built WITH the planner prefill patch (`setup/patches/audiocpp-v0.9.0-vulkan-planner-prefill.patch` applies to v0.9.1 unchanged): the planner is on `Vulkan0` and no line says `buffer_name CPU`; prompt "warm acoustic guitar and soft piano, gentle documentary underscore, 90 bpm, instrumental" | passes |
 | `audiocpp-music-host-prefill.log` | audio.cpp v0.9.0 ace_step: a genuinely captured CPU placement (`ace_step.planner.weights.buffer_name CPU`) | `CPU_PLACEMENT` |
 | `sdcpp-video-cpu-derived.log` | derived from `sdcpp-video-healthy.log`: every params and compute line on CPU | `CPU_PLACEMENT` |
 | `sdcpp-video-cpu-compute-derived.log` | derived from `sdcpp-video-healthy.log`: only the diffusion stage's compute buffer on CPU | `CPU_PLACEMENT` |
+| `sdcpp-video-cpu-plan-derived.log` | derived from `sdcpp-video-healthy.log`: only the auto-fit plan's DiT line on CPU (`-> compute CPU, params RAM`) | `CPU_PLACEMENT` |
 | `sdcpp-video-tae-cpu-derived.log` | derived from `sdcpp-video-tae.log`: every params and compute line on CPU | `CPU_PLACEMENT` |
+| `sdcpp945-video-cpu-derived.log` | derived from `sdcpp945-video-healthy.log`: every params and compute line on CPU | `CPU_PLACEMENT` |
+| `sdcpp945-video-cpu-compute-derived.log` | derived from `sdcpp945-video-healthy.log`: only the diffusion stage's compute buffer on CPU | `CPU_PLACEMENT` |
+| `sdcpp945-video-cpu-plan-derived.log` | derived from `sdcpp945-video-healthy.log`: only the auto-fit plan's DiT line on CPU (`-> compute CPU, params RAM`) | `CPU_PLACEMENT` |
+| `sdcpp945-video-tae-cpu-derived.log` | derived from `sdcpp945-video-tae.log`: every params and compute line on CPU | `CPU_PLACEMENT` |
+| `sdcpp945-vace-cpu-compute-derived.log` | derived from `sdcpp945-vace-healthy.log`: only the diffusion stage's compute buffer on CPU | `CPU_PLACEMENT` |
+
+## The two sd.cpp record shapes
+
+The same message, as the two releases print it (real lines from the fixtures):
+
+```
+master-929  [VERBOSE] ggml_runner.cpp:1019 - Wan2.2-TI2V-5B compute buffer size: 478.17 MB(VRAM) on Vulkan0 (peak across 1 segment)
+master-945  [V] Wan2.2-TI2V-5B compute buffer size: 192.53 MB(VRAM) on Vulkan0 (peak across 1 segment) --- ggml_runner.cpp:1019
+```
+
+- **Level tag.** `[VERBOSE]` / `[INFO   ]` / `[WARN   ]` / `[ERROR  ]` (padded to 7) became `[V]` / `[I]` /
+  `[W]` / `[E]` (and `[D]`), unpadded (sd.cpp #2104).
+- **Source.** `file.cpp:N - ` in front of the message (the line number padded to 4) moved behind it, as
+  ` --- file.cpp:N` (#2104 moved it; #2106 made the separator ` --- `, it was ` - ` in the one release
+  between them, which no capture here covers: the guard reads that shape from the upstream commit alone).
+- **Records of several lines** carry the tag on the FIRST line and the source on the LAST: the parameter
+  dumps open with `[V] SDCliParams {` and close with `} --- main.cpp:699`; `System Info:` ends its second
+  line with ` --- main.cpp:698`. The lines in between have neither.
+- **Prompt echoes.** `parse '...'` and `split prompt "..."` print the prompt on one line with its newlines
+  escaped (`\n`, `\r` as two characters; #2106). No fixture has a multi-line prompt, so the escaping is
+  read from the upstream commit and pinned with synthetic lines, and whether the dumps escape a newline
+  is not known: the guard skips a dump block whole either way.
+- **Not changed.** ggml's own lines (`ggml_vulkan: ...`, `load_backend: ...`) are bare in both, and so are
+  the progress bars (carriage returns, kept byte for byte: `render/testdata/*.log` is `-text`).
+- **The auto-fit plan** (`[I]     DiT          params   5162 MiB, compute reserve  2048 MiB -> compute
+  Vulkan0, params Vulkan0`) is in both releases' logs; the guard takes the DiT line on `Vulkan<N>` as
+  evidence of the diffusion stage and `-> compute CPU` of any component as a placement.
+
+`normalizeSdLine` in `render/igpu-engine.mjs` cuts one head and one tail, so the guard's shapes read the
+message and the same tests run over the fixtures of both releases.
 
 ## Why the sd.cpp negatives are derived
 
 No sd.cpp run on the CPU was captured: the node's operator forbids running a model on its
 CPU, even to make a fixture. Each negative is a healthy log with the device substituted
-in exactly the two line shapes sd.cpp prints. `derive-cpu-fixtures.mjs` does the
+in exactly the line shapes sd.cpp prints (the params-buffer line, the compute-buffer line, the
+auto-fit plan line). The substitution touches only the device words, so one script derives the
+negatives of both record shapes. `derive-cpu-fixtures.mjs` does the
 substitution and the node test re-derives each file and fails if a checked-in file
 drifts from its source.
 
 ## What the CPU backend prints (checked in the source, not assumed)
 
 Both format strings were read at stable-diffusion.cpp commit `3f8527a` (and the ggml it
-pins, commit `89c4413`):
+pins, commit `89c4413`); the master-945 logs print the same message texts (checked against
+the `sdcpp945-*` fixtures, the source was not re-read at `a1ded76`), only the record around
+them changed:
 
 - `src/model_manager.cpp:490`:
   `"model manager prepared params backend buffers (%6.2f MB, %zu tensors, %zu blocks, %s) on %s"`,
