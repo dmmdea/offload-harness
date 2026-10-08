@@ -1759,10 +1759,16 @@ in the bundle. The fields that may be files are `video-gen.still`, `animate.ref`
   base64-decoded straight out of it into the one decoded copy, and the admission closure keeps only the job id and task type),
   so a running or queued job pins neither the body nor the bundle: the extracted directory is the only copy.
 - **In-flight cap.** The body is read and decoded before the admission gates, so N concurrent uploads would hold N times that
-  peak. The node holds at most `mediaJobInFlightMax` of them at once (2, the stt upload door's bound): a caller that passed the
-  bearer check takes a slot before the first body byte and holds it until the job is admitted or refused, and every exit of the
-  handler gives it back. A caller over the bound waits for a slot up to 30 s, then is answered `503` with `Retry-After: 5`, which a
-  delegator re-places (`capacity`). The slot wait extends its own write deadline so the 503 reaches a real client.
+  peak. The node holds at most `mediaJobInFlightMax` of them at once: **one** (the stt upload door's bound is 2, for bodies of at
+  most 64 MiB). At the 256 MiB default cap one body is about 0.58 GiB in memory, the base64 text (341 MiB) beside the decoded
+  bundle (up to 256 MiB), so the door's node-wide peak is slots x 0.58 GiB: one slot keeps it under 0.6 GiB beside a ComfyUI
+  render, where two would be 1.17 GiB. A caller that passed the bearer check takes the slot before the first body byte and holds
+  it until the job is admitted or refused (up to the 15-minute read window on a slow link), and every exit of the handler gives it
+  back; uploads are served one at a time. A caller over the bound waits for the slot up to 30 s, then is answered `503` with
+  `Retry-After: 5`. The slot wait extends its own write deadline so the 503 reaches a real client. The door's only client,
+  `internal/mediaremote`, reads that 503 as a `capacity` defer but does not read `Retry-After` and makes one pass over the node it
+  picked: the caller gets the capacity defer and a later call places the job again. Slot occupancy is not in `/fleet/health` or in
+  the queue depth the node pick ranks on, so a node whose slot a long upload holds can still rank first.
 - **Outputs ride the bearer.** A media-job renders from the caller's private files (a still, a driver video, a voice sample), so
   its output is not served by bare name to anyone who learns it. After the inner builder, the door sets the render's `out` to
   `<media_dir>/mediajob-<16 hex>.<ext>` (`png`, `mp4`, `wav`, or `flac` for music; run-graph, which takes no file through this

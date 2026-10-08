@@ -94,7 +94,7 @@ Tests: `TestMediaJobDoorChecksTheDoorAndTheBearerBeforeReadingTheBody`, `TestMed
 Behaviour that differs from the first cut of the entry above (all of it unreleased):
 
 - **`fleet_media_inputs_max_mb` defaults to 256, not 512.** A node holds the base64 request body and the decoded bundle
-  together while it admits a job; the default keeps that peak under about 0.6 GiB. Raise it for a node with the RAM.
+  together while it admits a job; the default keeps that peak under about 0.6 GiB (the door takes one body at a time). Raise it for a node with the RAM.
 - **A running or queued media job no longer pins its request body.** The admission closure keeps only the job id and task
   type; the door decodes the head of the body without materialising the bundle and base64-decodes the bundle straight out of
   the body, so the extracted directory is the only copy the job holds (a 24 MiB bundle held 64 MiB of heap for the job's
@@ -204,11 +204,11 @@ Review of the branch against main 0.169.0 found three behaviours it had not pick
   off, `X-Offload-Pair-Card: node`. The MCP doors hand the lane their `runTaskAs`, which now forwards `BeginRemote` to the
   server's pipeline (without it the doors attributed nothing); the CLI verbs pass the pipeline itself. The local route and an
   auto call that runs here are unchanged.
-- **The media-job door caps its in-flight uploads like the stt upload door.** The body (a bundle of up to
+- **The media-job door caps its in-flight uploads.** The body (a bundle of up to
   `fleet_media_inputs_max_mb`, 256 MiB, in base64) is read before the admission gates, so every concurrent upload could hold one.
-  The door now takes one of `mediaJobInFlightMax` slots (2, the stt door's bound) after the bearer check and before the first
-  body byte, releases it on every exit of the handler, and answers `503` with `Retry-After` to a caller that waits past 30 s
-  (a delegator re-places a 503). `takeSTTUploadSlot` and the new door share `takeUploadSlot`.
+  The door now takes one of `mediaJobInFlightMax` slots (one, see the release review below) after the bearer check and before the
+  first body byte, releases it on every exit of the handler, and answers `503` with `Retry-After` to a caller that waits past 30 s
+  (`mediaremote` reads it as a capacity defer; see the release review). `takeSTTUploadSlot` and the new door share `takeUploadSlot`.
 - **The outputs of a media-job are served only to the fleet token.** They are rendered from the caller's private files (a still,
   a driver video, a voice sample), but `GET /fleet/media/{name}` served them by bare name while main bearer-gates compose-project
   and stt-upload renders. The door now names the render itself (`mediajob-<16 hex>.<ext>` under `media_dir`, set after the inner
@@ -276,6 +276,30 @@ each guard was broken once at its real call site and seen red.
   `config.AnimateSdcppFootprintFamily`, the constant both sides read, so a lane recording under another name kept it green (the video and
   audio legs read the writers' own helpers). The leg now runs the lane and reads back the family its footprint was recorded under;
   `fpFamily: "wan-vace2"` in the lane fails it.
+- **The media-job door takes one body at a time (C5S1, low).** `mediaJobInFlightMax` was the stt upload door's 2, copied unscaled, but
+  a media-job body is far larger than an stt upload (48 MiB): at the 256 MiB default cap one slot holds the base64 text (341 MiB) beside
+  the decoded bundle (up to 256 MiB), about 0.58 GiB, so the door's node-wide peak was about 1.17 GiB beside a ComfyUI render while the
+  config key, the operator guide and this file promised "under about 0.6 GiB". The door now has its own bound, 1: its peak is that one
+  figure and uploads are served one at a time (a second token holder waits up to 30 s for the slot, then gets the 503). ADR 0077, the
+  fleet-node and media-generation pages, the operator guide and the config key state the slots x 0.58 GiB bound. Tests:
+  `TestMediaJobDoorHoldsOneBodyAtATimeSoItsPeakIsTheDocumentedFigure` (computes the peak from the cap and the constant; red at 2 with
+  1.17 GiB) and `TestASecondMediaJobWaitsWhileTheFirstBodyIsStillArriving` (red at 2: a second upload is answered while the first
+  body is still arriving).
+- **The slot-wait 503 is documented as what it is (C5S4, low).** ADR 0077, the fleet-node page and this file said a delegator re-places
+  the media-job door's slot-wait 503, but the door's only client is `internal/mediaremote`, which reads the status as a capacity
+  defer, does not read `Retry-After` and makes one pass over the node it picked (`internal/delegate` never posts to the door). The call
+  returns the capacity defer and a later call places the job again. Upload-slot occupancy is not in `/fleet/health` or in the queue
+  depth the node pick ranks on, so a node whose slot a long upload holds can still rank first. The docs now say so; no behaviour changed.
+- **The upload-slot wait's cancel arm is pinned (C5S2, low).** `takeUploadSlot`, shared by the stt upload door and the media-job door,
+  returns without a slot and without an answer when the caller's request is cancelled while it waits. Mutating that arm to
+  `return true` survived the whole package and would have let the deferred release free a slot the request never took, so the door
+  admitted more bodies than its bound and the real owner's release then blocked forever.
+  `TestAnUploadWaiterWhoseRequestIsCancelledLeavesWithoutASlotOrAnAnswer` cancels a waiter's context against full slots on both doors
+  and asserts it leaves at once, writes no answer and leaves every slot as it found it.
+- **`mediaJobOutputPath` creating a missing `media_dir` is pinned (C5C7, low).** The pipeline creates `media_dir` only where it names
+  the output itself, and the door now always supplies `out`, so an input-less job from a client other than `mediaremote` on a node whose
+  `media_dir` does not exist yet would be handed a path in a missing directory. Deleting the `MkdirAll`, or the guard that keeps an
+  empty `media_dir` from reaching it, left the suite green. `TestMediaJobOutputPathCreatesAMissingMediaDirAndToleratesNone` pins both.
 
 ### Changed — `--offload-to-cpu` is sanctioned spill on the iGPU media engines
 

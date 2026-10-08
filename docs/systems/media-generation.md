@@ -1647,8 +1647,10 @@ through `POST /fleet/media-job` ([fleet-node.md](fleet-node.md#the-media-job-doo
 builders decode; `out` and `out_dir` never travel (`out_dir` is where the fetched outputs land here). Four request fields cannot ride the fleet task and defer by name
 (`defer_class` `contract`) instead of being dropped: `refine=false`, `tts_voice`, `transformer` and (`run_graph`) `devices`, whose card ids name cards on the calling machine.
 
-**Node-side bounds.** A node holds at most two media-job bodies in flight (the stt upload door's bound): a caller over it
-waits for a slot and, past 30 s, is answered `503` with `Retry-After`, which the client reads as a re-placeable `capacity` defer.
+**Node-side bounds.** A node holds at most one media-job body in flight (a body is about 0.58 GiB in memory at the 256 MiB
+default cap, the base64 text beside the decoded bundle): a caller over it waits for the slot and, past 30 s, is answered `503`
+with `Retry-After`. The client reads that as a `capacity` defer but does not read `Retry-After` and makes one pass over the node it
+picked, so the call returns the defer and a later call places the job again.
 The node also names a media-job's render itself (`mediajob-<16 hex>.<ext>`) and serves it only to a holder of the fleet token,
 because it is rendered from the caller's private files: the client sends the bearer on every output fetch, a tokenless read of
 that name is refused, and the outputs of a job with no input file (the tokenless dispatch) are still read by bare name.

@@ -10,6 +10,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
 )
 
@@ -113,6 +114,62 @@ func TestMediaJobRendersUnderAGatedStem(t *testing.T) {
 	if out, _ := req.Params["out"].(string); !strings.HasPrefix(filepath.Base(out), mediaJobOutputPrefix) {
 		t.Errorf("a caller-named out reached the pipeline: %q", out)
 	}
+}
+
+// mediaJobOutputPath makes media_dir itself. The pipeline creates media_dir only in the branches where it names the
+// output (out == ""), and the door now always supplies `out`, so an input-less job (image-gen, music, a voice without a
+// clone) sent by a client other than mediaremote to a node whose media_dir does not exist yet would be handed a path in a
+// missing directory, and the render script would fail on the node. Every other test starts from a directory that exists,
+// so deleting the MkdirAll, or the guard that keeps an empty media_dir from reaching it, passed the suite (review of
+// 0.170.0, C5C7).
+func TestMediaJobOutputPathCreatesAMissingMediaDirAndToleratesNone(t *testing.T) {
+	t.Run("a media_dir that does not exist yet", func(t *testing.T) {
+		cfg := config.Config{MediaDir: filepath.Join(t.TempDir(), "not", "yet", "created")}
+		out, err := mediaJobOutputPath(cfg, "image-gen", nil)
+		if err != nil {
+			t.Fatalf("a missing media_dir is the door's to create: %v", err)
+		}
+		if filepath.Dir(out) != cfg.MediaDir || !mediaJobOutputRe.MatchString(filepath.Base(out)) {
+			t.Fatalf("out = %q, want a mediajob-<16 hex> file directly under %q", out, cfg.MediaDir)
+		}
+		if st, err := os.Stat(cfg.MediaDir); err != nil || !st.IsDir() {
+			t.Fatalf("media_dir %q does not exist after the path was handed out (%v): the render would write into a missing directory", cfg.MediaDir, err)
+		}
+	})
+	t.Run("an input-less job through the door", func(t *testing.T) {
+		cfg := mediaJobCfg(t)
+		cfg.MediaDir = filepath.Join(t.TempDir(), "fresh")
+		req, cleanup, err := BuildRequest(context.Background(), cfg, true, MediaJobTask, mediaPayload("image-gen", `{"prompt":"p"}`, nil, nil, nil))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer cleanup()
+		out, _ := req.Params["out"].(string)
+		if out == "" || filepath.Dir(out) != cfg.MediaDir {
+			t.Fatalf("out = %q, want a file under the new media_dir %q", out, cfg.MediaDir)
+		}
+		if st, err := os.Stat(cfg.MediaDir); err != nil || !st.IsDir() {
+			t.Fatalf("the job was handed %q but media_dir does not exist (%v)", out, err)
+		}
+	})
+	t.Run("no media_dir", func(t *testing.T) {
+		for _, dir := range []string{"", "   "} {
+			out, err := mediaJobOutputPath(config.Config{MediaDir: dir}, "image-gen", nil)
+			if err != nil || out != "" {
+				t.Errorf("media_dir %q: got (%q, %v), want no output path and no error: the pipeline names the output when the door cannot", dir, out, err)
+			}
+		}
+		cfg := mediaJobCfg(t)
+		cfg.MediaDir = ""
+		req, cleanup, err := BuildRequest(context.Background(), cfg, true, MediaJobTask, mediaPayload("image-gen", `{"prompt":"p"}`, nil, nil, nil))
+		if err != nil {
+			t.Fatalf("a job on a node with no media_dir was refused: %v", err)
+		}
+		defer cleanup()
+		if _, has := req.Params["out"]; has {
+			t.Errorf("a node with no media_dir was handed an out: %v", req.Params["out"])
+		}
+	})
 }
 
 // The end-to-end privacy rule: the output of a media-job is refused to a tokenless fetch and served with the

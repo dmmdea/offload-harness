@@ -1839,8 +1839,9 @@ type Config struct {
 	FleetMediaInputs bool `json:"fleet_media_inputs,omitempty"`
 	// FleetMediaInputsMaxMB caps one media-job bundle as sent (gzip-compressed), MiB; 0 = 256. The node
 	// holds the request body (base64, a third larger) and the decoded bundle at the same moment while it
-	// admits a job, so the default is sized to keep that peak under about 0.6 GiB; raise it for a node with
-	// the RAM and a driver video that needs it.
+	// admits a job, so the default is sized to keep that peak under about 0.6 GiB; the door takes one body
+	// at a time (mediaJobInFlightMax), so that is the door's whole peak, and raising the cap raises it by
+	// that much and a third again. Raise it for a node with the RAM and a driver video that needs it.
 	FleetMediaInputsMaxMB int `json:"fleet_media_inputs_max_mb,omitempty"`
 	// FleetSTTUploadMaxMB caps one audio upload to POST /fleet/stt (the stt upload door, ADR 0072),
 	// MiB of decoded audio; 0 = 48. The request body is that cap in base64 (64 MiB at the default) plus

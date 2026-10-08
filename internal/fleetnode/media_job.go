@@ -98,12 +98,19 @@ const mediaJobClosed = "media-job is not open on this node (it needs fleet_media
 // blanket 30 s timeouts would cut a driver video on an ordinary link (the compose-project door's reason).
 const mediaJobWindow = 15 * time.Minute
 
-// mediaJobInFlightMax bounds the media-job bodies one node holds in memory at once, the stt upload door's
-// bound and for the same reason: the body (a bundle of up to fleet_media_inputs_max_mb, in base64) is read
-// and decoded BEFORE the admission gates, so without a bound N concurrent uploads hold N times the peak of
-// one. A caller over the bound waits for a slot (a waiter holds a goroutine, not a body); one that waits
-// longer than mediaJobSlotWait gets a re-placeable 503 with Retry-After.
-const mediaJobInFlightMax = sttUploadInFlightMax
+// mediaJobInFlightMax bounds the media-job bodies one node holds in memory at once: ONE, the door's own
+// bound, not the stt upload door's (sttUploadInFlightMax, 2). The body (a bundle of up to
+// fleet_media_inputs_max_mb, in base64) is read and decoded BEFORE the admission gates, so without a bound N
+// concurrent uploads hold N times the peak of one, and a media-job body is far larger than an stt upload's
+// (48 MiB of audio): at the 256 MiB default cap one slot holds the base64 body (341.3 MiB) beside the decoded
+// bundle (up to 256 MiB), about 0.58 GiB, so two slots would be about 1.17 GiB beside a ComfyUI render. With
+// one slot the door's peak is that single figure, the "under about 0.6 GiB" fleet_media_inputs_max_mb
+// promises; raising this bound multiplies it. A slot is held from before the first body byte until the job
+// is admitted or refused (up to mediaJobWindow on a slow link), so uploads are served one at a time: a caller
+// over the bound waits for the slot (a waiter holds a goroutine, not a body); one that waits longer than
+// mediaJobSlotWait gets a 503 with Retry-After, which the client of this door (internal/mediaremote) does not
+// retry: the call returns a capacity defer and a later call places it again.
+const mediaJobInFlightMax = 1
 
 // mediaJobSlotWait is a var only so a test can shorten it.
 var mediaJobSlotWait = 30 * time.Second

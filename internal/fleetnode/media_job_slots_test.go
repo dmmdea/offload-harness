@@ -6,12 +6,14 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/dmmdea/offload-harness/internal/config"
 )
 
-// Resource bound (ADR 0077, mirroring the stt upload door's): a media-job body is read and decoded before the
-// admission gates, so every concurrent upload could hold a bundle-sized body. The node holds at most
-// mediaJobInFlightMax of them at once; a caller over the bound waits for a slot and is answered a
-// re-placeable 503 when the wait runs out.
+// Resource bound (ADR 0077; the same shape as the stt upload door's, with its own bound): a media-job body is
+// read and decoded before the admission gates, so every concurrent upload could hold a bundle-sized body. The
+// node holds at most mediaJobInFlightMax of them at once (one); a caller over the bound waits for a slot and is
+// answered a capacity 503 with Retry-After when the wait runs out.
 
 func mjStillBody(t *testing.T, id string) string {
 	t.Helper()
@@ -19,9 +21,98 @@ func mjStillBody(t *testing.T, id string) string {
 		map[string]string{"still": "s.png"}, func(p *MediaJobPayload) { p.JobID = id }))
 }
 
-func TestMediaJobInFlightMaxIsTheSTTDoorsDefault(t *testing.T) {
-	if mediaJobInFlightMax != sttUploadInFlightMax || mediaJobInFlightMax < 1 {
-		t.Fatalf("mediaJobInFlightMax = %d, want the stt door's %d", mediaJobInFlightMax, sttUploadInFlightMax)
+// The bound was the stt upload door's 2, copied unscaled. A media-job body is far larger than an stt upload's:
+// at the 256 MiB default cap one body holds the base64 text (a third larger than the bundle) beside the decoded
+// bundle, about 0.58 GiB, so the node-wide peak is slots x that figure. The door takes ONE body at a time, which
+// keeps its peak at the "under about 0.6 GiB" the config key and the docs promise (review of 0.170.0, C5S1).
+func TestMediaJobDoorHoldsOneBodyAtATimeSoItsPeakIsTheDocumentedFigure(t *testing.T) {
+	const gib = int64(1) << 30
+	var def config.Config // the defaults: fleet_media_inputs_max_mb unset = 256
+	perSlot := MediaJobBodyCap(def) + def.EffectiveMediaInputsMaxBytes()
+	if perSlot < gib/2 || perSlot > 6*gib/10 {
+		t.Fatalf("one slot holds %d bytes at the default cap, outside the documented 0.5 to 0.6 GiB: the figure in the docs is stale", perSlot)
+	}
+	if peak := perSlot * mediaJobInFlightMax; peak > 6*gib/10 {
+		t.Fatalf("mediaJobInFlightMax = %d puts the door's peak at %.2f GiB at the default cap, over the documented 0.6 GiB (one slot is %.2f GiB)",
+			mediaJobInFlightMax, float64(peak)/float64(gib), float64(perSlot)/float64(gib))
+	}
+	s, _ := newTestServer(t, mediaJobCfg(t), &inputRunner{}, nil)
+	if cap(s.mediaJobSlots) != mediaJobInFlightMax || mediaJobInFlightMax != 1 {
+		t.Fatalf("the server holds %d slot(s), mediaJobInFlightMax = %d, want one", cap(s.mediaJobSlots), mediaJobInFlightMax)
+	}
+	if mediaJobInFlightMax >= sttUploadInFlightMax {
+		t.Errorf("the media-job door (%d) must hold fewer bodies than the stt upload door (%d): its bodies are several times larger", mediaJobInFlightMax, sttUploadInFlightMax)
+	}
+}
+
+// Behaviour, not the constant: while one upload's body is still arriving, a second token holder's request is
+// not read; it waits for the slot and is served when the first is done.
+func TestASecondMediaJobWaitsWhileTheFirstBodyIsStillArriving(t *testing.T) {
+	s, _ := newTestServer(t, mediaJobCfg(t), &inputRunner{}, nil)
+	base := serveOn(t, s, 30*time.Second)
+	first, second := mjStillBody(t, "mj-first"), mjStillBody(t, "mj-second")
+	half := len(first) / 2
+
+	pr, pw := io.Pipe()
+	req1, err := http.NewRequest(http.MethodPost, base+MediaJobPath, pr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req1.ContentLength = int64(len(first))
+	req1.Header.Set("Content-Type", "application/json")
+	req1.Header.Set("Authorization", "Bearer tok")
+	code := func(req *http.Request) <-chan int {
+		ch := make(chan int, 1)
+		go func() {
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				ch <- -1
+				return
+			}
+			resp.Body.Close()
+			ch <- resp.StatusCode
+		}()
+		return ch
+	}
+	done1 := code(req1)
+	go func() { _, _ = io.WriteString(pw, first[:half]) }()
+	deadline := time.Now().Add(5 * time.Second)
+	for len(s.mediaJobSlots) != 1 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if len(s.mediaJobSlots) != 1 {
+		t.Fatal("the first upload never took the slot")
+	}
+
+	req2, err := http.NewRequest(http.MethodPost, base+MediaJobPath, strings.NewReader(second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req2.Header.Set("Content-Type", "application/json")
+	req2.Header.Set("Authorization", "Bearer tok")
+	done2 := code(req2)
+	select {
+	case c := <-done2:
+		t.Fatalf("a second upload was answered %d while the first body was still arriving: the node holds more than one body at once", c)
+	case <-time.After(300 * time.Millisecond):
+	}
+	if _, known := s.jobs.Get("mj-second"); known {
+		t.Fatal("the second job was admitted while the first body was still arriving")
+	}
+
+	if _, err := io.WriteString(pw, first[half:]); err != nil {
+		t.Fatal(err)
+	}
+	pw.Close()
+	for i, ch := range []<-chan int{done1, done2} {
+		select {
+		case c := <-ch:
+			if c != http.StatusAccepted {
+				t.Errorf("upload %d answered %d, want 202", i+1, c)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatalf("upload %d was never answered", i+1)
+		}
 	}
 }
 

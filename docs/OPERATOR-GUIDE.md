@@ -552,7 +552,7 @@ its route loads, not from the config binding) and on a node from `delegate_remot
 it; `local` never does. `remotes` narrows the nodes for one call and must be a subset of `delegate_remotes`. A still, a
 reference and driver, or a clone sample travels in a hash-checked bundle to the node's media-job door, which a node opens
 only with `fleet_media_inputs: true` and a `fleet_auth_token` (the caller holds the same token; `fleet_media_inputs_max_mb`
-caps the bundle, 256 MB by default: the node holds the base64 body and the decoded bundle together while it admits a job, so raise it only on a node with the RAM). A job with no input file, and every `run-graph` (its graph travels inline), needs no
+caps the bundle, 256 MB by default: the node holds the base64 body and the decoded bundle together while it admits a job, about 0.58 GiB at the default, and takes one upload at a time (a second waits up to 30 s for the first, then is answered 503), so raise it only on a node with the RAM). A job with no input file, and every `run-graph` (its graph travels inline), needs no
 door. The outputs come back by name, each checked against the sha256 the node published; a mismatch defers and leaves no
 file. A node advertises `video-gen`, `animate`, `audio-gen` and `run-graph` only while its media route is CONFIGURED, so a
 node with a missing weight drops the task and `/fleet/health` `media_routes` says which route and why; `doctor` and

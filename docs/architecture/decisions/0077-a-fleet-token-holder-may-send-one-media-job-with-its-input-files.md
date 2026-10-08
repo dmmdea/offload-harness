@@ -44,9 +44,16 @@ Three facts stood in the way.
    (`fleet_media_inputs_max_mb`, default 256 MiB compressed); the decoder refuses unknown fields; a token holder gets a
    15-minute read and write window. `media-job` is token-gated like `compose-project` (`tokenGated`), so a dispatch of it
    over `/fleet/dispatch` needs the bearer too, and its jobs are masked from tokenless polls and feeds. The body is read and
-   decoded before the admission gates, so the node holds at most `mediaJobInFlightMax` bodies at once (2, the stt upload door's
-   bound, `takeUploadSlot`): a caller takes a slot after the bearer check and before the first body byte, holds it until the
-   handler returns, and when it waits past 30 s is answered `503` with `Retry-After` (a delegator re-places a 503).
+   decoded before the admission gates, so the node holds at most `mediaJobInFlightMax` bodies at once: **one** (the door's own
+   bound; the stt upload door's is 2, for bodies of at most 64 MiB). At the 256 MiB default cap one body is about 0.58 GiB in
+   memory, the base64 text (341 MiB) beside the decoded bundle (up to 256 MiB), so the door's node-wide peak is slots x 0.58 GiB:
+   one slot keeps it under 0.6 GiB beside a ComfyUI render, where two would be 1.17 GiB, and uploads are served one at a time.
+   A caller takes the slot (`takeUploadSlot`) after the bearer check and before the first body byte, holds it until the handler
+   returns (up to the 15-minute read window on a slow link), and when it waits past 30 s is answered `503` with `Retry-After: 5`.
+   The door's only client, `internal/mediaremote`, reads that status as a `capacity` defer but does not read `Retry-After` and
+   makes one pass over the node it picked: the caller gets the capacity defer and a later call places the job again. The slot's
+   occupancy is not in `/fleet/health` or in the queue depth the node pick ranks on, so a node whose slot a long upload holds can
+   still rank first.
 3. **The bundle is verified, extracted into a fresh directory and sniffed.** The node checks the declared sha256, extracts
    with `internal/composebundle` (regular files only, confined names, caps counted on the bytes written) into
    `<media_dir>/fleet-inputs/in-*` (a directory, which the media route never serves), requires every `inputs` value to be a
