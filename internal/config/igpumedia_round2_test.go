@@ -34,7 +34,8 @@ func TestTokenCapRefusalRefusesACapWithoutAUsableStride(t *testing.T) {
 // TST4: the Node screen splits on every JS \s (a non-breaking space among them), so a cpu hidden
 // behind one is refused there; the Go screen must refuse it too.
 func TestScreenExtraArgsSeesACpuBehindAUnicodeSpace(t *testing.T) {
-	for _, sp := range []string{"\u00a0", "\u2003", "\u3000", "\ufeff", "\u2028", "\u202f"} {
+	// "\v" is the odd one: JS's \s takes it, Go's \s ([\t\n\f\r ]) does not, so it has to be listed
+	for _, sp := range []string{"\u00a0", "\u2003", "\u3000", "\ufeff", "\u2028", "\u202f", "\v"} {
 		arg := "--threads=" + sp + "cpu"
 		if _, _, _, found := ScreenExtraArgs(ExtraArgsSdcpp, []string{arg}); !found {
 			t.Errorf("%q passed the Go screen; the Node screen refuses it", arg)
@@ -57,6 +58,7 @@ func TestGoScreensAgreeWithTheSharedParityTable(t *testing.T) {
 		BackendAllowed   []string   `json:"backend_allowed"`
 		ExtraArgsRefused [][]string `json:"extra_args_refused"`
 		ExtraArgsAllowed [][]string `json:"extra_args_allowed"`
+		GoStricter       [][]string `json:"go_stricter"`
 	}
 	if err := json.Unmarshal(raw, &tbl); err != nil {
 		t.Fatal(err)
@@ -82,6 +84,16 @@ func TestGoScreensAgreeWithTheSharedParityTable(t *testing.T) {
 	for _, args := range tbl.ExtraArgsAllowed {
 		if i, a, why, found := ScreenExtraArgs(ExtraArgsSdcpp, args); found {
 			t.Errorf("ScreenExtraArgs(%q) refused element %d %q (%s), the shared table allows it", args, i, a, why)
+		}
+	}
+	// The one known difference, in the safe direction: U+0085 splits an element here but not in JS (whose
+	// \s lacks it), so Go refuses what the Node screen passes. The Node test asserts its side of this list.
+	if len(tbl.GoStricter) == 0 {
+		t.Fatal("the table's go_stricter list is empty: the U+0085 difference is no longer documented")
+	}
+	for _, args := range tbl.GoStricter {
+		if _, _, _, found := ScreenExtraArgs(ExtraArgsSdcpp, args); !found {
+			t.Errorf("ScreenExtraArgs(%q) passed; Go is documented to be stricter than the Node screen on it", args)
 		}
 	}
 }

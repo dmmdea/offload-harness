@@ -726,4 +726,10 @@ test("the screens agree with the shared parity table (internal/config reads the 
   for (const b of t.backend_allowed) assert.equal(refuseCpuBackend(b), b.trim(), `backend ${JSON.stringify(b)}`);
   for (const a of t.extra_args_refused) assert.ok(screenExtraArgs(a, { engine: "sdcpp" }), `extra args ${JSON.stringify(a)} must be refused`);
   for (const a of t.extra_args_allowed) assert.equal(screenExtraArgs(a, { engine: "sdcpp" }), null, `extra args ${JSON.stringify(a)} must pass`);
+  // The one known difference, in the safe direction: JS's \s lacks U+0085 (NEL), so this screen passes what the
+  // Go screen refuses (Go refuses first; internal/config asserts its side of the same list).
+  assert.ok(t.go_stricter.length > 0, "the U+0085 difference is documented in the table");
+  for (const a of t.go_stricter) assert.equal(screenExtraArgs(a, { engine: "sdcpp" }), null, `extra args ${JSON.stringify(a)}: the Node screen is documented to pass it`);
+  // a vertical tab is where the two regexes used to disagree (Go's \s lacks it, JS's has it): refused by both
+  assert.ok(t.extra_args_refused.some((a) => a.some((x) => x.includes("\u000b"))), "the table carries a vertical-tab row");
 });

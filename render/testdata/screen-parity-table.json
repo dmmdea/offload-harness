@@ -1,5 +1,5 @@
 {
-  "note": "One list for both layers. internal/config (CPUBackendRefusal, ScreenExtraArgs) and render/igpu-engine.mjs (refuseCpuBackend, screenExtraArgs) must agree on every row; both test files read this file. Strings are JSON, so the unicode spaces are escapes.",
+  "note": "One list for both layers. internal/config (CPUBackendRefusal, ScreenExtraArgs) and render/igpu-engine.mjs (refuseCpuBackend, screenExtraArgs) must agree on every row; both test files read this file. Strings are JSON, so the unicode spaces are escapes. Go's \\s is [\\t\\n\\f\\r ] (no vertical tab, no unicode space) and JS's \\s has both, so extra_args_refused carries a vertical-tab row (u000b) next to the unicode-space ones. go_stricter is the ONE known difference, in the safe direction: U+0085 (NEL) splits an element in Go but not in JS, so the Go screen refuses it and the Node screen passes it (the Go layer refuses first; the runner is its own door for a hand-run). Each test file asserts its own side of that list, so a change on either side is deliberate.",
   "backend_refused": [
     "", "  ", "cpu", "CPU", " cpu ", "cpu0", "best", "auto", "diffusion=best", "diffusion=vulkan0,vae=cpu", "clip=cpu,diffusion=vulkan0",
     "vulkan0,cpu", "diffusion=cuda0&cpu", "cuda0", "hip", "blas", "opencl", "rpc", "vulcan", "bestest0", "cpufreq0x", "vulkan-0", "vulkan0 vulkan1",
@@ -9,7 +9,11 @@
   "extra_args_refused": [
     ["--backend", "cpu"], ["--backend=cpu"], ["-b", "cpu"], ["--params-backend", "cpu"], ["--clip-on-cpu"], ["--vae-on-cpu"], ["--control-net-cpu"], ["--rpc", "x"],
     ["--some-cpu-flag"], ["--threads=cpu"], ["--threads=\u00a0cpu"], ["--threads=\u2003cpu"], ["--threads=\u3000cpu"], ["--threads=\ufeffcpu"], ["--threads=\u202fcpu"],
+    ["--threads=\u000bcpu"], ["--x", "a\u000bcpu0"],
     ["--x", "a,cpu"], ["--x", "a&cpu0"], ["--x", "a:cpu"]
+  ],
+  "go_stricter": [
+    ["--threads=\u0085cpu"], ["--x", "a\u0085cpu"]
   ],
   "extra_args_allowed": [
     ["--vae-tiling"], ["--offload-to-cpu"], ["--offload-to-cpu=1"], ["--flag with space"], ["--threads=4"], ["--threads=\u00a04"], ["--lora-model-dir", "/data/loras"]

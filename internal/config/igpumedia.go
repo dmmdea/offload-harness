@@ -134,9 +134,12 @@ var placementFlags = map[string]bool{
 var sanctionedSpillFlags = map[string]bool{"--offload-to-cpu": true}
 
 // extraArgSplitRe splits an extra-args element into the words a backend value can hide in. Go's
-// \s is ASCII-only while JS's (the runner's screen) also takes the Unicode spaces, so they are
-// listed: "--threads=<NBSP>cpu" must be refused by both layers.
-var extraArgSplitRe = regexp.MustCompile(`[=,&:\s\x{0085}\x{00a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}]+`)
+// \s is only [\t\n\f\r ]: it has neither the vertical tab nor any Unicode space, while JS's (the
+// runner's screen) has both, so they are listed: "--threads=<VT>cpu" and "--threads=<NBSP>cpu"
+// must be refused by both layers (render/testdata/screen-parity-table.json pins each). U+0085
+// (NEL) is split on here though JS's \s does not take it: the one place the two layers differ, in
+// the safe direction (Go refuses first; see the table's go_stricter list).
+var extraArgSplitRe = regexp.MustCompile(`[=,&:\s\x0b\x{0085}\x{00a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}]+`)
 var cpuTokenRe = regexp.MustCompile(`^cpu\d*$`)
 
 // ScreenExtraArgs returns the first *_extra_args element that changes the backend or the
