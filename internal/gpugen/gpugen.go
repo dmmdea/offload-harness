@@ -20,12 +20,14 @@ package gpugen
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -243,6 +245,21 @@ func Generate(ctx context.Context, spec Spec) (string, error) {
 			return "", fmt.Errorf("gpugen: %s timeout after %s (deadline exceeded, process tree killed): %w (%s)",
 				baseName(spec.Script), spec.Timeout, err, tailDetail(tw))
 		}
+		// A client cancel (the caller's own context) is the same event as a timeout for the class:
+		// on an OwnProcessGroup lane the runner answers the SIGTERM with exit 143 ("exit status
+		// 143"), which carries neither "killed" nor "signal:" and would read as "other", while
+		// every other lane's cancel ends "signal: killed" and reads as a timeout.
+		if cctx.Err() == context.Canceled {
+			return "", fmt.Errorf("gpugen: %s canceled (context canceled, process tree killed): %w (%s)",
+				baseName(spec.Script), err, tailDetail(tw))
+		}
+		// The iGPU runners end a typed failure with one short "IGPU_CLASS=<class>" line. The class
+		// is read from the whole retained output, never from the 400-byte display tail: a real
+		// GPU_RESET line is longer than that tail, so the token would be cut off with it.
+		if cls := runnerClass(tw.Contents()); cls != "" {
+			return "", &RunError{Class: cls, err: fmt.Errorf("gpugen: %s failed [%s%s]: %w (%s)",
+				baseName(spec.Script), classTag, cls, err, typedDetail(tw))}
+		}
 		return "", fmt.Errorf("gpugen: %s failed: %w (%s)", baseName(spec.Script), err, tailDetail(tw))
 	}
 	if fi, statErr := os.Stat(spec.Out); statErr != nil || fi.Size() == 0 {
@@ -267,6 +284,66 @@ func tailDetail(tw *tailWriter) string {
 		return fmt.Sprintf("truncated: total %d bytes; tail: %s", tw.Total(), d)
 	}
 	return d
+}
+
+// classTag is the label a typed failure carries in its message ("[class=gpu_reset]") for a reader.
+const classTag = "class="
+
+// RunError is a runner failure whose class the runner itself reported (the IGPU_CLASS= line).
+// ClassifyErr returns Class for it, whatever words the rest of the message happens to contain.
+type RunError struct {
+	Class string
+	err   error
+}
+
+func (e *RunError) Error() string { return e.err.Error() }
+func (e *RunError) Unwrap() error { return e.err }
+
+// runnerClassLine matches the runner's class line: the whole line, at its start.
+var runnerClassLine = regexp.MustCompile(`(?m)^IGPU_CLASS=([a-z_]+)[ \t\r]*$`)
+
+// runnerClasses are the classes a runner may report. A line naming anything else is ignored, so
+// engine output that happens to look like the marker cannot invent a class.
+var runnerClasses = map[string]bool{
+	"cpu_placement": true, "cpu_backend_refused": true, "gpu_reset": true, "token_cap_exceeded": true,
+	"extra_args_refused": true, "illegal_instruction": true, "black_clip": true, "frozen_clip": true,
+	"depth_frames_invalid": true, "model_incompatible": true, "binary_not_absolute": true,
+	"out_dir_unwritable": true, "dead_air": true, "ffmpeg_unavailable": true, "unmeasurable": true,
+	"engine_crashed": true, "oom": true, "device_invalid": true, "timeout": true,
+}
+
+// runnerClass is the class of the LAST valid IGPU_CLASS= line in the captured output, "" when
+// there is none. The last one, because the runner prints its own after everything the engine said.
+func runnerClass(out []byte) string {
+	all := runnerClassLine.FindAllSubmatch(out, -1)
+	for i := len(all) - 1; i >= 0; i-- {
+		if c := string(all[i][1]); runnerClasses[c] {
+			return c
+		}
+	}
+	return ""
+}
+
+// failedLine matches a runner's final human line: "SDCPP VIDEO FAILED: GPU_RESET: ...".
+var failedLine = regexp.MustCompile(`(?m)^[A-Z][A-Z ]* FAILED: .*$`)
+
+// typedDetail is the detail of a typed runner failure: the runner's own "<NAME> FAILED: ..."
+// line from its START (so the TOKEN: label survives, unlike in a tail cut), at most 600 bytes,
+// else the display tail. A marker inside it is defanged so it cannot be read back as one.
+func typedDetail(tw *tailWriter) string {
+	out := tw.Contents()
+	d := ""
+	if loc := failedLine.FindAllIndex(out, -1); len(loc) > 0 {
+		last := loc[len(loc)-1]
+		d = strings.TrimRight(string(out[last[0]:last[1]]), "\r")
+		if len(d) > 600 {
+			d = d[:600] + "..."
+		}
+	}
+	if d == "" {
+		d = tailDetail(tw)
+	}
+	return strings.ReplaceAll(d, "IGPU_CLASS=", "IGPU_CLASS~")
 }
 
 // runCombined runs cmd with both stdout and stderr merged into w — the
@@ -374,6 +451,12 @@ func ClassifyErr(err error) string {
 	if err == nil {
 		return ""
 	}
+	// A class the runner reported itself (the IGPU_CLASS= line Generate read from the full output)
+	// is exact and wins over any wording in the message.
+	var re *RunError
+	if errors.As(err, &re) && re.Class != "" {
+		return re.Class
+	}
 	s := strings.ToLower(err.Error())
 	switch {
 	// The iGPU media runners' no-CPU guards (CT-49, render/igpu-engine.mjs): the engine's
@@ -410,10 +493,24 @@ func ClassifyErr(err error) string {
 		return "binary_not_absolute"
 	case strings.Contains(s, "out_dir_unwritable"):
 		return "out_dir_unwritable"
+	case strings.Contains(s, "device_invalid"):
+		return "device_invalid"
+	// The audio and video QA gates and the engine's own death: typed, so a path or an engine log
+	// line in the message ("room", "timeout", "killed") cannot claim them for a looser class below.
+	case strings.Contains(s, "dead_air"): // render/audio-qa.mjs's QA gate, F-35 follow-up 2026-09-23
+		return "dead_air"
+	case strings.Contains(s, "unmeasurable"): // the output could not be measured, so it was not checked
+		return "unmeasurable"
+	case strings.Contains(s, "ffmpeg_unavailable"): // render/comfy-music.mjs main(), F-38 fix 2026-09-24
+		return "ffmpeg_unavailable"
+	case strings.Contains(s, "engine_crashed"), crashedBySignal.MatchString(s):
+		return "engine_crashed"
 	// ggml_vulkan's allocation failure has neither "out of memory" nor "oom" in its text
-	// ("Device memory allocation of size N failed ... vk::Device::allocateMemory: ErrorOutOfDeviceMemory").
-	case strings.Contains(s, "out of memory") || strings.Contains(s, "cudamalloc") || strings.Contains(s, "oom") ||
-		strings.Contains(s, "erroroutofdevicememory") || strings.Contains(s, "erroroutofhostmemory") || strings.Contains(s, "device memory allocation of size"):
+	// ("Device memory allocation of size N failed ... vk::Device::allocateMemory: ErrorOutOfDeviceMemory");
+	// ggml's own says "insufficient memory (attempted to allocate N MB)" and sd.cpp "alloc compute buffer failed".
+	case strings.Contains(s, "out of memory") || strings.Contains(s, "out_of_memory") || strings.Contains(s, "cudamalloc") || strings.Contains(s, "oom") ||
+		strings.Contains(s, "erroroutofdevicememory") || strings.Contains(s, "erroroutofhostmemory") || strings.Contains(s, "device memory allocation of size") ||
+		strings.Contains(s, "insufficient memory") || strings.Contains(s, "alloc compute buffer failed"):
 		return "oom"
 	case strings.Contains(s, "timeout") || strings.Contains(s, "deadline") || strings.Contains(s, "context canceled") || strings.Contains(s, "killed") || strings.Contains(s, "signal:"):
 		return "timeout"
@@ -421,14 +518,16 @@ func ClassifyErr(err error) string {
 		return "conn_refused"
 	case strings.Contains(s, "llama-server 5"): // "llama-server 5xx: ..."
 		return "http_5xx"
-	case strings.Contains(s, "dead_air"): // render/audio-qa.mjs's QA gate, F-35 follow-up 2026-09-23
-		return "dead_air"
-	case strings.Contains(s, "ffmpeg_unavailable"): // render/comfy-music.mjs main(), F-38 fix 2026-09-24
-		return "ffmpeg_unavailable"
 	default:
 		return "other"
 	}
 }
+
+// crashedBySignal matches the wording of an engine that died of a crash signal ("sd-cli was
+// killed by signal SIGSEGV"): the word "killed" in it is not a timeout. SIGKILL is not a crash
+// (the OOM killer or a timeout) and SIGTERM / SIGINT / SIGHUP are a stop, so only the crash
+// signals are listed.
+var crashedBySignal = regexp.MustCompile(`killed by signal sig(?:segv|abrt|bus|fpe|trap|sys)`)
 
 // asInt coerces an any (int / int64 / float64) to int; 0 on miss. Shared so callers
 // (imagegen, pipeline) can normalize param maps the same way.

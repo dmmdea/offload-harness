@@ -51,6 +51,7 @@ import {
 import {
   parseArgs, parseExtraArgs, refuseExtraArgs, runEngine, createLogGuard, installLifecycle,
   makeDeadline, finiteNum, makeTempDir, refuseRelativeBinary, ensureOutDir, CPU_BACKEND_REFUSED,
+  engineExitError, reportFatal,
 } from "./igpu-engine.mjs";
 import { defaultRun, runFailure } from "./igpu-qa.mjs";
 
@@ -244,8 +245,8 @@ async function main() {
     await withGpuSlot({ noLock: flags["no-lock"], comfyManaged: false }, async () => {
       deadline.enforce("audiocpp_cli");
       const guard = createLogGuard({ engine: "audiocpp", echoes: [text, flags.lyrics] });
-      const { code } = await runEngine({ bin, args, timeoutMs: deadline.remainingMs(), label: "audiocpp_cli", guard });
-      if (code !== 0) throw new Error("audiocpp_cli exited " + code);
+      const { code, log } = await runEngine({ bin, args, timeoutMs: deadline.remainingMs(), label: "audiocpp_cli", guard });
+      if (code !== 0) throw engineExitError("audiocpp_cli", code, log, "");
       if (!existsSync(wav)) throw new Error("audiocpp_cli exited 0 but produced no audio at " + wav);
     });
     deadline.enforce("audio finalize");
@@ -259,7 +260,7 @@ async function main() {
 // Run only as the main module — importing this file (tests) has no side effects.
 if (import.meta.url === pathToFileURL(process.argv[1] || "").href) {
   main().catch((e) => {
-    console.error("AUDIOCPP FAILED:", e.message);
+    reportFatal("AUDIOCPP", e);
     process.exit(1);
   });
 }

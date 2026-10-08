@@ -60,7 +60,7 @@ import { resolveFfmpeg, resolveFfprobe } from "./audio-qa.mjs";
 import {
   parseArgs, parseExtraArgs, refuseCpuBackend, refuseExtraArgs, runEngine, createLogGuard, checkTokenCap,
   installLifecycle, makeDeadline, normalizeFrames, floorFrames, normalizeSize, finiteNum, encodeMp4, makeTempDir,
-  vulkanDeviceFromBackend, refuseRelativeBinary, ensureOutDir, modelMetadataError,
+  vulkanDeviceFromBackend, refuseRelativeBinary, ensureOutDir, engineExitError, reportFatal,
 } from "./igpu-engine.mjs";
 import { checkClip, convertDepthFrames, countVideoFrames, trimDecision } from "./igpu-qa.mjs";
 import { vaeTileOverlap } from "./sdcpp-video.mjs";
@@ -203,13 +203,13 @@ async function main() {
       const denv = depthEnv(flags.backend);
       for (let i = 0; i < n; i++) {
         deadline.enforce("depth-anything");
-        const { code } = await runEngine({
+        const { code, log: depthLog } = await runEngine({
           bin: depthBin,
           args: buildDepthArgs({ model: flags["depth-model"], input: join(framesTmp.dir, frames[i]), outPng: join(depthRawTmp.dir, frames[i]), extra: depthExtra }),
           env: denv, timeoutMs: deadline.remainingMs(), label: "depth-anything",
           guard: createLogGuard({ engine: "da3" }),
         });
-        if (code !== 0) throw new Error(`depth-anything exited ${code} on frame ${i + 1}/${n}`);
+        if (code !== 0) throw engineExitError("depth-anything", code, depthLog, "");
         if (!existsSync(join(depthRawTmp.dir, frames[i]))) throw new Error(`depth-anything produced no depth image for frame ${i + 1}/${n}`);
         console.error(`sdcpp-animate: depth ${i + 1}/${n}`);
       }
@@ -221,7 +221,7 @@ async function main() {
       deadline.enforce("sd-cli");
       const guard = createLogGuard({ engine: "sdcpp", echoes: [prompt, flags.negative] });
       const { code, log } = await runEngine({ bin: sdBin, args, timeoutMs: deadline.remainingMs(), label: "sd-cli", guard });
-      if (code !== 0) throw modelMetadataError(log, flags.model) || new Error("sd-cli exited " + code);
+      if (code !== 0) throw engineExitError("sd-cli", code, log, flags.model);
       if (!existsSync(webm)) throw new Error("sd-cli exited 0 but produced no video at " + webm);
     });
     // the mp4 carries exactly N frames: probe what sd-cli decoded, drop the reference latent only if it is there
@@ -250,7 +250,7 @@ async function main() {
 // Run only as the main module — importing this file (tests) has no side effects.
 if (import.meta.url === pathToFileURL(process.argv[1] || "").href) {
   main().catch((e) => {
-    console.error("SDCPP ANIMATE FAILED:", e.message);
+    reportFatal("SDCPP ANIMATE", e);
     process.exit(1);
   });
 }

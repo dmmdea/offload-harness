@@ -56,7 +56,7 @@ import { resolveFfmpeg } from "./audio-qa.mjs";
 import {
   parseArgs, parseExtraArgs, refuseCpuBackend, refuseExtraArgs, runEngine, createLogGuard, checkTokenCap,
   installLifecycle, makeDeadline, normalizeFrames, normalizeSize, finiteNum, encodeMp4, makeTempDir,
-  refuseRelativeBinary, ensureOutDir, modelMetadataError,
+  refuseRelativeBinary, ensureOutDir, engineExitError, reportFatal,
 } from "./igpu-engine.mjs";
 import { checkClip } from "./igpu-qa.mjs";
 
@@ -169,7 +169,7 @@ async function main() {
       deadline.enforce("sd-cli");
       const guard = createLogGuard({ engine: "sdcpp", echoes: [shape.prompt, flags.negative] });
       const { code, log } = await runEngine({ bin, args, timeoutMs: deadline.remainingMs(), label: "sd-cli", guard });
-      if (code !== 0) throw modelMetadataError(log, flags.model) || new Error("sd-cli exited " + code);
+      if (code !== 0) throw engineExitError("sd-cli", code, log, flags.model);
       if (!existsSync(webm)) throw new Error("sd-cli exited 0 but produced no video at " + webm);
     });
     deadline.enforce("ffmpeg mp4 encode");
@@ -191,7 +191,7 @@ async function main() {
 // Run only as the main module — importing this file (tests) has no side effects.
 if (import.meta.url === pathToFileURL(process.argv[1] || "").href) {
   main().catch((e) => {
-    console.error("SDCPP VIDEO FAILED:", e.message);
+    reportFatal("SDCPP VIDEO", e);
     process.exit(1);
   });
 }

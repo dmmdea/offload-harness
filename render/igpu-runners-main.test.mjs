@@ -71,6 +71,8 @@ const at = (argv, flag) => argv[argv.indexOf(flag) + 1];
 const probe = (file, entries) => spawnSync(ffprobe, ["-v", "error", "-count_frames", "-select_streams", "v:0", "-show_entries", `stream=${entries}`, "-of", "default=nw=1", file], { encoding: "utf8" }).stdout;
 const frameCount = (file) => Number(/nb_read_frames=(\d+)/.exec(probe(file, "nb_read_frames"))[1]);
 const rate = (file) => /r_frame_rate=(\S+)/.exec(probe(file, "r_frame_rate"))[1];
+// the runner's last stderr line: every typed failure ends with its IGPU_CLASS= line (internal/gpugen reads it)
+const lastLine = (stderr) => stderr.trim().split(/\r?\n/).pop();
 const noTempLeft = (sb) => assert.deepEqual(readdirSync(sb.priv), [], "the runner's temp dirs are removed");
 
 const GOOD_SD_HEADER = [
@@ -160,6 +162,7 @@ test("sdcpp-video main: a CPU compute line kills the engine (its pid is dead), e
     const r = await runNode("sdcpp-video.mjs", v.args, sb);
     assert.equal(r.status, 1, r.stderr);
     assert.match(r.stderr, /CPU_PLACEMENT/);
+    assert.equal(lastLine(r.stderr), "IGPU_CLASS=cpu_placement");
     assert.ok(!existsSync(v.out), "no clip is delivered");
     const pid = Number(readFileSync(v.pid, "utf8"));
     assert.ok(await waitGone(pid), "the engine process is dead");
@@ -187,6 +190,7 @@ test("sdcpp-video main: a device reset in the log is GPU_RESET naming the token 
     assert.equal(r.status, 1, r.stderr);
     assert.match(r.stderr, /GPU_RESET/);
     assert.match(r.stderr, /2 s lockup timeout/);
+    assert.equal(lastLine(r.stderr), "IGPU_CLASS=gpu_reset", "the class is the last line: the long human line is cut by gpugen's 400-byte tail");
     assert.ok(!existsSync(v.out));
     noTempLeft(sb);
   } finally { sb.done(); }
@@ -199,6 +203,7 @@ test("sdcpp-video main: an entirely black clip is BLACK_CLIP and the mp4 is remo
     const r = await runNode("sdcpp-video.mjs", v.args, sb);
     assert.equal(r.status, 1, r.stderr);
     assert.match(r.stderr, /BLACK_CLIP/);
+    assert.equal(lastLine(r.stderr), "IGPU_CLASS=black_clip");
     assert.ok(!existsSync(v.out), "a black clip is never delivered");
     noTempLeft(sb);
   } finally { sb.done(); }
@@ -436,6 +441,7 @@ test("audiocpp main: the REAL host-prefill log (planner weights on the CPU) kill
     const r = await runNode("audiocpp-generate.mjs", a.args, sb);
     assert.equal(r.status, 1, r.stderr);
     assert.match(r.stderr, /CPU_PLACEMENT/);
+    assert.equal(lastLine(r.stderr), "IGPU_CLASS=cpu_placement");
     assert.ok(!existsSync(a.out));
     assert.ok(await waitGone(Number(readFileSync(a.pid, "utf8"))), "the engine process is dead");
     noTempLeft(sb);

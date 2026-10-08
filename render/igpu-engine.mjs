@@ -34,6 +34,46 @@ export const ILLEGAL_INSTRUCTION = "ILLEGAL_INSTRUCTION";
 export const BINARY_NOT_ABSOLUTE = "BINARY_NOT_ABSOLUTE";
 export const OUT_DIR_UNWRITABLE = "OUT_DIR_UNWRITABLE";
 export const MODEL_INCOMPATIBLE = "MODEL_INCOMPATIBLE";
+export const ENGINE_CRASHED = "ENGINE_CRASHED";
+export const OUT_OF_MEMORY = "OUT_OF_MEMORY";
+export const DEVICE_INVALID = "DEVICE_INVALID";
+
+// ---------------------------------------------------------------- the error class line
+
+// Every typed failure a runner ends with is also reported as ONE short final machine line,
+// "IGPU_CLASS=<class>", after the (long) human line. The Go side (internal/gpugen) reads the class
+// from that line anywhere in the output it captured; the human line is not the carrier, because
+// gpugen keeps only its tail in the error text and a real GPU_RESET line is longer than that tail.
+// The classes are gpugen.ClassifyErr's names (internal/gpugen pins both lists together).
+export const CLASS_MARKER = "IGPU_CLASS=";
+const TOKEN_CLASSES = {
+  CPU_PLACEMENT: "cpu_placement", CPU_BACKEND_REFUSED: "cpu_backend_refused", GPU_RESET: "gpu_reset",
+  TOKEN_CAP_EXCEEDED: "token_cap_exceeded", EXTRA_ARGS_REFUSED: "extra_args_refused",
+  ILLEGAL_INSTRUCTION: "illegal_instruction", BLACK_CLIP: "black_clip", FROZEN_CLIP: "frozen_clip",
+  DEPTH_FRAMES_INVALID: "depth_frames_invalid", MODEL_INCOMPATIBLE: "model_incompatible",
+  BINARY_NOT_ABSOLUTE: "binary_not_absolute", OUT_DIR_UNWRITABLE: "out_dir_unwritable",
+  DEAD_AIR: "dead_air", FFMPEG_UNAVAILABLE: "ffmpeg_unavailable", UNMEASURABLE: "unmeasurable",
+  ENGINE_CRASHED: "engine_crashed", OUT_OF_MEMORY: "oom", DEVICE_INVALID: "device_invalid",
+};
+
+// errorClass: the class a failure message belongs to ("" = untyped): its leading TOKEN_NAME:, else
+// "timeout" when it reports one. Pure.
+export function errorClass(message) {
+  const text = String(message ?? "");
+  const tok = /^\s*([A-Z][A-Z0-9_]+):/.exec(text);
+  if (tok && TOKEN_CLASSES[tok[1]]) return TOKEN_CLASSES[tok[1]];
+  if (/\btimeout\b/i.test(text)) return "timeout";
+  return "";
+}
+
+// reportFatal: print a runner's failure the way every iGPU runner ends: the human line, then the class
+// line when the failure is typed. The caller exits non-zero.
+export function reportFatal(label, e) {
+  const msg = e && e.message ? e.message : String(e);
+  console.error(`${label} FAILED:`, msg);
+  const cls = errorClass(msg);
+  if (cls) console.error(CLASS_MARKER + cls);
+}
 
 // parseArgs: positionals + --flags. `booleans` names the flags that take no value.
 // Every other --flag consumes the next token (a missing value is undefined, which every
@@ -383,8 +423,11 @@ export function noGpuEvidenceError(label, verdict) {
   return new Error(`${CPU_PLACEMENT}: no GPU evidence was seen in ${label}'s log (expected ${verdict.expected}) — a run that cannot show it ran on the GPU is treated as a CPU run; no model runs on CPU on this engine`);
 }
 
-export function gpuResetError(hit) {
-  return new Error(`${GPU_RESET}: the GPU reset during the run (log line ${hit.lineNo}: ${hit.line}). The amdgpu driver resets the compute ring when one GPU dispatch runs past its default 2 s lockup timeout; keep the request inside the configured token cap (sdcpp_max_tokens, or animategen_sdcpp_max_tokens for animate) by lowering width/height/frames. This failure is never retried automatically.`);
+export function gpuResetError(hit, engine = "sdcpp") {
+  const advice = engine === "audiocpp"
+    ? "shorten the request (seconds or text length)"
+    : "keep the request inside the configured token cap (sdcpp_max_tokens, or animategen_sdcpp_max_tokens for animate) by lowering width/height/frames";
+  return new Error(`${GPU_RESET}: the GPU reset during the run (log line ${hit.lineNo}: ${hit.line}). The amdgpu driver resets the compute ring when one GPU dispatch runs past its default 2 s lockup timeout; ${advice}. This failure is never retried automatically.`);
 }
 
 // ---------------------------------------------------------------- token cap
@@ -530,6 +573,33 @@ export function installLifecycle({ pollMs = Number(process.env.IGPU_PARENT_POLL_
   }
 }
 
+// Signals that mean the engine itself crashed (an assert, a segfault, a bad access), as opposed to
+// being told to stop (SIGTERM, SIGINT, SIGHUP) or killed (SIGKILL: the OOM killer or a timeout).
+const CRASH_SIGNALS = new Set(["SIGSEGV", "SIGABRT", "SIGBUS", "SIGFPE", "SIGTRAP", "SIGSYS"]);
+
+// memoryFailure: the first log line in which ggml / sd.cpp / audio.cpp / the Vulkan driver reports it
+// ran out of memory ("insufficient memory (attempted to allocate 5162.00 MB)", "alloc compute buffer
+// failed", "Device memory allocation of size N failed", ErrorOutOfDeviceMemory), or "".
+const MEMORY_FAILURE = /insufficient memory|alloc(?:ate|ation)? compute buffer failed|failed to alloc(?:ate)? (?:compute )?buffer|device memory allocation of size|ErrorOutOf(?:Device|Host)Memory|\bout of memory\b/i;
+export function memoryFailure(lines) {
+  for (const l of lines || []) if (MEMORY_FAILURE.test(l)) return String(l).trim().slice(0, 200);
+  return "";
+}
+
+// memoryError: the typed OUT_OF_MEMORY failure (err_class oom), naming the log line that says so.
+export function memoryError(label, line, how) {
+  return new Error(`${OUT_OF_MEMORY}: ${label} ran out of memory (${how}): ${line}. Lower the width, height or frames, or free memory on this box. Not retried automatically.`);
+}
+
+// engineExitError: the error for an engine that exited non-zero: a refused model file
+// (MODEL_INCOMPATIBLE), an out-of-memory report in its log (OUT_OF_MEMORY), else "<label> exited N".
+export function engineExitError(label, code, log, modelFile) {
+  const lines = String(log ?? "").split(/\r\n|\r|\n/);
+  return (modelFile ? modelMetadataError(log, modelFile) : null)
+    || (memoryFailure(lines) ? memoryError(label, memoryFailure(lines), `exit ${code}`) : null)
+    || new Error(`${label} exited ${code}`);
+}
+
 // runEngine: spawn `bin args`, tee every output line to stderr (that is the progress the Go
 // side tails), feed each line to `guard` (createLogGuard) and settle:
 //   resolves {code, log}            the engine exited normally (any code; the caller judges it)
@@ -579,7 +649,7 @@ export function runEngine({ bin, args, env, timeoutMs = 0, guard, label = "engin
       chunks.push(line);
       process.stderr.write(line + "\n");
       const hit = guard.scan(line);
-      if (hit) abort(hit.kind === GPU_RESET ? gpuResetError(hit) : cpuPlacementError(hit));
+      if (hit) abort(hit.kind === GPU_RESET ? gpuResetError(hit, guard.engine) : cpuPlacementError(hit));
     };
     const feed = (stream) => {
       let buf = "";
@@ -601,8 +671,15 @@ export function runEngine({ bin, args, env, timeoutMs = 0, guard, label = "engin
         return finish(reject, new Error(`${ILLEGAL_INSTRUCTION}: ${label} died with SIGILL (exit ${code ?? 132}): the binary uses CPU instructions this machine's CPU lacks (an instruction-set mismatch, e.g. the audio.cpp release build is AVX-512 and a Zen 3 CPU has none). Build the engine on the node instead of using a prebuilt release.`));
       }
       if (signal) {
-        const hint = signal === "SIGKILL" ? " (SIGKILL on a UMA iGPU box usually means the kernel out-of-memory (OOM) killer)" : "";
-        return finish(reject, new Error(`${label} was killed by signal ${signal}${hint}`));
+        const mem = memoryFailure(chunks);
+        if (mem) return finish(reject, memoryError(label, mem, `died of signal ${signal}`));
+        if (signal === "SIGKILL") {
+          return finish(reject, new Error(`${label} was killed by signal SIGKILL (SIGKILL on a UMA iGPU box usually means the kernel out-of-memory (OOM) killer)`));
+        }
+        if (CRASH_SIGNALS.has(signal)) {
+          return finish(reject, new Error(`${ENGINE_CRASHED}: ${label} died of signal ${signal}: an engine crash, not a timeout; the same request would crash it again. Not retried automatically.`));
+        }
+        return finish(reject, new Error(`${label} was killed by signal ${signal}`));
       }
       if (code === 0) {
         const v = guard.verdict();
