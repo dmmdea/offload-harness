@@ -26,8 +26,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -112,6 +110,14 @@ type Spec struct {
 	// path never starts ComfyUI, so there is nothing to free). The killTree + output
 	// stat still apply — the python worker still gets process-tree-killed on timeout.
 	SkipFreeComfy bool
+	// OwnProcessGroup, when true (non-Windows only; a no-op on Windows, where taskkill /T
+	// already reaps the tree), starts the runner as the leader of its own process group, so a
+	// timeout or a cancel signals the WHOLE group instead of the bare node process: SIGTERM
+	// first, so the runner can kill its engine and remove its temp dirs, then SIGKILL after a
+	// grace. The iGPU media runners set it (their engines are spawn-per-job native binaries that
+	// would otherwise keep the GPU after the lease is released). false keeps every other lane's
+	// kill exactly as it was.
+	OwnProcessGroup bool
 	// Footprint, when non-nil, turns on passive per-render VRAM peak sampling for
 	// the fleet-node footprint store (added 2026-07-17): while the child runs,
 	// SampleFunc is polled and the max observation is reported via OnFootprint —
@@ -193,6 +199,9 @@ func Generate(ctx context.Context, spec Spec) (string, error) {
 	// Windows orphans the ComfyUI python grandchild and bypasses node's finally.
 	cmd.Cancel = func() error { return killTree(cmd.Process) }
 	cmd.WaitDelay = 10 * time.Second
+	if spec.OwnProcessGroup {
+		setProcessGroup(cmd)
+	}
 	// Belt-and-suspenders VRAM free (invariant 3, layer 2). Skipped for runners that
 	// never launch ComfyUI (TTS) — there a /free is pointless, though harmless.
 	if !spec.SkipFreeComfy {
@@ -318,20 +327,6 @@ func runSampled(cmd *exec.Cmd, w io.Writer, sample func(childPid int) (float64, 
 // and still need the same whole-tree kill on timeout/cancel.
 func KillTree(p *os.Process) error { return killTree(p) }
 
-// killTree force-terminates p and ALL descendants. On Windows, killing the bare node
-// process leaves the spawned ComfyUI python alive (no process-group semantics), so we
-// taskkill the whole tree; elsewhere a direct kill is the best portable effort.
-func killTree(p *os.Process) error {
-	if p == nil {
-		return nil
-	}
-	if runtime.GOOS == "windows" {
-		_ = exec.Command("taskkill", "/T", "/F", "/PID", strconv.Itoa(p.Pid)).Run()
-		return nil
-	}
-	return p.Kill()
-}
-
 // instanceEnv is the env a Spec's per-card ComfyUI instance adds to the child: its endpoint
 // and its card, and a blank legacy index when a card is named. A Spec that names neither
 // (every caller today) adds nothing.
@@ -398,7 +393,44 @@ func ClassifyErr(err error) string {
 	}
 	s := strings.ToLower(err.Error())
 	switch {
-	case strings.Contains(s, "out of memory") || strings.Contains(s, "cudamalloc") || strings.Contains(s, "oom"):
+	// The iGPU media runners' no-CPU guards (CT-49, render/igpu-engine.mjs): the engine's
+	// log placed a model on the CPU, or the backend itself was a CPU one. Checked first so
+	// the "killed" in a placement-abort message never reads as a timeout.
+	case strings.Contains(s, "cpu_placement"):
+		return "cpu_placement"
+	case strings.Contains(s, "cpu_backend_refused"):
+		return "cpu_backend_refused"
+	// The GPU reset during the run (the amdgpu 2 s lockup timeout): never retried. Its message
+	// names that timeout, so it must be classified before the "timeout" case below.
+	case strings.Contains(s, "gpu_reset"):
+		return "gpu_reset"
+	case strings.Contains(s, "token_cap_exceeded"):
+		return "token_cap_exceeded"
+	case strings.Contains(s, "extra_args_refused"):
+		return "extra_args_refused"
+	case strings.Contains(s, "illegal_instruction"):
+		return "illegal_instruction"
+	// The iGPU runners' output gates and input refusals (render/igpu-qa.mjs, render/igpu-engine.mjs):
+	// the engine exited 0 but the clip is black / frozen, the depth frames are not the RGB sd-cli
+	// needs, sd-cli refused the model file, or the runner refused its own inputs. Never retried:
+	// the same request fails the same way, and none of these is a timeout or an oom whatever words
+	// the path in the message happens to contain.
+	case strings.Contains(s, "black_clip"):
+		return "black_clip"
+	case strings.Contains(s, "frozen_clip"):
+		return "frozen_clip"
+	case strings.Contains(s, "depth_frames_invalid"):
+		return "depth_frames_invalid"
+	case strings.Contains(s, "model_incompatible"):
+		return "model_incompatible"
+	case strings.Contains(s, "binary_not_absolute"):
+		return "binary_not_absolute"
+	case strings.Contains(s, "out_dir_unwritable"):
+		return "out_dir_unwritable"
+	// ggml_vulkan's allocation failure has neither "out of memory" nor "oom" in its text
+	// ("Device memory allocation of size N failed ... vk::Device::allocateMemory: ErrorOutOfDeviceMemory").
+	case strings.Contains(s, "out of memory") || strings.Contains(s, "cudamalloc") || strings.Contains(s, "oom") ||
+		strings.Contains(s, "erroroutofdevicememory") || strings.Contains(s, "erroroutofhostmemory") || strings.Contains(s, "device memory allocation of size"):
 		return "oom"
 	case strings.Contains(s, "timeout") || strings.Contains(s, "deadline") || strings.Contains(s, "context canceled") || strings.Contains(s, "killed") || strings.Contains(s, "signal:"):
 		return "timeout"

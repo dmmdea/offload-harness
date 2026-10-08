@@ -1,0 +1,315 @@
+[VERBOSE] main.cpp:697  - version: stable-diffusion.cpp version unknown, commit 3f8527a
+ggml_vulkan: Found 1 Vulkan devices:
+ggml_vulkan: 0 = AMD Radeon Graphics (RADV RENOIR) (radv) | uma: 1 | fp16: 1 | bf16: 0 | fp4: 0 | warp size: 64 | shared memory: 65536 | int dot: 0 | matrix cores: none
+load_backend: loaded Vulkan backend from /opt/sdcpp/libggml-vulkan.so
+load_backend: loaded CPU backend from /opt/sdcpp/libggml-cpu-haswell.so
+[VERBOSE] main.cpp:698  - System Info: 
+   SSE3 = 1 |    SSSE3 = 1 |    AVX = 1 |    AVX2 = 1 |    F16C = 1 |    FMA = 1 |    BMI2 = 1 |    OPENMP = 1 |    REPACK = 1 | 
+[VERBOSE] main.cpp:699  - SDCliParams {
+  mode: vid_gen,
+  output_path: "/work/vace-r2v-depth.webm",
+  image_path: "",
+  metadata_format: "text",
+  log_level: verbose,
+  color: false,
+  convert_name: false,
+  preview_method: none,
+  preview_interval: 1,
+  preview_path: "preview.avi",
+  preview_fps: 16,
+  taesd_preview: false,
+  preview_noisy: false,
+  imatrix_out: "",
+  metadata_raw: false,
+  metadata_brief: false,
+  metadata_all: false
+}
+[VERBOSE] main.cpp:700  - SDContextParams {
+  n_threads: 6,
+  conditioning_cache_size: 0,
+  model_path: "",
+  clip_l_path: "",
+  clip_g_path: "",
+  clip_vision_path: "",
+  t5xxl_path: "/models/video/wan22-ti2v-5b/umt5-xxl-encoder-Q8_0.gguf",
+  llm_path: "",
+  llm_vision_path: "",
+  tokenizer: "",
+  diffusion_model_path: "/models/video/wan21-vace-1.3b/wan2.1_vace_1.3B_fp16.safetensors",
+  high_noise_diffusion_model_path: "",
+  uncond_diffusion_model_path: "",
+  embeddings_connectors_path: "",
+  vae_path: "/models/video/wan21-vace-1.3b/wan_2.1_vae.safetensors",
+  vae_format: "auto",
+  audio_vae_path: "",
+  audio_encoder_path: "",
+  taesd_path: "",
+  esrgan_path: "",
+  control_net_path: "",
+  embedding_dir: "",
+  embeddings: {
+  }
+  wtype: NONE,
+  tensor_type_rules: "",
+  lora_model_dir: ".",
+  hires_upscalers_dir: "",
+  photo_maker_path: "",
+  rng_type: cuda,
+  sampler_rng_type: NONE,
+  offload_params_to_cpu: false,
+  max_vram: "0",
+  disable_prefetch: false,
+  disable_segmented_compute: false,
+  eager_load: false,
+  backend: "vulkan0",
+  params_backend: "",
+  split_mode: "",
+  model_args: "",
+  auto_fit: true,
+  enable_mmap: false,
+  control_net_cpu: false,
+  clip_on_cpu: false,
+  vae_on_cpu: false,
+  flash_attn: false,
+  diffusion_flash_attn: true,
+  sage_attn: false,
+  linear_scale: 0,
+  attn_scale: 0,
+  diffusion_conv_direct: false,
+  vae_conv_direct: false,
+  prediction: NONE,
+  lora_apply_mode: auto,
+  force_sdxl_vae_conv_scale: false
+}
+[VERBOSE] main.cpp:701  - SDGenerationParams {
+  loras: "{
+  }",
+  high_noise_loras: "{
+  }",
+  prompt: "a clay figure of a bearded man in a plaid shirt waves hello and steps forward, stop-motion clay style, warm evening light",
+  negative_prompt: "static, blurry, low quality, deformed hands, extra fingers, JPEG artifacts",
+  ad_model_path: "",
+  ad_prompt: "",
+  ad_negative_prompt: "",
+  extra_ad_args: "",
+  clip_skip: -1,
+  width: 480,
+  height: 832,
+  batch_count: 1,
+  qwen_image_layers: 3,
+  init_image_path: "/work/ref-720x1280.png",
+  end_image_path: "",
+  mask_image_path: "",
+  control_image_path: "",
+  ref_image_paths: [],
+  ref_video_paths: [],
+  ref_video_audio_paths: [],
+  ref_audio_paths: [],
+  control_video_path: "/work/vace/depth-rgb",
+  image_preprocess: ,
+  ref_image_args: ,
+  increase_ref_index: false,
+  pm_id_images_dir: "",
+  pm_id_embed_path: "",
+  pm_style_strength: 20,
+  skip_layers: [7, 8, 9],
+  sample_params: (txt_cfg: 6.00, img_cfg: 6.00, distilled_guidance: 3.50, slg.layer_count: 0, slg.layer_start: 0.01, slg.layer_end: 0.20, slg.scale: 0.00, scheduler: NONE, sample_method: euler, sample_steps: 20, eta: inf, shifted_timestep: 0, flow_shift: inf, extra_sample_args: ),
+  high_noise_skip_layers: [7, 8, 9],
+  high_noise_sample_params: (txt_cfg: 7.00, img_cfg: 7.00, distilled_guidance: 3.50, slg.layer_count: 0, slg.layer_start: 0.01, slg.layer_end: 0.20, slg.scale: 0.00, scheduler: NONE, sample_method: NONE, sample_steps: 20, eta: inf, shifted_timestep: 0, flow_shift: inf, extra_sample_args: ),
+  custom_sigmas: [],
+  cache_mode: "",
+  cache_option: "",
+  cache: disabled (threshold=inf, start=0.15, end=0.95),
+  moe_boundary: 0.875,
+  video_frames: 33,
+  fps: 16,
+  vace_strength: 1,
+  strength: 0.75,
+  control_strength: 0.9,
+  seed: 5,
+  upscale_repeats: 1,
+  upscale_tile_size: 128,
+  hires: { enabled: false, upscaler: "Latent", model_path: "", scale: 2, target_width: 0, target_height: 0, steps: 0, denoising_strength: 0.7, custom_sigmas: [], upscale_tile_size: 128 },
+  vae_tiling_params: { 1, 0, 0, 0, 0.25, 0, 0, "" },
+}
+[VERBOSE] main.cpp:349  - load image 0 from '/work/vace/depth-rgb/f_0001.png'
+[VERBOSE] main.cpp:349  - load image 1 from '/work/vace/depth-rgb/f_0002.png'
+[VERBOSE] main.cpp:349  - load image 2 from '/work/vace/depth-rgb/f_0003.png'
+[VERBOSE] main.cpp:349  - load image 3 from '/work/vace/depth-rgb/f_0004.png'
+[VERBOSE] main.cpp:349  - load image 4 from '/work/vace/depth-rgb/f_0005.png'
+[VERBOSE] main.cpp:349  - load image 5 from '/work/vace/depth-rgb/f_0006.png'
+[VERBOSE] main.cpp:349  - load image 6 from '/work/vace/depth-rgb/f_0007.png'
+[VERBOSE] main.cpp:349  - load image 7 from '/work/vace/depth-rgb/f_0008.png'
+[VERBOSE] main.cpp:349  - load image 8 from '/work/vace/depth-rgb/f_0009.png'
+[VERBOSE] main.cpp:349  - load image 9 from '/work/vace/depth-rgb/f_0010.png'
+[VERBOSE] main.cpp:349  - load image 10 from '/work/vace/depth-rgb/f_0011.png'
+[VERBOSE] main.cpp:349  - load image 11 from '/work/vace/depth-rgb/f_0012.png'
+[VERBOSE] main.cpp:349  - load image 12 from '/work/vace/depth-rgb/f_0013.png'
+[VERBOSE] main.cpp:349  - load image 13 from '/work/vace/depth-rgb/f_0014.png'
+[VERBOSE] main.cpp:349  - load image 14 from '/work/vace/depth-rgb/f_0015.png'
+[VERBOSE] main.cpp:349  - load image 15 from '/work/vace/depth-rgb/f_0016.png'
+[VERBOSE] main.cpp:349  - load image 16 from '/work/vace/depth-rgb/f_0017.png'
+[VERBOSE] main.cpp:349  - load image 17 from '/work/vace/depth-rgb/f_0018.png'
+[VERBOSE] main.cpp:349  - load image 18 from '/work/vace/depth-rgb/f_0019.png'
+[VERBOSE] main.cpp:349  - load image 19 from '/work/vace/depth-rgb/f_0020.png'
+[VERBOSE] main.cpp:349  - load image 20 from '/work/vace/depth-rgb/f_0021.png'
+[VERBOSE] main.cpp:349  - load image 21 from '/work/vace/depth-rgb/f_0022.png'
+[VERBOSE] main.cpp:349  - load image 22 from '/work/vace/depth-rgb/f_0023.png'
+[VERBOSE] main.cpp:349  - load image 23 from '/work/vace/depth-rgb/f_0024.png'
+[VERBOSE] main.cpp:349  - load image 24 from '/work/vace/depth-rgb/f_0025.png'
+[VERBOSE] main.cpp:349  - load image 25 from '/work/vace/depth-rgb/f_0026.png'
+[VERBOSE] main.cpp:349  - load image 26 from '/work/vace/depth-rgb/f_0027.png'
+[VERBOSE] main.cpp:349  - load image 27 from '/work/vace/depth-rgb/f_0028.png'
+[VERBOSE] main.cpp:349  - load image 28 from '/work/vace/depth-rgb/f_0029.png'
+[VERBOSE] main.cpp:349  - load image 29 from '/work/vace/depth-rgb/f_0030.png'
+[VERBOSE] main.cpp:349  - load image 30 from '/work/vace/depth-rgb/f_0031.png'
+[VERBOSE] main.cpp:349  - load image 31 from '/work/vace/depth-rgb/f_0032.png'
+[VERBOSE] main.cpp:349  - load image 32 from '/work/vace/depth-rgb/f_0033.png'
+[VERBOSE] model_loader.cpp:189  - using 6 threads for model loading
+[INFO   ] diffusion_engine.cpp:732  - loading diffusion model from '/models/video/wan21-vace-1.3b/wan2.1_vace_1.3B_fp16.safetensors'
+[INFO   ] model_loader.cpp:221  - load /models/video/wan21-vace-1.3b/wan2.1_vace_1.3B_fp16.safetensors using safetensors format
+[VERBOSE] model_loader.cpp:289  - init from '/models/video/wan21-vace-1.3b/wan2.1_vace_1.3B_fp16.safetensors', prefix = 'model.diffusion_model.'
+[INFO   ] diffusion_engine.cpp:774  - loading t5xxl from '/models/video/wan22-ti2v-5b/umt5-xxl-encoder-Q8_0.gguf'
+[INFO   ] model_loader.cpp:215  - load /models/video/wan22-ti2v-5b/umt5-xxl-encoder-Q8_0.gguf using gguf format
+[VERBOSE] model_loader.cpp:261  - init from '/models/video/wan22-ti2v-5b/umt5-xxl-encoder-Q8_0.gguf'
+[VERBOSE] gguf_reader_ext.h:218  - GGUF v3, tensor_count=242, metadata_kv_count=30
+[INFO   ] diffusion_engine.cpp:803  - loading vae from '/models/video/wan21-vace-1.3b/wan_2.1_vae.safetensors'
+[INFO   ] model_loader.cpp:221  - load /models/video/wan21-vace-1.3b/wan_2.1_vae.safetensors using safetensors format
+[VERBOSE] model_loader.cpp:289  - init from '/models/video/wan21-vace-1.3b/wan_2.1_vae.safetensors', prefix = 'vae.'
+[VERBOSE] model_loader.cpp:626  - patch_embedding_channels 24576
+[VERBOSE] model_loader.cpp:626  - patch_embedding_channels 24576
+[INFO   ] diffusion_engine.cpp:995  - Version: Wan 2.x 
+[INFO   ] backend_fit.cpp:323  - auto-fit plan:
+[INFO   ] backend_fit.cpp:324  -   devices:
+[INFO   ] backend_fit.cpp:326  -     Vulkan0      AMD Radeon Graphics (RADV RENOIR) free  25058 MiB, budget  24546 MiB
+[INFO   ] backend_fit.cpp:333  -     RAM          free  24942 MiB, params budget  22448 MiB
+[INFO   ] backend_fit.cpp:336  -   compute-device weight cache priority: diffusion > te > vae
+[INFO   ] backend_fit.cpp:337  -   components (params: compute device -> RAM -> other GPU -> disk):
+[INFO   ] backend_fit.cpp:346  -     DiT          params   4109 MiB, compute reserve  2048 MiB -> compute Vulkan0, params Vulkan0
+[INFO   ] backend_fit.cpp:346  -     Conditioner  params   5757 MiB, compute reserve  2048 MiB -> compute Vulkan0, params Vulkan0
+[INFO   ] backend_fit.cpp:346  -     VAE          params    242 MiB, compute reserve  1024 MiB -> compute Vulkan0, params Vulkan0
+[INFO   ] backend_fit.cpp:474  - auto-fit: --backend "vulkan0"
+[VERBOSE] ggml_extend_backend.cpp:404  - Initializing backend: Vulkan0
+[VERBOSE] model_loader.cpp:626  - patch_embedding_channels 24576
+[VERBOSE] model_loader.cpp:189  - using 6 threads for model loading
+[INFO   ] diffusion_engine.cpp:1522 - Weight type stat:                      f32: 77   |     f16: 1260 |    q8_0: 169  |    bf16: 194  
+[INFO   ] diffusion_engine.cpp:1523 - Conditioner weight type stat:          f32: 73   |    q8_0: 169  
+[INFO   ] diffusion_engine.cpp:1524 - Diffusion model weight type stat:      f32: 4    |     f16: 1260 
+[INFO   ] diffusion_engine.cpp:1525 - VAE weight type stat:                 bf16: 194  
+[VERBOSE] diffusion_engine.cpp:1527 - ggml tensor size = 432 bytes
+[VERBOSE] wan.hpp:91   - wan: model_type = t2v, num_layers = 30, vace_layers = 15, dim = 2048, ffn_dim = 8192, num_heads = 16
+[INFO   ] wan.hpp:967  - Wan2.1-VACE-1.3B
+[INFO   ] model_builders.cpp:625  - using VAE for encoding / decoding
+[VERBOSE] wan_vae.hpp:1338 - Wan VAE convolution type: 3D
+[INFO   ] diffusion_engine.cpp:1202 - Using flash attention in the diffusion model
+[VERBOSE] diffusion_engine.cpp:1211 - validating model metadata
+[VERBOSE] diffusion_engine.cpp:1281 - model metadata validated; weights will be prepared lazily
+[INFO   ] diffusion_engine.cpp:1327 - total params memory size = 10111.14MB (VRAM 10111.14MB, RAM 0.00MB): text_encoders 5757.05MB(VRAM), diffusion_model 4112.00MB(VRAM), vae 242.10MB(VRAM), controlnet 0.00MB(N/A), extensions 0.00MB(N/A)
+[INFO   ] diffusion_engine.cpp:1466 - running in FLOW mode
+[INFO   ] image_preprocess.cpp:266  - preprocess init[0]: 720x1280 crop=(0,16,720,1248) resize=480x832 pad=(0,0) output=480x832 filter=auto(0) antialias=false
+[INFO   ] image_preprocess.cpp:266  - preprocess control-frame[0]: 518x896 crop=(1,0,516,896) resize=480x832 pad=(0,0) output=480x832 filter=auto(0) antialias=false
+[INFO   ] image_preprocess.cpp:266  - preprocess control-frame[1]: 518x896 crop=(1,0,516,896) resize=480x832 pad=(0,0) output=480x832 filter=auto(0) antialias=false
+[INFO   ] image_preprocess.cpp:266  - preprocess control-frame[2]: 518x896 crop=(1,0,516,896) resize=480x832 pad=(0,0) output=480x832 filter=auto(0) antialias=false
+[INFO   ] image_preprocess.cpp:266  - preprocess control-frame[3]: 518x896 crop=(1,0,516,896) resize=480x832 pad=(0,0) output=480x832 filter=auto(0) antialias=false
+[INFO   ] image_preprocess.cpp:266  - preprocess control-frame[4]: 518x896 crop=(1,0,516,896) resize=480x832 pad=(0,0) output=480x832 filter=auto(0) antialias=false
+[INFO   ] image_preprocess.cpp:266  - preprocess control-frame[5]: 518x896 crop=(1,0,516,896) resize=480x832 pad=(0,0) output=480x832 filter=auto(0) antialias=false
+[INFO   ] image_preprocess.cpp:266  - preprocess control-frame[6]: 518x896 crop=(1,0,516,896) resize=480x832 pad=(0,0) output=480x832 filter=auto(0) antialias=false
+[INFO   ] image_preprocess.cpp:266  - preprocess control-frame[7]: 518x896 crop=(1,0,516,896) resize=480x832 pad=(0,0) output=480x832 filter=auto(0) antialias=false
+[INFO   ] image_preprocess.cpp:266  - preprocess control-frame[8]: 518x896 crop=(1,0,516,896) resize=480x832 pad=(0,0) output=480x832 filter=auto(0) antialias=false
+[INFO   ] image_preprocess.cpp:266  - preprocess control-frame[9]: 518x896 crop=(1,0,516,896) resize=480x832 pad=(0,0) output=480x832 filter=auto(0) antialias=false
+[INFO   ] image_preprocess.cpp:266  - preprocess control-frame[10]: 518x896 crop=(1,0,516,896) resize=480x832 pad=(0,0) output=480x832 filter=auto(0) antialias=false
+[INFO   ] image_preprocess.cpp:266  - preprocess control-frame[11]: 518x896 crop=(1,0,516,896) resize=480x832 pad=(0,0) output=480x832 filter=auto(0) antialias=false
+[INFO   ] image_preprocess.cpp:266  - preprocess control-frame[12]: 518x896 crop=(1,0,516,896) resize=480x832 pad=(0,0) output=480x832 filter=auto(0) antialias=false
+[INFO   ] image_preprocess.cpp:266  - preprocess control-frame[13]: 518x896 crop=(1,0,516,896) resize=480x832 pad=(0,0) output=480x832 filter=auto(0) antialias=false
+[INFO   ] image_preprocess.cpp:266  - preprocess control-frame[14]: 518x896 crop=(1,0,516,896) resize=480x832 pad=(0,0) output=480x832 filter=auto(0) antialias=false
+[INFO   ] image_preprocess.cpp:266  - preprocess control-frame[15]: 518x896 crop=(1,0,516,896) resize=480x832 pad=(0,0) output=480x832 filter=auto(0) antialias=false
+[INFO   ] image_preprocess.cpp:266  - preprocess control-frame[16]: 518x896 crop=(1,0,516,896) resize=480x832 pad=(0,0) output=480x832 filter=auto(0) antialias=false
+[INFO   ] image_preprocess.cpp:266  - preprocess control-frame[17]: 518x896 crop=(1,0,516,896) resize=480x832 pad=(0,0) output=480x832 filter=auto(0) antialias=false
+[INFO   ] image_preprocess.cpp:266  - preprocess control-frame[18]: 518x896 crop=(1,0,516,896) resize=480x832 pad=(0,0) output=480x832 filter=auto(0) antialias=false
+[INFO   ] image_preprocess.cpp:266  - preprocess control-frame[19]: 518x896 crop=(1,0,516,896) resize=480x832 pad=(0,0) output=480x832 filter=auto(0) antialias=false
+[INFO   ] image_preprocess.cpp:266  - preprocess control-frame[20]: 518x896 crop=(1,0,516,896) resize=480x832 pad=(0,0) output=480x832 filter=auto(0) antialias=false
+[INFO   ] image_preprocess.cpp:266  - preprocess control-frame[21]: 518x896 crop=(1,0,516,896) resize=480x832 pad=(0,0) output=480x832 filter=auto(0) antialias=false
+[INFO   ] image_preprocess.cpp:266  - preprocess control-frame[22]: 518x896 crop=(1,0,516,896) resize=480x832 pad=(0,0) output=480x832 filter=auto(0) antialias=false
+[INFO   ] image_preprocess.cpp:266  - preprocess control-frame[23]: 518x896 crop=(1,0,516,896) resize=480x832 pad=(0,0) output=480x832 filter=auto(0) antialias=false
+[INFO   ] image_preprocess.cpp:266  - preprocess control-frame[24]: 518x896 crop=(1,0,516,896) resize=480x832 pad=(0,0) output=480x832 filter=auto(0) antialias=false
+[INFO   ] image_preprocess.cpp:266  - preprocess control-frame[25]: 518x896 crop=(1,0,516,896) resize=480x832 pad=(0,0) output=480x832 filter=auto(0) antialias=false
+[INFO   ] image_preprocess.cpp:266  - preprocess control-frame[26]: 518x896 crop=(1,0,516,896) resize=480x832 pad=(0,0) output=480x832 filter=auto(0) antialias=false
+[INFO   ] image_preprocess.cpp:266  - preprocess control-frame[27]: 518x896 crop=(1,0,516,896) resize=480x832 pad=(0,0) output=480x832 filter=auto(0) antialias=false
+[INFO   ] image_preprocess.cpp:266  - preprocess control-frame[28]: 518x896 crop=(1,0,516,896) resize=480x832 pad=(0,0) output=480x832 filter=auto(0) antialias=false
+[INFO   ] image_preprocess.cpp:266  - preprocess control-frame[29]: 518x896 crop=(1,0,516,896) resize=480x832 pad=(0,0) output=480x832 filter=auto(0) antialias=false
+[INFO   ] image_preprocess.cpp:266  - preprocess control-frame[30]: 518x896 crop=(1,0,516,896) resize=480x832 pad=(0,0) output=480x832 filter=auto(0) antialias=false
+[INFO   ] image_preprocess.cpp:266  - preprocess control-frame[31]: 518x896 crop=(1,0,516,896) resize=480x832 pad=(0,0) output=480x832 filter=auto(0) antialias=false
+[INFO   ] image_preprocess.cpp:266  - preprocess control-frame[32]: 518x896 crop=(1,0,516,896) resize=480x832 pad=(0,0) output=480x832 filter=auto(0) antialias=false
+[VERBOSE] model_loader.cpp:189  - using 6 threads for model loading
+[INFO   ] denoiser.hpp:1129 - get_sigmas with discrete scheduler
+[INFO   ] request.cpp:420  - sampling using Euler method
+[INFO   ] video.cpp:1009 - VACE
+[VERBOSE] vae.hpp:261  - VAE encode tile size: 256x256 pixels (32x32 latent)
+[VERBOSE] tiling.cpp:201  - num tiles : 2, 4 
+[VERBOSE] tiling.cpp:202  - optimal overlap : 0.125000, 0.250000 (targeting 0.250000)
+[VERBOSE] tiling.cpp:203  - processing 8 tiles
+[INFO   ] ggml_graph_cut.cpp:1032 - wan_vae build cached graph cut plan done (taking 1 ms)
+[VERBOSE] model_loader.cpp:626  - patch_embedding_channels 24576
+[VERBOSE] model_loader.cpp:1108 - loading 82/194 tensors from /models/video/wan21-vace-1.3b/wan_2.1_vae.safetensors
+  |###                                               | 4/82 - 0.00MB/s[K  |##################################################| 82/82 - 500.85MB/s[K
+[INFO   ] model_loader.cpp:1378 - loading tensors completed, taking 0.20s (read: 0.06s, memcpy: 0.00s, convert: 0.06s, copy_to_backend: 0.01s)
+[VERBOSE] model_manager.cpp:490  - model manager prepared params backend buffers (101.20 MB, 82 tensors, 1 blocks, VRAM) on Vulkan0
+[VERBOSE] ggml_runner.cpp:1019 - wan_vae compute buffer size: 482.29 MB(VRAM) on Vulkan0 (peak across 1 segment)
+  |======>                                           | 1/8 - 1.43s/it[K  |============>                                     | 2/8 - 1.16s/it[K  |==================>                               | 3/8 - 1.16s/it[K  |=========================>                        | 4/8 - 1.16s/it[K  |===============================>                  | 5/8 - 1.16s/it[K  |=====================================>            | 6/8 - 1.15s/it[K  |===========================================>      | 7/8 - 1.15s/it[K  |==================================================| 8/8 - 1.15s/it[K
+[VERBOSE] vae.hpp:290  - computing vae encode graph completed, taking 9.54s
+[VERBOSE] vae.hpp:261  - VAE encode tile size: 256x256 pixels (32x32 latent)
+[VERBOSE] tiling.cpp:201  - num tiles : 2, 4 
+[VERBOSE] tiling.cpp:202  - optimal overlap : 0.125000, 0.250000 (targeting 0.250000)
+[VERBOSE] tiling.cpp:203  - processing 8 tiles
+[INFO   ] ggml_graph_cut.cpp:1032 - wan_vae build cached graph cut plan done (taking 3 ms)
+[VERBOSE] model_loader.cpp:626  - patch_embedding_channels 24576
+[VERBOSE] model_loader.cpp:1108 - loading 4/194 tensors from /models/video/wan21-vace-1.3b/wan_2.1_vae.safetensors
+  |#############                                     | 1/4 - 0.00MB/s[K  |##################################################| 4/4 - 87.98MB/s[K
+[INFO   ] model_loader.cpp:1378 - loading tensors completed, taking 0.01s (read: 0.00s, memcpy: 0.00s, convert: 0.00s, copy_to_backend: 0.00s)
+[VERBOSE] model_manager.cpp:490  - model manager prepared params backend buffers (  1.06 MB, 4 tensors, 1 blocks, VRAM) on Vulkan0
+[VERBOSE] ggml_runner.cpp:1019 - wan_vae compute buffer size: 3283.99 MB(VRAM) on Vulkan0 (peak across 1 segment)
+  |======>                                           | 1/8 - 33.12s/it[K  |============>                                     | 2/8 - 32.98s/it[K  |==================>                               | 3/8 - 32.98s/it[K  |=========================>                        | 4/8 - 32.99s/it[K  |===============================>                  | 5/8 - 33.00s/it[K  |=====================================>            | 6/8 - 33.03s/it[K  |===========================================>      | 7/8 - 33.06s/it[K  |==================================================| 8/8 - 33.06s/it[K
+[VERBOSE] vae.hpp:290  - computing vae encode graph completed, taking 264.38s
+[VERBOSE] vae.hpp:261  - VAE encode tile size: 256x256 pixels (32x32 latent)
+[VERBOSE] tiling.cpp:201  - num tiles : 2, 4 
+[VERBOSE] tiling.cpp:202  - optimal overlap : 0.125000, 0.250000 (targeting 0.250000)
+[VERBOSE] tiling.cpp:203  - processing 8 tiles
+[VERBOSE] ggml_runner.cpp:1019 - wan_vae compute buffer size: 3283.99 MB(VRAM) on Vulkan0 (peak across 1 segment)
+  |======>                                           | 1/8 - 33.49s/it[K  |============>                                     | 2/8 - 33.11s/it[K  |==================>                               | 3/8 - 33.09s/it[K  |=========================>                        | 4/8 - 33.02s/it[K  |===============================>                  | 5/8 - 33.12s/it[K  |=====================================>            | 6/8 - 33.23s/it[K  |===========================================>      | 7/8 - 33.35s/it[K  |==================================================| 8/8 - 33.25s/it[K
+[VERBOSE] vae.hpp:290  - computing vae encode graph completed, taking 265.85s
+[INFO   ] video.cpp:1080 - encode_first_stage completed, taking 541713 ms
+[VERBOSE] conditioner.hpp:1487 - parse 'a clay figure of a bearded man in a plaid shirt waves hello and steps forward, stop-motion clay style, warm evening light' to [['a clay figure of a bearded man in a plaid shirt waves hello and steps forward, stop-motion clay style, warm evening light', 1], ]
+[VERBOSE] t5_unigram_tokenizer.cpp:346  - split prompt "a clay figure of a bearded man in a plaid shirt waves hello and steps forward, stop-motion clay style, warm evening light" to tokens ["▁a", "▁", "clay", "▁figure", "▁of", "▁a", "▁bear", "ded", "▁man", "▁in", "▁a", "▁pla", "id", "▁shirt", "▁wave", "s", "▁hello", "▁and", "▁steps", "▁forward", ",", "▁stop", "-", "motion", "▁", "clay", "▁style", ",", "▁warm", "▁evening", "▁light", ]
+[INFO   ] ggml_graph_cut.cpp:1032 - t5 build cached graph cut plan done (taking 3 ms)
+[VERBOSE] model_loader.cpp:626  - patch_embedding_channels 24576
+[VERBOSE] model_loader.cpp:1108 - loading 242/242 tensors from /models/video/wan22-ti2v-5b/umt5-xxl-encoder-Q8_0.gguf
+  |#                                                 | 4/242 - 0.00MB/s[K  |###                                               | 12/242 - 336.75MB/s[K  |####                                              | 19/242 - 401.90MB/s[K  |######                                            | 25/242 - 579.03MB/s[K  |########                                          | 34/242 - 625.46MB/s[K  |#########                                         | 42/242 - 653.33MB/s[K  |###########                                       | 49/242 - 679.01MB/s[K  |############                                      | 56/242 - 648.40MB/s[K  |##############                                    | 63/242 - 652.36MB/s[K  |###############                                   | 72/242 - 688.44MB/s[K  |#################                                 | 80/242 - 700.35MB/s[K  |##################                                | 85/242 - 659.93MB/s[K  |####################                              | 94/242 - 696.69MB/s[K  |######################                            | 102/242 - 701.95MB/s[K  |#######################                           | 110/242 - 700.40MB/s[K  |########################                          | 116/242 - 693.39MB/s[K  |##########################                        | 123/242 - 692.56MB/s[K  |############################                      | 132/242 - 709.31MB/s[K  |##############################                    | 142/242 - 724.00MB/s[K  |###############################                   | 146/242 - 701.59MB/s[K  |################################                  | 153/242 - 700.52MB/s[K  |##################################                | 162/242 - 713.53MB/s[K  |###################################               | 169/242 - 708.16MB/s[K  |#####################################             | 176/242 - 706.94MB/s[K  |#######################################           | 184/242 - 714.67MB/s[K  |########################################          | 193/242 - 716.69MB/s[K  |##########################################        | 202/242 - 726.71MB/s[K  |###########################################       | 206/242 - 710.84MB/s[K  |#############################################     | 214/242 - 717.20MB/s[K  |###############################################   | 223/242 - 718.85MB/s[K  |################################################  | 232/242 - 727.47MB/s[K  |##################################################| 238/242 - 723.20MB/s[K  |##################################################| 242/242 - 643.61MB/s[K
+[INFO   ] model_loader.cpp:1378 - loading tensors completed, taking 8.94s (read: 6.24s, memcpy: 0.00s, convert: 0.00s, copy_to_backend: 0.32s)
+[VERBOSE] model_manager.cpp:490  - model manager prepared params backend buffers (5757.05 MB, 242 tensors, 6 blocks, VRAM) on Vulkan0
+[VERBOSE] ggml_runner.cpp:1019 - t5 compute buffer size: 297.00 MB(VRAM) on Vulkan0 (peak across 1 segment)
+[VERBOSE] conditioner.hpp:1583 - computing condition graph completed, taking 15167 ms
+[VERBOSE] conditioner.hpp:1487 - parse 'static, blurry, low quality, deformed hands, extra fingers, JPEG artifacts' to [['static, blurry, low quality, deformed hands, extra fingers, JPEG artifacts', 1], ]
+[VERBOSE] t5_unigram_tokenizer.cpp:346  - split prompt "static, blurry, low quality, deformed hands, extra fingers, JPEG artifacts" to tokens ["▁static", ",", "▁blu", "rry", ",", "▁low", "▁quality", ",", "▁de", "formed", "▁hands", ",", "▁extra", "▁fingers", ",", "▁J", "PEG", "▁arti", "facts", ]
+[VERBOSE] conditioner.hpp:1583 - computing condition graph completed, taking 5742 ms
+[INFO   ] video.cpp:1212 - get_learned_condition completed, taking 20.92s
+[INFO   ] video.cpp:1612 - generate_video 480x832x37
+[VERBOSE] video.cpp:1678 - sample 60x104x10
+[INFO   ] ggml_graph_cut.cpp:1032 - Wan2.1-VACE-1.3B build cached graph cut plan done (taking 11 ms)
+[VERBOSE] model_loader.cpp:626  - patch_embedding_channels 24576
+[VERBOSE] model_loader.cpp:1108 - loading 1264/1264 tensors from /models/video/wan21-vace-1.3b/wan2.1_vace_1.3B_fp16.safetensors
+  |#                                                 | 5/1264 - 0.00MB/s[K  |###                                               | 57/1264 - 591.91MB/s[K  |#####                                             | 106/1264 - 704.24MB/s[K  |#######                                           | 153/1264 - 764.40MB/s[K  |########                                          | 201/1264 - 777.79MB/s[K  |##########                                        | 243/1264 - 776.87MB/s[K  |############                                      | 289/1264 - 773.13MB/s[K  |##############                                    | 342/1264 - 770.48MB/s[K  |################                                  | 382/1264 - 753.96MB/s[K  |#################                                 | 424/1264 - 761.07MB/s[K  |###################                               | 477/1264 - 760.42MB/s[K  |#####################                             | 522/1264 - 763.61MB/s[K  |#######################                           | 559/1264 - 755.04MB/s[K  |#########################                         | 620/1264 - 756.74MB/s[K  |###########################                       | 666/1264 - 764.32MB/s[K  |############################                      | 707/1264 - 763.41MB/s[K  |##############################                    | 758/1264 - 762.85MB/s[K  |################################                  | 801/1264 - 759.71MB/s[K  |##################################                | 847/1264 - 758.11MB/s[K  |####################################              | 910/1264 - 774.09MB/s[K  |#######################################           | 968/1264 - 781.92MB/s[K  |#########################################         | 1021/1264 - 782.75MB/s[K  |###########################################       | 1079/1264 - 789.47MB/s[K  |#############################################     | 1137/1264 - 795.44MB/s[K  |################################################  | 1198/1264 - 801.07MB/s[K  |##################################################| 1253/1264 - 806.25MB/s[K  |##################################################| 1264/1264 - 789.26MB/s[K
+[INFO   ] model_loader.cpp:1378 - loading tensors completed, taking 5.21s (read: 4.42s, memcpy: 0.00s, convert: 0.00s, copy_to_backend: 0.55s)
+[VERBOSE] model_manager.cpp:490  - model manager prepared params backend buffers (4112.00 MB, 1264 tensors, 5 blocks, VRAM) on Vulkan0
+radv/amdgpu: The CS has been cancelled because the context is lost. This context is innocent.
+[ERROR  ] ggml - ggml_vulkan: device lost on Vulkan0
+[ERROR  ] ggml - ggml_vulkan: device lost on Vulkan0
+[ERROR  ] compute_workspace.cpp:243  - Vulkan0 workspace synchronization failed during segment cleanup: vk::Queue::submit: ErrorDeviceLost
+[ERROR  ] ggml_runner.cpp:659  - Wan2.1-VACE-1.3B graph execution failed on Vulkan0: vk::Queue::submit: ErrorDeviceLost
+[ERROR  ] diffusion_engine.cpp:2594 - diffusion model compute failed
+[ERROR  ] diffusion_engine.cpp:2733 - Diffusion model sampling failed
+[ERROR  ] video.cpp:1709 - sampling failed after 8.39s
+[ERROR  ] main.cpp:928  - generate failed
+[VERBOSE] model_manager.cpp:1260 - model manager released params backend buffers (9971.31 MB, 1592 tensors, 13 blocks, VRAM) from Vulkan0
+[ERROR  ] ggml - ggml_vulkan: device lost on Vulkan0
+[ERROR  ] ggml_extend_backend.cpp:757  - backend cleanup failed: vk::Queue::submit: ErrorDeviceLost
+EXIT=1 WALL=580s

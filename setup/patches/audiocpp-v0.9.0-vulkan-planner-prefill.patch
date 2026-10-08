@@ -1,0 +1,35 @@
+--- a/src/models/ace_step/planner.cpp	2026-10-03 19:18:46.973694580 +0000
++++ b/src/models/ace_step/planner.cpp	2026-10-03 19:18:46.977694696 +0000
+@@ -152,9 +152,9 @@
+ bool planner_prefill_uses_host_backend(core::BackendType backend_type) {
+     switch (backend_type) {
+     case core::BackendType::Vulkan:
+-        // Vulkan keeps the validated host-prefill path for now; it can try the Metal
+-        // decode-graph prompt prefill path below once parity and performance are checked.
+-        return true;
++        // offload-harness local patch: no host (CPU) copy of the planner on Vulkan; the prompt
++        // is prefilled on the device through the decode graph (see prepare_prefill), the path
++        // upstream uses on Metal. The batched prefill graph on Vulkan produced a corrupt plan.
+     case core::BackendType::Metal:
+     case core::BackendType::Cpu:
+     case core::BackendType::Cuda:
+@@ -2832,7 +2832,8 @@
+                 required_cache_steps,
+                 decode_graph_arena_bytes_);
+         }
+-        const bool use_metal_prompt_step_prefill = prefill_runtime->backend_type() == core::BackendType::Metal;
++        const bool use_metal_prompt_step_prefill = prefill_runtime->backend_type() == core::BackendType::Metal ||
++            prefill_runtime->backend_type() == core::BackendType::Vulkan;  // offload-harness local patch
+         if (!use_metal_prompt_step_prefill &&
+             (!prefill_graph_ || !prefill_graph_->can_run(*prefill_runtime, static_cast<int64_t>(prompt_ids.size())))) {
+             prefill_graph_ = std::make_unique<Qwen3PlannerPrefillGraph>(
+@@ -2930,7 +2931,8 @@
+             auto cfg_prefill_runtime =
+                 planner_prefill_weights_runtime_ != nullptr ? planner_prefill_weights_runtime_ : weights_runtime_;
+             const bool use_metal_prompt_step_cfg_prefill =
+-                cfg_prefill_runtime->backend_type() == core::BackendType::Metal;
++                cfg_prefill_runtime->backend_type() == core::BackendType::Metal ||
++                cfg_prefill_runtime->backend_type() == core::BackendType::Vulkan;  // offload-harness local patch
+             const int64_t cfg_required_cache_steps = prompt_steps + max_new_tokens;
+             const auto cfg_graph_prepare_start = Clock::now();
+             if (!use_metal_prompt_step_cfg_prefill &&

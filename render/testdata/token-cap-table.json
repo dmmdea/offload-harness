@@ -1,0 +1,14 @@
+{
+  "formula": "ceil(W/(stride*2)) * ceil(H/(stride*2)) * (floor((frames-1)/4) + 1 + refLatentFrames)",
+  "defaults": { "width": 832, "height": 480, "frames": 49 },
+  "rows": [
+    { "note": "FastWan2.2 TI2V-5B, Wan2.2 VAE 16x: measured fine", "width": 832, "height": 480, "frames": 49, "stride": 16, "ref": 0, "tokens": 5070 },
+    { "note": "VACE 1.3B + reference, Wan2.1 VAE 8x: device lost in the first step", "width": 480, "height": 832, "frames": 33, "stride": 8, "ref": 1, "tokens": 15600 },
+    { "note": "VACE 1.3B + reference at a size that fits", "width": 288, "height": 512, "frames": 33, "stride": 8, "ref": 1, "tokens": 5760 },
+    { "note": "sizes that are not a multiple of the cell round up", "width": 854, "height": 485, "frames": 49, "stride": 16, "ref": 0, "tokens": 5616 },
+    { "note": "the minimum clip", "width": 32, "height": 32, "frames": 5, "stride": 16, "ref": 0, "tokens": 2 },
+    { "note": "a frame count that is not 4k+1 floors the latent frames", "width": 832, "height": 480, "frames": 50, "stride": 16, "ref": 0, "tokens": 5070 },
+    { "note": "one reference latent frame on a 16x VAE", "width": 832, "height": 480, "frames": 49, "stride": 16, "ref": 1, "tokens": 5460 },
+    { "note": "stride 8 on the same clip is four times the tokens", "width": 832, "height": 480, "frames": 49, "stride": 8, "ref": 0, "tokens": 20280 }
+  ]
+}

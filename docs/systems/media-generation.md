@@ -31,6 +31,8 @@ use and prints a `WARN` line when that device is an integrated GPU
 subprocess probe, so it is invoked directly from `doctor`, not from `mediacap.Routes` (which stays
 a pure config/filesystem derivation for `offload_status`/`acceptance`).
 
+**iGPU media engines (CT-49).** The video, animate, voice and music lanes also run on a Vulkan-only box (no CUDA, no ROCm) through spawn-per-job native engines (sd.cpp `vid_gen`, sd.cpp VACE with depth-anything.cpp, audio.cpp), under a hard rule that no model runs on CPU. See [iGPU media engines](#igpu-media-engines-video-animate-voice-music-ct-49).
+
 **Composition lane (ADR 0059).** `offload_compose_video` / `compose-video` renders
 designed HTML/CSS motion graphics to video with **HyperFrames**: title cards, lower thirds, kinetic
 type and alpha overlays. It is CPU-class: software GL and CPU encode, with no GPU lease. It is
@@ -48,6 +50,7 @@ pinned, env-scrubbed and machine-gated. See
 - Why is FLUX not an option?
 - How is a named opt-in family (Qwen-Image-2.1) selected, and what does its result carry?
 - Which card does a ComfyUI route render on, and how is that pinned per binding?
+- How do video, animate, voice and music run on an iGPU-only box, and how is CPU placement refused?
 
 ## Scope
 
@@ -1075,6 +1078,133 @@ from a worktree, with no GPU and no live lease root:
    dispatch to the local daemon would wait in the same per-card slots and leases this admission already waits in
    and add no queue of its own. The place in line is the token.
 
+## iGPU media engines: video, animate, voice, music (CT-49)
+
+A box whose only GPU is a Vulkan iGPU (no CUDA, no ROCm) serves the same four lanes a ComfyUI box does, through the same MCP tools, CLI verbs and fleet task types: `generate_video` (I2V and T2V), `animate_character`, and `generate_audio` kind `voice` (with clone) and kind `music`. `run_graph` stays ComfyUI-only. Every engine is a spawn-per-job native CLI under the existing media lease: the process exits, the memory is gone, nothing is resident, no ComfyUI and no Python. A box that sets none of the keys below behaves byte for byte as before (`TestEveryRouteWithNoEngineKeyKeepsItsExactArgv` pins the four argv shapes, and passes on the unmodified base too).
+
+| Lane | Selected by | Runner | Engine |
+|---|---|---|---|
+| `generate_video` | a `videogen_families` entry with `"engine": "sdcpp"` | `render/sdcpp-video.mjs` | stable-diffusion.cpp `sd-cli -M vid_gen` (Wan2.2 TI2V-5B GGUF; also drives a Wan2.2 A14B high/low pair where the box has the memory) |
+| `animate_character` | `animategen_engine: "sdcpp"` | `render/sdcpp-animate.mjs` | ffmpeg frames, depth-anything.cpp depth PNGs, sd.cpp Wan2.1 VACE 1.3B with the depth directory as `--control-video` |
+| `generate_audio` voice | `voicegen_engine: "audiocpp"` | `render/audiocpp-generate.mjs --kind voice` | audio.cpp `audiocpp_cli`, `chatterbox` family, `--task tts` (`clon` with a clone reference) |
+| `generate_audio` music | `musicgen_engine: "audiocpp"` | `render/audiocpp-generate.mjs --kind music` | audio.cpp `audiocpp_cli`, `ace_step` family, `--task gen` |
+
+### No model runs on CPU
+
+The operator rule behind these lanes is that nothing runs on the CPU. It is enforced at four layers, each with a test that was seen red once:
+
+1. **Config load.** `config.CPUBackendRefusal` is an allowlist: a backend must be `vulkan` or `vulkanN` (per-module assignments such as `diffusion=vulkan0,vae=vulkan0` are checked value by value). An empty backend, `cpu`, `cpu0`, `best`, `auto` (the binary's own pick is the CPU on a box whose GPU it cannot open), `blas`, `opencl`, `rpc` and a typo such as `vulcan` are all refused. `config.ExtraArgsRefusal` refuses, in every `*_extra_args` list (`sdcpp_extra_args`, `animategen_sdcpp_extra_args`, `animategen_depth_extra_args`, `audiocpp_extra_args`), any element that changes the backend or placement: `--backend` / `-b` (any value), `--params-backend`, `--clip-on-cpu`, `--vae-on-cpu`, `--control-net-cpu`, `--rpc`, `--device` for audio.cpp (the `audiocpp_device` key owns it), any flag named with `cpu` and any `cpu` backend value, because extras are appended after the runner's own `--backend` and would override it. `--offload-to-cpu` is the one cpu-named flag that is allowed, as sanctioned spill: sd.cpp parks the weights in RAM and stages them to the device step by step, and every compute buffer stays on the GPU (the house rule of 2026-10-07 allows RAM as overflow while it truly adds capability, stays bounded and keeps the box stable). Whether a box should use it is a per-seat measurement, not a screen, and on a UMA iGPU box, where "VRAM" is the same memory as RAM, it only adds copies, so the amd-gcn bindings leave it off. The runners never add it themselves (the sd.cpp VACE docs command line shows it, and the runner does not copy it); it reaches sd-cli only when a binding's extra args carry it, and the log guard in layer 4 still kills a run that shows compute on the CPU. `local-offload doctor` loads the config first, so it fails on all of this by name.
+2. **mediacap.** A route whose backend is a CPU one is BOUND-BUT-MISSING (doctor FAIL), whatever the config loader said, so an in-process config cannot slip past `offload_status`.
+3. **Pipeline.** The same refusals are typed defers before the media lease is taken and before the runner spawns: `meta.err_class` `cpu_backend_refused` for a backend, `extra_args_refused` for an extra-args element.
+4. **The runners read their engine's log, and a run passes only on POSITIVE evidence.** Each runner scans every output line while the engine runs, and a run is accepted only with affirmative proof that the work ran on the GPU, per engine. sd-cli needs a non-software `ggml_vulkan: <n> = <device>` line and a diffusion-stage `<module> compute buffer size: ... on Vulkan<N>` line (not the text encoder or VAE) and no compute buffer `on CPU`; the pinned format strings (`model_manager.cpp:490`, `ggml_runner.cpp:1019`) print the CPU backend as `CPU`, and `Vulkan_Host` (pinned host memory) is neither evidence nor a placement, so the params-on-host log that `--offload-to-cpu` produces passes while any compute buffer on the CPU is still `CPU_PLACEMENT`. depth-anything.cpp (`da3-cli`) needs `[da3] da::Backend using device: Vulkan<N>` on every frame. audiocpp_cli needs a `<component>.weights.buffer_name Vulkan<N>` line, and ANY `*.weights.buffer_name CPU` line is a placement: upstream audio.cpp loads a second host copy of the ACE-Step planner for the prompt prefill when the backend is Vulkan, so a stock build fails this guard (the real captured log is `render/testdata/audiocpp-music-host-prefill.log`) and the node needs the planner prefill patch, [`setup/patches/audiocpp-v0.9.0-vulkan-planner-prefill.patch`](../../setup/patches/audiocpp-v0.9.0-vulkan-planner-prefill.patch) (see [Voice and music](#voice-and-music-renderaudiocpp-generatemjs)). A line placing compute on the CPU kills the process tree at once with `CPU_PLACEMENT` (`cpu_placement`), and a run that ends without its positive evidence is `CPU_PLACEMENT` too ("no GPU evidence was seen"), never a pass by silence. Params resting in host RAM with the compute on Vulkan is the sanctioned overflow and does not fail. Never scanned for anything: ggml's `load_backend: loaded CPU backend` registration, `Initializing backend: CPU`, the `SDCliParams` / `SDContextParams` / `SDGenerationParams` dump blocks, the tokenizer echoes (`split prompt ...`, `parse '...'`) and any line that repeats the request's prompt, negative prompt, TTS text or lyrics verbatim. A software Vulkan device (`llvmpipe`, `lavapipe`, `swiftshader`) and `ggml_vulkan: Found 0 Vulkan devices` count as the CPU. The sd-cli and audiocpp_cli verbose flags (`-v`, `--log`) are therefore never optional in the argv. The guard is `createLogGuard` in `render/igpu-engine.mjs` and is pinned by REAL engine logs in `render/testdata/` (the sd.cpp CPU negatives are derived from them, see its README).
+
+Every runner takes `--timeout-sec`; the pipeline passes its timeout minus a 15 s margin (a quarter of the budget under a minute). The runner's deadline counts from ITS OWN process start (the llama-swap drain and every pre-spawn step spend it) and covers the final ffmpeg encode, so it kills its engine's whole process tree before gpugen's own kill.
+
+### Runner contract: argv shape, binaries, output directory, typed errors
+
+- **Flags first, then `--`, then the positionals.** The pipeline sends `--sd-bin ... --model ... -- <out> [<still>] "<prompt>"` (animate: `-- <out> <ref> <driver> "<prompt>"`; audio: `-- <out> "<text>"`), and every runner's `parseArgs` treats a bare `--` as the end of flag parsing. A prompt, TTS text or lyrics that starts with `--` (a section marker such as `--- Intro ---`) therefore stays a positional instead of being read as a flag that swallows the next token. A hand run may still put the positionals first when none of them starts with `--`.
+- **One binary-resolution rule.** The Go side resolves each bound engine binary (`sdcpp_bin`, `animategen_sdcpp_bin`, `animategen_depth_bin`, `audiocpp_bin`) with `mediaops.ResolveBinary` (an explicit path is stat'd, a bare name is looked up on PATH, which is exactly what `doctor` and `offload_status` report) and passes the ABSOLUTE path; a value that resolves to nothing is a defer naming the key, before the lease. The runners refuse a non-absolute `--sd-bin` / `--depth-bin` / `--bin` with `BINARY_NOT_ABSOLUTE`, so a bare `sd-cli` that `doctor` shows CONFIGURED can no longer pass doctor and then fail every call.
+- **The output directory is made up front.** The pipeline creates the directory the result lands in before it takes the lease and reports the `MkdirAll` error as a defer (`cannot create the output directory ...`); the runner repeats the check and fails with `OUT_DIR_UNWRITABLE` before it spawns anything, so a render never ends in "cannot write the output" after minutes of GPU time.
+- **Backend values are each engine's own.** sd.cpp (`sdcpp_backend`, `animategen_sdcpp_backend`) takes `vulkan` or `vulkanN` (`vulkan0`). audio.cpp (`audiocpp_backend`) takes its own enum, `vulkan`, `cuda`, `hip`, `rocm` or `metal`, and the device index is the separate `audiocpp_device` key (`--backend vulkan --device 0`); `vulkan0` is not an audio.cpp value, and config load, mediacap, the pipeline and the runner all say so (with the `audiocpp_device` hint) instead of leaving the CLI to reject it at run time.
+- **Output gates.** An engine that exits 0 is not a finished job: a clip is checked for black and frozen output, audio for dead air (below); a gate failure removes the file and fails typed.
+
+The typed errors a lane can return (`meta.err_class` in parentheses; the runner prints the class name first, `gpugen.ClassifyErr` maps it):
+
+| Error | `err_class` | Meaning |
+|---|---|---|
+| `CPU_PLACEMENT` | `cpu_placement` | a model ran or would run on the CPU, or a clean exit showed no GPU evidence |
+| `CPU_BACKEND_REFUSED` | `cpu_backend_refused` | the backend is not an accepted GPU value for that engine |
+| `EXTRA_ARGS_REFUSED` | `extra_args_refused` | an extra-args element changes the backend or placement (not `--offload-to-cpu`, which is sanctioned spill) |
+| `TOKEN_CAP_EXCEEDED` | `token_cap_exceeded` | the request is over the configured latent-token cap |
+| `GPU_RESET` | `gpu_reset` | the engine log reports a lost device (never retried) |
+| `ILLEGAL_INSTRUCTION` | `illegal_instruction` | SIGILL / exit 132: the binary uses CPU instructions this CPU lacks |
+| `MODEL_INCOMPATIBLE` | `model_incompatible` | sd-cli refused the model file (`model metadata validation failed`) |
+| `DEPTH_FRAMES_INVALID` | `depth_frames_invalid` | a control frame is not 8-bit RGB at exactly W x H |
+| `BLACK_CLIP` / `FROZEN_CLIP` | `black_clip` / `frozen_clip` | the finished clip is entirely black / entirely frozen |
+| `DEAD_AIR` | `dead_air` | the finished audio is silent or has dead air at an edge |
+| `BINARY_NOT_ABSOLUTE` | `binary_not_absolute` | a runner was handed a bare or relative engine path |
+| `OUT_DIR_UNWRITABLE` | `out_dir_unwritable` | the output directory cannot be created or written |
+| `FFMPEG_UNAVAILABLE` | `ffmpeg_unavailable` | ffmpeg / ffprobe could not be resolved |
+
+### The GPU timeout envelope: GPU_RESET and the token cap
+
+amdgpu's default `lockup_timeout` is 2000 ms: one GPU dispatch that runs longer makes the kernel reset the compute ring (`ring comp_1.2.0 timeout`, then `device wedged, but recovered through reset`). Fused attention cost per step scales with tokens squared times model width, so the request size is the lever. Measured on the reference node: FastWan2.2 TI2V-5B at 832x480x49 on the 16x Wan2.2 VAE is 5,070 latent tokens and runs; Wan2.1 VACE 1.3B at 480x832x33 plus a reference image on the 8x Wan2.1 VAE is 15,600 tokens and lost the device in the first step; 288x512x33 plus a reference is 5,760 and passes: the full run (20 steps, cfg 6.0, euler, tiled VAE decode) exited 0 with no ring reset in 2,939 s wall (conditioning 21 s, control-video VAE encode 199 s, sampling 2,153 s at about 101 to 108 s per step, decode 352 s). So the envelope numbers to seed are **5,760 tokens at model width 1536 passes, 15,600 resets the ring**, and 5,070 tokens at width 3072 (the TI2V-5B) passes. The cost per step scales with tokens squared times width, so the cap is per model: set it per video family and for animate separately, never one number for both.
+
+- `tokens = ceil(W/(stride*2)) * ceil(H/(stride*2)) * (floor((frames-1)/4) + 1 + refLatentFrames)`, stride = the VAE's spatial downsampling (16 for Wan2.2, 8 for Wan2.1), +1 latent frame for the VACE reference image. `config.LatentTokens` and `latentTokens` in `render/igpu-engine.mjs` are twins pinned to one table, `render/testdata/token-cap-table.json`.
+- The cap is configured, never assumed: `sdcpp_max_tokens` and `sdcpp_vae_stride` (8 or 16) on a video family, `animategen_sdcpp_max_tokens` and `animategen_sdcpp_vae_stride` for animate. A cap needs its stride; values must be positive; no cap configured means no check and a box without the keys is unchanged.
+- The pipeline computes it on the size the runner will render (after the 4k+1 / multiple-of-32 normalization) BEFORE taking the media lease, and refuses with a typed, non-retryable defer (`err_class` `token_cap_exceeded`) that names the tokens, the cap and how to fit (frames that fit at that size, or lower width/height). The runner checks the same formula again before spawning sd-cli.
+- When the log still reports `ErrorDeviceLost`, `device lost` or `context is lost`, the runner kills the engine and fails with `GPU_RESET` (`err_class` `gpu_reset`), which names the 2 s lockup timeout and the cap. It is never retried automatically.
+
+### Killing a run: process groups, signals, signal deaths
+
+- **gpugen.** The iGPU lanes start the runner as the leader of its own process group (`Spec.OwnProcessGroup`, non-Windows; Windows keeps `taskkill /T`). A timeout or a cancel SIGTERMs the whole group so the runner can kill its engine and remove its temp dirs, then SIGKILLs the group after a 5 s grace. Other lanes keep their previous kill exactly.
+- **The runners** kill the engine's process tree and remove their temp dirs on SIGTERM, SIGINT and SIGHUP, and when their parent process disappears (polled once a second), so a runner whose harness was SIGKILLed does not leave the iGPU held.
+- **Deaths are named.** An engine killed by a signal reports it (SIGKILL on a UMA iGPU box usually means the kernel OOM killer and classifies as `oom`), and exit 132 / SIGILL is `ILLEGAL_INSTRUCTION` (`illegal_instruction`): an instruction-set mismatch. The official audio.cpp Ubuntu release binary is built with AVX-512 and dies this way on a CPU without it (it only shows once a model runs; `--list-devices` still works), so build audiocpp_cli on the node from the release tag (`scripts/build_linux.sh --backend vulkan --model-set custom --models chatterbox,ace_step --target audiocpp_cli`) instead of using the release tarball.
+
+### Video (`render/sdcpp-video.mjs`)
+
+```json
+"videogen_family": "fastwan",
+"videogen_families": {
+  "fastwan": {
+    "engine": "sdcpp",
+    "sdcpp_bin": "/path/to/sd-cli",
+    "sdcpp_model": "/path/to/Wan2.2-TI2V-5B-Q8_0.gguf",
+    "sdcpp_vae": "/path/to/wan2.2_vae.safetensors",
+    "sdcpp_t5xxl": "/path/to/umt5-xxl-encoder-Q8_0.gguf",
+    "sdcpp_backend": "vulkan0",
+    "sdcpp_extra_args": [],
+    "steps": 3, "cfg": 1, "flow_shift": 3, "sampler": "euler",
+    "fps": 24, "width": 832, "height": 480, "frames": 49,
+    "license": "Apache-2.0", "commercial_use": true
+  }
+}
+```
+
+An sdcpp family may carry any name, including one a ComfyUI family also uses (`wan22`, `ltx25`, `hunyuan`, `h3`): `resolveVideoFamily` matches it by its own name, exactly, its entry wins wholesale (the flat `videogen_*` ComfyUI weight keys never reach sd-cli), and `doctor`, `offload_status` and the pipeline agree on which family a request that names no model resolves to (`config.DefaultVideoSdcppFamily`; an unset `videogen_family` means `wan22`), with exactly one `VideoFamilyBindingRows` row per family. A request's `model` param selects it on a box whose default is ComfyUI. `sdcpp_high_noise_model` adds the Wan2.2 A14B high-noise expert, and `high_noise_cfg`, `high_noise_steps` and `high_noise_sampler` are that expert's own recipe (sd-cli `--high-noise-cfg-scale` / `--high-noise-steps` / `--high-noise-sampling-method`; its default high-noise cfg is 7.0, which doubles the iGPU time of a distilled recipe, so a pair always sets it); they need the high-noise model. Non-default sdcpp families get their own `generate_video:<name>` route in `doctor` and `offload_status`.
+
+**Tiny autoencoder (opt-in).** `sdcpp_tae` binds a tiny autoencoder, and a request with `fast: true` decodes with it (`--taesd`; sd.cpp then also uses it for the I2V encode, log line `using TAE for encoding / decoding`). The verified file is the Apache-2.0 `taew2_2.safetensors` from lightx2v/Autoencoders: 17 frames decode in 2.79 s against 299 s for the tiled full VAE, at SSIM 0.950 against the full VAE with one faint sky smudge. **`lighttaew2_2.safetensors` is broken in this sd.cpp** (frames 8 and 16 decode a different scene, SSIM 0.72): never bind it. The full VAE stays the default. Without the key, `fast` is a no-op on the sdcpp lane and the result's `notes` array says so (a bound but missing file says that instead, and the full VAE decodes); `doctor` lists the TAE file as optional and it never fails the route.
+
+Argv contract (`sdcpp-video.mjs --sd-bin ABS --model ... --vae ... --t5xxl ... --backend ... -- <out.mp4> [<still>] "<prompt>"`; optional `--high-noise-model --high-noise-cfg --high-noise-steps --high-noise-sampler --tae --vae-tile-overlap --frames --width --height --fps --steps --cfg --flow-shift --sampler --seed --negative --max-tokens --vae-stride --timeout-sec --extra-args <json array>`) maps to sd-cli master-929 as `-M vid_gen --diffusion-model [--high-noise-diffusion-model] --vae --t5xxl [-i <still>] -p [-n] [--cfg-scale] [--steps] [--sampling-method] [--flow-shift] [--high-noise-cfg-scale] [--high-noise-steps] [--high-noise-sampling-method] -W -H --video-frames --fps [-s] --backend --diffusion-fa --vae-tiling --vae-tile-overlap 0.25 [--taesd] -v -o <tmp>.webm`, then ffmpeg encodes the webm to H.264 mp4 (yuv420p, CRF 16, the given fps; `FFMPEG_PATH` or PATH). The tile overlap defaults to the measured best decode (17 frames: overlap 0.5 took 364 s, 0.25 took 299 s, 0.25 with `--vae-conv-direct` 424 s, untiled 355 s; `--vae-conv-direct` stays unused on Vulkan). The finished clip is then read back as a clip: ffmpeg `blackdetect` and `freezedetect` over the whole file, and one that is entirely black or entirely frozen (95% or more of its length) fails `BLACK_CLIP` / `FROZEN_CLIP` and is removed, because a Vulkan fp16 or NaN failure exits 0 with no picture in it; a fade or a held frame passes. Frames are normalized to the nearest 4k+1 (ties up, minimum 5, default 49) and width and height are floored to a multiple of 32 (default 832x480); the Go side applies the same rule before it spawns, so the argv the runner receives is the argv sd-cli gets. The result is `{video_path, seed}` plus the family's license pair, like the ComfyUI route.
+
+Measured on the reference iGPU node (Vega 7, UMA, Zen 3 without AVX-512), FastWan TI2V-5B q8_0, 832x480x49, 3 steps, cfg 1: conditioning 15 s, sampling 232 s, full-VAE decode 1,075 s (the TAE above is the opt-in way to cut that).
+
+### Animate (`render/sdcpp-animate.mjs`)
+
+Config: `animategen_engine`, `animategen_sdcpp_bin/_model/_vae/_t5xxl/_backend/_tae/_extra_args/_max_tokens/_vae_stride`, `animategen_depth_bin`, `animategen_depth_model`, `animategen_depth_extra_args`, `animategen_steps`, `animategen_cfg`, `animategen_flow_shift` (plus the shared `animategen_width/_height`). `animategen_sdcpp_script` overrides the runner path. `animategen_sdcpp_tae` is the same opt-in tiny autoencoder as the video lane (`fast: true`, with the same notes when it is not bound).
+
+**The model must be a `.safetensors` VACE checkpoint.** The two public Wan2.1 VACE 1.3B GGUFs lack `vace_patch_embedding.weight` (1,263 tensors against 1,264) and sd-cli refuses them (`Diffusion model tensor 'model.diffusion_model.vace_patch_embedding.weight' not in model metadata`, `model metadata validation failed`); the Comfy-Org `wan2.1_vace_1.3B_fp16.safetensors` loads. The runner surfaces that refusal as `MODEL_INCOMPATIBLE` naming the model file and the missing tensor, and `doctor` notes a `.gguf` animate model on the route.
+
+The runner extracts the driver's frames with ffmpeg (16 fps, scaled to cover W x H and centre-cropped, the first N = 4k+1 frames; a driver shorter than the request renders the largest 4k+1 it has, and fewer than 5 frames is an error), runs depth-anything.cpp once per frame, and renders `sd-cli -M vid_gen --diffusion-model <vace gguf> --vae --t5xxl -i <ref> --control-video <depth dir> ...`. The frames, depth and output temp directories are removed when the runner finishes, fails, times out, receives SIGTERM/SIGINT/SIGHUP, or finds its parent process gone; a SIGKILL of the runner itself cannot run any cleanup, which is why gpugen signals the runner's whole process group (below) rather than killing node alone.
+
+**The depth step (verified on the node, depth-anything.cpp `14f7461` built with `DA_GGML_VULKAN`).** The argv is `da3-cli depth --model M --input <one frame> --png <out.png> --no-invert`, once per frame. `--input a --input b` is multi-view joint depth, not per-frame, and is never used. `--no-invert` is required: the default writes near=dark and far=bright, `--no-invert` writes near=bright and far=dark, which is the depth-control convention. The CLI has no backend flag (the backends are compile-time), so the step is pinned to the sd backend's Vulkan device through `GGML_VK_VISIBLE_DEVICES` and its log is the evidence it ran on the GPU: `[da3] da::Backend using device: Vulkan<N>` is required on every frame (the first frame is the probe, so a CPU-only build stops after one frame instead of running all N on the CPU), and `offload_weights: ... (N host-only tensors kept on CPU ...)` is a storage line, not a placement. The model is reloaded per frame (about 1.5 s each; 33 frames took 51 s).
+
+**RGB control frames.** `da3-cli` writes a 1-channel PNG at the model's own working size (518x896 for a 288x512 or 480x832 input) and sd-cli refuses 1-channel PNGs (`the number of channels for the input image must be >= 3, but got 1 channels`). So the runner converts every depth PNG to `rgb24` at exactly W x H with ffmpeg into the directory sd-cli reads, then reads every header back (8-bit, colour type 2, W x H, and exactly N files, else `DEPTH_FRAMES_INVALID`).
+
+**The VACE argv** is sd.cpp `docs/wan.md` "V2V with Wan2.1 VACE" at `3f8527a`: `-M vid_gen --diffusion-model <vace> --vae <wan_2.1_vae> --t5xxl <umt5> -i <reference image> --control-video <dir of frames> -W -H --video-frames N --cfg-scale 6.0 --sampling-method euler`. `-i` is the VACE reference image (`-r` is for Flux Kontext and MiniMax-H3 only). That doc page also passes `--offload-to-cpu`; the runner never adds it (on a UMA iGPU it only adds copies); it reaches sd-cli only when a binding's extra args carry it, which the screen allows as sanctioned spill (weights in RAM, compute on the GPU).
+
+**Frame count.** With a reference image sd.cpp samples N+4 frames (the reference occupies one latent frame; `generate_video 480x832x37` for 33 requested is the sample size). The measured build trims that itself and decodes exactly N (`decoded 288x512x33`, ffprobe `nb_read_frames` 33), so the runner probes the decoded count with ffprobe and drops the first 4 frames only if it finds N+4; N keeps everything, and any other count keeps everything and says so. The mp4 therefore always carries N frames. The same black / frozen clip gate as the video lane runs last.
+
+**Quality, honestly.** Measured at 288x512x33 on the reference node (preview-grade): motion, pose and layout follow the driver closely (depth-guided); the reference identity transfers partially (face, beard and clay style yes, outfit no).
+
+### Voice and music (`render/audiocpp-generate.mjs`)
+
+Config: `voicegen_engine`, `musicgen_engine`, `audiocpp_bin`, `audiocpp_backend` (`vulkan`, not `vulkan0`), `audiocpp_device` (an index, default 0), `audiocpp_voice_family` (default `chatterbox`), `audiocpp_voice_model`, `audiocpp_music_family` (default `ace_step`), `audiocpp_music_model`, `audiocpp_extra_args`; `audiocpp_script` overrides the runner path. A model is a GGUF file or a model package directory.
+
+**Build audiocpp_cli on the node.** The official `audio-v0.9.0-bin-ubuntu-x64-vulkan` release binary contains thousands of AVX-512 instructions and dies with SIGILL (exit 132, reported as `ILLEGAL_INSTRUCTION`) on any CPU without AVX-512, as soon as a model runs; `--list-devices` still works, which hides it. On such a CPU (a Zen 3 box is one) build from the v0.9.0 tag with native CPU optimisation on (the default): `scripts/build_linux.sh --backend vulkan --model-set custom --models chatterbox,ace_step --target audiocpp_cli`.
+
+**The ACE-Step planner prefill patch (required for music).** Upstream v0.9.0 runs the ACE-Step planner's prompt prefill on the host when the backend is Vulkan (`planner_prefill_uses_host_backend()` returns true), so it loads a second copy of the planner LM on the CPU (`ace_step.planner.weights.buffer_name Vulkan0`, then ten seconds later `... CPU`; the captured log is `render/testdata/audiocpp-music-host-prefill.log`). That is a CPU placement, and the guard rightly fails a stock build. [`setup/patches/audiocpp-v0.9.0-vulkan-planner-prefill.patch`](../../setup/patches/audiocpp-v0.9.0-vulkan-planner-prefill.patch) (version 3, three changes in `src/models/ace_step/planner.cpp`) moves it onto the device: (1) `planner_prefill_uses_host_backend()` is false for Vulkan, so no host copy is loaded; (2) the phase prefill (`use_metal_prompt_step_prefill`) and (3) the code phase's classifier-free-guidance prefill (`use_metal_prompt_step_cfg_prefill`) run through the decode graph one token at a time on the device, the path upstream already uses on Metal. All three are needed: version 1 of the patch (change 1 alone) sent the prefill through the BATCHED prefill graph on Vulkan, and that path is corrupt on this backend (the chain-of-thought caption degenerated into garbage), so it was rejected. Measured with the bf16 package, seed 7, same prompt: the plan text is identical to the stock host-prefill build, zero `buffer_name CPU` lines, 30 s of audio in 149 to 165 s (stock 158 to 183 s); with greedy planner decoding the first 44 of 150 audio codes match the stock build and 81 of 150 overall (one near-tie flip under different float arithmetic, then autoregressive drift: the same cross-backend effect upstream reports for a quantised planner). Apply it to the v0.9.0 tree before building (`patch -p1 < audiocpp-v0.9.0-vulkan-planner-prefill.patch`); a later upstream that fixes the Vulkan prefill makes it unnecessary.
+
+**The ACE-Step package is bf16.** Upstream grades `ace_step` q8_0 "No (planner sampling can fail)": a quantised planner samples a different token path. Bind `ace-step-1.5-turbo-bf16.gguf` (package `ace_step_turbo_bf16`, 10.09 GB), not a q8_0 file.
+
+Argv contract: `--task tts|clon|gen --family F --model M --backend B --device N --text T [--language L] [--voice-ref R] [--lyrics L] [--duration-seconds S] [--seed N] --metrics --log --out <wav>`. Voice uses `clon` plus `--voice-ref` when a clone reference is given (the request's `clone`, else `voicegen_ref`); the language defaults to `es` like the Chatterbox worker. Output is a `.wav`. The runner finalizes the engine's file and every ffmpeg step must succeed, or the job fails with the step's stderr tail (never a silent copy of the raw engine file, and a non-wav extension is re-encoded, never renamed); ffmpeg AND ffprobe are required up front (`FFMPEG_UNAVAILABLE` before the lease), because audio nobody can measure is not a usable result. **Music**: trailing silence below -45 dB is trimmed (a measured ACE-Step piece ended 3.6 s before a 30 s request and padded the rest with silence), a short fade-out is applied (a tenth of the clip, at most 1 s), the result is loudness-normalized to -14 LUFS / -1 dBTP and delivered at 48 kHz. **Voice** is the engine's file as it wrote it (re-encoded only for a non-wav extension). Both kinds then pass the repo's dead-air gate (`render/audio-qa.mjs`, the way `comfy-music.mjs` applies it) on the file as delivered: a silent render (a Vulkan fp16 or NaN failure writes zeros and exits 0), or leading or trailing silence over 1 s, or more than 10% silence, fails `DEAD_AIR` and the file is removed. Measured on the reference node: voice clone EN 7.36 s of audio in 30.2 s, ES 8.44 s in 34.8 s (RTF about 4.1); music 30 s in 108 s (RTF 3.6) before the patch. `voice=finetuned` keeps the Chatterbox python worker, `voice=endpoint` keeps the speech server, and a configured audiocpp voice engine is a local voice, so the endpoint is not the default on such a box.
+
+### Verdicts
+
+`doctor` and `offload_status` show each engine route as CONFIGURED only when the runner, the engine binaries and every bound model file exist, and ffmpeg AND ffprobe (the black / frozen clip gate and the VACE frame count need ffprobe; the audio gates need both); an engine with nothing bound is NOT CONFIGURED, and a bound file that is missing, a half-bound engine, a backend that is not that engine's own GPU value (audio.cpp's enum for the audio routes) or a CPU backend is BOUND-BUT-MISSING. The optional TAE file is listed and never fails a route. Voice and music are independent: a box with only `voicegen_engine: audiocpp` keeps the ComfyUI verdict for music. These routes never claim ComfyUI as a prerequisite.
+
+The ComfyUI video route's own file check reads the binding the pipeline renders with (`config.ResolveVideoFamilyBinding` of the canonical render family), not the flat `videogen_*` keys, so a box whose `videogen_family` is spelled `wan` (the runner's word for Wan 2.2) is checked against its `videogen_families["wan22"]` entry (weights, loader and pool keys) instead of files the render never loads. `local-offload fleet-measure` probes the video and music lanes through `config.VideoGenBound()` and `MusicGenBound()` (a ComfyUI script or the CT-49 engine), the same helpers `AnimateGenBound()` and `VoiceGenBound()` complete for the fleet advertisement, so an sdcpp or audio.cpp box is no longer told "skipped (no videogen_script configured)".
+
 ## Error handling
 
 Failures return typed Defers rather than crashing: a busy GPU lock defers with a distinct reason, a
@@ -1238,6 +1368,15 @@ recorded as known offenders with their reason rather than silently skipped — a
   lifecycle and its graph builder
 - [`render/sdcpp-generate.mjs`](../../render/sdcpp-generate.mjs) — the sdcpp engine (flag mapping
   to the pinned sd.cpp CLI lives here)
+- [`render/igpu-engine.mjs`](../../render/igpu-engine.mjs) — the iGPU runners' shared plumbing: the
+  backend refusal, `detectCpuPlacement`, `runEngine` (kill on the first CPU-placement line), the 4k+1
+  and /32 normalization; [`render/sdcpp-video.mjs`](../../render/sdcpp-video.mjs),
+  [`render/sdcpp-animate.mjs`](../../render/sdcpp-animate.mjs) and
+  [`render/audiocpp-generate.mjs`](../../render/audiocpp-generate.mjs) are the three runners
+- [`internal/pipeline/igpumedia.go`](../../internal/pipeline/igpumedia.go),
+  [`internal/config/igpumedia.go`](../../internal/config/igpumedia.go) and
+  [`internal/mediacap/igpumedia.go`](../../internal/mediacap/igpumedia.go) — the iGPU lanes' routing,
+  config contract (with the CPU refusal) and route verdicts
 - [`render/edit_image.py`](../../render/edit_image.py) — the edit ops
 - [`internal/pipeline/inpaint_autotext.go`](../../internal/pipeline/inpaint_autotext.go) — auto-text
   localization and its validation envelope

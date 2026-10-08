@@ -122,12 +122,33 @@ func TestKillTreeNilProcess(t *testing.T) {
 // TestClassifyErr maps common failure substrings to err classes (mirrors pipeline).
 func TestClassifyErr(t *testing.T) {
 	cases := map[string]string{
-		"CUDA out of memory":                                   "oom",
-		"context deadline exceeded":                            "timeout",
-		"dial tcp: connection refused":                         "conn_refused",
-		"DEAD_AIR: dead air persisted after a retry":           "dead_air",
-		"FFMPEG_UNAVAILABLE: ffmpeg/ffprobe could not resolve": "ffmpeg_unavailable",
-		"something else entirely":                              "other",
+		"CUDA out of memory":                                    "oom",
+		"context deadline exceeded":                             "timeout",
+		"dial tcp: connection refused":                          "conn_refused",
+		"DEAD_AIR: dead air persisted after a retry":            "dead_air",
+		"FFMPEG_UNAVAILABLE: ffmpeg/ffprobe could not resolve":  "ffmpeg_unavailable",
+		"CPU_PLACEMENT: the engine placed a model on the CPU":   "cpu_placement",
+		"CPU_BACKEND_REFUSED: --backend \"cpu\" places a model": "cpu_backend_refused",
+		"CPU_PLACEMENT: ... aborted (killed)":                   "cpu_placement",
+		"something else entirely":                               "other",
+		// the iGPU runners' typed failures (render/igpu-engine.mjs). GPU_RESET names the 2 s
+		// lockup timeout and the token cap, and must still not read as a timeout.
+		"gpugen: sdcpp-video.mjs failed: exit status 1 (SDCPP VIDEO FAILED: GPU_RESET: the GPU reset during the run (log line 303: radv/amdgpu: The CS has been cancelled because the context is lost.). The amdgpu driver resets the compute ring when one GPU dispatch runs past its default 2 s lockup timeout; keep the request inside the configured token cap (sdcpp_max_tokens)": "gpu_reset",
+		"TOKEN_CAP_EXCEEDED: 480x832x33 + reference needs 15600 latent tokens": "token_cap_exceeded",
+		"EXTRA_ARGS_REFUSED: --extra-args[0] \"--clip-on-cpu\"":                "extra_args_refused",
+		"ILLEGAL_INSTRUCTION: audiocpp_cli died with SIGILL (exit 132)":        "illegal_instruction",
+		// the output gates and input refusals: typed classes even when the path in the message
+		// carries a word a looser class would claim ("room", "timeout", "killed")
+		"SDCPP VIDEO FAILED: BLACK_CLIP: the clip is 100% black (/work/room/clip.mp4); the engine exited 0 but delivered a clip with no picture in it": "black_clip",
+		"SDCPP ANIMATE FAILED: FROZEN_CLIP: the clip is 100% frozen (no frame ever changes) (/work/timeout/a.mp4)":                                     "frozen_clip",
+		"SDCPP ANIMATE FAILED: DEPTH_FRAMES_INVALID: control frame 00002.png is 40x72 colour type 0":                                                   "depth_frames_invalid",
+		"SDCPP ANIMATE FAILED: MODEL_INCOMPATIBLE: sd-cli refused the model /models/wan2.1-vace-1.3b-q8_0.gguf: tensor 'x' is not in its metadata":     "model_incompatible",
+		"SDCPP VIDEO FAILED: BINARY_NOT_ABSOLUTE: --sd-bin \"sd-cli\" is not an absolute path":                                                         "binary_not_absolute",
+		"AUDIOCPP FAILED: OUT_DIR_UNWRITABLE: cannot use /x/y for the output":                                                                          "out_dir_unwritable",
+		// ggml_vulkan's own allocation failure is an oom too
+		"ggml_vulkan: Device memory allocation of size 5368709120 failed.\nvk::Device::allocateMemory: ErrorOutOfDeviceMemory": "oom",
+		// a signal death carries the signal and, for SIGKILL, the OOM hint: class oom
+		"sd-cli was killed by signal SIGKILL (SIGKILL on a UMA iGPU box usually means the kernel out-of-memory (OOM) killer)": "oom",
 	}
 	for msg, want := range cases {
 		if got := ClassifyErr(errString(msg)); got != want {

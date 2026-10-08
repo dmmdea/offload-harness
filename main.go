@@ -3003,8 +3003,10 @@ func runFleetMeasure(args []string) error {
 
 	// video-gen: the FAST (distilled) recipe at the smallest frame count — the
 	// slow native recipe is not a measurement tool. Reuses the probe image as
-	// the I2V still when the image step produced one.
-	if cfg.VideoGenScript != "" {
+	// the I2V still when the image step produced one. Engine-aware gate (CT-49), like the
+	// image step: a box whose only video is the sdcpp engine has no videogen_script but
+	// absolutely serves video-gen, and its iGPU footprints must be recorded too.
+	if cfg.VideoGenBound() {
 		note("video-gen: rendering the fast recipe at 9 frames...")
 		params := map[string]any{"fast": true, "frames": 9}
 		req := core.Request{Task: core.TaskGenerateVideo, Door: "cli:fleet-measure", Input: "fleet-measure probe: slow gentle camera pan", Params: params}
@@ -3017,11 +3019,11 @@ func runFleetMeasure(args []string) error {
 			note("video-gen: deferred: %s", res.Reason)
 		}
 	} else {
-		note("video-gen: skipped (no videogen_script configured)")
+		note("video-gen: skipped (no video route configured - neither videogen_script nor an sdcpp video family)")
 	}
 
-	// audio-gen: 5s of music (the ComfyUI ACE-Step path — the GPU-heavy one).
-	if cfg.MusicGenScript != "" {
+	// audio-gen: 5s of music (the ComfyUI ACE-Step path or the audio.cpp engine — the GPU-heavy one).
+	if cfg.MusicGenBound() {
 		note("audio-gen: rendering 5s of music...")
 		res := p.Run(ctx, core.Request{
 			Task:   core.TaskGenerateAudio,
@@ -3035,7 +3037,7 @@ func runFleetMeasure(args []string) error {
 			note("audio-gen: deferred: %s", res.Reason)
 		}
 	} else {
-		note("audio-gen: skipped (no musicgen_script configured)")
+		note("audio-gen: skipped (no music route configured - neither musicgen_script nor musicgen_engine audiocpp)")
 	}
 	note("audio-gen (voice): skipped — voice footprints accumulate passively during normal TTS use")
 	note("run-graph: skipped — no universal probe graph; footprints accumulate passively per model_family")
