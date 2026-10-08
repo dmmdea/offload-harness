@@ -16,7 +16,7 @@ installed by its own mode rather than by a profile.
 | web research | `offload_research`: pages are fetched here and digested by contracts on the fleet's seats |
 | a vetted template rendered to video | `offload_compose_video` with the default `route` auto: this box has no lane, so the template goes through a node's template door (`compose-video` over `/fleet/dispatch`) and the video and snapshots come back into this box's media dir |
 | a whole HyperFrames project or an inline composition | the same call with `project_dir` or `html`: packed into a bundle, checked here, sent to a node's token-gated project door ([ADR 0071](../architecture/decisions/0071-a-fleet-token-holder-may-send-a-whole-composition-project-to-render.md)); the video and snapshots come back |
-| an image, a clip, a character animation, a voice or music clip, a ComfyUI graph | `offload_generate_image`, `offload_generate_video`, `offload_animate_character`, `offload_generate_audio`, `offload_run_graph` with the default `route` auto: this box has no lane, so the job goes to a node from `delegate_remotes`; a still, a reference and driver or a clone sample travels in a hash-checked bundle to the node's media-job door ([ADR 0072](../architecture/decisions/0072-a-fleet-token-holder-may-send-one-media-job-with-its-input-files.md)), and the output comes back verified against the sha256 the node published |
+| an image, a clip, a character animation, a voice or music clip, a ComfyUI graph | `offload_generate_image`, `offload_generate_video`, `offload_animate_character`, `offload_generate_audio`, `offload_run_graph` with the default `route` auto: this box has no lane, so the job goes to a node from `delegate_remotes`; a still, a reference and driver or a clone sample travels in a hash-checked bundle to the node's media-job door ([ADR 0076](../architecture/decisions/0076-a-fleet-token-holder-may-send-one-media-job-with-its-input-files.md)), and the output comes back verified against the sha256 the node published |
 | questions about one image (VQA, OCR, assessment) | `offload_vqa`, `offload_ocr`, `offload_assess_image` with `route: "remote"`: the image is sent to a node that advertises the vision lane. Their `auto` route leaves the box only while a local card is busy, so a client names `remote` |
 | classify and extract | `offload_classify`, `offload_extract` with `route: "remote"`, on a node that advertises the text lane |
 
@@ -53,7 +53,10 @@ claude mcp add local-offload --scope user -- <dir>\bin\local-offload.exe mcp --c
 ```
 
 `install client` writes `<home>/etc/config.json` (mode 0600; it holds the token, which is never printed):
-`delegate_remotes`, `fleet_auth_token`, `agent_delegation_enabled`, the media, state, cache and ledger
+`delegate_remotes`, `fleet_auth_token`, `agent_delegation_enabled`, `pair_workloads_enabled` (so a client on
+a PAIR member cards the work it sends to the fleet; on a box with no PAIR installed its cards relay through the
+first `delegate_remotes` member that advertises `pair_relay` (`pair_workloads_relay` defaults to `auto`), and with no such
+member the key is inert and the serving node cards the job instead, see [pair-workloads](pair-workloads.md)), the media, state, cache and ledger
 paths under the home, and every model route and every script binding that has a default written empty,
 so `doctor`, `offload_status` and `acceptance` never claim a lane the box does not have. `ffmpeg_path` keeps
 its default only when ffmpeg and ffprobe are on PATH (`offload_media` and the kit's cut scripts run them

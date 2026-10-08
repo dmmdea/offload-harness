@@ -18,7 +18,7 @@
 #     serves hits, except the FIRST request after an MP server start, which gets 0 L2 hits and recomputes
 #     (open until register-time binding lands). Without the overlay, run it on the same-box RAM tier only
 #     (SEAT_L2 empty): 24k back in 0.53 s (26x).
-#   fp8 KV at 262,144 context runs on the three-card pipeline seat (the blackwell-3x16 tier profile); the
+#   fp8 KV at 262,144 context runs on the three-card pipeline seat (hand-wired on the 3-card reference box as opencode's model since 2026-10-04; no tier seeds it); the
 #     2026-09-03 "fp8 KV and 262k infeasible" result was the two-card layout on vLLM 0.28. MTP has no
 #     pipeline support.
 # Every knob is overridden from seat.env (SEAT_* variables) without editing this file. The values
@@ -42,7 +42,7 @@ MP_PORT="${SEAT_MP_PORT:-18796}"
 # on every port file of the fleet; 18793 is <node-b>'s LiteLLM reservation); seat.env overrides it.
 MP_HTTP_PORT="${SEAT_MP_HTTP_PORT:-18790}"
 # SEAT_L1_GB default 2 for a seat with no measured value (register B-02; RSS ≈ L1 + 1.1 GiB). Measured seats set it in
-# seat.env: the pair 8 (2 starved its staging on 2026-09-21), the three-card flagship 16.
+# seat.env: the pair 8 (2 starved its staging on 2026-09-21), the hand-wired three-card seat 16.
 L1_GB="${SEAT_L1_GB:-2}"
 CHUNK="${SEAT_CHUNK:-784}"
 # The cache server (L2) is OPT-IN: empty = same-box tier only. `${VAR-default}` (no colon) so that

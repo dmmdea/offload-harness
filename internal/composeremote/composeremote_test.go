@@ -24,6 +24,7 @@ type nodeRunner struct {
 	mu       sync.Mutex
 	media    string
 	defer_   string
+	delay    time.Duration // how long a render takes (the poll sees the job running meanwhile)
 	lastReq  core.Request
 	sawFiles []string
 }
@@ -32,6 +33,9 @@ func (n *nodeRunner) Run(_ context.Context, req core.Request) core.Result {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.lastReq = req
+	if n.delay > 0 {
+		time.Sleep(n.delay)
+	}
 	if dir, _ := req.Params["project_dir"].(string); dir != "" {
 		_ = filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
 			if err == nil && !d.IsDir() {
@@ -56,6 +60,15 @@ type node struct {
 	srv    *httptest.Server
 	runner *nodeRunner
 	hits   atomic.Int64
+	// lastPost is the header of the last POST the node received (the attribution headers ride it).
+	hdrMu    sync.Mutex
+	lastPost http.Header
+}
+
+func (n *node) postHeader() http.Header {
+	n.hdrMu.Lock()
+	defer n.hdrMu.Unlock()
+	return n.lastPost.Clone()
 }
 
 // startNode runs a real fleet node server (the doors, auth, job store and media serving) behind httptest.
@@ -82,6 +95,9 @@ func startNode(t *testing.T, openProjects bool) *node {
 	n.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		if req.Method == http.MethodPost {
 			n.hits.Add(1)
+			n.hdrMu.Lock()
+			n.lastPost = req.Header.Clone()
+			n.hdrMu.Unlock()
 		}
 		h.ServeHTTP(w, req)
 	}))

@@ -39,6 +39,22 @@ func TestEveryDelegatorSurfaceWiresTheRescue(t *testing.T) {
 		if perr != nil {
 			return nil
 		}
+		// An options BUILDER counts as wired when its own body returns a delegate.RunOptions literal
+		// carrying Rescue: agent_delegate builds its options in one pinned place (the roster guard,
+		// roster_remotes_test.go), and the guarantee here is the same, read one hop away.
+		builders := map[string]bool{}
+		for _, decl := range f.Decls {
+			fd, ok := decl.(*ast.FuncDecl)
+			if !ok || fd.Body == nil {
+				continue
+			}
+			ast.Inspect(fd.Body, func(n ast.Node) bool {
+				if lit, ok := n.(*ast.CompositeLit); ok && isRunOptions(lit) && litHasRescue(lit) {
+					builders[fd.Name.Name] = true
+				}
+				return true
+			})
+		}
 		ast.Inspect(f, func(n ast.Node) bool {
 			call, ok := n.(*ast.CallExpr)
 			if !ok {
@@ -56,15 +72,16 @@ func TestEveryDelegatorSurfaceWiresTheRescue(t *testing.T) {
 			if u, ok := last.(*ast.UnaryExpr); ok {
 				last = u.X
 			}
-			lit, ok := last.(*ast.CompositeLit)
 			has := false
-			if ok {
-				for _, el := range lit.Elts {
-					if kv, ok := el.(*ast.KeyValueExpr); ok {
-						if k, ok := kv.Key.(*ast.Ident); ok && k.Name == "Rescue" {
-							has = true
-						}
-					}
+			if lit, ok := last.(*ast.CompositeLit); ok {
+				has = litHasRescue(lit)
+			}
+			if c, ok := last.(*ast.CallExpr); ok {
+				switch fn := c.Fun.(type) {
+				case *ast.SelectorExpr:
+					has = builders[fn.Sel.Name]
+				case *ast.Ident:
+					has = builders[fn.Name]
 				}
 			}
 			if !has {
@@ -83,4 +100,26 @@ func TestEveryDelegatorSurfaceWiresTheRescue(t *testing.T) {
 	if len(bad) > 0 {
 		t.Fatalf("delegate engine calls that do not hand it a Rescue (a finished answer whose re-pack failed is lost work there): %v", bad)
 	}
+}
+
+// isRunOptions reports whether lit is a delegate.RunOptions literal.
+func isRunOptions(lit *ast.CompositeLit) bool {
+	sel, ok := lit.Type.(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+	x, ok := sel.X.(*ast.Ident)
+	return ok && x.Name == "delegate" && sel.Sel.Name == "RunOptions"
+}
+
+// litHasRescue reports whether a composite literal sets the Rescue field.
+func litHasRescue(lit *ast.CompositeLit) bool {
+	for _, el := range lit.Elts {
+		if kv, ok := el.(*ast.KeyValueExpr); ok {
+			if k, ok := kv.Key.(*ast.Ident); ok && k.Name == "Rescue" {
+				return true
+			}
+		}
+	}
+	return false
 }

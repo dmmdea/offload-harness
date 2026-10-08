@@ -1,4 +1,4 @@
-// Composite tier (ADR 0039, Task 6): the node-side agent task runs the seat a
+// Composite tier (ADR 0052, Task 6): the node-side agent task runs the seat a
 // placement DECIDED, not the planner default — through the seat override a
 // delegator hands it (RunAgentContract's options) or through the layer a
 // dispatched contract names (contract.layer), which the node re-runs through

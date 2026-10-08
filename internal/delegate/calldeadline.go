@@ -74,8 +74,10 @@ const callGraceMax = 10 * time.Second
 type callDeadline struct {
 	at    time.Time     // the instant the call must be over
 	grace time.Duration // how long cooperating subtasks get to unwind after it
+	span  time.Duration // how long the call had when the state was built: what a reserve is taken out of
 
 	total    int          // subtasks the whole call owes an answer for
+	started  atomic.Int64 // subtasks that have begun, across every chunk (begin); total - started are still to come
 	answered atomic.Int64 // subtasks that produced a REAL result (never a deadline defer)
 	frozen   atomic.Int64 // unfinished count at the instant the deadline was first observed; -1 = not yet
 }
@@ -100,7 +102,7 @@ func newCallDeadline(ctx context.Context, opts *RunOptions, owed int) *callDeadl
 	}
 	grace := time.Until(at) / 20
 	grace = min(max(grace, callGraceMin), callGraceMax)
-	c := &callDeadline{at: at, grace: grace, total: owed}
+	c := &callDeadline{at: at, grace: grace, total: owed, span: time.Until(at)}
 	c.frozen.Store(-1)
 	return c
 }
@@ -109,6 +111,96 @@ func newCallDeadline(ctx context.Context, opts *RunOptions, owed int) *callDeadl
 // deadline never reaches it.
 func (c *callDeadline) reached() bool {
 	return c != nil && !time.Now().Before(c.at)
+}
+
+// timeLeft is how long the call has until its deadline: ok=false when it has none (a
+// nil call: the CLI verbs, agent_run, offload_ask), and (0, true) once it has passed.
+// Placement reads it so that nothing is promised time the call no longer has (ADR 0073).
+func (c *callDeadline) timeLeft() (left time.Duration, ok bool) {
+	if c == nil {
+		return 0, false
+	}
+	return max(time.Until(c.at), 0), true
+}
+
+// callWaitReserve is the part of a call that a capacity wait leaves unspent (ADR 0073). A
+// wait that runs to the call's deadline would otherwise place a subtask in the call's last
+// seconds, where the job can only be cut and then runs on in its node with nobody waiting
+// for it (ADR 0065 decision 3, the ghost ADR 0063 exists to stop creating). 15 s is what
+// a placement needs to be worth making: the least execution budget a dispatch is ever
+// handed (minRetrySec, 10 s), a poll to read its answer (pollEvery, 3 s) and a little
+// slack. It is measured against the wall clock, not the node's seconds, so a test that
+// compresses pollSecond does not compress it; a var so a test can set it, as it can
+// callGraceMin. Production never mutates it.
+var callWaitReserve = 15 * time.Second
+
+// waitHorizon is the instant a capacity wait of this call ends: the deadline less the
+// reserve. ok=false when the call has no deadline. The instant may already have passed,
+// which is a wait with no time to run.
+func (c *callDeadline) waitHorizon() (at time.Time, ok bool) {
+	if c == nil {
+		return time.Time{}, false
+	}
+	return c.at.Add(-callWaitReserve), true
+}
+
+// begin records that one more subtask of the call has started: it holds a run slot from here on.
+// Nil-safe, like answer.
+func (c *callDeadline) begin() {
+	if c != nil {
+		c.started.Add(1)
+	}
+}
+
+// unstarted is how many subtasks of the WHOLE call (every chunk of a batched one) have not started: the
+// ones still waiting for a run slot and the ones of later chunks. 0 for a call with no deadline, which
+// has no wait to bound by it. A capacity wait reads it (capacityWaitFor): while it is above zero the
+// wait holds a slot somebody else needs, so it may not run to the call's horizon (ADR 0073).
+func (c *callDeadline) unstarted() int {
+	if c == nil {
+		return 0
+	}
+	return max(c.total-int(c.started.Load()), 0)
+}
+
+// noRoom reports that the call has no more left than a placed job needs to run in (the reserve), and
+// how much it has. A subtask that would START now could only be cut, then run on in its node with
+// nobody waiting for it (ADR 0065 decision 3), so the launch loop begins nothing once this is true.
+// false for a call with no deadline, and for a call that never had more than the reserve to begin with:
+// the reserve is taken out of a call's time, and out of a call no longer than the reserve it would leave
+// nothing to run in at all, so such a call (a deadline configured at 10 s, a test's one-second one) keeps
+// starting its subtasks and the deadline cuts them, exactly as before ADR 0073.
+func (c *callDeadline) noRoom() (left time.Duration, noRoom bool) {
+	left, ok := c.timeLeft()
+	return left, ok && c.span > callWaitReserve && left <= callWaitReserve
+}
+
+// patience is how long the caller will wait for c to START on v: the contract's poll budget
+// (patienceFor, ADR 0063 decision 5), clamped to what the call has left less the reserve (ADR
+// 0073). The poll budget of a timeout_auto contract is 660-1,260 s and a call has 1,500, so late in
+// a call a node with a 500 s backlog still passed the gate: the job was dealt, the call ended
+// first, and a job the node had started kept running there with nobody waiting for it (17
+// call-deadline cuts in one day, 11 of them with the job still on a node). The reserve is part of
+// the clamp because a job that would start inside it is as useless as one placed inside it.
+//
+// The returned clause is "" when the poll budget was the bound, else the sentence that goes
+// behind the gate's arithmetic in a reason, so the number printed ("past the 30 s this contract
+// will wait for a start") is never read as the contract's own when the call set it. The clamp is
+// never zero: startsWithinPatience reads a non-positive patience as "no bound", and a call with
+// nothing left to start a job in is the strictest bound there is (only a node that starts at once
+// passes, and a node that publishes no ETA is no opinion, as always).
+func (r *runner) patience(c core.AgentContract, v NodeView) (time.Duration, string) {
+	full := patienceFor(c, v)
+	left, ok := r.call.timeLeft()
+	if !ok {
+		return full, ""
+	}
+	room := max(left-callWaitReserve, time.Nanosecond)
+	if room >= full {
+		return full, ""
+	}
+	return room, fmt.Sprintf("; the call's deadline is %s away, less the %s reserved for a placed job to run in, and the contract's own poll budget is %s",
+		left.Round(time.Second), callWaitReserve.Round(time.Second), full.Round(time.Second))
 }
 
 // unfinished is how many subtasks of the whole call had no result when the
@@ -486,18 +578,41 @@ func nodeOrBase(pr PlacedResult) string {
 	return "its node"
 }
 
+// launchStop is why the launch loop stopped starting subtasks, when it was the reserve: the call had
+// no more than a placed job needs left (callDeadline.noRoom), and how much it had at that moment. The
+// zero value is any other stop (the call's deadline passed, or the context ended).
+type launchStop struct {
+	noRoom bool
+	left   time.Duration
+}
+
 // unlaunched is the result of a subtask that was never started because the call
-// ended first (or, for a caller cancellation, because the context ended). Its row
-// is recorded here — no attempt ever will — under a freshly minted job id.
-func (r *runner) unlaunched(contract core.AgentContract) PlacedResult {
+// ended first, because the call had no more left than a placed job needs to run in
+// (the launch loop begins nothing inside the reserve, ADR 0073), or, for a caller
+// cancellation, because the context ended. Its row is recorded here — no attempt ever
+// will — under a freshly minted job id.
+func (r *runner) unlaunched(contract core.AgentContract, stop launchStop) PlacedResult {
 	// No node ran it, so it names no node and no seat.
 	pr := PlacedResult{
 		Unplaced: true, deadlineCut: r.call.reached(),
 		PlacementReason: "not started: the call ended first",
 	}
-	if r.call.reached() {
+	switch {
+	case r.call.reached():
 		pr.Result = r.call.wire("never started: the call's deadline passed first")
-	} else {
+	case stop.noRoom:
+		// The deadline has NOT passed, so this is not the call-deadline defer (its prefix is a grep key for
+		// "the deadline passed"): it is the capacity defer ADR 0073 gives a subtask with no time to wait, for
+		// the same reason - a job started now could only be cut and then run on with nobody waiting for it.
+		pr.PlacementReason = fmt.Sprintf("not started: the call's deadline left no room (the call had %s left, no more than the %s a placed job needs to run in)",
+			stop.left.Round(time.Second), callWaitReserve.Round(time.Second))
+		pr.Result = core.AgentWireResult{
+			SchemaVersion: core.AgentWireSchemaVersion,
+			Deferred:      true,
+			DeferClass:    core.DeferClassCapacity,
+			Reason:        pr.PlacementReason + " — re-run it later",
+		}
+	default:
 		pr.Err = "canceled: the call's context ended before this subtask started"
 	}
 	pr.JobID = mintJobID()

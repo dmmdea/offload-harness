@@ -43,6 +43,8 @@ import (
 	"github.com/dmmdea/offload-harness/internal/delegate"
 	"github.com/dmmdea/offload-harness/internal/imageio"
 	"github.com/dmmdea/offload-harness/internal/netguard"
+	"github.com/dmmdea/offload-harness/internal/pairworkloads"
+	"github.com/dmmdea/offload-harness/internal/rosterprobe"
 )
 
 // Route values. RouteLocal is the default: an empty route means local.
@@ -58,8 +60,12 @@ const (
 // prefill and decode, with room for a queued dispatch.
 const Budget = 300 * time.Second
 
+// healthTimeout is how long one call waits for one node's /fleet/health: the single-shot lanes'
+// shared bound, probed concurrently and cached (internal/rosterprobe). A var so a test compresses
+// it; production never mutates it.
+var healthTimeout = rosterprobe.DefaultTimeout
+
 const (
-	healthTimeout   = 5 * time.Second
 	dispatchTimeout = 20 * time.Second // the body is an image, several MB
 	pollEvery       = 500 * time.Millisecond
 	maxBody         = 4 << 20
@@ -72,7 +78,7 @@ const (
 // netguard.SafeTransport for the same reason the delegator's health client
 // does: the lane may only ever reach loopback or the operator's tailnet
 // (never-cloud, ADR 0001), enforced at dial time.
-var HTTPClient = &http.Client{Transport: netguard.SafeTransport(nil), Timeout: Budget}
+var HTTPClient = &http.Client{Transport: netguard.SafeTransport(nil), Timeout: Budget, CheckRedirect: rosterprobe.NoRedirect}
 
 // localBusy is the auto route's trigger — the machine-wide GPU lease, read
 // exactly as agent placement reads it. A seam so tests drive both branches
@@ -121,11 +127,16 @@ func Run(ctx context.Context, cfg config.Config, runner Runner, req core.Request
 	case RouteLocal:
 		return runner.Run(ctx, req)
 	case RouteRemote:
-		res, err := Call(ctx, cfg, req)
+		// A call sent to a node is the remote lane's own: it writes its ledger row and, once a node
+		// is chosen, its one PAIR card (D5/D6).
+		h := core.BeginRemote(runner, req, r)
+		res, err := callWith(ctx, cfg, req, h)
 		if err != nil {
-			return placementDefer(err, "remote: forced")
+			res = placementDefer(err, "remote: forced")
+		} else {
+			res.Meta.Placement = "remote: forced"
 		}
-		res.Meta.Placement = "remote: forced"
+		h.Finish(res)
 		return res
 	}
 	// auto
@@ -134,14 +145,18 @@ func Run(ctx context.Context, cfg config.Config, runner Runner, req core.Request
 		res.Meta.Placement = "local: gpu idle"
 		return res
 	}
-	res, err := Call(ctx, cfg, req)
+	h := core.BeginRemote(runner, req, r)
+	res, err := callWith(ctx, cfg, req, h)
 	if err == nil {
 		res.Meta.Placement = "remote: local gpu busy"
+		h.Finish(res)
 		return res
 	}
 	// Busy local, no usable remote: queued-local beats ineligible-remote, the
 	// same rule Place applies to a contract. The reason travels so a slow call
-	// is attributable.
+	// is attributable. The local run writes its own row; an attempt that never
+	// reached a node leaves nothing behind, one that did leaves a failed card.
+	h.Discard(err.Error())
 	res = runner.Run(ctx, req)
 	res.Meta.Placement = "local: gpu busy, " + err.Error()
 	return res
@@ -177,6 +192,11 @@ func (e *placementError) Error() string { return e.msg }
 // the caller maps to a defer class; the node's own result — including its
 // defers — comes back as the core.Result it produced.
 func Call(ctx context.Context, cfg config.Config, req core.Request) (core.Result, error) {
+	return callWith(ctx, cfg, req, core.NopAttribution{})
+}
+
+// callWith is Call reporting the dispatch and the node's progress to h (core.RemoteAttribution).
+func callWith(ctx context.Context, cfg config.Config, req core.Request, h core.RemoteAttribution) (core.Result, error) {
 	start := time.Now()
 	if len(cfg.DelegateRemotes) == 0 {
 		return core.Result{}, &placementError{core.DeferClassConfig, "no delegate_remotes configured — nothing to place the vision task on"}
@@ -194,11 +214,11 @@ func Call(ctx context.Context, cfg config.Config, req core.Request) (core.Result
 	if err != nil {
 		return core.Result{}, err
 	}
-	jobID, err := dispatch(ctx, cfg, base, req, dataURI)
+	jobID, err := dispatch(ctx, cfg, base, node, req, dataURI, h)
 	if err != nil {
 		return core.Result{}, err
 	}
-	res, err := wait(ctx, cfg, base, jobID)
+	res, err := wait(ctx, cfg, base, jobID, h)
 	if err != nil {
 		return core.Result{}, &placementError{core.DeferClassInfrastructure, fmt.Sprintf("node %s: %v", node, err)}
 	}
@@ -219,27 +239,21 @@ func pickNode(ctx context.Context, cfg config.Config, task string) (base, node s
 		views  []delegate.NodeView
 		misses []string
 	)
-	for _, b := range cfg.DelegateRemotes {
-		b = strings.TrimRight(strings.TrimSpace(b), "/")
-		if b == "" {
-			continue
-		}
-		hctx, cancel := context.WithTimeout(ctx, healthTimeout)
-		v, herr := delegate.FetchNodeView(hctx, b, cfg.FleetAuthToken)
-		cancel()
-		if herr != nil {
-			misses = append(misses, b+": "+herr.Error())
+	for _, r := range rosterprobe.Probe(ctx, cfg.DelegateRemotes, cfg.FleetAuthToken, healthTimeout) {
+		b, v := r.Base, r.View
+		if r.Err != nil {
+			misses = append(misses, r.Miss())
 			continue
 		}
 		switch {
 		case !v.ServesVision():
-			misses = append(misses, fmt.Sprintf("%s (%s): no vision lane (tasks %v)", b, v.NodeID, v.Tasks))
+			misses = append(misses, fmt.Sprintf("%s (%s): no vision lane (tasks %v)", r.Shown(), v.NodeID, v.Tasks))
 			continue
 		case !v.ServesVisionTask(task):
-			misses = append(misses, fmt.Sprintf("%s (%s): its vision seat does not serve %s (vision_tasks %v)", b, v.NodeID, task, v.VisionTasks))
+			misses = append(misses, fmt.Sprintf("%s (%s): its vision seat does not serve %s (vision_tasks %v)", r.Shown(), v.NodeID, task, v.VisionTasks))
 			continue
 		case v.LeasedText || v.LeaseBusy:
-			misses = append(misses, fmt.Sprintf("%s (%s): card leased", b, v.NodeID))
+			misses = append(misses, fmt.Sprintf("%s (%s): card leased", r.Shown(), v.NodeID))
 			continue
 		}
 		bases = append(bases, b)
@@ -266,7 +280,7 @@ type payload struct {
 	Brief    string `json:"brief,omitempty"`
 }
 
-func dispatch(ctx context.Context, cfg config.Config, base string, req core.Request, dataURI string) (string, error) {
+func dispatch(ctx context.Context, cfg config.Config, base, node string, req core.Request, dataURI string, h core.RemoteAttribution) (string, error) {
 	var rnd [8]byte
 	if _, err := rand.Read(rnd[:]); err != nil {
 		return "", &placementError{core.DeferClassInfrastructure, "job id: " + err.Error()}
@@ -290,9 +304,13 @@ func dispatch(ctx context.Context, cfg config.Config, base string, req core.Requ
 	}
 	hreq.Header.Set("Content-Type", "application/json")
 	auth(cfg, hreq)
+	// Who asked, and whether the serving node must card the job because this box will not (D7/D11).
+	pairworkloads.WireHeadersFor(cfg, hreq.Header)
+	// The call's one PAIR card opens here, on the node about to receive the job.
+	h.Dispatched(base, node, p.JobID)
 	resp, err := HTTPClient.Do(hreq)
 	if err != nil {
-		return "", &placementError{core.DeferClassInfrastructure, fmt.Sprintf("dispatch %s: %v", base, err)}
+		return "", &placementError{core.DeferClassInfrastructure, rosterprobe.Scrub(base, fmt.Errorf("dispatch %s: %w", base, err))}
 	}
 	rb, _ := io.ReadAll(io.LimitReader(resp.Body, maxBody))
 	resp.Body.Close()
@@ -305,8 +323,10 @@ func dispatch(ctx context.Context, cfg config.Config, base string, req core.Requ
 		if resp.StatusCode == http.StatusServiceUnavailable || resp.StatusCode == http.StatusTooManyRequests {
 			class = core.DeferClassCapacity
 		}
-		return "", &placementError{class, fmt.Sprintf("dispatch %s: status %d: %s", base, resp.StatusCode, truncate(rb))}
+		return "", &placementError{class, rosterprobe.Scrub(base, fmt.Errorf("dispatch %s: status %d: %s", base, resp.StatusCode, truncate(rb)))}
 	}
+	// The node accepted the job: whatever the negative cache holds against it is out of date.
+	rosterprobe.Default.Forget(base)
 	return p.JobID, nil
 }
 
@@ -329,7 +349,7 @@ type jobWire struct {
 // the job (evicted, or the node restarted), so no later poll can succeed.
 // maxPollFailures consecutive failures give up so a dead node costs bounded
 // time, not the whole budget.
-func wait(ctx context.Context, cfg config.Config, base, jobID string) (core.Result, error) {
+func wait(ctx context.Context, cfg config.Config, base, jobID string, h core.RemoteAttribution) (core.Result, error) {
 	failures := 0
 	for {
 		pctx, cancel := context.WithTimeout(ctx, dispatchTimeout)
@@ -355,6 +375,8 @@ func wait(ctx context.Context, cfg config.Config, base, jobID string) (core.Resu
 		}
 		failures = 0
 		switch j.State {
+		case "running":
+			h.Running()
 		case "done":
 			var res core.Result
 			if len(j.Data) == 0 || json.Unmarshal(j.Data, &res) != nil {

@@ -82,7 +82,7 @@ func (s *Server) StartClaimLoop(ctx context.Context, cfg config.Config) {
 // still consumed a poll).
 func (s *Server) claimOne(ctx context.Context, client *http.Client, holder, nodeID string, cfg config.Config) (string, bool) {
 	// The tasks advertised on a claim are derived NOW, by the predicate health and admission use: the
-	// media tasks follow a cached disk read (ADR 0072), so a node whose weight went missing must stop
+	// media tasks follow a cached disk read (ADR 0076), so a node whose weight went missing must stop
 	// claiming that task and one whose weight returned must start, with no restart.
 	body, _ := json.Marshal(map[string]any{"node_id": nodeID, "task_types": SupportedTasksFor(cfg, s.opts.LoopbackListener)})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, holder+"/fleet/queue/claim", bytes.NewReader(body))
@@ -117,12 +117,50 @@ func (s *Server) claimOne(ctx context.Context, client *http.Client, holder, node
 		s.settle(ctx, client, holder, cfg, "nack", job.ID, nodeID, nil, "build: "+berr.Error())
 		return job.ID, true
 	}
+	// A pulled job is attributed exactly like a pushed one (D9): the door is "fleet", so the asker's
+	// card is the only one (before, the node carded it too), the asker's name goes on this node's
+	// row, and a job whose asker signalled that it will not card it gets its card from this node.
+	// The submitter's headers reached us on the queued job.
+	asker := core.SanitizeAsker(job.Asker)
+	spec := s.claimSpec(job.TaskType, cleanup)
+	// A job this node already holds (a lease-expiry re-claim of our own job) has its own card, or its
+	// own finished one: opening another would emit a queued frame that reopens a card its terminal
+	// frame closed (and leaves an open-card marker nothing closes while this process lives) or
+	// regresses a running one. The push path makes the same up-front lookup (handleDispatch). The
+	// claim loop is one goroutine, so nothing admits this id between the lookup and Admit below.
+	var card *nodeCard
+	if _, known := s.jobs.Get(job.ID); !known {
+		card = s.newNodeCard(string(breq.Task), spec.Model, job.ID, asker, job.PairCard == core.PairCardNode)
+	}
+	spec.OnDropped = func() {
+		cleanup()
+		card.fail("the job was dropped before it started (withdrawn, or the node drained)")
+	}
 	run := func(rctx context.Context) (json.RawMessage, error) {
 		defer cleanup()
 		// The same fleet job id the push door stamps (ADR 0064, register C-63): a
 		// pulled job is known to the holder, and to its ledger row, by this id.
 		breq.FleetJobID = job.ID
+		breq.Door = dispatchDoor(breq.Door)
+		breq.Requester = asker
+		// The same stt cap the push door applies (enterSTT): a pulled stt job waits its turn too.
+		releaseSTT, gerr := s.enterSTT(rctx, job.TaskType)
+		if gerr != nil {
+			card.fail("the node shut down while this job waited for the stt slot")
+			s.settle(ctx, client, holder, cfg, "nack", job.ID, nodeID, nil, gerr.Error())
+			return nil, gerr
+		}
+		defer releaseSTT()
+		card.running()
+		finished := false
+		defer func() {
+			if !finished {
+				card.fail("the node's job run failed unexpectedly")
+			}
+		}()
 		res := s.runner.Run(rctx, breq)
+		finished = true
+		card.finish(res)
 		if job.TaskType == string(core.TaskAgentRun) && res.OK {
 			// The same seat-proof write the push door makes (server.go's
 			// dispatch run closure): a pulled contract that completed a call
@@ -161,8 +199,12 @@ func (s *Server) claimOne(ctx context.Context, client *http.Client, holder, node
 	// Band and Tenant are NOT set: fleetqueue.Job does not carry them, so
 	// there is nothing honest to fill them with. A pulled job therefore rides
 	// the default band, which is what it did before this change.
-	spec := s.claimSpec(job.TaskType, cleanup)
+	card.queued()
 	if created := s.jobs.Admit(job.ID, spec, run); !created {
+		// card is nil for a job already known (above). A card that is open here means the refusal
+		// was a drain: the job is not ours to run (the lease requeues it), so the card closes failed
+		// instead of staying queued with no terminal frame, as the push path does.
+		card.fail("node draining")
 		// Already known locally (a lease-expiry re-claim of our own job):
 		// the original run's settle will ack; nothing to RUN.
 		//
@@ -195,7 +237,7 @@ func (s *Server) claimSpec(taskType string, cleanup func()) AcceptSpec {
 		// the identical contract arriving by dispatch was gated.
 		Agent: taskType == string(core.TaskAgentRun),
 		// Gated masks a pulled token-gated job exactly as a dispatched one.
-		Gated: gatedJob(taskType),
+		Gated: gatedJob(s.opts.Cfg, taskType),
 		// Uncapped keeps a pulled render off the concurrency cap that exists
 		// to protect the shared text endpoint it never touches.
 		Uncapped: !s.concurrencyCapped(taskType),

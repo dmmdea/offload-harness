@@ -961,8 +961,10 @@ is given:
 (below), not held by another job in this process, with the free VRAM and host RAM, and never the display
 card while the operator is at the desk. The display card is the one whose `display_active` reads Enabled
 **or** whose `display_attached` reads Yes (`gpuprobe.ScreenCardUUIDs`, the card table's rule); it is auto-assigned only when
-`operator_presence` says the operator is away, and an explicit pin may always name it (the operator's
-word). Ties go to a card with no resident seat, then the cheapest eviction, then the lowest id.
+`operator_presence` says the operator is away, and then only while the display layer's desktop floor stays free
+after the call's footprint (a media call declares none, so an unpinned call never takes it: it picks among the other
+cards; `gpu_lease`, "The display card, once the operator is away"). An explicit pin may always name it (the
+operator's word). Ties go to a card with no resident seat, then the cheapest eviction, then the lowest id.
 
 **An explicit pin is a hard constraint.** It is never re-picked: the call queues, FIFO, for the card it
 names, however many others are free. It still runs in the per-card instance, not in the default one, so
@@ -1469,7 +1471,7 @@ an editor; the overlay itself is silent.
   with `@font-face` from the shared kit. An undeclared family makes the compiler request the Google
   Fonts CSS API, with the page's character set in the query.
 
-## Remote routing and the media-job door (ADR 0072)
+## Remote routing and the media-job door (ADR 0076)
 
 `offload_generate_image`, `offload_generate_video`, `offload_animate_character`, `offload_generate_audio` and
 `offload_run_graph` (CLI `generate-image`, `generate-video`, `generate-audio`, `run-graph`) take `route` and
@@ -1497,7 +1499,7 @@ defer, with `defer_class` `capacity`.
 **What travels.** A job with no input file goes through `POST /fleet/dispatch`. A job with a still (`offload_generate_video`),
 a reference and driver (`offload_animate_character`) or a clone sample (`offload_generate_audio`) packs the files into a
 bundle (each under its field name plus its extension, copied into a temp directory and packed with `composebundle`) and goes
-through `POST /fleet/media-job` ([fleet-node.md](fleet-node.md#the-media-job-door-artifacts-and-honest-advertisement-adr-0072)).
+through `POST /fleet/media-job` ([fleet-node.md](fleet-node.md#the-media-job-door-artifacts-and-honest-advertisement-adr-0076)).
 `run-graph` carries its graph and manifest inline, so it never needs the door. The payload uses the field names the node's
 builders decode; `out` and `out_dir` never travel (`out_dir` is where the fetched outputs land here). Four request fields cannot ride the fleet task and defer by name
 (`defer_class` `contract`) instead of being dropped: `refine=false`, `tts_voice`, `transformer` and (`run_graph`) `devices`, whose card ids name cards on the calling machine.

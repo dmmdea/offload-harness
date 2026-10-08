@@ -1,5 +1,5 @@
 // Package placement is the ONE decision table of the composite tier (ADR
-// 0039, 0.116.0): it turns (task class, token need, quality gate,
+// 0052, 0.116.0): it turns (task class, token need, quality gate,
 // context_class, budget, live occupancy, live guards) into a Decision — which
 // layer, which seat, on which device pin, and why. It exists as a pure package
 // because three callers must agree on the same answer: the local box placing
@@ -136,6 +136,22 @@ type Live struct {
 	// UUID because the board reorders indices on power loss) can be matched
 	// against a seat's index pin. !ok = cannot resolve = the guard refuses.
 	DeviceIndex func(device string) (string, bool)
+	// ScreenCards names, as CUDA indices, the cards the driver says drive the operator's monitor
+	// (gpuprobe.Device.DrivesDisplay). The display_floor guard uses it to CONTRADICT a declared
+	// display_device that is not among them: the floor would be guarding a card that is not the
+	// desktop's. nil, or a nil/empty answer (no card flagged, or a reading that cannot say which),
+	// contradicts nothing, so a guard with no evidence trusts the declaration as it did before this
+	// reader existed. A remote row carries none: the node's own verdict already includes the check.
+	ScreenCards func() []string
+	// WatcherAlive says whether the display layer's post-admission watcher (internal/displaywatch) is
+	// checking on this box, from the heartbeat it leaves (internal/displaystate.Alive), and why not in
+	// words. The display layer's presence guard asks it: a twin admitted onto the operator's card with
+	// nothing watching it stays there until llama-swap's idle ttl however soon the operator is back.
+	// nil refuses on the display layer's presence guard (fail closed, like every reader), except where
+	// the presence reader is nil too and a remote row's own verdict stands for both. ResidentVerdict,
+	// which the watcher itself calls, never reads it: a watcher must not unload twins because of its
+	// own bookkeeping.
+	WatcherAlive func() (bool, string)
 	// HostFree reads free host RAM in GiB; !ok = refuse on the host_ram guard.
 	HostFree func() (float64, bool)
 	// Presence reads the operator-presence state (ProbePresence).
@@ -349,10 +365,13 @@ func (t table) admissible(l config.LayerSpec, s config.LayerSeat) (ok bool, reas
 
 // agentHome names the layer whose agent seat takes the free choice: the triple
 // when it declares an agent seat and is neither opt-in nor dormant, otherwise
-// the pair. <node-b>'s flagship is the three-card seat (operator 2026-09-19:
-// "the 3 card tier as the agent seat now and the 2 card tier to be the opt in
-// one"), so a triple that carries the agent seat is the default and the pair is
-// entered by name; a box whose triple is opt-in (or absent) keeps the pair.
+// the pair. From 2026-09-21 to 2026-10-04 <node-b>'s home was its three-card
+// seat (operator 2026-09-19: "the 3 card tier as the agent seat now and the 2
+// card tier to be the opt in one"); since 2026-10-04 the harness runs on the
+// pair again and the three-card seat is opencode's alone, so the blackwell-3x16
+// seed declares no triple. The rule stays for any box that declares one: a
+// triple carrying a non-opt-in agent seat is the default and the pair is entered
+// by name; a box whose triple is opt-in (or absent) keeps the pair.
 func (t table) agentHome() string { return AgentHome(t.layers) }
 
 // AgentHome names the layer whose agent seat takes the free choice (see table.agentHome).

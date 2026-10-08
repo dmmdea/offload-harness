@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/dmmdea/offload-harness/internal/config"
@@ -21,14 +22,16 @@ var remoteMediaPayloads = map[string]string{
 	"audio-gen": `{"text":"hola"}`,
 	"run-graph": `{"graph":{"1":{"class_type":"X"}}}`,
 	ComposeTask: `{"template":"title-card"}`,
-	// The media-input door extracts a bundle onto this node (ADR 0072); with no bundle it is the
+	// The media-input door extracts a bundle onto this node (ADR 0076); with no bundle it is the
 	// inner task alone, which is the shape every hostile `out` below is tried against.
 	MediaJobTask: `{"job_id":"mj-out","task_type":"image-gen","payload":{"prompt":"p"}}`,
 }
 
 // Tasks that write no caller-addressed file: stt writes its transcript under media_dir
-// from the input's own hash, and the agent/accel/vision/text lanes produce JSON only.
-var remoteNonWriters = []string{"stt", "agent", "accel", VisionTask, TextTask}
+// from the input's own hash, the stt upload door's payload has no path field at all (a strict decode
+// refuses one: TestSTTUploadPayloadValidation) and names its private file itself, and the
+// agent/accel/vision/text lanes produce JSON only.
+var remoteNonWriters = []string{"stt", STTUploadTask, "agent", "accel", VisionTask, TextTask}
 
 func remoteOutCfg() config.Config {
 	cfg := fullCfg()
@@ -40,7 +43,7 @@ func remoteOutCfg() config.Config {
 	cfg.FleetComposeProjects = true
 	cfg.FleetAuthToken = "tok"
 	cfg.ComposeCacheDir = composeProjectTestCache
-	// ... and so does the media-input door (ADR 0072).
+	// ... and so does the media-input door (ADR 0076).
 	cfg.FleetMediaInputs = true
 	cfg.MediaDir = composeProjectTestCache
 	return cfg
@@ -77,6 +80,13 @@ func TestRemoteMediaTaskOutNeverReachesThePipeline(t *testing.T) {
 			cleanup()
 			for _, k := range []string{"out", "out_dir"} {
 				if v, ok := req.Params[k]; ok {
+					// The project door names its own render under media_dir (composeproj-<hex>.<ext>,
+					// media_gate.go) whenever the node has a media_dir, which this config now does for the
+					// media-input door: that out is the NODE's, never the caller's, and the loop below
+					// still proves it is not the caller's path.
+					if s, _ := v.(string); k == "out" && task == ComposeProjectTask && isNodeProjectOut(cfg, s) {
+						continue
+					}
 					t.Errorf("%s: remote %s=%v reached the pipeline", task, k, v)
 				}
 			}
@@ -103,4 +113,11 @@ func TestEveryFleetWriterIsCoveredByTheOutRule(t *testing.T) {
 			t.Errorf("fleet task %q is not in remoteMediaPayloads: add it and prove its builder drops a caller's out", task)
 		}
 	}
+}
+
+// isNodeProjectOut reports whether out is a file the project door chose itself: directly under this
+// node's media_dir, named with the door's own stem.
+func isNodeProjectOut(cfg config.Config, out string) bool {
+	return out != "" && filepath.Dir(out) == filepath.Clean(cfg.MediaDir) &&
+		strings.HasPrefix(filepath.Base(out), projectOutputPrefix)
 }

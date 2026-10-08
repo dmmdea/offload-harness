@@ -161,12 +161,12 @@ func shapeOf(st Subtask) (Kind, string) {
 
 // adequate reports whether v's ADVERTISED context ceiling provably holds this
 // contract plus the reserve the agent loop itself consumes. It is the same
-// arithmetic remoteEligible gates on, extracted so "smallest ADEQUATE seat" is
-// a thing the code computes rather than a phrase in a comment.
+// arithmetic remoteEligible gates on, extracted so "ADEQUATE seat" is a thing
+// the code computes rather than a phrase in a comment.
 //
 // An unadvertised ceiling (0) is never adequate: unknown is not a capacity, and
 // a seat that published no number must not win the mechanical contest by
-// looking like the smallest one on the roster.
+// looking like the smallest one on the roster (where the window decides).
 func adequate(st Subtask, v NodeView) bool {
 	return st.EstTokens+specReserve <= v.AgentCtxTokens
 }
@@ -182,12 +182,16 @@ const fitInadequate = math.MinInt32
 // nodes actually publish:
 //
 //   - reasoning  → the roomiest adequate seat (headroom is what the work needs)
-//   - mechanical → the SMALLEST adequate seat, so the roomier seat stays free
-//     for work that needs it. An idle capable seat is the resource protected.
+//   - mechanical → the adequate seat expected to FINISH first (eta.go's etaFor:
+//     cold load + the node's queue wait + generation at its measured rate), the
+//     window only breaking a tie. Since W-11 (ADR 0050) this is NOT "the smallest
+//     seat": the smallest-window rule is what remains when no seat of the roster
+//     publishes a rate, and a fast roomy seat takes mechanical work that its
+//     slower, smaller neighbour would finish later.
 //
-// A seat is only ranked once it is adequate, so "smallest" can never mean "too
-// small". Callers still hand scoreFit an already-eligible roster — this is the
-// second line of that defence, not the first.
+// A seat is only ranked once it is adequate, so a ranking can never prefer a seat
+// that is "too small". Callers still hand scoreFit an already-eligible roster —
+// this is the second line of that defence, not the first.
 //
 // Note it never ranks the LOCAL seat above anything: local advertises no
 // ceiling in a delegator run, so it reads as inadequate here. That is why
@@ -210,18 +214,29 @@ const fitInadequate = math.MinInt32
 // fold into one maximisable int is scoreFitRanked, shared with betterRanked's
 // pairwise comparison so spread and auto/remote/vision order the same fleet
 // identically.
-func scoreFit(st Subtask, v NodeView) int {
-	window := v.AgentCtxTokens
+//
+// scoreFit ranks a seat with no published rate on its window alone, which is only right when no seat
+// of the roster publishes one. A roster that mixes measured and unmeasured seats is scored with
+// scoreFitWith and the fleet's median rate, as every other ranking is (ADR 0057).
+func scoreFit(st Subtask, v NodeView) int { return scoreFitWith(st, v, 0) }
+
+// scoreFitWith is scoreFit with the fleet's assumed rate (fleetTokSPrior over the roster being dealt):
+// a seat that publishes no rate is ranked as if it ran at that median, exactly as rankFor does for
+// betterRemote and Place (ADR 0057: "a fresh or re-imaged node neither starves nor captures the
+// queue"; ADR 0050: the same fleet should not answer which seat is best differently depending on
+// which route asked). Without it the int fold compared an unmeasured seat's -window (about -3e4)
+// with a measured seat's -eta x 10 x 2^24 (about -5e9), so an unmeasured seat beat every measured
+// one on mechanical work and lost to every one on reasoning work. It orders; it never admits
+// (eligibility and adequacy are decided before it, and a seat that fails them is fitInadequate here
+// as it always was). A zero prior is no prior: the original rule, applied uniformly.
+func scoreFitWith(st Subtask, v NodeView, priorTokS float64) int {
 	if dec, ok := remoteDecision(st, v); ok {
 		if dec.Defer || dec.Wait {
 			return fitInadequate
 		}
-		if dec.CtxTokens > 0 {
-			window = dec.CtxTokens
-		}
 	} else if !adequate(st, v) {
 		return fitInadequate
 	}
-	eta, etaKnown := etaFor(st, v)
-	return scoreFitRanked(inferKind(st), window, eta, etaKnown)
+	ri := rankFor(st, v, priorTokS)
+	return scoreFitRanked(inferKind(st), ri.window, ri.eta, ri.etaKnown)
 }

@@ -629,6 +629,13 @@ func acquireQueued(m *gpulease.Manager, class gpulease.Class, opts gpulease.Opti
 	lease, err := m.TryAcquire(class, opts)
 	var held *gpulease.ErrHeld
 	if err == nil || wait <= 0 || !errors.As(err, &held) {
+		if err == nil {
+			// A card that is free at once is granted here without ever reaching the queue, so the
+			// grant-time check (a request whose admission can change while it waits) is made here too.
+			if verr := m.VetGrant(lease, opts); verr != nil {
+				return nil, verr
+			}
+		}
 		return lease, heldHint(err, wait)
 	}
 	fmt.Fprintf(os.Stderr, "gpu reserve: queued behind %v — waiting up to %s\n", held, wait)

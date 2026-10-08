@@ -33,7 +33,7 @@ import (
 
 // fleetTaskOrder is the advertisement order (stable for health payloads + error
 // messages). Membership is decided per-config by taskConfiguredFor.
-var fleetTaskOrder = []string{"image-gen", "video-gen", "animate", "stt", "audio-gen", "run-graph", MediaJobTask, ComposeTask, ComposeProjectTask, "agent", "accel", VisionTask, TextTask}
+var fleetTaskOrder = []string{"image-gen", "video-gen", "animate", "stt", STTUploadTask, "audio-gen", "run-graph", MediaJobTask, ComposeTask, ComposeProjectTask, "agent", "accel", VisionTask, TextTask}
 
 // taskConfiguredFor reports whether THIS box actually serves taskType — the same
 // route gates the pipeline uses (empty script/model = the task defers there, so
@@ -67,12 +67,16 @@ func taskConfiguredIn(v *mediaView, taskType string, loopbackListener bool) bool
 	case "video-gen":
 		// Bound AND derived CONFIGURED by internal/mediacap (the script, the weights its graph loads
 		// and the custom nodes it names are on this machine): a bound script over a missing weight is
-		// not a capability, and advertising it sent jobs to a node that failed them (ADR 0072).
+		// not a capability, and advertising it sent jobs to a node that failed them (ADR 0076).
 		return mediaTaskBound(cfg, taskType) && mediaTaskRouteReady(v, taskType)
 	case "animate":
 		return mediaTaskBound(cfg, taskType) && mediaTaskRouteReady(v, taskType)
 	case "stt":
 		return cfg.STTModel != ""
+	case STTUploadTask:
+		// The stt upload door (ADR 0072): advertised exactly when POST /fleet/stt would admit — a
+		// bound whisper model and the vision lane's reachability rule.
+		return STTUploadAdmissible(cfg, loopbackListener)
 	case "audio-gen":
 		// Voice (script or the OpenAI-compatible speech server) or music, whichever is derived
 		// CONFIGURED: a node serving only one kind still serves audio-gen.
@@ -80,7 +84,7 @@ func taskConfiguredIn(v *mediaView, taskType string, loopbackListener bool) bool
 	case "run-graph":
 		return mediaTaskBound(cfg, taskType) && mediaTaskRouteReady(v, taskType)
 	case MediaJobTask:
-		// The input door (ADR 0072): opted in, a fleet token to check, and at least one media
+		// The input door (ADR 0076): opted in, a fleet token to check, and at least one media
 		// task this node can run right now. Never advertised or admitted on a tokenless node.
 		return cfg.MediaInputsAdmissible() && anyMediaTaskConfigured(v, loopbackListener)
 	case ComposeTask:
@@ -292,7 +296,7 @@ func familyFor(cfg config.Config, taskType string) string {
 		// One shipped variant; must agree with what the pipeline writes into the
 		// footprint store (pipeline.runAnimateCharacter samples under this key).
 		return "wan-animate2"
-	case "stt":
+	case "stt", STTUploadTask:
 		return "whisper"
 	case "audio-gen":
 		return "acestep"
@@ -433,6 +437,8 @@ func buildRequestIn(ctx context.Context, v *mediaView, loopbackListener bool, ta
 		return buildAnimate(payload)
 	case "stt":
 		return buildSTT(payload)
+	case STTUploadTask:
+		return buildSTTUpload(cfg, payload)
 	case "audio-gen":
 		return buildAudioGen(payload)
 	case "run-graph":

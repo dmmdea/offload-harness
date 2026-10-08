@@ -133,6 +133,19 @@ tie-breakers `betterRemote` already had:
   amount of "always the argmax" for herding avoidance) — bounded by the 20 % near-tie band and reversible by
   narrowing or removing it if measurement shows it costs more than it saves.
 
+## Amendment (2026-10-07): a new job's wait is one number
+
+Decision 3 prices a seat's queue wait with the node's own `queue_wait_estimate_sec` "outright". That field is the wait of the
+deepest job ALREADY queued (`excess x wall / workers`); the job being placed now queues one slot deeper, so the ranking, the
+backlog gate and the queue budget ([ADR 0063](0063-placement-holds-instead-of-sleeping-or-refusing.md) decisions 4 and 5)
+under-priced exactly the slow nodes with the longest queues, and the field was absent at `depth == max_concurrent_jobs`. The
+node now also publishes `new_job_wait_sec`, the wait of the arrival, which the delegator believes as it stands; against a
+node that publishes only the older estimate it adds the slot itself, and with neither it derives the same number from the
+counters. The rule decision 3 states (the node's own number outranks arithmetic over a health snapshot) is unchanged; what
+changed is which of the node's numbers is a new job's. Wire: additive (absent only when the node has no wall sample or an
+unlimited ceiling; a free worker is an explicit `0`, so a delegator never derives the wait from counters that include uncapped
+jobs), so every old/new pairing of node and delegator prices a new job at the same number ([fleet-node.md](../../systems/fleet-node.md), the health fields).
+
 ## Alternatives considered
 
 - **A hard refusal on the seat's `min_turn_sec`** (its max-final worst case) — REJECTED by the INV-5 rider

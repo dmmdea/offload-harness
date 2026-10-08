@@ -103,11 +103,14 @@ func TestRunWithDeadlineReturnsFinishedAndDefersUnfinished(t *testing.T) {
 		}
 		return localOK(), nil
 	}
-	results, sum, elapsed := runWithin(t, 4*time.Second, cfg, local,
-		[]core.AgentContract{{Goal: "fast one"}, {Goal: "slow one"}}, "local", nil, deadlineIn(300*time.Millisecond), nil)
+	results, sum, elapsed := runWithin(t, 6*time.Second, cfg, local,
+		// One second, not 300 ms: under a full `go test ./...` on a shared CI runner the instant "fast one" was
+		// once still unscheduled at 300 ms and read as unfinished (2026-10-07); the rule pinned here is the
+		// same at any deadline the finished subtask fits inside.
+		[]core.AgentContract{{Goal: "fast one"}, {Goal: "slow one"}}, "local", nil, deadlineIn(time.Second), nil)
 
-	if elapsed < 250*time.Millisecond || elapsed > 2*time.Second {
-		t.Fatalf("RunWith returned after %s, want ~300ms (the deadline) plus a short unwind", elapsed)
+	if elapsed < 900*time.Millisecond || elapsed > 3*time.Second {
+		t.Fatalf("RunWith returned after %s, want ~1s (the deadline) plus a short unwind", elapsed)
 	}
 	if sum != (Summary{Succeeded: 1, Deferred: 1}) {
 		t.Fatalf("summary = %+v, want one success and one defer (a deadline is never a failure)", sum)
@@ -161,7 +164,7 @@ func TestRunWithDeadlineDoesNotWaitForARunnerThatIgnoresItsContext(t *testing.T)
 		}
 		return localOK(), nil
 	}
-	results, sum, elapsed := runWithin(t, 4*time.Second, cfg, local,
+	results, sum, elapsed := runWithin(t, 6*time.Second, cfg, local,
 		[]core.AgentContract{{Goal: "fast one"}, {Goal: "slow one"}}, "local", nil, deadlineIn(300*time.Millisecond), unblock)
 
 	if elapsed > 2*time.Second {
@@ -290,7 +293,7 @@ func TestRunWithDeadlineKeepsAResultThatFinishesInTheUnwind(t *testing.T) {
 		}
 		return localOK(), nil
 	}
-	results, sum, _ := runWithin(t, 4*time.Second, cfg, local,
+	results, sum, _ := runWithin(t, 6*time.Second, cfg, local,
 		[]core.AgentContract{{Goal: "fast one"}, {Goal: "slow one"}}, "local", nil, deadlineIn(300*time.Millisecond), nil)
 	if sum != (Summary{Succeeded: 2}) {
 		t.Fatalf("summary = %+v, want both answers kept", sum)
@@ -453,6 +456,7 @@ func TestRunWithDeadlineCancelsAnOutstandingRemoteJob(t *testing.T) {
 func TestRunWithDeadlineEndsTheCapacityWaitAsACallDeadlineDefer(t *testing.T) {
 	compressPolls(t, 5*time.Millisecond, time.Second)
 	compressWait(t, 20*time.Millisecond, 50*time.Millisecond)
+	withCallReserve(t, 0) // pins the CUT: with a reserve the wait ends before the deadline (callwait_test.go)
 	_, url := refusingNode(t, "node-full", http.StatusServiceUnavailable, nil)
 	cfg := testCfg(t)
 	cfg.AgentPlacementWaitSec = 30 // would hold the subtask for half a minute
@@ -530,6 +534,7 @@ func TestRunQueueRouteHonoursTheCallDeadline(t *testing.T) {
 func TestRunWithDeadlineRecordsACapacityWaitCutBeforeAnyAttempt(t *testing.T) {
 	compressPolls(t, 5*time.Millisecond, time.Second)
 	compressWait(t, 20*time.Millisecond, 50*time.Millisecond)
+	withCallReserve(t, 0) // pins the CUT: with a reserve the wait ends before the deadline (callwait_test.go)
 	_, url := refusingNode(t, "node-full", http.StatusServiceUnavailable, func(f *fakeNode) {
 		f.maxConcurrentJobs, f.jobsRunning = 1, 1 // no headroom: the deal sends it straight to the wait
 		f.maxQueueDepth, f.queueDepth = 2, 2      // and the wait sees it saturated on every tick

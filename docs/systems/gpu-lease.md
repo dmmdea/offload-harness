@@ -251,8 +251,8 @@ remote takes the contract; with none, the runner waits up to `agent_lease_wait_s
 where three foreign contracts landed on a reserved two-card seat mid-measurement. `route=local` is
 not gated, and a `media` holder only steers (the affinity gate above arbitrates it), so the sentence
 before this one still holds for interactive text calls: a `text` reservation does not block them.
-Since 0.113.18 that wait is the delegator's **capacity wait** (`agent_placement_wait_sec`, default
-120 s, or `agent_lease_wait_sec` when longer): it watches the lease AND every remote's room, so a
+Since 0.113.18 that wait is the delegator's **capacity wait** (until the call's deadline less a reserve when the call has one,
+ADR 0073, else `agent_placement_wait_sec`, default 120 s, or `agent_lease_wait_sec` when longer): it watches the lease AND every remote's room, so a
 remote that frees while the local card is reserved takes the work; the holder-naming deferral is what
 remains when nothing frees. The re-placement path's local last resort honours the lease too (it did
 not before). See docs/systems/fleet-node.md, "Bands, tenants, saturation and the capacity wait".
@@ -452,7 +452,7 @@ leases and say there is no table.
 | form | meaning |
 |---|---|
 | `gpu reserve --devices 0,GPU-aaaa ...` | exactly these cards (an nvidia-smi index or a UUID prefix of at least four characters; ambiguous or unknown is an error). The operator's word: the display card is allowed, and a busy card is a place in line, FIFO behind its holder. |
-| `gpu reserve --cards 2` or `--cards 1..3` | the allocator picks (below). Never the display card while the operator is at the desk. |
+| `gpu reserve --cards 2` or `--cards 1..3` | the allocator picks (below). Never the display card while the operator is at the desk; with `operator_presence` reading away it may take that card, but only while the display layer's desktop floor stays free after `--vram`, and never with no `--vram` ("The display card, once the operator is away", below). |
 | `gpu reserve --whole-node ...` | everything, as before. |
 | `gpu reserve ... -- <cmd>` | the cards `<cmd>` names itself: `CUDA_VISIBLE_DEVICES` (a UUID, or an index in PCI order when `CUDA_DEVICE_ORDER=PCI_BUS_ID`, else in ComfyUI order), else `--cuda-device N`, else `COMFY_CUDA_DEVICE`. Nothing named means the whole node. |
 
@@ -493,6 +493,47 @@ seat first, then the cheapest eviction (the footprint of the configured layer se
 unreadable host-RAM counter refuses only when a RAM need was declared. On Windows (WDDM) nvidia-smi lists no per-process
 rows for compute apps, so `foreign-busy` is Linux-only evidence today; the measured N-instance host RAM that tunes the
 headroom term is a P13 acceptance item.
+
+**The display card, once the operator is away.** `operator_presence` is one key with two readers: the display layer's
+`presence` guard ([composite-tier.md](composite-tier.md)) and this allocator. Set to `auto` (the console locked, or idle
+past `operator_idle_sec`, and nothing fullscreen) or to `away` (the operator's override, which reads away whatever the desk is
+doing), it lets the allocator take the display card too, and an opened card is still the desktop's, so it is held to the floor
+the display layer keeps: allocatable only while its free VRAM, less `--vram`, still leaves `display_floor_gib` (the largest
+floor declared by a layer guarded by `display_floor`; a box that declares none is judged as it was before this rule). The
+arithmetic is the layer's own (`free − footprint ≥ floor`), so the two doors onto the card cannot disagree about it, and it
+applies to the display card alone: a pair card is judged by the footprint, as it always was. A job that gives no `--vram`
+never takes the display card, because a footprint nobody declared cannot be shown to leave the floor (the layer's guard
+refuses a seat with no display footprint the same way); a media call whose `comfy_cuda_device` is empty declares none, so
+it picks among the other cards. `--devices` names the card on the operator's word and is never second-guessed. The skip
+reads `vram` and names the floor, and a display card that could not clear the floor is not queued on while a lease holds it
+(waiting would not fix it). A display twin that is loaded counts as a resident seat of the display card, each loaded
+twin costed at the layer's `display_footprint_gib` (both twins loaded cost twice that), so the card is not ranked as an
+empty one while it holds a twin: taking it would evict the twins, and the order prices that. When llama-swap's `/running`
+cannot be read the display layer's models are counted as loaded, so the display card sorts as occupied rather than as the
+empty card it might be; other layers' seats contribute nothing then, as before
+(`TestAnOpenedDisplayCardIsHeldToTheDesktopFloor`, `TestALoadedTwinOnTheDisplayCardIsAnEvictionNotAnEmptyCard`,
+`TestResidentFromCountsALoadedModelMapTwinOnItsCard`, `TestPickAutoDoesNotHandOutTheDisplayCardBelowTheLayersFloor`).
+
+**A queued request is asked again at the grant.** The cards a `--cards` request or an auto-placed media call queues on
+are chosen from the operator's presence and the display card's free VRAM as they are at the enqueue, and a place in line
+can be hours long. When the cards come free the grant puts the desktop rule again from fresh readings
+(`gpulease.Options.GrantCheck`, `gpulease.DesktopRefusals`, built by `gpualloc.GrantCheck`): the display card, or a card
+that may be it on a reading that could not say, while the operator is back at the desk, and the display card under its
+floor. The check runs with the cards already claimed by the request, because a claim that is checked before it is made can
+be skipped by a lease that is mid-release; a refused grant is released at once and the request chooses again from the same
+fresh readings, so it takes another card it still fits, queues on what qualifies now, or keeps polling for the display card
+to qualify until its `--wait` ends. The second choice keeps the arrival time of the first (`Options.QueuedSince`), so the
+place in line is not lost to it. `--devices` is the operator's word and carries no check
+(`TestAQueuedLeaseIsNotGrantedTheDisplayCardOnceTheOperatorIsBack`, `TestAQueuedMediaCallIsNotGrantedTheDisplayCardOnceTheOperatorIsBack`).
+
+**A lease already running on the display card is not revoked when the operator returns.** The post-admission watcher
+([composite-tier.md](composite-tier.md), ADR 0075) unloads the display layer's llama-swap twins and nothing else: it never
+stops a process and never releases a lease. A `--cards` job or a media render that took the display card while the operator
+was away keeps it after they come back. The desktop floor was checked once, when the card was claimed
+(`free - footprint >= floor`), so what protects the desktop afterwards is the footprint the job declared with `--vram`, the
+window it declared with `--for` (the lease expires then), and the operator, who can end it with `gpu release`. A job that
+grows past its declared footprint, or a game that takes the memory, can break the floor while the lease runs, and nothing
+here will notice. Declare `--vram` honestly and keep `--for` short on the display card.
 
 **A place in line for a caller that cannot stay (plan P13, invariant I4).** A media tool call waits its window
 (`gpu_wait_ms`, 90 s) and must then answer. On a host that leases cards it answers with a **token** instead of
@@ -626,13 +667,15 @@ names cards, and memoised for 2 s; an idle box and a whole-node lease never read
 | the delegation door, the `agent_run` door and the review lane's local loop | the fence pre-check reads the same narrowed lease the cordon does, so it still predicts what the cordon will do |
 | the delegator (`delegate`) | `LeaseForContract` narrows the local lease to the seats a contract could run on; the busy formula in the auto deal, the capacity wait, the retry fence and the spread deal read it per contract, and the local box is busy for a contract only when **every** local agent seat it could use sits on a held card (`TestLocalBusyFalseWhenAFreeCardServesTheSeat`). `LocalLeaseFor`, `LocalBusyFor`, `ReservedFor`, `FencedFor` and `ForeignFenceFor` are the same questions for a caller that knows its seat; `Reserved`, `Fenced` and `ForeignFence` keep their signatures and their whole-node reading |
 | the text and vision auto routes (`textremote`, `visionremote`) | the "local GPU is busy" trigger reads the cards of the workhorse and vision seats |
+| the stt auto route (`sttremote`, 0.164.0) | the "local whisper would be held" trigger is `modelaffinity.WouldBlockUpstream`, the upstream fence's own first inspection without its wait: a lease that fences the whisper model's cards (the same narrowing as above) AND the model not already resident; a resident whisper is served here at once (`TestWouldBlockUpstreamAgreesWithTheFence`, `TestDefaultLocalBusyIsTheWhisperFenceNotTheLease`) |
 | the pipeline's vision pre-check (`gpulock.WaitFreeScoped`) | waits, and defers `gpu_busy`, only for a lease on the vision seat's cards, the same reading the auto route made when it chose to run locally (`TestVisionGateIgnoresALeaseOnAnotherCard`, `TestVisionGateStillWaitsForALeaseOnItsOwnCard`); before this it waited `vision_gpu_wait_sec` on **any** live lease and deferred a call the delegator had just kept local |
 | the placement table | `Live.CardsHeld` (the local snapshot arms it from the same lease directory and card table) and agent row 5c, below |
 
 **The agent lane falls back to a card that is free.** When the home layer's agent seat fits the contract and a lease this
 process does not hold sits on its cards, the table takes the next declared layer, in declared order, that is not opt-in and not
-dormant, whose agent seat fits the contract's window and whose cards are free. On the three-card tier the flagship layer
-spans every card, so a card-2 render moves the lane to the single layer's agent seat on card 0
+dormant, whose agent seat fits the contract's window and whose cards are free. On the three-card tier the home layer is the
+pair (cards 0 and 2; it was the three-card layer, which spans every card, from 0.132.6 until 2026-10-04), so a card-2 render
+moves the lane to the single layer's agent seat on card 0
 (`TestAgentHomeFallsBackToNonIntersectingLayer`). With none free the contract **keeps the home seat and queues at its gate**,
 never a defer, and the reason says no local layer has free cards so the delegator may route it to another node
 (`TestNoFallbackQueuesAndRoutesRemote`; the delegator's own routing to the free-card node is plan P1, which is not part of this
@@ -733,13 +776,13 @@ goes through `AwaitUpstream` or `AwaitModelRoute` (speech, embeddings, the chat 
 fence and then has no post-load check, and a batch that never drains (steady joiners) never reaches its release; see Known
 gaps. Nothing here signals or stops a process.
 
-**What this makes of the three-card tier, measured.** The shipped table declares nine seats (`TestSeatsThatStayPlaceableUnderACardLease`
-computes the counts through the code above). While a lease holds **card 2**, three stay placeable: the single layer's router
-and agent on card 0, and the dormant display layer's twin on the display card. The flagship (pinned to every card), the pair's
-three seats and the single layer's OCR and speech seats (card 2) are fenced, which is correct. While a lease holds **card 0**
-three stay placeable (the card-2 single seats and the display twin); while it holds the **display card** seven do. That
-closes the C-86 estimate of how much of the box one card-2 job takes: it used to take every seat, and now it takes six of the
-nine.
+**What this makes of the three-card tier, measured.** The shipped table declares eight seats (`TestSeatsThatStayPlaceableUnderACardLease`
+computes the counts through the code above; it declared nine while the three-card seat was a `triple` layer, 0.132.6 to
+2026-10-04). While a lease holds **card 2**, three stay placeable: the single layer's router and agent on card 0, and the
+dormant display layer's twin on the display card. The pair's three seats and the single layer's OCR and speech seats (card 2)
+are fenced, which is correct. While a lease holds **card 0** three stay placeable (the card-2 single seats and the display
+twin); while it holds the **display card** seven do. That closes the C-86 estimate of how much of the box one card-2 job
+takes: it used to take every seat, and now it takes five of the eight.
 
 **Not done here.** (1) The live capture on the three-card box. Plan P4 step 1 is a read-only capture of what the sampled
 processes and the wrapped command line show for the lease that was running when the plan was written; that lease has ended, so

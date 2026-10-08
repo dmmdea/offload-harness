@@ -289,6 +289,8 @@ func acquireAutoCards(m *gpulease.Manager, class gpulease.Class, opts gpulease.O
 		}
 		return 0
 	}
+	var queuedSince time.Time
+	refusals := 0
 	for lost := 0; ; lost++ {
 		ids, free, err := pickAutoCards(plan, remaining(), build, out, sleep, now)
 		if err != nil {
@@ -299,7 +301,25 @@ func acquireAutoCards(m *gpulease.Manager, class gpulease.Class, opts gpulease.O
 		// sees them and the loop makes progress; the cap only bounds a pathological churn, after
 		// which the picked set is queued on like any other.
 		if !free || lost >= maxAutoClaimRetries {
-			return acquireQueued(m, class, opts, remaining())
+			// The set was chosen against the operator's presence and the desktop floor as they are
+			// NOW, and a place in line can be hours long. When the card comes free the same rule is
+			// asked again from fresh readings (GrantCheck): if the display card no longer qualifies
+			// the grant is refused, and this loop chooses again: another card the request still fits,
+			// or a wait for what qualifies. The arrival time is kept, so the place in line is not lost
+			// to the second choice.
+			if queuedSince.IsZero() {
+				queuedSince = now()
+			}
+			opts.QueuedSince = queuedSince
+			opts.GrantCheck = gpualloc.GrantCheck(build, ids)
+			lease, qerr := acquireQueued(m, class, opts, remaining())
+			var refused *gpulease.ErrGrantRefused
+			if errors.As(qerr, &refused) && refusals < maxAutoClaimRetries {
+				refusals++
+				fmt.Fprintf(out, "gpu reserve: the cards this request was queued on no longer qualify (%s); choosing again\n", refused.Reason)
+				continue
+			}
+			return lease, qerr
 		}
 		lease, err := m.TryAcquire(class, opts)
 		var held *gpulease.ErrHeld

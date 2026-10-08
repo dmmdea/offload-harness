@@ -71,6 +71,7 @@ import (
 	// the package and is used at every placement site; the package is the
 	// composite tier's decision TABLE (ADR 0039), so the alias names what it is.
 	placetable "github.com/dmmdea/offload-harness/internal/placement"
+	"github.com/dmmdea/offload-harness/internal/seatguard"
 	"github.com/dmmdea/offload-harness/internal/seatload"
 )
 
@@ -268,8 +269,8 @@ type PlacedResult struct {
 	// healthy one.
 	ReplacementNote string
 	// CapacityWaitSec (0.113.18) is how long this subtask waited for a node to
-	// have room before one took it — the capacity wait, agent_placement_wait_sec
-	// — and is NOT part of timeout_sec. waited marks it for Summary.Waited; shed
+	// have room before one took it — the capacity wait (the call's deadline less a
+	// reserve, else agent_placement_wait_sec; ADR 0073) — and is NOT part of timeout_sec. waited marks it for Summary.Waited; shed
 	// marks a sheddable subtask that found no idle node (Summary.Shed).
 	CapacityWaitSec float64
 	// PlaceKeeping and RetryAfterSec (GPU routing P7) are what a capacity wait that ended with
@@ -352,7 +353,8 @@ type PlaceWait struct {
 	Node string `json:"node"`
 	// On is what it stood behind: lease (a lease on the cards the contract needs), queue (the
 	// node's own admission ceiling or no room), backlog (a queue longer than the caller will
-	// wait), cooldown (the node's own refusal).
+	// wait), cooldown (the node's own refusal), seat (another vLLM seat holds the local cards
+	// and loading the agent seat would unload it).
 	On string `json:"on"`
 	// Detail is the sentence behind On.
 	Detail string `json:"detail"`
@@ -676,6 +678,12 @@ type RunOptions struct {
 	// so it must be safe for that and must not block: the MCP doors hand each event
 	// to a channel. Nothing in the engine reads it back.
 	OnProgress func(ProgressEvent)
+	// RosterOnly says the call's remotes list was named by a MODEL (the MCP agent_delegate door), so
+	// it may only NARROW the configured fleet: an entry outside cfg.DelegateRemotes, or any entry on a
+	// box that configures none, is refused before anything is dialled (CheckRosterRemotes). The
+	// operator's own surfaces (the CLI verbs, fleet-smoke) leave it false and keep naming any tailnet
+	// node, which is how a node that has not joined the roster yet is tested.
+	RosterOnly bool
 	// call is the deadline's shared state (calldeadline.go): RunBatched builds it
 	// once so every chunk of a batched call counts its unfinished subtasks against
 	// the whole call. Nil = RunWith builds its own from Deadline.
@@ -806,13 +814,25 @@ func RunWith(ctx context.Context, cfg config.Config, local LocalRunner, subtasks
 	// Fleet membership is configuration: a call that names no remotes uses the
 	// config's delegate_remotes. A call's own list REPLACES it (never merges) so
 	// one node can still be targeted deliberately.
-	if len(remotes) == 0 {
+	named := len(remotes) > 0
+	if !named {
 		remotes = cfg.DelegateRemotes
 	}
 	for _, base := range remotes {
 		if err := netguard.TailnetURL(base); err != nil {
 			return nil, Summary{}, fmt.Errorf("delegate: remote %q: %w", base, err)
 		}
+	}
+	// A list a model named may only narrow the configured fleet (ADR 0038, amendment 2026-10-07): the
+	// roster is what the operator vetted, and a caller-named URL outside it is never dialled.
+	if named && opts != nil && opts.RosterOnly {
+		// The list that proceeds is the roster's own spelling of it, so the process in-flight gate and every
+		// per-base map after this keep one node under one key (CanonicalRosterRemotes).
+		canonical, err := CanonicalRosterRemotes(cfg, remotes)
+		if err != nil {
+			return nil, Summary{}, fmt.Errorf("delegate: %w", err)
+		}
+		remotes = canonical
 	}
 
 	// Ledger row per delegation (roast delta 9). ledger.Open is the existing
@@ -905,15 +925,8 @@ func RunWith(ctx context.Context, cfg config.Config, local LocalRunner, subtasks
 		// now read once so the whole batch agrees. route=remote forces busy
 		// unconditionally: local is never a placement for an explicit remote.
 		busy := route == "remote"
-		localBusy := busyReading{}
 		if route == "auto" {
-			localBusy = r.probeLocalBusy(ctx)
-			busy = r.anyLeaseHeld(leaseInfo, subtasks) || localBusy.inflight >= cfg.FleetConcurrencyLimit() || localBusy.loading
-			// One line per run, mirroring route=spread's own local-slot log
-			// (review round 1 item 4): before this the identical W-01 read had
-			// no trace at all, so an operator could not tell "busy" from
-			// "idle" without re-deriving it from the placement_reason.
-			log.Printf("delegate: auto local slot: busy=%v inflight=%d loading=%v (%s)", busy, localBusy.inflight, localBusy.loading, localBusy.note)
+			busy = r.readAutoLocalSlot(ctx, leaseInfo, subtasks)
 		}
 		// The fleet is read when the local seat is busy and, for an idle one, only when some
 		// contract names a layer this box does not declare (register A-108): that contract is dealt
@@ -938,6 +951,7 @@ func RunWith(ctx context.Context, cfg config.Config, local LocalRunner, subtasks
 	sem := make(chan struct{}, runConcurrency)
 	var wg sync.WaitGroup
 	launched := 0
+	var stop launchStop
 launch:
 	for i, c := range subtasks {
 		if dl == nil {
@@ -952,7 +966,16 @@ launch:
 			case <-ctx.Done():
 				break launch
 			}
+			// Nor does one that would begin inside the reserve (ADR 0073). The slot may have taken
+			// minutes to come, and a job started with no more than a placed job needs left could only
+			// be cut by the deadline and then run on in its node with nobody waiting for it.
+			if left, noRoom := dl.noRoom(); noRoom {
+				<-sem
+				stop = launchStop{noRoom: true, left: left}
+				break launch
+			}
 		}
+		dl.begin()
 		wg.Add(1)
 		launched++
 		go func(i int, contract core.AgentContract) {
@@ -983,7 +1006,7 @@ launch:
 		switch {
 		case done[i]:
 		case i >= launched:
-			results[i] = r.unlaunched(subtasks[i])
+			results[i] = r.unlaunched(subtasks[i], stop)
 			progress.finished(i, results[i])
 		default:
 			results[i] = r.abandoned(i, subtasks[i])
@@ -1191,6 +1214,16 @@ type runner struct {
 	// seam tests drive it through; nil = the production probe (seatload).
 	spreadLocalBusy busyReading
 	localBusyProbe  func(ctx context.Context) busyReading
+	// seatGuardCheck is probeLocalBusy's seam onto the seat guard (checkSeatGuard);
+	// nil = the process-wide seatguard.Shared.
+	seatGuardCheck func(ctx context.Context, model string) seatguard.Verdict
+	// autoDealBusy is the reading route=auto's one deal was made from (RunWith), kept
+	// so a remote placement can say the local seat was occupied, not merely busy.
+	autoDealBusy busyReading
+	// autoDealReadBusy records that route=auto's deal (or a per-subtask placement) read the
+	// local seat busy and placed around it (dealReadLocalBusy). Atomic: subtask goroutines
+	// set it while the capacity wait of a sibling reads it.
+	autoDealReadBusy atomic.Bool
 	// autoLocalBusyOnce/autoLocalBusy cache route=auto's ONE read of the local
 	// seat's load (W-01, register S-01): every subtask of this Run must see
 	// the SAME reading — the same one-probe-per-Run invariant spreadLocalBusy
@@ -1533,7 +1566,10 @@ type retryWait struct {
 // (agent_placement_wait_sec; a negative value switches the wait off and the retry is
 // skipped at once, as before).
 func (r *runner) awaitRetrySeat(ctx context.Context, alt placement, why string) retryWait {
-	wait := r.cfg.PlacementWait()
+	// The retry keeps the TTL under a call deadline too (ADR 0073): it is an optional second opinion on
+	// an answer the subtask already holds, and holding that answer for the rest of the call to improve
+	// on it would cost the caller more than the retry can return.
+	wait := r.placementTTL()
 	if wait <= 0 {
 		return retryWait{stillBusy: true, why: why}
 	}
@@ -1708,6 +1744,9 @@ func (r *runner) retrySeatBusy(ctx context.Context, alt placement) (bool, string
 	if alt.base == "" {
 		rd := r.probeLocalBusy(ctx)
 		if rd.busy {
+			if rd.occupiedBy != "" {
+				return true, rd.why()
+			}
 			if rd.inflight == 0 {
 				return true, rd.note // a load in progress: the count is unknown, the note says why
 			}
@@ -1894,6 +1933,26 @@ func (r *runner) noteRefusal(pl *placements, pr PlacedResult) {
 type cooldowns struct {
 	mu    sync.Mutex
 	until map[string]time.Time
+	// at is when the latest refusal that held a node was noted: a health read taken before it is the
+	// picture that refusal just proved wrong, so it can say nothing about the hold (lift).
+	at map[string]time.Time
+	// lifted marks a node whose hold a post-refusal health read lifted once this run, and firm a node
+	// that refused again after that: its counters did not predict its refusals, so its Retry-After
+	// stands for the rest of the run. One lift is the bound on how often a node whose health reports
+	// free workers while it keeps answering 503 (a stale VRAM snapshot, say) can be re-asked early.
+	lifted map[string]bool
+	firm   map[string]bool
+	// liftNote is, per base, the words for a lift that has not yet been followed by anything else: the
+	// note and the instant the hold it ended would have run out on its own. A new hold (the node refused
+	// after the lift) forgets it, and so does liftNarration once that instant has passed.
+	liftNote map[string]liftedCooldown
+}
+
+// liftedCooldown is a Retry-After hold that a health read ended early (cooldowns.lift): the words that
+// narrate it, and when the hold would have ended on its own.
+type liftedCooldown struct {
+	note  string
+	until time.Time
 }
 
 // hold records that base is off limits until `until` (never shortening a hold
@@ -1906,10 +1965,72 @@ func (c *cooldowns) hold(base string, until time.Time) {
 	defer c.mu.Unlock()
 	if c.until == nil {
 		c.until = map[string]time.Time{}
+		c.at = map[string]time.Time{}
+		c.lifted = map[string]bool{}
+		c.firm = map[string]bool{}
+		c.liftNote = map[string]liftedCooldown{}
 	}
 	if cur, ok := c.until[base]; !ok || until.After(cur) {
 		c.until[base] = until
 	}
+	c.at[base] = time.Now()
+	delete(c.liftNote, base) // refused after a lift: a dispatch after THIS hold ends was not allowed by that lift
+	if c.lifted[base] {
+		c.firm[base] = true // refused again after its hold was lifted
+	}
+}
+
+// newestHold is the latest refusal that holds any node at now, or the zero time when none does:
+// a health read for the capacity wait is taken after it, so a hold can be judged against it.
+func (c *cooldowns) newestHold(now time.Time) time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var newest time.Time
+	for base, until := range c.until {
+		if now.Before(until) && c.at[base].After(newest) {
+			newest = c.at[base]
+		}
+	}
+	return newest
+}
+
+// lift ends base's hold when a health read taken AFTER its latest refusal proves a free worker
+// (freeWorkerProven): the hold is the node's Retry-After, its own estimate at refusal time of when a
+// worker frees, and a later read that shows one free has outdated it. readAfter is the instant the
+// read was guaranteed to postdate (fetchViewsDetailedSince's notBefore); a hold set after it was not
+// judged by that read. Unknown and saturated readings keep the hold, as does a node that already
+// refused after a lift (firm).
+func (c *cooldowns) lift(base string, v NodeView, readAfter, now time.Time) (note string, lifted bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	until, held := c.until[base]
+	if !held || !now.Before(until) || c.firm[base] || readAfter.IsZero() || c.at[base].After(readAfter) || !freeWorkerProven(v) {
+		return "", false
+	}
+	delete(c.until, base)
+	c.lifted[base] = true
+	note = fmt.Sprintf("its Retry-After cooldown (%s left) was lifted: its health, read after the refusal, shows %d of %d worker(s) running and none queued",
+		until.Sub(now).Round(time.Second), v.JobsRunning, v.MaxConcurrentJobs)
+	if c.liftNote == nil {
+		c.liftNote = map[string]liftedCooldown{}
+	}
+	c.liftNote[base] = liftedCooldown{note: note, until: until}
+	return note, true
+}
+
+// liftNarration is the lift note a dispatch to base may carry, or "". A lift explains a dispatch only while
+// it is what let the node be asked: the hold it ended would still be in force at now, and the node has not
+// refused since (hold forgets the note). A node lifted on one tick and dispatched on a later one, after the
+// hint had run out anyway, was asked because the hint ended; saying its cooldown "was lifted" would claim a
+// speed-up that never happened.
+func (c *cooldowns) liftNarration(base string, now time.Time) string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	l, ok := c.liftNote[base]
+	if !ok || !now.Before(l.until) {
+		return ""
+	}
+	return l.note
 }
 
 // heldUntil reports the instant base becomes a candidate again, when that is
@@ -2314,8 +2435,10 @@ func heldOutNote(held map[string]string, already string) string {
 
 // awaitCapacity is the delegator's queue (0.113.18, L5 of the fleet-flow
 // chapter): a subtask every fitting node has just refused for CAPACITY — or
-// whose only placement is a seat a text lease reserves — waits here, with a
-// TTL (agent_placement_wait_sec, or agent_lease_wait_sec when that is longer),
+// whose only placement is a seat a text lease reserves — waits here, until its
+// call's deadline less a reserve when the call has one, else for a TTL
+// (agent_placement_wait_sec, or agent_lease_wait_sec when that is longer; see
+// capacityWaitFor, ADR 0073),
 // and is placed on the FIRST node that frees: the local seat once the lease
 // clears, or a remote whose health says it has room (hasRoom). A node that
 // passes the check and still refuses (its snapshot was stale) is one more tick,
@@ -2365,11 +2488,21 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 	if r.priority < core.BandNormal {
 		return r.settle(contract, r.shedResult(localView, seed, refusals), pl, waitStart)
 	}
-	wait := r.cfg.PlacementWait()
-	if lw := time.Duration(r.cfg.AgentLeaseWaitSec) * time.Second; lw > wait {
-		wait = lw
-	}
+	// How long the wait runs, and what bounds it (ADR 0073): a call that has a whole-call deadline waits
+	// until it, less the reserve a placed job needs; any other call waits agent_placement_wait_sec.
+	cw := r.capacityWaitFor(waitStart, decided != nil)
+	wait := cw.wait
 	if wait <= 0 {
+		if cw.call != nil {
+			// Neither the operator's off switch nor a chain of refusals that ended: the call has less left
+			// than a placed job needs, so there is nothing to wait for (and a job placed now could only be
+			// cut). A plain lease reservation keeps its holder-naming deferral; every other place in line
+			// is the capacity defer, saying why it did not wait.
+			if seed.waitCapacity && !seed.gated && !seed.overflow && !seed.fenced {
+				return r.settle(contract, r.reservedDefer(localView, r.localLease(contract), 0, seed.pendingReason, cw.call), pl, waitStart)
+			}
+			return r.settle(contract, r.capacityDefer(localView, seed, 0, 0, refusals, waitEvidence{note: pl.waitNote, call: cw.call}), pl, waitStart)
+		}
 		if decided != nil {
 			// The wait is switched off: a zero TTL. The expiry rule applies at
 			// once — RUN on the decided seat (it holds the contract; only the
@@ -2389,11 +2522,11 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 			if seed.fenced {
 				return r.settle(contract, r.fencedDefer(localView, seed.pendingReason, 0), pl, waitStart)
 			}
-			return r.settle(contract, r.reservedDefer(localView, r.localLease(contract), 0, seed.pendingReason), pl, waitStart)
+			return r.settle(contract, r.reservedDefer(localView, r.localLease(contract), 0, seed.pendingReason, nil), pl, waitStart)
 		}
 		return r.exhaustedSettled(contract, seed, refusals, why, waitStart)
 	}
-	deadline := waitStart.Add(wait)
+	deadline := cw.deadline
 	spanStart := waitStart
 	var idle time.Duration
 	// stLeft is st with the wall the NEXT dispatch would carry: what is left of the
@@ -2432,6 +2565,8 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 	// room on every tick while a Retry-After longer than the wait keeps it out, and a
 	// defer that said only "no node had room" would not be what happened.
 	cooling := map[string]string{}
+	// A node whose Retry-After cooldown a health read ended early (cooldowns.lift) is narrated on the
+	// placement reason of the dispatch it allowed: cooldowns.liftNarration says when a lift still explains one.
 	// probeFails is every base whose health probe failed DURING the wait, by
 	// base: the tick used to drop these on the floor, so a wait that never
 	// reached a single node reported "0 refusal(s)".
@@ -2448,6 +2583,13 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 	// The seat stays off limits until it stops reading busy (localStillBusy) - the
 	// wait exists to spare the subtask that pile-up, not to rebuild it at tick zero.
 	overflow := seed.overflow
+	// dealBusy: the deal read the local seat busy (spread's busy rule, route=auto's busy
+	// formula) and dealt around it. A subtask it sent to a remote that then turned out full
+	// (the process gate, a refusal) stands in this wait exactly like an overflow subtask and
+	// keeps the same rule: the seat is taken only once it stops reading busy. Before this only
+	// an overflow subtask kept it, so a gate turn-away took the busy seat at the first tick
+	// (the TestOverflowStaysOffABusySeatWhoseLoadBecomesUnreadable CI flake, also on main).
+	dealBusy := overflow || r.dealReadLocalBusy()
 	// reservedSeen: the wait began under, or saw, a text lease on the local seat -
 	// it names the placement "lease cleared" when the seat opens. A gate turn-away
 	// and a deal's overflow are not leases: no lease is held.
@@ -2455,6 +2597,8 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 	// fencedSeen: the wait began under, or saw, a lease that fences every local seat the contract
 	// could run on (fencedLocal) - it names the placement "fence cleared" when the seat opens.
 	fencedSeen := seed.fenced
+	// occupiedSeen: the wait saw another vLLM seat occupy the local cards (the seat it names).
+	occupiedSeen := ""
 	// noteSuffix carries why the subtask waited, when nothing refused it, onto the
 	// placement reasons the wait writes.
 	noteSuffix := ""
@@ -2480,6 +2624,11 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 	// defer that ends the wait, which publishes it (placeKept).
 	places := map[string]PlaceWait{}
 	for wait > 0 && ctx.Err() == nil {
+		if cw.call != nil && !time.Now().Before(deadline) {
+			// The last tick of a TTL wait still looks once more after its sleep; a wait bounded by the call
+			// does not, because what it would place now is placed in the reserve it exists to keep.
+			break
+		}
 		if decided == nil && r.route != "remote" && !pl.tried[""] {
 			delete(places, "")
 			lease = r.localLease(contract)
@@ -2519,11 +2668,30 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 			// the seat still reads busy by the deal's own reading: the registry above
 			// counts only delegated runs, and a seat busy with anyone else's requests
 			// shows nothing there.
-			stillBusy := false
-			if overflow && free && !Reserved(lease) {
-				stillBusy, _ = r.localStillBusy(ctx, lease)
+			// Whatever started the wait (a refusal, a lease, a deal, no remote at all), a seat
+			// another vLLM seat occupies is no candidate: taking it unloads that seat
+			// (probeLocalBusy's occupiedBy; operator 2026-10-06: "wait in line"). It becomes one
+			// when the occupant leaves. Read first, so the reason can name the occupant.
+			occupied := false
+			if !Reserved(lease) && !fenced && free && r.route != "local" {
+				if rd := r.busyReadingNow(ctx); rd.occupiedBy != "" {
+					occupied, occupiedSeen = true, rd.occupiedBy
+					places[""] = PlaceWait{Node: localView.NodeID, On: "seat", Detail: rd.why()}
+				}
 			}
-			if !Reserved(lease) && !fenced && free && !stillBusy {
+			stillBusy := false
+			if !occupied && dealBusy && free && !Reserved(lease) {
+				// The overflow keeps the deal's whole reading; a subtask that reached the wait
+				// another way (the gate, a refusal) keeps only the seat's load: a lease is judged
+				// by the wait itself above (Reserved, fenced), and one this process holds is no
+				// reason to stay off the seat.
+				readLease := lease
+				if !overflow {
+					readLease = gpulease.Info{}
+				}
+				stillBusy, _ = r.localStillBusy(ctx, readLease)
+			}
+			if !Reserved(lease) && !fenced && free && !stillBusy && !occupied {
 				credit()
 				remaining := pl.remaining(start, budget)
 				if remaining < minRetrySec {
@@ -2542,7 +2710,9 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 					reason = fmt.Sprintf("local seat was reserved, lease cleared after %s — running local (capacity wait)", idle.Round(time.Second))
 				case fencedSeen:
 					reason = fmt.Sprintf("local seat was fenced by a lease, fence cleared after %s — running local (capacity wait)", idle.Round(time.Second))
-				case overflow:
+				case occupiedSeen != "":
+					reason = fmt.Sprintf("local seat was occupied by the vLLM seat %s, which left after %s — running local (capacity wait)", occupiedSeen, idle.Round(time.Second))
+				case dealBusy:
 					reason = fmt.Sprintf("local seat was busy when the deal kept this subtask off it, idle after %s — running local (capacity wait)", idle.Round(time.Second))
 				}
 				forced := placement{view: localView, reason: reason + noteSuffix}
@@ -2574,7 +2744,7 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 			// bound inside the fan-out caps what any ONE remote can cost
 			// (probeTickBound explains why nothing tighter belongs here).
 			tickCtx, cancelTick := context.WithTimeout(ctx, probeTickBound(deadline))
-			views, bases, _, failed := r.fetchViewsDetailed(tickCtx)
+			views, bases, _, failed, readAfter := r.fleetReadForWait(tickCtx)
 			cancelTick()
 			if ctx.Err() != nil || !time.Now().Before(deadline) {
 				// The tick's probe is bounded by the wait's own deadline, and by the
@@ -2635,21 +2805,29 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 					continue
 				}
 				// A node that refused for capacity is not asked again before its
-				// cooldown ends, whatever its health says: the snapshot still advertises
-				// the room it just denied.
+				// cooldown ends, unless this tick's read - taken after the refusal - proves it
+				// has a free worker (cooldowns.lift): its Retry-After was the node's own
+				// estimate of when one would free, and a later read that shows one free has
+				// outdated it. Health that proves nothing (an unknown, a saturated node, a
+				// backlog) never lifts it: the snapshot may still advertise the room the
+				// node just denied.
 				if until, isCooling := r.cool.heldUntil(bases[j], now); isCooling {
-					cooling[bases[j]] = fmt.Sprintf("%s: cooling down after its own refusal (%s left)", laneID(v), until.Sub(now).Round(time.Second))
-					places[bases[j]] = PlaceWait{Node: laneID(v), On: "cooldown", Detail: "cooling down after its own refusal", EtaSec: int(until.Sub(now).Seconds())}
-					continue
+					if _, liftedNow := r.cool.lift(bases[j], v, readAfter, now); !liftedNow {
+						cooling[bases[j]] = fmt.Sprintf("%s: cooling down after its own refusal (%s left)", laneID(v), until.Sub(now).Round(time.Second))
+						places[bases[j]] = PlaceWait{Node: laneID(v), On: "cooldown", Detail: "cooling down after its own refusal", EtaSec: int(until.Sub(now).Seconds())}
+						continue
+					}
 				}
+				patience, clamp := r.patience(sn.Contract, v)
 				if !hasRoom(v, false) || !processGate.available(bases[j], admissionCeiling(v)) {
-					places[bases[j]] = PlaceWait{Node: laneID(v), On: "queue", Detail: whyNoRoom(v, false, patienceFor(sn.Contract, v))}
+					places[bases[j]] = PlaceWait{Node: laneID(v), On: "queue", Detail: whyNoRoom(v, false, patience, clamp)}
 					continue
 				}
 				// Room is not enough: a job sent to a node whose backlog outlasts what the
 				// caller will wait is one the delegator abandons while the node runs it
 				// anyway. Held out - re-read next tick, never refused for good.
-				if ok, why := startsWithinPatience(v, patienceFor(sn.Contract, v)); !ok {
+				if ok, why := startsWithinPatience(v, patience); !ok {
+					why += clamp
 					heldOut[bases[j]] = laneID(v) + ": backlog (" + why + ")"
 					places[bases[j]] = PlaceWait{Node: laneID(v), On: "backlog", Detail: why, EtaSec: int(queueWaitFor(v))}
 					continue
@@ -2668,7 +2846,7 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 				replaced.TimeoutSec = remaining
 				replaced.TimeoutAuto = false // what is left — explicit, never auto (D-03)
 				forced := placement{view: views[best], base: bases[best],
-					reason: fmt.Sprintf("capacity wait → %s (room after %s)", views[best].NodeID, idle.Round(time.Second)) + noteSuffix}
+					reason: fmt.Sprintf("capacity wait → %s (room after %s)", views[best].NodeID, idle.Round(time.Second)) + liftedClause(r.cool.liftNarration(bases[best], time.Now())) + noteSuffix}
 				if r.beforeForced != nil {
 					r.beforeForced(bases[best])
 				}
@@ -2738,7 +2916,7 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 			// A text lease took the cards during the wait: the holder is real,
 			// and running on the reserved seat is the one thing the lease
 			// forbids. The established deferral, naming the holder.
-			return r.settle(contract, r.reservedDefer(localView, info, idle, decided.Reason), pl, waitStart)
+			return r.settle(contract, r.reservedDefer(localView, info, idle, decided.Reason, nil), pl, waitStart)
 		}
 		// TTL expiry for a decided seed RUNS on the decided seat (the plan's
 		// rule): the seat holds the contract and is free to load; the wait was
@@ -2752,9 +2930,9 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 		// Nothing freed and the local seat is still reserved: the established
 		// deferral, naming the holder (class infrastructure — a human's timing
 		// decision), with the refusals appended.
-		return r.settle(contract, placeKept(r.reservedDefer(localView, lease, idle, "no eligible remote had room — "+strings.Join(refusals, "; ")+noteSuffix), places), pl, waitStart)
+		return r.settle(contract, placeKept(r.reservedDefer(localView, lease, idle, "no eligible remote had room — "+strings.Join(refusals, "; ")+noteSuffix, cw.call), places), pl, waitStart)
 	}
-	return r.settle(contract, placeKept(r.capacityDefer(localView, seed, idle, wait, refusals, waitEvidence{note: pl.waitNote, probeFails: probeFails, heldOut: heldOut, cooling: cooling}), places), pl, waitStart)
+	return r.settle(contract, placeKept(r.capacityDefer(localView, seed, idle, wait, refusals, waitEvidence{note: pl.waitNote, probeFails: probeFails, heldOut: heldOut, cooling: cooling, call: cw.call, held: cw.held}), places), pl, waitStart)
 }
 
 // localPlace is the place the local seat holds in line while a lease keeps the contract off it:
@@ -2957,6 +3135,108 @@ type waitEvidence struct {
 	probeFails map[string]*probeFailTally
 	heldOut    map[string]string
 	cooling    map[string]string
+	// call is set when the call's deadline bounded the wait (ADR 0073), so the defer says that
+	// and does not tell the caller to raise a setting that never bounded it.
+	call *callWaitInfo
+	// held is how many subtasks of the call had not started when a wait that kept its configured bound began
+	// (capacityWait.held): the defer says why a call with time left stopped waiting.
+	held int
+}
+
+// capacityWait is how long and until when one subtask's capacity wait runs, and what bounds it.
+type capacityWait struct {
+	// wait is how long the wait may run; 0 means there is nothing to wait for: the operator
+	// switched the wait off, or (call set) the call has less left than a placed job needs.
+	wait time.Duration
+	// deadline is when the wait ends.
+	deadline time.Time
+	// call is non-nil when the call's deadline, not agent_placement_wait_sec, bounds the wait.
+	call *callWaitInfo
+	// held is how many subtasks of the call had not started when the wait began; non-zero means the wait
+	// kept its configured bound, and not the call's, because it holds a run slot they are waiting for.
+	held int
+}
+
+// callWaitInfo is what a wait bounded by the call's deadline was given, for the words of the
+// defer that ends it.
+type callWaitInfo struct {
+	left    time.Duration // the call's remaining time when the wait began
+	reserve time.Duration // what the wait leaves unspent, for a placed job to run in
+	noTime  bool          // the call had no more than the reserve left, so the wait did not run
+}
+
+// words says what bounded the wait, in the order a reader of a defer needs it: the call's own
+// clock, the reserve, and that the setting a caller might reach for does not apply.
+func (c *callWaitInfo) words() string {
+	if c.noTime {
+		return fmt.Sprintf("the call had only %s left, no more than the %s a placed job needs to run in, so it did not wait", c.left.Round(time.Second), c.reserve.Round(time.Second))
+	}
+	return fmt.Sprintf("bounded by the call's deadline, not by agent_placement_wait_sec: the call had %s left when the wait began, less the %s a placed job needs to run in", c.left.Round(time.Second), c.reserve.Round(time.Second))
+}
+
+// placementWaitDefault is DefaultPlacementWait as the engine reads it: a var so a test can
+// compress the built-in wait the way it compresses placementPollInterval. Production never
+// mutates it.
+var placementWaitDefault = config.DefaultPlacementWait
+
+// placementTTL is the capacity wait of a call that has no whole-call deadline:
+// agent_placement_wait_sec, else the built-in 120 s, and 0 when the operator switched the wait
+// off. A call that has a deadline waits until it instead (capacityWaitFor), except a wait that
+// holds a run slot while subtasks of the call have not started; the retry's wait
+// (awaitRetrySeat) and a composite decision's eviction wait keep this TTL under any call
+// (ADR 0073).
+func (r *runner) placementTTL() time.Duration {
+	if r.cfg.AgentPlacementWaitSec == 0 {
+		return placementWaitDefault
+	}
+	return r.cfg.PlacementWait()
+}
+
+// capacityWaitFor decides how long a subtask's capacity wait runs (ADR 0073, completing the
+// change ADR 0063 and ADR 0065 name as next): a call that has a whole-call deadline waits until
+// that deadline less callWaitReserve, whatever agent_placement_wait_sec says, so band-0 work
+// never defers for capacity while the call still has time to place it; a call that has none
+// (the CLI verbs, agent_run, offload_ask) waits agent_placement_wait_sec as before.
+//
+// Three things keep the TTL under a deadline. A negative agent_placement_wait_sec is the
+// operator's off switch for every call, and the deadline does not turn it back on. A decided
+// seed (a composite box's pair seat draining) keeps it because its expiry RUNS the contract on
+// the decided seat, which needs the time the reserve would take away. And a wait that holds a
+// run slot while subtasks of the call have not started keeps the bound it had before the
+// deadline (the larger of the TTL and agent_lease_wait_sec) unless the call ends sooner: only
+// the last subtask to start waits for the horizon.
+//
+// agent_lease_wait_sec is part of that bound, never of the call's: a wait the call bounds ends
+// at the horizon even when the lease wait is longer, because a wait past the deadline helps no
+// one.
+func (r *runner) capacityWaitFor(start time.Time, decided bool) capacityWait {
+	// The wait a call with no deadline has, and the ceiling of every wait that is not call-bound: the larger of
+	// agent_placement_wait_sec and agent_lease_wait_sec, as it always was.
+	base := max(r.placementTTL(), time.Duration(r.cfg.AgentLeaseWaitSec)*time.Second)
+	w := capacityWait{wait: base, deadline: start.Add(base)}
+	if r.cfg.AgentPlacementWaitSec < 0 || decided {
+		return w
+	}
+	horizon, ok := r.call.waitHorizon()
+	if !ok {
+		return w
+	}
+	bound := max(horizon.Sub(start), 0)
+	// A wait holds one of the call's run slots (RunWith's sem), so while subtasks of the call have not started
+	// - the ones waiting for a slot and the ones of later chunks - it may not run to the horizon: they would
+	// start late, or never, and with less than the reserve left. Such a wait keeps the bound it had before
+	// ADR 0073, unless the call's own end comes sooner. The last subtask to start waits for the horizon, since
+	// nothing is behind it.
+	if held := r.call.unstarted(); held > 0 && base <= bound {
+		w.held = held
+		return w
+	}
+	// The call is the bound, and a longer agent_lease_wait_sec does not extend it: a wait past the call's
+	// deadline cannot help anyone, the call is over before it ends.
+	left, _ := r.call.timeLeft()
+	w.deadline, w.wait = horizon, bound
+	w.call = &callWaitInfo{left: left, reserve: callWaitReserve, noTime: bound <= 0}
+	return w
 }
 
 // coolingNote renders the nodes the last tick of a capacity wait did not ask because
@@ -2995,9 +3275,22 @@ func (r *runner) capacityDefer(local NodeView, seed PlacedResult, idle, wait tim
 	if ev.note != "" {
 		chain += "; waiting because: " + ev.note
 	}
-	reason := fmt.Sprintf("capacity wait: no node had room within %s (waited %s; agent_placement_wait_sec=%d; %s%s%s%s) — re-run later, raise agent_placement_wait_sec, or add a node",
+	slotNote := ""
+	if ev.held > 0 && ev.call == nil {
+		// The call had time left, and this wait ended anyway: it held a run slot that subtasks of the call were
+		// waiting for (ADR 0073). Saying so keeps "no node had room within 2m0s" from reading as the call's own limit.
+		slotNote = fmt.Sprintf("; %d subtask(s) of the call had not started, so this wait could not hold its run slot to the call's deadline", ev.held)
+	}
+	reason := fmt.Sprintf("capacity wait: no node had room within %s (waited %s; agent_placement_wait_sec=%d; %s%s%s%s%s) — re-run later, raise agent_placement_wait_sec, or add a node",
 		wait, idle.Round(time.Second), r.cfg.AgentPlacementWaitSec, chain,
-		heldOutNote(ev.heldOut, strings.Join(refusals, "; ")), coolingNote(ev.cooling), probeFailureNote(ev.probeFails))
+		heldOutNote(ev.heldOut, strings.Join(refusals, "; ")), coolingNote(ev.cooling), probeFailureNote(ev.probeFails), slotNote)
+	if ev.call != nil {
+		// The call's deadline bounded this wait (ADR 0073). The advice to raise agent_placement_wait_sec
+		// would be wrong: that key never bounded it. What helps is a later call or a bigger fleet.
+		reason = fmt.Sprintf("capacity wait: no node had room before the call's deadline (waited %s; %s; %s%s%s%s) — re-run later or add a node",
+			idle.Round(time.Second), ev.call.words(), chain,
+			heldOutNote(ev.heldOut, strings.Join(refusals, "; ")), coolingNote(ev.cooling), probeFailureNote(ev.probeFails))
+	}
 	return PlacedResult{
 		Node: local.NodeID, Seat: local.AgentSeat, JobID: seed.JobID,
 		PlacementReason: reason, waited: true, Unplaced: true, CapacityWaitSec: idle.Seconds(),
@@ -3214,12 +3507,14 @@ func (r *runner) replacementNode(ctx context.Context, contract core.AgentContrac
 		freshViews, freshBases := untried(views, bases, pl.tried)
 		var candViews []NodeView
 		var candBases []string
-		candViews, candBases, busy = r.withRoom(st, freshViews, freshBases)
+		var lifted map[string]string
+		candViews, candBases, busy, lifted = r.withRoomAfter(st, freshViews, freshBases, refusedAt)
 		if chosen := Place(mintP2CSeed(), st, r.localView(), candViews, true); !chosen.Local {
+			base := baseFor(chosen, candViews, candBases)
 			return placement{
 				view:   chosen,
-				base:   baseFor(chosen, candViews, candBases),
-				reason: fmt.Sprintf("re-placed on %s after %d refusal(s)", chosen.NodeID, refused),
+				base:   base,
+				reason: fmt.Sprintf("re-placed on %s after %d refusal(s)", chosen.NodeID, refused) + liftedClause(lifted[base]),
 			}, "", true
 		}
 	}
@@ -3269,6 +3564,16 @@ func (r *runner) replacementNode(ctx context.Context, contract core.AgentContrac
 		pl.capacityRefusal = true
 		return placement{}, head + ", and the local seat is fenced (" + why + " — " + HolderLine(info) + ")", false
 	}
+	// An occupied seat is no last resort either (0.165.2): loading it would unload another
+	// loaded vLLM seat (probeLocalBusy's occupiedBy; the reference box's opencode seat). A remote
+	// was eligible and refused, so this is a place in line: the capacity wait re-reads every node
+	// each tick and takes the local seat only once the occupant has left.
+	if r.route != "local" {
+		if rd := r.busyReadingNow(ctx); rd.occupiedBy != "" {
+			pl.capacityRefusal = true
+			return placement{}, head + ", and " + rd.why(), false
+		}
+	}
 	if free, note := r.localSlotAhead(); !free {
 		// A full run-cap line is a place in line, not a refusal: the wait watches it and
 		// takes the seat when a slot frees (INV-4), whatever kind of refusal started
@@ -3292,6 +3597,15 @@ func (r *runner) replacementNode(ctx context.Context, contract core.AgentContrac
 // node that cannot run the contract at all (remoteEligible): the first kind frees
 // up and is worth waiting for, the second never does.
 func (r *runner) withRoom(st Subtask, views []NodeView, bases []string) (outV []NodeView, outB []string, busy []string) {
+	outV, outB, busy, _ = r.withRoomAfter(st, views, bases, time.Time{})
+	return outV, outB, busy
+}
+
+// withRoomAfter is withRoom for views read no earlier than readAfter (the zero time: a read of unknown
+// age, which lifts nothing). Given one, a node on a Retry-After cooldown whose health in these views
+// proves a free worker has its cooldown lifted (cooldowns.lift) and is judged like any other; lifted
+// names, per base, why.
+func (r *runner) withRoomAfter(st Subtask, views []NodeView, bases []string, readAfter time.Time) (outV []NodeView, outB []string, busy []string, lifted map[string]string) {
 	outV = make([]NodeView, 0, len(views))
 	outB = make([]string, 0, len(bases))
 	now := time.Now()
@@ -3301,11 +3615,18 @@ func (r *runner) withRoom(st Subtask, views []NodeView, bases []string) (outV []
 			continue
 		}
 		if until, cooling := r.cool.heldUntil(bases[j], now); cooling {
-			busy = append(busy, fmt.Sprintf("%s: cooling down after its own refusal (%s left)", laneID(v), until.Sub(now).Round(time.Second)))
-			continue
+			note, liftedNow := r.cool.lift(bases[j], v, readAfter, now)
+			if !liftedNow {
+				busy = append(busy, fmt.Sprintf("%s: cooling down after its own refusal (%s left)", laneID(v), until.Sub(now).Round(time.Second)))
+				continue
+			}
+			if lifted == nil {
+				lifted = map[string]string{}
+			}
+			lifted[bases[j]] = note
 		}
-		if patience := patienceFor(st.Contract, v); !hasRoomWithin(v, sheddable, patience) {
-			busy = append(busy, laneID(v)+": "+whyNoRoom(v, sheddable, patience))
+		if patience, clamp := r.patience(st.Contract, v); !hasRoomWithin(v, sheddable, patience) {
+			busy = append(busy, laneID(v)+": "+whyNoRoom(v, sheddable, patience, clamp))
 			continue
 		}
 		if !processGate.available(bases[j], admissionCeiling(v)) {
@@ -3315,12 +3636,36 @@ func (r *runner) withRoom(st Subtask, views []NodeView, bases []string) (outV []
 		outV = append(outV, v)
 		outB = append(outB, bases[j])
 	}
-	return outV, outB, busy
+	return outV, outB, busy, lifted
+}
+
+// liftedClause is the bracket a placement reason carries when the node it names was asked before
+// its Retry-After cooldown ended, because its health proved a free worker.
+func liftedClause(note string) string {
+	if note == "" {
+		return ""
+	}
+	return " [" + note + "]"
+}
+
+// fleetReadForWait is the capacity wait's per-tick read of the fleet. A node on a cooldown is judged
+// only by a read taken after its latest refusal (cooldowns.lift), so the read must postdate the newest
+// hold in force: the 2 s probe memo may serve a snapshot another waiter's probe took just before a
+// refusal, and a picture older than the refusal is the one thing that proves nothing about it. With
+// no hold in force it is the ordinary memoised read (the zero time). readAfter is the instant the read
+// is guaranteed to postdate.
+func (r *runner) fleetReadForWait(ctx context.Context) (views []NodeView, bases []string, probeErrs []string, failed map[string]string, readAfter time.Time) {
+	readAfter = r.cool.newestHold(time.Now())
+	views, bases, probeErrs, failed = r.fetchViewsDetailedSince(ctx, readAfter)
+	return views, bases, probeErrs, failed, readAfter
 }
 
 // whyNoRoom says why hasRoomWithin refused v: no room by its own advertisement, or
-// room but a backlog past the caller's patience (with the arithmetic).
-func whyNoRoom(v NodeView, sheddable bool, patience time.Duration) string {
+// room but a backlog past the caller's patience (with the arithmetic). clamp is the
+// note runner.patience returns when the call's remaining time, not the contract's own
+// poll budget, set that patience; it rides only the backlog verdict, since a node with
+// no room is refused whatever the patience.
+func whyNoRoom(v NodeView, sheddable bool, patience time.Duration, clamp string) string {
 	if !hasRoom(v, sheddable) {
 		switch {
 		case v.SaturationKnown && v.SaturationHigh:
@@ -3333,7 +3678,7 @@ func whyNoRoom(v NodeView, sheddable bool, patience time.Duration) string {
 		return "no room (not accepting new work)"
 	}
 	_, why := startsWithinPatience(v, patience)
-	return "backlog (" + why + ")"
+	return "backlog (" + why + clamp + ")"
 }
 
 // localSlotAhead reports whether the local seat's run-cap line has a free slot
@@ -3442,8 +3787,8 @@ func (r *runner) anyLeaseHeld(info gpulease.Info, subtasks []core.AgentContract)
 // capacity wait of a subtask a DEAL kept off the seat because it read busy
 // (PlacedResult.overflow) may take the seat only once the deal would have. route=spread
 // reads busy on any request in flight (agent_spread_local_slot: always never reads
-// busy); route=auto on a held lease, an in-flight count at the fleet's own cap, or a
-// load in progress (W-01). An UNREADABLE seat keeps the deal's busy answer: the deal
+// busy); route=auto on a held lease, an in-flight count at the fleet's own cap, a
+// load in progress (W-01), or another vLLM seat a load would evict (occupiedBy). An UNREADABLE seat keeps the deal's busy answer: the deal
 // fails open because it has no evidence, but here it read the seat busy, and a probe
 // that fails afterwards (a box too loaded to answer in time) is no evidence of idle.
 // Failing open here ran the overflow on the busy seat (register C-88, CI run
@@ -3454,8 +3799,39 @@ func (r *runner) localStillBusy(ctx context.Context, lease gpulease.Info) (busy 
 	if r.route == "spread" {
 		return (rd.busy || rd.unknown) && r.cfg.SpreadLocalSlot() != config.SpreadLocalAlways, rd.note
 	}
+	return lease.Held || r.atRunCap(rd.inflight) || rd.loading || rd.occupiedBy != "" || rd.unknown, rd.note
+}
+
+// atRunCap reports whether `inflight` requests on the local seat have reached the fleet's own
+// concurrency cap (fleet_max_concurrent_jobs): the cap above which route=auto reads the seat as busy.
+// An UNLIMITED cap (a negative setting, which FleetConcurrencyLimit resolves to 0) is never reached.
+// The comparison used to be written out at four sites and guarded at one: `inflight >= 0` is always
+// true, so with fleet_max_concurrent_jobs < 0 an IDLE local seat read as permanently busy and the work
+// left the box although the setting says unlimited (the diagnosis' F11). One helper, so the four
+// cannot drift again.
+func (r *runner) atRunCap(inflight int) bool {
 	limit := r.cfg.FleetConcurrencyLimit()
-	return lease.Held || (limit > 0 && rd.inflight >= limit) || rd.loading || rd.unknown, rd.note
+	return limit > 0 && inflight >= limit
+}
+
+// readAutoLocalSlot is route=auto's one joint reading of the local seat for the whole run (W-01): it
+// records the reading (autoDealBusy) and whether the seat's LOAD read busy (autoDealReadBusy), logs the
+// one line per run, and returns the deal's busy flag, which also counts a lease. It is a method, and not
+// a block in RunWith, so the reading can be pinned without a live run (unlimited_cap_test.go).
+func (r *runner) readAutoLocalSlot(ctx context.Context, leaseInfo gpulease.Info, subtasks []core.AgentContract) (busy bool) {
+	localBusy := r.probeLocalBusy(ctx)
+	// occupiedBy: another vLLM seat holds the cards and loading this one would evict it.
+	busy = r.anyLeaseHeld(leaseInfo, subtasks) || r.atRunCap(localBusy.inflight) || localBusy.loading || localBusy.occupiedBy != ""
+	r.autoDealBusy = localBusy
+	// The seat's LOAD only: a lease is the wait's own business (Reserved, fencedLocal),
+	// and a lease this process holds must not keep its own subtasks off the seat.
+	r.autoDealReadBusy.Store(r.atRunCap(localBusy.inflight) || localBusy.loading || localBusy.occupiedBy != "")
+	// One line per run, mirroring route=spread's own local-slot log
+	// (review round 1 item 4): before this the identical W-01 read had
+	// no trace at all, so an operator could not tell "busy" from
+	// "idle" without re-deriving it from the placement_reason.
+	log.Printf("delegate: auto local slot: busy=%v inflight=%d loading=%v occupied_by=%q (%s)", busy, localBusy.inflight, localBusy.loading, localBusy.occupiedBy, localBusy.note)
+	return busy
 }
 
 // busyReadingNow is probeLocalBusy memoised for fetchViewsMemoTTL, so a dozen
@@ -4204,7 +4580,8 @@ func (r *runner) placeAutoRemote(seed string, st Subtask, localView NodeView, vi
 		// the caller's patience is held out of the deal - a placement feasibility
 		// refusal that prints its arithmetic (the verdict line below), never a
 		// preference for a faster seat. The capacity wait re-reads it every tick.
-		if ok, _ := startsWithinPatience(v, patienceFor(st.Contract, v)); !ok {
+		patience, _ := r.patience(st.Contract, v)
+		if ok, _ := startsWithinPatience(v, patience); !ok {
 			continue
 		}
 		if headroom(v) <= dealt[bases[j]] {
@@ -4227,7 +4604,7 @@ func (r *runner) placeAutoRemote(seed string, st Subtask, localView NodeView, vi
 	// nothing eligible at all — not only the happy path. `failed` carries the
 	// dead/unreachable bases from this SAME snapshot, so a node this deal
 	// never even heard from is named too, not silently dropped.
-	verdicts := placementVerdictLine(st, views, bases, bestBase, dealt, failed)
+	verdicts := placementVerdictLine(st, views, bases, bestBase, dealt, failed, r.patience)
 	if found {
 		dealt[bestBase]++
 		reason := fmt.Sprintf("route=%s → %s (headroom)", r.route, best.NodeID)
@@ -4239,10 +4616,16 @@ func (r *runner) placeAutoRemote(seed string, st Subtask, localView NodeView, vi
 		if verdicts != "" {
 			reason += "; " + verdicts
 		}
+		if r.autoDealBusy.occupiedBy != "" {
+			reason += "; " + r.autoDealBusy.why()
+		}
 		return spreadSlot{placement: placement{view: best, base: bestBase, reason: reason}}
 	}
 	if anyEligible {
 		reason := fmt.Sprintf("route=%s: every eligible remote is at headroom or cannot start the job inside the caller's patience", r.route)
+		if r.autoDealBusy.occupiedBy != "" {
+			reason += "; " + r.autoDealBusy.why()
+		}
 		if verdicts != "" {
 			reason += "; " + verdicts
 		}
@@ -4262,7 +4645,7 @@ func (r *runner) placeAutoRemote(seed string, st Subtask, localView NodeView, vi
 // aligned window of len(nodes) slots — every eligible seat receives at most one
 // subtask, so `runConcurrency` sibling subtasks never queue behind each other on
 // one seat while another seat idles. A fit score that re-picks freely breaks it
-// immediately: the smallest seat wins EVERY mechanical slot and the roomiest
+// immediately: the best-scoring seat wins EVERY mechanical slot and the roomiest
 // wins every reasoning slot, which is the stacking spread was built to remove.
 //
 // That invariant cannot be recovered by any per-subtask pure function of
@@ -4422,6 +4805,23 @@ type busyReading struct {
 	// or the read was ambiguous): busy is false only because the deal fails open.
 	// The capacity wait must not read that as "now idle" (register C-88).
 	unknown bool
+	// occupiedBy names the declared vLLM seat that holds this box's cards while
+	// the agent seat is NOT loaded, when loading the agent seat would make
+	// llama-swap unload it (seatguard's verdict for the agent seat). busy is
+	// true with it: the seat has nothing in flight, but taking the local slot
+	// costs the occupant a cold load and its prefix cache. The reference box's
+	// three-card seat is opencode's model, so a harness contract dealt to an idle
+	// agent seat there evicted the operator's session (2026-10-06).
+	occupiedBy string
+}
+
+// why renders the reading for a placement reason: the seat a load would evict
+// when another vLLM seat holds the cards, else the in-flight count.
+func (b busyReading) why() string {
+	if b.occupiedBy != "" {
+		return "local seat occupied: loading it would evict the loaded vLLM seat " + b.occupiedBy
+	}
+	return fmt.Sprintf("local seat busy: %d in flight", b.inflight)
 }
 
 // localBusyProbeTimeout bounds the one-shot read of the local seat's load: two
@@ -4457,6 +4857,21 @@ func (r *runner) probeLocalBusy(ctx context.Context) busyReading {
 		return busyReading{note: "busy probe failed: " + err.Error(), unknown: true}
 	}
 	if !rd.Loaded {
+		// Not loaded is idle only while nothing else would be pushed off the cards to
+		// load it. A loaded vLLM seat that the agent seat's load would unload (the
+		// reference box's opencode-only three-card seat shares the agent seat's cards
+		// and llama-swap set) makes the slot as unavailable as a busy one: the deal
+		// prefers a remote with room, waits in line when every remote is full, and
+		// falls back here only when no remote can take the contract at all. The guard
+		// is asked before the ambiguity below: it resolves names from the serving
+		// config, not the roster, so it still answers when the roster read failed (and
+		// it answers "nothing evicted" when the agent seat is itself the one running).
+		// A /running it cannot read names no seat and changes nothing (the deal fails
+		// open, as the probe always has); a serving config it cannot read makes it
+		// protect whatever vLLM seat is loaded, which only sends the work to the fleet.
+		if v := r.checkSeatGuard(pctx, seat); v.Protect && v.Seat != "" {
+			return busyReading{busy: true, occupiedBy: v.Seat, note: "local seat not loaded; " + v.Reason}
+		}
 		if rd.Ambiguous {
 			// Degraded read: the roster could not resolve the seat and /running
 			// holds other entries. Idle is the SAFE reading for a deal (the
@@ -4474,6 +4889,44 @@ func (r *runner) probeLocalBusy(ctx context.Context) busyReading {
 		return busyReading{busy: true, loading: true, note: "local seat " + strings.TrimPrefix(rd.Source, "running-state:") + " (a load is in progress)"}
 	}
 	return busyReading{busy: rd.Inflight > 0, inflight: rd.Inflight, note: rd.Source}
+}
+
+// dealReadLocalBusy reports whether this run's placement read the local seat busy and
+// dealt around it: spread's busy rule (skipsBusyLocal), or route=auto's busy formula at the
+// deal or a per-subtask placement. The capacity wait keeps that reading for every subtask
+// it holds, not only the deal's overflow (awaitCapacity's dealBusy).
+func (r *runner) dealReadLocalBusy() bool {
+	switch r.route {
+	case "spread":
+		return r.skipsBusyLocal()
+	case "auto":
+		return r.autoDealReadBusy.Load()
+	}
+	return false
+}
+
+// autoOccupant is route=auto's reading when it found the local seat occupied: the joint
+// deal's (autoDealBusy) or the per-subtask placement's (autoLocalBusy); zero otherwise.
+func (r *runner) autoOccupant() busyReading {
+	if r.autoDealBusy.occupiedBy != "" {
+		return r.autoDealBusy
+	}
+	if r.autoLocalBusy.occupiedBy != "" {
+		return r.autoLocalBusy
+	}
+	return busyReading{}
+}
+
+// checkSeatGuard asks the box's seat guard (internal/seatguard, the same reading
+// the cascade uses to keep a rung from evicting a vLLM seat) whether loading model
+// would unload a loaded vLLM seat. seatGuardCheck is the test seam; nil = the
+// process-wide guard, which is nil (and every verdict zero) on a box that declares
+// no vllm_seats, names no endpoint or turns cascade_seat_guard off.
+func (r *runner) checkSeatGuard(ctx context.Context, model string) seatguard.Verdict {
+	if r.seatGuardCheck != nil {
+		return r.seatGuardCheck(ctx, model)
+	}
+	return seatguard.Shared(r.cfg).Check(ctx, model)
 }
 
 // skipsBusyLocal reports whether this run deals its local rotation slots away:
@@ -4525,8 +4978,9 @@ func (r *runner) placeSpreadWith(i int, st Subtask, localView NodeView, book *de
 		// The backlog gate (ADR 0063): eligible, but it cannot START this job
 		// inside the caller's patience, so it is out of THIS deal - named in the
 		// reason with its arithmetic, and re-read by the capacity wait.
-		if ok, why := startsWithinPatience(v, patienceFor(st.Contract, v)); !ok {
-			heldBack = append(heldBack, laneID(v)+": backlog ("+why+")")
+		patience, clamp := r.patience(st.Contract, v)
+		if ok, why := startsWithinPatience(v, patience); !ok {
+			heldBack = append(heldBack, laneID(v)+": backlog ("+why+clamp+")")
 			continue
 		}
 		if skip && !hasRoom(v, r.priority < core.BandNormal) {
@@ -4571,15 +5025,24 @@ func (r *runner) placeSpreadWith(i int, st Subtask, localView NodeView, book *de
 			// every free slot they have, and the local seat is busy: the overflow
 			// waits in line (the capacity wait, INV-4) instead of stacking on the
 			// busy seat or on a node that would refuse it.
-			return spreadSlot{placement: placement{view: localView, reason: fmt.Sprintf("route=spread: every remote with room is already dealt to its headroom (%s); local seat busy: %d in flight", strings.Join(atCap, "; "), r.spreadLocalBusy.inflight)}, capacityWait: true}
+			return spreadSlot{placement: placement{view: localView, reason: fmt.Sprintf("route=spread: every remote with room is already dealt to its headroom (%s); %s", strings.Join(atCap, "; "), r.spreadLocalBusy.why())}, capacityWait: true}
+		}
+		// An occupied seat is never the fallback (operator 2026-10-06: "wait in line"): the
+		// subtask waits for the occupant to leave or a remote to free, whichever comes first.
+		if r.spreadLocalBusy.occupiedBy != "" {
+			what := "no remote with room"
+			if eligible == 0 {
+				what = "no eligible remote"
+			}
+			return spreadSlot{placement: placement{view: localView, reason: fmt.Sprintf("route=spread: %s; %s — waiting in line", r.spreadLocalBusy.why(), what)}, capacityWait: true}
 		}
 		// The reason must not send an operator chasing capacity when no remote
 		// could take this contract at all.
 		sl := r.placeSpreadWith(i, st, localView, book, false)
 		if eligible == 0 {
-			sl.reason += fmt.Sprintf(" (local seat busy: %d in flight; no eligible remote)", r.spreadLocalBusy.inflight)
+			sl.reason += fmt.Sprintf(" (%s; no eligible remote)", r.spreadLocalBusy.why())
 		} else {
-			sl.reason += fmt.Sprintf(" (local seat busy: %d in flight; no remote with room)", r.spreadLocalBusy.inflight)
+			sl.reason += fmt.Sprintf(" (%s; no remote with room)", r.spreadLocalBusy.why())
 		}
 		return sl
 	}
@@ -4645,21 +5108,22 @@ func (r *runner) placeSpreadWith(i int, st Subtask, localView NodeView, book *de
 		book.counts[""]++
 		return spreadSlot{placement: placement{view: localView, reason: fmt.Sprintf("route=spread → local (slot %d of %d)", slot+1, len(nodes))}}
 	}
-	k := fitPick(st, nodes, bases, slot, book.dealt, book.counts)
+	prior := fleetTokSPrior(r.spreadViews)
+	k := fitPickWith(st, nodes, bases, slot, book.dealt, book.counts, prior)
 	if k < 0 {
 		// Every eligible remote has already taken a subtask this cycle — which a
 		// ragged eligible set can reach without passing through a local slot.
 		// Reshuffle rather than stack: after the clear a pick always exists,
 		// because len(nodes) > 1 guarantees at least one remote.
 		clear(book.dealt)
-		k = fitPick(st, nodes, bases, slot, book.dealt, book.counts)
+		k = fitPickWith(st, nodes, bases, slot, book.dealt, book.counts, prior)
 	}
 	book.dealt[bases[k]] = true
 	book.counts[bases[k]]++
 	kind, rule := shapeOf(st)
 	reason := fmt.Sprintf("route=spread → %s (slot %d of %d, fit=%s/%s)", nodes[k].NodeID, slot+1, len(nodes), kind, rule)
 	if skip {
-		reason += fmt.Sprintf("; local seat busy: %d in flight", r.spreadLocalBusy.inflight)
+		reason += "; " + r.spreadLocalBusy.why()
 	}
 	if len(held) > 0 {
 		// Nodes this subtask could have been dealt to and was not: named on the slot
@@ -4688,16 +5152,49 @@ func (r *runner) placeSpreadWith(i int, st Subtask, localView NodeView, book *de
 // that publish no per-card truth are one tier, so a fleet of them deals exactly
 // as it did before.
 func fitPick(st Subtask, nodes []NodeView, bases []string, slot int, dealt map[string]bool, counts map[string]int) int {
+	return fitPickWith(st, nodes, bases, slot, dealt, counts, fleetTokSPrior(nodes))
+}
+
+// fitPickWith is fitPick with the fleet's assumed rate chosen by the caller: the spread deal passes
+// fleetTokSPrior over the WHOLE roster it probed, once for every subtask of the deal, so a seat's
+// score does not move as nodes at their headroom leave the rotation (Place and the joint auto deal
+// take the median over the whole roster too).
+//
+// Two demotion keys come before all of it, the two betterRemote leads with (gate.go): a node a lease
+// demotes (a long text lease, then an overdue one), then a node whose own advertisement says the next
+// dispatch is refused (saturated: its admission ceiling is met, or it reports saturation.high). Both
+// DEMOTE and never exclude, as there (see saturated): the
+// delegator's copy of those numbers is stale by construction, a demoted node still takes its slot of
+// the cycle when nothing better is left in it, and re-placement is the net that catches a wrong
+// guess. Before this the spread deal read neither, so with an idle local seat a draining or
+// queue-capped node kept its cycle slot while a healthy node idled: a refused dispatch, a cooldown on
+// that node, one of the subtask's maxRemoteReplacements spent, and the cycle's order broken.
+func fitPickWith(st Subtask, nodes []NodeView, bases []string, slot int, dealt map[string]bool, counts map[string]int, prior float64) int {
 	k, best, bestTier := -1, 0, 0
+	bestLease, bestSat := 0, false
 	for c := 0; c < len(nodes); c++ {
 		j := (slot + c) % len(nodes)
 		if nodes[j].Local || dealt[bases[j]] {
 			continue
 		}
+		lease, sat := leaseDemotionRank(nodes[j], &st), saturated(nodes[j])
 		tier := cardTier(nodes[j].withCardsDealt(counts[bases[j]]), st.Contract.Layer)
-		s := scoreFit(st, nodes[j])
-		if k < 0 || tier > bestTier || (tier == bestTier && s > best) {
-			k, best, bestTier = j, s, tier
+		s := scoreFitWith(st, nodes[j], prior)
+		better := false
+		switch {
+		case k < 0:
+			better = true
+		case lease != bestLease:
+			better = lease < bestLease
+		case sat != bestSat:
+			better = !sat
+		case tier != bestTier:
+			better = tier > bestTier
+		default:
+			better = s > best
+		}
+		if better {
+			k, best, bestTier, bestLease, bestSat = j, s, tier, lease, sat
 		}
 	}
 	return k
@@ -4928,6 +5425,12 @@ func (r *runner) attempt(ctx context.Context, i int, contract core.AgentContract
 			if fence, fenceWhy, fenced := r.fencedLocal(contract); localServes && fenced {
 				return PlacedResult{waitCapacity: true, fenced: true, pendingReason: "local seat fenced (" + fenceWhy + " — " + HolderLine(fence) + "); no eligible remote — " + why, remotesUnreachable: deadFleet}
 			}
+			// An occupied seat (operator 2026-10-06: "wait in line") is a place in line too, never
+			// "queued-local": loading it would unload the vLLM seat holding the cards. The wait takes
+			// it once the occupant leaves (localStillBusy reads occupiedBy) or a remote frees.
+			if occ := r.autoOccupant(); localServes && occ.occupiedBy != "" {
+				return PlacedResult{waitCapacity: true, overflow: true, pendingReason: occ.why() + "; no eligible remote — " + why, remotesUnreachable: deadFleet}
+			}
 			chosen = localView
 			reason = "local busy; no eligible remote — " + why + " (queued-local beats ineligible-remote)"
 			if !localServes {
@@ -4960,7 +5463,10 @@ func (r *runner) attempt(ctx context.Context, i int, contract core.AgentContract
 			// probeLocalBusy always has.
 			r.autoLocalBusyOnce.Do(func() { r.autoLocalBusy = r.probeLocalBusy(ctx) })
 			local := r.autoLocalBusy
-			busy = leaseInfo.Held || local.inflight >= r.cfg.FleetConcurrencyLimit() || local.loading
+			busy = leaseInfo.Held || r.atRunCap(local.inflight) || local.loading || local.occupiedBy != ""
+			if r.atRunCap(local.inflight) || local.loading || local.occupiedBy != "" {
+				r.autoDealReadBusy.Store(true) // the seat's load, never the lease (see the joint deal)
+			}
 		}
 		var views []NodeView
 		var bases []string
@@ -5027,6 +5533,11 @@ func (r *runner) attempt(ctx context.Context, i int, contract core.AgentContract
 			// place in line as a reservation, without the dial that would be turned away.
 			why, class := r.noEligibleRemote(st, views, probeErrs)
 			return PlacedResult{waitCapacity: true, fenced: true, pendingReason: "local seat fenced (" + fenceWhy + " — " + HolderLine(fence) + "); no eligible remote — " + why, remotesUnreachable: class == core.DeferClassInfrastructure}
+		case chosen.Local && r.route == "auto" && r.autoOccupant().occupiedBy != "" && r.localServesLayer(localView, contract):
+			// The occupied seat waits in line like a reservation (operator 2026-10-06: "wait in
+			// line"): never loaded over the vLLM seat holding the cards while that seat stays.
+			why, class := r.noEligibleRemote(st, views, probeErrs)
+			return PlacedResult{waitCapacity: true, overflow: true, pendingReason: r.autoOccupant().why() + "; no eligible remote — " + why, remotesUnreachable: class == core.DeferClassInfrastructure}
 		case chosen.Local:
 			why, class := r.noEligibleRemote(st, views, probeErrs)
 			reason = "local busy; no eligible remote — " + why + " (queued-local beats ineligible-remote)"
@@ -5041,6 +5552,9 @@ func (r *runner) attempt(ctx context.Context, i int, contract core.AgentContract
 			deadFleet = class == core.DeferClassInfrastructure
 		default:
 			reason = "local busy; placed on " + chosen.NodeID
+			if r.route == "auto" && r.autoLocalBusy.occupiedBy != "" {
+				reason = r.autoLocalBusy.why() + "; placed on " + chosen.NodeID
+			}
 		}
 		if !chosen.Local {
 			base = baseFor(chosen, views, bases)
@@ -6001,6 +6515,9 @@ func (r *runner) dispatchDetailed(ctx context.Context, base, jobID string, paylo
 		if r.tenant != "" {
 			req.Header.Set(core.TenantHeader, r.tenant)
 		}
+		// Who asked, and whether the serving node must card the job because this box will not
+		// (D7/D11): a header, for the same reason the tenant is one.
+		r.pair.SetWireHeaders(req.Header)
 		resp, derr := fleetClient.Do(req)
 		if derr != nil {
 			cancel()
@@ -6373,12 +6890,20 @@ func (r *runner) probeRemotes(ctx context.Context) ([]NodeView, []string, []stri
 // seat a TEXT lease reserves: deferred, class infrastructure (the box needs a
 // human's timing decision, not a rewritten contract), the holder named so the
 // caller can wait, route elsewhere, or ask. It never runs the contract.
-func (r *runner) reservedDefer(local NodeView, info gpulease.Info, waited time.Duration, why string) PlacedResult {
+//
+// call is non-nil when the call's deadline bounded the wait (ADR 0073): the advice to set
+// agent_lease_wait_sec longer would then be wrong, because the wait already ran as long as the
+// call could spare.
+func (r *runner) reservedDefer(local NodeView, info gpulease.Info, waited time.Duration, why string, call *callWaitInfo) PlacedResult {
 	reason := why
 	if !strings.Contains(why, "reserved") {
 		reason = "local seat reserved (" + HolderLine(info) + "); " + why
 	}
-	reason += fmt.Sprintf("; waited %s (agent_lease_wait_sec=%d) — set agent_lease_wait_sec to wait longer, add a remote, or release the lease", waited.Round(time.Second), r.cfg.AgentLeaseWaitSec)
+	if call != nil {
+		reason += fmt.Sprintf("; waited %s (%s) — add a remote, release the lease, or re-run when it ends", waited.Round(time.Second), call.words())
+	} else {
+		reason += fmt.Sprintf("; waited %s (agent_lease_wait_sec=%d) — set agent_lease_wait_sec to wait longer, add a remote, or release the lease", waited.Round(time.Second), r.cfg.AgentLeaseWaitSec)
+	}
 	return PlacedResult{
 		Node: local.NodeID, Seat: local.AgentSeat,
 		PlacementReason: reason,

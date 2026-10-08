@@ -166,7 +166,7 @@ type ParamsBasis struct {
 	RknpuHome string `json:"rknpu_home,omitempty"`
 	// DisplayLayer is hashed as the whole layer spec, not as its name: the
 	// template substitutes the layer’s rungs, its device pin and its guards into
-	// the rendered text (ADR 0039), so a change to any of them changes the
+	// the rendered text (ADR 0052), so a change to any of them changes the
 	// config while the name stays "display".
 	DisplayLayer      *config.LayerSpec `json:"display_layer"`
 	GPUEnv            []string          `json:"gpu_env"`

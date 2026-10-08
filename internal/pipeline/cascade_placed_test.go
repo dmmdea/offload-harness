@@ -1,4 +1,4 @@
-// Composite tier (ADR 0039, Task 6): the mechanical cascade is placed too. On a
+// Composite tier (ADR 0052, Task 6): the mechanical cascade is placed too. On a
 // composite box every text result carries `placed` naming the layer whose
 // rung served it (the single layer's router by default); when the pair holds
 // the cards and the display layer is awake and its guards pass, the chain runs
@@ -125,6 +125,8 @@ func TestCascadeSubstitutesTheDisplayTwinsWhenTheLayerIsAwake(t *testing.T) {
 			DeviceIndex: func(d string) (string, bool) { return d, true },
 			HostFree:    func() (float64, bool) { return 100, true },
 			Presence:    func() placement.Presence { return placement.ProbePresence(cfg.PresenceMode(), cfg.OperatorIdle()) },
+			// The display layer opens only while its watcher is alive (internal/displaystate).
+			WatcherAlive: func() (bool, string) { return true, "watcher heartbeat 3s old" },
 		}
 	}
 

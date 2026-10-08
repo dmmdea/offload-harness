@@ -3,10 +3,12 @@ package placement
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/dmmdea/offload-harness/internal/config"
+	"github.com/dmmdea/offload-harness/internal/displaystate"
 	"github.com/dmmdea/offload-harness/internal/gpuprobe"
 	"github.com/dmmdea/offload-harness/internal/seatload"
 )
@@ -169,5 +171,32 @@ func TestSharedSnapshotIsOnePerPlacementIdentity(t *testing.T) {
 	}
 	if SharedSnapshot(cfg) != a1 {
 		t.Fatal("registering other identities must not evict the first")
+	}
+}
+
+// The Snapshot every local caller reads through carries the watcher reader, from the heartbeat file
+// under the config's state root.
+func TestSnapshotLiveCarriesTheWatcherReader(t *testing.T) {
+	cfg := config.CompositeFixture()
+	cfg.StateDir = t.TempDir()
+	now := time.Unix(1_700_000_000, 0)
+	s := NewSnapshot(cfg, 2*time.Second)
+	s.now = func() time.Time { return now }
+	live := s.Live()
+	if live.WatcherAlive == nil {
+		t.Fatal("the snapshot's Live must carry the watcher reader")
+	}
+	if alive, why := live.WatcherAlive(); alive || !strings.Contains(why, "no heartbeat") {
+		t.Fatalf("no state file, no watcher: %v %q", alive, why)
+	}
+	path, err := displaystate.StatePath(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := displaystate.Write(path, displaystate.State{CheckedAt: now.Add(-5 * time.Second), IntervalSec: 10}); err != nil {
+		t.Fatal(err)
+	}
+	if alive, why := live.WatcherAlive(); !alive {
+		t.Fatalf("a heartbeat 5 s old is alive: %q", why)
 	}
 }

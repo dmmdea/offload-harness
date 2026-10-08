@@ -183,6 +183,7 @@ func TestASeatDownReplacementThatTheCallDeadlineCutKeepsTheSeatDownDeferAndRecor
 func TestASeatDownReplacementWaitingForCapacityIsCutByTheCallDeadlineNotByItsOwnWait(t *testing.T) {
 	compressPolls(t, 5*time.Millisecond, time.Second)
 	compressWait(t, 20*time.Millisecond, 50*time.Millisecond)
+	withCallReserve(t, 0) // pins the CUT: with a reserve the wait ends before the deadline (callwait_test.go)
 	script := &firstJobScript{}
 	var dispatchesAnywhere atomic.Int64
 	// The first dispatch anywhere is taken; every later one is refused, full, with a Retry-After.

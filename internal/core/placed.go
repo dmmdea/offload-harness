@@ -1,7 +1,7 @@
 package core
 
 // Placed is the placement decision published on every result a composite box
-// produces (ADR 0039, 0.116.0): which tier, layer and seat served the work, on
+// produces (ADR 0052, 0.116.0): which tier, layer and seat served the work, on
 // which device pin, and why — or, on a defer, which guard refused. It exists
 // because the composite-tier spec's fourth defect was "placement is
 // invisible": a result named neither the cards nor the seat that served it, so

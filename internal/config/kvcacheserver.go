@@ -118,7 +118,7 @@ func (k KVCacheServer) StoreName() string {
 // value (register B-02: on 2026-09-18 the pair's 2 / 4 / 8 GB arms restored the
 // same context at 3.1 / 5.1 / 9.1 GiB of MP-server RSS over 24 contracts). It is
 // not enough for every seat: on 2026-09-21 2 GB starved the pair's staging under
-// production load, so the pair seeds 8 and the three-card flagship 16.
+// production load, so the pair seeds 8 (the hand-wired three-card seat runs 16).
 func (k KVCacheServer) EffectiveL1StagingGB() int {
 	if k.L1StagingGB <= 0 {
 		return 2
@@ -263,12 +263,17 @@ func privateHost(host string) error {
 	if !strings.Contains(host, ".") || strings.HasSuffix(lower, ".local") {
 		return nil
 	}
-	suf := strings.ToLower(strings.TrimSpace(netguard.TailnetSuffix()))
-	if suf == "" {
+	zones := netguard.TailnetSuffixes()
+	if len(zones) == 0 {
 		return fmt.Errorf("%s is a dotted hostname and no tailnet_suffix is configured — use the store's LAN IP, a bare hostname, or set config `tailnet_suffix` to your tailnet zone", host)
 	}
-	if strings.HasSuffix(lower, "."+suf) {
-		return nil
+	for _, zone := range zones {
+		if strings.HasSuffix(lower, "."+zone) {
+			return nil
+		}
 	}
-	return fmt.Errorf("%s is neither a private/tailnet address nor a bare, .local or %s hostname", host, suf)
+	if len(zones) > 1 {
+		return fmt.Errorf("%s is neither a private/tailnet address nor a bare, .local or one of %s hostname", host, strings.Join(zones, ", "))
+	}
+	return fmt.Errorf("%s is neither a private/tailnet address nor a bare, .local or %s hostname", host, zones[0])
 }

@@ -184,6 +184,10 @@ type fakeNode struct {
 	// X-Offload-Tenant header ("" = absent).
 	lastPriority atomic.Value // *int
 	lastTenant   atomic.Value // string
+	// lastAsker / lastPairCard record the attribution headers (core.AskerHeader,
+	// core.PairCardHeader) the LAST dispatch carried ("" = absent).
+	lastAsker    atomic.Value // string
+	lastPairCard atomic.Value // string
 	// saturation, when non-nil, is published as health's `saturation` block.
 	saturation *struct {
 		Score    float64 `json:"score"`
@@ -290,6 +294,8 @@ func (f *fakeNode) server() *httptest.Server {
 		_ = json.Unmarshal(raw, &keys)
 		f.lastPriority.Store(keys.Priority)
 		f.lastTenant.Store(r.Header.Get(core.TenantHeader))
+		f.lastAsker.Store(r.Header.Get(core.AskerHeader))
+		f.lastPairCard.Store(r.Header.Get(core.PairCardHeader))
 		if f.killOnDispatch {
 			// No status line, no body: the delegator sees a transport error and
 			// never an HTTP answer, on both dispatch attempts.
@@ -1402,6 +1408,11 @@ func TestRunTelemetryFailureIsLoudOnceAndNeverFailsTheRun(t *testing.T) {
 		// A ledger under a path that cannot be created either: ledger.Open fails.
 		LedgerPath: filepath.Join(home, "delegation-log", "ledger.jsonl"),
 		AgentModel: "local-seat",
+		// Isolation as testCfg: without a StateDir RunWith opens the MACHINE's
+		// delegate-intent.jsonl and runs RecoverOrphans against the operator's
+		// real open intents, and without a GPULockPath it reads the real lease.
+		StateDir:    filepath.Join(home, "state"),
+		GPULockPath: filepath.Join(home, "gpu-lease"),
 	}
 
 	local := func(ctx context.Context, c core.AgentContract, _ LocalOptions) (core.AgentWireResult, error) {

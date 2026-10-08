@@ -1,8 +1,6 @@
 package delegate
 
 import (
-	"net/url"
-	"strings"
 	"sync"
 	"time"
 
@@ -20,11 +18,7 @@ import (
 // frame, built from the node's reported name, corrected it. fallback is used
 // when base has no usable host.
 func pairNodeName(base, fallback string) string {
-	u, err := url.Parse(strings.TrimSpace(base))
-	if err == nil && u.Hostname() != "" {
-		return strings.ToLower(u.Hostname())
-	}
-	return fallback
+	return pairworkloads.NodeName(base, fallback)
 }
 
 // PAIR workload frames for delegations (docs/systems/pair-workloads.md).

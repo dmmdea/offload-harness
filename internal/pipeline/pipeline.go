@@ -54,6 +54,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/mediahash"
 	"github.com/dmmdea/offload-harness/internal/mediaops"
 	"github.com/dmmdea/offload-harness/internal/modelaffinity"
+	"github.com/dmmdea/offload-harness/internal/pairworkloads"
 	"github.com/dmmdea/offload-harness/internal/parser"
 	"github.com/dmmdea/offload-harness/internal/placement"
 	"github.com/dmmdea/offload-harness/internal/router"
@@ -86,15 +87,16 @@ type Pipeline struct {
 	seatRatesPath string
 	cfg           config.Config
 	client        *llamaclient.Client
-	stt           *sttclient.Client  // whisper-server transcribe client (audio never hits the text cascade)
-	cache         *cache.Cache       // may be nil
-	led           *ledger.Ledger     // may be nil
-	tracker       CallTracker        // nil = no PAIR running cards
-	thresholds    map[string]float64 // per-task conformal margin thresholds (Phase 2); nil = config constant
-	breakers      *breaker.Group     // per-tier circuit breakers (Phase 3)
-	router        *router.Model      // entry-tier router (Phase 5); nil = static rule
-	overrides     *tierOverrides     // health-driven per-tier timeouts/degraded (Phase 4); nil = none
-	healMu        sync.Mutex         // Phase 7 autoheal rate-limit
+	stt           *sttclient.Client      // whisper-server transcribe client (audio never hits the text cascade)
+	cache         *cache.Cache           // may be nil
+	led           *ledger.Ledger         // may be nil
+	tracker       CallTracker            // nil = no PAIR running cards
+	pair          *pairworkloads.Emitter // nil = remote calls open no PAIR card (remoteattr.go)
+	thresholds    map[string]float64     // per-task conformal margin thresholds (Phase 2); nil = config constant
+	breakers      *breaker.Group         // per-tier circuit breakers (Phase 3)
+	router        *router.Model          // entry-tier router (Phase 5); nil = static rule
+	overrides     *tierOverrides         // health-driven per-tier timeouts/degraded (Phase 4); nil = none
+	healMu        sync.Mutex             // Phase 7 autoheal rate-limit
 	lastHeal      map[string]time.Time
 	// Phase 2 Task 4: opt-in correctness head + per-task p(correct) thresholds.
 	// Both nil/empty unless cfg.ConfHeadEnabled — the gate is inert otherwise.
@@ -144,7 +146,7 @@ type Pipeline struct {
 	vllmSeatMu     sync.Mutex
 	vllmSeatCache  map[string]vllmSeatAnswer
 	vllmSeatWarned map[string]bool
-	// Composite tier (ADR 0039): placementLive is the seam tests use to inject
+	// Composite tier (ADR 0052): placementLive is the seam tests use to inject
 	// the machine's live readers (occupancy, free VRAM, host RAM, presence);
 	// nil = the PROCESS-WIDE memoised Snapshot over cfg
 	// (placement.SharedSnapshot: one 2 s reading serves every decision in
@@ -367,8 +369,12 @@ type cacheVal struct {
 // when the call ends (pairworkloads.Emitter.Begin). working turns the card
 // running once the lane holds its engine (core.MarkWorking); both are nil when
 // nothing was opened.
+//
+// callID is the id of the card Begin opened ("" when none was): Run stamps it on
+// the call's Meta, the ledger row carries it, and the row closes exactly that
+// card (pairworkloads.Emitter.claim) instead of the oldest open card of the task.
 type CallTracker interface {
-	Begin(task, door string) (working func(), end func(deferred bool, reason string))
+	Begin(task, door string) (callID string, working func(), end func(deferred bool, reason string))
 }
 
 // SetCallTracker wires the tracker Run reports call starts to; nil = none.
@@ -387,13 +393,15 @@ func closeCall(end func(deferred bool, reason string), res *core.Result) {
 
 func (p *Pipeline) Run(ctx context.Context, req core.Request) (res core.Result) {
 	start := time.Now()
+	callID := ""
 	if p.tracker != nil && req.Task.Valid() {
-		if working, end := p.tracker.Begin(string(req.Task), req.Door); end != nil {
+		if id, working, end := p.tracker.Begin(string(req.Task), req.Door); end != nil {
+			callID = id
 			ctx = core.WithWorkingMark(ctx, working)
 			defer closeCall(end, &res)
 		}
 	}
-	meta := core.Meta{Model: p.cfg.Model}
+	meta := core.Meta{Model: p.cfg.Model, CallID: callID, ParentJobID: req.ParentJobID}
 	// Register A-102: carry the caller's door into telemetry so the ledger row
 	// names the surface that admitted the call. Documentary only — nothing below
 	// reads it, and every sub-branch takes meta by value from here.
@@ -402,6 +410,8 @@ func (p *Pipeline) Run(ctx context.Context, req core.Request) (res core.Result) 
 	// under, carried to the ledger row the same way the door is, so a node's row
 	// joins to the delegator's on one equality.
 	meta.FleetJobID = req.FleetJobID
+	// The asker's name a fleet node was told (X-Offload-Asker), carried to the ledger row the same way.
+	meta.Requester = req.Requester
 
 	if !req.Task.Valid() {
 		return core.Deferf("unknown task "+string(req.Task), "", meta)
@@ -649,7 +659,7 @@ func (p *Pipeline) Run(ctx context.Context, req core.Request) (res core.Result) 
 	if kn, _ := p.knnSnap(); kn != nil {
 		knnSkip = p.knnPreferLargerEntry(req.Task, req.Input)
 	}
-	// Composite tier (ADR 0039): ONE placement decision for this call — the
+	// Composite tier (ADR 0052): ONE placement decision for this call — the
 	// chain is built from it and every rung's result is stamped with it.
 	placed := p.cascadePlacement()
 	chain := p.modelChainOn(req.Task, meta.Feat, knnSkip, placed)
@@ -720,6 +730,12 @@ func (p *Pipeline) Run(ctx context.Context, req core.Request) (res core.Result) 
 			res, escalatable = p.attempt(ctx, req, built, ck, model, meta, start, true, entryLen)
 		}
 		tried[model] = true
+		// An escalating attempt that wrote an inner row minted the call's job id;
+		// every later row of this call (the answer, or the final defer) carries it.
+		if res.Meta.JobID != "" {
+			meta.JobID = res.Meta.JobID
+		}
+		meta.CardsCarried = res.Meta.CardsCarried
 		// Phase 3/7: the breaker tracks INFRA health only (ErrClass set); a quality
 		// defer means the tier physically worked. Autoheal fires on infra failure.
 		// LO-9: a TIMEOUT on the first call to an idle tier is exempted from
@@ -987,7 +1003,7 @@ func (p *Pipeline) runVisionGen(ctx context.Context, req core.Request, built tas
 	}
 	if info := gpulock.WaitFreeScoped(ctx, p.gpuLockPath, p.visionGPUWait, p.visionGPUPoll, readLease); info.Held {
 		meta.LatencyMs = time.Since(start).Milliseconds()
-		meta.ErrClass = "gpu_busy"
+		meta.ErrClass = errClassGPUBusy
 		reason := fmt.Sprintf("gpu busy: generation job holds the lock (%ds)", int(info.Age/time.Second))
 		p.recordDefer(req.Task, meta, len(req.Input), reason)
 		return core.Deferf(reason, "", meta)
@@ -1021,8 +1037,21 @@ func (p *Pipeline) runVisionGen(ctx context.Context, req core.Request, built tas
 	if gerr != nil {
 		meta.LatencyMs = time.Since(start).Milliseconds()
 		meta.ErrClass = classifyErr(gerr)
-		p.recordDefer(req.Task, meta, len(req.Input), "vision model call failed: "+gerr.Error())
-		return core.Deferf("vision model call failed: "+gerr.Error(), "", meta)
+		reason := "vision model call failed: " + gerr.Error()
+		// A context-overflow defer that runVideoDescribe is about to retry at a
+		// smaller frame width is a STEP of that call, not the call: its row is
+		// an inner row of the row the final attempt writes.
+		row := meta
+		if rt, _ := ctx.Value(visionRetryKey{}).(*visionRetry); rt != nil && rt.canRetry && row.ParentJobID == "" && isContextOverflow(reason) {
+			if rt.id == "" {
+				rt.id = mintJobID("vd")
+			}
+			// An inner row names the call; it is never the call (JobID empty), even
+			// on the second retried attempt, whose meta already carries the id.
+			row.ParentJobID, row.JobID = rt.id, ""
+		}
+		p.recordDefer(req.Task, row, len(req.Input), reason)
+		return core.Deferf(reason, "", meta)
 	}
 	meta.TokensIn = gres.TokensIn
 	meta.TokensOut = gres.TokensOut
@@ -1089,7 +1118,18 @@ func (p *Pipeline) runVideoDescribe(ctx context.Context, req core.Request, built
 	// different identity than the attempt that looked it up, storing the result
 	// under a digest for bytes the model never saw.
 	vidID, vdErr := p.digestMedia(req.Video)
+	// The retry loop below writes one row per attempt. An overflowed attempt that
+	// WILL be retried (width above the floor) is an inner row of the call; the
+	// attempt that ends the loop is the call's row and carries the job id the
+	// inner rows named. Nothing is minted unless an attempt really is retried, so
+	// the common one-attempt call writes the same single plain row as before.
+	retry := &visionRetry{}
+	ctx = context.WithValue(ctx, visionRetryKey{}, retry)
 	for {
+		retry.canRetry = width > 256
+		if retry.id != "" {
+			meta.JobID = retry.id
+		}
 		frames, err := videoio.SampleFrames(req.Video, p.cfg.FFmpegPath, p.cfg.VideoFPS, p.cfg.VideoMaxFrames, width, p.cfg.VisionMaxImageBytes)
 		if err != nil {
 			meta.LatencyMs = time.Since(start).Milliseconds()
@@ -1245,7 +1285,10 @@ func (p *Pipeline) runTranscribe(ctx context.Context, req core.Request, meta cor
 	if p.cache != nil && identifiable {
 		if raw, ok := p.cache.Get(ck); ok {
 			var cv cacheVal
-			if json.Unmarshal(raw, &cv) == nil && len(cv.Data) > 0 {
+			// A hit names transcript files on disk: one whose files are gone (a fleet node removes an
+			// upload job's transcripts after their retention) would answer with paths that point at
+			// nothing, so it is a miss and the transcription is redone.
+			if json.Unmarshal(raw, &cv) == nil && len(cv.Data) > 0 && transcriptFilesPresent(cv.Data) {
 				meta.CacheHit = true
 				meta.LatencyMs = time.Since(start).Milliseconds()
 				p.record(req.Task, meta, len(req.Audio))
@@ -1402,6 +1445,25 @@ func (p *Pipeline) runTranscribe(ctx context.Context, req core.Request, meta cor
 	meta.LatencyMs = time.Since(start).Milliseconds()
 	p.record(req.Task, meta, len(req.Audio))
 	return core.Result{OK: true, Data: data, Meta: meta}
+}
+
+// transcriptFilesPresent reports whether every transcript file a cached result names still exists.
+// A result that names none (an older entry, or a payload this build cannot read) counts as present:
+// the check only refuses a hit it can prove dangles.
+func transcriptFilesPresent(data json.RawMessage) bool {
+	var r transcribeResult
+	if json.Unmarshal(data, &r) != nil {
+		return true
+	}
+	for _, p := range []string{r.SRTPath, r.TextPath, r.JSONPath} {
+		if p == "" {
+			continue
+		}
+		if _, err := os.Stat(p); err != nil {
+			return false
+		}
+	}
+	return true
 }
 
 // transcribeResult is the offload_transcribe payload (the {gist, segments[]}
@@ -1731,7 +1793,10 @@ func (p *Pipeline) runInpaintImage(ctx context.Context, req core.Request, meta c
 	// cleanly on the vqa load limit. Evidence:
 	// docs/superpowers/evidence/2026-07-17-nightshift-run-graph.md.
 	if mask == "" && paramBool(req.Params, "auto_text") {
-		am, aerr := p.autoTextMask(ctx, image, req.Door)
+		// The detector's vqa row is an inner row of this call's row (plan D12):
+		// every exit below records through meta, so the job id rides on all of them.
+		meta.JobID = mintJobID("ip")
+		am, aerr := p.autoTextMask(ctx, image, req.Door, meta.JobID)
 		if aerr != nil {
 			return defer1("auto text localization failed: " + aerr.Error() + " — build a mask with edit-image mask_boxes instead")
 		}
@@ -4102,29 +4167,91 @@ func sha256hex(s string) string {
 // and the escalation/defer ladder all come for free. There is no new extraction
 // logic here; runExtractImage only composes ocr + extract.
 //
-// Telemetry: the two sub-calls each record their own ledger row (an `ocr` vision
-// row + an `extract` text row). That is the correct, honest accounting, so
-// runExtractImage adds NO recording of its own — meta/start are unused here.
+// Telemetry (plan D12): the two sub-calls still record their own ledger rows (an
+// `ocr` vision row + an `extract` text row), but as INNER rows of one row the
+// composite writes for itself on EVERY exit (recordExtractImageCall). One call,
+// one card; the sub-call rows stay for the per-task detail (register C-62).
 func (p *Pipeline) runExtractImage(ctx context.Context, req core.Request, meta core.Meta, start time.Time) core.Result {
-	_ = meta
-	_ = start
+	jobID := mintJobID("xi")
+	meta.JobID = jobID
+	var subs []core.Result
+	done := func(res core.Result) core.Result {
+		p.recordExtractImageCall(req.Task, meta, start, res, subs)
+		return res
+	}
 	// 1. OCR the image via the existing ocr task (reuses runVision + the vision
 	//    tier). A propagated defer covers image-load, empty-output, and model-fail.
-	ocrRes := p.Run(ctx, core.Request{Task: core.TaskOCR, Image: req.Image, Door: req.Door})
+	ocrRes := p.Run(ctx, core.Request{Task: core.TaskOCR, Image: req.Image, Door: req.Door, ParentJobID: jobID})
+	subs = append(subs, ocrRes)
 	if !ocrRes.OK {
-		return ocrRes
+		return done(ocrRes)
 	}
 	// 2. Pull the OCR text out of ocrRes.Data ({"text": "..."}).
 	var m map[string]string
 	_ = json.Unmarshal(ocrRes.Data, &m)
 	ocrText := m["text"]
 	if strings.TrimSpace(ocrText) == "" {
-		return core.Deferf("empty OCR text for extract_image", "", ocrRes.Meta)
+		return done(core.Deferf("empty OCR text for extract_image", "", ocrRes.Meta))
 	}
 	// 3. Run the EXISTING extract on the OCR text — grammar + grounding (against
 	//    ocrText) + schema validation, all reused. The caller's schema rides in
 	//    req.Params exactly as offload_extract passes it.
-	return p.Run(ctx, core.Request{Task: core.TaskExtract, Input: ocrText, Params: req.Params, Door: req.Door})
+	exRes := p.Run(ctx, core.Request{Task: core.TaskExtract, Input: ocrText, Params: req.Params, Door: req.Door, ParentJobID: jobID})
+	subs = append(subs, exRes)
+	return done(exRes)
+}
+
+// recordExtractImageCall writes the composite's own row: the parent the ocr and
+// extract rows name. Each token is counted once by every reader:
+//
+//   - TokensIn is only what no inner row carries: the prompts of sub-calls a cache
+//     hit answered (an inner cache-hit row saves nothing). The prompts of the
+//     sub-calls that ran stay on their inner rows, whose TokensIn the savings
+//     summary adds (C-62).
+//   - TokensOut is the call's whole output; an inner row's is never counted.
+//   - CardsTokens is the work the cards did across the sub-calls that ran,
+//     set explicitly because Record writes 0 on an inner row and would derive
+//     this row's figure from the reduced TokensIn.
+//   - The row is a cache hit only when every sub-call that ran was one, so a call
+//     that did no card work makes no card.
+//
+// A sub-call's own escalating attempts are inner rows too (flattened under this
+// composite). Their prompt tokens reach the savings summary (a non-deferred inner
+// row's TokensIn is added, C-62) and their card work reaches CardsTokens through
+// the sub-call's Meta.CardsCarried; their output is on no call row, because only
+// the answering tier's figures are in res.Meta.
+func (p *Pipeline) recordExtractImageCall(task core.TaskType, meta core.Meta, start time.Time, res core.Result, subs []core.Result) {
+	if p.led == nil {
+		return
+	}
+	row := meta
+	row.Model = res.Meta.Model
+	row.ErrClass = res.Meta.ErrClass
+	row.LatencyMs = time.Since(start).Milliseconds()
+	row.TokensIn, row.TokensOut = 0, 0
+	row.CacheHit = len(subs) > 0
+	cards, cachedIn := 0, 0
+	for _, s := range subs {
+		row.TokensOut += s.Meta.TokensOut
+		if s.Meta.CacheHit {
+			cachedIn += s.Meta.TokensIn
+			continue
+		}
+		row.CacheHit = false
+		cards += s.Meta.TokensIn + s.Meta.TokensOut
+	}
+	for _, s := range subs {
+		// A sub-call's own climbing attempts (inner rows under this composite) did
+		// card work that no row but the answering tier's could carry.
+		cards += s.Meta.CardsCarried
+	}
+	row.TokensIn = cachedIn
+	e := entryFrom(task, row, res.Deferred, 0)
+	if res.Deferred {
+		e.Reason = res.Reason
+	}
+	e.CardsTokens = cards
+	_ = p.led.Record(e)
 }
 
 // attempt runs the grammar+retry loop for ONE model tier. It returns the result
@@ -4280,7 +4407,23 @@ func (p *Pipeline) attempt(ctx context.Context, req core.Request, built tasks.Bu
 					// 9,217 for 43 real firings. Same record gate as a success
 					// (counterfactual RunTier calls write nothing).
 					if record {
-						p.record(req.Task, meta, entryChars)
+						// The row is a step of the call, not the call (plan D12):
+						// an inner row of the row the tier that finally answers
+						// writes. The id is minted here, on the first climb, so a
+						// call that never climbs writes the same plain row as ever.
+						// A call already inner (a composite's sub-call) stays inner
+						// under its composite's id: rows never nest.
+						row := meta
+						if row.ParentJobID == "" {
+							if meta.JobID == "" {
+								meta.JobID = mintJobID("cs")
+							}
+							row.ParentJobID, row.JobID = meta.JobID, ""
+						}
+						p.record(req.Task, row, entryChars)
+						// The inner row's cards_tokens is written 0: the row of the tier
+						// that answers carries this attempt's work (Meta.CardsCarried).
+						meta.CardsCarried += ledger.CardsTokensOf(entryFrom(req.Task, row, false, entryChars))
 					}
 					// a larger, more decisive tier may clear the threshold
 					return core.Deferf(reason, gen.Content, meta), true
@@ -4600,6 +4743,10 @@ func (p *Pipeline) RecordAccel(task, modelTier string, latencyMs int64, deferred
 }
 
 // entryFrom builds a ledger entry from per-call meta + the enriched signals.
+//
+// It is shared by every caller that snapshots a row (the entry tier's correctness-label snapshot, the
+// confidence head's feature row, the shadow capture), so it carries no card work of earlier attempts:
+// those are the call's own row's business (callRowFrom).
 func entryFrom(task core.TaskType, meta core.Meta, deferred bool, inputChars int) ledger.Entry {
 	return ledger.Entry{
 		Task: string(task), TokensIn: meta.TokensIn, TokensOut: meta.TokensOut, SeatTokensIn: meta.SeatTokensIn,
@@ -4630,6 +4777,7 @@ func entryFrom(task core.TaskType, meta core.Meta, deferred bool, inputChars int
 		// empty — omitted — on a plain cascade call.
 		JobID:          meta.JobID,
 		ParentJobID:    meta.ParentJobID,
+		CallID:         meta.CallID,
 		QueuedMs:       meta.QueuedMs,
 		Placement:      meta.Placement,
 		Steps:          meta.Steps,
@@ -4641,6 +4789,8 @@ func entryFrom(task core.TaskType, meta core.Meta, deferred bool, inputChars int
 		Door: meta.Door,
 		// The fleet job id of a dispatched call (ADR 0064); empty on any other.
 		FleetJobID: meta.FleetJobID,
+		// Who a fleet node ran the job for (D11); empty on any other row.
+		Requester: meta.Requester,
 		// The media binding's license (ADR 0058); empty on text rows.
 		License: meta.License,
 		// Same read the delegation log does (delegate.record): per-row, so a
@@ -4648,6 +4798,20 @@ func entryFrom(task core.TaskType, meta core.Meta, deferred bool, inputChars int
 		// every row consistently, and an untagged process writes nothing.
 		Arm: strings.TrimSpace(os.Getenv("OFFLOAD_DELEGATE_ARM")),
 	}
+}
+
+// callRowFrom is entryFrom for a row the ledger will hold as the CALL's row (the answering tier's, or
+// the final defer): it adds the card work of the call's earlier attempts' inner rows (whose
+// cards_tokens Record zeroes) to its own, so the call's row holds all of the call's work and a total
+// over the ledger counts each token once. An inner row (ParentJobID set) adds nothing. Only the two
+// writers of a call's row use it; a snapshot built by entryFrom already has the attempt's work in
+// its own figures, and adding the carried work to it counts that work twice.
+func callRowFrom(task core.TaskType, meta core.Meta, deferred bool, inputChars int) ledger.Entry {
+	e := entryFrom(task, meta, deferred, inputChars)
+	if meta.CardsCarried > 0 && meta.ParentJobID == "" {
+		e.CardsTokens = meta.CardsCarried + ledger.CardsTokensOf(e)
+	}
+	return e
 }
 
 // placedLayer is the ledger's read of a placed block: the layer, or "" (the
@@ -4663,7 +4827,7 @@ func (p *Pipeline) record(task core.TaskType, meta core.Meta, inputChars int) {
 	if p.led == nil {
 		return
 	}
-	_ = p.led.Record(entryFrom(task, meta, false, inputChars))
+	_ = p.led.Record(callRowFrom(task, meta, false, inputChars))
 }
 
 // recordDefer logs a single deferred ledger entry for the final cascade
@@ -4674,7 +4838,7 @@ func (p *Pipeline) recordDefer(task core.TaskType, meta core.Meta, inputChars in
 	if p.led == nil {
 		return
 	}
-	e := entryFrom(task, meta, true, inputChars)
+	e := callRowFrom(task, meta, true, inputChars)
 	e.Reason = reason
 	_ = p.led.Record(e)
 }

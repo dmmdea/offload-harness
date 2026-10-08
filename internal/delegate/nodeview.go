@@ -95,7 +95,7 @@ type NodeView struct {
 	// with a short media lease; placement of agent work keeps reading LeasedText and LeaseBusy.
 	LeaseHeld bool
 	// MediaRoutes is the node's own verdict on each file-backed media route (health
-	// `media_routes`, ADR 0072): CONFIGURED, NOT CONFIGURED or BOUND-BUT-MISSING. It is only
+	// `media_routes`, ADR 0076): CONFIGURED, NOT CONFIGURED or BOUND-BUT-MISSING. It is only
 	// meaningful when MediaRoutesKnown: a node that predates the field publishes none, which is
 	// UNKNOWN, never "no route is configured".
 	MediaRoutes      []MediaRouteView
@@ -162,6 +162,13 @@ type NodeView struct {
 	// NONE: the lane is dark unless declared, and an older node never lists "text"
 	// either. Read it through ServesTextTask, never directly.
 	TextTasks []string
+	// STTHQ / STTUploadMaxMB decode health's `stt_hq` and `stt_upload_max_mb` (ADR 0072): whether the
+	// node has an hq whisper model and the largest audio upload its door takes, MiB decoded. Both
+	// are published only by a node that advertises "stt-upload", so an older node decodes to nil
+	// and 0. STTHQ is a POINTER: false (a node with the door and no hq model) must stay distinct
+	// from absent. Read them through ServesSTTUpload and PlaceSTT, never directly.
+	STTHQ          *bool
+	STTUploadMaxMB int
 	// Layers is a composite node's advertised device layers (health `layers`,
 	// ADR 0039): the spec of every layer and seat, live occupancy, and the
 	// node's OWN admissibility verdict per layer. The delegator rebuilds them
@@ -205,6 +212,12 @@ type NodeView struct {
 	// genuine "no wait right now" answer and must read differently from
 	// "this node does not publish the estimate at all".
 	QueueWaitEstimateSec *float64
+	// NewJobWaitSec is the node's OWN estimate of how long a job submitted NOW waits for a worker -
+	// health `new_job_wait_sec` (ADR 0073), one slot deeper than QueueWaitEstimateSec, which is the
+	// wait of the deepest job ALREADY queued. nil on a node that predates it, and on any node while
+	// a worker is free (omitempty). publishedStartWait prefers it as-is; without it the older
+	// estimate gets the slot added.
+	NewJobWaitSec *float64
 }
 
 // LeaseView is one live lease of a node, as its health leases[] publishes it.
@@ -235,10 +248,47 @@ type LeaseView struct {
 // is safely reachable (fleetnode.taskConfiguredFor).
 const VisionTask = "vision"
 
+// STTUploadTask is the fleet task_type of the stt upload door (ADR 0072): a node lists it in
+// supported_task_types when its whisper model is bound and the door is safely reachable
+// (fleetnode.STTUploadAdmissible). The legacy "stt" task, which every node with a whisper model
+// lists, takes only a path on the NODE's disk and cannot be sent bytes.
+const STTUploadTask = "stt-upload"
+
+// defaultSTTUploadMaxMB is the upload cap a node that lists the door but publishes no
+// stt_upload_max_mb is held to: the door's built-in (config.EffectiveSTTUploadMaxBytes).
+const defaultSTTUploadMaxMB = 48
+
 // TextTask is the fleet task_type of the text lane (0.154.0): a node lists it in
 // supported_task_types only when its tier declares text tasks (config text_tasks) and the
 // lane is safely reachable (fleetnode.taskConfiguredFor).
 const TextTask = "text"
+
+// ServesSTTUpload reports whether v advertises the stt upload door.
+func (v NodeView) ServesSTTUpload() bool {
+	for _, t := range v.Tasks {
+		if t == STTUploadTask {
+			return true
+		}
+	}
+	return false
+}
+
+// ServesSTTUploadOf reports whether v can transcribe a file of size bytes: it advertises the
+// door, takes a file that large, and has an hq model when hq is asked (a node that does not publish
+// stt_hq is not assumed to have one).
+func (v NodeView) ServesSTTUploadOf(hq bool, size int64) bool {
+	if !v.ServesSTTUpload() {
+		return false
+	}
+	if hq && (v.STTHQ == nil || !*v.STTHQ) {
+		return false
+	}
+	max := v.STTUploadMaxMB
+	if max <= 0 {
+		max = defaultSTTUploadMaxMB
+	}
+	return size <= int64(max)<<20
+}
 
 // ServesText reports whether v advertises the text lane.
 func (v NodeView) ServesText() bool {
@@ -451,9 +501,12 @@ type healthWire struct {
 	// Additive (0.154.0): the classify / extract tasks the node's text lane serves.
 	// Absent on an older node and on any node whose tier declares none (the lane is dark).
 	TextTasks []string `json:"text_tasks"`
-	// Additive (ADR 0072): the node's media route verdicts. A pointer so an absent key (an older
+	// Additive (ADR 0076): the node's media route verdicts. A pointer so an absent key (an older
 	// node) stays distinguishable from a published list.
 	MediaRoutes *[]MediaRouteView `json:"media_routes"`
+	// Additive (ADR 0072): the stt upload door's capability. Absent on an older node.
+	STTHQ          *bool `json:"stt_hq"`
+	STTUploadMaxMB int   `json:"stt_upload_max_mb"`
 	// Additive (0.116.0, ADR 0039). nil on a plain or pre-0.116 node; the ONE
 	// row shape fleetnode publishes and offload_status echoes.
 	Layers []placetable.LayerRow `json:"layers"`
@@ -467,6 +520,7 @@ type healthWire struct {
 	LeaseDraining        bool     `json:"lease_draining"`
 	RecentAgentWallSec   float64  `json:"recent_agent_wall_sec"`
 	QueueWaitEstimateSec *float64 `json:"queue_wait_estimate_sec"`
+	NewJobWaitSec        *float64 `json:"new_job_wait_sec"`
 }
 
 // FetchNodeView reads one node's /fleet/health into a NodeView (Local=false —
@@ -539,7 +593,10 @@ func FetchNodeView(ctx context.Context, base, token string) (NodeView, error) {
 		VisionTasks:  w.VisionTasks,
 		TextTasks:    w.TextTasks,
 		Layers:       w.Layers,
-		Local:        false,
+
+		STTHQ:          w.STTHQ,
+		STTUploadMaxMB: w.STTUploadMaxMB,
+		Local:          false,
 
 		JobsAdmitting:        w.JobsAdmitting,
 		SeatLoaded:           w.SeatLoaded,
@@ -548,6 +605,7 @@ func FetchNodeView(ctx context.Context, base, token string) (NodeView, error) {
 		LeaseDraining:        w.LeaseDraining,
 		RecentAgentWallSec:   w.RecentAgentWallSec,
 		QueueWaitEstimateSec: w.QueueWaitEstimateSec,
+		NewJobWaitSec:        w.NewJobWaitSec,
 	}
 	if w.MediaRoutes != nil {
 		v.MediaRoutes, v.MediaRoutesKnown = *w.MediaRoutes, true

@@ -6,7 +6,7 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
-### Added — media jobs run on a fleet node, with their input files, and come back verified (ADR 0072, register CT-50)
+### Added — media jobs run on a fleet node, with their input files, and come back verified (ADR 0076, register CT-50)
 
 A machine with no render lane, or a caller who names a node, can now render an image, a clip, a character animation, a voice
 or music clip or a ComfyUI graph on the fleet. Nothing in the repository dispatched the five media tasks before: the MCP doors
@@ -131,6 +131,448 @@ Tests: `TestReadMediaJobBodyAllocatesExactlyContentLength`, `TestFetchedOutputsL
 `TestTouchRefreshesTheClaimsAndFinishedTempsACallHolds`, `TestAMultiOutputFetchKeepsItsClaimsFresh`,
 `TestReplacingAnExistingOutKeepsItsPermissionBits`, `TestPollFailuresThatAlternateWithAnswersNeverEndTheWait`,
 `TestAGraphThatEscapesPastTheNodesBodyCapIsRefusedBeforeTheNetwork`, `TestComposeProjectReportsADeadlineItCannotExtend`.
+
+## [0.168.0] - 2026-10-07 - the display layer opens under the presence guard and leaves when the operator returns
+
+### The display layer opens under its presence guard and leaves when the operator returns (ADR 0075)
+
+- **The card allocator keeps the desktop floor on a display card it opens.** `operator_presence` `auto` or `away` already
+  opened the display card to `gpu reserve --cards N` and to an auto-placed media call, with no floor: with the pair seat
+  loaded on the other two cards the display card sorted first as the card with nothing to evict, and a 10 GiB job could
+  take it to about 2 GiB free. The allocator now holds an opened display card to the display layer's own arithmetic,
+  `free − footprint ≥ display_floor_gib` (`config.DisplayFloorGiB()`: the largest floor of a layer guarded by
+  `display_floor`, 0 when none is declared, which leaves a box without one exactly as it was). A job that declares no
+  footprint (`--vram`) cannot be shown to leave the floor and is not given the card, as the layer's guard refuses a seat
+  with no display footprint; `--devices` still names the card on the operator's word. The skip reads `vram` and names the
+  floor, and a display card that could not clear the floor is not queued on while a lease holds it.
+- **A loaded display twin is a resident seat of its card.** `gpualloc.ResidentFrom` counted a seat only by its `model`,
+  and the display layer's router names its twins only in `model_map`, so a loaded twin left the display card reading as an
+  empty one. Twins now count, each loaded twin costed at `footprint_gib`, else `display_footprint_gib`, so taking the card is
+  priced as the eviction it is.
+- Docs: `gpu-lease.md` ("The display card, once the operator is away"), `media-generation.md`. Tests: the allocator floor
+  table (`TestAnOpenedDisplayCardIsHeldToTheDesktopFloor` and its siblings in `internal/gpulease`), `ResidentFrom` over a
+  twin, `BuildInput` carrying the floor and the end-to-end picker (`internal/gpualloc`), `TestDisplayFloorGiB…`
+  (`internal/config`); each new branch mutated red.
+- **The `display_floor` guard checks the card the config names against the card the driver says drives the monitor.** The
+  floor guarded `layers[display].display_device` and never asked the driver which card the screen is on, so a board that
+  re-enumerated after a power loss, or a cable that moved, left the floor protecting a card that is not the desktop's. The
+  guard now refuses, before any arithmetic, naming both cards (`display_device 1 is CUDA index 1, but the driver reports
+  the monitor on index 0`) when the driver singles out cards that drive a monitor and the declared one is not among them.
+  It contradicts only on positive evidence: a reading that cannot say (no card flagged, a transient failure that left
+  `display_attached` unknown, no reader) trusts the declaration, and a second monitor on another card does not contradict a
+  declared card that also drives one. Index and UUID pins are both resolved first, and the node publishes the same verdict
+  in its `layers` rows (`gpuprobe.ScreenCardIndexes`, `placement.Live.ScreenCards`).
+- **`CheckComposite` reads UUID pins.** The checked union read only digits after `CUDA_VISIBLE_DEVICES=`, so a render that
+  pins a seat by GPU UUID (this box's rule, and what the twin template tells an operator to substitute) read as "pins no
+  CUDA_VISIBLE_DEVICES" and was refused. A UUID pin is now a pin: two UUID lists are compared as the same cards (a declared
+  prefix stands for the id that extends it), a UUID list must name as many cards as the declaration, and a UUID against an
+  index declaration is compared through this machine's card table or refused (see the review fixes below).
+- Docs: `composite-tier.md` (the guard, "The rendered config is checked"). Tests: `TestDisplayFloorCrossChecks…`,
+  `TestLiveFromReadingsCarriesTheScreenCards…`, `TestANodePublishesAMismatchedDisplayCardAsInadmissible`,
+  `TestSnapshotServesTheScreenCardsFromItsMemoisedProbe` (`internal/placement`), `TestScreenCardIndexes`
+  (`internal/gpuprobe`), `TestCheckCompositeReadsUUIDPins` (`internal/servingtmpl`); each new branch mutated red.
+- **A loaded display twin is unloaded when the operator returns or the desktop's memory goes.** The layer's guards decide
+  once, at the placement; a twin then sat on the desktop's card until llama-swap's 300 s idle ttl however soon the operator
+  was back, and a twin another llama-swap client loaded was never asked at all. `fleet-serve` now runs a watcher
+  (`internal/displaywatch`, `fleet_displaywatch.go`): every `display_watch_sec` (0 = 10 s, negative = off, above 300
+  refused at load) it reads llama-swap's `/running`, and only while a model of the display layer (its seats' own models
+  and router `model_map` twins) is loaded does it ask the layer's own desktop guards again through
+  `placement.ResidentVerdict`: presence reads present or unknown, or free VRAM on the display card is below the floor. It
+  uses the same readers, card resolution and fail-closed reading as admission, but tests `free ≥ floor` and does not
+  subtract the footprint again (a resident seat is already out of the free number), and leaves `host_ram` alone. On a
+  refusal it unloads the layer's loaded models through llama-swap's per-model route (never the total one, no drain: the
+  desktop needs the memory now), logs each one with the reason, and retries a failed unload at the next check. It
+  unloads nothing else, and an unreadable `/running` unloads nothing. It checks once at start, so a twin loaded before
+  fleet-serve came up is not exempt.
+- **`offload_status` shows the guard.** `local.display_guard` (omitted on a box with no display layer, and on a dormant
+  layer that never acted) carries `watching` (a heartbeat the watcher wrote recently, so a box whose fleet-serve is not
+  running reads `false` with the reason), the check period and `last_action` (the models, the reasons, what came down and
+  any error). `local.operator_presence` publishes the presence reading and mode on a composite box, with the caution
+  that `away` is the operator's unconditional override and `auto` the supported mode. A plain box's payload is unchanged.
+- Tests: `internal/displaywatch` (presence flips, the floor falls, fail-closed inputs, a failed unload
+  retried, a stopping twin ignored, only the display layer's models, the per-model route and never the total one, the
+  state file and the status view), `TestResidentVerdict…` and `TestPresenceAllowsIsTheGuardsRule` (`internal/placement`),
+  `TestStartDisplayWatch…` (root), `TestDisplayWatch…` (`internal/config`), `TestStatusPublishes…` (`internal/mcpserver`);
+  each new branch mutated red.
+- **Docs: the real enable sequence for the display layer, and the `away` caution.** `composite-tier.md` gains "Opening the
+  display layer" (back up; seed `tier_profile`/`tiers`/`layers` into the live config; UUID-pinned display twins in the
+  llama-swap yaml; restart llama-swap with the vLLM seat stopped cleanly; `operator_presence` `auto`; `dormant` false;
+  read it back), and "The guards keep holding after the load". `operator_presence` `away` is documented as an
+  unconditional override that admits at the desk, and `auto` as the supported mode. A rendered twin is loadable by any
+  llama-swap client whatever `dormant` and `operator_presence` say; the unload-on-return check also takes down a twin a
+  non-harness client loaded. The G1b recipe in the composite-tier plan is refreshed: the presence step, the
+  `summarize <file>` syntax, baselines, the assertions (`placed.seat` is the twin, `/v1/models` lists it, the floor holds
+  in every sample, the pair is not evicted), the unload-on-return check, and the precondition that the three-card seat is
+  not loaded.
+- **ADR 0075, "The display layer opens under the presence guard and leaves when the operator returns".** Records the
+  operator's 2026-10-07 "yes" to opening the display-card seat under its presence guard (it takes work only while the
+  console is locked or idle and nothing is fullscreen, with a 4 GiB desktop floor), that this amends the earlier operator
+  rule keeping single-card seats off the display card for the display layer only, and the terms: the gaps closed before it
+  opens (allocator floor and twin residents, the screen cross-check, UUID pins), the post-admission check (per-model unload,
+  no drain, fail loud, nothing else touched), `auto` as the supported presence mode with `away` documented as an override,
+  and the rendered-twin-is-loadable-by-any-client caveat. Indexed in the ADR README; `composite-tier.md` links it.
+- **Review fixes: the desktop rule holds when the card is unknown, at the grant, and when nothing is watching.**
+  - **A display-unknown card is held to the floor.** After a transient display query failure every card is `DisplayUnknown`
+    and none is `Display`, so the floor (`c.Display && floor > 0`) was skipped on exactly the reading where no card can be
+    vouched for as not the monitor. The floor now applies to a card that is `Display` or `DisplayUnknown`.
+  - **A queued request is asked again at the grant.** A `--cards` request or an auto-placed media call that queued on the
+    display card while the operator was away was decided at the enqueue and never again; FIFO can take hours. The grant now
+    vets the cards it just handed over (`Options.GrantCheck`, `Manager.VetGrant`, `gpulease.DesktopRefusals`, built by
+    `gpualloc.GrantCheck`): a card that no longer qualifies (the operator is back, the floor is gone) is released and the
+    request chooses again from fresh readings, taking another card it still fits or waiting for what qualifies, with its
+    arrival time kept. The check runs after the claim because a check before it can be skipped by a lease that is
+    mid-release. Wired into the reserve verb (including its immediate-grant path) and the media admission queue. A lease
+    already RUNNING on the display card is not revoked when the operator returns (the watcher unloads llama-swap twins and
+    nothing else); `gpu-lease.md` and ADR 0075 say so.
+  - **A blind watcher is not watching.** An unreadable `/running` used to leave `watching: true` on a fresh heartbeat. The
+    state file now records `read_err` and `blind_since` (written at once on the first failed read and on recovery) and
+    `local.display_guard` shows `watching: false` with a note while it is blind. A state path that cannot be resolved is
+    no longer dropped: it is logged at start and carried in the status note.
+  - **The display layer does not open while nothing is watching it.** Its `presence` guard now also refuses when the
+    watcher's heartbeat is absent or stale, the watcher is blind, or `display_watch_sec` is negative
+    (`internal/displaystate.Alive`, read through `placement.Live.WatcherAlive`; a new leaf package so `placement` needs no
+    import of `displaywatch`). The post-admission check itself never asks. A node publishes the same verdict in its health
+    rows. Closing the card (`operator_presence` back to `present`) reaches the watcher only on a `fleet-serve` restart; the
+    docs say so. The watcher covers only the layer named `display`; the docs say that too.
+  - **A UUID pin the render cannot compare is refused, not passed.** `comparePins` let a UUID-rendered pin against an
+    index-declared one through. The gate now resolves the UUIDs through this machine's card table (`nvidia-smi`, read once
+    and only when a comparison needs it) and compares index sets; without a table, or with a UUID the table does not list, it
+    refuses and says to declare UUID pins in `layers` or render on the box. The `display_floor` guard resolves a seat's UUID
+    `device` through the probe too (one it cannot resolve counts as on the display card), so that advice does not turn the
+    floor's arithmetic into `free - 0`.
+  - **An unreadable `/running` reads the display card as occupied; every loaded twin is costed.** `ResidentSeats` returned
+    nothing when llama-swap could not be read, so the display card sorted first as the card with nothing to evict. The
+    display layer's models are now counted as loaded then (other layers contribute nothing, as before), and `ResidentFrom`
+    costs each loaded twin at its footprint instead of once per seat.
+  - **`display_watch_sec` that overflows a `Duration` is refused.** `seconds * time.Second` wraps negative above about 9.2e9,
+    which read as off and passed validation. The value is compared as an integer first, and `DisplayWatchInterval` clamps an
+    unvalidated one to 300 s.
+  - Tests: `TestAnUnknownDisplayCardIsHeldToTheDesktopFloor`, `TestDesktopRefusals…`, `TestAcquireRefusesTheGrant…`,
+    `TestVetGrant…` (`internal/gpulease`); `TestAQueuedLease…`, `TestARefusedGrantKeepsTheArrivalTime…`,
+    `TestAnImmediateGrantIsVettedToo`, `TestRenderGate…UUIDPin…` (root); `TestAQueuedMediaCall…` (`internal/pipeline`);
+    `TestABlindWatcher…`, `TestTheWatcherSeesAgain…`, `TestAStatePathThatCannotBeResolved…` (`internal/displaywatch`);
+    `internal/displaystate`; `TestTheDisplayLayerDoesNotOpenWhileTheWatcherIsNotAlive` and siblings, `TestAUUIDPinnedSeat…`
+    (`internal/placement`); `TestTheDisplayRowCarriesThisNodesWatcherLiveness` (`internal/fleetnode`);
+    `TestCheckCompositeReadsUUIDPins` (`internal/servingtmpl`); `TestResidentSeatsTreatsTheDisplayCard…` (`internal/gpualloc`);
+    `TestValidateLayersRefusesADisplayWatchThatOverflowsADuration` (`internal/config`); each new branch mutated red.
+
+## [0.167.0] - 2026-10-07 - truth and guards outside the delegator: tailnet zones, redacted roster URLs, faster probes, doctor rows, OCR off Q4 seats
+
+### Truth and guards outside the delegator (fleet-first, track B; ADR 0074)
+
+- **The tailnet guard admits a configured list of zones.** A node shared in from another tailnet is named by Tailscale
+  under the SHARER's zone, and `tailnet_suffix` held one zone, so the only form that passed every guard for such a node
+  was its raw `100.x` address. The new key `tailnet_suffixes` lists further zones beside `tailnet_suffix` (which keeps its
+  meaning and keeps working alone); load installs the union, the own zone first, before any endpoint is vetted, and a
+  malformed entry refuses the load naming `tailnet_suffixes[i]` and changes nothing. Every consumer of the zone judges the
+  whole list: `netguard.TailnetURL` (a new `TailnetURLIn` takes the list as an argument), the research lane's by-name
+  refusal (a host under ANY listed zone is the tailnet, not web), and the cache-store host check. The default is
+  unchanged and fail-closed, the dial gate is untouched (a name that resolves outside loopback and the tailnet CGNAT range is
+  still refused at dial time), and a generic `.ts.net` rule is still rejected. `doctor` prints one `tailnet zones:` row
+  naming each zone and its key (nothing when none is configured).
+  Docs: ADR 0074 (new; amends 0023, whose decision text carries a pointer), `OPERATOR-GUIDE.md`, `mcp-server.md`,
+  `config.example.json`. Tests: `tailnet_zones_test.go` (netguard), `tailnetzones_test.go` (config: every guarded key,
+  the install, malformed entries, the cache-store host), `fetch_tailnet_test.go` (research), `doctor_tailnetzones_test.go`;
+  each new branch mutated red.
+- **Every single-shot lane admits a roster entry the way the agent lane does.** The vision, text, stt-upload, compose
+  and accelerator lanes dialled `delegate_remotes` through the dial gate alone, so one entry was refused by the agent
+  lane's shape check and used by five others, and a bad entry got no message naming it. They now share
+  `internal/rosterprobe`: every entry is judged by `netguard.TailnetURL` before any dial, and a refused one is a named
+  miss in the lane's defer reason (`<base>: not dialled, refused by the tailnet guard (<why>)`), never a failed call;
+  the entries after it still serve. Blank slots are left out, and configured order and slot numbers are kept (compose
+  breaks queue ties by slot; the accelerator lane takes the first listing node). The agent lane still fails a whole
+  call on a refused entry: that is `internal/delegate`'s, not changed here (reported for the delegator track).
+  Docs: ADR 0074 decision 4, `FLEET-NODE.md` (vision placement), `fleet-node.md`, `accelerators.md`. Tests:
+  `rosterprobe_test.go` and one `roster_test.go` per lane; the accelerator dial-gate proof now goes through the lane's
+  own request helper (the shape check refuses its old input first). Each guard, five lane sites and `Members`,
+  mutated red.
+- **The single-shot lanes probe the roster at once, through one shared cache.** Each lane probed `delegate_remotes`
+  serially (k dead members cost k x 5 s before any node was chosen, k x 2 s per accelerator call), per call, sharing
+  nothing with the other lanes (membership review F06). `rosterprobe.Probe` reads every admitted entry's health
+  concurrently (the lane's own bound: 5 s, 2 s for the accelerator lane), returns the readings in configured order, memoises a
+  good answer for 2 s and negative-caches a transport failure for 30 s, process-wide: the delegator's own windows, and
+  one lane's discovery of a dead node saves every other lane the wait. A node that answered with a status is never
+  cached as down, nothing is cached once the caller's context is done, and a timeout is not held against a caller willing
+  to wait longer (a 2 s accelerator failure never turns a 5 s vision call away). A call over a roster with three hung
+  members places in about one bound instead of three, and a second call dials none of them. `healthTimeout` is a var in
+  each lane for tests. Timings are tabled in `fleet-node.md`.
+- **The cascade lane's dead base costs one probe, and only for itself.** `cascade_remote_lanes` read a base's health, and
+  when that got no answer asked its roster too (two bounds under one mutex shared by every lane base: membership review
+  F08). A base that does not answer the health GET at all (no dial, no route, a timeout, a reset, a body that stalls) is
+  no longer asked for a roster, and the probe runs outside the cache lock with one probe in flight per base, so a call
+  that needs one base never waits on another. A base that ANSWERED but is not a node (a llama-swap 404s the route) is
+  read through its roster as before. `laneProbeTimeout` is a var for tests; the stale "bounded by laneProbeTimeout"
+  comments are corrected.
+  Docs: ADR 0074 decisions 5 and 6, `fleet-node.md` (the timings table), `OPERATOR-GUIDE.md` (the lane section). Tests:
+  `probe_test.go` (rosterprobe: concurrency, order, both caches and their guards), `roster_test.go` per lane (a black-holed
+  roster placed once, in parallel, dial counts), `lanes_probe_test.go` (llamaclient: one probe not two, no head-of-line
+  blocking, single flight, a dropped or stalled health reply); every new branch mutated red. The race detector is not
+  available on the machine this was built on (no C toolchain), so the concurrency tests ran without `-race`.
+- **`doctor` shows a wrong or missing fleet token, and names a refused roster entry by slot.** `/fleet/health` ignores
+  the bearer, so a `fleet_auth_token` that was missing or wrong read healthy on every doctor row and first showed as a
+  401 on dispatch, which the delegator does not re-place (membership review F11). `doctor` now reads the roster once,
+  concurrently, through `rosterprobe` (it was serial at 5 s a remote), then asks each reachable node the one question
+  health cannot: `rosterprobe.CheckToken` sends an agent dispatch with no `job_id`, which the node answers after its
+  bearer check and before it creates anything (401 other token, 403 no token beyond loopback, 400 `job_id required`
+  accepted; no job is queued). Rows `OK` / `MISMATCH` / `NO-TOKEN` / `UNKNOWN` / `UNCHECKED` name the entry by its
+  `delegate_remotes[i]` slot, and a box with no token prints one `NOT SET` line. The token and a node's reply text are
+  never printed, and the bearer is sent only to a base the tailnet guard admits. The fleet-versions rows name entries by
+  slot too and show a guard-refused one as `REFUSED ... not dialled` instead of `UNREACHABLE`. At config load, a
+  `delegate_remotes` entry the tailnet guard refuses is now a finding (`delegate_remotes[i] is refused by the tailnet
+  guard`, judged against the zones the config itself names), so it is learned at load and not at the first call; it
+  warns and does not refuse, like every finding there. Every message about a roster entry prints it redacted
+  (userinfo, query and fragment removed), and a dial error's quotation of the raw base is scrubbed.
+  Docs: ADR 0074 decisions 7 and 8, `OPERATOR-GUIDE.md` (troubleshooting rows). Tests: `doctor_fleettoken_test.go` (rows
+  by slot, nothing asked of a refused or unreachable entry, no token printed, the real node handler end to end),
+  `rosterprobe/token_test.go` (the three answers through the real handler, nothing queued, bearer only in the header,
+  never sent to a refused base), `endpointshape_tailnet_test.go`; each new branch mutated red.
+- **No message about a roster entry carries a credential it was pasted with, and the bearer never follows a redirect.**
+  A roster entry is a base URL, and nothing stops one being pasted with `?token=` or `user:password@`. The tailnet
+  guard's own refusal quoted it (a `url.Error` quotes the whole input), `Member.Miss`, `Reading.Miss`, the lanes'
+  "probed ..." lines and dispatch errors printed the raw base, and the negative cache replayed a dial error that quotes
+  the URL. `netguard.RedactBase` (moved below `internal/config`, which delegates to it) is the one redaction, now also
+  covering the scheme-less `user:pw@host` form; `TailnetURLIn` quotes only that and words a parse failure without the
+  input, `validateEndpointValue` and the loader inherit it, `rosterprobe.Scrub` (the doctor's scrub moved here) also masks
+  every other URL left in a message, the cache scrubs a dial error before it is cached, and the doctor, the five lanes
+  and the lane/loopback config findings use them. Separately, the token probe and the five single-shot lane clients
+  followed redirects, so a node answering 3xx could have the client replay the request and its `Authorization` header at
+  a `Location` it chose; they now return the 3xx as the answer (`rosterprobe.NoRedirect`); the health read in
+  `internal/delegate` has the same gap and is that package's to change. ADR 0074 now says plainly that
+  the one `fleet_auth_token` is sent to every admitted roster node, including nodes under a sharer's tailnet zone, whose
+  administrator therefore receives a token that opens every node on the roster: list only nodes you trust with it (a
+  per-remote token is future work).
+  Docs: ADR 0074 (decisions 5, 7 and 9, consequences), `fleet-node.md`. Tests: `redact_test.go` and
+  `tailnet_zones_test.go` (netguard), `endpointshape_tailnet_test.go` (config), `scrub_test.go` and
+  `token_redirect_test.go` (rosterprobe), `doctor_fleettoken_test.go`, `redirect_test.go` per lane; each new branch
+  mutated red.
+- **A tailnet zone must be a zone.** `ParseZone` took any dotted string without a space, slash, colon or `@`, so
+  `*.x.ts.net`, `x.ts.net?`, a trailing backslash and the bare generic `ts.net` all loaded as "a zone" that matched
+  nothing, or (the bare domain) every tailnet's hostnames. A zone is now dot-separated `[a-z0-9-]` labels, and the bare
+  `ts.net` is refused by name; the load refuses the entry naming `tailnet_suffix[es][i]`. `EndpointWarnings` now says
+  what `TailnetZones` does on a malformed list (no zones, all-or-nothing) and prints the zone error as the first finding.
+- **The negative cache holds a busy or restarting node out for seconds, not half a minute, and a cold burst costs one
+  probe.** A node that timed out or refused the dial sat out the whole 30 s window, so a box that rebooted stayed
+  invisible to the single-shot lanes long after it was back. A timeout, a refused or an unroutable dial (classified by
+  error type, since Windows reports ECONNREFUSED as a different errno) is now held at most 5 s; a name that does not
+  resolve keeps 30 s. `Cache.Forget(base)` drops the verdict, and the five lanes call it when a dispatch is accepted.
+  Concurrent cold probes of one base under one bound share one request (a waiter's own context still ends its wait, a
+  prober that leaves does not hand its cancellation to a waiter, and callers with different bounds do not share).
+  `MemoTTL` and `NegativeTTL` are constants now: the windows and the clock are per-cache, so the timing tests run on a
+  fake clock and on gates, assert counts, and no longer mutate a package variable; the lane roster tests got the same
+  slack for a loaded CI runner.
+
+- **A Q4 seat its tier page calls inadequate for OCR no longer answers remote OCR.** The fleet vision lane advertises
+  `vqa`, `ocr` and `assess_image` on any node whose seed binds a vision seat without `tasks`, so the `ampere-8` node
+  (Qwen3-VL-4B Q4_K_M) was handed remote `ocr` although its own page records the omitted `ocr` alias as a quality
+  statement and Q4 as the measured OCR-fidelity cliff (fleet-first review R3-F14). Its vision seat now declares `tasks`
+  `vqa` and `assess_image`, which the seed writes as `vision_tasks`: the node refuses `ocr` at ack time naming the
+  allowed set, publishes the list in health, and a delegator places remote `ocr` on another node or defers. A local
+  `ocr` call is unaffected (routing uses `vision_model`). The declaration is dropped when an ocrprobe measurement clears
+  the seat. NOT changed, on purpose: `ampere-6`, `amd-gcn`, `amd-rdna3`, `amd-rdna3-dgpu`, `cpu` and `dual-gpu` also
+  run a Q4 vision seat, but their pages make no statement about OCR quality (the review calls them unmeasured), so they
+  keep all three tasks until a measurement or a page says otherwise. A node only picks this up when its config is
+  re-seeded from the tier.
+  Docs: `FLEET-NODE.md`, `fleet-node.md`, `docs/tiers/ampere-8.md` (regenerated). Tests:
+  `vision_tasks_tier_test.go` (a row for every shipped tier that binds a vision seat, so a new tier must decide; the
+  ampere-8 declaration stays tied to its page's statement); the declaration, the ocr-restored case and the rewritten
+  statement each mutated red.
+
+- **A `linux-amdgpu` node publishes `gpu_devices[]`.** ADR 0053 decision 4 and `FLEET-NODE.md` say a Linux AMD node
+  reports its cards the way an nvidia-smi node does, and `AmdgpuSysfsDeviceProbe` existed to do it, but
+  `chooseSamplerKind` routed only `nvidia-smi` to the device sampler, so the probe was never started and the amd-gcn
+  node published no per-card rows. `fleet-serve` now starts its sampler
+  through `startVRAMSampler`, which sends `linux-amdgpu` to the device sampler: one row per amdgpu card (index, name,
+  memory composed as the node's memory probe composes it), an empty uuid and no utilisation, so the delegator still reads
+  the cards as unknown rather than busy. If the per-device read fails at startup though the gate probe worked, the node
+  keeps the single reading and logs why. `linux-meminfo` (the RK3588 SoC: one RAM pool, no cards) deliberately stays on
+  the single-value sampler, and the docs now say so instead of naming windows-generic as the only source without rows.
+  Docs: `FLEET-NODE.md`, `fleet-node.md`, ADR 0053 decision 4. Tests: `fleet_sampler_test.go` (a fake sysfs tree
+  through `startVRAMSampler`: one device row, APU and discrete composition, the fallback, the two single sources; a
+  pin that `runFleetServe` starts its sampler through the chooser), `TestChooseSamplerKind`; each new branch and the
+  call site mutated red.
+- **Composite-tier citations point at ADR 0052.** The composite tier (a box as the union of its tiers, the device
+  layers, the display layer and the placement table) was drafted as "ADR 0039" and recorded as ADR 0052, because 0039 was
+  already "A held card is a place in line". About fifty comments, the tier pages and their generators
+  (`tierdocs`, `profiles.json`), the setup scripts and ADR 0054 kept the draft number, so a reader following "ADR 0039"
+  from `internal/config/layers.go` landed on the lease queue. They now cite 0052; references that mean the real 0039
+  (ADR 0041, the lease-queue line in `gpuactivity` and one older entry in this file) are untouched. Comment and prose
+  changes only, plus the regenerated tier pages. Not changed, on purpose: the dated plan and spec under
+  `docs/superpowers/` (they record the number the work was drafted under), ADR 0061's "ADR 0039 (placement)" (it can
+  be read either way), and the citations inside `internal/delegate` and `internal/mcpserver/mcpserver.go`, which
+  belong to the tracks editing those files.
+
+## [0.166.0] - 2026-10-07 - the capacity wait runs to the call's deadline; the spread deal and the roster get their guards
+
+- **The capacity wait runs to the call's deadline, not to a fixed 120 s (ADR 0073; the diagnosis' M1).** 85 of one day's 281 deferred delegate rows were `capacity wait: no node had room within 2m0s`, for subtasks a node freeing a minute later would have taken, inside a call that has 1,500 s. A call that has a whole-call deadline (`agent_delegate`, `offload_research`) now waits for capacity until that deadline less a 15 s reserve, whatever `agent_placement_wait_sec` says, so band-0 work no longer defers for capacity while the call still has time to place it; only the last subtask to start waits that long, because a wait holds one of the call's four run slots and four of them waiting to the horizon would keep the rest of the call (and every later chunk of a batched one) from starting until it was too late to place anything: the earlier ones keep the bound the wait had before (the larger of `agent_placement_wait_sec` and `agent_lease_wait_sec`, or the call's end if sooner) and their defer says why; no subtask is started inside the reserve either (it ends at once as a `capacity` defer, `not started: the call's deadline left no room`; a call that never had more than the reserve is exempt); nothing is dispatched inside the reserve (a job placed there could only be cut, and would run on in its node with nobody waiting for it), and a call with no more than the reserve left does not wait. `agent_placement_wait_sec` is now the wait of a call with no deadline (the `delegate` CLI verb, `agent_run` and `offload_ask` with a route), 0 = 120 s; a negative value is still the off switch for every call. A composite box's eviction wait, a verification retry's wait for a busy seat and a wait that holds a run slot keep their TTL, and an `agent_lease_wait_sec` longer than the call no longer extends a wait the call bounds. Sheddable work is still shed at once. The capacity defer keeps its class and prefix and now says what bounded it (`bounded by the call's deadline, not by agent_placement_wait_sec`) instead of telling the caller to raise a setting that never bounded the wait; the holder-naming deferral of a reserved seat words the same fact. To shorten the wait of the MCP doors, shorten `agent_call_deadline_sec`. Docs: `fleet-node.md` ("What bounds the wait"), `OPERATOR-GUIDE.md`, `gpu-lease.md`, `opencode-integration.md`, `glossary.md`, the `agent_delegate` schema, forward links in ADR 0063 and 0065. Tests: `callwait_slots_test.go` (five subtasks on a fleet that never frees: the first four defer at the TTL and say why, the fifth waits for the horizon; a subtask that gets a slot inside the reserve is not started, nor a later chunk; the reserve is taken only out of a call longer than it), `callwait_test.go` (a fleet full for 1.5 s lands the subtask inside a 4 s call although the configured TTL is 1 s; the same with the setting unset; the no-deadline control arm; a wait that never frees ends before the deadline as a capacity defer with nothing dispatched in the reserve; sheddable shed at once; the off switch stays off; a call with less left than the reserve; a lease wait; nothing placed at the wait's last look; the bound itself, row by row); the six tests that pin the CUT of a wait by the deadline set the reserve to zero; each new branch mutated red.
+
+- **Patience is the time the call has left (ADR 0073; the diagnosis' F07).** How long a job may wait to START on a node was the contract's poll budget, 660-1,260 s for a `timeout_auto` contract, longer than the call can still honour late in it: a node with a 500 s backlog passed the backlog gate, the job was dealt, the call ended first, and a job the node had already started kept running there with nobody waiting for it (17 call-deadline cuts in one day, 11 of them with the job still on a node). The patience is now `min(poll budget, time left on the call - reserve)` at every site that reads it (the auto deal, the spread deal, re-placement, the capacity wait's tick and the verdict that narrates them, which takes the gate's own function so the two cannot diverge), and the reason prints the call's arithmetic behind the gate's (`... past the 30 s this contract will wait for a start; the call's deadline is 45 s away, less the 15 s reserved for a placed job to run in, and the contract's own poll budget is 21m0s`). A feasibility refusal like the backlog gate itself: it never ranks seats by speed, a node that publishes no ETA stays no opinion, and a call with no deadline is unchanged. Docs: `fleet-node.md` (the backlog gate), ADR 0073 decision 7. Tests: `patience_call_test.go` (the rule row by row; the auto deal, the spread deal, re-placement, the capacity wait end to end with a control arm each, and the narration); each site mutated red.
+
+- **A health read after a refusal that proves a free worker lifts the node's Retry-After cooldown (ADR 0073).** A 503's `Retry-After` is the node's own estimate, at the moment it refused, of when a worker frees; the capacity wait re-read the node's health every tick and kept it out until the hint ended all the same, so a node that drained a minute into a 300 s hint stayed unused for the rest of the wait while the subtask deferred (and with the wait now running to the call's deadline the cost is minutes). A read taken after the refusal that shows a published `max_concurrent_jobs`, fewer jobs running than it, none queued and no saturation lifts the cooldown, in the capacity wait and in re-placement, and the placement reason says so. The proof is positive evidence only: a node that publishes no counters (an older node, a queue that reads empty because nothing is counted) proves nothing, and a saturated or backlogged one keeps its cooldown. The wait's read must postdate the latest refusal in force, so a probe-memo snapshot another waiter took just before the refusal is never reused for it. A node that refuses again after a lift is firm for the rest of the run, so a node whose counters disagree with its admission costs one early ask, not one per tick, and a dispatch that follows that second refusal, or that lands after the hint would have ended anyway, is not narrated as the lift's. Docs: `fleet-node.md`, `glossary.md`, `OPERATOR-GUIDE.md`, ADR 0063 decision 1 (link), ADR 0073 decision 8. Tests: `cooldown_lift_test.go` (the proof row by row, the lift row by row, the wait end to end with a control arm for health that proves nothing and one for a node that refuses after a lift, re-placement, the memo); each branch mutated red.
+
+- **The spread deal ranks an unmeasured seat on the fleet's median rate (ADR 0057; the diagnosis' F04).** `scoreFit`, the int the spread deal picks seats by, rated a seat that publishes no `seat_rate` on its window alone while `rankFor` (Place, the joint auto deal, re-placement) priced it at the fleet's median, so the same roster was ordered two ways: an unmeasured seat's `-window` (about -3e4) sat five orders of magnitude above a measured seat's `-eta x 10 x 2^24`, took every first mechanical slot, and lost every reasoning slot to a measured seat with a smaller window. A node that has just joined (`samples == 0`) is exactly that seat. `scoreFitWith` takes the prior (`fleetTokSPrior` over the roster the run probed, once for the whole deal, so a score does not move as nodes at their headroom leave the rotation); `scoreFit` keeps its meaning as the prior-less rule. It orders and never admits: eligibility, adequacy and the feasibility refusals are untouched. Docs: `fleet-node.md` (Score). Tests: the 18-seat brute-force ordering test is extended to the fold (`TestScoreFitOrdersAMixedFleetAsThePairwiseRankingDoes`: it agrees with `betterRanked` for every pair the seeded draw cannot decide) and `TestSpreadDealRanksAnUnmeasuredSeatOnTheFleetMedian` deals the diagnosed shapes; both mutated red.
+
+- **The spread deal reads saturation and lease demotion for a remote, as `betterRemote` does (the diagnosis' F09).** The deal picked among the remotes by free-card tier and fit score only, so a node reporting `saturation.high` (draining, or its admission queue at the ceiling) or sitting under a long or overdue text lease kept its slot of the cycle while a healthy node idled: the dispatch was refused, the node cooled, one of the subtask's re-placements was spent and the cycle's order was gone. The pick now ranks a lease-demoted node, then a saturated one, behind every node that is neither, before tier and fit. They are demotions and never exclusions (a demoted node still takes its slot when nothing better is left in the cycle), so a cycle, a one-per-seat deal and an all-equal roster deal exactly as before. Docs: `fleet-node.md`. Tests: `spread_demotion_test.go` (a saturated node, a node at its admission ceiling, a long and an overdue lease, the demote-not-exclude cycle, the unchanged rotation); each key mutated red.
+
+- **One number prices a new job's wait for a worker: `new_job_wait_sec` (ADR 0050 amendment; the diagnosis' F10, both halves).** A node published `queue_wait_estimate_sec`, the wait of the deepest job ALREADY queued (`excess x wall / workers`), and the delegator preferred it outright although its own formula prices a new job one slot deeper (`running + queued - workers + 1`): 4 running and 3 queued behind a 300 s wall on 4 workers read 225 s while a new job waited 300 s, so the ranking, the backlog gate and the queue budget under-priced exactly the slow nodes with the longest queues. At `depth == max_concurrent_jobs` the estimate was 0 and omitted although a new job still waits for a worker to retire. The node now publishes `new_job_wait_sec` beside it (`(capped depth - workers + 1) x wall / workers`, over the same capped backlog and wall sample; additive, absent only when the node has no wall sample or an unlimited ceiling, and an explicit `0` when a worker is free, so a delegator never falls back to counters that include uncapped renders) and the old field keeps its meaning byte for byte. The delegator believes the new field as it stands, adds the slot itself to an older node's positive estimate (from that node's own wall and ceiling), and derives the same number from the counters when a node publishes neither, so every old/new pairing prices a new job at one number and a new delegator never adds a slot to one a new node already counted. The gate's arithmetic names which number it is. Docs: `fleet-node.md` (health fields), `FLEET-NODE.md`, `glossary.md`, ADR 0050 (amendment). Tests: `startwait_test.go` (as it stands, one slot deeper, the property over a grid of node states, the printed arithmetic, a negative figure, the decode), `newjobwait_test.go` and `newjobwait_wire_test.go` in `fleetnode` (the node's arithmetic row by row against the older field, the capped-only rule, and the shipped decoder reading the shipped handler); `TestQueueWaitForFormula` and `TestQueueBudgetIsDerivedFromTheNodesETA` now say which published number they mean; each branch mutated red.
+
+- **An unlimited `fleet_max_concurrent_jobs` no longer makes `route=auto` read an idle local seat as busy (the diagnosis' F11).** `FleetConcurrencyLimit()` resolves a negative setting to 0, "unlimited", and the busy formula compared the seat's in-flight count against it with `>=` at four sites and guarded the comparison at one (`localStillBusy`): `inflight >= 0` is always true, so with the cap unlimited an IDLE seat read as permanently busy and the work left the box although the setting says it can take any number of runs. One helper, `runner.atRunCap` (`limit > 0 && inflight >= limit`), now serves the joint deal (both of its readings, which moved from a block in `RunWith` into `readAutoLocalSlot` so they can be pinned), the per-subtask placement (both of its readings) and the capacity wait's re-reading of a seat a deal kept it off, so the sites cannot drift. Latent on the reference box (it sets no cap); the default and an explicit cap behave exactly as before. Docs: `fleet-node.md` (the `auto` route). Tests: `unlimited_cap_test.go` (the helper's truth table, the per-subtask path and the "read busy" flag it records, the joint deal through `RunWith` and `readAutoLocalSlot`'s two flags, the wait's re-reading, a control for the built-in cap); the helper and each of the six call sites mutated red.
+
+- **A call's `remotes` may only narrow `delegate_remotes` (ADR 0038 amendment; the diagnosis' R2-F08, the standing rule that a box never delegates to the standalone machine).** A model-named `remotes` list on `agent_delegate` REPLACED the configured roster after one check, the shape of each URL (loopback, the tailnet's range or zone, a dotless name), so any tailnet host passed and was dialled with the fleet's bearer on its health read: the standalone box was kept out by habit alone, and a caller could confine a whole fan-out to one node without anything saying it had. The door now refuses an entry that `delegate_remotes` does not list, as a `config`-class defer that names it and the roster and says what to do, before any contract is prepared and before anything is dialled; a box with no `delegate_remotes` accepts no list; entries compare as the roster spells them (a trailing slash and case are the same node), and what proceeds is the roster's own spelling, so the process in-flight gate keys one node once. The engine enforces it again for a call that says its list came from a model (`RunOptions.RosterOnly`, set only by that door), so `delegate.RunWith` is not a way around the door. The operator's own CLI verbs keep naming any tailnet node: `fleet-smoke --remote` tests a node that has not joined yet. The tool schema now says the list narrows, that a URL outside the roster is refused and never dialled, and that a list REPLACES the roster (a one-node list confines every subtask); `OPERATOR-GUIDE.md` no longer says remotes are named per call, not in config. Docs: `OPERATOR-GUIDE.md`, `fleet-node.md`, ADR 0038 (amendment). Tests: `roster_test.go` (the rule row by row, the engine refusing before dialling with a control arm for the CLI path) and `roster_remotes_test.go` (the door, a box with no roster, the schema text); the two existing door tests that named a node now configure it; each branch mutated red.
+
+- **The text a caller reads says what the mechanical ranking does: the seat expected to finish first, not the smallest (ADR 0050 item 3; the diagnosis' F12).** The `agent_delegate` `route` description told a model that mechanical goals "take the smallest eligible seat so the roomier one stays free", and the CLI help, `fit.go`'s `scoreFit` comment and `fleet-node.md` said the same. That was the rule until W-11: since then mechanical work ranks by expected completion (cold load, the node's queue wait and generation at its measured rate), the window only breaking a tie and deciding alone when no seat of the roster publishes a rate, so a fast roomy seat takes mechanical work its slower, smaller neighbour would finish later. A caller who believed the old text phrased goals to steer work to a seat the engine no longer prefers. The tool schema, the `delegate --route` help, the `scoreFit` and `adequate` comments (and the two comments in `gate.go` and `run.go` that repeated the phrase) and `fleet-node.md` (the Score bullet, the shape bullet and the cycle measurement, now dated to 0.99.0) describe the real order; the behaviour is untouched. Tests: `route_schema_test.go` reads the registered tool's `route` description and fails on the stale phrases; the ranking itself was already pinned by `TestScoreFitMechanicalPrefersTheFasterSeatWhenRatesArePublished`; the description mutated back to the stale text goes red.
+
+## [0.165.3] - 2026-10-06 - an occupied seat waits in line; a gate turn-away keeps the deal's busy reading
+
+- **An occupied seat is never the fallback (operator 2026-10-06: "wait in line").** 0.165.2 still loaded the local
+  agent seat over another vLLM seat when no remote could take the contract at all. Now route `auto` (the joint deal
+  and the per-subtask placement) and `spread` hand that subtask to the capacity wait instead: it runs on a remote that
+  frees, or on the local seat once the occupant has left (`local seat was occupied by the vLLM seat <seat>, which left
+  after <t>`), and ends as a capacity defer at `agent_placement_wait_sec`. The wait checks occupancy whatever started
+  it, with or without remotes configured. An explicit `route:"local"` and `agent_run` with no route are unchanged.
+- **A process-gate turn-away keeps the deal's busy reading.** The capacity wait re-read the local seat's load only for
+  the deal's overflow subtask. A subtask the deal had sent to a remote because the seat read busy, and that the
+  process gate then turned away (this process already held the node's admission slot) or a remote refused, took the
+  busy seat at the first tick. `dealReadLocalBusy` now carries the deal's reading of the seat's LOAD (in flight,
+  loading, occupied; never a lease, which the wait judges itself, and one this process holds must not keep its own
+  subtasks off the seat) into the wait for every subtask. The first draft carried the lease too and a review caught
+  it: a held media lease kept a refused subtask off a seat whose run-cap line had freed. This was the CI-only flake of
+  `TestOverflowStaysOffABusySeatWhoseLoadBecomesUnreadable` (red on main 2026-10-01 and on #535);
+  `TestAGateTurnAwayKeepsTheDealsBusyReading` reproduces it deterministically (old rule: 3 of 3 runs red on both
+  routes).
+- Docs: `fleet-node.md` (the capacity wait, the occupied seat), `opencode-integration.md`. Tests:
+  `TestRunOccupiedWithNoFleetWaitsInLine` (auto, spread), `TestRunOneOccupiedWithNoFleetTakesTheSeatOnceTheOccupantLeaves`,
+  `TestAGateTurnAwayKeepsTheDealsBusyReading` (spread, auto); each new branch mutated red.
+
+## [0.165.2] - 2026-10-06 - an agent seat whose load would evict another vLLM seat counts as busy
+
+- **The defect, on the reference box.** The harness's agent seat (`agent-pool`, the two-card pair) and opencode's
+  three-card seat share the same cards, one llama-swap port and a mutually exclusive set. The local-busy probe read
+  only the agent seat's own in-flight count, so while opencode held the three-card seat the agent seat read as
+  not loaded, which meant idle: `agent_delegate` (route `auto` and `spread`) dealt the contract to the local seat and
+  llama-swap unloaded the operator's session to load the pair. The cascade already had a guard for exactly this
+  (`internal/seatguard`); the agent doors never asked it.
+- **The fix.** `probeLocalBusy` asks the seat guard when the agent seat is not loaded. When the load would unload a
+  loaded vLLM seat, the reading is busy and names that seat (`occupiedBy`). Route `auto` (the joint deal and the
+  per-subtask placement), `spread`, the capacity wait and the retry treat it as they treat a busy seat: a remote with
+  room first, a place in line when every remote is full, the local seat only when no remote can take the contract.
+  Reasons say `local seat occupied: loading it would evict the loaded vLLM seat <seat>`; an unoccupied seat's wording
+  is unchanged. An unknown guard reading names no seat and deals as before.
+- **Refusals and the wait.** A remote that refuses (a 503 from a full fleet) no longer drops the contract onto the
+  occupied seat: re-placement treats it as a place in line, as it treats a lease fence, and the capacity wait takes
+  the local seat only once the occupant has left (`local seat was occupied by the vLLM seat <seat>, which left after
+  <t>`). The guard is asked before the probe's roster-ambiguity fallback, because it resolves names from the serving
+  config: a failed roster read no longer hides the occupant. Found by review; the first draft fixed only the deal.
+- **`offload_ask` with no route.** Its files ride inline, so when the local seat is occupied an ask with no route takes
+  `auto` and the response carries a `route_note` naming the seat. An explicit `route:"local"` still runs here, and
+  `agent_run` with no route stays local (its `read_root` does not travel); docs say to name `route:"auto"` on a
+  self-contained `agent_run` while an opencode session holds the three-card seat.
+- **Off switch.** `cascade_seat_guard: false` turns this off together with the cascade guard.
+- Docs: `fleet-node.md` (the local slot), `mcp-server.md` (C-46 routes), `opencode-integration.md`, and the
+  `offload_ask` / `agent_delegate` route descriptions. Tests: `occupied_seat_test.go` (the real probe and guard against a
+  fake llama-swap: occupied, idle, guard off, undeclared occupant, unreadable roster; `auto`, `spread`, the per-subtask
+  path and the no-fleet fallback through `Run`; a refusing remote with the wait off and on; the retry note) and
+  `ask_occupied_test.go`.
+
+## [0.165.1] - 2026-10-06 - blackwell-3x16 runs the harness on two cards again; the three-card seat is opencode's
+
+- **The operator's order, in the table.** 2026-10-04: "modify the <node-b> offload harness tier so it runs on 2 cards again
+  (3 card should remain exclusive as an opencode configuration)". It reverses the 2026-09-19 order that 0.132.6 wired
+  ("the 3 card tier as the agent seat now and the 2 card tier to be the opt in one"). blackwell-3x16 seeds the tp2 PAIR
+  as its `vllm_seat` again: `qwen3.8-27b-vllm` on devices `0,2` (the two 5060 Tis, never the display card), window
+  **163,840** at util 0.90 (soak-verified there because the display card is outside the seat), batched 3135, fp8 KV,
+  L1 staging 8 GB, the tp2 store; `agent_ctx_tokens` 262,144 -> 163,840. It keeps `agent-pool-2card` and
+  `27b-vllm-2card` as aliases (what callers named it while it was opt-in) and carries the fold-system chat template and
+  prompt-token details over from the three-card seat, so the agent seat's request handling does not change.
+- **Layers.** The `pair` layer is the home again (not opt-in; its agent seat is filled from the `vllm_seat` at install,
+  as before 0.132.6), and the `triple` layer is gone from the seed, so `placement.AgentHome` resolves to the pair and no
+  contract can name a three-card layer. The table declares 8 seats (9 with the triple): a card-2 lease leaves 3
+  placeable, a card-0 lease 3, a display-card lease 7. The placement code is unchanged; a box that declares a
+  non-opt-in triple still homes its agent lane there.
+- **The three-card seat stays, as opencode's.** Its measured layout (pipeline 3 on `2,1,0`, `28,13,23`, fp8 KV pinned
+  at 3.75 GiB per card, 262,144, util 0.84, L1 16 GB, its own store) is kept in the tier notes; on the reference box it
+  is hand-wired and named by id in `opencode.jsonc`. The pipeline schema (`pipeline_parallel`, `layer_partition`,
+  `kv_cache_memory_bytes`) is unchanged. `docs/systems/opencode-integration.md` gains the seat note, including the
+  consequence that the two vLLM seats are mutually exclusive in llama-swap, so a harness contract placed locally while
+  an opencode session holds the three-card seat swaps the seats (a cold load each way).
+- **Docs:** the generated tier page, `composite-tier.md` (why there is no triple), `cache-server.md` (L1 staging per
+  seat), `gpu-lease.md` (the home layer and the 8-seat counts), `OPERATOR-GUIDE.md`, and the code comments that named
+  the three-card seat as the current `agent-pool`. Tests: `TestDualBlackwellSeedsThePairSeatWithTheCacheServer` compares the two tiers' pair seat directly
+  again, `layerSetTiers` drops the triple on this instruction, `TestSeatsThatStayPlaceableUnderACardLease` counts 8,
+  and the installer self-test (`setup/render.tests.ps1`) expects three layers with the bare agent seat on the pair.
+
+## [0.165.0] - 2026-10-03 - PAIR shows every job where it ran: remote calls card, fleet nodes card for askers that cannot, transcription spills to an idle node
+
+An audit of PAIR's Jobs list against every node's ledger (2026-10-03) found it drew every card it received correctly, and
+that whole classes of work never reached it: 13 jobs a fleet node served for a thin client, every remote compose / vision /
+text call, everything on a box that is not a PAIR member, and one card left "queued" for 31.9 h. It also found that a box
+whose three cards were leased refused five transcriptions while two nodes' whisper seats sat idle. Defect ids are those of
+the fixes plan; the release notes name each.
+
+### Fixed — a test run no longer eats real PAIR cards (D1-D4)
+
+- `TestLeaseCardLifecycle` built an enabled emitter with no state root, so its sweep claimed the machine-wide
+  `pair-open` register's real orphan markers, posted their close to its own test server and deleted them: the real card
+  stayed open (the 31.9 h ghost; reproduced exactly as the recorded `frames = 4` flake). The root, `internal/delegate`
+  and `internal/mcpserver` suites now point `LOCAL_OFFLOAD_STATE_DIR` at a throwaway dir in a TestMain that fails
+  closed (about 55 mcpserver tests and one delegate test touched the real root; a per-package sweep with `ProgramData`
+  redirected now leaves the scratch root empty for all eight packages checked).
+- An orphan marker records the endpoint it was posted to; a sweeper closes only markers of its own endpoint (a legacy
+  marker counts as the default endpoint), so no test server or second ingress can consume a real card.
+- A close PAIR rejects (400 / 413 / 422) drops that marker and the pass continues; a marker whose frame cannot be built
+  is dropped the same way; transport errors, 5xx, 408 and 429 keep the marker. One bad marker no longer starves the rest.
+
+### Fixed — remote work is carded where it ran (D5-D11)
+
+- Remote compose, vision and text calls (`route: remote` or an auto spill) wrote no asker ledger row and no PAIR card.
+  They now emit exactly one card (queued → running → terminal) whose node is the dispatch host with the fleet node id as
+  an alias, plus one asker ledger row (`node`, `node_id`, `route`, `placement`, `fleet_job_id`, `card_by_caller`).
+- New wire headers: `X-Offload-Asker` (the asking box's PAIR member name or short host name) on every work-creating
+  fleet request, and `X-Offload-Pair-Card: node` ONLY when the asker will not card the job itself. On that signal the
+  serving node cards the job (requester `offload-harness/fleet:<asker>`) and records the asker on its ledger row
+  (`requester`). Old askers send nothing and keep today's behaviour, so a rolling deploy never double-cards.
+- Pulled (claim-loop) jobs get `Door = fleet` and carry the same signal; a duplicate admission can no longer leave a
+  node card open on the push or the pull path; fleet-serve drains its emitter on every shutdown branch.
+- `install client` seeds `pair_workloads_enabled: true` (inert without a PAIR identity).
+- Cards for work on a view-only PAIR node resolve through `<appdir>/configs/view-only-nodes.json`.
+
+### Fixed — one card per call (D12-D15)
+
+- A `video_watch` call wrote one ledger row per window and PAIR showed every row as a card (13 cards for one call on
+  2026-10-03). Window rows, video_describe's overflow retries, the text cascade's escalating attempts, extract_image's
+  sub-calls and inpaint's auto-text vqa are now inner rows (`parent_job_id`) of their call: one card, one job in the
+  savings summary, each token counted once.
+- `video_watch` stops waiting after the first window that defers `gpu_busy` (each window had re-waited the 90 s gate:
+  18 minutes for one refused call); the defer carries `err_class` and the latest reason.
+- A call's card is closed by its own ledger row (a `call_id` stamped on the row), not by the oldest open card of the
+  task: concurrent transcriptions no longer produce a third card.
+
+### Added — transcription can run on an idle fleet node (D16-D20, ADR 0072)
+
+- New token-gated node route `POST /fleet/stt` (task `stt-upload`, advertised in `/fleet/health` with `stt_hq` and
+  `stt_upload_max_mb`): the asker uploads 16 kHz mono Opus (or the original file under the cap), the node transcribes
+  it through its own pipeline and returns the whole result. Config `fleet_stt_upload_max_mb` (default 48),
+  `fleet_stt_max_concurrent` (default 1: stt jobs on a node queue in order across both lanes instead of failing
+  "model unloaded").
+- `offload_transcribe` gains `route` (`local` | `auto` | `remote`, default `auto`: every node serves the same whisper
+  family, so a spill costs no quality); `auto` spills only when the local whisper admission would actually block
+  (`modelaffinity.WouldBlockUpstream`). The asker writes its own `.srt/.txt/.segments.json`. CLI `transcribe --route`
+  (default local); `classify` / `extract` gain `--route` like their MCP twins. A local gpu-busy defer now names the route.
+- Behaviour change: on a node WITH a `fleet_auth_token` the legacy path-taking `stt` dispatch lane now needs the bearer.
+  The only known external dispatcher sends no token, but no real stt use through it exists.
+- Transcripts a node writes for an upload are removed after `fleet_stt_transcript_ttl_min` / when the job is evicted;
+  `/fleet/media` needs the bearer for gated lanes' outputs (stt uploads, legacy stt transcripts, compose projects) on a
+  node with a token, matching names fail-closed.
+- `internal/accelremote` dials through `netguard.SafeTransport` like every other fleet client.
+
+### Added — boxes outside the PAIR cluster report through a member (D24, D26)
+
+- Identity fallback: when `node-id.json` is unreadable (the harness runs as another OS user than PAIR), the emitter
+  reads this node's UUID from PAIR's loopback node-info and uses it only when the loopback ingress answers.
+- Card relay: a member advertises `pair_relay` and serves token-gated `POST /fleet/pair-relay`; a box with no PAIR
+  identity relays its cards there (`pair_workloads_relay`, default auto from `delegate_remotes`). The member namespaces
+  the id, names the asker, resolves the node itself (including view-only nodes), rate-limits and caps open cards per
+  asker; relayed markers are `.remote` files a pre-relay sweeper skips. `offload_status` gains a `pair` block naming
+  the emitter's mode (local ingress / node-info fallback / relay / off).
 
 ## [0.164.0] - 2026-10-03 - Media calls take one card, leases have bounded terms, the fleet reports per card
 
@@ -1321,7 +1763,7 @@ loaded one counted as reclaimable capacity: a job placed on that figure could ta
   the seat of the node's own layers and deferred `agent seat "..." is not in the endpoint's
   served roster`. Confirmed cause: a copied config that kept the node's `layers`. The explicit
   file was in fact the only one read; on a composite box the placement table picks the seat from
-  the layers and `agent_model` applies only when a decision names none (ADR 0039, unchanged), so
+  the layers and `agent_model` applies only when a decision names none (ADR 0052, unchanged), so
   the copy's `agent_model` was shadowed by a layer's agent seat, which the repointed
   endpoint did not serve. The harness now prints a stderr note naming the config file when its
   `agent_model` is not a seat of any of its layers, and a roster-miss defer on a placed (or

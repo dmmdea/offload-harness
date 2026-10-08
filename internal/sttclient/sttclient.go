@@ -56,6 +56,26 @@ var sttCalls atomic.Int64
 // read) from unloading anything. Guarded by inferMu.
 var warmed = map[string]map[string]bool{}
 
+// sttQueued counts jobs a caller holds back BEFORE they reach the line (Queued): a fleet node's
+// stt gate (fleet_stt_max_concurrent) keeps the jobs over its cap out of the pipeline until a
+// slot frees. They will transcribe next, so UnloadIfIdle reads them like calls in line.
+var sttQueued atomic.Int64
+
+// Queued notes that one more transcription is waiting behind the caller's own gate and will use the
+// upstream as soon as the gate lets it through; the returned func (idempotent) takes it back, and the
+// caller calls it once the job has joined the line (or been abandoned). While any is outstanding,
+// UnloadIfIdle leaves the model loaded, so a burst held at a node's gate pays one cold start, not one
+// per job (register C-91, D18).
+func Queued() func() {
+	sttQueued.Add(1)
+	var once sync.Once
+	return func() { once.Do(func() { sttQueued.Add(-1) }) }
+}
+
+// QueuedNow reports how many jobs are held back by a Queued gate right now, so a test can wait until
+// one is in line instead of sleeping.
+func QueuedNow() int { return int(sttQueued.Load()) }
+
 // Pending reports how many transcriptions in this process are waiting for the whisper
 // upstream or running on it (register C-91): the count UnloadIfIdle reads. It exists so a
 // test can wait until a second call is in line instead of sleeping and hoping.
@@ -498,14 +518,14 @@ func (c *Client) warmedModels() []string {
 // so a burst whose final call was refused by the fence still frees the models its earlier
 // calls warmed.
 func (c *Client) UnloadIfIdle(ctx context.Context) error {
-	if sttCalls.Load() > 0 {
+	if sttCalls.Load() > 0 || sttQueued.Load() > 0 {
 		return nil
 	}
 	if !inferMu.TryLock() {
 		return nil
 	}
 	defer inferMu.Unlock()
-	if sttCalls.Load() > 0 {
+	if sttCalls.Load() > 0 || sttQueued.Load() > 0 {
 		return nil
 	}
 	var errs []error

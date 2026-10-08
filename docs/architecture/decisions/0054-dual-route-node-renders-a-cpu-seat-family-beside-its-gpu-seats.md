@@ -67,7 +67,7 @@ end (an UNSTAMPED serving config nobody can regenerate).
 
 - **A second llama-swap instance for the CPU route.** Rejected: two residency solvers cannot
   keep one model resident at a time on a shared DDR pool; the matrix is the point.
-- **A composite tier (`composes: [amd-gcn, cpu]`, ADR 0039).** Rejected for this shape: the
+- **A composite tier (`composes: [amd-gcn, cpu]`, ADR 0052).** Rejected for this shape: the
   composite mechanism places device *layers*; here both routes serve the same weights on the
   same memory, and the choice is per request, not per layer.
 - **Letting llama-server pick the backend per request.** llama.cpp loads one backend per

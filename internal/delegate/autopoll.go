@@ -143,7 +143,9 @@ func pollBudgetFor(view NodeView, c core.AgentContract, runSeat string) (budget,
 
 // patienceFor is how long the caller will wait for c to START on view: its poll
 // budget. The seat is the advertised agent seat (a composite node's layer seat is
-// decided later and can only widen a bound sized from the cap).
+// decided later and can only widen a bound sized from the cap). A call that has a
+// deadline clamps it to the time the call has left (runner.patience, ADR 0073); every
+// placement site reads that, never this.
 func patienceFor(c core.AgentContract, view NodeView) time.Duration {
 	budget, _, _ := pollBudgetFor(view, c, "")
 	return budget

@@ -33,7 +33,7 @@ const mcpClientAbort = 1800 * time.Second
 // deadlineServer is delegateTestServer with the whole-call deadline compressed to
 // sec seconds (config.AgentCallDeadlineSec is whole seconds; a one-second
 // deadline keeps each test to about a second).
-func deadlineServer(t *testing.T, sec int, local func(context.Context, core.AgentContract, delegate.LocalOptions) (core.AgentWireResult, error)) *Server {
+func deadlineServer(t *testing.T, sec int, local func(context.Context, core.AgentContract, delegate.LocalOptions) (core.AgentWireResult, error), roster ...string) *Server {
 	t.Helper()
 	home := t.TempDir()
 	cfg := config.Default()
@@ -41,6 +41,7 @@ func deadlineServer(t *testing.T, sec int, local func(context.Context, core.Agen
 	cfg.LedgerPath = filepath.Join(home, "ledger.jsonl")
 	cfg.AgentDelegationEnabled = true
 	cfg.AgentCallDeadlineSec = sec
+	cfg.DelegateRemotes = roster // the configured fleet: a call's own remotes list may only narrow it
 	s := New(pipeline.New(cfg, nil, nil, nil))
 	s.localAgent = local
 	return s

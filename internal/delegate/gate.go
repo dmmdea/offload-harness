@@ -382,6 +382,17 @@ func provablyStartsNow(v NodeView) bool {
 	return v.MaxConcurrentJobs > 0 && v.JobsRunning < v.MaxConcurrentJobs && v.JobsQueued == 0
 }
 
+// freeWorkerProven reports whether v's own numbers PROVE a free execution slot with nobody
+// ahead of a new job: it publishes its worker ceiling, fewer jobs run than that, none waits in
+// its backlog, and it does not report itself saturated. It is the second proof provablyStartsNow
+// accepts and not the first: a node whose queue is empty because it publishes no counters at all
+// (an older node, a fake) proves nothing about its workers, and "unknown is never a yes" is the
+// rule every capacity reader in this package follows. A Retry-After cooldown is lifted only on
+// this proof (cooldowns.lift, ADR 0073).
+func freeWorkerProven(v NodeView) bool {
+	return !saturated(v) && v.MaxConcurrentJobs > 0 && v.JobsRunning < v.MaxConcurrentJobs && v.JobsQueued == 0
+}
+
 // remoteEligible is the §S3 HARD gate — every condition must hold, and each
 // one fails toward local:
 //
@@ -395,7 +406,7 @@ func provablyStartsNow(v NodeView) bool {
 //     fits the advertised ceiling with room for the loop itself. An
 //     unadvertised ceiling (0) can never fit — "unknown" is not a capacity.
 //     The arithmetic lives in fit.go's adequate() so the gate and the
-//     smallest-ADEQUATE-seat fit score can never drift apart on what "fits"
+//     ADEQUATE-seat fit score can never drift apart on what "fits"
 //     means.
 //   - OutputSchema present (len>0 — bytes, not merely non-nil): the reshaped
 //     verifiability requirement (roast delta 3). Remote output merges only
@@ -749,6 +760,34 @@ func PlaceText(remotes []NodeView, task string) (int, bool) {
 		}
 	}
 	return best, best >= 0
+}
+
+// PlaceSTT picks the fleet node that transcribes ONE uploaded audio file (the stt upload door, ADR
+// 0072) when the caller has decided the work leaves the box (route remote, or route auto while the
+// local whisper admission would block). It is PlaceVision with the door's own gate: the node must
+// ADVERTISE the door (ServesSTTUpload: an older node lists only the legacy path-taking "stt", which
+// cannot be sent bytes, so it is never a target), have an hq model when hq is asked, take a file this
+// size (size bytes against its published cap), and have a card that is not spoken for (the same
+// LeasedText / LeaseBusy refusals). Ranking is betterRemote, as for vision, and the return is the
+// INDEX into remotes, for the same reason.
+func PlaceSTT(remotes []NodeView, hq bool, size int64) (int, bool) {
+	seed := mintP2CSeed()
+	best := -1
+	for i, r := range remotes {
+		if !sttEligible(r, hq, size) {
+			continue
+		}
+		if best < 0 || betterRemote(seed, nil, 0, r, remotes[best]) {
+			best = i
+		}
+	}
+	return best, best >= 0
+}
+
+// sttEligible is PlaceSTT's hard gate: the door advertised and able to take this file, the card not
+// reserved.
+func sttEligible(r NodeView, hq bool, size int64) bool {
+	return r.ServesSTTUploadOf(hq, size) && !r.LeasedText && !r.LeaseBusy
 }
 
 // textEligible is PlaceText's hard gate: the lane advertised and the task served, the card not

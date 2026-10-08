@@ -58,7 +58,7 @@ type Profile struct {
 	// (ADR 0048 Amendment 2): a tier page that showed only the lane seat would hide a seat
 	// and the layer it backs.
 	ExtraVLLMSeats []vllmseat.Spec `json:"extra_vllm_seats"`
-	// Composes and Layers are the composite declaration (ADR 0039): the tiers
+	// Composes and Layers are the composite declaration (ADR 0052): the tiers
 	// this one is a COMPLETE instance of, and the device layers it routes work
 	// to. Absent on every ordinary tier, whose page is unchanged.
 	Composes []string           `json:"composes"`
@@ -702,13 +702,13 @@ func composesSection(p Profile) string {
 		// A layers-only tier (one device, several seats served in turn) composes no other tier,
 		// so the heading that says "Composes" would claim a composition it does not have.
 		b.WriteString("\n## Layers\n\n" +
-			"This tier declares device LAYERS (ADR 0039) on the card(s) it already has: the layer decides which seat\n" +
+			"This tier declares device LAYERS (ADR 0052) on the card(s) it already has: the layer decides which seat\n" +
 			"serves a task, and a layer's seat is seeded only while the box actually runs it.\n\n")
 	} else {
 		b.WriteString("\n## Composes\n\n")
 	}
 	if len(p.Composes) > 0 {
-		b.WriteString("This box is a COMPLETE instance of each of these tiers at once (ADR 0039) — it does not\n" +
+		b.WriteString("This box is a COMPLETE instance of each of these tiers at once (ADR 0052) — it does not\n" +
 			"merely resemble them, and the fleet reads one capacity row per layer rather than one per box:\n\n")
 		for _, id := range p.Composes {
 			fmt.Fprintf(&b, "- [`%s`](%s.md)\n", id, id)

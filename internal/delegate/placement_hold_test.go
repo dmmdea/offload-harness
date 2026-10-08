@@ -395,7 +395,8 @@ func TestARetryMayReturnToALocalSeatThatOnlyCapacityDeferredTheSubtask(t *testin
 // that abandoned jobs a node was about to run (58 queue deadlines on 09-29, the
 // node running every one of them anyway). Clamped to [60 s, the caller's patience].
 func TestQueueBudgetIsDerivedFromTheNodesETA(t *testing.T) {
-	est := func(sec float64) NodeView { v := slowNodeShaped(); v.QueueWaitEstimateSec = &sec; return v }
+	// The node publishes the wait of a new job (new_job_wait_sec, ADR 0073), which is believed as it stands.
+	est := func(sec float64) NodeView { v := slowNodeShaped(); v.NewJobWaitSec = &sec; return v }
 	if got := queueBudgetFor(est(480), 20*time.Minute); got < 750*time.Second || got != 750*time.Second {
 		t.Fatalf("budget for a node with a 480 s ETA = %s, want 12m30s (1.5 x 480 + 30 s, past the old 5 m ceiling)", got)
 	}
@@ -410,6 +411,41 @@ func TestQueueBudgetIsDerivedFromTheNodesETA(t *testing.T) {
 	}
 	if got := queueBudgetFor(est(100), 20*time.Minute); got != 180*time.Second {
 		t.Fatalf("budget for a 100 s ETA = %s, want 3m0s", got)
+	}
+}
+
+// TestQueueBudgetIsDerivedFromAnOlderNodesEstimateToo: the budget above on the OTHER side of a rolling
+// deploy. A node that predates new_job_wait_sec publishes only queue_wait_estimate_sec, the wait of its
+// deepest job ALREADY queued, and a new job waits one slot longer (ADR 0073): the node's own wall over its
+// workers (slowNodeShaped: one worker, a 443.6 s wall). The slot is added to a positive estimate only; 0 is
+// "a worker is free" and stays 0, and the same clamp to [60 s, the caller's patience] applies.
+func TestQueueBudgetIsDerivedFromAnOlderNodesEstimateToo(t *testing.T) {
+	const slot = 443.6 // recent wall / 1 worker
+	legacy := func(sec float64) NodeView { v := slowNodeShaped(); v.QueueWaitEstimateSec = &sec; return v }
+	// The budget is 1.5 x the wait a new job faces + 30 s, in the node's seconds converted with pollSecond.
+	// Compared within a millisecond: the conversion is a float multiplication and may land a nanosecond off.
+	within := func(got, want time.Duration) bool { return got-want > -time.Millisecond && got-want < time.Millisecond }
+	budget := func(estimate float64) time.Duration {
+		return time.Duration((queueBudgetFactor*(estimate+slot) + queueBudgetSlackSec) * float64(pollSecond))
+	}
+	if got, want := queueBudgetFor(legacy(480), 30*time.Minute), budget(480); !within(got, want) {
+		t.Fatalf("budget for an older node with a 480 s estimate = %s, want %s (1.5 x (480 s + the 443.6 s slot a new job adds) + 30 s)", got, want)
+	}
+	if got, want := queueBudgetFor(legacy(100), 30*time.Minute), budget(100); !within(got, want) {
+		t.Fatalf("budget for an older node with a 100 s estimate = %s, want %s", got, want)
+	}
+	if got := queueBudgetFor(legacy(480), 600*time.Second); got != 600*time.Second {
+		t.Fatalf("budget = %s, want the caller's 600 s patience to cap it", got)
+	}
+	if got := queueBudgetFor(legacy(0), 20*time.Minute); got != 60*time.Second {
+		t.Fatalf("budget for an older node saying a worker is free = %s, want the 60 s floor: no slot is added to a 0", got)
+	}
+	// A node that publishes both is believed on the new field alone: the slot is already in it.
+	both := legacy(480)
+	forNew := 100.0
+	both.NewJobWaitSec = &forNew
+	if got := queueBudgetFor(both, 30*time.Minute); got != 180*time.Second {
+		t.Fatalf("budget for a node publishing 480 s and new_job_wait_sec 100 s = %s, want 3m0s from the new field alone", got)
 	}
 }
 

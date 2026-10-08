@@ -18,6 +18,9 @@ type fakeLive struct {
 	host   float64
 	hostOK bool
 	pres   *Presence
+	// watcherDown, when set, is why the display layer's watcher is not alive; the default is a live one
+	// (the display layer's presence guard asks, internal/displaystate).
+	watcherDown string
 }
 
 func (f fakeLive) live() Live {
@@ -37,6 +40,12 @@ func (f fakeLive) live() Live {
 	if f.pres != nil {
 		p := *f.pres
 		l.Presence = func() Presence { return p }
+		l.WatcherAlive = func() (bool, string) {
+			if f.watcherDown != "" {
+				return false, f.watcherDown
+			}
+			return true, "watcher heartbeat 4s old"
+		}
 	}
 	return l
 }

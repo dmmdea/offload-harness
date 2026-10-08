@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"embed"
 	"encoding/json"
 	"flag"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/dmmdea/offload-harness/internal/buildinfo"
 	"github.com/dmmdea/offload-harness/internal/config"
+	"github.com/dmmdea/offload-harness/internal/gpuprobe"
 	"github.com/dmmdea/offload-harness/internal/hwdetect"
 	"github.com/dmmdea/offload-harness/internal/mediaseat"
 	"github.com/dmmdea/offload-harness/internal/servingtmpl"
@@ -118,7 +120,7 @@ type servingProfile struct {
 	MediaSeats []mediaseat.Seat `json:"media_seats"`
 	// GPUEnv is added to every model in the rendered config.
 	GPUEnv []string `json:"gpu_env"`
-	// Composes / Layers are the composite declaration (ADR 0039): the tiers
+	// Composes / Layers are the composite declaration (ADR 0052): the tiers
 	// this one is a complete instance of, and the device layers it places work
 	// on. Absent on every ordinary tier, where the render is unchanged.
 	Composes []string           `json:"composes"`
@@ -409,7 +411,7 @@ type renderResult struct {
 	Config     string // rendered, UNSTAMPED -- the bytes body_sha256 covers
 	Basis      servingtmpl.SpecBasis
 	Include26B bool
-	// Layers / Composed are the composite declaration (ADR 0039) as the render
+	// Layers / Composed are the composite declaration (ADR 0052) as the render
 	// resolved it: the SEEDED layers the config was rendered from, and the
 	// capabilities of the tiers the composite claims to be a complete instance
 	// of. They are carried out of the derivation because the composition check
@@ -647,7 +649,7 @@ func runInstallRender(args []string) error {
 //   - The spill ceiling (H-01, INV-1): `--n-cpu-moe` above the tier's measured spill
 //     (`n_cpu_moe_max`), and a partial placement that names no N (which renders the
 //     every-expert form), are refused.
-//   - D5 (ADR 0039): a tier that declares layers must render the CHECKED UNION of what it
+//   - D5 (ADR 0052): a tier that declares layers must render the CHECKED UNION of what it
 //     declares: every layer seat defined, every seat on the cards its layer declares, every
 //     composed capability present. The tier shipped a media block copied from the 2-card tier
 //     once (0.113.33) and nothing read the result; this reads it. It runs for a tier that
@@ -664,11 +666,38 @@ func renderGate(res renderResult) error {
 	if len(res.Profile.Composes) > 0 || len(res.Layers) > 0 {
 		if err := servingtmpl.CheckComposite(res.Config, servingtmpl.CompositeDecl{
 			Tier: res.TierID, Composes: res.Profile.Composes, Layers: res.Layers, MediaKinds: seatKinds(res.Profile.MediaSeats),
+			ResolvePin: localPinResolver(),
 		}, res.Composed); err != nil {
 			return fmt.Errorf("tier %s: %w — not written", res.TierID, err)
 		}
 	}
 	return nil
+}
+
+// renderCardTable reads this machine's card table for the one comparison a render cannot make from its
+// own text: a UUID-rendered pin against an index-declared one. A seam so a test supplies a box; the
+// production read is nvidia-smi through gpuprobe, bounded, and an error is "no card table".
+var renderCardTable = func() ([]gpuprobe.Device, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	return gpuprobe.Read(ctx)
+}
+
+// localPinResolver resolves a rendered GPU UUID (or prefix) to its CUDA index through this machine's
+// card table, reading the table once and only if a comparison needs it, so a render that pins nothing
+// by UUID never runs nvidia-smi. A table that cannot be read resolves nothing, and the comparison is
+// then refused (servingtmpl.CheckComposite) instead of passed.
+func localPinResolver() func(string) (string, bool) {
+	var once sync.Once
+	var devs []gpuprobe.Device
+	return func(pin string) (string, bool) {
+		once.Do(func() {
+			if d, err := renderCardTable(); err == nil {
+				devs = d
+			}
+		})
+		return gpuprobe.IndexOf(devs, pin)
+	}
 }
 
 // spillViolations is the INV-1 spill rule for one resolved render: the text-level ceiling

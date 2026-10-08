@@ -6,6 +6,7 @@ import (
 
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
+	"github.com/dmmdea/offload-harness/internal/displaywatch"
 	"github.com/dmmdea/offload-harness/internal/placement"
 )
 
@@ -47,6 +48,72 @@ func layersView(ctx context.Context, cfg config.Config) []placement.LayerRow {
 	case <-ctx.Done():
 		return placement.RowsFromConfig(cfg, placement.Live{})
 	}
+}
+
+// withDisplayStatus adds, to the local block of offload_status, what a composite box owes about the
+// display card's gate: the operator-presence reading and mode (the layer's presence guard and the card
+// allocator both read that key), and the post-admission guard's heartbeat and last action (ADR 0075).
+// A box that seeds no layers gets its block back untouched, which is what keeps its payload byte for
+// byte what it was (the golden pins it); display_guard is omitted unless the watcher has something
+// to say.
+func withDisplayStatus(ctx context.Context, cfg config.Config, local map[string]any) map[string]any {
+	if !cfg.Composite() {
+		return local
+	}
+	local["operator_presence"] = presenceView(ctx, cfg)
+	if v := displaywatch.StatusView(cfg, time.Now()); v != nil {
+		local["display_guard"] = v
+	}
+	return local
+}
+
+// presenceView is the operator-presence reading offload_status publishes beside the layer rows, on a
+// composite box only (the key is the display card's gate: the layer's presence guard and the card
+// allocator both read it). It is the probe's own reading for the configured mode, from the same 2 s
+// memo the guards read through, so what an operator reads here is what the guards just saw. It never
+// blocks the call: a probe that does not answer inside layersViewTimeout is reported as such, with the
+// mode, which is configuration and needs no probe.
+func presenceView(ctx context.Context, cfg config.Config) map[string]any {
+	ctx, cancel := context.WithTimeout(ctx, layersViewTimeout)
+	defer cancel()
+	done := make(chan placement.Presence, 1)
+	go func() { done <- placement.SharedSnapshot(cfg).Presence() }()
+	select {
+	case p := <-done:
+		return presenceViewFor(cfg, p)
+	case <-ctx.Done():
+		return map[string]any{"mode": cfg.PresenceMode(), "note": "the presence probe did not answer in time"}
+	}
+}
+
+// presenceViewFor renders one presence reading. admits is the presence guard's own verdict on it (the
+// rule the guard and the check on a loaded twin share, placement.PresenceAllows); idle_threshold_sec
+// is what `auto` measures the last input against. An `away` mode carries the caution that it is the
+// operator's unconditional override: it admits whether or not anyone is at the desk, because it never
+// reads the session (ADR 0052 D4), so `auto` is the mode that protects the operator.
+func presenceViewFor(cfg config.Config, p placement.Presence) map[string]any {
+	admits, reading := placement.PresenceAllows(p)
+	view := map[string]any{
+		"mode":    cfg.PresenceMode(),
+		"known":   p.Known,
+		"away":    p.Away,
+		"locked":  p.Locked,
+		"admits":  admits,
+		"reading": reading,
+	}
+	if p.IdleSec > 0 {
+		view["idle_sec"] = p.IdleSec
+	}
+	if p.Note != "" {
+		view["note"] = p.Note
+	}
+	switch cfg.PresenceMode() {
+	case "auto":
+		view["idle_threshold_sec"] = int(cfg.OperatorIdle() / time.Second)
+	case "away":
+		view["caution"] = "away is the operator's unconditional override: it admits whether or not anyone is at the desk (no idle, lock or fullscreen test), so the display card opens at the keyboard too. auto is the supported mode"
+	}
+	return view
 }
 
 // withPlaced publishes a placement block on a result map, and publishes

@@ -10,6 +10,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+
+	"github.com/dmmdea/offload-harness/internal/core"
 )
 
 const maxQueueBody = 1 << 20 // mirror the dispatch cap: 1 MiB
@@ -66,7 +68,14 @@ func handleSubmit(q *Queue) http.HandlerFunc {
 		if !decode(w, r, &in) {
 			return
 		}
-		state, err := q.Submit(in.JobID, in.TaskType, in.Payload, in.TimeoutSec)
+		// The submitter's attribution headers ride the job to whichever node claims it, so a pulled
+		// job is attributed exactly like a pushed one. The asker name is untrusted; the card
+		// signal has one legal value.
+		attr := Attribution{Asker: core.SanitizeAsker(r.Header.Get(core.AskerHeader))}
+		if r.Header.Get(core.PairCardHeader) == core.PairCardNode {
+			attr.PairCard = core.PairCardNode
+		}
+		state, err := q.SubmitAttributed(in.JobID, in.TaskType, in.Payload, in.TimeoutSec, attr)
 		if err != nil {
 			jsonError(w, http.StatusBadRequest, err.Error())
 			return

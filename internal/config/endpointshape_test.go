@@ -447,3 +447,67 @@ func TestFindingsWanVirtualVramNegative(t *testing.T) {
 		t.Fatalf("a measured value must load as written, got %g", measured.VideoGenWanVirtualVramGB)
 	}
 }
+
+// pair_node_info_url is read for this node's PAIR identity (the identity fallback), so it is held to
+// loopback: any other host fails the load naming the key and the value, and an unusable URL is refused
+// like every other configured base.
+func TestLoadHoldsPairNodeInfoURLToLoopback(t *testing.T) {
+	refused := []string{
+		"http://192.0.2.1:14318/v1/node-info",
+		"http://node-info.example.test:14318/v1/node-info",
+		"http://[2001:db8::1]:14318/v1/node-info",
+		"http://127.0.0.1.example.test/v1/node-info",
+		"node-a:14318",
+		"ftp://127.0.0.1/v1/node-info",
+		"http://127.0.0.1:9/v1/node-info",
+	}
+	for _, v := range refused {
+		_, err := Load(writeShapeCfg(t, `{"pair_node_info_url":`+quote(v)+`}`))
+		if err == nil {
+			t.Errorf("Load must refuse pair_node_info_url %q", v)
+			continue
+		}
+		for _, want := range []string{"pair_node_info_url", v} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("Load error %q must name %q", err, want)
+			}
+		}
+	}
+	for _, v := range []string{
+		"http://127.0.0.1:14318/v1/node-info",
+		"http://localhost:14318/v1/node-info",
+		"http://[::1]:14318/v1/node-info",
+		"",
+	} {
+		cfg, err := Load(writeShapeCfg(t, `{"pair_node_info_url":`+quote(v)+`}`))
+		if err != nil {
+			t.Errorf("a loopback (or unset) pair_node_info_url %q must load: %v", v, err)
+			continue
+		}
+		if cfg.PairNodeInfoURL != v {
+			t.Errorf("pair_node_info_url = %q, want %q", cfg.PairNodeInfoURL, v)
+		}
+	}
+}
+
+// pair_workloads_relay lists fleet-serve member bases (or the words auto and off): an entry that is
+// not a usable base is refused at load naming the key, the two words are never read as URLs.
+func TestLoadValidatesPairWorkloadsRelay(t *testing.T) {
+	for _, v := range []string{"node-a:18811", "ftp://192.0.2.9/", "http://192.0.2.9:9"} {
+		_, err := Load(writeShapeCfg(t, `{"pair_workloads_relay":[`+quote(v)+`]}`))
+		if err == nil {
+			t.Errorf("Load must refuse pair_workloads_relay entry %q", v)
+			continue
+		}
+		for _, want := range []string{"pair_workloads_relay", v} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("Load error %q must name %q", err, want)
+			}
+		}
+	}
+	for _, list := range []string{`["auto"]`, `["off"]`, `["http://192.0.2.9:18811"]`, `["AUTO","http://192.0.2.9:18811"]`, `[]`} {
+		if _, err := Load(writeShapeCfg(t, `{"pair_workloads_relay":`+list+`}`)); err != nil {
+			t.Errorf("pair_workloads_relay %s must load: %v", list, err)
+		}
+	}
+}

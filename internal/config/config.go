@@ -119,8 +119,18 @@ type Config struct {
 	// rule is deliberately NOT the fallback: it would admit ANY tailnet's
 	// Funnel-published hostname, i.e. a public-internet endpoint wearing a
 	// tailnet-looking name.
-	TailnetSuffix string            `json:"tailnet_suffix,omitempty"`
-	SeatEndpoints map[string]string `json:"seat_endpoints,omitempty"`
+	TailnetSuffix string `json:"tailnet_suffix,omitempty"`
+	// TailnetSuffixes are MORE tailnet DNS zones netguard.TailnetURL admits dotted
+	// hostnames under, beside tailnet_suffix (ADR 0074). Tailscale names a node shared in
+	// from another tailnet under the SHARER's zone and nowhere else, so a delegator that
+	// takes such a node by name needs that zone listed; before this list the only form
+	// that passed was the node's raw tailnet CGNAT-range address. Every entry is a zone the
+	// operator names on purpose, normalized like tailnet_suffix and refused at load when
+	// it is not a DNS zone; empty (the default) adds none. It does NOT loosen the dial
+	// gate, which still refuses any name that resolves outside loopback and
+	// the tailnet CGNAT range, and it is not a generic ".ts.net" rule.
+	TailnetSuffixes []string          `json:"tailnet_suffixes,omitempty"`
+	SeatEndpoints   map[string]string `json:"seat_endpoints,omitempty"`
 	// CascadeRemoteLanes maps a model seat (same key rule as SeatEndpoints) to a
 	// remote OpenAI-compatible base URL that ALSO serves that model — the
 	// busy-aware failover lane for the daily cascade (roast delta 7), distinct
@@ -411,6 +421,22 @@ type Config struct {
 	// PairWorkloadsEndpoint is the ingress URL; the default is the port every
 	// node's workload-ingress.json binds.
 	PairWorkloadsEndpoint string `json:"pair_workloads_endpoint,omitempty"`
+	// PairNodeInfoURL is PAIR's loopback node-info (default http://127.0.0.1:14318/v1/node-info),
+	// asked for this node's UUID (`hostUuid`) when PAIR's node-id.json is missing or unreadable: a box
+	// where the harness runs as a different OS user than PAIR (a small ARM node). The fallback identity counts
+	// only while the pair_workloads_endpoint ingress answers HTTP, so a box with node-info and no
+	// ingress stays off. Loopback only: any other host is refused at load. Empty = the default,
+	// except where OFFLOAD_PAIR_APPDIR is set (docs/systems/pair-workloads.md).
+	PairNodeInfoURL string `json:"pair_node_info_url,omitempty"`
+	// PairWorkloadsRelay is where this box's PAIR frames go when it has NO PAIR identity of its own
+	// (no readable node-id.json and no node-info fallback: a view-only box, a thin client where PAIR
+	// is not installed): the base URLs of fleet-serve members that serve POST /fleet/pair-relay
+	// (docs/systems/pair-workloads.md, *The card relay*). Absent or empty = "auto": every
+	// delegate_remotes base whose /fleet/health advertises pair_relay. The entry "auto" says so
+	// outright, "off" turns the relay off, and any other entry is an explicit member base (a box with
+	// no delegate_remotes sets it by hand). Used only while pair_workloads_enabled is on and the box
+	// has no identity; the fleet_auth_token is the bearer.
+	PairWorkloadsRelay []string `json:"pair_workloads_relay,omitempty"`
 	// PairSeatActivityEnabled (0.133.0) makes fleet-serve report traffic that
 	// reaches this box's vLLM seats WITHOUT the harness (a curl soak, an editor
 	// pointed at llama-swap) as PAIR cards, one per busy stretch of a seat. The
@@ -418,7 +444,7 @@ type Config struct {
 	// harness job never shows twice. Unlike pair_workloads_enabled it belongs on
 	// every box that SERVES a vLLM seat. Off by default; same ingress URL.
 	PairSeatActivityEnabled bool `json:"pair_seat_activity_enabled,omitempty"`
-	// TierProfile (0.116.0, ADR 0039) is the tier this box is INSTALLED as
+	// TierProfile (0.116.0, ADR 0052) is the tier this box is INSTALLED as
 	// (installed.json's profile, e.g. "blackwell-3x16"), seeded by tierseed so
 	// status, health and every placement record carry the identity from CONFIG
 	// rather than re-reading the install. "" = not recorded (a pre-0.116.0 box,
@@ -440,12 +466,23 @@ type Config struct {
 	// says so), "auto" (console session locked ⇒ away; else last input idle
 	// ≥ operator_idle_sec and the shell not busy/fullscreen ⇒ away). Defaults
 	// to present — the display card fails closed until the operator has read
-	// the probe's readings in offload_status and set auto or away.
+	// the probe's readings in offload_status and set auto or away. The key has two
+	// readers: the layer's presence guard and the card allocator (gpu reserve --cards,
+	// an auto-placed media call), which takes the display card only while this reads
+	// away, and then only above the layers' desktop floor (DisplayFloorGiB).
 	OperatorPresence string `json:"operator_presence,omitempty"`
 	// OperatorIdleSec is the last-input idle threshold behind presence mode
 	// "auto". 0 = 900 (15 min): long enough that a coffee break does not admit
 	// a 10 GB load onto the desktop's card.
 	OperatorIdleSec int `json:"operator_idle_sec,omitempty"`
+	// DisplayWatchSec (ADR 0075) is how often fleet-serve re-checks the display layer's desktop
+	// guards (presence and the display_floor) WHILE one of the layer's seats is loaded, and unloads
+	// the seat when either refuses. The admission guards decide once, at the placement; a twin
+	// then sits on the desktop's card until llama-swap's 300 s idle ttl, however soon the operator
+	// is back or a game takes the card's memory. 0 = 10 s; negative = off (the layer then has its
+	// admission guards and the idle ttl only); above 300 is refused, since a check slower than the
+	// idle ttl guards nothing the ttl does not.
+	DisplayWatchSec int `json:"display_watch_sec,omitempty"`
 	// AgentLeaseWaitSec bounds how long a LOCAL agent placement (agent_delegate /
 	// delegate, route auto or spread) waits for a foreign TEXT-class GPU lease to
 	// clear before deferring. `gpu reserve --class text` (a benchmark, eval or
@@ -457,7 +494,12 @@ type Config struct {
 	// work; with none, the placement waits up to this many seconds (re-reading the
 	// lease once a second) and then defers, class infrastructure, naming the holder
 	// and its expiry. The wait is the larger of this and agent_placement_wait_sec
-	// (default 120 s), so 0 (the default) leaves it to the placement wait. route=local is the caller's
+	// (default 120 s), so 0 (the default) leaves it to the placement wait. Both are
+	// the wait of a call with no whole-call deadline, and of a subtask that holds a
+	// run slot while others of its call have not started (ADR 0073). A wait that the
+	// call's own deadline bounds (the MCP doors, for the last subtask to start) ends
+	// at that deadline less a reserve even when this key is longer: a wait past the
+	// deadline cannot help, the call is over before it ends. route=local is the caller's
 	// explicit choice and is not gated; a media lease is arbitrated by the
 	// model-affinity gate as before (ADR 0026) and is not a placement gate either.
 	AgentLeaseWaitSec int `json:"agent_lease_wait_sec,omitempty"`
@@ -492,9 +534,18 @@ type Config struct {
 	// released), so a contract is no longer lost because one node was busy for
 	// the minute it was dispatched ("<node-b> timed out", 2026-09-06). The wait is
 	// NOT charged to the contract's timeout_sec (like time provably spent queued
-	// on a node); it is bounded by this key alone. 0 = the built-in default
-	// (120 s); negative = do not wait (the pre-0.113.18 behaviour). A sheddable
-	// contract (priority -1) never waits: with no idle node it is shed at once.
+	// on a node). What bounds it depends on the call (ADR 0073): a call that has a
+	// whole-call deadline (the MCP doors agent_delegate and offload_research,
+	// agent_call_deadline_sec) waits until that deadline less a short reserve for
+	// a placed job to run in, whatever this key says, so production work never
+	// defers for capacity while the call still has time to place it (once every
+	// subtask of the call has started: see below); this key is
+	// the wait of a call with NO deadline (the CLI verbs, agent_run, offload_ask),
+	// where 0 = the built-in default (120 s), and the wait of a subtask that holds
+	// one of the call's run slots while others have not started (only the last
+	// subtask to start waits for the deadline). Negative = do not wait (the
+	// pre-0.113.18 behaviour), for every call. A sheddable contract (priority -1)
+	// never waits: with no idle node it is shed at once.
 	AgentPlacementWaitSec int `json:"agent_placement_wait_sec,omitempty"`
 	// AgentCallDeadlineSec (ADR 0065, register C-67) is the WHOLE-CALL deadline of
 	// the MCP doors agent_delegate and offload_research: how long one call may run
@@ -1694,7 +1745,7 @@ type Config struct {
 	FleetComposeProjects bool `json:"fleet_compose_projects,omitempty"`
 	// FleetComposeBundleMaxMB caps one project bundle as sent (gzip-compressed), MiB; 0 = 64.
 	FleetComposeBundleMaxMB int `json:"fleet_compose_bundle_max_mb,omitempty"`
-	// FleetMediaInputs (ADR 0072) opens this node's media-job door, POST /fleet/media-job: a
+	// FleetMediaInputs (ADR 0076) opens this node's media-job door, POST /fleet/media-job: a
 	// holder of the fleet token sends ONE image, video, animation, audio or ComfyUI-graph job
 	// together with the input files it reads (a still, a reference image, a driver video, a voice
 	// clone sample), which the node extracts into a fresh directory, sniffs by magic bytes and
@@ -1706,6 +1757,24 @@ type Config struct {
 	// admits a job, so the default is sized to keep that peak under about 0.6 GiB; raise it for a node with
 	// the RAM and a driver video that needs it.
 	FleetMediaInputsMaxMB int `json:"fleet_media_inputs_max_mb,omitempty"`
+	// FleetSTTUploadMaxMB caps one audio upload to POST /fleet/stt (the stt upload door, ADR 0072),
+	// MiB of decoded audio; 0 = 48. The request body is that cap in base64 (64 MiB at the default) plus
+	// slack, and 48 MiB is about 4.6 h of the 32 kbps Opus an asker sends. Published in health
+	// (stt_upload_max_mb) so an asker never sends a file the node would refuse.
+	FleetSTTUploadMaxMB int `json:"fleet_stt_upload_max_mb,omitempty"`
+	// FleetSTTTranscriptTTLMin is how long a node keeps the transcript files (.srt, .txt,
+	// .segments.json) of an stt upload job under media_dir, minutes; 0 = 30, negative = keep them for
+	// good. They are removed when the job record is evicted or once this old, swept at fleet-serve
+	// start and on the job store's janitor tick; /fleet/media serves them only to a bearer holder
+	// while they last (ADR 0072). The asker fetches the segment list within seconds of the job
+	// finishing, so the default is generous.
+	FleetSTTTranscriptTTLMin int `json:"fleet_stt_transcript_ttl_min,omitempty"`
+	// FleetSTTMaxConcurrent caps how many fleet stt jobs run at once on this node, the legacy
+	// path-taking lane and the upload door counted together; 0 = 1. Whisper is one single-slot
+	// upstream: a job over the cap waits its turn in arrival order and is never refused. Inference
+	// itself stays serialized by the whisper client's process-wide mutex whatever this says, so a
+	// value above 1 only overlaps the jobs' ffmpeg conversions and queue time.
+	FleetSTTMaxConcurrent int `json:"fleet_stt_max_concurrent,omitempty"`
 	// KVSlotCapGiB bounds the node's kvslots/ directory (ADR 0056 Layer 2); 0 = 8 GiB.
 	KVSlotCapGiB int `json:"kvslot_cap_gib,omitempty"`
 	// FleetAgentEnabled opts this NODE into executing fleet "agent" tasks
@@ -2126,7 +2195,7 @@ func Default() Config {
 // (LO-4: config.example.json ships "~/.local-offload/..." paths that were
 // previously taken literally, silently creating a "~" directory in the cwd).
 //
-// A config returned WITH an error never carries the composite keys (ADR 0039):
+// A config returned WITH an error never carries the composite keys (ADR 0052):
 // LoadWithSource hands the value to every subcommand whatever the error, so the
 // layers are stripped here, in the wrapper, for the same reason the GPU gate is
 // armed in one — no exit path (decode, any validator, the fleet_queue_holder
@@ -2270,13 +2339,17 @@ func load(path string) (Config, error) {
 	if err := validateFamilies(c); err != nil {
 		return c, err
 	}
-	// Install the operator's tailnet zone BEFORE any endpoint is vetted — the
-	// endpoint checks below consult it, so setting it afterwards would judge this
+	// Install the operator's tailnet zones BEFORE any endpoint is vetted — the
+	// endpoint checks below consult them, so setting them afterwards would judge this
 	// load's endpoints against the PREVIOUS value (empty on a first load, i.e.
 	// every dotted tailnet FQDN wrongly rejected). A malformed zone is refused
 	// here rather than stored, so it can be attributed to its key.
-	if err := netguard.SetTailnetSuffix(c.TailnetSuffix); err != nil {
-		return c, fmt.Errorf("tailnet_suffix: %w", err)
+	zones, zerr := c.TailnetZones()
+	if zerr != nil {
+		return c, zerr
+	}
+	if err := netguard.SetTailnetSuffixes(zones); err != nil {
+		return c, err
 	}
 	if err := validateTailnetEndpoints("seat_endpoints", c.SeatEndpoints); err != nil {
 		return c, err
@@ -2832,14 +2905,20 @@ func DefaultComfyDir() string {
 	return ""
 }
 
+// DefaultPlacementWait is the capacity wait of a call that has no whole-call deadline when
+// agent_placement_wait_sec is unset. A call WITH a deadline waits until it instead (ADR 0073).
+const DefaultPlacementWait = 120 * time.Second
+
 // PlacementWait resolves AgentPlacementWaitSec: 0 → the built-in default
-// (120 s), negative → 0 meaning "do not wait".
+// (DefaultPlacementWait), negative → 0 meaning "do not wait". It is the wait of a call
+// with no whole-call deadline; a call that has one is bounded by it (ADR 0073) and reads
+// this only for the off switch.
 func (c Config) PlacementWait() time.Duration {
 	switch {
 	case c.AgentPlacementWaitSec < 0:
 		return 0
 	case c.AgentPlacementWaitSec == 0:
-		return 120 * time.Second
+		return DefaultPlacementWait
 	default:
 		return time.Duration(c.AgentPlacementWaitSec) * time.Second
 	}
@@ -3026,7 +3105,7 @@ func (c Config) EffectiveComposeBundleMaxBytes() int64 {
 	return int64(mb) << 20
 }
 
-// MediaInputsAdmissible reports whether THIS node's media-job door is open (ADR 0072): the
+// MediaInputsAdmissible reports whether THIS node's media-job door is open (ADR 0076): the
 // operator opted in, the node holds a fleet token for the door to check, and at least one media
 // task (image, video, animation, voice or music, run-graph) is bound. One predicate for the
 // route, the fleet advertisement and admission, so the door is never open without a token.
@@ -3048,6 +3127,39 @@ func (c Config) EffectiveMediaInputsMaxBytes() int64 {
 		mb = DefaultMediaInputsMaxMB
 	}
 	return int64(mb) << 20
+}
+
+// EffectiveSTTUploadMaxBytes is the cap on one audio upload to POST /fleet/stt, decoded: 48 MiB unless
+// fleet_stt_upload_max_mb says otherwise (zero and negative read as the built-in).
+func (c Config) EffectiveSTTUploadMaxBytes() int64 {
+	mb := c.FleetSTTUploadMaxMB
+	if mb <= 0 {
+		mb = 48
+	}
+	return int64(mb) << 20
+}
+
+// EffectiveSTTTranscriptTTL is how long an stt upload job's transcript files live on the node:
+// fleet_stt_transcript_ttl_min minutes, 30 when it is zero; 0 for a negative value, which means
+// "never remove".
+func (c Config) EffectiveSTTTranscriptTTL() time.Duration {
+	switch m := c.FleetSTTTranscriptTTLMin; {
+	case m < 0:
+		return 0
+	case m == 0:
+		return 30 * time.Minute
+	default:
+		return time.Duration(m) * time.Minute
+	}
+}
+
+// EffectiveSTTMaxConcurrent is how many fleet stt jobs this node runs at once: fleet_stt_max_concurrent,
+// 1 when it is zero or negative.
+func (c Config) EffectiveSTTMaxConcurrent() int {
+	if c.FleetSTTMaxConcurrent <= 0 {
+		return 1
+	}
+	return c.FleetSTTMaxConcurrent
 }
 
 // EffectiveComposeCacheDir is where the compose runner keeps its work dirs, the
@@ -3439,7 +3551,8 @@ func (c Config) DeclaresUnconstrainedSeat(id string) bool {
 // there (see Config.VLLMSeats for why the roster is declared rather than
 // sniffed). Callers that hold an ALIAS must resolve it to its canonical id
 // first — the 3-card reference box's agent seat is bound by the alias
-// `agent-pool` of `qwen3.8-27b-vllm-3card`, and only the canonical id is in `vllm_seats`, so
+// `agent-pool` of `qwen3.8-27b-vllm` (of `qwen3.8-27b-vllm-3card` until 2026-10-04), and only
+// the canonical id is in `vllm_seats`, so
 // an exact match alone would leave that box on a constraint field vLLM
 // discards (register D-129).
 func (c Config) DeclaresVLLMSeat(id string) bool {

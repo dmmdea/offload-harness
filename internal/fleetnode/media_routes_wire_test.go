@@ -11,7 +11,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/fleetnode"
 )
 
-// The shipped decoder reads the shipped handler's media_routes (ADR 0072): the verdicts and the media-job
+// The shipped decoder reads the shipped handler's media_routes (ADR 0076): the verdicts and the media-job
 // task arrive as the node published them.
 func TestMediaRoutesAndMediaJobSurviveTheDelegatorsHealthDecoder(t *testing.T) {
 	cfg := config.Config{

@@ -176,7 +176,7 @@ func noLocalRun(t *testing.T) func(context.Context, core.AgentContract, delegate
 // ignored (a sheddable job queued like an urgent one) and the tenant never named.
 func TestAgentDelegatePassesPriorityAndTenantToTheDispatch(t *testing.T) {
 	node, url := newCaptureNode(t)
-	s := delegateTestServer(t, noLocalRun(t))
+	s := delegateTestServer(t, noLocalRun(t), url)
 	if _, err := s.handleAgentDelegate(context.Background(), callReq(remoteDelegateArgs(url, map[string]any{"priority": 1}))); err != nil {
 		t.Fatal(err)
 	}

@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-// media_routes (ADR 0072) is additive: a node that publishes it has its verdicts decoded, and a node that
+// media_routes (ADR 0076) is additive: a node that publishes it has its verdicts decoded, and a node that
 // predates it is UNKNOWN, never read as "no route is configured".
 func TestFetchNodeViewDecodesMediaRoutesAndKeepsAnOlderNodeUnknown(t *testing.T) {
 	withRoutes := `{

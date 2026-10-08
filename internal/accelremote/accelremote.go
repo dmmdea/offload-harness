@@ -29,21 +29,34 @@ import (
 
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
+	"github.com/dmmdea/offload-harness/internal/netguard"
+	"github.com/dmmdea/offload-harness/internal/pairworkloads"
+	"github.com/dmmdea/offload-harness/internal/rosterprobe"
 )
 
 // Budget bounds one forwarded call end to end: a cold sidecar spawn on the
 // node (45 s) plus the tool's own timeout, with room for a queued dispatch.
 const Budget = 150 * time.Second
 
+// healthTimeout is how long one call waits for one node's /fleet/health. The accelerator lane keeps
+// its own 2 s (a forwarded Coral or RKNPU call is a few milliseconds of work, so a node that cannot
+// answer health in 2 s is not worth waiting for) where the other single-shot lanes use the shared
+// rosterprobe.DefaultTimeout; the roster cache honours the difference (a 2 s timeout is not held
+// against a caller willing to wait 5). A var so a test compresses it; production never mutates it.
+var healthTimeout = 2 * time.Second
+
 const (
-	healthTimeout   = 2 * time.Second
 	dispatchTimeout = 10 * time.Second
 	pollEvery       = 500 * time.Millisecond
 	maxBody         = 32 << 20
 )
 
-// HTTPClient is the transport every request uses; tests swap it.
-var HTTPClient = &http.Client{Timeout: Budget}
+// HTTPClient is the transport every request uses; tests swap it. It rides
+// netguard.SafeTransport like every other fleet client (health, vision, text, compose):
+// the lane may only ever reach loopback or the operator's tailnet (never-cloud, ADR 0001),
+// enforced at dial time, so a delegate_remotes entry that drifts to a public address dies
+// at the dial gate instead of carrying an image there.
+var HTTPClient = &http.Client{Transport: netguard.SafeTransport(nil), Timeout: Budget, CheckRedirect: rosterprobe.NoRedirect}
 
 var safeName = regexp.MustCompile(`[^A-Za-z0-9._-]`)
 
@@ -123,33 +136,25 @@ func buildPayload(id, tool string, args map[string]any) ([]byte, error) {
 	return json.Marshal(p)
 }
 
-type healthWire struct {
-	NodeID       string   `json:"node_id"`
-	Accelerators []string `json:"accelerators"`
-}
-
-// pickNode probes delegate_remotes IN ORDER and returns the first whose health
-// lists the accelerator. Every miss is named in the error so "no node" is
-// never a mystery.
+// pickNode reads delegate_remotes' health (concurrently, through the shared roster cache) and
+// returns the first node IN CONFIGURED ORDER whose health lists the accelerator. Every miss is
+// named in the error so "no node" is never a mystery. Probing the whole roster at once costs the
+// slowest member, not the sum, and the first listing node still wins.
 func pickNode(ctx context.Context, cfg config.Config, id string) (base, node string, err error) {
 	var misses []string
-	for _, b := range cfg.DelegateRemotes {
-		b = strings.TrimRight(strings.TrimSpace(b), "/")
-		hctx, cancel := context.WithTimeout(ctx, healthTimeout)
-		h, herr := getJSON[healthWire](hctx, cfg, b+"/fleet/health")
-		cancel()
-		if herr != nil {
-			misses = append(misses, b+": "+herr.Error())
+	for _, r := range rosterprobe.Probe(ctx, cfg.DelegateRemotes, cfg.FleetAuthToken, healthTimeout) {
+		if r.Err != nil {
+			misses = append(misses, r.Miss())
 			continue
 		}
-		if slices.Contains(h.Accelerators, id) {
-			n := h.NodeID
+		if slices.Contains(r.View.Accelerators, id) {
+			n := r.View.NodeID
 			if n == "" {
-				n = b
+				n = r.Base
 			}
-			return b, n, nil
+			return r.Base, n, nil
 		}
-		misses = append(misses, fmt.Sprintf("%s (%s): accelerators %v", b, h.NodeID, h.Accelerators))
+		misses = append(misses, fmt.Sprintf("%s (%s): accelerators %v", r.Shown(), r.View.NodeID, r.View.Accelerators))
 	}
 	return "", "", fmt.Errorf("no fleet node advertises %s — probed %s", id, strings.Join(misses, "; "))
 }
@@ -169,15 +174,19 @@ func dispatch(ctx context.Context, cfg config.Config, base string, payload []byt
 	}
 	req.Header.Set("Content-Type", "application/json")
 	auth(cfg, req)
+	// Who asked, and whether the serving node must card the job because this box will not (D7/D11).
+	pairworkloads.WireHeadersFor(cfg, req.Header)
 	resp, err := HTTPClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("dispatch %s: %w", base, err)
+		return "", rosterprobe.Scrubbed(base, fmt.Errorf("dispatch %s: %w", base, err))
 	}
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxBody))
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusAccepted {
-		return "", fmt.Errorf("dispatch %s: status %d: %s", base, resp.StatusCode, truncate(body))
+		return "", rosterprobe.Scrubbed(base, fmt.Errorf("dispatch %s: status %d: %s", base, resp.StatusCode, truncate(body)))
 	}
+	// The node accepted the job: whatever the negative cache holds against it is out of date.
+	rosterprobe.Default.Forget(base)
 	return jobID, nil
 }
 

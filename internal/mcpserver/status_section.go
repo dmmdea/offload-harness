@@ -29,6 +29,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/gpulease"
 	"github.com/dmmdea/offload-harness/internal/gpuprobe"
 	"github.com/dmmdea/offload-harness/internal/modelaffinity"
+	"github.com/dmmdea/offload-harness/internal/pairworkloads"
 )
 
 const (
@@ -49,7 +50,11 @@ type statusBlock struct {
 // map and marshals sorted). The section enum and the dispatch both read it, so
 // a new block cannot be reachable in one and missing from the other.
 var statusBlockTable = []statusBlock{
-	{"local", func(s *Server, ctx context.Context, cfg config.Config) any { return s.statusLocal(ctx, cfg) }},
+	// withDisplayStatus (layers_view.go) adds the composite box's presence reading and the display
+	// guard's last action to the block; it returns a plain box's block untouched.
+	{"local", func(s *Server, ctx context.Context, cfg config.Config) any {
+		return withDisplayStatus(ctx, cfg, s.statusLocal(ctx, cfg))
+	}},
 	{"media", func(_ *Server, _ context.Context, cfg config.Config) any { return statusMedia(cfg) }},
 	{"remote", func(_ *Server, _ context.Context, cfg config.Config) any { return statusRemote(cfg) }},
 	// Accelerators (ADR 0024): reported only when listed, one entry per device
@@ -66,6 +71,9 @@ var statusBlockTable = []statusBlock{
 	{"fleet", func(s *Server, ctx context.Context, cfg config.Config) any { return s.fleetView(ctx, cfg) }},
 	{"kv_cache_server", func(_ *Server, ctx context.Context, cfg config.Config) any { return kvCacheServerView(ctx, cfg) }},
 	{"gpu_lease", func(_ *Server, ctx context.Context, cfg config.Config) any { return localLeaseView(ctx, cfg) }},
+	// How this box's PAIR cards are reported (docs/systems/pair-workloads.md): reported only when
+	// pair_workloads_enabled is on, so a box that never opted in answers byte-identically to before.
+	{"pair", func(_ *Server, _ context.Context, cfg config.Config) any { return statusPair(cfg) }},
 }
 
 // statusSectionValues is the section enum: the two composites, then every block.
@@ -337,4 +345,23 @@ func oneLine(s string, max int) string {
 		return string(r[:max]) + "…"
 	}
 	return s
+}
+
+// statusPair is the "pair" block: which way this box's PAIR emitter reports (local ingress, node-info
+// fallback, relay <member route URL>, or off with the reason). nil (absent from the full answer) when
+// pair_workloads_enabled is off. It reads the per-config emitter the wire headers use (identity, and in
+// auto relay mode the delegate_remotes' health, cached), so a status call probes nothing a call just did.
+func statusPair(cfg config.Config) any {
+	if !cfg.PairWorkloadsEnabled {
+		return nil
+	}
+	m := pairworkloads.ModeFor(cfg)
+	out := map[string]any{"mode": m.Mode}
+	if m.Relay != "" {
+		out["relay"] = m.Relay
+	}
+	if m.Reason != "" {
+		out["reason"] = m.Reason
+	}
+	return out
 }

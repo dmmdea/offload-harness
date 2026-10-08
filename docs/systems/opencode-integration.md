@@ -26,6 +26,25 @@ plus one lever Claude Code cannot offer: the three-lane dispatch protocol is inj
 | Instrument | `~/.claude/state/dispatch-log.jsonl` | Rows tagged `harness:"opencode"` — one adherence read across both harnesses; the Claude Code hooks own the file's rotation, the plugin is append-only |
 | Context instrument | [`cmd/opencode-context`](../../cmd/opencode-context/) over [`internal/occontext`](../../internal/occontext/) | Read-only per-call token, cache, growth, compaction and TTFT report from a copy of opencode's session db — see [Measuring context](#measuring-context) |
 
+## Which seat opencode runs on (the three-card reference box)
+
+opencode's primary, `small_model` and the `offload` agent name the three-card vLLM seat
+`qwen3.8-27b-vllm-3card` **by id** in `opencode.jsonc`, never by an alias. Since 2026-10-04 that seat is
+opencode's alone (operator: the harness runs on two cards, the three-card layout stays an opencode
+configuration): the harness's `agent-pool` is the two-card pair `qwen3.8-27b-vllm` again (the blackwell-3x16
+`vllm_seat`), and no harness layer declares the three-card seat, so the placement table never puts a contract on
+it. From 2026-09-21 to 2026-10-04 both names were one seat.
+
+The two vLLM seats need the same cards and share one llama-swap port and its mutually exclusive `interactive`
+set, so they are never loaded together, and loading one unloads the other (a cold load of minutes each way).
+Since 0.165.2 the harness keeps its own work off an opencode session's seat: while the three-card seat is
+loaded, the local agent seat reads as occupied (the seat guard's verdict), so `agent_delegate` (route `auto` or
+`spread`) deals to a remote with room and otherwise waits in line: for a remote to free, or for opencode's seat to
+unload (then it loads the pair), ending as a capacity defer when the wait's bound is reached (the call's deadline less a reserve, ADR 0073, else `agent_placement_wait_sec`; 0.165.3; before it, a
+fleet with no eligible node loaded the pair anyway). `offload_ask` with no route takes `auto` the same way. Two doors still load the
+pair here: an explicit `route:"local"`, and `agent_run` with no route, whose `read_root` cannot travel. Name
+`route:"auto"` on a self-contained `agent_run` while a session is live on the three-card seat.
+
 ## Behavior (verified live 2026-08-24, local primaries)
 
 - `offload_plugin_status` called by a local model → `PLUGIN_OK 0.1.0`.
