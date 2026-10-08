@@ -25,9 +25,11 @@ every lane the harness has, and a roster entry must mean the same thing to all o
   > **Unverified:** the vendor sentence above is the diagnosis's reading of the vendor page, not re-read for this change,
   > and whether MagicDNS on a given delegator answers the sharer-zone name with a tailnet address was not tested; the
   > dial gate (below) is what makes the answer safe either way.
-- The shape check ran on the agent lane only. The six single-shot lanes (vision, text, stt upload, compose, media, accelerator)
-  dialled the same roster entries through the dial gate alone, so one entry was refused by one lane and used by six,
-  and a bad entry got no message naming its key on those lanes.
+- The shape check ran on the agent lane only. The five single-shot lanes (vision, text, stt upload, compose, accelerator)
+  dialled the same roster entries through the dial gate alone, so one entry was refused by one lane and used by five,
+  and a bad entry got no message naming its key on those lanes. (The media lane, ADR 0077, arrived after this
+  decision and was built on the shared reader below from its first release, so it is the sixth lane that reads the
+  roster this way, not one that was changed.)
 - ADR 0023 says `TailnetURL` vets every remote base "at config load and at intake". For `delegate_remotes` it ran at
   intake only: a refused entry loaded clean, passed `doctor`, and then failed every `agent_delegate` and
   `offload_research` call, `route:"local"` included.
@@ -49,8 +51,8 @@ every lane the harness has, and a roster entry must mean the same thing to all o
    therefore adds no reachable address; it only lets the operator spell the name Tailscale gave the node.
 4. **Every single-shot lane admits a roster entry the way the agent lane does.** `internal/rosterprobe.Members`
    normalizes the roster (trim, drop blank slots, keep configured order and slot numbers) and applies
-   `netguard.TailnetURL` to each entry; the vision, text, stt-upload, compose, media and accelerator lanes call it in place of
-   their own loops. A refused entry is a named miss, `<base>: not dialled, refused by the tailnet guard (<why>)`, never a
+   `netguard.TailnetURL` to each entry; the vision, text, stt-upload, compose and accelerator lanes call it in place of
+   their own loops, and the media lane (ADR 0077) is built on it. A refused entry is a named miss, `<base>: not dialled, refused by the tailnet guard (<why>)`, never a
    failed call and never a dial; the entries after it still serve.
 5. **The single-shot lanes read the roster at once, through one shared cache, at documented timings.**
    `rosterprobe.Probe` reads every admitted entry's `/fleet/health` concurrently, each bounded by the lane's own timeout
@@ -122,7 +124,7 @@ every lane the harness has, and a roster entry must mean the same thing to all o
   back stays out of the single-shot lanes for up to 5 s after a timeout or a refused dial and up to 30 s after another
   transport failure (the delegator's own negative window), or until a dispatch to it is accepted. A placement that lands on a
   node that has since filled is refused by the node and reported as a capacity defer, as before.
-- A bad roster entry reads the same on five lanes: named, and not dialled. One difference remains and is recorded rather
+- A bad roster entry reads the same on six lanes (vision, text, stt upload, compose, media and the accelerator forwarder): named, and not dialled. One difference remains and is recorded rather
   than hidden: the agent lane (`internal/delegate`) fails a WHOLE call on a refused entry, the single-shot lanes skip it.
   Skipping with a reason at the agent lane too is the consistent end state and belongs to that package's owner.
 

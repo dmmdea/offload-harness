@@ -11,13 +11,13 @@ import (
 
 // Attribution of a call the route sent to a fleet node (PAIR routing fixes, D5/D6).
 //
-// composeremote, visionremote and textremote never call Pipeline.Run for a remote or auto-spilled
-// call, so the asking box wrote no ledger row and showed no PAIR card for work it had spilled. A
-// plain row would not have fixed it: ledger.Entry carries no node, so the observer would have carded
-// the asker itself. RemoteCall is the one mechanism the lanes share: ONE card per dispatched call on
-// the node that serves it (queued at dispatch, running when the node says the job started, terminal
-// with the result), and ONE asker ledger row that tells the observer the card is already decided
-// (Entry.CardByCaller).
+// composeremote, visionremote, textremote, sttremote and mediaremote never call Pipeline.Run for a
+// remote or auto-spilled call, so the asking box wrote no ledger row and showed no PAIR card for work
+// it had spilled. A plain row would not have fixed it: ledger.Entry carries no node, so the observer
+// would have carded the asker itself. RemoteCall is the one mechanism the lanes share: ONE card per
+// dispatched call on the node that serves it (queued at dispatch, running when the node says the job
+// started, terminal with the result), and ONE asker ledger row that tells the observer the card is
+// already decided (Entry.CardByCaller).
 //
 // The card's identity is fixed when it opens: PAIR keys a card on (origin, engine, runId, id), so the
 // engine never changes afterwards; the model may be refreshed on the terminal frame (the node says

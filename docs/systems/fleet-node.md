@@ -374,8 +374,9 @@ implications.
     30 s, then a re-placeable `503`). The transcript outputs (`stt-<digits>-<8 hex>.srt|txt|segments.json`) are removed when
     the job record is evicted or after `fleet_stt_transcript_ttl_min` (default 30, a negative value keeps them; swept at
     startup and on the janitor tick), and on a node with a token `GET /fleet/media` serves them only to a bearer holder
-    (so does a project render, `composeproj-<16 hex>.*`, and the legacy path-taking `stt` lane's transcripts,
-    `<basename>-<8 hex>.srt|txt|segments.json`; every other media name stays tokenless; the match folds case and trailing
+    (so do a project render, `composeproj-<16 hex>.*`, a media-job render, `mediajob-<16 hex>.*`, and the legacy path-taking
+    `stt` lane's transcripts, `<basename>-<8 hex>.srt|txt|segments.json`; the outputs of the tokenless lanes, `render-*`, `compose-*`
+    and a plain `/fleet/dispatch` job's files, stay readable by bare name; the match folds case and trailing
     dots and spaces and treats a non-ASCII, `~` or `:` name as gated, because NTFS opens one file under those spellings).
     `GET /fleet/media` refuses a
     dot name. Details: [FLEET-NODE.md](../FLEET-NODE.md#the-stt-upload-door-post-fleetstt),
@@ -638,7 +639,7 @@ that will not card the job itself (its PAIR emitter is not enabled). `admit` rec
 (printable, at most 64 characters, `core.SanitizeAsker`) as `requester` on the node's ledger row and, on the
 signal, when the node's own emitter is enabled, emits the job's one PAIR card from the node (queued at admit,
 running at start, terminal at finish; `fleetnode/nodecard.go`). Asking boxes send them on `/fleet/dispatch`,
-`/fleet/vision`, `/fleet/text`, `/fleet/compose-project`, `/fleet/media-job` and `/fleet/queue/submit`; the queue holder stores both
+`/fleet/vision`, `/fleet/text`, `/fleet/stt`, `/fleet/compose-project`, `/fleet/media-job` and `/fleet/queue/submit`; the queue holder stores both
 on the job (`fleetqueue.Job.Asker`, `PairCard`), so the claim loop applies them to a pulled job exactly as
 `admit` does to a pushed one — and now also stamps a pulled job's door `fleet` (`dispatchDoor`), which it did
 not before. A claim of a job the node already holds (a lease-expiry re-claim) opens no card, and a claim a
@@ -1521,9 +1522,10 @@ local-MCP trust boundary and stays open. Every media path — media dispatch, me
 the token, so already-deployed tokenless media clients keep working byte-identically
 (pinned by test), with ONE exception since the stt transcript change: on a node that HAS a token, `GET /fleet/media/{name}`
 needs the bearer for the outputs of the token-gated lanes (an stt upload's transcripts, the legacy `stt` lane's
-`<basename>-<8 hex>` transcripts, a project render's `composeproj-<16 hex>` files; `gatedMediaName`, which folds case and
-trailing dots and spaces and fails closed on a non-ASCII, `~` or `:` name, since a Windows node opens one file under those
-spellings), while `render-*`, `compose-*` and every other name stay tokenless;
+`<basename>-<8 hex>` transcripts, a project render's `composeproj-<16 hex>` files, a media-job render's `mediajob-<16 hex>` files;
+`gatedMediaName`, which folds case and trailing dots and spaces and fails closed on a non-ASCII, `~` or `:` name, since a Windows
+node opens one file under those spellings), while the outputs of the tokenless lanes (`render-*`, `compose-*`, a plain
+`/fleet/dispatch` job's files) stay readable by bare name;
 whole-fleet enforcement is a recorded follow-up
 ([ADR 0023](../architecture/decisions/0023-agent-lane-tailnet-auth-and-locality.md)).
 

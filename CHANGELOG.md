@@ -306,6 +306,16 @@ each guard was broken once at its real call site and seen red.
   `Route: ""`. `TestAutoSpilledMediaCallIsOneCardAndOneRow` now runs the routes `auto`, `""` and `"  AUTO "`,
   `TestAForcedRemoteMediaCallIsRecordedUnderTheNormalisedRoute` the spellings of `remote`, and
   `TestARemoteComposeCallIsRecordedUnderTheNormalisedRoute` both for the compose lane (the identical gap); the raw route fails them.
+- **The docs and comments say what the code does (C5C1 to C5C5, C5S3, REL6, REL7).** The Auth passages (`docs/FLEET-NODE.md`,
+  `docs/systems/fleet-node.md`) list a media-job's renders (`mediajob-<16 hex>.*`) among the names `GET /fleet/media/{name}` gates and no
+  longer say every other name stays tokenless (the outputs of the tokenless lanes do), and the handler comment at the gate lists all four
+  gated families. ADR 0074's index row and Consequences count six lanes; its Context keeps main's five, because the media lane shipped on
+  the shared reader and was never one of the lanes that dialled through the dial gate alone. The `rosterprobe`, `core`, `pipeline` and
+  `pairworkloads` comments list the lanes that call them (media and stt included), and the attribution-header sender list adds
+  `/fleet/stt`. The `docs/FLEET-NODE.md` task table binds `video-gen`, `animate` and `audio-gen` by script OR engine, gains the
+  `animate` row and names the engine families (`wan-vace`, `ace_step`, `chatterbox`). `setup/SETUP-AGENT.md` says the amd-gcn tier seeds
+  the iGPU media keys and what the installing agent must still stage at the seeded paths (the engine binaries and the nine model
+  files; without them the four routes read BOUND-BUT-MISSING and `doctor` prints FAIL for each).
 
 ### Changed — `--offload-to-cpu` is sanctioned spill on the iGPU media engines
 

@@ -2985,9 +2985,10 @@ func (s *Server) handleMedia(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "filename must be a bare name")
 		return
 	}
-	// The outputs of the token-gated lanes (stt upload transcripts, project renders) need the bearer
-	// on a node that has a token; checked before the file is looked up, so the answer never says
-	// whether the name exists. Every other name, and every name on a tokenless node, is as it was.
+	// The outputs of the token-gated lanes (stt upload transcripts, the legacy stt lane's transcripts,
+	// project renders, media-job renders: gatedMediaName) need the bearer on a node that has a token;
+	// checked before the file is looked up, so the answer never says whether the name exists. Every
+	// other name, and every name on a tokenless node, is as it was.
 	if tok := s.opts.Cfg.FleetAuthToken; tok != "" && gatedMediaName(name) && !bearerOK(r, tok) {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return

@@ -1,12 +1,12 @@
 // Package rosterprobe is how the single-shot fleet lanes — vision, text, stt upload,
-// compose and the accelerator forwarder — read the fleet roster (config
+// compose, media and the accelerator forwarder — read the fleet roster (config
 // delegate_remotes) before they pick a node for ONE call.
 //
-// Rules that live here so that five lanes cannot drift apart on them (ADR 0074):
+// Rules that live here so that six lanes cannot drift apart on them (ADR 0074):
 //
 //   - ADMISSION. A roster entry is judged by the same tailnet shape check the agent lane
 //     applies (netguard.TailnetURL) before it is dialled. The lanes used to rely on the
-//     dial gate alone, so one entry was refused by one lane and used by five, and a bad
+//     dial gate alone, so one entry was refused by one lane and used by the others, and a bad
 //     entry got no message naming the key. A refused entry is a named miss, never a
 //     failed call: the other entries still serve.
 //   - READING. The roster is probed CONCURRENTLY, in the order it is configured, with a
