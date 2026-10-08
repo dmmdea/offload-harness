@@ -17,7 +17,9 @@ import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { makeStub, stubAvailable } from "./igpu-stub.mjs";
 import { resolveFfmpeg, resolveFfprobe } from "./audio-qa.mjs";
-import { descendantsOf, pidGone, waitUntilGone, sweepStaleTempDirs, ENGINE_EXIT_WAIT_MS } from "./igpu-engine.mjs";
+import {
+  descendantsOf, pidGone, waitUntilGone, sweepStaleTempDirs, ENGINE_EXIT_WAIT_MS, enginePids, runEngine, createLogGuard, killTree,
+} from "./igpu-engine.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const isWin = process.platform === "win32";
@@ -305,4 +307,100 @@ test("the process 'exit' hook removes the temp dirs of a runner that exits (or t
       assert.deepEqual(readdirSync(base), []);
     } finally { rmSync(base, { recursive: true, force: true }); }
   }
+});
+
+// A runner that dies of an uncaught error gets no signal: the 'exit' hook is the only thing between its engine
+// and an orphan that keeps the iGPU. The engine is a REAL process; the runner is a script that starts it through
+// runEngine, prints its pid and throws.
+test("the process 'exit' hook kills an engine that is still live when the runner dies of an uncaught error (no signal ever arrives)", { skip: skipAll || (isWin && "POSIX process model"), timeout: 60000 }, async () => {
+  const mod = pathToFileURL(join(here, "igpu-engine.mjs")).href;
+  const code = `
+    import { spawn } from "node:child_process";
+    import { writeSync } from "node:fs";
+    import { runEngine, createLogGuard } from ${JSON.stringify(mod)};
+    let child;
+    runEngine({ bin: process.execPath, args: ["-e", "setInterval(() => {}, 1000)"], guard: createLogGuard({ engine: "sdcpp" }), label: "engine",
+      spawnImpl: (...a) => (child = spawn(...a)) }).catch(() => {});
+    setTimeout(() => { writeSync(1, String(child.pid)); throw new Error("uncaught in the runner"); }, 700);
+  `;
+  let enginePid = 0;
+  try {
+    const r = spawnSync(process.execPath, ["--input-type=module", "-e", code], { encoding: "utf8" });
+    enginePid = Number(r.stdout.trim());
+    assert.ok(enginePid > 0, `the engine's pid was printed: ${r.stdout} ${r.stderr}`);
+    assert.equal(r.status, 1, "the runner died of the uncaught error, with no signal involved");
+    assert.match(r.stderr, /uncaught in the runner/);
+    assert.ok(await waitGone(enginePid, 15000), "the engine must not outlive its runner");
+  } finally {
+    if (enginePid && alive(enginePid)) { try { process.kill(enginePid, "SIGKILL"); } catch { /* gone */ } }
+  }
+});
+
+test("the process 'exit' hook asks for the pids, kills, WAITS for them and only then cleans up (an uncaught error, injected steps)", { skip: skipAll }, () => {
+  const mod = pathToFileURL(join(here, "igpu-engine.mjs")).href;
+  // A real engine killed by its own parent is a zombie until the event loop reaps it, which the exit hook cannot
+  // let happen, so the wait is not observable on a real process: the steps are injected and their ORDER is.
+  const code = `
+    import { writeSync } from "node:fs";
+    import { installLifecycle } from ${JSON.stringify(mod)};
+    const log = [];
+    installLifecycle({ pollMs: 100000, deps: {
+      pids: () => { log.push("pids"); return [111, 222]; },
+      kill: () => log.push("kill"),
+      wait: (pids) => { log.push("wait:" + pids.join(",")); return { gone: true, waitedMs: 0, alive: [] }; },
+      cleanup: () => { log.push("cleanup"); writeSync(1, JSON.stringify(log)); },
+      exit: () => {},
+    } });
+    throw new Error("uncaught in the runner");
+  `;
+  const r = spawnSync(process.execPath, ["--input-type=module", "-e", code], { encoding: "utf8" });
+  assert.equal(r.status, 1, r.stderr);
+  assert.deepEqual(JSON.parse(r.stdout), ["pids", "kill", "wait:111,222", "cleanup"]);
+});
+
+// ---------------------------------------------------------------- enginePids on real children
+
+// runEngine with a spawn wrapper that hands the test the real child object.
+function startEngine(script) {
+  const out = { child: null, done: false };
+  const run = runEngine({
+    bin: process.execPath, args: ["-e", script], guard: createLogGuard({ engine: "sdcpp" }), label: "engine",
+    spawnImpl: (...a) => { out.child = spawn(...a); return out.child; },
+  });
+  out.settled = run.then(() => "resolved", (e) => e.message).then((v) => { out.done = true; return v; });
+  return out;
+}
+
+test("enginePids on real children: a live engine is listed with its descendants; none is listed once it has been killed and settled", { skip: skipAll, timeout: 60000 }, async () => {
+  assert.deepEqual(enginePids(), [], "no engine, nothing to find");
+  const dir = mkdtempSync(join(tmpdir(), "igpu-pids-"));
+  const gpid = join(dir, "grandchild.pid");
+  const script = `const { spawn } = require("node:child_process"); const g = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+    require("node:fs").writeFileSync(${JSON.stringify(gpid)}, String(g.pid)); setInterval(() => {}, 1000);`;
+  const e = startEngine(script);
+  try {
+    await waitFor(() => readPid(gpid), 30000, "the engine's own child to start");
+    const pids = enginePids();
+    assert.ok(pids.includes(e.child.pid), `the live engine ${e.child.pid} is listed: ${pids}`);
+    if (!isWin) assert.ok(pids.includes(readPid(gpid)), `and so is its descendant ${readPid(gpid)}: ${pids}`);
+  } finally {
+    killTree(e.child);
+  }
+  await e.settled;
+  assert.deepEqual(enginePids(), [], "a settled engine is no longer listed");
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("enginePids on real children: an engine that has exited but whose pipes are still held open (so it is still in the live set) is not listed", { skip: skipAll || (isWin && "POSIX process model"), timeout: 60000 }, async () => {
+  // the engine starts a helper that inherits its stderr pipe and outlives it, then exits at once: its 'exit' has
+  // fired and exitCode is set, but 'close' (which removes it from the live set) waits for the helper to let go
+  const script = `const { spawn } = require("node:child_process");
+    spawn(process.execPath, ["-e", "setTimeout(() => {}, 3000)"], { stdio: ["ignore", "ignore", "inherit"] }).unref();`;
+  const e = startEngine(script);
+  await waitFor(() => e.child && e.child.exitCode !== null, 30000, "the engine to exit");
+  assert.equal(e.child.exitCode, 0);
+  assert.equal(e.done, false, "premise: runEngine has not settled, so the exited engine is still in the live set");
+  assert.deepEqual(enginePids(), [], "an exited engine is not a process to wait for");
+  await e.settled;
+  assert.deepEqual(enginePids(), []);
 });

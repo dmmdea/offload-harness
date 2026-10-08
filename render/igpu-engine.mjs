@@ -781,13 +781,18 @@ const defaultDeps = {
   exit: (code) => process.exit(code),
 };
 
+// What the process 'exit' hook runs with: the defaults until installLifecycle replaces them with its own
+// (the same defaults unless a test injects pids / kill / wait / cleanup), so the exit path is observable
+// like the signal path is.
+let exitDeps = defaultDeps;
+
 function ensureExitHook() {
   if (exitHookInstalled) return;
   exitHookInstalled = true;
   process.on("exit", () => {
     // an engine still live when the process exits (a crash, an uncaught error) is killed AND waited for
-    stopEngines(defaultDeps);
-    runCleanups();
+    stopEngines(exitDeps);
+    exitDeps.cleanup();
   });
 }
 
@@ -811,6 +816,7 @@ export function installLifecycle({ pollMs = Number(process.env.IGPU_PARENT_POLL_
   if (lifecycleInstalled) return;
   lifecycleInstalled = true;
   const d = { ...defaultDeps, ...deps };
+  exitDeps = d;
   let dying = false;
   const die = (code, why) => {
     if (dying) return;
