@@ -860,3 +860,65 @@ test("audiocpp main: a non-numeric --device is DEVICE_INVALID (its own class); s
     assert.deepEqual(records(a.dRec), []);
   } finally { sb.done(); }
 });
+
+// ---------------------------------------------------------------- a non-zero exit is a failure, whatever the engine wrote
+
+test("audiocpp main: an engine that WROTE valid audio and then exited non-zero is a failure - voice and music, plain and out of memory; nothing is delivered", opts, async () => {
+  for (const kind of ["voice", "music"]) {
+    const evidence = kind === "music" ? "[TIMING ts=1] ace_step.planner.weights.buffer_name Vulkan0" : "[TIMING ts=1] chatterbox.t3.weights.buffer_name Vulkan0";
+    for (const [name, more, want, cls] of [
+      ["plain", [], /AUDIOCPP FAILED: audiocpp_cli exited 1/, ""],
+      ["out of memory", ["ggml_backend_alloc_ctx_tensors_from_buft: insufficient memory (attempted to allocate 5162.00 MB)"], /OUT_OF_MEMORY: audiocpp_cli ran out of memory \(exit 1\)/, "IGPU_CLASS=oom"],
+    ]) {
+      const sb = sandbox();
+      try {
+        // a real PCM wav at --out, a healthy GPU log, and exit 1: the file alone must not make this a success
+        const a = audioSetup(sb, kind, { log: [evidence, ...more], exit: 1, writes: { kind: "wav", seconds: 4 } });
+        const r = await runNode("audiocpp-generate.mjs", a.args, sb);
+        assert.equal(r.status, 1, `${kind}/${name}: ${r.stderr}`);
+        assert.match(r.stderr, want, `${kind}/${name}`);
+        assert.ok(!/WROTE/.test(r.stdout), `${kind}/${name}: the runner must not report a result`);
+        assert.ok(!existsSync(a.out), `${kind}/${name}: the audio written before the non-zero exit is not delivered`);
+        if (cls) assert.equal(lastLine(r.stderr), cls, `${kind}/${name}`);
+        else assert.ok(!r.stderr.includes("IGPU_CLASS="), `${kind}/${name}: an untyped engine exit prints no class line (gpugen files it as other)`);
+        assert.equal(records(a.rec).length, 1, `${kind}/${name}: the engine ran once and was not retried`);
+        noTempLeft(sb);
+      } finally { sb.done(); }
+    }
+  }
+});
+
+test("sdcpp-animate main: a depth process that WROTE its depth image and exited non-zero stops the run at that frame - sd-cli never starts, nothing is delivered", opts, async () => {
+  const sb = sandbox();
+  try {
+    const a = animateSetup(sb, { depth: { exit: 1 } });
+    const r = await runNode("sdcpp-animate.mjs", a.args, sb);
+    assert.equal(r.status, 1, r.stderr);
+    assert.match(r.stderr, /SDCPP ANIMATE FAILED: depth-anything exited 1/);
+    assert.equal(records(a.dRec).length, 1, "it stopped at the first frame");
+    assert.deepEqual(records(a.sdRec), [], "sd-cli was never started");
+    assert.ok(!existsSync(a.out));
+    noTempLeft(sb);
+  } finally { sb.done(); }
+});
+
+test("sdcpp-video / sdcpp-animate main: an sd-cli that WROTE its video and then exited non-zero is 'sd-cli exited 1', not a delivered clip", opts, async () => {
+  let sb = sandbox();
+  try {
+    const v = videoSetup(sb, { log: GOOD_SD_HEADER, exit: 1 }); // the default stub writes a real clip at -o
+    const r = await runNode("sdcpp-video.mjs", v.args, sb);
+    assert.equal(r.status, 1, r.stderr);
+    assert.match(r.stderr, /SDCPP VIDEO FAILED: sd-cli exited 1/);
+    assert.ok(!/WROTE/.test(r.stdout) && !existsSync(v.out), "no clip is delivered");
+    noTempLeft(sb);
+  } finally { sb.done(); }
+  sb = sandbox();
+  try {
+    const a = animateSetup(sb, { sd: { exit: 1 } });
+    const r = await runNode("sdcpp-animate.mjs", a.args, sb);
+    assert.equal(r.status, 1, r.stderr);
+    assert.match(r.stderr, /SDCPP ANIMATE FAILED: sd-cli exited 1/);
+    assert.ok(!/WROTE/.test(r.stdout) && !existsSync(a.out), "no clip is delivered");
+    noTempLeft(sb);
+  } finally { sb.done(); }
+});

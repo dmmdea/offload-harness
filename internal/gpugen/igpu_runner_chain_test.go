@@ -140,6 +140,13 @@ func chainRows(t *testing.T) []chainRow {
 		{name: "dead_air/a silent render, engine log ends with room/boom/timeout words", script: "audiocpp-generate.mjs", want: "dead_air", label: "DEAD_AIR:", ffmpeg: true,
 			spec: stubEngine{Log: []string{"[TIMING ts=1] ace_step.planner.weights.buffer_name Vulkan0", "[INFO] a bloom room boom, timeout killed"},
 				Write: &stubWrite{Kind: "wav", Seconds: 4, Silent: true}}, args: music(nil), out: audioOut},
+		// F7: an engine that WROTE its output and then exited non-zero is a failed run, untyped (no class line, so
+		// "other"), and the file it wrote is not delivered
+		{name: "other/audio.cpp exits 1 after writing a valid wav", script: "audiocpp-generate.mjs", want: "other", label: "audiocpp_cli exited 1",
+			spec: stubEngine{Log: []string{"[TIMING ts=1] ace_step.planner.weights.buffer_name Vulkan0"}, Exit: 1, Write: &stubWrite{Kind: "wav", Seconds: 4}},
+			args: music(nil), out: audioOut},
+		{name: "other/sd-cli exits 1 after writing a clip", script: "sdcpp-video.mjs", want: "other", label: "sd-cli exited 1", ffmpeg: true,
+			spec: stubEngine{Log: goodSDHeader, Exit: 1, Write: &stubWrite{Kind: "video"}}, args: video(nil), out: clipOut},
 		{name: "timeout/the runner's own deadline", script: "sdcpp-video.mjs", want: "timeout", label: "timeout",
 			spec: stubEngine{Log: goodSDHeader, Hang: true}, args: video(nil, "--timeout-sec", "3"), out: clipOut},
 		{name: "timeout/gpugen's deadline kills the runner", script: "sdcpp-video.mjs", want: "timeout", timeout: 4 * time.Second,
