@@ -16,7 +16,8 @@ A caller on any machine can now send one render to a fleet node together with it
 CPU, every backend Vulkan): video family `fastwan` (engine sdcpp, FastWan2.2-TI2V-5B q8_0 + Wan2.2 VAE + umt5-xxl Q8_0 + the opt-in
 `taew2_2` fast decode; 3 steps, cfg 1, flow_shift 5, euler, 832x480x49 at 24 fps; token cap 5200 / stride 16; Apache-2.0,
 `commercial_use` true; `videogen_timeout_sec` 7200), animate on sd.cpp (Wan2.1 VACE 1.3B fp16 `.safetensors`, Apache-2.0, with the
-depth-anything.cpp control video: 288x512, 20 steps, cfg 6, token cap 5800 / stride 8; `animategen_timeout_sec` 5400) and voice + music
+depth-anything.cpp control video: 288x512, `animategen_frames` 33 (the default clip), 20 steps, cfg 6, token cap 5800 / stride 8;
+`animategen_timeout_sec` 5400) and voice + music
 on audio.cpp (Chatterbox q8_0, ACE-Step 1.5 turbo bf16; backend `vulkan`, device 0). Paths follow the seed convention
 (`__OFFLOAD_HOME__/models/<subdir>/<file>`, engines under `__OFFLOAD_HOME__` with `__EXE__`). The ACE-Step licence is not verified, so
 its `commercial_use` stays unset and the tier notes say it must be checked at the ACE-Step source before anything records it. The nine
@@ -228,6 +229,26 @@ Tests: `TestRemoteMediaCallIsOneCardOnTheServingNodeAndOneRow`, `TestRemoteMedia
 `TestMediaJobSlotIsReleasedOnEveryExit`, `TestMediaJobRendersUnderAGatedStem`,
 `TestMediaJobOutputNeedsTheBearerAPlainDispatchOutputDoesNot`, `TestAMediaJobOutputIsFetchedWithTheBearerAndRefusedWithout`,
 `TestGatedMediaNames`.
+
+### Fixed — release review of 0.170.0 (register CT-51)
+
+The release reviewer and the round-4 reviewers of the integrated branch found the items below; each is fixed before the release, and
+each guard was broken once at its real call site and seen red.
+
+- **A default animate request fits the amd-gcn seed's token cap (REL1, high).** The seed pinned the animate geometry (288x512) and its
+  latent-token cap (5800, stride 8) to the measured 33-frame run, but no key could carry a frame count and both the lane and the runner
+  defaulted to 49: 288x512x49 plus the VACE reference frame is 8,064 tokens, so on a node seeded from the tier every animate call that
+  named no `frames` (`offload_animate_character`, `animate-character`, a delegator's `animate` job) was refused `token_cap_exceeded`
+  before the runner started. New key `animategen_frames` is the sd.cpp animate lane's default clip when a request names none (0 = the
+  runner's own 49, as before; a request's `frames` always wins; the ComfyUI animate route ignores it; a negative value is refused at
+  load). The lane applies it before the pre-lease token-cap check and passes it to the runner as `--frames`, and the amd-gcn seed sets
+  `animategen_frames` 33 (288x512x33 plus the reference frame is 5,760 tokens against the cap of 5,800). `config.example.json` and
+  `docs/tiers/amd-gcn.md` are regenerated and the animate `frames` help of the CLI verb and the MCP tool names the sd.cpp default. A
+  box that does not set the key is byte for byte as before. Tests: `TestTheSeededAmdGcnDefaultAnimateRequestFitsItsTokenCap` (the real
+  seed: a default request runs and the runner gets `--frames 33`), `TestAnAnimateRequestOverTheSeededCapIsStillRefusedBeforeTheLease`,
+  `TestABoxWithoutAnimategenFramesKeepsTheRunnersDefault`, `TestAnimategenFramesDoesNotTouchTheComfyUIAnimateRoute`, the seeded values
+  in `TestAmdGcnMediaSeedValues` and the negative-value case of `TestNegativeRecipeValuesAreRefused`. With the lane's default reverted
+  to the runner's, the first two fail with the review's own refusal (`288x512x49 + reference needs 8064 latent tokens ... cap is 5800`).
 
 ### Changed — `--offload-to-cpu` is sanctioned spill on the iGPU media engines
 

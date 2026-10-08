@@ -1245,6 +1245,15 @@ type Config struct {
 	AnimateGenSteps     int     `json:"animategen_steps,omitempty"`
 	AnimateGenCFG       float64 `json:"animategen_cfg,omitempty"`
 	AnimateGenFlowShift float64 `json:"animategen_flow_shift,omitempty"`
+	// AnimateGenFrames is the frame count the sdcpp animate lane renders when a request names
+	// none (a per-request frames always wins). 0 = the runner's own default (49). It is sized
+	// together with animategen_width/height and animategen_sdcpp_max_tokens: the latent-token cap
+	// is checked on the frame count the lane will actually render, so a box whose cap fits only
+	// a short clip (the amd-gcn seed: 33 frames at 288x512) must name that clip here, or every
+	// call that omits `frames` renders the default 49 and is refused as token_cap_exceeded.
+	// sdcpp lane only (animategen_engine "sdcpp"): the ComfyUI route has its own 81-frame chunk
+	// and ignores this key.
+	AnimateGenFrames int `json:"animategen_frames,omitempty"`
 	// VoiceGenEngine: "" = today's Chatterbox python worker (voicegen_script, tts.mjs);
 	// "audiocpp" = render/audiocpp-generate.mjs --kind voice (audio.cpp's chatterbox
 	// family, `--task tts`, or `clon` when a clone reference is given).

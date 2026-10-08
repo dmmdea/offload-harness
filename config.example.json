@@ -224,6 +224,7 @@
   "animategen_steps": 0,
   "animategen_cfg": 0,
   "animategen_flow_shift": 0,
+  "animategen_frames": 0,
   "voicegen_engine": "",
   "musicgen_engine": "",
   "audiocpp_script": "render/audiocpp-generate.mjs",

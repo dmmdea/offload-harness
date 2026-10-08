@@ -277,6 +277,9 @@ func validateIGPUMedia(c Config) error {
 	if c.AnimateGenSteps < 0 || c.AnimateGenCFG < 0 || c.AnimateGenFlowShift < 0 {
 		return fmt.Errorf("animategen_steps, animategen_cfg and animategen_flow_shift must not be negative")
 	}
+	if c.AnimateGenFrames < 0 {
+		return fmt.Errorf("animategen_frames must not be negative (0 = the runner's own default)")
+	}
 	if err := ExtraArgsRefusal("animategen_sdcpp_extra_args", ExtraArgsSdcpp, c.AnimateGenSdcppExtraArgs); err != nil {
 		return err
 	}

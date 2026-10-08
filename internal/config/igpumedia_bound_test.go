@@ -68,6 +68,7 @@ func TestNegativeRecipeValuesAreRefused(t *testing.T) {
 		{"animate negative steps", `{"animategen_steps":-1}`, "animategen_steps, animategen_cfg and animategen_flow_shift must not be negative"},
 		{"animate negative cfg", `{"animategen_cfg":-6}`, "animategen_steps, animategen_cfg and animategen_flow_shift must not be negative"},
 		{"animate negative flow_shift", `{"animategen_flow_shift":-1}`, "animategen_steps, animategen_cfg and animategen_flow_shift must not be negative"},
+		{"animate negative frames", `{"animategen_frames":-33}`, "animategen_frames must not be negative"},
 		{"high-noise negative cfg", `{"videogen_families":{"a14b":{"engine":"sdcpp","sdcpp_backend":"vulkan0","sdcpp_high_noise_model":"/m/h.gguf","high_noise_cfg":-1}}}`, "high_noise_cfg and high_noise_steps must not be negative"},
 		{"high-noise negative steps", `{"videogen_families":{"a14b":{"engine":"sdcpp","sdcpp_backend":"vulkan0","sdcpp_high_noise_model":"/m/h.gguf","high_noise_steps":-2}}}`, "high_noise_cfg and high_noise_steps must not be negative"},
 		{"high-noise recipe without the expert", `{"videogen_families":{"a14b":{"engine":"sdcpp","sdcpp_backend":"vulkan0","high_noise_cfg":1}}}`, "sdcpp_high_noise_model is not set"},

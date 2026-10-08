@@ -150,8 +150,15 @@ func TestAmdGcnMediaSeedValues(t *testing.T) {
 	}
 	if cfg.AnimateGenEngine != config.EngineSdcpp || cfg.AnimateGenSdcppBackend != "vulkan0" ||
 		cfg.AnimateGenSdcppMaxTokens != 5800 || cfg.AnimateGenSdcppVAEStride != 8 ||
-		cfg.AnimateGenSteps != 20 || cfg.AnimateGenCFG != 6 || cfg.AnimateGenWidth != 288 || cfg.AnimateGenHeight != 512 {
+		cfg.AnimateGenSteps != 20 || cfg.AnimateGenCFG != 6 || cfg.AnimateGenWidth != 288 || cfg.AnimateGenHeight != 512 ||
+		cfg.AnimateGenFrames != 33 {
 		t.Errorf("animate seed drifted from the measured envelope: %+v", cfg)
+	}
+	// The default clip fits the cap the seed pins: 288x512x33 + the VACE reference frame is 5,760 tokens
+	// on an 8x VAE, at or under animategen_sdcpp_max_tokens (REL1: the runner's own 49-frame default is 8,064).
+	if err := config.TokenCapRefusal("animategen_sdcpp_max_tokens", cfg.AnimateGenWidth, cfg.AnimateGenHeight, cfg.AnimateGenFrames,
+		cfg.AnimateGenSdcppVAEStride, 1, cfg.AnimateGenSdcppMaxTokens); err != nil {
+		t.Errorf("the seeded default animate clip does not fit the seeded token cap: %v", err)
 	}
 	if cfg.VoiceGenEngine != config.EngineAudiocpp || cfg.MusicGenEngine != config.EngineAudiocpp ||
 		cfg.AudiocppBackend != "vulkan" || cfg.AudiocppDevice != "0" ||

@@ -1828,7 +1828,7 @@ func runAnimateCharacter(args []string) error {
 	negative := fs.String("negative", "", "hard exclusions")
 	width := fs.Int("width", 0, "working width px (0 = the 482x854 template default)")
 	height := fs.Int("height", 0, "working height px")
-	frames := fs.Int("frames", 0, "frame count (default 81 — one native chunk)")
+	frames := fs.Int("frames", 0, "frame count (default 81 — one native chunk; on an animategen_engine sdcpp box the default is its animategen_frames, else 49)")
 	steps := fs.Int("steps", 0, "sampler steps (0 = the distilled recipe's 10)")
 	seed := fs.Int("seed", 0, "RNG seed for reproducibility")
 	poseStrength := fs.Float64("pose-strength", 0, "0-1: how strongly the driver's pose drives the output (0 = builder default 1.0)")

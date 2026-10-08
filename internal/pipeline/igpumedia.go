@@ -502,7 +502,11 @@ func (p *Pipeline) runAnimateCharacterSdcpp(ctx context.Context, req core.Reques
 		}
 		return def
 	}
-	frames := normalizeVideoFrames(pick("frames", 0))
+	// A request that names no frames renders animategen_frames (0 = the runner's own default). The
+	// cap check below and the runner's --frames flag both read this one value, so a box whose cap
+	// fits only a short clip (the amd-gcn seed: 33 frames at 288x512) is not refused for the
+	// longer default the runner would otherwise render.
+	frames := normalizeVideoFrames(pick("frames", cfg.AnimateGenFrames))
 	width := floorTo32(pick("width", cfg.AnimateGenWidth))
 	height := floorTo32(pick("height", cfg.AnimateGenHeight))
 	// The VACE reference image occupies one latent frame on top of the clip's (see the video
