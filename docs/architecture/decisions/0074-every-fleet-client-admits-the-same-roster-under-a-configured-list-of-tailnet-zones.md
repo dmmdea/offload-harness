@@ -25,8 +25,8 @@ every lane the harness has, and a roster entry must mean the same thing to all o
   > **Unverified:** the vendor sentence above is the diagnosis's reading of the vendor page, not re-read for this change,
   > and whether MagicDNS on a given delegator answers the sharer-zone name with a tailnet address was not tested; the
   > dial gate (below) is what makes the answer safe either way.
-- The shape check ran on the agent lane only. The five single-shot lanes (vision, text, stt upload, compose, accelerator)
-  dialled the same roster entries through the dial gate alone, so one entry was refused by one lane and used by five,
+- The shape check ran on the agent lane only. The six single-shot lanes (vision, text, stt upload, compose, media, accelerator)
+  dialled the same roster entries through the dial gate alone, so one entry was refused by one lane and used by six,
   and a bad entry got no message naming its key on those lanes.
 - ADR 0023 says `TailnetURL` vets every remote base "at config load and at intake". For `delegate_remotes` it ran at
   intake only: a refused entry loaded clean, passed `doctor`, and then failed every `agent_delegate` and
@@ -49,7 +49,7 @@ every lane the harness has, and a roster entry must mean the same thing to all o
    therefore adds no reachable address; it only lets the operator spell the name Tailscale gave the node.
 4. **Every single-shot lane admits a roster entry the way the agent lane does.** `internal/rosterprobe.Members`
    normalizes the roster (trim, drop blank slots, keep configured order and slot numbers) and applies
-   `netguard.TailnetURL` to each entry; the vision, text, stt-upload, compose and accelerator lanes call it in place of
+   `netguard.TailnetURL` to each entry; the vision, text, stt-upload, compose, media and accelerator lanes call it in place of
    their own loops. A refused entry is a named miss, `<base>: not dialled, refused by the tailnet guard (<why>)`, never a
    failed call and never a dial; the entries after it still serve.
 5. **The single-shot lanes read the roster at once, through one shared cache, at documented timings.**
@@ -93,7 +93,7 @@ every lane the harness has, and a roster entry must mean the same thing to all o
    printed. Informational: the exit code does not change.
 9. **The bearer is one token, sent to every admitted node, and never follows a redirect.** `fleet_auth_token` is a single
    value: every request to a roster node (the health read, the token probe, a dispatch, a job poll) carries it, whichever
-   node and whichever zone the entry names. The token probe and the five single-shot lane clients return a 3xx to the
+   node and whichever zone the entry names. The token probe and the six single-shot lane clients return a 3xx to the
    caller instead of following it (`rosterprobe.NoRedirect`), so a node, or a proxy in front of one, cannot have the
    client replay the request and its `Authorization` header at a `Location` it chose. The health read
    (`delegate.healthClient` in `internal/delegate`, which also sends the bearer) is that package's, was not changed, and

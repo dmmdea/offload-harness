@@ -3,7 +3,7 @@ package fleetnode
 // The media of the token-gated lanes (ADR 0072 follow-up, D26's companion).
 //
 // GET /fleet/media/{name} is tokenless on purpose: a media client (the image lane's callers) reads a
-// render by bare name. But two gated lanes put their OUTPUTS in the same directory, and a file there
+// render by bare name. But the gated lanes put their OUTPUTS in the same directory, and a file there
 // was readable by anyone who learned its name:
 //
 //   - the stt upload door's transcripts: stt-<digits>-<8 hex>.srt|txt|segments.json. The stem is the
@@ -13,17 +13,23 @@ package fleetnode
 //     compose-video lane keeps compose-<hash8>, which a node cannot tell from a project render's), so
 //     a name alone says which lane wrote it, from the first byte, and across a restart.
 //
+//   - the media-job door's outputs (ADR 0077): mediajob-<16 hex>.<ext>. They are rendered from the caller's
+//     PRIVATE input files (a still, a driver video, a voice sample), so they ride the bearer the way a project
+//     render does; the door sets the output path itself (mediaJobOutputPath), so a name alone says which door
+//     wrote it. A job of the tokenless /fleet/dispatch door keeps the pipeline's own name (render-<hash8>.png,
+//     video-<hash8>.mp4, ...), which stays readable by bare name as before.
+//
 //   - the legacy path-taking stt lane's transcripts (<basename>-<8 hex>.srt|txt|segments.json): that
 //     lane is token-gated on a node with a token, so its outputs ride the bearer too (they are never
 //     swept: the pipeline's content-keyed cache, shared with local transcription, owns them).
 //
 // The match fails closed on the spellings a Windows filesystem folds onto one file (gatedMediaName).
 //
-// On a node WITH a fleet_auth_token those names now need the bearer; a node with no token, and every
+// On a node WITH a fleet_auth_token those names need the bearer; a node with no token, and every
 // other name, answer as they always did. The transcripts are also removed: when the job record is
 // evicted, and once older than fleet_stt_transcript_ttl_min (default 30), swept at fleet-serve start
 // and on the job store's janitor tick. The project renders are not swept (a render is the product the
-// asker came for, and it is already kept as long as any media output).
+// asker came for, and it is already kept as long as any media output); nor are the media-job renders.
 
 import (
 	"encoding/json"
@@ -50,10 +56,16 @@ var (
 	// projectOutputRe is the stem buildComposeProject gives a project render: its video and the
 	// renderer's snapshots beside it.
 	projectOutputRe = regexp.MustCompile(`^composeproj-[0-9a-f]{16}(\.[a-z0-9]{1,8}|-snap-[A-Za-z0-9._-]+)$`)
+	// mediaJobOutputRe is the stem mediaJobOutputPath gives a media-job render: the file itself, and anything
+	// the pipeline derives from it beside it (a name that continues the stem with "." or "-").
+	mediaJobOutputRe = regexp.MustCompile(`^mediajob-[0-9a-f]{16}[.-][a-z0-9._-]*$`)
 )
 
 // projectOutputPrefix is the stem every project render's output starts with.
 const projectOutputPrefix = "composeproj-"
+
+// mediaJobOutputPrefix is the stem every media-job render's output starts with.
+const mediaJobOutputPrefix = "mediajob-"
 
 // legacySTTOutputRe is what the LEGACY path-taking stt lane names its transcripts:
 // <sanitized-basename>-<8 hex of the content identity>.srt|txt|segments.json (pipeline's mediaBase).
@@ -75,7 +87,7 @@ func gatedMediaName(name string) bool {
 		}
 	}
 	n := strings.ToLower(strings.TrimRight(name, ". "))
-	return sttOutputRe.MatchString(n) || projectOutputRe.MatchString(n) || legacySTTOutputRe.MatchString(n)
+	return sttOutputRe.MatchString(n) || projectOutputRe.MatchString(n) || mediaJobOutputRe.MatchString(n) || legacySTTOutputRe.MatchString(n)
 }
 
 // SweepSTTTranscripts removes the transcript files of stt upload jobs that are older than the node's

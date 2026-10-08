@@ -80,11 +80,11 @@ func TestRemoteMediaTaskOutNeverReachesThePipeline(t *testing.T) {
 			cleanup()
 			for _, k := range []string{"out", "out_dir"} {
 				if v, ok := req.Params[k]; ok {
-					// The project door names its own render under media_dir (composeproj-<hex>.<ext>,
-					// media_gate.go) whenever the node has a media_dir, which this config now does for the
-					// media-input door: that out is the NODE's, never the caller's, and the loop below
-					// still proves it is not the caller's path.
-					if s, _ := v.(string); k == "out" && task == ComposeProjectTask && isNodeProjectOut(cfg, s) {
+					// The project door and the media-job door name their own render under media_dir
+					// (composeproj-<hex>.<ext>, mediajob-<hex>.<ext>, media_gate.go) whenever the node has a
+					// media_dir, which this config has for both: that out is the NODE's, never the caller's,
+					// and the loop below still proves it is not the caller's path.
+					if s, _ := v.(string); k == "out" && isNodeChosenOut(cfg, task, s) {
 						continue
 					}
 					t.Errorf("%s: remote %s=%v reached the pipeline", task, k, v)
@@ -115,9 +115,10 @@ func TestEveryFleetWriterIsCoveredByTheOutRule(t *testing.T) {
 	}
 }
 
-// isNodeProjectOut reports whether out is a file the project door chose itself: directly under this
-// node's media_dir, named with the door's own stem.
-func isNodeProjectOut(cfg config.Config, out string) bool {
-	return out != "" && filepath.Dir(out) == filepath.Clean(cfg.MediaDir) &&
-		strings.HasPrefix(filepath.Base(out), projectOutputPrefix)
+// isNodeChosenOut reports whether out is a file the task's door chose itself: directly under this
+// node's media_dir, named with that door's own stem (only the project door and the media-job door pick one).
+func isNodeChosenOut(cfg config.Config, task, out string) bool {
+	stem := map[string]string{ComposeProjectTask: projectOutputPrefix, MediaJobTask: mediaJobOutputPrefix}[task]
+	return stem != "" && out != "" && filepath.Dir(out) == filepath.Clean(cfg.MediaDir) &&
+		strings.HasPrefix(filepath.Base(out), stem)
 }

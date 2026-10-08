@@ -1629,7 +1629,11 @@ render on a fleet node and get the output back hash-verified. The other media to
 - `remote` always goes to a node. `remotes` narrows the nodes for one call; each must already be in `delegate_remotes`,
   and the call is refused before any probe otherwise.
 
-**Which node.** The client reads each candidate's `/fleet/health` and keeps the nodes that list the task (and `media-job`
+**Which node.** The candidates are read through `internal/rosterprobe` like every other single-shot lane (ADR 0074): each
+`delegate_remotes` entry is first judged by the tailnet shape check the agent lane applies (`netguard.TailnetURL`), and one it
+refuses is a named miss in the defer (`<base>: not dialled, refused by the tailnet guard (<why>)`), never a dial, while the
+other nodes still serve; the rest are probed at once, in configured order, through the shared memo and negative cache. The
+client reads each candidate's `/fleet/health` and keeps the nodes that list the task (and `media-job`
 when input files travel), report every route the task needs as CONFIGURED when they report routes at all (a node that
 predates `media_routes` is unknown, not refused), and do not hold a TEXT lease (they would answer 503). Among those, a node
 with no held lease ranks first, then the shorter queue (queued plus running), then config order. Every miss is named in the
@@ -1642,6 +1646,12 @@ through `POST /fleet/media-job` ([fleet-node.md](fleet-node.md#the-media-job-doo
 `run-graph` carries its graph and manifest inline, so it never needs the door. The payload uses the field names the node's
 builders decode; `out` and `out_dir` never travel (`out_dir` is where the fetched outputs land here). Four request fields cannot ride the fleet task and defer by name
 (`defer_class` `contract`) instead of being dropped: `refine=false`, `tts_voice`, `transformer` and (`run_graph`) `devices`, whose card ids name cards on the calling machine.
+
+**Node-side bounds.** A node holds at most two media-job bodies in flight (the stt upload door's bound): a caller over it
+waits for a slot and, past 30 s, is answered `503` with `Retry-After`, which the client reads as a re-placeable `capacity` defer.
+The node also names a media-job's render itself (`mediajob-<16 hex>.<ext>`) and serves it only to a holder of the fleet token,
+because it is rendered from the caller's private files: the client sends the bearer on every output fetch, a tokenless read of
+that name is refused, and the outputs of a job with no input file (the tokenless dispatch) are still read by bare name.
 
 **What comes back.** The client polls `/fleet/jobs/{id}` every 2 seconds inside a budget when the caller gave no deadline
 (image 2 h, video and animate 6 h, audio 1 h, run-graph 2 h), then fetches every output the result names by bare name from
@@ -1669,6 +1679,13 @@ node's withdraw, `DELETE /fleet/jobs/{id}`, is for agent jobs only (ADR 0064), s
 passes while the outputs are fetched says the render finished and the fetch ran out of time), and a transport failure an `infrastructure` defer. An input file this
 machine cannot read is `contract`; this machine's own temp directory, disk or packer failing is `infrastructure`. A defer the node itself returned (a render that
 deferred) comes back as the node sent it, with `meta.node`.
+
+**Attribution.** A call that goes to a node is the remote lane's own, like compose, vision, text and transcription (0.165.0,
+D5-D11): it writes one asker ledger row (`node`, `node_id`, `route`, `placement`, `fleet_job_id`, `card_by_caller`) and, once a
+node is chosen, one PAIR card on that node (queued, running, terminal), and the handle is closed on every way the call can end
+(a result, a refusal, a node defer, a deadline). A call that reached no node has its row and no card. Both POSTs, the plain
+dispatch and the media-job, carry `X-Offload-Asker` and, only when this machine's emitter is off, `X-Offload-Pair-Card: node`.
+The local route, and an auto call that runs here, are not attributed (the pipeline writes that row).
 
 ## Comfy workflow templates catalog (phase A)
 

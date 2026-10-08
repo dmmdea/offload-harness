@@ -1141,7 +1141,7 @@ never a local run. `meta.node` / `meta.placement` on the result say where it ran
 
 Every `delegate_remotes` entry is first judged by the tailnet shape check the agent lane applies
 (`netguard.TailnetURL`), through `internal/rosterprobe`; an entry it refuses is named in the defer reason as
-`not dialled, refused by the tailnet guard` and the others still serve (the text, stt-upload, compose and accelerator
+`not dialled, refused by the tailnet guard` and the others still serve (the text, stt-upload, compose, media and accelerator
 lanes do the same, [ADR 0074](architecture/decisions/0074-every-fleet-client-admits-the-same-roster-under-a-configured-list-of-tailnet-zones.md)).
 
 ## The text task (`POST /fleet/text`)

@@ -19,6 +19,7 @@ package fleetnode
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -97,8 +98,19 @@ const mediaJobClosed = "media-job is not open on this node (it needs fleet_media
 // blanket 30 s timeouts would cut a driver video on an ordinary link (the compose-project door's reason).
 const mediaJobWindow = 15 * time.Minute
 
-// handleMediaJob checks the door and the bearer BEFORE reading the body, then decodes the typed payload
-// and joins the shared admission path.
+// mediaJobInFlightMax bounds the media-job bodies one node holds in memory at once, the stt upload door's
+// bound and for the same reason: the body (a bundle of up to fleet_media_inputs_max_mb, in base64) is read
+// and decoded BEFORE the admission gates, so without a bound N concurrent uploads hold N times the peak of
+// one. A caller over the bound waits for a slot (a waiter holds a goroutine, not a body); one that waits
+// longer than mediaJobSlotWait gets a re-placeable 503 with Retry-After.
+const mediaJobInFlightMax = sttUploadInFlightMax
+
+// mediaJobSlotWait is a var only so a test can shorten it.
+var mediaJobSlotWait = 30 * time.Second
+
+// handleMediaJob checks the door and the bearer BEFORE reading the body, takes one of the node's few
+// in-flight slots (held until the job is admitted or refused), then decodes the typed payload and joins the
+// shared admission path.
 func (s *Server) handleMediaJob(w http.ResponseWriter, r *http.Request) {
 	if !s.opts.Cfg.MediaInputsAdmissible() {
 		writeError(w, http.StatusForbidden, mediaJobClosed)
@@ -108,6 +120,12 @@ func (s *Server) handleMediaJob(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
+	// A caller that passed the bearer check holds one of the node's media-job slots from before the first
+	// body byte until the handler returns, which is every exit: see mediaJobInFlightMax.
+	if !s.takeUploadSlot(w, r, s.mediaJobSlots, mediaJobSlotWait, "media jobs") {
+		return
+	}
+	defer func() { <-s.mediaJobSlots }()
 	// Only a token holder gets the longer window; everyone else met the blanket timeouts above.
 	s.extendRead(w, mediaJobWindow, "the media-job door")
 	s.extendWrite(w, mediaJobWindow, "the media-job door")
@@ -404,10 +422,59 @@ func buildMediaJob(ctx context.Context, v *mediaView, loopbackListener bool, pay
 		cleanup()
 		return core.Request{}, noop, err
 	}
+	// The render is written under a stem of the door's own choosing, never the pipeline's <task>-<hash8>
+	// (which the tokenless /fleet/dispatch lane shares): GET /fleet/media then tells a media-job render by
+	// its name alone and serves it only to a bearer holder (media_gate.go). The renders are made from the
+	// caller's private input files, so they must not be readable by whoever learns a name.
+	if out, oerr := mediaJobOutputPath(cfg, task, req.Params); oerr != nil {
+		innerCleanup()
+		cleanup()
+		return core.Request{}, noop, nodeSideError{fmt.Errorf("media-job: %w", oerr)}
+	} else if out != "" {
+		if req.Params == nil {
+			req.Params = map[string]any{}
+		}
+		req.Params["out"] = out
+	}
 	return req, func() {
 		innerCleanup()
 		cleanup()
 	}, nil
+}
+
+// mediaJobOutputExt is the extension the pipeline gives a render of task when no `out` is named. "" for a
+// task whose outputs the door cannot name: run-graph writes whatever files its graph names, takes no input
+// file through this door, and so renders nothing from the caller's private bytes.
+func mediaJobOutputExt(task string, params map[string]any) string {
+	switch task {
+	case "image-gen":
+		return "png"
+	case "video-gen", "animate":
+		return "mp4"
+	case "audio-gen":
+		if kind, _ := params["kind"].(string); strings.EqualFold(strings.TrimSpace(kind), "music") {
+			return "flac"
+		}
+		return "wav"
+	}
+	return ""
+}
+
+// mediaJobOutputPath is the output file a media-job render is given: mediajob-<16 hex>.<ext> directly under
+// media_dir. "" when the node has no media_dir or the task's outputs are not named by `out`.
+func mediaJobOutputPath(cfg config.Config, task string, params map[string]any) (string, error) {
+	ext := mediaJobOutputExt(task, params)
+	if ext == "" || strings.TrimSpace(cfg.MediaDir) == "" {
+		return "", nil
+	}
+	if err := os.MkdirAll(cfg.MediaDir, 0o755); err != nil {
+		return "", err
+	}
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	return filepath.Join(cfg.MediaDir, mediaJobOutputPrefix+hex.EncodeToString(b[:])+"."+ext), nil
 }
 
 func containsString(xs []string, x string) bool {

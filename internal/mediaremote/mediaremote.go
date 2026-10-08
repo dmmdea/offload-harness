@@ -46,6 +46,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/delegate"
 	"github.com/dmmdea/offload-harness/internal/mediacap"
+	"github.com/dmmdea/offload-harness/internal/pairworkloads"
 	"github.com/dmmdea/offload-harness/internal/rosterprobe"
 )
 
@@ -206,11 +207,17 @@ func Run(ctx context.Context, cfg config.Config, runner Runner, req core.Request
 	if r == RouteAuto {
 		placement = "remote: no " + laneName(req) + " lane on this machine"
 	}
-	res, err := Call(ctx, cfg, req, remotes)
+	// The call is the remote lane's own from here on: it writes its asker ledger row and, once a node is
+	// chosen, its one PAIR card, like composeremote and the other remote lanes (0.165.0, D5-D11). The
+	// handle is finished on both exits below; the local branches above never reach it.
+	h := core.BeginRemote(runner, req, r)
+	res, err := callWith(ctx, cfg, req, remotes, h)
 	if err != nil {
-		return placementDefer(err, placement)
+		res = placementDefer(err, placement)
+	} else {
+		res.Meta.Placement = placement
 	}
-	res.Meta.Placement = placement
+	h.Finish(res)
 	return res
 }
 
@@ -262,6 +269,11 @@ func placementDefer(err error, placement string) core.Result {
 // problem is an error the caller maps to a defer class; the node's own verdict (a render that deferred)
 // comes back as a deferred core.Result.
 func Call(ctx context.Context, cfg config.Config, req core.Request, remotes []string) (core.Result, error) {
+	return callWith(ctx, cfg, req, remotes, core.NopAttribution{})
+}
+
+// callWith is Call reporting the dispatch and the node's progress to h (core.RemoteAttribution).
+func callWith(ctx context.Context, cfg config.Config, req core.Request, remotes []string, h core.RemoteAttribution) (core.Result, error) {
 	start := time.Now()
 	bases, err := candidateBases(cfg, remotes)
 	if err != nil {
@@ -335,13 +347,15 @@ func Call(ctx context.Context, cfg config.Config, req core.Request, remotes []st
 		return core.Result{}, &contractError{fmt.Sprintf("the %s request cannot be encoded for the wire: %v", pl.fleetTask, err)}
 	}
 
+	// The call's one PAIR card opens here, on the node about to receive the job.
+	h.Dispatched(base, node, jobID)
 	if err := post(ctx, cfg, base, route, body); err != nil {
 		if be := budgetEnded(ctx, phaseSending, node, jobID, err); be != nil {
 			return core.Result{}, be
 		}
 		return core.Result{}, err
 	}
-	res, data, err := wait(ctx, cfg, base, jobID)
+	res, data, err := wait(ctx, cfg, base, jobID, h)
 	if err != nil {
 		if be := budgetEnded(ctx, phaseRendering, node, jobID, err); be != nil {
 			return core.Result{}, be
@@ -636,6 +650,9 @@ func post(ctx context.Context, cfg config.Config, base, route string, body []byt
 	}
 	hreq.Header.Set("Content-Type", "application/json")
 	auth(cfg, hreq)
+	// Who asked, and whether the serving node must card the job because this box will not. Both doors
+	// (the tokenless dispatch and the token-gated media-job) are work-creating requests.
+	pairworkloads.WireHeadersFor(cfg, hreq.Header)
 	resp, err := HTTPClient.Do(hreq)
 	if err != nil {
 		return &placementError{core.DeferClassInfrastructure, rosterprobe.Scrub(base, fmt.Errorf("dispatch %s: %w", url, err))}
@@ -685,7 +702,7 @@ func (e *httpStatusError) rejectedToken() bool {
 // an errored one carries the node's typed reason, which comes back as a deferred result. A node that says
 // it does not hold the job (restarted, or evicted it) and one that refuses the bearer end the wait at once;
 // any other failure is tolerated until maxPollFailures of them happen in a row.
-func wait(ctx context.Context, cfg config.Config, base, jobID string) (core.Result, json.RawMessage, error) {
+func wait(ctx context.Context, cfg config.Config, base, jobID string, h core.RemoteAttribution) (core.Result, json.RawMessage, error) {
 	failures := 0
 	for {
 		pctx, cancel := context.WithTimeout(ctx, pollTimeout)
@@ -711,6 +728,8 @@ func wait(ctx context.Context, cfg config.Config, base, jobID string) (core.Resu
 		} else {
 			failures = 0
 			switch j.State {
+			case "running":
+				h.Running()
 			case "done":
 				if len(j.Data) == 0 {
 					return core.Deferf("the node finished the job with no result", "", core.Meta{}), nil, nil
