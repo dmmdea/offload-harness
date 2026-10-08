@@ -15,9 +15,9 @@
 import { test } from "node:test";
 import assert from "node:assert";
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { makeStub, stubAvailable } from "./igpu-stub.mjs";
 import { resolveFfmpeg, resolveFfprobe } from "./audio-qa.mjs";
@@ -52,8 +52,8 @@ function sandbox() {
   return { root, work, priv, f, done: () => rmSync(root, { recursive: true, force: true }) };
 }
 
-function runNode(script, args, sb, { timeoutMs = 170000 } = {}) {
-  const env = { ...process.env, TEMP: sb.priv, TMP: sb.priv, TMPDIR: sb.priv, FFMPEG_PATH: ffmpeg, LLAMA_SWAP_API: "http://127.0.0.1:9", IGPU_PARENT_POLL_MS: "250" };
+function runNode(script, args, sb, { timeoutMs = 170000, env: extraEnv = {} } = {}) {
+  const env = { ...process.env, TEMP: sb.priv, TMP: sb.priv, TMPDIR: sb.priv, FFMPEG_PATH: ffmpeg, LLAMA_SWAP_API: "http://127.0.0.1:9", IGPU_PARENT_POLL_MS: "250", ...extraEnv };
   for (const k of Object.keys(env)) if (k.startsWith("GPU_LEASE") || k === "GGML_VK_VISIBLE_DEVICES") delete env[k];
   return new Promise((resolve) => {
     const c = spawn(process.execPath, [join(here, script), ...args], { env, stdio: ["ignore", "pipe", "pipe"] });
@@ -518,4 +518,298 @@ test("audiocpp main: the text and the lyrics are handed to the guard - a forged 
       noTempLeft(sb);
     } finally { sb.done(); }
   }
+});
+
+// ---------------------------------------------------------------- sdcpp-animate: the guards and the output gate (SIL5)
+
+// the absolute path of the ffmpeg this host resolves (resolveFfmpeg may answer a bare name)
+function ffmpegAbs() {
+  if (ffmpeg.includes("/") || ffmpeg.includes("\\")) return ffmpeg;
+  for (const d of String(process.env.PATH || "").split(process.platform === "win32" ? ";" : ":")) {
+    for (const n of [ffmpeg, ffmpeg + ".exe"]) if (d && existsSync(join(d, n))) return join(d, n);
+  }
+  throw new Error("ffmpeg is not on PATH");
+}
+
+const partsIn = (dir) => (existsSync(dir) ? readdirSync(dir).filter((f) => f.includes(".part")) : []);
+
+test("sdcpp-animate main: a CPU compute buffer in sd-cli's log kills sd-cli (pid dead), is CPU_PLACEMENT, delivers nothing and leaves no temp dir", opts, async () => {
+  const sb = sandbox();
+  try {
+    const a = animateSetup(sb, { sd: { logFile: undefined, log: [...GOOD_SD_HEADER, "[VERBOSE] ggml_runner.cpp:1019 - t5 compute buffer size: 297.00 MB(RAM) on CPU (peak across 1 segment)"], hang: true, writes: undefined } });
+    const r = await runNode("sdcpp-animate.mjs", a.args, sb);
+    assert.equal(r.status, 1, r.stderr);
+    assert.match(r.stderr, /CPU_PLACEMENT: the engine placed a model on the CPU/);
+    assert.equal(lastLine(r.stderr), "IGPU_CLASS=cpu_placement");
+    assert.equal(records(a.dRec).length, 5, "the depth step ran on the GPU for every frame first");
+    assert.ok(await waitGone(Number(readFileSync(a.sdPid, "utf8"))), "sd-cli is dead");
+    assert.ok(!existsSync(a.out));
+    noTempLeft(sb);
+  } finally { sb.done(); }
+});
+
+test("sdcpp-animate main: an sd-cli that exits 0 without any GPU evidence is CPU_PLACEMENT, not a delivered clip", opts, async () => {
+  const sb = sandbox();
+  try {
+    const a = animateSetup(sb, { sd: { logFile: undefined, log: ["sd.cpp: all done"] } });
+    const r = await runNode("sdcpp-animate.mjs", a.args, sb);
+    assert.equal(r.status, 1, r.stderr);
+    assert.match(r.stderr, /CPU_PLACEMENT: no GPU evidence was seen in sd-cli's log/);
+    assert.ok(!existsSync(a.out), "a clip nobody can show ran on the GPU is not delivered");
+    assert.deepEqual(partsIn(dirname(a.out)), []);
+    noTempLeft(sb);
+  } finally { sb.done(); }
+});
+
+test("sdcpp-animate main: a device reset in sd-cli's log is GPU_RESET naming the token cap (animate's own key)", opts, async () => {
+  const sb = sandbox();
+  try {
+    const a = animateSetup(sb, { sd: { logFile: fixture("sdcpp-vace-device-lost.log"), exit: 1, writes: undefined } });
+    const r = await runNode("sdcpp-animate.mjs", a.args, sb);
+    assert.equal(r.status, 1, r.stderr);
+    assert.match(r.stderr, /GPU_RESET: .*2 s lockup timeout/);
+    assert.match(r.stderr, /animategen_sdcpp_max_tokens/);
+    assert.equal(lastLine(r.stderr), "IGPU_CLASS=gpu_reset");
+    assert.ok(!existsSync(a.out));
+    noTempLeft(sb);
+  } finally { sb.done(); }
+});
+
+test("sdcpp-animate main: an entirely black or entirely frozen VACE clip is BLACK_CLIP / FROZEN_CLIP, never delivered, no partial left", opts, async () => {
+  for (const [kind, w, frames, re] of [
+    ["black", { kind: "video", ffmpeg, black: true }, "5", /BLACK_CLIP/],
+    ["frozen", { kind: "video", ffmpeg, frozen: true }, "9", /FROZEN_CLIP/], // 9 frames at 16 fps outlast freezedetect's 0.5 s
+  ]) {
+    const sb = sandbox();
+    try {
+      const a = animateSetup(sb, { sd: { writes: w } });
+      const args = a.args.slice();
+      args[args.indexOf("--frames") + 1] = frames;
+      const r = await runNode("sdcpp-animate.mjs", args, sb);
+      assert.equal(r.status, 1, `${kind}: ${r.stderr}`);
+      assert.match(r.stderr, re, kind);
+      assert.equal(lastLine(r.stderr), kind === "black" ? "IGPU_CLASS=black_clip" : "IGPU_CLASS=frozen_clip");
+      assert.ok(!existsSync(a.out), `${kind}: the rejected clip is not delivered`);
+      assert.deepEqual(partsIn(dirname(a.out)), [], `${kind}: no partial is left beside it`);
+      noTempLeft(sb);
+    } finally { sb.done(); }
+  }
+});
+
+test("sdcpp-video main: an entirely frozen clip is FROZEN_CLIP and is never delivered", opts, async () => {
+  const sb = sandbox();
+  try {
+    const v = videoSetup(sb, { log: GOOD_SD_HEADER, writes: { kind: "video", ffmpeg, frozen: true } }, []);
+    const args = v.args.slice();
+    args[args.indexOf("--frames") + 1] = "9"; // 9 frames at 8 fps = 1.1 s, past freezedetect's 0.5 s
+    const r = await runNode("sdcpp-video.mjs", args, sb);
+    assert.equal(r.status, 1, r.stderr);
+    assert.match(r.stderr, /FROZEN_CLIP: the clip is 100% frozen/);
+    assert.equal(lastLine(r.stderr), "IGPU_CLASS=frozen_clip");
+    assert.ok(!existsSync(v.out));
+    assert.deepEqual(partsIn(dirname(v.out)), []);
+    noTempLeft(sb);
+  } finally { sb.done(); }
+});
+
+// ---------------------------------------------------------------- SIL8: a rejected re-run never touches a good clip
+
+test("sdcpp-video / sdcpp-animate main: a re-run of the same request that fails (black clip, CPU placement) leaves the previous good clip byte for byte", opts, async () => {
+  for (const lane of ["video", "animate"]) {
+    const sb = sandbox();
+    try {
+      const failures = [{ writes: { kind: "video", ffmpeg, black: true } }, lane === "video" ? { log: [...GOOD_SD_HEADER, "t5 compute buffer size: 1 MB(RAM) on CPU"], hang: true } : { logFile: undefined, log: ["sd.cpp: nothing to show"] }];
+      for (const bad of failures) {
+        let out;
+        let r;
+        if (lane === "video") {
+          const v = videoSetup(sb, { log: GOOD_SD_HEADER, ...bad });
+          out = v.out;
+          mkdirSync(dirname(out), { recursive: true });
+          writeFileSync(out, "PREVIOUS-GOOD-CLIP");
+          r = await runNode("sdcpp-video.mjs", v.args, sb);
+        } else {
+          const a = animateSetup(sb, { sd: bad });
+          out = a.out;
+          mkdirSync(dirname(out), { recursive: true });
+          writeFileSync(out, "PREVIOUS-GOOD-CLIP");
+          r = await runNode("sdcpp-animate.mjs", a.args, sb);
+        }
+        assert.equal(r.status, 1, `${lane}: ${r.stderr.slice(-300)}`);
+        assert.equal(readFileSync(out, "utf8"), "PREVIOUS-GOOD-CLIP", `${lane}: the previous clip is untouched`);
+        assert.deepEqual(partsIn(dirname(out)), [], `${lane}: no partial left`);
+        noTempLeft(sb);
+      }
+    } finally { sb.done(); }
+  }
+});
+
+// ---------------------------------------------------------------- the runner main() thin spots (TST22)
+
+test("sdcpp-animate main: a driver clip shorter than the request renders the largest 4k+1 that exists; fewer than 5 frames is an error", opts, async () => {
+  const sb = sandbox();
+  try {
+    const a = animateSetup(sb);
+    const args = a.args.slice();
+    args[args.indexOf("--frames") + 1] = "33"; // the 1 s driver at 16 fps has 16 frames: 13 = 4*3+1 is the largest 4k+1
+    const r = await runNode("sdcpp-animate.mjs", args, sb);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stderr, /driver gave 16 frames; rendering 13 \(4k\+1\) instead of 33/);
+    assert.equal(at(records(a.sdRec)[0].argv, "--video-frames"), "13", "sd-cli is asked for the frames that exist, not the requested 33");
+    assert.equal(records(a.dRec).length, 13);
+    assert.equal(frameCount(a.out), 13);
+  } finally { sb.done(); }
+  const sb2 = sandbox();
+  try {
+    const a = animateSetup(sb2);
+    const short = join(sb2.work, "short.mp4");
+    const g = spawnSync(ffmpeg, ["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc2=s=96x64:d=0.25:r=16", "-c:v", "libx264", "-pix_fmt", "yuv420p", short]);
+    assert.equal(g.status, 0, String(g.stderr));
+    const args = a.args.slice();
+    args[args.indexOf("--") + 3] = short; // the driver positional
+    const r = await runNode("sdcpp-animate.mjs", args, sb2);
+    assert.equal(r.status, 1, r.stderr);
+    assert.match(r.stderr, /the driver clip yields only 4 frame\(s\) at 16 fps; at least 5 are needed/);
+    assert.deepEqual(records(a.dRec), [], "no depth step for a driver that is too short");
+    noTempLeft(sb2);
+  } finally { sb2.done(); }
+});
+
+test("sdcpp-animate main: a driver that is not a video fails the frame extraction (no engine starts)", opts, async () => {
+  const sb = sandbox();
+  try {
+    const a = animateSetup(sb);
+    const junk = sb.f("junk.mp4", "this is not a video");
+    const args = a.args.slice();
+    args[args.indexOf("--") + 3] = junk;
+    const r = await runNode("sdcpp-animate.mjs", args, sb);
+    assert.equal(r.status, 1, r.stderr);
+    assert.match(r.stderr, /driver frame extraction failed/);
+    assert.deepEqual(records(a.dRec), []);
+    noTempLeft(sb);
+  } finally { sb.done(); }
+});
+
+test("every runner names each missing input file on its own before anything starts", opts, async () => {
+  const sb = sandbox();
+  try {
+    const v = videoSetup(sb, { log: GOOD_SD_HEADER }, ["--tae", sb.f("tae.safetensors"), "--high-noise-model", sb.f("high.gguf")]);
+    for (const flag of ["--model", "--vae", "--t5xxl", "--tae", "--high-noise-model"]) {
+      const args = v.args.slice();
+      args[args.indexOf(flag) + 1] = join(sb.work, "missing-" + flag.slice(2));
+      const r = await runNode("sdcpp-video.mjs", args, sb);
+      assert.equal(r.status, 1, `${flag}: ${r.stderr}`);
+      assert.match(r.stderr, new RegExp(`${flag} not found`), flag);
+    }
+    const noStill = v.args.slice();
+    noStill[noStill.indexOf("--") + 2] = join(sb.work, "missing-still.png");
+    const r2 = await runNode("sdcpp-video.mjs", noStill, sb);
+    assert.match(r2.stderr, /image not found/);
+    assert.deepEqual(records(v.rec), [], "the engine never started");
+
+    const a = animateSetup(sb, { extra: ["--tae", sb.f("tae2.safetensors")] });
+    for (const flag of ["--model", "--vae", "--t5xxl", "--tae", "--depth-model"]) {
+      const args = a.args.slice();
+      args[args.indexOf(flag) + 1] = join(sb.work, "missing-" + flag.slice(2));
+      const r = await runNode("sdcpp-animate.mjs", args, sb);
+      assert.equal(r.status, 1, `${flag}: ${r.stderr}`);
+      assert.match(r.stderr, new RegExp(`${flag} not found`), flag);
+    }
+    for (const [idx, what] of [[2, "reference image"], [3, "driver clip"]]) { // positionals: out, ref, driver, prompt
+      const args = a.args.slice();
+      args[args.indexOf("--") + idx] = join(sb.work, "missing-" + idx);
+      const r = await runNode("sdcpp-animate.mjs", args, sb);
+      assert.match(r.stderr, new RegExp(`${what} not found`), what);
+    }
+    assert.deepEqual(records(a.dRec), []);
+
+    const m = audioSetup(sb, "voice", { log: ["[TIMING ts=1] c.weights.buffer_name Vulkan0"], writes: { kind: "wav", seconds: 1 } }, ["--clone", sb.f("ref.wav")]);
+    for (const flag of ["--model", "--clone"]) {
+      const args = m.args.slice();
+      args[args.indexOf(flag) + 1] = join(sb.work, "missing-" + flag.slice(2));
+      const r = await runNode("audiocpp-generate.mjs", args, sb);
+      assert.equal(r.status, 1, `${flag}: ${r.stderr}`);
+      assert.match(r.stderr, new RegExp(`${flag} not found`), flag);
+    }
+    assert.deepEqual(records(m.rec), []);
+  } finally { sb.done(); }
+});
+
+test("every runner requires ffmpeg (and animate ffprobe) up front - FFMPEG_UNAVAILABLE before any engine starts", opts, async () => {
+  const sb = sandbox();
+  try {
+    const none = { FFMPEG_PATH: join(sb.work, "no-such-ffmpeg") };
+    const v = videoSetup(sb, { log: GOOD_SD_HEADER });
+    const r1 = await runNode("sdcpp-video.mjs", v.args, sb, { env: none });
+    assert.equal(r1.status, 1, r1.stderr);
+    assert.match(r1.stderr, /FFMPEG_UNAVAILABLE/);
+    assert.equal(lastLine(r1.stderr), "IGPU_CLASS=ffmpeg_unavailable");
+    assert.deepEqual(records(v.rec), []);
+
+    const a = animateSetup(sb);
+    const r2 = await runNode("sdcpp-animate.mjs", a.args, sb, { env: none });
+    assert.equal(r2.status, 1, r2.stderr);
+    assert.match(r2.stderr, /FFMPEG_UNAVAILABLE: ffmpeg could not be resolved/);
+    assert.deepEqual(records(a.dRec), []);
+    // ffmpeg present but no ffprobe beside it and none on PATH
+    const lonely = join(sb.work, "lonely");
+    mkdirSync(lonely);
+    const real = ffmpegAbs();
+    const copy = join(lonely, basename(real));
+    copyFileSync(real, copy);
+    const r3 = await runNode("sdcpp-animate.mjs", a.args, sb, { env: { FFMPEG_PATH: copy, PATH: "" } });
+    assert.equal(r3.status, 1, r3.stderr);
+    assert.match(r3.stderr, /FFMPEG_UNAVAILABLE: ffprobe could not be resolved/);
+    assert.deepEqual(records(a.dRec), []);
+
+    const m = audioSetup(sb, "music", { log: ["[TIMING ts=1] c.weights.buffer_name Vulkan0"] });
+    const r4 = await runNode("audiocpp-generate.mjs", m.args, sb, { env: none });
+    assert.equal(r4.status, 1, r4.stderr);
+    assert.match(r4.stderr, /FFMPEG_UNAVAILABLE/);
+    assert.deepEqual(records(m.rec), []);
+    const r5 = await runNode("audiocpp-generate.mjs", m.args, sb, { env: { FFMPEG_PATH: copy, PATH: "" } });
+    assert.equal(r5.status, 1, r5.stderr);
+    assert.match(r5.stderr, /FFMPEG_UNAVAILABLE/);
+    assert.deepEqual(records(m.rec), []);
+  } finally { sb.done(); }
+});
+
+test("sdcpp-video main: sd-cli refusing a model file after its device line is MODEL_INCOMPATIBLE (no compute buffer was printed, so no GPU evidence: it is still not CPU_PLACEMENT)", opts, async () => {
+  const sb = sandbox();
+  try {
+    const log = [GOOD_SD_HEADER[0], GOOD_SD_HEADER[1],
+      "[ERROR] Diffusion model tensor 'model.diffusion_model.vace_patch_embedding.weight' not in model metadata",
+      "[ERROR] model metadata validation failed"];
+    const v = videoSetup(sb, { log, exit: 1, writes: undefined });
+    const r = await runNode("sdcpp-video.mjs", v.args, sb);
+    assert.equal(r.status, 1, r.stderr);
+    assert.match(r.stderr, /MODEL_INCOMPATIBLE: sd-cli refused the model/);
+    assert.ok(!/CPU_PLACEMENT/.test(r.stderr));
+    assert.equal(lastLine(r.stderr), "IGPU_CLASS=model_incompatible");
+    noTempLeft(sb);
+  } finally { sb.done(); }
+});
+
+test("audiocpp main: a non-numeric --device is DEVICE_INVALID (its own class); sdcpp-animate: a relative --sd-bin / --depth-bin each name themselves", opts, async () => {
+  const sb = sandbox();
+  try {
+    const m = audioSetup(sb, "music", { log: ["[TIMING ts=1] c.weights.buffer_name Vulkan0"] });
+    const bad = m.args.slice();
+    bad[bad.indexOf("--device") + 1] = "gpu0";
+    const r = await runNode("audiocpp-generate.mjs", bad, sb);
+    assert.equal(r.status, 1, r.stderr);
+    assert.match(r.stderr, /DEVICE_INVALID: --device "gpu0"/);
+    assert.equal(lastLine(r.stderr), "IGPU_CLASS=device_invalid");
+    assert.deepEqual(records(m.rec), []);
+
+    const a = animateSetup(sb);
+    for (const flag of ["--sd-bin", "--depth-bin"]) {
+      const args = a.args.slice();
+      args[args.indexOf(flag) + 1] = "relative-binary";
+      const r2 = await runNode("sdcpp-animate.mjs", args, sb);
+      assert.equal(r2.status, 1, `${flag}: ${r2.stderr}`);
+      assert.match(r2.stderr, new RegExp(`BINARY_NOT_ABSOLUTE: ${flag} "relative-binary"`), flag);
+    }
+    assert.deepEqual(records(a.dRec), []);
+  } finally { sb.done(); }
 });

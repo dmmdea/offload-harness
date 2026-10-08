@@ -185,10 +185,12 @@ async function main() {
   const outTmp = makeTempDir("sdcpp-animate-out-");
   try {
     // 1. the driver's frames
+    deadline.enforce("driver frame extraction");
     const ex = spawnSync(ffmpeg, buildExtractArgs({ driver, framesDir: framesTmp.dir, width: p.width, height: p.height, frames: p.frames }),
       { encoding: "utf8", ...(deadline.active ? { timeout: deadline.remainingMs(), killSignal: "SIGKILL" } : {}) });
     if (ex.error || ex.status !== 0) {
-      throw new Error("driver frame extraction failed: " + (ex.error ? ex.error.message : String(ex.stderr || "").trim().slice(-300)));
+      const timedOut = ex.error && ex.error.code === "ETIMEDOUT";
+      throw new Error((timedOut ? "driver frame extraction timeout (killed): " : "driver frame extraction failed: ") + (ex.error ? ex.error.message : String(ex.stderr || "").trim().slice(-300)));
     }
     const frames = listFrames(framesTmp.dir);
     const n = framesToRender(p.frames, frames.length);

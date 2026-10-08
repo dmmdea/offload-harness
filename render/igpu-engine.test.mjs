@@ -319,7 +319,7 @@ test("runEngine: runEngine refuses to run without a guard", () => {
   assert.throws(() => runEngine({ bin: process.execPath, args: ["-e", "0"] }), /log guard/);
 });
 
-test("runEngine: the first CPU line kills the engine AND its grandchild, and both are dead when the promise rejects", async () => {
+test("runEngine: the first CPU line kills the engine AND its grandchild, and both are dead when the promise rejects", { timeout: 90000 }, async () => {
   const dir = scratch();
   try {
     const pidFile = join(dir, "engine.pid");
@@ -358,7 +358,7 @@ test("runEngine: a placement line printed on stderr, and a final line with no tr
   );
 });
 
-test("runEngine: a lost GPU is GPU_RESET (the real log), naming the 2 s lockup timeout and the token cap; the engine is dead", async () => {
+test("runEngine: a lost GPU is GPU_RESET (the real log), naming the 2 s lockup timeout and the token cap; the engine is dead", { timeout: 90000 }, async () => {
   const dir = scratch();
   try {
     const pidFile = join(dir, "pid");
@@ -378,17 +378,18 @@ test("runEngine: a GPU_RESET engine that exits 1 by itself is still GPU_RESET, n
   );
 });
 
-test("runEngine: the timeout kills the engine and its tree, and the engine is dead when the promise rejects", async () => {
+test("runEngine: the timeout kills the engine and its tree, and the engine is dead when the promise rejects", { timeout: 90000 }, async () => {
   const dir = scratch();
   try {
     const pidFile = join(dir, "pid");
     await assert.rejects(
       runEngine({
         bin: process.execPath, args: ["-e", "require('fs').writeFileSync(process.argv[1],String(process.pid));setInterval(()=>{},1000)", pidFile],
-        timeoutMs: 700, label: "slow", guard: createLogGuard({ engine: "audiocpp" }),
+        timeoutMs: 6000, label: "slow", guard: createLogGuard({ engine: "audiocpp" }),
       }),
       /slow timeout after/,
     );
+    assert.ok(existsSync(pidFile), "the engine never started inside the budget (the host is too loaded for this test)");
     assert.ok(await waitGone(Number(readFileSync(pidFile, "utf8"))));
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
@@ -436,7 +437,7 @@ writeFileSync(info, JSON.stringify({ harness: process.pid, tempDir: t.dir }));
   return file;
 }
 
-test("lifecycle: SIGTERM to the runner kills its engine and removes its temp dir", { skip: isWin && "POSIX signals" }, async () => {
+test("lifecycle: SIGTERM to the runner kills its engine and removes its temp dir", { skip: isWin && "POSIX signals", timeout: 90000 }, async () => {
   const dir = scratch();
   try {
     const info = join(dir, "info.json");
@@ -451,7 +452,7 @@ test("lifecycle: SIGTERM to the runner kills its engine and removes its temp dir
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test("lifecycle: when the parent process disappears the runner kills its engine, removes its temp dir and exits", async () => {
+test("lifecycle: when the parent process disappears the runner kills its engine, removes its temp dir and exits", { timeout: 90000 }, async () => {
   const dir = scratch();
   try {
     const info = join(dir, "info.json");
