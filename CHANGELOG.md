@@ -57,6 +57,15 @@ Versioning: [SemVer](https://semver.org/).
 - Docs: ADR 0076; amendment notes in ADRs 0032, 0050, 0063 and 0073 where their text describes the old width or the idle
   seat; `fleet-node.md` ("How wide a call is, and how a list of pages is dealt"); `OPERATOR-GUIDE.md`; the
   `agent_delegate` tool text no longer says an idle local box always runs the work.
+- **Review fixes before release.** **(1)** A node that publishes neither ceiling is held to four open dispatches by the
+  process gate (`admissionCeiling`). The width counted it as four, but the semaphore is one pool, so once the call's
+  other legs finished it could hold every subtask dealt to it: 8 of a 12-page call in
+  `TestANodeThatPublishesNoCeilingIsHeldToFourWhenTheCallsOtherLegsFinish`. **(2)** A local seat with no run cap
+  (`fleet_max_concurrent_jobs` < 0) counts at most four toward the width, instead of everything dealt to it. Each fix
+  was mutated red. Stated in ADR 0076's consequences: an `auto` call on an idle seat with more subtasks than the seat's
+  room reads the fleet before it starts; sheddable overflow past the seat's line is shed when no remote has an idle slot
+  (it used to queue in the seat's FIFO); a node struck during a call keeps its share of pages 9 to 12 (they were a
+  second deal).
 
 ### A vision verb run under its own GPU lease does not wait for that lease
 

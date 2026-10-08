@@ -4562,9 +4562,13 @@ func headroom(v NodeView) int {
 //     has open to its admission ceiling (ADR 0063 decision 7);
 //   - a remote that publishes none counts at most runConcurrency, per node: an unpublished ceiling is unknown and
 //     never a limit (headroom), so the deal can send it every subtask, and the bound the constant gave a call is
-//     all the evidence there is that it can take them. Two such nodes give eight, not four;
+//     all the evidence there is that it can take them. Two such nodes give eight, not four. The semaphore is one
+//     pool, so once the call's other legs finish only the process gate keeps such a node at four: admissionCeiling
+//     holds a node that publishes neither ceiling to runConcurrency open dispatches;
 //   - the local seat counts min(dealt, run-cap room): past its room a subtask waits in the seat's own FIFO (register
-//     C-60), and holding a run slot for that wait is what the constant was bounding;
+//     C-60), and holding a run slot for that wait is what the constant was bounding. A seat with no run cap
+//     (fleet_max_concurrent_jobs < 0) has unlimited room, so it counts at most runConcurrency, the bound the
+//     constant gave it;
 //   - a slot the deal gave no place (capacityWait: every node with room was already dealt to its headroom; reserved:
 //     a lease holds the seat) counts nothing. It reaches the wait only when a slot frees, so the launch loop still
 //     starts it behind the dealt ones and ADR 0073 decision 9 holds as written: a wait keeps its TTL while a subtask of
@@ -4592,7 +4596,11 @@ func (r *runner) dealParallelism() int {
 			published[sl.base] = sl.view.MaxConcurrentJobs > 0
 		}
 	}
-	width := min(local, r.dealRoom)
+	room := r.dealRoom
+	if room >= unlimitedHeadroom {
+		room = runConcurrency
+	}
+	width := min(local, room)
 	for base, n := range perNode {
 		if !published[base] {
 			n = min(n, runConcurrency)

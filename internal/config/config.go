@@ -1615,9 +1615,10 @@ type Config struct {
 	// The refusal boundary is byte-identical to 0.99.0's; actual concurrency
 	// under any setting of this key is now less than or equal to what it was.
 	//
-	// The default is deliberately GENEROUS: normal use never touches it (a full
-	// agent_delegate call is 8 subtasks; the delegator runs 4 at a time), so it
-	// only bites on a runaway pile-up across many concurrent delegators — the
+	// The default is deliberately GENEROUS: normal use rarely touches it (a full
+	// agent_delegate call is 8 subtasks, and since ADR 0076 a call runs as many at
+	// once as its deal committed to each node, so a node is sent its whole share at
+	// once), so it bites on a pile-up across concurrent delegators — the
 	// measured failure mode here was unbounded queue LATENCY behind the single
 	// llama-swap slot, not a crash. An over-tight cap is the worse defect: this
 	// fleet's history includes written limits quietly suppressing real use.
@@ -1632,7 +1633,8 @@ type Config struct {
 	// unlimited (goroutine-per-job, the pre-0.100.0 execution behaviour).
 	//
 	// The default is 4 because that is what this fleet actually runs: the
-	// delegator dispatches a delegation fan-out four subtasks at a time, so 4
+	// delegator used to dispatch a fan-out four subtasks at a time, and since
+	// ADR 0076 it deals a node at most the headroom this ceiling publishes, so 4
 	// preserves the observed steady state while bounding the pathological one
 	// the split exists to kill (a node at "depth 31" was 31 simultaneous
 	// inferences against ONE llama-swap slot). A job that waits is strictly

@@ -298,10 +298,10 @@ func placementUtil(v NodeView) (int, bool) {
 //   - The snapshot ages between the health GET and the dispatch POST. Placement
 //     is not atomic with admission, and any node can admit or finish jobs in
 //     that gap in either direction.
-//   - This run's own siblings eat the headroom it measured. Run fans out at
-//     runConcurrency, and those subtasks probe within milliseconds of each
-//     other — so several of them can read the same free slot and then compete
-//     for it.
+//   - This run's own siblings eat the headroom it measured. Run fans out as
+//     wide as its deal (dealParallelism, never below runConcurrency), and those
+//     subtasks probe within milliseconds of each other — so several of them can
+//     read the same free slot and then compete for it.
 //
 // Hard-excluding on a number that is stale by construction would strand a node
 // that has since drained, on evidence that was never current. Demoting costs

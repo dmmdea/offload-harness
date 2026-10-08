@@ -212,6 +212,39 @@ func TestRunBatchedDealsTwelvePagesAsOneBatchAcrossTheFleet(t *testing.T) {
 	}
 }
 
+// TestANodeThatPublishesNoCeilingIsHeldToFourWhenTheCallsOtherLegsFinish: the width counts a node that publishes no
+// ceiling as at most four, but the semaphore is one pool for the whole call. Here 12 pages are dealt over a node of four
+// that answers at once and a node that publishes nothing and holds its jobs. When the fast node's legs finish they free
+// their share of the width. Without a bound of its own, the unknown node then held every page dealt to it, up to 8 at
+// once. The process gate holds it to four (admissionCeiling), and the pages it turns away wait in line for the first node
+// that frees.
+func TestANodeThatPublishesNoCeilingIsHeldToFourWhenTheCallsOtherLegsFinish(t *testing.T) {
+	compressPolls(t, 5*time.Millisecond, 2*time.Second)
+	fast := newFanProbe(1, 5*time.Second)          // releases every job as soon as one is open
+	hold := newFanProbe(1000, 1500*time.Millisecond) // never reaches its peak, so each job is held 1.5 s
+	_, fastURL := fast.node(t, "n1", 4)
+	_, oldURL := hold.node(t, "old", 0)
+	cfg := testCfg(t)
+	cfg.AgentPlacementWaitSec = 30 // production waits for room; the test default (-1) defers at once
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
+	defer cancel()
+	results, sum, err := RunBatched(ctx, cfg, neverLocal(t), pages(12), "remote", []string{fastURL, oldURL}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum.Succeeded != 12 {
+		for i, res := range results {
+			if res.Result.StopReason != "final" {
+				t.Logf("page %d on %q: stop %q, err %q, placement %q", i, res.Node, res.Result.StopReason, res.Err, res.PlacementReason)
+			}
+		}
+		t.Fatalf("summary %+v, want all 12 pages to succeed", sum)
+	}
+	if _, perNode := hold.peaks(); perNode["old"] > int64(runConcurrency) {
+		t.Errorf("the node that publishes no ceiling held %d jobs open at once, want at most %d", perNode["old"], runConcurrency)
+	}
+}
+
 // TestRunBatchedSpreadsAResearchCallOverTheLocalSeatAndTheFleet: the door's default route. 12 pages over the local seat
 // and three nodes of 4 slots are dealt three each, the local seat inside its run-cap room of 4, and all 12 are open at once.
 func TestRunBatchedSpreadsAResearchCallOverTheLocalSeatAndTheFleet(t *testing.T) {
@@ -308,6 +341,9 @@ func TestDealParallelismSumsWhatTheDealCommittedToEachPlace(t *testing.T) {
 		{"a local seat dealt less than its room counts what it was dealt", "spread", slotsOf(
 			repeatSlot(localSlotOf(), 3), repeatSlot(remoteSlotOf("http://n1", 4), 4)), 6, 3 + 4},
 		{"a local seat past its room falls back to the floor", "auto", repeatSlot(localSlotOf(), 8), 2, runConcurrency},
+		{"a seat with no run cap counts the floor, not all it was dealt", "auto", repeatSlot(localSlotOf(), 12), unlimitedHeadroom, runConcurrency},
+		{"a seat with no run cap beside a node of four counts the floor plus the node", "spread", slotsOf(
+			repeatSlot(localSlotOf(), 8), repeatSlot(remoteSlotOf("http://n1", 4), 4)), unlimitedHeadroom, runConcurrency + 4},
 		{"overflow in the capacity wait counts nothing (its slot carries the local view, and the seat has room)", "auto", slotsOf(
 			repeatSlot(remoteSlotOf("http://n1", 6), 6), repeatSlot(wait, 3)), 6, 6},
 		{"a slot a lease reserves counts nothing", "spread", slotsOf(

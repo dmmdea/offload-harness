@@ -730,9 +730,12 @@ of what the deal committed to each place:
 - a remote that **publishes** `max_concurrent_jobs` counts every subtask dealt to it (the deal already holds that to `max_concurrent_jobs
   - jobs_running`, and the process gate holds this process's open dispatches to the node's `max_queue_depth`);
 - a remote that publishes **none** counts at most four **per node**, because an unpublished ceiling is unknown and never a limit: two such
-  nodes give eight, and a call whose only remote publishes none is held to four on it, as it was;
+  nodes give eight, and a call whose only remote publishes none is held to four on it, as it was. The process gate keeps it there once
+  the call's other legs finish: a node that publishes neither `max_queue_depth` nor `max_concurrent_jobs` is held to four open
+  dispatches, across every call of this process;
 - the **local seat** counts `min(dealt, run-cap room)`: past its room a local run waits in the seat's own first-come-first-served line
-  (`fleet_max_concurrent_jobs`, `AwaitSeatSlotReporting`), and holding a run slot for that wait is what the constant bounded;
+  (`fleet_max_concurrent_jobs`, `AwaitSeatSlotReporting`), and holding a run slot for that wait is what the constant bounded. A seat
+  with no run cap (`fleet_max_concurrent_jobs` < 0) counts at most four;
 - a subtask the deal gave **no place** (the overflow handed to the capacity wait, a local slot a text lease reserves) counts nothing. It
   starts behind the dealt subtasks as their slots free, so the rules of the paragraph above hold at any width: the wait of a slot-holder
   keeps its TTL while a subtask has not started, only the last waits to the horizon, and nothing starts inside the reserve.

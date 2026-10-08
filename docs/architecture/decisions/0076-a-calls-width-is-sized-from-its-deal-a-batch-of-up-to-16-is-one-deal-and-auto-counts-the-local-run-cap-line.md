@@ -50,9 +50,14 @@ counted the local seat's line for the spread deal only) and [ADR 0032](0032-a-pe
    - a remote that publishes none counts at most `runConcurrency` **per node**. An unpublished ceiling is unknown and never a
      limit (`headroom`), so the deal can send such a node every subtask, and the bound the constant gave a call is the only
      evidence it can take them. The 4 is per node and not global: two such nodes give 8, not 4. A call whose only remote
-     publishes none is held to 4 on that node, as it was;
+     publishes none is held to 4 on that node, as it was. The width only counts the 4: the semaphore is one pool for the call,
+     so once the call's other legs finish, a free slot can start another subtask on that node. The process gate is what holds
+     it there: `admissionCeiling` holds a node that publishes neither `max_queue_depth` nor `max_concurrent_jobs` to
+     `runConcurrency` open dispatches, process-wide (review, 2026-10-07: without it, such a node held 8 of a 12-page call);
    - the local seat counts `min(dealt, run-cap room)`. Past its room a local run waits in the seat's own FIFO
-     (`pipeline/agenttask.go`, registers C-42 and C-60), and holding a run slot for that wait is what the constant bounded;
+     (`pipeline/agenttask.go`, registers C-42 and C-60), and holding a run slot for that wait is what the constant bounded.
+     A seat with no run cap (`fleet_max_concurrent_jobs` < 0) has unlimited room, so it counts at most `runConcurrency`, the
+     bound the constant gave it;
    - a subtask the deal gave no place counts nothing: the overflow handed to the capacity wait (`capacityWait`), and a local
      slot a text lease reserves (`reserved`).
 
@@ -103,6 +108,18 @@ counted the local seat's line for the spread deal only) and [ADR 0032](0032-a-pe
   has registered on the seat. A run registers when it starts, so a window remains in which two callers read the same room; the
   seat's FIFO is the net for that window, as it was.
 - `Summary.Batches` is 1 for a research call of 9 to 12 pages where it was 2. Nothing else on the wire changes.
+- An `auto` call on an idle seat with more subtasks than the seat's room reads the fleet's health before any subtask starts,
+  because the overflow needs a remote. The read is usually well under a second. A peer that does not answer costs up to the
+  probe timeout. A call that fits the room reads nothing, as before.
+- Sheddable work (priority -1) past the idle seat's line is shed when no remote has an idle slot. It used to wait in the
+  seat's FIFO, which the capacity wait's rule for sheddable work forbids: it takes idle capacity only, and never queues in
+  front of production work. The subtasks inside the seat's room still run.
+- A strike against a node recorded during a call takes effect at the next fleet probe. A 9-to-12-page call used to probe
+  again at its chunk boundary, so a node that gave off-document answers on early pages lost its share of the later ones. One
+  deal per call keeps that share for the whole call. Late binding (the plan's R4b) is where that check comes back.
+- The process gate now holds a node that publishes no ceiling to four open dispatches across all of this process's calls.
+  The old width held it to four per call, so two concurrent calls on such a node now share four. As of this release, no live
+  node publishes no ceiling.
 - The width is no longer a property tests can assume. The tests that pinned the eight-subtask chunk boundary moved to 16, and
   the ones that pinned "four at a time" are the ones that have no deal (`route=local`) or a node that publishes no ceiling.
 
