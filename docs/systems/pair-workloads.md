@@ -44,7 +44,7 @@ pending work on the node that runs it. Off by default; two config keys turn it o
 | `internal/fleetnode/nodecard.go` | the serving node's own card for a job whose asker will not card it (*The node's fallback card* below) |
 | `internal/pairworkloads/relay_test.go`, `internal/fleetnode/pair_relay_test.go` | the relay's tests: the member's decode and resolution, the remote marker, the rate limit, relay mode, the route's token gate |
 | `internal/pairworkloads/pairworkloads_test.go`, `internal/delegate/pair_events_test.go`, `internal/pairworkloads/seatwatch_test.go`, `internal/pairworkloads/orphans_test.go` | the contract tests |
-| `internal/pairworkloads/attribution_test.go`, `internal/pairworkloads/remote_test.go`, `internal/{composeremote,visionremote,textremote,sttremote}/attribution_test.go`, `internal/fleetnode/attribution_test.go`, `internal/delegate/attribution_test.go` | the remote-call attribution tests: one card per call, the headers, the node card, view-only resolution |
+| `internal/pairworkloads/attribution_test.go`, `internal/pairworkloads/remote_test.go`, `internal/{composeremote,visionremote,textremote,sttremote,mediaremote}/attribution_test.go`, `internal/fleetnode/attribution_test.go`, `internal/delegate/attribution_test.go` | the remote-call attribution tests: one card per call, the headers, the node card, view-only resolution |
 
 ## What problem this solves
 
@@ -171,8 +171,8 @@ never the entry tier's correctness-label snapshot, whose `cards_tokens` is the 0
 
 5. **Calls routed to a fleet node** (unreleased, `internal/pairworkloads/remote.go`). A remote or
    auto-spilled `compose_video`, vision (`vqa`, `ocr`, `assess_image`, ...), text (`classify`,
-   `extract`) or `transcribe` call (the card's engine is `whispercpp`) never goes through `Pipeline.Run` on the asking box (`composeremote.Run`,
-   `visionremote.Run`, `textremote.Run` and, since 0.164.0, `sttremote.Run` send the job and poll it), so before this the asker wrote
+   `extract`), media (`generate_image`, `generate_video`, `animate_character`, `generate_audio`, `run_graph`) or `transcribe` call (the card's engine is `whispercpp`) never goes through `Pipeline.Run` on the asking box (`composeremote.Run`,
+   `visionremote.Run`, `textremote.Run`, `mediaremote.Run` and, since 0.164.0, `sttremote.Run` send the job and poll it), so before this the asker wrote
    neither a ledger row nor a card for work it had spilled, and a plain row would have carded the
    asker itself (`ledger.Entry` named no node). The lanes now report through
    `core.RemoteAttribution`, which the `Runner` they receive (`*pipeline.Pipeline`) provides:
@@ -209,7 +209,7 @@ carry the attribution from the asker to the node:
 
 | Header | Value | Sent by |
 |---|---|---|
-| `X-Offload-Asker` | the asker's PAIR member name when its emitter is enabled and the box is a member (lowercased), else its short lowercase hostname | every asker, on every request that creates work: delegation dispatch and queue submit, compose (template and project), vision, text, accelerator forwards |
+| `X-Offload-Asker` | the asker's PAIR member name when its emitter is enabled and the box is a member (lowercased), else its short lowercase hostname | every asker, on every request that creates work: delegation dispatch and queue submit, compose (template and project), media (dispatch and media-job), vision, text, accelerator forwards |
 | `X-Offload-Pair-Card` | `node` | ONLY an asker whose emitter is not enabled (key off, PAIR not installed): nothing on that box will card the job |
 
 The signal is inverted on purpose, for a staggered rollout: an older asker sends neither header, so it

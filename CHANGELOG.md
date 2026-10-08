@@ -144,14 +144,49 @@ through the dial gate alone.
   "probed ..." line says `not dialled, refused by the tailnet guard` for the refused one while the others still serve. The entry
   prints redacted (a token pasted into it never reaches a defer), the dispatch errors are scrubbed the same way, and a node that
   accepts a job drops out of the negative cache.
-- **The media-job decision record is ADR 0077.** Main took 0072 for the stt upload door and then 0076 for the call-width record while this work was in review, so the
-  record moves to the next free number and every reference to it (docs, code comments, this entry) moves with it.
-- **The media-job door joins the bearer rule in `tokenGated`**, which now takes the node's config (main's change: the legacy
-  `stt` lane is gated when the node has a token); `media-job` sits beside `compose-project` and `stt-upload`, and it is advertised
-  in `fleetTaskOrder` between `run-graph` and `compose`.
+- Merge bookkeeping, no behaviour change: the decision record is ADR 0077 (main took 0072 and 0076 meanwhile), and `media-job`
+  sits in main's config-taking `tokenGated` beside `compose-project` and `stt-upload`.
 
 Tests: `TestPickNodeNamesARosterEntryTheTailnetGuardRefusesAndDoesNotDialIt`,
 `TestRunNamesARefusedRosterEntryInTheDeferAndRedactsItsToken`.
+
+### Fixed — remote attribution, an in-flight cap and gated outputs for the media-job work (ADR 0077, register CT-50)
+
+Review of the branch against main 0.169.0 found three behaviours it had not picked up from main's stt and compose work.
+
+- **A remote media call is attributed like every other remote lane (0.165.0, D5-D11).** `internal/mediaremote` wrote no asker
+  ledger row and no PAIR card for a call it sent to a node, and its dispatches named no asker. A remote or auto-spilled media
+  call now opens a `core.BeginRemote` handle, reports the dispatch to the node it picked and the node's running state, and
+  finishes the handle on every exit (a result, a refused POST, a node defer, a deadline); a call that reached no node has its row
+  and no card. Both POSTs, the plain dispatch and the media-job, send `X-Offload-Asker` and, only when this machine's emitter is
+  off, `X-Offload-Pair-Card: node`. The MCP doors hand the lane their `runTaskAs`, which now forwards `BeginRemote` to the
+  server's pipeline (without it the doors attributed nothing); the CLI verbs pass the pipeline itself. The local route and an
+  auto call that runs here are unchanged.
+- **The media-job door caps its in-flight uploads like the stt upload door.** The body (a bundle of up to
+  `fleet_media_inputs_max_mb`, 256 MiB, in base64) is read before the admission gates, so every concurrent upload could hold one.
+  The door now takes one of `mediaJobInFlightMax` slots (2, the stt door's bound) after the bearer check and before the first
+  body byte, releases it on every exit of the handler, and answers `503` with `Retry-After` to a caller that waits past 30 s
+  (a delegator re-places a 503). `takeSTTUploadSlot` and the new door share `takeUploadSlot`.
+- **The outputs of a media-job are served only to the fleet token.** They are rendered from the caller's private files (a still,
+  a driver video, a voice sample), but `GET /fleet/media/{name}` served them by bare name while main bearer-gates compose-project
+  and stt-upload renders. The door now names the render itself (`mediajob-<16 hex>.<ext>` under `media_dir`, set after the inner
+  builder) and `gatedMediaName` recognises the stem, so a tokenless fetch is `401` exactly as a gated project render's is.
+  `mediaremote` sends the fleet bearer on its output fetches (a test pins it against a node that gates the name). run-graph and
+  every output of the tokenless `/fleet/dispatch` door are unchanged.
+- Docs: the lists of lanes that share `internal/rosterprobe` (fleet-node.md, FLEET-NODE.md, ADR 0074) now name the media lane, as
+  do the attribution headers table in pair-workloads.md and "Which node" in media-generation.md; a stale comment in
+  `admit` that said the run closure captures the envelope was reworded.
+
+Tests: `TestRemoteMediaCallIsOneCardOnTheServingNodeAndOneRow`, `TestRemoteMediaCardResolvesThroughTheFleetNodeID`,
+`TestAutoSpilledMediaCallIsOneCardAndOneRow`, `TestRemoteMediaCallThatNeverReachedANodeWritesARowAndNoCard`,
+`TestRemoteMediaRefusedDispatchClosesTheCardFailed`, `TestRemoteMediaNodeDeferClosesTheCardFailed`,
+`TestRemoteMediaCallThatRunsOutOfTimeStillClosesItsCard`, `TestRemoteMediaSendsTheAttributionHeaders`,
+`TestRemoteMediaCardTurnsRunningWhenTheNodeSaysTheJobStarted`, `TestLocalMediaRoutesWriteNoRemoteAttribution`,
+`TestMediaDoorThatRoutesRemoteWritesTheAskersLedgerRow`, `TestMediaJobSlotIsHeldWhileTheBodyIsReadAndReleasedAfter`,
+`TestMediaJobsInFlightAreBoundedAndWaitForASlot`, `TestMediaJobOverTheCapGets503WithRetryAfter`,
+`TestMediaJobSlotIsReleasedOnEveryExit`, `TestMediaJobRendersUnderAGatedStem`,
+`TestMediaJobOutputNeedsTheBearerAPlainDispatchOutputDoesNot`, `TestAMediaJobOutputIsFetchedWithTheBearerAndRefusedWithout`,
+`TestGatedMediaNames`.
 
 ## [0.169.0] - 2026-10-07 - a call is as wide as its deal, and a vision verb runs under its own lease
 

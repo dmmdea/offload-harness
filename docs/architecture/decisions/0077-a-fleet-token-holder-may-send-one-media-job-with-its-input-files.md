@@ -40,7 +40,10 @@ Three facts stood in the way.
    and the bearer are checked before any of the body is read; the body is capped at the bundle cap in base64 plus 64 KiB
    (`fleet_media_inputs_max_mb`, default 256 MiB compressed); the decoder refuses unknown fields; a token holder gets a
    15-minute read and write window. `media-job` is token-gated like `compose-project` (`tokenGated`), so a dispatch of it
-   over `/fleet/dispatch` needs the bearer too, and its jobs are masked from tokenless polls and feeds.
+   over `/fleet/dispatch` needs the bearer too, and its jobs are masked from tokenless polls and feeds. The body is read and
+   decoded before the admission gates, so the node holds at most `mediaJobInFlightMax` bodies at once (2, the stt upload door's
+   bound, `takeUploadSlot`): a caller takes a slot after the bearer check and before the first body byte, holds it until the
+   handler returns, and when it waits past 30 s is answered `503` with `Retry-After` (a delegator re-places a 503).
 3. **The bundle is verified, extracted into a fresh directory and sniffed.** The node checks the declared sha256, extracts
    with `internal/composebundle` (regular files only, confined names, caps counted on the bytes written) into
    `<media_dir>/fleet-inputs/in-*` (a directory, which the media route never serves), requires every `inputs` value to be a
@@ -71,11 +74,22 @@ Three facts stood in the way.
    anything lands: a mismatch deletes what was fetched and defers as infrastructure. A caller's `remotes` must be a subset
    of `delegate_remotes`. The candidates are read through `internal/rosterprobe` like every other single-shot lane
    (ADR 0074): an entry the tailnet guard refuses is a named miss that is never dialled, and the probes run at once through
-   the shared memo and negative cache.
+   the shared memo and negative cache. A call sent to a node is attributed like the other remote lanes (0.165.0, D5-D11): it
+   opens a `core.BeginRemote` handle, writes one asker ledger row and, once a node is chosen, one PAIR card, closed on every
+   exit of the call, and both POSTs (the dispatch and the media-job) carry `X-Offload-Asker` and, when this machine's emitter
+   is off, `X-Offload-Pair-Card: node`.
 7. **The five MCP doors and four CLI verbs take the route.** `offload_generate_image`, `offload_generate_video`,
    `offload_animate_character`, `offload_generate_audio` and `offload_run_graph` gain `route` and `remotes`, and
    `generate-image`, `generate-video`, `generate-audio` and `run-graph` gain `--route` and a repeatable `--remote`. In each
    handler the direct pipeline call became the `mediaremote.Run` call and nothing else changed. No tool was added.
+
+8. **A media-job's outputs are served only to the fleet token.** The outputs are rendered from the caller's private input
+   files, but `GET /fleet/media/{name}` is tokenless by design for the dispatch lanes, which meant a name was enough to read
+   one. The door now sets the render's `out` itself, after the inner builder, to `<media_dir>/mediajob-<16 hex>.<ext>`, and
+   `gatedMediaName` recognises that stem, so on a node with a token a tokenless fetch is refused exactly as a gated project
+   render or an stt upload transcript is (`media_gate.go`). `mediaremote` already sends the fleet bearer on every output
+   fetch, and a test pins it. run-graph, which takes no input file through this door and whose outputs the graph names, and
+   every output of the tokenless `/fleet/dispatch` door are unchanged. Like a project render, a media-job render is not swept.
 
 ## Consequences
 

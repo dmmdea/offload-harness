@@ -638,7 +638,7 @@ that will not card the job itself (its PAIR emitter is not enabled). `admit` rec
 (printable, at most 64 characters, `core.SanitizeAsker`) as `requester` on the node's ledger row and, on the
 signal, when the node's own emitter is enabled, emits the job's one PAIR card from the node (queued at admit,
 running at start, terminal at finish; `fleetnode/nodecard.go`). Asking boxes send them on `/fleet/dispatch`,
-`/fleet/vision`, `/fleet/text`, `/fleet/compose-project` and `/fleet/queue/submit`; the queue holder stores both
+`/fleet/vision`, `/fleet/text`, `/fleet/compose-project`, `/fleet/media-job` and `/fleet/queue/submit`; the queue holder stores both
 on the job (`fleetqueue.Job.Asker`, `PairCard`), so the claim loop applies them to a pulled job exactly as
 `admit` does to a pushed one — and now also stamps a pulled job's door `fleet` (`dispatchDoor`), which it did
 not before. A claim of a job the node already holds (a lease-expiry re-claim) opens no card, and a claim a
@@ -854,9 +854,9 @@ read, not for being busy. Four changes, none of which adds a probe:
   <reason> (last of 3)`, kept distinct from refusals because a probe failure is not a refusal: nobody
   declined the work.
 
-**The single-shot lanes read the same roster, by the same rules (ADR 0074).** The vision, text, stt-upload, compose
-and accelerator lanes each pick ONE node for ONE call from `delegate_remotes`, and each used to carry its own copy of
-the loop. They now share `internal/rosterprobe`:
+**The single-shot lanes read the same roster, by the same rules (ADR 0074).** The vision, text, stt-upload, compose,
+media and accelerator lanes each pick ONE node for ONE call from `delegate_remotes`, and each used to carry its own copy
+of the loop. They now share `internal/rosterprobe`:
 
 - **Admission.** Every entry is judged by `netguard.TailnetURL`, the shape check the agent lane applies at intake,
   before it is dialled; the lanes used to rely on the dial gate alone, so one entry was refused by one lane and used by
@@ -896,7 +896,7 @@ the loop. They now share `internal/rosterprobe`:
 | surface | per-member bound | probes | memo | negative cache |
 |---|---|---|---|---|
 | agent lane (`internal/delegate`, per Run) | 15 s | concurrent | 2 s per Run | 30 s per Run |
-| vision, text, stt-upload, compose lanes | 5 s | concurrent, one in flight per base and bound | 2 s, process-wide | 30 s, process-wide; 5 s after a timeout or a refused dial; dropped by an accepted dispatch |
+| vision, text, stt-upload, compose, media lanes | 5 s | concurrent, one in flight per base and bound | 2 s, process-wide | 30 s, process-wide; 5 s after a timeout or a refused dial; dropped by an accepted dispatch |
 | accelerator lane | 2 s | concurrent, one in flight per base and bound | 2 s, process-wide | the same (a 2 s timeout is not held against a longer-waiting caller) |
 | cascade lane (`cascade_remote_lanes`) | 5 s per request, one request when nothing answers | one per base, outside the lock | 30 s per base (failures included) | the same entry |
 | `offload_status` nodes section | 8 s for the whole section | concurrent | none | none |
@@ -1756,6 +1756,18 @@ in the bundle. The fields that may be files are `video-gen.still`, `animate.ref`
   extended deadlines is logged once per process per route. The body is held once while the job is admitted (the bundle is
   base64-decoded straight out of it into the one decoded copy, and the admission closure keeps only the job id and task type),
   so a running or queued job pins neither the body nor the bundle: the extracted directory is the only copy.
+- **In-flight cap.** The body is read and decoded before the admission gates, so N concurrent uploads would hold N times that
+  peak. The node holds at most `mediaJobInFlightMax` of them at once (2, the stt upload door's bound): a caller that passed the
+  bearer check takes a slot before the first body byte and holds it until the job is admitted or refused, and every exit of the
+  handler gives it back. A caller over the bound waits for a slot up to 30 s, then is answered `503` with `Retry-After: 5`, which a
+  delegator re-places (`capacity`). The slot wait extends its own write deadline so the 503 reaches a real client.
+- **Outputs ride the bearer.** A media-job renders from the caller's private files (a still, a driver video, a voice sample), so
+  its output is not served by bare name to anyone who learns it. After the inner builder, the door sets the render's `out` to
+  `<media_dir>/mediajob-<16 hex>.<ext>` (`png`, `mp4`, `wav`, or `flac` for music; run-graph, which takes no file through this
+  door and whose outputs the graph names, is left alone), and `GET /fleet/media/{name}` answers `401` to a tokenless read of
+  that stem on a node with a token (`gatedMediaName`, the rule the project and stt upload renders already ride). The client
+  sends the fleet bearer on every output fetch. The outputs of the tokenless `/fleet/dispatch` door keep the pipeline's own
+  names and stay readable by bare name.
 - The bundle's sha256 must match; it is extracted into `<media_dir>/fleet-inputs/in-*` (regular files only, confined names,
   byte caps; a symlink or a traversal name is refused); each `inputs` value must be a regular file directly in that
   directory; and its first bytes must match the field's kind: image PNG, JPEG or WebP; video MP4/MOV or WebM/MKV; audio WAV,

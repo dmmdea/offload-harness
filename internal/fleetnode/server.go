@@ -2525,8 +2525,10 @@ func (s *Server) admit(w http.ResponseWriter, r *http.Request, env dispatchEnvel
 	// An stt upload's transcript files, learned when the job finishes and released with its record.
 	var sttOut sttOutputs
 	card := s.newNodeCard(string(req.Task), specModel, env.JobID, asker, nodeCards)
-	// The payload is spent: the request is built. The run closure below captures env, and a queued
-	// stt upload's payload is up to 64 MiB, so the job must not keep it alive until it finishes.
+	// The payload is spent: the request is built. The run closure below keeps no envelope (only jobID and
+	// taskType), so nothing the job holds pins the body; dropping this reference lets the handler's own
+	// copy (a queued stt upload's is up to 64 MiB, a media job's up to fleet_media_inputs_max_mb in
+	// base64) be collected when the handler returns, not after the job's queue wait and run.
 	env.Payload = nil
 
 	run := func(ctx context.Context) (json.RawMessage, error) {
