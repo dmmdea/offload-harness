@@ -119,7 +119,7 @@ func TestRemoteMediaCardResolvesThroughTheFleetNodeID(t *testing.T) {
 // auto sent to a node because this machine has no lane is attributed like remote, with the auto route. The route
 // the ledger records is the NORMALISED one (local|auto|remote, core/remoteattr.go), whatever the caller typed: the
 // MCP doors omit `route` and send "", and a caller may spell it with case or spaces. Handing the raw string to
-// core.BeginRemote wrote the row with Route "" for the commonest remote spill and failed nothing (review of 0.170.0,
+// core.BeginRemote wrote the row with Route "" for the commonest remote spill and failed nothing (review of 0.171.0,
 // C5C6).
 func TestAutoSpilledMediaCallIsOneCardAndOneRow(t *testing.T) {
 	for _, route := range []string{"auto", "", "  AUTO "} {

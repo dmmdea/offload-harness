@@ -124,7 +124,7 @@ func TestRemoteComposeThatNeverReachedANodeWritesARowAndNoCard(t *testing.T) {
 
 // The route the ledger records is the NORMALISED one (local|auto|remote, core/remoteattr.go), whatever the caller
 // typed: the MCP door omits `route` and sends "", and a caller may spell it with case or spaces. Handing the raw
-// string to core.BeginRemote wrote the asker row with Route "" or "REMOTE" and failed nothing (review of 0.170.0,
+// string to core.BeginRemote wrote the asker row with Route "" or "REMOTE" and failed nothing (review of 0.171.0,
 // C5C6). No node and no composition lane here, so the call is deferred after it opened its attribution: one row.
 func TestARemoteComposeCallIsRecordedUnderTheNormalisedRoute(t *testing.T) {
 	for route, want := range map[string]string{

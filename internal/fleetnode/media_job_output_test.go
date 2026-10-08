@@ -121,7 +121,7 @@ func TestMediaJobRendersUnderAGatedStem(t *testing.T) {
 // clone) sent by a client other than mediaremote to a node whose media_dir does not exist yet would be handed a path in a
 // missing directory, and the render script would fail on the node. Every other test starts from a directory that exists,
 // so deleting the MkdirAll, or the guard that keeps an empty media_dir from reaching it, passed the suite (review of
-// 0.170.0, C5C7).
+// 0.171.0, C5C7).
 func TestMediaJobOutputPathCreatesAMissingMediaDirAndToleratesNone(t *testing.T) {
 	t.Run("a media_dir that does not exist yet", func(t *testing.T) {
 		cfg := config.Config{MediaDir: filepath.Join(t.TempDir(), "not", "yet", "created")}
