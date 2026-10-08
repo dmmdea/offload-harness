@@ -256,22 +256,39 @@ export function modelMetadataError(log, modelFile) {
 //            (upstream loads a second host copy of the ACE-Step planner for the prompt prefill).
 //
 // Never scanned for anything: ggml's "loaded CPU backend" registration, "Initializing
-// backend: CPU", the SDCliParams / SDContextParams / SDGenerationParams dump blocks, the
-// tokenizer echo lines ("split prompt ..." / "parse '...'"), and any line that contains the
-// request's prompt, negative prompt, TTS text or lyrics verbatim.
+// backend: CPU", and (sd.cpp only, on its own record shapes) the SDCliParams / SDContextParams /
+// SDGenerationParams dump blocks and the tokenizer echo lines ("split prompt ..." / "parse '...'").
+//
+// The request's own text (prompt, negative prompt, TTS text, lyrics) never switches the CPU detector
+// off: every other line is scanned whole, the placement and evidence shapes are anchored at the start
+// of the line (after the record head), and a line that echoes the request can only fail to count as
+// POSITIVE evidence. A plain-words shape (a device reset) is read with the request's text taken out.
 export const GUARD_ENGINES = ["sdcpp", "da3", "audiocpp"];
 
 const SOFTWARE_DEVICE = /\b(?:llvmpipe|lavapipe|swiftshader)\b/i;
-const BLOCK_START = /\b(?:SDCliParams|SDContextParams|SDGenerationParams)\s*\{\s*$/;
-const LOG_PREFIX = /^\[(?:VERBOSE|INFO|WARN|WARNING|ERROR|DEBUG|TRACE)\s*\]/;
-const TOKENIZER_ECHO = [/\bsplit prompt\s+"/, /(?:^|\s)parse\s+'/];
+// The head of an sd.cpp log record: "[VERBOSE] ggml_runner.cpp:1019 - " (the bare lines of older builds
+// and of the tests have none). Every placement and evidence shape below starts at the line's start
+// (after the head), so text the request echoes in the MIDDLE of some other line can neither forge
+// a shape nor, by being a substring of a real one, hide it.
+const HEAD = String.raw`(?:\[[A-Z]+\s*\]\s+[\w./-]+:\d+\s+-\s+)?`;
+// audio.cpp's own record heads: "[TIMING ts=20261003-172137] ", "[TRACE ts=...] "
+const AUDIO_HEAD = String.raw`(?:\[[A-Z]+(?:\s+ts=[^\]\s]*)?\s*\]\s*)*`;
+// sd.cpp's parameter dumps: only the engine that prints them (sdcpp) opens a block, and only on its
+// own record shape, so text echoed elsewhere that happens to end in "SDCliParams {" opens nothing.
+const BLOCK_START = new RegExp(String.raw`^\[[A-Z]+\s*\]\s+[\w./-]+:\d+\s+-\s+(?:SDCliParams|SDContextParams|SDGenerationParams)\s*\{\s*$`);
+const LOG_PREFIX = /^\[(?:VERBOSE|INFO|WARN|WARNING|ERROR|DEBUG|TRACE|TIMING)(?:\s+ts=[^\]\s]*)?\s*\]/;
+const TOKENIZER_ECHO = [new RegExp("^" + HEAD + String.raw`split prompt\s+"`), new RegExp("^" + HEAD + String.raw`parse\s+'`)];
 const GPU_RESET_RE = /ErrorDeviceLost|device lost|context is lost/i;
 const GGML_DEVICE_LINE = /^\s*ggml_vulkan:\s*(\d+)\s*=\s*(.+?)\s*(?:\||$)/;
 const NO_VULKAN_DEVICE = /ggml_vulkan:\s*Found\s+0\s+Vulkan\s+devices|ggml_vulkan:\s*No\s+devices\s+found/i;
-// stable-diffusion.cpp: a compute buffer on a backend, and the modules that are not the
-// diffusion stage.
-const SD_COMPUTE_BUFFER = /^(?:.*?\s-\s)?(.+?)\s+compute buffer size:.*?\bon\s+(\S+)/;
-const SD_AUX_MODULE = /(?:^|[\s_.-])(?:t5\w*|umt5\w*|clip\w*|llm\w*|\w*vae\w*|tae\w*|taehv|taesd|esrgan|text_?enc\w*|conditioner|control\w*|vision\w*)(?:[\s_.-]|$)/i;
+// stable-diffusion.cpp: a compute buffer on a backend; the module name is one word.
+const SD_COMPUTE_BUFFER = new RegExp("^" + HEAD + String.raw`([\w.+-]+)\s+compute buffer size:.*?\bon\s+(\S+)`);
+// The modules that are NOT the diffusion stage, by sd.cpp's own runner names (get_desc()), matched
+// against the WHOLE module name: the text encoders (t5, umt5, clip, llm), the VAEs (vae, wan_vae,
+// flux_vae, ...), the tiny autoencoders (tae*, taesd, taehv), the control-net runner (control_net),
+// ESRGAN and the vision tower. A substring match would count a diffusion model whose NAME holds one
+// of the words (Wan2.1-Fun-14B-Control) as auxiliary and fail a healthy run for lack of evidence.
+export const SD_AUX_MODULE = /^(?:(?:um)?t5(?:[_-]?xxl)?|clip(?:[_-](?:l|g|h|vision|text))?|llm|text[_-]?enc(?:oder)?|conditioner|(?:[\w.]*[_-])?vae(?:[_-][\w.]*)?|tae\w*|control[_-]?net|esrgan|pmid|(?:clip[_-])?vision(?:[_-]\w*)?)$/i;
 const SD_CPU_SHAPES = [
   /\bloading CPU backend\b/i, // [WARN] ggml_extend_backend.cpp: the actual no-GPU fallback
   /\bUsing CPU backend\b/i, // LOG_VERBOSE when the default compute backend is the CPU
@@ -279,32 +296,43 @@ const SD_CPU_SHAPES = [
   /->\s*compute\s+cpu\d*\b/i, // auto-fit plan: "... -> compute CPU, params RAM"
   /auto-fit:\s*no GPU memory budget available;\s*using CPU/i,
 ];
-const DA3_BACKEND = /da::Backend using device:\s*(\S+)/i;
-const DA3_CPU_SHAPES = [/offload_weights:.*->\s*CPU\b/i, /node\(s\) run on CPU\b/i];
-const AUDIO_BUFFER = /\.weights\.buffer_name\s+(\S+)/;
+const DA3_BACKEND = /^\[da3\]\s+da::Backend using device:\s*(\S+)/i;
+const DA3_CPU_SHAPES = [/^\[da3\]\s+offload_weights:.*->\s*CPU\b/i, /^\[da3\]\s+.*node\(s\) run on CPU\b/i];
+const AUDIO_BUFFER = new RegExp("^" + AUDIO_HEAD + String.raw`([\w.-]+)\.weights\.buffer_name\s+(\S+)`);
 
 function stripAnsi(s) {
   // eslint-disable-next-line no-control-regex
   return s.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "");
 }
 
-// buildEchoMatcher: a predicate for log lines that merely repeat user text. A line drops when
-// it contains an echoed string verbatim (each line of a multi-line string counts too). A
-// string shorter than 6 characters is too likely to occur inside a real log line, so it only
-// drops a line that IS that string, or that holds it in quotes.
+// buildEchoMatcher: what the guard knows of the request's own text (prompt, negative prompt, TTS text,
+// lyrics; each line of a multi-line text counts too). It is used for two things only, and never to
+// make a line invisible to the CPU detector:
+//   isEcho(line)  the line IS an echo of that text (the text is most of the line, or all of it): such
+//                 a line can carry no POSITIVE evidence, so text that looks like a device or buffer
+//                 line is not evidence. A real evidence line that merely contains a fragment of the
+//                 text ("Vulkan0" as a prompt) is not an echo.
+//   strip(line)   the line with the text taken out, for the one shape that is plain words (a device
+//                 reset), so a prompt about "device lost" cannot end a healthy run.
+// A piece shorter than 6 characters is ignored: no evidence line is that short, so it can forge
+// nothing, and stripping it would only eat real words.
 function buildEchoMatcher(echoes) {
-  const full = [];
-  const short = [];
+  const pieces = new Set();
   for (const raw of echoes || []) {
-    if (typeof raw !== "string" || raw.trim() === "") continue;
-    const pieces = new Set([raw.trim()]);
-    for (const part of raw.split(/\r\n|\r|\n/)) if (part.trim() !== "") pieces.add(part.trim());
-    for (const p of pieces) (p.length >= 6 ? full : short).push(p);
+    if (typeof raw !== "string") continue;
+    for (const part of [raw, ...raw.split(/\r\n|\r|\n/)]) if (part.trim().length >= 6) pieces.add(part.trim());
   }
-  return (line) => {
-    const t = line.trim();
-    if (full.some((p) => line.includes(p))) return true;
-    return short.some((p) => t === p || line.includes(`"${p}"`) || line.includes(`'${p}'`));
+  const full = [...pieces].sort((x, y) => y.length - x.length);
+  return {
+    isEcho(line) {
+      const t = line.trim();
+      return t !== "" && full.some((p) => line.includes(p) && p.length >= 0.6 * t.length);
+    },
+    strip(line) {
+      let out = line;
+      for (const p of full) out = out.split(p).join(" ");
+      return out;
+    },
   };
 }
 
@@ -313,8 +341,8 @@ function buildEchoMatcher(echoes) {
 // verdict() is called when the engine exits and says whether the positive evidence was seen.
 export function createLogGuard({ engine, echoes = [] }) {
   if (!GUARD_ENGINES.includes(engine)) throw new Error(`createLogGuard: unknown engine ${JSON.stringify(engine)} (want ${GUARD_ENGINES.join(", ")})`);
-  const echoed = buildEchoMatcher(echoes);
-  const st = { lineNo: 0, inBlock: false, device: false, diffusion: false, params: false, da3: false, audio: false };
+  const echo = buildEchoMatcher(echoes);
+  const st = { lineNo: 0, inBlock: false, device: false, diffusion: false, da3: false, audio: false };
   const evidence = [];
   const note = (s) => { if (evidence.length < 20) evidence.push(s); };
 
@@ -323,23 +351,32 @@ export function createLogGuard({ engine, echoes = [] }) {
   function scan(raw) {
     st.lineNo++;
     const line = stripAnsi(String(raw ?? ""));
-    if (st.inBlock) {
-      if (/^\}\s*$/.test(line)) { st.inBlock = false; return null; }
-      if (!LOG_PREFIX.test(line)) return null; // an indented dump line: never scanned
-      st.inBlock = false; // an unterminated dump: the next log record ends it
+    if (engine === "sdcpp") {
+      // the parameter dumps and the tokenizer echoes repeat the request's text and every path:
+      // the only lines that are skipped outright, and only on sd.cpp's own record shapes
+      if (st.inBlock) {
+        if (/^\}\s*$/.test(line)) { st.inBlock = false; return null; }
+        if (!LOG_PREFIX.test(line)) return null; // an indented dump line: never scanned
+        st.inBlock = false; // an unterminated dump: the next log record ends it
+      }
+      if (BLOCK_START.test(line)) { st.inBlock = true; return null; }
+      if (TOKENIZER_ECHO.some((re) => re.test(line))) return null;
     }
-    if (BLOCK_START.test(line)) { st.inBlock = true; return null; }
-    if (TOKENIZER_ECHO.some((re) => re.test(line))) return null;
-    if (echoed(line)) return null;
+    const isEcho = echo.isEcho(line);
 
-    if (GPU_RESET_RE.test(line)) return { kind: GPU_RESET, line: line.trim(), lineNo: st.lineNo };
+    // a lost device is plain words: read it with the request's own text taken out
+    if (GPU_RESET_RE.test(echo.strip(line))) return { kind: GPU_RESET, line: line.trim(), lineNo: st.lineNo };
 
+    // every placement shape reads the WHOLE line, whatever the request said: its text cannot switch
+    // the CPU detector off
     if (NO_VULKAN_DEVICE.test(line)) return cpu(line);
     if (/\bggml_vulkan\b/i.test(line) && SOFTWARE_DEVICE.test(line)) return cpu(line);
     const dev = GGML_DEVICE_LINE.exec(line);
     if (dev) {
-      st.device = true;
-      note(`device ${dev[1]} = ${dev[2]}`);
+      if (!isEcho) {
+        st.device = true;
+        note(`device ${dev[1]} = ${dev[2]}`);
+      }
       return null;
     }
 
@@ -349,22 +386,19 @@ export function createLogGuard({ engine, echoes = [] }) {
       if (cb) {
         const [, desc, on] = cb;
         if (/^CPU\d*$/i.test(on)) return cpu(line);
-        if (/^Vulkan\d+$/i.test(on)) {
-          st.params = true;
-          if (!SD_AUX_MODULE.test(desc)) {
-            st.diffusion = true;
-            note(`${desc} compute on ${on}`);
-          }
+        if (/^Vulkan\d+$/i.test(on) && !isEcho && !SD_AUX_MODULE.test(desc)) {
+          st.diffusion = true;
+          note(`${desc} compute on ${on}`);
         }
-        return null;
       }
-      if (/prepared params backend buffers\b.*\bon\s+Vulkan\d+\b/.test(line)) st.params = true;
     } else if (engine === "da3") {
       const b = DA3_BACKEND.exec(line);
       if (b) {
         if (/^Vulkan\d+$/i.test(b[1])) {
-          st.da3 = true;
-          note(`da3 backend ${b[1]}`);
+          if (!isEcho) {
+            st.da3 = true;
+            note(`da3 backend ${b[1]}`);
+          }
           return null;
         }
         return cpu(line);
@@ -373,8 +407,8 @@ export function createLogGuard({ engine, echoes = [] }) {
     } else {
       const m = AUDIO_BUFFER.exec(line);
       if (m) {
-        if (/^CPU\d*$/i.test(m[1])) return cpu(line);
-        if (/^Vulkan\d+$/i.test(m[1])) {
+        if (/^CPU\d*$/i.test(m[2])) return cpu(line);
+        if (/^Vulkan\d+$/i.test(m[2]) && !isEcho) {
           st.audio = true;
           note(`${line.trim().split(/\s+/).slice(-2).join(" ")}`);
         }

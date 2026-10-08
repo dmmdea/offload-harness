@@ -17,8 +17,10 @@
 //   logFile: path of a captured log printed first (then `log`)
 //   exit:    exit code (default 0)
 //   hang:    after the log, never exit (the runner has to kill it)
+//   echoFlags: ["-p", ...]  also print the value after each of these flags, one bare line per line of it
+//   frozen / black (writes.video): a still colour / a black clip
 //   writes:  one of
-//     {kind:"video", extraFrames, black, ffmpeg}   a real clip at `-o` (frames = --video-frames + extraFrames)
+//     {kind:"video", extraFrames, black, frozen, ffmpeg}   a real clip at `-o` (frames = --video-frames + extraFrames)
 //     {kind:"wav", seconds, tailSilence, silent}    a PCM16 wav at `--out`
 //     {kind:"gray_png"}                              a 1-channel PNG at `--png`
 //   inspectControlVideo: record the PNG headers found in the directory after --control-video
@@ -207,6 +209,12 @@ function runAsEngine() {
   if (spec.logFile) lines.push(...readFileSync(spec.logFile, "utf8").split(/\r\n|\r|\n/));
   if (spec.log) lines.push(...spec.log);
   for (const l of lines) process.stderr.write(l + "\n");
+  // echoFlags: print the value after each named flag, one bare line per line of it (an engine that
+  // echoes the request's own text into its log)
+  for (const flag of spec.echoFlags || []) {
+    const v = argAfter(argv, flag);
+    if (v) for (const l of v.split(/\r\n|\r|\n/)) process.stderr.write(l + "\n");
+  }
 
   const w = spec.writes;
   if (w && w.kind === "gray_png") {
@@ -223,7 +231,8 @@ function runAsEngine() {
     const height = argAfter(argv, "-H") || "64";
     const fps = argAfter(argv, "--fps") || "16";
     const frames = Number(argAfter(argv, "--video-frames") || 5) + (w.extraFrames || 0);
-    const src = w.black ? `color=c=black:s=${width}x${height}:r=${fps}` : `testsrc2=s=${width}x${height}:r=${fps}`;
+    // black: an all-black clip; frozen: one still colour (not black, never changing); else a moving test pattern
+    const src = w.black ? `color=c=black:s=${width}x${height}:r=${fps}` : w.frozen ? `color=c=0x2060c0:s=${width}x${height}:r=${fps}` : `testsrc2=s=${width}x${height}:r=${fps}`;
     const r = spawnSync(w.ffmpeg, ["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", src, "-frames:v", String(frames), "-an", out], { encoding: "utf8" });
     if (r.status !== 0) {
       process.stderr.write("stub: ffmpeg failed: " + r.stderr + "\n");

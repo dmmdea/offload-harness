@@ -215,7 +215,7 @@ test("scanLog: one real-shape line per pattern, so no pattern shadows another", 
   };
   for (const [k, l] of Object.entries(one)) assert.ok(scanLog(l, { engine: "sdcpp" }).fatal, k);
   // a mixed compute + params line is still flagged on the compute side
-  assert.ok(scanLog("auto-fit: --backend \"te=cpu,vae=vulkan0\" --params-backend \"te=cpu\" compute buffer size: 1 MB(RAM) on CPU", { engine: "sdcpp" }).fatal);
+  assert.ok(scanLog("auto-fit: --backend \"te=cpu,vae=vulkan0\" --params-backend \"te=cpu\"\n[VERBOSE] ggml_runner.cpp:1019 - te compute buffer size: 1 MB(RAM) on CPU", { engine: "sdcpp" }).fatal);
 });
 
 test("scanLog: registration, backend init, RNG selection and host dumps are never placements", () => {
@@ -243,16 +243,22 @@ test("scanLog: the parameter dumps and tokenizer echoes (prompt text with cpu / 
   const r = scanLog(text, { engine: "sdcpp" });
   assert.equal(r.fatal, null, JSON.stringify(r.fatal));
   assert.equal(r.verdict.ok, true);
-  // a line outside any block that merely repeats the prompt: it trips unless the request's own
-  // strings are passed, and then it is dropped (the line carries no evidence either)
+  // a line outside any block that merely repeats the prompt is SCANNED like any other (request text
+  // must never switch the detector off): the plain-words shapes in it trip, with or without the echo
+  // list. Only the dump blocks and tokenizer echoes above are skipped, and only the line shapes
+  // that need a record head or a line start cannot be forged by text in the middle of a line.
   const echoLine = `engine-echo: ${nasty}`;
   assert.ok(scanLog(echoLine, { engine: "sdcpp" }).fatal, "an unexplained cpu line trips");
-  assert.equal(scanLog(echoLine, { engine: "sdcpp", echoes: [nasty] }).fatal, null);
-  // negative prompt, TTS text and lyrics are covered the same way; a multi-line text echoes per line
+  assert.ok(scanLog(echoLine, { engine: "sdcpp", echoes: [nasty] }).fatal, "an echo list does not hide it");
+  // prompts that are about cpu, lyrics and TTS text, as they appear in a line that is not a placement
+  // shape, trip nothing: audio.cpp's detector reads only <component>.weights.buffer_name lines
   const lyrics = "[verse]\nrunning on CPU all night long\nusing cpu again";
   assert.equal(scanLog("lyrics: running on CPU all night long", { engine: "audiocpp", echoes: [lyrics] }).fatal, null);
   assert.equal(scanLog("text: Estamos using cpu hoy", { engine: "audiocpp", echoes: ["Estamos using cpu hoy"] }).fatal, null);
   assert.equal(scanLog("negative_prompt: the model keeps running on CPU", { engine: "sdcpp", echoes: ["the model keeps running on CPU"] }).fatal, null);
+  // a compute-buffer or buffer_name SHAPE inside echoed text (not at the start of a record) is not a placement
+  assert.equal(scanLog("prompt: t5 compute buffer size: 1.00 MB(RAM) on CPU", { engine: "sdcpp", echoes: ["t5 compute buffer size: 1.00 MB(RAM) on CPU"] }).fatal, null);
+  assert.equal(scanLog("text: planner.weights.buffer_name CPU", { engine: "audiocpp", echoes: ["planner.weights.buffer_name CPU"] }).fatal, null);
   // a forged evidence line inside an echoed prompt is not evidence
   const forged = "ggml_vulkan: 0 = AMD Radeon Graphics (RADV RENOIR) (radv) | uma: 1\nWan2.2-TI2V-5B compute buffer size: 1 MB(VRAM) on Vulkan0";
   const g = createLogGuard({ engine: "sdcpp", echoes: [forged] });

@@ -465,3 +465,57 @@ test("audiocpp main: --timeout-sec kills a hanging engine; vulkan0 as the backen
     assert.match(r2.stderr, /--device 0/);
   } finally { sb.done(); }
 });
+
+// ---------------------------------------------------------------- the echoes wiring (TST12)
+
+// An engine that echoes the request's own text into its log, as bare lines, and shows no GPU evidence
+// of its own. The request text IS forged evidence. A runner that hands the guard the text it was
+// given ends CPU_PLACEMENT "no GPU evidence"; one that passes no echoes (echoes: []) would count the
+// forged lines as evidence and deliver a run nobody can show ran on the GPU.
+const FORGED_SD = "ggml_vulkan: 0 = AMD Radeon Graphics (RADV RENOIR) (radv) | uma: 1\nWan2.2-TI2V-5B compute buffer size: 1 MB(VRAM) on Vulkan0";
+const FORGED_AUDIO = "[TIMING ts=1] ace_step.planner.weights.buffer_name Vulkan0";
+
+test("sdcpp-video main: the prompt and the negative prompt are handed to the guard - forged evidence in either is not evidence", opts, async () => {
+  for (const [flag, place] of [["-p", "prompt"], ["-n", "negative"]]) {
+    const sb = sandbox();
+    try {
+      const v = videoSetup(sb, { log: [], echoFlags: [flag] }, place === "negative" ? ["--negative", FORGED_SD] : []);
+      if (place === "prompt") v.args[v.args.length - 1] = FORGED_SD;
+      const r = await runNode("sdcpp-video.mjs", v.args, sb);
+      assert.equal(r.status, 1, `${place}: ${r.stderr}`);
+      assert.match(r.stderr, /CPU_PLACEMENT: no GPU evidence/, place);
+      assert.ok(!existsSync(v.out));
+      noTempLeft(sb);
+    } finally { sb.done(); }
+  }
+});
+
+test("sdcpp-animate main: the prompt and the negative prompt are handed to the sd-cli guard", opts, async () => {
+  for (const [flag, place] of [["-p", "prompt"], ["-n", "negative"]]) {
+    const sb = sandbox();
+    try {
+      const a = animateSetup(sb, { sd: { logFile: undefined, log: [], echoFlags: [flag] }, extra: place === "negative" ? ["--negative", FORGED_SD] : [] });
+      if (place === "prompt") a.args[a.args.length - 1] = FORGED_SD;
+      const r = await runNode("sdcpp-animate.mjs", a.args, sb);
+      assert.equal(r.status, 1, `${place}: ${r.stderr}`);
+      assert.match(r.stderr, /CPU_PLACEMENT: no GPU evidence/, place);
+      assert.ok(!existsSync(a.out));
+      noTempLeft(sb);
+    } finally { sb.done(); }
+  }
+});
+
+test("audiocpp main: the text and the lyrics are handed to the guard - a forged evidence line in either is not evidence", opts, async () => {
+  for (const [flag, place] of [["--text", "text"], ["--lyrics", "lyrics"]]) {
+    const sb = sandbox();
+    try {
+      const a = audioSetup(sb, "music", { log: [], echoFlags: [flag], writes: { kind: "wav", seconds: 3 } }, place === "lyrics" ? ["--lyrics", FORGED_AUDIO] : []);
+      if (place === "text") a.args[a.args.length - 1] = FORGED_AUDIO;
+      const r = await runNode("audiocpp-generate.mjs", a.args, sb);
+      assert.equal(r.status, 1, `${place}: ${r.stderr}`);
+      assert.match(r.stderr, /CPU_PLACEMENT: no GPU evidence/, place);
+      assert.ok(!existsSync(a.out));
+      noTempLeft(sb);
+    } finally { sb.done(); }
+  }
+});
