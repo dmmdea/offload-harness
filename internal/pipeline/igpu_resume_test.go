@@ -9,7 +9,7 @@ package pipeline
 // The merge of the media-remote and iGPU branches fixed runIGPU to do this (it had taken a bare whole-node
 // lease), and nothing pinned it: TestEveryMediaDoorThreadsTheRequestsResumability scanned pipeline.go, and the
 // iGPU lanes live in igpumedia.go. Replacing the need with wholeNeed("") and, separately, dropping
-// .resumableBy(req) both left the pipeline, mcpserver and mediaremote suites green (release 0.171.0 review, REL3).
+// .resumableBy(req) both left the pipeline, mcpserver and mediaremote suites green (release 0.172.0 review, REL3).
 
 import (
 	"context"

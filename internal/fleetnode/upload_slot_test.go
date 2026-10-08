@@ -13,7 +13,7 @@ import (
 // guard for a caller that has gone while it waited: the request is neither admitted nor answered, and no slot
 // is taken or released on its behalf. It was unpinned: mutating the arm to `return true` survived the whole
 // package, and would have let the deferred release free a slot the request never took, so the door admitted
-// more bodies than its bound and the real owner's release then blocked forever (review of 0.171.0, C5S2).
+// more bodies than its bound and the real owner's release then blocked forever (review of 0.172.0, C5S2).
 //
 // A real HTTP/1.1 socket cancels the request context while the handler is still waiting only when the
 // server is watching the connection, so this pins the arm in process, with a request whose context is

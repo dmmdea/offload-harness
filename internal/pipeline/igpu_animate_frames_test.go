@@ -4,7 +4,7 @@ package pipeline
 // measured 33-frame envelope. The lane's default frame count used to be the runner's own 49, and 288x512x49
 // plus the VACE reference frame is 8,064 tokens, so on a node seeded from that tier every animate call that
 // named no frames (offload_animate_character, the animate-character verb, a delegator's animate job) was
-// refused token_cap_exceeded before the runner started (release 0.171.0 review, REL1). animategen_frames is
+// refused token_cap_exceeded before the runner started (release 0.172.0 review, REL1). animategen_frames is
 // the key that carries the default clip. These tests resolve the REAL seed, so the cap and the default
 // cannot drift apart without a failure here.
 
