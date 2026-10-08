@@ -286,6 +286,18 @@ func familyFor(cfg config.Config, taskType string) string {
 		// review, measured), while the writer correctly folded them to Wan.
 		// TestVideoFootprintFamilyMatchesTheAdvertisedFamily pins the two
 		// packages together over that full input space.
+		//
+		// An sdcpp default family (CT-49) is the other writer: the iGPU lane records
+		// pipeline.videoFootprintFamily of the family it rendered, which is the family's own
+		// name (an operator-chosen key such as "fastwan"; the wan22 sentinel keeps the
+		// store's "wan2.2" spelling). That name is not in the runner's closed set, so it
+		// must be checked first or it would fold to Wan here while the writer kept it.
+		if def, ok := cfg.DefaultVideoSdcppFamily(); ok {
+			if def == "wan22" {
+				return "wan2.2"
+			}
+			return def
+		}
 		switch f := strings.TrimSpace(cfg.VideoGenFamily); f {
 		case "ltx25", "h3", "hunyuan", "ace":
 			return f
@@ -293,17 +305,48 @@ func familyFor(cfg config.Config, taskType string) string {
 			return "wan2.2"
 		}
 	case "animate":
-		// One shipped variant; must agree with what the pipeline writes into the
-		// footprint store (pipeline.runAnimateCharacter samples under this key).
+		// Two variants, one family each, matching what the pipeline writes into the footprint
+		// store: the ComfyUI route samples under "wan-animate2"
+		// (pipeline.runAnimateCharacter), the sd.cpp VACE lane under config.AnimateSdcppFootprintFamily.
+		if cfg.AnimateGenEngine == config.EngineSdcpp {
+			return config.AnimateSdcppFootprintFamily
+		}
 		return "wan-animate2"
 	case "stt", STTUploadTask:
 		return "whisper"
 	case "audio-gen":
+		if fs := audioFamilies(cfg); len(fs) > 0 {
+			return fs[0]
+		}
 		return "acestep"
 	case "run-graph":
 		return "comfy-graph"
 	}
 	return ""
+}
+
+// audioFamilies is the audio-gen task's advertised families. A box with no audio.cpp engine
+// advertises "acestep" exactly as it always has. With an engine bound (CT-49) the lanes record
+// their footprints under the engine's family names (pipeline.runGenerateAudioAudiocpp keys on
+// cfg.AudiocppVoiceFamilyName / AudiocppMusicFamilyName), so those are what is advertised: the
+// voice family when voice is audio.cpp, the music family when music is, and "acestep" still for
+// a ComfyUI music script that stays bound beside an audio.cpp voice.
+func audioFamilies(cfg config.Config) []string {
+	voiceEngine := cfg.VoiceGenEngine == config.EngineAudiocpp
+	musicEngine := cfg.MusicGenEngine == config.EngineAudiocpp
+	if !voiceEngine && !musicEngine {
+		return []string{"acestep"}
+	}
+	var out []string
+	if musicEngine {
+		out = append(out, cfg.AudiocppMusicFamilyName())
+	} else if cfg.MusicGenScript != "" {
+		out = append(out, "acestep")
+	}
+	if voiceEngine {
+		out = append(out, cfg.AudiocppVoiceFamilyName())
+	}
+	return out
 }
 
 // Families returns the loadable model families for the advertised tasks,
@@ -317,10 +360,17 @@ func familiesOf(cfg config.Config, tasks []string) []string {
 	var out []string
 	seen := map[string]bool{}
 	for _, t := range tasks {
-		f := familyFor(cfg, t)
-		if f != "" && !seen[f] {
-			seen[f] = true
-			out = append(out, f)
+		fams := []string{familyFor(cfg, t)}
+		if t == "audio-gen" {
+			if af := audioFamilies(cfg); len(af) > 0 {
+				fams = af
+			}
+		}
+		for _, f := range fams {
+			if f != "" && !seen[f] {
+				seen[f] = true
+				out = append(out, f)
+			}
 		}
 		// A named image family (ADR 0058) is a graph this node can load too; its
 		// NAME and license ride health's image_families (ImageFamilies below).

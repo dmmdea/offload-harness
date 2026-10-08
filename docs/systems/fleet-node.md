@@ -1774,7 +1774,11 @@ returns it with the rest of `data`, so the machine that fetches `GET /fleet/medi
 audio any of `generate_audio:voice`, `generate_audio:voice:endpoint` and `generate_audio:music`. A bound script over a
 missing weight, VAE or custom node is BOUND-BUT-MISSING and the task drops out; restoring the file brings it back. One
 predicate (`taskConfiguredFor`) serves health and dispatch, so a node never lists what it would refuse. `image-gen` keeps
-`ImageGenAdvertisable`. `/fleet/health` gains `media_routes: [{route, engine, state}]` (every task route, not the shared
+`ImageGenAdvertisable`. A task counts as bound when its script OR its native engine is (CT-51): `video-gen` through
+`config.VideoGenBound()`, `animate` through `AnimateGenBound()`, `audio-gen` through `VoiceGenBound() || MusicGenBound()`, so an
+sd.cpp / audio.cpp-only box (no ComfyUI) advertises them; `run-graph` stays script-only. The engine lanes advertise the family
+they record footprints under (the sdcpp default video family's own name, `wan-vace` for sd.cpp animate, the audio.cpp family names
+for audio-gen). `/fleet/health` gains `media_routes: [{route, engine, state}]` (every task route, not the shared
 prerequisites; the `detail` paths stay on the node), and `supported_task_types` and `loadable_model_families` are derived per
 request from the same reading, which is cached for at most 60 seconds per config and read once per health request and once
 per admission (the node keys its cache once, at construction; the pull claim loop re-derives its task list on every claim). A

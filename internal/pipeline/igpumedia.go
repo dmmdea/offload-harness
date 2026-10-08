@@ -266,22 +266,28 @@ func (p *Pipeline) sdcppVideoBinding(req core.Request) (renderFamily string, fb 
 	return renderFamily, fb, fb.UsesSdcpp()
 }
 
+// sdcppRenderFamily is the family an sdcpp video render is recorded under. A request that names
+// no model on a box whose default family is an sdcpp one that is spelled like a ComfyUI family
+// (wan22, ...) arrives with renderFamily "": the ledger and the footprint store key on THAT
+// family, the one config.DefaultVideoSdcppFamily (and mediacap) name. The fleet advertises the
+// same family (fleetnode.familyFor; TestEngineLaneFamiliesMatchTheAdvertisedOnes pins the two).
+func sdcppRenderFamily(cfg config.Config, renderFamily string) string {
+	if renderFamily != "" {
+		return renderFamily
+	}
+	if def, ok := cfg.DefaultVideoSdcppFamily(); ok {
+		return def
+	}
+	return "sdcpp"
+}
+
 // runGenerateVideoSdcpp renders generate_video through render/sdcpp-video.mjs.
 // params as the ComfyUI route: still/out/negative/seed/steps/frames/width/height; a
 // per-request value wins over the family binding's default. fast=true decodes with the family's
 // tiny autoencoder (sdcpp_tae, opt-in); without that key fast is a no-op on this lane and the
 // result's notes say so.
 func (p *Pipeline) runGenerateVideoSdcpp(ctx context.Context, req core.Request, meta core.Meta, start time.Time, renderFamily string, fb config.VideoFamilyBinding) core.Result {
-	if renderFamily == "" {
-		// a request that names no model on a box whose default family is an sdcpp one that is
-		// spelled like a ComfyUI family (wan22, ...): the ledger and the footprint store key on
-		// THAT family, the one config.DefaultVideoSdcppFamily (and mediacap) name
-		if def, ok := p.cfg.DefaultVideoSdcppFamily(); ok {
-			renderFamily = def
-		} else {
-			renderFamily = "sdcpp"
-		}
-	}
+	renderFamily = sdcppRenderFamily(p.cfg, renderFamily)
 	meta.Model = "sdcpp-video:" + renderFamily
 	meta.License = fb.License
 	prompt := strings.TrimSpace(req.Input)
@@ -586,7 +592,7 @@ func (p *Pipeline) runAnimateCharacterSdcpp(ctx context.Context, req core.Reques
 
 	outPath, dres := p.runIGPU(ctx, req, &meta, start, igpuRun{
 		leaseReason: "animate (sdcpp)", failVerb: "character animation failed",
-		fpFamily: "wan-vace", fpQuant: quantFromModelFile(cfg.AnimateGenSdcppModel), fpTask: "animate",
+		fpFamily: config.AnimateSdcppFootprintFamily, fpQuant: quantFromModelFile(cfg.AnimateGenSdcppModel), fpTask: "animate",
 		script: script, args: runnerArgs(flags, out, ref, driver, prompt), out: out, timeout: timeout,
 	})
 	if dres != nil {
@@ -601,6 +607,15 @@ func (p *Pipeline) runAnimateCharacterSdcpp(ctx context.Context, req core.Reques
 }
 
 // ---------------------------------------------------------------- audio
+
+// audiocppFootprintFamily is the audio.cpp --family a kind runs, which is also the footprint-store
+// family it is recorded under and the family the fleet advertises for audio-gen (fleetnode.audioFamilies).
+func audiocppFootprintFamily(cfg config.Config, kind string) string {
+	if kind == "music" {
+		return cfg.AudiocppMusicFamilyName()
+	}
+	return cfg.AudiocppVoiceFamilyName()
+}
 
 // audiocppServes reports whether this generate_audio request is served by audio.cpp: kind
 // music with musicgen_engine audiocpp, or kind voice with voicegen_engine audiocpp on the
@@ -622,9 +637,9 @@ func audiocppServes(cfg config.Config, kind, voice string) bool {
 // voice clone reference falls back to voicegen_ref.
 func (p *Pipeline) runGenerateAudioAudiocpp(ctx context.Context, req core.Request, meta core.Meta, start time.Time, kind string) core.Result {
 	cfg := p.cfg
-	family, model := cfg.AudiocppVoiceFamilyName(), cfg.AudiocppVoiceModel
+	family, model := audiocppFootprintFamily(cfg, kind), cfg.AudiocppVoiceModel
 	if kind == "music" {
-		family, model = cfg.AudiocppMusicFamilyName(), cfg.AudiocppMusicModel
+		model = cfg.AudiocppMusicModel
 	}
 	meta.Model = "audiocpp:" + family
 	text := strings.TrimSpace(req.Input)

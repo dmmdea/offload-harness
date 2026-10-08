@@ -6,6 +6,24 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added — a node whose lanes run on the native engines advertises and admits them (register CT-51, I1)
+
+`internal/fleetnode` bound a media task only through its ComfyUI/python script (`videogen_script`, `animategen_script`,
+`voicegen_script`/`musicgen_script`/`tts_endpoint`), so an iGPU box whose video, animate, voice and music run on the
+sd.cpp and audio.cpp engines (CT-49) set none of them and never advertised or admitted `video-gen`, `animate` or `audio-gen`,
+even with every route CONFIGURED. `mediaTaskBound` now binds `video-gen` through `config.VideoGenBound()`, `animate` through
+`AnimateGenBound()` and `audio-gen` through `VoiceGenBound() || MusicGenBound()`; `run-graph` is unchanged (ComfyUI only). The
+route verdict still decides: a bound engine whose model file is missing is BOUND-BUT-MISSING and the task is refused at
+admission with the `503` route-not-ready, and a box with neither a script nor an engine behaves exactly as before.
+The advertised model family stays in the namespace the lane records its footprints under: an sdcpp default video family
+advertises its own name (the wan22 sentinel keeps the store's `wan2.2`), the sd.cpp animate lane advertises
+`config.AnimateSdcppFootprintFamily` (`wan-vace`, the constant both sides use), and audio-gen advertises the audio.cpp family
+names the lanes record (`chatterbox` for voice, `ace_step` for music) instead of the ComfyUI `acestep`. Every one of these lanes
+does record a footprint, so none is advertised without one. Tests: `TestEngineOnlyBoxAdvertisesAndAdmitsItsMediaLanes`,
+`TestEngineOnlyBoxRefusesALaneWhoseBoundFileIsMissing`, `TestABoxWithNeitherScriptNorEngineKeepsItsBehaviour`,
+`TestEngineLaneFamiliesAreTheRecordedOnes` (fleetnode) and `TestEngineLaneFamiliesMatchTheAdvertisedOnes` (pipeline, the pin
+extended from `TestVideoFootprintFamilyMatchesTheAdvertisedFamily`); each guard was broken once and seen red.
+
 ### Added — media jobs run on a fleet node, with their input files, and come back verified (ADR 0077, register CT-50)
 
 A machine with no render lane, or a caller who names a node, can now render an image, a clip, a character animation, a voice
@@ -185,8 +203,8 @@ control video); `voicegen_engine` / `musicgen_engine: "audiocpp"` render through
 `musicgen_engine` and `audiocpp_*` (`config.example.json` regenerated). A box that sets none of them behaves byte for byte
 as before (`TestEveryRouteWithNoEngineKeyKeepsItsExactArgv`, green on the unmodified base too). `doctor`, `offload_status` and
 `acceptance` derive a route per engine (CONFIGURED only when the runner, binaries and every bound model file exist; a non-default
-sdcpp video family gets `generate_video:<name>`). Not in this change: the fleet advertisement of these lanes (the media-remote
-branch owns `internal/fleetnode`), run-graph (stays ComfyUI-only) and per-node seeds.
+sdcpp video family gets `generate_video:<name>`). Not in this change: run-graph (stays ComfyUI-only) and per-node seeds; the fleet
+advertisement of these lanes is the CT-51 entry above.
 
 ### Added — the GPU-evidence guard is positive, with GPU_RESET, a token cap, real kill semantics and extra-args screening (CT-49 safety core)
 

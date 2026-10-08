@@ -85,16 +85,19 @@ var taskMediaRoutes = map[string][]string{
 	"audio-gen": {"generate_audio:voice", "generate_audio:voice:endpoint", "generate_audio:music"},
 }
 
-// mediaTaskBound reports whether cfg binds a script or endpoint for taskType at all (the "bound" half of
-// BOUND-BUT-MISSING). It is false for a task with no mapped route.
+// mediaTaskBound reports whether cfg binds a renderer for taskType at all (the "bound" half of
+// BOUND-BUT-MISSING): its ComfyUI/python script (or the speech endpoint), OR the CT-49 engine that replaces
+// it (sd.cpp video and animate, audio.cpp voice and music). A box whose only renderers are the native
+// engines sets no script, so binding through the script alone never advertised or admitted its lanes
+// (CT-51 I1). It is false for a task with no mapped route.
 func mediaTaskBound(cfg config.Config, taskType string) bool {
 	switch taskType {
 	case "video-gen":
-		return cfg.VideoGenScript != ""
+		return cfg.VideoGenBound()
 	case "animate":
-		return cfg.AnimateGenScript != ""
+		return cfg.AnimateGenBound()
 	case "audio-gen":
-		return cfg.VoiceGenScript != "" || cfg.MusicGenScript != "" || cfg.TTSEndpoint != ""
+		return cfg.VoiceGenBound() || cfg.MusicGenBound()
 	case "run-graph":
 		return cfg.RunGraphScript != ""
 	}

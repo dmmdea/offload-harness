@@ -316,6 +316,11 @@ func (c Config) SdcppVideoFamily(name string) bool {
 	return ok && b.UsesSdcpp()
 }
 
+// AnimateSdcppFootprintFamily is the footprint-store family the sd.cpp VACE animate lane records
+// under, and the family the fleet advertises for animate on a box that runs it (CT-51 I1): one
+// constant so the writer (internal/pipeline) and the advertiser (internal/fleetnode) cannot drift.
+const AnimateSdcppFootprintFamily = "wan-vace"
+
 // AudiocppVoiceFamilyName / AudiocppMusicFamilyName are the audio.cpp --family values,
 // with the verified defaults applied.
 func (c Config) AudiocppVoiceFamilyName() string {
