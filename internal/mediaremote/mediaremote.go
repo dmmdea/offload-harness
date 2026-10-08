@@ -46,6 +46,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/delegate"
 	"github.com/dmmdea/offload-harness/internal/mediacap"
+	"github.com/dmmdea/offload-harness/internal/rosterprobe"
 )
 
 const (
@@ -54,8 +55,12 @@ const (
 	RouteRemote = composeremote.RouteRemote
 )
 
+// healthTimeout is how long one call waits for one node's /fleet/health: the single-shot lanes' shared
+// bound, probed concurrently and cached (internal/rosterprobe). A var so a test compresses it; production
+// never mutates it.
+var healthTimeout = rosterprobe.DefaultTimeout
+
 const (
-	healthTimeout   = 5 * time.Second
 	dispatchTimeout = 20 * time.Minute // a bundle may be hundreds of MB
 	pollTimeout     = 20 * time.Second
 	fetchTimeout    = 30 * time.Minute
@@ -330,7 +335,7 @@ func Call(ctx context.Context, cfg config.Config, req core.Request, remotes []st
 		return core.Result{}, &contractError{fmt.Sprintf("the %s request cannot be encoded for the wire: %v", pl.fleetTask, err)}
 	}
 
-	if err := post(ctx, cfg, base+route, body); err != nil {
+	if err := post(ctx, cfg, base, route, body); err != nil {
 		if be := budgetEnded(ctx, phaseSending, node, jobID, err); be != nil {
 			return core.Result{}, be
 		}
@@ -546,15 +551,18 @@ func pickNode(ctx context.Context, cfg config.Config, bases []string, task, door
 		cands  []cand
 		misses []string
 	)
-	for i, b := range bases {
-		hctx, cancel := context.WithTimeout(ctx, healthTimeout)
-		v, herr := delegate.FetchNodeView(hctx, b, cfg.FleetAuthToken)
-		cancel()
-		if herr != nil {
-			misses = append(misses, b+": "+herr.Error())
+	// The candidates are read through internal/rosterprobe like every other single-shot lane (ADR 0074):
+	// each entry is judged by the tailnet shape check before it is dialled (a refused entry is a named miss,
+	// never a dial), the probes run concurrently in configured order, and the shared memo and negative
+	// cache keep a dead node from costing a bound on every call. Reading.Index is the entry's slot in the
+	// list probed here, which is what "config order" breaks ties by.
+	for _, r := range rosterprobe.Probe(ctx, bases, cfg.FleetAuthToken, healthTimeout) {
+		b, v := r.Base, r.View
+		if r.Err != nil {
+			misses = append(misses, r.Miss())
 			continue
 		}
-		who := fmt.Sprintf("%s (%s)", b, v.NodeID)
+		who := fmt.Sprintf("%s (%s)", r.Shown(), v.NodeID)
 		if !contains(v.Tasks, task) {
 			misses = append(misses, fmt.Sprintf("%s: does not serve %s", who, task))
 			continue
@@ -573,9 +581,9 @@ func pickNode(ctx context.Context, cfg config.Config, bases []string, task, door
 		}
 		id := v.NodeID
 		if id == "" {
-			id = b
+			id = r.Shown() // the node id reaches results and messages, so the redacted form
 		}
-		cands = append(cands, cand{b, id, v.LeaseHeld || v.LeaseBusy || v.LeaseOverdue, v.QueueDepth + v.JobsRunning, i})
+		cands = append(cands, cand{b, id, v.LeaseHeld || v.LeaseBusy || v.LeaseOverdue, v.QueueDepth + v.JobsRunning, r.Index})
 	}
 	if len(cands) == 0 {
 		why := "no fleet node serves " + task
@@ -618,7 +626,8 @@ func stateOf(v delegate.NodeView, routes []string) string {
 	return strings.Join(parts, " / ")
 }
 
-func post(ctx context.Context, cfg config.Config, url string, body []byte) error {
+func post(ctx context.Context, cfg config.Config, base, route string, body []byte) error {
+	url := base + route
 	dctx, cancel := context.WithTimeout(ctx, dispatchTimeout)
 	defer cancel()
 	hreq, err := http.NewRequestWithContext(dctx, http.MethodPost, url, bytes.NewReader(body))
@@ -629,7 +638,7 @@ func post(ctx context.Context, cfg config.Config, url string, body []byte) error
 	auth(cfg, hreq)
 	resp, err := HTTPClient.Do(hreq)
 	if err != nil {
-		return &placementError{core.DeferClassInfrastructure, fmt.Sprintf("dispatch %s: %v", url, err)}
+		return &placementError{core.DeferClassInfrastructure, rosterprobe.Scrub(base, fmt.Errorf("dispatch %s: %w", url, err))}
 	}
 	rb, _ := io.ReadAll(io.LimitReader(resp.Body, maxBody))
 	resp.Body.Close()
@@ -643,8 +652,10 @@ func post(ctx context.Context, cfg config.Config, url string, body []byte) error
 		case http.StatusUnauthorized, http.StatusForbidden:
 			class = core.DeferClassConfig
 		}
-		return &placementError{class, fmt.Sprintf("dispatch %s: status %d: %s", url, resp.StatusCode, truncate(rb))}
+		return &placementError{class, rosterprobe.Scrub(base, fmt.Errorf("dispatch %s: status %d: %s", url, resp.StatusCode, truncate(rb)))}
 	}
+	// The node accepted the job: whatever the negative cache holds against it is out of date.
+	rosterprobe.Default.Forget(base)
 	return nil
 }
 

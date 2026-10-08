@@ -132,6 +132,27 @@ Tests: `TestReadMediaJobBodyAllocatesExactlyContentLength`, `TestFetchedOutputsL
 `TestReplacingAnExistingOutKeepsItsPermissionBits`, `TestPollFailuresThatAlternateWithAnswersNeverEndTheWait`,
 `TestAGraphThatEscapesPastTheNodesBodyCapIsRefusedBeforeTheNetwork`, `TestComposeProjectReportsADeadlineItCannotExtend`.
 
+### Changed — the media lane reads the roster the way every other single-shot lane does (ADR 0074, register CT-50)
+
+Merging main (0.165.0 to 0.168.0) put the tailnet-zone guard and the shared roster reader (`internal/rosterprobe`) under
+every single-shot lane except the media one, which was written before them and probed `delegate_remotes` one node at a time
+through the dial gate alone.
+
+- **A roster entry the tailnet guard refuses is a named miss, never a dial.** `mediaremote` now reads the candidate nodes
+  through `rosterprobe.Probe`: each entry is judged by the same shape check the agent lane applies (against `tailnet_suffix`
+  and `tailnet_suffixes`), the rest are probed at once in configured order through the shared memo and negative cache, and the
+  "probed ..." line says `not dialled, refused by the tailnet guard` for the refused one while the others still serve. The entry
+  prints redacted (a token pasted into it never reaches a defer), the dispatch errors are scrubbed the same way, and a node that
+  accepts a job drops out of the negative cache.
+- **The media-job decision record is ADR 0076.** Main took 0072 for the stt upload door while this work was in review, so the
+  record moves to the next free number and every reference to it (docs, code comments, this entry) moves with it.
+- **The media-job door joins the bearer rule in `tokenGated`**, which now takes the node's config (main's change: the legacy
+  `stt` lane is gated when the node has a token); `media-job` sits beside `compose-project` and `stt-upload`, and it is advertised
+  in `fleetTaskOrder` between `run-graph` and `compose`.
+
+Tests: `TestPickNodeNamesARosterEntryTheTailnetGuardRefusesAndDoesNotDialIt`,
+`TestRunNamesARefusedRosterEntryInTheDeferAndRedactsItsToken`.
+
 ## [0.168.0] - 2026-10-07 - the display layer opens under the presence guard and leaves when the operator returns
 
 ### The display layer opens under its presence guard and leaves when the operator returns (ADR 0075)

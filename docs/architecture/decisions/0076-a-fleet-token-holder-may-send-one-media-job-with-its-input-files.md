@@ -69,7 +69,9 @@ Three facts stood in the way.
    holds no TEXT lease; a node holding no lease ranks first, then the shorter queue, then config order, and every miss is
    named in the defer. Each output is fetched by bare name and verified against the node's published sha256 before
    anything lands: a mismatch deletes what was fetched and defers as infrastructure. A caller's `remotes` must be a subset
-   of `delegate_remotes`.
+   of `delegate_remotes`. The candidates are read through `internal/rosterprobe` like every other single-shot lane
+   (ADR 0074): an entry the tailnet guard refuses is a named miss that is never dialled, and the probes run at once through
+   the shared memo and negative cache.
 7. **The five MCP doors and four CLI verbs take the route.** `offload_generate_image`, `offload_generate_video`,
    `offload_animate_character`, `offload_generate_audio` and `offload_run_graph` gain `route` and `remotes`, and
    `generate-image`, `generate-video`, `generate-audio` and `run-graph` gain `--route` and a repeatable `--remote`. In each
