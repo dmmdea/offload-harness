@@ -205,11 +205,20 @@ export function assessClip({ duration, black, frozen, fps = 0 }, { entirely = 0.
   return { ok: true, kind: "", reason: `black ${(b * 100).toFixed(0)}%, frozen ${(f * 100).toFixed(0)}%` };
 }
 
+// BLACK_PICTURE_TH: blackdetect's pic_th, the fraction of a frame's pixels that must be black for the
+// frame to count as black. 0.98 (the default is 0.98 too) rejected legitimate low-key footage: a dark
+// frame with a small bright object (a candle flame, the moon) is 98.5 to 99.25 % black, so a 320x240
+// field with an object of 0.75 % or 1.5 % of the frame was a BLACK_CLIP, a full failure that is never
+// retried. Measured with ffmpeg 6.1 on such clips: 0.999 passes both and still fails a pure black clip
+// (100 % black); an object of 4 % passes at either value. A failed render is black or noise, not a
+// frame that holds an image, so the strict value costs nothing.
+export const BLACK_PICTURE_TH = 0.999;
+
 // buildClipCheckArgs: one decode pass of the whole clip through both detectors. The default
 // log level is needed: blackdetect and freezedetect report at info level.
 export function buildClipCheckArgs(file) {
   return ["-hide_banner", "-nostats", "-i", file, "-an",
-    "-vf", "blackdetect=d=0.1:pic_th=0.98,freezedetect=n=-60dB:d=0.5", "-f", "null", "-"];
+    "-vf", `blackdetect=d=0.1:pic_th=${BLACK_PICTURE_TH},freezedetect=n=-60dB:d=0.5`, "-f", "null", "-"];
 }
 
 // checkClip: run the detectors over the whole clip and throw BLACK_CLIP / FROZEN_CLIP (typed,
