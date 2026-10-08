@@ -43,6 +43,7 @@ type seen struct {
 	method, path string
 	auth         string
 	body         []byte
+	header       http.Header // a clone of the request's headers (the attribution tests read them)
 }
 
 // node is a REAL fleet node server (doors, auth, job store, media serving) behind httptest, with a runner
@@ -55,6 +56,8 @@ type node struct {
 	runner *nodeRunner
 	// tamper, when set, rewrites the body GET /fleet/media serves.
 	tamper func(name string, b []byte) []byte
+	// refusePost, when non-zero, answers every POST with that status before the node sees it.
+	refusePost int
 }
 
 // nodeRunner writes the outputs a render of each task would and reports them the way the pipeline does.
@@ -179,9 +182,13 @@ func startNode(t *testing.T, o nodeOpts) *node {
 			req.Body = io.NopCloser(bytes.NewReader(body))
 		}
 		n.mu.Lock()
-		n.log = append(n.log, seen{req.Method, req.URL.Path, req.Header.Get("Authorization"), body})
-		tamper := n.tamper
+		n.log = append(n.log, seen{req.Method, req.URL.Path, req.Header.Get("Authorization"), body, req.Header.Clone()})
+		tamper, refuse := n.tamper, n.refusePost
 		n.mu.Unlock()
+		if refuse != 0 && req.Method == http.MethodPost {
+			http.Error(w, "refused by the test", refuse)
+			return
+		}
 		if tamper != nil && strings.HasPrefix(req.URL.Path, "/fleet/media/") {
 			rec := httptest.NewRecorder()
 			h.ServeHTTP(rec, req)

@@ -236,6 +236,19 @@ func (r runTaskAs) Run(ctx context.Context, req core.Request) core.Result {
 	return r.s.runTask(ctx, req)
 }
 
+// BeginRemote makes the runner the remote lane's attributor: mediaremote asks its Runner for the handle
+// that writes the asker's ledger row and PAIR card for a call sent to a node, and the server's pipeline is
+// the one that does (without this the MCP doors would send the job and attribute nothing). A server with
+// no pipeline (the test seam) returns nil, which core.BeginRemote turns into the no-op handle.
+func (r runTaskAs) BeginRemote(req core.Request, route string) core.RemoteAttribution {
+	if r.s.p == nil {
+		return nil
+	}
+	return r.s.p.BeginRemote(req, route)
+}
+
+var _ core.RemoteAttributor = runTaskAs{}
+
 // withMediaPlace threads the waiter_token a queued media answer returned into the request's params,
 // so the call resumes the place in line it left (internal/gpulease/tokens.go). Absent or blank is a
 // new arrival, and params comes back untouched.
