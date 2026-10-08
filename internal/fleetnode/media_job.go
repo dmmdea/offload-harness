@@ -97,8 +97,19 @@ const mediaJobClosed = "media-job is not open on this node (it needs fleet_media
 // blanket 30 s timeouts would cut a driver video on an ordinary link (the compose-project door's reason).
 const mediaJobWindow = 15 * time.Minute
 
-// handleMediaJob checks the door and the bearer BEFORE reading the body, then decodes the typed payload
-// and joins the shared admission path.
+// mediaJobInFlightMax bounds the media-job bodies one node holds in memory at once, the stt upload door's
+// bound and for the same reason: the body (a bundle of up to fleet_media_inputs_max_mb, in base64) is read
+// and decoded BEFORE the admission gates, so without a bound N concurrent uploads hold N times the peak of
+// one. A caller over the bound waits for a slot (a waiter holds a goroutine, not a body); one that waits
+// longer than mediaJobSlotWait gets a re-placeable 503 with Retry-After.
+const mediaJobInFlightMax = sttUploadInFlightMax
+
+// mediaJobSlotWait is a var only so a test can shorten it.
+var mediaJobSlotWait = 30 * time.Second
+
+// handleMediaJob checks the door and the bearer BEFORE reading the body, takes one of the node's few
+// in-flight slots (held until the job is admitted or refused), then decodes the typed payload and joins the
+// shared admission path.
 func (s *Server) handleMediaJob(w http.ResponseWriter, r *http.Request) {
 	if !s.opts.Cfg.MediaInputsAdmissible() {
 		writeError(w, http.StatusForbidden, mediaJobClosed)
@@ -108,6 +119,12 @@ func (s *Server) handleMediaJob(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
+	// A caller that passed the bearer check holds one of the node's media-job slots from before the first
+	// body byte until the handler returns, which is every exit: see mediaJobInFlightMax.
+	if !s.takeUploadSlot(w, r, s.mediaJobSlots, mediaJobSlotWait, "media jobs") {
+		return
+	}
+	defer func() { <-s.mediaJobSlots }()
 	// Only a token holder gets the longer window; everyone else met the blanket timeouts above.
 	s.extendRead(w, mediaJobWindow, "the media-job door")
 	s.extendWrite(w, mediaJobWindow, "the media-job door")

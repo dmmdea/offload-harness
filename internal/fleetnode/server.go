@@ -243,6 +243,8 @@ type Server struct {
 	sttGate *sttGate
 	// sttUploadSlots bounds the stt uploads in flight on this node (sttUploadInFlightMax).
 	sttUploadSlots chan struct{}
+	// mediaJobSlots bounds the media-job bodies in flight on this node (mediaJobInFlightMax).
+	mediaJobSlots chan struct{}
 	// chatLane is ChatLaneAdmissible over the RESOLVED listener (C-41b) — the
 	// same one-predicate discipline as agentLane and visionLane: health
 	// publishes `chat_lane` exactly when POST /fleet/chat will admit, because
@@ -493,6 +495,7 @@ func New(runner Runner, jobs *Jobs, opts Options) *Server {
 		relayLimiter:       pairworkloads.DefaultRelayLimiter(),
 		sttGate:            newSTTGate(opts.Cfg.EffectiveSTTMaxConcurrent()),
 		sttUploadSlots:     make(chan struct{}, sttUploadInFlightMax),
+		mediaJobSlots:      make(chan struct{}, mediaJobInFlightMax),
 		chatLane:           ChatLaneAdmissible(opts.Cfg, opts.LoopbackListener),
 		rosterServes:       swapRosterServes,
 		rosterServedModels: swapRosterServedModels,
