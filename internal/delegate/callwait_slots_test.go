@@ -108,13 +108,13 @@ func TestASubtaskIsNotStartedInsideTheReserve(t *testing.T) {
 	}
 }
 
-// TestALaterChunkIsNotStartedInsideTheReserve: the same rule across the chunks of a batched call
-// (offload_research sends more subtasks than one chunk holds). The first chunk runs in two waves of
-// 2 s and uses the call's time; the second finds about 2 s left of a 3 s reserve and starts nothing, so
-// its subtasks end at once as the same defer instead of beginning in the last seconds. The scale is
-// wide on purpose: the second wave must start with more than the reserve left (it does, with a second
-// to spare) and the call must not reach its deadline first (it has two), so a loaded runner has to
-// stall for a full second to move either.
+// TestALaterChunkIsNotStartedInsideTheReserve: the same rule across the chunks of a batched call (a list
+// longer than one batch of 16, ADR 0076). The first chunk runs in two waves of 2 s and uses the call's
+// time, and the subtasks of its third wave are not started; the second chunk finds about 2 s left of a
+// 3 s reserve and starts nothing, so its subtasks end at once as the same defer instead of beginning in
+// the last seconds. The scale is wide on purpose: the second wave must start with more than the reserve
+// left (it does, with a second to spare) and the call must not reach its deadline first (it has two), so
+// a loaded runner has to stall for a full second to move either.
 func TestALaterChunkIsNotStartedInsideTheReserve(t *testing.T) {
 	withCallReserve(t, 3*time.Second)
 	cfg := testCfg(t)
@@ -127,7 +127,7 @@ func TestALaterChunkIsNotStartedInsideTheReserve(t *testing.T) {
 		}
 		return localOK(), nil
 	}
-	contracts := make([]core.AgentContract, MaxSubtasks+2)
+	contracts := make([]core.AgentContract, MaxBatchSubtasks+2)
 	for i := range contracts {
 		contracts[i] = core.AgentContract{Goal: "answer the question"}
 	}
@@ -135,15 +135,16 @@ func TestALaterChunkIsNotStartedInsideTheReserve(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunBatched: %v", err)
 	}
-	if got := started.Load(); got != int64(MaxSubtasks) {
-		t.Fatalf("the seat was started %d times, want %d (the first chunk): the second began inside the reserve", got, MaxSubtasks)
+	// Two waves of runConcurrency (4) started: route=local has no deal to size the call from.
+	if got := started.Load(); got != int64(2*runConcurrency) {
+		t.Fatalf("the seat was started %d times, want %d (two waves of the first chunk): the third wave, and the second chunk, began inside the reserve", got, 2*runConcurrency)
 	}
-	if sum.Batches != 2 || sum.Deferred != 2 {
-		t.Fatalf("summary %+v, want two chunks and the two subtasks of the second deferred", sum)
+	if sum.Batches != 2 || sum.Deferred != len(contracts)-2*runConcurrency {
+		t.Fatalf("summary %+v, want two chunks and the %d subtasks past the second wave deferred", sum, len(contracts)-2*runConcurrency)
 	}
-	for _, pr := range results[MaxSubtasks:] {
+	for _, pr := range results[2*runConcurrency:] {
 		if !pr.Result.Deferred || pr.Result.DeferClass != core.DeferClassCapacity || !strings.Contains(pr.Result.Reason, "the call's deadline left no room") {
-			t.Errorf("later-chunk result %+v, want the no-room capacity defer", pr.Result)
+			t.Errorf("later result %+v, want the no-room capacity defer", pr.Result)
 		}
 	}
 }

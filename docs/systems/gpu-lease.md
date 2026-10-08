@@ -240,7 +240,9 @@ same rule `gpulease.Acquire` already applied. Before that, every `vqa`/`ocr`/`as
 hold's whole life. A MEDIA holder is deliberately never short-circuited: its expiry is a timeout
 CEILING, not a promise. Only an
 INHERITED lease (`GPU_LEASE_EPOCH`) exempts a caller — the holder's own pid deliberately does not, or
-`fleet-serve` would un-gate itself. See
+`fleet-serve` would un-gate itself. (The vision gate applied that exemption only from 0.169.0, through
+`gpulease.Inherited`: before, `gpu reserve ... -- local-offload vqa` waited on its own lease and deferred
+`gpu_busy`.) See
 [ADR 0026](../architecture/decisions/0026-text-load-admissions-wait-for-the-media-lease.md).
 
 **Delegate placement reads a `text` reservation as "not here" (0.113.14).** `internal/delegate`

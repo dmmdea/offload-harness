@@ -146,6 +146,18 @@ changed is which of the node's numbers is a new job's. Wire: additive (absent on
 unlimited ceiling; a free worker is an explicit `0`, so a delegator never derives the wait from counters that include uncapped
 jobs), so every old/new pairing of node and delegator prices a new job at the same number ([fleet-node.md](../../systems/fleet-node.md), the health fields).
 
+## Amendment (2026-10-07): the width of a call, and the idle seat's line
+
+Two things this ADR says about a call's width changed with [ADR 0076](0076-a-calls-width-is-sized-from-its-deal-a-batch-of-up-to-16-is-one-deal-and-auto-counts-the-local-run-cap-line.md).
+The Consequences' "`runConcurrency` sibling subtasks" were four goroutines whatever the joint deal (decision 4) had committed to the
+nodes, so a deal that gave each of four nodes two subtasks ran one at a time on each. The call is now as wide as its deal:
+`dealParallelism()` sums what the deal committed to each place, counting a remote that publishes `max_concurrent_jobs` by what it
+was dealt, one that publishes none at most `runConcurrency` per node, and the local seat by `min(dealt, run-cap room)`, never below
+`runConcurrency`. And decision 1's idle seat ("an idle local node always runs the work", `gate.go`) holds for the first `room`
+subtasks of a call, not for all of them: `route=auto`'s joint deal counts what it gives an idle seat against `localRunCapRoom`,
+as the spread deal does (ADR 0063 decision 6), and deals the overflow through decision 4's ranking to the remotes with headroom.
+Eligibility, the feasibility floor and the ranking are untouched.
+
 ## Alternatives considered
 
 - **A hard refusal on the seat's `min_turn_sec`** (its max-final worst case) — REJECTED by the INV-5 rider

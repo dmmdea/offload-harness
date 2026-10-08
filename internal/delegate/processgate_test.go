@@ -87,6 +87,21 @@ func TestAdmissionCeilingIsTheQueueDepth(t *testing.T) {
 	}
 }
 
+// TestAdmissionCeilingHoldsANodeThatPublishesNothingToFour: a node that publishes neither max_queue_depth nor
+// max_concurrent_jobs is unknown. A call counts it as at most four in its width (ADR 0076), and the gate is what keeps
+// it there once the call's other legs have finished and freed their share of the semaphore.
+func TestAdmissionCeilingHoldsANodeThatPublishesNothingToFour(t *testing.T) {
+	if got := admissionCeiling(NodeView{}); got != runConcurrency {
+		t.Fatalf("admission ceiling of a node that publishes nothing = %d, want runConcurrency (%d)", got, runConcurrency)
+	}
+	if got := admissionCeiling(NodeView{MaxQueueDepth: 8}); got != 8 {
+		t.Fatalf("admission ceiling of a node that publishes only max_queue_depth 8 = %d, want 8", got)
+	}
+	if why := gateFullReason("http://old", NodeView{NodeID: "old"}); !strings.Contains(why, "it publishes no ceiling, so this process holds it to 4") {
+		t.Fatalf("gate reason = %q, want it to say the node publishes no ceiling and is held to 4", why)
+	}
+}
+
 // TestGateTurnAwayIsNoRefusalAndKeepsItsStory: the process gate turned the dispatch
 // away, so the node was never asked - the doc comments say "never a refusal", and
 // Summary.Replaced counts subtasks re-placed after a node refused them. The hold is

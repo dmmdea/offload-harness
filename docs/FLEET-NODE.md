@@ -902,7 +902,7 @@ demoted below a loaded node that does.
 Saturation is a RANKING input, not a capability: `remoteEligible` is unchanged, and a saturated node
 is still chosen when nothing better exists. The reason is that the **delegator's copy** of these
 numbers is stale by construction — the snapshot ages between the health `GET` and the dispatch `POST`
-(placement is not atomic with admission), and this run's own concurrent siblings (`runConcurrency`)
+(placement is not atomic with admission), and this run's own concurrent siblings (the call's width, `dealParallelism`)
 eat the headroom it measured, since they probe within milliseconds of each other and can all read the
 same free slot. Hard-excluding on a number that is stale by construction would strand a node that has
 since drained, on evidence that was never current; demoting costs nothing when the reading was right

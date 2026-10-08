@@ -44,10 +44,25 @@ type inflightGate struct {
 // processGate is THE gate: one per process, shared by every RunWith.
 var processGate = &inflightGate{open: map[string]int{}}
 
-// admissionCeiling is the most jobs a node will hold at once - its published
-// max_queue_depth, which counts running AND queued (the number a `503 queue full`
-// is decided on). 0 = the node published none: unknown is never a limit.
-func admissionCeiling(v NodeView) int { return v.MaxQueueDepth }
+// admissionCeiling is the most dispatches this process holds open on a node at once.
+// A node that publishes max_queue_depth is held to it: it counts running AND queued (the
+// number a `503 queue full` is decided on). A node that publishes a worker count but no
+// depth has no gate ceiling (0): the deal already holds what it commits there to the
+// node's headroom. A node that publishes NEITHER is unknown, and is held to
+// runConcurrency, the most one call ever had open on it before a call was sized from its
+// deal (ADR 0076). That width counts such a node as at most four, and the semaphore is one
+// pool for the whole call, so once the call's other legs finish only this bound keeps it
+// at four. The bound is process-wide, like the gate.
+func admissionCeiling(v NodeView) int {
+	switch {
+	case v.MaxQueueDepth > 0:
+		return v.MaxQueueDepth
+	case v.MaxConcurrentJobs > 0:
+		return 0
+	default:
+		return runConcurrency
+	}
+}
 
 // tryAcquire takes one slot on base unless the process already holds `limit` of
 // them open (limit <= 0 = no limit, the slot is only counted). release gives the
@@ -94,8 +109,12 @@ func (g *inflightGate) load(base string) int {
 // gateFullReason is the sentence a subtask carries into the capacity wait when
 // the process gate turned its dispatch away.
 func gateFullReason(base string, v NodeView) string {
-	return fmt.Sprintf("process gate: this process already holds %d dispatch(es) open on %s, at its admission ceiling (max_queue_depth %d) — waiting in line for one to finish",
-		processGate.load(base), laneID(v), admissionCeiling(v))
+	ceiling := fmt.Sprintf("max_queue_depth %d", v.MaxQueueDepth)
+	if v.MaxQueueDepth <= 0 {
+		ceiling = fmt.Sprintf("it publishes no ceiling, so this process holds it to %d", admissionCeiling(v))
+	}
+	return fmt.Sprintf("process gate: this process already holds %d dispatch(es) open on %s, at its admission ceiling (%s) — waiting in line for one to finish",
+		processGate.load(base), laneID(v), ceiling)
 }
 
 // ---- per-page retry cap ---------------------------------------------------

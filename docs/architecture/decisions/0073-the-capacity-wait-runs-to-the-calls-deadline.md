@@ -122,7 +122,10 @@ call deadline instead of a fixed TTL)", and listed the wait under "Not solved he
    saturated and backlogged readings keep the cooldown, as before.
 
 9. **A wait does not hold a run slot to the horizon while subtasks of the call have not started.** A call runs
-   `runConcurrency` (4) subtasks at a time and a waiting subtask holds its slot. If every subtask waited to the horizon,
+   `runConcurrency` (4) subtasks at a time and a waiting subtask holds its slot. *(Amended by
+   [0076](0076-a-calls-width-is-sized-from-its-deal-a-batch-of-up-to-16-is-one-deal-and-auto-counts-the-local-run-cap-line.md):
+   the 4 is the floor of a width that follows the call's deal. The rule below is stated in terms of
+   `callDeadline.unstarted()`, not of the number, and holds at any width.)* If every subtask waited to the horizon,
    four of them on a saturated fleet would hold all four slots for the rest of the call: the other four of an
    eight-subtask call, and every later chunk of a batched `offload_research`, would not start until the waiters ended, and
    would then start with less than the reserve left and be cut. The wait meant to stop capacity defers would have made
@@ -171,7 +174,8 @@ call deadline instead of a fixed TTL)", and listed the wait under "Not solved he
   so the subtasks behind them would start at once and dispatch in the same ticks, every one of them reading the same
   health and competing for the same room, and the process gate, the deal's headroom and the Retry-After pacing were all
   sized for `runConcurrency` open attempts. Capping the wait of a slot-holder at its old bound changes one number and
-  keeps all of that.
+  keeps all of that. *(The width itself is sized from the deal since ADR 0076, which is the "wider run limit is its own
+  change" the Consequences name; releasing the slot of a waiter stays rejected.)*
 
 - **Keep the configured value as a ceiling and only change the default.** Rejected: a live config that pins the value
   (the historical default written out) would keep the defect, and there is no way to tell it from a deliberate choice.

@@ -6,6 +6,83 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.169.0] - 2026-10-07 - a call is as wide as its deal, and a vision verb runs under its own lease
+
+### A call is as wide as its deal, and a research call is one deal (fleet-first, track R3; ADR 0076)
+
+- **A call is as wide as its deal, and a research call is one deal ([ADR
+  0076](docs/architecture/decisions/0076-a-calls-width-is-sized-from-its-deal-a-batch-of-up-to-16-is-one-deal-and-auto-counts-the-local-run-cap-line.md);
+  the diagnosis' F01).** One call never had more than four jobs in flight: the semaphore in `RunWith` was the constant
+  `runConcurrency = 4`, so a joint deal that committed two subtasks to each of four nodes of four slots ran one at a
+  time on each, and `RunBatched` cut a 12-page `offload_research` call into chunks of eight that ran strictly one after
+  the other, so the second chunk waited for the slowest page of the first and the call used at most four of the fleet's
+  sixteen slots. The semaphore is now `dealParallelism()`, the sum over the deal's dealt slots of what each place takes
+  at once, never below four: a remote that publishes `max_concurrent_jobs` counts every subtask it was dealt (the deal
+  already holds that to its headroom, and the process gate to its admission ceiling), a remote that publishes none
+  counts at most four per node (an unpublished ceiling is unknown, never a limit, so two such nodes give eight and a
+  call whose only remote publishes none stays at four on it), the local seat counts `min(dealt, run-cap room)`, and a
+  subtask the deal gave no place (the capacity-wait overflow, a slot a lease reserves) counts nothing, so ADR 0073's
+  rules hold at any width: a wait that holds a slot keeps its TTL while a subtask has not started, only the last waits
+  to the horizon, and nothing starts inside the reserve. `route=local` has no deal and keeps four (`route=queue` hands
+  its subtasks to the pull holders before any semaphore exists); the width is logged (`fan-out width N for M
+  subtask(s)`) when it is not four. `RunBatched` deals up to 16 subtasks as ONE joint deal through an internal `runWith`
+  that takes the subtask bound, so a research call's 12 pages are never chunked, a longer list is consecutive deals of
+  16 and `batches` counts the deals; `agent_delegate` and the `delegate` CLI verb call `RunWith` and keep their bound of
+  eight, and the tool's input schema (`maxItems` 8) is unchanged. Tests: 8 subtasks over 4 nodes of 4 slots now peak at
+  8 open jobs and 12 pages over 3 nodes of 4 at 12 in one batch, where the constant gave 4 and 4
+  (`TestACallIsAsWideAsItsDeal`, `TestRunBatchedDealsTwelvePagesAsOneBatchAcrossTheFleet`,
+  `TestRunBatchedSpreadsAResearchCallOverTheLocalSeatAndTheFleet`; the nodes hold their jobs until the peak is reached,
+  so the peak is the engine's width and not the runner's speed), the width table
+  (`TestDealParallelismSumsWhatTheDealCommittedToEachPlace`), the local seat's room
+  (`TestTheLocalSeatCountsOnlyItsRunCapRoomInTheWidth`), R1's rules at a width of six and eight
+  (`TestAWaitHoldingARunSlotOfAWideCallKeepsItsTTLWhileASubtaskIsUnstarted`,
+  `TestASubtaskBehindAWideCallIsNotStartedInsideTheReserve`, `TestAWideCallUnwindsAtTheDeadline`), and the
+  chunk-boundary tests moved from 8 to 16; each new branch mutated red.
+- **`route=auto` counts the idle local seat's run-cap line (ADR 0076; the diagnosis' F02).** The joint deal dealt every
+  subtask to an idle local seat without counting what it had committed to it: 8 subtasks, a run cap of 4 and one remote
+  with 4 free slots made 8 local and 0 remote (the spread deal on the same inputs made 4 and 4), and the overflow stood
+  in the seat's own FIFO for up to the run's wall while an eligible remote idled; concurrent callers each read the seat
+  idle at their own start. The deal now reads `localRunCapRoom` once per call and counts what it gives the idle seat
+  against it, as the spread deal counts the local seat (ADR 0063 decision 6): the seat still wins the first `room`
+  subtasks (ADR 0050 decision 1), and the rest are dealt through the unchanged `remoteEligible` gate, the backlog gate
+  and the headroom count to the remotes with room, to the capacity wait when none has, and to the seat only while no
+  remote could run the contract at all. A subtask moved off the seat says so in its placement reason (`the idle local
+  seat's run-cap line is spent by this deal (4 of 4 free slot(s) dealt; ...)`), and a layer-naming subtask the seat
+  could never take is not blamed on the line. An idle seat's call reads the fleet's health when it has more subtasks
+  than the seat's line takes; one that fits it reads none, as before. Tests:
+  `TestAutoDealCountsTheIdleLocalSeatAgainstItsRunCap` (the diagnosis' S2: 4 local, 4 remote) with its control,
+  no-eligible-remote, registered-runs, overflow and layer variants, and end to end
+  `TestAutoRunSendsTheOverflowOfAnIdleSeatToTheFleet` and
+  `TestAutoRunDoesNotReadTheFleetWhileTheIdleSeatsLineTakesEverySubtask`; each new branch mutated red.
+- Docs: ADR 0076; amendment notes in ADRs 0032, 0050, 0063 and 0073 where their text describes the old width or the idle
+  seat; `fleet-node.md` ("How wide a call is, and how a list of pages is dealt"); `OPERATOR-GUIDE.md`; the
+  `agent_delegate` tool text no longer says an idle local box always runs the work.
+- **Review fixes before release.** **(1)** A node that publishes neither ceiling is held to four open dispatches by the
+  process gate (`admissionCeiling`). The width counted it as four, but the semaphore is one pool, so once the call's
+  other legs finished it could hold every subtask dealt to it: 8 of a 12-page call in
+  `TestANodeThatPublishesNoCeilingIsHeldToFourWhenTheCallsOtherLegsFinish`. **(2)** A local seat with no run cap
+  (`fleet_max_concurrent_jobs` < 0) counts at most four toward the width, instead of everything dealt to it. Each fix
+  was mutated red. Stated in ADR 0076's consequences: an `auto` call on an idle seat with more subtasks than the seat's
+  room reads the fleet before it starts; sheddable overflow past the seat's line is shed when no remote has an idle slot
+  (it used to queue in the seat's FIFO); a node struck during a call keeps its share of pages 9 to 12 (they were a
+  second deal).
+
+### A vision verb run under its own GPU lease does not wait for that lease
+
+- **A vision verb run under its own GPU lease no longer waits for that lease.** `gpu reserve ... -- local-offload
+  vqa|ocr|assess-image` is the command the lease was taken for, and the vision gate waited on it anyway: it read the
+  held lease as a generation job, polled `vision_gpu_wait_sec` and deferred `gpu_busy`, so a measured vision run (the
+  2026-09-12 vision bake) could not queue like every other GPU job and had to stop the fleet node instead. The gate now
+  drops the lease whose epoch is this process's `GPU_LEASE_EPOCH` before it decides, the rule `gpu-lease.md` already
+  stated for it and the one the render runners (`ambientLeaseEnv`) and the delegator (`ForeignFence`) apply. The
+  comparison moved into one helper, `gpulease.Inherited`, that the delegator now calls too. Per lease and by epoch: a
+  child of another lease, or a stale variable from a lease since handed on, still waits. Tests:
+  `TestVisionUnderItsOwnLeaseDoesNotWaitForIt` (mutated red: without the fix it waits the full window and defers),
+  `TestVisionUnderAnotherLeasesEpochStillWaits`, `TestInheritedComparesTheEpoch`.
+- Test: `TestVisionGPULockReleasedMidWaitProceeds` now releases its lock the way production's `removeClaim` does,
+  retrying a Windows sharing violation while the gate's poll holds `meta.json` open. Under load it failed 4 times in 150
+  (`-cpu 1`); it now passes 300 of 300.
+
 ## [0.168.0] - 2026-10-07 - the display layer opens under the presence guard and leaves when the operator returns
 
 ### The display layer opens under its presence guard and leaves when the operator returns (ADR 0075)

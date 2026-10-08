@@ -9,8 +9,6 @@ package delegate
 
 import (
 	"fmt"
-	"os"
-	"strconv"
 	"strings"
 	"time"
 
@@ -300,10 +298,10 @@ func placementUtil(v NodeView) (int, bool) {
 //   - The snapshot ages between the health GET and the dispatch POST. Placement
 //     is not atomic with admission, and any node can admit or finish jobs in
 //     that gap in either direction.
-//   - This run's own siblings eat the headroom it measured. Run fans out at
-//     runConcurrency, and those subtasks probe within milliseconds of each
-//     other — so several of them can read the same free slot and then compete
-//     for it.
+//   - This run's own siblings eat the headroom it measured. Run fans out as
+//     wide as its deal (dealParallelism, never below runConcurrency), and those
+//     subtasks probe within milliseconds of each other — so several of them can
+//     read the same free slot and then compete for it.
 //
 // Hard-excluding on a number that is stale by construction would strand a node
 // that has since drained, on evidence that was never current. Demoting costs
@@ -1031,17 +1029,12 @@ func ForeignFence(info gpulease.Info) (bool, string) {
 }
 
 // inheritedLease reports whether this process runs under the ONE lease info
-// describes: GPU_LEASE_EPOCH (threaded to children by gpu reserve and the
-// pipeline's ambient lease env) equals that lease's epoch. Callers with several
-// live leases walk Info.Each and ask it of each; "inside any live lease" is not an
-// exemption from every other lease's fence.
+// describes (gpulease.Inherited, the one comparison every gate that exempts the
+// holder's own child shares). Callers with several live leases walk Info.Each and
+// ask it of each; "inside any live lease" is not an exemption from every other
+// lease's fence.
 func inheritedLease(info gpulease.Info) bool {
-	raw := strings.TrimSpace(os.Getenv("GPU_LEASE_EPOCH"))
-	if raw == "" {
-		return false
-	}
-	epoch, err := strconv.ParseUint(raw, 10, 64)
-	return err == nil && epoch != 0 && epoch == info.Epoch
+	return gpulease.Inherited(info)
 }
 
 // HolderLine names a lease holder for a placement reason: class, pid, the

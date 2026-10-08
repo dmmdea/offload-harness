@@ -186,11 +186,13 @@ func TestHandleAgentDelegateDeadlineCanBeSwitchedOff(t *testing.T) {
 	}
 }
 
-// TestHandleResearchReturnsFinishedDigestsAtTheCallDeadline: nine pages run as
-// two chunks (8 + 1). The last page of chunk one blocks; at the deadline the seven
-// digests come back, that page and the page of the second chunk (which never
-// started) are call-deadline defers counting the whole call, and the body keeps
-// its C-75 shape (digests before sources, not an error).
+// TestHandleResearchReturnsFinishedDigestsAtTheCallDeadline: nine pages are ONE
+// deal (ADR 0076: up to 16 are never chunked, and this door allows 12), and
+// route=local has no deal to size the call from, so four run at a time. Pages 4 to 7
+// block and hold all four slots, so pages 8 and 9 never start. At the deadline the
+// three digests come back, the four blocked pages and the two that never started are
+// call-deadline defers counting the whole call, and the body keeps its C-75 shape
+// (digests before sources, not an error).
 func TestHandleResearchReturnsFinishedDigestsAtTheCallDeadline(t *testing.T) {
 	var cancelled atomic.Int64
 	var ran atomic.Int64
@@ -200,7 +202,7 @@ func TestHandleResearchReturnsFinishedDigestsAtTheCallDeadline(t *testing.T) {
 		if len(c.Context) > 0 {
 			name = c.Context[0].Name
 		}
-		if strings.HasPrefix(name, "08-") {
+		if page := name[:min(len(name), 3)]; page >= "04-" && page <= "07-" {
 			c.Goal = "slow page"
 		} else {
 			c.Goal = "fast page"
@@ -227,7 +229,7 @@ func TestHandleResearchReturnsFinishedDigestsAtTheCallDeadline(t *testing.T) {
 		t.Fatalf("the call returned after %s, want about the 1s deadline", elapsed)
 	}
 	if res.IsError {
-		t.Fatal("IsError = true on a research call that returned seven digests")
+		t.Fatal("IsError = true on a research call that returned three digests")
 	}
 	raw := res.Content[0].(*mcp.TextContent).Text
 	if i, j := strings.Index(raw, `"results"`), strings.Index(raw, `"sources"`); i < 0 || j < 0 || i > j {
@@ -235,22 +237,22 @@ func TestHandleResearchReturnsFinishedDigestsAtTheCallDeadline(t *testing.T) {
 	}
 	m := decodeResult(t, res)
 	summary, _ := m["summary"].(map[string]any)
-	if summary["succeeded"] != float64(7) || summary["deferred"] != float64(2) || summary["skipped"] != nil {
-		t.Fatalf("summary = %v, want 7 digests and 2 call-deadline defers (deferred, not skipped)", summary)
+	if summary["succeeded"] != float64(3) || summary["deferred"] != float64(6) || summary["skipped"] != nil || summary["batches"] != float64(1) {
+		t.Fatalf("summary = %v, want 3 digests and 6 call-deadline defers (deferred, not skipped) from ONE batch", summary)
 	}
 	results, _ := m["results"].([]any)
 	if len(results) != 9 {
 		t.Fatalf("results = %d entries, want one per page (9)", len(results))
 	}
-	for _, i := range []int{7, 8} {
+	for i := 3; i < 9; i++ {
 		r, _ := results[i].(map[string]any)
 		reason, _ := r["reason"].(string)
-		if r["deferred"] != true || r["defer_class"] != core.DeferClassBudget || !strings.HasPrefix(reason, "call deadline reached; 2 unfinished") {
-			t.Fatalf("result %d = %v, want the call-deadline defer counting both chunks", i, r)
+		if r["deferred"] != true || r["defer_class"] != core.DeferClassBudget || !strings.HasPrefix(reason, "call deadline reached; 6 unfinished") {
+			t.Fatalf("result %d = %v, want the call-deadline defer counting the whole call (6 unfinished)", i, r)
 		}
 	}
-	if ran.Load() != 8 {
-		t.Fatalf("the seat ran %d pages, want 8: the second chunk must not start after the deadline", ran.Load())
+	if ran.Load() != 7 {
+		t.Fatalf("the seat ran %d pages, want 7: pages 8 and 9 had no slot and must not start after the deadline", ran.Load())
 	}
 }
 

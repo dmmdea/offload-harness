@@ -427,6 +427,21 @@ func (i Info) HoldsEpoch(epoch uint64) bool {
 	return false
 }
 
+// Inherited reports whether this process runs under the ONE lease l describes: GPU_LEASE_EPOCH
+// (threaded to its command by gpu reserve, and to the render runners by the pipeline's ambient
+// lease env) equals that lease's epoch. The epoch is compared, never presence-checked, so a
+// stale variable from a lease since handed on exempts nothing. Callers with several live leases
+// ask it of each (Each, Where): a child of lease A is inside A and no other lease, so "inside
+// any live lease" is never an exemption from every other lease.
+func Inherited(l Info) bool {
+	raw := strings.TrimSpace(os.Getenv("GPU_LEASE_EPOCH"))
+	if raw == "" {
+		return false
+	}
+	epoch, err := strconv.ParseUint(raw, 10, 64)
+	return err == nil && epoch != 0 && epoch == l.Epoch
+}
+
 // Options configure an acquisition.
 type Options struct {
 	Reason string
