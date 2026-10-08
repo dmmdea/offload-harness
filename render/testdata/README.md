@@ -58,6 +58,21 @@ using CPU` (`backend_fit.cpp:446`) and the plan line `-> compute <backend>, para
 `load_backend: loaded CPU backend` (ggml always registers its CPU backend) are not
 placements.
 
+## screen-parity-table.json
+
+One list of backend values and extra-args elements for BOTH screens: `internal/config`
+(`CPUBackendRefusal`, `ScreenExtraArgs`) and `render/igpu-engine.mjs` (`refuseCpuBackend`,
+`screenExtraArgs`) must agree on every row, and both test files read this file. It pins the
+empty per-module parts (`vulkan0,`, `,vulkan0`, `vulkan0&`) and the Unicode spaces
+(`--threads=<NBSP>cpu`) that the Go screen once let through.
+
+## clock-preload.cjs
+
+A test-only `node --require` preload for `render/igpu-deadline.test.mjs`: it busy-waits before the
+runner starts, moves the clock an hour ahead after an exact `spawn` / `spawnSync` (matched by a
+needle in its command line), and records the `timeout` option of every `spawnSync`. Never used by
+a runner.
+
 ## token-cap-table.json
 
 The shared inputs and expected latent-token counts for the token cap. `render/igpu-engine.test.mjs`
