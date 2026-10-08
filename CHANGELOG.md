@@ -249,6 +249,13 @@ each guard was broken once at its real call site and seen red.
   `TestABoxWithoutAnimategenFramesKeepsTheRunnersDefault`, `TestAnimategenFramesDoesNotTouchTheComfyUIAnimateRoute`, the seeded values
   in `TestAmdGcnMediaSeedValues` and the negative-value case of `TestNegativeRecipeValuesAreRefused`. With the lane's default reverted
   to the runner's, the first two fail with the review's own refusal (`288x512x49 + reference needs 8064 latent tokens ... cap is 5800`).
+- **`render/igpu-runners-main.test.mjs` passes on Linux (REL2).** The test-only stub engine replayed its log with
+  `process.stderr.write` and then called `process.exit()`; on POSIX a pipe write is asynchronous, so the tail of the 21 KB real-engine
+  fixtures was lost (about 8 KB reached the runner) and the runner's positive GPU-evidence guard read a healthy run as `CPU_PLACEMENT`
+  ("no GPU evidence"). Windows makes its stdio pipes blocking, which is why the Windows gate was green. The stub now writes its log with
+  a synchronous `writeSync(2, ...)` that retries a momentarily full pipe (EAGAIN) and stops quietly when the reader is gone (EPIPE).
+  The production runners were never at fault (they read until the stream closes). Run under Linux (Node 22.23.1): 2 of 20 failed before
+  (`--offload-to-cpu` sanctioned spill, device reset), 20 of 20 pass after, none skipped; Windows (Node 26.7.0) stays 20 of 20.
 
 ### Changed — `--offload-to-cpu` is sanctioned spill on the iGPU media engines
 

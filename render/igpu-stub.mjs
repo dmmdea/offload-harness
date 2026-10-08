@@ -26,7 +26,7 @@
 //
 // Dependency-free (Node 18+ built-ins only).
 import { spawnSync } from "node:child_process";
-import { appendFileSync, chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
@@ -192,6 +192,27 @@ function argAfter(argv, flag) {
   return i >= 0 ? argv[i + 1] : undefined;
 }
 
+// writeStderr writes text to fd 2 synchronously and in full. process.stderr.write on a pipe is
+// asynchronous on POSIX (Windows makes its stdio pipes blocking), and this stub calls process.exit()
+// right after its log: the tail of a long log was dropped (about 8 KB of a 21 KB real-engine log reached
+// the runner on Linux), so the runner's positive GPU-evidence guard read a healthy run as
+// "no GPU evidence" and failed it CPU_PLACEMENT. A momentarily full non-blocking pipe (EAGAIN) is
+// retried, never abandoned; a reader that has gone (EPIPE: the runner killed this engine on purpose)
+// ends the output quietly.
+function writeStderr(text) {
+  const buf = Buffer.from(text);
+  let off = 0;
+  while (off < buf.length) {
+    try {
+      off += writeSync(2, buf, off, buf.length - off);
+    } catch (e) {
+      if (e.code === "EPIPE") return;
+      if (e.code !== "EAGAIN") throw e;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5); // let the reader drain the pipe
+    }
+  }
+}
+
 function runAsEngine() {
   const spec = JSON.parse(readFileSync(process.argv[2], "utf8"));
   const argv = process.argv.slice(3);
@@ -206,7 +227,7 @@ function runAsEngine() {
   const lines = [];
   if (spec.logFile) lines.push(...readFileSync(spec.logFile, "utf8").split(/\r\n|\r|\n/));
   if (spec.log) lines.push(...spec.log);
-  for (const l of lines) process.stderr.write(l + "\n");
+  writeStderr(lines.map((l) => l + "\n").join(""));
 
   const w = spec.writes;
   if (w && w.kind === "gray_png") {
@@ -214,7 +235,7 @@ function runAsEngine() {
     const input = argAfter(argv, "--input");
     // a depth map at the model's own working size, not the frame's
     writeFileSync(out, grayPng(Number(w.width) || 40, Number(w.height) || 72));
-    if (input && !existsSync(input)) process.stderr.write(`stub: input ${input} does not exist\n`);
+    if (input && !existsSync(input)) writeStderr(`stub: input ${input} does not exist\n`);
   } else if (w && w.kind === "wav") {
     writeFileSync(argAfter(argv, "--out"), pcmWav(w));
   } else if (w && w.kind === "video") {
@@ -226,7 +247,7 @@ function runAsEngine() {
     const src = w.black ? `color=c=black:s=${width}x${height}:r=${fps}` : `testsrc2=s=${width}x${height}:r=${fps}`;
     const r = spawnSync(w.ffmpeg, ["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", src, "-frames:v", String(frames), "-an", out], { encoding: "utf8" });
     if (r.status !== 0) {
-      process.stderr.write("stub: ffmpeg failed: " + r.stderr + "\n");
+      writeStderr("stub: ffmpeg failed: " + r.stderr + "\n");
       process.exit(99);
     }
   }
