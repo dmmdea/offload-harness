@@ -6,6 +6,23 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.176.0] - 2026-10-09 - the render helper's drain sees a vLLM seat's requests
+
+### Fixed — the render helper's drain reads a vLLM seat's requests, so a media lease no longer unloads it under a request in flight
+
+- **`render/gpu-lock.mjs` `quiesceLlamaSwap` read only llama-server `/slots`.** A vLLM seat has no `/slots` route, so a loaded
+  vLLM seat was named unknown, given the brief grace, and unloaded by `freeLlamaSwap` ("proceeding without a verified
+  drain") under a request in flight: on the reference 3-card box, 2026-10-09 16:56 UTC, a card-scoped media lease cleared
+  the two-card 27B vLLM seat 4 s after it started and llama-swap answered the running chat completion 500 "unspecific
+  error: aborted". The drain now reads `/upstream/<id>/metrics` when `/slots` is absent (404 or 501) and sums the same
+  gauges the Go-side drain reads (`internal/seatload.InflightGauges`: `vllm:num_requests_running` and `_waiting`,
+  `llamacpp:requests_processing` and `_deferred`); a seat that answers neither, or whose exposition carries none of them,
+  stays unknown and never reads as idle. Tests: `parseInflightMetrics` on labelled float samples, a vLLM seat drained
+  through `/metrics`, a seat answering neither route named unknown, an exposition without the gauges named unknown.
+  Not changed here: the helper still clears every non-keep-set model whatever card it sits on, and a media lease is not
+  exclusive, so a text seat reloads under it between renders; both are design items for a later release. A raw vLLM batch
+  client that wants never to be drained at all holds `gpu reserve --class text --cards ...` around its job.
+
 ## [0.175.0] - 2026-10-09 - a RAM-spill MoE is the 6 GB node's agent seat, and the memory stack gains EmbeddingGemma-2
 
 ### Added — ampere-6's agent seat is Qwen3.6-35B-A3B, a RAM-spill MoE, on a box with 28 GB or more of RAM (ADR 0080)
