@@ -302,3 +302,134 @@ func TestPrintCardTableNotesAnUndeclaredComfyOrderAndTheDeclaredOne(t *testing.T
 		t.Errorf("an error is said, not hidden:\n%s", text)
 	}
 }
+
+// useSeatActivity makes the activity read behind `gpu status` report the agent seat as seat says
+// (call it after useQuietStatus, which installs the synthetic idle host it adds to).
+func useSeatActivity(t *testing.T, seat gpuactivity.SeatState) {
+	t.Helper()
+	prev := statusActivityFn
+	statusActivityFn = func(ctx context.Context, o gpuactivity.Options) gpuactivity.View {
+		v := prev(ctx, o)
+		v.Seat = seat
+		return v
+	}
+	t.Cleanup(func() { statusActivityFn = prev })
+}
+
+// useActivityHeld makes the activity read report a held card, as it would if a lease was taken
+// between the verb's own lease read and the snapshot's.
+func useActivityHeld(t *testing.T) {
+	t.Helper()
+	prev := statusActivityFn
+	statusActivityFn = func(ctx context.Context, o gpuactivity.Options) gpuactivity.View {
+		v := prev(ctx, o)
+		v.Held = true
+		return v
+	}
+	t.Cleanup(func() { statusActivityFn = prev })
+}
+
+// The warm-owed marker means "the seat was cleared for a lease and nobody has loaded it back".
+// Once the card is free and the seat is observed loaded and settled, the debt is moot, whoever
+// loaded it (a failed warm-back whose load went through anyway, another client's request): the
+// stale marker made the next `--unload-seat` wrapper warm a seat that was cold when its lease
+// began, and nothing else ever cleared it. `gpu status` is where the seat's state is read, so it
+// clears the marker it can prove stale, text and JSON alike.
+func TestGPUStatusClearsAnOwedMarkerForASettledLoadedSeat(t *testing.T) {
+	cfg, m := scopedLeaseFixture(t)
+	useQuietStatus(t, statusCards(), nil)
+	useSeatActivity(t, gpuactivity.SeatState{Name: "Seat", Loaded: true}) // the marker's name differs in case only
+	if err := m.MarkSeatWarmOwed("seat"); err != nil {
+		t.Fatal(err)
+	}
+	out := captureStdout(t, func() {
+		if err := runGPUStatus([]string{"--config", cfg}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if strings.Contains(out, "warm-back owed") {
+		t.Errorf("a loaded seat on a free card owes nothing, and status must not say it does:\n%s", out)
+	}
+	if owed := m.SeatWarmOwed(); owed != "" {
+		t.Errorf("status must clear the marker it proved stale, owed=%q", owed)
+	}
+
+	if err := m.MarkSeatWarmOwed("seat"); err != nil {
+		t.Fatal(err)
+	}
+	out = captureStdout(t, func() {
+		if err := runGPUStatus([]string{"--config", cfg, "--json"}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(out), &doc); err != nil {
+		t.Fatalf("--json must be one JSON document: %v\n%s", err, out)
+	}
+	if got := doc["seat_warm_owed"]; got != "" {
+		t.Errorf("the JSON must report the marker after the clear, got seat_warm_owed=%v", got)
+	}
+	if owed := m.SeatWarmOwed(); owed != "" {
+		t.Errorf("the JSON verb clears too, owed=%q", owed)
+	}
+}
+
+// Every condition of the clear is load-bearing: a marker is kept (and still printed) unless the
+// card is free of every lease AND the seat it names is read loaded and settled. A held card is
+// the lease's own debt, a seat still starting or stopping has not settled, an unreadable seat
+// proves nothing, and another seat's state says nothing about this one.
+func TestGPUStatusKeepsAnOwedMarkerUnlessTheCardIsFreeAndTheSeatIsSettledLoaded(t *testing.T) {
+	loaded := gpuactivity.SeatState{Name: "seat", Loaded: true}
+	cases := []struct {
+		name    string
+		seat    gpuactivity.SeatState
+		lease   func(t *testing.T, m *gpulease.Manager)
+		actHeld bool // the activity read saw a lease the verb's own read did not
+	}{
+		{name: "the seat is cold", seat: gpuactivity.SeatState{Name: "seat"}},
+		{name: "the seat is starting", seat: gpuactivity.SeatState{Name: "seat", Loaded: true, Starting: true}},
+		{name: "the seat is stopping", seat: gpuactivity.SeatState{Name: "seat", Loaded: true, Stopping: true}},
+		{name: "the seat could not be read", seat: gpuactivity.SeatState{Name: "seat", Loaded: true, Err: "llama-swap /running: status 503"}},
+		{name: "another seat is the one loaded", seat: gpuactivity.SeatState{Name: "other-seat", Loaded: true}},
+		{name: "a lease holds the card", seat: loaded, lease: func(t *testing.T, m *gpulease.Manager) {
+			if _, err := m.TryAcquire(gpulease.ClassText, gpulease.Options{Reason: "holder", TTL: time.Hour}); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "the activity read saw a lease", seat: loaded, actHeld: true},
+		{name: "several card leases are live", seat: loaded, lease: func(t *testing.T, m *gpulease.Manager) {
+			for _, card := range []string{"gpu-aaaa0000-x", "gpu-cccc0000-x"} {
+				if _, err := m.TryAcquire(gpulease.ClassMedia, gpulease.Options{Reason: "render " + card, Devices: []string{card}, TTL: time.Hour}); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, m := scopedLeaseFixture(t)
+			useQuietStatus(t, statusCards(), nil)
+			useSeatActivity(t, tc.seat)
+			if tc.actHeld {
+				useActivityHeld(t)
+			}
+			if tc.lease != nil {
+				tc.lease(t, m)
+			}
+			if err := m.MarkSeatWarmOwed("seat"); err != nil {
+				t.Fatal(err)
+			}
+			out := captureStdout(t, func() {
+				if err := runGPUStatus([]string{"--config", cfg}); err != nil {
+					t.Fatal(err)
+				}
+			})
+			if owed := m.SeatWarmOwed(); owed != "seat" {
+				t.Errorf("the marker must stay, owed=%q", owed)
+			}
+			if !strings.Contains(out, "seat warm-back owed: seat") {
+				t.Errorf("a marker that stays is still printed:\n%s", out)
+			}
+		})
+	}
+}

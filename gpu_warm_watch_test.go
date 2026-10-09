@@ -3,8 +3,11 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -21,8 +24,12 @@ func TestWarmWatchesALoadThatOutlastsLlamaSwapsHealthWait(t *testing.T) {
 	t.Cleanup(func() { warmWatch, warmWatchEvery = old, oldEvery })
 	var state atomic.Value // "", "starting", "ready"
 	state.Store("starting")
+	var hits atomic.Int32
 	mux := http.NewServeMux()
-	mux.HandleFunc("/upstream/seat/health", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(500) })
+	mux.HandleFunc("/upstream/seat/health", func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.WriteHeader(500)
+	})
 	mux.HandleFunc("/running", func(w http.ResponseWriter, r *http.Request) {
 		var running []map[string]string
 		if s := state.Load().(string); s != "" {
@@ -49,6 +56,7 @@ func TestWarmWatchesALoadThatOutlastsLlamaSwapsHealthWait(t *testing.T) {
 	}
 	// Nothing loading after the 5xx: the failure, at once.
 	state.Store("")
+	hits.Store(0)
 	start = time.Now()
 	err := warmSeat(context.Background(), srv.Client(), srv.URL, "seat")
 	if err == nil || !strings.Contains(err.Error(), "not loading") {
@@ -57,11 +65,407 @@ func TestWarmWatchesALoadThatOutlastsLlamaSwapsHealthWait(t *testing.T) {
 	if time.Since(start) > 500*time.Millisecond {
 		t.Fatal("a seat that is not loading must fail without waiting out the watch")
 	}
+	// ...and without re-sending the load: a bare 500 is not a reload.
+	if n := hits.Load(); n != 1 {
+		t.Fatalf("a bare 500 over a cold seat is not retried: want 1 health request, got %d", n)
+	}
 	// A load that never becomes ready fails at the watch bound.
 	state.Store("starting")
 	warmWatch = 150 * time.Millisecond
 	err = warmSeat(context.Background(), srv.Client(), srv.URL, "seat")
 	if err == nil || !strings.Contains(err.Error(), "did not become ready") {
 		t.Fatalf("a load that never finishes must fail at the watch bound, got %v", err)
+	}
+}
+
+// llama-swap -watch-config reloads on any config write: the warm's health request, parked in the
+// old router, is answered HTTP 500 "<router> is shutting down" and /running speaks for the new,
+// cold server. The load was never refused, it was interrupted: the warm re-sends it.
+func TestWarmSurvivesAReloadWhoseOldRouterAnswersShuttingDown500(t *testing.T) {
+	notes := fastWarmRetry(t, 5*time.Second)
+	f := &warmOrderSwap{drainSwap: &drainSwap{}, reloadFails: 2}
+	srv := reloadingSwap(t, f)
+	if err := warmSeat(testCtx(t), srv.Client(), srv.URL, "seat"); err != nil {
+		t.Fatalf("a warm across a reload must succeed: %v", err)
+	}
+	if hits, warms := f.healthHits.Load(), f.warms.Load(); hits != 3 || warms != 1 {
+		t.Fatalf("two interrupted requests and one that loaded: health requests=%d (want 3) loads=%d (want 1)", hits, warms)
+	}
+	got := notes.all()
+	if len(got) != 1 || !strings.Contains(got[0], "reload") || !strings.Contains(got[0], "seat") {
+		t.Fatalf("the retry says so once, naming the seat and the reload: %q", got)
+	}
+}
+
+// A full restart drops the listener: the health request dies with a transport error. The warm
+// re-sends the load to the restarted server instead of failing on the first EOF.
+func TestWarmRetriesATransportErrorAcrossARestart(t *testing.T) {
+	fastWarmRetry(t, 5*time.Second)
+	f := &warmOrderSwap{drainSwap: &drainSwap{}, reloadFails: 2, reloadHijack: true}
+	srv := reloadingSwap(t, f)
+	if err := warmSeat(testCtx(t), srv.Client(), srv.URL, "seat"); err != nil {
+		t.Fatalf("a warm across a dropped connection must succeed: %v", err)
+	}
+	if hits, warms := f.healthHits.Load(), f.warms.Load(); hits != 3 || warms != 1 {
+		t.Fatalf("health requests=%d (want 3) loads=%d (want 1)", hits, warms)
+	}
+}
+
+// While the whole server is down /running is as unreachable as the health route; an unreadable
+// /running during a recovery is "not up yet", not "wait for a load nobody started".
+func TestWarmRetriesThroughAnUnreadableRunningWhileTheServerIsDown(t *testing.T) {
+	fastWarmRetry(t, 5*time.Second)
+	f := &warmOrderSwap{drainSwap: &drainSwap{}, reloadFails: 2, reloadHijack: true, runningDownUntilHit: 3}
+	srv := reloadingSwap(t, f)
+	start := time.Now()
+	if err := warmSeat(testCtx(t), srv.Client(), srv.URL, "seat"); err != nil {
+		t.Fatalf("a warm across a restart must succeed: %v", err)
+	}
+	if took := time.Since(start); took > time.Second {
+		t.Fatalf("an unreadable /running must not be waited out like a load (took %s)", took)
+	}
+	if hits := f.healthHits.Load(); hits != 3 {
+		t.Fatalf("health requests=%d (want 3)", hits)
+	}
+}
+
+// The status set that means "the server is going away or not there yet" is 502, 503 and 504; it
+// is retried. A 404 is the server answering that it does not know the seat: not retried, and not
+// a warm either (see the next test).
+func TestWarmRetriesA502And503ButNotA404(t *testing.T) {
+	for _, code := range []int{http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout} {
+		t.Run(strconv.Itoa(code), func(t *testing.T) {
+			fastWarmRetry(t, 5*time.Second)
+			f := &warmOrderSwap{drainSwap: &drainSwap{}, reloadFails: 1, reloadStatus: code, reloadBody: "upstream gone"}
+			srv := reloadingSwap(t, f)
+			if err := warmSeat(testCtx(t), srv.Client(), srv.URL, "seat"); err != nil {
+				t.Fatalf("a %d is retried and the retry loads the seat: %v", code, err)
+			}
+			if hits, warms := f.healthHits.Load(), f.warms.Load(); hits != 2 || warms != 1 {
+				t.Fatalf("health requests=%d (want 2) loads=%d (want 1)", hits, warms)
+			}
+		})
+	}
+	t.Run("404", func(t *testing.T) {
+		fastWarmRetry(t, 5*time.Second)
+		f := &warmOrderSwap{drainSwap: &drainSwap{}, reloadFails: 1, reloadStatus: http.StatusNotFound, reloadBody: "model not found"}
+		srv := reloadingSwap(t, f)
+		err := warmSeat(testCtx(t), srv.Client(), srv.URL, "seat")
+		if err == nil || !strings.Contains(err.Error(), "404") {
+			t.Fatalf("a 404 over a cold seat is not retried and not a warm, got %v", err)
+		}
+		if hits := f.healthHits.Load(); hits != 1 {
+			t.Fatalf("a 404 is not retried: health requests=%d (want 1)", hits)
+		}
+	})
+}
+
+// A status below 500 used to be "success" whatever it said: a seat renamed or removed by the very
+// config edit that reloaded llama-swap answers 404 "model not found", and the warm printed
+// "warmed back" and cleared its marker for a seat that never loaded (409 and 429 the same). The
+// verdict now matches what the seat is doing: ready is a warm, starting is a load to watch, cold
+// is the failure, named with the status and what the server said.
+func TestWarmDoesNotTakeA4xxForAWarmSeat(t *testing.T) {
+	t.Run("cold", func(t *testing.T) {
+		fastWarmRetry(t, 5*time.Second)
+		f := &warmOrderSwap{drainSwap: &drainSwap{}, reloadFails: 1, reloadStatus: http.StatusNotFound, reloadBody: `{"error":"could not find real modelID for seat"}`}
+		srv := reloadingSwap(t, f)
+		err := warmSeat(testCtx(t), srv.Client(), srv.URL, "seat")
+		if err == nil {
+			t.Fatal("a 404 over a seat that is not loaded is not a warm")
+		}
+		for _, want := range []string{"status 404", "could not find real modelID", "not loading"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("the failure must contain %q, got %v", want, err)
+			}
+		}
+		if f.healthHits.Load() != 1 || f.warms.Load() != 0 {
+			t.Errorf("one request, no load: health requests=%d loads=%d", f.healthHits.Load(), f.warms.Load())
+		}
+	})
+	t.Run("ready", func(t *testing.T) {
+		fastWarmRetry(t, 5*time.Second)
+		f := &warmOrderSwap{drainSwap: &drainSwap{}, reloadFails: 1, reloadStatus: http.StatusTooManyRequests, reloadBody: "busy"}
+		f.loaded.Store(true) // another client loaded it
+		srv := reloadingSwap(t, f)
+		if err := warmSeat(testCtx(t), srv.Client(), srv.URL, "seat"); err != nil {
+			t.Fatalf("a 429 over a seat that is loaded and ready is a warm seat: %v", err)
+		}
+		if f.healthHits.Load() != 1 {
+			t.Errorf("health requests=%d (want 1)", f.healthHits.Load())
+		}
+	})
+	t.Run("starting", func(t *testing.T) {
+		fastWarmRetry(t, 5*time.Second)
+		f := &warmOrderSwap{drainSwap: &drainSwap{}, reloadFails: 1, reloadStatus: http.StatusConflict, reloadBody: "busy"}
+		f.loaded.Store(true)
+		f.starting.Store(true)
+		srv := reloadingSwap(t, f)
+		go func() {
+			time.Sleep(100 * time.Millisecond)
+			f.starting.Store(false)
+		}()
+		start := time.Now()
+		if err := warmSeat(testCtx(t), srv.Client(), srv.URL, "seat"); err != nil {
+			t.Fatalf("a load in progress is watched to its end: %v", err)
+		}
+		if time.Since(start) < 80*time.Millisecond {
+			t.Errorf("the warm must wait for the load that was starting, took %s", time.Since(start))
+		}
+	})
+	t.Run("unreadable", func(t *testing.T) {
+		fastWarmRetry(t, 5*time.Second)
+		f := &warmOrderSwap{drainSwap: &drainSwap{}, reloadFails: 1, reloadStatus: http.StatusNotFound, reloadBody: "nope", runningDownUntilHit: 1 << 20}
+		srv := reloadingSwap(t, f)
+		start := time.Now()
+		err := warmSeat(testCtx(t), srv.Client(), srv.URL, "seat")
+		if err == nil || !strings.Contains(err.Error(), "status 404") || !strings.Contains(err.Error(), "could not be read") {
+			t.Fatalf("a 404 with no readable seat state is a failure that says so, got %v", err)
+		}
+		if time.Since(start) > time.Second {
+			t.Errorf("a 404 must not wait out the watch for a seat it cannot read, took %s", time.Since(start))
+		}
+	})
+	t.Run("2xx is a warm", func(t *testing.T) {
+		fastWarmRetry(t, 5*time.Second)
+		f := &warmOrderSwap{drainSwap: &drainSwap{}}
+		srv := reloadingSwap(t, f)
+		if err := warmSeat(testCtx(t), srv.Client(), srv.URL, "seat"); err != nil {
+			t.Fatalf("a 200 is the load: %v", err)
+		}
+	})
+}
+
+// The retry class is narrow on purpose. A bare 500 is how llama-swap reports a start that failed
+// (the engine exited, the health check timed out): re-sending that load is a second failed load.
+// Only a signature of a reload (or a restart) earns the re-send, so a broken seat still fails at
+// once, with what the server said.
+func TestWarmDoesNotRetryAPlainFiveHundredWithNothingLoading(t *testing.T) {
+	fastWarmRetry(t, 5*time.Second)
+	f := &warmOrderSwap{drainSwap: &drainSwap{}, reloadFails: 1, reloadStatus: http.StatusInternalServerError,
+		reloadBody: `{"error":{"message":"unspecific error: upstream command exited prematurely but successfully"}}`}
+	srv := reloadingSwap(t, f)
+	start := time.Now()
+	err := warmSeat(testCtx(t), srv.Client(), srv.URL, "seat")
+	if err == nil || !strings.Contains(err.Error(), "not loading") || !strings.Contains(err.Error(), "exited prematurely") {
+		t.Fatalf("a bare 500 over a cold seat fails as not loading, with the server's words: %v", err)
+	}
+	if took := time.Since(start); took > 500*time.Millisecond {
+		t.Fatalf("a bare 500 over a cold seat must fail at once, took %s", took)
+	}
+	if hits := f.healthHits.Load(); hits != 1 {
+		t.Fatalf("a bare 500 is not retried: health requests=%d (want 1)", hits)
+	}
+}
+
+// Once a reload has been seen the recovery is a window, not a single event: the new server's
+// first start can fail while the old process still holds the port or the card, and that answer
+// is a bare 500 with no reload words in it. Inside the grace it is retried too.
+func TestWarmKeepsRetryingAnyFiveHundredInsideTheGraceOnceAReloadWasSeen(t *testing.T) {
+	fastWarmRetry(t, 5*time.Second)
+	f := &warmOrderSwap{drainSwap: &drainSwap{}, reloadFails: 2}
+	f.reloadAnswerFn = func(hit int32) (int, string) {
+		if hit == 1 {
+			return http.StatusInternalServerError, shuttingDownBody
+		}
+		return http.StatusInternalServerError, `{"error":{"message":"unspecific error: upstream command exited prematurely"}}`
+	}
+	srv := reloadingSwap(t, f)
+	if err := warmSeat(testCtx(t), srv.Client(), srv.URL, "seat"); err != nil {
+		t.Fatalf("a failed first start right after a reload is part of the recovery: %v", err)
+	}
+	if hits := f.healthHits.Load(); hits != 3 {
+		t.Fatalf("health requests=%d (want 3)", hits)
+	}
+}
+
+// The recovery window covers a server that is going away or not there yet, not a server that
+// answers: after a reload the seat may be GONE from the new config, and a 404 over a cold seat
+// ends the warm at once however much of the window is left.
+func TestWarmStopsAtA404EvenInsideTheRecoveryWindow(t *testing.T) {
+	fastWarmRetry(t, 5*time.Second)
+	f := &warmOrderSwap{drainSwap: &drainSwap{}, reloadFails: 2}
+	f.reloadAnswerFn = func(hit int32) (int, string) {
+		if hit == 1 {
+			return http.StatusInternalServerError, shuttingDownBody
+		}
+		return http.StatusNotFound, `{"error":"could not find real modelID for seat"}`
+	}
+	srv := reloadingSwap(t, f)
+	err := warmSeat(testCtx(t), srv.Client(), srv.URL, "seat")
+	if err == nil || !strings.Contains(err.Error(), "status 404") || strings.Contains(err.Error(), "no recovery within") {
+		t.Fatalf("a 404 over a cold seat ends the warm, named as such: %v", err)
+	}
+	if hits := f.healthHits.Load(); hits != 2 {
+		t.Fatalf("the load is not re-sent after a 404: health requests=%d (want 2)", hits)
+	}
+}
+
+// The grace bounds the recovery. A server that keeps saying it is shutting down must end the warm
+// with the not-loading failure and the grace named, never a loop that holds the lease for good.
+func TestWarmRetryIsBoundedByTheReloadGrace(t *testing.T) {
+	fastWarmRetry(t, 300*time.Millisecond)
+	f := &warmOrderSwap{drainSwap: &drainSwap{}, reloadFails: 1 << 20}
+	srv := reloadingSwap(t, f)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	start := time.Now()
+	err := warmSeat(ctx, srv.Client(), srv.URL, "seat")
+	if err == nil || !strings.Contains(err.Error(), "not loading") || !strings.Contains(err.Error(), "no recovery within") {
+		t.Fatalf("a recovery that never comes must end as not loading, with the grace named: %v", err)
+	}
+	if took := time.Since(start); took > 2*time.Second {
+		t.Fatalf("the retry outlived its grace: %s", took)
+	}
+	if hits := f.healthHits.Load(); hits < 3 {
+		t.Fatalf("the grace allows several re-sends, got %d health requests", hits)
+	}
+}
+
+// A seat that another client is already loading on the new server is WAITED for, not asked again:
+// the re-send is for a seat nothing is loading.
+func TestWarmWaitsOutALoadThatStartedOnTheNewServerInsteadOfResending(t *testing.T) {
+	fastWarmRetry(t, 5*time.Second)
+	f := &warmOrderSwap{drainSwap: &drainSwap{}, reloadFails: 1}
+	f.loaded.Store(true)
+	f.starting.Store(true) // another client's request is loading it on the new server
+	srv := reloadingSwap(t, f)
+	go func() {
+		time.Sleep(150 * time.Millisecond)
+		f.starting.Store(false)
+	}()
+	start := time.Now()
+	if err := warmSeat(testCtx(t), srv.Client(), srv.URL, "seat"); err != nil {
+		t.Fatalf("a load that finishes is a warm: %v", err)
+	}
+	if time.Since(start) < 100*time.Millisecond {
+		t.Errorf("the warm must wait for the load, took %s", time.Since(start))
+	}
+	if hits, warms := f.healthHits.Load(), f.warms.Load(); hits != 1 || warms != 0 {
+		t.Errorf("no second load request while one is starting: health requests=%d (want 1) loads=%d (want 0)", hits, warms)
+	}
+}
+
+// A request that timed out is a load that outlasted the client, not a reload: it is not sent
+// again (the caller's final reading of the seat decides what it was). The two shapes a timeout
+// takes are both covered: the client's own deadline, and a transport that gave up waiting for
+// the response headers.
+func TestWarmDoesNotRetryAClientTimeout(t *testing.T) {
+	clients := map[string]*http.Client{
+		"client deadline":         {Timeout: 100 * time.Millisecond},
+		"response header timeout": {Transport: &http.Transport{ResponseHeaderTimeout: 100 * time.Millisecond}},
+	}
+	for name, client := range clients {
+		t.Run(name, func(t *testing.T) {
+			fastWarmRetry(t, 5*time.Second)
+			f := &warmOrderSwap{drainSwap: &drainSwap{}, warmHold: 400 * time.Millisecond}
+			srv := reloadingSwap(t, f)
+			err := warmSeat(testCtx(t), client, srv.URL, "seat")
+			if err == nil {
+				t.Fatal("a request that timed out is an error")
+			}
+			var ne interface{ Timeout() bool }
+			if !errors.As(err, &ne) || !ne.Timeout() {
+				t.Errorf("the error must still be the timeout: %v", err)
+			}
+			if hits := f.healthHits.Load(); hits != 1 {
+				t.Errorf("a timed-out load request is not sent again: health requests=%d (want 1)", hits)
+			}
+		})
+	}
+}
+
+// dialTimeout is a transport timeout that is not a context deadline: what a dialer that gave up
+// reports (the shape of "dial tcp ...: i/o timeout").
+type dialTimeout struct{}
+
+func (dialTimeout) Error() string   { return "dial: i/o timeout" }
+func (dialTimeout) Timeout() bool   { return true }
+func (dialTimeout) Temporary() bool { return true }
+
+// A transport timeout of that shape is a connection that never came up in time, not a server
+// going away mid-reload: it is not retried either.
+func TestWarmDoesNotRetryATransportTimeoutThatIsNotAContextDeadline(t *testing.T) {
+	fastWarmRetry(t, 300*time.Millisecond)
+	var dials atomic.Int32
+	client := &http.Client{Transport: &http.Transport{DialContext: func(context.Context, string, string) (net.Conn, error) {
+		dials.Add(1)
+		return nil, dialTimeout{}
+	}}}
+	err := warmSeat(testCtx(t), client, "http://warm.invalid:1", "seat")
+	if err == nil || !strings.Contains(err.Error(), "i/o timeout") {
+		t.Fatalf("a dial timeout is an error, got %v", err)
+	}
+	if n := dials.Load(); n != 1 {
+		t.Fatalf("a transport timeout is not retried: dials=%d (want 1)", n)
+	}
+}
+
+// The back-off ends with the caller: a cancelled warm (a lost lease) returns at once, however
+// long the next delay was.
+func TestWarmRetryIsCancelledWithItsContext(t *testing.T) {
+	fastWarmRetry(t, time.Minute)
+	warmRetryFirst, warmRetryMax = 2*time.Second, 2*time.Second
+	f := &warmOrderSwap{drainSwap: &drainSwap{}, reloadFails: 1 << 20}
+	srv := reloadingSwap(t, f)
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		cancel()
+	}()
+	start := time.Now()
+	err := warmSeat(ctx, srv.Client(), srv.URL, "seat")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("a cancelled warm returns the cancellation, got %v", err)
+	}
+	if took := time.Since(start); took > time.Second {
+		t.Fatalf("a cancelled warm must not sleep out its back-off, took %s", took)
+	}
+}
+
+// What the server said is in the failure, bounded: the snippet is at most 120 bytes however big
+// the body, and only the first 512 bytes of a body are read, so a reload signature further in is
+// not seen.
+func TestWarmErrorCarriesABoundedSnippetOfTheAnswer(t *testing.T) {
+	fastWarmRetry(t, 5*time.Second)
+	f := &warmOrderSwap{drainSwap: &drainSwap{}, reloadFails: 1, reloadStatus: http.StatusInternalServerError, reloadBody: strings.Repeat("x", 4096)}
+	srv := reloadingSwap(t, f)
+	err := warmSeat(testCtx(t), srv.Client(), srv.URL, "seat")
+	if err == nil {
+		t.Fatal("a bare 500 over a cold seat is a failure")
+	}
+	if n := strings.Count(err.Error(), "x"); n == 0 || n > 120 {
+		t.Errorf("the snippet of the answer must be there and at most 120 bytes, got %d bytes of it: %v", n, err)
+	}
+	f2 := &warmOrderSwap{drainSwap: &drainSwap{}, reloadFails: 1, reloadStatus: http.StatusInternalServerError,
+		reloadBody: strings.Repeat("x", 600) + " is shutting down"}
+	srv2 := reloadingSwap(t, f2)
+	if err := warmSeat(testCtx(t), srv2.Client(), srv2.URL, "seat"); err == nil || f2.healthHits.Load() != 1 {
+		t.Errorf("a signature past the first 512 bytes is not read: err=%v health requests=%d (want 1)", err, f2.healthHits.Load())
+	}
+}
+
+// The gate is asked before EVERY re-send, never before the first request (that check is the
+// caller's), and a refusal ends the warm with the sentinel the caller branches on.
+func TestWarmAsksItsGateBeforeEachResend(t *testing.T) {
+	fastWarmRetry(t, 5*time.Second)
+	f := &warmOrderSwap{drainSwap: &drainSwap{}, reloadFails: 2}
+	srv := reloadingSwap(t, f)
+	asked := 0
+	if err := warmSeatGated(testCtx(t), srv.Client(), srv.URL, "seat", func() bool { asked++; return true }); err != nil {
+		t.Fatalf("an open gate lets the retry through: %v", err)
+	}
+	if asked != 2 || f.healthHits.Load() != 3 {
+		t.Fatalf("two re-sends, two gate checks: asked=%d health requests=%d", asked, f.healthHits.Load())
+	}
+	f2 := &warmOrderSwap{drainSwap: &drainSwap{}, reloadFails: 1 << 20}
+	srv2 := reloadingSwap(t, f2)
+	asked = 0
+	err := warmSeatGated(testCtx(t), srv2.Client(), srv2.URL, "seat", func() bool { asked++; return asked < 2 })
+	if !errors.Is(err, errWarmGuardStopped) {
+		t.Fatalf("a closed gate ends the warm with the sentinel, got %v", err)
+	}
+	if asked != 2 || f2.healthHits.Load() != 2 {
+		t.Fatalf("the second check refused, so only the first re-send went: asked=%d health requests=%d (want 2 and 2)", asked, f2.healthHits.Load())
 	}
 }

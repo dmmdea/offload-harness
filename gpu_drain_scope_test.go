@@ -306,6 +306,7 @@ func cardLeaseWrapperFixture(t *testing.T, srvURL, agentSeat string) string {
 
 func TestReserveACardScopesTheUnloadAndHandsTheRenderLaneItsList(t *testing.T) {
 	f := newMultiSeatSwap("agent-pool", "qwen3-vl-8b", "gemma-4-26b-agent", "mystery-model", "embeddinggemma")
+	f.agentSeat = "agent-pool"
 	srv := swapWithRoster(f, "agent-pool", "qwen3-vl-8b", "gemma-4-26b-agent", "mystery-model", "embeddinggemma")
 	defer srv.Close()
 	old := maintenanceClient
@@ -325,9 +326,17 @@ func TestReserveACardScopesTheUnloadAndHandsTheRenderLaneItsList(t *testing.T) {
 	}
 	f.mu.Lock()
 	stays := f.loaded["gemma-4-26b-agent"] && f.loaded["embeddinggemma"]
+	warms, warmed := f.warms, f.loaded["agent-pool"]
 	f.mu.Unlock()
 	if !stays {
 		t.Fatal("the card-0 seat and the memory stack must stay resident")
+	}
+	// The wrapper warms the agent seat back when its command ends. This test used to pass
+	// over a stand-in that answered that request 418, because a status below 500 counted as a
+	// warm; it is now a failure, so the stand-in serves the agent seat's warm and the test says
+	// the warm happened.
+	if warms != 1 || !warmed {
+		t.Fatalf("the wrapper must warm the agent seat back once its command ends: warms=%d loaded=%v", warms, warmed)
 	}
 	raw, err := os.ReadFile(envOut)
 	if err != nil {

@@ -463,6 +463,27 @@ func (m *Manager) ClearSeatWarmOwed() {
 	_ = os.Remove(m.seatWarmOwedPath())
 }
 
+// ClearSeatWarmOwedIfSeat removes the marker only if it still names seat
+// (compared case-insensitively, as the warm path compares seat names) and
+// reports whether it removed it. It is the clear for a caller that decided
+// from an observation: `gpu status` sees the seat loaded and the card free,
+// and must not delete a marker a new lease stamped for another seat between
+// its read and its clear. The marker's timestamp has one-second resolution, so
+// the seat name is the compare; the read and the remove are still two
+// operations, which narrows the window to microseconds and does not close it.
+// The cost of losing that race is one skipped warm (the seat then loads on its
+// next request), never a warm landed over a lease.
+func (m *Manager) ClearSeatWarmOwedIfSeat(seat string) bool {
+	seat = strings.TrimSpace(seat)
+	if seat == "" {
+		return false
+	}
+	if !strings.EqualFold(m.SeatWarmOwed(), seat) {
+		return false
+	}
+	return os.Remove(m.seatWarmOwedPath()) == nil
+}
+
 // managerAt builds a throwaway Manager bound to an explicit lease directory,
 // for a package-level helper that operates on a directory string rather than
 // an owned Manager — InspectDir's own pattern (gpulease.go), extended here to

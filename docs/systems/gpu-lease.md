@@ -1149,7 +1149,9 @@ is checked by name before the keep-set (llama-swap's ttl -1/0 seats) and also wh
 per-model route fails, the legacy `GET /unload` is used only when no stack member is resident. It unloads everything,
 whatever `?model=` says, so when the stack is resident or `/running` cannot be read, the reserve fails and names the
 stack. The wrapper form warms the seat back (`GET /upstream/<model>/health`) BEFORE releasing, so the first
-contract placed here again finds a loaded seat; the detach form's counterpart is `gpu release --warm-seat`.
+contract placed here again finds a loaded seat; the detach form's counterpart is `gpu release --warm-seat`. That request
+is the load, so a llama-swap reload or restart can interrupt it: the warm re-sends it for up to 60 s (see "A warm-back
+interrupted by a llama-swap reload is re-sent" below), and the owed marker is cleared once the seat is observed loaded.
 
 **The warm-back belongs to the LAST holder (0.129.2, register D-124).** On 2026-09-18 02:57 a wrapper whose command
 had been cut warmed the seat while the next queued lease had already taken the card, drained an "idle" seat and unloaded
@@ -1231,6 +1233,79 @@ exclusive card, and three measurement rows read the seat's 10 GiB as their own f
 - **The warm is heartbeat for its length** (`drainRenewEvery`, 15 s), so a 27B load of several minutes cannot go stale
   under the 120 s heartbeat TTL; losing the lease mid-warm cancels the request and is reported, while a heartbeat
   write that fails with the lease still ours is reported once and retried on the next tick (register C-59).
+- **A warm-back interrupted by a llama-swap reload is re-sent (0.176.0).** The warm's health request IS the load, and
+  llama-swap started with `-watch-config` reloads on ANY write to its config: it builds a brand-new server (every model
+  cold; no running process is adopted), swaps it in, and only then shuts the old one down. The request parked in the old
+  router is answered HTTP 500 with a body saying `<router> is shutting down` (the router is `matrix` or `group`) while
+  `/running` already speaks for the new server, empty. A full restart instead drops the connection, or whatever fronts
+  llama-swap answers 502/503/504. The warm used to read that empty `/running`, call the seat "not loading" and give up,
+  leaving the seat cold with the marker standing. It now tells the interruption from a failed start by what the server
+  said (`warmSeatGated`, `gpu_drain.go`):
+  - *Retried:* a transport error (not the caller's cancellation, not the client's own timeout), a 502, 503 or 504, and a
+    500 whose first 512 bytes hold ` is shutting down`. The first one opens a recovery window of 60 s
+    (`warmReloadGrace`). Inside it, whenever `/running` reads the seat cold (or unreadable, the server being down), the
+    load is re-sent after a back-off of 1, 2, 4, 8, 8... s. While the seat is `starting` (another client's request is
+    already loading it on the new server) the warm waits and never sends a second load. Any further 5xx or transport
+    error inside the window is part of the recovery too, because the new server's first start can fail while the old
+    process still holds its port or card. Past the window the warm fails with `status N (<snippet>) and the seat is not
+    loading; no recovery within 1m0s of a llama-swap reload/restart`.
+  - *Not retried:* a bare 500 (or any 5xx without those words) over a seat that is not loading. That is how llama-swap
+    reports a start that failed, and re-sending it is a second failed load, so it fails at once, as before
+    (`TestWarmDoesNotRetryAPlainFiveHundredWithNothingLoading`). A client timeout is not retried either: it is a load that
+    outlasted the client, and the final reading below decides what it was.
+  - *Re-checked before each re-send:* the guards the warm started under (the card is still ours, nobody is queued behind
+    it, no other lease sits on the seat's cards) are read again before EVERY re-send, with the same sentences. A refusal
+    stops the retry, prints `warm-back of <seat> stopped during its retry; the warm stays owed`, and leaves the marker
+    where it is: a re-send after a successor queued is the warm landing on somebody else's lease (register D-124).
+  - *Said:* the first re-send prints one line on stderr (`gpu: warm of <seat> hit a llama-swap reload or restart ...`),
+    and every failure names the status and the first 120 bytes of the answer, which the old message left out.
+  - *A status below 500 is no longer success by itself.* A 404 "model not found" (the config edit renamed or removed the
+    seat), a 409 or a 429 used to print `warmed back` and clear the marker over a seat that never loaded. A non-2xx
+    answer below 500 is now decided by one `/running` read: loaded and ready is a warm, `starting` is watched like any
+    load, anything else is the failure, naming the status and the snippet, and it is never retried. A 2xx is the load and
+    stays success.
+
+  After a warm that failed, one last `/running` reading decides whether the failure stands: when the seat is loaded and
+  not starting, the tool prints `the health request failed (...) but the seat is loaded; treating it as warmed`, clears
+  the marker and reports `warmed back`. A warm cancelled because the lease was lost is excluded: the card is no longer
+  ours, so a reading taken after that proves nothing. Otherwise the failure line ends by saying the warm stays owed and
+  that `gpu status` clears the marker once the seat is observed loaded. Tests: `gpu_warm_reload_test.go`, `gpu_warm_watch_test.go`.
+
+  **Known limits.** A retried warm holds the lease longer: up to the 60 s window plus the load (and the 15 minute watch of
+  a load that outlasts llama-swap's health wait), so a successor queued behind the holder waits that long; the heartbeat
+  runs across the back-off (`TestTheWarmBacksHeartbeatRunsAcrossARetriedWarm`). A transport error is retried, so a
+  llama-swap that is simply down now holds the lease for the window before the warm fails (it used to fail at once). The
+  retry class keys on llama-swap's message text: if upstream rewords ` is shutting down` the 500 leg silently reverts to
+  failing at once, while the 502/503/504, transport and final-reading legs still apply, and the snippet in the failure
+  makes the drift visible.
+
+  > **Unverified:** the mechanism is read from llama-swap's source (v236 and v256: the reload swaps the new server in
+  > before it shuts the old one down, and the old router answers `<router> is shutting down` as an HTTP 500), not
+  > observed against a running instance, and the body of the 500 in the incident that prompted this change was never
+  > captured. Whether a re-send during the old server's teardown can clash with the old process still holding its port or
+  > card was not measured; the back-off and the window are the mitigation.
+
+- **`seat_warm_owed`: what the marker means and who clears it (0.176.0).** `<state>/gpu/seat-warm-owed` holds
+  `<seat> <RFC 3339 time>` and means "this seat was cleared for a lease and nobody has loaded it back". An unload stamps
+  it (`gpu reserve --unload-seat`, the detached holder's included). `gpu status` prints it as `seat warm-back owed:` and
+  carries it as the `seat_warm_owed` key of `--json` (a seat name, or `""`); `offload_status`, the plain `gpu release`
+  note and the wrapper's skip-unless-owed check read it too. Two things clear it: a warm that finishes or is observed
+  loaded (above), and `gpu status`, which removes a marker it can prove stale: no live lease holds the card, the activity
+  read agrees, and the seat the marker names (compared case-insensitively) is read loaded, settled (not starting or
+  stopping) and without a read error. Several live card leases keep the marker: `info.Held` is true whenever ANY lease is
+  live. Before this, only a successful warm cleared it, so a warm that failed while the load went through anyway, or any
+  client's request that loaded the seat, left a debt that made the next `--unload-seat` wrapper warm a seat that was cold
+  when its lease began. The clear is a compare-and-delete by seat name (`gpulease.ClearSeatWarmOwedIfSeat`); `gpu status`
+  is already a write in the read path (it stamps the orphan marker, see the ownership section), and `offload_status` stays
+  read-only: it never clears, so the two views can disagree until a `gpu status` runs. Known limit: the marker's read and
+  its removal are two operations, so a lease that takes the card and stamps a fresh marker for the same seat in that gap
+  can lose it; the price is one skipped warm, and the seat then loads on its next request. Tests:
+  `TestGPUStatusClearsAnOwedMarkerForASettledLoadedSeat`, `TestGPUStatusKeepsAnOwedMarkerUnlessTheCardIsFreeAndTheSeatIsSettledLoaded`.
+- **Do not edit llama-swap's config inside a lease and release in the same breath.** With `-watch-config`, ANY write to
+  the config reloads llama-swap, and a reload unloads EVERY model, the memory stack's embedders included, because the new
+  server adopts no running process (see the note under the reload bullet: read from source, not observed). The retried
+  warm loads only the agent seat; everything else stays cold until its next request. Wait for llama-swap's
+  `configuration reloaded` log line before `gpu release --warm-seat`.
 - **A queued `--unload-seat` acquire finds the card empty because of the ORDER, not because it waits (register D-124
   clause b, validated 2026-10-01).** The live failure of 2026-09-19 — after `gpu reserve --unload-seat` the seat was
   still loaded, the previous holder's deferred warm-back having landed between the new holder's unload and its first
@@ -1240,7 +1315,8 @@ exclusive card, and three measurement rows read the seat's 10 GiB as their own f
   1. *Wrapper form.* The warm runs before `Release()`, under the holder's lease, heartbeat for its length. A queued
      acquirer is either seen as a waiter (the warm is skipped; it belongs to the last holder) or waits for the
      release that follows the warm, so its drain and unload run after the warm settled. A warm whose health request
-     is answered 5xx while the load carries on is watched to completion under the same lease.
+     is answered 5xx while the load carries on is watched to completion under the same lease, and one interrupted by a
+     llama-swap reload or restart is re-sent under it for up to 60 s (the reload bullet above), so the order holds.
   2. *Owed, not in flight* (a holder lost its lease before it could warm): the marker stays; the next
      `--unload-seat` holder drains a cold seat, runs its command on the cleared card, and pays the warm at its own
      release, never ahead of its command.
@@ -1415,6 +1491,12 @@ request posted straight to llama-swap by anything outside the harness is outside
 
 ## Known gaps
 
+- **The warm-back's reload retry rests on llama-swap's source, not on a captured incident.** The 500 body of the incident
+  that prompted it was never recorded, the retry class keys on llama-swap's message text, and a re-send during the old
+  server's teardown was not measured against a live instance. The failure line now carries the status and a snippet of the
+  answer, so the next incident documents itself; see the reload bullet under "Draining a seat before a window". A retried
+  warm also holds the lease up to the 60 s window longer, and a llama-swap that is down holds it for that window before the
+  warm fails.
 - **Terms: expiry is a label that only reports, and an attended lease with no progress contract is judged on one
   sample.** Nothing consumes the expired label yet except `gpu status`, `offload_status`, the waiter's sentence and
   `/fleet/health` (the takeover that acts on it is a later change). A lease whose owner the registry never held (an MCP

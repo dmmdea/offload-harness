@@ -121,6 +121,9 @@ func runGPUStatus(args []string) error {
 	// the agent seat is owed a warm-back by the last of them.
 	waiters := m.Waiters()
 	warmOwed := m.SeatWarmOwed()
+	if warmOwedIsStale(info, act, warmOwed) && m.ClearSeatWarmOwedIfSeat(warmOwed) {
+		warmOwed = ""
+	}
 	// Non-harness processes holding significant VRAM right now (register
 	// D-1xx-4, 2026-09-23): visible here too, not only at acquire, because a
 	// session reading `gpu status` mid-investigation deserves the same
@@ -1068,6 +1071,29 @@ func drainDeadline(explicit time.Duration, queuedAt time.Time, wait time.Duratio
 // root, its llama-swap and its agent seat, with a utilization sample.
 func activityOptions(cfg config.Config) gpuactivity.Options {
 	return gpuactivity.Options{LockOverride: cfg.GPULockPath, StateDir: cfg.StateDir, Endpoint: cfg.Endpoint, Seat: cfg.AgentPlannerModel(""), SampleGPU: true, Scope: modelaffinity.ScopeFunc(cfg.GPULockPath, cfg.StateDir), OrphanGrace: cfg.GPUOrphanGrace(), ComfyDir: cfg.ComfyDir}
+}
+
+// warmOwedIsStale reports whether the owed-warm marker is provably moot: the card is free of
+// EVERY lease and the agent seat the marker names is read loaded and settled. The marker means
+// "the seat was cleared for a lease and nobody has loaded it back"; a failed warm-back whose
+// load went through anyway, or any client's request, loads it, and nothing else ever cleared
+// the marker, so the next `--unload-seat` wrapper warmed a seat that was cold when its lease
+// began (the 2026-09-23 defect the was-resident check exists for).
+//
+// The free-card test is info.Held, which is true whenever ANY lease is live: the lease reader
+// returns the lowest live epoch's record (Held set for every live record) and a zero Info only
+// when nothing is live, and the legacy-scope pass leaves Held alone. Only the fields of that
+// summary that describe the lowest lease (epoch, devices) are the lowest lease's; Held is not
+// one of them. act.Held is the activity read's own, later, reading of the same fact.
+//
+// A seat that is starting or stopping has not settled, a seat that could not be read proves
+// nothing, and another seat's state says nothing about this one.
+func warmOwedIsStale(info gpulease.Info, act gpuactivity.View, owed string) bool {
+	if owed == "" || info.Held || act.Held {
+		return false
+	}
+	s := act.Seat
+	return s.Err == "" && s.Loaded && !s.Starting && !s.Stopping && strings.EqualFold(owed, s.Name)
 }
 
 func printActivity(v gpuactivity.View) {

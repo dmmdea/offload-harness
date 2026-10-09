@@ -99,3 +99,41 @@ func TestSeatWarmOwedMarkerRoundTrips(t *testing.T) {
 		t.Fatalf("cleared marker still reads %q", got)
 	}
 }
+
+// ClearSeatWarmOwedIfSeat is the compare-and-delete the status verb clears a stale marker with:
+// it removes the marker only while it still names the seat the caller observed, so a fresh
+// marker a new lease wrote for another seat between the read and the clear survives.
+func TestClearSeatWarmOwedIfSeat(t *testing.T) {
+	m, _ := newTestManager(t)
+	if m.ClearSeatWarmOwedIfSeat("seat") {
+		t.Fatal("there is no marker, so nothing was cleared")
+	}
+	if err := m.MarkSeatWarmOwed("seat"); err != nil {
+		t.Fatal(err)
+	}
+	if m.ClearSeatWarmOwedIfSeat("other-seat") {
+		t.Fatal("a marker for another seat must not be cleared")
+	}
+	if got := m.SeatWarmOwed(); got != "seat" {
+		t.Fatalf("a refused clear left the marker %q, want it untouched", got)
+	}
+	if !m.ClearSeatWarmOwedIfSeat("SEAT") {
+		t.Fatal("the seat name compares case-insensitively, as the warm path does")
+	}
+	if got := m.SeatWarmOwed(); got != "" {
+		t.Fatalf("the cleared marker still reads %q", got)
+	}
+	if m.ClearSeatWarmOwedIfSeat("seat") {
+		t.Fatal("a second clear finds nothing to remove")
+	}
+	// An empty marker reads as "no seat owed"; a blank seat name must not match it and delete it.
+	if err := os.WriteFile(m.seatWarmOwedPath(), nil, 0o666); err != nil {
+		t.Fatal(err)
+	}
+	if m.ClearSeatWarmOwedIfSeat("  ") || m.ClearSeatWarmOwedIfSeat("") {
+		t.Fatal("a blank seat name clears nothing")
+	}
+	if _, err := os.Stat(m.seatWarmOwedPath()); err != nil {
+		t.Fatalf("a refused clear left the empty marker file in place: %v", err)
+	}
+}
