@@ -271,14 +271,16 @@ var auditDetectFacts = hwdetect.Detect
 type auditRAMResolution struct {
 	Tier       string // min|low|mid|high, or "none" when the overlay was switched off
 	Source     string // "detected" or "--ram-tier"
-	Overlay    string // the RAM tier handed to tierseed.Options: "mid"|"high", or "" for the base seed alone
+	Overlay    string // the RAM tier handed to tierseed.Options: "low"|"mid"|"high", or "" for the base seed alone
 	DetectedGb int    // the RAM this machine's probe read, in GB; 0 when the tier was named, not detected
 }
 
 // resolveAuditRAMTier turns --ram-tier into the overlay the audit compares. Empty and "auto" mean the
-// tier this box detects: the installer applies the RAM overlay on a mid/high box, so an audit of the
-// BASE seed alone calls every overlay-carried key drift (23 of 38 rows on an 8 GB card with 64 GB RAM).
-// "none" keeps the base-seed comparison selectable. Only mid and high have an overlay (tierseed).
+// tier this box detects: the installer applies the RAM overlays on a low/mid/high box (config_seed_ram_low_up
+// from low up, config_seed_ram_mid_high from mid up), so an audit of the BASE seed alone calls every
+// overlay-carried key drift (23 of 38 rows on an 8 GB card with 64 GB RAM).
+// "none" keeps the base-seed comparison selectable. Low, mid and high each select overlays (tierseed):
+// config_seed_ram_low_up applies on all three, config_seed_ram_mid_high on mid and high only.
 func resolveAuditRAMTier(flag string, detect func() (string, int, error)) (auditRAMResolution, error) {
 	v := strings.ToLower(strings.TrimSpace(flag))
 	source, detectedGb := "--ram-tier", 0
@@ -290,9 +292,9 @@ func resolveAuditRAMTier(flag string, detect func() (string, int, error)) (audit
 		v, source, detectedGb = strings.ToLower(strings.TrimSpace(tier)), "detected", gb
 	}
 	switch v {
-	case "mid", "high":
+	case "low", "mid", "high":
 		return auditRAMResolution{Tier: v, Source: source, Overlay: v, DetectedGb: detectedGb}, nil
-	case "min", "low", "none":
+	case "min", "none":
 		return auditRAMResolution{Tier: v, Source: source, DetectedGb: detectedGb}, nil
 	}
 	return auditRAMResolution{}, fmt.Errorf("audit-config: --ram-tier must be auto, none, min, low, mid or high, got %q (%s)", flag, source)
@@ -314,8 +316,11 @@ func ramTierIsThisMachines(r auditRAMResolution, cfgFlag, goos, home string) str
 
 // describe says in words which seed the audit compared: the overlay's own name, or the base alone.
 func (r auditRAMResolution) describe() string {
-	if r.Overlay != "" {
-		return "base seed + config_seed_ram_mid_high overlay"
+	switch r.Overlay {
+	case "low":
+		return "base seed + config_seed_ram_low_up overlay (where the tier declares one)"
+	case "mid", "high":
+		return "base seed + config_seed_ram_low_up and config_seed_ram_mid_high overlays (where the tier declares them)"
 	}
 	return "base seed only, no RAM overlay"
 }
@@ -330,7 +335,10 @@ func (r auditRAMResolution) sourceLabel() string {
 
 // ramOverlayName is the JSON spelling of the overlay compared: its config key, or "none".
 func ramOverlayName(r auditRAMResolution) string {
-	if r.Overlay != "" {
+	switch r.Overlay {
+	case "low":
+		return "config_seed_ram_low_up"
+	case "mid", "high":
 		return "config_seed_ram_mid_high"
 	}
 	return "none"

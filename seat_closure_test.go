@@ -105,6 +105,14 @@ func renderParams(prof servingProfile, goos string) servingtmpl.Params {
 		Include26B: include26B, IncludeQ38: prof.IncludeQwen38,
 		IncludeQ354B: prof.IncludeQwen354B, IncludeQ359B: prof.IncludeQwen359B,
 		IncludeQ3827B: prof.IncludeQwen3827B, IncludeMimo9B: prof.IncludeMimo9B,
+		// The widest roster: a tier that MAY carry the RAM-spill seat renders it here, so the
+		// closure gate sees the binding the low-and-up overlay can write. Whether a given BOX gets
+		// it is the RAM gate's decision, pinned per RAM tier by
+		// TestTheAgentSeatEachRAMTierBindsIsTheOneItsRenderServes.
+		IncludeQ3635B: prof.IncludeQwen3635B,
+		// The memory-stack embedder has no RAM gate and binds no alias, so the closure gate's
+		// widest roster simply carries it where the tier asks for it.
+		IncludeEG2: prof.IncludeEmbeddingGemma2, EG2TextOnly: prof.eg2TextOnly(),
 		Seats: prof.MediaSeats, Home: "/opt/offload", GOOS: goos, GPUEnv: prof.GPUEnv,
 		// Backend was missing until 2026-09-20: without it every closure render treated the
 		// cpu tier as a GPU tier (seats gained -ngl/--flash-attn the installer never emits).

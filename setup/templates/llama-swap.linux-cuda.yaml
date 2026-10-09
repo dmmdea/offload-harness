@@ -83,9 +83,11 @@ models:
   # never assigned), so a server-side --temp/--top-p is inert on this lane.
   #
   # The Q354B_AGENT_ALIAS token below drops this entry's claim on `agent-seat` when
-  # mimo-9b-agent ALSO renders (2026-09-24): the two share the alias, and this seat
-  # stays as the tier's un-aliased ROLLBACK rather than being refused outright —
-  # the mirror of qwen3.5-9b-agent's own Q359B_AGENT_ALIAS token below.
+  # mimo-9b-agent ALSO renders (2026-09-24), or when the Qwen3.6-35B-A3B spill seat
+  # below renders (2026-10-09): they share the alias, and this seat stays as the
+  # tier's un-aliased ROLLBACK (an opt-in entry the lane can be pointed back at)
+  # rather than being refused outright — the mirror of qwen3.5-9b-agent's own
+  # Q359B_AGENT_ALIAS token below.
   qwen3.5-4b-agent:
     aliases: [qwen35-4b__Q354B_AGENT_ALIAS__]
     env: ["${ld}"]
@@ -173,6 +175,45 @@ models:
       --jinja --reasoning off --port ${PORT} --host 127.0.0.1
     checkEndpoint: /health
     ttl: 300
+  # AGENT seat for the 6GB tier on a box with host RAM to spare: Qwen3.6-35B-A3B
+  # UD-IQ3_XXS (35B total, ~3B active, Apache-2.0, 12.30 GiB). The routed experts sit in
+  # host RAM through `--n-cpu-moe 40`; attention, the dense layers and the KV cache stay on
+  # the card. A RAM-SPILL seat (ADR 0080), admitted under the operator's 2026-10-07 ruling
+  # "acceptable spill as long as it truly adds capability and does not become a RAM hog or
+  # make the system unstable", and measured against exactly those three gates on the
+  # reference 6 GB node (llama.cpp b10964): ADDS CAPABILITY - blind pack G4 (24 judgements),
+  # overall 8.11 vs the incumbent Qwen3.5-4B's 7.26 (gap 0.85, bar 0.5), 17/24 head to head,
+  # 1,399 s vs 4,818 s on the hard-8 set; NOT A RAM HOG - ~11.6 GB host RSS while loaded
+  # (weights + 1 GiB), released on unload, MemAvailable never under 5,446 MiB on a 32 GB box
+  # beside a game server; STABLE - no abort and zero swap-in across the runs with the flags
+  # below. ~2.1 GB on the card at a 32768 window with q8_0 KV.
+  #
+  # Rendered only when the tier sets include_qwen36_35b AND the box's RAM tier can hold the
+  # spill (low, mid or high; not `min`, and not an unspecified tier; install_render.go
+  # spillSeatIncluded): the renderer strips this block, its matrix var and its set membership
+  # together, so a box that cannot hold it renders without it and keeps the 4B as the agent seat. It is one more HEAVY alternative in the
+  # interactive set (one heavy seat on the card at a time), never a co-resident. It claims
+  # `agent-seat`; qwen3.5-4b-agent hands the alias off (the Q354B_AGENT_ALIAS token).
+  #
+  # Flags are LITERALS - the exact configuration the bake measured - and written explicitly
+  # instead of via ${common}: ${common} pins `--reasoning off`, and this is a THINKING model
+  # (no --reasoning flag on purpose). The ZERO host prompt cache is deliberate: it grew
+  # ~1 GiB per digest run in the bake, and the tier's cache-ram figure would be stacked on
+  # top of the 11.6 GB of experts. `--load-mode none` exists from llama.cpp
+  # b10964 (it replaced --no-mmap). `--n-cpu-moe 40` is sanctioned by the tier's
+  # n_cpu_moe_max (INV-1: the write gate refuses a render above the measured spill).
+  # --threads matters here (the spilled experts run on the CPU threads). NO sampling flags:
+  # the agent loop sends `temperature: 0` on every request.
+  qwen3.6-35b-a3b-agent:
+    aliases: [qwen36-35b, agent-seat]
+    env: ["${ld}"]
+    cmd: >-
+      __LLAMA_BIN__/llama-server --model __MODELS__/Qwen3.6-35B-A3B/Qwen3.6-35B-A3B-UD-IQ3_XXS.gguf
+      --n-gpu-layers 99 --n-cpu-moe 40 --flash-attn on --cache-type-k q8_0 --cache-type-v q8_0
+      --ctx-size 32768 --jinja --threads __NTHREADS__ --batch-size 2048 --ubatch-size 512
+      --parallel 1 --cache-ram 0 --load-mode none --port ${PORT} --host 127.0.0.1
+    checkEndpoint: /health
+    ttl: 300
   embeddinggemma:
     aliases: [text-embedding, local-embed]
     env: ["${ld}"]
@@ -180,6 +221,33 @@ models:
       __LLAMA_BIN__/llama-server --model __MODELS__/embeddinggemma-300M-Q8_0.gguf
       --embeddings --pooling mean --ctx-size 2048 --batch-size 2048 --ubatch-size 2048
       --n-gpu-layers 99 --port ${PORT} --host 127.0.0.1
+    checkEndpoint: /health
+    ttl: 300
+  # SECOND memory-stack embedder: EmbeddingGemma-2 Q8_0 with its multimodal projector (text,
+  # image and short-video embeddings in one space), the embedder the memory stack is moving to.
+  # Gated on the tier's include_embeddinggemma2 and a MEMBER OF THE STACK'S RESIDENCY SET (`emb & rer & eg2`): resident beside
+  # the swappable seats, never swapped by them. The entry as written is the memory AUTHORITY's (ampere-6,
+  # the card it was measured on). A tier whose embeddinggemma2_projector is false (ampere-8 and
+  # blackwell-3x16: replicas that only embed text, on cards the projector does not fit beside their
+  # seats) renders the SAME entry with its one projector argument (flag and GGUF path) stripped at
+  # render (servingtmpl dropEG2Projector): every other flag stays, --ubatch-size 2048 included (the stack's
+  # hot budget is 1,900 tokens; a smaller ubatch returns HTTP 500 on long memories). The projector's
+  # filename stays below so the gated-weight contract test keeps pinning it against install.ps1.
+  # No aliases: the memory stack selects the id. The
+  # embeddinggemma (300M) entry above stays on every template for the harness's own embed lane
+  # (kNN pre-filter, judge) and for callers of text-embedding / local-embed; retiring it is a
+  # later release. Like that entry it bypasses ${common} (an embedder: no --jinja, no reasoning
+  # flag). Flags are the measured configuration; MEASURED on the reference 6 GB node: 1,196 MiB
+  # loaded, 1,466 MiB peak after image embeds, 1,536 MiB after a short video; without the
+  # projector 460 MiB loaded and 482 MiB peak at --ubatch-size 2048. REQUIRES llama.cpp >= b11452 (the gemma-embedding2 architecture,
+  # upstream PR #30054, merged 2026-10-06); b11490 is the build it was proven on.
+  embeddinggemma2:
+    env: ["${ld}"]
+    cmd: >-
+      __LLAMA_BIN__/llama-server --model __MODELS__/embeddinggemma-2-Q8_0.gguf
+      --mmproj __MODELS__/mmproj-embeddinggemma-2-Q8_0.gguf --embeddings --pooling mean
+      --ctx-size 4096 --batch-size 4096 --ubatch-size 2048 --n-gpu-layers 99 --flash-attn on
+      --host 127.0.0.1 --port ${PORT}
     checkEndpoint: /health
     ttl: 300
   bge-reranker-v2-m3:
@@ -231,6 +299,7 @@ matrix:
   vars:
     emb: embeddinggemma
     rer: bge-reranker-v2-m3
+    eg2: embeddinggemma2
     e4b: offload-e4b
     e2b: gemma4-e2b
     m26: gemma4-26b-a4b
@@ -239,12 +308,14 @@ matrix:
     q359: qwen3.5-9b-agent
     mimo9: mimo-9b-agent
     q3827: qwen38-27b-agent
+    q36: qwen3.6-35b-a3b-agent
   # The memory stack is the most expensive thing on this box to lose and the cheapest to
   # keep: make it maximally expensive to stop, so if the solver ever does have a choice
   # it stops something else first.
   evict_costs:
     emb: 1000
     rer: 1000
+    eg2: 1000
   sets:
-    residents: "emb & rer__SEATS_RESIDENT__"
-    interactive: "+residents & (e4b | e2b__M26_ALT____Q354B_ALT____Q359B_ALT____MIMO9B_ALT____Q3827B_ALT____SEATS_SWAPPABLE__)"
+    residents: "emb & rer__EG2_AND____SEATS_RESIDENT__"
+    interactive: "+residents & (e4b | e2b__M26_ALT____Q354B_ALT____Q359B_ALT____MIMO9B_ALT____Q3827B_ALT____Q3635B_ALT____SEATS_SWAPPABLE__)"

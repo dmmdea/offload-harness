@@ -41,6 +41,11 @@ func TestAgentWindowMatchesWhatTheAgentSeatServes(t *testing.T) {
 			IncludeQ359B   bool                       `json:"include_qwen35_9b"`
 			IncludeQ3827B  bool                       `json:"include_qwen38_27b"`
 			ConfigSeed     map[string]json.RawMessage `json:"config_seed"`
+			// The RAM overlays can rebind the agent seat too (ampere-6's low-and-up layer binds the
+			// spill seat), and the window the tier advertises must match THAT seat's on the boxes
+			// the overlay applies to.
+			ConfigSeedLowUp   map[string]json.RawMessage `json:"config_seed_ram_low_up"`
+			ConfigSeedMidHigh map[string]json.RawMessage `json:"config_seed_ram_mid_high"`
 		} `json:"profiles"`
 	}
 	if err := json.Unmarshal(raw, &doc); err != nil {
@@ -75,6 +80,8 @@ func TestAgentWindowMatchesWhatTheAgentSeatServes(t *testing.T) {
 		"qwen3.5-9b-agent": ctxExprFor(t, string(tmplRaw), "qwen3.5-9b-agent"),
 		"qwen38-27b-agent": ctxExprFor(t, string(tmplRaw), "qwen38-27b-agent"),
 		"mimo-9b-agent":    ctxExprFor(t, string(tmplRaw), "mimo-9b-agent"),
+		// the RAM-spill agent seat: a literal window, bound only through the low-and-up overlay
+		"qwen3.6-35b-a3b-agent": ctxExprFor(t, string(tmplRaw), "qwen3.6-35b-a3b-agent"),
 	}
 
 	checked := 0
@@ -133,6 +140,49 @@ func TestAgentWindowMatchesWhatTheAgentSeatServes(t *testing.T) {
 		t.Fatal("no tier declares an agent seat — this gate went blind")
 	}
 	t.Logf("checked %d tiers with a declared agent seat", checked)
+
+	// The same rule for an agent seat a RAM OVERLAY binds: the base loop above reads only
+	// config_seed, so a seat reachable only through an overlay was invisible to it.
+	overlayChecked := 0
+	for tier, p := range doc.Profiles {
+		seatCtx := defaultSeatCtx
+		if m, ok := seatCtxByBackend[p.Backend]; ok {
+			seatCtx = m
+		}
+		for layer, seed := range map[string]map[string]json.RawMessage{
+			"config_seed_ram_low_up": p.ConfigSeedLowUp, "config_seed_ram_mid_high": p.ConfigSeedMidHigh,
+		} {
+			raw, ok := seed["agent_model"]
+			if !ok {
+				continue
+			}
+			var bound string
+			if err := json.Unmarshal(raw, &bound); err != nil {
+				continue
+			}
+			expr, known := seatCtx[bound]
+			if !known {
+				continue
+			}
+			overlayChecked++
+			want := p.CtxSize
+			if expr != "__CTX__" {
+				n, err := strconv.Atoi(expr)
+				if err != nil {
+					t.Errorf("tier %s (%s): cannot read seat %q ctx expression %q", tier, layer, bound, expr)
+					continue
+				}
+				want = n
+			}
+			if p.AgentCtxTokens != want {
+				t.Errorf("tier %s: %s binds agent seat %q, which serves a %d window, but the tier advertises "+
+					"agent_ctx_tokens %d — contracts are sized from the advertised figure", tier, layer, bound, want, p.AgentCtxTokens)
+			}
+		}
+	}
+	if overlayChecked == 0 {
+		t.Fatal("no RAM overlay binds an agent seat this gate knows — it went blind to the spill seat")
+	}
 }
 
 // ctxExprFor returns the --ctx-size argument of a model block: a literal, or __CTX__.

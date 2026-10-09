@@ -230,7 +230,8 @@ text_encoders/qwen3vl_8b_bf16.safetensors vae/qwen_image_2.1_vae_bf16.safetensor
 8GB tiers: **VERIFIED** — O1 bf16 @2048 runs on an 8GB 3070 with 64GB RAM (5.9 min/render,
 an 8GB 3070 + 64GB RAM box, 2026-07-16). **J4: this binding is now AUTOMATIC on fresh installs** —
 `ampere-8`/`blackwell-8` carry a `config_seed_ram_mid_high` layer that install.ps1 merges only when
-`ram_tier` is mid/high (same RAM gate as the 26B cpu-moe path). The two tiers DIVERGE by operator
+`ram_tier` is mid/high (same RAM gate as the 26B cpu-moe path). A second layer, `config_seed_ram_low_up`, applies from `low`
+(28 GB) up and merges before it (ampere-6 binds its RAM-spill agent seat there, ADR 0080). The two tiers DIVERGE by operator
 decision: **`ampere-8` = the O1 bf16 IMAGE seat, image only** (no video/music — decision
 2026-07-23, standing for that tier pending its own bake). **`blackwell-8` (2026-08-23 REVERSAL,
 editor-box role; every seat run on the blackwell-8 reference box; the fp8mixed edit timing is owed at acceptance)** additionally seeds the wan22
@@ -340,7 +341,7 @@ CUDA version + the *detected* GPU set, not a fixed assumption:
 
 **H4 (shipped): `install.ps1` automates this selection.** Step 3 reads detect's
 `cuda_driver`/`cuda_toolkit` (`Select-CudaBuild`): Blackwell profile + CUDA-13 driver → the pinned
-`llama-cuda13` (13.3) prebuilt, SHA-verified (tier `serves`); Blackwell on a 12.x driver / undetected
+`llama-cuda13` (13.4 since the b11490 pin, 13.3 before) prebuilt, SHA-verified (tier `serves`); Blackwell on a 12.x driver / undetected
 CUDA → **refuses loudly** with the exact driver-upgrade-or-source-build guidance; `dual-gpu` →
 refuses with the multi-arch source-build recipe (`-DCMAKE_CUDA_ARCHITECTURES="70;120"`, 12.8/12.9
 toolkit); every other CUDA profile keeps the verified 12.4 prebuilt. The selection is reported as

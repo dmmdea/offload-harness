@@ -50,7 +50,8 @@ type Options struct {
 	Home string
 	// GOOS selects the executable suffix. "" = the running platform.
 	GOOS string
-	// RAMTier selects the optional config_seed_ram_mid_high overlay ("mid"/"high").
+	// RAMTier selects the RAM-gated overlays: config_seed_ram_low_up on "low"/"mid"/"high"
+	// (RAMLowUp) and config_seed_ram_mid_high on "mid"/"high". "" or "min" applies neither.
 	RAMTier string
 	// HailoHome is the Hailo repo checkout __HAILO_HOME__ expands to.
 	HailoHome string
@@ -85,8 +86,15 @@ var vaeArgs = map[string]string{
 
 // Profile is the part of a profiles.json entry this package reads.
 type Profile struct {
-	Backend           string         `json:"backend"`
-	ConfigSeed        map[string]any `json:"config_seed"`
+	Backend    string         `json:"backend"`
+	ConfigSeed map[string]any `json:"config_seed"`
+	// ConfigSeedLowUp is the RAM-gated overlay for the 32 GB class and up: applied when the
+	// detected ram_tier is low, mid or high (28 GB and above), never on min. It exists for a
+	// binding whose seat needs host RAM a `min` box does not have but a `low` box does (the
+	// ampere-6 Qwen3.6-35B-A3B spill seat, ~11.6 GB resident); the mid/high overlay below
+	// cannot say that, because the 32 GB reference box classifies as `low`. When both apply,
+	// the mid/high value wins key by key.
+	ConfigSeedLowUp   map[string]any `json:"config_seed_ram_low_up"`
 	ConfigSeedMidHigh map[string]any `json:"config_seed_ram_mid_high"`
 	// ResidentTier is the tier's preferred hot model. It SEEDS the agent planner
 	// seat (agent_model) when it differs from the workhorse — see Resolve.
@@ -583,6 +591,24 @@ func containsID(list []string, want string) bool {
 	return false
 }
 
+// RAMLowUp reports whether a detected ram_tier is the 32 GB class or above (low, mid, high:
+// hwdetect.RAMTier >= 28 GB): the boxes config_seed_ram_low_up applies to. It is exported
+// because the serving render gates the RAM-spill agent seat on the SAME predicate
+// (install_render.go spillSeatIncluded) — the seed that binds agent_model to the seat and
+// the render that serves it must agree on which boxes get it, and sharing the predicate is
+// what makes that structural instead of a convention. Anything else, including "" (the
+// caller does not know) and an unrecognised name, is false: the overlay is opt-in. Case and
+// surrounding whitespace do not matter ("LOW", " low "): `install render` normalises its
+// --ram-tier before it asks, so this predicate must too, or `install seed` handed the same
+// flag would leave agent_model on the 4B while the render serves the spill seat.
+func RAMLowUp(ramTier string) bool {
+	switch strings.ToLower(strings.TrimSpace(ramTier)) {
+	case "low", "mid", "high":
+		return true
+	}
+	return false
+}
+
 // Resolve renders one tier's seed for a target machine: overlay applied, tokens
 // expanded, vae_mode translated, and the whole thing validated. The result is ready
 // to merge into a config.json.
@@ -594,7 +620,14 @@ func Resolve(p Profile, id string, opt Options) (map[string]any, error) {
 	for k, v := range p.ConfigSeed {
 		merged[k] = v
 	}
-	if opt.RAMTier == "mid" || opt.RAMTier == "high" {
+	// One normalised name for both overlays, the way the serving render normalises its flag.
+	ramTier := strings.ToLower(strings.TrimSpace(opt.RAMTier))
+	if RAMLowUp(ramTier) {
+		for k, v := range p.ConfigSeedLowUp {
+			merged[k] = v
+		}
+	}
+	if ramTier == "mid" || ramTier == "high" {
 		for k, v := range p.ConfigSeedMidHigh {
 			merged[k] = v
 		}

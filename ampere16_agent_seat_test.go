@@ -173,7 +173,18 @@ func seatBlock(t *testing.T, tmpl, model string) string {
 	}
 	rest := tmpl[start[1]:]
 	if next := regexp.MustCompile(`(?m)^  [A-Za-z0-9_.\-]+:$`).FindStringIndex(rest); next != nil {
-		return rest[:next[0]]
+		rest = rest[:next[0]]
 	}
-	return rest
+	// Functional lines only. The comment that introduces the NEXT entry sits between this block's
+	// last line and that entry's key, so a slice by key boundary hands it to this block; a prose
+	// comment naming `agent-seat` (the RAM-spill seat's, which follows the 27B entry) then reads as
+	// this entry claiming the alias.
+	var b strings.Builder
+	for _, ln := range strings.Split(rest, "\n") {
+		if !strings.HasPrefix(strings.TrimSpace(ln), "#") {
+			b.WriteString(ln)
+			b.WriteString("\n")
+		}
+	}
+	return b.String()
 }

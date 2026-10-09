@@ -163,6 +163,19 @@ models:
       --n-gpu-layers 999 --port ${PORT} --host 127.0.0.1
     checkEndpoint: /health
     ttl: 300
+  # SECOND memory-stack embedder (EmbeddingGemma-2 Q8_0 + its multimodal projector, which a text-only
+  # tier's render strips, embeddinggemma2_projector false), a member of
+  # the stack's residency set; see the linux-cuda template for the full rationale and the
+  # measured footprint. REQUIRES llama.cpp >= b11452.
+  embeddinggemma2:
+    env: ["${ld}", "${vk}"]
+    cmd: >-
+      __LLAMA_BIN__/llama-server --model __MODELS__/embeddinggemma-2-Q8_0.gguf
+      --mmproj __MODELS__/mmproj-embeddinggemma-2-Q8_0.gguf --embeddings --pooling mean
+      --ctx-size 4096 --batch-size 4096 --ubatch-size 2048 --n-gpu-layers 99 --flash-attn on
+      --host 127.0.0.1 --port ${PORT}
+    checkEndpoint: /health
+    ttl: 300
   bge-reranker-v2-m3:
     aliases: [reranker-v2-m3]
     env: ["${ld}", "${vk}"]
@@ -193,6 +206,7 @@ matrix:
   vars:
     emb: embeddinggemma
     rer: bge-reranker-v2-m3
+    eg2: embeddinggemma2
     e4b: offload-e4b
     e2b: gemma4-e2b
     m26: gemma4-26b-a4b
@@ -204,6 +218,7 @@ matrix:
   evict_costs:
     emb: 1000
     rer: 1000
+    eg2: 1000
   sets:
-    residents: "emb & rer__SEATS_RESIDENT__"
+    residents: "emb & rer__EG2_AND____SEATS_RESIDENT__"
     interactive: "+residents & (e4b | e2b__M26_ALT____Q354B_ALT____Q359B_ALT____MIMO9B_ALT____Q3827B_ALT____SEATS_SWAPPABLE__)"

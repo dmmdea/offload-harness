@@ -1385,11 +1385,18 @@ type Config struct {
 	// on the reference box, pinned to the utility card, not the render card (they ran
 	// on the CPU only from 2026-09-07 to 09-10). Sourced here (not a buried const) so a
 	// renamed/added 3rd member is honored. Threaded to the runner via the
-	// MEMORY_STACK env. Default {embeddinggemma, bge-reranker-v2-m3, embeddinggemma-ams}:
-	// the third is the id the memory authority node serves its embedder under (register
-	// A-122b, 2026-10-01), which the first two did not cover, so a lease's --unload-seat and
-	// the render runner's helper would have unloaded it. A name a box does not serve is
-	// inert: the set only filters what llama-swap reports. Keep embeddinggemma FIRST:
+	// MEMORY_STACK env. Default {embeddinggemma, bge-reranker-v2-m3, embeddinggemma-ams,
+	// embeddinggemma2}: the third is the id the memory authority node serves its embedder
+	// under (register A-122b, 2026-10-01), which the first two did not cover, so a lease's
+	// --unload-seat and the render runner's helper would have unloaded it; the fourth is the
+	// EmbeddingGemma-2 entry (with its multimodal projector on the authority, text-only on the
+	// replicas) the memory stack is moving to
+	// (2026-10-09, serving templates' embeddinggemma2, tier flag include_embeddinggemma2),
+	// appended for the same reason. A name a box does not serve is inert: the set only
+	// filters what llama-swap reports. A config that NAMES a memory_stack replaces this
+	// default, so a node that carries its own list must add embeddinggemma2 itself (the tiers that
+	// render the entry, ampere-6, ampere-8 and blackwell-3x16, seed a list that names it, projector
+	// or not). Keep embeddinggemma FIRST:
 	// EmbedModel() falls back to MemoryStack[0]. render/gpu-lock.mjs's DEFAULT_MEMORY_STACK
 	// is the same list, and a test keeps the two in step. This is an
 	// UNORDERED keep-alive set — do NOT infer roles from position (use EmbedModel).
@@ -2205,7 +2212,7 @@ func Default() Config {
 		ComposeQuality:              "high",
 		BrowseTimeoutSec:            300,
 		BrowseMaxActions:            30,
-		MemoryStack:                 []string{"embeddinggemma", "bge-reranker-v2-m3", "embeddinggemma-ams"},
+		MemoryStack:                 []string{"embeddinggemma", "bge-reranker-v2-m3", "embeddinggemma-ams", "embeddinggemma2"},
 		EmbedModelName:              "embeddinggemma", // explicit; reorder-proof (not MemoryStack position)
 		Temperature:                 0,
 		MaxRetries:                  1,

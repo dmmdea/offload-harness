@@ -20,7 +20,9 @@
 # Windows installer and this one cannot drift.
 #
 # PREREQUISITES (this script does not build or download them, and says so up front):
-#   - a built llama.cpp (llama-server + its shared objects)
+#   - a built llama.cpp (llama-server + its shared objects); b11452 or newer for a tier that renders
+#     the embeddinggemma2 memory-stack entry, b10964 or newer for ampere-6's RAM-spill agent seat
+#     (b11490 is the build both were proven on)
 #   - the GGUF model files for the tier
 #   - node (for the render runners), and the local-offload binary itself
 set -euo pipefail

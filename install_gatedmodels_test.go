@@ -31,12 +31,35 @@ const (
 	weightQ359B  = "Qwen3.5-9B-UD-Q4_K_XL.gguf"
 	weightQ3827B = "Qwen3.8-27B-UD-IQ3_S.gguf"
 	weightMimo9B = "MiMo-V2.6-Distill-Qwen-9B-Q4_K_M.gguf"
+	// The RAM-spill seat's weight sits in a SUBDIRECTORY of the models dir: the templates'
+	// cmd and install.ps1's pinned `name` both carry it.
+	weightQ3635B = "Qwen3.6-35B-A3B/Qwen3.6-35B-A3B-UD-IQ3_XXS.gguf"
+	// The second memory-stack embedder: a model AND its multimodal projector, flat in the models dir.
+	weightEG2 = "embeddinggemma-2-Q8_0.gguf"
+	mmprojEG2 = "mmproj-embeddinggemma-2-Q8_0.gguf"
 )
 
 func gatedWarn(t *testing.T, in26B, inQ38, inQ354B, inQ359B, inQ3827B, inMimo9B bool, dir, target string) string {
 	t.Helper()
 	var buf bytes.Buffer
-	warnMissingGatedModelsTo(in26B, inQ38, inQ354B, inQ359B, inQ3827B, inMimo9B, dir, target, &buf)
+	warnMissingGatedModelsTo(in26B, inQ38, inQ354B, inQ359B, inQ3827B, inMimo9B, false, false, false, dir, target, &buf)
+	return buf.String()
+}
+
+// gatedWarnQ3635B drives the RAM-spill seat's gate alone, every other gate off.
+func gatedWarnQ3635B(t *testing.T, inQ3635B bool, dir, target string) string {
+	t.Helper()
+	var buf bytes.Buffer
+	warnMissingGatedModelsTo(false, false, false, false, false, false, inQ3635B, false, false, dir, target, &buf)
+	return buf.String()
+}
+
+// gatedWarnEG2 drives the memory-stack embedder's gate alone, every other gate off. inProjector is the
+// tier's projector flag (embeddinggemma2_projector, true unless the tier is a text-only replica).
+func gatedWarnEG2(t *testing.T, inEG2, inProjector bool, dir, target string) string {
+	t.Helper()
+	var buf bytes.Buffer
+	warnMissingGatedModelsTo(false, false, false, false, false, false, false, inEG2, inProjector, dir, target, &buf)
 	return buf.String()
 }
 
@@ -186,5 +209,89 @@ func TestWarnMissingGatedModelsCoversTheMimoSeat(t *testing.T) {
 	}
 	if !strings.Contains(both, "2 gated model weight(s)") {
 		t.Errorf("want a count of exactly 2, got:\n%s", both)
+	}
+}
+
+// TestWarnMissingGatedModelsCoversTheQwen3635BSpillSeat pins the RAM-spill agent seat into the
+// same last-line-of-defence warning the other gated seats get, INCLUDING the subdirectory its
+// weight lives in: a render that stats a flat Qwen3.6-35B-A3B-UD-IQ3_XXS.gguf would warn
+// forever on a box that fetched it where the template reads it. The gate it is handed is the
+// post-RAM-gate value, so a `min` box (seat not rendered) is told nothing.
+func TestWarnMissingGatedModelsCoversTheQwen3635BSpillSeat(t *testing.T) {
+	dir := t.TempDir()
+	// Gate ON, weight absent -> it must be named, with its subdirectory.
+	out := gatedWarnQ3635B(t, true, dir, runtime.GOOS)
+	if !strings.Contains(out, filepath.Join(dir, filepath.FromSlash(weightQ3635B))) {
+		t.Errorf("the spill seat is gated on and %s is absent, but the warning does not name that path:\n%s", weightQ3635B, out)
+	}
+	if !strings.Contains(out, "1 gated model weight(s)") {
+		t.Errorf("want a count of exactly 1, got:\n%s", out)
+	}
+	// The weight FLAT in the models dir is not the file the template reads: still absent.
+	touchWeight(t, dir, filepath.Base(weightQ3635B))
+	if out := gatedWarnQ3635B(t, true, dir, runtime.GOOS); !strings.Contains(out, filepath.FromSlash(weightQ3635B)) {
+		t.Errorf("a flat copy of the GGUF must not satisfy the check (the template reads the subdirectory):\n%s", out)
+	}
+	// Weight in its subdirectory -> silent.
+	if err := os.MkdirAll(filepath.Join(dir, filepath.Dir(weightQ3635B)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	touchWeight(t, dir, filepath.FromSlash(weightQ3635B))
+	if out := gatedWarnQ3635B(t, true, dir, runtime.GOOS); strings.TrimSpace(out) != "" {
+		t.Errorf("every gated weight is present, want silence, got:\n%s", out)
+	}
+	// Gate OFF (the tier does not carry it, or the box is `min`) -> silent with the weight absent.
+	if out := gatedWarnQ3635B(t, false, t.TempDir(), runtime.GOOS); strings.TrimSpace(out) != "" {
+		t.Errorf("the spill seat is not rendered, want silence, got:\n%s", out)
+	}
+}
+
+// TestWarnMissingGatedModelsNamesBothEmbeddingGemma2Files pins the stack member into the same
+// last-line-of-defence warning the other gated entries get, and requires BOTH files: a model with no
+// projector loads and then fails on the first image embed, so the projector is counted on its own.
+func TestWarnMissingGatedModelsNamesBothEmbeddingGemma2Files(t *testing.T) {
+	dir := t.TempDir()
+	out := gatedWarnEG2(t, true, true, dir, runtime.GOOS)
+	for _, name := range []string{weightEG2, mmprojEG2} {
+		if !strings.Contains(out, name) {
+			t.Errorf("include_embeddinggemma2 is set and %s is absent, but the warning does not name it:\n%s", name, out)
+		}
+	}
+	if !strings.Contains(out, "2 gated model weight(s)") {
+		t.Errorf("want a count of exactly 2 (model + projector), got:\n%s", out)
+	}
+	// the model present, the projector absent -> only the projector is named
+	touchWeight(t, dir, weightEG2)
+	out = gatedWarnEG2(t, true, true, dir, runtime.GOOS)
+	if strings.Contains(out, "embeddinggemma2 (model)") || !strings.Contains(out, "embeddinggemma2 (mmproj)") || !strings.Contains(out, "1 gated model weight(s)") {
+		t.Errorf("a missing projector alone must be reported on its own, got:\n%s", out)
+	}
+	touchWeight(t, dir, mmprojEG2)
+	if out := gatedWarnEG2(t, true, true, dir, runtime.GOOS); strings.TrimSpace(out) != "" {
+		t.Errorf("both files present, want silence, got:\n%s", out)
+	}
+	if out := gatedWarnEG2(t, false, true, t.TempDir(), runtime.GOOS); strings.TrimSpace(out) != "" {
+		t.Errorf("a tier without the stack member must not be told to fetch its files, got:\n%s", out)
+	}
+}
+
+// TestWarnMissingGatedModelsNamesOnlyTheEmbeddingGemma2ModelForATextOnlyTier: a replica's entry starts
+// without --mmproj and the installer never fetches the projector, so a missing projector is not a
+// warning there (it would fire forever), while a missing model still is.
+func TestWarnMissingGatedModelsNamesOnlyTheEmbeddingGemma2ModelForATextOnlyTier(t *testing.T) {
+	dir := t.TempDir()
+	out := gatedWarnEG2(t, true, false, dir, runtime.GOOS)
+	if !strings.Contains(out, weightEG2) {
+		t.Errorf("a text-only tier is missing the model and the warning does not name it:\n%s", out)
+	}
+	if strings.Contains(out, mmprojEG2) || strings.Contains(out, "embeddinggemma2 (mmproj)") {
+		t.Errorf("a text-only tier is told to fetch a projector it never downloads:\n%s", out)
+	}
+	if !strings.Contains(out, "1 gated model weight(s)") {
+		t.Errorf("want a count of exactly 1 (the model), got:\n%s", out)
+	}
+	touchWeight(t, dir, weightEG2)
+	if out := gatedWarnEG2(t, true, false, dir, runtime.GOOS); strings.TrimSpace(out) != "" {
+		t.Errorf("the model alone satisfies a text-only tier, want silence, got:\n%s", out)
 	}
 }

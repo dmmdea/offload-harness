@@ -6,6 +6,157 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.175.0] - 2026-10-09 - a RAM-spill MoE is the 6 GB node's agent seat, and the memory stack gains EmbeddingGemma-2
+
+### Added — ampere-6's agent seat is Qwen3.6-35B-A3B, a RAM-spill MoE, on a box with 28 GB or more of RAM (ADR 0080)
+
+The operator's 2026-10-07 ruling on RAM spill ("acceptable as long as it truly adds capability and does not become a RAM hog or
+make the system unstable") met its first seat. `qwen3.6-35b-a3b-agent` (unsloth `Qwen3.6-35B-A3B-UD-IQ3_XXS.gguf`, 12.30 GiB, 35B total
+and about 3B active, Apache-2.0) keeps the routed experts in host RAM through `--n-cpu-moe 40` and attention, the dense layers and
+the KV cache on the card. Measured in the 2026-10-07/08 lean bake on the reference 6 GB node (llama.cpp b10964), blind pack G4
+(24 judgements): overall 8.11 against the incumbent Qwen3.5-4B's 7.26 (gap 0.85, bar 0.5), 17 of 24 head to head, hard-8 set in
+1,399 s against 4,818 s (decode 16.5 against 7.9 tok/s, heat-soaked); about 11.6 GB host RSS while loaded, released on unload,
+MemAvailable never under 5,446 MiB on a 32 GB box, and about 2.1 GB on the card at the 32768 window with q8_0 KV; no abort and
+zero swap-in. gpt-oss-20b (void) and Gemma 4 26B-A4B (failed spill stability) were the other arms.
+
+- **The tier flag and the gate.** `profiles.json` `include_qwen36_35b` (ampere-6 only) lets a tier carry the entry. It renders only
+  where the box's `ram_tier` is `low`, `mid` or `high` (28 GB and up, which is what a 32 GB box reports), through
+  `spillSeatIncluded`; a `min` box renders no spill seat and keeps the Qwen3.5-4B as the `agent-seat` (its roster differs from
+  before only by the `embeddinggemma2` entry below, which has no RAM gate), and an UNSPECIFIED `--ram-tier` is below the floor
+  too, so `install render` without the flag serves the 4B. The entry is a literal copy of the measured configuration in `llama-swap.linux-cuda.yaml` and
+  `llama-swap.win-cuda.yaml` (`--n-cpu-moe 40`, `--cache-ram 0`, `--load-mode none`, a 32768 window, q8_0 KV, no `--reasoning`
+  flag because it is a thinking model), one more heavy alternative in the interactive set, never a resident. It needs llama.cpp
+  b10964 or newer.
+- **A second RAM overlay, `config_seed_ram_low_up`.** The only seed overlay was `config_seed_ram_mid_high` (56 GB and up), and the
+  measured node has 32 GB and classifies as `low`, so binding the seat there would have rendered it on the measured node and
+  left its config on the 4B. The new layer applies on `low`, `mid` and `high` (before the mid/high layer, which wins key by key)
+  and never on `min`; ampere-6 binds `agent_model` to the seat in it while its base seed stays `qwen3.5-4b-agent`. The render and
+  the seed call one predicate, `tierseed.RAMLowUp` (case-blind and trimmed, as `install render` reads its flag, so `--ram-tier LOW`
+  reaches both commands the same way; an empty tier is below the floor on both), so a config cannot name a seat the roster dropped.
+  `install.ps1` applies the
+  same layer (`Test-RamLowUp`), and `audit-config` now compares a `low` box against the base seed plus this layer instead of the
+  base seed alone, so a correctly installed 32 GB node does not read as drifted.
+- **The alias moves, the 4B stays.** The seat claims `agent-seat`; `qwen3.5-4b-agent` (and `qwen3.5-9b-agent`) hands the alias
+  off and stays rendered as an un-aliased opt-in rollback. `include_qwen36_35b` beside `include_mimo_9b` is refused by name.
+- **The spill is sanctioned by the tier's measured number.** ampere-6 declares `n_cpu_moe_max: 40`, the first tier to declare
+  one; the write gate (INV-1) still refuses a render whose `--n-cpu-moe` exceeds it. `moe_26b` stays `drop`.
+- **Windows installer.** `model-qwen36-35b` joins `$PINNED` (13,211,155,424 bytes, sha256 `9c964e65…88fbe`, read from the Hugging Face
+  resolve redirect's `X-Linked-Size` / `X-Linked-ETag`; no model bytes were downloaded and the bake node's own copy was not
+  re-hashed). It downloads, into its subdirectory, only when the tier carries the seat and `ram_tier` is `low` or above.
+- **Docs.** [ADR 0080](docs/architecture/decisions/0080-a-ram-spill-moe-is-the-agent-seat-when-it-earns-it.md) (Proposed: the operator
+  made the decision, an agent does not accept an ADR), ampere-6's notes (the "no expert may sit in RAM" paragraph is amended, the
+  evidence is appended), `docs/tiers/ampere-6.md` (both `agent_model` rows), `docs/systems/setup-installer.md`.
+
+Tests (each name says what it pins): `TestTheAgentSeatEachRAMTierBindsIsTheOneItsRenderServes` (ampere-6 at min/low/mid/high on
+both OSes: the bound seat is the served one, one holder of `agent-seat`, a spill only where the seat is),
+`TestNoOtherTierRendersTheSpillSeatOrAnNCPUMoESpill`, `TestTheSpillSeatIsSanctionedByTheTiersMeasuredSpillAndNothingElse`,
+`TestTheSeedOverlayAndTheRenderShareOneRAMPredicate`, `TestRAMLowUpIsExactlyLowMidHighWhateverTheCaseOrPadding`,
+`TestTheInstallCommandsSeatTheSpillSeatAndWarnForItsWeightOnlyWhereItIsRendered` (both commands, with the flag absent, upper-cased
+and padded), `TestQwen3635BSpillSeatKeepsEveryMeasuredFlag`,
+`TestQwen3635BSpillSeatTakesTheAgentSeatAliasFromTheSmallSeats`, `TestDroppingTheQwen3635BSpillSeatLeavesNoTraceOfItAnywhere`,
+`TestDroppingTheQwen3827BAgentEntryKeepsTheFirstLineOfTheSpillSeatsComment`,
+`TestResolveAppliesTheLowUpOverlayOnLowMidHighAndNeverOnMinOrUnknown`,
+`TestAuditConfigDetectedLowRAMKeepsAnInstalledSpillSeatNodeClean`; the agent-window, fleet-cap and overlay-load gates now cover the
+`low` tier and an overlay-bound seat; `setup/render.tests.ps1` and `setup/tests/install-config-seed.test.ps1` gain the per-band and
+download-gate checks.
+
+### Added — `embeddinggemma2`, the memory stack's second embedder (EmbeddingGemma-2 Q8_0 + its multimodal projector), and the llama.cpp build it needs
+
+By the memory-stack session's order of 2026-10-08, EmbeddingGemma-2 replaces EmbeddingGemma-300m for the whole memory stack; the
+harness ships the entry and the memory stack owns the cutover. Measured on the reference 6 GB node: 1,196 MiB loaded, 1,466 MiB peak
+after image embeds, 1,536 MiB after a short video with the projector; 460 MiB loaded and 482 MiB peak without it, at
+`--ubatch-size 2048`. The memory authority (ampere-6) runs the entry with its projector; the replicas run it text-only (below).
+**The build requirement:** the GGUF's architecture (`gemma-embedding2`) needs llama.cpp **b11452 or newer** (upstream PR #30054,
+merged 2026-10-06); b11490 is the build it was proven on.
+
+- **The entry, on every template that renders the stack** (`linux-cuda`, `linux-vulkan`, `linux-cpu`, `win-cuda`,
+  `win-cuda-resident`, `win-cpu`, `win-vulkan`, `win-dual-cuda`, `win-dual-blackwell`, `win-triple-blackwell`): `embeddinggemma2`,
+  `--model embeddinggemma-2-Q8_0.gguf --mmproj mmproj-embeddinggemma-2-Q8_0.gguf --embeddings --pooling mean --ctx-size 4096
+  --batch-size 4096 --ubatch-size 2048 --n-gpu-layers 99 --flash-attn on` (the authority's entry; a replica's has no `--mmproj`),
+  `ttl: 300`, no aliases (mem0 selects the id). Like
+  `embeddinggemma` it bypasses `${common}`; the CPU templates run it without `-ngl` and `--flash-attn`. It is a member of the
+  stack's residency set (`emb & rer & eg2`; `emb & eg2` where a template has no reranker; the one `resident` set of the
+  all-resident templates), so it is resident beside the swappable seats and never swapped by them, and it carries the stack's
+  evict cost. `embeddinggemma` (300M) stays on every template, for the harness's own embed lane and the callers of its aliases
+  `text-embedding` / `local-embed`; retiring it is a later release.
+- **Gated by a tier field, default false.** `include_embeddinggemma2` is true on ampere-6, the card it was measured on, and on
+  ampere-8 and blackwell-3x16 as text-only replicas, and on no other tier;
+  `TestTheEmbeddingGemma2FlagAndProjectorAreSetOnExactlyTheirTiers` makes adding a tier a deliberate diff. No RAM gate: it is
+  VRAM-resident. With the flag off the entry, its matrix var and its `evict_costs` row are all stripped (`dropModel` matches a var by
+  its value and cannot see the evict row, so `dropEG2` removes it itself instead of relying on llama-swap to tolerate a cost for an
+  undeclared var, which was not verified).
+- **Replicas render the entry text-only: `embeddinggemma2_projector: false` on ampere-8 and blackwell-3x16, and the authority
+  (ampere-6) keeps the projector.** A replica only embeds text (media adds go to the authority) and text vectors are identical with
+  and without the projector (cosine 1.0, measured on the reference 6 GB node), so the projector buys a replica nothing and costs
+  it VRAM: 1,196 MiB loaded and 1,536 MiB at peak with it, 460 MiB loaded and 482 MiB at peak without it, at
+  `--ubatch-size 2048`. The residency matrix declares the stack's members valid beside whichever seat is loaded and llama-swap does
+  not check VRAM, so a tier that carries the entry must have room on its card. On record, ampere-8 binds `mimo-9b-agent` at ctx 65536
+  (6,707 MiB peak on the 3070 Laptop) beside `embeddinggemma` (about 460 MiB): with the projector the entry would add 1,196 to 1,536
+  MiB, 8,363 to 8,703 MiB on a card of 8,192 MiB, so the projector would exceed the card; text-only it is 6,707 + 460 + 482 = 7,649
+  MiB (8,027 with the reranker the Linux template adds). blackwell-3x16's utility card holds the vl-8b OCR seat (11,751 MiB),
+  whisper (2.2 GiB declared), `embeddinggemma` (458) and the reranker (378), 14,839 MiB: with the projector 16,035 to 16,375 MiB on a
+  card that reports 16,311, no headroom after an image embed and over after a video one; text-only 14,839 + 482 = 15,321 MiB. Neither
+  box was measured with the entry loaded (the entry was measured on the reference 6 GB node only), so an on-box co-residency
+  measurement can still turn the projector on: set the field true and record the figures in the tier's notes and in
+  `eg2CardBudget`. **The replica entry is the authority's entry with exactly one argument removed**: id `embeddinggemma2` (the memory
+  stack's restore check greps that id in `/v1/models`), the same ggml-org Q8_0 GGUF (sha256 `2188ac1d…`), `--embeddings --pooling mean
+  --ctx-size 4096 --batch-size 4096 --ubatch-size 2048 --n-gpu-layers 99 --flash-attn on`, llama.cpp b11452 or newer, and no
+  `--mmproj`. `--ubatch-size 2048` is load-bearing (the stack's hot budget is 1,900 tokens; a smaller ubatch returns HTTP 500 on long
+  memories). The strip is `servingtmpl.dropEG2Projector`, a mirror of the other gated strips, rather than a template token, so the
+  templates keep the authority's entry verbatim (the gated-weight contract test still pins the projector's filename in them): it
+  removes the one `--mmproj <GGUF>` argument from the `embeddinggemma2` entry and from nothing else, and refuses the render by name
+  if the entry does not carry that argument exactly once or any `--mmproj` survives in it. `Params.EG2TextOnly` (zero means with the
+  projector, so every existing caller renders what it always did) comes from the profile field, which is optional: **absent means
+  true**, only an explicit false makes a tier text-only. The projector GGUF is not downloaded for a text-only tier, the missing-weight
+  warning names only the model for it, and `TestTheEmbeddingGemma2FlagIsOnTheTiersWhoseRecordedFootprintsFitTheCardAndOnlyThem` is
+  exact in both directions: a tier that carries the projector needs the projector sum to fit its card, and a text-only tier needs the
+  text-only sum to fit and the projector sum NOT to fit, so a new measurement forces the projector to be turned on (or the row
+  corrected) on purpose. It is a necessary condition (a peak sum against the largest card figure on record), not a proof of fit.
+  **On a text-only box the memory stack's `MEM0_MEDIA_EMBEDDER=off` (memory stack 1.35.1) makes offline media search a clean 400**
+  (a figure from the memory stack's owner; not exercised by this repo's tests).
+- **Spec hashes.** The provenance fields `include_qwen36_35b`, `include_embeddinggemma2` and `eg2_text_only` are omitted from the
+  canonical basis when false, so they add nothing to the Params portion of any tier that does not carry them (the authority's
+  entry, with its projector, hashes without `eg2_text_only`). The text-only field IS in the basis and in the `Params()` inverse the
+  stale-render re-derive replays: without it a replica would be re-rendered with the projector and read stale forever. They keep no hash still: `template_sha256`
+  is in the basis and ten of the eleven llama-swap templates changed (all but `linux-rk3588`), so every node rendered from one of
+  them reads STALE until it is re-rendered, as for any template edit, and the tiers whose own `profiles.json` entry changed
+  (ampere-6, ampere-8, blackwell-3x16) also move `profiles_entry_sha256`.
+- **Config defaults.** `internal/config` `MemoryStack` and `render/gpu-lock.mjs` `DEFAULT_MEMORY_STACK` gain `embeddinggemma2`, appended
+  (an unserved name is inert; `EmbedModel()` still falls back to `embeddinggemma`); `config.example.json` is regenerated. A config
+  that NAMES a `memory_stack` replaces the default, and the installer's seeded `config.json` names two entries, so the tiers that
+  render the entry (ampere-6, and ampere-8 and blackwell-3x16 as text-only replicas: a projector-less entry is as much a stack
+  member) seed `config_seed.memory_stack` with
+  `[embeddinggemma, bge-reranker-v2-m3, embeddinggemma2]`; without it a fresh install on those tiers would let `--unload-seat`, the
+  render helper and fleet reclaim unload the entry. The shared template stays at two entries on purpose: `llamaswap bind check`
+  reports a listed name the roster does not serve as dangling, which would flag every other tier. A node that carries its own
+  hand-written list must still add `embeddinggemma2` itself.
+- **Windows installer.** The llama.cpp pin moves from **b9934 to b11490**, with the six assets re-pinned from the GitHub release API
+  digests (the vulkan, cpu and cuda-13.4 zips were also downloaded and hashed against them; the 12.4 cudart zip is byte-identical to
+  the old pin). **The CUDA 13 asset family is `cuda-13.4` at this tag (it was `cuda-13.3`), so the `llama-cuda13` / `llama-cudart13`
+  URLs changed, not only their hashes;** `Select-CudaBuild` keys on the driver's CUDA major (13.0 or newer), so the selection did not
+  move. The two EmbeddingGemma-2 GGUFs join `$PINNED` (309,855,456 and 554,821,024 bytes; sha256 `2188ac1d…` and `c4a8a526…`, read from
+  the Hugging Face resolve redirect and equal to the values the memory-stack session measured on) and download, together, for a tier
+  that carries the projector; a text-only tier downloads the model alone (`Get-GatedModelKeys -IncludeEmbeddingGemma2Projector`, read
+  from the profile's `embeddinggemma2_projector` with the same strict-boolean check, absent meaning true). That build also provides the `--load-mode` the Qwen3.6-35B-A3B spill seat above needs.
+- **Docs.** `docs/systems/setup-installer.md`, `docs/systems/gpu-lease.md` (the keep-set), `docs/systems/fleet-node.md`, the model table in
+  `CLAUDE.md`, the tier pages (generated), `setup/SETUP-AGENT.md`'s asset name.
+
+Tests: `TestEmbeddingGemma2IsTheMeasuredStackEntryOnEveryTemplate`, `TestEmbeddingGemma2JoinsTheStacksResidencySetBesideEmbeddinggemma`,
+`TestEmbeddingGemma2StackSetsAreExactlyTheMemoryStackPlusIt`, `TestDroppingEmbeddingGemma2LeavesTheRenderThatExistedBeforeIt`,
+`TestIncludeEmbeddingGemma2OnAnEntrylessTemplateIsRefused`, `TestEmbeddingGemma2RendersOnExactlyTheTiersThatCarryItOnEveryOSTheyRenderOn`,
+`TestTheEmbeddingGemma2FlagIsOnTheTiersWhoseRecordedFootprintsFitTheCardAndOnlyThem`,
+`TestTheEmbeddingGemma2ProjectorIsRefusedOnTheTextOnlyTiers`, `TestTheEmbeddingGemma2FlagAndProjectorAreSetOnExactlyTheirTiers`,
+`TestEmbeddingGemma2TextOnlyIsTheAuthoritysEntryMinusTheProjectorOnEveryTemplate`, `TestEmbeddingGemma2TextOnlyLeavesTheOtherProjectorsAlone`,
+`TestEmbeddingGemma2TextOnlyWithoutTheStackMemberChangesNothing`, `TestTextOnlyOnAnEntrylessTemplateIsStillRefusedByName`,
+`TestDropEG2ProjectorIsExactAndScopedToTheEntry`, `TestTheTextOnlyEntryOfEachReplicaTierIsTheAuthoritysEntryMinusTheProjector`,
+`TestTheCanonicalBasisOmitsTheTextOnlyFieldWhenFalseAndCarriesItWhenTrue`, `TestATextOnlyTierStillSeedsTheKeepSet`,
+`TestTheInstallRenderCommandWarnsForExactlyTheEmbeddingGemma2FilesTheTierDownloads`,
+`TestWarnMissingGatedModelsNamesBothEmbeddingGemma2Files`, `TestWarnMissingGatedModelsNamesOnlyTheEmbeddingGemma2ModelForATextOnlyTier`,
+`TestDefaultMemoryStack` (and the Go/Node agreement test), the PowerShell
+download-gate, pin and llama.cpp-tag checks (`setup/tests/install-config-seed.test.ps1`, which also gains the text-only download set and
+the per-tier projector and keep-set checks) and the per-tier render checks in
+`setup/render.tests.ps1` (the replicas' command line compared word for word with the authority's); each new rule was mutation-checked once.
+
 ## [0.174.0] - 2026-10-08 - a seat that fills under the hint's fallback is a refusal, not the result
 
 ### Fixed — a remote hint's no-wait seat fallback files a seat that filled in between as a refusal, not as its result
