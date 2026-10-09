@@ -17,6 +17,7 @@ import (
 	"context"
 	"net/http"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -43,12 +44,22 @@ func withBuiltInWait(t *testing.T, d time.Duration) {
 	t.Cleanup(func() { placementWaitDefault = old })
 }
 
-// fullUntil is a dispatch hook for a node that is full until d after the hook was made, and takes
-// work after that. It is decided by the clock, not by a count, so how often the wait ticks cannot
-// move the instant the node frees.
+// fullUntil is a dispatch hook for a node that is full for d after its FIRST dispatch, and takes work
+// after that. It is decided by the clock, not by a count, so how often the wait ticks cannot move the
+// instant the node frees; and the clock starts at the first dispatch, not when the hook is made, so
+// the test's own setup (the fixture, the health read, the deal) never eats into the window on a loaded
+// runner (CI, 2026-10-08: 0.44 s of a 1.5 s window, and capacity_wait_sec read 1.06 under its 1.2 floor).
 func fullUntil(d time.Duration) func(int64) int {
-	freesAt := time.Now().Add(d)
+	var (
+		mu      sync.Mutex
+		freesAt time.Time
+	)
 	return func(int64) int {
+		mu.Lock()
+		defer mu.Unlock()
+		if freesAt.IsZero() {
+			freesAt = time.Now().Add(d)
+		}
 		if time.Now().Before(freesAt) {
 			return http.StatusServiceUnavailable
 		}
@@ -57,13 +68,19 @@ func fullUntil(d time.Duration) func(int64) int {
 }
 
 // TestAWaitRunsToTheCallDeadlineNotTheConfiguredTTL is the defect: the one node is full for 1.5 s
-// and frees; the TTL is 1 s (the configured setting, standing in for the 120 s that ended the
+// from its first dispatch and then frees; the TTL is 1 s (the configured setting, standing in for the 120 s that ended the
 // diagnosed waits) and the call has 4 s. Before ADR 0073 the wait ended at 1 s as a capacity defer
 // and the node took nothing; now the subtask waits for the node and lands on it, and the call is
 // over before its deadline.
+//
+// The credited capacity_wait_sec is the wait's idle time: every re-ask of the node is an attempt,
+// charged to the budget and left out of the credit (awaitCapacity's spanStart). At a 20 ms poll the
+// wait re-asked the node some 75 times inside the 1.5 s, and on a loaded CI runner those re-asks
+// took 0.44 s of it (2026-10-08, credited 1.06 under the 1.2 floor). The poll here is 250 ms: a
+// handful of re-asks, so what is credited is the wait and not the runner's speed.
 func TestAWaitRunsToTheCallDeadlineNotTheConfiguredTTL(t *testing.T) {
 	compressPolls(t, 5*time.Millisecond, time.Second)
-	compressWait(t, 20*time.Millisecond, 0)
+	compressWait(t, 250*time.Millisecond, 0)
 	withCallReserve(t, 300*time.Millisecond)
 	node, url := acceptingNode(t, "node-late", "answer after a long wait", func(f *fakeNode) {
 		f.dispatchHook = fullUntil(1500 * time.Millisecond)
@@ -81,6 +98,7 @@ func TestAWaitRunsToTheCallDeadlineNotTheConfiguredTTL(t *testing.T) {
 	if elapsed < 1400*time.Millisecond || elapsed > 3700*time.Millisecond {
 		t.Fatalf("the call took %s, want it to wait out the 1.5 s the node was full and finish before the 4 s deadline", elapsed)
 	}
+	t.Logf("elapsed %s, capacity_wait_sec %.2f, dispatches %d", elapsed, pr.CapacityWaitSec, node.dispatches.Load())
 	if pr.CapacityWaitSec < 1.2 {
 		t.Fatalf("capacity_wait_sec = %.2f, want the ~1.5 s the wait lasted credited", pr.CapacityWaitSec)
 	}

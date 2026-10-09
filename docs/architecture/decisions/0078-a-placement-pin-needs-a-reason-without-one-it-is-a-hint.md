@@ -99,7 +99,9 @@ reasons are for the surfaces where a session decides.
      refusal, a lease) has just established that no remote has room, and keeps the seat's place in line at once. With the wait
      switched off (`agent_placement_wait_sec` negative), or for a sheddable run (priority -1), which never waits, there is no tick
      to read the fleet in: the idle seat takes the subtask at once, under the guards below, instead of the capacity defer or the
-     shed a remote pin gets (`hintSeatWithoutAWait`).
+     shed a remote pin gets (`hintSeatWithoutAWait`). That fallback reads the seat again before it runs it; a run-cap line
+     that fills between the read and the run declines the subtask as capacity with nothing run, and the shed or the defer
+     stands, with the seat's refusal on it, as the capacity wait files the same answer.
 
    The fallback is the seat, never a lease. A seat a text lease reserves or a lease fences, and one another vLLM seat occupies, is
    never a fallback: the subtask waits in line for it or for a node, and a wait that ends with nothing placed defers naming the

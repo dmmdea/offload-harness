@@ -2607,7 +2607,7 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 	if r.priority < core.BandNormal {
 		// A sheddable run never waits, so a remote hint the process gate turned away has no tick to take the idle seat in:
 		// it takes it here, under the deal's own guards, or it is shed.
-		if pr, ok := r.hintSeatWithoutAWait(ctx, i, contract, start, budget, pl, seed, refusals, fmt.Sprintf("sheddable work (priority %d) does not wait", r.priority)); ok {
+		if pr, ok := r.hintSeatWithoutAWait(ctx, i, contract, start, budget, pl, seed, &refusals, fmt.Sprintf("sheddable work (priority %d) does not wait", r.priority)); ok {
 			return pr
 		}
 		return r.settle(contract, r.shedResult(localView, seed, refusals), pl, waitStart)
@@ -2639,7 +2639,7 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 		if seed.gated || seed.overflow {
 			// A remote hint the process gate turned away has no wait to take the idle seat in either: the operator switched
 			// it off (agent_placement_wait_sec), and the choice is the seat or a defer.
-			if pr, ok := r.hintSeatWithoutAWait(ctx, i, contract, start, budget, pl, seed, refusals,
+			if pr, ok := r.hintSeatWithoutAWait(ctx, i, contract, start, budget, pl, seed, &refusals,
 				fmt.Sprintf("the capacity wait is switched off (agent_placement_wait_sec=%d)", r.cfg.AgentPlacementWaitSec)); ok {
 				return pr
 			}
@@ -3089,9 +3089,13 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 // layer. The deal's picture can be minutes old, so the conditions that can change are read again now: no lease reserves
 // or fences the seat, it is not at its run cap, loading or occupied, and its run-cap line has a free slot ahead of a
 // newcomer. An unreadable seat keeps the deal's answer (free), as the deal does. ok=false leaves the caller's outcome (the
-// shed, the capacity defer) as it was, and nothing has run or been recorded: that includes a composite decision that
-// asks the seat to wait, which is the wait's business and not this fallback's.
-func (r *runner) hintSeatWithoutAWait(ctx context.Context, i int, contract core.AgentContract, start time.Time, budget int, pl *placements, seed PlacedResult, refusals []string, why string) (PlacedResult, bool) {
+// shed, the capacity defer) as it was. Before the attempt nothing has run or been recorded: that includes a composite decision
+// that asks the seat to wait, which is the wait's business and not this fallback's. The one ok=false after it is the seat's
+// line filling between the fresh read and the run: the seat's admission then declines the subtask as capacity with no step
+// run (capacityDeferRefusal, ADR 0063 decision 3), which is filed on the caller's refusals (the shed or the defer names it, as
+// the capacity wait files the same answer) and not published as the seat's result. It was: a sheddable run read as a
+// capacity defer of the local seat instead of the shed it was.
+func (r *runner) hintSeatWithoutAWait(ctx context.Context, i int, contract core.AgentContract, start time.Time, budget int, pl *placements, seed PlacedResult, refusals *[]string, why string) (PlacedResult, bool) {
 	if !r.remoteHint() || !seed.gated || !r.hintSeatFree || pl.tried[""] {
 		return PlacedResult{}, false
 	}
@@ -3128,7 +3132,14 @@ func (r *runner) hintSeatWithoutAWait(ctx context.Context, i int, contract core.
 	}
 	pl.tried[""] = true
 	pl.attempts++
-	return annotateLanding(pr, refusals), true
+	if capacityDeferRefusal(pr) {
+		// The line filled between the read and the run: the seat declined the job and ran nothing, so it is the refusal
+		// the caller's shed or defer names, not the result it publishes.
+		*refusals = append(*refusals, refusalLine(pr))
+		r.noteRefusal(pl, pr)
+		return PlacedResult{}, false
+	}
+	return annotateLanding(pr, *refusals), true
 }
 
 // localPlace is the place the local seat holds in line while a lease keeps the contract off it:
