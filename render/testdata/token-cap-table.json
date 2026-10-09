@@ -8,6 +8,8 @@
     { "note": "sizes that are not a multiple of the cell round up", "width": 854, "height": 485, "frames": 49, "stride": 16, "ref": 0, "tokens": 5616 },
     { "note": "the minimum clip", "width": 32, "height": 32, "frames": 5, "stride": 16, "ref": 0, "tokens": 2 },
     { "note": "a frame count that is not 4k+1 floors the latent frames", "width": 832, "height": 480, "frames": 50, "stride": 16, "ref": 0, "tokens": 5070 },
+    { "note": "52 frames is 12.75 latent steps: floored to 12 (+1), not rounded to 13", "width": 832, "height": 480, "frames": 52, "stride": 16, "ref": 0, "tokens": 5070 },
+    { "note": "53 frames is 13 whole latent steps (+1)", "width": 832, "height": 480, "frames": 53, "stride": 16, "ref": 0, "tokens": 5460 },
     { "note": "one reference latent frame on a 16x VAE", "width": 832, "height": 480, "frames": 49, "stride": 16, "ref": 1, "tokens": 5460 },
     { "note": "stride 8 on the same clip is four times the tokens", "width": 832, "height": 480, "frames": 49, "stride": 8, "ref": 0, "tokens": 20280 }
   ]

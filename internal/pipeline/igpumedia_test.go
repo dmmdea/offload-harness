@@ -749,3 +749,79 @@ func TestIGPULanesMapTheRunnersTypedFailuresToTheirErrClass(t *testing.T) {
 		}
 	}
 }
+
+// The class a lane records is read from what the REAL runner builders print, at their true length.
+// The hand-written messages above are short enough to survive gpugen's 400-byte display tail; the
+// builders' own text is not (the GPU_RESET line is about 470 bytes with its token at the start), so
+// this runs the lanes against a runner that prints each builder's real output through reportFatal.
+func TestIGPULanesClassifyTheRealRunnerErrorBuilders(t *testing.T) {
+	requireNodePipeline(t)
+	engineURL, err := filepath.Abs(filepath.Join("..", "..", "render", "igpu-engine.mjs"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	engineURL = "file:///" + strings.TrimPrefix(filepath.ToSlash(engineURL), "/")
+	lost, err := os.ReadFile(filepath.Join("..", "..", "render", "testdata", "sdcpp-vace-device-lost.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var lostLine string
+	for _, l := range strings.Split(string(lost), "\n") {
+		if strings.Contains(l, "context is lost") {
+			lostLine = strings.TrimSpace(l)
+			break
+		}
+	}
+	if lostLine == "" {
+		t.Fatal("no context-is-lost line in the device-lost fixture")
+	}
+	cases := []struct{ name, js, class string }{
+		{"gpu reset", `gpuResetError({lineNo: 384, line: ` + strconv.Quote(lostLine) + `})`, "gpu_reset"},
+		{"cpu placement", `cpuPlacementError({lineNo: 8, line: "t5 compute buffer size: 297.00 MB(RAM) on CPU (peak across 1 segment)"})`, "cpu_placement"},
+		{"no gpu evidence", `noGpuEvidenceError("sd-cli", {expected: "a non-software ggml_vulkan device line and a diffusion-stage compute buffer on Vulkan"})`, "cpu_placement"},
+		{"model incompatible", `modelMetadataError("[ERROR] Diffusion model tensor 'model.diffusion_model.vace_patch_embedding.weight' not in model metadata", "/very/long/model/directory/for/the/vace/checkpoints/wan2.1_vace_1.3B_fp16.safetensors")`, "model_incompatible"},
+		{"token cap", `tryIt(() => checkTokenCap({flags: {"max-tokens": "100", "vae-stride": "16"}, width: 480, height: 832, frames: 33}))`, "token_cap_exceeded"},
+		{"cpu backend", `tryIt(() => refuseCpuBackend("diffusion=vulkan0,vae=cpu"))`, "cpu_backend_refused"},
+		{"extra args", `tryIt(() => refuseExtraArgs(["--vae-on-cpu"], {engine: "sdcpp", key: "--extra-args"}))`, "extra_args_refused"},
+		{"binary", `tryIt(() => refuseRelativeBinary("--sd-bin", "sd-cli"))`, "binary_not_absolute"},
+	}
+	for _, tc := range cases {
+		dir := t.TempDir()
+		stub := filepath.Join(dir, "realbuilder.mjs")
+		body := `import {gpuResetError, cpuPlacementError, noGpuEvidenceError, modelMetadataError, checkTokenCap, refuseCpuBackend, refuseExtraArgs, refuseRelativeBinary, reportFatal} from ` + strconv.Quote(engineURL) + `;
+const tryIt = (f) => { try { f(); } catch (e) { return e; } throw new Error("no error thrown"); };
+reportFatal("SDCPP VIDEO", ` + tc.js + `);
+process.exit(1);
+`
+		if err := os.WriteFile(stub, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		cfgV := sdcppVideoCfg(t, dir)
+		cfgV.VideoGenSdcppScript = stub
+		cfgA := animateCfg(t, dir)
+		cfgA.AnimateGenSdcppScript = stub
+		cfgU := audiocppCfg(t, dir)
+		cfgU.AudiocppScript = stub
+		for lane, c := range map[string]struct {
+			cfg config.Config
+			req core.Request
+		}{
+			"video":   {cfgV, videoReq(dir, nil)},
+			"animate": {cfgA, animateReq(dir, nil)},
+			"voice":   {cfgU, core.Request{Task: core.TaskGenerateAudio, Input: "hola", Params: map[string]any{"kind": "voice", "out": filepath.Join(dir, "s.wav")}}},
+			"music":   {cfgU, core.Request{Task: core.TaskGenerateAudio, Input: "lofi", Params: map[string]any{"kind": "music", "out": filepath.Join(dir, "m.wav")}}},
+		} {
+			res := (&Pipeline{cfg: c.cfg}).Run(context.Background(), c.req)
+			if res.OK || !res.Deferred {
+				t.Errorf("%s/%s: want a defer, got ok=%v", tc.name, lane, res.OK)
+				continue
+			}
+			if res.Meta.ErrClass != tc.class {
+				t.Errorf("%s/%s: ErrClass = %q, want %q (reason %q)", tc.name, lane, res.Meta.ErrClass, tc.class, res.Reason)
+			}
+			if label := strings.ToUpper(tc.class) + ":"; tc.name == "gpu reset" && !strings.Contains(res.Reason, label) {
+				t.Errorf("%s/%s: the reason lost its %s label: %q", tc.name, lane, label, res.Reason)
+			}
+		}
+	}
+}

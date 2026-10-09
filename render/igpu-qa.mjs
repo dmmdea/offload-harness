@@ -25,6 +25,7 @@ import { join } from "node:path";
 export const BLACK_CLIP = "BLACK_CLIP";
 export const FROZEN_CLIP = "FROZEN_CLIP";
 export const DEPTH_FRAMES_INVALID = "DEPTH_FRAMES_INVALID";
+export const UNMEASURABLE = "UNMEASURABLE";
 
 // defaultRun: spawnSync with text output; `timeoutMs` (0 = none) bounds the call.
 export function defaultRun(cmd, args, { timeoutMs = 0 } = {}) {
@@ -195,7 +196,7 @@ function coverage(segments, duration, snap = 0.125) {
 // entirely frozen (>= `entirely` of its length) fails; partial black or frozen stretches are
 // ordinary content (a fade, a held frame) and pass. Pure.
 export function assessClip({ duration, black, frozen, fps = 0 }, { entirely = 0.95 } = {}) {
-  if (!(duration > 0)) return { ok: false, kind: "UNMEASURABLE", reason: "the clip has no measurable duration" };
+  if (!(duration > 0)) return { ok: false, kind: UNMEASURABLE, reason: "ffmpeg reported no duration for the clip" };
   const snap = snapSeconds(fps);
   const b = coverage(black, duration, snap) / duration;
   const f = coverage(frozen, duration, snap) / duration;
@@ -204,22 +205,36 @@ export function assessClip({ duration, black, frozen, fps = 0 }, { entirely = 0.
   return { ok: true, kind: "", reason: `black ${(b * 100).toFixed(0)}%, frozen ${(f * 100).toFixed(0)}%` };
 }
 
+// BLACK_PICTURE_TH: blackdetect's pic_th, the fraction of a frame's pixels that must be black for the
+// frame to count as black. 0.98 (the default is 0.98 too) rejected legitimate low-key footage: a dark
+// frame with a small bright object (a candle flame, the moon) is 98.5 to 99.25 % black, so a 320x240
+// field with an object of 0.75 % or 1.5 % of the frame was a BLACK_CLIP, a full failure that is never
+// retried. Measured with ffmpeg 6.1 on such clips: 0.999 passes both and still fails a pure black clip
+// (100 % black); an object of 4 % passes at either value. A failed render is black or noise, not a
+// frame that holds an image, so the strict value costs nothing.
+export const BLACK_PICTURE_TH = 0.999;
+
 // buildClipCheckArgs: one decode pass of the whole clip through both detectors. The default
 // log level is needed: blackdetect and freezedetect report at info level.
 export function buildClipCheckArgs(file) {
   return ["-hide_banner", "-nostats", "-i", file, "-an",
-    "-vf", "blackdetect=d=0.1:pic_th=0.98,freezedetect=n=-60dB:d=0.5", "-f", "null", "-"];
+    "-vf", `blackdetect=d=0.1:pic_th=${BLACK_PICTURE_TH},freezedetect=n=-60dB:d=0.5`, "-f", "null", "-"];
 }
 
 // checkClip: run the detectors over the whole clip and throw BLACK_CLIP / FROZEN_CLIP (typed,
-// not retried) for an entirely black or frozen one. Returns the verdict when the clip is alive.
-export function checkClip(ffmpeg, file, { timeoutMs = 0, run = defaultRun } = {}) {
+// not retried) for an entirely black or frozen one, and UNMEASURABLE when the clip's length could
+// not be read (it was not checked, so it is not delivered either). Returns the verdict when the
+// clip is alive. `label` names the clip in an error (the delivery path, when `file` is a partial).
+export function checkClip(ffmpeg, file, { timeoutMs = 0, run = defaultRun, label = file } = {}) {
   const r = run(ffmpeg, buildClipCheckArgs(file), { timeoutMs });
   if (r.error || r.status !== 0) throw runFailure("clip check", r);
   const text = String(r.stderr || "");
   const verdict = assessClip({ duration: parseDuration(text), black: parseBlackSegments(text), frozen: parseFreezeSegments(text), fps: parseFps(text) });
+  if (verdict.kind === UNMEASURABLE) {
+    throw new Error(`${UNMEASURABLE}: ${verdict.reason} (${label}), so the clip could not be checked for a black or frozen picture; it is not delivered. This says nothing about the picture itself. Not retried automatically.`);
+  }
   if (!verdict.ok) {
-    throw new Error(`${verdict.kind}: ${verdict.reason} (${file}); the engine exited 0 but delivered a clip with no picture in it, which is a failed render. Not retried automatically.`);
+    throw new Error(`${verdict.kind}: ${verdict.reason} (${label}); the engine exited 0 but delivered a clip with no picture in it, which is a failed render. Not retried automatically.`);
   }
   return verdict;
 }

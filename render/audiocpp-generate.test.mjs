@@ -61,6 +61,34 @@ test("music: --task gen with the ace_step family, lyrics and --duration-seconds;
   assert.equal(a[a.length - 1], "o.wav");
 });
 
+// What parseArgs hands over for a flag given with no value is `undefined` (a key that is present), and
+// --seconds may arrive empty, as text, zero or negative: none of it may reach audiocpp_cli as an option
+// or as the word "undefined".
+test("music: --lyrics, --duration-seconds and --seed never reach the argv when unset, empty, not a number or not positive", () => {
+  const base = { family: "ace_step", model: "m", backend: "vulkan", device: "0" };
+  for (const [name, flags] of [
+    ["absent", base],
+    ["unset", { ...base, lyrics: undefined, seconds: undefined, seed: undefined, lang: undefined }],
+    ["empty", { ...base, lyrics: "", seconds: "", seed: "" }],
+    ["not a number", { ...base, seconds: "abc", seed: "x" }],
+    ["not positive", { ...base, seconds: "0" }],
+    ["negative", { ...base, seconds: "-5" }],
+  ]) {
+    const a = buildAudiocppArgs({ kind: "music", outFile: "o.wav", text: "t", flags });
+    for (const x of a) assert.ok(!/undefined|NaN|null/.test(String(x)), `${name}: ${JSON.stringify(x)} must not reach the argv`);
+    for (const o of ["--lyrics", "--duration-seconds", "--seed"]) assert.ok(!a.includes(o), `${name}: ${o} must be omitted`);
+  }
+  // and the same options do reach it when they are real
+  const a = buildAudiocppArgs({ kind: "music", outFile: "o.wav", text: "t", flags: { ...base, lyrics: "la", seconds: "12.5", seed: "3.4" } });
+  assert.equal(a[a.indexOf("--lyrics") + 1], "la");
+  assert.equal(a[a.indexOf("--duration-seconds") + 1], "12.5");
+  assert.equal(a[a.indexOf("--seed") + 1], "3", "the seed is rounded to an integer");
+  const v = buildAudiocppArgs({ kind: "voice", outFile: "o.wav", text: "t", flags: { ...base, family: "chatterbox", lang: undefined, clone: undefined, seconds: "30", lyrics: "ignored" } });
+  assert.equal(v[v.indexOf("--language") + 1], "es", "an unset language is the house default, not 'undefined'");
+  assert.ok(!v.includes("--voice-ref") && !v.includes("--duration-seconds") && !v.includes("--lyrics"), "a voice job takes none of the music options");
+  for (const x of v) assert.ok(!/undefined|NaN|null/.test(String(x)), JSON.stringify(x));
+});
+
 test("an unknown kind throws", () => {
   assert.throws(() => buildAudiocppArgs({ kind: "sfx", outFile: "o", text: "t", flags: {} }), /voice or music/);
 });
@@ -88,11 +116,12 @@ test("the script reports a bad kind and missing flags with exit 2", () => {
 // finalizeAudio takes an injectable `run` / `measureFn` / `durationFn`, so every decision is
 // tested against captured-shape tool results without spawning ffmpeg; the real chain is run
 // end to end by igpu-runners-main.test.mjs.
-import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, readdirSync } from "node:fs";
+import { extname } from "node:path";
 import { tmpdir } from "node:os";
 import {
   finalizeAudio, gateDeadAir, buildTrimTailArgs, buildMasterArgs, buildConvertArgs, fadeSeconds,
-  refuseAudioBackend, refuseAudioDevice, TAIL_SILENCE_DB,
+  refuseAudioBackend, refuseAudioDevice, AUDIO_BACKENDS, TAIL_SILENCE_DB,
 } from "./audiocpp-generate.mjs";
 
 function work() {
@@ -113,7 +142,7 @@ function stubRun({ failAt = -1, status = 1, stderr = "boom", noWrite = false } =
   };
   return { run, calls };
 }
-const CLEAN = { duration: 26.6, silences: [], integratedLUFS: -14, truePeakDBFS: -1.2 };
+const CLEAN = { duration: 26.6, silences: [], integratedLUFS: -14, truePeakDBFS: -1.2, exitStatus: 0, exitSignal: null };
 const base = { ffmpeg: "ffmpeg", ffprobe: "ffprobe", measureFn: () => CLEAN, durationFn: (_p, f) => (f.endsWith("trimmed.wav") ? 26.55 : 30), log: () => {} };
 
 test("finalizeAudio music: trim the trailing silence below -45 dB, then fade-out + loudnorm -14 LUFS / -1 dBTP at 48 kHz, then the dead-air gate", () => {
@@ -179,19 +208,27 @@ test("finalizeAudio voice: a .wav is the engine's file byte for byte (no ffmpeg 
     const f = finalizeAudio({ ...base, wav: w.wav, out: w.out("v.flac"), kind: "voice", workDir: w.dir, run: flacRun.run });
     assert.equal(f.did, "converted");
     assert.equal(flacRun.calls.length, 1);
-    assert.equal(flacRun.calls[0].args[flacRun.calls[0].args.length - 1], w.out("v.flac"));
+    // ffmpeg writes a PARTIAL beside the delivery path (same directory, same extension), which is then
+    // renamed onto it - never the delivery path itself
+    const dst = flacRun.calls[0].args[flacRun.calls[0].args.length - 1];
+    assert.equal(dirname(dst), dirname(w.out("v.flac")));
+    assert.ok(dst !== w.out("v.flac") && dst.endsWith(".flac") && dst.includes(".part."), dst);
+    assert.ok(!existsSync(dst), "the partial is gone once it has been renamed onto the result");
     assert.equal(readFileSync(w.out("v.flac"), "utf8"), "stub-output-0", "ffmpeg's output, not the raw wav bytes under a .flac name");
   } finally { w.done(); }
 });
 
 test("finalizeAudio: the dead-air gate runs on the DELIVERED file for voice and music; a silent or unmeasurable render is DEAD_AIR and the file is removed (G26)", () => {
-  const silent = { duration: 20, silences: [{ start: 0, end: 20, duration: 20 }], integratedLUFS: -70, truePeakDBFS: -70 };
+  const silent = { duration: 20, silences: [{ start: 0, end: 20, duration: 20 }], integratedLUFS: -70, truePeakDBFS: -70, exitStatus: 0, exitSignal: null };
   for (const [kind, out] of [["voice", "v.wav"], ["music", "m.wav"]]) {
     const w = work();
     try {
       const seen = [];
       assert.throws(() => finalizeAudio({ ...base, wav: w.wav, out: w.out(out), kind, workDir: w.dir, run: stubRun().run, measureFn: (_f, _p, file) => { seen.push(file); return silent; } }), /DEAD_AIR: .*silence/);
-      assert.deepEqual(seen, [w.out(out)], "measured on the file as delivered");
+      assert.equal(seen.length, 1);
+      assert.equal(dirname(seen[0]), dirname(w.out(out)), "measured on the file that would be delivered (the partial beside the result)");
+      assert.ok(seen[0].endsWith(extname(out)) && seen[0].includes(".part."), seen[0]);
+      assert.ok(!existsSync(seen[0]), "the rejected partial is removed");
       assert.ok(!existsSync(w.out(out)), `${kind}: a failed gate removes what it rejects`);
       assert.throws(() => finalizeAudio({ ...base, wav: w.wav, out: w.out(out), kind, workDir: w.dir, run: stubRun().run, measureFn: () => null }), /DEAD_AIR: the delivered audio could not be measured/);
     } finally { w.done(); }
@@ -221,14 +258,19 @@ test("the ffmpeg argv builders: trim, master and convert", () => {
 });
 
 test("refuseAudioBackend: audio.cpp's own values only; vulkan0 is sd.cpp's spelling and is refused with the --device hint; cpu and best are refused", () => {
-  for (const b of ["vulkan", "Vulkan", "cuda", "hip", "rocm", "metal"]) assert.equal(refuseAudioBackend(b), b.toLowerCase());
-  for (const b of ["vulkan0", "vulkan1", "cpu", "best", "auto", "", undefined, "blas", "vulcan"]) {
+  for (const b of ["vulkan", "Vulkan"]) assert.equal(refuseAudioBackend(b), b.toLowerCase());
+  assert.deepEqual(AUDIO_BACKENDS, ["vulkan"], "SIL13: the evidence guard only recognises Vulkan buffers");
+  // cuda / hip / rocm / metal would read CONFIGURED and end every call CPU_PLACEMENT "no GPU evidence"
+  for (const b of ["vulkan0", "vulkan1", "cpu", "best", "auto", "", undefined, "blas", "vulcan", "cuda", "hip", "rocm", "metal"]) {
     assert.throws(() => refuseAudioBackend(b), /CPU_BACKEND_REFUSED/, String(b));
   }
   assert.throws(() => refuseAudioBackend("vulkan1"), /--backend vulkan --device 1/);
   assert.equal(refuseAudioDevice(undefined), "0");
   assert.equal(refuseAudioDevice("2"), "2");
-  for (const d of ["-1", "x", "0.5", "vulkan0"]) assert.throws(() => refuseAudioDevice(d), /device index/);
+  // SIL13: a bad device is its own class (DEVICE_INVALID), not a backend refusal
+  for (const d of ["-1", "x", "0.5", "vulkan0"]) {
+    assert.throws(() => refuseAudioDevice(d), (e) => /^DEVICE_INVALID:/.test(e.message) && /device index/.test(e.message) && !/CPU_BACKEND_REFUSED/.test(e.message), d);
+  }
 });
 
 test("the -- terminator: lyrics or text that start with -- stay positional", () => {

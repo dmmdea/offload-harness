@@ -67,6 +67,17 @@ test("parseLoudness: takes the Summary block's final I:/Peak:, not a per-tick li
   assert.equal(truePeakDBFS, -6.3);
 });
 
+test("parseLoudness: per-tick I: lines with no Summary block are NOT a measurement (a pass killed half way printed ticks)", () => {
+  const ticks = `
+[Parsed_ebur128_0] t: 0.1  M: -20.0 S: -20.0  I: -25.0 LUFS  LRA: 0.0 LU  TPK: -10.0 -10.0 dBFS
+[Parsed_ebur128_0] t: 0.2  M: -19.0 S: -19.0  I: -19.0 LUFS  LRA: 1.2 LU  TPK: -8.2 -6.3 dBFS
+`;
+  assert.deepEqual(parseLoudness(ticks), { integratedLUFS: null, truePeakDBFS: null });
+  // and once the Summary is there, its value wins over every tick before it
+  const done = ticks + "[Parsed_ebur128_0] Summary:\n\n  Integrated loudness:\n    I:         -17.5 LUFS\n    Threshold: -27.5 LUFS\n\n  True peak:\n    Peak:       -2.0 dBFS\n";
+  assert.deepEqual(parseLoudness(done), { integratedLUFS: -17.5, truePeakDBFS: -2.0 });
+});
+
 test("parseLoudness: no ebur128 output returns nulls, not zeros (never fabricate a measurement)", () => {
   const { integratedLUFS, truePeakDBFS } = parseLoudness("nothing here");
   assert.equal(integratedLUFS, null);

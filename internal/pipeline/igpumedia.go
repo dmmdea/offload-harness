@@ -32,6 +32,7 @@ const (
 	errClassCPUBackendRefused = "cpu_backend_refused"
 	errClassExtraArgsRefused  = "extra_args_refused"
 	errClassTokenCapExceeded  = "token_cap_exceeded"
+	errClassDeviceInvalid     = "device_invalid" // audiocpp_device is not a device index: a config error, not a backend refusal
 
 	// What the runners render when the caller names no size or length (render/sdcpp-video.mjs
 	// and sdcpp-animate.mjs DEFAULT_*): the token cap is computed on what the runner will
@@ -133,10 +134,11 @@ func floorTo32(n int) int {
 
 func fmtFloat(f float64) string { return strconv.FormatFloat(f, 'f', -1, 64) }
 
-// timeoutArgs arms the runner's own deadline a margin BEFORE gpugen's. gpugen kills only the
-// node process on a non-Windows host, so a runner killed from outside leaves its engine
-// running on the iGPU; a runner that times itself out kills the engine's whole tree first.
-// The margin is 15 s (a quarter of the budget when that is under a minute); no timeout, no flag.
+// timeoutArgs arms the runner's own deadline a margin BEFORE gpugen's, so a run that is too slow
+// ends with the runner's own typed timeout after it has killed the engine's whole tree and removed
+// its temp dirs, instead of being cut down from outside (gpugen SIGTERMs the runner's process
+// group and SIGKILLs it after a grace). The margin is 15 s (a quarter of the budget when that is
+// under a minute); no timeout, no flag.
 func timeoutArgs(timeout time.Duration) []string {
 	if timeout <= 0 {
 		return nil
@@ -223,6 +225,10 @@ type igpuRun struct {
 	timeout     time.Duration
 }
 
+// generateIGPU is gpugen.Generate; a var so a test can capture the Spec a lane hands it (the flags
+// that make a cancel reach the engine are only visible there).
+var generateIGPU = gpugen.Generate
+
 // runIGPU takes the media lease, runs the script under gpugen (process-tree-killed on
 // timeout, no ComfyUI /free) and returns the produced file, or the defer result.
 func (p *Pipeline) runIGPU(ctx context.Context, req core.Request, meta *core.Meta, start time.Time, r igpuRun) (string, *core.Result) {
@@ -246,7 +252,7 @@ func (p *Pipeline) runIGPU(ctx context.Context, req core.Request, meta *core.Met
 		OwnProcessGroup: true,
 	}
 	p.footprintSampling(r.fpFamily, r.fpQuant, r.fpTask).ApplyTo(&spec)
-	outPath, gerr := gpugen.Generate(ctx, spec)
+	outPath, gerr := generateIGPU(ctx, spec)
 	if gerr != nil {
 		meta.ErrClass = gpugen.ClassifyErr(gerr)
 		res := p.deferGen(req, *meta, start, len(req.Input), r.failVerb+": "+gerr.Error())
@@ -650,13 +656,13 @@ func (p *Pipeline) runGenerateAudioAudiocpp(ctx context.Context, req core.Reques
 	if text == "" {
 		return p.deferGen(req, meta, start, len(req.Input), "empty audio prompt")
 	}
-	// audio.cpp's own backend values (vulkan|cuda|hip|rocm|metal) and a separate device index:
-	// "vulkan0" is sd.cpp's spelling and the CLI would reject it at run time
+	// audio.cpp's backend value (vulkan only: the runner's GPU-evidence guard reads Vulkan buffers) and
+	// a separate device index: "vulkan0" is sd.cpp's spelling and the CLI would reject it at run time
 	if err := config.AudiocppBackendRefusal(cfg.AudiocppBackend); err != nil {
 		return p.deferCPUBackend(req, meta, start, "audio generation", err)
 	}
 	if err := config.AudiocppDeviceRefusal(cfg.AudiocppDevice); err != nil {
-		return p.deferCPUBackend(req, meta, start, "audio generation", err)
+		return p.deferRefused(req, meta, start, errClassDeviceInvalid, "audio generation", err)
 	}
 	if err := config.ExtraArgsRefusal("audiocpp_extra_args", config.ExtraArgsAudiocpp, cfg.AudiocppExtraArgs); err != nil {
 		return p.deferRefused(req, meta, start, errClassExtraArgsRefused, "audio generation", err)

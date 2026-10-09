@@ -21,9 +21,9 @@
 //
 // Dependency-free (Node 18+ built-ins only).
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, accessSync, constants as fsConstants } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, renameSync, writeFileSync, accessSync, constants as fsConstants } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, extname, isAbsolute, join, resolve } from "node:path";
 
 export const CPU_PLACEMENT = "CPU_PLACEMENT";
 export const CPU_BACKEND_REFUSED = "CPU_BACKEND_REFUSED";
@@ -34,6 +34,61 @@ export const ILLEGAL_INSTRUCTION = "ILLEGAL_INSTRUCTION";
 export const BINARY_NOT_ABSOLUTE = "BINARY_NOT_ABSOLUTE";
 export const OUT_DIR_UNWRITABLE = "OUT_DIR_UNWRITABLE";
 export const MODEL_INCOMPATIBLE = "MODEL_INCOMPATIBLE";
+export const ENGINE_CRASHED = "ENGINE_CRASHED";
+export const OUT_OF_MEMORY = "OUT_OF_MEMORY";
+export const DEVICE_INVALID = "DEVICE_INVALID";
+
+// ---------------------------------------------------------------- the error class line
+
+// Every typed failure a runner ends with is also reported as ONE short final machine line,
+// "IGPU_CLASS=<class>", after the (long) human line. The Go side (internal/gpugen) reads the class
+// from that line anywhere in the output it captured; the human line is not the carrier, because
+// gpugen keeps only its tail in the error text and a real GPU_RESET line is longer than that tail.
+// The classes are gpugen.ClassifyErr's names (internal/gpugen pins both lists together).
+export const CLASS_MARKER = "IGPU_CLASS=";
+const TOKEN_CLASSES = {
+  CPU_PLACEMENT: "cpu_placement", CPU_BACKEND_REFUSED: "cpu_backend_refused", GPU_RESET: "gpu_reset",
+  TOKEN_CAP_EXCEEDED: "token_cap_exceeded", EXTRA_ARGS_REFUSED: "extra_args_refused",
+  ILLEGAL_INSTRUCTION: "illegal_instruction", BLACK_CLIP: "black_clip", FROZEN_CLIP: "frozen_clip",
+  DEPTH_FRAMES_INVALID: "depth_frames_invalid", MODEL_INCOMPATIBLE: "model_incompatible",
+  BINARY_NOT_ABSOLUTE: "binary_not_absolute", OUT_DIR_UNWRITABLE: "out_dir_unwritable",
+  DEAD_AIR: "dead_air", FFMPEG_UNAVAILABLE: "ffmpeg_unavailable", UNMEASURABLE: "unmeasurable",
+  ENGINE_CRASHED: "engine_crashed", OUT_OF_MEMORY: "oom", DEVICE_INVALID: "device_invalid",
+};
+
+// errorClass: the class a failure message belongs to ("" = untyped): its leading TOKEN_NAME:, else
+// "timeout" when it reports one. Pure.
+export function errorClass(message) {
+  const text = String(message ?? "");
+  const tok = /^\s*([A-Z][A-Z0-9_]+):/.exec(text);
+  if (tok && TOKEN_CLASSES[tok[1]]) return TOKEN_CLASSES[tok[1]];
+  if (/\btimeout\b/i.test(text)) return "timeout";
+  return "";
+}
+
+// reportFatal: print a runner's failure the way every iGPU runner ends: the human line, then the class
+// line when the failure is typed. `then`, when given, runs once the LAST line has been written out.
+export function reportFatal(label, e, then) {
+  const msg = e && e.message ? e.message : String(e);
+  const cls = errorClass(msg);
+  const human = `${label} FAILED: ${msg}\n`;
+  if (cls) {
+    process.stderr.write(human);
+    process.stderr.write(CLASS_MARKER + cls + "\n", then);
+  } else {
+    process.stderr.write(human, then);
+  }
+}
+
+// failAndExit: report a runner's failure and exit with `code` once it has been written out.
+// process.exit() right after a write drops output that a full pipe could not take at once (it is
+// queued), and the class line at the end of a failure is the one part gpugen reads its class from.
+// Writes complete in order, so the callback of the last write means all of it is out; the timer is the
+// bound for a pipe nobody reads.
+export function failAndExit(label, e, code = 1) {
+  setTimeout(() => process.exit(code), 3000).unref();
+  reportFatal(label, e, () => process.exit(code));
+}
 
 // parseArgs: positionals + --flags. `booleans` names the flags that take no value.
 // Every other --flag consumes the next token (a missing value is undefined, which every
@@ -198,17 +253,33 @@ export function modelMetadataError(log, modelFile) {
 // What counts as evidence, per engine (formats read from the engines' own source at the
 // pinned commits and confirmed against real logs in render/testdata, see its README):
 //
-//   sdcpp    (stable-diffusion.cpp 3f8527a)  PASS needs ALL of
+//   sdcpp    (stable-diffusion.cpp 3f8527a "master-929", a1ded76 "master-945")  PASS needs ALL of
 //              - "ggml_vulkan: <n> = <device> (...)" for a NON-software device,
-//              - a "<module> compute buffer size: ... on Vulkan<N>" line for a module that is
-//                not an auxiliary one (text encoder / VAE / TAE): the diffusion stage,
-//              - and no "compute buffer size ... on CPU" line.
+//              - the diffusion stage on a Vulkan device: a "<module> compute buffer size: ... on
+//                Vulkan<N>" line for a module that is not an auxiliary one (text encoder / VAE /
+//                TAE), or the auto-fit plan's line for the diffusion component ("DiT   params ...
+//                -> compute Vulkan<N>, params ..."),
+//              - and no "compute buffer size ... on CPU" line and no plan line "-> compute CPU".
 //            sd.cpp prints the backend via ggml_backend_name() (compute: "CPU" for the CPU
 //            backend, "Vulkan0" for the first Vulkan device) and the params buffer type via
 //            ggml_backend_buft_name() ("CPU", "Vulkan0", or "Vulkan_Host" for pinned host
 //            memory). Params resting in RAM with compute on the GPU is the sanctioned
-//            overflow, so a params line "on CPU" / "on Vulkan_Host" is neither evidence nor a
-//            placement.
+//            overflow, so a params line "on CPU" / "on Vulkan_Host" and a plan line
+//            "params RAM" / "params CPU" are neither evidence nor a placement.
+//            sd.cpp's log record has two shapes and BOTH are read for good, because nodes upgrade at
+//            different times (a fleet update moves one node to the next release while the rest stay):
+//              master-929 and before   "[VERBOSE] ggml_runner.cpp:1019 - <message>"   (the tag is padded to 7:
+//                                      "[INFO   ]", "[WARN   ]", "[ERROR  ]"; the line number is padded too)
+//              master-945 and after    "[V] <message> --- ggml_runner.cpp:1019"       (#2104: one-letter tags [D] [V]
+//                                      [I] [W] [E], and the source location moved to the END, unpadded; #2106: the
+//                                      separator is " --- " (a build between the two commits has " - "), and the
+//                                      newlines of a prompt echo are escaped, "\n" as the two characters)
+//            A record of several lines (a parameter dump, "System Info") carries its tag on the FIRST line and its
+//            tail on the LAST ("} --- main.cpp:699"). So every sd.cpp line is NORMALISED before an anchored shape reads
+//            it (normalizeSdLine): one leading level tag in either spelling (with the "file.cpp:N - " source prefix
+//            after the old one) and one trailing source tail are cut, and the raw line is kept for the error
+//            messages. The shapes that are anchored at the start of a record read the normalised line; the plain
+//            words (a CPU backend, a lost device) read the whole raw line.
 //   da3      (depth-anything.cpp da3-cli)    PASS needs "[da3] da::Backend using device: Vulkan<N>".
 //            "offload_weights: ... (N host-only tensors kept on CPU ...)" is a storage line.
 //   audiocpp (audio.cpp audiocpp_cli)        PASS needs a "<component>.weights.buffer_name
@@ -216,22 +287,85 @@ export function modelMetadataError(log, modelFile) {
 //            (upstream loads a second host copy of the ACE-Step planner for the prompt prefill).
 //
 // Never scanned for anything: ggml's "loaded CPU backend" registration, "Initializing
-// backend: CPU", the SDCliParams / SDContextParams / SDGenerationParams dump blocks, the
-// tokenizer echo lines ("split prompt ..." / "parse '...'"), and any line that contains the
-// request's prompt, negative prompt, TTS text or lyrics verbatim.
+// backend: CPU", and (sd.cpp only, on its own record shapes) the SDCliParams / SDContextParams /
+// SDGenerationParams dump blocks and the tokenizer echo lines ("split prompt ..." / "parse '...'").
+// A dump block opens on the record whose whole message is "SDCliParams {" (or the other two) and
+// closes on a normalised "}" at column 0: the bare "}" of the old shape, "} --- main.cpp:699" of the
+// new one. A block that is never closed ends at the next LONG-tag record (the old shape's valve)
+// and, in the new shape, ONLY at its close: the one-letter tags are deliberately not a valve. A new-shape
+// record ends with its tail, so the "}" always carries one; a block that does not close is a record shape
+// this guard does not understand, and the loud outcome is the right one (the rest of the log is skipped,
+// the run ends without its evidence and fails CPU_PLACEMENT "no GPU evidence", the way this very shape
+// first showed), where a valve would pass the run on a guess and hide that the closing line changed.
+//
+// The request's own text (prompt, negative prompt, TTS text, lyrics) never switches the CPU detector
+// off: every other line is scanned whole, the placement and evidence shapes are anchored at the start
+// of the record (after its head), and a line that echoes the request can only fail to count as
+// POSITIVE evidence. A plain-words shape (a device reset) is read with the request's text taken out.
+// A record that IS a line of the request ("[V] SDCliParams {" as a prompt line) opens no dump block.
 export const GUARD_ENGINES = ["sdcpp", "da3", "audiocpp"];
 
 const SOFTWARE_DEVICE = /\b(?:llvmpipe|lavapipe|swiftshader)\b/i;
-const BLOCK_START = /\b(?:SDCliParams|SDContextParams|SDGenerationParams)\s*\{\s*$/;
-const LOG_PREFIX = /^\[(?:VERBOSE|INFO|WARN|WARNING|ERROR|DEBUG|TRACE)\s*\]/;
-const TOKENIZER_ECHO = [/\bsplit prompt\s+"/, /(?:^|\s)parse\s+'/];
+// audio.cpp's own record heads: "[TIMING ts=20261003-172137] ", "[TRACE ts=...] "
+const AUDIO_HEAD = String.raw`(?:\[[A-Z]+(?:\s+ts=[^\]\s]*)?\s*\]\s*)*`;
+// sd.cpp's record head and tail, in the two shapes (see the comment above). Every placement and evidence
+// shape below starts at the beginning of the record (after the head), so text the request echoes in the
+// MIDDLE of some other line can neither forge a shape nor, by being a substring of a real one, hide it.
+//   old head   "[VERBOSE] ggml_runner.cpp:1019 - ", "[INFO   ] main.cpp:699  - ": the long tag and the source it prints in front
+//   new head   "[V] ": the one-letter tag alone (the bare lines of the tests and of ggml itself have none)
+//   tail       " --- ggml_runner.cpp:1019": the new source, behind the message (" - ..." in a build between #2104 and #2106)
+const SD_OLD_HEAD = /^\[(?:DEBUG|VERBOSE|INFO|WARN|WARNING|ERROR)\s*\]\s+[\w./+-]+:\d+\s+-\s+/;
+const SD_NEW_TAG = /^\[[DVIWE?]\](?:\s|$)/;
+// (one whitespace char in front of the dashes, the run before it is cut by hand: a `\s+` here would make a
+// line of thousands of spaces, such as a padded prompt in a dump, cost the square of its length)
+const SD_TAIL = /\s(?:---|-)\s+[\w./+-]+:\d+\s*$/;
+
+// normalizeSdLine: an sd.cpp log line without its record head and its source tail. Pure; cuts at most
+// one head and one tail, and only at the two ends of the line.
+//   text    the rest. Leading whitespace is kept: a dump's indented "  }" is not its closing "}".
+//   tagged  the line carried a head, i.e. it STARTS a record (a bare "SDCliParams {" is only text).
+// A record of several lines has its head on the first line and its tail on the last, so a middle line
+// has neither and the last one is its tail alone ("} --- main.cpp:699" is "}").
+export function normalizeSdLine(line) {
+  let text = String(line ?? "");
+  let tagged = false;
+  const head = SD_OLD_HEAD.exec(text) || SD_NEW_TAG.exec(text);
+  if (head) {
+    text = text.slice(head[0].length);
+    tagged = true;
+  }
+  const tail = SD_TAIL.exec(text);
+  if (tail) {
+    let end = tail.index;
+    while (end > 0 && /\s/.test(text[end - 1])) end--; // the space(s) the tail was appended after go with it
+    text = text.slice(0, end);
+  }
+  return { text, tagged };
+}
+
+// sd.cpp's parameter dumps: only the engine that prints them (sdcpp) opens a block, and only on a
+// record whose whole message is the header, so text echoed elsewhere that happens to end in
+// "SDCliParams {" opens nothing. Matched against the NORMALISED text of a tagged line.
+const BLOCK_START = /^(?:SDCliParams|SDContextParams|SDGenerationParams)\s*\{\s*$/;
+// The long-tag record heads that end an unterminated dump block (the old shape's valve; the new
+// shape's one-letter tags are not in it on purpose, see above), plus audio.cpp's own heads.
+const LOG_PREFIX = /^\[(?:VERBOSE|INFO|WARN|WARNING|ERROR|DEBUG|TRACE|TIMING)(?:\s+ts=[^\]\s]*)?\s*\]/;
+const TOKENIZER_ECHO = [/^split prompt\s+"/, /^parse\s+'/];
 const GPU_RESET_RE = /ErrorDeviceLost|device lost|context is lost/i;
 const GGML_DEVICE_LINE = /^\s*ggml_vulkan:\s*(\d+)\s*=\s*(.+?)\s*(?:\||$)/;
 const NO_VULKAN_DEVICE = /ggml_vulkan:\s*Found\s+0\s+Vulkan\s+devices|ggml_vulkan:\s*No\s+devices\s+found/i;
-// stable-diffusion.cpp: a compute buffer on a backend, and the modules that are not the
-// diffusion stage.
-const SD_COMPUTE_BUFFER = /^(?:.*?\s-\s)?(.+?)\s+compute buffer size:.*?\bon\s+(\S+)/;
-const SD_AUX_MODULE = /(?:^|[\s_.-])(?:t5\w*|umt5\w*|clip\w*|llm\w*|\w*vae\w*|tae\w*|taehv|taesd|esrgan|text_?enc\w*|conditioner|control\w*|vision\w*)(?:[\s_.-]|$)/i;
+// stable-diffusion.cpp: a compute buffer on a backend; the module name is one word. Read on the normalised text.
+const SD_COMPUTE_BUFFER = /^([\w.+-]+)\s+compute buffer size:.*?\bon\s+(\S+)/;
+// The auto-fit plan's line of the diffusion component, "DiT   params 5162 MiB, compute reserve 2048 MiB ->
+// compute Vulkan0, params Vulkan0" (the old shape's head eats its indentation, the new one keeps it). The
+// compute backend is group 1. Read on the normalised text; "-> compute CPU" is a placement (SD_CPU_SHAPES).
+const SD_PLAN_DIT = /^\s*DiT\s+params\b.*?->\s*compute\s+([A-Za-z_]+\d*)\b/i;
+// The modules that are NOT the diffusion stage, by sd.cpp's own runner names (get_desc()), matched
+// against the WHOLE module name: the text encoders (t5, umt5, clip, llm), the VAEs (vae, wan_vae,
+// flux_vae, ...), the tiny autoencoders (tae*, taesd, taehv), the control-net runner (control_net),
+// ESRGAN and the vision tower. A substring match would count a diffusion model whose NAME holds one
+// of the words (Wan2.1-Fun-14B-Control) as auxiliary and fail a healthy run for lack of evidence.
+export const SD_AUX_MODULE = /^(?:(?:um)?t5(?:[_-]?xxl)?|clip(?:[_-](?:l|g|h|vision|text))?|llm|text[_-]?enc(?:oder)?|conditioner|(?:[\w.]*[_-])?vae(?:[_-][\w.]*)?|tae\w*|control[_-]?net|esrgan|pmid|(?:clip[_-])?vision(?:[_-]\w*)?)$/i;
 const SD_CPU_SHAPES = [
   /\bloading CPU backend\b/i, // [WARN] ggml_extend_backend.cpp: the actual no-GPU fallback
   /\bUsing CPU backend\b/i, // LOG_VERBOSE when the default compute backend is the CPU
@@ -239,32 +373,48 @@ const SD_CPU_SHAPES = [
   /->\s*compute\s+cpu\d*\b/i, // auto-fit plan: "... -> compute CPU, params RAM"
   /auto-fit:\s*no GPU memory budget available;\s*using CPU/i,
 ];
-const DA3_BACKEND = /da::Backend using device:\s*(\S+)/i;
-const DA3_CPU_SHAPES = [/offload_weights:.*->\s*CPU\b/i, /node\(s\) run on CPU\b/i];
-const AUDIO_BUFFER = /\.weights\.buffer_name\s+(\S+)/;
+const DA3_BACKEND = /^\[da3\]\s+da::Backend using device:\s*(\S+)/i;
+const DA3_CPU_SHAPES = [/^\[da3\]\s+offload_weights:.*->\s*CPU\b/i, /^\[da3\]\s+.*node\(s\) run on CPU\b/i];
+const AUDIO_BUFFER = new RegExp("^" + AUDIO_HEAD + String.raw`([\w.-]+)\.weights\.buffer_name\s+(\S+)`);
 
 function stripAnsi(s) {
   // eslint-disable-next-line no-control-regex
   return s.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "");
 }
 
-// buildEchoMatcher: a predicate for log lines that merely repeat user text. A line drops when
-// it contains an echoed string verbatim (each line of a multi-line string counts too). A
-// string shorter than 6 characters is too likely to occur inside a real log line, so it only
-// drops a line that IS that string, or that holds it in quotes.
+// buildEchoMatcher: what the guard knows of the request's own text (prompt, negative prompt, TTS text,
+// lyrics; each line of a multi-line text counts too). It is used for two things only, and never to
+// make a line invisible to the CPU detector:
+//   isEcho(line)  the line IS an echo of that text (the text is most of the line, or all of it): such
+//                 a line can carry no POSITIVE evidence, so text that looks like a device or buffer
+//                 line is not evidence. A real evidence line that merely contains a fragment of the
+//                 text ("Vulkan0" as a prompt) is not an echo.
+//   strip(line)   the line with the text taken out, for the one shape that is plain words (a device
+//                 reset), so a prompt about "device lost" cannot end a healthy run.
+// A piece shorter than 6 characters is ignored: no evidence line is that short, so it can forge
+// nothing, and stripping it would only eat real words.
+// The pieces of a text are the text, each of its lines, and the text as sd.cpp (master-945+) prints
+// a prompt: on ONE line, with every newline escaped to the two characters "\n" (and a CR to "\r").
+// Without that spelling a two-line prompt echoed on one line would be two half-covered pieces
+// (under 60% each) and no echo at all.
+const escapeNewlines = (s) => s.replace(/\r/g, "\\r").replace(/\n/g, "\\n");
 function buildEchoMatcher(echoes) {
-  const full = [];
-  const short = [];
+  const pieces = new Set();
   for (const raw of echoes || []) {
-    if (typeof raw !== "string" || raw.trim() === "") continue;
-    const pieces = new Set([raw.trim()]);
-    for (const part of raw.split(/\r\n|\r|\n/)) if (part.trim() !== "") pieces.add(part.trim());
-    for (const p of pieces) (p.length >= 6 ? full : short).push(p);
+    if (typeof raw !== "string") continue;
+    for (const part of [raw, escapeNewlines(raw), ...raw.split(/\r\n|\r|\n/)]) if (part.trim().length >= 6) pieces.add(part.trim());
   }
-  return (line) => {
-    const t = line.trim();
-    if (full.some((p) => line.includes(p))) return true;
-    return short.some((p) => t === p || line.includes(`"${p}"`) || line.includes(`'${p}'`));
+  const full = [...pieces].sort((x, y) => y.length - x.length);
+  return {
+    isEcho(line) {
+      const t = line.trim();
+      return t !== "" && full.some((p) => line.includes(p) && p.length >= 0.6 * t.length);
+    },
+    strip(line) {
+      let out = line;
+      for (const p of full) out = out.split(p).join(" ");
+      return out;
+    },
   };
 }
 
@@ -273,8 +423,8 @@ function buildEchoMatcher(echoes) {
 // verdict() is called when the engine exits and says whether the positive evidence was seen.
 export function createLogGuard({ engine, echoes = [] }) {
   if (!GUARD_ENGINES.includes(engine)) throw new Error(`createLogGuard: unknown engine ${JSON.stringify(engine)} (want ${GUARD_ENGINES.join(", ")})`);
-  const echoed = buildEchoMatcher(echoes);
-  const st = { lineNo: 0, inBlock: false, device: false, diffusion: false, params: false, da3: false, audio: false };
+  const echo = buildEchoMatcher(echoes);
+  const st = { lineNo: 0, inBlock: false, device: false, diffusion: false, da3: false, audio: false };
   const evidence = [];
   const note = (s) => { if (evidence.length < 20) evidence.push(s); };
 
@@ -283,48 +433,68 @@ export function createLogGuard({ engine, echoes = [] }) {
   function scan(raw) {
     st.lineNo++;
     const line = stripAnsi(String(raw ?? ""));
-    if (st.inBlock) {
-      if (/^\}\s*$/.test(line)) { st.inBlock = false; return null; }
-      if (!LOG_PREFIX.test(line)) return null; // an indented dump line: never scanned
-      st.inBlock = false; // an unterminated dump: the next log record ends it
+    // `text` is what the shapes anchored at the start of a record read. For sd.cpp it is the line
+    // without its record head and its source tail (normalizeSdLine); the other engines' lines as they are.
+    let text = line;
+    if (engine === "sdcpp") {
+      const rec = normalizeSdLine(line);
+      text = rec.text;
+      // the parameter dumps and the tokenizer echoes repeat the request's text and every path:
+      // the only lines that are skipped outright, and only on sd.cpp's own record shapes
+      if (st.inBlock) {
+        if (/^\}\s*$/.test(text)) { st.inBlock = false; return null; } // the old "}" and the new "} --- main.cpp:699"
+        if (!LOG_PREFIX.test(line)) return null; // a dump line, or the lines of a new-shape record: never scanned
+        st.inBlock = false; // an unterminated old-shape dump: the next long-tag record ends it
+      }
+      if (rec.tagged && BLOCK_START.test(text) && !echo.isEcho(line)) { st.inBlock = true; return null; }
+      if (TOKENIZER_ECHO.some((re) => re.test(text))) return null;
     }
-    if (BLOCK_START.test(line)) { st.inBlock = true; return null; }
-    if (TOKENIZER_ECHO.some((re) => re.test(line))) return null;
-    if (echoed(line)) return null;
+    // the head and the tail of an sd.cpp record dilute the share the request's text has of the line, so
+    // the message alone is asked too
+    const isEcho = echo.isEcho(line) || (text !== line && echo.isEcho(text));
 
-    if (GPU_RESET_RE.test(line)) return { kind: GPU_RESET, line: line.trim(), lineNo: st.lineNo };
+    // a lost device is plain words: read it with the request's own text taken out
+    if (GPU_RESET_RE.test(echo.strip(line))) return { kind: GPU_RESET, line: line.trim(), lineNo: st.lineNo };
 
+    // every placement shape reads the WHOLE line, whatever the request said: its text cannot switch
+    // the CPU detector off
     if (NO_VULKAN_DEVICE.test(line)) return cpu(line);
     if (/\bggml_vulkan\b/i.test(line) && SOFTWARE_DEVICE.test(line)) return cpu(line);
     const dev = GGML_DEVICE_LINE.exec(line);
     if (dev) {
-      st.device = true;
-      note(`device ${dev[1]} = ${dev[2]}`);
+      if (!isEcho) {
+        st.device = true;
+        note(`device ${dev[1]} = ${dev[2]}`);
+      }
       return null;
     }
 
     if (engine === "sdcpp") {
       if (SD_CPU_SHAPES.some((re) => re.test(line))) return cpu(line);
-      const cb = SD_COMPUTE_BUFFER.exec(line);
+      const cb = SD_COMPUTE_BUFFER.exec(text);
       if (cb) {
         const [, desc, on] = cb;
         if (/^CPU\d*$/i.test(on)) return cpu(line);
-        if (/^Vulkan\d+$/i.test(on)) {
-          st.params = true;
-          if (!SD_AUX_MODULE.test(desc)) {
-            st.diffusion = true;
-            note(`${desc} compute on ${on}`);
-          }
+        if (/^Vulkan\d+$/i.test(on) && !isEcho && !SD_AUX_MODULE.test(desc)) {
+          st.diffusion = true;
+          note(`${desc} compute on ${on}`);
         }
-        return null;
       }
-      if (/prepared params backend buffers\b.*\bon\s+Vulkan\d+\b/.test(line)) st.params = true;
+      // the auto-fit plan puts the diffusion component on a device before anything is loaded: a second
+      // way to show the diffusion stage is on the GPU ("-> compute CPU" was a placement above)
+      const plan = SD_PLAN_DIT.exec(text);
+      if (plan && /^Vulkan\d+$/i.test(plan[1]) && !isEcho) {
+        st.diffusion = true;
+        note(`DiT plan: compute on ${plan[1]}`);
+      }
     } else if (engine === "da3") {
       const b = DA3_BACKEND.exec(line);
       if (b) {
         if (/^Vulkan\d+$/i.test(b[1])) {
-          st.da3 = true;
-          note(`da3 backend ${b[1]}`);
+          if (!isEcho) {
+            st.da3 = true;
+            note(`da3 backend ${b[1]}`);
+          }
           return null;
         }
         return cpu(line);
@@ -333,8 +503,8 @@ export function createLogGuard({ engine, echoes = [] }) {
     } else {
       const m = AUDIO_BUFFER.exec(line);
       if (m) {
-        if (/^CPU\d*$/i.test(m[1])) return cpu(line);
-        if (/^Vulkan\d+$/i.test(m[1])) {
+        if (/^CPU\d*$/i.test(m[2])) return cpu(line);
+        if (/^Vulkan\d+$/i.test(m[2]) && !isEcho) {
           st.audio = true;
           note(`${line.trim().split(/\s+/).slice(-2).join(" ")}`);
         }
@@ -348,7 +518,7 @@ export function createLogGuard({ engine, echoes = [] }) {
     let expected;
     if (engine === "sdcpp") {
       ok = st.device && st.diffusion;
-      expected = `a non-software "ggml_vulkan: <n> = <device>" line${st.device ? " (seen)" : " (missing)"} and a diffusion-stage "compute buffer size ... on Vulkan<N>" line${st.diffusion ? " (seen)" : " (missing)"}`;
+      expected = `a non-software "ggml_vulkan: <n> = <device>" line${st.device ? " (seen)" : " (missing)"} and a diffusion-stage "compute buffer size ... on Vulkan<N>" line (or the auto-fit plan's DiT "-> compute Vulkan<N>" line)${st.diffusion ? " (seen)" : " (missing)"}`;
     } else if (engine === "da3") {
       ok = st.da3;
       expected = `a "da::Backend using device: Vulkan<N>" line`;
@@ -383,8 +553,11 @@ export function noGpuEvidenceError(label, verdict) {
   return new Error(`${CPU_PLACEMENT}: no GPU evidence was seen in ${label}'s log (expected ${verdict.expected}) — a run that cannot show it ran on the GPU is treated as a CPU run; no model runs on CPU on this engine`);
 }
 
-export function gpuResetError(hit) {
-  return new Error(`${GPU_RESET}: the GPU reset during the run (log line ${hit.lineNo}: ${hit.line}). The amdgpu driver resets the compute ring when one GPU dispatch runs past its default 2 s lockup timeout; keep the request inside the configured token cap (sdcpp_max_tokens, or animategen_sdcpp_max_tokens for animate) by lowering width/height/frames. This failure is never retried automatically.`);
+export function gpuResetError(hit, engine = "sdcpp") {
+  const advice = engine === "audiocpp"
+    ? "shorten the request (seconds or text length)"
+    : "keep the request inside the configured token cap (sdcpp_max_tokens, or animategen_sdcpp_max_tokens for animate) by lowering width/height/frames";
+  return new Error(`${GPU_RESET}: the GPU reset during the run (log line ${hit.lineNo}: ${hit.line}). The amdgpu driver resets the compute ring when one GPU dispatch runs past its default 2 s lockup timeout; ${advice}. This failure is never retried automatically.`);
 }
 
 // ---------------------------------------------------------------- token cap
@@ -465,22 +638,124 @@ const cleanups = new Set();
 let exitHookInstalled = false;
 let lifecycleInstalled = false;
 
-// killTree: the whole process tree, not just the child. On Windows taskkill /T; elsewhere the
-// engine is spawned detached (its own process group), so the group is killed. Best-effort,
-// never throws.
+// How long a runner that is told to stop waits for its engine to be gone before it exits, and so
+// before the media lease is released: long enough for the kernel to tear down an engine's Vulkan
+// context (the amdgpu lockup timeout is 2 s), shorter than gpugen's SIGTERM grace (5 s) so the
+// runner is not SIGKILLed in the middle of the wait.
+export const ENGINE_EXIT_WAIT_MS = 3000;
+
+// processTable: pid -> ppid for every process (POSIX only; empty on Windows or on failure):
+// /proc on Linux, `ps` elsewhere.
+export function processTable() {
+  const table = new Map();
+  if (process.platform === "win32") return table;
+  try {
+    if (existsSync("/proc/self/stat")) {
+      for (const name of readdirSync("/proc")) {
+        if (!/^\d+$/.test(name)) continue;
+        try {
+          const stat = readFileSync(`/proc/${name}/stat`, "utf8");
+          // "pid (comm) S ppid ...": comm may hold spaces and parentheses, so cut at the LAST ")"
+          table.set(Number(name), Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[1]));
+        } catch { /* gone while we looked */ }
+      }
+    } else {
+      const r = spawnSync("ps", ["-A", "-o", "pid=,ppid="], { encoding: "utf8" });
+      for (const line of String(r.stdout || "").split("\n")) {
+        const m = /^\s*(\d+)\s+(\d+)\s*$/.exec(line);
+        if (m) table.set(Number(m[1]), Number(m[2]));
+      }
+    }
+  } catch { /* best effort */ }
+  return table;
+}
+
+// descendantsOf: every descendant of `pid`, deepest first (so a parent is never killed before its
+// children can be found). Pure over `table`.
+export function descendantsOf(pid, table = processTable()) {
+  const children = new Map();
+  for (const [p, pp] of table) {
+    if (!children.has(pp)) children.set(pp, []);
+    children.get(pp).push(p);
+  }
+  const order = [];
+  const walk = (p) => { for (const c of children.get(p) || []) { order.push(c); walk(c); } };
+  walk(pid);
+  return order.reverse();
+}
+
+// killTree: the engine and everything it started, not just the child. On Windows taskkill /T.
+// Elsewhere the engine is NOT detached: it stays in the runner's process group, so that gpugen's
+// SIGKILL of that group (when the runner itself cannot answer a SIGTERM) takes the engine with it
+// (a detached engine would survive it and keep the iGPU). The runner therefore walks the engine's
+// descendants itself. A child that does lead its own group (a caller-supplied spawn) has that group
+// killed too. Best-effort, never throws.
 export function killTree(child) {
   if (!child || child.pid === undefined || child.exitCode !== null || child.signalCode) return;
   try {
     if (process.platform === "win32") {
       spawnSync("taskkill", ["/PID", String(child.pid), "/T", "/F"], { stdio: "ignore" });
-    } else {
-      try { process.kill(-child.pid, "SIGKILL"); } catch { child.kill("SIGKILL"); }
+      return;
     }
+    try { process.kill(-child.pid, "SIGKILL"); } catch { /* not a group leader: the normal case */ }
+    for (const p of descendantsOf(child.pid)) {
+      try { process.kill(p, "SIGKILL"); } catch { /* already gone */ }
+    }
+    try { process.kill(child.pid, "SIGKILL"); } catch { /* already gone */ }
   } catch { /* nothing more to do */ }
 }
 
 function killLiveEngines() {
   for (const c of [...liveEngines]) killTree(c);
+}
+
+// enginePids: the pids of every live engine and its descendants (what a shutdown must see gone).
+export function enginePids() {
+  if (liveEngines.size === 0) return []; // nothing to find: skip the process table scan on a normal exit
+  const table = processTable();
+  const out = [];
+  for (const c of liveEngines) {
+    if (c.pid === undefined || c.exitCode !== null || c.signalCode) continue;
+    out.push(c.pid, ...descendantsOf(c.pid, table));
+  }
+  return out;
+}
+
+// pidGone: the process does not exist, or is only a zombie waiting to be reaped (a killed child of
+// this very process stays one until the event loop runs, and the shutdown paths below are
+// synchronous).
+export function pidGone(pid) {
+  try {
+    process.kill(pid, 0);
+  } catch (e) {
+    return !(e && e.code === "EPERM");
+  }
+  if (process.platform === "win32") return false;
+  try {
+    if (existsSync("/proc/self/stat")) {
+      const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+      return /^[ZX]/.test(stat.slice(stat.lastIndexOf(")") + 2));
+    }
+    const r = spawnSync("ps", ["-o", "stat=", "-p", String(pid)], { encoding: "utf8" });
+    return r.status !== 0 || /^\s*Z/.test(String(r.stdout || ""));
+  } catch {
+    return true; // /proc/<pid> vanished between the two calls
+  }
+}
+
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+// waitUntilGone: block (at most maxMs) until every pid is gone. Returns {gone, waitedMs}.
+export function waitUntilGone(pids, { maxMs = ENGINE_EXIT_WAIT_MS, pollMs = 25, isGone = pidGone, sleep = sleepSync, now = Date.now } = {}) {
+  const t0 = now();
+  let alive = pids.filter((p) => !isGone(p));
+  while (alive.length > 0 && now() - t0 < maxMs) {
+    sleep(pollMs);
+    alive = alive.filter((p) => !isGone(p));
+  }
+  return { gone: alive.length === 0, waitedMs: now() - t0, alive };
 }
 
 function runCleanups() {
@@ -489,10 +764,36 @@ function runCleanups() {
   }
 }
 
+// stopEngines: kill every live engine tree and WAIT for it to be gone. A runner that exits (and so
+// lets the lease go) while its engine is still tearing down its Vulkan context lets the next job
+// start a second engine on the same iGPU.
+function stopEngines(deps) {
+  const pids = deps.pids();
+  deps.kill();
+  return pids.length ? deps.wait(pids) : { gone: true, waitedMs: 0, alive: [] };
+}
+
+const defaultDeps = {
+  pids: enginePids,
+  kill: killLiveEngines,
+  wait: (pids) => waitUntilGone(pids),
+  cleanup: runCleanups,
+  exit: (code) => process.exit(code),
+};
+
+// What the process 'exit' hook runs with: the defaults until installLifecycle replaces them with its own
+// (the same defaults unless a test injects pids / kill / wait / cleanup), so the exit path is observable
+// like the signal path is.
+let exitDeps = defaultDeps;
+
 function ensureExitHook() {
   if (exitHookInstalled) return;
   exitHookInstalled = true;
-  process.on("exit", () => { killLiveEngines(); runCleanups(); });
+  process.on("exit", () => {
+    // an engine still live when the process exits (a crash, an uncaught error) is killed AND waited for
+    stopEngines(exitDeps);
+    exitDeps.cleanup();
+  });
 }
 
 function pidAlive(pid) {
@@ -507,16 +808,26 @@ function pidAlive(pid) {
 // installLifecycle: make the runner kill its engine tree and remove its temp dirs when it is
 // told to stop (SIGTERM / SIGINT / SIGHUP) and when its parent disappears (process.ppid
 // changes, or the original parent no longer exists), so cleanup never depends on a graceful
-// exit by the parent. Idempotent. `pollMs` is the parent-watch interval.
-export function installLifecycle({ pollMs = Number(process.env.IGPU_PARENT_POLL_MS) || 1000 } = {}) {
+// exit by the parent. It exits only AFTER the engine tree is gone (bounded by ENGINE_EXIT_WAIT_MS).
+// Idempotent. `pollMs` is the parent-watch interval; `deps` replaces the pieces a test observes
+// (pids, kill, wait, cleanup, exit).
+export function installLifecycle({ pollMs = Number(process.env.IGPU_PARENT_POLL_MS) || 1000, deps = {} } = {}) {
   ensureExitHook();
   if (lifecycleInstalled) return;
   lifecycleInstalled = true;
+  const d = { ...defaultDeps, ...deps };
+  exitDeps = d;
+  let dying = false;
   const die = (code, why) => {
+    if (dying) return;
+    dying = true;
     try { process.stderr.write(`igpu-engine: ${why}; killing the engine tree and cleaning up\n`); } catch { /* stderr may be gone */ }
-    killLiveEngines();
-    runCleanups();
-    process.exit(code);
+    const w = stopEngines(d);
+    if (!w.gone) {
+      try { process.stderr.write(`igpu-engine: engine process(es) ${w.alive.join(",")} still present after ${w.waitedMs} ms\n`); } catch { /* ignore */ }
+    }
+    d.cleanup();
+    d.exit(code);
   };
   for (const [sig, code] of [["SIGTERM", 143], ["SIGINT", 130], ["SIGHUP", 129]]) {
     process.on(sig, () => die(code, `received ${sig}`));
@@ -528,6 +839,33 @@ export function installLifecycle({ pollMs = Number(process.env.IGPU_PARENT_POLL_
     }, pollMs);
     t.unref();
   }
+}
+
+// Signals that mean the engine itself crashed (an assert, a segfault, a bad access), as opposed to
+// being told to stop (SIGTERM, SIGINT, SIGHUP) or killed (SIGKILL: the OOM killer or a timeout).
+const CRASH_SIGNALS = new Set(["SIGSEGV", "SIGABRT", "SIGBUS", "SIGFPE", "SIGTRAP", "SIGSYS"]);
+
+// memoryFailure: the first log line in which ggml / sd.cpp / audio.cpp / the Vulkan driver reports it
+// ran out of memory ("insufficient memory (attempted to allocate 5162.00 MB)", "alloc compute buffer
+// failed", "Device memory allocation of size N failed", ErrorOutOfDeviceMemory), or "".
+const MEMORY_FAILURE = /insufficient memory|alloc(?:ate|ation)? compute buffer failed|failed to alloc(?:ate)? (?:compute )?buffer|device memory allocation of size|ErrorOutOf(?:Device|Host)Memory|\bout of memory\b/i;
+export function memoryFailure(lines) {
+  for (const l of lines || []) if (MEMORY_FAILURE.test(l)) return String(l).trim().slice(0, 200);
+  return "";
+}
+
+// memoryError: the typed OUT_OF_MEMORY failure (err_class oom), naming the log line that says so.
+export function memoryError(label, line, how) {
+  return new Error(`${OUT_OF_MEMORY}: ${label} ran out of memory (${how}): ${line}. Lower the width, height or frames, or free memory on this box. Not retried automatically.`);
+}
+
+// engineExitError: the error for an engine that exited non-zero: a refused model file
+// (MODEL_INCOMPATIBLE), an out-of-memory report in its log (OUT_OF_MEMORY), else "<label> exited N".
+export function engineExitError(label, code, log, modelFile) {
+  const lines = String(log ?? "").split(/\r\n|\r|\n/);
+  return (modelFile ? modelMetadataError(log, modelFile) : null)
+    || (memoryFailure(lines) ? memoryError(label, memoryFailure(lines), `exit ${code}`) : null)
+    || new Error(`${label} exited ${code}`);
 }
 
 // runEngine: spawn `bin args`, tee every output line to stderr (that is the progress the Go
@@ -552,7 +890,10 @@ export function runEngine({ bin, args, env, timeoutMs = 0, guard, label = "engin
     const child = spawnImpl(bin, args, {
       env: { ...process.env, ...(env || {}) },
       stdio: ["ignore", "pipe", "pipe"],
-      detached: process.platform !== "win32",
+      // NOT detached: the engine stays in the runner's process group, so a SIGKILL of that group (gpugen's
+      // escalation when the runner cannot answer a SIGTERM) takes the engine with it. killTree walks its
+      // descendants itself.
+      detached: false,
       windowsHide: true,
     });
     liveEngines.add(child);
@@ -579,7 +920,7 @@ export function runEngine({ bin, args, env, timeoutMs = 0, guard, label = "engin
       chunks.push(line);
       process.stderr.write(line + "\n");
       const hit = guard.scan(line);
-      if (hit) abort(hit.kind === GPU_RESET ? gpuResetError(hit) : cpuPlacementError(hit));
+      if (hit) abort(hit.kind === GPU_RESET ? gpuResetError(hit, guard.engine) : cpuPlacementError(hit));
     };
     const feed = (stream) => {
       let buf = "";
@@ -601,8 +942,15 @@ export function runEngine({ bin, args, env, timeoutMs = 0, guard, label = "engin
         return finish(reject, new Error(`${ILLEGAL_INSTRUCTION}: ${label} died with SIGILL (exit ${code ?? 132}): the binary uses CPU instructions this machine's CPU lacks (an instruction-set mismatch, e.g. the audio.cpp release build is AVX-512 and a Zen 3 CPU has none). Build the engine on the node instead of using a prebuilt release.`));
       }
       if (signal) {
-        const hint = signal === "SIGKILL" ? " (SIGKILL on a UMA iGPU box usually means the kernel out-of-memory (OOM) killer)" : "";
-        return finish(reject, new Error(`${label} was killed by signal ${signal}${hint}`));
+        const mem = memoryFailure(chunks);
+        if (mem) return finish(reject, memoryError(label, mem, `died of signal ${signal}`));
+        if (signal === "SIGKILL") {
+          return finish(reject, new Error(`${label} was killed by signal SIGKILL (SIGKILL on a UMA iGPU box usually means the kernel out-of-memory (OOM) killer)`));
+        }
+        if (CRASH_SIGNALS.has(signal)) {
+          return finish(reject, new Error(`${ENGINE_CRASHED}: ${label} died of signal ${signal}: an engine crash, not a timeout; the same request would crash it again. Not retried automatically.`));
+        }
+        return finish(reject, new Error(`${label} was killed by signal ${signal}`));
       }
       if (code === 0) {
         const v = guard.verdict();
@@ -671,16 +1019,76 @@ export function mp4Args(src, dst, fps, { trimFirst = 0 } = {}) {
     "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "16", "-r", String(fps), "-movflags", "+faststart", dst];
 }
 
-// encodeMp4: `timeoutMs` (0 = none) bounds the encode, so the runner's deadline covers it too.
+// partialPath: where a result is written before it is delivered: a hidden sibling of `dst` in the
+// SAME directory (so the final rename is atomic and never crosses a drive), with dst's extension
+// last (ffmpeg picks the container from it). The pid keeps two runners apart.
+export function partialPath(dst) {
+  const ext = extname(dst);
+  return join(dirname(dst), `.${basename(dst, ext)}.${process.pid}.part${ext}`);
+}
+
+// registerCleanup: run `fn` on every exit path of the runner (the process 'exit' hook and the signal /
+// parent-gone handlers, like the temp dirs). Returns the function that unregisters it.
+export function registerCleanup(fn) {
+  cleanups.add(fn);
+  ensureExitHook();
+  return () => cleanups.delete(fn);
+}
+
+// deliverFile: make `partial` the file at `dst`, atomically (rename). A result is only ever PUBLISHED
+// by this, so a failed or killed run never leaves a half-written file at the delivery path and a
+// re-run of the same request never overwrites a good clip with a partial one.
+export function deliverFile(partial, dst) {
+  renameSync(partial, dst);
+}
+
+// encodeMp4: `timeoutMs` (0 = none) bounds the encode, so the runner's deadline covers it too. The
+// encode writes to a partial file beside `dst`; `opts.verify(partialPath)` (optional) may throw to
+// reject it (the black / frozen clip gate); only then is it renamed onto `dst`. Any failure, a
+// rejection or a deadline kill removes the partial and leaves whatever was at `dst` untouched.
 export function encodeMp4(ffmpeg, src, dst, fps, timeoutMs = 0, opts = {}) {
   if (!ffmpeg) throw new Error("FFMPEG_UNAVAILABLE: ffmpeg could not be resolved (set ffmpeg_path, or put ffmpeg on PATH)");
-  const r = spawnSync(ffmpeg, mp4Args(src, dst, fps, opts), {
-    encoding: "utf8", ...(timeoutMs > 0 ? { timeout: timeoutMs, killSignal: "SIGKILL" } : {}),
-  });
-  if (r.error || r.status !== 0 || !existsSync(dst)) {
-    const timedOut = r.error && r.error.code === "ETIMEDOUT";
-    throw new Error((timedOut ? "ffmpeg mp4 encode timeout (killed): " : "ffmpeg mp4 encode failed: ") + (r.error ? r.error.message : String(r.stderr || "").trim().slice(-300)));
+  const { verify, ...mp4Opts } = opts;
+  const partial = partialPath(dst);
+  const rm = () => { try { rmSync(partial, { force: true }); } catch { /* best effort */ } };
+  const unregister = registerCleanup(rm);
+  try {
+    const r = spawnSync(ffmpeg, mp4Args(src, partial, fps, mp4Opts), {
+      encoding: "utf8", ...(timeoutMs > 0 ? { timeout: timeoutMs, killSignal: "SIGKILL" } : {}),
+    });
+    if (r.error || r.status !== 0 || !existsSync(partial)) {
+      const timedOut = r.error && r.error.code === "ETIMEDOUT";
+      throw new Error((timedOut ? "ffmpeg mp4 encode timeout (killed): " : "ffmpeg mp4 encode failed: ") + (r.error ? r.error.message : String(r.stderr || "").trim().slice(-300)));
+    }
+    if (verify) verify(partial);
+    deliverFile(partial, dst);
+  } catch (e) {
+    rm();
+    throw e;
+  } finally {
+    unregister();
   }
+}
+
+const OWNER_FILE = ".igpu-owner";
+
+// sweepStaleTempDirs: remove the leftovers of runners that died without cleaning up (SIGKILL,
+// power loss): directories in `base` named `prefix*` whose owner marker names a process that no
+// longer exists. A directory with no marker, or whose owner is alive (another job, this one), is
+// left alone. Returns the directories removed. Best effort, never throws.
+export function sweepStaleTempDirs(prefix, base = tmpdir()) {
+  const removed = [];
+  try {
+    for (const name of readdirSync(base)) {
+      if (!name.startsWith(prefix)) continue;
+      const dir = join(base, name);
+      let owner;
+      try { owner = Number(readFileSync(join(dir, OWNER_FILE), "utf8").trim()); } catch { continue; }
+      if (!Number.isInteger(owner) || owner <= 0 || owner === process.pid || pidAlive(owner)) continue;
+      try { rmSync(dir, { recursive: true, force: true }); removed.push(dir); } catch { /* best effort */ }
+    }
+  } catch { /* the base dir may not be listable */ }
+  return removed;
 }
 
 // makeTempDir: a private work dir under the OS temp dir, removed by cleanup() on every
@@ -688,7 +1096,11 @@ export function encodeMp4(ffmpeg, src, dst, fps, timeoutMs = 0, opts = {}) {
 // parent-gone handlers (which run every registered cleanup), so a killed job leaves no
 // frames behind.
 export function makeTempDir(prefix) {
+  sweepStaleTempDirs(prefix);
   const dir = mkdtempSync(join(tmpdir(), prefix));
+  // the owner marker lets a LATER runner tell this dir from a dead one's (a runner that was SIGKILLed
+  // cannot clean up after itself)
+  try { writeFileSync(join(dir, OWNER_FILE), String(process.pid)); } catch { /* best effort */ }
   let done = false;
   const cleanup = () => {
     if (done) return;

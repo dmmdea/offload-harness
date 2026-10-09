@@ -17,10 +17,14 @@
 //   logFile: path of a captured log printed first (then `log`)
 //   exit:    exit code (default 0)
 //   hang:    after the log, never exit (the runner has to kill it)
+//   echoFlags: ["-p", ...]  also print the value after each of these flags, one bare line per line of it
+//   frozen / black (writes.video): a still colour / a black clip
 //   writes:  one of
-//     {kind:"video", extraFrames, black, ffmpeg}   a real clip at `-o` (frames = --video-frames + extraFrames)
+//     {kind:"video", extraFrames, black, frozen, ffmpeg}   a real clip at `-o` (frames = --video-frames + extraFrames)
 //     {kind:"wav", seconds, tailSilence, silent}    a PCM16 wav at `--out`
 //     {kind:"gray_png"}                              a 1-channel PNG at `--png`
+//     {kind:"last_arg", content}                     `content` written to the LAST argument (a fake ffmpeg)
+//   stdout:  [lines] printed to stdout (a fake ffprobe answers its duration there)
 //   inspectControlVideo: record the PNG headers found in the directory after --control-video
 // }
 //
@@ -200,11 +204,20 @@ function argAfter(argv, flag) {
 // retried, never abandoned; a reader that has gone (EPIPE: the runner killed this engine on purpose)
 // ends the output quietly.
 function writeStderr(text) {
+  writeFdInFull(2, text);
+}
+
+// writeStdout: the same for fd 1 (a fake ffprobe answers its duration there, then exits).
+function writeStdout(text) {
+  writeFdInFull(1, text);
+}
+
+function writeFdInFull(fd, text) {
   const buf = Buffer.from(text);
   let off = 0;
   while (off < buf.length) {
     try {
-      off += writeSync(2, buf, off, buf.length - off);
+      off += writeSync(fd, buf, off, buf.length - off);
     } catch (e) {
       if (e.code === "EPIPE") return;
       if (e.code !== "EAGAIN") throw e;
@@ -228,9 +241,21 @@ function runAsEngine() {
   if (spec.logFile) lines.push(...readFileSync(spec.logFile, "utf8").split(/\r\n|\r|\n/));
   if (spec.log) lines.push(...spec.log);
   writeStderr(lines.map((l) => l + "\n").join(""));
+  // echoFlags: print the value after each named flag, one bare line per line of it (an engine that
+  // echoes the request's own text into its log)
+  for (const flag of spec.echoFlags || []) {
+    const v = argAfter(argv, flag);
+    if (v) writeStderr(v.split(/\r\n|\r|\n/).map((l) => l + "\n").join(""));
+  }
+
+  // stdout: lines printed to stdout (a fake ffprobe answers its duration there)
+  writeStdout((spec.stdout || []).map((l) => l + "\n").join(""));
 
   const w = spec.writes;
-  if (w && w.kind === "gray_png") {
+  if (w && w.kind === "last_arg") {
+    // a fake ffmpeg: writes `content` to its last argument (the destination), then exits as told
+    writeFileSync(argv[argv.length - 1], w.content ?? "PARTIAL-BYTES");
+  } else if (w && w.kind === "gray_png") {
     const out = argAfter(argv, "--png");
     const input = argAfter(argv, "--input");
     // a depth map at the model's own working size, not the frame's
@@ -244,7 +269,8 @@ function runAsEngine() {
     const height = argAfter(argv, "-H") || "64";
     const fps = argAfter(argv, "--fps") || "16";
     const frames = Number(argAfter(argv, "--video-frames") || 5) + (w.extraFrames || 0);
-    const src = w.black ? `color=c=black:s=${width}x${height}:r=${fps}` : `testsrc2=s=${width}x${height}:r=${fps}`;
+    // black: an all-black clip; frozen: one still colour (not black, never changing); else a moving test pattern
+    const src = w.black ? `color=c=black:s=${width}x${height}:r=${fps}` : w.frozen ? `color=c=0x2060c0:s=${width}x${height}:r=${fps}` : `testsrc2=s=${width}x${height}:r=${fps}`;
     const r = spawnSync(w.ffmpeg, ["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", src, "-frames:v", String(frames), "-an", out], { encoding: "utf8" });
     if (r.status !== 0) {
       writeStderr("stub: ffmpeg failed: " + r.stderr + "\n");
@@ -255,7 +281,9 @@ function runAsEngine() {
     setInterval(() => {}, 1000);
     return;
   }
-  process.exit(spec.exit ?? 0);
+  // not process.exit(): a big log written to a pipe that is full is queued, and exit() would drop the
+  // end of it (the runner then sees a truncated log); the code is applied when the loop drains
+  process.exitCode = spec.exit ?? 0;
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] || "").href) runAsEngine();

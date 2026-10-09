@@ -93,13 +93,22 @@ export function resolveFfprobe(ffmpegPath) {
   return probe.error ? "" : "ffprobe";
 }
 
+// boundedBy: the spawnSync options that bound a call by `timeoutMs` (0 = none, the form every caller
+// that passes no deadline gets, so a caller without a budget behaves exactly as it always did).
+function boundedBy(timeoutMs) {
+  return timeoutMs > 0 ? { timeout: timeoutMs, killSignal: "SIGKILL" } : {};
+}
+
 // durationSec: the file's duration via ffprobe. Returns 0 on any failure (caller
-// treats 0 as "cannot assess — skip").
-export function durationSec(ffprobePath, file) {
+// treats 0 as "cannot assess — skip"). `timeoutMs` (0 = none) bounds the call; a call
+// that was killed at its bound THROWS a timeout instead of returning 0, because 0 reads
+// as "the audio is empty" and a deadline is not that.
+export function durationSec(ffprobePath, file, { timeoutMs = 0 } = {}) {
   const r = spawnSync(ffprobePath, [
     "-v", "error", "-show_entries", "format=duration",
     "-of", "default=noprint_wrappers=1:nokey=1", file,
-  ], { encoding: "utf8" });
+  ], { encoding: "utf8", ...boundedBy(timeoutMs) });
+  if (r.error && r.error.code === "ETIMEDOUT") throw new Error(`ffprobe duration timeout (killed): ${r.error.message}`);
   const n = Number(String(r.stdout || "").trim());
   return Number.isFinite(n) && n > 0 ? n : 0;
 }
@@ -117,36 +126,53 @@ export function parseSilences(stderrText) {
   return out;
 }
 
-// parseLoudness: the LAST "I: <x> LUFS" and the (Summary-only) "Peak: <y> dBFS"
-// lines from a combined silencedetect+ebur128 run. Per-tick ebur128 lines repeat
-// "I:" throughout the file; taking the last match lands on the final Summary value.
-// "Peak:" (as opposed to the per-tick "TPK:") only appears in the Summary's "True
-// peak:" section, so the first/only match is already the right one.
+// parseLoudness: the integrated loudness ("I: <x> LUFS") and the true peak ("Peak: <y>
+// dBFS") from the Summary block of a combined silencedetect+ebur128 run, and ONLY from
+// there. ffmpeg prints the Summary at the very end of a pass that ran to completion,
+// while every per-tick ebur128 line (one each 100 ms) also carries an "I: <x> LUFS": a
+// pass that was killed half way still printed ticks, so reading any "I:" would report a
+// loudness for a pass that measured nothing. null for both when no Summary was printed.
+// "Peak:" (as opposed to the per-tick "TPK:") only exists in the Summary's "True peak:"
+// section; it is "-inf" for digital silence, which reads as null as well.
 export function parseLoudness(stderrText) {
-  const iMatches = [...stderrText.matchAll(/\bI:\s*(-?[\d.]+)\s*LUFS/g)];
-  const peakMatches = [...stderrText.matchAll(/\bPeak:\s*(-?[\d.]+)\s*dBFS/g)];
-  const integratedLUFS = iMatches.length ? Number(iMatches[iMatches.length - 1][1]) : null;
-  const truePeakDBFS = peakMatches.length ? Number(peakMatches[peakMatches.length - 1][1]) : null;
-  return { integratedLUFS, truePeakDBFS };
+  const text = String(stderrText ?? "");
+  const at = text.lastIndexOf("Summary:");
+  const block = at >= 0 ? text.slice(at) : "";
+  const integrated = /Integrated loudness:\s*I:\s*(-?[\d.]+)\s*LUFS/.exec(block);
+  const peak = /\bPeak:\s*(-?[\d.]+)\s*dBFS/.exec(block);
+  return { integratedLUFS: integrated ? Number(integrated[1]) : null, truePeakDBFS: peak ? Number(peak[1]) : null };
 }
 
 // measure: run ffmpeg once (silencedetect + ebur128 chained, one decode pass) plus
-// ffprobe for duration. Returns null when ffmpeg/ffprobe are unavailable or the
-// spawn fails — the caller must treat null as "skip the gate", never as "clean".
-export function measure(ffmpegPath, ffprobePath, file, { noiseDB = -45, minSilenceSec = 0.5 } = {}) {
+// ffprobe for duration. Returns null when ffmpeg/ffprobe are unavailable, ffprobe sees
+// no duration or the spawn fails — the caller must treat null as "skip the gate", never
+// as "clean". Otherwise it reports the FACTS of the pass and decides nothing: how the
+// ffmpeg pass ended (`exitStatus`, null when a signal ended it; `exitSignal`) and what it
+// printed (`silences`; `integratedLUFS` / `truePeakDBFS`, null unless the Summary block
+// was printed). A pass that did not exit 0 or printed no Summary measured nothing, and its
+// empty silence list does not mean "no silence": gateDeadAir (audiocpp-generate.mjs) is the
+// caller that refuses to read it as clean. `timeoutMs` (0 = none) bounds both calls; a call
+// killed at its bound throws a timeout rather than returning null.
+export function measure(ffmpegPath, ffprobePath, file, { noiseDB = -45, minSilenceSec = 0.5, timeoutMs = 0 } = {}) {
   if (!ffmpegPath || !ffprobePath) return null;
-  const duration = durationSec(ffprobePath, file);
+  const t0 = Date.now();
+  const duration = durationSec(ffprobePath, file, { timeoutMs });
   if (!duration) return null;
+  // the two calls share one budget: the ffmpeg pass gets what the ffprobe call left
+  const left = timeoutMs > 0 ? Math.max(1, timeoutMs - (Date.now() - t0)) : 0;
   const r = spawnSync(ffmpegPath, [
     "-hide_banner", "-nostats", "-i", file,
     "-af", `silencedetect=noise=${noiseDB}dB:d=${minSilenceSec},ebur128=peak=true`,
     "-f", "null", "-",
-  ], { encoding: "utf8" });
-  if (r.error) return null;
+  ], { encoding: "utf8", ...boundedBy(left) });
+  if (r.error) {
+    if (r.error.code === "ETIMEDOUT") throw new Error(`ffmpeg loudness/silence measurement timeout (killed): ${r.error.message}`);
+    return null;
+  }
   const text = String(r.stderr || "");
   const silences = parseSilences(text);
   const { integratedLUFS, truePeakDBFS } = parseLoudness(text);
-  return { duration, silences, integratedLUFS, truePeakDBFS };
+  return { duration, silences, integratedLUFS, truePeakDBFS, exitStatus: r.status, exitSignal: r.signal || null };
 }
 
 // assessDeadAir: the QA gate's verdict. "Dead air" per the JOB spec: trailing OR

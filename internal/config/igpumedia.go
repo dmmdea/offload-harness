@@ -37,6 +37,9 @@ const (
 // "vulcan" are all refused instead of being left to the binary to resolve.
 var vulkanBackendRe = regexp.MustCompile(`^vulkan\d*$`)
 
+// backendSepRe separates the per-module assignments of one --backend value.
+var backendSepRe = regexp.MustCompile(`[,&]`)
+
 // CPUBackendRefusal returns an error when backend is not purely Vulkan devices, and nil
 // for a backend that names only Vulkan devices. The empty string is refused too: an engine
 // with no backend would let the binary pick its own, and the binary's own choice is CPU on a
@@ -50,7 +53,11 @@ func CPUBackendRefusal(backend string) error {
 	if b == "" {
 		return fmt.Errorf("backend is unset (a GPU backend such as \"vulkan0\" is required; no model runs on CPU on this engine)")
 	}
-	for _, part := range strings.FieldsFunc(b, func(r rune) bool { return r == ',' || r == '&' }) {
+	// Split keeps the empty parts (FieldsFunc dropped them): an empty assignment ("vulkan0,",
+	// ",vulkan0", "vulkan0,,vulkan1", "vulkan0&") is refused, exactly as render/igpu-engine.mjs
+	// refuseCpuBackend refuses it. The two layers must agree, or doctor shows CONFIGURED for a
+	// backend that every call then refuses after taking the media lease.
+	for _, part := range backendSepRe.Split(b, -1) {
 		v := strings.TrimSpace(part)
 		if i := strings.LastIndex(v, "="); i >= 0 {
 			v = strings.TrimSpace(v[i+1:])
@@ -62,16 +69,20 @@ func CPUBackendRefusal(backend string) error {
 	return nil
 }
 
-// audiocppBackends is the allowlist of audio.cpp --backend values: the GPU backends of
-// `audiocpp_cli --backend cpu|cuda|hip|rocm|vulkan|metal|best` (rocm is an alias of hip).
+// audiocppBackends is the allowlist of audio.cpp --backend values. audio.cpp itself knows
+// `cpu|cuda|hip|rocm|vulkan|metal|best`, but only vulkan is allowed here: the runner proves a run
+// was on the GPU by the "<component>.weights.buffer_name Vulkan<N>" lines of the engine's log
+// (render/igpu-engine.mjs), and that evidence guard recognises no other backend's buffer names, so
+// a cuda / hip / rocm / metal binding would read CONFIGURED and then end every call as
+// CPU_PLACEMENT "no GPU evidence" even when it ran on that GPU. Add a backend here only together
+// with a real captured log of its buffer names and the evidence pattern for them.
 // audio.cpp takes the device index SEPARATELY (--device N, the audiocpp_device key), so
 // "vulkan0" is not a valid audio.cpp backend even though sd.cpp's --backend wants exactly that.
 // cpu and best (which may pick the CPU) are not on the list: no model runs on CPU.
-var audiocppBackends = map[string]bool{"vulkan": true, "cuda": true, "hip": true, "rocm": true, "metal": true}
+var audiocppBackends = map[string]bool{"vulkan": true}
 
-// AudiocppBackendRefusal returns an error unless backend is one of audio.cpp's GPU backends
-// (vulkan, cuda, hip, rocm, metal). It is the audiocpp_backend twin of CPUBackendRefusal,
-// which validates sd.cpp's vulkanN spelling.
+// AudiocppBackendRefusal returns an error unless backend is audio.cpp's vulkan backend. It is the
+// audiocpp_backend twin of CPUBackendRefusal, which validates sd.cpp's vulkanN spelling.
 func AudiocppBackendRefusal(backend string) error {
 	b := strings.ToLower(strings.TrimSpace(backend))
 	if b == "" {
@@ -82,7 +93,7 @@ func AudiocppBackendRefusal(backend string) error {
 		if vulkanBackendRe.MatchString(b) {
 			hint = fmt.Sprintf(" - audio.cpp takes the device index separately: set audiocpp_backend \"vulkan\" and audiocpp_device %q", strings.TrimPrefix(b, "vulkan"))
 		}
-		return fmt.Errorf("backend %q is not an audio.cpp GPU backend (want vulkan, cuda, hip, rocm or metal; cpu and best are refused: no model runs on CPU on this engine)%s", backend, hint)
+		return fmt.Errorf("backend %q is not an allowed audio.cpp backend (want vulkan: the GPU-evidence guard only recognises Vulkan buffers; cpu and best are refused: no model runs on CPU on this engine)%s", backend, hint)
 	}
 	return nil
 }
@@ -95,7 +106,7 @@ func AudiocppDeviceRefusal(device string) error {
 	if d == "" || deviceIndexRe.MatchString(d) {
 		return nil
 	}
-	return fmt.Errorf("audiocpp_device %q is not a device index (a non-negative integer such as \"0\")", device)
+	return fmt.Errorf("DEVICE_INVALID: audiocpp_device %q is not a device index (a non-negative integer such as \"0\"); this is a configuration error, not a backend refusal", device)
 }
 
 // Engines whose extra args are screened (ExtraArgsRefusal): they differ only in which flags
@@ -122,7 +133,13 @@ var placementFlags = map[string]bool{
 // iGPU box "VRAM" is the same memory, so it only adds copies and the bindings leave it off).
 var sanctionedSpillFlags = map[string]bool{"--offload-to-cpu": true}
 
-var extraArgSplitRe = regexp.MustCompile(`[=,&:\s]+`)
+// extraArgSplitRe splits an extra-args element into the words a backend value can hide in. Go's
+// \s is only [\t\n\f\r ]: it has neither the vertical tab nor any Unicode space, while JS's (the
+// runner's screen) has both, so they are listed: "--threads=<VT>cpu" and "--threads=<NBSP>cpu"
+// must be refused by both layers (render/testdata/screen-parity-table.json pins each). U+0085
+// (NEL) is split on here though JS's \s does not take it: the one place the two layers differ, in
+// the safe direction (Go refuses first; see the table's go_stricter list).
+var extraArgSplitRe = regexp.MustCompile(`[=,&:\s\x0b\x{0085}\x{00a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}]+`)
 var cpuTokenRe = regexp.MustCompile(`^cpu\d*$`)
 
 // ScreenExtraArgs returns the first *_extra_args element that changes the backend or the
@@ -200,6 +217,13 @@ func tokenFitAdvice(width, height, stride, refLatentFrames, capTokens int) strin
 func TokenCapRefusal(key string, width, height, frames, stride, refLatentFrames, capTokens int) error {
 	if capTokens <= 0 {
 		return nil
+	}
+	// A cap with no usable stride cannot be checked, and LatentTokens would answer 0 ("fits") for
+	// it: refuse here, before the lease, what the runner refuses after it ("--vae-stride must be 8
+	// or 16 when --max-tokens is set"). config.Load already rejects the pair; this is the door for
+	// an in-process Config that never went through Load.
+	if stride != 8 && stride != 16 {
+		return fmt.Errorf("TOKEN_CAP_EXCEEDED: the token cap (%s = %d) cannot be checked: the VAE stride is %d, want 8 or 16 (set the matching *_vae_stride key); refused rather than assumed to fit. Not retried.", key, capTokens, stride)
 	}
 	tokens := LatentTokens(width, height, frames, stride, refLatentFrames)
 	if tokens <= capTokens {

@@ -100,25 +100,45 @@ test("screenExtraArgs: anything that changes the backend or the placement is ref
 
 // ---------------------------------------------------------------- the positive guard on REAL logs
 
-const SD_HEALTHY = ["sdcpp-video-healthy.log", "sdcpp-video-tae.log"];
+// The real healthy sd.cpp logs, in BOTH record shapes the guard reads (CT-49 round 3): the master-929 one
+// ("[VERBOSE] ggml_runner.cpp:1019 - <message>", fixtures `sdcpp-*`) and the master-945 one ("[V] <message> ---
+// ggml_runner.cpp:1019", fixtures `sdcpp945-*`). `head` is a line only that shape has, so a fixture cannot be swapped for the
+// other shape unnoticed; `diffusion` is the diffusion module the run printed.
+const SD_HEALTHY = [
+  { file: "sdcpp-video-healthy.log", shape: "master-929", head: /^\[VERBOSE\] main\.cpp:699 {2}- SDCliParams \{$/m, diffusion: "Wan2.2-TI2V-5B" },
+  { file: "sdcpp-video-tae.log", shape: "master-929", head: /^\[VERBOSE\] main\.cpp:699 {2}- SDCliParams \{$/m, diffusion: "Wan2.2-TI2V-5B" },
+  { file: "sdcpp945-video-healthy.log", shape: "master-945", head: /^\} --- main\.cpp:699$/m, diffusion: "Wan2.2-TI2V-5B" },
+  { file: "sdcpp945-video-tae.log", shape: "master-945", head: /^\} --- main\.cpp:699$/m, diffusion: "Wan2.2-TI2V-5B" },
+  { file: "sdcpp945-vace-healthy.log", shape: "master-945", head: /^\} --- main\.cpp:699$/m, diffusion: "Wan2.1-VACE-1.3B" },
+];
 
-test("scanLog: each real healthy sd.cpp log passes (device line + a diffusion-stage compute buffer on Vulkan)", () => {
-  for (const f of SD_HEALTHY) {
-    const r = scanLog(fixture(f), { engine: "sdcpp" });
-    assert.equal(r.fatal, null, `${f}: ${JSON.stringify(r.fatal)}`);
-    assert.equal(r.verdict.ok, true, f);
-    assert.ok(r.verdict.evidence.some((e) => /Wan2\.2-TI2V-5B compute on Vulkan0/.test(e)), f);
+test("scanLog: each real healthy sd.cpp log passes, master-929 and master-945 alike (device line + a diffusion-stage compute buffer on Vulkan)", () => {
+  for (const { file, shape, head, diffusion } of SD_HEALTHY) {
+    const text = fixture(file);
+    assert.match(text, head, `${file} is a ${shape} log`);
+    const r = scanLog(text, { engine: "sdcpp" });
+    assert.equal(r.fatal, null, `${file}: ${JSON.stringify(r.fatal)}`);
+    assert.equal(r.verdict.ok, true, `${file}: ${r.verdict.expected}`);
+    assert.ok(r.verdict.evidence.some((e) => e.startsWith(`${diffusion} compute on Vulkan0`)), `${file}: ${JSON.stringify(r.verdict.evidence)}`);
+    assert.ok(r.verdict.evidence.some((e) => /^DiT plan: compute on Vulkan0$/.test(e)), `${file}: the auto-fit plan's DiT line is evidence too`);
   }
 });
 
-test("scanLog: the real da3-cli and audio.cpp voice logs pass; the host-only-tensors line is not a placement", () => {
+test("scanLog: the real da3-cli and audio.cpp logs pass (v0.9.0 and v0.9.1); the host-only-tensors line is not a placement", () => {
   const da = scanLog(fixture("da3-healthy.log"), { engine: "da3" });
   assert.equal(da.fatal, null);
   assert.equal(da.verdict.ok, true);
   assert.match(fixture("da3-healthy.log"), /host-only tensors kept on CPU/, "the fixture must carry the line that must not trip");
-  const au = scanLog(fixture("audiocpp-voice-clone.log"), { engine: "audiocpp" });
-  assert.equal(au.fatal, null);
-  assert.equal(au.verdict.ok, true);
+  // audio.cpp v0.9.1 (the Chatterbox S3 encoder fix) prints the same component buffer_name lines as v0.9.0; the
+  // music log is a build WITH the planner prefill patch: the planner is on Vulkan0 and no line says CPU
+  for (const f of ["audiocpp-voice-clone.log", "audiocpp091-voice-clone.log", "audiocpp091-music.log"]) {
+    const au = scanLog(fixture(f), { engine: "audiocpp" });
+    assert.equal(au.fatal, null, `${f}: ${JSON.stringify(au.fatal)}`);
+    assert.equal(au.verdict.ok, true, f);
+    assert.ok(au.verdict.evidence.some((e) => /weights\.buffer_name Vulkan0$/.test(e)), f);
+    assert.doesNotMatch(fixture(f), /weights\.buffer_name CPU/, `${f} carries no CPU buffer line`);
+  }
+  assert.match(fixture("audiocpp091-music.log"), /^\[TIMING ts=\d+-\d+\] ace_step\.planner\.weights\.buffer_name Vulkan0$/m, "the v0.9.1 music log is the patched build: the planner is on the device");
 });
 
 test("scanLog: the REAL audio.cpp host-prefill log (planner weights on CPU) is CPU_PLACEMENT at that line", () => {
@@ -135,7 +155,8 @@ test("scanLog: any <component>.weights.buffer_name CPU line is CPU_PLACEMENT, wh
   }
 });
 
-test("scanLog: the derived sd.cpp negatives each fail, and each checked-in file is exactly what its source derives to", () => {
+test("scanLog: the derived sd.cpp negatives each fail (master-929 and master-945 alike), and each checked-in file is exactly what its source derives to", () => {
+  const shapes = new Set();
   for (const d of DERIVED) {
     const text = fixture(d.out);
     assert.equal(text.split("\n")[0], `# derived from ${d.from} by substituting the device; no CPU run was captured because the node's operator forbids model compute on its CPU`);
@@ -143,8 +164,14 @@ test("scanLog: the derived sd.cpp negatives each fail, and each checked-in file 
     const r = scanLog(text, { engine: "sdcpp" });
     assert.ok(r.fatal, `${d.out} must be fatal`);
     assert.equal(r.fatal.kind, CPU_PLACEMENT);
-    assert.match(r.fatal.line, /compute buffer size: .*\(RAM\) on CPU/, d.out);
+    // the line that kills the run: a compute buffer on the CPU, or (mode "plan") the auto-fit plan's "-> compute CPU"
+    assert.match(r.fatal.line, d.mode === "plan" ? /DiT\s+params .*-> compute CPU, params RAM/ : /compute buffer size: .*\(RAM\) on CPU/, d.out);
+    // the raw line is kept for the message: the 945 shape's head and tail are on it
+    const is945 = d.out.startsWith("sdcpp945-");
+    assert.equal(/^\[[A-Z]\] .* --- [\w.]+:\d+$/.test(r.fatal.line), is945, `${d.out}: ${r.fatal.line}`);
+    shapes.add(is945 ? "master-945" : "master-929");
   }
+  assert.deepEqual([...shapes].sort(), ["master-929", "master-945"], "negatives of both record shapes");
 });
 
 test("scanLog: params in host RAM with the compute on Vulkan is the sanctioned overflow, not a placement", () => {
@@ -171,6 +198,11 @@ test("scanLog: no positive line fails (sd.cpp, da3, audio.cpp) and the message s
     ["sdcpp", regs], ["sdcpp", ""], ["da3", regs], ["audiocpp", regs],
     // device seen, but no diffusion-stage compute buffer on the GPU
     ["sdcpp", "ggml_vulkan: Found 1 Vulkan devices:\nggml_vulkan: 0 = AMD Radeon Graphics (RADV RENOIR) (radv) | uma: 1 | fp16: 1\n[VERBOSE] ggml_runner.cpp:1019 - t5 compute buffer size: 297.00 MB(VRAM) on Vulkan0 (peak across 1 segment)\n"],
+    // ... and the same in the master-945 record shape
+    ["sdcpp", "load_backend: loaded CPU backend from /opt/x/libggml-cpu-haswell.so\n[V] Initializing backend: CPU --- ggml_extend_backend.cpp:404\n"],
+    ["sdcpp", "ggml_vulkan: Found 1 Vulkan devices:\nggml_vulkan: 0 = AMD Radeon Graphics (RADV RENOIR) (radv) | uma: 1 | fp16: 1\n[V] t5 compute buffer size: 297.00 MB(VRAM) on Vulkan0 (peak across 1 segment) --- ggml_runner.cpp:1019\n"],
+    // the plan's Conditioner and VAE lines are not the diffusion stage either
+    ["sdcpp", "ggml_vulkan: 0 = AMD Radeon Graphics (RADV RENOIR) (radv) | uma: 1 | fp16: 1\n[I]     Conditioner  params   5757 MiB, compute reserve  2048 MiB -> compute Vulkan0, params Vulkan0 --- backend_fit.cpp:346\n[I]     VAE          params   1344 MiB, compute reserve  1024 MiB -> compute Vulkan0, params Vulkan0 --- backend_fit.cpp:346\n"],
     // da3 on a non-Vulkan device line is a CPU run
   ]) {
     const r = scanLog(text, { engine });
@@ -195,6 +227,16 @@ test("scanLog: no devices, a software Vulkan device and a CPU backend line are a
     "[WARN   ] backend_fit.cpp:446 - auto-fit: no GPU memory budget available; using CPU",
     "[VERBOSE] ggml_runner.cpp:1019 - t5 compute buffer size: 297.00 MB(RAM) on CPU (peak across 1 segment)",
     "[VERBOSE] ggml_runner.cpp:1019 - Wan2.2-TI2V-5B compute buffer size: 297.00 MB(RAM) on CPU0 (peak across 1 segment)",
+    // the same shapes in the master-945 record shape: one-letter tag in front, source tail behind
+    "[W] loading CPU backend --- ggml_extend_backend.cpp:676",
+    "[V] Using CPU backend --- ggml_extend_backend.cpp:681",
+    "[E] No devices found! --- ggml_extend_backend.cpp:635",
+    "[I]     DiT          params   5162 MiB, compute reserve  2048 MiB -> compute CPU, params RAM --- backend_fit.cpp:346",
+    "[I]     Conditioner  params   5757 MiB, compute reserve  2048 MiB -> compute CPU, params RAM --- backend_fit.cpp:346",
+    "[I]     VAE          params   1344 MiB, compute reserve  1024 MiB -> compute CPU, params RAM --- backend_fit.cpp:346",
+    "[W] auto-fit: no GPU memory budget available; using CPU --- backend_fit.cpp:446",
+    "[V] t5 compute buffer size: 297.00 MB(RAM) on CPU (peak across 1 segment) --- ggml_runner.cpp:1019",
+    "[V] Wan2.2-TI2V-5B compute buffer size: 297.00 MB(RAM) on CPU0 (peak across 1 segment) --- ggml_runner.cpp:1019",
   ];
   for (const l of cpu) assert.equal(scanLog(l, { engine: "sdcpp" }).fatal?.kind, CPU_PLACEMENT, l);
   for (const l of cpu.slice(0, 4)) {
@@ -215,7 +257,7 @@ test("scanLog: one real-shape line per pattern, so no pattern shadows another", 
   };
   for (const [k, l] of Object.entries(one)) assert.ok(scanLog(l, { engine: "sdcpp" }).fatal, k);
   // a mixed compute + params line is still flagged on the compute side
-  assert.ok(scanLog("auto-fit: --backend \"te=cpu,vae=vulkan0\" --params-backend \"te=cpu\" compute buffer size: 1 MB(RAM) on CPU", { engine: "sdcpp" }).fatal);
+  assert.ok(scanLog("auto-fit: --backend \"te=cpu,vae=vulkan0\" --params-backend \"te=cpu\"\n[VERBOSE] ggml_runner.cpp:1019 - te compute buffer size: 1 MB(RAM) on CPU", { engine: "sdcpp" }).fatal);
 });
 
 test("scanLog: registration, backend init, RNG selection and host dumps are never placements", () => {
@@ -243,16 +285,32 @@ test("scanLog: the parameter dumps and tokenizer echoes (prompt text with cpu / 
   const r = scanLog(text, { engine: "sdcpp" });
   assert.equal(r.fatal, null, JSON.stringify(r.fatal));
   assert.equal(r.verdict.ok, true);
-  // a line outside any block that merely repeats the prompt: it trips unless the request's own
-  // strings are passed, and then it is dropped (the line carries no evidence either)
+  // the same in the master-945 record shape: the nasty prompt sits in the dump (closed by "} --- main.cpp:701"),
+  // in "parse '...'" and in "split prompt \"...\"" (tails and all)
+  const orig945 = "waves crash on the rocks around the lighthouse, golden hour";
+  const text945 = fixture("sdcpp945-video-healthy.log").split(orig945).join(nasty);
+  assert.ok(text945.split(nasty).length >= 4, "the prompt must be echoed in the dump, parse '...' and split prompt \"...\"");
+  const r945 = scanLog(text945, { engine: "sdcpp" });
+  assert.equal(r945.fatal, null, JSON.stringify(r945.fatal));
+  assert.equal(r945.verdict.ok, true);
+  // ... and it is the SKIPPING that holds it: the same lines without their record shape would trip
+  assert.ok(scanLog(`[V] note: ${nasty} --- main.cpp:1`, { engine: "sdcpp" }).fatal, "an unexplained cpu line in the new shape trips too");
+  // a line outside any block that merely repeats the prompt is SCANNED like any other (request text
+  // must never switch the detector off): the plain-words shapes in it trip, with or without the echo
+  // list. Only the dump blocks and tokenizer echoes above are skipped, and only the line shapes
+  // that need a record head or a line start cannot be forged by text in the middle of a line.
   const echoLine = `engine-echo: ${nasty}`;
   assert.ok(scanLog(echoLine, { engine: "sdcpp" }).fatal, "an unexplained cpu line trips");
-  assert.equal(scanLog(echoLine, { engine: "sdcpp", echoes: [nasty] }).fatal, null);
-  // negative prompt, TTS text and lyrics are covered the same way; a multi-line text echoes per line
+  assert.ok(scanLog(echoLine, { engine: "sdcpp", echoes: [nasty] }).fatal, "an echo list does not hide it");
+  // prompts that are about cpu, lyrics and TTS text, as they appear in a line that is not a placement
+  // shape, trip nothing: audio.cpp's detector reads only <component>.weights.buffer_name lines
   const lyrics = "[verse]\nrunning on CPU all night long\nusing cpu again";
   assert.equal(scanLog("lyrics: running on CPU all night long", { engine: "audiocpp", echoes: [lyrics] }).fatal, null);
   assert.equal(scanLog("text: Estamos using cpu hoy", { engine: "audiocpp", echoes: ["Estamos using cpu hoy"] }).fatal, null);
   assert.equal(scanLog("negative_prompt: the model keeps running on CPU", { engine: "sdcpp", echoes: ["the model keeps running on CPU"] }).fatal, null);
+  // a compute-buffer or buffer_name SHAPE inside echoed text (not at the start of a record) is not a placement
+  assert.equal(scanLog("prompt: t5 compute buffer size: 1.00 MB(RAM) on CPU", { engine: "sdcpp", echoes: ["t5 compute buffer size: 1.00 MB(RAM) on CPU"] }).fatal, null);
+  assert.equal(scanLog("text: planner.weights.buffer_name CPU", { engine: "audiocpp", echoes: ["planner.weights.buffer_name CPU"] }).fatal, null);
   // a forged evidence line inside an echoed prompt is not evidence
   const forged = "ggml_vulkan: 0 = AMD Radeon Graphics (RADV RENOIR) (radv) | uma: 1\nWan2.2-TI2V-5B compute buffer size: 1 MB(VRAM) on Vulkan0";
   const g = createLogGuard({ engine: "sdcpp", echoes: [forged] });
@@ -302,6 +360,20 @@ test("runEngine: a real healthy log run resolves with its code and evidence; std
   assert.match(e.log, /progress 50%/);
 });
 
+test("runEngine: a real healthy master-945 log (one-letter tags, source tails, CR progress bars) resolves with its evidence, the plan's DiT line among it", async () => {
+  for (const [file, frames, prompt] of [
+    ["sdcpp945-video-healthy.log", "832x480x17", "waves crash on the rocks around the lighthouse, golden hour"],
+    ["sdcpp945-vace-healthy.log", "288x512x21", "a clay figure of a bearded man in a plaid shirt waves hello, stop-motion clay style, warm evening light"],
+  ]) {
+    // the request's own prompt is handed to the guard, as the runners do: the dump and the tokenizer echoes repeat it
+    const r = await runEngine({ bin: process.execPath, ...catFixture(file), guard: createLogGuard({ engine: "sdcpp", echoes: [prompt] }), label: "fake sd-cli" });
+    assert.equal(r.code, 0, file);
+    assert.match(r.log, new RegExp(`generate_video ${frames}`), file);
+    assert.ok(r.evidence.some((e) => /^DiT plan: compute on Vulkan0$/.test(e)), file);
+    assert.ok(r.evidence.some((e) => / compute on Vulkan0$/.test(e) && !/^DiT plan/.test(e)), file);
+  }
+});
+
 test("runEngine: a clean exit with no GPU evidence rejects CPU_PLACEMENT, whatever the engine printed", async () => {
   await assert.rejects(
     runEngine({ bin: process.execPath, args: ["-e", "console.log('all done quietly')"], guard: createLogGuard({ engine: "audiocpp" }), label: "quiet" }),
@@ -313,7 +385,7 @@ test("runEngine: runEngine refuses to run without a guard", () => {
   assert.throws(() => runEngine({ bin: process.execPath, args: ["-e", "0"] }), /log guard/);
 });
 
-test("runEngine: the first CPU line kills the engine AND its grandchild, and both are dead when the promise rejects", async () => {
+test("runEngine: the first CPU line kills the engine AND its grandchild, and both are dead when the promise rejects", { timeout: 90000 }, async () => {
   const dir = scratch();
   try {
     const pidFile = join(dir, "engine.pid");
@@ -352,7 +424,7 @@ test("runEngine: a placement line printed on stderr, and a final line with no tr
   );
 });
 
-test("runEngine: a lost GPU is GPU_RESET (the real log), naming the 2 s lockup timeout and the token cap; the engine is dead", async () => {
+test("runEngine: a lost GPU is GPU_RESET (the real log), naming the 2 s lockup timeout and the token cap; the engine is dead", { timeout: 90000 }, async () => {
   const dir = scratch();
   try {
     const pidFile = join(dir, "pid");
@@ -372,17 +444,18 @@ test("runEngine: a GPU_RESET engine that exits 1 by itself is still GPU_RESET, n
   );
 });
 
-test("runEngine: the timeout kills the engine and its tree, and the engine is dead when the promise rejects", async () => {
+test("runEngine: the timeout kills the engine and its tree, and the engine is dead when the promise rejects", { timeout: 90000 }, async () => {
   const dir = scratch();
   try {
     const pidFile = join(dir, "pid");
     await assert.rejects(
       runEngine({
         bin: process.execPath, args: ["-e", "require('fs').writeFileSync(process.argv[1],String(process.pid));setInterval(()=>{},1000)", pidFile],
-        timeoutMs: 700, label: "slow", guard: createLogGuard({ engine: "audiocpp" }),
+        timeoutMs: 6000, label: "slow", guard: createLogGuard({ engine: "audiocpp" }),
       }),
       /slow timeout after/,
     );
+    assert.ok(existsSync(pidFile), "the engine never started inside the budget (the host is too loaded for this test)");
     assert.ok(await waitGone(Number(readFileSync(pidFile, "utf8"))));
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
@@ -430,7 +503,7 @@ writeFileSync(info, JSON.stringify({ harness: process.pid, tempDir: t.dir }));
   return file;
 }
 
-test("lifecycle: SIGTERM to the runner kills its engine and removes its temp dir", { skip: isWin && "POSIX signals" }, async () => {
+test("lifecycle: SIGTERM to the runner kills its engine and removes its temp dir", { skip: isWin && "POSIX signals", timeout: 90000 }, async () => {
   const dir = scratch();
   try {
     const info = join(dir, "info.json");
@@ -445,7 +518,7 @@ test("lifecycle: SIGTERM to the runner kills its engine and removes its temp dir
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test("lifecycle: when the parent process disappears the runner kills its engine, removes its temp dir and exits", async () => {
+test("lifecycle: when the parent process disappears the runner kills its engine, removes its temp dir and exits", { timeout: 90000 }, async () => {
   const dir = scratch();
   try {
     const info = join(dir, "info.json");
@@ -642,4 +715,21 @@ test("makeTempDir: cleanup removes the directory and is idempotent", () => {
   t.cleanup();
   assert.ok(!existsSync(t.dir));
   t.cleanup();
+});
+
+// ---------------------------------------------------------------- Go / Node parity
+
+test("the screens agree with the shared parity table (internal/config reads the same file): empty per-module parts, unicode spaces", () => {
+  const t = JSON.parse(fixture("screen-parity-table.json"));
+  assert.ok(t.backend_refused.length >= 20 && t.extra_args_refused.length >= 10);
+  for (const b of t.backend_refused) assert.throws(() => refuseCpuBackend(b), new RegExp(CPU_BACKEND_REFUSED), `backend ${JSON.stringify(b)}`);
+  for (const b of t.backend_allowed) assert.equal(refuseCpuBackend(b), b.trim(), `backend ${JSON.stringify(b)}`);
+  for (const a of t.extra_args_refused) assert.ok(screenExtraArgs(a, { engine: "sdcpp" }), `extra args ${JSON.stringify(a)} must be refused`);
+  for (const a of t.extra_args_allowed) assert.equal(screenExtraArgs(a, { engine: "sdcpp" }), null, `extra args ${JSON.stringify(a)} must pass`);
+  // The one known difference, in the safe direction: JS's \s lacks U+0085 (NEL), so this screen passes what the
+  // Go screen refuses (Go refuses first; internal/config asserts its side of the same list).
+  assert.ok(t.go_stricter.length > 0, "the U+0085 difference is documented in the table");
+  for (const a of t.go_stricter) assert.equal(screenExtraArgs(a, { engine: "sdcpp" }), null, `extra args ${JSON.stringify(a)}: the Node screen is documented to pass it`);
+  // a vertical tab is where the two regexes used to disagree (Go's \s lacks it, JS's has it): refused by both
+  assert.ok(t.extra_args_refused.some((a) => a.some((x) => x.includes("\u000b"))), "the table carries a vertical-tab row");
 });

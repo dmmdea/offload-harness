@@ -20,7 +20,8 @@ import { resolveFfmpeg, resolveFfprobe } from "./audio-qa.mjs";
 const scratch = () => mkdtempSync(join(tmpdir(), "igpu-qa-test-"));
 
 // Captured with: ffmpeg -hide_banner -nostats -i X.mp4 -an -vf "blackdetect=d=0.1:pic_th=0.98,freezedetect=n=-60dB:d=0.5" -f null -
-// (X = 2 s of black / 2 s of flat grey / 1 s of test pattern then 1 s of black / 2 s of test pattern).
+// (X = 2 s of black / 2 s of flat grey / 1 s of test pattern then 1 s of black / 2 s of test pattern). pic_th
+// was 0.98 at capture time and is 0.999 now; a frame that is entirely black prints the same lines at both.
 const REAL = {
   black: `Input #0, mov,mp4,m4a,3gp,3g2,mj2, from 'black.mp4':
   Duration: 00:00:02.00, start: 0.000000, bitrate: 9 kb/s
@@ -103,6 +104,8 @@ test("buildClipCheckArgs: one decode pass of the whole clip through blackdetect 
   assert.match(vf, /blackdetect/);
   assert.match(vf, /freezedetect/);
   assert.ok(!a.includes("-loglevel"), "the detectors report at info level");
+  // the black threshold: 0.98 called a dark frame with a 0.75 % bright object black (see BLACK_PICTURE_TH)
+  assert.ok(vf.includes("blackdetect=d=0.1:pic_th=0.999,"), vf);
 });
 
 test("checkClip with a stub run: a black clip throws BLACK_CLIP naming the file, a frozen one FROZEN_CLIP, a live one passes", () => {
@@ -243,5 +246,28 @@ test("real ffmpeg: checkClip fails an all-black clip and a flat frozen clip, pas
     assert.equal(checkClip(ffmpeg, alive).ok, true);
     assert.equal(checkClip(ffmpeg, half).ok, true);
     assert.equal(countVideoFrames(ffprobe, alive), 32);
+  } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
+test("real ffmpeg: low-key footage (a dark field with a small bright object moving across it) passes the clip check; a pure black clip still fails as BLACK_CLIP", real, () => {
+  const d = scratch();
+  try {
+    // 320x240 = 76,800 px. A 24x24 object is 0.75 % of the frame and a 34x34 one 1.5 %: the frame is 99.25 % /
+    // 98.5 % black, which the old pic_th=0.98 called a black frame (BLACK_CLIP, never retried). The object
+    // moves, so the clip is not frozen either.
+    const mk = (name, size) => {
+      const f = join(d, name);
+      const src = size === 0
+        ? "color=c=black:s=320x240:r=16:d=2"
+        : `color=c=black:s=320x240:r=16:d=2[bg];color=c=white:s=${size}x${size}:r=16:d=2[fg];[bg][fg]overlay=x='mod(n*8,296)':y=108:shortest=1`;
+      const r = ff("-f", "lavfi", "-i", src, "-c:v", "libx264", "-pix_fmt", "yuv420p", f);
+      assert.equal(r.status, 0, r.stderr);
+      return f;
+    };
+    for (const [size, share] of [[24, "0.75 %"], [34, "1.5 %"]]) {
+      const v = checkClip(ffmpeg, mk(`lowkey${size}.mp4`, size));
+      assert.equal(v.ok, true, `a ${share} bright object on black is footage, not a black clip`);
+    }
+    assert.throws(() => checkClip(ffmpeg, mk("black.mp4", 0)), (e) => e.message.startsWith(BLACK_CLIP + ":"));
   } finally { rmSync(d, { recursive: true, force: true }); }
 });

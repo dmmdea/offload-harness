@@ -58,6 +58,29 @@ test("buildSdVideoArgs: a T2V render has no -i and no high-noise model; unset sa
   assert.equal(a[a.indexOf("--fps") + 1], "24");
 });
 
+// What parseArgs hands over for a flag given with no value is `undefined` (a key that is present), and a
+// numeric option may arrive as "" or text: none of it may reach sd-cli as an option or as the word "undefined".
+const junkFree = (a, what) => {
+  for (const x of a) assert.ok(!/undefined|NaN|null/.test(String(x)), `${what}: ${JSON.stringify(x)} must not reach the argv`);
+};
+
+test("buildSdVideoArgs: options that are unset, empty or not a number never reach the argv - including the high-noise recipe of a bound high-noise model", () => {
+  const unset = {
+    ...baseFlags, negative: undefined, cfg: undefined, steps: undefined, sampler: undefined, "flow-shift": undefined, seed: undefined, tae: undefined,
+    "high-noise-model": "/m/high.gguf", "high-noise-cfg": undefined, "high-noise-steps": undefined, "high-noise-sampler": undefined,
+  };
+  const empty = { ...unset, negative: "", cfg: "", steps: "", sampler: "", "flow-shift": "", seed: "", tae: "", "high-noise-cfg": "", "high-noise-steps": "", "high-noise-sampler": "" };
+  const text = { ...unset, cfg: "abc", steps: "x", "flow-shift": "y", seed: "z", "high-noise-cfg": "n/a", "high-noise-steps": "-" };
+  for (const [name, flags] of [["unset", unset], ["empty", empty], ["not a number", text]]) {
+    const a = buildSdVideoArgs({ outFile: "o.webm", still: "", prompt: "p", flags });
+    junkFree(a, name);
+    assert.ok(a.includes("--high-noise-diffusion-model"), `${name}: the bound high-noise model is passed`);
+    for (const f of ["-n", "--cfg-scale", "--steps", "--sampling-method", "--flow-shift", "-s", "--taesd", "--high-noise-cfg-scale", "--high-noise-steps", "--high-noise-sampling-method"]) {
+      assert.ok(!a.includes(f), `${name}: ${f} must be omitted`);
+    }
+  }
+});
+
 test("buildSdVideoArgs: frames are normalized to 4k+1 and width/height to multiples of 32 in the argv", () => {
   const a = buildSdVideoArgs({ outFile: "o.webm", still: "", prompt: "p", flags: { ...baseFlags, frames: "50", width: "854", height: "485" } });
   assert.equal(a[a.indexOf("--video-frames") + 1], "49");

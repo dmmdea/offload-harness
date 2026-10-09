@@ -51,7 +51,7 @@
 // reference latent itself and decodes exactly N, so the mp4 is trimmed only when the decoded
 // count is exactly N+4 (igpu-qa.mjs trimDecision, probed with ffprobe). The finished clip is
 // checked for black / frozen output before it is delivered.
-import { existsSync, mkdirSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -60,7 +60,7 @@ import { resolveFfmpeg, resolveFfprobe } from "./audio-qa.mjs";
 import {
   parseArgs, parseExtraArgs, refuseCpuBackend, refuseExtraArgs, runEngine, createLogGuard, checkTokenCap,
   installLifecycle, makeDeadline, normalizeFrames, floorFrames, normalizeSize, finiteNum, encodeMp4, makeTempDir,
-  vulkanDeviceFromBackend, refuseRelativeBinary, ensureOutDir, modelMetadataError,
+  vulkanDeviceFromBackend, refuseRelativeBinary, ensureOutDir, engineExitError, failAndExit,
 } from "./igpu-engine.mjs";
 import { checkClip, convertDepthFrames, countVideoFrames, trimDecision } from "./igpu-qa.mjs";
 import { vaeTileOverlap } from "./sdcpp-video.mjs";
@@ -185,10 +185,12 @@ async function main() {
   const outTmp = makeTempDir("sdcpp-animate-out-");
   try {
     // 1. the driver's frames
+    deadline.enforce("driver frame extraction");
     const ex = spawnSync(ffmpeg, buildExtractArgs({ driver, framesDir: framesTmp.dir, width: p.width, height: p.height, frames: p.frames }),
       { encoding: "utf8", ...(deadline.active ? { timeout: deadline.remainingMs(), killSignal: "SIGKILL" } : {}) });
     if (ex.error || ex.status !== 0) {
-      throw new Error("driver frame extraction failed: " + (ex.error ? ex.error.message : String(ex.stderr || "").trim().slice(-300)));
+      const timedOut = ex.error && ex.error.code === "ETIMEDOUT";
+      throw new Error((timedOut ? "driver frame extraction timeout (killed): " : "driver frame extraction failed: ") + (ex.error ? ex.error.message : String(ex.stderr || "").trim().slice(-300)));
     }
     const frames = listFrames(framesTmp.dir);
     const n = framesToRender(p.frames, frames.length);
@@ -203,13 +205,13 @@ async function main() {
       const denv = depthEnv(flags.backend);
       for (let i = 0; i < n; i++) {
         deadline.enforce("depth-anything");
-        const { code } = await runEngine({
+        const { code, log: depthLog } = await runEngine({
           bin: depthBin,
           args: buildDepthArgs({ model: flags["depth-model"], input: join(framesTmp.dir, frames[i]), outPng: join(depthRawTmp.dir, frames[i]), extra: depthExtra }),
           env: denv, timeoutMs: deadline.remainingMs(), label: "depth-anything",
           guard: createLogGuard({ engine: "da3" }),
         });
-        if (code !== 0) throw new Error(`depth-anything exited ${code} on frame ${i + 1}/${n}`);
+        if (code !== 0) throw engineExitError("depth-anything", code, depthLog, "");
         if (!existsSync(join(depthRawTmp.dir, frames[i]))) throw new Error(`depth-anything produced no depth image for frame ${i + 1}/${n}`);
         console.error(`sdcpp-animate: depth ${i + 1}/${n}`);
       }
@@ -221,7 +223,7 @@ async function main() {
       deadline.enforce("sd-cli");
       const guard = createLogGuard({ engine: "sdcpp", echoes: [prompt, flags.negative] });
       const { code, log } = await runEngine({ bin: sdBin, args, timeoutMs: deadline.remainingMs(), label: "sd-cli", guard });
-      if (code !== 0) throw modelMetadataError(log, flags.model) || new Error("sd-cli exited " + code);
+      if (code !== 0) throw engineExitError("sd-cli", code, log, flags.model);
       if (!existsSync(webm)) throw new Error("sd-cli exited 0 but produced no video at " + webm);
     });
     // the mp4 carries exactly N frames: probe what sd-cli decoded, drop the reference latent only if it is there
@@ -230,14 +232,14 @@ async function main() {
     const trim = trimDecision(decoded, n);
     if (trim.note) console.error("sdcpp-animate: " + trim.note);
     deadline.enforce("ffmpeg mp4 encode");
-    encodeMp4(ffmpeg, webm, out, OUTPUT_FPS, deadline.remainingMs(), { trimFirst: trim.trimFirst });
-    deadline.enforce("clip check");
-    try {
-      checkClip(ffmpeg, out, { timeoutMs: deadline.remainingMs() });
-    } catch (e) {
-      try { rmSync(out, { force: true }); } catch { /* best effort */ }
-      throw e;
-    }
+    // encode to a partial beside --out, reject a black / frozen clip before it replaces anything
+    encodeMp4(ffmpeg, webm, out, OUTPUT_FPS, deadline.remainingMs(), {
+      trimFirst: trim.trimFirst,
+      verify: (partial) => {
+        deadline.enforce("clip check");
+        checkClip(ffmpeg, partial, { timeoutMs: deadline.remainingMs(), label: out });
+      },
+    });
     console.log("WROTE", out);
   } finally {
     framesTmp.cleanup();
@@ -250,7 +252,6 @@ async function main() {
 // Run only as the main module — importing this file (tests) has no side effects.
 if (import.meta.url === pathToFileURL(process.argv[1] || "").href) {
   main().catch((e) => {
-    console.error("SDCPP ANIMATE FAILED:", e.message);
-    process.exit(1);
+    failAndExit("SDCPP ANIMATE", e);
   });
 }
