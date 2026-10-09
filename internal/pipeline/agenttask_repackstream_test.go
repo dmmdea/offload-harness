@@ -71,7 +71,7 @@ func TestRepackSlowStreamingSeatIsNotStalled(t *testing.T) {
 		t.Fatalf("structured = %s", wire.Structured)
 	}
 	if el := time.Since(start); el < 1500*time.Millisecond {
-		t.Fatalf("the re-pack finished in %s: the fake did not stream for ten allowances, the test proves nothing", el)
+		t.Fatalf("the re-pack finished in %s: the fake did not stream for 2.5 allowances (1.5 s), the test proves nothing", el)
 	}
 }
 

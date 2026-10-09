@@ -15,6 +15,7 @@ package delegate
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
@@ -220,7 +221,7 @@ func TestRunBatchedDealsTwelvePagesAsOneBatchAcrossTheFleet(t *testing.T) {
 // that frees.
 func TestANodeThatPublishesNoCeilingIsHeldToFourWhenTheCallsOtherLegsFinish(t *testing.T) {
 	compressPolls(t, 5*time.Millisecond, 2*time.Second)
-	fast := newFanProbe(1, 5*time.Second)          // releases every job as soon as one is open
+	fast := newFanProbe(1, 5*time.Second)            // releases every job as soon as one is open
 	hold := newFanProbe(1000, 1500*time.Millisecond) // never reaches its peak, so each job is held 1.5 s
 	_, fastURL := fast.node(t, "n1", 4)
 	_, oldURL := hold.node(t, "old", 0)
@@ -425,41 +426,142 @@ func TestTheLocalSeatCountsOnlyItsRunCapRoomInTheWidth(t *testing.T) {
 
 // TestAWaitHoldingARunSlotOfAWideCallKeepsItsTTLWhileASubtaskIsUnstarted is ADR 0073 decision 9 with six slots instead of four:
 // seven subtasks, one node that publishes six slots and never has room. The deal opens six, the seventh waits behind them for a
-// slot, and the six that hold slots wait only the TTL (0.3 s) and say why; the seventh, started when the first slot freed, has
+// slot, and the six that hold slots wait only the TTL (0.6 s) and say why; the seventh, started when the first slot freed, has
 // nothing behind it and waits for the call's horizon.
+//
+// None of the assertions reads the runner's speed. A starved runner can only LENGTHEN what the test reads off the clock and only
+// SHORTEN what the wait credits (every re-ask of the node is an attempt: it is charged to the budget and left out of the credit),
+// so the clock is read as a lower bound and the credit as a lenient fraction of the window the seventh actually had. That window
+// is what the call's absolute deadline left once the first holder's TTL had run, and a starved runner moves it: the first
+// holder's wait ended 2 s late in one run of thirty at four spinners on two cores. A run whose window is under two TTLs, or
+// whose subtasks the call's own deadline cut after the runner had spent most of the call on setup or had stalled it with the
+// hold already shown to work, cannot tell a wait held to the TTL from one run to the horizon, so it is skipped as inconclusive
+// after the assertions that do not depend on the window have run. A cut with the call's time still ahead is the defect (a wait
+// that ignores its bound) and fails. The poll is 250 ms for the reason it is in
+// TestAWaitRunsToTheCallDeadlineNotTheConfiguredTTL: at 20 ms the seventh re-asked the node dozens of times and, on a starved
+// runner, the round trips took the credit under a floor of 1 s. A wait that begins after the seventh has started has nothing
+// behind it and runs to the call's horizon by design, so the six are read with that in mind.
 func TestAWaitHoldingARunSlotOfAWideCallKeepsItsTTLWhileASubtaskIsUnstarted(t *testing.T) {
+	const ttl, window = 600 * time.Millisecond, 3200 * time.Millisecond
 	compressPolls(t, 5*time.Millisecond, time.Second)
-	compressWait(t, 20*time.Millisecond, 0)
+	compressWait(t, 250*time.Millisecond, 0)
 	withCallReserve(t, 200*time.Millisecond)
-	withBuiltInWait(t, 300*time.Millisecond)
+	withBuiltInWait(t, ttl)
 	_, url := refusingNode(t, "node-full", http.StatusServiceUnavailable, func(f *fakeNode) {
 		f.maxConcurrentJobs, f.maxQueueDepth = 6, 12
 	})
 	cfg := testCfg(t)
 	cfg.AgentPlacementWaitSec = 0
 
-	results, sum, _ := runWithin(t, 10*time.Second, cfg, neverLocal(t), pages(7), "remote", []string{url}, deadlineIn(2500*time.Millisecond), nil)
+	// The call's own events say when each subtask began and ended: the production code's clock, not the test's.
+	var mu sync.Mutex
+	began, ended := map[int]time.Time{}, map[int]time.Time{}
+	opts := deadlineIn(window)
+	opts.OnProgress = func(ev ProgressEvent) {
+		mu.Lock()
+		defer mu.Unlock()
+		if ev.Kind == "started" {
+			began[ev.Index] = time.Now()
+		} else {
+			ended[ev.Index] = time.Now()
+		}
+	}
+	horizon := opts.Deadline.Add(-callWaitReserve)
 
+	results, sum, elapsed := runWithin(t, 10*time.Second, cfg, neverLocal(t), pages(7), "remote", []string{url}, opts, nil)
+
+	mu.Lock()
+	defer mu.Unlock()
 	if sum.Deferred != 7 {
 		t.Fatalf("summary %+v, want every subtask deferred for capacity: the node never had room", sum)
 	}
-	for i, pr := range results[:6] {
-		r := pr.Result.Reason
-		for _, want := range []string{"no node had room within 300ms", "subtask(s) of the call had not started"} {
-			if !strings.Contains(r, want) {
-				t.Errorf("result %d reason = %q, want it to contain %q: a wait holding a run slot keeps its TTL", i, r, want)
-			}
+	// A subtask the call's own deadline cut was not ended by its wait. That is the runner's stall only when the evidence says so:
+	// the call had little left when its first subtask began (the runner spent it on setting the call up), the call outlived its
+	// own deadline by more than a second (the runner was frozen), or the hold works (a holder ended at the TTL) and the stall
+	// took the rest. A wait that ignores its bound is cut by the call as well, on time, with every subtask in the same state and
+	// the call's whole time ahead of it; that is the defect, and it fails.
+	stall, cut, ttlHeld := "", false, 0
+	for i, pr := range results {
+		if strings.Contains(pr.Result.Reason, "call deadline reached") {
+			cut = true
 		}
-		if pr.CapacityWaitSec > 1.2 {
-			t.Errorf("result %d waited %.2f s, want about the 0.3 s TTL: it held its slot for the call's horizon instead", i, pr.CapacityWaitSec)
+		if i < 6 && strings.Contains(pr.Result.Reason, "no node had room within "+ttl.String()) {
+			ttlHeld++
+		}
+	}
+	if cut {
+		b0, began0 := began[0]
+		switch {
+		case !began0 || opts.Deadline.Sub(b0) < 3*ttl+callWaitReserve:
+			stall = "the call had less than three TTLs and the reserve left when its first subtask began: the runner spent the call setting it up"
+		case elapsed > window+time.Second:
+			stall = fmt.Sprintf("the call took %s against a deadline of %s: the runner was frozen", elapsed.Round(time.Millisecond), window)
+		case ttlHeld > 0:
+			stall = fmt.Sprintf("%d of the six waits ended at the TTL and the call's deadline cut the rest: the runner stalled for most of the call", ttlHeld)
 		}
 	}
 	last := results[6]
+	b, ok := began[6]
+	if !ok {
+		if stall != "" {
+			t.Skip(stall)
+		}
+		t.Fatalf("the last subtask never began (its reason %q, the call's deadline cut a subtask: %v): no holder's wait ended at the TTL to free a run slot", last.Result.Reason, cut)
+	}
+	// What the seventh was given: from the moment it began to the horizon. It is the call's deadline less the runner's setup and
+	// less the TTL the first holder waited, so it is the one number the runner moves.
+	avail := horizon.Sub(b)
+	life := ended[6].Sub(b)
+	t.Logf("call %s; last subtask began %s before the horizon, lived %s, credited %.2f s", elapsed, avail.Round(time.Millisecond), life.Round(time.Millisecond), last.CapacityWaitSec)
+	thin := ""
+	if avail < 2*ttl {
+		thin = fmt.Sprintf("the last subtask began only %s before the horizon, under two TTLs of %s", avail.Round(time.Millisecond), ttl)
+	}
+
+	for i, pr := range results[:6] {
+		r := pr.Result.Reason
+		if strings.Contains(r, "call deadline reached") {
+			if stall == "" {
+				t.Errorf("result %d reason = %q, want its wait to end at its bound: the call's deadline cut it, with the call's time still ahead of it", i, r)
+			}
+			continue
+		}
+		if !strings.Contains(r, "subtask(s) of the call had not started") {
+			// Only a wait that began after the seventh started, or with less than a TTL left in the call, may run to the call's
+			// horizon: nothing is behind the first, and the TTL does not fit in the call for the second (capacityWaitFor).
+			// Its credited wait is then no longer than the time from the seventh's start to the horizon (a poll of
+			// allowance for the event that reports the start a little after the start itself) or the TTL. A wait that is
+			// call-bound while the seventh was still waiting for its slot and the call had time is the defect, and it
+			// leaves a credited wait longer than either.
+			if !strings.Contains(r, "before the call's deadline") || pr.CapacityWaitSec > max(avail.Seconds()+0.25, ttl.Seconds()) {
+				t.Errorf("result %d reason = %q (waited %.2f s), want it to hold its run slot only for the TTL: it began to wait before the seventh subtask started, which is %s before the horizon", i, r, pr.CapacityWaitSec, avail.Round(time.Millisecond))
+			}
+			continue
+		}
+		if want := "no node had room within " + ttl.String(); !strings.Contains(r, want) {
+			t.Errorf("result %d reason = %q, want it to contain %q: a wait holding a run slot keeps its TTL", i, r, want)
+		}
+		if limit := 2 * ttl.Seconds(); pr.CapacityWaitSec > limit {
+			t.Errorf("result %d waited %.2f s, want about the %s TTL: it held its slot for the call's horizon instead", i, pr.CapacityWaitSec, ttl)
+		}
+	}
+	if stall != "" || thin != "" {
+		t.Skip(stall + thin + ": nothing to prove about the last subtask's wait")
+	}
+
 	if !strings.Contains(last.Result.Reason, "before the call's deadline") || strings.Contains(last.Result.Reason, "had not started") {
 		t.Errorf("the last subtask's reason = %q, want it bounded by the call: nothing was behind it", last.Result.Reason)
 	}
-	if last.CapacityWaitSec < 1.0 {
-		t.Errorf("the last subtask waited %.2f s, want it to outwait the 0.3 s TTL the earlier ones were held to", last.CapacityWaitSec)
+	// The last subtask outwaits the TTL: held to it like the others it would live one TTL, and a starved runner only makes
+	// it live longer. It must live one and a half of them.
+	if want := ttl * 3 / 2; life < want {
+		t.Errorf("the last subtask lived %s, want at least %s: it should outwait the %s TTL the earlier ones were held to and run on to the call's horizon", life, want, ttl)
+	}
+	// The credit is the wait's idle time, so a starved runner shortens it (in one run at eight busy threads on two cores the
+	// re-asks took 80 % of the window): a tenth of the window is the published metric still being a wait and not zero, where
+	// about 90 % of it is credited when the runner keeps up.
+	if floor := avail.Seconds() / 10; last.CapacityWaitSec < floor {
+		t.Errorf("the last subtask waited %.2f s, want at least %.2f s credited (a tenth of the %s it had): nothing was behind it, it was not held to the TTL", last.CapacityWaitSec, floor, avail.Round(time.Millisecond))
 	}
 }
 
