@@ -2,6 +2,7 @@ package composeremote
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/url"
 	"os"
@@ -118,6 +119,28 @@ func TestRemoteComposeThatNeverReachedANodeWritesARowAndNoCard(t *testing.T) {
 	}
 	if rig2.frameCount() != 0 || len(rig2.rows()) != 1 {
 		t.Fatalf("auto with no remotes: frames %d rows %d", rig2.frameCount(), len(rig2.rows()))
+	}
+}
+
+// The route the ledger records is the NORMALISED one (local|auto|remote, core/remoteattr.go), whatever the caller
+// typed: the MCP door omits `route` and sends "", and a caller may spell it with case or spaces. Handing the raw
+// string to core.BeginRemote wrote the asker row with Route "" or "REMOTE" and failed nothing (review of 0.173.0,
+// C5C6). No node and no composition lane here, so the call is deferred after it opened its attribution: one row.
+func TestARemoteComposeCallIsRecordedUnderTheNormalisedRoute(t *testing.T) {
+	for route, want := range map[string]string{
+		"": "auto", "auto": "auto", "  AUTO ": "auto",
+		"remote": "remote", "REMOTE": "remote", " Remote ": "remote",
+	} {
+		t.Run(fmt.Sprintf("route %q", route), func(t *testing.T) {
+			rig := newPairRig(t, true)
+			res := Run(context.Background(), config.Config{}, rig.p, core.Request{Task: core.TaskComposeVideo}, route)
+			if !res.Deferred {
+				t.Fatalf("Run: %+v, want a defer: this box has no lane and no remotes", res)
+			}
+			if rows := rig.rows(); len(rows) != 1 || rows[0].Route != want {
+				t.Fatalf("rows = %+v, want one row with the normalised route %q", rows, want)
+			}
+		})
 	}
 }
 

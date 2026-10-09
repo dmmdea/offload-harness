@@ -468,6 +468,8 @@ func rkllmSeatNote(seats []mediaseat.Seat) string {
 func mediaSeedKey(k string) bool {
 	for _, p := range []string{
 		"imagegen_", "videogen_", "musicgen_", "voicegen_", "sdcpp_",
+		// the CT-49 iGPU engines: sd.cpp animate and audio.cpp voice/music
+		"animategen_", "audiocpp_",
 		"inpaint_", "gen_edit_", "run_graph_", "upscale_",
 		// comfy_*: the ComfyUI install and its launch profile (comfy_dir,
 		// comfy_cuda_device, comfy_dynamic_vram, comfy_extra_args) place every
@@ -505,6 +507,10 @@ func mediaSummary(seed map[string]any) string {
 	if f, ok := seed["imagegen_family"].(string); ok && f != "" {
 		return "comfyui (" + f + ")"
 	}
+	// A tier whose lanes run on the CT-49 iGPU engines (no image engine, no ComfyUI): name them.
+	if engines := igpuEngineSummary(seed); engines != "" {
+		return engines
+	}
 	// A tier whose only media binding is the composition lane (ADR 0059) ships no image
 	// engine — name the lane rather than a bare "yes" that reads as an image route.
 	onlyCompose := len(seed) > 0
@@ -517,6 +523,38 @@ func mediaSummary(seed map[string]any) string {
 		return "compose only"
 	}
 	return "yes"
+}
+
+// igpuEngineSummary names the CT-49 engines a seed binds ("" when it binds none): sdcpp video
+// (a videogen_families entry with engine sdcpp) and animate, audiocpp voice and music.
+func igpuEngineSummary(seed map[string]any) string {
+	var parts []string
+	var sdcpp []string
+	if fams, ok := seed["videogen_families"].(map[string]any); ok {
+		for _, f := range fams {
+			if fb, ok := f.(map[string]any); ok && fb["engine"] == "sdcpp" {
+				sdcpp = append(sdcpp, "video")
+				break
+			}
+		}
+	}
+	if e, _ := seed["animategen_engine"].(string); e == "sdcpp" {
+		sdcpp = append(sdcpp, "animate")
+	}
+	if len(sdcpp) > 0 {
+		parts = append(parts, "`sdcpp` "+strings.Join(sdcpp, "+"))
+	}
+	var audio []string
+	if e, _ := seed["voicegen_engine"].(string); e == "audiocpp" {
+		audio = append(audio, "voice")
+	}
+	if e, _ := seed["musicgen_engine"].(string); e == "audiocpp" {
+		audio = append(audio, "music")
+	}
+	if len(audio) > 0 {
+		parts = append(parts, "`audiocpp` "+strings.Join(audio, "+"))
+	}
+	return strings.Join(parts, ", ")
 }
 
 func moe(p Profile) string {
@@ -541,6 +579,12 @@ func valueString(v any) string {
 			return fmt.Sprintf("%d", int64(t))
 		}
 		return fmt.Sprintf("%g", t)
+	case map[string]any:
+		// a nested seed object (videogen_families): compact JSON, keys sorted by encoding/json
+		if b, err := json.Marshal(t); err == nil {
+			return string(b)
+		}
+		return fmt.Sprint(v)
 	default:
 		return fmt.Sprint(v)
 	}

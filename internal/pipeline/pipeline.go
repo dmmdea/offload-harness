@@ -2778,6 +2778,12 @@ func publishPipelineArtifacts(outRoot, jobID string, artifacts []string, mediaDi
 // defers to Claude. params: still (string image path), model (hunyuan|wan), frames/width/
 // height/steps/seed (int), negative (string), reserve_vram (float, per-workflow override).
 func (p *Pipeline) runGenerateVideo(ctx context.Context, req core.Request, meta core.Meta, start time.Time) core.Result {
+	// CT-49: a family bound to the sdcpp engine renders through render/sdcpp-video.mjs
+	// (igpumedia.go) and never reaches ComfyUI. The lookup is pure, and no family binds
+	// an engine unless the operator set one, so every other box falls through unchanged.
+	if renderFamily, fb, ok := p.sdcppVideoBinding(req); ok {
+		return p.runGenerateVideoSdcpp(ctx, req, meta, start, renderFamily, fb)
+	}
 	if p.cfg.VideoGenScript == "" {
 		return p.deferGen(req, meta, start, len(req.Input), "no video-gen route configured")
 	}
@@ -3017,6 +3023,10 @@ func (p *Pipeline) runGenerateVideo(ctx context.Context, req core.Request, meta 
 // driver (string video path), motion_prompt/negative (string), width/height/frames/
 // steps/seed (int), pose_strength/ref_strength (float), reserve_vram (float).
 func (p *Pipeline) runAnimateCharacter(ctx context.Context, req core.Request, meta core.Meta, start time.Time) core.Result {
+	// CT-49: animategen_engine "sdcpp" = ffmpeg frames + depth-anything.cpp + sd.cpp VACE.
+	if p.cfg.AnimateGenEngine == config.EngineSdcpp {
+		return p.runAnimateCharacterSdcpp(ctx, req, meta, start)
+	}
 	if p.cfg.AnimateGenScript == "" {
 		return p.deferGen(req, meta, start, len(req.Input), "no animate route configured")
 	}
@@ -3160,6 +3170,11 @@ func (p *Pipeline) runGenerateAudio(ctx context.Context, req core.Request, meta 
 	// a script-less box with an endpoint renders instead of deferring.
 	if kind == "voice" && useTTSEndpoint(p.cfg, paramStr(req.Params, "voice")) {
 		return p.runVoiceEndpoint(ctx, req, meta, start)
+	}
+	// CT-49: audio.cpp (voicegen_engine / musicgen_engine "audiocpp") serves voice and
+	// music on a Vulkan iGPU; the python/ComfyUI worker below is not involved.
+	if audiocppServes(p.cfg, kind, paramStr(req.Params, "voice")) {
+		return p.runGenerateAudioAudiocpp(ctx, req, meta, start, kind)
 	}
 	if script == "" {
 		return p.deferGen(req, meta, start, len(req.Input), "no audio-gen route configured for kind "+kind)
@@ -3879,12 +3894,20 @@ const videoFamilyWanSentinel = "wan22"
 func resolveVideoFamily(cfg config.Config, reqModel string) (argModel, renderFamily string) {
 	req := strings.TrimSpace(reqModel)
 	if req != "" {
+		// An sdcpp family (CT-49) has no runner-dispatch literal: it is matched by its own
+		// name, exactly, and renders under that name.
+		if cfg.SdcppVideoFamily(req) {
+			return req, req
+		}
 		// An explicit request is passed through verbatim (the runner owns the
 		// arg namespace, including values this function has never heard of), but
 		// provenance is canonicalised.
 		return req, canonicalVideoFamily(req)
 	}
 	if fam := strings.TrimSpace(cfg.VideoGenFamily); fam != "" {
+		if cfg.SdcppVideoFamily(fam) {
+			return fam, fam
+		}
 		if fam == videoFamilyWanSentinel {
 			// Bound to the runner default: pass no arg (byte-identical to the
 			// pre-0.73.1 behavior) but the render IS Wan, so say so.

@@ -53,7 +53,7 @@ func (s *Server) StartClaimLoop(ctx context.Context, cfg config.Config) {
 	holder := cfg.FleetQueueHolder
 	client := &http.Client{Timeout: claimTimeout, Transport: netguard.SafeTransport(nil)}
 	nodeID := s.opts.NodeID
-	log.Printf("fleetnode: claim loop up against %s (tasks %v)", holder, s.tasks)
+	log.Printf("fleetnode: claim loop up against %s (tasks now %v; re-derived on every claim)", holder, SupportedTasksFor(cfg, s.opts.LoopbackListener))
 	for {
 		select {
 		case <-ctx.Done():
@@ -81,7 +81,10 @@ func (s *Server) StartClaimLoop(ctx context.Context, cfg config.Config) {
 // when a job was claimed (whether or not admission succeeded — a nacked claim
 // still consumed a poll).
 func (s *Server) claimOne(ctx context.Context, client *http.Client, holder, nodeID string, cfg config.Config) (string, bool) {
-	body, _ := json.Marshal(map[string]any{"node_id": nodeID, "task_types": s.tasks})
+	// The tasks advertised on a claim are derived NOW, by the predicate health and admission use: the
+	// media tasks follow a cached disk read (ADR 0077), so a node whose weight went missing must stop
+	// claiming that task and one whose weight returned must start, with no restart.
+	body, _ := json.Marshal(map[string]any{"node_id": nodeID, "task_types": SupportedTasksFor(cfg, s.opts.LoopbackListener)})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, holder+"/fleet/queue/claim", bytes.NewReader(body))
 	if err != nil {
 		return "", false
@@ -171,8 +174,11 @@ func (s *Server) claimOne(ctx context.Context, client *http.Client, holder, node
 			s.settle(ctx, client, holder, cfg, "ack", job.ID, nodeID, nil, res.Reason)
 			return nil, fmt.Errorf("%s", res.Reason)
 		}
-		s.settle(ctx, client, holder, cfg, "ack", job.ID, nodeID, res.Data, "")
-		return res.Data, nil
+		// The same artifacts the push door adds (server.go's dispatch run closure), computed before
+		// the holder is told so it stores the verified result too.
+		data := withArtifacts(cfg, job.TaskType, res.Data)
+		s.settle(ctx, client, holder, cfg, "ack", job.ID, nodeID, data, "")
+		return data, nil
 	}
 	// The SAME AcceptSpec the push path builds (server.go's handleDispatch),
 	// because this is the same surface: before 0.113.27 this called bare

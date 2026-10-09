@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/dmmdea/offload-harness/internal/config"
@@ -21,6 +22,9 @@ var remoteMediaPayloads = map[string]string{
 	"audio-gen": `{"text":"hola"}`,
 	"run-graph": `{"graph":{"1":{"class_type":"X"}}}`,
 	ComposeTask: `{"template":"title-card"}`,
+	// The media-input door extracts a bundle onto this node (ADR 0077); with no bundle it is the
+	// inner task alone, which is the shape every hostile `out` below is tried against.
+	MediaJobTask: `{"job_id":"mj-out","task_type":"image-gen","payload":{"prompt":"p"}}`,
 }
 
 // Tasks that write no caller-addressed file: stt writes its transcript under media_dir
@@ -39,6 +43,9 @@ func remoteOutCfg() config.Config {
 	cfg.FleetComposeProjects = true
 	cfg.FleetAuthToken = "tok"
 	cfg.ComposeCacheDir = composeProjectTestCache
+	// ... and so does the media-input door (ADR 0077).
+	cfg.FleetMediaInputs = true
+	cfg.MediaDir = composeProjectTestCache
 	return cfg
 }
 
@@ -73,6 +80,13 @@ func TestRemoteMediaTaskOutNeverReachesThePipeline(t *testing.T) {
 			cleanup()
 			for _, k := range []string{"out", "out_dir"} {
 				if v, ok := req.Params[k]; ok {
+					// The project door and the media-job door name their own render under media_dir
+					// (composeproj-<hex>.<ext>, mediajob-<hex>.<ext>, media_gate.go) whenever the node has a
+					// media_dir, which this config has for both: that out is the NODE's, never the caller's,
+					// and the loop below still proves it is not the caller's path.
+					if s, _ := v.(string); k == "out" && isNodeChosenOut(cfg, task, s) {
+						continue
+					}
 					t.Errorf("%s: remote %s=%v reached the pipeline", task, k, v)
 				}
 			}
@@ -99,4 +113,12 @@ func TestEveryFleetWriterIsCoveredByTheOutRule(t *testing.T) {
 			t.Errorf("fleet task %q is not in remoteMediaPayloads: add it and prove its builder drops a caller's out", task)
 		}
 	}
+}
+
+// isNodeChosenOut reports whether out is a file the task's door chose itself: directly under this
+// node's media_dir, named with that door's own stem (only the project door and the media-job door pick one).
+func isNodeChosenOut(cfg config.Config, task, out string) bool {
+	stem := map[string]string{ComposeProjectTask: projectOutputPrefix, MediaJobTask: mediaJobOutputPrefix}[task]
+	return stem != "" && out != "" && filepath.Dir(out) == filepath.Clean(cfg.MediaDir) &&
+		strings.HasPrefix(filepath.Base(out), stem)
 }

@@ -30,7 +30,8 @@ func useTTSEndpoint(cfg config.Config, voice string) bool {
 	if voice != "" && voice != "generalist" {
 		return false
 	}
-	return cfg.TTSEndpoint != "" && cfg.VoiceGenScript == ""
+	// An audio.cpp voice engine (CT-49) is a local voice, so it keeps the default.
+	return cfg.TTSEndpoint != "" && cfg.VoiceGenScript == "" && cfg.VoiceGenEngine != config.EngineAudiocpp
 }
 
 // runVoiceEndpoint renders generate_audio kind=voice through the configured

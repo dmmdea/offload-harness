@@ -1,0 +1,236 @@
+# derived from sdcpp945-video-healthy.log by substituting the device; no CPU run was captured because the node's operator forbids model compute on its CPU
+[V] version: stable-diffusion.cpp version unknown, commit a1ded76 --- main.cpp:697
+ggml_vulkan: Found 1 Vulkan devices:
+ggml_vulkan: 0 = AMD Radeon Graphics (RADV RENOIR) (radv) | uma: 1 | fp16: 1 | bf16: 0 | fp4: 0 | warp size: 64 | shared memory: 65536 | int dot: 0 | matrix cores: none
+load_backend: loaded Vulkan backend from /opt/sdcpp/libggml-vulkan.so
+load_backend: loaded CPU backend from /opt/sdcpp/libggml-cpu-haswell.so
+[V] System Info: 
+   SSE3 = 1 |    SSSE3 = 1 |    AVX = 1 |    AVX2 = 1 |    F16C = 1 |    FMA = 1 |    BMI2 = 1 |    OPENMP = 1 |    REPACK = 1 |  --- main.cpp:698
+[V] SDCliParams {
+  mode: vid_gen,
+  output_path: "/work/m945-tiling-o25.webm",
+  image_path: "",
+  metadata_format: "text",
+  log_level: verbose,
+  color: false,
+  convert_name: false,
+  preview_method: none,
+  preview_interval: 1,
+  preview_path: "preview.avi",
+  preview_fps: 24,
+  taesd_preview: false,
+  preview_noisy: false,
+  imatrix_out: "",
+  metadata_raw: false,
+  metadata_brief: false,
+  metadata_all: false
+} --- main.cpp:699
+[V] SDContextParams {
+  n_threads: 6,
+  conditioning_cache_size: 0,
+  model_path: "",
+  clip_l_path: "",
+  clip_g_path: "",
+  clip_vision_path: "",
+  t5xxl_path: "/models/video/wan22-ti2v-5b/umt5-xxl-encoder-Q8_0.gguf",
+  llm_path: "",
+  llm_vision_path: "",
+  tokenizer: "",
+  diffusion_model_path: "/models/video/wan22-ti2v-5b/FastWan2.2-TI2V-5B-q8_0.gguf",
+  high_noise_diffusion_model_path: "",
+  uncond_diffusion_model_path: "",
+  embeddings_connectors_path: "",
+  vae_path: "/models/video/wan22-ti2v-5b/Wan2.2_VAE.safetensors",
+  vae_format: "auto",
+  audio_vae_path: "",
+  audio_encoder_path: "",
+  taesd_path: "",
+  esrgan_path: "",
+  control_net_path: "",
+  embedding_dir: "",
+  embeddings: {
+  }
+  wtype: NONE,
+  tensor_type_rules: "",
+  lora_model_dir: ".",
+  hires_upscalers_dir: "",
+  photo_maker_path: "",
+  rng_type: cuda,
+  sampler_rng_type: NONE,
+  offload_params_to_cpu: false,
+  max_vram: "0",
+  disable_prefetch: false,
+  disable_segmented_compute: false,
+  eager_load: false,
+  backend: "vulkan0",
+  params_backend: "",
+  split_mode: "",
+  model_args: "",
+  auto_fit: true,
+  enable_mmap: false,
+  control_net_cpu: false,
+  clip_on_cpu: false,
+  vae_on_cpu: false,
+  flash_attn: false,
+  diffusion_flash_attn: true,
+  sage_attn: false,
+  linear_scale: 0,
+  attn_scale: 0,
+  diffusion_conv_direct: false,
+  vae_conv_direct: false,
+  prediction: NONE,
+  lora_apply_mode: auto,
+  force_sdxl_vae_conv_scale: false
+} --- main.cpp:700
+[V] SDGenerationParams {
+  loras: "{
+  }",
+  high_noise_loras: "{
+  }",
+  prompt: "waves crash on the rocks around the lighthouse, golden hour",
+  negative_prompt: "",
+  ad_model_path: "",
+  ad_prompt: "",
+  ad_negative_prompt: "",
+  extra_ad_args: "",
+  clip_skip: -1,
+  width: 832,
+  height: 480,
+  batch_count: 1,
+  qwen_image_layers: 3,
+  init_image_path: "/work/lighthouse-832x480.png",
+  end_image_path: "",
+  mask_image_path: "",
+  control_image_path: "",
+  ref_image_paths: [],
+  ref_video_paths: [],
+  ref_video_audio_paths: [],
+  ref_audio_paths: [],
+  control_video_path: "",
+  image_preprocess: ,
+  ref_image_args: ,
+  increase_ref_index: false,
+  pm_id_images_dir: "",
+  pm_id_embed_path: "",
+  pm_style_strength: 20,
+  skip_layers: [7, 8, 9],
+  sample_params: (txt_cfg: 1.00, img_cfg: 1.00, distilled_guidance: 3.50, slg.layer_count: 0, slg.layer_start: 0.01, slg.layer_end: 0.20, slg.scale: 0.00, scheduler: NONE, sample_method: euler, sample_steps: 3, eta: inf, shifted_timestep: 0, flow_shift: 5.00, extra_sample_args: ),
+  high_noise_skip_layers: [7, 8, 9],
+  high_noise_sample_params: (txt_cfg: 7.00, img_cfg: 7.00, distilled_guidance: 3.50, slg.layer_count: 0, slg.layer_start: 0.01, slg.layer_end: 0.20, slg.scale: 0.00, scheduler: NONE, sample_method: NONE, sample_steps: 20, eta: inf, shifted_timestep: 0, flow_shift: inf, extra_sample_args: ),
+  custom_sigmas: [],
+  cache_mode: "",
+  cache_option: "",
+  cache: disabled (threshold=inf, start=0.15, end=0.95),
+  moe_boundary: 0.875,
+  video_frames: 17,
+  fps: 24,
+  vace_strength: 1,
+  strength: 0.75,
+  control_strength: 0.9,
+  seed: 42,
+  upscale_repeats: 1,
+  upscale_tile_size: 128,
+  hires: { enabled: false, upscaler: "Latent", model_path: "", scale: 2, target_width: 0, target_height: 0, steps: 0, denoising_strength: 0.7, custom_sigmas: [], upscale_tile_size: 128 },
+  vae_tiling_params: { 1, 0, 0, 0, 0.25, 0, 0, "" },
+} --- main.cpp:701
+[V] using 6 threads for model loading --- model_loader.cpp:189
+[I] loading diffusion model from '/models/video/wan22-ti2v-5b/FastWan2.2-TI2V-5B-q8_0.gguf' --- diffusion_engine.cpp:733
+[I] load /models/video/wan22-ti2v-5b/FastWan2.2-TI2V-5B-q8_0.gguf using gguf format --- model_loader.cpp:215
+[V] init from '/models/video/wan22-ti2v-5b/FastWan2.2-TI2V-5B-q8_0.gguf' --- model_loader.cpp:261
+[V] GGUF v3, tensor_count=825, metadata_kv_count=0 --- gguf_reader_ext.h:218
+[I] loading t5xxl from '/models/video/wan22-ti2v-5b/umt5-xxl-encoder-Q8_0.gguf' --- diffusion_engine.cpp:775
+[I] load /models/video/wan22-ti2v-5b/umt5-xxl-encoder-Q8_0.gguf using gguf format --- model_loader.cpp:215
+[V] init from '/models/video/wan22-ti2v-5b/umt5-xxl-encoder-Q8_0.gguf' --- model_loader.cpp:261
+[V] GGUF v3, tensor_count=242, metadata_kv_count=30 --- gguf_reader_ext.h:218
+[I] loading vae from '/models/video/wan22-ti2v-5b/Wan2.2_VAE.safetensors' --- diffusion_engine.cpp:804
+[I] load /models/video/wan22-ti2v-5b/Wan2.2_VAE.safetensors using safetensors format --- model_loader.cpp:221
+[V] init from '/models/video/wan22-ti2v-5b/Wan2.2_VAE.safetensors', prefix = 'vae.' --- model_loader.cpp:289
+[V] patch_embedding_channels 147456 --- model_loader.cpp:629
+[V] patch_embedding_channels 147456 --- model_loader.cpp:629
+[I] Version: Wan 2.2 TI2V  --- diffusion_engine.cpp:996
+[I] auto-fit plan: --- backend_fit.cpp:323
+[I]   devices: --- backend_fit.cpp:324
+[I]     Vulkan0      AMD Radeon Graphics (RADV RENOIR) free  25058 MiB, budget  24546 MiB --- backend_fit.cpp:326
+[I]     RAM          free  24621 MiB, params budget  22158 MiB --- backend_fit.cpp:333
+[I]   compute-device weight cache priority: diffusion > te > vae --- backend_fit.cpp:336
+[I]   components (params: compute device -> RAM -> other GPU -> disk): --- backend_fit.cpp:337
+[I]     DiT          params   5162 MiB, compute reserve  2048 MiB -> compute Vulkan0, params Vulkan0 --- backend_fit.cpp:346
+[I]     Conditioner  params   5757 MiB, compute reserve  2048 MiB -> compute Vulkan0, params Vulkan0 --- backend_fit.cpp:346
+[I]     VAE          params   1344 MiB, compute reserve  1024 MiB -> compute Vulkan0, params Vulkan0 --- backend_fit.cpp:346
+[I] auto-fit: --backend "vulkan0" --- backend_fit.cpp:474
+[V] Initializing backend: Vulkan0 --- ggml_extend_backend.cpp:404
+[V] patch_embedding_channels 147456 --- model_loader.cpp:629
+[V] using 6 threads for model loading --- model_loader.cpp:189
+[I] Weight type stat:                      f32: 415  |     f16: 196  |    q8_0: 652   --- diffusion_engine.cpp:1524
+[I] Conditioner weight type stat:          f32: 73   |    q8_0: 169   --- diffusion_engine.cpp:1525
+[I] Diffusion model weight type stat:      f32: 342  |    q8_0: 483   --- diffusion_engine.cpp:1526
+[I] VAE weight type stat:                  f16: 196   --- diffusion_engine.cpp:1527
+[V] ggml tensor size = 432 bytes --- diffusion_engine.cpp:1529
+[V] wan: model_type = t2v, num_layers = 30, vace_layers = 0, dim = 2048, ffn_dim = 8192, num_heads = 16 --- wan.hpp:91
+[I] Wan2.2-TI2V-5B --- wan.hpp:967
+[I] using VAE for encoding / decoding --- model_builders.cpp:638
+[V] Wan VAE convolution type: 3D --- wan_vae.hpp:1338
+[I] Using flash attention in the diffusion model --- diffusion_engine.cpp:1203
+[V] validating model metadata --- diffusion_engine.cpp:1212
+[V] model metadata validated; weights will be prepared lazily --- diffusion_engine.cpp:1282
+[I] total params memory size = 12265.07MB (VRAM 12265.07MB, RAM 0.00MB): text_encoders 5757.05MB(VRAM), diffusion_model 5163.77MB(VRAM), vae 1344.24MB(VRAM), controlnet 0.00MB(N/A), extensions 0.00MB(N/A) --- diffusion_engine.cpp:1328
+[I] running in FLOW mode --- diffusion_engine.cpp:1468
+[I] preprocess init[0]: 832x480 crop=(0,0,832,480) resize=832x480 pad=(0,0) output=832x480 filter=auto(0) antialias=false --- image_preprocess.cpp:266
+[V] using 6 threads for model loading --- model_loader.cpp:189
+[I] get_sigmas with discrete scheduler --- denoiser.hpp:1129
+[I] sampling using Euler method --- request.cpp:422
+[I] IMG2VID --- video.cpp:957
+[V] VAE encode tile size: 256x256 pixels (16x16 latent) --- vae.hpp:270
+[V] num tiles : 4, 2  --- tiling.cpp:178
+[V] processing 8 tiles --- tiling.cpp:179
+[I] wan_vae build cached graph cut plan done (taking 0 ms) --- ggml_graph_cut.cpp:1032
+[V] patch_embedding_channels 147456 --- model_loader.cpp:629
+[V] loading 82/196 tensors from /models/video/wan22-ti2v-5b/Wan2.2_VAE.safetensors --- model_loader.cpp:1111
+  |###                                               | 4/82 - 0.00MB/s[K  |####################################              | 58/82 - 534.40MB/s[K  |##################################################| 82/82 - 639.09MB/s[K
+[I] loading tensors completed, taking 0.44s (read: 0.36s, memcpy: 0.00s, convert: 0.00s, copy_to_backend: 0.01s) --- model_loader.cpp:1381
+[V] model manager prepared params backend buffers (282.53 MB, 82 tensors, 1 blocks, RAM) on CPU --- model_manager.cpp:490
+[V] wan_vae compute buffer size: 206.69 MB(RAM) on CPU (peak across 1 segment) --- ggml_runner.cpp:1019
+  |======>                                           | 1/8 - 1.13s/it[K  |============>                                     | 2/8 - 1.52it/s[K  |==================>                               | 3/8 - 1.52it/s[K  |=========================>                        | 4/8 - 1.52it/s[K  |===============================>                  | 5/8 - 1.52it/s[K  |=====================================>            | 6/8 - 1.52it/s[K  |===========================================>      | 7/8 - 1.52it/s[K  |==================================================| 8/8 - 1.52it/s[K
+[V] computing vae encode graph completed, taking 5.75s --- vae.hpp:301
+[I] encode_first_stage completed, taking 5752 ms --- video.cpp:985
+[V] parse 'waves crash on the rocks around the lighthouse, golden hour' to [['waves crash on the rocks around the lighthouse, golden hour', 1], ] --- conditioner.hpp:1487
+[V] split prompt "waves crash on the rocks around the lighthouse, golden hour" to tokens ["▁wave", "s", "▁crash", "▁on", "▁the", "▁rocks", "▁around", "▁the", "▁light", "house", ",", "▁golden", "▁hour", ] --- t5_unigram_tokenizer.cpp:346
+[I] t5 build cached graph cut plan done (taking 1 ms) --- ggml_graph_cut.cpp:1032
+[V] patch_embedding_channels 147456 --- model_loader.cpp:629
+[V] loading 242/242 tensors from /models/video/wan22-ti2v-5b/umt5-xxl-encoder-Q8_0.gguf --- model_loader.cpp:1111
+  |###                                               | 13/242 - 549.87MB/s[K  |#####                                             | 22/242 - 657.26MB/s[K  |######                                            | 27/242 - 608.31MB/s[K  |########                                          | 36/242 - 647.48MB/s[K  |#########                                         | 43/242 - 654.00MB/s[K  |###########                                       | 52/242 - 707.30MB/s[K  |#############                                     | 60/242 - 721.63MB/s[K  |##############                                    | 63/242 - 652.77MB/s[K  |################                                  | 73/242 - 712.41MB/s[K  |#################                                 | 82/242 - 717.68MB/s[K  |###################                               | 89/242 - 725.52MB/s[K  |####################                              | 95/242 - 686.38MB/s[K  |######################                            | 103/242 - 718.55MB/s[K  |########################                          | 113/242 - 721.88MB/s[K  |#########################                         | 118/242 - 699.29MB/s[K  |##########################                        | 124/242 - 692.57MB/s[K  |############################                      | 132/242 - 709.31MB/s[K  |###############################                   | 146/242 - 740.72MB/s[K  |##################################                | 162/242 - 788.94MB/s[K  |#####################################             | 176/242 - 813.03MB/s[K  |########################################          | 193/242 - 853.21MB/s[K  |############################################      | 209/242 - 885.88MB/s[K  |###############################################   | 224/242 - 915.71MB/s[K  |##################################################| 240/242 - 937.76MB/s[K  |##################################################| 242/242 - 924.53MB/s[K
+[I] loading tensors completed, taking 6.23s (read: 4.69s, memcpy: 0.00s, convert: 0.00s, copy_to_backend: 0.26s) --- model_loader.cpp:1381
+[V] model manager prepared params backend buffers (5757.05 MB, 242 tensors, 6 blocks, RAM) on CPU --- model_manager.cpp:490
+[V] t5 compute buffer size: 297.00 MB(RAM) on CPU (peak across 1 segment) --- ggml_runner.cpp:1019
+[V] computing condition graph completed, taking 12026 ms --- conditioner.hpp:1583
+[I] get_learned_condition completed, taking 12.03s --- video.cpp:1212
+[I] generate_video 832x480x17 --- video.cpp:1612
+[V] sample 52x30x5 --- video.cpp:1678
+[I] Wan2.2-TI2V-5B build cached graph cut plan done (taking 4 ms) --- ggml_graph_cut.cpp:1032
+[V] patch_embedding_channels 147456 --- model_loader.cpp:629
+[V] loading 825/825 tensors from /models/video/wan22-ti2v-5b/FastWan2.2-TI2V-5B-q8_0.gguf --- model_loader.cpp:1111
+  |#                                                 | 4/825 - 0.00MB/s[K  |##                                                | 28/825 - 460.86MB/s[K  |####                                              | 52/825 - 509.70MB/s[K  |#####                                             | 72/825 - 616.11MB/s[K  |#######                                           | 99/825 - 669.46MB/s[K  |########                                          | 126/825 - 701.49MB/s[K  |##########                                        | 153/825 - 722.25MB/s[K  |###########                                       | 175/825 - 723.90MB/s[K  |############                                      | 194/825 - 719.18MB/s[K  |##############                                    | 218/825 - 720.84MB/s[K  |###############                                   | 241/825 - 682.36MB/s[K  |################                                  | 262/825 - 715.99MB/s[K  |##################                                | 288/825 - 706.88MB/s[K  |####################                              | 314/825 - 716.32MB/s[K  |#####################                             | 342/825 - 724.43MB/s[K  |#######################                           | 365/825 - 724.81MB/s[K  |########################                          | 384/825 - 722.40MB/s[K  |#########################                         | 407/825 - 723.08MB/s[K  |###########################                       | 432/825 - 716.61MB/s[K  |############################                      | 450/825 - 708.30MB/s[K  |#############################                     | 477/825 - 714.37MB/s[K  |###############################                   | 508/825 - 719.87MB/s[K  |#################################                 | 531/825 - 724.69MB/s[K  |##################################                | 555/825 - 727.16MB/s[K  |####################################              | 578/825 - 727.45MB/s[K  |####################################              | 593/825 - 713.06MB/s[K  |######################################            | 616/825 - 708.96MB/s[K  |#######################################           | 639/825 - 713.30MB/s[K  |#########################################         | 666/825 - 717.45MB/s[K  |##########################################        | 692/825 - 721.32MB/s[K  |############################################      | 716/825 - 721.74MB/s[K  |#############################################     | 741/825 - 723.68MB/s[K  |###############################################   | 761/825 - 724.00MB/s[K  |################################################  | 783/825 - 717.55MB/s[K  |################################################# | 805/825 - 712.77MB/s[K  |##################################################| 825/825 - 723.89MB/s[K
+[I] loading tensors completed, taking 7.13s (read: 6.48s, memcpy: 0.00s, convert: 0.00s, copy_to_backend: 0.41s) --- model_loader.cpp:1381
+[V] model manager prepared params backend buffers (5163.77 MB, 825 tensors, 6 blocks, RAM) on CPU --- model_manager.cpp:490
+[V] Wan2.2-TI2V-5B compute buffer size: 192.53 MB(RAM) on CPU (peak across 1 segment) --- ggml_runner.cpp:1019
+  |================>                                 | 1/3 - 29.09s/it[K  |=================================>                | 2/3 - 21.74s/it[K  |==================================================| 3/3 - 21.77s/it[K
+[I] sampling completed, taking 72.60s --- video.cpp:1712
+[I] generating latent video completed, taking 72.61s --- video.cpp:1856
+[V] decode_video_outputs latent 52x30x5x48 --- video.cpp:1234
+[V] VAE decode tile size: 256x256 pixels (16x16 latent) --- vae.hpp:338
+[V] num tiles : 4, 2  --- tiling.cpp:178
+[V] processing 8 tiles --- tiling.cpp:179
+[I] wan_vae build cached graph cut plan done (taking 1 ms) --- ggml_graph_cut.cpp:1032
+[V] patch_embedding_channels 147456 --- model_loader.cpp:629
+[V] loading 110/196 tensors from /models/video/wan22-ti2v-5b/Wan2.2_VAE.safetensors --- model_loader.cpp:1111
+  |#                                                 | 1/110 - 0.00MB/s[K  |##############                                    | 30/110 - 53.12MB/s[K  |###############                                   | 31/110 - 161.02MB/s[K  |#####################                             | 44/110 - 556.06MB/s[K  |#########################                         | 53/110 - 656.80MB/s[K  |############################                      | 61/110 - 633.50MB/s[K  |###############################                   | 68/110 - 662.32MB/s[K  |#########################################         | 89/110 - 705.48MB/s[K  |##################################################| 110/110 - 660.43MB/s[K
+[I] loading tensors completed, taking 1.60s (read: 1.39s, memcpy: 0.00s, convert: 0.00s, copy_to_backend: 0.05s) --- model_loader.cpp:1381
+[V] model manager prepared params backend buffers (1058.78 MB, 110 tensors, 2 blocks, RAM) on CPU --- model_manager.cpp:490
+[V] wan_vae compute buffer size: 5077.13 MB(RAM) on CPU (peak across 1 segment) --- ggml_runner.cpp:1019
+  |======>                                           | 1/8 - 35.51s/it[K  |============>                                     | 2/8 - 33.36s/it[K  |==================>                               | 3/8 - 33.35s/it[K  |=========================>                        | 4/8 - 33.35s/it[K  |===============================>                  | 5/8 - 33.35s/it[K  |=====================================>            | 6/8 - 33.35s/it[K  |===========================================>      | 7/8 - 33.35s/it[K  |==================================================| 8/8 - 33.35s/it[K
+[V] computing vae decode graph completed, taking 269.02s --- vae.hpp:375
+[I] decode_first_stage completed, taking 269.02s --- video.cpp:1243
+[V] decode_video_outputs decoded 832x480x17x3 --- video.cpp:1248
+[I] generate_video completed in 359.49s --- video.cpp:1944
+[V] model manager released params backend buffers (12262.13 MB, 1259 tensors, 15 blocks, VRAM) from Vulkan0 --- model_manager.cpp:1260
+[I] save result video to '/work/m945-tiling-o25.webm' --- main.cpp:547

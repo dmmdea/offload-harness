@@ -91,6 +91,7 @@ The installer seeds this tier's media bindings (`config_seed`):
 
 | key | value |
 |---|---|
+| `animategen_script` | `render/comfy-animate.mjs` |
 | `comfy_cuda_device` | `2` |
 | `comfy_dynamic_vram` | `on` |
 | `compose_script` | `render/compose-hyperframes.mjs` |
@@ -133,7 +134,6 @@ here so they are never mistaken for a media capability:
 | `agent_max_tokens` | `4096` |
 | `agent_model` | `qwen3.8-27b` |
 | `agent_timeout_sec` | `600` |
-| `animategen_script` | `render/comfy-animate.mjs` |
 | `ffmpeg_video_encoder` | `h264_nvenc` |
 
 ## Operator notes

@@ -6,6 +6,407 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.173.0] - 2026-10-08 - Remote media routing, the media-job door, and iGPU media engines (sd.cpp video and animate, audio.cpp voice and music)
+
+A caller on any machine can now send one render to a fleet node together with its input files, name the node or let the roster place it, and get the output back with its bytes verified (the media-job door, ADR 0077); a node advertises and admits a media task only while its route is actually CONFIGURED, so a missing weight drops the task out of the roster instead of failing jobs. A box whose only GPU is a Vulkan iGPU, with no CUDA, no ROCm and no model on the CPU, now serves video (I2V and T2V), character animation, voice with cloning and music through stable-diffusion.cpp and audio.cpp, advertises those lanes to the fleet, and ships the measured amd-gcn seed for them.
+
+### Added — the amd-gcn tier seeds its measured iGPU media set (register CT-51, I5)
+
+`setup/templates/profiles.json` `profiles.amd-gcn.config_seed` now carries the lanes measured on the Vega 7 reference box (no model on
+CPU, every backend Vulkan): video family `fastwan` (engine sdcpp, FastWan2.2-TI2V-5B q8_0 + Wan2.2 VAE + umt5-xxl Q8_0 + the opt-in
+`taew2_2` fast decode; 3 steps, cfg 1, flow_shift 5, euler, 832x480x49 at 24 fps; token cap 5200 / stride 16; Apache-2.0,
+`commercial_use` true; `videogen_timeout_sec` 7200), animate on sd.cpp (Wan2.1 VACE 1.3B fp16 `.safetensors`, Apache-2.0, with the
+depth-anything.cpp control video: 288x512, `animategen_frames` 33 (the default clip), 20 steps, cfg 6, token cap 5800 / stride 8;
+`animategen_timeout_sec` 5400) and voice + music
+on audio.cpp (Chatterbox q8_0, ACE-Step 1.5 turbo bf16; backend `vulkan`, device 0). Paths follow the seed convention
+(`__OFFLOAD_HOME__/models/<subdir>/<file>`, engines under `__OFFLOAD_HOME__` with `__EXE__`). The ACE-Step licence is not verified, so
+its `commercial_use` stays unset and the tier notes say it must be checked at the ACE-Step source before anything records it. The nine
+weights are pinned (url, name, size, sha256, version) in `setup/install.ps1`'s `$PINNED` table, the one place the repo pins media
+models (the Linux install has no media leg yet, so they are pin-only: no gate downloads them), and their sizes are mirrored in
+`internal/mediacap/modelsizes.go` (`TestKnownModelSizesMatchInstaller`) except `wan_2.1_vae.safetensors`, which every ComfyUI Wan
+route also binds. The seed needs 0.173.0: 0.172.0 and earlier do not know the keys. Tier pages: `animategen_*` and `audiocpp_*` keys are media
+keys (they were filed under the non-media heading, so `ampere-16` listed its `animategen_script` there), a nested seed object renders as
+compact JSON instead of a Go map dump, and the README media column names the iGPU engines. Tests (`internal/tierseed`):
+`TestAmdGcnMediaSeedRoutesFollowTheFiles` (the resolved seed derives the four routes BOUND-BUT-MISSING on a fresh install and
+CONFIGURED once the files are placed), `TestAmdGcnMediaSeedValues`, `TestAmdGcnMediaSeedWeightsArePinned`; each was broken once and seen red.
+
+### Added — a node whose lanes run on the native engines advertises and admits them (register CT-51, I1)
+
+`internal/fleetnode` bound a media task only through its ComfyUI/python script (`videogen_script`, `animategen_script`,
+`voicegen_script`/`musicgen_script`/`tts_endpoint`), so an iGPU box whose video, animate, voice and music run on the
+sd.cpp and audio.cpp engines (CT-49) set none of them and never advertised or admitted `video-gen`, `animate` or `audio-gen`,
+even with every route CONFIGURED. `mediaTaskBound` now binds `video-gen` through `config.VideoGenBound()`, `animate` through
+`AnimateGenBound()` and `audio-gen` through `VoiceGenBound() || MusicGenBound()`; `run-graph` is unchanged (ComfyUI only). The
+route verdict still decides: a bound engine whose model file is missing is BOUND-BUT-MISSING and the task is refused at
+admission with the `503` route-not-ready, and a box with neither a script nor an engine behaves exactly as before.
+The advertised model family stays in the namespace the lane records its footprints under: an sdcpp default video family
+advertises its own name (the wan22 sentinel keeps the store's `wan2.2`), the sd.cpp animate lane advertises
+`config.AnimateSdcppFootprintFamily` (`wan-vace`, the constant both sides use), and audio-gen advertises the audio.cpp family
+names the lanes record (`chatterbox` for voice, `ace_step` for music) instead of the ComfyUI `acestep`. Every one of these lanes
+does record a footprint, so none is advertised without one. Tests: `TestEngineOnlyBoxAdvertisesAndAdmitsItsMediaLanes`,
+`TestEngineOnlyBoxRefusesALaneWhoseBoundFileIsMissing`, `TestABoxWithNeitherScriptNorEngineKeepsItsBehaviour`,
+`TestEngineLaneFamiliesAreTheRecordedOnes` (fleetnode) and `TestEngineLaneFamiliesMatchTheAdvertisedOnes` (pipeline, the pin
+extended from `TestVideoFootprintFamilyMatchesTheAdvertisedFamily`); each guard was broken once and seen red.
+
+### Added — media jobs run on a fleet node, with their input files, and come back verified (ADR 0077, register CT-50)
+
+A machine with no render lane, or a caller who names a node, can now render an image, a clip, a character animation, a voice
+or music clip or a ComfyUI graph on the fleet. Nothing in the repository dispatched the five media tasks before: the MCP doors
+and CLI verbs called the local pipeline directly.
+
+- **Node: the media-job door.** `POST /fleet/media-job` (task `media-job`) takes one media task with its input files (a
+  `video-gen` still, an `animate` reference and driver, an `audio-gen` clone sample) from a holder of the fleet token. It is
+  closed unless `fleet_media_inputs` is true, `fleet_auth_token` is set and a media task is bound; the bearer is checked
+  before the body; the bundle is capped (`fleet_media_inputs_max_mb`, default 256 MiB), sha256-checked, extracted into
+  `<media_dir>/fleet-inputs/in-*` and sniffed by magic bytes per field kind; the inner task is built by the builder
+  `/fleet/dispatch` uses; the directory is removed with the job and swept at startup. `media-job` is token-gated, so its jobs
+  are masked from tokenless polls.
+- **Node: artifacts.** A finished media job's data gains `artifacts: [{name, bytes, sha256}]` for every output inside
+  `media_dir`. Additive.
+- **Node: honest advertisement.** `video-gen`, `animate`, `audio-gen` and `run-graph` are advertised and admitted only while
+  `internal/mediacap` derives their route CONFIGURED (default configs ship every script bound, so a box listed tasks whose
+  weights were missing and failed the first job). `/fleet/health` gains `media_routes`; its task and family lists are derived
+  per request from the same reading, cached at most 60 s. An endpoint-only voice node now advertises `audio-gen`.
+- **Client: `internal/mediaremote`** mirrors `composeremote`: `route` local, auto (here when this machine has the lane,
+  read from the files; with no lane and no fleet it still runs here) or remote; node pick by task, `media-job`, route verdict,
+  text lease, held lease, queue and config order, every miss named; outputs fetched by name and verified against the node's
+  sha256 before anything lands. `delegate.NodeView` decodes `media_routes` (absent = unknown) and any held lease.
+  On a machine that renders here the five media doors still go through the per-card admission (0.164.0): the job reaches
+  the pipeline through the server's own `runTask`, so `waiter_token` is taken and a queued answer's place in line is kept
+  exactly as on the doors that have no route. A route that sends the job to a node does not carry `waiter_token` (a place in
+  line is on one machine) or run_graph's `devices`, which defers by name.
+- **Doors.** `offload_generate_image`, `offload_generate_video`, `offload_animate_character`, `offload_generate_audio` and
+  `offload_run_graph` gain `route` and `remotes`; `generate-image`, `generate-video`, `generate-audio`, `animate-character` and
+  `run-graph` gain `--route` and a repeatable `--remote`. No tool was added. `refine=false`, `tts_voice`, `transformer` and (`run_graph`) `devices` defer on a remote
+  route (the node's tasks cannot carry them).
+- Closes the input half of register C-90 for media inputs (STT stays a separate door).
+
+Tests: `TestMediaJobDoorChecksTheDoorAndTheBearerBeforeReadingTheBody`, `TestMediaJobRefusesBadPayloadsAndLeavesNothing`,
+`TestMediaJobRewritesTheInputFieldsAndRemovesTheDirectory`, `TestSweepOrphanedInputDirs`,
+`TestWithArtifactsListsEveryOutputInsideMediaDir`, `TestFinishedMediaJobDataCarriesArtifacts`,
+`TestAMissingWeightDropsVideoGenFromTheAdvertisement`, `TestMediaRoutesAreCachedForAtMostSixtySeconds`,
+`TestAStillTravelsAsAMediaJobBundleWhoseHashMatches`, `TestAShaMismatchDefersAndLeavesNoFile`,
+`TestANodeWithoutTheRouteIsSkippedAndNamed`, `TestCallerRemotesMustBeAmongDelegateRemotes`,
+`TestMediaToolsAdvertiseRouteAndRemotes`, `TestMediaVerbsRouteToAFleetNode`.
+
+### Changed — review round for the media-job work (register CT-50)
+
+Behaviour that differs from the first cut of the entry above (all of it unreleased):
+
+- **`fleet_media_inputs_max_mb` defaults to 256, not 512.** A node holds the base64 request body and the decoded bundle
+  together while it admits a job; the default keeps that peak under about 0.6 GiB (the door takes one body at a time). Raise it for a node with the RAM.
+- **A running or queued media job no longer pins its request body.** The admission closure keeps only the job id and task
+  type; the door decodes the head of the body without materialising the bundle and base64-decodes the bundle straight out of
+  the body, so the extracted directory is the only copy the job holds (a 24 MiB bundle held 64 MiB of heap for the job's
+  whole life before; the test bounds it).
+- **`run_graph`'s `out_dir` is honoured on a remote route.** It never travels to the node; the fetched outputs are written into
+  it (created if missing, refused before the network when it cannot be created). `out` still takes the primary output.
+- **A fetched output never replaces an existing local file.** Each is staged under a unique temp name in its destination
+  directory and its final name is claimed exclusively: the primary keeps the node's file name in `media_dir` when it is free,
+  every other output is prefixed with the remote job id (an `out_dir` keeps the node's names and prefixes only a taken one).
+  Only the caller's own `out` is replaced, and it is placed last; if a placement fails part-way every temp and claim is
+  removed and the defer names the files that already landed.
+- **A bound media task whose route is not CONFIGURED is a `503`, not a `400`.** The refusal names the route and its mediacap
+  state and is re-placeable; a task that is not bound at all keeps `400 unsupported task_type`. The `media-job` door answers
+  the same when every media task it carries is bound but not ready.
+- **The pull claim loop** advertises the tasks the node can run now (re-derived every claim) instead of the startup list.
+- **The `media-job` file-field guard** matches field names without regard to case (the builders do), so `{"Still":"/etc/passwd"}`
+  is refused; a shipped file replaces every spelling of its field.
+- **Defer classes.** A call whose own deadline passed is `budget` and names the node and remote job; a 401 or 403 on the poll or
+  the fetch is `config` (and a 404 or a repeated poll failure still ends the wait); an input file this machine cannot read is
+  `contract` while its own temp directory, disk or packer failing is `infrastructure`; an unencodable parameter is a `contract`
+  defer naming the cause; graph and manifest are checked together against the 1 MiB dispatch body.
+- **The node is chosen before the bundle is packed**, so a fleet with no eligible node costs one probe, not the bundle.
+- **Route verdicts are read once per health request and per admission** (the node keys its cache once at construction) and a
+  slow derivation no longer holds one lock for every config; `route: auto` caches this machine's lane verdict for at most
+  60 s instead of walking the files on every call. The door's read and write deadline extensions report a writer that cannot
+  carry them, once per route.
+- **`animate-character` takes `--route` and `--remote`** like the other media verbs.
+
+Tests: `TestAnInFlightMediaJobDoesNotPinItsRequestBody`, `TestMediaJobFileFieldsAreRefusedAsNodePathsInAnyCasing`,
+`TestMediaJobCarriesOnlyItsFiveTasks`, `TestABoundTaskWithANotReadyRouteIs503NamingTheRouteAnUnboundOneStays400`,
+`TestClaimAdvertisesTheMediaTasksTheNodeCanRunRightNow`, `TestPulledMediaJobIsAckedWithArtifacts`,
+`TestMediaVerdictsAreReadOncePerHealthRequestAndPerAdmission`, `TestEachMediaTaskIsAdvertisedOnlyForItsOwnRoute`,
+`TestSweepKeepsADirectoryYoungerThanTheLongestTimeoutPlusAnHour`, `TestAFetchedOutputNeverReplacesAFileThatIsAlreadyThere`,
+`TestAFailedPlacementRemovesEveryTempAndNamesWhatLanded`, `TestRunGraphOutDirReceivesTheFetchedOutputs`,
+`TestTheTaskBudgetEndsACallThatSetNoDeadlineAsABudgetDefer`, `TestACallersDeadlineIsHonouredInBothDirections`,
+`TestAPollThatIs404EndsTheWaitAtOnce`, `TestConsecutivePollFailuresEndTheWaitAfterFiveAndAResetByASuccess`,
+`TestEveryMCPParameterReachesTheNodeBuilderUnderItsFieldName`, `TestEveryMediaDoorParameterReachesTheWire`,
+`TestLocalConfiguredMapsEachTaskToItsOwnRoute`, `TestAHostileResultPathCollapsesToAPlainNameInsideMediaDir`,
+`TestAnimateCharacterVerbRoutesToAFleetNode`, `TestEveryMediaVerbPassesRouteAndRemotesToTheRouter`,
+`TestCacheDoesNotHoldOneLockAcrossEveryConfigsDerivation`.
+
+### Changed — second review round for the media-job work (register CT-50)
+
+- **The media-job body is read into one buffer of exactly `Content-Length` bytes.** `bytes.Buffer.ReadFrom` regrew a buffer sized
+  `Content-Length + 1` to about twice its size whenever the last reads left fewer than 512 bytes free (5 of 400 loopback
+  uploads), which broke the 0.6 GiB peak the 256 MiB default promises. The door now uses `io.ReadFull` and probes one byte past
+  the declared length; a body longer than it declared is refused `413 request body too large` like one over the cap, and one
+  shorter than it declared is a `400`.
+- **Fetched files are mode 0644 less the umask**, not the temp file's 0600, so a service reading `media_dir` (or the caller's
+  `out`) on Linux can read them, as before the staging change.
+- **An empty `media_dir` means the current directory** for a fetch (it failed after the render with `mkdir : ...`).
+- **The caller's `out` is decided first and reserved.** An `out` inside `out_dir` that shares a base name with a secondary
+  output no longer lets the secondary claim that name and be renamed over; the secondary takes the job-id-prefixed name.
+- **A budget or deadline that ends a call says what it cannot undo.** A media job cannot be withdrawn: it is claimed to running
+  as soon as it is admitted, and `DELETE /fleet/jobs/{id}` is for agent jobs only (ADR 0064, `TestWithdrawIsForAgentJobsOnly`),
+  so the node answers 405 and the job keeps its card until it ends. The client therefore sends no withdraw. A deadline that
+  passes while the job is sent or rendering defers as `budget`, names the node and the remote job, and says the node may still
+  be running the job and it cannot be recalled; one that passes during the fetch says the render finished and the fetch ran out
+  of time.
+- **Leftovers of a fetch that never finished are swept** from the destination directory before names are claimed: stale
+  `.media-fetch-*.part` temps and zero-byte `media-<16 hex>-*` claim files (bounded to 4096 entries scanned and 256 removed,
+  logged). "Stale" is older than the longest call budget (1 to 6 hours, the same `Budgets` a call runs under) plus an hour, so
+  no call still running can lose its files, and a call refreshes the modification time of its own claims and finished temps
+  after each download, so a long multi-output fetch never ages toward it. Two limits are deliberate: a crash mid-fetch can leave
+  an empty claim under the node's bare file name (the primary), which the sweep does not remove because it cannot tell it from
+  an empty file the user made; and an empty `media-<16 hex>-*` file older than the threshold is indistinguishable from a claim.
+- **Replacing an existing `out` keeps that file's permission bits** (a private 0600 `out` stays 0600); a new `out` is 0644 less
+  the umask like every other fetched file.
+- **`compose-project` reports a deadline it cannot extend** like the media-job door does (it discarded the errors).
+
+Tests: `TestReadMediaJobBodyAllocatesExactlyContentLength`, `TestFetchedOutputsLandAs0644LessTheUmask`,
+`TestAnEmptyMediaDirIsTheCurrentDirectory`, `TestAnOutThatSharesANameWithASecondaryNeverDestroysIt`,
+`TestABudgetThatEndsTheCallSaysTheJobCannotBeRecalled`, `TestABudgetExpiryAgainstARealNodeSendsNoDeleteAndSaysTheJobCannotBeRecalled`,
+`TestABudgetThatEndsWhileTheJobIsBeingSentSaysSoAndSendsNoDelete`, `TestABudgetThatEndsDuringTheFetchSaysTheRenderFinished`, `TestAStaleFetchLeftoverIsSweptBeforeTheNextClaim`,
+`TestTheSweepThresholdIsTheLongestBudgetPlusAnHour`, `TestSweepStaleKeepsAFileInsideTheThresholdAndTakesOneBeyondIt`,
+`TestTouchRefreshesTheClaimsAndFinishedTempsACallHolds`, `TestAMultiOutputFetchKeepsItsClaimsFresh`,
+`TestReplacingAnExistingOutKeepsItsPermissionBits`, `TestPollFailuresThatAlternateWithAnswersNeverEndTheWait`,
+`TestAGraphThatEscapesPastTheNodesBodyCapIsRefusedBeforeTheNetwork`, `TestComposeProjectReportsADeadlineItCannotExtend`.
+
+### Changed — the media lane reads the roster the way every other single-shot lane does (ADR 0074, register CT-50)
+
+Merging main (0.165.0 to 0.168.0) put the tailnet-zone guard and the shared roster reader (`internal/rosterprobe`) under
+every single-shot lane except the media one, which was written before them and probed `delegate_remotes` one node at a time
+through the dial gate alone.
+
+- **A roster entry the tailnet guard refuses is a named miss, never a dial.** `mediaremote` now reads the candidate nodes
+  through `rosterprobe.Probe`: each entry is judged by the same shape check the agent lane applies (against `tailnet_suffix`
+  and `tailnet_suffixes`), the rest are probed at once in configured order through the shared memo and negative cache, and the
+  "probed ..." line says `not dialled, refused by the tailnet guard` for the refused one while the others still serve. The entry
+  prints redacted (a token pasted into it never reaches a defer), the dispatch errors are scrubbed the same way, and a node that
+  accepts a job drops out of the negative cache.
+- Merge bookkeeping, no behaviour change: the decision record is ADR 0077 (main took 0072 and 0076 meanwhile), and `media-job`
+  sits in main's config-taking `tokenGated` beside `compose-project` and `stt-upload`.
+
+Tests: `TestPickNodeNamesARosterEntryTheTailnetGuardRefusesAndDoesNotDialIt`,
+`TestRunNamesARefusedRosterEntryInTheDeferAndRedactsItsToken`.
+
+### Fixed — remote attribution, an in-flight cap and gated outputs for the media-job work (ADR 0077, register CT-50)
+
+Review of the branch against main 0.169.0 found three behaviours it had not picked up from main's stt and compose work.
+
+- **A remote media call is attributed like every other remote lane (0.165.0, D5-D11).** `internal/mediaremote` wrote no asker
+  ledger row and no PAIR card for a call it sent to a node, and its dispatches named no asker. A remote or auto-spilled media
+  call now opens a `core.BeginRemote` handle, reports the dispatch to the node it picked and the node's running state, and
+  finishes the handle on every exit (a result, a refused POST, a node defer, a deadline); a call that reached no node has its row
+  and no card. Both POSTs, the plain dispatch and the media-job, send `X-Offload-Asker` and, only when this machine's emitter is
+  off, `X-Offload-Pair-Card: node`. The MCP doors hand the lane their `runTaskAs`, which now forwards `BeginRemote` to the
+  server's pipeline (without it the doors attributed nothing); the CLI verbs pass the pipeline itself. The local route and an
+  auto call that runs here are unchanged.
+- **The media-job door caps its in-flight uploads.** The body (a bundle of up to
+  `fleet_media_inputs_max_mb`, 256 MiB, in base64) is read before the admission gates, so every concurrent upload could hold one.
+  The door now takes one of `mediaJobInFlightMax` slots (one, see the release review below) after the bearer check and before the
+  first body byte, releases it on every exit of the handler, and answers `503` with `Retry-After` to a caller that waits past 30 s
+  (`mediaremote` reads it as a capacity defer; see the release review). `takeSTTUploadSlot` and the new door share `takeUploadSlot`.
+- **The outputs of a media-job are served only to the fleet token.** They are rendered from the caller's private files (a still,
+  a driver video, a voice sample), but `GET /fleet/media/{name}` served them by bare name while main bearer-gates compose-project
+  and stt-upload renders. The door now names the render itself (`mediajob-<16 hex>.<ext>` under `media_dir`, set after the inner
+  builder) and `gatedMediaName` recognises the stem, so a tokenless fetch is `401` exactly as a gated project render's is.
+  `mediaremote` sends the fleet bearer on its output fetches (a test pins it against a node that gates the name). run-graph and
+  every output of the tokenless `/fleet/dispatch` door are unchanged.
+- Docs: the lists of lanes that share `internal/rosterprobe` (fleet-node.md, FLEET-NODE.md, ADR 0074) now name the media lane, as
+  do the attribution headers table in pair-workloads.md and "Which node" in media-generation.md; a stale comment in
+  `admit` that said the run closure captures the envelope was reworded.
+
+Tests: `TestRemoteMediaCallIsOneCardOnTheServingNodeAndOneRow`, `TestRemoteMediaCardResolvesThroughTheFleetNodeID`,
+`TestAutoSpilledMediaCallIsOneCardAndOneRow`, `TestRemoteMediaCallThatNeverReachedANodeWritesARowAndNoCard`,
+`TestRemoteMediaRefusedDispatchClosesTheCardFailed`, `TestRemoteMediaNodeDeferClosesTheCardFailed`,
+`TestRemoteMediaCallThatRunsOutOfTimeStillClosesItsCard`, `TestRemoteMediaSendsTheAttributionHeaders`,
+`TestRemoteMediaCardTurnsRunningWhenTheNodeSaysTheJobStarted`, `TestLocalMediaRoutesWriteNoRemoteAttribution`,
+`TestMediaDoorThatRoutesRemoteWritesTheAskersLedgerRow`, `TestMediaJobSlotIsHeldWhileTheBodyIsReadAndReleasedAfter`,
+`TestMediaJobsInFlightAreBoundedAndWaitForASlot`, `TestMediaJobOverTheCapGets503WithRetryAfter`,
+`TestMediaJobSlotIsReleasedOnEveryExit`, `TestMediaJobRendersUnderAGatedStem`,
+`TestMediaJobOutputNeedsTheBearerAPlainDispatchOutputDoesNot`, `TestAMediaJobOutputIsFetchedWithTheBearerAndRefusedWithout`,
+`TestGatedMediaNames`.
+
+### Fixed — release review of 0.173.0 (register CT-51)
+
+The release reviewer and the round-4 reviewers of the integrated branch found the items below; each is fixed before the release, and
+each guard was broken once at its real call site and seen red.
+
+- **A remote output cannot be larger than the node said it is.** The client fetched each output with no bound but its 30-minute wall,
+  so a node streaming past the file it announced could fill the caller's disk before the sha256 check refused the file. The fetch now
+  stops one byte past the `bytes` the node published in `artifacts` and defers as infrastructure, naming the file and the size; nothing
+  is kept. A graph or manifest file the caller names is sized before it is read, so a large file named by mistake is refused without
+  being read into memory. (Found by a clean-context `offload_review_diff` pass; an older node that publishes no artifacts still yields
+  an `unverified` result, unchanged.)
+- **A default animate request fits the amd-gcn seed's token cap (REL1, high).** The seed pinned the animate geometry (288x512) and its
+  latent-token cap (5800, stride 8) to the measured 33-frame run, but no key could carry a frame count and both the lane and the runner
+  defaulted to 49: 288x512x49 plus the VACE reference frame is 8,064 tokens, so on a node seeded from the tier every animate call that
+  named no `frames` (`offload_animate_character`, `animate-character`, a delegator's `animate` job) was refused `token_cap_exceeded`
+  before the runner started. New key `animategen_frames` is the sd.cpp animate lane's default clip when a request names none (0 = the
+  runner's own 49, as before; a request's `frames` always wins; the ComfyUI animate route ignores it; a negative value is refused at
+  load). The lane applies it before the pre-lease token-cap check and passes it to the runner as `--frames`, and the amd-gcn seed sets
+  `animategen_frames` 33 (288x512x33 plus the reference frame is 5,760 tokens against the cap of 5,800). `config.example.json` and
+  `docs/tiers/amd-gcn.md` are regenerated and the animate `frames` help of the CLI verb and the MCP tool names the sd.cpp default. A
+  box that does not set the key is byte for byte as before. Tests: `TestTheSeededAmdGcnDefaultAnimateRequestFitsItsTokenCap` (the real
+  seed: a default request runs and the runner gets `--frames 33`), `TestAnAnimateRequestOverTheSeededCapIsStillRefusedBeforeTheLease`,
+  `TestABoxWithoutAnimategenFramesKeepsTheRunnersDefault`, `TestAnimategenFramesDoesNotTouchTheComfyUIAnimateRoute`, the seeded values
+  in `TestAmdGcnMediaSeedValues` and the negative-value case of `TestNegativeRecipeValuesAreRefused`. With the lane's default reverted
+  to the runner's, the first two fail with the review's own refusal (`288x512x49 + reference needs 8064 latent tokens ... cap is 5800`).
+- **`render/igpu-runners-main.test.mjs` passes on Linux (REL2).** The test-only stub engine replayed its log with
+  `process.stderr.write` and then called `process.exit()`; on POSIX a pipe write is asynchronous, so the tail of the 21 KB real-engine
+  fixtures was lost (about 8 KB reached the runner) and the runner's positive GPU-evidence guard read a healthy run as `CPU_PLACEMENT`
+  ("no GPU evidence"). Windows makes its stdio pipes blocking, which is why the Windows gate was green. The stub now writes its log with
+  a synchronous `writeSync(2, ...)` that retries a momentarily full pipe (EAGAIN) and stops quietly when the reader is gone (EPIPE).
+  The production runners were never at fault (they read until the stream closes). Run under Linux (Node 22.23.1): 2 of 20 failed before
+  (`--offload-to-cpu` sanctioned spill, device reset), 20 of 20 pass after, none skipped; Windows (Node 26.7.0) stays 20 of 20.
+- **An engine-only node opens the media-job door (REL4).** `config.MediaInputsAdmissible` bound a task only through the ComfyUI script
+  keys, the speech endpoint and `run_graph_script`, while `fleetnode.mediaTaskBound` had moved onto the engine-aware helpers (CT-51 I1),
+  so the repository held two notions of "bound". A node whose renderers are the sd.cpp and audio.cpp engines, with every script key
+  blank (the shape of the CT-49 tests and the rockchip seed), advertised `video-gen`, `animate` and `audio-gen` but not `media-job`, and
+  a remote caller could not send it a still, a reference and driver pair or a clone sample. The predicate now binds through
+  `VideoGenBound`, `AnimateGenBound`, `VoiceGenBound` (which includes `tts_endpoint`), `MusicGenBound` and `run_graph_script`; a node
+  with nothing bound, no opt-in or no token keeps the door closed. Tests: `TestMediaInputsAdmissibleBindsThroughTheEngineAwareHelpers`
+  and `TestAnEngineOnlyBoxOpensTheMediaJobDoor` (an engine-only box advertises `media-job` and takes a bearer'd still); with the old
+  predicate restored both fail, the second with `[video-gen animate audio-gen]` advertised and no `media-job`.
+- **The merge-time fix in `runIGPU` is pinned (REL3).** The iGPU lanes take their lease in one place, which takes the whole node with the
+  request's `waiter_token` and its door's resumability, as the sdcpp image lane does (the merge fixed it; it had taken a bare whole-node
+  lease). Nothing pinned it: `TestEveryMediaDoorThreadsTheRequestsResumability` scanned `pipeline.go` only, and replacing the need with
+  `wholeNeed("")` and, separately, dropping `.resumableBy(req)` both left the pipeline, mcpserver and mediaremote suites green. The scan
+  now covers `igpumedia.go` with a per-file minimum, and `TestAnIGPULaneKeepsAPlaceInLineAndResumesIt` runs the sd.cpp video, sd.cpp
+  animate and audio.cpp voice lanes against a held node: a resumable caller is queued with a token, a caller that cannot resume gets the
+  plain busy answer and leaves no place, and the token resumes the place once the node frees. Each mutation fails it on all three lanes.
+- **The sd.cpp animate family pin reads what the lane records (REL5).** The pin compared the family `fleetnode` advertises with
+  `config.AnimateSdcppFootprintFamily`, the constant both sides read, so a lane recording under another name kept it green (the video and
+  audio legs read the writers' own helpers). The leg now runs the lane and reads back the family its footprint was recorded under;
+  `fpFamily: "wan-vace2"` in the lane fails it.
+- **The media-job door takes one body at a time (C5S1, low).** `mediaJobInFlightMax` was the stt upload door's 2, copied unscaled, but
+  a media-job body is far larger than an stt upload (48 MiB): at the 256 MiB default cap one slot holds the base64 text (341 MiB) beside
+  the decoded bundle (up to 256 MiB), about 0.58 GiB, so the door's node-wide peak was about 1.17 GiB beside a ComfyUI render while the
+  config key, the operator guide and this file promised "under about 0.6 GiB". The door now has its own bound, 1: its peak is that one
+  figure and uploads are served one at a time (a second token holder waits up to 30 s for the slot, then gets the 503). ADR 0077, the
+  fleet-node and media-generation pages, the operator guide and the config key state the slots x 0.58 GiB bound. Tests:
+  `TestMediaJobDoorHoldsOneBodyAtATimeSoItsPeakIsTheDocumentedFigure` (computes the peak from the cap and the constant; red at 2 with
+  1.17 GiB) and `TestASecondMediaJobWaitsWhileTheFirstBodyIsStillArriving` (red at 2: a second upload is answered while the first
+  body is still arriving).
+- **The slot-wait 503 is documented as what it is (C5S4, low).** ADR 0077, the fleet-node page and this file said a delegator re-places
+  the media-job door's slot-wait 503, but the door's only client is `internal/mediaremote`, which reads the status as a capacity
+  defer, does not read `Retry-After` and makes one pass over the node it picked (`internal/delegate` never posts to the door). The call
+  returns the capacity defer and a later call places the job again. Upload-slot occupancy is not in `/fleet/health` or in the queue
+  depth the node pick ranks on, so a node whose slot a long upload holds can still rank first. The docs now say so; no behaviour changed.
+- **The upload-slot wait's cancel arm is pinned (C5S2, low).** `takeUploadSlot`, shared by the stt upload door and the media-job door,
+  returns without a slot and without an answer when the caller's request is cancelled while it waits. Mutating that arm to
+  `return true` survived the whole package and would have let the deferred release free a slot the request never took, so the door
+  admitted more bodies than its bound and the real owner's release then blocked forever.
+  `TestAnUploadWaiterWhoseRequestIsCancelledLeavesWithoutASlotOrAnAnswer` cancels a waiter's context against full slots on both doors
+  and asserts it leaves at once, writes no answer and leaves every slot as it found it.
+- **`mediaJobOutputPath` creating a missing `media_dir` is pinned (C5C7, low).** The pipeline creates `media_dir` only where it names
+  the output itself, and the door now always supplies `out`, so an input-less job from a client other than `mediaremote` on a node whose
+  `media_dir` does not exist yet would be handed a path in a missing directory. Deleting the `MkdirAll`, or the guard that keeps an
+  empty `media_dir` from reaching it, left the suite green. `TestMediaJobOutputPathCreatesAMissingMediaDirAndToleratesNone` pins both.
+- **The asker row's route is pinned to the normalised one (C5C6, low).** `mediaremote.Run` and `composeremote.Run` open the remote call's
+  attribution with the normalised route (`local|auto|remote`, the contract in `core/remoteattr.go`). Passing the raw string instead left
+  every test green, and the MCP doors omit `route`, so the commonest remote spill would have written its asker ledger row with
+  `Route: ""`. `TestAutoSpilledMediaCallIsOneCardAndOneRow` now runs the routes `auto`, `""` and `"  AUTO "`,
+  `TestAForcedRemoteMediaCallIsRecordedUnderTheNormalisedRoute` the spellings of `remote`, and
+  `TestARemoteComposeCallIsRecordedUnderTheNormalisedRoute` both for the compose lane (the identical gap); the raw route fails them.
+- **The docs and comments say what the code does (C5C1 to C5C5, C5S3, REL6, REL7).** The Auth passages (`docs/FLEET-NODE.md`,
+  `docs/systems/fleet-node.md`) list a media-job's renders (`mediajob-<16 hex>.*`) among the names `GET /fleet/media/{name}` gates and no
+  longer say every other name stays tokenless (the outputs of the tokenless lanes do), and the handler comment at the gate lists all four
+  gated families. ADR 0074's index row and Consequences count six lanes; its Context keeps main's five, because the media lane shipped on
+  the shared reader and was never one of the lanes that dialled through the dial gate alone. The `rosterprobe`, `core`, `pipeline` and
+  `pairworkloads` comments list the lanes that call them (media and stt included), and the attribution-header sender list adds
+  `/fleet/stt`. The `docs/FLEET-NODE.md` task table binds `video-gen`, `animate` and `audio-gen` by script OR engine, gains the
+  `animate` row and names the engine families (`wan-vace`, `ace_step`, `chatterbox`). `setup/SETUP-AGENT.md` says the amd-gcn tier seeds
+  the iGPU media keys and what the installing agent must still stage at the seeded paths (the engine binaries and the nine model
+  files; without them the four routes read BOUND-BUT-MISSING and `doctor` prints FAIL for each).
+
+### Fixed — CT-49 review round: the dead-air gate cannot be fooled by a dying pass, low-key footage passes, the deadline is a typed timeout
+
+- **The dead-air gate fails closed on a pass that did not finish.** `parseLoudness` took the LAST `I: <x> LUFS` anywhere in the measuring ffmpeg's output, and every per-tick ebur128 line (one per 100 ms) prints an `I:` too, while `measure()` looked only at whether ffmpeg failed to spawn. A measuring pass that printed one tick and was OOM-killed (exit 137) gave a loudness and an empty silence list, which reads "no silence", and a silent render was delivered (the reviewer's repro: `gpugen.Generate` returned nil with a 192 KB silent file). The loudness and the peak are now read from ebur128's `Summary:` block only (printed at the very end of a pass that ran to completion); `measure()` reports the facts of the pass (`exitStatus`, `exitSignal`) and decides nothing; `gateDeadAir` requires exit 0 AND the Summary, else `UNMEASURABLE` (`unmeasurable`, not delivered). The same fail-open exists in `comfy-music.mjs`, which feeds `assessDeadAir(measure(...))` and ships on a missing measurement by design (it never withholds an already-produced render); it reads only `duration` and `silences`, so it is unchanged, and the decision for that lane is the operator's.
+- **The black-clip gate no longer rejects low-key footage.** `blackdetect` `pic_th` 0.98 called a dark frame with a small bright object (a candle flame, the moon: 0.75 % to 1.5 % of the frame) black, a full `BLACK_CLIP` that is never retried. It is 0.999 now (measured with ffmpeg 6.1 on 320x240 clips: both objects pass, a pure black clip still fails, a 4 % object passed at either value).
+- **The deadline and the cancel are typed timeouts.** `Generate`'s deadline and cancel branches returned plain errors embedding the child's last 400 bytes, and `ClassifyErr` substring-matched them: "...timeout...(a living room, boom)" and "...canceled...(the zoom lens)" classified as `oom`. Both now return `*RunError` with class `timeout` (message and `%w` chain unchanged).
+- **The audio runner's ffmpeg and ffprobe calls are bounded** like the video and animate runners' were documented to be: the trailing-silence trim, both duration probes, the master or re-encode and the dead-air measurement carry what is left of `--timeout-sec`, each step asks `deadline.enforce` first, and a call killed at its bound is a `timeout`, never `dead_air` or `unmeasurable`. `measure()` and `durationSec()` take an optional `timeoutMs` (default none).
+- **Go and Node agree on the vertical tab.** `--threads=<U+000B>cpu` was refused by the runner and accepted by `config.ScreenExtraArgs` (Go's `\s` has no vertical tab), so doctor showed CONFIGURED and every call then failed after taking the lease. U+0085 stays the one known difference, in the safe direction (Go refuses first); the shared parity table now lists it (`go_stricter`) and each side asserts its half.
+- **Test pins from the mutation round (each seen red against its inverse mutation).** The process 'exit' hook's engine stop (a real engine must be dead after an uncaught error; the wait is pinned by order, which needed the hook to run with the deps `installLifecycle` was given, no behaviour change); `enginePids` on real child objects; a non-zero engine exit that still wrote valid output is a failure (audio.cpp, depth-anything, sd-cli; Go chain rows); SIGFPE / SIGTRAP / SIGSYS as crash signals on both sides; unset, empty and non-numeric options never reach an argv; the ltx25 pool reads the bound binding and `ace` is a runner family (mediacap); the `failAndExit` slow-reader test no longer flakes under load (1 of 48 runs at 8-way before, 0 of 148 after). The exit hook's engine stop and the engine wait were the two guards the round 2 entry below called "seen red" without a test that failed when they were removed; that claim now says so, and both have one.
+
+### Fixed — CT-49 round 3: the GPU-evidence guard reads sd.cpp's new log format (master-945)
+
+- **A healthy sd.cpp master-945 run failed as `CPU_PLACEMENT`.** The committed guard, run on a real master-945 (`a1ded76`) log from the reference node, ended `no GPU evidence ... diffusion-stage "compute buffer size ... on Vulkan<N>" line (missing)`: a fail-closed false positive that would have blocked every iGPU video and animate job on a node the day it upgrades sd.cpp (a fleet-update sweep does exactly that). sd.cpp #2104 and #2106 changed the log record: one-letter tags (`[V]` for `[VERBOSE]`, `[I]`, `[W]`, `[E]`, `[D]`), the source moved from in front of the message (`ggml_runner.cpp:1019 - `) to a trailing ` --- ggml_runner.cpp:1019` (a record of several lines has its tag on the first line and its source on the last, so a parameter dump now closes with `} --- main.cpp:699`), and a prompt echo prints its newlines escaped. The guard's record-head patterns knew only the old shape.
+- **Both shapes are read, for good** (nodes upgrade at different times). Every sd.cpp line goes through `normalizeSdLine` before a shape anchored at the start of a record reads it: one leading level tag in either spelling (and, after the long one, the `file.cpp:N - ` prefix) and one trailing source tail are cut, the raw line stays for the error message, and leading whitespace stays (a dump's indented `  }` is not its close). A dump block closes on a normalised `}`. The plain-words shapes (a CPU backend, a lost device, `-> compute CPU`) still read the whole raw line, so request text hides none of them. A build between the two upstream commits, which puts ` - ` in front of the source, is read as well (from the commits; no log of it was captured). An unterminated block still ends at the next long-tag record; in the new shape the one-letter tags are deliberately no valve, so a closing line the guard does not recognise ends the run `CPU_PLACEMENT` "no GPU evidence" loudly instead of passing it on a guess.
+- **The auto-fit plan is evidence too.** Both releases print `DiT   params ... -> compute Vulkan0, params Vulkan0`: the DiT line on a Vulkan device shows the diffusion stage on the GPU (as the compute-buffer line does), `-> compute CPU` for any component is a placement, and `params RAM` / `params CPU` alone is the sanctioned spill.
+- **Request text stays inert in the new shape.** A record that is itself a line of the request (`[V] SDCliParams {` as a prompt line) opens no dump block; a multi-line text also counts as an echo in the one-line spelling sd.cpp prints it in (`\n` for a newline), and the message alone is asked as well, so a 20-character tail does not dilute the share the text has of the line.
+- **Setup and docs.** sd.cpp master-945 (its decoded frames are bit-identical to master-929's on the measured FastWan run, about 10% faster) and audio.cpp v0.9.1 (the Chatterbox S3 encoder fix, upstream #778), built natively with the same planner prefill patch (`setup/patches/audiocpp-v0.9.0-vulkan-planner-prefill.patch` applies to v0.9.1 unchanged; the file keeps its name), are named as the measured releases in `setup/SETUP-AGENT.md` and `docs/systems/media-generation.md`, which also describe the two log formats and the normalisation rule. `SETUP-AGENT.md` tells an installing agent what a `no GPU evidence` on a run whose log shows the GPU means.
+- **Fixtures** (`render/testdata/`, scrubbed like the earlier ones): real master-945 logs (`sdcpp945-video-healthy.log`, `sdcpp945-video-tae.log`, `sdcpp945-vace-healthy.log`) and real audio.cpp v0.9.1 logs (`audiocpp091-voice-clone.log`, `audiocpp091-music.log`, a build with the planner patch: the planner on `Vulkan0`, no CPU line). The negatives for the new shape are derived from them (every params and compute line, only the diffusion compute buffer, only the VACE diffusion buffer, only the plan's DiT line, the TAE run) and the old shape gets its plan negative, each file headed "derived from ... no CPU run was captured because the node's operator forbids model compute on its CPU", with the re-derive test (`derive-cpu-fixtures.mjs`).
+- **Tests.** Every real healthy log of both shapes passes (also with the real prompts as the echo list), every derived negative of both shapes fails `CPU_PLACEMENT` on its own line, `} --- main.cpp:699` closes a block (and `  } ---`, `}, ---` do not), prompt text equal to part of a placement line hides nothing in either shape, the plan lines (any component on the CPU kills the run, the spill passes, the DiT line is evidence, a forged one is not), escaped newlines, `GPU_RESET` in the new shape, the audio.cpp v0.9.1 logs, and the real video and animate runners each replaying a real master-945 log end to end (the video one also its CPU-derived twin: the engine dies at that line, nothing delivered). Against the unfixed guard the master-945 tests fail with `CPU_PLACEMENT: no GPU evidence` through the real runners. The block-end mutation (the close reads a bare `}` again) turns every master-945 healthy-log test red, and 18 other mutations of the guard (the tag and tail strips, the head forms, the plan evidence and its CPU shape, the escaped spelling, the echo of the message, the block-open guard, the valve, the compute-buffer shape reading the raw line, a quadratic tail pattern) are each caught by a test.
+
+### Fixed — CT-49 fix round 2: typed errors survive gpugen, the engine dies with its runner, the guards cannot be switched off by request text
+
+- **A device reset was reported as a timeout.** The runner's real `GPU_RESET` line is about 470 bytes with its token at the start and gpugen kept only a 400-byte tail, so `ClassifyErr` saw "lockup timeout". Every runner now ends a typed failure with one short `IGPU_CLASS=<class>` line; `gpugen.Generate` reads the class from the last such line anywhere in the captured output (a `gpugen.RunError`) and keeps the runner's labelled line in the reason. Pinned end to end with the REAL runners and a stub engine replaying the captured logs (`internal/gpugen/igpu_runner_chain_test.go`: every typed class, with the true message length) and in the pipeline against the real error builders.
+- **Classifier.** An engine crash signal is `engine_crashed` (not a timeout through "killed"); ggml `insufficient memory` / sd.cpp `alloc compute buffer failed` are `oom` (exit 1 or SIGABRT); `dead_air` and `ffmpeg_unavailable` beat the `oom`/`timeout` words of a path; `unmeasurable` and `device_invalid` are new classes; a client cancel of an iGPU lane is `timeout` like every other lane.
+- **The engine is in the runner's process group** (not detached), so gpugen's SIGKILL of the group takes it along; the runner waits (bounded) for the engine tree to be gone before it exits, so the lease is not released while the iGPU is still held; a SIGKILLed runner's temp dirs are swept by the next job. Proved on Linux with the real runner SIGSTOPped through `Generate`.
+- **Request text cannot switch the CPU detector off.** Echo suppression is limited to sd.cpp's dump blocks and tokenizer lines on its own record shape; every placement and evidence shape is anchored at the start of a record; an echo of the request can only fail to count as positive evidence. audio.cpp's `[TIMING ts=..]` / `[TRACE ts=..]` heads are recognised. `SD_AUX_MODULE` matches sd.cpp's runner names whole (a diffusion model called `Wan2.1-Fun-14B-Control` no longer fails for lack of evidence).
+- **Gates fail closed and delivery is atomic.** A dead-air measurement with no loudness summary is `UNMEASURABLE`, a clip whose duration could not be read is `UNMEASURABLE` (and no longer claims "no picture"); mp4 and audio results are written to a partial beside the result and renamed after the gate, so a failed or deadline-killed run never overwrites or deletes a good file.
+- **Config and pipeline agree with the runners.** Empty per-module backend parts (`vulkan0,`) and Unicode-space cpu values are refused in Go as in Node (one shared parity table); a token cap with no usable VAE stride is refused before the lease; `audiocpp_backend` is `vulkan` only (the evidence guard recognises only Vulkan buffers); a non-numeric `audiocpp_device` is `device_invalid`; the animate frame extraction asks the deadline and reports its own kill as a timeout; a typed failure is flushed before the runner exits.
+- **Tests (seen red against their fixes, except the exit hook's engine stop and the engine wait, which the review round above pinned afterwards).** `render/igpu-lifecycle.test.mjs` (the real runners: parent death, SIGTERM/SIGINT/SIGHUP, the process group, the exit hook), `render/igpu-deadline.test.mjs` (every `deadline.enforce` site and bound, through a test-only clock preload), `render/igpu-guard.test.mjs`, `render/igpu-delivery.test.mjs`, `render/igpu-classes.test.mjs`, the animate/video main-level guard and gate cases, `internal/pipeline` (the Spec every lane hands gpugen: `OwnProcessGroup`, footprint key, ledger row; the cap at the runner defaults; each unbound key) and the per-family doctor entries. The POSIX parts run on Windows hosts only through a Linux (WSL) run, which needs ffmpeg for the main-level suite.
+
+### Changed — `--offload-to-cpu` is sanctioned spill on the iGPU media engines
+
+- The operator rule of 2026-10-07 allows RAM as overflow (bounded, released on unload, never destabilizing the box) while all compute stays on the GPU, so the `*_extra_args` screen (`config.ScreenExtraArgs` / `config.ExtraArgsRefusal` and `render/igpu-engine.mjs` `screenExtraArgs`) now ACCEPTS sd.cpp's `--offload-to-cpu`: it parks the weights in RAM and stages them to the device, and every compute buffer stays on the GPU. Every compute-placing flag is still refused exactly as before (`--clip-on-cpu`, `--vae-on-cpu`, `--control-net-cpu`, `--backend`/`-b`, `--params-backend`, `--rpc`, audio.cpp `--device`, any other cpu-named flag and any cpu backend value), and the positive GPU-evidence guard still passes a run whose params sit on the host (`on CPU` / `Vulkan_Host`) with compute on Vulkan and fails a compute buffer on the CPU with `CPU_PLACEMENT`. The runners never add the flag themselves (the sd.cpp VACE docs command line shows it; the runner does not copy it); it reaches sd-cli only through a binding's extra args. On a UMA iGPU box, where "VRAM" is the same memory, it only adds copies, so the amd-gcn bindings leave it off: whether a seat uses it is a per-seat measurement, not a screen. Tests assert acceptance at the config, pipeline-lane, script and runner layers.
+
+
+### Added / Fixed — CT-49 fix round, phase B: runner correctness, output gates, and the pipeline contract
+
+- **Depth and VACE, verified on the node.** The depth step runs `da3-cli depth --model M --input <frame> --png <out> --no-invert` once per frame (never the multi-view `--input a --input b` form), and every depth PNG is converted to `rgb24` at exactly W x H and read back before sd-cli gets the directory (sd-cli refuses 1-channel PNGs; `DEPTH_FRAMES_INVALID`). The VACE model is a `.safetensors` checkpoint (the public GGUFs lack `vace_patch_embedding.weight`); sd-cli's `model metadata validation failed` is a typed `MODEL_INCOMPATIBLE` naming the model file; `--offload-to-cpu` is never passed; `-i` is the VACE reference image (sd.cpp `docs/wan.md`, G14). VACE decodes exactly N frames on this sd.cpp, so the N+4 reference-latent trim is a probe-and-only-if conditional (ffprobe count; N+4 drops the first 4).
+- **One runner contract.** Flags first, then `--`, then the positionals (a prompt or lyrics starting with `--` stays positional; G11). The Go side resolves every engine binary with `mediaops.ResolveBinary` and passes the absolute path, the runners refuse a bare or relative one (`BINARY_NOT_ABSOLUTE`), and `doctor` agrees (G10, G23). The output directory is created before the lease, and an uncreatable one is reported (`OUT_DIR_UNWRITABLE`; G27). `audiocpp_backend` is validated against audio.cpp's own values (`vulkan|cuda|hip|rocm|metal`) with a separate numeric `audiocpp_device`; `vulkan0` is refused with the hint at config load, in mediacap, the pipeline and the runner (G13).
+- **A14B high-noise recipe and the tiny autoencoder.** `high_noise_cfg`, `high_noise_steps` and `high_noise_sampler` on a video family map to sd-cli's `--high-noise-cfg-scale` / `--high-noise-steps` / `--high-noise-sampling-method` (G9). `--vae-tiling` now carries `--vae-tile-overlap 0.25` (the measured best). `sdcpp_tae` / `animategen_sdcpp_tae` bind an opt-in tiny autoencoder: `fast: true` adds `--taesd`, and without the key `fast` is a no-op on the sdcpp lanes, which the result's `notes` say; `taew2_2` is the verified file and `lighttaew2_2` is broken (never bind it); mediacap lists the TAE as optional and it never fails a route.
+- **Finalize and output gates.** `finalizeAudio` fails on any ffmpeg error with its stderr tail instead of copying the raw engine file (G22). Music trims trailing silence below -45 dB, fades out, loudnorms to -14 LUFS / -1 dBTP at 48 kHz; voice and music both pass the repo's dead-air gate (`DEAD_AIR`, file removed; G26). A video or animate clip that is entirely black or entirely frozen fails `BLACK_CLIP` / `FROZEN_CLIP` (ffmpeg `blackdetect` + `freezedetect` over the whole clip). New `err_class` values: `black_clip`, `frozen_clip`, `depth_frames_invalid`, `model_incompatible`, `binary_not_absolute`, `out_dir_unwritable`.
+- **mediacap and the pipeline agree.** An sdcpp family named like a ComfyUI family (`wan22`, `ltx25`, `hunyuan`, `h3`) gives the verdict the pipeline routes on, with one binding row per family and the ledger family named for it (G2, G24, G32). `doctor`'s ComfyUI video file check reads `ResolveVideoFamilyBinding` of the canonical render family, the binding the pipeline renders with, not the flat `videogen_*` keys (G41). ffprobe is a required binding of every iGPU route; the untested route guards are pinned (ffmpeg, runner scripts, voice/music independence, the byte-identical no-engine-key route list; G36, G40).
+- **For the fleet seam (CT-51).** `config.VideoGenBound()`, `AnimateGenBound()`, `VoiceGenBound()` and `MusicGenBound()` say whether a lane has a ComfyUI/python renderer (or the TTS endpoint) OR the CT-49 engine bound; `fleet-measure` probes the video and music lanes through them instead of printing "skipped (no videogen_script configured)" on an sdcpp or audio.cpp box (G15). `internal/fleetnode` is untouched.
+- **audio.cpp on a CPU without AVX-512, and the ACE-Step patch.** The official release binary needs AVX-512 (SIGILL, `ILLEGAL_INSTRUCTION`); build it on the node. Upstream runs the Vulkan ACE-Step planner prefill on the host (a CPU placement): `setup/patches/audiocpp-v0.9.0-vulkan-planner-prefill.patch` (v3, three changes) moves it onto the device; the bf16 ACE-Step package is the one to bind (q8_0 is graded No upstream).
+- **Tests.** Each runner's `main()` is run against a stub engine binary (`render/igpu-runners-main.test.mjs`: argv reaches the engine, the GPU pin reaches the depth child, a CPU line / no evidence / device reset / timeout leaves the engine dead and writes nothing, the gates remove what they reject, temp dirs are gone; G30); `render/igpu-qa.test.mjs` runs against real ffmpeg detector output; the pipeline lanes' seed minting, voice clone fallback, COMFY_DIR strip, no ComfyUI `/free`, empty-prompt and missing-input defers and per-request steps are pinned (G35, G37).
+
+### Added — iGPU media engines: video, animate, voice and music on a Vulkan-only box (CT-49)
+
+A box whose only GPU is a Vulkan iGPU (no CUDA, no ROCm, and an operator rule that no model runs on CPU) now serves
+`generate_video` (I2V and T2V), `animate_character` and `generate_audio` voice (with clone) and music through the same
+MCP tools, CLI verbs and fleet task types as a ComfyUI box. Each engine is a spawn-per-job native CLI under the existing media
+lease (nothing resident, no ComfyUI, no Python): a `videogen_families` entry with `"engine": "sdcpp"` renders through
+`render/sdcpp-video.mjs` (stable-diffusion.cpp `vid_gen`, Wan2.2 TI2V-5B or an A14B pair; the family may carry any name and
+`videogen_family` may name it as the box default); `animategen_engine: "sdcpp"` renders through
+`render/sdcpp-animate.mjs` (ffmpeg frames, depth-anything.cpp, sd.cpp Wan2.1 VACE 1.3B with the depth directory as the
+control video); `voicegen_engine` / `musicgen_engine: "audiocpp"` render through `render/audiocpp-generate.mjs` (audio.cpp
+`chatterbox` and `ace_step`, music loudness-normalized to -14 LUFS / -1 dBTP when ffmpeg is present). New keys: the
+`sdcpp_*`, `steps`, `cfg`, `flow_shift` and `sampler` fields of a video family binding, `videogen_sdcpp_script`,
+`animategen_engine`, `animategen_sdcpp_*`, `animategen_depth_*`, `animategen_steps/_cfg/_flow_shift`, `voicegen_engine`,
+`musicgen_engine` and `audiocpp_*` (`config.example.json` regenerated). A box that sets none of them behaves byte for byte
+as before (`TestEveryRouteWithNoEngineKeyKeepsItsExactArgv`, green on the unmodified base too). `doctor`, `offload_status` and
+`acceptance` derive a route per engine (CONFIGURED only when the runner, binaries and every bound model file exist; a non-default
+sdcpp video family gets `generate_video:<name>`). Not in this change: run-graph (stays ComfyUI-only) and per-node seeds; the fleet
+advertisement of these lanes is the CT-51 entry above.
+
+### Added — the GPU-evidence guard is positive, with GPU_RESET, a token cap, real kill semantics and extra-args screening (CT-49 safety core)
+
+- **A run passes only on positive evidence it ran on the GPU.** sd.cpp needs a non-software `ggml_vulkan` device line and a diffusion-stage `compute buffer size ... on Vulkan<N>` line and no compute buffer `on CPU`; da3-cli needs `da::Backend using device: Vulkan<N>`; audio.cpp needs `<component>.weights.buffer_name Vulkan<N>` and any `*.weights.buffer_name CPU` is `CPU_PLACEMENT` (the real captured ACE-Step host-prefill case). No evidence by process end is `CPU_PLACEMENT` ("no GPU evidence was seen"). The parameter dump blocks, tokenizer echoes, ggml's CPU-backend registration, `Initializing backend: CPU` and any line repeating the request's prompt / negative / text / lyrics are never scanned. The format strings behind the sd.cpp lines were read at commit 3f8527a (the CPU backend prints `CPU`; `Vulkan_Host` is host-pinned memory). The synthetic fixtures are replaced by the real engine logs from the reference node (`render/testdata/`); the sd.cpp CPU negatives are derived from the healthy logs and say so.
+- **`GPU_RESET`** (`err_class` `gpu_reset`): `ErrorDeviceLost` / `device lost` / `context is lost` in an engine log kills the run with a typed error that names the amdgpu 2 s lockup timeout and the token cap; never retried.
+- **Token cap**: `sdcpp_max_tokens` + `sdcpp_vae_stride` (video families) and `animategen_sdcpp_max_tokens` + `animategen_sdcpp_vae_stride` (animate; the VACE reference adds a latent frame). Computed in Go before the media lease and again in the runner; a typed non-retryable defer (`token_cap_exceeded`) names tokens, cap and how to fit. The Go and Node formulas are pinned to one shared table. No cap configured = no check.
+- **Kill semantics**: the iGPU lanes start the runner as a process-group leader (`gpugen.Spec.OwnProcessGroup`, non-Windows) and a timeout or cancel SIGTERMs the group, then SIGKILLs it after 5 s; the runners kill the engine tree and remove temp dirs on SIGTERM/SIGINT/SIGHUP and when the parent disappears; a signal death names the signal (SIGKILL = OOM killer hint), exit 132 / SIGILL is `ILLEGAL_INSTRUCTION` (the audio.cpp release binary is AVX-512: build it on the node); the self-timeout is a deadline from runner start covering pre-spawn work and the ffmpeg encode.
+- **`*_extra_args` screening**: an element that changes the backend or placement (`--backend`/`-b`, `--params-backend`, `--clip-on-cpu`, `--vae-on-cpu`, `--control-net-cpu`, `--rpc`, `--device` for audio.cpp, any cpu-named flag or cpu value) is refused at config load (doctor FAIL), as a typed defer (`extra_args_refused`) and in each runner. Backends are now an allowlist (`vulkan` / `vulkanN`).
+
+### Added — no model ever runs on CPU on these engines, enforced at four layers
+
+A `cpu` or unset backend (also `cpu0`, `best`, `auto` and any per-module assignment such as `diffusion=vulkan0,vae=cpu`) is refused at config
+load (so `doctor` fails on it by name), reported BOUND-BUT-MISSING by the route derivation, a typed defer in the pipeline
+(`err_class` `cpu_backend_refused`), and refused again by each runner. The runners also read their engine's own log while it
+runs: the first line that places a compute module on the CPU (a software Vulkan device such as llvmpipe included) kills the process tree and fails the job with `CPU_PLACEMENT`
+(`err_class` `cpu_placement`) instead of finishing a long render on the wrong silicon. Tests:
+`TestCPUBackendRefusal`, `TestSdcppVideoFamilyRefusesACPUBackend`, `TestAnimateAndAudioEnginesRefuseACPUBackend`,
+`TestACPUBackendIsATypedDeferOnEveryIGPULane`, `TestACPUOrUnsetBackendMakesEveryIGPURouteBoundButMissing` and the node tests in
+`render/igpu-engine.test.mjs` (each guard was broken once and seen red). The first cut of the log guard was negative-only and
+fixture-modelled; the entry above replaces it with the positive guard pinned to real captured logs.
+
 ## [0.172.0] - 2026-10-08 - a single-slot node publishes one worker, and the ranking eta stops at no wall
 
 ### Fixed — a node whose agent seat serves one request at a time now publishes one worker, and doctor shows the mismatch

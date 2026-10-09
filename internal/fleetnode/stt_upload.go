@@ -136,20 +136,27 @@ const sttUploadSlotAnswerRoom = 10 * time.Second
 // takeSTTUploadSlot waits for an upload slot, or answers the 503 and reports false. The caller
 // releases the slot by receiving from s.sttUploadSlots.
 func (s *Server) takeSTTUploadSlot(w http.ResponseWriter, r *http.Request) bool {
+	return s.takeUploadSlot(w, r, s.sttUploadSlots, sttUploadSlotWait, "stt uploads")
+}
+
+// takeUploadSlot is the slot wait the two body-reading doors share (the stt upload door and the media-job
+// door): it takes a place in slots, or answers the re-placeable 503 and reports false once wait has run
+// out. what names the door's bodies in the refusal.
+func (s *Server) takeUploadSlot(w http.ResponseWriter, r *http.Request, slots chan struct{}, wait time.Duration, what string) bool {
 	// net/http arms the blanket 30 s WriteTimeout at header-read, so a slot wait of that length would
 	// expire it before the 503 below is written and the caller would read a bare connection reset, not
 	// the re-placeable refusal: the wait extends its own write deadline first, with room for the answer.
-	s.extendWrite(w, sttUploadSlotWait+sttUploadSlotAnswerRoom, "the stt upload slot wait")
-	wait := time.NewTimer(sttUploadSlotWait)
-	defer wait.Stop()
+	s.extendWrite(w, wait+sttUploadSlotAnswerRoom, "the "+what+" slot wait")
+	t := time.NewTimer(wait)
+	defer t.Stop()
 	select {
-	case s.sttUploadSlots <- struct{}{}:
+	case slots <- struct{}{}:
 		return true
 	case <-r.Context().Done():
 		return false // the caller left: nobody is listening for an answer
-	case <-wait.C:
+	case <-t.C:
 		w.Header().Set("Retry-After", "5")
-		writeError(w, http.StatusServiceUnavailable, fmt.Sprintf("node busy receiving stt uploads (%d in flight for over %s): retry shortly or place elsewhere", sttUploadInFlightMax, sttUploadSlotWait))
+		writeError(w, http.StatusServiceUnavailable, fmt.Sprintf("node busy receiving %s (%d in flight for over %s): retry shortly or place elsewhere", what, cap(slots), wait))
 		return false
 	}
 }

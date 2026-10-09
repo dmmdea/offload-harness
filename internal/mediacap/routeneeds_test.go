@@ -194,6 +194,63 @@ func TestLtx25NeedsMultiGPUOnlyWhenPooled(t *testing.T) {
 	}
 }
 
+// TestLtx25NodeClassesFollowTheBoundBindingNotTheFlatPoolKey: whether the LTX graph loads through
+// ComfyUI-MultiGPU is the pool of the binding the render resolves (ResolveVideoFamilyBinding), not
+// the flat videogen_pool_vvram_gb. For a default family with no entry the two are the same value,
+// so the only place they can differ is a binding that wins wholesale: an sdcpp entry named ltx25
+// (the flat videogen_* keys never reach it). Both directions, so reading either key for the other
+// shows.
+func TestLtx25NodeClassesFollowTheBoundBindingNotTheFlatPoolKey(t *testing.T) {
+	pooled := "UNETLoaderDisTorch2MultiGPU,CLIPLoaderMultiGPU,VAELoaderMultiGPU"
+	mk := func(flat, bound float64) config.Config {
+		cfg := bare()
+		cfg.VideoGenFamily = "ltx25"
+		cfg.VideoGenPoolVvramGB = flat
+		cfg.VideoGenFamilies = map[string]config.VideoFamilyBinding{"ltx25": {Engine: config.EngineSdcpp, PoolVvramGB: bound}}
+		return cfg
+	}
+	// the flat key says pooled, the bound entry says it is not: the entry wins
+	cfg := mk(30, 0)
+	if got := cfg.ResolveVideoFamilyBinding("ltx25").PoolVvramGB; got != 0 {
+		t.Fatalf("the premise is gone: the bound entry's pool should win over the flat key, got %v", got)
+	}
+	if _, _, classes, _ := videoNeeds(cfg); len(classes) != 0 {
+		t.Errorf("flat pool 30 but the bound ltx25 entry has none: want no custom-node classes, got %v", classes)
+	}
+	// and the reverse
+	cfg = mk(0, 30)
+	if _, _, classes, _ := videoNeeds(cfg); strings.Join(classes, ",") != pooled {
+		t.Errorf("no flat pool but the bound ltx25 entry pools 30 GB: want %s, got %v", pooled, classes)
+	}
+}
+
+// TestAceIsARunnerFamilyOfItsOwn: render/comfy-video.mjs dispatches on "ace" exactly (the music-video
+// graph), so videogen_family "ace" stays "ace" instead of falling through to Wan 2.2 the way an unknown
+// word does, and it resolves against the box's default binding (the flat keys), as the pipeline's
+// canonicalVideoFamily("ace") does. Dropping "ace" from the set would send it through the wan22 entry.
+func TestAceIsARunnerFamilyOfItsOwn(t *testing.T) {
+	for fam, want := range map[string]string{
+		"ltx25": "ltx25", "h3": "h3", "hunyuan": "hunyuan", "ace": "ace",
+		"": "wan22", "wan": "wan22", "wan22": "wan22", "LTX25": "wan22", "Ace": "wan22", "ltx2.5": "wan22", "foo": "wan22",
+	} {
+		if got := videoRunnerFamily(fam); got != want {
+			t.Errorf("videoRunnerFamily(%q) = %q, want %q", fam, got, want)
+		}
+	}
+	cfg := bare()
+	cfg.VideoGenFamily = "ace"
+	cfg.VideoGenUnetHigh, cfg.VideoGenUnetLow = "flat-high.safetensors", "flat-low.safetensors"
+	cfg.VideoGenFamilies = map[string]config.VideoFamilyBinding{"wan22": {UnetHigh: "wan22-entry-high.safetensors", UnetLow: "wan22-entry-low.safetensors"}}
+	_, files, _, _ := videoNeeds(cfg)
+	names := map[string]string{}
+	for _, f := range files {
+		names[f.label] = f.name
+	}
+	if names["videogen_unet_high"] != "flat-high.safetensors" || names["videogen_unet_low"] != "flat-low.safetensors" {
+		t.Errorf("videogen_family ace resolves against the default binding (the flat keys), not the wan22 entry: %v", names)
+	}
+}
+
 // TestKrea2NeedsMultiGPUOnlyWhenPooled: same rule as ltx25 (above) — a single-card krea2
 // graph is core; a pooled one loads the DiT AND (2026-09-24 fix) the text encoder/VAE
 // through ComfyUI-MultiGPU, since the stock CLIPLoader/VAELoader "device" input can only

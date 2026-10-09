@@ -49,6 +49,7 @@ The installer seeds this tier's media bindings (`config_seed`):
 
 | key | value |
 |---|---|
+| `animategen_script` | `` |
 | `musicgen_script` | `` |
 | `run_graph_script` | `` |
 | `sdcpp_script` | `` |
@@ -66,7 +67,6 @@ here so they are never mistaken for a media capability:
 
 | key | value |
 |---|---|
-| `animategen_script` | `` |
 | `escalation_model` | `` |
 | `fleet_agent_enabled` | `false` |
 | `fleet_max_concurrent_jobs` | `1` |

@@ -20,14 +20,14 @@ package gpugen
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
-	"strconv"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -112,6 +112,14 @@ type Spec struct {
 	// path never starts ComfyUI, so there is nothing to free). The killTree + output
 	// stat still apply — the python worker still gets process-tree-killed on timeout.
 	SkipFreeComfy bool
+	// OwnProcessGroup, when true (non-Windows only; a no-op on Windows, where taskkill /T
+	// already reaps the tree), starts the runner as the leader of its own process group, so a
+	// timeout or a cancel signals the WHOLE group instead of the bare node process: SIGTERM
+	// first, so the runner can kill its engine and remove its temp dirs, then SIGKILL after a
+	// grace. The iGPU media runners set it (their engines are spawn-per-job native binaries that
+	// would otherwise keep the GPU after the lease is released). false keeps every other lane's
+	// kill exactly as it was.
+	OwnProcessGroup bool
 	// Footprint, when non-nil, turns on passive per-render VRAM peak sampling for
 	// the fleet-node footprint store (added 2026-07-17): while the child runs,
 	// SampleFunc is polled and the max observation is reported via OnFootprint —
@@ -193,6 +201,9 @@ func Generate(ctx context.Context, spec Spec) (string, error) {
 	// Windows orphans the ComfyUI python grandchild and bypasses node's finally.
 	cmd.Cancel = func() error { return killTree(cmd.Process) }
 	cmd.WaitDelay = 10 * time.Second
+	if spec.OwnProcessGroup {
+		setProcessGroup(cmd)
+	}
 	// Belt-and-suspenders VRAM free (invariant 3, layer 2). Skipped for runners that
 	// never launch ComfyUI (TTS) — there a /free is pointless, though harmless.
 	if !spec.SkipFreeComfy {
@@ -230,9 +241,29 @@ func Generate(ctx context.Context, spec Spec) (string, error) {
 		// other crash. Folding "deadline exceeded" into the error text here makes
 		// EVERY gpugen caller's ClassifyErr(gerr) == "timeout" reliable, on every OS
 		// and whatever exit code the kill happens to produce — not just audio.
+		//
+		// The class is TYPED (a *RunError), not left to ClassifyErr's substring match: the message
+		// embeds the child's last 400 bytes, and an engine log that ends "...a living room, boom"
+		// would otherwise read as "oom" through the "oom" in "room" / "boom".
 		if cctx.Err() == context.DeadlineExceeded {
-			return "", fmt.Errorf("gpugen: %s timeout after %s (deadline exceeded, process tree killed): %w (%s)",
-				baseName(spec.Script), spec.Timeout, err, tailDetail(tw))
+			return "", &RunError{Class: "timeout", err: fmt.Errorf("gpugen: %s timeout after %s (deadline exceeded, process tree killed): %w (%s)",
+				baseName(spec.Script), spec.Timeout, err, tailDetail(tw))}
+		}
+		// A client cancel (the caller's own context) is the same event as a timeout for the class:
+		// on an OwnProcessGroup lane the runner answers the SIGTERM with exit 143 ("exit status
+		// 143"), which carries neither "killed" nor "signal:" and would read as "other", while
+		// every other lane's cancel ends "signal: killed" and reads as a timeout. Typed for the same
+		// reason as the deadline above ("...canceled...(the zoom lens)" must not read as oom).
+		if cctx.Err() == context.Canceled {
+			return "", &RunError{Class: "timeout", err: fmt.Errorf("gpugen: %s canceled (context canceled, process tree killed): %w (%s)",
+				baseName(spec.Script), err, tailDetail(tw))}
+		}
+		// The iGPU runners end a typed failure with one short "IGPU_CLASS=<class>" line. The class
+		// is read from the whole retained output, never from the 400-byte display tail: a real
+		// GPU_RESET line is longer than that tail, so the token would be cut off with it.
+		if cls := runnerClass(tw.Contents()); cls != "" {
+			return "", &RunError{Class: cls, err: fmt.Errorf("gpugen: %s failed [%s%s]: %w (%s)",
+				baseName(spec.Script), classTag, cls, err, typedDetail(tw))}
 		}
 		return "", fmt.Errorf("gpugen: %s failed: %w (%s)", baseName(spec.Script), err, tailDetail(tw))
 	}
@@ -258,6 +289,68 @@ func tailDetail(tw *tailWriter) string {
 		return fmt.Sprintf("truncated: total %d bytes; tail: %s", tw.Total(), d)
 	}
 	return d
+}
+
+// classTag is the label a typed failure carries in its message ("[class=gpu_reset]") for a reader.
+const classTag = "class="
+
+// RunError is a failure whose class was decided structurally, not by the words of its message: the
+// class the runner itself reported (the IGPU_CLASS= line), or "timeout" for the deadline and the
+// cancel gpugen itself observed. ClassifyErr returns Class for it, whatever words the rest of the
+// message (which embeds the child's last output) happens to contain.
+type RunError struct {
+	Class string
+	err   error
+}
+
+func (e *RunError) Error() string { return e.err.Error() }
+func (e *RunError) Unwrap() error { return e.err }
+
+// runnerClassLine matches the runner's class line: the whole line, at its start.
+var runnerClassLine = regexp.MustCompile(`(?m)^IGPU_CLASS=([a-z_]+)[ \t\r]*$`)
+
+// runnerClasses are the classes a runner may report. A line naming anything else is ignored, so
+// engine output that happens to look like the marker cannot invent a class.
+var runnerClasses = map[string]bool{
+	"cpu_placement": true, "cpu_backend_refused": true, "gpu_reset": true, "token_cap_exceeded": true,
+	"extra_args_refused": true, "illegal_instruction": true, "black_clip": true, "frozen_clip": true,
+	"depth_frames_invalid": true, "model_incompatible": true, "binary_not_absolute": true,
+	"out_dir_unwritable": true, "dead_air": true, "ffmpeg_unavailable": true, "unmeasurable": true,
+	"engine_crashed": true, "oom": true, "device_invalid": true, "timeout": true,
+}
+
+// runnerClass is the class of the LAST valid IGPU_CLASS= line in the captured output, "" when
+// there is none. The last one, because the runner prints its own after everything the engine said.
+func runnerClass(out []byte) string {
+	all := runnerClassLine.FindAllSubmatch(out, -1)
+	for i := len(all) - 1; i >= 0; i-- {
+		if c := string(all[i][1]); runnerClasses[c] {
+			return c
+		}
+	}
+	return ""
+}
+
+// failedLine matches a runner's final human line: "SDCPP VIDEO FAILED: GPU_RESET: ...".
+var failedLine = regexp.MustCompile(`(?m)^[A-Z][A-Z ]* FAILED: .*$`)
+
+// typedDetail is the detail of a typed runner failure: the runner's own "<NAME> FAILED: ..."
+// line from its START (so the TOKEN: label survives, unlike in a tail cut), at most 600 bytes,
+// else the display tail. A marker inside it is defanged so it cannot be read back as one.
+func typedDetail(tw *tailWriter) string {
+	out := tw.Contents()
+	d := ""
+	if loc := failedLine.FindAllIndex(out, -1); len(loc) > 0 {
+		last := loc[len(loc)-1]
+		d = strings.TrimRight(string(out[last[0]:last[1]]), "\r")
+		if len(d) > 600 {
+			d = d[:600] + "..."
+		}
+	}
+	if d == "" {
+		d = tailDetail(tw)
+	}
+	return strings.ReplaceAll(d, "IGPU_CLASS=", "IGPU_CLASS~")
 }
 
 // runCombined runs cmd with both stdout and stderr merged into w — the
@@ -317,20 +410,6 @@ func runSampled(cmd *exec.Cmd, w io.Writer, sample func(childPid int) (float64, 
 // browse lane keeps a stdio conversation open, so it cannot go through Generate)
 // and still need the same whole-tree kill on timeout/cancel.
 func KillTree(p *os.Process) error { return killTree(p) }
-
-// killTree force-terminates p and ALL descendants. On Windows, killing the bare node
-// process leaves the spawned ComfyUI python alive (no process-group semantics), so we
-// taskkill the whole tree; elsewhere a direct kill is the best portable effort.
-func killTree(p *os.Process) error {
-	if p == nil {
-		return nil
-	}
-	if runtime.GOOS == "windows" {
-		_ = exec.Command("taskkill", "/T", "/F", "/PID", strconv.Itoa(p.Pid)).Run()
-		return nil
-	}
-	return p.Kill()
-}
 
 // instanceEnv is the env a Spec's per-card ComfyUI instance adds to the child: its endpoint
 // and its card, and a blank legacy index when a card is named. A Spec that names neither
@@ -396,9 +475,66 @@ func ClassifyErr(err error) string {
 	if err == nil {
 		return ""
 	}
+	// A class the runner reported itself (the IGPU_CLASS= line Generate read from the full output)
+	// is exact and wins over any wording in the message.
+	var re *RunError
+	if errors.As(err, &re) && re.Class != "" {
+		return re.Class
+	}
 	s := strings.ToLower(err.Error())
 	switch {
-	case strings.Contains(s, "out of memory") || strings.Contains(s, "cudamalloc") || strings.Contains(s, "oom"):
+	// The iGPU media runners' no-CPU guards (CT-49, render/igpu-engine.mjs): the engine's
+	// log placed a model on the CPU, or the backend itself was a CPU one. Checked first so
+	// the "killed" in a placement-abort message never reads as a timeout.
+	case strings.Contains(s, "cpu_placement"):
+		return "cpu_placement"
+	case strings.Contains(s, "cpu_backend_refused"):
+		return "cpu_backend_refused"
+	// The GPU reset during the run (the amdgpu 2 s lockup timeout): never retried. Its message
+	// names that timeout, so it must be classified before the "timeout" case below.
+	case strings.Contains(s, "gpu_reset"):
+		return "gpu_reset"
+	case strings.Contains(s, "token_cap_exceeded"):
+		return "token_cap_exceeded"
+	case strings.Contains(s, "extra_args_refused"):
+		return "extra_args_refused"
+	case strings.Contains(s, "illegal_instruction"):
+		return "illegal_instruction"
+	// The iGPU runners' output gates and input refusals (render/igpu-qa.mjs, render/igpu-engine.mjs):
+	// the engine exited 0 but the clip is black / frozen, the depth frames are not the RGB sd-cli
+	// needs, sd-cli refused the model file, or the runner refused its own inputs. Never retried:
+	// the same request fails the same way, and none of these is a timeout or an oom whatever words
+	// the path in the message happens to contain.
+	case strings.Contains(s, "black_clip"):
+		return "black_clip"
+	case strings.Contains(s, "frozen_clip"):
+		return "frozen_clip"
+	case strings.Contains(s, "depth_frames_invalid"):
+		return "depth_frames_invalid"
+	case strings.Contains(s, "model_incompatible"):
+		return "model_incompatible"
+	case strings.Contains(s, "binary_not_absolute"):
+		return "binary_not_absolute"
+	case strings.Contains(s, "out_dir_unwritable"):
+		return "out_dir_unwritable"
+	case strings.Contains(s, "device_invalid"):
+		return "device_invalid"
+	// The audio and video QA gates and the engine's own death: typed, so a path or an engine log
+	// line in the message ("room", "timeout", "killed") cannot claim them for a looser class below.
+	case strings.Contains(s, "dead_air"): // render/audio-qa.mjs's QA gate, F-35 follow-up 2026-09-23
+		return "dead_air"
+	case strings.Contains(s, "unmeasurable"): // the output could not be measured, so it was not checked
+		return "unmeasurable"
+	case strings.Contains(s, "ffmpeg_unavailable"): // render/comfy-music.mjs main(), F-38 fix 2026-09-24
+		return "ffmpeg_unavailable"
+	case strings.Contains(s, "engine_crashed"), crashedBySignal.MatchString(s):
+		return "engine_crashed"
+	// ggml_vulkan's allocation failure has neither "out of memory" nor "oom" in its text
+	// ("Device memory allocation of size N failed ... vk::Device::allocateMemory: ErrorOutOfDeviceMemory");
+	// ggml's own says "insufficient memory (attempted to allocate N MB)" and sd.cpp "alloc compute buffer failed".
+	case strings.Contains(s, "out of memory") || strings.Contains(s, "out_of_memory") || strings.Contains(s, "cudamalloc") || strings.Contains(s, "oom") ||
+		strings.Contains(s, "erroroutofdevicememory") || strings.Contains(s, "erroroutofhostmemory") || strings.Contains(s, "device memory allocation of size") ||
+		strings.Contains(s, "insufficient memory") || strings.Contains(s, "alloc compute buffer failed"):
 		return "oom"
 	case strings.Contains(s, "timeout") || strings.Contains(s, "deadline") || strings.Contains(s, "context canceled") || strings.Contains(s, "killed") || strings.Contains(s, "signal:"):
 		return "timeout"
@@ -406,14 +542,16 @@ func ClassifyErr(err error) string {
 		return "conn_refused"
 	case strings.Contains(s, "llama-server 5"): // "llama-server 5xx: ..."
 		return "http_5xx"
-	case strings.Contains(s, "dead_air"): // render/audio-qa.mjs's QA gate, F-35 follow-up 2026-09-23
-		return "dead_air"
-	case strings.Contains(s, "ffmpeg_unavailable"): // render/comfy-music.mjs main(), F-38 fix 2026-09-24
-		return "ffmpeg_unavailable"
 	default:
 		return "other"
 	}
 }
+
+// crashedBySignal matches the wording of an engine that died of a crash signal ("sd-cli was
+// killed by signal SIGSEGV"): the word "killed" in it is not a timeout. SIGKILL is not a crash
+// (the OOM killer or a timeout) and SIGTERM / SIGINT / SIGHUP are a stop, so only the crash
+// signals are listed.
+var crashedBySignal = regexp.MustCompile(`killed by signal sig(?:segv|abrt|bus|fpe|trap|sys)`)
 
 // asInt coerces an any (int / int64 / float64) to int; 0 on miss. Shared so callers
 // (imagegen, pipeline) can normalize param maps the same way.

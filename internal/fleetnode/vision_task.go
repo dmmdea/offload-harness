@@ -89,15 +89,16 @@ func visionTaskServed(cfg config.Config, task core.TaskType) bool {
 
 // tokenGated reports whether a task_type rides the bearer rule on a node configured as cfg: the
 // agent lane (v1 scope), since 0.116.0 the vision lane, since 0.154.0 the text lane, the
-// project-bundle door (compose-project, ADR 0071), the stt upload door (ADR 0072) and the PAIR card
-// relay (pair-relay, D26: not a job, the door's own name). The legacy
-// path-taking "stt" lane joins them when the node HAS a fleet_auth_token (D17): it reads an arbitrary
-// path on this node's disk, which is the shape the other lanes were gated to avoid. A node with no
-// token keeps its legacy stt lane open, so no deployed tokenless node starts refusing. Every other
-// media task stays tokenless so deployed media clients keep working byte-identically.
+// project-bundle door (compose-project, ADR 0071), the media-input door (media-job, ADR 0077:
+// it writes a caller's bytes to this node's disk, like compose-project), the
+// stt upload door (ADR 0072) and the PAIR card relay (pair-relay, D26: not a job, the door's own name).
+// The legacy path-taking "stt" lane joins them when the node HAS a fleet_auth_token (D17): it reads an
+// arbitrary path on this node's disk, which is the shape the other lanes were gated to avoid. A node
+// with no token keeps its legacy stt lane open, so no deployed tokenless node starts refusing. Every
+// other media task stays tokenless so deployed media clients keep working byte-identically.
 func tokenGated(cfg config.Config, taskType string) bool {
 	switch taskType {
-	case string(core.TaskAgentRun), VisionTask, TextTask, ComposeProjectTask, STTUploadTask, PairRelayTask:
+	case string(core.TaskAgentRun), VisionTask, TextTask, ComposeProjectTask, MediaJobTask, STTUploadTask, PairRelayTask:
 		return true
 	case "stt":
 		return cfg.FleetAuthToken != ""

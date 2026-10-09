@@ -393,8 +393,9 @@ implications.
     30 s, then a re-placeable `503`). The transcript outputs (`stt-<digits>-<8 hex>.srt|txt|segments.json`) are removed when
     the job record is evicted or after `fleet_stt_transcript_ttl_min` (default 30, a negative value keeps them; swept at
     startup and on the janitor tick), and on a node with a token `GET /fleet/media` serves them only to a bearer holder
-    (so does a project render, `composeproj-<16 hex>.*`, and the legacy path-taking `stt` lane's transcripts,
-    `<basename>-<8 hex>.srt|txt|segments.json`; every other media name stays tokenless; the match folds case and trailing
+    (so do a project render, `composeproj-<16 hex>.*`, a media-job render, `mediajob-<16 hex>.*`, and the legacy path-taking
+    `stt` lane's transcripts, `<basename>-<8 hex>.srt|txt|segments.json`; the outputs of the tokenless lanes, `render-*`, `compose-*`
+    and a plain `/fleet/dispatch` job's files, stay readable by bare name; the match folds case and trailing
     dots and spaces and treats a non-ASCII, `~` or `:` name as gated, because NTFS opens one file under those spellings).
     `GET /fleet/media` refuses a
     dot name. Details: [FLEET-NODE.md](../FLEET-NODE.md#the-stt-upload-door-post-fleetstt),
@@ -657,7 +658,7 @@ that will not card the job itself (its PAIR emitter is not enabled). `admit` rec
 (printable, at most 64 characters, `core.SanitizeAsker`) as `requester` on the node's ledger row and, on the
 signal, when the node's own emitter is enabled, emits the job's one PAIR card from the node (queued at admit,
 running at start, terminal at finish; `fleetnode/nodecard.go`). Asking boxes send them on `/fleet/dispatch`,
-`/fleet/vision`, `/fleet/text`, `/fleet/compose-project` and `/fleet/queue/submit`; the queue holder stores both
+`/fleet/vision`, `/fleet/text`, `/fleet/stt`, `/fleet/compose-project`, `/fleet/media-job` and `/fleet/queue/submit`; the queue holder stores both
 on the job (`fleetqueue.Job.Asker`, `PairCard`), so the claim loop applies them to a pulled job exactly as
 `admit` does to a pushed one — and now also stamps a pulled job's door `fleet` (`dispatchDoor`), which it did
 not before. A claim of a job the node already holds (a lease-expiry re-claim) opens no card, and a claim a
@@ -873,9 +874,9 @@ read, not for being busy. Four changes, none of which adds a probe:
   <reason> (last of 3)`, kept distinct from refusals because a probe failure is not a refusal: nobody
   declined the work.
 
-**The single-shot lanes read the same roster, by the same rules (ADR 0074).** The vision, text, stt-upload, compose
-and accelerator lanes each pick ONE node for ONE call from `delegate_remotes`, and each used to carry its own copy of
-the loop. They now share `internal/rosterprobe`:
+**The single-shot lanes read the same roster, by the same rules (ADR 0074).** The vision, text, stt-upload, compose,
+media and accelerator lanes each pick ONE node for ONE call from `delegate_remotes`, and each used to carry its own copy
+of the loop. They now share `internal/rosterprobe`:
 
 - **Admission.** Every entry is judged by `netguard.TailnetURL`, the shape check the agent lane applies at intake,
   before it is dialled; the lanes used to rely on the dial gate alone, so one entry was refused by one lane and used by
@@ -915,7 +916,7 @@ the loop. They now share `internal/rosterprobe`:
 | surface | per-member bound | probes | memo | negative cache |
 |---|---|---|---|---|
 | agent lane (`internal/delegate`, per Run) | 15 s | concurrent | 2 s per Run | 30 s per Run |
-| vision, text, stt-upload, compose lanes | 5 s | concurrent, one in flight per base and bound | 2 s, process-wide | 30 s, process-wide; 5 s after a timeout or a refused dial; dropped by an accepted dispatch |
+| vision, text, stt-upload, compose, media lanes | 5 s | concurrent, one in flight per base and bound | 2 s, process-wide | 30 s, process-wide; 5 s after a timeout or a refused dial; dropped by an accepted dispatch |
 | accelerator lane | 2 s | concurrent, one in flight per base and bound | 2 s, process-wide | the same (a 2 s timeout is not held against a longer-waiting caller) |
 | cascade lane (`cascade_remote_lanes`) | 5 s per request, one request when nothing answers | one per base, outside the lock | 30 s per base (failures included) | the same entry |
 | `offload_status` nodes section | 8 s for the whole section | concurrent | none | none |
@@ -1605,9 +1606,10 @@ local-MCP trust boundary and stays open. Every media path — media dispatch, me
 the token, so already-deployed tokenless media clients keep working byte-identically
 (pinned by test), with ONE exception since the stt transcript change: on a node that HAS a token, `GET /fleet/media/{name}`
 needs the bearer for the outputs of the token-gated lanes (an stt upload's transcripts, the legacy `stt` lane's
-`<basename>-<8 hex>` transcripts, a project render's `composeproj-<16 hex>` files; `gatedMediaName`, which folds case and
-trailing dots and spaces and fails closed on a non-ASCII, `~` or `:` name, since a Windows node opens one file under those
-spellings), while `render-*`, `compose-*` and every other name stay tokenless;
+`<basename>-<8 hex>` transcripts, a project render's `composeproj-<16 hex>` files, a media-job render's `mediajob-<16 hex>` files;
+`gatedMediaName`, which folds case and trailing dots and spaces and fails closed on a non-ASCII, `~` or `:` name, since a Windows
+node opens one file under those spellings), while the outputs of the tokenless lanes (`render-*`, `compose-*`, a plain
+`/fleet/dispatch` job's files) stay readable by bare name;
 whole-fleet enforcement is a recorded follow-up
 ([ADR 0023](../architecture/decisions/0023-agent-lane-tailnet-auth-and-locality.md)).
 
@@ -1821,6 +1823,76 @@ survived for months. The alias resolution in particular retries on the next poll
 budget: latching "already tried" on a failed roster read disabled the alias match for the rest of the
 wait after ONE transient error, which is S-08 again, intermittently.
 
+## The media-job door, artifacts and honest advertisement (ADR 0077)
+
+Three additions to the media tasks, all additive on the wire.
+
+**The media-job door.** `POST /fleet/media-job` (task `media-job`) takes one `image-gen`, `video-gen`, `animate`,
+`audio-gen` or `run-graph` job together with the input files it reads, from a holder of the fleet token. The body is
+`{job_id, task_type, payload, bundle?, bundle_sha256?, inputs?}`: `payload` is the inner task's payload exactly as
+`/fleet/dispatch` takes it, `bundle` is base64 of a gzip-tar of the files, and `inputs` maps a payload field to a bare name
+in the bundle. The fields that may be files are `video-gen.still`, `animate.ref`, `animate.driver` and `audio-gen.clone`.
+
+- It is open only when `fleet_media_inputs` is true, `fleet_auth_token` is set and a media task is bound
+  (`config.MediaInputsAdmissible`; "bound" is the advertisement's own notion, a script, the speech endpoint or the sd.cpp /
+  audio.cpp engine, so an engine-only node with every script key blank opens it; health lists `media-job` only while one inner
+  task is also runnable). Closed, it answers
+  403; without the bearer, 401; both before a byte of the body is read. `media-job` is token-gated, so the same task over
+  `/fleet/dispatch` needs the bearer too, and its jobs are masked from tokenless polls and feeds.
+- The body is capped at `fleet_media_inputs_max_mb` (default 256, compressed) in base64 plus 64 KiB (413 over it), is JSON
+  only, and unknown fields are a 400. A token holder gets a 15-minute read and write window; a writer that cannot carry the
+  extended deadlines is logged once per process per route. The body is held once while the job is admitted (the bundle is
+  base64-decoded straight out of it into the one decoded copy, and the admission closure keeps only the job id and task type),
+  so a running or queued job pins neither the body nor the bundle: the extracted directory is the only copy.
+- **In-flight cap.** The body is read and decoded before the admission gates, so N concurrent uploads would hold N times that
+  peak. The node holds at most `mediaJobInFlightMax` of them at once: **one** (the stt upload door's bound is 2, for bodies of at
+  most 64 MiB). At the 256 MiB default cap one body is about 0.58 GiB in memory, the base64 text (341 MiB) beside the decoded
+  bundle (up to 256 MiB), so the door's node-wide peak is slots x 0.58 GiB: one slot keeps it under 0.6 GiB beside a ComfyUI
+  render, where two would be 1.17 GiB. A caller that passed the bearer check takes the slot before the first body byte and holds
+  it until the job is admitted or refused (up to the 15-minute read window on a slow link), and every exit of the handler gives it
+  back; uploads are served one at a time. A caller over the bound waits for the slot up to 30 s, then is answered `503` with
+  `Retry-After: 5`. The slot wait extends its own write deadline so the 503 reaches a real client. The door's only client,
+  `internal/mediaremote`, reads that 503 as a `capacity` defer but does not read `Retry-After` and makes one pass over the node it
+  picked: the caller gets the capacity defer and a later call places the job again. Slot occupancy is not in `/fleet/health` or in
+  the queue depth the node pick ranks on, so a node whose slot a long upload holds can still rank first.
+- **Outputs ride the bearer.** A media-job renders from the caller's private files (a still, a driver video, a voice sample), so
+  its output is not served by bare name to anyone who learns it. After the inner builder, the door sets the render's `out` to
+  `<media_dir>/mediajob-<16 hex>.<ext>` (`png`, `mp4`, `wav`, or `flac` for music; run-graph, which takes no file through this
+  door and whose outputs the graph names, is left alone), and `GET /fleet/media/{name}` answers `401` to a tokenless read of
+  that stem on a node with a token (`gatedMediaName`, the rule the project and stt upload renders already ride). The client
+  sends the fleet bearer on every output fetch. The outputs of the tokenless `/fleet/dispatch` door keep the pipeline's own
+  names and stay readable by bare name.
+- The bundle's sha256 must match; it is extracted into `<media_dir>/fleet-inputs/in-*` (regular files only, confined names,
+  byte caps; a symlink or a traversal name is refused); each `inputs` value must be a regular file directly in that
+  directory; and its first bytes must match the field's kind: image PNG, JPEG or WebP; video MP4/MOV or WebM/MKV; audio WAV,
+  FLAC, MP3, OGG or M4A. A payload that names a node-local path in a file field, in any casing (`Still` fills `still` in the
+  builders), is refused: this door carries bytes, never paths; a shipped file replaces every spelling of its field. The inner task is built by the same builder `/fleet/dispatch` uses, with each field rewritten to the extracted path.
+- The directory is removed when the job ends and on every refusal. `fleet-serve` removes `in-*` directories older than the
+  longest media timeout plus an hour at startup. A node-side failure (a disk that filled) is a 500, not "refused".
+
+**Artifacts.** When a media job finishes, its stored `data` gains `artifacts: [{name, bytes, sha256}]`, one per output the
+result names (`image_path`, `video_path`, `audio_path`, run-graph `outputs`) that is a regular file directly inside
+`media_dir`. A path outside it, a symlink or a file that cannot be hashed is left out and never fails the job. The poll
+returns it with the rest of `data`, so the machine that fetches `GET /fleet/media/{name}` can verify the bytes.
+
+**Honest advertisement.** `video-gen`, `animate`, `audio-gen` and `run-graph` are advertised, and admitted, only while
+`internal/mediacap` reads the matching route as CONFIGURED: `generate_video`, `animate_character`, `run_graph`, and for
+audio any of `generate_audio:voice`, `generate_audio:voice:endpoint` and `generate_audio:music`. A bound script over a
+missing weight, VAE or custom node is BOUND-BUT-MISSING and the task drops out; restoring the file brings it back. One
+predicate (`taskConfiguredFor`) serves health and dispatch, so a node never lists what it would refuse. `image-gen` keeps
+`ImageGenAdvertisable`. A task counts as bound when its script OR its native engine is (CT-51): `video-gen` through
+`config.VideoGenBound()`, `animate` through `AnimateGenBound()`, `audio-gen` through `VoiceGenBound() || MusicGenBound()`, so an
+sd.cpp / audio.cpp-only box (no ComfyUI) advertises them; `run-graph` stays script-only. The engine lanes advertise the family
+they record footprints under (the sdcpp default video family's own name, `wan-vace` for sd.cpp animate, the audio.cpp family names
+for audio-gen). `/fleet/health` gains `media_routes: [{route, engine, state}]` (every task route, not the shared
+prerequisites; the `detail` paths stay on the node), and `supported_task_types` and `loadable_model_families` are derived per
+request from the same reading, which is cached for at most 60 seconds per config and read once per health request and once
+per admission (the node keys its cache once, at construction; the pull claim loop re-derives its task list on every claim). A
+media task the node binds whose route is not CONFIGURED is refused at admission with a `503` naming the route and its
+state (`task_type "video-gen" is bound on this node but its route is not ready: generate_video BOUND-BUT-MISSING ...`), which
+every delegator re-places; a task that is not bound at all keeps the `400 unsupported task_type`. A delegator reads `media_routes` through
+`delegate.NodeView` (`MediaRoutes`, `RouteState`); an absent field is unknown, never "no route".
+
 ## Source map
 
 - [`internal/fleetnode/server.go`](../../internal/fleetnode/server.go) — routes, payloads, duplicate
@@ -1841,6 +1913,13 @@ wait after ONE transient error, which is S-08 again, intermittently.
   task types ride the bearer rule, the legacy `stt` when the node has a token), the vision lane
 - [`internal/sttremote/sttremote.go`](../../internal/sttremote/sttremote.go) — the asker of the upload door: routes,
   Opus conversion, placement, wait, validation and the asker's own output files
+- [`internal/fleetnode/media_job.go`](../../internal/fleetnode/media_job.go) — the media-job door: the body, the
+  bundle checks, the magic-byte sniff, the sweep of orphaned input directories
+- [`internal/fleetnode/media_artifacts.go`](../../internal/fleetnode/media_artifacts.go) — `artifacts` on a finished
+  media job
+- [`internal/fleetnode/media_ready.go`](../../internal/fleetnode/media_ready.go) — the cached mediacap reading behind
+  the honest advertisement and `media_routes`
+- [`internal/mediaremote/`](../../internal/mediaremote/) — the client that places a media job on a node
 - [`internal/fleetnode/jobs.go`](../../internal/fleetnode/jobs.go) — state machine, the admit-then-
   schedule queue and its concurrency limit, eviction, drain, the agent job marker
 - [`internal/fleetnode/tasks.go`](../../internal/fleetnode/tasks.go) — `agentTaskConfigured`,
@@ -1882,6 +1961,7 @@ wait after ONE transient error, which is S-08 again, intermittently.
 
 - [../FLEET-NODE.md](../FLEET-NODE.md) — operator guide
 - [../flows/fleet-job-lifecycle.md](../flows/fleet-job-lifecycle.md)
+- [../architecture/decisions/0077-a-fleet-token-holder-may-send-one-media-job-with-its-input-files.md](../architecture/decisions/0077-a-fleet-token-holder-may-send-one-media-job-with-its-input-files.md)
 - [../architecture/decisions/0008-pdh-primary-vram-sampling.md](../architecture/decisions/0008-pdh-primary-vram-sampling.md)
 - [fleet-overview.md](fleet-overview.md) — the delegator-side operator page that reads these health
   and jobs fields

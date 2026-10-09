@@ -270,6 +270,76 @@ $PINNED = @{
     sha  = '235745af8d86bf4a4c1b5b4f529868b37019a10f7c0b2e79ad0abca3a22bc6e1'
     version = '235745af'
   }
+  # --- CT-51 I5: the amd-gcn (Vulkan iGPU) media models, PIN-ONLY. Nothing in this installer downloads them
+  # (no gate names these keys; the Linux install has no media leg yet, so the weights are placed out of band);
+  # the pins record the exact bytes the tier's config_seed binds, each one measured 2026-10-03 and verified against
+  # the Hugging Face LFS sha256 on the reference node. internal/mediacap/modelsizes.go mirrors the sizes
+  # (TestKnownModelSizesMatchInstaller). Licences: FastWan2.2-TI2V-5B, the Wan 2.2 / 2.1 VAEs, umt5-xxl, taew2_2,
+  # Wan2.1 VACE 1.3B and Depth-Anything V2 Small are Apache-2.0 (commercial use allowed); Chatterbox is MIT;
+  # the ACE-Step 1.5 licence is NOT verified - its commercial_use stays unset until it is checked at the ACE-Step source.
+  'model-fastwan' = @{
+    url  = 'https://huggingface.co/Green-Sky/FastWan2.2-TI2V-5B-FullAttn-GGUF/resolve/main/FastWan2.2-TI2V-5B-q8_0.gguf'
+    name = 'FastWan2.2-TI2V-5B-q8_0.gguf'
+    size = 5412844128
+    sha  = 'b62f50ff87c4dfa2910c6883d45015e05b709366581698b302e259e7f25c9208'
+    version = 'b62f50ff'
+  }
+  'model-wan22-vae' = @{
+    url  = 'https://huggingface.co/QuantStack/Wan2.2-TI2V-5B-GGUF/resolve/main/VAE/Wan2.2_VAE.safetensors'
+    name = 'Wan2.2_VAE.safetensors'
+    size = 1409400960
+    sha  = 'e40321bd36b9709991dae2530eb4ac303dd168276980d3e9bc4b6e2b75fed156'
+    version = 'e40321bd'
+  }
+  'model-umt5-xxl' = @{
+    url  = 'https://huggingface.co/city96/umt5-xxl-encoder-gguf/resolve/main/umt5-xxl-encoder-Q8_0.gguf'
+    name = 'umt5-xxl-encoder-Q8_0.gguf'
+    size = 6043068256
+    sha  = '2521d4de0bf9e1cc6549866463ceae85e4ec3239bc6063f7488810be39033bbc'
+    version = '2521d4de'
+  }
+  'model-wan22-tae' = @{
+    url  = 'https://huggingface.co/lightx2v/Autoencoders/resolve/main/taew2_2.safetensors'
+    name = 'taew2_2.safetensors'
+    size = 22848048
+    sha  = '5243c5c9d77ecf2d74800d672bac3678c0d72462899f1b3b10aa1bbc11eae461'
+    version = '5243c5c9'
+  }
+  'model-vace' = @{
+    url  = 'https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/diffusion_models/wan2.1_vace_1.3B_fp16.safetensors'
+    name = 'wan2.1_vace_1.3B_fp16.safetensors'
+    size = 4309519800
+    sha  = '640ccc0577e6a5d4bb15cd91b11b699ef914fc55f126c5a1c544e152130784f2'
+    version = '640ccc05'
+  }
+  'model-wan21-vae' = @{
+    url  = 'https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/vae/wan_2.1_vae.safetensors'
+    name = 'wan_2.1_vae.safetensors'
+    size = 253815318
+    sha  = '2fc39d31359a4b0a64f55876d8ff7fa8d780956ae2cb13463b0223e15148976b'
+    version = '2fc39d31'
+  }
+  'model-depth-anything' = @{
+    url  = 'https://huggingface.co/mudler/depth-anything.cpp-gguf/resolve/main/depth-anything2-small-q8_0.gguf'
+    name = 'depth-anything2-small-q8_0.gguf'
+    size = 36780864
+    sha  = 'e778ad03adc6c2917894cc5a9ad458278973568b75c892c629b6cbed9348f228'
+    version = 'e778ad03'
+  }
+  'model-chatterbox' = @{
+    url  = 'https://huggingface.co/audio-cpp/audio.cpp-gguf/resolve/main/Chatterbox-GGUF/chatterbox-q8_0.gguf'
+    name = 'chatterbox-q8_0.gguf'
+    size = 2088393668
+    sha  = 'd586dd1aa59613cab8046176fb7ca5ba191c02a9b10ffa5b0d892ed22b470656'
+    version = 'd586dd1a'
+  }
+  'model-ace-step' = @{
+    url  = 'https://huggingface.co/audio-cpp/audio.cpp-gguf/resolve/main/ACE-Step1.5-GGUF/turbo/ace-step-1.5-turbo-bf16.gguf'
+    name = 'ace-step-1.5-turbo-bf16.gguf'
+    size = 10090398272
+    sha  = '93974239a29a1a821b3cc1b1ca7e1c6229b1a900a0e44a1a9770bb2271d2be5f'
+    version = '93974239'
+  }
 }
 
 # ---------------------------------------------------------------------------

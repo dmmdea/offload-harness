@@ -4,7 +4,7 @@ package core
 //
 // A call the route sends to a fleet node never passes through Pipeline.Run on the asking box, so
 // that box wrote no ledger row and no PAIR card for it. The remote lanes (composeremote,
-// visionremote, textremote, and later the stt route) report the call through these two interfaces
+// visionremote, textremote, sttremote and mediaremote) report the call through these two interfaces
 // instead. They live in core because the lanes receive only a small Runner interface and must not
 // import the pipeline (which imports delegate, which they already import) or each other.
 //

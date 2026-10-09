@@ -25,6 +25,8 @@ const (
 	gatedJSON = "stt-1234567890-0a1b2c3d.segments.json"
 	gatedMP4  = "composeproj-0123456789abcdef.mp4"
 	gatedSnap = "composeproj-0123456789abcdef-snap-0001.png"
+	// a media-job render (ADR 0077): rendered from the caller's private input files
+	gatedJobMP4 = "mediajob-0123456789abcdef.mp4"
 )
 
 func writeMedia(t *testing.T, dir, name string, age time.Duration) string {
@@ -51,6 +53,8 @@ func TestGatedMediaNames(t *testing.T) {
 		t.Fatalf("sttOutputRe = %s, want %s: update internal/pipeline's producer pin with it", sttOutputRe, sttOutputShape)
 	}
 	for _, n := range []string{gatedSRT, gatedTXT, gatedJSON, gatedMP4, gatedSnap, "composeproj-0123456789abcdef.webm", "stt-7-ffffffff.srt",
+		// the media-job door's renders: the video, a voice, a music clip, a still, and a name derived from the stem
+		gatedJobMP4, "mediajob-0123456789abcdef.wav", "mediajob-0123456789abcdef.flac", "mediajob-0123456789abcdef.png", "mediajob-0123456789abcdef-up.mp4",
 		// the LEGACY path-taking stt lane's outputs: <basename>-<8 hex>.<ext>, gated when the node has a token
 		"stt-legacy-0a1b2c3d.srt", "recording-0a1b2c3d.segments.json", "x" + gatedSRT,
 	} {
@@ -66,6 +70,7 @@ func TestGatedMediaNames(t *testing.T) {
 		gatedSRT + ".", gatedSRT + "..", gatedSRT + " ", gatedSRT + ". .", gatedJSON + " ",
 		"COMPOSEPROJ-0123456789ABCDEF.MP4", "composeproj-0123456789abcdef.mp4.", gatedMP4 + " ",
 		"ComposeProj-0123456789abcdef-snap-0001.PNG",
+		"MEDIAJOB-0123456789ABCDEF.MP4", gatedJobMP4 + ".", gatedJobMP4 + " ", gatedJobMP4 + ":stream", "MediaJob-0123456789abcdef.Mp4",
 		"STT-1234~1.SRT", "stt-1~1.srt", gatedSRT + "::$DATA", gatedSRT + ":stream",
 		"\u017ftt-1234567890-0a1b2c3d.srt", "stt-1234567890-0a1b2c3d.sr\u212a", "stt-1\x00.srt",
 	} {
@@ -84,6 +89,11 @@ func TestGatedMediaNames(t *testing.T) {
 		"composeproj-xyz.mp4",          // not a 16-hex stem
 		"composeproj-0123456789abcdef", // no extension
 		"xcomposeproj-0123456789abcdef.mp4",
+		"video-0a1b2c3d.mp4",        // a plain dispatch's video: the pipeline's own name, tokenless
+		"mediajob-xyz.mp4",          // not a 16-hex stem
+		"mediajob-0123456789abcdef", // no extension
+		"xmediajob-0123456789abcdef.mp4",
+		"mediajob-0123456789abcdeff.mp4", // 17 hex
 	} {
 		if gatedMediaName(n) {
 			t.Errorf("%q must stay an ungated media name", n)
@@ -96,12 +106,12 @@ func TestGatedMediaNames(t *testing.T) {
 func TestMediaOfGatedLanesNeedsTheBearer(t *testing.T) {
 	cfg := tokenCfg("s3cret")
 	cfg.MediaDir = t.TempDir()
-	for _, n := range []string{gatedSRT, gatedTXT, gatedJSON, gatedMP4, gatedSnap, "render-0a1b2c3d.png", "compose-0a1b2c3d.mp4", "interview-0a1b2c3d.srt"} {
+	for _, n := range []string{gatedSRT, gatedTXT, gatedJSON, gatedMP4, gatedSnap, gatedJobMP4, "render-0a1b2c3d.png", "compose-0a1b2c3d.mp4", "video-0a1b2c3d.mp4", "interview-0a1b2c3d.srt"} {
 		writeMedia(t, cfg.MediaDir, n, 0)
 	}
 	s, _ := newTestServer(t, cfg, &fakeRunner{}, authOpts(true))
 	// "interview-<hash8>.srt" is the legacy path-taking stt lane's name (that lane is token-gated too).
-	for _, n := range []string{gatedSRT, gatedTXT, gatedJSON, gatedMP4, gatedSnap, "interview-0a1b2c3d.srt"} {
+	for _, n := range []string{gatedSRT, gatedTXT, gatedJSON, gatedMP4, gatedSnap, gatedJobMP4, "interview-0a1b2c3d.srt"} {
 		if rec := do(t, s, http.MethodGet, "/fleet/media/"+n, "", nil); rec.Code != http.StatusUnauthorized {
 			t.Errorf("GET %s with no bearer = %d, want 401", n, rec.Code)
 		}
@@ -113,7 +123,7 @@ func TestMediaOfGatedLanesNeedsTheBearer(t *testing.T) {
 			t.Errorf("GET %s with the bearer = %d (%q)", n, rec.Code, rec.Body.String())
 		}
 	}
-	for _, n := range []string{"render-0a1b2c3d.png", "compose-0a1b2c3d.mp4"} {
+	for _, n := range []string{"render-0a1b2c3d.png", "compose-0a1b2c3d.mp4", "video-0a1b2c3d.mp4"} {
 		if rec := do(t, s, http.MethodGet, "/fleet/media/"+n, "", nil); rec.Code != http.StatusOK {
 			t.Errorf("ungated GET %s = %d, want 200: media of the tokenless lanes stays tokenless", n, rec.Code)
 		}

@@ -544,6 +544,21 @@ visible only with the token. The video and its snapshots come back into this mac
 renders only locally. A machine with no model or lane at all is a
 [delegation client](systems/delegation-client.md).
 
+**Media jobs on a fleet node ([ADR 0077](architecture/decisions/0077-a-fleet-token-holder-may-send-one-media-job-with-its-input-files.md)).**
+`offload_generate_image`, `offload_generate_video`, `offload_animate_character`, `offload_generate_audio` and
+`offload_run_graph` take `route` and `remotes` (CLI `generate-image`, `generate-video`, `generate-audio`, `run-graph`:
+`--route` and a repeatable `--remote`). `auto`, the default, runs here when this machine has the lane (read from the files
+its route loads, not from the config binding) and on a node from `delegate_remotes` when it has none; `remote` always sends
+it; `local` never does. `remotes` narrows the nodes for one call and must be a subset of `delegate_remotes`. A still, a
+reference and driver, or a clone sample travels in a hash-checked bundle to the node's media-job door, which a node opens
+only with `fleet_media_inputs: true` and a `fleet_auth_token` (the caller holds the same token; `fleet_media_inputs_max_mb`
+caps the bundle, 256 MB by default: the node holds the base64 body and the decoded bundle together while it admits a job, about 0.58 GiB at the default, and takes one upload at a time (a second waits up to 30 s for the first, then is answered 503), so raise it only on a node with the RAM). A job with no input file, and every `run-graph` (its graph travels inline), needs no
+door. The outputs come back by name, each checked against the sha256 the node published; a mismatch defers and leaves no
+file. A node advertises `video-gen`, `animate`, `audio-gen` and `run-graph` only while its media route is CONFIGURED, so a
+node with a missing weight drops the task and `/fleet/health` `media_routes` says which route and why; `doctor` and
+`offload_status` print the same verdicts. `refine=false`, `tts_voice`, `transformer` and `run_graph`'s `devices` cannot travel and defer on a remote
+route; `run_graph`'s `out_dir` is where the fetched outputs land on the calling machine (created if missing, never sent to the node). A node that binds a media task but whose route is not CONFIGURED refuses a job for it with a 503 naming the route and its state (a delegator re-places that), not the 400 an unbound task gets. See [media-generation.md](systems/media-generation.md#remote-routing-and-the-media-job-door-adr-0077).
+
 **Adding a template.** Follow the contract in
 [`render/compose-templates/README.md`](../render/compose-templates/README.md): offline, deterministic,
 declared variables, a duration variable, and a README with a measured render. Lint and check must

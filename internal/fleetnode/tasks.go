@@ -33,7 +33,7 @@ import (
 
 // fleetTaskOrder is the advertisement order (stable for health payloads + error
 // messages). Membership is decided per-config by taskConfiguredFor.
-var fleetTaskOrder = []string{"image-gen", "video-gen", "animate", "stt", STTUploadTask, "audio-gen", "run-graph", ComposeTask, ComposeProjectTask, "agent", "accel", VisionTask, TextTask}
+var fleetTaskOrder = []string{"image-gen", "video-gen", "animate", "stt", STTUploadTask, "audio-gen", "run-graph", MediaJobTask, ComposeTask, ComposeProjectTask, "agent", "accel", VisionTask, TextTask}
 
 // taskConfiguredFor reports whether THIS box actually serves taskType — the same
 // route gates the pipeline uses (empty script/model = the task defers there, so
@@ -49,6 +49,13 @@ var fleetTaskOrder = []string{"image-gen", "video-gen", "animate", "stt", STTUpl
 // AgentLaneAdmissible for why that distinction is load-bearing for the agent lane
 // and irrelevant for every other task.
 func taskConfiguredFor(cfg config.Config, taskType string, loopbackListener bool) bool {
+	return taskConfiguredIn(newMediaView(cfg), taskType, loopbackListener)
+}
+
+// taskConfiguredIn is taskConfiguredFor over a request's mediaView, so the media verdicts are read once
+// for the whole request however many tasks it judges (the view carries the config).
+func taskConfiguredIn(v *mediaView, taskType string, loopbackListener bool) bool {
+	cfg := v.cfg
 	switch taskType {
 	case "image-gen":
 		// The default binding (ComfyUI script OR the sdcpp engine, J2) OR at least one
@@ -58,9 +65,12 @@ func taskConfiguredFor(cfg config.Config, taskType string, loopbackListener bool
 		// CONFIGURED (<node-f> wave session 5d227d30 §2a).
 		return cfg.ImageGenAdvertisable()
 	case "video-gen":
-		return cfg.VideoGenScript != ""
+		// Bound AND derived CONFIGURED by internal/mediacap (the script, the weights its graph loads
+		// and the custom nodes it names are on this machine): a bound script over a missing weight is
+		// not a capability, and advertising it sent jobs to a node that failed them (ADR 0077).
+		return mediaTaskBound(cfg, taskType) && mediaTaskRouteReady(v, taskType)
 	case "animate":
-		return cfg.AnimateGenScript != ""
+		return mediaTaskBound(cfg, taskType) && mediaTaskRouteReady(v, taskType)
 	case "stt":
 		return cfg.STTModel != ""
 	case STTUploadTask:
@@ -68,9 +78,15 @@ func taskConfiguredFor(cfg config.Config, taskType string, loopbackListener bool
 		// bound whisper model and the vision lane's reachability rule.
 		return STTUploadAdmissible(cfg, loopbackListener)
 	case "audio-gen":
-		return cfg.VoiceGenScript != "" || cfg.MusicGenScript != ""
+		// Voice (script or the OpenAI-compatible speech server) or music, whichever is derived
+		// CONFIGURED: a node serving only one kind still serves audio-gen.
+		return mediaTaskBound(cfg, taskType) && mediaTaskRouteReady(v, taskType)
 	case "run-graph":
-		return cfg.RunGraphScript != ""
+		return mediaTaskBound(cfg, taskType) && mediaTaskRouteReady(v, taskType)
+	case MediaJobTask:
+		// The input door (ADR 0077): opted in, a fleet token to check, and at least one media
+		// task this node can run right now. Never advertised or admitted on a tokenless node.
+		return cfg.MediaInputsAdmissible() && anyMediaTaskConfigured(v, loopbackListener)
 	case ComposeTask:
 		// The composition lane: the runner, the pinned install and the pinned browser
 		// all bound — config.ComposeRouteConfigured, the pipeline's own gate.
@@ -104,6 +120,17 @@ func taskConfiguredFor(cfg config.Config, taskType string, loopbackListener bool
 	// Anything else is only "configured" when it is a VALID cfg.Pipelines key
 	// (Task 6): 100% config-driven, so a new pipeline needs no new case here.
 	return pipelineNameConfigured(cfg, taskType)
+}
+
+// anyMediaTaskConfigured reports whether at least one task the media-job door carries is served by this
+// node right now (the same predicates dispatch applies), so the door is not advertised over nothing.
+func anyMediaTaskConfigured(v *mediaView, loopbackListener bool) bool {
+	for _, t := range mediaJobTasks {
+		if taskConfiguredIn(v, t, loopbackListener) {
+			return true
+		}
+	}
+	return false
 }
 
 // AgentLaneAdmissible is THE ONE predicate behind the fleet "agent" lane
@@ -202,9 +229,15 @@ func SupportedTasks(cfg config.Config) []string {
 // supplied — what /fleet/health advertises, so supported_task_types and the
 // agent_* block can never disagree with what dispatch will admit.
 func SupportedTasksFor(cfg config.Config, loopbackListener bool) []string {
+	return supportedTasksIn(newMediaView(cfg), loopbackListener)
+}
+
+// supportedTasksIn is SupportedTasksFor over a request's mediaView.
+func supportedTasksIn(v *mediaView, loopbackListener bool) []string {
+	cfg := v.cfg
 	var out []string
 	for _, t := range fleetTaskOrder {
-		if taskConfiguredFor(cfg, t, loopbackListener) {
+		if taskConfiguredIn(v, t, loopbackListener) {
 			out = append(out, t)
 		}
 	}
@@ -253,6 +286,18 @@ func familyFor(cfg config.Config, taskType string) string {
 		// review, measured), while the writer correctly folded them to Wan.
 		// TestVideoFootprintFamilyMatchesTheAdvertisedFamily pins the two
 		// packages together over that full input space.
+		//
+		// An sdcpp default family (CT-49) is the other writer: the iGPU lane records
+		// pipeline.videoFootprintFamily of the family it rendered, which is the family's own
+		// name (an operator-chosen key such as "fastwan"; the wan22 sentinel keeps the
+		// store's "wan2.2" spelling). That name is not in the runner's closed set, so it
+		// must be checked first or it would fold to Wan here while the writer kept it.
+		if def, ok := cfg.DefaultVideoSdcppFamily(); ok {
+			if def == "wan22" {
+				return "wan2.2"
+			}
+			return def
+		}
 		switch f := strings.TrimSpace(cfg.VideoGenFamily); f {
 		case "ltx25", "h3", "hunyuan", "ace":
 			return f
@@ -260,12 +305,19 @@ func familyFor(cfg config.Config, taskType string) string {
 			return "wan2.2"
 		}
 	case "animate":
-		// One shipped variant; must agree with what the pipeline writes into the
-		// footprint store (pipeline.runAnimateCharacter samples under this key).
+		// Two variants, one family each, matching what the pipeline writes into the footprint
+		// store: the ComfyUI route samples under "wan-animate2"
+		// (pipeline.runAnimateCharacter), the sd.cpp VACE lane under config.AnimateSdcppFootprintFamily.
+		if cfg.AnimateGenEngine == config.EngineSdcpp {
+			return config.AnimateSdcppFootprintFamily
+		}
 		return "wan-animate2"
 	case "stt", STTUploadTask:
 		return "whisper"
 	case "audio-gen":
+		if fs := audioFamilies(cfg); len(fs) > 0 {
+			return fs[0]
+		}
 		return "acestep"
 	case "run-graph":
 		return "comfy-graph"
@@ -273,16 +325,52 @@ func familyFor(cfg config.Config, taskType string) string {
 	return ""
 }
 
+// audioFamilies is the audio-gen task's advertised families. A box with no audio.cpp engine
+// advertises "acestep" exactly as it always has. With an engine bound (CT-49) the lanes record
+// their footprints under the engine's family names (pipeline.runGenerateAudioAudiocpp keys on
+// cfg.AudiocppVoiceFamilyName / AudiocppMusicFamilyName), so those are what is advertised: the
+// voice family when voice is audio.cpp, the music family when music is, and "acestep" still for
+// a ComfyUI music script that stays bound beside an audio.cpp voice.
+func audioFamilies(cfg config.Config) []string {
+	voiceEngine := cfg.VoiceGenEngine == config.EngineAudiocpp
+	musicEngine := cfg.MusicGenEngine == config.EngineAudiocpp
+	if !voiceEngine && !musicEngine {
+		return []string{"acestep"}
+	}
+	var out []string
+	if musicEngine {
+		out = append(out, cfg.AudiocppMusicFamilyName())
+	} else if cfg.MusicGenScript != "" {
+		out = append(out, "acestep")
+	}
+	if voiceEngine {
+		out = append(out, cfg.AudiocppVoiceFamilyName())
+	}
+	return out
+}
+
 // Families returns the loadable model families for the advertised tasks,
 // deduplicated, in task order. nil when nothing is bound.
 func Families(cfg config.Config) []string {
+	return familiesOf(cfg, SupportedTasks(cfg))
+}
+
+// familiesOf is Families over a task list the caller already derived (health computes it once).
+func familiesOf(cfg config.Config, tasks []string) []string {
 	var out []string
 	seen := map[string]bool{}
-	for _, t := range SupportedTasks(cfg) {
-		f := familyFor(cfg, t)
-		if f != "" && !seen[f] {
-			seen[f] = true
-			out = append(out, f)
+	for _, t := range tasks {
+		fams := []string{familyFor(cfg, t)}
+		if t == "audio-gen" {
+			if af := audioFamilies(cfg); len(af) > 0 {
+				fams = af
+			}
+		}
+		for _, f := range fams {
+			if f != "" && !seen[f] {
+				seen[f] = true
+				out = append(out, f)
+			}
 		}
 		// A named image family (ADR 0058) is a graph this node can load too; its
 		// NAME and license ride health's image_families (ImageFamilies below).
@@ -370,10 +458,22 @@ func ImageFamilies(cfg config.Config) []ImageFamily {
 // lane is the only task whose verdict depends on it; every other task ignores
 // it entirely.
 func BuildRequest(ctx context.Context, cfg config.Config, loopbackListener bool, taskType string, payload json.RawMessage) (core.Request, func(), error) {
+	return buildRequestIn(ctx, newMediaView(cfg), loopbackListener, taskType, payload)
+}
+
+// buildRequestIn is BuildRequest over an admission's mediaView, so one admission reads the media verdicts
+// once (the task's own gate, the media-job inner gate and the refusal's task list share the reading).
+func buildRequestIn(ctx context.Context, v *mediaView, loopbackListener bool, taskType string, payload json.RawMessage) (core.Request, func(), error) {
+	cfg := v.cfg
 	noop := func() {}
-	if !taskConfiguredFor(cfg, taskType, loopbackListener) {
+	if !taskConfiguredIn(v, taskType, loopbackListener) {
+		// A media task the node binds but whose route is not CONFIGURED is not a malformed request: it is
+		// a node that cannot run it right now, which admission answers 503 so the caller re-places it.
+		if nre := mediaRouteNotReady(v, taskType); nre != nil {
+			return core.Request{}, noop, nre
+		}
 		return core.Request{}, noop, fmt.Errorf("unsupported task_type %q (supported: %s)",
-			taskType, strings.Join(SupportedTasksFor(cfg, loopbackListener), ", "))
+			taskType, strings.Join(supportedTasksIn(v, loopbackListener), ", "))
 	}
 	if len(payload) == 0 {
 		payload = json.RawMessage(`{}`)
@@ -397,6 +497,8 @@ func BuildRequest(ctx context.Context, cfg config.Config, loopbackListener bool,
 		return buildComposeVideo(payload)
 	case ComposeProjectTask:
 		return buildComposeProject(ctx, cfg, payload)
+	case MediaJobTask:
+		return buildMediaJob(ctx, v, loopbackListener, payload)
 	case "agent":
 		return buildAgentRun(cfg, payload)
 	case "accel":
@@ -414,7 +516,7 @@ func BuildRequest(ctx context.Context, cfg config.Config, loopbackListener bool,
 	}
 	// Unreachable: taskConfiguredFor gates membership. Kept for defense.
 	return core.Request{}, noop, fmt.Errorf("unsupported task_type %q (supported: %s)",
-		taskType, strings.Join(SupportedTasksFor(cfg, loopbackListener), ", "))
+		taskType, strings.Join(supportedTasksIn(v, loopbackListener), ", "))
 }
 
 // A remote media task's output path is the NODE's choice, never the caller's.

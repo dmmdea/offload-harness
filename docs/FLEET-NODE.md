@@ -179,7 +179,10 @@ of repeating).
 
 The advertisement (`/fleet/health` `supported_task_types`) is derived from the node's OWN
 config at process start — a route bound in the config after the process started (e.g. adding
-`imagegen_script`) does not advertise until the process is restarted the hard way above.
+`imagegen_script`) does not advertise until the process is restarted the hard way above. Since ADR 0077
+the media tasks (`video-gen`, `animate`, `audio-gen`, `run-graph`) are the exception in the other direction: a
+bound route is advertised only while `internal/mediacap` reads it CONFIGURED from the disk (re-read at most every
+60 seconds), so a weight that goes missing drops the task without a restart and `media_routes` says why.
 
 ## Two utilization figures, and which one answers which question
 
@@ -429,16 +432,21 @@ instrument, and we explicitly encourage running it alongside a fleet node:
 ## Task surface
 
 Advertised tasks are **derived from this box's config**, never hardcoded — an unbound route
-is not advertised, so the dispatcher can't send work the box would defer:
+is not advertised, so the dispatcher can't send work the box would defer. A media task
+(`video-gen`, `animate`, `audio-gen`, `run-graph`) is bound by its ComfyUI/python script **or** by the native
+engine that replaces it (sd.cpp for video and animate, audio.cpp for voice and music, CT-49), and is advertised and
+admitted only while `internal/mediacap` reads its route as CONFIGURED (`/fleet/health` `media_routes` says which route
+is missing what): a bound script or engine over a missing weight drops the task, and restoring the file brings it back:
 
 | Fleet `task_type` | Pipeline task | Advertised when | Footprint family |
 |---|---|---|---|
 | `image-gen` | `generate_image` | `imagegen_script`/sdcpp engine bound (the default binding) OR any `imagegen_families` entry configured — a family-only node (no default binding, e.g. an opt-in-family-only node) is advertised too | `imagegen_family` (else `sdxl`, only when the default binding is actually configured); quant `bf16` for the HiDream-O1 binding |
-| `video-gen` | `generate_video` | `videogen_script` set | the `videogen_family` binding (`ltx25`, …), else `wan2.2` for the runner default; quant `q8_0` only for the Wan family, when the bound unets are the Q8_0 GGUFs |
+| `video-gen` | `generate_video` | `videogen_script` set, **or** the default family bound to the sd.cpp engine (`videogen_families.<name>.engine: sdcpp`) — and `generate_video` CONFIGURED | the `videogen_family` binding (`ltx25`, …), else `wan2.2` for the runner default; an sd.cpp default family advertises its own name (the `wan22` sentinel keeps `wan2.2`); quant `q8_0` only for the Wan family, when the bound unets are the Q8_0 GGUFs |
+| `animate` | `animate_character` | `animategen_script` set, **or** `animategen_engine: sdcpp` — and `animate_character` CONFIGURED | `wan-animate2` (ComfyUI WAN-Animate-2); `wan-vace` for the sd.cpp Wan2.1 VACE lane (`config.AnimateSdcppFootprintFamily`, the family that lane records its footprint under) |
 | `stt` | `transcribe` (a path on THIS node's disk) | `stt_model` set | `whisper` (llama-swap-resident — no footprint sampling). Bearer-gated when the node has a `fleet_auth_token` (0.164.0); shares the stt concurrency cap below. |
 | `stt-upload` (own route `POST /fleet/stt`, 0.164.0) | `transcribe` over audio bytes the caller sends | `stt_model` set **and** (loopback listener **or** `fleet_auth_token` set) | `whisper`, as `stt` |
-| `audio-gen` | `generate_audio` | voice or music script set | `acestep` (music) / `chatterbox` (voice) |
-| `run-graph` | `run_graph` | `run_graph_script` set | payload-declared `model_family`, else `comfy-graph` |
+| `audio-gen` | `generate_audio` | a voice renderer (`voicegen_script`, `tts_endpoint` or `voicegen_engine: audiocpp`) or a music renderer (`musicgen_script` or `musicgen_engine: audiocpp`) bound — and at least one of `generate_audio:voice`, `generate_audio:voice:endpoint`, `generate_audio:music` CONFIGURED | `acestep` (ComfyUI music, and the only family a box with no audio.cpp engine advertises); with audio.cpp, the engine's own family names: `ace_step` (music) and `chatterbox` (voice) |
+| `run-graph` | `run_graph` | `run_graph_script` set (ComfyUI only: no native engine runs a graph) — and `run_graph` CONFIGURED | payload-declared `model_family`, else `comfy-graph` |
 | `agent` | `agent` | `fleet_agent_enabled` **and** a resolvable agent seat **and** (loopback listener **or** `fleet_auth_token` set) | none — llama-swap-resident text work, no render footprint |
 | `vision` (own route `POST /fleet/vision`) | `vqa` / `ocr` / `assess_image` (narrowed by the node's `vision_tasks`) | `vision_model` set **and** (loopback listener **or** `fleet_auth_token` set) — see [The vision task](#the-vision-task-post-fleetvision) | none — llama-swap-resident VLM, no render footprint |
 | `text` (own route `POST /fleet/text`, 0.154.0, dark) | `classify` / `extract` (never summarize or triage), as the node's `text_tasks` names them | `text_tasks` non-empty **and** (loopback listener **or** `fleet_auth_token` set) — see [The text task](#the-text-task-post-fleettext) | none — the node's own cascade seat, no render footprint |
@@ -685,12 +693,16 @@ No transcript field exists — remote reasoning never crosses the wire.
   withheld from the advertised `supported_task_types`. Loopback + no token stays open (same
   trust boundary as the local MCP surface).
 - **Media dispatch, media job polls, `/fleet/media/*`, and health never check the token** —
-  deployed tokenless media clients keep working byte-identically — **except** that on a node with a token,
+  deployed tokenless media clients keep working byte-identically (the one media door that carries a caller's private input files,
+  `POST /fleet/media-job`, is token-gated like the project door: see
+  [the media-job door](systems/fleet-node.md#the-media-job-door-artifacts-and-honest-advertisement-adr-0077)) — **except** that on a node with a token,
   `GET /fleet/media/{name}` needs the bearer for the outputs of the token-gated lanes: an stt upload's transcripts
   (`stt-<digits>-<8 hex>.*`), the legacy path-taking `stt` lane's transcripts (`<basename>-<8 hex>.srt|txt|segments.json`,
-  because that lane is gated and its stem can carry the node's own file names) and a project render's files
+  because that lane is gated and its stem can carry the node's own file names), a project render's files
   (`composeproj-<16 hex>.*`, the project door's own stem; the vetted `compose-video` lane keeps `compose-<hash8>` and stays
-  tokenless). The gate fails closed on spellings a Windows filesystem folds onto the same file: the name is matched
+  tokenless) and a media-job's renders (`mediajob-<16 hex>.*`, the media-job door's own stem, set after the inner builder: they
+  are rendered from the caller's private still, driver video or voice sample; a job of the tokenless `/fleet/dispatch` door
+  keeps the pipeline's `render-<hash8>` / `video-<hash8>` names and is still read by bare name). The gate fails closed on spellings a Windows filesystem folds onto the same file: the name is matched
   lower-cased with trailing dots and spaces removed, and a name that is not plain ASCII or carries `~` or `:` is treated as
   gated (media this node writes is plain lower-case ASCII, so no tokenless lane is caught). Whole-fleet enforcement is a
   recorded follow-up for a coordinated whole-fleet deploy window (ADR 0023).
@@ -1142,7 +1154,7 @@ never a local run. `meta.node` / `meta.placement` on the result say where it ran
 
 Every `delegate_remotes` entry is first judged by the tailnet shape check the agent lane applies
 (`netguard.TailnetURL`), through `internal/rosterprobe`; an entry it refuses is named in the defer reason as
-`not dialled, refused by the tailnet guard` and the others still serve (the text, stt-upload, compose and accelerator
+`not dialled, refused by the tailnet guard` and the others still serve (the text, stt-upload, compose, media and accelerator
 lanes do the same, [ADR 0074](architecture/decisions/0074-every-fleet-client-admits-the-same-roster-under-a-configured-list-of-tailnet-zones.md)).
 
 ## The text task (`POST /fleet/text`)
