@@ -1132,11 +1132,15 @@ as the fallback): the agent seat, and every other model `/running` lists, except
 embedder and reranker). The stack stays resident and the run prints `kept the memory stack resident`. The operator's
 rule is that mem0 never yields. On the three-card reference box it sits on the utility card, so unloading it freed nothing a render could use; on a single-card tier it shares the render card (register
 C-87, 2026-10-01). `render/gpu-lock.mjs` keeps the same set. An empty `memory_stack` means the default set: `embeddinggemma`,
-`bge-reranker-v2-m3` and `embeddinggemma-ams`, the id the memory authority node serves its embedder under (register A-122b:
-the first two did not name it, so a lease cleared it; a name the box does not serve is inert, and `internal/config` and
-`render/gpu-lock.mjs` carry the same list, kept equal by a test). A non-empty list replaces the default rather than adding
+`bge-reranker-v2-m3`, `embeddinggemma-ams`, the id the memory authority node serves its embedder under (register A-122b:
+the first two did not name it, so a lease cleared it), and `embeddinggemma2`, the EmbeddingGemma-2 entry the memory stack is
+moving to (appended 2026-10-09; the serving templates render it on the tiers that set `include_embeddinggemma2`, with its
+projector on the memory authority's tier and text-only on the replicas). A name the
+box does not serve is inert, and `internal/config` and `render/gpu-lock.mjs` carry the same list, kept equal by a test. A non-empty list replaces the default rather than adding
 to it, and the installer's seeded `config.json` names the first two, so a node whose embedder or reranker has another
-model name must list every member: an unlisted one is unloaded by `--unload-seat` like any other resident model, and by
+model name must list every member (the tiers that render `embeddinggemma2`, ampere-6, ampere-8 and blackwell-3x16 (the last
+two text-only), seed `memory_stack` with it in `config_seed`, projector or not; the template stays at two entries because `llamaswap bind check` reports a listed name
+the roster does not serve as dangling): an unlisted one is unloaded by `--unload-seat` like any other resident model, and by
 the render free step like any other tier. Fleet reclaim (`fleet_reclaim.go`) keeps the same set: a loaded `memory_stack`
 member (the default set when the list is empty, read by the same `effectiveMemoryStack` as `--unload-seat`) is baseline, never
 reclaimable capacity, whatever its ttl is, so the house rule's 300 s idle ttl no longer makes the embedder reclaimable there. It

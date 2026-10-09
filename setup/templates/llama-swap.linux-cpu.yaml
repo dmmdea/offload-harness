@@ -63,6 +63,19 @@ models:
       --threads __NTHREADS__ --port ${PORT} --host 127.0.0.1
     checkEndpoint: /health
     ttl: 300
+  # SECOND memory-stack embedder (EmbeddingGemma-2 Q8_0 + its multimodal projector, which a text-only
+  # tier's render strips, embeddinggemma2_projector false), a member of
+  # the stack's residency set; see the linux-cuda template for the full rationale and the
+  # measured footprint. REQUIRES llama.cpp >= b11452.
+  embeddinggemma2:
+    env: ["${ld}"]
+    cmd: >-
+      __LLAMA_BIN__/llama-server --model __MODELS__/embeddinggemma-2-Q8_0.gguf
+      --mmproj __MODELS__/mmproj-embeddinggemma-2-Q8_0.gguf --embeddings --pooling mean
+      --ctx-size 4096 --batch-size 4096 --ubatch-size 2048 --threads __NTHREADS__
+      --host 127.0.0.1 --port ${PORT}
+    checkEndpoint: /health
+    ttl: 300
 
 # This template accepts tier-declared media seats (a residency ROLE, never a set name).
 # `env` is the loader-path macro every llama-backed seat carries on Linux. A template
@@ -74,11 +87,13 @@ models:
 matrix:
   vars:
     emb: embeddinggemma
+    eg2: embeddinggemma2
     e4b: offload-e4b
     e2b: gemma4-e2b
     m26: gemma4-26b-a4b
   evict_costs:
     emb: 1000
+    eg2: 1000
   sets:
-    residents: "emb__SEATS_RESIDENT__"
+    residents: "emb__EG2_AND____SEATS_RESIDENT__"
     interactive: "+residents & (e4b | e2b__M26_ALT____SEATS_SWAPPABLE__)"

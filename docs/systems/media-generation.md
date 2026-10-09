@@ -92,7 +92,7 @@ job for a bounded window (`gpu_wait_ms`, 90 s) and then defers with the holder's
 Two details of the free step are easy to get wrong:
 
 - **It frees per model, not everything.** The always-loaded embedding and reranker models are
-  small (a few hundred MiB each) and, on the reference box, pinned to the utility card, not the render card. An earlier unload-all implementation tore that memory stack down
+  small (a few hundred MiB each; the larger EmbeddingGemma-2 entry on the tiers that carry it, 1,196 to 1,536 MiB with its projector and 460 to 482 MiB text-only) and, on the reference box, pinned to the utility card, not the render card. An earlier unload-all implementation tore that memory stack down
   on every generation job for no VRAM benefit; the keep-set now protects it.
 - **ComfyUI is only killed if the harness started it.** An already-running instance is left alone.
 

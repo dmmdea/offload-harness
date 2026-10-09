@@ -158,6 +158,9 @@ type ParamsBasis struct {
 	IncludeQ359B  bool             `json:"include_qwen35_9b"`
 	IncludeMimo9B bool             `json:"include_mimo_9b"`
 	IncludeQ3827B bool             `json:"include_qwen38_27b"`
+	IncludeQ3635B bool             `json:"include_qwen36_35b,omitempty"`      // omitted when false: it adds nothing to the Params bytes of a tier that never sets it
+	IncludeEG2    bool             `json:"include_embeddinggemma2,omitempty"` // omitted when false, for the same reason
+	EG2TextOnly   bool             `json:"eg2_text_only,omitempty"`           // omitted when false: the entry with its projector, as the authority runs it, hashes as it did
 	Seats         []mediaseat.Seat `json:"seats"`
 	Home          string           `json:"home"`
 	GOOS          string           `json:"goos"`
@@ -187,8 +190,8 @@ func BasisOf(p Params) ParamsBasis {
 		Ctx: p.Ctx, KVType: p.KVType, FlashAttn: p.FlashAttn, MoE26B: p.MoE26B,
 		Threads: p.Threads, CacheRAMMiB: p.CacheRAMMiB, Include26B: p.Include26B, IncludeQ38: p.IncludeQ38,
 		IncludeQ354B: p.IncludeQ354B, IncludeQ359B: p.IncludeQ359B, IncludeMimo9B: p.IncludeMimo9B,
-		IncludeQ3827B: p.IncludeQ3827B,
-		Seats:         p.Seats, Home: p.Home, GOOS: p.GOOS, RknpuHome: p.RknpuHome, DisplayLayer: p.DisplayLayer, GPUEnv: p.GPUEnv,
+		IncludeQ3827B: p.IncludeQ3827B, IncludeQ3635B: p.IncludeQ3635B, IncludeEG2: p.IncludeEG2, EG2TextOnly: p.EG2TextOnly,
+		Seats: p.Seats, Home: p.Home, GOOS: p.GOOS, RknpuHome: p.RknpuHome, DisplayLayer: p.DisplayLayer, GPUEnv: p.GPUEnv,
 		Backend: p.Backend, AltCPULlamaBin: p.AltCPULlamaBin, DisableCUDAGraphs: p.DisableCUDAGraphs,
 		VLLMSeat: p.VLLMSeat, ExtraVLLMSeats: p.ExtraVLLMSeats, VLLMRuntime: p.VLLMRuntime,
 	}
@@ -204,8 +207,8 @@ func (b ParamsBasis) Params() Params {
 		Ctx: b.Ctx, KVType: b.KVType, FlashAttn: b.FlashAttn, MoE26B: b.MoE26B,
 		Threads: b.Threads, CacheRAMMiB: b.CacheRAMMiB, Include26B: b.Include26B, IncludeQ38: b.IncludeQ38,
 		IncludeQ354B: b.IncludeQ354B, IncludeQ359B: b.IncludeQ359B, IncludeMimo9B: b.IncludeMimo9B,
-		IncludeQ3827B: b.IncludeQ3827B,
-		Seats:         b.Seats, Home: b.Home, GOOS: b.GOOS, RknpuHome: b.RknpuHome, DisplayLayer: b.DisplayLayer, GPUEnv: b.GPUEnv,
+		IncludeQ3827B: b.IncludeQ3827B, IncludeQ3635B: b.IncludeQ3635B, IncludeEG2: b.IncludeEG2, EG2TextOnly: b.EG2TextOnly,
+		Seats: b.Seats, Home: b.Home, GOOS: b.GOOS, RknpuHome: b.RknpuHome, DisplayLayer: b.DisplayLayer, GPUEnv: b.GPUEnv,
 		Backend: b.Backend, AltCPULlamaBin: b.AltCPULlamaBin, DisableCUDAGraphs: b.DisableCUDAGraphs,
 		VLLMSeat: b.VLLMSeat, ExtraVLLMSeats: b.ExtraVLLMSeats, VLLMRuntime: b.VLLMRuntime,
 	}

@@ -141,8 +141,9 @@ export function releaseLeaseUnloadMarker(lease) {
 // of silently unloaded. The literal below is the fallback for a direct CLI run. It is the
 // same list as config.Default().MemoryStack (internal/config), and a Go test reads this
 // line to keep the two in step: embeddinggemma-ams is the id the memory authority node
-// serves its embedder under (register A-122b), and a name a box does not serve is inert.
-const DEFAULT_MEMORY_STACK = ["embeddinggemma", "bge-reranker-v2-m3", "embeddinggemma-ams"];
+// serves its embedder under (register A-122b), embeddinggemma2 is the EmbeddingGemma-2 entry the
+// memory stack is moving to (2026-10-09), and a name a box does not serve is inert.
+const DEFAULT_MEMORY_STACK = ["embeddinggemma", "bge-reranker-v2-m3", "embeddinggemma-ams", "embeddinggemma2"];
 export function memoryStack(env = process.env.MEMORY_STACK) {
   if (env && env.trim()) {
     return new Set(env.split(",").map((s) => s.trim()).filter(Boolean));

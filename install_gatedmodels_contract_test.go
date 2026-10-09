@@ -41,6 +41,9 @@ var gatedWeightFilenames = []string{
 	weightQ354B,
 	weightQ359B,
 	weightMimo9B,
+	weightQ3635B,
+	weightEG2,
+	mmprojEG2,
 }
 
 func repoFile(t *testing.T, rel string) string {
@@ -64,6 +67,11 @@ var gatedModelWeights = map[string][]string{
 	"qwen3.5-9b-agent": {weightQ359B},
 	"qwen38-27b-agent": {weightQ3827B},
 	"mimo-9b-agent":    {weightMimo9B},
+	// The RAM-spill agent seat: its weight is in a subdirectory, and the name must be in BOTH
+	// the templates that define it (linux-cuda, win-cuda) and install.ps1's pinned `name`.
+	"qwen3.6-35b-a3b-agent": {weightQ3635B},
+	// The second memory-stack embedder: model + multimodal projector, in every template that renders the stack.
+	"embeddinggemma2": {weightEG2, mmprojEG2},
 }
 
 // TestGatedWeightFilenamesMatchTheShippedTemplates pins each filename against the

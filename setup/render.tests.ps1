@@ -262,20 +262,28 @@ if ($b32Functional -notmatch 'qwen3\.8-27b' -and $b32Functional -notmatch '\bq38
 # docs/specs/2026-07-26-ampere-6-tier-design.md): ctx 16384->32768 and resident
 # E2B->E4B, both pure GPU-side wins.
 #
-# The 26B stays DROPPED on EVERY ram tier, and that is deliberate: boxes in this
-# class are servers whose CPU and RAM belong to their services, so inference is
-# confined to the GPU and no MoE/CPU-offload tier is allowed. It was measured to
-# RUN here, so the temptation to enable it is real — these assertions exist
-# precisely to fail if someone does. Both bands are asserted so a future RAM
-# upgrade (low -> mid) cannot silently re-introduce it.
+# The 26B stays DROPPED on EVERY ram tier, and that is deliberate: it was measured to
+# RUN here (and failed spill stability in the 2026-10-07/08 bake), so the temptation to
+# enable it is real - these assertions exist precisely to fail if someone does. All four
+# bands are asserted so a future RAM upgrade (low -> mid) cannot silently re-introduce it.
+#
+# What changed 2026-10-09 (ADR 0080): "no expert may sit in RAM" is no longer the tier's
+# rule. The operator's 2026-10-07 spill ruling admits a spill that truly adds capability,
+# is no RAM hog and leaves the system stable, and the Qwen3.6-35B-A3B agent seat passed all
+# three. It renders on low, mid and high (28 GB and up) and NEVER on min, with the 26B
+# still absent - the per-band checks below pin exactly that split.
 foreach ($band in @('min','low','mid','high')) {
-  Write-Host "== ampere-6 / ram=$band - ctx 32768, NO 26B (GPU-only by design) =="
+  Write-Host "== ampere-6 / ram=$band - ctx 32768, NO 26B, spill agent seat only from low up =="
   $r = Invoke-Render -Backend 'cuda' -ProfileId 'ampere-6' -RamTier $band -BigRam $false
   $macro = Get-CommonMacro $r.yaml
   if ($macro -match '--ctx-size 32768')                        { Ok "ampere-6/$band ctx=32768" } else { Bad "ampere-6/$band ctx (got: $macro)" }
   if ($r.yaml -match '(?m)^\s{2}gemma4-e2b:')                  { Ok "ampere-6/$band has E2B tier" } else { Bad "ampere-6/$band E2B present" }
   if ($r.yaml -notmatch 'gemma4-26b-a4b')                      { Ok "ampere-6/$band has NO 26B tier" } else { Bad "ampere-6/$band 26B LEAKED IN (CPU/RAM is reserved for services)" }
-  if ($r.yaml -notmatch '(?m)^\s+cmd:.*--n?-?cpu-moe')         { Ok "ampere-6/$band renders no CPU-offload flag" } else { Bad "ampere-6/$band emitted a cpu-moe flag" }
+  # The 26B's placement flag is absent on every band; the ONE --n-cpu-moe the tier may carry is
+  # the spill seat's literal, asserted per band below.
+  if ($r.yaml -notmatch '(?m)^\s+cmd:.*--n?-?cpu-moe')         { Ok "ampere-6/$band renders no CPU-offload flag on a cmd line" } else { Bad "ampere-6/$band emitted a cpu-moe flag" }
+  $spillFunctional = (($r.yaml -split "`r?`n") | Where-Object { $_.Trim() -and $_.Trim() -notmatch '^#' }) -join "`n"
+  if ($spillFunctional -notmatch '--cpu-moe')                  { Ok "ampere-6/$band renders no every-expert --cpu-moe in a functional line" } else { Bad "ampere-6/$band emitted --cpu-moe (every expert in RAM)" }
   if ($r.verdict -and $r.verdict.moe_mode -eq 'drop')          { Ok "ampere-6/$band moe_mode=drop" } else { Bad "ampere-6/$band moe_mode (got: $($r.verdict.moe_mode))" }
   if ($r.yaml -notmatch '__MOE_26B__')                         { Ok "ampere-6/${band}: no unsubstituted MoE token" } else { Bad "ampere-6/$band left __MOE_26B__" }
   # include_qwen35_4b: the measured agent seat renders (entry + swappable-set
@@ -301,6 +309,78 @@ foreach ($band in @('min','low','mid','high')) {
   # already has several.
   if ($q354Cmd -and $q354Cmd -notmatch '--reasoning\s+off')    { Ok "ampere-6/$band qwen3.5-4b seat does NOT pin --reasoning off (measured: off collapses it)" } else { Bad "ampere-6/$band qwen3.5-4b seat pins --reasoning off - measured to collapse 67% -> 28-44%" }
   if ($q354Cmd -and $q354Cmd -notmatch '\$\{common\}')         { Ok "ampere-6/$band qwen3.5-4b seat writes flags explicitly (not via `${common})" } else { Bad "ampere-6/$band qwen3.5-4b seat uses `${common}, which pins --reasoning off" }
+
+  # The RAM-spill agent seat: rendered exactly where the box has the RAM (low, mid, high), never on min.
+  $spillWanted = ($band -ne 'min')
+  $spillHere = ($spillFunctional -match '(?m)^\s{2}qwen3\.6-35b-a3b-agent:')
+  if ($spillHere -eq $spillWanted)                             { Ok "ampere-6/$band spill agent seat rendered=$spillHere (RAM floor is low)" } else { Bad "ampere-6/$band spill agent seat rendered=$spillHere, want $spillWanted" }
+  if ($r.yaml -notmatch '__Q3635B_')                           { Ok "ampere-6/${band}: no unsubstituted Q3635B token" } else { Bad "ampere-6/$band left __Q3635B_*__" }
+  $q354Aliased = ($q354Cmd -match 'agent-seat') -or ($r.yaml -match '(?m)^\s{4}aliases:.*qwen35-4b.*agent-seat')
+  if ($spillWanted) {
+    $spillCmd = ([regex]::Match($r.yaml, '(?ms)^\s{2}qwen3\.6-35b-a3b-agent:.*?(?=^\s{2}\S|\Z)')).Value
+    if ($spillCmd -match '--n-cpu-moe 40')                     { Ok "ampere-6/$band spill seat carries the measured --n-cpu-moe 40" } else { Bad "ampere-6/$band spill seat lost --n-cpu-moe 40" }
+    if ($spillCmd -match '--load-mode none')                   { Ok "ampere-6/$band spill seat carries --load-mode none" } else { Bad "ampere-6/$band spill seat lost --load-mode none" }
+    if ($spillCmd -match '--cache-ram 0\b')                    { Ok "ampere-6/$band spill seat carries the deliberate zero host prompt cache" } else { Bad "ampere-6/$band spill seat lost --cache-ram 0" }
+    if ($spillCmd -match '--ctx-size 32768' -and $spillCmd -match '--parallel 1') { Ok "ampere-6/$band spill seat serves 32768 on one slot" } else { Bad "ampere-6/$band spill seat window or slot count moved" }
+    if ($spillCmd -notmatch '--reasoning' -and $spillCmd -notmatch '\$\{common\}') { Ok "ampere-6/$band spill seat is a thinking model: no --reasoning, not via `${common}" } else { Bad "ampere-6/$band spill seat pins a reasoning flag or uses `${common}" }
+    if ($spillCmd -match 'Qwen3\.6-35B-A3B.Qwen3\.6-35B-A3B-UD-IQ3_XXS\.gguf') { Ok "ampere-6/$band spill seat reads the GGUF from its subdirectory" } else { Bad "ampere-6/$band spill seat model path" }
+    if ($r.yaml -match '(?m)^\s{4}interactive:.*\bq36\b')      { Ok "ampere-6/$band spill seat joins the interactive set" } else { Bad "ampere-6/$band q36 set membership" }
+    if ($spillCmd -match 'agent-seat' -and -not $q354Aliased)  { Ok "ampere-6/$band spill seat holds agent-seat, the 4B handed it off" } else { Bad "ampere-6/$band agent-seat alias is not uniquely held by the spill seat" }
+  } else {
+    if ($spillFunctional -notmatch '--n-cpu-moe')              { Ok "ampere-6/$band renders no --n-cpu-moe (min RAM: no spill)" } else { Bad "ampere-6/$band renders a spill on a min-RAM box" }
+    if ($spillFunctional -notmatch '\bq36\b')                  { Ok "ampere-6/$band has no q36 var or set member" } else { Bad "ampere-6/$band q36 leaked into the matrix" }
+    if ($q354Aliased)                                          { Ok "ampere-6/$band the 4B keeps agent-seat (it is the only agent seat here)" } else { Bad "ampere-6/$band the 4B lost agent-seat with no spill seat to take it" }
+  }
+}
+# The memory stack's second embedder (include_embeddinggemma2, 2026-10-09): the entry, its matrix var,
+# its evict cost and its member of the stack's residency set render on ampere-6 (the memory
+# authority's card, where it was measured, WITH its projector) and on ampere-8 and blackwell-3x16 as
+# TEXT-ONLY replicas (the same entry without --mmproj: see the loop after this one), and nowhere
+# else. No RAM gate (VRAM-resident), so the RAM band does not matter; two bands are asserted to prove that.
+foreach ($case in @(@('ampere-6', 'min'), @('ampere-6', 'high'))) {
+  $pid2 = $case[0]; $band = $case[1]
+  $r = Invoke-Render -Backend 'cuda' -ProfileId $pid2 -RamTier $band -BigRam $false
+  $eg2Functional = (($r.yaml -split "`r?`n") | Where-Object { $_.Trim() -and $_.Trim() -notmatch '^#' }) -join "`n"
+  if ($eg2Functional -match '(?m)^\s{2}embeddinggemma2:')       { Ok "$pid2/$band renders the embeddinggemma2 stack entry" } else { Bad "$pid2/$band embeddinggemma2 entry missing" }
+  $eg2Cmd = ([regex]::Match($r.yaml, '(?ms)^\s{2}embeddinggemma2:.*?(?=^\s{2}\S|\Z)')).Value
+  if ($eg2Cmd -match 'embeddinggemma-2-Q8_0\.gguf' -and $eg2Cmd -match '--mmproj\s+\S*mmproj-embeddinggemma-2-Q8_0\.gguf') { Ok "$pid2/$band embeddinggemma2 reads the model and its projector" } else { Bad "$pid2/$band embeddinggemma2 model or projector missing" }
+  if ($eg2Cmd -match '--embeddings' -and $eg2Cmd -match '--ctx-size 4096' -and $eg2Cmd -match '--batch-size 4096' -and $eg2Cmd -match '--ubatch-size 2048') { Ok "$pid2/$band embeddinggemma2 carries the measured embedding sizing" } else { Bad "$pid2/$band embeddinggemma2 sizing moved" }
+  if ($eg2Cmd -notmatch 'aliases:')                             { Ok "$pid2/$band embeddinggemma2 has no aliases (the memory stack selects the id)" } else { Bad "$pid2/$band embeddinggemma2 grew an alias" }
+  if ($eg2Functional -match '(?m)^\s{4}eg2:\s*embeddinggemma2\s*$' -and $eg2Functional -match '(?m)^\s{4}eg2:\s*1000\s*$') { Ok "$pid2/$band eg2 var and evict cost present" } else { Bad "$pid2/$band eg2 var or evict cost missing" }
+  if ($eg2Functional -match '(?m)^\s{4}residents?:\s*"[^"]*\beg2\b[^"]*"') { Ok "$pid2/$band eg2 is a member of the stack's residency set" } else { Bad "$pid2/$band eg2 not in the residency set" }
+  if ($eg2Functional -notmatch '(?m)^\s{4}(interactive|text):.*\beg2\b') { Ok "$pid2/$band eg2 is never a swappable alternative" } else { Bad "$pid2/$band eg2 leaked into the swappable set" }
+  if ($r.yaml -notmatch '__EG2_')                               { Ok "$pid2/${band}: no unsubstituted EG2 token" } else { Bad "$pid2/$band left __EG2_*__" }
+  if ($eg2Functional -match '(?m)^\s{2}embeddinggemma:')        { Ok "$pid2/$band keeps the embeddinggemma (300M) entry" } else { Bad "$pid2/$band lost the 300M embedder" }
+}
+# The TEXT-ONLY replicas (embeddinggemma2_projector false): the entry renders in the stack's residency
+# set exactly as on the authority, minus its one `--mmproj <GGUF>` argument. Every other flag of the
+# authority's (ampere-6) command line is compared word for word, ubatch 2048 included (the stack's hot
+# budget is 1,900 tokens; a smaller ubatch returns HTTP 500 on long memories).
+$a6 = Invoke-Render -Backend 'cuda' -ProfileId 'ampere-6' -RamTier 'high' -BigRam $false
+$a6Cmd = ([regex]::Match($a6.yaml, '(?ms)^\s{2}embeddinggemma2:.*?(?=^\s{2}\S|\Z)')).Value
+$a6Words = ((($a6Cmd -replace '(?m)^\s*(env|checkEndpoint|ttl):.*$', '') -replace '--mmproj\s+\S+\s+', '') -split '\s+' | Where-Object { $_ -and $_ -ne 'cmd:' -and $_ -ne '>-' -and $_ -ne 'embeddinggemma2:' }) -join ' '
+foreach ($case in @(@('ampere-8', 'low'), @('ampere-8', 'high'), @('blackwell-3x16', 'high'))) {
+  $pid2 = $case[0]; $band = $case[1]
+  $r = Invoke-Render -Backend 'cuda' -ProfileId $pid2 -RamTier $band -BigRam $false
+  $eg2Functional = (($r.yaml -split "`r?`n") | Where-Object { $_.Trim() -and $_.Trim() -notmatch '^#' }) -join "`n"
+  if ($eg2Functional -match '(?m)^\s{2}embeddinggemma2:')       { Ok "$pid2/$band renders the embeddinggemma2 stack entry (text-only replica)" } else { Bad "$pid2/$band embeddinggemma2 entry missing" }
+  $eg2Cmd = ([regex]::Match($r.yaml, '(?ms)^\s{2}embeddinggemma2:.*?(?=^\s{2}\S|\Z)')).Value
+  if ($eg2Cmd -match 'embeddinggemma-2-Q8_0\.gguf')             { Ok "$pid2/$band embeddinggemma2 reads the model" } else { Bad "$pid2/$band embeddinggemma2 model missing" }
+  if ($eg2Cmd -notmatch 'mmproj' -and $eg2Functional -notmatch 'mmproj-embeddinggemma') { Ok "$pid2/$band embeddinggemma2 carries no --mmproj (text-only)" } else { Bad "$pid2/$band embeddinggemma2 still names a projector" }
+  $eg2Words = (($eg2Cmd -replace '(?m)^\s*(env|checkEndpoint|ttl):.*$', '') -split '\s+' | Where-Object { $_ -and $_ -ne 'cmd:' -and $_ -ne '>-' -and $_ -ne 'embeddinggemma2:' }) -join ' '
+  if ($eg2Words -eq $a6Words)                                   { Ok "$pid2/$band embeddinggemma2 is the authority's command line minus the projector, word for word" } else { Bad "$pid2/$band embeddinggemma2 flags differ from the authority's.`n   got : $eg2Words`n   want: $a6Words" }
+  if ($eg2Cmd -match '--embeddings --pooling mean' -and $eg2Cmd -match '--ctx-size 4096' -and $eg2Cmd -match '--batch-size 4096' -and $eg2Cmd -match '--ubatch-size 2048') { Ok "$pid2/$band embeddinggemma2 carries the measured embedding sizing" } else { Bad "$pid2/$band embeddinggemma2 sizing moved" }
+  if ($eg2Cmd -notmatch 'aliases:')                             { Ok "$pid2/$band embeddinggemma2 has no aliases" } else { Bad "$pid2/$band embeddinggemma2 grew an alias" }
+  if ($eg2Functional -match '(?m)^\s{4}eg2:\s*embeddinggemma2\s*$' -and $eg2Functional -match '(?m)^\s{4}eg2:\s*1000\s*$') { Ok "$pid2/$band eg2 var and evict cost present" } else { Bad "$pid2/$band eg2 var or evict cost missing" }
+  if ($eg2Functional -match '(?m)^\s{4}residents?:\s*"[^"]*\beg2\b[^"]*"') { Ok "$pid2/$band eg2 is a member of the stack's residency set" } else { Bad "$pid2/$band eg2 not in the residency set" }
+  if ($r.yaml -notmatch '__EG2_')                               { Ok "$pid2/${band}: no unsubstituted EG2 token" } else { Bad "$pid2/$band left __EG2_*__" }
+  if ($eg2Functional -match '(?m)^\s{2}embeddinggemma:')        { Ok "$pid2/$band keeps the embeddinggemma (300M) entry" } else { Bad "$pid2/$band lost the 300M embedder" }
+}
+foreach ($case in @(@('blackwell-16', 'mid'), @('volta-16', 'mid'), @('blackwell-8', 'mid'))) {
+  $pid2 = $case[0]; $band = $case[1]
+  $r = Invoke-Render -Backend 'cuda' -ProfileId $pid2 -RamTier $band -BigRam $false
+  $eg2Functional = (($r.yaml -split "`r?`n") | Where-Object { $_.Trim() -and $_.Trim() -notmatch '^#' }) -join "`n"
+  if ($eg2Functional -notmatch 'embeddinggemma2' -and $eg2Functional -notmatch '(?m)^\s{4}eg2:') { Ok "$pid2/$band renders no embeddinggemma2 (the tier does not carry it)" } else { Bad "$pid2/$band embeddinggemma2 leaked in" }
 }
 # NEGATIVE: a tier that does NOT set include_qwen35_4b must have the entry, its var
 # and its set membership stripped — the mirror of the blackwell-32 qwen3.8 check.

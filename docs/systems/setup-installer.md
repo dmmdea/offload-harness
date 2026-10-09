@@ -105,14 +105,65 @@ confusion:
 - **Vulkan device pinning:** every model entry in the Vulkan template carries
   `GGML_VK_VISIBLE_DEVICES=0` so multi-ICD boxes serve from a deterministic adapter.
 - **One exemption:** the `embeddinggemma` entry bypasses the shared flag macro entirely, taking
-  `--embedding --pooling mean` instead. "All served models get these flags" is therefore false.
+  `--embedding --pooling mean` instead. "All served models get these flags" is therefore false. The
+  `embeddinggemma2` entry (below) takes the same exemption.
+- **The memory stack's second embedder** (0.175.0): every template that renders the stack
+  (`linux-cuda`, `linux-vulkan`, `linux-cpu`, `win-cuda`, `win-cuda-resident`, `win-cpu`, `win-vulkan`,
+  `win-dual-cuda`, `win-dual-blackwell`, `win-triple-blackwell`) carries an `embeddinggemma2` entry:
+  EmbeddingGemma-2 Q8_0 plus its multimodal projector (`--mmproj`), `--embeddings --pooling mean --ctx-size 4096
+  --batch-size 4096 --ubatch-size 2048 --n-gpu-layers 99 --flash-attn on` (the CPU templates drop `-ngl` and
+  `--flash-attn`, as their `embeddinggemma` entry runs without `-ngl`), `ttl: 300`, no aliases (the memory stack
+  selects the id). It renders only on a tier that sets `include_embeddinggemma2`: ampere-6, the memory
+  authority's card where it was measured, WITH the projector, and ampere-8 and blackwell-3x16 as **text-only
+  replicas** (`embeddinggemma2_projector: false`). A replica only embeds text (media adds go to the authority) and
+  text vectors are identical with and without the projector (cosine 1.0, measured), so the replica's entry is the
+  authority's entry with the one `--mmproj <GGUF>` argument removed at render (`servingtmpl.dropEG2Projector`),
+  every other flag identical (`--ubatch-size 2048` is load-bearing: the stack's hot budget is 1,900 tokens and a
+  smaller ubatch returns HTTP 500 on long memories), and the installer does not download the projector for it.
+  The field is optional and absent means true. The projector is off by arithmetic: with it the entry would exceed
+  those cards beside the tier's seats (8,703 MiB on the 8 GB card, 16,375 MiB on the 16,311 MiB utility card of
+  the 3-card tier), text-only it fits (7,649 and 15,321 MiB), and `eg2CardBudget` in
+  `embeddinggemma2_stack_test.go` carries those sums, refuses the projector on a card its recorded sum exceeds and
+  refuses a text-only tier whose projector sum has come to fit; an on-box co-residency measurement can turn the
+  projector on. The entry joins the stack's residency
+  set (`emb & rer & eg2`, or `emb & eg2` where a template has no reranker, or the one `resident` set of an
+  all-resident template): resident beside the swappable seats, never swapped by them, with the stack's evict
+  cost. With the flag off the entry, its matrix var and its evict row are all stripped. The `embeddinggemma`
+  (300M) entry stays on every template: the harness's own embed lane and callers of `text-embedding` /
+  `local-embed` keep using it. Footprint measured on the reference 6 GB node: 1,196 MiB loaded, 1,466 MiB after
+  image embeds, 1,536 MiB after a short video with the projector; 460 MiB loaded and 482 MiB at peak text-only, at
+  `--ubatch-size 2048`. On a text-only box the memory stack's `MEM0_MEDIA_EMBEDDER=off` (memory stack 1.35.1)
+  makes offline media search a clean 400. It needs llama.cpp
+  b11452 or newer (the `gemma-embedding2` architecture); on Windows `install.ps1` pins b11490 and downloads the two
+  GGUFs (309,855,456 and 554,821,024 bytes) for a tier that carries the projector and the model alone for a text-only
+  tier, with no RAM gate (`Get-GatedModelKeys -IncludeEmbeddingGemma2Projector`).
+- **The Windows llama.cpp pin is b11490** (was b9934): the pre-built assets are `win-cuda-12.4`, **`win-cuda-13.4`**
+  (named `13.3` until b9934, so the `llama-cuda13` / `llama-cudart13` URLs moved, not only their hashes), `win-vulkan`
+  and `win-cpu`, each pinned by the GitHub release API digest. `Select-CudaBuild` still keys on the DRIVER's CUDA
+  major (13.0 or newer for the Blackwell serve path), so the selection logic did not move.
+- **The RAM-spill agent seat is a second, measured exception** (ADR 0080): `qwen3.6-35b-a3b-agent`
+  writes its flags as literals (`--n-cpu-moe 40`, `--cache-ram 0`, `--load-mode none`, a 32768 window,
+  q8_0 KV, no `--reasoning` flag because it is a thinking model) instead of the tier macros, because
+  those literals are the configuration the 2026-10-07/08 bake measured. It renders only where the tier
+  carries it (`include_qwen36_35b`) **and** the box's `ram_tier` is `low`, `mid` or `high` (28 GB and up;
+  a `min` box, or a caller that names no tier, renders no spill seat and keeps the Qwen3.5-4B as
+  `agent-seat`; the tier name is read case-blind and trimmed). The same predicate (`tierseed.RAMLowUp`) gates the seed
+  overlay `config_seed_ram_low_up` that binds `agent_model` to it, so a binding never names a seat the
+  roster dropped; `TestTheAgentSeatEachRAMTierBindsIsTheOneItsRenderServes` renders ampere-6 on both
+  operating systems at every RAM tier to hold that. It claims the `agent-seat` alias, and the
+  `qwen3.5-4b-agent` entry stays rendered beside it as an un-aliased opt-in rollback. It requires
+  llama.cpp b10964 or newer (`--load-mode`), and on Windows `install.ps1` downloads the 12.3 GiB GGUF
+  only when both conditions hold.
 
 See [ADR 0002](../architecture/decisions/0002-grammar-reliable-serving-flags.md).
 
 **Config seeds** bind media models per profile. Tiers at 16 GB and above seed HiDream-O1 bf16 and Wan
 2.2 Q8_0. 8 GB tiers gained a **RAM-conditional layer** (J4): `config_seed_ram_mid_high` merges on
 top of the base seed only when `ram_tier` is mid/high, so a 64 GB 8 GB box auto-binds what previously
-needed manual config. The two 8 GB tiers diverge by operator decision: `ampere-8`'s overlay stays the
+needed manual config. A second layer, `config_seed_ram_low_up`, merges when `ram_tier` is low, mid or
+high (28 GB and up, which is what a 32 GB box reports) and BEFORE the mid/high layer, so the mid/high
+value wins key by key; `ampere-6` uses it to bind its agent seat to the Qwen3.6-35B-A3B spill seat on a
+32 GB-class box while a `min` box keeps the Qwen3.5-4B. The two 8 GB tiers diverge by operator decision: `ampere-8`'s overlay stays the
 verified O1 bf16 image seat, image only (2026-07-23 decision, standing there); `blackwell-8`'s
 overlay ALSO seeds the wan22 video lane, `gen_edit_*`, and `inpaint_*` (2026-08-23 reversal, every
 seat measured on its reference box — see `docs/tiers/blackwell-8.md`). The AMD profiles
@@ -227,8 +278,13 @@ config at all — every Linux deployment hand-wrote one, and on the measured 6 G
 first two hand-written topologies each broke the box.
 
 ```
-local-offload install render --profile ampere-6 --home /srv/offload   --llama-bin /srv/offload/build/llamacpp/build/bin   --models /srv/offload/models --listen 127.0.0.1:11436 --out llama-swap.yaml
+local-offload install render --profile ampere-6 --home /srv/offload   --llama-bin /srv/offload/build/llamacpp/build/bin   --models /srv/offload/models --listen 127.0.0.1:11436 --ram-tier low --out llama-swap.yaml
 ```
+
+Name the node's RAM with `--ram-tier min|low|mid|high` (28 GB and up is `low`, which is what a 32 GB box reports). It gates
+the RAM-hungry placements: the 26B on the tiers that carry it and the RAM-spill agent seat of ampere-6 (`low` and up). A render
+without the flag leaves the 26B placement ungated (the caller does not know) but does not render the spill seat: an unspecified
+tier is below that floor.
 
 The templates are **embedded in the binary**, so a fetched binary can render a config on a
 machine with no checkout — which is the shape a real install needs. Omit `--profile` and it
@@ -284,8 +340,12 @@ every offender, and nothing is written:
    sanctions none, so any `N` above zero is refused. A tier that names `moe_26b: n_cpu_moe` with no `N`
    is refused too, because that renders the every-expert `--cpu-moe` on a box with a card.
    `n_cpu_moe_max` is a separate number from `n_cpu_moe` on purpose: the placement a tier ships and the
-   ceiling its measurement supports are two decisions, and one field cannot check itself. No shipped tier
-   declares a partial spill today.
+   ceiling its measurement supports are two decisions, and one field cannot check itself. Only `ampere-6`
+   declares one: `n_cpu_moe_max: 40`, the number its Qwen3.6-35B-A3B spill seat was measured at (the seat's
+   `--n-cpu-moe 40` is a literal in the template, so the ceiling is what lets it render; see
+   [ADR 0080](../architecture/decisions/0080-a-ram-spill-moe-is-the-agent-seat-when-it-earns-it.md)).
+   The check is entry-agnostic, so the same number would also sanction a 26B placement of up to 40 on that
+   tier, which is inert while its `moe_26b` is `drop`.
 3. **The layer check (ADR 0052, D5).** A tier that declares layers must render the seats they name, on the
    cards they name. It runs for any tier that declares layers, not only one that composes others: the
    `ampere-16` tier's `fast` layer would otherwise route to a seat the config never defined.
@@ -382,11 +442,12 @@ the installer would never have written, such as a vLLM box against its fallback 
 reports drift that is its own artifact.
 
 `--ram-tier` defaults to **auto**: the RAM tier this machine detects (`detect` stamps the same
-value), so a 64 GB box is compared against the base seed **plus** the `config_seed_ram_mid_high`
-overlay its installer applied. It used to default to the base seed alone, and on a blackwell-8 box
+value), so a 64 GB box is compared against the base seed **plus** the `config_seed_ram_low_up` and
+`config_seed_ram_mid_high` overlays its installer applied (a 32 GB box, `low`, against the base seed
+plus `config_seed_ram_low_up`; a tier that declares neither overlay compares against its base seed). It used to default to the base seed alone, and on a blackwell-8 box
 with 64 GB of RAM 23 of the 38 rows it called drifted were overlay-carried false positives. Pass
-`--ram-tier none` to compare the base seed alone, `min` or `low` to speak for a smaller box
-(neither has an overlay), or `mid` or `high` to name one explicitly, which is what a node read
+`--ram-tier none` to compare the base seed alone, `min` to speak for a smaller box (no overlay
+applies), or `low`, `mid` or `high` to name one explicitly, which is what a node read
 over SSH needs: the auditing machine's RAM is not the node's. An unknown value is refused.
 Detection reads **this** machine only, so when `--config`, `--home` or a `--goos` other than this
 platform's point away from it and `--ram-tier` is not named, the audit prints a warning on stderr
@@ -394,10 +455,10 @@ that the overlay compared is this machine's RAM tier and asks for `--ram-tier` f
 config. A RAM probe that reads 0 GB is refused with the same pointer: 0 GB would classify as `min`,
 and the audit would pick the base seed without saying so.
 Both outputs say which seed was compared. The text header reads
-`ram-tier=mid (detected, 64 GB; base seed + config_seed_ram_mid_high overlay)` or
+`ram-tier=mid (detected, 64 GB; base seed + config_seed_ram_low_up and config_seed_ram_mid_high overlays (where the tier declares them))` or
 `ram-tier=none (--ram-tier; base seed only, no RAM overlay)`, and `--json` carries `ram_tier`,
-`ram_tier_source` (`detected` or `--ram-tier`) and `ram_overlay` (`config_seed_ram_mid_high` or
-`none`). `--vllm-seat-active auto` runs the installer's own
+`ram_tier_source` (`detected` or `--ram-tier`) and `ram_overlay` (the most specific overlay compared:
+`config_seed_ram_mid_high` on mid/high, `config_seed_ram_low_up` on low, else `none`). `--vllm-seat-active auto` runs the installer's own
 detection, which is right for the local box. Pass `true` or `false` for a remote one. The flag speaks
 for the tier's vLLM seats as a set: `true` says the node serves the lane seat and every extra seat,
 `false` none, and `auto` detects each seat on its own (the venv plus that seat's weights, and for an extra

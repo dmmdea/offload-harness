@@ -19,13 +19,15 @@ import {
 
 test("MEMORY_STACK is sourced from env, not a buried const (invariant 1)", () => {
   // Default (env unset) carries the canonical mem0 models — never unloaded: the embedder, the
-  // reranker and embeddinggemma-ams, the id the memory authority node serves its embedder under
-  // (register A-122b; config.Default().MemoryStack is the same list).
+  // reranker, embeddinggemma-ams (the id the memory authority node serves its embedder under,
+  // register A-122b) and embeddinggemma2 (the EmbeddingGemma-2 entry, 2026-10-09);
+  // config.Default().MemoryStack is the same list.
   const def = memoryStack("");
   assert.ok(def.has("embeddinggemma"), "default keeps embeddinggemma");
   assert.ok(def.has("bge-reranker-v2-m3"), "default keeps bge-reranker-v2-m3");
   assert.ok(def.has("embeddinggemma-ams"), "default keeps embeddinggemma-ams");
-  assert.equal(def.size, 3, "the default is exactly the three canonical members");
+  assert.ok(def.has("embeddinggemma2"), "default keeps embeddinggemma2 (the EmbeddingGemma-2 stack member)");
+  assert.equal(def.size, 4, "the default is exactly the four canonical members");
   // The Go harness threads config.MemoryStack as a comma-separated env; a renamed/added
   // 3rd CPU member is honored (not silently unloaded). Trimming + empties handled.
   const env = memoryStack("embeddinggemma, bge-reranker-v2-m3 , new-cpu-embedder ,");

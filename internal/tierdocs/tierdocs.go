@@ -48,6 +48,11 @@ type Profile struct {
 	// reference laptop) had its page claim it "ships no media configuration" while the
 	// installer bound an image seat on any mid/high-RAM box.
 	ConfigSeedMidHigh map[string]any `json:"config_seed_ram_mid_high"`
+	// ConfigSeedLowUp is the RAM-gated overlay for the 32 GB class and up (low, mid, high).
+	// Only its NON-media keys are rendered (the Media section's prose is written around the
+	// mid/high overlay), which TestLowUpOverlayHoldsNoMediaKeys enforces: a media key added
+	// here must extend the Media section first.
+	ConfigSeedLowUp map[string]any `json:"config_seed_ram_low_up"`
 	// MediaSeats are the ALIAS-backed media capabilities (vision / STT) the tier
 	// serves. They are a separate axis from ConfigSeed — seats become llama-swap
 	// models, seed keys become spawn-per-job bindings — and a page that showed only
@@ -335,38 +340,48 @@ func renderTier(name string, p Profile, reports []string) string {
 
 	// Non-media seed keys render in their own clearly-labeled section — never
 	// under the media heading. Overlay-sourced keys keep their RAM gate visible.
+	// One row per (key, layer): a key an overlay REPLACES keeps its unconditional row beside the
+	// gated one, because the unconditional value is what a box under the overlay's RAM tier keeps
+	// (ampere-6's agent_model is the 4B on `min` and the spill seat on `low` and up). Rows follow
+	// the order Resolve applies the layers in: base, then low/mid/high, then mid/high on top.
 	type nonMediaRow struct {
-		value string
-		gated bool
+		key, value string
+		layer      int    // 0 = config_seed, 1 = config_seed_ram_low_up, 2 = config_seed_ram_mid_high
+		gated      string // "" = unconditional; else the RAM tiers the row applies on
 	}
-	nonMediaKeys := make([]string, 0, len(p.ConfigSeed)+len(p.ConfigSeedMidHigh))
-	nonMedia := map[string]nonMediaRow{}
+	var nonMedia []nonMediaRow
 	for k, v := range p.ConfigSeed {
 		if !mediaSeedKey(k) {
-			nonMediaKeys = append(nonMediaKeys, k)
-			nonMedia[k] = nonMediaRow{value: valueString(v)}
+			nonMedia = append(nonMedia, nonMediaRow{key: k, value: valueString(v)})
+		}
+	}
+	for k, v := range p.ConfigSeedLowUp {
+		if !mediaSeedKey(k) {
+			nonMedia = append(nonMedia, nonMediaRow{key: k, value: valueString(v), layer: 1, gated: "`low`/`mid`/`high`"})
 		}
 	}
 	for k, v := range p.ConfigSeedMidHigh {
 		if !mediaSeedKey(k) {
-			if _, seen := nonMedia[k]; !seen {
-				nonMediaKeys = append(nonMediaKeys, k)
-			}
-			nonMedia[k] = nonMediaRow{value: valueString(v), gated: true}
+			nonMedia = append(nonMedia, nonMediaRow{key: k, value: valueString(v), layer: 2, gated: "`mid`/`high`"})
 		}
 	}
-	if len(nonMediaKeys) > 0 {
-		sort.Strings(nonMediaKeys)
+	if len(nonMedia) > 0 {
+		sort.Slice(nonMedia, func(i, j int) bool {
+			if nonMedia[i].key != nonMedia[j].key {
+				return nonMedia[i].key < nonMedia[j].key
+			}
+			return nonMedia[i].layer < nonMedia[j].layer
+		})
 		b.WriteString("\n## Installer-seeded config (non-media)\n\n" +
 			"These `config_seed` keys are applied to a FRESH harness config exactly like the media\n" +
 			"seed, but they bind no media route — the agent/cascade seats and per-node knobs live\n" +
 			"here so they are never mistaken for a media capability:\n\n| key | value |\n|---|---|\n")
-		for _, k := range nonMediaKeys {
+		for _, r := range nonMedia {
 			mark := ""
-			if nonMedia[k].gated {
-				mark = " (RAM-gated: applied on `mid`/`high` only)"
+			if r.gated != "" {
+				mark = " (RAM-gated: applied on " + r.gated + " only)"
 			}
-			fmt.Fprintf(&b, "| `%s`%s | `%s` |\n", k, mark, nonMedia[k].value)
+			fmt.Fprintf(&b, "| `%s`%s | `%s` |\n", r.key, mark, r.value)
 		}
 	}
 

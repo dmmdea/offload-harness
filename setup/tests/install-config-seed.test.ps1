@@ -336,8 +336,102 @@ Assert ($leanMimo -contains 'model-mimo-9b')                                'mim
 $both9B = @(Get-GatedModelKeys -IncludeQwen38 $false -IncludeQwen354B $false -IncludeQwen359B $true -IncludeMimo9B $true -WithFamily $true)
 Assert (($both9B -contains 'model-qwen35-9b') -and ($both9B -contains 'model-mimo-9b') -and ($both9B.Count -eq 2)) 'include_qwen35_9b + include_mimo_9b together pull both weights, only those'
 
+# The Qwen3.6-35B-A3B RAM-spill agent seat: same gate mechanism, same non-family asymmetry (on a
+# 32 GB-class ampere-6 box it IS the agent seat, so a lean install must not strand the binding).
+$q36 = @(Get-GatedModelKeys -IncludeQwen38 $false -IncludeQwen354B $true -IncludeQwen3635B $true -RamTier 'low' -WithFamily $true)
+Assert ($q36 -contains 'model-qwen36-35b')                                  'include_qwen36_35b pulls model-qwen36-35b'
+Assert (($q36 -contains 'model-qwen35-4b') -and ($q36.Count -eq 2))         'the spill seat is pulled BESIDE the 4B rollback, nothing else'
+$leanQ36 = @(Get-GatedModelKeys -IncludeQwen38 $false -IncludeQwen354B $false -IncludeQwen3635B $true -RamTier 'mid' -WithFamily $false)
+Assert ($leanQ36 -contains 'model-qwen36-35b')                              'the spill seat survives a LEAN install (does NOT ride the family gate)'
+# The RAM gate lives INSIDE Get-GatedModelKeys, not only in its caller: the flag with a min (or unknown, or
+# omitted) RAM tier downloads nothing, so the 12.3 GiB file cannot outlive the render gate that drops the entry.
+foreach ($r in @('min', 'none', '')) {
+  $belowFloor = @(Get-GatedModelKeys -IncludeQwen38 $false -IncludeQwen354B $true -IncludeQwen3635B $true -RamTier $r -WithFamily $true)
+  Assert (-not ($belowFloor -contains 'model-qwen36-35b'))                   "the spill seat flag on a '$r' RAM tier downloads no 12 GB for it"
+  Assert (($belowFloor -contains 'model-qwen35-4b') -and $belowFloor.Count -eq 1) "...and the 4B rollback weights still arrive on a '$r' box"
+}
+$noQ36 = @(Get-GatedModelKeys -IncludeQwen38 $false -IncludeQwen354B $true -WithFamily $true)
+Assert (-not ($noQ36 -contains 'model-qwen36-35b'))                         'a tier/box without the spill seat downloads no 12 GB for it'
+
+# The memory stack's second embedder (EmbeddingGemma-2 + its projector): both files or neither, no RAM
+# gate (VRAM-resident), and - like the other agent/stack weights - it survives a LEAN install.
+$eg2 = @(Get-GatedModelKeys -IncludeQwen38 $false -IncludeQwen354B $true -IncludeEmbeddingGemma2 $true -WithFamily $true)
+Assert (($eg2 -contains 'model-eg2') -and ($eg2 -contains 'model-eg2-mmproj')) 'include_embeddinggemma2 pulls the model AND its multimodal projector'
+Assert (($eg2 -contains 'model-qwen35-4b') -and ($eg2.Count -eq 3))          'the stack member is pulled beside the tier''s other gated weights, nothing else'
+$leanEg2 = @(Get-GatedModelKeys -IncludeQwen38 $false -IncludeQwen354B $false -IncludeEmbeddingGemma2 $true -WithFamily $false)
+Assert (($leanEg2 -contains 'model-eg2') -and ($leanEg2 -contains 'model-eg2-mmproj') -and ($leanEg2.Count -eq 2)) 'the stack member survives a LEAN install (does NOT ride the family gate)'
+$noEg2 = @(Get-GatedModelKeys -IncludeQwen38 $false -IncludeQwen354B $true -WithFamily $true)
+Assert (-not ($noEg2 -contains 'model-eg2') -and -not ($noEg2 -contains 'model-eg2-mmproj')) 'a tier without the stack member downloads neither file'
+foreach ($r in @('min', 'low', 'mid', 'high', '')) {
+  $anyRam = @(Get-GatedModelKeys -IncludeQwen38 $false -IncludeQwen354B $false -IncludeEmbeddingGemma2 $true -RamTier $r -WithFamily $true)
+  Assert (($anyRam -contains 'model-eg2') -and ($anyRam -contains 'model-eg2-mmproj')) "the stack member has no RAM gate (ram_tier '$r' still pulls it)"
+}
+# A text-only replica (embeddinggemma2_projector false): the render drops --mmproj and the replica never
+# embeds media, so the model alone is fetched - the 0.55 GB projector is for the tier that carries it.
+$eg2Text = @(Get-GatedModelKeys -IncludeQwen38 $false -IncludeQwen354B $true -IncludeEmbeddingGemma2 $true -IncludeEmbeddingGemma2Projector $false -WithFamily $true)
+Assert (($eg2Text -contains 'model-eg2') -and -not ($eg2Text -contains 'model-eg2-mmproj')) 'a text-only replica pulls the embedder model and NOT the projector'
+Assert (($eg2Text -contains 'model-qwen35-4b') -and ($eg2Text.Count -eq 2))     'the text-only replica still pulls the tier''s other gated weights, nothing else'
+$leanText = @(Get-GatedModelKeys -IncludeQwen38 $false -IncludeQwen354B $false -IncludeEmbeddingGemma2 $true -IncludeEmbeddingGemma2Projector $false -WithFamily $false)
+Assert (($leanText.Count -eq 1) -and ($leanText[0] -eq 'model-eg2'))              'a text-only replica survives a LEAN install as the model alone'
+foreach ($r in @('min', 'low', 'mid', 'high', '')) {
+  $textRam = @(Get-GatedModelKeys -IncludeQwen38 $false -IncludeQwen354B $false -IncludeEmbeddingGemma2 $true -IncludeEmbeddingGemma2Projector $false -RamTier $r -WithFamily $true)
+  Assert (($textRam -contains 'model-eg2') -and -not ($textRam -contains 'model-eg2-mmproj')) "the text-only replica has no RAM gate either (ram_tier '$r')"
+}
+$explicitProj = @(Get-GatedModelKeys -IncludeQwen38 $false -IncludeQwen354B $false -IncludeEmbeddingGemma2 $true -IncludeEmbeddingGemma2Projector $true -WithFamily $true)
+Assert (($explicitProj -contains 'model-eg2') -and ($explicitProj -contains 'model-eg2-mmproj') -and ($explicitProj.Count -eq 2)) 'an explicit projector true pulls both files, as the default does'
+$projNoEntry = @(Get-GatedModelKeys -IncludeQwen38 $false -IncludeQwen354B $false -IncludeEmbeddingGemma2 $false -IncludeEmbeddingGemma2Projector $true -WithFamily $true)
+Assert ($projNoEntry.Count -eq 0)                                                'the projector flag alone downloads nothing: it means something only with the entry'
+foreach ($k in @('model-eg2', 'model-eg2-mmproj')) {
+  $pin = $PINNED[$k]
+  Assert ([bool]$pin)                                                          "PINNED defines $k"
+  Assert ($pin.sha -match '^[0-9a-f]{64}$')                                    "$k pins a full sha256"
+  Assert ($pin.version -eq $pin.sha.Substring(0, 8))                           "$k version is the first 8 hex of its sha"
+  Assert ($pin.url -match '^https://huggingface\.co/ggml-org/embeddinggemma-2-GGUF/resolve/main/') "$k is fetched from the ggml-org EmbeddingGemma-2 repo"
+  Assert ($pin.url.EndsWith($pin.name))                                        "$k local name is the file the template cmd names"
+}
+Assert ([int64]$PINNED['model-eg2'].size -eq 309855456)                        'model-eg2 size is the measured 309,855,456 bytes'
+Assert ($PINNED['model-eg2'].sha.StartsWith('2188ac1d'))                       'model-eg2 sha256 begins 2188ac1d (the memory-stack session''s prefix)'
+Assert ([int64]$PINNED['model-eg2-mmproj'].size -eq 554821024)                 'model-eg2-mmproj size is the measured 554,821,024 bytes'
+Assert ($PINNED['model-eg2-mmproj'].sha -eq 'c4a8a52691ecef40618438928bdf9e68379b854e24166f292592353db0aab64f') 'model-eg2-mmproj sha256 is the measured one'
+
+# --- The pinned llama.cpp build (Lane B, 2026-10-09): the floor, the naming, and one tag everywhere --------------
+Write-Host ""
+Write-Host "== The pinned llama.cpp build: floor, asset naming, one tag =="
+Assert ($LLAMA_TAG -match '^b\d+$')                                            'LLAMA_TAG has the bNNNN shape'
+Assert ([int]$LLAMA_TAG.Substring(1) -ge 11452)                                'LLAMA_TAG is at or above b11452 (the gemma-embedding2 architecture)'
+foreach ($k in @('llama-vulkan', 'llama-cuda', 'llama-cudart', 'llama-cuda13', 'llama-cudart13', 'llama-cpu')) {
+  $p = $PINNED[$k]
+  Assert ($p.url -like "https://github.com/ggml-org/llama.cpp/releases/download/$LLAMA_TAG/*") "$k downloads from the $LLAMA_TAG release"
+  Assert ($p.version -eq $LLAMA_TAG)                                           "$k manifest version is the tag (a bump re-downloads it)"
+  Assert ($p.sha -match '^[0-9a-f]{64}$')                                      "$k pins a full sha256"
+  Assert ([int64]$p.size -gt 1000000)                                          "$k pins a size"
+}
+Assert ($PINNED['llama-cuda13'].url.EndsWith("llama-$LLAMA_TAG-bin-win-cuda-13.4-x64.zip"))   'llama-cuda13 names the cuda-13.4 asset this tag ships (cuda-13.3 is gone)'
+Assert ($PINNED['llama-cudart13'].url.EndsWith('cudart-llama-bin-win-cuda-13.4-x64.zip'))     'llama-cudart13 names the cuda-13.4 cudart asset'
+Assert ($PINNED['llama-cuda'].url.EndsWith("llama-$LLAMA_TAG-bin-win-cuda-12.4-x64.zip"))      'llama-cuda keeps the 12.4 asset name'
+Assert ($PINNED['llama-vulkan'].url.EndsWith("llama-$LLAMA_TAG-bin-win-vulkan-x64.zip"))       'llama-vulkan names the vulkan asset'
+Assert ($PINNED['llama-cpu'].url.EndsWith("llama-$LLAMA_TAG-bin-win-cpu-x64.zip"))             'llama-cpu names the cpu asset'
+$sixShas = @('llama-vulkan', 'llama-cuda', 'llama-cudart', 'llama-cuda13', 'llama-cudart13', 'llama-cpu') | ForEach-Object { $PINNED[$_].sha }
+Assert (($sixShas | Select-Object -Unique).Count -eq 6)                       'the six llama.cpp assets pin six different hashes'
+
+# The RAM gate Step 5 applies BEFORE it hands the flag to Get-GatedModelKeys: low, mid and high
+# (28 GB and up), never min or an unknown tier. Twin of tierseed.RAMLowUp in Go.
+Write-Host ""
+Write-Host "== Test-RamLowUp: the RAM floor of the spill seat =="
+Assert ([bool](Get-Command Test-RamLowUp -ErrorAction SilentlyContinue)) 'dot-source seam defines Test-RamLowUp'
+foreach ($r in @('low', 'mid', 'high')) { Assert ((Test-RamLowUp -RamTier $r) -eq $true)  "ram_tier $r is on the spill seat's side of the floor" }
+foreach ($r in @('min', '', 'none', 'huge')) { Assert ((Test-RamLowUp -RamTier $r) -eq $false) "ram_tier '$r' is below the floor (no seat, no 12 GB download)" }
+
+# The pin: size and sha read from the Hugging Face resolve redirect (X-Linked-Size / X-Linked-ETag).
+$pin36 = $PINNED['model-qwen36-35b']
+Assert ([bool]$pin36)                                                       'PINNED defines model-qwen36-35b'
+Assert ($pin36.name -eq 'Qwen3.6-35B-A3B/Qwen3.6-35B-A3B-UD-IQ3_XXS.gguf') 'the pinned name carries the subdirectory the template cmd names'
+Assert ($pin36.sha -match '^[0-9a-f]{64}$')                                 'the pinned sha is a full sha256'
+Assert ($pin36.version -eq $pin36.sha.Substring(0, 8))                      'the pinned version is the first 8 hex of the sha, like every other model'
+Assert ([int64]$pin36.size -gt 13000000000 -and [int64]$pin36.size -lt 13500000000) 'the pinned size is the 12.30 GiB GGUF'
+
 # Every key a gate can emit must exist in $PINNED, or the install dies mid-download.
-foreach ($k in @('model-qwen35-4b', 'model-qwen35-9b', 'model-mimo-9b', 'model-qwen38', 'model-qwen38-mmproj')) {
+foreach ($k in @('model-qwen35-4b', 'model-qwen35-9b', 'model-mimo-9b', 'model-qwen36-35b', 'model-eg2', 'model-eg2-mmproj', 'model-qwen38', 'model-qwen38-mmproj')) {
   Assert ([bool]$PINNED[$k])                                                "PINNED defines $k (gate cannot name a key with no pin)"
 }
 # Closure the other way: a tier that sets the flag must have its pin present.
@@ -351,6 +445,39 @@ foreach ($t in @($profiles.PSObject.Properties.Name)) {
   if ($profiles.$t.include_mimo_9b -eq $true) {
     Assert ([bool]$PINNED['model-mimo-9b'])                                 "tier $t sets include_mimo_9b and the pin exists"
   }
+  if ($profiles.$t.include_embeddinggemma2 -eq $true) {
+    Assert ([bool]$PINNED['model-eg2'] -and [bool]$PINNED['model-eg2-mmproj']) "tier $t sets include_embeddinggemma2 and both pins exist"
+  }
+  # embeddinggemma2_projector: a JSON boolean when present (Step 5 throws on anything else), and
+  # meaningful only on a tier that carries the entry.
+  if ($profiles.$t.PSObject.Properties['embeddinggemma2_projector']) {
+    Assert ($profiles.$t.embeddinggemma2_projector -is [bool])                 "tier $t embeddinggemma2_projector is a JSON boolean"
+    Assert ($profiles.$t.include_embeddinggemma2 -eq $true)                    "tier $t sets embeddinggemma2_projector only with include_embeddinggemma2"
+  }
+  if ($profiles.$t.include_qwen36_35b -eq $true) {
+    Assert ([bool]$PINNED['model-qwen36-35b'])                              "tier $t sets include_qwen36_35b and the pin exists"
+    # The tier must declare the measured spill the write gate checks the entry's --n-cpu-moe against.
+    Assert ([int]$profiles.$t.n_cpu_moe_max -ge 40)                         "tier $t sets include_qwen36_35b and declares n_cpu_moe_max >= 40"
+    # ...and bind the seat only through the low-and-up overlay, never the base seed.
+    Assert ($profiles.$t.config_seed.agent_model -ne 'qwen3.6-35b-a3b-agent') "tier $t does not bind the spill seat in its BASE seed (a min box cannot hold it)"
+    Assert ($profiles.$t.config_seed_ram_low_up.agent_model -eq 'qwen3.6-35b-a3b-agent') "tier $t binds the spill seat in config_seed_ram_low_up"
+  }
+}
+
+# The three tiers that carry the embeddinggemma2 entry, and what each downloads: the memory authority's
+# card (ampere-6) carries the projector, the two replicas are text-only (their recorded footprints cannot
+# hold the projector: eg2CardBudget in embeddinggemma2_stack_test.go). Each states its projector flag
+# explicitly, and each seeds the memory-stack keep-set whether or not it carries the projector.
+Write-Host ""
+Write-Host "== embeddinggemma2 per tier: projector flag, download set, keep-set =="
+foreach ($c in @(@('ampere-6', $true), @('ampere-8', $false), @('blackwell-3x16', $false))) {
+  $t = $c[0]; $wantProj = [bool]$c[1]
+  Assert ($profiles.$t.include_embeddinggemma2 -eq $true)                      "tier $t carries the embeddinggemma2 entry"
+  Assert (($profiles.$t.embeddinggemma2_projector -is [bool]) -and ($profiles.$t.embeddinggemma2_projector -eq $wantProj)) "tier $t states embeddinggemma2_projector = $wantProj"
+  $keys = @(Get-GatedModelKeys -IncludeQwen38 $false -IncludeQwen354B $false -IncludeEmbeddingGemma2 ([bool]$profiles.$t.include_embeddinggemma2) -IncludeEmbeddingGemma2Projector ([bool]$profiles.$t.embeddinggemma2_projector) -WithFamily $false)
+  Assert (($keys -contains 'model-eg2') -and (($keys -contains 'model-eg2-mmproj') -eq $wantProj)) "tier $t downloads the projector iff it carries it (projector = $wantProj)"
+  $ms = @(((Merge-ConfigSeed -ConfigText $tplText -Seed $profiles.$t.config_seed -OffloadHome 'D:\oh') | ConvertFrom-Json).memory_stack)
+  Assert (($ms -join ',') -eq 'embeddinggemma,bge-reranker-v2-m3,embeddinggemma2') "tier $t seeds the memory-stack keep-set with embeddinggemma2 (projector = $wantProj)"
 }
 
 # --- The 26B download follows the resolved include_26b (<node-e> parity audit, 2026-09-23) --
@@ -386,6 +513,12 @@ Assert (([regex]::Matches($installText, "'model-26b'")).Count -eq 3) "'model-26b
 $ppAt = $installText.IndexOf('$pp = Resolve-ProfileParams')
 $step5At = $installText.IndexOf('$modelKeys = @(')
 Assert (($ppAt -gt 0) -and ($ppAt -lt $step5At)) '$pp is resolved before the Step 5 download set'
+# The embeddinggemma2 projector flag, wired in the main flow (below the seam, so pinned by source): read from
+# the profile with the same strict-boolean check as its siblings, absent meaning true, and handed to
+# Get-GatedModelKeys, or a text-only tier would still download the projector (or a projector tier lose it).
+Assert ($installText -match '\$includeEmbeddingGemma2Projector = \$true')                                                 'Step 5 defaults the embeddinggemma2 projector to true (absent means true)'
+Assert ($installText -match 'embeddinggemma2_projector must be a JSON boolean')                                          'Step 5 refuses a non-boolean embeddinggemma2_projector, like its siblings'
+Assert ($installText -match '-IncludeEmbeddingGemma2 \$includeEmbeddingGemma2 -IncludeEmbeddingGemma2Projector \$includeEmbeddingGemma2Projector -WithFamily \$withFamily') 'Step 5 hands the resolved projector flag to Get-GatedModelKeys'
 
 # --- Task 6: accelerator seed (ADR 0024) ----------------------------------------------
 Write-Host ""

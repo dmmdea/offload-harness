@@ -70,11 +70,12 @@ type Verdict struct {
 	// really distinguishes config #4, so RAM approximates it.
 	BigRAM bool   `json:"big_ram"`
 	Reason string `json:"reason"`
-	// RAMTier gates the RAM-hungry 26B placements and the RAM-gated config_seed
-	// overlay. detect.ps1 has always emitted it; this side reported raw ram_gb only,
-	// so the Linux installer had nothing to pass and BOTH gates were inert there —
-	// a tier served the 26B on a box with no RAM path for it, and the mid/high-only
-	// image seed never applied.
+	// RAMTier gates the RAM-hungry 26B placements, the RAM-spill agent seat and the
+	// RAM-gated config_seed overlays (config_seed_ram_low_up from low up,
+	// config_seed_ram_mid_high from mid up). detect.ps1 has always emitted it; this side
+	// reported raw ram_gb only, so the Linux installer had nothing to pass and the gates
+	// were inert there — a tier served the 26B on a box with no RAM path for it, and the
+	// mid/high image seed never applied.
 	RAMTier string `json:"ram_tier"`
 	// Accelerators lists additive devices found BESIDE the GPU (ADR 0024), e.g.
 	// "hailo-8l". Classify never fills it — detection is a separate probe

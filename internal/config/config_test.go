@@ -278,7 +278,7 @@ func TestFleetQueueLimitDefaultTracksConcurrency(t *testing.T) {
 
 func TestDefaultMemoryStack(t *testing.T) {
 	c := Default()
-	want := map[string]bool{"embeddinggemma": true, "bge-reranker-v2-m3": true, "embeddinggemma-ams": true}
+	want := map[string]bool{"embeddinggemma": true, "bge-reranker-v2-m3": true, "embeddinggemma-ams": true, "embeddinggemma2": true}
 	if len(c.MemoryStack) != len(want) {
 		t.Fatalf("MemoryStack = %v, want %v", c.MemoryStack, want)
 	}
@@ -297,8 +297,16 @@ func TestDefaultMemoryStack(t *testing.T) {
 	if !seen["embeddinggemma-ams"] {
 		t.Errorf("MemoryStack = %v, want it to keep embeddinggemma-ams resident", c.MemoryStack)
 	}
+	// The EmbeddingGemma-2 entry is a stack member the harness ships (tier flag include_embeddinggemma2): a default
+	// without it lets a lease clear the embedder the memory stack is moving to.
+	if !seen["embeddinggemma2"] {
+		t.Errorf("MemoryStack = %v, want it to keep embeddinggemma2 resident", c.MemoryStack)
+	}
 	// EmbedModel() falls back to MemoryStack[0] for a config that only sets the stack, so the embedder stays first
 	// and the node-specific id is appended, never put first.
+	if c.MemoryStack[len(c.MemoryStack)-1] != "embeddinggemma2" {
+		t.Errorf("MemoryStack = %v, want embeddinggemma2 APPENDED last (the cutover is the memory stack's, not the default's)", c.MemoryStack)
+	}
 	if c.MemoryStack[0] != "embeddinggemma" {
 		t.Errorf("MemoryStack[0] = %q, want embeddinggemma (EmbedModel's fallback)", c.MemoryStack[0])
 	}

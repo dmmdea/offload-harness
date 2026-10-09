@@ -58,6 +58,7 @@ func TestParamsBasisMirrorsParams(t *testing.T) {
 	p.ExtraVLLMSeats = []*vllmseat.Spec{{ID: "extra-seat", Unit: "u2", Port: 18797, MaxModelLen: 32768}}
 	p.VLLMRuntime = vllmseat.Runtime{User: "someone", ProxyHost: "203.0.113.9"}
 	p.IncludeQ38, p.IncludeQ359B, p.IncludeMimo9B, p.DisableCUDAGraphs = true, true, true, true
+	p.IncludeQ3827B, p.IncludeQ3635B, p.IncludeEG2, p.EG2TextOnly = true, true, true, true
 	// The composite tier’s display layer (ADR 0052) rides in the hashed set too:
 	// left nil here, a BasisOf that forgot to carry it would round-trip cleanly
 	// and hash nil forever on the one tier that actually sets it.
@@ -103,6 +104,10 @@ func TestSpecHashIsSensitiveToEveryInput(t *testing.T) {
 		{"params.include_qwen35_4b", func(b *SpecBasis) { b.Params.IncludeQ354B = true }},
 		{"params.include_qwen35_9b", func(b *SpecBasis) { b.Params.IncludeQ359B = true }},
 		{"params.include_mimo_9b", func(b *SpecBasis) { b.Params.IncludeMimo9B = true }},
+		{"params.include_qwen38_27b", func(b *SpecBasis) { b.Params.IncludeQ3827B = true }},
+		{"params.include_qwen36_35b", func(b *SpecBasis) { b.Params.IncludeQ3635B = true }},
+		{"params.include_embeddinggemma2", func(b *SpecBasis) { b.Params.IncludeEG2 = true }},
+		{"params.eg2_text_only", func(b *SpecBasis) { b.Params.EG2TextOnly = true }},
 		{"params.seats", func(b *SpecBasis) {
 			b.Params.Seats = []mediaseat.Seat{{Kind: "vision", Name: "vlm", Model: "m.gguf", Residency: "swap"}}
 		}},
@@ -128,6 +133,55 @@ func TestSpecHashIsSensitiveToEveryInput(t *testing.T) {
 				t.Errorf("changing %s did not change the spec hash -- that input is not covered by the closed set", tc.field)
 			}
 		})
+	}
+}
+
+// TestTheCanonicalBasisOmitsTheSpillSeatFieldWhenFalseAndCarriesItWhenTrue pins the omitempty promise on
+// include_qwen36_35b, and only that: a render that does not include the seat (every tier but ampere-6,
+// and ampere-6 on a `min` box) canonicalises to bytes that do not mention the field at all, so the
+// field adds nothing to the Params portion of the basis. It does NOT promise an unchanged spec hash:
+// template_sha256 and profiles_entry_sha256 are in the basis too, so a node rendered from a template
+// that changed in the same release reads STALE regardless.
+func TestTheCanonicalBasisOmitsTheSpillSeatFieldWhenFalseAndCarriesItWhenTrue(t *testing.T) {
+	_, off, err := SpecHash(basis())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(off), "include_qwen36_35b") {
+		t.Errorf("a basis without the spill seat must not carry the field, got:\n%s", off)
+	}
+	b := basis()
+	b.Params.IncludeQ3635B = true
+	_, on, err := SpecHash(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(on), `"include_qwen36_35b":true`) {
+		t.Errorf("a basis WITH the spill seat must carry the field, got:\n%s", on)
+	}
+}
+
+// TestTheCanonicalBasisOmitsTheStackMemberFieldWhenFalseAndCarriesItWhenTrue is the same omitempty
+// promise for include_embeddinggemma2: a render without the stack member (every tier but ampere-6)
+// canonicalises to bytes that never mention the field, so the field adds nothing to its Params portion.
+// As above, this pins the canonical bytes, not the whole spec hash: the templates that gained the entry
+// move template_sha256 for every tier rendered from them.
+func TestTheCanonicalBasisOmitsTheStackMemberFieldWhenFalseAndCarriesItWhenTrue(t *testing.T) {
+	_, off, err := SpecHash(basis())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(off), "include_embeddinggemma2") {
+		t.Errorf("a basis without the stack member must not carry the field, got:\n%s", off)
+	}
+	b := basis()
+	b.Params.IncludeEG2 = true
+	_, on, err := SpecHash(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(on), `"include_embeddinggemma2":true`) {
+		t.Errorf("a basis WITH the stack member must carry the field, got:\n%s", on)
 	}
 }
 
@@ -503,5 +557,31 @@ func TestStampNeverReintroducesAnUnsubstitutedToken(t *testing.T) {
 	// A run of three underscores must not leave a doubled pair behind.
 	if strings.Contains(escapeDoubleUnderscore([]byte("a___b____c")), "__") {
 		t.Error("escapeDoubleUnderscore left a doubled underscore in a longer run")
+	}
+}
+
+// TestTheCanonicalBasisOmitsTheTextOnlyFieldWhenFalseAndCarriesItWhenTrue is the same omitempty
+// promise for the text-only embeddinggemma2 entry: the entry WITH its projector (the memory
+// authority's, ampere-6) canonicalises to bytes that never mention eg2_text_only, so the field adds
+// nothing to its Params portion, while a text-only replica records it. The record matters beyond the
+// hash: the stale-render re-derive replays Params from the stamp, and a basis that forgot the field
+// would re-render a replica WITH the projector and call its config stale forever.
+func TestTheCanonicalBasisOmitsTheTextOnlyFieldWhenFalseAndCarriesItWhenTrue(t *testing.T) {
+	b := basis()
+	b.Params.IncludeEG2 = true
+	_, authority, err := SpecHash(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(authority), "eg2_text_only") {
+		t.Errorf("the entry with its projector must not carry the text-only field, got:\n%s", authority)
+	}
+	b.Params.EG2TextOnly = true
+	_, replica, err := SpecHash(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(replica), `"eg2_text_only":true`) {
+		t.Errorf("a text-only replica must carry the field, got:\n%s", replica)
 	}
 }

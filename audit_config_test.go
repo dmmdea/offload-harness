@@ -395,7 +395,8 @@ func stubDetectedRAMTier(t *testing.T, tier string) {
 }
 
 // The audit must compare the seed the installer WOULD write on this box, and that includes the RAM
-// overlay of the tier the box detects. `none` stays selectable, and a RAM tier below mid has no overlay.
+// overlay of the tier the box detects. `none` stays selectable. Low selects the low-and-up overlay only,
+// mid/high select both, and min selects neither.
 func TestResolveAuditRAMTier(t *testing.T) {
 	cases := []struct {
 		flag, detected string
@@ -405,12 +406,12 @@ func TestResolveAuditRAMTier(t *testing.T) {
 	}{
 		{"", "mid", "mid", "mid", "detected", false},
 		{"auto", "high", "high", "high", "detected", false},
-		{"", "low", "", "low", "detected", false},
+		{"", "low", "low", "low", "detected", false},
 		{"", "min", "", "min", "detected", false},
 		{"none", "mid", "", "none", "--ram-tier", false},
 		{"mid", "low", "mid", "mid", "--ram-tier", false},
 		{"HIGH", "min", "high", "high", "--ram-tier", false},
-		{"low", "high", "", "low", "--ram-tier", false},
+		{"low", "high", "low", "low", "--ram-tier", false},
 		{"huge", "mid", "", "", "", true},
 	}
 	for _, c := range cases {
@@ -482,15 +483,59 @@ func TestAuditConfigRAMTierNoneComparesTheBaseSeed(t *testing.T) {
 	}
 }
 
-// A detected tier below mid has no overlay: the audit compares the base seed and says so.
-func TestAuditConfigDetectedLowRAMHasNoOverlay(t *testing.T) {
+// A detected low tier selects the low-and-up overlay only: a tier with no such overlay (blackwell-8) is
+// compared against its base seed, so a node carrying the MID overlay drifts, and the text says which
+// overlay layers were compared.
+func TestAuditConfigDetectedLowRAMComparesTheLowUpOverlayOnly(t *testing.T) {
 	stubDetectedRAMTier(t, "low")
 	out, err := auditRAMNode(t)
 	if !errors.Is(err, errConfigDrift) {
-		t.Fatalf("a low-RAM box has no overlay, so a node carrying one must drift, got %v\n%s", err, out)
+		t.Fatalf("a low-RAM box does not take the mid/high overlay, so a node carrying it must drift, got %v\n%s", err, out)
 	}
-	if !strings.Contains(out, "ram-tier=low") || !strings.Contains(out, "base seed only") {
-		t.Errorf("got:\n%s", out)
+	if !strings.Contains(out, "ram-tier=low") || !strings.Contains(out, "config_seed_ram_low_up") || strings.Contains(out, "config_seed_ram_mid_high") {
+		t.Errorf("a low-RAM audit must name the low-and-up overlay and not the mid/high one, got:\n%s", out)
+	}
+}
+
+// ampere-6 is the tier that declares a low-and-up overlay (the Qwen3.6-35B-A3B spill seat's agent
+// binding). A node installed on a 32 GB box carries it, so the default audit on a detected low box
+// must call it clean, and `--ram-tier min` (the base seed alone, the 4B) must read it as drift:
+// without the low-and-up layer in the audit a correctly installed 32 GB node reads as drifted.
+func TestAuditConfigDetectedLowRAMKeepsAnInstalledSpillSeatNodeClean(t *testing.T) {
+	doc, err := tierseed.LoadDoc(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	home := t.TempDir()
+	seed, err := tierseed.Resolve(doc.Profiles["ampere-6"], "ampere-6", tierseed.Options{Home: home, GOOS: "linux", RAMTier: "low"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if seed["agent_model"] != "qwen3.6-35b-a3b-agent" {
+		t.Fatalf("the fixture is wrong: ampere-6 at ram low seeds agent_model %v", seed["agent_model"])
+	}
+	raw, err := json.Marshal(seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(cfg, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	audit := func(flags ...string) (string, error) {
+		var runErr error
+		out := captureStdout(t, func() {
+			runErr = runAuditConfig(append([]string{"--config", cfg, "--tier", "ampere-6", "--root", ".", "--home", home,
+				"--goos", "linux", "--vllm-seat-active", "false"}, flags...))
+		})
+		return out, runErr
+	}
+	stubDetectedRAMTier(t, "low")
+	if out, err := audit(); err != nil {
+		t.Fatalf("a 32 GB (low) ampere-6 node carrying the spill-seat binding must audit clean by default, got %v\n%s", err, out)
+	}
+	if out, err := audit("--ram-tier", "min"); !errors.Is(err, errConfigDrift) {
+		t.Fatalf("against the base seed alone (min) the spill-seat binding is drift, got %v\n%s", err, out)
 	}
 }
 

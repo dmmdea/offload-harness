@@ -61,7 +61,8 @@ func TestEveryShippedOverlayLoadsAndValidates(t *testing.T) {
 	sort.Strings(ids)
 	for _, id := range ids {
 		for _, goos := range []string{"windows", "linux"} {
-			for _, ram := range []string{"mid", "high"} {
+			// low joined with config_seed_ram_low_up: the 32 GB class takes an overlay of its own now.
+			for _, ram := range []string{"low", "mid", "high"} {
 				seed, err := Resolve(profiles[id], id, Options{Home: "/opt/offload", GOOS: goos, RAMTier: ram})
 				if err != nil {
 					t.Errorf("tier %s (%s, ram %s) does not resolve: %v", id, goos, ram, err)
@@ -140,12 +141,15 @@ func TestSeededWanLoaderMatchesTheExperts(t *testing.T) {
 		for k, v := range p.ConfigSeed {
 			withOverlay[k] = v
 		}
+		for k, v := range p.ConfigSeedLowUp {
+			withOverlay[k] = v
+		}
 		for k, v := range p.ConfigSeedMidHigh {
 			withOverlay[k] = v
 		}
 		for view, seed := range map[string]map[string]any{
-			"config_seed":                            p.ConfigSeed,
-			"config_seed + config_seed_ram_mid_high": withOverlay,
+			"config_seed": p.ConfigSeed,
+			"config_seed + RAM overlays (low_up, then mid_high)": withOverlay,
 		} {
 			if seed["videogen_wan_loader"] != "native" {
 				continue

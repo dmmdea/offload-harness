@@ -74,7 +74,8 @@ func fleetCapRuleFor(t *testing.T, id string, sp servingProfile, prof tierseed.P
 	t.Helper()
 	v := fleetCapVerdict{}
 	for _, goos := range []string{"linux", "windows"} {
-		for _, ram := range []string{"", "mid", "high"} {
+		// low joined when ampere-6 gained a low-and-up overlay (the 32 GB class binds the spill seat).
+		for _, ram := range []string{"", "low", "mid", "high"} {
 			v.configs = append(v.configs, fleetCapConfig{goos, ram, seededConfigFor(t, prof, id, goos, ram)})
 		}
 	}

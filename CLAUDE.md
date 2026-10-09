@@ -27,6 +27,7 @@ The `--serve` endpoint is **unauthenticated** and drives write/GitHub tools → 
 | `offload-e4b` (alias `gemma4-e4b`) | `model` | Workhorse — summarize / extract; default agent planner. |
 | `gemma4-26b-a4b` | `escalation_model` / `reasoning_model` | MoE tier tried before deferring. |
 | `embeddinggemma` | (memory stack) | Embeddings. |
+| `embeddinggemma2` | (memory stack) | EmbeddingGemma-2; opt-in per tier (`include_embeddinggemma2`), with its multimodal projector on the memory authority's tier and text-only (`embeddinggemma2_projector: false`, no `--mmproj`) on replicas; no aliases, beside `embeddinggemma`. |
 | `qwen3vl-4b`, `whisper-stt`, `whisper-stt-hq` | `vision_model` / `stt_model[_hq]` | Vision + speech. All opt-in and DERIVED: a tier declares a `media_seats` entry, which renders the llama-swap seat and writes the binding together. No seat, no binding, route defers. |
 
 On a COMPOSITE box (ADR 0052) these aliases are not the whole story: the box declares device
@@ -100,7 +101,7 @@ prompt/exemplars; can only narrow — UNSET resolves to config `agent_profile`, 
    output comes back empty. **Profile-driven, NOT universal:** `--cache-type-k/v` is `q8_0` on 11 of
    17 profiles (`f16` only on blackwell-48/72, amd-rdna3, amd-gcn, cpu and rockchip-rk3588; K and V always symmetric, and
    `q8_0` V requires flash-attn on), and `--flash-attn` is on for every GPU profile (`amd-gcn` joined 2026-09-20, measured;
-   `rockchip-rk3588` serves no llama.cpp entry: llama.cpp Vulkan faults its Mali GPU, measured), and omitted entirely by the cpu template. The `embeddinggemma` entry bypasses the shared flag
+   `rockchip-rk3588` serves no llama.cpp entry: llama.cpp Vulkan faults its Mali GPU, measured), and omitted entirely by the cpu template. The `embeddinggemma` and `embeddinggemma2` entries bypass the shared flag
    macro altogether. **Residency is declared with `matrix:`, never legacy `groups:`** (ADR 0020):
    sets are the valid CONCURRENT COMBINATIONS and the memory stack appears in every set, so no
    request can be satisfied by evicting it — `groups:`+`persistent:true` was measured failing to

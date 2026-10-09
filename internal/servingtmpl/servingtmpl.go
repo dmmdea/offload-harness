@@ -93,6 +93,39 @@ type Params struct {
 	// claim the `agent-seat` alias, so it coexists with a rendered 4B/9B fallback
 	// entry and the lane is bound explicitly through config_seed.agent_model.
 	IncludeQ3827B bool
+	// IncludeQ3635B gates the Qwen3.6-35B-A3B RAM-SPILL agent entry (UD-IQ3_XXS weights,
+	// the routed experts in host RAM through a literal `--n-cpu-moe 40`, attention, dense
+	// layers and the KV cache on the card). False removes the model block, its matrix var
+	// and its set membership (the __Q3635B_ALT__ token renders empty). It is the
+	// POST-RAM-GATE value: the tier's include_qwen36_35b says the tier may carry the seat,
+	// and the caller (install_render.go deriveRender, through spillSeatIncluded) sets this
+	// only when the box's RAM tier can hold the spilled experts (`low`, `mid` or `high`; an
+	// unspecified tier does not qualify; the ~11.6 GB host RSS was measured on a 32 GB box).
+	// A box that cannot hold them therefore renders the tier without the seat. The entry claims the
+	// `agent-seat` alias, so the Qwen3.5-4B / 9B entries lose their own claim on it while
+	// it renders (the __Q354B_AGENT_ALIAS__ / __Q359B_AGENT_ALIAS__ tokens) and stay as
+	// un-aliased rollback seats; pairing it with IncludeMimo9B, which claims the same
+	// alias, is refused by validate().
+	IncludeQ3635B bool
+	// IncludeEG2 gates the embeddinggemma2 entry (EmbeddingGemma-2 Q8_0, with its multimodal
+	// projector unless EG2TextOnly, llama.cpp >= b11452) as a MEMORY-STACK member: false removes
+	// the model block, its matrix var and its evict_costs row, and the __EG2_AND__ token renders
+	// empty. True joins it to the stack's residency set (`emb & rer & eg2`), beside embeddinggemma
+	// and bge-reranker-v2-m3: resident among the swappable seats, never swapped by them. It comes
+	// from the tier's include_embeddinggemma2 field and defaults to false; no RAM gate (it is
+	// VRAM-resident: 1,196 MiB loaded, 1,466 MiB after image embeds on the reference 6 GB node
+	// with the projector, 460 MiB loaded and 482 MiB at peak without it).
+	// The embeddinggemma (300M) entry stays on every template regardless: the harness's own
+	// embed lane and unknown callers of its aliases keep using it.
+	IncludeEG2 bool
+	// EG2TextOnly renders the embeddinggemma2 entry WITHOUT its multimodal projector: the one
+	// `--mmproj <path>` argument is removed and every other flag stays as measured (the strip is
+	// dropEG2Projector, a mirror of the other gated strips). Zero means WITH the projector, the
+	// entry as the memory authority runs it, so a caller that never heard of the field renders
+	// what it always did. It comes from the tier's embeddinggemma2_projector field being false
+	// (a text-only replica: text vectors are identical with and without the projector, cosine
+	// 1.0 measured, and a replica never embeds media) and is meaningful only with IncludeEG2.
+	EG2TextOnly bool
 
 	// Seats are the tier's alias-backed media seats (vision / STT). Empty is the
 	// common case and MUST render byte-identically to a build that had no seat
@@ -285,6 +318,23 @@ func Render(tmpl string, p Params) (string, error) {
 			return "", err
 		}
 	}
+	if !p.IncludeQ3635B {
+		var err error
+		if out, err = dropQ3635B(out); err != nil {
+			return "", err
+		}
+	}
+	if !p.IncludeEG2 {
+		var err error
+		if out, err = dropEG2(out); err != nil {
+			return "", err
+		}
+	} else if p.EG2TextOnly {
+		var err error
+		if out, err = dropEG2Projector(out); err != nil {
+			return "", err
+		}
+	}
 	// Seats go in AFTER the 26B removal and BEFORE substitution: after, so a seat
 	// whose text happens to mention the 26B can never trip drop26B's post-check;
 	// before, so seat blocks are written in the same token vocabulary as the rest
@@ -431,7 +481,7 @@ func Render(tmpl string, p Params) (string, error) {
 	// dropped above (IncludeQ359B false) carries no __Q359B_AGENT_ALIAS__ occurrence
 	// left to substitute, so this is a harmless no-op there.
 	q359bAgentAlias := ", agent-seat"
-	if p.IncludeMimo9B {
+	if p.IncludeMimo9B || p.IncludeQ3635B {
 		q359bAgentAlias = ""
 	}
 	// qwen3.5-4b-agent's OWN `agent-seat` alias mirrors q359bAgentAlias exactly
@@ -440,8 +490,12 @@ func Render(tmpl string, p Params) (string, error) {
 	// so an operator can switch config_seed.agent_model back to it without a re-render
 	// — and it loses its claim on the shared alias to mimo-9b-agent the same way
 	// qwen3.5-9b-agent does. Computed unconditionally, same harmless-no-op rule.
+	// The Qwen3.6-35B-A3B spill seat hands the alias off the same way: it is the seat the
+	// lane binds when the box can hold it, and the 4B/9B entry stays rendered as the
+	// opt-in un-aliased rollback (the post-RAM-gate IncludeQ3635B is false on a `min` box,
+	// where the small entry keeps `agent-seat` as the tier's only agent seat).
 	q354bAgentAlias := ", agent-seat"
-	if p.IncludeMimo9B {
+	if p.IncludeMimo9B || p.IncludeQ3635B {
 		q354bAgentAlias = ""
 	}
 	// The Qwen3.8-27B agent membership mirrors Q359B exactly. Same refusal-by-name rule.
@@ -456,7 +510,37 @@ func Render(tmpl string, p Params) (string, error) {
 		}
 		q3827balt = " | q3827"
 	}
+	// The Qwen3.6-35B-A3B spill seat's membership mirrors Q3827B exactly (only the _ALT_
+	// half exists: it is one more heavy alternative in the swapping set, never a member of
+	// an "&" group, so the heavy seats still never share the card). Same refusal-by-name.
+	q3635balt := ""
+	if p.IncludeQ3635B {
+		if !definesModel(out, modelQ3635B) {
+			return "", fmt.Errorf("this tier sets include_qwen36_35b but the target serving template defines no "+
+				"`%s` model entry, so there is nothing to include. Rendering anyway would emit a config without "+
+				"the agent seat while the installer still downloads its weights — add the %s entry (and "+
+				"its matrix var + __Q3635B_ALT__ set membership) to the template, or drop include_qwen36_35b from the tier",
+				modelQ3635B, modelQ3635B)
+		}
+		q3635balt = " | q36"
+	}
+	// The memory stack's second embedder joins the residents set as a CONJUNCTION member (` & eg2`),
+	// the operator every template's stack set already uses for emb and rer. Same refusal-by-name rule
+	// as every gated entry: a tier that asked for it against a template with no entry must not render
+	// a config silently without it while the installer downloads its weights.
+	eg2and := ""
+	if p.IncludeEG2 {
+		if !definesModel(out, modelEG2) {
+			return "", fmt.Errorf("this tier sets include_embeddinggemma2 but the target serving template defines no "+
+				"`%s` model entry, so there is nothing to include. Rendering anyway would emit a config without "+
+				"the second memory-stack embedder while the installer still downloads its weights — add the %s entry (and "+
+				"its matrix var + __EG2_AND__ residency membership) to the template, or drop include_embeddinggemma2 from the tier",
+				modelEG2, modelEG2)
+		}
+		eg2and = " & eg2"
+	}
 	for from, to := range map[string]string{
+		"__EG2_AND__":           eg2and,
 		"__M26_ALT__":           m26alt,
 		"__M26_AND__":           m26and,
 		"__Q38_ALT__":           q38alt,
@@ -467,6 +551,7 @@ func Render(tmpl string, p Params) (string, error) {
 		"__Q359B_AGENT_ALIAS__": q359bAgentAlias,
 		"__MIMO9B_ALT__":        mimo9balt,
 		"__Q3827B_ALT__":        q3827balt,
+		"__Q3635B_ALT__":        q3635balt,
 		"__SEATS_SWAPPABLE__":   seatFrag[roleSwappable],
 		"__SEATS_RESIDENT__":    seatFrag[roleResident],
 		"__LLAMA_BIN__":         strings.TrimRight(p.LlamaBin, "/"),
@@ -555,6 +640,15 @@ func (p Params) validate() error {
 	// kept as the tier's un-aliased ROLLBACK seat. The __Q354B_AGENT_ALIAS__ token
 	// (mirroring __Q359B_AGENT_ALIAS__) drops qwen3.5-4b-agent's own claim on the
 	// alias so only mimo-9b-agent carries it, avoiding the duplicate.
+	// The Qwen3.6-35B-A3B spill seat claims `agent-seat` too and hands it OFF the 4B and
+	// 9B entries (the alias tokens), but nothing hands it off mimo-9b-agent, which keeps
+	// its own claim: both rendering would be a duplicate alias llama-swap rejects at
+	// startup. No tier sets both (mimo is the 8GB class, the spill seat is measured on the
+	// 6GB one); refuse the pair by name rather than leave it to the startup failure.
+	if p.IncludeQ3635B && p.IncludeMimo9B {
+		missing = append(missing, "a single agent seat (include_qwen36_35b and include_mimo_9b are both set, "+
+			"but both entries claim the `agent-seat` alias — pick one)")
+	}
 	if len(p.Seats) > 0 && p.Home == "" && seatsNeedHome(p.Seats, p.RknpuHome) {
 		missing = append(missing, "install home (a media seat names a path under "+tokenHome+" or "+tokenRknpuHome+")")
 	}
@@ -1350,6 +1444,90 @@ const modelQ3827B = "qwen38-27b-agent"
 // strip. Its set membership is handled by the __Q3827B_ALT__ token.
 func dropQ3827B(tmpl string) (string, error) {
 	return dropModel(tmpl, modelQ3827B)
+}
+
+// modelQ3635B is the Qwen3.6-35B-A3B RAM-spill agent entry, gated by the tier's
+// include_qwen36_35b AND the box's RAM tier (install_render.go spillSeatIncluded)
+// exactly as modelQ3827B rides include_qwen38_27b once the post-gate value is in.
+const modelQ3635B = "qwen3.6-35b-a3b-agent"
+
+// dropQ3635B removes the Qwen3.6-35B-A3B spill agent entry — the exact mirror of the
+// Q3827B strip. Its set membership is handled by the __Q3635B_ALT__ token.
+func dropQ3635B(tmpl string) (string, error) {
+	return dropModel(tmpl, modelQ3635B)
+}
+
+// modelEG2 is the second memory-stack embedder: EmbeddingGemma-2 Q8_0, with its multimodal
+// projector (--mmproj) unless the tier is text-only (embeddinggemma2_projector false), gated by
+// the tier's include_embeddinggemma2.
+const modelEG2 = "embeddinggemma2"
+
+// eg2ProjectorFlag is the projector argument of the embeddinggemma2 entry exactly as every
+// template writes it, WITH its trailing space. The flag sits at the start of its line, followed
+// by `--embeddings` on the same line, so removing the pair and the space leaves the continuation
+// line at its own indent: a more-indented line inside a `cmd: >-` folded scalar is literal text
+// and would keep its newline, so the space is part of the strip. The filename stays in the
+// templates (the gated-weight contract test pins it there against install.ps1's pin) and is
+// removed here, which makes a text-only entry the authority's entry minus this one argument by
+// construction.
+const eg2ProjectorFlag = "--mmproj __MODELS__/mmproj-embeddinggemma-2-Q8_0.gguf "
+
+// dropEG2Projector removes the projector argument from the embeddinggemma2 entry and from
+// nothing else, for a text-only tier. It is exact in both directions: the entry must carry the
+// flag exactly once, and no `--mmproj` may survive in the entry's functional lines, so a
+// template edit that renames the projector or wraps the line differently fails the render by name
+// instead of shipping an entry that still loads the projector (or a bare flag with no path). A
+// template with no entry is returned untouched; Render's refusal-by-name reports that case.
+func dropEG2Projector(tmpl string) (string, error) {
+	if !definesModel(tmpl, modelEG2) {
+		return tmpl, nil
+	}
+	lines := strings.Split(tmpl, "\n")
+	inBlock, hits := false, 0
+	for i, l := range lines {
+		switch {
+		case strings.HasPrefix(l, "  "+modelEG2+":"):
+			inBlock = true
+			continue
+		case inBlock && l != "" && !strings.HasPrefix(l, " "):
+			inBlock = false
+		case inBlock && strings.HasPrefix(l, "  ") && !strings.HasPrefix(l, "   ") && strings.Contains(l, ":"):
+			inBlock = false
+		}
+		if !inBlock {
+			continue
+		}
+		if n := strings.Count(l, eg2ProjectorFlag); n > 0 {
+			hits += n
+			lines[i] = strings.ReplaceAll(l, eg2ProjectorFlag, "")
+		}
+		if t := strings.TrimSpace(lines[i]); t != "" && !strings.HasPrefix(t, "#") && strings.Contains(t, "--mmproj") {
+			return "", fmt.Errorf("the %s entry still names a projector after the text-only strip (%q): the template's projector argument "+
+				"is not the one this renderer removes (%q) — update both together", modelEG2, t, strings.TrimSpace(eg2ProjectorFlag))
+		}
+	}
+	if hits != 1 {
+		return "", fmt.Errorf("the %s entry carries the projector argument %q %d times, want exactly 1 — the template's shape changed, "+
+			"so a text-only render cannot be proven to differ from the authority's entry by that argument alone", modelEG2, strings.TrimSpace(eg2ProjectorFlag), hits)
+	}
+	return strings.Join(lines, "\n"), nil
+}
+
+// evictRowEG2 is the stack's evict_costs row for the var `eg2`. dropModel removes a matrix var
+// by matching the model name in the var's VALUE, which an evict_costs row (`eg2: 1000`) does not
+// carry, so the row would dangle when the entry is dropped. Whether llama-swap tolerates a cost
+// for a var it does not declare is unverified, and a config that only works if it does is not
+// shipped: the row goes with the entry.
+var evictRowEG2 = regexp.MustCompile(`(?m)^ {4}eg2:[ \t]*[0-9]+[ \t]*\n`)
+
+// dropEG2 removes the embeddinggemma2 entry, its matrix var and its evict_costs row — the mirror
+// of the other gated strips. Its residency membership is handled by the __EG2_AND__ token.
+func dropEG2(tmpl string) (string, error) {
+	out, err := dropModel(tmpl, modelEG2)
+	if err != nil {
+		return "", err
+	}
+	return evictRowEG2.ReplaceAllString(out, ""), nil
 }
 
 // dropModel removes one model block AND the matrix var naming it, with a

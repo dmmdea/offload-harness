@@ -101,8 +101,35 @@ type servingProfile struct {
 	// Unlike the 4B/9B pair it does NOT claim the `agent-seat` alias, so it is not
 	// mutually exclusive with them: the smaller entry stays rendered as the fallback
 	// and the lane binds here through config_seed.agent_model.
-	IncludeQwen3827B bool   `json:"include_qwen38_27b"`
-	MoE26B           string `json:"moe_26b"`
+	IncludeQwen3827B bool `json:"include_qwen38_27b"`
+	// IncludeQwen3635B says the tier MAY carry the Qwen3.6-35B-A3B RAM-spill agent entry
+	// (UD-IQ3_XXS, routed experts in host RAM through a literal `--n-cpu-moe 40`). It is
+	// not the render decision: the entry renders only on a box whose RAM tier can hold the
+	// spilled experts (spillSeatIncluded), and the tier's config_seed_ram_low_up overlay
+	// binds agent_model to it on exactly those boxes, so the seat and the binding agree by
+	// construction. It claims the `agent-seat` alias, so the 4B / 9B entry stays rendered as
+	// an opt-in un-aliased rollback (servingtmpl.Render hands the alias off) and mimo-9b-agent
+	// cannot share a tier with it. REQUIRES llama.cpp >= b10964 (`--load-mode`), and the tier
+	// must declare n_cpu_moe_max >= 40 or the write gate refuses the render.
+	IncludeQwen3635B bool `json:"include_qwen36_35b"`
+	// IncludeEmbeddingGemma2 adds the embeddinggemma2 entry (EmbeddingGemma-2 Q8_0) to the tier's
+	// MEMORY STACK: it renders into the stack's residency set beside embeddinggemma and
+	// bge-reranker-v2-m3 and its GGUF (and its projector, see EmbeddingGemma2Projector) joins the
+	// Windows download set. Default false; true on ampere-6 (the memory authority's card, where it
+	// was measured, WITH the projector) and on ampere-8 and blackwell-3x16 as text-only replicas.
+	// No RAM gate. REQUIRES llama.cpp >= b11452 (the gemma-embedding2 architecture). The
+	// embeddinggemma (300M) entry stays regardless.
+	IncludeEmbeddingGemma2 bool `json:"include_embeddinggemma2"`
+	// EmbeddingGemma2Projector says whether the embeddinggemma2 entry carries the multimodal
+	// projector (--mmproj) and whether the installer downloads the projector GGUF. A pointer so
+	// that ABSENT means true (the entry as the authority runs it, as measured): only an explicit
+	// false renders the text-only entry, which is the same entry with that one argument removed.
+	// A replica embeds text only (media adds go to the authority) and text vectors are identical
+	// with and without the projector (cosine 1.0), so a tier whose card cannot hold the projector
+	// beside its seats (eg2CardBudget in embeddinggemma2_stack_test.go) is text-only, and an
+	// on-box measurement can turn the projector on. Meaningful only with include_embeddinggemma2.
+	EmbeddingGemma2Projector *bool  `json:"embeddinggemma2_projector"`
+	MoE26B                   string `json:"moe_26b"`
 	// NCPUMoE is the N for the partial `n_cpu_moe` placement (top N expert layers in
 	// RAM, the rest on the GPU).
 	NCPUMoE int `json:"n_cpu_moe"`
@@ -148,6 +175,13 @@ type servingProfile struct {
 	// a declared "gpu" placement renders), and they must stay byte-identical to what
 	// install.ps1 emitted or the delegation silently changes an off-matrix install.
 	moeLiteral string
+}
+
+// eg2TextOnly reports whether the tier's embeddinggemma2 entry renders without the multimodal
+// projector: only an explicit embeddinggemma2_projector false says so, and only on a tier that
+// carries the entry at all (a tier that does not carry it has no entry to be text-only).
+func (p servingProfile) eg2TextOnly() bool {
+	return p.IncludeEmbeddingGemma2 && p.EmbeddingGemma2Projector != nil && !*p.EmbeddingGemma2Projector
 }
 
 // fallbackProfile is what an UNKNOWN or absent tier renders. install.ps1 carried this
@@ -220,6 +254,25 @@ func moePlacement(p servingProfile, ramTier string) (flag string, include bool) 
 	return "", false
 }
 
+// spillSeatIncluded decides whether the RAM-spill agent seat (Qwen3.6-35B-A3B) renders: the
+// tier must carry it (include_qwen36_35b) AND the box's RAM tier must be able to hold the
+// spilled experts. The floor is the n_cpu_moe rule above (survives `low`, not `min`): the
+// seat was measured at ~11.6 GB of host RSS on a 32 GB box (MemAvailable never under
+// 5.4 GB beside a game server), and `low` is the 28 GB-and-up class that 32 GB boxes
+// report. Unlike the 26B placement, an EMPTY ramTier does NOT skip the gate: a caller that
+// does not know its RAM is not a box known to hold 12 GB of spill, and the seed overlay
+// (config_seed_ram_low_up, which binds agent_model to this seat) treats unknown the same
+// way, so `install render` without --ram-tier serves the 4B and `install seed` without it
+// binds the 4B. Any value that is not low, mid or high drops the seat. The predicate is
+// tierseed.RAMLowUp, the one that overlay applies on, so the entry and the binding cannot
+// disagree about which boxes get the seat.
+//
+// install.ps1's Step 5 applies the same rule to the download set (`-in low,mid,high`), and
+// its Test-RamLowUp treats an empty tier as below the floor too.
+func spillSeatIncluded(p servingProfile, ramTier string) bool {
+	return p.IncludeQwen3635B && tierseed.RAMLowUp(ramTier)
+}
+
 // templateFor picks the serving template for an OS + backend pair, and says exactly
 // what exists when there is no match — a wrong template is worse than none.
 func templateFor(goos, backend string) (string, error) {
@@ -290,14 +343,14 @@ func warnMissingSeatModelsTo(seats []mediaseat.Seat, modelsDir, target string, w
 // contract (the same names install.ps1's $PINNED table downloads to).
 // Same shape as the seat warning: a warning, never an error, and skipped when
 // rendering for another machine, where a local miss means nothing.
-func warnMissingGatedModels(include26B, includeQ38, includeQ354B, includeQ359B, includeQ3827B, includeMimo9B bool, modelsDir, target string) {
-	warnMissingGatedModelsTo(include26B, includeQ38, includeQ354B, includeQ359B, includeQ3827B, includeMimo9B, modelsDir, target, os.Stderr)
+func warnMissingGatedModels(include26B, includeQ38, includeQ354B, includeQ359B, includeQ3827B, includeMimo9B, includeQ3635B, includeEG2, includeEG2Projector bool, modelsDir, target string) {
+	warnMissingGatedModelsTo(include26B, includeQ38, includeQ354B, includeQ359B, includeQ3827B, includeMimo9B, includeQ3635B, includeEG2, includeEG2Projector, modelsDir, target, os.Stderr)
 }
 
 // warnMissingGatedModelsTo carries the body with an injectable sink so the warning
 // is testable (it had no coverage at all — 0.72.0 review finding I-2). The wrapper
 // above keeps every production call site unchanged.
-func warnMissingGatedModelsTo(include26B, includeQ38, includeQ354B, includeQ359B, includeQ3827B, includeMimo9B bool, modelsDir, target string, w io.Writer) {
+func warnMissingGatedModelsTo(include26B, includeQ38, includeQ354B, includeQ359B, includeQ3827B, includeMimo9B, includeQ3635B, includeEG2, includeEG2Projector bool, modelsDir, target string, w io.Writer) {
 	if modelsDir == "" || target != runtime.GOOS {
 		return
 	}
@@ -326,6 +379,22 @@ func warnMissingGatedModelsTo(include26B, includeQ38, includeQ354B, includeQ359B
 	}
 	if includeMimo9B {
 		check("mimo-9b-agent", "model", "MiMo-V2.6-Distill-Qwen-9B-Q4_K_M.gguf")
+	}
+	// includeQ3635B is the POST-RAM-GATE value (res.Params.IncludeQ3635B): a `min` box does
+	// not render the entry, so it must not be told to fetch 12.3 GiB for it.
+	if includeQ3635B {
+		check("qwen3.6-35b-a3b-agent", "model", "Qwen3.6-35B-A3B/Qwen3.6-35B-A3B-UD-IQ3_XXS.gguf")
+	}
+	// The second memory-stack embedder needs BOTH files when the entry carries its projector: a
+	// model with no projector loads and then fails on the first image embed, the same shape as the
+	// 27B's mmproj above. A text-only entry (includeEG2Projector false, res.Params.EG2TextOnly) is
+	// started without --mmproj and the installer does not download the projector, so only the model
+	// is checked: warning about a file that tier never fetches would warn forever.
+	if includeEG2 {
+		check("embeddinggemma2", "model", "embeddinggemma-2-Q8_0.gguf")
+		if includeEG2Projector {
+			check("embeddinggemma2", "mmproj", "mmproj-embeddinggemma-2-Q8_0.gguf")
+		}
 	}
 	if len(missing) == 0 {
 		return
@@ -537,7 +606,10 @@ func deriveRender(profilesRaw []byte, req renderRequest) (renderResult, error) {
 		CacheRAMMiB:  cacheRAMFor(doc.CacheRAMMiBByRAMTier, ramTier),
 		IncludeQ354B: p.IncludeQwen354B, IncludeQ359B: p.IncludeQwen359B,
 		IncludeQ3827B: p.IncludeQwen3827B, IncludeMimo9B: p.IncludeMimo9B,
-		Seats: p.MediaSeats, Home: req.Home, RknpuHome: req.RknpuHome, GOOS: target, GPUEnv: p.GPUEnv, Backend: p.Backend,
+		IncludeQ3635B: spillSeatIncluded(p, ramTier),
+		IncludeEG2:    p.IncludeEmbeddingGemma2,
+		EG2TextOnly:   p.eg2TextOnly(),
+		Seats:         p.MediaSeats, Home: req.Home, RknpuHome: req.RknpuHome, GOOS: target, GPUEnv: p.GPUEnv, Backend: p.Backend,
 		AltCPULlamaBin:    req.AltLlamaBinCPU,
 		DisableCUDAGraphs: p.DisableCUDAGraphs,
 		VLLMSeat:          seat, ExtraVLLMSeats: extras, VLLMRuntime: seatRT,
@@ -579,7 +651,7 @@ func runInstallRender(args []string) error {
 	home := fs.String("home", "", "install root, for media seat paths (__OFFLOAD_HOME__)")
 	rknpuHome := fs.String("rknpu-home", "", "RKNPU home, for the rkllm seat's launcher (__RKNPU_HOME__; default: $RKNPU_HOME, else <home>/rknpu)")
 	fallback := fs.String("fallback-backend", "", "render off-matrix defaults for this backend when --profile is unknown or empty (cuda|cuda-resident|dual-cuda|vulkan|rk3588|cpu)")
-	ramTier := fs.String("ram-tier", "", "min|low|mid|high — gates the RAM-hungry 26B placements. Empty = do not gate (the caller does not know)")
+	ramTier := fs.String("ram-tier", "", "min|low|mid|high — gates the RAM-hungry 26B placements (empty = do not gate, the caller does not know) and the RAM-spill agent seat (low and up only; empty = not rendered)")
 	// The vLLM seat's DEPLOYMENT half. A tier is a hardware class, so it cannot know
 	// the account llama-swap runs as, the address the engine binds, or where this box
 	// keeps its venv and HF cache. Absent user/proxy = render the fallback seat.
@@ -612,7 +684,7 @@ func runInstallRender(args []string) error {
 
 	target := res.Params.GOOS
 	warnMissingSeatModels(res.Profile.MediaSeats, *modelsDir, target)
-	warnMissingGatedModels(res.Include26B, res.Profile.IncludeQwen38, res.Profile.IncludeQwen354B, res.Profile.IncludeQwen359B, res.Profile.IncludeQwen3827B, res.Profile.IncludeMimo9B, *modelsDir, target)
+	warnMissingGatedModels(res.Include26B, res.Profile.IncludeQwen38, res.Profile.IncludeQwen354B, res.Profile.IncludeQwen359B, res.Profile.IncludeQwen3827B, res.Profile.IncludeMimo9B, res.Params.IncludeQ3635B, res.Params.IncludeEG2, !res.Params.EG2TextOnly, *modelsDir, target)
 
 	// The provenance stamp (K-02) rides on every rendered config from here on.
 	// It is prepended AFTER the rule audit so the audit sees exactly what a

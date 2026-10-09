@@ -29,7 +29,7 @@ try {
 }
 Assert ([bool](Get-Command Select-CudaBuild -ErrorAction SilentlyContinue)) 'dot-source seam defines Select-CudaBuild'
 
-Write-Host "== Select-CudaBuild: Blackwell on a CUDA-13 driver -> pinned 13.3 build (serves) =="
+Write-Host "== Select-CudaBuild: Blackwell on a CUDA-13 driver -> pinned 13.4 build (serves) =="
 $r = Select-CudaBuild -ProfileId 'blackwell-16' -CudaDriver '13.3' -CudaToolkit $null
 Assert (-not $r.refuse) 'blackwell-16/13.3 not refused'
 Assert ($r.component -eq 'llama-cuda13') 'blackwell-16/13.3 component=llama-cuda13'
@@ -41,7 +41,7 @@ Assert (($r.report -join ' ') -notmatch 'available on this box now') 'blackwell-
 Write-Host "== Select-CudaBuild: 12.8 toolkit alongside a 13.x driver -> peak source-build noted =="
 $r = Select-CudaBuild -ProfileId 'blackwell-16' -CudaDriver '13.3' -CudaToolkit '12.8'
 Assert (-not $r.refuse) 'blackwell-16/13.3+tk12.8 not refused'
-Assert ($r.component -eq 'llama-cuda13') 'blackwell-16/13.3+tk12.8 still serves on 13.3 prebuilt'
+Assert ($r.component -eq 'llama-cuda13') 'blackwell-16/13.3+tk12.8 still serves on 13.4 prebuilt'
 Assert (($r.report -join ' ') -match 'available on this box now') 'blackwell-16/13.3+tk12.8 peak source-build noted'
 
 Write-Host "== Select-CudaBuild: blackwell-8 keys the same family =="

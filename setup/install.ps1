@@ -37,11 +37,17 @@ $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot  = Split-Path -Parent $scriptDir
 
 # ---------------------------------------------------------------------------
-# PINNED assets - update tags/hashes HERE in one place. Verified live 2026-07-08.
-# llama.cpp release b9934 ; llama-swap v236. Model SHA256 = Hugging Face LFS oid
+# PINNED assets - update tags/hashes HERE in one place. Verified live 2026-07-08; the llama.cpp
+# pins were re-read from the GitHub release API 2026-10-09.
+# llama.cpp release b11490 ; llama-swap v236. Model SHA256 = Hugging Face LFS oid
 # (fetched from the HF tree API at pin time - no model download needed to pin).
 # ---------------------------------------------------------------------------
-$LLAMA_TAG = 'b9934'
+# b11490 (2026-10-08) replaces b9934. The floor is b11452: the EmbeddingGemma-2 entry's GGUF
+# architecture (gemma-embedding2, upstream PR #30054) first builds there and b11490 is the build it
+# was proven on; the Qwen3.6-35B-A3B spill seat needs b10964 (--load-mode). NAMING CHANGE: the CUDA
+# 13 asset family is cuda-13.4 from this tag on (was cuda-13.3 at b9934), so the llama-cuda13 /
+# llama-cudart13 URLs move with the tag, not only their hashes. The 12.4 cudart zip is byte-identical.
+$LLAMA_TAG = 'b11490'
 $SWAP_TAG  = 'v236'
 $PINNED = @{
   # llama.cpp backend binaries (SHA256 from the GitHub release API; verified by download).
@@ -53,14 +59,14 @@ $PINNED = @{
   # surfaces newer upstream releases at install time so the pin never silently rots.
   'llama-vulkan' = @{
     url  = "https://github.com/ggml-org/llama.cpp/releases/download/$LLAMA_TAG/llama-$LLAMA_TAG-bin-win-vulkan-x64.zip"
-    sha  = '20ea5f484c0ae373affd5c5032b718bf3b9e15a31db5c93bfbbb6d9323824a23'
-    size = 32895710
+    sha  = '99cd7f7ca3e9de328026c5330b8ff92941103911b15df4d721ee9fd61055919d'
+    size = 33424529
     version = $LLAMA_TAG
   }
   'llama-cuda' = @{
     url  = "https://github.com/ggml-org/llama.cpp/releases/download/$LLAMA_TAG/llama-$LLAMA_TAG-bin-win-cuda-12.4-x64.zip"
-    sha  = '31086784613cc4b250fa820762c812bb77cff2f98322e5b76ba62488780bd293'
-    size = 267009784
+    sha  = '475de637171161bf259a2ef0a3384b8421ff9f70fe5aff0bad2cf931e01ad858'
+    size = 264960856
     version = $LLAMA_TAG
   }
   'llama-cudart' = @{
@@ -69,25 +75,26 @@ $PINNED = @{
     size = 391443627
     version = $LLAMA_TAG
   }
-  # H4: CUDA-13.3 build family — the Blackwell (sm_120) SERVE path. SHA256 = the GitHub
-  # release API asset digest for tag b9934 (verified 2026-07-15); Get-Verified re-checks
-  # size + SHA on every download.
+  # H4: CUDA-13.4 build family (cuda-13.3 until b9934) — the Blackwell (sm_120) SERVE path.
+  # SHA256 = the GitHub release API asset digest for tag b11490 (read 2026-10-09; the vulkan, cpu
+  # and cuda-13.4 zips were also downloaded and hashed against it); Get-Verified re-checks size +
+  # SHA on every download.
   'llama-cuda13' = @{
-    url  = "https://github.com/ggml-org/llama.cpp/releases/download/$LLAMA_TAG/llama-$LLAMA_TAG-bin-win-cuda-13.3-x64.zip"
-    sha  = '20e49d5c640037db1e6a1d3ad111030ed9e15c6df4d4438fc9dad622de035793'
-    size = 162132387
+    url  = "https://github.com/ggml-org/llama.cpp/releases/download/$LLAMA_TAG/llama-$LLAMA_TAG-bin-win-cuda-13.4-x64.zip"
+    sha  = 'd141c145909ea27aae64c0f73d58e93fc9ecca6112658aa8f0d79cc304443860'
+    size = 153309931
     version = $LLAMA_TAG
   }
   'llama-cudart13' = @{
-    url  = "https://github.com/ggml-org/llama.cpp/releases/download/$LLAMA_TAG/cudart-llama-bin-win-cuda-13.3-x64.zip"
-    sha  = '1462a050eb4c684921ba51dcc4cc488a036674c3e73e9945ee705b854808d03e'
-    size = 390970417
+    url  = "https://github.com/ggml-org/llama.cpp/releases/download/$LLAMA_TAG/cudart-llama-bin-win-cuda-13.4-x64.zip"
+    sha  = '738f8c251ac22b70c3ae6f83a10cf222725df0395246a2cf58f32bdb85fbe668'
+    size = 423535356
     version = $LLAMA_TAG
   }
   'llama-cpu' = @{
     url  = "https://github.com/ggml-org/llama.cpp/releases/download/$LLAMA_TAG/llama-$LLAMA_TAG-bin-win-cpu-x64.zip"
-    sha  = 'dba3a85a954c14ea69f03d0f7c5c805b4b3e5387940e5543dbdaf55a12a4c385'
-    size = 18206912
+    sha  = 'ed69a9e87713b84c63940b2f0e708c8e698e82b3d74dfa1364e94d97e334720c'
+    size = 19482170
     version = $LLAMA_TAG
   }
   # llama-swap release (windows_amd64 zip).
@@ -197,12 +204,53 @@ $PINNED = @{
     sha  = '4bca6f18c73f72270c7a20c2ea2bea581de8246e318714277120369d34048c81'
     version = '4bca6f18'
   }
+  # RAM-SPILL agent seat (ADR 0080): Qwen3.6-35B-A3B UD-IQ3_XXS (35B total, ~3B active,
+  # Apache-2.0), the routed experts in host RAM through `--n-cpu-moe 40`, attention and the
+  # KV cache on the card. Measured on the reference 6 GB node in the 2026-10-07/08 lean bake
+  # (llama.cpp b10964): blind pack 8.11 vs the 4B's 7.26, ~2.1 GB on the card, ~11.6 GB host
+  # RSS released on unload. Gated on the resolved profile's include_qwen36_35b AND a RAM tier
+  # of low, mid or high (Step 5: the entry is not rendered on `min`, so 12.3 GiB is not
+  # fetched there either). REQUIRES llama.cpp >= b10964 (`--load-mode`). `name` carries the
+  # subdirectory the template's cmd names (__MODELS__/Qwen3.6-35B-A3B/...), which the
+  # download loop creates. size/sha read 2026-10-09 from the Hugging Face resolve redirect's
+  # X-Linked-Size / X-Linked-ETag (the LFS oid), the same method as model-mimo-9b; no model
+  # bytes were downloaded to pin. The bake node's own copy was NOT re-hashed against it.
+  'model-qwen36-35b' = @{
+    url  = 'https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF/resolve/main/Qwen3.6-35B-A3B-UD-IQ3_XXS.gguf'
+    name = 'Qwen3.6-35B-A3B/Qwen3.6-35B-A3B-UD-IQ3_XXS.gguf'
+    size = 13211155424
+    sha  = '9c964e657212fea1f24905dd7b0a89b82fd807d19fab0b41da14251b07b88fbe'
+    version = '9c964e65'
+  }
   'model-embed' = @{
     url  = 'https://huggingface.co/unsloth/embeddinggemma-300m-GGUF/resolve/main/embeddinggemma-300M-Q8_0.gguf'
     name = 'embeddinggemma-300m-Q8_0.gguf'
     size = 328577056
     sha  = 'a0f7b4e13c397a6e1b32c2de75b1f65a14c92ec524d5f674d94a4290a1c4969b'
     version = 'a0f7b4e1'
+  }
+  # EmbeddingGemma-2 (ggml-org GGUF) — the memory stack's second embedder, entry `embeddinggemma2`
+  # (model + multimodal projector, so TWO files for the tier that carries the projector, ONE for a
+  # text-only replica). Gated on the resolved profile's include_embeddinggemma2 (Step 5; ampere-6 with
+  # the projector, the card it was measured on; ampere-8 and blackwell-3x16 text-only, their
+  # embeddinggemma2_projector false, so `model-eg2-mmproj` is not fetched there), no RAM gate: it is
+  # VRAM-resident (1,196 MiB loaded with the projector, 460 MiB without, on the reference
+  # 6 GB node). REQUIRES llama.cpp >= b11452 (gemma-embedding2 architecture). size/sha
+  # read 2026-10-09 from the Hugging Face resolve redirect's X-Linked-Size / X-Linked-ETag (the LFS
+  # oid) and equal the values the memory-stack session measured on; no model bytes were downloaded.
+  'model-eg2' = @{
+    url  = 'https://huggingface.co/ggml-org/embeddinggemma-2-GGUF/resolve/main/embeddinggemma-2-Q8_0.gguf'
+    name = 'embeddinggemma-2-Q8_0.gguf'
+    size = 309855456
+    sha  = '2188ac1deca4b77dffefd603c2776a9d76d9d74ec01841392982ebb840b09135'
+    version = '2188ac1d'
+  }
+  'model-eg2-mmproj' = @{
+    url  = 'https://huggingface.co/ggml-org/embeddinggemma-2-GGUF/resolve/main/mmproj-embeddinggemma-2-Q8_0.gguf'
+    name = 'mmproj-embeddinggemma-2-Q8_0.gguf'
+    size = 554821024
+    sha  = 'c4a8a52691ecef40618438928bdf9e68379b854e24166f292592353db0aab64f'
+    version = 'c4a8a526'
   }
   # --- J2 media tier: stable-diffusion.cpp (Vulkan) + the Apache-2.0 image roster ---
   # sd.cpp uses rolling per-master releases (no semver): the pin is tag+commit, a
@@ -643,9 +691,10 @@ function Resolve-ProfileParams {
 # the TOOLKIT (nvcc) only matters for the source-build path, so it is reported
 # as an opportunity, never required.
 #
-# Matrix (upstream reality, release b9934 — verified 2026-07-15):
+# Matrix (upstream reality, release b11490 — asset names verified 2026-10-09; the sm_120 / cuBLAS
+# findings below were measured on b9934 on 2026-07-15 and are not re-measured on this build):
 #   * win-cuda-12.4 prebuilt: NO sm_120 -> will not run Blackwell at all.
-#   * win-cuda-13.3 prebuilt: SERVES Blackwell (MMQ falls back to cuBLAS,
+#   * win-cuda-13.4 prebuilt (13.3 until b9934): SERVES Blackwell (MMQ falls back to cuBLAS,
 #     ~5.6x slower prefill on Q4 — functional, not peak). Needs a CUDA-13 driver.
 #   * NO win-cuda-12.8 prebuilt exists -> the PEAK path (sm_120 MMQ,
 #     -DCMAKE_CUDA_ARCHITECTURES=120) is a documented source-build vs a
@@ -682,7 +731,7 @@ function Select-CudaBuild {
   if ($ProfileId -match '^blackwell-') {
     if ($driverVer -and $driverVer -ge [version]'13.0') {
       $report = @(
-        "Blackwell (sm_120), $cudaDesc -> CUDA-13.3 prebuilt: SERVES now (MMQ falls back to cuBLAS, ~5.6x slower prefill on Q4). Functional, not peak.",
+        "Blackwell (sm_120), $cudaDesc -> CUDA-13.4 prebuilt: SERVES now (MMQ falls back to cuBLAS, ~5.6x slower prefill on Q4). Functional, not peak.",
         "Peak path: source-build vs a CUDA 12.8/12.9 toolkit with -DCMAKE_CUDA_ARCHITECTURES=120 (MMQ). See setup/SETUP-AGENT.md - Blackwell note." )
       if ($toolkitVer -and $toolkitVer -ge [version]'12.8' -and $toolkitVer -lt [version]'13.0') {
         $report += "Toolkit $CudaToolkit is already installed - the peak source-build is available on this box now."
@@ -691,8 +740,8 @@ function Select-CudaBuild {
     }
     if ($driverVer -and $driverVer -ge [version]'12.8') {
       return @{ component = ''; keys = @(); tier = 'refuse'; refuse = $true; report = @(
-        "Blackwell (sm_120), ${cudaDesc}: NO pinned prebuilt runs here - the 12.4 build has no sm_120 and the CUDA-13.3 build needs a CUDA-13 (R580+) driver.",
-        "Either upgrade the NVIDIA driver to R580+ and re-run install (the 13.3 prebuilt then serves), or source-build vs a 12.8/12.9 toolkit for peak (-DCMAKE_CUDA_ARCHITECTURES=120).",
+        "Blackwell (sm_120), ${cudaDesc}: NO pinned prebuilt runs here - the 12.4 build has no sm_120 and the CUDA-13.4 build needs a CUDA-13 (R580+) driver.",
+        "Either upgrade the NVIDIA driver to R580+ and re-run install (the 13.4 prebuilt then serves), or source-build vs a 12.8/12.9 toolkit for peak (-DCMAKE_CUDA_ARCHITECTURES=120).",
         "See setup/SETUP-AGENT.md - Blackwell note." ) }
     }
     return @{ component = ''; keys = @(); tier = 'refuse'; refuse = $true; report = @(
@@ -742,8 +791,17 @@ function Get-FamilyModelKeys {
   return $keys
 }
 
+# Test-RamLowUp: the RAM tiers (low, mid, high = 28 GB and above) a RAM-SPILL seat renders and
+# downloads on. Twin of tierseed.RAMLowUp, which the Go renderer gates the entry on and the
+# config_seed_ram_low_up overlay applies on; keep the three names identical. `min` and an
+# unknown tier are false, so an unmeasured box neither fetches the weights nor renders the seat.
+function Test-RamLowUp {
+  param([string]$RamTier)
+  return ($RamTier -in @('low', 'mid', 'high'))
+}
+
 function Get-GatedModelKeys {
-  param([bool]$IncludeQwen38, [bool]$IncludeQwen354B, [bool]$IncludeQwen359B, [bool]$IncludeQwen3827B, [bool]$IncludeMimo9B = $false, [bool]$WithFamily)
+  param([bool]$IncludeQwen38, [bool]$IncludeQwen354B, [bool]$IncludeQwen359B, [bool]$IncludeQwen3827B, [bool]$IncludeMimo9B = $false, [bool]$IncludeQwen3635B = $false, [string]$RamTier = '', [bool]$IncludeEmbeddingGemma2 = $false, [bool]$IncludeEmbeddingGemma2Projector = $true, [bool]$WithFamily)
   $keys = @()
   # The 27B coder/agent seat RIDES the family gate: OFFLOAD_WITH_FAMILY=0 (a lean
   # install) opts out of an 18.8GB download even on an include_qwen38 tier.
@@ -769,6 +827,24 @@ function Get-GatedModelKeys {
   # 9B Qwen entry it can render beside: 5.6GB, and a lean install must not silently
   # drop a seat the yaml still names.
   if ($IncludeMimo9B) { $keys += @('model-mimo-9b') }
+  # The Qwen3.6-35B-A3B spill seat does not ride the family gate either: on a 32 GB-class
+  # ampere-6 box it IS the agent seat (config_seed_ram_low_up binds agent_model to it), so a
+  # lean install that dropped its 12.3 GiB would leave the config naming a seat with no weights.
+  # It is gated on the box's RAM tier HERE too (-RamTier, default '' = unknown = below the floor),
+  # not only by the caller, so the 12.3 GiB download cannot outlive the render gate: a `min` box
+  # does not render the entry, so it must not fetch the file.
+  if ($IncludeQwen3635B -and (Test-RamLowUp -RamTier $RamTier)) { $keys += @('model-qwen36-35b') }
+  # The memory stack's second embedder (model 0.31 GB, multimodal projector 0.55 GB). It does not ride the
+  # family gate: it is a stack member, not a chat model, and a lean install that dropped it would leave
+  # the rendered residency set naming an entry whose weights never arrived. No RAM gate either: it is
+  # VRAM-resident. An entry that carries the projector (the default, and the memory authority's) needs
+  # BOTH files - a model with no projector fails on the first image embed. A text-only replica
+  # ($IncludeEmbeddingGemma2Projector false: the render drops --mmproj and the replica never embeds media)
+  # downloads the model alone, so the 0.55 GB projector is not fetched for an entry that never loads it.
+  if ($IncludeEmbeddingGemma2) {
+    $keys += @('model-eg2')
+    if ($IncludeEmbeddingGemma2Projector) { $keys += @('model-eg2-mmproj') }
+  }
   # Returned WITHOUT the ,@() no-unroll wrapper on purpose. That guard is correct where a
   # 1-element array must survive JSON SERIALIZATION (Merge-ConfigSeed), but here the only
   # consumer is `$modelKeys += ...`, where unrolling is exactly what is wanted - and on an
@@ -1404,7 +1480,7 @@ Step 'prereq: Go >=1.26' `
 # ---------------------------------------------------------------------------
 # Step 3: llama.cpp binaries for the backend (+ cudart for CUDA)
 # SKIP requires: artifact present AND manifest records the currently-pinned tag
-# under the SELECTED component key — so a CUDA-build switch (e.g. 12.4 -> 13.3
+# under the SELECTED component key — so a CUDA-build switch (e.g. 12.4 -> 13.4
 # after a driver upgrade, or the V100 arriving flipping the profile) forces a
 # real re-install on the next run even though old bytes are still on disk.
 # H4: for CUDA the build is CHOSEN from (profile, detected CUDA) — flexible,
@@ -1467,6 +1543,9 @@ $includeQwen354B = $false
 $includeQwen359B = $false
 $includeMimo9B = $false
 $includeQwen3827B = $false
+$includeQwen3635B = $false
+$includeEmbeddingGemma2 = $false
+$includeEmbeddingGemma2Projector = $true
 $profilesJsonStep5 = Join-Path (Join-Path $scriptDir 'templates') 'profiles.json'
 if ($profileId -and (Test-Path $profilesJsonStep5)) {
   $pdoc5 = Get-Content -Raw $profilesJsonStep5 | ConvertFrom-Json
@@ -1505,11 +1584,38 @@ if ($profileId -and (Test-Path $profilesJsonStep5)) {
       throw "profile '$profileId': include_qwen38_27b must be a JSON boolean, got '$q3827Val' ($($q3827Val.GetType().Name)) - fix setup/templates/profiles.json before the download set is chosen"
     }
     $includeQwen3827B = ($q3827Val -is [bool] -and $q3827Val)
+
+    # Same STRICT bool gate for the RAM-spill agent seat, and then the RAM gate: the tier
+    # may carry it, the BOX must be able to hold the spilled experts (low, mid or high).
+    $q3635Val = $pdoc5.profiles.$profileId.include_qwen36_35b
+    if ($null -ne $q3635Val -and -not ($q3635Val -is [bool])) {
+      throw "profile '$profileId': include_qwen36_35b must be a JSON boolean, got '$q3635Val' ($($q3635Val.GetType().Name)) - fix setup/templates/profiles.json before the download set is chosen"
+    }
+    $includeQwen3635B = ($q3635Val -is [bool] -and $q3635Val -and (Test-RamLowUp -RamTier $ramTier))
+    if ($q3635Val -is [bool] -and $q3635Val -and -not $includeQwen3635B) {
+      Write-Host "SKIP  model: Qwen3.6-35B-A3B (profile '$profileId' carries the RAM-spill agent seat but ram_tier=$ramTier is below low: the seat is not rendered and the 4B stays the agent seat)" -ForegroundColor DarkGray
+    }
+
+    # Same STRICT bool gate for the memory stack's second embedder (no RAM gate: VRAM-resident).
+    $eg2Val = $pdoc5.profiles.$profileId.include_embeddinggemma2
+    if ($null -ne $eg2Val -and -not ($eg2Val -is [bool])) {
+      throw "profile '$profileId': include_embeddinggemma2 must be a JSON boolean, got '$eg2Val' ($($eg2Val.GetType().Name)) - fix setup/templates/profiles.json before the download set is chosen"
+    }
+    $includeEmbeddingGemma2 = ($eg2Val -is [bool] -and $eg2Val)
+
+    # The projector: ABSENT means true (the entry as the memory authority runs it); only an explicit
+    # JSON false makes the tier a text-only replica whose render drops --mmproj, so only then is the
+    # projector GGUF left out of the download set. Same STRICT bool gate: [bool]'false' is $true.
+    $eg2ProjVal = $pdoc5.profiles.$profileId.embeddinggemma2_projector
+    if ($null -ne $eg2ProjVal -and -not ($eg2ProjVal -is [bool])) {
+      throw "profile '$profileId': embeddinggemma2_projector must be a JSON boolean, got '$eg2ProjVal' ($($eg2ProjVal.GetType().Name)) - fix setup/templates/profiles.json before the download set is chosen"
+    }
+    $includeEmbeddingGemma2Projector = -not ($eg2ProjVal -is [bool] -and -not $eg2ProjVal)
   }
 }
 # Gate -> download-set mapping lives in Get-GatedModelKeys (above the test seam) so it
 # can be regression-pinned; the rules and their deliberate asymmetry are documented there.
-$modelKeys += Get-GatedModelKeys -IncludeQwen38 $includeQwen38 -IncludeQwen354B $includeQwen354B -IncludeQwen359B $includeQwen359B -IncludeQwen3827B $includeQwen3827B -IncludeMimo9B $includeMimo9B -WithFamily $withFamily
+$modelKeys += Get-GatedModelKeys -IncludeQwen38 $includeQwen38 -IncludeQwen354B $includeQwen354B -IncludeQwen359B $includeQwen359B -IncludeQwen3827B $includeQwen3827B -IncludeMimo9B $includeMimo9B -IncludeQwen3635B $includeQwen3635B -RamTier $ramTier -IncludeEmbeddingGemma2 $includeEmbeddingGemma2 -IncludeEmbeddingGemma2Projector $includeEmbeddingGemma2Projector -WithFamily $withFamily
 foreach ($key in $modelKeys) {
   $m = $PINNED[$key]
   $dest = Join-Path $modelDir $m.name
@@ -1519,6 +1625,8 @@ foreach ($key in $modelKeys) {
       ((Get-OldVersion $key) -eq $m.version) -and (Test-CachedSha -Path $dest -ExpectedSha $m.sha)
     } `
     {
+      # A pinned name may carry a subdirectory (the Qwen3.6-35B-A3B seat's cmd names one).
+      New-Item -ItemType Directory -Force -Path (Split-Path -Parent $dest) | Out-Null
       Get-Verified -Url $m.url -Dest $dest -ExpectedSize $m.size -Sha $m.sha
       Test-CachedSha -Path $dest -ExpectedSha $m.sha | Out-Null   # seed the sentinel for the next run
     }
@@ -1654,6 +1762,8 @@ $gatedSeats = [ordered]@{
   'qwen3.8-27b'      = $includeQwen38
   'qwen3.5-4b-agent' = $includeQwen354B
   'qwen38-27b-agent' = $includeQwen3827B
+  'qwen3.6-35b-a3b-agent' = $includeQwen3635B
+  'embeddinggemma2' = $includeEmbeddingGemma2
 }
 # -RenderOnly always renders fresh: drop any stale output so the Step SKIP test can't short-circuit it.
 if ($RenderOnly -and (Test-Path $yamlDest)) { Remove-Item $yamlDest -Force }
@@ -1704,8 +1814,11 @@ Step "render llama-swap.yaml (backend=$tplBackend profile=$(if ($profileId) { $p
     # backend defaults this script used to hold, keyed by the TEMPLATE's backend.
     if ($pp.known -and $profileId) { $renderArgs += @('--profile', $profileId) }
     else { $renderArgs += @('--fallback-backend', $tplBackend) }
-    # --threads matters only where the template carries the token (the cpu backend),
-    # and there it is PHYSICAL cores - the value this script has always used.
+    # --threads matters only where the template carries the __NTHREADS__ token: the cpu
+    # backend's entries and, since ADR 0080, the RAM-spill agent seat of the cuda template
+    # (the spilled experts run on those threads). The value is PHYSICAL cores - the value
+    # this script has always used. The bake's own thread count is not recorded in the repo,
+    # so the spill seat's --threads is the renderer's input, not a measured literal.
     $cores = (Get-CimInstance Win32_Processor | Measure-Object -Property NumberOfCores -Sum).Sum
     if (-not $cores -or $cores -lt 1) { $cores = [Environment]::ProcessorCount }
     $renderArgs += @('--threads', "$cores")
@@ -1820,6 +1933,7 @@ Step 'harness config -> ~/.local-offload/config.json' `
     $cfgText = Get-Content -Raw (Join-Path (Join-Path $scriptDir 'templates') 'config.json')
     $seed = $null
     $seedCond = $null
+    $seedCondLow = $null
     $profRow = $null
     # $pdoc is hoisted above the profile guard: an accelerator on a profile-less
     # render must still seed (ADR 0024 — accelerators are ADDITIVE to the tier).
@@ -1837,11 +1951,20 @@ Step 'harness config -> ~/.local-offload/config.json' `
         if ($ramTier -in @('mid','high') -and $profRow.PSObject.Properties['config_seed_ram_mid_high']) {
           $seedCond = $profRow.config_seed_ram_mid_high
         }
+        # The 32 GB-and-up layer (low|mid|high; tierseed.RAMLowUp): merged BEFORE the
+        # mid/high layer so the mid/high value wins key by key, as in tierseed.Resolve.
+        if ((Test-RamLowUp -RamTier $ramTier) -and $profRow.PSObject.Properties['config_seed_ram_low_up']) {
+          $seedCondLow = $profRow.config_seed_ram_low_up
+        }
       }
     }
     if ($seed) {
       $cfgText = Merge-ConfigSeed -ConfigText $cfgText -Seed $seed -OffloadHome $HOME_DIR
       Write-Host "      config_seed ($profileId): $(@($seed.PSObject.Properties.Name) -join ', ')" -ForegroundColor DarkGray
+    }
+    if ($seedCondLow) {
+      $cfgText = Merge-ConfigSeed -ConfigText $cfgText -Seed $seedCondLow -OffloadHome $HOME_DIR
+      Write-Host "      config_seed_ram_low_up ($profileId, ram_tier=$ramTier): $(@($seedCondLow.PSObject.Properties.Name) -join ', ')" -ForegroundColor DarkGray
     }
     if ($seedCond) {
       $cfgText = Merge-ConfigSeed -ConfigText $cfgText -Seed $seedCond -OffloadHome $HOME_DIR
@@ -1851,7 +1974,7 @@ Step 'harness config -> ~/.local-offload/config.json' `
     # (authoritative) — this raw-merge path bypasses tierseed, so the derivation
     # is replicated via Get-DerivedAgentModel (see its comment). Runs even with
     # no seed at all: a seed-less tier (e.g. dual-gpu) still names a resident_tier.
-    $agentSeat = Get-DerivedAgentModel -ProfileRow $profRow -Seeds @($seed, $seedCond)
+    $agentSeat = Get-DerivedAgentModel -ProfileRow $profRow -Seeds @($seed, $seedCondLow, $seedCond)
     if ($agentSeat) {
       $cfgText = Merge-ConfigSeed -ConfigText $cfgText -Seed ([pscustomobject]@{ agent_model = $agentSeat })
       Write-Host "      agent seat ($profileId): agent_model=$agentSeat (derived from resident_tier)" -ForegroundColor DarkGray
@@ -2049,6 +2172,7 @@ if ($profileId -and (Test-Path $profilesJson)) {
   if ($hintDoc.profiles.PSObject.Properties[$profileId]) {
     $hintRow = $hintDoc.profiles.$profileId
     $hintSeeds = @($hintRow.config_seed)
+    if ((Test-RamLowUp -RamTier $ramTier) -and $hintRow.PSObject.Properties['config_seed_ram_low_up']) { $hintSeeds += $hintRow.config_seed_ram_low_up }
     if ($ramTier -in @('mid','high') -and $hintRow.PSObject.Properties['config_seed_ram_mid_high']) { $hintSeeds += $hintRow.config_seed_ram_mid_high }
     $derivedSeat = Get-DerivedAgentModel -ProfileRow $hintRow -Seeds $hintSeeds
   }

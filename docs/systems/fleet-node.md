@@ -1111,7 +1111,8 @@ a resident embedder into the idle baseline and make that node under-advertise fo
 **The memory stack is protected by name, in both modes.** The house rule gives every model a
 300 s idle ttl, so a mem0 stack member is neither a `ttl: -1/0` seat nor in the keep-set, yet
 it is what `gpu reserve --unload-seat` and the render helper keep resident. Reclaim keeps the
-same set, `memory_stack` (the default set when empty), matched on the canonical id ignoring
+same set, `memory_stack` (the default set when empty: `embeddinggemma`, `bge-reranker-v2-m3`, `embeddinggemma-ams` and
+`embeddinggemma2`, the EmbeddingGemma-2 stack member), matched on the canonical id ignoring
 case and padding, before the keep-set is consulted and even when no keep-set could be read
 (register C-94). A non-member at ttl 300 is still reclaimable.
 

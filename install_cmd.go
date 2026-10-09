@@ -170,7 +170,7 @@ func runInstallSeed(args []string) error {
 	profile := fs.String("profile", "", "tier id (see docs/tiers/README.md)")
 	home := fs.String("home", "", "install root substituted for __OFFLOAD_HOME__")
 	goos := fs.String("os", "", "target OS for binary names: windows|linux (default: this machine)")
-	ramTier := fs.String("ram-tier", "", "apply the config_seed_ram_mid_high overlay: mid|high")
+	ramTier := fs.String("ram-tier", "", "apply the RAM-gated seed overlays: low|mid|high (config_seed_ram_low_up on all three, config_seed_ram_mid_high on mid|high)")
 	root := fs.String("root", ".", "repo root holding setup/templates/profiles.json")
 	// The vLLM agent seat's deployment half, so the BINDING is decided by the same
 	// detection that decides whether `install render` emits the seat. Pass the same
