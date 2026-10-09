@@ -13,7 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { rmSync, mkdtempSync, writeFileSync, mkdirSync, unlinkSync } from "node:fs";
 import {
-  memoryStack, quiesceLlamaSwap, freeLlamaSwap, parseUnloadModels,
+  memoryStack, quiesceLlamaSwap, freeLlamaSwap, parseUnloadModels, parseInflightMetrics,
   checkInheritedLease, claimLeaseUnload, readLease, inheritedLease, LEASE_FORMAT_SIGNATURE,
 } from "./gpu-lock.mjs";
 
@@ -225,6 +225,68 @@ test("quiesce does NOT call a 404 idle when /running says the model IS loaded", 
   });
   assert.equal(r.drained, false, "a loaded-but-unobservable tier must not report as drained");
   assert.deepEqual(r.unknown, ["whisper-stt"], "the unobservable tier is named for the caller's log");
+});
+
+// THE SECOND FAIL-OPEN (2026-10-09): a vLLM seat has no /slots route either. It was named
+// unknown, given the brief grace, and unloaded under a request in flight; llama-swap answered
+// that request 500 "aborted". The exposition at /upstream/<id>/metrics is what says whether a
+// vLLM (or llama-server) seat holds requests, and only a seat that answers neither is unknown.
+const vllmMetrics = (running, waiting = 0) => ({
+  ok: true, status: 200,
+  text: async () => `# HELP vllm:num_requests_running x\n# TYPE vllm:num_requests_running gauge\n` +
+    `vllm:num_requests_running{engine="0",model_name="m"} ${running}.0\n` +
+    `vllm:num_requests_waiting{engine="0",model_name="m"} ${waiting}.0\nvllm:num_requests_running_total 500\n`,
+});
+
+test("parseInflightMetrics sums the in-flight gauges, with labels and floats, and reads nothing as null", () => {
+  assert.equal(parseInflightMetrics(`vllm:num_requests_running{engine="0"} 2.0\nvllm:num_requests_waiting{engine="0"} 1.0\nvllm:num_requests_running_total 500\n`), 3);
+  assert.equal(parseInflightMetrics("llamacpp:requests_processing 1\nllamacpp:requests_deferred 0\n"), 1);
+  assert.equal(parseInflightMetrics("# HELP something\nvllm:prompt_tokens_total 12345\n"), null, "an exposition with no in-flight gauge says nothing");
+  assert.equal(parseInflightMetrics(""), null);
+});
+
+test("quiesce reads a loaded vLLM seat (no /slots) through /metrics and waits for its requests to end", async () => {
+  let metricsPolls = 0;
+  const r = await quiesceLlamaSwap(["qwen-vllm"], {
+    fetchImpl: async (url) => {
+      const u = String(url);
+      if (u.endsWith("/running")) return { ok: true, status: 200, json: async () => ({ running: [{ model: "qwen-vllm" }] }) };
+      if (u.endsWith("/slots")) return { ok: false, status: 404, json: async () => ({}) }; // vLLM: no /slots route
+      if (u.endsWith("/metrics")) { metricsPolls++; return vllmMetrics(metricsPolls < 3 ? 1 : 0); }
+      throw new Error("unexpected " + u);
+    },
+    pollMs: 1, timeoutMs: 5_000, graceMs: 1,
+  });
+  assert.equal(r.drained, true, "verified once the exposition reports no running or waiting request");
+  assert.deepEqual(r.unknown, [], "a seat the exposition answers for is never unknown");
+  assert.ok(metricsPolls >= 3, `expected to keep polling /metrics while busy, polled ${metricsPolls}`);
+});
+
+test("quiesce names a loaded seat unknown when neither /slots nor /metrics answers", async () => {
+  const r = await quiesceLlamaSwap(["whisper-stt"], {
+    fetchImpl: async (url) => {
+      const u = String(url);
+      if (u.endsWith("/running")) return { ok: true, status: 200, json: async () => ({ running: [{ model: "whisper-stt" }] }) };
+      return { ok: false, status: 404, json: async () => ({}), text: async () => "" };
+    },
+    pollMs: 1, timeoutMs: 1_000, graceMs: 1,
+  });
+  assert.equal(r.drained, false);
+  assert.deepEqual(r.unknown, ["whisper-stt"]);
+});
+
+test("quiesce treats an exposition without an in-flight gauge as unknown, not idle", async () => {
+  const r = await quiesceLlamaSwap(["m"], {
+    fetchImpl: async (url) => {
+      const u = String(url);
+      if (u.endsWith("/running")) return { ok: true, status: 200, json: async () => ({ running: [{ model: "m" }] }) };
+      if (u.endsWith("/slots")) return { ok: false, status: 404, json: async () => ({}) };
+      return { ok: true, status: 200, text: async () => "vllm:prompt_tokens_total 12345\n" };
+    },
+    pollMs: 1, timeoutMs: 1_000, graceMs: 1,
+  });
+  assert.equal(r.drained, false);
+  assert.deepEqual(r.unknown, ["m"]);
 });
 
 test("quiesce clears a transient unknown once the tier becomes observable", async () => {

@@ -192,6 +192,38 @@ function withTimeout(ms) {
 // verified drain while in-flight work was killed, which is the exact 502 this exists to
 // prevent. So a 404 is cross-checked against /running, and anything we cannot observe
 // is named in `unknown` rather than assumed quiet.
+//
+// SECOND SIGNAL (2026-10-09): a vLLM seat has no /slots route either, so it read as
+// unknown, got the brief grace and was unloaded under a request in flight (a 27B vLLM
+// seat on the reference 3-card box: llama-swap answered the request 500 "aborted" 4 s
+// after the lease started). vLLM and llama-server both publish an exposition at
+// /upstream/<id>/metrics; the gauges below are the ones the Go-side drain reads
+// (internal/seatload.InflightGauges). A loaded seat whose /slots is absent is read there;
+// only a seat that answers neither is unknown.
+export const INFLIGHT_GAUGES = [
+  "vllm:num_requests_running", "vllm:num_requests_waiting",
+  "llamacpp:requests_processing", "llamacpp:requests_deferred",
+];
+
+// parseInflightMetrics sums the in-flight gauges of a Prometheus exposition. Labels
+// (`{engine="0",model_name="m"}`) and float samples are accepted; every other line is
+// ignored. Returns null when the text carries none of the gauges (then the exposition
+// says nothing about requests, and the caller must not read it as idle).
+export function parseInflightMetrics(text) {
+  let total = 0, seen = false;
+  for (const raw of String(text || "").split("\n")) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#")) continue;
+    const m = /^([A-Za-z_:][A-Za-z0-9_:]*)(\{[^}]*\})?\s+(-?[0-9.]+(?:[eE][-+]?[0-9]+)?)/.exec(line);
+    if (!m || !INFLIGHT_GAUGES.includes(m[1])) continue;
+    const v = Number(m[3]);
+    if (!Number.isFinite(v)) continue;
+    seen = true;
+    total += v;
+  }
+  return seen ? total : null;
+}
+
 export async function quiesceLlamaSwap(ids, {
   api = process.env.LLAMA_SWAP_API || "http://localhost:11436",
   timeoutMs = 60_000, pollMs = 500, graceMs = 1_500,
@@ -218,16 +250,29 @@ export async function quiesceLlamaSwap(ids, {
   //   - id not in /running  => nothing to drain, and NO probe is ever sent;
   //   - /running unreadable => we are blind, and hands-off beats a probe that may
   //     LOAD a model: every id is named unknown, no /upstream request fires.
+  // metricsBusy: the second signal for a loaded seat without /slots. true/false when the
+  // exposition carries an in-flight gauge; null when it does not answer (404/501, a
+  // non-exposition body, a timeout), which the caller names unknown.
+  const metricsBusy = async (id) => {
+    try {
+      const r = await fetchImpl(`${api}/upstream/${id}/metrics`, { signal: withTimeout(requestTimeoutMs) });
+      if (!r.ok) return null;
+      const n = parseInflightMetrics(await r.text());
+      return n === null ? null : n > 0;
+    } catch { return null; }
+  };
+
   const busy = async (id, loadedSet) => {
     if (!loadedSet) { unknown.add(id); return false; } // blind: never probe
     if (!loadedSet.has(id)) return false;              // not loaded: nothing in flight
     try {
       const r = await fetchImpl(`${api}/upstream/${id}/slots`, { signal: withTimeout(requestTimeoutMs) });
-      if (r.status === 404) {
-        // Loaded but no /slots route (whisper, any non-llama.cpp backend): we are
-        // blind to it, and must say so instead of claiming a drain.
-        unknown.add(id);
-        return false;
+      if (r.status === 404 || r.status === 501) {
+        // Loaded but no /slots route (vLLM, whisper, any non-llama.cpp backend): read
+        // the exposition instead; a seat that answers neither is unknown, never idle.
+        const mb = await metricsBusy(id);
+        if (mb === null) { unknown.add(id); return false; }
+        return mb;
       }
       if (!r.ok) { unknown.add(id); return false; }
       const j = await r.json();
