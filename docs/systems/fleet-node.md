@@ -1280,7 +1280,9 @@ the authoritative pin it always had. Everything this document says of `route=loc
   process, which says nothing about the others) reads the fleet once in the capacity wait before the subtask takes the idle seat
   (`awaitCapacity`, `fleetFirst`); with the wait switched off, or for a sheddable run, which never waits, there is no tick to read the
   fleet in, and the idle seat takes it at once under the guards below instead of the capacity defer or the shed a remote pin gets
-  (`hintSeatWithoutAWait`). A leased or fenced seat, and one another vLLM seat occupies, is never a fallback: the subtask waits in line,
+  (`hintSeatWithoutAWait`). That fallback reads the seat again before it runs it, and a run-cap line that fills between the read and
+  the run declines the subtask as capacity with nothing run: the shed or the defer stands, with the seat's refusal on it, as the
+  capacity wait files the same answer. A leased or fenced seat, and one another vLLM seat occupies, is never a fallback: the subtask waits in line,
   and a wait that ends with nothing placed defers naming the holder. Nor is a seat whose run-cap line is full or that is loading, in the
   deal and in the gate case. But with no remote able to run the contract at all the seat's own line is the only queue there is (ADR
   0076), so there a full or loading seat takes the subtask at once, behind its in-flight work, as route `auto` does, and only a lease, a

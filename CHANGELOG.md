@@ -6,6 +6,29 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.174.0] - 2026-10-08 - a seat that fills under the hint's fallback is a refusal, not the result
+
+### Fixed — a remote hint's no-wait seat fallback files a seat that filled in between as a refusal, not as its result
+
+- **`hintSeatWithoutAWait` (ADR 0078 decision 5) reads the seat free and runs it; when the seat's run-cap line filled between
+  that read and the run, the seat's admission declined the subtask as capacity with nothing run (ADR 0063 decision 3), and the
+  fallback published that defer as the seat's result.** A sheddable run then read as a capacity defer of the local seat, with
+  the seat as the place it ran, instead of the shed it was; with the wait switched off, the defer named the seat as having run
+  it. The declined attempt is now filed as the refusal the capacity wait files the same answer as (`refusalLine`, credited like
+  it), and the caller's outcome stands with that refusal on it. From the R4e regression critic (2026-10-08); not seen live.
+  Tests: `TestAGatedRemoteHintIsShedWhenTheSeatsLineFillsBetweenTheReadAndTheRun` (red before),
+  `TestAGatedRemoteHintDefersAsCapacityWhenTheSeatsLineFillsWithTheWaitOff`.
+- **A test pins that the bare remote route's `retry_note` names no pin on a seatless box**
+  (`TestTheBareRemoteRoutesRetryNoteNamesNoPinOnASeatlessBox`). The two `remotePinned()` keys of the skipped-retry notes in
+  `runOne` could be widened to the route (`r.route == "remote"`) with every test green, because the bare route's retry always
+  had the local seat to go to and never reached those notes; a delegation client is the box where it has not.
+- **`TestAWaitRunsToTheCallDeadlineNotTheConfiguredTTL` no longer measures the runner's speed.** The credited
+  `capacity_wait_sec` is the wait's idle time: each re-ask of the full node is an attempt, charged to the budget and left out
+  of the credit (`awaitCapacity`'s `spanStart`). At the test's 20 ms poll the wait re-asked the node some 75 times inside the
+  1.5 s the node was full, and on a loaded CI runner those re-asks took 0.44 s of it, so the credit read 1.06 under the test's
+  1.2 floor (2026-10-08, the 0.172.0 build job; passed on rerun). The test now polls every 250 ms, a handful of re-asks, and
+  its `fullUntil` hook starts the node's window at the first dispatch instead of at fixture build, so setup never counts either.
+
 ## [0.173.0] - 2026-10-08 - Remote media routing, the media-job door, and iGPU media engines (sd.cpp video and animate, audio.cpp voice and music)
 
 A caller on any machine can now send one render to a fleet node together with its input files, name the node or let the roster place it, and get the output back with its bytes verified (the media-job door, ADR 0077); a node advertises and admits a media task only while its route is actually CONFIGURED, so a missing weight drops the task out of the roster instead of failing jobs. A box whose only GPU is a Vulkan iGPU, with no CUDA, no ROCm and no model on the CPU, now serves video (I2V and T2V), character animation, voice with cloning and music through stable-diffusion.cpp and audio.cpp, advertises those lanes to the fleet, and ships the measured amd-gcn seed for them.
