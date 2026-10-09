@@ -120,12 +120,34 @@ confusion:
   authority's entry with the one `--mmproj <GGUF>` argument removed at render (`servingtmpl.dropEG2Projector`),
   every other flag identical (`--ubatch-size 2048` is load-bearing: the stack's hot budget is 1,900 tokens and a
   smaller ubatch returns HTTP 500 on long memories), and the installer does not download the projector for it.
-  The field is optional and absent means true. The projector is off by arithmetic: with it the entry would exceed
-  those cards beside the tier's seats (8,703 MiB on the 8 GB card, 16,375 MiB on the 16,311 MiB utility card of
-  the 3-card tier), text-only it fits (7,649 and 15,321 MiB), and `eg2CardBudget` in
-  `embeddinggemma2_stack_test.go` carries those sums, refuses the projector on a card its recorded sum exceeds and
-  refuses a text-only tier whose projector sum has come to fit; an on-box co-residency measurement can turn the
-  projector on. The entry joins the stack's residency
+  The field is optional and absent means true. The projector is off by arithmetic, and `eg2CardBudget` in
+  `embeddinggemma2_stack_test.go` carries it in two arms. The **sum arm** adds every footprint the records put on
+  the card beside the entry: with the projector the entry would exceed the 8 GB card (8,703 MiB on 8,192) and the
+  3-card tier's 16,311 MiB utility card (16,375 MiB), text-only it fits (7,649 and 15,321 MiB). A row uses the
+  reference 6 GB node's entry peaks (482 MiB text-only, 1,536 MiB with the projector) unless it names its own, and
+  the 3-card row keeps the 2.2 GiB whisper its layers declare. The **vLLM-share arm** applies to a tier whose
+  profile declares a vLLM seat on the card the residents are pinned to, decided from the seat's device list and the
+  pins in the tier's own render (ampere-6 and ampere-8 declare no seat and skip it). The 3-card tier's agent seat
+  is a two-card tensor-parallel seat (devices 0 and 2 in PCI order) at `gpu_memory_utilization` 0.90, so it claims
+  ceil(0.90 x 16,311) = 14,680 MiB of the utility card and the residents and the entry share what is left.
+  Measured on that card (RTX 5060 Ti 16 GB, llama.cpp b11490, the template's flags, card-total deltas because
+  per-process memory reads N/A under WDDM, 2026-10-09): the 300M embedder 505 MiB, the reranker 439, the entry
+  text-only 501, the entry with the projector 1,237 (loaded and after one text embed). The residents' 944 MiB leave
+  687 MiB: the text-only entry fits with 186 to spare and the projector is 550 over (its two GGUFs alone are 825
+  MiB), so the tier stays text-only. At utilization 0.95 the same arithmetic leaves -129 MiB, which is the profile's
+  recorded failure of 0.95 beside the memory-stack embedder. The arms are checked together: a text-only tier needs
+  its entry to fit in both and the projector refused by at least one, a projector tier needs the projector to fit in
+  both, and one headroom term (`eg2HeadroomMiB`, zero because the repo states none for these tiers) applies to
+  both. An on-box co-residency measurement can turn the projector on.
+
+  > **Unverified:** the 687 MiB is arithmetic from the seat's declared utilization, not a measurement of the entry
+  > loading beside a warm seat: the residents and the entry were each measured on the card with the seat not
+  > running. It assumes the engine holds to ceil(util x card); an engine can run above its share (the `ampere-16`
+  > co-residency record in `ampere16_coresidency_test.go` has one about 1 GB above it at utilization 0.90 with 32
+  > sequences), and the 3-card seat's soak was not repeated with the second embedder resident. The projector's image
+  > and video peaks were not measured on that card; its 1,237 MiB is a floor and already exceeds the room.
+
+  The entry joins the stack's residency
   set (`emb & rer & eg2`, or `emb & eg2` where a template has no reranker, or the one `resident` set of an
   all-resident template): resident beside the swappable seats, never swapped by them, with the stack's evict
   cost. With the flag off the entry, its matrix var and its evict row are all stripped. The `embeddinggemma`
