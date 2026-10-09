@@ -235,6 +235,12 @@ Tests: `TestRemoteMediaCallIsOneCardOnTheServingNodeAndOneRow`, `TestRemoteMedia
 The release reviewer and the round-4 reviewers of the integrated branch found the items below; each is fixed before the release, and
 each guard was broken once at its real call site and seen red.
 
+- **A remote output cannot be larger than the node said it is.** The client fetched each output with no bound but its 30-minute wall,
+  so a node streaming past the file it announced could fill the caller's disk before the sha256 check refused the file. The fetch now
+  stops one byte past the `bytes` the node published in `artifacts` and defers as infrastructure, naming the file and the size; nothing
+  is kept. A graph or manifest file the caller names is sized before it is read, so a large file named by mistake is refused without
+  being read into memory. (Found by a clean-context `offload_review_diff` pass; an older node that publishes no artifacts still yields
+  an `unverified` result, unchanged.)
 - **A default animate request fits the amd-gcn seed's token cap (REL1, high).** The seed pinned the animate geometry (288x512) and its
   latent-token cap (5800, stride 8) to the measured 33-frame run, but no key could carry a frame count and both the lane and the runner
   defaulted to 49: 288x512x49 plus the VACE reference frame is 8,064 tokens, so on a node seeded from the tier every animate call that

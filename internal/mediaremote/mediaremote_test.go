@@ -586,7 +586,13 @@ func TestAShaMismatchDefersAndLeavesNoFile(t *testing.T) {
 	n := startNode(t, nodeOpts{})
 	n.tamper = func(name string, b []byte) []byte {
 		if strings.HasPrefix(name, "graph-b") {
-			return []byte("EVIL")
+			// the same length with every byte changed: the size the node published still holds, so only
+			// the hash can catch it
+			evil := append([]byte{}, b...)
+			for i := range evil {
+				evil[i] ^= 0xFF
+			}
+			return evil
 		}
 		return b
 	}
@@ -615,6 +621,38 @@ func TestAShaMismatchDefersAndLeavesNoFile(t *testing.T) {
 	}}, "remote", nil)
 	if b, _ := os.ReadFile(out); string(b) != "MINE" {
 		t.Fatalf("a failed verification replaced the caller's file with %q", b)
+	}
+}
+
+// A node that streams more than the size it published is stopped one byte past that size, before the hash
+// check would have refused the file: the defer names the size and nothing is left behind (release review of
+// 0.173.0: the download had no bound but its 30-minute wall).
+func TestAFileLargerThanItsPublishedSizeIsStoppedAndLeavesNoFile(t *testing.T) {
+	n := startNode(t, nodeOpts{})
+	n.tamper = func(name string, b []byte) []byte {
+		if strings.HasPrefix(name, "graph-b") {
+			return append(append([]byte{}, b...), make([]byte, 1<<20)...)
+		}
+		return b
+	}
+	cfg := clientCfg(t, n)
+	out := filepath.Join(t.TempDir(), "main.png")
+	res := Run(context.Background(), cfg, &recordingRunner{}, core.Request{Task: core.TaskRunGraph, Params: map[string]any{
+		"graph_path": writeFile(t, t.TempDir(), "g.json", []byte(`{"1":{"class_type":"X"}}`)), "out": out,
+	}}, "remote", nil)
+	if res.OK || !res.Deferred || res.DeferClass != core.DeferClassInfrastructure {
+		t.Fatalf("an oversized file must defer as infrastructure: %+v", res)
+	}
+	if !strings.Contains(res.Reason, "larger than") || !strings.Contains(res.Reason, "graph-b.mp4") {
+		t.Fatalf("the defer must name the file and its published size, not only a hash mismatch: %s", res.Reason)
+	}
+	for _, p := range []string{out, filepath.Join(cfg.MediaDir, "graph-b.mp4")} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Errorf("%s was left behind after an oversized fetch (%v)", p, err)
+		}
+	}
+	if left, _ := filepath.Glob(filepath.Join(cfg.MediaDir, stagePrefix+"*")); len(left) != 0 {
+		t.Errorf("staged temps were left behind: %v", left)
 	}
 }
 

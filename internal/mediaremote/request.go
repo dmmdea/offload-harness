@@ -280,6 +280,11 @@ func readJSONObject(path, what string) (json.RawMessage, error) {
 	if path == "" {
 		return nil, nil
 	}
+	// The size is asked first, so a large file named by mistake (a video passed as a graph) is refused
+	// without being read into memory; the length check after the read still holds for a file that grew.
+	if fi, err := os.Stat(path); err == nil && fi.Size() > maxGraphBytes {
+		return nil, &contractError{fmt.Sprintf("%s is %d bytes, over the %d bytes a fleet dispatch carries inline", what, fi.Size(), maxGraphBytes)}
+	}
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return nil, &contractError{fmt.Sprintf("%s: %v", what, err)}

@@ -793,6 +793,7 @@ func fetchOutputs(ctx context.Context, cfg config.Config, base string, data json
 		return nil, fmt.Errorf("the node's result is not an object: %w", err)
 	}
 	expected := map[string]string{} // name -> sha256 the node published
+	sizes := map[string]int64{}     // name -> bytes the node published (absent: no size was published)
 	published := false
 	if arts, ok := m["artifacts"].([]any); ok {
 		for _, a := range arts {
@@ -802,6 +803,11 @@ func fetchOutputs(ctx context.Context, cfg config.Config, base string, data json
 			if name != "" && sum != "" {
 				expected[name] = strings.ToLower(sum)
 				published = true
+				if n, ok := am["bytes"].(json.Number); ok {
+					if v, err := n.Int64(); err == nil && v >= 0 {
+						sizes[name] = v
+					}
+				}
 			}
 		}
 	}
@@ -921,7 +927,11 @@ func fetchOutputs(ctx context.Context, cfg config.Config, base string, data json
 				perm, exact = fi.Mode().Perm(), true
 			}
 		}
-		tmp, got, err := download(ctx, cfg, base, it.name, filepath.Dir(it.dst), perm, exact)
+		limit, sized := sizes[it.name]
+		if !sized {
+			limit = -1
+		}
+		tmp, got, err := download(ctx, cfg, base, it.name, filepath.Dir(it.dst), perm, exact, limit)
 		if err != nil {
 			cleanup()
 			return nil, err
@@ -1051,8 +1061,10 @@ func nodeName(p string) (string, error) {
 
 // download fetches one file into a unique temp file in dir and returns that temp path and the sha256 of
 // the bytes written. exact means perm is the mode of a file being replaced and is applied with fchmod, past
-// the umask. On any failure no temp file is left behind.
-func download(ctx context.Context, cfg config.Config, base, name, dir string, perm os.FileMode, exact bool) (tmp, sum string, err error) {
+// the umask. limit is the size the node published for the file (-1: none published): the fetch stops one
+// byte past it and fails, so a node that streams more than it announced cannot fill the disk before the
+// sha256 check would have refused the file. On any failure no temp file is left behind.
+func download(ctx context.Context, cfg config.Config, base, name, dir string, perm os.FileMode, exact bool, limit int64) (tmp, sum string, err error) {
 	fctx, cancel := context.WithTimeout(ctx, fetchTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(fctx, http.MethodGet, base+"/fleet/media/"+url.PathEscape(name), nil)
@@ -1083,10 +1095,20 @@ func download(ctx context.Context, cfg config.Config, base, name, dir string, pe
 		}
 	}
 	h := sha256.New()
-	if _, err := io.Copy(io.MultiWriter(f, h), resp.Body); err != nil {
+	body := io.Reader(resp.Body)
+	if limit >= 0 {
+		body = io.LimitReader(resp.Body, limit+1)
+	}
+	n, err := io.Copy(io.MultiWriter(f, h), body)
+	if err != nil {
 		f.Close()
 		os.Remove(tmp)
 		return "", "", fmt.Errorf("GET %s: %w", name, err)
+	}
+	if limit >= 0 && n > limit {
+		f.Close()
+		os.Remove(tmp)
+		return "", "", &placementError{core.DeferClassInfrastructure, fmt.Sprintf("the file %s is larger than the %d bytes the node published for it: the fetch was stopped and nothing was kept", name, limit)}
 	}
 	if err := f.Close(); err != nil {
 		os.Remove(tmp)
