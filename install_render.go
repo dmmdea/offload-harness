@@ -8,9 +8,11 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -455,6 +457,11 @@ type renderRequest struct {
 	// AltLlamaBinCPU (--llama-bin-cpu) is the CPU build's dir; non-empty renders the
 	// CPU seat family, which the tier must declare via alt_backends.
 	AltLlamaBinCPU string
+	// EG2LlamaBin (--llama-bin-eg2) is the directory of the llama.cpp build that serves ONLY the
+	// embeddinggemma2 entry; empty (or the main build spelled again) leaves the entry on LlamaBin.
+	// deriveRender normalises it, so the value the stamp records and the replay re-derives from is
+	// the cleaned one.
+	EG2LlamaBin string
 	// PinnedVLLM, when set, REPLACES the vLLM seat resolution instead of running
 	// it. Only the replay sets it: vllmSeatFor inspects the LOCAL box (does this
 	// machine have the hand-built venv and the snapshot?), so re-running the
@@ -564,6 +571,12 @@ func deriveRender(profilesRaw []byte, req renderRequest) (renderResult, error) {
 		// NativeCommandError (installer-windows went red on #419, 2026-09-20).
 		fmt.Printf("note: tier %s declares alt_backends [cpu]; pass --llama-bin-cpu <dir of a CPU llama-server build> to render its CPU seat family\n", id)
 	}
+	// A second build for the embeddinggemma2 entry is likewise a per-box path the table permits per
+	// tier: the flag places it, include_embeddinggemma2 says the tier renders an entry to place it on.
+	eg2Bin, err := cleanEG2Bin(id, req.EG2LlamaBin, req.LlamaBin, p.IncludeEmbeddingGemma2)
+	if err != nil {
+		return renderResult{}, err
+	}
 
 	n := req.Threads
 	if n <= 0 {
@@ -609,6 +622,7 @@ func deriveRender(profilesRaw []byte, req renderRequest) (renderResult, error) {
 		IncludeQ3635B: spillSeatIncluded(p, ramTier),
 		IncludeEG2:    p.IncludeEmbeddingGemma2,
 		EG2TextOnly:   p.eg2TextOnly(),
+		EG2LlamaBin:   eg2Bin,
 		Seats:         p.MediaSeats, Home: req.Home, RknpuHome: req.RknpuHome, GOOS: target, GPUEnv: p.GPUEnv, Backend: p.Backend,
 		AltCPULlamaBin:    req.AltLlamaBinCPU,
 		DisableCUDAGraphs: p.DisableCUDAGraphs,
@@ -642,6 +656,7 @@ func runInstallRender(args []string) error {
 	profileID := fs.String("profile", "", "tier id (default: classify this machine)")
 	llamaBin := fs.String("llama-bin", "", "directory holding llama-server and its shared objects")
 	altLlamaBinCPU := fs.String("llama-bin-cpu", "", "directory of a CPU llama-server build: renders the tier's CPU seat family beside its GPU seats (tier must declare alt_backends [cpu])")
+	eg2LlamaBin := fs.String("llama-bin-eg2", "", "directory of the llama.cpp build that serves ONLY the embeddinggemma2 entry (default: --llama-bin)")
 	modelsDir := fs.String("models", "", "directory holding the GGUF model files")
 	listen := fs.String("listen", "127.0.0.1:11436", "llama-swap listen address")
 	threads := fs.Int("threads", 0, "--threads per server (default: half the logical CPUs)")
@@ -671,6 +686,7 @@ func runInstallRender(args []string) error {
 		LlamaBin: *llamaBin, ModelsDir: *modelsDir, Listen: *listen, Home: *home, Threads: *threads,
 		RknpuHome:      homeOr(*rknpuHome, "RKNPU_HOME", *home, "rknpu"),
 		AltLlamaBinCPU: *altLlamaBinCPU,
+		EG2LlamaBin:    *eg2LlamaBin,
 		VLLM:           vllmRuntimeFlags{user: *vllmUser, proxyHost: *vllmProxy, venv: *vllmVenv, seatDir: *vllmSeatDir, hfHome: *hfHome},
 	})
 	if err != nil {
@@ -681,6 +697,13 @@ func runInstallRender(args []string) error {
 	if err := renderGate(res); err != nil {
 		return err
 	}
+	// The llama.cpp floor of the embeddinggemma2 entry. WRITE time only: a replay (audit-yaml) runs on
+	// another machine with another machine's paths, so deriveRender never asks.
+	floorNote, err := eg2FloorCheck(res)
+	if err != nil {
+		return err
+	}
+	printEG2FloorNote(floorNote, *out)
 
 	target := res.Params.GOOS
 	warnMissingSeatModels(res.Profile.MediaSeats, *modelsDir, target)
@@ -744,6 +767,117 @@ func renderGate(res renderResult) error {
 		}
 	}
 	return nil
+}
+
+const eg2MinLlamaBuild = 11452
+
+// cleanEG2Bin turns --llama-bin-eg2 into the value the render, the stamp and the replay all share: ""
+// when the flag is absent or spells the main build again (then the entry is simply on the main build and
+// nothing is recorded), else the directory with forward slashes and no trailing slash (llama-swap on
+// Windows mis-parses backslashes inside a cmd, and the recorded spelling must be the one a replay
+// re-derives from). A flag given for a tier that renders no embeddinggemma2 entry is refused by name,
+// because the stamp would record a build that serves nothing; so is a value the macro it lands in could not
+// carry (servingtmpl.Params.EG2LlamaBin refuses the same characters for any other caller).
+func cleanEG2Bin(tier, eg2, main string, tierRendersEntry bool) (string, error) {
+	if eg2 == "" {
+		return "", nil
+	}
+	if !tierRendersEntry {
+		return "", fmt.Errorf("tier %s: --llama-bin-eg2 given but the tier does not carry include_embeddinggemma2 (no embeddinggemma2 entry renders) — drop the flag", tier)
+	}
+	if strings.ContainsAny(eg2, "\"\n\r$") {
+		return "", fmt.Errorf("tier %s: --llama-bin-eg2 %q holds a double quote, a line break or a `$`; it lands inside a quoted YAML macro that llama-swap expands", tier, eg2)
+	}
+	dir := slashDir(eg2)
+	if dir == "" {
+		return "", fmt.Errorf("tier %s: --llama-bin-eg2 %q names no directory", tier, eg2)
+	}
+	if dir == slashDir(main) {
+		return "", nil
+	}
+	return dir, nil
+}
+
+// slashDir is a directory spelled with forward slashes and no trailing slash.
+func slashDir(dir string) string {
+	return strings.TrimRight(strings.ReplaceAll(dir, `\`, "/"), "/")
+}
+
+// llamaBuildOf reads the llama.cpp build number a directory's own name states: a standalone `b<digits>`
+// token of 4 to 6 digits in the LAST path element (llamacpp-b10964, llama.cpp-b11490, b11452). The name is
+// the only source: the renderer never runs a llama-server, because `--version` initialises every CUDA card
+// on the box and `install render` runs on live nodes. A name that states no build, or two different ones,
+// is unknown, never guessed.
+func llamaBuildOf(dir string) (int, bool) {
+	name := path.Base(slashDir(dir))
+	alnum := func(c byte) bool { return c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' }
+	found := -1
+	for i := 0; i < len(name); i++ {
+		if name[i] != 'b' || (i > 0 && alnum(name[i-1])) {
+			continue
+		}
+		j := i + 1
+		for j < len(name) && name[j] >= '0' && name[j] <= '9' {
+			j++
+		}
+		if n := j - (i + 1); n < 4 || n > 6 || (j < len(name) && alnum(name[j])) {
+			continue
+		}
+		v, _ := strconv.Atoi(name[i+1 : j])
+		if found >= 0 && found != v {
+			return 0, false
+		}
+		found = v
+	}
+	if found < 0 {
+		return 0, false
+	}
+	return found, true
+}
+
+// eg2FloorCheck is the write-time check that the llama.cpp build the embeddinggemma2 entry will run on can
+// load it: the entry's own build when --llama-bin-eg2 is set, else the main one. It reads the build from the
+// directory's name (llamaBuildOf) and, for a render that includes the entry:
+//   - a build the name states below eg2MinLlamaBuild is an error: the entry cannot start, and nothing is
+//     written (a node whose main build is that old passes --llama-bin-eg2 with a newer one);
+//   - a build at or above it is silent;
+//   - a name that states none is a note, and the render proceeds: the check cannot tell, and refusing
+//     what it cannot read would stop every install into a directory called `llama`.
+//
+// It is never called from deriveRender or the replay: an audit runs on another machine with another
+// machine's recorded paths and must not judge them.
+func eg2FloorCheck(res renderResult) (note string, err error) {
+	if !res.Params.IncludeEG2 {
+		return "", nil
+	}
+	dir := res.Params.EG2LlamaBin
+	if dir == "" {
+		dir = res.Params.LlamaBin
+	}
+	build, ok := llamaBuildOf(dir)
+	switch {
+	case !ok:
+		return fmt.Sprintf("note: tier %s renders embeddinggemma2, which needs llama.cpp b%d or newer (gemma-embedding2); the build of %s could not be read from its directory name (a b<number> token such as llama-b%d), so the floor was not checked\n",
+			res.TierID, eg2MinLlamaBuild, dir, eg2MinLlamaBuild), nil
+	case build < eg2MinLlamaBuild:
+		return "", fmt.Errorf("tier %s renders embeddinggemma2, which needs llama.cpp b%d or newer (gemma-embedding2), but %s is b%d: pass --llama-bin-eg2 <dir of a b%d+ build> - not written",
+			res.TierID, eg2MinLlamaBuild, dir, build, eg2MinLlamaBuild)
+	}
+	return "", nil
+}
+
+// printEG2FloorNote says the floor note where it cannot corrupt the output: stdout when the config goes to
+// --out (install.ps1 reads the renderer's stdout and its self-test runs under ErrorActionPreference Stop,
+// where a native stderr line is a terminating error), stderr when the config itself is stdout, where a
+// note ahead of it would break the stamp.
+func printEG2FloorNote(note, outPath string) {
+	switch {
+	case note == "":
+	case outPath != "":
+		fmt.Print(note)
+	default:
+		fmt.Fprint(os.Stderr, note)
+	}
 }
 
 // renderCardTable reads this machine's card table for the one comparison a render cannot make from its
@@ -947,6 +1081,10 @@ func replayRequest(b servingtmpl.SpecBasis) (renderRequest, bool) {
 		TierID: b.TierID, Fallback: b.Render.FallbackBackend, RAMTier: b.Render.RAMTier,
 		GOOS: b.Params.GOOS, LlamaBin: b.Params.LlamaBin, ModelsDir: b.Params.ModelsDir,
 		Listen: b.Params.Listen, Home: b.Params.Home, RknpuHome: b.Params.RknpuHome, Threads: b.Params.Threads,
+		// The second builds are per-BOX paths too (the CPU family's and the embeddinggemma2 entry's): a
+		// replay that dropped one re-rendered the entry or the family on the main build and read STALE for
+		// a path the node chose itself, which no re-render by this binary could ever fix.
+		AltLlamaBinCPU: b.Params.AltCPULlamaBin, EG2LlamaBin: b.Params.EG2LlamaBin,
 		// The vLLM deployment half is a per-BOX fact (the account, the bound
 		// address, where the venv lives), never a seed. Pinned from the stamp so
 		// the replay measures seed drift and not "the auditing box is not the

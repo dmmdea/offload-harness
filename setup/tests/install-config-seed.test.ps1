@@ -519,6 +519,16 @@ Assert (($ppAt -gt 0) -and ($ppAt -lt $step5At)) '$pp is resolved before the Ste
 Assert ($installText -match '\$includeEmbeddingGemma2Projector = \$true')                                                 'Step 5 defaults the embeddinggemma2 projector to true (absent means true)'
 Assert ($installText -match 'embeddinggemma2_projector must be a JSON boolean')                                          'Step 5 refuses a non-boolean embeddinggemma2_projector, like its siblings'
 Assert ($installText -match '-IncludeEmbeddingGemma2 \$includeEmbeddingGemma2 -IncludeEmbeddingGemma2Projector \$includeEmbeddingGemma2Projector -WithFamily \$withFamily') 'Step 5 hands the resolved projector flag to Get-GatedModelKeys'
+# OFFLOAD_EG2_LLAMA_BIN (install render --llama-bin-eg2), wired in the main flow (below the seam, so pinned by
+# source): documented in the header, checked for llama-server.exe, normalised to forward slashes, handed to the
+# renderer from ONE place and only when set, and part of the Step 6 SKIP probe so an upgrade re-renders instead of
+# keeping a yaml that predates the override.
+Assert ($installText -match '(?m)^#\s+OFFLOAD_EG2_LLAMA_BIN \(opt-in')                                  'install.ps1 documents OFFLOAD_EG2_LLAMA_BIN in its header env list'
+Assert ($installText.Contains('Test-Path -LiteralPath (Join-Path $eg2Dir ''llama-server.exe'')'))        'OFFLOAD_EG2_LLAMA_BIN is checked for llama-server.exe before anything renders'
+Assert ($installText.Contains('$eg2Dir.Replace(''\'', ''/'')'))                                          'OFFLOAD_EG2_LLAMA_BIN is normalised to forward slashes (llama-swap on Windows mis-parses backslashes)'
+Assert ($installText.Contains('if ($eg2Bin) { $renderArgs += @(''--llama-bin-eg2'', $eg2Bin) }'))          'install.ps1 appends --llama-bin-eg2 to the render args only when the override is set'
+Assert (([regex]::Matches($installText, '--llama-bin-eg2'', \$eg2Bin')).Count -eq 1)                    'the renderer is handed --llama-bin-eg2 from exactly one place'
+Assert ($installText.Contains('((-not $eg2Bin) -or (Select-String -Path $yamlDest -SimpleMatch -Pattern $eg2Bin -Quiet))')) 'the Step 6 SKIP probe re-renders a yaml that predates the override'
 
 # --- Task 6: accelerator seed (ADR 0024) ----------------------------------------------
 Write-Host ""

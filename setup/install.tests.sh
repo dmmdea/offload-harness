@@ -90,6 +90,32 @@ render_expr="$(awk '/"\$BIN" install render/,/--out "\$SWAP_YAML"/' "$INSTALL" |
 [ -n "$render_expr" ] && [ "$render_expr" = "$seed_expr" ] \
   && pass "render passes --rknpu-home like seed" || fail "render passes --rknpu-home like seed" "seed=[$seed_expr] render=[$render_expr]"
 
+# 8-12. --llama-bin-eg2: a second llama.cpp build for the embeddinggemma2 entry alone (a node whose main
+#       build is older than b11452). Same shape as --llama-bin: it must be a directory, the dry run says
+#       what it would render with, an absent flag changes nothing, and the render call passes it only when set.
+mkdir -p "$TMP/llama-eg2"
+run_install cuda --llama-bin "$TMP/llama" --llama-bin-eg2 "$TMP/absent-eg2"
+[ "$RC" -ne 0 ] && printf '%s' "$OUT" | grep -q -- "--llama-bin-eg2 $TMP/absent-eg2 is not a directory" \
+  && pass "a given --llama-bin-eg2 must be a directory" || fail "a given --llama-bin-eg2 must be a directory" "rc=$RC: $OUT"
+
+run_install cuda --llama-bin "$TMP/llama" --llama-bin-eg2 "$TMP/llama-eg2"
+[ "$RC" -eq 0 ] && printf '%s' "$OUT" | grep "would render" | grep -q -- "--llama-bin-eg2 $TMP/llama-eg2" \
+  && pass "a real --llama-bin-eg2 is accepted and the dry run names it" || fail "a real --llama-bin-eg2 is accepted and the dry run names it" "rc=$RC: $OUT"
+
+run_install cuda --llama-bin "$TMP/llama"
+[ "$RC" -eq 0 ] && printf '%s' "$OUT" | grep "would render" | grep -q -- "--llama-bin $TMP/llama" \
+  && ! printf '%s' "$OUT" | grep "would render" | grep -q -- "--llama-bin-eg2" \
+  && pass "without --llama-bin-eg2 the dry run names no second build" || fail "without --llama-bin-eg2 the dry run names no second build" "rc=$RC: $OUT"
+
+#       the render call (a dry run never renders, so this reads the script, like the --rknpu-home case above).
+render_call="$(awk '/"\$BIN" install render/,/--out "\$SWAP_YAML"/' "$INSTALL")"
+printf '%s' "$render_call" | grep -q -- '${LLAMA_BIN_EG2:+--llama-bin-eg2 "$LLAMA_BIN_EG2"}' \
+  && printf '%s' "$render_call" | tail -1 | grep -q -- '--out "$SWAP_YAML"$' \
+  && pass "the render call passes --llama-bin-eg2 only when it is set" || fail "the render call passes --llama-bin-eg2 only when it is set" "$render_call"
+
+bash "$INSTALL" --help 2>&1 | grep -q -- "--llama-bin-eg2 DIR" \
+  && pass "--help documents --llama-bin-eg2" || fail "--help documents --llama-bin-eg2" "$(bash "$INSTALL" --help 2>&1 | head -20)"
+
 # --client: a delegation client (ADR 0071) needs no tier, no llama.cpp build and no service.
 OUT="$(bash "$INSTALL" --bin "$STUB" --prefix "$TMP/client" --client --dry-run 2>&1)"; RC=$?
 [ "$RC" -ne 0 ] && printf '%s' "$OUT" | grep -q -- "--client requires --remotes" \
