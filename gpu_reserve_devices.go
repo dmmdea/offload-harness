@@ -321,13 +321,18 @@ func acquireAutoCards(m *gpulease.Manager, class gpulease.Class, opts gpulease.O
 			}
 			return lease, qerr
 		}
-		lease, err := m.TryAcquire(class, opts)
+		// One gated attempt (register D-1xx-3): a waiter registered earlier for one of these
+		// cards is ahead of this request, and with no wait the honest answer is the queue's.
+		opts.Wait = 0
+		lease, err := m.Acquire(class, opts)
 		var held *gpulease.ErrHeld
 		switch {
 		case err == nil:
 			return lease, nil
 		case errors.As(err, &held):
 			continue // another reserve claimed one of these first; allocate again with its claim visible
+		case errors.Is(err, gpulease.ErrStillQueued):
+			return nil, heldHint(err, 0)
 		default:
 			return nil, err
 		}

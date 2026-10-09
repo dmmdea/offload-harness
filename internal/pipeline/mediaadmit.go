@@ -669,14 +669,16 @@ func (p *Pipeline) acquireCards(ctx context.Context, m *gpulease.Manager, reason
 					}
 					free = false
 				} else {
-					lease, err := m.TryAcquire(gpulease.ClassMedia, optsFor(ids))
+					// One gated attempt (register D-1xx-3): a waiter already registered for these
+					// cards answers ErrStillQueued and sends this request to the queue below.
+					lease, err := m.Acquire(gpulease.ClassMedia, optsFor(ids))
 					if err == nil {
 						stopKeep()
 						return p.grantCards(ctx, m, lease, ids, plan, cards, tokenID), nil
 					}
 					mediaSlots.release(ids)
 					var held *gpulease.ErrHeld
-					if !errors.As(err, &held) {
+					if !errors.As(err, &held) && !errors.Is(err, gpulease.ErrStillQueued) {
 						return mediaGrant{}, err
 					}
 					if plan.auto && lost < mediaClaimRetries {

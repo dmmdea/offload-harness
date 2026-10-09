@@ -97,6 +97,13 @@ two lines on stderr — `queued behind <holder> — waiting up to <wait>` on ent
 <n> in the queue` on exit — never one per poll, because the session wrapping this would turn a
 poll line into a notification each.
 
+A free card with a waiter already registered for it is that waiter's: a fresh `gpu reserve` never probes
+the card bare. `Acquire` registers before its first attempt, with or without `--wait`, and only the front of
+the line claims; `--wait 0` on such a card fails fast naming the waiter ahead (`ErrStillQueued`), and a waiter
+for other cards is no reason to wait (disjoint backfill). Before this, the CLI's first probe was a bare
+`TryAcquire`, so a recipe that chained reserves back to back won every just-freed card ahead of a waiter
+registered for over an hour (2026-10-09).
+
 The declared-window short-circuit below does **not** apply to a reservation (`Options.WaitOut`):
 the holder's window is printed as information, never treated as a verdict, because holders
 release before it as a rule — the wrapper form releases the moment its command ends. Measured

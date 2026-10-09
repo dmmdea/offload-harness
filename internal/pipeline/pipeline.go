@@ -3580,6 +3580,10 @@ func (p *Pipeline) acquireWholeNode(ctx context.Context, reason string, ttl, wai
 		if errors.As(err, &held) {
 			return nil, noop, &errGPUBusy{info: held.Info}
 		}
+		if errors.Is(err, gpulease.ErrStillQueued) {
+			// The card is free but a waiter registered earlier is ahead (register D-1xx-3): busy, not broken.
+			return nil, noop, &errGPUBusy{detail: err.Error()}
+		}
 		return nil, noop, err
 	}
 

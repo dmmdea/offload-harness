@@ -1314,7 +1314,8 @@ func (m *Manager) holderInfo(meta *Meta) Info {
 }
 
 // Acquire takes the card, retrying for up to opts.Wait while someone else legitimately
-// holds it. Zero Wait is exactly TryAcquire.
+// holds it. Zero Wait is ONE attempt, still behind every registered waiter that conflicts
+// with this request (the no-wait note below): it is not a bare TryAcquire.
 //
 // WHY A BOUNDED WAIT AND NOT A SINGLE TRY: the lock this package replaced existed to
 // ORGANIZE concurrent GPU jobs into a serial queue, not to cancel them — a render that
@@ -1339,10 +1340,23 @@ func (m *Manager) Acquire(class Class, opts Options) (*Lease, error) {
 		return nil, ErrCardScopedOff
 	}
 	opts.Devices = devs
-	if opts.Wait <= 0 {
-		return m.TryAcquire(class, opts)
+	// A NO-WAIT ACQUIRE IS ONE GATED ATTEMPT, NOT A BARE TryAcquire (register D-1xx-3,
+	// 2026-10-09). This used to return TryAcquire straight away for Wait <= 0, so a caller
+	// that could not wait never consulted the waiter queue at all: a card freed in the
+	// window between a release and the front waiter's next poll tick went to whichever
+	// fresh no-wait claim landed in it. Measured live on the reference 3-card box: a recipe
+	// chaining `gpu reserve` calls back to back (each call's first probe was such a bare
+	// claim) took the same card as epochs 1320, 1321 and 1322 while a text waiter
+	// registered for 1h26m sat front of queue the whole time. The no-wait path now runs the
+	// SAME registered, front-of-queue gated loop below with a deadline of now: one attempt
+	// if this caller is front of the line, else the queue's answer (ErrHeld for a held
+	// card, ErrStillQueued naming the waiter ahead for a free one). Registering costs one
+	// file write and nothing else when nobody is in line.
+	wait := opts.Wait
+	if wait < 0 {
+		wait = 0
 	}
-	deadline := m.now().Add(opts.Wait)
+	deadline := m.now().Add(wait)
 
 	// NEVER WAIT FOR SOMETHING THAT CANNOT HAPPEN, checked ONCE against
 	// whoever holds the card AT THE MOMENT Acquire WAS CALLED — a read-only
@@ -1378,7 +1392,7 @@ func (m *Manager) Acquire(class Class, opts Options) (*Lease, error) {
 	//
 	// Unless the caller said WaitOut: for it the window is information, not
 	// a verdict (see Options.WaitOut).
-	if info := m.InspectFor(devs); info.Held && !opts.WaitOut && info.Class == ClassText &&
+	if info := m.InspectFor(devs); wait > 0 && info.Held && !opts.WaitOut && info.Class == ClassText &&
 		!info.ExpiresAt.IsZero() && info.ExpiresAt.After(deadline) {
 		return nil, m.heldErr(info)
 	}
