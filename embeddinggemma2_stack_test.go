@@ -158,7 +158,9 @@ var eg2CardBudget = []eg2BudgetRow{
 	// The sum arm keeps the declared whisper (TestTheBlackwellTripleRowKeepsTheDeclaredWhisperOnPurpose)
 	// and the entry peaks of the reference node: the utility card's image and video peaks were not
 	// measured, so its 1,237 MiB (loaded, after a text embed) is no peak to set here. The share arm
-	// carries the measured figures: the seat's 0.90 share leaves 687 MiB beside the residents.
+	// carries the measured figures: the seat's 0.90 share leaves 687 MiB beside the residents. The two
+	// residents below therefore stay at the figures the tier's notes in profiles.json cite (458 / 378,
+	// measured on the 16 GB co-residency tier); the utility card's own 505 / 439 live in the share arm.
 	{tier: "blackwell-3x16", card: "RTX 5060 Ti 16 GB, card 2, 16,311 MiB (docs/FLEET-NODE.md)", cardMiB: 16311, beside: []eg2Part{
 		{"vl-8b OCR seat measured alone on card 2 (win-triple-blackwell.yaml)", 11751},
 		{"whisper-stt, 2.2 GiB as declared in the tier's layers", 2252},
