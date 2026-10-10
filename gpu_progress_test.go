@@ -42,7 +42,7 @@ func TestAutoProgressIsDeclaredOnlyForAHeartbeatingHelperTheCallerLeftUndeclared
 		{"a script that merely mentions a helper in an argument", gpulease.Options{}, []string{"node", "render/other.mjs", "--note", "comfy-render.mjs is slow"}, ""},
 	}
 	for _, c := range cases {
-		path, helper, ok := autoProgressFile(c.opts, c.cmd, dir, 4242, now)
+		path, helper, ok := autoProgressFile(c.opts, c.cmd, dir, 4242, now, false)
 		if c.want == "" {
 			if ok || path != "" {
 				t.Errorf("%s: declared %q for %q", c.name, path, helper)
@@ -62,9 +62,9 @@ func TestAutoProgressIsDeclaredOnlyForAHeartbeatingHelperTheCallerLeftUndeclared
 		}
 	}
 	// Two wrappers of one process at the same instant... never share a name; two instants never do.
-	a, _, _ := autoProgressFile(gpulease.Options{}, []string{"comfy-render.mjs"}, dir, 1, now)
-	b, _, _ := autoProgressFile(gpulease.Options{}, []string{"comfy-render.mjs"}, dir, 1, now.Add(time.Nanosecond))
-	c, _, _ := autoProgressFile(gpulease.Options{}, []string{"comfy-render.mjs"}, dir, 2, now)
+	a, _, _ := autoProgressFile(gpulease.Options{}, []string{"comfy-render.mjs"}, dir, 1, now, false)
+	b, _, _ := autoProgressFile(gpulease.Options{}, []string{"comfy-render.mjs"}, dir, 1, now.Add(time.Nanosecond), false)
+	c, _, _ := autoProgressFile(gpulease.Options{}, []string{"comfy-render.mjs"}, dir, 2, now, false)
 	if a == b || a == c {
 		t.Errorf("minted names collide: %q %q %q", a, b, c)
 	}

@@ -447,6 +447,9 @@ func runGPUReserve(args []string) error {
 	if len(cmdArgs) > 0 && *detach {
 		return errors.New("--detach and a wrapped command are mutually exclusive")
 	}
+	if *detach && owner.wantsMintedProgress() {
+		return errors.New("--progress-file auto mints a file for the command the wrapper form runs; a --detach hold wraps none and runs several over its life, so name the file the jobs append to (--progress-file <path> --stall <window>)")
+	}
 
 	m, err := openLease(fs)
 	if err != nil {
@@ -468,21 +471,28 @@ func runGPUReserve(args []string) error {
 	if w := progressFileWarning(opts.ProgressFile); w != "" {
 		fmt.Fprintln(os.Stderr, w)
 	}
-	// A wrapped render helper that heartbeats gets the contract the caller did not declare (F8): without
-	// one the lease has nothing to renew on and is labelled expired at the end of its first term while the
-	// render is healthy. Only the wrapper form: a detached hold wraps no command to hand a file to.
-	autoProgress := ""
+	// A wrapped command that runs a render helper which heartbeats (or that asked for the minted file with
+	// --progress-file auto) gets the contract the caller did not declare (F8): without one the lease has
+	// nothing to renew on and is labelled expired at the end of its first term while the render is
+	// healthy. Only the wrapper form: a detached hold wraps no command to hand a file to.
+	autoProgress, autoWhat := "", ""
 	if !*detach {
 		dir := gpulease.ProgressDir(m.Root())
-		if p, helper, ok := autoProgressFile(opts, cmdArgs, dir, os.Getpid(), time.Now()); ok {
+		asked := owner.wantsMintedProgress()
+		if p, what, ok := autoProgressFile(opts, cmdArgs, dir, os.Getpid(), time.Now(), asked); ok {
 			if err := os.MkdirAll(dir, 0o755); err != nil {
 				// Said, never fatal: the render runs under the lease as it always did, unjudged by a contract.
 				fmt.Fprintf(os.Stderr, "gpu reserve: could not create %s for a progress contract (%v); the lease will not renew on progress\n", dir, err)
+				opts.Stall = 0 // a window with no file is refused by the lease; --progress-file auto --stall <d> must not turn a full disk into a refusal
 			} else {
 				gpulease.SweepMintedProgress(dir, mintedProgressMaxAge, time.Now())
-				opts.ProgressFile, opts.Stall = p, autoProgressStall
-				autoProgress = p
-				fmt.Fprintln(os.Stderr, autoProgressSentence(p, helper, autoProgressStall))
+				stall := autoProgressStall
+				if opts.Stall > 0 { // --progress-file auto --stall <d>: the caller's window
+					stall = opts.Stall
+				}
+				opts.ProgressFile, opts.Stall = p, stall
+				autoProgress, autoWhat = p, what
+				fmt.Fprintln(os.Stderr, autoProgressSentence(p, what, stall, asked))
 			}
 		}
 	}
@@ -697,8 +707,7 @@ func runGPUReserve(args []string) error {
 		cmd.Env = append(cmd.Env, gpuProgressFileEnv+"="+opts.ProgressFile)
 	}
 	if autoProgress != "" {
-		helper, _ := gpulease.HeartbeatHelperIn(cmdArgs)
-		if err := startAutoProgress(autoProgress, helper, time.Now()); err != nil {
+		if err := startAutoProgress(autoProgress, autoWhat, time.Now()); err != nil {
 			fmt.Fprintf(os.Stderr, "gpu reserve: could not create the progress file %s (%v); the lease reads its progress as unknown until the helper creates it\n", autoProgress, err)
 		}
 	}
