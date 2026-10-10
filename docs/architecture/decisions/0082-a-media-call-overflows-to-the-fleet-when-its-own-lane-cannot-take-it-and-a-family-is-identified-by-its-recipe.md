@@ -95,7 +95,10 @@ Three facts made the obvious change unsafe as stated.
    rule keeps closed, a quarantined card, a host short of RAM, a card another process holds that no lease shows) refuses every
    call alike, and each call sent to it would park for the node's whole `gpu_wait_ms` before the bounce came back; a call the node
    serves forgets the count, a health read does not. The cluster row says which pause it is (`bounced`, `refused`,
-   `unreachable`) and for how long the call was not offered to the node. The step and attempt numbers are chosen, not measured.
+   `unreachable`) and for how long the call was not offered to the node. The step and attempt numbers are chosen, not measured. The
+   memory is the placer's package variable, so it is per process: the MCP server keeps it across the calls of its session, and a
+   one-shot CLI call starts with none, so it pays a bounced node's `gpu_wait_ms` again (the node-published verdict that would
+   replace the memory is not built).
 7. **Attribution stays one card per node that held the job and one row per call.** An overflowing call opens its PAIR card only
    once a node has ACCEPTED the job. A node that bounces it after accepting has its card closed quiet (completed, never
    started, the reason kept; `core.RemoteAttribution.Bounce`) and writes no ledger row; the call's one asker row names the node

@@ -17,7 +17,7 @@ package mediaremote
 //
 // HOW IT ENDS. A node that refuses the POST (503, 429) or accepts the job and answers that another job holds its
 // card (gpu_busy, gpu_queued) or that its lease cannot be taken (gpu_lease_unavailable: in all three nothing ran) is
-// passed over, under a fresh job id, at most maxPlacements times, and is not offered another call for a while (a
+// passed over, under a fresh job id, at most maxPlacements times, and is not offered another call by this process for a while (a
 // node that read idle in health but whose own grant refuses the job refuses every call alike, and each one would park
 // for the node's whole gpu_wait_ms before the bounce came back). A node's own answer after it accepted the job is
 // final: a render that failed is the call's result and is never placed elsewhere, and a job a node holds is never also
@@ -64,8 +64,8 @@ const maxCooldown = 5 * time.Minute
 // and each call sent to it parks for the node's whole gpu_wait_ms (90 s by default) before the bounce comes back: three
 // calls would cost 270 s of waiting for nothing. The first bounce pauses the node for a minute (a lane taken between the
 // health read and the POST is the common cause and clears by itself), the second for the cap; a call the node serves
-// forgets them. Chosen transport constants, not measured: this release has no node-published verdict to read instead
-// (the place-now header of the plan, section 7, is the lasting fix).
+// forgets them. Per process, like the rest of the placer's memory. Chosen transport constants, not measured: this release
+// has no node-published verdict to read instead (the place-now header of the plan, section 7, is the lasting fix).
 var bounceSteps = []time.Duration{time.Minute, maxCooldown}
 
 // Seams: tests replace the roster reader, this machine's release, the clock and the jitter; production never does.
@@ -88,8 +88,11 @@ type ClusterRow struct {
 	Differs []string `json:"differs,omitempty"`
 }
 
-// placerState is the process-wide memory of nodes that did not answer: a call after a call must not pay a probe bound
-// for a box that is down.
+// placerState is this PROCESS's memory of the nodes it is leaving alone: nodes that did not answer (a call after a call
+// must not pay a probe bound for a box that is down), nodes that took a call and passed it back, and nodes that asked to
+// be left alone (Retry-After). It is the package variable placer, so it holds inside a long-lived process (the MCP server
+// answers every media call of its session through it) and is empty when a one-shot CLI call starts (main.go runs
+// Run once per process): that call pays a bounced node's whole gpu_wait_ms again.
 type placerState struct {
 	mu    sync.Mutex
 	nodes map[string]*nodeBackoff

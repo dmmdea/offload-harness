@@ -2026,6 +2026,8 @@ back is left alone for 60 s and then 300 s per consecutive bounce (only a call i
 not): a node that reads idle but whose own grant refuses every job would otherwise park each call for its whole `gpu_wait_ms`.
 Chosen constants, not measurements (`TestABounceIsRememberedAndTheNodeComesBackAtTheNextStep`,
 `TestARetryAfterHoldsTheNodeAndReadsAsRefused`, `TestARefusedDialMovesOnAndBacksTheNodeOff`, `TestACallIsSentToAtMostThreeNodes`).
+The memory is per process (the placer is a package variable): the MCP server keeps it across the calls of its session, and a
+one-shot CLI call (`generate-image` and the other verbs) starts with none, so it pays a bounced node's `gpu_wait_ms` again.
 
 **Attribution.** The call's PAIR card opens on the first node that ACCEPTS the job, not before the POST, so a node that refused
 it leaves none. A node that accepted and then bounced it has its card closed quiet (`completed`, never started, the reason kept:

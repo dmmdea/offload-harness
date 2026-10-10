@@ -56,7 +56,8 @@ Versioning: [SemVer](https://semver.org/).
   pauses it, and a node that took a call and passed it back is left alone for 60 s and then 300 s per consecutive bounce, because a
   node that reads idle in its health but whose own grant refuses every job would otherwise park each call for its whole
   `gpu_wait_ms`; the cluster row names the pause as `bounced`, `refused` or `unreachable` and for how long (chosen constants, not
-  measurements). `RemoteAttribution.Bounce` closes
+  measurements). The memory is per process: the MCP server keeps it across the calls of a session, while a one-shot CLI call starts
+  with none and pays a bounced node's `gpu_wait_ms` again. `RemoteAttribution.Bounce` closes
   the PAIR card of an attempt that ran nothing (completed, never started) whatever its `err_class`, `gpu_lease_unavailable` included,
   and writes no ledger row; an overflowing call opens its
   card only once a node has accepted the job, so the call has one row and one card per node that held it.
