@@ -7,10 +7,10 @@ date: "2026-10-09"
 
 ## Context
 
-0.175.0 added the `embeddinggemma2` entry (EmbeddingGemma-2, a second memory-stack embedder) to every serving template. Its
-GGUF architecture, `gemma-embedding2`, first builds in llama.cpp b11452 (upstream PR 30054); b11490 is the build it was
-proven on. The render has had one llama.cpp build for every entry since the Linux renderer existed: `--llama-bin` feeds the one
-`__LLAMA_BIN__` token, and on Linux the one `ld` loader macro.
+0.175.0 added the `embeddinggemma2` entry (EmbeddingGemma-2, a second memory-stack embedder) to ten of the eleven serving
+templates (the Rockchip board's has none). Its GGUF architecture, `gemma-embedding2`, first builds in llama.cpp b11452
+(upstream PR 30054); b11490 is the build it was proven on. The render has had one llama.cpp build for every entry since
+the Linux renderer existed: `--llama-bin` feeds the one `__LLAMA_BIN__` token, and on Linux the one `ld` loader macro.
 
 The `ampere-6` reference box runs b10964, which the RAM-spill agent seat of ADR 0080 needs and which it was measured on. It must
 keep that build for its other seats, and b10964 cannot load the new entry. With one build per render the only way to serve both
@@ -44,12 +44,18 @@ provenance stamp.
 4. **The replay carries it.** `replayRequest` gains `EG2LlamaBin` and the sibling `AltLlamaBinCPU`, which it had dropped (a
    node rendered with a CPU family would have replayed without one and read STALE for a path it chose itself; dormant, because
    no tier declares `alt_backends`). A node rendered with the flag audits MATCH; an entry's path edited by hand still reads
-   HAND-EDITED, because `audit-yaml` has no per-entry view.
+   HAND-EDITED, because `audit-yaml` has no per-entry view. Both are inputs the tier must still permit, so a stamp that records
+   one the tier has since withdrawn reads STALE with the renderer's refusal as the detail and no key list; the "no longer in
+   the tier table" words stay for a tier that really left it (`provenanceOf` tells the two apart).
 5. **The b11452 floor is a write-time check, from the directory's name.** `eg2MinLlamaBuild = 11452`; `install render` reads a
-   `b<digits>` token (four to six digits) from the build directory's own last path element and refuses a render whose entry
-   build is known and below it. It never runs `llama-server`: `--version` initialises every CUDA card, and `install render`
-   runs on live nodes. A name that states no build is a `note:`, on stdout when `--out` is set (the Windows installer reads that
-   stream) and on stderr otherwise (stdout is then the stamped config). The check reads the entry's own build when the flag is
+   `b<digits>` token (four to six digits) from the build directory's own last path element, or from the nearest element above
+   it when that one is the generic `bin` or `build` (`llamacpp-b10964/bin`, `llama-b11490/build/bin`), and refuses a render
+   whose entry build is known and below it. It never runs `llama-server`: `--version` initialises every CUDA card, and
+   `install render` runs on live nodes. **The check is therefore advisory:** it protects a build whose directory path states
+   its build, and for any other (`<home>/llama`, `/srv/offload/build/llamacpp/build/bin`) it cannot tell what the directory
+   holds. A name that states no build is a `note:`, on stdout when `--out` is set (the Windows installer captures that stream
+   and relays its `note:` lines, except the one about its own pinned build) and on stderr otherwise (stdout is then the
+   stamped config). The check reads the entry's own build when the flag is
    set and the main build otherwise, and only for a render that includes the entry. It is never part of the derivation or the
    replay: an audit runs on another machine with another machine's recorded paths.
 6. **Installers.** `install.sh --llama-bin-eg2 DIR` passes it through. `install.ps1` gains the opt-in
@@ -60,12 +66,12 @@ provenance stamp.
 
 - A node that keeps an older main build serves the entry from a rendered, stamped config instead of a hand edit; the hand splice
   is retired by re-rendering, as ADR 0054 retired the CPU one.
-- **Behaviour change with the flag unset:** a render whose main build the directory name states as older than b11452, on a tier
+- **Behaviour change with the flag unset:** a render whose main build the directory path states as older than b11452, on a tier
   that carries the entry, is refused where it used to be written. That entry could not start on such a build. A directory whose
   name states no build gets a note, so an install into a directory called `llama` is not stopped by a check that cannot tell.
 - `spec_sha256` differs between same-tier nodes with and without the flag, as it already does with `llama_bin`; a fleet check
   compares serving-config state, not the hash.
-- A binary older than 0.176.0 auditing a stamp that carries `eg2_llama_bin` drops the key it does not know and reads
+- A binary older than 0.177.0 auditing a stamp that carries `eg2_llama_bin` drops the key it does not know and reads
   HAND-EDITED. Only a node rendered with the flag is affected, and the cure is to upgrade the binary before re-rendering with it.
 - The residents run two llama.cpp builds side by side. > **Unverified:** that a build-consistency check across loaded seats
   reports drift for this shape; read from its source, not run.

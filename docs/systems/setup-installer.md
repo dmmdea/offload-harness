@@ -137,7 +137,7 @@ confusion:
   b11452 or newer (the `gemma-embedding2` architecture); on Windows `install.ps1` pins b11490 and downloads the two
   GGUFs (309,855,456 and 554,821,024 bytes) for a tier that carries the projector and the model alone for a text-only
   tier, with no RAM gate (`Get-GatedModelKeys -IncludeEmbeddingGemma2Projector`). A node whose main build is older keeps
-  it for its other seats and runs this one entry from a second build (0.176.0, `--llama-bin-eg2`; see "A second llama.cpp
+  it for its other seats and runs this one entry from a second build (0.177.0, `--llama-bin-eg2`; see "A second llama.cpp
   build for the embeddinggemma2 entry" under "Serving config on Linux" below), and `install render` refuses a build it
   can read as older than b11452.
 - **The Windows llama.cpp pin is b11490** (was b9934): the pre-built assets are `win-cuda-12.4`, **`win-cuda-13.4`**
@@ -353,8 +353,9 @@ local-offload install render --profile ampere-6 --home /opt/offload --llama-bin 
   not the target OS.
 - **How.** A rewrite of the `embeddinggemma2` block inside `servingtmpl.Render`, before substitution, on the same block
   scanner as the text-only projector strip. No template and no `profiles.json` edit, so `template_sha256` and every
-  `profiles_entry_sha256` stay put: an unset render is byte-identical to the previous release's (compared on all ten
-  templates, projector kept and stripped), and no stamped node reads STALE because of this change. The rewrite is exact in
+  `profiles_entry_sha256` stay put: an unset render is byte-identical to the previous release's (pinned by sha256 on all ten
+  templates, projector kept and stripped, in `internal/servingtmpl/testdata/eg2bin-unset-render.golden`, taken from the
+  0.175.0 renderer), and no stamped node reads STALE because of this change. The rewrite is exact in
   both directions: the entry must name `__LLAMA_BIN__` exactly once, and on a Linux template carry exactly one `${ld}`
   item, or the render fails naming the entry.
 - **The value.** Backslashes become forward slashes and a trailing slash goes (llama-swap on Windows mis-parses
@@ -363,16 +364,22 @@ local-offload install render --profile ampere-6 --home /opt/offload --llama-bin 
   llama-swap expands), and so is a value that is only separators. A tier that does not carry `include_embeddinggemma2`
   (the other CUDA tiers, the Rockchip board, an off-matrix box) refuses the flag by naming the tier and the flag, because
   the stamp would record a build that serves nothing.
-- **The floor check, at write time only.** `eg2MinLlamaBuild` is 11452. `install render` reads the build from a `b<digits>`
-  token of four to six digits in the build directory's own name (`llamacpp-b10964`, `llama.cpp-b11490`,
-  `llama-b11490-bin-win-cuda-12.4-x64`) and never runs `llama-server`, whose `--version` initialises every CUDA card on
-  the box while `install render` runs on live nodes. It checks the entry's own build when the flag is set and the main
+- **The floor check, at write time only, and advisory.** `eg2MinLlamaBuild` is 11452. `install render` reads the build from
+  a `b<digits>` token of four to six digits in the build directory's own name (`llamacpp-b10964`, `llama.cpp-b11490`,
+  `llama-b11490-bin-win-cuda-12.4-x64`), or, when that name is the generic `bin` or `build` of a CMake tree or a release
+  archive, in the nearest directory above it that is not (`.../llamacpp-b10964/bin`, `.../llama-b11490/build/bin`). It
+  never runs `llama-server`, whose `--version` initialises every CUDA card on the box while `install render` runs on live
+  nodes. **The floor is therefore advisory, not a guarantee:** it protects a build whose directory path states its build,
+  and says plainly that it could not check any other (`/srv/offload/build/llamacpp/build/bin`, `<home>/llama`), whatever
+  build that directory really holds. Name build directories for their build to get the refusal. It checks the entry's own build when the flag is set and the main
   build otherwise, and only for a render that includes the entry. A build the name states below the floor is refused
   (`tier T renders embeddinggemma2, which needs llama.cpp b11452 or newer (gemma-embedding2), but <dir> is bN: pass
   --llama-bin-eg2 <dir of a b11452+ build> - not written`), at or above it is silent, and a name that states none (a
   directory called `llama`) is a `note:` line and the render proceeds. The note goes to stdout when `--out` is set
-  (`install.ps1` reads that stream and its self-test treats stderr output as an error) and to stderr otherwise, where
-  stdout is the stamped config itself. **Behaviour change when the flag is unset:** a render whose main build is named
+  (`install.ps1` captures that stream, relays its `note:` lines to the operator, and its self-test treats stderr output as
+  an error) and to stderr otherwise, where stdout is the stamped config itself. `install.ps1` leaves out the note about its
+  own build (`<home>/llama` never states one, and the pinned tag is held at or above the floor), so on Windows the note
+  appears only for an `OFFLOAD_EG2_LLAMA_BIN` directory whose name states no build. **Behaviour change when the flag is unset:** a render whose main build is named
   below b11452, on a tier that carries the entry, is now refused where it used to be written; that entry cannot start on
   such a build. The replay never checks the floor (`audit-yaml` runs on another machine with another machine's recorded
   paths and must not judge them), and `TestInstallPs1PinsABuildAtOrAboveTheEG2Floor` holds the Windows installer's pinned
@@ -382,13 +389,17 @@ local-offload install render --profile ampere-6 --home /opt/offload --llama-bin 
   view: an entry's path edited by hand still reads HAND-EDITED, and the same change made by the renderer (on a template
   without a loader macro it is exactly that path edit) reads MATCH. The replay now also carries `--llama-bin-cpu`, which
   it used to drop, so a node rendered with a CPU family would have read STALE for a path it chose itself (dormant: no tier
-  declares `alt_backends`). **A binary older than 0.176.0 auditing a stamp that carries `eg2_llama_bin` reads HAND-EDITED**
+  declares `alt_backends`). Each is a render input the tier must still permit: a stamp that records one the tier has since
+  withdrawn reads STALE with the renderer's own refusal as the detail (`this binary cannot re-derive tier T from the
+  recorded inputs: ...`) and no key list, not with "no longer in the tier table", which is kept for a tier that really
+  left it. **A binary older than 0.177.0 auditing a stamp that carries `eg2_llama_bin` reads HAND-EDITED**
   (it drops the key it does not know, so the spec hash no longer matches): upgrade the binary before re-rendering with the
   flag.
 - **Windows.** `install.ps1` installs one pinned tag for every node it installs (b11490, at or above the floor), so an
   installer-managed node needs no second build. `OFFLOAD_EG2_LLAMA_BIN=<dir>` is the opt-in override for a node that keeps
   an older main build: the directory must hold `llama-server.exe` (else the script throws), is normalised to forward
-  slashes, is appended to the render args as `--llama-bin-eg2`, and joins the Step 6 skip test so an upgrade re-renders. The
+  slashes, is appended to the render args as `--llama-bin-eg2`, and joins the Step 6 skip test so an upgrade re-renders (the test matches the executable's path,
+  `<dir>/llama-server.exe`, so a longer sibling directory is not mistaken for it). The
   directory must be a complete extraction (the llama zip, plus the cudart zip for CUDA), because Windows resolves its DLLs
   beside the executable and the entry carries no loader macro; a bare llama zip fails at load with a DLL error that reads
   like a model problem. The skip test cannot tell that the variable was removed: dropping the override needs a fresh render
@@ -775,7 +786,7 @@ canary pure helpers (`selftest-canaries.test.ps1` — word-overlap, flash-attn l
 live-captured log lines, cosine). Go-side config round-tripping is covered by
 `example_config_test.go` and `doctor_test.go`, which also guard against tier-key drift between
 `config.example.json` and the code. The second-build flag is pinned by `internal/servingtmpl/eg2bin_test.go` (what the
-rewrite touches and refuses, on all ten templates), `install_render_eg2bin_test.go` (the flag, the floor check, the replay),
+rewrite touches and refuses, on all ten templates, and the golden hashes of the unset renders), `install_render_eg2bin_test.go` (the flag, the floor check, the replay),
 `setup/install.tests.sh` and the `OFFLOAD_EG2_LLAMA_BIN` cases of `setup/render.tests.ps1` and
 `setup/tests/install-config-seed.test.ps1`.
 
