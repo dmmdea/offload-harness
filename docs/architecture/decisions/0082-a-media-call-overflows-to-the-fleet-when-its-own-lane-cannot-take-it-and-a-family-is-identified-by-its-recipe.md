@@ -47,15 +47,19 @@ Three facts made the obvious change unsafe as stated.
    creates no lease, place in line, epoch, waiter record, ledger row, PAIR card or ComfyUI instance. A differential test drives
    the real wait-0 admission over a table of lane states and holds the prober to the one direction that matters.
 3. **A family is its recipe (`mediacap.ImageRecipe`).** The recipe is the weight files the graph loads (checkpoint, text
-   encoder, VAE, LoRA), each with its byte size on the node's disk, and the sampling it renders with, digested (sha256 of
-   canonical JSON) over RESOLVED values: a key the binding leaves unset takes the builder's own default, from a table that a
+   encoder, VAE, LoRA), each with its name and byte size on the node's disk, and the sampling it renders with, digested (sha256
+   of canonical JSON) over RESOLVED values: a key the binding leaves unset takes the builder's own default, from a table that a
    test reads out of `render/wf-qwen-image-21.mjs` and `render/comfy-render.mjs`, so it cannot drift from the code that renders
    (Qwen-Image-2.1 only in this release; any other graph leaves unset keys unset, which is stricter, never looser). The license
    the result is tagged with is part of it. Node-local keys (`comfy_*`, timeouts, scripts, `reserve_vram`, the pool keys) are not;
    a test fails when a key joins the image overlay's clear list unclassified. No recipe exists for an sd.cpp binding, so a
    ComfyUI recipe never matches one. The match is strict, also requires the same `harness_version` (the graph builders ship
    with the release) and a recipe with no missing file, and never substitutes: a caller who accepts another build names that
-   family himself, and the answer tells him which of his own families would match.
+   family himself, and the answer tells him which of his own families would match. **The identity is name plus size, not
+   content.** It tells a bf16 build from an int8 one and catches a truncated copy; it cannot tell two same-named files of one
+   size whose bytes differ (a full-length corrupted copy, a same-named re-release with the same tensor layout, a file updated in
+   place on one node), and the node's 412 re-check recomputes the same size-based digest, so it does not catch them either. A
+   sha256 per weight file, cached by path, size and mtime and published in `image_recipes`, is the upgrade and is not built.
 4. **Nodes publish and check recipes.** `/fleet/health` gains `image_recipes[]` (one row per ComfyUI binding that names a
    checkpoint: name, default, digest, files with sizes, resolved sampling, license, and which sampling keys the binding set) and
    `refine_honoured`, from a memo of the route cache's 60 s so health stays cheap. An image-gen dispatch may carry
@@ -107,7 +111,7 @@ Three facts made the obvious change unsafe as stated.
   one bounce: up to the node's `gpu_wait_ms` (90 s by default) parked on the node and one deferred row there, before the placer
   sees it. The health pre-filter (no lease of any class) makes that rare; if the logs show it is not, a place-now header read in
   admission is the first optimisation (a lane verdict published by the node, answered before a job exists), not built here.
-- **Named limits.** One FIFO per delegating machine; cross-machine order is node arrival. A call resumed with its token stays in
+- **Named limits.** The recipe is name plus size, not content (decision 3). One FIFO per delegating machine; cross-machine order is node arrival. A call resumed with its token stays in
   the local line, so a node that frees later is not used by it (the ticket queue with late binding is the next step). Every
   remote job pays ComfyUI's cold start. The same recipe and seed on a different GPU architecture is the same composition, not
   bit-identical pixels. A hand-forced `route=remote` can still park beside a placed job (`concurrencyCapped` is false for media).

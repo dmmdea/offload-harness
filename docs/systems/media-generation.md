@@ -1977,7 +1977,10 @@ admission over a table of lane states and fails if a lane the grant would serve 
 **What a family is.** A name says nothing about which weights sit under it. A family's identity is its **recipe**
 (`mediacap.ImageRecipe`): the checkpoint, text encoder, VAE and LoRA it loads, each with its byte size on the node's disk, and
 the sampling it renders with (steps, cfg, sampler, scheduler, schedule, shift, LoRA strength, preset), plus the license the result
-is tagged with, digested with sha256 over canonical JSON. The digest is over **resolved** values: a key the binding leaves unset
+is tagged with, digested with sha256 over canonical JSON. The identity is **name plus size**, not content: two same-named files
+of the same size whose bytes differ (a corrupted full-length copy, a same-named re-release with the same tensor layout, a file
+updated in place on one node only) digest alike, and the node's own 412 check recomputes the same size-based digest, so it
+cannot catch them either; a content fingerprint per weight file is the named upgrade and is not built. The digest is over **resolved** values: a key the binding leaves unset
 takes the builder's default (Qwen-Image-2.1: 40 steps, cfg 1, euler, scheduler `simple`, schedule `official`), so a node that
 writes the default out and a node that leaves it unset are one recipe. That table is pinned by a test to the constants in
 `render/wf-qwen-image-21.mjs` and `render/comfy-render.mjs`; any other graph family leaves unset keys unset, which is stricter.

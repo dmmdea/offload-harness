@@ -14,11 +14,19 @@ import (
 
 // What an image family IS (P0 plan, S1; ADR 0082).
 //
-// A node that takes another machine's image job must render the SAME image the caller's own lane would have: the
+// A node that takes another machine's image job should render the SAME image the caller's own lane would have: the
 // same weights, the same sampling. Two nodes can name a family alike and bind different files under it (one node's
 // qwen-image-2.1 is the bf16 DiT and another's is an int8 build), and a name says nothing about a file that was
-// truncated in a copy. So a family is identified by its RECIPE: the weight files it loads, each with its byte
-// size, and the sampling it renders with, digested over RESOLVED values and compared strictly.
+// truncated in a copy. So a family is identified by its RECIPE: the weight files it loads, each with its NAME and
+// BYTE SIZE, and the sampling it renders with, digested over RESOLVED values and compared strictly.
+//
+// WHAT THAT CAN AND CANNOT SEE. Name plus size separates builds that differ in size (bf16 against int8 against NVFP4)
+// and catches a truncated copy. It does NOT see content: two files with the same name and the same byte size but
+// different bytes (a full-length corrupted copy, a same-named re-release with the same tensor layout, one node's file
+// updated in place and the other's not) digest alike, and the node's own 412 check recomputes the same size-based
+// digest, so it cannot catch what the published digest cannot. A content fingerprint per weight file (a sha256 cached
+// by path, size and mtime) is the fix and is not built; until it is, a file replaced in place on a node is a case the
+// match does not see.
 //
 // RESOLVED, not raw. The same render has more than one config spelling: a binding that leaves the scheduler unset
 // gets the builder's own default, and a binding that writes that default out explicitly renders identically. A
@@ -47,7 +55,8 @@ const (
 )
 
 // RecipeFile is one weight file the graph loads: its role, its ComfyUI-relative name and its size on this machine
-// (-1 when it is not found: a recipe with a missing file is never a match).
+// (-1 when it is not found: a recipe with a missing file is never a match). Name and size only: the bytes are not
+// read, so two same-named files of one size are one file as far as a recipe can tell.
 type RecipeFile struct {
 	Role  string `json:"role"`
 	Name  string `json:"name"`

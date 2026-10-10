@@ -23,12 +23,15 @@ Versioning: [SemVer](https://semver.org/).
   wait-0 grant refuse is present, and free whenever it cannot say. `TestMediaLaneFreeNeverRefusesAGrant` drives the real admission
   over 27 lane states and fails if a lane the grant would serve is called busy; `TestMediaLaneFreeWritesNothing` snapshots the lease
   root in each of them.
-- **Identity is the recipe, not the name.** `mediacap.ImageRecipe`: the checkpoint, text encoder, VAE and LoRA a family loads with
-  their byte sizes, and its sampling, digested over RESOLVED values (an unset Qwen-Image-2.1 key takes the builder's default from a
+- **Identity is the recipe, not the name, and the recipe is name plus size, not content.** `mediacap.ImageRecipe`: the checkpoint,
+  text encoder, VAE and LoRA a family loads with their names and byte sizes, and its sampling, digested over RESOLVED values (an unset Qwen-Image-2.1 key takes the builder's default from a
   table `TestBuilderDefaultsMatchTheJSConstants` reads out of `render/wf-qwen-image-21.mjs` and `render/comfy-render.mjs`), so a node
   that writes the default scheduler out and one that leaves it unset match, and a bf16, an int8 and an NVFP4 build of one family
   name never do. Node-local keys are not in it, and a test fails when a key joins the image overlay's clear list unclassified.
-  No recipe exists for an sd.cpp binding. The match is strict, needs the same release, and never substitutes.
+  No recipe exists for an sd.cpp binding. The match is strict, needs the same release, and never substitutes. Two same-named files
+  of one size whose bytes differ (a corrupted full-length copy, a same-named re-release with the same tensor layout, a file updated
+  in place on one node) digest alike, and the node's 412 re-check recomputes the same size-based digest, so it cannot catch them
+  either; a sha256 per weight file is the named upgrade and is not built.
 - **Nodes publish and check recipes.** `/fleet/health` gains `image_recipes[]` and `refine_honoured` (additive; absent on a node
   without an image lane and on older nodes, which a delegator reads as "cannot be matched"), from a 60 s memo. An image-gen dispatch
   may carry `recipe_digest`; the node recomputes the digest of the family it names from the files on disk at admission and answers

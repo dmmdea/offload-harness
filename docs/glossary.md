@@ -141,10 +141,13 @@ honoured or overridden. See [architecture/decisions/0078-a-placement-pin-needs-a
 ## Image recipe
 
 What an image family IS, for the purpose of deciding whether another node would render the same picture: the weight files
-its graph loads (checkpoint, text encoder, VAE, LoRA) each with its byte size on that node's disk, and the sampling it renders
-with, digested with sha256 over RESOLVED values (a key the binding leaves unset takes the builder's own default, so a node that
-writes the default out and one that leaves it unset are the same recipe). Narrower than "named family": the name is a label, the
-recipe is the identity. Node-local keys (which card, timeouts, scripts, `reserve_vram`, the pool keys) are not in it, and an
+its graph loads (checkpoint, text encoder, VAE, LoRA) each with its name and its byte size on that node's disk, and the
+sampling it renders with, digested with sha256 over RESOLVED values (a key the binding leaves unset takes the builder's own
+default, so a node that writes the default out and one that leaves it unset are the same recipe). Narrower than "named
+family": the name is a label, the recipe is the identity the harness can check. That identity is **name plus size**, not
+content: it separates a bf16 build from an int8 one and catches a truncated copy, but two same-named files of the same size
+with different bytes (a corrupted full-length copy, a re-release with the same tensor layout) digest alike, and the node's own
+check recomputes the same digest. A content fingerprint is not built. Node-local keys (which card, timeouts, scripts, `reserve_vram`, the pool keys) are not in it, and an
 sd.cpp binding has none. A node publishes its recipes in `/fleet/health` `image_recipes[]`, a delegator matches the `digest`
 strictly, and the node re-checks it at admission (412 on a mismatch). See [ADR 0082](architecture/decisions/0082-a-media-call-overflows-to-the-fleet-when-its-own-lane-cannot-take-it-and-a-family-is-identified-by-its-recipe.md).
 

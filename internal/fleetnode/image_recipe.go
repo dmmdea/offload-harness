@@ -7,12 +7,14 @@ package fleetnode
 // the weight files with their sizes, the resolved sampling, the license a result is tagged with, and its digest),
 // and an image-gen dispatch may carry the digest it matched: the node recomputes the digest of the family the
 // payload names and refuses a dispatch whose digest is not that one, with 412. The digest is the whole contract; the
-// check below and the delegator's match read the same mediacap.Recipe.Digest, so they cannot disagree.
+// check below and the delegator's match read the same mediacap.Recipe.Digest, so they cannot disagree. That is also its
+// limit: the digest covers file names and byte sizes, not contents, so the 412 check cannot catch what the published
+// digest cannot (two same-named, same-size files with different bytes; mediacap/recipe.go says so).
 //
 // Health stays cheap (server.go: only cached or cheap reads): the rows come from a memo of mediaRoutesTTL, the same
 // freshness a route verdict has. The admission check does not use the memo. It stats the three or four weight files of
-// the one family a dispatch names, once per dispatch, and a node whose files changed a second ago must not admit a
-// job on a recipe it no longer holds.
+// the one family a dispatch names, once per dispatch, and a node whose files changed in size a second ago must not admit
+// a job on a recipe it no longer holds.
 
 import (
 	"fmt"
