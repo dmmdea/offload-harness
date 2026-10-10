@@ -91,12 +91,12 @@ func watchQuiet(t *testing.T, atLeast time.Duration) func() []quietGap {
 //   - The reasons are rendered from the wait's own decision, so they read no clock and run before any skip. A holder's names
 //     the TTL, the zero agent_placement_wait_sec and the subtasks that had not started; the last subtask's is bounded by the
 //     call and does not say "had not started" (a last subtask held to the TTL does, as it would if the call still counted a
-//     begun subtask as unstarted). A holder whose reason says the call bounded its wait fails, unless its wait could not have
-//     begun while the last subtask was unstarted: it started after the last subtask did, with under a TTL left to the
-//     horizon, or after a dispatch that took a quarter of a second or more. A stall elsewhere in the call excuses none of
-//     that, so holders run to the horizon fail on a loaded runner too. A holder is given no credit ceiling: the credit counts
-//     a late wake as idle time, so a ceiling would read the runner's speed, and the reason already says which bound the wait
-//     had.
+//     begun subtask as unstarted). A holder whose reason says the call bounded its wait fails, unless its wait can have begun
+//     late enough to have nothing behind it (after the last subtask did, or with under a TTL left to the horizon): a wait
+//     credited c that ended at e began no later than e-c, which is what a slow first dispatch leaves, with its start event
+//     long before. A stall elsewhere in the call excuses none of that, so holders run to the horizon fail on a loaded runner
+//     too. A holder is given no credit ceiling: the credit counts a late wake as idle time, so a ceiling would read the
+//     runner's speed, and the reason already says which bound the wait had.
 //   - A holder lived at least its TTL, and the last subtask at least one and a half. Both read the call's own events, and a
 //     starved runner can only lengthen what they measure. This is what shows the last subtask outwaiting the TTL.
 //   - The credit is not asserted as a floor. Every re-ask of the node is an attempt, charged to the budget and left out of the
@@ -150,6 +150,10 @@ func heldSlotWait(t *testing.T, contracts []core.AgentContract, tune func(*fakeN
 	}
 	b7, began7 := began[slots]
 	at := func(ts time.Time) time.Duration { return ts.Sub(opened).Round(time.Millisecond) }
+	lastBegan := "never"
+	if began7 {
+		lastBegan = at(b7).String()
+	}
 	// outside is how much of a subtask's life, from its start event to its end event, was not credited as idle wait: its
 	// dispatches before the wait and its re-asks of the node during it (the credit leaves both out). Milliseconds on a runner
 	// that keeps up, and 0 for a subtask that never began.
@@ -216,11 +220,16 @@ func heldSlotWait(t *testing.T, contracts []core.AgentContract, tune func(*fakeN
 			}
 		case strings.Contains(r, "before the call's deadline"):
 			// The call bounded this wait, which is what a wait with nothing behind it does: one that began after the last
-			// subtask did, or with under a TTL left to the horizon. A holder whose first dispatch was slow reaches either with
-			// neither showing in the events, but it spent a quarter of a second or more outside its credited wait. This is a
-			// decision string, so a stall elsewhere in the call excuses nothing here: holders run to the horizon fail.
-			if !(began7 && began[i].After(b7)) && horizon.Sub(began[i]) >= heldTTL && outside(i) < heldReserve/2 {
-				t.Errorf("result %d reason = %q, want a wait that held its run slot only for the %s TTL: it began before the last subtask did, with room before the horizon, and spent %s outside its credited wait", i, r, heldTTL, outside(i).Round(time.Millisecond))
+			// subtask did, or with under a TTL left to the horizon. A holder whose first dispatch was slow gets there with its
+			// start event long before, but a wait credited c that ended at e began no later than e-c, so a wait that cannot
+			// have begun that late is the defect. This is a decision string, so a stall elsewhere in the call excuses nothing
+			// here: holders run to the horizon fail on a loaded runner too.
+			from := horizon.Add(-heldTTL)
+			if began7 && b7.Before(from) {
+				from = b7
+			}
+			if latest := ended[i].Add(-time.Duration(pr.CapacityWaitSec * float64(time.Second))); latest.Before(from) {
+				t.Errorf("result %d reason = %q, want a wait that held its run slot only for the %s TTL: it began no later than %s into the call, before the last subtask did (%s) and with room before the horizon (%s)", i, r, heldTTL, at(latest), lastBegan, at(horizon.Add(-heldTTL)))
 			}
 		case strings.Contains(r, callDeadlinePrefix):
 			// The call's deadline cut this wait, which a runner stalled across the horizon does to any of them.
