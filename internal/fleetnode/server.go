@@ -211,6 +211,12 @@ type Server struct {
 	// imageFamilies is the named-family advertisement (ADR 0058), computed once
 	// like families; nil on a node without named families (key omitted).
 	imageFamilies []ImageFamily
+	// recipeRows is the memoised image_recipes advertisement (image_recipe.go): re-read from the weight files at
+	// most every mediaRoutesTTL, so polling health does not stat them each time.
+	recipeMu   sync.Mutex
+	recipeRows []ImageRecipeHealth
+	recipeAt   time.Time
+	recipeRead bool
 	// agentSeat is the resolved agent planner seat (config.AgentPlannerModel:
 	// agent_model > workhorse Model), computed once here at construction —
 	// the config cannot change under a running server. Advertised (and probed
@@ -1235,6 +1241,15 @@ type healthPayload struct {
 	// a family whose commercial_use is false, and read a null license as UNKNOWN.
 	// Omitted on a node with no named families — the pre-0.134 shape.
 	ImageFamilies []ImageFamily `json:"image_families,omitempty"`
+	// ImageRecipes is what each ComfyUI image binding IS: the weight files with their sizes, the resolved sampling,
+	// the license a result is tagged with, and the digest a delegator matches and sends back as recipe_digest
+	// (image_recipe.go, ADR 0082). Additive; omitted on a node with no ComfyUI binding that names a checkpoint, and
+	// on a node that predates it, which a reader takes as "cannot be matched", never as "matches anything".
+	ImageRecipes []ImageRecipeHealth `json:"image_recipes,omitempty"`
+	// RefineHonoured says this node's image-gen task carries `refine`: an explicit false reaches the pipeline and
+	// skips the node's prompt refiner. A delegator that sends refine=false requires it, so a node that predates it
+	// is a named miss instead of one that silently refines. Additive; published by a node that serves image-gen.
+	RefineHonoured bool `json:"refine_honoured,omitempty"`
 	// QueueDepth keeps its ORIGINAL meaning and shape across the 0.100.0
 	// backlog/concurrency split: accepted + running, i.e. every job this node
 	// owns that has not reached a terminal state. Every existing reader (the
@@ -1629,6 +1644,15 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if s.opts.ServingConfig != nil {
 		if sha, state := s.opts.ServingConfig(); state != "" {
 			payload.ServingConfigSpecSHA256, payload.ServingConfigState = sha, state
+		}
+	}
+	// The image recipe (ADR 0082) is published by a node that serves image-gen, from a memo; the node carries
+	// `refine` on that task exactly when it serves it.
+	for _, t := range tasks {
+		if t == "image-gen" {
+			payload.RefineHonoured = true
+			payload.ImageRecipes = s.imageRecipeRows()
+			break
 		}
 	}
 	// GPU utilization: advertise the busiest device's utilization when known.
@@ -2482,6 +2506,13 @@ func (s *Server) admit(w http.ResponseWriter, r *http.Request, env dispatchEnvel
 		var nre *routeNotReadyError
 		if errors.As(err, &nre) {
 			writeError(w, http.StatusServiceUnavailable, err.Error())
+			return
+		}
+		// An image job whose recipe_digest is not the one of the family it names here: the node is not what the
+		// delegator matched (its files changed since it read health). 412, and no job exists (image_recipe.go).
+		var rme *recipeMismatchError
+		if errors.As(err, &rme) {
+			writeError(w, http.StatusPreconditionFailed, err.Error())
 			return
 		}
 		// A failure that is this node's own (a disk that filled while unpacking a project) is not the

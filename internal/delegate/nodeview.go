@@ -94,6 +94,19 @@ type NodeView struct {
 	// "lease".held). A media client (mediaremote) ranks a node with no held lease ahead of one
 	// with a short media lease; placement of agent work keeps reading LeasedText and LeaseBusy.
 	LeaseHeld bool
+	// LeaseClass, LeaseReason and LeaseRemainingSec describe the lease LeaseHeld speaks of, as the node's singular
+	// lease block states it (the worst of the live leases when several are held): its class, why it was taken and
+	// the seconds left of the term it declared. A media client quotes them when it tells a caller what a node is
+	// busy with. Empty and 0 when no lease is held or on a node too old to publish them.
+	LeaseClass        string
+	LeaseReason       string
+	LeaseRemainingSec int
+	// ImageRecipes is what each ComfyUI image family on the node IS (health `image_recipes`, ADR 0082): the weight
+	// files with their sizes, the resolved sampling and a digest. nil on a node that predates it or that has no
+	// binding to identify, which is "cannot be matched", never "matches anything". RefineHonoured is health
+	// `refine_honoured`: the node's image-gen task carries an explicit refine=false.
+	ImageRecipes   []ImageRecipeView
+	RefineHonoured bool
 	// MediaRoutes is the node's own verdict on each file-backed media route (health
 	// `media_routes`, ADR 0077): CONFIGURED, NOT CONFIGURED or BOUND-BUT-MISSING. It is only
 	// meaningful when MediaRoutesKnown: a node that predates the field publishes none, which is
@@ -386,6 +399,36 @@ type MediaRouteView struct {
 	State  string `json:"state"`
 }
 
+// ImageRecipeView mirrors fleetnode.ImageRecipeHealth (and the mediacap.Recipe embedded in it): one ComfyUI image
+// binding a payload's `family` can select, and what it is. Mirrored here, not imported, as MediaRouteView mirrors
+// its row, so the delegator's decoder stays free of the media packages.
+type ImageRecipeView struct {
+	Name          string                `json:"name"`
+	Default       bool                  `json:"default"`
+	Digest        string                `json:"digest"`
+	Engine        string                `json:"engine"`
+	Graph         string                `json:"graph"`
+	Files         []ImageRecipeFileView `json:"files"`
+	Preset        string                `json:"preset"`
+	Steps         int                   `json:"steps"`
+	CFG           float64               `json:"cfg"`
+	Sampler       string                `json:"sampler"`
+	Scheduler     string                `json:"scheduler"`
+	Schedule      string                `json:"schedule"`
+	Shift         float64               `json:"shift"`
+	LoRAStrength  float64               `json:"lora_strength"`
+	License       string                `json:"license"`
+	CommercialUse *bool                 `json:"commercial_use"`
+	Explicit      []string              `json:"explicit"`
+}
+
+// ImageRecipeFileView is one weight file of a recipe: its role, its name and its size on the node (-1: not found there).
+type ImageRecipeFileView struct {
+	Role  string `json:"role"`
+	Name  string `json:"name"`
+	Bytes int64  `json:"bytes"`
+}
+
 // MediaRouteConfigured is the state string of a route that can run right now.
 const MediaRouteConfigured = "CONFIGURED"
 
@@ -463,6 +506,8 @@ type healthWire struct {
 	Lease *struct {
 		Held  bool   `json:"held"`
 		Class string `json:"class"`
+		// Reason is why the lease was taken (the holder's own words); absent on a node that omits it.
+		Reason string `json:"reason"`
 		// Overdue is additive (GPU routing P1): held and past its declared
 		// window. Absent on an older node, decoding to false.
 		Overdue bool `json:"overdue"`
@@ -512,6 +557,9 @@ type healthWire struct {
 	// Additive (ADR 0077): the node's media route verdicts. A pointer so an absent key (an older
 	// node) stays distinguishable from a published list.
 	MediaRoutes *[]MediaRouteView `json:"media_routes"`
+	// Additive (ADR 0082): what each image family on the node is, and whether its image-gen carries refine.
+	ImageRecipes   []ImageRecipeView `json:"image_recipes"`
+	RefineHonoured bool              `json:"refine_honoured"`
 	// Additive (ADR 0072): the stt upload door's capability. Absent on an older node.
 	STTHQ          *bool `json:"stt_hq"`
 	STTUploadMaxMB int   `json:"stt_upload_max_mb"`
@@ -602,6 +650,9 @@ func FetchNodeView(ctx context.Context, base, token string) (NodeView, error) {
 		TextTasks:    w.TextTasks,
 		Layers:       w.Layers,
 
+		ImageRecipes:   w.ImageRecipes,
+		RefineHonoured: w.RefineHonoured,
+
 		STTHQ:          w.STTHQ,
 		STTUploadMaxMB: w.STTUploadMaxMB,
 		Local:          false,
@@ -617,6 +668,9 @@ func FetchNodeView(ctx context.Context, base, token string) (NodeView, error) {
 	}
 	if w.MediaRoutes != nil {
 		v.MediaRoutes, v.MediaRoutesKnown = *w.MediaRoutes, true
+	}
+	if w.Lease != nil && w.Lease.Held {
+		v.LeaseClass, v.LeaseReason, v.LeaseRemainingSec = strings.ToLower(w.Lease.Class), w.Lease.Reason, w.Lease.RemainingSec
 	}
 	if w.Saturation != nil {
 		v.SaturationKnown = true

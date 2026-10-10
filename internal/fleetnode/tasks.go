@@ -480,7 +480,7 @@ func buildRequestIn(ctx context.Context, v *mediaView, loopbackListener bool, ta
 	}
 	switch taskType {
 	case "image-gen":
-		return buildImageGen(payload)
+		return buildImageGen(cfg, payload)
 	case "video-gen":
 		return buildVideoGen(payload)
 	case "animate":
@@ -533,7 +533,7 @@ func buildRequestIn(ctx context.Context, v *mediaView, loopbackListener bool, ta
 // callers on this box.
 
 // buildImageGen mirrors mcpserver.handleGenerateImage, minus `out` (see above).
-func buildImageGen(payload json.RawMessage) (core.Request, func(), error) {
+func buildImageGen(cfg config.Config, payload json.RawMessage) (core.Request, func(), error) {
 	noop := func() {}
 	var in struct {
 		Prompt   string `json:"prompt"`
@@ -547,6 +547,13 @@ func buildImageGen(payload json.RawMessage) (core.Request, func(), error) {
 		// unknown one with the list it serves (health's image_families).
 		Family      string `json:"family"`
 		Transparent bool   `json:"transparent"`
+		// Refine is a pointer so absent differs from false, as in the MCP handler: only an EXPLICIT false
+		// reaches the pipeline (the opt-in prompt refiner's one request-level knob). It used to be dropped here,
+		// which is why a delegator could not send refine=false (health's refine_honoured says this node carries it).
+		Refine *bool `json:"refine"`
+		// RecipeDigest is the digest of the recipe the delegator matched for Family (health's image_recipes):
+		// the dispatch is admitted only if this node's family still digests to it (image_recipe.go).
+		RecipeDigest string `json:"recipe_digest"`
 	}
 	if err := json.Unmarshal(payload, &in); err != nil {
 		return core.Request{}, noop, fmt.Errorf("image-gen payload: %w", err)
@@ -554,7 +561,15 @@ func buildImageGen(payload json.RawMessage) (core.Request, func(), error) {
 	if in.Prompt == "" {
 		return core.Request{}, noop, fmt.Errorf("image-gen payload: prompt required")
 	}
+	if in.RecipeDigest != "" {
+		if err := checkRecipe(cfg, in.Family, in.RecipeDigest); err != nil {
+			return core.Request{}, noop, err
+		}
+	}
 	params := map[string]any{}
+	if in.Refine != nil && !*in.Refine {
+		params["refine"] = false
+	}
 	if in.Family != "" {
 		params["family"] = in.Family
 	}

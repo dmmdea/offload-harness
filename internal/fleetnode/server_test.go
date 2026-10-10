@@ -143,6 +143,9 @@ func pollJob(t *testing.T, s *Server, id string, want JobState) map[string]any {
 // always present — 0 is a meaningful value for each, so omitempty would make an
 // unlimited limit indistinguishable from a node too old to publish one. The
 // values here are the built-in defaults an unconfigured node resolves.
+// refine_honoured is the ADR 0082 key: a node that serves image-gen says its task
+// carries `refine`; this fixture's default binding names no checkpoint, so it
+// publishes no image_recipes row (nothing to identify).
 func TestHealthGoldenShape(t *testing.T) {
 	opts := &Options{
 		NodeID:   "node-a",
@@ -180,6 +183,7 @@ func TestHealthGoldenShape(t *testing.T) {
 			{"route":"generate_audio:voice:endpoint","engine":"openai-compatible-tts","state":"NOT CONFIGURED"}
 		],
 		"model_footprints": [{"model_family":"sdxl","quant":"bf16","task_type":"image-gen","vram_peak_gb":9.6}],
+		"refine_honoured": true,
 		"queue_depth": 0,
 		"jobs_queued": 0, "jobs_running": 0,
 		"max_concurrent_jobs": 4, "max_queue_depth": 8,
