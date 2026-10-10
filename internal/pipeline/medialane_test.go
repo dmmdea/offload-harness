@@ -258,9 +258,12 @@ func laneCases() []laneCase {
 				}
 			},
 			params: ownPlace(nil, 0)},
-		// The pinned and the allocated plans do not queue by arrival time: every other caller in line claims the card
-		// before the call looks (gpualloc.QueuedClaims), a call with a place included, so a later waiter IS in its way.
-		{name: "pinned: a registered waiter that arrived after the call's own place is still in its way", spec: pinned, grants: false, mustSeeBusy: true,
+		// The real WAIT-0 admission of a pinned or an allocated plan does not queue by arrival time: every other caller in
+		// line claims the card before the call looks (gpualloc.QueuedClaims), a call with a place included, so a later
+		// waiter refuses the try (grants: false). The prober does NOT call it busy any more for a call that resumes a
+		// place (S2): such a call is a ticket's, and the question is whether it would be served before the caller behind
+		// it, which it is: the lease queue serves a resumed place by arrival time once it waits.
+		{name: "pinned: a registered waiter that arrived after the call's own place is behind it", spec: pinned, grants: false, mustSeeBusy: false,
 			setup:  func(t *testing.T, f *admitFixture) { seatWaiterAt(t, f.root, "transcribe a.wav", A) },
 			params: ownPlace([]string{A}, 5*time.Second)},
 		{name: "the call's own place in line is not in its way", spec: pinned, grants: true,
@@ -527,36 +530,6 @@ func TestMediaLaneFreeCountsOnlyTheCallersThatHoldTheCallBack(t *testing.T) {
 	}
 	if got := since(time.Minute); got != 2 {
 		t.Errorf("callers that arrived before the call's place are ahead of it: %d ahead", got)
-	}
-}
-
-// Arrival order decides only on the whole-node plan. A call that resumes its place, with a waiter that joined the line
-// AFTER that place: on a plan that names its cards the waiter claims them before the call looks, so it is in the way and the
-// verdict counts it; on the whole-node plan, which queues by arrival time, it is behind the call and nothing is in the way.
-func TestMediaLaneFreeOrdersByArrivalOnlyOnTheWholeNodePlan(t *testing.T) {
-	A := leaseIDOf(admitUUIDA)
-	for _, tc := range []struct {
-		name      string
-		spec      admitSpec
-		devices   []string
-		wantFree  bool
-		wantAhead int
-	}{
-		{"a pin names its cards", admitSpec{order: admitOrder, mutate: pinA}, []string{A}, false, 1},
-		{"the whole node", admitSpec{order: admitOrder, mutate: pinSeveral}, nil, true, 0},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			f := newAdmitFixtureWith(t, tc.spec)
-			seatWaiterAt(t, f.root, "transcribe a.wav", tc.devices...)
-			tok, err := f.m.LeaveToken(gpulease.ClassMedia, gpulease.Options{Reason: "image-gen", Devices: tc.devices}, time.Now().Add(-5*time.Second))
-			if err != nil {
-				t.Fatal(err)
-			}
-			v := f.p.MediaLaneFree(context.Background(), laneReq(map[string]any{"waiter_token": tok.ID}))
-			if v.Free != tc.wantFree || v.Ahead != tc.wantAhead {
-				t.Errorf("free=%v ahead=%d (%s), want free=%v ahead=%d", v.Free, v.Ahead, v.Why, tc.wantFree, tc.wantAhead)
-			}
-		})
 	}
 }
 
