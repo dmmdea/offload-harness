@@ -92,9 +92,11 @@ export function restampLaunchOwner(dir, key, leaseEpoch) {
  * stampLaunchFamily: record whose weights a kept instance may hold. ComfyUI keeps the models it loaded
  * in host memory between prompts (its RAM-pressure cache evicts only under pressure of its own, which
  * on a 128 GiB box is far above where this harness needs it), so an instance that served one family and
- * is then handed a job of another holds BOTH until something tells it to let go. The incident of
- * 2026-10-09 was one keyed instance at 57 GiB private: a qwen-image model cached from an earlier lease
- * next to the krea2 model of the current one. `lastFamily` is that something's memory: the signature
+ * is then handed a job of another probably holds BOTH until something tells it to let go (reconstructed
+ * from the code and the surviving logs, not observed). The incident of 2026-10-09 was one keyed instance
+ * at 57 GiB private; the probable cause is a qwen-image model cached from an earlier lease next to the
+ * krea2 model of the current one (comfy-family.mjs says why that cannot be confirmed and what it does
+ * not explain). `lastFamily` is that something's memory: the signature
  * (comfy-family.mjs) of the job whose weights the instance may still hold; "" clears it (the instance
  * was just told to free everything, so it holds nothing).
  *

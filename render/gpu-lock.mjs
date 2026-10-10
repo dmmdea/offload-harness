@@ -477,7 +477,8 @@ export async function withGpuSlot(opts, fn) {
     tailLog = tailComfyLog,
     // family: the weights signature of this runner's job (comfy-family.mjs familySignature). When given,
     // the launch marker of the instance remembers it, and a kept instance whose marker names ANOTHER
-    // family is freed before the first job, so an instance never holds two families' weights.
+    // family is freed before the first job, so it does not carry the previous family's weights into this
+    // one's. A free that fails leaves the old family recorded, and the next runner tries again.
     family = "",
     comfyDir = COMFY_DIR,
     settleFamily = settleInstanceFamily,

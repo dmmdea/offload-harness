@@ -80,7 +80,7 @@ export async function settleInstanceFamily({
   const previous = typeof marker.lastFamily === "string" ? marker.lastFamily : "";
   let freed = false;
   if (previous && previous !== family) {
-    log(`COMFY-FAMILY-FREE: the instance${key ? ` '${key}'` : ""} on ${api} last ran ${previous}; this job is ${family}. Freeing its models before the first job, so it never holds two families' weights`);
+    log(`COMFY-FAMILY-FREE: the instance${key ? ` '${key}'` : ""} on ${api} last ran ${previous}; this job is ${family}. Freeing its models before the first job of a different family`);
     freed = (await free(api)) !== false;
     if (!freed) {
       log(`COMFY-FAMILY-WARN: the free before the first job did not succeed, so the instance may still hold ${previous}'s weights next to ${family}'s; it stays recorded as ${previous} and the next runner will try again`);
