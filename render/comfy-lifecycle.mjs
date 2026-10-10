@@ -200,9 +200,12 @@ export const LIST_GPUS_TIMEOUT_MS = 10000;
 export const LIST_GPUS_RETRY_TIMEOUT_MS = 30000;
 
 // listGpusWith counts the cards `nvidia-smi -L` lists (0 = no usable listing). Only a listing that
-// TIMED OUT is retried: a failure that came back at once fails the same way again. spawnSync is
-// injectable for tests.
-export function listGpusWith(spawnSync = nodeSpawnSync) {
+// TIMED OUT is retried: a failure that came back at once fails the same way again. A listing that
+// ran out of time is never silent, because "0" then leaves ComfyUI on card 0 only and the failure
+// shows up much later, as a graph that fails validation for a box that has the cards: the retry is
+// said, and so is the second timeout together with what the launch does instead. spawnSync and warn
+// are injectable for tests.
+export function listGpusWith(spawnSync = nodeSpawnSync, warn = (line) => console.error(line)) {
   const ask = (timeout) => {
     try {
       return spawnSync("nvidia-smi", ["-L"], { encoding: "utf8", timeout });
@@ -210,8 +213,15 @@ export function listGpusWith(spawnSync = nodeSpawnSync) {
       return null;
     }
   };
+  const ranOut = (r) => Boolean(r && r.error && r.error.code === "ETIMEDOUT");
   let r = ask(LIST_GPUS_TIMEOUT_MS);
-  if (r && r.error && r.error.code === "ETIMEDOUT") r = ask(LIST_GPUS_RETRY_TIMEOUT_MS);
+  if (ranOut(r)) {
+    warn(`COMFY-GPU-LIST-WARN: nvidia-smi -L did not answer within ${LIST_GPUS_TIMEOUT_MS / 1000} s; asking once more under ${LIST_GPUS_RETRY_TIMEOUT_MS / 1000} s`);
+    r = ask(LIST_GPUS_RETRY_TIMEOUT_MS);
+    if (ranOut(r)) {
+      warn(`COMFY-GPU-LIST-WARN: nvidia-smi -L did not answer within ${LIST_GPUS_RETRY_TIMEOUT_MS / 1000} s either, so the card count is unknown and ComfyUI keeps the Windows default of card 0 only: a graph that names another card (a pool's donor) will fail validation. Setting CUDA_VISIBLE_DEVICES skips the listing`);
+    }
+  }
   if (!r || r.status !== 0 || !r.stdout) return 0;
   return (r.stdout.match(/GPU [0-9]+/g) || []).length;
 }
