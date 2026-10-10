@@ -24,8 +24,8 @@ Versioning: [SemVer](https://semver.org/).
   that mints one.
 - **The helper heartbeats it.** New `render/lease-progress.mjs`: `pollOutputs` (the poll loop every ComfyUI runner shares)
   appends one JSON line to the file, at most every 30 s, when ComfyUI answered a poll and still lists the prompt (in
-  `/history`, or running or pending in `/queue`); `comfy-generate --batch` writes one before and after every picture, and
-  `withGpuSlot` one when the slot is ready. A helper under a lease whose record declares a progress file but that the wrapper
+  `/history`, or running or pending in `/queue`); `comfy-generate --batch` writes one before and after every picture,
+  `withGpuSlot` one when the slot is ready, and `comfy-run-graph` one per manifest model while it provisions them. A helper under a lease whose record declares a progress file but that the wrapper
   did not start (a detached hold with `--progress-file`) finds it in the record. The lines are appended (the file may be a
   log the caller keeps), never throw, and do nothing when no file is declared.
 - **A hung or lost render is still labelled.** A hung helper stops polling, a ComfyUI that stops answering is an unanswered
@@ -36,7 +36,7 @@ Versioning: [SemVer](https://semver.org/).
   and `/system_stats` stays healthy (ComfyUI has no polled step counter; its progress events are websocket-only and the
   render tree is dependency-free): that stays bounded by `COMFY_WAIT_SEC` and the lease's maximum total, not by a stall
   verdict.
-- **Tests.** `render/lease-progress.test.mjs` (18; the end-to-end one runs the real `comfy-generate.mjs --batch` and the
+- **Tests.** `render/lease-progress.test.mjs` (20; the end-to-end one runs the real `comfy-generate.mjs --batch` and the
   `comfy-render.mjs` child it spawns against a fake ComfyUI) and `gpu_progress_test.go` (the decision, the helper list
   pinned to what `render/` contains, the real wrapper renewing a beating helper's lease, labelling a silent one, and keeping
   a caller's own file). 20 mutations of the shipped code were each caught.

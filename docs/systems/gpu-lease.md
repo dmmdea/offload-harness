@@ -1032,7 +1032,9 @@ another node and never poll here) gets nothing declared: a contract that nothing
 **The helper heartbeats it**: the path travels to the command in `GPU_LEASE_PROGRESS_FILE`, and
 `render/lease-progress.mjs` appends one JSON line (`{"at":...,"pid":...,"detail":"ComfyUI is running prompt 1a2b3c4d (62s into the wait)"}`)
 at most every 30 s, from the poll loop every ComfyUI runner shares (`pollOutputs` in `render/comfy-submit.mjs`), between
-the pictures of a `--batch`, and when the GPU slot is ready. A helper under a lease whose record declares a progress
+the pictures of a `--batch`, when the GPU slot is ready, and (`comfy-run-graph` with a manifest) once per model while it
+provisions them, before ComfyUI exists to poll; one download or hash longer than the stall window still reads
+`held-stalled` until the next beat. A helper under a lease whose record declares a progress
 file but that was not started by the wrapper form (a `gpu reserve --detach --progress-file ...`) finds the file in the
 lease record through `GPU_LEASE_DIR`/`GPU_LEASE_EPOCH`. **What a beat is evidence of**: a poll that ComfyUI answered, for
 a prompt ComfyUI itself still lists (in `/history`, or running or pending in `/queue`). A hung helper stops polling; a

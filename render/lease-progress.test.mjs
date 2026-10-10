@@ -19,6 +19,7 @@ import {
 import { readEpochRecord, readLease, withGpuSlot } from "./gpu-lock.mjs";
 import { pollOutputs } from "./comfy-submit.mjs";
 import { runBatchJobs } from "./batch-jobs.mjs";
+import { satisfyModels } from "./manifest-satisfy.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const GENERATE = join(HERE, "comfy-generate.mjs");
@@ -314,6 +315,34 @@ test("runBatchJobs tells its progress callback before and after every job, and a
   });
   assert.deepEqual(summary, { total: 2, ok: 1, failed: 1 });
   assert.deepEqual(told, ["batch job 1/2 starting", "batch job 1/2 done", "batch job 2/2 starting", "batch job 2/2 failed"]);
+});
+
+test("satisfyModels tells its beat which model it is on, before ComfyUI exists to poll (run-graph with a manifest)", async () => {
+  const told = [];
+  const deps = {
+    comfyDir: "C:/ComfyUI", beat: (line) => told.push(line),
+    exists: (p) => p.endsWith("have.safetensors"), sentinelOk: () => true, writeSentinel: () => {},
+    download: async () => {}, sha256: async () => "H",
+  };
+  const r = await satisfyModels([
+    { path: "models/have.safetensors", sha256: "H" },
+    { path: "models/need.safetensors", source_url: "u", sha256: "H" },
+  ], deps);
+  assert.equal(r.ok, true);
+  assert.deepEqual(told, [
+    "manifest: checking models/have.safetensors",
+    "manifest: checking models/need.safetensors",
+    "manifest: downloading models/need.safetensors",
+    "manifest: downloaded models/need.safetensors",
+  ]);
+  // No beat given: unchanged behaviour.
+  const bare = await satisfyModels([{ path: "models/need.safetensors", source_url: "u", sha256: "H" }], { ...deps, beat: undefined, exists: () => false, sentinelOk: () => false });
+  assert.equal(bare.ok, true);
+});
+
+test("comfy-run-graph hands the satisfier a beat that writes to the lease's progress file", () => {
+  const src = readFileSync(join(HERE, "comfy-run-graph.mjs"), "utf8");
+  assert.match(src, /beat: \(line\) => leaseBeat\(line, \{ force: true \}\)/);
 });
 
 // ---------------------------------------------------------------------------------------
