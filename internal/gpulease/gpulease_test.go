@@ -936,3 +936,51 @@ func TestInfoFromLeavesAnUnsetDeclaredEndZero(t *testing.T) {
 		t.Fatalf("a declared end changed: got %s, want %s", got, end)
 	}
 }
+
+// The class is a label on a RESERVATION, so a sentence that names the holder says "lease". The
+// bare word ("GPU held by text") read as a text seat holding the card, and two sessions argued
+// over who held it on 2026-10-07 (F9). The refusal a waiter reads and the line `gpu reserve`
+// prints on queueing carry the same phrase `gpu status` leads with.
+func TestClassLeasePhraseNamesALeaseOfAClass(t *testing.T) {
+	for _, tc := range []struct {
+		class Class
+		want  string
+	}{
+		{ClassText, "a text-class lease"},
+		{ClassMedia, "a media-class lease"},
+		{Class("audio"), "an audio-class lease"}, // a class that starts with a vowel
+		{Class(""), "a lease"},                   // a claim still in progress carries no class
+		{Class("  "), "a lease"},
+	} {
+		if got := tc.class.LeasePhrase(); got != tc.want {
+			t.Errorf("%q.LeasePhrase() = %q, want %q", string(tc.class), got, tc.want)
+		}
+	}
+}
+
+func TestErrHeldNamesALeaseOfAClassNotABareClass(t *testing.T) {
+	for _, class := range []Class{ClassText, ClassMedia} {
+		m, _ := newTestManager(t)
+		l, err := m.TryAcquire(class, Options{Reason: "bench", TTL: time.Hour})
+		if err != nil {
+			t.Fatalf("%s: acquire: %v", class, err)
+		}
+		_, err = m.TryAcquire(class, Options{Reason: "second"})
+		var held *ErrHeld
+		if !errors.As(err, &held) {
+			t.Fatalf("%s: second acquire = %v, want *ErrHeld", class, err)
+		}
+		msg := err.Error()
+		if want := "GPU held by a " + string(class) + "-class lease (pid "; !strings.Contains(msg, want) {
+			t.Errorf("%s: refusal %q must say %q", class, msg, want)
+		}
+		if bare := "held by " + string(class) + " ("; strings.Contains(msg, bare) {
+			t.Errorf("%s: refusal %q still names the bare class (%q): that reads as a seat holding the card", class, msg, bare)
+		}
+		_ = l.Release()
+	}
+	// A claim in progress carries no class: still a lease, not "held by  (pid 0".
+	if msg := (&ErrHeld{Info: Info{Held: true, Reason: "claim in progress"}}).Error(); !strings.Contains(msg, "GPU held by a lease (pid 0") {
+		t.Errorf("a classless holder reads %q, want \"GPU held by a lease (pid 0\"", msg)
+	}
+}

@@ -261,7 +261,9 @@ func gpuLeaseVerdictLine(view map[string]any) string {
 		b.WriteString(" — " + oneLine(note, clip))
 	}
 	if held, _ := view["held"].(bool); held {
-		fmt.Fprintf(&b, "; held by pid %v (%v", view["pid"], view["class"])
+		// The same phrase `gpu status` leads with (gpulease.Class.LeasePhrase): the bare class read as a seat.
+		class, _ := view["class"].(string)
+		fmt.Fprintf(&b, "; held by %s (pid %v", gpulease.Class(class).LeasePhrase(), view["pid"])
 		if ex, _ := view["exclusive"].(bool); ex {
 			b.WriteString(", exclusive")
 		}

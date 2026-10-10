@@ -86,6 +86,14 @@ local-offload gpu release --epoch <N>
 that should be visible, not inferred from silence. When held it ends with the one line that
 matters: how to **queue behind it** (`queue_with` in the JSON).
 
+The headline names what holds the card: **a lease of a class**, `GPU: held by a text-class lease  pid 792210  epoch 7  for
+3m0s  expires 4:05PM  (exclusive: text loads wait or route elsewhere)` (`a media-class lease` for a render). The bare class
+word it used to print (`held by text`) read as a text *seat* holding the card, and on 2026-10-07 two sessions argued over who
+held it while the holder was a bench's reservation (the class only says what the reservation is for). One phrase
+(`gpulease.Class.LeasePhrase`) is shared by every surface that names a holder: this headline, the refusal and the
+`queued behind` line of `gpu reserve` (`GPU held by a text-class lease (pid …, held 3m0s, reason "…")`) and the brief
+`gpu_lease_verdict` line of `offload_status` (`held by a text-class lease (pid 792210, exclusive, 180s): <reason>`).
+
 ### A held card is a place in line, not a refusal (0.115.2)
 
 `gpu reserve` **queues** behind a current holder — `--wait` (default **8h**) is how long it

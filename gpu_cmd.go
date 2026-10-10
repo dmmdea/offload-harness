@@ -243,8 +243,10 @@ func runGPUStatus(args []string) error {
 	if info.Command != "" {
 		excl += "\n  running: " + info.Command
 	}
+	// "held by a text-class lease", never "held by text": the bare class read as a text SEAT holding
+	// the card (2026-10-07, a bench's reservation taken for a model). The class labels a reservation.
 	fmt.Printf("GPU: held by %s  pid %d  epoch %d  for %s  expires %s%s\n  reason: %s\n  queue behind it: %s\n",
-		info.Class, info.PID, info.Epoch, info.Age.Round(time.Second),
+		info.Class.LeasePhrase(), info.PID, info.Epoch, info.Age.Round(time.Second),
 		info.ExpiresAt.Format(time.Kitchen), excl, info.Reason, queueHint)
 	if len(info.Devices) > 0 {
 		fmt.Printf("  cards: %s (a card-scoped lease; other cards are not fenced by it)\n", strings.Join(info.Devices, ", "))

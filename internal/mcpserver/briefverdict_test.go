@@ -259,3 +259,22 @@ func TestBriefDoesNotClipTheStandingOfAnEscalatedLease(t *testing.T) {
 		}
 	}
 }
+
+// The brief line names the holder as a LEASE of a class, the phrase `gpu status` leads with: the
+// bare class ("held by pid 7 (media, ...") read as a model, and a bench's reservation was taken
+// for a text seat (F9, 2026-10-07). Exclusive and draining stay on the line.
+func TestBriefVerdictLineNamesALeaseOfAClass(t *testing.T) {
+	line := gpuLeaseVerdictLine(map[string]any{
+		"verdict": "held-idle", "held": true, "pid": 7, "class": "media", "exclusive": true, "draining": true, "age_s": 10, "reason": "film",
+	})
+	if want := "; held by a media-class lease (pid 7, exclusive, draining, 10s): film"; !strings.Contains(line, want) {
+		t.Errorf("the brief line must say %q:\n%s", want, line)
+	}
+	if strings.Contains(line, "held by pid") {
+		t.Errorf("the brief line names the pid before the lease, which reads as a process, not a reservation:\n%s", line)
+	}
+	text := gpuLeaseVerdictLine(map[string]any{"verdict": "held-working", "held": true, "pid": 9, "class": "text", "age_s": 3})
+	if want := "; held by a text-class lease (pid 9, 3s)"; !strings.Contains(text, want) {
+		t.Errorf("a text lease reads %q:\n%s", want, text)
+	}
+}

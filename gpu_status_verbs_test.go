@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -300,5 +302,51 @@ func TestPrintCardTableNotesAnUndeclaredComfyOrderAndTheDeclaredOne(t *testing.T
 	}
 	if text := captureStdout(t, func() { printCardTable(nil, "", errors.New("boom"), nil) }); !strings.Contains(text, "card table: none") || !strings.Contains(text, "boom") {
 		t.Errorf("an error is said, not hidden:\n%s", text)
+	}
+}
+
+// The headline says what holds the card: a LEASE of a class. "GPU: held by text  pid 792210"
+// read as a text SEAT holding the card, and two sessions argued over who held it (F9,
+// 2026-10-07); the holder was a bench's reservation. Both classes say "lease", and an
+// exclusive one keeps saying so.
+func TestGPUStatusHeadlineNamesALeaseOfAClassNotABareClass(t *testing.T) {
+	for _, tc := range []struct {
+		class     gpulease.Class
+		exclusive bool
+		want      string
+	}{
+		{gpulease.ClassText, true, "a text-class lease"},
+		{gpulease.ClassText, false, "a text-class lease"},
+		{gpulease.ClassMedia, false, "a media-class lease"},
+	} {
+		name := string(tc.class)
+		if tc.exclusive {
+			name += "-exclusive"
+		}
+		t.Run(name, func(t *testing.T) {
+			cfg, m := leaseFixture(t)
+			useQuietStatus(t, nil, errors.New("nvidia-smi not found"))
+			l, err := m.TryAcquire(tc.class, gpulease.Options{Reason: "bench", TTL: time.Hour, Exclusive: tc.exclusive})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = l.Release() }()
+
+			text := captureStdout(t, func() {
+				if err := runGPUStatus([]string{"--config", cfg}); err != nil {
+					t.Fatal(err)
+				}
+			})
+			head := "GPU: held by " + tc.want + "  pid " + strconv.Itoa(os.Getpid()) + "  epoch "
+			if !strings.Contains(text, head) {
+				t.Errorf("the headline must lead with %q:\n%s", head, text)
+			}
+			if bare := "held by " + string(tc.class) + " "; strings.Contains(text, bare) {
+				t.Errorf("the headline names the bare class (%q), which reads as a seat holding the card:\n%s", bare, text)
+			}
+			if excl := strings.Contains(text, "(exclusive: text loads wait or route elsewhere)"); excl != (tc.exclusive && tc.class == gpulease.ClassText) {
+				t.Errorf("an exclusive text lease keeps saying so (and a plain one does not): exclusive line present = %v\n%s", excl, text)
+			}
+		})
 	}
 }
