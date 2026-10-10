@@ -446,11 +446,17 @@ func Assess(v View) (verdict, note string) {
 }
 
 // foreignLoadTail names, by what each is, the busy cards that are NOT the holder's work. It is said only for
-// a card the card table marks as displaying (displayCards: the same rule the allocator and the node's
-// placement figure read, never a card's index) and, apart from that, for a card outside the cards this
-// lease holds. The sentence used to call whichever card was busiest "the display card": a lease on card 2
-// over a busy card 0 (a seat, another lease, another process) read "that is the display card" for a card
-// that drives no screen (F38).
+// a card that is driving a display right now (displayCards: the card table's display_active, the rule the
+// verdict uses to keep a desktop's load out of the holder's work, never a card's index) and, apart from that,
+// for a card outside the cards this lease holds. The sentence used to call whichever card was busiest "the
+// display card": a lease on card 2 over a busy card 0 (a seat, another lease, another process) read "that is
+// the display card" for a card that drives no screen (F38).
+//
+// This is NOT the placement rule. The allocator and `gpu cards` also mark a card "display" when a monitor is
+// attached to it and its screen is asleep (display_attached, gpuprobe.ScreenCardUUIDs), because they must
+// keep new work off the desktop's card; this attribution reads display_active alone (screenCards, below, is
+// the wider rule). A busy card of that kind outside the lease therefore reads "outside this lease's cards"
+// here while `gpu cards` marks it display: both are true, and neither says the load is the holder's.
 func foreignLoadTail(v View, display map[string]bool, leaseCards map[string]bool) string {
 	var disp, outside *GPU
 	for i := range v.GPUs {
@@ -493,7 +499,7 @@ func helperTail(h *Holder) string {
 	if !ok {
 		return ""
 	}
-	return "; it is running " + helper + ", whose cards are quiet between two pictures too, and it declared no progress contract that would say which this is (a `gpu reserve` that wraps a render helper declares one itself)"
+	return "; it is running " + helper + ", whose cards are quiet between two pictures too, and it declared no progress contract that would say which this is (a `gpu reserve` that runs a render helper declares one itself)"
 }
 
 // describeCard is the one phrasing for "which card, how busy".
