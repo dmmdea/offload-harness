@@ -25,7 +25,11 @@ other on a single shared card.
 | `internal/gpulease/effective.go`, `infer.go`, `proctree*.go` | **what a lease holds, as a seat reads it (plan P4)**: `Info.EffectiveDevices/Touches/For`, `ResolvePins`, the legacy-lease evidence rule (`Scoper`, applied only to a record an older binary wrote: `Info.Legacy`; the `seen.<epoch>` sidecar, the scope ledger) and the process-tree reader it runs on |
 | `internal/gpulease/term.go` | **terms (plan P9)**: `PlanTerm` (what a requested window comes to), the installed limits (`SetDefaultTerms`), and `AdvanceTerm`, the one place a term ends in a renewal or the expired label (see [Terms](#terms-a-window-is-a-term-and-a-term-ends-in-a-renewal-or-a-label-adr-0070)) |
 | `internal/gpulease/audit.go`, `procimages_*.go` | the **reader audit** behind `gpu doctor`: finds harness binaries, Node readers and running images, and writes the reader-audit marker |
-| `internal/gpuprobe/cards.go`, `hostram.go` | the **card table** (UUID-keyed, index spaces side by side) and the host-RAM headroom term |
+| `internal/gpuprobe/cards.go` | the **card table** (UUID-keyed, index spaces side by side) |
+| `internal/gpuprobe/hostmemory.go`, `hostram*.go` | the **host memory reading** (physical, available, commit used and limit; Windows `GlobalMemoryStatusEx`, Linux `/proc/meminfo`), `HostRAMAdmits` (the ONE admission rule), the OK / NEAR / OVER verdict and the `UseHostMemoryReader` test seam |
+| `internal/gpulease/hostram.go`, `procmem*.go` | the **host-RAM term of the grant**: `Options.HostRAMGiB`, `ErrHostRAM`, the not-yet-loaded part of granted leases (private memory of the holder's descendants), `Manager.HostRAMPending` |
+| `internal/hostneed` | **how much host RAM a lease declares**: `--ram`, else the model files of a recognised render helper call that do not fit the card, else the media class default (see "Host RAM") |
+| `internal/gpucards/hostview.go` | the `host_memory` block and verdict that `gpu status` and `offload_status` render |
 | `internal/gpucards` | the per-card view (`Rows`, `LeaseRows`, `QueueRows`, `Table`, `Section`) that `gpu status`, `gpu cards` and `offload_status` brief all render |
 | `internal/gpulease/proc*.go` | per-platform liveness and process-start identity, exported so no consumer keeps a second copy |
 | `internal/pipeline/pipeline.go` | takes the `media` lease around **every** generation call site (image ComfyUI + sdcpp, inpaint, image batch, run-graph, video, audio) and threads `GPU_LEASE_*` to the runner; inherits an ambient lease instead of re-acquiring; owns the in-process slot (`mediaSlot`) that arbitrates jobs sharing one inherited lease |
@@ -46,7 +50,7 @@ other on a single shared card.
 | `gpu_drain.go` (`leaseScope`, `maintainSeatScoped`, `unloadModelsFor`), `render/gpu-lock.mjs` (`parseUnloadModels`) | plan P5: the drain and unload take only the seats on the leased cards, and the render lane unloads the list the wrapper exports (`GPU_LEASE_UNLOAD_MODELS`) |
 | `internal/modelaffinity/seatscope.go`, `scoper.go`, `seatyield.go` | the gate's per-seat reading (`SetSeatPins`, `ScopeToPins`, `SeatLease`, `CardsHeld`), the production wiring of the evidence rule (`InspectLease` for the load gate, which remembers what it sees; `PeekLease`, `ScopeInfo`, `ScopeFunc`, `ScopeLeases` for inspectors, which write nothing), and the seat race rule (`YieldIfFenced`) |
 | `internal/mcpserver` | registers the session this MCP server serves in the session registry at start and removes it at exit |
-| `internal/config` | `state_dir`, `gpu_lock_path`, `gpu_card_scoped_leases`, `gpu_legacy_scope_inference`, `gpu_comfy_order`, `gpu_host_ram_headroom_gib`, `gpu_orphan_grace_min`, `gpu_max_term_min`, `gpu_max_total_min`; `ModelPins` (a model's device pins, read from the layers) |
+| `internal/config` | `state_dir`, `gpu_lock_path`, `gpu_card_scoped_leases`, `gpu_legacy_scope_inference`, `gpu_comfy_order`, `gpu_host_ram_headroom_gib` (default 8), `gpu_orphan_grace_min`, `gpu_max_term_min`, `gpu_max_total_min`; `ModelPins` (a model's device pins, read from the layers) |
 
 ## Why it exists
 
@@ -512,11 +516,13 @@ after a transient `nvidia-smi` failure carries no `display_attached` and marks i
 them until the next good reading), not claimed (a
 whole-node lease claims every card), not under a foreign compute process
 (`foreign-busy`, reported and skipped, never killed), its free VRAM fits `--vram` (GiB per card), and the **host** has the
-RAM `--ram` declares plus `gpu_host_ram_headroom_gib` (default 4) free. Among allocatable cards the order is: no resident
+host's memory admits what `--ram` declares: the same rule the grant applies (`gpuprobe.HostRAMAdmits`: committed memory +
+the need + the not-yet-loaded part of granted leases must stay under physical RAM less `gpu_host_ram_headroom_gib`, default
+8; see "Host RAM" below), here as an advisory pre-filter. Among allocatable cards the order is: no resident
 seat first, then the cheapest eviction (the footprint of the configured layer seats loaded on it), then the lowest id. An
-unreadable host-RAM counter refuses only when a RAM need was declared. On Windows (WDDM) nvidia-smi lists no per-process
-rows for compute apps, so `foreign-busy` is Linux-only evidence today; the measured N-instance host RAM that tunes the
-headroom term is a P13 acceptance item.
+unreadable host-memory reading refuses only when a RAM need was declared, and a need no state of the host admits ends the
+request at once. On Windows (WDDM) nvidia-smi lists no per-process
+rows for compute apps, so `foreign-busy` is Linux-only evidence today.
 
 **The display card, once the operator is away.** `operator_presence` is one key with two readers: the display layer's
 `presence` guard ([composite-tier.md](composite-tier.md)) and this allocator. Set to `auto` (the console locked, or idle
@@ -599,7 +605,10 @@ lease epoch (the default instance, an instance launched outside a lease) is neve
 instances only while its lease is still its own (`Lease.Check`): one that was released from outside or reclaimed
 after a suspend is a straggler, leaves them running and says which (the same rule `Lease.Release` follows for the
 claim: a fenced-out holder leaks rather than destroys), and `comfyinst` re-reads the marker at the moment of the
-stop and leaves an instance whose marker changed hands during its proof. A lease that ends because its holder died
+stop and leaves an instance whose marker changed hands during its proof. The proof is asked for three times of eight
+seconds (it was once of three): an instance in the middle of a long prompt answers late, and a holder that read one slow
+answer as "not shown to be ours" left the instance running with its models; if it still does not answer, the report says
+how many attempts were made and that the next runner on that card frees the instance before its first job. A lease that ends because its holder died
 (no release runs) leaves its instance (a kept instance is detached, so it survives the holder). The next lease on
 that card REUSES it, it does not launch over it: a live keyed instance whose marker proves it is ours is reused, and
 reusing an instance that was a lease's takes it over (`restampLaunchOwner`: only the marker's `leaseEpoch` changes,
@@ -1062,6 +1071,128 @@ lease like the wrapper does and carries on holding. `--release-at-expiry` (on `g
 holder) restores the old ending; it is refused for the wrapper form, which has no deadline to release at. `--for` stays
 required with `--detach`: it is the term the lease is judged by. A hold that nothing ever releases stays held until it is
 released or taken over, which is the point.
+
+## Host RAM: a lease declares what it will load, and paging is never an acceptable state (2026-10-09)
+
+**The rule (AGENTS.md).** The cards do the inference; RAM is overflow only. Spill is allowed only while it is
+bounded, and it never makes the box unstable. **Paging, and committing more memory than the box has, is never
+an acceptable state.** A card has a hard edge (the driver refuses the allocation); host RAM does not (the OS pages and
+every other process stalls), so the harness refuses *before* the grant, on the number that includes what the granted
+jobs are about to load.
+
+**The incident.** On the reference 3-card Windows box (127.7 GiB physical), two ComfyUI media lanes that stream bf16
+weights the card cannot hold ran at once under two card-scoped media leases (`gpu reserve --devices <card> --class media --
+node render/comfy-generate.mjs --batch ... --family krea2 --ckpt ...`). A Krea 2 bf16 UNet (24.5 GiB) and its Qwen3-VL-4B
+text encoder (8.3 GiB) on a 16 GiB card, and a Qwen-Image 2512 bf16 stream of about 38 GiB. Committed memory reached
+162.9 GiB against a 187.7 GiB limit, the system-managed page file grew from 60 to 68 GiB, and free RAM bottomed at 3.2 GiB.
+The non-media baseline on that box was about 56 GiB (desktop apps, agent CLIs, browsers, WSL, kernel pools). One keyed
+per-card ComfyUI instance held 57 GiB private because it still cached a Qwen-Image model from an earlier lease next to the
+Krea 2 model of the current one; POSTing ComfyUI's own `/free` released 52 GiB of it between prompts without killing a job.
+
+**Why the harness did not stop it.** The card allocator's host term (`allocator.go`) applied only to `--cards`; an explicit
+`--devices` lease, which is what every owner wrapper takes, bypassed it. It read **free** RAM, which says nothing about jobs
+that have been granted and have not loaded yet (both lanes were granted while RAM was still free). And nothing read
+**committed** memory at all.
+
+### What a lease declares
+
+A lease carries `Options.HostRAMGiB`, stamped on its record as `host_ram_gib` (additive and omitted when 0: an older
+binary ignores it, and a record without it declares nothing). Where the number comes from, in order
+(`internal/hostneed`; `TestAKrea2Bf16CallOn16GiBIsTheUnetPlusTheTextEncoder`, `TestAnExplicitRamBeatsTheEstimate`,
+`TestTextAndSeatLeasesDefaultToZero`):
+
+| source | what it is |
+|---|---|
+| `gpu reserve --ram <GiB>` | the operator's word. **0 is allowed** and means "needs no host RAM". A negative value is refused. |
+| a recognised render helper call | `render/comfy-generate.mjs`, `comfy-render`, `comfy-edit`, `comfy-inpaint` or `comfy-video`, wherever it sits in the wrapped command (either path-separator style). The UNet or checkpoint and the text-encoder files the family loads are sized through the configured ComfyUI model paths (`mediacap.ModelRoots`, the same tables `doctor` reads) and counted **in full when together they do not fit the largest card of the lease** less the runner's `--reserve-vram`; a set that fits declares 0. A krea2 bf16 call on a 16 GiB card is 24.48 + 8.27 = 32.75 GiB. `run-graph` is not recognised: what an arbitrary graph loads is unknown. |
+| a file whose size cannot be read | the documented per-family size (`hostneed.familySizes`: the files the reference box binds, rounded up; Qwen-Image 2512 bf16 is the incident's ~38 GiB stream). A family with neither has no estimate and takes the class default. |
+| the **media class default** | for a media lease with no `--ram` and no recognised call: the largest estimate over the render families **this box binds** (`imagegen_*`, `gen_edit_*`, `videogen_*`, named families), so a 32 GiB node is not held to a 128 GiB node's numbers; 0 when nothing is bound. It is never clamped to fit the box: a default that cannot be admitted is refused with the reason and `--ram` as the way out. |
+| a text or seat lease | 0. |
+
+**Why the full file size and not the overflow.** ComfyUI's dynamic VRAM stages the whole file in host memory ("Model Krea2
+prepared for dynamic VRAM loading. 24449MB Staged", the encoder "8463MB Staged" in the incident lane's own console log),
+and its RAM-pressure cache keeps it there between prompts. The same principle says a set that fits the card streams nothing
+from RAM, so it declares nothing. The media admission (`internal/pipeline`) asks the same estimate per route, from the
+binding it is about to render with, once the card it will run on is known: image, edit, inpaint, video (by the family that
+will render), animate and music read their files; `run-graph`, sd.cpp and the iGPU engines take the class default; upscale
+and voice declare nothing, their weights sit on the card.
+
+### The admission rule
+
+Every grant path applies **one** rule (`gpuprobe.HostRAMAdmits`), with committed memory read from the OS
+(`GlobalMemoryStatusEx`: total minus available page file on Windows; `/proc/meminfo` `Committed_AS` on Linux):
+
+```
+projected = committed memory now + the lease's declared need + the not-yet-loaded part of leases already granted
+admit iff projected <= physical RAM - gpu_host_ram_headroom_gib        (default 8 GiB)
+```
+
+* **Everywhere the cards are granted.** A card-scoped grant (`--devices`, `--cards`, the media admission) checks inside
+  `grantDevicesLocked`, under the epoch lock, after the cards are shown free and before the epoch is issued; the record that
+  carries the declared need is written in the same critical section, so two grants on different cards cannot both read the
+  same headroom: the second one's check sees the first one's record
+  (`TestConcurrentGrantsOnDifferentCardsCannotBothTakeTheLastHeadroom`: exactly one of four racers fits, 25 rounds). A
+  whole-node grant checks in `TryAcquire` before its epoch is bumped, so a refusal burns none; it needs no lock because a
+  whole-node lease conflicts with every other live lease, so nothing else is live to account for. The detached holder
+  receives the parent's resolved number as `--ram` and declares exactly that. The card allocator applies the same function
+  before it picks cards, advisory (it never refuses what the grant would admit: the media admission passes it the need
+  against the largest card); the grant is the authority.
+* **The not-yet-loaded part.** A granted lease's declared need minus what the processes below its holder hold privately
+  right now (`PrivateUsage` through `K32GetProcessMemoryInfo` on Windows, `RssAnon` + `VmSwap` on Linux), never below zero.
+  Leases that share a holder pid are pooled (the pipeline holds one lease per card in one server process, and all their
+  runners are below it), the holder's own memory is not subtracted (a long-lived server's memory is not the job's), and a
+  holder whose memory cannot be read counts as holding nothing, so its whole declared need is pending
+  (`TestTheNotYetLoadedPartOfAGrantedLeaseCounts`, `TestPendingPoolsLeasesByHolder`). Without this term the second lane
+  reads 20 GiB committed, sees room, and both go: the incident, replayed.
+* **A need of 0 is never read against the host.** The lease adds no memory, so a box that is already over is not made to
+  wait for it, and the counters are not even read (`TestALeaseThatDeclaresNoNeedIsNeverReadAgainstTheHost`).
+* **A shortage waits in the same line.** The request stays a registered waiter, in the same FIFO, in the same place,
+  its record marked `waiting_for: host-ram` and carrying what it declared (`gpu status` shows both), and a request behind it
+  for the same cards stays behind it. The line `waiting for host RAM: needs 33.4 GiB, committed 96.4 of 127.7 GiB physical
+  (+12.0 GiB still to load by leases already running), 8.0 GiB headroom` is printed once per request, never per poll.
+  `--wait 0` refuses with that text, the flag that waits, and `--ram` as the way out; the media admission answers the same
+  words as a queued place in line (resumable doors) or a busy defer (the rest).
+* **A need no state of the box admits is refused at once.** If the need exceeds physical RAM less the headroom, waiting
+  cannot help: the request ends with the text (it names `--ram` and `gpu_host_ram_headroom_gib`), and the pipeline classes it
+  `gpu_lease_unavailable` (a configuration fault), not `gpu_busy`. `--ram 0` is the escape hatch the operator owns.
+* **Unreadable memory.** On a platform that has a reader (Windows, Linux) a lease that declares a need waits until the host
+  can be read, the way the other guards fail closed. On a platform with no reader the rule cannot judge and admits.
+
+**Known limits, stated so they are not discovered.** Linux's `Committed_AS` counts mappings a process reserved and never
+touched (CUDA and large `mmap`s do), so it reads high there: the safe direction for a guard whose failure is paging. A
+detached lease (`--detach`) has no command of its own below its holder, so its whole declared need counts as still to
+load for as long as it is held (a budget reservation). A kept ComfyUI whose runner has exited is reparented away from the
+holder's tree, so its loaded weights count both as pending and in the commit charge until that lease ends: that
+over-refuses, it never under-refuses. A pipeline job running under its parent's ambient lease (`acquireInherited`,
+`GPU_LEASE_DEVICES`) gets no admission of its own: the parent's declaration covers it. A process outside every lease can
+still push the box over; the guard sees it in the commit charge and holds new declaring leases back, but it does not stop or
+evict anything.
+
+### What `gpu status` and `offload_status` show
+
+`gpu status` (text and `--json`) and `offload_status`'s `gpu_lease` block carry `host_memory`: `physical_gib`,
+`available_gib`, `commit_used_gib`, `commit_limit_gib`, `headroom_gib`, `declared_live_gib` (the sum of the host RAM the
+live leases declared), `pending_gib` (the part of it still to load), `admits_up_to_gib` and one **verdict**, built by
+`gpucards.HostView` for all three surfaces so they cannot disagree:
+
+| host verdict | meaning |
+|---|---|
+| `OK` | committed memory is more than the headroom below physical RAM |
+| `NEAR` | committed memory is within the headroom of physical RAM: the next declaring lease waits |
+| `OVER` | committed memory is **above** physical RAM: the box is paging. New leases that declare host RAM wait until commit is back under physical less the headroom; end a lease or stop a kept ComfyUI instance to free it |
+| `unknown` | the reading could not be taken |
+
+The brief verdict line of `offload_status` leads with `HOST RAM OVER (committed 162.9 of 127.7 GiB physical: the box is
+paging)` in capitals, ahead of the lease verdict word, because `free` at the head of that line reads as "the box has room";
+NEAR trails it. The lease rows show what each lease declared, and the queue rows what a waiter waits for
+(`TestGPUStatusJSONCarriesTheHostBlockAndAnOverVerdict`, `TestStatusNamesOverLoudlyOnTheBriefLine`).
+
+### An instance never holds two families' weights
+
+The paging incident's 57 GiB instance is closed at its source in `render/comfy-family.mjs`: the launch marker remembers
+whose weights a kept instance may still hold, a runner that finds another family there frees it before its first job, and
+the end-of-run `/free` is awaited, retried and loud; see "A kept instance (`--keep-comfy`)" in
+[media-generation.md](media-generation.md).
 
 ## The fleet reads leases per card (plan P7)
 

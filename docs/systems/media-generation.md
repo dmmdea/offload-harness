@@ -924,6 +924,25 @@ runner. A kept instance that never answers is still killed, since a half-started
   holds at most three 5 MB archives plus the run in progress. The live file of a run is not truncated: the
   instance lives no longer than its lease, which bounds it. `tailComfyLog` (the lines a failure message
   carries) reads only the last 256 KB of the file, so a long-lived instance's log is never read whole.
+- **It never holds two families' weights (2026-10-09, `render/comfy-family.mjs`).** ComfyUI keeps the models it loaded in
+  host memory between prompts ("Using RAM pressure cache"; "Model Krea2 prepared for dynamic VRAM loading. 24449MB Staged" in
+  the instance's own log) and drops them only when told to; an instance that served one family and is handed a job of
+  another holds both. The incident's instance held 57 GiB private that way (a Qwen-Image model cached next to a Krea 2 one;
+  POST `/free` released 52 GiB between prompts without killing a job). The ways it came about, read from the code and the
+  instances' logs: a runner killed before its `finally` (the pipeline's timeout kills the whole tree) never sent its
+  end-of-run `/free`, and the post-run `/free` of `gpugen` waited one second; the holder's proof before stopping a kept
+  instance at release (`GET /system_stats`, three seconds) failed on an instance busy with a 550-second prompt, so it
+  outlived its lease; the next lease reused it and loaded its family beside the first; and `run-graph` left whatever its
+  graph loaded on an instance that was already up. What closes it: every ComfyUI runner passes a **family signature**
+  (the family plus the weights file, so a Q5 GGUF and a bf16 safetensors of one family count as two) to `withGpuSlot`;
+  the instance's launch marker records it (`lastFamily`); a runner that finds a kept instance whose marker names ANOTHER
+  family frees it, awaited, before its first job (`COMFY-FAMILY-FREE`), and the same family keeps its warm weights; the
+  end-of-run `/free` (both flags, always, kept or not) is awaited, retried once and loud when an instance that is
+  listening did not acknowledge it (`COMFY-FREE-WARN`), and clears the recorded family; a free that did not succeed
+  before the first job leaves the old family recorded so the next runner tries again; `run-graph` frees an instance it
+  ran on only when the harness launched it (live pid, the marker's exact argv); the holder's proof is asked three times of
+  eight seconds; `gpugen`'s post-run `/free` waits five seconds and says a failure that reached an instance. Tests run
+  against a fake ComfyUI that records the order of `/free` and the job (`render/comfy-hoard.test.mjs`).
 - **Who stops it.** A kept instance lives no longer than the GPU lease it was launched under; its marker
   records that lease epoch (`leaseEpoch`). The **holder of the lease stops it on release**: `gpu reserve`
   when its wrapped command ends, and the pipeline when its media lease is released
@@ -958,6 +977,17 @@ is given:
 | `run-graph` with ONE declared device | that card | a lease on it | its instance, pinned by uuid |
 | `run-graph` with several declared devices, or none, sd.cpp, voice | the whole node | the whole node | the default instance (none for sd.cpp and voice) |
 | any call on a host that does not lease cards, or whose card table cannot be read | the whole node | the whole node | exactly as before this change |
+
+**Host RAM.** A generation call also declares the host RAM its weights will stream from (the UNet or checkpoint and the
+text encoder of its binding, counted in full when together they do not fit the card it runs on; 0 when they fit; the media
+class default for an arbitrary graph, sd.cpp and the iGPU engines; nothing for upscale and voice) and the grant admits it
+against committed memory plus what the leases already granted have yet to load, under physical RAM less
+`gpu_host_ram_headroom_gib` (default 8): see "Host RAM" in [gpu-lease.md](gpu-lease.md). Two Krea 2 bf16 lanes, each
+24.48 + 8.27 GiB, on a host that fits one: the first is admitted, the second finds idle cards and waits in the same line with
+`waiting for host RAM: needs 32.8 GiB, committed X of Y GiB physical, Z GiB headroom` (a queued place in line for a door that
+can resume, a busy defer for the rest) until the first is done
+(`TestTheSecondLaneWaitsWhileTheFirstIsStillLoading`). A need no state of the host admits is `gpu_lease_unavailable`, naming
+`--ram` and the headroom key.
 
 **The allocator and the display card.** An unpinned single-card call takes the allocator's card
 (`gpu_lease`, "The allocator"): not claimed by a live lease, not promised to a caller waiting in line
