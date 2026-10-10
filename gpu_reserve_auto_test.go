@@ -29,7 +29,7 @@ func fourCardTable() []gpuprobe.Card {
 func TestPickAutoCardsQueuesOnTheFreeCardPlusTheFirstClaimedOne(t *testing.T) {
 	cards := fourCardTable()
 	build := func() (gpulease.AllocInput, error) {
-		return gpulease.AllocInput{Cards: cards, HostFreeOK: true, HostFreeGiB: 64,
+		return gpulease.AllocInput{Cards: cards, HostMemOK: true, HostMem: roomyTestHost,
 			Claimed: map[string]bool{"gpu-aaaa0000-x": true, "gpu-bbbb0000-x": true, "gpu-cccc0000-x": true}}, nil
 	}
 	var out bytes.Buffer
@@ -50,7 +50,7 @@ func TestPickAutoCardsQueuesWhenOneCardIsFreeAndOneIsClaimed(t *testing.T) {
 		{Index: 2, UUID: "GPU-cccc0000-x", Name: "T", TotalGiB: 16, FreeGiB: 16},
 	}, "")
 	build := func() (gpulease.AllocInput, error) {
-		return gpulease.AllocInput{Cards: cards, HostFreeOK: true, HostFreeGiB: 64, Claimed: map[string]bool{"gpu-cccc0000-x": true}}, nil
+		return gpulease.AllocInput{Cards: cards, HostMemOK: true, HostMem: roomyTestHost, Claimed: map[string]bool{"gpu-cccc0000-x": true}}, nil
 	}
 	var out bytes.Buffer
 	ids, free, err := pickAutoCards(devicePlan{Auto: true, Min: 2, Max: 2}, 10*time.Second, build, &out, func(time.Duration) { t.Error("must queue, not poll") }, time.Now)
@@ -70,7 +70,7 @@ func TestPickAutoCardsPollsWhenTheShortfallIsNotALiveLease(t *testing.T) {
 		{Index: 1, UUID: "GPU-bbbb0000-x", Name: "T", TotalGiB: 16, FreeGiB: 16, DisplayActive: true},
 	}, "")
 	build := func() (gpulease.AllocInput, error) {
-		return gpulease.AllocInput{Cards: cards, HostFreeOK: true, HostFreeGiB: 64}, nil
+		return gpulease.AllocInput{Cards: cards, HostMemOK: true, HostMem: roomyTestHost}, nil
 	}
 	clock := time.Unix(1000, 0)
 	polls := 0
@@ -137,7 +137,7 @@ func TestAcquireAutoCardsRetriesWhenACompetitorWinsTheRace(t *testing.T) {
 func raceTheFirstTwoAllocations() {
 	var arrived atomic.Int32
 	gate := make(chan struct{})
-	hostFreeRAMFn = func() (float64, bool) {
+	hostMemoryFn = func() (gpuprobe.HostMemory, bool) {
 		if n := arrived.Add(1); n <= 2 {
 			if n == 2 {
 				close(gate)
@@ -147,7 +147,7 @@ func raceTheFirstTwoAllocations() {
 			case <-time.After(10 * time.Second):
 			}
 		}
-		return 64, true
+		return roomyTestHost, true
 	}
 }
 
@@ -241,7 +241,7 @@ func TestAcquireAutoCardsBoundsItsRetries(t *testing.T) {
 	builds := 0
 	stale := func() (gpulease.AllocInput, error) {
 		builds++
-		return gpulease.AllocInput{Cards: cards, HostFreeOK: true, HostFreeGiB: 64}, nil // never shows the holder's claim
+		return gpulease.AllocInput{Cards: cards, HostMemOK: true, HostMem: roomyTestHost}, nil // never shows the holder's claim
 	}
 	var out bytes.Buffer
 	_, err = acquireAutoCards(m, gpulease.ClassMedia, gpulease.Options{Reason: "ours", TTL: time.Hour}, devicePlan{Auto: true, Min: 1, Max: 1, Source: "--cards 1"},

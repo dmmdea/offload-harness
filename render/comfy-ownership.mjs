@@ -88,6 +88,33 @@ export function restampLaunchOwner(dir, key, leaseEpoch) {
   try { renameSync(tmp, path); } catch (e) { try { rmSync(tmp, { force: true }); } catch {} throw e; }
   return { changed: true, previous };
 }
+/**
+ * stampLaunchFamily: record whose weights a kept instance may hold. ComfyUI keeps the models it loaded
+ * in host memory between prompts (its RAM-pressure cache evicts only under pressure of its own, which
+ * on a 128 GiB box is far above where this harness needs it), so an instance that served one family and
+ * is then handed a job of another holds BOTH until something tells it to let go. The incident of
+ * 2026-10-09 was one keyed instance at 57 GiB private: a qwen-image model cached from an earlier lease
+ * next to the krea2 model of the current one. `lastFamily` is that something's memory: the signature
+ * (comfy-family.mjs) of the job whose weights the instance may still hold; "" clears it (the instance
+ * was just told to free everything, so it holds nothing).
+ *
+ * Only the family changes: the pid, argv, profile and lease epoch are what prove the instance is ours.
+ * It stamps only an instance that has a marker (one this harness launched); a foreign ComfyUI has none,
+ * and gets none. Written beside, then renamed over, so a reader never sees half a marker. Throws on an
+ * I/O failure; the caller says so and carries on.
+ */
+export function stampLaunchFamily(dir, key, family) {
+  const rec = readLaunchOwner(dir, key);
+  if (!rec || (key && rec.key !== key)) return { changed: false, why: "no marker" };
+  const previous = typeof rec.lastFamily === "string" ? rec.lastFamily : "";
+  const next = String(family ?? "");
+  if (previous === next) return { changed: false, previous };
+  if (next) rec.lastFamily = next; else delete rec.lastFamily;
+  const path = lp(dir, key), tmp = path + ".tmp";
+  writeFileSync(tmp, JSON.stringify(rec));
+  try { renameSync(tmp, path); } catch (e) { try { rmSync(tmp, { force: true }); } catch {} throw e; }
+  return { changed: true, previous };
+}
 export function clearLaunchOwner(dir, key = "") {
   try { rmSync(lp(dir, key), { force: true }); } catch {}
 }

@@ -201,9 +201,9 @@ func newAdmitFixtureWith(t *testing.T, spec admitSpec) *admitFixture {
 	f.stops = &admitStops{m: m}
 	f.p = &Pipeline{cfg: cfg}
 	f.p.alloc = gpualloc.Deps{
-		Cards:       func(context.Context, config.Config) ([]gpuprobe.Card, string, error) { return f.cards, "", nil },
-		HostFreeRAM: func() (float64, bool) { return 64, true },
-		Presence:    func(config.Config) (bool, bool) { return true, f.away },
+		Cards:      func(context.Context, config.Config) ([]gpuprobe.Card, string, error) { return f.cards, "", nil },
+		HostMemory: func() (gpuprobe.HostMemory, bool) { return roomyHostMem, true },
+		Presence:   func(config.Config) (bool, bool) { return true, f.away },
 	}
 	f.p.instanceAPI = func(c gpuprobe.Card) string { return fmt.Sprintf("%s/card%d", f.frees.srv.URL, c.NvidiaIndex) }
 	f.p.stopKept = func(_ context.Context, dir string, epoch uint64) []comfyinst.Outcome {

@@ -3,6 +3,9 @@ package gpugen
 import (
 	"context"
 	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -411,5 +414,29 @@ func TestGenerateEnvExactInheritsNothing(t *testing.T) {
 	}
 	if inherited := run(false); inherited["GPUGEN_PROBE_SECRET"] != "must-not-leak" {
 		t.Fatal("the default path must keep inheriting the parent environment")
+	}
+}
+
+// The post-run /free waits for a ComfyUI that is in the middle of a step: one second was too short for
+// an instance that answers late, and a /free that never arrived left the instance holding its models
+// for the next family to be loaded beside (render/comfy-family.mjs). A server that takes a second and a
+// half to answer must still be told.
+func TestFreeComfyVRAMWaitsLongerThanOneSecondForABusyInstance(t *testing.T) {
+	var mu sync.Mutex
+	var bodies []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(1500 * time.Millisecond)
+		b, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		bodies = append(bodies, r.Method+" "+r.URL.Path+" "+string(b))
+		mu.Unlock()
+		_, _ = w.Write([]byte("{}"))
+	}))
+	defer srv.Close()
+	freeComfyVRAM(srv.URL)
+	mu.Lock()
+	defer mu.Unlock()
+	if len(bodies) != 1 || bodies[0] != `POST /free {"unload_models":true,"free_memory":true}` {
+		t.Fatalf("the busy instance was never told to free (a one-second timeout gives up before it answers): %v", bodies)
 	}
 }

@@ -233,7 +233,7 @@ var generateIGPU = gpugen.Generate
 // timeout, no ComfyUI /free) and returns the produced file, or the defer result.
 func (p *Pipeline) runIGPU(ctx context.Context, req core.Request, meta *core.Meta, start time.Time, r igpuRun) (string, *core.Result) {
 	// an iGPU engine has no ComfyUI instance to bind to a card: the whole node, as the sdcpp image lane
-	grant, lerr := p.acquireMediaLease(ctx, r.leaseReason, r.timeout, p.gpuWait(), wholeNeed(paramStr(req.Params, "waiter_token")).resumableBy(req))
+	grant, lerr := p.acquireMediaLease(ctx, r.leaseReason, r.timeout, p.gpuWait(), wholeNeed(paramStr(req.Params, "waiter_token")).declaresRAM(classDefaultRAM(p.cfg)).resumableBy(req))
 	if lerr != nil {
 		res := p.deferForLease(lerr, req.Task, *meta, len(req.Input), start)
 		return "", &res

@@ -36,6 +36,7 @@ import { writeFileSync, unlinkSync, readFileSync, appendFileSync, mkdirSync } fr
 import { join, dirname } from "node:path";
 import { writeFileAtomic } from "./atomic-out.mjs";
 import { withGpuSlot } from "./gpu-lock.mjs";
+import { familySignature } from "./comfy-family.mjs";
 import { COMFY_DIR, comfyApi } from "./comfy-lifecycle.mjs";
 import { stageInput as stageToInput } from "./comfy-input.mjs";
 import { buildSDXLInpaint } from "./wf-sdxl-inpaint.mjs";
@@ -57,6 +58,8 @@ for (let i = 0; i < argv.length; i++) {
 const [out, imagePath, maskPath, prompt] = pos;
 const API = comfyApi(flags.api);
 const FAMILY = flags.family || "sdxl";
+// The weights this run loads, for the instance's launch marker (comfy-family.mjs).
+const INPAINT_FAMILY = familySignature("inpaint-" + FAMILY, FAMILY === "qwen" ? flags.unet : (flags.ckpt || process.env.COMFY_CKPT));
 if (FAMILY !== "sdxl" && FAMILY !== "qwen") {
   console.error(`error: --family must be sdxl or qwen, got ${FAMILY}`);
   process.exit(2);
@@ -213,7 +216,8 @@ if (flags.batch) {
   writeFileSync(resultsPath, "");
   const MAX_CONSEC_FAIL = Number(process.env.COMFY_BATCH_MAX_CONSEC_FAIL || 3);
   withGpuSlot(
-    { noLock: flags["no-lock"], keepComfy: flags["keep-comfy"], comfyManaged: true, api: API, reserveVram: flags["reserve-vram"], warm: true },
+    { noLock: flags["no-lock"], keepComfy: flags["keep-comfy"], comfyManaged: true, api: API, reserveVram: flags["reserve-vram"], warm: true,
+      family: INPAINT_FAMILY },
     async () => {
       let okCount = 0, failCount = 0, consecFail = 0, firstErr = null;
       for (let i = 0; i < jobs.length; i++) {
@@ -266,7 +270,8 @@ if (flags.batch) {
     seed: Number(flags.seed != null ? flags.seed : Math.floor(Math.random() * 1e15)),
   };
   withGpuSlot(
-    { noLock: flags["no-lock"], keepComfy: flags["keep-comfy"], comfyManaged: true, api: API, reserveVram: flags["reserve-vram"] },
+    { noLock: flags["no-lock"], keepComfy: flags["keep-comfy"], comfyManaged: true, api: API, reserveVram: flags["reserve-vram"],
+      family: INPAINT_FAMILY },
     () => renderJob(job),
   ).catch((e) => { console.error("INPAINT FAILED:", e.message); process.exit(1); });
 }

@@ -23,7 +23,7 @@ func fourCards() []gpuprobe.Card {
 // use three is unacceptable).
 func TestAllocatorWaitableListsFreeCardsBeforeClaimedOnes(t *testing.T) {
 	in := AllocInput{
-		Cards: fourCards(), Min: 2, Max: 2, HostFreeOK: true, HostFreeGiB: 64,
+		Cards: fourCards(), Min: 2, Max: 2, HostMemOK: true, HostMem: roomyHost,
 		Claimed: map[string]bool{"gpu-aaaa0000": true, "gpu-bbbb0000": true, "gpu-cccc0000": true},
 	}
 	_, err := Allocate(in)
@@ -48,7 +48,7 @@ func TestAllocatorWaitableExcludesCardsThatWaitingDoesNotFree(t *testing.T) {
 	cards[1].Display = true
 	cards[3].VRAMFreeGiB = 1
 	in := AllocInput{
-		Cards: cards, Min: 2, Max: 2, HostFreeOK: true, HostFreeGiB: 64, FootprintGiB: 8,
+		Cards: cards, Min: 2, Max: 2, HostMemOK: true, HostMem: roomyHost, FootprintGiB: 8,
 		Claimed:     map[string]bool{"gpu-aaaa0000": true},
 		Quarantined: map[string]bool{"gpu-cccc0000": true},
 	}

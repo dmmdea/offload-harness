@@ -227,6 +227,12 @@ var standingLead = map[string]string{
 // line, so the line always ends in how to join it.
 func gpuLeaseVerdictLine(view map[string]any) string {
 	var b strings.Builder
+	// A host that is paging leads the line, whatever the cards are doing: "free" at the head of it
+	// would read as "the box has room" while committed memory is above physical RAM.
+	hostLead, hostLoud, hostTail := hostMemoryClauses(view)
+	if hostLoud {
+		b.WriteString(hostLead + "; ")
+	}
 	verdict, _ := view["verdict"].(string)
 	// A lease that is orphaned, overdue or stalled leads with that word in capitals
 	// (plan P8): "held" read as "busy, queue behind it" for the twenty hours an abandoned
@@ -290,9 +296,41 @@ func gpuLeaseVerdictLine(view map[string]any) string {
 			fmt.Fprintf(&b, "; a human-authorised session frees it with: %s (not in this build yet: until it ships, ask whoever owns it or the operator)", gpulease.TakeoverCommand(epoch))
 		}
 	}
+	if hostTail != "" {
+		b.WriteString("; " + hostTail)
+	}
 	cmd, _, _ := strings.Cut(gpulease.QueueHint, "  (")
 	b.WriteString("; queue with: " + cmd)
 	return b.String()
+}
+
+// hostMemoryView builds the host_memory block of the gpu_lease view (m is nil when the lease
+// directory could not be opened: then nothing is declared and nothing is pending).
+func hostMemoryView(cfg config.Config, m *gpulease.Manager) map[string]any {
+	var declared, pending float64
+	if m != nil {
+		declared, pending = gpulease.DeclaredHostRAMGiB(m.Leases()), m.HostRAMPending()
+	}
+	mem, ok := gpuprobe.ReadHostMemory()
+	return gpucards.NewHostView(mem, ok, cfg.GPUHostRAMHeadroom(), declared, pending).Map()
+}
+
+// hostMemoryClauses reads the verdict back out of the view's host_memory block and words it for the
+// one-line brief: OVER is the loud lead, NEAR a tail, OK and unknown say nothing there (the block
+// carries them). It reads the block and not the host again, so the line and the block cannot disagree.
+func hostMemoryClauses(view map[string]any) (lead string, loud bool, tail string) {
+	hm, _ := view["host_memory"].(map[string]any)
+	if hm == nil {
+		return "", false, ""
+	}
+	num := func(k string) float64 { f, _ := hm[k].(float64); return f }
+	switch hm["verdict"] {
+	case string(gpuprobe.HostOver):
+		return fmt.Sprintf("HOST RAM OVER (committed %.1f of %.1f GiB physical: the box is paging)", num("commit_used_gib"), num("physical_gib")), true, ""
+	case string(gpuprobe.HostNear):
+		return "", false, fmt.Sprintf("host RAM NEAR the limit (committed %.1f of %.1f GiB physical, %.1f GiB headroom)", num("commit_used_gib"), num("physical_gib"), num("headroom_gib"))
+	}
+	return "", false, ""
 }
 
 // localVerdictLine renders this box's serving state as one line: is the local

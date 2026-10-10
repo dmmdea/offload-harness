@@ -30,6 +30,7 @@
     "exclusive",
     "expires_at",
     "held",
+    "host_memory",
     "note",
     "origin",
     "owner",

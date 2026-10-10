@@ -69,6 +69,12 @@ type Deps struct {
 	QuietPolls int
 	// HTTPTimeout bounds each request to the instance.
 	HTTPTimeout time.Duration
+	// ProofAttempts is how many times the launch fingerprint (GET /system_stats) is asked for before
+	// the instance is reported as not answering; 0 = once. An instance in the middle of a prompt
+	// (the qwen-image prompts in the field run 550 to 585 seconds) answers late, and a lease holder
+	// that read one slow answer as "not shown to be ours" left the instance running with its models
+	// for the next lease's family to be loaded beside (render/comfy-family.mjs says how that ends).
+	ProofAttempts int
 	// Client is the HTTP client; nil means one with HTTPTimeout.
 	Client *http.Client
 }
@@ -76,12 +82,15 @@ type Deps struct {
 // RealDeps is the production wiring.
 func RealDeps() Deps {
 	return Deps{
-		Alive:       gpulease.PIDAlive,
-		Start:       processStartUnixMs,
-		Kill:        terminate,
-		Sleep:       time.Sleep,
-		QuietPolls:  20, // 20 x 500 ms
-		HTTPTimeout: 3 * time.Second,
+		Alive:      gpulease.PIDAlive,
+		Start:      processStartUnixMs,
+		Kill:       terminate,
+		Sleep:      time.Sleep,
+		QuietPolls: 20, // 20 x 500 ms
+		// Three tries of eight seconds, not one of three: the proof is the price of being allowed to
+		// stop a busy instance, and the busy ones are the ones holding the memory.
+		HTTPTimeout:   8 * time.Second,
+		ProofAttempts: 3,
 	}
 }
 
@@ -151,10 +160,10 @@ func stopOne(ctx context.Context, path string, m Marker, epoch uint64, d Deps) O
 	if client == nil {
 		client = &http.Client{Timeout: d.HTTPTimeout}
 	}
-	argv, err := systemArgv(ctx, client, base)
+	argv, err := d.proveArgv(ctx, client, base)
 	switch {
 	case err != nil:
-		o.Why = fmt.Sprintf("the instance on port %d did not answer /system_stats (%v), so it is not shown to be the harness's own; left running", m.Port, err)
+		o.Why = fmt.Sprintf("the instance on port %d did not answer /system_stats after %d attempt(s) (%v), so it is not shown to be the harness's own; left running, and the next runner on its card frees it before its first job", m.Port, max(d.ProofAttempts, 1), err)
 		return o
 	case !sameArgv(m.Args, argv):
 		o.Why = fmt.Sprintf("the argv the instance on port %d reports differs from the launch marker's, so it is not shown to be the harness's own; left running", m.Port)
@@ -190,6 +199,23 @@ func stopOne(ctx context.Context, path string, m Marker, epoch uint64, d Deps) O
 	}
 	o.Why = fmt.Sprintf("stop sent to process %d but it is still running", m.PID)
 	return o
+}
+
+// proveArgv asks for the instance's launch fingerprint, up to ProofAttempts times, pausing between
+// tries. Only a failure to ANSWER is retried: an answer that differs from the marker's is final.
+func (d Deps) proveArgv(ctx context.Context, c *http.Client, base string) ([]string, error) {
+	attempts := max(d.ProofAttempts, 1)
+	var argv []string
+	var err error
+	for i := 0; i < attempts; i++ {
+		if argv, err = systemArgv(ctx, c, base); err == nil || ctx.Err() != nil {
+			return argv, err
+		}
+		if i+1 < attempts && d.Sleep != nil {
+			d.Sleep(time.Second)
+		}
+	}
+	return argv, err
 }
 
 // stillThisLeases re-reads the marker at path and says why the instance is no longer shown to be

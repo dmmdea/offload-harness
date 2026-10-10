@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/dmmdea/offload-harness/internal/gpuprobe"
 	"github.com/dmmdea/offload-harness/internal/gpuprobe/smitest"
 )
 
@@ -35,7 +36,11 @@ func TestMain(m *testing.M) {
 	if err := os.Setenv("LOCAL_OFFLOAD_STATE_DIR", filepath.Clean(dir)); err != nil {
 		os.Stderr.WriteString("pipeline tests: could not set LOCAL_OFFLOAD_STATE_DIR: " + err.Error() + "\n")
 	}
+	// A media admission reads the host's memory before it grants a lease (internal/gpulease/hostram.go):
+	// the suite runs against a known host, not against whatever the machine running it is doing.
+	restoreHost := gpuprobe.UseHostMemoryReader(func() (gpuprobe.HostMemory, bool) { return roomyHostMem, true })
 	code := m.Run()
+	restoreHost()
 	_ = os.RemoveAll(dir)
 	os.Exit(code)
 }

@@ -13,24 +13,48 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
+	"github.com/dmmdea/offload-harness/internal/gpuprobe"
 )
 
-func lowHostRAM(f *admitFixture) {
-	f.p.alloc.HostFreeRAM = func() (float64, bool) { return 0.25, true }
+// krea2Binding makes the fixture's image route a bf16 Krea 2 binding. Its weights cannot fit a 16 GiB
+// card, so a call declares the documented 24.5 GiB UNet + 8.3 GiB text encoder (the fixture has no
+// model tree to read the real sizes from): the incident's lane.
+func krea2Binding(c *config.Config) {
+	c.ImageGenFamily, c.ImageGenCkpt = "krea2", "krea2_turbo_bf16.safetensors"
+}
+
+// shortHost is a 100 GiB host with the given memory committed.
+func shortHost(commit float64) gpuprobe.HostMemory {
+	return gpuprobe.HostMemory{PhysicalGiB: 100, AvailableGiB: 5, CommitUsedGiB: commit, CommitLimitGiB: 160}
+}
+
+// useHost puts both doors onto one host reading: the allocator's pre-filter (the pipeline's own
+// reader) and the lease grant (the process-wide one). They apply one rule and must see one host.
+func (f *admitFixture) useHost(t *testing.T, read func() gpuprobe.HostMemory) {
+	t.Helper()
+	f.p.alloc.HostMemory = func() (gpuprobe.HostMemory, bool) { return read(), true }
+	restore := gpuprobe.UseHostMemoryReader(func() (gpuprobe.HostMemory, bool) { return read(), true })
+	t.Cleanup(restore)
+}
+
+// lowHostRAM leaves 5 GiB of the host uncommitted: nothing the incident's lane declares fits.
+func lowHostRAM(t *testing.T, f *admitFixture) {
+	f.useHost(t, func() gpuprobe.HostMemory { return shortHost(95) })
 }
 
 // A resumable call gets a place in line on the cards that would qualify but for the host, with the
 // reason, and resumes it when the host recovers.
 func TestACallThatFoundNoCardForWantOfHostRAMGetsAPlaceInLine(t *testing.T) {
-	f := newAdmitFixtureWith(t, admitSpec{order: admitOrder})
-	lowHostRAM(f)
+	f := newAdmitFixtureWith(t, admitSpec{order: admitOrder, mutate: krea2Binding})
+	lowHostRAM(t, f)
 
 	res := f.await(f.image(nil))
 	if res.Meta.ErrClass != "gpu_queued" || res.DeferClass != core.DeferClassCapacity {
 		t.Fatalf("want a queued capacity defer, got ok=%v class=%q/%q: %s", res.OK, res.Meta.ErrClass, res.DeferClass, res.Reason)
 	}
-	if !strings.Contains(res.Reason, "host free RAM") {
+	if !strings.Contains(res.Reason, "waiting for host RAM: needs 32.8 GiB, committed 95.0 of 100.0 GiB physical, 8.0 GiB headroom") {
 		t.Errorf("the reason must say what is short: %q", res.Reason)
 	}
 	var p struct {
@@ -50,7 +74,7 @@ func TestACallThatFoundNoCardForWantOfHostRAMGetsAPlaceInLine(t *testing.T) {
 	}
 
 	// The host recovers; the same request with the token is served and the place is spent.
-	f.p.alloc.HostFreeRAM = func() (float64, bool) { return 64, true }
+	f.useHost(t, func() gpuprobe.HostMemory { return roomyHostMem })
 	f.letRunnersGo()
 	again := f.await(f.image(map[string]any{"waiter_token": p.Token}))
 	if !again.OK {
@@ -63,11 +87,11 @@ func TestACallThatFoundNoCardForWantOfHostRAMGetsAPlaceInLine(t *testing.T) {
 
 // A door that cannot resume keeps the plain defer, with the reason, and leaves nothing behind.
 func TestAHostRAMShortageForADoorThatCannotResumeIsABusyDeferWithTheReason(t *testing.T) {
-	f := newAdmitFixtureWith(t, admitSpec{order: admitOrder})
-	lowHostRAM(f)
+	f := newAdmitFixtureWith(t, admitSpec{order: admitOrder, mutate: krea2Binding})
+	lowHostRAM(t, f)
 	res := f.await(f.plain(core.TaskGenerateImage, "a calm ocean at dawn", map[string]any{"out": filepath.Join(f.dir, "plain.png")}))
 	busyNotQueued(t, res)
-	if !strings.Contains(res.Reason, "host free RAM") {
+	if !strings.Contains(res.Reason, "waiting for host RAM") {
 		t.Errorf("the reason must say what is short: %q", res.Reason)
 	}
 	if n := len(f.m.Tokens()); n != 0 {

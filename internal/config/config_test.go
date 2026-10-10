@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/dmmdea/offload-harness/internal/gpulease"
 	"github.com/dmmdea/offload-harness/internal/modelaffinity"
 )
 
@@ -157,6 +158,7 @@ func TestLegacyScopeInferenceDefaultsOffAndLoadArmsIt(t *testing.T) {
 // The card allocator's two inputs (plan P3). Both default to "not set": the order is
 // then unknown (never guessed) and the host-RAM headroom is the built-in default.
 func TestCardAllocatorKeysDefaultAndLoad(t *testing.T) {
+	t.Cleanup(func() { gpulease.SetDefaultHostRAMHeadroom(0) })
 	d := Default()
 	if d.GPUComfyOrder != "" {
 		t.Fatalf("gpu_comfy_order must default to unset, got %q", d.GPUComfyOrder)
@@ -948,5 +950,36 @@ func TestRknpuFieldsRoundTrip(t *testing.T) {
 	}
 	if c.RknpuEndpoint != "http://127.0.0.1:19999" || c.RknpuSidecarCmd != "/opt/x/rknpu/rknpu-http.sh" || c.RknpuTimeoutSec != 7 || c.RknpuIdleSec != 9 {
 		t.Fatalf("round-trip lost a field: %+v", c)
+	}
+}
+
+// gpu_host_ram_headroom_gib reaches the lease GRANT, not only the readers that report it: Load installs
+// it process-wide where every Manager (the CLI's, the pipeline's, the detached holder's) reads it, the
+// way the orphan grace and the term limits are installed. It was a per-Manager setter that nothing in
+// production called, so the grant kept the built-in 8 GiB whatever the key said (review, 2026-10-10).
+func TestLoadInstallsTheHostRAMHeadroomForEveryGrant(t *testing.T) {
+	t.Cleanup(func() { gpulease.SetDefaultHostRAMHeadroom(0) })
+	dir := t.TempDir()
+	p := filepath.Join(dir, "config.json")
+	write := func(body string) {
+		t.Helper()
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(`{"state_dir": "` + filepath.ToSlash(dir) + `", "gpu_host_ram_headroom_gib": 16}`)
+	if _, err := Load(p); err != nil {
+		t.Fatal(err)
+	}
+	if got := gpulease.DefaultHostRAMHeadroom(); got != 16 {
+		t.Fatalf("the configured headroom must reach the lease library, got %v", got)
+	}
+	// A later load of a config that sets nothing restores the built-in default.
+	write(`{"state_dir": "` + filepath.ToSlash(dir) + `"}`)
+	if _, err := Load(p); err != nil {
+		t.Fatal(err)
+	}
+	if got := gpulease.DefaultHostRAMHeadroom(); got != DefaultGPUHostRAMHeadroomGiB {
+		t.Fatalf("an unset key means the default %v, got %v", DefaultGPUHostRAMHeadroomGiB, got)
 	}
 }

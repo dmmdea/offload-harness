@@ -45,6 +45,11 @@ func PickAuto(plan Plan, wait time.Duration, build func() (gpulease.AllocInput, 
 		if !errors.As(aerr, &none) {
 			return nil, false, aerr
 		}
+		if none.HostImpossible {
+			// No state of this host admits the declared need, so there is nothing to poll for and no
+			// --wait to suggest: the error says what to change (hostram.go).
+			return nil, false, none
+		}
 		if none.HostReason == "" && len(none.Waitable) >= plan.Min {
 			target := none.Waitable[:plan.Min]
 			fmt.Fprintf(out, "gpu reserve: no %d card(s) are free right now; queueing for %s (%s)\n", plan.Min, strings.Join(target, ", "), SkipSummary(none))

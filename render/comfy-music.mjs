@@ -31,6 +31,7 @@ import { readFileSync, unlinkSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { writeFileAtomic, commitPartial, discardPartial } from "./atomic-out.mjs";
 import { withGpuSlot } from "./gpu-lock.mjs";
+import { familySignature } from "./comfy-family.mjs";
 import { comfyApi } from "./comfy-lifecycle.mjs";
 import { firstOutputFile } from "./comfy-output.mjs";
 import { buildAceStep } from "./wf-acestep.mjs";
@@ -255,7 +256,8 @@ async function main() {
   const trim = !flags.graph && !!ffmpeg && !!ffprobe;
   const { graph, seed, seconds, renderSeconds } = buildGraphFromArgs(pos, flags, { trim });
   await withGpuSlot(
-    { noLock: flags["no-lock"], keepComfy: flags["keep-comfy"], comfyManaged: true, api: API, reserveVram: flags["reserve-vram"] || RESERVE_VRAM_DEFAULT },
+    { noLock: flags["no-lock"], keepComfy: flags["keep-comfy"], comfyManaged: true, api: API, reserveVram: flags["reserve-vram"] || RESERVE_VRAM_DEFAULT,
+      family: familySignature("acestep") },
     () => generate(out, API, graph, seed, { ffmpeg, ffprobe, seconds, renderSeconds }),
   );
 }

@@ -34,6 +34,9 @@ func threeCards() []gpuprobe.Card {
 	return cards
 }
 
+// roomyHostMemory is a host with room for anything these tests ask of it.
+var roomyHostMemory = gpuprobe.HostMemory{PhysicalGiB: 256, AvailableGiB: 200, CommitUsedGiB: 40, CommitLimitGiB: 400}
+
 func scratchManager(t *testing.T) *gpulease.Manager {
 	t.Helper()
 	m, err := gpulease.OpenAt("", t.TempDir())
@@ -46,9 +49,9 @@ func scratchManager(t *testing.T) *gpulease.Manager {
 
 func hostDeps(cards []gpuprobe.Card, away bool) Deps {
 	return Deps{
-		Cards:       func(context.Context, config.Config) ([]gpuprobe.Card, string, error) { return cards, "", nil },
-		HostFreeRAM: func() (float64, bool) { return 64, true },
-		Presence:    func(config.Config) (bool, bool) { return true, away },
+		Cards:      func(context.Context, config.Config) ([]gpuprobe.Card, string, error) { return cards, "", nil },
+		HostMemory: func() (gpuprobe.HostMemory, bool) { return roomyHostMemory, true },
+		Presence:   func(config.Config) (bool, bool) { return true, away },
 	}
 }
 
@@ -71,7 +74,7 @@ func TestBuildInputReadsLeasesAndTheCallersOwnClaims(t *testing.T) {
 	if in.WholeNodeHeld {
 		t.Error("a card-scoped lease is not a whole-node lease")
 	}
-	if in.FootprintGiB != 4 || in.HostNeedGiB != 8 || !in.HostFreeOK || in.HostFreeGiB != 64 {
+	if in.FootprintGiB != 4 || in.HostNeedGiB != 8 || !in.HostMemOK || in.HostMem != roomyHostMemory {
 		t.Errorf("needs/host not carried: %+v", in)
 	}
 	if in.AllowDisplay {
@@ -304,5 +307,45 @@ func TestResidentSeatsIsEmptyWhenLlamaSwapCannotBeRead(t *testing.T) {
 	}
 	if got := ResidentSeats(context.Background(), config.Config{}, threeCards(), nil); len(got) != 0 {
 		t.Fatalf("no layers, nothing resident: %v", got)
+	}
+}
+
+// A host-RAM need no state of the host admits cannot be cured by waiting, so the allocator does not
+// poll for it: it returns at once with the refusal, however long the caller was willing to wait, and
+// it neither sleeps nor tells the line it is "waiting for that to change" (internal/gpulease/hostram.go).
+func TestPickAutoDoesNotPollForAnImpossibleHostNeed(t *testing.T) {
+	cards := threeCards()
+	build := func() (gpulease.AllocInput, error) {
+		return gpulease.AllocInput{
+			Cards:     cards,
+			HostMemOK: true, HostMem: gpuprobe.HostMemory{PhysicalGiB: 100, AvailableGiB: 50, CommitUsedGiB: 20, CommitLimitGiB: 160},
+			HostNeedGiB: 99, HostHeadroomGiB: 8, // 99 > 100 - 8: no state of this host admits it
+		}, nil
+	}
+	var out bytes.Buffer
+	sleeps := 0
+	_, _, err := PickAuto(Plan{Min: 1, Max: 1}, time.Hour, build, &out, func(time.Duration) { sleeps++ }, time.Now)
+	var none *gpulease.NoCardsError
+	if !errors.As(err, &none) || !none.HostImpossible {
+		t.Fatalf("want the impossible host refusal, got %v", err)
+	}
+	if sleeps != 0 || strings.Contains(out.String(), "waiting up to") {
+		t.Fatalf("an impossible need must not be polled for: %d sleep(s), output %q", sleeps, out.String())
+	}
+	if strings.Contains(err.Error(), "--wait") {
+		t.Fatalf("there is no --wait to suggest: %v", err)
+	}
+
+	// A host that is merely short IS waited for: the same request with a need that fits once the host frees.
+	short := func() (gpulease.AllocInput, error) {
+		in, _ := build()
+		in.HostNeedGiB, in.HostMem.CommitUsedGiB = 30, 90
+		return in, nil
+	}
+	sleeps = 0
+	clock := time.Unix(1000, 0)
+	_, _, err = PickAuto(Plan{Min: 1, Max: 1}, 10*time.Second, short, &out, func(d time.Duration) { sleeps++; clock = clock.Add(d) }, func() time.Time { return clock })
+	if !errors.As(err, &none) || none.HostImpossible || sleeps == 0 {
+		t.Fatalf("a shortage that waiting can cure is polled for (sleeps %d): %v", sleeps, err)
 	}
 }
