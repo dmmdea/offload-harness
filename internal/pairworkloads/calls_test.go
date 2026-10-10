@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/dmmdea/offload-harness/internal/config"
+	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/ledger"
 )
 
@@ -59,7 +60,7 @@ func TestBeginQueuedThenWorkingThenRowCloses(t *testing.T) {
 	if err := l.Record(ledger.Entry{Task: "animate_character", ModelTier: "wan2.2-animate", LatencyMs: 5000}); err != nil {
 		t.Fatal(err)
 	}
-	end(false, "")
+	end(core.Result{OK: true})
 	e.Wait()
 	if c.count() != 3 {
 		t.Fatalf("frames = %d, want 3 (the row closes the card; End adds nothing)", c.count())
@@ -81,7 +82,7 @@ func TestEndClosesUnstartedCardWithoutRow(t *testing.T) {
 	e := New(Config{Enabled: true, Endpoint: srv.URL, AppDir: writePairAppDir(t)})
 
 	_, working, end := e.Begin("transcribe", "cli:transcribe")
-	end(true, "whisper unreachable")
+	end(core.Deferf("whisper unreachable", "", core.Meta{}))
 	working() // after the close: nothing
 	e.Wait()
 	byM := methodsOf(c)
@@ -93,7 +94,7 @@ func TestEndClosesUnstartedCardWithoutRow(t *testing.T) {
 		failed["error"] != "whisper unreachable" || failed["startedAt"] != nil {
 		t.Fatalf("End must fail the same card with no start: %v", failed)
 	}
-	end(false, "")
+	end(core.Result{OK: true})
 	e.Wait()
 	if c.count() != 2 {
 		t.Fatalf("a second End must send nothing, frames = %d", c.count())
@@ -205,11 +206,11 @@ func TestOverlappingCallsEachRowClosesItsOwnCard(t *testing.T) {
 	if err := l.Record(ledger.Entry{Task: "transcribe", ModelTier: "model-b", LatencyMs: 1000, CallID: idB}); err != nil {
 		t.Fatal(err)
 	}
-	endB(false, "")
+	endB(core.Result{OK: true})
 	if err := l.Record(ledger.Entry{Task: "transcribe", ModelTier: "model-a", LatencyMs: 9000, CallID: idA}); err != nil {
 		t.Fatal(err)
 	}
-	endA(false, "")
+	endA(core.Result{OK: true})
 	e.Wait()
 
 	opened, terminal := terminalsByID(c)
@@ -255,7 +256,7 @@ func TestRowWithUnknownCallIDLeavesOpenCardsAlone(t *testing.T) {
 	if terminal[idA] != nil {
 		t.Fatalf("a row for another call closed card %s", idA)
 	}
-	endA(false, "")
+	endA(core.Result{OK: true})
 	e.Wait()
 	opened, terminal := terminalsByID(c)
 	if terminal[idA] == nil || !opened[idA] {

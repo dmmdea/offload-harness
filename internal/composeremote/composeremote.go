@@ -111,6 +111,7 @@ func Run(ctx context.Context, cfg config.Config, runner Runner, req core.Request
 	// The call is the remote lane's own from here on: it writes its ledger row and, once a node is
 	// chosen, its one PAIR card (D5/D6). The local route above never reaches this.
 	h := core.BeginRemote(runner, req, r)
+	defer core.CloseOnPanic(h) // a panic in the dispatch, the poll or the fetch closes the card before the door dies of it
 	if r == RouteAuto {
 		placement = "remote: no composition lane on this machine"
 		if len(cfg.DelegateRemotes) == 0 {
@@ -392,10 +393,14 @@ type jobWire struct {
 	State string          `json:"state"`
 	Data  json.RawMessage `json:"data"`
 	Error string          `json:"error"`
+	// ErrClass is the err_class the node's lane filed a failed job under, beside Error (see
+	// mediaremote.jobWire): it tells a composition held back by another one from a render that broke.
+	ErrClass string `json:"err_class"`
 }
 
 // wait polls the job until it is done or errored. A done media job's data is the pipeline's result
-// object; an errored one carries the node's typed reason, which comes back as a deferred result.
+// object; an errored one carries the node's typed reason and its err_class, which come back as a
+// deferred result.
 func wait(ctx context.Context, cfg config.Config, base, jobID string, h core.RemoteAttribution) (core.Result, json.RawMessage, error) {
 	failures := 0
 	for {
@@ -424,7 +429,7 @@ func wait(ctx context.Context, cfg config.Config, base, jobID string, h core.Rem
 				}
 				return core.Result{OK: true}, j.Data, nil
 			case "error":
-				return core.Deferf(j.Error, "", core.Meta{}), nil, nil
+				return core.Deferf(j.Error, "", core.Meta{ErrClass: j.ErrClass}), nil, nil
 			}
 		}
 		select {

@@ -367,14 +367,16 @@ type cacheVal struct {
 // local model before ever deferring to Opus. Infra errors do not escalate.
 // CallTracker opens a PAIR Jobs card when a long call starts and closes it
 // when the call ends (pairworkloads.Emitter.Begin). working turns the card
-// running once the lane holds its engine (core.MarkWorking); both are nil when
-// nothing was opened.
+// running once the lane holds its engine (core.MarkWorking); end closes it
+// with the call's Result (a success completes it, a call held back by another
+// job's hold on the card closes it quiet, anything else fails it with the
+// reason); both are nil when nothing was opened.
 //
 // callID is the id of the card Begin opened ("" when none was): Run stamps it on
 // the call's Meta, the ledger row carries it, and the row closes exactly that
 // card (pairworkloads.Emitter.claim) instead of the oldest open card of the task.
 type CallTracker interface {
-	Begin(task, door string) (callID string, working func(), end func(deferred bool, reason string))
+	Begin(task, door string) (callID string, working func(), end func(res core.Result))
 }
 
 // SetCallTracker wires the tracker Run reports call starts to; nil = none.
@@ -382,13 +384,15 @@ func (p *Pipeline) SetCallTracker(t CallTracker) { p.tracker = t }
 
 // closeCall closes a tracked call's card with the call's outcome. Deferred
 // directly (recover works only there): a panic leaves the result zero, which
-// would read as success, so the card closes failed and the panic goes on.
-func closeCall(end func(deferred bool, reason string), res *core.Result) {
+// would read as success, so the card closes failed and the panic goes on. end
+// returns once the close is on the wire (pairworkloads.Emitter.Begin), so Run
+// does not return, and its door does not answer, before the card is closed.
+func closeCall(end func(res core.Result), res *core.Result) {
 	if r := recover(); r != nil {
-		end(true, fmt.Sprintf("panic: %v", r))
+		end(core.Result{Deferred: true, Reason: fmt.Sprintf("panic: %v", r)})
 		panic(r)
 	}
-	end(res.Deferred, res.Reason)
+	end(*res)
 }
 
 func (p *Pipeline) Run(ctx context.Context, req core.Request) (res core.Result) {

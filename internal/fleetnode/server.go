@@ -2607,7 +2607,10 @@ func (s *Server) admit(w http.ResponseWriter, r *http.Request, env dispatchEnvel
 		if reason == "" {
 			reason = "deferred" // Jobs.finish treats "" as success; never let that lie
 		}
-		return nil, errors.New(reason)
+		// The class the lane filed the deferral under travels with the reason (err_class on the poll): the
+		// box that asked closes the call's PAIR card quiet for a call another job held back (gpu_busy,
+		// gpu_queued) and failed for one that ran and broke, and it can only tell them apart by the class.
+		return nil, &classedError{msg: reason, class: res.Meta.ErrClass}
 	}
 
 	// An agent dispatch (already authorized above) is admitted with Agent set,
@@ -3017,6 +3020,11 @@ type jobWire struct {
 	State JobState        `json:"state"`
 	Data  json.RawMessage `json:"data,omitempty"`
 	Error string          `json:"error,omitempty"`
+	// ErrClass is the err_class the failed run's lane filed its deferral under, beside `error` (see
+	// classedError). Additive and omitempty, like Progress and WallSec below: a failure that carries no
+	// class, and every job that did not fail, publishes the payload it always did, and an asker too old
+	// to read it ignores the field (and closes the call's card failed, as it always did).
+	ErrClass string `json:"err_class,omitempty"`
 	// Progress (0.131.0, liveness walls): the run's last liveness report while
 	// it runs. Additive and omitempty, like WallSec below: a delegator that
 	// does not read it polls exactly as before.
@@ -3033,7 +3041,7 @@ type jobWire struct {
 }
 
 func writeJobView(w http.ResponseWriter, status int, v *JobView) {
-	out := jobWire{JobID: v.ID, State: v.State, Data: v.Data, Error: v.Error, WallSec: v.WallSec, Progress: v.Progress}
+	out := jobWire{JobID: v.ID, State: v.State, Data: v.Data, Error: v.Error, ErrClass: v.ErrClass, WallSec: v.WallSec, Progress: v.Progress}
 	if p := v.Progress; p != nil {
 		// Top-level twins of the two bounds, for a reader that wants them
 		// without descending into progress.

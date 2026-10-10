@@ -498,3 +498,25 @@ type Result struct {
 func Deferf(reason, partial string, meta Meta) Result {
 	return Result{OK: false, Deferred: true, Reason: reason, Partial: partial, Meta: meta}
 }
+
+// The err_class values of a call that did not run because ANOTHER job held what it needed: a
+// media call that waited its window and left a place in line (gpu_queued, the answer carries a
+// waiter_token), a call that waited and left none (gpu_busy), and a composition that waited its
+// window for the process's one compose slot (compose_busy: the slot is not a GPU card, a
+// composition is CPU-class, but the call is in the same position, nothing ran and the answer says
+// to call again). All three are congestion, not failure (register C-89: "a busy card is a place in
+// line"), and the PAIR card of such a call closes accordingly (pairworkloads.cardOutcome). The
+// producers are in internal/pipeline (deferForLease, runVisionGen, runTranscribe, runComposeVideo)
+// and main.go's image batch.
+const (
+	ErrClassGPUBusy     = "gpu_busy"
+	ErrClassGPUQueued   = "gpu_queued"
+	ErrClassComposeBusy = "compose_busy"
+)
+
+// CardHeld reports whether errClass says the call was held back by another job's hold on what it
+// needed (the GPU card, or a composition's one slot). It decides by class and never by reason text:
+// the reason is a sentence for a person.
+func CardHeld(errClass string) bool {
+	return errClass == ErrClassGPUBusy || errClass == ErrClassGPUQueued || errClass == ErrClassComposeBusy
+}

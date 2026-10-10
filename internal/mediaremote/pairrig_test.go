@@ -28,7 +28,9 @@ type pairRig struct {
 	led    *ledger.Ledger
 	path   string
 	appDir string
-	p      *pipeline.Pipeline
+	// openDir is the emitter's open-card register: the one input the orphan sweep reads.
+	openDir string
+	p       *pipeline.Pipeline
 }
 
 // newPairRig builds the rig; members are extra PAIR member names (each gets the uuid "<name>-uuid").
@@ -59,7 +61,8 @@ func newPairRig(t *testing.T, enabled bool, members ...string) *pairRig {
 			t.Fatal(err)
 		}
 	}
-	r.e = pairworkloads.New(pairworkloads.Config{Enabled: enabled, Endpoint: srv.URL, OpenDir: t.TempDir(), AppDir: r.appDir})
+	r.openDir = t.TempDir()
+	r.e = pairworkloads.New(pairworkloads.Config{Enabled: enabled, Endpoint: srv.URL, OpenDir: r.openDir, AppDir: r.appDir})
 	r.path = filepath.Join(t.TempDir(), "ledger.jsonl")
 	led, err := ledger.Open(r.path)
 	if err != nil {
@@ -91,6 +94,20 @@ func (r *pairRig) cards() map[string]map[string]any {
 		r.t.Fatalf("one call opened %d cards: %v", len(ids), ids)
 	}
 	return out
+}
+
+// openMarkers lists the cards still open in the register, read at once: nothing waits for a background post.
+func (r *pairRig) openMarkers() []string {
+	r.t.Helper()
+	ents, err := os.ReadDir(r.openDir)
+	if err != nil && !os.IsNotExist(err) {
+		r.t.Fatal(err)
+	}
+	var names []string
+	for _, e := range ents {
+		names = append(names, e.Name())
+	}
+	return names
 }
 
 func (r *pairRig) frameCount() int {

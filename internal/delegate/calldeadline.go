@@ -547,23 +547,79 @@ func (r *runner) emitPair(ev pairworkloads.Event) {
 	r.pairMu.RLock()
 	defer r.pairMu.RUnlock()
 	if r.pairShut {
-		// Dropped by design, but not silently: PAIR's card for this job stays as it was
-		// until PAIR's own staleness sweep, and nobody would otherwise know why.
+		// Dropped by design, but not silently: nobody would otherwise know why a frame never
+		// reached PAIR. A card this run opened was already closed by shutPair.
 		r.pairLate.Do(func() {
-			log.Printf("delegate: a PAIR frame for job %s was dropped: an abandoned subtask reported after the call had returned; its card stays as it was until PAIR's own staleness sweep (results unaffected; further drops in this run are not logged)", ev.JobID)
+			log.Printf("delegate: a PAIR frame for job %s was dropped: an abandoned subtask reported after the call had returned (its card was closed when the call returned; results unaffected; further drops in this run are not logged)", ev.JobID)
 		})
 		return
 	}
+	r.notePair(ev)
 	r.pair.Emit(ev)
+}
+
+// pairCard is a card this run opened: the last in-flight frame it sent (the identity a closing
+// frame must repeat) and whether its terminal frame has been sent.
+type pairCard struct {
+	last   pairworkloads.Event
+	closed bool
+}
+
+// notePair keeps the run's account of its open cards, which shutPair settles. A card's terminal
+// frame closes it for good: PAIR drops an in-flight frame for a card it holds terminal, and a late
+// "running" from a progress goroutine must not reopen it here.
+func (r *runner) notePair(ev pairworkloads.Event) {
+	r.pairOpenMu.Lock()
+	defer r.pairOpenMu.Unlock()
+	if r.pairOpen == nil {
+		r.pairOpen = map[string]*pairCard{}
+	}
+	c := r.pairOpen[ev.JobID]
+	if c == nil {
+		c = &pairCard{}
+		r.pairOpen[ev.JobID] = c
+	}
+	switch ev.State {
+	case "queued", "running":
+		if !c.closed {
+			c.last = ev
+		}
+	default:
+		c.closed = true
+	}
 }
 
 // shutPair ends PAIR emission for this run; RunWith defers it so it runs before
 // pair.Wait(). It waits for any Emit in progress (bounded: building and queueing a
 // frame), so after it returns no Add can race the Wait.
+//
+// It also closes every card this run opened and never closed. The call returned its answer
+// without them: a seat that ignores its context was abandoned at the call deadline, and the
+// result published for it is a budget defer ("did not stop ... whatever it answers later is
+// discarded"). Its goroutine's own terminal frame is dropped from here on, so before this the
+// card sat queued or running in PAIR's Jobs list for as long as the door's process lived, and
+// the orphan sweep then closed it "harness process exited before the job finished" (the
+// delegation twin of the 2026-10-09 media-door incident). Each is closed failed, under the identity its in-flight frames named, with
+// the deadline's own words; the emissions are on this goroutine, before pair.Wait().
 func (r *runner) shutPair() {
 	r.pairMu.Lock()
 	r.pairShut = true
 	r.pairMu.Unlock()
+	r.pairOpenMu.Lock()
+	var left []pairworkloads.Event
+	for _, c := range r.pairOpen {
+		if !c.closed {
+			c.closed = true
+			left = append(left, c.last)
+		}
+	}
+	r.pairOpenMu.Unlock()
+	for _, ev := range left {
+		ev.State = "failed"
+		ev.Error = callDeadlinePrefix + ": the subtask had not stopped when the call returned"
+		ev.CompletedAt = time.Now().UnixMilli()
+		r.pair.Emit(ev)
+	}
 }
 
 // nodeOrBase names the node a job was placed on: its advertised id, else its dial

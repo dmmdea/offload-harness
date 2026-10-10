@@ -21,12 +21,14 @@ import (
 // nodeRunner stands in for a render node's pipeline: it writes a "video" and a snapshot into the
 // node's media dir and reports them the way the compose pipeline does.
 type nodeRunner struct {
-	mu       sync.Mutex
-	media    string
-	defer_   string
-	delay    time.Duration // how long a render takes (the poll sees the job running meanwhile)
-	lastReq  core.Request
-	sawFiles []string
+	mu     sync.Mutex
+	media  string
+	defer_ string
+	// deferClass is the err_class the deferral carries (core.Meta.ErrClass); "" = none.
+	deferClass string
+	delay      time.Duration // how long a render takes (the poll sees the job running meanwhile)
+	lastReq    core.Request
+	sawFiles   []string
 }
 
 func (n *nodeRunner) Run(_ context.Context, req core.Request) core.Result {
@@ -46,7 +48,7 @@ func (n *nodeRunner) Run(_ context.Context, req core.Request) core.Result {
 		})
 	}
 	if n.defer_ != "" {
-		return core.Deferf(n.defer_, "", core.Meta{})
+		return core.Deferf(n.defer_, "", core.Meta{ErrClass: n.deferClass})
 	}
 	video := filepath.Join(n.media, "compose-abcd1234.mp4")
 	snap := filepath.Join(n.media, "compose-abcd1234-snap-00-at-1s.png")

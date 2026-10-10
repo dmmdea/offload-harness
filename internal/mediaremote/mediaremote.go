@@ -211,6 +211,7 @@ func Run(ctx context.Context, cfg config.Config, runner Runner, req core.Request
 	// chosen, its one PAIR card, like composeremote and the other remote lanes (0.165.0, D5-D11). The
 	// handle is finished on both exits below; the local branches above never reach it.
 	h := core.BeginRemote(runner, req, r)
+	defer core.CloseOnPanic(h) // a panic in the dispatch, the poll or the fetch closes the card before the door dies of it
 	res, err := callWith(ctx, cfg, req, remotes, h)
 	if err != nil {
 		res = placementDefer(err, placement)
@@ -680,6 +681,11 @@ type jobWire struct {
 	State string          `json:"state"`
 	Data  json.RawMessage `json:"data"`
 	Error string          `json:"error"`
+	// ErrClass is the err_class the node's lane filed a failed job under, beside Error: what tells a job
+	// another job held back (gpu_busy, gpu_queued) from one that ran and broke, so the call's PAIR card
+	// closes quiet for the first and failed for the second. A node too old to publish it leaves it empty,
+	// and the card closes failed, as it always did.
+	ErrClass string `json:"err_class"`
 }
 
 // httpStatusError is a node answering a GET with a status that is not 200.
@@ -699,7 +705,8 @@ func (e *httpStatusError) rejectedToken() bool {
 }
 
 // wait polls the job until it is done or errored. A done media job's data is the pipeline's result object;
-// an errored one carries the node's typed reason, which comes back as a deferred result. A node that says
+// an errored one carries the node's typed reason and the err_class its lane filed it under, which come
+// back as a deferred result (Meta.ErrClass, what the call's PAIR card keys on). A node that says
 // it does not hold the job (restarted, or evicted it) and one that refuses the bearer end the wait at once;
 // any other failure is tolerated until maxPollFailures of them happen in a row.
 func wait(ctx context.Context, cfg config.Config, base, jobID string, h core.RemoteAttribution) (core.Result, json.RawMessage, error) {
@@ -736,7 +743,7 @@ func wait(ctx context.Context, cfg config.Config, base, jobID string, h core.Rem
 				}
 				return core.Result{OK: true}, j.Data, nil
 			case "error":
-				return core.Deferf(j.Error, "", core.Meta{}), nil, nil
+				return core.Deferf(j.Error, "", core.Meta{ErrClass: j.ErrClass}), nil, nil
 			}
 		}
 		select {

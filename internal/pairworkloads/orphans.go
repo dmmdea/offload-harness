@@ -243,6 +243,16 @@ func (e *Emitter) track(ev Event, pl sendPlan) (removeAfterPost string) {
 		p := e.open[ev.JobID]
 		delete(e.open, ev.JobID)
 		e.openMu.Unlock()
+		if p != "" && pl.info != nil {
+			// The verdict is on disk before it is posted. The marker on disk is still the in-flight one
+			// until untrack settles it after the post, and a process killed in between (an MCP client
+			// that kills its door right after the reply) would leave the sweep to close the card
+			// "harness process exited before the job finished" over a job that finished, whatever its
+			// outcome. As a pending marker the sweep sends the verdict itself, which is also what it
+			// does for a post that fails; a sweeper that reads it while the post is in flight resends an
+			// identical terminal frame, which PAIR merges as an equal-rank no-op.
+			e.parkTerminal(p, pl)
+		}
 		if p == "" && pl.remote {
 			// A relayed card's marker is found by name, not by this process's memory: the member may
 			// have restarted since the in-flight frame while the producer, on another box, did not.
@@ -317,14 +327,21 @@ func (e *Emitter) untrack(path string, pl sendPlan, postErr error) {
 		removeRetrying(path)
 		return
 	}
+	if !e.parkTerminal(path, pl) {
+		removeRetrying(path)
+	}
+}
+
+// parkTerminal rewrites the marker at path as a PENDING terminal marker: the frame in pl, which the
+// sweep sends as it is, whatever the liveness of its producer. false = it could not be written (the
+// marker on disk, if any, is then untouched).
+func (e *Emitter) parkTerminal(path string, pl sendPlan) bool {
 	pid, start := e.selfIdentity()
 	if pl.remote {
 		pid, start = 0, 0
 	}
-	body, err := json.Marshal(openMarker{PID: pid, ProcStart: start, WrittenMs: e.now().UnixMilli(), Pending: true, Endpoint: pl.url, Remote: pl.remote, Relay: pl.relay, Info: terminal})
-	if err != nil || !writeAtomic(filepath.Dir(path), path, body) {
-		removeRetrying(path)
-	}
+	body, err := json.Marshal(openMarker{PID: pid, ProcStart: start, WrittenMs: e.now().UnixMilli(), Pending: true, Endpoint: pl.url, Remote: pl.remote, Relay: pl.relay, Info: pl.info})
+	return err == nil && writeAtomic(filepath.Dir(path), path, body)
 }
 
 // writeAtomic writes body to path via a temp file and a rename, so a sweeper

@@ -1163,7 +1163,11 @@ that it is skipped by everyone (a whole-node barrier included), so a client that
 the line. A call that RESUMED a place and is now waiting for its card inside this process (the card's slot
 is held by another job here) re-asserts its place every ten seconds until it is served, hands it to its lease
 wait, or gives it up again, so a caller that is standing in its place never loses it to that grace. A place that
-was not resumed is not invented: a first-time call leaves one only when it gives up. Tokens are in `<state>/gpu/tokens`, not among the waiters (an older binary prunes any waiter
+was not resumed is not invented: a first-time call leaves one only when it gives up. The call's PAIR card closes with
+the answer, before the door replies, and quietly: `completed` with no start and the reason in `error`, never a red
+`failed` (and never "harness process exited before the job finished" over a door a client killed right after the
+reply), because a place in line is the lease queue working ([pair-workloads.md](pair-workloads.md), *A held card is
+not a failure*). Tokens are in `<state>/gpu/tokens`, not among the waiters (an older binary prunes any waiter
 whose process stopped polling); a binary that predates them does not honour them, so on a host that mixes
 versions it can take a card ahead of a token holder, which costs the holder its place and never
 exclusivity. A call that holds the whole node on such a host leaves the same kind of token. A host that
@@ -1646,7 +1650,8 @@ type, stat cards and captions on word timings. With `webm` (VP9 `yuva420p`) or `
 `withGpuSlot`**. A media lease would make load-triggering text admissions wait
 ([ADR 0026](../architecture/decisions/0026-text-load-admissions-wait-for-the-media-lease.md)) for
 work that never touches a card. One composition runs at a time per process, on its own compose slot
-(not `mediaSlot`). A second call waits `gpu_wait_ms` and then defers `compose_busy`. On the fleet,
+(not `mediaSlot`). A second call waits `gpu_wait_ms` and then defers `compose_busy`, and the call's PAIR card closes quiet
+for it like a held GPU card ([pair-workloads.md](pair-workloads.md), *A held card is not a failure*). On the fleet,
 `compose-video` is exempt from the text concurrency cap for the same reason `accel` is.
 
 **Inputs: exactly one.**
@@ -1880,12 +1885,17 @@ it cannot be recalled: a media job cannot be withdrawn, because it is claimed to
 node's withdraw, `DELETE /fleet/jobs/{id}`, is for agent jobs only (ADR 0064), so the client sends none; a deadline that
 passes while the outputs are fetched says the render finished and the fetch ran out of time), and a transport failure an `infrastructure` defer. An input file this
 machine cannot read is `contract`; this machine's own temp directory, disk or packer failing is `infrastructure`. A defer the node itself returned (a render that
-deferred) comes back as the node sent it, with `meta.node`.
+deferred) comes back as the node sent it, with `meta.node` and the `meta.err_class` its lane filed it under (the node's
+poll carries the class beside the reason as `err_class`; a node older than that publishes none, and the caller reads an empty class).
 
 **Attribution.** A call that goes to a node is the remote lane's own, like compose, vision, text and transcription (0.165.0,
 D5-D11): it writes one asker ledger row (`node`, `node_id`, `route`, `placement`, `fleet_job_id`, `card_by_caller`) and, once a
 node is chosen, one PAIR card on that node (queued, running, terminal), and the handle is closed on every way the call can end
-(a result, a refusal, a node defer, a deadline). A call that reached no node has its row and no card. Both POSTs, the plain
+(a result, a refusal, a node defer, a deadline), with the terminal frame posted before the door answers; a node that answers
+that another job holds its card (`gpu_busy`, `gpu_queued`) closes the card quiet, not red, by the `err_class` its poll carries
+([pair-workloads.md](pair-workloads.md), *A held card is not a failure*); a node that does not publish the class leaves the
+card closed red. A call that reached no node has its row and no card, and a panic in the lane closes the card failed with the
+panic before it goes on. Both POSTs, the plain
 dispatch and the media-job, carry `X-Offload-Asker` and, only when this machine's emitter is off, `X-Offload-Pair-Card: node`.
 The local route, and an auto call that runs here, are not attributed (the pipeline writes that row).
 

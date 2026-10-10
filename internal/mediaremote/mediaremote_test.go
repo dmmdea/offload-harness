@@ -67,6 +67,9 @@ type nodeRunner struct {
 	reqs    []core.Request
 	inputs  map[string][]byte // field -> bytes the pipeline read from the extracted file
 	deferAs string
+	// deferClass is the err_class the deferral carries (core.Meta.ErrClass); "" = a deferral with no class,
+	// which is what a node too old to know the field publishes.
+	deferClass string
 	// hold, when set, blocks every run until it is closed (a render that never finishes during the test).
 	hold chan struct{}
 }
@@ -86,7 +89,7 @@ func (n *nodeRunner) Run(_ context.Context, req core.Request) core.Result {
 		}
 	}
 	if n.deferAs != "" {
-		return core.Deferf(n.deferAs, "", core.Meta{})
+		return core.Deferf(n.deferAs, "", core.Meta{ErrClass: n.deferClass})
 	}
 	// A render is written where the pipeline is told to put it (`out`, which the media-job door sets to a
 	// name of its own) and under the pipeline's own name when it is told nothing, like the real one.
