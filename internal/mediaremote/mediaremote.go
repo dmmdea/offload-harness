@@ -195,6 +195,13 @@ func Run(ctx context.Context, cfg config.Config, runner Runner, req core.Request
 	if !ok {
 		return contractDefer(fmt.Sprintf("unrecognized route %q; use local, auto or remote", route), core.Meta{})
 	}
+	// A bad min_vram_gb is the caller's mistake whatever the route: refused here by name, before the lane is asked or a node
+	// is read, so a call that stays on this machine never drops the typo silently.
+	if req.Task == core.TaskRunGraph {
+		if _, _, err := minVRAMArg(req.Params); err != nil {
+			return contractDefer(err.Error(), core.Meta{})
+		}
+	}
 	if r == RouteLocal {
 		return runner.Run(ctx, req)
 	}

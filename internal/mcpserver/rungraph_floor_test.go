@@ -53,6 +53,30 @@ func TestRunGraphDoorCarriesMinVRAMAndModelFamily(t *testing.T) {
 	}
 }
 
+// A min_vram_gb that is not a number of GB (0 or more) is refused by name at the door, on every route: the CLI door has always
+// said so, and this one let it through to a call that stayed on this machine, where nothing read it and the typo vanished.
+func TestRunGraphDoorRefusesAMalformedMinVRAMOnEveryRoute(t *testing.T) {
+	for _, route := range []string{"", "local", "auto", "remote"} {
+		for _, bad := range []string{`"sixteen"`, `-1`, `true`} {
+			s := New(nil)
+			runs := 0
+			s.runHook = func(context.Context, core.Request) core.Result {
+				runs++
+				return core.Result{OK: true, Data: json.RawMessage(`{}`)}
+			}
+			args := `{"graph_json":"{}","min_vram_gb":` + bad + `,"route":"` + route + `"}`
+			res, err := s.handleRunGraph(context.Background(), callReq(args))
+			if err != nil {
+				t.Fatal(err)
+			}
+			out := textOf(res)
+			if runs != 0 || !strings.Contains(out, "min_vram_gb") || !strings.Contains(out, `"deferred":true`) {
+				t.Errorf("route %q, min_vram_gb %s: want a refusal naming min_vram_gb and nothing run (runs %d): %.300s", route, bad, runs, out)
+			}
+		}
+	}
+}
+
 func TestRunGraphToolAdvertisesMinVRAMAndModelFamily(t *testing.T) {
 	for _, tool := range listTools(t, config.Default()) {
 		if tool.Name != "offload_run_graph" {
