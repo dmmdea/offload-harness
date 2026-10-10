@@ -1,17 +1,23 @@
 package ledger
 
-// Reason codes (register C-68, ADR 0064): a CLOSED set that says why a delegated
-// job ended the way it did, written beside the free-text Reason on every
-// `agent_delegate` row. The free text is for a human and varies with every job
+import "strings"
+
+// Reason codes (register C-68, ADR 0064; every deferred row since F22): a CLOSED set that says why a
+// delegated job ended the way it did, written beside the free-text Reason on every `agent_delegate`
+// row and on every row of any task that deferred. The free text is for a human and varies with every job
 // ("queue deadline after 5m0s (31 poll(s) answered `accepted`)"); the code is what
 // a reader groups, counts and joins on. Before it, a fresh question about the
 // fleet (how many jobs died queued? how many stalled in prefill?) needed a bespoke
 // regex over prose, and the answers disagreed.
 //
-// A row that completed cleanly carries ReasonOK, so "reason_code present on every
-// row" is checkable without knowing which rows failed. The set is closed: Record
-// replaces a code that is not in it with ReasonOther, so a typo at a writer cannot
-// mint a new group. Adding a member is an additive change.
+// A delegate row that completed cleanly carries ReasonOK, so "reason_code present on every
+// delegate row" is checkable without knowing which rows failed. A row of any other task carries a
+// code only when it DEFERRED (F22, 2026-10-09: 21 of 100 deferred rows on one node, all 23 on
+// another, none had one, because the code was settled for agent_delegate alone and every other
+// door's defer was a free-text reason and, on the media doors, an err_class): a successful cascade
+// or media row stays without one. The set is closed: Record replaces a code that is not in it with
+// the classification of the row, so a typo at a writer cannot mint a new group. Adding a member is
+// an additive change.
 const (
 	// ReasonOK: the job completed and passed every acceptance check.
 	ReasonOK = "ok"
@@ -91,6 +97,11 @@ const (
 	ReasonWrite          = "write"
 	ReasonInfrastructure = "infrastructure"
 
+	// ReasonBadInput: the call's own input cannot be processed as given: an audio file with no audio
+	// stream, a picture that does not load, a video that cannot be sampled. Nothing is wrong with the
+	// stack or the contract; the file is what has to change.
+	ReasonBadInput = "bad_input"
+
 	// ReasonOther: a failure no code above names. The classifier is total, so a
 	// row is never without a code — but a growing share here means the set needs a
 	// new member.
@@ -106,14 +117,15 @@ var reasonCodes = []string{
 	ReasonSeatDown, ReasonStallAdmission, ReasonStallColdLoad, ReasonStallPrefill,
 	ReasonStallDecode, ReasonStallTool, ReasonStallRepack, ReasonStallEngine, ReasonStallOther,
 	ReasonBudget, ReasonAbstention, ReasonContract, ReasonConfig, ReasonWrite,
-	ReasonInfrastructure, ReasonOther,
+	ReasonInfrastructure, ReasonBadInput, ReasonOther,
 }
 
-// settleReasonCode is the code Record writes on an agent_delegate row: the
-// writer's own when it is in the closed set, and otherwise the truthful default
-// for the row — the dispatch marker is "started", a row that completed is "ok",
-// and a failed row no writer classified is "other" (a code outside the set is
-// replaced, never stored: an invented member would be a group nobody can join on).
+// settleReasonCode is the code Record writes on an agent_delegate row and on any deferred row: the
+// writer's own when it is in the closed set, and otherwise the truthful default for the row: the
+// dispatch marker is "started", a delegate row that completed is "ok", and a deferred row no writer
+// classified is classified from its err_class and its reason (DeferCode), "other" when neither names
+// it (a code outside the set is replaced, never stored: an invented member would be a group nobody
+// can join on).
 func settleReasonCode(e Entry) string {
 	switch {
 	case IsReasonCode(e.ReasonCode):
@@ -121,9 +133,68 @@ func settleReasonCode(e Entry) string {
 	case e.Phase == PhaseStarted:
 		return ReasonStarted
 	case e.Deferred:
-		return ReasonOther
+		return DeferCode(e.ErrClass, e.Reason)
 	}
 	return ReasonOK
+}
+
+// errClassCodes maps the err_class vocabulary of the media, vision and speech doors to the closed set.
+// The classes are written in internal/core (ErrClass*), internal/pipeline (classifyErr, the lane and
+// lease classes) and internal/gpugen (ClassifyErr, the iGPU runners' typed classes); a test in
+// internal/pipeline pins every core.ErrClass* constant to a member here. A class missing from the table
+// falls through to the reason's prefix and then to "other", which is how a new class is noticed.
+var errClassCodes = map[string]string{
+	// Another job held what the call needed: congestion, a place in line, not a failure.
+	"gpu_busy": ReasonNodeBusy, "gpu_queued": ReasonNodeBusy, "compose_busy": ReasonNodeBusy,
+	// Something in the stack failed.
+	"gpu_lease_unavailable": ReasonInfrastructure, "timeout": ReasonInfrastructure, "conn_refused": ReasonInfrastructure,
+	"http_5xx": ReasonInfrastructure, "oom": ReasonInfrastructure, "disk_full": ReasonInfrastructure,
+	"out_dir_unwritable": ReasonInfrastructure, "tts_endpoint": ReasonInfrastructure, "lane_unavailable": ReasonInfrastructure,
+	"engine_crashed": ReasonInfrastructure, "gpu_reset": ReasonInfrastructure, "cpu_placement": ReasonInfrastructure,
+	"cpu_backend_refused": ReasonInfrastructure, "illegal_instruction": ReasonInfrastructure,
+	// The box or the binding cannot do what was asked as configured.
+	"not_configured": ReasonConfig, "binary_not_absolute": ReasonConfig, "model_incompatible": ReasonConfig,
+	"device_invalid": ReasonConfig, "ffmpeg_unavailable": ReasonConfig,
+	// The request itself is what no node can run.
+	"token_cap_exceeded": ReasonContract, "extra_args_refused": ReasonContract,
+	// The engine ran and its output failed the quality gate.
+	"black_clip": ReasonFailedVerification, "frozen_clip": ReasonFailedVerification, "depth_frames_invalid": ReasonFailedVerification,
+	"dead_air": ReasonFailedVerification, "unmeasurable": ReasonFailedVerification,
+	// The input file.
+	"bad_input": ReasonBadInput,
+}
+
+// reasonPrefixCodes classify a deferred row whose err_class names nothing, by the stable prefix of the
+// reason the pipeline wrote ("gpu busy: ...", "audio convert: ..."): the review lane's local defer and
+// the other door-specific writes that set no err_class. Matched in order; a prefix is a sentence the
+// harness itself writes, never a model's or a node's prose.
+var reasonPrefixCodes = []struct{ prefix, code string }{
+	{"gpu busy:", ReasonNodeBusy}, {"seat busy:", ReasonNodeBusy},
+	{"the input has no audio stream", ReasonBadInput}, {"audio convert:", ReasonBadInput}, {"image load:", ReasonBadInput},
+	{"frame sampling:", ReasonBadInput}, {"empty image prompt", ReasonBadInput},
+	{"generate_svg: missing kind", ReasonBadInput}, {"generate_svg: bad spec", ReasonBadInput},
+	{"empty transcript", ReasonAbstention}, {"empty vision output", ReasonAbstention}, {"vision output truncated", ReasonAbstention},
+	{"non-JSON output", ReasonAbstention},
+	{"transcribe call failed:", ReasonInfrastructure}, {"image generation failed:", ReasonInfrastructure},
+	{"probe:", ReasonInfrastructure}, {"generate_svg: write:", ReasonInfrastructure}, {"generate_svg:", ReasonInfrastructure},
+}
+
+// DeferCode is the closed-set code of a deferred row no writer classified: its err_class when the table
+// knows it, else the prefix of its reason ("no ... configured" is config), else ReasonOther. Total: every
+// deferred row gets a member of the set.
+func DeferCode(errClass, reason string) string {
+	if c, ok := errClassCodes[errClass]; ok {
+		return c
+	}
+	for _, p := range reasonPrefixCodes {
+		if strings.HasPrefix(reason, p.prefix) {
+			return p.code
+		}
+	}
+	if strings.HasPrefix(reason, "no ") && strings.Contains(reason, " configured") {
+		return ReasonConfig
+	}
+	return ReasonOther
 }
 
 // ReasonCodes returns the closed set of reason codes (a copy).

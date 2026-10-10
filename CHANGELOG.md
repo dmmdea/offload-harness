@@ -70,6 +70,28 @@ Versioning: [SemVer](https://semver.org/).
   dispatcher's cases and a test pins the list to the switch and the usage to the list.
 - **Tests.** `gpu_usage_test.go` (5); six mutations were each caught. `docs/systems/gpu-lease.md` ("Using it").
 
+### Fixed — a transcription of a file with no audio stream says so (F21), and every deferred ledger row carries a reason code (F22)
+
+- **F21.** `offload_transcribe` on a file with no audio stream deferred with ffmpeg's raw text (`audio convert: audioio: ffmpeg
+  failed: exit status 234 ([out#0/wav @ 0x...] Output file does not contain any stream ...)`). `audioio` now returns
+  `ErrNoAudioStream` for it (matched on ffmpeg's own words, checked against a real ffmpeg on a video with no audio track), and the door
+  defers with **"the input has no audio stream"**, defer class `contract` (the caller's file is what is wrong, so it is not read as a
+  broken stack), `err_class` `bad_input`, and the ledger reason code `bad_input`. The remote lane no longer uploads such a file to a node
+  (the failed Opus conversion fell back to sending the original, and the node then failed on it with ffmpeg's words).
+- **F22.** The reason code was settled for `task == agent_delegate` alone, so a deferred row of any other door carried free text and,
+  on the media doors, an `err_class`: on one node 23 of 23 deferred rows, on another 21 of 100 had none (the review lane's local
+  "gpu busy" row among them). `Record`, the one path every writer takes, now settles the code of **every deferred row**: the
+  writer's own code from the closed set wins, otherwise the row is classified from its `err_class` (`ledger.DeferCode`) and then from the
+  stable prefix of its reason (`gpu busy:`, `seat busy:`, `no ... configured`, `audio convert:`, ...), and `other` when neither names it.
+  The closed set gains **`bad_input`** (additive). A row of another task that did not defer still carries none.
+- **The writers are walked.** `TestEveryDeferredRowCarriesAReasonCodeFromTheClosedSet` records a row shaped like each writer's output
+  (the pipeline doors, the review lane's local defer, the media doors' err_classes, `RecordAccel`, the remote lane's row, a fleet node's
+  executor row); `TestEveryWriterOfALedgerRowIsKnown` parses the tree and fails when a file that builds a `ledger.Entry` or calls
+  `Record` on a ledger is not on its list; `TestEveryCoreErrClassHasALedgerReasonCode` pins every `core.ErrClass*` to the table; and
+  `TestADocumentedCodeIsAMemberAndTheFleetNodeDocListsEveryMember` keeps `docs/FLEET-NODE.md` listing every member.
+- **Tests.** `internal/audioio/noaudio_test.go`, `internal/sttremote/noaudio_test.go`, `internal/pipeline/transcribe_noaudio_test.go`,
+  `internal/ledger/defer_code_test.go`. `docs/FLEET-NODE.md`, `docs/OPERATOR-GUIDE.md`, `docs/systems/offload-pipeline.md`.
+
 ## [0.179.0] - 2026-10-10 - a busy image lane overflows to an idle node that renders the same recipe, and every GPU lease path has a host-RAM brake
 
 ### Added — a busy image lane overflows to an idle node that renders the same recipe (F52, ADR 0082)

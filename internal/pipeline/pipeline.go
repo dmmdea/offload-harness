@@ -1250,6 +1250,16 @@ func (p *Pipeline) runTranscribe(ctx context.Context, req core.Request, meta cor
 	wav, cleanup, cerr := audioio.ConvertToWav16k(req.Audio, p.cfg.FFmpegPath)
 	if cerr != nil {
 		meta.LatencyMs = time.Since(start).Milliseconds()
+		if errors.Is(cerr, audioio.ErrNoAudioStream) {
+			// The file has nothing to transcribe: say so in the caller's words, not ffmpeg's, and class it as a
+			// bad input (the contract class, so it is not read as a broken stack): no node and no retry changes it
+			// (F21).
+			meta.ErrClass = core.ErrClassBadInput
+			p.recordDefer(req.Task, meta, len(req.Audio), audioio.ErrNoAudioStream.Error())
+			res := core.Deferf(audioio.ErrNoAudioStream.Error(), "", meta)
+			res.DeferClass = core.DeferClassContract
+			return res
+		}
 		p.recordDefer(req.Task, meta, len(req.Audio), "audio convert: "+cerr.Error())
 		return core.Deferf("audio convert: "+cerr.Error(), "", meta)
 	}
