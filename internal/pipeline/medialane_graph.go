@@ -9,8 +9,12 @@ package pipeline
 // of the real wait-0 admission that never calls busy a lane the grant would serve (TestMediaLaneFreeGraphNeverRefusesAGrant
 // drives the real admission over a table of states) and creates and removes nothing (TestMediaLaneFreeGraphWritesNothing).
 //
-// What a graph declares for the host is the media class default: its weights cannot be named from outside, so the guard
-// sizes it as the largest ComfyUI family the box binds (classDefaultRAM; a box that binds none declares nothing).
+// What a graph declares for the host is the media class default: the lease is taken for the graph as a whole, before anything
+// reads the weights it names, so the guard sizes it as the largest ComfyUI family the box binds (classDefaultRAM; a box that
+// binds none declares nothing). The node's door does resolve the files a dispatched graph names (fleetnode/graph_files.go),
+// but their sizes are not what the lease declares. So the declaration is an upper bound for the families the box binds and
+// not the graph's own size: a graph that names weights bigger than every bound family can be under-counted. That is a named
+// limit of this step (S0's G3 owns the numbers), not a measurement.
 //
 // A graph with operator-declared devices is a card-scoped graph the delegator never places on another node (request.go in
 // mediaremote refuses to carry devices), so the question is not asked for it. An inherited lease and a card table that does not
