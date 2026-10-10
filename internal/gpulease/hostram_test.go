@@ -3,6 +3,7 @@ package gpulease
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"os"
 	"strings"
@@ -518,5 +519,69 @@ func TestAGrantKeepsTheInstalledHeadroomNotTheBuiltInOne(t *testing.T) {
 	asHostRAM(t, err)
 	if !strings.Contains(err.Error(), "8.0 GiB headroom") {
 		t.Fatalf("with nothing installed the built-in 8.0 applies, got: %v", err)
+	}
+}
+
+// G1 (the P0 plan): the per-node check a placer asks WITHOUT taking anything is the rule the grant
+// applies, not a second one. Over a table of host states and needs (a lease already granted and still
+// to load included), the read-only HostRAMCheck and the grant's own refusal agree on every verdict, on
+// the sentence and on whether waiting could cure it, and the check leaves nothing behind: no record, no
+// claim, no waiter, no epoch spent.
+func TestHostRAMCheckIsTheRuleTheGrantApplies(t *testing.T) {
+	for _, running := range []float64{0, 20} {
+		for _, commit := range []float64{10, 50, 70, 85, 95} {
+			for _, need := range []float64{0, 5, 30, 60, 95} {
+				m, _ := ramScoped(t, commit)
+				declared := 0.0
+				if running > 0 {
+					// A lease already granted that declared 20 GiB and has loaded none of it: 20 GiB still to
+					// load. Where the host is too tight to grant even that one, the row is about a host with
+					// nothing granted.
+					if l, err := m.TryAcquire(ClassMedia, Options{Reason: "running", TTL: time.Hour, Devices: []string{card1}, HostRAMGiB: running}); err == nil {
+						declared = running
+						defer func() { _ = l.Release() }()
+					}
+				}
+				name := fmt.Sprintf("commit %.0f, need %.0f, still to load %.0f", commit, need, declared)
+				before := epochNow(t, m)
+				recsBefore, claimsBefore := recordFiles(t, m), claimFiles(t, m)
+				chk := m.HostRAMCheck(need)
+				refusal := m.hostRAMRefusal(Options{HostRAMGiB: need}, m.Leases())
+				if chk.OK != (refusal == nil) {
+					t.Errorf("%s: HostRAMCheck.OK = %v but the grant's refusal = %v", name, chk.OK, refusal)
+					continue
+				}
+				if refusal != nil && (chk.Why != refusal.Why || chk.Impossible != refusal.Impossible || chk.ProjectedGiB != refusal.ProjectedGiB || chk.PendingGiB != refusal.PendingGiB) {
+					t.Errorf("%s: the check and the grant disagree\n check: %+v\n grant: %+v", name, chk, refusal.HostRAMCheck)
+				}
+				if declared > 0 && need > 0 && chk.PendingGiB != declared {
+					t.Errorf("%s: the check must count the %.0f GiB still to load, got %+v", name, declared, chk)
+				}
+				if got := epochNow(t, m); got != before {
+					t.Errorf("%s: the read-only check spent an epoch (%d -> %d)", name, before, got)
+				}
+				if recs, claims := recordFiles(t, m), claimFiles(t, m); len(recs) != len(recsBefore) || len(claims) != len(claimsBefore) {
+					t.Errorf("%s: the read-only check wrote records %v claims %v", name, recs, claims)
+				}
+				if ws := m.Waiters(); len(ws) != 0 {
+					t.Errorf("%s: the read-only check registered a waiter: %+v", name, ws)
+				}
+			}
+		}
+	}
+}
+
+// A need of 0 adds nothing to the host, so the check says yes without reading it (the grant does the same),
+// and a placer that asks about a lane that declares nothing costs the box no counter read.
+func TestHostRAMCheckOfNothingReadsNothing(t *testing.T) {
+	m, f := ramScoped(t, 99) // over the line already: a declaring lease would wait, a non-declaring one does not
+	if chk := m.HostRAMCheck(0); !chk.OK {
+		t.Fatalf("a need of 0 is always admitted: %+v", chk)
+	}
+	if n := f.reads.Load(); n != 0 {
+		t.Fatalf("a need of 0 read the host %d time(s)", n)
+	}
+	if chk := m.HostRAMCheck(5); chk.OK || f.reads.Load() == 0 {
+		t.Fatalf("a need of 5 on a host at 99 of 100 must be read and refused: %+v", chk)
 	}
 }

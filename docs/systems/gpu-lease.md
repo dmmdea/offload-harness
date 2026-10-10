@@ -1192,6 +1192,14 @@ admit iff projected <= physical RAM - gpu_host_ram_headroom_gib        (default 
   receives the parent's resolved number as `--ram` and declares exactly that. The card allocator applies the same function
   before it picks cards, advisory (it never refuses what the grant would admit: the media admission passes it the need
   against the largest card); the grant is the authority.
+* **Asked without taking: `Manager.HostRAMCheck(need)`.** A placement that wants to know whether this node would admit a
+  lane before it sends the lane here asks the node's own Manager, which applies the same function the grant calls
+  (`hostRAMCheckAgainst`: the host as it reads now, the not-yet-loaded part of the live leases, this Manager's headroom).
+  It takes no lease, registers no waiter, spends no epoch and writes nothing; a need of 0 is admitted without reading the
+  host. The answer carries the numbers and the refusal sentence, so a queued answer can quote the node's own words. The
+  grant stays the authority: a lease can land between the answer and the grant, and the grant re-checks under the epoch
+  lock (`TestHostRAMCheckIsTheRuleTheGrantApplies`: the verdict, the sentence and "can waiting cure it" agree with the
+  grant's over a table of hosts, needs and running leases, and nothing is written; `TestHostRAMCheckOfNothingReadsNothing`).
 * **One headroom, the configured one, on every surface.** `gpu_host_ram_headroom_gib` is installed for the whole process
   by `config.Load` (`gpulease.SetDefaultHostRAMHeadroom`, the way the orphan grace and the term limits are), so the grant, the
   card allocator and the status surfaces read one number whichever constructor built the Manager. It was a per-Manager setter

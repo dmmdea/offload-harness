@@ -179,22 +179,40 @@ func DeclaredHostRAMGiB(leases []Info) float64 {
 	return sum
 }
 
-// hostRAMRefusal applies the rule to a grant that declares opts.HostRAMGiB, given the leases live
-// at the moment (the caller reads them inside its critical section). nil admits. A lease that
-// declares nothing is never read against the host: the memory is not touched, so a box that is
-// already over is not made to wait for a job that adds nothing to it.
-func (m *Manager) hostRAMRefusal(opts Options, live []Info) *ErrHostRAM {
-	if opts.HostRAMGiB <= 0 {
-		return nil
+// hostRAMCheckAgainst is THE function that puts the admission rule to a need: the host's memory as it
+// reads now, the not-yet-loaded part of the leases in live, this Manager's headroom. The grant
+// (hostRAMRefusal, inside its critical section, with the leases it just read) and the read-only
+// per-node check (HostRAMCheck) both call it, so a placement that asks before it asks the node and the
+// node's own grant cannot disagree: there is one rule and one place that applies it. A need of 0 is
+// admitted without reading anything: it adds no memory, so a box that is already over is not made to
+// wait for a job that adds nothing to it.
+func (m *Manager) hostRAMCheckAgainst(needGiB float64, live []Info) gpuprobe.HostRAMCheck {
+	if needGiB <= 0 {
+		return gpuprobe.HostRAMCheck{OK: true}
 	}
 	mem, ok := m.hostMemory()
 	var pending float64
 	if len(live) > 0 {
 		pending = pendingGiB(live, m.heldGiB)
 	}
-	chk := gpuprobe.HostRAMAdmits(mem, ok, opts.HostRAMGiB, pending, m.HostRAMHeadroom())
-	if chk.OK {
-		return nil
+	return gpuprobe.HostRAMAdmits(mem, ok, needGiB, pending, m.HostRAMHeadroom())
+}
+
+// HostRAMCheck is the admission rule put to a need as it stands right now on THIS node: the host's
+// memory, the leases live now and this Manager's headroom, the sentence a refusal would carry. It is
+// read-only (it takes no lease, registers no waiter, spends no epoch and writes nothing), so a placer
+// can ask whether a lane would be admitted here before it asks the node to take it; the node's own
+// grant stays the authority, because a lease can land between this answer and the grant, and the grant
+// re-checks under the epoch lock. needGiB <= 0 is always admitted.
+func (m *Manager) HostRAMCheck(needGiB float64) gpuprobe.HostRAMCheck {
+	return m.hostRAMCheckAgainst(needGiB, m.Leases())
+}
+
+// hostRAMRefusal applies the rule to a grant that declares opts.HostRAMGiB, given the leases live
+// at the moment (the caller reads them inside its critical section). nil admits.
+func (m *Manager) hostRAMRefusal(opts Options, live []Info) *ErrHostRAM {
+	if chk := m.hostRAMCheckAgainst(opts.HostRAMGiB, live); !chk.OK {
+		return &ErrHostRAM{chk}
 	}
-	return &ErrHostRAM{chk}
+	return nil
 }
