@@ -214,7 +214,7 @@ test("runBatchJobs: a failure that is not a full disk or a dead server does not 
   }
 });
 
-test("isDiskFullError: by errno code, by flag, and by the words a child or ComfyUI reports it in", () => {
+test("isDiskFullError: by errno code, by flag, and by the errno token a child or ComfyUI reports it with", () => {
   for (const code of ["ENOSPC", "EDQUOT", "EROFS"]) assert.equal(isDiskFullError(Object.assign(new Error("x"), { code })), true, code);
   assert.equal(isDiskFullError(Object.assign(new Error("x"), { diskFull: true })), true);
   for (const text of [
@@ -222,8 +222,9 @@ test("isDiskFullError: by errno code, by flag, and by the words a child or Comfy
     "comfy-render exited 1: ENOSPC: no space left on device, write (writing renders/a.png)",
     "ComfyUI exec error: {\"exception_message\":\"[Errno 28] No space left on device\"}",
     "OSError: [Errno 122] Disk quota exceeded",
+    "OSError: [Errno 30] Read-only file system: 'x.png'",
+    "OSError: [WinError 112] There is not enough space on the disk",
     "EROFS: read-only file system, open 'x.png'",
-    "There is not enough space on the disk.",
   ]) assert.equal(isDiskFullError(new Error(text)), true, text);
   for (const text of [
     "EACCES: permission denied, open 'x.png'",
@@ -232,10 +233,21 @@ test("isDiskFullError: by errno code, by flag, and by the words a child or Comfy
     "comfy-render exited 1: ComfyUI exec error: node 5 failed",
     "connect ECONNREFUSED 127.0.0.1:8188",
     "ENOSPCX is not an errno",
+    "OSError: [Errno 2] No such file or directory: 'x.png'",
   ]) assert.equal(isDiskFullError(new Error(text)), false, text);
   assert.equal(isDiskFullError(undefined), false);
   assert.equal(isDiskFullError(null), false);
-  assert.equal(isDiskFullError("no space left on device"), true, "a bare string reason is read by its words");
+});
+
+// A ComfyUI exec error echoes the failing node's inputs, the prompt text among them. Prose is not an
+// errno: a picture of a monitor reading "no space left on device" must not stop an overnight batch.
+test("isDiskFullError: a prompt that merely mentions a full disk is not a full disk", () => {
+  for (const text of [
+    "ComfyUI exec error: {\"status_str\":\"error\",\"current_inputs\":{\"text\":[\"a monitor reading: no space left on device\"]}}",
+    "comfy-render exited 1: ComfyUI exec error: node 6 failed (a read-only file system banner, disk quota exceeded)",
+    "There is not enough space on the disk.",
+  ]) assert.equal(isDiskFullError(new Error(text)), false, text);
+  assert.equal(isDiskFullError("no space left on device"), false, "a bare prose reason is not an errno either");
 });
 
 test("renderExitError carries a child's full-disk reason through to the classifier (the child -> parent crossing)", () => {

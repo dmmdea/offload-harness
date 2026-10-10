@@ -82,14 +82,18 @@ export const BATCH_EXIT_JOBS_FAILED = 4;
 // The errnos that mean the volume an output goes to cannot take another byte: ENOSPC (full), EDQUOT
 // (quota used up) and EROFS (remounted read-only, which is what a failing disk does).
 export const DISK_FULL_CODES = Object.freeze(["ENOSPC", "EDQUOT", "EROFS"]);
-const DISK_FULL_TEXT = /\b(?:ENOSPC|EDQUOT|EROFS)\b|no space left on device|disk quota exceeded|read-only file system|not enough space on the disk/i;
+// In a message the errno is matched as a TOKEN, never as prose: ComfyUI's exec error echoes the failing
+// node's inputs, the prompt text among them, and a prompt that mentions a full disk must not stop a
+// batch. Node writes the name ("ENOSPC: no space left on device, write"), Python the number ("[Errno 28]
+// No space left on device"; 122 is EDQUOT, 30 is EROFS; "[WinError 112]" is Windows' own full disk).
+const DISK_FULL_TEXT = /\b(?:ENOSPC|EDQUOT|EROFS)\b|\[(?:Errno (?:28|122|30)|WinError 112)\]/;
 
 // isDiskFullError: does this failure say the output volume is full? By errno code when the error
-// came from an fs call in this process (comfy-inpaint renders in-process), and by its words when it
-// crossed a process boundary: a comfy-render child reports only its "RENDER FAILED:" line, and a
-// ComfyUI that cannot save its own output reports Python's "[Errno 28] No space left on device"
-// in an exec error. Every later job writes to the same place and fails the same way, which is why
-// this class stops a batch (runBatchJobs, inpaint-jobs.mjs batchAbort).
+// came from an fs call in this process (comfy-inpaint renders in-process), and by the errno token in
+// its message when it crossed a process boundary: a comfy-render child reports only its "RENDER
+// FAILED:" line, and a ComfyUI that cannot save its own output reports Python's "[Errno 28]" in an
+// exec error. Every later job writes to the same place and fails the same way, which is why this
+// class stops a batch (runBatchJobs, inpaint-jobs.mjs batchAbort).
 export function isDiskFullError(e) {
   if (e == null) return false;
   if (e.diskFull === true || DISK_FULL_CODES.includes(e.code)) return true;

@@ -196,8 +196,10 @@ the failed job and every later job get a row, the later ones with an `error` tha
 ComfyUI became unusable at job N/M`, and the batch exits non-zero and its teardown frees the card and
 the lease, instead of failing every remaining job against the same server (C-83: 3 min each, after a
 48-minute wait on the first). A full disk (0.178.0: `ENOSPC`, `EDQUOT` or `EROFS`, read from the
-errno where the runner renders in-process and from the child's `RENDER FAILED:` line or ComfyUI's
-own `[Errno 28] No space left on device` otherwise): the same stop, with `error` starting `not run:
+errno where the runner renders in-process and from the errno token in the child's `RENDER FAILED:`
+line or in ComfyUI's own `[Errno 28] No space left on device` otherwise; the name or number counts,
+never prose, because an exec error echoes the prompt and a prompt that mentions a full disk must not
+stop a batch): the same stop, with `error` starting `not run:
 the disk is full at job N/M, writing <out>`, exit 1 and the error line naming the path. It is
 deliberately batch-wide: the output directories of one batch are normally one volume. A failed job's
 `error` carries the child's own `RENDER FAILED:` reason rather than only `comfy-render exited N`.
