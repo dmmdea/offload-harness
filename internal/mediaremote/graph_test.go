@@ -208,9 +208,9 @@ func TestRunGraphOverflowMovesPastANodeThatLacksTheFile(t *testing.T) {
 	}
 }
 
-// Nobody holds the file: the call goes on to its own queue from when it came back, and the answer names, per node, the
-// files that node lacks. The row carries the first 300 bytes of the node's answer (post() truncates), so the refusal's
-// sentence is short enough that two real Wan file names land inside them.
+// Nobody holds the file: the call goes on to its own queue from when it came back, and the deferral it ends in (the local
+// lane here answers a place in line) names, per node, the files that node lacks. The row carries the first 300 bytes of the
+// node's answer (post() truncates), so the refusal's sentence is short enough that two real Wan file names land inside them.
 func TestRunGraphNobodyHoldsTheFileFallsBackNamingIt(t *testing.T) {
 	a := startGraphNode(t, "node-a", nil, 7.96)
 	b := startGraphNode(t, "node-b", []string{"models/vae/other.safetensors"}, 15.92)
@@ -543,4 +543,43 @@ func TestNoFleetBoxIsByteIdenticalForRunGraph(t *testing.T) {
 		t.Errorf("route local asks nothing: probes %d runs %d", probes, runs)
 	}
 	untouched(t, "the node", n)
+}
+
+// The release proof is not only an overflow rule. A node's file check ships with the release, so a node on another one is
+// not shown to make it, and that holds on every remote placement of a graph: route remote and a thin client's auto call
+// reach pickNodeFor, not the overflow's matcher, and read the same version. A node that publishes no version is on no release
+// this machine can name.
+func TestAGraphOnAnyRemoteRouteNeedsANodeOnThisRelease(t *testing.T) {
+	older := startNode(t, nodeOpts{id: "node-old", version: "0.1.0", healthEdit: withCards(7.96),
+		cfg: func(c *config.Config) { c.ComfyDir = graphTreeWith(t, krea2File) }})
+	unversioned := startNode(t, nodeOpts{id: "node-none",
+		healthEdit: func(m map[string]any) { withCards(7.96)(m); delete(m, "harness_version") },
+		cfg:        func(c *config.Config) { c.ComfyDir = graphTreeWith(t, krea2File) }})
+
+	for _, route := range []string{"remote", "auto-thin-client"} {
+		cfg := graphClient(t, older, unversioned)
+		mode := route
+		if route == "auto-thin-client" {
+			stubLocalRoutes(t, configured()) // this machine has no run_graph route: no queue to wait in, so the call leaves
+			mode = "auto"
+		}
+		res := Run(context.Background(), cfg, &laneRunner{}, graphReqOf(t, krea2Graph, nil), mode, nil)
+		if res.OK || !res.Deferred {
+			t.Fatalf("%s: a graph is not sent to a node on another release: %s", route, brief(res))
+		}
+		for _, want := range []string{"node-old", "harness 0.1.0", "node-none", "(none published)", localVersion} {
+			if !strings.Contains(res.Reason, want) {
+				t.Errorf("%s: the refusal names every miss and the release it wanted (%q is missing): %s", route, want, res.Reason)
+			}
+		}
+		noPosts(t, "the node on another release", older)
+		noPosts(t, "the node that publishes no release", unversioned)
+	}
+
+	// A node on this release takes it on the same routes (the control: the check refuses the version, not the route).
+	same := startGraphNode(t, "node-same", []string{krea2File}, 7.96)
+	cfg := graphClient(t, older, same)
+	if res := Run(context.Background(), cfg, &laneRunner{}, graphReqOf(t, krea2Graph, nil), "remote", nil); !res.OK || res.Meta.Node != "node-same" {
+		t.Errorf("route remote skips the node on another release and takes the one on this release: %s", brief(res))
+	}
 }

@@ -269,8 +269,11 @@ type overflowOutcome struct {
 	note string
 }
 
-// annotate adds the cluster block to a local result that is a deferral, and quotes it in the reason. A result that is
-// not a deferral (the call ran here) and a call the fleet was never asked about are returned untouched.
+// annotate adds what the fleet attempt came to to a local result that is a deferral: the cluster block (a row per node that
+// could not take the call) and the note (why the fleet was not asked at all), each in the data and quoted in the reason. A
+// result that is not a deferral (the call ran here and succeeded) is returned untouched, and so is any result when the attempt
+// left neither a row nor a note, and a deferral whose data is not a JSON object; a call the fleet was not asked about is
+// annotated, with its note, when it defers.
 func (o overflowOutcome) annotate(res core.Result) core.Result {
 	if (len(o.rows) == 0 && o.note == "") || res.OK || !res.Deferred {
 		return res

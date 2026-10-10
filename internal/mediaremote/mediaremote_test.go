@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dmmdea/offload-harness/internal/buildinfo"
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/fleetnode"
@@ -151,7 +152,8 @@ type nodeOpts struct {
 	cfg         func(*config.Config)
 	routes      func(config.Config) []mediacap.Route
 	hold        chan struct{} // see nodeRunner.hold; the test closes it
-	// id is the node id health publishes ("" = render-node) and version its harness_version ("" = none).
+	// id is the node id health publishes ("" = render-node) and version its harness_version ("" = this build's, as every real
+	// node publishes one; a test that wants a node with none deletes the key with healthEdit).
 	id, version string
 	// lease, when set, is the node's GPU lease as health reads it (a held lease makes the node busy).
 	lease func() gpulease.Info
@@ -195,11 +197,15 @@ func startNode(t *testing.T, o nodeOpts) *node {
 	if o.cfg != nil {
 		o.cfg(&cfg)
 	}
+	version := o.version
+	if version == "" {
+		version = buildinfo.Version
+	}
 	r := &nodeRunner{media: media, hold: o.hold, deferAs: o.deferAs, deferClass: o.deferClass}
 	jobs := fleetnode.NewJobs(time.Hour, cfg.FleetConcurrencyLimit())
 	t.Cleanup(func() { jobs.DrainAndStop(2 * time.Second) })
 	s := fleetnode.New(r, jobs, fleetnode.Options{
-		NodeID: nodeID(o.id), Version: o.version, Cfg: cfg, GpuVendor: "nvidia", GpuArch: "ampere", Lease: o.lease,
+		NodeID: nodeID(o.id), Version: version, Cfg: cfg, GpuVendor: "nvidia", GpuArch: "ampere", Lease: o.lease,
 		Snapshot: func() (fleetnode.Snapshot, bool) {
 			// One card, as a single-GPU render node publishes it (a 16 GB card reads 15.92 GiB): a whole-node graph is placed
 			// only on a node that says it has one (graph.go), and the tests that mean otherwise edit gpu_devices themselves.
@@ -837,8 +843,10 @@ func fakeNode(t *testing.T, o fakeOpts) *httptest.Server {
 		o.log.note(r.URL.EscapedPath(), strings.HasPrefix(r.URL.Path, "/fleet/jobs/"))
 		switch {
 		case r.URL.Path == "/fleet/health":
-			// One card (see startNode): the graph tests place a whole-node graph only on a node that publishes one.
-			extra := `,"gpu_devices":[{"index":0,"uuid":"GPU-fake-0","name":"test card","vram_total_gb":15.92,"vram_free_gb":12}]`
+			// One card (see startNode): the graph tests place a whole-node graph only on a node that publishes one. And this
+			// build's release, as every real node publishes it: a graph is placed only on a node that proves it runs the release
+			// whose file check it relies on.
+			extra := `,"harness_version":"` + buildinfo.Version + `","gpu_devices":[{"index":0,"uuid":"GPU-fake-0","name":"test card","vram_total_gb":15.92,"vram_free_gb":12}]`
 			if o.routes != "" {
 				extra += `,"media_routes":` + o.routes
 			}

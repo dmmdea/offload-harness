@@ -596,7 +596,8 @@ func pickNode(ctx context.Context, cfg config.Config, bases []string, task, door
 }
 
 // pickNodeFor is pickNode for a call that asks something more of the node (need): an image job sent with refine=false
-// needs a node that carries it, and a node that does not is a named miss.
+// needs a node that carries it, and a graph needs a node on this release (releaseRefuses) with one card and the card size it
+// asked for (refuses); a node that does not is a named miss.
 func pickNodeFor(ctx context.Context, cfg config.Config, bases []string, task, doorTask string, routes []string, n need) (base, node string, err error) {
 	type cand struct {
 		base, node string
@@ -637,6 +638,10 @@ func pickNodeFor(ctx context.Context, cfg config.Config, bases []string, task, d
 		}
 		if n.refineOff && task == taskImage && !v.RefineHonoured {
 			misses = append(misses, fmt.Sprintf("%s: does not honour refine=false (an older harness would refine the prompt anyway)", who))
+			continue
+		}
+		if why := n.releaseRefuses(v); why != "" {
+			misses = append(misses, fmt.Sprintf("%s: %s", who, why))
 			continue
 		}
 		if why := n.refuses(v); why != "" {

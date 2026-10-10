@@ -6,8 +6,11 @@ package mediaremote
 // every file the graph names, and the NODE decides that at its door (internal/fleetnode graph_files.go answers 503 naming
 // what it lacks, which the placer treats like any refusal at the door: the call goes on to the next node). The delegator
 // therefore sends no family and no digest, and asks of a candidate only what it can read from health: that it serves
-// run-graph with the route configured, runs this release (the file check ships with it), holds no lease, and the two rules
-// below.
+// run-graph with the route configured, runs this release (the file check ships with it: an equal harness_version is the
+// proof, releaseRefuses), holds no lease, and the two rules below. The release and the two rules hold for EVERY remote
+// placement of a graph: the overflow asks them in matchGraph, and the calls that must leave this machine (route remote, a
+// thin client's auto) in pickNodeFor, which asks the task, the route, a text lease, the release and the two rules, not the
+// media lease the overflow also reads.
 //
 // ONE CARD. A graph the operator did not pin to cards holds the whole node and runs in the default ComfyUI instance, which
 // sees every card. On a node with several cards that instance can land on the display card, and the delegator cannot tell
@@ -19,12 +22,13 @@ package mediaremote
 // INPUT FILES. The files a graph's input loaders read (LoadImage, LoadVideo, LoadAudio) are the caller's own and carry
 // generic names (image.png, ComfyUI_00001_.png [output]) that two machines share with different bytes. A node can match one
 // only by name, so a node holding a same-named file would run the graph on the wrong bytes and answer ok with a verified
-// file. A graph that reads one is therefore never auto-overflowed: the call waits for this machine's own lane, and the answer
-// says the fleet was not asked and why (overflowOutcome.note). Carrying a size and a hash of each file to the node, which
-// would restore the overflow for such graphs, is a named seam, not built. A call that must leave this machine anyway (route
-// remote, or auto on a machine with no graph lane of its own, which has no queue to wait in) keeps the node's check by name:
-// refusing it would turn a placement into a refusal, and the files it names live wherever the caller put them. The
-// same-named-file risk stays there, a named limit.
+// file. A graph that reads one is therefore never auto-overflowed: the call waits for this machine's own lane. When that wait
+// ends in a deferral, the deferral says the fleet was not asked and why (overflowOutcome.note: in its reason, and in its data
+// as fleet_note); a call that then runs here and succeeds carries no note, because annotate leaves a result that is not a
+// deferral untouched. Carrying a size and a hash of each file to the node, which would restore the overflow for such graphs,
+// is a named seam, not built. A call that must leave this machine anyway (route remote, or auto on a machine with no graph
+// lane of its own, which has no queue to wait in) keeps the node's check by name: refusing it would turn a placement into a
+// refusal, and the files it names live wherever the caller put them. The same-named-file risk stays there, a named limit.
 //
 // MIN_VRAM_GB. A call can ask for a node whose largest card is at least N GB. Without the argument a graph that names the
 // family wan22 (model_family) and carries a height of 720 or more gets the default floor of 16 GB, CHOSEN from the film
@@ -176,6 +180,18 @@ func graphNeedOf(req core.Request) *graphNeed {
 	return g
 }
 
+// releaseRefuses says why node v cannot take a run_graph for want of this release, "" when it can or the call is not a
+// graph. A node's file check ships with the release and an equal harness_version is the only proof this client can read that
+// a node has it, so a node on another release (or one that publishes none) is not shown to make the check. Every remote
+// placement of a graph asks it: the overflow (matchGraph) and the calls that must leave this machine (pickNodeFor: route
+// remote, a thin client's auto), which is why it is a rule of the call's need and not of one matcher.
+func (n need) releaseRefuses(v delegate.NodeView) string {
+	if n.graph == nil || v.HarnessVersion == localVersion {
+		return ""
+	}
+	return fmt.Sprintf("runs harness %s and this machine %s: a graph's file check ships with the release, and a node on another one is not shown to make it", shownVersion(v.HarnessVersion), localVersion)
+}
+
 // refuses says why node v cannot take this call by the two rules above, "" when it can. It reads only what health
 // publishes: gpu_devices[] (nil is unknown, and unknown is never enough).
 func (n need) refuses(v delegate.NodeView) string {
@@ -226,8 +242,8 @@ func matchGraph(v delegate.NodeView, n need) (nodeMatch, bool) {
 	if !contains(v.Tasks, taskRunGraph) {
 		return miss("does not serve " + taskRunGraph)
 	}
-	if v.HarnessVersion != localVersion {
-		return miss(fmt.Sprintf("runs harness %s and this machine %s: a graph's file check ships with the release, and a node on another one is not shown to make it", shownVersion(v.HarnessVersion), localVersion))
+	if why := n.releaseRefuses(v); why != "" {
+		return miss(why)
 	}
 	if st, known := v.RouteState("run_graph"); known && st != delegate.MediaRouteConfigured {
 		return miss(fmt.Sprintf("its route run_graph is %s on that node", st))

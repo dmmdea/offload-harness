@@ -5,7 +5,8 @@ package mediaremote
 // INPUT FILES. A graph's input files (LoadImage, LoadVideo, LoadAudio) are the caller's own, with names two machines share
 // with different bytes (image.png, ComfyUI_00001_.png [output]). A node can match one only by name, so a node holding a
 // same-named file would run the graph on the wrong bytes and answer ok with a sha-verified file. A graph that reads one
-// therefore never auto-overflows: it waits for its own lane, and the answer says why the fleet was not asked.
+// therefore never auto-overflows: it waits for its own lane, and when that wait ends in a deferral the deferral says why the
+// fleet was not asked. A call that then runs here and succeeds says nothing about the fleet (annotate touches only a deferral).
 
 import (
 	"context"
@@ -62,6 +63,22 @@ func TestRunGraphThatReadsAnInputFileStaysOnThisMachine(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The note is on a deferral and only on one: a graph that reads an input file whose local run then succeeds is the caller's
+// answer as the lane gave it, with nothing added about the fleet and no node asked.
+func TestAnInputFileGraphThatRunsHereAfterTheWaitCarriesNoFleetNote(t *testing.T) {
+	n := startGraphNode(t, "node-b", []string{krea2File, "input/ref.png"}, 7.96)
+	cfg := graphClient(t, n)
+	lr := &laneRunner{verdict: heldLane()} // the lane frees up and the local run succeeds
+	res := Run(context.Background(), cfg, lr, graphReqOf(t, refGraph, nil), "auto", nil)
+	if probes, runs := lr.counts(); !res.OK || probes != 1 || runs != 1 {
+		t.Fatalf("the graph waits for its own lane and runs there: probes %d runs %d (%s)", probes, runs, brief(res))
+	}
+	if _, has := decode(t, res)["fleet_note"]; has || strings.Contains(res.Reason, "by name") {
+		t.Errorf("a result that is not a deferral carries no note about the fleet: %s", string(res.Data))
+	}
+	untouched(t, "the node", n)
 }
 
 // The rule is about a file being read. An input loader fed by a link reads no file of its own, and a graph that reads
