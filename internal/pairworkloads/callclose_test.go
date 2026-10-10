@@ -410,6 +410,57 @@ func TestAHungPairDelaysTheAnswerByItsBoundNotForever(t *testing.T) {
 	}
 }
 
+// The relay member's terminal path for a card another box opened is parked before its post like any
+// other, as long as THIS member still holds the card's in-flight marker in memory (the common case: the
+// producer's frames arrive within one member process). A member that restarted between the in-flight
+// frame and the terminal one finds the marker by name instead and writes the pending verdict only if the
+// post fails (TestRelayedTerminalRemovesTheMarkerAfterAMemberRestart); that case is not pinned here.
+func TestARelayedTerminalFrameIsParkedBeforeItsPostWhileTheMemberHoldsTheMarker(t *testing.T) {
+	m := newRelayMember(t)
+	arrived := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if strings.Contains(peekBody(req), `"workload:completed"`) {
+			once.Do(func() { close(arrived) })
+			<-release // the member's post of the terminal frame hangs here
+		}
+		m.pair.handler(w, req)
+	}))
+	defer srv.Close()
+	m.e = New(Config{Enabled: true, Endpoint: srv.URL, AppDir: m.appDr, OpenDir: m.open})
+	defer m.e.Wait()
+	defer close(release)
+	m.relayOne(t, relayFrame(t, "workload:submitted", queuedInfo(), map[string]any{"node": "node-v"}), "node-q")
+	done := queuedInfo()
+	done["state"], done["completedAt"], done["startedAt"] = "completed", 2000, 1100
+	ev, err := ParseRelay(relayFrame(t, "workload:completed", done, map[string]any{"node": "node-v"}), "node-q")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.e.Emit(ev)
+	select {
+	case <-arrived:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the terminal post never reached the ingress")
+	}
+	ents, _ := os.ReadDir(m.open)
+	if len(ents) != 1 || !strings.HasSuffix(ents[0].Name(), remoteSuffix) {
+		t.Fatalf("register = %v, want the one relayed marker", ents)
+	}
+	raw, err := os.ReadFile(filepath.Join(m.open, ents[0].Name()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mk openMarker
+	if err := json.Unmarshal(raw, &mk); err != nil {
+		t.Fatal(err)
+	}
+	if !mk.Pending || !mk.Remote || string(mk.Info["state"]) != `"completed"` {
+		t.Fatalf("while the terminal post is in flight the relayed marker must already hold the verdict: pending=%v remote=%v state=%s", mk.Pending, mk.Remote, mk.Info["state"])
+	}
+}
+
 // The wait for the frame a ledger row claimed is bounded as well. The observer's goroutine posts that frame
 // after planning it (a relay's health probe, a cold read of the PAIR identity), and a stall there that no
 // deadline covers would hold the call's answer for as long as it lasts. end waits for the row's signal at
