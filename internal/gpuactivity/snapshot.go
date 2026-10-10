@@ -37,6 +37,11 @@ type Options struct {
 	// on/off) inject idle or busy cards without touching the real driver. See
 	// internal/mcpserver's statusGPUSampler var for how offload_status wires it.
 	Sampler func(ctx context.Context) ([]GPU, error)
+	// ProcSampler overrides how the processes on the cards are listed when SampleGPU is true. Nil
+	// (the production default) means SampleProcesses (nvidia-smi --query-compute-apps). The same
+	// seam as Sampler, for the same reason: how a display card's desktop is folded
+	// (View.splitProcesses) is only testable through a status call with process rows of its own.
+	ProcSampler func(ctx context.Context) ([]GPUProcess, error)
 	// Scope fills in the effective cards of a legacy whole-node lease (the evidence rule lives
 	// in modelaffinity, which imports this package, so the caller hands it in). nil = the
 	// lease's declared devices only.
@@ -294,7 +299,11 @@ func Snapshot(ctx context.Context, opts Options) View {
 			v.GPUErr = "nvidia-smi: " + gerr.Error()
 		} else {
 			v.GPUs = gpus
-			if procs, perr := SampleProcesses(ctx); perr == nil {
+			procSample := opts.ProcSampler
+			if procSample == nil {
+				procSample = SampleProcesses
+			}
+			if procs, perr := procSample(ctx); perr == nil {
 				v.Processes = procs
 			}
 		}
@@ -500,21 +509,111 @@ func holderTail(v View) string {
 }
 
 func processTail(v View) string {
-	if len(v.Processes) == 0 {
+	listed, folded := v.splitProcesses()
+	if len(listed) == 0 && len(folded) == 0 {
 		return ""
 	}
-	names := make([]string, 0, len(v.Processes))
+	var parts []string
+	if len(listed) > 0 {
+		names := make([]string, 0, len(listed))
+		for _, p := range listed {
+			names = append(names, fmt.Sprintf("%s (pid %d)", shortName(p.Name), p.PID))
+		}
+		sort.Strings(names)
+		const keep = 6
+		more := ""
+		if len(names) > keep {
+			more = fmt.Sprintf(" and %d more", len(names)-keep)
+			names = names[:keep]
+		}
+		parts = append(parts, "on the cards: "+strings.Join(names, ", ")+more)
+	}
+	// The desktop is counted, not named: sorted by name and cut at six, thirty window rows pushed
+	// the one process that is not the desktop into "and N more" (the same noise as the JSON list).
+	for _, f := range folded {
+		parts = append(parts, f.Sentence())
+	}
+	return "; " + strings.Join(parts, "; ")
+}
+
+// DisplayCardProcs is the one summary that stands in for the processes nvidia-smi lists on a
+// display card and cannot size. On Windows (WDDM) that is the whole desktop: explorer, every
+// browser, the chat apps, 31 rows on the reference 3-card box, each used_known=false. Listed one
+// by one they buried the single process that mattered (a python on a work card) in the lease view
+// an agent reads first (F18, 2026-10-09), and they say nothing about the lease. Counted per card
+// instead; the complete list is nvidia-smi's own (docs/systems/gpu-lease.md).
+type DisplayCardProcs struct {
+	Index   int    `json:"index"`
+	GPUUUID string `json:"gpu_uuid,omitempty"`
+	Name    string `json:"name"`
+	Count   int    `json:"count"`
+}
+
+// Sentence is the summary as `gpu status` prints it.
+func (d DisplayCardProcs) Sentence() string {
+	noun := "desktop processes"
+	if d.Count == 1 {
+		noun = "desktop process"
+	}
+	return fmt.Sprintf("%d %s on the display card (card %d, %s), memory unknown (WDDM)", d.Count, noun, d.Index, d.Name)
+}
+
+// screenCards returns, lower-cased, the cards the card table marks "display": display_active OR
+// display_attached (gpuprobe.ScreenCardUUIDs, the placement rule). The desktop lives on the
+// monitor's card, and a sleeping screen closes none of its windows; but with the screen asleep
+// display_active reads Disabled on every card while display_attached stays Yes on the monitor's
+// (display.go, measured 2026-10-03), so the load-attribution rule (displayCards: display_active
+// alone) would fold nothing exactly when an unattended session reads the lease. Empty on a box
+// with no non-display card: its only card is its work card (the single-card guard every display
+// rule carries).
+func screenCards(v View) map[string]bool {
+	devs := make([]gpuprobe.Device, 0, len(v.GPUs))
+	for _, g := range v.GPUs {
+		devs = append(devs, gpuprobe.Device{UUID: g.UUID, DisplayActive: g.DisplayActive, DisplayAttached: g.DisplayAttached})
+	}
+	out := map[string]bool{}
+	for id := range gpuprobe.ScreenCardUUIDs(devs) {
+		out[strings.ToLower(id)] = true
+	}
+	return out
+}
+
+// splitProcesses separates the processes worth a row of their own from the ones a display card's
+// summary stands for. A row is folded only when BOTH hold: nvidia-smi could not size it
+// (UsedKnown false, which is WDDM's answer for every process) AND it sits on a card that drives a
+// screen. A row with a known size, a row on any other card (the python that holds a work card is
+// unsized too) and a row that names no card stay listed: absent evidence is never "it is only the
+// desktop". Counts are distinct pids per card. With no display card the processes come back as
+// they are (nil stays nil, so a sample-less view keeps omitting the key); with one, listed is
+// never nil.
+func (v View) splitProcesses() (listed []GPUProcess, folded []DisplayCardProcs) {
+	screen := screenCards(v)
+	if len(screen) == 0 {
+		return v.Processes, nil
+	}
+	cards := make(map[string]GPU, len(screen))
+	for _, g := range v.GPUs {
+		cards[strings.ToLower(g.UUID)] = g
+	}
+	pids := map[string]map[int]bool{}
+	listed = make([]GPUProcess, 0, len(v.Processes))
 	for _, p := range v.Processes {
-		names = append(names, fmt.Sprintf("%s (pid %d)", shortName(p.Name), p.PID))
+		id := strings.ToLower(p.GPUUUID)
+		if p.UsedKnown || !screen[id] {
+			listed = append(listed, p)
+			continue
+		}
+		if pids[id] == nil {
+			pids[id] = map[int]bool{}
+		}
+		pids[id][p.PID] = true
 	}
-	sort.Strings(names)
-	const keep = 6
-	more := ""
-	if len(names) > keep {
-		more = fmt.Sprintf(" and %d more", len(names)-keep)
-		names = names[:keep]
+	for id, on := range pids {
+		g := cards[id]
+		folded = append(folded, DisplayCardProcs{Index: g.Index, GPUUUID: g.UUID, Name: g.Name, Count: len(on)})
 	}
-	return "; on the cards: " + strings.Join(names, ", ") + more
+	sort.Slice(folded, func(i, j int) bool { return folded[i].Index < folded[j].Index })
+	return listed, folded
 }
 
 func shortName(p string) string {
@@ -548,7 +647,13 @@ func (v View) Map() map[string]any {
 		m["gpus"] = v.GPUs
 	}
 	if v.Processes != nil {
-		m["gpu_processes"] = v.Processes
+		// A display card's unsizable processes are one count per card, not one row per window
+		// (DisplayCardProcs); everything else is listed as it always was.
+		listed, folded := v.splitProcesses()
+		m["gpu_processes"] = listed
+		if len(folded) > 0 {
+			m["display_card_processes_unknown"] = folded
+		}
 	}
 	if v.GPUErr != "" {
 		m["gpu_error"] = v.GPUErr

@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -488,5 +490,70 @@ func TestGPUStatusKeepsAnOwedMarkerUnlessTheCardIsFreeAndTheSeatIsSettledLoaded(
 				t.Errorf("a marker that stays is still printed:\n%s", out)
 			}
 		})
+	}
+}
+
+// The headline says what holds the card: a LEASE of a class. "GPU: held by text  pid 792210"
+// read as a text SEAT holding the card, and two sessions argued over who held it (F9,
+// 2026-10-07); the holder was a bench's reservation. Both classes say "lease", and an
+// exclusive one keeps saying so.
+func TestGPUStatusHeadlineNamesALeaseOfAClassNotABareClass(t *testing.T) {
+	for _, tc := range []struct {
+		class     gpulease.Class
+		exclusive bool
+		want      string
+	}{
+		{gpulease.ClassText, true, "a text-class lease"},
+		{gpulease.ClassText, false, "a text-class lease"},
+		{gpulease.ClassMedia, false, "a media-class lease"},
+	} {
+		name := string(tc.class)
+		if tc.exclusive {
+			name += "-exclusive"
+		}
+		t.Run(name, func(t *testing.T) {
+			cfg, m := leaseFixture(t)
+			useQuietStatus(t, nil, errors.New("nvidia-smi not found"))
+			l, err := m.TryAcquire(tc.class, gpulease.Options{Reason: "bench", TTL: time.Hour, Exclusive: tc.exclusive})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = l.Release() }()
+
+			text := captureStdout(t, func() {
+				if err := runGPUStatus([]string{"--config", cfg}); err != nil {
+					t.Fatal(err)
+				}
+			})
+			head := "GPU: held by " + tc.want + "  pid " + strconv.Itoa(os.Getpid()) + "  epoch "
+			if !strings.Contains(text, head) {
+				t.Errorf("the headline must lead with %q:\n%s", head, text)
+			}
+			if bare := "held by " + string(tc.class) + " "; strings.Contains(text, bare) {
+				t.Errorf("the headline names the bare class (%q), which reads as a seat holding the card:\n%s", bare, text)
+			}
+			if excl := strings.Contains(text, "(exclusive: text loads wait or route elsewhere)"); excl != (tc.exclusive && tc.class == gpulease.ClassText) {
+				t.Errorf("an exclusive text lease keeps saying so (and a plain one does not): exclusive line present = %v\n%s", excl, text)
+			}
+		})
+	}
+}
+
+// The error a fail-fast detached reserve (--wait 0) reports when another reservation won the card
+// names that holder as a LEASE of a class too: "another holder took the GPU first: text (pid ..."
+// read as a text seat, the same defect as the headline above.
+func TestForeignHolderErrorNamesALeaseOfAClassNotABareClass(t *testing.T) {
+	for _, tc := range []struct {
+		class gpulease.Class
+		want  string
+	}{
+		{gpulease.ClassText, `another holder took the GPU first: a text-class lease (pid 4242, reason "kv bench")`},
+		{gpulease.ClassMedia, `another holder took the GPU first: a media-class lease (pid 4242, reason "kv bench")`},
+		{gpulease.Class(""), `another holder took the GPU first: a lease (pid 4242, reason "kv bench")`},
+	} {
+		got := foreignHolderError(gpulease.Info{Held: true, Class: tc.class, PID: 4242, Reason: "kv bench"}).Error()
+		if got != tc.want {
+			t.Errorf("class %q: got %q, want %q", string(tc.class), got, tc.want)
+		}
 	}
 }

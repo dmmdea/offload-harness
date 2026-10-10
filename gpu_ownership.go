@@ -237,10 +237,17 @@ func ownershipStatusLines(h *gpuactivity.Holder, info gpulease.Info) []string {
 	default:
 		// UNKNOWN. "No owner recorded" is true only when none is; a recorded owner that could
 		// not be tracked (its session was never in the registry, or the registry could not be
-		// read) is a different statement, and the note says which.
+		// read) is a different statement, and the note says which. A lease with NO owner can still
+		// carry the label of who asked for it (--origin): a bench launched from a unit with no
+		// session in its environment was known by that label alone, and the line called it
+		// "unknown" while only `reason:` named the holder (F9, 2026-10-07). The label is shown
+		// and nothing else changes: it is not an owner, so the lease is still never orphaned.
 		switch {
 		case h.OwnerNote != "":
 			state = h.OwnerNote + ": never orphaned, judged by its declared window only"
+		case who == "unknown" && strings.TrimSpace(h.Origin) != "":
+			who = "none recorded"
+			state = fmt.Sprintf("origin %q; never orphaned, judged by its declared window only", strings.TrimSpace(h.Origin))
 		default:
 			state = "no owner recorded: never orphaned, judged by its declared window only"
 		}

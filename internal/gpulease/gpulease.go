@@ -83,6 +83,23 @@ const (
 // that never itself holds the lease, never mind acquires it.
 func (c Class) Valid() bool { return c == ClassMedia || c == ClassText }
 
+// LeasePhrase is the class as a sentence names a holder: "a text-class lease". The bare class
+// word ("GPU: held by text  pid 792210") read as a text SEAT holding the card, and on 2026-10-07
+// two sessions argued over who held it while one was looking at a bench's reservation. The class
+// only labels what the reservation is for, so every surface that names a holder says "lease".
+// An empty class (a claim still in progress, a record that never carried one) is just "a lease".
+func (c Class) LeasePhrase() string {
+	s := strings.TrimSpace(string(c))
+	if s == "" {
+		return "a lease"
+	}
+	article := "a"
+	if strings.ContainsRune("aeiou", rune(strings.ToLower(s)[0])) {
+		article = "an"
+	}
+	return article + " " + s + "-class lease"
+}
+
 const (
 	// DefaultHeartbeatTTL is how long a holder may go without renewing before the
 	// heartbeat is considered stale. Deliberately generous: under a saturating
@@ -187,8 +204,9 @@ func (e *ErrHeld) Error() string {
 }
 
 func (e *ErrHeld) baseError() string {
+	// The holder is a LEASE of a class, never "held by text": that read as a text seat (LeasePhrase).
 	s := fmt.Sprintf("GPU held by %s (pid %d, held %s, reason %q",
-		e.Info.Class, e.Info.PID, e.Info.Age.Round(time.Second), e.Info.Reason)
+		e.Info.Class.LeasePhrase(), e.Info.PID, e.Info.Age.Round(time.Second), e.Info.Reason)
 	if e.Info.Exclusive {
 		s += ", exclusive"
 	}
@@ -1324,7 +1342,7 @@ func (m *Manager) removeStaleClaim(judged *Meta) error {
 // already read.
 //
 // A fresh Inspect() can lose a race with the holder's release and return a ZERO Info,
-// which renders as `gpu busy:  holds the lease (0s, reason "")`. That string is not
+// which renders as `gpu busy: held by a lease (0s, reason "")`. That string is not
 // decoration: it is what an agent reads to decide whether retrying is worth it.
 func (m *Manager) holderInfo(meta *Meta) Info {
 	if info := m.Inspect(); info.Held {

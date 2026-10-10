@@ -267,8 +267,10 @@ func runGPUStatus(args []string) error {
 	if info.Command != "" {
 		excl += "\n  running: " + info.Command
 	}
+	// "held by a text-class lease", never "held by text": the bare class read as a text SEAT holding
+	// the card (2026-10-07, a bench's reservation taken for a model). The class labels a reservation.
 	fmt.Printf("GPU: held by %s  pid %d  epoch %d  for %s  expires %s%s\n  reason: %s\n  queue behind it: %s\n",
-		info.Class, info.PID, info.Epoch, info.Age.Round(time.Second),
+		info.Class.LeasePhrase(), info.PID, info.Epoch, info.Age.Round(time.Second),
 		info.ExpiresAt.Format(time.Kitchen), excl, info.Reason, queueHint)
 	if len(info.Devices) > 0 {
 		fmt.Printf("  cards: %s (a card-scoped lease; other cards are not fenced by it)\n", strings.Join(info.Devices, ", "))
@@ -328,7 +330,7 @@ func runGPUReserve(args []string) error {
 	class := fs.String("class", "text", "lease class: text (a measurement/bench) or media (a generation job)")
 	dur := fs.Duration("for", 45*time.Minute, "how long the card is needed; stamped as the lease's declared window")
 	reason := fs.String("reason", "", "why the card is held (shown to whoever is waiting)")
-	origin := fs.String("origin", "", "who asked for it (session/host)")
+	origin := fs.String("origin", "", "who asked for it (a label: session/host); gpu status shows it in the owner line when no session or pid owner is recorded")
 	detach := fs.Bool("detach", false, "hold the lease in a hidden background process instead of wrapping a command")
 	drain := fs.Bool("drain", false, "after taking the lease, wait until the agent seat is IDLE — no request running or waiting on the engine, no load in progress, no registered agent run — before continuing; the lease is stamped DRAINING meanwhile (new runs wait, in-flight runs complete) and exclusive only once idle; a drain that misses its deadline releases the lease and exits non-zero")
 	drainTimeout := fs.Duration("drain-timeout", 0, "how long --drain waits for in-flight work; 0 (the default) = the rest of the --wait queue budget, never under 2m — one 27B step runs 3-4 min, which is why a fixed 2m window failed twice on 2026-09-14")
@@ -739,6 +741,14 @@ func heldHint(err error, wait time.Duration) error {
 	return fmt.Errorf("%w; not free within --wait %s — pass a longer --wait to keep queueing", err, wait)
 }
 
+// foreignHolderError is what a fail-fast detached reserve (--wait 0) reports when the lease it
+// finds is not its child's: another reservation won the card first. The holder is named as a LEASE
+// of a class, the phrase `gpu status` leads with (gpulease.Class.LeasePhrase), not as "text".
+func foreignHolderError(info gpulease.Info) error {
+	return fmt.Errorf("another holder took the GPU first: %s (pid %d, reason %q)",
+		info.Class.LeasePhrase(), info.PID, info.Reason)
+}
+
 // detachHolder spawns a HIDDEN child that owns the lease, so the lease's holder pid is
 // a real, observable process rather than this short-lived CLI invocation. With a
 // positive wait the CHILD queues (gpu hold acquires with the same --wait) and this
@@ -838,8 +848,7 @@ func detachHolder(fs *flag.FlagSet, class string, dur, wait time.Duration, opts 
 		// exit (above) be the verdict when the line does not move in time.
 		if info.Held && info.PID != childPID {
 			if wait <= 0 {
-				return 0, fmt.Errorf("another holder took the GPU first: %s (pid %d, reason %q)",
-					info.Class, info.PID, info.Reason)
+				return 0, foreignHolderError(info)
 			}
 			if queuedBehind != info.PID {
 				queuedBehind = info.PID

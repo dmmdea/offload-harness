@@ -36,7 +36,7 @@ other on a single shared card.
 | `internal/gpulease/explain.go` | the sentence a waiter reads when the lease it is queued behind is stalled, orphaned or overdue, and the installed orphan grace. READ-ONLY: it reads the orphan marker a status surface recorded and never writes it or takes the epoch lock |
 | `gpu_ownership.go` | the ownership flags (`--owner-*`, `--unattended`, `--progress-file`, `--stall`, `--yield-grace`, `--on-yield`), the `gpu owner-flags` verb, and the ownership lines of `gpu status` |
 | `gpu_drain.go` | `--drain`: waits until the seat's gauge AND the run registry are empty, inside the queue budget; restamps `draining` → `exclusive`; unload / warm-back |
-| `internal/gpuactivity` | the RUN REGISTRY (`<state root>/gpu/activity/`, one record per agent loop in flight) and the activity reading behind `gpu status` / `offload_status.gpu_lease` (`verdict`, `activity`) — ADR 0041; `holders.go` derives each live lease's standing, `facts.go` the activity facts of a legacy lease |
+| `internal/gpuactivity` | the RUN REGISTRY (`<state root>/gpu/activity/`, one record per agent loop in flight) and the activity reading behind `gpu status` / `offload_status.gpu_lease` (`verdict`, `activity`) — ADR 0041; `holders.go` derives each live lease's standing, `facts.go` the activity facts of a legacy lease, `snapshot.go` (`View.Map`, `splitProcesses`) the one JSON shape both surfaces read, with a display card's unsized processes folded into one count per card |
 | `internal/seatload` | the seat's in-flight reading: llama-swap's `/running` (and the roster, for an alias), then the loaded seat's own `/metrics` or `/slots` at the `proxy` `/running` reports — never through `/upstream`, which resets the idle unload timer; a `starting` seat is reported without touching the seat |
 | `gpu_hide_windows.go`, `gpu_hide_other.go` | hidden spawn for the detached holder (a visible console gets closed, killing the hold) |
 | `render/gpu-lock.mjs` | READ-ONLY participant: honours + fences an inherited lease, elects one unloader, drains, ComfyUI lifecycle. **Does not acquire.** |
@@ -85,6 +85,16 @@ local-offload gpu release --epoch <N>
 **"free (unreserved)"** explicitly, because an unreserved card is exactly when work is exposed;
 that should be visible, not inferred from silence. When held it ends with the one line that
 matters: how to **queue behind it** (`queue_with` in the JSON).
+
+The headline names what holds the card: **a lease of a class**, `GPU: held by a text-class lease  pid 792210  epoch 7  for
+3m0s  expires 4:05PM  (exclusive: text loads wait or route elsewhere)` (`a media-class lease` for a render). The bare class
+word it used to print (`held by text`) read as a text *seat* holding the card, and on 2026-10-07 two sessions argued over who
+held it while the holder was a bench's reservation (the class only says what the reservation is for). One phrase
+(`gpulease.Class.LeasePhrase`) is shared by every surface that names a holder: this headline, the refusal and the
+`queued behind` line of `gpu reserve` (`GPU held by a text-class lease (pid …, held 3m0s, reason "…")`), the error of a
+`gpu reserve --detach --wait 0` that lost the race (`another holder took the GPU first: a text-class lease (pid …, reason "…")`),
+the brief `gpu_lease_verdict` line of `offload_status` (`held by a text-class lease (pid 792210, exclusive, 180s): <reason>`)
+and the media tools' deferrals ([media-generation.md](media-generation.md), "A call that cannot get a card keeps its place").
 
 ### A held card is a place in line, not a refusal (0.115.2)
 
@@ -898,7 +908,15 @@ evidence and a heartbeat the wrapper writes about itself proves only that the wr
 **Where the owner comes from.** `gpu reserve --owner-session ID --owner-pid N --owner-start-ms MS [--owner-remote]`,
 else the session label the ledger already resolves (`LOCAL_OFFLOAD_ORIGIN`, then `CLAUDE_CODE_SESSION_ID`) with NO pid:
 the process a wrapper happens to run from is usually a short-lived shell, and recording it would read every lease as
-abandoned the moment the shell exits. With neither, the owner is unknown. `local-offload gpu owner-flags [--pid N]`
+abandoned the moment the shell exits. With neither, the owner is unknown. A lease with no owner can still carry
+`--origin` (a free-text label of who asked, e.g. a launcher's name): it is not an owner and changes no verdict (the lease
+stays never-orphaned, judged by its window), but `gpu status` shows it in the owner line, `owner: none recorded — origin
+"<label>"; never orphaned, judged by its declared window only`, instead of `owner: unknown — no owner recorded`. A bench
+launched from a systemd unit has no session in its environment, so before this its `origin` was in the record and on the
+wire and nowhere in the text a person reads, and two sessions mixed up who held the card (F9, 2026-10-07). The origin is
+printed quoted, on one line, and only when no session, pid or remote owner is recorded (it never displaces one); on the
+wire it is `origin` in `gpu status --json` and in the `offload_status` lease block, and `activity.holder.origin`.
+`local-offload gpu owner-flags [--pid N]`
 prints the flags for the calling tree on one line (`--owner-session=ID --owner-pid=N --owner-start-ms=MS`), for a
 launcher that detaches before it takes the lease (a process created through WMI has no parent to ask and does not
 inherit the session). The hidden `gpu hold` child of a `--detach` reserve is passed the owner and the contract as flags
@@ -913,7 +931,8 @@ session, because the new server of a resumed session and the old one's exit woul
 record. States: `alive`; `gone` (nothing alive, and the owner could be tracked: it was in the registry when the lease
 was taken, or a pid was recorded); `unknown` (it could not be tracked, or the registry could not be read, so it is never
 orphaned; `gpu status` says which: a session that was never in the registry is "recorded but cannot be tracked", and
-"no owner recorded" is said only when none is); `remote`. A registry that cannot be READ (a permission error, a wrong
+"no owner recorded" is said only when none is, and a lease labelled only with `--origin` says "none recorded — origin ..."
+instead); `remote`. A registry that cannot be READ (a permission error, a wrong
 mount: anything but "the directory does not exist") is never read as "nobody in it"; a recorded process that is alive
 still stands. *Unverified
 beyond the environment variable the ledger already relies on: how a given Claude Code build maps a session to a live
@@ -1494,7 +1513,7 @@ fence: the pre-0.117.0 warm-up loaded the seat straight past an exclusive hold.
 | `held-overdue` | the declared window ended and the holder is still alive and heartbeating. Informational: a declared window is not a ceiling for a live holder, so nothing is reclaimed. A holder whose owner vouches for the job renews its term instead (see [Terms](#terms-a-window-is-a-term-and-a-term-ends-in-a-renewal-or-a-label-adr-0070)); when it does not, the lease is labelled **expired** and the note says why (the `--for` default is 45 minutes, so a wrapper that never declared a window and has no live owner reads overdue after that while it still heartbeats) |
 | `tree-orphan` | the wrapper is gone but the job it started still holds the cards. In the vocabulary so the precedence is complete; **not produced by this build** (it needs the wrapper to record its process tree) |
 | `loaded-idle` | no lease; the seat is resident with nothing in flight (unloads at its ttl) |
-| `busy-outside` | no lease, seat idle, cards busy — work the harness does not own (the processes are listed) |
+| `busy-outside` | no lease, seat idle, cards busy — work the harness does not own (the processes are listed; a display card's unsized desktop is counted, not named) |
 | `stale-holder` | a lease record whose holder is gone; the next acquirer reclaims it |
 | `free` | no lease, nothing in flight, cards quiet |
 
@@ -1508,12 +1527,30 @@ escalated one and `activity.leases[]` lists them all. The verdict words are pinn
 a change that adds one here without a row in this table.
 
 `activity` carries `seat` (name, loaded, starting, inflight, source), `runs[]` (kind, pid, origin, goal,
-phase, step, tokens_out, age), `gpus[]` (index, name, util_pct, mem), `gpu_processes[]`, and `holder`
+phase, step, tokens_out, age), `gpus[]` (index, name, util_pct, mem), `gpu_processes[]` (with `display_card_processes_unknown[]`, below), and `holder`
 (pid, alive, command, heartbeat_age_s, draining, exclusive, and the derived standing: `owner_state`,
 `owner_session`, `owner_note` (why a recorded owner cannot be told apart), `orphan_marker_error`, `orphaned`,
 `orphaned_since`, `orphaned_for_s`, `overdue`, `overdue_by_s`, `stalled`, `unattended`,
 `progress{file,state,age_s,stall_s,detail,problem}`, `activity_facts[]`). The drain's progress line is built from the same
 reading and printed on CHANGE (count, load state, a run's step), with a reminder every five minutes.
+
+**A display card's desktop is one count, not a list (F18, 2026-10-09).** On Windows nvidia-smi types every window of the
+desktop as a process on the monitor's card and sizes none of them (`used_memory` `[N/A]`, `used_known: false`): the
+reference 3-card box listed 31 such rows, and the one process that mattered, a python on a work card (unsized as well),
+was a needle in them. `gpu_processes[]` therefore lists every process EXCEPT those that are both on a card the card
+table marks `display` and unsized; those are counted once per card in `display_card_processes_unknown[]` (`index`,
+`gpu_uuid`, `name`, `count` of distinct pids). "Display" is the card table's rule (`display_active` or `display_attached`,
+so the monitor's card counts with the screen asleep, when `display_active` reads Disabled on every card), and a one-card box
+has no display card, so it folds nothing: its only card is its work card. A process with a known size, a process on any
+other card (the lease holder's unsized python among them) and a row that names no card are listed individually, however
+many there are. The shape is the same in `gpu status --json` and in every `offload_status` section that carries the lease
+block (`gpu_lease`, and the default `all`, which builds the same block); the `busy-outside` note counts the desktop the same
+way (`30 desktop processes on the display card (card 1, <name>), memory unknown (WDDM)`) instead of naming the first six
+by name. The key `gpu_processes` stays; it is `[]` when a sample was taken and every row folded, and absent only when no
+process sample was taken, and `display_card_processes_unknown` is present only when something folded. The complete list is
+not kept anywhere else in the harness; it is nvidia-smi's own, `nvidia-smi
+--query-compute-apps=pid,used_memory,gpu_uuid,process_name --format=csv` (the query the harness runs), and the desktop's windows
+are in Task Manager. `gpu status` text prints no process list, so it has nothing to fold outside that `busy-outside` note.
 
 ## Probes pass the fence too (2026-09-22)
 
