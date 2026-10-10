@@ -1350,7 +1350,7 @@ fence: the pre-0.117.0 warm-up loaded the seat straight past an exclusive hold.
 | `held-overdue` | the declared window ended and the holder is still alive and heartbeating. Informational: a declared window is not a ceiling for a live holder, so nothing is reclaimed. A holder whose owner vouches for the job renews its term instead (see [Terms](#terms-a-window-is-a-term-and-a-term-ends-in-a-renewal-or-a-label-adr-0070)); when it does not, the lease is labelled **expired** and the note says why (the `--for` default is 45 minutes, so a wrapper that never declared a window and has no live owner reads overdue after that while it still heartbeats) |
 | `tree-orphan` | the wrapper is gone but the job it started still holds the cards. In the vocabulary so the precedence is complete; **not produced by this build** (it needs the wrapper to record its process tree) |
 | `loaded-idle` | no lease; the seat is resident with nothing in flight (unloads at its ttl) |
-| `busy-outside` | no lease, seat idle, cards busy — work the harness does not own (the processes are listed) |
+| `busy-outside` | no lease, seat idle, cards busy — work the harness does not own (the processes are listed; a display card's unsized desktop is counted, not named) |
 | `stale-holder` | a lease record whose holder is gone; the next acquirer reclaims it |
 | `free` | no lease, nothing in flight, cards quiet |
 
@@ -1364,12 +1364,30 @@ escalated one and `activity.leases[]` lists them all. The verdict words are pinn
 a change that adds one here without a row in this table.
 
 `activity` carries `seat` (name, loaded, starting, inflight, source), `runs[]` (kind, pid, origin, goal,
-phase, step, tokens_out, age), `gpus[]` (index, name, util_pct, mem), `gpu_processes[]`, and `holder`
+phase, step, tokens_out, age), `gpus[]` (index, name, util_pct, mem), `gpu_processes[]` (with `display_card_processes_unknown[]`, below), and `holder`
 (pid, alive, command, heartbeat_age_s, draining, exclusive, and the derived standing: `owner_state`,
 `owner_session`, `owner_note` (why a recorded owner cannot be told apart), `orphan_marker_error`, `orphaned`,
 `orphaned_since`, `orphaned_for_s`, `overdue`, `overdue_by_s`, `stalled`, `unattended`,
 `progress{file,state,age_s,stall_s,detail,problem}`, `activity_facts[]`). The drain's progress line is built from the same
 reading and printed on CHANGE (count, load state, a run's step), with a reminder every five minutes.
+
+**A display card's desktop is one count, not a list (F18, 2026-10-09).** On Windows nvidia-smi types every window of the
+desktop as a process on the monitor's card and sizes none of them (`used_memory` `[N/A]`, `used_known: false`): the
+reference 3-card box listed 31 such rows, and the one process that mattered, a python on a work card (unsized as well),
+was a needle in them. `gpu_processes[]` therefore lists every process EXCEPT those that are both on a card the card
+table marks `display` and unsized; those are counted once per card in `display_card_processes_unknown[]` (`index`,
+`gpu_uuid`, `name`, `count` of distinct pids). "Display" is the card table's rule (`display_active` or `display_attached`,
+so the monitor's card counts with the screen asleep, when `display_active` reads Disabled on every card), and a one-card box
+has no display card, so it folds nothing: its only card is its work card. A process with a known size, a process on any
+other card (the lease holder's unsized python among them) and a row that names no card are listed individually, however
+many there are. The shape is the same in `gpu status --json` and in every `offload_status` section that carries the lease
+block (`gpu_lease`, and the default `all`, which builds the same block); the `busy-outside` note counts the desktop the same
+way (`30 desktop processes on the display card (card 1, <name>), memory unknown (WDDM)`) instead of naming the first six
+by name. The key `gpu_processes` stays; it is `[]` when a sample was taken and every row folded, and absent only when no
+process sample was taken, and `display_card_processes_unknown` is present only when something folded. The complete list is
+not kept anywhere else in the harness; it is nvidia-smi's own, `nvidia-smi
+--query-compute-apps=pid,used_memory,gpu_uuid,process_name --format=csv` (the query the harness runs), and the desktop's windows
+are in Task Manager. `gpu status` text prints no process list, so it has nothing to fold outside that `busy-outside` note.
 
 ## Probes pass the fence too (2026-09-22)
 

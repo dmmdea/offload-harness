@@ -1081,7 +1081,9 @@ past `gpu_orphan_grace_min`), `held-overdue` (its declared window ended, its hol
 expired and says why) and `tree-orphan`
 (not produced yet) — see "Who asked for a lease" and "Terms" in docs/systems/gpu-lease.md — and an
 `activity` block with the seat's load state and in-flight count, every registered run (kind, pid, origin,
-goal excerpt, phase, step, tokens, age), a utilization/memory sample per card with the processes on them,
+goal excerpt, phase, step, tokens, age), a utilization/memory sample per card with the processes on them
+(a display card's processes that nvidia-smi cannot size, the Windows desktop, are one count per card in
+`display_card_processes_unknown`, not dozens of rows; "A display card's desktop is one count" in docs/systems/gpu-lease.md),
 and the holder's command (the wrapper form stamps its argv). Every agent loop registers itself in
 `<state root>/gpu/activity/` before admission and updates the record per step, so a drain or a status reader
 sees a run between its steps, when the engine's own gauge reads zero.
