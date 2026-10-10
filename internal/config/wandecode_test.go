@@ -13,22 +13,25 @@ import (
 // pin the config half: the default, the vocabulary, the per-family override, and that the Go and
 // Node sides name the same modes. The argv half is internal/pipeline's TestRunGenerateVideo_PassesWanDecode.
 
-// TestWanDecodeDefaultsToAuto: a config that never mentions the key renders with auto, and the
-// shipped default is the explicit "auto" (config.example.json documents it as such), while an
-// explicit empty value reads the same way downstream (nothing is passed and the runner's default,
-// auto, applies).
-func TestWanDecodeDefaultsToAuto(t *testing.T) {
-	if got := Default().VideoGenWanDecode; got != "auto" {
-		t.Fatalf("Default().VideoGenWanDecode = %q, want \"auto\"", got)
+// TestWanDecodeDefaultsToTiled: a config that never mentions the key renders with tiled, today's
+// graph, and the shipped default is the explicit "tiled" (config.example.json documents it as
+// such), while an explicit empty value reads the same way downstream (nothing is passed and the
+// runner's default, tiled, applies). auto and plain are an explicit opt-in: the default flips to
+// auto only after a live acceptance render at the 16 GB tiers' shape shows a ~40 s decode with no
+// "Ran out of memory when regular VAE decoding" line in the ComfyUI log (docs/systems/media-generation.md,
+// "The Wan decode is per card").
+func TestWanDecodeDefaultsToTiled(t *testing.T) {
+	if got := Default().VideoGenWanDecode; got != "tiled" {
+		t.Fatalf("Default().VideoGenWanDecode = %q, want \"tiled\"", got)
 	}
 	c, err := Load(writeCfg(t, `{"model":"x"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.VideoGenWanDecode != "auto" {
-		t.Fatalf("a config without the key must load auto, got %q", c.VideoGenWanDecode)
+	if c.VideoGenWanDecode != "tiled" {
+		t.Fatalf("a config without the key must load tiled, got %q", c.VideoGenWanDecode)
 	}
-	if fb := c.VideoDefaultFamilyBinding(); fb.WanDecode != "auto" {
+	if fb := c.VideoDefaultFamilyBinding(); fb.WanDecode != "tiled" {
 		t.Fatalf("the default family binding must carry the flat key, got %q", fb.WanDecode)
 	}
 }

@@ -122,9 +122,11 @@ test("submitChecked: an unreadable /object_info steps aside and lets the submiss
   assert.equal(submitted, 1);
 });
 
-// --- --wan-decode (config videogen_wan_decode): auto | plain | tiled -----------------------------------
-// Measured on a 16 GB card (A/B 2026-10-03; the tiled arm was one chunk, the clip's shape is unrecorded):
-// plain VAEDecode 38 s at a 10.3 GB peak, tiled 412 s at 3.2 GB.
+// --- --wan-decode (config videogen_wan_decode): tiled (default) | plain | auto -----------------------------------
+// Measured on a 16 GB card (A/B 2026-10-03; the tiled arm was one chunk, ComfyUI dynamic VRAM was on, the clip's
+// shape is unrecorded): plain VAEDecode 38 s at a 10.3 GB peak, tiled 412 s at 3.2 GB. No plain render at the 16 GB
+// tiers' own shape (1280x720x81) was ever run, so the absent flag is tiled and auto/plain are an explicit opt-in:
+// every test of the card read below asks for auto itself (AUTO_ARGV).
 // ComfyUI is stubbed throughout: no render, no GPU, no ComfyUI process.
 
 const GIB = 1024 ** 3;
@@ -150,6 +152,7 @@ async function runFor(argv, fetchImpl) {
   return { ...built, logs };
 }
 const WAN_ARGV = ["o.mp4", "s.png", "p", "--seed", "1"];
+const AUTO_ARGV = [...WAN_ARGV, "--wan-decode", "auto"]; // the card read is opt-in, so every test of it asks for auto
 
 test("parseArgs: --wan-decode is a value flag (not a BOOL_FLAG) and leaves the flags around it alone", () => {
   assert.ok(!BOOL_FLAGS.includes("wan-decode"), "a bool flag would swallow nothing and read the mode as a positional");
@@ -160,23 +163,24 @@ test("parseArgs: --wan-decode is a value flag (not a BOOL_FLAG) and leaves the f
   assert.deepEqual(pos, ["o.mp4", "s.png", "p"]);
 });
 
-test("wanDecodeMode: absent is auto, the three modes pass, and anything else (empty, dangling, wrong case) is refused", () => {
-  assert.equal(wanDecodeMode({}), "auto");
+test("wanDecodeMode: absent is tiled, the three modes pass, and anything else (empty, dangling, wrong case) is refused", () => {
+  assert.equal(wanDecodeMode({}), "tiled");
   for (const m of ["auto", "plain", "tiled"]) assert.equal(wanDecodeMode({ "wan-decode": m }), m);
   for (const bad of ["fast", "", "Plain", "VAEDecode", undefined]) {
     assert.throws(() => wanDecodeMode({ "wan-decode": bad }), /--wan-decode must be auto\|plain\|tiled/, `value ${JSON.stringify(bad)}`);
   }
-  // A trailing --wan-decode with no value parses to undefined; it is a mistake, not "auto".
+  // A trailing --wan-decode with no value parses to undefined; it is a mistake, not the default.
   assert.throws(() => wanDecodeMode(parseArgs(["o.mp4", "s.png", "p", "--wan-decode"]).flags), /--wan-decode must be/);
 });
 
-test("--wan-decode threads through buildGraphFromArgs to the Wan builder; without a card reading, auto builds the tiled decode", () => {
+test("--wan-decode threads through buildGraphFromArgs to the Wan builder; the absent flag is tiled whatever the card says, and auto without a card reading builds the tiled decode", () => {
   const graphFor = (argv, opts = {}) => buildGraphFromArgs(...Object.values(parseArgs(argv)), { stage, ...opts }).graph;
   assert.equal(decodeNode(graphFor([...WAN_ARGV, "--wan-decode", "plain"])), "VAEDecode");
   assert.equal(decodeNode(graphFor([...WAN_ARGV, "--wan-decode", "tiled"])), "VAEDecodeTiled");
-  assert.equal(decodeNode(graphFor(WAN_ARGV)), "VAEDecodeTiled", "no flag and no reading: auto stays on today's node");
-  assert.equal(decodeNode(graphFor([...WAN_ARGV, "--wan-decode", "auto"], { vramTotalBytes: 16 * GIB })), "VAEDecode");
-  assert.equal(decodeNode(graphFor(WAN_ARGV, { vramTotalBytes: 16 * GIB })), "VAEDecode", "the absent flag is auto");
+  assert.equal(decodeNode(graphFor(WAN_ARGV)), "VAEDecodeTiled", "no flag and no reading: today's node");
+  assert.equal(decodeNode(graphFor(AUTO_ARGV)), "VAEDecodeTiled", "auto with no reading stays on today's node");
+  assert.equal(decodeNode(graphFor(AUTO_ARGV, { vramTotalBytes: 16 * GIB })), "VAEDecode");
+  assert.equal(decodeNode(graphFor(WAN_ARGV, { vramTotalBytes: 16 * GIB })), "VAEDecodeTiled", "the absent flag is tiled: the card does not choose");
   assert.equal(decodeNode(graphFor([...WAN_ARGV, "--wan-decode", "tiled"], { vramTotalBytes: 16 * GIB })), "VAEDecodeTiled", "an explicit mode beats the card");
   assert.throws(() => graphFor([...WAN_ARGV, "--wan-decode", "bogus"]), /--wan-decode must be auto\|plain\|tiled/);
 });
@@ -228,12 +232,12 @@ test("readRenderCard: every answer that does not name a card is an error, never 
 });
 
 test("auto: a 16 GiB card builds VAEDecode, an 8 GiB card VAEDecodeTiled, an unreadable one VAEDecodeTiled — and the log says which and why", async () => {
-  const big = await runFor(WAN_ARGV, systemStats(oneCard(16 * GIB)).fetchImpl);
+  const big = await runFor(AUTO_ARGV, systemStats(oneCard(16 * GIB)).fetchImpl);
   assert.equal(decodeNode(big.graph), "VAEDecode");
   assert.equal(big.logs.length, 1, "one line per run");
   assert.match(big.logs[0], /^wan-decode: VAEDecode \(auto: the render card reports 16\.0 GiB of VRAM, at least the 12\.0 GiB the plain decode wants; card cuda:0 Test Card\)$/);
 
-  const small = await runFor(WAN_ARGV, systemStats(oneCard(8 * GIB)).fetchImpl);
+  const small = await runFor(AUTO_ARGV, systemStats(oneCard(8 * GIB)).fetchImpl);
   assert.equal(decodeNode(small.graph), "VAEDecodeTiled");
   assert.match(small.logs[0], /^wan-decode: VAEDecodeTiled \(auto: the render card reports 8\.0 GiB of VRAM, under the 12\.0 GiB the plain decode wants; card cuda:0 Test Card\)$/);
 
@@ -242,17 +246,27 @@ test("auto: a 16 GiB card builds VAEDecode, an 8 GiB card VAEDecodeTiled, an unr
     ["HTTP 500", systemStats({}, { status: 500 }).fetchImpl, /answered HTTP 500/],
     ["no devices", systemStats({ devices: [] }).fetchImpl, /lists no device/],
   ]) {
-    const none = await runFor(WAN_ARGV, fetchImpl);
+    const none = await runFor(AUTO_ARGV, fetchImpl);
     assert.equal(decodeNode(none.graph), "VAEDecodeTiled", `${label}: today's node`);
     assert.match(none.logs[0], /^wan-decode: VAEDecodeTiled \(auto: the render card's VRAM was not read, so the tiled decode this graph always used stays; /, label);
     assert.match(none.logs[0], reason, label);
   }
 });
 
-test("auto cuts at 12 GiB inclusive through the whole path, and a missing flag is auto", async () => {
-  assert.equal(decodeNode((await runFor(WAN_ARGV, systemStats(oneCard(12 * GIB)).fetchImpl)).graph), "VAEDecode");
-  assert.equal(decodeNode((await runFor(WAN_ARGV, systemStats(oneCard(12 * GIB - 1)).fetchImpl)).graph), "VAEDecodeTiled");
-  assert.equal(decodeNode((await runFor([...WAN_ARGV, "--wan-decode", "auto"], systemStats(oneCard(16 * GIB)).fetchImpl)).graph), "VAEDecode");
+test("auto cuts at 12 GiB inclusive through the whole path", async () => {
+  assert.equal(decodeNode((await runFor(AUTO_ARGV, systemStats(oneCard(12 * GIB)).fetchImpl)).graph), "VAEDecode");
+  assert.equal(decodeNode((await runFor(AUTO_ARGV, systemStats(oneCard(12 * GIB - 1)).fetchImpl)).graph), "VAEDecodeTiled");
+  assert.equal(decodeNode((await runFor(AUTO_ARGV, systemStats(oneCard(16 * GIB)).fetchImpl)).graph), "VAEDecode");
+});
+
+test("the absent flag is tiled: whatever the card reports the graph is today's, no card is read, and the log names the node", async () => {
+  for (const bytes of [8 * GIB, 12 * GIB, 16 * GIB, 24 * GIB]) {
+    const s = systemStats(oneCard(bytes));
+    const r = await runFor(WAN_ARGV, s.fetchImpl);
+    assert.equal(decodeNode(r.graph), "VAEDecodeTiled", `${bytes / GIB} GiB`);
+    assert.equal(s.calls.length, 0, `${bytes / GIB} GiB: the default makes no /system_stats request`);
+    assert.deepStrictEqual(r.logs, ["wan-decode: VAEDecodeTiled (tiled decode requested)"], `${bytes / GIB} GiB`);
+  }
 });
 
 test("an explicit --wan-decode reads no card: zero requests, and the log names the request", async () => {
@@ -307,7 +321,7 @@ test("a run buildGraphFromArgs would refuse for a missing still or prompt reads 
   process.exit = (code) => { throw new Error(`exit ${code}`); };
   console.error = () => {};
   try {
-    for (const argv of [["o.mp4", "only-one-positional"], ["o.mp4"]]) {
+    for (const argv of [["o.mp4", "only-one-positional", "--wan-decode", "auto"], ["o.mp4", "--wan-decode", "auto"]]) {
       const s = systemStats(oneCard(16 * GIB));
       const { pos, flags } = parseArgs(argv);
       await assert.rejects(buildGraphForRun(pos, flags, API, { stage, fetchImpl: s.fetchImpl, log: () => {} }), /exit 2/, argv.join(" "));
@@ -331,7 +345,7 @@ test("runsWanGraph agrees with the dispatch in buildGraphFromArgs: every family 
   assert.equal(runsWanGraph({ graph: "wf.json", model: "wan" }), false);
 });
 
-test("buildGraphForRun over real HTTP: a stand-in ComfyUI answering /system_stats with a 16 GiB card gets the plain decode", async () => {
+test("buildGraphForRun over real HTTP: under --wan-decode auto, a stand-in ComfyUI answering /system_stats with a 16 GiB card gets the plain decode", async () => {
   const hits = [];
   const srv = createServer((req, res) => {
     hits.push(req.url);
@@ -348,7 +362,7 @@ test("buildGraphForRun over real HTTP: a stand-in ComfyUI answering /system_stat
     const { port } = srv.address();
     assert.ok(port < 8188 || port > 8191, "the stand-in must never sit on 8188-8191");
     const logs = [];
-    const { pos, flags } = parseArgs(WAN_ARGV);
+    const { pos, flags } = parseArgs(AUTO_ARGV);
     // No fetchImpl: this is the runner's own transport, global fetch with its timeout signal.
     const r = await buildGraphForRun(pos, flags, `http://127.0.0.1:${port}`, { stage, log: (m) => logs.push(m) });
     assert.equal(decodeNode(r.graph), "VAEDecode");
@@ -385,7 +399,7 @@ test("buildGraphForRun's default log is stderr: one wan-decode line there, nothi
   console.error = (...a) => errs.push(a.join(" "));
   console.log = (...a) => outs.push(a.join(" "));
   try {
-    const { pos, flags } = parseArgs(WAN_ARGV);
+    const { pos, flags } = parseArgs(AUTO_ARGV);
     await buildGraphForRun(pos, flags, API, { stage, fetchImpl: systemStats(oneCard(16 * GIB)).fetchImpl });
   } finally { console.error = realErr; console.log = realLog; }
   assert.equal(errs.length, 1, "one stderr line per Wan run");

@@ -217,9 +217,11 @@ test("loader:native works with --fast (lightx2v LoRA still applies) and with pos
   assert.ok(Object.values(gUpscale).find((n) => n.class_type === "UpscaleModelLoader"), "upscale chain still builds under the native loader");
 });
 
-// --- decode: videogen_wan_decode (auto | plain | tiled) ------------------------------------------------
-// Measured on a 16 GB card (A/B 2026-10-03; the tiled arm was one chunk, the clip's shape is unrecorded):
-// plain VAEDecode 38 s at a 10.3 GB peak, tiled 412 s at 3.2 GB.
+// --- decode: videogen_wan_decode (tiled (default) | plain | auto) ------------------------------------------------
+// Measured on a 16 GB card (A/B 2026-10-03; the tiled arm was one chunk, ComfyUI dynamic VRAM was on, the clip's
+// shape is unrecorded): plain VAEDecode 38 s at a 10.3 GB peak, tiled 412 s at 3.2 GB. No plain render at the 16 GB
+// tiers' own shape (1280x720x81) was ever run, so the default is tiled and auto/plain are an explicit opt-in until a
+// live acceptance render there shows a ~40 s decode and no "Ran out of memory when regular VAE decoding" log line.
 
 const GIB = 1024 ** 3;
 const decodeBase = { imagePath: "s.png", prompt: "p", seed: 7 };
@@ -242,8 +244,8 @@ test("decode:tiled builds today's VAEDecodeTiled node input for input; decode:pl
   assert.equal(Object.values(tiled).filter((n) => /^VAEDecode/.test(n.class_type)).length, 1, "exactly one decode node");
 });
 
-test("decode defaults to auto, and auto without a card reading builds the tiled decode, so every earlier caller is unchanged", () => {
-  assert.equal(WAN_DECODE_DEFAULT, "auto");
+test("decode defaults to tiled, today's graph, and auto without a card reading builds the same tiled decode, so every earlier caller is unchanged", () => {
+  assert.equal(WAN_DECODE_DEFAULT, "tiled");
   assert.deepStrictEqual([...WAN_DECODE_MODES], ["auto", "plain", "tiled"]);
   const g = buildWan22I2V(decodeBase);
   assert.deepStrictEqual(g["13"], TILED_DECODE_NODE);
@@ -251,23 +253,31 @@ test("decode defaults to auto, and auto without a card reading builds the tiled 
   assert.deepStrictEqual(g, buildWan22I2V({ ...decodeBase, decode: "auto" }));
 });
 
+test("the default decode never reads the card: 8, 12, 16 and 24 GiB cards all get today's tiled graph", () => {
+  const tiledGraph = buildWan22I2V({ ...decodeBase, decode: "tiled" });
+  for (const vramTotalBytes of [8 * GIB, 12 * GIB, 16 * GIB, 17_094_934_528, 24 * GIB]) {
+    assert.deepStrictEqual(buildWan22I2V({ ...decodeBase, vramTotalBytes }), tiledGraph, `${vramTotalBytes} bytes`);
+    assert.equal(decodeClass({ vramTotalBytes }), "VAEDecodeTiled", `${vramTotalBytes} bytes`);
+  }
+});
+
 test("decode:auto — a 16 GiB card runs the plain decode, an 8 GiB card the tiled one, an unreadable card the tiled one", () => {
   assert.deepStrictEqual(buildWan22I2V({ ...decodeBase, decode: "auto", vramTotalBytes: 16 * GIB })["13"], PLAIN_DECODE_NODE);
   assert.deepStrictEqual(buildWan22I2V({ ...decodeBase, decode: "auto", vramTotalBytes: 8 * GIB })["13"], TILED_DECODE_NODE);
   assert.deepStrictEqual(buildWan22I2V({ ...decodeBase, decode: "auto", vramTotalBytes: undefined })["13"], TILED_DECODE_NODE);
-  // The default mode is auto, so the card alone decides.
-  assert.equal(decodeClass({ vramTotalBytes: 16 * GIB }), "VAEDecode");
-  assert.equal(decodeClass({ vramTotalBytes: 8 * GIB }), "VAEDecodeTiled");
+  // With auto asked for, the card alone decides (the default mode ignores it, see the test above).
+  assert.equal(decodeClass({ decode: "auto", vramTotalBytes: 16 * GIB }), "VAEDecode");
+  assert.equal(decodeClass({ decode: "auto", vramTotalBytes: 8 * GIB }), "VAEDecodeTiled");
 });
 
 test("decode:auto cuts at 12 GiB inclusive, and a value that is not a positive finite number is no reading", () => {
   assert.equal(WAN_PLAIN_DECODE_MIN_VRAM_BYTES, 12 * GIB);
-  assert.equal(decodeClass({ vramTotalBytes: 12 * GIB }), "VAEDecode", "exactly 12 GiB runs plain");
-  assert.equal(decodeClass({ vramTotalBytes: 12 * GIB - 1 }), "VAEDecodeTiled", "one byte under stays tiled");
+  assert.equal(decodeClass({ decode: "auto", vramTotalBytes: 12 * GIB }), "VAEDecode", "exactly 12 GiB runs plain");
+  assert.equal(decodeClass({ decode: "auto", vramTotalBytes: 12 * GIB - 1 }), "VAEDecodeTiled", "one byte under stays tiled");
   // The measured card class: a 16 GB card reports a little under 16 GiB.
-  assert.equal(decodeClass({ vramTotalBytes: 17_094_934_528 }), "VAEDecode");
+  assert.equal(decodeClass({ decode: "auto", vramTotalBytes: 17_094_934_528 }), "VAEDecode");
   for (const junk of [0, -1, NaN, Infinity, "17179869184", null, true, {}, []]) {
-    assert.equal(decodeClass({ vramTotalBytes: junk }), "VAEDecodeTiled", `${JSON.stringify(junk)} is no reading`);
+    assert.equal(decodeClass({ decode: "auto", vramTotalBytes: junk }), "VAEDecodeTiled", `${JSON.stringify(junk)} is no reading`);
   }
 });
 

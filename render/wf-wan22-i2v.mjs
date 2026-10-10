@@ -19,13 +19,20 @@
 // patch_embed input; the 48-ch wan2.2_vae is for the 5B TI2V and mismatches). Run only
 // with the GPU freed of llama-swap.
 // DECODE (decode; config videogen_wan_decode, helper flag --wan-decode): how the latent becomes frames.
+//   • tiled (default): VAEDecodeTiled (tile 256/64, temporal 32/8), the node this graph always used, so a caller
+//     that names no mode gets the graph exactly as it was before the key existed.
 //   • plain: VAEDecode. One pass over the whole frame, so the VRAM peak follows the frame's resolution (ComfyUI
 //     sizes this VAE's decode from height x width, with the frame count a mere step at 4 latent frames).
-//   • tiled: VAEDecodeTiled (tile 256/64, temporal 32/8), the node this graph always used.
-//   • auto (default): plain when vramTotalBytes (the render card's total VRAM; the runner reads it from the
+//   • auto (opt-in): plain when vramTotalBytes (the render card's total VRAM; the runner reads it from the
 //     ComfyUI it submits to) is at least WAN_PLAIN_DECODE_MIN_VRAM_BYTES, else tiled. No reading = tiled.
-//   Measured on an RTX 5060 Ti 16 GB (A/B 2026-10-03; the clip's shape is unrecorded): plain 38 s at a 10.3 GB
-//   peak against tiled 412 s at 3.2 GB (that A/B's tiled arm was one chunk), 45 dB PSNR between the two.
+//   Why the default is tiled and not auto: auto would run the plain decode by default on every 16 GB card, and no
+//   render at the 16 GB tiers' own shape (1280x720x81) was ever run with plain. ComfyUI's own estimate there is
+//   12.0 GiB of a 15.9 GiB card, and a second out-of-memory after ComfyUI's single tiled retry (below) fails a
+//   ~70-minute render after sampling. The one measurement, on an RTX 5060 Ti 16 GB (A/B 2026-10-03): plain 38 s at a
+//   10.3 GB peak against tiled 412 s at 3.2 GB (that A/B's tiled arm was one chunk), 45 dB PSNR between the two,
+//   was taken with ComfyUI dynamic VRAM on and a clip of unrecorded shape. So auto and plain stay available as an
+//   explicit opt-in, and the default flips to auto only after a live acceptance render at the tier shape shows a
+//   ~40 s decode with no "Ran out of memory when regular VAE decoding" line in the ComfyUI log.
 //   ComfyUI's VAE.decode catches an out-of-memory plain decode and retries it tiled (comfy/sd.py, read at
 //   v0.38.0), which makes plain worth trying on a big card, but the retry is a second chance and not a
 //   guarantee: it sits outside the try/except and can run out of memory too, and the harness runs ComfyUI with
@@ -37,7 +44,8 @@
 export const WAN_OFFICIAL_NEGATIVE = "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走";
 
 export const WAN_DECODE_MODES = Object.freeze(["auto", "plain", "tiled"]);
-export const WAN_DECODE_DEFAULT = "auto";
+// tiled is today's graph; auto and plain are an explicit opt-in (see the DECODE note in the header).
+export const WAN_DECODE_DEFAULT = "tiled";
 // The smallest total VRAM at which "auto" runs the plain decode. 16 GB cards are the measured class (they
 // report ~15.9 GiB); a card under 12 GiB was not measured and keeps the tiled decode. A nominal 12 GB card
 // sits on the cut and was never read, so which side it lands on is not claimed: pin plain or tiled there.
@@ -90,7 +98,7 @@ export function buildWan22I2V({
   // extension — the historical, always-worked behavior, still available for a
   // card too small for native streaming or a mixed-precision box.
   loader = "auto",
-  // decode (config: videogen_wan_decode): "auto" | "plain" | "tiled", see the DECODE note in the header.
+  // decode (config: videogen_wan_decode): "tiled" (the default) | "plain" | "auto", see the DECODE note in the header.
   // vramTotalBytes is the render card's total VRAM, which only "auto" reads; left undefined (a caller
   // that never looked at the card, preflight-graph.mjs) auto builds the tiled decode, as before.
   decode = WAN_DECODE_DEFAULT, vramTotalBytes,

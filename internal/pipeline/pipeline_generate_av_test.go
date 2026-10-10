@@ -548,9 +548,10 @@ func TestRunGenerateVideo_PassesWanSplitAndFast(t *testing.T) {
 
 // TestRunGenerateVideo_PassesWanDecode: how the Wan graph decodes is this box's config
 // (videogen_wan_decode), not a constant in the graph builder. The default config hands the runner
-// "auto" (it reads the render card's size), a configured plain or tiled is forced, an empty value
-// passes nothing (the runner's own default is auto), and a videogen_families entry for the family
-// that renders replaces the flat key wholesale, like every other field of a binding.
+// "tiled" (today's graph), a configured plain or tiled is forced, a configured auto lets the runner
+// read the render card's size, an empty value passes nothing (the runner's own default is tiled),
+// and a videogen_families entry for the family that renders replaces the flat key wholesale, like
+// every other field of a binding.
 func TestRunGenerateVideo_PassesWanDecode(t *testing.T) {
 	requireNodePipeline(t)
 	run := func(t *testing.T, mut func(*config.Config), params map[string]any) []string {
@@ -574,8 +575,8 @@ func TestRunGenerateVideo_PassesWanDecode(t *testing.T) {
 		return readArgs(t, out.VideoPath)
 	}
 	none := func(*config.Config) {}
-	if args := run(t, none, nil); !hasFlagVal(args, "wan-decode", "auto") {
-		t.Fatalf("the default config must hand the runner --wan-decode auto; args=%v", args)
+	if args := run(t, none, nil); !hasFlagVal(args, "wan-decode", "tiled") {
+		t.Fatalf("the default config must hand the runner --wan-decode tiled; args=%v", args)
 	}
 	for _, mode := range []string{"plain", "tiled", "auto"} {
 		if args := run(t, func(c *config.Config) { c.VideoGenWanDecode = mode }, nil); !hasFlagVal(args, "wan-decode", mode) {
@@ -583,7 +584,7 @@ func TestRunGenerateVideo_PassesWanDecode(t *testing.T) {
 		}
 	}
 	if args := run(t, func(c *config.Config) { c.VideoGenWanDecode = "" }, nil); hasFlag(args, "wan-decode") {
-		t.Fatalf("an empty videogen_wan_decode must pass nothing (the runner defaults to auto); args=%v", args)
+		t.Fatalf("an empty videogen_wan_decode must pass nothing (the runner defaults to tiled); args=%v", args)
 	}
 
 	// The family that renders decides. Seated on ltx25 with a wan22 entry, a model:"wan" request

@@ -19,8 +19,10 @@
 //   auto (default, decides per expert file by extension) | native (plain UNETLoader, no
 //   DisTorch2/MultiGPU, dynamic-VRAM streaming does the offload; refused on a .gguf
 //   expert) | gguf-distorch (forces the historical DisTorch2/MultiGPU wrapper on both
-//   experts). --wan-decode (the harness passes videogen_wan_decode; wan only): auto (default) |
-//   plain (VAEDecode) | tiled (VAEDecodeTiled, the graph's historical node). auto reads the
+//   experts). --wan-decode (the harness passes videogen_wan_decode; wan only): tiled (default;
+//   VAEDecodeTiled, the graph's historical node) | plain (VAEDecode) | auto. plain and auto are an explicit
+//   opt-in until a live render at the 16 GB tiers' shape (1280x720x81) has shown the plain decode fits there
+//   (docs/systems/media-generation.md, "The Wan decode is per card"). auto reads the
 //   render card's total VRAM from GET /system_stats (devices[0], the primary device) and runs the
 //   plain decode on a card of at least 12 GiB, else tiled; an unreadable answer is tiled. The
 //   chosen node and why go to stderr. LTX 2.5 and Hunyuan 1.5 ignore it (they keep VAEDecodeTiled).
@@ -77,9 +79,10 @@ export function wanVvramGb(flags) {
   return n;
 }
 
-// wanDecodeMode parses --wan-decode (the harness passes config videogen_wan_decode): absent is auto,
-// and a value outside the builder's modes is refused rather than guessed, because one that quietly fell
-// back to auto would hide a typo behind a render that still works. An empty or dangling flag is refused too.
+// wanDecodeMode parses --wan-decode (the harness passes config videogen_wan_decode): absent is the builder's
+// default, tiled, and a value outside the builder's modes is refused rather than guessed, because one that
+// quietly fell back to the default would hide a typo behind a render that still works. An empty or dangling
+// flag is refused too.
 export function wanDecodeMode(flags) {
   if (!("wan-decode" in flags)) return WAN_DECODE_DEFAULT;
   const raw = flags["wan-decode"];
@@ -249,7 +252,7 @@ function wanDecodeLine(mode, card, graph) {
 // buildGraphForRun is the one path generate() takes to a graph. A run that builds the Wan graph in auto
 // decode mode first reads the render card's VRAM from the ComfyUI it is about to submit to, so
 // buildGraphFromArgs stays synchronous and the read happens once, only for the graph that uses it: an
-// explicit plain or tiled makes no request, and neither does LTX 2.5, Hunyuan 1.5, ace, h3 or a --graph
+// tiled (the default) or plain makes no request, and neither does LTX 2.5, Hunyuan 1.5, ace, h3 or a --graph
 // file. A run buildGraphFromArgs would refuse for a missing still or prompt reads nothing either: it
 // exits right after, and exiting with a socket still closing is the Windows crash main() warns about.
 // Every Wan run logs its decode (log defaults to stderr).

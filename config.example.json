@@ -189,7 +189,7 @@
   "videogen_text_encoder": "",
   "videogen_wan_virtual_vram_gb": 7,
   "videogen_wan_loader": "",
-  "videogen_wan_decode": "auto",
+  "videogen_wan_decode": "tiled",
   "videogen_family": "",
   "videogen_families": null,
   "videogen_sdcpp_script": "render/sdcpp-video.mjs",

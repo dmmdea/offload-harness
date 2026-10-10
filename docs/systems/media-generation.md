@@ -446,7 +446,7 @@ Bound per machine through flat config keys, so the same code serves different ha
 | Inpaint | `inpaint_ckpt`, `inpaint_vae`, `inpaint_steps/cfg/sampler/scheduler` |
 | Generative edit | `gen_edit_script`, `gen_edit_unet`, `gen_edit_preset` (`full`/`lightning8`/`lightning4`), `gen_edit_clip/vae/lora/lora_strength`, `gen_edit_steps/cfg/sampler/scheduler`, `gen_edit_megapixels` (0 = follow the source, held within 0.9-2.0), `gen_edit_timeout_sec` |
 | Upscale | `upscale_script` (shipped default `render/comfy-upscale.mjs`), `upscale_model` (ComfyUI `upscale_models/` filename; empty = `videogen_upscale_model`), `upscale_timeout_sec` (600) |
-| Video | `videogen_family` (`""`/`wan22` = Wan 2.2; `ltx25` = LTX-2.5 joint-AV), `videogen_unet_high`, `videogen_unet_low`, `videogen_text_encoder`, `videogen_upscale_model`, `videogen_wan_virtual_vram_gb`, `videogen_wan_decode` (`auto`/`plain`/`tiled`) (Wan keys); `videogen_transformer`, `videogen_video_vae`, `videogen_audio_vae`, `videogen_latent_upscaler`, `videogen_fps`, `videogen_pool_vvram_gb/pool_compute/pool_donor` (LTX-2.5 keys) |
+| Video | `videogen_family` (`""`/`wan22` = Wan 2.2; `ltx25` = LTX-2.5 joint-AV), `videogen_unet_high`, `videogen_unet_low`, `videogen_text_encoder`, `videogen_upscale_model`, `videogen_wan_virtual_vram_gb`, `videogen_wan_decode` (`tiled` default; `plain`/`auto` opt-in) (Wan keys); `videogen_transformer`, `videogen_video_vae`, `videogen_audio_vae`, `videogen_latent_upscaler`, `videogen_fps`, `videogen_pool_vvram_gb/pool_compute/pool_donor` (LTX-2.5 keys) |
 | Audio | `voicegen_*`, `musicgen_script`; `tts_endpoint` / `tts_model` (default `tts-1`) / `tts_voice` / `tts_api_key` (0.113.25: an OpenAI-compatible speech SERVER for `generate_audio kind=voice` — `voice: endpoint`, or the default on a box with no `voicegen_script`; `internal/ttsclient` POSTs `/v1/audio/speech`, writes the WAV atomically, defers naming the server's words on any non-audio answer, takes no media lease because the server owns its GPU; e.g. VoiceStudio on `http://127.0.0.1:3900`) |
 | Qwen-Image-2.1 (family `qwen-image-2.1`) | `imagegen_ckpt` + `imagegen_clip` + `imagegen_vae` (all three REQUIRED — the builder has no defaults), `imagegen_schedule` (`official` default / `comfy`), `imagegen_steps/cfg` (both or neither; official 40 / 1.0); edit: `gen_edit_family: "qwen-image-2.1"`, `gen_edit_unet/clip/vae`, `gen_edit_resolution` (0 = 1024), `gen_edit_cache_device` (`auto`/`gpu`/`cpu`/`off`) |
 | Named families + license (ADR 0058) | `imagegen_families`, `gen_edit_families` (name → overlay + `license` + `commercial_use`); `imagegen_license`/`imagegen_commercial_use`, `gen_edit_license`/`gen_edit_commercial_use` (the default binding's own tag, both or neither) |
@@ -478,21 +478,31 @@ donor card, this one parks weights in RAM. The runner also asks the running Comf
 the graph names before submitting (`render/comfy-nodes.mjs`), so a missing pack is a one-line
 `MISSING_NODE` defer naming the class and pack, with nothing POSTed.
 
-**The Wan decode is per card** (`videogen_wan_decode`, default `auto`; the pipeline passes it as
+**The Wan decode is per card** (`videogen_wan_decode`, default `tiled`; the pipeline passes it as
 `--wan-decode`, and a `videogen_families["wan22"].wan_decode` entry overrides it for a Wan render on a box seated
-to another family). The Wan graph used to hard-code `VAEDecodeTiled` (tile 256/64, temporal 32/8). A film session
-measured the alternative on an RTX 5060 Ti 16 GB (A/B 2026-10-03): the plain `VAEDecode` took 38 s at a 10.3 GB
-peak, the tiled decode 412 s at 3.2 GB (that A/B's tiled arm was one chunk), and the two outputs sit at 45 dB PSNR
-from each other. The figures reached this change without the clip's width, height or frame count, so the shape they
-were taken at is unrecorded. The three modes:
+to another family). The Wan graph used to hard-code `VAEDecodeTiled` (tile 256/64, temporal 32/8), and the default
+keeps it, so a config that never sets the key renders the graph it always did. A film session measured the
+alternative on an RTX 5060 Ti 16 GB (A/B 2026-10-03): the plain `VAEDecode` took 38 s at a 10.3 GB peak, the tiled
+decode 412 s at 3.2 GB (that A/B's tiled arm was one chunk), and the two outputs sit at 45 dB PSNR from each other.
+That A/B ran with ComfyUI dynamic VRAM on, and the figures reached this change without the clip's width, height or
+frame count, so the shape they were taken at is unrecorded. The three modes:
 
 | Mode | Graph node | Reads the card |
 |---|---|---|
-| `plain` | `VAEDecode` | no |
-| `tiled` | `VAEDecodeTiled`, unchanged from before the key existed | no |
-| `auto` (default; an empty value reads the same) | `VAEDecode` when the render card reports at least 12 GiB of VRAM, else `VAEDecodeTiled` | yes |
+| `tiled` (default; an empty value reads the same) | `VAEDecodeTiled`, unchanged from before the key existed | no |
+| `plain` (opt-in) | `VAEDecode` | no |
+| `auto` (opt-in) | `VAEDecode` when the render card reports at least 12 GiB of VRAM, else `VAEDecodeTiled` | yes |
 
-`auto` asks the ComfyUI the runner submits to, once per Wan run, after it is up and before the graph is built:
+**Why the default is `tiled`, not `auto`.** `auto` would run the plain `VAEDecode` by default on every 16 GB card, and
+no render at the 16 GB tiers' own shape (1280x720x81) was ever run with plain. ComfyUI's own estimate there is 12.0 GiB
+of a card that reports 15.9 GiB, and a second out-of-memory after ComfyUI's single tiled retry fails a ~70-minute
+render after sampling (the estimates behind this are worked out below). The one measurement above was taken with
+ComfyUI dynamic VRAM on and a clip of unrecorded shape, so it does not say what happens at that shape. `auto` and
+`plain` therefore stay available as an explicit opt-in (`videogen_wan_decode`, or `--wan-decode` on the runner), and the
+default flips to `auto` only after a live acceptance render at the tier shape shows a decode of about 40 s and no
+`Ran out of memory when regular VAE decoding` line in the ComfyUI log.
+
+Under `auto` the runner asks the ComfyUI it submits to, once per Wan run, after it is up and before the graph is built:
 `GET /system_stats`, `devices[0].vram_total`. `devices[0]` is the primary device, the one a decode runs on (ComfyUI
 lists it first on purpose and then every MultiGPU donor, read at v0.38.0), so a job pinned to one card
 (`comfy_cuda_device`, a per-card instance) reads that card's size. The cut compares the reported **total**, not the
@@ -502,7 +512,8 @@ or times out, ComfyUI answers an HTTP error or no JSON, there is no device or no
 primary device is a CPU or MPS one, whose `vram_total` is the host's RAM and says nothing about a card. The runner
 logs the node and the reason on stderr, one `wan-decode:` line per Wan run, for example
 `wan-decode: VAEDecode (auto: the render card reports 15.9 GiB of VRAM, at least the 12.0 GiB the plain decode wants; card ...)`.
-An explicit `plain` or `tiled` makes no request, and neither does any run that is not the Wan graph.
+The default `tiled` and an explicit `plain` make no request, and neither does any run that is not the Wan graph; a run
+on the default logs `wan-decode: VAEDecodeTiled (tiled decode requested)`.
 
 **What `plain` risks, and what ComfyUI does when it fails.** ComfyUI's `VAE.decode` (`comfy/sd.py`, read at v0.38.0 on
 2026-10-09) asks the card for the decode's estimated memory, runs the untiled decode inside a try/except that
@@ -531,24 +542,26 @@ The caveat (ComfyUI issue 15453, from the research behind this change and not re
 other loaded models are not evicted before the decode, so a card already holding weights fails the plain attempt more
 often. That is part of why `auto` sends a card under 12 GiB to the tiled node; an 8 GB card was measured the other way,
 and plain `VAEDecode` never finished there (the `blackwell-8` tier record, 2026-08-23 media roster bake). A 12 GB card
-sits on the cut and was not measured: pin `plain` or `tiled` there rather than trust `auto`. A box whose ComfyUI log
-keeps printing the warning above should pin `tiled`.
+sits on the cut and was not measured: pin `plain` or `tiled` there rather than trust `auto`. A box that opted in to
+`plain` or `auto` and whose ComfyUI log keeps printing the warning above should go back to `tiled`, the default.
 
-> **Unverified:** no render at the 16 GB tiers' own shape, 1280x720x81, was run for this change (it renders nothing;
-> its tests stand ComfyUI in with a `/system_stats` stub), and the 2026-10-03 A/B is one card and one clip of
-> unrecorded shape, so neither says whether the plain decode fits at that shape or whether the retry above rescues it
-> when it does not. The 12 GiB cut, and how the plain attempt behaves beside resident models (issue 15453), were not
-> measured either. `auto` decides on the card alone, which is the rule it was given, while ComfyUI's estimate follows
-> the frame's resolution; a resolution-aware `auto` is a possible follow-up, not something this change does. Until one
-> such render has run on a 16 GB tier, `plain` at that shape is a default carried over from the A/B, not a settled one:
-> pin `tiled` on a box whose ComfyUI log shows the warning above.
+> **Unverified:** no render at the 16 GB tiers' own shape, 1280x720x81, was ever run with the plain decode, neither for
+> this change (it renders nothing; its tests stand ComfyUI in with a `/system_stats` stub) nor before it, and the
+> 2026-10-03 A/B is one card, with ComfyUI dynamic VRAM on, and one clip of unrecorded shape, so neither says whether
+> the plain decode fits at that shape or whether the retry above rescues it when it does not. The 12 GiB cut, and how
+> the plain attempt behaves beside resident models (issue 15453), were not measured either. `auto` decides on the card
+> alone, which is the rule it was given, while ComfyUI's estimate follows the frame's resolution; a resolution-aware
+> `auto` is a possible follow-up, not something this change does. That is why the default is `tiled` and `auto` is an
+> opt-in. The acceptance condition for flipping the default to `auto`: one live render at a 16 GB tier's own shape,
+> 1280x720x81, with `videogen_wan_decode` set to `auto`, whose decode takes about 40 s and whose ComfyUI log has no
+> `Ran out of memory when regular VAE decoding` line.
 
 **What this does not touch.** LTX 2.5 and Hunyuan 1.5 keep `VAEDecodeTiled`: they decode through other VAEs that
 nobody measured, and their builders are called exactly as before. `--wan-decode` and `videogen_wan_decode` do
 nothing for them (the pipeline passes the flag whatever the family, as it does `--wan-vvram-gb`, and their runner
-branches never read it). WAN-Animate-2 already used the plain `VAEDecode`. The effect on the tiers: no tier seeds the
-key, so every tier whose render card reports 12 GiB or more (the 16 GB tiers and up) now decodes `plain` on a Wan
-render, and the 8 GB tiers stay tiled.
+branches never read it). WAN-Animate-2 already used the plain `VAEDecode`. The effect on the tiers: none. No tier seeds
+the key, so every tier decodes `tiled` on a Wan render, exactly as before the key existed; a box opts in to `plain` or
+`auto` by setting `videogen_wan_decode` itself.
 
 **LTX-2.5** (`videogen_family: "ltx25"`) is the measured 32 GB-class video seat (2026-08-12
 three-way, bound 2026-08-14, behavior-proven 2026-08-15): the 22B distilled int8 DiT renders

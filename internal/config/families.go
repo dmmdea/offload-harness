@@ -461,9 +461,9 @@ func validateMediaEnums(c Config, where string) error {
 }
 
 // WanDecodeModes is the vocabulary of videogen_wan_decode and of a videogen_families entry's
-// wan_decode, with "" reading as auto: render/wf-wan22-i2v.mjs WAN_DECODE_MODES is the same list
-// (TestWanDecodeMirrorsTheBuilder reads it), so a mode the runner would refuse is refused here, at
-// load, instead of as a runner exit on every render.
+// wan_decode, with "" reading as the runner's default, tiled: render/wf-wan22-i2v.mjs
+// WAN_DECODE_MODES is the same list (TestWanDecodeMirrorsTheBuilder reads it), so a mode the
+// runner would refuse is refused here, at load, instead of as a runner exit on every render.
 var WanDecodeModes = []string{"auto", "plain", "tiled"}
 
 func validWanDecode(s string) bool { return s == "" || slices.Contains(WanDecodeModes, s) }
