@@ -205,6 +205,7 @@ type Emitter struct {
 	openDir     string // "" = no register
 	openMu      sync.Mutex
 	open        map[string]string // job id -> marker path
+	posting     map[string]int    // marker file name -> terminal posts in flight (orphans.go, ITS OWN POST); under openMu
 	selfOnce    sync.Once
 	selfStart   int64
 	sweepOnce   sync.Once

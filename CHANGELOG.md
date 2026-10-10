@@ -93,6 +93,22 @@ Versioning: [SemVer](https://semver.org/).
   whose node's card was held closes quiet on its asker too; remote lanes close on a panic; the call deadline's abandoned
   subtasks have their cards closed.
 
+### Fixed — a short call's PAIR card is closed once, whichever way the scheduler runs the emitter's sweep
+
+- **An emitter's own sweep resent the terminal frame the emitter was posting.** The verdict is parked as a pending marker
+  before it is posted (the entry above), and the sweep every emitter makes on its first `Emit` runs on a goroutine: a call
+  short enough to close before that goroutine had read the register (a deferral, a refused dispatch, a lease card) was
+  closed twice, the second frame byte for byte the first. PAIR merges it, but it is a duplicate on the wire, and it failed
+  three tests of three packages (`TestLeaseCardLifecycle`, `TestPulledReclaimOfAFinishedJobEmitsNoSecondCard`,
+  `TestEndClosesUnstartedCardWithoutRow`) on the 4-vCPU Linux CI runner of this release while they passed on a 16-core
+  host: the sweep races the caller and wins as processors get scarcer (none of 50 runs on 16 CPUs, up to 8 of 50 on 2 to 4,
+  nearly every run on one). An emitter now remembers the markers it has a post in flight for and its sweeps leave them alone; a
+  post that fails parks the frame again and clears the mark, so the next sweep sends it as before. Another process's sweep,
+  or fleet-serve's periodic one, that reads the marker in those milliseconds still resends an identical frame, which PAIR
+  merges. Tests: a held terminal post and the emitter's own sweep (nothing sent), a refused post and the same emitter's
+  next sweep (one sent), a short card closed once on one processor; the first and the last red without the guard, the
+  second red when the mark is never cleared.
+
 ### Fixed — `offload_review_diff` no longer publishes hollow reviews, stacked restatements or discarded cut answers
 
 - **Root cause of the hollow findings:** the structured re-pack, told only `"findings" (array of strings)`, split

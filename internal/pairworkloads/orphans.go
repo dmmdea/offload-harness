@@ -42,6 +42,19 @@ package pairworkloads
 // marker with pid 0 and Remote set, named `0-<job>.remote`, not `.json`: a harness built before the
 // relay sweeps this directory too and reads a pid <= 0 marker as orphaned (see remoteSuffix).
 //
+// ITS OWN POST. A terminal frame is parked as a pending marker BEFORE it is posted (track), so the
+// verdict outlives a producer killed mid-post. A sweeper that reads that marker while the post is in
+// flight cannot tell it from a failed post and sent the same frame a second time. The sweeper that does
+// is the producer's own: every emitter sweeps once, on its first Emit, from a goroutine, and a short
+// call (a deferral, a refused dispatch) is opened and closed before that goroutine has read the
+// register whenever the scheduler runs it late (on one processor every time: a duplicate terminal
+// frame in three tests of three packages on a 4-vCPU CI runner, 2026-10-10). The emitter therefore
+// remembers the markers it has a post in flight for (Emitter.posting) and its sweeps leave those alone;
+// a post that fails parks the frame again and clears the mark, so the next sweep sends it as before.
+// The mark is per emitter: a sweeper of another process, or fleet-serve's periodic one (an emitter of
+// its own), that reads the marker in those few milliseconds still resends an identical terminal frame,
+// which PAIR merges as an equal-rank no-op.
+//
 // WHOSE MARKER. A marker records the ingress URL its card was posted to, and a
 // sweep closes only the markers of ITS OWN ingress (a marker with no endpoint
 // predates the field and counts as DefaultEndpoint). Closing is posting to the
@@ -249,8 +262,11 @@ func (e *Emitter) track(ev Event, pl sendPlan) (removeAfterPost string) {
 			// that kills its door right after the reply) would leave the sweep to close the card
 			// "harness process exited before the job finished" over a job that finished, whatever its
 			// outcome. As a pending marker the sweep sends the verdict itself, which is also what it
-			// does for a post that fails; a sweeper that reads it while the post is in flight resends an
-			// identical terminal frame, which PAIR merges as an equal-rank no-op.
+			// does for a post that fails. This emitter's own sweeps skip the marker until the post
+			// settles (markPosting runs BEFORE the marker is written, so a sweep that can read it finds
+			// the mark); a sweeper of another process that reads it in that window resends an identical
+			// terminal frame, which PAIR merges as an equal-rank no-op.
+			e.markPosting(p)
 			e.parkTerminal(p, pl)
 		}
 		if p == "" && pl.remote {
@@ -317,6 +333,7 @@ func (e *Emitter) untrack(path string, pl sendPlan, postErr error) {
 	if path == "" {
 		return
 	}
+	defer e.unmarkPosting(path) // after the marker is removed or parked again, never before
 	if postErr == nil || terminal == nil {
 		removeRetrying(path)
 		return
@@ -342,6 +359,36 @@ func (e *Emitter) parkTerminal(path string, pl sendPlan) bool {
 	}
 	body, err := json.Marshal(openMarker{PID: pid, ProcStart: start, WrittenMs: e.now().UnixMilli(), Pending: true, Endpoint: pl.url, Remote: pl.remote, Relay: pl.relay, Info: pl.info})
 	return err == nil && writeAtomic(filepath.Dir(path), path, body)
+}
+
+// markPosting records that this emitter is about to park, and then post, the terminal frame of the
+// marker at path; unmarkPosting clears it when the post has settled; isPosting is what its sweeps ask.
+// Keyed by file name (the register is one directory per emitter) and counted, so two frames that name
+// one marker never clear each other's mark early.
+func (e *Emitter) markPosting(path string) {
+	e.openMu.Lock()
+	defer e.openMu.Unlock()
+	if e.posting == nil {
+		e.posting = map[string]int{}
+	}
+	e.posting[filepath.Base(path)]++
+}
+
+func (e *Emitter) unmarkPosting(path string) {
+	e.openMu.Lock()
+	defer e.openMu.Unlock()
+	name := filepath.Base(path)
+	if n := e.posting[name]; n > 1 {
+		e.posting[name] = n - 1
+	} else {
+		delete(e.posting, name)
+	}
+}
+
+func (e *Emitter) isPosting(name string) bool {
+	e.openMu.Lock()
+	defer e.openMu.Unlock()
+	return e.posting[name] > 0
 }
 
 // writeAtomic writes body to path via a temp file and a rename, so a sweeper
@@ -482,6 +529,12 @@ func (e *Emitter) SweepOrphans(ctx context.Context) int {
 		}
 		if !e.ownsEndpoint(markerEndpoint(m)) {
 			continue // another ingress's card: not ours to post, lock, delete or age-drop
+		}
+		if m.Pending && e.isPosting(name) {
+			// This emitter parked that verdict and its own post is still in flight: sending it again
+			// would double the card's close. A post that fails parks the frame again (untrack) and
+			// clears the mark, so the next sweep sends it.
+			continue
 		}
 		if !m.Pending && !e.orphaned(m, now) {
 			continue

@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -361,6 +362,97 @@ func TestTheTerminalVerdictIsOnDiskBeforeItIsPosted(t *testing.T) {
 	}
 	if verdict == nil || verdict["startedAt"].(float64) != 2000 || verdict["completedAt"].(float64) != 9000 {
 		t.Fatalf("the swept frame must be the producer's own verdict: %v", verdict)
+	}
+	if files := r.files(t); len(files) != 0 {
+		t.Fatalf("a delivered verdict leaves no marker: %v", files)
+	}
+}
+
+// An emitter's own sweep leaves alone the terminal frame the same emitter is posting. The verdict is
+// parked as a pending marker BEFORE the post, so a sweep that reads the register in that window finds a
+// frame it cannot tell from a failed post, and used to send it a second time: the first Emit of every
+// emitter starts a sweep from a goroutine, and a short call is closed before that goroutine has read the
+// register whenever the scheduler runs it late (a duplicate terminal frame in three tests on a 4-vCPU CI
+// runner, 2026-10-10). A sweeper of ANOTHER process still sends a parked verdict (the test above).
+func TestAnEmittersOwnSweepLeavesTheTerminalFrameItIsPosting(t *testing.T) {
+	r := &orphanRig{pair: &capture{}, appDir: writePairAppDir(t), dir: t.TempDir()}
+	release := make(chan struct{})
+	var once, releaseOnce sync.Once
+	arrived := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if strings.Contains(peekBody(req), `"workload:completed"`) {
+			held := false
+			once.Do(func() { held = true })
+			if held {
+				close(arrived)
+				<-release // the producer's own terminal post is in flight here
+			}
+		}
+		r.pair.handler(w, req)
+	}))
+	defer srv.Close()
+	r.url = srv.URL
+	p := r.emitter(nil, nil)
+	free := func() { releaseOnce.Do(func() { close(release) }) }
+	defer p.Wait() // runs after the release: the held post lands, then the server closes
+	defer free()   // runs first
+	p.Emit(Event{JobID: "call-own", Model: "generate_image", Engine: "comfyui", State: "queued", CreatedAt: 1_000})
+	p.Wait()
+	p.Emit(Event{JobID: "call-own", Model: "comfyui:x", Engine: "comfyui", State: "completed", CreatedAt: 1_000, StartedAt: 2_000, CompletedAt: 9_000})
+	select {
+	case <-arrived:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the terminal post never reached the ingress")
+	}
+	if files := r.files(t); len(files) != 1 {
+		t.Fatalf("one marker, parked as the verdict, while the post is in flight: %v", files)
+	}
+	if n := p.SweepOrphans(context.Background()); n != 0 {
+		t.Fatalf("the emitter's own sweep sent %d frame(s) for the card it is posting itself", n)
+	}
+	free()
+	p.Wait()
+	done := 0
+	for i := 0; i < r.pair.count(); i++ {
+		if r.pair.method(i) == "workload:completed" {
+			done++
+		}
+	}
+	if done != 1 || len(r.failedFrames()) != 0 {
+		t.Fatalf("one terminal frame for the card: completed=%d failed=%v", done, r.failedFrames())
+	}
+	if files := r.files(t); len(files) != 0 {
+		t.Fatalf("a delivered verdict leaves no marker: %v", files)
+	}
+}
+
+// The guard above lasts as long as the post and no longer: a terminal frame the post could not deliver
+// is parked again, and the same emitter's next sweep sends it (what fleet-serve's sweeper does for a
+// node whose PAIR was restarting).
+func TestAnEmittersOwnSweepSendsAParkedVerdictItsPostCouldNotDeliver(t *testing.T) {
+	r := &orphanRig{pair: &capture{}, appDir: writePairAppDir(t), dir: t.TempDir()}
+	var refuse atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if refuse.Load() && strings.Contains(peekBody(req), `"workload:completed"`) {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		r.pair.handler(w, req)
+	}))
+	defer srv.Close()
+	r.url = srv.URL
+	p := r.emitter(nil, nil)
+	p.Emit(Event{JobID: "call-late", Model: "generate_image", Engine: "comfyui", State: "queued", CreatedAt: 1_000})
+	p.Wait()
+	refuse.Store(true)
+	p.Emit(Event{JobID: "call-late", Model: "comfyui:x", Engine: "comfyui", State: "completed", CreatedAt: 1_000, StartedAt: 2_000, CompletedAt: 9_000})
+	p.Wait()
+	if files := r.files(t); len(files) != 1 {
+		t.Fatalf("a verdict PAIR could not take stays in the register: %v", files)
+	}
+	refuse.Store(false)
+	if n := p.SweepOrphans(context.Background()); n != 1 {
+		t.Fatalf("the emitter's own sweep must send the verdict its post could not deliver: %d", n)
 	}
 	if files := r.files(t); len(files) != 0 {
 		t.Fatalf("a delivered verdict leaves no marker: %v", files)

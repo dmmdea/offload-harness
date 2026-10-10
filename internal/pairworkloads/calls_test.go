@@ -4,6 +4,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"reflect"
+	"runtime"
+	"sort"
 	"testing"
 
 	"github.com/dmmdea/offload-harness/internal/config"
@@ -98,6 +101,36 @@ func TestEndClosesUnstartedCardWithoutRow(t *testing.T) {
 	e.Wait()
 	if c.count() != 2 {
 		t.Fatalf("a second End must send nothing, frames = %d", c.count())
+	}
+}
+
+// The first Emit of an emitter starts a sweep of the open-card register from a goroutine. With one
+// processor that goroutine runs when the caller blocks on its terminal post, so it reads the verdict the
+// caller parked a moment earlier. A short call (a deferral, a refused dispatch) must still put exactly one
+// terminal frame on the wire: three tests of three packages saw a second, identical one on a 4-vCPU CI
+// runner (2026-10-10), and any of them fails every time here without the emitter's own-post guard.
+func TestAShortCardIsClosedOnceWithOneProcessor(t *testing.T) {
+	prev := runtime.GOMAXPROCS(1)
+	t.Cleanup(func() { runtime.GOMAXPROCS(prev) })
+	app := writePairAppDir(t)
+	for i := 0; i < 10; i++ {
+		c := &capture{}
+		srv := httptest.NewServer(http.HandlerFunc(c.handler))
+		e := New(Config{Enabled: true, Endpoint: srv.URL, AppDir: app, OpenDir: t.TempDir()})
+		id, _, end := e.Begin("transcribe", "cli:transcribe")
+		end(core.Deferf("whisper unreachable", "", core.Meta{}))
+		e.Wait()
+		srv.Close()
+		var got []string
+		for j := 0; j < c.count(); j++ {
+			if c.info(j)["id"] == id {
+				got = append(got, c.method(j).(string))
+			}
+		}
+		sort.Strings(got)
+		if want := []string{"workload:errored", "workload:submitted"}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("round %d: frames of the card = %v, want %v", i, got, want)
+		}
 	}
 }
 

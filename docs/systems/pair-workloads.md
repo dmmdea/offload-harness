@@ -584,9 +584,16 @@ side can know the producer died, so the harness retires its own orphans:
   goroutine): a process killed while its terminal post is in flight, or before a background post has
   started, leaves the verdict itself in the register, and the sweep sends that instead of "harness
   process exited before the job finished" for a job whose outcome it knew. The one cost is a window of
-  milliseconds in which a LIVE producer's marker is already pending: a sweeper that reads it then
-  resends an identical terminal frame, which PAIR merges as an equal-rank no-op, and the producer's
-  own removal of the marker after its post is idempotent. The other cost is one more marshal and
+  milliseconds in which a LIVE producer's marker is already pending. The producer's own emitter keeps
+  its sweeps out of it: it remembers the markers it has a post in flight for (`Emitter.posting`, set in
+  `track` before the marker is written and cleared in `untrack` once the marker is removed or parked
+  again), because its first-`Emit` sweep runs on a goroutine and a call short enough to close before
+  that goroutine ran (a deferral, a refused dispatch) was otherwise closed twice (2026-10-10: three tests
+  of three packages on a 4-vCPU CI runner, and on one processor every time). A post that fails parks
+  the frame again and clears the mark, so the next sweep, the emitter's own included, sends it. A
+  sweeper of another process, or fleet-serve's periodic one (an emitter of its own), that reads the
+  marker in that window resends an identical terminal frame, which PAIR merges as an equal-rank no-op,
+  and the producer's own removal of the marker after its post is idempotent. The other cost is one more marshal and
   atomic write (with Windows' bounded rename retry) on the caller's goroutine for every terminal frame
   that has an open marker: delegations, lease cards, node cards and seat-watch `closeAll` pay it too,
   not only the door path. The marker is written atomically
