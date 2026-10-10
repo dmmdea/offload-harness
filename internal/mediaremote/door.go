@@ -17,8 +17,10 @@ import (
 	"context"
 	crand "crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/big"
+	"net/http"
 	"strings"
 	"time"
 
@@ -129,8 +131,8 @@ func (q *queueRT) admit(ctx context.Context, cfg config.Config, runner Runner, r
 
 	// An identical request is the ticket it already made.
 	for _, t := range st.list() {
-		if t.ReqKey != key {
-			continue
+		if t.ReqKey != key || (t.Collected && terminalState(t.State)) {
+			continue // not this request, or its result was taken: a repeat of the content is a new job
 		}
 		if res, attached := q.attach(ctx, cfg, runner, req, remotes, w, st, t); attached {
 			return res, nil
@@ -141,8 +143,10 @@ func (q *queueRT) admit(ctx context.Context, cfg config.Config, runner Runner, r
 		}
 	}
 
+	// A lane that reads free runs the call here, as it always did. One the pipeline could not read (v.Unjudged) is not a free
+	// lane: the call becomes a ticket, whose first scan looks at the fleet and runs the call here only if no node can take it.
 	v := core.ProbeLane(ctx, runner, req)
-	if v.Free {
+	if v.Free && !v.Unjudged {
 		return runner.Run(ctx, req), nil
 	}
 	lt, existing, err := q.create(ctx, cfg, runner, req, remotes, w, st, key, local, v, inherit)
@@ -239,6 +243,10 @@ func (q *queueRT) attach(ctx context.Context, cfg config.Config, runner Runner, 
 		return collectFile(st, t), true
 	case !t.dead():
 		return q.awaitFile(ctx, cfg, runner, req, remotes, w, st, t.ID), true
+	case inFlightState(t.State) && t.Job == "":
+		// Its owner ended while it was being sent, and the file (an older build's) names no job: there is nothing to poll, and the
+		// job may be on the node. The answer says so rather than guessing either way.
+		return deferRes(core.DeferClassInfrastructure, fmt.Sprintf("ticket %s was being sent to %s when its owner ended and records no job id, so it cannot be polled and may already be rendering there; check that node's jobs before sending the request again", t.ID, t.Node), core.ErrClassGPUQueued), true
 	case inFlightState(t.State):
 		if ad := q.adopt(ctx, cfg, runner, req, remotes, w, st, t); ad != nil {
 			return q.await(ctx, cfg, w, ad), true
@@ -299,14 +307,38 @@ func (q *queueRT) adopt(ctx context.Context, cfg config.Config, runner Runner, r
 	go func() {
 		defer q.wg.Done()
 		start := time.Now()
-		placement := "remote: this machine's image lane was not free (" + t.LaneWhy + ")"
+		placement := lanePlacement(t.LaneWhy, true)
 		actx, cancel := context.WithTimeout(lt.ctx, Budgets[lt.pl.fleetTask])
 		defer cancel()
+		// A ticket that was only being sent when its owner ended may never have reached the node: ask it once. A node that
+		// denies the job (404) was never given it (or lost it before it ran), so there is nothing to wait for and the ticket
+		// goes back in line with its arrival; a node that holds it, or does not answer, is polled as any placed ticket.
+		if t.State == stPlacing {
+			if _, gerr := getJSON[jobWire](actx, cfg, t.Base+"/fleet/jobs/"+t.Job); gerr != nil {
+				var se *httpStatusError
+				if errors.As(gerr, &se) && se.code == http.StatusNotFound {
+					logQueue("ticket %s: its owner ended while it was being sent to %s and the node does not hold job %s; the ticket goes back in line", t.ID, t.Node, t.Job)
+					lt.backToWaiting(t.Base)
+					lt.q.nudge()
+					return
+				}
+			}
+		}
 		// The attribution handle opens no card (Dispatched is never called): the call writes its one ledger row and the card
 		// the ended process opened is closed by the sweep that closes a dead process's cards.
 		h := core.BeginRemote(runner, lt.req, RouteAuto)
 		defer core.CloseOnPanic(h)
 		res, err := collect(actx, cfg, lt.req, lt.pl, t.Base, t.Node, t.Job, start, &ticketHandle{RemoteAttribution: h, lt: lt})
+		if err == nil && passedBack(res) {
+			// The node took the job and passed it back (another job held its card): nothing ran, as for a live owner's job. The
+			// ticket re-enters the line and the node is left alone for a while, instead of the caller being handed a gpu_busy
+			// failure for a job that can still run.
+			h.Discard("the node passed the adopted job back; the ticket goes on to the next lane that frees")
+			placer.bounced(t.Base, t.Node, "bounced", "it took the last call and passed it back: another job held its card")
+			lt.backToWaiting(t.Base)
+			lt.q.nudge()
+			return
+		}
 		if err != nil {
 			res = placementDefer(err, placement)
 		} else if res.OK {
@@ -328,8 +360,9 @@ func withSeed(req core.Request, seed int) core.Request {
 	return req
 }
 
-// deliver hands the ticket's result to a call that waited for it, once: the first call to take it removes the file, and a
-// call that arrives later starts a new job.
+// deliver hands the ticket's result to a call that waited for it. The first call to take it marks the file collected, and the
+// file stays for collectedKeep so a call of another process that waits on the same ticket, or one that names its token, still
+// gets the result; a request that only repeats the content starts a new job (the result was taken).
 func (q *queueRT) deliver(lt *liveTicket) core.Result {
 	lt.mu.Lock()
 	res, first, canceled := lt.res, !lt.collected, lt.canceled
@@ -337,7 +370,7 @@ func (q *queueRT) deliver(lt *liveTicket) core.Result {
 	id := lt.t.ID
 	lt.mu.Unlock()
 	if first && !canceled {
-		lt.st.remove(id)
+		lt.st.markCollected(id)
 	}
 	return res
 }
@@ -348,7 +381,7 @@ func collectFile(st *store, t ticketFile) core.Result {
 	if len(t.Result) == 0 || json.Unmarshal(t.Result, &res) != nil {
 		res = deferRes(core.DeferClassInfrastructure, fmt.Sprintf("ticket %s finished but kept no readable result; send the request again", t.ID), "")
 	}
-	st.remove(t.ID)
+	st.markCollected(t.ID)
 	return res
 }
 
@@ -506,7 +539,7 @@ func clusterSummary(t ticketFile) string {
 
 // nextText is what the answer tells a caller to do.
 func nextText(id string) string {
-	return "the harness holds this job and starts it on the first matching lane that frees; do not call again or resend; a repeat of the request attaches to this ticket; call with waiter_token=" + id + " only to collect the result"
+	return fmt.Sprintf("the harness holds this job and starts it on the first matching lane that frees; do not call again or resend; a repeat of the request attaches to this ticket; call with waiter_token=%s only to collect the result (a finished result is kept for %.0f hours)", id, doneOKKeep.Hours())
 }
 
 // queuedAnswer is the one answer that says where a ticket stands and why: the ticket, its place in this machine's queue,

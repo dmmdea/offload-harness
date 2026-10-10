@@ -105,9 +105,12 @@ func answerOf(t *testing.T, res core.Result) answer {
 	return a
 }
 
-// ticketFiles lists the ticket files in the state dir.
+// ticketFiles lists the ticket files in the state dir that are still a ticket: a finished one whose result was taken stays on
+// file for collectedKeep so a second caller waiting on it gets the result too, and is not a ticket any more (collectedFiles
+// lists those).
 func ticketFiles(t *testing.T, cfg config.Config) []string {
 	t.Helper()
+	st, _ := storeFor(cfg)
 	ents, err := os.ReadDir(filepath.Join(cfg.StateDir, queueDirName))
 	if err != nil {
 		return nil
@@ -115,6 +118,9 @@ func ticketFiles(t *testing.T, cfg config.Config) []string {
 	var out []string
 	for _, e := range ents {
 		if strings.HasPrefix(e.Name(), "mq-") && strings.HasSuffix(e.Name(), ".json") {
+			if tf, ok := st.read(strings.TrimSuffix(e.Name(), ".json")); ok && tf.Collected && terminalState(tf.State) {
+				continue
+			}
 			out = append(out, e.Name())
 		}
 	}
@@ -753,9 +759,9 @@ func TestWaitingTicketOfDeadOwnerIsSwept(t *testing.T) {
 	e.lr.placeFor("tk-deadplace0002", time.UnixMilli(old))
 	// A finished ticket nobody collected, long past doneKeep, and a claim whose owner is gone.
 	stale := ticketFile{ID: "mq-donestale001", ReqKey: "k4", Created: old, Owner: deadOwner, Beat: old, State: stDone, Result: json.RawMessage(`{"ok":true}`)}
-	prevKeep := doneKeep
-	doneKeep = time.Millisecond
-	t.Cleanup(func() { doneKeep = prevKeep })
+	prevKeep, prevOKKeep := doneKeep, doneOKKeep
+	doneKeep, doneOKKeep = time.Millisecond, time.Millisecond
+	t.Cleanup(func() { doneKeep, doneOKKeep = prevKeep, prevOKKeep })
 	if err := st.write(stale); err != nil {
 		t.Fatal(err)
 	}
@@ -1130,8 +1136,15 @@ func TestQueueStateAndGoroutinesDoNotGrowWithScans(t *testing.T) {
 	}
 	files := func() []string {
 		ents, _ := os.ReadDir(filepath.Join(e.cfg.StateDir, queueDirName))
+		st, _ := storeFor(e.cfg)
 		var names []string
 		for _, f := range ents {
+			if f.Name() == lockName { // the lock file stays for good (queuefs.go)
+				continue
+			}
+			if tf, ok := st.read(strings.TrimSuffix(f.Name(), ".json")); ok && tf.Collected && terminalState(tf.State) {
+				continue // a taken result stays collectedKeep for the other callers waiting on it
+			}
 			names = append(names, f.Name())
 		}
 		return names
@@ -1263,12 +1276,14 @@ func TestClaimNodeIsExclusiveAndLetsGoOfTheDead(t *testing.T) {
 		t.Error("only the holder lets a node go")
 	}
 	st.releaseNode(base, c.ID)
-	if files, _ := os.ReadDir(st.dir); len(files) != 3 { // the three ticket files; no claim, no lock
+	// The three ticket files and the lock file, which stays for good (an operating-system file lock is on the open file, and a
+	// file that came and went would let a late contender lock a new one while an earlier holder still had the old: queuefs.go).
+	if files, _ := os.ReadDir(st.dir); len(files) != 4 {
 		var names []string
 		for _, f := range files {
 			names = append(names, f.Name())
 		}
-		t.Errorf("a released node leaves no claim and no lock behind: %v", names)
+		t.Errorf("a released node leaves no claim behind (the three tickets and the lock file): %v", names)
 	}
 }
 
@@ -1377,6 +1392,21 @@ func TestALostRaceOnTheLocalLaneGoesBackToWaiting(t *testing.T) {
 	e.lr.mu.Lock()
 	e.lr.local = core.Result{OK: true, Data: json.RawMessage(`{"local":true}`)}
 	e.lr.mu.Unlock()
+	// The refusal paused the lane for this ticket (TestALostRaceOnTheLocalLaneIsNotARetryLoop...): a cycle inside the pause
+	// does not ask it, and one after the pause does.
+	lt.mu.Lock()
+	if !time.Now().Before(lt.lostUntil) || lt.lostN != 1 {
+		lt.mu.Unlock()
+		t.Fatalf("a refused run pauses the lane for the ticket: lostN=%d until=%s", lt.lostN, lt.lostUntil)
+	}
+	lt.mu.Unlock()
+	q.cycle(context.Background())
+	if runs := len(e.lr.ranCalls()); runs != 1 {
+		t.Fatalf("inside the pause the lane is not asked again: %d runs", runs)
+	}
+	lt.mu.Lock()
+	lt.lostUntil = time.Now().Add(-time.Second)
+	lt.mu.Unlock()
 	q.cycle(context.Background())
 	waitFor(t, 5*time.Second, "the second run serves it", func() bool { return isDone(lt) })
 	if !lt.res.OK {

@@ -387,8 +387,16 @@ type attemptResult struct {
 	row  ClusterRow
 }
 
-// attempt sends the call to c under a fresh job id and brings the result back.
-func attempt(ctx context.Context, cfg config.Config, req core.Request, pl planned, c candidate, local localID, start time.Time, h core.RemoteAttribution) attemptResult {
+// passedBack says a node's answer is a job it accepted and handed back: another job holds its card, or it could not take its
+// lease. Nothing ran there, so the call goes on (to the next lane that frees) and the node is left alone for a while.
+func passedBack(res core.Result) bool {
+	return !res.OK && (core.CardHeld(res.Meta.ErrClass) || res.Meta.ErrClass == core.ErrClassGPULeaseUnavailable)
+}
+
+// attempt sends the call to c under jobID and brings the result back. The caller mints the id BEFORE it records the claim, so
+// the ticket on disk names the job from the instant it may be on the node (a process that ends in between leaves an id an
+// adopter can ask the node about).
+func attempt(ctx context.Context, cfg config.Config, req core.Request, pl planned, c candidate, local localID, start time.Time, jobID string, h core.RemoteAttribution) attemptResult {
 	payload := make(map[string]any, len(pl.payload)+2)
 	for k, v := range pl.payload {
 		payload[k] = v
@@ -403,10 +411,6 @@ func attempt(ctx context.Context, cfg config.Config, req core.Request, pl planne
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		return attemptResult{kind: attemptFailed, err: &contractError{fmt.Sprintf("the %s request cannot be encoded for the wire: %v", pl.fleetTask, err)}}
-	}
-	jobID, err := newJobID()
-	if err != nil {
-		return attemptResult{kind: attemptFailed, err: &placementError{core.DeferClassInfrastructure, "job id: " + err.Error()}}
 	}
 	body, err := json.Marshal(map[string]any{"job_id": jobID, "task_type": pl.fleetTask, "payload": json.RawMessage(raw)})
 	if err != nil {

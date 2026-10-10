@@ -66,6 +66,9 @@ type node struct {
 	dropAck bool
 	// healthEdit rewrites the decoded health body before it is served (nodeOpts.healthEdit).
 	healthEdit func(map[string]any)
+	// beforePost, when set, is called with the body of every POST before the node sees it: how a test reads what the
+	// delegator had on disk at the instant it sent the job.
+	beforePost func(body []byte)
 }
 
 func nodeID(id string) string {
@@ -215,8 +218,11 @@ func startNode(t *testing.T, o nodeOpts) *node {
 		}
 		n.mu.Lock()
 		n.log = append(n.log, seen{req.Method, req.URL.Path, req.Header.Get("Authorization"), body, req.Header.Clone()})
-		tamper, refuse, retryAfter, drop := n.tamper, n.refusePost, n.refuseRetryAfter, n.dropAck
+		tamper, refuse, retryAfter, drop, before := n.tamper, n.refusePost, n.refuseRetryAfter, n.dropAck, n.beforePost
 		n.mu.Unlock()
+		if before != nil && req.Method == http.MethodPost {
+			before(body)
+		}
 		if refuse != 0 && req.Method == http.MethodPost {
 			if retryAfter != "" {
 				w.Header().Set("Retry-After", retryAfter)

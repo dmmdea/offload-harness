@@ -88,6 +88,15 @@ type liveTicket struct {
 	running   bool // a goroutine is carrying the ticket (a local run, a send, a poll)
 	collected bool
 	canceled  bool
+	// ended: finish has run, so the ticket's channel is closed. Checked under mu at the top of finish, whatever state the ticket
+	// is in: a cancel ends a ticket without making its state terminal, and a send that was already under way must not end
+	// it a second time.
+	ended bool
+
+	// lostN counts the runs on this machine's lane that the lane refused at once although it had read free, in a row, and
+	// lostUntil is when the ticket asks that lane again (see startLocal).
+	lostN     int
+	lostUntil time.Time
 
 	done chan struct{}
 	res  core.Result
@@ -204,6 +213,10 @@ func spread(d time.Duration) time.Duration {
 
 func (q *queueRT) scanLoop() {
 	defer q.wg.Done()
+	kctx, stopKeep := context.WithCancel(q.rootCtx)
+	defer stopKeep()
+	q.wg.Add(1)
+	go q.keepLoop(kctx)
 	for {
 		q.cycle(q.rootCtx)
 		q.mu.Lock()
@@ -221,6 +234,38 @@ func (q *queueRT) scanLoop() {
 			timer.Stop()
 		case <-timer.C:
 		}
+	}
+}
+
+// keepLoop touches the place of every waiting ticket on its own rhythm (scanEvery), for as long as the scanner lives. A scan
+// visits its tickets one after another and each visit asks the lane one question (a bounded card-table read, up to
+// laneProbeBound), so with enough waiting tickets the turn of the last one comes later than the 30 s the local line holds a
+// place for; a place touched only at its ticket's turn would lapse and be left again, and the ticket would not hold its
+// card against a later caller in between. A touch is one file write, and a place that already lapsed is left again by its
+// ticket's next turn (keepPlace), with the ticket's own arrival.
+func (q *queueRT) keepLoop(ctx context.Context) {
+	defer q.wg.Done()
+	tick := time.NewTicker(scanEvery)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+		}
+		for _, lt := range q.snapshot() {
+			lt.touchPlace()
+		}
+	}
+}
+
+// touchPlace refreshes the place of a waiting ticket (one that is running keeps its own).
+func (lt *liveTicket) touchPlace() {
+	lt.mu.Lock()
+	place, waiting := lt.t.Place, lt.t.State == stWaiting && !lt.running && !lt.canceled
+	lt.mu.Unlock()
+	if waiting && place != "" {
+		core.KeepPlace(lt.runner, place)
 	}
 }
 
@@ -327,16 +372,31 @@ func (lt *liveTicket) step(ctx context.Context, cs *cycleState) {
 		verdict = *lt.first
 	}
 	lt.first = nil
+	cooling, lostN, coolLeft := !reuse && time.Now().Before(lt.lostUntil), lt.lostN, time.Until(lt.lostUntil)
 	lt.mu.Unlock()
 	switch {
 	case reuse:
 	case cs.localTaken:
 		// An older ticket of this scan has the lane; this one cannot take it now, and its answer keeps the last reading.
 		verdict, probed = core.LaneVerdict{Free: false, Why: "an older ticket of this machine is being started on the lane"}, false
+	case cooling:
+		// The lane read free and refused this ticket's run at once (a younger place on the card that a call without a wait
+		// cannot pass, or a caller that took the card between the reading and the run). Asking again now would repeat the
+		// run, and each refused run writes the pipeline's own deferred row: the lane is not asked, and not run, until the
+		// pause is over. The fleet is looked at meanwhile.
+		verdict = core.LaneVerdict{Free: false, Why: fmt.Sprintf("this machine's lane read free but refused the last %s at once; not asked again for %s", plural(lostN, "run"), coolLeft.Round(time.Second))}
 	default:
 		verdict = core.ProbeLane(sctx, lt.runner, preq)
+		if !verdict.Free {
+			lt.mu.Lock()
+			lt.lostN = 0 // the lane's state really changed: the next time it reads free is a new question
+			lt.mu.Unlock()
+		}
 	}
-	if verdict.Free && !cs.localTaken {
+	// A lane that reads free runs the call here and now. A lane the pipeline could not read is not a free lane (the card
+	// table is slowest to read exactly when a heavy render holds the card): the fleet is looked at in this same scan, and
+	// the run here is the answer only when no node can take the call.
+	if verdict.Free && !verdict.Unjudged {
 		cs.localTaken = true
 		lt.startLocal()
 		return
@@ -416,7 +476,7 @@ func (lt *liveTicket) step(ctx context.Context, cs *cycleState) {
 	sort.Strings(matched)
 
 	local := localLane(verdict)
-	if probed && !verdict.Free && verdict.Why != "" {
+	if probed && (!verdict.Free || verdict.Unjudged) && verdict.Why != "" {
 		lt.mu.Lock()
 		lt.t.LaneWhy = verdict.Why
 		lt.mu.Unlock()
@@ -424,7 +484,31 @@ func (lt *liveTicket) step(ctx context.Context, cs *cycleState) {
 	lt.record(rows, extra, matched, local, all, berr)
 	if chosen != nil {
 		lt.startRemote(sctx, *chosen)
+		return
 	}
+	if verdict.Free && !cs.localTaken { // the lane could not be read and no node can take the call: it runs here
+		cs.localTaken = true
+		lt.startLocal()
+	}
+}
+
+func plural(n int, what string) string {
+	if n == 1 {
+		return what
+	}
+	return fmt.Sprintf("%d %ss", n, what)
+}
+
+// lanePlacement is the placement sentence of a result that ran on a node, from the reading of this machine's lane that sent it
+// there (was: the call was sent earlier, by a process that has since ended).
+func lanePlacement(why string, was bool) string {
+	if rest, unread := strings.CutPrefix(why, "not judged: "); unread {
+		return "remote: this machine's image lane could not be judged (" + rest + ")"
+	}
+	if was {
+		return "remote: this machine's image lane was not free (" + why + ")"
+	}
+	return "remote: this machine's image lane is not free (" + why + ")"
 }
 
 // markScanned says the first scan of the ticket is over (a call waits for it before it answers).
@@ -575,14 +659,22 @@ func (lt *liveTicket) startLocal() {
 			return
 		}
 		if !res.OK && res.Deferred && core.CardHeld(res.Meta.ErrClass) {
-			// The lane was taken between the question and the run, and nothing ran: the ticket goes back to waiting
-			// with its place (a lost race only cost the run's own wait).
+			// The lane was taken between the question and the run, or refused a run that has no wait (gpu_wait_ms 0), and
+			// nothing ran: the ticket goes back to waiting with its place. It does NOT ask the lane again at once: a lane
+			// that reads free and refuses at once would be asked and refused in a loop, a pipeline deferred row per run.
+			// The pause grows with each refusal in a row (the same steps as a node that does not answer), and step looks
+			// at the fleet meanwhile. A refusal that took the run's whole wait (gpu_wait_ms > 0) already spaced the runs.
 			lt.mu.Lock()
 			lt.running = false
 			lt.t.State = stWaiting
+			lt.lostN++
+			pause := backoffSteps[min(lt.lostN, len(backoffSteps))-1]
+			lt.lostUntil = time.Now().Add(pause)
+			n := lt.lostN
+			lt.t.Local = &LocalLane{State: "busy", Why: fmt.Sprintf("the last run on this machine's lane was refused at once although it read free; not asked again for %s", pause)}
 			lt.persistLocked()
 			lt.mu.Unlock()
-			lt.q.nudge()
+			logQueue("ticket %s: this machine's lane read free and refused the run at once (%d in a row); not asked again for %s, the fleet is looked at meanwhile", lt.t.ID, n, pause)
 			return
 		}
 		lt.finish(res, false)
@@ -636,10 +728,20 @@ func (lt *liveTicket) startRemote(ctx context.Context, c candidate) {
 		lt.mu.Unlock()
 		return
 	}
+	jobID, jerr := newJobID()
+	if jerr != nil {
+		logQueue("ticket %s: no job id could be made: %v", lt.t.ID, jerr)
+		lt.mu.Unlock()
+		return
+	}
 	lt.running = true // one dispatch of a ticket at a time, from here until the job ends or the claim is refused
 	cp := lt.t
+	// The ticket names its job in the very write that claims the node. A process that ends between the claim and the POST
+	// leaves a ticket an adopter can ask the node about; without the id there is nothing to ask, and a job the POST got
+	// through would run with no record of where.
+	cp.Job = jobID
 	lt.mu.Unlock()
-	// The claim waits for the directory lock, which a crashed holder can keep for a while: not with the ticket locked.
+	// The claim waits for the directory lock: not with the ticket locked.
 	ok, _, err := lt.st.claimNode(&cp, c.base, c.node, stPlacing)
 	if err != nil || !ok {
 		if err != nil {
@@ -651,8 +753,17 @@ func (lt *liveTicket) startRemote(ctx context.Context, c candidate) {
 		return
 	}
 	lt.mu.Lock()
-	lt.t.State, lt.t.Base, lt.t.Node = cp.State, cp.Base, cp.Node
-	placement := "remote: this machine's image lane is not free (" + lt.t.LaneWhy + ")"
+	if lt.canceled {
+		// A cancel landed while the claim waited for the lock, and it told its caller that nothing was sent: the claim wrote
+		// the ticket's file and the node's claim after the cancel removed them, so both go again and nothing is sent.
+		lt.running = false
+		lt.mu.Unlock()
+		lt.st.releaseNode(c.base, cp.ID)
+		lt.st.remove(cp.ID)
+		return
+	}
+	lt.t.State, lt.t.Base, lt.t.Node, lt.t.Job = cp.State, cp.Base, cp.Node, cp.Job
+	placement := lanePlacement(lt.t.LaneWhy, false)
 	lt.mu.Unlock()
 	lt.q.wg.Add(1)
 	go func() {
@@ -662,7 +773,7 @@ func (lt *liveTicket) startRemote(ctx context.Context, c candidate) {
 		defer cancel()
 		h := core.BeginRemote(lt.runner, lt.req, RouteAuto)
 		defer core.CloseOnPanic(h)
-		a := attempt(actx, lt.cfg, lt.req, lt.pl, c, lt.local, start, &ticketHandle{RemoteAttribution: h, lt: lt})
+		a := attempt(actx, lt.cfg, lt.req, lt.pl, c, lt.local, start, jobID, &ticketHandle{RemoteAttribution: h, lt: lt})
 		switch a.kind {
 		case attemptDone:
 			a.res.Meta.Placement = placement + "; ran on " + c.node
@@ -674,16 +785,24 @@ func (lt *liveTicket) startRemote(ctx context.Context, c candidate) {
 			lt.finish(res, false)
 		default: // the node passed the job back or was not reached: nothing ran there
 			h.Discard("the ticket goes on to the next lane that frees")
-			lt.mu.Lock()
-			lt.running = false
-			lt.t.State, lt.t.Base, lt.t.Node, lt.t.Job = stWaiting, "", "", ""
-			lt.persistLocked()
-			lt.mu.Unlock()
-			lt.st.releaseNode(c.base, lt.t.ID)
+			lt.backToWaiting(c.base)
 			lt.rememberAttempt(c, a.row)
 			lt.q.nudge()
 		}
 	}()
+}
+
+// backToWaiting puts a ticket whose job went nowhere (a node passed it back or was not reached, or an adopted job was never
+// on its node) back in line: the node and the job id are let go and the next scan decides again. The ticket keeps its arrival
+// and its place.
+func (lt *liveTicket) backToWaiting(base string) {
+	lt.mu.Lock()
+	lt.running = false
+	lt.t.State, lt.t.Base, lt.t.Node, lt.t.Job = stWaiting, "", "", ""
+	id := lt.t.ID
+	lt.persistLocked()
+	lt.mu.Unlock()
+	lt.st.releaseNode(base, id)
 }
 
 // rememberAttempt keeps what a refused or bounced attempt said about a node until the node is read again.
@@ -703,10 +822,11 @@ func (lt *liveTicket) rememberAttempt(c candidate, row ClusterRow) {
 // local place are let go, and every call waiting for the ticket is woken. canceled removes the ticket.
 func (lt *liveTicket) finish(res core.Result, canceled bool) {
 	lt.mu.Lock()
-	if terminalState(lt.t.State) {
+	if lt.ended || terminalState(lt.t.State) {
 		lt.mu.Unlock()
 		return
 	}
+	lt.ended = true
 	base, id, place := lt.t.Base, lt.t.ID, lt.t.Place
 	lt.running = false
 	lt.res = res
@@ -742,12 +862,17 @@ func (lt *liveTicket) finish(res core.Result, canceled bool) {
 func (lt *liveTicket) cancelUndispatched(why string) bool {
 	lt.mu.Lock()
 	state := lt.t.State
-	lt.mu.Unlock()
-	switch state {
-	case stWaiting:
+	if state == stWaiting && !lt.canceled && !lt.ended {
+		// Marked in the same hold of the lock as the look at the state: a scan that is claiming a node for this ticket
+		// (state still waiting until the claim is taken) checks the mark under the lock before it commits to sending, so the
+		// job is either sent, and then the state is placing and this answers false, or it is not sent.
+		lt.canceled = true
+		lt.mu.Unlock()
 		lt.finish(deferRes(core.DeferClassCapacity, why, core.ErrClassGPUQueued), true)
 		return true
-	case stLocal:
+	}
+	lt.mu.Unlock()
+	if state == stLocal {
 		lt.cancel()
 		return true
 	}

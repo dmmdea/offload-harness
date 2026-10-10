@@ -60,8 +60,19 @@ var (
 	firstScanBound = 15 * time.Second
 	// ownerStale: an owner whose pid is alive but has not written its beat for this long is hung, and is treated as dead.
 	ownerStale = 10 * time.Minute
-	// doneKeep: a finished ticket nobody collected stays this long (the lease line's own place TTL).
+	// doneKeep: a FAILED ticket nobody collected stays this long (the lease line's own place TTL). A failure is kept only for a
+	// short while because a repeat of the request should try again, not be handed a stale failure.
 	doneKeep = 10 * time.Minute
+	// doneOKKeep: a finished ticket whose job SUCCEEDED and that nobody collected stays this long. The caller was told to call
+	// once and come back for the result with the token, a job renders for minutes to hours, and a result that vanished ten
+	// minutes after the job ended would be rendered a second time by the caller that obeyed. A result is a few hundred bytes
+	// naming a file; the render is at its out path either way.
+	doneOKKeep = 6 * time.Hour
+	// collectedKeep: a ticket whose result was handed to a caller stays this long, marked collected, so the other calls
+	// waiting for the same ticket (an MCP door and a CLI of another process, or a second caller naming the token) still receive
+	// the result. A render is not repeated because two callers asked for it in the same minute. It is not offered to a request
+	// that merely repeats the content (that starts a new job: the result was taken).
+	collectedKeep = 2 * time.Minute
 	// deadKeep: a placed ticket whose owner died stays adoptable this long (a job renders for minutes to hours).
 	deadKeep = 6 * time.Hour
 	// ticketMaxWait ends a ticket that has waited this long without a lane (the default wait of `gpu reserve --wait`, ADR 0039).
@@ -140,7 +151,9 @@ type ticketFile struct {
 	PlaceNote string `json:"local_place_note,omitempty"`
 
 	State string `json:"state"`
-	// Node is the node id, Base its URL and Job the id the node knows the job by, once a node is claimed (Job: accepted).
+	// Node is the node id, Base its URL and Job the id the node knows the job by, once a node is claimed: the id is minted before
+	// the claim and written with it (state placing), so a placing ticket names a job that may or may not have reached the node
+	// (the POST may not have been sent), and a placed one names a job the node accepted.
 	Node string `json:"node,omitempty"`
 	Base string `json:"base,omitempty"`
 	Job  string `json:"remote_job_id,omitempty"`
@@ -157,8 +170,9 @@ type ticketFile struct {
 	Position int          `json:"position,omitempty"`
 
 	// Result is the finished call's core.Result, once it is terminal.
-	Result    json.RawMessage `json:"result,omitempty"`
-	Collected bool            `json:"collected,omitempty"`
+	Result json.RawMessage `json:"result,omitempty"`
+	// Collected: a call took the result. The file stays for collectedKeep so every call waiting on the ticket gets it.
+	Collected bool `json:"collected,omitempty"`
 }
 
 // LocalLane is the answer's word about this machine's own lane.
@@ -255,6 +269,14 @@ func (s *store) write(t ticketFile) error {
 		return err
 	}
 	return writeFileAtomic(s.path(t.ID), b)
+}
+
+// markCollected records that a call took the ticket's result (the file stays for collectedKeep, see there).
+func (s *store) markCollected(id string) {
+	if t, ok := s.read(id); ok && !t.Collected && terminalState(t.State) {
+		t.Collected = true
+		_ = s.write(t)
+	}
 }
 
 func (s *store) remove(id string) {
@@ -399,14 +421,21 @@ func (s *store) claims() map[string]claim {
 
 // sweep removes what a dead process left that nothing will ever collect, and returns the places of the tickets it
 // removed so the caller can drop them from the lease line. It keeps a placed ticket of a dead owner (the next identical
-// call adopts it) for deadKeep, and a finished one nobody collected for doneKeep.
+// call adopts it) for deadKeep, and a finished one nobody collected for doneOKKeep (a success) or doneKeep (a failure).
 func (s *store) sweep(all []ticketFile) (dropped []string) {
 	now := time.Now()
 	for _, t := range all {
 		age := now.Sub(time.UnixMilli(maxInt64(t.Updated, t.Beat)))
 		switch {
 		case terminalState(t.State):
-			if age > doneKeep {
+			keep := doneKeep
+			switch {
+			case t.Collected:
+				keep = collectedKeep
+			case t.State == stDone:
+				keep = doneOKKeep
+			}
+			if age > keep {
 				s.remove(t.ID)
 			}
 		case t.dead() && (t.State == stWaiting || t.State == stLocal):
@@ -490,6 +519,9 @@ func Queue(cfg config.Config) []QueueRow {
 	}
 	var out []QueueRow
 	for _, t := range st.list() {
+		if t.Collected && terminalState(t.State) {
+			continue // its result was taken; it stays on file only for the other callers waiting on it
+		}
 		row := QueueRow{Ticket: t.ID, State: t.State, Task: t.Task, Family: t.Family, Position: t.Position, Node: t.Node, Job: t.Job,
 			Created: time.UnixMilli(t.Created).UTC().Format(time.RFC3339), AgeSec: int(time.Since(time.UnixMilli(t.Created)).Seconds()),
 			OwnerAlive: !t.dead(), Place: t.Place != ""}
