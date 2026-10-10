@@ -193,6 +193,7 @@ models:
   # tier's render strips, embeddinggemma2_projector false), a member of
   # the stack's residency set; see the linux-cuda template for the full rationale and the
   # measured footprint. REQUIRES llama.cpp >= b11452.
+  # KNOWN GAP: embeddinggemma, this entry and the reranker all pin to device 2, the shape that failed the agent seat's cold start on the reference 3-card box (2026-10-09, docs/systems/setup-installer.md); not re-pinned, because the fit of device 0's cascade and 26B resident tier beside a 501 MiB resident is unmeasured.
   embeddinggemma2:
     env: [CUDA_VISIBLE_DEVICES=2]
     cmd: >-

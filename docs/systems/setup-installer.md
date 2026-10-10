@@ -120,12 +120,44 @@ confusion:
   authority's entry with the one `--mmproj <GGUF>` argument removed at render (`servingtmpl.dropEG2Projector`),
   every other flag identical (`--ubatch-size 2048` is load-bearing: the stack's hot budget is 1,900 tokens and a
   smaller ubatch returns HTTP 500 on long memories), and the installer does not download the projector for it.
-  The field is optional and absent means true. The projector is off by arithmetic: with it the entry would exceed
-  those cards beside the tier's seats (8,703 MiB on the 8 GB card, 16,375 MiB on the 16,311 MiB utility card of
-  the 3-card tier), text-only it fits (7,649 and 15,321 MiB), and `eg2CardBudget` in
-  `embeddinggemma2_stack_test.go` carries those sums, refuses the projector on a card its recorded sum exceeds and
-  refuses a text-only tier whose projector sum has come to fit; an on-box co-residency measurement can turn the
-  projector on. The entry joins the stack's residency
+  The field is optional and absent means true. The projector is off on the replicas: on a sum for the 8 GB card
+  and on a measurement for the 3-card tier. The sum: with the projector the entry would exceed those cards beside
+  the tier's seats (8,703 MiB on the 8 GB card, 16,375 MiB on the 16,311 MiB utility card of the 3-card tier),
+  text-only it fits (7,649 and 15,321 MiB), and `eg2CardBudget` in `embeddinggemma2_stack_test.go` carries those
+  sums, refuses the projector on a card its recorded sum exceeds and refuses a text-only tier whose projector sum
+  has come to fit. It is a necessary condition and models neither headroom nor the vLLM agent seat that shares
+  the 3-card tier's utility card; an on-box co-residency measurement can turn the projector on.
+
+  The measurement, taken 2026-10-09 on the reference 3-card box with that box's local pinned-pool seat
+  configuration (the `SEAT_KV_HEADROOM_GIB` path of `setup/templates/vllm-seat/seat_fg.sh`: `--kv-cache-memory-bytes`
+  is the smaller free memory of the seat's cards less 11.19 GiB non-KV and 0.5 GiB headroom, floored at 2.0 GiB and
+  capped at 3.4 GiB), **not** the shipped `setup/templates/vllm-seat/windows-wsl/seat.env`, which sizes the pool by
+  `gpu_memory_utilization`. The agent seat is tensor-parallel 2 over the two RTX 5060 Ti cards at `max_model_len`
+  163,840:
+
+  - (a) The three memory-stack residents (`embeddinggemma`, `bge-reranker-v2-m3` and the text-only
+    `embeddinggemma2`) all on one seat card, 1,648 MiB used on it: the agent seat's cold start **failed** after
+    about 208 s, vLLM's `_check_enough_kv_cache_memory` needing 2.66 GiB of KV for 163,840 tokens with 2.49 GiB
+    available.
+  - (b) `embeddinggemma2` moved to the seat's other card (the two cards read 1,049 and 600 MiB with the stack
+    loaded): cold start OK in 255 s, all four models ready afterwards.
+  - (c) Card-total deltas on the utility card (llama.cpp b11490; WDDM reports per-process memory as N/A):
+    `embeddinggemma` +505 MiB, text-only `embeddinggemma2` +501, the reranker +439; `embeddinggemma2` with its
+    projector 1,237 MiB (the projector +736).
+
+  What it supports, and nothing more: on a tier whose vLLM seat spans the memory-stack residents' card, the
+  residents must not all sit on one seat card at the declared window, and the projector stays off (it adds 736 MiB
+  to the shape that already failed). `TestTheTripleBlackwellTierStaysTextOnlyOnTheMeasuredRecord` holds the tier
+  text-only until a new measurement says otherwise. The shipped utilization-sized seat was not measured with the
+  second embedder; its pool is measured during startup profiling, device-wide, so a resident that loads in that
+  window shrinks it (`KVCacheMemoryBytes` in `internal/vllmseat`).
+
+  **Known gap:** the `win-triple-blackwell` template (`setup/templates/llama-swap.win-triple-blackwell.yaml`) pins
+  `embeddinggemma`, `embeddinggemma2` and the reranker all to device 2, the shape that failed in (a). It is not
+  changed in this release: the template's other seat card (device 0) carries the cascade and the `gemma4-26b-a4b`
+  resident tier, whose fit beside a 501 MiB resident is unmeasured, and a model is never re-pinned from a guess.
+
+  The entry joins the stack's residency
   set (`emb & rer & eg2`, or `emb & eg2` where a template has no reranker, or the one `resident` set of an
   all-resident template): resident beside the swappable seats, never swapped by them, with the stack's evict
   cost. With the flag off the entry, its matrix var and its evict row are all stripped. The `embeddinggemma`
