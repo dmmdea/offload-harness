@@ -564,3 +564,89 @@ func TestAnAdmissionReadThatNeverAnswersIsReadTwiceThenTheCallAsksForTheWholeNod
 		t.Errorf("%d reads, want 2 (the attempt and its retry): the whole-node path reads nothing", n)
 	}
 }
+
+// ---------------------------------------------------------------------------------------------
+// Under a parent's lease: the one exit that used to degrade without a word
+// ---------------------------------------------------------------------------------------------
+
+// underParent runs the fixture's calls the way `gpu reserve --devices ... -- <cmd>` runs its child: a
+// lease the parent holds on the given cards, named in the environment the child inherits.
+func (f *admitFixture) underParent(uuids ...string) *gpulease.Lease {
+	f.t.Helper()
+	ids := make([]string, 0, len(uuids))
+	for _, u := range uuids {
+		ids = append(ids, leaseIDOf(u))
+	}
+	parent, err := f.m.TryAcquire(gpulease.ClassMedia, gpulease.Options{Reason: "gpu reserve --devices", TTL: time.Hour, Devices: ids})
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	f.t.Cleanup(func() { _ = parent.Release() })
+	f.t.Setenv("GPU_LEASE_DIR", parent.Dir())
+	f.t.Setenv("GPU_LEASE_EPOCH", fmt.Sprint(parent.Epoch()))
+	f.t.Setenv("GPU_LEASE_CLASS", "media")
+	f.t.Setenv("GPU_LEASE_DEVICES", strings.Join(ids, ","))
+	return parent
+}
+
+// A call under its parent's lease picks which of the parent's cards to run on from the card table. A
+// table that cannot be read (after its retry) sends it to the legacy path: the default instance, no
+// card of its own. The call is served, so nothing refuses and nothing is deferred, but it no longer
+// runs where a healthy table would have put it, and it used to say nothing about that.
+func TestAnUnreadableTableUnderAParentsLeaseIsSaidInTheLogAndTheCallStillRuns(t *testing.T) {
+	t.Run("control: a table that reads binds the call to the parent's card", func(t *testing.T) {
+		f := newAdmitFixtureWith(t, admitSpec{order: admitOrder})
+		f.underParent(admitUUIDA)
+		ch := f.image(nil)
+		env := f.waitStarted(1)[0].Env
+		if env["COMFY_CARD_UUID"] != admitUUIDA || env["COMFY_API"] == "" {
+			t.Fatalf("premise: with a table the call runs in the instance of the parent's card, got %v", env)
+		}
+		f.letRunnersGo()
+		f.await(ch)
+	})
+	t.Run("a table that cannot be read is logged and the call runs in the default instance", func(t *testing.T) {
+		logs := captureAdmissionLog(t)
+		f := newAdmitFixtureWith(t, admitSpec{order: admitOrder})
+		f.underParent(admitUUIDA)
+		f.flakyTable().script(0, false)
+		ch := f.image(nil)
+		env := f.waitStarted(1)[0].Env
+		if env["COMFY_CARD_UUID"] != "" || env["COMFY_API"] != "" {
+			t.Errorf("without a table the call has no card of its own, got %v", env)
+		}
+		if env["GPU_LEASE_DEVICES"] != leaseIDOf(admitUUIDA) {
+			t.Errorf("it still runs inside the parent's lease: GPU_LEASE_DEVICES=%q", env["GPU_LEASE_DEVICES"])
+		}
+		for _, want := range []string{"the card table could not be read", "parent's lease", "no card of its own"} {
+			if !strings.Contains(logs.String(), want) {
+				t.Errorf("the log must say what the call did instead (missing %q):\n%s", want, logs.String())
+			}
+		}
+		f.letRunnersGo()
+		if r := f.await(ch); !r.OK {
+			t.Fatalf("the call is served by the legacy path: %+v", r)
+		}
+	})
+}
+
+// When the legacy path then has to refuse (another job in this process holds a card, so the whole-node
+// slot is not free), the refusal carries the words about the table: the reader of "gpu busy" would
+// otherwise not know the call was placed without it.
+func TestAnUnreadableTableUnderAParentsLeaseRidesTheBusyAnswer(t *testing.T) {
+	f := newAdmitFixtureWith(t, admitSpec{order: admitOrder})
+	f.underParent(admitUUIDA)
+	f.flakyTable().script(0, false)
+	if !mediaSlots.tryTake([]string{leaseIDOf(admitUUIDC)}) {
+		t.Fatal("setup: the slot is not free")
+	}
+	t.Cleanup(func() { mediaSlots.release([]string{leaseIDOf(admitUUIDC)}) })
+
+	res := f.await(f.plainImage())
+	busyNotQueued(t, res)
+	for _, want := range []string{"another generation job in this process", "the card table could not be read", "parent's lease"} {
+		if !strings.Contains(res.Reason, want) {
+			t.Errorf("the busy answer must say why the call was on the legacy path (missing %q): %s", want, res.Reason)
+		}
+	}
+}

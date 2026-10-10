@@ -514,8 +514,7 @@ func (p *Pipeline) acquireCardScoped(ctx context.Context, reason string, ttl, wa
 		return mediaGrant{}, true, "", ierr
 	}
 	if inherited != nil {
-		g, handled, err := p.acquireInherited(ctx, inherited, wait, need)
-		return g, handled, "", err
+		return p.acquireInherited(ctx, inherited, wait, need)
 	}
 	m, err := p.scopedManager()
 	if err != nil || !m.CardScoped() {
@@ -1001,8 +1000,11 @@ func startHeartbeat(lease *gpulease.Lease) func() {
 // (`gpu reserve --devices ... -- <cmd>`): GPU_LEASE_DEVICES names them. The lease is not ours to
 // renew or release; the in-process slots arbitrate which of its cards this call runs on, so two
 // calls under a two-card lease run on both cards. handled is false when the lease holds the whole
-// node, or the call cannot be placed on its cards (the legacy path then serves it).
-func (p *Pipeline) acquireInherited(ctx context.Context, inherited []string, wait time.Duration, need mediaNeed) (mediaGrant, bool, error) {
+// node, or the call cannot be placed on its cards (the legacy path then serves it). note is non-empty
+// only when the legacy path serves it because the card table could not be read (after its one retry):
+// the call goes on in the default instance with no card of its own, which nobody asked for, so it is
+// logged on every such call and rides the answer if the legacy path then has to refuse (withTableNote).
+func (p *Pipeline) acquireInherited(ctx context.Context, inherited []string, wait time.Duration, need mediaNeed) (g mediaGrant, handled bool, note string, err error) {
 	var held []string
 	for _, id := range strings.Split(os.Getenv("GPU_LEASE_DEVICES"), ",") {
 		if id = strings.ToLower(strings.TrimSpace(id)); id != "" {
@@ -1010,11 +1012,13 @@ func (p *Pipeline) acquireInherited(ctx context.Context, inherited []string, wai
 		}
 	}
 	if len(held) == 0 || need.Kind != needSingle {
-		return mediaGrant{}, false, nil
+		return mediaGrant{}, false, "", nil
 	}
-	cards, _, err := p.alloc.CardTable(ctx, p.cfg)
-	if err != nil {
-		return mediaGrant{}, false, nil
+	cards, _, terr := p.alloc.CardTable(ctx, p.cfg)
+	if terr != nil {
+		note = unreadableUnderParent(terr)
+		log.Printf("media admission: %s", note)
+		return mediaGrant{}, false, note, nil
 	}
 	var cands []string
 	for _, id := range held {
@@ -1023,20 +1027,20 @@ func (p *Pipeline) acquireInherited(ctx context.Context, inherited []string, wai
 		}
 	}
 	if len(cands) == 0 {
-		return mediaGrant{}, false, nil
+		return mediaGrant{}, false, "", nil
 	}
 	if need.Pin != "" {
 		// An explicit pin is the one card; it must be among the parent's, or the legacy path (and its
 		// own --cuda-device) serves the call exactly as it did.
 		plan, perr := planMedia(need, cards, nil)
 		if perr != nil || plan.whole || len(plan.ids) != 1 || !containsString(cands, plan.ids[0]) {
-			return mediaGrant{}, false, nil
+			return mediaGrant{}, false, "", nil
 		}
 		cands = plan.ids
 	}
 	picked, ok := mediaSlots.takeAny(cands, wait)
 	if !ok {
-		return mediaGrant{}, true, &errGPUBusy{detail: fmt.Sprintf("every card of the lease this process runs under (%s) is in use by another job here after %s", strings.Join(cands, ", "), wait)}
+		return mediaGrant{}, true, "", &errGPUBusy{detail: fmt.Sprintf("every card of the lease this process runs under (%s) is in use by another job here after %s", strings.Join(cands, ", "), wait)}
 	}
 	core.MarkWorking(ctx)
 	c, _ := lookupCard(cards, picked)
@@ -1046,7 +1050,14 @@ func (p *Pipeline) acquireInherited(ctx context.Context, inherited []string, wai
 		Card:    &c,
 		API:     p.instanceEndpoint(c),
 		Release: func() { once.Do(func() { mediaSlots.release([]string{picked}) }) },
-	}, true, nil
+	}, true, "", nil
+}
+
+// unreadableUnderParent is what a call under its parent's lease says when the card table could not be
+// read: which of the parent's cards it would have run on is the table's to say, so the call goes on
+// the way it did before cards were leased, in the default instance, inside the parent's lease.
+func unreadableUnderParent(tableErr error) string {
+	return fmt.Sprintf("the card table could not be read (%s), so this call runs in the default instance under its parent's lease, with no card of its own, as it did before cards were leased", tableErr)
 }
 
 func containsString(list []string, s string) bool {
