@@ -129,6 +129,7 @@
   "gen_edit_cfg": 0,
   "gen_edit_sampler": "",
   "gen_edit_scheduler": "",
+  "gen_edit_schedule": "",
   "gen_edit_megapixels": 0,
   "gen_edit_timeout_sec": 1800,
   "gen_edit_family": "",
