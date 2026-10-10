@@ -70,7 +70,8 @@ func TestScanGraphFindsLoadImageInputs(t *testing.T) {
 		"4": {"class_type":"LoadImage",       "inputs":{"image":"kept/in.png [input]"}},
 		"5": {"class_type":"LoadImage",       "inputs":{"image":["9",0]}},
 		"6": {"class_type":"ImageScale",      "inputs":{"image":["1",0],"width":512}},
-		"7": {"class_type":"PreviewImage",    "inputs":{"images":["1",0]}}
+		"7": {"class_type":"PreviewImage",    "inputs":{"images":["1",0]}},
+		"8": {"class_type":"SomeCustomNode",  "inputs":{"image":"not-a-loader-input.png"}}
 	}`
 	got, err := ScanGraph([]byte(graph))
 	if err != nil {
@@ -153,19 +154,27 @@ func TestMissingModelFilesReadsExtraModelPaths(t *testing.T) {
 func TestMissingModelFilesNeverLeavesTheRoots(t *testing.T) {
 	// A name is data from a tailnet peer: it is looked up under the roots and nowhere else, so a name that climbs out of
 	// them or names an absolute path is missing even when the file exists.
+	// Each name below would resolve to a file that EXISTS if it were joined to a class directory as written, so only the
+	// refusal to look it up keeps it missing.
 	outside := tree(t, "secret.safetensors")
-	dir := tree(t, "models/vae/ok.safetensors")
+	dir := tree(t, "models/vae/ok.safetensors", "secret.safetensors", "models/vae/etc/x.safetensors")
 	roots := ModelRoots(dir)
 	names := []string{
-		"../../" + filepath.Base(outside) + "/secret.safetensors",
+		"../../secret.safetensors", // out of models/vae to the ComfyUI dir
+		`..\..\secret.safetensors`,
+		"vae/../../../secret.safetensors",
 		filepath.ToSlash(filepath.Join(outside, "secret.safetensors")),
-		`..\..\x.safetensors`,
 		"/etc/x.safetensors",
-		`C:\Windows\x.safetensors`,
+		`\etc\x.safetensors`,
+		`C:\x.safetensors`,
 		"",
+		"   ",
 	}
 	if got := MissingModelFiles(roots, names); !reflect.DeepEqual(got, names) {
 		t.Fatalf("every name outside the roots must be missing: got %v", got)
+	}
+	if got := MissingModelFiles(roots, []string{"ok.safetensors"}); len(got) != 0 {
+		t.Fatalf("control: a plain name is held: %v", got)
 	}
 }
 

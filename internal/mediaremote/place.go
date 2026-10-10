@@ -318,9 +318,10 @@ func ambientLease() bool {
 // tryOverflow places the call on the fleet when its local lane is not free. The zero outcome means "run it here".
 func tryOverflow(ctx context.Context, cfg config.Config, runner Runner, req core.Request, remotes []string) overflowOutcome {
 	// An image is identified by its recipe; a whole-node graph by the files its node holds (graph.go). A graph that names
-	// devices is card-scoped and stays here (a card id names a card on this machine).
+	// devices is card-scoped and stays here: plan() below refuses to carry devices (a card id names a card on this
+	// machine), and a call it refuses is never asked about the lane.
 	graph := req.Task == core.TaskRunGraph
-	if (req.Task != core.TaskGenerateImage && !graph) || str(req.Params, "waiter_token") != "" || ambientLease() || (graph && hasDevices(req.Params)) {
+	if (req.Task != core.TaskGenerateImage && !graph) || str(req.Params, "waiter_token") != "" || ambientLease() {
 		return overflowOutcome{}
 	}
 	bases, err := candidateBases(cfg, remotes)

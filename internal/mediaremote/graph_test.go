@@ -464,14 +464,24 @@ func TestGraphOverflowCandidatesNeedTheReleaseAnIdleNodeAndTheRoute(t *testing.T
 	noRoute := startNode(t, nodeOpts{id: "node-noroute", version: fixtureVersion, healthEdit: withCards(7.96),
 		cfg:    func(c *config.Config) { c.ComfyDir = graphTreeWith(t, krea2File); c.RunGraphScript = "" },
 		routes: bindOnly})
-	cfg := graphClient(t, old, busy, noRoute)
+	// A node that still lists run-graph but says its route is not CONFIGURED (a weight went missing under it).
+	missing := startNode(t, nodeOpts{id: "node-missing", version: fixtureVersion,
+		healthEdit: func(m map[string]any) {
+			withCards(7.96)(m)
+			m["media_routes"] = []map[string]any{{"route": "run_graph", "engine": "comfyui", "state": "BOUND-BUT-MISSING"}}
+		},
+		cfg: func(c *config.Config) { c.ComfyDir = graphTreeWith(t, krea2File) }})
+	cfg := graphClient(t, old, busy, noRoute, missing)
 	lr := &laneRunner{verdict: heldLane(), local: queuedLocal()}
 	res := Run(context.Background(), cfg, lr, graphReqOf(t, krea2Graph, nil), "auto", nil)
 	if _, runs := lr.counts(); runs != 1 {
 		t.Fatalf("no node can take it: %+v", res)
 	}
-	for _, n := range []*node{old, busy, noRoute} {
+	for _, n := range []*node{old, busy, noRoute, missing} {
 		noPosts(t, n.srv.URL, n)
+	}
+	if r, ok := rowFor(clusterOf(t, res), "node-missing"); !ok || r.State != "not-capable" || !strings.Contains(r.Why, "BOUND-BUT-MISSING") {
+		t.Errorf("a node whose run_graph route is not configured: %+v", r)
 	}
 	rows := clusterOf(t, res)
 	if r, ok := rowFor(rows, "node-old"); !ok || r.State != "not-capable" || !strings.Contains(r.Why, "harness 0.1.0") {
