@@ -337,9 +337,17 @@ func acquireAutoCards(m *gpulease.Manager, class gpulease.Class, opts gpulease.O
 		try.Wait, try.GrantCheck = 0, nil
 		lease, err := m.Acquire(class, try)
 		var held *gpulease.ErrHeld
+		var short *gpulease.ErrHostRAM
 		switch {
 		case err == nil:
 			return lease, nil
+		case errors.As(err, &short) && !short.Impossible:
+			// The cards are free and the HOST's memory is not (internal/gpulease/hostram.go): picking
+			// again cannot help, so no more attempts are made at the allocation. The next pass takes
+			// the queued branch, which waits for the room in the same line (an impossible need
+			// returns below, as the error it is).
+			lost = maxAutoClaimRetries
+			continue
 		case errors.As(err, &held), errors.Is(err, gpulease.ErrStillQueued):
 			// Another reserve claimed one of these first, or a waiter registered for one of them is
 			// ahead of this request: allocate again with that visible (the allocator reads the

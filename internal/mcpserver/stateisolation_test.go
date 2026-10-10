@@ -9,6 +9,7 @@ import (
 
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/gpulease"
+	"github.com/dmmdea/offload-harness/internal/gpuprobe"
 )
 
 // stateIsolationPrefix names this package's throwaway state root, so
@@ -63,8 +64,14 @@ func runIsolated(m suiteRunner, mkdirTemp func(dir, pattern string) (string, err
 			return 1
 		}
 	}
+	// offload_status reports the host's memory (gpu_lease.host_memory): the suite runs against a known
+	// host, so its answers and its golden do not depend on what the machine running it is doing.
+	defer gpuprobe.UseHostMemoryReader(func() (gpuprobe.HostMemory, bool) { return knownTestHost, true })()
 	return m.Run()
 }
+
+// knownTestHost is the host the suite reports: 128 GiB physical, 40 GiB committed, so the verdict is OK.
+var knownTestHost = gpuprobe.HostMemory{PhysicalGiB: 128, AvailableGiB: 64, CommitUsedGiB: 40, CommitLimitGiB: 192}
 
 // stubRunner records whether the suite was run.
 type stubRunner struct{ ran bool }

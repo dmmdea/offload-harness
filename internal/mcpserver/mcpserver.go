@@ -872,7 +872,9 @@ func localLeaseViewWithActivity(ctx context.Context, cfg config.Config) (map[str
 	}
 	// The line behind the holder and the warm the last of them owes the seat
 	// (0.129.2, register D-124) — read-only, nothing is acquired.
+	var leaseMgr *gpulease.Manager
 	if m, err := gpulease.OpenAt(cfg.GPULockPath, cfg.StateDir); err == nil {
+		leaseMgr = m
 		if ws := m.Waiters(); len(ws) > 0 {
 			view["queued"] = len(ws)
 		}
@@ -880,6 +882,10 @@ func localLeaseViewWithActivity(ctx context.Context, cfg config.Config) (map[str
 			view["seat_warm_owed"] = seat
 		}
 	}
+	// The host's memory and what the live leases declared of it (2026-10-09, the paging incident):
+	// physical, available, commit used and limit, the declared sum, and one verdict, OK / NEAR / OVER.
+	// OVER leads the brief line in capitals. Present held or free: a box can be over with no lease at all.
+	view["host_memory"] = hostMemoryView(cfg, leaseMgr)
 	if !info.Held {
 		view["note"] = "free (unreserved): a bench or training run on this box is exposed until it takes the lease — wrap it in the queue_with command"
 		return view, act
