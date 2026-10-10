@@ -941,6 +941,7 @@ cards, so confirm that an instance is on its card by per-card memory deltas, not
 | `COMFY-INSTANCE-WARN: …` | extra args that would override the instance's pin, port or directories were dropped, or an instance with no card pin was launched |
 | `COMFY-PORT-TAKEN: …` | the instance's port is held, on an address ComfyUI will listen on, by something that is not ComfyUI; nothing was launched or killed |
 | `COMFY-PROFILE-MISMATCH: …` | a ComfyUI answers on the instance's port but is not shown to be that instance (or is on the wrong card); refused, and stopped only when the harness's own marker proves it is the harness's and its spawner is gone |
+| `COMFY-GPU-LIST-WARN: …` | `nvidia-smi -L`, which counts the cards for a Windows launch (`cudaVisibleEnv`), did not answer in time: the first line says it is being asked once more under a longer timeout, a second line that it ran out again and the launch keeps ComfyUI's Windows default of card 0 only (a pooled graph then fails validation) |
 
 ### Per-card media admission (plan P13b)
 
