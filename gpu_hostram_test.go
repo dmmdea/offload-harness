@@ -582,3 +582,34 @@ func TestGPUStatusListsAWaiterThatWaitsOnHostRAM(t *testing.T) {
 		t.Fatalf("it is granted once the host has the room: %v", err)
 	}
 }
+
+// F24 meets the guard: a `gpu reserve` already reads the card table for its plan, and the host-RAM estimate sized
+// against a card must use THAT table, not take a read of its own (a fourth nvidia-smi exec per command, and one
+// more place a wedged driver costs a retry). With the plan's table in hand the estimate reads nothing, and it
+// sizes against that table's cards; without one it reads once, as before.
+func TestTheHostRAMEstimateReusesTheTableThePlanRead(t *testing.T) {
+	useCardTable(t, "")
+	inner := cardTableFn
+	reads := 0
+	cardTableFn = func(ctx context.Context, cfg config.Config) ([]gpuprobe.Card, string, error) {
+		reads++
+		return inner(ctx, cfg)
+	}
+	t.Cleanup(func() { cardTableFn = inner })
+	small, _ := gpuprobe.BuildCards([]gpuprobe.Device{{Index: 0, UUID: "GPU-aaaa0000-x", Name: "T", TotalGiB: 16, FreeGiB: 16, UtilKnown: true}}, "")
+	big, _ := gpuprobe.BuildCards([]gpuprobe.Device{{Index: 0, UUID: "GPU-aaaa0000-x", Name: "T", TotalGiB: 48, FreeGiB: 48, UtilKnown: true}}, "")
+
+	var out bytes.Buffer
+	n := resolveReserveHostRAMWith(false, 0, gpulease.ClassText, krea2Words(), nil, config.Config{}, true, small, &out)
+	if reads != 0 || math.Abs(n.GiB-32.8) > 0.01 {
+		t.Errorf("a 16 GiB table the plan read: %d card-table read(s), declared %.1f GiB; want none and 32.8", reads, n.GiB)
+	}
+	n = resolveReserveHostRAMWith(false, 0, gpulease.ClassText, krea2Words(), nil, config.Config{}, true, big, &out)
+	if reads != 0 || n.GiB != 0 {
+		t.Errorf("the 24.5 + 8.3 GiB set fits a 48 GiB card the plan read: %d read(s), declared %.1f GiB; want none and 0", reads, n.GiB)
+	}
+	resolveReserveHostRAMWith(false, 0, gpulease.ClassText, krea2Words(), nil, config.Config{}, true, nil, &out)
+	if reads != 1 {
+		t.Errorf("without the plan's table the estimate reads it once, read %d time(s)", reads)
+	}
+}

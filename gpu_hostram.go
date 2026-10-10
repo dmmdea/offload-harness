@@ -14,6 +14,7 @@ import (
 
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/gpulease"
+	"github.com/dmmdea/offload-harness/internal/gpuprobe"
 	"github.com/dmmdea/offload-harness/internal/hostneed"
 )
 
@@ -28,6 +29,15 @@ import (
 // why on out, but only when the number is not zero by default: the operator needs the line when a
 // lease will wait on it.
 func resolveReserveHostRAM(ramGiven bool, ramGiB float64, class gpulease.Class, cmdArgs []string, ids []string, cfg config.Config, readCards bool, out io.Writer) hostneed.Need {
+	return resolveReserveHostRAMWith(ramGiven, ramGiB, class, cmdArgs, ids, cfg, readCards, nil, out)
+}
+
+// resolveReserveHostRAMWith is resolveReserveHostRAM for a verb whose plan already read the card table: known
+// is that table (nil = none was read, and the estimate reads one when it needs a card's VRAM). Reusing it
+// keeps a command's nvidia-smi reads to its deciding stages (the plan's, the unload scope's, the wrapper's),
+// each with its retry, instead of adding a fourth for the estimate: a wedged driver costs a command the
+// reads it already makes (F24), and the estimate sees the very table the plan chose its cards from.
+func resolveReserveHostRAMWith(ramGiven bool, ramGiB float64, class gpulease.Class, cmdArgs []string, ids []string, cfg config.Config, readCards bool, known []gpuprobe.Card, out io.Writer) hostneed.Need {
 	req := hostneed.Request{Class: class, Args: cmdArgs}
 	if ramGiven {
 		req.Explicit = &ramGiB
@@ -35,7 +45,9 @@ func resolveReserveHostRAM(ramGiven bool, ramGiB float64, class gpulease.Class, 
 	facts := hostneed.Facts{Cfg: cfg, Env: os.Getenv}
 	_, recognised := hostneed.ParseRenderCall(cmdArgs)
 	if readCards && !ramGiven && (recognised || class == gpulease.ClassMedia) {
-		if cards, _, err := cardTable(context.Background(), cfg); err == nil {
+		if known != nil {
+			facts.VRAMGiB = hostneed.LargestCardGiB(known, ids)
+		} else if cards, _, err := cardTable(context.Background(), cfg); err == nil {
 			facts.VRAMGiB = hostneed.LargestCardGiB(cards, ids)
 		}
 	}

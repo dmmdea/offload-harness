@@ -444,8 +444,13 @@ func runGPUReserve(args []string) error {
 	if *detach {
 		cmdEnv = func(string) string { return "" } // a detached holder runs no command to read cards from
 	}
+	var planCards []gpuprobe.Card // the table the plan read, kept so the host-RAM estimate below reuses it
 	plan, perr := planReserveDevices(devFlags, cmdArgs, cmdEnv, m.CardScoped(), func() ([]gpuprobe.Card, string, error) {
-		return cardTablePatient(context.Background(), reserveCfg)
+		cards, note, err := cardTablePatient(context.Background(), reserveCfg)
+		if err == nil {
+			planCards = cards
+		}
+		return cards, note, err
 	})
 	if perr != nil {
 		return perr
@@ -465,7 +470,7 @@ func runGPUReserve(args []string) error {
 	// from the render helper it wraps, else the class default. Declared on EVERY path (named cards,
 	// allocated cards, the whole node, the detached holder), because the grant admits it against
 	// committed memory wherever the cards came from.
-	need := resolveReserveHostRAM(ramGiven, *ramFlag, gpulease.Class(*class), cmdArgs, plan.IDs, reserveCfg, m.CardScoped(), os.Stderr)
+	need := resolveReserveHostRAMWith(ramGiven, *ramFlag, gpulease.Class(*class), cmdArgs, plan.IDs, reserveCfg, m.CardScoped(), planCards, os.Stderr)
 	opts.HostRAMGiB = need.GiB
 	devFlags.ramGiB = need.GiB // the card allocator's pre-filter reads the same figure
 	buildAlloc := func() (gpulease.AllocInput, error) {
