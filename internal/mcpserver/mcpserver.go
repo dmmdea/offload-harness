@@ -3748,10 +3748,11 @@ func reviewPayload(wire core.AgentWireResult, diff string, maxFindings int, extr
 	if !wire.Deferred {
 		// The structured re-pack is a copy of the seat's answer, and a lossy one (F1, root
 		// cause, 2026-10-09). Probed live on the fleet seats with this lane's exact prompt and
-		// schema: a qwen3.6 seat wrote one perfect `severe | file:line | claim | why` line and the
-		// grammar-lane re-pack split it into two bare strings, claim and why; a mimo-9b seat
-		// repeated a line, the loop read that as a cut final and re-issued it with "return the
-		// same JSON object that was asked for", and the seat invented a JSON object per finding
+		// schema: the grammar-lane re-pack SPLITS lines (a qwen3.6 seat's one perfect
+		// `severe | file:line | claim | why` line became two bare strings, claim and why, and two
+		// mimo-9b seats' five lines became ten, with no re-issue involved); and a mimo-9b seat that
+		// repeated a line was read by the loop as a cut final and re-issued with "return the
+		// same JSON object that was asked for", so it invented a JSON object per finding
 		// that the re-pack then kept one string of, its claim. Either way every finding reached
 		// ParseFindings with no severity, file or why, and was hollow. The seat's own answer
 		// held them all. So the answer is read too (reviewlane.RawLines: pipe lines, or the

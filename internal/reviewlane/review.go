@@ -645,9 +645,11 @@ func (r Result) Survivors() int { return len(r.Findings) + r.TruncatedByCap }
 // back as findings with every field empty but the claim, and a live probe of the same prompt on
 // the same fleet seats found two different ways the re-pack gets there.
 //
-//   - The grammar-lane re-pack is told only `"findings" (array of strings)`, so on a
-//     qwen3.6-35b-a3b seat it SPLIT one perfectly formed line (`severe | file:3764 | claim | why`)
-//     into its claim and its why as two list items and dropped the severity and the location.
+//   - The grammar-lane re-pack is told only `"findings" (array of strings)`, so it SPLITS lines:
+//     one perfectly formed line (`severe | file:3764 | claim | why`) from a qwen3.6-35b-a3b seat
+//     came back as its claim and its why in two list items, and on two mimo-9b seats five
+//     well-formed lines came back as ten bare strings, no re-issue involved. The severity and the
+//     location were gone. This is the ordinary path on those seats, not an edge.
 //   - A mimo-9b seat repeated a line, the loop's repetition guard read that as a cut final, and
 //     the cut-final re-issue told it to "return the same JSON object that was asked for". This
 //     lane never asked for JSON, so the seat invented one, {"findings":[{"severity", "path",

@@ -533,15 +533,19 @@ These design choices are load-bearing rather than incidental:
   on a mimo-9b seat (twice) and a qwen3.6-35b-a3b seat (once). Running this lane's exact prompt
   and schema on those fleet seats found two mechanisms, and in both the seat's own answer was
   strictly richer than what the re-pack made of it. (1) The grammar-lane re-pack is told only
-  `"findings" (array of strings)`, so on the qwen3.6 seat it split one perfectly formed line,
-  `severe | file:3764 | claim | why`, into its claim and its why as two list items and dropped the
-  severity and the location. (2) A mimo-9b seat repeated a line; the loop's repetition guard read
+  `"findings" (array of strings)`, so it SPLITS the seat's lines: on the qwen3.6 seat one perfectly
+  formed line, `severe | file:3764 | claim | why`, came back as its claim and its why in two list
+  items with the severity and the location dropped, and on two mimo-9b seats (no re-issue, finish
+  `stop`) five well-formed pipe lines came back as ten bare strings. That is the ordinary path on
+  these seats, not an edge, and it fits the reports: their counts (4, 6 and 2 findings) are all
+  even, as two strings per line gives. (2) A mimo-9b seat repeated a line; the loop's repetition guard read
   that as a cut final (finish_reason was `stop`, 471 tokens of a 2,048 budget) and re-issued it
   with `listCapInstruction`'s "Return the same JSON object that was asked for". This lane never
   asked for JSON, so the seat invented one, `{"findings":[{"severity","path","line","claim","why"},…]}`,
   and the re-pack kept one string per object: its claim. A control run (a 20-line diff, no re-issue)
-  came back with nine intact pipe lines and a faithful re-pack, so the re-pack is lossy when its
-  input is not already an array of strings, not by nature. `reviewlane.RawLines` therefore reads
+  came back with nine intact pipe lines and a faithful re-pack, so the split is not deterministic:
+  the prompt gives the seat no rule for what a list item is, and what it does varies with the
+  input. `reviewlane.RawLines` therefore reads
   the answer in the two shapes seen (the pipe lines the prompt asks for, and a fenced or bare JSON
   document of strings or `severity`/`path`|`file`/`line`/`claim`/`why` objects, rendered back to
   pipe lines), `reviewPayload` runs both readings through the same filters and publishes whichever
