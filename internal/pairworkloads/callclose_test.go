@@ -523,3 +523,27 @@ func TestARemoteCallClosesBeforeItsDoorAnswers(t *testing.T) {
 		})
 	}
 }
+
+// The relay carries the quiet close like any other frame: the strict decode a member applies takes a
+// completed frame that carries an error and no start, and keeps the reason, so a box with no PAIR of its
+// own (a thin client reporting through a member) closes a held call's card the same way.
+func TestARelayedHeldCardCloseIsTakenByTheMembersDecode(t *testing.T) {
+	r := newFakeRelay(t)
+	e, _ := relayEmitter(t, r)
+	e.EmitSync(Event{JobID: "call-9-1", Model: "generate_image", Engine: "comfyui", State: "completed", Error: heldReason,
+		Requester: "offload-harness/sess-9", CreatedAt: 5000, CompletedAt: 6000})
+	if r.count() != 1 {
+		t.Fatalf("relay hits = %d, want the one close, posted before EmitSync returned", r.count())
+	}
+	raw, err := json.Marshal(r.hit(0).body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ev, err := ParseRelay(raw, "node-q")
+	if err != nil {
+		t.Fatalf("the member's decode refused the quiet close: %v", err)
+	}
+	if ev.State != "completed" || ev.StartedAt != 0 || !strings.HasPrefix(ev.Error, "gpu queued: card(s) 0000 held by media") {
+		t.Fatalf("the member must read a completed, unstarted card carrying the reason: %+v", ev)
+	}
+}
