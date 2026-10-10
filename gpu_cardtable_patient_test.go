@@ -73,6 +73,19 @@ func (s *slowTable) reads() []time.Duration {
 	return append([]time.Duration(nil), s.left...)
 }
 
+// useRoster replaces the llama-swap roster read that a card-scoped reserve makes to cut the unload list
+// its command is handed (wrapperUnloadEnv). Unreplaced it goes to the config's endpoint, the default
+// 127.0.0.1:11436: a dev host with a live llama-swap answers, a CI runner gets "connection refused", and
+// the wrapper then skips the card-table read that list's scope makes (UnloadModels reads the table only
+// for a roster that is not empty). Reads of the table are counted and ordered below, so a roster that
+// depends on the host moved them (2026-10-10: reads = [40ms 40ms] on Linux CI).
+func useRoster(t *testing.T, ids ...string) {
+	t.Helper()
+	old := rosterIDsFn
+	rosterIDsFn = func(context.Context, string) ([]string, error) { return ids, nil }
+	t.Cleanup(func() { rosterIDsFn = old })
+}
+
 // useScriptedTable is useSlowTable with the reads scripted one by one.
 func useScriptedTable(t *testing.T, cards []gpuprobe.Card, modes ...string) *slowTable {
 	t.Helper()
@@ -128,6 +141,7 @@ func TestNodeSwapCardsSurvivesOneSlowCardTableRead(t *testing.T) {
 func TestGPUReserveCardsSurvivesOneSlowCardTableRead(t *testing.T) {
 	cfg, m := scopedLeaseFixture(t)
 	useCardTable(t, "") // the other live reads (processes, seats, RAM); the table below replaces its reader
+	useRoster(t, "seat-on-card-2")
 	cards, _ := gpuprobe.BuildCards([]gpuprobe.Device{
 		{Index: 0, UUID: "GPU-aaaa0000-x", Name: "T", TotalGiB: 16, FreeGiB: 16, UtilKnown: true},
 		{Index: 1, UUID: "GPU-bbbb0000-x", Name: "T2", TotalGiB: 16, FreeGiB: 16, UtilKnown: true, DisplayActive: true},
@@ -175,6 +189,7 @@ func TestALeaseScopeSurvivesOneSlowCardTableRead(t *testing.T) {
 func TestGPUReserveConfinementReadsTheCardTableWithTheRetry(t *testing.T) {
 	cfg, _ := scopedLeaseFixture(t)
 	useCardTable(t, "") // the other live reads (processes, seats, RAM); the table below replaces its reader
+	useRoster(t, "seat-on-card-2")
 	clearCardPins(t)
 	t.Setenv("CUDA_VISIBLE_DEVICES", "2")
 	t.Setenv("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
@@ -183,8 +198,9 @@ func TestGPUReserveConfinementReadsTheCardTableWithTheRetry(t *testing.T) {
 		{Index: 1, UUID: "GPU-bbbb0000-x", Name: "T2", TotalGiB: 16, FreeGiB: 16, UtilKnown: true, DisplayActive: true},
 		{Index: 2, UUID: "GPU-cccc0000-x", Name: "T", TotalGiB: 16, FreeGiB: 16, UtilKnown: true},
 	}, "")
-	// Three verbs' reads, in order: the plan's, the unload list's scope (wrapperUnloadEnv) and the wrapper's
-	// own, taken to read the command's pin once the lease is held. The third one's first attempt runs out of time.
+	// Three verbs' reads, in order: the plan's, the unload list's scope (wrapperUnloadEnv, which reads the
+	// table only for a roster it can read: useRoster above) and the wrapper's own, taken to read the
+	// command's pin once the lease is held. The third one's first attempt runs out of time.
 	s := useScriptedTable(t, cards, "ok", "ok", "hang")
 	out := t.TempDir() + "/env.txt"
 	t.Setenv("LO_HELPER_ENV_OUT", out)

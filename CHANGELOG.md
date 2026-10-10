@@ -109,6 +109,18 @@ Versioning: [SemVer](https://semver.org/).
   next sweep (one sent), a short card closed once on one processor; the first and the last red without the guard, the
   second red when the mark is never cleared.
 
+### Fixed — two tests passed only on a host with a live llama-swap and a pinned Go cache
+
+- **`TestGPUReserveConfinementReadsTheCardTableWithTheRetry` counted card-table reads that depend on a llama-swap answering.** A
+  card-scoped `gpu reserve` hands its command the unload list for the render lane, cut from the llama-swap roster, and the cut
+  reads the card table only for a roster it could read. The test's scripted reads (`ok`, `ok`, `hang`) assumed that read
+  succeeded, which it does on a host with a live llama-swap on the config's default `127.0.0.1:11436` and does not on a CI
+  runner (connection refused): there the wrapper made one read fewer, its own confinement read took the second `ok`, and the
+  test saw `reads = [40ms 40ms]`. The code is right either way (a roster it cannot read leaves the render lane on its own
+  rule, and the log says so). The card-table tests now read a stand-in roster (`useRoster`), so the reads are the same
+  everywhere and a test run no longer asks the host's llama-swap anything. Checked on one Linux host with one binary: a fresh
+  loopback fails with the CI's message, the host's own loopback passes.
+
 ### Fixed — `offload_review_diff` no longer publishes hollow reviews, stacked restatements or discarded cut answers
 
 - **Root cause of the hollow findings:** the structured re-pack, told only `"findings" (array of strings)`, split
