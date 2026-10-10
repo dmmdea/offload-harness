@@ -204,6 +204,25 @@ func TestNodeCardFailsWithTheReasonOfADeferredJob(t *testing.T) {
 	}
 }
 
+// The one deferral a card is completed over: a job that never ran because another job held the card it
+// needed (err_class gpu_busy or gpu_queued) did not fail, so its card closes quiet (PAIR has no cancelled
+// state; pairworkloads.CardOutcome), with the reason, exactly as the asker's own card for the call would.
+func TestNodeCardOfAJobHeldBackByTheCardClosesQuiet(t *testing.T) {
+	pn := newPairNode(t, true)
+	fr := &fakeRunner{fn: func(context.Context, core.Request) core.Result {
+		return core.Deferf("gpu busy: another generation job holds the card", "", core.Meta{ErrClass: core.ErrClassGPUBusy})
+	}}
+	s, _ := newTestServer(t, imageCfg(), fr, pairOpts(pn))
+	if rec := do(t, s, http.MethodPost, "/fleet/dispatch", `{"job_id":"held-1","task_type":"image-gen","payload":{"prompt":"hi"}}`, askerHeaders); rec.Code != http.StatusAccepted {
+		t.Fatalf("dispatch = %d", rec.Code)
+	}
+	pollJob(t, s, "held-1", JobError)
+	cards := pn.cards(t)
+	if cards["failed"] != nil || cards["completed"] == nil || cards["completed"]["error"] != "gpu busy: another generation job holds the card" {
+		t.Fatalf("cards = %v, want one quiet completed card carrying the reason", cards)
+	}
+}
+
 // The asker value is untrusted: it is cut to printable text of at most 64 characters before it is
 // recorded or shown.
 func TestNodeSanitizesTheAskerName(t *testing.T) {

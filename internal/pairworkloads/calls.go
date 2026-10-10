@@ -2,7 +2,9 @@ package pairworkloads
 
 import (
 	"fmt"
+	"time"
 
+	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/ledger"
 )
 
@@ -27,6 +29,14 @@ import (
 // tasks whose engine the task alone decides; a text or vision call learns its
 // seat, and so llamacpp vs vllm, only as it runs, and it is short. Those keep
 // the single terminal card.
+//
+// The close is on the wire before the call returns (2026-10-09). A door answers the moment its
+// call returns, and a client that opens a fresh stdio door per attempt closes stdin and kills the
+// process right after the reply: a close left on a background goroutine died with the process, the
+// card's queued marker was still in the register, and the orphan sweep closed the card "Failed:
+// harness process exited before the job finished" for a call that had answered cleanly. So end posts
+// its own close inline (EmitSync), and when the call's ledger row claimed the card instead (the
+// row's frame is posted by the observer's goroutine) end waits for that frame to land.
 var longCallTasks = map[string]bool{
 	"generate_image":        true,
 	"inpaint_image":         true,
@@ -47,7 +57,7 @@ var longCallTasks = map[string]bool{
 // pair_workloads_enabled (0.140.6).
 const FleetDoor = "fleet"
 
-// openCall is one card awaiting its terminal frame. started and closed are
+// openCall is one card awaiting its terminal frame. started, closed and sent are
 // guarded by Emitter.callMu.
 type openCall struct {
 	jobID     string
@@ -57,6 +67,10 @@ type openCall struct {
 	created   int64
 	started   int64
 	closed    bool
+	// sent exists once the call's ledger row has claimed the card (claim) and is closed when the frame
+	// that closes it has been posted or parked: end waits on it, so the call does not return, and its
+	// door does not answer, before the card is closed on the wire. nil = no row claimed the card.
+	sent chan struct{}
 }
 
 // callID is the card's own job id: the one id a ledger row needs to name to
@@ -67,11 +81,13 @@ func (c *openCall) callID() string { return c.jobID }
 // returns the call id (the card's job id: the caller stamps it on the call's
 // ledger row so that row closes THIS card) and the two functions that move the
 // card on: working (the lane holds its engine: the card turns running, once)
-// and end (the call returned: the card closes with its outcome, unless the
-// call's ledger row already closed it). The id is "" and both functions are nil
-// when nothing was opened: emitter disabled, a task whose engine is not fixed
-// by the task, or work this box serves for another (FleetDoor).
-func (e *Emitter) Begin(task, door string) (callID string, working func(), end func(deferred bool, reason string)) {
+// and end (the call returned with res: the card closes with its outcome, unless
+// the call's ledger row already closed it, in which case end waits for that
+// frame). end returns after the close is on the wire, so the caller may answer
+// and be killed. The id is "" and both functions are nil when nothing was
+// opened: emitter disabled, a task whose engine is not fixed by the task, or
+// work this box serves for another (FleetDoor).
+func (e *Emitter) Begin(task, door string) (callID string, working func(), end func(res core.Result)) {
 	if !e.Enabled() || !longCallTasks[task] || door == FleetDoor {
 		return "", nil, nil
 	}
@@ -103,23 +119,41 @@ func (e *Emitter) Begin(task, door string) (callID string, working func(), end f
 		e.Emit(Event{JobID: c.jobID, Model: task, Engine: c.engine, State: "running",
 			Requester: c.requester, CreatedAt: c.created, StartedAt: started})
 	}
-	end = func(deferred bool, reason string) {
+	end = func(res core.Result) {
 		started, ok := e.release(c)
 		if !ok {
+			// The call's ledger row claimed the card and its frame is on the observer's goroutine:
+			// the caller is about to answer, so wait until it has landed (or been parked).
+			e.awaitRowClose(c)
 			return
 		}
-		state, errText := "completed", ""
-		if deferred {
-			state, errText = "failed", reason
-			if errText == "" {
-				errText = "deferred"
-			}
-		}
-		e.Emit(Event{JobID: c.jobID, Model: task, Engine: c.engine, State: state, Error: errText,
+		state, errText := CardOutcome(res, started != 0)
+		e.EmitSync(Event{JobID: c.jobID, Model: task, Engine: c.engine, State: state, Error: errText,
 			Requester: c.requester, CreatedAt: c.created, StartedAt: started,
 			CompletedAt: e.now().UnixMilli()})
 	}
 	return c.callID(), working, end
+}
+
+// closeWait bounds end's wait for the frame its ledger row's goroutine posts: the post itself is
+// bounded by sendTimeout, and planning it (a relay's health probe, a cold identity read) by a
+// little more. A hung PAIR therefore costs a call at most this once, never its answer.
+const closeWait = sendTimeout + 2*time.Second
+
+// awaitRowClose waits until the frame that closes c on the strength of its ledger row has been
+// posted or parked. It returns at once when no row claimed the card (end closed it itself, or an
+// earlier end already waited).
+func (e *Emitter) awaitRowClose(c *openCall) {
+	e.callMu.Lock()
+	sent := c.sent
+	e.callMu.Unlock()
+	if sent == nil {
+		return
+	}
+	select {
+	case <-sent:
+	case <-time.After(closeWait):
+	}
 }
 
 // claim takes the open card a ledger row closes, and reports when that card
@@ -136,6 +170,9 @@ func (e *Emitter) Begin(task, door string) (callID string, working func(), end f
 // Only a row that carries no call id (a writer that does not stamp one) is
 // matched first-in first-out. A row for a task with no open card (a batch's
 // second image) gets its own card as before.
+//
+// The claimant owes the card's sent channel a close once its frame has been posted
+// or parked; end waits on it (awaitRowClose).
 func (e *Emitter) claim(task, callID string) (*openCall, int64) {
 	e.callMu.Lock()
 	defer e.callMu.Unlock()
@@ -156,6 +193,7 @@ func (e *Emitter) claim(task, callID string) (*openCall, int64) {
 		return nil, 0
 	}
 	c.closed = true
+	c.sent = make(chan struct{}) // the observer's goroutine closes it once the row's frame has landed
 	e.dropLocked(c)
 	return c, c.started
 }
@@ -200,4 +238,41 @@ func closeWith(ev Event, c *openCall, started int64) Event {
 		ev.Requester = c.requester
 	}
 	return ev
+}
+
+// CardOutcome is the terminal state and error text of the PAIR card of a call that ended with res;
+// started says whether its lane ever held the engine (the card ran). Every writer of a call's closing
+// frame maps its outcome through here (Begin's end, the ledger row, RemoteCall.Finish, the node's
+// card), so a call is closed the same way whichever of them gets there first.
+func CardOutcome(res core.Result, started bool) (state, errText string) {
+	return cardOutcome(res.Deferred || !res.OK, res.Meta.ErrClass, res.Reason, started)
+}
+
+// cardOutcome folds how a call ended into the card's terminal state: failed says it did not succeed
+// (deferred, or not OK), errClass is its err_class, reason its defer reason, started whether its lane
+// ever held the engine.
+//
+// A call HELD BACK by another job's hold on the card it needed (core.CardHeld: gpu_queued, which
+// leaves a place in line, and gpu_busy) did not fail. Nothing ran, the lease queue kept its place or
+// the caller was told to come back, and "a busy card is a place in line" is the design working
+// (register C-89, plan P13). But PAIR's lifecycle has two terminal states, `completed` and `failed`
+// (workload:completed / workload:errored; its workload manager defines no cancelled or skipped one),
+// its desktop paints the second red and prints `error` only on it, and `workloads:remove`, the one
+// other thing a producer can say, is outside the lifecycle the card relay carries (ParseRelay refuses
+// it). So such a call closes COMPLETED with its start left null (never started) and the reason in
+// `error`: the Jobs list shows a quiet card instead of a red one, and PAIR's history keeps why it did
+// not run. Anything else that did not succeed, and a held call whose lane had already started,
+// closes failed with the reason ("deferred" when there is none).
+func cardOutcome(failed bool, errClass, reason string, started bool) (state, errText string) {
+	if !failed {
+		return "completed", ""
+	}
+	errText = reason
+	if errText == "" {
+		errText = "deferred"
+	}
+	if core.CardHeld(errClass) && !started {
+		return "completed", errText
+	}
+	return "failed", errText
 }
