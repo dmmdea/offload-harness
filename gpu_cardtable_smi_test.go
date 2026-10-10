@@ -22,7 +22,7 @@ import (
 func TestThePatientReaderRunsTheProductionReaderThroughOneSlowNvidiaSmi(t *testing.T) {
 	st := smitest.Install(t, smitest.Step{Delay: 20 * time.Second}, smitest.Step{Delay: 5500 * time.Millisecond})
 	oldFirst, oldRetry := cardReadFirst, cardReadRetry
-	cardReadFirst, cardReadRetry = 1500*time.Millisecond, 0 // no retry deadline set: gpualloc's default 15 s
+	cardReadFirst, cardReadRetry = 3*time.Second, 0 // no retry deadline set: gpualloc's default 15 s
 	t.Cleanup(func() { cardReadFirst, cardReadRetry = oldFirst, oldRetry })
 
 	start := time.Now()
@@ -37,7 +37,7 @@ func TestThePatientReaderRunsTheProductionReaderThroughOneSlowNvidiaSmi(t *testi
 	if calls := st.Calls(); len(calls) != 2 {
 		t.Errorf("%d nvidia-smi calls %q, want exactly 2: the one that ran out and its retry", len(calls), calls)
 	}
-	if took < 6900*time.Millisecond {
-		t.Errorf("the whole read took %v, want at least 7 s: the stand-in's delays were not served", took.Round(time.Millisecond))
+	if took < 8400*time.Millisecond {
+		t.Errorf("the whole read took %v, want at least 8.5 s: the stand-in's delays were not served", took.Round(time.Millisecond))
 	}
 }

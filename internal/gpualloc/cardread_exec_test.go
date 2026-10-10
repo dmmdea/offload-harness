@@ -18,12 +18,14 @@ import (
 	"github.com/dmmdea/offload-harness/internal/gpuprobe/smitest"
 )
 
-// The first call outlasts its deadline and is killed; the second takes 5.5 s: longer than the 5 s the base
-// kept inside the default reader, shorter than the retry's default 15 s. A reader that caps itself (or
+// The first call outlasts its deadline and is killed (the deadline is generous enough for the stand-in to
+// START and record itself first, even on a loaded box: a call killed before it started would not be counted);
+// the second takes 5.5 s: longer than the 5 s the base kept inside the default reader, shorter than the
+// retry's default 15 s. A reader that caps itself (or
 // ignores the context it is given) fails this: the retry dies at the cap, or the first call is never killed.
 func TestTheProductionReaderIsNotCappedBelowTheRetryDeadline(t *testing.T) {
 	st := smitest.Install(t, smitest.Step{Delay: 20 * time.Second}, smitest.Step{Delay: 5500 * time.Millisecond})
-	d := Deps{ReadDeadline: 1500 * time.Millisecond} // no Cards and no RetryDeadline: the production reader, the default 15 s
+	d := Deps{ReadDeadline: 3 * time.Second} // no Cards and no RetryDeadline: the production reader, the default 15 s
 	start := time.Now()
 	cards, _, err := d.CardTable(context.Background(), config.Config{})
 	took := time.Since(start)
@@ -36,10 +38,10 @@ func TestTheProductionReaderIsNotCappedBelowTheRetryDeadline(t *testing.T) {
 	if calls := st.Calls(); len(calls) != 2 {
 		t.Errorf("%d nvidia-smi calls %q, want exactly 2: the one that ran out and its retry", len(calls), calls)
 	}
-	// The stand-in really was slow (the first attempt's 1.5 s, then the retry's 5.5 s), so the pass above
+	// The stand-in really was slow (the first attempt's 3 s, then the retry's 5.5 s), so the pass above
 	// was not a fast answer by accident.
-	if took < 6900*time.Millisecond {
-		t.Errorf("the whole read took %v, want at least 7 s: the stand-in's delays were not served", took.Round(time.Millisecond))
+	if took < 8400*time.Millisecond {
+		t.Errorf("the whole read took %v, want at least 8.5 s: the stand-in's delays were not served", took.Round(time.Millisecond))
 	}
 }
 
@@ -47,14 +49,14 @@ func TestTheProductionReaderIsNotCappedBelowTheRetryDeadline(t *testing.T) {
 // is real (a process that outlives its context would hold the caller for the stand-in's 20 s).
 func TestTheProductionReaderIsKilledAtEachDeadlineAndGivesUpAfterTwoAttempts(t *testing.T) {
 	st := smitest.Install(t, smitest.Step{Delay: 20 * time.Second})
-	d := Deps{ReadDeadline: 1500 * time.Millisecond, RetryDeadline: 2500 * time.Millisecond}
+	d := Deps{ReadDeadline: 3 * time.Second, RetryDeadline: 5 * time.Second}
 	start := time.Now()
 	_, _, err := d.CardTable(context.Background(), config.Config{})
 	took := time.Since(start)
 	if err == nil {
 		t.Fatal("a nvidia-smi that never answers is an error")
 	}
-	if !strings.Contains(err.Error(), "read twice: no answer within 1.5s, then none within 2.5s") {
+	if !strings.Contains(err.Error(), "read twice: no answer within 3s, then none within 5s") {
 		t.Errorf("the error must say how the table was tried: %v", err)
 	}
 	if !errors.Is(err, context.DeadlineExceeded) {

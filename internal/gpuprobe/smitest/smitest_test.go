@@ -74,7 +74,7 @@ func TestTheStandInRefusesAFieldItDoesNotKnowTheWayNvidiaSmiDoes(t *testing.T) {
 // started, so it still counts.
 func TestACallTheDeadlineKillsStillCountsAndTheLastStepRepeats(t *testing.T) {
 	st := Install(t, Step{Delay: 20 * time.Second}, Step{})
-	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	start := time.Now()
 	if _, err := exec.CommandContext(ctx, "nvidia-smi", "--query-gpu=index", "--format=csv,noheader,nounits").Output(); err == nil {

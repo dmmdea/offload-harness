@@ -617,8 +617,11 @@ func TestAnUnreadableTableUnderAParentsLeaseIsSaidInTheLogAndTheCallStillRuns(t 
 		if env["COMFY_CARD_UUID"] != "" || env["COMFY_API"] != "" {
 			t.Errorf("without a table the call has no card of its own, got %v", env)
 		}
-		if env["GPU_LEASE_DEVICES"] != leaseIDOf(admitUUIDA) {
-			t.Errorf("it still runs inside the parent's lease: GPU_LEASE_DEVICES=%q", env["GPU_LEASE_DEVICES"])
+		// Not the grant's doing: the legacy path hands the runner only the lease dir, epoch and class. The
+		// parent's GPU_LEASE_DEVICES reaches it the way it does in production, through the environment the
+		// harness process inherited from `gpu reserve`.
+		if env["GPU_LEASE_DIR"] == "" || env["GPU_LEASE_EPOCH"] == "" || env["GPU_LEASE_DEVICES"] != leaseIDOf(admitUUIDA) {
+			t.Errorf("it still runs inside the parent's lease (dir, epoch and the cards it holds): %v", env)
 		}
 		for _, want := range []string{"the card table could not be read", "parent's lease", "no card of its own"} {
 			if !strings.Contains(logs.String(), want) {
@@ -746,7 +749,7 @@ func TestADegradedCallPlacesFromTheNewestTableItReadNotTheAdmissionOne(t *testin
 	f.holdCard(admitUUIDC)
 	tbl := f.tableScript(
 		tableStep{cards: unsure(f.cards)},                         // the admission read: the fallback query
-		tableStep{cards: f.cards, delay: 2500 * time.Millisecond}, // the allocation's read: the full query, slow under load
+		tableStep{cards: f.cards, delay: 3500 * time.Millisecond}, // the allocation's read: the full query, slow under load
 	)
 	f.letRunnersGo() // the call that is placed finishes at once
 	ch := f.image(nil)
@@ -765,9 +768,12 @@ func TestADegradedCallPlacesFromTheNewestTableItReadNotTheAdmissionOne(t *testin
 	if m == nil {
 		t.Fatalf("the degrade is logged with the age of the table it used:\n%s", logs.String())
 	}
-	// The allocation's reading finished a second or less before the read that died; the admission table is
-	// 2.5 s older than that, so an age of 2 s or more means the call reports (and places from) the wrong one.
-	if m[1] != "less than a second earlier" && m[1] != "1s earlier" {
+	// The allocation's reading finished a lease poll (1 s) or so before the read that died, a margin for a
+	// loaded box on top; the admission table is 3.5 s older than that reading, so an age of 3 s or more means
+	// the call reports (and places from) the wrong one.
+	switch m[1] {
+	case "less than a second earlier", "1s earlier", "2s earlier":
+	default:
 		t.Errorf("the log says the table it placed from is %q old: it must be the allocation's reading, not the admission one", m[1])
 	}
 }
