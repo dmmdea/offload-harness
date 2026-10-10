@@ -450,6 +450,21 @@ position, and two same-model cards cannot be ordered by anything it does report,
 `CUDA_VISIBLE_DEVICES=<uuid>` probe. A box with one card needs no declaration. With no nvidia-smi the verbs still print the
 leases and say there is no table.
 
+**Reading the table under load (F24, 0.178.0).** The table is one nvidia-smi exec of `gpuprobe`'s per-device query
+(`--query-gpu`: index, uuid, name, memory, utilisation, the two display columns) and nothing else: the allocation never
+lists processes, which is the separate, best-effort foreign-busy reader's call (`TestTheCardTableQueriesTheDeviceFieldsAndNeverListsProcesses`).
+A read that takes a tenth of a second on a quiet box has run out five on a loaded one (2026-10-09: a media call's allocation
+re-read ran out its 5 s while two cards ran other sessions' renders). Every reader that **decides** something from the table
+therefore goes through `gpualloc.Deps.CardTable`: one attempt under `DefaultCardRead` (5 s) and, when that attempt ran out of
+time while the caller's own context was still good, **one** more under `DefaultCardReadRetry` (15 s). A failure that comes back
+at once (nvidia-smi not on PATH, a table with no card) is not retried, since a longer deadline cannot fix it, and the error of a
+read that failed twice says so (`read twice: no answer within 5s, then none within 15s`). The deciding readers are the allocator's
+input (the media path and `gpu reserve --cards`), what `gpu reserve` resolves from the table (`--cards`, `--devices`, a command's
+own pin), `node-swap --cards`, and the scope of a drain or an unload (without a table every seat counts as on the leased cards, so
+one slow read would unload the seats on the other cards). `gpu cards` and `gpu status` stay at one attempt: "no table" is a fine
+answer for a view. What a media call does when even the second attempt fails is in
+[media-generation.md](media-generation.md#a-card-table-that-runs-out-of-time-is-not-a-refusal).
+
 **Choosing the cards of a reservation.**
 
 | form | meaning |

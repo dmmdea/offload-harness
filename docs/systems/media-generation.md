@@ -957,7 +957,7 @@ is given:
 | a pooled image or video route | the cards its pool keys name, when the pool has at least two cards and the box has at most three | a lease on those cards | the default instance, **launch unchanged** (every card visible) |
 | `run-graph` with ONE declared device | that card | a lease on it | its instance, pinned by uuid |
 | `run-graph` with several declared devices, or none, sd.cpp, voice | the whole node | the whole node | the default instance (none for sd.cpp and voice) |
-| any call on a host that does not lease cards, or whose card table cannot be read | the whole node | the whole node | exactly as before this change |
+| any call on a host that does not lease cards, or whose card table cannot be read at admission (after one retry) | the whole node | the whole node | exactly as before this change, and the answer of a call that must wait says why it waits for the node ([below](#a-card-table-that-runs-out-of-time-is-not-a-refusal)) |
 
 **The allocator and the display card.** An unpinned single-card call takes the allocator's card
 (`gpu_lease`, "The allocator"): not claimed by a live lease, not promised to a caller waiting in line
@@ -1071,12 +1071,40 @@ from a worktree, with no GPU and no live lease root:
    per-process rows (Linux only: WDDM lists none), but the media path's default `ForeignBusy` reader returns
    nothing, so a Linux host that turns card-scoped leases on would hand a render a card another process is using.
    The reader lives in the root package beside the foreign-load guard; moving it into `internal/gpualloc` is
-   the fix, and it matters on a Linux host only.
+   the fix, and it matters on a Linux host only. When it moves it must stay its own time-boxed, best-effort
+   read and never become part of the card-table read: that read is the per-device query alone, and a process
+   listing joined to it would put the slowest thing `nvidia-smi` does under load on every media call's path.
 5. **"Enqueue on the node daemon's job queue" (the plan's spike): not adopted, and why.** The daemon runs media
    jobs inline in the request handler: `concurrencyCapped` is false for `image-gen`, `video-gen`, `animate`,
    `audio-gen` and `run-graph` (a parked media job would hold an execution slot and starve the agent lane), so a
    dispatch to the local daemon would wait in the same per-card slots and leases this admission already waits in
    and add no queue of its own. The place in line is the token.
+
+### A card table that runs out of time is not a refusal
+
+A card-scoped call reads the card table at admission (to plan) and again inside its allocation (the allocator's
+input, once per pick and once more at the grant-time check of a call that waited). Each read is one `nvidia-smi` exec
+of the per-device query, with no process listing, under 5 s and, when it ran out of time, once more under 15 s
+([gpu-lease.md](gpu-lease.md#reserving-cards-the-card-table-and-the-reader-audit-plan-p3)). On 2026-10-09 a session
+benchmarking image generation, with two cards running other sessions' renders, got
+`the card table: nvidia-smi: nvidia-smi: context deadline exceeded` as a `gpu_lease_unavailable` defer after 6 s,
+while the calls beside it got the ordinary queued answer: the admission read had answered, the allocation's re-read
+ran out its 5 s, and the raw error left `acquireCards`. A card-table read that fails, even after its retry, is never the
+reason a media call is refused. What the call does instead depends on where the read failed:
+
+| where the read failed | what the call does | what the answer and the log say |
+|---|---|---|
+| at admission | asks for the whole node, as it did before cards were leased | the log, on every such call; and a call that then has to wait is queued with a token whose reason reads "the card table could not be read (...), so this call asks for the whole node" |
+| inside the allocation of an unpinned call (the admission read had answered) | is placed from the newest table it did read (the admission one, at worst) with the operator's screen kept closed to it: a table it could not refresh is the one thing that could misstate the display card's free VRAM. Who holds what is the lease directory's, read fresh every time, so it still takes a free card, or queues on the cards that qualify. It does not ask nvidia-smi again for the rest of the call, so a wedged driver costs one retry per call and not one per stage | the log; and a call that waits gets the ordinary queued answer (`gpu_queued`, a token, the cards it waits for) whose reason says the table could not be re-read, how it was tried and how old the table it used was |
+| a call that named its cards (a `comfy_cuda_device` pin, a pool, a declared device) | does not read the table inside the allocation at all: nothing is left to choose, and what is taken comes from the lease directory, this process's slots and the places held in line (`gpualloc.Claims`) | nothing to say: it queues on the cards it named |
+
+The unload list a lease may take (`GPU_LEASE_UNLOAD_MODELS`) is scoped from the table the call already holds, not from a
+third read after the grant: which seat sits on which card needs the card list, not a fresh reading, and a read that ran
+out used to widen the list to every seat, so a render on one card emptied the seats on the others (register C-86).
+`TestAnAllocationReadTimeoutQueuesTheCallInsteadOfDeferringIt` and its neighbours in
+`internal/pipeline/mediaadmit_cardtable_test.go` pin each row. The render helper's own card count
+(`nvidia-smi -L`, `cudaVisibleEnv`) is asked once more under a longer timeout when it ran out, for the same reason: "no
+listing" would leave ComfyUI on the Windows default of card 0 only.
 
 ## iGPU media engines: video, animate, voice, music (CT-49)
 
