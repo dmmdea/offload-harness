@@ -45,6 +45,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/gpulock"
 	"github.com/dmmdea/offload-harness/internal/gpuprobe"
 	"github.com/dmmdea/offload-harness/internal/grounding"
+	"github.com/dmmdea/offload-harness/internal/hostneed"
 	"github.com/dmmdea/offload-harness/internal/imagegen"
 	"github.com/dmmdea/offload-harness/internal/imageio"
 	"github.com/dmmdea/offload-harness/internal/judge"
@@ -1752,7 +1753,7 @@ func (p *Pipeline) runGenerateImageSdcpp(ctx context.Context, req core.Request, 
 	}
 	imgFamily, imgQuant := imageFootprintKey(cfg)
 	// sd.cpp has no ComfyUI instance to bind to a card: the whole node, as always.
-	grant, lerr := p.acquireMediaLease(ctx, "image-gen (sdcpp)", timeout, p.gpuWait(), wholeNeed(paramStr(req.Params, "waiter_token")).resumableBy(req))
+	grant, lerr := p.acquireMediaLease(ctx, "image-gen (sdcpp)", timeout, p.gpuWait(), wholeNeed(paramStr(req.Params, "waiter_token")).declaresRAM(classDefaultRAM(p.cfg)).resumableBy(req))
 	if lerr != nil {
 		return p.deferForLease(lerr, req.Task, meta, len(req.Input), start)
 	}
@@ -1840,7 +1841,7 @@ func (p *Pipeline) runInpaintImage(ctx context.Context, req core.Request, meta c
 		CFG: p.cfg.InpaintCFG, Sampler: p.cfg.InpaintSampler, Scheduler: p.cfg.InpaintScheduler,
 	}
 	timeout := time.Duration(p.cfg.InpaintTimeoutSec) * time.Second
-	grant, lerr := p.acquireMediaLease(ctx, "inpaint", timeout, p.gpuWait(), singleCardNeed(p.cfg, paramStr(req.Params, "waiter_token")).resumableBy(req))
+	grant, lerr := p.acquireMediaLease(ctx, "inpaint", timeout, p.gpuWait(), singleCardNeed(p.cfg, paramStr(req.Params, "waiter_token")).declaresRAM(routeRAM(hostneed.RouteInpaint, p.cfg)).resumableBy(req))
 	if lerr != nil {
 		return p.deferForLease(lerr, req.Task, meta, len(req.Input), start)
 	}
@@ -2125,7 +2126,7 @@ func (p *Pipeline) runEditImageGenerative(ctx context.Context, req core.Request,
 		Launch: comfyLaunch(cfg, true),
 	}
 	timeout := time.Duration(cfg.GenEditTimeoutSec) * time.Second
-	grant, lerr := p.acquireMediaLease(ctx, "edit", timeout, p.gpuWait(), singleCardNeed(cfg, paramStr(req.Params, "waiter_token")).resumableBy(req))
+	grant, lerr := p.acquireMediaLease(ctx, "edit", timeout, p.gpuWait(), singleCardNeed(cfg, paramStr(req.Params, "waiter_token")).declaresRAM(routeRAM(hostneed.RouteEdit, cfg)).resumableBy(req))
 	if lerr != nil {
 		return p.deferForLease(lerr, req.Task, meta, len(req.Input), start)
 	}
@@ -2535,7 +2536,7 @@ func (p *Pipeline) runRunGraph(ctx context.Context, req core.Request, meta core.
 	// fleet dispatch path threads it) else the generic comfy-graph bucket.
 	// run-graph holds the whole node unless the operator DECLARES devices: the caller's graph owns
 	// its placement, so nothing here can know which cards it will use.
-	grant, lerr := p.acquireMediaLease(ctx, "run-graph", timeout, p.gpuWait(), declaredNeed(declaredDevices(req.Params), paramStr(req.Params, "waiter_token")).resumableBy(req))
+	grant, lerr := p.acquireMediaLease(ctx, "run-graph", timeout, p.gpuWait(), declaredNeed(declaredDevices(req.Params), paramStr(req.Params, "waiter_token")).declaresRAM(classDefaultRAM(p.cfg)).resumableBy(req))
 	if lerr != nil {
 		return p.deferForLease(lerr, req.Task, meta, len(req.Input), start)
 	}
@@ -2967,7 +2968,7 @@ func (p *Pipeline) runGenerateVideo(ctx context.Context, req core.Request, meta 
 	}
 
 	timeout := time.Duration(p.cfg.VideoGenTimeoutSec) * time.Second
-	grant, lerr := p.acquireMediaLease(ctx, "video-gen", timeout, p.gpuWait(), videoNeed(p.cfg, paramStr(req.Params, "waiter_token")).resumableBy(req))
+	grant, lerr := p.acquireMediaLease(ctx, "video-gen", timeout, p.gpuWait(), videoNeed(p.cfg, paramStr(req.Params, "waiter_token"), renderFamily).resumableBy(req))
 	if lerr != nil {
 		return p.deferForLease(lerr, req.Task, meta, len(req.Input), start)
 	}
@@ -3110,7 +3111,7 @@ func (p *Pipeline) runAnimateCharacter(ctx context.Context, req core.Request, me
 	}
 
 	timeout := time.Duration(p.cfg.AnimateGenTimeoutSec) * time.Second
-	grant, lerr := p.acquireMediaLease(ctx, "animate", timeout, p.gpuWait(), singleCardNeed(p.cfg, paramStr(req.Params, "waiter_token")).resumableBy(req))
+	grant, lerr := p.acquireMediaLease(ctx, "animate", timeout, p.gpuWait(), singleCardNeed(p.cfg, paramStr(req.Params, "waiter_token")).declaresRAM(routeRAM(hostneed.RouteAnimate, p.cfg)).resumableBy(req))
 	if lerr != nil {
 		return p.deferForLease(lerr, req.Task, meta, len(req.Input), start)
 	}
@@ -3277,7 +3278,7 @@ func (p *Pipeline) runGenerateAudio(ctx context.Context, req core.Request, meta 
 	// ComfyUI on a single card.
 	need := wholeNeed(paramStr(req.Params, "waiter_token")).resumableBy(req)
 	if kind == "music" {
-		need = singleCardNeed(p.cfg, paramStr(req.Params, "waiter_token")).resumableBy(req)
+		need = singleCardNeed(p.cfg, paramStr(req.Params, "waiter_token")).declaresRAM(routeRAM(hostneed.RouteMusic, p.cfg)).resumableBy(req)
 	}
 	grant, lerr := p.acquireMediaLease(ctx, "audio-gen ("+kind+")", timeout, p.gpuWait(), need)
 	if lerr != nil {
@@ -3455,6 +3456,9 @@ func ambientLeaseEnv() ([]string, error) {
 type errGPUBusy struct {
 	info   gpulease.Info
 	detail string
+	// hostRAM is set when the cards were free and the host's memory was what the call waited for
+	// (gpulease/hostram.go): the caller turns it into a place in line that says so.
+	hostRAM *gpulease.ErrHostRAM
 }
 
 func (e *errGPUBusy) Error() string {
@@ -3522,6 +3526,13 @@ func (p *Pipeline) deferForLease(err error, task core.TaskType, meta core.Meta, 
 // reclaim rule needs both a stale heartbeat and an expired window, so a missed tick
 // inside the declared window is harmless.
 func (p *Pipeline) acquireWholeNode(ctx context.Context, reason string, ttl, wait time.Duration, resume string) ([]string, func(), error) {
+	return p.acquireWholeNodeWith(ctx, reason, ttl, wait, resume, 0)
+}
+
+// acquireWholeNodeWith is acquireWholeNode for a call that declares hostRAMGiB of host RAM: the grant
+// admits it against committed memory (gpulease/hostram.go) and keeps the call in the queue while the
+// host is short.
+func (p *Pipeline) acquireWholeNodeWith(ctx context.Context, reason string, ttl, wait time.Duration, resume string, hostRAMGiB float64) ([]string, func(), error) {
 	noop := func() {}
 	start := time.Now()
 
@@ -3573,12 +3584,17 @@ func (p *Pipeline) acquireWholeNode(ctx context.Context, reason string, ttl, wai
 	// resume is a place-keeping token (gpulease/tokens.go): only a host that leases cards ever
 	// leaves one, so on any other host it names nothing and the call is what it always was.
 	lease, err := m.Acquire(gpulease.ClassMedia, gpulease.Options{
-		Reason: reason, Origin: "pipeline", TTL: ttl, Wait: remaining, ResumeToken: resume,
+		Reason: reason, Origin: "pipeline", TTL: ttl, Wait: remaining, ResumeToken: resume, HostRAMGiB: hostRAMGiB,
 	})
 	if err != nil {
 		var held *gpulease.ErrHeld
 		if errors.As(err, &held) {
 			return nil, noop, &errGPUBusy{info: held.Info}
+		}
+		var short *gpulease.ErrHostRAM
+		if errors.As(err, &short) && !short.Impossible {
+			// The node is free; the host's memory is not: busy, with the reason, not broken.
+			return nil, noop, &errGPUBusy{detail: err.Error(), hostRAM: short}
 		}
 		if errors.Is(err, gpulease.ErrStillQueued) {
 			// The card is free but a waiter registered earlier is ahead (register D-1xx-3): busy, not broken.
