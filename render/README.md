@@ -75,6 +75,7 @@ node render/comfy-video.mjs <out.mp4> <still.png> "<prompt>" \
      --model hunyuan --frames 17 --width 480 --height 848 \
      [--steps 50] [--seed N] [--negative "..."] [--reserve-vram 2.0] [--no-lock] [--keep-comfy]
 node render/comfy-video.mjs out.mp4 still.png "<prompt>" --model wan --frames 49   # secondary
+node render/comfy-video.mjs out.mp4 still.png "<prompt>" --wan-decode plain       # wan: auto (default) | plain | tiled
 node render/preflight-graph.mjs hunyuan   # validate a graph vs a running ComfyUI, no gen
 ```
 
@@ -85,6 +86,12 @@ node render/preflight-graph.mjs hunyuan   # validate a graph vs a running ComfyU
 - **VAE decode is the OOM cliff** — `temporal_size: 4096` (decode-all-at-once) HARD-CRASHED the
   display driver at 33 frames. `vaeTemporalSize: 16` chunks the decode temporally and fits;
   raise toward 4096 only on bigger GPUs (fewer motion seams).
+- **Wan 2.2's decode is a mode, `--wan-decode auto|plain|tiled`** (config `videogen_wan_decode`). `tiled` is
+  `VAEDecodeTiled`, the node the Wan graph always used and the one a card under 12 GiB keeps; `plain` is `VAEDecode`,
+  38 s at a 10.3 GB peak against 412 s at 3.2 GB on a 16 GB card (A/B 2026-10-03). `auto` (the default) reads
+  the render card's total VRAM from `GET /system_stats` and runs plain from 12 GiB, else tiled, and tiled when
+  the card cannot be read; it logs its choice on stderr. ComfyUI retries an out-of-memory plain decode tiled by
+  itself. Hunyuan 1.5 and LTX 2.5 are not touched by it. Detail: `docs/systems/media-generation.md`.
 - **`--reserve-vram 2.0`** keeps headroom for the Windows display/WDDM (too low → a decode spike
   kills the whole process with no traceback).
 - **Qwen2.5-VL fp8 text encoder CPU-offloads automatically** (~free with 64 GB RAM, saves 4–6 GB).
