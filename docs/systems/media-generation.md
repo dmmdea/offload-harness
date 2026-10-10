@@ -1974,7 +1974,9 @@ directory, the places in line, the in-process slots, the host's memory through t
 call that names no card) and says busy only when something that makes the grant refuse is present. It creates nothing (no lease,
 place in line, epoch, waiter, ledger row, PAIR card or ComfyUI instance). It says free when it cannot say: a lease the process
 inherited (`gpu reserve -- local-offload ...`), a card table that does not read in 4 s (chosen, not measured), a task or a binding
-it does not model (sd.cpp, an unknown family). A differential test (`TestMediaLaneFreeNeverRefusesAGrant`) drives the real
+it does not model (sd.cpp, an unknown family). On the whole-node plan, where the lease queue orders by arrival, a call that resumes
+a place counts only the callers that arrived before that place; on the pinned and allocated plans every other caller in line counts
+(`TestMediaLaneFreeOrdersByArrivalOnlyOnTheWholeNodePlan`). A differential test (`TestMediaLaneFreeNeverRefusesAGrant`) drives the real
 admission over a table of lane states and fails if a lane the grant would serve is called busy.
 
 **What a family is.** A name says nothing about which weights sit under it. A family's identity is its **recipe**
@@ -2012,11 +2014,16 @@ names no family is this machine's default binding and must not land on a node's 
 
 **When a node says no.** At most 3 nodes are tried, each under a fresh job id. A refusal at the door (`503`, `429`, `412`, any
 other status, or a connection that was never made) means nothing ran, and the call moves on; so does a node that accepted the
-job and answers `gpu_busy` or `gpu_queued` (another job holds its card). Any other answer after acceptance is final: a render
-that failed is the call's result and is never re-placed, a job a node holds is never also run here (a media job cannot be
-withdrawn, ADR 0064), and a node that goes away mid-job fails the call naming the node and the remote job. A node that does not
-answer a health read is left alone for 5, 15, 60 and then 300 s by consecutive failure (the last holds), and a `Retry-After`
-pauses a node for that long (jittered once): chosen constants, not measurements.
+job and answers `gpu_busy` or `gpu_queued` (another job holds its card) or `gpu_lease_unavailable` (it could not take its lease:
+nothing ran). Any other answer after acceptance is final: a render that failed is the call's result and is never re-placed, a
+POST that was sent and got no answer is final too (the node may hold the job; `TestAnAmbiguousPostIsFinal`), a job a node holds
+is never also run here (a media job cannot be withdrawn, ADR 0064), and a node that goes away mid-job fails the call naming the
+node and the remote job. A node that does not answer a health read is left alone for 5, 15, 60 and then 300 s by consecutive
+failure (the last holds), a `Retry-After` pauses a node for that long (jittered once), and a node that took a call and passed it
+back is left alone for 60 s and then 300 s per consecutive bounce (only a call it serves clears the count; a health read does
+not): a node that reads idle but whose own grant refuses every job would otherwise park each call for its whole `gpu_wait_ms`.
+Chosen constants, not measurements (`TestABounceIsRememberedAndTheNodeComesBackAtTheNextStep`,
+`TestARetryAfterHoldsTheNodeAndReadsAsRefused`, `TestARefusedDialMovesOnAndBacksTheNodeOff`, `TestACallIsSentToAtMostThreeNodes`).
 
 **Attribution.** The call's PAIR card opens on the first node that ACCEPTS the job, not before the POST, so a node that refused
 it leaves none. A node that accepted and then bounced it has its card closed quiet (`completed`, never started, the reason kept:
@@ -2029,7 +2036,8 @@ runs here exactly as it always did, and if it ends in a deferral (a place in lin
 (`{node, state, why, differs?}` per roster node, in config order, and the reason quotes them). `state` is `busy` (the node holds a
 lease; the lease and its reason; or another call of this process already has a job there), `not-capable` (the key that differs, in the config key's own name, and the family of this
 machine that WOULD match: `send family=<ours> to use its <theirs>`; or the release, or the refine, the route or the steps rule),
-`unreachable`, `refused`, `bounced` or `skipped`. A node absent from `delegate_remotes` is not named: nothing in the config says
+`unreachable`, `refused`, `bounced` or `skipped`; a node being left alone says why (`bounced`: it had the call and passed it back;
+`refused`: it answered the dispatch with a refusal; `unreachable`: it did not answer) and for how long. A node absent from `delegate_remotes` is not named: nothing in the config says
 it exists. A call that ran is never annotated.
 
 **What does not overflow.** A call that carries a `waiter_token` (it resumes a place in the local line and keeps it; the token
@@ -2040,7 +2048,11 @@ multi-GPU node would land on its display card), and video, animation and audio c
 **Named limits.** One first-in-first-out line per delegating machine; cross-machine order is node arrival; late binding (a ticket
 that starts on the first lane that frees) is the next step. Every remote job pays ComfyUI's cold start (zero-warm). The same
 recipe and seed on a different GPU architecture is the same composition, not bit-identical pixels. A mis-predicted placement
-costs one bounce: up to the node's `gpu_wait_ms` parked on the node and one deferred row there before the placer sees it.
+costs one bounce per node per pause: up to the node's `gpu_wait_ms` parked on the node and one deferred row there before the placer
+sees it. **A call that bounced queues locally from when it came back**, not from when it arrived: the caller joins the local line when
+the fleet attempt is over (at most 3 nodes, each up to its `gpu_wait_ms`), so a caller that arrived meanwhile is ahead of it. Carrying
+the arrival time into the local admission needs the lease queue (it takes one) and the in-process slot queue (it serves callers in the
+order they join and takes none); the ticket queue of the next step keeps a call's place across the attempt and is where that is done.
 
 **Reading a node's recipes** (the first live check, before relying on a match): `curl -s http://<node>:18811/fleet/health` and
 read `image_recipes` on the target and, on a machine that also runs `fleet-serve`, on the delegator's own node: the digest of the

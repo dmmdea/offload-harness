@@ -21,8 +21,11 @@ Versioning: [SemVer](https://semver.org/).
 - **The question is read-only and a relaxation.** `core.LaneProber` / `Pipeline.MediaLaneFree` is built from the helpers the
   admission already reads state with and edits nothing inside `acquireCards`: it says busy only when something that makes the real
   wait-0 grant refuse is present, and free whenever it cannot say. `TestMediaLaneFreeNeverRefusesAGrant` drives the real admission
-  over 27 lane states and fails if a lane the grant would serve is called busy; `TestMediaLaneFreeWritesNothing` snapshots the lease
-  root in each of them.
+  over 27 lane states and fails if a lane the grant would serve is called busy (and `TestMediaLaneFreeNeverRefusesAGrantOverRandomStates`
+  over 150 fixed-seed random ones); `TestMediaLaneFreeWritesNothing` snapshots the lease root in each of them. On the whole-node
+  plan, where the lease queue orders by arrival, a call that resumes a place counts only the callers that arrived before that place
+  (the randomized differential found the one state where the prober called such a lane busy; unreachable from the S1 trigger, live
+  for the ticket scan of the next step).
 - **Identity is the recipe, not the name, and the recipe is name plus size, not content.** `mediacap.ImageRecipe`: the checkpoint,
   text encoder, VAE and LoRA a family loads with their names and byte sizes, and its sampling, digested over RESOLVED values (an unset Qwen-Image-2.1 key takes the builder's default from a
   table `TestBuilderDefaultsMatchTheJSConstants` reads out of `render/wf-qwen-image-21.mjs` and `render/comfy-render.mjs`), so a node
@@ -42,9 +45,14 @@ Versioning: [SemVer](https://semver.org/).
   silent refinement (this applies to `route remote` and the no-lane `auto` path as well). `tts_voice`, `transformer` and a graph's
   `devices` still defer by name.
 - **Refusals move on, an accepted job is final.** At most 3 nodes, each under a fresh job id; a refusal at the door (503, 429, 412,
-  any status, a dial that never connected) or an accepted job answered `gpu_busy`/`gpu_queued` is passed over; any other answer
-  after acceptance is the call's result and a job a node holds is never also run here. A node that does not answer is left alone
-  for 5, 15, 60 and then 300 s, a `Retry-After` pauses it (chosen constants, not measurements). `RemoteAttribution.Bounce` closes
+  any status, a dial that never connected) or an accepted job answered `gpu_busy`, `gpu_queued` or `gpu_lease_unavailable` (nothing
+  ran in any of them) is passed over; any other answer after acceptance is the call's result, a POST that was sent and got no answer
+  is final too, and a job a node holds is never also run here (pinned by `TestAnAmbiguousPostIsFinal` and
+  `TestACallIsSentToAtMostThreeNodes`). A node that does not answer is left alone for 5, 15, 60 and then 300 s, a `Retry-After`
+  pauses it, and a node that took a call and passed it back is left alone for 60 s and then 300 s per consecutive bounce, because a
+  node that reads idle in its health but whose own grant refuses every job would otherwise park each call for its whole
+  `gpu_wait_ms`; the cluster row names the pause as `bounced`, `refused` or `unreachable` and for how long (chosen constants, not
+  measurements). `RemoteAttribution.Bounce` closes
   the PAIR card of an attempt that held nothing (completed, never started) and writes no ledger row; an overflowing call opens its
   card only once a node has accepted the job, so the call has one row and one card per node that held it.
 - **A roster that lists the machine itself.** An entry whose `node_id` equals this machine's (`fleet_node_id`, else the hostname)
@@ -56,7 +64,9 @@ Versioning: [SemVer](https://semver.org/).
 - **Fixed on the way.** A seed (and width, height, steps) the caller gave as an integer reached a fleet node through a float64, so a
   seed above 2^53 changed; the sender now reads integers exactly (`TestSeedTravelsExactly`).
 - **Not changed, and said.** One line per delegating machine, not one global order; a call resumed with its token is not moved
-  (late binding is the next step); every remote job cold-starts ComfyUI; the same recipe and seed on another GPU architecture is the
+  (late binding is the next step); a call that bounced queues locally from when it came back, not from when it arrived (carrying
+  its arrival time in needs both the lease queue and the in-process slot queue, which takes none; the ticket queue of the next step
+  keeps a call's place across the attempt); every remote job cold-starts ComfyUI; the same recipe and seed on another GPU architecture is the
   same composition, not bit-identical pixels. Nothing here was run against a live lease or a real render: the recipe match was
   tested against fixtures that reproduce the image blocks of three live nodes as stored on 2026-10-09 and 2026-10-10 (config text),
   one of them cut inside the block that matters, so the first live action reads `image_recipes` on both nodes.

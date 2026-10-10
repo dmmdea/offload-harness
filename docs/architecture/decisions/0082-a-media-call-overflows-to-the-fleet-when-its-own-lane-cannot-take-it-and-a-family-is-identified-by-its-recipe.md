@@ -42,7 +42,11 @@ Three facts made the obvious change unsafe as stated.
    admission reads state with (`planMedia`, `gpualloc.Claims` and `QueuedClaims`, the in-process slots, the grant's own
    host-RAM function, and the allocator itself for a call that names no card) and edits nothing inside `acquireCards`. It says
    "busy" only when something that makes the real wait-0 grant refuse is present, so it never calls busy a lane the grant would
-   have served; it may call free a lane the grant then refuses, and the call then runs locally exactly as before. Every doubt
+   have served; it may call free a lane the grant then refuses, and the call then runs locally exactly as before. The lease
+   queue orders by arrival only on the whole-node plan, so there a call that resumes a place counts only the callers that
+   arrived before that place; on the pinned and allocated plans every other caller in line counts
+   (`TestMediaLaneFreeOrdersByArrivalOnlyOnTheWholeNodePlan`; the S1 trigger never asks about a call that carries a token, the
+   ticket scan of the next step does). Every doubt
    (a lease this process inherited, a card table that does not read in 4 s, a request it does not model) reads as free. It
    creates no lease, place in line, epoch, waiter record, ledger row, PAIR card or ComfyUI instance. A differential test drives
    the real wait-0 admission over a table of lane states and holds the prober to the one direction that matters.
@@ -77,11 +81,18 @@ Three facts made the obvious change unsafe as stated.
    that names no family is this machine's default binding, and must not land on a node's different default.
 6. **Refusals move on; an accepted job is final.** At most 3 nodes are tried. A refusal at the door (`503`, `429`, `412`, any
    other status, or a dial that never connected) means nothing ran: the call goes on, under a fresh job id. A node that accepted
-   the job and answers `gpu_busy` or `gpu_queued` (another job holds its card, nothing ran) is passed over the same way. Any other
-   answer after acceptance is the call's result: a render that failed is never re-placed, and a job a node holds is never also
-   run here (a media job cannot be withdrawn, ADR 0064). A node that does not answer is left alone for 5, 15, 60 and then 300
-   seconds by consecutive failure, a `Retry-After` pauses it for that long (jittered once), so a powered-off box costs one probe
-   per step. The step and attempt numbers are chosen, not measured.
+   the job and answers `gpu_busy` or `gpu_queued` (another job holds its card, nothing ran) or `gpu_lease_unavailable` (it could
+   not take its lease: a lease location it cannot use, a host-RAM need no state of it admits; nothing ran) is passed over the
+   same way. Any other answer after acceptance is the call's result: a render that failed is never re-placed, a POST that was
+   sent and got no answer is final too (the node may hold the job: `TestAnAmbiguousPostIsFinal`), and a job a node holds is never
+   also run here (a media job cannot be withdrawn, ADR 0064). A node that does not answer is left alone for 5, 15, 60 and then
+   300 seconds by consecutive failure, a `Retry-After` pauses it for that long (jittered once), so a powered-off box costs one
+   probe per step. A node that took a call and passed it back (a bounce) is left alone for 60 s the first time and 300 s for each
+   consecutive bounce after, because a node that reads idle in its health but whose own grant refuses the job (a card the display
+   rule keeps closed, a quarantined card, a host short of RAM, a card another process holds that no lease shows) refuses every
+   call alike, and each call sent to it would park for the node's whole `gpu_wait_ms` before the bounce came back; a call the node
+   serves forgets the count, a health read does not. The cluster row says which pause it is (`bounced`, `refused`,
+   `unreachable`) and for how long the call was not offered to the node. The step and attempt numbers are chosen, not measured.
 7. **Attribution stays one card per node that held the job and one row per call.** An overflowing call opens its PAIR card only
    once a node has ACCEPTED the job. A node that bounces it after accepting has its card closed quiet (completed, never
    started, the reason kept; `core.RemoteAttribution.Bounce`) and writes no ledger row; the call's one asker row names the node
@@ -108,11 +119,17 @@ Three facts made the obvious change unsafe as stated.
   node exactly as they would to a local call. A remote job is zero-warm like any other: the node cold-starts ComfyUI and unloads
   it when the lease ends.
 - The delegator never counts cards from a node's health and never overrides a node's refusal. A mis-predicted placement costs
-  one bounce: up to the node's `gpu_wait_ms` (90 s by default) parked on the node and one deferred row there, before the placer
-  sees it. The health pre-filter (no lease of any class) makes that rare; if the logs show it is not, a place-now header read in
+  one bounce per node per pause (60 s, then 300 s): up to the node's `gpu_wait_ms` (90 s by default) parked on the node and one
+  deferred row there, before the placer sees it. The health pre-filter (no lease of any class) makes that rare; if the logs show it is not, a place-now header read in
   admission is the first optimisation (a lane verdict published by the node, answered before a job exists), not built here.
 - **Named limits.** The recipe is name plus size, not content (decision 3). One FIFO per delegating machine; cross-machine order is node arrival. A call resumed with its token stays in
-  the local line, so a node that frees later is not used by it (the ticket queue with late binding is the next step). Every
+  the local line, so a node that frees later is not used by it (the ticket queue with late binding is the next step). **A call
+  that bounced queues locally from when it came back**, not from when it arrived: it joins the local line only when the fleet
+  attempt is over (at most 3 nodes, each up to its `gpu_wait_ms`, plus the roster read), so a caller that arrived meanwhile is
+  ahead of it, and one bounce can cost it 90 s of seniority. Two halves would have to be fixed to carry the arrival time into the
+  local admission: the lease queue (it takes an arrival time) and the in-process slot queue, which serves callers in the order they
+  join and has no arrival time to take; the ticket queue of the next step keeps a call's place across the attempt and is where
+  that is done, not here. Every
   remote job pays ComfyUI's cold start. The same recipe and seed on a different GPU architecture is the same composition, not
   bit-identical pixels. A hand-forced `route=remote` can still park beside a placed job (`concurrencyCapped` is false for media).
   A per-request `steps` needs the node's binding to have set cfg for a graph that takes both together.
