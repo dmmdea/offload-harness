@@ -134,8 +134,9 @@ Versioning: [SemVer](https://semver.org/).
 ### Added — the warm-back of the agent seat is admitted like a load; the seat declares its footprint (G4)
 
 - The warm-back after a lease (`--unload-seat`, `gpu release --warm-seat`) was the one load nothing sized. It now puts the
-  seat's host footprint (`agent_seat_host_ram_gib`, a new additive config key; unset, `hostneed.DefaultSeatHostGiB` = 21 GiB,
-  the largest seat footprint on record, a chosen fail-closed figure and never 0) to the grant's admission over every lease
+  seat's host footprint (`agent_seat_host_ram_gib`, a new additive config key; unset, `hostneed.DefaultSeatHostGiB` = 21 GiB, a
+  chosen fail-closed figure and never 0: not a measurement, and below the 44 GiB the 2026-09-10 incident recorded for a seat, so a
+  node that runs a seat sets the key from its own measurement) to the grant's admission over every lease
   but the one being released (`Manager.HostRAMCheckWithout`), and refuses outright while another lane that declared host RAM is
   live. A host that reads NEAR or OVER never warms; a refused warm stays owed and the seat loads on its next request. Not done,
   on purpose: the owed warm is not counted as pending at another lease's grant (the seat was unloaded to make room for that

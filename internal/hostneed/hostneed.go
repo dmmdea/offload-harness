@@ -432,23 +432,26 @@ type Request struct {
 
 // DefaultSeatHostGiB is the host RAM an agent seat is assumed to hold when the node's config does not say
 // (agent_seat_host_ram_gib). An unknown seat is not "fits": 0 would let a warm-back load a seat the host may
-// not have room for, which is how a seat's 44 GiB host footprint went unseen on 2026-09-10. So the figure is the
-// LARGEST seat footprint on record: a vLLM pair seat held ~13 GiB of process plus 8 GiB of staged KV cache,
-// 21 GiB in all (measured 2026-09-10 and recorded in the project notes; not re-measured here), against ~12 GiB
-// resident for a 35B-class MoE seat with spilled experts. A seat that is smaller than that costs a warm-back that
-// waits for room it did not need; a seat that is larger and not configured is the gap, and the config key is the
-// way to close it. Chosen, not measured on any one node: the node that runs the seat measures its own and states it.
+// not have room for, which is how a seat's host footprint went uncounted on 2026-09-10. The figure is CHOSEN, not
+// measured on any node and NOT the largest on record: it is a vLLM pair seat's ~13 GiB of process plus 8 GiB of
+// staged KV cache (from the project notes of 2026-09-10, not re-measured here), against ~12 GiB resident for a
+// 35B-class MoE seat with spilled experts. The 2026-09-10 incident itself recorded a LARGER figure, 44 GiB of host
+// RAM for a seat; the note that carries the 44 GiB attributes it to LMCache staging plus page cache, and whether the
+// page-cache part is memory the OS can drop is not verified here, so which of the two a warm-back should be held to
+// is not settled. What is: with the key unset the warm-back is admitted against 21 GiB, below the incident's figure,
+// so a node that runs a seat must state its own measured footprint before it relies on that check. A seat smaller
+// than the default costs a warm-back that waits for room it did not need; a larger one that is not configured is the gap.
 const DefaultSeatHostGiB = 21.0
 
 // SeatNeed is the host RAM the agent seat needs once loaded: the node's own figure when its config states one
 // (agent_seat_host_ram_gib), else DefaultSeatHostGiB. It is never 0: a seat whose footprint is unknown is
-// treated as the largest one measured (fail closed), because a load the guard cannot size is the one it must
-// not wave through.
+// held to the chosen default (fail closed, though below the 44 GiB the 2026-09-10 incident recorded), because a
+// load the guard cannot size is the one it must not wave through.
 func SeatNeed(cfg config.Config) Need {
 	if g := cfg.AgentSeatHostRAMGiB; g > 0 {
 		return Need{GiB: g, Source: SourceSeat, Detail: "the node's agent_seat_host_ram_gib"}
 	}
-	return Need{GiB: DefaultSeatHostGiB, Source: SourceSeatDefault, Detail: "the agent seat's host footprint is not configured (agent_seat_host_ram_gib), so the largest seat footprint measured so far is assumed"}
+	return Need{GiB: DefaultSeatHostGiB, Source: SourceSeatDefault, Detail: "the agent seat's host footprint is not configured (agent_seat_host_ram_gib), so a chosen 21 GiB is assumed: not a measurement, and below the 44 GiB the 2026-09-10 incident recorded, so state the seat's own measured figure in agent_seat_host_ram_gib"}
 }
 
 // Resolve is the order in the package comment: explicit, a recognised render call, the media class

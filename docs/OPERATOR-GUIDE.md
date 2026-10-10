@@ -273,8 +273,9 @@ needs no host RAM); unset, it is estimated from the model files of a render help
 (a Krea 2 bf16 call on a 16 GiB card is about 33 GiB), else for a media lease the largest render family the box binds, and
 0 for a text lease. A lease that has to wait says `waiting for host RAM: needs N GiB, committed X of Y GiB physical, Z GiB
 headroom` once and keeps its place in the same queue; `--wait 0` refuses with that text. The warm-back of the agent seat after a
-lease is admitted the same way against `agent_seat_host_ram_gib` (the host RAM the seat holds once loaded; unset, the largest
-footprint on record, 21 GiB, stands in) and never runs while another lane that declared host RAM is live. `gpu status` and `offload_status`
+lease is admitted the same way against `agent_seat_host_ram_gib` (the host RAM the seat holds once loaded; unset, a chosen 21 GiB
+stands in: not a measurement, and below the 44 GiB the 2026-09-10 incident recorded for a seat, so set the key from the node's own
+measurement before relying on the check) and never runs while another lane that declared host RAM is live. `gpu status` and `offload_status`
 show the host's memory with one verdict: `OK`, `NEAR` (within the headroom of physical RAM) or `OVER` (committed above
 physical RAM; the brief status line then starts `HOST RAM OVER`). Details:
 [GPU lease, "Host RAM"](systems/gpu-lease.md).
