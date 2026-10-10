@@ -495,11 +495,10 @@ frame count, so the shape they were taken at is unrecorded. The three modes:
 
 **Why the default is `tiled`, not `auto`.** `auto` would run the plain `VAEDecode` by default on every 16 GB card, and
 no render at the 16 GB tiers' own shape (1280x720x81) was ever run with plain. ComfyUI's own estimate there is 12.0 GiB
-of a card that reports 15.9 GiB, and a second out-of-memory after ComfyUI's single tiled retry fails a ~70-minute
-render after sampling (the estimates behind this are worked out below). The one measurement above was taken with
+of a card that reports 15.9 GiB, and a second out-of-memory after ComfyUI's single tiled retry fails the whole render after sampling (the estimates behind this are worked out below). The one measurement above was taken with
 ComfyUI dynamic VRAM on and a clip of unrecorded shape, so it does not say what happens at that shape. `auto` and
 `plain` therefore stay available as an explicit opt-in (`videogen_wan_decode`, or `--wan-decode` on the runner), and the
-default flips to `auto` only after a live acceptance render at the tier shape shows a decode of about 40 s and no
+default flips to `auto` only after a live acceptance render at the tier shape shows a decode close to the measured 38 s and no
 `Ran out of memory when regular VAE decoding` line in the ComfyUI log.
 
 Under `auto` the runner asks the ComfyUI it submits to, once per Wan run, after it is up and before the graph is built:
@@ -553,7 +552,7 @@ sits on the cut and was not measured: pin `plain` or `tiled` there rather than t
 > alone, which is the rule it was given, while ComfyUI's estimate follows the frame's resolution; a resolution-aware
 > `auto` is a possible follow-up, not something this change does. That is why the default is `tiled` and `auto` is an
 > opt-in. The acceptance condition for flipping the default to `auto`: one live render at a 16 GB tier's own shape,
-> 1280x720x81, with `videogen_wan_decode` set to `auto`, whose decode takes about 40 s and whose ComfyUI log has no
+> 1280x720x81, with `videogen_wan_decode` set to `auto`, whose decode stays close to the measured 38 s and whose ComfyUI log has no
 > `Ran out of memory when regular VAE decoding` line.
 
 **What this does not touch.** LTX 2.5 and Hunyuan 1.5 keep `VAEDecodeTiled`: they decode through other VAEs that

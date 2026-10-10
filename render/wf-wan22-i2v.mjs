@@ -27,12 +27,12 @@
 //     ComfyUI it submits to) is at least WAN_PLAIN_DECODE_MIN_VRAM_BYTES, else tiled. No reading = tiled.
 //   Why the default is tiled and not auto: auto would run the plain decode by default on every 16 GB card, and no
 //   render at the 16 GB tiers' own shape (1280x720x81) was ever run with plain. ComfyUI's own estimate there is
-//   12.0 GiB of a 15.9 GiB card, and a second out-of-memory after ComfyUI's single tiled retry (below) fails a
-//   ~70-minute render after sampling. The one measurement, on an RTX 5060 Ti 16 GB (A/B 2026-10-03): plain 38 s at a
+//   12.0 GiB of a 15.9 GiB card, and a second out-of-memory after ComfyUI's single tiled retry (below) fails
+//   the whole render after sampling. The one measurement, on an RTX 5060 Ti 16 GB (A/B 2026-10-03): plain 38 s at a
 //   10.3 GB peak against tiled 412 s at 3.2 GB (that A/B's tiled arm was one chunk), 45 dB PSNR between the two,
 //   was taken with ComfyUI dynamic VRAM on and a clip of unrecorded shape. So auto and plain stay available as an
 //   explicit opt-in, and the default flips to auto only after a live acceptance render at the tier shape shows a
-//   ~40 s decode with no "Ran out of memory when regular VAE decoding" line in the ComfyUI log.
+//   decode close to the measured 38 s with no "Ran out of memory when regular VAE decoding" line in the ComfyUI log.
 //   ComfyUI's VAE.decode catches an out-of-memory plain decode and retries it tiled (comfy/sd.py, read at
 //   v0.38.0), which makes plain worth trying on a big card, but the retry is a second chance and not a
 //   guarantee: it sits outside the try/except and can run out of memory too, and the harness runs ComfyUI with

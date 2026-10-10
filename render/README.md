@@ -98,8 +98,8 @@ node render/preflight-graph.mjs hunyuan   # validate a graph vs a running ComfyU
   and `auto` are an explicit opt-in, because no render at the 16 GB tiers' own shape (1280x720x81) was ever run with
   plain: ComfyUI's estimate for the plain decode follows the frame's resolution (12.0 GiB at 1280x720, on a card that
   reports 15.9 GiB), it retries an out-of-memory plain decode tiled only once, and a second out-of-memory fails a
-  ~70-minute render after sampling. The default flips to `auto` only after a live acceptance render at that shape
-  shows a ~40 s decode and no `Ran out of memory when regular VAE decoding` line in the ComfyUI log. Hunyuan 1.5 and
+  the whole render after sampling. The default flips to `auto` only after a live acceptance render at that shape
+  shows a decode close to the measured 38 s and no `Ran out of memory when regular VAE decoding` line in the ComfyUI log. Hunyuan 1.5 and
   LTX 2.5 are not touched by it. Detail: `docs/systems/media-generation.md`.
 - **`--reserve-vram 2.0`** keeps headroom for the Windows display/WDDM (too low → a decode spike
   kills the whole process with no traceback).
