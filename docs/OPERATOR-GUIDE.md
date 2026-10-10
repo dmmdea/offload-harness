@@ -323,12 +323,17 @@ local-offload run-graph --graph wf.json --manifest manifest.json --out-dir out/
 
 Executes any API-format ComfyUI graph under the same GPU-lock/zero-warm lifecycle. With a fleet
 (`delegate_remotes`) an `auto` graph whose lane is not free goes to an idle node instead of waiting, under three rules
-([media-generation.md](systems/media-generation.md), "Graphs on the fleet"): the node must hold every model file and input image the
+([media-generation.md](systems/media-generation.md), "Graphs on the fleet"): the node must hold every model file and input file the
 graph names (it refuses with 503 naming what it lacks, and the call moves on); it must publish exactly **one** card, because a
-whole-node graph runs in the default ComfyUI instance, which sees every card, and could land on a multi-GPU box's display card; and,
+whole-node graph runs in the default ComfyUI instance, which sees every card, and could land on a multi-GPU box's display card (a
+single card that drives a display passes); and,
 with `--min-vram-gb N`, its largest card must be at least N GB (a 16 GB card reads 15.92 GiB and counts as 16). `--model-family wan22`
 with a graph height of 720 or more gets a 16 GB floor **chosen** from the film owner's stated constraint (Wan 2.2 14B at 720p needs a 16 GB
-card), not measured; `--min-vram-gb 0` lifts it. The floor filters nodes only: `--route local` never reads it. The **node manifest** (`node_packs[{name,repo,commit}]` + `models[{path,source_url,sha256}]`)
+card), not measured; `--min-vram-gb 0` lifts it. The floor filters nodes only: `--route local` never reads it. With the fleet as
+the film owner described it on 2026-10-09 (the 16 GB cards are the multi-card workstation's three; the single-card nodes have 8 GB
+cards) the two rules together leave a default-floor Wan graph no remote node: it waits for its own lane. A graph that reads an input
+file (`LoadImage`, `LoadVideo`, `LoadAudio`) is never auto-overflowed either, because a node can match such a file only by name; the
+answer says so, and `--route remote` with a named node still sends it. The **node manifest** (`node_packs[{name,repo,commit}]` + `models[{path,source_url,sha256}]`)
 is satisfied BEFORE ComfyUI starts: packs cloned at their pinned commits with all deps
 resolved **together** (uv) under **host-torch constraints** (provisioning never replaces the
 installed CUDA torch — an unsatisfiable pack set defers instead), models downloaded and

@@ -181,24 +181,31 @@ Decision 9 left graphs out: a graph has no recipe, and a whole-node graph placed
 card. This amendment adds them under four rules; every other decision stands, and none of the four is a recipe.
 
 1. **A graph's identity is that the node holds the files it names, and the node decides it at its door.** Before it writes a
-   temp file, takes a lease or starts ComfyUI, `buildRunGraph` reads the graph: a string input under a key that contains
-   `_name` and ends in `.safetensors`, `.gguf`, `.pth`, `.pt`, `.ckpt` or `.sft` is a weight file, and the `image` input of a
-   `LoadImage`, `LoadImageMask` or `LoadImageOutput` node is an input image. A weight file must resolve **by name** under any
-   class directory of any of the node's models roots, the way a ComfyUI loader opens it (subfolders included, no search for
-   the basename; `mediacap.MissingModelFiles`); an input image must be in ComfyUI's `input` directory (`output` or `temp` when
-   its annotation says so). A name that is absolute or climbs out with `..` is never looked up and reads as missing. A node
+   temp file, takes a lease or starts ComfyUI, `buildRunGraph` reads the graph: any string input, under any key, whose value
+   ends in `.safetensors`, `.gguf`, `.pth`, `.pt`, `.ckpt` or `.sft` is a weight file (the loaders' key names are open-ended, the
+   extension is not), and the file input of `LoadImage`, `LoadImageMask`, `LoadImageOutput`, `LoadVideo` and `LoadAudio` is an
+   input file. A weight file must resolve **by name** under any class directory of any of the node's models roots (a class
+   directory that is a link counts), the way a ComfyUI loader opens it (subfolders included, no search for the basename;
+   `mediacap.MissingModelFiles`); an input file must be in ComfyUI's `input` directory (`output` or `temp` when its annotation
+   says so). A name that is absolute or climbs out with `..` is never looked up and reads as missing. A node
    that lacks any of them answers with the existing re-placeable route-not-ready refusal, **503**, naming what is missing (six
    names, then a count), before any job exists. A model the graph's manifest tells the node to fetch (a `models[]` entry with a
-   `source_url`) is not refused: the satisfier downloads it before ComfyUI starts. **Input images do not travel with a graph**
+   `source_url`) is not refused: the satisfier downloads it before ComfyUI starts. **Input files do not travel with a graph**
    (the dispatch door carries JSON; the media-job door carries no input for `run-graph`), so the refusal says so; carrying
-   them is a named seam, not built. As for a recipe, "holds" is **name, not content**, and the other input loaders (LoadVideo,
-   LoadAudio, a custom node's own key) are not read. The delegator sends no family and no digest, and requires the node to run
-   its own release (the check ships with it), where a new health key would have said the same.
+   them is a named seam, not built. "Holds" is **name, not content**. For a weight file the name is the practical identity; an
+   input file is the caller's own with a generic name, so a same-named file of other bytes would run the graph on the wrong
+   bytes, and rule 2 keeps such a graph off the auto-overflow. A custom node's own file key is not read. The delegator sends no
+   family and no digest, and requires the node to run its own release (the check ships with it), where a new health key would
+   have said the same; that proves the check only because the release that adds it carries a new version number, so the bump
+   ships with the merge, before any delegator is deployed.
 2. **The trigger and the placement are the image's.** `Pipeline.MediaLaneFree` answers for a whole-node `run_graph` with the
    whole-node reading (any lease, in-process slot or place in line, and the host's memory against the media class default, the
-   only size a graph's unnameable weights can have), under the same contract: a relaxation of the real wait-0 admission, held by
+   largest family the box binds: the lease is taken for the graph as a whole before anything reads its weights, so that is an
+   upper bound and not the graph's own size), under the same contract: a relaxation of the real wait-0 admission, held by
    a differential test, that writes nothing. A graph that names `devices` (refused by `plan()` before the lane is asked), one
-   that carries a `waiter_token`, and one under an inherited lease stay here. A node's 503 at the door moves the call to the
+   that carries a `waiter_token`, one under an inherited lease and one that reads an input file stay here; the last waits for
+   this machine's own lane and its deferral says the fleet was not asked and why (`fleet_note`). Hashing each input file to the
+   node would lift that last exception; it is not built. A node's 503 at the door moves the call to the
    next node like any refusal at the door (decision 6) and counts toward the three attempts; the call falls back to the local
    queue with `cluster[]` naming, per node, the file it lacks.
 3. **A whole-node graph is placed only on a node that publishes exactly one card.** A graph that names no devices holds the
@@ -207,7 +214,8 @@ card. This amendment adds them under four rules; every other decision stands, an
    so is a node that publishes no `gpu_devices` (unknown is never a pass). The rule is the delegator's **placement** rule and it
    covers every remote placement of a graph: the overflow, `route remote` and a thin client alike, so a graph cannot be sent to
    a multi-GPU node by this client at all. It does not change what such a node does with a graph sent to it by hand or run on
-   its own machine: that local whole-node case is the parked item the operator knows.
+   its own machine: that local whole-node case is the parked item the operator knows. A single card that drives a display passes
+   the rule: a box whose only card is its display card runs there by necessity (the allocator's carve-out, as for an image).
 4. **`min_vram_gb`.** A call may ask for a node whose largest `gpu_devices[].vram_total_gb` is at least N GB; a node that
    publishes no cards cannot be shown to have it and is a miss. A card counts as the size it rounds to: nvidia-smi reports
    MiB/1024, so a 16 GB card reads 15.92 or 15.93 GiB (the figures in `docs/FLEET-NODE.md`) and a literal comparison with 16
@@ -217,8 +225,12 @@ card. This amendment adds them under four rules; every other decision stands, an
    cites it says so. The caller's number wins over it, 0 included. The floor filters remote candidates only: the local lane is
    the node's own grant.
 
-**Named limits of the amendment.** The file check is by name (a same-named file of other bytes is held). Input images need to
-be on the node already. The default floor reads two things the harness otherwise never reads in a graph (`model_family`, the
+**Named limits of the amendment.** The file check is by name (a same-named file of other bytes is held), which is why a graph that
+reads an input file is not auto-overflowed. Input files need to be on the node already when a node is named by hand. The node's
+host-RAM guard sizes a graph at the media class default, not at the files the door has resolved, so a graph naming weights bigger
+than every bound family can be under-counted. The default floor reads two things the harness otherwise never reads in a graph (`model_family`, the
 `height` inputs), and a graph that uses neither key gets none. A forced or thin-client graph can no longer reach a multi-GPU
 node, the workstation among them; whether to relax that for the operator's own machine, once the monitors-off detector exists, is the
-operator's. Nothing here was run live: A8 in the step report is the first.
+operator's. With the fleet as the film owner described it on 2026-10-09 (the 16 GB cards are the three of the multi-card
+workstation, the single-card nodes carry 8 GB cards) rules 3 and 4 together leave a graph that gets the default Wan floor no remote
+target: it waits for its own lane. The durable fix is on the node (keep a whole-node graph off the display card there). Nothing here was run live: A8 in the step report is the first.
