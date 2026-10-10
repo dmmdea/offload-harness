@@ -640,13 +640,13 @@ func (p *Pipeline) acquireCards(ctx context.Context, m *gpulease.Manager, reason
 					// One gated attempt (register D-1xx-3): a waiter registered for these cards that
 					// the allocation above did not see answers ErrStillQueued and sends this request
 					// to the queue below. A lost attempt must cost a call that resumed a place
-					// nothing, so it is neither of the two things Acquire does with the token. It
-					// does not hand the token over (a waiter that resumes a token CONSUMES it, and the
-					// queue below would then register as a new arrival: for an explicit-card call,
-					// which sets no arrival time of its own, the place it had would be gone for the
-					// length of that wait). And it carries the place's arrival time, so the live token
-					// that is still holding the place, older than any new arrival, does not hold this
-					// attempt back: a token blocks only waiters that arrived after it.
+					// nothing. So it does not hand the token over: a waiter that resumes a token
+					// CONSUMES it, and the queue below would then register as a new arrival (an
+					// explicit-card call sets no arrival time of its own, so the place it had would
+					// be gone for the length of that wait). It carries the place's arrival time
+					// instead, so the live token that still holds the place, older than any new
+					// arrival, does not hold this attempt back: a token blocks only the waiters
+					// that arrived after it.
 					try := optsFor(ids)
 					try.ResumeToken = ""
 					if tokenID != "" {
