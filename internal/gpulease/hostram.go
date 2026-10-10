@@ -32,7 +32,9 @@ package gpulease
 // request at once.
 
 import (
+	"math"
 	"sort"
+	"sync/atomic"
 
 	"github.com/dmmdea/offload-harness/internal/gpuprobe"
 )
@@ -50,16 +52,46 @@ type ErrHostRAM struct {
 
 func (e *ErrHostRAM) Error() string { return e.Why }
 
-// SetHostRAMHeadroom sets the headroom this Manager's grants keep uncommitted (config
-// gpu_host_ram_headroom_gib). Zero or negative means the default.
+// installedHostHeadroom is the operator's gpu_host_ram_headroom_gib as config.Load installed it, in
+// math.Float64bits (0 = none installed, so gpuprobe's default stands).
+var installedHostHeadroom atomic.Uint64
+
+// SetDefaultHostRAMHeadroom installs the operator's headroom (config gpu_host_ram_headroom_gib) for
+// EVERY Manager of this process, the way the orphan grace and the term limits are installed
+// (SetDefaultOrphanGrace, SetDefaultTerms): config.Load calls it, so no constructor can forget.
+// It used to be a per-Manager setter that no production path called, so the grant kept reading the
+// built-in 8 GiB while `gpu status` and the card allocator read the configured key: an operator who
+// raised the headroom to be safer was admitted up to the difference past the limit he set, and one who
+// lowered it to unblock a lane was still refused (the post-implementation review, 2026-10-10).
+// Zero, negative or not-a-number restores the default.
+func SetDefaultHostRAMHeadroom(gib float64) {
+	if math.IsNaN(gib) || math.IsInf(gib, 0) || gib < 0 {
+		gib = 0
+	}
+	installedHostHeadroom.Store(math.Float64bits(gib))
+}
+
+// DefaultHostRAMHeadroom is the headroom a Manager without its own keeps uncommitted: the installed
+// one, else gpuprobe.DefaultHostRAMHeadroomGiB.
+func DefaultHostRAMHeadroom() float64 {
+	if g := math.Float64frombits(installedHostHeadroom.Load()); g > 0 {
+		return g
+	}
+	return gpuprobe.DefaultHostRAMHeadroomGiB
+}
+
+// SetHostRAMHeadroom gives THIS Manager a headroom of its own, over the installed one. A test seam:
+// production leaves it unset and every grant reads the process-wide value config.Load installed.
+// Zero or negative means the process-wide value.
 func (m *Manager) SetHostRAMHeadroom(gib float64) { m.hostHeadroomGiB = gib }
 
-// HostRAMHeadroom is the headroom in force.
+// HostRAMHeadroom is the headroom in force for this Manager's grants: its own when set, else the
+// process-wide one (SetDefaultHostRAMHeadroom), else the built-in default.
 func (m *Manager) HostRAMHeadroom() float64 {
 	if m.hostHeadroomGiB > 0 {
 		return m.hostHeadroomGiB
 	}
-	return gpuprobe.DefaultHostRAMHeadroomGiB
+	return DefaultHostRAMHeadroom()
 }
 
 func (m *Manager) hostMemory() (gpuprobe.HostMemory, bool) {

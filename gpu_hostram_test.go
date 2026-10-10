@@ -68,6 +68,27 @@ func emptyComfyDir(t *testing.T, cfgPath string) {
 	}
 }
 
+// setConfigKey adds one key to the fixture's config file.
+func setConfigKey(t *testing.T, cfgPath, key string, value any) {
+	t.Helper()
+	raw, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatal(err)
+	}
+	doc[key] = value
+	out, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfgPath, out, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // The estimate reaches the lease: a krea2 bf16 call on a 16 GiB card declares the unet plus the text
 // encoder (the documented family sizes, 24.5 + 8.3 = 32.8 GiB, since this fixture binds no model tree),
 // on the record the next grant and `gpu status` read.
@@ -219,7 +240,36 @@ func TestReserveAnImpossibleNeedIsRefusedAtOnce(t *testing.T) {
 	}
 }
 
-// A negative --ram is a mistake, not a request.
+// THE CONFIGURED HEADROOM REACHES THE GRANT (review, 2026-10-10). `gpu status` and the card allocator
+// read gpu_host_ram_headroom_gib from the config; the grant read the built-in 8 GiB, so the three
+// disagreed and the operator's key changed what the status said and nothing the harness did. 70 GiB
+// committed of 100: a 20 GiB lease fits under the built-in headroom (90 <= 92) and not under 16 (90 > 84),
+// and a 28 GiB lease fits only under a headroom lowered to 1 (98 <= 99).
+func TestReserveGrantsAgainstTheConfiguredHeadroom(t *testing.T) {
+	t.Cleanup(func() { gpulease.SetDefaultHostRAMHeadroom(0) })
+	cfg, m := scopedLeaseFixture(t)
+	useCardTable(t, "")
+	hostAt(t, 70)
+
+	setConfigKey(t, cfg, "gpu_host_ram_headroom_gib", 16)
+	err := runGPUReserve(reserveWithCmd(cfg, []string{"--class", "media", "--devices", "2", "--wait", "0", "--ram", "20"}))
+	var short *gpulease.ErrHostRAM
+	if !errors.As(err, &short) || !strings.Contains(err.Error(), "16.0 GiB headroom") {
+		t.Fatalf("a headroom of 16 must refuse 20 GiB on 70 committed of 100, naming 16.0 GiB headroom; got: %v", err)
+	}
+	if l := m.Leases(); len(l) != 0 {
+		t.Fatalf("a refused reserve holds nothing, got %+v", l)
+	}
+
+	setConfigKey(t, cfg, "gpu_host_ram_headroom_gib", 1)
+	t.Setenv("LO_HELPER_SLEEP_MS", "0")
+	t.Setenv("LO_HELPER_ENV_OUT", t.TempDir()+"/env.txt")
+	if err := runGPUReserve(reserveWithCmd(cfg, []string{"--class", "media", "--devices", "2", "--wait", "0", "--ram", "28"})); err != nil {
+		t.Fatalf("a headroom lowered to 1 admits 98 of 100: %v", err)
+	}
+}
+
+// A negative --ram is a mistake, not a request.// A negative --ram is a mistake, not a request.
 func TestReserveRefusesANegativeRam(t *testing.T) {
 	cfg, _ := scopedLeaseFixture(t)
 	err := runGPUReserve(reserveWithCmd(cfg, []string{"--class", "media", "--ram", "-4"}))

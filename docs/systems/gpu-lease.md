@@ -50,7 +50,7 @@ other on a single shared card.
 | `gpu_drain.go` (`leaseScope`, `maintainSeatScoped`, `unloadModelsFor`), `render/gpu-lock.mjs` (`parseUnloadModels`) | plan P5: the drain and unload take only the seats on the leased cards, and the render lane unloads the list the wrapper exports (`GPU_LEASE_UNLOAD_MODELS`) |
 | `internal/modelaffinity/seatscope.go`, `scoper.go`, `seatyield.go` | the gate's per-seat reading (`SetSeatPins`, `ScopeToPins`, `SeatLease`, `CardsHeld`), the production wiring of the evidence rule (`InspectLease` for the load gate, which remembers what it sees; `PeekLease`, `ScopeInfo`, `ScopeFunc`, `ScopeLeases` for inspectors, which write nothing), and the seat race rule (`YieldIfFenced`) |
 | `internal/mcpserver` | registers the session this MCP server serves in the session registry at start and removes it at exit |
-| `internal/config` | `state_dir`, `gpu_lock_path`, `gpu_card_scoped_leases`, `gpu_legacy_scope_inference`, `gpu_comfy_order`, `gpu_host_ram_headroom_gib` (default 8), `gpu_orphan_grace_min`, `gpu_max_term_min`, `gpu_max_total_min`; `ModelPins` (a model's device pins, read from the layers) |
+| `internal/config` | `state_dir`, `gpu_lock_path`, `gpu_card_scoped_leases`, `gpu_legacy_scope_inference`, `gpu_comfy_order`, `gpu_host_ram_headroom_gib` (default 8; `Load` installs it process-wide, `gpulease.SetDefaultHostRAMHeadroom`), `gpu_orphan_grace_min`, `gpu_max_term_min`, `gpu_max_total_min`; `ModelPins` (a model's device pins, read from the layers) |
 
 ## Why it exists
 
@@ -1142,6 +1142,14 @@ admit iff projected <= physical RAM - gpu_host_ram_headroom_gib        (default 
   receives the parent's resolved number as `--ram` and declares exactly that. The card allocator applies the same function
   before it picks cards, advisory (it never refuses what the grant would admit: the media admission passes it the need
   against the largest card); the grant is the authority.
+* **One headroom, the configured one, on every surface.** `gpu_host_ram_headroom_gib` is installed for the whole process
+  by `config.Load` (`gpulease.SetDefaultHostRAMHeadroom`, the way the orphan grace and the term limits are), so the grant, the
+  card allocator and the status surfaces read one number whichever constructor built the Manager. It was a per-Manager setter
+  that no production path called: the grant kept the built-in 8 GiB while `gpu status` reported the configured key, so an
+  operator who raised the headroom to be safer was admitted up to the difference past the limit set, and one who lowered it
+  to unblock a lane was still refused (found by the post-implementation review, 2026-10-10;
+  `TestLoadInstallsTheHostRAMHeadroomForEveryGrant`, `TestAGrantKeepsTheInstalledHeadroomNotTheBuiltInOne`,
+  `TestReserveGrantsAgainstTheConfiguredHeadroom`, `TestTheMediaAdmissionKeepsTheConfiguredHeadroom`).
 * **The not-yet-loaded part.** A granted lease's declared need minus what the processes below its holder hold privately
   right now (`PrivateUsage` through `K32GetProcessMemoryInfo` on Windows, `RssAnon` + `VmSwap` on Linux), never below zero.
   Leases that share a holder pid are pooled (the pipeline holds one lease per card in one server process, and all their

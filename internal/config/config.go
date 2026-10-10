@@ -2340,6 +2340,10 @@ func loadArmed(path string) (Config, error) {
 	// The term limits are read by every acquirer (a record is stamped with them) and by every
 	// holder's tick, so they are installed here too.
 	gpulease.SetDefaultTerms(c.GPUMaxTerm(), c.GPUMaxTotal())
+	// The host-RAM headroom every lease grant keeps uncommitted is read by every grant path (the CLI,
+	// the pipeline's media admission, the detached holder), so it is installed here too: wired per
+	// constructor it was wired nowhere, and the grant ignored the key `gpu status` reported.
+	gpulease.SetDefaultHostRAMHeadroom(c.GPUHostRAMHeadroom())
 	if lerr := modelaffinity.SetGPULease(c.GPULockPath, c.StateDir); lerr != nil {
 		fmt.Fprintf(os.Stderr, "warning: GPU load gate disabled: %v\n"+
 			"  Text calls will not wait for a media render to finish with the card.\n", lerr)

@@ -3,6 +3,7 @@ package gpulease
 import (
 	"encoding/json"
 	"errors"
+	"math"
 	"os"
 	"strings"
 	"sync"
@@ -456,5 +457,66 @@ func TestHostRAMPendingReadsTheLiveLeases(t *testing.T) {
 	}
 	if got := DeclaredHostRAMGiB(m.Leases()); got != 30 {
 		t.Fatalf("declared = %.1f, want 30", got)
+	}
+}
+
+// The headroom in force is the Manager's own, else the one config.Load installed for the whole
+// process, else the built-in default; nonsense restores the default.
+func TestTheHeadroomInForceIsTheManagersOwnThenTheInstalledThenTheDefault(t *testing.T) {
+	t.Cleanup(func() { SetDefaultHostRAMHeadroom(0) })
+	m := &Manager{}
+	if got := m.HostRAMHeadroom(); got != gpuprobe.DefaultHostRAMHeadroomGiB {
+		t.Fatalf("nothing installed: want the built-in %v, got %v", gpuprobe.DefaultHostRAMHeadroomGiB, got)
+	}
+	SetDefaultHostRAMHeadroom(16)
+	if got := m.HostRAMHeadroom(); got != 16 {
+		t.Fatalf("a Manager without its own headroom reads the installed one, got %v", got)
+	}
+	m.SetHostRAMHeadroom(3)
+	if got := m.HostRAMHeadroom(); got != 3 {
+		t.Fatalf("a Manager's own headroom beats the installed one, got %v", got)
+	}
+	m.SetHostRAMHeadroom(0)
+	for _, bad := range []float64{0, -4, math.NaN(), math.Inf(1)} {
+		SetDefaultHostRAMHeadroom(bad)
+		if got := m.HostRAMHeadroom(); got != gpuprobe.DefaultHostRAMHeadroomGiB {
+			t.Fatalf("installing %v must restore the built-in default, got %v", bad, got)
+		}
+	}
+}
+
+// THE DEFECT THE POST-IMPLEMENTATION REVIEW REPRODUCED (2026-10-10). Every production Manager comes from
+// OpenAt and never had its own headroom, so the grant read the built-in 8 GiB while `gpu status` and the
+// card allocator read gpu_host_ram_headroom_gib: raising the key to be safer was admitted up to the
+// difference past the limit set, and lowering it to unblock a lane was still refused. A grant now keeps
+// the INSTALLED headroom, both ways. 70 GiB committed of 100.
+func TestAGrantKeepsTheInstalledHeadroomNotTheBuiltInOne(t *testing.T) {
+	t.Cleanup(func() { SetDefaultHostRAMHeadroom(0) })
+	try := func(installed, need float64) error {
+		t.Helper()
+		SetDefaultHostRAMHeadroom(installed)
+		m, _ := ramScoped(t, 70)
+		m.SetHostRAMHeadroom(0) // built the way OpenAt builds one: no headroom of its own
+		l, err := m.TryAcquire(ClassMedia, Options{Reason: "krea2", TTL: time.Hour, Devices: []string{card0}, HostRAMGiB: need})
+		if err == nil {
+			_ = l.Release()
+		}
+		return err
+	}
+	// Raised to 16: 70 + 20 = 90 is over 100 - 16 = 84, though it is under the built-in 100 - 8 = 92.
+	err := try(16, 20)
+	asHostRAM(t, err)
+	if !strings.Contains(err.Error(), "16.0 GiB headroom") {
+		t.Fatalf("the refusal must name the headroom in force (16.0), got: %v", err)
+	}
+	// Lowered to 1: 70 + 28 = 98 is under 100 - 1 = 99, though it is over the built-in 92.
+	if err := try(1, 28); err != nil {
+		t.Fatalf("a headroom lowered to 1 GiB admits 98 of 100: %v", err)
+	}
+	// Nothing installed: the built-in 8.
+	err = try(0, 28)
+	asHostRAM(t, err)
+	if !strings.Contains(err.Error(), "8.0 GiB headroom") {
+		t.Fatalf("with nothing installed the built-in 8.0 applies, got: %v", err)
 	}
 }

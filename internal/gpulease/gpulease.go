@@ -604,7 +604,8 @@ type Manager struct {
 	// writeProbe is a test seam for "this process cannot write the lease directory"; nil
 	// means a real probe.
 	writeProbe func(dir string) error
-	// hostHeadroomGiB is the host RAM a grant keeps uncommitted (SetHostRAMHeadroom); 0 = the default.
+	// hostHeadroomGiB is this Manager's own host-RAM headroom (SetHostRAMHeadroom, a test seam); 0 = the
+	// process-wide one config.Load installed (SetDefaultHostRAMHeadroom).
 	hostHeadroomGiB float64
 	// hostMem and workload are test seams for the host-RAM term: the host's memory reading (nil = the
 	// real reader, gpuprobe.ReadHostMemory) and what the processes below a holder pid hold privately

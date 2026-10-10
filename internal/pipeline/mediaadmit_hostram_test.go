@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/dmmdea/offload-harness/internal/core"
+	"github.com/dmmdea/offload-harness/internal/gpulease"
 	"github.com/dmmdea/offload-harness/internal/gpuprobe"
 )
 
@@ -159,5 +160,27 @@ func TestTheLeaseRecordCarriesTheDeclaredNeed(t *testing.T) {
 	f.letRunnersGo()
 	if r := f.await(call); !r.OK {
 		t.Fatalf("the call: class=%q %s", r.Meta.ErrClass, r.Reason)
+	}
+}
+
+// The media admission's Managers keep the configured headroom too (config.Load installs it for the whole
+// process; the pipeline builds its Managers with gpulease.OpenAt and never set one of its own, so the
+// grant read the built-in 8 GiB whatever gpu_host_ram_headroom_gib said). 40 GiB committed of 100 and a
+// krea2 lane of 32.8: 72.8 fits under the built-in 92, and not under a headroom of 30 (limit 70).
+func TestTheMediaAdmissionKeepsTheConfiguredHeadroom(t *testing.T) {
+	t.Cleanup(func() { gpulease.SetDefaultHostRAMHeadroom(0) })
+	gpulease.SetDefaultHostRAMHeadroom(30)
+	f := newAdmitFixtureWith(t, admitSpec{order: admitOrder, mutate: krea2Binding})
+	f.useHost(t, func() gpuprobe.HostMemory { return shortHost(40) })
+
+	res := f.await(f.image(nil))
+	if res.OK || res.Meta.ErrClass != "gpu_queued" {
+		t.Fatalf("a headroom of 30 must hold a 32.8 GiB lane back on 40 committed of 100, got ok=%v class=%q: %s", res.OK, res.Meta.ErrClass, res.Reason)
+	}
+	if !strings.Contains(res.Reason, "30.0 GiB headroom") {
+		t.Errorf("the reason must name the headroom in force: %s", res.Reason)
+	}
+	if got := len(f.started()); got != 0 {
+		t.Fatalf("%d runner(s) started on a host the configured headroom says is full", got)
 	}
 }
