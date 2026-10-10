@@ -128,9 +128,25 @@ const QueueHint = "local-offload gpu reserve --wait 8h --drain --unload-seat --f
 
 // ErrStillQueued is what a queued Acquire returns when its whole window passed without it ever
 // reaching the front of the line, so no claim was attempted and no holder was seen: it waited
-// behind a waiter that has not claimed, or behind a place held for a caller who left. It is a
-// place in line and not a fault, like ErrHeld; callers that answer with a token treat the two alike.
-var ErrStillQueued = errors.New("gpulease: gave up waiting for the card: still queued")
+// behind a waiter that has not claimed, or behind a place held for a caller who left. A zero
+// window is the same answer at once: the card is free, but someone registered earlier is ahead
+// of this request, and no claim was attempted. It is a place in line and not a fault, like
+// ErrHeld; callers that answer with a token treat the two alike.
+//
+// The text says only what is true of both cases ("still queued"); the wrapping error says
+// whether the request waited (stillQueuedErr), because "gave up waiting" is false of an attempt
+// that was refused on the spot.
+var ErrStillQueued = errors.New("gpulease: still queued")
+
+// stillQueuedErr is the ErrStillQueued answer, worded for what the request did: waited > 0 is a
+// request that stood in line for its window, 0 one that made a single gated attempt and was
+// refused. behind names who was ahead.
+func stillQueuedErr(waited time.Duration, behind string) error {
+	if waited > 0 {
+		return fmt.Errorf("%w: gave up after waiting %s for the card, behind %s", ErrStillQueued, waited.Round(time.Millisecond), behind)
+	}
+	return fmt.Errorf("%w: the card is free, but this request is not first in line, behind %s", ErrStillQueued, behind)
+}
 
 // ErrHeld is returned by TryAcquire when the card is legitimately held by someone
 // else. It carries the current holder so a caller can report an honest ETA rather
@@ -1144,6 +1160,13 @@ func (l *Lease) Devices() []string { return append([]string(nil), l.devices...) 
 
 // TryAcquire attempts to take the card once. It returns *ErrHeld when someone else
 // legitimately holds it, so the caller can report a real ETA instead of a bare error.
+//
+// IT BYPASSES THE WAITER QUEUE: it neither registers nor consults the line, so on a card that
+// is free it wins ahead of every registered waiter, however long they have stood there. That is
+// the defect register D-1xx-3 closed for every production claim (Acquire, with or without a
+// Wait, is the gated door). TryAcquire is for setup and tests, and for Acquire's own gated
+// attempt, which has already checked the line; a production path that wants the card calls
+// Acquire.
 func (m *Manager) TryAcquire(class Class, opts Options) (*Lease, error) {
 	if !class.Valid() {
 		return nil, fmt.Errorf("gpulease: unknown class %q (want %q or %q)", class, ClassMedia, ClassText)
@@ -1314,7 +1337,8 @@ func (m *Manager) holderInfo(meta *Meta) Info {
 }
 
 // Acquire takes the card, retrying for up to opts.Wait while someone else legitimately
-// holds it. Zero Wait is exactly TryAcquire.
+// holds it. Zero Wait is ONE attempt, still behind every registered waiter that conflicts
+// with this request (the no-wait note below): it is not a bare TryAcquire.
 //
 // WHY A BOUNDED WAIT AND NOT A SINGLE TRY: the lock this package replaced existed to
 // ORGANIZE concurrent GPU jobs into a serial queue, not to cancel them — a render that
@@ -1339,10 +1363,23 @@ func (m *Manager) Acquire(class Class, opts Options) (*Lease, error) {
 		return nil, ErrCardScopedOff
 	}
 	opts.Devices = devs
-	if opts.Wait <= 0 {
-		return m.TryAcquire(class, opts)
+	// A NO-WAIT ACQUIRE IS ONE GATED ATTEMPT, NOT A BARE TryAcquire (register D-1xx-3,
+	// 2026-10-09). This used to return TryAcquire straight away for Wait <= 0, so a caller
+	// that could not wait never consulted the waiter queue at all: a card freed in the
+	// window between a release and the front waiter's next poll tick went to whichever
+	// fresh no-wait claim landed in it. Measured live on the reference 3-card box: a recipe
+	// chaining `gpu reserve` calls back to back (each call's first probe was such a bare
+	// claim) took the same card as epochs 1320, 1321 and 1322 while a text waiter
+	// registered for 1h26m sat front of queue the whole time. The no-wait path now runs the
+	// SAME registered, front-of-queue gated loop below with a deadline of now: one attempt
+	// if this caller is front of the line, else the queue's answer (ErrHeld for a held
+	// card, ErrStillQueued naming the waiter ahead for a free one). Registering costs one
+	// file write and nothing else when nobody is in line.
+	wait := opts.Wait
+	if wait < 0 {
+		wait = 0
 	}
-	deadline := m.now().Add(opts.Wait)
+	deadline := m.now().Add(wait)
 
 	// NEVER WAIT FOR SOMETHING THAT CANNOT HAPPEN, checked ONCE against
 	// whoever holds the card AT THE MOMENT Acquire WAS CALLED — a read-only
@@ -1378,7 +1415,7 @@ func (m *Manager) Acquire(class Class, opts Options) (*Lease, error) {
 	//
 	// Unless the caller said WaitOut: for it the window is information, not
 	// a verdict (see Options.WaitOut).
-	if info := m.InspectFor(devs); info.Held && !opts.WaitOut && info.Class == ClassText &&
+	if info := m.InspectFor(devs); wait > 0 && info.Held && !opts.WaitOut && info.Class == ClassText &&
 		!info.ExpiresAt.IsZero() && info.ExpiresAt.After(deadline) {
 		return nil, m.heldErr(info)
 	}
@@ -1426,7 +1463,7 @@ func (m *Manager) Acquire(class Class, opts Options) (*Lease, error) {
 				// reproduced directly (TestReturningHolderCannotJumpAn
 				// AlreadyRegisteredWaiter): a nil-error return panicked the
 				// very next line, l.Release(), on a nil *Lease.
-				return nil, queueTimeoutErr(m, self)
+				return nil, queueTimeoutErr(m, self, wait)
 			}
 			pause := m.pollInterval()
 			if remaining < pause {
@@ -1477,29 +1514,39 @@ func (m *Manager) Acquire(class Class, opts Options) (*Lease, error) {
 // registrant, such as a seat/text-load admission's RegisterSeatWaiter, can
 // hold the front of the line indefinitely without ever claiming), so a bare
 // m.Inspect() would misreport "not held" and the true reason — queued behind
-// an entry that never tries — would be silently lost. Named after whichever
-// OTHER waiter is still ahead of self, when Inspect itself has nothing to say.
-func queueTimeoutErr(m *Manager, self Waiter) error {
+// an entry that never tries — would be silently lost. Named after the waiter
+// that is actually ahead of self when Inspect itself has nothing to say.
+//
+// "Ahead" is the rule isFrontOfQueue applies, no looser: older than self
+// (waiterBefore) AND wanting a card self wants (devicesConflict). Naming the
+// first OTHER waiter in the listing instead pointed a request at an entry on a
+// disjoint card, or at one that arrived after it, as the thing it was waiting
+// for (the pre-ship review of D-1xx-3, 2026-10-09). waited is the window this request stood in line
+// (0 for a single gated attempt), so the message does not claim a wait that
+// never happened.
+func queueTimeoutErr(m *Manager, self Waiter, waited time.Duration) error {
 	if info := m.InspectFor(self.Devices); info.Held {
 		return m.heldErr(info)
 	}
 	for _, w := range m.Waiters() {
-		if w.path == self.path {
+		if w.path == self.path || !waiterBefore(w, self) || !devicesConflict(w.Devices, self.Devices) {
 			continue
 		}
-		return fmt.Errorf("%w: behind pid %d (%s, reason %q), which has not claimed the card", ErrStillQueued, w.PID, w.Class, w.Reason)
+		return stillQueuedErr(waited, fmt.Sprintf("pid %d (%s, reason %q), which has not claimed the card", w.PID, w.Class, w.Reason))
 	}
 	// A place held for a caller who left (tokens.go) keeps the line just as a waiter does.
 	for _, t := range m.Tokens() {
 		if t.ID != self.Token && m.tokenLive(t) && t.SinceMs < self.SinceMs && devicesConflict(t.Devices, self.Devices) {
-			return fmt.Errorf("%w: behind a place held for another caller (%s, %s, reason %q), who may still come back for it", ErrStillQueued, t.ID, t.Class, t.Reason)
+			return stillQueuedErr(waited, fmt.Sprintf("a place held for another caller (%s, %s, reason %q), who may still come back for it", t.ID, t.Class, t.Reason))
 		}
 	}
-	// The card is free and no one else is in line: isFrontOfQueue would have
-	// been true and TryAcquire would have run, setting err — this is
-	// unreachable in practice, kept only so the function can never fall
-	// through to a bare nil.
-	return &ErrHeld{Info: Info{Reason: "gave up waiting for the card for an undetermined reason"}}
+	// Whoever was ahead is gone by now (it claimed and released, or left the
+	// line) and nothing else is: the card is free for a retry. Reachable, if
+	// rare, because the blocker can leave between the gate's check and this
+	// reading; the answer stays a place-in-line one (ErrStillQueued) so callers
+	// that treat it as busy retry or queue, and its words are true of a request
+	// that waited and of one that did not.
+	return stillQueuedErr(waited, "an earlier request that has left the line since; the card is free to retry")
 }
 
 // claimGrace is how long a present-but-unparseable meta.json is treated as a claim in

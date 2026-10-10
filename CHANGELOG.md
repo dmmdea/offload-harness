@@ -6,6 +6,38 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed — a fresh `gpu reserve` queues behind registered waiters instead of winning a just-freed card
+
+- **`acquireQueued` probed the card with a bare `TryAcquire` before it ever queued.** The place in line was taken
+  only after that probe returned `ErrHeld`, so a card freed in the window between a holder's release and the front
+  waiter's next poll tick (1 s) went to whichever fresh reserve was launched in it, ahead of everyone registered.
+  A recipe that chains reserves back to back (its next `gpu reserve` starts the instant the previous one returns)
+  won that race every batch: on the reference 3-card box, 2026-10-09, three chained media reserves took card 2 as
+  epochs 1320, 1321 and 1322 while a text waiter for cards 0+2, registered for 1h26m and front of queue the whole
+  time, never got its turn; the recipe's own log printed "2 lease(s) queued behind this one" at each release and
+  never "queued behind". The same class sat in `gpulease.Acquire`, which returned a bare `TryAcquire` for
+  `Wait <= 0`, and in the two other direct `TryAcquire` callers (`gpu reserve --cards` without a wait, the media
+  admission's first claim). Now: `Acquire` with no wait runs the same registered, front-of-queue gated loop with a
+  deadline of now — one attempt if this caller is front of the line, else the queue's answer (`ErrHeld` for a held
+  card, `ErrStillQueued` naming the waiter ahead for a free one); `acquireQueued` never probes bare and prints its
+  one entry line from a read-only look at the line (`queueLine`: the holder, else the conflicting waiter);
+  `--wait 0` on a free card with a waiter ahead fails fast with the `--wait` hint; `gpu reserve --cards` and the
+  media admission go through the gated attempt and treat "still queued" as a lost claim (allocate again, then
+  queue), and both allocators read the line (`gpualloc.QueuedClaims`), so a card with a waiter ahead is not
+  picked as free; the pipeline's no-wait media lease maps it to `gpu busy`. Disjoint backfill is unchanged: a
+  waiter for other cards is no reason to wait, and a blocked text-load admission queues on its seat's cards.
+  `gpulease.DevicesConflict` is exported for the entry line. Tests: a no-wait `Acquire` yields to a registered
+  waiter on a free card and wins once it leaves; it still backfills a disjoint card; a fresh reserve (`--wait 0`
+  and `--wait 300ms`) queues behind a `RegisterSeatWaiter` entry on a free card and wins once it leaves; the
+  pipeline's no-wait whole-node lease reads a waiter ahead as `gpu busy` and is granted once it leaves — all four
+  red on the unpatched base (mutants: the bare probe restored in the CLI, the shortcut restored in `Acquire`, the
+  busy mapping removed, each red). The media admission already counted a registered waiter's place at allocation
+  (`gpualloc.QueuedClaims`, moved out of the pipeline so the reserve verb reads the same rule), so its gated
+  attempt only closes the gap between the allocation and the claim, and costs a call that resumed a place nothing;
+  a test pins that an image call with a seat waiter in line answers `gpu_queued` and starts nothing.
+  Not changed here: a binary older than this release keeps winning the gap (the
+  pinned copy that chained the incident's reserves must be refreshed to carry the fix).
+
 ## [0.177.0] - 2026-10-09 - warm-back survives a llama-swap reload, the embedder can run from its own llama.cpp build, and two flaky tests stop reading the clock
 
 ### Fixed — a warm-back interrupted by a llama-swap reload or restart is re-sent, and the owed-warm marker clears when the debt is moot

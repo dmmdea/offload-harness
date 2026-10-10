@@ -97,6 +97,27 @@ two lines on stderr — `queued behind <holder> — waiting up to <wait>` on ent
 <n> in the queue` on exit — never one per poll, because the session wrapping this would turn a
 poll line into a notification each.
 
+A free card with a waiter already registered for it is that waiter's: a fresh `gpu reserve` never probes
+the card bare. `Acquire` registers before its first attempt, with or without `--wait`, and only the front of
+the line claims; `--wait 0` on such a card fails fast naming the waiter ahead (`ErrStillQueued`), and a waiter
+for other cards is no reason to wait (disjoint backfill). Before this, the CLI's first probe was a bare
+`TryAcquire`, so a recipe that chained reserves back to back won every just-freed card ahead of a waiter
+registered for over an hour (2026-10-09).
+
+A waiter is on the cards it waits for and no others. A blocked text-load admission (a seat waiting for a render to
+clear its card) registers on **its seat's cards** — the cards its wait blocks on, resolved from the layer pins and
+the card table — so a fresh `gpu reserve --devices <other card>` on a free card the seat does not sit on still goes
+through; a seat whose cards cannot be named (an undeclared model, a pin the table cannot place, an unreadable table)
+registers as the whole node, the gate's rule for every doubt. `gpu reserve --cards N` reads the line when it
+allocates (`gpualloc.QueuedClaims`, the rule the media admission already used): a card with a waiter or a held place
+ahead of the request is not free to it, so it takes a card nobody is queued for, and a claim lost to a waiter is
+allocated around exactly like a claim lost to another reserve (N reserves fanning out over N free cards land on N
+cards). A refusal says what the request did. `--wait 0` says the card is free but the request is not first in line,
+names the waiter ahead (one that is actually ahead: older, on a card the request wants) and the flag that queues; a
+window spent in line says it gave up after waiting that long and to pass a longer `--wait`. A `--detach` reserve
+whose hidden holder gives up repeats the holder's own last line next to the log path, so that hint reaches the
+terminal that asked.
+
 The declared-window short-circuit below does **not** apply to a reservation (`Options.WaitOut`):
 the holder's window is printed as information, never treated as a verdict, because holders
 release before it as a rule — the wrapper form releases the moment its command ends. Measured
@@ -1172,10 +1193,11 @@ exclusive card, and three measurement rows read the seat's 10 GiB as their own f
   the line; a waiter whose own `--wait` expires removes its record and leaves the line for whoever is behind it.
   Class carries no priority in the queue — text and media waiters interleave in pure arrival order; no ADR
   documents a queue-level class priority (0026 gates text LOADS behind a media lease, 0041 sizes the drain
-  budget, neither says anything about acquisition order). This governs ordering among REGISTERED waiters only: a
-  brand-new `Acquire`'s very first, pre-registration probe (and any bare `TryAcquire` that never sets `Wait`) can
-  still land in the narrow window between a release and the front waiter's next poll — the same residual race
-  every poll-based queue has, bounded by one poll interval, and unrelated to the hours-long starvation this fixes.
+  budget, neither says anything about acquisition order). This governs ordering among REGISTERED waiters, and
+  since 0.178.0 every production claim is one: `Acquire` registers BEFORE its first attempt, with or without a
+  `Wait` (a zero `Wait` is one gated attempt), so a fresh claim no longer lands in the window between a release
+  and the front waiter's next poll. The one door that still skips the line is a bare `TryAcquire`, which setup
+  and tests use and no production path calls.
 - **Accepted residual — a forward wall-clock jump.** A waiter's heartbeat is its record's mtime, compared with
   the reader's wall clock (file times carry no monotonic reading). A forward clock step larger than the staleness
   window (10× the poll interval, floor 15 s) — an NTP correction after a laptop resumes, a manual clock change —
@@ -1199,6 +1221,16 @@ exclusive card, and three measurement rows read the seat's 10 GiB as their own f
   independently — not the in-process `mediaSlot` path, which never touches `<state>/gpu/waiters/` at all) shares
   one real pid across two+ waiter records; a same-millisecond tie resolves to exactly one front-of-queue via the
   random-token filename tie-break, never both (a livelock) and never neither.
+- **A waiter is kept for the wait it declared (0.178.0).** Its record carries `deadline_ms` (the registration time
+  plus the `--wait` it passed). The flat 12 h debris cap — a live, heartbeating record older than the longest
+  default wait is stuck, not queued — still judges a record that declared none (a seat admission, an older binary's),
+  but a `gpu reserve --wait 20h` is kept to its own deadline plus an hour of slack. It used to be reaped at hour 12,
+  and its next heartbeat re-created a record the next reader reaped again, so it stood outside the line for the last
+  eight hours of a wait it had been told it had.
+- **A request that cannot take a place says so (0.178.0).** The gate is fail-soft: a record that could not be written
+  (an unwritable `waiters/` directory) answers "front of the queue", so a bookkeeping fault never refuses GPU work.
+  That made the loss silent: the request claimed like a bare claim, ahead of waiters it should queue behind. It now
+  prints one warning on stderr per process, and the claim itself is untouched.
 - **The heartbeat itself needed the SAME read-side retry the write side already had.** Once every waiter started
   rewriting its own record every poll tick, `-count=10` caught a real, non-jitter race:
   `Waiters()`'s plain `os.ReadFile`/`os.Stat` had no retry, and on Windows a read can transiently fail while a
