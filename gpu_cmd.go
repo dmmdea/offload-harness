@@ -597,7 +597,11 @@ func runGPUReserve(args []string) error {
 	// after a cut command loaded the seat onto the next lease's exclusive card,
 	// and a warm ahead of a queued --unload-seat is a load bought for nothing).
 	// The warm is heartbeat for its length; the lease outlives the command by
-	// exactly the warm.
+	// exactly the warm. A command ended on SIGTERM is the exception (C02): a console close, a logoff or a
+	// shutdown gives the process about five seconds, and a seat reload is minutes, so the lease is released
+	// inside the grace and the warm stays owed (the marker is the debt; the next holder to release, `gpu
+	// release --warm-seat` or the seat's next request pays it).
+	endedOnTerm := false
 	finish := func() {
 		// A progress file this wrapper minted goes with the command it was minted for, and FIRST: left in place
 		// through the seat's warm-back (minutes) it would go stale and `gpu status` would read the lease
@@ -609,7 +613,10 @@ func runGPUReserve(args []string) error {
 		// The instances kept under this lease go first: they hold VRAM the seat's warm-back and
 		// the next holder both want, and they live no longer than the lease (gpu_instances.go).
 		stopInstancesOfLease(cfg, lease, os.Stderr)
-		if *unload {
+		switch {
+		case *unload && endedOnTerm:
+			fmt.Fprintln(os.Stderr, warmSkippedOnTermSentence)
+		case *unload:
 			warmBackGuarded(cfg, leaseWarmGuard(m, lease), os.Stderr)
 		}
 		_ = lease.Release()
@@ -664,6 +671,9 @@ func runGPUReserve(args []string) error {
 	sigc := make(chan os.Signal, 1)
 	signal.Notify(sigc, wrapperSignals...)
 	defer signal.Stop(sigc)
+	if wrapperSignalFeed != nil {
+		go wrapperSignalFeed(sigc)
+	}
 
 	cmd := exec.Command(cmdArgs[0], cmdArgs[1:]...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
@@ -742,6 +752,7 @@ func runGPUReserve(args []string) error {
 			return err
 		case sig := <-sigc:
 			why = signalWhy(sig)
+			endedOnTerm = endsGraceBounded(sig)
 			_ = cmd.Process.Kill()
 		case <-tick.C:
 			// LOSING THE LEASE MUST BE LOUD. Discarding this error left the wrapped

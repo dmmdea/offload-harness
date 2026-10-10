@@ -20,6 +20,19 @@ import (
 // wrapperSignals are the signals the wrapper asks for while its command runs.
 var wrapperSignals = []os.Signal{os.Interrupt, syscall.SIGTERM}
 
+// wrapperSignalFeed is a test seam: when set, it is handed the wrapper's signal channel once the wrapper is
+// listening, so a test can deliver the signal a console close would (a real one cannot be driven from a test,
+// and Windows cannot send SIGTERM to a process). Production leaves it nil.
+var wrapperSignalFeed func(chan<- os.Signal)
+
+// endsGraceBounded reports whether the signal is one after which the OS ends the process in a few seconds:
+// SIGTERM, which is how a console close, a logoff and a shutdown reach a Go program on Windows. The wrapper
+// then releases its lease at once and leaves the seat's warm-back owed instead of doing it first.
+func endsGraceBounded(s os.Signal) bool { return s == syscall.SIGTERM }
+
+// warmSkippedOnTermSentence is what the wrapper says in place of the warm-back.
+const warmSkippedOnTermSentence = "gpu reserve: the command was ended on a termination signal (its console was closed, or the session is ending or the machine is shutting down), and the OS gives that about five seconds: releasing the lease now and NOT warming the seat back; the warm stays owed (`gpu status` shows it) and the seat loads on its next request, or with `gpu release --warm-seat`"
+
 // signalWhy is the clause the wrapper appends to the exit status on the card of a command it ended on a
 // signal. " (interrupted)" is what a Ctrl-C always read.
 func signalWhy(s os.Signal) string {
