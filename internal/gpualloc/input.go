@@ -13,7 +13,9 @@ package gpualloc
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"sort"
 	"strings"
@@ -25,6 +27,17 @@ import (
 	"github.com/dmmdea/offload-harness/internal/placement"
 	"github.com/dmmdea/offload-harness/internal/seatload"
 	"github.com/dmmdea/offload-harness/internal/swapclient"
+)
+
+// The deadlines of a card-table read. The read is one nvidia-smi exec: a tenth of a second on a quiet
+// box, and on a loaded one (three cards at 100 %, a model loading, a CPU with no slot for the exec)
+// a read that answered in a second has then run out five. A read that runs out its first deadline
+// is made once more under the longer one, so one slow read does not change a placement
+// (F24, 2026-10-09: the allocation's re-read of the table ran out and hard-deferred a media call
+// that its own admission read had just served).
+const (
+	DefaultCardRead      = 5 * time.Second
+	DefaultCardReadRetry = 15 * time.Second
 )
 
 // Need is what the job asks of each card and of the host.
@@ -41,8 +54,13 @@ type Need struct {
 // Deps are the live reads behind the allocator's input, so a test assembles a host. A nil
 // member uses the production reader.
 type Deps struct {
-	// Cards reads the card table and a warning about the declared ComfyUI order.
+	// Cards reads the card table and a warning about the declared ComfyUI order. It is ONE attempt
+	// and takes its deadline from ctx: CardTable sets it, and again, longer, for the one retry, so a
+	// reader that adds a deadline of its own would cap that retry as well.
 	Cards func(ctx context.Context, cfg config.Config) ([]gpuprobe.Card, string, error)
+	// ReadDeadline bounds the first attempt of a card-table read and RetryDeadline the one retry
+	// that follows an attempt which ran out of time (zero = DefaultCardRead, DefaultCardReadRetry).
+	ReadDeadline, RetryDeadline time.Duration
 	// ForeignBusy maps a card (lease id) to a description of the foreign compute process on it.
 	// The default sees none: foreign-busy is Linux-only evidence (WDDM lists no per-process rows),
 	// and the reserve verb's reader lives with its denylist in package main, which passes it in.
@@ -62,10 +80,12 @@ func DefaultDeps() Deps {
 
 func (d Deps) withDefaults() Deps {
 	if d.Cards == nil {
+		// No deadline here: CardTable puts one on every attempt. The read is gpuprobe's one per-device
+		// query (--query-gpu fields) and nothing else: the allocation never lists processes, the
+		// slowest thing nvidia-smi does under load (the foreign-process reader is a separate,
+		// best-effort call that only the verbs which want it make).
 		d.Cards = func(ctx context.Context, cfg config.Config) ([]gpuprobe.Card, string, error) {
-			cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-			defer cancel()
-			return gpuprobe.ReadCards(cctx, cfg.GPUComfyOrder)
+			return gpuprobe.ReadCards(ctx, cfg.GPUComfyOrder)
 		}
 	}
 	if d.ForeignBusy == nil {
@@ -88,25 +108,98 @@ func (d Deps) withDefaults() Deps {
 	return d
 }
 
-// CardTable reads the card table the way the allocator does.
+// CardTable reads the card table the way the allocator does: one attempt under ReadDeadline and,
+// when that attempt ran out of time, ONE more under the longer RetryDeadline. Only a timeout is
+// retried: an attempt that failed outright (nvidia-smi not on PATH, a table with no card) fails the
+// same way again, and a caller whose own context is done has nobody left to read for. The error of
+// a read that failed twice says so, so the answer a caller builds from it can.
 func (d Deps) CardTable(ctx context.Context, cfg config.Config) ([]gpuprobe.Card, string, error) {
-	return d.withDefaults().Cards(ctx, cfg)
+	d = d.withDefaults()
+	first, retry := d.ReadDeadline, d.RetryDeadline
+	if first <= 0 {
+		first = DefaultCardRead
+	}
+	if retry <= 0 {
+		retry = DefaultCardReadRetry
+	}
+	r := d.attempt(ctx, cfg, first)
+	if r.err == nil || !r.ranOut {
+		return r.cards, r.note, r.err
+	}
+	log.Printf("gpualloc: the card table read ran out of time after %s (%v); reading it once more under %s", first, r.err, retry)
+	r = d.attempt(ctx, cfg, retry)
+	if r.err != nil {
+		return nil, "", fmt.Errorf("%w (read twice: no answer within %s, then none within %s)", r.err, first, retry)
+	}
+	return r.cards, r.note, nil
+}
+
+// cardRead is one attempt at the card table.
+type cardRead struct {
+	cards []gpuprobe.Card
+	note  string
+	err   error
+	// ranOut says the attempt's own deadline ended it while the caller's context was still good:
+	// the one failure a longer deadline can fix.
+	ranOut bool
+}
+
+func (d Deps) attempt(ctx context.Context, cfg config.Config, deadline time.Duration) cardRead {
+	actx, cancel := context.WithTimeout(ctx, deadline)
+	defer cancel()
+	var r cardRead
+	r.cards, r.note, r.err = d.Cards(actx, cfg)
+	// Asked before cancel, which would make every attempt read as expired. A deadline the CALLER's
+	// context carries (shorter than ours, and spent) also reads DeadlineExceeded here, which is why
+	// the caller's context is asked too.
+	r.ranOut = r.err != nil && errors.Is(actx.Err(), context.DeadlineExceeded) && ctx.Err() == nil
+	return r
+}
+
+// CardTableError is BuildInput's failure when the card table could not be read, so a caller that
+// can place without a fresh table (the media path keeps the one it read at admission) tells that
+// failure from any other. The words are what they always were: "the card table: <cause>".
+type CardTableError struct{ Err error }
+
+func (e *CardTableError) Error() string { return "the card table: " + e.Err.Error() }
+func (e *CardTableError) Unwrap() error { return e.Err }
+
+// Claims reads what is taken, without the card table: whether a whole-node lease is live (it claims
+// every card) and the lease ids of the cards a live lease claims, plus the ones the caller claims
+// for work the lease directory cannot show (Need.Claimed). A caller that NAMED its cards (a pin, a
+// pool, a declared device) has nothing to choose, so this is all it asks of the allocator's input:
+// it never needs nvidia-smi for it.
+func Claims(m *gpulease.Manager, need Need) (wholeNodeHeld bool, claimed map[string]bool) {
+	claimed = map[string]bool{}
+	for _, l := range m.Leases() {
+		if len(l.Devices) == 0 {
+			wholeNodeHeld = true
+		}
+		for _, d := range l.Devices {
+			claimed[d] = true
+		}
+	}
+	for id, on := range need.Claimed {
+		if on {
+			claimed[id] = true
+		}
+	}
+	return wholeNodeHeld, claimed
 }
 
 // BuildInput assembles the allocator's input from live state: the card table, the live leases,
 // quarantine sidecars, foreign compute processes, resident seats, the presence guard and host
-// RAM. Every read is best-effort except the card table, which is the point; an unreadable extra
-// reads as "nothing to report" (and, for foreign processes, is empty on Windows by nvidia-smi's
-// own limit).
+// RAM. Every read is best-effort except the card table, which is the point (a *CardTableError,
+// after the one retry of Deps.CardTable); an unreadable extra reads as "nothing to report" (and,
+// for foreign processes, is empty on Windows by nvidia-smi's own limit).
 func BuildInput(ctx context.Context, m *gpulease.Manager, cfg config.Config, need Need, deps Deps) (gpulease.AllocInput, error) {
 	deps = deps.withDefaults()
-	cards, _, err := deps.Cards(ctx, cfg)
+	cards, _, err := deps.CardTable(ctx, cfg)
 	if err != nil {
-		return gpulease.AllocInput{}, fmt.Errorf("the card table: %w", err)
+		return gpulease.AllocInput{}, &CardTableError{Err: err}
 	}
 	in := gpulease.AllocInput{
 		Cards:           cards,
-		Claimed:         map[string]bool{},
 		Quarantined:     m.QuarantinedCards(),
 		ForeignBusy:     deps.ForeignBusy(ctx, cfg),
 		Resident:        deps.Resident(ctx, cfg, cards),
@@ -114,19 +207,7 @@ func BuildInput(ctx context.Context, m *gpulease.Manager, cfg config.Config, nee
 		HostNeedGiB:     need.RAMGiB,
 		HostHeadroomGiB: cfg.GPUHostRAMHeadroom(),
 	}
-	for _, l := range m.Leases() {
-		if len(l.Devices) == 0 {
-			in.WholeNodeHeld = true
-		}
-		for _, d := range l.Devices {
-			in.Claimed[d] = true
-		}
-	}
-	for id, on := range need.Claimed {
-		if on {
-			in.Claimed[id] = true
-		}
-	}
+	in.WholeNodeHeld, in.Claimed = Claims(m, need)
 	in.HostFreeGiB, in.HostFreeOK = deps.HostFreeRAM()
 	known, away := deps.Presence(cfg)
 	in.AllowDisplay = known && away
