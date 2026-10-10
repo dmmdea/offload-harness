@@ -91,8 +91,10 @@ The headline names what holds the card: **a lease of a class**, `GPU: held by a 
 word it used to print (`held by text`) read as a text *seat* holding the card, and on 2026-10-07 two sessions argued over who
 held it while the holder was a bench's reservation (the class only says what the reservation is for). One phrase
 (`gpulease.Class.LeasePhrase`) is shared by every surface that names a holder: this headline, the refusal and the
-`queued behind` line of `gpu reserve` (`GPU held by a text-class lease (pid …, held 3m0s, reason "…")`) and the brief
-`gpu_lease_verdict` line of `offload_status` (`held by a text-class lease (pid 792210, exclusive, 180s): <reason>`).
+`queued behind` line of `gpu reserve` (`GPU held by a text-class lease (pid …, held 3m0s, reason "…")`), the error of a
+`gpu reserve --detach --wait 0` that lost the race (`another holder took the GPU first: a text-class lease (pid …, reason "…")`),
+the brief `gpu_lease_verdict` line of `offload_status` (`held by a text-class lease (pid 792210, exclusive, 180s): <reason>`)
+and the media tools' deferrals ([media-generation.md](media-generation.md), "A call that cannot get a card keeps its place").
 
 ### A held card is a place in line, not a refusal (0.115.2)
 

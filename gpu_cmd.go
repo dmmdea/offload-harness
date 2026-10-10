@@ -667,6 +667,14 @@ func heldHint(err error, wait time.Duration) error {
 	return fmt.Errorf("%w; not free within --wait %s — pass a longer --wait to keep queueing", err, wait)
 }
 
+// foreignHolderError is what a fail-fast detached reserve (--wait 0) reports when the lease it
+// finds is not its child's: another reservation won the card first. The holder is named as a LEASE
+// of a class, the phrase `gpu status` leads with (gpulease.Class.LeasePhrase), not as "text".
+func foreignHolderError(info gpulease.Info) error {
+	return fmt.Errorf("another holder took the GPU first: %s (pid %d, reason %q)",
+		info.Class.LeasePhrase(), info.PID, info.Reason)
+}
+
 // detachHolder spawns a HIDDEN child that owns the lease, so the lease's holder pid is
 // a real, observable process rather than this short-lived CLI invocation. With a
 // positive wait the CHILD queues (gpu hold acquires with the same --wait) and this
@@ -766,8 +774,7 @@ func detachHolder(fs *flag.FlagSet, class string, dur, wait time.Duration, opts 
 		// exit (above) be the verdict when the line does not move in time.
 		if info.Held && info.PID != childPID {
 			if wait <= 0 {
-				return 0, fmt.Errorf("another holder took the GPU first: %s (pid %d, reason %q)",
-					info.Class, info.PID, info.Reason)
+				return 0, foreignHolderError(info)
 			}
 			if queuedBehind != info.PID {
 				queuedBehind = info.PID

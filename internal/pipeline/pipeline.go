@@ -3461,8 +3461,10 @@ func (e *errGPUBusy) Error() string {
 	if e.detail != "" {
 		return "gpu busy: " + e.detail
 	}
-	return fmt.Sprintf("gpu busy: %s holds the lease (%ds, reason %q)",
-		e.info.Class, int(e.info.Age/time.Second), e.info.Reason)
+	// The holder is a LEASE of a class ("held by a text-class lease"), never the bare class: "text holds
+	// the lease" read as a text seat (gpulease.Class.LeasePhrase, the phrase `gpu status` leads with).
+	return fmt.Sprintf("gpu busy: held by %s (%ds, reason %q)",
+		e.info.Class.LeasePhrase(), int(e.info.Age/time.Second), e.info.Reason)
 }
 
 // IsGPUBusy reports whether err means the card was legitimately held by someone else

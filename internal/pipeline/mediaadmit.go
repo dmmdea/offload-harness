@@ -782,7 +782,8 @@ func (p *Pipeline) queuedAnswerWhy(m *gpulease.Manager, ids []string, since time
 	case why != "":
 		e.Why = why
 	case held != nil:
-		e.Why = fmt.Sprintf("%s held by %s (%q)", subject, held.Info.Class, held.Info.Reason)
+		// "held by a media-class lease", never "held by media": the bare class read as a seat (gpulease.Class.LeasePhrase).
+		e.Why = fmt.Sprintf("%s held by %s (%q)", subject, held.Info.Class.LeasePhrase(), held.Info.Reason)
 	case len(e.HeldBy) > 0:
 		e.Why = fmt.Sprintf("%s in use", subject)
 	default:

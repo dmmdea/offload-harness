@@ -350,3 +350,22 @@ func TestGPUStatusHeadlineNamesALeaseOfAClassNotABareClass(t *testing.T) {
 		})
 	}
 }
+
+// The error a fail-fast detached reserve (--wait 0) reports when another reservation won the card
+// names that holder as a LEASE of a class too: "another holder took the GPU first: text (pid ..."
+// read as a text seat, the same defect as the headline above.
+func TestForeignHolderErrorNamesALeaseOfAClassNotABareClass(t *testing.T) {
+	for _, tc := range []struct {
+		class gpulease.Class
+		want  string
+	}{
+		{gpulease.ClassText, `another holder took the GPU first: a text-class lease (pid 4242, reason "kv bench")`},
+		{gpulease.ClassMedia, `another holder took the GPU first: a media-class lease (pid 4242, reason "kv bench")`},
+		{gpulease.Class(""), `another holder took the GPU first: a lease (pid 4242, reason "kv bench")`},
+	} {
+		got := foreignHolderError(gpulease.Info{Held: true, Class: tc.class, PID: 4242, Reason: "kv bench"}).Error()
+		if got != tc.want {
+			t.Errorf("class %q: got %q, want %q", string(tc.class), got, tc.want)
+		}
+	}
+}

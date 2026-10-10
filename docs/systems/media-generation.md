@@ -1022,7 +1022,10 @@ was not resumed is not invented: a first-time call leaves one only when it gives
 whose process stopped polling); a binary that predates them does not honour them, so on a host that mixes
 versions it can take a card ahead of a token holder, which costs the holder its place and never
 exclusivity. A call that holds the whole node on such a host leaves the same kind of token. A host that
-does not lease cards keeps the `gpu busy` answer byte for byte.
+does not lease cards keeps the plain `gpu busy` answer. Both answers name the lease in the way as a **lease of a class**,
+the phrase `gpu status` leads with, never as the bare class word (`held by media` read as a media *seat* holding the
+cards): `gpu queued: card(s) <ids> held by a media-class lease ("<reason>"); your place in line is #1 ...`, and
+`gpu busy: held by a text-class lease (30s, reason "<reason>")`.
 
 **Only a door that can resume leaves a place.** A token is claimed by sending it back, which only an MCP tool
 can do (`core.Request.Resumable`, set by the MCP server and by nothing that arrives over the wire). The

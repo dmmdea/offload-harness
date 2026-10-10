@@ -1319,7 +1319,7 @@ func (m *Manager) removeStaleClaim(judged *Meta) error {
 // already read.
 //
 // A fresh Inspect() can lose a race with the holder's release and return a ZERO Info,
-// which renders as `gpu busy:  holds the lease (0s, reason "")`. That string is not
+// which renders as `gpu busy: held by a lease (0s, reason "")`. That string is not
 // decoration: it is what an agent reads to decide whether retrying is worth it.
 func (m *Manager) holderInfo(meta *Meta) Info {
 	if info := m.Inspect(); info.Held {
