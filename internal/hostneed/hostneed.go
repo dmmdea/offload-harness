@@ -339,10 +339,11 @@ func ClassDefault(f Facts) Need {
 	if cfg.VideoGenScript != "" {
 		n, ok := ForRoute(RouteVideo, cfg, f)
 		consider("video", n, ok)
+		// A named family renders with ITS binding (ResolveVideoFamilyBinding), and that is chosen
+		// against the box's own default family, so the config is passed as it is and the family by name:
+		// making the name the default family would hand every name the flat videogen_* keys.
 		for name := range cfg.VideoGenFamilies {
-			vcfg := cfg
-			vcfg.VideoGenFamily = name
-			n, ok := ForRoute(RouteVideo, vcfg, f)
+			n, ok := ForVideo(cfg, name, f)
 			consider("video family "+name, n, ok)
 		}
 	}

@@ -167,6 +167,26 @@ func TestTheMediaClassDefaultIsTheLargestFamilyThisBoxBinds(t *testing.T) {
 	}
 }
 
+// A named video family renders with ITS binding, so the class default sizes it from that binding and
+// not from the box's flat videogen_* keys (which belong to the box's default family).
+func TestTheClassDefaultSizesANamedVideoFamilyFromItsOwnBinding(t *testing.T) {
+	dir, stat := comfyTree(t, map[string]float64{
+		"ltx_named_transformer.safetensors": 30,
+		"gemma_named_encoder.safetensors":   20,
+	})
+	cfg := config.Config{
+		ComfyDir:       dir,
+		VideoGenScript: "render/comfy-video.mjs",
+		VideoGenFamilies: map[string]config.VideoFamilyBinding{
+			"ltx25": {Transformer: "ltx_named_transformer.safetensors", TextEncoder: "gemma_named_encoder.safetensors"},
+		},
+	}
+	n := ClassDefault(Facts{Cfg: cfg, VRAMGiB: 16, Stat: stat})
+	if !near(n.GiB, 50) || !strings.Contains(n.Detail, "video family ltx25") {
+		t.Fatalf("class default = %v, want the named ltx25 binding's 30 + 20 GiB (the wan22 default is 33.1)", n)
+	}
+}
+
 // The edit helper: the UNet from --unet, the text encoder the 2511 graph defaults to.
 func TestAnEditCallCountsItsUnetAndTheDefaultTextEncoder(t *testing.T) {
 	f := krea2Facts(t, 16)
