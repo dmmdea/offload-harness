@@ -1277,12 +1277,13 @@ which term refused: `committed X of Y GiB physical` or `only A GiB of Y GiB phys
 reading of 81.6 GiB (the reference box between jobs, 2026-10-10 about 04:12 UTC; 83 GiB available, 127.7 GiB physical,
 headroom 8) admits a 32.8 GiB declaration, the Krea 2 bf16 files: projected 114.4 GiB against a limit of 119.7, 50.2 GiB left
 available, so both terms pass (`gpuprobe.HostRAMAdmits` on those numbers). At 06:01 UTC the box read 129.5 GiB committed with
-one lane running, a ComfyUI process six minutes after launch holding 57.7 GiB private bytes (working set 40.7 GiB); at 06:32 UTC
+one ComfyUI lane running, a process six minutes after launch holding 57.7 GiB private bytes (working set 40.7 GiB); at 06:32 UTC
 a second process, launched fresh seven minutes earlier, held the same 57.7 GiB, and the box read 129.3 GiB committed and 49.1 GiB
 available with the page file unchanged (2,298 MiB in use): 1.6 GiB above physical RAM and 9.6 GiB past the guard's own line. The
-81.6 and 129.3 GiB readings are separate observations two hours apart, so the 47.7 GiB between them is the lane and whatever
-else changed, not the lane alone; what they establish is that a lane declared at 32.8 GiB can run at a footprint that, added to
-a baseline the rule admits, passes physical RAM. The exposure is (a) the first three runs of every family/quant/task key on a node, which
+family those lanes ran is not recorded in the readings, and the 81.6 and 129.3 GiB readings are separate observations two hours
+apart, so the 47.7 GiB between them is the lane and whatever else changed, not the lane alone. What they establish is narrower: a
+lane that holds 57.7 GiB private (24.9 GiB more than a 32.8 GiB declaration), added to a baseline the rule admits, passes
+physical RAM. Whether a Krea 2 lane runs at that footprint is the S1 acceptance data. The exposure is (a) the first three runs of every family/quant/task key on a node, which
 declare the file sizes, (b) any lane whose private bytes exceed its declared resident need, and (c) any process that holds no
 lease (the watcher below saw commit swing 95.3 to 132.1 GiB, four times the 8 GiB headroom). What the guard does about it: a
 lane already running is counted whole in the commit reading, so the next lease waits (a declaration equal to that lane's working

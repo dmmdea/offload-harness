@@ -86,8 +86,8 @@ Versioning: [SemVer](https://semver.org/).
   without occupying RAM, so a lane's commit can exceed what it declared (a declaration is the model files' size, raised to the
   largest measured resident peak once three runs exist). **This is a brake on declared loads, not a bound on what the box
   commits:** the rule applied to a commit reading of 81.6 GiB admits a 32.8 GiB Krea 2 declaration (114.4 GiB projected against
-  119.7), and one lane of that kind read 129.3 GiB committed on the 127.7 GiB box hours later (docs/systems/gpu-lease.md, "Known
-  limits"). The not-yet-loaded part of a granted lease is its declared need minus what the processes below its holder hold
+  119.7), and a ComfyUI lane holding 57.7 GiB private bytes (its family is not recorded) read 129.3 GiB committed on the 127.7 GiB
+  box hours later (docs/systems/gpu-lease.md, "Known limits"). The not-yet-loaded part of a granted lease is its declared need minus what the processes below its holder hold
   RESIDENT (not private: committed-but-unoccupied memory is not RAM that has loaded). The default headroom is **8 GiB** (was
   4): chosen, not measured, and not a number the operator typed; it is a floor until each node's interactive working-set swing
   is measured (docs/systems/gpu-lease.md, "How the numbers get measured"). A shortage queues in the same FIFO as a card

@@ -273,8 +273,8 @@ what running leases have yet to load` at or above the same headroom. **This is a
 the box.** A declaration is an estimate: the size of the model files, until three measured runs of that family on the node raise
 it to the largest resident memory they reached. A lane's commit can carry its card allocations on top, so a lane can commit more
 than it declared: the rule applied to a commit reading of 81.6 GiB on the 127.7 GiB reference box admits a 32.8 GiB Krea 2 bf16
-declaration (114.4 GiB projected against a 119.7 GiB limit), and one lane of that kind read 129.3 GiB committed on that box some
-hours later, above its physical RAM. The available-RAM term refuses against the declared loads at the moment of the decision; it
+declaration (114.4 GiB projected against a 119.7 GiB limit), and a ComfyUI lane holding 57.7 GiB private bytes (its family is not
+recorded) read 129.3 GiB committed on that box some hours later, above its physical RAM. The available-RAM term refuses against the declared loads at the moment of the decision; it
 does not bound a lane that holds more than it declared, and nothing here bounds a process that holds no lease. A lane already
 running is counted whole in the next decision, so the next lease waits, but the guard does not stop the lane that took the box
 over: read `gpu status` (below), not the admission, as the state of the box. `gpu reserve --ram <GiB>` states the need (0 =

@@ -159,9 +159,9 @@ type HostRAMCheck struct {
 // declaration is until three measured runs raise it. Measured counterexample (docs/systems/gpu-lease.md,
 // "Known limits"): at a commit reading of 81.6 GiB on the 127.7 GiB reference box with 83 GiB available, a
 // 32.8 GiB declaration (the Krea 2 bf16 files) is admitted here (projected 114.4 GiB against a limit of
-// 119.7, 50.2 GiB left available), while one lane of that kind read 129.3 GiB committed on the same box
-// some hours later (a separate reading, so the 47.7 GiB between the two is the lane and whatever else changed),
-// above its physical RAM.
+// 119.7, 50.2 GiB left available), while a ComfyUI lane holding 57.7 GiB private bytes (its family is not
+// recorded) read 129.3 GiB committed on the same box some hours later (a separate reading, so the 47.7 GiB
+// between the two is the lane and whatever else changed), above its physical RAM.
 func HostRAMAdmits(mem HostMemory, readable bool, needGiB, pendingGiB, headroomGiB float64) HostRAMCheck {
 	return hostRAMAdmits(mem, readable, HostMemorySupported, needGiB, pendingGiB, headroomGiB)
 }
