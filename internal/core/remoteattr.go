@@ -30,6 +30,13 @@ type RemoteAttribution interface {
 	// node writes nothing at all; one that did is finished as a deferred call with reason, so its
 	// card is closed failed and the node time it took is on the ledger.
 	Discard(reason string)
+	// Bounce ends ONE attempt of a call that is going on to another node: the node it was dispatched to
+	// answered that another job holds its card (CardHeld(res.Meta.ErrClass)), so nothing ran there. The
+	// attempt's card closes the way a held call's does (quiet, never started), no ledger row is written
+	// (the call has one row, and its Finish writes it), and the handle is armed again: the next Dispatched
+	// opens a card on the node the call was placed on next. Before any dispatch, or after the call ended,
+	// it does nothing.
+	Bounce(res Result)
 }
 
 // RemoteAttributor is implemented by a Runner that can attribute a remote call. route is the
@@ -45,6 +52,7 @@ func (NopAttribution) Dispatched(string, string, string) {}
 func (NopAttribution) Running()                          {}
 func (NopAttribution) Finish(Result)                     {}
 func (NopAttribution) Discard(string)                    {}
+func (NopAttribution) Bounce(Result)                     {}
 
 // CloseOnPanic is deferred right after BeginRemote (defer core.CloseOnPanic(h)): a lane that panics after
 // it opened the call's card (in the dispatch, the poll or the fetch) would leave the card queued and the
