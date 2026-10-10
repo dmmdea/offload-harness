@@ -39,7 +39,7 @@ Versioning: [SemVer](https://semver.org/).
 - **Tests.** `render/lease-progress.test.mjs` (20; the end-to-end one runs the real `comfy-generate.mjs --batch` and the
   `comfy-render.mjs` child it spawns against a fake ComfyUI) and `gpu_progress_test.go` (the decision, the helper list
   pinned to what `render/` contains, the real wrapper renewing a beating helper's lease, labelling a silent one, and keeping
-  a caller's own file). 20 mutations of the shipped code were each caught.
+  a caller's own file). 23 mutations of the shipped code were each caught.
 - **Docs.** `docs/systems/gpu-lease.md` (a new paragraph; the two passages that said an attended job without a progress file
   is labelled at the end of its first term now say which job that still is), `docs/systems/media-generation.md`,
   `render/README.md`.
@@ -117,7 +117,7 @@ Versioning: [SemVer](https://semver.org/).
   delegate-recovered/" while the dispatch is open, "the node finished the job, result in delegate-recovered/" once a recovery
   pass has filed the answer. It stays `failed`, because the call did fail (its caller got no answer). Whether PAIR would let a
   later `completed` frame replace a card that is already terminal cannot be established from this tree, so none is sent.
-- **Tests.** `internal/pairworkloads/seatwatch_exit_test.go`, `orphans_text_test.go`, `gpu_signals_test.go`; 19 mutations were each
+- **Tests.** `internal/pairworkloads/seatwatch_exit_test.go`, `orphans_text_test.go`, `gpu_signals_test.go`; 16 mutations were each
   caught. `docs/systems/pair-workloads.md`.
 
 ## [0.179.0] - 2026-10-10 - a busy image lane overflows to an idle node that renders the same recipe, and every GPU lease path has a host-RAM brake

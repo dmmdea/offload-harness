@@ -256,7 +256,9 @@ func progressTestFixture(t *testing.T, stall time.Duration) (cfg string, m *gpul
 // THE DEFECT, END TO END: a healthy helper under a lease with a 1 s window, nobody to vouch for it but its
 // own progress file. The lease must renew at the end of its term and never be labelled expired.
 func TestWrapperRenewsTheLeaseOfAHelperThatKeepsBeating(t *testing.T) {
-	cfg, m := progressTestFixture(t, 15*time.Minute)
+	// A stall window short enough that the lease is vouched for only by the file MOVING: with the production
+	// 15 minutes the file would read advancing for the whole test whether or not the helper wrote to it.
+	cfg, m := progressTestFixture(t, 1500*time.Millisecond)
 	envOut := filepath.Join(t.TempDir(), "env.txt")
 	t.Setenv("LO_HELPER_ENV_OUT", envOut)
 	t.Setenv("LO_HELPER_RUN_MS", "3500")
@@ -265,7 +267,7 @@ func TestWrapperRenewsTheLeaseOfAHelperThatKeepsBeating(t *testing.T) {
 
 	waitForLeases(t, m, 1)
 	in := m.Inspect()
-	if in.Progress == nil || in.Progress.StallMs != (15*time.Minute).Milliseconds() {
+	if in.Progress == nil || in.Progress.StallMs != autoProgressStall.Milliseconds() {
 		t.Fatalf("the wrapper must declare the contract on the lease record: %+v", in.Progress)
 	}
 	minted := in.Progress.File
