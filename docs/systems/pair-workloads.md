@@ -116,9 +116,10 @@ empty, so its asker closes the card `failed` as it always did (update the node t
 Why `completed` and not `workloads:remove`, the one other thing a producer can say: removal is outside the
 lifecycle the card relay carries (`ParseRelay` refuses it), so a relay-mode box could not use it, and it
 would drop the reason; the fork's local ingress does accept it, so on a box that reports to a local PAIR it
-remains an option. What `completed` costs, read from the fork's desktop source (the live dashboard was not
-looked at): the desktop paints a `completed` card gray, prints `error` only on a `failed` card, and labels
-every card that is not `running` "Ran on <node>" with a "Completed at" time. A held card therefore reads
+remains an option. What `completed` costs, as the 2026-10-09 review read it from the fork's desktop source
+(`WorkloadItemCard.tsx`; not re-read while writing this, and the live dashboard was not looked at): the
+desktop paints a `completed` card gray, prints `error` only on a `failed` card, and labels every card that
+is not `running` "Ran on <node>" with a "Completed at" time. A held card therefore reads
 as a call that ran and finished, with the reason not on its face; it did not run, and the frame, PAIR's
 history, the harness ledger row (`gpu_queued`, `gpu_busy`, `compose_busy`) and the call's own reply all say
 so. Whether a quiet `completed` card or no card is the better reading is the operator's decision; either

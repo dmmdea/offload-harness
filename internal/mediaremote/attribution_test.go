@@ -282,6 +282,11 @@ func TestRemoteMediaNodeHeldDeferClosesTheCardQuiet(t *testing.T) {
 				if res.OK || !res.Deferred || res.Meta.ErrClass != class || res.Meta.Node != "render-node" || res.Reason != reason {
 					t.Fatalf("Run: %+v, want the node's deferral with its class", res)
 				}
+				// RUN HAS RETURNED: THE DOOR ANSWERS NOW. The card is closed on the wire and out of the register,
+				// which is all the orphan sweep reads, so no later process can call it "harness process exited".
+				if open := rig.openMarkers(); len(open) != 0 {
+					t.Fatalf("the register still holds %v when the door answers: the sweep would close the card as an orphan", open)
+				}
 				cards := rig.cards()
 				if cards["failed"] != nil || cards["completed"] == nil || cards["completed"]["error"] != reason {
 					t.Fatalf("cards = %v, want one completed card carrying the reason and no failed frame", cards)
