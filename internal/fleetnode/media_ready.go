@@ -140,8 +140,9 @@ type routeNotReadyError struct {
 
 func (e *routeNotReadyError) Error() string {
 	if e.detail != "" {
-		return fmt.Sprintf("task_type %q is bound on this node but this request cannot run here: %s (place the job on a node that holds them)",
-			e.task, e.detail)
+		// Short on purpose: the delegator's cluster row keeps the first 300 bytes of this answer's body (truncate in
+		// mediaremote), and the names the sentence is for must land inside them.
+		return fmt.Sprintf("task_type %q cannot run this request here: %s (place it on a node that holds them)", e.task, e.detail)
 	}
 	return fmt.Sprintf("task_type %q is bound on this node but its route is not ready: %s (the route is not CONFIGURED, so this node cannot run it now; place the job on another node, or restore the files the route needs and retry)",
 		e.task, e.routes)

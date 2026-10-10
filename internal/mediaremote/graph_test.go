@@ -45,6 +45,8 @@ func withCards(totals ...float64) func(map[string]any) {
 const (
 	krea2Graph = `{"3":{"class_type":"UNETLoader","inputs":{"unet_name":"krea2_turbo_bf16.safetensors"}},"4":{"class_type":"KSampler","inputs":{"model":["3",0]}}}`
 	plainGraph = `{"1":{"class_type":"KSampler","inputs":{"seed":1}}}`
+	// wanFilesGraph names two files with real, long names.
+	wanFilesGraph = `{"3":{"class_type":"UNETLoader","inputs":{"unet_name":"wan/wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors"}},"4":{"class_type":"CLIPLoader","inputs":{"clip_name":"umt5_xxl_fp8_e4m3fn_scaled.safetensors"}}}`
 )
 
 // graphTreeWith is a ComfyUI tree holding exactly the given files (relative to the tree).
@@ -207,13 +209,14 @@ func TestRunGraphOverflowMovesPastANodeThatLacksTheFile(t *testing.T) {
 }
 
 // Nobody holds the file: the call goes on to its own queue from when it came back, and the answer names, per node, the
-// file that node lacks.
+// files that node lacks. The row carries the first 300 bytes of the node's answer (post() truncates), so the refusal's
+// sentence is short enough that two real Wan file names land inside them.
 func TestRunGraphNobodyHoldsTheFileFallsBackNamingIt(t *testing.T) {
 	a := startGraphNode(t, "node-a", nil, 7.96)
 	b := startGraphNode(t, "node-b", []string{"models/vae/other.safetensors"}, 15.92)
 	cfg := graphClient(t, a, b)
 	lr := &laneRunner{verdict: heldLane(), local: queuedLocal()}
-	res := Run(context.Background(), cfg, lr, graphReqOf(t, krea2Graph, nil), "auto", nil)
+	res := Run(context.Background(), cfg, lr, graphReqOf(t, wanFilesGraph, nil), "auto", nil)
 	if probes, runs := lr.counts(); probes != 1 || runs != 1 {
 		t.Fatalf("the call waits in its own queue: probes %d runs %d (%+v)", probes, runs, res)
 	}
@@ -222,8 +225,10 @@ func TestRunGraphNobodyHoldsTheFileFallsBackNamingIt(t *testing.T) {
 		t.Fatalf("one row per roster node: %+v", rows)
 	}
 	for _, r := range rows {
-		if !strings.Contains(r.Why, "krea2_turbo_bf16.safetensors") {
-			t.Errorf("the row names the file the node lacks: %+v", r)
+		for _, name := range []string{"wan/wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors", "umt5_xxl_fp8_e4m3fn_scaled.safetensors"} {
+			if !strings.Contains(r.Why, name) {
+				t.Errorf("the row names the files the node lacks (%s is missing from it): %+v", name, r)
+			}
 		}
 	}
 }

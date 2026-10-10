@@ -2095,7 +2095,9 @@ recipe and no family: what makes a node a fit is that it **holds the files the g
   downloads it before it starts ComfyUI, as it always did.
 
 A node that lacks any of them answers **503** with the existing route-not-ready refusal, naming what is missing (six names, then
-a count), and **no job, temp file or lease exists**. 503 is what every delegator re-places, so the call goes to the next node
+a count), and **no job, temp file or lease exists**. The delegator's `cluster[]` row keeps the first 300 bytes of that answer's body
+(`post()` truncates), so the sentence is short and two real Wan file names fit; a graph missing many long names shows its first two or
+three there, and the node's own 503 body (a `curl` of the dispatch) lists up to six. 503 is what every delegator re-places, so the call goes to the next node
 instead of this one cold-starting ComfyUI to defer. The check is by **name, not content** (a same-named file of other bytes is
 held, as for a recipe digest), and the other input loaders (`LoadVideo`, `LoadAudio`, a custom node's own file key) are not read.
 

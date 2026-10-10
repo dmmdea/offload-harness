@@ -27,7 +27,9 @@ import (
 )
 
 // graphNamesCap is how many missing names one refusal lists before it counts the rest. A graph with a long list is almost
-// always a whole workflow this node was never meant to run; six names say so and keep the sentence one a caller reads.
+// always a whole workflow this node was never meant to run; six names say so and keep the sentence one a caller reads. The
+// delegator's cluster row keeps only the first 300 bytes of the answer's body, so a graph missing many long names shows its
+// first two or three there; the node's own 503 body lists up to six.
 const graphNamesCap = 6
 
 // graphFilesRefusal returns the refusal for a run-graph payload whose graph names a file this node does not hold, nil when
@@ -48,8 +50,7 @@ func graphFilesRefusal(cfg config.Config, graph, manifest []byte) *routeNotReady
 			}
 		}
 		if missing := mediacap.MissingModelFiles(mediacap.ModelRoots(cfg.ComfyDir), names); len(missing) > 0 {
-			parts = append(parts, fmt.Sprintf("the graph loads %s this node does not hold (looked under every class directory of its model roots, by the name the loader opens): %s",
-				plural(len(missing), "file", "files"), listCapped(missing)))
+			parts = append(parts, fmt.Sprintf("the graph loads %s this node does not hold: %s", plural(len(missing), "file", "files"), listCapped(missing)))
 		}
 	}
 	if len(files.Images) > 0 {
@@ -61,7 +62,7 @@ func graphFilesRefusal(cfg config.Config, graph, manifest []byte) *routeNotReady
 					names[i] += " [" + m.Dir + "]"
 				}
 			}
-			parts = append(parts, fmt.Sprintf("the graph reads %s this node does not hold: %s (input images do not travel with a graph: a LoadImage input must already be on the node)",
+			parts = append(parts, fmt.Sprintf("the graph reads %s this node does not hold: %s (input images do not travel with a graph)",
 				plural(len(missing), "input image", "input images"), listCapped(names)))
 		}
 	}

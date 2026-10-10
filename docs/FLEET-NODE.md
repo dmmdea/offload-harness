@@ -472,7 +472,8 @@ that ends `.safetensors`, `.gguf`, `.pth`, `.pt`, `.ckpt` or `.sft`) and the ima
 exist **by name** under any class directory of any of the node's models roots (`<comfy_dir>/models/*`, every `extra_model_paths.yaml`
 entry); each input image must be in `<comfy_dir>/input` (`output` or `temp` when its `[output]` / `[temp]` annotation says so). A node
 that lacks one answers **503** (the re-placeable "this node cannot run this now", the same refusal as a route that is not CONFIGURED)
-naming what is missing, six names and then a count, and creates no job: the delegator places the graph on the next node instead of
+naming what is missing, six names and then a count (the delegator's `cluster[]` row keeps the first 300 bytes of that answer, so
+it shows the first two or three of a long list), and creates no job: the delegator places the graph on the next node instead of
 this one cold-starting ComfyUI to defer. **Input images do not travel with a graph** (`/fleet/dispatch` carries JSON, and the
 media-job door carries no input for `run-graph`), so an image the node does not hold cannot be sent to it; the refusal says so. A
 model the graph's manifest tells the node to fetch (a `models[]` entry with a `source_url`) is not refused. The check is by name
