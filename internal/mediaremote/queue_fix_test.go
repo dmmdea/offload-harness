@@ -655,3 +655,53 @@ func TestTheAnswerSaysHowLongAFinishedResultIsKept(t *testing.T) {
 		t.Errorf("the instruction to collect says until when: %s", got)
 	}
 }
+
+// The placement sentence of a result that ran on a node names the reading that sent it there at the ticket's last look, not the
+// one it was made under: a ticket made while the lane was busy, whose lane then could not be read, was not sent by a busy lane.
+func TestAPlacementNamesTheReadingThatSentTheJobNotTheOneTheTicketWasMadeUnder(t *testing.T) {
+	e := newQEnv(t, 1, true)
+	q, _ := manual(t)
+	lt := admitOn(t, q, e.cfg, e.lr, e.req("a red door", nil)) // the lane is held: a ticket made under a busy reading
+	forgetFirstReading(lt)
+	e.lr.set(unjudgedLane())
+	e.free(0)
+	q.cycle(context.Background()) // one scan sees the unread lane and the idle node together
+	waitFor(t, 10*time.Second, "the node renders it", func() bool { return isDone(lt) })
+	if p := lt.res.Meta.Placement; !strings.Contains(p, "could not be judged") || strings.Contains(p, "is not free") {
+		t.Errorf("the placement says the lane could not be judged, not that it was busy: %q", p)
+	}
+}
+
+// While the lane is paused for a ticket the answer's local row says how long, and the sentence a finished result keeps does not
+// carry a countdown that would be stale the moment it is read.
+func TestThePausedLaneNamesItsCountdownInTheAnswerAndNotInThePlacement(t *testing.T) {
+	e := newQEnv(t, 1, true)
+	q, _ := manual(t)
+	lost := core.Deferf("gpu queued: card(s) c2 held", "", core.Meta{ErrClass: core.ErrClassGPUQueued})
+	lost.DeferClass = core.DeferClassCapacity
+	e.lr.local = lost
+	lt := admitOn(t, q, e.cfg, e.lr, e.req("a red door", nil))
+	forgetFirstReading(lt)
+	e.lr.set(core.LaneVerdict{Free: true})
+	q.cycle(context.Background()) // the lane reads free; the run is refused at once and the lane is paused for the ticket
+	waitFor(t, 5*time.Second, "the refused run comes back", func() bool {
+		lt.mu.Lock()
+		defer lt.mu.Unlock()
+		return len(e.lr.ranCalls()) == 1 && !lt.running && lt.t.State == stWaiting
+	})
+	q.cycle(context.Background()) // a scan inside the pause: the lane is not asked, and the row says for how long
+	snap := lt.snapshot()
+	if snap.Local == nil || snap.Local.State != "busy" || !strings.Contains(snap.Local.Why, "refused the last run at once") || !strings.Contains(snap.Local.Why, "not asked again for") {
+		t.Fatalf("the local row says the lane is busy for this ticket, why, and for how long: %+v", snap.Local)
+	}
+	if len(e.lr.ranCalls()) != 1 {
+		t.Errorf("a scan inside the pause does not ask the lane again: %d runs", len(e.lr.ranCalls()))
+	}
+	e.free(0)
+	q.cycle(context.Background()) // the idle node takes it
+	waitFor(t, 10*time.Second, "the node renders it", func() bool { return isDone(lt) })
+	p := lt.res.Meta.Placement
+	if strings.Contains(p, "not asked again") || !strings.Contains(p, "refused the last run at once") {
+		t.Errorf("the placement says what sent the job to the node, with no countdown: %q", p)
+	}
+}

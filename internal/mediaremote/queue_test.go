@@ -1207,6 +1207,7 @@ func TestQueueStateAndGoroutinesDoNotGrowWithScans(t *testing.T) {
 		defer auto.mu.Unlock()
 		return !auto.scanning
 	})
+	waitFor(t, 5*time.Second, "the place keeper ends with its scanner", func() bool { return auto.keepers.Load() == 0 })
 }
 
 // ---- the claim, the lane, the memory -----------------------------------------------------------------------------------

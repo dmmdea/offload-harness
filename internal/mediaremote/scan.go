@@ -36,6 +36,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/dmmdea/offload-harness/internal/config"
@@ -127,7 +128,9 @@ type queueRT struct {
 	scanning bool
 	stopped  bool
 
-	wg      sync.WaitGroup
+	wg sync.WaitGroup
+	// keepers is how many place keepers run: one per live scanner, none after it ended.
+	keepers atomic.Int32
 	kick    chan struct{}
 	rootCtx context.Context
 	stopAll context.CancelFunc
@@ -216,6 +219,7 @@ func (q *queueRT) scanLoop() {
 	kctx, stopKeep := context.WithCancel(q.rootCtx)
 	defer stopKeep()
 	q.wg.Add(1)
+	q.keepers.Add(1)
 	go q.keepLoop(kctx)
 	for {
 		q.cycle(q.rootCtx)
@@ -245,6 +249,7 @@ func (q *queueRT) scanLoop() {
 // ticket's next turn (keepPlace), with the ticket's own arrival.
 func (q *queueRT) keepLoop(ctx context.Context) {
 	defer q.wg.Done()
+	defer q.keepers.Add(-1)
 	tick := time.NewTicker(scanEvery)
 	defer tick.Stop()
 	for {
@@ -374,6 +379,7 @@ func (lt *liveTicket) step(ctx context.Context, cs *cycleState) {
 	lt.first = nil
 	cooling, lostN, coolLeft := !reuse && time.Now().Before(lt.lostUntil), lt.lostN, time.Until(lt.lostUntil)
 	lt.mu.Unlock()
+	paused := false
 	switch {
 	case reuse:
 	case cs.localTaken:
@@ -384,7 +390,7 @@ func (lt *liveTicket) step(ctx context.Context, cs *cycleState) {
 		// cannot pass, or a caller that took the card between the reading and the run). Asking again now would repeat the
 		// run, and each refused run writes the pipeline's own deferred row: the lane is not asked, and not run, until the
 		// pause is over. The fleet is looked at meanwhile.
-		verdict = core.LaneVerdict{Free: false, Why: fmt.Sprintf("this machine's lane read free but refused the last %s at once; not asked again for %s", plural(lostN, "run"), coolLeft.Round(time.Second))}
+		verdict, paused = core.LaneVerdict{Free: false, Why: fmt.Sprintf("this machine's lane read free but refused the last %s at once", plural(lostN, "run"))}, true
 	default:
 		verdict = core.ProbeLane(sctx, lt.runner, preq)
 		if !verdict.Free {
@@ -476,6 +482,9 @@ func (lt *liveTicket) step(ctx context.Context, cs *cycleState) {
 	sort.Strings(matched)
 
 	local := localLane(verdict)
+	if paused { // the countdown is for the answer's local row, not for the placement sentence a finished result keeps
+		local.Why += fmt.Sprintf("; not asked again for %s", coolLeft.Round(time.Second))
+	}
 	if probed && (!verdict.Free || verdict.Unjudged) && verdict.Why != "" {
 		lt.mu.Lock()
 		lt.t.LaneWhy = verdict.Why
