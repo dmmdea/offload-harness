@@ -198,10 +198,10 @@ func Run(ctx context.Context, cfg config.Config, runner Runner, req core.Request
 // this call and must be a subset of it. An image call on a box that has the lane AND a fleet, whose lane is not free,
 // becomes a ticket (ticket.go) and w says how the call waits for it.
 func RunWith(ctx context.Context, cfg config.Config, runner Runner, req core.Request, route string, remotes []string, w Wait) core.Result {
-	if r, ok := NormalizeRoute(route); ok && r == RouteAuto {
+	r, ok := NormalizeRoute(route)
+	if ok && r == RouteAuto {
 		cfg = effectiveCfg(cfg, w.RosterFile) // a node added to the config file since the session began joins the fleet
 	}
-	r, ok := NormalizeRoute(route)
 	if !ok {
 		return contractDefer(fmt.Sprintf("unrecognized route %q; use local, auto or remote", route), core.Meta{})
 	}

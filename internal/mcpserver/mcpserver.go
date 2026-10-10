@@ -1874,7 +1874,13 @@ func (s *Server) handleGenerateImage(ctx context.Context, req *mcp.CallToolReque
 	// A busy lane makes the call a ticket the process keeps (ADR 0083): this door answers inside its window (gpu_wait_ms, or
 	// wait_s) and the ticket goes on, so the wait is the harness's and the caller is not asked to loop.
 	return result(mediaremote.RunWith(ctx, s.mediaCfg(), runTaskAs{s}, core.Request{Task: core.TaskGenerateImage, Door: "offload_generate_image", Input: in.Prompt, Params: withMediaPlace(req.Params.Arguments, params)},
-		in.Route, in.Remotes, mediaremote.Wait{Window: waitWindow(in.WaitS), Detach: true, RosterFile: s.configPath}))
+		in.Route, in.Remotes, s.imageWait(in.WaitS)))
+}
+
+// imageWait is how the image door waits for its ticket: inside its window, with the ticket outliving the call, re-reading
+// delegate_remotes from the config file this server runs on.
+func (s *Server) imageWait(waitS *int) mediaremote.Wait {
+	return mediaremote.Wait{Window: waitWindow(waitS), Detach: true, RosterFile: s.configPath}
 }
 
 // maxWaitS caps wait_s: an hour is already longer than any tool call a client will hold open.

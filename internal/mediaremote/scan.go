@@ -51,6 +51,13 @@ var honourOrder = true
 // stepBound bounds one ticket's decision inside a scan (its probes), so one wedged read cannot hold up the others.
 const stepBound = 30 * time.Second
 
+// localRowKey is the memo key of this machine's own lane in the row memory.
+const localRowKey = "this machine"
+
+// placeRetry is how long a ticket that could not get a place in the local line waits before it asks again (a host that
+// keeps none will not start to, but a card table that would not read at creation will). Chosen.
+const placeRetry = time.Minute
+
 // rowMemo remembers since when a node has been in a state, for the cluster row's `since`.
 type rowMemo struct {
 	state string
@@ -92,6 +99,9 @@ type liveTicket struct {
 	scannedOnce sync.Once
 
 	rowSince map[string]rowMemo
+
+	// placeTried is when the ticket last asked the box for a place in its line.
+	placeTried time.Time
 
 	// first is the lane reading the call made when it became a ticket, reused by the first scan if it is still fresh:
 	// the card table is one nvidia-smi read, and the same question twice in a second is not a second question.
@@ -432,13 +442,14 @@ func (lt *liveTicket) keepPlace(ctx context.Context) {
 	if place != "" && core.KeepPlace(lt.runner, place) {
 		return
 	}
-	if place == "" && lt.noPlaceNote() != "" {
+	if place == "" && lt.noPlaceNote() != "" && time.Since(lt.placeTried) < placeRetry {
 		return // this box keeps none; asking every scan would only repeat the answer
 	}
 	req := lt.req
 	pl, err := core.LeavePlace(ctx, lt.runner, req, time.UnixMilli(created))
 	lt.mu.Lock()
 	defer lt.mu.Unlock()
+	lt.placeTried = time.Now()
 	if err != nil {
 		lt.t.Place = ""
 		if lt.t.PlaceNote == "" {
@@ -501,6 +512,7 @@ func (lt *liveTicket) record(rows, extra []rowAt, matched []string, local *Local
 		row.Since = memo.at.UTC().Format(time.RFC3339)
 		cluster = append(cluster, row)
 	}
+	seen[localRowKey] = true
 	for node := range lt.rowSince { // a node that left the roster stops being remembered
 		if !seen[node] {
 			delete(lt.rowSince, node)
@@ -519,7 +531,7 @@ func (lt *liveTicket) record(rows, extra []rowAt, matched []string, local *Local
 	}
 	lt.t.Scanned, lt.t.Matches, lt.t.Cluster, lt.t.Position = true, matched, cluster, pos
 	if local != nil {
-		local.Since = rowSinceOf(lt.rowSince, "this machine", local.State, now)
+		local.Since = rowSinceOf(lt.rowSince, localRowKey, local.State, now)
 		lt.t.Local = local
 	}
 	lt.persistLocked()
@@ -622,15 +634,22 @@ func (lt *liveTicket) startRemote(ctx context.Context, c candidate) {
 		lt.mu.Unlock()
 		return
 	}
-	ok, _, err := lt.st.claimNode(&lt.t, c.base, c.node, stPlacing)
+	lt.running = true // one dispatch of a ticket at a time, from here until the job ends or the claim is refused
+	cp := lt.t
+	lt.mu.Unlock()
+	// The claim waits for the directory lock, which a crashed holder can keep for a while: not with the ticket locked.
+	ok, _, err := lt.st.claimNode(&cp, c.base, c.node, stPlacing)
 	if err != nil || !ok {
-		lt.mu.Unlock()
 		if err != nil {
-			logQueue("ticket %s: node %s could not be claimed: %v", lt.t.ID, c.shown, err)
+			logQueue("ticket %s: node %s could not be claimed: %v", cp.ID, c.shown, err)
 		}
+		lt.mu.Lock()
+		lt.running = false
+		lt.mu.Unlock()
 		return
 	}
-	lt.running = true
+	lt.mu.Lock()
+	lt.t.State, lt.t.Base, lt.t.Node = cp.State, cp.Base, cp.Node
 	placement := "remote: this machine's image lane is not free (" + lt.t.LaneWhy + ")"
 	lt.mu.Unlock()
 	lt.q.wg.Add(1)

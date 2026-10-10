@@ -1172,3 +1172,210 @@ func TestQueueStateAndGoroutinesDoNotGrowWithScans(t *testing.T) {
 		return !auto.scanning
 	})
 }
+
+// ---- the claim, the lane, the memory -----------------------------------------------------------------------------------
+
+// A node is claimed by one ticket at a time, under the directory lock: a second ticket is refused and told whose it is; the
+// holder's own claim is its to keep; a claim whose owner is gone, or whose ticket has no job in flight, holds nothing; and a
+// released node is free.
+func TestClaimNodeIsExclusiveAndLetsGoOfTheDead(t *testing.T) {
+	st := &store{dir: filepath.Join(t.TempDir(), queueDirName)}
+	const base = "http://node.example:18811"
+	mk := func(id string, owner ownerID) ticketFile {
+		return ticketFile{ID: id, ReqKey: id, Created: nowMs(), Owner: owner, Beat: nowMs(), State: stWaiting}
+	}
+	a, b := mk("mq-aaaaaaaaaaaa", selfOwner()), mk("mq-bbbbbbbbbbbb", selfOwner())
+	if ok, _, err := st.claimNode(&a, base, "node-x", stPlacing); err != nil || !ok {
+		t.Fatalf("the first ticket claims an unclaimed node: %v %v", ok, err)
+	}
+	if a.State != stPlacing || a.Base != base {
+		t.Errorf("the claim saves the ticket as placing on the node: %+v", a)
+	}
+	ok, holder, err := st.claimNode(&b, base+"/", "node-x", stPlacing) // the same node, spelled with a slash
+	if err != nil || ok || holder.Ticket != a.ID {
+		t.Fatalf("a second ticket is refused and told whose the node is: ok=%v holder=%+v err=%v", ok, holder, err)
+	}
+	if b.State != stWaiting || b.Base != "" {
+		t.Errorf("a refused ticket is not changed: %+v", b)
+	}
+	if again, _, _ := st.claimNode(&a, base, "node-x", stPlacing); !again {
+		t.Error("the holder keeps its own claim")
+	}
+	if got := st.claims(); len(got) != 1 || got[base].Ticket != a.ID {
+		t.Errorf("one live claim: %+v", got)
+	}
+
+	// The holder's job ends (its ticket is no longer in flight): the claim holds nothing.
+	a.State = stDone
+	if err := st.write(a); err != nil {
+		t.Fatal(err)
+	}
+	if len(st.claims()) != 0 {
+		t.Error("a claim whose ticket has no job in flight is not live")
+	}
+	if ok, _, _ := st.claimNode(&b, base, "node-x", stPlacing); !ok {
+		t.Fatal("the node is free once the job is done")
+	}
+	// The holder's process is gone: the claim holds nothing either.
+	dead, _ := json.Marshal(claim{Base: normBase(base), Ticket: b.ID, Owner: deadOwner, At: nowMs()})
+	if err := writeFileAtomic(st.claimPath(base), dead); err != nil {
+		t.Fatal(err)
+	}
+	c := mk("mq-cccccccccccc", selfOwner())
+	if ok, _, _ := st.claimNode(&c, base, "node-x", stPlacing); !ok {
+		t.Fatal("the node of a dead owner is free")
+	}
+	st.releaseNode(base, "mq-bbbbbbbbbbbb") // not the holder: nothing happens
+	if len(st.claims()) != 1 {
+		t.Error("only the holder lets a node go")
+	}
+	st.releaseNode(base, c.ID)
+	if files, _ := os.ReadDir(st.dir); len(files) != 3 { // the three ticket files; no claim, no lock
+		var names []string
+		for _, f := range files {
+			names = append(names, f.Name())
+		}
+		t.Errorf("a released node leaves no claim and no lock behind: %v", names)
+	}
+}
+
+// Only the oldest ticket takes the local lane in one scan; the others wait for the next. (Two runs that both start would
+// each wait the lease line's window, and the second would report a lost race.)
+func TestOnlyOneTicketTakesTheLocalLanePerScan(t *testing.T) {
+	e := newQEnv(t, 1, true)
+	q, _ := manual(t)
+	lt1 := admitOn(t, q, e.cfg, e.lr, e.req("first", nil))
+	time.Sleep(5 * time.Millisecond)
+	lt2 := admitOn(t, q, e.cfg, e.lr, e.req("second", nil))
+	forgetFirstReading(lt1, lt2)
+	e.lr.set(core.LaneVerdict{Free: true})
+	q.cycle(context.Background())
+	waitFor(t, 5*time.Second, "the oldest ticket runs here", func() bool { return isDone(lt1) })
+	if runs := e.lr.ranCalls(); len(runs) != 1 || runs[0].Input != "first" {
+		t.Fatalf("one run in the scan, the oldest ticket's: %+v", runs)
+	}
+	if isDone(lt2) {
+		t.Error("the younger ticket waits for the next scan")
+	}
+	q.cycle(context.Background())
+	waitFor(t, 5*time.Second, "then the younger one", func() bool { return isDone(lt2) })
+}
+
+// The queue directory is kept tidy: a temp file of a write that never finished is swept, and the row memory forgets a node
+// that left the roster.
+func TestSweepRemovesDebrisAndTheRowMemoryForgetsAGoneNode(t *testing.T) {
+	e := newQEnv(t, 2, true)
+	st, _ := storeFor(e.cfg)
+	if err := os.MkdirAll(st.dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-time.Hour)
+	for _, name := range []string{"mq-aaaaaaaaaaaa.json.1.abcd.tmp", "mq-garbage00001.json"} {
+		p := filepath.Join(st.dir, name)
+		if err := os.WriteFile(p, []byte("{"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		_ = os.Chtimes(p, old, old)
+	}
+	q, _ := manual(t)
+	lt := admitOn(t, q, e.cfg, e.lr, e.req("a red door", nil))
+	q.cycle(context.Background())
+	if left := queueFiles(t, e.cfg, "mq-aaaaaaaaaaaa"); len(left) != 0 {
+		t.Errorf("a stale temp file is swept: %v", left)
+	}
+	if left := queueFiles(t, e.cfg, "mq-garbage"); len(left) != 0 {
+		t.Errorf("a ticket file that does not parse is swept: %v", left)
+	}
+
+	lt.mu.Lock()
+	before := len(lt.rowSince)
+	lt.mu.Unlock()
+	if before != 3 { // two nodes and this machine's own lane
+		t.Fatalf("the memory holds the two nodes and the local lane: %d", before)
+	}
+	lt.cfg.DelegateRemotes = lt.cfg.DelegateRemotes[:1]
+	q.cycle(context.Background())
+	lt.mu.Lock()
+	after := len(lt.rowSince)
+	lt.mu.Unlock()
+	if after != 2 {
+		t.Errorf("a node that left the roster is forgotten: %d", after)
+	}
+}
+
+// forgetFirstReading drops the lane reading a ticket made when it was created, which its first scan would otherwise reuse for
+// a couple of seconds: a test that changes the lane right after creating the ticket wants the scan to look again.
+func forgetFirstReading(lts ...*liveTicket) {
+	for _, lt := range lts {
+		lt.mu.Lock()
+		lt.first = nil
+		lt.mu.Unlock()
+	}
+}
+
+// The lane was free when the question was asked and taken before the run got it (a race the question cannot rule out): the
+// run came back with nothing run ("gpu busy / queued"), and the ticket goes back to waiting with its place, then runs when
+// the lane really frees. It is not a failure and not a result.
+func TestALostRaceOnTheLocalLaneGoesBackToWaiting(t *testing.T) {
+	e := newQEnv(t, 1, true)
+	lost := core.Deferf("gpu queued: card(s) c2 held", "", core.Meta{ErrClass: core.ErrClassGPUQueued})
+	lost.DeferClass = core.DeferClassCapacity
+	e.lr.local = lost
+	q, _ := manual(t)
+	lt := admitOn(t, q, e.cfg, e.lr, e.req("a red door", nil))
+	place := lt.snapshot().Place
+	forgetFirstReading(lt)
+	e.lr.set(core.LaneVerdict{Free: true})
+	q.cycle(context.Background())
+	waitFor(t, 5*time.Second, "the run comes back", func() bool { return len(e.lr.ranCalls()) == 1 })
+	waitFor(t, 5*time.Second, "the ticket is waiting again", func() bool {
+		s := lt.snapshot()
+		lt.mu.Lock()
+		running := lt.running
+		lt.mu.Unlock()
+		return s.State == stWaiting && !running
+	})
+	if isDone(lt) {
+		t.Fatal("a lost race is not the ticket's result")
+	}
+	if e.lr.dropped(place) != 0 {
+		t.Error("the ticket keeps its place through a lost race")
+	}
+	e.lr.mu.Lock()
+	e.lr.local = core.Result{OK: true, Data: json.RawMessage(`{"local":true}`)}
+	e.lr.mu.Unlock()
+	q.cycle(context.Background())
+	waitFor(t, 5*time.Second, "the second run serves it", func() bool { return isDone(lt) })
+	if !lt.res.OK {
+		t.Errorf("the second run is the result: %+v", lt.res)
+	}
+}
+
+// An owner says it is alive by writing its beat on every scan, so one that is hung (alive by pid, silent for ownerStale) can
+// be told from one that is working.
+func TestAnOwnerWritesItsBeatOnEveryScan(t *testing.T) {
+	e := newQEnv(t, 1, true)
+	q, _ := manual(t)
+	lt := admitOn(t, q, e.cfg, e.lr, e.req("a red door", nil))
+	st, _ := storeFor(e.cfg)
+	t0, _ := st.read(lt.t.ID)
+	time.Sleep(20 * time.Millisecond)
+	q.cycle(context.Background())
+	t1, _ := st.read(lt.t.ID)
+	if t1.Beat <= t0.Beat {
+		t.Errorf("the beat moves on every scan: %d -> %d", t0.Beat, t1.Beat)
+	}
+	// A ticket whose local run is in flight is still beating.
+	lt.mu.Lock()
+	lt.running, lt.t.State = true, stLocal
+	lt.mu.Unlock()
+	time.Sleep(20 * time.Millisecond)
+	q.cycle(context.Background())
+	t2, _ := st.read(lt.t.ID)
+	if t2.Beat <= t1.Beat {
+		t.Errorf("a ticket that is running keeps beating: %d -> %d", t1.Beat, t2.Beat)
+	}
+	lt.mu.Lock()
+	lt.running, lt.t.State = false, stWaiting
+	lt.mu.Unlock()
+}

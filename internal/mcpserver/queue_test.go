@@ -165,3 +165,16 @@ func TestStatusMediaQueueListsTheTickets(t *testing.T) {
 		t.Errorf("row = %+v", r)
 	}
 }
+
+// The image door's wait: the ticket outlives the call, the window is wait_s, and the roster file is the one the server runs on.
+func TestTheImageDoorWaitsDetachedInsideItsWindowOnTheServersConfigFile(t *testing.T) {
+	s := New(nil).WithConfigSource("/some/where/config.json")
+	five := 5
+	w := s.imageWait(&five)
+	if !w.Detach || w.Window != 5*time.Second || w.RosterFile != "/some/where/config.json" {
+		t.Errorf("wait = %+v", w)
+	}
+	if w := New(nil).imageWait(nil); !w.Detach || w.Window != 0 || w.RosterFile != "" {
+		t.Errorf("the default window is the machine's gpu_wait_ms (0 here), with no file to re-read: %+v", w)
+	}
+}
