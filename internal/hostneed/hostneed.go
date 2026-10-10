@@ -360,7 +360,9 @@ func videoFamily(fam string) string {
 // or whose files cannot be sized, is not counted; a box that binds nothing declares 0.
 //
 // A binding on the "sdcpp" engine is left out ON PURPOSE: its weights are not in a ComfyUI model tree, and "does it
-// fit the card" means nothing on a unified-memory iGPU. So an sd.cpp call (and the iGPU engines' video, animate and
+// fit the card" means nothing on a unified-memory iGPU. That is the image, animate and music routes by their engine
+// keys and a video family by its binding's engine (the box's default family included); the edit route has no engine
+// key and is always ComfyUI. So an sd.cpp call (and the iGPU engines' video, animate and
 // audio calls, which take this default too) declares the largest COMFYUI family the box binds, an upper bound that
 // is not its own size, and on a box that binds no ComfyUI family (an sd.cpp-only node) it declares 0: its lanes are
 // admitted whatever the host reads, and the weights `--offload-to-cpu` parks in RAM are outside the guard there.
@@ -405,12 +407,18 @@ func ClassDefault(f Facts) Need {
 		}
 	}
 	if cfg.VideoGenScript != "" {
-		n, ok := ForRoute(RouteVideo, cfg, f)
-		consider("video", n, ok)
+		// A family on the sdcpp engine renders through sd-cli, not this tree (the box's default family may be one).
+		if !cfg.SdcppVideoFamily(cfg.VideoGenFamily) {
+			n, ok := ForRoute(RouteVideo, cfg, f)
+			consider("video", n, ok)
+		}
 		// A named family renders with ITS binding (ResolveVideoFamilyBinding), and that is chosen
 		// against the box's own default family, so the config is passed as it is and the family by name:
 		// making the name the default family would hand every name the flat videogen_* keys.
 		for name := range cfg.VideoGenFamilies {
+			if cfg.SdcppVideoFamily(name) {
+				continue
+			}
 			n, ok := ForVideo(cfg, name, f)
 			consider("video family "+name, n, ok)
 		}

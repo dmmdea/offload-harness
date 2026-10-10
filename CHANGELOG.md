@@ -130,6 +130,8 @@ Versioning: [SemVer](https://semver.org/).
   `Committed_AS` reads high; run-graph, sd.cpp and iGPU calls take the class default, which is the largest ComfyUI family the box
   binds: on a box that binds none (an sd.cpp-only node) it is 0, so those lanes declare nothing and the guard does not see the
   weights `--offload-to-cpu` parks in RAM (`TestAnSdcppOnlyBoxDeclaresNothing`); sizing sd.cpp from its own model files is not built.
+  A video family on the sd.cpp engine is left out of that default like the image, animate and music bindings (it was counted as the
+  runner family its name maps to, `TestAnSdcppVideoFamilyIsNotCountedInTheClassDefault`); the edit route has no engine key.
 
 ### Added — the node's host-RAM verdict can be asked without taking anything (G1)
 

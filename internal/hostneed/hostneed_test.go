@@ -167,6 +167,36 @@ func TestTheMediaClassDefaultIsTheLargestFamilyThisBoxBinds(t *testing.T) {
 	}
 }
 
+// The same rule for VIDEO: a videogen_families entry on the sdcpp engine renders through sd-cli, whose weights are not in a
+// ComfyUI model tree, so the class default leaves it out, a family that is the box's default included. Were it counted it
+// would be sized as the ComfyUI builder default of the runner family its name maps to (the sd.cpp entry carries none of the
+// ComfyUI keys), an upper bound of weights sd-cli never loads. A ComfyUI video family beside it still decides.
+func TestAnSdcppVideoFamilyIsNotCountedInTheClassDefault(t *testing.T) {
+	dir, stat := comfyTree(t, map[string]float64{
+		"wan_small_high.safetensors": 10, "wan_small_low.safetensors": 10, "wan_small_encoder.safetensors": 2,
+	})
+	// An sd.cpp family may carry a ComfyUI family's name; unscreened it would be sized as that family's builder defaults.
+	sdcppLtx := config.VideoFamilyBinding{Engine: "sdcpp", SdcppModel: "ltx.gguf"}
+	// 1. The box's default family is the sd.cpp one: nothing on this box is ComfyUI video, so nothing is declared.
+	cfg := config.Config{
+		ComfyDir:         dir,
+		VideoGenScript:   "render/comfy-video.mjs",
+		VideoGenFamily:   "ltx25",
+		VideoGenFamilies: map[string]config.VideoFamilyBinding{"ltx25": sdcppLtx},
+	}
+	if n := ClassDefault(Facts{Cfg: cfg, VRAMGiB: 16, Stat: stat}); n.GiB != 0 || n.Source != SourceNone {
+		t.Errorf("a default video family on the sdcpp engine is not counted, so this box declares nothing, got %v", n)
+	}
+	// 2. A named sd.cpp family beside a smaller ComfyUI default (Wan 2.2 on the flat keys, 10 + 10 + 2, more than the card
+	// holds so it streams from RAM): the default decides, not the 34.35 GiB the sd.cpp family would be sized as.
+	cfg.VideoGenFamily = ""
+	cfg.VideoGenUnetHigh, cfg.VideoGenUnetLow, cfg.VideoGenTextEncoder = "wan_small_high.safetensors", "wan_small_low.safetensors", "wan_small_encoder.safetensors"
+	n := ClassDefault(Facts{Cfg: cfg, VRAMGiB: 16, Stat: stat})
+	if !near(n.GiB, 22) || strings.Contains(n.Detail, "ltx25") {
+		t.Errorf("a named sdcpp video family is not counted: the ComfyUI default family decides (10 + 10 + 2 GiB), got %v", n)
+	}
+}
+
 // A named video family renders with ITS binding, so the class default sizes it from that binding and
 // not from the box's flat videogen_* keys (which belong to the box's default family).
 func TestTheClassDefaultSizesANamedVideoFamilyFromItsOwnBinding(t *testing.T) {
