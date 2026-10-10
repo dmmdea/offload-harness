@@ -46,8 +46,8 @@ import (
 )
 
 // Timings of the queue. Transport and housekeeping constants, CHOSEN (not measured) and named here so a reader can see
-// what is not a resource number: the scan rhythm is the operator's "within one interval of a lane freeing" and the
-// rest only bound how long a dead process's leftovers stay.
+// what is not a resource number: the scan rhythm bounds how long a lane that freed waits to be noticed, and the rest
+// only bound how long a dead process's leftovers stay.
 var (
 	// scanEvery and scanSpread: one scanner per process looks at its tickets about every scanEvery, +/- scanSpread of
 	// it so several processes of one machine do not look at the same instant.
@@ -64,7 +64,7 @@ var (
 	doneKeep = 10 * time.Minute
 	// deadKeep: a placed ticket whose owner died stays adoptable this long (a job renders for minutes to hours).
 	deadKeep = 6 * time.Hour
-	// ticketMaxWait ends a ticket that has waited this long without a lane (the house rule for a queued GPU wait is 8 h).
+	// ticketMaxWait ends a ticket that has waited this long without a lane (the default wait of `gpu reserve --wait`, ADR 0039).
 	ticketMaxWait = 8 * time.Hour
 	// tmpStale: a temp file of a write that never finished.
 	tmpStale = time.Minute

@@ -30,7 +30,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"math/rand"
 	"os"
@@ -41,7 +40,6 @@ import (
 
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
-	"github.com/dmmdea/offload-harness/internal/rosterprobe"
 )
 
 // honourOrder is the rule that an older waiting ticket of the machine is first in line for the nodes it matches. A var only
@@ -84,11 +82,10 @@ type liveTicket struct {
 	cancel context.CancelFunc
 
 	// notify tells a human at a CLI about a change of standing, once per line (say).
-	notify   func(string)
-	lastSaid string
+	notify  func(string)
+	saidKey string
 
 	running   bool // a goroutine is carrying the ticket (a local run, a send, a poll)
-	waiters   int  // calls waiting for it in this process
 	collected bool
 	canceled  bool
 
@@ -491,6 +488,11 @@ func localLane(v core.LaneVerdict) *LocalLane {
 // record merges what the scan learned into the ticket and saves it: the rows in the roster's order with their `since`,
 // the nodes that match, the local lane, and the place in line.
 func (lt *liveTicket) record(rows, extra []rowAt, matched []string, local *LocalLane, all []ticketFile, berr error) {
+	lt.recordLocked(rows, extra, matched, local, all, berr)
+	lt.say(standing(lt.snapshot()))
+}
+
+func (lt *liveTicket) recordLocked(rows, extra []rowAt, matched []string, local *LocalLane, all []ticketFile, berr error) {
 	merged := append(append([]rowAt(nil), rows...), extra...)
 	sort.SliceStable(merged, func(i, j int) bool { return merged[i].idx < merged[j].idx })
 	now := time.Now()
@@ -604,12 +606,12 @@ func (h *ticketHandle) Dispatched(base, nodeID, jobID string) {
 	h.lt.say(standing(h.lt.snapshot()))
 }
 
-// say tells the human waiting at a CLI (if there is one) where the ticket stands, unless it just said the same.
-func (lt *liveTicket) say(line string) {
+// say tells the human waiting at a CLI (if there is one) where the ticket stands, once per change of standing (the key).
+func (lt *liveTicket) say(key, line string) {
 	lt.mu.Lock()
-	fn, same := lt.notify, line == lt.lastSaid
-	if line != "" {
-		lt.lastSaid = line
+	fn, same := lt.notify, key == lt.saidKey
+	if key != "" {
+		lt.saidKey = key
 	}
 	lt.mu.Unlock()
 	if fn != nil && line != "" && !same {
@@ -806,13 +808,4 @@ func rosterFromFile(path string) ([]string, bool) {
 	}
 	rosterCache.m[path] = rosterEntry{mtime: fi.ModTime(), size: fi.Size(), remotes: doc.Remotes}
 	return doc.Remotes, true
-}
-
-// ---- errors and helpers the door uses -----------------------------------------------------------------------------
-
-var errNoQueue = errors.New("this machine has no state_dir, so it keeps no ticket queue")
-
-// forgetRoster is for tests: the probes of one test must not remember another's nodes.
-func forgetRoster() {
-	rosterprobe.Default.Reset()
 }

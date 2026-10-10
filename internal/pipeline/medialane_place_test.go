@@ -296,3 +296,27 @@ func TestMediaLaneFreeOrdersByArrivalForACallThatResumesItsPlace(t *testing.T) {
 		})
 	}
 }
+
+// What the verdict counts when the lane IS taken: a call that resumes a place is held back by the callers that arrived before
+// that place and by nobody who came after it. A card held by a lease, an older place and a later waiter: the call's explanation
+// names one caller ahead, not two.
+func TestMediaLaneFreeCountsOnlyThePlacesBeforeTheOneItResumes(t *testing.T) {
+	A := leaseIDOf(admitUUIDA)
+	f := newAdmitFixtureWith(t, admitSpec{order: admitOrder, mutate: pinA})
+	hold(t, f, "a bench render", A)
+	if _, err := f.m.LeaveToken(gpulease.ClassMedia, gpulease.Options{Reason: "image-gen", Devices: []string{A}}, time.Now().Add(-time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	tok, err := f.m.LeaveToken(gpulease.ClassMedia, gpulease.Options{Reason: "image-gen", Devices: []string{A}}, time.Now().Add(-10*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	seatWaiterAt(t, f.root, "transcribe a.wav", A) // arrived after the call's place
+	v := f.p.MediaLaneFree(context.Background(), laneReq(map[string]any{"waiter_token": tok.ID}))
+	if v.Free || v.Ahead != 1 {
+		t.Errorf("one caller is ahead of the place (the older one), the waiter behind it is not: free=%v ahead=%d (%s)", v.Free, v.Ahead, v.Why)
+	}
+	if len(v.Holders) != 1 {
+		t.Errorf("the lease is named: %+v", v.Holders)
+	}
+}

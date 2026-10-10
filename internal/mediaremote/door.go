@@ -89,12 +89,13 @@ func (q *queueRT) runQueued(ctx context.Context, cfg config.Config, runner Runne
 // it), or a ticket this process just made and the caller is to wait for.
 func (q *queueRT) admit(ctx context.Context, cfg config.Config, runner Runner, req core.Request, remotes []string, w Wait) (core.Result, *liveTicket) {
 	st, ok := storeFor(cfg)
-	if req.Task != core.TaskGenerateImage || !ok || ambientLease() {
+	if req.Task != core.TaskGenerateImage || !ok {
 		return runner.Run(ctx, req), nil
 	}
 	key := reqKey(req)
 
 	// A ticket named by its token. A token that names nothing (collected, swept, mistyped) is a new arrival.
+	var inherit time.Time
 	if tok := str(req.Params, "waiter_token"); strings.HasPrefix(tok, "mq-") {
 		if validTicketID(tok) {
 			if t, found := st.read(tok); found {
@@ -104,11 +105,17 @@ func (q *queueRT) admit(ctx context.Context, cfg config.Config, runner Runner, r
 				if res, attached := q.attach(ctx, cfg, runner, req, remotes, w, st, t); attached {
 					return res, nil
 				}
+				inherit = time.UnixMilli(t.Created) // its owner is gone and it had sent nothing: the new ticket keeps its arrival
 			}
 		}
 		req = withoutParam(req, "waiter_token")
 	}
 
+	// A call that runs under a lease its process inherited has a card chosen for it (checked after a ticket named by its token
+	// was collected: that needs no lane).
+	if ambientLease() {
+		return runner.Run(ctx, req), nil
+	}
 	if _, err := candidateBases(cfg, remotes); err != nil {
 		return runner.Run(ctx, req), nil // a bad `remotes` is reported by the paths that use it, as before
 	}
@@ -121,7 +128,6 @@ func (q *queueRT) admit(ctx context.Context, cfg config.Config, runner Runner, r
 	}
 
 	// An identical request is the ticket it already made.
-	var inherit time.Time
 	for _, t := range st.list() {
 		if t.ReqKey != key {
 			continue
@@ -196,7 +202,7 @@ func (q *queueRT) create(ctx context.Context, cfg config.Config, runner Runner, 
 	if perr == nil {
 		lt.t.Place = place.Token
 	} else {
-		lt.t.PlaceNote = placeNote(perr)
+		lt.t.PlaceNote, lt.placeTried = placeNote(perr), time.Now()
 	}
 	var existing *ticketFile
 	err = st.withLock(func() error {
@@ -348,14 +354,6 @@ func collectFile(st *store, t ticketFile) core.Result {
 
 // await waits for the ticket this process owns, as long as the door allows.
 func (q *queueRT) await(ctx context.Context, cfg config.Config, w Wait, lt *liveTicket) core.Result {
-	lt.mu.Lock()
-	lt.waiters++
-	lt.mu.Unlock()
-	defer func() {
-		lt.mu.Lock()
-		lt.waiters--
-		lt.mu.Unlock()
-	}()
 	var expire <-chan time.Time
 	if win := windowOf(cfg, w); win >= 0 {
 		timer := time.NewTimer(win)
@@ -374,6 +372,7 @@ func (q *queueRT) await(ctx context.Context, cfg config.Config, w Wait, lt *live
 			lt.say(standing(lt.snapshot()))
 		}
 	}
+	tell()
 	for {
 		select {
 		case <-lt.done:
@@ -391,7 +390,12 @@ func (q *queueRT) await(ctx context.Context, cfg config.Config, w Wait, lt *live
 				return q.deliver(lt)
 			default:
 			}
-			return queuedAnswer(lt.snapshot())
+			snap := lt.snapshot()
+			if terminalState(snap.State) {
+				<-lt.done // finished between the two looks: its result is the answer
+				return q.deliver(lt)
+			}
+			return queuedAnswer(snap)
 		case <-ctx.Done():
 			if w.Detach {
 				return deferRes(core.DeferClassCapacity, fmt.Sprintf("the call ended before its job did; ticket %s keeps running in this process and a repeat of the request, or waiter_token=%s, collects it", lt.t.ID, lt.t.ID), core.ErrClassGPUQueued)
@@ -423,7 +427,7 @@ func (q *queueRT) awaitFile(ctx context.Context, cfg config.Config, runner Runne
 	defer poll.Stop()
 	scanBound := time.Now().Add(firstScanBound)
 	expired := false
-	told := ""
+	toldKey := ""
 	for {
 		t, ok := st.read(id)
 		switch {
@@ -438,8 +442,8 @@ func (q *queueRT) awaitFile(ctx context.Context, cfg config.Config, runner Runne
 			}
 			return q.runQueued(ctx, cfg, runner, req, remotes, w)
 		case w.Notify != nil:
-			if line := standing(t); line != "" && line != told {
-				told = line
+			if key, line := standing(t); line != "" && key != toldKey {
+				toldKey = key
 				w.Notify(line)
 			}
 		}
@@ -465,19 +469,20 @@ func (lt *liveTicket) snapshot() ticketFile {
 	return t
 }
 
-// standing is the one line for a human about where a ticket stands.
-func standing(t ticketFile) string {
+// standing is the one line for a human about where a ticket stands, and a key that changes when the standing does: the line of
+// a waiting ticket carries reasons whose numbers move every scan, and a human is told once, not every scan.
+func standing(t ticketFile) (key, line string) {
 	switch t.State {
 	case stLocal:
-		return fmt.Sprintf("ticket %s: started on this machine's lane", t.ID)
+		return "local", fmt.Sprintf("ticket %s: started on this machine's lane", t.ID)
 	case stPlacing, stPlaced, stFetching:
-		return fmt.Sprintf("ticket %s: started on %s", t.ID, t.Node)
+		return "node/" + t.Node, fmt.Sprintf("ticket %s: started on %s", t.ID, t.Node)
 	case stWaiting:
 		if t.Scanned {
-			return fmt.Sprintf("ticket %s: queued (position %d); it starts on the first matching lane that frees: %s", t.ID, t.Position, clusterSummary(t))
+			return fmt.Sprintf("queued/%d", t.Position), fmt.Sprintf("ticket %s: queued (position %d); it starts on the first matching lane that frees: %s", t.ID, t.Position, clusterSummary(t))
 		}
 	}
-	return ""
+	return "", ""
 }
 
 // clusterSummary is the per-node why, in one sentence.
@@ -524,8 +529,14 @@ func queuedAnswer(t ticketFile) core.Result {
 			data["node"] = t.Node
 		}
 	}
-	res := core.Deferf(fmt.Sprintf("queued as %s (position %d): %s. %s", t.ID, maxInt(t.Position, 1), clusterSummary(t), nextText(t.ID)), "",
-		core.Meta{ErrClass: core.ErrClassGPUQueued})
+	head := fmt.Sprintf("queued as %s (position %d): %s", t.ID, maxInt(t.Position, 1), clusterSummary(t))
+	switch t.State {
+	case stLocal:
+		head = fmt.Sprintf("ticket %s is running on this machine's lane", t.ID)
+	case stPlacing, stPlaced, stFetching:
+		head = fmt.Sprintf("ticket %s is running on %s (remote job %s)", t.ID, t.Node, t.Job)
+	}
+	res := core.Deferf(head+". "+nextText(t.ID), "", core.Meta{ErrClass: core.ErrClassGPUQueued})
 	res.DeferClass = core.DeferClassCapacity
 	if b, err := json.Marshal(data); err == nil {
 		res.Data = b

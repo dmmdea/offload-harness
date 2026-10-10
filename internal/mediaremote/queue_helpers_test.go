@@ -111,8 +111,9 @@ type keeperRunner struct {
 	leaves []leaveCall
 	keeps  map[string]int
 	drops  []string
-	// noPlace, when set, is what LeaveMediaPlace answers (a host that keeps none).
+	// noPlace, when set, is what LeaveMediaPlace answers (a host that keeps none); asked counts every ask.
 	noPlace error
+	asked   int
 }
 
 type leaveCall struct {
@@ -135,6 +136,7 @@ func (k *keeperRunner) placeFor(token string, since time.Time) {
 func (k *keeperRunner) LeaveMediaPlace(_ context.Context, req core.Request, since time.Time) (core.MediaPlace, error) {
 	k.km.Lock()
 	defer k.km.Unlock()
+	k.asked++
 	if k.noPlace != nil {
 		return core.MediaPlace{}, k.noPlace
 	}

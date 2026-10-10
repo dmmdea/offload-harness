@@ -444,7 +444,13 @@ func TestTicketOldestFirstPerNode(t *testing.T) {
 // Two idle nodes, two tickets of one machine: the oldest takes the first node and the other takes the second in the same
 // scan. An older ticket holds back a younger one only from the nodes the older one could itself be started on.
 func TestOlderTicketDoesNotHoldANodeItCannotUse(t *testing.T) {
-	e := newQEnv(t, 2, true)
+	// The jobs stay on their nodes until the test lets them go: a render that ended inside the scan would free the first node
+	// again before the second ticket looked, and both jobs would honestly go there.
+	hold := make(chan struct{})
+	e := newQEnv(t, 2, true, func(_ int, o *nodeOpts) { o.hold = hold })
+	var once sync.Once
+	release := func() { once.Do(func() { close(hold) }) }
+	t.Cleanup(release)
 	q, _ := manual(t)
 	lt1 := admitOn(t, q, e.cfg, e.lr, e.req("first", nil))
 	time.Sleep(5 * time.Millisecond)
@@ -452,6 +458,8 @@ func TestOlderTicketDoesNotHoldANodeItCannotUse(t *testing.T) {
 	e.free(0)
 	e.free(1)
 	q.cycle(context.Background())
+	waitFor(t, 5*time.Second, "a job on each node", func() bool { return len(e.nodes[0].posts()) == 1 && len(e.nodes[1].posts()) == 1 })
+	release()
 	waitFor(t, 5*time.Second, "both tickets render", func() bool { return isDone(lt1) && isDone(lt2) })
 	if len(e.nodes[0].posts()) != 1 || len(e.nodes[1].posts()) != 1 {
 		t.Errorf("one job on each node: %d / %d", len(e.nodes[0].posts()), len(e.nodes[1].posts()))
@@ -820,6 +828,10 @@ func TestDeadOwnerLocalTicketIsSweptAndRerendered(t *testing.T) {
 func TestCLIBlocksAndCancelsUndispatched(t *testing.T) {
 	e := newQEnv(t, 1, true)
 	req := e.req("a red door", nil)
+	// The human is told where the ticket started by the ticket itself, not by a poll that might happen to see it.
+	prevPoll := attachPoll
+	attachPoll = time.Hour
+	t.Cleanup(func() { attachPoll = prevPoll })
 
 	// Blocks: nothing frees, so the call does not return, and a lane that frees ends it with the result.
 	var lines []string
@@ -855,7 +867,16 @@ func TestCLIBlocksAndCancelsUndispatched(t *testing.T) {
 	if last := lines[len(lines)-1]; !strings.Contains(last, "started on") {
 		t.Errorf("the human is told when it started: %v", lines)
 	}
+	for i := 1; i < len(lines); i++ {
+		if lines[i] == lines[i-1] {
+			t.Errorf("the human is told once per change of standing, not once per scan: %v", lines)
+			break
+		}
+	}
 	lm.Unlock()
+	if n := len(ticketFiles(t, e.cfg)); n != 0 {
+		t.Errorf("the call that took the result took the ticket with it: %d file(s)", n)
+	}
 
 	// Ctrl-C before anything was sent cancels the ticket.
 	e.hold(0)
@@ -1378,4 +1399,141 @@ func TestAnOwnerWritesItsBeatOnEveryScan(t *testing.T) {
 	lt.mu.Lock()
 	lt.running, lt.t.State = false, stWaiting
 	lt.mu.Unlock()
+}
+
+// A ticket whose box keeps no place asks again after a while, not on every scan.
+func TestAPlaceThatCannotBeHadIsAskedForAgainAfterAWhileNotEveryScan(t *testing.T) {
+	e := newQEnv(t, 1, true)
+	e.lr.noPlace = core.ErrNoMediaPlace
+	q, _ := manual(t)
+	lt := admitOn(t, q, e.cfg, e.lr, e.req("a red door", nil))
+	for i := 0; i < 12; i++ {
+		q.cycle(context.Background())
+	}
+	e.lr.km.Lock()
+	asked := e.lr.asked
+	e.lr.km.Unlock()
+	if asked != 1 {
+		t.Fatalf("the box said it keeps no place; twelve scans must not ask again: %d asks", asked)
+	}
+	// After the retry interval it asks again, and a box that can now keep one gives the ticket its place.
+	lt.mu.Lock()
+	lt.placeTried = time.Now().Add(-2 * placeRetry)
+	lt.mu.Unlock()
+	e.lr.km.Lock()
+	e.lr.noPlace = nil
+	e.lr.km.Unlock()
+	q.cycle(context.Background())
+	if lt.snapshot().Place == "" {
+		t.Error("a box that can keep a place now gives the ticket one")
+	}
+}
+
+// Two processes that get the same request at the same instant make ONE ticket: the check and the write are one step under the
+// directory lock, so neither passes the other's request by.
+func TestTwoProcessesAskingAtOnceMakeOneTicket(t *testing.T) {
+	e := newQEnv(t, 1, true)
+	q1, q2 := manual(t)
+	// Nobody scans in this test, so the call that attaches to the other process's ticket must not wait for a first scan.
+	prev := firstScanBound
+	firstScanBound = 20 * time.Millisecond
+	t.Cleanup(func() { firstScanBound = prev })
+	for round := 0; round < 25; round++ {
+		req := e.req("a red door", map[string]any{"seed": 1000 + round})
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		for _, q := range []*queueRT{q1, q2} {
+			wg.Add(1)
+			go func(q *queueRT) {
+				defer wg.Done()
+				<-start
+				q.admit(context.Background(), e.cfg, e.lr, req, nil, Wait{Window: AtOnce, Detach: true})
+			}(q)
+		}
+		close(start)
+		wg.Wait()
+		st, _ := storeFor(e.cfg)
+		n := 0
+		for _, tk := range st.list() {
+			if tk.Seed == 1000+round {
+				n++
+			}
+		}
+		if n != 1 {
+			t.Fatalf("round %d: two processes asking at once made %d tickets for one request", round, n)
+		}
+	}
+}
+
+// A call whose window ends while the job is already on a node is told where it runs, not that it is queued, and that it
+// need not call again.
+func TestAnAnswerWhileTheJobRunsSaysWhereItRuns(t *testing.T) {
+	hold := make(chan struct{})
+	e := newQEnv(t, 1, false, func(_ int, o *nodeOpts) { o.hold = hold })
+	t.Cleanup(func() { close(hold) })
+	req := e.req("a red door", nil)
+	res := settle(t, e.cfg, e.lr, req, func(r core.Result) bool { return strings.Contains(r.Reason, "is running on node-a") })
+	a := answerOf(t, res)
+	if (a.State != stPlaced && a.State != stPlacing && a.State != stFetching) || a.Node != "node-a" {
+		t.Errorf("the answer carries the state and the node: %+v", a)
+	}
+	if !strings.Contains(res.Reason, "remote job media-") || !strings.Contains(res.Reason, "do not call again") {
+		t.Errorf("the answer names the job and says not to call again: %s", res.Reason)
+	}
+	hold <- struct{}{}
+	if r := settle(t, e.cfg, e.lr, req, func(r core.Result) bool { return r.OK }); r.Meta.Node != "node-a" {
+		t.Errorf("collected: %+v", r.Meta)
+	}
+}
+
+// The ticket of a dead owner, named by its token: nothing was sent, so it is swept, and the call starts over as a new ticket that
+// keeps the arrival of the one it replaces.
+func TestADeadOwnersTicketNamedByTokenGivesItsArrivalToTheNewOne(t *testing.T) {
+	e := newQEnv(t, 1, true)
+	req := e.req("a red door", nil)
+	st, _ := storeFor(e.cfg)
+	arrived := nowMs() - 300_000
+	if err := st.write(ticketFile{ID: "mq-deadnamed0001", ReqKey: reqKey(req), Created: arrived, Owner: deadOwner, Beat: arrived, State: stWaiting}); err != nil {
+		t.Fatal(err)
+	}
+	named := req
+	named.Params = map[string]any{"waiter_token": "mq-deadnamed0001"}
+	for k, v := range req.Params {
+		named.Params[k] = v
+	}
+	a := answerOf(t, runDoor(e.cfg, e.lr, named, AtOnce))
+	if a.Ticket == "mq-deadnamed0001" {
+		t.Fatal("the dead owner's ticket is not the new call's")
+	}
+	if got := st.list(); len(got) != 1 || got[0].Created != arrived {
+		t.Errorf("the new ticket keeps the arrival of the swept one: %+v (want %d)", got, arrived)
+	}
+}
+
+// A finished ticket is collected by its token wherever the collecting call runs, including under a lease its process inherited
+// (which has no lane of its own to ask about): the ticket's result does not depend on one.
+func TestATicketIsCollectedByTokenEvenUnderAnInheritedLease(t *testing.T) {
+	e := newQEnv(t, 1, true)
+	req := e.req("a red door", nil)
+	st, _ := storeFor(e.cfg)
+	done, _ := json.Marshal(core.Result{OK: true, Data: json.RawMessage(`{"image_path":"x.png"}`), Meta: core.Meta{Node: "node-a"}})
+	if err := st.write(ticketFile{ID: "mq-collectme0001", ReqKey: reqKey(req), Created: nowMs(), Owner: deadOwner, Beat: nowMs(), State: stDone, Result: done}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GPU_LEASE_DIR", t.TempDir())
+	named := req
+	named.Params = map[string]any{"waiter_token": "mq-collectme0001"}
+	for k, v := range req.Params {
+		named.Params[k] = v
+	}
+	res := runDoor(e.cfg, e.lr, named, AtOnce)
+	if !res.OK || res.Meta.Node != "node-a" || !strings.Contains(string(res.Data), "x.png") {
+		t.Fatalf("the finished ticket's result is handed over: %+v", res)
+	}
+	if n := len(ticketFiles(t, e.cfg)); n != 0 {
+		t.Errorf("a collected ticket is gone: %d", n)
+	}
+	if _, runs := e.lr.counts(); runs != 0 {
+		t.Errorf("collecting asks no lane: %d runs", runs)
+	}
 }
