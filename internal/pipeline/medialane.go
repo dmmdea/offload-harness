@@ -49,8 +49,12 @@ const laneProbeBound = 4 * time.Second
 
 var _ core.LaneProber = (*Pipeline)(nil)
 
-// MediaLaneFree implements core.LaneProber for an image generation request.
+// MediaLaneFree implements core.LaneProber for an image generation request, and for a whole-node run_graph
+// (medialane_graph.go).
 func (p *Pipeline) MediaLaneFree(ctx context.Context, req core.Request) core.LaneVerdict {
+	if req.Task == core.TaskRunGraph {
+		return p.graphLaneFree(ctx, req)
+	}
 	notJudged := func(why string) core.LaneVerdict { return core.LaneVerdict{Free: true, Why: "not judged: " + why} }
 	if req.Task != core.TaskGenerateImage {
 		return notJudged("only image generation is probed")
