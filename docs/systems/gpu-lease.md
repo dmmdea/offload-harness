@@ -1222,7 +1222,10 @@ admit iff projected <= physical RAM - gpu_host_ram_headroom_gib        (default 
   for the same cards stays behind it. The line `waiting for host RAM: needs 33.4 GiB, committed 96.4 of 127.7 GiB physical
   (+12.0 GiB still to load by leases already running), 8.0 GiB headroom` is printed once per request, never per poll.
   `--wait 0` refuses with that text, the flag that waits, and `--ram` as the way out; the media admission answers the same
-  words as a queued place in line (resumable doors) or a busy defer (the rest).
+  words as a queued place in line (resumable doors) or a busy defer (the rest). That holds for a call with no time left
+  (`gpu_wait_ms` 0, or a window spent) on every plan shape: a pinned card, an allocated card and the whole node all answer
+  the guard's sentence, never the line's "promised to callers ahead of this one" (the cards are free and nobody is ahead;
+  `TestWaitZeroKeepsTheGuardsSentenceOnAPinnedPlan` and its siblings, G2 of the P0 plan).
 * **A need no state of the box admits is refused at once.** If the need exceeds physical RAM less the headroom, waiting
   cannot help: the request ends with the text (it names `--ram` and `gpu_host_ram_headroom_gib`), and the pipeline classes it
   `gpu_lease_unavailable` (a configuration fault), not `gpu_busy`. `--ram 0` is the escape hatch the operator owns.

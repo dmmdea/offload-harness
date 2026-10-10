@@ -804,6 +804,8 @@ func (p *Pipeline) acquireCards(ctx context.Context, m *gpulease.Manager, reason
 	// open when the call joined the line.
 	for refusals := 0; ; refusals++ {
 		var ids []string
+		// hostShort is set when the gated try was refused for the HOST's memory, with the cards free.
+		var hostShort *gpulease.ErrHostRAM
 		for lost := 0; ; lost++ {
 			free := true
 			if plan.auto {
@@ -873,6 +875,7 @@ func (p *Pipeline) acquireCards(ctx context.Context, m *gpulease.Manager, reason
 						if short.Impossible {
 							return mediaGrant{}, err
 						}
+						hostShort = short
 					case !errors.As(err, &held) && !errors.Is(err, gpulease.ErrStillQueued):
 						return mediaGrant{}, err
 					case plan.auto && lost < mediaClaimRetries:
@@ -886,12 +889,23 @@ func (p *Pipeline) acquireCards(ctx context.Context, m *gpulease.Manager, reason
 
 		// Nothing is free: take a place in line. The in-process slots first (bounded, FIFO among this
 		// process's callers), then the lease queue, FIFO across processes, keeping the arrival time.
+		//
+		// A call with no time left (gpu_wait_ms 0, or a window spent) answers here, and the answer must say
+		// what is true: when the gated try was refused for the host's memory the cards are free and nobody is
+		// ahead, so it carries the guard's own sentence (hostRAMAnswer, as the waiting path below does) and
+		// not the line's "promised to callers ahead", which named nobody (G2 of the P0 plan).
+		noTime := func() error {
+			if hostShort != nil {
+				return p.hostRAMAnswer(m, ids, since, tokenID, optsFor(ids), reason, hostShort, need.Resumable)
+			}
+			return p.queuedAnswer(m, ids, since, tokenID, optsFor(ids), reason, nil, need.Resumable)
+		}
 		if !mediaSlots.take(ids, remaining()) {
-			return mediaGrant{}, p.queuedAnswer(m, ids, since, tokenID, optsFor(ids), reason, nil, need.Resumable)
+			return mediaGrant{}, noTime()
 		}
 		if remaining() <= 0 {
 			mediaSlots.release(ids)
-			return mediaGrant{}, p.queuedAnswer(m, ids, since, tokenID, optsFor(ids), reason, nil, need.Resumable)
+			return mediaGrant{}, noTime()
 		}
 		qo := optsFor(ids)
 		qo.Wait, qo.WaitOut = remaining(), true
