@@ -21,8 +21,11 @@ package pipeline
 // host-RAM guard and the card-table retry both edit): nothing here edits it.
 //
 // It creates nothing: no lease, no place in line, no epoch, no waiter record, no ledger row, no PAIR card, no ComfyUI
-// instance. The readers it shares with the admission prune records that have already expired, as they do for every
-// call; that is the only thing its reads change.
+// instance. And it removes nothing: the readers of the line it shares with the admission prune a record they find dead
+// (an expired place in line, a waiter that stopped polling or whose process is gone) as housekeeping for the next
+// reader, so the probe reads the lease root through a view that does not (gpulease.Manager.ReadOnly) and leaves such
+// a record for a reader that is allowed to write. TestMediaLaneFreeWritesNothing snapshots the lease root over each
+// state of the table, those records included.
 
 import (
 	"context"
@@ -74,6 +77,8 @@ func (p *Pipeline) MediaLaneFree(ctx context.Context, req core.Request) core.Lan
 	if err != nil {
 		return notJudged("the lease directory cannot be opened (" + err.Error() + "); the call reports it itself")
 	}
+	// Every read below goes through a view that prunes nothing: the question must not change the state it asks about.
+	m = m.ReadOnly()
 	// The card table, once, under a bound of its own. It sizes the host-RAM need (the call declares what does not fit
 	// its card) and, on a card-scoped host, fixes the plan.
 	rctx, cancel := context.WithTimeout(ctx, laneProbeBound)

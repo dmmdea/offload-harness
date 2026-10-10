@@ -162,7 +162,7 @@ func (m *Manager) ResumeToken(id string) (Token, bool) {
 		return Token{}, false
 	}
 	if m.now().Sub(time.UnixMilli(t.PolledMs)) > TokenTTL {
-		_ = os.Remove(path)
+		m.prune(path)
 		return Token{}, false
 	}
 	return t, true
@@ -204,11 +204,11 @@ func (m *Manager) Tokens() []Token {
 		case tokenGone:
 			continue
 		case tokenBad:
-			_ = os.Remove(path)
+			m.prune(path)
 			continue
 		}
 		if m.now().Sub(time.UnixMilli(t.PolledMs)) > TokenTTL {
-			_ = os.Remove(path)
+			m.prune(path)
 			continue
 		}
 		out = append(out, t)

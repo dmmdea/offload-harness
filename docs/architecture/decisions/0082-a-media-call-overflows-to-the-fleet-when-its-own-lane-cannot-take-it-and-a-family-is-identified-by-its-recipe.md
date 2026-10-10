@@ -48,8 +48,11 @@ Three facts made the obvious change unsafe as stated.
    (`TestMediaLaneFreeOrdersByArrivalOnlyOnTheWholeNodePlan`; the S1 trigger never asks about a call that carries a token, the
    ticket scan of the next step does). Every doubt
    (a lease this process inherited, a card table that does not read in 4 s, a request it does not model) reads as free. It
-   creates no lease, place in line, epoch, waiter record, ledger row, PAIR card or ComfyUI instance. A differential test drives
-   the real wait-0 admission over a table of lane states and holds the prober to the one direction that matters.
+   creates no lease, place in line, epoch, waiter record, ledger row, PAIR card or ComfyUI instance, and it removes nothing: the
+   readers of the line it shares with the admission prune a record they find dead (an expired place, a waiter that stopped
+   polling) as housekeeping, and the probe reads through `gpulease.Manager.ReadOnly`, a view that skips such a record and leaves
+   it on disk. A differential test drives the real wait-0 admission over a table of lane states and holds the prober to the one
+   direction that matters, and `TestMediaLaneFreeWritesNothing` snapshots the lease root over each of them, those records included.
 3. **A family is its recipe (`mediacap.ImageRecipe`).** The recipe is the weight files the graph loads (checkpoint, text
    encoder, VAE, LoRA), each with its name and byte size on the node's disk, and the sampling it renders with, digested (sha256
    of canonical JSON) over RESOLVED values: a key the binding leaves unset takes the builder's own default, from a table that a

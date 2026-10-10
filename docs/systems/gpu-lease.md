@@ -616,7 +616,9 @@ ignored by a whole-node barrier, so a client that wandered off never blocks the 
 (10 min) it can still be resumed, with its original arrival time (the resumed waiter carries it, so it is
 ahead of everyone who arrived after it), and then it is pruned. `gpulease.LeaveToken`, `ResumeToken`,
 `DropToken`, `Tokens` and `QueuePosition` are the API; `Options.ResumeToken` and `QueuedSince` make a
-waiter carry a place. Tokens are files in `<state>/gpu/tokens`, never among the waiters in
+waiter carry a place. The readers of the line (`ResumeToken`, `Tokens`, `Waiters`) prune a record they find dead,
+expired or stale as they read; `Manager.ReadOnly` returns a view of the same root whose readers skip such a record
+and leave it on disk, for a question that must not change what it asks about (the media lane probe). Tokens are files in `<state>/gpu/tokens`, never among the waiters in
 `<state>/gpu/waiters`: a binary that predates them prunes every waiter record whose process has stopped
 refreshing it, and would delete a token it cannot refresh. It does not honour tokens either, so on a host that
 mixes versions an older binary can take a card ahead of a token holder; that costs the holder its place and

@@ -1,9 +1,11 @@
 package gpulease
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -441,5 +443,90 @@ func TestAnAcquireBehindOnlyALiveTokenIsStillQueuedAndNamesIt(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), tok.ID) {
 		t.Errorf("the error should name the place held ahead (%s): %v", tok.ID, err)
+	}
+}
+
+// A ReadOnly view reads the line the way every reader does and writes nothing: a record the ordinary readers prune
+// (an expired token, a token that is not one, a waiter whose process is gone, a waiter that stopped polling) is skipped
+// and LEFT on disk. The view is what the media lane probe asks its question through, so asking never changes the line.
+func TestAReadOnlyViewSkipsDeadRecordsAndLeavesThemOnDisk(t *testing.T) {
+	m, now := tokenManager(t)
+	expired, err := m.LeaveToken(ClassMedia, Options{Devices: []string{"gpu-aaaa"}}, *now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	*now = now.Add(TokenTTL + time.Second)
+	fresh, err := m.LeaveToken(ClassMedia, Options{Devices: []string{"gpu-bbbb"}}, *now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(m.tokensDir(), "garbage.json"), []byte("{"), 0o666); err != nil {
+		t.Fatal(err)
+	}
+	wdir := m.waitersDir()
+	if err := os.MkdirAll(wdir, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	dead, _ := json.Marshal(Waiter{PID: 2147483000, Class: ClassText, SinceMs: now.UnixMilli()})
+	if err := os.WriteFile(filepath.Join(wdir, "2147483000.1.json"), dead, 0o666); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wdir, "garbage.json"), []byte("{"), 0o666); err != nil {
+		t.Fatal(err)
+	}
+	live, _ := json.Marshal(Waiter{PID: os.Getpid(), Class: ClassMedia, SinceMs: now.UnixMilli()})
+	livePath := filepath.Join(wdir, "live.json")
+	if err := os.WriteFile(livePath, live, 0o666); err != nil {
+		t.Fatal(err)
+	}
+	// A live pid whose record stopped being re-stamped: the heartbeat check prunes it for an ordinary reader.
+	stale, _ := json.Marshal(Waiter{PID: os.Getpid(), Class: ClassMedia, SinceMs: now.UnixMilli()})
+	stalePath := filepath.Join(wdir, "stale.json")
+	if err := os.WriteFile(stalePath, stale, 0o666); err != nil {
+		t.Fatal(err)
+	}
+	old := now.Add(-time.Hour) // the Manager's clock is the test's, not the wall clock
+	if err := os.Chtimes(stalePath, old, old); err != nil {
+		t.Fatal(err)
+	}
+	files := func() string {
+		var names []string
+		for _, d := range []string{m.tokensDir(), wdir} {
+			entries, _ := os.ReadDir(d)
+			for _, e := range entries {
+				names = append(names, filepath.Base(d)+"/"+e.Name())
+			}
+		}
+		sort.Strings(names)
+		return strings.Join(names, " ")
+	}
+	before := files()
+
+	v := m.ReadOnly()
+	if _, ok := v.ResumeToken(expired.ID); ok {
+		t.Error("through the view an expired token still does not resume")
+	}
+	if got := v.Tokens(); len(got) != 1 || got[0].ID != fresh.ID {
+		t.Errorf("through the view only the live token is listed, got %+v", got)
+	}
+	ws := v.Waiters()
+	if len(ws) != 1 || ws[0].PID != os.Getpid() || filepath.Base(ws[0].path) != "live.json" {
+		t.Errorf("through the view only the live waiter is listed, got %+v", ws)
+	}
+	if after := files(); after != before {
+		t.Fatalf("the view wrote: the line held [%s] before the reads and [%s] after", before, after)
+	}
+
+	// The ordinary reader of the same root still does its housekeeping: the view changed nothing about it.
+	if _, ok := m.ResumeToken(expired.ID); ok {
+		t.Error("an expired token does not resume")
+	}
+	_ = m.Tokens()
+	_ = m.Waiters()
+	if after := files(); after == before {
+		t.Errorf("the ordinary readers must still prune what they find dead, the line is unchanged: %s", after)
+	}
+	if _, err := os.Stat(livePath); err != nil {
+		t.Errorf("the live waiter must survive the housekeeping: %v", err)
 	}
 }

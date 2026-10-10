@@ -1972,7 +1972,9 @@ call that finds the lane free runs here with no node read at all.
 is a read-only question: would a wait-0 admission of this call be granted now? It reads the state the admission reads (the lease
 directory, the places in line, the in-process slots, the host's memory through the guard's own function, and the allocator for a
 call that names no card) and says busy only when something that makes the grant refuse is present. It creates nothing (no lease,
-place in line, epoch, waiter, ledger row, PAIR card or ComfyUI instance). It says free when it cannot say: a lease the process
+place in line, epoch, waiter, ledger row, PAIR card or ComfyUI instance) and removes nothing: it reads the lease directory through
+`gpulease.Manager.ReadOnly`, a view that skips the records the line's readers prune as housekeeping (an expired place in line, a
+waiter that stopped polling) and leaves them on disk (`TestMediaLaneFreeWritesNothing`, with a state for each). It says free when it cannot say: a lease the process
 inherited (`gpu reserve -- local-offload ...`), a card table that does not read in 4 s (chosen, not measured), a task or a binding
 it does not model (sd.cpp, an unknown family). On the whole-node plan, where the lease queue orders by arrival, a call that resumes
 a place counts only the callers that arrived before that place; on the pinned and allocated plans every other caller in line counts

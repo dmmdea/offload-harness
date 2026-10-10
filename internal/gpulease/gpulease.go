@@ -630,6 +630,8 @@ type Manager struct {
 	// (nil = the real process-tree reader, descendantsResidentGiB). Production never sets them.
 	hostMem  func() (gpuprobe.HostMemory, bool)
 	workload func(holderPID int) (float64, bool)
+	// readOnly marks a view made by ReadOnly: the readers that prune a record they find dead or expired leave it.
+	readOnly bool
 }
 
 // ErrCardScopedOff is returned by an acquisition that names devices on a host that
@@ -646,6 +648,27 @@ func (m *Manager) EmulateLegacyWriter() { m.legacyWriter = true }
 // SetCardScoped turns the device-scoped WRITER on or off for this Manager. It is the
 // raw switch and checks nothing: production callers go through ApplyCardScopedConfig.
 func (m *Manager) SetCardScoped(on bool) { m.cardScoped = on }
+
+// ReadOnly returns a view of the same lease root whose readers write nothing. The readers of the line (Waiters,
+// Tokens, ResumeToken) prune a record they find dead, stale or expired, as housekeeping for whoever reads next; through
+// the view they skip such a record exactly as before and leave it on disk. It is for a question that must not change
+// the state it asks about (the media lane probe, internal/pipeline/medialane.go): everything a helper reads through the
+// view, gpualloc's included, is read-only. The view shares the root, the clock and the seams of m; only m's own
+// acquisitions and releases write, and the view is not meant to make any.
+func (m *Manager) ReadOnly() *Manager {
+	v := *m
+	v.readOnly = true
+	return &v
+}
+
+// prune removes a record a reader found dead, stale or expired, unless this is a ReadOnly view. Best effort, like
+// every prune: the record is only debris, and the next reader that is allowed to write finds it again.
+func (m *Manager) prune(path string) {
+	if m.readOnly {
+		return
+	}
+	_ = os.Remove(path)
+}
 
 // CardScoped reports whether this Manager may write card-scoped leases (the per-host
 // switch, after ApplyCardScopedConfig).

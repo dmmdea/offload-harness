@@ -21,8 +21,11 @@ Versioning: [SemVer](https://semver.org/).
 - **The question is read-only and a relaxation.** `core.LaneProber` / `Pipeline.MediaLaneFree` is built from the helpers the
   admission already reads state with and edits nothing inside `acquireCards`: it says busy only when something that makes the real
   wait-0 grant refuse is present, and free whenever it cannot say. `TestMediaLaneFreeNeverRefusesAGrant` drives the real admission
-  over 27 lane states and fails if a lane the grant would serve is called busy (and `TestMediaLaneFreeNeverRefusesAGrantOverRandomStates`
-  over 150 fixed-seed random ones); `TestMediaLaneFreeWritesNothing` snapshots the lease root in each of them. On the whole-node
+  over 38 lane states and fails if a lane the grant would serve is called busy (and `TestMediaLaneFreeNeverRefusesAGrantOverRandomStates`
+  over 150 fixed-seed random ones); `TestMediaLaneFreeWritesNothing` snapshots the lease root in each of them. It removes nothing
+  either: it reads through `gpulease.Manager.ReadOnly`, a view whose readers skip the records the line's readers prune as
+  housekeeping (an expired place in line, a waiter that stopped polling, a dead one) and leave them on disk, and five of the 38
+  states hold exactly such a record. On the whole-node
   plan, where the lease queue orders by arrival, a call that resumes a place counts only the callers that arrived before that place
   (the randomized differential found the one state where the prober called such a lane busy; unreachable from the S1 trigger, live
   for the ticket scan of the next step).

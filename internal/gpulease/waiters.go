@@ -500,7 +500,7 @@ func (m *Manager) Waiters() []Waiter {
 		}
 		var w Waiter
 		if json.Unmarshal(b, &w) != nil || w.PID <= 0 {
-			_ = os.Remove(p)
+			m.prune(p)
 			continue
 		}
 		alive := pidAlive(w.PID)
@@ -510,7 +510,7 @@ func (m *Manager) Waiters() []Waiter {
 			}
 		}
 		if !alive || waiterOutlived(w, nowMs) {
-			_ = os.Remove(p)
+			m.prune(p)
 			continue
 		}
 		// HEARTBEAT STALENESS. A live, non-recycled pid is not enough: the
@@ -529,7 +529,7 @@ func (m *Manager) Waiters() []Waiter {
 			continue // transient: do not prune a record we could not actually check
 		}
 		if now.Sub(fi.ModTime()) > staleWindow {
-			_ = os.Remove(p)
+			m.prune(p)
 			continue
 		}
 		w.path = p

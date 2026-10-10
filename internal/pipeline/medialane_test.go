@@ -9,6 +9,7 @@ package pipeline
 
 import (
 	"context"
+	"encoding/json"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -36,6 +37,52 @@ func pinAKrea2(c *config.Config) { krea2Binding(c); pinA(c) }
 // cards (planMedia: "comfy_cuda_device names several cards: this call holds the whole node"): the plan whose queue order is
 // the lease queue's own, by arrival time.
 func pinSeveral(c *config.Config) { c.ComfyCudaDevice = "1,2" }
+
+// leaveExpiredToken leaves a place in line for devices (nil = the whole node) whose poller left longer ago than a token
+// can be resumed (gpulease.TokenTTL): the file exists, and every reader that prunes finds it expired. The Manager's
+// clock is not settable from here, so the place is left and its poll time is written back into the record.
+func leaveExpiredToken(t *testing.T, f *admitFixture, devices []string) string {
+	t.Helper()
+	tok, err := f.m.LeaveToken(gpulease.ClassMedia, gpulease.Options{Reason: "image-gen", Devices: devices}, time.Now().Add(-30*time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(f.root, "gpu", "tokens", tok.ID+".json")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rec map[string]any
+	if err := json.Unmarshal(b, &rec); err != nil {
+		t.Fatal(err)
+	}
+	rec["polled_ms"] = time.Now().Add(-gpulease.TokenTTL - 5*time.Minute).UnixMilli()
+	if b, err = json.Marshal(rec); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, b, 0o666); err != nil {
+		t.Fatal(err)
+	}
+	return tok.ID
+}
+
+// staleWaiter registers a waiter whose process is alive but that stopped re-stamping its record an hour ago: every
+// reader that prunes finds it stale. It is registered once and never refreshed.
+func staleWaiter(t *testing.T, f *admitFixture, reason string, devices ...string) {
+	t.Helper()
+	_, unregister := gpulease.RegisterSeatWaiter(filepath.Join(f.root, "gpu", "lease"), reason, devices)
+	t.Cleanup(unregister)
+	entries, err := os.ReadDir(filepath.Join(f.root, "gpu", "waiters"))
+	if err != nil || len(entries) == 0 {
+		t.Fatalf("the waiter left no record: %v", err)
+	}
+	old := time.Now().Add(-time.Hour)
+	for _, e := range entries {
+		if err := os.Chtimes(filepath.Join(f.root, "gpu", "waiters", e.Name()), old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
 
 // hold takes a media lease on cards (lease ids) for an hour, released with the test.
 func hold(t *testing.T, f *admitFixture, reason string, devices ...string) *gpulease.Lease {
@@ -224,6 +271,21 @@ func laneCases() []laneCase {
 				}
 				return map[string]any{"waiter_token": tok.ID}
 			}},
+		// Records the readers of the line PRUNE (an expired place, a waiter that stopped polling) are absent to the
+		// admission, so they are not in the call's way; and the probe, which reads through the same readers, must skip
+		// them WITHOUT removing them (TestMediaLaneFreeWritesNothing snapshots the lease root over each of these).
+		{name: "whole node: the call resumes its own place and it has expired", spec: wholeLeased, grants: true,
+			params: func(t *testing.T, f *admitFixture) map[string]any {
+				return map[string]any{"waiter_token": leaveExpiredToken(t, f, nil)}
+			}},
+		{name: "whole node: a place another caller left has expired", spec: wholeLeased, grants: true,
+			setup: func(t *testing.T, f *admitFixture) { leaveExpiredToken(t, f, nil) }},
+		{name: "pinned: a place another caller left on the pinned card has expired", spec: pinned, grants: true,
+			setup: func(t *testing.T, f *admitFixture) { leaveExpiredToken(t, f, []string{A}) }},
+		{name: "pinned: a waiter on the pinned card stopped polling", spec: pinned, grants: true,
+			setup: func(t *testing.T, f *admitFixture) { staleWaiter(t, f, "transcribe a.wav", A) }},
+		{name: "whole node: a waiter stopped polling", spec: wholeLeased, grants: true,
+			setup: func(t *testing.T, f *admitFixture) { staleWaiter(t, f, "transcribe a.wav") }},
 	}
 }
 
@@ -272,7 +334,8 @@ func TestMediaLaneFreeNeverRefusesAGrant(t *testing.T) {
 
 // What the prober reads and creates: nothing is written. The lease root (every file's path, size, modification time
 // and content) is the same before and after, in an idle lane, behind a lease, with a place in line, a waiter and a
-// short host. Expired records the readers prune as they read are not in play: every record here is live.
+// short host, and with the records the readers of the line prune as they read (a place whose poller left more than
+// TokenTTL ago, a waiter that stopped polling): the probe skips them and leaves them where they are.
 func TestMediaLaneFreeWritesNothing(t *testing.T) {
 	snapshot := func(root string) []string {
 		var out []string
