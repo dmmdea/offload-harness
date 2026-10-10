@@ -333,8 +333,11 @@ card), not measured; `--min-vram-gb 0` lifts it. The floor filters nodes only: `
 the film owner described it on 2026-10-09 (the 16 GB cards are the multi-card workstation's three; the single-card nodes have 8 GB
 cards) the two rules together leave a default-floor Wan graph no remote node: it waits for its own lane. A graph that reads an input
 file (`LoadImage`, `LoadVideo`, `LoadAudio`) is never auto-overflowed either, because a node can match such a file only by name; the
-answer says so. A call that must leave this machine anyway (`--route remote`, or `auto` on a machine with no graph lane) still
-sends it, with the node's check by name only. The **node manifest** (`node_packs[{name,repo,commit}]` + `models[{path,source_url,sha256}]`)
+call waits for this machine's own lane, and if that wait ends in a deferral the deferral says the fleet was not asked and why (a
+call that then runs here and succeeds carries no such note). A call that must leave this machine anyway (`--route remote`, or
+`auto` on a machine with no graph lane) still sends it, with the node's check by name only. On every route that sends a graph to
+a node, the node must run this machine's own release (the file check ships with it): a node on another release, or one that
+publishes none, is skipped by name, so a fleet part-way through an upgrade takes graphs only on the nodes already upgraded. The **node manifest** (`node_packs[{name,repo,commit}]` + `models[{path,source_url,sha256}]`)
 is satisfied BEFORE ComfyUI starts: packs cloned at their pinned commits with all deps
 resolved **together** (uv) under **host-torch constraints** (provisioning never replaces the
 installed CUDA torch — an unsatisfiable pack set defers instead), models downloaded and

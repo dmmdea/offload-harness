@@ -181,15 +181,19 @@ Decision 9 left graphs out: a graph has no recipe, and a whole-node graph placed
 card. This amendment adds them under four rules; every other decision stands, and none of the four is a recipe.
 
 1. **A graph's identity is that the node holds the files it names, and the node decides it at its door.** Before it writes a
-   temp file, takes a lease or starts ComfyUI, `buildRunGraph` reads the graph: any string input, under any key, whose value
-   ends in `.safetensors`, `.gguf`, `.pth`, `.pt`, `.ckpt` or `.sft` is a weight file (the loaders' key names are open-ended, the
-   extension is not), and the file input of `LoadImage`, `LoadImageMask`, `LoadImageOutput`, `LoadVideo` and `LoadAudio` is an
+   temp file, takes a lease or starts ComfyUI, `buildRunGraph` reads the graph: any string input, under any key but one, whose
+   value ends in `.safetensors`, `.gguf`, `.pth`, `.pt`, `.ckpt` or `.sft` is a weight file (the loaders' key names are
+   open-ended, the extension is not). The two exclusions the code keeps: the key `filename_prefix` (an output prefix, whatever
+   its value) is never read, and neither is a value that contains `://` (a URL). The file input of `LoadImage`, `LoadImageMask`,
+   `LoadImageOutput`, `LoadVideo` and `LoadAudio` is an
    input file. A weight file must resolve **by name** under any class directory of any of the node's models roots (a class
    directory that is a link counts), the way a ComfyUI loader opens it (subfolders included, no search for the basename;
-   `mediacap.MissingModelFiles`); an input file must be in ComfyUI's `input` directory (`output` or `temp` when its annotation
+   `mediacap.MissingModelFilesUpTo`); an input file must be in ComfyUI's `input` directory (`output` or `temp` when its annotation
    says so). A name that is absolute or climbs out with `..` is never looked up and reads as missing. A node
-   that lacks any of them answers with the existing re-placeable route-not-ready refusal, **503**, naming what is missing (six
-   names, then a count), before any job exists. A model the graph's manifest tells the node to fetch (a `models[]` entry with a
+   that lacks any of them answers with the existing re-placeable route-not-ready refusal, **503**, naming what is missing (up to
+   six names of each kind; past six weight files it says `7 or more files ... and more` and gives no count, because the node stops
+   looking at the seventh: the door is open to any peer and a graph can name thousands of files, so the work is bounded by what
+   the refusal shows and not by the graph), before any job exists. A model the graph's manifest tells the node to fetch (a `models[]` entry with a
    `source_url`) is not refused: the satisfier downloads it before ComfyUI starts. **Input files do not travel with a graph**
    (the dispatch door carries JSON; the media-job door carries no input for `run-graph`), so the refusal says so; carrying
    them is a named seam, not built. "Holds" is **name, not content**. For a weight file the name is the practical identity; an
@@ -197,18 +201,22 @@ card. This amendment adds them under four rules; every other decision stands, an
    bytes, and rule 2 keeps such a graph off the auto-overflow. A custom node's own file key is not read. The delegator sends no
    family and no digest, and requires the node to run its own release (the check ships with it), where a new health key would
    have said the same; that proves the check only because the release that adds it carries a new version number, so the bump
-   ships with the merge, before any delegator is deployed.
+   ships with the merge, before any delegator is deployed. The release proof holds for **every** remote placement of a graph, as
+   rule 3's card rule does: the overflow asks it of its candidates, and `route remote` and a thin client's `auto` ask it when they
+   pick a node, so a node on another release, or one that publishes none, is a named miss on all three.
 2. **The trigger and the placement are the image's.** `Pipeline.MediaLaneFree` answers for a whole-node `run_graph` with the
    whole-node reading (any lease, in-process slot or place in line, and the host's memory against the media class default, the
    largest family the box binds: the lease is taken for the graph as a whole before anything reads its weights, so that is an
    upper bound and not the graph's own size), under the same contract: a relaxation of the real wait-0 admission, held by
    a differential test, that writes nothing. A graph that names `devices` (refused by `plan()` before the lane is asked), one
    that carries a `waiter_token`, one under an inherited lease and one that reads an input file stay here; the last waits for
-   this machine's own lane and its deferral says the fleet was not asked and why (`fleet_note`). A call with no lane of its own to
-   wait for (`route remote`, or `auto` on a thin client) is placed as before, checked by name only. Hashing each input file to
+   this machine's own lane, and if that wait ends in a deferral the deferral says the fleet was not asked and why (`fleet_note`;
+   a call that then runs here and succeeds carries no note, because only a deferral is annotated). A call with no lane of its own
+   to wait for (`route remote`, or `auto` on a thin client) is placed as before, checked by name only, and held to rule 1's release
+   proof and rules 3 and 4. Hashing each input file to
    the node would lift that last exception and close that limit; it is not built. A node's 503 at the door moves the call to the
    next node like any refusal at the door (decision 6) and counts toward the three attempts; the call falls back to the local
-   queue with `cluster[]` naming, per node, the file it lacks.
+   queue, and when that wait ends in a deferral the deferral carries `cluster[]` naming, per node, the file it lacks.
 3. **A whole-node graph is placed only on a node that publishes exactly one card.** A graph that names no devices holds the
    whole node and runs in the default ComfyUI instance, which sees every card; on a node with several, the delegator cannot
    know which card that instance picks and it may be the display card. So a node with more than one card is a named miss, and
@@ -234,4 +242,6 @@ than every bound family can be under-counted. The default floor reads two things
 node, the workstation among them; whether to relax that for the operator's own machine, once the monitors-off detector exists, is the
 operator's. With the fleet as the film owner described it on 2026-10-09 (the 16 GB cards are the three of the multi-card
 workstation, the single-card nodes carry 8 GB cards) rules 3 and 4 together leave a graph that gets the default Wan floor no remote
-target: it waits for its own lane. The durable fix is on the node (keep a whole-node graph off the display card there). Nothing here was run live: A8 in the step report is the first.
+target: it waits for its own lane. The durable fix is on the node (keep a whole-node graph off the display card there). A graph is
+placed only on a node that runs this machine's release, on every route, so a fleet part-way through an upgrade routes graphs only
+to the nodes already on it (and `route remote` to a node still on the old release is a named miss, not a send). Nothing here was run live: A8 in the step report is the first.

@@ -9,22 +9,29 @@ Versioning: [SemVer](https://semver.org/).
 ### Added — a whole-node graph runs on the fleet: a node checks the files it names, one card only, and a VRAM floor (F32, ADR 0082 Amendment 1)
 
 - **A node refuses a run-graph that names a file it does not hold, before any job exists.** `/fleet/dispatch` reads the graph at
-  the door (`mediacap.ScanGraph`): any string input, under any key, whose value ends `.safetensors`, `.gguf`, `.pth`, `.pt`, `.ckpt`
-  or `.sft` is a weight file (a `ModelPatchLoader`'s `name` and a wrapper loader's `model` count, not only `*_name` keys; an output
-  prefix and a URL do not), and the file input of `LoadImage`, `LoadImageMask`, `LoadImageOutput` (`image`), `LoadVideo` (`file`) and
+  the door (`mediacap.ScanGraph`): any string input, under any key but `filename_prefix`, whose value ends `.safetensors`,
+  `.gguf`, `.pth`, `.pt`, `.ckpt` or `.sft` and does not contain `://` is a weight file (a `ModelPatchLoader`'s `name` and a wrapper
+  loader's `model` count, not only `*_name` keys; those two, the key `filename_prefix` and a value containing `://`, are the
+  exclusions the code keeps), and the file input of `LoadImage`, `LoadImageMask`, `LoadImageOutput` (`image`), `LoadVideo` (`file`) and
   `LoadAudio` (`audio`) is an input file. A weight file must exist by name under any class directory of any models root, a class
-  directory that is a symlink or a junction included (the same resolver the host-RAM estimate uses); an input file must be in the
+  directory that is a symlink or a junction included (the same class-directory enumeration the host-RAM estimate and doctor's model
+  bindings use); an input file must be in the
   ComfyUI input, output or temp directory. A node that lacks one answers **503** with the existing re-placeable route-not-ready
-  refusal naming it (six names, then a count), before a temp file, a lease or ComfyUI exists, so a delegator moves on instead of a
-  node cold-starting ComfyUI to defer. **Input files do not travel with a graph**, and the refusal says so. A model the manifest
+  refusal naming it (up to six names of each kind; past six weight files it says `7 or more files ... and more` and gives no count,
+  because the node stops looking at the seventh: the door is open to any peer and a graph can name thousands of files, so the work is
+  bounded by what the refusal shows and not by the graph), before a temp file, a lease or ComfyUI exists, so a delegator moves on instead of a
+  node cold-starting ComfyUI to defer. The class-directory-link fix lives in `classDirs` (`internal/mediacap/modelbindings.go`), which
+  doctor's model bindings and the host-RAM estimate read too, so on a node whose class directory is a link they now find the files
+  behind it as well, not only this check. **Input files do not travel with a graph**, and the refusal says so. A model the manifest
   tells the node to fetch (`source_url`) is not refused; a name that is absolute or climbs with `..` is never looked up. The check is
   by name, not content.
 - **A busy lane places a whole-node graph on an idle node.** `Pipeline.MediaLaneFree` answers for a `run_graph` that names no
   devices with the whole-node reading (any lease, slot or place in line; host RAM against the media class default) under the image
   probe's contract (a relaxation of the real admission, held by a differential test; it writes nothing). The overflow of 0.179.0
-  now covers it: no family and no digest travel, a node's 503 at the door moves the call to the next node, and the answer carries
-  `cluster[]` naming, per node, the file it lacks. A graph with `devices`, a `waiter_token`, an inherited lease or an input file stays
-  here.
+  now covers it: no family and no digest travel, a node's 503 at the door moves the call to the next node, and when the call then
+  waits in this machine's own queue and that wait ends in a deferral, the deferral carries `cluster[]` naming, per node, the file it
+  lacks (a call that then runs here and succeeds carries none). A graph with `devices`, a `waiter_token`, an inherited lease or an
+  input file stays here.
 - **A graph that reads an input file is not auto-overflowed.** Input files are the caller's own and carry generic names
   (`image.png`, `ComfyUI_00001_.png [output]`) that two machines share with different bytes, and a node can match one only by name,
   so a node holding a same-named file would have run the graph on the wrong bytes and answered ok with a sha-verified output. The
@@ -54,6 +61,10 @@ Versioning: [SemVer](https://semver.org/).
 - **The release that ships this must carry a new version number before any delegator is deployed.** A delegator takes an equal
   `harness_version` as proof that a node has the file check; this change adds no version, so a node still on the build before it
   would read as equal and take a graph it cannot check. The bump belongs to the merge (a deploy precondition, not a code switch).
+- **A graph is placed only on a node that runs this machine's release, on every route.** The proof above was first asked only by the
+  overflow; `route remote` and a thin client's `auto` pick their node by another function and did not compare `harness_version`, so
+  they could send a graph to a node on another release. They now refuse such a node, and one that publishes no version, by name, as the
+  overflow does. A fleet part-way through an upgrade therefore takes graphs only on the nodes already upgraded.
 - Not changed, and said: this change adds no VERSION or buildinfo bump of its own. A hash of the input files, `devices` on a remote
   graph and a custom node's own file keys are named seams, not built. The node's host-RAM guard sizes a graph at the media class
   default (the largest family the box binds), not at the files it names, so a graph naming weights bigger than every bound family

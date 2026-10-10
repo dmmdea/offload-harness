@@ -2080,11 +2080,13 @@ recipe and no family: what makes a node a fit is that it **holds the files the g
 **The node's door (the ACK check).** Before it writes a temp file, takes a lease or starts ComfyUI, `buildRunGraph`
 (`internal/fleetnode/graph_files.go`, with `mediacap.ScanGraph` and `mediacap.MissingModelFiles`) reads the graph:
 
-- a **weight file** is any string input, under **any key**, whose value ends in `.safetensors`, `.gguf`, `.pth`, `.pt`, `.ckpt` or
-  `.sft`: `ckpt_name`, `unet_name`, `vae_name`, `lora_name`, but also a `ModelPatchLoader`'s `name`, a wrapper loader's `model`, an
-  `ipadapter_file` or a primitive's `value` (every custom node picks its own key; the extension is the stable part). A link, a
-  number, an output prefix (`filename_prefix`) and a URL are not files. The price is a text that itself ends in a weight extension:
-  it reads as a file name and costs a re-placeable 503 (the graph still runs on its own machine). It must
+- a **weight file** is any string input, under **any key but one**, whose value ends in `.safetensors`, `.gguf`, `.pth`, `.pt`,
+  `.ckpt` or `.sft`: `ckpt_name`, `unet_name`, `vae_name`, `lora_name`, but also a `ModelPatchLoader`'s `name`, a wrapper loader's
+  `model`, an `ipadapter_file` or a primitive's `value` (every custom node picks its own key; the extension is the stable part).
+  The two exclusions the code keeps: the key `filename_prefix` (an output prefix, whatever its value) is never read, and neither is
+  a value that contains `://` (a URL). A link and a number are not strings and are not files either. The price is a text that
+  itself ends in a weight extension: it reads as a file name and costs a re-placeable 503 (the graph still runs on its own
+  machine). It must
   resolve **by name** under **any class directory of any models root** of the node (`<comfy_dir>/models/*` and every entry of
   `extra_model_paths.yaml`), as a ComfyUI loader opens it: the name relative to the class directory, subfolders included, never a
   search for the basename. A class directory that is a symlink or a Windows junction counts. The class is not matched to the
@@ -2099,8 +2101,11 @@ recipe and no family: what makes a node a fit is that it **holds the files the g
 - a model the **manifest** tells the node to fetch (a `models[]` entry with a `source_url`) is not missing: the satisfier
   downloads it before it starts ComfyUI, as it always did.
 
-A node that lacks any of them answers **503** with the existing route-not-ready refusal, naming what is missing (six names, then
-a count), and **no job, temp file or lease exists**. The delegator's `cluster[]` row keeps the first 300 bytes of that answer's body
+A node that lacks any of them answers **503** with the existing route-not-ready refusal, naming what is missing (up to six names
+of each kind), and **no job, temp file or lease exists**. Past six missing weight files it says `7 or more files ... and more` and
+gives no count: the node stops looking at the seventh (the door is open to any peer and a graph can name thousands of files, and a
+missing name costs a stat in every class directory of every models root, so the work is bounded by the six shown and not by the
+graph); a list of missing input files is short and is counted exactly. The delegator's `cluster[]` row keeps the first 300 bytes of that answer's body
 (`post()` truncates), so the sentence is short and two real Wan file names fit; a graph missing many long names shows its first two or
 three there, and the node's own 503 body (a `curl` of the dispatch) lists up to six. 503 is what every delegator re-places, so the call goes to the next node
 instead of this one cold-starting ComfyUI to defer. The check is by **name, not content**: a same-named file of other bytes is held. For a
@@ -2113,6 +2118,10 @@ stays by name: that is a named limit. A custom node's own file key is not read.
 **Which node.** A candidate serves `run-graph` with `run_graph` CONFIGURED when it reports its routes, runs this release (the
 file check ships with it: an equal `harness_version` proves that only when the release that adds the check carries a new version
 number, so the version bump ships with the merge, before any delegator is deployed), holds no lease of any class, is not this machine's own node, and passes the two rules below. The
+release proof and the two rules hold for **every** remote placement of a graph, not only the overflow: `route remote` and a thin
+client's `auto` pick a node by the same health fields and refuse a node that runs another release, or publishes none, by name
+(they do not read the media lease; the node's own grant refuses a job it cannot take). A fleet part-way through an upgrade
+therefore cannot place a graph on a node that is not yet on this release. The
 lane question is the whole-node reading of `Pipeline.MediaLaneFree` (`internal/pipeline/medialane_graph.go`: any lease,
 in-process slot or place in line, and the host's memory against the media class default, the largest family the box binds: the
 lease is taken for the graph as a whole before anything reads the weights it names, so that is an upper bound for the families the
@@ -2120,11 +2129,12 @@ box binds and not the graph's own size, and a graph that names weights bigger th
 named limit), under the same relaxation contract as the image's (`TestMediaLaneFreeGraphNeverRefusesAGrant`,
 `TestMediaLaneFreeGraphWritesNothing`). The graph travels as it is: no family, no digest, `out_dir` and `min_vram_gb` never. A node's
 503 moves the call on like any refusal at the door and counts toward the three attempts; when nothing admits, the call waits in
-this machine's own queue and the answer carries `cluster[]` naming, per node, the file it lacks. A graph that names `devices`, one
+this machine's own queue, and when that wait ends in a deferral the deferral carries `cluster[]` naming, per node, the file it
+lacks (a call that then runs here and succeeds carries no `cluster[]` and no note: only a deferral is annotated). A graph that names `devices`, one
 that carries a `waiter_token`, one under an inherited lease and one that **reads an input file** are not overflowed. The last waits
 for this machine's own lane, and the deferral it ends in says that the fleet was not asked and why (`fleet_note` in its data and in
 its reason). A call with no lane of its own to wait for (`route remote`, or `auto` on a thin client) is placed on a node as before,
-checked by name only. Sending a size and a hash of each input file to the node would restore the overflow for such graphs and
+checked by name only, and held to the same release proof and the two rules below. Sending a size and a hash of each input file to the node would restore the overflow for such graphs and
 close that limit; it is not built.
 
 **One card.** A graph that names no devices holds the whole node and runs in the default ComfyUI instance, which sees every

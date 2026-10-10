@@ -2,9 +2,10 @@ package pipeline
 
 // MediaLaneFree for a whole-node run_graph (P0 plan, S4). A graph the operator did not pin to cards holds the WHOLE node, so
 // the question is the whole-node one: any lease, in-process slot or place in line is in its way, and so is a host that
-// cannot take what the call declares (the media class default, the largest family the box binds, since a graph's weights
-// cannot be named). The contract is the one the image probe has, held by the same kind of differential test against the REAL
-// wait-0 admission: a lane the grant would serve is never called busy.
+// cannot take what the call declares (the media class default, the largest family the box binds: the lease is taken for the
+// graph as a whole before anything reads the weights it names, so what it declares is not the size of those files, though
+// the node's door does resolve them). The contract is the one the image probe has, held by the same kind of differential
+// test against the REAL wait-0 admission: a lane the grant would serve is never called busy.
 
 import (
 	"context"
