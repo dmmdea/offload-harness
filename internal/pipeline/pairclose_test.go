@@ -238,6 +238,37 @@ func TestABusyMediaCallClosesItsPairCardQuietBeforeRunReturns(t *testing.T) {
 	rig.quiet()
 }
 
+// A composition that waited its window for the process's one compose slot and found another composition
+// holding it is held back as surely as a media call behind another job's card (compose_busy): nothing ran
+// and the answer says to call again. The slot is no GPU card, but the call closes quiet all the same.
+func TestABusyComposeSlotClosesItsPairCardQuietBeforeRunReturns(t *testing.T) {
+	rig := newPairRig(t)
+	dir := t.TempDir()
+	cfg := composeCfg(t, dir, writeComposeStub(t, dir, "ok"))
+	cfg.GPUWaitMs = 1
+	p := &Pipeline{cfg: cfg}
+	p.SetCallTracker(rig.em)
+	if !takeComposeSlot(time.Second) {
+		t.Fatal("setup: the compose slot is already held")
+	}
+	defer releaseComposeSlot()
+	res := p.Run(context.Background(), core.Request{Task: core.TaskComposeVideo, Door: "offload_compose_video", Params: map[string]any{"template": "title-card"}})
+	if res.OK || !res.Deferred || res.Meta.ErrClass != core.ErrClassComposeBusy {
+		t.Fatalf("want the compose-slot deferral, got ok=%v class=%q: %s", res.OK, res.Meta.ErrClass, res.Reason)
+	}
+	// RUN HAS RETURNED: THE DOOR ANSWERS NOW.
+	closed := rig.byMethod("workload:completed")
+	if got, _ := closed["error"].(string); !strings.HasPrefix(got, "compose_video: busy") || closed["startedAt"] != nil || closed["engine"] != "hyperframes" {
+		t.Fatalf("a composition held back by another closes quiet and unstarted with its reason: %v", closed)
+	}
+	for _, m := range rig.methods() {
+		if m == "workload:errored" {
+			t.Fatalf("a busy compose slot was closed as a failure: %v", rig.methods())
+		}
+	}
+	rig.quiet()
+}
+
 // A render that ran is a completed card with its start and no error.
 func TestASuccessfulMediaCallClosesItsPairCardCompleted(t *testing.T) {
 	for _, withLedger := range []bool{false, true} {

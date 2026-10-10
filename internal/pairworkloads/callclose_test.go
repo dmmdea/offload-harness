@@ -276,6 +276,8 @@ func TestCardOutcomeTable(t *testing.T) {
 		{"success that never marked working (a cache hit)", core.Result{OK: true}, false, "completed", ""},
 		{"queued answer", heldResult(), false, "completed", heldReason},
 		{"busy card", core.Deferf("gpu busy: x", "", core.Meta{ErrClass: "gpu_busy"}), false, "completed", "gpu busy: x"},
+		{"busy compose slot", core.Deferf("compose_video: busy — another composition in this process still holds the compose slot after 90s", "", core.Meta{ErrClass: "compose_busy"}), false, "completed",
+			"compose_video: busy — another composition in this process still holds the compose slot after 90s"},
 		{"queued answer after the lane started", heldResult(), true, "failed", heldReason},
 		{"render failure", core.Deferf("image generation failed: boom", "", core.Meta{ErrClass: "timeout"}), true, "failed", "image generation failed: boom"},
 		{"capacity class alone is not a held card", func() core.Result {
