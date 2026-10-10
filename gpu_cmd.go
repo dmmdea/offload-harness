@@ -111,6 +111,9 @@ func runGPUStatus(args []string) error {
 	if err != nil {
 		return err
 	}
+	// The readings below begin here: a marker stamped after this instant belongs to a lease
+	// they cannot speak for (see the stale-marker clear).
+	readsBegan := time.Now()
 	// With the scope the seat gates read (plan P4): a legacy whole-node lease arrives with the
 	// cards the evidence rule scoped it to, or with the reason it stayed whole-node.
 	info := modelaffinity.ScopeInfo(m.Dir(), m.Inspect())
@@ -121,8 +124,18 @@ func runGPUStatus(args []string) error {
 	// the agent seat is owed a warm-back by the last of them.
 	waiters := m.Waiters()
 	warmOwed := m.SeatWarmOwed()
-	if warmOwedIsStale(info, act, warmOwed) && m.ClearSeatWarmOwedIfSeat(warmOwed) {
-		warmOwed = ""
+	// A marker the readings prove moot is removed, and said. The readings above took as long as
+	// the whole activity snapshot, so the clear itself checks what they cannot: that the marker
+	// is older than they are, and that no lease is live now. When it declines (a lease stamped
+	// a fresh marker meanwhile, or another status run got there first) the live value is
+	// reported, not the one read before.
+	clearedStale := ""
+	if warmOwedIsStale(info, act, warmOwed) {
+		if m.ClearSeatWarmOwedIfStale(warmOwed, readsBegan) {
+			clearedStale, warmOwed = warmOwed, ""
+		} else {
+			warmOwed = m.SeatWarmOwed()
+		}
 	}
 	// Non-harness processes holding significant VRAM right now (register
 	// D-1xx-4, 2026-09-23): visible here too, not only at acquire, because a
@@ -159,6 +172,11 @@ func runGPUStatus(args []string) error {
 			// The next step, spelled out: a session reading "held" used to conclude
 			// "refuse the work"; the honest answer is "queue behind it".
 			"queue_with": queueHint,
+		}
+		// The seat whose stale warm-back marker this run removed (the key is only present when
+		// one was), so a reader of the JSON can tell "nothing was owed" from "it was just cleared".
+		if clearedStale != "" {
+			out["seat_warm_owed_cleared"] = clearedStale
 		}
 		// Card-scoped leases (P2): the cards a lease holds and every live epoch. Only
 		// present when they matter, so a whole-node host's output is unchanged.
@@ -218,6 +236,9 @@ func runGPUStatus(args []string) error {
 				parts = append(parts, fmt.Sprintf("pid %d (%s%s, %s in line)", w.PID, w.Class, scope, time.Since(w.Since()).Round(time.Second)))
 			}
 			fmt.Printf("  queued: %d — %s\n", len(waiters), strings.Join(parts, ", "))
+		}
+		if clearedStale != "" {
+			fmt.Printf("  cleared the stale warm-back marker for %s: the seat is loaded and no lease holds the card\n", clearedStale)
 		}
 		if warmOwed != "" {
 			fmt.Printf("  seat warm-back owed: %s (paid by the last holder to release)\n", warmOwed)
@@ -1013,13 +1034,14 @@ func markWarmOwed(m *gpulease.Manager) func(seat string) {
 // heartbeats ownership; waiters and the marker come from the manager.
 func leaseWarmGuard(m *gpulease.Manager, l *gpulease.Lease) warmGuard {
 	return warmGuard{
-		held:       l.Check,
-		renew:      l.Renew,
-		waiters:    m.Waiters,
-		owed:       m.SeatWarmOwed,
-		clear:      m.ClearSeatWarmOwed,
-		onlyIfOwed: true,
-		others:     otherLeaseOnSeat(m, l.Epoch()),
+		held:        l.Check,
+		renew:       l.Renew,
+		waiters:     m.Waiters,
+		owed:        m.SeatWarmOwed,
+		clear:       m.ClearSeatWarmOwed,
+		clearIfSeat: m.ClearSeatWarmOwedIfSeat,
+		onlyIfOwed:  true,
+		others:      otherLeaseOnSeat(m, l.Epoch()),
 	}
 }
 
@@ -1040,11 +1062,12 @@ func releaseWarmGuard(m *gpulease.Manager, epoch uint64) warmGuard {
 		// No Lease object to heartbeat here (a detached holder's child does
 		// that), but the ownership check re-runs on the same cadence for the
 		// warm's whole length, so a card that moves on mid-load cancels it.
-		renew:   held,
-		waiters: m.Waiters,
-		owed:    m.SeatWarmOwed,
-		clear:   m.ClearSeatWarmOwed,
-		others:  otherLeaseOnSeat(m, epoch),
+		renew:       held,
+		waiters:     m.Waiters,
+		owed:        m.SeatWarmOwed,
+		clear:       m.ClearSeatWarmOwed,
+		clearIfSeat: m.ClearSeatWarmOwedIfSeat,
+		others:      otherLeaseOnSeat(m, epoch),
 	}
 }
 

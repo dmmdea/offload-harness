@@ -476,9 +476,9 @@ func TestAFailedWarmsMarkerIsClearedByGPUStatusOnceTheSeatIsLoaded(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := m.MarkSeatWarmOwed("seat"); err != nil {
-		t.Fatal(err)
-	}
+	// Stamped when the unload happened, a warm's length ago (the status clear wants a marker older
+	// than its own readings).
+	markOwedAgo(t, m, "seat", time.Minute)
 	var out bytes.Buffer
 	warmBackGuarded(loadCfgPath(cfgPath), leaseWarmGuard(m, holder), &out)
 	if !strings.Contains(out.String(), "warm-back of seat failed") || m.SeatWarmOwed() != "seat" {
@@ -502,5 +502,189 @@ func TestAFailedWarmsMarkerIsClearedByGPUStatusOnceTheSeatIsLoaded(t *testing.T)
 	})
 	if m.SeatWarmOwed() != "" || strings.Contains(free, "warm-back owed") {
 		t.Fatalf("a free card and a loaded seat owe nothing (owed=%q):\n%s", m.SeatWarmOwed(), free)
+	}
+}
+
+// The final reading clears the marker only while the guards still allow touching the card. The
+// reading takes a moment and the heartbeat that would notice a lost lease ticks every 15 s, so
+// a warm that fails with the seat reading loaded can find that the card has moved on, or that
+// a successor has queued, by the time it would clear the marker. Then the marker is left for
+// whoever owns it now, the output says why, and the warm is not reported as done.
+func TestWarmBackGuardedLeavesTheMarkerWhenTheGuardsNoLongerAllowTheObservedLoadedClear(t *testing.T) {
+	setup := func(t *testing.T) (*warmOrderSwap, string, *gpulease.Manager, *gpulease.Lease) {
+		t.Helper()
+		fastWarmRetry(t, 5*time.Second)
+		old := maintenanceClient
+		maintenanceClient = &http.Client{Timeout: 150 * time.Millisecond}
+		t.Cleanup(func() { maintenanceClient = old })
+		f := &warmOrderSwap{drainSwap: &drainSwap{}, warmHold: 500 * time.Millisecond}
+		f.onHealth = func(int32) { f.loaded.Store(true) } // up and ready; only the answer is stuck
+		cfgPath, m := warmOrderFixture(t, f)
+		holder, err := m.TryAcquire(gpulease.ClassText, gpulease.Options{Reason: "warming", TTL: time.Hour, Exclusive: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := m.MarkSeatWarmOwed("seat"); err != nil {
+			t.Fatal(err)
+		}
+		return f, cfgPath, m, holder
+	}
+	check := func(t *testing.T, out string, m *gpulease.Manager, want string) {
+		t.Helper()
+		for _, w := range []string{"warm-back of seat failed", "the seat reads loaded, but the marker is left alone", want, "the warm stays owed"} {
+			if !strings.Contains(out, w) {
+				t.Errorf("the output must contain %q: %s", w, out)
+			}
+		}
+		if strings.Contains(out, "treating it as warmed") || strings.Contains(out, "seat warmed back") {
+			t.Errorf("a warm that may not touch the marker is not reported as done: %s", out)
+		}
+		if owed := m.SeatWarmOwed(); owed != "seat" {
+			t.Errorf("the marker stays for the lease that owns it now, owed=%q", owed)
+		}
+	}
+	t.Run("the card moved on", func(t *testing.T) {
+		f, cfgPath, m, holder := setup(t)
+		f.onWarm = func() { _, _ = m.ReleaseByEpoch(holder.Epoch()) } // lost while the request hangs
+		var out bytes.Buffer
+		warmBackGuarded(loadCfgPath(cfgPath), leaseWarmGuard(m, holder), &out)
+		_ = holder.Release()
+		check(t, out.String(), m, "the card is no longer ours")
+	})
+	t.Run("a lease queued behind the warm", func(t *testing.T) {
+		f, cfgPath, m, holder := setup(t)
+		var once sync.Once
+		queued := make(chan error, 1)
+		f.onWarm = func() {
+			once.Do(func() {
+				go func() {
+					l, aerr := m.Acquire(gpulease.ClassText, gpulease.Options{Reason: "behind", TTL: time.Hour, Wait: 20 * time.Second, WaitOut: true})
+					if aerr == nil {
+						_ = l.Release()
+					}
+					queued <- aerr
+				}()
+				deadline := time.Now().Add(10 * time.Second)
+				for len(m.Waiters()) == 0 && time.Now().Before(deadline) {
+					time.Sleep(5 * time.Millisecond)
+				}
+			})
+		}
+		var out bytes.Buffer
+		warmBackGuarded(loadCfgPath(cfgPath), leaseWarmGuard(m, holder), &out)
+		_ = holder.Release()
+		select {
+		case err := <-queued:
+			if err != nil {
+				t.Errorf("the queued lease must be granted once the holder lets go: %v", err)
+			}
+		case <-time.After(10 * time.Second):
+			t.Error("the queued lease was never granted after the holder let go")
+		}
+		check(t, out.String(), m, "1 lease(s) queued behind this one")
+	})
+}
+
+// What a failed warm says follows what it knows. "The warm stays owed" is only true when a
+// marker is there: an explicit `gpu release --warm-seat` over a seat nothing was owed to has no
+// debt to keep. A window that ran out over an unreadable server says the state could not be
+// read (not "not loading"), the announcement does not call an unreadable seat cold, and a
+// confirming read that fails says it could not confirm.
+func TestAFailedWarmSaysOnlyWhatItKnows(t *testing.T) {
+	t.Run("nothing owed", func(t *testing.T) {
+		fastWarmRetry(t, 100*time.Millisecond)
+		f := &warmOrderSwap{drainSwap: &drainSwap{}, reloadFails: 1 << 20}
+		cfgPath, m := warmOrderFixture(t, f)
+		holder, err := m.TryAcquire(gpulease.ClassText, gpulease.Options{Reason: "detached", TTL: time.Hour, Exclusive: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out bytes.Buffer
+		warmBackGuarded(loadCfgPath(cfgPath), releaseWarmGuard(m, holder.Epoch()), &out)
+		_ = holder.Release()
+		if !strings.Contains(out.String(), "warm-back of seat failed") || !strings.Contains(out.String(), "not loading") {
+			t.Errorf("the failure is said: %s", out.String())
+		}
+		if strings.Contains(out.String(), "stays owed") || strings.Contains(out.String(), "gpu status") {
+			t.Errorf("no marker is there, so no debt stays and nothing is left for `gpu status` to clear: %s", out.String())
+		}
+	})
+	t.Run("owed", func(t *testing.T) {
+		fastWarmRetry(t, 100*time.Millisecond)
+		f := &warmOrderSwap{drainSwap: &drainSwap{}, reloadFails: 1 << 20}
+		cfgPath, m := warmOrderFixture(t, f)
+		holder, err := m.TryAcquire(gpulease.ClassText, gpulease.Options{Reason: "detached", TTL: time.Hour, Exclusive: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := m.MarkSeatWarmOwed("seat"); err != nil {
+			t.Fatal(err)
+		}
+		var out bytes.Buffer
+		warmBackGuarded(loadCfgPath(cfgPath), releaseWarmGuard(m, holder.Epoch()), &out)
+		_ = holder.Release()
+		if !strings.Contains(out.String(), "the warm stays owed (`gpu status` clears it once the seat is observed loaded)") {
+			t.Errorf("a marker that stays is said to stay: %s", out.String())
+		}
+	})
+	t.Run("an unreadable server", func(t *testing.T) {
+		notes := fastWarmRetry(t, 100*time.Millisecond)
+		f := &warmOrderSwap{drainSwap: &drainSwap{}, reloadFails: 1 << 20, reloadStatus: http.StatusServiceUnavailable, reloadBody: "gone"}
+		f.runningDown = func() bool { return true }
+		cfgPath, m := warmOrderFixture(t, f)
+		holder, err := m.TryAcquire(gpulease.ClassText, gpulease.Options{Reason: "warming", TTL: time.Hour, Exclusive: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := m.MarkSeatWarmOwed("seat"); err != nil {
+			t.Fatal(err)
+		}
+		var out bytes.Buffer
+		warmBackGuarded(loadCfgPath(cfgPath), leaseWarmGuard(m, holder), &out)
+		_ = holder.Release()
+		for _, want := range []string{"warm-back of seat failed", "the seat's state could not be read; no recovery within", "could not confirm the seat's state ("} {
+			if !strings.Contains(out.String(), want) {
+				t.Errorf("the output must contain %q: %s", want, out.String())
+			}
+		}
+		if strings.Contains(out.String(), "not loading") {
+			t.Errorf("an unreadable seat is not a seat that is not loading: %s", out.String())
+		}
+		got := notes.all()
+		if len(got) != 1 || !strings.Contains(got[0], "the seat reads cold or unreadable") || strings.Contains(got[0], "the seat is cold") {
+			t.Errorf("the announcement does not call an unreadable seat cold: %q", got)
+		}
+		if owed := m.SeatWarmOwed(); owed != "seat" {
+			t.Errorf("an unconfirmed warm stays owed, owed=%q", owed)
+		}
+	})
+}
+
+// The observed-loaded clear is a compare-and-delete by seat, not a blind remove: a marker that
+// names another seat by the time the warm finishes is somebody else's debt and stays.
+func TestWarmBackGuardedObservedLoadedClearLeavesAMarkerThatNamesAnotherSeat(t *testing.T) {
+	fastWarmRetry(t, 5*time.Second)
+	old := maintenanceClient
+	maintenanceClient = &http.Client{Timeout: 150 * time.Millisecond}
+	t.Cleanup(func() { maintenanceClient = old })
+	f := &warmOrderSwap{drainSwap: &drainSwap{}, warmHold: 500 * time.Millisecond}
+	f.onHealth = func(int32) { f.loaded.Store(true) } // up and ready; only the answer is stuck
+	cfgPath, m := warmOrderFixture(t, f)
+	holder, err := m.TryAcquire(gpulease.ClassText, gpulease.Options{Reason: "warming", TTL: time.Hour, Exclusive: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.MarkSeatWarmOwed("seat"); err != nil {
+		t.Fatal(err)
+	}
+	f.onWarm = func() { _ = m.MarkSeatWarmOwed("other-seat") }
+	var out bytes.Buffer
+	warmBackGuarded(loadCfgPath(cfgPath), leaseWarmGuard(m, holder), &out)
+	_ = holder.Release()
+	if !strings.Contains(out.String(), "treating it as warmed") {
+		t.Errorf("the seat reads loaded and the guards allow: %s", out.String())
+	}
+	if owed := m.SeatWarmOwed(); owed != "other-seat" {
+		t.Errorf("a marker for another seat is not this warm's to clear, owed=%q", owed)
 	}
 }

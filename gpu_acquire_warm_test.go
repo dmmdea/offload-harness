@@ -92,16 +92,31 @@ type warmOrderSwap struct {
 	// reloadHijack closes the connection instead of answering: the shape of a full
 	// llama-swap restart, whose listener goes away.
 	reloadHijack bool
+	// reloadTruncate answers the 500 with a body cut short: the headers promise more than
+	// arrives and the connection closes, as it does when the old router dies while it is
+	// writing the answer. The part that arrives is not enough to read the reload words.
+	reloadTruncate bool
 	// runningDownUntilHit answers /running 503 while fewer health requests than this
 	// have arrived: the whole server is down, not just the old router.
 	runningDownUntilHit int32
+	// runningDown, when set, is asked on every /running read and answers it 503 when it says
+	// so: one poll that fails in the middle of a load.
+	runningDown func() bool
 	// reloadAnswerFn, when set, decides the answer of the reloadFails requests by hit number
 	// (a reload that is followed by a failed start); it replaces reloadStatus and reloadBody.
 	reloadAnswerFn func(hit int32) (status int, body string)
 	// onHealth runs on every health request with its 1-based hit number, before it is answered.
 	onHealth func(hit int32)
-	// healthHits counts every health request, reloaded or not.
+	// healthHits counts every health request, reloaded or not; healthAt is when each arrived.
 	healthHits atomic.Int32
+	healthAt   []time.Time
+}
+
+// arrivals is when each health request arrived, in order.
+func (f *warmOrderSwap) arrivals() []time.Time {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]time.Time(nil), f.healthAt...)
 }
 
 // shuttingDownBody is what llama-swap's router answers a request it was holding when its
@@ -112,6 +127,14 @@ const shuttingDownBody = `{"src":"llama-swap","error":{"message":"unspecific err
 func (f *warmOrderSwap) answerReload(w http.ResponseWriter, hit int32) {
 	if f.reloadHijack {
 		if c, _, err := w.(http.Hijacker).Hijack(); err == nil {
+			c.Close()
+		}
+		return
+	}
+	if f.reloadTruncate {
+		if c, rw, err := w.(http.Hijacker).Hijack(); err == nil {
+			_, _ = rw.WriteString("HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/plain\r\nContent-Length: 400\r\n\r\nunspecific error: matrix is shu")
+			_ = rw.Flush()
 			c.Close()
 		}
 		return
@@ -170,13 +193,16 @@ func (f *warmOrderSwap) handler(model string) http.Handler {
 		inner.ServeHTTP(w, r)
 	})
 	mux.HandleFunc("/running", func(w http.ResponseWriter, r *http.Request) {
-		if f.healthHits.Load() < f.runningDownUntilHit {
+		if f.healthHits.Load() < f.runningDownUntilHit || (f.runningDown != nil && f.runningDown()) {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			return
 		}
 		inner.ServeHTTP(w, r)
 	})
 	mux.HandleFunc("/upstream/"+model+"/health", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		f.healthAt = append(f.healthAt, time.Now())
+		f.mu.Unlock()
 		hit := f.healthHits.Add(1)
 		if f.onHealth != nil {
 			f.onHealth(hit)

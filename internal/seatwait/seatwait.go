@@ -201,6 +201,24 @@ func Retryable(status int, body string) bool {
 	return false
 }
 
+// DeathMarker is llama-swap's own wording for a start whose engine exited
+// ("upstream command exited prematurely", process_command.go in upstream's
+// source): the one body that says a start died.
+const DeathMarker = "upstream command exited"
+
+// startRefusedMarker is the older llama-swap's 502 for a start it could not
+// complete ("unable to start process: ..."). It is this repo's recorded shape
+// (the warm-back tests), not quoted from the current upstream source.
+const startRefusedMarker = "unable to start process"
+
+// StartFailed reports whether a refusal's body says the seat's process did not
+// start: the engine exited, or llama-swap was "unable to start process". Re-sending
+// that request is a second failed start, whatever the status code says.
+func StartFailed(body string) bool {
+	lower := strings.ToLower(body)
+	return strings.Contains(lower, DeathMarker) || strings.Contains(lower, startRefusedMarker)
+}
+
 // Sleeping reports whether a reserved sleep is in progress right now — the
 // fact a wall-timeout classifier needs: "did the wall expire WHILE waiting
 // on peers?" is a different question from "was there ever a busy answer?".

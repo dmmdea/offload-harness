@@ -92,7 +92,7 @@ func TestWarmSurvivesAReloadWhoseOldRouterAnswersShuttingDown500(t *testing.T) {
 		t.Fatalf("two interrupted requests and one that loaded: health requests=%d (want 3) loads=%d (want 1)", hits, warms)
 	}
 	got := notes.all()
-	if len(got) != 1 || !strings.Contains(got[0], "reload") || !strings.Contains(got[0], "seat") {
+	if len(got) != 1 || !strings.Contains(got[0], "reload") || !strings.Contains(got[0], "seat") || !strings.Contains(got[0], "the seat is cold") {
 		t.Fatalf("the retry says so once, naming the seat and the reload: %q", got)
 	}
 }
@@ -259,23 +259,118 @@ func TestWarmDoesNotRetryAPlainFiveHundredWithNothingLoading(t *testing.T) {
 }
 
 // Once a reload has been seen the recovery is a window, not a single event: the new server's
-// first start can fail while the old process still holds the port or the card, and that answer
-// is a bare 500 with no reload words in it. Inside the grace it is retried too.
-func TestWarmKeepsRetryingAnyFiveHundredInsideTheGraceOnceAReloadWasSeen(t *testing.T) {
+// first answer can be a bare 500 with no reload words in it. Inside the grace it is retried too,
+// unless its body says the start died (next test).
+func TestWarmKeepsRetryingAFiveHundredThatDoesNotSayTheStartDiedInsideTheGrace(t *testing.T) {
 	fastWarmRetry(t, 5*time.Second)
 	f := &warmOrderSwap{drainSwap: &drainSwap{}, reloadFails: 2}
 	f.reloadAnswerFn = func(hit int32) (int, string) {
 		if hit == 1 {
 			return http.StatusInternalServerError, shuttingDownBody
 		}
-		return http.StatusInternalServerError, `{"error":{"message":"unspecific error: upstream command exited prematurely"}}`
+		return http.StatusInternalServerError, `{"error":{"message":"unspecific error: not ready"}}`
 	}
 	srv := reloadingSwap(t, f)
 	if err := warmSeat(testCtx(t), srv.Client(), srv.URL, "seat"); err != nil {
-		t.Fatalf("a failed first start right after a reload is part of the recovery: %v", err)
+		t.Fatalf("a bare 500 right after a reload is part of the recovery: %v", err)
 	}
 	if hits := f.healthHits.Load(); hits != 3 {
 		t.Fatalf("health requests=%d (want 3)", hits)
+	}
+}
+
+// llama-swap answers a FAILED START as a 502 "unable to start process: upstream command exited
+// prematurely" (the contract path already reads it that way: seatwait.StartFailed). That is a
+// refusal, not a server going away, so it neither opens the recovery window nor is re-sent: a
+// second send is a second engine launch while the lease stays held and a successor waits. The
+// status code does not matter, and neither does the window.
+func TestWarmDoesNotRetryAnAnswerThatSaysTheStartDied(t *testing.T) {
+	bodies := map[string]string{
+		"unable to start process": "unable to start process: upstream command exited prematurely",
+		"engine exited":           `{"error":{"message":"unspecific error: upstream command exited prematurely","src":"llama-swap"}}`,
+		"unable, nothing else":    "Unable to start process: listen failed",
+	}
+	for _, code := range []int{http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout, http.StatusInternalServerError} {
+		for name, body := range bodies {
+			t.Run(strconv.Itoa(code)+" "+name, func(t *testing.T) {
+				notes := fastWarmRetry(t, 5*time.Second)
+				f := &warmOrderSwap{drainSwap: &drainSwap{}, reloadFails: 1 << 20, reloadStatus: code, reloadBody: body}
+				srv := reloadingSwap(t, f)
+				start := time.Now()
+				err := warmSeat(testCtx(t), srv.Client(), srv.URL, "seat")
+				if err == nil {
+					t.Fatal("a start that died is a failed warm")
+				}
+				for _, want := range []string{"status " + strconv.Itoa(code), "not loading"} {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("the failure must contain %q, got %v", want, err)
+					}
+				}
+				if sn := warmSnippet(body); !strings.Contains(err.Error(), sn) {
+					t.Errorf("the failure carries what the server said (%q): %v", sn, err)
+				}
+				if strings.Contains(err.Error(), "no recovery within") {
+					t.Errorf("no recovery window was opened, so none ran out: %v", err)
+				}
+				if hits := f.healthHits.Load(); hits != 1 {
+					t.Errorf("a failed start is not sent again: health requests=%d (want 1)", hits)
+				}
+				if took := time.Since(start); took > 500*time.Millisecond {
+					t.Errorf("a failed start must fail at once, took %s", took)
+				}
+				if got := notes.all(); len(got) != 0 {
+					t.Errorf("nothing was retried, so nothing is announced: %q", got)
+				}
+			})
+		}
+	}
+}
+
+// Inside an open window the same answer ends the warm too: a reload came first, then the new
+// server's first start died. The window covers a server that is not there, not one that tried
+// and failed.
+func TestWarmStopsAtAnAnswerThatSaysTheStartDiedEvenInsideTheRecoveryWindow(t *testing.T) {
+	fastWarmRetry(t, 5*time.Second)
+	f := &warmOrderSwap{drainSwap: &drainSwap{}, reloadFails: 3}
+	f.reloadAnswerFn = func(hit int32) (int, string) {
+		if hit == 1 {
+			return http.StatusInternalServerError, shuttingDownBody
+		}
+		return http.StatusBadGateway, "unable to start process: upstream command exited prematurely"
+	}
+	srv := reloadingSwap(t, f)
+	err := warmSeat(testCtx(t), srv.Client(), srv.URL, "seat")
+	if err == nil || !strings.Contains(err.Error(), "status 502") || !strings.Contains(err.Error(), "unable to start process") ||
+		strings.Contains(err.Error(), "no recovery within") {
+		t.Fatalf("the failed start ends the warm, named as such: %v", err)
+	}
+	if hits := f.healthHits.Load(); hits != 2 {
+		t.Fatalf("the load is not re-sent after a start that died: health requests=%d (want 2)", hits)
+	}
+}
+
+// The seat outranks the body: a start that died for THIS request while another client's request
+// is loading the seat is watched, not failed (the contract path reads it the same way). The
+// answer did not open a recovery window either, so the old rule for a 5xx still holds: an
+// unreadable /running is waited out like the load it may hide.
+func TestWarmWatchesASeatAnotherClientIsLoadingEvenWhenTheAnswerSaysTheStartDied(t *testing.T) {
+	fastWarmRetry(t, 5*time.Second)
+	f := &warmOrderSwap{drainSwap: &drainSwap{}, reloadFails: 1, reloadStatus: http.StatusBadGateway,
+		reloadBody: "unable to start process: upstream command exited prematurely"}
+	f.loaded.Store(true)
+	f.starting.Store(true)
+	var polls atomic.Int32
+	f.runningDown = func() bool { return polls.Add(1) <= 3 }
+	srv := reloadingSwap(t, f)
+	go func() {
+		time.Sleep(150 * time.Millisecond)
+		f.starting.Store(false)
+	}()
+	if err := warmSeat(testCtx(t), srv.Client(), srv.URL, "seat"); err != nil {
+		t.Fatalf("a seat that is loading is a warm in progress: %v", err)
+	}
+	if hits := f.healthHits.Load(); hits != 1 {
+		t.Fatalf("health requests=%d (want 1)", hits)
 	}
 }
 
@@ -467,5 +562,135 @@ func TestWarmAsksItsGateBeforeEachResend(t *testing.T) {
 	}
 	if asked != 2 || f2.healthHits.Load() != 2 {
 		t.Fatalf("the second check refused, so only the first re-send went: asked=%d health requests=%d (want 2 and 2)", asked, f2.healthHits.Load())
+	}
+}
+
+// A reload does not end the patience a load in progress is owed. After the reload the re-sent
+// load outlasts llama-swap's health wait (the 500 comes back while the seat is still starting),
+// and one /running poll fails in the middle of it. That poll says nothing about the load: the
+// watch keeps waiting for the seat it last saw starting instead of calling the state unknown,
+// which would end the warm while the load still lands, under whoever takes the card next.
+func TestWarmKeepsWaitingForALoadItSawStartingThroughOneUnreadableRunningAfterAReload(t *testing.T) {
+	notes := fastWarmRetry(t, 5*time.Second)
+	f := &warmOrderSwap{drainSwap: &drainSwap{}, reloadFails: 1, healthFails: true, visibleLoad: true, warmHold: 300 * time.Millisecond}
+	var polls atomic.Int32
+	f.runningDown = func() bool {
+		// The second poll that finds the seat starting fails, once; the first one read it fine.
+		return f.starting.Load() && polls.Add(1) == 2
+	}
+	srv := reloadingSwap(t, f)
+	if err := warmSeat(testCtx(t), srv.Client(), srv.URL, "seat"); err != nil {
+		t.Fatalf("a load that finishes is a warm, whatever one poll said in the middle of it: %v", err)
+	}
+	if polls.Load() < 2 {
+		t.Fatalf("the stand-in never failed a poll mid-load (polls while starting=%d): the test proved nothing", polls.Load())
+	}
+	// One reload answer, then the one load. A watch that gave up on the unreadable poll would
+	// have sent the load a third time.
+	if hits, warms := f.healthHits.Load(), f.warms.Load(); hits != 2 || warms != 1 {
+		t.Fatalf("health requests=%d (want 2) loads=%d (want 1)", hits, warms)
+	}
+	if got := notes.all(); len(got) != 1 {
+		t.Fatalf("the reload was announced once: %q", got)
+	}
+}
+
+// The other face of that rule: nothing was ever seen starting, so an unreadable /running during a
+// recovery is "the server is not up yet", and the warm backs off and re-sends instead of waiting
+// out the watch (15 minutes in production) for a load nobody started. The answer here is a 503
+// from whatever fronts llama-swap, not a dropped connection, so the attempt carries a status.
+func TestWarmDoesNotWaitOutAnUnreadableRunningAfterAReloadAnsweredBy503(t *testing.T) {
+	fastWarmRetry(t, 5*time.Second)
+	f := &warmOrderSwap{drainSwap: &drainSwap{}, reloadFails: 2, reloadStatus: http.StatusServiceUnavailable, reloadBody: "upstream gone", runningDownUntilHit: 3}
+	srv := reloadingSwap(t, f)
+	start := time.Now()
+	if err := warmSeat(testCtx(t), srv.Client(), srv.URL, "seat"); err != nil {
+		t.Fatalf("a warm across a front end that was down must succeed: %v", err)
+	}
+	// warmWatch is 2s in this test: a watch that waited for /running would have run it out.
+	if took := time.Since(start); took > time.Second {
+		t.Fatalf("an unreadable /running with nothing starting must not be waited out like a load (took %s)", took)
+	}
+	if hits, warms := f.healthHits.Load(), f.warms.Load(); hits != 3 || warms != 1 {
+		t.Fatalf("health requests=%d (want 3) loads=%d (want 1)", hits, warms)
+	}
+}
+
+// The back-off doubles from warmRetryFirst up to warmRetryMax and stays there. Timers are coarse
+// on some hosts, so the test reads arrival times with generous scales, and checks the two things
+// a wrong back-off changes: no gap is shorter than its delay (a constant first delay fails the
+// third gap), and the cap is reached (an uncapped doubling reaches only six requests in the
+// grace where the capped one sends more than ten).
+func TestWarmBackoffDoublesUpToItsCap(t *testing.T) {
+	fastWarmRetry(t, 1500*time.Millisecond)
+	warmRetryFirst, warmRetryMax = 40*time.Millisecond, 160*time.Millisecond
+	f := &warmOrderSwap{drainSwap: &drainSwap{}, reloadFails: 1 << 20}
+	srv := reloadingSwap(t, f)
+	err := warmSeat(testCtx(t), srv.Client(), srv.URL, "seat")
+	if err == nil || !strings.Contains(err.Error(), "no recovery within") {
+		t.Fatalf("a recovery that never comes ends with the grace named: %v", err)
+	}
+	at := f.arrivals()
+	if len(at) < 10 {
+		t.Fatalf("the capped back-off sends more than ten requests in the grace, got %d", len(at))
+	}
+	want := []time.Duration{40, 80, 160, 160, 160}
+	for i, w := range want {
+		w *= time.Millisecond
+		if gap := at[i+1].Sub(at[i]); gap < w-time.Millisecond {
+			t.Errorf("gap %d between requests is %s, shorter than its back-off of %s", i+1, gap, w)
+		}
+	}
+}
+
+// The body of the answer is the only input to the reload classification, and a read of it can
+// fail: the old router is shutting down while it writes the 500, and the connection dies mid-body.
+// A 500 whose body was cut short by a dropped connection is retried like the reload it is (the
+// words that would have said so did not arrive), where a bare 500 over a cold seat is not.
+func TestWarmRetriesAFiveHundredWhoseBodyWasCutShort(t *testing.T) {
+	fastWarmRetry(t, 5*time.Second)
+	f := &warmOrderSwap{drainSwap: &drainSwap{}, reloadFails: 1, reloadTruncate: true}
+	srv := reloadingSwap(t, f)
+	if err := warmSeat(testCtx(t), srv.Client(), srv.URL, "seat"); err != nil {
+		t.Fatalf("a 500 cut off mid-answer is a reload: %v", err)
+	}
+	if hits, warms := f.healthHits.Load(), f.warms.Load(); hits != 2 || warms != 1 {
+		t.Fatalf("health requests=%d (want 2) loads=%d (want 1)", hits, warms)
+	}
+}
+
+// When the body cannot be read and the failure is not a dropped connection (here the client's own
+// deadline ran out while the answer was being read), nothing is retried and the failure says the
+// answer was cut short, with the error, instead of presenting the part that arrived as the whole.
+func TestWarmFailureSaysWhenTheAnswerWasCutShort(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/upstream/seat/health", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "400")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("unspecific error: part"))
+		w.(http.Flusher).Flush()
+		select {
+		case <-time.After(2 * time.Second):
+		case <-r.Context().Done():
+		}
+	})
+	mux.HandleFunc("/running", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"running": []map[string]string{}})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	fastWarmRetry(t, 5*time.Second)
+	client := &http.Client{Timeout: 300 * time.Millisecond}
+	err := warmSeat(testCtx(t), client, srv.URL, "seat")
+	if err == nil {
+		t.Fatal("a 500 over a cold seat is a failure")
+	}
+	for _, want := range []string{"status 500", "unspecific error: part", "the answer was cut short", "not loading"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the failure must contain %q, got %v", want, err)
+		}
+	}
+	if got := (warmAttempt{status: 500, bodyErr: errors.New("read: boom")}).describe(); !strings.Contains(got, "could not be read: read: boom") {
+		t.Errorf("an answer with no body at all says it could not be read: %q", got)
 	}
 }
