@@ -1,6 +1,11 @@
 package servingtmpl
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"os"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -105,12 +110,88 @@ func TestTheSharedEG2ScannerKeepsTheBoundariesDropEG2ProjectorHad(t *testing.T) 
 	check("entry between two siblings", "models:\n  a:\n    cmd: x\n  embeddinggemma2:\n    cmd: y\n    ttl: 300\n  b:\n    cmd: z\n")
 }
 
-// TestEG2BinUnsetRendersByteIdentically is the promise that makes the field free to add: a render that gives
-// the entry no build of its own (empty, or the main build spelled again, with or without a trailing slash)
-// is the render every earlier release produced, so no node's config changes and no stamp moves. Every
-// template, with and without the projector, on the template's own target and on the "" target the other
-// tests use.
-func TestEG2BinUnsetRendersByteIdentically(t *testing.T) {
+// eg2UnsetGolden holds the sha256 of every template's unset render as the 0.175.0 renderer, which had no
+// EG2LlamaBin, produced it.
+const eg2UnsetGolden = "testdata/eg2bin-unset-render.golden"
+
+const eg2UnsetGoldenHeader = `# sha256 of the UNSET render (no EG2LlamaBin) of every embeddinggemma2 template, taken from the 0.175.0 renderer (66d17aa1),
+# which had no such field. One line per template, target, projector-stripped flag: <template> <goos, - for none> <text-only> <sha256>.
+# Read by TestEG2BinUnsetRendersTheBytes0175Rendered. A deliberate change to a template or to the renderer that moves
+# an unset render rewrites this file with OFFLOAD_UPDATE_GOLDEN=1 and says so in the changelog.
+`
+
+// TestEG2BinUnsetRendersTheBytes0175Rendered is the promise that makes the field free to add: a render that
+// gives the entry no build of its own is the render the release before the field produced, byte for byte, so
+// no node's config changes and no stamp moves. The golden hashes were taken from the 0.175.0 renderer itself
+// (a tree without the field), not from this code, so a later change to the shared scanner, to Render or to a
+// template that alters an unset render goes red here. Every template, with and without the projector, on the
+// template's own target and on the "" target the other tests use. An intended change re-pins the file
+// (OFFLOAD_UPDATE_GOLDEN=1, as internal/mcpserver's status golden does).
+func TestEG2BinUnsetRendersTheBytes0175Rendered(t *testing.T) {
+	got := map[string]string{}
+	var keys []string
+	for _, tc := range eg2Templates {
+		for _, textOnly := range []bool{false, true} {
+			for _, goos := range []string{"", targetOf(tc.name)} {
+				label := goos
+				if label == "" {
+					label = "-"
+				}
+				key := fmt.Sprintf("%s %s %v", tc.name, label, textOnly)
+				sum := sha256.Sum256([]byte(eg2BinRender(t, tc.name, goos, textOnly, "")))
+				got[key] = hex.EncodeToString(sum[:])
+				keys = append(keys, key)
+			}
+		}
+	}
+	sort.Strings(keys)
+	if os.Getenv("OFFLOAD_UPDATE_GOLDEN") == "1" {
+		var b strings.Builder
+		b.WriteString(eg2UnsetGoldenHeader)
+		for _, k := range keys {
+			b.WriteString(k + " " + got[k] + "\n")
+		}
+		if err := os.WriteFile(eg2UnsetGolden, []byte(b.String()), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("rewrote %s (%d renders)", eg2UnsetGolden, len(keys))
+	}
+	raw, err := os.ReadFile(eg2UnsetGolden)
+	if err != nil {
+		t.Fatalf("read golden: %v", err)
+	}
+	want := map[string]string{}
+	for _, l := range strings.Split(string(raw), "\n") {
+		f := strings.Fields(l)
+		if len(f) == 0 || strings.HasPrefix(f[0], "#") {
+			continue
+		}
+		if len(f) != 4 {
+			t.Fatalf("golden line %q: want <template> <goos> <text-only> <sha256>", l)
+		}
+		want[strings.Join(f[:3], " ")] = f[3]
+	}
+	for _, k := range keys {
+		switch w, ok := want[k]; {
+		case !ok:
+			t.Errorf("%s: no golden line (a new template or variant: re-pin with OFFLOAD_UPDATE_GOLDEN=1 after checking its unset render)", k)
+		case w != got[k]:
+			t.Errorf("%s: the unset render is no longer the 0.175.0 render (sha256 %s, golden %s). If a template or the renderer was changed on purpose, re-pin with OFFLOAD_UPDATE_GOLDEN=1 and say so in the changelog", k, got[k], w)
+		}
+	}
+	for k := range want {
+		if _, ok := got[k]; !ok {
+			t.Errorf("golden line %q matches no render (a template or variant was removed or renamed)", k)
+		}
+	}
+}
+
+// TestEG2BinSpelledAsTheMainBuildIsTheUnsetRender: an own build that spells the main build again (with or
+// without a trailing slash) is no build of its own, so it renders exactly the unset render, adds no loader
+// macro and leaves every llama-server on the main build. Every template, with and without the projector, on
+// the template's own target and on the "" target the other tests use. (That the unset render is the 0.175.0
+// one is the golden test above; this compares the new code with itself and says so.)
+func TestEG2BinSpelledAsTheMainBuildIsTheUnsetRender(t *testing.T) {
 	main := params().LlamaBin
 	for _, tc := range eg2Templates {
 		for _, textOnly := range []bool{false, true} {
@@ -368,6 +449,11 @@ func TestRetargetEG2BinRefusesAChangedTemplateShape(t *testing.T) {
 		{"a Linux entry without the loader item", strings.Replace(linux, "  embeddinggemma2:\n    env: [\"${ld}\"]", "  embeddinggemma2:\n    env: []", 1), "${ld}"},
 		{"a Linux entry with the loader item twice", strings.Replace(linux, "  embeddinggemma2:\n    env: [\"${ld}\"]", "  embeddinggemma2:\n    env: [\"${ld}\", \"${ld}\"]", 1), "${ld}"},
 		{"a template that already defines the macro", strings.Replace(linux, "\n\nmodels:", "\n  ldembed: \"x\"\n\nmodels:", 1), "ldembed"},
+		// A Windows-style template (no `ld:` macro) whose entry names the loader item anyway: there is no macro
+		// to place `ldembed` beside, and leaving the item would load from the main build.
+		{"an entry with the loader item in a template that defines no ld macro", strings.Replace(win, "  embeddinggemma2:\n    cmd:", "  embeddinggemma2:\n    env: [\"${ld}\"]\n    cmd:", 1), "defines no `ld:` macro"},
+		// `ld:` as the very last bytes of the template: the macro is inserted AFTER the ld line, which is not there.
+		{"a template whose ld macro is its last line", "models:\n  embeddinggemma2:\n    env: [\"${ld}\"]\n    cmd: >-\n      __LLAMA_BIN__/llama-server --model m\n\nmacros:\n  ld: \"LD_LIBRARY_PATH=/opt/x:${LD_LIBRARY_PATH:-}\"", "last line"},
 	} {
 		if tc.tmpl == linux || tc.tmpl == win {
 			t.Fatalf("%s: the test mutation did not apply", tc.name)

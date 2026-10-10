@@ -132,7 +132,7 @@ type Params struct {
 	// Every other entry keeps LlamaBin. It exists for a node whose main build cannot load the
 	// entry's architecture (llama.cpp below b11452) but must keep that build for its other seats.
 	// Empty is the common case and renders byte-identically to a build with no support for it
-	// (TestEG2BinUnsetRendersByteIdentically). Meaningful only with IncludeEG2: set without it,
+	// (TestEG2BinUnsetRendersTheBytes0175Rendered). Meaningful only with IncludeEG2: set without it,
 	// Render refuses.
 	EG2LlamaBin string
 
@@ -1648,7 +1648,7 @@ func retargetEG2Bin(tmpl, dir string) (string, error) {
 	i := strings.Index(out, ldMacroAnchor)
 	eol := strings.Index(out[i+1:], "\n")
 	if eol < 0 {
-		return "", fmt.Errorf("malformed macros block: `ld:` is the last line")
+		return "", fmt.Errorf("the %s entry's own loader macro has no place to go: malformed macros block, `ld:` is the last line", modelEG2)
 	}
 	insertAt := i + 1 + eol + 1
 	macro := fmt.Sprintf("  %s: \"LD_LIBRARY_PATH=%s:${LD_LIBRARY_PATH:-}\"\n", eg2LoaderMacro, dir)

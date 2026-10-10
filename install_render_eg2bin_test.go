@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -392,8 +393,10 @@ func TestRunInstallRenderEG2BinFlag(t *testing.T) {
 }
 
 // TestLlamaBuildIsReadFromTheDirectoryName locks the one source the floor check trusts: a b<digits> token
-// of 4 to 6 digits in the directory's OWN last path element, as the release archives and the usual build
-// directories are named. Anything the name does not state plainly is unknown, never guessed.
+// of 4 to 6 digits in the directory's own last path element, or, when that is the generic `bin` or `build`
+// of a CMake tree or a release archive, in the nearest element above it that is not (llama-b11490/bin,
+// llama-b11490/build/bin). Anything the name does not state plainly is unknown, never guessed, and the floor
+// is advisory for it.
 func TestLlamaBuildIsReadFromTheDirectoryName(t *testing.T) {
 	for _, tc := range []struct {
 		dir   string
@@ -416,7 +419,18 @@ func TestLlamaBuildIsReadFromTheDirectoryName(t *testing.T) {
 		{"/opt/cub11490", 0, false},            // not a standalone token
 		{"/opt/llama-b11490x", 0, false},       // trailing letters: not a token
 		{"/opt/llama-b11452-b11490", 0, false}, // two builds: ambiguous
-		{"/opt/llama-b11490/bin", 0, false},    // only the directory's own name is read
+		{"/opt/llama-b11490/bin", 11490, true}, // the generic bin folder of a build directory named for its build
+		{"/opt/llamacpp-b10964/bin", 10964, true},
+		{"/opt/llama-b11490/build/bin", 11490, true},
+		{"/opt/llama-b11490/build", 11490, true},
+		{`\opt\llama-b11490\build\bin\`, 11490, true},
+		{"/opt/llama-b11490/Build/BIN", 11490, true}, // the generic names are matched without case
+		{"/opt/llama/build/bin", 0, false},           // nothing above bin/build states a build
+		{"/srv/offload/build/llamacpp/build/bin", 0, false},
+		{"/opt/llama-b11490/bin/b10000", 10000, true}, // the directory's own name wins; the walk only skips generic folders
+		{"/opt/llama-b11490/tools/bin", 0, false},     // only bin and build are skipped, not any folder
+		{"bin", 0, false},
+		{"/build/bin", 0, false},
 		{"", 0, false},
 		{"/", 0, false},
 	} {
@@ -459,6 +473,9 @@ func TestTheFloorCheckRefusesABuildBelowB11452AtWriteTime(t *testing.T) {
 		{"ampere-6", "linux", "/opt/llamacpp-b11452", false},
 		{"ampere-6", "linux", "/opt/llamacpp-b11451", true},
 		{"ampere-6", "linux", eg2OldBuild, true},
+		{"ampere-6", "linux", "/opt/llamacpp-b11451/bin", true}, // the generic bin folder of a build named for its build
+		{"ampere-6", "linux", "/opt/llamacpp-b11452/build/bin", false},
+		{"ampere-6", "linux", "/opt/llamacpp-b10964/build/bin", true},
 		{"ampere-8", "windows", "/opt/llama-b11452", false}, // a text-only replica renders the entry too
 		{"ampere-8", "windows", "/opt/llama-b11451", true},
 		{"blackwell-3x16", "windows", "/opt/llama-b10000", true},
@@ -516,6 +533,14 @@ func TestAnUnreadableBuildIsANoteOnTheStreamThatCannotCorruptTheOutput(t *testin
 	}
 	if !strings.Contains(stderr, marker) {
 		t.Errorf("without --out the note belongs on stderr.\nstderr:\n%s", stderr)
+	}
+
+	// The documented CMake layout names no build anywhere in its path: the floor is advisory there too, a note
+	// and no refusal, whatever build the directory actually holds.
+	args, out = eg2RenderArgs(t, "ampere-6", "linux", "-llama-bin", "/srv/offload/build/llamacpp/build/bin")
+	stdout, stderr, err = bothStreams(t, append(args, "-out", out)...)
+	if err != nil || !strings.Contains(stdout, marker) {
+		t.Errorf("a build/bin directory that names no build must render with the note, err %v.\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
 	}
 
 	// A state the name does state, at or above the floor, is silent on both streams.
@@ -581,5 +606,141 @@ func TestInstallRenderUsageNamesBothSecondBuildFlags(t *testing.T) {
 		if !strings.Contains(line, flag) {
 			t.Errorf("the `install render` usage line does not name %s:\n%s", flag, line)
 		}
+	}
+}
+
+// agedTable is the embedded tier table with mut applied to its profiles, as the JSON deriveRender takes: the
+// way a test ages the table (a tier that has since withdrawn an input a stamp recorded), which the embedded
+// one cannot do.
+func agedTable(t *testing.T, mut func(profiles map[string]any)) []byte {
+	t.Helper()
+	var doc map[string]any
+	if err := json.Unmarshal(embeddedProfiles, &doc); err != nil {
+		t.Fatal(err)
+	}
+	mut(doc["profiles"].(map[string]any))
+	raw, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
+// stampedWith renders req against a table and stamps the result, as `install render` writes it.
+func stampedWith(t *testing.T, table []byte, req renderRequest) string {
+	t.Helper()
+	res, err := deriveRender(table, req)
+	if err != nil {
+		t.Fatalf("the control render of %s does not derive: %v", req.TierID, err)
+	}
+	stamped, err := servingtmpl.Stamp(res.Config, res.Basis, stampedAtFixed())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return stamped
+}
+
+// TestAStampedSecondBuildTheTableNoLongerAllowsIsReportedWithItsRealReason: the replay now carries
+// --llama-bin-eg2 and --llama-bin-cpu, and each is a refusal when the tier stops permitting it. The audit used
+// to throw deriveRender's error away and say the tier was "no longer in the tier table, or its template is
+// gone", which was false for a tier that is in the table with its template: the report must name what the
+// binary refused, carry no key list (nothing was re-derived, so no key was compared), and the words for a tier
+// that really left the table stay as they were.
+func TestAStampedSecondBuildTheTableNoLongerAllowsIsReportedWithItsRealReason(t *testing.T) {
+	const gone = "no longer in the tier table"
+
+	t.Run("embeddinggemma2 entry withdrawn from the tier", func(t *testing.T) {
+		req := eg2BinReq("ampere-6", "linux")
+		req.EG2LlamaBin = eg2NewBuild
+		stamped := stampedWith(t, embeddedProfiles, req)
+		if rep := provenanceAgainst(embeddedProfiles, stamped); rep.State != servingtmpl.StateMatch {
+			t.Fatalf("the control reports %s: %s", rep.State, rep.Detail)
+		}
+
+		withdrawn := agedTable(t, func(p map[string]any) { p["ampere-6"].(map[string]any)["include_embeddinggemma2"] = false })
+		rep := provenanceAgainst(withdrawn, stamped)
+		if rep.State != servingtmpl.StateStale {
+			t.Fatalf("state = %s, want STALE: %s", rep.State, rep.Detail)
+		}
+		for _, want := range []string{"cannot re-derive tier ampere-6 from the recorded inputs", "--llama-bin-eg2", "include_embeddinggemma2"} {
+			if !strings.Contains(rep.Detail, want) {
+				t.Errorf("the detail does not carry %q: %s", want, rep.Detail)
+			}
+		}
+		if strings.Contains(rep.Detail, gone) {
+			t.Errorf("the tier is in the table with its template, but the detail says it is not: %s", rep.Detail)
+		}
+		if len(rep.Keys) != 0 {
+			t.Errorf("nothing was re-derived, so no key was compared, but the report lists %v", rep.Keys)
+		}
+		if !strings.Contains(rep.Line("llama-swap.yaml"), "STALE") {
+			t.Errorf("the one-line form lost the state: %s", rep.Line("llama-swap.yaml"))
+		}
+
+		// The tier that really left the table keeps its words, and its key list.
+		missing := agedTable(t, func(p map[string]any) { delete(p, "ampere-6") })
+		rep = provenanceAgainst(missing, stamped)
+		if rep.State != servingtmpl.StateStale || !strings.Contains(rep.Detail, gone) || strings.Contains(rep.Detail, "cannot re-derive") {
+			t.Errorf("a tier deleted from the table: want STALE with the old %q words, got %s: %s", gone, rep.State, rep.Detail)
+		}
+	})
+
+	t.Run("cpu family withdrawn from the tier", func(t *testing.T) {
+		// No shipped tier declares alt_backends (amd-gcn's was withdrawn 2026-09-24), so the tier is a copy of a
+		// Vulkan one that does, as TestAltCPUBinReplayMatches does.
+		dual := func(alt bool) []byte {
+			return agedTable(t, func(p map[string]any) {
+				ids := make([]string, 0, len(p))
+				for id := range p {
+					ids = append(ids, id)
+				}
+				sort.Strings(ids) // the same tier to copy on every call, or the stamp and its replay table differ
+				for _, id := range ids {
+					if m, ok := p[id].(map[string]any); ok && m["backend"] == "vulkan" {
+						cp := map[string]any{}
+						for k, x := range m {
+							cp[k] = x
+						}
+						if alt {
+							cp["alt_backends"] = []any{"cpu"}
+						}
+						delete(cp, "media_seats")
+						p["test-dual-route"] = cp
+						return
+					}
+				}
+				t.Fatal("no Vulkan tier in the shipped table to copy")
+			})
+		}
+		req := eg2BinReq("test-dual-route", "linux")
+		req.AltLlamaBinCPU = "/opt/llama-cpu"
+		stamped := stampedWith(t, dual(true), req)
+		if rep := provenanceAgainst(dual(true), stamped); rep.State != servingtmpl.StateMatch {
+			t.Fatalf("the control reports %s: %s", rep.State, rep.Detail)
+		}
+		rep := provenanceAgainst(dual(false), stamped)
+		if rep.State != servingtmpl.StateStale || !strings.Contains(rep.Detail, "cannot re-derive tier test-dual-route") || !strings.Contains(rep.Detail, "--llama-bin-cpu") ||
+			strings.Contains(rep.Detail, gone) || len(rep.Keys) != 0 {
+			t.Errorf("a stamped CPU family the tier no longer declares: want the refusal named and no keys, got %s %v: %s", rep.State, rep.Keys, rep.Detail)
+		}
+	})
+}
+
+// TestInstallPs1RelaysTheFloorNoteExceptForItsOwnBuild: install.ps1 shows the operator the renderer's `note:`
+// lines (the filter used to pass only WARNING and indented lines, so the floor note was printed and dropped),
+// and leaves out the one about its own build by the note's closing words. The two files must agree on those
+// words, and the note an unreadable build gets must end with them.
+func TestInstallPs1RelaysTheFloorNoteExceptForItsOwnBuild(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("setup", "install.ps1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "$_ -match '^note:' -and ($eg2Bin -or $_ -notmatch '" + eg2FloorUncheckedTail + "')"
+	if !strings.Contains(string(b), want) {
+		t.Errorf("setup/install.ps1 does not relay `note:` lines with the filter %q", want)
+	}
+	note, err := eg2FloorCheck(renderResult{TierID: "ampere-6", Params: servingtmpl.Params{IncludeEG2: true, LlamaBin: "/opt/llama"}})
+	if err != nil || !strings.HasSuffix(strings.TrimSpace(note), eg2FloorUncheckedTail) {
+		t.Errorf("the note for a build whose name states none must end with %q, got err %v: %q", eg2FloorUncheckedTail, err, note)
 	}
 }
