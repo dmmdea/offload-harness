@@ -25,9 +25,11 @@ func krea2Binding(c *config.Config) {
 	c.ImageGenFamily, c.ImageGenCkpt = "krea2", "krea2_turbo_bf16.safetensors"
 }
 
-// shortHost is a 100 GiB host with the given memory committed.
+// / shortHost is a 100 GiB host with the given memory committed. Available moves with commit (a host that has
+// committed more has less left), because the admission rule reads both: a fixed small figure would make every
+// lane wait on the physical term whatever the commit said.
 func shortHost(commit float64) gpuprobe.HostMemory {
-	return gpuprobe.HostMemory{PhysicalGiB: 100, AvailableGiB: 5, CommitUsedGiB: commit, CommitLimitGiB: 160}
+	return gpuprobe.HostMemory{PhysicalGiB: 100, AvailableGiB: 100 - commit/2, CommitUsedGiB: commit, CommitLimitGiB: 160}
 }
 
 // useHost puts both doors onto one host reading: the allocator's pre-filter (the pipeline's own

@@ -184,6 +184,9 @@ type Pipeline struct {
 	footOnce    sync.Once
 	foot        *fleetnode.Footprints
 	fleetSample func(childPid int) (float64, error)
+	// hostSample overrides the host-memory sampler of the same hook in tests (nil = gpulease.TreeMemory:
+	// the private and the resident memory of the render's process tree).
+	hostSample func(childPid int) (privateGiB, residentGiB float64, err error)
 	// Opt-in image-prompt refiner seam (refiner.go): overrides the refiner's
 	// chat call in tests (nil = p.client.Generate). Only reached when
 	// cfg.ImageGenRefinerModel is set, so a client-less test Pipeline stays safe.
@@ -3713,7 +3716,23 @@ func (p *Pipeline) footprintSampling(family, quant, task string) *gpugen.Samplin
 		Footprint:   &gpugen.FootprintKey{Family: family, Quant: quant, Task: task},
 		SampleFunc:  p.footprintSampleFunc(),
 		OnFootprint: func(peakGiB float64) { store.Record(family, quant, task, peakGiB) },
+		// The host side of the same measurement (G3 of the P0 plan): what the render's process tree held of
+		// the host's memory at its peak, recorded beside the VRAM peak under the same key. The media
+		// admission raises a declaration to it once enough runs exist (calibratedRAM).
+		HostSampleFunc:  p.hostSampleFunc(),
+		OnHostFootprint: func(privateGiB, residentGiB float64) { store.RecordHost(family, quant, task, privateGiB, residentGiB) },
 	}
+}
+
+// hostSampleFunc is the host-memory sample of a render: the private and the resident memory of the process tree
+// rooted at the runner, root included (gpulease.TreeMemory). p.hostSample overrides it in tests. A ComfyUI
+// instance kept from an earlier lease and reused by this runner is not under it, so a run can read LOW; the one
+// consumer (calibratedRAM) only ever raises a declaration with it, and the store keeps the max over runs.
+func (p *Pipeline) hostSampleFunc() func(childPid int) (float64, float64, error) {
+	if p.hostSample != nil {
+		return p.hostSample
+	}
+	return gpulease.TreeMemory
 }
 
 // footprintSampleFunc selects the per-render VRAM source per cfg.FleetSampler:

@@ -22,6 +22,9 @@ func homeAt(t *testing.T, dir string) {
 	}
 	t.Setenv("HOMEDRIVE", "")
 	t.Setenv("HOMEPATH", "")
+	// These tests read the user-home fallback; TestMain points the offload home somewhere else for every other
+	// test (so none writes the operator's ledger or footprint store), and that variable wins over the home.
+	t.Setenv("LOCAL_OFFLOAD_HOME", "")
 }
 
 func auditRows(t *testing.T, home string) int {

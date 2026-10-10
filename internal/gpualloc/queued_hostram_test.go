@@ -22,7 +22,7 @@ func TestQueuedClaimsLeavesAHostRAMWaitersCardFreeToARequestThatDeclaresNone(t *
 	setCommit := func(gib float64) { commit.Store(math.Float64bits(gib)) }
 	setCommit(90) // 90 + 30 > 100 - 8: the waiter below is short of memory, its card is free
 	restore := gpuprobe.UseHostMemoryReader(func() (gpuprobe.HostMemory, bool) {
-		return gpuprobe.HostMemory{PhysicalGiB: 100, AvailableGiB: 5, CommitUsedGiB: math.Float64frombits(commit.Load()), CommitLimitGiB: 160}, true
+		return gpuprobe.HostMemory{PhysicalGiB: 100, AvailableGiB: 100 - math.Float64frombits(commit.Load())/2, CommitUsedGiB: math.Float64frombits(commit.Load()), CommitLimitGiB: 160}, true
 	})
 	t.Cleanup(restore)
 

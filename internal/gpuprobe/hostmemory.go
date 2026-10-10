@@ -30,6 +30,12 @@ import (
 // agents and the kernel's own growth need while a lease loads. The incident box's non-media baseline
 // was 56 GiB of desktop apps, agent CLIs, browsers, WSL and kernel pools, and that baseline moves by
 // several GiB inside a minute, so 8 is the floor, not a measurement of any one job.
+//
+// CHOSEN 2026-10-09 by the harness session, NOT MEASURED, and not a number the operator typed. What it
+// stands in for is each node's interactive working-set swing, which has not been measured yet: the
+// measurement procedure, the data points so far and the table that takes `measured <date> <node> n=<k>` rows
+// are in docs/systems/gpu-lease.md ("How the numbers get measured"). The config key is the override and
+// the thing to change when a node's own measurement says so.
 const DefaultHostRAMHeadroomGiB = 8.0
 
 // HostMemory is one reading of the host's memory, in GiB.
@@ -116,23 +122,36 @@ type HostRAMCheck struct {
 	// Unreadable: the reading could not be taken on a platform that has a reader.
 	Unreadable bool
 	// The numbers the decision rested on, all GiB. ProjectedGiB is commit now plus the need plus the
-	// part still to load of leases already granted; LimitGiB is physical RAM less the headroom.
-	NeedGiB, CommittedGiB, PendingGiB, PhysicalGiB, HeadroomGiB, LimitGiB, ProjectedGiB float64
+	// part still to load of leases already granted; LimitGiB is physical RAM less the headroom;
+	// AvailableGiB is what could be handed out without paging when the decision was taken.
+	NeedGiB, CommittedGiB, PendingGiB, PhysicalGiB, HeadroomGiB, LimitGiB, ProjectedGiB, AvailableGiB float64
 	// Why is the sentence a refusal carries ("" when OK).
 	Why string
 }
 
 // HostRAMAdmits is THE rule, read by the lease grant (authoritative, inside the grant's critical
-// section) and by the card allocator (advisory, before it picks cards), so the two cannot disagree:
+// section) and by the card allocator (advisory, before it picks cards), so the two cannot disagree.
+// An admission needs BOTH terms:
 //
-//	projected = commit used now + need + pending
-//	admit iff projected <= physical RAM - headroom
+//	commit:    commit used now + need + pending      <= physical RAM - headroom
+//	physical:  available now - need - pending        >= headroom
 //
 // need is what the lease declares it will load; pending is the part of the leases ALREADY GRANTED
-// that has not loaded yet (declared need less what their processes hold), which commit used does not
-// yet include. A lease that declares no need (<= 0) adds nothing, so it is admitted whatever the box
+// that has not loaded yet (declared need less what their processes hold), which neither counter yet
+// includes. A lease that declares no need (<= 0) adds nothing, so it is admitted whatever the box
 // looks like: refusing it would idle a card without making the memory any safer. A need that exceeds
 // physical RAM less the headroom is Impossible: it cannot be admitted however long it waits.
+//
+// WHY TWO TERMS (G3 of the P0 plan). Commit is the primary term because it counts memory the OS has
+// PROMISED, touched or not, which is what stops a second lane before it has loaded; it is also a
+// conservative one: on Windows, GPU allocations made through WDDM may be charged to the process's
+// commit too (a llama-server with every layer on the card was reported at 29.2 GiB private bytes beside
+// 25.7 GiB of VRAM; the evidence and what is still unverified are in docs/systems/gpu-lease.md), so commit
+// may read high by the VRAM in use, and a rule that read only commit would over-refuse by that much. The
+// physical term does not depend on that question at all: it reads what can be handed out without paging.
+// Requiring both is robust whichever way the question falls: if VRAM is in commit, the commit term
+// over-refuses and the physical term is untouched; if some resident memory is not in commit, the physical
+// term catches it. Neither relaxes the other, so nothing here admits on an unmeasured hypothesis.
 func HostRAMAdmits(mem HostMemory, readable bool, needGiB, pendingGiB, headroomGiB float64) HostRAMCheck {
 	return hostRAMAdmits(mem, readable, HostMemorySupported, needGiB, pendingGiB, headroomGiB)
 }
@@ -161,7 +180,7 @@ func hostRAMAdmits(mem HostMemory, readable, supported bool, needGiB, pendingGiB
 		c.Why = fmt.Sprintf("waiting for host RAM: the host's memory cannot be read, so a lease that needs %.1f GiB cannot be shown to fit", needGiB)
 		return c
 	}
-	c.CommittedGiB, c.PhysicalGiB = mem.CommitUsedGiB, mem.PhysicalGiB
+	c.CommittedGiB, c.PhysicalGiB, c.AvailableGiB = mem.CommitUsedGiB, mem.PhysicalGiB, mem.AvailableGiB
 	c.LimitGiB = mem.PhysicalGiB - headroomGiB
 	c.ProjectedGiB = mem.CommitUsedGiB + needGiB + pendingGiB
 	switch {
@@ -176,6 +195,13 @@ func hostRAMAdmits(mem HostMemory, readable, supported bool, needGiB, pendingGiB
 		}
 		c.Why = fmt.Sprintf("waiting for host RAM: needs %.1f GiB, committed %.1f of %.1f GiB physical%s, %.1f GiB headroom",
 			needGiB, mem.CommitUsedGiB, mem.PhysicalGiB, pend, headroomGiB)
+	case mem.AvailableGiB-needGiB-pendingGiB < headroomGiB:
+		pend := ""
+		if pendingGiB > 0 {
+			pend = fmt.Sprintf(" (+%.1f GiB still to load by leases already running)", pendingGiB)
+		}
+		c.Why = fmt.Sprintf("waiting for host RAM: needs %.1f GiB, only %.1f GiB of %.1f GiB physical is available%s, %.1f GiB headroom",
+			needGiB, mem.AvailableGiB, mem.PhysicalGiB, pend, headroomGiB)
 	default:
 		c.OK = true
 	}

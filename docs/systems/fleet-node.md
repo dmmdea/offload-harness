@@ -295,7 +295,9 @@ Advertised footprints are the **raw max-observed peak**: a new observed peak set
 `vram_peak_gb = round(observed, 0.1)` — the node adds **no** margin; the dispatcher owns all routing
 margin ([ADR 0013](../architecture/decisions/0013-nodes-advertise-raw-footprint.md)). Only successful renders with a positive peak are
 recorded. Footprints merge across processes by file mtime, so `fleet-measure` run while a node is
-serving becomes visible to the running node.
+serving becomes visible to the running node. The same hook also records `host_peak_gb` and `host_resident_peak_gb` (the
+render's process tree, peak private and peak resident memory) and a run count, additive and omitted until measured, for the
+node's own host-RAM guard (see [GPU lease](gpu-lease.md), "How the numbers get measured"); merging is a per-field max.
 
 Full reasoning in [ADR 0008](../architecture/decisions/0008-pdh-primary-vram-sampling.md).
 

@@ -128,8 +128,9 @@ func TestAllocatorSkipsWhenHostRamHeadroomLow(t *testing.T) {
 	if len(none.Waitable) == 0 {
 		t.Fatal("a host shortage must leave the cards waitable")
 	}
-	// Plenty of RAM: the same request allocates.
-	in.HostMem.CommitUsedGiB = 40
+	// Plenty of RAM: the same request allocates. (Both terms of the rule read the host: commit and what is
+	// available, so a host with room moves both.)
+	in.HostMem.CommitUsedGiB, in.HostMem.AvailableGiB = 40, 60
 	if a, err := Allocate(in); err != nil || len(a.Devices) != 1 {
 		t.Fatalf("with RAM to spare: %v %v", a.Devices, err)
 	}

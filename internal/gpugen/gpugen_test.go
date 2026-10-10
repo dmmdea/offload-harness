@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -438,5 +439,122 @@ func TestFreeComfyVRAMWaitsLongerThanOneSecondForABusyInstance(t *testing.T) {
 	defer mu.Unlock()
 	if len(bodies) != 1 || bodies[0] != `POST /free {"unload_models":true,"free_memory":true}` {
 		t.Fatalf("the busy instance was never told to free (a one-second timeout gives up before it answers): %v", bodies)
+	}
+}
+
+// --- host-memory sampling (G3 of the P0 plan: the guard sizes a render from what renders held) ---
+
+// TestGenerateReportsTheHostPeaksOnSuccess: with Footprint set and a HostSampleFunc, a successful render reports
+// the MAX private and the MAX resident sample, once, and the sampler is handed the child's pid. The two maxima are
+// independent (the private peak need not be the sample the resident peak came from).
+func TestGenerateReportsTheHostPeaksOnSuccess(t *testing.T) {
+	requireNode(t)
+	old := footprintSampleInterval
+	footprintSampleInterval = 50 * time.Millisecond
+	defer func() { footprintSampleInterval = old }()
+
+	out := filepath.Join(t.TempDir(), "made.txt")
+	exe, script, args := sleepThenWriteCmd(out, "hello", 400)
+
+	var mu sync.Mutex
+	privs := []float64{20.5, 57.7, 31.0} // peak 57.7, not the last value
+	ress := []float64{14.0, 18.5, 40.7}  // peak 40.7, from a different sample
+	i := 0
+	var sampledPid int
+	var gotPriv, gotRes []float64
+	_, err := Generate(context.Background(), Spec{
+		Exe: exe, Script: script, Args: args,
+		Out:       out,
+		Timeout:   20 * time.Second,
+		Footprint: &FootprintKey{Family: "krea2", Quant: "bf16", Task: "image-gen"},
+		HostSampleFunc: func(pid int) (float64, float64, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			sampledPid = pid
+			p, r := privs[i%len(privs)], ress[i%len(ress)]
+			i++
+			return p, r, nil
+		},
+		OnHostFootprint: func(priv, res float64) {
+			mu.Lock()
+			defer mu.Unlock()
+			gotPriv, gotRes = append(gotPriv, priv), append(gotRes, res)
+		},
+	})
+	if err != nil {
+		t.Fatalf("Generate: unexpected error: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if sampledPid <= 0 {
+		t.Fatalf("HostSampleFunc never received the child pid (got %d)", sampledPid)
+	}
+	if len(gotPriv) != 1 || gotPriv[0] != 57.7 || gotRes[0] != 40.7 {
+		t.Fatalf("OnHostFootprint = private %v resident %v, want one report of 57.7 and 40.7", gotPriv, gotRes)
+	}
+}
+
+// TestGenerateHostFootprintNotReportedOnFailure: a failed run's host peak may be partial, so only SUCCESS records.
+func TestGenerateHostFootprintNotReportedOnFailure(t *testing.T) {
+	requireNode(t)
+	old := footprintSampleInterval
+	footprintSampleInterval = 50 * time.Millisecond
+	defer func() { footprintSampleInterval = old }()
+
+	called := false
+	_, err := Generate(context.Background(), Spec{
+		Exe: "node", Script: "-e", Args: []string{"process.exit(3)"},
+		Out:             filepath.Join(t.TempDir(), "never.txt"),
+		Timeout:         10 * time.Second,
+		Footprint:       &FootprintKey{Family: "krea2", Task: "image-gen"},
+		HostSampleFunc:  func(int) (float64, float64, error) { return 9, 8, nil },
+		OnHostFootprint: func(float64, float64) { called = true },
+	})
+	if err == nil {
+		t.Fatal("Generate must surface the child's non-zero exit")
+	}
+	if called {
+		t.Fatal("OnHostFootprint must NOT fire when the child failed")
+	}
+}
+
+// TestGenerateHostSamplingIsInertWithoutAFootprintKey: Footprint nil is the legacy path; nothing is sampled.
+func TestGenerateHostSamplingIsInertWithoutAFootprintKey(t *testing.T) {
+	requireNode(t)
+	out := filepath.Join(t.TempDir(), "made.txt")
+	exe, script, args := writeFileCmd(out, "hello")
+	sampled, reported := false, false
+	if _, err := Generate(context.Background(), Spec{
+		Exe: exe, Script: script, Args: args, Out: out, Timeout: 10 * time.Second,
+		HostSampleFunc:  func(int) (float64, float64, error) { sampled = true; return 1, 1, nil },
+		OnHostFootprint: func(float64, float64) { reported = true },
+	}); err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if sampled || reported {
+		t.Fatalf("a nil Footprint must not sample or report (sampled=%v reported=%v)", sampled, reported)
+	}
+}
+
+// The host sampler works without a VRAM sampler: a render whose VRAM cannot be sampled still has its host peaks.
+func TestGenerateHostSamplingNeedsNoVRAMSampler(t *testing.T) {
+	requireNode(t)
+	old := footprintSampleInterval
+	footprintSampleInterval = 50 * time.Millisecond
+	defer func() { footprintSampleInterval = old }()
+
+	out := filepath.Join(t.TempDir(), "made.txt")
+	exe, script, args := sleepThenWriteCmd(out, "hello", 300)
+	var reported atomic.Int32
+	if _, err := Generate(context.Background(), Spec{
+		Exe: exe, Script: script, Args: args, Out: out, Timeout: 20 * time.Second,
+		Footprint:       &FootprintKey{Family: "krea2", Task: "image-gen"},
+		HostSampleFunc:  func(int) (float64, float64, error) { return 3, 2, nil },
+		OnHostFootprint: func(float64, float64) { reported.Add(1) },
+	}); err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if reported.Load() != 1 {
+		t.Fatalf("the host peaks were reported %d times, want once", reported.Load())
 	}
 }

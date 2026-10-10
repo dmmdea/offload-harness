@@ -196,3 +196,44 @@ func TestUseHostMemoryReaderStandsAHostInAndRestores(t *testing.T) {
 		t.Fatal("restore left the stand-in installed")
 	}
 }
+
+// G3(c) of the P0 plan: the rule is robust to what the commit counter does or does not contain. Commit stays the
+// primary term (it counts memory the OS has PROMISED, which is what catches a second lane before it loads), and a
+// second term reads the physical side: what can be handed out without paging, less the need and the part of the
+// running leases still to load, must stay at or above the headroom. If WDDM GPU allocations inflate commit, the
+// commit term over-refuses (the safe direction) and this one is untouched; if some resident memory is not in commit,
+// this one catches it. Either way an admission needs BOTH.
+func TestHostRAMAdmitsAlsoRequiresTheAvailableFloor(t *testing.T) {
+	cases := []struct {
+		name            string
+		mem             HostMemory
+		need, pending   float64
+		wantOK          bool
+		wantWhyContains string
+	}{
+		{"commit reads low but little is available: the physical term refuses",
+			HostMemory{PhysicalGiB: 128, AvailableGiB: 20, CommitUsedGiB: 50, CommitLimitGiB: 192}, 15, 0, false, "only 20.0 GiB of 128.0 GiB physical is available"},
+		{"what the running leases have yet to load comes off the available figure too",
+			HostMemory{PhysicalGiB: 128, AvailableGiB: 40, CommitUsedGiB: 50, CommitLimitGiB: 192}, 15, 20, false, "+20.0 GiB still to load"},
+		{"exactly at the floor is admitted",
+			HostMemory{PhysicalGiB: 128, AvailableGiB: 23, CommitUsedGiB: 50, CommitLimitGiB: 192}, 15, 0, true, ""},
+		{"commit inflated past the line with plenty available: the commit term refuses, with its own sentence",
+			HostMemory{PhysicalGiB: 128, AvailableGiB: 90, CommitUsedGiB: 125, CommitLimitGiB: 192}, 10, 0, false, "committed 125.0 of 128.0 GiB physical"},
+		{"both terms satisfied",
+			HostMemory{PhysicalGiB: 128, AvailableGiB: 80, CommitUsedGiB: 60, CommitLimitGiB: 192}, 20, 0, true, ""},
+		{"a lease that declares nothing is admitted whatever is available",
+			HostMemory{PhysicalGiB: 128, AvailableGiB: 0, CommitUsedGiB: 128, CommitLimitGiB: 192}, 0, 0, true, ""},
+	}
+	for _, c := range cases {
+		got := hostRAMAdmits(c.mem, true, true, c.need, c.pending, 8)
+		if got.OK != c.wantOK || got.Impossible {
+			t.Errorf("%s: ok=%v impossible=%v, want ok=%v (%s)", c.name, got.OK, got.Impossible, c.wantOK, got.Why)
+		}
+		if !c.wantOK && (got.Why == "" || !strings.Contains(got.Why, c.wantWhyContains)) {
+			t.Errorf("%s: why = %q, want it to contain %q", c.name, got.Why, c.wantWhyContains)
+		}
+		if got.AvailableGiB != c.mem.AvailableGiB && c.need > 0 {
+			t.Errorf("%s: the check must carry the available figure it decided on, got %v want %v", c.name, got.AvailableGiB, c.mem.AvailableGiB)
+		}
+	}
+}

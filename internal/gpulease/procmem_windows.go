@@ -27,14 +27,15 @@ type processMemoryCountersEx struct {
 	PrivateUsage               uintptr
 }
 
-// privateBytes is the process's PrivateUsage: the memory it has committed that no other process
-// shares. It is the same currency as the system commit charge the grant compares against, which
-// is why it is the number subtracted from a lease's declared need. The limited-query right is
-// tried first, because it is granted across integrity levels; a process in another security
-// context that refuses both is unreadable, not zero (the caller decides what unreadable means).
-func privateBytes(pid int) (uint64, bool) {
+// readProcessMemory is the process's PrivateUsage (the memory it has committed that no other process
+// shares) and WorkingSetSize (what is resident now). PrivateUsage is the same currency as the system commit
+// charge the grant compares against, which is why it is the number subtracted from a lease's declared need.
+// The limited-query right is tried first, because it is granted across integrity levels; a process in
+// another security context that refuses both is unreadable, not zero (the caller decides what unreadable
+// means).
+func readProcessMemory(pid int) (private, resident uint64, ok bool) {
 	if pid <= 0 {
-		return 0, false
+		return 0, 0, false
 	}
 	const (
 		queryLimited = 0x1000
@@ -50,8 +51,8 @@ func privateBytes(pid int) (uint64, bool) {
 		r, _, _ := procK32GetProcessMemoryInfo.Call(uintptr(h), uintptr(unsafe.Pointer(&c)), uintptr(c.Cb))
 		_ = syscall.CloseHandle(h)
 		if r != 0 {
-			return uint64(c.PrivateUsage), true
+			return uint64(c.PrivateUsage), uint64(c.WorkingSetSize), true
 		}
 	}
-	return 0, false
+	return 0, 0, false
 }

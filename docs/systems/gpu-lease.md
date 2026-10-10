@@ -50,7 +50,7 @@ other on a single shared card.
 | `gpu_drain.go` (`leaseScope`, `maintainSeatScoped`, `unloadModelsFor`), `render/gpu-lock.mjs` (`parseUnloadModels`) | plan P5: the drain and unload take only the seats on the leased cards, and the render lane unloads the list the wrapper exports (`GPU_LEASE_UNLOAD_MODELS`) |
 | `internal/modelaffinity/seatscope.go`, `scoper.go`, `seatyield.go` | the gate's per-seat reading (`SetSeatPins`, `ScopeToPins`, `SeatLease`, `CardsHeld`), the production wiring of the evidence rule (`InspectLease` for the load gate, which remembers what it sees; `PeekLease`, `ScopeInfo`, `ScopeFunc`, `ScopeLeases` for inspectors, which write nothing), and the seat race rule (`YieldIfFenced`) |
 | `internal/mcpserver` | registers the session this MCP server serves in the session registry at start and removes it at exit |
-| `internal/config` | `state_dir`, `gpu_lock_path`, `gpu_card_scoped_leases`, `gpu_legacy_scope_inference`, `gpu_comfy_order`, `gpu_host_ram_headroom_gib` (default 8; `Load` installs it process-wide, `gpulease.SetDefaultHostRAMHeadroom`), `gpu_orphan_grace_min`, `gpu_max_term_min`, `gpu_max_total_min`; `ModelPins` (a model's device pins, read from the layers) |
+| `internal/config` | `state_dir`, `gpu_lock_path`, `gpu_card_scoped_leases`, `gpu_legacy_scope_inference`, `gpu_comfy_order`, `gpu_host_ram_headroom_gib` (default 8, chosen and not measured; `Load` installs it process-wide, `gpulease.SetDefaultHostRAMHeadroom`), `agent_seat_host_ram_gib` (the host RAM the agent seat holds once loaded, for the warm-back; unset = `hostneed.DefaultSeatHostGiB`), `gpu_orphan_grace_min`, `gpu_max_term_min`, `gpu_max_total_min`; `ModelPins` (a model's device pins, read from the layers) |
 
 ## Why it exists
 
@@ -1178,9 +1178,21 @@ Every grant path applies **one** rule (`gpuprobe.HostRAMAdmits`), with committed
 (`GlobalMemoryStatusEx`: total minus available page file on Windows; `/proc/meminfo` `Committed_AS` on Linux):
 
 ```
-projected = committed memory now + the lease's declared need + the not-yet-loaded part of leases already granted
-admit iff projected <= physical RAM - gpu_host_ram_headroom_gib        (default 8 GiB)
+commit term:    committed memory now + the lease's declared need + the not-yet-loaded part   <= physical RAM - headroom
+physical term:  available physical RAM now - the lease's declared need - the not-yet-loaded part   >= headroom
+admit iff BOTH hold       (headroom = gpu_host_ram_headroom_gib, default 8 GiB: chosen, not measured; see "How the numbers get measured")
 ```
+
+Two terms, because what the OS counts as committed is not the same quantity as what sits in RAM, and the box must not be
+promised more than it has *and* must not run out of what it has. Commit is the primary term: it counts memory the OS has
+promised, touched or not, which is what stops a second lane before it has loaded. It is also the conservative one: on Windows
+a process's GPU allocations may be charged to its commit without ever occupying system RAM (see the finding below), so commit
+can read high by the VRAM in use. The physical term does not depend on that question: it reads what can be handed out without
+paging. Requiring both is robust whichever way the question falls: if VRAM is in commit, the commit term over-refuses (the
+safe direction, the lane waits) and the physical term is untouched; if some resident memory is not in commit, the physical
+term catches it. Neither relaxes the other, so nothing admits on an unmeasured hypothesis. A refusal says which term refused:
+`committed X of Y GiB physical` or `only A GiB of Y GiB physical is available`
+(`TestHostRAMAdmitsAlsoRequiresTheAvailableFloor`).
 
 * **Everywhere the cards are granted.** A card-scoped grant (`--devices`, `--cards`, the media admission) checks inside
   `grantDevicesLocked`, under the epoch lock, after the cards are shown free and before the epoch is issued; the record that
@@ -1208,8 +1220,12 @@ admit iff projected <= physical RAM - gpu_host_ram_headroom_gib        (default 
   to unblock a lane was still refused (found by the post-implementation review, 2026-10-10;
   `TestLoadInstallsTheHostRAMHeadroomForEveryGrant`, `TestAGrantKeepsTheInstalledHeadroomNotTheBuiltInOne`,
   `TestReserveGrantsAgainstTheConfiguredHeadroom`, `TestTheMediaAdmissionKeepsTheConfiguredHeadroom`).
-* **The not-yet-loaded part.** A granted lease's declared need minus what the processes below its holder hold privately
-  right now (`PrivateUsage` through `K32GetProcessMemoryInfo` on Windows, `RssAnon` + `VmSwap` on Linux), never below zero.
+* **The not-yet-loaded part.** A granted lease's declared need minus what the processes below its holder hold RESIDENT
+  right now (`WorkingSetSize` through `K32GetProcessMemoryInfo` on Windows, `VmRSS` on Linux), never below zero. Resident and
+  not private, because a declaration is in RAM units and committed-but-unoccupied memory (a card allocation charged to the
+  process's commit, an untouched reservation) is not RAM that has loaded: a real child that was committed 256 MiB it never
+  touched read private 305 MiB and resident 13 MiB on the reference box, 2026-10-10
+  (`TestHeldCountsWhatIsResidentNotWhatIsMerelyCommitted`).
   Leases that share a holder pid are pooled (the pipeline holds one lease per card in one server process, and all their
   runners are below it), the holder's own memory is not subtracted (a long-lived server's memory is not the job's), and a
   holder whose memory cannot be read counts as holding nothing, so its whole declared need is pending
@@ -1262,6 +1278,63 @@ evict anything. **Reach (G7 of the P0 plan).** The guard bounds the leases that 
 loads on demand with no lease at all) and a hand-started ComfyUI instance are outside it: it sees what they have committed, never
 what they are about to. The closure is to run the live harness everywhere and to make a ComfyUI start refuse without a lease
 token; until then the rule rests on those callers going through the lease, and nothing here claims it bounds a process that does not.
+
+### How the numbers get measured (G3 of the P0 plan)
+
+Every figure this rule uses is the harness's: chosen or measured, and labelled as which. None is presented as a number anyone else set.
+
+* **The headroom (8 GiB) is chosen, not measured.** It is a floor: the incident box's non-media baseline was about 56 GiB of
+  desktop apps, agent CLIs, browsers, WSL and kernel pools and it moves by several GiB inside a minute. What is still owed is
+  each node's interactive working-set swing, measured against its own use, recorded here as `measured <date> <node> n=<k>`;
+  until a row exists below, 8 is the starting value and `gpu_host_ram_headroom_gib` is the override. Data points so far (these
+  describe how the counters move, they do not derive a headroom): on the reference 3-card box, 2026-10-10, a watcher that
+  logged only when the verdict changed (11 lines) saw commit range from 95.3 to 132.1 GiB across a stretch of other sessions'
+  work, with one fall of 32.0 GiB (127.3 to 95.3) inside 16 seconds, while available RAM stayed between 47.6 and 77.7 GiB and
+  the page file in use between 2494 and 2665 MiB (it did not grow); a read-only sample of 60 readings at 3 s intervals in a
+  quiet interval (04:41 to 04:45 local) read commit 100.09 to 100.43 GiB and available 72.54 to 72.71 GiB.
+
+  | node | measured | n | working-set swing | headroom adopted |
+  |---|---|---|---|---|
+  | (none yet: the first acceptance runs of cluster overflow, on the nodes that take it, are the first) | | | | 8 (chosen) |
+
+* **What each render held is recorded, not guessed.** Every sampled GPU render records, beside its VRAM peak, the peak
+  PRIVATE and the peak RESIDENT memory of its process tree (`gpulease.TreeMemory`, sampled by gpugen on the same tick) into
+  the footprint store as `host_peak_gb` and `host_resident_peak_gb` with the number of runs (`host_runs`); both ride
+  `/fleet/health` `model_footprints[]` additively. Two quantities on purpose: they differ exactly where the open question
+  below bites. The media admission reads them back (`Pipeline.calibratedRAM`) and **raises** a declaration to the measured
+  resident peak once at least three runs exist (`hostPeakMinRuns`, chosen), for the image and video routes. It only
+  raises: the sampled tree can miss memory (a ComfyUI instance kept from an earlier lease and reused is not under the
+  runner that is sampled), a render whose weights fit its card still declares 0, and the store keeps the max over runs, not
+  a percentile. Edit, inpaint, animate and music keep the estimate from their model files until their sampling keys carry a
+  family.
+
+* **Does a GPU process's WDDM allocation count toward its private bytes / commit? Partly measured, not settled.**
+  *Measured 2026-10-10 on the reference 3-card box, read-only* (Windows performance counters, no lease, nothing started; 60
+  readings at 3 s intervals, one GPU process steady the whole time): a ComfyUI server (`--disable-smart-memory --cache-none`) read
+  private 27.8 GiB, working set 16.1 GiB, GPU Process Memory dedicated 9.55 GiB, shared 13.58 GiB, total committed 23.13 GiB.
+  `private - working set` is 11.7 GiB against 9.55 GiB of dedicated VRAM: consistent with dedicated card allocations being
+  charged to private bytes and not being resident, and with shared GPU memory (system RAM the driver backs) being resident.
+  It is one process in one steady state, and a second process on the box (the screenshot tool) did not fit the same
+  arithmetic (`private - working set` 0.84 GiB under its 1.03 GiB dedicated), so it is evidence, not proof. *Reported, not
+  reproduced here:* a llama-server with every layer on the card showed 29.2 GiB private beside 25.7 GiB of VRAM. *Measured as
+  a control:* committed-but-untouched memory reads as private and not as resident (256 MiB: private 305 MiB, resident 13 MiB),
+  so "private is not RAM" is true of the process model on this OS, whatever the driver does. *Observed by earlier watchers,
+  same box:* commit above physical RAM (129.5 against 127.7 GiB) with one lane running, 47 GiB free and 2.3 GiB of page file in
+  use, unchanged for hours. **UNVERIFIED:** whether the system commit counter itself moves by a lane's VRAM when the lane
+  starts (the one thing that would settle it needs a lease and a lane, which is the S1 acceptance run), and the whole question
+  on the other nodes. Until then the rule requires both terms (above) and the not-yet-loaded sum is in resident units, so the
+  answer can only change how often a lane waits, never whether the box is protected.
+
+* **Pages-in per second is not a paging signal on this box.** `\Memory\Pages Input/sec` read 0 to 1168 pages/s in the quiet
+  sample with the page file flat, because it counts every file-backed read as well. Say "paging" only from page-file growth or
+  the pages-output rate.
+
+* **To record the data points (read-only, the S1 acceptance runs produce them for free).** Around one lane at a time, on each
+  node, sample every 3 s and keep the rows: `\Memory\Committed Bytes`, `\Memory\Available Bytes`,
+  `\Paging File(_Total)\% Usage`, `\Memory\Pages Output/sec`, and `\GPU Process Memory(*)\Dedicated Usage`,
+  `Shared Usage`, `Total Committed` next to each GPU process's private bytes and working set. The footprint store's
+  `host_peak_gb` / `host_resident_peak_gb` / `vram_peak_gb` of the same runs are the other half. Keep commit as a term only if
+  it tracks the working set across a lane start; stop the run at NEAR.
 
 ### The agent seat and its warm-back (G4 of the P0 plan)
 

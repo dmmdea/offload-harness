@@ -97,6 +97,59 @@ type mediaNeed struct {
 	// nothing: a route whose weights always sit on the card (upscale, voice) adds no host memory the
 	// grant needs to see. The grant admits it against committed memory (gpulease/hostram.go).
 	RAM func(vramGiB float64) hostneed.Need
+	// Foot is the footprint-store key this call's renders are recorded under (the key the same route's sampling
+	// hook uses), so a declaration can be raised to what those renders were measured to hold (calibratedRAM). The
+	// zero value is not calibrated; only the image and video routes set it.
+	Foot footKey
+}
+
+// footKey is a footprint-store identity: family, quant, task.
+type footKey struct{ family, quant, task string }
+
+// withFootprint names the store key the call's renders are recorded under.
+func (n mediaNeed) withFootprint(k footKey) mediaNeed {
+	n.Foot = k
+	return n
+}
+
+// hostPeakMinRuns is how many measured runs of a key must exist before a measurement may raise a declaration.
+// Chosen 2026-10-10, not measured: a single run is one reading of a number that moves with the workflow, the
+// cached families and the desktop, and three is the fewest that lets one outlier be seen against two others in the
+// store's own records. A measurement only ever raises the declaration, so the number errs toward waiting for more
+// data, not toward admitting on less.
+const hostPeakMinRuns = 3
+
+// calibratedRAM raises a declared need to what renders of the call's key were measured to hold: the footprint
+// store's peak RESIDENT memory of the render's process tree, once at least hostPeakMinRuns runs exist, when that is
+// higher than the estimate from the model files. Three properties are the point:
+//
+//   - It only RAISES. The sampled tree can miss memory (a kept ComfyUI reused from an earlier lease is not under
+//     the runner), so a low reading says nothing about what must stream, and a measurement must never be what
+//     waves a lane through that the files say needs RAM.
+//   - It leaves 0 alone. A render whose weights fit its card streams nothing from RAM; the measured tree carries
+//     the runtime's own baseline and, on a driver that charges card allocations to the process, the card's memory,
+//     neither of which the guard is for.
+//   - It is RESIDENT, not private, because a declaration is in RAM units and the not-yet-loaded sum subtracts
+//     resident memory from it (gpulease.descendantsResidentGiB). The private peak is recorded beside it for the
+//     commit question and not consumed here.
+//
+// The unit that is still open is whether a declaration should ALSO cover the card memory a render's commit
+// carries; the commit term of the admission reads actual commit, so a lane already running is counted whole.
+func (p *Pipeline) calibratedRAM(n hostneed.Need, k footKey) hostneed.Need {
+	if n.GiB <= 0 || k.task == "" {
+		return n
+	}
+	store := p.FootprintStore()
+	if store == nil {
+		return n
+	}
+	hp, ok := store.HostPeak(k.family, k.quant, k.task)
+	if !ok || hp.Runs < hostPeakMinRuns || hp.ResidentGiB <= n.GiB {
+		return n
+	}
+	return hostneed.Need{GiB: hp.ResidentGiB, Source: hostneed.SourceMeasured,
+		Detail: fmt.Sprintf("measured: the resident memory of %s/%s renders peaked at %.1f GiB over %d runs, above the %.1f GiB their model files add up to",
+			k.family, k.task, hp.ResidentGiB, hp.Runs, n.GiB)}
 }
 
 // declaresRAM sets how the call's host RAM need is resolved.
@@ -153,7 +206,7 @@ func (p *Pipeline) declaredRAM(ctx context.Context, need mediaNeed, cards []gpup
 			cards = t
 		}
 	}
-	n := need.RAM(hostneed.LargestCardGiB(cards, ids))
+	n := p.calibratedRAM(need.RAM(hostneed.LargestCardGiB(cards, ids)), need.Foot)
 	if n.GiB > 0 {
 		planNote("declaring host RAM: " + n.String())
 	}
@@ -190,18 +243,24 @@ func declaredNeed(devices []string, token string) mediaNeed {
 
 // imageNeed is the need of the image-generation route (and its batch) for the resolved binding.
 func imageNeed(cfg config.Config, token string) mediaNeed {
+	fam, quant := imageFootprintKey(cfg)
+	foot := footKey{fam, quant, "image-gen"}
 	if cfg.ImagePooled() {
-		return pooledNeed(token, cfg.ImageGenPoolCompute, cfg.ImageGenPoolDonor).declaresRAM(routeRAM(hostneed.RouteImage, cfg))
+		return pooledNeed(token, cfg.ImageGenPoolCompute, cfg.ImageGenPoolDonor).declaresRAM(routeRAM(hostneed.RouteImage, cfg)).withFootprint(foot)
 	}
-	return singleCardNeed(cfg, token).declaresRAM(routeRAM(hostneed.RouteImage, cfg))
+	return singleCardNeed(cfg, token).declaresRAM(routeRAM(hostneed.RouteImage, cfg)).withFootprint(foot)
 }
 
 // videoNeed is the need of the video route: pooled, or a single card like image generation.
 func videoNeed(cfg config.Config, token, renderFamily string, over hostneed.VideoOverrides) mediaNeed {
+	// The key the video route's sampling hook records under (runGenerateVideo): the family that renders and the
+	// quant of the binding it renders with.
+	fb := cfg.ResolveVideoFamilyBinding(renderFamily)
+	foot := footKey{videoFootprintFamily(renderFamily), videoFootprintQuant(fb, renderFamily), "video-gen"}
 	if cfg.VideoPooled() {
-		return pooledNeed(token, cfg.VideoGenPoolCompute, cfg.VideoGenPoolDonor).declaresRAM(videoRAM(cfg, renderFamily, over))
+		return pooledNeed(token, cfg.VideoGenPoolCompute, cfg.VideoGenPoolDonor).declaresRAM(videoRAM(cfg, renderFamily, over)).withFootprint(foot)
 	}
-	return singleCardNeed(cfg, token).declaresRAM(videoRAM(cfg, renderFamily, over))
+	return singleCardNeed(cfg, token).declaresRAM(videoRAM(cfg, renderFamily, over)).withFootprint(foot)
 }
 
 // mediaGrant is what a call holds while it renders.

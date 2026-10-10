@@ -57,6 +57,9 @@ const (
 	SourceClassDefault Source = "class default"
 	// SourceNone: a text or seat lease, or a box that binds no render family: nothing declared.
 	SourceNone Source = "none"
+	// SourceMeasured: the estimate raised to what renders of this binding were measured to hold on the host
+	// (the footprint store's host peaks, once enough runs exist).
+	SourceMeasured Source = "measured"
 	// SourceSeat: the agent seat's footprint, as the node's config states it (agent_seat_host_ram_gib).
 	SourceSeat Source = "seat"
 	// SourceSeatDefault: an agent seat whose footprint nobody stated: the fail-closed default.

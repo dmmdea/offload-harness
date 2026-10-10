@@ -134,6 +134,16 @@ type Spec struct {
 	// OnFootprint receives the observed peak (GiB) after a SUCCESSFUL render whose
 	// sampled peak was > 0. nil = observations are discarded.
 	OnFootprint func(peakGiB float64)
+	// HostSampleFunc returns the HOST memory (GiB) of the process tree rooted at childPid right now: its
+	// private bytes (the commit-side figure) and its resident set (the physical-RAM figure). It is polled on
+	// the same tick as SampleFunc, only while Footprint is set, and the peak of each is reported once via
+	// OnHostFootprint on a SUCCESSFUL run (G3 of the P0 plan: the host-RAM guard sizes a render from what
+	// renders were measured to hold, not only from the size of their model files). The caller composes what a
+	// sample means (gpulease.TreeMemory); gpugen stays dependency-free. nil = no host sampling.
+	HostSampleFunc func(childPid int) (privateGiB, residentGiB float64, err error)
+	// OnHostFootprint receives the peak private and the peak resident memory (GiB) after a SUCCESSFUL render
+	// whose sampled private peak was > 0. nil = discarded.
+	OnHostFootprint func(privatePeakGiB, residentPeakGiB float64)
 }
 
 // FootprintKey identifies which footprint-store entry a sampled render belongs to
@@ -151,6 +161,9 @@ type Sampling struct {
 	Footprint   *FootprintKey
 	SampleFunc  func(childPid int) (float64, error)
 	OnFootprint func(peakGiB float64)
+	// HostSampleFunc / OnHostFootprint: see Spec.
+	HostSampleFunc  func(childPid int) (privateGiB, residentGiB float64, err error)
+	OnHostFootprint func(privatePeakGiB, residentPeakGiB float64)
 }
 
 // ApplyTo copies s onto spec. nil-safe: a nil receiver is a no-op, so callers
@@ -162,6 +175,8 @@ func (s *Sampling) ApplyTo(spec *Spec) {
 	spec.Footprint = s.Footprint
 	spec.SampleFunc = s.SampleFunc
 	spec.OnFootprint = s.OnFootprint
+	spec.HostSampleFunc = s.HostSampleFunc
+	spec.OnHostFootprint = s.OnHostFootprint
 }
 
 // footprintSampleInterval is how often SampleFunc is polled during a sampled
@@ -218,15 +233,16 @@ func Generate(ctx context.Context, spec Spec) (string, error) {
 	// window before that truncation ever ran.
 	tw := newTailWriter(tailWriterCap)
 	var (
-		err  error
-		peak float64
+		err               error
+		peak              float64
+		hostPriv, hostRes float64
 	)
 	if spec.Footprint == nil {
 		// Legacy path — byte-identical to the pre-tailWriter behavior for any
 		// output under the cap (which is every real case tail(o,400) cares about).
 		err = runCombined(cmd, tw)
 	} else {
-		peak, err = runSampled(cmd, tw, spec.SampleFunc)
+		peak, hostPriv, hostRes, err = runSampledHost(cmd, tw, spec.SampleFunc, spec.HostSampleFunc)
 	}
 	if err != nil {
 		// cctx.Err() is OUR OWN derived context, so this is authoritative regardless
@@ -273,6 +289,9 @@ func Generate(ctx context.Context, spec Spec) (string, error) {
 	// SUCCESS only: a failed/phantom run's peak may be partial, so it never records.
 	if spec.Footprint != nil && spec.OnFootprint != nil && peak > 0 {
 		spec.OnFootprint(peak)
+	}
+	if spec.Footprint != nil && spec.OnHostFootprint != nil && hostPriv > 0 {
+		spec.OnHostFootprint(hostPriv, hostRes)
 	}
 	return spec.Out, nil
 }
@@ -371,17 +390,25 @@ func runCombined(cmd *exec.Cmd, w io.Writer) error {
 // follow-up review's second named call site). Returns the peak observation and
 // the child's error. sample==nil degrades to a plain Start/Wait (peak 0).
 func runSampled(cmd *exec.Cmd, w io.Writer, sample func(childPid int) (float64, error)) (float64, error) {
+	peak, _, _, err := runSampledHost(cmd, w, sample, nil)
+	return peak, err
+}
+
+// runSampledHost is runSampled that also samples the process tree's HOST memory on the same tick: it returns the
+// peak VRAM sample and the peak private and peak resident memory the host sampler saw (each 0 when its sampler is
+// nil or never answered). The two peaks are independent maxima, not a pair read at one instant.
+func runSampledHost(cmd *exec.Cmd, w io.Writer, sample func(childPid int) (float64, error),
+	hostSample func(childPid int) (privateGiB, residentGiB float64, err error)) (peak, hostPriv, hostResident float64, err error) {
 	cmd.Stdout = w
 	cmd.Stderr = w
 	if err := cmd.Start(); err != nil {
-		return 0, err
+		return 0, 0, 0, err
 	}
 	var (
-		peak float64
 		done = make(chan struct{})
 		wg   sync.WaitGroup
 	)
-	if sample != nil {
+	if sample != nil || hostSample != nil {
 		pid := cmd.Process.Pid
 		wg.Add(1)
 		go func() {
@@ -389,8 +416,20 @@ func runSampled(cmd *exec.Cmd, w io.Writer, sample func(childPid int) (float64, 
 			t := time.NewTicker(footprintSampleInterval)
 			defer t.Stop()
 			for {
-				if g, serr := sample(pid); serr == nil && g > peak {
-					peak = g
+				if sample != nil {
+					if g, serr := sample(pid); serr == nil && g > peak {
+						peak = g
+					}
+				}
+				if hostSample != nil {
+					if p, r, serr := hostSample(pid); serr == nil {
+						if p > hostPriv {
+							hostPriv = p
+						}
+						if r > hostResident {
+							hostResident = r
+						}
+					}
 				}
 				select {
 				case <-done:
@@ -400,10 +439,10 @@ func runSampled(cmd *exec.Cmd, w io.Writer, sample func(childPid int) (float64, 
 			}
 		}()
 	}
-	err := cmd.Wait()
+	err = cmd.Wait()
 	close(done)
-	wg.Wait() // happens-before: peak is safely visible after the sampler exits
-	return peak, err
+	wg.Wait() // happens-before: the peaks are safely visible after the sampler exits
+	return peak, hostPriv, hostResident, err
 }
 
 // KillTree is killTree for the lanes that spawn their own interactive child (the

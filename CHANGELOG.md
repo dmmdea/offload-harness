@@ -6,6 +6,122 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added — a host-RAM guard on every GPU lease path; a kept ComfyUI instance never holds two families' weights
+
+- **The memory is refused before the grant, not discovered after it.** On the reference 3-card Windows box (127.7 GiB physical),
+  2026-10-09, two card-scoped media leases each streamed bf16 weights a 16 GiB card cannot hold: committed memory reached
+  162.9 GiB against a 187.7 GiB limit, the page file grew 60 to 68 GiB and free RAM bottomed at 3.2 GiB. The allocator's host
+  term read FREE RAM and applied only to `--cards`, so `--devices` (what every owner wrapper takes) bypassed it, and nothing
+  read committed memory. Now a lease carries a declared host-RAM need (`host_ram_gib`, an additive field of the lease record)
+  and every grant path (`--devices`, `--cards`, whole-node, the pipeline's media admission, the detached holder) admits it
+  atomically with the grant, under the epoch lock. The rule has two terms and a grant needs both:
+  `committed now + need + not-yet-loaded <= physical - gpu_host_ram_headroom_gib` and
+  `available now - need - not-yet-loaded >= gpu_host_ram_headroom_gib`. Commit is primary (it counts what the OS has promised,
+  which is what stops a second lane before it loads) and conservative (on Windows a process's GPU allocations may be charged
+  to its commit without occupying RAM); the physical term does not depend on that question, so the rule is robust whichever way
+  it falls. The not-yet-loaded part of a granted lease is its declared need minus what the processes below its holder hold
+  RESIDENT (not private: committed-but-unoccupied memory is not RAM that has loaded). The default headroom is **8 GiB** (was
+  4): chosen, not measured, and not a number the operator typed; it is a floor until each node's interactive working-set swing
+  is measured (docs/systems/gpu-lease.md, "How the numbers get measured"). A shortage queues in the same FIFO as a card
+  shortage (`waiting for host RAM: needs N GiB, committed X of Y GiB physical (+P GiB still to load by leases already
+  running), Z GiB headroom`, printed once per request; the waiter's record and `gpu status` say it waits for host RAM);
+  `--wait 0` refuses with that text; a need no state of the box can admit is refused at once, naming `--ram` and
+  `gpu_host_ram_headroom_gib`, and the pipeline classes it `gpu_lease_unavailable`, not `gpu_busy`. A need of 0 is never read
+  against the host.
+- **Where the need comes from.** `gpu reserve --ram <GiB>` (0 allowed), else the model files of a recognised render-helper call
+  that do not fit the card, counted in FULL because ComfyUI's dynamic VRAM stages the whole file in host memory (a krea2 bf16
+  call on a 16 GiB card is 24.48 + 8.27 GiB; a file that cannot be sized takes the documented per-family size), else the media
+  class default (the largest render family the box binds), and 0 for a text lease. The detached holder is handed the parent's
+  resolved number as `--ram`. The pipeline's media admission asks the same estimate per route from the binding it is about to
+  render with. A host with card-scoped leases off reads no card table, so its card is unknown and the files count in full.
+- **Visibility.** `gpu status` (text and `--json`) and `offload_status`'s `gpu_lease` block carry `host_memory` (physical,
+  available, commit used and limit, headroom, declared and still-to-load GiB, how much the next lease may declare) and one
+  verdict: OK, NEAR (within the headroom of physical RAM) or OVER (committed memory above physical RAM). The brief verdict line
+  leads with `HOST RAM OVER (committed memory X GiB exceeds the Y GiB of physical RAM)`. OVER is a statement about what the OS
+  has promised; no surface claims the box is paging, because no reading here can know it (the page file growing, or the
+  pages-output rate, would). Lease rows show what each lease declared; queue rows show what a waiter waits for.
+- **A kept ComfyUI instance no longer holds two families' weights.** The launch marker remembers the family (and weights file)
+  an instance may still hold. The runner's end-of-run `/free` is now awaited, retried once and loud (`COMFY-FREE-WARN`), sent
+  even when the instance is kept, and clears the recorded family only when it succeeded; a runner that finds a different
+  family on a kept instance frees it before its first job; `run-graph` frees an instance it ran on, including one it found
+  already up; the lease-close proof of a kept instance retries 3 times at 8 s instead of once at 3 s (a ComfyUI in the middle of
+  a 550-second prompt answers late); the pipeline's backstop `/free` waits 5 s instead of 1 s. The incident's 57 GiB instance is
+  reconstructed from the code and the surviving logs, not observed.
+- **Not changed, and said:** the guard bounds the leases that pass through it. A pinned older binary (its leases declare
+  nothing), a direct llama-swap request and a hand-started ComfyUI are outside it; a pipeline job under a parent's ambient
+  `--devices` lease gets no admission of its own; a detached lease counts its whole need as still to load for its life; Linux
+  `Committed_AS` reads high; sd.cpp, run-graph and iGPU calls take the class default.
+
+### Added — the node's host-RAM verdict can be asked without taking anything (G1)
+
+- `gpulease.Manager.HostRAMCheck(need)` puts a need to the host as it reads now: the same function the grant calls
+  (`hostRAMCheckAgainst`), over the leases live now, with the numbers and the refusal sentence. It takes no lease, registers no
+  waiter, spends no epoch and writes nothing; a need of 0 is admitted without reading the host. A cluster placement can ask the
+  node before it sends a lane there and cannot disagree with the node's own grant (`TestHostRAMCheckIsTheRuleTheGrantApplies`).
+
+### Fixed — a media call that cannot wait answers the guard's sentence on every plan (G2)
+
+- With `gpu_wait_ms` 0 (one gated try) and the cards free but the host's memory short, a pinned or allocated plan fell through
+  the queue step and answered "card(s) X promised to callers ahead of this one" (or "held, or promised..."): false, and naming
+  nobody. It now answers the guard's own sentence, as a queued place for a door that can resume and as the busy defer
+  carrying the same words for one that cannot. The whole-node path and the allocator's own pre-filter already did; their
+  tests are the pins (`TestWaitZeroKeepsTheGuardsSentence...`).
+
+### Fixed — a waiter that waits only on host RAM no longer stops a request that declares none (G6)
+
+- A waiter the host refuses stays at the front of the FIFO for its whole `--wait` (eight hours by default), so a 0 GiB request
+  for the same card queued behind an idle card, and a whole-node waiter stopped every request on the box ("which has not
+  claimed the card"). A waiter whose record says it waits only on host RAM (`waiting_for: host-ram`) now does not hold back a
+  request that declares no host RAM: that request cannot make the shortage worse. A request that declares host RAM stays behind
+  it and is told what the waiter in front waits for. The delay the pass costs the waiter is bounded, not a stream: the moment
+  it finds its card held it stops being a waiter on memory and nothing else passes it. Named limits: nothing reserves the
+  waiter's memory against a declaring request on disjoint cards, and a token (a place held for a caller who left) still holds
+  for its 30 s grace. `gpualloc.QueuedClaims` takes whether the asker declares host RAM, so the allocator does not steer a
+  passing request off an idle card.
+
+### Added — the warm-back of the agent seat is admitted like a load; the seat declares its footprint (G4)
+
+- The warm-back after a lease (`--unload-seat`, `gpu release --warm-seat`) was the one load nothing sized. It now puts the
+  seat's host footprint (`agent_seat_host_ram_gib`, a new additive config key; unset, `hostneed.DefaultSeatHostGiB` = 21 GiB,
+  the largest seat footprint on record, a chosen fail-closed figure and never 0) to the grant's admission over every lease
+  but the one being released (`Manager.HostRAMCheckWithout`), and refuses outright while another lane that declared host RAM is
+  live. A host that reads NEAR or OVER never warms; a refused warm stays owed and the seat loads on its next request. Not done,
+  on purpose: the owed warm is not counted as pending at another lease's grant (the seat was unloaded to make room for that
+  lease; the reload happens after it), and a text lease still declares 0 unless `--ram` says.
+
+### Added — what each render held on the host is measured; declarations are raised by it (G3)
+
+- Every sampled GPU render records, beside its VRAM peak, the peak private and the peak resident memory of its process tree
+  (`gpulease.TreeMemory`, sampled by gpugen on the same tick) into the footprint store as `host_peak_gb` and
+  `host_resident_peak_gb` with the number of runs; both ride `/fleet/health` `model_footprints[]` additively. The media admission
+  raises a declaration to the measured resident peak once at least three runs exist (image and video routes), never lowers one,
+  and leaves a declaration of 0 alone. Whether a GPU process's WDDM allocations count toward its private bytes is partly
+  measured and not settled (docs/systems/gpu-lease.md: one process steady-state fits, a second does not, the lane-start case
+  is unverified); the two-term rule and the resident not-yet-loaded sum make the guard correct whichever way it falls.
+  The pipeline test suite now isolates the offload home, so a test can no longer write the operator's footprint store.
+
+### Fixed — the host-RAM surfaces say what the reading shows (G5)
+
+- "OVER" is commit above physical RAM, the guard's own conservative line chosen 2026-10-09; it was labelled "the operator's
+  definition" and the status line said "the box is paging". Neither is true of what the code can know. The note, the brief line
+  and the docs say "committed memory X GiB exceeds the Y GiB of physical RAM" and that the reading cannot say whether the box is
+  paging now.
+
+### Fixed — PickAuto's poll loop is bounded by the polls the wait allows
+
+- `gpualloc.PickAuto` ended its poll loop only when the injected clock passed the deadline. A caller that injects a sleep that
+  does not advance that clock (a no-op sleep with the real clock, a frozen clock) turned it into a busy-spin building one
+  `AllocInput` per pass for the whole wait. A run of the tests of an interrupted patch (2026-10-10) held 52 GiB private on the
+  reference box, and the patch contains exactly that shape (reconstructed from it: the 52 GiB was not re-observed; the committed
+  tests do not grow). The loop is now also bounded by `wait/2s + 1` passes (the same bound in production);
+  `TestPickAutoPollsAreBoundedWhateverTheClockDoes` is the bound.
+
+### Fixed — merging the guard onto 0.178.0
+
+- `gpu reserve`'s host-RAM estimate reuses the card table its plan already read instead of taking a read of its own (F24: a
+  wedged `nvidia-smi` costs a command the reads it already makes), and the whole-node path of a media call whose admission read
+  failed sizes its declaration against an unknown card instead of reading the table again.
+
 ## [0.178.0] - 2026-10-10 - the lease queue is first come first served, media outputs are atomic, and held media jobs close cleanly
 
 ### Fixed — a fresh `gpu reserve` queues behind registered waiters instead of winning a just-freed card

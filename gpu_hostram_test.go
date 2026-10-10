@@ -406,7 +406,9 @@ func (h *hostCommit) set(v float64)       { h.mu.Lock(); defer h.mu.Unlock(); h.
 func useHostCommit(t *testing.T, commit *hostCommit) {
 	t.Helper()
 	read := func() (gpuprobe.HostMemory, bool) {
-		return gpuprobe.HostMemory{PhysicalGiB: 100, AvailableGiB: 10, CommitUsedGiB: commit.get(), CommitLimitGiB: 160}, true
+		c := commit.get()
+		// Available moves with commit (a host that commits more has less left): the rule reads both terms.
+		return gpuprobe.HostMemory{PhysicalGiB: 100, AvailableGiB: 100 - c/2, CommitUsedGiB: c, CommitLimitGiB: 160}, true
 	}
 	restore := gpuprobe.UseHostMemoryReader(read)
 	old := hostMemoryFn

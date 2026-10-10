@@ -101,21 +101,30 @@ func (m *Manager) hostMemory() (gpuprobe.HostMemory, bool) {
 	return gpuprobe.ReadHostMemory()
 }
 
-// heldGiB is what the processes under a lease holder hold privately right now, and whether that
-// could be read.
+// heldGiB is what the processes under a lease holder hold RESIDENT right now, and whether that could be
+// read.
 func (m *Manager) heldGiB(holderPID int) (float64, bool) {
 	if m.workload != nil {
 		return m.workload(holderPID)
 	}
-	return descendantsPrivateGiB(holderPID)
+	return descendantsResidentGiB(holderPID)
 }
 
-// descendantsPrivateGiB sums the private memory of every process below holderPID, not the holder
-// itself. A wrapper lease's holder is `gpu reserve`, a few MiB, and the job is below it; a pipeline
-// lease's holder is the long-lived server, whose own memory is not the job's and must not be
-// subtracted from it. A process whose memory cannot be read (another security context) counts 0,
-// which leaves more of the declared need pending: the conservative reading.
-func descendantsPrivateGiB(holderPID int) (float64, bool) {
+// descendantsResidentGiB sums the resident memory (the working set) of every process below holderPID, not
+// the holder itself. A wrapper lease's holder is `gpu reserve`, a few MiB, and the job is below it; a pipeline
+// lease's holder is the long-lived server, whose own memory is not the job's and must not be subtracted from
+// it. A process whose memory cannot be read (another security context) counts 0, which leaves more of the
+// declared need pending: the conservative reading.
+//
+// RESIDENT, not private (G3 of the P0 plan). A lease declares the host RAM it will load, in RAM units
+// (the files that stream from RAM, hostneed), and this is what is subtracted from it to find what is still to
+// come. Private bytes are commit: memory a process has been promised, resident or not, and on Windows a
+// process's GPU allocations may be charged to it without ever occupying system RAM (a llama-server with every
+// layer on the card was reported at 29.2 GiB private beside 25.7 GiB of VRAM). Subtracting a figure that
+// includes that from a need that does not would call a lane fully loaded while most of its RAM was still to
+// come, and the second lane would be admitted into the gap. The working set is the RAM the tree occupies now;
+// where private and resident coincide (no card memory in commit) the two readings are the same.
+func descendantsResidentGiB(holderPID int) (float64, bool) {
 	tree, err := ProcessTree(holderPID)
 	if err != nil {
 		return 0, false
@@ -125,11 +134,32 @@ func descendantsPrivateGiB(holderPID int) (float64, bool) {
 		if p.PID == holderPID {
 			continue
 		}
-		if n, ok := privateBytes(p.PID); ok {
-			bytes += n
+		if _, res, ok := processMemory(p.PID); ok {
+			bytes += res
 		}
 	}
 	return float64(bytes) / (1 << 30), true
+}
+
+// TreeMemory is the private and the resident memory (GiB) of root and every process below it: what a render's
+// whole process tree holds right now. It is the measurement path of G3 (the P0 plan): sampled while a render
+// runs, its peaks are what the footprint store keeps beside the VRAM peak. Unlike descendantsResidentGiB the root
+// is counted, because here the root is the render's own runner, not a long-lived server. A process that cannot
+// be read counts as holding nothing (the reading is then LOW, never high: callers that act on it only ever
+// raise a declaration with it). err is non-nil only when the process table itself cannot be read.
+func TreeMemory(root int) (privateGiB, residentGiB float64, err error) {
+	tree, err := ProcessTree(root)
+	if err != nil {
+		return 0, 0, err
+	}
+	var priv, res uint64
+	for _, p := range tree {
+		if pv, rs, ok := processMemory(p.PID); ok {
+			priv += pv
+			res += rs
+		}
+	}
+	return float64(priv) / (1 << 30), float64(res) / (1 << 30), nil
 }
 
 // pendingGiB is the part of the declared needs of leases ALREADY GRANTED that has not loaded yet:
