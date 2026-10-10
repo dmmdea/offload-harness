@@ -223,6 +223,38 @@ test("pollOutputs: a prompt the server no longer lists anywhere (a restarted Com
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+// The shape the poll loop's own comment names (C-83): a poisoned server can answer /history with an HTTP
+// error for the rest of the budget. That answer says the server is UP, not that the prompt is alive, so it
+// is no evidence on its own: only the prompt's presence in /queue vouches for it.
+const historyHttp500 = () => ({ ok: false, status: 500, json: async () => ({}), text: async () => "internal error" });
+
+test("pollOutputs: a /history that answers HTTP 500 and a /queue that does not list the prompt never beats (the server is up, the render is not vouched for)", async () => {
+  const dir = tmp();
+  try {
+    const file = join(dir, "p.jsonl");
+    const c = clock();
+    const { fetchImpl, urls } = comfyDouble({ history: historyHttp500, queue: () => json({ queue_running: [[1, "someone-else", {}, {}, []]], queue_pending: [] }) });
+    await assert.rejects(pollOutputs({ api: "http://x", promptId: "p1", waitSec: 120, isDone: () => false, fetchImpl, sleep: c.sleep, now: c.now, env: { [PROGRESS_FILE_ENV]: file }, noOutputMsg: "gone" }), /gone/);
+    assert.equal(existsSync(file), false, "an HTTP error from /history is not a sign that this prompt is alive");
+    assert.ok(urls.some((u) => u.endsWith("/queue")), "the queue WAS asked");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("pollOutputs: a /history that answers HTTP 500 while /queue lists the prompt running does beat (the render is alive, the history route is what is ill)", async () => {
+  const dir = tmp();
+  try {
+    const file = join(dir, "p.jsonl");
+    const c = clock();
+    const done = doneAfter(1);
+    let n = 0;
+    const { fetchImpl } = comfyDouble({ history: () => (++n <= 4 ? historyHttp500() : done(1)), queue: running("p1") });
+    await pollOutputs({ api: "http://x", promptId: "p1", waitSec: 120, isDone: (e) => !!e.outputs?.[9]?.images?.[0], fetchImpl, sleep: c.sleep, now: c.now, env: { [PROGRESS_FILE_ENV]: file } });
+    const rows = lines(file);
+    assert.equal(rows.length, 1);
+    assert.match(rows[0].detail, /^ComfyUI is running prompt p1/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("pollOutputs: a /queue that errors, hangs up or answers nonsense is no evidence; a later good answer beats", async () => {
   const dir = tmp();
   try {
