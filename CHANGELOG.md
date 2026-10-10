@@ -38,6 +38,23 @@ Versioning: [SemVer](https://semver.org/).
   Not changed here: a binary older than this release keeps winning the gap (the
   pinned copy that chained the incident's reserves must be refreshed to carry the fix).
 
+### Added — Qwen-Image-2.1-Turbo: a `turbo` schedule for the 2.1 image and edit graphs
+
+- **`render/wf-qwen-image-21.mjs` learns the Turbo checkpoint's saved schedule.** `Qwen/Qwen-Image-2.1-Turbo` (8 steps,
+  cfg 1, the same 7B architecture, Qwen Research License, generation and editing) ships its sampling schedule as
+  `sample_sigmas` in `model_index.json` with dynamic shifting off, shift 1.0 and no terminal stretch — a list the base
+  model's `official` schedule (dynamic mu, `shift_terminal` 0.02) does not reproduce at 8 steps, and ComfyUI's fixed
+  shift does not either. `imagegen_schedule: "turbo"` feeds that list through `ManualSigmas` (terminal 0 appended) and
+  refuses any step count but 8, naming the saved schedule. The 2.1 edit graph gains the same custom-sampler path behind
+  the new `gen_edit_schedule` (`comfy`, the KSampler default, or `turbo`; the size-dependent `official` mode has no
+  place on the encoder's latent); `comfy-edit.mjs --schedule` is a 2.1-only knob, refused on 2511. Bind the Turbo as
+  named families beside the 40-step ones (the Comfy-Org repack: `qwen_image_2.1_turbo_bf16.safetensors` /
+  `qwen_image_2.1_turbo_int8_convrot.safetensors`). Tests: the list pinned value for value, T2I and edit graphs at
+  several sizes, wrong step counts refused, the edit default graph unchanged, the 2511 refusal.
+- **doctor: the default `edit_image_generative` row names the named-families case.** A node whose only edit bindings
+  are `gen_edit_families` overlays (no `gen_edit_unet`) read "gen_edit_script/gen_edit_unet is unset" beside a
+  CONFIGURED family row, as if defective; it now says it edits through its named families.
+
 ## [0.177.0] - 2026-10-09 - warm-back survives a llama-swap reload, the embedder can run from its own llama.cpp build, and two flaky tests stop reading the clock
 
 ### Fixed — a warm-back interrupted by a llama-swap reload or restart is re-sent, and the owed-warm marker clears when the debt is moot

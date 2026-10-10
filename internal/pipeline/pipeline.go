@@ -2121,6 +2121,7 @@ func (p *Pipeline) runEditImageGenerative(ctx context.Context, req core.Request,
 		Family:      cfg.GenEditFamily,
 		Resolution:  cfg.GenEditResolution,
 		CacheDevice: cfg.GenEditCacheDevice,
+		Schedule:    cfg.GenEditSchedule,
 		// The edit route renders on ONE card: the device pin applies.
 		Launch: comfyLaunch(cfg, true),
 	}

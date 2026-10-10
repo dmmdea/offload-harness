@@ -144,3 +144,15 @@ test("the real script exits 2 on a caller mistake, before the GPU slot is touche
     assert.doesNotMatch(r.stderr, /GPU lease missing/, "refused before withGpuSlot");
   }
 });
+
+test("2.1 --schedule turbo plans the saved 8-step graph; 2511 refuses the knob; unknown values refused", () => {
+  const p = plan([...E21, "--schedule", "turbo", "--steps", "8", "--cfg", "1"]);
+  assert.match(p.describe, /schedule turbo/);
+  const g = p.build(["t.png"]);
+  assert.ok(Object.values(g).some((n) => n.class_type === "SamplerCustomAdvanced"), "custom sampler on the turbo path");
+  assert.ok(!Object.values(g).some((n) => n.class_type === "KSampler"));
+  assert.match(plan(E21).describe, /schedule comfy/, "comfy is the edit default");
+  assert.throws(() => plan([...E2511, "--schedule", "turbo"]), /--schedule is a qwen-image-2.1 edit knob/);
+  assert.throws(() => plan([...E21, "--schedule", "official"]), /--schedule must be one of comfy\|turbo/);
+  assert.throws(() => plan([...E21, "--schedule", "turbo"]).build(["t.png"]), /steps must be 8/);
+});
