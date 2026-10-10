@@ -2,7 +2,9 @@ package pipeline
 
 import (
 	"fmt"
+	"os"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -74,5 +76,30 @@ func TestBatchErrClass(t *testing.T) {
 	}
 	if got := batchErrClass("CUDA out of memory", nil); got != "oom" {
 		t.Fatalf("oom classification: got %q", got)
+	}
+}
+
+// 2026-10-09: a batch stopped on a full drive and its items were recorded with err_class "other".
+// A full volume is its own class, read from the errno token (the render helpers' rule), never from
+// prose, for the image lanes (this file's classifyErr) as for the rest (gpugen.ClassifyErr).
+func TestBatchErrClassRecordsAFullDiskAsDiskFull(t *testing.T) {
+	stopped := fmt.Errorf("gpugen: comfy-generate.mjs failed: exit status 1 (IMAGE BATCH FAILED: the disk is full at job 2/4, writing renders/b.png (comfy-render exited 1: ENOSPC: no space left on device, write); 2 jobs not run, recorded as such)")
+	for name, got := range map[string]string{
+		"the failing job's own row":      batchErrClass("comfy-render exited 1: ENOSPC: no space left on device, write (writing renders/b.png)", nil),
+		"a not-run row":                  batchErrClass("not run: the disk is full at job 2/4, writing renders/b.png (comfy-render exited 1: ENOSPC: no space left on device, write)", nil),
+		"ComfyUI's own errno":            batchErrClass("comfy-render exited 1: ComfyUI exec error: OSError: [Errno 28] No space left on device", nil),
+		"a job with no row, batch error": batchErrClass("no result recorded (batch aborted?)", stopped),
+		"a Go write that failed":         classifyErr(&os.PathError{Op: "write", Path: "jobs.jsonl", Err: syscall.ENOSPC}),
+		"the batch error itself":         classifyErr(stopped),
+	} {
+		if got != "disk_full" {
+			t.Errorf("%s: err_class = %q, want disk_full", name, got)
+		}
+	}
+	// prose alone is not a full disk: a prompt echoed in an exec error must not be recorded as one
+	for _, msg := range []string{"no space left on device", `ComfyUI exec error: {"current_inputs":{"text":["a monitor reading: no space left on device"]}}`} {
+		if got := classifyErr(fmt.Errorf("%s", msg)); got != "other" {
+			t.Errorf("classifyErr(%q) = %q, want other", msg, got)
+		}
 	}
 }

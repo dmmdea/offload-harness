@@ -5088,6 +5088,12 @@ func classifyErr(err error) string {
 	if errors.Is(err, llamaclient.ErrLaneUnavailable) {
 		return errClassLaneGone
 	}
+	// A full volume (0.178.0), by the typed errno or the errno token in the text, never by prose: the
+	// image lanes classify with this function, and a batch item that failed on a full drive was
+	// recorded as "other" (gpugen.IsDiskFull is the one rule, shared with gpugen.ClassifyErr).
+	if gpugen.IsDiskFull(err) {
+		return "disk_full"
+	}
 	s := strings.ToLower(err.Error())
 	switch {
 	case strings.Contains(s, "out of memory") || strings.Contains(s, "cudamalloc") || strings.Contains(s, "oom"):

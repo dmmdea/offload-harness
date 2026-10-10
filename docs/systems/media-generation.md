@@ -1175,6 +1175,7 @@ The typed errors a lane can return (`meta.err_class` in parentheses; the runner 
 | `ENGINE_CRASHED` | `engine_crashed` | the engine died of SIGSEGV / SIGABRT / SIGBUS / SIGFPE / SIGTRAP: a crash, not a timeout |
 | `OUT_OF_MEMORY` | `oom` | ggml `insufficient memory`, sd.cpp `alloc compute buffer failed`, a Vulkan allocation failure, or SIGKILL on a UMA box (the OOM killer) |
 | `DEVICE_INVALID` | `device_invalid` | `audiocpp_device` is not a device index (a configuration error, not a backend refusal) |
+| a full volume (0.178.0) | `disk_full` | `ENOSPC`, `EDQUOT` or `EROFS`: the typed errno of a Go file call, or the errno name/number in a runner's output (`ENOSPC:` from Node, `[Errno 28]` from Python; `[WinError 112]` on Windows), never the prose around it, because an exec error echoes the prompt. Both classifiers (`gpugen.ClassifyErr` and the image lanes' `pipeline.classifyErr`) share `gpugen.IsDiskFull`; a batch that stopped on a full drive was recorded as `other` before |
 | a client cancel | `timeout` | the caller cancelled the run: classified like every other media lane's cancel |
 
 ### The GPU timeout envelope: GPU_RESET and the token cap
