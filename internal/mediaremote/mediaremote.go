@@ -211,6 +211,7 @@ func Run(ctx context.Context, cfg config.Config, runner Runner, req core.Request
 	// chosen, its one PAIR card, like composeremote and the other remote lanes (0.165.0, D5-D11). The
 	// handle is finished on both exits below; the local branches above never reach it.
 	h := core.BeginRemote(runner, req, r)
+	defer core.CloseOnPanic(h) // a panic in the dispatch, the poll or the fetch closes the card before the door dies of it
 	res, err := callWith(ctx, cfg, req, remotes, h)
 	if err != nil {
 		res = placementDefer(err, placement)

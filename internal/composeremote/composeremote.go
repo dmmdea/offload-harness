@@ -111,6 +111,7 @@ func Run(ctx context.Context, cfg config.Config, runner Runner, req core.Request
 	// The call is the remote lane's own from here on: it writes its ledger row and, once a node is
 	// chosen, its one PAIR card (D5/D6). The local route above never reaches this.
 	h := core.BeginRemote(runner, req, r)
+	defer core.CloseOnPanic(h) // a panic in the dispatch, the poll or the fetch closes the card before the door dies of it
 	if r == RouteAuto {
 		placement = "remote: no composition lane on this machine"
 		if len(cfg.DelegateRemotes) == 0 {
