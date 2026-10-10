@@ -204,3 +204,11 @@ func (k *keeperRunner) lapse(token string) {
 }
 
 var _ core.PlaceKeeper = (*keeperRunner)(nil)
+
+// runBounded is the CLI's call (it blocks until the job is done) with a bound, so a regression that would keep a ticket waiting
+// for ever ends the test in seconds and not at the package's timeout.
+func runBounded(cfg config.Config, runner Runner, req core.Request, route string, remotes []string) core.Result {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	return Run(ctx, cfg, runner, req, route, remotes)
+}

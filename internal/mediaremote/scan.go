@@ -760,8 +760,11 @@ func deferRes(class, reason, errClass string) core.Result {
 	return res
 }
 
+// queueLog is where the queue's log lines go (the process's stderr; a test replaces it).
+var queueLog = func(line string) { fmt.Fprintln(os.Stderr, line) }
+
 func logQueue(format string, args ...any) {
-	fmt.Fprintf(os.Stderr, "media queue: "+format+"\n", args...)
+	queueLog("media queue: " + fmt.Sprintf(format, args...))
 }
 
 // ---- the roster file ----------------------------------------------------------------------------------------------

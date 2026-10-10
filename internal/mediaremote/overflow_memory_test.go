@@ -41,7 +41,7 @@ func TestABounceIsRememberedAndTheNodeComesBackAtTheNextStep(t *testing.T) {
 	call := func(step string) {
 		t.Helper()
 		lr := &laneRunner{verdict: heldLane()}
-		res := Run(context.Background(), cfg, lr, overflowReq(t, "qwen-image-2.1-fast", nil), "auto", nil)
+		res := runBounded(cfg, lr, overflowReq(t, "qwen-image-2.1-fast", nil), "auto", nil)
 		if !res.OK || res.Meta.Node != "node-b" {
 			t.Fatalf("%s: the node that admits serves the call: %+v", step, res)
 		}
@@ -97,7 +97,7 @@ func TestACallTheNodeServesForgetsItsBounces(t *testing.T) {
 		}
 	}
 	call := func() core.Result {
-		return Run(context.Background(), cfg, &laneRunner{verdict: heldLane()}, overflowReq(t, "qwen-image-2.1-fast", nil), "auto", nil)
+		return runBounded(cfg, &laneRunner{verdict: heldLane()}, overflowReq(t, "qwen-image-2.1-fast", nil), "auto", nil)
 	}
 
 	if res := call(); !res.OK || res.Meta.Node != "node-b" || len(a.posts()) != 1 {
@@ -186,7 +186,7 @@ func TestALeaseThatCannotBeTakenMovesTheCallOnAndPausesTheNode(t *testing.T) {
 	cfg := overflowClient(t, "krea2", map[string]string{"qwen-image-2.1-fast": block(int8Ckpt, "")}, a, b)
 	pinPlacerClock(t)
 	lr := &laneRunner{verdict: heldLane()}
-	res := Run(context.Background(), cfg, lr, overflowReq(t, "qwen-image-2.1-fast", nil), "auto", nil)
+	res := runBounded(cfg, lr, overflowReq(t, "qwen-image-2.1-fast", nil), "auto", nil)
 	if !res.OK || res.Meta.Node != "node-b" {
 		t.Fatalf("the next node serves a call the first could not admit: %+v", res)
 	}
@@ -224,7 +224,7 @@ func TestAnAmbiguousPostIsFinal(t *testing.T) {
 
 	done := make(chan core.Result, 1)
 	go func() {
-		done <- Run(context.Background(), cfg, lr, overflowReq(t, "qwen-image-2.1-fast", nil), "auto", nil)
+		done <- runBounded(cfg, lr, overflowReq(t, "qwen-image-2.1-fast", nil), "auto", nil)
 	}()
 	var res core.Result
 	select {
@@ -273,7 +273,7 @@ func TestARefusedDialMovesOnAndBacksTheNodeOff(t *testing.T) {
 	t.Cleanup(func() { probeRoster = prev })
 
 	lr := &laneRunner{verdict: heldLane()}
-	res := Run(context.Background(), cfg, lr, overflowReq(t, "qwen-image-2.1-fast", nil), "auto", nil)
+	res := runBounded(cfg, lr, overflowReq(t, "qwen-image-2.1-fast", nil), "auto", nil)
 	if !res.OK || res.Meta.Node != "node-b" {
 		t.Fatalf("a dial that never connected sent nothing, so the next node serves the call: %+v", res)
 	}
@@ -284,7 +284,7 @@ func TestARefusedDialMovesOnAndBacksTheNodeOff(t *testing.T) {
 	if pz, _ := placer.backedOff(a.srv.URL); pz.why() != "not probed: it did not answer a moment ago; looking again in 3s" {
 		t.Errorf("a node that was never reached reads as not probed, and says for how long: %q", pz.why())
 	}
-	if res := Run(context.Background(), cfg, &laneRunner{verdict: heldLane()}, overflowReq(t, "qwen-image-2.1-fast", nil), "auto", nil); !res.OK || res.Meta.Node != "node-b" {
+	if res := runBounded(cfg, &laneRunner{verdict: heldLane()}, overflowReq(t, "qwen-image-2.1-fast", nil), "auto", nil); !res.OK || res.Meta.Node != "node-b" {
 		t.Fatalf("%+v", res)
 	}
 	if len(asked) < 2 || len(asked[0]) != 2 {

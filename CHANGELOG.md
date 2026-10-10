@@ -41,6 +41,9 @@ Versioning: [SemVer](https://semver.org/).
   node is written with the ticket's `placing` state under a directory lock before the job is sent, so two processes never send one
   single-job node two jobs (`TestTwoProcessesNeverDispatchTwoTicketsToOneSingleJobNode`, which turns the ordering rule off so that only
   the claim stands between them). This closes the S1 open issue 6.
+- **A dead owner's claim holds its node for 2 minutes** (chosen), not a moment less: the job it sent keeps running on the node, which
+  shows its lease only once the job is admitted, and in those seconds another process would have sent the node a second job.
+  **A node that does not answer is logged once per backoff step** (5, 15, 60, then 300 s), never per scan.
 - **Owners die.** A `waiting` or `local` ticket of a dead owner (process gone, or no beat for 10 minutes) is swept by the next scan or
   call of any process and its place let go; a `placed` or `fetching` one is **adopted by the next identical call**, which polls the
   recorded node job and fetches its outputs and never sends the request again, so the job renders once (`TestDeadOwnerPlacedTicketIsAdopted`:

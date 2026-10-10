@@ -262,7 +262,7 @@ func TestTicketFixesOneSeed(t *testing.T) {
 	req := e.req("a red door", nil)
 	delete(req.Params, "seed")
 
-	res := Run(context.Background(), e.cfg, e.lr, req, "auto", nil)
+	res := runBounded(e.cfg, e.lr, req, "auto", nil)
 	if !res.OK || res.Meta.Node != "node-b" {
 		t.Fatalf("node-a bounces the job and node-b renders it: %+v", res)
 	}
@@ -287,7 +287,7 @@ func TestTicketFixesOneSeed(t *testing.T) {
 
 	// The seed the caller gave is the seed, and the key was taken before any seed was fixed: a resend without it attaches.
 	given := newQEnv(t, 1, false)
-	if r := Run(context.Background(), given.cfg, given.lr, given.req("p", map[string]any{"seed": 31337}), "auto", nil); !r.OK {
+	if r := runBounded(given.cfg, given.lr, given.req("p", map[string]any{"seed": 31337}), "auto", nil); !r.OK {
 		t.Fatal(r)
 	}
 	if _, p := posted(t, given.nodes[0]); p["seed"] != float64(31337) {
@@ -1102,7 +1102,7 @@ func TestABouncedAttemptGoesBackToWaitingAndTheNextScanTriesTheNextNode(t *testi
 	}
 	e := newQEnv(t, 5, false, bounce)
 	pinPlacerClock(t)
-	res := Run(context.Background(), e.cfg, e.lr, e.req("a red door", nil), "auto", nil)
+	res := runBounded(e.cfg, e.lr, e.req("a red door", nil), "auto", nil)
 	if !res.OK || res.Meta.Node != "node-e" {
 		t.Fatalf("the fifth node serves it: %+v", res)
 	}
@@ -1243,8 +1243,18 @@ func TestClaimNodeIsExclusiveAndLetsGoOfTheDead(t *testing.T) {
 		t.Fatal(err)
 	}
 	c := mk("mq-cccccccccccc", selfOwner())
+	// Its process just died: the job it sent is still running on the node, which shows its lease only once the job is admitted,
+	// so the node stays in use for the grace.
+	if ok, holder, _ := st.claimNode(&c, base, "node-x", stPlacing); ok || holder.Ticket != b.ID {
+		t.Fatalf("the node of an owner that died a moment ago is still in use: ok=%v holder=%+v", ok, holder)
+	}
+	// Long after, the node's own health speaks for it.
+	b.Beat = time.Now().Add(-deadClaimGrace - time.Minute).UnixMilli()
+	if err := st.write(b); err != nil {
+		t.Fatal(err)
+	}
 	if ok, _, _ := st.claimNode(&c, base, "node-x", stPlacing); !ok {
-		t.Fatal("the node of a dead owner is free")
+		t.Fatal("the node of an owner that died long ago is free")
 	}
 	st.releaseNode(base, "mq-bbbbbbbbbbbb") // not the holder: nothing happens
 	if len(st.claims()) != 1 {
@@ -1535,5 +1545,59 @@ func TestATicketIsCollectedByTokenEvenUnderAnInheritedLease(t *testing.T) {
 	}
 	if _, runs := e.lr.counts(); runs != 0 {
 		t.Errorf("collecting asks no lane: %d runs", runs)
+	}
+}
+
+// The miss of a node is logged once per backoff step, not once per scan: a node inside its pause is not probed, so it says
+// nothing. (The pauses are 5, 15, 60 and then 300 seconds, chosen.)
+func TestADeadNodeIsLoggedOncePerBackoffStepNotPerScan(t *testing.T) {
+	e := newQEnv(t, 1, true)
+	cfg := e.cfg
+	cfg.DelegateRemotes = append([]string{"http://127.0.0.1:9"}, cfg.DelegateRemotes...) // nothing listens on port 9
+	now := pinPlacerClock(t)
+	var mu sync.Mutex
+	var lines []string
+	prev := queueLog
+	queueLog = func(l string) {
+		mu.Lock()
+		lines = append(lines, l)
+		mu.Unlock()
+	}
+	t.Cleanup(func() { queueLog = prev })
+	q, _ := manual(t)
+	admitOn(t, q, cfg, e.lr, e.req("a red door", nil))
+	logged := func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		n := 0
+		for _, l := range lines {
+			if strings.Contains(l, ":9") && strings.Contains(l, "not probing it again for") {
+				n++
+			}
+		}
+		return n
+	}
+	for _, step := range []struct {
+		advance time.Duration
+		want    int
+		note    string
+	}{
+		{0, 1, "the first miss is logged"},
+		{4 * time.Second, 1, "inside the 5 s pause: not probed, not logged"},
+		{2 * time.Second, 2, "past 5 s: probed and missed again, logged"},
+		{14 * time.Second, 2, "inside the 15 s pause"},
+		{2 * time.Second, 3, "past 15 s"},
+		{59 * time.Second, 3, "inside the 60 s pause"},
+		{2 * time.Second, 4, "past 60 s"},
+		{299 * time.Second, 4, "inside the 300 s pause"},
+		{2 * time.Second, 5, "past 300 s"},
+	} {
+		*now = now.Add(step.advance)
+		for i := 0; i < 3; i++ { // several scans inside one instant of the pinned clock
+			q.cycle(context.Background())
+		}
+		if got := logged(); got != step.want {
+			t.Fatalf("%s: %d line(s), want %d (%v)", step.note, got, step.want, lines)
+		}
 	}
 }

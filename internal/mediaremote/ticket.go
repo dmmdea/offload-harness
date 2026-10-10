@@ -68,6 +68,10 @@ var (
 	ticketMaxWait = 8 * time.Hour
 	// tmpStale: a temp file of a write that never finished.
 	tmpStale = time.Minute
+	// deadClaimGrace: a claim whose owner died stays in force this long after the owner's last beat. The job it sent keeps
+	// running on the node, and the node's health shows its lease only once the job has been admitted; for those seconds the node
+	// reads idle, and another process would send it a second job. After the grace the node's own health speaks for it.
+	deadClaimGrace = 2 * time.Minute
 )
 
 const (
@@ -322,14 +326,19 @@ func (s *store) readClaim(path string) (claim, bool) {
 	return c, true
 }
 
-// claimLive: the claim's owner is alive and its ticket is on file with a job in flight on that node. Anything else is a
-// leak or a dead process's, and does not hold the node.
+// claimLive: the claim's ticket is on file with a job in flight on that node, and its owner is alive (and has written its beat
+// within ownerStale) or died less than deadClaimGrace ago. Anything else is a leak, or a dead process's long after, and does
+// not hold the node.
 func (s *store) claimLive(c claim) bool {
-	if !c.Owner.alive() {
+	t, ok := s.read(c.Ticket)
+	if !ok || !inFlightState(t.State) || normBase(t.Base) != normBase(c.Base) {
 		return false
 	}
-	t, ok := s.read(c.Ticket)
-	return ok && inFlightState(t.State) && normBase(t.Base) == normBase(c.Base)
+	age := time.Since(time.UnixMilli(t.Beat))
+	if c.Owner.alive() {
+		return t.Beat == 0 || age < ownerStale
+	}
+	return age < deadClaimGrace
 }
 
 // claimNode takes base for the ticket under the lock: ok is false, with the holder, when another live ticket has it.

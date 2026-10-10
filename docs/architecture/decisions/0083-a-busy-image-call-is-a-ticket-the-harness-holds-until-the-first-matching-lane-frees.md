@@ -57,12 +57,14 @@ make the caller retry. Three things were still wrong once every lane was busy.
    older waiting ticket of the machine matches (an older ticket that has not been scanned yet is first in line for every node).
    Nothing is sent to a node until a lane is free there: **late binding**, no job parked anywhere. One node is tried per scan; a
    node that refuses or bounces the job goes back to waiting and is paused by the placer's memory (a full node that names no
-   `Retry-After` for 5 s, a bounce for 60 s and then 300 s); a local run that lost the race to another job goes back to waiting
+   `Retry-After` for 5 s, a bounce for 60 s and then 300 s; a node that does not answer for 5, 15, 60 and then 300 s, with one
+   line on the process's stderr per step and none per scan); a local run that lost the race to another job goes back to waiting
    with its place. A ticket never gives up on a lane (the S1 bound of three nodes is gone); it ends after 8 h without one.
 6. **A node a ticket has a job on is in use for every scanner on the machine.** A claim file per node is written, together with
    the ticket's `placing` state, under a directory lock, before the job is sent: the read and the write are one step, so two
-   processes never send one single-job node two jobs. A claim is live only while its owner is alive and its ticket has a job in
-   flight on that node; a dead process's claim holds nothing.
+   processes never send one single-job node two jobs. A claim is live while its ticket has a job in flight on that node and
+   its owner is alive, or died less than 2 minutes ago (chosen: the job it sent keeps running on the node, which shows its lease
+   only once the job is admitted, and in those seconds the node would read idle); after that the node's own health speaks for it.
 7. **Owners die; tickets are adopted or swept.** An owner is dead when its process is gone or when it has not written its beat
    for 10 minutes. A `waiting` ticket of a dead owner, and a `local` one (its render died with its process), are swept by the next
    scan or call of any process, and their places let go; the identical call that finds one starts a new ticket that keeps its

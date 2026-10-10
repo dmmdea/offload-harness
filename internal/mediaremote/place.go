@@ -161,8 +161,8 @@ func (p *placerState) entry(base string) *nodeBackoff {
 	return nb
 }
 
-// failed records one more consecutive failure to reach base and sets its pause.
-func (p *placerState) failed(base string) {
+// failed records one more consecutive failure to reach base and sets its pause, which it returns.
+func (p *placerState) failed(base string) time.Duration {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	nb := p.entry(base)
@@ -173,6 +173,7 @@ func (p *placerState) failed(base string) {
 	nb.fails++
 	nb.until = placerNow().Add(backoffSteps[step])
 	nb.state, nb.cause = "unreachable", "it did not answer a moment ago"
+	return backoffSteps[step]
 }
 
 // cooldown leaves base alone for d (a node's Retry-After, jittered once so several delegators do not return together).
@@ -308,10 +309,11 @@ func candidatesFor(ctx context.Context, cfg config.Config, bases []string, local
 	for _, r := range probeRoster(ctx, live, cfg.FleetAuthToken, healthTimeout) {
 		i := idxOf[r.Base]
 		if r.Err != nil {
-			if !rosterprobe.IsRefusal(r.Err) && r.Source == rosterprobe.SourceProbe {
-				placer.failed(r.Base)
-			}
 			why := r.Miss()
+			if !rosterprobe.IsRefusal(r.Err) && r.Source == rosterprobe.SourceProbe {
+				// One line per backoff step, not per scan: a node in its pause is not probed, so it is not logged.
+				logQueue("%s; not probing it again for %s", why, placer.failed(r.Base))
+			}
 			state := "unreachable"
 			if rosterprobe.IsRefusal(r.Err) {
 				state = "refused"
@@ -444,7 +446,7 @@ func attempt(ctx context.Context, cfg config.Config, req core.Request, pl planne
 	if errors.As(serr, &pe) && ctx.Err() == nil {
 		switch {
 		case pe.neverReached:
-			placer.failed(c.base)
+			logQueue("%s did not take the connection; not offering it a job for %s", c.shown, placer.failed(c.base))
 			return attemptResult{kind: attemptOut, row: ClusterRow{Node: c.shown, State: "unreachable", Why: "did not take the connection: " + pe.Error()}}
 		case pe.status == 503 || pe.status == 429:
 			// A node that names no Retry-After is still left alone for the first backoff step: the ticket tries the

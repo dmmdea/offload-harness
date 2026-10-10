@@ -2028,7 +2028,8 @@ nothing ran). Any other answer after acceptance is final: a render that failed i
 POST that was sent and got no answer is final too (the node may hold the job; `TestAnAmbiguousPostIsFinal`), a job a node holds
 is never also run here (a media job cannot be withdrawn, ADR 0064), and a node that goes away mid-job fails the call naming the
 node and the remote job. A node that does not answer a health read is left alone for 5, 15, 60 and then 300 s by consecutive
-failure (the last holds), a `Retry-After` pauses a node for that long (jittered once), and a node that took a call and passed it
+failure (the last holds; each miss is one line on the process's stderr, once per step and none per scan,
+`TestADeadNodeIsLoggedOncePerBackoffStepNotPerScan`), a `Retry-After` pauses a node for that long (jittered once), and a node that took a call and passed it
 back is left alone for 60 s and then 300 s per consecutive bounce (only a call it serves clears the count; a health read does
 not): a node that reads idle but whose own grant refuses every job would otherwise park each call for its whole `gpu_wait_ms`.
 Chosen constants, not measurements (`TestABounceIsRememberedAndTheNodeComesBackAtTheNextStep`,
@@ -2123,7 +2124,9 @@ without one. A freed lane is noticed within one scan interval (at most 12 s).
 window in which two processes both read a node idle and both send it a job. A claim file per node (`use-<hash>.json`) is written
 together with the ticket's `placing` state, under a directory lock (`.lock`, an `O_EXCL` file held for a few file operations), before
 the job is sent (`TestTwoProcessesNeverDispatchTwoTicketsToOneSingleJobNode`, `TestClaimNodeIsExclusiveAndLetsGoOfTheDead`). A claim is
-live only while its owner is alive and its ticket has a job in flight on that node.
+live while its ticket has a job in flight on that node and its owner is alive, or died less than 2 minutes ago (chosen: the job it
+sent keeps running on the node, which shows its lease only once the job is admitted; after the grace the node's own health speaks
+for it, `TestClaimNodeIsExclusiveAndLetsGoOfTheDead`).
 
 **Owners die.** An owner is dead when its process is gone or it has not written its beat for 10 minutes (chosen). A `waiting` ticket
 of a dead owner, and a `local` one (its render died with its process), are swept by the next scan or call of any process and their

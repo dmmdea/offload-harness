@@ -1,7 +1,6 @@
 package mediaremote
 
 import (
-	"context"
 	"strings"
 	"testing"
 
@@ -14,7 +13,7 @@ func TestOverflowRewritesFamilyToTheNodesName(t *testing.T) {
 	n := startImageNode(t, "node-b", "hidream-o1", map[string]string{"qwen-image-2.1": block(int8Ckpt, "")}, nodeOpts{})
 	cfg := overflowClient(t, "krea2", map[string]string{"qwen-image-2.1-fast": block(int8Ckpt, "")}, n)
 	lr := &laneRunner{verdict: heldLane()}
-	if res := Run(context.Background(), cfg, lr, overflowReq(t, "qwen-image-2.1-fast", nil), "auto", nil); !res.OK {
+	if res := runBounded(cfg, lr, overflowReq(t, "qwen-image-2.1-fast", nil), "auto", nil); !res.OK {
 		t.Fatal(res)
 	}
 	_, payload := posted(t, n)
@@ -43,7 +42,7 @@ func TestOnlyImageJobsOverflow(t *testing.T) {
 		"a voice":     {Task: core.TaskGenerateAudio, Input: "hello", Params: map[string]any{"voice": "generalist"}},
 	} {
 		lr := &laneRunner{verdict: heldLane()}
-		if res := Run(context.Background(), cfg, lr, req, "auto", nil); !res.OK {
+		if res := runBounded(cfg, lr, req, "auto", nil); !res.OK {
 			t.Fatalf("%s: %+v", name, res)
 		}
 		if probes, runs := lr.counts(); probes != 0 || runs != 1 {
@@ -97,7 +96,7 @@ func TestTheMachineItselfIsNeverACandidate(t *testing.T) {
 	cfg.FleetNodeID = "Node-B" // the case differs on purpose: hostnames are case-insensitive
 
 	lr := &laneRunner{verdict: heldLane()}
-	res := Run(context.Background(), cfg, lr, overflowReq(t, "qwen-image-2.1-fast", nil), "auto", nil)
+	res := runBounded(cfg, lr, overflowReq(t, "qwen-image-2.1-fast", nil), "auto", nil)
 	if !res.OK || res.Meta.Node != "node-c" {
 		t.Fatalf("the other node serves it: %+v", res)
 	}
