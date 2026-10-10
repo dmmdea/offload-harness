@@ -21,6 +21,27 @@ import (
 // the stack: errors.Is(err, ErrNoAudioStream) lets a door say so and file it as a bad input.
 var ErrNoAudioStream = errors.New("the input has no audio stream")
 
+// ErrFFmpegUnavailable is what a conversion returns when ffmpeg could not be run at all (the executable is
+// not on the PATH, the configured path is wrong or not executable), as opposed to ffmpeg running and
+// refusing the input. The first is the stack's fault and the second the caller's file: a ledger row that
+// filed both as "bad input" (F22 follow-up) would send an operator to look at a file when the box has no
+// ffmpeg. errors.Is(err, ErrFFmpegUnavailable) lets a door file it as ffmpeg_unavailable.
+var ErrFFmpegUnavailable = errors.New("ffmpeg could not be run")
+
+// convertFailure is the error of an ffmpeg run that failed, shared by both converters. out is what ffmpeg
+// printed; err is what running it returned: an *exec.ExitError means ffmpeg ran and said no, anything else
+// means it never ran.
+func convertFailure(audioPath string, out []byte, err error) error {
+	if noAudioStream(string(out)) {
+		return fmt.Errorf("audioio: %q: %w", audioPath, ErrNoAudioStream)
+	}
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) {
+		return fmt.Errorf("audioio: ffmpeg failed: %w: %w (%s)", ErrFFmpegUnavailable, err, string(out))
+	}
+	return fmt.Errorf("audioio: ffmpeg failed: %w (%s)", err, string(out))
+}
+
 // noAudioStream reports whether ffmpeg's output says the input left nothing to encode. The sentence has
 // changed little across versions ("Output file #0 does not contain any stream" in 4.x, "Output file does
 // not contain any stream" in 9.x); the stable part is matched, case-insensitively.
@@ -65,10 +86,7 @@ func ConvertToWav16k(audioPath, ffmpegPath string) (string, func(), error) {
 	cmd := exec.Command(ffmpegPath, buildFFmpegArgs(audioPath, out)...)
 	if o, err := cmd.CombinedOutput(); err != nil {
 		cleanup()
-		if noAudioStream(string(o)) {
-			return "", nil, fmt.Errorf("audioio: %q: %w", audioPath, ErrNoAudioStream)
-		}
-		return "", nil, fmt.Errorf("audioio: ffmpeg failed: %w (%s)", err, string(o))
+		return "", nil, convertFailure(audioPath, o, err)
 	}
 	if fi, err := os.Stat(out); err != nil || fi.Size() == 0 {
 		cleanup()
@@ -118,10 +136,7 @@ func ConvertToOpus16k(audioPath, ffmpegPath string) (string, func(), error) {
 	cmd := exec.Command(ffmpegPath, buildOpusArgs(audioPath, out)...)
 	if o, err := cmd.CombinedOutput(); err != nil {
 		cleanup()
-		if noAudioStream(string(o)) {
-			return "", nil, fmt.Errorf("audioio: %q: %w", audioPath, ErrNoAudioStream)
-		}
-		return "", nil, fmt.Errorf("audioio: ffmpeg failed: %w (%s)", err, string(o))
+		return "", nil, convertFailure(audioPath, o, err)
 	}
 	if fi, err := os.Stat(out); err != nil || fi.Size() == 0 {
 		cleanup()

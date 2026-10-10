@@ -62,7 +62,7 @@ func TestTranscribeOfAFileWithNoAudioStreamSaysSoAndIsFiledAsABadInput(t *testin
 // added there would file as "other" and fragment the register this closed set exists to keep (F22).
 func TestEveryCoreErrClassHasALedgerReasonCode(t *testing.T) {
 	for _, c := range []string{
-		core.ErrClassGPUBusy, core.ErrClassGPUQueued, core.ErrClassComposeBusy, core.ErrClassGPULeaseUnavailable, core.ErrClassBadInput,
+		core.ErrClassGPUBusy, core.ErrClassGPUQueued, core.ErrClassComposeBusy, core.ErrClassGPULeaseUnavailable, core.ErrClassBadInput, core.ErrClassFFmpegUnavailable,
 		errClassGPUBusy, errClassLaneGone,
 	} {
 		if got := ledger.DeferCode(c, ""); got == ledger.ReasonOther {

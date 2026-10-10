@@ -212,7 +212,7 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 			return core.Result{OK: false, Reason: "agent task: marshaling wire result: " + merr.Error(), Meta: meta}
 		}
 		if w.Deferred {
-			p.recordDefer(req.Task, meta, len(req.Input), w.Reason)
+			p.recordDeferClassed(req.Task, meta, len(req.Input), w.Reason, w.DeferClass)
 		} else {
 			p.record(req.Task, meta, len(req.Input))
 		}

@@ -170,14 +170,44 @@ var errClassCodes = map[string]string{
 // harness itself writes, never a model's or a node's prose.
 var reasonPrefixCodes = []struct{ prefix, code string }{
 	{"gpu busy:", ReasonNodeBusy}, {"seat busy:", ReasonNodeBusy},
+	// A conversion that could not make a temp directory is the box's disk; ffmpeg that could not be run is
+	// typed upstream (err_class ffmpeg_unavailable); what remains of "audio convert:" is ffmpeg refusing the file.
+	{"audio convert: audioio: tempdir:", ReasonInfrastructure},
 	{"the input has no audio stream", ReasonBadInput}, {"audio convert:", ReasonBadInput}, {"image load:", ReasonBadInput},
 	{"frame sampling:", ReasonBadInput}, {"empty image prompt", ReasonBadInput},
 	{"generate_svg: missing kind", ReasonBadInput}, {"generate_svg: bad spec", ReasonBadInput},
+	// The media doors' own refusals of an input that cannot be run as given (the sentence each door writes).
+	{"empty audio prompt", ReasonBadInput}, {"empty video prompt", ReasonBadInput}, {"empty character/background prompt", ReasonBadInput},
+	{"animate needs both a reference image and a driver video", ReasonBadInput},
+	{"unknown audio kind ", ReasonContract}, {"unknown voice ", ReasonContract},
 	{"empty transcript", ReasonAbstention}, {"empty vision output", ReasonAbstention}, {"vision output truncated", ReasonAbstention},
 	{"non-JSON output", ReasonAbstention},
 	{"transcribe call failed:", ReasonInfrastructure}, {"image generation failed:", ReasonInfrastructure},
+	{"audio generation failed:", ReasonInfrastructure}, {"video generation failed:", ReasonInfrastructure},
+	{"character animation failed:", ReasonInfrastructure}, {"run-graph failed:", ReasonInfrastructure},
+	{"batch job failed:", ReasonInfrastructure}, {"cannot create out_dir:", ReasonInfrastructure},
+	// "<kind> refused: <why>" is a binding the node cannot run as configured (an engine binary that does not
+	// resolve is the usual case); a request the bindings refuse by size or flags sets its own err_class.
+	{"audio generation refused:", ReasonConfig}, {"video generation refused:", ReasonConfig}, {"character animation refused:", ReasonConfig},
+	{"animategen_engine is sdcpp but ", ReasonConfig}, {"compose_video: no composition route configured", ReasonConfig},
+	{"voice=endpoint requested but tts_endpoint is unset", ReasonConfig},
+	// A named family the node does not serve is the request's; a family whose overlay is incomplete is the config's.
+	{"unknown image family", ReasonContract}, {"unknown edit family", ReasonContract}, {"imagegen_families[", ReasonConfig},
 	{"probe:", ReasonInfrastructure}, {"generate_svg: write:", ReasonInfrastructure}, {"generate_svg:", ReasonInfrastructure},
 }
+
+// deferClassCodes maps core.DeferClass* (the class a node's defer carries on the wire) to the closed set. The
+// ledger imports no core, so the values are written as strings and a test in internal/pipeline pins every
+// core.DeferClass* constant to an entry here. "capacity" is the node's own capacity defer (a seat at its run
+// cap, a card under a lease): ReasonNodeBusy, as the delegator files the same class when a node answered it.
+var deferClassCodes = map[string]string{
+	"abstention": ReasonAbstention, "budget": ReasonBudget, "infrastructure": ReasonInfrastructure,
+	"config": ReasonConfig, "contract": ReasonContract, "capacity": ReasonNodeBusy, "write": ReasonWrite,
+}
+
+// CodeForDeferClass is the reason code of a defer class, or "" when the class is empty or not one the table
+// knows (the row is then classified from its err_class and its reason, DeferCode).
+func CodeForDeferClass(class string) string { return deferClassCodes[class] }
 
 // DeferCode is the closed-set code of a deferred row no writer classified: its err_class when the table
 // knows it, else the prefix of its reason ("no ... configured" is config), else ReasonOther. Total: every
@@ -193,6 +223,16 @@ func DeferCode(errClass, reason string) string {
 	}
 	if strings.HasPrefix(reason, "no ") && strings.Contains(reason, " configured") {
 		return ReasonConfig
+	}
+	// "pipeline <task>: no artifacts configured" and "pipeline <task> failed: ...": the task name sits in the
+	// middle, so no fixed prefix names them.
+	if strings.HasPrefix(reason, "pipeline ") {
+		switch {
+		case strings.Contains(reason, ": no artifacts configured"):
+			return ReasonConfig
+		case strings.Contains(reason, " failed: "):
+			return ReasonInfrastructure
+		}
 	}
 	return ReasonOther
 }
