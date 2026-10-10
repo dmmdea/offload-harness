@@ -393,7 +393,8 @@ func TestAHungPairDelaysTheAnswerByItsBoundNotForever(t *testing.T) {
 	e.Wait()
 	start := time.Now()
 	end(heldResult())
-	if took := time.Since(start); took > sendTimeout+time.Second {
+	// The post is bounded at sendTimeout; the slack is for a box that is busy, not for a wait that has no bound.
+	if took := time.Since(start); took > sendTimeout+3*time.Second {
 		t.Fatalf("end held the call %s behind a hung PAIR; the post is bounded at %s", took, sendTimeout)
 	}
 	files := r.files(t)

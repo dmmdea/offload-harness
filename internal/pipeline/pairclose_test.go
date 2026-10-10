@@ -81,6 +81,22 @@ func (r *pairRig) seen() []pairFrame {
 	return append([]pairFrame(nil), r.frames...)
 }
 
+// waitFor waits for a frame with method to land. It is for the frame the test is NOT about (the card's
+// opening, posted in the background): the closing frame is read the moment Run returns, with no wait.
+func (r *pairRig) waitFor(method string) {
+	r.t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, m := range r.methods() {
+			if m == method {
+				return
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	r.t.Fatalf("no %s frame within 10 s: %v", method, r.methods())
+}
+
 // byMethod returns the workloadInfo of the one frame with method, failing when there is not exactly
 // one or more than one card is in play (one call is one card).
 func (r *pairRig) byMethod(method string) map[string]any {
@@ -190,7 +206,9 @@ func TestAQueuedMediaCallClosesItsPairCardQuietBeforeRunReturns(t *testing.T) {
 				t.Fatalf("want the queued answer, got class %q: %s", res.Meta.ErrClass, res.Reason)
 			}
 			// RUN HAS RETURNED: THE DOOR ANSWERS NOW, AND ITS CLIENT KILLS IT.
-			opened, closed := rig.byMethod("workload:submitted"), rig.byMethod("workload:completed")
+			closed := rig.byMethod("workload:completed")
+			rig.waitFor("workload:submitted") // the opening frame is background work this test is not about
+			opened := rig.byMethod("workload:submitted")
 			if got, _ := closed["error"].(string); !strings.HasPrefix(got, "gpu queued: ") {
 				t.Fatalf("the close must carry the deferral reason, got %q", got)
 			}
