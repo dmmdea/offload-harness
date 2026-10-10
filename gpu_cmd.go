@@ -658,7 +658,7 @@ func runGPUReserve(args []string) error {
 		cmd.Env = append(cmd.Env, gpuProgressFileEnv+"="+opts.ProgressFile)
 	}
 	if autoProgress != "" {
-		helper, _ := wrappedHeartbeatHelper(cmdArgs)
+		helper, _ := gpulease.HeartbeatHelperIn(cmdArgs)
 		if err := startAutoProgress(autoProgress, helper, time.Now()); err != nil {
 			fmt.Fprintf(os.Stderr, "gpu reserve: could not create the progress file %s (%v); the lease reads its progress as unknown until the helper creates it\n", autoProgress, err)
 		}

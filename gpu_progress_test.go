@@ -72,7 +72,7 @@ func TestAutoProgressIsDeclaredOnlyForAHeartbeatingHelperTheCallerLeftUndeclared
 
 // ---- the lists that must not drift ----------------------------------------------------------------
 
-// A helper missing from heartbeatHelpers runs under a lease with no contract (the defect); one that is
+// A helper missing from gpulease.HeartbeatHelperNames runs under a lease with no contract (the defect); one that is
 // listed but never beats would be labelled stalled. The list is therefore what render/ contains: every
 // runner that calls pollOutputs, plus comfy-generate.mjs, whose children do.
 func TestHeartbeatHelpersPinTheRenderDirectory(t *testing.T) {
@@ -103,17 +103,14 @@ func TestHeartbeatHelpersPinTheRenderDirectory(t *testing.T) {
 		t.Fatal("comfy-generate.mjs no longer runs comfy-render.mjs children / beats between pictures: revisit this list")
 	}
 	want["comfy-generate.mjs"] = true
-	var got, wantL []string
-	for n := range heartbeatHelpers {
-		got = append(got, n)
-	}
+	got := gpulease.HeartbeatHelperNames()
+	var wantL []string
 	for n := range want {
 		wantL = append(wantL, n)
 	}
-	sort.Strings(got)
 	sort.Strings(wantL)
 	if strings.Join(got, ",") != strings.Join(wantL, ",") {
-		t.Fatalf("heartbeatHelpers = %v, but render/ heartbeats through %v", got, wantL)
+		t.Fatalf("gpulease.HeartbeatHelperNames() = %v, but render/ heartbeats through %v", got, wantL)
 	}
 }
 

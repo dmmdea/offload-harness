@@ -3,6 +3,7 @@ package gpulease
 import (
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -46,4 +47,50 @@ func SweepMintedProgress(dir string, maxAge time.Duration, now time.Time) int {
 		}
 	}
 	return removed
+}
+
+// heartbeatHelpers are the render scripts that move a lease's progress file: every runner that calls
+// pollOutputs (render/comfy-submit.mjs), and comfy-generate.mjs, whose children do. The wrapper declares a
+// progress contract for a command that runs one (gpu_progress.go), and a status reading uses the same list
+// to say what a lease with no contract was probably doing. TestHeartbeatHelpersPinTheRenderDirectory keeps
+// it equal to what render/ contains: a helper missing here runs under a lease with no contract (the F8
+// defect), one listed that does not beat would be labelled stalled.
+var heartbeatHelpers = map[string]bool{
+	"comfy-generate.mjs":  true,
+	"comfy-render.mjs":    true,
+	"comfy-edit.mjs":      true,
+	"comfy-inpaint.mjs":   true,
+	"comfy-video.mjs":     true,
+	"comfy-animate.mjs":   true,
+	"comfy-music.mjs":     true,
+	"comfy-upscale.mjs":   true,
+	"comfy-run-graph.mjs": true,
+}
+
+// HeartbeatHelperNames is the list, sorted.
+func HeartbeatHelperNames() []string {
+	out := make([]string, 0, len(heartbeatHelpers))
+	for n := range heartbeatHelpers {
+		out = append(out, n)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// HeartbeatHelperIn finds a heartbeating helper among the arguments of a command (behind an interpreter,
+// its path in either separator style) and returns its file name.
+func HeartbeatHelperIn(args []string) (string, bool) {
+	for _, a := range args {
+		base := strings.ToLower(filepath.Base(strings.ReplaceAll(a, `\`, "/")))
+		if heartbeatHelpers[base] {
+			return base, true
+		}
+	}
+	return "", false
+}
+
+// HeartbeatHelperInCommand is HeartbeatHelperIn for the command line a lease records (its arguments joined
+// by single spaces).
+func HeartbeatHelperInCommand(command string) (string, bool) {
+	return HeartbeatHelperIn(strings.Fields(command))
 }

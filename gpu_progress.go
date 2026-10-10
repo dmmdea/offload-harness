@@ -22,7 +22,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/dmmdea/offload-harness/internal/gpulease"
@@ -44,35 +43,6 @@ var autoProgressStall = 15 * time.Minute
 // mints one removes it as left by a wrapper that was killed.
 const mintedProgressMaxAge = 7 * 24 * time.Hour
 
-// heartbeatHelpers are the render scripts that move the lease's progress file: every runner that calls
-// pollOutputs (render/comfy-submit.mjs), and comfy-generate.mjs, whose children do. TestHeartbeatHelpers
-// PinTheRenderDirectory keeps this list equal to what render/ actually contains: a helper missing here
-// runs under a lease with no contract (the defect), one listed that does not beat would be labelled
-// stalled.
-var heartbeatHelpers = map[string]bool{
-	"comfy-generate.mjs":  true,
-	"comfy-render.mjs":    true,
-	"comfy-edit.mjs":      true,
-	"comfy-inpaint.mjs":   true,
-	"comfy-video.mjs":     true,
-	"comfy-animate.mjs":   true,
-	"comfy-music.mjs":     true,
-	"comfy-upscale.mjs":   true,
-	"comfy-run-graph.mjs": true,
-}
-
-// wrappedHeartbeatHelper finds a heartbeating helper in a wrapped command (behind an interpreter, its
-// path in either separator style) and returns its file name.
-func wrappedHeartbeatHelper(cmdArgs []string) (string, bool) {
-	for _, a := range cmdArgs {
-		base := strings.ToLower(filepath.Base(strings.ReplaceAll(a, `\`, "/")))
-		if heartbeatHelpers[base] {
-			return base, true
-		}
-	}
-	return "", false
-}
-
 // autoProgressFile decides whether the wrapper declares a progress contract for the command it wraps,
 // and where its file lives. It declares one only when the caller declared none (a caller's own
 // --progress-file is its contract, and an --unattended lease must have carried one already) and the
@@ -81,7 +51,7 @@ func autoProgressFile(opts gpulease.Options, cmdArgs []string, progressDir strin
 	if opts.ProgressFile != "" {
 		return "", "", false
 	}
-	helper, found := wrappedHeartbeatHelper(cmdArgs)
+	helper, found := gpulease.HeartbeatHelperIn(cmdArgs)
 	if !found {
 		return "", "", false
 	}

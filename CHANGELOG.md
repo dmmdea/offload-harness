@@ -44,6 +44,23 @@ Versioning: [SemVer](https://semver.org/).
   is labelled at the end of its first term now say which job that still is), `docs/systems/media-generation.md`,
   `render/README.md`.
 
+### Fixed — `gpu status` no longer calls a card the display card because it is busy, and a batch between pictures does not read idle (F38)
+
+- **The defect.** `gpu status` printed `HELD-IDLE` on a live krea2 batch between two pictures and called card 0 "the display
+  card". The note said "that is the display card" about the busiest card the verdict had excluded from the holder's work,
+  whatever that card was: a lease on one card over a busy neighbour (a seat, another lease, another process) named the
+  neighbour the display card although it drives no screen.
+- **The naming.** A card is called the display card only when the card table marks it so (`display_active`, the rule the
+  allocator and the node's placement figure read; never by index). Any other busy card the lease does not hold is named as
+  **outside this lease's cards** (a seat, another lease or another process is using it), and when both kinds are busy the
+  note names each for what it is.
+- **The batch.** With the progress contract a wrapped render helper now keeps (F8), a batch between two pictures reads
+  `held-working` while its file moves, and its note says the cards are quiet between items. A batch that stops writing
+  reads `held-stalled` as before. A lease running a render helper with no contract (an older wrapper, a caller that pinned
+  an old binary) stays `held-idle` and says why it cannot tell idle from stalled.
+- **Tests.** `internal/gpuactivity/f38_test.go` (6) and `internal/gpulease/progressdir_test.go`; six mutations of the shipped
+  code were each caught. `docs/systems/gpu-lease.md` (the verdict table).
+
 ## [0.179.0] - 2026-10-10 - a busy image lane overflows to an idle node that renders the same recipe, and every GPU lease path has a host-RAM brake
 
 ### Added — a busy image lane overflows to an idle node that renders the same recipe (F52, ADR 0082)

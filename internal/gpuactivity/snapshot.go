@@ -376,7 +376,7 @@ func Assess(v View) (verdict, note string) {
 	// re-derive why a busy box still reads idle under the lease.
 	foreignTail := ""
 	if cardsBusy && !workCardsBusy {
-		foreignTail = " — the cards ARE busy (" + busyCard + ") but that is the display card, and with no seat request in flight that load is the desktop's, not the holder's work"
+		foreignTail = foreignLoadTail(v, display, leaseCards)
 	}
 
 	work := describeWork(v, now)
@@ -407,7 +407,10 @@ func Assess(v View) (verdict, note string) {
 	case v.Held && workCardsBusy:
 		return VerdictHeldWorking, "the lease is held and the cards are busy under it — " + workCard + "; the seat is idle, so this is the holder's own job" + trespassTail(v) + evidenceTail(h) + ownerCaveat(h) + factsTail(h) + holderTail(v)
 	case progressAdvancing:
-		return VerdictHeldWorking, "the lease is held and its progress file is advancing (" + progressSentence(h) + "); the seat is idle and the cards are quiet" + ownerCaveat(h) + factsTail(h) + holderTail(v)
+		// The cards of a lease that is moving its progress file are quiet BETWEEN items (a batch loads the next
+		// picture's prompt, a video is assembled on the CPU): quiet cards under a live contract are the job's
+		// own rhythm, not idleness (F38, a krea2 batch read held-idle between two pictures).
+		return VerdictHeldWorking, "the lease is held and its progress file is advancing (" + progressSentence(h) + "); the seat is idle and the lease's cards are quiet right now, which is how a job reads between two items or in a phase that does not load the GPU" + ownerCaveat(h) + factsTail(h) + holderTail(v)
 	case v.Held:
 		n := "the lease is held but NOTHING is running on the cards right now: no request in flight on the seat"
 		if v.Seat.Name == "" {
@@ -421,7 +424,7 @@ func Assess(v View) (verdict, note string) {
 			n += " (GPU utilization unknown: " + v.GPUErr + ")"
 		}
 		n += foreignTail
-		n += " — the holder is waiting (a drain, a queue), loading, or stalled" + trespassTail(v) + evidenceTail(h) + ownerCaveat(h) + factsTail(h) + holderTail(v)
+		n += " — the holder is waiting (a drain, a queue), loading, or stalled" + trespassTail(v) + evidenceTail(h) + helperTail(h) + ownerCaveat(h) + factsTail(h) + holderTail(v)
 		return VerdictHeldIdle, n
 	case seatBusy || runs > 0:
 		return VerdictWorking, "unreserved, and work is in flight on the seat: " + work + staleTail
@@ -440,6 +443,57 @@ func Assess(v View) (verdict, note string) {
 	default:
 		return VerdictFree, "no lease, no request in flight, cards quiet"
 	}
+}
+
+// foreignLoadTail names, by what each is, the busy cards that are NOT the holder's work. It is said only for
+// a card the card table marks as displaying (displayCards: the same rule the allocator and the node's
+// placement figure read, never a card's index) and, apart from that, for a card outside the cards this
+// lease holds. The sentence used to call whichever card was busiest "the display card": a lease on card 2
+// over a busy card 0 (a seat, another lease, another process) read "that is the display card" for a card
+// that drives no screen (F38).
+func foreignLoadTail(v View, display map[string]bool, leaseCards map[string]bool) string {
+	var disp, outside *GPU
+	for i := range v.GPUs {
+		g := &v.GPUs[i]
+		if !g.UtilKnown || g.UtilPct < utilBusyPct {
+			continue
+		}
+		switch {
+		case display[g.UUID]:
+			if disp == nil || g.UtilPct > disp.UtilPct {
+				disp = g
+			}
+		case leaseCards != nil && !leaseCards[strings.ToLower(g.UUID)]:
+			if outside == nil || g.UtilPct > outside.UtilPct {
+				outside = g
+			}
+		}
+	}
+	switch {
+	case disp != nil && outside != nil:
+		return " — the cards ARE busy, but not with the holder's work: " + describeCard(*disp) + " is the display card (the desktop's load), and " +
+			describeCard(*outside) + " is outside this lease's cards (a seat, another lease or another process is using it)"
+	case disp != nil:
+		return " — the cards ARE busy (" + describeCard(*disp) + ") but that is the display card, and with no seat request in flight that load is the desktop's, not the holder's work"
+	case outside != nil:
+		return " — the cards ARE busy (" + describeCard(*outside) + ") but that card is outside this lease's cards (a seat, another lease or another process is using it), so it is not the holder's work"
+	}
+	return ""
+}
+
+// helperTail says, on a held-idle reading, what a lease with no progress contract that is running a render
+// helper was probably doing: between two pictures of a batch, or loading the next model, the cards are quiet
+// too, and without a contract there is nothing to tell that from a stall (F38). "" for a lease that declares
+// one (its own reading says so) or runs no helper.
+func helperTail(h *Holder) string {
+	if h == nil || h.Progress != nil {
+		return ""
+	}
+	helper, ok := gpulease.HeartbeatHelperInCommand(h.Command)
+	if !ok {
+		return ""
+	}
+	return "; it is running " + helper + ", whose cards are quiet between two pictures too, and it declared no progress contract that would say which this is (a `gpu reserve` that wraps a render helper declares one itself)"
 }
 
 // describeCard is the one phrasing for "which card, how busy".
