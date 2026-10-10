@@ -5,8 +5,11 @@ package mediacap
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
+	"sort"
 	"testing"
 )
 
@@ -22,14 +25,24 @@ func TestScanGraphFindsEveryLoaderFileOnce(t *testing.T) {
 		"10": {"class_type":"SaveImage",       "inputs":{"filename_prefix":"out_name.safetensors","images":["8",0]}},
 		"11": {"class_type":"CLIPTextEncode",  "inputs":{"text":"a file_name.safetensors on a desk","clip":["4",0]}},
 		"12": {"class_type":"VAELoader",       "inputs":{"vae_name":"builtin"}},
-		"13": {"class_type":"UNETLoader",      "inputs":{"unet_name":["99",0]}}
+		"13": {"class_type":"UNETLoader",      "inputs":{"unet_name":["99",0]}},
+		"14": {"class_type":"ModelPatchLoader","inputs":{"name":"qwen_image_inpaint_diffsynth_controlnet.safetensors"}},
+		"15": {"class_type":"WanVideoModelLoader","inputs":{"model":"wan2.2_i2v_low_noise_14B_fp8.safetensors","base_precision":"bf16"}},
+		"16": {"class_type":"IPAdapterModelLoader","inputs":{"ipadapter_file":"ip-adapter.safetensors"}},
+		"17": {"class_type":"PrimitiveString", "inputs":{"value":"primitive_fed.safetensors"}},
+		"18": {"class_type":"SomeDownloader",  "inputs":{"url":"https://example.invalid/fetched.safetensors"}}
 	}`
 	got, err := ScanGraph([]byte(graph))
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Any string input whose value ends in a weight extension is a file the node must hold, whatever the key is called: a
+	// loader names its file under `name` (ModelPatchLoader), `model` (a wrapper's loader), `ipadapter_file` or a primitive's
+	// `value`, and a graph the scan misses is a graph a node without the file takes a lease, cold-starts ComfyUI and defers.
+	// An output prefix (filename_prefix) is a name to write, and a URL is fetched, not held: neither is a file to hold.
 	want := []string{
 		"a.GGUF", "b.sft", "old.ckpt", "umt5_xxl_fp8.safetensors", "wan/wan2.2_i2v_high_noise_14B_fp8.safetensors", "wan_2.1_vae.pth", "lightx2v.pt",
+		"qwen_image_inpaint_diffsynth_controlnet.safetensors", "wan2.2_i2v_low_noise_14B_fp8.safetensors", "ip-adapter.safetensors", "primitive_fed.safetensors",
 	}
 	// Order is by node id then input key (the graph's keys are unordered JSON), so a refusal names the same file on every run.
 	if !sameSet(got.Models, want) {
@@ -38,8 +51,18 @@ func TestScanGraphFindsEveryLoaderFileOnce(t *testing.T) {
 	if again, _ := ScanGraph([]byte(graph)); !reflect.DeepEqual(got, again) {
 		t.Errorf("a scan must be deterministic: %v then %v", got.Models, again.Models)
 	}
-	if len(got.Images) != 0 {
-		t.Errorf("no LoadImage in this graph: %v", got.Images)
+	if len(got.Inputs) != 0 {
+		t.Errorf("no input loader in this graph: %v", got.Inputs)
+	}
+}
+
+// The price of reading every key: a text input that itself ends in a weight extension reads as a file name. That costs a
+// re-placeable 503 naming it (the graph still runs on this machine), which is the cheaper side of the trade against a
+// graph whose loader keys the scan does not know. The test pins it so the trade is a decision and not an accident.
+func TestScanGraphReadsATextThatEndsInAWeightExtensionAsAFile(t *testing.T) {
+	got, err := ScanGraph([]byte(`{"1":{"class_type":"CLIPTextEncode","inputs":{"text":"my_lora.safetensors"}}}`))
+	if err != nil || !reflect.DeepEqual(got.Models, []string{"my_lora.safetensors"}) {
+		t.Fatalf("got %+v, %v; want the text read as a file name", got, err)
 	}
 }
 
@@ -71,17 +94,24 @@ func TestScanGraphFindsLoadImageInputs(t *testing.T) {
 		"5": {"class_type":"LoadImage",       "inputs":{"image":["9",0]}},
 		"6": {"class_type":"ImageScale",      "inputs":{"image":["1",0],"width":512}},
 		"7": {"class_type":"PreviewImage",    "inputs":{"images":["1",0]}},
-		"8": {"class_type":"SomeCustomNode",  "inputs":{"image":"not-a-loader-input.png"}}
+		"8": {"class_type":"SomeCustomNode",  "inputs":{"image":"not-a-loader-input.png"}},
+		"9": {"class_type":"LoadVideo",       "inputs":{"file":"driver.mp4"}},
+		"10":{"class_type":"LoadAudio",       "inputs":{"audio":"voice.flac [temp]"}},
+		"11":{"class_type":"LoadVideo",       "inputs":{"file":["9",0]}},
+		"12":{"class_type":"LoadAudio",       "inputs":{"file":"wrong-key-for-audio.flac"}}
 	}`
 	got, err := ScanGraph([]byte(graph))
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []GraphImage{
-		{Name: "ref.png", Dir: "input"}, {Name: "mask.png", Dir: "input"}, {Name: "prev/step.png", Dir: "output"}, {Name: "kept/in.png", Dir: "input"},
+	// LoadVideo reads its `file` and LoadAudio its `audio`, annotated the same way: they are inputs a node must hold as well.
+	// Node ids sort as strings, so "10" comes right after "1".
+	want := []GraphInput{
+		{Name: "ref.png", Dir: "input"}, {Name: "voice.flac", Dir: "temp"}, {Name: "mask.png", Dir: "input"}, {Name: "prev/step.png", Dir: "output"},
+		{Name: "kept/in.png", Dir: "input"}, {Name: "driver.mp4", Dir: "input"},
 	}
-	if !reflect.DeepEqual(got.Images, want) {
-		t.Fatalf("Images = %+v, want %+v", got.Images, want)
+	if !reflect.DeepEqual(got.Inputs, want) {
+		t.Fatalf("Inputs = %+v, want %+v", got.Inputs, want)
 	}
 }
 
@@ -94,7 +124,7 @@ func TestScanGraphToleratesWhatItDoesNotRead(t *testing.T) {
 		"a name with no known extension": `{"1": {"class_type":"X","inputs":{"unet_name":"model.bin"}}}`,
 	} {
 		got, err := ScanGraph([]byte(graph))
-		if err != nil || len(got.Models) != 0 || len(got.Images) != 0 {
+		if err != nil || len(got.Models) != 0 || len(got.Inputs) != 0 {
 			t.Errorf("%s: got %+v, %v; want nothing and no error", name, got, err)
 		}
 	}
@@ -154,8 +184,10 @@ func TestMissingModelFilesReadsExtraModelPaths(t *testing.T) {
 func TestMissingModelFilesNeverLeavesTheRoots(t *testing.T) {
 	// A name is data from a tailnet peer: it is looked up under the roots and nowhere else, so a name that climbs out of
 	// them or names an absolute path is missing even when the file exists.
-	// Each name below would resolve to a file that EXISTS if it were joined to a class directory as written, so only the
-	// refusal to look it up keeps it missing.
+	// Every name from the first to `\etc\x.safetensors` would resolve to a file that EXISTS if it were joined to a class
+	// directory as written, so only the refusal to look it up keeps it missing. The last three (a drive path, an empty and a
+	// blank name) have no file to point at on this machine; TestSafeRelRefusesWhatCannotBeAFileInAClassDirectory pins that
+	// safeRel refuses them by itself.
 	outside := tree(t, "secret.safetensors")
 	dir := tree(t, "models/vae/ok.safetensors", "secret.safetensors", "models/vae/etc/x.safetensors")
 	roots := ModelRoots(dir)
@@ -178,15 +210,85 @@ func TestMissingModelFilesNeverLeavesTheRoots(t *testing.T) {
 	}
 }
 
+// safeRel is the only thing between a name a peer sent and a stat call, so it is tested on its own: ok for any of these would
+// let a lookup read a path that is not one file name inside the class directory.
+func TestSafeRelRefusesWhatCannotBeAFileInAClassDirectory(t *testing.T) {
+	for _, n := range []string{
+		"", "   ", "../x.safetensors", `..\x.safetensors`, "a/../../x.safetensors", "/x.safetensors", `\x.safetensors`,
+		"//host/share/x.safetensors", `C:\x.safetensors`, "C:x.safetensors", "c:/x.safetensors", "a\x00b.safetensors",
+	} {
+		if got, ok := safeRel(n); ok {
+			t.Errorf("safeRel(%q) = %q, true; want a refusal", n, got)
+		}
+	}
+	for n, want := range map[string]string{
+		"x.safetensors": "x.safetensors", "wan/high.safetensors": "wan/high.safetensors", `wan\high.safetensors`: "wan/high.safetensors",
+		"a..b.safetensors": "a..b.safetensors", " my lora v2.safetensors ": "my lora v2.safetensors",
+	} {
+		if got, ok := safeRel(n); !ok || got != want {
+			t.Errorf("safeRel(%q) = %q, %v; want %q, true", n, got, ok, want)
+		}
+	}
+}
+
+// dirLinks are the ways a class directory can be a link to a directory elsewhere (a models tree kept on a second volume and
+// linked into place). os.ReadDir reports such an entry as not a directory, so enumerating class directories by IsDir alone
+// drops it, and the node refuses graphs whose files it holds.
+var dirLinks = map[string]func(link, target string) error{
+	"symlink": os.Symlink,
+	"junction": func(link, target string) error {
+		if runtime.GOOS != "windows" {
+			return os.ErrInvalid
+		}
+		return exec.Command("cmd", "/c", "mklink", "/J", link, target).Run()
+	},
+}
+
+func TestAClassDirectoryThatIsALinkIsStillAClassDirectory(t *testing.T) {
+	for kind, link := range dirLinks {
+		t.Run(kind, func(t *testing.T) {
+			store := tree(t, "ckpts/m.safetensors")
+			dir := t.TempDir()
+			models := filepath.Join(dir, "models")
+			if err := os.MkdirAll(filepath.Join(models, "vae"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(models, "vae", "v.safetensors"), []byte("x"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(models, "README.txt"), []byte("not a class"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := link(filepath.Join(models, "checkpoints"), filepath.Join(store, "ckpts")); err != nil {
+				t.Skipf("this host cannot make a %s here: %v", kind, err)
+			}
+			roots := ModelRoots(dir)
+			var classes []string
+			for _, r := range roots {
+				for _, cd := range classDirs(r) {
+					classes = append(classes, cd[0])
+				}
+			}
+			sort.Strings(classes)
+			if !reflect.DeepEqual(classes, []string{"checkpoints", "vae"}) {
+				t.Fatalf("class directories = %v, want checkpoints (the %s) and vae, and not the README", classes, kind)
+			}
+			if got := MissingModelFiles(roots, []string{"m.safetensors", "v.safetensors"}); len(got) != 0 {
+				t.Fatalf("a file reached through a %s is held: missing %v", kind, got)
+			}
+		})
+	}
+}
+
 func TestMissingModelFilesOnANodeWithNoModelsRoot(t *testing.T) {
 	if got := MissingModelFiles(nil, []string{"a.safetensors"}); !reflect.DeepEqual(got, []string{"a.safetensors"}) {
 		t.Fatalf("a node with no models root holds no model file: %v", got)
 	}
 }
 
-func TestMissingInputImagesLooksInTheDirTheNameSays(t *testing.T) {
+func TestMissingInputFilesLooksInTheDirTheNameSays(t *testing.T) {
 	dir := tree(t, "input/ref.png", "input/kept/in.png", "output/prev/step.png")
-	got := MissingInputImages(dir, []GraphImage{
+	got := MissingInputFiles(dir, []GraphInput{
 		{Name: "ref.png", Dir: "input"},
 		{Name: "kept/in.png", Dir: "input"},
 		{Name: "prev/step.png", Dir: "output"},
@@ -195,13 +297,13 @@ func TestMissingInputImagesLooksInTheDirTheNameSays(t *testing.T) {
 		{Name: "../input/ref.png", Dir: "input"}, // climbs
 		{Name: "x.png", Dir: "temp"},
 	})
-	want := []GraphImage{
+	want := []GraphInput{
 		{Name: "step.png", Dir: "input"}, {Name: "prev/step.png", Dir: "input"}, {Name: "../input/ref.png", Dir: "input"}, {Name: "x.png", Dir: "temp"},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("missing = %+v, want %+v", got, want)
 	}
-	if got := MissingInputImages("", []GraphImage{{Name: "ref.png", Dir: "input"}}); len(got) != 1 {
+	if got := MissingInputFiles("", []GraphInput{{Name: "ref.png", Dir: "input"}}); len(got) != 1 {
 		t.Errorf("a node with no ComfyUI dir holds no input image: %v", got)
 	}
 }

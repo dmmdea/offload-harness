@@ -10,7 +10,9 @@ import (
 	"errors"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -151,7 +153,65 @@ func TestRunGraphFilesAreFoundUnderEveryClassDirectoryAndRoot(t *testing.T) {
 	}
 }
 
-// An input image does not travel with a graph (the dispatch door carries JSON only), so a LoadImage the node does not hold
+// A class directory that is a link to a directory elsewhere (a models tree on a second volume, linked into place) is a class
+// directory: the files behind it are held. A listing reports the link, not what it points at, and a node that dropped it
+// refused graphs whose files it had.
+func TestRunGraphFilesBehindALinkedClassDirectoryAreHeld(t *testing.T) {
+	for kind, link := range map[string]func(link, target string) error{
+		"symlink": os.Symlink,
+		"junction": func(link, target string) error {
+			if runtime.GOOS != "windows" {
+				return os.ErrInvalid
+			}
+			return exec.Command("cmd", "/c", "mklink", "/J", link, target).Run()
+		},
+	} {
+		t.Run(kind, func(t *testing.T) {
+			cfg := graphNode(t, "models/diffusion_models/wan/high.safetensors", "models/text_encoders/umt5.safetensors")
+			store := t.TempDir()
+			if err := os.WriteFile(filepath.Join(store, "wan_vae.safetensors"), []byte("x"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := link(filepath.Join(cfg.ComfyDir, "models", "vae"), store); err != nil {
+				t.Skipf("this host cannot make a %s here: %v", kind, err)
+			}
+			_, cleanup, err := BuildRequest(t.Context(), cfg, true, "run-graph", []byte(`{"graph":`+wanGraph+`}`))
+			defer cleanup()
+			if err != nil {
+				t.Fatalf("the VAE is behind a %s and the node holds it: %v", kind, err)
+			}
+		})
+	}
+}
+
+// A loader that names its file under a key other than *_name is read all the same: the scan goes by what the value is (a
+// weight file name), because every custom node picks its own key. A node without the file refuses it at the door instead of
+// cold-starting ComfyUI to defer, and a node that holds it runs the graph.
+func TestRunGraphReadsAFileUnderAnyInputKeyAndAnInputLoaderOfAnyKind(t *testing.T) {
+	const patchGraph = `{"1":{"class_type":"ModelPatchLoader","inputs":{"name":"qwen_inpaint_patch.safetensors"}},
+		"2":{"class_type":"LoadVideo","inputs":{"file":"driver.mp4"}}}`
+	cfg := graphNode(t)
+	tmp := isolatedTemp(t)
+	s, jobs := newTestServer(t, cfg, &fakeRunner{}, nil)
+	rec := do(t, s, http.MethodPost, "/fleet/dispatch", graphDispatch("g-patch", patchGraph, ""), nil)
+	wantErrorShape(t, rec, http.StatusServiceUnavailable, "qwen_inpaint_patch.safetensors")
+	if !strings.Contains(rec.Body.String(), "driver.mp4") {
+		t.Errorf("a LoadVideo file the node lacks is named too: %s", rec.Body.String())
+	}
+	if queued, running := jobs.Counts(); queued+running != 0 {
+		t.Errorf("a refused dispatch creates no job")
+	}
+	if left := entries(t, tmp); len(left) != 0 {
+		t.Errorf("a refused dispatch left temp files behind: %v", left)
+	}
+	held := graphNode(t, "models/model_patches/qwen_inpaint_patch.safetensors", "input/driver.mp4")
+	s2, _ := newTestServer(t, held, &fakeRunner{}, nil)
+	if rec := do(t, s2, http.MethodPost, "/fleet/dispatch", graphDispatch("g-patch-ok", patchGraph, ""), nil); rec.Code != http.StatusAccepted {
+		t.Fatalf("a node that holds both must accept, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// An input file does not travel with a graph (the dispatch door carries JSON only), so a LoadImage the node does not hold
 // is refused the same way, and the refusal says why the delegator cannot just send it.
 func TestRunGraphMissingInputImageIs503(t *testing.T) {
 	cfg := graphNode(t, "models/diffusion_models/wan/high.safetensors")
@@ -162,7 +222,7 @@ func TestRunGraphMissingInputImageIs503(t *testing.T) {
 	rec := do(t, s, http.MethodPost, "/fleet/dispatch", graphDispatch("g-img", refGraph, ""), nil)
 	wantErrorShape(t, rec, http.StatusServiceUnavailable, "ref.png")
 	if !strings.Contains(rec.Body.String(), "do not travel") {
-		t.Errorf("the refusal must say input images do not travel with a graph: %s", rec.Body.String())
+		t.Errorf("the refusal must say input files do not travel with a graph: %s", rec.Body.String())
 	}
 	if strings.Contains(rec.Body.String(), "high.safetensors") {
 		t.Errorf("the weight file is held and must not be named: %s", rec.Body.String())

@@ -9,15 +9,20 @@ package mediacap
 //
 // The harness never interprets a graph's semantics (internal/rungraph), and this stays generic on purpose:
 //
-//   - a model file is any string input, under a key that contains "_name" (ckpt_name, unet_name, clip_name1, vae_name,
-//     lora_name, control_net_name, model_name, ...), whose value ends in one of the weight extensions. A link
-//     (["12", 0]), a number or a word without such an extension ("builtin", "None") is not a file.
-//   - an input image is the `image` input of a LoadImage, LoadImageMask or LoadImageOutput node, in the directory its
-//     ComfyUI annotation names ("name.png [output]"; none = input).
+//   - a model file is any string input whose value ends in one of the weight extensions, whatever the input is called:
+//     ckpt_name, unet_name, clip_name1, vae_name, lora_name, but also a ModelPatchLoader's `name`, a wrapper loader's `model`,
+//     an `ipadapter_file`, a primitive's `value`. The loaders' key names are open-ended (every custom node picks its own), the
+//     extension is not. A link (["12", 0]), a number, a word without such an extension ("builtin", "None"), an output prefix
+//     (filename_prefix) and a URL are not files to hold. The price is a text that itself ends in a weight extension: it reads
+//     as a file name, and costs a re-placeable 503 (the graph still runs on its own machine).
+//   - an input file is the file input of an input loader, in the directory its ComfyUI annotation names ("name.png [output]";
+//     none = input): `image` of LoadImage, LoadImageMask and LoadImageOutput, `file` of LoadVideo, `audio` of LoadAudio.
 //
 // "Held" is by NAME, as ComfyUI's loaders open a file: the name relative to a class directory, subfolders included, never a
-// search for the basename. It is not a comparison of content: a same-named file of other bytes is held. Loader nodes whose
-// file input is not named like that (a text prompt, a LoadVideo or LoadAudio node, a custom node's own key) are not read.
+// search for the basename. It is not a comparison of content: a same-named file of other bytes is held. For an INPUT file (the
+// caller's own, with a name like image.png that two machines easily share with different bytes) that is not enough to run a
+// graph on a node instead of its own machine, so mediaremote keeps a graph that reads one off the auto-overflow. Loader nodes
+// whose file input is none of the above (a custom node's own image or video key) are not read.
 
 import (
 	"encoding/json"
@@ -31,8 +36,9 @@ import (
 // modelExts are the weight file extensions a loader opens (ComfyUI's supported_pt_extensions and GGUF).
 var modelExts = []string{".safetensors", ".gguf", ".pth", ".pt", ".ckpt", ".sft"}
 
-// GraphImage is an input image a graph's LoadImage node reads: the name, and which of ComfyUI's directories it is in.
-type GraphImage struct {
+// GraphInput is an input file (an image, a video or an audio clip) that an input loader of a graph reads: the name, and which
+// of ComfyUI's directories it is in.
+type GraphInput struct {
 	Name string
 	// Dir is "input", "output" or "temp": the annotation on the name, "input" when it has none.
 	Dir string
@@ -42,11 +48,15 @@ type GraphImage struct {
 type GraphFiles struct {
 	// Models are the weight file names, each once, ordered by node id and then input key.
 	Models []string
-	// Images are the LoadImage inputs, in node id order.
-	Images []GraphImage
+	// Inputs are the files an input loader reads (LoadImage, LoadVideo, LoadAudio), in node id order.
+	Inputs []GraphInput
 }
 
-var imageNodes = map[string]bool{"LoadImage": true, "LoadImageMask": true, "LoadImageOutput": true}
+// inputLoaders are the input loader classes the scan reads, each with the name of the input that holds the file.
+var inputLoaders = map[string]string{
+	"LoadImage": "image", "LoadImageMask": "image", "LoadImageOutput": "image",
+	"LoadVideo": "file", "LoadAudio": "audio",
+}
 
 var annotation = regexp.MustCompile(`^(.*) \[(input|output|temp)\]$`)
 
@@ -83,17 +93,23 @@ func ScanGraph(graph []byte) (GraphFiles, error) {
 				continue
 			}
 			switch {
-			case strings.Contains(strings.ToLower(k), "_name") && isModelFile(v):
+			case isInputKey(n.Class, k) && strings.TrimSpace(v) != "":
+				out.Inputs = append(out.Inputs, imageOf(v))
+			case k != "filename_prefix" && !strings.Contains(v, "://") && isModelFile(v):
 				if !seen[v] {
 					seen[v] = true
 					out.Models = append(out.Models, v)
 				}
-			case k == "image" && imageNodes[n.Class] && strings.TrimSpace(v) != "":
-				out.Images = append(out.Images, imageOf(v))
 			}
 		}
 	}
 	return out, nil
+}
+
+// isInputKey reports whether key is the file input of an input loader of the given class.
+func isInputKey(class, key string) bool {
+	want, ok := inputLoaders[class]
+	return ok && key == want
 }
 
 func isModelFile(v string) bool {
@@ -106,11 +122,11 @@ func isModelFile(v string) bool {
 	return false
 }
 
-func imageOf(v string) GraphImage {
+func imageOf(v string) GraphInput {
 	if m := annotation.FindStringSubmatch(v); m != nil {
-		return GraphImage{Name: m[1], Dir: m[2]}
+		return GraphInput{Name: m[1], Dir: m[2]}
 	}
-	return GraphImage{Name: v, Dir: "input"}
+	return GraphInput{Name: v, Dir: "input"}
 }
 
 // safeRel turns a name a peer sent into a relative slash path that cannot leave the directory it is joined to: no empty
@@ -157,11 +173,11 @@ func MissingModelFiles(roots []ModelRoot, names []string) []string {
 	return missing
 }
 
-// MissingInputImages returns, in order, the input images that are not under comfyDir's input, output or temp directory
-// (as each one's annotation says). An empty comfyDir holds nothing.
-func MissingInputImages(comfyDir string, images []GraphImage) []GraphImage {
-	var missing []GraphImage
-	for _, im := range images {
+// MissingInputFiles returns, in order, the input files that are not under comfyDir's input, output or temp directory (as each
+// one's annotation says). An empty comfyDir holds nothing. By name only (see the top of this file).
+func MissingInputFiles(comfyDir string, inputs []GraphInput) []GraphInput {
+	var missing []GraphInput
+	for _, im := range inputs {
 		held := false
 		if rel, ok := safeRel(im.Name); ok && comfyDir != "" {
 			if _, found := osStatSize(filepath.Join(comfyDir, im.Dir, filepath.FromSlash(rel))); found {

@@ -134,7 +134,7 @@ type routeNotReadyError struct {
 	task   string
 	routes string // "generate_video BOUND-BUT-MISSING", one entry per derived route of the task
 	// detail, when set, replaces routes: the route is ready, but THIS request names something the node does not hold (a
-	// run-graph whose graph loads a weight file or reads an input image that is not here, graph_files.go).
+	// run-graph whose graph loads a weight file or reads an input file that is not here, graph_files.go).
 	detail string
 }
 

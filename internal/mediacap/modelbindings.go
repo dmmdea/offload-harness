@@ -290,8 +290,13 @@ func classDirs(r ModelRoot) [][2]string {
 	if r.Classes == nil {
 		entries, _ := os.ReadDir(r.Dir)
 		for _, e := range entries {
-			if e.IsDir() {
-				out = append(out, [2]string{e.Name(), filepath.Join(r.Dir, e.Name())})
+			// A class directory that is a symlink or a Windows junction (a models tree kept on another volume and linked
+			// into place) is not IsDir() in a directory listing, which reports the link and not what it points at. What a
+			// link's mode bits say differs by Go release and platform, so every entry that is not itself a directory is asked
+			// of the filesystem (os.Stat follows links); a plain file such as a README is not a directory there either.
+			p := filepath.Join(r.Dir, e.Name())
+			if e.IsDir() || isDir(p) {
+				out = append(out, [2]string{e.Name(), p})
 			}
 		}
 		return out
