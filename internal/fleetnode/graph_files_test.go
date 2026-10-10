@@ -1,10 +1,10 @@
 package fleetnode
 
 // The node's side of a remote graph (P0 plan, S4; ADR 0082 amendment). A run-graph dispatch names, inside its graph, the
-// weight files its loaders open and the images its LoadImage nodes read. A node that holds them all runs the graph; a node
-// that lacks one used to take its lease, cold-start ComfyUI and defer after, so the delegator learned it a render later.
-// Admission now reads the graph first and answers 503 (the re-placeable "this node cannot run this now") naming what is
-// missing, before any job, temp file or lease exists.
+// weight files its loaders open and the input files its input loaders read (an image, a video, an audio clip). A node that
+// holds them all runs the graph; a node that lacks one used to take its lease, cold-start ComfyUI and defer after, so the
+// delegator learned it a render later. Admission now reads the graph first and answers 503 (the re-placeable "this node
+// cannot run this now") naming what is missing, before any job, temp file or lease exists.
 
 import (
 	"errors"
@@ -257,19 +257,33 @@ func TestRunGraphRefusalNamesEverythingMissingAndCutsALongList(t *testing.T) {
 		}
 	}
 
-	var sb strings.Builder
-	sb.WriteString("{")
-	for i := 0; i < 9; i++ {
-		if i > 0 {
-			sb.WriteString(",")
+	// A graph of n lora loaders, none of which this node holds.
+	loras := func(n int) []byte {
+		var sb strings.Builder
+		sb.WriteString(`{"graph":{`)
+		for i := 0; i < n; i++ {
+			if i > 0 {
+				sb.WriteString(",")
+			}
+			sb.WriteString(`"` + string(rune('a'+i)) + `":{"class_type":"LoraLoader","inputs":{"lora_name":"l` + string(rune('a'+i)) + `.safetensors"}}`)
 		}
-		sb.WriteString(`"` + string(rune('a'+i)) + `":{"class_type":"LoraLoader","inputs":{"lora_name":"l` + string(rune('a'+i)) + `.safetensors"}}`)
+		sb.WriteString("}}")
+		return []byte(sb.String())
 	}
-	sb.WriteString("}")
-	_, cleanup2, err := BuildRequest(t.Context(), cfg, true, "run-graph", []byte(`{"graph":`+sb.String()+`}`))
+	// Up to six missing files are listed and counted exactly...
+	_, cleanup2, err := BuildRequest(t.Context(), cfg, true, "run-graph", loras(6))
 	defer cleanup2()
-	if err == nil || !strings.Contains(err.Error(), "la.safetensors") || !strings.Contains(err.Error(), "and 3 more") || strings.Contains(err.Error(), "li.safetensors") {
-		t.Fatalf("a refusal lists the first six and counts the rest: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "6 files") || !strings.Contains(err.Error(), "lf.safetensors") || strings.Contains(err.Error(), "more") {
+		t.Fatalf("six missing files are all named and counted: %v", err)
+	}
+	// ...and past six the node names the first six and says "more": it stops looking at the seventh (the door is open to any
+	// peer and a graph can name thousands of files), so it does not know how many there are.
+	_, cleanup3, err := BuildRequest(t.Context(), cfg, true, "run-graph", loras(9))
+	defer cleanup3()
+	if err == nil || !strings.Contains(err.Error(), "la.safetensors") || !strings.Contains(err.Error(), "lf.safetensors") ||
+		!strings.Contains(err.Error(), "7 or more files") || !strings.Contains(err.Error(), "lf.safetensors and more") ||
+		strings.Contains(err.Error(), "lg.safetensors") || strings.Contains(err.Error(), "li.safetensors") || strings.Contains(err.Error(), "and 3 more") {
+		t.Fatalf("a refusal lists the first six and says there are more, with no count it did not take: %v", err)
 	}
 }
 

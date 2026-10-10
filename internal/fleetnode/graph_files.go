@@ -29,10 +29,12 @@ import (
 	"github.com/dmmdea/offload-harness/internal/mediacap"
 )
 
-// graphNamesCap is how many missing names one refusal lists before it counts the rest. A graph with a long list is almost
-// always a whole workflow this node was never meant to run; six names say so and keep the sentence one a caller reads. The
-// delegator's cluster row keeps only the first 300 bytes of the answer's body, so a graph missing many long names shows its
-// first two or three there; the node's own 503 body lists up to six.
+// graphNamesCap is how many missing names one refusal lists. A graph with a long list is almost always a whole workflow this
+// node was never meant to run; six names say so and keep the sentence one a caller reads. The delegator's cluster row keeps
+// only the first 300 bytes of the answer's body, so a graph missing many long names shows its first two or three there; the
+// node's own 503 body lists up to six. For a weight file the node stops looking at the seventh missing name (the door is open
+// to any peer, and a graph can name thousands of files), so past six it says "more" and not how many; for an input file,
+// which is a short list, it counts the rest.
 const graphNamesCap = 6
 
 // graphFilesRefusal returns the refusal for a run-graph payload whose graph names a file this node does not hold, nil when
@@ -52,8 +54,12 @@ func graphFilesRefusal(cfg config.Config, graph, manifest []byte) *routeNotReady
 				names = append(names, n)
 			}
 		}
-		if missing := mediacap.MissingModelFiles(mediacap.ModelRoots(cfg.ComfyDir), names); len(missing) > 0 {
-			parts = append(parts, fmt.Sprintf("the graph loads %s this node does not hold: %s", plural(len(missing), "file", "files"), listCapped(missing)))
+		if missing, more := mediacap.MissingModelFilesUpTo(mediacap.ModelRoots(cfg.ComfyDir), names, graphNamesCap); len(missing) > 0 {
+			if more {
+				parts = append(parts, fmt.Sprintf("the graph loads %d or more files this node does not hold: %s and more", graphNamesCap+1, strings.Join(missing, ", ")))
+			} else {
+				parts = append(parts, fmt.Sprintf("the graph loads %s this node does not hold: %s", plural(len(missing), "file", "files"), strings.Join(missing, ", ")))
+			}
 		}
 	}
 	if len(files.Inputs) > 0 {

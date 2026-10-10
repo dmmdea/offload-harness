@@ -149,28 +149,54 @@ func safeRel(name string) (string, bool) {
 // not read from the node that loads the file: the harness does not know every loader (a custom node names its own
 // class), and a node holding the file under a class its loader will not open fails in ComfyUI's own preflight, which
 // stays the authority. A name that is not a safe relative path is missing.
+//
+// It lists every missing name; MissingModelFilesUpTo is the form that stops looking.
 func MissingModelFiles(roots []ModelRoot, names []string) []string {
-	var classes []string
-	seen := map[string]bool{}
+	missing, _ := MissingModelFilesUpTo(roots, names, 0)
+	return missing
+}
+
+// statModel is the stat of one candidate path of a weight file: osStatSize, a seam so a test can count how many a call makes.
+var statModel = osStatSize
+
+// MissingModelFilesUpTo is MissingModelFiles for a caller that shows only the first few: it returns at most limit of the
+// missing names, in order, and more is true when there was a further one (it looks no further than the limit+1th missing
+// name). A limit of 0 or less means no limit, and more is then false.
+//
+// The cost of a call is bounded by the limit and not by the graph. A graph can name thousands of files (a dispatch body may
+// be 1 MiB), the door that asks is open to any peer on the tailnet, and a name that is missing costs one stat per class
+// directory of every root, so a name-by-name resolve of a 16,875-name graph took 3.5 s on a 20-class-directory tree (a
+// scratch measurement, 2026-10-10, one host) before it ruled. Two things bound it now: each root's class directories are
+// listed ONCE per call, not once per name (the listing of a root is a directory read plus a stat for every entry that is
+// not itself a directory), and the search stops at the limit+1th missing name. The count of the missing names beyond that
+// is therefore not known, and a caller says "more" and not a number.
+func MissingModelFilesUpTo(roots []ModelRoot, names []string, limit int) (missing []string, more bool) {
+	var dirs []string
 	for _, r := range roots {
 		for _, cd := range classDirs(r) {
-			if !seen[cd[0]] {
-				seen[cd[0]] = true
-				classes = append(classes, cd[0])
+			dirs = append(dirs, cd[1])
+		}
+	}
+	for _, name := range names {
+		held := false
+		if rel, ok := safeRel(name); ok {
+			rel = filepath.FromSlash(rel)
+			for _, dir := range dirs {
+				if _, found := statModel(filepath.Join(dir, rel)); found {
+					held = true
+					break
+				}
 			}
 		}
-	}
-	var missing []string
-	for _, name := range names {
-		rel, ok := safeRel(name)
-		if ok {
-			_, ok = ResolveModelFile(roots, ModelFile{Name: rel, Classes: classes}, nil)
+		if held {
+			continue
 		}
-		if !ok {
-			missing = append(missing, name)
+		if limit > 0 && len(missing) == limit {
+			return missing, true
 		}
+		missing = append(missing, name)
 	}
-	return missing
+	return missing, false
 }
 
 // MissingInputFiles returns, in order, the input files that are not under comfyDir's input, output or temp directory (as each

@@ -1,9 +1,11 @@
 package mediacap
 
-// What a ComfyUI API-format graph names that a node must HOLD to run it (graphfiles.go): the loader files and the
-// input images. The graphs here are small and written out, not generated: the point of each is one rule of the scan.
+// What a ComfyUI API-format graph names that a node must HOLD to run it (graphfiles.go): the weight files its loaders open
+// and the input files its input loaders read (an image, a video, an audio clip). The graphs here are small and written out,
+// not generated: the point of each is one rule of the scan.
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -305,7 +307,7 @@ func TestMissingInputFilesLooksInTheDirTheNameSays(t *testing.T) {
 		t.Fatalf("missing = %+v, want %+v", got, want)
 	}
 	if got := MissingInputFiles("", []GraphInput{{Name: "ref.png", Dir: "input"}}); len(got) != 1 {
-		t.Errorf("a node with no ComfyUI dir holds no input image: %v", got)
+		t.Errorf("a node with no ComfyUI dir holds no input file: %v", got)
 	}
 }
 
@@ -329,5 +331,125 @@ func TestManifestSourcedModelsAreTheOnesTheNodeFetches(t *testing.T) {
 	}
 	if len(ManifestSourcedModels(nil)) != 0 || len(ManifestSourcedModels([]byte(`{`))) != 0 {
 		t.Error("no manifest, or one that does not parse, provisions nothing")
+	}
+}
+
+// A graph can name thousands of files, so the check lists each models root once per call and not once per name: the listing of
+// a root is the dear part of a lookup (a directory read, plus a stat for every entry that is not itself a directory), and a
+// name's own cost is then one stat per class directory. The answer is the one a name-by-name resolve gives.
+func TestMissingModelFilesListsEachRootOnceNotOncePerName(t *testing.T) {
+	dir := tree(t,
+		"models/vae/v0.safetensors", "models/loras/l0.safetensors", "models/checkpoints/c0.ckpt", "models/diffusion_models/wan/d0.gguf",
+		"models/text_encoders/t0.safetensors", "models/clip_vision/cv0.sft",
+	)
+	other := tree(t, "weights/diff/big.safetensors")
+	yaml := "other:\n  base_path: " + filepath.ToSlash(other) + "\n  diffusion_models: weights/diff\n"
+	if err := os.WriteFile(filepath.Join(dir, "extra_model_paths.yaml"), []byte(yaml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	roots := ModelRoots(dir)
+	if len(roots) != 2 {
+		t.Fatalf("the fixture wants a models root and one extra root, got %d: %+v", len(roots), roots)
+	}
+
+	var names []string
+	for i := 0; i < 400; i++ {
+		names = append(names, fmt.Sprintf("absent-%03d.safetensors", i)) // the long list of a workflow this node was never meant to run
+	}
+	names = append(names, "v0.safetensors", "l0.safetensors", "c0.ckpt", "wan/d0.gguf", "t0.safetensors", "cv0.sft", "big.safetensors", "../v0.safetensors")
+
+	// What a name-by-name resolve says, the way the check worked before: each name asks every root for its class directories.
+	var classes []string
+	for _, r := range roots {
+		for _, cd := range classDirs(r) {
+			classes = append(classes, cd[0])
+		}
+	}
+	var want []string
+	for _, n := range names {
+		rel, ok := safeRel(n)
+		if ok {
+			_, ok = ResolveModelFile(roots, ModelFile{Name: rel, Classes: classes}, nil)
+		}
+		if !ok {
+			want = append(want, n)
+		}
+	}
+
+	var reads []string
+	prev := readDir
+	readDir = func(name string) ([]os.DirEntry, error) { reads = append(reads, name); return os.ReadDir(name) }
+	t.Cleanup(func() { readDir = prev })
+
+	got := MissingModelFiles(roots, names)
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("the answer changed: got %d missing, want %d\n got  %v\n want %v", len(got), len(want), got, want)
+	}
+	if len(got) != 401 {
+		t.Fatalf("control: 400 absent names and the one that climbs are missing, the 7 held names are not; got %d", len(got))
+	}
+	// One models root lists its subdirectories (the extra root names its class directories in the yaml and lists nothing).
+	if len(reads) != 1 {
+		t.Errorf("a call lists each models root once; %d names caused %d directory reads", len(names), len(reads))
+	}
+}
+
+// The cost of the check is bounded by what the refusal shows, not by the graph: a door open to any peer takes a graph of
+// thousands of names, and a name that is missing costs a stat in every class directory. The search stops at the seventh missing
+// name when six are shown, and says there was more.
+func TestMissingModelFilesUpToStopsLookingPastTheLimit(t *testing.T) {
+	dir := tree(t, "models/vae/v0.safetensors", "models/loras/l0.safetensors", "models/checkpoints/c0.ckpt", "models/unet/u0.gguf")
+	roots := ModelRoots(dir)
+	var classDirCount int
+	for _, r := range roots {
+		classDirCount += len(classDirs(r))
+	}
+	if classDirCount != 4 {
+		t.Fatalf("the fixture has 4 class directories, got %d", classDirCount)
+	}
+
+	var names []string
+	for i := 0; i < 5000; i++ {
+		names = append(names, fmt.Sprintf("absent-%04d.safetensors", i))
+	}
+	names = append(names, "v0.safetensors") // held, but after the seventh missing name: never reached
+
+	var stats, reads int
+	prevStat, prevRead := statModel, readDir
+	statModel = func(p string) (int64, bool) { stats++; return prevStat(p) }
+	readDir = func(name string) ([]os.DirEntry, error) { reads++; return os.ReadDir(name) }
+	t.Cleanup(func() { statModel, readDir = prevStat, prevRead })
+
+	got, more := MissingModelFilesUpTo(roots, names, 6)
+	if !more || !reflect.DeepEqual(got, names[:6]) {
+		t.Fatalf("want the first six missing names and more=true, got %v more=%v", got, more)
+	}
+	// Seven names were looked up (six listed, the seventh proves there is more), each in every class directory.
+	if want := 7 * classDirCount; stats != want {
+		t.Errorf("%d names in the graph cost %d stats, want %d (seven names x %d class directories)", len(names), stats, want, classDirCount)
+	}
+	if reads != 1 {
+		t.Errorf("the models root is listed once, got %d directory reads", reads)
+	}
+
+	// Exactly the limit missing is not "more", fewer is not either, and a limit of 0 asks for them all.
+	for _, tc := range []struct {
+		name  string
+		names []string
+		limit int
+		want  []string
+		more  bool
+	}{
+		{"exactly the limit", []string{"v0.safetensors", "x1.safetensors", "x2.safetensors"}, 2, []string{"x1.safetensors", "x2.safetensors"}, false},
+		{"one over the limit", []string{"x1.safetensors", "v0.safetensors", "x2.safetensors", "x3.safetensors"}, 2, []string{"x1.safetensors", "x2.safetensors"}, true},
+		{"below the limit", []string{"x1.safetensors"}, 2, []string{"x1.safetensors"}, false},
+		{"none missing", []string{"v0.safetensors", "l0.safetensors"}, 2, nil, false},
+		{"no limit", []string{"x1.safetensors", "x2.safetensors", "x3.safetensors"}, 0, []string{"x1.safetensors", "x2.safetensors", "x3.safetensors"}, false},
+		{"an unsafe name is missing and counts", []string{"../v0.safetensors", "x1.safetensors", "x2.safetensors"}, 2, []string{"../v0.safetensors", "x1.safetensors"}, true},
+	} {
+		got, more := MissingModelFilesUpTo(roots, tc.names, tc.limit)
+		if !reflect.DeepEqual(got, tc.want) || more != tc.more {
+			t.Errorf("%s: got %v more=%v, want %v more=%v", tc.name, got, more, tc.want, tc.more)
+		}
 	}
 }

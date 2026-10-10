@@ -284,11 +284,14 @@ func ModelBindings(cfg config.Config) []Binding {
 	return out
 }
 
+// readDir lists a directory for classDirs: os.ReadDir, a seam so a test can count how often a models root is listed.
+var readDir = os.ReadDir
+
 // classDirs enumerates (class, directory) pairs for a root.
 func classDirs(r ModelRoot) [][2]string {
 	var out [][2]string
 	if r.Classes == nil {
-		entries, _ := os.ReadDir(r.Dir)
+		entries, _ := readDir(r.Dir)
 		for _, e := range entries {
 			// A class directory that is a symlink or a Windows junction (a models tree kept on another volume and linked
 			// into place) is not IsDir() in a directory listing, which reports the link and not what it points at. What a
