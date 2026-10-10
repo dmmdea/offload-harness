@@ -20,7 +20,8 @@ func TestAMalformedMinVRAMIsRefusedOnEveryRoute(t *testing.T) {
 			cfg := graphClient(t, n)
 			lr := &laneRunner{verdict: heldLane()}
 			res := Run(context.Background(), cfg, lr, graphReqOf(t, krea2Graph, map[string]any{"min_vram_gb": bad}), route, nil)
-			if res.OK || !res.Deferred || res.DeferClass != core.DeferClassContract || !strings.Contains(res.Reason, "min_vram_gb") {
+			// Refused before anything was asked, so it has no placement: a call refused later says "remote: forced".
+			if res.OK || !res.Deferred || res.DeferClass != core.DeferClassContract || !strings.Contains(res.Reason, "min_vram_gb") || res.Meta.Placement != "" {
 				t.Errorf("route %s, min_vram_gb %v: want a contract refusal naming min_vram_gb, got %s", route, bad, brief(res))
 			}
 			if probes, runs := lr.counts(); probes != 0 || runs != 0 {

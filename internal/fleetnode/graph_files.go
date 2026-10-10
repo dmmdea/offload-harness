@@ -14,7 +14,8 @@ package fleetnode
 // output, or temp) directory. It is a name, not content, and the two differ in what that proves. A weight file's name is its
 // identity in practice (a model is published under one). An input file is the caller's own and gets a generic name, so a
 // same-named file of other bytes is held here and the graph would run on it; the delegator therefore never auto-overflows a
-// graph that reads one (mediaremote/graph.go), and only a caller who names a node by hand reaches this check with one. A file
+// graph that reads one (mediaremote/graph.go); a call that must leave its machine anyway (route remote, or auto on a machine
+// with no graph lane of its own) reaches this check with one, and for it the check stays by name. A file
 // the graph's manifest tells the node to fetch (a models[] entry with a source_url) is not missing: the satisfier downloads it
 // before ComfyUI starts. Input files do not travel with a graph (the dispatch door carries JSON; the media-job door carries no
 // input for run-graph), so one the node does not hold cannot be repaired by sending it: the refusal says so, and carrying them

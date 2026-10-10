@@ -76,8 +76,9 @@ func TestRunGraphWhoseInputLoaderReadsNoFileOverflows(t *testing.T) {
 	}
 }
 
-// A caller who names the node by hand has chosen where the files are: the forced route keeps the check by name (the node
-// refuses at its door when it lacks one), and a free lane keeps the call here without a word about the fleet.
+// A call that must leave this machine anyway keeps the node's check by name (the node refuses at its door when it lacks the
+// file): route remote, and auto on a machine with no graph lane of its own, which has no queue to wait in. A free lane keeps
+// the call here without a word about the fleet.
 func TestInputFilesAreOnlyAnAutoOverflowRule(t *testing.T) {
 	n := startGraphNode(t, "node-b", []string{krea2File, "input/ref.png"}, 7.96)
 	cfg := graphClient(t, n)
@@ -94,4 +95,25 @@ func TestInputFilesAreOnlyAnAutoOverflowRule(t *testing.T) {
 		t.Errorf("a free lane says nothing about the fleet: %s", brief(free))
 	}
 	untouched(t, "the node", n2)
+}
+
+// A thin client (no graph lane of its own) has no queue to wait in, so refusing would turn a placement into a refusal: its
+// `auto` call goes to a node as it always did, checked by name at the node's door. The same-named-file risk stays on this
+// path; it is a named limit and this test pins it as a decision.
+func TestAThinClientPlacesAnInputFileGraphByTheNodesCheckOnly(t *testing.T) {
+	holds := startGraphNode(t, "node-b", []string{krea2File, "input/ref.png"}, 7.96)
+	cfg := graphClient(t, holds)
+	stubLocalRoutes(t, configured()) // this machine has no run_graph route
+	res := Run(context.Background(), cfg, &laneRunner{}, graphReqOf(t, refGraph, nil), "auto", nil)
+	if !res.OK || res.Meta.Node != "node-b" || !strings.Contains(res.Meta.Placement, "no graph lane on this machine") {
+		t.Fatalf("a machine with no lane places the graph on the node that holds its files: %s (%s)", brief(res), res.Meta.Placement)
+	}
+
+	lacks := startGraphNode(t, "node-c", []string{krea2File}, 7.96)
+	cfg2 := graphClient(t, lacks)
+	stubLocalRoutes(t, configured())
+	res = Run(context.Background(), cfg2, &laneRunner{}, graphReqOf(t, refGraph, nil), "auto", nil)
+	if res.OK || !strings.Contains(res.Reason, "ref.png") {
+		t.Fatalf("the node's check by name refuses a file it lacks, naming it: %s", brief(res))
+	}
 }

@@ -21,8 +21,10 @@ package mediaremote
 // only by name, so a node holding a same-named file would run the graph on the wrong bytes and answer ok with a verified
 // file. A graph that reads one is therefore never auto-overflowed: the call waits for this machine's own lane, and the answer
 // says the fleet was not asked and why (overflowOutcome.note). Carrying a size and a hash of each file to the node, which
-// would restore the overflow for such graphs, is a named seam, not built. A caller who names a node by hand (route remote)
-// has chosen where the files are, and the node's check by name stays.
+// would restore the overflow for such graphs, is a named seam, not built. A call that must leave this machine anyway (route
+// remote, or auto on a machine with no graph lane of its own, which has no queue to wait in) keeps the node's check by name:
+// refusing it would turn a placement into a refusal, and the files it names live wherever the caller put them. The
+// same-named-file risk stays there, a named limit.
 //
 // MIN_VRAM_GB. A call can ask for a node whose largest card is at least N GB. Without the argument a graph that names the
 // family wan22 (model_family) and carries a height of 720 or more gets the default floor of 16 GB, CHOSEN from the film
