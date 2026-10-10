@@ -358,6 +358,14 @@ func videoFamily(fam string) string {
 // ClassDefault is the media class default: the largest estimate over the render families this box
 // binds (config), so it describes what THIS box can be asked to run. A route whose script is unset,
 // or whose files cannot be sized, is not counted; a box that binds nothing declares 0.
+//
+// A binding on the "sdcpp" engine is left out ON PURPOSE: its weights are not in a ComfyUI model tree, and "does it
+// fit the card" means nothing on a unified-memory iGPU. So an sd.cpp call (and the iGPU engines' video, animate and
+// audio calls, which take this default too) declares the largest COMFYUI family the box binds, an upper bound that
+// is not its own size, and on a box that binds no ComfyUI family (an sd.cpp-only node) it declares 0: its lanes are
+// admitted whatever the host reads, and the weights `--offload-to-cpu` parks in RAM are outside the guard there.
+// Sizing sd.cpp from its own model files is not built (TestAnSdcppOnlyBoxDeclaresNothing pins the behaviour the docs
+// state, so they change together).
 func ClassDefault(f Facts) Need {
 	cfg := f.Cfg
 	if strings.TrimSpace(cfg.ComfyDir) == "" {

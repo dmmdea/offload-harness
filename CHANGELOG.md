@@ -110,7 +110,9 @@ Versioning: [SemVer](https://semver.org/).
 - **Not changed, and said:** the guard bounds the leases that pass through it. A pinned older binary (its leases declare
   nothing), a direct llama-swap request and a hand-started ComfyUI are outside it; a pipeline job under a parent's ambient
   `--devices` lease gets no admission of its own; a detached lease counts its whole need as still to load for its life; Linux
-  `Committed_AS` reads high; sd.cpp, run-graph and iGPU calls take the class default.
+  `Committed_AS` reads high; run-graph, sd.cpp and iGPU calls take the class default, which is the largest ComfyUI family the box
+  binds: on a box that binds none (an sd.cpp-only node) it is 0, so those lanes declare nothing and the guard does not see the
+  weights `--offload-to-cpu` parks in RAM (`TestAnSdcppOnlyBoxDeclaresNothing`); sizing sd.cpp from its own model files is not built.
 
 ### Added — the node's host-RAM verdict can be asked without taking anything (G1)
 

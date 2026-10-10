@@ -481,3 +481,31 @@ func TestSeatNeedIsTheConfiguredFigureElseTheFailClosedDefault(t *testing.T) {
 		}
 	}
 }
+
+// sd.cpp and the iGPU engines are not sized. The class default is the largest COMFYUI family a box binds, and a binding on the
+// "sdcpp" engine is left out of it on purpose: its weights are not in a ComfyUI model tree, and "does it fit the card" means
+// nothing on a unified-memory iGPU. So a box that binds only sd.cpp (the shape of the small nodes) declares NOTHING and its
+// lanes are admitted whatever the host reads; the spill `--offload-to-cpu` parks in RAM there is outside the guard. The docs say
+// so (gpu-lease.md, media-generation.md); this pins it so the docs and the code change together.
+func TestAnSdcppOnlyBoxDeclaresNothing(t *testing.T) {
+	f := krea2Facts(t, 16)
+	// Bound to krea2's files on the sdcpp engine: were the engine not screened out these would size to 32.75 GiB.
+	f.Cfg.ImageGenScript, f.Cfg.ImageGenEngine = "render/sdcpp-generate.mjs", "sdcpp"
+	f.Cfg.ImageGenFamily, f.Cfg.ImageGenCkpt = "krea2", "krea2_turbo_bf16.safetensors"
+	f.Cfg.AnimateGenScript, f.Cfg.AnimateGenEngine = "render/sdcpp-animate.mjs", "sdcpp"
+	for name, cfg := range map[string]config.Config{"with a ComfyUI install": f.Cfg, "without one": func() config.Config { c := f.Cfg; c.ComfyDir = ""; return c }()} {
+		g := f
+		g.Cfg = cfg
+		if n := ClassDefault(g); n.GiB != 0 || n.Source != SourceNone {
+			t.Errorf("%s: a box that binds only sd.cpp declares nothing, got %v", name, n)
+		}
+		if n := Resolve(Request{Class: gpulease.ClassMedia, Args: []string{"python", "my_render.py"}}, g); n.GiB != 0 {
+			t.Errorf("%s: an unrecognised media command on that box takes the class default, which is 0, got %v", name, n)
+		}
+	}
+	// A ComfyUI family beside it still decides the default: the sd.cpp binding neither raises nor lowers it.
+	f.Cfg.GenEditScript, f.Cfg.GenEditFamily, f.Cfg.GenEditUnet = "render/comfy-edit.mjs", "", "qwen_image_edit_2511_fp8mixed.safetensors"
+	if n := ClassDefault(f); !near(n.GiB, 19.12+8.74) || !strings.Contains(n.Detail, "edit") {
+		t.Errorf("a ComfyUI edit family beside the sd.cpp bindings decides the class default, got %v", n)
+	}
+}

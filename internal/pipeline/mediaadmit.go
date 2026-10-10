@@ -185,7 +185,8 @@ func videoRAM(cfg config.Config, renderFamily string, over hostneed.VideoOverrid
 }
 
 // classDefaultRAM is for a call whose weights the pipeline cannot name (an arbitrary graph, sd.cpp,
-// an iGPU engine): the media class default, the largest render family this box binds.
+// an iGPU engine): the media class default, the largest ComfyUI render family this box binds. A box that binds
+// none (sd.cpp only) gets 0, so those lanes declare nothing (hostneed.ClassDefault says why).
 func classDefaultRAM(cfg config.Config) func(float64) hostneed.Need {
 	return func(vram float64) hostneed.Need {
 		return hostneed.ClassDefault(hostneed.Facts{Cfg: cfg, VRAMGiB: vram})

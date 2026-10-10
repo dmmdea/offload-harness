@@ -1141,7 +1141,10 @@ is given:
 **Host RAM.** A generation call also declares the host RAM its weights will stream from (the UNet or checkpoint and the
 text encoder of its binding, for a video call the family's binding with the request's own `transformer` put over it, counted
 in full when together they do not fit the card it runs on; 0 when they fit; the media
-class default for an arbitrary graph (`run-graph`, or a helper run with `--graph`), sd.cpp and the iGPU engines; nothing for upscale and voice) and the grant admits it
+class default for an arbitrary graph (`run-graph`, or a helper run with `--graph`), sd.cpp and the iGPU engines: the largest
+ComfyUI family the box binds, an upper bound that is not their own size, and **0 on a box that binds no ComfyUI family, so an
+sd.cpp-only node declares nothing**, its lanes are admitted whatever the host reads and the weights `--offload-to-cpu` parks in
+RAM are outside the guard there; nothing for upscale and voice) and the grant admits it
 against committed memory plus what the leases already granted have yet to load, under physical RAM less
 `gpu_host_ram_headroom_gib` (default 8), as a brake on declared loads (the declaration is an estimate until three measured runs
 raise it, and an admitted lane can still read OVER): see "Host RAM" in [gpu-lease.md](gpu-lease.md). Two Krea 2 bf16 lanes, each
