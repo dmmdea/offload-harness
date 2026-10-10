@@ -1287,7 +1287,7 @@ apart, so the 47.7 GiB between them is the lane and whatever else changed, not t
 lane that holds 57.7 GiB private (24.9 GiB more than a 32.8 GiB declaration), added to a baseline the rule admits, passes
 physical RAM. Whether a Krea 2 lane runs at that footprint is the S1 acceptance data. The exposure is (a) the first three runs of every family/quant/task key on a node, which
 declare the file sizes, (b) any lane whose private bytes exceed its declared resident need, and (c) any process that holds no
-lease (the watcher below saw commit swing 95.3 to 132.1 GiB, four times the 8 GiB headroom). What the guard does about it: a
+lease (the watcher below saw commit swing 95.3 to 132.1 GiB, more than four times the 8 GiB headroom). What the guard does about it: a
 lane already running is counted whole in the commit reading, so the next lease waits (a declaration equal to that lane's working
 set, 40.7 GiB, is refused on the same baseline: 122.3 GiB projected against 119.7), and `OVER` reaches `gpu status` and
 `offload_status`. What it does not do: stop the lane that took the box over. The lasting fix is to declare the larger of

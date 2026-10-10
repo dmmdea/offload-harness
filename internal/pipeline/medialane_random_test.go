@@ -4,7 +4,9 @@ package pipeline
 // drove the real admission over random combinations of them and found a state the table could not have: a call that
 // resumes its own place in line, on the whole-node plan, with a caller that joined the line after that place (the plan
 // queues by arrival time, the prober counted the directory). Combinations are where a relaxation built from several
-// readers breaks, so this keeps the random differential: fixed seeds, so a failure names a state that can be replayed.
+// readers breaks, so this keeps the random differential: fixed seeds, so a failure names a state that can be replayed
+// (go test -run 'TestMediaLaneFreeNeverRefusesAGrantOverRandomStates/state-NNN'; the check that the states as a whole
+// include both outcomes runs only when every state ran, so a replay of one reports that one and nothing else).
 
 import (
 	"context"
@@ -36,10 +38,11 @@ func TestMediaLaneFreeNeverRefusesAGrantOverRandomStates(t *testing.T) {
 		{"whole (a pin that names several cards)", admitSpec{order: admitOrder, mutate: pinSeveral}},
 		{"whole-krea2 (a pin that names several cards)", admitSpec{order: admitOrder, mutate: func(c *config.Config) { krea2Binding(c); pinSeveral(c) }}},
 	}
-	var granted, busy, free int
+	var granted, busy, free, ran int
 	for i := 0; i < randomLaneIterations; i++ {
 		i := i
 		t.Run(fmt.Sprintf("state-%03d", i), func(t *testing.T) {
+			ran++
 			rng := rand.New(rand.NewSource(int64(52000 + i)))
 			pick := func(p float64) bool { return rng.Float64() < p }
 			sp := specs[rng.Intn(len(specs))]
@@ -176,8 +179,9 @@ func TestMediaLaneFreeNeverRefusesAGrantOverRandomStates(t *testing.T) {
 			}
 		})
 	}
-	t.Logf("%d states: the real admission granted %d; the probe called %d busy and %d free", randomLaneIterations, granted, busy, free)
-	if granted == 0 || busy == 0 {
+	t.Logf("%d states: the real admission granted %d; the probe called %d busy and %d free", ran, granted, busy, free)
+	// Under a -run filter only some states ran, and a handful of states need not hold both outcomes.
+	if ran == randomLaneIterations && (granted == 0 || busy == 0) {
 		t.Errorf("the random states must include both outcomes or they test nothing: granted %d, busy %d", granted, busy)
 	}
 }
