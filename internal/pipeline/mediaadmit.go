@@ -526,38 +526,6 @@ func lookupCard(cards []gpuprobe.Card, id string) (gpuprobe.Card, bool) {
 	return gpuprobe.Card{}, false
 }
 
-// queuedClaims lists the cards callers are queued for ahead of a new arrival: live waiters and
-// the live tokens (a place held for a caller who may come back). They are not free for a newcomer,
-// who queues behind them (FIFO). A queued whole-node request is a barrier for every card. ownToken
-// is the caller's own place, never counted against it.
-func queuedClaims(m *gpulease.Manager, cards []gpuprobe.Card, ownToken string) map[string]bool {
-	out := map[string]bool{}
-	add := func(devs []string) {
-		if len(devs) == 0 {
-			for _, c := range cards {
-				out[c.LeaseID()] = true
-			}
-			return
-		}
-		for _, d := range devs {
-			out[d] = true
-		}
-	}
-	for _, w := range m.Waiters() {
-		if ownToken != "" && w.Token == ownToken {
-			continue
-		}
-		add(w.Devices)
-	}
-	for _, t := range m.Tokens() {
-		if t.ID == ownToken || !m.TokenLive(t) {
-			continue
-		}
-		add(t.Devices)
-	}
-	return out
-}
-
 // placeKeepEvery is how often a call that resumed a place in line re-asserts it while it waits in
 // this process: a third of the grace, so one missed tick still leaves the place held. A var so a
 // test can shorten it.
@@ -623,7 +591,7 @@ func (p *Pipeline) acquireCards(ctx context.Context, m *gpulease.Manager, reason
 	}
 	build := func() (gpulease.AllocInput, error) {
 		claimed := mediaSlots.held()
-		for id := range queuedClaims(m, cards, tokenID) {
+		for id := range gpualloc.QueuedClaims(m, cards, tokenID) {
 			claimed[id] = true
 		}
 		return gpualloc.BuildInput(ctx, m, p.cfg, gpualloc.Need{Claimed: claimed}, p.alloc)
@@ -669,9 +637,22 @@ func (p *Pipeline) acquireCards(ctx context.Context, m *gpulease.Manager, reason
 					}
 					free = false
 				} else {
-					// One gated attempt (register D-1xx-3): a waiter already registered for these
-					// cards answers ErrStillQueued and sends this request to the queue below.
-					lease, err := m.Acquire(gpulease.ClassMedia, optsFor(ids))
+					// One gated attempt (register D-1xx-3): a waiter registered for these cards that
+					// the allocation above did not see answers ErrStillQueued and sends this request
+					// to the queue below. A lost attempt must cost a call that resumed a place
+					// nothing, so it is neither of the two things Acquire does with the token. It
+					// does not hand the token over (a waiter that resumes a token CONSUMES it, and the
+					// queue below would then register as a new arrival: for an explicit-card call,
+					// which sets no arrival time of its own, the place it had would be gone for the
+					// length of that wait). And it carries the place's arrival time, so the live token
+					// that is still holding the place, older than any new arrival, does not hold this
+					// attempt back: a token blocks only waiters that arrived after it.
+					try := optsFor(ids)
+					try.ResumeToken = ""
+					if tokenID != "" {
+						try.QueuedSince = since
+					}
+					lease, err := m.Acquire(gpulease.ClassMedia, try)
 					if err == nil {
 						stopKeep()
 						return p.grantCards(ctx, m, lease, ids, plan, cards, tokenID), nil
