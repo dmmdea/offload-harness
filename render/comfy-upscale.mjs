@@ -16,6 +16,7 @@
 import { readFileSync, writeFileSync, unlinkSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { withGpuSlot } from "./gpu-lock.mjs";
+import { familySignature } from "./comfy-family.mjs";
 import { COMFY_DIR, comfyApi } from "./comfy-lifecycle.mjs";
 import { stageInput as stageToInput } from "./comfy-input.mjs";
 import { buildUpscale } from "./wf-upscale.mjs";
@@ -107,6 +108,7 @@ async function render() {
 }
 
 withGpuSlot(
-  { noLock: flags["no-lock"], comfyManaged: true, api: API, reserveVram: flags["reserve-vram"] },
+  { noLock: flags["no-lock"], comfyManaged: true, api: API, reserveVram: flags["reserve-vram"],
+    family: familySignature("upscale", model) },
   render,
 ).catch((e) => { console.error("UPSCALE FAILED:", e.message); process.exit(1); });

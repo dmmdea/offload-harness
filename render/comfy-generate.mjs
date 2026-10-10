@@ -22,6 +22,7 @@ import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import { readFileSync, writeFileSync, appendFileSync, mkdirSync } from "node:fs";
 import { withGpuSlot } from "./gpu-lock.mjs";
+import { familySignature } from "./comfy-family.mjs";
 import { comfyApi } from "./comfy-lifecycle.mjs";
 import { parseJobs, jobArgs, runBatchJobs, renderExitError, JOB_PARAM_FLAGS, SHARED_BINDING_FLAGS } from "./batch-jobs.mjs";
 
@@ -81,7 +82,8 @@ if (flags.batch) {
   mkdirSync(dirname(resultsPath) || ".", { recursive: true });
   writeFileSync(resultsPath, "");
   withGpuSlot(
-    { noLock: flags["no-lock"], keepComfy: flags["keep-comfy"], comfyManaged: true, api: API, reserveVram: flags["reserve-vram"], warm: true },
+    { noLock: flags["no-lock"], keepComfy: flags["keep-comfy"], comfyManaged: true, api: API, reserveVram: flags["reserve-vram"], warm: true,
+      family: familySignature(flags.family || "sdxl", flags.ckpt || process.env.COMFY_CKPT) },
     () => runBatchJobs({
       jobs,
       runJob: (job) => runRenderArgs(jobArgs(job, sharedFlags)),
@@ -95,7 +97,8 @@ if (flags.batch) {
     process.exit(2);
   }
   withGpuSlot(
-    { noLock: flags["no-lock"], keepComfy: flags["keep-comfy"], comfyManaged: true, api: API, reserveVram: flags["reserve-vram"] },
+    { noLock: flags["no-lock"], keepComfy: flags["keep-comfy"], comfyManaged: true, api: API, reserveVram: flags["reserve-vram"],
+      family: familySignature(flags.family || "sdxl", flags.ckpt || process.env.COMFY_CKPT) },
     () => runRenderArgs(jobArgs({ out, prompt }, sharedFlags)),
   ).catch((e) => { console.error("IMAGE GEN FAILED:", e.message); process.exit(1); });
 }

@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -36,12 +37,19 @@ type instance struct {
 	// onStats runs while /system_stats is being answered: the window between the proof and the
 	// stop, in which another lease can take the instance over.
 	onStats func()
+	// slowStats is how many of the next /system_stats requests are answered only after slowFor: an
+	// instance in the middle of a long prompt (the qwen-image prompts in the field run 550 to 585 s).
+	slowStats atomic.Int32
+	slowFor   time.Duration
 }
 
 func startInstance(t *testing.T, argv []string) *instance {
 	t.Helper()
 	in := &instance{argv: argv}
 	in.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/system_stats" && in.slowStats.Add(-1) >= 0 {
+			time.Sleep(in.slowFor)
+		}
 		in.mu.Lock()
 		defer in.mu.Unlock()
 		if in.down {
@@ -489,3 +497,62 @@ func helperSleeper(t *testing.T) *exec.Cmd {
 }
 
 func realAlive(pid int) bool { return gpulease.PIDAlive(pid) }
+
+// THE PATH THAT LEFT A KEPT INSTANCE BEHIND WITH ITS MODELS. The holder stopping a lease's instance
+// first proves it is the harness's own by asking it for its launch argv, and an instance in the middle
+// of a long prompt answers late. With one short try that read "did not answer ... left running": the
+// instance outlived its lease holding its weights, and the next lease reused it and loaded another
+// family beside them. The proof is asked for more than once now.
+func TestASlowInstanceIsStillProvenAndStopped(t *testing.T) {
+	dir := t.TempDir()
+	in := startInstance(t, testArgs)
+	in.slowFor = 400 * time.Millisecond
+	in.slowStats.Store(2) // the first two answers arrive after the client has given up
+	host := newHost()
+	host.alive[4242] = true
+	host.start[4242] = 1_760_000_000_000 - 4000
+	writeMarker(t, dir, ".offload-launch-gaaaa1111.json", keyedMarker(in.port(t), 4242, 7, nil))
+	deps := host.deps(in)
+	deps.HTTPTimeout, deps.ProofAttempts = 150*time.Millisecond, 3
+
+	got := StopForLease(context.Background(), dir, 7, deps)
+
+	if len(got) != 1 || !got[0].Stopped {
+		t.Fatalf("outcomes = %+v: an instance that answers on the third try is proven and stopped", got)
+	}
+	if in.timesFreed() != 1 || len(host.killedPIDs()) != 1 {
+		t.Errorf("freed %d, killed %v: the proven instance is freed then stopped", in.timesFreed(), host.killedPIDs())
+	}
+}
+
+// One try is the old behaviour, and it reports the instance and leaves it; the message says how many
+// attempts it made and what happens next, so the operator does not read it as the end of the story.
+func TestOneSlowAnswerWithOneAttemptLeavesTheInstanceAndSaysSo(t *testing.T) {
+	dir := t.TempDir()
+	in := startInstance(t, testArgs)
+	in.slowFor = 400 * time.Millisecond
+	in.slowStats.Store(1)
+	host := newHost()
+	host.alive[4242] = true
+	host.start[4242] = 1_760_000_000_000 - 4000
+	writeMarker(t, dir, ".offload-launch-gaaaa1111.json", keyedMarker(in.port(t), 4242, 7, nil))
+	deps := host.deps(in)
+	deps.HTTPTimeout, deps.ProofAttempts = 150*time.Millisecond, 1
+
+	got := StopForLease(context.Background(), dir, 7, deps)
+
+	if len(got) != 1 || got[0].Stopped || len(host.killedPIDs()) != 0 {
+		t.Fatalf("outcomes = %+v killed %v: with a single attempt the slow instance is left running", got, host.killedPIDs())
+	}
+	if !strings.Contains(got[0].Why, "after 1 attempt(s)") || !strings.Contains(got[0].Why, "frees it before its first job") {
+		t.Errorf("why = %q, want the attempts and what happens next", got[0].Why)
+	}
+}
+
+// The production wiring asks more than once, for longer than the old three seconds.
+func TestRealDepsAskForTheProofMoreThanOnce(t *testing.T) {
+	d := RealDeps()
+	if d.ProofAttempts < 2 || d.HTTPTimeout <= 3*time.Second {
+		t.Fatalf("RealDeps proof = %d attempts of %s: a busy instance answers late, and it is the one holding the memory", d.ProofAttempts, d.HTTPTimeout)
+	}
+}

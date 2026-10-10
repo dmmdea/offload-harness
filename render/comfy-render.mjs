@@ -50,6 +50,7 @@
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { withGpuSlot } from "./gpu-lock.mjs";
+import { familySignature } from "./comfy-family.mjs";
 import { comfyApi } from "./comfy-lifecycle.mjs";
 import { buildHiDreamO1 } from "./wf-hidream-o1.mjs";
 import { buildKrea2 } from "./wf-krea2.mjs";
@@ -430,7 +431,8 @@ async function main() {
   // reuse an already-fit running instance (comfy-lifecycle's reuse guard), take the
   // GPU slot, tear down after.
   await withGpuSlot(
-    { noLock: flags["no-lock"], keepComfy: flags["keep-comfy"], comfyManaged: true, api: API, reserveVram: flags["reserve-vram"] },
+    { noLock: flags["no-lock"], keepComfy: flags["keep-comfy"], comfyManaged: true, api: API, reserveVram: flags["reserve-vram"],
+      family: familySignature(flags.family || "sdxl", flags.ckpt || process.env.COMFY_CKPT) },
     () => generate(out, API, built, flags),
   );
 }

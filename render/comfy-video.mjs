@@ -27,6 +27,7 @@
 // one-line MISSING_NODE defer naming the class and the pack, not a 400 at the POST.
 import { writeFileSync, readFileSync, existsSync } from "node:fs";
 import { withGpuSlot } from "./gpu-lock.mjs";
+import { familySignature } from "./comfy-family.mjs";
 import { COMFY_DIR, comfyApi } from "./comfy-lifecycle.mjs";
 import { stageInput as stageToInput } from "./comfy-input.mjs";
 import { firstOutputFile } from "./comfy-output.mjs";
@@ -214,7 +215,8 @@ async function main() {
   const API = comfyApi(flags.api);
   if (!out) { console.error('usage: node comfy-video.mjs <out.mp4> <still> "<prompt>" [--model hunyuan|wan] [flags]   |   <out.mp4> --graph wf.json'); process.exit(2); }
   await withGpuSlot(
-    { noLock: flags["no-lock"], keepComfy: flags["keep-comfy"], comfyManaged: true, api: API, reserveVram: flags["reserve-vram"] },
+    { noLock: flags["no-lock"], keepComfy: flags["keep-comfy"], comfyManaged: true, api: API, reserveVram: flags["reserve-vram"],
+      family: familySignature("video-" + (flags.model || "wan"), flags.transformer || flags["high-unet"]) },
     () => generate(out, API, pos, flags),
   );
 }

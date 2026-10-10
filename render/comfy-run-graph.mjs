@@ -10,7 +10,8 @@ import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { withGpuSlot, freeComfy as _freeComfy } from "./gpu-lock.mjs";
-import { comfyUp as _comfyUp, ensureComfy as _ensureComfy, resolveComfyDir, resolveComfyPy, comfyApi, resolveInstance, DEFAULT_COMFY_PORT } from "./comfy-lifecycle.mjs";
+import { comfyUp as _comfyUp, ensureComfy as _ensureComfy, resolveComfyDir, resolveComfyPy, comfyApi, resolveInstance, DEFAULT_COMFY_PORT, fetchSystemArgv } from "./comfy-lifecycle.mjs";
+import { freeHarnessInstance } from "./comfy-family.mjs";
 import { parseManifest as _parse, manifestHash as _hash } from "./manifest.mjs";
 import { satisfyManifest, defaultSatisfyDeps } from "./manifest-satisfy.mjs";
 import { preflightGraph } from "./preflight-graph-file.mjs";
@@ -42,6 +43,10 @@ export async function runGraphFlow(args, deps) {
     parseManifest = _parse, manifestHash = _hash,
     readOwner = _readOwner, writeOwner = _writeOwner,
     comfyUp, ensureComfy, killComfy, freeComfy, satisfy,
+    // freeKept: free what the graph left on an instance that was ALREADY UP when this run began, if it
+    // is one this harness launched (a kept per-card instance). Without it an arbitrary graph's models
+    // stayed in that instance for the next lease's family to be loaded beside (comfy-family.mjs).
+    freeKept = async () => {},
     preflight = preflightGraph,
     postGraph, collect = async (pid) => allOutputsByNode((await postGraph.history(pid)) || {}),
     fetchToDir, writeResult = (p, o) => writeFileSync(p, JSON.stringify(o)),
@@ -134,6 +139,10 @@ export async function runGraphFlow(args, deps) {
     if (ownComfy && comfyChild) {
       try { await freeComfy(); } catch {}
       try { killComfy(comfyChild); } catch {}
+    } else if (wasUp) {
+      // An instance that was already running and that the harness launched (a kept per-card instance)
+      // holds whatever this graph loaded; freeKept decides whose it is, and frees only the harness's.
+      try { await freeKept(); } catch {}
     }
   }
 }
@@ -180,6 +189,7 @@ async function main() {
   // with no candidate list and no existence check, so run_graph spawned a binary that
   // cannot exist on Linux — advertised to the fleet, broken on arrival.
   const comfyPy = resolveComfyPy(comfyDir);
+  const instance = resolveInstance({ api, env: process.env });
   const cmCli = process.env.COMFY_CM_CLI || join(comfyDir, "custom_nodes/ComfyUI-Manager/cm-cli.py");
   const satDeps = defaultSatisfyDeps({ comfyDir, comfyPy, api, cmCli });
 
@@ -190,6 +200,10 @@ async function main() {
       ensureComfy: deps.ensureComfy,
       killComfy: (c) => c.kill(),
       freeComfy: deps.freeComfy,
+      freeKept: () => freeHarnessInstance({
+        comfyDir, key: instance.key, api: instance.api,
+        free: () => deps.freeComfy(), systemArgv: fetchSystemArgv,
+      }),
       satisfy: (mm) => satisfyManifest(mm, satDeps),
       preflight: preflightGraph,
       // Submission/polling via the shared comfy-submit.mjs layer: CLI-preferred submit

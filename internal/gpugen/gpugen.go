@@ -454,18 +454,34 @@ func comfyAPI(override string) string {
 	return "http://127.0.0.1:8188"
 }
 
-// freeComfyVRAM asks ComfyUI to unload models + free VRAM (zero-always-warm). Best-
-// effort: a 1s timeout and any error are ignored (ComfyUI may already be gone, or
-// never ours to free).
+// freeComfyTimeout bounds the post-run /free. It was one second, which a ComfyUI in the middle of a
+// step does not always answer in; the request is only a flag the instance's worker acts on, so five
+// seconds costs nothing when the instance is idle or gone (a refused connection returns at once) and
+// is the difference when it is busy.
+const freeComfyTimeout = 5 * time.Second
+
+// freeComfyVRAM asks ComfyUI to unload models + free VRAM (zero-always-warm). Best-effort: it never
+// fails the run (ComfyUI may already be gone, or never ours to free), but a request that reached an
+// instance and did not succeed is said once on stderr, because an instance whose models were not freed
+// is one the next family is loaded beside (render/comfy-family.mjs). One that is not listening is not
+// news.
 func freeComfyVRAM(api string) {
-	cl := &http.Client{Timeout: 1 * time.Second}
+	cl := &http.Client{Timeout: freeComfyTimeout}
 	req, err := http.NewRequest(http.MethodPost, api+"/free", strings.NewReader(`{"unload_models":true,"free_memory":true}`))
 	if err != nil {
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if resp, derr := cl.Do(req); derr == nil {
-		_ = resp.Body.Close()
+	resp, derr := cl.Do(req)
+	if derr != nil {
+		if s := strings.ToLower(derr.Error()); !strings.Contains(s, "refused") && !strings.Contains(s, "no such host") {
+			fmt.Fprintf(os.Stderr, "gpugen: POST %s/free did not succeed (%v); the instance may still hold its models\n", api, derr)
+		}
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		fmt.Fprintf(os.Stderr, "gpugen: POST %s/free answered %s; the instance may still hold its models\n", api, resp.Status)
 	}
 }
 

@@ -14,6 +14,7 @@
 //   --motion-prompt describes the driver video (what motion is being transferred).
 import { writeFileSync } from "node:fs";
 import { withGpuSlot } from "./gpu-lock.mjs";
+import { familySignature } from "./comfy-family.mjs";
 import { comfyApi } from "./comfy-lifecycle.mjs";
 import { stageInput as stageToInput } from "./comfy-input.mjs";
 import { firstOutputFile } from "./comfy-output.mjs";
@@ -86,6 +87,7 @@ async function animate() {
 }
 
 withGpuSlot(
-  { noLock: flags["no-lock"], keepComfy: flags["keep-comfy"], comfyManaged: true, api: API, reserveVram: flags["reserve-vram"] },
+  { noLock: flags["no-lock"], keepComfy: flags["keep-comfy"], comfyManaged: true, api: API, reserveVram: flags["reserve-vram"],
+    family: familySignature("wan-animate2", flags.unet) },
   animate,
 ).catch((e) => { console.error("ANIMATE FAILED:", e.message); process.exit(1); });
