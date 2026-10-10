@@ -6,6 +6,8 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.178.0] - 2026-10-10 - the lease queue is first come first served, media outputs are atomic, and held media jobs close cleanly
+
 ### Fixed — a fresh `gpu reserve` queues behind registered waiters instead of winning a just-freed card
 
 - **`acquireQueued` probed the card with a bare `TryAcquire` before it ever queued.** The place in line was taken
@@ -54,6 +56,66 @@ Versioning: [SemVer](https://semver.org/).
 - **doctor: the default `edit_image_generative` row names the named-families case.** A node whose only edit bindings
   are `gen_edit_families` overlays (no `gen_edit_unet`) read "gen_edit_script/gen_edit_unet is unset" beside a
   CONFIGURED family row, as if defective; it now says it edits through its named families.
+
+### Fixed — a failed render leaves nothing at its output path, a full disk stops a batch, and a batch with failed jobs says so
+
+- **Atomic outputs.** Every render helper delivers its final output through a staged sibling renamed into place
+  (`render/atomic-out.mjs`; `render/atomic_out.py` for the Python workers; the ffmpeg ops in `internal/mediaops` the same way).
+  A full data drive used to leave zero-byte pictures (21 of 36 in one batch, 2026-10-09) that skip-existing scripts read as
+  finished; now no file is left at the path and a good file already there survives.
+- **A full disk stops a batch.** A `--batch` stops at `ENOSPC`/`EDQUOT`/`EROFS` (recognised by its errno token, never by prose)
+  and records the remaining jobs as not run; the ledger files it under its own class, `disk_full`.
+- **Exit codes.** `comfy-generate`/`comfy-inpaint --batch` and `local-offload generate-image --batch` exit 4 when any job
+  failed (they exited 0); a clean batch is 0, a stop or setup error 1. The Go caller reads 4 as a finished batch.
+
+### Fixed — `gpu status` names what holds the card, and `offload_status` stops burying it
+
+- The `gpu status` headline, the `gpu reserve` refusal, the media lanes' queued answer and the brief `gpu_lease_verdict` say
+  `held by a media-class lease` / `a text-class lease` (was `held by media`, which read as a seat).
+- The owner line shows the lease's `--origin` when no session or pid owner is recorded (display only; still never orphaned).
+- `gpu_processes` folds a display card's unsizable processes (the Windows desktop: 31 rows on the reference 3-card box) into
+  `display_card_processes_unknown`, one `{index, gpu_uuid, name, count}` per card; every other row is still listed.
+
+### Fixed — a card-table read that runs out of time under load no longer hard-defers a media call
+
+- The allocator's `nvidia-smi` read is retried once under 15 s after its 5 s; a call whose re-read still fails is placed from the
+  newest table it holds and queued with a reason that says so, instead of a `gpu_lease_unavailable` defer. `gpu reserve`,
+  `node-swap --cards` and the drain/unload scope read the table with the same retry; the render helper asks `nvidia-smi -L`
+  once more and logs `COMFY-GPU-LIST-WARN` instead of silently leaving ComfyUI on card 0. The allocation reads only the
+  per-device `--query-gpu` fields (no process listing).
+
+### Fixed — a PAIR job is closed with its real outcome when the door answers a deferral
+
+- A door killed right after its reply no longer leaves a red "harness process exited before the job finished" card: the close
+  of a long call is on the wire before the door answers. A call that waited its window and found the card (`gpu_queued`,
+  `gpu_busy`) or the compose slot held closes quiet (`completed`, no start, the reason in `error`; PAIR has no cancelled
+  state); a render that broke still closes `failed`. A fleet node's job poll carries `err_class` (additive), so a remote call
+  whose node's card was held closes quiet on its asker too; remote lanes close on a panic; the call deadline's abandoned
+  subtasks have their cards closed.
+
+### Fixed — `offload_review_diff` no longer publishes hollow reviews, stacked restatements or discarded cut answers
+
+- **Root cause of the hollow findings:** the structured re-pack, told only `"findings" (array of strings)`, split
+  `severity | file:line | claim | why` lines into bare strings on the fleet's 9B and 35B seats. The lane now also reads the
+  seat's own answer (pipe lines, or JSON finding objects) and publishes whichever reading keeps more findings
+  (`salvaged:"repack_flattened"`).
+- Findings with no severity, file or why are dropped and counted (`dropped_hollow`); when nothing survives filtering and the
+  seat did not say NONE the lane defers instead of returning an empty success. Findings on the same file and line fold into
+  the most severe, the others' claims in `also`.
+- A review the seat wrote but the clock kept from being structured is read line by line through the same filters and
+  published with `salvaged:"output_truncated"|"wall"`.
+
+### Added — a decode mode for the Wan 2.2 graph: `videogen_wan_decode` (`tiled` | `auto` | `plain`), default `tiled`
+
+- `render/comfy-video.mjs --wan-decode tiled|auto|plain` (the pipeline passes `videogen_wan_decode`). `tiled` is today's
+  `VAEDecodeTiled` graph and stays the default. `plain` is `VAEDecode`; `auto` picks plain when the render card's
+  `GET /system_stats` `devices[0].vram_total` is 12 GiB or more, else tiled, and logs one `wan-decode:` line. Measured on an
+  RTX 5060 Ti 16 GB (2026-10-03, ComfyUI dynamic VRAM on, clip shape unrecorded): plain 38 s at a 10.3 GB peak against
+  412 s tiled, 45 dB PSNR apart.
+- **Why the default stays tiled:** no plain decode has been run at the 16 GB tiers' own shape (1280x720x81), where ComfyUI's
+  estimate is 12.0 GiB of a 15.9 GiB card; ComfyUI retries an out-of-memory plain decode tiled once, and a second
+  out-of-memory fails the clip after sampling. The default moves to `auto` after a live acceptance render at that shape
+  decodes in about 40 s with no `Ran out of memory when regular VAE decoding` line.
 
 ## [0.177.0] - 2026-10-09 - warm-back survives a llama-swap reload, the embedder can run from its own llama.cpp build, and two flaky tests stop reading the clock
 
