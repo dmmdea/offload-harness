@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"os"
 	"strings"
 	"sync"
@@ -42,11 +43,37 @@ func krea2Words() []string {
 	return strings.Fields("render/comfy-generate.mjs --batch jobs.jsonl --family krea2 --ckpt krea2_turbo_bf16.safetensors")
 }
 
+// emptyComfyDir points the fixture's config at an install with no model tree. scopedLeaseFixture writes
+// only state_dir and the card-scoped switch, so without this the config would be config.Default()'s
+// ComfyDir (C:/ComfyUI on Windows), and an estimate would read the weights of whatever install the
+// machine running the tests has: a result that depends on the machine, and a test that reads a live
+// install. With nothing to size, the documented per-family sizes apply, on every machine.
+func emptyComfyDir(t *testing.T, cfgPath string) {
+	t.Helper()
+	raw, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatal(err)
+	}
+	doc["comfy_dir"] = t.TempDir()
+	out, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfgPath, out, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // The estimate reaches the lease: a krea2 bf16 call on a 16 GiB card declares the unet plus the text
-// encoder (the documented family sizes here, since this fixture binds no model tree), on the record
-// the next grant and `gpu status` read.
+// encoder (the documented family sizes, 24.5 + 8.3 = 32.8 GiB, since this fixture binds no model tree),
+// on the record the next grant and `gpu status` read.
 func TestReserveDeclaresTheEstimatedHostRAMOnTheLease(t *testing.T) {
 	cfg, m := scopedLeaseFixture(t)
+	emptyComfyDir(t, cfg)
 	useCardTable(t, "")
 	t.Setenv("LO_HELPER_SLEEP_MS", "2500")
 	t.Setenv("LO_HELPER_ENV_OUT", t.TempDir()+"/env.txt")
@@ -55,8 +82,9 @@ func TestReserveDeclaresTheEstimatedHostRAMOnTheLease(t *testing.T) {
 		done <- runGPUReserve(reserveWithCmd(cfg, []string{"--class", "media", "--devices", "2", "--wait", "0", "--reason", "krea2"}, krea2Words()...))
 	}()
 	leases := waitForLeases(t, m, 1)
-	if got := leases[0].HostRAMGiB; got < 32.7 || got > 32.9 {
-		t.Fatalf("the lease declares %.2f GiB, want the documented krea2 unet + text encoder (24.5 + 8.3)", got)
+	// 32.8, not the 32.75 a real krea2 install sums to: the documented sizes, whatever this machine has.
+	if got := leases[0].HostRAMGiB; math.Abs(got-32.8) > 0.01 {
+		t.Fatalf("the lease declares %.2f GiB, want the documented krea2 unet + text encoder (24.5 + 8.3 = 32.8)", got)
 	}
 	if err := <-done; err != nil {
 		t.Fatalf("reserve: %v", err)
