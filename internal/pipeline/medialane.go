@@ -63,32 +63,34 @@ type laneOf struct {
 // resolveLane resolves an image request against this box. why is not empty when the box cannot judge the request
 // (a task it does not model, a binding that is not a ComfyUI one, a lease the process inherited, a lease directory or a
 // card table that would not open or read): the sentence is the reason, and every caller degrades toward the way the call
-// ran before the question existed.
-func (p *Pipeline) resolveLane(ctx context.Context, req core.Request) (ln laneOf, why string) {
+// ran before the question existed. unread is true only for the reasons that are a READ that failed (the lease directory,
+// the card table, a plan the table cannot make): there the lane is in question and the box could not look at it, which the
+// router must not take for a free lane (core.LaneVerdict.Unjudged). The others say the lane is not in question at all.
+func (p *Pipeline) resolveLane(ctx context.Context, req core.Request) (ln laneOf, why string, unread bool) {
 	if req.Task != core.TaskGenerateImage {
-		return ln, "only image generation is probed"
+		return ln, "only image generation is probed", false
 	}
 	if strings.TrimSpace(req.Input) == "" {
-		return ln, "the request has no prompt"
+		return ln, "the request has no prompt", false
 	}
 	// The binding the call would render with, resolved the way runGenerateImage resolves it.
 	cfg, _, ferr := p.cfg.ResolveImageFamily(paramStr(req.Params, "family"))
 	if ferr != nil {
-		return ln, ferr.Error()
+		return ln, ferr.Error(), false
 	}
 	if cfg.ImageGenEngine == "sdcpp" || cfg.ImageGenScript == "" {
-		return ln, "this binding is not a ComfyUI one"
+		return ln, "this binding is not a ComfyUI one", false
 	}
 	ln.token = paramStr(req.Params, "waiter_token")
 	ln.need = imageNeed(cfg, ln.token)
 
 	// A call that runs under a lease its parent holds (`gpu reserve -- local-offload ...`) has a card chosen for it.
 	if inherited, ierr := ambientLeaseEnv(); ierr != nil || inherited != nil {
-		return ln, "this process runs under a GPU lease it inherited, so the lane is its parent's"
+		return ln, "this process runs under a GPU lease it inherited, so the lane is its parent's", false
 	}
 	m, err := p.scopedManager()
 	if err != nil {
-		return ln, "the lease directory cannot be opened (" + err.Error() + "); the call reports it itself"
+		return ln, "the lease directory cannot be opened (" + err.Error() + "); the call reports it itself", true
 	}
 	ln.m = m
 	// The card table, once, under a bound of its own. It sizes the host-RAM need (the call declares what does not fit
@@ -101,18 +103,18 @@ func (p *Pipeline) resolveLane(ctx context.Context, req core.Request) (ln laneOf
 		if terr != nil {
 			cause = terr.Error()
 		}
-		return ln, "the card table could not be read (" + cause + "); the call reads it itself"
+		return ln, "the card table could not be read (" + cause + "); the call reads it itself", true
 	}
 	ln.table = table
 	ln.plan = mediaPlan{whole: true}
 	if m.CardScoped() {
 		pl, perr := planMedia(ln.need, table, nil)
 		if perr != nil {
-			return ln, perr.Error()
+			return ln, perr.Error(), true
 		}
 		ln.plan = pl
 	}
-	return ln, ""
+	return ln, "", false
 }
 
 // MediaLaneFree implements core.LaneProber for an image generation request.
@@ -123,10 +125,9 @@ func (p *Pipeline) resolveLane(ctx context.Context, req core.Request) (ln laneOf
 // callers that arrived before the place are ahead of it (the ticket queue's question, P0 plan S2): the lease queue
 // serves a resumed place by arrival time, so a caller behind it never holds the card against it.
 func (p *Pipeline) MediaLaneFree(ctx context.Context, req core.Request) core.LaneVerdict {
-	notJudged := func(why string) core.LaneVerdict { return core.LaneVerdict{Free: true, Why: "not judged: " + why} }
-	ln, why := p.resolveLane(ctx, req)
+	ln, why, unread := p.resolveLane(ctx, req)
 	if why != "" {
-		return notJudged(why)
+		return core.LaneVerdict{Free: true, Why: "not judged: " + why, Unjudged: unread}
 	}
 	// Every read below goes through a view that prunes nothing: the question must not change the state it asks about.
 	m := ln.m.ReadOnly()
@@ -149,10 +150,10 @@ func (p *Pipeline) MediaLaneFree(ctx context.Context, req core.Request) core.Lan
 
 // laneReading collects what a probe finds in the way.
 type laneReading struct {
-	p      *Pipeline
-	m      *gpulease.Manager
-	cards  []gpuprobe.Card
-	token  string
+	p     *Pipeline
+	m     *gpulease.Manager
+	cards []gpuprobe.Card
+	token string
 	// since is the arrival time of the place in line the call resumes, zero for a new arrival (placeSince).
 	since  time.Time
 	askRAM float64

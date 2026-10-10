@@ -28,7 +28,7 @@ func noPlace(why string) error { return fmt.Errorf("%w (%s)", core.ErrNoMediaPla
 
 // LeaveMediaPlace implements core.PlaceKeeper.
 func (p *Pipeline) LeaveMediaPlace(ctx context.Context, req core.Request, since time.Time) (core.MediaPlace, error) {
-	ln, why := p.resolveLane(ctx, req)
+	ln, why, _ := p.resolveLane(ctx, req)
 	if why != "" {
 		return core.MediaPlace{}, noPlace(why)
 	}
