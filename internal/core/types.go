@@ -514,6 +514,13 @@ const (
 	ErrClassComposeBusy = "compose_busy"
 )
 
+// ErrClassGPULeaseUnavailable is the err_class of a media call that did not run because its lease could not be taken
+// for a reason that is not another job's hold: a lease location the node cannot use, or a host-RAM need that no state
+// of the host admits. Nothing ran (the only producer, internal/pipeline deferForLease, sees acquisition errors and
+// nothing else), so a router that placed the call on a node with it may place the call elsewhere. It is not CardHeld:
+// no other job is in the way, so the call has no place in line to wait for.
+const ErrClassGPULeaseUnavailable = "gpu_lease_unavailable"
+
 // CardHeld reports whether errClass says the call was held back by another job's hold on what it
 // needed (the GPU card, or a composition's one slot). It decides by class and never by reason text:
 // the reason is a sentence for a person.

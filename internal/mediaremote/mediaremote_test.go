@@ -57,8 +57,13 @@ type node struct {
 	runner *nodeRunner
 	// tamper, when set, rewrites the body GET /fleet/media serves.
 	tamper func(name string, b []byte) []byte
-	// refusePost, when non-zero, answers every POST with that status before the node sees it.
-	refusePost int
+	// refusePost, when non-zero, answers every POST with that status before the node sees it, with refuseRetryAfter
+	// (seconds, as a node writes the header) as its Retry-After when that is set.
+	refusePost       int
+	refuseRetryAfter string
+	// dropAck, when set, runs every POST to /fleet/dispatch through the node and then closes the connection before a byte
+	// of the answer is written: the node HAS the job and the delegator never hears so (a lost acknowledgement).
+	dropAck bool
 	// healthEdit rewrites the decoded health body before it is served (nodeOpts.healthEdit).
 	healthEdit func(map[string]any)
 }
@@ -210,11 +215,23 @@ func startNode(t *testing.T, o nodeOpts) *node {
 		}
 		n.mu.Lock()
 		n.log = append(n.log, seen{req.Method, req.URL.Path, req.Header.Get("Authorization"), body, req.Header.Clone()})
-		tamper, refuse := n.tamper, n.refusePost
+		tamper, refuse, retryAfter, drop := n.tamper, n.refusePost, n.refuseRetryAfter, n.dropAck
 		n.mu.Unlock()
 		if refuse != 0 && req.Method == http.MethodPost {
+			if retryAfter != "" {
+				w.Header().Set("Retry-After", retryAfter)
+			}
 			http.Error(w, "refused by the test", refuse)
 			return
+		}
+		if drop && req.Method == http.MethodPost && req.URL.Path == "/fleet/dispatch" {
+			h.ServeHTTP(httptest.NewRecorder(), req) // the node takes the job...
+			if hj, ok := w.(http.Hijacker); ok {
+				if conn, _, err := hj.Hijack(); err == nil {
+					_ = conn.Close() // ...and its answer is lost
+					return
+				}
+			}
 		}
 		if n.healthEdit != nil && req.Method == http.MethodGet && req.URL.Path == "/fleet/health" {
 			rec := httptest.NewRecorder()

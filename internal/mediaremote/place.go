@@ -16,11 +16,14 @@ package mediaremote
 // authority). Candidates rank by the shorter queue, then config order.
 //
 // HOW IT ENDS. A node that refuses the POST (503, 429) or accepts the job and answers that another job holds its
-// card (gpu_busy, gpu_queued: nothing ran) is passed over, under a fresh job id, at most maxPlacements times. A
-// node's own answer after it accepted the job is final: a render that failed is the call's result and is never placed
-// elsewhere, and a job a node holds is never also run here (a media job cannot be recalled, ADR 0064). When nothing
-// admits, the call runs here exactly as it always did, and if that ends in a deferral it carries a cluster[] block
-// that says, per node, why the fleet could not take it.
+// card (gpu_busy, gpu_queued) or that its lease cannot be taken (gpu_lease_unavailable: in all three nothing ran) is
+// passed over, under a fresh job id, at most maxPlacements times, and is not offered another call for a while (a
+// node that read idle in health but whose own grant refuses the job refuses every call alike, and each one would park
+// for the node's whole gpu_wait_ms before the bounce came back). A node's own answer after it accepted the job is
+// final: a render that failed is the call's result and is never placed elsewhere, and a job a node holds is never also
+// run here (a media job cannot be recalled, ADR 0064). When nothing admits, the call runs here exactly as it always
+// did, and if that ends in a deferral it carries a cluster[] block that says, per node, why the fleet could not take
+// it.
 
 import (
 	"context"
@@ -50,6 +53,16 @@ var backoffSteps = []time.Duration{5 * time.Second, 15 * time.Second, time.Minut
 
 // maxCooldown caps the pause a node's Retry-After can put on it (the last backoff step; chosen, not measured).
 const maxCooldown = 5 * time.Minute
+
+// bounceSteps is how long a node that took a call and passed it back is left alone, by consecutive bounce (the last
+// step holds). A node whose health reads idle but whose own grant refuses the job (a card the display rule keeps closed,
+// a quarantined card, a host short of RAM, a card another process holds that no lease shows) refuses every call alike,
+// and each call sent to it parks for the node's whole gpu_wait_ms (90 s by default) before the bounce comes back: three
+// calls would cost 270 s of waiting for nothing. The first bounce pauses the node for a minute (a lane taken between the
+// health read and the POST is the common cause and clears by itself), the second for the cap; a call the node serves
+// forgets them. Chosen transport constants, not measured: this release has no node-published verdict to read instead
+// (the place-now header of the plan, section 7, is the lasting fix).
+var bounceSteps = []time.Duration{time.Minute, maxCooldown}
 
 // Seams: tests replace the roster reader, this machine's release, the clock and the jitter; production never does.
 var (
@@ -82,9 +95,30 @@ type placerState struct {
 	held map[string]bool
 }
 
+// nodeBackoff is what the placer remembers about a node it is leaving alone.
 type nodeBackoff struct {
-	fails int
-	until time.Time
+	// fails counts consecutive failures to reach the node; bounces counts consecutive calls it took and passed back
+	// (only a call it serves clears them).
+	fails, bounces int
+	until          time.Time
+	// state and cause say what the pause is for, in the cluster row's own terms: a node that ANSWERED must never read
+	// as one that did not. shown is the node as the cluster row names it ("address (node id)"), known once it answered.
+	state, cause, shown string
+}
+
+// pause is a node being left alone: for how much longer, and why.
+type pause struct {
+	left                time.Duration
+	state, cause, shown string
+}
+
+// why is the cluster row's sentence for the pause.
+func (z pause) why() string {
+	lead := "not offered a call"
+	if z.state == "unreachable" {
+		lead = "not probed"
+	}
+	return fmt.Sprintf("%s: %s; looking again in %s", lead, z.cause, z.left.Round(time.Second))
 }
 
 var placer = &placerState{nodes: map[string]*nodeBackoff{}, held: map[string]bool{}}
@@ -114,37 +148,44 @@ func (p *placerState) release(base string) {
 	delete(p.held, base)
 }
 
-// backedOff reports whether base is being left alone and for how much longer.
-func (p *placerState) backedOff(base string) (time.Duration, bool) {
+// backedOff reports whether base is being left alone, for how much longer and why.
+func (p *placerState) backedOff(base string) (pause, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if nb := p.nodes[base]; nb != nil {
 		if left := nb.until.Sub(placerNow()); left > 0 {
-			return left, true
+			return pause{left: left, state: nb.state, cause: nb.cause, shown: nb.shown}, true
 		}
 	}
-	return 0, false
+	return pause{}, false
+}
+
+// entry is base's record, made when there is none. Callers hold p.mu.
+func (p *placerState) entry(base string) *nodeBackoff {
+	nb := p.nodes[base]
+	if nb == nil {
+		nb = &nodeBackoff{}
+		p.nodes[base] = nb
+	}
+	return nb
 }
 
 // failed records one more consecutive failure to reach base and sets its pause.
 func (p *placerState) failed(base string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	nb := p.nodes[base]
-	if nb == nil {
-		nb = &nodeBackoff{}
-		p.nodes[base] = nb
-	}
+	nb := p.entry(base)
 	step := nb.fails
 	if step >= len(backoffSteps) {
 		step = len(backoffSteps) - 1
 	}
 	nb.fails++
 	nb.until = placerNow().Add(backoffSteps[step])
+	nb.state, nb.cause = "unreachable", "it did not answer a moment ago"
 }
 
 // cooldown leaves base alone for d (a node's Retry-After, jittered once so several delegators do not return together).
-func (p *placerState) cooldown(base string, d time.Duration) {
+func (p *placerState) cooldown(base string, d time.Duration, shown, cause string) {
 	if d <= 0 {
 		return
 	}
@@ -153,21 +194,60 @@ func (p *placerState) cooldown(base string, d time.Duration) {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	nb := p.nodes[base]
-	if nb == nil {
-		nb = &nodeBackoff{}
-		p.nodes[base] = nb
-	}
+	nb := p.entry(base)
 	if until := placerNow().Add(placerJitter(d)); until.After(nb.until) {
-		nb.until = until
+		nb.until, nb.state, nb.cause, nb.shown = until, "refused", cause, shown
 	}
 }
 
-// ok forgets everything held against base: it answered.
+// bounced records that base took a call and passed it back (nothing ran there) and leaves it alone for the next
+// bounceSteps step. It returns the pause it set, jittered once like a Retry-After.
+func (p *placerState) bounced(base, shown, state, cause string) time.Duration {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	nb := p.entry(base)
+	step := nb.bounces
+	if step >= len(bounceSteps) {
+		step = len(bounceSteps) - 1
+	}
+	nb.bounces++
+	d := placerJitter(bounceSteps[step])
+	if until := placerNow().Add(d); until.After(nb.until) {
+		nb.until, nb.state, nb.cause, nb.shown = until, state, cause, shown
+	}
+	return d
+}
+
+// ok records that base answered a health read: what held against it for not answering is over. A pause that is still
+// running because the node ANSWERED (a Retry-After, a bounce) is not undone by a health read, and the bounce count only
+// a served call clears: a node that reads idle and bounces every call must not start again at the first step each time
+// its pause lapses and it is read.
 func (p *placerState) ok(base string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	delete(p.nodes, base)
+	nb := p.nodes[base]
+	if nb == nil {
+		return
+	}
+	nb.fails = 0
+	if nb.state == "unreachable" {
+		nb.until, nb.state, nb.cause, nb.shown = time.Time{}, "", "", ""
+	}
+	if nb.bounces == 0 && !placerNow().Before(nb.until) {
+		delete(p.nodes, base)
+	}
+}
+
+// served records that base ran a call (whatever its result): it is not bouncing.
+func (p *placerState) served(base string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if nb := p.nodes[base]; nb != nil {
+		nb.bounces = 0
+		if !placerNow().Before(nb.until) {
+			delete(p.nodes, base)
+		}
+	}
 }
 
 // overflowOutcome is what an attempt to place a call on the fleet came to.
@@ -341,9 +421,12 @@ func candidatesFor(ctx context.Context, cfg config.Config, bases []string, local
 	idxOf := map[string]int{}
 	for i, b := range bases {
 		idxOf[b] = i
-		if left, backed := placer.backedOff(b); backed {
-			rows = append(rows, rowAt{i, ClusterRow{Node: rosterprobe.Members([]string{b})[0].Shown(), State: "unreachable",
-				Why: fmt.Sprintf("not probed: it did not answer a moment ago; looking again in %s", left.Round(time.Second))}})
+		if pz, backed := placer.backedOff(b); backed {
+			name := pz.shown
+			if name == "" {
+				name = rosterprobe.Members([]string{b})[0].Shown()
+			}
+			rows = append(rows, rowAt{i, ClusterRow{Node: name, State: pz.state, Why: pz.why()}})
 			continue
 		}
 		live = append(live, b)
@@ -440,12 +523,25 @@ func attempt(ctx context.Context, cfg config.Config, req core.Request, pl planne
 	}
 	res, serr := sendAndFetch(ctx, cfg, req, pl, c.base, c.node, "/fleet/dispatch", body, jobID, start, h, true)
 	if serr == nil {
-		if !res.OK && core.CardHeld(res.Meta.ErrClass) {
+		switch {
+		case !res.OK && core.CardHeld(res.Meta.ErrClass):
 			// The node accepted the job and answered that another job holds its card: nothing ran. Its card closes
-			// quiet and the call goes on, under a fresh job id.
+			// quiet, the node is left alone for a while (it read idle and refused anyway: it will again), and the call
+			// goes on, under a fresh job id.
 			h.Bounce(res)
-			return attemptResult{kind: attemptBounce, row: ClusterRow{Node: c.shown, State: "bounced", Why: "had the call and passed it back: " + res.Reason}}
+			left := placer.bounced(c.base, c.shown, "bounced", "it took the last call and passed it back: another job held its card")
+			return attemptResult{kind: attemptBounce, row: ClusterRow{Node: c.shown, State: "bounced",
+				Why: fmt.Sprintf("had the call and passed it back: %s; not offered another call for %s", res.Reason, left.Round(time.Second))}}
+		case !res.OK && res.Meta.ErrClass == core.ErrClassGPULeaseUnavailable:
+			// The node accepted the job and could not take its lease (a lease location it cannot use, a host-RAM need no
+			// state of it admits): nothing ran there either, and a call the fleet could still serve is not ended by one
+			// node's fault.
+			h.Bounce(res)
+			left := placer.bounced(c.base, c.shown, "refused", "it took the last call and could not take its lease")
+			return attemptResult{kind: attemptBounce, row: ClusterRow{Node: c.shown, State: "refused",
+				Why: fmt.Sprintf("took the call and could not take its lease, so nothing ran: %s; not offered another call for %s", res.Reason, left.Round(time.Second))}}
 		}
+		placer.served(c.base)
 		return attemptResult{kind: attemptDone, res: res}
 	}
 	// A refusal AT THE DOOR means the node never took the job, so nothing ran there and the call moves on, whatever the
@@ -459,7 +555,7 @@ func attempt(ctx context.Context, cfg config.Config, req core.Request, pl planne
 			placer.failed(c.base)
 			return attemptResult{kind: attemptOut, row: ClusterRow{Node: c.shown, State: "unreachable", Why: "did not take the connection: " + pe.Error()}}
 		case pe.status == 503 || pe.status == 429:
-			placer.cooldown(c.base, pe.retryAfter)
+			placer.cooldown(c.base, pe.retryAfter, c.shown, fmt.Sprintf("it answered %d to the last dispatch and asked to be left alone", pe.status))
 			return attemptResult{kind: attemptBounce, row: ClusterRow{Node: c.shown, State: "refused", Why: fmt.Sprintf("answered %d to the dispatch: %s", pe.status, pe.Error())}}
 		case pe.status == 412:
 			return attemptResult{kind: attemptOut, row: ClusterRow{Node: c.shown, State: "refused", Why: "refused the recipe (412): its files changed since it published them; " + pe.Error()}}

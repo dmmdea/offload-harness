@@ -3529,7 +3529,7 @@ func (p *Pipeline) deferForLease(err error, task core.TaskType, meta core.Meta, 
 	if errors.As(err, &busy) {
 		meta.ErrClass = "gpu_busy"
 	} else {
-		meta.ErrClass = "gpu_lease_unavailable"
+		meta.ErrClass = core.ErrClassGPULeaseUnavailable
 	}
 	p.recordDefer(task, meta, inputChars, err.Error())
 	return core.Deferf(err.Error(), "", meta)
