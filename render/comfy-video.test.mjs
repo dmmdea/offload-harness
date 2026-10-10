@@ -123,7 +123,8 @@ test("submitChecked: an unreadable /object_info steps aside and lets the submiss
 });
 
 // --- --wan-decode (config videogen_wan_decode): auto | plain | tiled -----------------------------------
-// Measured on a 16 GB card (A/B 2026-10-03): plain VAEDecode 38 s at a 10.3 GB peak, tiled 412 s at 3.2 GB.
+// Measured on a 16 GB card (A/B 2026-10-03; the tiled arm was one chunk, the clip's shape is unrecorded):
+// plain VAEDecode 38 s at a 10.3 GB peak, tiled 412 s at 3.2 GB.
 // ComfyUI is stubbed throughout: no render, no GPU, no ComfyUI process.
 
 const GIB = 1024 ** 3;

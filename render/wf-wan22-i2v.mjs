@@ -19,15 +19,18 @@
 // patch_embed input; the 48-ch wan2.2_vae is for the 5B TI2V and mismatches). Run only
 // with the GPU freed of llama-swap.
 // DECODE (decode; config videogen_wan_decode, helper flag --wan-decode): how the latent becomes frames.
-//   • plain: VAEDecode. One pass over the whole clip, so the VRAM peak is the clip's.
+//   • plain: VAEDecode. One pass over the whole frame, so the VRAM peak follows the frame's resolution (ComfyUI
+//     sizes this VAE's decode from height x width, with the frame count a mere step at 4 latent frames).
 //   • tiled: VAEDecodeTiled (tile 256/64, temporal 32/8), the node this graph always used.
 //   • auto (default): plain when vramTotalBytes (the render card's total VRAM; the runner reads it from the
 //     ComfyUI it submits to) is at least WAN_PLAIN_DECODE_MIN_VRAM_BYTES, else tiled. No reading = tiled.
-//   Measured on an RTX 5060 Ti 16 GB (A/B 2026-10-03): plain 38 s at a 10.3 GB peak against tiled 412 s at
-//   3.2 GB (that A/B's tiled arm was one chunk), 45 dB PSNR between the two. plain is safe to try on a
-//   big card because ComfyUI's VAE.decode catches an out-of-memory decode and retries it tiled by itself
-//   (comfy/sd.py, read at v0.38.0), so a wrong guess costs time, not the render. Only THIS graph reads it:
-//   LTX 2.5 and Hunyuan 1.5 decode through other VAEs nobody measured and keep VAEDecodeTiled.
+//   Measured on an RTX 5060 Ti 16 GB (A/B 2026-10-03; the clip's shape is unrecorded): plain 38 s at a 10.3 GB
+//   peak against tiled 412 s at 3.2 GB (that A/B's tiled arm was one chunk), 45 dB PSNR between the two.
+//   ComfyUI's VAE.decode catches an out-of-memory plain decode and retries it tiled (comfy/sd.py, read at
+//   v0.38.0), which makes plain worth trying on a big card, but the retry is a second chance and not a
+//   guarantee: it sits outside the try/except and can run out of memory too, and the harness runs ComfyUI with
+//   --cache-none, so a failed decode is a failed render. Only THIS graph reads it: LTX 2.5 and Hunyuan 1.5
+//   decode through other VAEs nobody measured and keep VAEDecodeTiled.
 
 // Official Wan training-time negative (Wan-Video/Wan2.2 wan/configs/shared_config.py,
 // sample_neg_prompt — the model is tuned against it; works with English positives).

@@ -417,7 +417,8 @@ the graph names before submitting (`render/comfy-nodes.mjs`), so a missing pack 
 to another family). The Wan graph used to hard-code `VAEDecodeTiled` (tile 256/64, temporal 32/8). A film session
 measured the alternative on an RTX 5060 Ti 16 GB (A/B 2026-10-03): the plain `VAEDecode` took 38 s at a 10.3 GB
 peak, the tiled decode 412 s at 3.2 GB (that A/B's tiled arm was one chunk), and the two outputs sit at 45 dB PSNR
-from each other. The three modes:
+from each other. The figures reached this change without the clip's width, height or frame count, so the shape they
+were taken at is unrecorded. The three modes:
 
 | Mode | Graph node | Reads the card |
 |---|---|---|
@@ -437,24 +438,44 @@ logs the node and the reason on stderr, one `wan-decode:` line per Wan run, for 
 `wan-decode: VAEDecode (auto: the render card reports 15.9 GiB of VRAM, at least the 12.0 GiB the plain decode wants; card ...)`.
 An explicit `plain` or `tiled` makes no request, and neither does any run that is not the Wan graph.
 
-**Why trying `plain` is safe, and where it is not.** ComfyUI's `VAE.decode` (`comfy/sd.py`, read at v0.38.0 on
-2026-10-09) wraps the untiled decode in a try/except, re-raises anything that is not an out-of-memory error, and on
-an out-of-memory one logs `Warning: Ran out of memory when regular VAE decoding, retrying with tiled VAE decoding.`
-and decodes again tiled. For a video latent that is `decode_tiled_3d`, tiling time as well as space: the temporal
-tile starts at the whole latent and halves until a tile fits the memory budget, then the spatial tile grows while
-it still fits. So a `plain` decode that does not fit degrades into a tiled one by itself and costs the failed
-attempt, not the render. The caveat (ComfyUI issue 15453, from the same research): with dynamic VRAM the other
-loaded models are not evicted before the decode, so a small card fails the plain attempt more often. That is why
-`auto` sends a card under 12 GiB to the tiled node, and why a box whose ComfyUI log keeps printing the warning above
-should pin `tiled`. A card under 12 GiB was not measured, and a nominal 12 GB card sits on the cut and was not
-read; pin `plain` or `tiled` there rather than trust `auto`.
+**What `plain` risks, and what ComfyUI does when it fails.** ComfyUI's `VAE.decode` (`comfy/sd.py`, read at v0.38.0 on
+2026-10-09) asks the card for the decode's estimated memory, runs the untiled decode inside a try/except that
+re-raises anything that is not an out-of-memory error, and on an out-of-memory one logs `Warning: Ran out of memory
+when regular VAE decoding, retrying with tiled VAE decoding.` and decodes again through `decode_tiled_3d`. That second
+attempt sits outside the try/except, so it is a second chance and not a guarantee: if it also runs out of memory the
+exception propagates and the render fails after sampling, and because the harness starts ComfyUI with `--cache-none`
+a resubmit samples again. What the retry does for the Wan 2.1 VAE this graph loads (`wan_2.1_vae.safetensors`),
+worked out from the estimator and the tile selection in that file:
 
-> **Unverified:** the 2026-10-03 A/B is one card and one clip. ComfyUI sizes a decode from the latent's shape
-> (`memory_used_decode`, which for the 3D VAEs grows with the product of the latent's frame and pixel
-> dimensions), and `auto` decides on the card alone, so a clip well past the measured one can still overflow a
-> 16 GB card; the retry above catches that at the cost of the failed attempt. The 12 GiB cut and how the plain
-> attempt behaves beside resident models (issue 15453) were not measured by this change either: its tests stand
-> ComfyUI in with a `/system_stats` stub and render nothing.
+- **The estimate follows the frame's resolution.** `memory_used_decode` is `(2200 if latent_frames <= 4 else 7000) x
+  latent_height x latent_width x 64 x bytes_per_element`, so above 4 latent frames the clip's length drops out. At
+  2 bytes per element (ComfyUI's bf16 or fp16 VAE; the harness passes no VAE precision flag) it asks 5.2 GiB at 832x480
+  and 12.0 GiB at 1280x720, for 49, 81 or 121 frames alike.
+- **The retry tiles space, not time.** Its budget is that same estimate, capped at 80 % of the card's total memory. It
+  starts from a 256 px tile spanning the whole clip in time, shortens the time tile only while even that tile would
+  exceed the budget (its estimate is 0.85 GiB, so it never does at these shapes), then doubles the spatial tile while
+  the estimate still fits. The first retry tile is therefore 512 px, estimated at 3.2 GiB, at 832x480, but 1024 px,
+  estimated at 9.6 GiB (80 % of the 12.0 GiB attempt that just failed), at 1280x720. Whether that tile fits where the
+  whole frame did not has not been measured.
+- **Where that bites.** The three 16 GB tiers (`blackwell-16`, `ampere-16`, `volta-16`) seed 1280x720x81, the shape at
+  which the plain decode's estimate (12.0 GiB) sits closest to what such a card reports (15.9 GiB, three quarters of
+  it), so `auto` leans hardest on the retry exactly there.
+
+The caveat (ComfyUI issue 15453, from the research behind this change and not reproduced here): with dynamic VRAM the
+other loaded models are not evicted before the decode, so a card already holding weights fails the plain attempt more
+often. That is part of why `auto` sends a card under 12 GiB to the tiled node; an 8 GB card was measured the other way,
+and plain `VAEDecode` never finished there (the `blackwell-8` tier record, 2026-08-23 media roster bake). A 12 GB card
+sits on the cut and was not measured: pin `plain` or `tiled` there rather than trust `auto`. A box whose ComfyUI log
+keeps printing the warning above should pin `tiled`.
+
+> **Unverified:** no render at the 16 GB tiers' own shape, 1280x720x81, was run for this change (it renders nothing;
+> its tests stand ComfyUI in with a `/system_stats` stub), and the 2026-10-03 A/B is one card and one clip of
+> unrecorded shape, so neither says whether the plain decode fits at that shape or whether the retry above rescues it
+> when it does not. The 12 GiB cut, and how the plain attempt behaves beside resident models (issue 15453), were not
+> measured either. `auto` decides on the card alone, which is the rule it was given, while ComfyUI's estimate follows
+> the frame's resolution; a resolution-aware `auto` is a possible follow-up, not something this change does. Until one
+> such render has run on a 16 GB tier, `plain` at that shape is a default carried over from the A/B, not a settled one:
+> pin `tiled` on a box whose ComfyUI log shows the warning above.
 
 **What this does not touch.** LTX 2.5 and Hunyuan 1.5 keep `VAEDecodeTiled`: they decode through other VAEs that
 nobody measured, and their builders are called exactly as before. `--wan-decode` and `videogen_wan_decode` do

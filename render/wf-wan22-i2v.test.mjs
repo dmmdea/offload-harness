@@ -218,7 +218,8 @@ test("loader:native works with --fast (lightx2v LoRA still applies) and with pos
 });
 
 // --- decode: videogen_wan_decode (auto | plain | tiled) ------------------------------------------------
-// Measured on a 16 GB card (A/B 2026-10-03): plain VAEDecode 38 s at a 10.3 GB peak, tiled 412 s at 3.2 GB.
+// Measured on a 16 GB card (A/B 2026-10-03; the tiled arm was one chunk, the clip's shape is unrecorded):
+// plain VAEDecode 38 s at a 10.3 GB peak, tiled 412 s at 3.2 GB.
 
 const GIB = 1024 ** 3;
 const decodeBase = { imagePath: "s.png", prompt: "p", seed: 7 };

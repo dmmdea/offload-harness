@@ -1137,9 +1137,12 @@ type Config struct {
 	// submits to (GET /system_stats), and falls back to tiled when it cannot; "plain" and
 	// "tiled" force one node. The graph used to hard-code the tiled node. Measured on an
 	// RTX 5060 Ti 16 GB (A/B 2026-10-03): plain 38 s at a 10.3 GB peak against tiled 412 s
-	// at 3.2 GB (that A/B's tiled arm was one chunk), 45 dB PSNR between them. plain is
-	// safe to try on a big card because ComfyUI's own VAE.decode retries an out-of-memory
-	// decode tiled. Only the Wan graph reads it: LTX 2.5 and Hunyuan 1.5 decode through
+	// at 3.2 GB (that A/B's tiled arm was one chunk), 45 dB PSNR between them. ComfyUI's own
+	// VAE.decode retries an out-of-memory plain decode tiled, once: a second chance that can run
+	// out of memory too (the harness runs ComfyUI with --cache-none, so a failed decode is a
+	// failed render), and its estimate follows the frame's resolution, so plain is a bet on the
+	// card, not a guarantee (docs/systems/media-generation.md, "The Wan decode is per card").
+	// Only the Wan graph reads it: LTX 2.5 and Hunyuan 1.5 decode through
 	// other VAEs nobody measured and keep VAEDecodeTiled. Default "auto" = the runner's
 	// own default (WAN_DECODE_DEFAULT; TestWanDecodeMirrorsTheBuilder keeps them equal).
 	VideoGenWanDecode string `json:"videogen_wan_decode,omitempty"`
