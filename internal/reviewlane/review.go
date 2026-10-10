@@ -85,6 +85,11 @@ type Finding struct {
 	Line     int    `json:"line"`
 	Claim    string `json:"claim"`
 	Why      string `json:"why"`
+
+	// Also holds the claims of other findings that cited this same file and line and were
+	// folded into this one (MergeSameLine). Additive and omitted when nothing was folded, so a
+	// result with no stacked line is byte-identical to what it was before the field existed.
+	Also []string `json:"also,omitempty"`
 }
 
 // reviewOutputSchema is a flat object whose one field is an array of STRINGS, and both
@@ -237,48 +242,67 @@ func BuildContract(task, diff string) (core.AgentContract, error) {
 }
 
 // Result is everything one review publishes: the findings the caller is shown, plus the
-// four counts that say what is NOT in that list.
+// five counts that say what is NOT in that list.
 //
 // The counts are not telemetry. A short or empty findings list is the shape a reader most
 // easily misreads, and each count means something different about WHY it is short:
 // DroppedUngrounded says the seat named a file the diff does not touch (it invented a path),
 // DroppedEcho says it handed the prompt's own template back instead of reviewing,
-// DroppedDuplicate says the same defect was reported more than once, and TruncatedByCap says
-// more was found than the caller asked to see. Counting one and swallowing the others would
-// make the published list quietly unreadable — the same reason dropped-but-uncounted was
-// wrong in the first place.
+// DroppedHollow says it wrote lines with no structure at all — no severity, no file, no why,
+// only a claim (the 2026-10-09 report: four of them, each merely restating the diff),
+// DroppedDuplicate says the same defect was reported more than once — or the same file and
+// line was cited more than once in different words, in which case the extra claims ride on the
+// kept finding in Also — and TruncatedByCap says more was found than the caller asked to see.
+// Counting one and swallowing the others would make the published list quietly unreadable —
+// the same reason dropped-but-uncounted was wrong in the first place.
 type Result struct {
 	Findings          []Finding
 	DroppedUngrounded int
 	DroppedEcho       int
+	DroppedHollow     int
 	DroppedDuplicate  int
 	TruncatedByCap    int
 }
 
+// Filtered is how many of the seat's lines the filters that can EMPTY a list took: hollow,
+// ungrounded and echoed. A duplicate always leaves its survivor and the cap keeps at least one,
+// so those two never count here. Non-zero on an empty Findings means the seat DID write
+// finding-shaped lines and the lane discarded every one.
+func (r Result) Filtered() int { return r.DroppedHollow + r.DroppedUngrounded + r.DroppedEcho }
+
 // Report turns the seat's raw finding lines into what the caller is shown: template echoes
-// removed, parsed, grounded against the diff's own files, deduplicated, severity-ranked,
-// capped — with a count for each of the four ways a line can fail to reach the caller.
+// removed, parsed, hollow lines removed, grounded against the diff's own files,
+// deduplicated, same-line restatements folded together, severity-ranked, capped — with a
+// count for each of the five ways a line can fail to appear as its own finding.
 //
-// Dedupe runs BEFORE capFindings on purpose (register D-90): the seat routinely restates the
-// same defect — once per hunk it touches, or once plainly and once with the file:line it
-// already named repeated inside the claim text — and applying the cap first would let those
-// restatements of ONE finding crowd a genuinely different finding out of the published list.
-// That is the same failure class TruncatedByCap's own doc names for an uncounted drop, just
-// reached from the other side: a cap that counts what it hides but still hides the wrong
-// thing because duplicates padded the queue ahead of it.
+// Dedupe and MergeSameLine run BEFORE capFindings on purpose (register D-90): the seat
+// routinely restates the same defect — once per hunk it touches, once plainly and once with
+// the file:line it already named repeated inside the claim text, or in three different words
+// at one line — and applying the cap first would let those restatements of ONE finding crowd
+// a genuinely different finding out of the published list. That is the same failure class
+// TruncatedByCap's own doc names for an uncounted drop, just reached from the other side: a
+// cap that counts what it hides but still hides the wrong thing because duplicates padded the
+// queue ahead of it.
 func Report(lines []string, diff string, max int) Result {
 	lines, echoed := dropTemplateEchoes(lines)
-	kept, ungrounded := Ground(ParseFindings(lines), FilesInDiff(diff))
+	// Hollow lines go before grounding so neither filter ever sees the other's: a hollow line
+	// names no file, and Ground only judges findings that do.
+	parsed, hollow := DropHollow(ParseFindings(lines))
+	kept, ungrounded := Ground(parsed, FilesInDiff(diff))
 	deduped, duplicate := Dedupe(kept)
-	ranked := rankFindings(deduped, capFindings(max))
+	merged, folded := MergeSameLine(deduped)
+	ranked := rankFindings(merged, capFindings(max))
 	return Result{
 		Findings:          ranked,
 		DroppedUngrounded: ungrounded,
 		DroppedEcho:       echoed,
-		DroppedDuplicate:  duplicate,
+		DroppedHollow:     hollow,
+		// One count for both ways a finding is absorbed into another: a restatement of the
+		// same claim (Dedupe) and a different claim at the same file:line (MergeSameLine).
+		DroppedDuplicate: duplicate + folded,
 		// rankFindings reorders and truncates and does nothing else, so the difference
-		// between what went in (post-dedupe) and what came out IS the cap's doing.
-		TruncatedByCap: len(deduped) - len(ranked),
+		// between what went in (post-merge) and what came out IS the cap's doing.
+		TruncatedByCap: len(merged) - len(ranked),
 	}
 }
 
@@ -325,7 +349,9 @@ func baseFileKey(file string) string {
 // consecutive lines starts a new cluster — because a seat citing the same defect one line off
 // is not a second defect. Within a cluster the most severe report wins; a severity tie keeps
 // whichever occurrence came first in the seat's own answer (lowest original index), so the
-// surviving finding never depends on map or sort iteration order.
+// surviving finding never depends on map or sort iteration order. A claim worded differently
+// has a different key and is not this function's to merge; when it cites the same file and
+// line it is MergeSameLine's.
 func Dedupe(in []Finding) ([]Finding, int) {
 	type item struct {
 		idx  int
@@ -374,6 +400,109 @@ func Dedupe(in []Finding) ([]Finding, int) {
 		if keep[i] {
 			out = append(out, f)
 		}
+	}
+	return out, dropped
+}
+
+// MergeSameLine folds findings that cite the SAME file and line into one and counts the rest
+// as duplicates. The kept finding is the most severe (a severity tie keeps whichever came
+// first in the seat's answer, so the choice never depends on map or sort order) and the
+// others' claims ride on it in Also, in the seat's order.
+//
+// Dedupe cannot see these: it keys on the normalised claim, so a seat that restates one
+// defect in different words passes through as several findings. The live report (2026-10-09,
+// a 48 KB diff) had three stacked on a single line of one file, each a rewording of the same
+// issue. They are one place to look, so the caller reads that place once — but nothing the
+// reviewer said is thrown away, because what differs between them is exactly the wording, and
+// a line can also hold two genuinely different defects. Every claim stays readable.
+//
+// Findings merge only on an exact file and line. The file is compared the way Ground and Dedupe
+// compare it (base name, because the seat may root a path differently), which shares their
+// blind spot: two touched files with one base name and one line number would merge, and the
+// claim still rides along, so nothing is lost when they do. Line 0 means "the seat did not say
+// where", and a finding with no line (or no file) is never merged on that alone: two findings
+// that both failed to name a place are not the same place.
+//
+// It runs after Dedupe and before the cap, for the reason Report gives (D-90): folding a stack
+// frees slots for genuinely different findings, where capping first would let the stack crowd
+// them out.
+func MergeSameLine(in []Finding) ([]Finding, int) {
+	type spot struct {
+		file string
+		line int
+	}
+	at := map[spot][]int{} // input indexes citing each spot, ascending
+	for i, f := range in {
+		if f.File == "" || f.Line <= 0 {
+			continue
+		}
+		k := spot{baseFileKey(f.File), f.Line}
+		at[k] = append(at[k], i)
+	}
+	folded := map[int]bool{}   // indexes absorbed into another finding
+	also := map[int][]string{} // kept index -> the claims it absorbed, in the seat's order
+	dropped := 0
+	for _, idx := range at {
+		if len(idx) < 2 {
+			continue
+		}
+		keep := idx[0]
+		for _, i := range idx[1:] {
+			// Strictly more severe only: idx is ascending, so an equal rank keeps the earlier.
+			if severityRank(in[i].Severity) < severityRank(in[keep].Severity) {
+				keep = i
+			}
+		}
+		for _, i := range idx {
+			if i == keep {
+				continue
+			}
+			folded[i] = true
+			dropped++
+			if c := strings.TrimSpace(in[i].Claim); c != "" {
+				also[keep] = append(also[keep], c)
+			}
+		}
+	}
+	out := make([]Finding, 0, len(in)-dropped)
+	for i, f := range in {
+		if folded[i] {
+			continue
+		}
+		if extra := also[i]; len(extra) > 0 {
+			f.Also = append(append([]string(nil), f.Also...), extra...)
+		}
+		out = append(out, f)
+	}
+	return out, dropped
+}
+
+// DropHollow removes findings that carry no structure at all — no known severity, no file
+// and no why, only a claim — and counts them as DroppedHollow.
+//
+// It exists because ParseFindings keeps every line it cannot read, and a small seat that
+// ignores the line format entirely produces nothing BUT such lines. The live report (2026-10-09,
+// a 228-line diff on a small seat) was four findings with severity "", file "", line 0 and why "",
+// each claim merely restating the diff, published as a successful review. A hollow line names
+// no place to look, no consequence and no rank, so it cannot be triaged; it is the lane's version
+// of an echo — text shaped like a finding that reviews nothing.
+//
+// Dropping is safe only because it is COUNTED and because an emptied list now defers instead of
+// publishing (publishReview: a list emptied by filtering is not a review). That pair is what
+// ParseFindings' old "nothing is dropped for being badly formatted" rule was protecting — a
+// clean bill of health nobody issued — and it holds for every line that carries ANY structure:
+// a known severity, a file or a why still survives however badly the rest is formatted. An
+// unrecognised label alone ("critical | run.go") is not structure; it ranks last by design and
+// is exactly the claim-only shape this drops.
+func DropHollow(in []Finding) ([]Finding, int) {
+	out := make([]Finding, 0, len(in))
+	dropped := 0
+	for _, f := range in {
+		if !isKnownSeverity(f.Severity) && f.File == "" && f.Why == "" {
+			dropped++
+			continue
+		}
+		out = append(out, f)
 	}
 	return out, dropped
 }
@@ -452,6 +581,187 @@ func VerdictReadsClean(output string) bool {
 	return noneLineRe.MatchString(t) || noDefectRe.MatchString(t)
 }
 
+// What cut the structuring step short, as published in a result's `salvaged` field.
+const (
+	// SalvagedOutputTruncated: the seat's final answer ended on the completion budget, so what
+	// it wrote is a PARTIAL list. Its complete lines are read; the one cut mid-way is dropped.
+	SalvagedOutputTruncated = "output_truncated"
+	// SalvagedWall: the loop finished and the clock ended the structured re-pack — skipped for
+	// lack of wall, or clamped and cut by the time left. The answer is complete.
+	SalvagedWall = "wall"
+	// SalvagedRepackFlattened: the re-pack ran and returned, but it had flattened the findings
+	// (a bare sentence apiece, or one pipe line split into its fields) and the seat's own answer
+	// held strictly more findings once read. See RawLines.
+	SalvagedRepackFlattened = "repack_flattened"
+)
+
+// Salvage reads a DEFERRED agent result whose seat had already written the review and was
+// stopped only by the clock on the structuring step, and returns the lines to run through
+// Report. kind is "" for every other result, which the caller handles exactly as it always did.
+//
+// It answers a measured waste (the harness ledger, the 26 hours to 2026-10-09): of five review
+// defers, three read "output failed schema: re-pack skipped: the final answer was cut at the
+// completion budget" and a fourth "structured re-pack skipped: 0 s left to the wall", on a 27B
+// seat and on a 9B one. In every case the seat had written review lines and the lane threw them
+// away. The re-pack is a convenience for this lane, not a requirement: the answer format is
+// LINE-oriented, ParseFindings already reads raw lines, and the schema's one field is those
+// same lines split on newlines. So an answer the re-pack could not reach is still readable, and
+// each line then passes through every filter a structured one does (echo, hollow, grounding,
+// dedupe, the cap). The raw text itself is still never published, only what survives them.
+//
+// It keys on structure, not prose: OutputTruncated (the node's own flag for a cut final) and
+// SchemaMiss with the budget class (the node's flag for a finished answer whose structuring the
+// CLOCK ended: a re-pack skipped, clamped or cut by the time left; a canceled one is excluded,
+// because nobody is waiting for it). Everything else stays a defer: a gpu-busy or other
+// capacity defer, a seat or stack failure (infrastructure), a re-pack that answered the wrong
+// shape (abstention), and any defer that holds no answer. Those are the seat or the stack
+// failing, not the clock cutting short an answer that was fine.
+//
+// A cut answer's last line is dropped. The text after its final newline is where the budget
+// stopped the seat, so it is a fragment ("severe | run.go:5 | off-by-one in the l"), and a
+// fragment can parse into a plausible finding with the wrong claim. A finished answer keeps
+// every line.
+func Salvage(w core.AgentWireResult) (kind string, lines []string) {
+	if !w.Deferred || len(w.Structured) != 0 || strings.TrimSpace(w.Output) == "" {
+		return "", nil
+	}
+	switch {
+	case w.OutputTruncated:
+		return SalvagedOutputTruncated, answerLines(w.Output, true)
+	case w.SchemaMiss && w.DeferClass == core.DeferClassBudget && !strings.HasPrefix(w.Reason, core.RepackCanceledReason):
+		// A finished answer: read it the way a delivered one is, so the shapes a seat is seen
+		// to write (RawLines) are one reader's business and the two paths cannot diverge.
+		return SalvagedWall, RawLines(w.Output)
+	}
+	return "", nil
+}
+
+// Survivors is how many findings outlived every filter, before the cap hid any: what a reading
+// of the seat's answer is worth, and the number two readings of the same answer are compared on.
+func (r Result) Survivors() int { return len(r.Findings) + r.TruncatedByCap }
+
+// RawLines reads the lines of a seat's RAW final answer, the text the structured re-pack is only
+// a copy of. It exists because the copy is the weak link: on 2026-10-09 three review reports came
+// back as findings with every field empty but the claim, and a live probe of the same prompt on
+// the same fleet seats found two different ways the re-pack gets there.
+//
+//   - The grammar-lane re-pack is told only `"findings" (array of strings)`, so it SPLITS lines:
+//     one perfectly formed line (`severe | file:3764 | claim | why`) from a qwen3.6-35b-a3b seat
+//     came back as its claim and its why in two list items, and on two mimo-9b seats five
+//     well-formed lines came back as ten bare strings, no re-issue involved. The severity and the
+//     location were gone. This is the ordinary path on those seats, not an edge.
+//   - A mimo-9b seat repeated a line, the loop's repetition guard read that as a cut final, and
+//     the cut-final re-issue told it to "return the same JSON object that was asked for". This
+//     lane never asked for JSON, so the seat invented one, {"findings":[{"severity", "path",
+//     "line", "claim", "why"}, ...]}, and the re-pack kept one string per object: its claim.
+//
+// In both, the raw answer is strictly richer than what the re-pack made of it. So the door reads
+// both and keeps the richer reading (see the door's use of Survivors); the re-pack stays the
+// default because it also strips a preamble, and a faithful one reads identically.
+//
+// Two shapes are recognised. Pipe lines, the format the prompt asks for, are the answer split on
+// newlines. A JSON document (fenced or bare, {"findings":[...]} or a bare array) whose items are
+// strings or objects is rendered back into pipe lines, one per item, so ParseFindings and every
+// filter see exactly what they see for a seat that followed the format. The keys read are the ones
+// the prompt's own placeholders spell: severity, path (or file), line, claim, why.
+func RawLines(output string) []string {
+	if lines := jsonFindingLines(output); len(lines) > 0 {
+		return lines
+	}
+	return strings.Split(output, "\n")
+}
+
+// jsonFindingLines returns the findings of the JSON document a seat answered with, one pipe line
+// each, or nil when the answer holds no such document. The document must open a LINE (after an
+// optional fence), so a bracket inside a pipe-line claim ("indexes xs[len(xs)]") can never hijack a
+// plain answer, and it must yield at least one non-empty line, so a stray array in prose reads as
+// the prose it is.
+func jsonFindingLines(output string) []string {
+	off := 0
+	for _, ln := range strings.SplitAfter(output, "\n") {
+		t := strings.TrimLeft(ln, " \t")
+		if strings.HasPrefix(t, "{") || strings.HasPrefix(t, "[") {
+			var doc any
+			if json.NewDecoder(strings.NewReader(output[off+len(ln)-len(t):])).Decode(&doc) != nil {
+				return nil
+			}
+			var items []any
+			switch d := doc.(type) {
+			case map[string]any:
+				items, _ = d["findings"].([]any)
+			case []any:
+				items = d
+			}
+			var lines []string
+			for _, it := range items {
+				var line string
+				switch v := it.(type) {
+				case string:
+					line = v
+				case map[string]any:
+					line = objectLine(v)
+				}
+				if strings.TrimSpace(line) != "" {
+					lines = append(lines, line)
+				}
+			}
+			return lines
+		}
+		off += len(ln)
+	}
+	return nil
+}
+
+// lineSuffixRe matches a trailing ":<line>" on a path.
+var lineSuffixRe = regexp.MustCompile(`:\d+$`)
+
+// objectLine renders one finding object as the pipe line the prompt asks for, leaving out the
+// parts it lacks so the line still reads in the shapes ParseFindings knows: "sev | file:line |
+// claim | why", "sev | claim | why", "file:line | claim | why", or the bare claim (which is hollow
+// and dropped). A pipe inside a value would shift the fields, so it is written as a slash.
+func objectLine(o map[string]any) string {
+	f := make(map[string]string, len(o))
+	for k, v := range o {
+		switch t := v.(type) {
+		case string:
+			f[strings.ToLower(k)] = strings.TrimSpace(t)
+		case float64:
+			f[strings.ToLower(k)] = strconv.Itoa(int(t))
+		}
+	}
+	pick := func(keys ...string) string {
+		for _, k := range keys {
+			if v := f[k]; v != "" {
+				return strings.TrimSpace(strings.ReplaceAll(v, "|", "/"))
+			}
+		}
+		return ""
+	}
+	sev, file, claim, why := pick("severity"), pick("path", "file"), pick("claim"), pick("why")
+	if line := pick("line"); file != "" && line != "" && line != "0" && !lineSuffixRe.MatchString(file) {
+		file += ":" + line
+	}
+	var parts []string
+	for _, p := range []string{sev, file, claim, why} {
+		if p != "" {
+			parts = append(parts, p)
+		}
+	}
+	return strings.Join(parts, " | ")
+}
+
+// answerLines splits a seat's raw final answer into its lines. cut means the answer was ended
+// by the completion budget, so whatever follows its last newline is a fragment and is dropped:
+// the final element of the split, which is "" when the text ended on a newline (nothing lost)
+// and the cut line otherwise.
+func answerLines(output string, cut bool) []string {
+	lines := strings.Split(output, "\n")
+	if cut {
+		lines = lines[:len(lines)-1]
+	}
+	return lines
+}
+
 // capFindings resolves the caller's cap: unset or over the ceiling means DefaultMaxFindings,
 // because that is all the seat was asked to produce.
 func capFindings(max int) int {
@@ -497,7 +807,10 @@ const listMarkers = "-*•‣— \t"
 // wrote in its own shape survives as an unranked claim (Severity ""), because discarding it
 // would turn a reviewer that did work into an empty findings list — a clean bill of health
 // nobody issued. Only a blank line and the literal NONE (the "no defects" answer the prompt
-// asks for) are dropped.
+// asks for) are dropped HERE. The rule still holds for every line that carries any structure
+// (a known severity, a file or a why); the one shape it no longer protects is a bare claim,
+// which Report drops through DropHollow — counted, and safe because a list emptied by
+// filtering now defers instead of reading as a clean review.
 func ParseFindings(lines []string) []Finding {
 	out := make([]Finding, 0, len(lines))
 	for _, raw := range lines {
