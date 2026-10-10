@@ -1649,8 +1649,8 @@ recorded as known offenders with their reason rather than silently skipped — a
   [`internal/mediaremote/place.go`](../../internal/mediaremote/place.go) and
   [`identity.go`](../../internal/mediaremote/identity.go) — overflow placement and the strict match;
   [`ticket.go`](../../internal/mediaremote/ticket.go), [`scan.go`](../../internal/mediaremote/scan.go),
-  [`door.go`](../../internal/mediaremote/door.go) and [`queuefs.go`](../../internal/mediaremote/queuefs.go) — the ticket queue
-  (ADR 0083); [`internal/pipeline/medialane_place.go`](../../internal/pipeline/medialane_place.go) and
+  [`door.go`](../../internal/mediaremote/door.go) and [`queuefs.go`](../../internal/mediaremote/queuefs.go) (with its
+  `queuefs_lock_*.go` per-platform file lock) — the ticket queue (ADR 0083); [`internal/pipeline/medialane_place.go`](../../internal/pipeline/medialane_place.go) and
   [`internal/core/place.go`](../../internal/core/place.go) — the place a ticket keeps in the machine's own line
 - [`render/compose-hyperframes.mjs`](../../render/compose-hyperframes.mjs) — the composition runner:
   env allowlist, subcommand allowlist, `--json` everywhere, lint → check → render → ffprobe gate,
@@ -2091,16 +2091,20 @@ ticket, with or without a token: that is what ends a caller's loop, because the 
 (`TestIdenticalResendAttachesToTheLiveTicket`). `waiter_token=mq-...` names a ticket and collects its result; a token that belongs
 to a different request is refused by name, and one that names nothing is a new arrival. A `tk-...` place of the local line is
 brought into the ticket. An `mq-` token never reaches the lease line (`TestMQTokenNeverReachesThePipeline`). A result is handed over
-once: the call that takes it removes the file, so a later identical request is a new job (a caller that wants a second picture of
-one prompt differs in a parameter, a seed). **One seed.** When the caller gave none, the ticket mints one (1 to 1e9, the pipeline's
+once per request: the call that takes it marks the file collected and the file stays 2 minutes (chosen), so another call waiting for
+the same ticket, in this process or another, gets the result too and nothing renders twice
+(`TestASecondCallNamingTheTicketStillGetsTheResultTheFirstTook`); a later request that only repeats the content is a new job (a
+caller that wants a second picture of one prompt differs in a parameter, a seed). **One seed.** When the caller gave none, the ticket mints one (1 to 1e9, the pipeline's
 own range) at creation, so a bounce, a re-placement, an adoption and a local run render one composition
 (`TestTicketFixesOneSeed`); the key is taken before, so a re-send without a seed attaches.
 
 **Seniority in the machine's own line.** `core.PlaceKeeper`, implemented by the pipeline (`medialane_place.go`) and forwarded by the
 MCP runner, wraps the lease manager's place-keeping tokens and adds no admission logic: a place is left at creation with the
 ticket's arrival time on the cards the real admission would queue the call on (the pin, or the card the allocator would pick),
-touched on every scan (a place holds its cards for 30 s after its last touch, and the scan is ~10 s), left again with the SAME
-arrival time if it lapsed, let go when the ticket ends, and spent by the final local run through the `waiter_token` path every
+touched on its own rhythm (a place holds its cards for 30 s after its last touch; a keeper touches every waiting ticket's place every
+scan interval, ~10 s, without waiting for the scan, because a scan visits its tickets one after another and each visit asks one lane
+question of up to 4 s, so a place touched only at its ticket's turn would lapse once enough tickets wait:
+`TestAPlaceIsTouchedWhileASlowScanIsRunning`), left again with the SAME arrival time if it lapsed, let go when the ticket ends, and spent by the final local run through the `waiter_token` path every
 resumed call takes. A caller that arrives after the ticket queues behind it. A host that does not lease cards keeps no places: the
 ticket waits without local seniority and its answer says so. The lane question for a call that resumes a place is ordered by arrival
 on every plan (`gpualloc.QueuedClaimsBefore`); without that, two places on one idle card each read the other as in its way and
@@ -2110,20 +2114,37 @@ neither would start (`TestKeptTokenHoldsSeniorityAgainstLaterWaiters` in the pip
 transport constant, not a resource number), oldest ticket first. A scan DECIDES; a job runs in a goroutine of its own, one per
 ticket in flight, so a local run that waits in the lease line stalls neither another ticket's scan nor the touch that keeps each
 place alive. For a waiting ticket a scan: (1) keeps its place; (2) **local first**: when the lane question says the ticket would be
-served now, starts the local run with the place as its `waiter_token` (one ticket per scan, the oldest; a run that loses the race
-to another job comes back with nothing run and the ticket goes back to waiting, `TestALostRaceOnTheLocalLaneGoesBackToWaiting`);
+served now, starts the local run with the place as its `waiter_token` (one ticket per scan, the oldest). A run the lane refuses at
+once, or that loses the race to another job, comes back with nothing run and the ticket goes back to waiting
+(`TestALostRaceOnTheLocalLaneGoesBackToWaiting`); the lane is then **paused for that ticket** for 5, 15, 60 and then 300 s by
+consecutive refusal (the node steps; a reading of busy resets them) and the fleet is looked at meanwhile, so a lane that reads free
+and refuses at once (`gpu_wait_ms` 0, or a younger place on the card that a call without a wait cannot pass) is not asked in a loop,
+each run writing the pipeline's own deferred row (`TestALostRaceOnTheLocalLaneIsNotARetryLoopAndTheFleetIsTriedMeanwhile`). A lane the
+pipeline TRIED to read and could not (the card table past its 4 s bound, the lease directory not opening: `core.LaneVerdict.Unjudged`)
+is not a free lane: the fleet is looked at in the same scan, and the run here is the answer only when no node can take the call
+(`TestAnUnreadLaneStillLooksAtTheFleet`, `TestAnUnreadLaneWithNoNodeRunsHere`); a call the prober does not model at all (another task, a
+binding without a ComfyUI lane, an inherited lease) runs here at once;
 (3) otherwise asks the fleet with ADR 0082's own filter and ranking (`candidatesFor`), minus the nodes a ticket of the machine has
 a job on and the nodes an **older** waiting ticket of the machine matches (an older ticket not yet scanned is first in line for every
 node: `TestTicketOldestFirstPerNode`), and sends the first node left the job. **Late binding**: nothing is sent to a node until a
 lane is free there, so no job sits parked on a node that frees later than another (`TestLateBindingStartsOnFirstFreedLane`). One node
 is tried per scan; a node that refuses or bounces the job is left alone (5 s for a full node that names no `Retry-After`, 60 s
 and then 300 s for a bounce) and the ticket tries the next at its next scan. A ticket never gives up on a lane; it ends after 8 h
-without one. A freed lane is noticed within one scan interval (at most 12 s).
+without one. A freed lane is noticed within one scan interval (at most 12 s) plus the time the previous scan took, since a scan visits
+its tickets one after another and each costs one lane question: that is N reads per interval for N waiting tickets, each bounded
+by 4 s and a few hundred milliseconds when the table reads.
 
 **A node a ticket has a job on is in use for every scanner on the machine.** Reading the tickets and then sending would leave the
 window in which two processes both read a node idle and both send it a job. A claim file per node (`use-<hash>.json`) is written
-together with the ticket's `placing` state, under a directory lock (`.lock`, an `O_EXCL` file held for a few file operations), before
-the job is sent (`TestTwoProcessesNeverDispatchTwoTicketsToOneSingleJobNode`, `TestClaimNodeIsExclusiveAndLetsGoOfTheDead`). A claim is
+together with the ticket's `placing` state, which already names the job about to be sent (its id is minted before the claim), under
+a directory lock (`.lock`, an operating-system file lock held for a few file operations: `flock`, `LockFileEx`), before the job is
+sent (`TestTwoProcessesNeverDispatchTwoTicketsToOneSingleJobNode`, `TestClaimNodeIsExclusiveAndLetsGoOfTheDead`, `TestTheTicketNamesItsJobBeforeThePost`).
+The lock is never a file whose age decides it is stale: every way of breaking a stale file lock has a gap in which a slow contender
+removes the fresh lock of the one that broke it (two holders inside at once, 24 of 300 contended rounds on the first design), while the
+system frees an OS lock when its holder's process ends, however it ends (`TestTheDirectoryLockNeverHasTwoHolders`,
+`TestACrashedHoldersLockIsFreedWhenItsProcessEnds`); the lock file stays in the directory for good, since removing it would let a late
+contender lock a new file while an earlier holder still has the old. A cancel that lands while the claim waits for the lock ends the
+ticket before anything is sent: the claim is let go and nothing reaches the node (`TestACancelDuringTheClaimSendsNothingAndFinishesOnce`). A claim is
 live while its ticket has a job in flight on that node and its owner is alive, or died less than 2 minutes ago (chosen: the job it
 sent keeps running on the node, which shows its lease only once the job is admitted; after the grace the node's own health speaks
 for it, `TestClaimNodeIsExclusiveAndLetsGoOfTheDead`).
@@ -2133,15 +2154,21 @@ of a dead owner, and a `local` one (its render died with its process), are swept
 places let go (`TestWaitingTicketOfDeadOwnerIsSwept`); the identical call that finds one makes a new ticket that keeps its arrival
 time (`TestDeadOwnerLocalTicketIsSweptAndRerendered`). A `placed` or `fetching` ticket stays for 6 hours (chosen) and is **adopted by
 the next identical call**: the new owner polls the recorded node job and fetches its outputs and never sends the request again, so
-the job renders once; the adopted call writes its one ledger row and opens no card (`TestDeadOwnerPlacedTicketIsAdopted`). A
-finished ticket nobody collected stays 10 minutes (chosen). A temp file of a write that never finished, and a claim with no live
+the job renders once; the adopted call writes its one ledger row and opens no card (`TestDeadOwnerPlacedTicketIsAdopted`). A `placing`
+ticket (the owner ended while the job was being sent) is asked about at the node once: a node that denies the job was never given it, and
+the ticket goes back in line with its arrival (`TestADeadOwnersPlacingTicketThatWasNeverSentGoesBackInLine`); one with no job id (a file
+of an older build) is not polled, and the answer says the job may be on the node (`TestAPlacingTicketWithNoJobIdIsNeverPolled`). A job
+the node accepted and passed back goes back in line too, and the node is left alone for a while (`TestAnAdoptedJobTheNodePassedBackGoesBackInLine`).
+A finished ticket nobody collected stays 6 hours when its job succeeded and 10 minutes when it failed (chosen: the caller was told to call
+once and come back for it, and a repeat of a failed request should try again; `TestAFinishedResultNobodyCollectedIsKeptForHoursAFailureIsNot`).
+A temp file of a write that never finished, and a claim with no live
 owner, are removed by the same sweep.
 
 **A scan writes no card, no row and no waiter.** It reads the lane, the roster and the files, writes its own ticket file (beat,
 matches, answer) and touches its place (`TestScanNeverWritesCardsOrRows`, the register C01 regression: the first design of this loop
 opened a PAIR card per attempt). The call's one ledger row and one PAIR card open at dispatch: at the node's acceptance for a remote
-job (as in ADR 0082), by the pipeline's own run for a local one (a local run that loses a race writes the pipeline's own deferred
-row). Re-attaching by token or by resend creates no row, no card and no place (`TestReattachByTokenCreatesNoJobRowOrCard`).
+job (as in ADR 0082), by the pipeline's own run for a local one (a refused local run writes the pipeline's own deferred row, one per
+refusal, spaced by the pause above). Re-attaching by token or by resend creates no row, no card and no place (`TestReattachByTokenCreatesNoJobRowOrCard`).
 
 **The answer.** A call whose window ends before its job is done answers with a capacity deferral of class `gpu_queued`:
 
@@ -2149,7 +2176,7 @@ row). Re-attaching by token or by resend creates no row, no card and no place (`
 {queued: true, scope: "cluster", ticket: "mq-...", waiter_token: "mq-...", position: N,
  local: {state, why, holder?, ahead?, since}, cluster: [{node, state, why, differs?, holder?, since}, ...],
  next: "the harness holds this job and starts it on the first matching lane that frees; do not call again or resend; a repeat of the
-        request attaches to this ticket; call with waiter_token=mq-... only to collect the result"}
+        request attaches to this ticket; call with waiter_token=mq-... only to collect the result (a finished result is kept for 6 hours)"}
 ```
 
 `position` is the ticket's rank among the machine's waiting tickets (1 is next); `local` is this machine's own lane (`free`, `busy`
@@ -2168,7 +2195,9 @@ does not parse leaves the roster as it was. The server passes its resolved confi
 
 **Named limits.** One first-in-first-out line per delegating machine (its state dir): two machines each hold a queue and meet only at
 a node's own grant; a holder node's queue (ADR 0030) is the named upgrade. A CLI ticket dies with the CLI (a waiting one is swept, a
-placed one adopted). Each waiting ticket costs one lane question (a bounded `nvidia-smi` read) and one roster read per scan; the first
+placed one adopted). A process suspended for longer than 10 minutes reads as dead to the others until it writes its beat again: its
+waiting tickets can be swept meanwhile, an identical call can then make a second ticket, and a placed one is adopted rather than
+re-sent (the job is then polled by two processes); a guard that also requires the pid to be gone is the named follow-up. Each waiting ticket costs one lane question (a bounded `nvidia-smi` read) and one roster read per scan; the first
 scan reuses the creation reading for 2 s. A node that frees between two scans can be taken by a caller that is not a ticket; the
 job then costs one bounce. The scan interval and jitter, the pause steps, the owner and keep timings and the 8 h ceiling are chosen
 constants, not measurements. Nothing here was run against a live lease, a live node or a render.
