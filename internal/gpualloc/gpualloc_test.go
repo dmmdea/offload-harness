@@ -34,6 +34,9 @@ func threeCards() []gpuprobe.Card {
 	return cards
 }
 
+// roomyHostMemory is a host with room for anything these tests ask of it.
+var roomyHostMemory = gpuprobe.HostMemory{PhysicalGiB: 256, AvailableGiB: 200, CommitUsedGiB: 40, CommitLimitGiB: 400}
+
 func scratchManager(t *testing.T) *gpulease.Manager {
 	t.Helper()
 	m, err := gpulease.OpenAt("", t.TempDir())
@@ -46,9 +49,9 @@ func scratchManager(t *testing.T) *gpulease.Manager {
 
 func hostDeps(cards []gpuprobe.Card, away bool) Deps {
 	return Deps{
-		Cards:       func(context.Context, config.Config) ([]gpuprobe.Card, string, error) { return cards, "", nil },
-		HostFreeRAM: func() (float64, bool) { return 64, true },
-		Presence:    func(config.Config) (bool, bool) { return true, away },
+		Cards:      func(context.Context, config.Config) ([]gpuprobe.Card, string, error) { return cards, "", nil },
+		HostMemory: func() (gpuprobe.HostMemory, bool) { return roomyHostMemory, true },
+		Presence:   func(config.Config) (bool, bool) { return true, away },
 	}
 }
 
@@ -71,7 +74,7 @@ func TestBuildInputReadsLeasesAndTheCallersOwnClaims(t *testing.T) {
 	if in.WholeNodeHeld {
 		t.Error("a card-scoped lease is not a whole-node lease")
 	}
-	if in.FootprintGiB != 4 || in.HostNeedGiB != 8 || !in.HostFreeOK || in.HostFreeGiB != 64 {
+	if in.FootprintGiB != 4 || in.HostNeedGiB != 8 || !in.HostMemOK || in.HostMem != roomyHostMemory {
 		t.Errorf("needs/host not carried: %+v", in)
 	}
 	if in.AllowDisplay {

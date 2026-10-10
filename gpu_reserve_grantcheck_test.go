@@ -46,7 +46,7 @@ func (b *grantBox) build() (gpulease.AllocInput, error) {
 	cards := append([]gpuprobe.Card(nil), b.cards...)
 	cards[0].VRAMFreeGiB = b.free0
 	b.mu.Unlock()
-	in := gpulease.AllocInput{Cards: cards, HostFreeOK: true, HostFreeGiB: 64, Claimed: map[string]bool{},
+	in := gpulease.AllocInput{Cards: cards, HostMemOK: true, HostMem: roomyTestHost, Claimed: map[string]bool{},
 		AllowDisplay: b.away.Load(), FootprintGiB: 2, DisplayFloorGiB: 4}
 	for _, l := range b.m.Leases() {
 		for _, d := range l.Devices {

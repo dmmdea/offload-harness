@@ -1326,9 +1326,14 @@ type Config struct {
 	// is set (or the box has one card). Unset, such a lease stays whole-node and says
 	// why; nothing is ever guessed. Measure it with a CUDA_VISIBLE_DEVICES=<uuid> probe.
 	GPUComfyOrder string `json:"gpu_comfy_order,omitempty"`
-	// GPUHostRAMHeadroomGiB is the host RAM the card allocator keeps free beyond a job's
-	// declared need (`gpu reserve --ram`), because a load that pushes the host into swap
-	// stalls every seat on the box. 0 = DefaultGPUHostRAMHeadroomGiB.
+	// GPUHostRAMHeadroomGiB is the host memory every GPU lease grant keeps UNCOMMITTED beyond what
+	// the lease declares (`gpu reserve --ram`, the estimate from its model files, the class default;
+	// internal/hostneed): a grant is admitted only while committed memory now, plus its declared
+	// need, plus what the leases already granted have yet to load, stays at or under physical RAM
+	// less this. It is also the margin of the NEAR verdict `gpu status` reports. The card allocator
+	// applies the same rule before it picks cards. A load that pushes the host into paging stalls
+	// every seat on the box, and paging is never an acceptable state here.
+	// 0 = DefaultGPUHostRAMHeadroomGiB (8).
 	GPUHostRAMHeadroomGiB float64 `json:"gpu_host_ram_headroom_gib,omitempty"`
 	// GPUOrphanGraceMin (plan P8, default 15) is how many minutes an attended lease's
 	// owner may be gone before `gpu status`, offload_status and the fleet health read the

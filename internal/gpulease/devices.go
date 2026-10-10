@@ -578,6 +578,17 @@ func (m *Manager) grantDevicesLocked(class Class, opts Options, devs []string) (
 		return nil, m.heldErr(info), nil
 	}
 
+	// (4b) HOST RAM (hostram.go). Here, and not before the lock, so that the leases this reads (and
+	// the part of them still to load) are exactly the ones live at the instant this grant writes its
+	// own record in (5) to (7): two grants on different cards cannot both see the same headroom,
+	// because the second one's read includes the first one's record. After the cards, so a held card
+	// is reported as held and not as a memory shortage. Before the epoch, so a refusal burns none.
+	// The cost is the host's counters and, only when another lease declared a need, a walk of its
+	// holder's process tree: a few syscalls inside a critical section that is already file I/O.
+	if e := m.hostRAMRefusal(opts, r.infos()); e != nil {
+		return nil, nil, e
+	}
+
 	// (5) issue the epoch, write the record as `granting`.
 	epoch, err := m.bumpEpochLocked()
 	if err != nil {

@@ -363,7 +363,7 @@ func skipSummary(e *gpulease.NoCardsError) string { return gpualloc.SkipSummary(
 var (
 	foreignBusyFn   = foreignBusyByCard
 	residentSeatsFn = residentSeatsByCard
-	hostFreeRAMFn   = gpuprobe.HostFreeRAMGiB
+	hostMemoryFn    = gpuprobe.ReadHostMemory
 )
 
 // buildAllocInput assembles the allocator's input from live state (internal/gpualloc.BuildInput):
@@ -380,7 +380,7 @@ func buildAllocInput(ctx context.Context, m *gpulease.Manager, cfg config.Config
 		Cards:       cardTable,
 		ForeignBusy: foreignBusyFn,
 		Resident:    residentSeatsFn,
-		HostFreeRAM: hostFreeRAMFn,
+		HostMemory:  hostMemoryFn,
 	})
 	if err != nil {
 		return in, err

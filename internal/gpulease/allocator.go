@@ -8,14 +8,19 @@ package gpulease
 // A card is ALLOCATABLE when it is: not quarantined, not a display card (I6, unless the
 // caller says the operator is away), not claimed by a live lease (a whole-node lease
 // claims every card), not busy under a foreign compute process, and its free VRAM fits
-// the footprint; and the HOST has the RAM the job declares plus the configured headroom.
+// the footprint; and the HOST's memory admits the RAM the job declares (gpuprobe.HostRAMAdmits,
+// the rule the lease grant itself applies, hostram.go).
 // A display card the caller has opened keeps the desktop floor on top of that: its free
 // VRAM less the footprint must still leave AllocInput.DisplayFloorGiB (fitsCard).
 // Order among allocatable cards: no resident seat first, then the cheapest eviction, then
 // the lowest id.
 //
-// Naming cards (`--devices`) bypasses this: an explicit word is the operator's, queued
-// FIFO behind whoever holds those cards, and never second-guessed here.
+// Naming cards (`--devices`) bypasses the CARD choice: an explicit word is the operator's,
+// queued FIFO behind whoever holds those cards, and never second-guessed here. It does not
+// bypass the host-RAM rule: that one lives in the grant (Manager.hostRAMRefusal), so a lease
+// that names its cards declares its RAM need and is admitted against it like any other. Until
+// 2026-10-09 the host term lived only here, which is how two lanes that stream weights from
+// RAM ran at once under two `--devices` leases and committed 162.9 GiB on a 127.7 GiB box.
 //
 // A card with a foreign non-seat process is reported `foreign-busy` and skipped, never
 // killed. On Windows (WDDM) nvidia-smi lists no per-process rows for compute apps, so the
@@ -72,9 +77,13 @@ type AllocInput struct {
 	DisplayFloorGiB float64
 	// FootprintGiB is the VRAM the job needs free on EACH card (0 = not declared).
 	FootprintGiB float64
-	// Host RAM term: free RAM now, the job's declared need and the headroom to keep.
-	HostFreeGiB, HostNeedGiB, HostHeadroomGiB float64
-	HostFreeOK                                bool
+	// Host RAM term, the one rule the lease grant applies (gpuprobe.HostRAMAdmits): the host's memory
+	// now, the job's declared need, the part of the leases ALREADY GRANTED that has not loaded yet
+	// (Manager.HostRAMPending) and the headroom to keep. Here it is advisory (it keeps the allocator
+	// from picking cards a grant would then refuse); the grant, under the epoch lock, is the authority.
+	HostMem                                      gpuprobe.HostMemory
+	HostMemOK                                    bool
+	HostNeedGiB, HostPendingGiB, HostHeadroomGiB float64
 	// Min and Max bound how many cards to take (1 <= Min <= Max).
 	Min, Max int
 }
@@ -101,6 +110,9 @@ type NoCardsError struct {
 	Skipped []Skip
 	// HostReason is set when the HOST (RAM headroom), not the cards, is what is short.
 	HostReason string
+	// HostImpossible: the host's memory could never admit the declared need however long a caller
+	// waits (HostReason says so). Waiting does not help, so a caller that would poll returns instead.
+	HostImpossible bool
 	// Waitable lists, in allocation order, the cards a queued request can be given: the
 	// cards that are free right now first, then the cards skipped ONLY because a live
 	// lease claims them (and that would otherwise fit). A caller that must wait queues
@@ -183,11 +195,12 @@ func Allocate(in AllocInput) (Allocation, error) {
 	sort.SliceStable(claimedFit, func(i, j int) bool { return less(claimedFit[i], claimedFit[j]) })
 	sort.SliceStable(skipped, func(i, j int) bool { return skipped[i].Index < skipped[j].Index })
 
-	hostOK, hostWhy := gpuprobe.RAMHeadroom(in.HostFreeGiB, in.HostFreeOK, in.HostNeedGiB, in.HostHeadroomGiB)
-	if !hostOK || len(ok) < in.Min {
+	host := gpuprobe.HostRAMAdmits(in.HostMem, in.HostMemOK, in.HostNeedGiB, in.HostPendingGiB, in.HostHeadroomGiB)
+	if !host.OK || len(ok) < in.Min {
 		err := &NoCardsError{Want: in.Min, Have: len(ok), Skipped: skipped}
-		if !hostOK {
-			err.HostReason = hostWhy
+		if !host.OK {
+			err.HostReason = host.Why
+			err.HostImpossible = host.Impossible
 			err.Have = 0
 		}
 		for _, c := range ok {

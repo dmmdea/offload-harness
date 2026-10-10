@@ -153,6 +153,12 @@ type Waiter struct {
 	// ignores the field and keeps its flat cap, the conservative direction for a record it cannot
 	// read the wait of.
 	DeadlineMs int64 `json:"deadline_ms,omitempty"`
+	// HostRAMGiB is the host RAM the waiter declared (Options.HostRAMGiB), and WaitingFor what it is
+	// waiting on when that is not the cards: WaitHostRAM once the cards are free and the host's memory
+	// is what is short (hostram.go). Both ride the record the waiter already rewrites every tick, so
+	// `gpu status` can say "waiting for host RAM". Additive and omitempty; an older reader ignores them.
+	HostRAMGiB float64 `json:"host_ram_gib,omitempty"`
+	WaitingFor string  `json:"waiting_for,omitempty"`
 	path       string
 }
 
@@ -236,7 +242,8 @@ func (m *Manager) registerWaiter(class Class, opts Options) (Waiter, func()) {
 	if tok, ok := m.ResumeToken(opts.ResumeToken); ok {
 		since, resumed = tok.Since(), tok.ID
 	}
-	w := Waiter{PID: pid, Class: class, Reason: clipCommand(opts.Reason), SinceMs: since.UnixMilli(), Devices: opts.Devices, Token: resumed}
+	w := Waiter{PID: pid, Class: class, Reason: clipCommand(opts.Reason), SinceMs: since.UnixMilli(), Devices: opts.Devices, Token: resumed,
+		HostRAMGiB: max(opts.HostRAMGiB, 0)}
 	if opts.Wait > 0 {
 		// The wait is the record's own: the debris cap is derived from it, not from the longest
 		// wait anyone is expected to pass (waiterOutlived).
