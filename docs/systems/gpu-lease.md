@@ -1254,12 +1254,13 @@ exclusive card, and three measurement rows read the seat's 10 GiB as their own f
     the warm fails with `status N (<snippet>) and the seat is not loading; no recovery within 1m0s of a llama-swap
     reload/restart` (`and the seat's state could not be read` when `/running` never answered).
   - *Not retried, inside the window or outside it:* an answer whose body says the start died, `unable to start process`
-    (llama-swap's 502 `unable to start process: upstream command exited prematurely`) or `upstream command exited` (the
-    same words in a 500), whatever the status code. It is a refusal, not a server going away: it neither opens the
-    window nor is re-sent, because a re-send is a second engine launch while the lease stays held and a successor waits
+    (the 502 `unable to start process: upstream command exited prematurely` this repo records for a failed start) or
+    `upstream command exited` (the same words in a 500), whatever the status code. It is a refusal, not a server going
+    away: it neither opens the window nor is re-sent, because a re-send is a second engine launch while the lease stays
+    held and a successor waits
     (`TestWarmDoesNotRetryAnAnswerThatSaysTheStartDied`, `TestWarmStopsAtAnAnswerThatSaysTheStartDiedEvenInsideTheRecoveryWindow`).
-    The wording is `seatwait.StartFailed`, the classification the contract path uses too. A seat that another client is
-    loading outranks the body: the warm watches it.
+    The wording lives in `seatwait.StartFailed`; the contract path's classifier reads the same death marker. A seat that
+    another client is loading outranks the body: the warm watches it.
   - *Not retried either:* a bare 500, or a 5xx other than 502/503/504, over a seat that is not loading while no reload
     has been seen. That is how llama-swap reports a start that failed, and re-sending it is a second failed load, so it
     fails at once, as before (`TestWarmDoesNotRetryAPlainFiveHundredWithNothingLoading`); once a window is open the same
@@ -1310,9 +1311,10 @@ exclusive card, and three measurement rows read the seat's 10 GiB as their own f
   > `internal/router/base.go` answer a request they were holding with `fmt.Errorf("%s is shutting down", b.name)`, which
   > `internal/swaputil` maps, for an unclassified error, to HTTP 500 `unspecific error: <err>`. A failed start is
   > reported by `internal/process/process_command.go` as `upstream command exited prematurely` or `health check timed out
-  > after ...`. The `unable to start process:` prefix of the 502 is this repo's recorded shape (its own tests and the
-  > contract path), not something found in that source. Whether a re-send during the old server's teardown can clash with
-  > the old process still holding its port or card was not measured; the back-off and the window are the mitigation.
+  > after ...`. The `unable to start process:` prefix of the 502 is the shape this repo's tests record (the contract
+  > path's tests use it as a refused warm-up), not something found in that source. Whether a re-send during the old
+  > server's teardown can clash with the old process still holding its port or card was not measured; the back-off and
+  > the window are the mitigation.
 
 - **`seat_warm_owed`: what the marker means and who clears it (0.177.0).** `<state>/gpu/seat-warm-owed` holds
   `<seat> <RFC 3339 time>` (whole seconds, UTC) and means "this seat was cleared for a lease and nobody has loaded it

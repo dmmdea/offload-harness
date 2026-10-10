@@ -375,9 +375,9 @@ func warmSeat(ctx context.Context, client *http.Client, endpoint, model string) 
 //     is waited for, not asked again. Inside the window any further 5xx or
 //     transport error other than a timeout is part of the recovery, except an
 //     answer that says the start died (next).
-//   - An answer whose body says the start died (llama-swap's 502 "unable to start
-//     process: upstream command exited prematurely", or the same words in a 500) is
-//     a failed start whatever its status: it neither opens the recovery window nor is
+//   - An answer whose body says the start died (the 502 "unable to start process:
+//     upstream command exited prematurely" this repo records, or the same words in a
+//     500) is a failed start whatever its status: it neither opens the recovery window nor is
 //     re-sent inside one, because re-sending it is a second failed engine launch
 //     while the lease stays held. The seat is still watched first: a seat another
 //     client is loading outranks the body.
@@ -530,7 +530,7 @@ func transportRetryable(ctx context.Context, err error) bool {
 }
 
 // startFailed reports whether the answer's body says the seat's process did not start
-// (seatwait.StartFailed, the classification the contract path uses too).
+// (seatwait.StartFailed; the contract path's classifier reads the same death marker).
 func (a warmAttempt) startFailed() bool {
 	return a.err == nil && seatwait.StartFailed(a.body)
 }

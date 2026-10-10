@@ -206,9 +206,10 @@ func Retryable(status int, body string) bool {
 // source): the one body that says a start died.
 const DeathMarker = "upstream command exited"
 
-// startRefusedMarker is the older llama-swap's 502 for a start it could not
-// complete ("unable to start process: ..."). It is this repo's recorded shape
-// (the warm-back tests), not quoted from the current upstream source.
+// startRefusedMarker is the wording of a 502 for a start that could not be
+// completed ("unable to start process: ..."), as this repo's tests record it. It
+// was not found in the current upstream source, so it is a recorded shape, not a
+// quoted one.
 const startRefusedMarker = "unable to start process"
 
 // StartFailed reports whether a refusal's body says the seat's process did not

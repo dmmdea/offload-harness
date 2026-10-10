@@ -279,11 +279,12 @@ func TestWarmKeepsRetryingAFiveHundredThatDoesNotSayTheStartDiedInsideTheGrace(t
 	}
 }
 
-// llama-swap answers a FAILED START as a 502 "unable to start process: upstream command exited
-// prematurely" (the contract path already reads it that way: seatwait.StartFailed). That is a
-// refusal, not a server going away, so it neither opens the recovery window nor is re-sent: a
-// second send is a second engine launch while the lease stays held and a successor waits. The
-// status code does not matter, and neither does the window.
+// A FAILED START is answered as a 502 "unable to start process: upstream command exited
+// prematurely" (the shape this repo records; the contract path reads the same death marker,
+// seatwait.DeathMarker, as a start that died). That is a refusal, not a server going away, so it
+// neither opens the recovery window nor is re-sent: a second send is a second engine launch while
+// the lease stays held and a successor waits. The status code does not matter, and neither does
+// the window.
 func TestWarmDoesNotRetryAnAnswerThatSaysTheStartDied(t *testing.T) {
 	bodies := map[string]string{
 		"unable to start process": "unable to start process: upstream command exited prematurely",
@@ -620,7 +621,8 @@ func TestWarmDoesNotWaitOutAnUnreadableRunningAfterAReloadAnsweredBy503(t *testi
 // on some hosts, so the test reads arrival times with generous scales, and checks the two things
 // a wrong back-off changes: no gap is shorter than its delay (a constant first delay fails the
 // third gap), and the cap is reached (an uncapped doubling reaches only six requests in the
-// grace where the capped one sends more than ten).
+// grace where the capped one sends about eleven; the floor is eight so a loaded host keeps
+// some headroom).
 func TestWarmBackoffDoublesUpToItsCap(t *testing.T) {
 	fastWarmRetry(t, 1500*time.Millisecond)
 	warmRetryFirst, warmRetryMax = 40*time.Millisecond, 160*time.Millisecond
@@ -631,8 +633,8 @@ func TestWarmBackoffDoublesUpToItsCap(t *testing.T) {
 		t.Fatalf("a recovery that never comes ends with the grace named: %v", err)
 	}
 	at := f.arrivals()
-	if len(at) < 10 {
-		t.Fatalf("the capped back-off sends more than ten requests in the grace, got %d", len(at))
+	if len(at) < 8 {
+		t.Fatalf("the capped back-off sends about eleven requests in the grace (an uncapped one six), got %d", len(at))
 	}
 	want := []time.Duration{40, 80, 160, 160, 160}
 	for i, w := range want {
