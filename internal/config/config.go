@@ -1130,6 +1130,19 @@ type Config struct {
 	// ComfyUI-MultiGPU still serves a mixed-precision box). A config that never
 	// sets this key renders byte-identical to before the key existed.
 	VideoGenWanLoader string `json:"videogen_wan_loader,omitempty"`
+	// VideoGenWanDecode picks how the Wan 2.2 graph turns its latent into frames
+	// (render/wf-wan22-i2v.mjs, passed as --wan-decode): "auto" (the default; "" reads the
+	// same) runs the plain VAEDecode on a render card of at least 12 GiB and the tiled
+	// VAEDecodeTiled below that, reading the card's size from the ComfyUI the runner
+	// submits to (GET /system_stats), and falls back to tiled when it cannot; "plain" and
+	// "tiled" force one node. The graph used to hard-code the tiled node. Measured on an
+	// RTX 5060 Ti 16 GB (A/B 2026-10-03): plain 38 s at a 10.3 GB peak against tiled 412 s
+	// at 3.2 GB (that A/B's tiled arm was one chunk), 45 dB PSNR between them. plain is
+	// safe to try on a big card because ComfyUI's own VAE.decode retries an out-of-memory
+	// decode tiled. Only the Wan graph reads it: LTX 2.5 and Hunyuan 1.5 decode through
+	// other VAEs nobody measured and keep VAEDecodeTiled. Default "auto" = the runner's
+	// own default (WAN_DECODE_DEFAULT; TestWanDecodeMirrorsTheBuilder keeps them equal).
+	VideoGenWanDecode string `json:"videogen_wan_decode,omitempty"`
 	// VideoGenFamily selects the I2V graph family the video route renders with:
 	// "" or "wan22" = the Wan 2.2 two-expert graph (legacy default, unchanged);
 	// "ltx25" = the LTX-2.5 22B distilled joint-audio two-pass graph (the measured
@@ -2199,6 +2212,7 @@ func Default() Config {
 		MusicGenScript:              "render/comfy-music.mjs", // B3 ACE-Step music worker; "" => music defers
 		VideoGenTimeoutSec:          1500,
 		VideoGenWanVirtualVramGB:    7, // render/wf-wan22-i2v.mjs's own default; per-card, measured per node
+		VideoGenWanDecode:           "auto",
 		AnimateGenScript:            "render/comfy-animate.mjs",
 		AnimateGenTimeoutSec:        1800, // cold ComfyUI + one 81f Motion Transfer chunk (298.5s warm measured) + margin
 		AudioGenTimeoutSec:          720,

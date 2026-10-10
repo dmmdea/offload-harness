@@ -4,7 +4,14 @@
 // effects (it runs main() only when invoked as the script).
 import { test } from "node:test";
 import assert from "node:assert";
-import { parseArgs, wanVvramGb, buildGraphFromArgs, submitChecked } from "./comfy-video.mjs";
+import { readFileSync, mkdtempSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  BOOL_FLAGS, parseArgs, wanVvramGb, wanDecodeMode, readRenderCard, runsWanGraph,
+  buildGraphFromArgs, buildGraphForRun, submitChecked,
+} from "./comfy-video.mjs";
 
 const stage = (p) => "staged_" + p; // stands in for the copy into <COMFY_DIR>/input
 
@@ -113,4 +120,241 @@ test("submitChecked: an unreadable /object_info steps aside and lets the submiss
   let submitted = 0;
   await submitChecked({ api: "http://comfy.test", graph, clientId: "c", cli: null, fetchImpl, submit: async () => { submitted++; return { promptId: "p" }; } });
   assert.equal(submitted, 1);
+});
+
+// --- --wan-decode (config videogen_wan_decode): auto | plain | tiled -----------------------------------
+// Measured on a 16 GB card (A/B 2026-10-03): plain VAEDecode 38 s at a 10.3 GB peak, tiled 412 s at 3.2 GB.
+// ComfyUI is stubbed throughout: no render, no GPU, no ComfyUI process.
+
+const GIB = 1024 ** 3;
+const API = "http://comfy.test";
+
+// A fake GET /system_stats: answers with `body` (or the given status) and records every URL asked.
+function systemStats(body, { status = 200 } = {}) {
+  const calls = [];
+  const fetchImpl = async (url) => {
+    calls.push(String(url));
+    return { ok: status >= 200 && status < 300, status, json: async () => body };
+  };
+  return { fetchImpl, calls };
+}
+// What a ComfyUI with one render card answers (the shape of /system_stats devices[]).
+const oneCard = (bytes, extra = {}) => ({ devices: [{ name: "cuda:0 Test Card", type: "cuda", index: 0, vram_total: bytes, vram_free: bytes, ...extra }] });
+const decodeNode = (graph) => Object.values(graph).map((n) => n.class_type).find((c) => /^VAEDecode/.test(c));
+// buildGraphForRun with the card reading stubbed and the log captured.
+async function runFor(argv, fetchImpl) {
+  const logs = [];
+  const { pos, flags } = parseArgs(argv);
+  const built = await buildGraphForRun(pos, flags, API, { stage, fetchImpl, log: (m) => logs.push(m) });
+  return { ...built, logs };
+}
+const WAN_ARGV = ["o.mp4", "s.png", "p", "--seed", "1"];
+
+test("parseArgs: --wan-decode is a value flag (not a BOOL_FLAG) and leaves the flags around it alone", () => {
+  assert.ok(!BOOL_FLAGS.includes("wan-decode"), "a bool flag would swallow nothing and read the mode as a positional");
+  const { pos, flags } = parseArgs(["o.mp4", "s.png", "p", "--wan-decode", "plain", "--fast", "--seed", "3"]);
+  assert.equal(flags["wan-decode"], "plain");
+  assert.equal(flags.fast, true);
+  assert.equal(flags.seed, "3");
+  assert.deepEqual(pos, ["o.mp4", "s.png", "p"]);
+});
+
+test("wanDecodeMode: absent is auto, the three modes pass, and anything else (empty, dangling, wrong case) is refused", () => {
+  assert.equal(wanDecodeMode({}), "auto");
+  for (const m of ["auto", "plain", "tiled"]) assert.equal(wanDecodeMode({ "wan-decode": m }), m);
+  for (const bad of ["fast", "", "Plain", "VAEDecode", undefined]) {
+    assert.throws(() => wanDecodeMode({ "wan-decode": bad }), /--wan-decode must be auto\|plain\|tiled/, `value ${JSON.stringify(bad)}`);
+  }
+  // A trailing --wan-decode with no value parses to undefined; it is a mistake, not "auto".
+  assert.throws(() => wanDecodeMode(parseArgs(["o.mp4", "s.png", "p", "--wan-decode"]).flags), /--wan-decode must be/);
+});
+
+test("--wan-decode threads through buildGraphFromArgs to the Wan builder; without a card reading, auto builds the tiled decode", () => {
+  const graphFor = (argv, opts = {}) => buildGraphFromArgs(...Object.values(parseArgs(argv)), { stage, ...opts }).graph;
+  assert.equal(decodeNode(graphFor([...WAN_ARGV, "--wan-decode", "plain"])), "VAEDecode");
+  assert.equal(decodeNode(graphFor([...WAN_ARGV, "--wan-decode", "tiled"])), "VAEDecodeTiled");
+  assert.equal(decodeNode(graphFor(WAN_ARGV)), "VAEDecodeTiled", "no flag and no reading: auto stays on today's node");
+  assert.equal(decodeNode(graphFor([...WAN_ARGV, "--wan-decode", "auto"], { vramTotalBytes: 16 * GIB })), "VAEDecode");
+  assert.equal(decodeNode(graphFor(WAN_ARGV, { vramTotalBytes: 16 * GIB })), "VAEDecode", "the absent flag is auto");
+  assert.equal(decodeNode(graphFor([...WAN_ARGV, "--wan-decode", "tiled"], { vramTotalBytes: 16 * GIB })), "VAEDecodeTiled", "an explicit mode beats the card");
+  assert.throws(() => graphFor([...WAN_ARGV, "--wan-decode", "bogus"]), /--wan-decode must be auto\|plain\|tiled/);
+});
+
+test("--wan-decode is Wan-only: hunyuan and ltx25 keep their VAEDecodeTiled whatever it says", () => {
+  for (const model of ["hunyuan", "ltx25"]) {
+    const { graph } = buildGraphFromArgs(...Object.values(parseArgs([...WAN_ARGV, "--model", model, "--wan-decode", "plain"])), { stage, vramTotalBytes: 16 * GIB });
+    const classes = Object.values(graph).map((n) => n.class_type);
+    assert.ok(classes.includes("VAEDecodeTiled"), `${model} still decodes tiled`);
+    assert.ok(!classes.includes("VAEDecode"), `${model} must not gain a plain VAEDecode`);
+    assert.ok(!classes.includes("WanImageToVideo"), `${model} is not the Wan graph`);
+  }
+});
+
+test("readRenderCard reads devices[0].vram_total from GET <api>/system_stats: the primary device, which ComfyUI lists first", async () => {
+  const { fetchImpl, calls } = systemStats({ devices: [
+    { name: "cuda:1 Primary", type: "cuda", index: 1, vram_total: 16 * GIB },
+    { name: "cuda:0 Donor", type: "cuda", index: 0, vram_total: 48 * GIB },
+  ] });
+  assert.deepStrictEqual(await readRenderCard(API, { fetchImpl }), { vramTotal: 16 * GIB, name: "cuda:1 Primary" });
+  assert.deepStrictEqual(calls, [`${API}/system_stats`]);
+});
+
+test("readRenderCard: every answer that does not name a card is an error, never a guess", async () => {
+  const cases = {
+    "HTTP 500": systemStats({}, { status: 500 }),
+    "no devices key": systemStats({ system: {} }),
+    "empty devices": systemStats({ devices: [] }),
+    "devices is not an array": systemStats({ devices: { 0: oneCard(16 * GIB).devices[0] } }),
+    "null device": systemStats({ devices: [null] }),
+    "vram_total missing": systemStats({ devices: [{ name: "x", type: "cuda" }] }),
+    "vram_total a string": systemStats(oneCard("17179869184")),
+    "vram_total zero": systemStats(oneCard(0)),
+    "vram_total negative": systemStats(oneCard(-1)),
+    "vram_total NaN": systemStats(oneCard(NaN)),
+    "a CPU device (its vram_total is the host's RAM)": systemStats(oneCard(64 * GIB, { type: "cpu" })),
+    "an MPS device (its vram_total is the host's RAM)": systemStats(oneCard(64 * GIB, { type: "mps" })),
+  };
+  for (const [name, { fetchImpl }] of Object.entries(cases)) {
+    const r = await readRenderCard(API, { fetchImpl });
+    assert.ok(typeof r.error === "string" && r.error, `${name}: names why`);
+    assert.equal(r.vramTotal, undefined, `${name}: carries no size`);
+  }
+  const refused = await readRenderCard(API, { fetchImpl: async () => { throw new Error("ECONNREFUSED"); } });
+  assert.match(refused.error, /GET \/system_stats failed: ECONNREFUSED/);
+  const noJson = await readRenderCard(API, { fetchImpl: async () => ({ ok: true, status: 200, json: async () => { throw new SyntaxError("Unexpected token"); } }) });
+  assert.match(noJson.error, /returned no JSON/);
+  assert.match((await readRenderCard(API, { fetchImpl: systemStats({}, { status: 503 }).fetchImpl })).error, /answered HTTP 503/);
+});
+
+test("auto: a 16 GiB card builds VAEDecode, an 8 GiB card VAEDecodeTiled, an unreadable one VAEDecodeTiled — and the log says which and why", async () => {
+  const big = await runFor(WAN_ARGV, systemStats(oneCard(16 * GIB)).fetchImpl);
+  assert.equal(decodeNode(big.graph), "VAEDecode");
+  assert.equal(big.logs.length, 1, "one line per run");
+  assert.match(big.logs[0], /^wan-decode: VAEDecode \(auto: the render card reports 16\.0 GiB of VRAM, at least the 12\.0 GiB the plain decode wants; card cuda:0 Test Card\)$/);
+
+  const small = await runFor(WAN_ARGV, systemStats(oneCard(8 * GIB)).fetchImpl);
+  assert.equal(decodeNode(small.graph), "VAEDecodeTiled");
+  assert.match(small.logs[0], /^wan-decode: VAEDecodeTiled \(auto: the render card reports 8\.0 GiB of VRAM, under the 12\.0 GiB the plain decode wants; card cuda:0 Test Card\)$/);
+
+  for (const [label, fetchImpl, reason] of [
+    ["the request fails", async () => { throw new Error("ECONNREFUSED"); }, /GET \/system_stats failed: ECONNREFUSED/],
+    ["HTTP 500", systemStats({}, { status: 500 }).fetchImpl, /answered HTTP 500/],
+    ["no devices", systemStats({ devices: [] }).fetchImpl, /lists no device/],
+  ]) {
+    const none = await runFor(WAN_ARGV, fetchImpl);
+    assert.equal(decodeNode(none.graph), "VAEDecodeTiled", `${label}: today's node`);
+    assert.match(none.logs[0], /^wan-decode: VAEDecodeTiled \(auto: the render card's VRAM was not read, so the tiled decode this graph always used stays; /, label);
+    assert.match(none.logs[0], reason, label);
+  }
+});
+
+test("auto cuts at 12 GiB inclusive through the whole path, and a missing flag is auto", async () => {
+  assert.equal(decodeNode((await runFor(WAN_ARGV, systemStats(oneCard(12 * GIB)).fetchImpl)).graph), "VAEDecode");
+  assert.equal(decodeNode((await runFor(WAN_ARGV, systemStats(oneCard(12 * GIB - 1)).fetchImpl)).graph), "VAEDecodeTiled");
+  assert.equal(decodeNode((await runFor([...WAN_ARGV, "--wan-decode", "auto"], systemStats(oneCard(16 * GIB)).fetchImpl)).graph), "VAEDecode");
+});
+
+test("an explicit --wan-decode reads no card: zero requests, and the log names the request", async () => {
+  for (const [mode, node] of [["plain", "VAEDecode"], ["tiled", "VAEDecodeTiled"]]) {
+    const s = systemStats(oneCard(mode === "plain" ? 8 * GIB : 24 * GIB)); // a card that would choose the opposite
+    const r = await runFor([...WAN_ARGV, "--wan-decode", mode], s.fetchImpl);
+    assert.equal(decodeNode(r.graph), node, mode);
+    assert.equal(s.calls.length, 0, `${mode} must make no request`);
+    assert.deepStrictEqual(r.logs, [`wan-decode: ${node} (${mode} decode requested)`]);
+  }
+});
+
+test("a run that does not build the Wan graph reads no card and logs nothing", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wan-decode-"));
+  const graphFile = join(dir, "wf.json");
+  writeFileSync(graphFile, JSON.stringify({ "1": { class_type: "LoadImage", inputs: { image: "x.png" } } }));
+  const argvs = [
+    [...WAN_ARGV, "--model", "hunyuan"],
+    [...WAN_ARGV, "--model", "ltx25"],
+    [...WAN_ARGV, "--model", "h3"],
+    ["o.flac", "upbeat corporate", "--model", "ace"],
+    ["o.mp4", "--graph", graphFile],
+  ];
+  const realLog = console.log;
+  console.log = () => {}; // the ace branch announces its prompt on stdout
+  try {
+    for (const argv of argvs) {
+      const s = systemStats(oneCard(16 * GIB));
+      const r = await runFor(argv, s.fetchImpl);
+      assert.equal(s.calls.length, 0, `${argv.join(" ")}: no /system_stats request`);
+      assert.deepStrictEqual(r.logs, [], `${argv.join(" ")}: no wan-decode line`);
+    }
+  } finally { console.log = realLog; }
+});
+
+test("a bad --wan-decode on a Wan run throws before the still is staged; on a non-Wan run it is not read", async () => {
+  const staged = [];
+  const { pos, flags } = parseArgs([...WAN_ARGV, "--wan-decode", "bogus"]);
+  await assert.rejects(
+    buildGraphForRun(pos, flags, API, { stage: (p) => { staged.push(p); return "x"; }, fetchImpl: systemStats({}).fetchImpl, log: () => {} }),
+    /--wan-decode must be auto\|plain\|tiled/,
+  );
+  assert.deepEqual(staged, [], "nothing was copied into ComfyUI's input dir");
+  const ok = await runFor([...WAN_ARGV, "--model", "ltx25", "--wan-decode", "bogus"], systemStats({}).fetchImpl);
+  assert.equal(decodeNode(ok.graph), "VAEDecodeTiled", "ltx25 never reads the flag");
+});
+
+test("a run buildGraphFromArgs would refuse for a missing still or prompt reads no card: it exits right after", async () => {
+  // process.exit(2) is how the runner refuses; stand it in with a throw so the test can see it happen.
+  const realExit = process.exit;
+  const realErr = console.error;
+  process.exit = (code) => { throw new Error(`exit ${code}`); };
+  console.error = () => {};
+  try {
+    for (const argv of [["o.mp4", "only-one-positional"], ["o.mp4"]]) {
+      const s = systemStats(oneCard(16 * GIB));
+      const { pos, flags } = parseArgs(argv);
+      await assert.rejects(buildGraphForRun(pos, flags, API, { stage, fetchImpl: s.fetchImpl, log: () => {} }), /exit 2/, argv.join(" "));
+      assert.equal(s.calls.length, 0, `${argv.join(" ")}: no request before the refusal`);
+    }
+  } finally { process.exit = realExit; console.error = realErr; }
+});
+
+test("runsWanGraph agrees with the dispatch in buildGraphFromArgs: every family it dispatches on is non-Wan, anything else renders Wan", () => {
+  const src = readFileSync(new URL("./comfy-video.mjs", import.meta.url), "utf8");
+  const dispatched = new Set([...src.matchAll(/\bmodel === "([a-z0-9._-]+)"/g)].map((m) => m[1]));
+  assert.ok(dispatched.size >= 4, `found the dispatch literals in comfy-video.mjs (got ${[...dispatched]})`);
+  for (const fam of dispatched) assert.equal(runsWanGraph({ model: fam }), false, `${fam} is built by another builder`);
+  const listed = src.match(/NON_WAN_MODELS = Object\.freeze\(\[([^\]]*)\]\)/);
+  assert.ok(listed, "NON_WAN_MODELS is declared");
+  const nonWan = [...listed[1].matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+  assert.deepStrictEqual([...nonWan].sort(), [...dispatched].sort(), "the list and the dispatch name the same families");
+  // The Wan builder is the fall-through: no model, the spelled-out names and an unknown value all reach it.
+  for (const model of [undefined, "wan", "wan22", "something-new"]) assert.equal(runsWanGraph({ model }), true, String(model));
+  assert.equal(runsWanGraph({ graph: "wf.json" }), false, "a --graph file is the caller's own graph");
+  assert.equal(runsWanGraph({ graph: "wf.json", model: "wan" }), false);
+});
+
+test("buildGraphForRun over real HTTP: a stand-in ComfyUI answering /system_stats with a 16 GiB card gets the plain decode", async () => {
+  const hits = [];
+  const srv = createServer((req, res) => {
+    hits.push(req.url);
+    if (req.url === "/system_stats") {
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({ system: { os: "nt" }, devices: oneCard(17_094_934_528).devices }));
+      return;
+    }
+    res.statusCode = 404;
+    res.end();
+  });
+  await new Promise((r) => srv.listen(0, "127.0.0.1", r));
+  try {
+    const { port } = srv.address();
+    assert.ok(port < 8188 || port > 8191, "the stand-in must never sit on 8188-8191");
+    const logs = [];
+    const { pos, flags } = parseArgs(WAN_ARGV);
+    // No fetchImpl: this is the runner's own transport, global fetch with its timeout signal.
+    const r = await buildGraphForRun(pos, flags, `http://127.0.0.1:${port}`, { stage, log: (m) => logs.push(m) });
+    assert.equal(decodeNode(r.graph), "VAEDecode");
+    assert.deepStrictEqual(hits, ["/system_stats"]);
+    assert.match(logs[0], /^wan-decode: VAEDecode \(auto: the render card reports 15\.9 GiB of VRAM/);
+  } finally {
+    srv.closeAllConnections?.();
+    await new Promise((r) => srv.close(r));
+  }
 });
