@@ -58,9 +58,7 @@ process.exitCode = mode === "failed" ? 4 : mode === "stop" ? 1 : 0;
 // reaches a ComfyUI that happens to be running on the machine.
 func batchHome(t *testing.T) (home, cfgPath, jobsPath, ledgerPath string) {
 	t.Helper()
-	if _, err := exec.LookPath("node"); err != nil {
-		t.Skip("node not on PATH")
-	}
+	requireNode(t)
 	home = t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
@@ -81,6 +79,14 @@ func batchHome(t *testing.T) (home, cfgPath, jobsPath, ledgerPath string) {
 		t.Fatal(err)
 	}
 	return home, cfgPath, jobsPath, ledgerPath
+}
+
+// requireNode skips a test that runs the node runner stub when node is not installed.
+func requireNode(t *testing.T) {
+	t.Helper()
+	if _, err := exec.LookPath("node"); err != nil {
+		t.Skip("node not on PATH")
+	}
 }
 
 type batchOutput struct {
@@ -183,7 +189,14 @@ func TestGenerateImageBatchExitCodesThroughTheBuiltBinary(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds the product binary")
 	}
-	_, cfgPath, jobsPath, _ := batchHome(t)
+	requireNode(t)
+	// The binary is built BEFORE batchHome moves HOME to a temp directory: HOME is the home of the
+	// binary's runs, and the compiler keeps the caller's own HOME, module cache and build cache. On Linux
+	// GOPATH, and with it GOMODCACHE and GOCACHE, follow HOME, so a build under the temp one downloaded the
+	// whole module tree into the test's temp directory (45 s per run on CI) and left it behind: Go's
+	// module cache is read-only, and the directory could not be removed ("TempDir RemoveAll cleanup:
+	// unlinkat .../go/pkg/mod/...: permission denied", 2026-10-10). A Windows host pins GOMODCACHE in its
+	// own go env, which is why this only ever failed on Linux.
 	exe := filepath.Join(t.TempDir(), "local-offload")
 	if runtime.GOOS == "windows" {
 		exe += ".exe"
@@ -191,6 +204,7 @@ func TestGenerateImageBatchExitCodesThroughTheBuiltBinary(t *testing.T) {
 	if out, err := exec.Command("go", "build", "-o", exe, ".").CombinedOutput(); err != nil {
 		t.Fatalf("go build: %v\n%s", err, out)
 	}
+	_, cfgPath, jobsPath, _ := batchHome(t)
 	for _, c := range []struct {
 		mode   string
 		code   int

@@ -120,6 +120,12 @@ Versioning: [SemVer](https://semver.org/).
   rule, and the log says so). The card-table tests now read a stand-in roster (`useRoster`), so the reads are the same
   everywhere and a test run no longer asks the host's llama-swap anything. Checked on one Linux host with one binary: a fresh
   loopback fails with the CI's message, the host's own loopback passes.
+- **`TestGenerateImageBatchExitCodesThroughTheBuiltBinary` built the binary under its temp HOME.** The test moves HOME to a temp
+  directory for the binary's runs and then ran `go build`. On Linux GOPATH, and with it GOMODCACHE and GOCACHE, follow HOME, so
+  the compiler downloaded the whole module tree into that directory (45 s per run) and Go's module cache is read-only: the
+  directory could not be removed ("TempDir RemoveAll cleanup: unlinkat .../go/pkg/mod/...: permission denied"). A Windows host
+  pins GOMODCACHE in its own `go env`, so it never showed there. The binary is now built first, under the caller's own HOME and
+  caches; what the test pins (exit 0, 4 and 1 and their stderr lines through the built binary) is unchanged.
 
 ### Fixed — `offload_review_diff` no longer publishes hollow reviews, stacked restatements or discarded cut answers
 
