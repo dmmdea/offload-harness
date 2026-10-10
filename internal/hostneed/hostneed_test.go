@@ -450,7 +450,7 @@ func TestHelperRecognitionIgnoresCaseAndABoolFlagKeepsItsPositional(t *testing.T
 }
 
 // G4: the agent seat's host footprint. The node's own figure when it states one; an unstated seat is never 0
-// (fail closed on a CHOSEN figure, below the 44 GiB the 2026-09-10 incident recorded), a negative figure is a typo and
+// (fail closed on a CHOSEN figure, below the 44 GB the 2026-09-10 incident recorded), a negative figure is a typo and
 // reads as unstated.
 func TestSeatNeedIsTheConfiguredFigureElseTheFailClosedDefault(t *testing.T) {
 	n := SeatNeed(config.Config{AgentSeatHostRAMGiB: 11.6})
@@ -467,7 +467,7 @@ func TestSeatNeedIsTheConfiguredFigureElseTheFailClosedDefault(t *testing.T) {
 		t.Errorf("the default is the chosen fail-closed floor and must not shrink below 21 GiB: %v", DefaultSeatHostGiB)
 	}
 	// What the default says about itself: a figure the harness CHOSE, not one it measured, and not "the largest on
-	// record" (the incident that wrote the check recorded 44 GiB, which is larger than 21). A line that says otherwise
+	// record" (the incident that wrote the check recorded 44 GB, which is larger than 21). A line that says otherwise
 	// tells an operator the warm-back is held to the worst case when it is held to less.
 	detail := SeatNeed(config.Config{}).Detail
 	for _, claim := range []string{"largest", "on record", "measured so far"} {
@@ -475,7 +475,7 @@ func TestSeatNeedIsTheConfiguredFigureElseTheFailClosedDefault(t *testing.T) {
 			t.Errorf("the default seat figure is chosen, so it must not claim %q: %s", claim, detail)
 		}
 	}
-	for _, want := range []string{"chosen", "44 GiB", "agent_seat_host_ram_gib"} {
+	for _, want := range []string{"chosen", "44 GB", "agent_seat_host_ram_gib"} {
 		if !strings.Contains(detail, want) {
 			t.Errorf("the default seat figure must say %q: %s", want, detail)
 		}

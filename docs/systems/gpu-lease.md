@@ -1368,14 +1368,14 @@ Every figure this rule uses is the harness's: chosen or measured, and labelled a
 
 A lease that takes a card unloads the agent seat, and the wrapper warms it back before it releases the lease. That reload
 is a load like any other, and it used to be the one load nothing sized: the warm path had no host-RAM check, and the
-seat's footprint was declared nowhere. (The 2026-09-10 incident was a seat: 44 GiB of host RAM nobody counted.) Now:
+seat's footprint was declared nowhere. (The 2026-09-10 incident was a seat: 44 GB of host RAM nobody counted.) Now:
 
 * **The seat declares its footprint.** `agent_seat_host_ram_gib` is the host RAM the seat holds once loaded (resident set
   plus any staged KV cache). The node that runs the seat measures it and records `measured <date> <node>` beside the value.
   Unset is not "small": `hostneed.DefaultSeatHostGiB` (21 GiB: a vLLM pair seat's ~13 GiB of process plus 8 GiB of staged KV
   cache, from the project notes of 2026-09-10, not re-measured here) stands in, a **chosen** fail-closed figure, never 0
   (`TestSeatNeedIsTheConfiguredFigureElseTheFailClosedDefault`). It is **not** the largest figure on record: the 2026-09-10
-  incident recorded 44 GiB of host RAM for a seat, the note that carries it attributes that to LMCache staging plus page cache,
+  incident recorded 44 GB of host RAM for a seat, the note that carries it attributes that to LMCache staging plus page cache,
   and whether the page-cache part is memory the OS can drop is not verified here. So with the key unset the warm-back is
   admitted against a figure below the incident's, and a node that runs a seat sets `agent_seat_host_ram_gib` from its own
   measurement before it relies on the check.
