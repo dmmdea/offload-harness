@@ -9,6 +9,7 @@ package mediaremote
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -21,6 +22,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/gpulease"
+	"github.com/dmmdea/offload-harness/internal/rosterprobe"
 )
 
 // toggled is a node lease reader that reports a held media lease while b is set.
@@ -1599,5 +1601,44 @@ func TestADeadNodeIsLoggedOncePerBackoffStepNotPerScan(t *testing.T) {
 		if got := logged(); got != step.want {
 			t.Fatalf("%s: %d line(s), want %d (%v)", step.note, got, step.want, lines)
 		}
+	}
+}
+
+// A miss the shared roster cache replays (another lane of the process found the node dead a moment ago) is not this lane's own
+// failure: it is neither logged nor counted towards the node's pause, or one outage would push the pause up a step per lane.
+func TestAMissReplayedFromTheNegativeCacheIsNeitherLoggedNorCounted(t *testing.T) {
+	e := newQEnv(t, 1, true)
+	pinPlacerClock(t)
+	const gone = "http://127.0.0.1:9"
+	prev := probeRoster
+	probeRoster = func(_ context.Context, remotes []string, _ string, _ time.Duration) []rosterprobe.Reading {
+		var out []rosterprobe.Reading
+		for i, b := range remotes {
+			out = append(out, rosterprobe.Reading{Member: rosterprobe.Member{Index: i, Base: b}, Err: errors.New("dial tcp: connection refused"), Source: rosterprobe.SourceNegative})
+		}
+		return out
+	}
+	t.Cleanup(func() { probeRoster = prev })
+	var mu sync.Mutex
+	var lines []string
+	prevLog := queueLog
+	queueLog = func(l string) {
+		mu.Lock()
+		lines = append(lines, l)
+		mu.Unlock()
+	}
+	t.Cleanup(func() { queueLog = prevLog })
+	local, _, _ := localIdentity(e.cfg, "qwen-image-2.1-fast")
+	_, rows := candidatesFor(context.Background(), e.cfg, []string{gone}, local, need{})
+	if len(rows) != 1 || rows[0].row.State != "unreachable" {
+		t.Fatalf("the node reads as unreachable in the answer: %+v", rows)
+	}
+	if _, backed := placer.backedOff(gone); backed {
+		t.Error("a replayed miss does not start the node's own pause")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(lines) != 0 {
+		t.Errorf("a replayed miss is not logged: %v", lines)
 	}
 }
