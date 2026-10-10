@@ -6,6 +6,8 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.179.0] - 2026-10-10 - a busy image lane overflows to an idle node that renders the same recipe, and every GPU lease path has a host-RAM brake
+
 ### Added — a busy image lane overflows to an idle node that renders the same recipe (F52, ADR 0082)
 
 - **The behaviour.** An `auto` image call (`offload_generate_image`, `generate-image`) on a machine that has the lane and a fleet
