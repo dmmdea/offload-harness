@@ -58,7 +58,7 @@ Versioning: [SemVer](https://semver.org/).
   tested against fixtures that reproduce the image blocks of three live nodes as stored on 2026-10-09 and 2026-10-10 (config text),
   one of them cut inside the block that matters, so the first live action reads `image_recipes` on both nodes.
 
-### Added — a host-RAM guard on every GPU lease path; a kept ComfyUI instance never holds two families' weights
+### Added — a host-RAM guard on every GPU lease path; a kept ComfyUI instance is freed when its family changes
 
 - **A declared load is checked before the grant, not discovered after it.** On the reference 3-card Windows box (127.7 GiB physical),
   2026-10-09, two card-scoped media leases each streamed bf16 weights a 16 GiB card cannot hold: committed memory reached
@@ -95,13 +95,15 @@ Versioning: [SemVer](https://semver.org/).
   leads with `HOST RAM OVER (committed memory X GiB exceeds the Y GiB of physical RAM)`. OVER is a statement about what the OS
   has promised; no surface claims the box is paging, because no reading here can know it (the page file growing, or the
   pages-output rate, would). Lease rows show what each lease declared; queue rows show what a waiter waits for.
-- **A kept ComfyUI instance no longer holds two families' weights.** The launch marker remembers the family (and weights file)
+- **A kept ComfyUI instance is freed when its family changes.** The launch marker remembers the family (and weights file)
   an instance may still hold. The runner's end-of-run `/free` is now awaited, retried once and loud (`COMFY-FREE-WARN`), sent
   even when the instance is kept, and clears the recorded family only when it succeeded; a runner that finds a different
   family on a kept instance frees it before its first job; `run-graph` frees an instance it ran on, including one it found
   already up; the lease-close proof of a kept instance retries 3 times at 8 s instead of once at 3 s (a ComfyUI in the middle of
   a 550-second prompt answers late); the pipeline's backstop `/free` waits 5 s instead of 1 s. The incident's 57 GiB instance is
-  reconstructed from the code and the surviving logs, not observed.
+  reconstructed from the code and the surviving logs, not observed, and its probable cause (a second family cached beside the
+  first) may account for only part of the figure: a ComfyUI process launched fresh on 2026-10-10 held the same 57.7 GiB private
+  about seven minutes after launch, so the footprint of one lane is unmeasured (the S1 acceptance runs record it).
 - **Not changed, and said:** the guard bounds the leases that pass through it. A pinned older binary (its leases declare
   nothing), a direct llama-swap request and a hand-started ComfyUI are outside it; a pipeline job under a parent's ambient
   `--devices` lease gets no admission of its own; a detached lease counts its whole need as still to load for its life; Linux

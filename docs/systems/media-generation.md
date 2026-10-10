@@ -1080,16 +1080,19 @@ runner. A kept instance that never answers is still killed, since a half-started
   holds at most three 5 MB archives plus the run in progress. The live file of a run is not truncated: the
   instance lives no longer than its lease, which bounds it. `tailComfyLog` (the lines a failure message
   carries) reads only the last 256 KB of the file, so a long-lived instance's log is never read whole.
-- **It never holds two families' weights (2026-10-09, `render/comfy-family.mjs`).** ComfyUI keeps the models it loaded in
+- **It is freed when its family changes (2026-10-09, `render/comfy-family.mjs`).** ComfyUI keeps the models it loaded in
   host memory between prompts ("Using RAM pressure cache"; "Model Krea2 prepared for dynamic VRAM loading. 24449MB Staged" in
   the instance's own log) and drops them only when told to; an instance that served one family and is handed a job of
-  another holds both. The incident's instance held 57 GiB private that way (a Qwen-Image model cached next to a Krea 2 one;
-  POST `/free` released 52 GiB between prompts without killing a job). The ways it came about, read from the code and the
+  another holds both. The incident's instance held 57 GiB private, probably that way (a Qwen-Image model cached next to a
+  Krea 2 one: reconstructed, not observed; the session that handled it reported that POST `/free` released 52 GiB between
+  prompts without killing a job, a reading no record of which survives here). A ComfyUI process launched fresh on 2026-10-10
+  held the same 57.7 GiB private about seven minutes after launch, so this fix may account for only part of the figure and the
+  footprint of one lane is unmeasured. The ways two families could come to share an instance, read from the code and the
   instances' logs: a runner killed before its `finally` (the pipeline's timeout kills the whole tree) never sent its
   end-of-run `/free`, and the post-run `/free` of `gpugen` waited one second; the holder's proof before stopping a kept
   instance at release (`GET /system_stats`, three seconds) failed on an instance busy with a 550-second prompt, so it
   outlived its lease; the next lease reused it and loaded its family beside the first; and `run-graph` left whatever its
-  graph loaded on an instance that was already up. What closes it: every ComfyUI runner passes a **family signature**
+  graph loaded on an instance that was already up. What changes: every ComfyUI runner passes a **family signature**
   (the family plus the weights file, so a Q5 GGUF and a bf16 safetensors of one family count as two) to `withGpuSlot`;
   the instance's launch marker records it (`lastFamily`); a runner that finds a kept instance whose marker names ANOTHER
   family frees it, awaited, before its first job (`COMFY-FAMILY-FREE`), and the same family keeps its warm weights; the

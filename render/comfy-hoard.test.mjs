@@ -1,7 +1,7 @@
 // node --test render/comfy-hoard.test.mjs
 //
-// An instance never holds two families' weights (render/comfy-family.mjs; the paging incident of
-// 2026-10-09). Everything runs against a FAKE ComfyUI: an HTTP server on an ephemeral loopback port
+// A kept instance that last ran another family is freed before its first job (render/comfy-family.mjs; the
+// paging incident of 2026-10-09). Everything runs against a FAKE ComfyUI: an HTTP server on an ephemeral loopback port
 // that records the order of the requests it receives and answers /free and /system_stats. No real
 // ComfyUI is started or contacted, and the ports are never 8188-8191.
 import { test } from "node:test";

@@ -1,10 +1,17 @@
-// comfy-family.mjs — an instance never holds two families' weights.
+// comfy-family.mjs — a kept instance that last ran another family is freed before its first job.
 //
 // THE INCIDENT (2026-10-09, the reference 3-card Windows box, 127.7 GiB physical). Two ComfyUI media
 // lanes streaming bf16 weights ran at once and committed memory reached 162.9 GiB; one keyed (per-card)
-// instance held 57 GiB private because it still cached a qwen-image model from an earlier lease next to
-// the krea2 model of the current one. POSTing ComfyUI's own /free {"unload_models":true,
-// "free_memory":true} released 52 GiB of it between prompts without killing a job.
+// instance held 57 GiB private. The PROBABLE cause is that it still cached a qwen-image model from an
+// earlier lease next to the krea2 model of the current one: reconstructed from the code and the surviving
+// logs, not observed (the chain cannot be re-read, below). The session that handled the incident reported
+// that POSTing ComfyUI's own /free {"unload_models":true, "free_memory":true} released 52 GiB of it between
+// prompts without killing a job; no record of that reading survives in this repository.
+//
+// WHAT THIS DOES NOT EXPLAIN. A ComfyUI process launched fresh on 2026-10-10, about seven minutes before it
+// was read, held the same 57.7 GiB private as the earlier one. So a single lane may be that large without any
+// long cache history, this fix may account for only part of the 57 GiB, and the footprint of ONE lane is
+// unmeasured: the S1 acceptance runs record it (docs/systems/gpu-lease.md, "Known limits").
 //
 // HOW AN INSTANCE COMES TO HOLD TWO FAMILIES (read from the code and the instances' own logs; the
 // chain of the 57 GiB instance itself cannot be re-read, only four rotated console logs per card

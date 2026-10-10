@@ -1139,8 +1139,10 @@ node render/comfy-generate.mjs --batch ... --family krea2 --ckpt ...`). A Krea 2
 text encoder (8.3 GiB) on a 16 GiB card, and a Qwen-Image 2512 bf16 stream of about 38 GiB. Committed memory reached
 162.9 GiB against a 187.7 GiB limit, the system-managed page file grew from 60 to 68 GiB, and free RAM bottomed at 3.2 GiB.
 The non-media baseline on that box was about 56 GiB (desktop apps, agent CLIs, browsers, WSL, kernel pools). One keyed
-per-card ComfyUI instance held 57 GiB private because it still cached a Qwen-Image model from an earlier lease next to the
-Krea 2 model of the current one; POSTing ComfyUI's own `/free` released 52 GiB of it between prompts without killing a job.
+per-card ComfyUI instance held 57 GiB private. The probable cause is that it still cached a Qwen-Image model from an earlier
+lease next to the Krea 2 model of the current one (reconstructed from the code and the surviving logs, not observed); the
+session that handled the incident reported that POSTing ComfyUI's own `/free` released 52 GiB of it between prompts without
+killing a job, and no record of that reading survives here.
 
 **Why the harness did not stop it.** The card allocator's host term (`allocator.go`) applied only to `--cards`; an explicit
 `--devices` lease, which is what every owner wrapper takes, bypassed it. It read **free** RAM, which says nothing about jobs
@@ -1409,12 +1411,16 @@ physical RAM)` in capitals, ahead of the lease verdict word, because `free` at t
 NEAR trails it. The lease rows show what each lease declared, and the queue rows what a waiter waits for
 (`TestGPUStatusJSONCarriesTheHostBlockAndAnOverVerdict`, `TestStatusNamesOverLoudlyOnTheBriefLine`).
 
-### An instance never holds two families' weights
+### A kept instance is freed when its family changes
 
-The paging incident's 57 GiB instance is closed at its source in `render/comfy-family.mjs`: the launch marker remembers
-whose weights a kept instance may still hold, a runner that finds another family there frees it before its first job, and
-the end-of-run `/free` is awaited, retried and loud; see "A kept instance (`--keep-comfy`)" in
-[media-generation.md](media-generation.md).
+The paging incident's 57 GiB instance probably held two families' weights (reconstructed, not observed).
+`render/comfy-family.mjs` closes the ways the code allowed that: the launch marker remembers whose weights a kept instance may
+still hold, a runner that finds another family there frees it before its first job, and the end-of-run `/free` is awaited,
+retried and loud (a free that fails is said, and leaves the old family recorded so the next runner tries again); see "A kept
+instance (`--keep-comfy`)" in [media-generation.md](media-generation.md). It closes one way an instance can carry more than a
+lane's own weights; it does not explain the whole figure. A ComfyUI process launched fresh on 2026-10-10 held the same 57.7 GiB
+private about seven minutes after launch, so the footprint of a single lane is unmeasured here and the S1 acceptance runs
+record it (see "Known limits").
 
 ## The fleet reads leases per card (plan P7)
 
