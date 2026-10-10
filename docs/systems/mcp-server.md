@@ -552,9 +552,21 @@ These design choices are load-bearing rather than incidental:
   non-zero, on a deferral as well as a delivered review): `dropped_ungrounded`, `dropped_echo`
   (the prompt's own field spec or worked example handed back as a finding — measured behaviour,
   so it is a byte-equality guard rather than a human's vigilance), `dropped_hollow` (no known
-  severity, no file and no why), `dropped_duplicate` (the same defect reported more than once)
-  and `truncated_by_cap`. The `note` on an empty list is gated on them: "found nothing" beside a
-  non-zero drop count is false, and says so differently.
+  severity, no file and no why), `dropped_duplicate` (the same defect reported more than once,
+  and findings folded together by the same-line rule below) and `truncated_by_cap`. The `note`
+  on an empty list is gated on them: "found nothing" beside a non-zero drop count is false, and
+  says so differently.
+- **One file and line is one finding, and every claim stays readable (0.178.0).** `Dedupe` keys
+  on the normalised claim, so a seat that restates one issue in different words passed through
+  as several findings: on 2026-10-09 a 48 KB diff produced three, stacked on a single line of one
+  file. `reviewlane.MergeSameLine` now folds findings that cite the SAME file (compared by base
+  name, as `Ground` and `Dedupe` do) and line into the most severe one (a tie keeps the first
+  in the seat's order) and puts the others' claims in an additive `also` array on the kept
+  finding; each folded finding counts in `dropped_duplicate`. Line 0 means the seat did not say
+  where, so a finding with no line or no file is never merged on that alone. It runs after
+  `Dedupe` and before the cap, for the same register D-90 reason: a stack must not crowd a
+  genuinely different finding out of the published list. Nothing distinct is lost, since the
+  caller still reads every claim.
 
 Everything the lane returns is ADVISORY: it never gates a merge and never substitutes for the
 final does-it-actually-work verification, which stays with the caller — as do security review,

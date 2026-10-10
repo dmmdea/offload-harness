@@ -1,6 +1,7 @@
 package reviewlane
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -603,5 +604,204 @@ func TestReportClampsTheCapToWhatTheSeatWasAskedFor(t *testing.T) {
 	}
 	if got := capFindings(3); got != 3 {
 		t.Fatalf("a caller narrowing the list must be honoured: %d", got)
+	}
+}
+
+// The live shape (2026-10-09, a 48 KB diff): three findings stacked on ONE line of one file,
+// each a rewording of the same issue. Dedupe keys on the claim text and could not see them. They
+// merge into the most severe, every other claim stays readable in Also in the seat's order, and
+// the two absorbed findings are counted as duplicates.
+func TestMergeSameLineFoldsRestatementsAndKeepsEveryClaim(t *testing.T) {
+	in := []Finding{
+		{Severity: "moderate", File: "alarm.go", Line: 101, Claim: "the alarm id is never checked for nil", Why: "a nil id panics in dispatch"},
+		{Severity: "severe", File: "alarm.go", Line: 101, Claim: "dispatch dereferences an unvalidated alarm", Why: "a malformed alarm crashes the service"},
+		{Severity: "minor", File: "alarm.go", Line: 101, Claim: "no guard before the alarm lookup", Why: "the alarm is silently skipped"},
+	}
+	out, dropped := MergeSameLine(in)
+	if dropped != 2 || len(out) != 1 {
+		t.Fatalf("three findings on one line must become one with two counted: kept=%+v dropped=%d", out, dropped)
+	}
+	if out[0].Severity != "severe" || out[0].Claim != "dispatch dereferences an unvalidated alarm" {
+		t.Fatalf("the most severe report must be the one kept: %+v", out[0])
+	}
+	if len(out[0].Also) != 2 || out[0].Also[0] != "the alarm id is never checked for nil" || out[0].Also[1] != "no guard before the alarm lookup" {
+		t.Fatalf("the other two claims must ride in Also, in the seat's order: %+v", out[0].Also)
+	}
+	if len(in[0].Also) != 0 || len(in[1].Also) != 0 {
+		t.Fatalf("the input must not be mutated: %+v", in)
+	}
+}
+
+// The same shape end to end through Report, which is what the lane publishes.
+func TestReportFoldsAStackedLineIntoOneFindingAndCountsIt(t *testing.T) {
+	diff := "--- a/alarm.go\n+++ b/alarm.go\n@@ -1 +1 @@\n+x\n"
+	rep := Report([]string{
+		"moderate | alarm.go:101 | the alarm id is never checked for nil | a nil id panics in dispatch",
+		"severe | alarm.go:101 | dispatch dereferences an unvalidated alarm | a malformed alarm crashes the service",
+		"minor | alarm.go:101 | no guard before the alarm lookup | the alarm is silently skipped",
+	}, diff, 0)
+	if len(rep.Findings) != 1 || len(rep.Findings[0].Also) != 2 {
+		t.Fatalf("want one finding carrying two also-claims: %+v", rep.Findings)
+	}
+	if rep.DroppedDuplicate != 2 {
+		t.Fatalf("the two folded findings must be counted as duplicates: %d", rep.DroppedDuplicate)
+	}
+	if rep.TruncatedByCap != 0 || rep.DroppedHollow != 0 || rep.DroppedUngrounded != 0 {
+		t.Fatalf("no other count may move: %+v", rep)
+	}
+}
+
+// Equal severity keeps the FIRST finding in the seat's order, whatever the other fields say.
+func TestMergeSameLineSeverityTieKeepsTheFirstInTheSeatsOrder(t *testing.T) {
+	out, dropped := MergeSameLine([]Finding{
+		{Severity: "moderate", File: "run.go", Line: 9, Claim: "first", Why: "w1"},
+		{Severity: "moderate", File: "run.go", Line: 9, Claim: "second", Why: "w2"},
+		{Severity: "moderate", File: "run.go", Line: 9, Claim: "third", Why: "w3"},
+	})
+	if dropped != 2 || len(out) != 1 || out[0].Claim != "first" || len(out[0].Also) != 2 || out[0].Also[0] != "second" || out[0].Also[1] != "third" {
+		t.Fatalf("a tie must keep the first and fold the rest in order: kept=%+v dropped=%d", out, dropped)
+	}
+	// An unrecognised label ranks below a real severity, as it does everywhere else.
+	out, _ = MergeSameLine([]Finding{
+		{Severity: "critical", File: "run.go", Line: 9, Claim: "invented label"},
+		{Severity: "minor", File: "run.go", Line: 9, Claim: "real severity"},
+	})
+	if len(out) != 1 || out[0].Claim != "real severity" {
+		t.Fatalf("an invented severity label must not outrank a real one: %+v", out)
+	}
+}
+
+// Line 0 is "the seat did not say where". Two findings that both failed to name a place are not
+// the same place, and neither is a finding that named a line but no file.
+func TestMergeSameLineNeverMergesOnAMissingOrUnknownLocation(t *testing.T) {
+	for name, in := range map[string][]Finding{
+		"line 0 in one file":          {{File: "alarm.go", Claim: "a"}, {File: "alarm.go", Claim: "b"}},
+		"line 0 beside a real line":   {{File: "alarm.go", Claim: "a"}, {File: "alarm.go", Line: 5, Claim: "b"}},
+		"no file, same line":          {{Line: 5, Claim: "a"}, {Line: 5, Claim: "b"}},
+		"different files, same line":  {{File: "alarm.go", Line: 5, Claim: "a"}, {File: "run.go", Line: 5, Claim: "b"}},
+		"one file, different lines":   {{File: "alarm.go", Line: 5, Claim: "a"}, {File: "alarm.go", Line: 6, Claim: "b"}},
+		"negative line is not a line": {{File: "alarm.go", Line: -1, Claim: "a"}, {File: "alarm.go", Line: -1, Claim: "b"}},
+	} {
+		out, dropped := MergeSameLine(in)
+		if dropped != 0 || len(out) != len(in) {
+			t.Errorf("%s: nothing here is the same place: kept=%+v dropped=%d", name, out, dropped)
+		}
+		for _, f := range out {
+			if len(f.Also) != 0 {
+				t.Errorf("%s: nothing may be folded: %+v", name, f)
+			}
+		}
+	}
+}
+
+// The file is compared the way Ground and Dedupe compare it: a seat may root a path differently
+// in the same answer, and all of these name one file.
+func TestMergeSameLineComparesTheFileByBaseName(t *testing.T) {
+	out, dropped := MergeSameLine([]Finding{
+		{Severity: "minor", File: "internal/alarm.go", Line: 12, Claim: "one"},
+		{Severity: "minor", File: "b/internal/Alarm.go", Line: 12, Claim: "two"},
+		{Severity: "minor", File: `internal\alarm.go`, Line: 12, Claim: "three"},
+		{Severity: "minor", File: "alarm.go", Line: 12, Claim: "four"},
+	})
+	if dropped != 3 || len(out) != 1 || len(out[0].Also) != 3 {
+		t.Fatalf("four spellings of one file at one line are one place: kept=%+v dropped=%d", out, dropped)
+	}
+}
+
+// Survivors keep the seat's order, and findings elsewhere are untouched.
+func TestMergeSameLineKeepsInputOrderAndLeavesOtherFindingsAlone(t *testing.T) {
+	out, dropped := MergeSameLine([]Finding{
+		{Severity: "minor", File: "a.go", Line: 1, Claim: "stack member, folded away"},
+		{Severity: "moderate", File: "b.go", Line: 7, Claim: "lone finding"},
+		{Severity: "severe", File: "a.go", Line: 1, Claim: "stack keeper"},
+		{Severity: "minor", File: "c.go", Line: 0, Claim: "no line"},
+	})
+	if dropped != 1 || len(out) != 3 {
+		t.Fatalf("want 3 survivors, 1 folded: kept=%+v dropped=%d", out, dropped)
+	}
+	if out[0].Claim != "lone finding" || out[1].Claim != "stack keeper" || out[2].Claim != "no line" {
+		t.Fatalf("survivors must keep the seat's relative order: %+v", out)
+	}
+	if len(out[1].Also) != 1 || out[1].Also[0] != "stack member, folded away" {
+		t.Fatalf("the folded claim must ride on the keeper: %+v", out[1])
+	}
+	if len(out[0].Also) != 0 || len(out[2].Also) != 0 {
+		t.Fatalf("findings that absorbed nothing carry no Also: %+v", out)
+	}
+}
+
+// A folded finding with no claim text adds nothing to Also (a blank entry is noise), but it is
+// still one fewer finding and is still counted.
+func TestMergeSameLineSkipsBlankClaimsInAlsoButStillCountsThem(t *testing.T) {
+	out, dropped := MergeSameLine([]Finding{
+		{Severity: "severe", File: "run.go", Line: 3, Claim: "real claim"},
+		{Severity: "minor", File: "run.go", Line: 3, Claim: "  "},
+	})
+	if dropped != 1 || len(out) != 1 || len(out[0].Also) != 0 {
+		t.Fatalf("kept=%+v dropped=%d", out, dropped)
+	}
+}
+
+// The ordering guard, same reasoning as register D-90: folding must happen BEFORE the cap, or a
+// stack crowds a genuinely different finding out. Four severe restatements at one line plus one
+// distinct moderate finding, capped at 2: folded first, the stack is ONE slot and the distinct
+// finding keeps the other. Capped first, the two slots would both go to the stack's severe
+// members and the distinct finding would never be published.
+//
+// Mutation-verified: swapping Report's `merged, folded := MergeSameLine(deduped)` /
+// `rankFindings(merged, ...)` for a cap before the merge makes this test FAIL.
+func TestReportFoldsBeforeApplyingTheCapSoAStackCannotCrowdOutADistinctFinding(t *testing.T) {
+	diff := "--- a/run.go\n+++ b/run.go\n@@ -1 +1 @@\n+x\n"
+	rep := Report([]string{
+		"severe | run.go:7 | the index is not bounds-checked | reads past the end",
+		"severe | run.go:7 | slice access without a length guard | out-of-range panic",
+		"severe | run.go:7 | missing check on len(xs) | crash on empty input",
+		"severe | run.go:7 | unchecked subscript | crash",
+		"moderate | run.go:40 | the error from Close is dropped | a failed close is silent",
+	}, diff, 2)
+	if len(rep.Findings) != 2 || rep.TruncatedByCap != 0 {
+		t.Fatalf("the stack is one slot, so a cap of 2 hides nothing: %+v (truncated %d)", rep.Findings, rep.TruncatedByCap)
+	}
+	if rep.DroppedDuplicate != 3 {
+		t.Fatalf("three restatements folded: %d", rep.DroppedDuplicate)
+	}
+	if rep.Findings[0].Line != 7 || len(rep.Findings[0].Also) != 3 || rep.Findings[1].Line != 40 {
+		t.Fatalf("the folded stack and the distinct finding must both be published: %+v", rep.Findings)
+	}
+}
+
+// ...and the cap still binds AFTER the merge: 12 distinct places plus two restatements stacked
+// on the first one is 12 findings, of which the ceiling shows 10 and counts the 2 it hid.
+func TestReportCapStillAppliesAfterMerging(t *testing.T) {
+	diff := "--- a/run.go\n+++ b/run.go\n@@ -1 +1 @@\n+x\n"
+	lines := make([]string, 0, 14)
+	for i := 1; i <= 12; i++ {
+		lines = append(lines, fmt.Sprintf("minor | run.go:%d | distinct finding %d | consequence %d", i*10, i, i))
+	}
+	lines = append(lines,
+		"minor | run.go:10 | the first place worded another way | same consequence",
+		"minor | run.go:10 | the first place worded a third way | same consequence")
+	rep := Report(lines, diff, 0)
+	if len(rep.Findings) != DefaultMaxFindings || rep.TruncatedByCap != 2 || rep.DroppedDuplicate != 2 {
+		t.Fatalf("12 survivors capped to %d: got %d findings, truncated %d, duplicates %d", DefaultMaxFindings, len(rep.Findings), rep.TruncatedByCap, rep.DroppedDuplicate)
+	}
+}
+
+// Also is additive on the wire: absent unless something was folded, so a result with no stacked
+// line is byte-identical to what it was before the field existed.
+func TestFindingAlsoIsOmittedFromTheWireUnlessSomethingWasFolded(t *testing.T) {
+	plain, err := json.Marshal(Finding{Severity: "minor", File: "run.go", Line: 1, Claim: "c", Why: "w"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(plain), "also") {
+		t.Fatalf("a finding that absorbed nothing must not publish the field: %s", plain)
+	}
+	folded, err := json.Marshal(Finding{Severity: "minor", File: "run.go", Line: 1, Claim: "c", Why: "w", Also: []string{"x", "y"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(folded), `"also":["x","y"]`) {
+		t.Fatalf("a folded finding must publish its other claims: %s", folded)
 	}
 }

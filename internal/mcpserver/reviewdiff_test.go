@@ -467,6 +467,50 @@ func TestReviewDiffPublishesDroppedDuplicateAndDedupesBeforeTheCap(t *testing.T)
 	}
 }
 
+// Three findings stacked on one line in different words (the 2026-10-09 report, a 48 KB diff)
+// are one place to look. They publish as ONE finding - the most severe - with the other two
+// claims in `also`, and the two absorbed findings are counted in dropped_duplicate. Nothing the
+// reviewer said is lost, and a finding that absorbed nothing carries no `also` key at all.
+func TestReviewDiffFoldsASameLineStackIntoOneFindingWithAlso(t *testing.T) {
+	s := askTestServer(t, func(_ context.Context, _ core.AgentContract, _ delegate.LocalOptions) (core.AgentWireResult, error) {
+		return seatFindings(
+			"moderate | run.go:5 | the loop bound is off by one | reads one past the end",
+			"severe | run.go:5 | indexes past the end of xs | out-of-range panic at runtime",
+			"minor | run.go:5 | the comparison should be strict | fence-post error",
+			"minor | run.go:9 | naming is inconsistent | cosmetic",
+		), nil
+	})
+	res, err := s.handleReviewDiff(context.Background(), callReq(reviewArgs(t, map[string]any{
+		"diff": reviewDiff, "task": "iterate over every element exactly once",
+	})))
+	if err != nil {
+		t.Fatalf("handleReviewDiff: %v", err)
+	}
+	m := decodeResult(t, res)
+	if m["deferred"] != nil {
+		t.Fatalf("a delivered review must not defer: %v", m)
+	}
+	findings, _ := m["findings"].([]any)
+	if len(findings) != 2 {
+		t.Fatalf("want the folded stack plus the lone finding: %v", m["findings"])
+	}
+	first, _ := findings[0].(map[string]any)
+	if first["severity"] != "severe" || first["claim"] != "indexes past the end of xs" {
+		t.Fatalf("the most severe member of the stack must be the one published: %v", first)
+	}
+	also, _ := first["also"].([]any)
+	if len(also) != 2 || also[0] != "the loop bound is off by one" || also[1] != "the comparison should be strict" {
+		t.Fatalf("the other two claims must ride in also, in the seat's order: %v", first["also"])
+	}
+	if m["dropped_duplicate"] != float64(2) {
+		t.Fatalf("the two absorbed findings must be counted: %v", m)
+	}
+	second, _ := findings[1].(map[string]any)
+	if _, has := second["also"]; has {
+		t.Fatalf("a finding that absorbed nothing must not carry an also key: %v", second)
+	}
+}
+
 func TestReviewDiffRequiresExactlyOneDiffSource(t *testing.T) {
 	s := askTestServer(t, func(_ context.Context, _ core.AgentContract, _ delegate.LocalOptions) (core.AgentWireResult, error) {
 		t.Error("the seat must never be reached on a caller-input refusal")

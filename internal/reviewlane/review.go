@@ -85,6 +85,11 @@ type Finding struct {
 	Line     int    `json:"line"`
 	Claim    string `json:"claim"`
 	Why      string `json:"why"`
+
+	// Also holds the claims of other findings that cited this same file and line and were
+	// folded into this one (MergeSameLine). Additive and omitted when nothing was folded, so a
+	// result with no stacked line is byte-identical to what it was before the field existed.
+	Also []string `json:"also,omitempty"`
 }
 
 // reviewOutputSchema is a flat object whose one field is an array of STRINGS, and both
@@ -245,10 +250,11 @@ func BuildContract(task, diff string) (core.AgentContract, error) {
 // DroppedEcho says it handed the prompt's own template back instead of reviewing,
 // DroppedHollow says it wrote lines with no structure at all — no severity, no file, no why,
 // only a claim (the 2026-10-09 report: four of them, each merely restating the diff),
-// DroppedDuplicate says the same defect was reported more than once, and TruncatedByCap says
-// more was found than the caller asked to see. Counting one and swallowing the others would
-// make the published list quietly unreadable — the same reason dropped-but-uncounted was
-// wrong in the first place.
+// DroppedDuplicate says the same defect was reported more than once — or the same file and
+// line was cited more than once in different words, in which case the extra claims ride on the
+// kept finding in Also — and TruncatedByCap says more was found than the caller asked to see.
+// Counting one and swallowing the others would make the published list quietly unreadable —
+// the same reason dropped-but-uncounted was wrong in the first place.
 type Result struct {
 	Findings          []Finding
 	DroppedUngrounded int
@@ -260,16 +266,17 @@ type Result struct {
 
 // Report turns the seat's raw finding lines into what the caller is shown: template echoes
 // removed, parsed, hollow lines removed, grounded against the diff's own files,
-// deduplicated, severity-ranked, capped — with a count for each of the five ways a line can
-// fail to reach the caller.
+// deduplicated, same-line restatements folded together, severity-ranked, capped — with a
+// count for each of the five ways a line can fail to appear as its own finding.
 //
-// Dedupe runs BEFORE capFindings on purpose (register D-90): the seat routinely restates the
-// same defect — once per hunk it touches, or once plainly and once with the file:line it
-// already named repeated inside the claim text — and applying the cap first would let those
-// restatements of ONE finding crowd a genuinely different finding out of the published list.
-// That is the same failure class TruncatedByCap's own doc names for an uncounted drop, just
-// reached from the other side: a cap that counts what it hides but still hides the wrong
-// thing because duplicates padded the queue ahead of it.
+// Dedupe and MergeSameLine run BEFORE capFindings on purpose (register D-90): the seat
+// routinely restates the same defect — once per hunk it touches, once plainly and once with
+// the file:line it already named repeated inside the claim text, or in three different words
+// at one line — and applying the cap first would let those restatements of ONE finding crowd
+// a genuinely different finding out of the published list. That is the same failure class
+// TruncatedByCap's own doc names for an uncounted drop, just reached from the other side: a
+// cap that counts what it hides but still hides the wrong thing because duplicates padded the
+// queue ahead of it.
 func Report(lines []string, diff string, max int) Result {
 	lines, echoed := dropTemplateEchoes(lines)
 	// Hollow lines go before grounding so neither filter ever sees the other's: a hollow line
@@ -277,16 +284,19 @@ func Report(lines []string, diff string, max int) Result {
 	parsed, hollow := DropHollow(ParseFindings(lines))
 	kept, ungrounded := Ground(parsed, FilesInDiff(diff))
 	deduped, duplicate := Dedupe(kept)
-	ranked := rankFindings(deduped, capFindings(max))
+	merged, folded := MergeSameLine(deduped)
+	ranked := rankFindings(merged, capFindings(max))
 	return Result{
 		Findings:          ranked,
 		DroppedUngrounded: ungrounded,
 		DroppedEcho:       echoed,
 		DroppedHollow:     hollow,
-		DroppedDuplicate:  duplicate,
+		// One count for both ways a finding is absorbed into another: a restatement of the
+		// same claim (Dedupe) and a different claim at the same file:line (MergeSameLine).
+		DroppedDuplicate: duplicate + folded,
 		// rankFindings reorders and truncates and does nothing else, so the difference
-		// between what went in (post-dedupe) and what came out IS the cap's doing.
-		TruncatedByCap: len(deduped) - len(ranked),
+		// between what went in (post-merge) and what came out IS the cap's doing.
+		TruncatedByCap: len(merged) - len(ranked),
 	}
 }
 
@@ -333,7 +343,9 @@ func baseFileKey(file string) string {
 // consecutive lines starts a new cluster — because a seat citing the same defect one line off
 // is not a second defect. Within a cluster the most severe report wins; a severity tie keeps
 // whichever occurrence came first in the seat's own answer (lowest original index), so the
-// surviving finding never depends on map or sort iteration order.
+// surviving finding never depends on map or sort iteration order. A claim worded differently
+// has a different key and is not this function's to merge; when it cites the same file and
+// line it is MergeSameLine's.
 func Dedupe(in []Finding) ([]Finding, int) {
 	type item struct {
 		idx  int
@@ -382,6 +394,79 @@ func Dedupe(in []Finding) ([]Finding, int) {
 		if keep[i] {
 			out = append(out, f)
 		}
+	}
+	return out, dropped
+}
+
+// MergeSameLine folds findings that cite the SAME file and line into one and counts the rest
+// as duplicates. The kept finding is the most severe (a severity tie keeps whichever came
+// first in the seat's answer, so the choice never depends on map or sort order) and the
+// others' claims ride on it in Also, in the seat's order.
+//
+// Dedupe cannot see these: it keys on the normalised claim, so a seat that restates one
+// defect in different words passes through as several findings. The live report (2026-10-09,
+// a 48 KB diff) had three stacked on a single line of one file, each a rewording of the same
+// issue. They are one place to look, so the caller reads that place once — but nothing the
+// reviewer said is thrown away, because what differs between them is exactly the wording, and
+// a line can also hold two genuinely different defects. Every claim stays readable.
+//
+// Findings merge only on an exact file and line. The file is compared the way Ground and Dedupe
+// compare it (base name, because the seat may root a path differently), which shares their
+// blind spot: two touched files with one base name and one line number would merge, and the
+// claim still rides along, so nothing is lost when they do. Line 0 means "the seat did not say
+// where", and a finding with no line (or no file) is never merged on that alone: two findings
+// that both failed to name a place are not the same place.
+//
+// It runs after Dedupe and before the cap, for the reason Report gives (D-90): folding a stack
+// frees slots for genuinely different findings, where capping first would let the stack crowd
+// them out.
+func MergeSameLine(in []Finding) ([]Finding, int) {
+	type spot struct {
+		file string
+		line int
+	}
+	at := map[spot][]int{} // input indexes citing each spot, ascending
+	for i, f := range in {
+		if f.File == "" || f.Line <= 0 {
+			continue
+		}
+		k := spot{baseFileKey(f.File), f.Line}
+		at[k] = append(at[k], i)
+	}
+	folded := map[int]bool{}   // indexes absorbed into another finding
+	also := map[int][]string{} // kept index -> the claims it absorbed, in the seat's order
+	dropped := 0
+	for _, idx := range at {
+		if len(idx) < 2 {
+			continue
+		}
+		keep := idx[0]
+		for _, i := range idx[1:] {
+			// Strictly more severe only: idx is ascending, so an equal rank keeps the earlier.
+			if severityRank(in[i].Severity) < severityRank(in[keep].Severity) {
+				keep = i
+			}
+		}
+		for _, i := range idx {
+			if i == keep {
+				continue
+			}
+			folded[i] = true
+			dropped++
+			if c := strings.TrimSpace(in[i].Claim); c != "" {
+				also[keep] = append(also[keep], c)
+			}
+		}
+	}
+	out := make([]Finding, 0, len(in)-dropped)
+	for i, f := range in {
+		if folded[i] {
+			continue
+		}
+		if extra := also[i]; len(extra) > 0 {
+			f.Also = append(append([]string(nil), f.Also...), extra...)
+		}
+		out = append(out, f)
 	}
 	return out, dropped
 }
