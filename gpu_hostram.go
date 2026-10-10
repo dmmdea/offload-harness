@@ -21,17 +21,20 @@ import (
 // value), else the estimate for a recognised render helper call, else the class default, else
 // nothing. The card table is read only when an estimate needs a card's VRAM (a recognised render
 // call, or a media lease with no --ram), so a plain text reservation pays nothing; a table that cannot
-// be read leaves the card unknown, and then nothing is assumed to fit. It says what it declared and
+// be read leaves the card unknown, and then nothing is assumed to fit. readCards is the host's
+// card-scoped switch: a host that has not enabled card-scoped leases reads no card table at all (its
+// leases are whole-node, exactly as before, and it may have no NVIDIA card to ask), so its card is
+// unknown by construction and the estimate is the conservative one. It says what it declared and
 // why on out, but only when the number is not zero by default: the operator needs the line when a
 // lease will wait on it.
-func resolveReserveHostRAM(ramGiven bool, ramGiB float64, class gpulease.Class, cmdArgs []string, ids []string, cfg config.Config, out io.Writer) hostneed.Need {
+func resolveReserveHostRAM(ramGiven bool, ramGiB float64, class gpulease.Class, cmdArgs []string, ids []string, cfg config.Config, readCards bool, out io.Writer) hostneed.Need {
 	req := hostneed.Request{Class: class, Args: cmdArgs}
 	if ramGiven {
 		req.Explicit = &ramGiB
 	}
 	facts := hostneed.Facts{Cfg: cfg, Env: os.Getenv}
 	_, recognised := hostneed.ParseRenderCall(cmdArgs)
-	if !ramGiven && (recognised || class == gpulease.ClassMedia) {
+	if readCards && !ramGiven && (recognised || class == gpulease.ClassMedia) {
 		if cards, _, err := cardTable(context.Background(), cfg); err == nil {
 			facts.VRAMGiB = hostneed.LargestCardGiB(cards, ids)
 		}

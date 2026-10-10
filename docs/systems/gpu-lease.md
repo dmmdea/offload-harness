@@ -1117,6 +1117,11 @@ binding it is about to render with, once the card it will run on is known: image
 will render), animate and music read their files; `run-graph`, sd.cpp and the iGPU engines take the class default; upscale
 and voice declare nothing, their weights sit on the card.
 
+**An unknown card counts everything.** A set that fits the card declares 0 only when the card is known. A host that has not
+enabled card-scoped leases reads no card table (its leases are whole-node, as before, and it may have no NVIDIA card to
+ask), and a table that cannot be read is the same, so there the files count in full: the conservative figure, with `--ram`
+as the way to a smaller one (`TestReserveOnAFlagOffHostDeclaresTheFilesInFullWithoutReadingTheCardTable`).
+
 ### The admission rule
 
 Every grant path applies **one** rule (`gpuprobe.HostRAMAdmits`), with committed memory read from the OS

@@ -439,7 +439,7 @@ func runGPUReserve(args []string) error {
 	// from the render helper it wraps, else the class default. Declared on EVERY path (named cards,
 	// allocated cards, the whole node, the detached holder), because the grant admits it against
 	// committed memory wherever the cards came from.
-	need := resolveReserveHostRAM(ramGiven, *ramFlag, gpulease.Class(*class), cmdArgs, plan.IDs, reserveCfg, os.Stderr)
+	need := resolveReserveHostRAM(ramGiven, *ramFlag, gpulease.Class(*class), cmdArgs, plan.IDs, reserveCfg, m.CardScoped(), os.Stderr)
 	opts.HostRAMGiB = need.GiB
 	devFlags.ramGiB = need.GiB // the card allocator's pre-filter reads the same figure
 	buildAlloc := func() (gpulease.AllocInput, error) {

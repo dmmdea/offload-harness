@@ -107,7 +107,7 @@ func TestUnattendedReserveNeedsADeclaredWindowAndAProgressContract(t *testing.T)
 // looking at its own parent, so the parent passes the owner (and the contract) explicitly.
 func TestHoldChildCapturesParentOwner(t *testing.T) {
 	opts := gpulease.Options{
-		Reason: "film", Origin: "me", Owner: gpulease.Owner{Session: "sess-parent", PID: 4321, StartMs: 99},
+		Reason: "film", Origin: "me", Owner: gpulease.Owner{Session: "sess-parent", PID: 4321, StartMs: 99}, HostRAMGiB: 12.5,
 		Unattended: true, ProgressFile: filepath.Join(t.TempDir(), "work", "log.jsonl"), Stall: 2 * time.Hour, YieldGrace: 5 * time.Minute, OnYield: "touch work/STOP",
 	}
 	args := holdChildArgs("media", 20*time.Hour, 0, opts, "")
@@ -125,9 +125,13 @@ func TestHoldChildCapturesParentOwner(t *testing.T) {
 	fs.String("origin", "", "")
 	fs.Bool("exclusive", false, "")
 	fs.Bool("draining", false, "")
+	ram := fs.Float64("ram", 0, "")
 	of := addOwnershipFlags(fs)
 	if err := fs.Parse(args[2:]); err != nil {
 		t.Fatalf("the hold child cannot parse what its parent passed: %v\nargs: %q", err, args)
+	}
+	if *ram != opts.HostRAMGiB {
+		t.Fatalf("the hold child is told the host RAM its parent resolved (%.1f GiB), got %.1f", opts.HostRAMGiB, *ram)
 	}
 	var got gpulease.Options
 	// The child's environment names ANOTHER session: the parent's owner must win.

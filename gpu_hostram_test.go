@@ -282,15 +282,61 @@ func TestResolveReserveHostRAMReadsTheCardTableOnlyWhenItMatters(t *testing.T) {
 	for _, c := range cases {
 		reads = 0
 		var out bytes.Buffer
-		resolveReserveHostRAM(c.explicit, 5, c.class, c.args, nil, config.Config{}, &out)
+		resolveReserveHostRAM(c.explicit, 5, c.class, c.args, nil, config.Config{}, true, &out)
 		if reads != c.reads {
 			t.Errorf("%s: read the card table %d times, want %d", c.name, reads, c.reads)
 		}
 	}
+	// A host with card-scoped leases off reads no card table whatever the estimate would like to know:
+	// the card stays unknown and the figure is the conservative one (the files in full).
+	for _, c := range cases {
+		reads = 0
+		var out bytes.Buffer
+		resolveReserveHostRAM(c.explicit, 5, c.class, c.args, nil, config.Config{}, false, &out)
+		if reads != 0 {
+			t.Errorf("%s on a flag-off host: read the card table %d times, want none", c.name, reads)
+		}
+	}
+	{
+		var out bytes.Buffer
+		n := resolveReserveHostRAM(false, 0, gpulease.ClassText, krea2Words(), nil, config.Config{}, false, &out)
+		if math.Abs(n.GiB-32.8) > 0.01 || !strings.Contains(n.Detail, "unknown card") {
+			t.Errorf("a krea2 call on a flag-off host counts its files in full against an unknown card (32.8 GiB), got %v", n)
+		}
+	}
 	// A text bench declares nothing and says nothing.
 	var out bytes.Buffer
-	if n := resolveReserveHostRAM(false, 0, gpulease.ClassText, []string{"python", "bench.py"}, nil, config.Config{}, &out); n.GiB != 0 || n.Source != hostneed.SourceNone || out.Len() != 0 {
+	if n := resolveReserveHostRAM(false, 0, gpulease.ClassText, []string{"python", "bench.py"}, nil, config.Config{}, true, &out); n.GiB != 0 || n.Source != hostneed.SourceNone || out.Len() != 0 {
 		t.Fatalf("a text bench declares nothing and says nothing: %v %q", n, out.String())
+	}
+}
+
+// A host that has not enabled card-scoped leases keeps its whole-node lease and reads no card table
+// (TestGPUReserveFlagOffKeepsTheWholeNodeLeaseWhateverTheCommandSays), and the lease still declares
+// what the call will load: the card is unknown, so the model files count in full.
+func TestReserveOnAFlagOffHostDeclaresTheFilesInFullWithoutReadingTheCardTable(t *testing.T) {
+	cfg, m := leaseFixture(t)
+	emptyComfyDir(t, cfg)
+	oldCards := cardTableFn
+	cardTableFn = func(context.Context, config.Config) ([]gpuprobe.Card, string, error) {
+		t.Error("a flag-off host must not read the card table, not even to size a host-RAM estimate")
+		return nil, "", errors.New("must not be called")
+	}
+	t.Cleanup(func() { cardTableFn = oldCards })
+	t.Setenv("LO_HELPER_SLEEP_MS", "1500")
+	done := make(chan error, 1)
+	go func() {
+		done <- runGPUReserve(reserveWithCmd(cfg, []string{"--class", "media", "--wait", "0", "--reason", "krea2"}, krea2Words()...))
+	}()
+	leases := waitForLeases(t, m, 1)
+	if len(leases[0].Devices) != 0 {
+		t.Fatalf("a flag-off host holds the whole node: %+v", leases[0])
+	}
+	if got := leases[0].HostRAMGiB; math.Abs(got-32.8) > 0.01 {
+		t.Fatalf("the whole-node lease declares %.2f GiB, want the documented krea2 unet + text encoder (32.8)", got)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("reserve: %v", err)
 	}
 }
 
