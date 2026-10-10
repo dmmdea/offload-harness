@@ -16,14 +16,16 @@ import (
 
 // TestHelperWriteLeaseEnv is a helper process: when asked, it writes the lease
 // environment it was handed to a file, then stays alive for LO_HELPER_SLEEP_MS.
+// The stay does not depend on the file: a test that only watches the lease from
+// outside sets the sleep alone, and a helper that returned at once held the lease
+// for the few milliseconds a process takes to start, which a 40 ms poll caught on
+// a slow-spawning host and missed on a fast one (the Linux CI runner, every run).
 func TestHelperWriteLeaseEnv(t *testing.T) {
-	out := os.Getenv("LO_HELPER_ENV_OUT")
-	if out == "" {
-		return
+	if out := os.Getenv("LO_HELPER_ENV_OUT"); out != "" {
+		body := "devices=" + os.Getenv("GPU_LEASE_DEVICES") + "\nepoch=" + os.Getenv("GPU_LEASE_EPOCH") + "\n" +
+			"cuda_visible=" + os.Getenv("CUDA_VISIBLE_DEVICES") + "\ncuda_order=" + os.Getenv("CUDA_DEVICE_ORDER") + "\n"
+		_ = os.WriteFile(out, []byte(body), 0o644)
 	}
-	body := "devices=" + os.Getenv("GPU_LEASE_DEVICES") + "\nepoch=" + os.Getenv("GPU_LEASE_EPOCH") + "\n" +
-		"cuda_visible=" + os.Getenv("CUDA_VISIBLE_DEVICES") + "\ncuda_order=" + os.Getenv("CUDA_DEVICE_ORDER") + "\n"
-	_ = os.WriteFile(out, []byte(body), 0o644)
 	if ms := atoiOr(os.Getenv("LO_HELPER_SLEEP_MS")); ms > 0 {
 		time.Sleep(time.Duration(ms) * time.Millisecond)
 	}
