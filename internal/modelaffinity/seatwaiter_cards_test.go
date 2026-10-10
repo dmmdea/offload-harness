@@ -96,6 +96,23 @@ func TestAnUnplaceableSeatQueuesAsTheWholeNode(t *testing.T) {
 	}
 }
 
+// A whole-node lease needs no card table to wait on (seatscope.go, COST), so it costs none to register
+// for either: the entry is the whole node and the table is not read. Resolving the seat's cards
+// unconditionally put an nvidia-smi exec on every admission blocked by a whole-node lease, which the
+// gate's own tests forbid. Under a whole-node lease no other card is free to claim, so nothing is lost.
+func TestAnAdmissionBlockedByAWholeNodeLeaseQueuesAsTheWholeNodeWithoutTheCardTable(t *testing.T) {
+	m := cardScoped(t)
+	reads := armSeatScope(t, tripleBoxPins)
+	holdLease(t, m, gpulease.ClassMedia, gpulease.Options{Reason: "render", Origin: "pipeline"}) // no devices: the whole node
+	w := seatWaiterOf(t, m, "seat-card0")
+	if len(w.Devices) != 0 {
+		t.Fatalf("a whole-node lease blocks the admission: it queues as the whole node, got %v", w.Devices)
+	}
+	if n := reads.Load(); n != 0 {
+		t.Fatalf("a whole-node lease needs no card table, but it was read %d time(s)", n)
+	}
+}
+
 // SeatCards reads the pins and the card table the gate already uses, and says nothing it
 // cannot resolve.
 func TestSeatCardsResolvesPinsAndFailsClosed(t *testing.T) {

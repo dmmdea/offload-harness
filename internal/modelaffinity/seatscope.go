@@ -157,9 +157,11 @@ func ScopeToModel(info gpulease.Info, model string) gpulease.Info {
 // pins and the same card table ScopeToModel narrows a lease with, so the cards a blocked
 // admission WAITS on are the cards it was blocked on. nil means "cannot be said": an undeclared
 // model, a pin the card table cannot place, a card table that cannot be read. The caller reads
-// that as the whole node, the direction of every doubt in this file. Unlike ScopeToPins it does
-// not need a held lease to name cards: it is asked once, on the blocked path, to register the
-// admission's place in line, never on the unfenced fast path.
+// that as the whole node, the direction of every doubt in this file. It reads the card table (an
+// nvidia-smi exec, memoised) exactly as ScopeToPins does, so the caller asks it only under the
+// condition ScopeToPins reads it under: a held lease that names cards (namesCards). It is asked
+// once, on the blocked path, to register the admission's place in line, never on the unfenced
+// fast path and never for a whole-node lease, which needs no card table.
 func SeatCards(model string) []string {
 	pins, ok := pinsOf(model)
 	if !ok {

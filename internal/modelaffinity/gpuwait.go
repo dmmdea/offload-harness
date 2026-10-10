@@ -161,7 +161,18 @@ func awaitLease(ctx context.Context, base, model string, deadline time.Time, blo
 	// whole-node entry here held back a fresh claim on a free card the seat has no
 	// stake in. Unresolvable pins read as the whole node (SeatCards), as everywhere
 	// else in this gate.
-	refresh, unregister := gpulease.RegisterSeatWaiter(dir, "load "+model+" on "+base, SeatCards(model))
+	//
+	// The cards are resolved only when the lease that blocks us names cards, the
+	// condition under which ScopeToPins reads the card table at all (seatscope.go,
+	// COST): a whole-node lease needs no nvidia-smi exec to be waited on, and costs
+	// none to register for. The entry is then the whole node, which loses nothing —
+	// under a whole-node lease no other card is free to claim, and the entry is gone
+	// within one poll of the lease freeing.
+	var seatCards []string
+	if namesCards(info) {
+		seatCards = SeatCards(model)
+	}
+	refresh, unregister := gpulease.RegisterSeatWaiter(dir, "load "+model+" on "+base, seatCards)
 	defer unregister()
 	for {
 		remain := time.Until(deadline)
