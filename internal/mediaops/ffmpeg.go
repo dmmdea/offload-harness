@@ -18,7 +18,7 @@ type MediaRequest struct {
 	In        string   // input path (all ops except concat)
 	Inputs    []string // concat inputs (>=2)
 	ListPath  string   // concat: path of the demuxer list file the caller wrote
-	Out       string   // output path (probe: unused)
+	Out       string   // output path (probe: unused); RunMedia hands ffmpeg a staged sibling and renames it here (deliver.go)
 	Start     string   // trim: seconds or hh:mm:ss
 	End       string   // trim: absolute end time (resolved to Duration in RunMedia)
 	Duration  string   // trim: seconds

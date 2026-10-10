@@ -178,6 +178,20 @@ leave a `*.partial-<pid>-<n>` file; it never carries the output's name. `render/
 lists every direct file write left in `render/` and why it is not an output, so a new
 `writeFileSync(out, ...)` fails a test instead of the next batch.
 
+The Go media ops (`internal/mediaops`, behind `offload_media` and `offload_edit_image`) follow the same
+rule (`deliver.go`). ffmpeg (trim, concat, convert, mux_audio) used to be handed the output path with
+`-y`, which truncates it before the first byte: a clip that ran out of disk, or was killed at its
+timeout, was left at the output path half written. It is now pointed at a hidden staged sibling
+(`.<name>.partial-<pid>-<n>.<ext>`, the extension last because ffmpeg picks its muxer from it) and the
+sibling is renamed over the output only after an exit 0 with a non-empty file; any other ending removes
+it and leaves a previous good file untouched, with the same short retry of a rename that an antivirus
+scanner holds up. `extract_frames` extracts into a staging directory inside the destination and moves
+the frames in only when the whole run succeeded (the moves are renames within one volume, each atomic).
+An output that is also an input is refused by name, because ffmpeg's own in-place refusal can no longer
+fire on a staged name. GIMP never writes the destination: it exports to a private temp raster and the
+PIL worker, which delivers through `atomic_out.py`, makes the output. `internal/mediaops/writes_test.go`
+lists every write left in the package, and `deliver_test.go` runs the real ops against a fake engine.
+
 **Warm batch.** `generate-image --batch` takes a jobs file and runs N renders in one session. The
 only behavioral change is omitting ComfyUI's `--cache-none`, so the checkpoint loads once; teardown
 still happens exactly once, at the batch boundary. A failed render is recorded and the batch
