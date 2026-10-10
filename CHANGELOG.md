@@ -92,6 +92,34 @@ Versioning: [SemVer](https://semver.org/).
 - **Tests.** `internal/audioio/noaudio_test.go`, `internal/sttremote/noaudio_test.go`, `internal/pipeline/transcribe_noaudio_test.go`,
   `internal/ledger/defer_code_test.go`. `docs/FLEET-NODE.md`, `docs/OPERATOR-GUIDE.md`, `docs/systems/offload-pipeline.md`.
 
+### Fixed — PAIR cards that outlived what they described, and orphaned cards that say what happened (C02, C03, C04)
+
+- **C04, a seat-watch card that stays open.** Two paths left a seat-watch card "running" for as long as the watcher lived,
+  until the next fleet-serve's first sweep closed it "harness process exited" (one stayed open 642 s). `Poll` returned at once
+  when llama-swap's own `/running` was unreadable, with no bound; and a harness load that could not be resolved held an open card
+  untouched, with no bound. After `seatUnreadableLimit` consecutive polls (a minute) the first now fails every open card once
+  ("llama-swap stopped answering while this seat served direct traffic"), and the second completes the card at its last busy poll.
+  Both counts reset on one good poll. And a seat card orphaned by the death of its **watcher** (a fleet-serve killed by a deploy
+  swap) is closed `completed` with no error, as a clean stop closes it: it was never a harness job, and a red "harness process
+  exited before the job finished" over a stretch whose seat may have been fine is a red card for no failure.
+- **C02, a killed wrapper.** The cards of the lease wrappers that died in the same second (a console close, exit `0xC000013A`)
+  and of the ones a session killed on purpose were correct to be red: the job died. The decision is to keep them red and have the
+  card say what happened. The sweep's text now names the process, whether the job was still queued ("it never started") or
+  running ("gone 7m into the run"), that no outcome was reported, and the causes it has seen (killed, console closed, reboot); it
+  fits the 140-character card whole, and still starts with the words consumers match. It cannot say who ended the process: the
+  register holds a pid and a start time. `gpu reserve -- <command>` now also asks for `SIGTERM`: Go on Windows delivers a console
+  close, a logoff and a shutdown as `SIGTERM` and ends the process only after its handler has had its grace, so the wrapper kills
+  its command, closes its card ("terminated: its console was closed, or the session is ending or the machine is shutting down")
+  and releases its lease instead of dying silent. A `taskkill /F` gives no signal; the sweep's text covers it. The cause of the
+  01:09:59 incident itself was never established.
+- **C03, a recovered delegation.** A job a node finished and a recovery pass filed under `delegate-recovered/` had a card that
+  said it never finished. A delegation's orphan card now reads the delegator's intent ledger: "the node may still finish it, see
+  delegate-recovered/" while the dispatch is open, "the node finished the job, result in delegate-recovered/" once a recovery
+  pass has filed the answer. It stays `failed`, because the call did fail (its caller got no answer). Whether PAIR would let a
+  later `completed` frame replace a card that is already terminal cannot be established from this tree, so none is sent.
+- **Tests.** `internal/pairworkloads/seatwatch_exit_test.go`, `orphans_text_test.go`, `gpu_signals_test.go`; 19 mutations were each
+  caught. `docs/systems/pair-workloads.md`.
+
 ## [0.179.0] - 2026-10-10 - a busy image lane overflows to an idle node that renders the same recipe, and every GPU lease path has a host-RAM brake
 
 ### Added — a busy image lane overflows to an idle node that renders the same recipe (F52, ADR 0082)

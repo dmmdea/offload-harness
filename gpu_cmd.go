@@ -649,7 +649,7 @@ func runGPUReserve(args []string) error {
 		}
 	}
 	sigc := make(chan os.Signal, 1)
-	signal.Notify(sigc, os.Interrupt)
+	signal.Notify(sigc, wrapperSignals...)
 	defer signal.Stop(sigc)
 
 	cmd := exec.Command(cmdArgs[0], cmdArgs[1:]...)
@@ -728,8 +728,8 @@ func runGPUReserve(args []string) error {
 			}
 			card.finish(err)
 			return err
-		case <-sigc:
-			why = " (interrupted)"
+		case sig := <-sigc:
+			why = signalWhy(sig)
 			_ = cmd.Process.Kill()
 		case <-tick.C:
 			// LOSING THE LEASE MUST BE LOUD. Discarding this error left the wrapped

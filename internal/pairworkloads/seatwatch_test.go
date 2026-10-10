@@ -27,6 +27,7 @@ type fakeSwap struct {
 	running  int
 	waiting  int
 	badStats bool
+	swapDown bool     // llama-swap itself answers 502 (crashed, restarting, replaced)
 	seatURL  string   // the vLLM seat's own server (its `proxy:`)
 	swapHits []string // every path asked of llama-swap
 	seatHits []string // every path asked of the seat
@@ -42,6 +43,10 @@ func (f *fakeSwap) handler(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.swapHits = append(f.swapHits, r.URL.Path)
+	if f.swapDown {
+		http.Error(w, "llama-swap is not answering", http.StatusBadGateway)
+		return
+	}
 	switch {
 	case r.URL.Path == "/running":
 		models := `{"model":"qwen3.5-9b-agent","state":"ready","proxy":"http://127.0.0.1:1"}`
