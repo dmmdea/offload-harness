@@ -15,8 +15,9 @@ import (
 // each lease was granted, because neither job had loaded yet; committed memory reached 162.9 GiB
 // against a 187.7 GiB limit, the pagefile grew from 60 to 68 GiB, and free RAM bottomed at 3.2 GiB.
 // A card has a hard edge (the driver refuses the allocation); host RAM does not (the OS pages), so
-// the harness has to refuse before the grant, on the number that includes what the granted jobs are
-// ABOUT to load. Commit charge is that number on Windows: memory the OS has promised, touched or not.
+// the harness has to refuse before the grant, on a number that includes what the granted jobs are
+// ABOUT to load. Commit charge is the nearest reading on Windows: memory the OS has promised, touched or not
+// (what a job has yet to request is added from its declaration, the not-yet-loaded part).
 // On Linux Committed_AS is the same figure by the kernel's accounting, and counts mappings a process
 // reserved and never touched (CUDA and big mmaps do), so it reads high there: the safe direction for
 // a guard whose failure is paging.
@@ -143,15 +144,24 @@ type HostRAMCheck struct {
 // physical RAM less the headroom is Impossible: it cannot be admitted however long it waits.
 //
 // WHY TWO TERMS (G3 of the P0 plan). Commit is the primary term because it counts memory the OS has
-// PROMISED, touched or not, which is what stops a second lane before it has loaded; it is also a
-// conservative one: on Windows, GPU allocations made through WDDM may be charged to the process's
-// commit too (a llama-server with every layer on the card was reported at 29.2 GiB private bytes beside
-// 25.7 GiB of VRAM; the evidence and what is still unverified are in docs/systems/gpu-lease.md), so commit
-// may read high by the VRAM in use, and a rule that read only commit would over-refuse by that much. The
-// physical term does not depend on that question at all: it reads what can be handed out without paging.
-// Requiring both is robust whichever way the question falls: if VRAM is in commit, the commit term
-// over-refuses and the physical term is untouched; if some resident memory is not in commit, the physical
-// term catches it. Neither relaxes the other, so nothing here admits on an unmeasured hypothesis.
+// PROMISED, touched or not, which is what stops a second lane before it has loaded. On Windows, GPU
+// allocations made through WDDM may be charged to the process's commit too (a llama-server with every layer
+// on the card was reported at 29.2 GiB private bytes beside 25.7 GiB of VRAM; the evidence and what is still
+// unverified are in docs/systems/gpu-lease.md). That cuts two ways, and only one of them is safe. A box whose
+// commit already carries the VRAM in use reads high, so a rule that read only commit would over-refuse by
+// that much. But a DECLARATION is the model files' size (hostneed) or, once three runs exist, the largest
+// RESIDENT set a render's tree reached, so a lane whose commit carries card memory on top of that commits MORE
+// than it declared, and the commit term only learns it after the lane has started. The physical term reads
+// what can be handed out without paging, so it catches resident memory that commit does not show; it does not
+// catch a lane that commits more than it declared, and neither term sees a process that holds no lease.
+//
+// So this rule is a brake on DECLARED loads, not a bound on what the box commits, and an estimate is all a
+// declaration is until three measured runs raise it. Measured counterexample (docs/systems/gpu-lease.md,
+// "Known limits"): at a commit reading of 81.6 GiB on the 127.7 GiB reference box with 83 GiB available, a
+// 32.8 GiB declaration (the Krea 2 bf16 files) is admitted here (projected 114.4 GiB against a limit of
+// 119.7, 50.2 GiB left available), while one lane of that kind read 129.3 GiB committed on the same box
+// some hours later (a separate reading, so the 47.7 GiB between the two is the lane and whatever else changed),
+// above its physical RAM.
 func HostRAMAdmits(mem HostMemory, readable bool, needGiB, pendingGiB, headroomGiB float64) HostRAMCheck {
 	return hostRAMAdmits(mem, readable, HostMemorySupported, needGiB, pendingGiB, headroomGiB)
 }

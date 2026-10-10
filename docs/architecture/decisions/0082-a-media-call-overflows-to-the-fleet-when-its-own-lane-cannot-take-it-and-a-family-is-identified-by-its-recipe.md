@@ -8,8 +8,9 @@ date: "2026-10-10"
 ## Context
 
 A heavy image call on a box that has the lane waits for it. With the host-RAM guard of 0.178.0 that wait is longer on
-purpose: a lane that would push committed memory past physical RAM less the headroom is queued, because RAM is overflow
-only and the box must never page. Meanwhile other nodes of the fleet stood idle with the same model on disk. The operator's
+purpose: a lane whose declared need would take committed memory past physical RAM less the headroom is queued, because RAM is
+overflow only and the box must never page (the guard compares a declaration, which is an estimate: an admitted lane can still
+read over that line, docs/systems/gpu-lease.md, "Known limits"). Meanwhile other nodes of the fleet stood idle with the same model on disk. The operator's
 standing order for media (2026-10-10) is that the harness route media work to any node of the cluster even when every
 machine is busy, that it queue and never refuse, and that it not retry in a loop. ADR 0077 already lets a call run on a node
 (`route` `auto` or `remote`), but `auto` meant "here when this machine has the lane, a node when it has none", so a lane that

@@ -167,8 +167,8 @@ func TreeMemory(root int) (privateGiB, residentGiB float64, err error) {
 // share a holder pid are pooled (the pipeline holds one lease per card in one server process, and
 // their runners are all below it, so a lease-by-lease subtraction would credit each lease with the
 // others' memory and count nothing pending): declared minus held, per holder, never below zero.
-// held reports a holder's current private bytes; a holder it cannot read holds nothing, so its whole
-// declared need is pending.
+// held reports what the processes below a holder hold RESIDENT now (descendantsResidentGiB), the unit a
+// declaration is in; a holder it cannot read holds nothing, so its whole declared need is pending.
 func pendingGiB(live []Info, held func(holderPID int) (float64, bool)) float64 {
 	declared := map[int]float64{}
 	for _, l := range live {

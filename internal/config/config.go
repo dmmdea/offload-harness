@@ -1360,8 +1360,8 @@ type Config struct {
 	// need, plus what the leases already granted have yet to load, stays at or under physical RAM
 	// less this. It is also the margin of the NEAR verdict `gpu status` reports. The card allocator
 	// applies the same rule before it picks cards. A load that pushes the host into paging stalls
-	// every seat on the box; keeping committed memory under physical RAM less this is how the guard
-	// stays out of it.
+	// every seat on the box, so a DECLARED load is held back while it would pass physical RAM less this. That
+	// bounds declarations, not what a lane then commits (gpu-lease.md, "Known limits").
 	// 0 = DefaultGPUHostRAMHeadroomGiB (8).
 	GPUHostRAMHeadroomGiB float64 `json:"gpu_host_ram_headroom_gib,omitempty"`
 	// AgentSeatHostRAMGiB is the host RAM the agent seat holds once it is loaded (resident set plus any staged

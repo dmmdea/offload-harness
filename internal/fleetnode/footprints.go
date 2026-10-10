@@ -14,7 +14,8 @@ package fleetnode
 // resident memory (GiB) of the render's process tree and how many runs they come from
 // (RecordHost / HostPeak). They are the measurement the host-RAM guard calibrates a declaration with
 // (internal/pipeline: a render whose weights stream from RAM declares what its files add up to, raised to what
-// it was measured to hold once at least HostPeakMinRuns runs agree). They ride the wire as host_peak_gb (private)
+// the largest resident peak the store holds for the key, once at least HostPeakMinRuns runs exist; it only raises).
+// They ride the wire as host_peak_gb (private)
 // and host_resident_peak_gb (resident), additive and omitted when unmeasured. Two quantities on purpose: on
 // Windows a process's GPU allocations may be charged to its private bytes and not appear in its working set,
 // so recording only one would leave the question "which of these is RAM?" unanswerable.

@@ -626,8 +626,8 @@ type Manager struct {
 	// process-wide one config.Load installed (SetDefaultHostRAMHeadroom).
 	hostHeadroomGiB float64
 	// hostMem and workload are test seams for the host-RAM term: the host's memory reading (nil = the
-	// real reader, gpuprobe.ReadHostMemory) and what the processes below a holder pid hold privately
-	// (nil = the real process-tree reader). Production never sets them.
+	// real reader, gpuprobe.ReadHostMemory) and what the processes below a holder pid hold RESIDENT
+	// (nil = the real process-tree reader, descendantsResidentGiB). Production never sets them.
 	hostMem  func() (gpuprobe.HostMemory, bool)
 	workload func(holderPID int) (float64, bool)
 }

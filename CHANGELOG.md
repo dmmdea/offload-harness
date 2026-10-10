@@ -60,7 +60,7 @@ Versioning: [SemVer](https://semver.org/).
 
 ### Added — a host-RAM guard on every GPU lease path; a kept ComfyUI instance never holds two families' weights
 
-- **The memory is refused before the grant, not discovered after it.** On the reference 3-card Windows box (127.7 GiB physical),
+- **A declared load is checked before the grant, not discovered after it.** On the reference 3-card Windows box (127.7 GiB physical),
   2026-10-09, two card-scoped media leases each streamed bf16 weights a 16 GiB card cannot hold: committed memory reached
   162.9 GiB against a 187.7 GiB limit, the page file grew 60 to 68 GiB and free RAM bottomed at 3.2 GiB. The allocator's host
   term read FREE RAM and applied only to `--cards`, so `--devices` (what every owner wrapper takes) bypassed it, and nothing
@@ -69,9 +69,12 @@ Versioning: [SemVer](https://semver.org/).
   atomically with the grant, under the epoch lock. The rule has two terms and a grant needs both:
   `committed now + need + not-yet-loaded <= physical - gpu_host_ram_headroom_gib` and
   `available now - need - not-yet-loaded >= gpu_host_ram_headroom_gib`. Commit is primary (it counts what the OS has promised,
-  which is what stops a second lane before it loads) and conservative (on Windows a process's GPU allocations may be charged
-  to its commit without occupying RAM); the physical term does not depend on that question, so the rule is robust whichever way
-  it falls. The not-yet-loaded part of a granted lease is its declared need minus what the processes below its holder hold
+  which is what stops a second lane before it loads); on Windows a process's GPU allocations may be charged to its commit
+  without occupying RAM, so a lane's commit can exceed what it declared (a declaration is the model files' size, raised to the
+  largest measured resident peak once three runs exist). **This is a brake on declared loads, not a bound on what the box
+  commits:** the rule applied to a commit reading of 81.6 GiB admits a 32.8 GiB Krea 2 declaration (114.4 GiB projected against
+  119.7), and one lane of that kind read 129.3 GiB committed on the 127.7 GiB box hours later (docs/systems/gpu-lease.md, "Known
+  limits"). The not-yet-loaded part of a granted lease is its declared need minus what the processes below its holder hold
   RESIDENT (not private: committed-but-unoccupied memory is not RAM that has loaded). The default headroom is **8 GiB** (was
   4): chosen, not measured, and not a number the operator typed; it is a floor until each node's interactive working-set swing
   is measured (docs/systems/gpu-lease.md, "How the numbers get measured"). A shortage queues in the same FIFO as a card
@@ -150,7 +153,8 @@ Versioning: [SemVer](https://semver.org/).
   raises a declaration to the measured resident peak once at least three runs exist (image and video routes), never lowers one,
   and leaves a declaration of 0 alone. Whether a GPU process's WDDM allocations count toward its private bytes is partly
   measured and not settled (docs/systems/gpu-lease.md: one process steady-state fits, a second does not, the lane-start case
-  is unverified); the two-term rule and the resident not-yet-loaded sum make the guard correct whichever way it falls.
+  is unverified); the two-term rule and the resident not-yet-loaded sum are the guard's choice under that uncertainty, not a
+  proof that it holds whichever way it falls: an admitted lane can still read OVER (docs/systems/gpu-lease.md, "Known limits").
   The pipeline test suite now isolates the offload home, so a test can no longer write the operator's footprint store.
 
 ### Fixed — the host-RAM surfaces say what the reading shows (G5)

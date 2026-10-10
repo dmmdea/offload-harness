@@ -265,10 +265,19 @@ the binary is present, and on that path the harness has already taken the lease,
 inherits it. Invoking `comfyui-pp-cli` **standalone** against a live box is the bypass — wrap
 it in `gpu reserve --class media` if you need to.
 
-**Host RAM is part of the lease (2026-10-09).** A lease declares the host RAM it will load and the grant admits it against
-committed memory: `committed now + the lease's need + what running leases have yet to load` must stay under physical RAM
-less `gpu_host_ram_headroom_gib` (default 8, a floor the harness chose and has not yet measured). The harness does not let
-the box promise more memory than it has: it holds a lease back rather than let that happen. `gpu reserve --ram <GiB>` states the need (0 =
+**Host RAM is part of the lease (2026-10-09).** A lease declares the host RAM it will load, and the grant holds it back when
+that declaration would pass a line the harness chose. Two readings of the OS are compared, and a grant needs both:
+`committed now + the lease's need + what running leases have yet to load` at or under physical RAM less
+`gpu_host_ram_headroom_gib` (default 8, a floor the harness chose and has not yet measured), and `available RAM now - the need -
+what running leases have yet to load` at or above the same headroom. **This is a brake on declared loads, not a guarantee about
+the box.** A declaration is an estimate: the size of the model files, until three measured runs of that family on the node raise
+it to the largest resident memory they reached. A lane's commit can carry its card allocations on top, so a lane can commit more
+than it declared: the rule applied to a commit reading of 81.6 GiB on the 127.7 GiB reference box admits a 32.8 GiB Krea 2 bf16
+declaration (114.4 GiB projected against a 119.7 GiB limit), and one lane of that kind read 129.3 GiB committed on that box some
+hours later, above its physical RAM. The available-RAM term refuses against the declared loads at the moment of the decision; it
+does not bound a lane that holds more than it declared, and nothing here bounds a process that holds no lease. A lane already
+running is counted whole in the next decision, so the next lease waits, but the guard does not stop the lane that took the box
+over: read `gpu status` (below), not the admission, as the state of the box. `gpu reserve --ram <GiB>` states the need (0 =
 needs no host RAM); unset, it is estimated from the model files of a render helper call whose weights do not fit the card
 (a Krea 2 bf16 call on a 16 GiB card is about 33 GiB), else for a media lease the largest render family the box binds, and
 0 for a text lease. A lease that has to wait says `waiting for host RAM: needs N GiB, committed X of Y GiB physical, Z GiB

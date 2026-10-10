@@ -3,7 +3,7 @@ package pipeline
 // G3 of the P0 plan: the host-RAM guard sizes a render from what renders were MEASURED to hold, not only from the
 // size of their model files. Every sampled GPU render records the peak private and the peak resident memory of its
 // process tree beside its VRAM peak (gpugen's HostSampleFunc, the footprint store's RecordHost), and the media
-// admission raises a declaration to the measured resident peak once enough runs agree. It only ever RAISES: a
+// admission raises a declaration to the largest measured resident peak once enough runs exist. It only ever RAISES: a
 // measurement can be low (a kept ComfyUI instance reused from an earlier lease is not under the runner that is
 // sampled), and a measurement must never be what waves a 33 GiB stream through as 5.
 

@@ -15,9 +15,10 @@ import (
 // OVER is committed memory above physical RAM. That is a statement about what the OS has promised, not
 // about paging: whether the box is paging now needs the page-file growth or the pages-out rate, which no
 // surface here reads, so none of them says it. The grant's own rule (gpuprobe.HostRAMAdmits) is stricter
-// than OVER (it holds new declaring leases while commit + need + pending would pass physical RAM less the
-// headroom), so a box reads OVER only after something the grant never saw (a process outside every lease)
-// took the memory.
+// than OVER for the load it is asked to admit (it holds a new declaring lease while commit + the lease's
+// DECLARED need + pending would pass physical RAM less the headroom), but it compares a declaration, so a box
+// can still read OVER after a lane it admitted committed more than it declared (measured: gpu-lease.md,
+// "Known limits") as well as after something the grant never saw (a process outside every lease).
 type HostView struct {
 	Read bool
 	Mem  gpuprobe.HostMemory
