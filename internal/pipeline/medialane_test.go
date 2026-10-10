@@ -148,6 +148,26 @@ func laneCases() []laneCase {
 			}},
 		{name: "a short host, whole node", spec: admitSpec{order: admitOrder, noAudit: true, mutate: krea2Binding}, grants: false, mustSeeBusy: true,
 			setup: func(t *testing.T, f *admitFixture) { f.useHost(t, func() gpuprobe.HostMemory { return shortHost(95) }) }},
+		{name: "another lane is still loading the memory it declared, a lane that declares 32.8 GiB", spec: krea2Pinned, grants: false, mustSeeBusy: true,
+			setup: func(t *testing.T, f *admitFixture) {
+				f.useHost(t, func() gpuprobe.HostMemory { return shortHost(40) })
+				l, err := f.m.TryAcquire(gpulease.ClassMedia, gpulease.Options{Reason: "a lane that is loading", Origin: "test", TTL: time.Hour,
+					Devices: []string{C}, HostRAMGiB: 32.8})
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = l.Release() })
+			}},
+		{name: "another lane is still loading the memory it declared, a lane that declares nothing", spec: pinned, grants: true,
+			setup: func(t *testing.T, f *admitFixture) {
+				f.useHost(t, func() gpuprobe.HostMemory { return shortHost(40) })
+				l, err := f.m.TryAcquire(gpulease.ClassMedia, gpulease.Options{Reason: "a lane that is loading", Origin: "test", TTL: time.Hour,
+					Devices: []string{C}, HostRAMGiB: 32.8})
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = l.Release() })
+			}},
 		{name: "the call's own place in line is not in its way", spec: pinned, grants: true,
 			params: func(t *testing.T, f *admitFixture) map[string]any {
 				tok, err := f.m.LeaveToken(gpulease.ClassMedia, gpulease.Options{Reason: "image-gen", Devices: []string{A}}, time.Now().Add(-5*time.Second))
