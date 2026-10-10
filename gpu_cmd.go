@@ -398,7 +398,7 @@ func runGPUReserve(args []string) error {
 		cmdEnv = func(string) string { return "" } // a detached holder runs no command to read cards from
 	}
 	plan, perr := planReserveDevices(devFlags, cmdArgs, cmdEnv, m.CardScoped(), func() ([]gpuprobe.Card, string, error) {
-		return cardTable(context.Background(), reserveCfg)
+		return cardTablePatient(context.Background(), reserveCfg)
 	})
 	if perr != nil {
 		return perr

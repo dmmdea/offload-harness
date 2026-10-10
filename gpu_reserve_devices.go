@@ -351,12 +351,9 @@ var (
 // the card table, the live leases, quarantine sidecars, foreign compute processes, resident seats,
 // the presence guard and host RAM, through this package's seams so a test assembles a host.
 func buildAllocInput(ctx context.Context, m *gpulease.Manager, cfg config.Config, f reserveDeviceFlags) (gpulease.AllocInput, error) {
-	return gpualloc.BuildInput(ctx, m, cfg, gpualloc.Need{VRAMGiB: f.vramGiB, RAMGiB: f.ramGiB}, gpualloc.Deps{
-		Cards:       cardTable,
-		ForeignBusy: foreignBusyFn,
-		Resident:    residentSeatsFn,
-		HostFreeRAM: hostFreeRAMFn,
-	})
+	deps := cardTableDeps()
+	deps.ForeignBusy, deps.Resident, deps.HostFreeRAM = foreignBusyFn, residentSeatsFn, hostFreeRAMFn
+	return gpualloc.BuildInput(ctx, m, cfg, gpualloc.Need{VRAMGiB: f.vramGiB, RAMGiB: f.ramGiB}, deps)
 }
 
 // foreignBusyByCard maps a card (lease id) to the first non-harness compute process the
