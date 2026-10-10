@@ -6,6 +6,54 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.177.0] - 2026-10-09 - warm-back survives a llama-swap reload, the embedder can run from its own llama.cpp build, and two flaky tests stop reading the clock
+
+### Fixed — a warm-back interrupted by a llama-swap reload or restart is re-sent, and the owed-warm marker clears when the debt is moot
+
+- **Warm-back survives a reload.** `gpu release --warm-seat` and the reserve wrapper's warm-back used to report "warm-back failed"
+  when the load landed on a llama-swap `-watch-config` reload or a restart (a transport error, a 502/503/504, or a 500
+  "is shutting down"), although nothing was wrong. The load is now re-sent for up to 60 s with a 1/2/4/8 s back-off, the lease
+  guards re-read before each re-send. A body saying the start died (`upstream command exited`, `unable to start process`) is never
+  re-sent and never opens the window, whatever its status code (one classification, `internal/seatwait`, shared with the
+  pipeline). A seat another client is loading is waited for; a 4xx is no longer "warmed back" unless `/running` shows the seat
+  loaded; an unreadable `/running` during a seat last seen starting is waited out, also after a reload.
+- **The owed marker clears when the debt is moot.** A failed warm whose seat is then observed loaded clears it (guards re-read
+  first, compare-by-seat), and `gpu status` clears a marker it can prove stale: its stamp predates status's own readings, no
+  lease is live right before the remove, and the record is unchanged. It says so, and `--json` carries `seat_warm_owed_cleared`
+  on that run. Messages say whether the seat read cold or could not be read.
+
+### Added — `install render --llama-bin-eg2`: the embeddinggemma2 entry runs from a second llama.cpp build (ADR 0081)
+
+- `install render --llama-bin-eg2 <dir>` (`install.sh --llama-bin-eg2`, `OFFLOAD_EG2_LLAMA_BIN` on Windows) runs the
+  embeddinggemma2 entry alone from a second llama.cpp build (b11452 or newer), recorded as `eg2_llama_bin` in the render stamp
+  and carried by the `audit-yaml` replay (with `--llama-bin-cpu`, which the replay used to drop). Renders without the flag are
+  byte-identical to 0.175.0, pinned by golden hashes of every template variant. A binary older than 0.177.0 reads a node rendered
+  with the flag as HAND-EDITED.
+- A write-time floor check refuses an entry build named below b11452 (the directory, or the one above a `bin`/`build` folder);
+  a path that names no build gets an advisory `note:`, which `install.ps1` now relays. `audit-yaml` reports a stamped second
+  build its tier no longer permits as STALE with the renderer's own refusal, not "no longer in the tier table".
+- `install.ps1`'s Step 6 skip probe matches the executable path, and `render.tests.ps1` survives Windows PowerShell 5.1 (the
+  shell CI's `installer-windows` job runs).
+
+### Changed — the EG2 card budget states the 3-card tier's measured reason instead of a utilization model
+
+- The vLLM-share arm (utilization arithmetic that said the text-only entry "fits with 186 to spare") is removed: it modelled
+  neither the shipped util-sized seat nor the reference box's pinned pool. The sum arm and the text-only result are unchanged.
+- The 3-card tier stays text-only on a measurement (2026-10-09, reference 3-card box, local pinned-pool seat): the agent seat's
+  cold start failed with all three memory-stack residents on one seat card (2.66 GiB KV needed, 2.49 available) and passed with
+  embeddinggemma2 on the seat's other card. Recorded in `docs/systems/setup-installer.md` and the tier's notes, with the known
+  gap: the `win-triple-blackwell` template still pins the three residents to one seat card (device 0's fit beside a 501 MiB
+  resident is unmeasured, and a model is never re-pinned from a guess).
+
+### Fixed — two timing-flaky tests stop reading the runner's speed, and the delegate one can no longer pass a defect by skipping
+
+- **Pipeline:** `TestRepackChatFallbackStreamsUnderLiveness` measures a 1 s liveness allowance against a 40 ms delta gap and gains
+  a clock-free twin, `TestRepackChatFallbackReportsEveryDeltaToTheProgressHook`, that counts the progress hook's events.
+- **Delegate:** the four-slot and six-slot "a wait holding a run slot keeps its TTL" tests run one body (`heldSlotWait`): reasons
+  and the clock's lower bounds are asserted before any skip, and a call-deadline cut of the last subtask skips only on evidence
+  from outside it, otherwise it fails. A wait that ignores its horizon, holders run to the horizon, and an unstarted count floored
+  at one each fail both tests.
+
 ## [0.176.0] - 2026-10-09 - the render helper's drain sees a vLLM seat's requests
 
 ### Fixed — the render helper's drain reads a vLLM seat's requests, so a media lease no longer unloads it under a request in flight
