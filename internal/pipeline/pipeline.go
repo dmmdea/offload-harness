@@ -82,6 +82,12 @@ type Pipeline struct {
 	instanceAPI func(gpuprobe.Card) string
 	stopKept    func(ctx context.Context, comfyDir string, epoch uint64) []comfyinst.Outcome
 
+	// afterClaimsRead is a test seam, nil in production. A media call that NAMED its cards (a pin, a
+	// pool, a declared device) runs it once it has read what is claimed and before it makes its gated
+	// claim (acquireCards). That call reads no card table, so the allocator's input never runs for it
+	// and alloc.Presence cannot mark the window between its read and its claim.
+	afterClaimsRead func()
+
 	// seatRatesPath is the per-seat rate store under the state root, resolved
 	// by seatRates() on each agent run (empty = no usable root).
 	seatRatesPath string

@@ -745,6 +745,11 @@ func (p *Pipeline) acquireCards(ctx context.Context, m *gpulease.Manager, reason
 						free = false
 					}
 				}
+				// A waiter that registers between the read above and the gated claim below is one the
+				// read did not see; the claim must say it is ahead. The seam lands one exactly here.
+				if p.afterClaimsRead != nil {
+					p.afterClaimsRead()
+				}
 			}
 			if free {
 				if !mediaSlots.tryTake(ids) {

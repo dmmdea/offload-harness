@@ -5,6 +5,14 @@ package pipeline
 // (gpualloc.QueuedClaims), so the gate only closes the window between the allocation and the
 // claim: a waiter that registers there is ahead of the claim, and the claim must say so.
 //
+// A test lands a waiter in that window through the seam the call under test has. A call that names
+// no card is allocated (gpualloc.BuildInput) and the allocator's last read of live state is
+// alloc.Presence (afterTheAllocation). A call that NAMES its cards (a pin, a pool, a declared
+// device) has nothing to choose and reads no card table (F24): it reads only what is claimed
+// (gpualloc.Claims), the allocator's input never runs for it, and the pipeline's afterClaimsRead
+// seam sits right after that read (afterTheClaimsRead). The tests that pin a card drive the second,
+// the path a pin takes in production.
+//
 // What the gate may NOT do is cost a call that resumed a place its place. Acquire consumes the
 // token a waiter resumes, so an attempt that handed the token over and then lost would send the
 // call to the queue below as a new arrival (pre-ship review of D-1xx-3, 2026-10-09). These tests pin the gate itself
@@ -21,10 +29,12 @@ import (
 	"github.com/dmmdea/offload-harness/internal/gpulease"
 )
 
-// afterTheAllocation runs fn once, from inside the allocator's last read of live state. That read
-// comes after the claims the allocation counts (the lease directory and the line) have been read,
-// so whatever fn does is exactly what lands BETWEEN the allocation and the claim. It returns how
-// many times the allocator has read live state.
+// afterTheAllocation runs fn once, from inside the allocator's last read of live state, for a call
+// that is ALLOCATED (names no card). That read comes after the claims the allocation counts (the
+// lease directory and the line) have been read, so whatever fn does is exactly what lands BETWEEN
+// the allocation and the claim. A call that names its cards never runs the allocator's input, so
+// this hook never fires for it: afterTheClaimsRead is its window. It returns how many times the
+// allocator has read live state.
 func (f *admitFixture) afterTheAllocation(fn func()) (reads *atomic.Int64) {
 	f.t.Helper()
 	reads = &atomic.Int64{}
@@ -37,20 +47,34 @@ func (f *admitFixture) afterTheAllocation(fn func()) (reads *atomic.Int64) {
 	return reads
 }
 
-// A waiter that registers between the allocation and the claim is ahead of the claim. The call
-// that found the card free must queue behind it (a resumable gpu_queued answer) and start nothing:
-// the bare claim it used to make wins the card ahead of a waiter registered before it.
+// afterTheClaimsRead runs fn once, for a call that NAMES its cards (a pin, a pool, a declared
+// device), right after it has read what is claimed and before it claims: the pipeline's
+// afterClaimsRead seam. Whatever fn does lands BETWEEN that read and the claim, so a waiter it
+// registers is one the read did not see.
+func (f *admitFixture) afterTheClaimsRead(fn func()) {
+	f.t.Helper()
+	var once sync.Once
+	f.p.afterClaimsRead = func() { once.Do(fn) }
+}
+
+// A waiter that registers between a pinned call's read of what is claimed and its claim is ahead
+// of the claim. The call that found the card free must queue behind it (a resumable gpu_queued
+// answer) and start nothing: the bare claim it used to make wins the card ahead of a waiter
+// registered before it.
 func TestACallYieldsToAWaiterThatRegistersBetweenTheAllocationAndTheClaim(t *testing.T) {
 	f := newAdmitFixtureWith(t, admitSpec{order: admitOrder, mutate: func(c *config.Config) { c.ComfyCudaDevice = "2" }})
 	pinned := leaseIDOf(admitUUIDC)
 	var leave func()
-	f.afterTheAllocation(func() {
+	f.afterTheClaimsRead(func() {
 		leave = seatWaiterAt(t, f.root, "transcribe voice_es.wav", pinned)
 		time.Sleep(5 * time.Millisecond) // the waiter's SinceMs strictly precedes the claim's
 	})
 	f.letRunnersGo() // were the call to win the card, it would run to completion at once
 
 	res := f.await(f.image(nil))
+	if leave == nil {
+		t.Fatalf("setup: the call never reached the window between its read and its claim, so no waiter was registered (ok=%v class=%q %s)", res.OK, res.Meta.ErrClass, res.Reason)
+	}
 	if res.OK || res.Meta.ErrClass != "gpu_queued" {
 		t.Fatalf("a waiter was registered for the card before the claim: the call must queue, got ok=%v class=%q %s", res.OK, res.Meta.ErrClass, res.Reason)
 	}
@@ -64,9 +88,9 @@ func TestACallYieldsToAWaiterThatRegistersBetweenTheAllocationAndTheClaim(t *tes
 
 // A call that resumed a place and loses its first attempt keeps the place for the wait that
 // follows: the waiter it queues as carries the token and the arrival time the token had, so the
-// call is served ahead of everyone who arrived after it. The card here is taken between the
-// allocation and the claim (the shape of a lost race); an explicit-card call sets no arrival time
-// of its own, so the place is the token's or it is gone.
+// call is served ahead of everyone who arrived after it. The card here is taken between the call's
+// read of what is claimed and its claim (the shape of a lost race); an explicit-card call sets no
+// arrival time of its own, so the place is the token's or it is gone.
 func TestAResumedCallThatLosesItsFirstAttemptKeepsItsPlaceInTheQueue(t *testing.T) {
 	f := newAdmitFixtureWith(t, admitSpec{order: admitOrder, mutate: func(c *config.Config) {
 		c.ComfyCudaDevice = "2"
@@ -79,7 +103,7 @@ func TestAResumedCallThatLosesItsFirstAttemptKeepsItsPlaceInTheQueue(t *testing.
 	}
 	var holder *gpulease.Lease
 	took := make(chan struct{})
-	f.afterTheAllocation(func() {
+	f.afterTheClaimsRead(func() {
 		defer close(took)
 		l, herr := f.m.TryAcquire(gpulease.ClassMedia, gpulease.Options{Reason: "took the card first", TTL: time.Hour, Devices: []string{pinned}})
 		if herr != nil {

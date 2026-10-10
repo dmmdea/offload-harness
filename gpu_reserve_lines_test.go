@@ -40,7 +40,9 @@ func TestAReserveBehindAHolderPrintsItsEntryAndExitLines(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a held card is a place in line: %v", err)
 	}
-	for _, want := range []string{"gpu reserve: queued behind GPU held by media", "waiting up to 20s", "gpu reserve: acquired after"} {
+	// The holder is named as a LEASE of a class ("a media-class lease", gpulease.Class.LeasePhrase),
+	// never as the bare class: "held by media" read as a media seat holding the card (F9, 2026-10-07).
+	for _, want := range []string{"gpu reserve: queued behind GPU held by a media-class lease", "waiting up to 20s", "gpu reserve: acquired after"} {
 		if !strings.Contains(stderr, want) {
 			t.Errorf("the reserve must print %q while it queues behind a holder; stderr was:\n%s", want, stderr)
 		}
