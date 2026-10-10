@@ -56,6 +56,13 @@ process.exitCode = mode === "failed" ? 4 : mode === "stop" ? 1 : 0;
 // image script at the stub and the ledger at a temp file, and a three-job batch. gpugen frees the
 // ComfyUI it is told about when a run ends, so COMFY_API is aimed at a closed port: a test run never
 // reaches a ComfyUI that happens to be running on the machine.
+//
+// The image family is a name the host-RAM guard cannot size ("stub-family": no documented sizes, no model
+// files, no ComfyUI install bound), so the batch declares no host RAM. The built-binary test below runs a
+// child process, which cannot be handed a stand-in host the way an in-process test is (gpuprobe.UseHost
+// MemoryReader), and a family the guard CAN size (krea2: 32.8 GiB) made the child read the machine's real
+// memory: on a box with 105 GiB committed of 127.7 it was refused as "waiting for host RAM" and the test
+// failed for a reason that has nothing to do with exit codes. This file is about exit codes, not host RAM.
 func batchHome(t *testing.T) (home, cfgPath, jobsPath, ledgerPath string) {
 	t.Helper()
 	requireNode(t)
@@ -70,7 +77,7 @@ func batchHome(t *testing.T) (home, cfgPath, jobsPath, ledgerPath string) {
 	ledgerPath = filepath.Join(home, "ledger.jsonl")
 	cfgPath = filepath.Join(home, "config.json")
 	cfgJSON := `{"endpoint":"http://127.0.0.1:1","state_dir":` + strconvQuote(filepath.ToSlash(home)) + `,"gpu_wait_ms":5000,"media_dir":` + strconvQuote(filepath.ToSlash(filepath.Join(home, "media"))) +
-		`,"ledger_path":` + strconvQuote(filepath.ToSlash(ledgerPath)) + `,"imagegen_script":` + strconvQuote(filepath.ToSlash(stub)) + `,"imagegen_family":"krea2"}`
+		`,"ledger_path":` + strconvQuote(filepath.ToSlash(ledgerPath)) + `,"imagegen_script":` + strconvQuote(filepath.ToSlash(stub)) + `,"imagegen_family":"stub-family"}`
 	if err := os.WriteFile(cfgPath, []byte(cfgJSON), 0o644); err != nil {
 		t.Fatal(err)
 	}
