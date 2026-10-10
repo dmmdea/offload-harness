@@ -31,11 +31,12 @@ type RemoteAttribution interface {
 	// card is closed failed and the node time it took is on the ledger.
 	Discard(reason string)
 	// Bounce ends ONE attempt of a call that is going on to another node: the node it was dispatched to
-	// answered that another job holds its card (CardHeld(res.Meta.ErrClass)), so nothing ran there. The
-	// attempt's card closes the way a held call's does (quiet, never started), no ledger row is written
-	// (the call has one row, and its Finish writes it), and the handle is armed again: the next Dispatched
-	// opens a card on the node the call was placed on next. Before any dispatch, or after the call ended,
-	// it does nothing.
+	// took the job and handed it back (another job holds its card, or it could not take its lease), so
+	// nothing ran there. The attempt's card closes quiet (completed, never started) whatever err_class the
+	// answer carried, because a bounced attempt ran nothing and the class does not decide that. No ledger
+	// row is written (the call has one row, and its Finish writes it), and the handle is armed again: the
+	// next Dispatched opens a card on the node the call was placed on next. Before any dispatch, or after
+	// the call ended, it does nothing.
 	Bounce(res Result)
 }
 

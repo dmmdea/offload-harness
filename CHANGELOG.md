@@ -53,7 +53,8 @@ Versioning: [SemVer](https://semver.org/).
   node that reads idle in its health but whose own grant refuses every job would otherwise park each call for its whole
   `gpu_wait_ms`; the cluster row names the pause as `bounced`, `refused` or `unreachable` and for how long (chosen constants, not
   measurements). `RemoteAttribution.Bounce` closes
-  the PAIR card of an attempt that held nothing (completed, never started) and writes no ledger row; an overflowing call opens its
+  the PAIR card of an attempt that ran nothing (completed, never started) whatever its `err_class`, `gpu_lease_unavailable` included,
+  and writes no ledger row; an overflowing call opens its
   card only once a node has accepted the job, so the call has one row and one card per node that held it.
 - **A roster that lists the machine itself.** An entry whose `node_id` equals this machine's (`fleet_node_id`, else the hostname)
   is never a candidate and is named in `cluster[]` as `skipped`: it would match the recipe perfectly and send the call back into the

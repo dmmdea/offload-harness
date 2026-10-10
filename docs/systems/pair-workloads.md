@@ -99,6 +99,14 @@ class decides, never the reason text. A **remote** card (`RemoteCall`, `nodeCard
 the node admits the job, which says nothing about the card, so its held close ignores the running mark
 and keeps whatever start the card showed.
 
+**A bounced attempt closes quiet whatever its class.** An overflowing media call can be taken by a node that
+then hands it back (it answered that another job holds its card, or that it could not take its lease,
+`gpu_lease_unavailable`). Nothing ran on that node, so `RemoteCall.Bounce` closes that attempt's card
+`completed`, never started, with the reason in `error`, through `quietCardOutcome` and not through the
+class: the table above is for a call's final answer, where `gpu_lease_unavailable` is a configuration fault
+and closes red, while a bounce is not an answer, because the call goes on to another node or back to the
+local queue (`TestBounceClosesTheAttemptsCardQuietWhateverItsErrClass`).
+
 **The class has to reach the asker.** A call sent to a node closes its card on the asker's box, from the
 `Result` the lane rebuilt from the node's poll. The text, vision and stt lanes return the whole `Result` in
 the job's `data`, so they always carried the class. The media and compose lanes did not: a failed media job's
