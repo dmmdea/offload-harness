@@ -186,11 +186,21 @@ func nodeRoutes(req core.Request) []string {
 	return nil
 }
 
-// Run is the entry point the MCP tools and the CLI verbs share. local runs here; remote runs on a fleet
+// Run is the entry point the CLI verbs share: RunWith for a caller that waits for its job (Wait.Window < 0), so an image
+// call that finds every lane busy blocks until the first lane that frees runs it.
+func Run(ctx context.Context, cfg config.Config, runner Runner, req core.Request, route string, remotes []string) core.Result {
+	return RunWith(ctx, cfg, runner, req, route, remotes, Wait{Window: -1})
+}
+
+// RunWith is the entry point the MCP tools and the CLI verbs share. local runs here; remote runs on a fleet
 // node; auto runs here when this box has the lane (byte-identical to before the route existed) and on a
 // fleet node when it has none and a node is configured. remotes, when given, replaces delegate_remotes for
-// this call and must be a subset of it.
-func Run(ctx context.Context, cfg config.Config, runner Runner, req core.Request, route string, remotes []string) core.Result {
+// this call and must be a subset of it. An image call on a box that has the lane AND a fleet, whose lane is not free,
+// becomes a ticket (ticket.go) and w says how the call waits for it.
+func RunWith(ctx context.Context, cfg config.Config, runner Runner, req core.Request, route string, remotes []string, w Wait) core.Result {
+	if r, ok := NormalizeRoute(route); ok && r == RouteAuto {
+		cfg = effectiveCfg(cfg, w.RosterFile) // a node added to the config file since the session began joins the fleet
+	}
 	r, ok := NormalizeRoute(route)
 	if !ok {
 		return contractDefer(fmt.Sprintf("unrecognized route %q; use local, auto or remote", route), core.Meta{})
@@ -206,15 +216,10 @@ func Run(ctx context.Context, cfg config.Config, runner Runner, req core.Request
 			if noFleet {
 				return runner.Run(ctx, req)
 			}
-			// A lane here AND a fleet: when the lane is not free right now and a node of the fleet that renders
-			// the same recipe stands idle, the call goes there instead of waiting (ADR 0082). Otherwise it goes on
-			// to the local run, joining the local queue when the fleet attempt is over and not from when it arrived, and a
-			// deferral it ends in says what the fleet could not do for it.
-			ov := tryOverflow(ctx, cfg, runner, req, remotes)
-			if ov.placed {
-				return ov.res
-			}
-			return ov.annotate(runner.Run(ctx, req))
+			// A lane here AND a fleet: a free lane runs the call here; a busy one makes it a ticket that runs on the
+			// first matching lane that frees, here or on an idle node that renders the same recipe (ADR 0082,
+			// ADR 0083). The answer, when the call's window ends first, says per node why not.
+			return defaultQ.runQueued(ctx, cfg, runner, req, remotes, w)
 		}
 	}
 	placement := "remote: forced"
@@ -384,6 +389,16 @@ func sendAndFetch(ctx context.Context, cfg config.Config, req core.Request, pl p
 	if cardAfterAccept {
 		h.Dispatched(base, node, jobID)
 	}
+	return collect(ctx, cfg, req, pl, base, node, jobID, start, h)
+}
+
+// fetchNotifier is implemented by an attribution handle that wants to know when a job's outputs start to come back (the
+// ticket queue records it, so a job that is being fetched is adoptable as such).
+type fetchNotifier interface{ Fetching() }
+
+// collect waits for the job the node holds under jobID and fetches its outputs: everything a call does once its job is on a
+// node. A ticket that adopts a job whose owner died does exactly this and never sends the request again.
+func collect(ctx context.Context, cfg config.Config, req core.Request, pl planned, base, node, jobID string, start time.Time, h core.RemoteAttribution) (core.Result, error) {
 	res, data, err := wait(ctx, cfg, base, jobID, h)
 	if err != nil {
 		if be := budgetEnded(ctx, phaseRendering, node, jobID, err); be != nil {
@@ -398,6 +413,9 @@ func sendAndFetch(ctx context.Context, cfg config.Config, req core.Request, pl p
 	if !res.OK {
 		res.Meta.Node = node
 		return res, nil
+	}
+	if fn, ok := h.(fetchNotifier); ok {
+		fn.Fetching()
 	}
 	local, err := fetchOutputs(ctx, cfg, base, data, outputDest{out: str(req.Params, "out"), outDir: pl.outDir}, jobID, node)
 	if err != nil {

@@ -184,9 +184,9 @@ func TestStrictMismatchNamesTheDifferingKey(t *testing.T) {
 	}, n)
 	lr := &laneRunner{verdict: heldLane(), local: queuedLocal()}
 
-	res := Run(context.Background(), cfg, lr, overflowReq(t, "qwen-image-2.1", nil), "auto", nil)
-	if probes, runs := lr.counts(); probes != 1 || runs != 1 {
-		t.Fatalf("nothing matches: the call runs here once: probes %d runs %d", probes, runs)
+	res := runDoor(cfg, lr, overflowReq(t, "qwen-image-2.1", nil), AtOnce)
+	if _, runs := lr.counts(); runs != 0 {
+		t.Fatalf("nothing matches: the call is a ticket that waits for a lane, it does not run here: runs %d", runs)
 	}
 	noPosts(t, "the node with the int8 build", n)
 	rows := clusterOf(t, res)
@@ -202,8 +202,8 @@ func TestStrictMismatchNamesTheDifferingKey(t *testing.T) {
 	if len(row.Differs) != 1 || !strings.HasPrefix(row.Differs[0], "imagegen_ckpt: ") {
 		t.Errorf("differs = %v", row.Differs)
 	}
-	if !strings.Contains(res.Reason, row.Why) || !strings.Contains(string(res.Data), "tk-abc12345") {
-		t.Errorf("the local answer keeps its place in line and quotes the cluster: %s | %s", res.Reason, res.Data)
+	if !res.Deferred || !strings.Contains(res.Reason, row.Why) || !strings.Contains(string(res.Data), `"waiter_token":"mq-`) {
+		t.Errorf("the answer is the ticket's and quotes the cluster: %s | %s", res.Reason, res.Data)
 	}
 }
 
@@ -232,7 +232,7 @@ func TestRefineFalseCarriedOrNodeNamedMiss(t *testing.T) {
 	// With only the old node, the call is not placed and the answer names it.
 	alone := overflowClient(t, "krea2", map[string]string{"qwen-image-2.1-fast": block(int8Ckpt, "")}, oldNode)
 	lr2 := &laneRunner{verdict: heldLane(), local: queuedLocal()}
-	res = Run(context.Background(), alone, lr2, overflowReq(t, "qwen-image-2.1-fast", map[string]any{"refine": false}), "auto", nil)
+	res = runDoor(alone, lr2, overflowReq(t, "qwen-image-2.1-fast", map[string]any{"refine": false}), AtOnce)
 	row, ok := rowFor(clusterOf(t, res), "node-c")
 	if !ok || row.State != "not-capable" || !strings.Contains(row.Why, "refine=false") {
 		t.Fatalf("the old node must be a named miss: %+v | %s", row, res.Data)
@@ -284,7 +284,7 @@ func TestHarnessVersionMustMatch(t *testing.T) {
 	old := startImageNode(t, "node-b", "hidream-o1", fams, nodeOpts{healthEdit: func(m map[string]any) { m["harness_version"] = "0.178.0" }})
 	cfg := overflowClient(t, "krea2", map[string]string{"qwen-image-2.1-fast": block(int8Ckpt, "")}, old)
 	lr := &laneRunner{verdict: heldLane(), local: queuedLocal()}
-	res := Run(context.Background(), cfg, lr, overflowReq(t, "qwen-image-2.1-fast", nil), "auto", nil)
+	res := runDoor(cfg, lr, overflowReq(t, "qwen-image-2.1-fast", nil), AtOnce)
 	row, ok := rowFor(clusterOf(t, res), "node-b")
 	if !ok || row.State != "not-capable" || !strings.Contains(row.Why, "0.178.0") || !strings.Contains(row.Why, fixtureVersion) {
 		t.Fatalf("a node on another release is a named miss: %+v", row)
@@ -298,9 +298,9 @@ func TestAnIdleNodeIsTheOnlyCandidate(t *testing.T) {
 	busy := startImageNode(t, "node-a", "hidream-o1", fams, nodeOpts{lease: leased()})
 	cfg := overflowClient(t, "krea2", map[string]string{"qwen-image-2.1-fast": block(int8Ckpt, "")}, busy)
 	lr := &laneRunner{verdict: heldLane(), local: queuedLocal()}
-	res := Run(context.Background(), cfg, lr, overflowReq(t, "qwen-image-2.1-fast", nil), "auto", nil)
-	if probes, runs := lr.counts(); probes != 1 || runs != 1 {
-		t.Fatalf("no node can take it: it runs here: probes %d runs %d", probes, runs)
+	res := runDoor(cfg, lr, overflowReq(t, "qwen-image-2.1-fast", nil), AtOnce)
+	if _, runs := lr.counts(); runs != 0 {
+		t.Fatalf("no node can take it: the ticket waits, nothing runs here: runs %d", runs)
 	}
 	a, ok := rowFor(clusterOf(t, res), "node-a")
 	if !ok || a.State != "busy" || !strings.Contains(a.Why, "a bench render") || !strings.Contains(a.Why, "media-class lease") || !strings.Contains(a.Why, "left") {
@@ -317,7 +317,7 @@ func TestTheFamilysRouteMustBeConfiguredWhenTheNodeReportsIt(t *testing.T) {
 	}})
 	cfg := overflowClient(t, "krea2", map[string]string{"qwen-image-2.1-fast": block(int8Ckpt, "")}, missing)
 	lr := &laneRunner{verdict: heldLane(), local: queuedLocal()}
-	res := Run(context.Background(), cfg, lr, overflowReq(t, "qwen-image-2.1-fast", nil), "auto", nil)
+	res := runDoor(cfg, lr, overflowReq(t, "qwen-image-2.1-fast", nil), AtOnce)
 	b, ok := rowFor(clusterOf(t, res), "node-b")
 	if !ok || b.State != "not-capable" || !strings.Contains(b.Why, "generate_image:qwen-image-2.1") || !strings.Contains(b.Why, "BOUND-BUT-MISSING") {
 		t.Errorf("node-b: %+v", b)
@@ -508,20 +508,31 @@ func TestDeclaredDevicesNeverOverflow(t *testing.T) {
 	untouched(t, "the node", n)
 }
 
-// A call that resumes a place in the local line (it carries its waiter_token) keeps that place: it is not placed
-// elsewhere, and the place is not spent. (Late binding across the fleet is the ticket queue's, not this release's.)
-func TestAResumedCallStaysInTheLocalLine(t *testing.T) {
+// A call that resumes a place in the local line (it carries its waiter_token from a local queued answer) joins the cluster
+// queue and brings the place with it: it overflows to an idle matching node like any other call (the S1 release kept it in
+// the local line, so a caller that looped on a queued answer never reached the fleet), and the place it held is the
+// ticket's own, with the arrival time it left with.
+func TestAResumedCallJoinsTheClusterAndBringsItsPlace(t *testing.T) {
 	n := startImageNode(t, "node-b", "hidream-o1", map[string]string{"qwen-image-2.1": block(int8Ckpt, "")}, nodeOpts{})
 	cfg := overflowClient(t, "krea2", map[string]string{"qwen-image-2.1-fast": block(int8Ckpt, "")}, n)
-	lr := &laneRunner{verdict: heldLane()}
+	lr := newKeeperRunner(heldLane())
+	arrived := time.Now().Add(-4 * time.Minute)
+	lr.placeFor("tk-abc12345", arrived)
 	req := overflowReq(t, "qwen-image-2.1-fast", map[string]any{"waiter_token": "tk-abc12345"})
-	if res := Run(context.Background(), cfg, lr, req, "auto", nil); !res.OK {
-		t.Fatal(res)
+	res := Run(context.Background(), cfg, lr, req, "auto", nil)
+	if !res.OK || res.Meta.Node != "node-b" {
+		t.Fatalf("a call that carried a place is placed on the idle node: %+v", res)
 	}
-	if probes, runs := lr.counts(); probes != 0 || runs != 1 {
-		t.Errorf("a resumed call runs where its place is: probes %d runs %d", probes, runs)
+	if _, runs := lr.counts(); runs != 0 {
+		t.Errorf("a call a node served is not also run here: %d", runs)
 	}
-	untouched(t, "the node", n)
+	lv := lr.leaveCalls()
+	if len(lv) != 1 || lv[0].req.Params["waiter_token"] != "tk-abc12345" || lv[0].token != "tk-abc12345" {
+		t.Fatalf("the ticket resumes the place the call held: %+v", lv)
+	}
+	if lr.dropped("tk-abc12345") != 1 {
+		t.Errorf("the place is let go when the job is done: drops %v", lr.drops)
+	}
 }
 
 // A `remotes` argument that is not among delegate_remotes is the contract defer of the paths that use it; a call that
@@ -541,23 +552,23 @@ func TestABadRemotesArgumentDoesNotBreakALocalCall(t *testing.T) {
 	untouched(t, "the configured node", n)
 }
 
-// Nothing admits: the call falls through to today's local run and its deferral carries a cluster[] block with one row
-// per roster entry, in config order, each with the state and the reason in the node's own terms.
-func TestNothingAdmitsFallsBackWithClusterBlock(t *testing.T) {
+// Nothing admits: the call becomes a ticket, and the answer is the ticket's: one cluster[] row per roster entry, in config
+// order, each with the state and the reason in the node's own terms, and the instruction not to call again.
+func TestNothingAdmitsAnswersWithTheTicketAndAClusterBlock(t *testing.T) {
 	fams := map[string]string{"qwen-image-2.1": block(int8Ckpt, "")}
 	busy := startImageNode(t, "node-a", "hidream-o1", fams, nodeOpts{lease: leased()})
 	gone := startImageNode(t, "node-b", "hidream-o1", fams, nodeOpts{})
 	gone.srv.Close()
 	other := startImageNode(t, "node-c", "hidream-o1", map[string]string{"qwen-image-2.1": block(fp4Ckpt, "")}, nodeOpts{})
 	cfg := overflowClient(t, "krea2", map[string]string{"qwen-image-2.1-fast": block(int8Ckpt, "")}, busy, gone, other)
-	lr := &laneRunner{verdict: heldLane(), local: queuedLocal()}
+	lr := &laneRunner{verdict: heldLane()}
 
-	res := Run(context.Background(), cfg, lr, overflowReq(t, "qwen-image-2.1-fast", nil), "auto", nil)
-	if probes, runs := lr.counts(); probes != 1 || runs != 1 {
-		t.Fatalf("the local run is today's: probes %d runs %d", probes, runs)
+	res := runDoor(cfg, lr, overflowReq(t, "qwen-image-2.1-fast", nil), AtOnce)
+	if _, runs := lr.counts(); runs != 0 {
+		t.Fatalf("nothing runs here: the ticket waits: runs %d", runs)
 	}
-	if res.OK || res.Meta.ErrClass != core.ErrClassGPUQueued || !strings.Contains(string(res.Data), `"waiter_token":"tk-abc12345"`) {
-		t.Fatalf("the local deferral and its place in line are kept: %+v", res)
+	if res.OK || !res.Deferred || res.Meta.ErrClass != core.ErrClassGPUQueued || !strings.Contains(string(res.Data), `"waiter_token":"mq-`) {
+		t.Fatalf("the ticket's answer: %+v", res)
 	}
 	rows := clusterOf(t, res)
 	if len(rows) != 3 {
@@ -578,13 +589,6 @@ func TestNothingAdmitsFallsBackWithClusterBlock(t *testing.T) {
 	}
 	noPosts(t, "the busy node", busy)
 	noPosts(t, "the other build", other)
-
-	// A free local result is never annotated: the block belongs to a deferral.
-	lr2 := &laneRunner{verdict: heldLane()}
-	ok := Run(context.Background(), cfg, lr2, overflowReq(t, "qwen-image-2.1-fast", nil), "auto", nil)
-	if !ok.OK || strings.Contains(string(ok.Data), "cluster") {
-		t.Errorf("a local call that ran is not annotated: %+v", ok)
-	}
 }
 
 // A node that stopped answering is not probed again at once: it backs off 5, 15, 60 and then 300 seconds per

@@ -4,7 +4,6 @@ import (
 	"context"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/dmmdea/offload-harness/internal/core"
 )
@@ -54,60 +53,6 @@ func TestOnlyImageJobsOverflow(t *testing.T) {
 	untouched(t, "the node", n)
 }
 
-// Two calls of one process that both read a node idle must not both send it a job: the second would wait out the
-// node's whole window in the node's queue and come back as a bounce. The node a call has a job on is held for it, and
-// the second call goes on to its own queue and says why.
-func TestConcurrentCallsDoNotStackOnOneNode(t *testing.T) {
-	hold := make(chan struct{})
-	n := startImageNode(t, "node-b", "hidream-o1", map[string]string{"qwen-image-2.1": block(int8Ckpt, "")}, nodeOpts{hold: hold})
-	t.Cleanup(func() { close(hold) })
-	cfg := overflowClient(t, "krea2", map[string]string{"qwen-image-2.1-fast": block(int8Ckpt, "")}, n)
-
-	first := make(chan core.Result, 1)
-	go func() {
-		first <- Run(context.Background(), cfg, &laneRunner{verdict: heldLane()}, overflowReq(t, "qwen-image-2.1-fast", nil), "auto", nil)
-	}()
-	deadline := time.Now().Add(10 * time.Second)
-	for len(n.posts()) == 0 && time.Now().Before(deadline) {
-		time.Sleep(5 * time.Millisecond)
-	}
-	if len(n.posts()) != 1 {
-		t.Fatal("the first call never reached the node")
-	}
-
-	lr := &laneRunner{verdict: heldLane(), local: queuedLocal()}
-	// A bound on the second call, so that a node that WAS sent a second job (the node holds both until it is released
-	// below) ends this test in seconds instead of hanging it.
-	second, cancel := context.WithTimeout(context.Background(), 8*time.Second)
-	defer cancel()
-	res := Run(second, cfg, lr, overflowReq(t, "qwen-image-2.1-fast", nil), "auto", nil)
-	if probes, runs := lr.counts(); probes != 1 || runs != 1 {
-		t.Fatalf("the second call waits in its own queue: probes %d runs %d (%+v)", probes, runs, res)
-	}
-	if len(n.posts()) != 1 {
-		t.Errorf("the node was sent a second job while it had one: %d POSTs", len(n.posts()))
-	}
-	row, ok := rowFor(clusterOf(t, res), "node-b")
-	if !ok || row.State != "busy" || !strings.Contains(row.Why, "another call of this machine") {
-		t.Errorf("the answer says why: %+v", row)
-	}
-
-	// Once the first call is done the node is free for the next one.
-	hold <- struct{}{}
-	select {
-	case r := <-first:
-		if !r.OK {
-			t.Fatalf("the first call: %+v", r)
-		}
-	case <-time.After(30 * time.Second):
-		t.Fatal("the first call never ended")
-	}
-	if !placer.hold(n.srv.URL) {
-		t.Error("the node must be free for the next call once the first is done")
-	}
-	placer.release(n.srv.URL)
-}
-
 // The only node bounces the call (it accepted the job, another job holds its card) and nothing else admits, so the call
 // runs here. The bounced attempt left exactly one card, closed quiet (it ran nothing), and NO asker ledger row: the
 // pipeline's own run writes the call's row, and a remote attempt that held nothing must not write a second one.
@@ -117,14 +62,15 @@ func TestBounceThenNothingAdmitsLeavesOneQuietCardAndNoAskerRow(t *testing.T) {
 	cfg := overflowClient(t, "krea2", map[string]string{"qwen-image-2.1-fast": block(int8Ckpt, "")}, a)
 	cfg.PairWorkloadsEnabled = true
 	rig := newPairRig(t, true, "node-a")
-	lr := &laneRunner{verdict: heldLane(), rig: rig, local: queuedLocal()}
+	lr := &laneRunner{verdict: heldLane(), rig: rig}
 
-	res := Run(context.Background(), cfg, lr, overflowReq(t, "qwen-image-2.1-fast", nil), "auto", nil)
-	if probes, runs := lr.counts(); probes != 1 || runs != 1 {
-		t.Fatalf("nothing else admits, so the call runs here once: probes %d runs %d", probes, runs)
+	req := overflowReq(t, "qwen-image-2.1-fast", nil)
+	res := settle(t, cfg, lr, req, rowIs("node-a", "bounced"))
+	if _, runs := lr.counts(); runs != 0 {
+		t.Fatalf("nothing else admits, so the ticket waits and nothing runs here: runs %d", runs)
 	}
-	row, ok := rowFor(clusterOf(t, res), "node-a")
-	if !ok || row.State != "bounced" || !strings.Contains(row.Why, "passed it back") {
+	row, _ := rowFor(clusterOf(t, res), "node-a")
+	if !strings.Contains(row.Why, "passed it back") {
 		t.Fatalf("the answer says the node had the call and passed it back: %+v", row)
 	}
 	cards := rig.cards() // fails unless every frame belongs to ONE card
@@ -160,10 +106,10 @@ func TestTheMachineItselfIsNeverACandidate(t *testing.T) {
 	// Alone, the call stays in its own queue and the answer names the entry.
 	only := overflowClient(t, "krea2", map[string]string{"qwen-image-2.1-fast": block(int8Ckpt, "")}, self)
 	only.FleetNodeID = "node-b"
-	lr2 := &laneRunner{verdict: heldLane(), local: queuedLocal()}
-	res = Run(context.Background(), only, lr2, overflowReq(t, "qwen-image-2.1-fast", nil), "auto", nil)
-	if probes, runs := lr2.counts(); probes != 1 || runs != 1 {
-		t.Fatalf("nothing else admits: probes %d runs %d", probes, runs)
+	lr2 := &laneRunner{verdict: heldLane()}
+	res = runDoor(only, lr2, overflowReq(t, "qwen-image-2.1-fast", nil), AtOnce)
+	if _, runs := lr2.counts(); runs != 0 {
+		t.Fatalf("nothing else admits: the ticket waits: runs %d", runs)
 	}
 	row, ok := rowFor(clusterOf(t, res), "node-b")
 	if !ok || row.State != "skipped" || !strings.Contains(row.Why, "this machine") {
@@ -176,8 +122,8 @@ func TestTheMachineItselfIsNeverACandidate(t *testing.T) {
 	prev := hostnameFn // after overflowClient, which pins a hostname of its own
 	hostnameFn = func() (string, error) { return "node-b", nil }
 	t.Cleanup(func() { hostnameFn = prev })
-	lr3 := &laneRunner{verdict: heldLane(), local: queuedLocal()}
-	res = Run(context.Background(), byName, lr3, overflowReq(t, "qwen-image-2.1-fast", nil), "auto", nil)
+	lr3 := &laneRunner{verdict: heldLane()}
+	res = runDoor(byName, lr3, overflowReq(t, "qwen-image-2.1-fast", nil), AtOnce)
 	if row, ok := rowFor(clusterOf(t, res), "node-b"); !ok || row.State != "skipped" {
 		t.Fatalf("the hostname is the id when fleet_node_id is unset: %+v", row)
 	}

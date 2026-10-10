@@ -277,7 +277,7 @@ func (n *node) posts() []seen {
 }
 
 func clientCfg(t *testing.T, nodes ...*node) config.Config {
-	cfg := config.Config{MediaDir: t.TempDir(), FleetAuthToken: "tok"}
+	cfg := config.Config{MediaDir: t.TempDir(), StateDir: t.TempDir(), FleetAuthToken: "tok"}
 	for _, n := range nodes {
 		cfg.DelegateRemotes = append(cfg.DelegateRemotes, n.srv.URL)
 	}
