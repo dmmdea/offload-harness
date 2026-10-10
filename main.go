@@ -1010,7 +1010,7 @@ func runGenerateImage(args []string) error {
 		return fmt.Errorf("generate-image requires a prompt (not stdin): local-offload generate-image \"<prompt>\" [--width 1024]")
 	}
 
-	cfg := loadCfg(fs)
+	cfg, src := loadCfgWithSource(fs)
 	p, cleanup, err := openPipeline(cfg)
 	if err != nil {
 		return err
@@ -1047,12 +1047,26 @@ func runGenerateImage(args []string) error {
 	if *transparent {
 		params["transparent"] = true
 	}
-	res := mediaremote.Run(context.Background(), cfg, p, core.Request{
+	// This verb IS the wait: when every lane is busy it becomes a ticket (ADR 0083) and blocks until the first matching lane
+	// that frees has rendered it, telling the operator where it stands on stderr. The first Ctrl-C cancels a ticket that has
+	// sent nothing anywhere (a job already on a node cannot be recalled; run the same command to collect it); the second
+	// interrupt is the default one.
+	ictx, stopInterrupt := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stopInterrupt()
+	go func() {
+		<-ictx.Done()
+		stopInterrupt()
+	}()
+	wait := mediaremote.Wait{Window: -1, Notify: func(line string) { fmt.Fprintln(os.Stderr, line) }}
+	if src.Loaded() {
+		wait.RosterFile = src.Path
+	}
+	res := mediaremote.RunWith(ictx, cfg, p, core.Request{
 		Task:   core.TaskGenerateImage,
 		Door:   "cli:generate-image",
 		Input:  positional,
 		Params: params,
-	}, *route, remotes)
+	}, *route, remotes, wait)
 	emitResult(res, *asJSON, "", *compactFlag)
 	return nil
 }
@@ -2255,7 +2269,13 @@ func runMCP(args []string) error {
 		}
 	}()
 
-	err = mcpserver.New(p).WithConfigError(src.LoadErr).Run(ctx, version)
+	srv := mcpserver.New(p).WithConfigError(src.LoadErr)
+	if src.Loaded() {
+		// The server never reloads its config, so the ticket queue re-reads delegate_remotes from this file when it changes
+		// (ADR 0083): a node added to the file joins the running session.
+		srv = srv.WithConfigSource(src.Path)
+	}
+	err = srv.Run(ctx, version)
 	stopSignals()
 	<-flushDone
 	// A cancelled context IS the clean shutdown here, not a failure. Returning it
