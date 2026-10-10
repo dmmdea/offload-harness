@@ -26,11 +26,10 @@ import (
 
 // cardTableFn reads the card table, bounded only by ctx: the callers set the deadline (cardTable
 // one attempt, cardTablePatient the attempt and its retry), because a reader that added a
-// deadline of its own would cap the retry's longer one too. A variable so tests do not need
-// nvidia-smi.
-var cardTableFn = func(ctx context.Context, cfg config.Config) ([]gpuprobe.Card, string, error) {
-	return gpuprobe.ReadCards(ctx, cfg.GPUComfyOrder)
-}
+// deadline of its own would cap the retry's longer one too. It IS the allocator's production
+// reader (gpualloc.ReadCards), so the rule has one definition and one run against a stand-in
+// nvidia-smi. A variable so tests do not need nvidia-smi.
+var cardTableFn = gpualloc.ReadCards
 
 // cardTable returns the cards, a warning about the declared ComfyUI order (when it was
 // rejected), and an error when nvidia-smi gave no table. One attempt, five seconds: it feeds the

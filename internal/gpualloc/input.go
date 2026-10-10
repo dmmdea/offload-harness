@@ -78,15 +78,23 @@ func DefaultDeps() Deps {
 	return Deps{}.withDefaults()
 }
 
+// ReadCards is the production card-table reader, and the one every caller that does not inject its own
+// uses (the allocator's default, and the root package's cardTableFn). It is gpuprobe's one per-device
+// query (--query-gpu fields) and nothing else: the allocation never lists processes, the slowest thing
+// nvidia-smi does under load (the foreign-process reader is a separate, best-effort call that only the
+// verbs which want it make). It adds NO deadline of its own and takes the one in ctx, because CardTable
+// puts a deadline on every attempt and a reader that capped itself would cap the retry's longer deadline
+// too: the 5 s the base kept inside the default reader made the 15 s retry a 5 s one. Only a run against
+// a real process can tell, so TestTheProductionReaderIsNotCappedBelowTheRetryDeadline does that, with a
+// stand-in nvidia-smi (internal/gpuprobe/smitest), and TestTheAllocationNeverListsProcesses pins what
+// the allocation execs.
+func ReadCards(ctx context.Context, cfg config.Config) ([]gpuprobe.Card, string, error) {
+	return gpuprobe.ReadCards(ctx, cfg.GPUComfyOrder)
+}
+
 func (d Deps) withDefaults() Deps {
 	if d.Cards == nil {
-		// No deadline here: CardTable puts one on every attempt. The read is gpuprobe's one per-device
-		// query (--query-gpu fields) and nothing else: the allocation never lists processes, the
-		// slowest thing nvidia-smi does under load (the foreign-process reader is a separate,
-		// best-effort call that only the verbs which want it make).
-		d.Cards = func(ctx context.Context, cfg config.Config) ([]gpuprobe.Card, string, error) {
-			return gpuprobe.ReadCards(ctx, cfg.GPUComfyOrder)
-		}
+		d.Cards = ReadCards
 	}
 	if d.ForeignBusy == nil {
 		d.ForeignBusy = func(context.Context, config.Config) map[string]string { return nil }

@@ -251,11 +251,3 @@ func TestALeaseScopeReadsTheCardTableWithTheRetry(t *testing.T) {
 		t.Error("the seat on card 2 is on it")
 	}
 }
-
-// The allocation's own reader asks for the per-device fields only: it never lists processes (the
-// foreign-busy reader is a separate call that the media path does not make).
-func TestTheAllocationReadsNoProcessListing(t *testing.T) {
-	if got := DefaultDeps().ForeignBusy; got == nil || len(got(context.Background(), config.Config{})) != 0 {
-		t.Error("the default foreign-busy reader must see nothing: it is not wired to nvidia-smi")
-	}
-}
