@@ -649,12 +649,12 @@ func (m *Manager) EmulateLegacyWriter() { m.legacyWriter = true }
 // raw switch and checks nothing: production callers go through ApplyCardScopedConfig.
 func (m *Manager) SetCardScoped(on bool) { m.cardScoped = on }
 
-// ReadOnly returns a view of the same lease root whose readers write nothing. The readers of the line (Waiters,
+// ReadOnly returns a view of the same lease root whose readers of the line write nothing. Those readers (Waiters,
 // Tokens, ResumeToken) prune a record they find dead, stale or expired, as housekeeping for whoever reads next; through
 // the view they skip such a record exactly as before and leave it on disk. It is for a question that must not change
-// the state it asks about (the media lane probe, internal/pipeline/medialane.go): everything a helper reads through the
-// view, gpualloc's included, is read-only. The view shares the root, the clock and the seams of m; only m's own
-// acquisitions and releases write, and the view is not meant to make any.
+// the state it asks about (the media lane probe, internal/pipeline/medialane.go): a helper that reads the line through
+// the view, gpualloc's included, prunes nothing. The view shares the root, the clock and the seams of m, and it does not
+// stop an acquisition or a release made through it, which are not reads and which the probe never makes.
 func (m *Manager) ReadOnly() *Manager {
 	v := *m
 	v.readOnly = true
