@@ -184,7 +184,7 @@ func TestSeatWaiterBlocksANewAcquireUntilItUnregisters(t *testing.T) {
 		t.Fatalf("setup acquire: %v", err)
 	}
 
-	refresh, unregister := RegisterSeatWaiter(m.leaseDir(), "transcribe voice_es.wav")
+	refresh, unregister := RegisterSeatWaiter(m.leaseDir(), "transcribe voice_es.wav", nil)
 	// Guarantee the seat waiter's SinceMs (millisecond resolution) strictly
 	// precedes the media Acquire's own registration below — found live on
 	// CI (a fast Linux runner, 2026-09-24): with no gap, RegisterSeatWaiter

@@ -12,10 +12,11 @@ import (
 
 // seatWaiterAt registers a refreshed ClassSeat waiter under the fixture's lease dir and
 // returns the function that makes it leave. The waiter never claims; it only holds the
-// front of the line, exactly as a blocked seat/text-load admission does.
-func seatWaiterAt(t *testing.T, root, reason string) (leave func()) {
+// front of the line, exactly as a blocked seat/text-load admission does. With no devices
+// it is the whole node; with some it is queued for those cards only.
+func seatWaiterAt(t *testing.T, root, reason string, devices ...string) (leave func()) {
 	t.Helper()
-	refresh, unregister := gpulease.RegisterSeatWaiter(filepath.Join(root, "gpu", "lease"), reason)
+	refresh, unregister := gpulease.RegisterSeatWaiter(filepath.Join(root, "gpu", "lease"), reason, devices)
 	stop := make(chan struct{})
 	done := make(chan struct{})
 	go func() {

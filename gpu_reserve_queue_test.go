@@ -27,7 +27,7 @@ func TestAFreshReserveQueuesBehindARegisteredWaiterOnAFreeCard(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	refresh, unregister := gpulease.RegisterSeatWaiter(filepath.Join(root, "gpu", "lease"), "transcribe voice_es.wav")
+	refresh, unregister := gpulease.RegisterSeatWaiter(filepath.Join(root, "gpu", "lease"), "transcribe voice_es.wav", nil)
 	var once sync.Once
 	stop := make(chan struct{})
 	done := make(chan struct{})

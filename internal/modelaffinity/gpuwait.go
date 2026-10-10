@@ -155,7 +155,13 @@ func awaitLease(ctx context.Context, base, model string, deadline time.Time, blo
 	// See gpulease.RegisterSeatWaiter's doc for why this cannot deadlock or
 	// starve the lease itself. refresh must run every poll tick or the
 	// record goes heartbeat-stale and stops protecting our place in line.
-	refresh, unregister := gpulease.RegisterSeatWaiter(dir, "load "+model+" on "+base)
+	//
+	// The place is on THIS SEAT'S cards, the cards the wait above blocks on, not on
+	// the whole node: every newcomer queues behind a conflicting waiter, so a
+	// whole-node entry here held back a fresh claim on a free card the seat has no
+	// stake in. Unresolvable pins read as the whole node (SeatCards), as everywhere
+	// else in this gate.
+	refresh, unregister := gpulease.RegisterSeatWaiter(dir, "load "+model+" on "+base, SeatCards(model))
 	defer unregister()
 	for {
 		remain := time.Until(deadline)

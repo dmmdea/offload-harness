@@ -153,6 +153,29 @@ func ScopeToModel(info gpulease.Info, model string) gpulease.Info {
 	return ScopeToPins(info, pins)
 }
 
+// SeatCards names the cards (lease ids) the seat serving model sits on, resolved by the same
+// pins and the same card table ScopeToModel narrows a lease with, so the cards a blocked
+// admission WAITS on are the cards it was blocked on. nil means "cannot be said": an undeclared
+// model, a pin the card table cannot place, a card table that cannot be read. The caller reads
+// that as the whole node, the direction of every doubt in this file. Unlike ScopeToPins it does
+// not need a held lease to name cards: it is asked once, on the blocked path, to register the
+// admission's place in line, never on the unfenced fast path.
+func SeatCards(model string) []string {
+	pins, ok := pinsOf(model)
+	if !ok {
+		return nil
+	}
+	cards, ok := cardTable()
+	if !ok {
+		return nil
+	}
+	ids, ok := gpulease.ResolvePins(pins, cards)
+	if !ok {
+		return nil
+	}
+	return ids
+}
+
 // SeatLease reads the armed lease directory and returns what it holds against model's
 // cards: the leases that sit on them, and nothing else. The zero Info when the gate is not
 // armed (no config.Load ran in this process) or nothing relevant is held.

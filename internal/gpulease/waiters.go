@@ -42,12 +42,12 @@ package gpulease
 // waiter file's name, which registerWaiter makes unique with a random token —
 // every reader computes the same order from the same directory listing, so the
 // tie-break needs no coordination beyond the filesystem both sides already
-// share. This governs ordering among REGISTERED waiters only: a brand-new
-// Acquire's very first, pre-registration TryAcquire (and any bare TryAcquire
-// call that never sets Wait) can still land in the narrow window between a
-// release and the front waiter's next tick — the same residual race every
-// poll-based queue has, bounded by one poll interval, and unrelated to the
-// hours-long starvation this fixes.
+// share. This governs ordering among REGISTERED waiters, and since register
+// D-1xx-3 (2026-10-09) every production claim is one: Acquire registers BEFORE
+// its first attempt, with or without a Wait (a zero Wait is one gated attempt),
+// so a fresh claim can no longer land in the window between a release and the
+// front waiter's next tick. The one door that still skips the line is a bare
+// TryAcquire, which setup and tests use and no production path calls.
 //
 // Class carries no priority here: no ADR documents a queue-level class
 // priority (0026 gates text LOADS behind a media lease; 0041 sizes the drain
@@ -104,13 +104,24 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
 const (
-	waitersDirName     = "waiters"
-	seatWarmOwedName   = "seat-warm-owed"
-	waiterStaleAfterMs = 12 * 60 * 60 * 1000 // a waiter older than the longest --wait is debris
+	waitersDirName   = "waiters"
+	seatWarmOwedName = "seat-warm-owed"
+
+	// waiterStaleAfterMs is the debris cap for a live, heartbeating waiter that declared no wait
+	// (a seat admission, an older binary's record, a one-attempt claim): older than the default
+	// --wait's reach, it is not queued, it is stuck. A waiter that DECLARED a longer wait is kept
+	// for that wait instead (waiterOutlived), because the cap is only ever a guess at the wait.
+	waiterStaleAfterMs = 12 * 60 * 60 * 1000
+	// waiterDeadlineSlackMs is how long past its own declared deadline a waiter that is still
+	// alive and heartbeating is kept. Acquire leaves at its deadline, so a record that outlives it
+	// by this much belongs to a process that stopped acting on its own wait; the hour is slack for
+	// a clock step, not a grace anyone relies on.
+	waiterDeadlineSlackMs = 60 * 60 * 1000
 
 	// waiterHeartbeatMultiple x the poll interval, floored at
 	// waiterHeartbeatFloor, is the default heartbeat staleness window (see
@@ -136,7 +147,28 @@ type Waiter struct {
 	// Token names the place-keeping token this waiter resumed (tokens.go), so it never queues
 	// behind its own. An older reader ignores the field.
 	Token string `json:"token,omitempty"`
-	path  string
+	// DeadlineMs is when the waiter's own wait ends (registration time plus the wait it declared),
+	// 0 when it declared none. The debris cap reads it (waiterOutlived): a waiter that asked for
+	// 20 h must not be reaped as debris at 12 h while it is alive and heartbeating. An older reader
+	// ignores the field and keeps its flat cap, the conservative direction for a record it cannot
+	// read the wait of.
+	DeadlineMs int64 `json:"deadline_ms,omitempty"`
+	path       string
+}
+
+// waiterOutlived reports whether a live, heartbeating record has outlived every wait it could
+// still be honouring, so it is debris and not a place in line. The floor is waiterStaleAfterMs
+// from the arrival; a waiter that declared a wait is kept until that deadline plus the slack,
+// whichever is later. It never SHORTENS the floor: a record with no declared wait is judged
+// exactly as before.
+func waiterOutlived(w Waiter, nowMs int64) bool {
+	limit := w.SinceMs + waiterStaleAfterMs
+	if w.DeadlineMs > 0 {
+		if d := w.DeadlineMs + waiterDeadlineSlackMs; d > limit {
+			limit = d
+		}
+	}
+	return nowMs > limit
 }
 
 // Since is when the waiter started queueing.
@@ -164,13 +196,33 @@ func randomToken() string {
 	return strconv.FormatInt(time.Now().UnixNano(), 36)
 }
 
+// unregisteredWarned makes the warning below print once per process: a long-lived server whose
+// waiters directory is unwritable would otherwise repeat it on every media call, and a line per
+// call is a notification per call in whatever session wraps it.
+var unregisteredWarned atomic.Bool
+
+// warnUnregistered says, once, that this request could not take a place in line. The gate it
+// stands behind is fail-soft by design (isFrontOfQueue answers true for a record that was never
+// written, so a bookkeeping fault never refuses GPU work), which makes the failure silent: the
+// request would claim the card like a bare claim, ahead of waiters it should queue behind, and
+// nothing would show it. The claim itself is untouched; this only makes the loss of the queue
+// visible.
+func warnUnregistered(err error) {
+	if unregisteredWarned.Swap(true) {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "gpulease: warning: could not record this request's place in line (%v); it will claim the card without queueing behind earlier waiters, and later requests will not see it in line. Check that the waiters directory under the lease state root is writable\n", err)
+}
+
 // registerWaiter records this process as queued and returns the record it wrote
 // (with path set, so the caller can find itself again in a later Waiters() read) and a
 // func that removes it; the func is safe to call more than once. A failure to write
 // the record (unwritable waiters dir) returns a zero Waiter — see isFrontOfQueue for
-// what that degrades to.
+// what that degrades to — and says so once on stderr (warnUnregistered), because the
+// degradation is otherwise invisible: the request claims the card as a bare claim would.
 func (m *Manager) registerWaiter(class Class, opts Options) (Waiter, func()) {
 	if err := os.MkdirAll(m.waitersDir(), 0o777); err != nil {
+		warnUnregistered(err)
 		return Waiter{}, func() {}
 	}
 	pid := os.Getpid()
@@ -185,15 +237,22 @@ func (m *Manager) registerWaiter(class Class, opts Options) (Waiter, func()) {
 		since, resumed = tok.Since(), tok.ID
 	}
 	w := Waiter{PID: pid, Class: class, Reason: clipCommand(opts.Reason), SinceMs: since.UnixMilli(), Devices: opts.Devices, Token: resumed}
+	if opts.Wait > 0 {
+		// The wait is the record's own: the debris cap is derived from it, not from the longest
+		// wait anyone is expected to pass (waiterOutlived).
+		w.DeadlineMs = m.now().Add(opts.Wait).UnixMilli()
+	}
 	if st, ok := m.procStart(pid); ok {
 		w.StartTimeMs = st
 	}
 	b, err := json.Marshal(w)
 	if err != nil {
+		warnUnregistered(err)
 		return Waiter{}, func() {}
 	}
 	path := filepath.Join(m.waitersDir(), strconv.Itoa(pid)+"."+strconv.FormatInt(w.SinceMs, 10)+"."+randomToken()+".json")
 	if err := os.WriteFile(path, b, 0o666); err != nil {
+		warnUnregistered(err)
 		return Waiter{}, func() {}
 	}
 	w.path = path
@@ -238,7 +297,9 @@ func waiterBefore(a, b Waiter) bool {
 // directory, which the rest of the package already treats as advisory-only rather
 // than refusing GPU work over a bookkeeping failure. It costs that one caller its
 // place in the (unrecorded) line, not the reverse — it never makes an OTHER, properly
-// registered waiter lose its place.
+// registered waiter lose its place. It is not silent: registerWaiter has said so once on
+// stderr (warnUnregistered), because a gate that quietly becomes a bare claim is the
+// defect this queue exists to end.
 func (m *Manager) isFrontOfQueue(self Waiter) bool {
 	if self.path == "" {
 		return true
@@ -398,7 +459,7 @@ func (m *Manager) Waiters() []Waiter {
 				alive = false // recycled pid
 			}
 		}
-		if !alive || nowMs-w.SinceMs > waiterStaleAfterMs {
+		if !alive || waiterOutlived(w, nowMs) {
 			_ = os.Remove(p)
 			continue
 		}
@@ -516,6 +577,15 @@ func managerAt(leaseDir string) *Manager {
 // entry changes nothing: TryAcquire already refuses on its own, registered
 // waiter or not.
 //
+// WHICH CARDS. devices are the cards the blocked admission is waiting to load onto — its
+// seat's cards (lease ids), the same set awaitLease blocks on (ScopeToModel). Every newcomer
+// is gated by a registered waiter that CONFLICTS with it, so the set is what keeps this entry
+// from holding back work it has nothing to do with: registered as the whole node, a text-load
+// admission blocked on its seat's card stopped a fresh `gpu reserve --devices <other card>`
+// on a free, unrelated card (the 0.178.0 review). nil is the whole node, the right answer
+// only when the seat's cards cannot be named (an undeclared model, a pin the card table
+// cannot place, a card table that cannot be read): unknown is every card, the gate's rule.
+//
 // refresh must be called on every one of the caller's own poll ticks — a
 // long wait's record otherwise goes heartbeat-stale (waiterStaleWindow, see
 // the ALIVE BUT NOT POLLING section atop this file) and stops protecting the
@@ -523,8 +593,14 @@ func managerAt(leaseDir string) *Manager {
 // refreshWaiter call. unregister is safe to call more than once and must run
 // via defer so a cancelled or timed-out admission never leaks a waiter that
 // would otherwise sit at the front of the queue until it goes stale.
-func RegisterSeatWaiter(leaseDir, reason string) (refresh func(), unregister func()) {
+func RegisterSeatWaiter(leaseDir, reason string, devices []string) (refresh func(), unregister func()) {
 	m := managerAt(leaseDir)
-	self, unreg := m.registerWaiter(ClassSeat, Options{Reason: reason})
+	// A set that does not normalize (a blank or non-token id) is not a set of cards: it falls
+	// back to the whole node rather than to a record that names nothing the claims use.
+	devs, err := NormalizeDevices(devices)
+	if err != nil {
+		devs = nil
+	}
+	self, unreg := m.registerWaiter(ClassSeat, Options{Reason: reason, Devices: devs})
 	return func() { m.refreshWaiter(self) }, unreg
 }
