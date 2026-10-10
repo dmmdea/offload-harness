@@ -112,8 +112,8 @@ Three facts made the obvious change unsafe as stated.
 9. **Never overflow** a call that resumes a place in the local line (it carries `waiter_token`: the place is kept, and the first
    queued answer's token simply lapses if the call went to a node instead), that runs under a lease its process inherited, on a
    box with no `delegate_remotes` (that path is byte for byte what it was, and asks the lane nothing), or for anything but an
-   image job in this release. Graphs arrive with their own file check (a whole-node graph placed on a multi-GPU node would land
-   on its display card); video, animation and audio carry no per-family identity yet.
+   image job or a whole-node graph (Amendment 1 adds the graph, under its own file check and a single-card rule); video,
+   animation and audio carry no per-family identity yet.
 10. **ADR 0077 changes in three sentences.** Decision 6: `auto` runs here when the lane is free and, when it is not and a
     matching node is idle, there. The consequence that `refine=false` defers on a remote route no longer holds for image jobs:
     it travels, gated on `refine_honoured`. The consequence about `waiter_token` stands: a call that goes to a node leaves the
@@ -174,3 +174,51 @@ Three facts made the obvious change unsafe as stated.
   node's default, which is another model.
 - **Substitute a quantization when none matches.** The operator's rule that one node stays on the fast family, and the licence
   tag on a result, both make a silent substitution wrong; the answer names the family that would match instead.
+
+## Amendment 1 (2026-10-10, P0 step S4): a whole-node graph overflows too
+
+Decision 9 left graphs out: a graph has no recipe, and a whole-node graph placed on a multi-GPU node could land on its display
+card. This amendment adds them under four rules; every other decision stands, and none of the four is a recipe.
+
+1. **A graph's identity is that the node holds the files it names, and the node decides it at its door.** Before it writes a
+   temp file, takes a lease or starts ComfyUI, `buildRunGraph` reads the graph: a string input under a key that contains
+   `_name` and ends in `.safetensors`, `.gguf`, `.pth`, `.pt`, `.ckpt` or `.sft` is a weight file, and the `image` input of a
+   `LoadImage`, `LoadImageMask` or `LoadImageOutput` node is an input image. A weight file must resolve **by name** under any
+   class directory of any of the node's models roots, the way a ComfyUI loader opens it (subfolders included, no search for
+   the basename; `mediacap.MissingModelFiles`); an input image must be in ComfyUI's `input` directory (`output` or `temp` when
+   its annotation says so). A name that is absolute or climbs out with `..` is never looked up and reads as missing. A node
+   that lacks any of them answers with the existing re-placeable route-not-ready refusal, **503**, naming what is missing (six
+   names, then a count), before any job exists. A model the graph's manifest tells the node to fetch (a `models[]` entry with a
+   `source_url`) is not refused: the satisfier downloads it before ComfyUI starts. **Input images do not travel with a graph**
+   (the dispatch door carries JSON; the media-job door carries no input for `run-graph`), so the refusal says so; carrying
+   them is a named seam, not built. As for a recipe, "holds" is **name, not content**, and the other input loaders (LoadVideo,
+   LoadAudio, a custom node's own key) are not read. The delegator sends no family and no digest, and requires the node to run
+   its own release (the check ships with it), where a new health key would have said the same.
+2. **The trigger and the placement are the image's.** `Pipeline.MediaLaneFree` answers for a whole-node `run_graph` with the
+   whole-node reading (any lease, in-process slot or place in line, and the host's memory against the media class default, the
+   only size a graph's unnameable weights can have), under the same contract: a relaxation of the real wait-0 admission, held by
+   a differential test, that writes nothing. A graph that names `devices` (refused by `plan()` before the lane is asked), one
+   that carries a `waiter_token`, and one under an inherited lease stay here. A node's 503 at the door moves the call to the
+   next node like any refusal at the door (decision 6) and counts toward the three attempts; the call falls back to the local
+   queue with `cluster[]` naming, per node, the file it lacks.
+3. **A whole-node graph is placed only on a node that publishes exactly one card.** A graph that names no devices holds the
+   whole node and runs in the default ComfyUI instance, which sees every card; on a node with several, the delegator cannot
+   know which card that instance picks and it may be the display card. So a node with more than one card is a named miss, and
+   so is a node that publishes no `gpu_devices` (unknown is never a pass). The rule is the delegator's **placement** rule and it
+   covers every remote placement of a graph: the overflow, `route remote` and a thin client alike, so a graph cannot be sent to
+   a multi-GPU node by this client at all. It does not change what such a node does with a graph sent to it by hand or run on
+   its own machine: that local whole-node case is the parked item the operator knows.
+4. **`min_vram_gb`.** A call may ask for a node whose largest `gpu_devices[].vram_total_gb` is at least N GB; a node that
+   publishes no cards cannot be shown to have it and is a miss. A card counts as the size it rounds to: nvidia-smi reports
+   MiB/1024, so a 16 GB card reads 15.92 or 15.93 GiB (the figures in `docs/FLEET-NODE.md`) and a literal comparison with 16
+   would shut out every one. Absent the argument, a graph that names `model_family` `wan22` (or `wan2.2`, `wan`) and carries a
+   `height` input of 720 or more (the tallest of any node; none = no floor) gets a floor of 16. **That row is CHOSEN from the
+   film owner's stated constraint that Wan 2.2 14B at 720p needs a 16 GB card; it is not a measurement**, and every answer that
+   cites it says so. The caller's number wins over it, 0 included. The floor filters remote candidates only: the local lane is
+   the node's own grant.
+
+**Named limits of the amendment.** The file check is by name (a same-named file of other bytes is held). Input images need to
+be on the node already. The default floor reads two things the harness otherwise never reads in a graph (`model_family`, the
+`height` inputs), and a graph that uses neither key gets none. A forced or thin-client graph can no longer reach a multi-GPU
+node, the workstation among them; whether to relax that for the operator's own machine, once the monitors-off detector exists, is the
+operator's. Nothing here was run live: A8 in the step report is the first.

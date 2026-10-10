@@ -466,6 +466,20 @@ strict-validated at ack time — a malformed fleet job dies at the 400 with a cl
 never mid-render. Typed run-graph defers (`VENV_INCOHERENT`, `SATISFIER_SPAWN_FAILED`, `NODE_CLASS_MISSING`, …)
 surface in the job's `error` field as `code: detail`.
 
+**A run-graph also checks the files it names, at the door** (ADR 0082, Amendment 1). Before it writes a temp file, takes a lease
+or starts ComfyUI, the node reads the graph for the model files its loaders open (any string input under a key containing `_name`
+that ends `.safetensors`, `.gguf`, `.pth`, `.pt`, `.ckpt` or `.sft`) and the images its `LoadImage` nodes read. Each weight file must
+exist **by name** under any class directory of any of the node's models roots (`<comfy_dir>/models/*`, every `extra_model_paths.yaml`
+entry); each input image must be in `<comfy_dir>/input` (`output` or `temp` when its `[output]` / `[temp]` annotation says so). A node
+that lacks one answers **503** (the re-placeable "this node cannot run this now", the same refusal as a route that is not CONFIGURED)
+naming what is missing, six names and then a count, and creates no job: the delegator places the graph on the next node instead of
+this one cold-starting ComfyUI to defer. **Input images do not travel with a graph** (`/fleet/dispatch` carries JSON, and the
+media-job door carries no input for `run-graph`), so an image the node does not hold cannot be sent to it; the refusal says so. A
+model the graph's manifest tells the node to fetch (a `models[]` entry with a `source_url`) is not refused. The check is by name
+(a same-named file of other bytes is held) and a name that is absolute or climbs with `..` is never looked up. Health gains no
+key for it: a delegator requires the node to run its own release. A graph that names no file is admitted as before, on a node with
+no models root too.
+
 ## Pipeline-job task families
 
 `pipelines` (`internal/config` `Config.Pipelines map[string]PipelineSpec`) lets this node

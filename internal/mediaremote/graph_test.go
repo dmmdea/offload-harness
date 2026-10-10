@@ -388,6 +388,7 @@ func TestTheDefaultFloorKeysOnTheFamilyAndTheGraphsHeight(t *testing.T) {
 		{"the caller's zero lifts it", graphWith(1280), map[string]any{"model_family": "wan22", "min_vram_gb": 0}, 0},
 		{"a number in a string (the CLI)", graphWith(480), map[string]any{"min_vram_gb": "12"}, 12},
 		{"a JSON number", graphWith(480), map[string]any{"min_vram_gb": float64(12)}, 12},
+		{"a blank numeral is no number given, so the default applies", graphWith(1280), map[string]any{"model_family": "wan22", "min_vram_gb": " "}, 16},
 	} {
 		got, why := floor(c.graph, c.extra)
 		if got != c.want {
@@ -412,7 +413,7 @@ func TestMinVRAMMustBeANonNegativeNumber(t *testing.T) {
 			t.Errorf("min_vram_gb %v must be a contract refusal naming it, got %v", bad, err)
 		}
 	}
-	for _, ok := range []any{0, 16, "16", 15.5, "0"} {
+	for _, ok := range []any{0, 16, "16", 15.5, "0", "", " "} {
 		if _, err := plan(graphReqOf(t, plainGraph, map[string]any{"min_vram_gb": ok})); err != nil {
 			t.Errorf("min_vram_gb %v is a number: %v", ok, err)
 		}

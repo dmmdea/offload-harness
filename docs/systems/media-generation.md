@@ -1648,6 +1648,10 @@ recorded as known offenders with their reason rather than silently skipped — a
 - [`internal/pipeline/medialane.go`](../../internal/pipeline/medialane.go) — the read-only lane question;
   [`internal/mediaremote/place.go`](../../internal/mediaremote/place.go) and
   [`identity.go`](../../internal/mediaremote/identity.go) — overflow placement and the strict match
+- [`internal/mediacap/graphfiles.go`](../../internal/mediacap/graphfiles.go) — the files a graph names and which of them a tree
+  lacks; [`internal/fleetnode/graph_files.go`](../../internal/fleetnode/graph_files.go) — the node's 503 at the door;
+  [`internal/pipeline/medialane_graph.go`](../../internal/pipeline/medialane_graph.go) — the lane question for a whole-node graph;
+  [`internal/mediaremote/graph.go`](../../internal/mediaremote/graph.go) — the one-card rule, `min_vram_gb` and its default table
 - [`render/compose-hyperframes.mjs`](../../render/compose-hyperframes.mjs) — the composition runner:
   env allowlist, subcommand allowlist, `--json` everywhere, lint → check → render → ffprobe gate,
   typed `COMPOSE-FAIL` classes
@@ -1885,7 +1889,8 @@ render on a fleet node and get the output back hash-verified. The other media to
 - `local` always runs here. It never touches the network.
 - `auto` (the default) runs here when this machine has the lane and the lane is free, and the call is then byte-identical to
   one made before the route existed. When the lane exists and is NOT free, an image call may go to an idle node that renders
-  the same recipe instead of waiting ([Overflow](#overflow-a-busy-lane-places-an-image-call-on-the-fleet-adr-0082) below);
+  the same recipe instead of waiting ([Overflow](#overflow-a-busy-lane-places-an-image-call-on-the-fleet-adr-0082) below), and a
+  whole-node graph to an idle single-card node that holds its files ([Graphs](#graphs-on-the-fleet-adr-0082-amendment-1) below);
   nothing else about `auto` changed. "Has the lane" is read from the files, not the binding: `mediacap` derives the route (the script,
   the weights its graph loads, the custom nodes it names), so a default config, which binds every script, does not make a
   thin client look like a render box. With no lane here, `auto` goes to a node from `delegate_remotes`; with no lane and
@@ -2048,8 +2053,8 @@ it exists. A call that ran is never annotated.
 
 **What does not overflow.** A call that carries a `waiter_token` (it resumes a place in the local line and keeps it; the token
 of the first queued answer simply lapses after its grace if the call went to a node instead), a call that runs under a lease its
-process inherited, and anything but an image job: graphs arrive with their own file check (a whole-node graph placed on a
-multi-GPU node would land on its display card), and video, animation and audio carry no per-family identity yet.
+process inherited, and anything but an image job or a whole-node graph ([Graphs on the fleet](#graphs-on-the-fleet-adr-0082-amendment-1)
+below): video, animation and audio carry no per-family identity yet.
 
 **Named limits.** One first-in-first-out line per delegating machine; cross-machine order is node arrival; late binding (a ticket
 that starts on the first lane that frees) is the next step. Every remote job pays ComfyUI's cold start (zero-warm). The same
@@ -2065,6 +2070,64 @@ order they join and takes none); the ticket queue of the next step keeps a call'
 read `image_recipes` on the target and, on a machine that also runs `fleet-serve`, on the delegator's own node: the digest of the
 family you will name there is the one the target's row must equal. Neither `offload_status` nor `cluster[]` shows a local digest
 (`cluster[]` names the keys that differ, not the digest); a delegator that does not serve has no surface that prints its own.
+
+## Graphs on the fleet (ADR 0082, Amendment 1)
+
+`offload_run_graph` (CLI `run-graph`) with `route` `auto` goes through the same overflow as an image call when its own lane is
+not free, and every route that sends a graph to a node holds it to the rules below. The graph is the caller's, so it has no
+recipe and no family: what makes a node a fit is that it **holds the files the graph names**, and the node says so itself.
+
+**The node's door (the ACK check).** Before it writes a temp file, takes a lease or starts ComfyUI, `buildRunGraph`
+(`internal/fleetnode/graph_files.go`, with `mediacap.ScanGraph` and `mediacap.MissingModelFiles`) reads the graph:
+
+- a **weight file** is any string input under a key that contains `_name` (`ckpt_name`, `unet_name`, `clip_name1`, `vae_name`,
+  `lora_name`, `control_net_name`, ...) whose value ends in `.safetensors`, `.gguf`, `.pth`, `.pt`, `.ckpt` or `.sft`. It must
+  resolve **by name** under **any class directory of any models root** of the node (`<comfy_dir>/models/*` and every entry of
+  `extra_model_paths.yaml`), as a ComfyUI loader opens it: the name relative to the class directory, subfolders included, never a
+  search for the basename. The class is not matched to the loader (the harness does not know every loader; ComfyUI's own
+  preflight stays the authority on a file under a class its loader will not open).
+- an **input image** is the `image` input of a `LoadImage`, `LoadImageMask` or `LoadImageOutput` node; it must be in
+  `<comfy_dir>/input` (or `output` or `temp` when its `[output]` / `[temp]` annotation says so). **Input images do not travel with a
+  graph**: `/fleet/dispatch` carries JSON and the media-job door carries no input for `run-graph`, so a node that lacks the image
+  cannot be given it, and the refusal says so (carrying them is a named seam, not built).
+- a name that is absolute or climbs out with `..` is never looked up and reads as missing (the name is data from a peer).
+- a model the **manifest** tells the node to fetch (a `models[]` entry with a `source_url`) is not missing: the satisfier
+  downloads it before it starts ComfyUI, as it always did.
+
+A node that lacks any of them answers **503** with the existing route-not-ready refusal, naming what is missing (six names, then
+a count), and **no job, temp file or lease exists**. 503 is what every delegator re-places, so the call goes to the next node
+instead of this one cold-starting ComfyUI to defer. The check is by **name, not content** (a same-named file of other bytes is
+held, as for a recipe digest), and the other input loaders (`LoadVideo`, `LoadAudio`, a custom node's own file key) are not read.
+
+**Which node.** A candidate serves `run-graph` with `run_graph` CONFIGURED when it reports its routes, runs this release (the
+file check ships with it), holds no lease of any class, is not this machine's own node, and passes the two rules below. The
+lane question is the whole-node reading of `Pipeline.MediaLaneFree` (`internal/pipeline/medialane_graph.go`: any lease,
+in-process slot or place in line, and the host's memory against the media class default, the largest family the box binds, since a
+graph's weights cannot be named), under the same relaxation contract as the image's (`TestMediaLaneFreeGraphNeverRefusesAGrant`,
+`TestMediaLaneFreeGraphWritesNothing`). The graph travels as it is: no family, no digest, `out_dir` and `min_vram_gb` never. A node's
+503 moves the call on like any refusal at the door and counts toward the three attempts; when nothing admits, the call waits in
+this machine's own queue and the answer carries `cluster[]` naming, per node, the file it lacks. A graph that names `devices`, one
+that carries a `waiter_token` and one under an inherited lease are not overflowed.
+
+**One card.** A graph that names no devices holds the whole node and runs in the default ComfyUI instance, which sees every
+card. On a node with several, the delegator cannot tell which card that instance picks, and it may be the display card. So a
+whole-node graph is placed **only on a node that publishes exactly one card** in `gpu_devices`: a node with more is a named miss
+(`has 3 cards, ...`), and so is a node that publishes none (unknown is never a pass). This is a rule of this client's placement, and
+it covers every remote placement of a graph (the overflow, `route remote`, a thin client): this client cannot send a graph to a
+multi-GPU node. It does not change what such a node does with a graph sent to it by hand, nor a graph run on its own machine, whose
+whole-node instance can still pick the display card; that local case is parked.
+
+**`min_vram_gb`.** `offload_run_graph` and `run-graph --min-vram-gb N` ask for a node whose **largest** card is at least N GB;
+a node that publishes no cards cannot be shown to have it. A card counts as the size it rounds to: nvidia-smi reports MiB/1024,
+so a 16 GB card reads 15.92 or 15.93 GiB and a literal comparison with 16 would shut out every 16 GB card
+(`TestMinVRAMReadsTheLargestCardAndTheNominalSize`). With no argument, a graph that names `model_family` `wan22` (`wan2.2` and `wan`
+are the same) via `model_family` / `--model-family` and carries a `height` input of 720 or more (the tallest of any node; none = no
+floor) gets a floor of 16 GB. **That row is chosen from the film owner's stated constraint that Wan 2.2 14B at 720p needs a 16 GB
+card; the harness did not measure it**, and every row that cites it says "chosen". The caller's number wins over it and 0 lifts it.
+The floor filters **remote** candidates only: the local lane is this machine's own grant, and `route local` never reads it.
+
+**Not built.** Input images for graphs; a content check of the files; `devices` on a remote graph; LoadVideo and LoadAudio inputs; a
+default floor for other families or for video (`offload_generate_video` takes no `min_vram_gb`).
 
 ## Comfy workflow templates catalog (phase A)
 

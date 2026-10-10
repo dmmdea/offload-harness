@@ -6,6 +6,35 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added — a whole-node graph runs on the fleet: a node checks the files it names, one card only, and a VRAM floor (F32, ADR 0082 Amendment 1)
+
+- **A node refuses a run-graph that names a file it does not hold, before any job exists.** `/fleet/dispatch` reads the graph at
+  the door (`mediacap.ScanGraph`): a string input under a key containing `_name` that ends `.safetensors`, `.gguf`, `.pth`, `.pt`,
+  `.ckpt` or `.sft` is a weight file, and the `image` of a `LoadImage`, `LoadImageMask` or `LoadImageOutput` node is an input image.
+  A weight file must exist by name under any class directory of any models root (the same resolver the host-RAM estimate uses); an
+  input image must be in the ComfyUI input, output or temp directory. A node that lacks one answers **503** with the existing
+  re-placeable route-not-ready refusal naming it (six names, then a count), before a temp file, a lease or ComfyUI exists, so a
+  delegator moves on instead of a node cold-starting ComfyUI to defer. **Input images do not travel with a graph**, and the refusal
+  says so. A model the manifest tells the node to fetch (`source_url`) is not refused; a name that is absolute or climbs with `..` is
+  never looked up. The check is by name, not content.
+- **A busy lane places a whole-node graph on an idle node.** `Pipeline.MediaLaneFree` answers for a `run_graph` that names no
+  devices with the whole-node reading (any lease, slot or place in line; host RAM against the media class default) under the image
+  probe's contract (a relaxation of the real admission, held by a differential test; it writes nothing). The overflow of 0.179.0
+  now covers it: no family and no digest travel, a node's 503 at the door moves the call to the next node, and the answer carries
+  `cluster[]` naming, per node, the file it lacks. A graph with `devices`, a `waiter_token` or an inherited lease stays here.
+- **A whole-node graph is placed only on a node that publishes exactly one card.** A graph that names no devices runs in the default
+  ComfyUI instance, which sees every card, and on a multi-GPU node could land on its display card. A node with more than one card is
+  a named miss, and so is a node that publishes no `gpu_devices`. This covers every remote placement of a graph, `route remote` and a
+  thin client included: this client no longer sends a graph to a multi-GPU node. (A graph sent to such a node by hand, or run on its
+  own machine, is unchanged; that local case stays parked.)
+- **`min_vram_gb` / `--min-vram-gb`, and `model_family` / `--model-family`, on `offload_run_graph` / `run-graph`.** Only a node whose
+  largest `gpu_devices[].vram_total_gb` is at least N GB takes the graph; a card counts as the size it rounds to (nvidia-smi reports
+  a 16 GB card as 15.92 GiB). With no argument, a graph that names `model_family` `wan22` and carries a `height` input of 720 or more
+  gets a 16 GB floor: a row **chosen** from the film owner's stated constraint that Wan 2.2 14B at 720p needs a 16 GB card, not
+  measured, and labelled so in every answer that cites it. The caller's number wins, 0 included. It filters remote candidates only.
+- Not changed, and said: no VERSION or buildinfo bump. Input images, a content check of the files, `devices` on a remote graph and
+  LoadVideo / LoadAudio inputs are named seams, not built. Nothing here was run live: the live acceptance (A8) is the first.
+
 ## [0.179.0] - 2026-10-10 - a busy image lane overflows to an idle node that renders the same recipe, and every GPU lease path has a host-RAM brake
 
 ### Added — a busy image lane overflows to an idle node that renders the same recipe (F52, ADR 0082)
