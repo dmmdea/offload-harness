@@ -506,7 +506,7 @@ claim rather than a citation. The MECHANISM is independently supported: long-con
 degradation, measured across 18 SOTA models by Chroma's context-rot study and by Stanford's
 lost-in-the-middle work. The lane rests on the mechanism.
 
-Four design choices are load-bearing rather than incidental:
+These design choices are load-bearing rather than incidental:
 
 - **The diff rides in the GOAL, not in a context doc.** A context doc becomes a file the seat
   must find with `list_dir` and open with `read_file`, and the measured failure mode of a small
@@ -517,11 +517,15 @@ Four design choices are load-bearing rather than incidental:
   content check would either punish a clean diff or pass anything — the decorative acceptance
   `delegate.LintAcceptance` exists to name. What replaces it is a check the harness can actually
   make: a finding naming a file the diff never touched is dropped and reported as
-  `dropped_ungrounded`, since an invented path is how a small seat fails here.
+  `dropped_ungrounded`, since an invented path is how a small seat fails here, and a line with
+  no severity, no file and no why (a bare claim) is dropped and reported as `dropped_hollow`.
 - **Findings arrive as an array of strings.** `gbnf.FromJSONSchema` compiles any array to an
   array of strings, so an object-item schema would have become strings anyway; the prompt asks
   for one `severity | file:line | claim | why` line per defect and `ParseFindings` reads them
   back tolerantly, keeping what it cannot parse as an unranked claim rather than dropping it.
+  Whether such a claim *survives* is `Report`'s call (`DropHollow`): a line that carries any
+  structure — a known severity, a file or a why — is kept however badly the rest is formatted,
+  and only a bare claim is dropped, counted.
 - **An empty findings list is never published unless the seat EARNED it.** "No findings" is the
   one result a reader might take as reassurance, and a broken run reaches exactly that shape:
   `agent/loop.go` returns `stop_reason:"done"` as soon as the model stops requesting tools with
@@ -533,11 +537,24 @@ Four design choices are load-bearing rather than incidental:
   explicit `NONE` verdict the prompt asks for, and the handler defers with a distinct reason
   when it is absent. It checks for a signal, never for quality. When the list is genuinely
   empty, the response says in words that it is not a verification.
-- **Three counts say what is NOT in the list**, published on the same terms (present when
-  non-zero): `dropped_ungrounded`, `dropped_echo` (the prompt's own field spec or worked example
-  handed back as a finding — measured behaviour, so it is a byte-equality guard rather than a
-  human's vigilance), and `truncated_by_cap`. The `note` on an empty list is gated on them:
-  "found nothing" beside a non-zero drop count is false, and says so differently.
+- **A list the filters emptied is not a review either (0.178.0).** The gate above used to stand
+  down whenever any line had been dropped, on the reasoning that a run which produced text is
+  not the broken-run shape. A hollow or invented review produces text too: on 2026-10-09 a small
+  seat answered a 228-line diff with four bare claims that merely restated it, and the caller
+  got four findings with every other field empty, published as a success with no note and no
+  counts. Now whenever **no finding survives** and the raw answer does not read as a clean
+  `NONE`, the lane defers (`defer_class: abstention`), whatever was dropped, and the deferral
+  carries the non-zero counts and a reason naming them ("none of the seat's 4 findings survived
+  the lane's filters (4 had no severity, file or why) …"). A clean `NONE` with zero findings
+  stays an empty, noted result; the only emptied-list success left is that same clean verdict
+  beside lines that were all dropped, and its note says so.
+- **Five counts say what is NOT in the list**, published on the same terms (present when
+  non-zero, on a deferral as well as a delivered review): `dropped_ungrounded`, `dropped_echo`
+  (the prompt's own field spec or worked example handed back as a finding — measured behaviour,
+  so it is a byte-equality guard rather than a human's vigilance), `dropped_hollow` (no known
+  severity, no file and no why), `dropped_duplicate` (the same defect reported more than once)
+  and `truncated_by_cap`. The `note` on an empty list is gated on them: "found nothing" beside a
+  non-zero drop count is false, and says so differently.
 
 Everything the lane returns is ADVISORY: it never gates a merge and never substitutes for the
 final does-it-actually-work verification, which stays with the caller — as do security review,

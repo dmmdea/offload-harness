@@ -171,10 +171,98 @@ func TestParseFindingsToleratesHowASeatActuallyWrites(t *testing.T) {
 	if got[2].Severity != "minor" || got[2].File != "notes.md" || got[2].Line != 0 {
 		t.Fatalf("case + file without a line parsed wrong: %+v", got[2])
 	}
-	// A line the seat wrote in its own shape is KEPT as a claim, never dropped: silently
-	// discarding it would turn a reviewer that did work into a clean bill of health.
+	// A line the seat wrote in its own shape is KEPT by the parser as an unranked claim, never
+	// silently discarded: the parser must not turn a reviewer that did work into an empty
+	// list. Whether a bare claim SURVIVES is Report's call (DropHollow), where the drop is
+	// counted and an emptied list defers instead of reading as a clean review.
 	if got[3].Claim != "the diff looks fine to me" || got[3].Severity != "" {
 		t.Fatalf("an unformatted line must survive as an unranked claim: %+v", got[3])
+	}
+}
+
+// A HOLLOW finding is a bare claim: no known severity, no file and no why. Any one of the three
+// is structure, and a line carrying it survives however badly the rest was formatted — that is
+// what is left of ParseFindings' "nothing is dropped for being badly formatted" rule.
+func TestDropHollowKeepsAnyStructureAndDropsTheBareClaim(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		f      Finding
+		hollow bool
+	}{
+		{"claim only", Finding{Claim: "adds a null check before the call"}, true},
+		{"an unrecognised label alone is not structure", Finding{Severity: "critical", Claim: "adds a null check before the call"}, true},
+		{"known severity only", Finding{Severity: "minor", Claim: "adds a null check before the call"}, false},
+		{"file only", Finding{File: "run.go", Claim: "adds a null check before the call"}, false},
+		{"file and line only", Finding{File: "run.go", Line: 7, Claim: "adds a null check before the call"}, false},
+		{"why only", Finding{Claim: "adds a null check before the call", Why: "a nil input no longer panics"}, false},
+		{"all four fields", Finding{Severity: "severe", File: "run.go", Line: 7, Claim: "off-by-one", Why: "reads past the end"}, false},
+		{"known severity with an empty claim is still a severity", Finding{Severity: "severe"}, false},
+	} {
+		kept, dropped := DropHollow([]Finding{tc.f})
+		if tc.hollow && (dropped != 1 || len(kept) != 0) {
+			t.Errorf("%s: want it dropped and counted, got kept=%+v dropped=%d", tc.name, kept, dropped)
+		}
+		if !tc.hollow && (dropped != 0 || len(kept) != 1) {
+			t.Errorf("%s: carries structure and must survive, got kept=%+v dropped=%d", tc.name, kept, dropped)
+		}
+	}
+}
+
+// The same rule through the parser, on the shapes a seat actually writes: bare prose is hollow,
+// and each single-field line below parses to exactly one structured field.
+func TestDropHollowOnWhatParseFindingsMakesOfRealLines(t *testing.T) {
+	kept, dropped := DropHollow(ParseFindings([]string{
+		"the new guard restates what the diff already shows", // bare prose
+		"Added a null check before the dereference",          // bare prose
+		"critical | run.go",                // unknown label, the path lands in Claim
+		"severe | the loop bound is wrong", // severity only
+		"run.go:5 | off by one",            // file only
+		"the loop | reads past the end",    // why only
+	}))
+	if dropped != 3 {
+		t.Fatalf("the three bare claims must be dropped and counted, got %d: kept=%+v", dropped, kept)
+	}
+	if len(kept) != 3 || kept[0].Severity != "severe" || kept[1].File != "run.go" || kept[2].Why != "reads past the end" {
+		t.Fatalf("the three structured lines must survive in the seat's order: %+v", kept)
+	}
+}
+
+// The live shape (2026-10-09, a 228-line diff on a small seat): every line a bare claim that
+// merely restated the diff. Nothing survives, all four are counted, and nothing else is.
+func TestReportDropsAnAllHollowReviewAndCountsEveryLine(t *testing.T) {
+	diff := "--- a/alarm.go\n+++ b/alarm.go\n@@ -1 +1 @@\n+x\n"
+	rep := Report([]string{
+		"The alarm handler now checks for a nil alarm before dispatching",
+		"A new retry counter is incremented on every failed dispatch",
+		"The dispatch loop was moved into its own function",
+		"Logging was added around the alarm acknowledgement call",
+	}, diff, 0)
+	if len(rep.Findings) != 0 {
+		t.Fatalf("a hollow review must publish no findings: %+v", rep.Findings)
+	}
+	if rep.DroppedHollow != 4 {
+		t.Fatalf("all four lines must be counted as hollow, got %d", rep.DroppedHollow)
+	}
+	if rep.DroppedUngrounded+rep.DroppedEcho+rep.DroppedDuplicate+rep.TruncatedByCap != 0 {
+		t.Fatalf("no other count may move: %+v", rep)
+	}
+}
+
+// Hollow lines beside real ones are dropped one by one, and the three filters that can empty a
+// list each keep their own count — a hollow line is never booked as an ungrounded or echoed one.
+func TestReportCountsHollowBesideSurvivorsEchoesAndInventedFiles(t *testing.T) {
+	diff := "--- a/run.go\n+++ b/run.go\n@@ -1 +1 @@\n+x\n"
+	rep := Report([]string{
+		"severe | run.go:5 | off-by-one | reads past the end",
+		"adds a bounds check",
+		"severe | ghost.go:1 | invented | not in the diff",
+		fieldSpec,
+	}, diff, 0)
+	if len(rep.Findings) != 1 || rep.Findings[0].Claim != "off-by-one" {
+		t.Fatalf("the one structured, grounded finding must survive: %+v", rep.Findings)
+	}
+	if rep.DroppedHollow != 1 || rep.DroppedUngrounded != 1 || rep.DroppedEcho != 1 {
+		t.Fatalf("each filter must count its own line: %+v", rep)
 	}
 }
 

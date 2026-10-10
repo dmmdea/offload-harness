@@ -236,10 +236,11 @@ func TestReviewDiffDefersOnAnEmptyReviewItDidNotEarn(t *testing.T) {
 	}
 }
 
-// "found nothing" beside a non-zero drop count is simply false: the reviewer found things and
-// the harness discarded them. An invented path is documented as the ordinary way a small seat
-// fails here, so this combination is live rather than theoretical.
-func TestReviewDiffNoteDoesNotContradictTheDropCount(t *testing.T) {
+// A list the FILTERS emptied is not a review (0.178.0). Until then a run whose findings were
+// all dropped came back as a success carrying a note — a hollow or invented review published
+// as if it were a clean one. It now defers like a list the seat left empty, and the deferral
+// carries the count and a reason naming it, so the caller learns why and reviews the diff.
+func TestReviewDiffAllUngroundedDefersAndNamesTheDrops(t *testing.T) {
 	s := askTestServer(t, func(_ context.Context, _ core.AgentContract, _ delegate.LocalOptions) (core.AgentWireResult, error) {
 		return seatFindings(
 			"severe | ghost.go:1 | invented file | not in the diff",
@@ -253,18 +254,152 @@ func TestReviewDiffNoteDoesNotContradictTheDropCount(t *testing.T) {
 		t.Fatalf("handleReviewDiff: %v", err)
 	}
 	m := decodeResult(t, res)
-	if m["deferred"] != nil {
-		t.Fatalf("a run that produced text is not the broken-run shape: %v", m)
+	if m["deferred"] != true || m["defer_class"] != string(core.DeferClassAbstention) {
+		t.Fatalf("a list emptied by filtering must defer as an abstention, not publish a success: %v", m)
 	}
-	if m["dropped_ungrounded"].(float64) != 2 {
-		t.Fatalf("both invented findings must be counted: %v", m["dropped_ungrounded"])
+	if m["dropped_ungrounded"] != float64(2) {
+		t.Fatalf("both invented findings must be counted ON THE DEFER: %v", m)
+	}
+	reason, _ := m["reason"].(string)
+	if !strings.Contains(reason, "2 named files the diff never touched") || !strings.Contains(reason, "clean NONE verdict") {
+		t.Errorf("the reason must name the drops and the missing verdict: %q", reason)
+	}
+	if m["findings"] != nil || m["note"] != nil {
+		t.Errorf("a defer carries neither a findings list nor the empty-review note: %v", m)
+	}
+}
+
+// The exact live shape (2026-10-09, a 228-line diff on a small seat): four lines, each only a
+// claim — no severity, no file, no why — that merely restated the diff. They arrived as four
+// findings with every other field empty, published as a success with no note and no counts.
+func TestReviewDiffDefersWhenEveryFindingIsHollow(t *testing.T) {
+	s := askTestServer(t, func(_ context.Context, _ core.AgentContract, _ delegate.LocalOptions) (core.AgentWireResult, error) {
+		return seatFindings(
+			"The loop now iterates over every element of the slice",
+			"A bounds check was added before the index is used",
+			"The result of the iteration is returned to the caller",
+			"The function signature was left unchanged",
+		), nil
+	})
+	res, err := s.handleReviewDiff(context.Background(), callReq(reviewArgs(t, map[string]any{
+		"diff": reviewDiff, "task": "iterate over every element exactly once",
+	})))
+	if err != nil {
+		t.Fatalf("handleReviewDiff: %v", err)
+	}
+	m := decodeResult(t, res)
+	if m["deferred"] != true || m["defer_class"] != string(core.DeferClassAbstention) {
+		t.Fatalf("a hollow review must defer as an abstention: %v", m)
+	}
+	if m["dropped_hollow"] != float64(4) {
+		t.Fatalf("all four hollow lines must be counted on the defer: %v", m)
+	}
+	if reason, _ := m["reason"].(string); !strings.Contains(reason, "4 had no severity, file or why") {
+		t.Errorf("the reason must say the findings were hollow: %q", reason)
+	}
+	if m["findings"] != nil {
+		t.Errorf("a defer must not carry a findings list: %v", m["findings"])
+	}
+}
+
+// Every filter that can empty a list is named in the one reason, each with its own count.
+func TestReviewDiffDeferReasonNamesEachFilterThatEmptiedTheList(t *testing.T) {
+	s := askTestServer(t, func(_ context.Context, _ core.AgentContract, _ delegate.LocalOptions) (core.AgentWireResult, error) {
+		return seatFindings(
+			"The loop now iterates over every element of the slice",
+			"severe | ghost.go:1 | invented file | not in the diff",
+			exampleReviewLine,
+		), nil
+	})
+	res, err := s.handleReviewDiff(context.Background(), callReq(reviewArgs(t, map[string]any{
+		"diff": reviewDiff, "task": "iterate over every element exactly once",
+	})))
+	if err != nil {
+		t.Fatalf("handleReviewDiff: %v", err)
+	}
+	m := decodeResult(t, res)
+	if m["deferred"] != true {
+		t.Fatalf("hollow + ungrounded + echo, nothing surviving, must defer: %v", m)
+	}
+	for _, key := range []string{"dropped_hollow", "dropped_ungrounded", "dropped_echo"} {
+		if m[key] != float64(1) {
+			t.Errorf("%s must ride the defer: %v", key, m)
+		}
+	}
+	reason, _ := m["reason"].(string)
+	for _, want := range []string{"none of the seat's 3 findings", "1 had no severity, file or why", "1 named files the diff never touched", "1 handed the prompt's own template back"} {
+		if !strings.Contains(reason, want) {
+			t.Errorf("the reason must contain %q: %q", want, reason)
+		}
+	}
+}
+
+// exampleReviewLine is the prompt's worked example, handed back verbatim (the echo the lane
+// counts); reviewlane keeps the text unexported, so the front-door test spells it out.
+const exampleReviewLine = "moderate | internal/store/load.go:57 | the returned error is discarded with _ | a failed load reads as an empty store"
+
+// The deferral did not remove the honest clean result: a seat whose own raw answer is the
+// explicit NONE verdict still earns an empty list and its note. The one corner that keeps the
+// "never contradict the drop count" property alive is a clean verdict beside lines that were
+// all dropped (a self-contradicting answer, or a re-pack that invented a line the answer never
+// held): empty, counted, and worded as what it is.
+func TestReviewDiffCleanVerdictBesideDroppedLinesStaysAnEmptyResult(t *testing.T) {
+	s := askTestServer(t, func(_ context.Context, _ core.AgentContract, _ delegate.LocalOptions) (core.AgentWireResult, error) {
+		return seatRaw("NONE", "severe | ghost.go:1 | invented file | not in the diff", "The loop now iterates over every element"), nil
+	})
+	res, err := s.handleReviewDiff(context.Background(), callReq(reviewArgs(t, map[string]any{
+		"diff": reviewDiff, "task": "iterate over every element exactly once",
+	})))
+	if err != nil {
+		t.Fatalf("handleReviewDiff: %v", err)
+	}
+	m := decodeResult(t, res)
+	if m["deferred"] != nil {
+		t.Fatalf("an explicit NONE verdict is the one thing that earns an empty list: %v", m)
+	}
+	if findings, ok := m["findings"].([]any); !ok || len(findings) != 0 {
+		t.Fatalf("the list is empty, and published as [] rather than null: %v", m["findings"])
+	}
+	if m["dropped_ungrounded"] != float64(1) || m["dropped_hollow"] != float64(1) {
+		t.Fatalf("both drops must be counted: %v", m)
 	}
 	note, _ := m["note"].(string)
 	if strings.Contains(note, "found nothing in the diff") {
-		t.Errorf("the note contradicts the drop count it ships beside: %q", note)
+		t.Errorf("the note contradicts the drop counts it ships beside: %q", note)
 	}
-	if !strings.Contains(note, "survived filtering") {
+	if !strings.Contains(note, "survived filtering") || !strings.Contains(note, "no severity, file or why") {
 		t.Errorf("the note must say what actually happened: %q", note)
+	}
+}
+
+// dropped_hollow rides a delivered review on the same terms as the other counts: present when
+// non-zero, beside the findings that did survive.
+func TestReviewDiffPublishesDroppedHollowBesideSurvivors(t *testing.T) {
+	s := askTestServer(t, func(_ context.Context, _ core.AgentContract, _ delegate.LocalOptions) (core.AgentWireResult, error) {
+		return seatFindings(
+			"severe | run.go:5 | off-by-one in the loop bound | indexes one past the end",
+			"The loop now iterates over every element of the slice",
+			"A bounds check was added before the index is used",
+		), nil
+	})
+	res, err := s.handleReviewDiff(context.Background(), callReq(reviewArgs(t, map[string]any{
+		"diff": reviewDiff, "task": "iterate over every element exactly once",
+	})))
+	if err != nil {
+		t.Fatalf("handleReviewDiff: %v", err)
+	}
+	m := decodeResult(t, res)
+	if m["deferred"] != nil {
+		t.Fatalf("one finding survived, so this is a review: %v", m)
+	}
+	if findings, _ := m["findings"].([]any); len(findings) != 1 {
+		t.Fatalf("want the one structured finding: %v", m["findings"])
+	}
+	if m["dropped_hollow"] != float64(2) {
+		t.Fatalf("the two bare claims must be counted: %v", m)
+	}
+	if m["note"] != nil {
+		t.Errorf("the empty-review note belongs only on an empty list: %v", m["note"])
 	}
 }
 

@@ -237,12 +237,14 @@ func BuildContract(task, diff string) (core.AgentContract, error) {
 }
 
 // Result is everything one review publishes: the findings the caller is shown, plus the
-// four counts that say what is NOT in that list.
+// five counts that say what is NOT in that list.
 //
 // The counts are not telemetry. A short or empty findings list is the shape a reader most
 // easily misreads, and each count means something different about WHY it is short:
 // DroppedUngrounded says the seat named a file the diff does not touch (it invented a path),
 // DroppedEcho says it handed the prompt's own template back instead of reviewing,
+// DroppedHollow says it wrote lines with no structure at all — no severity, no file, no why,
+// only a claim (the 2026-10-09 report: four of them, each merely restating the diff),
 // DroppedDuplicate says the same defect was reported more than once, and TruncatedByCap says
 // more was found than the caller asked to see. Counting one and swallowing the others would
 // make the published list quietly unreadable — the same reason dropped-but-uncounted was
@@ -251,13 +253,15 @@ type Result struct {
 	Findings          []Finding
 	DroppedUngrounded int
 	DroppedEcho       int
+	DroppedHollow     int
 	DroppedDuplicate  int
 	TruncatedByCap    int
 }
 
 // Report turns the seat's raw finding lines into what the caller is shown: template echoes
-// removed, parsed, grounded against the diff's own files, deduplicated, severity-ranked,
-// capped — with a count for each of the four ways a line can fail to reach the caller.
+// removed, parsed, hollow lines removed, grounded against the diff's own files,
+// deduplicated, severity-ranked, capped — with a count for each of the five ways a line can
+// fail to reach the caller.
 //
 // Dedupe runs BEFORE capFindings on purpose (register D-90): the seat routinely restates the
 // same defect — once per hunk it touches, or once plainly and once with the file:line it
@@ -268,13 +272,17 @@ type Result struct {
 // thing because duplicates padded the queue ahead of it.
 func Report(lines []string, diff string, max int) Result {
 	lines, echoed := dropTemplateEchoes(lines)
-	kept, ungrounded := Ground(ParseFindings(lines), FilesInDiff(diff))
+	// Hollow lines go before grounding so neither filter ever sees the other's: a hollow line
+	// names no file, and Ground only judges findings that do.
+	parsed, hollow := DropHollow(ParseFindings(lines))
+	kept, ungrounded := Ground(parsed, FilesInDiff(diff))
 	deduped, duplicate := Dedupe(kept)
 	ranked := rankFindings(deduped, capFindings(max))
 	return Result{
 		Findings:          ranked,
 		DroppedUngrounded: ungrounded,
 		DroppedEcho:       echoed,
+		DroppedHollow:     hollow,
 		DroppedDuplicate:  duplicate,
 		// rankFindings reorders and truncates and does nothing else, so the difference
 		// between what went in (post-dedupe) and what came out IS the cap's doing.
@@ -374,6 +382,36 @@ func Dedupe(in []Finding) ([]Finding, int) {
 		if keep[i] {
 			out = append(out, f)
 		}
+	}
+	return out, dropped
+}
+
+// DropHollow removes findings that carry no structure at all — no known severity, no file
+// and no why, only a claim — and counts them as DroppedHollow.
+//
+// It exists because ParseFindings keeps every line it cannot read, and a small seat that
+// ignores the line format entirely produces nothing BUT such lines. The live report (2026-10-09,
+// a 228-line diff on a small seat) was four findings with severity "", file "", line 0 and why "",
+// each claim merely restating the diff, published as a successful review. A hollow line names
+// no place to look, no consequence and no rank, so it cannot be triaged; it is the lane's version
+// of an echo — text shaped like a finding that reviews nothing.
+//
+// Dropping is safe only because it is COUNTED and because an emptied list now defers instead of
+// publishing (publishReview: a list emptied by filtering is not a review). That pair is what
+// ParseFindings' old "nothing is dropped for being badly formatted" rule was protecting — a
+// clean bill of health nobody issued — and it holds for every line that carries ANY structure:
+// a known severity, a file or a why still survives however badly the rest is formatted. An
+// unrecognised label alone ("critical | run.go") is not structure; it ranks last by design and
+// is exactly the claim-only shape this drops.
+func DropHollow(in []Finding) ([]Finding, int) {
+	out := make([]Finding, 0, len(in))
+	dropped := 0
+	for _, f := range in {
+		if !isKnownSeverity(f.Severity) && f.File == "" && f.Why == "" {
+			dropped++
+			continue
+		}
+		out = append(out, f)
 	}
 	return out, dropped
 }
@@ -497,7 +535,10 @@ const listMarkers = "-*•‣— \t"
 // wrote in its own shape survives as an unranked claim (Severity ""), because discarding it
 // would turn a reviewer that did work into an empty findings list — a clean bill of health
 // nobody issued. Only a blank line and the literal NONE (the "no defects" answer the prompt
-// asks for) are dropped.
+// asks for) are dropped HERE. The rule still holds for every line that carries any structure
+// (a known severity, a file or a why); the one shape it no longer protects is a bare claim,
+// which Report drops through DropHollow — counted, and safe because a list emptied by
+// filtering now defers instead of reading as a clean review.
 func ParseFindings(lines []string) []Finding {
 	out := make([]Finding, 0, len(lines))
 	for _, raw := range lines {
