@@ -1017,18 +1017,43 @@ contributes its `detail`, else `done` of `total`, else the raw line.
 `gpu reserve --for ... -- node render/comfy-generate.mjs ...` had its lease labelled "expired ... open to a takeover" at
 the end of its first term: the caller declared no progress contract, the lease recorded no owner it could tell apart,
 and the helpers never wrote a progress file, so nothing vouched for a job that was rendering normally. The wrapper form
-now closes both halves. **The wrapper declares the contract** when it wraps a helper that heartbeats
-(`comfy-generate`, `-render`, `-edit`, `-inpaint`, `-video`, `-animate`, `-music`, `-upscale` and `-run-graph`, found
-behind an interpreter in either path-separator style) and the caller declared none: a file `<state root>/progress/wrap-<pid>-<nanoseconds>.jsonl`
+now closes both halves. **The wrapper declares the contract** when the command it wraps *runs* a helper that
+heartbeats (`comfy-generate`, `-render`, `-edit`, `-inpaint`, `-video`, `-animate`, `-music`, `-upscale` and
+`-run-graph`) and the caller declared none. It finds the helper where the command names it: as an argument behind an
+interpreter (either path-separator style), in the inline command line of one (`cmd /c "node ..."`, `bash -c`,
+`pwsh -Command`), or in a **script the command runs**: the wrapper reads the script (`.cmd`, `.bat`, `.ps1`, `.sh`,
+`.bash`, `.py`, `.mjs`, `.js` or `.cjs`; the first 64 KiB, comment lines skipped) and the scripts that script names (at
+most 8 files, 2 scripts deep, a script named by file name alone is looked for beside the one that names it), looking for
+a helper's path: `set "R=...\comfy-generate.mjs"` in a batch file, `GEN="...comfy-generate.mjs"` in a shell script,
+the two shapes the long renders of this workspace take (`cmd /c render-both.cmd`, `bash render-card-v3.sh`; the first
+form of this change recognised only the direct `node comfy-generate.mjs`, and a recipe-wrapped render, the common case,
+was still labelled). It reads text and does not parse shell. A script it cannot find or open (a variable the wrapper does
+not have, a path it cannot read) is "nothing found", and the lease behaves as before. A script that names a helper but
+also runs long steps that are not render helpers (a CPU bake, a download that outlasts the stall window) reads
+`held-stalled` during them, as the undeclared job would have been labelled expired at the end of its first term: pass
+your own `--progress-file` for such a recipe, or run the helper directly. **`--progress-file auto`** asks for the minted
+file for a command the scan cannot read (a compiled driver, a script that builds the helper's name at run time): the
+wrapper mints it, records the contract (with your `--stall`, else 15 minutes) and hands the path over in
+`GPU_LEASE_PROGRESS_FILE`; whatever the command is, only a render helper that heartbeats writes to it, so one that does not
+reads `held-stalled` once the window has passed. `auto` is the wrapper form's: a `--detach` hold wraps no command and
+runs several over its life, so it declares nothing by itself and `--detach --progress-file auto` is refused; give it a
+file of your own, `--progress-file <path> --stall <window>`, which the helpers find through the lease record
+(`GPU_LEASE_DIR`/`GPU_LEASE_EPOCH`). The contract it declares is: a file `<state root>/progress/wrap-<pid>-<nanoseconds>.jsonl`
 and a stall window of 15 minutes (chosen, not measured: more than three times the longest quiet stretch a polling
 helper has, the 240 s `COMFY_DEAD_SEC` the poll loop itself tolerates), recorded on the lease like a `--progress-file`
 the caller passed (so the term cap is the 24 hours a progress contract gets). It prints one line saying so, creates the
 file just before the command starts (not at acquisition: the drain that follows can wait out a long seat turn, and a
 file that existed through it would read stalled while the wrapper waits), and removes it when the command ends; a
 wrapper killed before it could leaves a file the next wrapper that mints one removes after seven days
-(`gpulease.SweepMintedProgress`, inline, no timer). A `--progress-file` of the caller's own is kept as it is and is
-never removed. A command that is not one of those scripts (a bench, `sdcpp-generate`, a Go verb, which may overflow to
-another node and never poll here) gets nothing declared: a contract that nothing writes to would only read stalled.
+(`gpulease.SweepMintedProgress`, inline, no timer). Before the file exists and after it is removed (the queue, the drain,
+the seat's unload, the warm-back) the lease declares a file that is not there, and `gpu status` says so in those terms:
+"does not exist: the wrapper creates it when its command starts and removes it when the command ends, so it is absent
+while the lease queues, drains, unloads the seat or warms it back" (not "the job has not written to it or the path is
+wrong", which a drain of an hour made it say about a healthy lease); the verdict is unchanged, because a missing file
+reads unknown and never stalled. A `--progress-file` of the caller's own is kept as it is and is
+never removed. A command that runs none of those helpers (a bench, `sdcpp-generate`, a Go verb, which may overflow to
+another node and never poll here) gets nothing declared unless the caller asks with `--progress-file auto`: a contract
+that nothing writes to would only read stalled.
 **The helper heartbeats it**: the path travels to the command in `GPU_LEASE_PROGRESS_FILE`, and
 `render/lease-progress.mjs` appends one JSON line (`{"at":...,"pid":...,"detail":"ComfyUI is running prompt 1a2b3c4d (62s into the wait)"}`)
 at most every 30 s, from the poll loop every ComfyUI runner shares (`pollOutputs` in `render/comfy-submit.mjs`), between
@@ -1579,7 +1604,12 @@ is checked by name before the keep-set (llama-swap's ttl -1/0 seats) and also wh
 per-model route fails, the legacy `GET /unload` is used only when no stack member is resident. It unloads everything,
 whatever `?model=` says, so when the stack is resident or `/running` cannot be read, the reserve fails and names the
 stack. The wrapper form warms the seat back (`GET /upstream/<model>/health`) BEFORE releasing, so the first
-contract placed here again finds a loaded seat; the detach form's counterpart is `gpu release --warm-seat`. That request
+contract placed here again finds a loaded seat, unless its command was ended on `SIGTERM` (C02): that is how a console
+close, a logoff and a shutdown reach a Go program on Windows, and the OS ends the process about five seconds later, so
+a reload of minutes inside that grace would stand in the warm-back with the lease held while the machine goes down. The
+lease is released at once, the wrapper says the warm-back was skipped, and the warm stays owed (the marker below;
+`gpu release --warm-seat` or the seat's next request pays it). A Ctrl-C has no such deadline and still warms. The detach
+form's counterpart is `gpu release --warm-seat`. That request
 is the load, so a llama-swap reload or restart can interrupt it: the warm re-sends it for up to 60 s (see "A warm-back
 interrupted by a llama-swap reload is re-sent" below), and the owed marker is cleared once the seat is observed loaded.
 
@@ -1897,7 +1927,7 @@ fence: the pre-0.117.0 warm-up loaded the seat straight past an exclusive hold.
 |---|---|
 | `working` | a request or a registered run is in flight on the seat (lease held or not) |
 | `held-working` | a lease is held, the seat is idle, and the cards are busy under it (≥ 15 % utilization) or its progress file is advancing — the holder's own job. With only card utilisation as evidence the note says so (`util only, no progress contract`): a live job and a hung one look alike. A lease whose progress file is advancing reads `held-working` with its cards quiet: a batch between two pictures is quiet by nature, and the note says so (F38) |
-| `held-idle` | a lease is held and NOTHING is running: seat idle, cards quiet — the holder is waiting (a drain, a queue), loading, or stalled. When busy cards exist that are not the holder's work, the note names each for what it is: **the display card** only for a card the card table marks as displaying (`display_active`, the rule the allocator and the node's placement figure read; never a card's index), and a card **outside this lease's cards** for any other busy card (a seat, another lease, another process). It used to call whichever excluded card was busiest "the display card" (F38). A lease with no progress contract that is running a render helper also says that its cards are quiet between two pictures too and that it declared no contract that would say which this is |
+| `held-idle` | a lease is held and NOTHING is running: seat idle, cards quiet — the holder is waiting (a drain, a queue), loading, or stalled. When busy cards exist that are not the holder's work, the note names each for what it is: **the display card** only for a card that is driving a screen right now (`display_active` in the card table; never a card's index), and a card **outside this lease's cards** for any other busy card (a seat, another lease, another process). That is narrower than the placement rule: the allocator and `gpu cards` also mark a card display when a monitor is attached to it and its screen is asleep (`display_attached`), so a busy card of that kind outside the lease reads "outside this lease's cards" here while `gpu cards` marks it display; both are true and neither calls the load the holder's. It used to call whichever excluded card was busiest "the display card" (F38). A lease with no progress contract that is running a render helper also says that its cards are quiet between two pictures too and that it declared no contract that would say which this is |
 | `held-stalled` | the lease carries a progress contract (`--progress-file` and `--stall`) and the file did not move inside its window. The holder is alive and heartbeating; nothing is reclaimed or killed |
 | `held-orphaned` | an ATTENDED lease whose owner (session or process) has been gone for longer than `gpu_orphan_grace_min` (default 15 minutes): nobody is expected back for it. Never produced for an unattended, remote or unknown-owner lease. Nothing is reclaimed or killed |
 | `held-overdue` | the declared window ended and the holder is still alive and heartbeating. Informational: a declared window is not a ceiling for a live holder, so nothing is reclaimed. A holder whose owner vouches for the job renews its term instead (see [Terms](#terms-a-window-is-a-term-and-a-term-ends-in-a-renewal-or-a-label-adr-0070)); when it does not, the lease is labelled **expired** and the note says why (the `--for` default is 45 minutes, so a wrapper that never declared a window and has no live owner reads overdue after that while it still heartbeats) |
@@ -2020,9 +2050,10 @@ request posted straight to llama-swap by anything outside the harness is outside
   an attended job without a progress file reads `expired` at the end of its first term even while its cards are busy
   (the `held-overdue` verdict was already true from that moment; the label adds the sentence and the takeover
   eligibility, and a takeover of an unknown owner will need `--force` anyway). The wrapper form now closes that for a
-  wrapped render helper, which is the case that was accused while healthy (F8): it declares and heartbeats a progress
-  contract, so such a lease renews for as long as the render lives. Any other attended job without a progress file
-  still reads `expired` at the end of its first term. And for an attended lease with a live owner
+  wrapped render helper, or a script that runs one, which is the case that was accused while healthy (F8): it declares
+  and heartbeats a progress contract, so such a lease renews for as long as the render lives. Any other attended job
+  without a progress file (a bench, a Go verb, a `--detach` hold, a recipe the scan cannot read and that did not ask
+  with `--progress-file auto`) still reads `expired` at the end of its first term. And for an attended lease with a live owner
   and no progress contract, "its cards are working" is a single `nvidia-smi` sample taken at the end of the term: a job in
   a quiet CPU phase at that instant is labelled, and the next check (a minute later) renews it if the cards are busy by
   then; a sample that could not be taken is labelled as unreadable, not as idle, and is asked again the same way. Neither

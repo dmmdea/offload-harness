@@ -6,22 +6,44 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
-### Fixed — a healthy long render's lease is no longer labelled "expired ... open to a takeover" (F8)
+### Fixed — a healthy long render's lease (a render helper, or a script that runs one) is no longer labelled "expired ... open to a takeover" (F8)
 
 - **The defect.** A 1,394 s Qwen-Image still run as `gpu reserve --for ... -- node render/comfy-generate.mjs ...` had its
   lease labelled "expired ... still held and heartbeating, reading held-overdue and open to a takeover" at the end of its
   first term while it was rendering normally: the caller declared no progress contract, the lease recorded no owner it could
   tell apart, and the render helpers never wrote a progress file, so nothing vouched for the job (the term rule renews on
-  progress for such an owner and on nothing else). A waiter reading `gpu status` was told a healthy job was abandoned.
-- **The wrapper declares the contract.** `gpu reserve` in its wrapper form, wrapping a render helper that heartbeats
+  progress for such an owner and on nothing else). A waiter reading `gpu status` was told a healthy job was abandoned. The
+  first form of this fix recognised only the direct command line `node render/comfy-*.mjs ...`; the long renders of this
+  workspace are launched from a recipe (`cmd /c render-both.cmd`, `bash render-card-v3.sh`: 8 of the 9 orphaned
+  lease-wrapper cards in the C02 evidence), with the helper's path inside the script, and those leases were still labelled. The recipe form is
+  covered below.
+- **The wrapper declares the contract.** `gpu reserve` in its wrapper form, running a render helper that heartbeats
   (`comfy-generate`, `-render`, `-edit`, `-inpaint`, `-video`, `-animate`, `-music`, `-upscale`, `-run-graph`) with no
   `--progress-file` of the caller's, records a progress contract on the lease: a file under `<state root>/progress/` and a
   15 minute stall window (chosen, not measured; the figure and why are in `docs/systems/gpu-lease.md`). It prints one line
-  saying so, creates the file just before the command starts, removes it when the command ends, and hands the path to the
-  command in the new `GPU_LEASE_PROGRESS_FILE` (a caller's own `--progress-file` is kept as it is and handed down the same
-  way, and never removed). A bench, `sdcpp-generate`, a Go verb or a `--detach` hold gets nothing declared.
-  `gpulease.SweepMintedProgress` removes minted files a killed wrapper left, after seven days, inline in the next wrapper
-  that mints one.
+  saying so (and where it found the helper), creates the file just before the command starts, removes it when the command
+  ends, and hands the path to the command in the new `GPU_LEASE_PROGRESS_FILE` (a caller's own `--progress-file` is kept as
+  it is and handed down the same way, and never removed). `gpulease.SweepMintedProgress` removes minted files a killed wrapper
+  left, after seven days, inline in the next wrapper that mints one.
+- **Where it looks for the helper.** The helper is found as an argument behind an interpreter, in the inline command line of
+  one (`cmd /c "node ..."`, `bash -c`, `pwsh -Command`), or **in a script the command runs**: `gpulease.HeartbeatHelperBehind`
+  reads the script (`.cmd`, `.bat`, `.ps1`, `.sh`, `.bash`, `.py`, `.mjs`, `.js`, `.cjs`; the first 64 KiB, comment lines
+  skipped) and the scripts it names (8 files, 2 deep) for a helper's path, which is how `set "R=...\comfy-generate.mjs"` and
+  `GEN="...comfy-generate.mjs"` are found. It reads text and does not parse shell; a script it cannot find or open is "nothing
+  found" and the lease behaves as before. **`--progress-file auto`** asks for the minted file for a command the scan cannot
+  read (a compiled driver, a name built at run time), with your `--stall` or the 15 minute default. A bench, `sdcpp-generate`
+  or a Go verb gets nothing declared unless asked. A `--detach` hold wraps no command and runs several over its life, so it
+  declares nothing by itself and `--detach --progress-file auto` is refused: name its file with `--progress-file <path>
+  --stall <window>`, which the helpers find through the lease record. A script that names a helper and also runs long steps
+  that are not render helpers reads `held-stalled` during them (it would have been labelled expired at the end of its first
+  term without a contract); pass your own `--progress-file` for such a recipe.
+- **What `gpu status` says while the file is absent.** The wrapper's file exists only while its command runs, so a lease in
+  its queue, its drain (`--drain-timeout 90m` is ordinary), the seat's unload or the warm-back declares a file that is not
+  there. The status line told such a lease "has not appeared in 1h0m0s, past its 15m0s stall window: the job has not written
+  to it or the path is wrong"; for the wrapper's own file it now says "does not exist: the wrapper creates it when its command
+  starts and removes it when the command ends, so it is absent while the lease queues, drains, unloads the seat or warms it
+  back". The verdict never changed (a missing file reads unknown, never stalled). The file is removed before the warm-back, not
+  after the release: left in place it would go stale during a warm-back of minutes and read stalled.
 - **The helper heartbeats it.** New `render/lease-progress.mjs`: `pollOutputs` (the poll loop every ComfyUI runner shares)
   appends one JSON line to the file, at most every 30 s, when ComfyUI answered a poll and still lists the prompt (in
   `/history`, or running or pending in `/queue`); `comfy-generate --batch` writes one before and after every picture,
@@ -36,13 +58,18 @@ Versioning: [SemVer](https://semver.org/).
   and `/system_stats` stays healthy (ComfyUI has no polled step counter; its progress events are websocket-only and the
   render tree is dependency-free): that stays bounded by `COMFY_WAIT_SEC` and the lease's maximum total, not by a stall
   verdict.
-- **Tests.** `render/lease-progress.test.mjs` (20; the end-to-end one runs the real `comfy-generate.mjs --batch` and the
-  `comfy-render.mjs` child it spawns against a fake ComfyUI) and `gpu_progress_test.go` (the decision, the helper list
-  pinned to what `render/` contains, the real wrapper renewing a beating helper's lease, labelling a silent one, and keeping
-  a caller's own file). 23 mutations of the shipped code were each caught.
+- **Tests.** `render/lease-progress.test.mjs` (22; the end-to-end one runs the real `comfy-generate.mjs --batch` and the
+  `comfy-render.mjs` child it spawns against a fake ComfyUI; two cover a `/history` that answers HTTP 500, which is no
+  evidence of a live prompt unless `/queue` lists it), `gpu_progress_test.go` and `gpu_progress_script_test.go` (the decision,
+  the helper list pinned to what `render/` contains, the real wrapper renewing a beating helper's lease, labelling a silent
+  one, keeping a caller's own file, reading a batch file and declaring from it, `--progress-file auto`),
+  `gpu_progress_drain_test.go` (the file does not exist through a drain and exists while the command runs),
+  `internal/gpulease/helperscan_test.go` (the scan and its bounds) and `internal/gpuactivity/minted_unknown_test.go`.
+  23 mutations of the first form were each caught; 22 more of this follow-up's code were each caught (one survived its first
+  test, an unset variable expanding to a path with a hole in it, and was killed after the test was sharpened).
 - **Docs.** `docs/systems/gpu-lease.md` (a new paragraph; the two passages that said an attended job without a progress file
   is labelled at the end of its first term now say which job that still is), `docs/systems/media-generation.md`,
-  `render/README.md`.
+  `render/README.md`, ADR 0070 (its amendment).
 
 ### Fixed — `gpu status` no longer calls a card the display card because it is busy, and a batch between pictures does not read idle (F38)
 
@@ -50,16 +77,18 @@ Versioning: [SemVer](https://semver.org/).
   card". The note said "that is the display card" about the busiest card the verdict had excluded from the holder's work,
   whatever that card was: a lease on one card over a busy neighbour (a seat, another lease, another process) named the
   neighbour the display card although it drives no screen.
-- **The naming.** A card is called the display card only when the card table marks it so (`display_active`, the rule the
-  allocator and the node's placement figure read; never by index). Any other busy card the lease does not hold is named as
-  **outside this lease's cards** (a seat, another lease or another process is using it), and when both kinds are busy the
-  note names each for what it is.
+- **The naming.** A card is called the display card only when the card table says it is driving a screen right now
+  (`display_active`; never by index). Any other busy card the lease does not hold is named as **outside this lease's cards**
+  (a seat, another lease or another process is using it), and when both kinds are busy the note names each for what it is.
+  This is narrower than the placement rule: the allocator and `gpu cards` also mark a card display when a monitor is attached
+  to it with the screen asleep, so such a busy card outside the lease reads "outside this lease's cards" in `gpu status`
+  while `gpu cards` marks it display (both true; neither calls the load the holder's), and a test pins it.
 - **The batch.** With the progress contract a wrapped render helper now keeps (F8), a batch between two pictures reads
   `held-working` while its file moves, and its note says the cards are quiet between items. A batch that stops writing
   reads `held-stalled` as before. A lease running a render helper with no contract (an older wrapper, a caller that pinned
   an old binary) stays `held-idle` and says why it cannot tell idle from stalled.
-- **Tests.** `internal/gpuactivity/f38_test.go` (6) and `internal/gpulease/progressdir_test.go`; six mutations of the shipped
-  code were each caught. `docs/systems/gpu-lease.md` (the verdict table).
+- **Tests.** `internal/gpuactivity/f38_test.go` (6), `f38_display_rule_test.go` and `internal/gpulease/progressdir_test.go`; six
+  mutations of the shipped code were each caught, and 1 more for the display rule. `docs/systems/gpu-lease.md` (the verdict table).
 
 ### Fixed — `gpu --help` prints usage, and `gpu --config <path> <subcommand>` works (F35)
 
@@ -84,6 +113,22 @@ Versioning: [SemVer](https://semver.org/).
   writer's own code from the closed set wins, otherwise the row is classified from its `err_class` (`ledger.DeferCode`) and then from the
   stable prefix of its reason (`gpu busy:`, `seat busy:`, `no ... configured`, `audio convert:`, ...), and `other` when neither names it.
   The closed set gains **`bad_input`** (additive). A row of another task that did not defer still carries none.
+- **F22 follow-up: the codes that were still `other`.** Replaying the real ledgers of a 48 hour window (221 deferred rows that are
+  not `agent_delegate`), the first form coded 162 of them `other`: the agent door's 96, the 48 `imagegen_families[...] ... is
+  required` rows of a config fault, the audio and video `generation failed:` rows (the identical image sentence was coded and
+  these were not) and others. Now: **the agent door's deferred rows carry the node's defer class as their code** (the door
+  knows it when it defers: `output failed schema`, `structured re-pack skipped` and `step budget exhausted` are prose, the
+  class is `budget`, `abstention`, `infrastructure`...; `capacity` is `node_busy`), `ledger.CodeForDeferClass`, pinned to every
+  `core.DeferClass*`; the audio and video `generation failed:`, `imagegen_families[`, `unknown image/edit family`, `refused:`
+  and the media doors' own empty-prompt and unknown-kind sentences have prefixes; and `audio convert:` is no longer a blanket
+  `bad_input`: ffmpeg that could not be run at all (`audioio.ErrFFmpegUnavailable`, an error that is not an `*exec.ExitError`)
+  files as `ffmpeg_unavailable` (`config`), a temp directory that could not be made as `infrastructure`, and what is left is
+  ffmpeg refusing the file. On the same 221 rows the words alone now code all but 96 of them, and those 96 are the agent door's,
+  which carry their class from now on (rows already in a ledger are not backfilled, so that figure cannot be replayed).
+  `TestEveryLiteralReasonAPipelineDoorDefersWithHasACode` walks the pipeline's writers (every literal reason passed to
+  `recordDefer` or `deferGen`) and fails when a new sentence classifies as `other` and is not listed with the reason it cannot
+  be classified from its words, which the file-name pin of `TestEveryWriterOfALedgerRowIsKnown` could not do. 14 mutations of this
+  follow-up's code were each caught.
 - **The writers are walked.** `TestEveryDeferredRowCarriesAReasonCodeFromTheClosedSet` records a row shaped like each writer's output
   (the pipeline doors, the review lane's local defer, the media doors' err_classes, `RecordAccel`, the remote lane's row, a fleet node's
   executor row); `TestEveryWriterOfALedgerRowIsKnown` parses the tree and fails when a file that builds a `ledger.Entry` or calls
@@ -95,30 +140,44 @@ Versioning: [SemVer](https://semver.org/).
 ### Fixed — PAIR cards that outlived what they described, and orphaned cards that say what happened (C02, C03, C04)
 
 - **C04, a seat-watch card that stays open.** Two paths left a seat-watch card "running" for as long as the watcher lived,
-  until the next fleet-serve's first sweep closed it "harness process exited" (one stayed open 642 s). `Poll` returned at once
-  when llama-swap's own `/running` was unreadable, with no bound; and a harness load that could not be resolved held an open card
-  untouched, with no bound. After `seatUnreadableLimit` consecutive polls (a minute) the first now fails every open card once
+  until the next fleet-serve's first sweep closed it "harness process exited". `Poll` returned at once when llama-swap's own
+  `/running` was unreadable, with no bound; and a harness load that could not be resolved held an open card untouched, with no
+  bound. **Which path, if either, held the one observed card for 642 s was not established**: the stretch may have been real,
+  with the fleet-serve that watched it stopped by a deploy swap; these are the two unbounded holes found in the code. After `seatUnreadableLimit` consecutive polls (a minute) the first now fails every open card once
   ("llama-swap stopped answering while this seat served direct traffic"), and the second completes the card at its last busy poll.
   Both counts reset on one good poll. And a seat card orphaned by the death of its **watcher** (a fleet-serve killed by a deploy
   swap) is closed `completed` with no error, as a clean stop closes it: it was never a harness job, and a red "harness process
-  exited before the job finished" over a stretch whose seat may have been fine is a red card for no failure.
+  exited before the job finished" over a stretch whose seat may have been fine is a red card for no failure. Its `completedAt`
+  is the moment the sweep found the watcher gone (the register holds the stretch's start, not its last busy poll), so after a
+  long outage the stretch can read longer than the traffic it carried.
 - **C02, a killed wrapper.** The cards of the lease wrappers that died in the same second (a console close, exit `0xC000013A`)
   and of the ones a session killed on purpose were correct to be red: the job died. The decision is to keep them red and have the
   card say what happened. The sweep's text now names the process, whether the job was still queued ("it never started") or
-  running ("gone 7m into the run"), that no outcome was reported, and the causes it has seen (killed, console closed, reboot); it
+  running ("gone 7m into the run"), that no outcome was reported, and the causes it has seen (killed, console closed, reboot).
+  "Queued" means "never started" only where the producer marks its card running when its work starts (a lease card, a
+  delegation, a media call); a **transcription** never does (the wait is inside llama-swap), so its swept card says "gone 9m
+  in, no outcome reported" and does not claim the work had not begun (the first form said "it never started" about a
+  transcription killed mid-decode). The text
   fits the 140-character card whole, and still starts with the words consumers match. It cannot say who ended the process: the
   register holds a pid and a start time. `gpu reserve -- <command>` now also asks for `SIGTERM`: Go on Windows delivers a console
   close, a logoff and a shutdown as `SIGTERM` and ends the process only after its handler has had its grace, so the wrapper kills
   its command, closes its card ("terminated: its console was closed, or the session is ending or the machine is shutting down")
-  and releases its lease instead of dying silent. A `taskkill /F` gives no signal; the sweep's text covers it. The cause of the
-  01:09:59 incident itself was never established.
+  and releases its lease instead of dying silent. With `--drain --unload-seat` it releases the lease **before** the seat's
+  warm-back and skips the warm-back (a reload of minutes inside a grace of seconds, with a model loading while the machine goes
+  down): the warm stays owed in the seat marker, and `gpu release --warm-seat` or the seat's next request pays it. A Ctrl-C has
+  no such deadline and still warms the seat back first. A `taskkill /F` gives no signal; the sweep's text covers it. The cause of
+  the 01:09:59 incident itself was never established.
 - **C03, a recovered delegation.** A job a node finished and a recovery pass filed under `delegate-recovered/` had a card that
   said it never finished. A delegation's orphan card now reads the delegator's intent ledger: "the node may still finish it, see
-  delegate-recovered/" while the dispatch is open, "the node finished the job, result in delegate-recovered/" once a recovery
-  pass has filed the answer. It stays `failed`, because the call did fail (its caller got no answer). Whether PAIR would let a
-  later `completed` frame replace a card that is already terminal cannot be established from this tree, so none is sent.
-- **Tests.** `internal/pairworkloads/seatwatch_exit_test.go`, `orphans_text_test.go`, `gpu_signals_test.go`; 16 mutations were each
-  caught. `docs/systems/pair-workloads.md`.
+  delegate-recovered/" while the dispatch is open, "the node reported the job's end; see delegate-recovered/" once a recovery
+  pass has filed the answer (the pass files an errored job the same way as a finished one, so the card does not say "finished").
+  It stays `failed`, because the call did fail (its caller got no answer), and a card keeps the text it was closed with: a
+  recovery filed after the sweep (the observed case, one minute after) does not rewrite it. Whether PAIR would let a later
+  `completed` frame replace a card that is already terminal cannot be established from this tree, so none is sent.
+- **Tests.** `internal/pairworkloads/seatwatch_exit_test.go`, `orphans_text_test.go`, `orphans_callcard_test.go`,
+  `gpu_signals_test.go`, `gpu_signals_warm_test.go` (the wrapper runs in a child process and the signal is delivered through a
+  seam; a console close cannot be driven from a test); 16 mutations were each caught, and 9 more for the transcription
+  text, the recovered-card wording and the warm-back. `docs/systems/pair-workloads.md`.
 
 ## [0.179.0] - 2026-10-10 - a busy image lane overflows to an idle node that renders the same recipe, and every GPU lease path has a host-RAM brake
 

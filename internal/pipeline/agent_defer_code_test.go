@@ -2,7 +2,7 @@ package pipeline
 
 // F22 follow-up (2026-10-10): the agent door's deferred rows carried a free-text reason and no err_class, so
 // "output failed schema", "structured re-pack skipped" and "step budget exhausted" (about 60 % of the
-// deferred non-delegate rows of one night) all coded as "other". The door knows the class (core.DeferClass*)
+// deferred non-delegate rows of a 48 hour window) all coded as "other". The door knows the class (core.DeferClass*)
 // when it defers; the row now carries it as its reason code. And a transcription whose ffmpeg could not be run
 // is the stack's, not the caller's file.
 

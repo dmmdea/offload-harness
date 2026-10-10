@@ -70,7 +70,7 @@ zero-always-warm (it shares the 8 GB with llama-swap, so it must coordinate). Ta
 - **`atomic-out.mjs`** — delivers the produced file: staged sibling, then rename (see the
   image tool's Notes above); `atomic_out.py` is the same for the Python workers.
 - **`lease-progress.mjs`** — the helper's heartbeat to its lease's progress file (F8). `gpu reserve -- node
-  render/comfy-*.mjs ...` declares a progress contract on the lease and hands the file to the helper in
+  render/comfy-*.mjs ...` (or a script that runs one, or `--progress-file auto`) declares a progress contract on the lease and hands the file to the helper in
   `GPU_LEASE_PROGRESS_FILE` (or the helper reads it from the inherited lease's record); `pollOutputs` appends a line
   at most every 30 s while ComfyUI answers and still lists the prompt, `comfy-generate --batch` between pictures, and
   `withGpuSlot` when the slot is ready. A long, healthy render's lease therefore renews instead of being labelled

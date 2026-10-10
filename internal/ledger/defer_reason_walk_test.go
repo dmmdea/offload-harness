@@ -2,7 +2,7 @@ package ledger
 
 // F22 follow-up (2026-10-10): TestEveryWriterOfALedgerRowIsKnown pins which FILES write ledger rows, so a
 // writer adding a new reason sentence was not caught: the review of the first F22 change replayed the real
-// ledgers of a night and 63 % of the deferred non-delegate rows still coded as "other", among them the audio
+// ledgers of a 48 hour window and 63 % of the deferred non-delegate rows still coded as "other", among them the audio
 // and video "generation failed" sentences that the identical image sentence did not share a code with. This
 // walks the pipeline's writers: every reason sentence a door passes to recordDefer or deferGen as a literal
 // (or as a literal followed by an error's text) must classify to a code other than "other", unless it is

@@ -13,8 +13,8 @@ import (
 // The long renders of this workspace are not launched that way: they run `cmd /c render-both.cmd` or
 // `bash render-card-v3.sh`, and the helper's path sits inside the script (`set "R=...\comfy-generate.mjs"`,
 // `GEN="...comfy-generate.mjs"`). Declaring a progress contract only for the direct form left exactly
-// those leases labelled "expired ... open to a takeover" at the end of their first term (the 8 killed
-// render cards of the 2026-10-09 incident were all `render-card-v3.sh` wrappers). So the wrapper also
+// those leases labelled "expired ... open to a takeover" at the end of their first term (8 of the 9
+// orphaned lease-wrapper cards in the 2026-10-09 C02 evidence ran `render-card-v3.sh`). So the wrapper also
 // reads the script it was asked to run, and the scripts that script names, a few hundred lines at most,
 // and looks for a helper path in them.
 //
