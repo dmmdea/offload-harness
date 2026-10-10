@@ -100,7 +100,8 @@ Three facts made the obvious change unsafe as stated.
    once a node has ACCEPTED the job. A node that bounces it after accepting has its card closed quiet (completed, never
    started, the reason kept; `core.RemoteAttribution.Bounce`) and writes no ledger row; the call's one asker row names the node
    that served it.
-8. **When nothing admits, the call runs here exactly as it always did.** If that ends in a deferral (a place in line, a busy
+8. **When nothing admits, the call goes on to the local admission, from when it came back.** It joins the local line when the
+   fleet attempt is over and not from when it arrived (Named limits). If that ends in a deferral (a place in line, a busy
    defer), the answer carries `cluster[]`: one row per roster node in config order (`busy`, `not-capable`, `unreachable`,
    `refused`, `bounced`, `skipped`), each with the reason in the node's own terms (the lease and its reason, the key that
    differs and the family of this machine that would match, the release or the refine it lacks), and the reason quotes them. A
@@ -127,9 +128,9 @@ Three facts made the obvious change unsafe as stated.
   admission is the first optimisation (a lane verdict published by the node, answered before a job exists), not built here.
 - **Named limits.** The recipe is name plus size, not content (decision 3). One FIFO per delegating machine; cross-machine order is node arrival. A call resumed with its token stays in
   the local line, so a node that frees later is not used by it (the ticket queue with late binding is the next step). **A call
-  that bounced queues locally from when it came back**, not from when it arrived: it joins the local line only when the fleet
-  attempt is over (at most 3 nodes, each up to its `gpu_wait_ms`, plus the roster read), so a caller that arrived meanwhile is
-  ahead of it, and one bounce can cost it 90 s of seniority. Two halves would have to be fixed to carry the arrival time into the
+  that went to the fleet first queues locally from when it came back**, not from when it arrived: it joins the local line only
+  when the fleet attempt is over (the lane question and the roster read, then at most 3 nodes, each up to its `gpu_wait_ms`), so a
+  caller that arrived meanwhile is ahead of it, and one bounce can cost it 90 s of seniority (270 s for three nodes). Two halves would have to be fixed to carry the arrival time into the
   local admission: the lease queue (it takes an arrival time) and the in-process slot queue, which serves callers in the order they
   join and has no arrival time to take; the ticket queue of the next step keeps a call's place across the attempt and is where
   that is done, not here. Every

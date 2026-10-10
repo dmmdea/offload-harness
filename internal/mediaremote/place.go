@@ -21,9 +21,12 @@ package mediaremote
 // node that read idle in health but whose own grant refuses the job refuses every call alike, and each one would park
 // for the node's whole gpu_wait_ms before the bounce came back). A node's own answer after it accepted the job is
 // final: a render that failed is the call's result and is never placed elsewhere, and a job a node holds is never also
-// run here (a media job cannot be recalled, ADR 0064). When nothing admits, the call runs here exactly as it always
-// did, and if that ends in a deferral it carries a cluster[] block that says, per node, why the fleet could not take
-// it.
+// run here (a media job cannot be recalled, ADR 0064). When nothing admits, the call goes on to the local admission,
+// and if that ends in a deferral it carries a cluster[] block that says, per node, why the fleet could not take it.
+// It joins the local queue when this attempt is over, not from when it arrived: the lane question, the roster read and
+// each bounce (up to the node's gpu_wait_ms, at most maxPlacements nodes) are time the local queue does not count, so
+// a caller that arrived meanwhile is ahead of it. Carrying the arrival time into the local admission is not built (the
+// in-process slot queue takes none); the ticket queue of the next step keeps a call's place across the attempt.
 
 import (
 	"context"
@@ -44,7 +47,8 @@ import (
 )
 
 // maxPlacements bounds the POST attempts of one overflowing call. Chosen, not measured: a call that three nodes have
-// refused or bounced is better served by its own queue, which keeps its place.
+// refused or bounced is better served by its own queue than by a fourth wait, though it joins that queue from when it
+// came back and not from when it arrived.
 const maxPlacements = 3
 
 // backoffSteps is how long a node that failed to answer is left alone, by consecutive failure (the last step holds).

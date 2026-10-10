@@ -232,8 +232,8 @@ come last by convention, but the validator does not enforce ordering.
 
 A media call leaving its own busy lane for an idle node of the fleet: an `auto` image call on a machine that has the lane and a
 fleet asks its pipeline whether the lane is free (`core.LaneProber`, a read-only relaxation of the real admission) and, when it
-is not, is sent to a node whose Image recipe matches. Not a substitute: a call no node matches waits in its own queue as before and
-says per node why (`cluster[]`). See [ADR 0082](architecture/decisions/0082-a-media-call-overflows-to-the-fleet-when-its-own-lane-cannot-take-it-and-a-family-is-identified-by-its-recipe.md).
+is not, is sent to a node whose Image recipe matches. Not a substitute: a call no node matches goes on to its own queue, joining it
+when the fleet attempt is over and not from when it arrived, and says per node why (`cluster[]`). See [ADR 0082](architecture/decisions/0082-a-media-call-overflows-to-the-fleet-when-its-own-lane-cannot-take-it-and-a-family-is-identified-by-its-recipe.md).
 
 ## Park
 

@@ -2034,7 +2034,8 @@ it leaves none. A node that accepted and then bounced it has its card closed qui
 
 **What the answer says.** A call that ran on a node answers with `meta.node` and `meta.placement`: `remote: this machine's image
 lane is not free (<what holds it, with its reason and the time its lease declared>); ran on <node>`. A call that nothing admitted
-runs here exactly as it always did, and if it ends in a deferral (a place in line, a busy defer) the answer carries `cluster[]`
+goes on to the local admission, joining its queue when the fleet attempt is over and not from when it arrived (Named limits below),
+and if it ends in a deferral (a place in line, a busy defer) the answer carries `cluster[]`
 (`{node, state, why, differs?}` per roster node, in config order, and the reason quotes them). `state` is `busy` (the node holds a
 lease; the lease and its reason; or another call of this process already has a job there), `not-capable` (the key that differs, in the config key's own name, and the family of this
 machine that WOULD match: `send family=<ours> to use its <theirs>`; or the release, or the refine, the route or the steps rule),
@@ -2051,8 +2052,9 @@ multi-GPU node would land on its display card), and video, animation and audio c
 that starts on the first lane that frees) is the next step. Every remote job pays ComfyUI's cold start (zero-warm). The same
 recipe and seed on a different GPU architecture is the same composition, not bit-identical pixels. A mis-predicted placement
 costs one bounce per node per pause: up to the node's `gpu_wait_ms` parked on the node and one deferred row there before the placer
-sees it. **A call that bounced queues locally from when it came back**, not from when it arrived: the caller joins the local line when
-the fleet attempt is over (at most 3 nodes, each up to its `gpu_wait_ms`), so a caller that arrived meanwhile is ahead of it. Carrying
+sees it. **A call that went to the fleet first queues locally from when it came back**, not from when it arrived: the caller joins the
+local line when the fleet attempt is over (the lane question and the roster read, then at most 3 nodes, each up to its
+`gpu_wait_ms`), so a caller that arrived meanwhile is ahead of it. Carrying
 the arrival time into the local admission needs the lease queue (it takes one) and the in-process slot queue (it serves callers in the
 order they join and takes none); the ticket queue of the next step keeps a call's place across the attempt and is where that is done.
 

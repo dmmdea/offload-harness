@@ -207,8 +207,9 @@ func Run(ctx context.Context, cfg config.Config, runner Runner, req core.Request
 				return runner.Run(ctx, req)
 			}
 			// A lane here AND a fleet: when the lane is not free right now and a node of the fleet that renders
-			// the same recipe stands idle, the call goes there instead of waiting (ADR 0082). Otherwise it runs
-			// here as it always did, and a deferral it ends in says what the fleet could not do for it.
+			// the same recipe stands idle, the call goes there instead of waiting (ADR 0082). Otherwise it goes on
+			// to the local run, joining the local queue when the fleet attempt is over and not from when it arrived, and a
+			// deferral it ends in says what the fleet could not do for it.
 			ov := tryOverflow(ctx, cfg, runner, req, remotes)
 			if ov.placed {
 				return ov.res

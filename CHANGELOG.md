@@ -14,8 +14,9 @@ Versioning: [SemVer](https://semver.org/).
   sends the call to an idle node whose **image recipe** digests alike, under the node's own family name. The answer says where it
   ran and why it left (`meta.node`, `meta.placement`). A box with no `delegate_remotes` asks nothing and reads no node (the path is
   unchanged), `route local` never leaves, a call that carries a `waiter_token` stays in the local line, a call under an inherited
-  lease stays, and only image jobs overflow (graphs arrive with their own file check). When no node admits, the call waits here
-  exactly as before and a deferral it ends in carries `cluster[]`: one row per `delegate_remotes` node (`busy`, `not-capable`,
+  lease stays, and only image jobs overflow (graphs arrive with their own file check). When no node admits, the call goes on to the local
+  queue, which it joins when the fleet attempt is over and not from when it arrived (see "Not changed, and said"), and a deferral it
+  ends in carries `cluster[]`: one row per `delegate_remotes` node (`busy`, `not-capable`,
   `unreachable`, `refused`, `bounced`, `skipped`) with the reason in the node's own terms (the lease and its reason, the config key
   that differs and the family of this machine that would match, the release or the refine it lacks).
 - **The question is read-only and a relaxation.** `core.LaneProber` / `Pipeline.MediaLaneFree` is built from the helpers the
@@ -68,7 +69,9 @@ Versioning: [SemVer](https://semver.org/).
 - **Fixed on the way.** A seed (and width, height, steps) the caller gave as an integer reached a fleet node through a float64, so a
   seed above 2^53 changed; the sender now reads integers exactly (`TestSeedTravelsExactly`).
 - **Not changed, and said.** One line per delegating machine, not one global order; a call resumed with its token is not moved
-  (late binding is the next step); a call that bounced queues locally from when it came back, not from when it arrived (carrying
+  (late binding is the next step); a call that went to the fleet first queues locally from when it came back, not from when it arrived (each bounce off a node
+  can cost up to that node's `gpu_wait_ms`, three nodes at most, and a call no node matches pays the lane question and the roster
+  read; carrying
   its arrival time in needs both the lease queue and the in-process slot queue, which takes none; the ticket queue of the next step
   keeps a call's place across the attempt); every remote job cold-starts ComfyUI; the same recipe and seed on another GPU architecture is the
   same composition, not bit-identical pixels. Nothing here was run against a live lease or a real render: the recipe match was

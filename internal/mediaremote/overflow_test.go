@@ -8,7 +8,7 @@ package mediaremote
 //	byte-identical on a box with no fleet, and a free lane runs here untouched;
 //	a busy lane goes to the node whose recipe is strictly equal, under the node's own family name, with the recipe
 //	  digest and the caller's refine and seed exactly as sent;
-//	what cannot be placed is named, per node, and the call then runs here as it always did;
+//	what cannot be placed is named, per node, and the call then goes on to its own queue, from when it came back;
 //	a refusal before acceptance moves on, a node's own answer after it never does, and a call the node holds is
 //	  never run twice.
 
