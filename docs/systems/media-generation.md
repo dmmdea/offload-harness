@@ -2106,8 +2106,9 @@ three there, and the node's own 503 body (a `curl` of the dispatch) lists up to 
 instead of this one cold-starting ComfyUI to defer. The check is by **name, not content**: a same-named file of other bytes is held. For a
 weight file the name is the practical identity (a model is published under one). For an **input file** it is not enough, because
 those are the caller's own and carry generic names (`image.png`, `ComfyUI_00001_.png [output]`) that two machines share with
-different bytes; so the delegator never auto-overflows a graph that reads one (below), and only a caller who names a node by hand
-reaches this check with one. A custom node's own file key is not read.
+different bytes; so the delegator never auto-overflows a graph that reads one (below). A call that must leave its machine anyway
+(`route remote`, or `auto` on a machine with no graph lane of its own) still reaches this check with one, and for it the check
+stays by name: that is a named limit. A custom node's own file key is not read.
 
 **Which node.** A candidate serves `run-graph` with `run_graph` CONFIGURED when it reports its routes, runs this release (the
 file check ships with it: an equal `harness_version` proves that only when the release that adds the check carries a new version
@@ -2122,7 +2123,9 @@ named limit), under the same relaxation contract as the image's (`TestMediaLaneF
 this machine's own queue and the answer carries `cluster[]` naming, per node, the file it lacks. A graph that names `devices`, one
 that carries a `waiter_token`, one under an inherited lease and one that **reads an input file** are not overflowed. The last waits
 for this machine's own lane, and the deferral it ends in says that the fleet was not asked and why (`fleet_note` in its data and in
-its reason). Sending a size and a hash of each input file to the node would restore the overflow for such graphs; it is not built.
+its reason). A call with no lane of its own to wait for (`route remote`, or `auto` on a thin client) is placed on a node as before,
+checked by name only. Sending a size and a hash of each input file to the node would restore the overflow for such graphs and
+close that limit; it is not built.
 
 **One card.** A graph that names no devices holds the whole node and runs in the default ComfyUI instance, which sees every
 card. On a node with several, the delegator cannot tell which card that instance picks, and it may be the display card. So a

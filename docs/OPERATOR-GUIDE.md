@@ -333,7 +333,8 @@ card), not measured; `--min-vram-gb 0` lifts it. The floor filters nodes only: `
 the film owner described it on 2026-10-09 (the 16 GB cards are the multi-card workstation's three; the single-card nodes have 8 GB
 cards) the two rules together leave a default-floor Wan graph no remote node: it waits for its own lane. A graph that reads an input
 file (`LoadImage`, `LoadVideo`, `LoadAudio`) is never auto-overflowed either, because a node can match such a file only by name; the
-answer says so, and `--route remote` with a named node still sends it. The **node manifest** (`node_packs[{name,repo,commit}]` + `models[{path,source_url,sha256}]`)
+answer says so. A call that must leave this machine anyway (`--route remote`, or `auto` on a machine with no graph lane) still
+sends it, with the node's check by name only. The **node manifest** (`node_packs[{name,repo,commit}]` + `models[{path,source_url,sha256}]`)
 is satisfied BEFORE ComfyUI starts: packs cloned at their pinned commits with all deps
 resolved **together** (uv) under **host-torch constraints** (provisioning never replaces the
 installed CUDA torch — an unsatisfiable pack set defers instead), models downloaded and

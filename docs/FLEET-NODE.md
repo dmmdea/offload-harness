@@ -478,8 +478,8 @@ it shows the first two or three of a long list), and creates no job: the delegat
 this one cold-starting ComfyUI to defer. **Input files do not travel with a graph** (`/fleet/dispatch` carries JSON, and the
 media-job door carries no input for `run-graph`), so a file the node does not hold cannot be sent to it; the refusal says so. A
 model the graph's manifest tells the node to fetch (a `models[]` entry with a `source_url`) is not refused. The check is by name
-(a same-named file of other bytes is held; a delegator therefore never auto-overflows a graph that reads an input file, and only
-a caller who names the node reaches this check with one) and a name that is absolute or climbs with `..` is never looked up.
+(a same-named file of other bytes is held; a delegator therefore never auto-overflows a graph that reads an input file, though a
+call that must leave its machine anyway, `route remote` or `auto` on a machine with no graph lane, reaches this check with one) and a name that is absolute or climbs with `..` is never looked up.
 Health gains no key for it: a delegator requires the node to run its own release, which proves the check only because the release
 that adds it carries a new version number. A graph that names no file is admitted as before, on a node with no models root too.
 

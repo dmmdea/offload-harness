@@ -204,8 +204,9 @@ card. This amendment adds them under four rules; every other decision stands, an
    upper bound and not the graph's own size), under the same contract: a relaxation of the real wait-0 admission, held by
    a differential test, that writes nothing. A graph that names `devices` (refused by `plan()` before the lane is asked), one
    that carries a `waiter_token`, one under an inherited lease and one that reads an input file stay here; the last waits for
-   this machine's own lane and its deferral says the fleet was not asked and why (`fleet_note`). Hashing each input file to the
-   node would lift that last exception; it is not built. A node's 503 at the door moves the call to the
+   this machine's own lane and its deferral says the fleet was not asked and why (`fleet_note`). A call with no lane of its own to
+   wait for (`route remote`, or `auto` on a thin client) is placed as before, checked by name only. Hashing each input file to
+   the node would lift that last exception and close that limit; it is not built. A node's 503 at the door moves the call to the
    next node like any refusal at the door (decision 6) and counts toward the three attempts; the call falls back to the local
    queue with `cluster[]` naming, per node, the file it lacks.
 3. **A whole-node graph is placed only on a node that publishes exactly one card.** A graph that names no devices holds the
@@ -226,7 +227,7 @@ card. This amendment adds them under four rules; every other decision stands, an
    the node's own grant.
 
 **Named limits of the amendment.** The file check is by name (a same-named file of other bytes is held), which is why a graph that
-reads an input file is not auto-overflowed. Input files need to be on the node already when a node is named by hand. The node's
+reads an input file is not auto-overflowed, though a call that must leave its machine anyway keeps the same-named-file risk. Input files need to be on the node already when a node is named by hand. The node's
 host-RAM guard sizes a graph at the media class default, not at the files the door has resolved, so a graph naming weights bigger
 than every bound family can be under-counted. The default floor reads two things the harness otherwise never reads in a graph (`model_family`, the
 `height` inputs), and a graph that uses neither key gets none. A forced or thin-client graph can no longer reach a multi-GPU

@@ -29,8 +29,10 @@ Versioning: [SemVer](https://semver.org/).
   (`image.png`, `ComfyUI_00001_.png [output]`) that two machines share with different bytes, and a node can match one only by name,
   so a node holding a same-named file would have run the graph on the wrong bytes and answered ok with a sha-verified output. The
   call waits for this machine's own lane instead, and a deferral it ends in says why the fleet was not asked (`fleet_note` in its
-  data, and in its reason). `route remote` names the node, so there the node's check by name stays. Sending a size and a hash of
-  each file to the node, which would restore the overflow for these graphs, is a named seam, not built.
+  data, and in its reason). A call that must leave this machine anyway (`route remote`, or `auto` on a machine with no graph lane of
+  its own, which has no queue to wait in) is placed as before, with the node's check by name only: the same-named-file risk
+  remains there, a named limit. Sending a size and a hash of each file to the node, which would restore the overflow for these
+  graphs, is a named seam, not built.
 - **A whole-node graph is placed only on a node that publishes exactly one card.** A graph that names no devices runs in the default
   ComfyUI instance, which sees every card, and on a multi-GPU node could land on its display card. A node with more than one card is
   a named miss, and so is a node that publishes no `gpu_devices`. This covers every remote placement of a graph, `route remote` and a
