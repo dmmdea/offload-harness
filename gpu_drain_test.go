@@ -305,6 +305,12 @@ type multiSeatSwap struct {
 	// v208/v242 builds) ignores ?model= and unloads EVERYTHING. bulkCalls counts it.
 	perModelMissing bool
 	bulkCalls       int
+	// agentSeat, when set, is the one model whose warm-back (GET /upstream/<it>/health) the
+	// stand-in serves: it loads the model and counts the request in warms. Every other
+	// /upstream route stays the foreign-resident tripwire. A test that runs the wrapper form
+	// sets it, because the wrapper warms the agent seat back when its command ends.
+	agentSeat string
+	warms     int
 }
 
 func newMultiSeatSwap(models ...string) *multiSeatSwap {
@@ -361,6 +367,15 @@ func (f *multiSeatSwap) handler() http.Handler {
 	mux.HandleFunc("/upstream/", func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unexpected warm-back of a foreign resident: "+r.URL.Path, http.StatusTeapot)
 	})
+	if f.agentSeat != "" {
+		mux.HandleFunc("/upstream/"+f.agentSeat+"/health", func(w http.ResponseWriter, r *http.Request) {
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			f.warms++
+			f.loaded[f.agentSeat] = true
+			w.WriteHeader(200)
+		})
+	}
 	return mux
 }
 

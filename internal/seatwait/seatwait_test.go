@@ -111,6 +111,29 @@ func TestRetryableClasses(t *testing.T) {
 	}
 }
 
+// StartFailed is the body that says a start died, in either of llama-swap's wordings, whatever
+// the status code carrying it.
+func TestStartFailedRecognisesBothWordings(t *testing.T) {
+	cases := []struct {
+		body string
+		want bool
+	}{
+		{`unable to start process: upstream command exited prematurely`, true},
+		{`{"error":{"message":"unspecific error: upstream command exited prematurely","src":"llama-swap"}}`, true},
+		{`Unable To Start Process: bind failed`, true},
+		{`UPSTREAM COMMAND EXITED`, true},
+		{`{"error":{"message":"unspecific error: matrix is shutting down"}}`, false},
+		{`health check timed out after 120s`, false},
+		{`upstream gone`, false},
+		{``, false},
+	}
+	for _, c := range cases {
+		if got := StartFailed(c.body); got != c.want {
+			t.Errorf("%q: got %v want %v", c.body, got, c.want)
+		}
+	}
+}
+
 func TestSleepHonoursContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

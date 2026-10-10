@@ -89,9 +89,12 @@ package gpulease
 // queue.
 //
 // Seat-warm-owed: a holder that unloaded the seat stamps <gpu>/seat-warm-owed
-// with the seat's name. The LAST releasing holder — the one with no waiter
-// behind it — clears it by warming; every other releaser leaves it in place.
-// A `gpu release --warm-seat` reads the same marker.
+// with the seat's name and the time. The LAST releasing holder — the one with no
+// waiter behind it — clears it by warming; every other releaser leaves it in place.
+// A `gpu release --warm-seat` reads the same marker. Two other paths clear it: a warm
+// that fails but whose seat is then observed loaded, once the guards are re-read
+// (ClearSeatWarmOwedIfSeat), and `gpu status`, for a marker it can prove stale
+// (ClearSeatWarmOwedIfStale: older than its readings, with no lease live).
 
 import (
 	"crypto/rand"
@@ -435,32 +438,103 @@ func (m *Manager) seatWarmOwedPath() string { return filepath.Join(m.gpuDir(), s
 // MarkSeatWarmOwed records that seat was unloaded for a lease and is owed a
 // warm by the last holder to release.
 func (m *Manager) MarkSeatWarmOwed(seat string) error {
+	return m.MarkSeatWarmOwedAt(seat, m.now())
+}
+
+// MarkSeatWarmOwedAt is MarkSeatWarmOwed with the time of the stamp given. The stamp is kept in
+// whole seconds (RFC 3339, UTC), which is the resolution ClearSeatWarmOwedIfStale reasons with.
+func (m *Manager) MarkSeatWarmOwedAt(seat string, at time.Time) error {
 	if strings.TrimSpace(seat) == "" {
 		return errors.New("gpulease: seat-warm-owed needs a seat name")
 	}
 	if err := os.MkdirAll(m.gpuDir(), 0o777); err != nil {
 		return err
 	}
-	rec := fmt.Sprintf("%s %s\n", seat, m.now().UTC().Format(time.RFC3339))
+	rec := fmt.Sprintf("%s %s\n", seat, at.UTC().Format(time.RFC3339))
 	return os.WriteFile(m.seatWarmOwedPath(), []byte(rec), 0o666)
 }
 
 // SeatWarmOwed reports the seat a warm is owed to, or "" when none is.
 func (m *Manager) SeatWarmOwed() string {
+	seat, _ := m.seatWarmOwedRecord()
+	return seat
+}
+
+// seatWarmOwedRecord reads the marker: the seat it names ("" when there is none) and the time it
+// was stamped (zero when the stamp is missing or does not parse).
+func (m *Manager) seatWarmOwedRecord() (seat string, stamped time.Time) {
 	b, err := os.ReadFile(m.seatWarmOwedPath())
 	if err != nil {
-		return ""
+		return "", time.Time{}
 	}
 	f := strings.Fields(string(b))
 	if len(f) == 0 {
-		return ""
+		return "", time.Time{}
 	}
-	return f[0]
+	if len(f) > 1 {
+		if t, perr := time.Parse(time.RFC3339, f[1]); perr == nil {
+			stamped = t
+		}
+	}
+	return f[0], stamped
 }
 
 // ClearSeatWarmOwed removes the marker once the seat has been warmed back.
 func (m *Manager) ClearSeatWarmOwed() {
 	_ = os.Remove(m.seatWarmOwedPath())
+}
+
+// ClearSeatWarmOwedIfSeat removes the marker only if it still names seat
+// (compared case-insensitively, as the warm path compares seat names) and
+// reports whether it removed it. It is the clear for a warm-back that failed
+// and then OBSERVED the seat loaded, and it is only as safe as the caller's own
+// guard re-check just before it: the config has one agent seat, so a fresh
+// marker a new lease stamped names the same seat and would match. The compare
+// keeps a marker for another seat; it does not tell this lease's marker from a
+// successor's. A caller that cannot re-check the lease uses
+// ClearSeatWarmOwedIfStale, which does tell them apart.
+func (m *Manager) ClearSeatWarmOwedIfSeat(seat string) bool {
+	seat = strings.TrimSpace(seat)
+	if seat == "" {
+		return false
+	}
+	if !strings.EqualFold(m.SeatWarmOwed(), seat) {
+		return false
+	}
+	return os.Remove(m.seatWarmOwedPath()) == nil
+}
+
+// ClearSeatWarmOwedIfStale is the clear for `gpu status`, which decides from readings it began
+// at readsBegan (the card free of every lease, the seat loaded). It removes the marker only
+// when the marker names seat, was stamped before those readings began, and no lease is live
+// when it removes it; it reports whether it did. A marker stamped after the readings began
+// belongs to a lease the readings cannot speak for, and the readings take as long as the whole
+// activity snapshot (a lease read, a seat read, a GPU sample), not microseconds.
+//
+// The stamp is whole seconds, so the marker may have been written up to a second after it, and
+// it counts as older only when that second also ended before readsBegan. A marker with no
+// stamp that parses cannot be shown to be older, so it stays. The marker is read again after
+// the lease check and must be the same record, so a lease that took the card, unloaded the seat
+// and stamped a new marker in between is not undone. What remains is the gap between that
+// second read and the remove: a lease would have to take the card, unload the seat over HTTP
+// and stamp inside it. A lost race would cost one skipped warm (the seat then loads on its
+// next request), never a warm landed over a lease.
+func (m *Manager) ClearSeatWarmOwedIfStale(seat string, readsBegan time.Time) bool {
+	seat = strings.TrimSpace(seat)
+	if seat == "" {
+		return false
+	}
+	name, stamped := m.seatWarmOwedRecord()
+	if !strings.EqualFold(name, seat) || stamped.IsZero() || stamped.Add(time.Second).After(readsBegan) {
+		return false
+	}
+	if m.Inspect().Held {
+		return false
+	}
+	if again, at := m.seatWarmOwedRecord(); again != name || !at.Equal(stamped) {
+		return false
+	}
+	return os.Remove(m.seatWarmOwedPath()) == nil
 }
 
 // managerAt builds a throwaway Manager bound to an explicit lease directory,
