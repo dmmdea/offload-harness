@@ -33,7 +33,7 @@
 //        [--preset full|lightning4] [--clip te.safetensors] [--lora l.safetensors] [--shift 3.1]
 //   node comfy-render.mjs <out.png> "<prompt>" --family qwen-image-2.1 --ckpt qwen_image_2.1_bf16.safetensors \
 //        --clip qwen3vl_8b_bf16.safetensors --vae qwen_image_2.1_vae_bf16.safetensors \
-//        [--schedule official|comfy] [--transparent 1] [--steps 40 --cfg 1]
+//        [--schedule official|comfy|turbo] [--transparent 1] [--steps 40 --cfg 1]
 //
 // --family is a closed set (KNOWN_FAMILIES). An unrecognised value exits 2 BEFORE any
 // ComfyUI work: it used to fall through to the SDXL graph silently, so a typo'd

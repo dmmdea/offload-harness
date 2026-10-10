@@ -450,6 +450,9 @@ type EditModel struct {
 	Family      string
 	Resolution  int
 	CacheDevice string
+	// Schedule is the 2.1 edit graph's sigma schedule ("comfy" | "turbo"; "" = the
+	// builder default, comfy). The 2511 graph never reads it.
+	Schedule string
 	Launch      ComfyLaunch
 }
 
@@ -545,6 +548,9 @@ func editArgs(out, image, prompt string, params map[string]any, m EditModel) []s
 	}
 	if m.CacheDevice != "" {
 		args = append(args, "--cache-device", m.CacheDevice)
+	}
+	if m.Schedule != "" {
+		args = append(args, "--schedule", m.Schedule)
 	}
 	if paramTrue(params["transparent"]) {
 		args = append(args, "--transparent", "1")

@@ -38,7 +38,7 @@ import { buildQwenImageEdit, QWEN_EDIT_PRESETS, resolveEditMegapixels } from "./
 import {
   buildQwenImage21Edit, QWEN_IMAGE_21_MAX_REFS, QWEN_IMAGE_21_RESOLUTION,
   QWEN_IMAGE_21_CACHE_DEVICES, QWEN_IMAGE_21_CACHE_DTYPES,
-} from "./wf-qwen-image-21.mjs";
+ QWEN_IMAGE_21_EDIT_SCHEDULES } from "./wf-qwen-image-21.mjs";
 import { imageSize } from "./image-size.mjs";
 import { firstOutputFile } from "./comfy-output.mjs";
 import { resolveCli, submitGraph, pollOutputs, fetchView, finalizeRun } from "./comfy-submit.mjs";
@@ -52,7 +52,7 @@ export const EDIT_FAMILIES = Object.freeze([EDIT_DEFAULT_FAMILY, "qwen-image-2.1
 
 const BOOL_FLAGS = ["no-lock"];
 const ONLY_2511 = ["preset", "lora", "lora-strength", "megapixels", "shift", "loader"];
-const ONLY_21 = ["resolution", "cache-device", "cache-dtype", "transparent"];
+const ONLY_21 = ["resolution", "cache-device", "cache-dtype", "transparent", "schedule"];
 
 /** Positionals + flags; --ref may repeat (collected in order into refs). */
 export function parseEditArgs(argv) {
@@ -163,6 +163,10 @@ export function planEdit({ pos, flags, refs = [], env = process.env, measure = (
   if (!QWEN_IMAGE_21_CACHE_DTYPES.includes(cacheDtype)) {
     throw new UsageError(`error: --cache-dtype must be one of ${QWEN_IMAGE_21_CACHE_DTYPES.join("|")}, got '${cacheDtype}'`);
   }
+  const schedule = flags.schedule || "comfy";
+  if (!QWEN_IMAGE_21_EDIT_SCHEDULES.includes(schedule)) {
+    throw new UsageError(`error: --schedule must be one of ${QWEN_IMAGE_21_EDIT_SCHEDULES.join("|")} on the qwen-image-2.1 edit graph (turbo = the Turbo checkpoint's saved 8-step sigmas, steps 8 / cfg 1), got '${schedule}'`);
+  }
   const resolution = flags.resolution != null ? Number(flags.resolution) : QWEN_IMAGE_21_RESOLUTION;
   if (!Number.isInteger(resolution) || resolution < 0 || resolution > 4096 || resolution % 32 !== 0) {
     throw new UsageError(`error: --resolution must be 0 (keep each image's size) or a multiple of 32 up to 4096, got '${flags.resolution}'`);
@@ -172,14 +176,14 @@ export function planEdit({ pos, flags, refs = [], env = process.env, measure = (
   const cfg = flags.cfg != null ? Number(flags.cfg) : undefined;
   return {
     family, sources, seed,
-    describe: `family ${family} images ${sources.length} resolution ${resolution} cache ${cacheDevice}/${cacheDtype}${transparent ? " transparent" : ""}`,
+    describe: `family ${family} images ${sources.length} resolution ${resolution} cache ${cacheDevice}/${cacheDtype} schedule ${schedule}${transparent ? " transparent" : ""}`,
     build: (staged) => buildQwenImage21Edit({
       images: staged, prompt,
       negative: flags.negative || "",
       unet, clip: flags.clip, vae: flags.vae,
       steps, cfg,
       sampler: flags.sampler || undefined, scheduler: flags.scheduler || undefined,
-      resolution, cacheDevice, cacheDtype, transparent, seed,
+      resolution, cacheDevice, cacheDtype, schedule, transparent, seed,
     }),
   };
 }

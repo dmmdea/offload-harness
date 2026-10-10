@@ -72,7 +72,27 @@ export const QWEN_IMAGE_21_MAX_REFS = 10;
 export const QWEN_IMAGE_21_RESOLUTION = 1024;
 
 /** The two schedule modes. */
-export const QWEN_IMAGE_21_SCHEDULES = Object.freeze(["official", "comfy"]);
+export const QWEN_IMAGE_21_SCHEDULES = Object.freeze(["official", "comfy", "turbo"]);
+
+/**
+ * The Turbo checkpoint's saved 8-step schedule: Qwen/Qwen-Image-2.1-Turbo, model_index.json
+ * `sample_sigmas` (read 2026-10-09). Its scheduler config turns dynamic shifting OFF, sets
+ * shift 1.0 and no shift_terminal, so diffusers passes these values through unchanged and
+ * appends the terminal 0 — exactly the steps + 1 list ManualSigmas gets here. The base
+ * model's "official" schedule (dynamic mu, shift_terminal 0.02) does not reproduce it.
+ */
+export const QWEN_IMAGE_21_TURBO_SIGMAS = Object.freeze([1.0, 0.978453, 0.95418, 0.926626, 0.89508, 0.845148, 0.704534, 0.414568, 0]);
+export const QWEN_IMAGE_21_TURBO_STEPS = QWEN_IMAGE_21_TURBO_SIGMAS.length - 1;
+
+/** The edit graph's schedules: "comfy" (KSampler on the model's own shift, the default) or the Turbo list. */
+export const QWEN_IMAGE_21_EDIT_SCHEDULES = Object.freeze(["comfy", "turbo"]);
+
+function turboSigmas(steps) {
+  if (steps !== QWEN_IMAGE_21_TURBO_STEPS) {
+    throw new Error(`qwen-image-2.1: schedule "turbo" is the Turbo checkpoint's saved ${QWEN_IMAGE_21_TURBO_STEPS}-step schedule (model_index.json sample_sigmas) — steps must be ${QWEN_IMAGE_21_TURBO_STEPS}, got ${steps}`);
+  }
+  return QWEN_IMAGE_21_TURBO_SIGMAS;
+}
 
 /** QwenImage21Cache options (comfy_extras/nodes_qwen.py). */
 export const QWEN_IMAGE_21_CACHE_DEVICES = Object.freeze(["auto", "gpu", "cpu", "off"]);
@@ -228,7 +248,8 @@ function decodeAndSave(g, samplesRef, transparent, filenamePrefix) {
 
 /**
  * Text-to-image. Required: prompt, unet, clip, vae. W/H snap down to /32
- * (floor 256), default 2048x2048. schedule "official" (default) | "comfy".
+ * (floor 256), default 2048x2048. schedule "official" (default) | "comfy" | "turbo"
+ * (the Turbo checkpoint's saved 8-step sigmas; steps must be 8).
  * transparent wraps the prompt in the official RGBA template and keeps the
  * alpha channel; otherwise the output is an opaque RGB PNG.
  */
@@ -267,7 +288,7 @@ export function buildQwenImage21({
   };
   g["5"] = { class_type: "EmptyLatentImage", inputs: { width: W, height: H, batch_size: 1 } };
 
-  if (schedule === "official") {
+  if (schedule === "official" || schedule === "turbo") {
     g["6"] = { class_type: "RandomNoise", inputs: { noise_seed: seed } };
     // cfg 1.0 (the official recipe) is ONE model pass per step: BasicGuider on the
     // positive. Any other cfg is real classifier-free guidance, which BasicGuider
@@ -277,7 +298,8 @@ export function buildQwenImage21({
       ? { class_type: "BasicGuider", inputs: { model: ["1", 0], conditioning: ["4", 0] } }
       : { class_type: "CFGGuider", inputs: { model: ["1", 0], positive: ["4", 0], negative: ["4", 1], cfg: s.cfg } };
     g["8"] = { class_type: "KSamplerSelect", inputs: { sampler_name: sampler } };
-    g["9"] = { class_type: "ManualSigmas", inputs: { sigmas: formatSigmas(qwenImage21Sigmas({ width: W, height: H, steps: s.steps })) } };
+    const sigmas = schedule === "turbo" ? turboSigmas(s.steps) : qwenImage21Sigmas({ width: W, height: H, steps: s.steps });
+    g["9"] = { class_type: "ManualSigmas", inputs: { sigmas: formatSigmas(sigmas) } };
     g["10"] = {
       class_type: "SamplerCustomAdvanced",
       inputs: { noise: ["6", 0], guider: ["7", 0], sampler: ["8", 0], sigmas: ["9", 0], latent_image: ["5", 0] },
@@ -311,6 +333,7 @@ export function buildQwenImage21Edit({
   steps, cfg,
   sampler = QWEN_IMAGE_21_RECIPE.sampler,
   scheduler = QWEN_IMAGE_21_RECIPE.scheduler,
+  schedule = "comfy",
   resolution = QWEN_IMAGE_21_RESOLUTION,
   cacheDevice = "auto", cacheDtype = "default",
   transparent = false,
@@ -332,6 +355,11 @@ export function buildQwenImage21Edit({
   }
   if (!QWEN_IMAGE_21_CACHE_DTYPES.includes(cacheDtype)) {
     throw new Error(`buildQwenImage21Edit: cacheDtype must be one of ${QWEN_IMAGE_21_CACHE_DTYPES.join("|")}, got ${cacheDtype}`);
+  }
+  if (!QWEN_IMAGE_21_EDIT_SCHEDULES.includes(schedule)) {
+    // The edit latent is the encoder's own (image_1's grid), so the size-dependent
+    // "official" schedule has no place here: KSampler on the model's shift, or the Turbo list.
+    throw new Error(`buildQwenImage21Edit: schedule must be one of ${QWEN_IMAGE_21_EDIT_SCHEDULES.join("|")}, got ${schedule}`);
   }
   const s = requireSampling(steps, cfg);
   requireResolution(resolution);
@@ -359,13 +387,28 @@ export function buildQwenImage21Edit({
     enc[`images.image_${i + 1}`] = src;
   });
   g["5"] = { class_type: "TextEncodeQwenImage21", inputs: enc };
-  g["10"] = {
-    class_type: "KSampler",
-    inputs: {
-      seed, steps: s.steps, cfg: s.cfg, sampler_name: sampler, scheduler, denoise: 1.0,
-      model: ["4", 0], positive: ["5", 0], negative: ["5", 1], latent_image: ["5", 2],
-    },
-  };
+  if (schedule === "turbo") {
+    // The Turbo checkpoint's saved sigmas through the same custom-sampler wiring as the
+    // T2I graph: the cached model drives the guider, the encoder's own latent is denoised.
+    g["6"] = { class_type: "RandomNoise", inputs: { noise_seed: seed } };
+    g["7"] = s.cfg === 1
+      ? { class_type: "BasicGuider", inputs: { model: ["4", 0], conditioning: ["5", 0] } }
+      : { class_type: "CFGGuider", inputs: { model: ["4", 0], positive: ["5", 0], negative: ["5", 1], cfg: s.cfg } };
+    g["8"] = { class_type: "KSamplerSelect", inputs: { sampler_name: sampler } };
+    g["9"] = { class_type: "ManualSigmas", inputs: { sigmas: formatSigmas(turboSigmas(s.steps)) } };
+    g["10"] = {
+      class_type: "SamplerCustomAdvanced",
+      inputs: { noise: ["6", 0], guider: ["7", 0], sampler: ["8", 0], sigmas: ["9", 0], latent_image: ["5", 2] },
+    };
+  } else {
+    g["10"] = {
+      class_type: "KSampler",
+      inputs: {
+        seed, steps: s.steps, cfg: s.cfg, sampler_name: sampler, scheduler, denoise: 1.0,
+        model: ["4", 0], positive: ["5", 0], negative: ["5", 1], latent_image: ["5", 2],
+      },
+    };
+  }
   decodeAndSave(g, ["10", 0], transparent, filenamePrefix);
   return g;
 }

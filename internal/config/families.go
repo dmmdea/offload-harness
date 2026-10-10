@@ -292,7 +292,7 @@ var editOverlay = overlayKind{
 	clear: []string{
 		"gen_edit_unet", "gen_edit_family", "gen_edit_preset", "gen_edit_lora", "gen_edit_lora_strength",
 		"gen_edit_clip", "gen_edit_vae", "gen_edit_steps", "gen_edit_cfg", "gen_edit_sampler",
-		"gen_edit_scheduler", "gen_edit_megapixels", "gen_edit_resolution", "gen_edit_cache_device",
+		"gen_edit_scheduler", "gen_edit_schedule", "gen_edit_megapixels", "gen_edit_resolution", "gen_edit_cache_device",
 		"gen_edit_license", "gen_edit_commercial_use",
 	},
 	inherited: []string{"gen_edit_script", "gen_edit_timeout_sec"},
@@ -417,9 +417,14 @@ var cudaDeviceRe = regexp.MustCompile(`^\d+(,\d+)*$`)
 // ("" at the top level, `imagegen_families["x"].` inside an overlay).
 func validateMediaEnums(c Config, where string) error {
 	switch strings.TrimSpace(c.ImageGenSchedule) {
-	case "", "official", "comfy":
+	case "", "official", "comfy", "turbo":
 	default:
-		return fmt.Errorf("%simagegen_schedule: unknown schedule %q (valid: \"\", \"official\", \"comfy\")", where, c.ImageGenSchedule)
+		return fmt.Errorf("%simagegen_schedule: unknown schedule %q (valid: \"\", \"official\", \"comfy\", \"turbo\")", where, c.ImageGenSchedule)
+	}
+	switch strings.TrimSpace(c.GenEditSchedule) {
+	case "", "comfy", "turbo":
+	default:
+		return fmt.Errorf("%sgen_edit_schedule: unknown schedule %q (valid: \"\", \"comfy\", \"turbo\")", where, c.GenEditSchedule)
 	}
 	switch c.ComfyDynamicVRAM {
 	case "", "on", "off":

@@ -769,7 +769,8 @@ type Config struct {
 	// ImageGenSchedule picks the qwen-image-2.1 sigma schedule: "official" (the
 	// model repo's diffusers scheduler — dynamic mu, exponential shift,
 	// shift_terminal 0.02 — computed by the builder), "comfy" (ComfyUI's fixed model
-	// shift, KSampler) or "" (the builder default, official). Other families ignore it.
+	// shift, KSampler), "turbo" (the Qwen-Image-2.1-Turbo checkpoint's saved 8-step
+	// sigmas; steps must be 8) or "" (the builder default, official). Other families ignore it.
 	ImageGenSchedule string `json:"imagegen_schedule,omitempty"`
 	// ImageGenLicense / ImageGenCommercialUse declare the license of THIS box's default
 	// image binding (ADR 0058). When set, every generate_image result from the default
@@ -881,6 +882,11 @@ type Config struct {
 	GenEditCFG       float64 `json:"gen_edit_cfg,omitempty"`
 	GenEditSampler   string  `json:"gen_edit_sampler,omitempty"`
 	GenEditScheduler string  `json:"gen_edit_scheduler,omitempty"`
+	// GenEditSchedule picks the qwen-image-2.1 edit graph's sigma schedule: "comfy"
+	// (KSampler on ComfyUI's fixed model shift, the default) or "turbo" (the
+	// Qwen-Image-2.1-Turbo checkpoint's saved 8-step sigmas; steps must be 8). The
+	// 2511 graph ignores it.
+	GenEditSchedule string `json:"gen_edit_schedule,omitempty"`
 	// GenEditMegapixels fixes the edit's working canvas — and therefore its OUTPUT
 	// resolution, since the scaled image is what the sampler denoises. 0 (the default)
 	// means "follow the source": the runner measures the source file and targets its
@@ -2780,6 +2786,10 @@ func warnImageBindingTo(c Config, w io.Writer, where string) {
 	if c.ImageGenSchedule != "" && c.ImageGenFamily != FamilyQwenImage21 {
 		fmt.Fprintf(w, "warning: %simagegen_schedule %q is set but imagegen_family is %q — only the qwen-image-2.1 graph reads a schedule; the flag is parsed and never consulted\n",
 			where, c.ImageGenSchedule, c.ImageGenFamily)
+	}
+	if c.GenEditSchedule != "" && c.GenEditFamily != FamilyQwenImage21 {
+		fmt.Fprintf(w, "warning: %sgen_edit_schedule %q is set but gen_edit_family is %q — only the qwen-image-2.1 edit graph reads a schedule; the flag is parsed and never consulted\n",
+			where, c.GenEditSchedule, c.GenEditFamily)
 	}
 	if where == "" && c.ImageGenFamily == FamilyQwenImage21 {
 		fmt.Fprintln(w, "warning: imagegen_family is qwen-image-2.1 on the DEFAULT image binding — ADR 0058 ships it only as a named imagegen_families opt-in; every un-named request on this box now renders it")

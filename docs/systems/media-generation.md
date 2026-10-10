@@ -624,7 +624,13 @@ Qwen-Image 2512, whose graph cannot drive it. Needs **ComfyUI ≥ v0.37.0** (the
   (`render/testdata/qwen-image-21-sigmas.golden.json`, generator beside it). Values are printed
   fixed-point because `ManualSigmas`' parser has no exponent support. `comfy` = `KSampler(euler,
   simple)` with ComfyUI's fixed model shift (0.69 at every size). ComfyUI #16447 contests which looks
-  better at 2K; the binding picks.
+  better at 2K; the binding picks. `turbo` = the Qwen-Image-2.1-Turbo checkpoint's saved 8-step list
+  (`model_index.json` `sample_sigmas`: dynamic shifting off, shift 1.0, no terminal stretch — fed through
+  `ManualSigmas` unchanged, terminal 0 appended) and refuses any step count but 8; bind it as its own named
+  family on the Turbo weights (`qwen_image_2.1_turbo_bf16` / `_int8_convrot`, 8 steps, cfg 1). The 2.1 edit
+  graph takes `gen_edit_schedule` `comfy` (default: `KSampler`) or `turbo` (the same custom-sampler wiring on
+  the cached model and the encoder's latent); it has no size-dependent `official` mode because its latent is
+  the encoder's.
 - **Transparency:** `transparent: true` wraps the prompt in the official RGBA template ("This is an
   RGBA image with transparency. … The image has alpha channel and the background is transparent.")
   and keeps the alpha channel; the default splits it off, so an ordinary prompt never hands a
