@@ -256,8 +256,8 @@ func (r runTaskAs) BeginRemote(req core.Request, route string) core.RemoteAttrib
 
 var _ core.RemoteAttributor = runTaskAs{}
 
-// MediaLaneFree makes the runner the lane prober mediaremote asks before it sends a busy image call to an idle node of the
-// fleet (ADR 0082): the server's pipeline answers it, read-only. A server built without a pipeline (the test seam) has no
+// MediaLaneFree makes the runner the lane prober mediaremote asks before it sends a busy image call, or a busy whole-node
+// graph, to an idle node of the fleet (ADR 0082): the server's pipeline answers it, read-only. A server built without a pipeline (the test seam) has no
 // lane to ask about, and reads as free: the call goes through runTask as it always did.
 func (r runTaskAs) MediaLaneFree(ctx context.Context, req core.Request) core.LaneVerdict {
 	if r.s.laneHook != nil {
