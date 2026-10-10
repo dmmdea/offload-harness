@@ -400,7 +400,10 @@ func TestWarmStopsAtA404EvenInsideTheRecoveryWindow(t *testing.T) {
 // The grace bounds the recovery. A server that keeps saying it is shutting down must end the warm
 // with the not-loading failure and the grace named, never a loop that holds the lease for good.
 func TestWarmRetryIsBoundedByTheReloadGrace(t *testing.T) {
-	fastWarmRetry(t, 300*time.Millisecond)
+	// A grace of a second, not a few hundred ms: on a host busy with other test runs one attempt
+	// took over a hundred ms, and a short grace then held two requests where the nominal count is
+	// about fifty.
+	fastWarmRetry(t, time.Second)
 	f := &warmOrderSwap{drainSwap: &drainSwap{}, reloadFails: 1 << 20}
 	srv := reloadingSwap(t, f)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -410,7 +413,7 @@ func TestWarmRetryIsBoundedByTheReloadGrace(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "not loading") || !strings.Contains(err.Error(), "no recovery within") {
 		t.Fatalf("a recovery that never comes must end as not loading, with the grace named: %v", err)
 	}
-	if took := time.Since(start); took > 2*time.Second {
+	if took := time.Since(start); took > 4*time.Second {
 		t.Fatalf("the retry outlived its grace: %s", took)
 	}
 	if hits := f.healthHits.Load(); hits < 3 {
@@ -621,10 +624,10 @@ func TestWarmDoesNotWaitOutAnUnreadableRunningAfterAReloadAnsweredBy503(t *testi
 // on some hosts, so the test reads arrival times with generous scales, and checks the two things
 // a wrong back-off changes: no gap is shorter than its delay (a constant first delay fails the
 // third gap), and the cap is reached (an uncapped doubling reaches only six requests in the
-// grace where the capped one sends about eleven; the floor is eight so a loaded host keeps
+// grace where the capped one sends about fourteen; the floor is nine so a loaded host keeps
 // some headroom).
 func TestWarmBackoffDoublesUpToItsCap(t *testing.T) {
-	fastWarmRetry(t, 1500*time.Millisecond)
+	fastWarmRetry(t, 2*time.Second)
 	warmRetryFirst, warmRetryMax = 40*time.Millisecond, 160*time.Millisecond
 	f := &warmOrderSwap{drainSwap: &drainSwap{}, reloadFails: 1 << 20}
 	srv := reloadingSwap(t, f)
@@ -633,8 +636,8 @@ func TestWarmBackoffDoublesUpToItsCap(t *testing.T) {
 		t.Fatalf("a recovery that never comes ends with the grace named: %v", err)
 	}
 	at := f.arrivals()
-	if len(at) < 8 {
-		t.Fatalf("the capped back-off sends about eleven requests in the grace (an uncapped one six), got %d", len(at))
+	if len(at) < 9 {
+		t.Fatalf("the capped back-off sends about fourteen requests in the grace (an uncapped one six), got %d", len(at))
 	}
 	want := []time.Duration{40, 80, 160, 160, 160}
 	for i, w := range want {
