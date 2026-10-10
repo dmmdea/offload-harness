@@ -26,8 +26,11 @@ import (
 type slowTable struct {
 	mu    sync.Mutex
 	hangs int
-	cards []gpuprobe.Card
-	left  []time.Duration
+	// script, when set, gives the next reads one by one ("ok" answers, "hang" blocks until the read's
+	// deadline ends it) before hangs applies: a verb whose reads are not the first ones it makes.
+	script []string
+	cards  []gpuprobe.Card
+	left   []time.Duration
 }
 
 func useSlowTable(t *testing.T, cards []gpuprobe.Card, hangs int) *slowTable {
@@ -45,6 +48,9 @@ func useSlowTable(t *testing.T, cards []gpuprobe.Card, hangs int) *slowTable {
 		hang := s.hangs > 0
 		if hang {
 			s.hangs--
+		}
+		if len(s.script) > 0 {
+			hang, s.script = s.script[0] == "hang", s.script[1:]
 		}
 		s.mu.Unlock()
 		if hang {
@@ -65,6 +71,16 @@ func (s *slowTable) reads() []time.Duration {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]time.Duration(nil), s.left...)
+}
+
+// useScriptedTable is useSlowTable with the reads scripted one by one.
+func useScriptedTable(t *testing.T, cards []gpuprobe.Card, modes ...string) *slowTable {
+	t.Helper()
+	s := useSlowTable(t, cards, 0)
+	s.mu.Lock()
+	s.script = append([]string(nil), modes...)
+	s.mu.Unlock()
+	return s
 }
 
 func TestTheDecidingVerbsReadTheCardTableWithTheRetryAndTheViewsDoNot(t *testing.T) {
@@ -148,5 +164,38 @@ func TestALeaseScopeSurvivesOneSlowCardTableRead(t *testing.T) {
 	}
 	if r := s.reads(); len(r) != 2 {
 		t.Errorf("reads = %v, want the attempt that ran out and its retry", r)
+	}
+}
+
+// The wrapper pins its command to the cards the lease holds, and what the command pins ITSELF to is
+// read from the card table: a bare index it inherited (CUDA_VISIBLE_DEVICES=2 in PCI order) means a
+// card only with the table. A pin inside the held cards is tighter than the lease and is left alone;
+// one the wrapper cannot resolve is REPLACED with the held cards and said so. That read is one of the
+// deciding ones: one slow nvidia-smi must not make the wrapper overwrite a pin it could have confirmed.
+func TestGPUReserveConfinementReadsTheCardTableWithTheRetry(t *testing.T) {
+	cfg, _ := scopedLeaseFixture(t)
+	useCardTable(t, "") // the other live reads (processes, seats, RAM); the table below replaces its reader
+	clearCardPins(t)
+	t.Setenv("CUDA_VISIBLE_DEVICES", "2")
+	t.Setenv("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
+	cards, _ := gpuprobe.BuildCards([]gpuprobe.Device{
+		{Index: 0, UUID: "GPU-aaaa0000-x", Name: "T", TotalGiB: 16, FreeGiB: 16, UtilKnown: true},
+		{Index: 1, UUID: "GPU-bbbb0000-x", Name: "T2", TotalGiB: 16, FreeGiB: 16, UtilKnown: true, DisplayActive: true},
+		{Index: 2, UUID: "GPU-cccc0000-x", Name: "T", TotalGiB: 16, FreeGiB: 16, UtilKnown: true},
+	}, "")
+	// Three verbs' reads, in order: the plan's, the unload list's scope (wrapperUnloadEnv) and the wrapper's
+	// own, taken to read the command's pin once the lease is held. The third one's first attempt runs out of time.
+	s := useScriptedTable(t, cards, "ok", "ok", "hang")
+	out := t.TempDir() + "/env.txt"
+	t.Setenv("LO_HELPER_ENV_OUT", out)
+	t.Setenv("LO_HELPER_SLEEP_MS", "0")
+	if err := runGPUReserve(append([]string{"--config", cfg, "--class", "media", "--devices", "2", "--wait", "0"}, envHelperCmd(out)...)); err != nil {
+		t.Fatal(err)
+	}
+	if got := envValue(out, "cuda_visible"); got != "2" {
+		t.Errorf("the command's own pin is inside the card the lease holds, so it is left alone; the wrapper saw no table and replaced it: CUDA_VISIBLE_DEVICES=%q", got)
+	}
+	if r := s.reads(); len(r) != 4 || r[2] > 40*time.Millisecond || r[3] < 400*time.Millisecond {
+		t.Errorf("reads = %v, want the plan's and the scope's reads, then the wrapper's attempt that ran out and its retry under the longer deadline", r)
 	}
 }
