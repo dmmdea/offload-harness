@@ -10,7 +10,15 @@
 #   --selftest: run every op against an in-memory image (no files, no stdin) and
 #   exit 0/1 - used by the Go test suite and CI.
 import json
+import os
 import sys
+
+# The output is delivered through atomic_out.save_atomic (a sibling module): a save straight onto `out`
+# truncates it first, so a full disk left a zero-byte file that read as finished and a failed save
+# destroyed a previous good one. The script directory is put on the path explicitly so the import
+# also works when the interpreter runs isolated (-I / -P).
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from atomic_out import save_atomic
 
 try:
     from PIL import Image, ImageDraw, ImageFont
@@ -541,7 +549,7 @@ def main():
         img = run_pipeline(img, ops)
         if out.lower().endswith((".jpg", ".jpeg")) and img.mode != "RGB":
             img = img.convert("RGB")
-        img.save(out)
+        save_atomic(out, img.save)
     except ValueError as e:
         print(json.dumps({"error": str(e)}))
         sys.exit(2)
