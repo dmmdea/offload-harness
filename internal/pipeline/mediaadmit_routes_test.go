@@ -295,7 +295,8 @@ func TestAHostWithoutCardScopedLeasesIsByteIdentical(t *testing.T) {
 	}
 }
 
-// With no card table the card path cannot choose a card: the whole node, as before, said once.
+// With no card table the card path cannot choose a card: the whole node, as before, said in the log
+// on every such call (and in the answer of one that has to wait: mediaadmit_cardtable_test.go).
 func TestAnUnreadableCardTableFallsBackToTheWholeNode(t *testing.T) {
 	f := newAdmitFixtureWith(t, admitSpec{order: admitOrder})
 	f.p.alloc.Cards = func(context.Context, config.Config) ([]gpuprobe.Card, string, error) {
