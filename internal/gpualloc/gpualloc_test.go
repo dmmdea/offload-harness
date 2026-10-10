@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -347,5 +348,42 @@ func TestPickAutoDoesNotPollForAnImpossibleHostNeed(t *testing.T) {
 	_, _, err = PickAuto(Plan{Min: 1, Max: 1}, 10*time.Second, short, &out, func(d time.Duration) { sleeps++; clock = clock.Add(d) }, func() time.Time { return clock })
 	if !errors.As(err, &none) || none.HostImpossible || sleeps == 0 {
 		t.Fatalf("a shortage that waiting can cure is polled for (sleeps %d): %v", sleeps, err)
+	}
+}
+
+// THE RUNAWAY OF 2026-10-10 (G3 of the P0 plan, step 2). A fix-round run of `go test -run TestPickAuto|TestQueuedClaims
+// ./internal/gpualloc/` held 52 GiB private on the reference box and had to be killed. The cause was not a leak in
+// the allocator: PickAuto's poll loop ends when `now()` passes the deadline, and the new test injected a sleep that
+// does not sleep (it only recorded an error) with the REAL clock and a one-hour wait, against a PickAuto that still
+// polled for the case under test. A poll loop whose sleep does not advance the clock it reads is a busy-spin, and
+// every pass built a fresh AllocInput (maps, strings, a NoCardsError) and every pass appended to the test's log: for
+// up to an hour. The loop is now also bounded by the number of polls the wait allows, whatever the clock does, so a
+// caller that injects a stuck clock gets the same "fewer cards qualify" answer after at most wait/2s+2 passes instead
+// of a spin; and this test is the bound.
+func TestPickAutoPollsAreBoundedWhateverTheClockDoes(t *testing.T) {
+	cards := threeCards() // the display card is the operator's: three cards can never qualify, and waiting does not change that
+	builds := 0
+	build := func() (gpulease.AllocInput, error) {
+		builds++
+		if builds > 5000 {
+			t.Fatalf("PickAuto is still building inputs after %d passes: the poll loop is not bounded by the wait", builds)
+		}
+		return gpulease.AllocInput{Cards: cards, HostMemOK: true, HostMem: roomyHostMemory}, nil
+	}
+	frozen := time.Unix(1000, 0)
+	sleeps := 0
+	_, _, err := PickAuto(Plan{Min: 3, Max: 3}, time.Hour, build, io.Discard,
+		func(time.Duration) { sleeps++ },   // a sleep that sleeps for nothing
+		func() time.Time { return frozen }, // and a clock that never moves
+	)
+	var none *gpulease.NoCardsError
+	if !errors.As(err, &none) {
+		t.Fatalf("a stuck clock must end in the allocator's own answer, got %v", err)
+	}
+	if max := int(time.Hour/(2*time.Second)) + 2; builds > max {
+		t.Fatalf("%d passes for a one-hour wait polled every 2s, want at most %d", builds, max)
+	}
+	if sleeps == 0 {
+		t.Fatal("the loop never polled at all: this test no longer exercises the poll path")
 	}
 }

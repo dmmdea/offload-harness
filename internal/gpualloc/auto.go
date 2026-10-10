@@ -27,11 +27,19 @@ type Plan struct {
 // card, quarantine, host RAM, VRAM) it polls until they do or wait runs out.
 //
 // Progress lines go to out (io.Discard is fine); the caller's clock and sleep are injected.
+//
+// The poll loop is bounded twice: by the deadline on the caller's clock and by the number of polls the wait
+// allows at the poll interval, whichever comes first. The second bound exists because both the clock and the
+// sleep are injected, and a loop that ends only when `now()` passes the deadline is a busy-spin whenever the
+// sleep it is handed does not advance the clock it is given (a no-op sleep with the real clock, a frozen
+// clock): 2026-10-10, a test of exactly that shape held 52 GiB private within a minute, one AllocInput and one
+// log line per pass, for the hour it had asked to wait. In production the two bounds are the same bound.
 func PickAuto(plan Plan, wait time.Duration, build func() (gpulease.AllocInput, error),
 	out io.Writer, sleep func(time.Duration), now func() time.Time) (ids []string, free bool, err error) {
 	deadline := now().Add(wait)
 	told := false
-	for {
+	maxPolls := int(wait/pickPollEvery) + 1
+	for polls := 0; ; polls++ {
 		in, err := build()
 		if err != nil {
 			return nil, false, err
@@ -55,16 +63,19 @@ func PickAuto(plan Plan, wait time.Duration, build func() (gpulease.AllocInput, 
 			fmt.Fprintf(out, "gpu reserve: no %d card(s) are free right now; queueing for %s (%s)\n", plan.Min, strings.Join(target, ", "), SkipSummary(none))
 			return target, false, nil
 		}
-		if wait <= 0 || !now().Before(deadline) {
+		if wait <= 0 || !now().Before(deadline) || polls >= maxPolls {
 			return nil, false, fmt.Errorf("%w%s", none, plan.Hint)
 		}
 		if !told {
 			told = true
 			fmt.Fprintf(out, "gpu reserve: fewer than %d card(s) qualify (%s); waiting up to %s for that to change\n", plan.Min, SkipSummary(none), wait)
 		}
-		sleep(2 * time.Second)
+		sleep(pickPollEvery)
 	}
 }
+
+// pickPollEvery is how often PickAuto reads the world again while too few cards qualify.
+const pickPollEvery = 2 * time.Second
 
 // GrantCheck is the check a queued request makes when its turn comes (gpulease.Options.GrantCheck).
 // The set it was queued on was chosen against the operator's presence and the desktop floor as they
