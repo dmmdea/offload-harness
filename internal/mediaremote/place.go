@@ -56,6 +56,7 @@ var (
 	probeRoster  = rosterprobe.Probe
 	localVersion = buildinfo.Version
 	placerNow    = time.Now
+	hostnameFn   = os.Hostname
 	placerJitter = func(d time.Duration) time.Duration { return time.Duration(float64(d) * (0.8 + 0.4*rand.Float64())) }
 )
 
@@ -202,6 +203,19 @@ func (o overflowOutcome) annotate(res core.Result) core.Result {
 	return res
 }
 
+// selfNodeID is this machine's node id the way fleet-serve derives its own (main.go fleetServeParams): fleet_node_id,
+// else the OS hostname. A roster that lists this machine's own node names the lane that is busy: it matches the recipe
+// perfectly, and sending the call back into it would only wait the node's window and bounce.
+func selfNodeID(cfg config.Config) string {
+	if id := strings.TrimSpace(cfg.FleetNodeID); id != "" {
+		return id
+	}
+	if h, err := hostnameFn(); err == nil {
+		return strings.TrimSpace(h)
+	}
+	return ""
+}
+
 // ambientLease reports whether this process runs under a lease it inherited (`gpu reserve -- local-offload ...`): its
 // card was chosen for it. It is the trigger the pipeline's own check keys on (pipeline.ambientLeaseEnv), read here so
 // the router never even asks the lane about such a call.
@@ -334,6 +348,7 @@ func candidatesFor(ctx context.Context, cfg config.Config, bases []string, local
 		}
 		live = append(live, b)
 	}
+	self := selfNodeID(cfg)
 	for _, r := range probeRoster(ctx, live, cfg.FleetAuthToken, healthTimeout) {
 		i := idxOf[r.Base]
 		if r.Err != nil {
@@ -351,6 +366,10 @@ func candidatesFor(ctx context.Context, cfg config.Config, bases []string, local
 		placer.ok(r.Base)
 		v := r.View
 		who := fmt.Sprintf("%s (%s)", r.Shown(), v.NodeID)
+		if self != "" && strings.EqualFold(strings.TrimSpace(v.NodeID), self) {
+			rows = append(rows, rowAt{i, ClusterRow{Node: who, State: "skipped", Why: "this machine's own node: the lane that is not free is the one it would use"}})
+			continue
+		}
 		m, ok := matchNode(local, v, n)
 		if !ok {
 			rows = append(rows, rowAt{i, ClusterRow{Node: who, State: m.state, Why: m.why, Differs: m.differs}})

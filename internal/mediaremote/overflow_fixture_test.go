@@ -129,6 +129,9 @@ func startImageNode(t *testing.T, id, defaultFamily string, families map[string]
 func overflowClient(t *testing.T, defaultFamily string, families map[string]string, nodes ...*node) config.Config {
 	t.Helper()
 	useVersion(t)
+	prevHost := hostnameFn
+	hostnameFn = func() (string, error) { return "delegator-host", nil } // no test depends on the machine that runs it
+	t.Cleanup(func() { hostnameFn = prevHost })
 	resetPlacer()
 	t.Cleanup(resetPlacer)
 	cfg := clientCfg(t, nodes...)

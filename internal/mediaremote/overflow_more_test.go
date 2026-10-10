@@ -138,3 +138,47 @@ func TestBounceThenNothingAdmitsLeavesOneQuietCardAndNoAskerRow(t *testing.T) {
 		t.Errorf("the node was sent the call once: %d", got)
 	}
 }
+
+// A roster that lists the machine ITSELF (a loopback or tailnet address of its own fleet-serve) must not make the busy
+// lane its own overflow: that entry matches the recipe perfectly, ranks first when it holds no lease the node can see
+// (a place in line, a host-RAM hold), and would send the call back into the same lane to wait its window and bounce.
+// A node's id is fleet_node_id, else the OS hostname, on both sides; the entry is named in cluster[] and never tried.
+func TestTheMachineItselfIsNeverACandidate(t *testing.T) {
+	fams := map[string]string{"qwen-image-2.1": block(int8Ckpt, "")}
+	self := startImageNode(t, "node-b", "hidream-o1", fams, nodeOpts{})
+	other := startImageNode(t, "node-c", "hidream-o1", fams, nodeOpts{})
+	cfg := overflowClient(t, "krea2", map[string]string{"qwen-image-2.1-fast": block(int8Ckpt, "")}, self, other)
+	cfg.FleetNodeID = "Node-B" // the case differs on purpose: hostnames are case-insensitive
+
+	lr := &laneRunner{verdict: heldLane()}
+	res := Run(context.Background(), cfg, lr, overflowReq(t, "qwen-image-2.1-fast", nil), "auto", nil)
+	if !res.OK || res.Meta.Node != "node-c" {
+		t.Fatalf("the other node serves it: %+v", res)
+	}
+	noPosts(t, "this machine's own node", self)
+
+	// Alone, the call stays in its own queue and the answer names the entry.
+	only := overflowClient(t, "krea2", map[string]string{"qwen-image-2.1-fast": block(int8Ckpt, "")}, self)
+	only.FleetNodeID = "node-b"
+	lr2 := &laneRunner{verdict: heldLane(), local: queuedLocal()}
+	res = Run(context.Background(), only, lr2, overflowReq(t, "qwen-image-2.1-fast", nil), "auto", nil)
+	if probes, runs := lr2.counts(); probes != 1 || runs != 1 {
+		t.Fatalf("nothing else admits: probes %d runs %d", probes, runs)
+	}
+	row, ok := rowFor(clusterOf(t, res), "node-b")
+	if !ok || row.State != "skipped" || !strings.Contains(row.Why, "this machine") {
+		t.Fatalf("the entry is named, not tried: %+v", row)
+	}
+	noPosts(t, "this machine's own node", self)
+
+	// With no fleet_node_id the OS hostname is the id, exactly as fleet-serve derives its own.
+	byName := overflowClient(t, "krea2", map[string]string{"qwen-image-2.1-fast": block(int8Ckpt, "")}, self)
+	prev := hostnameFn // after overflowClient, which pins a hostname of its own
+	hostnameFn = func() (string, error) { return "node-b", nil }
+	t.Cleanup(func() { hostnameFn = prev })
+	lr3 := &laneRunner{verdict: heldLane(), local: queuedLocal()}
+	res = Run(context.Background(), byName, lr3, overflowReq(t, "qwen-image-2.1-fast", nil), "auto", nil)
+	if row, ok := rowFor(clusterOf(t, res), "node-b"); !ok || row.State != "skipped" {
+		t.Fatalf("the hostname is the id when fleet_node_id is unset: %+v", row)
+	}
+}

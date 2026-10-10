@@ -1993,7 +1993,9 @@ no substitution); runs this same release (`harness_version`: the graph builders 
 `refine=false`; has the family's route (`generate_image` or `generate_image:<name>`) CONFIGURED when it reports its routes;
 accepts a per-request `steps` when the graph takes steps and cfg together (the node's binding must have **set** cfg, `explicit`);
 and holds **no lease of any class** (the delegator cannot know which card a node's lease sits on or which card the job would
-take, so it is conservative; the node's own grant, including the host-RAM guard, stays the authority). Candidates rank by the
+take, so it is conservative; the node's own grant, including the host-RAM guard, stays the authority). A roster entry that is this
+machine's own node (its `node_id` equals `fleet_node_id`, else the OS hostname, the rule `fleet-serve` names itself by) is never a
+candidate: it would match perfectly and send the call back into the lane that is not free. It is named in `cluster[]` as `skipped`. Candidates rank by the
 shorter queue (`queue_depth`), then config order. The job goes under the **node's own** family name for the recipe and with the
 digest; it never goes under the caller's name (a name binds different files on different nodes) and never with none (a call that
 names no family is this machine's default binding and must not land on a node's different default).
@@ -2015,7 +2017,7 @@ it leaves none. A node that accepted and then bounced it has its card closed qui
 lane is not free (<what holds it, with its reason and the time its lease declared>); ran on <node>`. A call that nothing admitted
 runs here exactly as it always did, and if it ends in a deferral (a place in line, a busy defer) the answer carries `cluster[]`
 (`{node, state, why, differs?}` per roster node, in config order, and the reason quotes them). `state` is `busy` (the node holds a
-lease; the lease and its reason), `not-capable` (the key that differs, in the config key's own name, and the family of this
+lease; the lease and its reason; or another call of this process already has a job there), `not-capable` (the key that differs, in the config key's own name, and the family of this
 machine that WOULD match: `send family=<ours> to use its <theirs>`; or the release, or the refine, the route or the steps rule),
 `unreachable`, `refused`, `bounced` or `skipped`. A node absent from `delegate_remotes` is not named: nothing in the config says
 it exists. A call that ran is never annotated.
@@ -2031,7 +2033,9 @@ recipe and seed on a different GPU architecture is the same composition, not bit
 costs one bounce: up to the node's `gpu_wait_ms` parked on the node and one deferred row there before the placer sees it.
 
 **Reading a node's recipes** (the first live check, before relying on a match): `curl -s http://<node>:18811/fleet/health` and
-read `image_recipes`; compare each row's `digest` with the one `offload_status` / the call's `cluster[]` shows for this machine.
+read `image_recipes` on the target and, on a machine that also runs `fleet-serve`, on the delegator's own node: the digest of the
+family you will name there is the one the target's row must equal. Neither `offload_status` nor `cluster[]` shows a local digest
+(`cluster[]` names the keys that differ, not the digest); a delegator that does not serve has no surface that prints its own.
 
 ## Comfy workflow templates catalog (phase A)
 

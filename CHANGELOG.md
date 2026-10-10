@@ -44,6 +44,12 @@ Versioning: [SemVer](https://semver.org/).
   for 5, 15, 60 and then 300 s, a `Retry-After` pauses it (chosen constants, not measurements). `RemoteAttribution.Bounce` closes
   the PAIR card of an attempt that held nothing (completed, never started) and writes no ledger row; an overflowing call opens its
   card only once a node has accepted the job, so the call has one row and one card per node that held it.
+- **A roster that lists the machine itself.** An entry whose `node_id` equals this machine's (`fleet_node_id`, else the hostname)
+  is never a candidate and is named in `cluster[]` as `skipped`: it would match the recipe perfectly and send the call back into the
+  lane that is not free.
+- **Cost.** Every `auto` image call on a lane-plus-fleet box now pays one `nvidia-smi` read (at most 4 s) for the lane question, and a
+  roster read when the lane is not free, including for families no node can match; a roster-first short circuit and a short table
+  copy for pinned plans are named follow-ups.
 - **Fixed on the way.** A seed (and width, height, steps) the caller gave as an integer reached a fleet node through a float64, so a
   seed above 2^53 changed; the sender now reads integers exactly (`TestSeedTravelsExactly`).
 - **Not changed, and said.** One line per delegating machine, not one global order; a call resumed with its token is not moved

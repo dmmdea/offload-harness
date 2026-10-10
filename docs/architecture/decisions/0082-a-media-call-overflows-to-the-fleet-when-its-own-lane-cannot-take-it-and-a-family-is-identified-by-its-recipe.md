@@ -66,8 +66,9 @@ Three facts made the obvious change unsafe as stated.
    `refine` when the call sent `refine=false`, has the family's route CONFIGURED when it reports its routes, accepts a
    per-request `steps` when the graph takes steps and cfg together (the node must have SET cfg), and holds **no lease of any
    class** (the delegator cannot know which card a node's lease sits on or which card the job would take, so it is
-   conservative; the node's own grant, including its host-RAM guard, is the authority). Candidates rank by the shorter queue,
-   then config order. The family is sent under the node's own name for the recipe, never the caller's, and never empty: a call
+   conservative; the node's own grant, including its host-RAM guard, is the authority), and is not this machine's own node (its
+   `node_id` equals `fleet_node_id`, else the OS hostname: such an entry would match perfectly and send the call back into the
+   lane that is not free; it is named in `cluster[]`). Candidates rank by the shorter queue, then config order. The family is sent under the node's own name for the recipe, never the caller's, and never empty: a call
    that names no family is this machine's default binding, and must not land on a node's different default.
 6. **Refusals move on; an accepted job is final.** At most 3 nodes are tried. A refusal at the door (`503`, `429`, `412`, any
    other status, or a dial that never connected) means nothing ran: the call goes on, under a fresh job id. A node that accepted
@@ -115,12 +116,21 @@ Three facts made the obvious change unsafe as stated.
   them was cut inside the block it matters for; the live acceptance reads `image_recipes` on both nodes first. Nothing here was
   run against a live lease or a real render. The backoff steps, the attempt bound and the probe's 4 s card-table bound are chosen
   constants, not resource numbers; the host-RAM numbers are the guard's and are not chosen here.
-- **Cost.** The probe reads the card table once per overflowing call, bounded at 4 s: unlike the plan's first sketch it keeps no
-  60 s copy, because a table that is a minute stale can call a lane busy that the grant would serve (the display card's free
-  memory moves), and the contract forbids that. The delegator's own recipe is three or four stats of its model tree per call
-  that gets as far as the lane question; the recipes of its OTHER families are read only when a node misses, to name the family
-  that would match. A node's health rows are 60 s old at worst, and the node re-checks the digest at admission from the files
-  then on disk.
+- **Cost, stated plainly.** Every `auto` image call on a box that has the lane and a fleet pays one `nvidia-smi` read (bounded at
+  4 s) for the lane question, and a roster read when the lane is not free, even when no node can ever match (the default family
+  and the 2512 bf16 family of the busiest submitter have no remote match today). A caller that re-sends without its token pays it
+  per re-send. The first sketch kept a 60 s copy of the card table; it was dropped for the AUTO plan, where the allocator reads the
+  display card's free memory and a minute-old table can call busy a lane the grant would serve, which the contract forbids. Two
+  follow-ups, neither built: a roster-first short circuit (health is memoised 2 s; when no published digest equals the local one the
+  lane question need not be asked), and a short table copy for the pinned and whole-node plans only, where the table maps a pin
+  to a card and sizes the host-RAM need (total VRAM) and nothing else. The delegator's own recipe is three or four stats of its
+  model tree per call that gets as far as the lane question; the recipes of its OTHER families are read only when a node misses, to
+  name the family that would match. A node's health rows are 60 s old at worst, and the node re-checks the digest at admission from
+  the files then on disk.
+- **An attribution edge.** An overflowing call opens its PAIR card when the node's 202 arrives, not before the POST. If the caller's
+  own deadline ends the call after the node accepted but before the 202 was read, the node runs the job with no card on the
+  delegator's side. Bounded: the call's budget is 2 h against a 20 min dispatch timeout, so it needs a caller-supplied deadline of
+  minutes or less.
 
 ## Alternatives considered
 
