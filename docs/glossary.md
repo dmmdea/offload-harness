@@ -232,8 +232,18 @@ come last by convention, but the validator does not enforce ordering.
 
 A media call leaving its own busy lane for an idle node of the fleet: an `auto` image call on a machine that has the lane and a
 fleet asks its pipeline whether the lane is free (`core.LaneProber`, a read-only relaxation of the real admission) and, when it
-is not, is sent to a node whose Image recipe matches. Not a substitute: a call no node matches goes on to its own queue, joining it
-when the fleet attempt is over and not from when it arrived, and says per node why (`cluster[]`). See [ADR 0082](architecture/decisions/0082-a-media-call-overflows-to-the-fleet-when-its-own-lane-cannot-take-it-and-a-family-is-identified-by-its-recipe.md).
+is not, is sent to a node whose Image recipe matches. Not a substitute: a call no node matches becomes a Ticket. See [ADR 0082](architecture/decisions/0082-a-media-call-overflows-to-the-fleet-when-its-own-lane-cannot-take-it-and-a-family-is-identified-by-its-recipe.md).
+
+## Ticket
+
+A busy image call that the harness holds until the first matching lane frees, here or on a node: one file under
+`<state_dir>/media-queue/`, an identity (the sha256 of the task, prompt and parameters without the `waiter_token`, so an identical
+re-send attaches to it), one fixed seed, a place in the machine's own lease line that keeps its arrival time, and a state. One
+scanner per process looks at its tickets about every 10 s, oldest first, and a job is never sent to a node before a lane is free
+there. The answer to a call that waits says the ticket, its position and, per roster node, the state and why; the instruction in it
+is not to call again. A ticket whose owner died is swept (waiting) or adopted by the next identical call (a job already on a node).
+See [ADR 0083](architecture/decisions/0083-a-busy-image-call-is-a-ticket-the-harness-holds-until-the-first-matching-lane-frees.md) and
+[media-generation.md](systems/media-generation.md#the-ticket-queue-a-busy-image-call-waits-for-the-first-matching-lane-that-frees-anywhere-adr-0083).
 
 ## Park
 

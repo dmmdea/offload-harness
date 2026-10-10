@@ -628,6 +628,16 @@ whole window passed without reaching the front returns `ErrStillQueued`, which n
 that has not claimed, or a place held for another caller); callers that answer with a token treat it like
 `ErrHeld`.
 
+**A ticket keeps a place for as long as it waits (ADR 0083).** The media ticket queue
+([media-generation.md](media-generation.md#the-ticket-queue-a-busy-image-call-waits-for-the-first-matching-lane-that-frees-anywhere-adr-0083))
+waits for a lane anywhere in the cluster, far longer than a window, and must stay senior to every caller that arrives after it. It
+leaves a token at creation, with the ticket's arrival time, on the cards the real admission would queue the call on; the owner's
+scan touches it (`TouchToken`, about every 10 s against the 30 s grace); a place that lapsed or was spent is left again with the
+same arrival time (`LeaveToken`); the ticket drops it when it ends; and the final local run resumes it as a `waiter_token` like any
+resumed call. `core.PlaceKeeper` is the seam (the pipeline implements it, `internal/pipeline/medialane_place.go`); it wraps
+these calls and adds no admission logic. The lane question for a call that resumes a place counts only the callers that arrived
+before that place on every plan (`gpualloc.QueuedClaimsBefore`).
+
 **A kept ComfyUI instance lives no longer than its lease.** A runner that keeps the ComfyUI it launched
 (`--keep-comfy`) leaves a detached instance running after it exits, so the items of a batch under one
 lease load their models once; its launch marker (`.offload-launch-<key>.json`) records the lease epoch.

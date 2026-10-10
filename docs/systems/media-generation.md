@@ -1647,7 +1647,11 @@ recorded as known offenders with their reason rather than silently skipped — a
   the node's `image_recipes` rows and the 412 check
 - [`internal/pipeline/medialane.go`](../../internal/pipeline/medialane.go) — the read-only lane question;
   [`internal/mediaremote/place.go`](../../internal/mediaremote/place.go) and
-  [`identity.go`](../../internal/mediaremote/identity.go) — overflow placement and the strict match
+  [`identity.go`](../../internal/mediaremote/identity.go) — overflow placement and the strict match;
+  [`ticket.go`](../../internal/mediaremote/ticket.go), [`scan.go`](../../internal/mediaremote/scan.go),
+  [`door.go`](../../internal/mediaremote/door.go) and [`queuefs.go`](../../internal/mediaremote/queuefs.go) — the ticket queue
+  (ADR 0083); [`internal/pipeline/medialane_place.go`](../../internal/pipeline/medialane_place.go) and
+  [`internal/core/place.go`](../../internal/core/place.go) — the place a ticket keeps in the machine's own line
 - [`render/compose-hyperframes.mjs`](../../render/compose-hyperframes.mjs) — the composition runner:
   env allowlist, subcommand allowlist, `--json` everywhere, lint → check → render → ffprobe gate,
   typed `COMPOSE-FAIL` classes
@@ -1977,9 +1981,10 @@ place in line, epoch, waiter, ledger row, PAIR card or ComfyUI instance) and rem
 `gpulease.Manager.ReadOnly`, a view that skips the records the line's readers prune as housekeeping (an expired place in line, a
 waiter that stopped polling) and leaves them on disk (`TestMediaLaneFreeWritesNothing`, with a state for each). It says free when it cannot say: a lease the process
 inherited (`gpu reserve -- local-offload ...`), a card table that does not read in 4 s (chosen, not measured), a task or a binding
-it does not model (sd.cpp, an unknown family). On the whole-node plan, where the lease queue orders by arrival, a call that resumes
-a place counts only the callers that arrived before that place; on the pinned and allocated plans every other caller in line counts
-(`TestMediaLaneFreeOrdersByArrivalOnlyOnTheWholeNodePlan`). A differential test (`TestMediaLaneFreeNeverRefusesAGrant`) drives the real
+it does not model (sd.cpp, an unknown family). A call that resumes a place
+in line (a ticket's local run) counts only the callers that arrived before that place, on every plan, because the lease queue serves
+a resumed place by arrival time (`TestMediaLaneFreeOrdersByArrivalForACallThatResumesItsPlace`); a new arrival counts every other
+caller in line. A differential test (`TestMediaLaneFreeNeverRefusesAGrant`) drives the real
 admission over a table of lane states and fails if a lane the grant would serve is called busy.
 
 **What a family is.** A name says nothing about which weights sit under it. A family's identity is its **recipe**
@@ -2015,7 +2020,8 @@ shorter queue (`queue_depth`), then config order. The job goes under the **node'
 digest; it never goes under the caller's name (a name binds different files on different nodes) and never with none (a call that
 names no family is this machine's default binding and must not land on a node's different default).
 
-**When a node says no.** At most 3 nodes are tried, each under a fresh job id. A refusal at the door (`503`, `429`, `412`, any
+**When a node says no.** A job goes to one node at a time, under a fresh job id for each (the ticket tries one node per scan and has no bound on how
+many it tries over its life). A refusal at the door (`503`, `429`, `412`, any
 other status, or a connection that was never made) means nothing ran, and the call moves on; so does a node that accepted the
 job and answers `gpu_busy` or `gpu_queued` (another job holds its card) or `gpu_lease_unavailable` (it could not take its lease:
 nothing ran). Any other answer after acceptance is final: a render that failed is the call's result and is never re-placed, a
@@ -2026,9 +2032,11 @@ failure (the last holds), a `Retry-After` pauses a node for that long (jittered 
 back is left alone for 60 s and then 300 s per consecutive bounce (only a call it serves clears the count; a health read does
 not): a node that reads idle but whose own grant refuses every job would otherwise park each call for its whole `gpu_wait_ms`.
 Chosen constants, not measurements (`TestABounceIsRememberedAndTheNodeComesBackAtTheNextStep`,
-`TestARetryAfterHoldsTheNodeAndReadsAsRefused`, `TestARefusedDialMovesOnAndBacksTheNodeOff`, `TestACallIsSentToAtMostThreeNodes`).
-The memory is per process (the placer is a package variable): the MCP server keeps it across the calls of its session, and a
-one-shot CLI call (`generate-image` and the other verbs) starts with none, so it pays a bounced node's `gpu_wait_ms` again.
+`TestARetryAfterHoldsTheNodeAndReadsAsRefused`, `TestARefusedDialMovesOnAndBacksTheNodeOff`, `TestABouncedAttemptGoesBackToWaitingAndTheNextScanTriesTheNextNode`).
+A node that answers 503 or 429 with no `Retry-After` is left alone for the first step (5 s); one that refuses with another status is
+left alone like a bounce. The memory is per process (the placer is a package variable): the MCP server keeps it across the calls
+of its session, and a one-shot CLI call (`generate-image` and the other verbs) starts with none, though its ticket keeps it across
+its own scans, so it pays a bounced node's `gpu_wait_ms` once.
 
 **Attribution.** The call's PAIR card opens on the first node that ACCEPTS the job, not before the POST, so a node that refused
 it leaves none. A node that accepted and then bounced it has its card closed quiet (`completed`, never started, the reason kept:
@@ -2037,34 +2045,130 @@ it leaves none. A node that accepted and then bounced it has its card closed qui
 
 **What the answer says.** A call that ran on a node answers with `meta.node` and `meta.placement`: `remote: this machine's image
 lane is not free (<what holds it, with its reason and the time its lease declared>); ran on <node>`. A call that nothing admitted
-goes on to the local admission, joining its queue when the fleet attempt is over and not from when it arrived (Named limits below),
-and if it ends in a deferral (a place in line, a busy defer) the answer carries `cluster[]`
-(`{node, state, why, differs?}` per roster node, in config order, and the reason quotes them). `state` is `busy` (the node holds a
-lease; the lease and its reason; or another call of this process already has a job there), `not-capable` (the key that differs, in the config key's own name, and the family of this
-machine that WOULD match: `send family=<ours> to use its <theirs>`; or the release, or the refine, the route or the steps rule),
-`unreachable`, `refused`, `bounced` or `skipped`; a node being left alone says why (`bounced`: it had the call and passed it back;
-`refused`: it answered the dispatch with a refusal; `unreachable`: it did not answer) and for how long. A node absent from `delegate_remotes` is not named: nothing in the config says
-it exists. A call that ran is never annotated.
+is a ticket, and its answer is the ticket's (below): `cluster[]` is one row per roster node in config order,
+`{node, state, why, differs?, holder?, since}`, and the reason quotes them. `state` is `free` (idle, but another ticket is first in
+line for it), `busy` (the node holds a lease: `holder` is its class, reason and time left), `draining`, `in-use` (a job of this
+machine is running there), `not-capable` (the key that differs, in the config key's own name, and the family of this machine that
+WOULD match: `send family=<ours> to use its <theirs>`; or the release, or the refine, the route or the steps rule), `unreachable`,
+`refused`, `bounced` or `skipped`; a node being left alone says why (`bounced`: it had the call and passed it back; `refused`: it
+answered the dispatch with a refusal; `unreachable`: it did not answer) and for how long, and `since` is when the ticket first found
+the node in that state. A node absent from `delegate_remotes` is not named: nothing in the config says it exists.
 
-**What does not overflow.** A call that carries a `waiter_token` (it resumes a place in the local line and keeps it; the token
-of the first queued answer simply lapses after its grace if the call went to a node instead), a call that runs under a lease its
-process inherited, and anything but an image job: graphs arrive with their own file check (a whole-node graph placed on a
-multi-GPU node would land on its display card), and video, animation and audio carry no per-family identity yet.
+**What does not overflow.** A call under a lease its process inherited, and anything but an image job: graphs arrive with their own
+file check (a whole-node graph placed on a multi-GPU node would land on its display card), and video, animation and audio carry no
+per-family identity yet. (A call that carries a `waiter_token` is not exempt any more: it joins the ticket queue and brings its place.)
 
-**Named limits.** One first-in-first-out line per delegating machine; cross-machine order is node arrival; late binding (a ticket
-that starts on the first lane that frees) is the next step. Every remote job pays ComfyUI's cold start (zero-warm). The same
-recipe and seed on a different GPU architecture is the same composition, not bit-identical pixels. A mis-predicted placement
-costs one bounce per node per pause: up to the node's `gpu_wait_ms` parked on the node and one deferred row there before the placer
-sees it. **A call that went to the fleet first queues locally from when it came back**, not from when it arrived: the caller joins the
-local line when the fleet attempt is over (the lane question and the roster read, then at most 3 nodes, each up to its
-`gpu_wait_ms`), so a caller that arrived meanwhile is ahead of it. Carrying
-the arrival time into the local admission needs the lease queue (it takes one) and the in-process slot queue (it serves callers in the
-order they join and takes none); the ticket queue of the next step keeps a call's place across the attempt and is where that is done.
+**Named limits of overflow.** Every remote job pays ComfyUI's cold start (zero-warm). The same recipe and seed on a different GPU
+architecture is the same composition, not bit-identical pixels. A mis-predicted placement costs one bounce per node per pause: up
+to the node's `gpu_wait_ms` parked on the node and one deferred row there before the placer sees it. The ticket queue below closes
+the two limits the first cut named (a call resumed with its token was not moved, and a call that went to the fleet first queued
+locally from when it came back, not from when it arrived).
 
 **Reading a node's recipes** (the first live check, before relying on a match): `curl -s http://<node>:18811/fleet/health` and
 read `image_recipes` on the target and, on a machine that also runs `fleet-serve`, on the delegator's own node: the digest of the
 family you will name there is the one the target's row must equal. Neither `offload_status` nor `cluster[]` shows a local digest
 (`cluster[]` names the keys that differ, not the digest); a delegator that does not serve has no surface that prints its own.
+
+## The ticket queue: a busy image call waits for the first matching lane that frees anywhere (ADR 0083)
+
+Overflow sends a busy call to an idle node. When **every** lane is busy the call used to wait in one place and, if it was an MCP
+call, come back as a queued answer the caller was told to re-send. A call whose lane is not free is now a **ticket**: the harness
+holds the job and starts it on the first matching lane that frees, here or on a node, with one answer that says where it stands and
+why, and no caller loop. A free lane runs the call here as it always did; a box with no `delegate_remotes` asks nothing; `route
+local` and `route remote` are unchanged.
+
+**The ticket.** One file per ticket, `<state_dir>/media-queue/mq-<id>.json`, written atomically, readable by every process of the
+machine (`internal/mediaremote/ticket.go`). It holds the owner (pid and start time) and its beat, the request's key, the arrival
+time, the seed, the place in the local line, the state, the node and the node's job id once there is one, the nodes whose recipe
+matched at the last scan, and the last answer; the request body stays in the owning process, so the file keeps no prompt. States:
+`waiting`, `local` (the local run is in flight), `placing` (a node is claimed and the job is being sent), `placed` (the node
+accepted it), `fetching`, `done`, `failed`.
+
+**One request, one ticket.** The key is the sha256 of the task, the prompt and the parameters as sent, without the `waiter_token`
+(numbers are canonicalised, so `2048`, `2048.0` and a `json.Number` agree). Any identical re-send attaches to the live
+ticket, with or without a token: that is what ends a caller's loop, because the tenth identical request is the first one's ticket
+(`TestIdenticalResendAttachesToTheLiveTicket`). `waiter_token=mq-...` names a ticket and collects its result; a token that belongs
+to a different request is refused by name, and one that names nothing is a new arrival. A `tk-...` place of the local line is
+brought into the ticket. An `mq-` token never reaches the lease line (`TestMQTokenNeverReachesThePipeline`). A result is handed over
+once: the call that takes it removes the file, so a later identical request is a new job (a caller that wants a second picture of
+one prompt differs in a parameter, a seed). **One seed.** When the caller gave none, the ticket mints one (1 to 1e9, the pipeline's
+own range) at creation, so a bounce, a re-placement, an adoption and a local run render one composition
+(`TestTicketFixesOneSeed`); the key is taken before, so a re-send without a seed attaches.
+
+**Seniority in the machine's own line.** `core.PlaceKeeper`, implemented by the pipeline (`medialane_place.go`) and forwarded by the
+MCP runner, wraps the lease manager's place-keeping tokens and adds no admission logic: a place is left at creation with the
+ticket's arrival time on the cards the real admission would queue the call on (the pin, or the card the allocator would pick),
+touched on every scan (a place holds its cards for 30 s after its last touch, and the scan is ~10 s), left again with the SAME
+arrival time if it lapsed, let go when the ticket ends, and spent by the final local run through the `waiter_token` path every
+resumed call takes. A caller that arrives after the ticket queues behind it. A host that does not lease cards keeps no places: the
+ticket waits without local seniority and its answer says so. The lane question for a call that resumes a place is ordered by arrival
+on every plan (`gpualloc.QueuedClaimsBefore`); without that, two places on one idle card each read the other as in its way and
+neither would start (`TestKeptTokenHoldsSeniorityAgainstLaterWaiters` in the pipeline, `TestTicketKeepsItsPlaceInTheLocalLine` here).
+
+**The scanner.** One per process, started with the process's first ticket and gone with its last, every 10 s +/- 20 % (a chosen
+transport constant, not a resource number), oldest ticket first. A scan DECIDES; a job runs in a goroutine of its own, one per
+ticket in flight, so a local run that waits in the lease line stalls neither another ticket's scan nor the touch that keeps each
+place alive. For a waiting ticket a scan: (1) keeps its place; (2) **local first**: when the lane question says the ticket would be
+served now, starts the local run with the place as its `waiter_token` (one ticket per scan, the oldest; a run that loses the race
+to another job comes back with nothing run and the ticket goes back to waiting, `TestALostRaceOnTheLocalLaneGoesBackToWaiting`);
+(3) otherwise asks the fleet with ADR 0082's own filter and ranking (`candidatesFor`), minus the nodes a ticket of the machine has
+a job on and the nodes an **older** waiting ticket of the machine matches (an older ticket not yet scanned is first in line for every
+node: `TestTicketOldestFirstPerNode`), and sends the first node left the job. **Late binding**: nothing is sent to a node until a
+lane is free there, so no job sits parked on a node that frees later than another (`TestLateBindingStartsOnFirstFreedLane`). One node
+is tried per scan; a node that refuses or bounces the job is left alone (5 s for a full node that names no `Retry-After`, 60 s
+and then 300 s for a bounce) and the ticket tries the next at its next scan. A ticket never gives up on a lane; it ends after 8 h
+without one. A freed lane is noticed within one scan interval (at most 12 s).
+
+**A node a ticket has a job on is in use for every scanner on the machine.** Reading the tickets and then sending would leave the
+window in which two processes both read a node idle and both send it a job. A claim file per node (`use-<hash>.json`) is written
+together with the ticket's `placing` state, under a directory lock (`.lock`, an `O_EXCL` file held for a few file operations), before
+the job is sent (`TestTwoProcessesNeverDispatchTwoTicketsToOneSingleJobNode`, `TestClaimNodeIsExclusiveAndLetsGoOfTheDead`). A claim is
+live only while its owner is alive and its ticket has a job in flight on that node.
+
+**Owners die.** An owner is dead when its process is gone or it has not written its beat for 10 minutes (chosen). A `waiting` ticket
+of a dead owner, and a `local` one (its render died with its process), are swept by the next scan or call of any process and their
+places let go (`TestWaitingTicketOfDeadOwnerIsSwept`); the identical call that finds one makes a new ticket that keeps its arrival
+time (`TestDeadOwnerLocalTicketIsSweptAndRerendered`). A `placed` or `fetching` ticket stays for 6 hours (chosen) and is **adopted by
+the next identical call**: the new owner polls the recorded node job and fetches its outputs and never sends the request again, so
+the job renders once; the adopted call writes its one ledger row and opens no card (`TestDeadOwnerPlacedTicketIsAdopted`). A
+finished ticket nobody collected stays 10 minutes (chosen). A temp file of a write that never finished, and a claim with no live
+owner, are removed by the same sweep.
+
+**A scan writes no card, no row and no waiter.** It reads the lane, the roster and the files, writes its own ticket file (beat,
+matches, answer) and touches its place (`TestScanNeverWritesCardsOrRows`, the register C01 regression: the first design of this loop
+opened a PAIR card per attempt). The call's one ledger row and one PAIR card open at dispatch: at the node's acceptance for a remote
+job (as in ADR 0082), by the pipeline's own run for a local one (a local run that loses a race writes the pipeline's own deferred
+row). Re-attaching by token or by resend creates no row, no card and no place (`TestReattachByTokenCreatesNoJobRowOrCard`).
+
+**The answer.** A call whose window ends before its job is done answers with a capacity deferral of class `gpu_queued`:
+
+```
+{queued: true, scope: "cluster", ticket: "mq-...", waiter_token: "mq-...", position: N,
+ local: {state, why, holder?, ahead?, since}, cluster: [{node, state, why, differs?, holder?, since}, ...],
+ next: "the harness holds this job and starts it on the first matching lane that frees; do not call again or resend; a repeat of the
+        request attaches to this ticket; call with waiter_token=mq-... only to collect the result"}
+```
+
+`position` is the ticket's rank among the machine's waiting tickets (1 is next); `local` is this machine's own lane (`free`, `busy`
+with its holder and the callers ahead, or `ram` when the host's memory, not the card, is what is short); `cluster[]` is described
+above and names EVERY roster node (`TestAnswerNamesEveryRosterNode`). The window is `wait_s` of the MCP door (0 answers after the
+ticket's first look; at most 3600), else the machine's `gpu_wait_ms`; the ticket goes on after the call returns, and the answer
+text tells the caller not to call again. The CLI (`generate-image`) blocks until the job is done, prints on stderr where the ticket
+stands (queued with the reasons, then where it started), and the first interrupt cancels a ticket that sent nothing; a job already on a
+node cannot be recalled (ADR 0064), so the ticket stays for the next identical command to adopt (`TestCLIBlocksAndCancelsUndispatched`).
+`offload_status` gains `media_queue[]` (ticket, state, family, position, node, age, whether its owner is alive and it holds a place,
+and why while it waits); absent when there are none.
+
+**The roster is re-read.** An MCP session never reloads its config, so the ticket re-reads `delegate_remotes` from the config file the
+session runs on whenever the file's mtime or size changes (`TestRosterReReadWithoutRestart`); only that key moves, and a file that
+does not parse leaves the roster as it was. The server passes its resolved config path, as does the CLI.
+
+**Named limits.** One first-in-first-out line per delegating machine (its state dir): two machines each hold a queue and meet only at
+a node's own grant; a holder node's queue (ADR 0030) is the named upgrade. A CLI ticket dies with the CLI (a waiting one is swept, a
+placed one adopted). Each waiting ticket costs one lane question (a bounded `nvidia-smi` read) and one roster read per scan; the first
+scan reuses the creation reading for 2 s. A node that frees between two scans can be taken by a caller that is not a ticket; the
+job then costs one bounce. The scan interval and jitter, the pause steps, the owner and keep timings and the 8 h ceiling are chosen
+constants, not measurements. Nothing here was run against a live lease, a live node or a render.
 
 ## Comfy workflow templates catalog (phase A)
 
