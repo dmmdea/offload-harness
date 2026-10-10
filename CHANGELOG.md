@@ -117,7 +117,7 @@ Versioning: [SemVer](https://semver.org/).
   reconstructed from the code and the surviving logs, not observed, and its probable cause (a second family cached beside the
   first) may account for only part of the figure: a ComfyUI process launched fresh on 2026-10-10 held the same 57.7 GiB private
   about seven minutes after launch, so the footprint of one lane is unmeasured (the S1 acceptance runs record it).
-- **Not changed, and said:** the guard bounds the leases that pass through it. A pinned older binary (its leases declare
+- **Not changed, and said:** the guard checks the declared loads of the leases that pass through it. A pinned older binary (its leases declare
   nothing), a direct llama-swap request and a hand-started ComfyUI are outside it; a pipeline job under a parent's ambient
   `--devices` lease gets no admission of its own; a detached lease counts its whole need as still to load for its life; Linux
   `Committed_AS` reads high; run-graph, sd.cpp and iGPU calls take the class default, which is the largest ComfyUI family the box

@@ -1300,11 +1300,11 @@ holder's tree, so its loaded weights count both as pending and in the commit cha
 over-refuses, it never under-refuses. A pipeline job running under its parent's ambient lease (`acquireInherited`,
 `GPU_LEASE_DEVICES`) gets no admission of its own: the parent's declaration covers it. A process outside every lease can
 still push the box over; the guard sees it in the commit charge and holds new declaring leases back, but it does not stop or
-evict anything. **Reach (G7 of the P0 plan).** The guard bounds the leases that pass through it. A binary older than the guard
+evict anything. **Reach (G7 of the P0 plan).** The guard checks the declared loads of the leases that pass through it. A binary older than the guard
 (a pinned copy: its leases declare nothing, so the not-yet-loaded sum undercounts them), a direct llama-swap request (the seat
 loads on demand with no lease at all) and a hand-started ComfyUI instance are outside it: it sees what they have committed, never
 what they are about to. The closure is to run the live harness everywhere and to make a ComfyUI start refuse without a lease
-token; until then the rule rests on those callers going through the lease, and nothing here claims it bounds a process that does not.
+token; until then the rule rests on those callers going through the lease, and nothing here claims it checks a process that does not.
 
 ### How the numbers get measured (G3 of the P0 plan)
 
