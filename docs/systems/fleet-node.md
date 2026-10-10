@@ -1719,7 +1719,14 @@ fleet-overview.md's "A failed `/fleet/jobs` fetch is distinguished from an empty
   node never saw, or evicted, the job): re-dispatch the same id, bounded at 2 re-dispatches — a
   node that keeps forgetting the job is broken, and re-POSTing forever would re-run the
   contract on every node restart.
-- The poll payload is `{job_id, state, data?, error?}` plus, since register D-116, **`wall_sec`**:
+- The poll payload is `{job_id, state, data?, error?, err_class?}` plus, since register D-116, **`wall_sec`**.
+  `err_class` (unreleased) is the class the failed run's lane filed its deferral under (`gpu_busy`, `gpu_queued`,
+  `compose_busy`, `timeout`, ...), published beside `error` on a job that failed and only when the lane filed one
+  (`classedError`, `JobView.ErrClass`); additive and `omitempty`, so an asker that does not read it polls exactly as
+  before. It is how the box that asked tells a call another job held back from a render that broke, and closes the
+  call's PAIR card quiet or failed accordingly ([pair-workloads.md](pair-workloads.md), *A held card is not a failure*).
+  The text, vision and stt lanes return the whole `core.Result` in `data` and never needed it.
+  `wall_sec` is
   the wall the RUNNING job is executing under, as the executing lane reported it
   (`core.ReportWall` → `Jobs.SetWall`). Additive and `omitempty` — a lane that reports none
   publishes the pre-D-116 payload, and a delegator too old to read it ignores the field. It

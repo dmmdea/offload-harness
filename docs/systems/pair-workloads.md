@@ -78,28 +78,51 @@ and the harness has nothing to gain by sending them.
 
 A media call that waited its window and found the card it needed held by another job does not fail:
 it either leaves a place in line and answers with a `waiter_token` (`err_class` `gpu_queued`) or, from a
-door that cannot resume, answers `gpu busy` (`gpu_busy`). "A busy card is a place in line" (register
-C-89, plan P13). Until 2026-10-09 such a call's card closed `failed`, red, with the reason; PAIR has no
-cancelled state to say "did not run", so the harness uses the two it has:
+door that cannot resume, answers `gpu busy` (`gpu_busy`). A composition that waited its window for the
+process's one compose slot and found another composition holding it (`compose_busy`; the slot is no
+GPU card, a composition is CPU-class, but nothing ran and the answer says to call again) is the same
+case. "A busy card is a place in line" (register C-89, plan P13). Until 2026-10-09 such a call's card
+closed `failed`, red, with the reason; PAIR has no cancelled state to say "did not run", so the
+harness uses the two it has:
 
 | Call ended | Card closes | `startedAt` | `error` |
 |---|---|---|---|
 | succeeded | `completed` | when the lane held the engine | null |
-| **held back by another job's hold on the card** (`core.CardHeld`: `err_class` `gpu_queued` or `gpu_busy`) and its lane never held the engine | `completed`, a quiet card | null (never started) | the defer reason |
+| **held back by another job's hold on what it needed** (`core.CardHeld`: `err_class` `gpu_queued`, `gpu_busy` or `compose_busy`) and its lane never held the engine | `completed`, a quiet card | null (never started) | the defer reason |
 | anything else that did not succeed (a render that broke, a configuration fault such as `gpu_lease_unavailable`, a deferral with no held class) | `failed`, red | when the lane held the engine, else null | the reason |
-| the lane panicked | `failed` | as above | `panic: <value>`, posted before the panic goes on |
+| the lane panicked (a remote lane included: `core.CloseOnPanic`) | `failed` | as above | `panic: <value>`, posted before the panic goes on |
 
 `pairworkloads.CardOutcome` is the one function that decides this, and every writer of a call's closing
 frame goes through it, so the card is the same whichever of them gets there first: `Begin`'s `end`, the
 ledger row (`FromLedger`), `RemoteCall.Finish` and the node's fallback card (`nodeCard.finish`). The
 class decides, never the reason text. A **remote** card (`RemoteCall`, `nodeCard`) turns `running` when
 the node admits the job, which says nothing about the card, so its held close ignores the running mark
-and keeps whatever start the card showed. Why `completed` and not `workloads:remove`, the one other
-thing a producer can say: removal is outside the lifecycle the card relay carries (`ParseRelay` refuses
-it), so a relay-mode box could not use it, and it would drop the reason. What it costs: PAIR's desktop
-paints `completed` gray and prints `error` only on a `failed` card, so the reason is in the frame, PAIR's
-history and the harness ledger, not on the card face. If the operator wants the card gone instead, it is
-this one function, plus the relay's method list.
+and keeps whatever start the card showed.
+
+**The class has to reach the asker.** A call sent to a node closes its card on the asker's box, from the
+`Result` the lane rebuilt from the node's poll. The text, vision and stt lanes return the whole `Result` in
+the job's `data`, so they always carried the class. The media and compose lanes did not: a failed media job's
+poll published `error` (the reason) alone, and the lane rebuilt the deferral with an empty class, so a node
+whose card was held read, on its asker, as a red card that had started (found by the 2026-10-09 review of
+this fix, reproduced against the real node server). The node now files the class with the failure: the run
+closure returns a `classedError`, `Jobs.execute` stores it on the job record, and the poll publishes it as
+`err_class` beside `error` (`fleetnode.JobView.ErrClass`, `jobWire.err_class`); `mediaremote` and
+`composeremote` read it into `Meta.ErrClass`, so a deferral the node returned comes back to the caller with
+the class it was filed under, as a local one always did. The field is additive and `omitempty`, like
+`wall_sec` and `progress`: a failure with no class and a job that did not fail publish the keys they always
+did, an asker that does not know the field ignores it, and a node that does not publish it leaves the class
+empty, so its asker closes the card `failed` as it always did (update the node to get the quiet close).
+
+Why `completed` and not `workloads:remove`, the one other thing a producer can say: removal is outside the
+lifecycle the card relay carries (`ParseRelay` refuses it), so a relay-mode box could not use it, and it
+would drop the reason; the fork's local ingress does accept it, so on a box that reports to a local PAIR it
+remains an option. What `completed` costs, read from the fork's desktop source (the live dashboard was not
+looked at): the desktop paints a `completed` card gray, prints `error` only on a `failed` card, and labels
+every card that is not `running` "Ran on <node>" with a "Completed at" time. A held card therefore reads
+as a call that ran and finished, with the reason not on its face; it did not run, and the frame, PAIR's
+history, the harness ledger row (`gpu_queued`, `gpu_busy`, `compose_busy`) and the call's own reply all say
+so. Whether a quiet `completed` card or no card is the better reading is the operator's decision; either
+is this one function, plus the relay's method list for the second.
 
 Where the rule reaches, and where it stops. A text or vision call opens no `Begin` card (PAIR keys a
 card on its engine, and they learn it only as they run), so its only card is the ledger row's terminal
@@ -109,8 +132,11 @@ card instead of leaving one open, which was already so and is benign (no false r
 switched, on purpose: the delegation card (`pairTerminal`) closes `failed` for any deferral. An
 agent contract's deferral carries a `defer_class`, not an `err_class`, and a placement that could not
 get a slot emits no card at all, so there is no held-card deferral on a delegation card to quiet. The
-relay member's terminal path for a card another box opened (`pl.remote`) is not parked before its post
-either: it closes by its terminal relayed frame or the age cap, as before.
+relay member's terminal path for a card another box opened (`pl.remote`) is parked before its post like
+any other while this member still holds the card's in-flight marker in memory (the producer's frames
+arrive within one member process); a member that restarted since the in-flight frame finds the marker by
+name and writes the pending verdict only if the post fails, and a relayed card whose producer died closes
+by its terminal relayed frame or the age cap, as before.
 
 ## The two sources
 
@@ -235,9 +261,17 @@ never the entry tier's correctness-label snapshot, whose `cards_tokens` is the 0
      when the node's job state turns `running`, then `completed`, or `failed` with the result's
      reason (a node that answered counts as started, so a finished card never reads "never started";
      except a node that answered that another job held its card, which ran nothing and closes the card
-     quiet, *A held card is not a failure*). The terminal frame is posted inline before the lane
+     quiet, *A held card is not a failure*; for the media and compose lanes the class arrives on the
+     node's poll, as `err_class`). The terminal frame is posted inline before the lane
      returns its result (`Finish` uses `EmitSync`): the door answers at once and may be killed right
-     after, as for a local call. On the auto route's fallback to a local run, `Discard` closes the
+     after, as for a local call. The asker's ledger row is recorded BEFORE that post (it is local file
+     I/O, and the post can take its whole bound when PAIR hangs), so a door killed inside the bound loses
+     the card's close, which the register has parked, and never the call's audit and savings row. Every
+     lane defers `core.CloseOnPanic(h)` right after `BeginRemote` (stt, text and vision on both routes):
+     a panic after the card opened (in the dispatch, the poll or the fetch) finishes the call as a deferred
+     infrastructure failure carrying the panic's text, so the card closes `failed` and the row is written,
+     and the panic goes on, as `closeCall` does for a local call. On a normal return the guard does
+     nothing. On the auto route's fallback to a local run, `Discard` closes the
      attempt that reached a node the same way, so a PAIR that hangs delays the local run by the
      post's bound (a refused connection is instant).
    - **One asker ledger row** (door, route, placement, `node`, `node_id`, `fleet_job_id`, latency,
@@ -663,7 +697,11 @@ appears in PAIR's Jobs list on this box **and** on the node that ran it, reading
   was killed mid-call (a crash, a killed session), which is what the text says.
 - **A held-card call shows `Completed`, not red**: that is *A held card is not a failure*. The reason
   is in the frame's `error` (PAIR's `workloads-history.json`), not on the card face; the harness
-  ledger row says `gpu_queued` or `gpu_busy`.
+  ledger row says `gpu_queued`, `gpu_busy` or `compose_busy`.
+- **A remote media or compose call whose node's card was held still shows red and started**: the
+  node is older than this change and does not publish `err_class` on its poll, so its asker cannot tell
+  a held card from a render that broke and closes the card `failed`. Update the node. The text, vision and
+  stt lanes never had the gap.
 - **A remote call has no card on its asker**: the asker's emitter is not enabled (the node then cards it,
   as `Requested from fleet:<asker>`, only when the node's own emitter is enabled), or no node was chosen
   (a placement defer writes a row and no card), or the node is an older build that does not read the
