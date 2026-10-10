@@ -32,10 +32,15 @@ func TestTheCardTableQueriesTheDeviceFieldsAndNeverListsProcesses(t *testing.T) 
 	if want := strings.TrimSuffix(smiQueryArgs[0], ",display_attached"); smiQueryArgsNoAttached[0] != want {
 		t.Errorf("the fallback query %q is not the full one %q less display_attached", smiQueryArgsNoAttached[0], smiQueryArgs[0])
 	}
-	// And they are the fields the table needs: identity, memory, utilisation and the two display columns.
-	for _, field := range []string{"index", "uuid", "name", "memory.total", "memory.used", "utilization.gpu", "display_active"} {
-		if !strings.Contains(smiQueryArgs[0], field) {
-			t.Errorf("the table query lost %q: %s", field, smiQueryArgs[0])
-		}
+	// And the columns are the parser's, IN ITS ORDER. ParseSmiMemoryDevices reads them by position: index,
+	// uuid, name, memory.total, memory.used, then utilization.gpu, display_active and display_attached. The
+	// allocator reads the identity, the memory and the two display columns; utilisation rides along for the
+	// views that print it (`gpu cards`, `gpu status`) and the health sampler, which share this reader. It
+	// is not dropped for the allocation's sake: a query without it shifts the display columns one place left
+	// (display_attached would be read as display_active, and the operator's screen would look free to the
+	// allocator), and what it costs was measured at about 20 ms of a 115 ms exec on a quiet box.
+	wantFields := "index,uuid,name,memory.total,memory.used,utilization.gpu,display_active,display_attached"
+	if got := strings.TrimPrefix(smiQueryArgs[0], "--query-gpu="); got != wantFields {
+		t.Errorf("the table query is %q, want the parser's columns in its order %q", got, wantFields)
 	}
 }
