@@ -1792,7 +1792,7 @@ Step "render llama-swap.yaml (backend=$tplBackend profile=$(if ($profileId) { $p
     -not (Select-String -Path $yamlDest -Pattern '__(LLAMA_BIN|MODELS|NTHREADS|CTX|KV_K|KV_V|FLASH_ATTN|MOE_26B|M26_ALT|M26_AND|Q38_ALT|Q38_AND)__' -Quiet) -and
     -not (Select-String -Path $yamlDest -SimpleMatch -Pattern $llamaDir -Quiet) -and   # backslash path = stale pre-R3.6 render
     (($tplBackend -ne 'vulkan') -or (Select-String -Path $yamlDest -SimpleMatch -Pattern 'GGML_VK_VISIBLE_DEVICES' -Quiet)) -and   # J1: vulkan render without the device pin = stale pre-0.22.19 render
-    ((-not $eg2Bin) -or (Select-String -Path $yamlDest -SimpleMatch -Pattern $eg2Bin -Quiet)) -and   # OFFLOAD_EG2_LLAMA_BIN set but absent from the yaml = rendered before the override: an upgrade must re-render
+    ((-not $eg2Bin) -or (Select-String -Path $yamlDest -SimpleMatch -Pattern "$eg2Bin/llama-server.exe" -Quiet)) -and   # OFFLOAD_EG2_LLAMA_BIN set but the entry not on that build = rendered before the override (or on another one): an upgrade must re-render. Anchored on the executable: a bare directory is a substring of a longer sibling (llama-b11490 inside llama-b11490-bin-win-cuda-12.4-x64)
     # A gated seat this tier enables but the rendered yaml does not contain = that yaml
     # PREDATES the seat. Without this probe an UPGRADE on an existing box downloads the
     # weights in Step 5 and then SKIPs the render here, so the installer prints all-OK
@@ -1860,7 +1860,13 @@ Step "render llama-swap.yaml (backend=$tplBackend profile=$(if ($profileId) { $p
     # Surface the binary's own warnings (e.g. a declared seat whose weights are absent).
     # The payload lines are indented continuations under the WARNING header — the old
     # header-only filter silently truncated every file list the warning exists to show.
-    $renderOut | Where-Object { $_ -match 'WARNING' -or $_ -match '^\s{2}\S' } | ForEach-Object { Write-Host "      $_" -ForegroundColor Yellow }
+    # `note:` lines are the renderer's advisories on stdout (stderr would abort this install, see above):
+    # an embeddinggemma2 build whose directory name states no b<number>, so the b11452 floor went unchecked.
+    # The one about THIS script's own build (<home>/llama, which never states a build) is not relayed:
+    # that build is the pinned tag, held at or above the floor by a test, so on every embeddinggemma2
+    # tier it would be a false alarm. With OFFLOAD_EG2_LLAMA_BIN set the operator chose the build, and
+    # the note is the only warning about it.
+    $renderOut | Where-Object { $_ -match 'WARNING' -or $_ -match '^\s{2}\S' -or ($_ -match '^note:' -and ($eg2Bin -or $_ -notmatch 'so the floor was not checked')) } | ForEach-Object { Write-Host "      $_" -ForegroundColor Yellow }
     if (-not (Test-Path $yamlDest)) { throw "install render reported success but wrote no $yamlDest" }
   }
 

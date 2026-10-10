@@ -528,7 +528,9 @@ Assert ($installText.Contains('Test-Path -LiteralPath (Join-Path $eg2Dir ''llama
 Assert ($installText.Contains('$eg2Dir.Replace(''\'', ''/'')'))                                          'OFFLOAD_EG2_LLAMA_BIN is normalised to forward slashes (llama-swap on Windows mis-parses backslashes)'
 Assert ($installText.Contains('if ($eg2Bin) { $renderArgs += @(''--llama-bin-eg2'', $eg2Bin) }'))          'install.ps1 appends --llama-bin-eg2 to the render args only when the override is set'
 Assert (([regex]::Matches($installText, '--llama-bin-eg2'', \$eg2Bin')).Count -eq 1)                    'the renderer is handed --llama-bin-eg2 from exactly one place'
-Assert ($installText.Contains('((-not $eg2Bin) -or (Select-String -Path $yamlDest -SimpleMatch -Pattern $eg2Bin -Quiet))')) 'the Step 6 SKIP probe re-renders a yaml that predates the override'
+Assert ($installText.Contains('((-not $eg2Bin) -or (Select-String -Path $yamlDest -SimpleMatch -Pattern "$eg2Bin/llama-server.exe" -Quiet))')) 'the Step 6 SKIP probe re-renders a yaml that predates the override, matched on the executable path'
+Assert (-not $installText.Contains('-Pattern $eg2Bin -Quiet'))                                           'the SKIP probe does not match the bare directory (a substring of a longer sibling directory would skip a needed re-render)'
+Assert ($installText.Contains('$_ -match ''^note:'' -and ($eg2Bin -or $_ -notmatch ''so the floor was not checked'')')) 'install.ps1 relays the renderer''s note: lines (the floor note), except the one about its own pinned build'
 
 # --- Task 6: accelerator seed (ADR 0024) ----------------------------------------------
 Write-Host ""

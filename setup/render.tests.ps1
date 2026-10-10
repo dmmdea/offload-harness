@@ -58,7 +58,7 @@ function Invoke-Render {
   }
   $jsonLine = ($stdout | Where-Object { $_ -match '^\s*\{.*"render_only".*\}\s*$' } | Select-Object -Last 1)
   $verdict = if ($jsonLine) { $jsonLine | ConvertFrom-Json } else { $null }
-  return @{ yaml = (Get-Content -Raw $out); verdict = $verdict; path = $out }
+  return @{ yaml = (Get-Content -Raw $out); verdict = $verdict; path = $out; text = ($stdout | Out-String) }
 }
 
 # The 'common' macro is a YAML folded scalar (>-) spanning 2 lines; join them so
@@ -410,6 +410,19 @@ if ($plainLines.Count -eq $ownLines.Count -and $lineDiff.Count -eq 2) { Ok 'OFFL
 $afterR = Invoke-Render -Backend 'cuda' -ProfileId 'ampere-8' -RamTier 'mid' -BigRam $false
 if ((Get-ModelCmd $afterR.yaml 'embeddinggemma2') -match [regex]::Escape("$mainFwd/llama-server.exe")) { Ok 'OFFLOAD_EG2_LLAMA_BIN does not leak into the next render' } else { Bad 'OFFLOAD_EG2_LLAMA_BIN leaked into a later render' }
 
+# The renderer's b11452 floor check cannot read a build from a directory whose name states none, and says so in
+# a `note:` line on stdout. install.ps1 must RELAY it to the console (its filter once passed only WARNING and
+# indented lines, so the note was printed and dropped) when the operator chose the build, and must NOT raise it
+# for its own build (<home>/llama never states one; the pinned tag is held above the floor by a Go test), where
+# it would be a false alarm on every embeddinggemma2 tier.
+$nameless = Join-Path $work 'llama-new'
+New-Item -ItemType Directory -Force -Path $nameless | Out-Null
+Set-Content -Path (Join-Path $nameless 'llama-server.exe') -Value 'stub' -NoNewline
+$noteR = Invoke-Render -Backend 'cuda' -ProfileId 'ampere-8' -RamTier 'mid' -BigRam $false -Eg2Bin $nameless
+if ($noteR.text -match '(?m)^\s*note: tier ampere-8 renders embeddinggemma2' -and $noteR.text -match 'could not be read from its directory name' -and $noteR.text -match 'so the floor was not checked' -and $noteR.text.Contains($nameless.Replace('\', '/'))) { Ok 'OFFLOAD_EG2_LLAMA_BIN naming no build: the floor note reaches the console, naming the directory' } else { Bad "OFFLOAD_EG2_LLAMA_BIN naming no build: the floor note was dropped (output: $($noteR.text))" }
+if ((Get-ModelCmd $noteR.yaml 'embeddinggemma2') -match [regex]::Escape(($nameless.Replace('\', '/')) + '/llama-server.exe')) { Ok 'OFFLOAD_EG2_LLAMA_BIN naming no build: the render proceeds on that build' } else { Bad 'OFFLOAD_EG2_LLAMA_BIN naming no build: the entry is not on the build it names' }
+if ($plainR.text -notmatch 'embeddinggemma2, which needs llama\.cpp' -and $ownR.text -notmatch 'embeddinggemma2, which needs llama\.cpp') { Ok 'the installer''s own build and an override named for its build (b11490) raise no floor note' } else { Bad "an unneeded floor note reached the console (own build: $($plainR.text) / b11490 override: $($ownR.text))" }
+
 # A directory with no llama-server.exe is refused by install.ps1 itself, and a tier that renders no
 # embeddinggemma2 entry is refused by the renderer, naming the flag; neither leaves a config behind.
 function Invoke-RenderExpectFail {
@@ -418,10 +431,16 @@ function Invoke-RenderExpectFail {
   if (Test-Path $out) { Remove-Item $out -Force }
   $env:OFFLOAD_BACKEND = $Backend; $env:OFFLOAD_PROFILE = $ProfileId; $env:OFFLOAD_RAM_TIER = $RamTier
   $env:OFFLOAD_HOME = $work; $env:OFFLOAD_EG2_LLAMA_BIN = $Eg2Bin
+  # The child writes its refusal to stderr, which Windows PowerShell 5.1 (CI's installer-windows job)
+  # turns into a TERMINATING NativeCommandError under this file's 'Stop': capture on Continue, judge by
+  # the exit code (the same wrap as the seed-parity call below).
+  $prevEap = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
   try {
     $text = & $psExe -NoProfile -File $install -RenderOnly -RenderOut $out 2>&1
     $code = $LASTEXITCODE
   } finally {
+    $ErrorActionPreference = $prevEap
     Remove-Item Env:OFFLOAD_BACKEND, Env:OFFLOAD_PROFILE, Env:OFFLOAD_RAM_TIER, Env:OFFLOAD_HOME, Env:OFFLOAD_EG2_LLAMA_BIN -ErrorAction SilentlyContinue
   }
   return @{ code = $code; text = ($text | Out-String); wrote = (Test-Path $out) }
