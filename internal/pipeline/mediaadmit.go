@@ -118,11 +118,13 @@ func routeRAM(route hostneed.Route, cfg config.Config) func(float64) hostneed.Ne
 	}
 }
 
-// videoRAM is routeRAM for the family that will render a video request.
-func videoRAM(cfg config.Config, renderFamily string) func(float64) hostneed.Need {
+// videoRAM is routeRAM for the family that will render a video request, with the weight files the
+// request itself names (over) put over that family's binding: the runner loads those, so those are
+// what the host is asked to hold.
+func videoRAM(cfg config.Config, renderFamily string, over hostneed.VideoOverrides) func(float64) hostneed.Need {
 	return func(vram float64) hostneed.Need {
 		f := hostneed.Facts{Cfg: cfg, VRAMGiB: vram}
-		if n, ok := hostneed.ForVideo(cfg, renderFamily, f); ok {
+		if n, ok := hostneed.ForVideoWith(cfg, renderFamily, over, f); ok {
 			return n
 		}
 		return hostneed.ClassDefault(f)
@@ -194,11 +196,11 @@ func imageNeed(cfg config.Config, token string) mediaNeed {
 }
 
 // videoNeed is the need of the video route: pooled, or a single card like image generation.
-func videoNeed(cfg config.Config, token, renderFamily string) mediaNeed {
+func videoNeed(cfg config.Config, token, renderFamily string, over hostneed.VideoOverrides) mediaNeed {
 	if cfg.VideoPooled() {
-		return pooledNeed(token, cfg.VideoGenPoolCompute, cfg.VideoGenPoolDonor).declaresRAM(videoRAM(cfg, renderFamily))
+		return pooledNeed(token, cfg.VideoGenPoolCompute, cfg.VideoGenPoolDonor).declaresRAM(videoRAM(cfg, renderFamily, over))
 	}
-	return singleCardNeed(cfg, token).declaresRAM(videoRAM(cfg, renderFamily))
+	return singleCardNeed(cfg, token).declaresRAM(videoRAM(cfg, renderFamily, over))
 }
 
 // mediaGrant is what a call holds while it renders.

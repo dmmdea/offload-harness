@@ -9,12 +9,16 @@ package pipeline
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/gpulease"
 	"github.com/dmmdea/offload-harness/internal/gpuprobe"
+	"github.com/dmmdea/offload-harness/internal/hostneed"
 )
 
 func resultTokenOf(t *testing.T, res core.Result) string {
@@ -182,5 +186,54 @@ func TestTheMediaAdmissionKeepsTheConfiguredHeadroom(t *testing.T) {
 	}
 	if got := len(f.started()); got != 0 {
 		t.Fatalf("%d runner(s) started on a host the configured headroom says is full", got)
+	}
+}
+
+// A video request that names its own transformer declares the file the runner will load, not the one
+// the config binds (review, 2026-10-10: the bf16 LTX-2.5 transformer is 39.13 GiB where the int8 default
+// is 20.03, and the estimate sized the default whatever the request said, 19 GiB under). The model tree
+// is a size table, because a 39 GiB fixture is not an option.
+func TestAVideoRequestsOwnTransformerIsWhatTheAdmissionDeclares(t *testing.T) {
+	const (
+		int8T = "ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors"
+		bf16T = "ltx-2.5-22b-distilled-transformer-bf16.safetensors"
+		gemma = "gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors"
+	)
+	sizes := map[string]float64{int8T: 20.03, bf16T: 39.13, gemma: 14.32}
+	restore := hostneed.UseStat(func(path string) (int64, bool) {
+		g, ok := sizes[filepath.Base(path)]
+		return int64(g * (1 << 30)), ok
+	})
+	t.Cleanup(restore)
+
+	declared := func(params map[string]any) float64 {
+		t.Helper()
+		f := newAdmitFixtureWith(t, admitSpec{order: admitOrder, mutate: func(c *config.Config) {
+			c.VideoGenScript, c.VideoGenFamily = c.ImageGenScript, "ltx25" // the fixture's fake runner
+		}})
+		for _, class := range []string{"diffusion_models", "text_encoders"} {
+			if err := os.MkdirAll(filepath.Join(f.cfg.ComfyDir, "models", class), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		params["out"] = filepath.Join(f.dir, "clip.mp4")
+		call := f.start(core.TaskGenerateVideo, "a calm ocean at dawn", params)
+		f.waitStarted(1)
+		leases := f.m.Leases()
+		if len(leases) != 1 {
+			t.Fatalf("want one live lease, got %+v", leases)
+		}
+		got := leases[0].HostRAMGiB
+		f.letRunnersGo()
+		if r := f.await(call); !r.OK {
+			t.Fatalf("the video call: class=%q %s", r.Meta.ErrClass, r.Reason)
+		}
+		return got
+	}
+	if got := declared(map[string]any{"model": "ltx25"}); got < 34.3 || got > 34.4 {
+		t.Fatalf("the int8 default declares 20.03 + 14.32 = 34.35 GiB, got %.2f", got)
+	}
+	if got := declared(map[string]any{"model": "ltx25", "transformer": bf16T}); got < 53.4 || got > 53.5 {
+		t.Fatalf("a request that names the bf16 transformer declares 39.13 + 14.32 = 53.45 GiB, got %.2f", got)
 	}
 }

@@ -83,6 +83,20 @@ const (
 	RouteMusic   Route = "music"
 )
 
+// defaultStat is what Facts.Stat falls back to when a caller leaves it nil: nil here too means os.Stat
+// (mediacap.ResolveModelFile). UseStat replaces it for the callers whose Facts a test cannot reach
+// (the pipeline's media admission builds its own); production never calls it.
+var defaultStat func(path string) (size int64, ok bool)
+
+// UseStat makes every estimate that leaves Facts.Stat nil size files through fn until restore is
+// called. It exists so a test of the media admission can say a bf16 transformer is 39 GiB without
+// writing one.
+func UseStat(fn func(path string) (size int64, ok bool)) (restore func()) {
+	prev := defaultStat
+	defaultStat = fn
+	return func() { defaultStat = prev }
+}
+
 // Facts are the readings an estimate needs besides the binding.
 type Facts struct {
 	// Cfg is the machine's config: ComfyDir (the model roots) and the video/animate bindings.
@@ -174,6 +188,10 @@ type slot struct {
 func estimate(family string, files []mediacap.ModelFile, f Facts) (Need, bool) {
 	roots := mediacap.ModelRoots(f.Cfg.ComfyDir)
 	defaults := familySizes[family]
+	stat := f.Stat
+	if stat == nil {
+		stat = defaultStat
+	}
 	var slots []slot
 	have := map[mediacap.ModelRole]int{}
 	for _, mf := range files {
@@ -181,7 +199,7 @@ func estimate(family string, files []mediacap.ModelFile, f Facts) (Need, bool) {
 			continue
 		}
 		s := slot{role: mf.Role, label: mf.Label, name: mf.Name}
-		if n, ok := mediacap.ResolveModelFile(roots, mf, f.Stat); ok {
+		if n, ok := mediacap.ResolveModelFile(roots, mf, stat); ok {
 			s.gib, s.from = float64(n)/gib, "file"
 		} else if d := defaults[mf.Role]; len(d) > have[mf.Role] {
 			s.gib, s.from = d[have[mf.Role]], "default"
@@ -268,13 +286,48 @@ func ForRoute(route Route, cfg config.Config, f Facts) (Need, bool) {
 // config-namespace family the pipeline resolved for the request ("" = this box's default family),
 // and the files are the binding that family renders with (config.ResolveVideoFamilyBinding).
 func ForVideo(cfg config.Config, renderFamily string, f Facts) (Need, bool) {
+	return ForVideoWith(cfg, renderFamily, VideoOverrides{}, f)
+}
+
+// VideoOverrides are the weight files ONE video call names over its family's binding. The pipeline
+// takes a per-request `transformer` (a caller can pick the bf16 LTX transformer for one hero render
+// without a config edit, and the runner loads exactly that file), so the estimate has to size the file
+// the render loads and not the one the config binds: a bf16 LTX-2.5 transformer is 39 GiB where the
+// int8 default is 20, 19 GiB of under-declaration, more than twice the headroom, which let a second
+// lane in while the first was still loading (the incident again; review of 2026-10-10). A field left
+// empty keeps the binding's.
+type VideoOverrides struct {
+	Transformer, UnetHigh, UnetLow, TextEncoder string
+}
+
+// apply puts the named files over fb.
+func (o VideoOverrides) apply(fb config.VideoFamilyBinding) config.VideoFamilyBinding {
+	if v := strings.TrimSpace(o.Transformer); v != "" {
+		fb.Transformer = v
+	}
+	if v := strings.TrimSpace(o.UnetHigh); v != "" {
+		fb.UnetHigh = v
+	}
+	if v := strings.TrimSpace(o.UnetLow); v != "" {
+		fb.UnetLow = v
+	}
+	if v := strings.TrimSpace(o.TextEncoder); v != "" {
+		fb.TextEncoder = v
+	}
+	return fb
+}
+
+// ForVideoWith is ForVideo for a call that names weight files of its own: the family's binding with
+// those files put over it.
+func ForVideoWith(cfg config.Config, renderFamily string, over VideoOverrides, f Facts) (Need, bool) {
 	f.Cfg = withDir(f.Cfg, cfg)
 	fam := strings.TrimSpace(renderFamily)
 	label := fam
 	if label == "" {
 		label = strings.TrimSpace(cfg.VideoGenFamily)
 	}
-	return estimate(videoFamily(label), mediacap.VideoModelFiles(cfg, fam), f)
+	runner, fb := mediacap.VideoBinding(cfg, fam)
+	return estimate(videoFamily(label), mediacap.VideoModelFilesFor(runner, over.apply(fb)), f)
 }
 
 // withDir keeps the facts' own ComfyDir when it has one, else the binding's.
@@ -377,12 +430,16 @@ func Resolve(r Request, f Facts) Need {
 		v := math.Max(*r.Explicit, 0)
 		return Need{GiB: v, Source: SourceExplicit, Detail: "stated with --ram"}
 	}
-	if call, ok := ParseRenderCall(r.Args); ok {
+	call, recognised := ParseRenderCall(r.Args)
+	if recognised {
 		if n, ok := call.Estimate(f); ok {
 			return n
 		}
 	}
-	if r.Class == gpulease.ClassMedia {
+	// A render helper whose weights cannot be sized (an arbitrary --graph, a family the table does not
+	// know) is media work whatever the lease is called: it takes the class default, not the 0 a text
+	// lease would.
+	if recognised || r.Class == gpulease.ClassMedia {
 		return ClassDefault(f)
 	}
 	return Need{Source: SourceNone, Detail: "a " + string(r.Class) + " lease declares no host RAM"}

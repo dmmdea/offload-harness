@@ -2968,7 +2968,10 @@ func (p *Pipeline) runGenerateVideo(ctx context.Context, req core.Request, meta 
 	}
 
 	timeout := time.Duration(p.cfg.VideoGenTimeoutSec) * time.Second
-	grant, lerr := p.acquireMediaLease(ctx, "video-gen", timeout, p.gpuWait(), videoNeed(p.cfg, paramStr(req.Params, "waiter_token"), renderFamily).resumableBy(req))
+	// The host RAM this call declares is sized from the files the runner will load: the family's binding
+	// with the request's own `transformer` over it (the runner was just handed that file, above).
+	over := hostneed.VideoOverrides{Transformer: paramStr(req.Params, "transformer")}
+	grant, lerr := p.acquireMediaLease(ctx, "video-gen", timeout, p.gpuWait(), videoNeed(p.cfg, paramStr(req.Params, "waiter_token"), renderFamily, over).resumableBy(req))
 	if lerr != nil {
 		return p.deferForLease(lerr, req.Task, meta, len(req.Input), start)
 	}

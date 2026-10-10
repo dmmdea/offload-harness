@@ -4,6 +4,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/mediacap"
 )
 
@@ -16,7 +17,8 @@ type RenderCall struct {
 }
 
 // helperRoute maps the render helpers to the route whose files they load. comfy-run-graph.mjs is
-// deliberately absent: it runs an arbitrary graph, so what it loads is unknown to the caller.
+// deliberately absent: it runs an arbitrary graph, so what it loads is unknown to the caller. The
+// same helpers run in --graph mode (comfy-render, comfy-video) are the same case, handled in Estimate.
 var helperRoute = map[string]Route{
 	"comfy-generate.mjs": RouteImage,
 	"comfy-render.mjs":   RouteImage,
@@ -67,6 +69,14 @@ func ParseRenderCall(args []string) (RenderCall, bool) {
 // machine's config supplies only where the model files are (ComfyDir) and, for video, the family
 // bindings the runner receives from the harness.
 func (c RenderCall) Estimate(f Facts) (Need, bool) {
+	// --graph POSTS THE CALLER'S OWN WORKFLOW as it is ("any nodes, any model, any pipeline",
+	// comfy-render.mjs; comfy-video.mjs says the same): the family flags are not read, so what it
+	// loads is as unknown to the caller as what run-graph loads, and the media class default stands in.
+	// Sizing it as the helper's default family declared 0 for a 40 GiB graph (SDXL fits the card) and
+	// the wrong family for a video one (review of 2026-10-10).
+	if strings.TrimSpace(c.Flags["graph"]) != "" {
+		return Need{}, false
+	}
 	if v := c.Flags["reserve-vram"]; v != "" {
 		if r, err := strconv.ParseFloat(v, 64); err == nil && r > 0 {
 			f.ReserveVRAMGiB = r
@@ -99,8 +109,18 @@ func (c RenderCall) Estimate(f Facts) (Need, bool) {
 		cfg.InpaintCkpt = firstNonEmpty(c.Flags["ckpt"], f.env("COMFY_CKPT"))
 		return ForRoute(RouteInpaint, cfg, f)
 	case RouteVideo:
-		cfg.VideoGenFamily = firstNonEmpty(c.Flags["model"], "wan")
-		return ForRoute(RouteVideo, cfg, f)
+		// What the runner loads is what its FLAGS name (--transformer, --high-unet, --low-unet,
+		// --text-encoder) and, for each one it is not given, the builder's default: the machine's config
+		// reaches the runner only as the flags the pipeline passes, and a hand-run helper gets none. So
+		// the binding is built from the flags alone (the way the image routes above build theirs), not
+		// from the config's: sizing a bf16 --transformer as the configured int8 file under-declared it by
+		// 19 GiB (review of 2026-10-10).
+		model := videoFamily(firstNonEmpty(c.Flags["model"], "wan"))
+		fb := config.VideoFamilyBinding{
+			Transformer: c.Flags["transformer"], UnetHigh: c.Flags["high-unet"],
+			UnetLow: c.Flags["low-unet"], TextEncoder: c.Flags["text-encoder"],
+		}
+		return estimate(model, mediacap.VideoModelFilesFor(model, fb), f)
 	}
 	return Need{}, false
 }

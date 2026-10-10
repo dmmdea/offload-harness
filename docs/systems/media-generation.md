@@ -979,8 +979,9 @@ is given:
 | any call on a host that does not lease cards, or whose card table cannot be read | the whole node | the whole node | exactly as before this change |
 
 **Host RAM.** A generation call also declares the host RAM its weights will stream from (the UNet or checkpoint and the
-text encoder of its binding, counted in full when together they do not fit the card it runs on; 0 when they fit; the media
-class default for an arbitrary graph, sd.cpp and the iGPU engines; nothing for upscale and voice) and the grant admits it
+text encoder of its binding, for a video call the family's binding with the request's own `transformer` put over it, counted
+in full when together they do not fit the card it runs on; 0 when they fit; the media
+class default for an arbitrary graph (`run-graph`, or a helper run with `--graph`), sd.cpp and the iGPU engines; nothing for upscale and voice) and the grant admits it
 against committed memory plus what the leases already granted have yet to load, under physical RAM less
 `gpu_host_ram_headroom_gib` (default 8): see "Host RAM" in [gpu-lease.md](gpu-lease.md). Two Krea 2 bf16 lanes, each
 24.48 + 8.27 GiB, on a host that fits one: the first is admitted, the second finds idle cards and waits in the same line with

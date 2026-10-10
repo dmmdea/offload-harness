@@ -105,10 +105,10 @@ func InpaintModelFiles(cfg config.Config) []ModelFile {
 	return nil
 }
 
-// VideoModelFiles is what the video route loads for the named runner family ("" = this box's
-// default family), by the same binding the render resolves (config.ResolveVideoFamilyBinding):
-// wan22, ltx25, h3 and hunyuan; anything else is Wan 2.2, as the runner treats it.
-func VideoModelFiles(cfg config.Config, family string) []ModelFile {
+// VideoBinding is the runner family and the EFFECTIVE binding a video render of the named family
+// ("" = this box's default family) loads with: config.ResolveVideoFamilyBinding, the resolution the
+// pipeline renders with. wan22, ltx25, h3 and hunyuan; anything else is Wan 2.2, as the runner treats it.
+func VideoBinding(cfg config.Config, family string) (runnerFamily string, fb config.VideoFamilyBinding) {
 	family = strings.TrimSpace(family)
 	if family == "" {
 		family = strings.TrimSpace(cfg.VideoGenFamily)
@@ -118,7 +118,22 @@ func VideoModelFiles(cfg config.Config, family string) []ModelFile {
 	if family != "" {
 		render = fam
 	}
-	return fromNeeds(videoFamilyFilesLabeled(fam, cfg.ResolveVideoFamilyBinding(render), "videogen_"))
+	return fam, cfg.ResolveVideoFamilyBinding(render)
+}
+
+// VideoModelFilesFor is what the video graph of runnerFamily loads with the binding fb: the files fb
+// names and, for every one it leaves unset, the builder's default. The binding is the caller's to
+// adjust first (a request that names its own transformer, a hand-run helper whose flags are its
+// whole binding); VideoModelFiles is this over the binding the box resolves.
+func VideoModelFilesFor(runnerFamily string, fb config.VideoFamilyBinding) []ModelFile {
+	return fromNeeds(videoFamilyFilesLabeled(videoRunnerFamily(strings.TrimSpace(runnerFamily)), fb, "videogen_"))
+}
+
+// VideoModelFiles is what the video route loads for the named runner family ("" = this box's
+// default family), by the same binding the render resolves (VideoBinding).
+func VideoModelFiles(cfg config.Config, family string) []ModelFile {
+	fam, fb := VideoBinding(cfg, family)
+	return VideoModelFilesFor(fam, fb)
 }
 
 // AnimateModelFiles is WAN-Animate-2's four files.
