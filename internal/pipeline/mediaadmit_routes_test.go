@@ -766,6 +766,57 @@ func TestACardHeldForAQueuedCallerIsNotFreeForANewcomer(t *testing.T) {
 	}
 }
 
+// The same promise holds for a call that NAMED its cards. A pin, a pool and a declared device leave
+// nothing to choose, so they never ask the allocator, and the only thing keeping such a call from taking
+// a card the moment no lease shows it is the claim the places in line put on it (queuedClaims): without
+// that, a newcomer that names the card runs ahead of the caller who has been waiting for it. TryAcquire
+// itself never consults the line (FIFO lives in Acquire), so this is the one place the rule is held.
+func TestACardHeldForAQueuedCallerIsNotFreeForANewcomerThatNamesIt(t *testing.T) {
+	pool := func(c *config.Config) {
+		c.ImageGenPoolVvramGB, c.ImageGenPoolCompute, c.ImageGenPoolDonor = 24, "cuda:2", "cuda:1"
+		c.ComfyCudaDevice = "2" // a pooled seat is never pinned
+	}
+	for _, tc := range []struct {
+		name    string
+		spec    admitSpec
+		promise string // the card a caller in line holds a place for
+		start   func(f *admitFixture) <-chan core.Result
+		devices []string // the cards the newcomer's own place is for
+	}{
+		{"a pin", admitSpec{order: admitOrder, mutate: func(c *config.Config) { c.ComfyCudaDevice = "2" }}, admitUUIDC,
+			func(f *admitFixture) <-chan core.Result { return f.image(nil) }, []string{leaseIDOf(admitUUIDC)}},
+		{"a pool", admitSpec{order: admitOrder, mutate: pool}, admitUUIDA,
+			func(f *admitFixture) <-chan core.Result { return f.image(nil) }, []string{leaseIDOf(admitUUIDA), leaseIDOf(admitUUIDC)}},
+		{"a declared device", admitSpec{order: admitOrder}, admitUUIDA,
+			func(f *admitFixture) <-chan core.Result { return f.graph(map[string]any{"devices": []string{"0"}}) }, []string{leaseIDOf(admitUUIDA)}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newAdmitFixtureWith(t, tc.spec)
+			f.leaveToken([]string{leaseIDOf(tc.promise)}, time.Now().Add(-time.Minute))
+			// The runners are let go first: a newcomer that wrongly takes the card then finishes at once, and
+			// the test fails on its answer instead of waiting out the runner.
+			f.letRunnersGo()
+			res := f.await(tc.start(f))
+			if res.OK {
+				t.Fatalf("the newcomer ran on a card a caller in line holds a place for: %+v", f.started())
+			}
+			if res.Meta.ErrClass != "gpu_queued" || res.DeferClass != core.DeferClassCapacity {
+				t.Fatalf("want a queued capacity defer behind the caller in line, got class=%q/%q: %s", res.Meta.ErrClass, res.DeferClass, res.Reason)
+			}
+			if got := f.started(); len(got) != 0 {
+				t.Fatalf("the newcomer ran although the card is promised ahead of it: %+v", got)
+			}
+			p := queuedData(t, res)
+			if strings.Join(p.Devices, ",") != strings.Join(tc.devices, ",") {
+				t.Errorf("the newcomer's place is for the cards it named %v, got %v", tc.devices, p.Devices)
+			}
+			if p.Position != 2 {
+				t.Errorf("position = %d, want 2: the caller who was promised the card is first", p.Position)
+			}
+		})
+	}
+}
+
 // A place held for the whole node is a barrier: with both cards free the newcomer still queues.
 func TestAQueuedWholeNodeRequestIsABarrierForANewcomer(t *testing.T) {
 	f := newAdmitFixtureWith(t, admitSpec{})
