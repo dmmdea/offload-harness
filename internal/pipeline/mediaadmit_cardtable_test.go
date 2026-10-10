@@ -17,6 +17,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -648,5 +650,170 @@ func TestAnUnreadableTableUnderAParentsLeaseRidesTheBusyAnswer(t *testing.T) {
 		if !strings.Contains(res.Reason, want) {
 			t.Errorf("the busy answer must say why the call was on the legacy path (missing %q): %s", want, res.Reason)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------------------------
+// Which table a degraded call places from, and a caller who has gone
+// ---------------------------------------------------------------------------------------------
+
+// tableStep is one read of a scripted card table: it answers with cards after delay, or fails at once.
+type tableStep struct {
+	cards []gpuprobe.Card
+	delay time.Duration
+	fail  bool
+}
+
+// tableScript is a card-table reader whose reads are scripted one by one, each with its own table, for the
+// tests that need two readings of the table to DIFFER (flakyTable serves the fixture's one table). Steps
+// are taken in order and the last one repeats.
+type tableScript struct {
+	mu    sync.Mutex
+	steps []tableStep
+	reads int
+}
+
+func (f *admitFixture) tableScript(steps ...tableStep) *tableScript {
+	s := &tableScript{steps: steps}
+	f.p.alloc.Cards = s.read
+	return s
+}
+
+// replace swaps every step not yet taken for the one given, which then repeats.
+func (s *tableScript) replace(step tableStep) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.steps = []tableStep{step}
+}
+
+func (s *tableScript) read(ctx context.Context, _ config.Config) ([]gpuprobe.Card, string, error) {
+	s.mu.Lock()
+	s.reads++
+	step := s.steps[0]
+	if len(s.steps) > 1 {
+		s.steps = s.steps[1:]
+	}
+	s.mu.Unlock()
+	if step.delay > 0 {
+		select {
+		case <-time.After(step.delay):
+		case <-ctx.Done():
+			return nil, "", fmt.Errorf("nvidia-smi: nvidia-smi: %w", ctx.Err())
+		}
+	}
+	if step.fail {
+		return nil, "", errSmiTimeout
+	}
+	return step.cards, "", nil
+}
+
+// unsure is the table as a degraded reading gives it (the fallback query, no display_attached): the same
+// cards, but none of them can be vouched for as "not the monitor's", so the allocator hands out none.
+func unsure(cards []gpuprobe.Card) []gpuprobe.Card {
+	out := append([]gpuprobe.Card(nil), cards...)
+	for i := range out {
+		out[i].Display, out[i].DisplayUnknown = false, true
+	}
+	return out
+}
+
+// waitForWaiter blocks until a call is registered in line for a card.
+func (f *admitFixture) waitForWaiter() {
+	f.t.Helper()
+	deadline := time.Now().Add(15 * time.Second)
+	for len(f.m.Waiters()) == 0 {
+		if time.Now().After(deadline) {
+			f.t.Fatal("the call never queued for a held card")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// A call that cannot re-read the table goes on from "the newest table it did read". The admission table is
+// the oldest and, here, the poorest: a degraded reading that could not say which card the monitor is on,
+// so it vouches for no card. The allocation's own read is the full one. When the table then dies at the
+// grant, the call must place from THAT one (card A is plainly not the screen's) and not fall back to the
+// admission table, which would refuse the grant for a reason the fresher reading does not have; and the
+// age it reports is the fresher table's, not the admission table's.
+func TestADegradedCallPlacesFromTheNewestTableItReadNotTheAdmissionOne(t *testing.T) {
+	f := newAdmitFixture(t, func(c *config.Config) { c.GPUWaitMs = 10000 })
+	if _, err := gpulease.Allocate(gpulease.AllocInput{Cards: unsure(f.cards), Min: 1, Max: 1}); err == nil {
+		t.Fatal("premise: a table that cannot say which card the monitor is on must vouch for no card")
+	}
+	logs := captureAdmissionLog(t)
+	f.shortReads(6*time.Second, 12*time.Second)
+	holdA := f.holdCard(admitUUIDA)
+	f.holdCard(admitUUIDC)
+	tbl := f.tableScript(
+		tableStep{cards: unsure(f.cards)},                         // the admission read: the fallback query
+		tableStep{cards: f.cards, delay: 2500 * time.Millisecond}, // the allocation's read: the full query, slow under load
+	)
+	f.letRunnersGo() // the call that is placed finishes at once
+	ch := f.image(nil)
+	f.waitForWaiter()
+	tbl.replace(tableStep{fail: true}) // the table dies while the call waits in line
+	_ = holdA.Release()                // its turn comes: card A
+
+	res := f.await(ch)
+	if !res.OK {
+		t.Fatalf("placed from the allocation's own reading card A is free and not the screen's, but the call was %s %q: %s", res.Meta.ErrClass, res.Reason, logs.String())
+	}
+	if got := f.started(); len(got) != 1 || got[0].Env["COMFY_CARD_UUID"] != admitUUIDA {
+		t.Errorf("the call ran on %+v, want card A", got)
+	}
+	m := regexp.MustCompile(`placed from the table it read ([^,]+),`).FindStringSubmatch(logs.String())
+	if m == nil {
+		t.Fatalf("the degrade is logged with the age of the table it used:\n%s", logs.String())
+	}
+	// The allocation's reading finished a second or less before the read that died; the admission table is
+	// 2.5 s older than that, so an age of 2 s or more means the call reports (and places from) the wrong one.
+	if m[1] != "less than a second earlier" && m[1] != "1s earlier" {
+		t.Errorf("the log says the table it placed from is %q old: it must be the allocation's reading, not the admission one", m[1])
+	}
+}
+
+// A caller that goes away while the allocation's read hangs has nobody to place: the call must end there,
+// not degrade, queue and leave a place in line that holds the card back from everyone behind it for the
+// grace.
+func TestACallerWhoLeavesDuringAHungReadLeavesNoPlaceInLine(t *testing.T) {
+	f := newAdmitFixture(t, nil)
+	f.shortReads(30*time.Second, 60*time.Second) // only the caller leaving ends the hung read
+	f.holdCard(admitUUIDA)
+	f.holdCard(admitUUIDC)
+	tbl := f.flakyTable()
+	tbl.steps("ok")     // admission answers
+	tbl.script(0, true) // then every read hangs until its context ends
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ch := make(chan core.Result, 1)
+	go func() {
+		ch <- f.p.Run(ctx, core.Request{Task: core.TaskGenerateImage, Input: "a calm ocean at dawn",
+			Params: map[string]any{"out": filepath.Join(f.dir, "gone.png")}, Resumable: true})
+	}()
+	deadline := time.Now().Add(15 * time.Second)
+	for tbl.count() < 2 { // the admission read, then the allocation's, which hangs
+		if time.Now().After(deadline) {
+			t.Fatal("the allocation never read the table")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+
+	res := f.await(ch)
+	if res.OK {
+		t.Fatalf("the call ran for a caller who had gone: %+v", res)
+	}
+	if res.Meta.ErrClass == "gpu_queued" {
+		t.Errorf("the call queued for a caller who had gone: %s", res.Reason)
+	}
+	if n := len(f.m.Tokens()); n != 0 {
+		t.Errorf("%d place(s) in line left for a caller who had gone: %+v", n, f.m.Tokens())
+	}
+	if n := len(f.m.Waiters()); n != 0 {
+		t.Errorf("%d waiter(s) left for a caller who had gone", n)
+	}
+	if n := len(f.m.Leases()); n != 2 {
+		t.Errorf("%d leases, want only the two held by the other jobs", n)
 	}
 }
