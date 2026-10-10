@@ -22,6 +22,18 @@ const (
 	MintedProgressSuffix = ".jsonl"
 )
 
+// IsMintedProgressFile reports whether path is a progress file of the wrapper's own minted shape
+// (wrap-<pid>-<unix nanos>.jsonl). Such a file exists only between the start of the wrapped command and its
+// end: a reader that finds it missing is looking at a lease that is queued, draining, unloading the seat
+// or warming it back, not at a job that forgot to write.
+func IsMintedProgressFile(path string) bool {
+	return isMintedName(filepath.Base(path))
+}
+
+func isMintedName(name string) bool {
+	return strings.HasPrefix(name, MintedProgressPrefix) && strings.HasSuffix(name, MintedProgressSuffix)
+}
+
 // SweepMintedProgress removes the minted progress files in dir that nothing has written to for maxAge. A
 // wrapper removes its own file when its command ends, so what is left here was left by a wrapper that was
 // killed (a closed console, a taskkill of the tree) before it could. It runs inline in the next
@@ -35,7 +47,7 @@ func SweepMintedProgress(dir string, maxAge time.Duration, now time.Time) int {
 	removed := 0
 	for _, e := range entries {
 		name := e.Name()
-		if e.IsDir() || !strings.HasPrefix(name, MintedProgressPrefix) || !strings.HasSuffix(name, MintedProgressSuffix) {
+		if e.IsDir() || !isMintedName(name) {
 			continue
 		}
 		fi, err := e.Info()

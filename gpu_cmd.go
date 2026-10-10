@@ -599,7 +599,10 @@ func runGPUReserve(args []string) error {
 	// The warm is heartbeat for its length; the lease outlives the command by
 	// exactly the warm.
 	finish := func() {
-		// A progress file this wrapper minted goes with the command it was minted for.
+		// A progress file this wrapper minted goes with the command it was minted for, and FIRST: left in place
+		// through the seat's warm-back (minutes) it would go stale and `gpu status` would read the lease
+		// stalled while it is only loading the seat. Absent it reads unknown, never stalled, and the status
+		// line says why (gpuactivity unknownWhy).
 		if autoProgress != "" {
 			_ = os.Remove(autoProgress)
 		}
