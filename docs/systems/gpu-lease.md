@@ -1156,7 +1156,7 @@ binary ignores it, and a record without it declares nothing). Where the number c
 | a recognised render helper call | `render/comfy-generate.mjs`, `comfy-render`, `comfy-edit`, `comfy-inpaint` or `comfy-video`, wherever it sits in the wrapped command (either path-separator style). The UNet or checkpoint and the text-encoder files the family loads are sized through the configured ComfyUI model paths (`mediacap.ModelRoots`, the same tables `doctor` reads) and counted **in full when together they do not fit the largest card of the lease** less the runner's `--reserve-vram`; a set that fits declares 0. A krea2 bf16 call on a 16 GiB card is 24.48 + 8.27 = 32.75 GiB. A video call is sized from the files its flags name (`--transformer`, `--high-unet`, `--low-unet`, `--text-encoder`) and the builder's default for each it is not given, because a hand-run helper gets nothing from the machine's config: a bf16 LTX-2.5 `--transformer` is 39.13 + 14.32 = 53.45 GiB where the int8 default is 20.03 + 14.32 (`TestAVideoCallIsSizedFromTheFilesItsFlagsName`). `run-graph` is not recognised, and neither is a helper run with `--graph` (`comfy-render`, `comfy-video`): both post the caller's own workflow, so what they load is unknown and they take the class default below, on a text lease too (`TestAGraphCallIsSizedByTheClassDefaultNotItsDefaultFamily`). |
 | a file whose size cannot be read | the documented per-family size (`hostneed.familySizes`: the files the reference box binds, rounded up; Qwen-Image 2512 bf16 is the incident's ~38 GiB stream). A family with neither has no estimate and takes the class default. |
 | the **media class default** | for a media lease with no `--ram` and no recognised call: the largest estimate over the render families **this box binds** (`imagegen_*`, `gen_edit_*`, `videogen_*`, named families), so a 32 GiB node is not held to a 128 GiB node's numbers; 0 when nothing is bound. It is never clamped to fit the box: a default that cannot be admitted is refused with the reason and `--ram` as the way out. |
-| a text or seat lease | 0. |
+| a text lease | 0: the harness cannot size an arbitrary wrapped command, so a text reservation declares nothing unless `--ram` says (the agent seat's own reload is sized where the harness does it, below). |
 
 **Why the full file size and not the overflow.** ComfyUI's dynamic VRAM stages the whole file in host memory ("Model Krea2
 prepared for dynamic VRAM loading. 24449MB Staged", the encoder "8463MB Staged" in the incident lane's own console log),
@@ -1257,7 +1257,37 @@ holder's tree, so its loaded weights count both as pending and in the commit cha
 over-refuses, it never under-refuses. A pipeline job running under its parent's ambient lease (`acquireInherited`,
 `GPU_LEASE_DEVICES`) gets no admission of its own: the parent's declaration covers it. A process outside every lease can
 still push the box over; the guard sees it in the commit charge and holds new declaring leases back, but it does not stop or
-evict anything.
+evict anything. **Reach (G7 of the P0 plan).** The guard bounds the leases that pass through it. A binary older than the guard
+(a pinned copy: its leases declare nothing, so the not-yet-loaded sum undercounts them), a direct llama-swap request (the seat
+loads on demand with no lease at all) and a hand-started ComfyUI instance are outside it: it sees what they have committed, never
+what they are about to. The closure is to run the live harness everywhere and to make a ComfyUI start refuse without a lease
+token; until then the rule rests on those callers going through the lease, and nothing here claims it bounds a process that does not.
+
+### The agent seat and its warm-back (G4 of the P0 plan)
+
+A lease that takes a card unloads the agent seat, and the wrapper warms it back before it releases the lease. That reload
+is a load like any other, and it used to be the one load nothing sized: the warm path had no host-RAM check, and the
+seat's footprint was declared nowhere. (The 2026-09-10 incident was a seat: 44 GiB of host RAM nobody counted.) Now:
+
+* **The seat declares its footprint.** `agent_seat_host_ram_gib` is the host RAM the seat holds once loaded (resident set
+  plus any staged KV cache). The node that runs the seat measures it and records `measured <date> <node>` beside the value.
+  Unset is not "small": `hostneed.DefaultSeatHostGiB` (21 GiB, the largest seat footprint on record: a vLLM pair seat's
+  ~13 GiB of process plus 8 GiB of staged KV cache, measured 2026-09-10 and recorded in the project notes, not re-measured
+  here) stands in, a **chosen** fail-closed figure, never 0 (`TestSeatNeedIsTheConfiguredFigureElseTheFailClosedDefault`).
+* **The warm passes the grant's admission.** Committed memory now, plus the seat's footprint, plus what the *other* live
+  leases have yet to load, must stay under physical RAM less the headroom (`Manager.HostRAMCheckWithout`: the same function
+  as the grant, with the lease being released left out, because its command has exited and it loads nothing more). A host
+  that reads NEAR or OVER therefore never warms (`TestAWarmBackIsRefusedWhenTheHostCannotTakeTheSeatAndStaysOwed`,
+  `TestAWarmBackDoesNotCountTheLeaseItIsReleasing`).
+* **Never while a lane streams.** Any other live lease that declared host RAM refuses the warm outright, whatever the
+  numbers say: the lane's own growth is in no counter yet (`TestAWarmBackNeverRunsWhileALaneThatDeclaredHostRAMIsLive`).
+* **A refused warm stays owed.** The marker is left for the last holder, exactly as for the other refusals, and the seat
+  loads on its next request. That request is a llama-swap load the lease system does not gate (see the reach note below):
+  refusing the warm keeps the harness from *adding* a load to a tight host, it does not stop a delegator that asks for the
+  seat.
+* **Not done, on purpose.** The owed warm is not counted as *pending* when another lease is admitted. The seat was unloaded to
+  make room for that very lease, and its reload happens after the lease ends, so reserving room for it at the lease's grant
+  would count the memory twice; the reload is admitted when it is attempted.
 
 ### What `gpu status` and `offload_status` show
 

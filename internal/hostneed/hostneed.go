@@ -57,6 +57,10 @@ const (
 	SourceClassDefault Source = "class default"
 	// SourceNone: a text or seat lease, or a box that binds no render family: nothing declared.
 	SourceNone Source = "none"
+	// SourceSeat: the agent seat's footprint, as the node's config states it (agent_seat_host_ram_gib).
+	SourceSeat Source = "seat"
+	// SourceSeatDefault: an agent seat whose footprint nobody stated: the fail-closed default.
+	SourceSeatDefault Source = "seat default"
 )
 
 // Need is a declared host-RAM need and where it came from.
@@ -421,6 +425,27 @@ type Request struct {
 	Class    gpulease.Class
 	// Args is the wrapped command (nil for a detached reservation).
 	Args []string
+}
+
+// DefaultSeatHostGiB is the host RAM an agent seat is assumed to hold when the node's config does not say
+// (agent_seat_host_ram_gib). An unknown seat is not "fits": 0 would let a warm-back load a seat the host may
+// not have room for, which is how a seat's 44 GiB host footprint went unseen on 2026-09-10. So the figure is the
+// LARGEST seat footprint on record: a vLLM pair seat held ~13 GiB of process plus 8 GiB of staged KV cache,
+// 21 GiB in all (measured 2026-09-10 and recorded in the project notes; not re-measured here), against ~12 GiB
+// resident for a 35B-class MoE seat with spilled experts. A seat that is smaller than that costs a warm-back that
+// waits for room it did not need; a seat that is larger and not configured is the gap, and the config key is the
+// way to close it. Chosen, not measured on any one node: the node that runs the seat measures its own and states it.
+const DefaultSeatHostGiB = 21.0
+
+// SeatNeed is the host RAM the agent seat needs once loaded: the node's own figure when its config states one
+// (agent_seat_host_ram_gib), else DefaultSeatHostGiB. It is never 0: a seat whose footprint is unknown is
+// treated as the largest one measured (fail closed), because a load the guard cannot size is the one it must
+// not wave through.
+func SeatNeed(cfg config.Config) Need {
+	if g := cfg.AgentSeatHostRAMGiB; g > 0 {
+		return Need{GiB: g, Source: SourceSeat, Detail: "the node's agent_seat_host_ram_gib"}
+	}
+	return Need{GiB: DefaultSeatHostGiB, Source: SourceSeatDefault, Detail: "the agent seat's host footprint is not configured (agent_seat_host_ram_gib), so the largest seat footprint measured so far is assumed"}
 }
 
 // Resolve is the order in the package comment: explicit, a recognised render call, the media class

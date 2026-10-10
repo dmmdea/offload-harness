@@ -586,3 +586,31 @@ func TestHostRAMCheckOfNothingReadsNothing(t *testing.T) {
 		t.Fatalf("a need of 5 on a host at 99 of 100 must be read and refused: %+v", chk)
 	}
 }
+
+// G4: a load that follows a lease about to be released is admitted without that lease's own declared need, which
+// is not still to come (its command has exited). Leaving nothing out is HostRAMCheck; the other leases still count.
+func TestHostRAMCheckWithoutLeavesOutOnlyTheReleasedLease(t *testing.T) {
+	m, _ := ramScoped(t, 40)
+	finished, err := m.TryAcquire(ClassMedia, Options{Reason: "just finished", TTL: time.Hour, Devices: []string{card0}, HostRAMGiB: 30})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = finished.Release() }()
+	other, err := m.TryAcquire(ClassMedia, Options{Reason: "still loading", TTL: time.Hour, Devices: []string{card1}, HostRAMGiB: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = other.Release() }()
+
+	all := m.HostRAMCheck(15) // 40 + 15 + (30 + 10 still to load) = 95 > 92
+	if all.OK || all.PendingGiB != 40 {
+		t.Fatalf("both leases count when nothing is left out: %+v", all)
+	}
+	without := m.HostRAMCheckWithout(15, finished.Epoch()) // 40 + 15 + 10 = 65
+	if !without.OK || without.PendingGiB != 10 {
+		t.Fatalf("the released lease's 30 GiB is not still to come, the other lease's 10 is: %+v", without)
+	}
+	if same := m.HostRAMCheckWithout(15, 0); same.OK != all.OK || same.PendingGiB != all.PendingGiB {
+		t.Fatalf("epoch 0 leaves nothing out: %+v vs %+v", same, all)
+	}
+}

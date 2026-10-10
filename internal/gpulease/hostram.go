@@ -208,6 +208,24 @@ func (m *Manager) HostRAMCheck(needGiB float64) gpuprobe.HostRAMCheck {
 	return m.hostRAMCheckAgainst(needGiB, m.Leases())
 }
 
+// HostRAMCheckWithout is HostRAMCheck for a load that follows a lease which is about to be released: the
+// lease with that epoch is left out of the not-yet-loaded sum, because its command has exited and it will
+// load nothing more, so counting its declared need as still to come would refuse the very load its release
+// makes room for (the warm-back of a seat is such a load). epoch 0 leaves nothing out.
+func (m *Manager) HostRAMCheckWithout(needGiB float64, epoch uint64) gpuprobe.HostRAMCheck {
+	live := m.Leases()
+	if epoch != 0 {
+		kept := live[:0:0]
+		for _, l := range live {
+			if l.Epoch != epoch {
+				kept = append(kept, l)
+			}
+		}
+		live = kept
+	}
+	return m.hostRAMCheckAgainst(needGiB, live)
+}
+
 // hostRAMRefusal applies the rule to a grant that declares opts.HostRAMGiB, given the leases live
 // at the moment (the caller reads them inside its critical section). nil admits.
 func (m *Manager) hostRAMRefusal(opts Options, live []Info) *ErrHostRAM {

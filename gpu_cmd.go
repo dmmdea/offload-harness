@@ -1212,6 +1212,7 @@ func leaseWarmGuard(m *gpulease.Manager, l *gpulease.Lease) warmGuard {
 		clearIfSeat: m.ClearSeatWarmOwedIfSeat,
 		onlyIfOwed:  true,
 		others:      otherLeaseOnSeat(m, l.Epoch()),
+		hostRAM:     hostRAMWarmCheck(m, l.Epoch()),
 	}
 }
 
@@ -1238,6 +1239,7 @@ func releaseWarmGuard(m *gpulease.Manager, epoch uint64) warmGuard {
 		clear:       m.ClearSeatWarmOwed,
 		clearIfSeat: m.ClearSeatWarmOwedIfSeat,
 		others:      otherLeaseOnSeat(m, epoch),
+		hostRAM:     hostRAMWarmCheck(m, epoch),
 	}
 }
 

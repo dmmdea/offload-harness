@@ -448,3 +448,21 @@ func TestHelperRecognitionIgnoresCaseAndABoolFlagKeepsItsPositional(t *testing.T
 		t.Fatalf("--keep-comfy takes no value, so out.png is not it: %+v", call.Flags)
 	}
 }
+
+// G4: the agent seat's host footprint. The node's own figure when it states one; an unstated seat is never 0
+// (fail closed: the largest footprint on record), a negative figure is a typo and reads as unstated.
+func TestSeatNeedIsTheConfiguredFigureElseTheFailClosedDefault(t *testing.T) {
+	n := SeatNeed(config.Config{AgentSeatHostRAMGiB: 11.6})
+	if n.GiB != 11.6 || n.Source != SourceSeat {
+		t.Errorf("a configured seat declares its own figure: %+v", n)
+	}
+	for _, g := range []float64{0, -3} {
+		n = SeatNeed(config.Config{AgentSeatHostRAMGiB: g})
+		if n.GiB != DefaultSeatHostGiB || n.Source != SourceSeatDefault || n.GiB <= 0 {
+			t.Errorf("agent_seat_host_ram_gib = %v must fall to the fail-closed default (never 0): %+v", g, n)
+		}
+	}
+	if DefaultSeatHostGiB < 21 {
+		t.Errorf("the default must not be smaller than the largest seat footprint on record (21 GiB): %v", DefaultSeatHostGiB)
+	}
+}
