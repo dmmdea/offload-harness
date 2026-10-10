@@ -260,8 +260,11 @@ func TestBounceClosesTheAttemptsCardQuietAndTheNextDispatchOpensANewOne(t *testi
 	if a["completed"]["scheduledOn"] != a["queued"]["scheduledOn"] {
 		t.Errorf("the bounced card closes on the node it opened on: %v vs %v", a["completed"]["scheduledOn"], a["queued"]["scheduledOn"])
 	}
-	if b["queued"] == nil || b["completed"] == nil || b["completed"]["startedAt"] == nil {
-		t.Fatalf("the serving node's card runs to completion: %v", b)
+	if b["queued"] == nil || b["running"] == nil || b["completed"] == nil || b["completed"]["startedAt"] == nil {
+		t.Fatalf("the serving node's card goes queued, running, completed (a bounce must not leave the first attempt's state on the handle): %v", b)
+	}
+	if b["completed"]["startedAt"].(float64) < b["queued"]["createdAt"].(float64) {
+		t.Errorf("the serving node's card started before it was created: it carries the bounced attempt's start: %v", b)
 	}
 	if a["queued"]["createdAt"] == b["queued"]["createdAt"] && a["queued"]["scheduledOn"] == b["queued"]["scheduledOn"] {
 		t.Errorf("the second card is a new card on another node: %v vs %v", a["queued"], b["queued"])

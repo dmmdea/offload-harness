@@ -2,9 +2,12 @@ package mcpserver
 
 import (
 	"context"
+	"strings"
 	"testing"
 
+	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
+	"github.com/dmmdea/offload-harness/internal/pipeline"
 )
 
 // The MCP doors hand mediaremote.Run runTaskAs as their runner. Overflow (ADR 0082) asks that runner whether the lane
@@ -33,5 +36,16 @@ func TestAServerWithNoPipelineReadsAsAFreeLane(t *testing.T) {
 	s := New(nil)
 	if got := core.ProbeLane(context.Background(), runTaskAs{s}, core.Request{Task: core.TaskGenerateImage, Input: "p"}); !got.Free {
 		t.Fatalf("no pipeline, no lane to ask about: %+v", got)
+	}
+}
+
+// The runner reaches the REAL pipeline, not only the test seam: a server that holds a pipeline gets the pipeline's own
+// verdict. The request is one the pipeline does not model (a video call), so it answers "not judged" at once, without
+// reading a card table or a lease directory; a runner that returned "free" without asking would carry no such reason.
+func TestTheRunnerAsksTheServersPipeline(t *testing.T) {
+	s := New(pipeline.New(config.Config{}, nil, nil, nil))
+	got := core.ProbeLane(context.Background(), runTaskAs{s}, core.Request{Task: core.TaskGenerateVideo, Input: "a slow pan"})
+	if !got.Free || !strings.HasPrefix(got.Why, "not judged:") {
+		t.Fatalf("the pipeline's own verdict must come back (free, with its reason): %+v", got)
 	}
 }
