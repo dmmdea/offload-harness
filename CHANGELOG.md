@@ -61,6 +61,15 @@ Versioning: [SemVer](https://semver.org/).
 - **Tests.** `internal/gpuactivity/f38_test.go` (6) and `internal/gpulease/progressdir_test.go`; six mutations of the shipped
   code were each caught. `docs/systems/gpu-lease.md` (the verdict table).
 
+### Fixed — `gpu --help` prints usage, and `gpu --config <path> <subcommand>` works (F35)
+
+- `local-offload gpu --help`, `-h`, `-help` and `help` print the subcommands on stdout and exit 0 (they answered `unknown gpu
+  subcommand "--help"` and exited 1); a bare `gpu` and an unknown subcommand are still errors, and the unknown-subcommand
+  message now points at `gpu --help`. A `--config <path>` (or `--config=<path>`) in front of the subcommand is handed to it,
+  as the top-level verb already did: `gpu --config x status` dispatched on `--config` and failed. `gpuVerbs` lists the
+  dispatcher's cases and a test pins the list to the switch and the usage to the list.
+- **Tests.** `gpu_usage_test.go` (5); six mutations were each caught. `docs/systems/gpu-lease.md` ("Using it").
+
 ## [0.179.0] - 2026-10-10 - a busy image lane overflows to an idle node that renders the same recipe, and every GPU lease path has a host-RAM brake
 
 ### Added — a busy image lane overflows to an idle node that renders the same recipe (F52, ADR 0082)

@@ -64,6 +64,10 @@ caller, since excluding the memory stack is its own invariant.
 
 ## Using it
 
+`local-offload gpu --help` (also `-h`, `-help`, `help`) prints the subcommands on stdout and exits 0; `local-offload gpu
+<subcommand> --help` lists that subcommand's flags. A `--config <path>` (or `--config=<path>`) may come before the
+subcommand as well as after it, as it may in front of any other verb (F35: both used to fail as `unknown gpu subcommand`).
+
 Prefer the **wrapper** form. The lease lives exactly as long as the command, so it cannot be
 leaked by forgetting to release, and it composes like `timeout` or `nice`:
 

@@ -48,28 +48,67 @@ import (
 	"github.com/dmmdea/offload-harness/internal/pairworkloads"
 )
 
+// gpuVerbs are the subcommands runGPU dispatches, in the order the usage lists them. `hold` is the hidden
+// holder a --detach reserve spawns and is not documented.
+var gpuVerbs = []string{"status", "cards", "reserve", "release", "doctor", "owner-flags", "hold"}
+
 func runGPU(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: local-offload gpu <status|cards|reserve|release|doctor|owner-flags> [flags]")
+		return errors.New(gpuUsageLine)
 	}
-	switch args[0] {
+	// A --config in front of the subcommand belongs to the subcommand, as it does in front of any other
+	// verb (main.go hoistGlobalConfig); without this `gpu --config x status` dispatched on "--config" and
+	// failed as an unknown subcommand (F35).
+	sub, rest, ok := hoistGlobalConfig(args)
+	if !ok {
+		return errors.New(gpuUsageLine)
+	}
+	switch sub {
+	case "-h", "-help", "--help", "help":
+		fmt.Print(gpuUsage())
+		return nil
 	case "status":
-		return runGPUStatus(args[1:])
+		return runGPUStatus(rest)
 	case "reserve":
-		return runGPUReserve(args[1:])
+		return runGPUReserve(rest)
 	case "release":
-		return runGPURelease(args[1:])
+		return runGPURelease(rest)
 	case "hold":
-		return runGPUHold(args[1:])
+		return runGPUHold(rest)
 	case "cards":
-		return runGPUCards(args[1:])
+		return runGPUCards(rest)
 	case "doctor":
-		return runGPUDoctor(args[1:])
+		return runGPUDoctor(rest)
 	case "owner-flags":
-		return runGPUOwnerFlags(args[1:])
+		return runGPUOwnerFlags(rest)
 	default:
-		return fmt.Errorf("unknown gpu subcommand %q (want status, cards, reserve, release, doctor or owner-flags)", args[0])
+		return fmt.Errorf("unknown gpu subcommand %q (want status, cards, reserve, release, doctor or owner-flags; `local-offload gpu --help` lists them)", sub)
 	}
+}
+
+// gpuUsageLine is the one-line usage a bare `gpu` (or a `gpu --config x` with no subcommand) is refused with.
+const gpuUsageLine = "usage: local-offload gpu [--config <path>] <status|cards|reserve|release|doctor|owner-flags> [flags] (local-offload gpu --help lists them)"
+
+// gpuUsage is what `gpu --help` prints on stdout: every documented subcommand once, and where the flags of
+// each are (the sub-verbs' own flag sets print them on --help).
+func gpuUsage() string {
+	return `local-offload gpu: the machine-wide GPU lease (who holds the cards, and a place in line for everyone else)
+
+Usage:
+  local-offload gpu [--config <path>] <subcommand> [flags]
+
+Subcommands:
+  gpu status [--json]                    who holds the cards, the queue behind them, and what the holder is doing (verdict and note)
+  gpu cards [--json]                     the card table, with each card's holder
+  gpu reserve [flags] -- <command...>    hold the cards for exactly as long as <command> runs, queueing behind a current holder
+  gpu reserve --detach [flags]           hold the cards in a background process until it is released (needs an explicit --for)
+  gpu release [--epoch N] [--warm-seat]  release the lease held (or only epoch N, if it is still current); --warm-seat loads the agent seat back
+  gpu doctor [--scan dir] [--write-audit] [--json]
+                                         audit the lease readers on this host (harness binaries and gpu-lock.mjs copies)
+  gpu owner-flags [--pid N]              print the owner flags for the calling process tree, to splice into a launcher that detaches
+
+--config <path> may come before the subcommand or after it. "local-offload gpu <subcommand> --help" lists that subcommand's flags.
+`
 }
 
 // openLease resolves the state root the same way every consumer does, so the CLI can
