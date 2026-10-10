@@ -89,6 +89,16 @@ in one place — see [GPU lease](gpu-lease.md) and
 [ADR 0018](../architecture/decisions/0018-machine-wide-fenced-gpu-lease.md). A busy card queues the
 job for a bounded window (`gpu_wait_ms`, 90 s) and then defers with the holder's detail.
 
+**A running helper tells its lease it is alive (F8).** Under `gpu reserve -- node render/comfy-*.mjs ...` the wrapper
+declares a progress contract on the lease and hands the file to the helper in `GPU_LEASE_PROGRESS_FILE`; the helper
+(`render/lease-progress.mjs`) appends a line to it at most every 30 s while ComfyUI answers and still lists its prompt
+(`pollOutputs`, so every runner that polls ComfyUI), between the pictures of a `--batch`, and when the slot is ready.
+That is what lets a long render's lease renew at the end of its term instead of being labelled "expired ... open to a
+takeover" while it is healthy, and what makes a helper that hangs or a prompt the server lost read `held-stalled`. With
+no file declared (a call from the harness's own doors, a `--no-lock` run) the heartbeat does nothing. The contract, the
+stall window and what a beat does and does not prove are in [GPU lease](gpu-lease.md), "A wrapped render helper declares
+its own contract and keeps it".
+
 Two details of the free step are easy to get wrong:
 
 - **It frees per model, not everything.** The always-loaded embedding and reranker models are

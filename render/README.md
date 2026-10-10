@@ -69,6 +69,15 @@ zero-always-warm (it shares the 8 GB with llama-swap, so it must coordinate). Ta
   mp4 under the **`gifs`** key for all formats (a ComfyUI quirk).
 - **`atomic-out.mjs`** — delivers the produced file: staged sibling, then rename (see the
   image tool's Notes above); `atomic_out.py` is the same for the Python workers.
+- **`lease-progress.mjs`** — the helper's heartbeat to its lease's progress file (F8). `gpu reserve -- node
+  render/comfy-*.mjs ...` declares a progress contract on the lease and hands the file to the helper in
+  `GPU_LEASE_PROGRESS_FILE` (or the helper reads it from the inherited lease's record); `pollOutputs` appends a line
+  at most every 30 s while ComfyUI answers and still lists the prompt, `comfy-generate --batch` between pictures, and
+  `withGpuSlot` when the slot is ready. A long, healthy render's lease therefore renews instead of being labelled
+  "expired ... open to a takeover"; a hung helper or a prompt the server lost stops the lines and the lease reads
+  `held-stalled`. It appends (the file may be a log the caller keeps), never throws, and does nothing when no file is
+  declared. It cannot see a sampler wedged inside a ComfyUI that still answers HTTP (no polled step counter): that
+  stays bounded by `COMFY_WAIT_SEC`. See [GPU lease](../docs/systems/gpu-lease.md).
 - **`preflight-graph.mjs`** — validates a built graph against the live `/object_info` (all
   required inputs present) **before** spending a GPU cycle.
 

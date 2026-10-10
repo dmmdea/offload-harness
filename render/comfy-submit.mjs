@@ -39,6 +39,7 @@ import { existsSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
+import { createLeaseHeartbeat } from "./lease-progress.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -334,6 +335,22 @@ async function probeStats(fetchImpl, api) {
   }
 }
 
+// promptOnServer: does ComfyUI's own queue still list this prompt, running or pending? The evidence a
+// lease heartbeat rests on when /history has nothing yet (it lists a prompt only once it has finished).
+// False on any failure to find out: a beat is written on positive evidence only, so a server that cannot
+// say lets the stall window run, as a server that has lost the prompt does.
+async function promptOnServer(fetchImpl, api, promptId) {
+  try {
+    const r = await fetchImpl(`${api}/queue`, { signal: AbortSignal.timeout(10_000) });
+    if (!r.ok) return false;
+    const q = await r.json();
+    const lists = [q && q.queue_running, q && q.queue_pending];
+    return lists.some((l) => Array.isArray(l) && l.some((e) => Array.isArray(e) && e[1] === promptId));
+  } catch {
+    return false;
+  }
+}
+
 // pollOutputs: poll /history/<id> every 2s until isDone(entry) or the budget runs out.
 // This is comfy-render.mjs's hardened loop (2026-07-30 dead-server watchdog + 2026-08
 // suspend/resume fence + per-poll 30s abort), now shared by every runner:
@@ -355,6 +372,12 @@ async function probeStats(fetchImpl, api) {
 //     server, not an endpoint that never worked. A healthy probe resets the count.
 // onExecError (optional) runs best-effort before an exec-error throw — the CLI-path
 // hook that finalizes the run row with the server's verbatim failure.
+// HEARTBEAT (F8, lease-progress.mjs): under a lease that declares a progress file (`gpu reserve` hands
+// the path in GPU_LEASE_PROGRESS_FILE) a poll that ComfyUI ANSWERED, for a prompt ComfyUI itself still
+// lists (in /history, or running/pending in /queue), appends one line at most every BEAT_EVERY_MS. That
+// is what lets the lease renew for the whole render instead of being labelled expired at the end of its
+// first term, and it stops the moment the evidence does: no answer, a prompt the server lost, or the
+// poll loop ended (a hung runner stops polling). With no declared file this costs nothing.
 export async function pollOutputs({
   api, promptId, waitSec = 1800, isDone,
   noOutputMsg = "no output produced in time",
@@ -367,6 +390,7 @@ export async function pollOutputs({
   const deadRaw = Number(env.COMFY_DEAD_SEC);
   const deadSec = Number.isFinite(deadRaw) ? Math.max(10, deadRaw) : 240;
   const startedAt = now();
+  const heartbeat = createLeaseHeartbeat({ env, now });
   let deadline = startedAt + Math.max(1, Number(waitSec) || 0) * 1000;
   let lastAnswerAt = startedAt;
   let prevTickAt = startedAt;
@@ -409,6 +433,9 @@ export async function pollOutputs({
     // An error status on /history says nothing about this prompt, like an unlisted one:
     // both go through the probe (a poisoned server may answer /history with a 5xx too).
     const h = failed ? null : hist[promptId];
+    if (heartbeat.due() && (h || await promptOnServer(fetchImpl, api, promptId))) {
+      heartbeat.beat(`ComfyUI is ${h ? "finishing" : "running"} prompt ${String(promptId).slice(0, 8)} (${Math.round((now() - startedAt) / 1000)}s into the wait)`);
+    }
     if (!h) {
       if (nextProbeAt === null) { nextProbeAt = now() + STATS_PROBE_EVERY_MS; continue; }
       if (now() < nextProbeAt) continue;

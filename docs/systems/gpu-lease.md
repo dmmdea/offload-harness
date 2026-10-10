@@ -35,6 +35,7 @@ other on a single shared card.
 | `internal/pipeline/pipeline.go` | takes the `media` lease around **every** generation call site (image ComfyUI + sdcpp, inpaint, image batch, run-graph, video, audio) and threads `GPU_LEASE_*` to the runner; inherits an ambient lease instead of re-acquiring; owns the in-process slot (`mediaSlot`) that arbitrates jobs sharing one inherited lease |
 | `gpu_cmd.go` | the `gpu status\|reserve\|release\|hold` verbs, wrapper and `--detach` forms |
 | `gpu_terms.go` | the holders' side of terms: the tick the wrapper form and the detached holder run at the end of a term, the over-cap warning, and the argv of the hidden holder (`--release-at-expiry`) |
+| `gpu_progress.go`, `internal/gpulease/progressdir.go`, `render/lease-progress.mjs` | the progress contract of a wrapped render helper (F8): the helpers the wrapper declares one for, the minted file and its sweep, `GPU_LEASE_PROGRESS_FILE`, and the helper-side heartbeat |
 | `gpu_reserve_devices.go`, `gpu_cards.go`, `gpu_doctor.go` | which cards a reserve holds (`--devices`, `--cards`, derivation, the queue), `gpu cards` and the status table, `gpu doctor` |
 | `internal/gpulease/owner.go` | **ownership (ADR 0070)**: who asked for a lease (`Owner`), the session registry, the first-observer orphan marker, the progress contract and `Standing`, the derived reading every status surface shares |
 | `internal/gpulease/explain.go` | the sentence a waiter reads when the lease it is queued behind is stalled, orphaned or overdue, and the installed orphan grace. READ-ONLY: it reads the orphan marker a status surface recorded and never writes it or takes the epoch lock |
@@ -1008,6 +1009,39 @@ so (`has not appeared in 3h0m0s, past its 2h0m0s stall window: the job has not w
 without changing the verdict. `gpu reserve` warns when the progress file's directory does not exist. The last line of the file is shown ("clip 4 of 17"): a JSON line
 contributes its `detail`, else `done` of `total`, else the raw line.
 
+**A wrapped render helper declares its own contract and keeps it (F8).** A healthy 1,394 s Qwen-Image still run as
+`gpu reserve --for ... -- node render/comfy-generate.mjs ...` had its lease labelled "expired ... open to a takeover" at
+the end of its first term: the caller declared no progress contract, the lease recorded no owner it could tell apart,
+and the helpers never wrote a progress file, so nothing vouched for a job that was rendering normally. The wrapper form
+now closes both halves. **The wrapper declares the contract** when it wraps a helper that heartbeats
+(`comfy-generate`, `-render`, `-edit`, `-inpaint`, `-video`, `-animate`, `-music`, `-upscale` and `-run-graph`, found
+behind an interpreter in either path-separator style) and the caller declared none: a file `<state root>/progress/wrap-<pid>-<nanoseconds>.jsonl`
+and a stall window of 15 minutes (chosen, not measured: more than three times the longest quiet stretch a polling
+helper has, the 240 s `COMFY_DEAD_SEC` the poll loop itself tolerates), recorded on the lease like a `--progress-file`
+the caller passed (so the term cap is the 24 hours a progress contract gets). It prints one line saying so, creates the
+file just before the command starts (not at acquisition: the drain that follows can wait out a long seat turn, and a
+file that existed through it would read stalled while the wrapper waits), and removes it when the command ends; a
+wrapper killed before it could leaves a file the next wrapper that mints one removes after seven days
+(`gpulease.SweepMintedProgress`, inline, no timer). A `--progress-file` of the caller's own is kept as it is and is
+never removed. A command that is not one of those scripts (a bench, `sdcpp-generate`, a Go verb, which may overflow to
+another node and never poll here) gets nothing declared: a contract that nothing writes to would only read stalled.
+**The helper heartbeats it**: the path travels to the command in `GPU_LEASE_PROGRESS_FILE`, and
+`render/lease-progress.mjs` appends one JSON line (`{"at":...,"pid":...,"detail":"ComfyUI is running prompt 1a2b3c4d (62s into the wait)"}`)
+at most every 30 s, from the poll loop every ComfyUI runner shares (`pollOutputs` in `render/comfy-submit.mjs`), between
+the pictures of a `--batch`, and when the GPU slot is ready. A helper under a lease whose record declares a progress
+file but that was not started by the wrapper form (a `gpu reserve --detach --progress-file ...`) finds the file in the
+lease record through `GPU_LEASE_DIR`/`GPU_LEASE_EPOCH`. **What a beat is evidence of**: a poll that ComfyUI answered, for
+a prompt ComfyUI itself still lists (in `/history`, or running or pending in `/queue`). A hung helper stops polling; a
+ComfyUI that stops answering is an unanswered poll; a prompt a restarted ComfyUI lost is listed nowhere; a poisoned CUDA
+context ends the wait through the poll loop's own `/system_stats` probe. Each stops the beats, the file stops moving, the
+lease reads `held-stalled` after its window, and at the end of its term it is labelled expired, as a lease with a
+progress contract that stops moving always was; the command is never killed. **What it does not catch**: a prompt that
+sits in ComfyUI's running queue with a wedged sampler while HTTP keeps answering and `/system_stats` stays healthy.
+ComfyUI offers no polled step counter (its progress events are websocket-only and this tree is dependency-free), so that
+case is bounded by the poll budget (`COMFY_WAIT_SEC`) and the lease's maximum total, not by a stall verdict. The
+harness's own media doors take their lease through the library, not the wrapper, hold it for the one call, and are not
+judged by this: no tick asks them about a term.
+
 **Legacy leases and "is it stale?".** A lease with no owner and no progress contract (every lease written before this
 change) can honestly be judged by one thing: its declared window, plus card utilisation, and the note then says
 `util only, no progress contract`. Two read-only activity facts are shown as information and are never a verdict input:
@@ -1070,7 +1104,8 @@ present: an advancing progress file, which the job itself writes, vouches for th
 unattended one. What such an owner does **not** get is the weaker leg: a busy card proves a process, not that anyone
 wants the result, so a lease of an owner who cannot be told, with no progress contract or a stalled one, is labelled at
 the end of its `--for` however busy its cards are (it already read `held-overdue` from that moment; the label adds the
-sentence). A gone owner is rescued by neither. "Its cards are working" is one `nvidia-smi` sample over the lease's
+sentence). A wrapped render helper is no longer in that position: the wrapper declares its progress contract and the
+helper keeps it moving ("A wrapped render helper declares its own contract and keeps it", above). A gone owner is rescued by neither. "Its cards are working" is one `nvidia-smi` sample over the lease's
 cards (the whole node for a whole-node lease), the display card excluded, at the verdict's 15 % threshold, taken only
 when it can change the answer (an attended lease, a live owner, progress not already advancing); an unattended lease
 never counts utilisation, and neither does a gone owner. The look has **three answers, not two**: *working*, *idle*
@@ -1978,7 +2013,10 @@ request posted straight to llama-swap by anything outside the harness is outside
   Until the registry writer is wired into the session hooks, that is every attended lease taken from a Claude session, so
   an attended job without a progress file reads `expired` at the end of its first term even while its cards are busy
   (the `held-overdue` verdict was already true from that moment; the label adds the sentence and the takeover
-  eligibility, and a takeover of an unknown owner will need `--force` anyway). And for an attended lease with a live owner
+  eligibility, and a takeover of an unknown owner will need `--force` anyway). The wrapper form now closes that for a
+  wrapped render helper, which is the case that was accused while healthy (F8): it declares and heartbeats a progress
+  contract, so such a lease renews for as long as the render lives. Any other attended job without a progress file
+  still reads `expired` at the end of its first term. And for an attended lease with a live owner
   and no progress contract, "its cards are working" is a single `nvidia-smi` sample taken at the end of the term: a job in
   a quiet CPU phase at that instant is labelled, and the next check (a minute later) renews it if the cards are busy by
   then; a sample that could not be taken is labelled as unreadable, not as idle, and is asked again the same way. Neither

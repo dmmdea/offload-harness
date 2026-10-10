@@ -130,6 +130,15 @@ silent.
   `expired` at the end of its first term while its cards are busy; its `held-overdue` verdict was already true from
   that moment. The alternative, letting a busy card rescue an unknown owner too, would stop a busy job nobody can
   vouch for from ever being called stale.
+- **Amended after F8 (a healthy 1,394 s render was labelled expired).** The consequence above is real for every attended
+  job without a progress file, and it fell on the one job that was working: a render helper under `gpu reserve`, with an
+  owner nobody could tell apart, a caller that declared no contract and helpers that wrote none. The wrapper form now
+  declares the contract itself when it wraps a helper that heartbeats, hands the file to the command in
+  `GPU_LEASE_PROGRESS_FILE`, and the helpers append to it while ComfyUI answers and still lists their prompt
+  (`render/lease-progress.mjs`; `docs/systems/gpu-lease.md`, "A wrapped render helper declares its own contract and keeps
+  it"). The rule of this decision is unchanged: the contract is the job's own word, the verdict is derived from it in one
+  place, and nothing is released or killed on it. What changed is who writes the word for a render. A job that is neither
+  a wrapped helper nor declared by its caller is judged as before.
 - With several live leases every surface describes the MOST ESCALATED one from its own record: the epoch, the owner,
   the progress contract and the takeover command always belong to the lease the verdict names.
 - A waiter's sentence reads the marker a status surface recorded, so a lone waiter on an orphan nobody has looked

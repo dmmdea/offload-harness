@@ -6,6 +6,44 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed — a healthy long render's lease is no longer labelled "expired ... open to a takeover" (F8)
+
+- **The defect.** A 1,394 s Qwen-Image still run as `gpu reserve --for ... -- node render/comfy-generate.mjs ...` had its
+  lease labelled "expired ... still held and heartbeating, reading held-overdue and open to a takeover" at the end of its
+  first term while it was rendering normally: the caller declared no progress contract, the lease recorded no owner it could
+  tell apart, and the render helpers never wrote a progress file, so nothing vouched for the job (the term rule renews on
+  progress for such an owner and on nothing else). A waiter reading `gpu status` was told a healthy job was abandoned.
+- **The wrapper declares the contract.** `gpu reserve` in its wrapper form, wrapping a render helper that heartbeats
+  (`comfy-generate`, `-render`, `-edit`, `-inpaint`, `-video`, `-animate`, `-music`, `-upscale`, `-run-graph`) with no
+  `--progress-file` of the caller's, records a progress contract on the lease: a file under `<state root>/progress/` and a
+  15 minute stall window (chosen, not measured; the figure and why are in `docs/systems/gpu-lease.md`). It prints one line
+  saying so, creates the file just before the command starts, removes it when the command ends, and hands the path to the
+  command in the new `GPU_LEASE_PROGRESS_FILE` (a caller's own `--progress-file` is kept as it is and handed down the same
+  way, and never removed). A bench, `sdcpp-generate`, a Go verb or a `--detach` hold gets nothing declared.
+  `gpulease.SweepMintedProgress` removes minted files a killed wrapper left, after seven days, inline in the next wrapper
+  that mints one.
+- **The helper heartbeats it.** New `render/lease-progress.mjs`: `pollOutputs` (the poll loop every ComfyUI runner shares)
+  appends one JSON line to the file, at most every 30 s, when ComfyUI answered a poll and still lists the prompt (in
+  `/history`, or running or pending in `/queue`); `comfy-generate --batch` writes one before and after every picture, and
+  `withGpuSlot` one when the slot is ready. A helper under a lease whose record declares a progress file but that the wrapper
+  did not start (a detached hold with `--progress-file`) finds it in the record. The lines are appended (the file may be a
+  log the caller keeps), never throw, and do nothing when no file is declared.
+- **A hung or lost render is still labelled.** A hung helper stops polling, a ComfyUI that stops answering is an unanswered
+  poll, a prompt a restarted ComfyUI lost is listed nowhere, and a poisoned CUDA context ends the wait through the poll
+  loop's own probe: each stops the lines, the file stops moving, the lease reads `held-stalled` after its window and its
+  term is labelled expired at the end, as for any lease with a progress contract that stops moving. Nothing is killed or
+  released. **Not caught:** a prompt that sits in ComfyUI's running queue with a wedged sampler while HTTP keeps answering
+  and `/system_stats` stays healthy (ComfyUI has no polled step counter; its progress events are websocket-only and the
+  render tree is dependency-free): that stays bounded by `COMFY_WAIT_SEC` and the lease's maximum total, not by a stall
+  verdict.
+- **Tests.** `render/lease-progress.test.mjs` (18; the end-to-end one runs the real `comfy-generate.mjs --batch` and the
+  `comfy-render.mjs` child it spawns against a fake ComfyUI) and `gpu_progress_test.go` (the decision, the helper list
+  pinned to what `render/` contains, the real wrapper renewing a beating helper's lease, labelling a silent one, and keeping
+  a caller's own file). 20 mutations of the shipped code were each caught.
+- **Docs.** `docs/systems/gpu-lease.md` (a new paragraph; the two passages that said an attended job without a progress file
+  is labelled at the end of its first term now say which job that still is), `docs/systems/media-generation.md`,
+  `render/README.md`.
+
 ## [0.179.0] - 2026-10-10 - a busy image lane overflows to an idle node that renders the same recipe, and every GPU lease path has a host-RAM brake
 
 ### Added — a busy image lane overflows to an idle node that renders the same recipe (F52, ADR 0082)

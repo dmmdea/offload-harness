@@ -31,6 +31,7 @@ import { withGpuSlot } from "./gpu-lock.mjs";
 import { familySignature } from "./comfy-family.mjs";
 import { comfyApi } from "./comfy-lifecycle.mjs";
 import { parseJobs, jobArgs, runBatchJobs, renderExitError, batchExitCode, batchEndLine, JOB_PARAM_FLAGS, SHARED_BINDING_FLAGS } from "./batch-jobs.mjs";
+import { leaseBeat } from "./lease-progress.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const argv = process.argv.slice(2);
@@ -95,6 +96,8 @@ if (flags.batch) {
       runJob: (job) => runRenderArgs(jobArgs(job, sharedFlags)),
       record: (line) => appendFileSync(resultsPath, line + "\n"),
       log: (line) => console.error(line),
+      // The lease's progress file moves between pictures too, not only while a child polls ComfyUI.
+      progress: (line) => leaseBeat(line, { force: true }),
     }),
   ).then((summary) => {
     // The batch ran every job. It used to exit 0 whatever became of them, so a caller learned of

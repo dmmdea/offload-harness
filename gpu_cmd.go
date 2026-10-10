@@ -429,6 +429,24 @@ func runGPUReserve(args []string) error {
 	if w := progressFileWarning(opts.ProgressFile); w != "" {
 		fmt.Fprintln(os.Stderr, w)
 	}
+	// A wrapped render helper that heartbeats gets the contract the caller did not declare (F8): without
+	// one the lease has nothing to renew on and is labelled expired at the end of its first term while the
+	// render is healthy. Only the wrapper form: a detached hold wraps no command to hand a file to.
+	autoProgress := ""
+	if !*detach {
+		dir := gpulease.ProgressDir(m.Root())
+		if p, helper, ok := autoProgressFile(opts, cmdArgs, dir, os.Getpid(), time.Now()); ok {
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				// Said, never fatal: the render runs under the lease as it always did, unjudged by a contract.
+				fmt.Fprintf(os.Stderr, "gpu reserve: could not create %s for a progress contract (%v); the lease will not renew on progress\n", dir, err)
+			} else {
+				gpulease.SweepMintedProgress(dir, mintedProgressMaxAge, time.Now())
+				opts.ProgressFile, opts.Stall = p, autoProgressStall
+				autoProgress = p
+				fmt.Fprintln(os.Stderr, autoProgressSentence(p, helper, autoProgressStall))
+			}
+		}
+	}
 	// A window above the cap on a term is accepted whole and never shortened; say so once, here,
 	// where it is asked for (the hidden holder of --detach would print into a log nobody reads).
 	if w := reserveTermWarning(*dur, opts); w != "" {
@@ -532,6 +550,10 @@ func runGPUReserve(args []string) error {
 	// The warm is heartbeat for its length; the lease outlives the command by
 	// exactly the warm.
 	finish := func() {
+		// A progress file this wrapper minted goes with the command it was minted for.
+		if autoProgress != "" {
+			_ = os.Remove(autoProgress)
+		}
 		// The instances kept under this lease go first: they hold VRAM the seat's warm-back and
 		// the next holder both want, and they live no longer than the lease (gpu_instances.go).
 		stopInstancesOfLease(cfg, lease, os.Stderr)
@@ -629,6 +651,17 @@ func runGPUReserve(args []string) error {
 		// This lease's card stands for the command: a one-shot harness verb
 		// under it reports no card of its own.
 		cmd.Env = append(cmd.Env, pairworkloads.UnderLeaseEnv+"=1")
+	}
+	if opts.ProgressFile != "" {
+		// The command is told where the lease's progress file is, whether this wrapper minted it or the
+		// caller declared it (render/lease-progress.mjs appends to it).
+		cmd.Env = append(cmd.Env, gpuProgressFileEnv+"="+opts.ProgressFile)
+	}
+	if autoProgress != "" {
+		helper, _ := wrappedHeartbeatHelper(cmdArgs)
+		if err := startAutoProgress(autoProgress, helper, time.Now()); err != nil {
+			fmt.Fprintf(os.Stderr, "gpu reserve: could not create the progress file %s (%v); the lease reads its progress as unknown until the helper creates it\n", autoProgress, err)
+		}
 	}
 	if err := cmd.Start(); err != nil {
 		err = fmt.Errorf("starting wrapped command: %w", err)
