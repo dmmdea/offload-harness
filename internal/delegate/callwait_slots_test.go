@@ -139,7 +139,7 @@ func heldSlotWait(t *testing.T, contracts []core.AgentContract, tune func(*fakeN
 	stopQuiet := watchQuiet(t, heldReserve/2)
 
 	// The limit is a hang guard, not a speed bound: a call that ends at its deadline in 3.5 s took 10 to 20 s to return in
-	// three of twenty runs at forty busy loops on one P, and that is a frozen runner and not a call that never returns.
+	// three of forty runs at forty busy loops on one P, and that is a frozen runner and not a call that never returns.
 	results, sum, elapsed := runWithin(t, 30*time.Second, cfg, neverLocal(t), contracts, "remote", []string{url}, opts, nil)
 
 	quiet := stopQuiet()
