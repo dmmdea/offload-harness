@@ -7,6 +7,7 @@ import (
 	"errors"
 	"math"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -376,9 +377,27 @@ func TestReserveOnAFlagOffHostDeclaresTheFilesInFullWithoutReadingTheCardTable(t
 	t.Setenv("LO_HELPER_SLEEP_MS", "1500")
 	done := make(chan error, 1)
 	go func() {
-		done <- runGPUReserve(reserveWithCmd(cfg, []string{"--class", "media", "--wait", "0", "--reason", "krea2"}, krea2Words()...))
+		err := runGPUReserve(reserveWithCmd(cfg, []string{"--class", "media", "--wait", "0", "--reason", "krea2"}, krea2Words()...))
+		os.Stderr.WriteString("DIAG reserve returned at " + time.Now().Format("15:04:05.000") + " err: " + diagErr(err) + "\n")
+		done <- err
 	}()
-	leases := waitForLeases(t, m, 1)
+	os.Stderr.WriteString("DIAG waiting from " + time.Now().Format("15:04:05.000") + " GPU_LOCK=" + os.Getenv("GPU_LOCK") + " STATE=" + os.Getenv("LOCAL_OFFLOAD_STATE_DIR") + "\n")
+	var leases []gpulease.Info
+	for deadline := time.Now().Add(15 * time.Second); time.Now().Before(deadline) && len(leases) == 0; time.Sleep(40 * time.Millisecond) {
+		leases = m.Leases()
+	}
+	if len(leases) == 0 {
+		var tree strings.Builder
+		diagWalk(filepath.Dir(cfg), &tree)
+		rerr := "still running 5 s after the deadline"
+		select {
+		case e := <-done:
+			rerr = diagErr(e)
+		case <-time.After(5 * time.Second):
+		}
+		raw, _ := os.ReadFile(cfg)
+		t.Fatalf("DIAG never saw the lease; reserve: %s; config %s: %s; tree:\n%s", rerr, cfg, raw, tree.String())
+	}
 	if len(leases[0].Devices) != 0 {
 		t.Fatalf("a flag-off host holds the whole node: %+v", leases[0])
 	}
@@ -388,6 +407,30 @@ func TestReserveOnAFlagOffHostDeclaresTheFilesInFullWithoutReadingTheCardTable(t
 	if err := <-done; err != nil {
 		t.Fatalf("reserve: %v", err)
 	}
+}
+
+func diagErr(err error) string {
+	if err == nil {
+		return "<nil>"
+	}
+	return err.Error()
+}
+
+// diagWalk lists every entry under root and the content of small JSON files.
+func diagWalk(root string, b *strings.Builder) {
+	_ = filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			b.WriteString("  walk " + p + ": " + err.Error() + "\n")
+			return nil
+		}
+		b.WriteString("  " + p + "\n")
+		if !d.IsDir() && strings.HasSuffix(p, ".json") {
+			if raw, rerr := os.ReadFile(p); rerr == nil && len(raw) < 4096 {
+				b.WriteString("    " + string(raw) + "\n")
+			}
+		}
+		return nil
+	})
 }
 
 // hostCommit is committed memory a test moves while reserves poll it.
