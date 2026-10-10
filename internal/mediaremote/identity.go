@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/dmmdea/offload-harness/internal/config"
+	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/delegate"
 	"github.com/dmmdea/offload-harness/internal/gpulease"
 	"github.com/dmmdea/offload-harness/internal/mediacap"
@@ -75,11 +76,13 @@ type need struct {
 	refineOff bool
 	// steps: the caller sent a per-request step count.
 	steps bool
+	// graph is what a run_graph asks of a node (graph.go); nil for every other task.
+	graph *graphNeed
 }
 
-func needOf(params map[string]any) need {
-	_, steps := posInt(params, "steps")
-	return need{refineOff: refineOff(params), steps: steps}
+func needOf(req core.Request) need {
+	_, steps := posInt(req.Params, "steps")
+	return need{refineOff: refineOff(req.Params), steps: steps, graph: graphNeedOf(req)}
 }
 
 // nodeMatch is the verdict of one node's published recipes against this machine's.

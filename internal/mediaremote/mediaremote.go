@@ -330,7 +330,7 @@ func callWith(ctx context.Context, cfg config.Config, req core.Request, remotes 
 	if len(pl.inputs) > 0 {
 		route, taskForNode = "/fleet/media-job", taskMediaJob
 	}
-	base, node, err := pickNodeFor(ctx, cfg, bases, pl.fleetTask, taskForNode, nodeRoutes(req), needOf(req.Params))
+	base, node, err := pickNodeFor(ctx, cfg, bases, pl.fleetTask, taskForNode, nodeRoutes(req), needOf(req))
 	if err != nil {
 		return core.Result{}, err
 	}
@@ -630,6 +630,10 @@ func pickNodeFor(ctx context.Context, cfg config.Config, bases []string, task, d
 		}
 		if n.refineOff && task == taskImage && !v.RefineHonoured {
 			misses = append(misses, fmt.Sprintf("%s: does not honour refine=false (an older harness would refine the prompt anyway)", who))
+			continue
+		}
+		if why := n.refuses(v); why != "" {
+			misses = append(misses, fmt.Sprintf("%s: %s", who, why))
 			continue
 		}
 		id := v.NodeID

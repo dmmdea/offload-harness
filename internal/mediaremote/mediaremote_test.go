@@ -201,7 +201,10 @@ func startNode(t *testing.T, o nodeOpts) *node {
 	s := fleetnode.New(r, jobs, fleetnode.Options{
 		NodeID: nodeID(o.id), Version: o.version, Cfg: cfg, GpuVendor: "nvidia", GpuArch: "ampere", Lease: o.lease,
 		Snapshot: func() (fleetnode.Snapshot, bool) {
-			return fleetnode.Snapshot{TotalGiB: 16, FreeGiB: 12, At: time.Now()}, true
+			// One card, as a single-GPU render node publishes it (a 16 GB card reads 15.92 GiB): a whole-node graph is placed
+			// only on a node that says it has one (graph.go), and the tests that mean otherwise edit gpu_devices themselves.
+			return fleetnode.Snapshot{TotalGiB: 15.92, FreeGiB: 12, At: time.Now(),
+				Devices: []fleetnode.GPUDevice{{Index: 0, UUID: "GPU-test-0", Name: "test card", TotalGiB: 15.92, FreeGiB: 12}}}, true
 		},
 		Footprints: func() []fleetnode.FootprintEntry { return nil },
 	})
@@ -834,7 +837,8 @@ func fakeNode(t *testing.T, o fakeOpts) *httptest.Server {
 		o.log.note(r.URL.EscapedPath(), strings.HasPrefix(r.URL.Path, "/fleet/jobs/"))
 		switch {
 		case r.URL.Path == "/fleet/health":
-			extra := ""
+			// One card (see startNode): the graph tests place a whole-node graph only on a node that publishes one.
+			extra := `,"gpu_devices":[{"index":0,"uuid":"GPU-fake-0","name":"test card","vram_total_gb":15.92,"vram_free_gb":12}]`
 			if o.routes != "" {
 				extra += `,"media_routes":` + o.routes
 			}

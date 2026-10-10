@@ -317,16 +317,22 @@ func ambientLease() bool {
 
 // tryOverflow places the call on the fleet when its local lane is not free. The zero outcome means "run it here".
 func tryOverflow(ctx context.Context, cfg config.Config, runner Runner, req core.Request, remotes []string) overflowOutcome {
-	if req.Task != core.TaskGenerateImage || str(req.Params, "waiter_token") != "" || ambientLease() {
+	// An image is identified by its recipe; a whole-node graph by the files its node holds (graph.go). A graph that names
+	// devices is card-scoped and stays here (a card id names a card on this machine).
+	graph := req.Task == core.TaskRunGraph
+	if (req.Task != core.TaskGenerateImage && !graph) || str(req.Params, "waiter_token") != "" || ambientLease() || (graph && hasDevices(req.Params)) {
 		return overflowOutcome{}
 	}
 	bases, err := candidateBases(cfg, remotes)
 	if err != nil {
 		return overflowOutcome{} // a bad `remotes` is reported by the paths that use it, as before
 	}
-	local, ok, _ := localIdentity(cfg, str(req.Params, "family"))
-	if !ok {
-		return overflowOutcome{}
+	var local localID
+	if !graph {
+		var ok bool
+		if local, ok, _ = localIdentity(cfg, str(req.Params, "family")); !ok {
+			return overflowOutcome{}
+		}
 	}
 	pl, err := plan(req)
 	if err != nil {
@@ -353,7 +359,7 @@ type rowAt struct {
 }
 
 func place(ctx context.Context, cfg config.Config, runner Runner, req core.Request, pl planned, bases []string, local localID, v core.LaneVerdict) overflowOutcome {
-	cands, rows := candidatesFor(ctx, cfg, bases, local, needOf(req.Params))
+	cands, rows := candidatesFor(ctx, cfg, bases, local, needOf(req))
 	out := overflowOutcome{}
 	flush := func(extra []rowAt) {
 		all := append(append([]rowAt(nil), rows...), extra...)
@@ -372,7 +378,7 @@ func place(ctx context.Context, cfg config.Config, runner Runner, req core.Reque
 		defer cancel()
 	}
 	start := time.Now()
-	placement := "remote: this machine's image lane is not free (" + v.Why + ")"
+	placement := "remote: this machine's " + laneName(req) + " lane is not free (" + v.Why + ")"
 	h := core.BeginRemote(runner, req, RouteAuto)
 	defer core.CloseOnPanic(h)
 
@@ -460,7 +466,7 @@ func candidatesFor(ctx context.Context, cfg config.Config, bases []string, local
 			rows = append(rows, rowAt{i, ClusterRow{Node: who, State: "skipped", Why: "this machine's own node: the lane that is not free is the one it would use"}})
 			continue
 		}
-		m, ok := matchNode(local, v, n)
+		m, ok := matchFor(local, v, n)
 		if !ok {
 			rows = append(rows, rowAt{i, ClusterRow{Node: who, State: m.state, Why: m.why, Differs: m.differs}})
 			continue
@@ -507,12 +513,15 @@ func attempt(ctx context.Context, cfg config.Config, req core.Request, pl planne
 		payload[k] = v
 	}
 	// The node renders the family under ITS name for this recipe, never the caller's (a name binds different files on
-	// different nodes), and the digest lets it refuse a recipe it no longer holds.
-	delete(payload, "family")
-	if c.family != "" {
-		payload["family"] = c.family
+	// different nodes), and the digest lets it refuse a recipe it no longer holds. A graph has neither: it carries its own
+	// files' names, and the node refuses at its door when it lacks one.
+	if pl.fleetTask == taskImage {
+		delete(payload, "family")
+		if c.family != "" {
+			payload["family"] = c.family
+		}
+		payload["recipe_digest"] = local.recipe.Digest()
 	}
-	payload["recipe_digest"] = local.recipe.Digest()
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		return attemptResult{kind: attemptFailed, err: &contractError{fmt.Sprintf("the %s request cannot be encoded for the wire: %v", pl.fleetTask, err)}}

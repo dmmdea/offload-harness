@@ -280,6 +280,10 @@ func plan(req core.Request) (planned, error) {
 		}
 		setStr(p, "reserve_vram", out)
 		setStr(p, "model_family", out)
+		// min_vram_gb is the delegator's own filter on the nodes it considers; it never travels.
+		if _, _, err := minVRAMArg(p); err != nil {
+			return planned{}, err
+		}
 		// The graph and the manifest share ONE dispatch body with the envelope and the other fields: each
 		// may be under its cap and the two together over what the node reads.
 		if total := len(graph) + len(manifest); total > maxGraphBytes {

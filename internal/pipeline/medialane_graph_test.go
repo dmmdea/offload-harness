@@ -280,7 +280,9 @@ func TestMediaLaneFreeGraphIsFreeForWhatItDoesNotModel(t *testing.T) {
 func TestMediaLaneFreeGraphIsFreeWhenTheCardTableCannotBeRead(t *testing.T) {
 	f := newAdmitFixtureWith(t, admitSpec{order: admitOrder})
 	hold(t, f, "a bench render", leaseIDOf(admitUUIDA))
-	f.p.alloc.Cards = func(context.Context, config.Config) ([]gpuprobe.Card, string, error) { return nil, "", context.DeadlineExceeded }
+	f.p.alloc.Cards = func(context.Context, config.Config) ([]gpuprobe.Card, string, error) {
+		return nil, "", context.DeadlineExceeded
+	}
 	if v := f.p.MediaLaneFree(context.Background(), graphLaneReq(nil)); !v.Free || !strings.Contains(v.Why, "card table") {
 		t.Errorf("an unreadable table must read as free with the reason: %+v", v)
 	}
