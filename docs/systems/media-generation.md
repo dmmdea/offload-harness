@@ -449,9 +449,12 @@ loaded models are not evicted before the decode, so a small card fails the plain
 should pin `tiled`. A card under 12 GiB was not measured, and a nominal 12 GB card sits on the cut and was not
 read; pin `plain` or `tiled` there rather than trust `auto`.
 
-> **Unverified:** the 2026-10-03 A/B is one card and one clip. The 12 GiB cut and how the plain attempt behaves
-> beside resident models (issue 15453) were not measured by this change, whose tests stand ComfyUI in with a
-> `/system_stats` stub and render nothing.
+> **Unverified:** the 2026-10-03 A/B is one card and one clip. ComfyUI sizes a decode from the latent's shape
+> (`memory_used_decode`, which for the 3D VAEs grows with the product of the latent's frame and pixel
+> dimensions), and `auto` decides on the card alone, so a clip well past the measured one can still overflow a
+> 16 GB card; the retry above catches that at the cost of the failed attempt. The 12 GiB cut and how the plain
+> attempt behaves beside resident models (issue 15453) were not measured by this change either: its tests stand
+> ComfyUI in with a `/system_stats` stub and render nothing.
 
 **What this does not touch.** LTX 2.5 and Hunyuan 1.5 keep `VAEDecodeTiled`: they decode through other VAEs that
 nobody measured, and their builders are called exactly as before. `--wan-decode` and `videogen_wan_decode` do
