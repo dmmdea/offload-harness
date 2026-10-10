@@ -110,11 +110,48 @@ func setStr(p map[string]any, k string, to map[string]any) {
 	}
 }
 
+// posInt reads a positive integer parameter EXACTLY. An integer a door handed over (int, int64, a json.Number, a
+// number in a string) is read as the integer it is, not through a float64: a seed above 2^53 (a 64-bit seed from a
+// bench that keys on it) lost its low bits there, and a seed that is not the one asked for is not the render
+// asked for. A float64 (a JSON number decoded into `any`) can only be read as one.
+func posInt(p map[string]any, k string) (int, bool) {
+	switch v := p[k].(type) {
+	case int:
+		return v, v > 0
+	case int64:
+		return int(v), v > 0
+	case json.Number:
+		if n, err := v.Int64(); err == nil {
+			return int(n), n > 0
+		}
+	case string:
+		if n, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64); err == nil {
+			return int(n), n > 0
+		}
+	}
+	if f, ok := num(p, k); ok && f > 0 {
+		return int(f), true
+	}
+	return 0, false
+}
+
 // setPos copies a positive integer parameter (the builders drop zero and negative values).
 func setPos(p map[string]any, k string, to map[string]any) {
-	if f, ok := num(p, k); ok && f > 0 {
-		to[k] = int(f)
+	if n, ok := posInt(p, k); ok {
+		to[k] = n
 	}
+}
+
+// refineOff reports an EXPLICIT refine=false, however a door spelled it (the pipeline's own reading,
+// pipeline.refineExplicitlyOff): absent or true is the node's own refiner setting.
+func refineOff(p map[string]any) bool {
+	switch v := p["refine"].(type) {
+	case bool:
+		return !v
+	case string:
+		return strings.EqualFold(strings.TrimSpace(v), "false")
+	}
+	return false
 }
 
 // setReserve carries reserve_vram as the number the node's video, animate and audio builders decode.
@@ -139,10 +176,12 @@ func plan(req core.Request) (planned, error) {
 		if req.Input == "" {
 			return planned{}, &contractError{"generate_image: prompt required"}
 		}
-		if b, ok := p["refine"].(bool); ok && !b {
-			return planned{}, &contractError{"refine=false is not carried by the fleet image-gen task (the node applies its own refiner setting); render it with route local, or drop refine"}
-		}
 		out["prompt"] = req.Input
+		// refine=false travels (ADR 0082). A node that does not carry it (health refine_honoured) is a named miss in
+		// pickNode and in the overflow placer, never one that renders with its refiner anyway.
+		if refineOff(p) {
+			out["refine"] = false
+		}
 		for _, k := range []string{"negative", "family"} {
 			setStr(p, k, out)
 		}

@@ -78,6 +78,9 @@ type Server struct {
 	// runHook is the seam the media doors run a request through: nil (production) is p.Run;
 	// tests inject one to see exactly what a door hands the pipeline.
 	runHook func(context.Context, core.Request) core.Result
+	// laneHook is the seam the lane question (core.LaneProber) is answered through: nil (production) is the pipeline's
+	// MediaLaneFree, or "free" when there is no pipeline; tests inject one to see that the question reaches the pipeline.
+	laneHook func(context.Context, core.Request) core.LaneVerdict
 	// localAgent is the LOCAL execution seam shared by agent_delegate and offload_ask:
 	// nil (production)
 	// resolves to p.RunAgentContract at call time; tests inject a fake so the
@@ -252,6 +255,21 @@ func (r runTaskAs) BeginRemote(req core.Request, route string) core.RemoteAttrib
 }
 
 var _ core.RemoteAttributor = runTaskAs{}
+
+// MediaLaneFree makes the runner the lane prober mediaremote asks before it sends a busy image call to an idle node of the
+// fleet (ADR 0082): the server's pipeline answers it, read-only. A server built without a pipeline (the test seam) has no
+// lane to ask about, and reads as free: the call goes through runTask as it always did.
+func (r runTaskAs) MediaLaneFree(ctx context.Context, req core.Request) core.LaneVerdict {
+	if r.s.laneHook != nil {
+		return r.s.laneHook(ctx, req)
+	}
+	if r.s.p == nil {
+		return core.LaneVerdict{Free: true}
+	}
+	return r.s.p.MediaLaneFree(ctx, req)
+}
+
+var _ core.LaneProber = runTaskAs{}
 
 // withMediaPlace threads the waiter_token a queued media answer returned into the request's params,
 // so the call resumes the place in line it left (internal/gpulease/tokens.go). Absent or blank is a
@@ -1556,7 +1574,7 @@ func (s *Server) textRun(ctx context.Context, req core.Request, route string) co
 // offload_generate_video, offload_animate_character, offload_generate_audio, offload_run_graph; ADR 0077): one
 // string so the five descriptions cannot drift. The default is auto, which runs here whenever this machine
 // has the lane, so a caller that never passes it is unchanged on a render box.
-const mediaRouteSchema = `"route":{"type":"string","enum":["local","auto","remote"],"description":"where the job runs (ADR 0077): auto (default; here when this machine has the lane, derived from the files its routes load, else a fleet node from delegate_remotes; a box with no lane and no fleet runs it here and gets the lane's own deferral), remote (always a fleet node; the input files you name travel to it in a hash-checked bundle and the output is fetched back and verified against the sha256 the node published), local (always this machine). meta.node and meta.placement say where it ran. out_dir (run_graph) is where the fetched outputs land on this machine (created if missing; it is never sent to the node). Not carried to a node: refine=false, tts_voice, transformer and devices (those defer on a remote route; waiter_token resumes a place in line on THIS machine only)"},"remotes":{"type":"array","items":{"type":"string"},"description":"fleet node base URLs for this call, tailnet-only (e.g. http://node-c:18811); each must be one of delegate_remotes, so a call can narrow the fleet and never extend it. Default: delegate_remotes"}`
+const mediaRouteSchema = `"route":{"type":"string","enum":["local","auto","remote"],"description":"where the job runs (ADR 0077): auto (default; here when this machine has the lane, derived from the files its routes load, else a fleet node from delegate_remotes; a box with no lane and no fleet runs it here and gets the lane's own deferral), remote (always a fleet node; the input files you name travel to it in a hash-checked bundle and the output is fetched back and verified against the sha256 the node published), local (always this machine). meta.node and meta.placement say where it ran. out_dir (run_graph) is where the fetched outputs land on this machine (created if missing; it is never sent to the node). Not carried to a node: tts_voice, transformer and devices (those defer on a remote route). refine=false IS carried, to a node whose health says it honours it (any other node is a named miss). waiter_token resumes a place in line on THIS machine only. With a fleet configured, an auto IMAGE call whose own lane is not free goes to an idle node that renders the SAME recipe (same weight files and sizes, same sampling, strict; ADR 0082) under that node's own family name, and when none admits it waits here as before and its answer carries cluster[] saying per node why not; a call that carries a waiter_token is never moved"},"remotes":{"type":"array","items":{"type":"string"},"description":"fleet node base URLs for this call, tailnet-only (e.g. http://node-c:18811); each must be one of delegate_remotes, so a call can narrow the fleet and never extend it. Default: delegate_remotes"}`
 
 // textRouteSchema is the `route` property offload_classify and offload_extract share. Adding it
 // changed tools/list on every box (0.154.0): the default is local, so every caller that never

@@ -29,6 +29,7 @@ import (
 	"io"
 	"io/fs"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -37,6 +38,7 @@ import (
 	"regexp"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -197,10 +199,21 @@ func Run(ctx context.Context, cfg config.Config, runner Runner, req core.Request
 		return runner.Run(ctx, req)
 	}
 	if r == RouteAuto {
-		if LocalConfigured(cfg, req) || (len(cfg.DelegateRemotes) == 0 && len(remotes) == 0) {
+		noFleet := len(cfg.DelegateRemotes) == 0 && len(remotes) == 0
+		if LocalConfigured(cfg, req) || noFleet {
 			// A lane here, or no fleet to hand it to: the call is exactly the one that existed before
 			// the route did (a box with neither still gets the lane's own deferral and its reason).
-			return runner.Run(ctx, req)
+			if noFleet {
+				return runner.Run(ctx, req)
+			}
+			// A lane here AND a fleet: when the lane is not free right now and a node of the fleet that renders
+			// the same recipe stands idle, the call goes there instead of waiting (ADR 0082). Otherwise it runs
+			// here as it always did, and a deferral it ends in says what the fleet could not do for it.
+			ov := tryOverflow(ctx, cfg, runner, req, remotes)
+			if ov.placed {
+				return ov.res
+			}
+			return ov.annotate(runner.Run(ctx, req))
 		}
 	}
 	placement := "remote: forced"
@@ -316,7 +329,7 @@ func callWith(ctx context.Context, cfg config.Config, req core.Request, remotes 
 	if len(pl.inputs) > 0 {
 		route, taskForNode = "/fleet/media-job", taskMediaJob
 	}
-	base, node, err := pickNode(ctx, cfg, bases, pl.fleetTask, taskForNode, nodeRoutes(req))
+	base, node, err := pickNodeFor(ctx, cfg, bases, pl.fleetTask, taskForNode, nodeRoutes(req), needOf(req.Params))
 	if err != nil {
 		return core.Result{}, err
 	}
@@ -348,13 +361,27 @@ func callWith(ctx context.Context, cfg config.Config, req core.Request, remotes 
 		return core.Result{}, &contractError{fmt.Sprintf("the %s request cannot be encoded for the wire: %v", pl.fleetTask, err)}
 	}
 
-	// The call's one PAIR card opens here, on the node about to receive the job.
-	h.Dispatched(base, node, jobID)
+	return sendAndFetch(ctx, cfg, req, pl, base, node, route, body, jobID, start, h, false)
+}
+
+// sendAndFetch posts body to route on base, waits for the node's job and fetches its outputs: everything a call does
+// once its node is chosen. cardAfterAccept says when the call's PAIR card opens: false (every call that always went
+// to a node) opens it before the POST, on the node about to receive the job; true (a call placed by overflow) opens
+// it only once the node has ACCEPTED the job, so a node that refuses the POST leaves no card behind and the card is
+// the accepting node's alone (ADR 0082).
+func sendAndFetch(ctx context.Context, cfg config.Config, req core.Request, pl planned, base, node, route string, body []byte, jobID string, start time.Time, h core.RemoteAttribution, cardAfterAccept bool) (core.Result, error) {
+	if !cardAfterAccept {
+		// The call's one PAIR card opens here, on the node about to receive the job.
+		h.Dispatched(base, node, jobID)
+	}
 	if err := post(ctx, cfg, base, route, body); err != nil {
 		if be := budgetEnded(ctx, phaseSending, node, jobID, err); be != nil {
 			return core.Result{}, be
 		}
 		return core.Result{}, err
+	}
+	if cardAfterAccept {
+		h.Dispatched(base, node, jobID)
 	}
 	res, data, err := wait(ctx, cfg, base, jobID, h)
 	if err != nil {
@@ -557,6 +584,12 @@ func contains(xs []string, x string) bool {
 // hold a TEXT lease (it would answer 503 anyway). Among them a node with no held lease ranks first, then
 // the shortest queue (queued plus running), then config order. Every miss is named in the error.
 func pickNode(ctx context.Context, cfg config.Config, bases []string, task, doorTask string, routes []string) (base, node string, err error) {
+	return pickNodeFor(ctx, cfg, bases, task, doorTask, routes, need{})
+}
+
+// pickNodeFor is pickNode for a call that asks something more of the node (need): an image job sent with refine=false
+// needs a node that carries it, and a node that does not is a named miss.
+func pickNodeFor(ctx context.Context, cfg config.Config, bases []string, task, doorTask string, routes []string, n need) (base, node string, err error) {
 	type cand struct {
 		base, node string
 		held       bool
@@ -592,6 +625,10 @@ func pickNode(ctx context.Context, cfg config.Config, bases []string, task, door
 		}
 		if v.LeasedText {
 			misses = append(misses, fmt.Sprintf("%s: a text lease holds its card", who))
+			continue
+		}
+		if n.refineOff && task == taskImage && !v.RefineHonoured {
+			misses = append(misses, fmt.Sprintf("%s: does not honour refine=false (an older harness would refine the prompt anyway)", who))
 			continue
 		}
 		id := v.NodeID
@@ -641,6 +678,21 @@ func stateOf(v delegate.NodeView, routes []string) string {
 	return strings.Join(parts, " / ")
 }
 
+// postError is a node's refusal of the POST itself, or the POST failing to reach it: a placementError that also says
+// what happened, so the overflow placer can tell a node that never took the job (a refused dial, a 503, a 429, a 412)
+// from one that may hold it (a transport failure after the request was sent). Every other reader sees the
+// placementError it wraps.
+type postError struct {
+	*placementError
+	// status is the HTTP status the node answered (0: no answer), retryAfter its Retry-After.
+	status     int
+	retryAfter time.Duration
+	// neverReached: the connection was never made, so nothing was sent.
+	neverReached bool
+}
+
+func (e *postError) Unwrap() error { return e.placementError }
+
 func post(ctx context.Context, cfg config.Config, base, route string, body []byte) error {
 	url := base + route
 	dctx, cancel := context.WithTimeout(ctx, dispatchTimeout)
@@ -656,7 +708,11 @@ func post(ctx context.Context, cfg config.Config, base, route string, body []byt
 	pairworkloads.WireHeadersFor(cfg, hreq.Header)
 	resp, err := HTTPClient.Do(hreq)
 	if err != nil {
-		return &placementError{core.DeferClassInfrastructure, rosterprobe.Scrub(base, fmt.Errorf("dispatch %s: %w", url, err))}
+		// A dial that failed never reached the node: nothing was sent, so the call may be placed elsewhere. Any other
+		// transport failure may have left the job with the node.
+		var op *net.OpError
+		dial := errors.As(err, &op) && op.Op == "dial"
+		return &postError{placementError: &placementError{core.DeferClassInfrastructure, rosterprobe.Scrub(base, fmt.Errorf("dispatch %s: %w", url, err))}, neverReached: dial}
 	}
 	rb, _ := io.ReadAll(io.LimitReader(resp.Body, maxBody))
 	resp.Body.Close()
@@ -670,7 +726,11 @@ func post(ctx context.Context, cfg config.Config, base, route string, body []byt
 		case http.StatusUnauthorized, http.StatusForbidden:
 			class = core.DeferClassConfig
 		}
-		return &placementError{class, rosterprobe.Scrub(base, fmt.Errorf("dispatch %s: status %d: %s", url, resp.StatusCode, truncate(rb)))}
+		retry := time.Duration(0)
+		if secs, perr := strconv.Atoi(strings.TrimSpace(resp.Header.Get("Retry-After"))); perr == nil && secs > 0 {
+			retry = time.Duration(secs) * time.Second
+		}
+		return &postError{placementError: &placementError{class, rosterprobe.Scrub(base, fmt.Errorf("dispatch %s: status %d: %s", url, resp.StatusCode, truncate(rb)))}, status: resp.StatusCode, retryAfter: retry}
 	}
 	// The node accepted the job: whatever the negative cache holds against it is out of date.
 	rosterprobe.Default.Forget(base)
