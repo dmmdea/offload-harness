@@ -107,3 +107,34 @@ func TestConcurrentCallsDoNotStackOnOneNode(t *testing.T) {
 	}
 	placer.release(n.srv.URL)
 }
+
+// The only node bounces the call (it accepted the job, another job holds its card) and nothing else admits, so the call
+// runs here. The bounced attempt left exactly one card, closed quiet (it ran nothing), and NO asker ledger row: the
+// pipeline's own run writes the call's row, and a remote attempt that held nothing must not write a second one.
+func TestBounceThenNothingAdmitsLeavesOneQuietCardAndNoAskerRow(t *testing.T) {
+	a := startImageNode(t, "node-a", "hidream-o1", map[string]string{"qwen-image-2.1": block(int8Ckpt, "")},
+		nodeOpts{deferAs: "gpu busy: card(s) held by a media-class lease", deferClass: core.ErrClassGPUBusy})
+	cfg := overflowClient(t, "krea2", map[string]string{"qwen-image-2.1-fast": block(int8Ckpt, "")}, a)
+	cfg.PairWorkloadsEnabled = true
+	rig := newPairRig(t, true, "node-a")
+	lr := &laneRunner{verdict: heldLane(), rig: rig, local: queuedLocal()}
+
+	res := Run(context.Background(), cfg, lr, overflowReq(t, "qwen-image-2.1-fast", nil), "auto", nil)
+	if probes, runs := lr.counts(); probes != 1 || runs != 1 {
+		t.Fatalf("nothing else admits, so the call runs here once: probes %d runs %d", probes, runs)
+	}
+	row, ok := rowFor(clusterOf(t, res), "node-a")
+	if !ok || row.State != "bounced" || !strings.Contains(row.Why, "passed it back") {
+		t.Fatalf("the answer says the node had the call and passed it back: %+v", row)
+	}
+	cards := rig.cards() // fails unless every frame belongs to ONE card
+	if cards["queued"] == nil || cards["completed"] == nil || cards["failed"] != nil || cards["completed"]["startedAt"] != nil {
+		t.Errorf("the bounced node's card closes quiet, never started: %v", cards)
+	}
+	if rows := rig.rows(); len(rows) != 0 {
+		t.Errorf("a remote attempt that held nothing writes no asker row: %+v", rows)
+	}
+	if got := len(a.posts()); got != 1 {
+		t.Errorf("the node was sent the call once: %d", got)
+	}
+}

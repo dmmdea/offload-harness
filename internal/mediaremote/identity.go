@@ -22,8 +22,9 @@ type localID struct {
 	name   string
 	recipe mediacap.Recipe
 	// others is the recipe of every other image family this machine binds, by name: a node that misses the family may
-	// match another of them, and the answer then says which to name.
-	others map[string]mediacap.Recipe
+	// match another of them, and the answer then says which to name. It stats each family's weight files, so it is read
+	// only when a node misses (once per call), never on the path of a match.
+	others func() map[string]mediacap.Recipe
 }
 
 // localIdentity resolves family on this machine, the way the pipeline resolves it ("" or the default binding's own
@@ -45,17 +46,27 @@ func localIdentity(cfg config.Config, family string) (localID, bool, string) {
 	if missing := r.Missing(); len(missing) > 0 {
 		return localID{}, false, "this machine is missing " + strings.Join(missing, ", ")
 	}
-	id := localID{name: strings.TrimSpace(family), recipe: r, others: map[string]mediacap.Recipe{}}
-	for _, fi := range cfg.ImageFamilies() {
-		o, _, oerr := cfg.ResolveImageFamily(fi.Name)
-		if oerr != nil {
-			continue
+	var (
+		memo map[string]mediacap.Recipe
+		done bool
+	)
+	others := func() map[string]mediacap.Recipe {
+		if done {
+			return memo
 		}
-		if or, ok := mediacap.ImageRecipe(o, fi, mediacap.ModelRoots(o.ComfyDir), nil); ok && len(or.Missing()) == 0 {
-			id.others[fi.Name] = or
+		memo, done = map[string]mediacap.Recipe{}, true
+		for _, fi := range cfg.ImageFamilies() {
+			o, _, oerr := cfg.ResolveImageFamily(fi.Name)
+			if oerr != nil {
+				continue
+			}
+			if or, ok := mediacap.ImageRecipe(o, fi, mediacap.ModelRoots(o.ComfyDir), nil); ok && len(or.Missing()) == 0 {
+				memo[fi.Name] = or
+			}
 		}
+		return memo
 	}
-	return id, true, ""
+	return localID{name: strings.TrimSpace(family), recipe: r, others: others}, true, ""
 }
 
 // need is what one call asks of a node beyond the recipe.
@@ -160,8 +171,9 @@ func closest(local localID, v delegate.NodeView) (nodeMatch, bool) {
 // alternative names a family of this machine that DOES match one of the node's, so the caller can ask for that build
 // knowingly: "send family=<ours> to use its <theirs>".
 func alternative(local localID, v delegate.NodeView) string {
-	names := make([]string, 0, len(local.others))
-	for name := range local.others {
+	others := local.others()
+	names := make([]string, 0, len(others))
+	for name := range others {
 		names = append(names, name)
 	}
 	sort.Strings(names)
@@ -170,7 +182,7 @@ func alternative(local localID, v delegate.NodeView) string {
 			continue
 		}
 		for _, row := range v.ImageRecipes {
-			if row.Digest == local.others[name].Digest() {
+			if row.Digest == others[name].Digest() {
 				return fmt.Sprintf("send family=%s to use its %s", name, familyLabel(row))
 			}
 		}

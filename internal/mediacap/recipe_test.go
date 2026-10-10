@@ -1,9 +1,11 @@
 package mediacap
 
-// What an image family IS (recipe.go). The fixtures are the image blocks of three nodes as they were read on
-// 2026-10-10, with the machines reduced to node letters: node A is the workstation that submits heavy media, node B
-// the headless node that is the first overflow target, node C the editor node that is the second. Sizes are
-// synthetic and equal for equal names (a copy of a file is the same file); a test that needs a different size says so.
+// What an image family IS (recipe.go). The fixtures reproduce the image blocks of three nodes as they stood in the
+// config text read on 2026-10-09 and 2026-10-10 (two of them from stored extracts), with the machines reduced to
+// node letters: node A is the workstation that submits heavy media, node B the headless node that is the first
+// overflow target, node C the editor node that is the second. They are config text, not a render, and the extract of
+// node B was cut inside the block this matters for. Sizes are synthetic and equal for equal names (a copy of a file is
+// the same file); a test that needs a different size says so.
 
 import (
 	"encoding/json"

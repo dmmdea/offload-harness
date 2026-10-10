@@ -49,8 +49,8 @@ Versioning: [SemVer](https://semver.org/).
 - **Not changed, and said.** One line per delegating machine, not one global order; a call resumed with its token is not moved
   (late binding is the next step); every remote job cold-starts ComfyUI; the same recipe and seed on another GPU architecture is the
   same composition, not bit-identical pixels. Nothing here was run against a live lease or a real render: the recipe match was
-  checked against the image blocks of three live nodes as read on 2026-10-10 (config text), one of them cut inside the block that
-  matters, so the first live action reads `image_recipes` on both nodes.
+  tested against fixtures that reproduce the image blocks of three live nodes as stored on 2026-10-09 and 2026-10-10 (config text),
+  one of them cut inside the block that matters, so the first live action reads `image_recipes` on both nodes.
 
 ### Added — a host-RAM guard on every GPU lease path; a kept ComfyUI instance never holds two families' weights
 

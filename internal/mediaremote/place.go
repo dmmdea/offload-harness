@@ -48,7 +48,7 @@ const maxPlacements = 3
 // Chosen transport constants, not resource numbers: a powered-off box costs one probe per step, not one per call.
 var backoffSteps = []time.Duration{5 * time.Second, 15 * time.Second, time.Minute, 5 * time.Minute}
 
-// maxCooldown caps the pause a node's Retry-After can put on it.
+// maxCooldown caps the pause a node's Retry-After can put on it (the last backoff step; chosen, not measured).
 const maxCooldown = 5 * time.Minute
 
 // Seams: tests replace the roster reader, this machine's release, the clock and the jitter; production never does.

@@ -110,13 +110,17 @@ Three facts made the obvious change unsafe as stated.
   remote job pays ComfyUI's cold start. The same recipe and seed on a different GPU architecture is the same composition, not
   bit-identical pixels. A hand-forced `route=remote` can still park beside a placed job (`concurrencyCapped` is false for media).
   A per-request `steps` needs the node's binding to have set cfg for a graph that takes both together.
-- **Measured and unmeasured.** The recipe match was checked against the image blocks of three live nodes as read on
-  2026-10-10 (their config text, not a render), and one of the three was cut inside the block it matters for; the live
-  acceptance reads `image_recipes` on both nodes first. Nothing here was run against a live lease or a real render. The backoff
-  steps, the attempt bound and the probe's 4 s card-table bound are chosen constants, not resource numbers; the host-RAM numbers
-  are the guard's and are not chosen here.
-- The delegator's local recipe is read from its own model tree on every overflowing call (three or four stats). A node's health
-  rows are 60 s old at worst, and the node re-checks the digest at admission from the files then on disk.
+- **Measured and unmeasured.** The recipe tests use fixtures that reproduce the image blocks of three live nodes as they stood
+  in config text read on 2026-10-09 and 2026-10-10 (two from stored extracts; text, not a render), and the extract of one of
+  them was cut inside the block it matters for; the live acceptance reads `image_recipes` on both nodes first. Nothing here was
+  run against a live lease or a real render. The backoff steps, the attempt bound and the probe's 4 s card-table bound are chosen
+  constants, not resource numbers; the host-RAM numbers are the guard's and are not chosen here.
+- **Cost.** The probe reads the card table once per overflowing call, bounded at 4 s: unlike the plan's first sketch it keeps no
+  60 s copy, because a table that is a minute stale can call a lane busy that the grant would serve (the display card's free
+  memory moves), and the contract forbids that. The delegator's own recipe is three or four stats of its model tree per call
+  that gets as far as the lane question; the recipes of its OTHER families are read only when a node misses, to name the family
+  that would match. A node's health rows are 60 s old at worst, and the node re-checks the digest at admission from the files
+  then on disk.
 
 ## Alternatives considered
 
