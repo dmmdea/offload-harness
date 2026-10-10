@@ -152,19 +152,60 @@ uses a `LoadVideo` node; every other video lane's `LoadImage` does not register 
 ComfyUI's execution outputs. `allOutputsByNode` (the `run_graph` lane, which addresses a specific
 node id from its own manifest rather than guessing) was not affected.
 
+**Outputs are delivered atomically (0.178.0).** Every ComfyUI runner (`comfy-render`, `-edit`,
+`-inpaint`, `-animate`, `-upscale`, `-video`, `-music`) used to fetch `/view` and call
+`writeFileSync(out, bytes)`, which opens, and so truncates, the target before it writes. On
+2026-10-09 the data drive filled to 0 GB in the middle of a 36-picture `comfy-generate --batch`:
+the writes failed with `ENOSPC`, 21 zero-byte PNGs were left at the jobs' `out` paths, and the
+batch went on to the next job. A zero-byte file passes every `exists()` check, so a skip-existing
+builder never re-renders it, and the same call destroys a previous good file at `out` whenever the
+new write fails. Now `render/atomic-out.mjs` (the Python workers: `render/atomic_out.py`) stages the
+bytes in a sibling of `out` in the same directory (`<out>.partial-<pid>-<n>`) and renames it over
+`out` only after the write finished (a POSIX rename, or MoveFileEx with replace on Windows). Any
+failure removes the staged file and rethrows the same error, so a failed render leaves **nothing at
+`out`** and a good file already there is **left untouched**. An empty payload is refused. A
+transient `EBUSY`, `EPERM` or `EACCES` on the rename (an antivirus scanner holding the staged file
+on Windows) is retried four times over 750 ms before it counts as a failure. The error names the
+output (`ENOSPC: no space left on device, write (writing <out>)`); Node's own message for a failed
+write names no path. The same helper delivers `run-graph`'s output files and its result envelope,
+`captions-groups.mjs --out`, `sdcpp-generate.mjs`'s engine output and its alpha rewrite (sd-cli
+writes a staged sibling, extension last, that is renamed after the rewrite), the cross-volume copy
+in `compose-hyperframes.mjs` (`moveInto`, which copied straight onto the destination), the music
+runner's trim and loudness swaps (one rename instead of unlink-then-rename, so a failed swap ships
+the render as it was), and the Python workers `edit_image.py` and `tts_chatterbox.py`. The igpu
+lanes below already worked this way. A runner killed mid-write (a taskkill cannot be caught) can
+leave a `*.partial-<pid>-<n>` file; it never carries the output's name. `render/output-writers.test.mjs`
+lists every direct file write left in `render/` and why it is not an output, so a new
+`writeFileSync(out, ...)` fails a test instead of the next batch.
+
 **Warm batch.** `generate-image --batch` takes a jobs file and runs N renders in one session. The
 only behavioral change is omitting ComfyUI's `--cache-none`, so the checkpoint loads once; teardown
 still happens exactly once, at the batch boundary. A failed render is recorded and the batch
-continues, one JSONL result line per job, and the script exits 0 (the Go side reads per-job
-status). The exception is a server that became unusable, where the child exits 3. Then the failed
-job and every later job get a row, the later ones with an `error` that starts `not run: ComfyUI
-became unusable at job N/M`. The batch exits non-zero and its teardown frees the card and the
-lease, instead of failing every remaining job against the same server (C-83: 3 min each, after a
-48-minute wait on the first). A failed job's `error` carries the child's own `RENDER FAILED:` reason
-rather than only `comfy-render exited N`. The inpaint batch (`comfy-inpaint.mjs --batch`) stops the
-same way on an unusable server, and still stops after `COMFY_BATCH_MAX_CONSEC_FAIL` (3) consecutive
-failures; its `_row: "aborted"` line now carries `reason`. **The default single-render path is
-unchanged.**
+continues, one JSONL result line per job. The exit code of a `--batch` runner
+(`comfy-generate.mjs`, `comfy-inpaint.mjs`) says how it ended: **0** every job rendered; **4** the
+batch ran every job and at least one failed (0.178.0; until then it exited 0 and a caller had to grep
+the log for `RENDER FAILED`: the rows with `"ok":false` in the results file name the failures, and
+the last log line gives the counts); **1** the batch could not run to the end; **2** usage. 4 is not
+3 on purpose: 3 is the child's *server unusable* code and `renderExitError` reads it as a verdict.
+The Go side (`imagegen.BatchExitJobsFailed`, pinned to `render/batch-jobs.mjs` by a test) treats 4
+with a non-empty results file as a finished batch and reads the rows, so `generate-image --batch` still
+reports per-job status in its JSON and is not an error for 35 good pictures out of 36; the results
+file format did not change. Two failures stop the batch instead of being recorded and passed over,
+because every later job would fail the same way. A server that became unusable (the child exits 3):
+the failed job and every later job get a row, the later ones with an `error` that starts `not run:
+ComfyUI became unusable at job N/M`, and the batch exits non-zero and its teardown frees the card and
+the lease, instead of failing every remaining job against the same server (C-83: 3 min each, after a
+48-minute wait on the first). A full disk (0.178.0: `ENOSPC`, `EDQUOT` or `EROFS`, read from the
+errno where the runner renders in-process and from the child's `RENDER FAILED:` line or ComfyUI's
+own `[Errno 28] No space left on device` otherwise): the same stop, with `error` starting `not run:
+the disk is full at job N/M, writing <out>`, exit 1 and the error line naming the path. It is
+deliberately batch-wide: the output directories of one batch are normally one volume. A failed job's
+`error` carries the child's own `RENDER FAILED:` reason rather than only `comfy-render exited N`.
+The inpaint batch (`comfy-inpaint.mjs --batch`) stops the same way on an unusable server and on a
+full disk (its `_row: "aborted"` line carries `reason`: `server_unusable`, `disk_full` or
+`consecutive_failures`, with the count of jobs not attempted), and still stops after
+`COMFY_BATCH_MAX_CONSEC_FAIL` (3) consecutive failures; if every job fails it keeps its "systemic"
+stop (exit 1) rather than 4. **The default single-render path is unchanged.**
 
 **Prompt refiner (opt-in).** When `imagegen_refiner_model` names a llama-swap text model,
 `generate_image` first expands the raw prompt with concrete photographic detail (lighting,
