@@ -42,7 +42,7 @@ Three facts made the obvious change unsafe as stated.
    admission reads state with (`planMedia`, `gpualloc.Claims` and `QueuedClaims`, the in-process slots, the grant's own
    host-RAM function, and the allocator itself for a call that names no card) and edits nothing inside `acquireCards`. It says
    "busy" only when something that makes the real wait-0 grant refuse is present, so it never calls busy a lane the grant would
-   have served; it may call free a lane the grant then refuses, and the call then runs locally exactly as before. The lease
+   have served; it may call free a lane the grant then refuses, and the call then runs locally as before, after the one bounded card-table read the question costs. The lease
    queue orders by arrival only on the whole-node plan, so there a call that resumes a place counts only the callers that
    arrived before that place; on the pinned and allocated plans every other caller in line counts
    (`TestMediaLaneFreeOrdersByArrivalOnlyOnTheWholeNodePlan`; the S1 trigger never asks about a call that carries a token, the

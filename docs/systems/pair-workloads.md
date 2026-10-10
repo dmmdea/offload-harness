@@ -92,7 +92,7 @@ harness uses the two it has:
 | anything else that did not succeed (a render that broke, a configuration fault such as `gpu_lease_unavailable`, a deferral with no held class) | `failed`, red | when the lane held the engine, else null | the reason |
 | the lane panicked (a remote lane included: `core.CloseOnPanic`) | `failed` | as above | `panic: <value>`, posted before the panic goes on |
 
-`pairworkloads.CardOutcome` is the one function that decides this, and every writer of a call's closing
+`pairworkloads.CardOutcome` decides this for every closing frame but a bounced attempt's (below), and every other writer of a call's closing
 frame goes through it, so the card is the same whichever of them gets there first: `Begin`'s `end`, the
 ledger row (`FromLedger`), `RemoteCall.Finish` and the node's fallback card (`nodeCard.finish`). The
 class decides, never the reason text. A **remote** card (`RemoteCall`, `nodeCard`) turns `running` when

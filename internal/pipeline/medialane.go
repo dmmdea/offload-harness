@@ -13,7 +13,7 @@ package pipeline
 //     grant's own host-RAM function, the allocator itself for a call that names no card), so it cannot say busy for a
 //     lane the grant would have granted;
 //   - it may say "free" for a lane the grant then refuses (a race, a card the allocator would skip at the grant, a
-//     table it could not read): the call then runs locally exactly as it always did, waits, and leaves its place in
+//     table it could not read): the call then runs locally as it did before this probe existed (after the probe's one bounded read), waits, and leaves its place in
 //     line. Every doubt degrades toward today's behaviour and never toward a placement made on a guess.
 //
 // TestMediaLaneFreeNeverRefusesAGrant drives the real admission over a table of lane states and holds the prober to

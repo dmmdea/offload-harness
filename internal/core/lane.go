@@ -13,7 +13,7 @@ import "context"
 // The contract is a RELAXATION, and the pipeline's differential test is its guard: Free is false only when a
 // condition that makes the real admission refuse is present, so a prober never calls a lane busy that the grant would
 // have served. It may call a lane free that the grant then refuses (a quarantined card, a race, a table it could not
-// read): the call then runs locally exactly as it always did. Every doubt degrades toward today's behaviour, never
+// read): the call then runs locally as it did before, after that one bounded read. Every doubt degrades toward today's behaviour, never
 // toward a placement made on a guess.
 
 // LaneVerdict is a prober's answer for one request.

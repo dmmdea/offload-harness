@@ -19,7 +19,7 @@
 //     runner's --reserve-vram); 0 when they do. A file whose size cannot be read takes the
 //     documented per-family size in familySizes; a family with neither is unknown, and the call
 //     takes the class default.
-//  3. The media class default: the largest of the render families THIS BOX has bound (its own
+//  3. The media class default: the largest of the ComfyUI render families THIS BOX has bound (an sd.cpp binding counts nothing; its own
 //     imagegen_*, gen_edit_*, videogen_* bindings), so a 32 GiB node is not held to the numbers of a
 //     128 GiB one; 0 when nothing is bound. It is never clamped to fit the box: a default that
 //     cannot be admitted here is refused with the reason and the way out (--ram), because quietly

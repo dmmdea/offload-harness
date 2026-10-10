@@ -108,7 +108,7 @@ Versioning: [SemVer](https://semver.org/).
 - **Where the need comes from.** `gpu reserve --ram <GiB>` (0 allowed), else the model files of a recognised render-helper call
   that do not fit the card, counted in FULL because ComfyUI's dynamic VRAM stages the whole file in host memory (a krea2 bf16
   call on a 16 GiB card is 24.48 + 8.27 GiB; a file that cannot be sized takes the documented per-family size), else the media
-  class default (the largest render family the box binds), and 0 for a text lease. The detached holder is handed the parent's
+  class default (the largest ComfyUI render family the box binds; an sd.cpp binding counts nothing), and 0 for a text lease. The detached holder is handed the parent's
   resolved number as `--ram`. The pipeline's media admission asks the same estimate per route from the binding it is about to
   render with. A host with card-scoped leases off reads no card table, so its card is unknown and the files count in full.
 - **Visibility.** `gpu status` (text and `--json`) and `offload_status`'s `gpu_lease` block carry `host_memory` (physical,
