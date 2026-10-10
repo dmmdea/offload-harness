@@ -24,15 +24,15 @@ type LeaseScope struct {
 	cardsOK bool
 }
 
-// NewLeaseScope reads the card table once (deps.Cards) for a lease holding ids (lease ids). A
-// table it cannot read is said once on warn (nil = silent) and every seat is then treated as on
-// the leased cards.
+// NewLeaseScope reads the card table once (deps.CardTable, which retries a read that ran out of
+// time) for a lease holding ids (lease ids). A table it cannot read is said once on warn (nil =
+// silent) and every seat is then treated as on the leased cards.
 func NewLeaseScope(ctx context.Context, cfg config.Config, ids []string, deps Deps, warn io.Writer) LeaseScope {
 	s := LeaseScope{cfg: cfg, ids: ids}
 	if len(ids) == 0 {
 		return s
 	}
-	cards, _, err := deps.withDefaults().Cards(ctx, cfg)
+	cards, _, err := deps.CardTable(ctx, cfg)
 	s.cards, s.cardsOK = cards, err == nil && len(cards) > 0
 	if !s.cardsOK && warn != nil {
 		// The fallback is right (every doubt fences) and silent, until now: the operator would

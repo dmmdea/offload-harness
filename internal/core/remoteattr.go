@@ -1,5 +1,7 @@
 package core
 
+import "fmt"
+
 // Remote-call attribution (PAIR routing fixes, D5/D6).
 //
 // A call the route sends to a fleet node never passes through Pipeline.Run on the asking box, so
@@ -43,6 +45,23 @@ func (NopAttribution) Dispatched(string, string, string) {}
 func (NopAttribution) Running()                          {}
 func (NopAttribution) Finish(Result)                     {}
 func (NopAttribution) Discard(string)                    {}
+
+// CloseOnPanic is deferred right after BeginRemote (defer core.CloseOnPanic(h)): a lane that panics after
+// it opened the call's card (in the dispatch, the poll or the fetch) would leave the card queued and the
+// call without its row, until the orphan sweep of a later process closes it "harness process exited". The
+// panic closes the call as a deferred one carrying the panic's text, then goes on: the door dies of it, and
+// the card says what happened. On a normal return it does nothing, because every return of a lane has
+// already finished or discarded the handle, and a second Finish is a no-op. It is the same close
+// pipeline.closeCall gives a local call. recover works only in the deferred function itself, which is why
+// this is a function to defer and not a helper to call from one.
+func CloseOnPanic(h RemoteAttribution) {
+	if r := recover(); r != nil {
+		res := Deferf(fmt.Sprintf("panic: %v", r), "", Meta{})
+		res.DeferClass = DeferClassInfrastructure
+		h.Finish(res)
+		panic(r)
+	}
+}
 
 // BeginRemote starts attribution of a remote call on runner, or returns the no-op handle when the
 // runner does not implement RemoteAttributor.

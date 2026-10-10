@@ -148,8 +148,13 @@ func routesWith(cfg config.Config, exeDir string, nodes NodeChecker) []Route {
 	// edit_unet is a ComfyUI model FILENAME, not a path, so it is reported but never
 	// stat'd — same rule as inpaint_ckpt.
 	if cfg.GenEditScript == "" || cfg.GenEditUnet == "" {
-		out = append(out, Route{Name: "edit_image_generative", Engine: "comfyui", State: NotConfigured,
-			Detail: "gen_edit_script/gen_edit_unet is unset"})
+		detail := "gen_edit_script/gen_edit_unet is unset"
+		if cfg.GenEditScript != "" && len(cfg.GenEditFamilies) > 0 {
+			// A node may edit through named families alone (ADR 0058): say so, or this
+			// row reads like a defect beside a CONFIGURED family row.
+			detail = "gen_edit_unet is unset: no default edit binding; this node edits through its named gen_edit_families (rows below)"
+		}
+		out = append(out, Route{Name: "edit_image_generative", Engine: "comfyui", State: NotConfigured, Detail: detail})
 	} else {
 		comfyUsed, nodeUsed = true, true
 		r := fileRoute("edit_image_generative", "comfyui", exeDir,

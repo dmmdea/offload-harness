@@ -236,7 +236,9 @@ func TestALateFrameFromAnAbandonedSubtaskDoesNotReachPair(t *testing.T) {
 
 // TestPairInflightFrameIsFencedOnceTheRunIsShut: the queued / running frame is behind
 // the same fence as the terminal one (the terminal frame has its own test). The
-// control shows an open run emits it.
+// control shows an open run emits it. The control's card is closed before the run is shut: a card the
+// run leaves open is closed BY shutPair (TestAnAbandonedSubtasksCardIsClosedWhenTheCallReturns), and
+// this test is about what is emitted after that, which is nothing.
 func TestPairInflightFrameIsFencedOnceTheRunIsShut(t *testing.T) {
 	pairAppDir(t)
 	c := &pairCapture{}
@@ -252,13 +254,20 @@ func TestPairInflightFrameIsFencedOnceTheRunIsShut(t *testing.T) {
 	if n := len(c.snapshot()); n != 1 {
 		t.Fatalf("control: %d frame(s) from an open run, want 1", n)
 	}
+	r.pairTerminal("agd-open", &open) // the run closes its own card, so shutPair has none to close
+	r.pair.Wait()
 	r.shutPair()
+	r.pair.Wait()
+	shut := len(c.snapshot())
+	if shut != 2 {
+		t.Fatalf("%d frame(s) from the open run and its close, want 2", shut)
+	}
 	var late PlacedResult
 	r.pairInflight(&late, "agd-late", "node-a", nil, "seat-m", "running", false)
 	r.pair.Wait()
 	waitABit()
-	if n := len(c.snapshot()); n != 1 {
-		t.Fatalf("%d frame(s) after the run was shut, want only the control's 1: the in-flight emit is not fenced", n)
+	if n := len(c.snapshot()); n != shut {
+		t.Fatalf("%d frame(s) after the run was shut, want only the %d before: the in-flight emit is not fenced", n, shut)
 	}
 }
 

@@ -9,6 +9,9 @@ package imagegen
 
 import (
 	"context"
+	"errors"
+	"os"
+	"os/exec"
 	"strconv"
 	"time"
 
@@ -450,6 +453,9 @@ type EditModel struct {
 	Family      string
 	Resolution  int
 	CacheDevice string
+	// Schedule is the 2.1 edit graph's sigma schedule ("comfy" | "turbo"; "" = the
+	// builder default, comfy). The 2511 graph never reads it.
+	Schedule string
 	Launch      ComfyLaunch
 }
 
@@ -546,6 +552,9 @@ func editArgs(out, image, prompt string, params map[string]any, m EditModel) []s
 	if m.CacheDevice != "" {
 		args = append(args, "--cache-device", m.CacheDevice)
 	}
+	if m.Schedule != "" {
+		args = append(args, "--schedule", m.Schedule)
+	}
 	if paramTrue(params["transparent"]) {
 		args = append(args, "--transparent", "1")
 	}
@@ -594,13 +603,21 @@ func batchArgs(jobsPath, resultsPath string, m Model) []string {
 	return append([]string{"--batch", jobsPath, "--results", resultsPath}, bindingArgs(m)...)
 }
 
+// BatchExitJobsFailed is the exit code render/comfy-generate.mjs --batch ends with when it
+// ran every job and at least one of them failed (BATCH_EXIT_JOBS_FAILED in
+// render/batch-jobs.mjs; TestBatchExitJobsFailedMatchesTheRunner pins the two together).
+// Before 0.178.0 that batch exited 0, so a shell caller had to grep the log for the failures.
+// The results file holds a row for every job then, exactly as after an exit 0.
+const BatchExitJobsFailed = 4
+
 // GenerateBatch renders every job in jobsPath (JSONL: {"prompt","out",...} per line)
 // through ONE warm ComfyUI session and writes one result line per job to resultsPath.
-// The results file is the gpugen success gate: the script exits 0 with a complete
-// results file even when individual renders failed (the caller reads per-job status),
-// while a crash/timeout/GPU-busy exits non-zero and errors here. So does a ComfyUI that
-// became unusable mid-batch (register C-83): the results file still holds a row per
-// job, the later ones "not run: ...", and the caller reads them on error too.
+// The results file is the gpugen success gate: the script exits 0, or BatchExitJobsFailed
+// when individual renders failed, with a complete results file (the caller reads per-job
+// status; neither is an error here), while a crash/timeout/GPU-busy exits non-zero and
+// errors here. So does a ComfyUI that became unusable mid-batch (register C-83) and a
+// full disk (0.178.0): the results file still holds a row per job, the later ones
+// "not run: ...", and the caller reads them on error too.
 // timeout bounds the WHOLE batch.
 func GenerateBatch(ctx context.Context, node, script, comfyDir, jobsPath, resultsPath string, m Model, timeout time.Duration, extraEnv ...string) error {
 	env := []string{"COMFY_DIR=" + comfyDir}
@@ -618,5 +635,26 @@ func GenerateBatch(ctx context.Context, node, script, comfyDir, jobsPath, result
 		ComfyAPI: m.Launch.API,
 		CardUUID: m.Launch.CardUUID,
 	})
+	if err != nil && batchRanToTheEnd(err, resultsPath) {
+		return nil
+	}
 	return err
+}
+
+// batchRanToTheEnd reports whether err is only the runner saying "I ran every job and some
+// failed": exit BatchExitJobsFailed with a non-empty results file (the gate Generate applies
+// only after a clean exit, so it is applied here). gpugen wraps the child's exit error with
+// %w. A timeout or a cancel is a typed RunError whatever exit code the kill produced, so it
+// never counts; neither does any other exit code, or a missing or empty results file.
+func batchRanToTheEnd(err error, resultsPath string) bool {
+	var typed *gpugen.RunError
+	if errors.As(err, &typed) {
+		return false
+	}
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) || exit.ExitCode() != BatchExitJobsFailed {
+		return false
+	}
+	fi, serr := os.Stat(resultsPath)
+	return serr == nil && fi.Size() > 0
 }

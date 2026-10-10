@@ -91,7 +91,11 @@ func TestAskRoutedDeferredSchemaMissCarriesTheFinishedAnswer(t *testing.T) {
 
 // offload_review_diff does NOT publish it: the lane's whole value is that what it
 // publishes went through the grounding and dedupe filters, and the loop's raw prose
-// has not. A defer there stays bare.
+// has not. Since F20 this exact shape (a finished answer whose re-pack had no wall) is
+// read line by line through those filters (reviewlane.Salvage), so the property that
+// must survive is no longer "the defer stays bare" but "the raw prose is never what is
+// published": here the one line is an invented file, nothing survives, and the defer
+// carries the count and no `output`.
 func TestReviewDeferredSchemaMissDoesNotPublishTheUnfilteredProse(t *testing.T) {
 	s := routeServer(t, func(context.Context, core.AgentContract, delegate.LocalOptions) (core.AgentWireResult, error) {
 		return schemaMissWire("major | nowhere.go:9 | an invented finding the filters would drop | never grounded"), nil
@@ -106,6 +110,12 @@ func TestReviewDeferredSchemaMissDoesNotPublishTheUnfilteredProse(t *testing.T) 
 	}
 	if _, has := m["output"]; has {
 		t.Fatalf("the review lane must not publish the loop's unfiltered prose: %v", m)
+	}
+	if _, has := m["schema_miss"]; has {
+		t.Fatalf("the finished-answer flag is the ask lane's, not this lane's: %v", m)
+	}
+	if m["dropped_ungrounded"] != float64(1) {
+		t.Fatalf("the salvage read the line, the filters dropped it, and the defer says so: %v", m)
 	}
 }
 

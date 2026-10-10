@@ -128,11 +128,12 @@ func TestRemoteTranscribeRefusedDispatchClosesTheCardFailed(t *testing.T) {
 	}
 }
 
-// A node that answered with a defer closes the card failed with the node's reason, and the row says
-// deferred: the node ran the job, so the card shows it started.
+// A node that answered with a defer that is NOT a held card (the job ran and broke) closes the card
+// failed with the node's reason, and the row says deferred: the node ran the job, so the card shows it
+// started.
 func TestRemoteTranscribeNodeDeferClosesTheCardFailed(t *testing.T) {
 	setBusy(t, false)
-	d := core.Deferf("gpu busy: held", "", core.Meta{ErrClass: "gpu_busy", Model: "whisper-stt"})
+	d := core.Deferf("transcribe call failed: whisper did not answer", "", core.Meta{ErrClass: "timeout", Model: "whisper-stt"})
 	node := newFakeNode(t, "node-b", sttTasks, d)
 	rig := newPairRig(t, true, hostOf(t, node))
 	res := Run(context.Background(), clientConfig(t, node), attrLocal{&localRunner{}, rig}, req(t), "remote")
@@ -140,11 +141,33 @@ func TestRemoteTranscribeNodeDeferClosesTheCardFailed(t *testing.T) {
 		t.Fatalf("Run: %+v", res)
 	}
 	cards := rig.cards()
-	if cards["failed"] == nil || cards["failed"]["error"] == nil {
-		t.Fatalf("cards = %v", cards)
+	if cards["failed"] == nil || cards["failed"]["error"] != "transcribe call failed: whisper did not answer" || cards["failed"]["startedAt"] == nil || cards["completed"] != nil {
+		t.Fatalf("cards = %v, want one failed card that started, carrying the node's reason", cards)
 	}
-	if rows := rig.rows(); len(rows) != 1 || !rows[0].Deferred || rows[0].ErrClass != "gpu_busy" {
+	if rows := rig.rows(); len(rows) != 1 || !rows[0].Deferred || rows[0].ErrClass != "timeout" {
 		t.Fatalf("rows = %+v", rows)
+	}
+}
+
+// A node that answered that ANOTHER job holds its card (gpu_busy: the transcription never started) is
+// a call held back, not a failure: the card closes quiet, completed with no start and the reason in
+// `error` (PAIR has no cancelled state, pairworkloads.CardOutcome), while the asker's row still says
+// deferred with the class. The stt wire carries the whole Result back, so the class always arrives.
+func TestRemoteTranscribeNodeHeldDeferClosesTheCardQuiet(t *testing.T) {
+	setBusy(t, false)
+	d := core.Deferf("gpu busy: held", "", core.Meta{ErrClass: "gpu_busy", Model: "whisper-stt"})
+	node := newFakeNode(t, "node-b", sttTasks, d)
+	rig := newPairRig(t, true, hostOf(t, node))
+	res := Run(context.Background(), clientConfig(t, node), attrLocal{&localRunner{}, rig}, req(t), "remote")
+	if !res.Deferred || res.Meta.ErrClass != "gpu_busy" {
+		t.Fatalf("Run: %+v", res)
+	}
+	cards := rig.cards()
+	if cards["failed"] != nil || cards["completed"] == nil || cards["completed"]["error"] != "gpu busy: held" || cards["completed"]["startedAt"] != nil {
+		t.Fatalf("cards = %v, want one completed card with no start carrying the reason, and no failed frame", cards)
+	}
+	if rows := rig.rows(); len(rows) != 1 || !rows[0].Deferred || rows[0].ErrClass != "gpu_busy" || rows[0].Node == "" {
+		t.Fatalf("rows = %+v, the asker's row keeps the class", rows)
 	}
 }
 

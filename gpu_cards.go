@@ -17,23 +17,51 @@ import (
 	"time"
 
 	"github.com/dmmdea/offload-harness/internal/config"
+	"github.com/dmmdea/offload-harness/internal/gpualloc"
 	"github.com/dmmdea/offload-harness/internal/gpucards"
 	"github.com/dmmdea/offload-harness/internal/gpulease"
 	"github.com/dmmdea/offload-harness/internal/gpuprobe"
 	"github.com/dmmdea/offload-harness/internal/modelaffinity"
 )
 
-// cardTableFn reads the card table. A variable so tests do not need nvidia-smi.
-var cardTableFn = func(ctx context.Context, cfg config.Config) ([]gpuprobe.Card, string, error) {
-	cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	return gpuprobe.ReadCards(cctx, cfg.GPUComfyOrder)
-}
+// cardTableFn reads the card table, bounded only by ctx: the callers set the deadline (cardTable
+// one attempt, cardTablePatient the attempt and its retry), because a reader that added a
+// deadline of its own would cap the retry's longer one too. It IS the allocator's production
+// reader (gpualloc.ReadCards), so the rule has one definition and one run against a stand-in
+// nvidia-smi. A variable so tests do not need nvidia-smi.
+var cardTableFn = gpualloc.ReadCards
 
 // cardTable returns the cards, a warning about the declared ComfyUI order (when it was
-// rejected), and an error when nvidia-smi gave no table.
+// rejected), and an error when nvidia-smi gave no table. One attempt, five seconds: it feeds the
+// views (`gpu cards`, `gpu status`), which show "no table" and move on.
 func cardTable(ctx context.Context, cfg config.Config) ([]gpuprobe.Card, string, error) {
-	return cardTableFn(ctx, cfg)
+	first := cardReadFirst
+	if first <= 0 {
+		first = gpualloc.DefaultCardRead
+	}
+	cctx, cancel := context.WithTimeout(ctx, first)
+	defer cancel()
+	return cardTableFn(cctx, cfg)
+}
+
+// cardReadFirst and cardReadRetry are the deadlines of the card-table read: the one attempt of
+// cardTable, and the attempt and its retry in cardTablePatient (zero = gpualloc's defaults, five
+// seconds and fifteen). Variables so a test does not wait them out.
+var cardReadFirst, cardReadRetry time.Duration
+
+// cardTableDeps is the allocator's card-table reader through this package's seam.
+func cardTableDeps() gpualloc.Deps {
+	return gpualloc.Deps{Cards: cardTableFn, ReadDeadline: cardReadFirst, RetryDeadline: cardReadRetry}
+}
+
+// cardTablePatient reads the table for the callers that DECIDE something from it: a reserve or a
+// node swap that names cards (it refuses without a table), the allocator's input, and the scope
+// of a drain or an unload (without a table every seat counts as on the leased cards). A read
+// that ran out of time is made once more under a longer deadline (gpualloc.Deps.CardTable)
+// before it counts as "no table", so one slow nvidia-smi under load does not refuse an
+// operator's command or widen a fence.
+func cardTablePatient(ctx context.Context, cfg config.Config) ([]gpuprobe.Card, string, error) {
+	return cardTableDeps().CardTable(ctx, cfg)
 }
 
 // statusLeaseSection is what `gpu status --json` adds for cards: the table (empty, with a

@@ -128,6 +128,7 @@ func Run(ctx context.Context, cfg config.Config, runner Runner, req core.Request
 		// A call sent to a node is the remote lane's own: it writes its ledger row and, once a node
 		// is chosen, its one PAIR card (D5/D6).
 		h := core.BeginRemote(runner, req, r)
+		defer core.CloseOnPanic(h) // a panic in the dispatch, the poll or the fetch closes the card before the door dies of it
 		res, err := callWith(ctx, cfg, req, h)
 		if err != nil {
 			res = placementDefer(err, "remote: forced")
@@ -144,6 +145,7 @@ func Run(ctx context.Context, cfg config.Config, runner Runner, req core.Request
 		return res
 	}
 	h := core.BeginRemote(runner, req, r)
+	defer core.CloseOnPanic(h) // as above, on the auto route
 	res, err := callWith(ctx, cfg, req, h)
 	if err == nil {
 		res.Meta.Placement = "remote: local gpu busy"

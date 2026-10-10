@@ -101,6 +101,11 @@ func NormalizeDevices(in []string) ([]string, error) {
 	return out, nil
 }
 
+// DevicesConflict reports whether two device sets share a card; an empty set is the whole
+// node and conflicts with everything. It is devicesConflict for a caller outside the package
+// that describes the line (the CLI's one entry line) and must agree with it exactly.
+func DevicesConflict(a, b []string) bool { return devicesConflict(a, b) }
+
 // devicesConflict is the conflict rule: either side whole-node (empty), or an
 // intersection.
 func devicesConflict(a, b []string) bool {

@@ -240,7 +240,7 @@ render through **one warm ComfyUI session** — the checkpoint loads once instea
 image; the zero-always-warm teardown (free VRAM, kill the spawned ComfyUI, release the GPU
 lock) runs at the **batch boundary**, however the batch ends. Measured on the 16GB box:
 first job ~32s (absorbs the checkpoint load), warm jobs ~22s. A failed job is recorded in
-its result item and does not abort the rest, unless ComfyUI itself became unusable (it stopped answering, or a CUDA fault left it answering but unable to run a prompt): the batch then stops at that job, the jobs after it fail with an error that starts `not run: ComfyUI became unusable at job N/M`, and the command exits non-zero (register C-83, 0.158.1). Single (unbatched) renders keep the zero-warm
+its result item and does not abort the rest, unless ComfyUI itself became unusable (it stopped answering, or a CUDA fault left it answering but unable to run a prompt): the batch then stops at that job, the jobs after it fail with an error that starts `not run: ComfyUI became unusable at job N/M`, and the command exits non-zero (register C-83, 0.158.1). A full output disk (`ENOSPC`, `EDQUOT`, `EROFS`) stops it the same way (0.178.0): the jobs after it fail with `not run: the disk is full at job N/M, writing <path>` and the command exits non-zero. Every picture is written atomically, to a staged file renamed into place: a failed render leaves nothing at its `out` path (before 0.178.0 a full disk left zero-byte PNGs that a skip-existing script read as finished) and a good file already there is kept. The exit code says how a batch ended, whether you run `local-offload generate-image --batch jobs.jsonl` or the helpers directly (`node render/comfy-generate.mjs --batch jobs.jsonl`, `render/comfy-inpaint.mjs --batch`): `0` every job rendered, `4` it ran every job and some failed (0.178.0; the `"ok":false` rows of the results file, or of the `generate-image` JSON, name them: the JSON keeps reporting per-job status), `1` it stopped (an unusable ComfyUI, a full disk, a setup error), `2` usage. The table is in `docs/systems/media-generation.md`. Single (unbatched) renders keep the zero-warm
 default — nothing changes unless you pass `--batch`.
 
 ### Never post a graph to `:8188` directly ⛔
@@ -1081,7 +1081,9 @@ past `gpu_orphan_grace_min`), `held-overdue` (its declared window ended, its hol
 expired and says why) and `tree-orphan`
 (not produced yet) — see "Who asked for a lease" and "Terms" in docs/systems/gpu-lease.md — and an
 `activity` block with the seat's load state and in-flight count, every registered run (kind, pid, origin,
-goal excerpt, phase, step, tokens, age), a utilization/memory sample per card with the processes on them,
+goal excerpt, phase, step, tokens, age), a utilization/memory sample per card with the processes on them
+(a display card's processes that nvidia-smi cannot size, the Windows desktop, are one count per card in
+`display_card_processes_unknown`, not dozens of rows; "A display card's desktop is one count" in docs/systems/gpu-lease.md),
 and the holder's command (the wrapper form stamps its argv). Every agent loop registers itself in
 `<state root>/gpu/activity/` before admission and updates the record per step, so a drain or a status reader
 sees a run between its steps, when the engine's own gauge reads zero.
@@ -1550,7 +1552,12 @@ node ineligible for new delegated work (and its dispatch answers 503, re-placeab
 
 **A held card is a place in line (0.115.2).** `gpu reserve` QUEUES behind a current holder for `--wait` (default 8h;
 `--wait 0` fails fast) in both the wrapper and `--detach` forms, printing one line on entry and one on acquire; the holder's
-declared window is reported, never trusted — the wait runs its full length. `--unload-seat` (or `--exclusive`) stamps the
+declared window is reported, never trusted — the wait runs its full length. **A free card with a waiter already in line
+is that waiter's**: a fresh reserve never probes the card bare, with or without `--wait` — it registers first and only the
+front of the line claims, so a recipe that chains reserves back to back queues behind an earlier waiter instead of winning
+every just-freed card (`--wait 0` then fails fast naming who is ahead; a waiter for OTHER cards, a blocked text-load
+admission included, which queues on its seat's cards only, is no reason to wait, and `--cards N` takes a card nobody is
+queued for). `--unload-seat` (or `--exclusive`) stamps the
 text lease **exclusive**, and the text-load gate then keeps models off the cleared cards for the lease's length — loads ride
 a `cascade_remote_lanes` lane or wait their own budget. `offload_status` publishes the local lease under `gpu_lease` with
 `queue_with`, the exact command. The rule for every session: **never refuse or defer GPU work because a card looks busy —

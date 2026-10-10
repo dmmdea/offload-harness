@@ -267,8 +267,10 @@ func runGPUStatus(args []string) error {
 	if info.Command != "" {
 		excl += "\n  running: " + info.Command
 	}
+	// "held by a text-class lease", never "held by text": the bare class read as a text SEAT holding
+	// the card (2026-10-07, a bench's reservation taken for a model). The class labels a reservation.
 	fmt.Printf("GPU: held by %s  pid %d  epoch %d  for %s  expires %s%s\n  reason: %s\n  queue behind it: %s\n",
-		info.Class, info.PID, info.Epoch, info.Age.Round(time.Second),
+		info.Class.LeasePhrase(), info.PID, info.Epoch, info.Age.Round(time.Second),
 		info.ExpiresAt.Format(time.Kitchen), excl, info.Reason, queueHint)
 	if len(info.Devices) > 0 {
 		fmt.Printf("  cards: %s (a card-scoped lease; other cards are not fenced by it)\n", strings.Join(info.Devices, ", "))
@@ -328,7 +330,7 @@ func runGPUReserve(args []string) error {
 	class := fs.String("class", "text", "lease class: text (a measurement/bench) or media (a generation job)")
 	dur := fs.Duration("for", 45*time.Minute, "how long the card is needed; stamped as the lease's declared window")
 	reason := fs.String("reason", "", "why the card is held (shown to whoever is waiting)")
-	origin := fs.String("origin", "", "who asked for it (session/host)")
+	origin := fs.String("origin", "", "who asked for it (a label: session/host); gpu status shows it in the owner line when no session or pid owner is recorded")
 	detach := fs.Bool("detach", false, "hold the lease in a hidden background process instead of wrapping a command")
 	drain := fs.Bool("drain", false, "after taking the lease, wait until the agent seat is IDLE — no request running or waiting on the engine, no load in progress, no registered agent run — before continuing; the lease is stamped DRAINING meanwhile (new runs wait, in-flight runs complete) and exclusive only once idle; a drain that misses its deadline releases the lease and exits non-zero")
 	drainTimeout := fs.Duration("drain-timeout", 0, "how long --drain waits for in-flight work; 0 (the default) = the rest of the --wait queue budget, never under 2m — one 27B step runs 3-4 min, which is why a fixed 2m window failed twice on 2026-09-14")
@@ -422,7 +424,7 @@ func runGPUReserve(args []string) error {
 		cmdEnv = func(string) string { return "" } // a detached holder runs no command to read cards from
 	}
 	plan, perr := planReserveDevices(devFlags, cmdArgs, cmdEnv, m.CardScoped(), func() ([]gpuprobe.Card, string, error) {
-		return cardTable(context.Background(), reserveCfg)
+		return cardTablePatient(context.Background(), reserveCfg)
 	})
 	if perr != nil {
 		return perr
@@ -580,7 +582,10 @@ func runGPUReserve(args []string) error {
 	// allocated its cards pins the command to them unless the command pins itself (see
 	// confineWrapped), and the wrapper says so when a pin of its own falls outside them.
 	if plan.Explicit {
-		launchCards, _, _ := cardTable(context.Background(), cfg) // best-effort: the UUID is rebuilt without it
+		// Read through the retry: a command's own pin (a bare index it inherited) resolves to a card only with
+		// the table, and without one the wrapper REPLACES a pin it could have confirmed. The UUID of a card
+		// the lease holds is rebuilt without the table, so a table that is still unreadable costs nothing else.
+		launchCards, _, _ := cardTablePatient(context.Background(), cfg)
 		conf := confineWrapped(true, lease.Devices(), cmdArgs, os.Getenv, launchCards)
 		cmd.Env = append(cmd.Env, conf.Env...)
 		if conf.Note != "" {
@@ -649,44 +654,102 @@ func runGPUReserve(args []string) error {
 // ADR 0018. A reservation is a place in line, and the line is printed ONCE on entry
 // (who holds it, why, until when) and once on exit; a poll line per second would be
 // a notification loop in the session that wrapped this.
+//
+// THE SECOND DEFECT (register D-1xx-3, 2026-10-09): the place in line was taken only
+// AFTER a bare TryAcquire had failed, so a card freed in the window between a release
+// and the front waiter's next poll tick went to whichever fresh reserve was launched
+// in it, ahead of everyone registered. A recipe that chains reserves back to back
+// (its next `gpu reserve` starts the instant the previous one returns) won that race
+// every batch: on the reference 3-card box it took card 2 as epochs 1320, 1321 and
+// 1322 while a text waiter registered for 1h26m sat front of queue the whole time,
+// and its log never printed "queued behind". A fresh reserve now never probes bare:
+// Acquire registers before its first attempt and only the front of the line claims,
+// with or without --wait (--wait 0 is one gated attempt). The entry line comes from a
+// read-only look at the line, not from a failed probe.
 func acquireQueued(m *gpulease.Manager, class gpulease.Class, opts gpulease.Options, wait time.Duration) (*gpulease.Lease, error) {
-	lease, err := m.TryAcquire(class, opts)
-	var held *gpulease.ErrHeld
-	if err == nil || wait <= 0 || !errors.As(err, &held) {
-		if err == nil {
-			// A card that is free at once is granted here without ever reaching the queue, so the
-			// grant-time check (a request whose admission can change while it waits) is made here too.
-			if verr := m.VetGrant(lease, opts); verr != nil {
-				return nil, verr
-			}
-		}
-		return lease, heldHint(err, wait)
+	if wait < 0 {
+		wait = 0
 	}
-	fmt.Fprintf(os.Stderr, "gpu reserve: queued behind %v — waiting up to %s\n", held, wait)
+	ahead := queueLine(m, opts)
+	if ahead != "" && wait > 0 {
+		fmt.Fprintf(os.Stderr, "gpu reserve: queued behind %s — waiting up to %s\n", ahead, wait)
+	}
 	start := time.Now()
 	// WaitOut: the holder's declared window is printed above as information, never
 	// treated as a verdict — holders release before it as a rule, and a waiter that
 	// left the line on the declaration was the refusal this verb exists to end.
 	opts.Wait, opts.WaitOut = wait, true
-	lease, err = m.Acquire(class, opts)
+	lease, err := m.Acquire(class, opts)
 	if err != nil {
 		return nil, heldHint(err, wait)
 	}
-	fmt.Fprintf(os.Stderr, "gpu reserve: acquired after %s in the queue\n", time.Since(start).Round(time.Second))
+	if ahead != "" {
+		fmt.Fprintf(os.Stderr, "gpu reserve: acquired after %s in the queue\n", time.Since(start).Round(time.Second))
+	}
 	return lease, nil
+}
+
+// queueLine describes who is ahead of a request at the moment it arrives — the current
+// holder of its cards, else the oldest registered waiter that conflicts with them — or ""
+// when the line is empty or the request's device ids do not parse (Acquire then refuses
+// them itself, with the reason). Read-only: it never claims, and it serves the one entry
+// line only; the order itself is decided inside Acquire.
+func queueLine(m *gpulease.Manager, opts gpulease.Options) string {
+	devs, err := gpulease.NormalizeDevices(opts.Devices)
+	if err != nil {
+		return ""
+	}
+	if info := m.InspectFor(devs); info.Held {
+		return m.HeldError(info).Error()
+	}
+	var oldest *gpulease.Waiter
+	for _, w := range m.Waiters() {
+		if !gpulease.DevicesConflict(w.Devices, devs) {
+			continue
+		}
+		if oldest == nil || w.SinceMs < oldest.SinceMs {
+			w := w
+			oldest = &w
+		}
+	}
+	if oldest == nil {
+		return ""
+	}
+	return fmt.Sprintf("pid %d (%s, reason %q), already in line for the card", oldest.PID, oldest.Class, oldest.Reason)
 }
 
 // heldHint makes a refusal actionable: the holder's declared window is already in the
 // message, so the only missing fact is which flag turns the refusal into a wait.
 func heldHint(err error, wait time.Duration) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, gpulease.ErrStillQueued) {
+		// The card is free but someone registered earlier is ahead in line (register D-1xx-3);
+		// the error already says who, and whether this request waited at all. What it cannot
+		// say is which flag changes the outcome: none was passed (--wait 0), or the window that
+		// was passed ran out with the waiter still in front.
+		if wait <= 0 {
+			return fmt.Errorf("%w; pass --wait <duration> (default %s) to queue behind it instead of failing", err, defaultReserveWait)
+		}
+		return fmt.Errorf("%w; pass a longer --wait to keep queueing", err)
+	}
 	var held *gpulease.ErrHeld
-	if err == nil || !errors.As(err, &held) {
+	if !errors.As(err, &held) {
 		return err
 	}
 	if wait <= 0 {
 		return fmt.Errorf("%w; pass --wait <duration> (default %s) to queue behind it instead of failing", err, defaultReserveWait)
 	}
 	return fmt.Errorf("%w; not free within --wait %s — pass a longer --wait to keep queueing", err, wait)
+}
+
+// foreignHolderError is what a fail-fast detached reserve (--wait 0) reports when the lease it
+// finds is not its child's: another reservation won the card first. The holder is named as a LEASE
+// of a class, the phrase `gpu status` leads with (gpulease.Class.LeasePhrase), not as "text".
+func foreignHolderError(info gpulease.Info) error {
+	return fmt.Errorf("another holder took the GPU first: %s (pid %d, reason %q)",
+		info.Class.LeasePhrase(), info.PID, info.Reason)
 }
 
 // detachHolder spawns a HIDDEN child that owns the lease, so the lease's holder pid is
@@ -763,7 +826,7 @@ func detachHolder(fs *flag.FlagSet, class string, dur, wait time.Duration, opts 
 		select {
 		case werr := <-childDone:
 			childProc = nil // nothing left to reap
-			return 0, fmt.Errorf("detached holder (pid %d) gave up before taking the lease: %v; its output is at %s", childPID, werr, errLog)
+			return 0, detachGaveUpError(childPID, werr, errLog)
 		default:
 		}
 		// With card-scoped leases several are live at once, so "the" holder is not the
@@ -788,8 +851,7 @@ func detachHolder(fs *flag.FlagSet, class string, dur, wait time.Duration, opts 
 		// exit (above) be the verdict when the line does not move in time.
 		if info.Held && info.PID != childPID {
 			if wait <= 0 {
-				return 0, fmt.Errorf("another holder took the GPU first: %s (pid %d, reason %q)",
-					info.Class, info.PID, info.Reason)
+				return 0, foreignHolderError(info)
 			}
 			if queuedBehind != info.PID {
 				queuedBehind = info.PID
@@ -822,6 +884,44 @@ func detachHolder(fs *flag.FlagSet, class string, dur, wait time.Duration, opts 
 		time.Sleep(150 * time.Millisecond)
 	}
 	return 0, fmt.Errorf("detached holder (pid %d) did not take the lease within %s; its output is at %s", childPID, (10*time.Second + wait).Round(time.Second), errLog)
+}
+
+// detachGaveUpError is the parent's answer when the hidden holder exited before it took the
+// lease: the exit status, the holder's own last words (childReason) and where the rest is.
+func detachGaveUpError(childPID int, werr error, errLog string) error {
+	return fmt.Errorf("detached holder (pid %d) gave up before taking the lease: %v%s; its full output is at %s", childPID, werr, childReason(errLog), errLog)
+}
+
+// childReasonMax bounds the detached holder's last words as the parent repeats them: an error
+// line is a sentence or two, and the log is still named for the rest.
+const childReasonMax = 600
+
+// childReason is the detached holder's own last words, read from the stderr the parent
+// captured for it: the error it exited with (main prints it as "error: ..."). It carries what
+// the parent cannot know, chiefly why the line did not move: who was ahead, and the flag a
+// foreground reserve would have named (`--wait` on a free card with a waiter in front). Without
+// it the parent reported only "gave up ... its output is at <temp log>" and the one sentence the
+// operator needed sat in a temp file. It returns "; <words>" so the caller's message reads whole,
+// or "" when the log is unreadable or empty.
+func childReason(errLog string) string {
+	b, err := os.ReadFile(errLog)
+	if err != nil {
+		return ""
+	}
+	last := ""
+	for _, line := range strings.Split(string(b), "\n") {
+		if l := strings.TrimSpace(line); l != "" {
+			last = l
+		}
+	}
+	last = strings.TrimSpace(strings.TrimPrefix(last, "error:"))
+	if last == "" {
+		return ""
+	}
+	if r := []rune(last); len(r) > childReasonMax {
+		last = string(r[:childReasonMax]) + "..."
+	}
+	return "; " + last
 }
 
 // holdArgs is the argv of the detached holder (`gpu hold ...`). A named card set travels as
@@ -910,6 +1010,9 @@ func runGPUHold(args []string) error {
 			os.Stderr, time.Sleep, time.Now)
 	} else {
 		lease, err = m.Acquire(gpulease.Class(*class), holdOpts)
+		// This process's stderr is what the parent reads back when the holder gives up
+		// (childReason), so the refusal carries the same hint the foreground verb prints.
+		err = heldHint(err, *wait)
 	}
 	if err != nil {
 		return err

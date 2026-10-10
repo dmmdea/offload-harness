@@ -4,9 +4,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"reflect"
+	"runtime"
+	"sort"
 	"testing"
 
 	"github.com/dmmdea/offload-harness/internal/config"
+	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/ledger"
 )
 
@@ -59,7 +63,7 @@ func TestBeginQueuedThenWorkingThenRowCloses(t *testing.T) {
 	if err := l.Record(ledger.Entry{Task: "animate_character", ModelTier: "wan2.2-animate", LatencyMs: 5000}); err != nil {
 		t.Fatal(err)
 	}
-	end(false, "")
+	end(core.Result{OK: true})
 	e.Wait()
 	if c.count() != 3 {
 		t.Fatalf("frames = %d, want 3 (the row closes the card; End adds nothing)", c.count())
@@ -81,7 +85,7 @@ func TestEndClosesUnstartedCardWithoutRow(t *testing.T) {
 	e := New(Config{Enabled: true, Endpoint: srv.URL, AppDir: writePairAppDir(t)})
 
 	_, working, end := e.Begin("transcribe", "cli:transcribe")
-	end(true, "whisper unreachable")
+	end(core.Deferf("whisper unreachable", "", core.Meta{}))
 	working() // after the close: nothing
 	e.Wait()
 	byM := methodsOf(c)
@@ -93,10 +97,40 @@ func TestEndClosesUnstartedCardWithoutRow(t *testing.T) {
 		failed["error"] != "whisper unreachable" || failed["startedAt"] != nil {
 		t.Fatalf("End must fail the same card with no start: %v", failed)
 	}
-	end(false, "")
+	end(core.Result{OK: true})
 	e.Wait()
 	if c.count() != 2 {
 		t.Fatalf("a second End must send nothing, frames = %d", c.count())
+	}
+}
+
+// The first Emit of an emitter starts a sweep of the open-card register from a goroutine. With one
+// processor that goroutine runs when the caller blocks on its terminal post, so it reads the verdict the
+// caller parked a moment earlier. A short call (a deferral, a refused dispatch) must still put exactly one
+// terminal frame on the wire: three tests of three packages saw a second, identical one on a 4-vCPU CI
+// runner (2026-10-10), and any of them fails every time here without the emitter's own-post guard.
+func TestAShortCardIsClosedOnceWithOneProcessor(t *testing.T) {
+	prev := runtime.GOMAXPROCS(1)
+	t.Cleanup(func() { runtime.GOMAXPROCS(prev) })
+	app := writePairAppDir(t)
+	for i := 0; i < 10; i++ {
+		c := &capture{}
+		srv := httptest.NewServer(http.HandlerFunc(c.handler))
+		e := New(Config{Enabled: true, Endpoint: srv.URL, AppDir: app, OpenDir: t.TempDir()})
+		id, _, end := e.Begin("transcribe", "cli:transcribe")
+		end(core.Deferf("whisper unreachable", "", core.Meta{}))
+		e.Wait()
+		srv.Close()
+		var got []string
+		for j := 0; j < c.count(); j++ {
+			if c.info(j)["id"] == id {
+				got = append(got, c.method(j).(string))
+			}
+		}
+		sort.Strings(got)
+		if want := []string{"workload:errored", "workload:submitted"}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("round %d: frames of the card = %v, want %v", i, got, want)
+		}
 	}
 }
 
@@ -205,11 +239,11 @@ func TestOverlappingCallsEachRowClosesItsOwnCard(t *testing.T) {
 	if err := l.Record(ledger.Entry{Task: "transcribe", ModelTier: "model-b", LatencyMs: 1000, CallID: idB}); err != nil {
 		t.Fatal(err)
 	}
-	endB(false, "")
+	endB(core.Result{OK: true})
 	if err := l.Record(ledger.Entry{Task: "transcribe", ModelTier: "model-a", LatencyMs: 9000, CallID: idA}); err != nil {
 		t.Fatal(err)
 	}
-	endA(false, "")
+	endA(core.Result{OK: true})
 	e.Wait()
 
 	opened, terminal := terminalsByID(c)
@@ -255,7 +289,7 @@ func TestRowWithUnknownCallIDLeavesOpenCardsAlone(t *testing.T) {
 	if terminal[idA] != nil {
 		t.Fatalf("a row for another call closed card %s", idA)
 	}
-	endA(false, "")
+	endA(core.Result{OK: true})
 	e.Wait()
 	opened, terminal := terminalsByID(c)
 	if terminal[idA] == nil || !opened[idA] {

@@ -1379,6 +1379,10 @@ type runner struct {
 	// RunWith has begun draining the emitter.
 	pairMu   sync.RWMutex
 	pairShut bool
+	// pairOpen is the run's account of the cards it opened (notePair), which shutPair settles:
+	// a card still open when the run ends belongs to a subtask the call deadline abandoned.
+	pairOpenMu sync.Mutex
+	pairOpen   map[string]*pairCard
 	// pairLate makes the "a late PAIR frame was dropped" line once per run.
 	pairLate sync.Once
 	// lastJob is, per subtask index, the job id of the attempt most recently started

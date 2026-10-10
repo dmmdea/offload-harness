@@ -274,9 +274,11 @@ func pickAutoCards(plan devicePlan, wait time.Duration, build func() (gpulease.A
 // acquireAutoCards allocates AND claims, as one loop, for a `--cards` request: the
 // allocator reads live state over a window of seconds, so another reserve can take the card
 // it picked before this one claims it (two simultaneous `--cards 1` over free cards both
-// pick the lowest id). The claim is therefore a non-blocking acquire; when it loses, the
-// winner's claim is visible and the allocator runs again, and the request queues FIFO only
-// when the allocator itself says no qualifying set is free.
+// pick the lowest id). The claim is therefore a non-blocking, GATED acquire (a registered
+// waiter for those cards is ahead of this request, and is told so); when it loses, to a
+// claim or to such a waiter, the winner is visible and the allocator runs again, and the
+// request queues FIFO only when the allocator itself says no qualifying set is free (or the
+// retries run out, which queues on the set it last picked).
 func acquireAutoCards(m *gpulease.Manager, class gpulease.Class, opts gpulease.Options, plan devicePlan, wait time.Duration,
 	build func() (gpulease.AllocInput, error), out io.Writer, sleep func(time.Duration), now func() time.Time) (*gpulease.Lease, error) {
 	deadline := now().Add(wait)
@@ -321,13 +323,30 @@ func acquireAutoCards(m *gpulease.Manager, class gpulease.Class, opts gpulease.O
 			}
 			return lease, qerr
 		}
-		lease, err := m.TryAcquire(class, opts)
+		// One gated attempt (register D-1xx-3): a waiter registered earlier for one of these
+		// cards is ahead of this request. It is a LOCAL copy of the request's options, because
+		// this loop carries state from the queued branch above across iterations (opts is a
+		// by-value local) and none of it describes THIS attempt: the GrantCheck there was built
+		// for the ids that branch queued on, and Acquire (unlike the TryAcquire it replaced) runs
+		// it on a grant, so a stale one vetted a different, valid card, gave the lease back and
+		// failed the reserve with ErrGrantRefused. The set claimed here was chosen from fresh
+		// readings by the allocator a moment ago, desktop rule included, which is the vetting it
+		// needs. The arrival time (QueuedSince) is the one thing that does carry: the place a
+		// refused grant kept is this attempt's place too.
+		try := opts
+		try.Wait, try.GrantCheck = 0, nil
+		lease, err := m.Acquire(class, try)
 		var held *gpulease.ErrHeld
 		switch {
 		case err == nil:
 			return lease, nil
-		case errors.As(err, &held):
-			continue // another reserve claimed one of these first; allocate again with its claim visible
+		case errors.As(err, &held), errors.Is(err, gpulease.ErrStillQueued):
+			// Another reserve claimed one of these first, or a waiter registered for one of them is
+			// ahead of this request: allocate again with that visible (the allocator reads the
+			// line, gpualloc.QueuedClaims) rather than ending the reserve. After maxAutoClaimRetries
+			// the loop queues on the set it last picked, which with a wait is a place in line and
+			// with --wait 0 is the refusal naming who is ahead.
+			continue
 		default:
 			return nil, err
 		}
@@ -350,13 +369,23 @@ var (
 // buildAllocInput assembles the allocator's input from live state (internal/gpualloc.BuildInput):
 // the card table, the live leases, quarantine sidecars, foreign compute processes, resident seats,
 // the presence guard and host RAM, through this package's seams so a test assembles a host.
+//
+// The cards callers are queued for count as claimed too (gpualloc.QueuedClaims), the way the media
+// admission reads them: a card with a registered waiter or a held place ahead of this request is not
+// free to it, whether or not anyone holds it at this instant. Without them the allocator picks such
+// a card as "free", the gated claim is refused for the waiter ahead, and N reserves fanning out over
+// N free cards all lose to each other's momentary registrations on the lowest id.
 func buildAllocInput(ctx context.Context, m *gpulease.Manager, cfg config.Config, f reserveDeviceFlags) (gpulease.AllocInput, error) {
-	return gpualloc.BuildInput(ctx, m, cfg, gpualloc.Need{VRAMGiB: f.vramGiB, RAMGiB: f.ramGiB}, gpualloc.Deps{
-		Cards:       cardTable,
-		ForeignBusy: foreignBusyFn,
-		Resident:    residentSeatsFn,
-		HostFreeRAM: hostFreeRAMFn,
-	})
+	deps := cardTableDeps()
+	deps.ForeignBusy, deps.Resident, deps.HostFreeRAM = foreignBusyFn, residentSeatsFn, hostFreeRAMFn
+	in, err := gpualloc.BuildInput(ctx, m, cfg, gpualloc.Need{VRAMGiB: f.vramGiB, RAMGiB: f.ramGiB}, deps)
+	if err != nil {
+		return in, err
+	}
+	for id := range gpualloc.QueuedClaims(m, in.Cards, "") {
+		in.Claimed[id] = true
+	}
+	return in, nil
 }
 
 // foreignBusyByCard maps a card (lease id) to the first non-harness compute process the

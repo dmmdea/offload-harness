@@ -152,18 +152,84 @@ uses a `LoadVideo` node; every other video lane's `LoadImage` does not register 
 ComfyUI's execution outputs. `allOutputsByNode` (the `run_graph` lane, which addresses a specific
 node id from its own manifest rather than guessing) was not affected.
 
+**Outputs are delivered atomically (0.178.0).** Every ComfyUI runner (`comfy-render`, `-edit`,
+`-inpaint`, `-animate`, `-upscale`, `-video`, `-music`) used to fetch `/view` and call
+`writeFileSync(out, bytes)`, which opens, and so truncates, the target before it writes. On
+2026-10-09 the data drive filled to 0 GB in the middle of a 36-picture `comfy-generate --batch`:
+the writes failed with `ENOSPC`, 21 zero-byte PNGs were left at the jobs' `out` paths, and the
+batch went on to the next job. A zero-byte file passes every `exists()` check, so a skip-existing
+builder never re-renders it, and the same call destroys a previous good file at `out` whenever the
+new write fails. Now `render/atomic-out.mjs` (the Python workers: `render/atomic_out.py`) stages the
+bytes in a sibling of `out` in the same directory (`<out>.partial-<pid>-<n>`) and renames it over
+`out` only after the write finished (a POSIX rename, or MoveFileEx with replace on Windows). Any
+failure removes the staged file and rethrows the same error, so a failed render leaves **nothing at
+`out`** and a good file already there is **left untouched**. An empty payload is refused. A
+transient `EBUSY`, `EPERM` or `EACCES` on the rename (an antivirus scanner holding the staged file
+on Windows) is retried four times over 750 ms before it counts as a failure. The error names the
+output (`ENOSPC: no space left on device, write (writing <out>)`); Node's own message for a failed
+write names no path. The same helper delivers `run-graph`'s output files and its result envelope,
+`captions-groups.mjs --out`, `sdcpp-generate.mjs`'s engine output and its alpha rewrite (sd-cli
+writes a staged sibling, extension last, that is renamed after the rewrite), the cross-volume copy
+in `compose-hyperframes.mjs` (`moveInto`, which copied straight onto the destination), the music
+runner's trim and loudness swaps (one rename instead of unlink-then-rename, so a failed swap ships
+the render as it was), and the Python workers `edit_image.py` and `tts_chatterbox.py`. The igpu
+lanes below already worked this way. A runner killed mid-write (a taskkill cannot be caught) can
+leave a `*.partial-<pid>-<n>` file; it never carries the output's name. `render/output-writers.test.mjs`
+lists every direct file write left in `render/` and why it is not an output, so a new
+`writeFileSync(out, ...)` fails a test instead of the next batch.
+
+The Go media ops (`internal/mediaops`, behind `offload_media` and `offload_edit_image`) follow the same
+rule (`deliver.go`). ffmpeg (trim, concat, convert, mux_audio) used to be handed the output path with
+`-y`, which truncates it before the first byte: a clip that ran out of disk, or was killed at its
+timeout, was left at the output path half written. It is now pointed at a hidden staged sibling
+(`.<name>.partial-<pid>-<n>.<ext>`, the extension last because ffmpeg picks its muxer from it) and the
+sibling is renamed over the output only after an exit 0 with a non-empty file; any other ending removes
+it and leaves a previous good file untouched, with the same short retry of a rename that an antivirus
+scanner holds up. `extract_frames` extracts into a staging directory inside the destination and moves
+the frames in only when the whole run succeeded (the moves are renames within one volume, each atomic).
+An output that is also an input is refused by name, because ffmpeg's own in-place refusal can no longer
+fire on a staged name. GIMP never writes the destination: it exports to a private temp raster and the
+PIL worker, which delivers through `atomic_out.py`, makes the output. `internal/mediaops/writes_test.go`
+lists every write left in the package, and `deliver_test.go` runs the real ops against a fake engine.
+
 **Warm batch.** `generate-image --batch` takes a jobs file and runs N renders in one session. The
 only behavioral change is omitting ComfyUI's `--cache-none`, so the checkpoint loads once; teardown
 still happens exactly once, at the batch boundary. A failed render is recorded and the batch
-continues, one JSONL result line per job, and the script exits 0 (the Go side reads per-job
-status). The exception is a server that became unusable, where the child exits 3. Then the failed
-job and every later job get a row, the later ones with an `error` that starts `not run: ComfyUI
-became unusable at job N/M`. The batch exits non-zero and its teardown frees the card and the
-lease, instead of failing every remaining job against the same server (C-83: 3 min each, after a
-48-minute wait on the first). A failed job's `error` carries the child's own `RENDER FAILED:` reason
-rather than only `comfy-render exited N`. The inpaint batch (`comfy-inpaint.mjs --batch`) stops the
-same way on an unusable server, and still stops after `COMFY_BATCH_MAX_CONSEC_FAIL` (3) consecutive
-failures; its `_row: "aborted"` line now carries `reason`. **The default single-render path is
+continues, one JSONL result line per job; the results file format did not change.
+
+Exit codes of a `--batch` run (0.178.0 added the 4; until then a batch with failed jobs exited 0 and
+a caller had to grep the log for `RENDER FAILED`):
+
+| Entry point | `0` | `4` | `1` | `2` |
+|---|---|---|---|---|
+| `render/comfy-generate.mjs --batch` | every job rendered | the batch ran every job and at least one failed: the rows with `"ok":false` in the results file name them, and the last log line gives the counts | the batch could not run to the end: a setup error, an unusable ComfyUI, a full disk (the jobs not run get a `not run:` row), the GPU slot | usage, or no jobs |
+| `render/comfy-inpaint.mjs --batch` | every job rendered | the batch ran every job and at least one failed but not all | stopped: an unusable ComfyUI, a full disk, the consecutive-failure limit, or every job failing (its `_row: "aborted"` line, or the "systemic" error) | usage, or a job that would fail before rendering |
+| `local-offload generate-image --batch` | every job rendered, or the batch was deferred because a card was busy (`err_class: gpu_busy`) | the batch ran every job and at least one failed: the JSON keeps reporting per-job status (`failed`, `items[].ok`) and the stderr line gives the counts | the batch stopped (the runner's exit 1) or the command failed before any job (a bad jobs file, `--family` with `--batch`) | an unknown verb or a flag error |
+
+4 is not 3 on purpose: 3 is `comfy-render.mjs`'s own *server unusable* code for its parent, and
+`renderExitError` reads it as a verdict. `imagegen.BatchExitJobsFailed` is the Go copy of the runner's
+`BATCH_EXIT_JOBS_FAILED` (pinned to `render/batch-jobs.mjs` by a test): `GenerateBatch` treats 4 with a
+non-empty results file as a finished batch and reads the rows, so the Go door reports 35 good pictures
+out of 36 as a batch with one failed item, then ends with the same 4 itself. No other Go entry point
+runs a media batch (`RunImageBatch` is called by the CLI verb only).
+
+Two failures stop the batch instead of being recorded and passed over, because every later job would
+fail the same way. A server that became unusable (the child exits 3): the failed job and every later
+job get a row, the later ones with an `error` that starts `not run: ComfyUI became unusable at job
+N/M`, and the batch exits non-zero and its teardown frees the card and the lease, instead of failing
+every remaining job against the same server (C-83: 3 min each, after a 48-minute wait on the first). A
+full disk (0.178.0: `ENOSPC`, `EDQUOT` or `EROFS`, read from the errno where the runner renders
+in-process and from the errno token in the child's `RENDER FAILED:` line or in ComfyUI's own `[Errno
+28] No space left on device` otherwise; the name or number counts, never prose, because an exec error
+echoes the prompt and a prompt that mentions a full disk must not stop a batch): the same stop, with
+`error` starting `not run: the disk is full at job N/M, writing <out>`, exit 1 and the error line
+naming the path. It is deliberately batch-wide: the output directories of one batch are normally one
+volume. The items such a stop took are ledgered with `err_class: disk_full` (they were `other`). A
+failed job's `error` carries the child's own `RENDER FAILED:` reason rather than only `comfy-render
+exited N`. The inpaint batch (`comfy-inpaint.mjs --batch`) stops the same way on an unusable server
+and on a full disk (its `_row: "aborted"` line carries `reason`: `server_unusable`, `disk_full` or
+`consecutive_failures`, with the count of jobs not attempted), and still stops after
+`COMFY_BATCH_MAX_CONSEC_FAIL` (3) consecutive failures. **The default single-render path is
 unchanged.**
 
 **Prompt refiner (opt-in).** When `imagegen_refiner_model` names a llama-swap text model,
@@ -380,7 +446,7 @@ Bound per machine through flat config keys, so the same code serves different ha
 | Inpaint | `inpaint_ckpt`, `inpaint_vae`, `inpaint_steps/cfg/sampler/scheduler` |
 | Generative edit | `gen_edit_script`, `gen_edit_unet`, `gen_edit_preset` (`full`/`lightning8`/`lightning4`), `gen_edit_clip/vae/lora/lora_strength`, `gen_edit_steps/cfg/sampler/scheduler`, `gen_edit_megapixels` (0 = follow the source, held within 0.9-2.0), `gen_edit_timeout_sec` |
 | Upscale | `upscale_script` (shipped default `render/comfy-upscale.mjs`), `upscale_model` (ComfyUI `upscale_models/` filename; empty = `videogen_upscale_model`), `upscale_timeout_sec` (600) |
-| Video | `videogen_family` (`""`/`wan22` = Wan 2.2; `ltx25` = LTX-2.5 joint-AV), `videogen_unet_high`, `videogen_unet_low`, `videogen_text_encoder`, `videogen_upscale_model`, `videogen_wan_virtual_vram_gb` (Wan keys); `videogen_transformer`, `videogen_video_vae`, `videogen_audio_vae`, `videogen_latent_upscaler`, `videogen_fps`, `videogen_pool_vvram_gb/pool_compute/pool_donor` (LTX-2.5 keys) |
+| Video | `videogen_family` (`""`/`wan22` = Wan 2.2; `ltx25` = LTX-2.5 joint-AV), `videogen_unet_high`, `videogen_unet_low`, `videogen_text_encoder`, `videogen_upscale_model`, `videogen_wan_virtual_vram_gb`, `videogen_wan_decode` (`tiled` default; `plain`/`auto` opt-in) (Wan keys); `videogen_transformer`, `videogen_video_vae`, `videogen_audio_vae`, `videogen_latent_upscaler`, `videogen_fps`, `videogen_pool_vvram_gb/pool_compute/pool_donor` (LTX-2.5 keys) |
 | Audio | `voicegen_*`, `musicgen_script`; `tts_endpoint` / `tts_model` (default `tts-1`) / `tts_voice` / `tts_api_key` (0.113.25: an OpenAI-compatible speech SERVER for `generate_audio kind=voice` — `voice: endpoint`, or the default on a box with no `voicegen_script`; `internal/ttsclient` POSTs `/v1/audio/speech`, writes the WAV atomically, defers naming the server's words on any non-audio answer, takes no media lease because the server owns its GPU; e.g. VoiceStudio on `http://127.0.0.1:3900`) |
 | Qwen-Image-2.1 (family `qwen-image-2.1`) | `imagegen_ckpt` + `imagegen_clip` + `imagegen_vae` (all three REQUIRED — the builder has no defaults), `imagegen_schedule` (`official` default / `comfy`), `imagegen_steps/cfg` (both or neither; official 40 / 1.0); edit: `gen_edit_family: "qwen-image-2.1"`, `gen_edit_unet/clip/vae`, `gen_edit_resolution` (0 = 1024), `gen_edit_cache_device` (`auto`/`gpu`/`cpu`/`off`) |
 | Named families + license (ADR 0058) | `imagegen_families`, `gen_edit_families` (name → overlay + `license` + `commercial_use`); `imagegen_license`/`imagegen_commercial_use`, `gen_edit_license`/`gen_edit_commercial_use` (the default binding's own tag, both or neither) |
@@ -411,6 +477,90 @@ pipeline passes it as `--wan-vvram-gb`. It is not the LTX-2.5 pool key: that one
 donor card, this one parks weights in RAM. The runner also asks the running ComfyUI for every node class
 the graph names before submitting (`render/comfy-nodes.mjs`), so a missing pack is a one-line
 `MISSING_NODE` defer naming the class and pack, with nothing POSTed.
+
+**The Wan decode is per card** (`videogen_wan_decode`, default `tiled`; the pipeline passes it as
+`--wan-decode`, and a `videogen_families["wan22"].wan_decode` entry overrides it for a Wan render on a box seated
+to another family). The Wan graph used to hard-code `VAEDecodeTiled` (tile 256/64, temporal 32/8), and the default
+keeps it, so a config that never sets the key renders the graph it always did. A film session measured the
+alternative on an RTX 5060 Ti 16 GB (A/B 2026-10-03): the plain `VAEDecode` took 38 s at a 10.3 GB peak, the tiled
+decode 412 s at 3.2 GB (that A/B's tiled arm was one chunk), and the two outputs sit at 45 dB PSNR from each other.
+That A/B ran with ComfyUI dynamic VRAM on, and the figures reached this change without the clip's width, height or
+frame count, so the shape they were taken at is unrecorded. The three modes:
+
+| Mode | Graph node | Reads the card |
+|---|---|---|
+| `tiled` (default; an empty value reads the same) | `VAEDecodeTiled`, unchanged from before the key existed | no |
+| `plain` (opt-in) | `VAEDecode` | no |
+| `auto` (opt-in) | `VAEDecode` when the render card reports at least 12 GiB of VRAM, else `VAEDecodeTiled` | yes |
+
+**Why the default is `tiled`, not `auto`.** `auto` would run the plain `VAEDecode` by default on every 16 GB card, and
+no render at the 16 GB tiers' own shape (1280x720x81) was ever run with plain. ComfyUI's own estimate there is 12.0 GiB
+of a card that reports 15.9 GiB, and a second out-of-memory after ComfyUI's single tiled retry fails the whole render after sampling (the estimates behind this are worked out below). The one measurement above was taken with
+ComfyUI dynamic VRAM on and a clip of unrecorded shape, so it does not say what happens at that shape. `auto` and
+`plain` therefore stay available as an explicit opt-in (`videogen_wan_decode`, or `--wan-decode` on the runner), and the
+default flips to `auto` only after a live acceptance render at the tier shape shows a decode close to the measured 38 s and no
+`Ran out of memory when regular VAE decoding` line in the ComfyUI log.
+
+Under `auto` the runner asks the ComfyUI it submits to, once per Wan run, after it is up and before the graph is built:
+`GET /system_stats`, `devices[0].vram_total`. `devices[0]` is the primary device, the one a decode runs on (ComfyUI
+lists it first on purpose and then every MultiGPU donor, read at v0.38.0), so a job pinned to one card
+(`comfy_cuda_device`, a per-card instance) reads that card's size. The cut compares the reported **total**, not the
+free memory; a 16 GB card reports about 15.9 GiB. When
+the answer cannot be used, `auto` builds the tiled node, exactly what the graph always built: the request fails
+or times out, ComfyUI answers an HTTP error or no JSON, there is no device or no numeric `vram_total`, or the
+primary device is a CPU or MPS one, whose `vram_total` is the host's RAM and says nothing about a card. The runner
+logs the node and the reason on stderr, one `wan-decode:` line per Wan run, for example
+`wan-decode: VAEDecode (auto: the render card reports 15.9 GiB of VRAM, at least the 12.0 GiB the plain decode wants; card ...)`.
+The default `tiled` and an explicit `plain` make no request, and neither does any run that is not the Wan graph; a run
+on the default logs `wan-decode: VAEDecodeTiled (tiled decode requested)`.
+
+**What `plain` risks, and what ComfyUI does when it fails.** ComfyUI's `VAE.decode` (`comfy/sd.py`, read at v0.38.0 on
+2026-10-09) asks the card for the decode's estimated memory, runs the untiled decode inside a try/except that
+re-raises anything that is not an out-of-memory error, and on an out-of-memory one logs `Warning: Ran out of memory
+when regular VAE decoding, retrying with tiled VAE decoding.` and decodes again through `decode_tiled_3d`. That second
+attempt sits outside the try/except, so it is a second chance and not a guarantee: if it also runs out of memory the
+exception propagates and the render fails after sampling, and because the harness starts ComfyUI with `--cache-none`
+a resubmit samples again. What the retry does for the Wan 2.1 VAE this graph loads (`wan_2.1_vae.safetensors`),
+worked out from the estimator and the tile selection in that file:
+
+- **The estimate follows the frame's resolution.** `memory_used_decode` is `(2200 if latent_frames <= 4 else 7000) x
+  latent_height x latent_width x 64 x bytes_per_element`, so above 4 latent frames the clip's length drops out. At
+  2 bytes per element (ComfyUI's bf16 or fp16 VAE; the harness passes no VAE precision flag) it asks 5.2 GiB at 832x480
+  and 12.0 GiB at 1280x720, for 49, 81 or 121 frames alike.
+- **The retry tiles space, not time.** Its budget is that same estimate, capped at 80 % of the card's total memory. It
+  starts from a 256 px tile spanning the whole clip in time, shortens the time tile only while even that tile would
+  exceed the budget (its estimate is 0.85 GiB, so it never does at these shapes), then doubles the spatial tile while
+  the estimate still fits. The first retry tile is therefore 512 px, estimated at 3.2 GiB, at 832x480, but 1024 px,
+  estimated at 9.6 GiB (80 % of the 12.0 GiB attempt that just failed), at 1280x720. Whether that tile fits where the
+  whole frame did not has not been measured.
+- **Where that bites.** The three 16 GB tiers (`blackwell-16`, `ampere-16`, `volta-16`) seed 1280x720x81, the shape at
+  which the plain decode's estimate (12.0 GiB) sits closest to what such a card reports (15.9 GiB, three quarters of
+  it), so `auto` leans hardest on the retry exactly there.
+
+The caveat (ComfyUI issue 15453, from the research behind this change and not reproduced here): with dynamic VRAM the
+other loaded models are not evicted before the decode, so a card already holding weights fails the plain attempt more
+often. That is part of why `auto` sends a card under 12 GiB to the tiled node; an 8 GB card was measured the other way,
+and plain `VAEDecode` never finished there (the `blackwell-8` tier record, 2026-08-23 media roster bake). A 12 GB card
+sits on the cut and was not measured: pin `plain` or `tiled` there rather than trust `auto`. A box that opted in to
+`plain` or `auto` and whose ComfyUI log keeps printing the warning above should go back to `tiled`, the default.
+
+> **Unverified:** no render at the 16 GB tiers' own shape, 1280x720x81, was ever run with the plain decode, neither for
+> this change (it renders nothing; its tests stand ComfyUI in with a `/system_stats` stub) nor before it, and the
+> 2026-10-03 A/B is one card, with ComfyUI dynamic VRAM on, and one clip of unrecorded shape, so neither says whether
+> the plain decode fits at that shape or whether the retry above rescues it when it does not. The 12 GiB cut, and how
+> the plain attempt behaves beside resident models (issue 15453), were not measured either. `auto` decides on the card
+> alone, which is the rule it was given, while ComfyUI's estimate follows the frame's resolution; a resolution-aware
+> `auto` is a possible follow-up, not something this change does. That is why the default is `tiled` and `auto` is an
+> opt-in. The acceptance condition for flipping the default to `auto`: one live render at a 16 GB tier's own shape,
+> 1280x720x81, with `videogen_wan_decode` set to `auto`, whose decode stays close to the measured 38 s and whose ComfyUI log has no
+> `Ran out of memory when regular VAE decoding` line.
+
+**What this does not touch.** LTX 2.5 and Hunyuan 1.5 keep `VAEDecodeTiled`: they decode through other VAEs that
+nobody measured, and their builders are called exactly as before. `--wan-decode` and `videogen_wan_decode` do
+nothing for them (the pipeline passes the flag whatever the family, as it does `--wan-vvram-gb`, and their runner
+branches never read it). WAN-Animate-2 already used the plain `VAEDecode`. The effect on the tiers: none. No tier seeds
+the key, so every tier decodes `tiled` on a Wan render, exactly as before the key existed; a box opts in to `plain` or
+`auto` by setting `videogen_wan_decode` itself.
 
 **LTX-2.5** (`videogen_family: "ltx25"`) is the measured 32 GB-class video seat (2026-08-12
 three-way, bound 2026-08-14, behavior-proven 2026-08-15): the 22B distilled int8 DiT renders
@@ -624,7 +774,13 @@ Qwen-Image 2512, whose graph cannot drive it. Needs **ComfyUI ≥ v0.37.0** (the
   (`render/testdata/qwen-image-21-sigmas.golden.json`, generator beside it). Values are printed
   fixed-point because `ManualSigmas`' parser has no exponent support. `comfy` = `KSampler(euler,
   simple)` with ComfyUI's fixed model shift (0.69 at every size). ComfyUI #16447 contests which looks
-  better at 2K; the binding picks.
+  better at 2K; the binding picks. `turbo` = the Qwen-Image-2.1-Turbo checkpoint's saved 8-step list
+  (`model_index.json` `sample_sigmas`: dynamic shifting off, shift 1.0, no terminal stretch — fed through
+  `ManualSigmas` unchanged, terminal 0 appended) and refuses any step count but 8; bind it as its own named
+  family on the Turbo weights (`qwen_image_2.1_turbo_bf16` / `_int8_convrot`, 8 steps, cfg 1). The 2.1 edit
+  graph takes `gen_edit_schedule` `comfy` (default: `KSampler`) or `turbo` (the same custom-sampler wiring on
+  the cached model and the encoder's latent); it has no size-dependent `official` mode because its latent is
+  the encoder's.
 - **Transparency:** `transparent: true` wraps the prompt in the official RGBA template ("This is an
   RGBA image with transparency. … The image has alpha channel and the background is transparent.")
   and keeps the alpha channel; the default splits it off, so an ordinary prompt never hands a
@@ -941,6 +1097,7 @@ cards, so confirm that an instance is on its card by per-card memory deltas, not
 | `COMFY-INSTANCE-WARN: …` | extra args that would override the instance's pin, port or directories were dropped, or an instance with no card pin was launched |
 | `COMFY-PORT-TAKEN: …` | the instance's port is held, on an address ComfyUI will listen on, by something that is not ComfyUI; nothing was launched or killed |
 | `COMFY-PROFILE-MISMATCH: …` | a ComfyUI answers on the instance's port but is not shown to be that instance (or is on the wrong card); refused, and stopped only when the harness's own marker proves it is the harness's and its spawner is gone |
+| `COMFY-GPU-LIST-WARN: …` | `nvidia-smi -L`, which counts the cards for a Windows launch (`cudaVisibleEnv`), did not answer in time: the first line says it is being asked once more under a longer timeout, a second line that it ran out again and the launch keeps ComfyUI's Windows default of card 0 only (a pooled graph then fails validation) |
 
 ### Per-card media admission (plan P13b)
 
@@ -957,7 +1114,7 @@ is given:
 | a pooled image or video route | the cards its pool keys name, when the pool has at least two cards and the box has at most three | a lease on those cards | the default instance, **launch unchanged** (every card visible) |
 | `run-graph` with ONE declared device | that card | a lease on it | its instance, pinned by uuid |
 | `run-graph` with several declared devices, or none, sd.cpp, voice | the whole node | the whole node | the default instance (none for sd.cpp and voice) |
-| any call on a host that does not lease cards, or whose card table cannot be read | the whole node | the whole node | exactly as before this change |
+| any call on a host that does not lease cards, or whose card table cannot be read at admission (after one retry) | the whole node | the whole node | exactly as before this change, and the answer of a call that must wait says why it waits for the node ([below](#a-card-table-that-runs-out-of-time-is-not-a-refusal)) |
 
 **The allocator and the display card.** An unpinned single-card call takes the allocator's card
 (`gpu_lease`, "The allocator"): not claimed by a live lease, not promised to a caller waiting in line
@@ -1018,11 +1175,18 @@ that it is skipped by everyone (a whole-node barrier included), so a client that
 the line. A call that RESUMED a place and is now waiting for its card inside this process (the card's slot
 is held by another job here) re-asserts its place every ten seconds until it is served, hands it to its lease
 wait, or gives it up again, so a caller that is standing in its place never loses it to that grace. A place that
-was not resumed is not invented: a first-time call leaves one only when it gives up. Tokens are in `<state>/gpu/tokens`, not among the waiters (an older binary prunes any waiter
+was not resumed is not invented: a first-time call leaves one only when it gives up. The call's PAIR card closes with
+the answer, before the door replies, and quietly: `completed` with no start and the reason in `error`, never a red
+`failed` (and never "harness process exited before the job finished" over a door a client killed right after the
+reply), because a place in line is the lease queue working ([pair-workloads.md](pair-workloads.md), *A held card is
+not a failure*). Tokens are in `<state>/gpu/tokens`, not among the waiters (an older binary prunes any waiter
 whose process stopped polling); a binary that predates them does not honour them, so on a host that mixes
 versions it can take a card ahead of a token holder, which costs the holder its place and never
 exclusivity. A call that holds the whole node on such a host leaves the same kind of token. A host that
-does not lease cards keeps the `gpu busy` answer byte for byte.
+does not lease cards keeps the plain `gpu busy` answer. Both answers name the lease in the way as a **lease of a class**,
+the phrase `gpu status` leads with, never as the bare class word (`held by media` read as a media *seat* holding the
+cards): `gpu queued: card(s) <ids> held by a media-class lease ("<reason>"); your place in line is #1 ...`, and
+`gpu busy: held by a text-class lease (30s, reason "<reason>")`.
 
 **Only a door that can resume leaves a place.** A token is claimed by sending it back, which only an MCP tool
 can do (`core.Request.Resumable`, set by the MCP server and by nothing that arrives over the wire). The
@@ -1071,12 +1235,47 @@ from a worktree, with no GPU and no live lease root:
    per-process rows (Linux only: WDDM lists none), but the media path's default `ForeignBusy` reader returns
    nothing, so a Linux host that turns card-scoped leases on would hand a render a card another process is using.
    The reader lives in the root package beside the foreign-load guard; moving it into `internal/gpualloc` is
-   the fix, and it matters on a Linux host only.
+   the fix, and it matters on a Linux host only. When it moves it must stay its own time-boxed, best-effort
+   read and never become part of the card-table read: that read is the per-device query alone, and a process
+   listing joined to it would put the slowest thing `nvidia-smi` does under load on every media call's path.
 5. **"Enqueue on the node daemon's job queue" (the plan's spike): not adopted, and why.** The daemon runs media
    jobs inline in the request handler: `concurrencyCapped` is false for `image-gen`, `video-gen`, `animate`,
    `audio-gen` and `run-graph` (a parked media job would hold an execution slot and starve the agent lane), so a
    dispatch to the local daemon would wait in the same per-card slots and leases this admission already waits in
    and add no queue of its own. The place in line is the token.
+
+### A card table that runs out of time is not a refusal
+
+A card-scoped call reads the card table at admission (to plan) and again inside its allocation (the allocator's
+input, once per pick and once more at the grant-time check of a call that waited). Each read is one `nvidia-smi` exec
+of the per-device query, with no process listing, under 5 s and, when it ran out of time, once more under 15 s
+([gpu-lease.md](gpu-lease.md#reserving-cards-the-card-table-and-the-reader-audit-plan-p3)). On 2026-10-09 a session
+benchmarking image generation, with two cards running other sessions' renders, got
+`the card table: nvidia-smi: nvidia-smi: context deadline exceeded` as a `gpu_lease_unavailable` defer after 6 s,
+while the calls beside it got the ordinary queued answer: the admission read had answered, the allocation's re-read
+ran out its 5 s, and the raw error left `acquireCards`. A card-table read that fails, even after its retry, is never the
+reason a media call is refused. What the call does instead depends on where the read failed:
+
+| where the read failed | what the call does | what the answer and the log say |
+|---|---|---|
+| at admission | asks for the whole node, as it did before cards were leased | the log, on every such call; and a call that then has to wait is queued with a token whose reason reads "the card table could not be read (...), so this call asks for the whole node" |
+| inside the allocation of an unpinned call (the admission read had answered) | is placed from the newest table it did read (the admission one, at worst) with the operator's screen kept closed to it: a table it could not refresh is the one thing that could misstate the display card's free VRAM. Who holds what is the lease directory's, read fresh every time, so it still takes a free card, or queues on the cards that qualify. It does not ask nvidia-smi again for the rest of the call, so a wedged driver costs one retry per call and not one per stage | the log; and a call that waits gets the ordinary queued answer (`gpu_queued`, a token, the cards it waits for) whose reason says the table could not be re-read, how it was tried and how old the table it used was |
+| a call that named its cards (a `comfy_cuda_device` pin, a pool, a declared device) | does not read the table inside the allocation at all: nothing is left to choose, and what is taken comes from the lease directory, this process's slots and the places held in line (`gpualloc.Claims`) | nothing to say: it queues on the cards it named |
+| a call under its parent's lease (`gpu reserve --devices ... -- <cmd>`) | reads the table to pick which of the parent's cards to run on; a table that cannot be read (after the retry) sends it to the legacy path, inside the parent's lease: the default instance, with no card of its own (a healthy table binds it to one of the parent's cards) | the log, on every such call; a call that is then refused (another job in this process holds the node) carries the same words in its busy answer; a call that runs has no answer to carry them |
+
+The unload list a lease may take (`GPU_LEASE_UNLOAD_MODELS`) is scoped from the table the call already holds, not from a
+third read after the grant: which seat sits on which card needs the card list, not a fresh reading, and a read that ran
+out used to widen the list to every seat, so a render on one card emptied the seats on the others (register C-86).
+`TestAnAllocationReadTimeoutQueuesTheCallInsteadOfDeferringIt` and its neighbours in
+`internal/pipeline/mediaadmit_cardtable_test.go` pin each row; the same file pins that a degraded call places from the
+newest table it read (not the admission one), and that a caller who has gone while the read hangs is not placed at all and
+leaves no place in line. A call that names its cards still queues behind the place held for them
+(`TestACardHeldForAQueuedCallerIsNotFreeForANewcomerThatNamesIt`): that claim is the one thing keeping it from taking a card
+ahead of the caller in line, since a named plan never asks the allocator. The render helper's own card count
+(`nvidia-smi -L`, `cudaVisibleEnv`) is asked once more under a longer timeout when it ran out, for the same reason: "no
+listing" would leave ComfyUI on the Windows default of card 0 only, and a pooled graph then fails validation with no hint
+of the cause; the retry, and a second timeout together with what the launch does instead, are written to stderr
+(`COMFY-GPU-LIST-WARN`).
 
 ## iGPU media engines: video, animate, voice, music (CT-49)
 
@@ -1132,6 +1331,7 @@ The typed errors a lane can return (`meta.err_class` in parentheses; the runner 
 | `ENGINE_CRASHED` | `engine_crashed` | the engine died of SIGSEGV / SIGABRT / SIGBUS / SIGFPE / SIGTRAP: a crash, not a timeout |
 | `OUT_OF_MEMORY` | `oom` | ggml `insufficient memory`, sd.cpp `alloc compute buffer failed`, a Vulkan allocation failure, or SIGKILL on a UMA box (the OOM killer) |
 | `DEVICE_INVALID` | `device_invalid` | `audiocpp_device` is not a device index (a configuration error, not a backend refusal) |
+| a full volume (0.178.0) | `disk_full` | `ENOSPC`, `EDQUOT` or `EROFS`: the typed errno of a Go file call, or the errno name/number in a runner's output (`ENOSPC:` from Node, `[Errno 28]` from Python; `[WinError 112]` on Windows), never the prose around it, because an exec error echoes the prompt. Both classifiers (`gpugen.ClassifyErr` and the image lanes' `pipeline.classifyErr`) share `gpugen.IsDiskFull`; a batch that stopped on a full drive was recorded as `other` before |
 | a client cancel | `timeout` | the caller cancelled the run: classified like every other media lane's cancel |
 
 ### The GPU timeout envelope: GPU_RESET and the token cap
@@ -1375,6 +1575,10 @@ recorded as known offenders with their reason rather than silently skipped — a
   multi-reference edit graphs and the official sigma schedule
   ([golden fixture](../../render/testdata/qwen-image-21-sigmas.golden.json))
 - [`render/comfy-generate.mjs`](../../render/comfy-generate.mjs) — single and batch render
+- [`render/wf-wan22-i2v.mjs`](../../render/wf-wan22-i2v.mjs) /
+  [`render/comfy-video.mjs`](../../render/comfy-video.mjs) — the Wan 2.2 graph and its runner: the
+  decode mode (`chooseWanDecode` is the one rule), the `/system_stats` card read (`readRenderCard`)
+  and `buildGraphForRun`, the single path from flags to a graph
 - [`render/comfy-edit.mjs`](../../render/comfy-edit.mjs) /
   [`render/wf-qwen-image-edit.mjs`](../../render/wf-qwen-image-edit.mjs) — the generative edit
   lifecycle and its graph builder
@@ -1458,7 +1662,8 @@ type, stat cards and captions on word timings. With `webm` (VP9 `yuva420p`) or `
 `withGpuSlot`**. A media lease would make load-triggering text admissions wait
 ([ADR 0026](../architecture/decisions/0026-text-load-admissions-wait-for-the-media-lease.md)) for
 work that never touches a card. One composition runs at a time per process, on its own compose slot
-(not `mediaSlot`). A second call waits `gpu_wait_ms` and then defers `compose_busy`. On the fleet,
+(not `mediaSlot`). A second call waits `gpu_wait_ms` and then defers `compose_busy`, and the call's PAIR card closes quiet
+for it like a held GPU card ([pair-workloads.md](pair-workloads.md), *A held card is not a failure*). On the fleet,
 `compose-video` is exempt from the text concurrency cap for the same reason `accel` is.
 
 **Inputs: exactly one.**
@@ -1692,12 +1897,17 @@ it cannot be recalled: a media job cannot be withdrawn, because it is claimed to
 node's withdraw, `DELETE /fleet/jobs/{id}`, is for agent jobs only (ADR 0064), so the client sends none; a deadline that
 passes while the outputs are fetched says the render finished and the fetch ran out of time), and a transport failure an `infrastructure` defer. An input file this
 machine cannot read is `contract`; this machine's own temp directory, disk or packer failing is `infrastructure`. A defer the node itself returned (a render that
-deferred) comes back as the node sent it, with `meta.node`.
+deferred) comes back as the node sent it, with `meta.node` and the `meta.err_class` its lane filed it under (the node's
+poll carries the class beside the reason as `err_class`; a node older than that publishes none, and the caller reads an empty class).
 
 **Attribution.** A call that goes to a node is the remote lane's own, like compose, vision, text and transcription (0.165.0,
 D5-D11): it writes one asker ledger row (`node`, `node_id`, `route`, `placement`, `fleet_job_id`, `card_by_caller`) and, once a
 node is chosen, one PAIR card on that node (queued, running, terminal), and the handle is closed on every way the call can end
-(a result, a refusal, a node defer, a deadline). A call that reached no node has its row and no card. Both POSTs, the plain
+(a result, a refusal, a node defer, a deadline), with the terminal frame posted before the door answers; a node that answers
+that another job holds its card (`gpu_busy`, `gpu_queued`) closes the card quiet, not red, by the `err_class` its poll carries
+([pair-workloads.md](pair-workloads.md), *A held card is not a failure*); a node that does not publish the class leaves the
+card closed red. A call that reached no node has its row and no card, and a panic in the lane closes the card failed with the
+panic before it goes on. Both POSTs, the plain
 dispatch and the media-job, carry `X-Offload-Asker` and, only when this machine's emitter is off, `X-Offload-Pair-Card: node`.
 The local route, and an auto call that runs here, are not attributed (the pipeline writes that row).
 

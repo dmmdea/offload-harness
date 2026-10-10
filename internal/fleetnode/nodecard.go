@@ -101,21 +101,18 @@ func (c *nodeCard) running() {
 }
 
 // finish closes the card with the job's outcome: failed (with the reason) for a result that is not
-// OK or deferred, completed otherwise; model, when the run reports one, replaces the admission-time
-// guess. Once.
+// OK or deferred, completed otherwise, except a job another job's hold on the card kept from running
+// (core.CardHeld), which closes quiet like every other card of such a call (pairworkloads.CardOutcome);
+// model, when the run reports one, replaces the admission-time guess. Once.
 func (c *nodeCard) finish(res core.Result) {
 	if c == nil {
 		return
 	}
-	if res.OK && !res.Deferred {
-		c.end("completed", "", res.Meta.Model)
-		return
-	}
-	reason := res.Reason
-	if reason == "" {
-		reason = "deferred"
-	}
-	c.end("failed", reason, res.Meta.Model)
+	// started is false whatever running saw: this card turns running when the node's worker takes the
+	// job (a media job is claimed to running at admission, before its lane waits for the card), so it
+	// says nothing about whether the card was ever held; the class decides.
+	state, errText := pairworkloads.CardOutcome(res, false)
+	c.end(state, errText, res.Meta.Model)
 }
 
 // fail closes the card failed with reason (a panic, a drain that never started the job, a refused

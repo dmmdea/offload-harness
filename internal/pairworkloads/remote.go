@@ -119,20 +119,18 @@ func (c *RemoteCall) Finish(res core.Result) {
 	c.finished = true
 	failed := res.Deferred || !res.OK
 	// A node that answered ran the job, whatever the polls happened to see: a completed card with no
-	// start would read "never started".
-	if c.started == 0 && c.dispatched && res.Meta.Node != "" {
+	// start would read "never started". Except a node that answered that another job held its card
+	// (core.CardHeld): that job never ran, and "never started" is the true reading of its card.
+	if c.started == 0 && c.dispatched && res.Meta.Node != "" && !(failed && core.CardHeld(res.Meta.ErrClass)) {
 		c.started = c.created
 	}
 	var ev Event
 	card := c.dispatched
 	if card {
-		state, errText := "completed", ""
-		if failed {
-			state, errText = "failed", res.Reason
-			if errText == "" {
-				errText = "deferred"
-			}
-		}
+		// started is false whatever Running saw: a remote card turns running when the node ADMITS the
+		// job (a media job is claimed to running at admission, before its lane waits for the card), so
+		// it says nothing about whether the card was ever held. The class decides.
+		state, errText := cardOutcome(failed, res.Meta.ErrClass, res.Reason, false)
 		if res.Meta.Model != "" {
 			c.model = res.Meta.Model
 		}
@@ -165,11 +163,17 @@ func (c *RemoteCall) Finish(res core.Result) {
 		}
 	}
 	c.mu.Unlock()
-	if card {
-		c.e.Emit(ev)
-	}
+	// The row first: it is local file I/O, and the post below can take its whole bound (a PAIR on a loaded
+	// box answers late, or not at all), during which the door may be killed by a client that gave up on
+	// the call; the call's audit and savings row must not be lost to that wait. CardByCaller makes the
+	// ledger observer skip it, so recording it posts nothing.
 	if c.led != nil {
 		_ = c.led.Record(row)
+	}
+	if card {
+		// Inline: the lane returns this result to its door, which answers at once and may be killed
+		// right after (see Begin), and a close on a background goroutine dies with the process.
+		c.e.EmitSync(ev)
 	}
 }
 

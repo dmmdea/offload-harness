@@ -204,6 +204,25 @@ func TestNodeCardFailsWithTheReasonOfADeferredJob(t *testing.T) {
 	}
 }
 
+// The one deferral a card is completed over: a job that never ran because another job held the card it
+// needed (err_class gpu_busy or gpu_queued) did not fail, so its card closes quiet (PAIR has no cancelled
+// state; pairworkloads.CardOutcome), with the reason, exactly as the asker's own card for the call would.
+func TestNodeCardOfAJobHeldBackByTheCardClosesQuiet(t *testing.T) {
+	pn := newPairNode(t, true)
+	fr := &fakeRunner{fn: func(context.Context, core.Request) core.Result {
+		return core.Deferf("gpu busy: another generation job holds the card", "", core.Meta{ErrClass: core.ErrClassGPUBusy})
+	}}
+	s, _ := newTestServer(t, imageCfg(), fr, pairOpts(pn))
+	if rec := do(t, s, http.MethodPost, "/fleet/dispatch", `{"job_id":"held-1","task_type":"image-gen","payload":{"prompt":"hi"}}`, askerHeaders); rec.Code != http.StatusAccepted {
+		t.Fatalf("dispatch = %d", rec.Code)
+	}
+	pollJob(t, s, "held-1", JobError)
+	cards := pn.cards(t)
+	if cards["failed"] != nil || cards["completed"] == nil || cards["completed"]["error"] != "gpu busy: another generation job holds the card" {
+		t.Fatalf("cards = %v, want one quiet completed card carrying the reason", cards)
+	}
+}
+
 // The asker value is untrusted: it is cut to printable text of at most 64 characters before it is
 // recorded or shown.
 func TestNodeSanitizesTheAskerName(t *testing.T) {
@@ -342,6 +361,61 @@ func TestPulledJobIsAttributedLikeAPushedOne(t *testing.T) {
 	cards := pn.cards(t)
 	if len(cards) != 3 || cards["queued"]["id"] != "pulled-3" || cards["completed"]["requesterId"] != "offload-harness/fleet:node-q" {
 		t.Fatalf("cards = %v, want one queued/running/completed card for the pulled job", cards)
+	}
+}
+
+// A pulled job that fails files the lane's err_class on its record as a pushed one does, and the card
+// the node opened for it closes by the same class: a job another job's hold on the card kept from
+// running closes quiet (completed, the reason in `error`), a job that ran and broke closes failed.
+func TestPulledJobFailureCarriesTheClassOnItsRecordAndItsCard(t *testing.T) {
+	for _, tc := range []struct {
+		id, class, reason, wantCard string
+	}{
+		{"pulled-5", "gpu_busy", "gpu busy: another generation job holds the card", "completed"},
+		{"pulled-6", "timeout", "agent seat did not answer", "failed"},
+	} {
+		t.Run(tc.class, func(t *testing.T) {
+			pn := newPairNode(t, true)
+			fr := &fakeRunner{fn: func(context.Context, core.Request) core.Result {
+				return core.Deferf(tc.reason, "", core.Meta{ErrClass: tc.class})
+			}}
+			cfg := imageCfg()
+			cfg.Home = t.TempDir()
+			cfg.FleetAgentEnabled = true
+			cfg.AgentModel = "agent-seat"
+			cfg.FleetAuthToken = "tok"
+			s, jobs := newTestServer(t, cfg, fr, pairOpts(pn))
+			served := false
+			holder := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/fleet/queue/claim" {
+					if served {
+						w.WriteHeader(http.StatusNoContent)
+						return
+					}
+					served = true
+					_ = json.NewEncoder(w).Encode(fleetqueue.Job{
+						ID: tc.id, TaskType: "agent", Asker: "node-q", PairCard: core.PairCardNode,
+						Payload: json.RawMessage(`{"schema_version":1,"goal":"g","output_schema":` + agentSchemaJSON + `}`),
+					})
+					return
+				}
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer holder.Close()
+			client := &http.Client{Timeout: 5 * time.Second, Transport: netguard.SafeTransport(nil)}
+			if id, ok := s.claimOne(context.Background(), client, holder.URL, "testnode", cfg); !ok || id != tc.id {
+				t.Fatalf("claimOne = %q, %v", id, ok)
+			}
+			view := waitJobState(t, jobs, tc.id, JobError)
+			if view.Error != tc.reason || view.ErrClass != tc.class {
+				t.Fatalf("the job's record = error %q class %q, want %q and %q", view.Error, view.ErrClass, tc.reason, tc.class)
+			}
+			cards := pn.cards(t)
+			other := map[string]string{"completed": "failed", "failed": "completed"}[tc.wantCard]
+			if cards[tc.wantCard] == nil || cards[other] != nil || cards[tc.wantCard]["error"] != tc.reason {
+				t.Fatalf("cards = %v, want one %s card carrying the reason and no %s frame", cards, tc.wantCard, other)
+			}
+		})
 	}
 }
 

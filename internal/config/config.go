@@ -769,7 +769,8 @@ type Config struct {
 	// ImageGenSchedule picks the qwen-image-2.1 sigma schedule: "official" (the
 	// model repo's diffusers scheduler — dynamic mu, exponential shift,
 	// shift_terminal 0.02 — computed by the builder), "comfy" (ComfyUI's fixed model
-	// shift, KSampler) or "" (the builder default, official). Other families ignore it.
+	// shift, KSampler), "turbo" (the Qwen-Image-2.1-Turbo checkpoint's saved 8-step
+	// sigmas; steps must be 8) or "" (the builder default, official). Other families ignore it.
 	ImageGenSchedule string `json:"imagegen_schedule,omitempty"`
 	// ImageGenLicense / ImageGenCommercialUse declare the license of THIS box's default
 	// image binding (ADR 0058). When set, every generate_image result from the default
@@ -881,6 +882,11 @@ type Config struct {
 	GenEditCFG       float64 `json:"gen_edit_cfg,omitempty"`
 	GenEditSampler   string  `json:"gen_edit_sampler,omitempty"`
 	GenEditScheduler string  `json:"gen_edit_scheduler,omitempty"`
+	// GenEditSchedule picks the qwen-image-2.1 edit graph's sigma schedule: "comfy"
+	// (KSampler on ComfyUI's fixed model shift, the default) or "turbo" (the
+	// Qwen-Image-2.1-Turbo checkpoint's saved 8-step sigmas; steps must be 8). The
+	// 2511 graph ignores it.
+	GenEditSchedule string `json:"gen_edit_schedule,omitempty"`
 	// GenEditMegapixels fixes the edit's working canvas — and therefore its OUTPUT
 	// resolution, since the scaled image is what the sampler denoises. 0 (the default)
 	// means "follow the source": the runner measures the source file and targets its
@@ -1130,6 +1136,28 @@ type Config struct {
 	// ComfyUI-MultiGPU still serves a mixed-precision box). A config that never
 	// sets this key renders byte-identical to before the key existed.
 	VideoGenWanLoader string `json:"videogen_wan_loader,omitempty"`
+	// VideoGenWanDecode picks how the Wan 2.2 graph turns its latent into frames
+	// (render/wf-wan22-i2v.mjs, passed as --wan-decode): "tiled" (the default; "" reads the
+	// same) keeps the tiled VAEDecodeTiled node the graph always used, so a config that never
+	// sets the key renders exactly as before; "plain" forces the plain VAEDecode; "auto" runs
+	// it on a render card of at least 12 GiB and the tiled node below that, reading the card's
+	// size from the ComfyUI the runner submits to (GET /system_stats), and falls back to tiled
+	// when it cannot. "plain" and "auto" are an explicit opt-in. The graph used to hard-code
+	// the tiled node. Why tiled and not auto: auto would run the plain decode by default on
+	// every 16 GB card, but no render at the 16 GB tiers' own shape (1280x720x81) was ever run
+	// with plain. ComfyUI's own estimate there is 12.0 GiB of a 15.9 GiB card, its VAE.decode
+	// retries an out-of-memory plain decode tiled only once, and a second out-of-memory fails a
+	// ~70-minute render after sampling (the harness runs ComfyUI with --cache-none, so a failed
+	// decode is a failed render). The one measurement, on an RTX 5060 Ti 16 GB (A/B
+	// 2026-10-03): plain 38 s at a 10.3 GB peak against tiled 412 s at 3.2 GB (that A/B's
+	// tiled arm was one chunk), 45 dB PSNR between them, was taken with ComfyUI dynamic VRAM
+	// on and a clip of unrecorded shape. The default flips to "auto" only after a live
+	// acceptance render at the tier shape shows a ~40 s decode with no "Ran out of memory when
+	// regular VAE decoding" line in the ComfyUI log (docs/systems/media-generation.md, "The Wan
+	// decode is per card"). Only the Wan graph reads it: LTX 2.5 and Hunyuan 1.5 decode through
+	// other VAEs nobody measured and keep VAEDecodeTiled. Default "tiled" = the runner's own
+	// default (WAN_DECODE_DEFAULT; TestWanDecodeMirrorsTheBuilder keeps them equal).
+	VideoGenWanDecode string `json:"videogen_wan_decode,omitempty"`
 	// VideoGenFamily selects the I2V graph family the video route renders with:
 	// "" or "wan22" = the Wan 2.2 two-expert graph (legacy default, unchanged);
 	// "ltx25" = the LTX-2.5 22B distilled joint-audio two-pass graph (the measured
@@ -2199,6 +2227,7 @@ func Default() Config {
 		MusicGenScript:              "render/comfy-music.mjs", // B3 ACE-Step music worker; "" => music defers
 		VideoGenTimeoutSec:          1500,
 		VideoGenWanVirtualVramGB:    7, // render/wf-wan22-i2v.mjs's own default; per-card, measured per node
+		VideoGenWanDecode:           "tiled",
 		AnimateGenScript:            "render/comfy-animate.mjs",
 		AnimateGenTimeoutSec:        1800, // cold ComfyUI + one 81f Motion Transfer chunk (298.5s warm measured) + margin
 		AudioGenTimeoutSec:          720,
@@ -2780,6 +2809,10 @@ func warnImageBindingTo(c Config, w io.Writer, where string) {
 	if c.ImageGenSchedule != "" && c.ImageGenFamily != FamilyQwenImage21 {
 		fmt.Fprintf(w, "warning: %simagegen_schedule %q is set but imagegen_family is %q — only the qwen-image-2.1 graph reads a schedule; the flag is parsed and never consulted\n",
 			where, c.ImageGenSchedule, c.ImageGenFamily)
+	}
+	if c.GenEditSchedule != "" && c.GenEditFamily != FamilyQwenImage21 {
+		fmt.Fprintf(w, "warning: %sgen_edit_schedule %q is set but gen_edit_family is %q — only the qwen-image-2.1 edit graph reads a schedule; the flag is parsed and never consulted\n",
+			where, c.GenEditSchedule, c.GenEditFamily)
 	}
 	if where == "" && c.ImageGenFamily == FamilyQwenImage21 {
 		fmt.Fprintln(w, "warning: imagegen_family is qwen-image-2.1 on the DEFAULT image binding — ADR 0058 ships it only as a named imagegen_families opt-in; every un-named request on this box now renders it")

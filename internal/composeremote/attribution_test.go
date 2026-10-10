@@ -95,6 +95,59 @@ func TestRemoteComposeNodeDeferClosesTheCardFailed(t *testing.T) {
 	}
 }
 
+// The node's verdict that ANOTHER job held what the composition needed (the compose slot another
+// composition took, or the card) is a call held back, not a failure: the err_class rides the node's poll
+// back to the asker (fleetnode `err_class`), whose card closes quiet, completed with the reason in
+// `error` and no failed frame. A composition that ran and broke, with a class that is not a held one,
+// still closes failed.
+func TestRemoteComposeNodeHeldDeferClosesTheCardQuiet(t *testing.T) {
+	reason := "compose_video: busy — another composition in this process still holds the compose slot after 90s"
+	for _, tc := range []struct {
+		class  string
+		reason string
+		want   string
+	}{
+		{core.ErrClassComposeBusy, reason, "completed"},
+		{core.ErrClassGPUBusy, "gpu busy: another generation job holds the card", "completed"},
+		{"timeout", "compose_video: RENDER_TIMEOUT: the render passed its window", "failed"},
+	} {
+		t.Run(tc.class, func(t *testing.T) {
+			n := startNode(t, false)
+			n.runner.delay = 300 * time.Millisecond // the first poll sees the job running, as a held one does
+			n.runner.defer_, n.runner.deferClass = tc.reason, tc.class
+			rig := newPairRig(t, true, dispatchHost(t, n))
+			res := Run(context.Background(), clientCfg(t, n), rig.p, core.Request{Task: core.TaskComposeVideo, Params: map[string]any{"template": "title-card"}}, "remote")
+			if res.OK || !res.Deferred || res.Meta.ErrClass != tc.class {
+				t.Fatalf("Run: %+v, want the node's deferral with its class", res)
+			}
+			cards := rig.cards()
+			other := map[string]string{"completed": "failed", "failed": "completed"}[tc.want]
+			if cards[tc.want] == nil || cards[other] != nil || cards[tc.want]["error"] != tc.reason {
+				t.Fatalf("cards = %v, want one %s card carrying the reason and no %s frame", cards, tc.want, other)
+			}
+			// The start: the one the running frame showed when the poll saw the job running; otherwise a held
+			// call has none (it never ran) and a call that ran and broke is shown to have started.
+			switch started := cards[tc.want]["startedAt"]; {
+			case cards["running"] != nil:
+				if started != cards["running"]["startedAt"] {
+					t.Fatalf("the close must keep the start the running frame showed: %v", cards)
+				}
+			case core.CardHeld(tc.class):
+				if started != nil {
+					t.Fatalf("a held call that was never seen running has no start: %v", cards)
+				}
+			default:
+				if started == nil {
+					t.Fatalf("a call that ran and broke has a start: %v", cards)
+				}
+			}
+			if rows := rig.rows(); len(rows) != 1 || !rows[0].Deferred || rows[0].ErrClass != tc.class || rows[0].Node == "" {
+				t.Fatalf("rows = %+v, the asker's row keeps the class", rows)
+			}
+		})
+	}
+}
+
 // (c) A placement defer before any dispatch writes NO card, but the call still has its row.
 func TestRemoteComposeThatNeverReachedANodeWritesARowAndNoCard(t *testing.T) {
 	dead := &config.Config{MediaDir: t.TempDir(), DelegateRemotes: []string{"http://127.0.0.1:1"}, FleetAuthToken: "tok"}

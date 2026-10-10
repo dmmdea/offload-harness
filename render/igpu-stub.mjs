@@ -24,6 +24,7 @@
 //     {kind:"wav", seconds, tailSilence, silent}    a PCM16 wav at `--out`
 //     {kind:"gray_png"}                              a 1-channel PNG at `--png`
 //     {kind:"last_arg", content}                     `content` written to the LAST argument (a fake ffmpeg)
+//     {kind:"file_o", base64}                        the decoded bytes (none = an empty file) at `-o` (sd-cli's image mode)
 //   stdout:  [lines] printed to stdout (a fake ffprobe answers its duration there)
 //   inspectControlVideo: record the PNG headers found in the directory after --control-video
 // }
@@ -263,6 +264,8 @@ function runAsEngine() {
     if (input && !existsSync(input)) writeStderr(`stub: input ${input} does not exist\n`);
   } else if (w && w.kind === "wav") {
     writeFileSync(argAfter(argv, "--out"), pcmWav(w));
+  } else if (w && w.kind === "file_o") {
+    writeFileSync(argAfter(argv, "-o"), Buffer.from(w.base64 || "", "base64"));
   } else if (w && w.kind === "video") {
     const out = argAfter(argv, "-o");
     const width = argAfter(argv, "-W") || "64";

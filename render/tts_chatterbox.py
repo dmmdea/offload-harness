@@ -11,6 +11,12 @@ import os
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS", "1")
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
 import argparse, sys, torch, torchaudio
+# The wav is delivered through atomic_out.save_atomic (a sibling module): a save straight onto --out
+# truncates it first, so a full disk left a zero-byte wav that read as finished and a failed save
+# destroyed a previous good one. The script directory goes on the path explicitly so the import also
+# works when the interpreter runs isolated (-I / -P).
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from atomic_out import save_atomic
 from chatterbox.mtl_tts import ChatterboxMultilingualTTS
 
 
@@ -40,7 +46,7 @@ def main():
         wav = torch.as_tensor(wav)
     if wav.dim() == 1:
         wav = wav.unsqueeze(0)
-    torchaudio.save(args.out, wav.detach().cpu().float(), model.sr)
+    save_atomic(args.out, lambda p: torchaudio.save(p, wav.detach().cpu().float(), model.sr))
     log(f"[chatterbox] wrote {args.out} @ {model.sr} Hz")
 
 

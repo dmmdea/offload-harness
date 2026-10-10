@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/dmmdea/offload-harness/internal/gpuprobe/smitest"
 )
 
 // TestMain makes this package's tests HERMETIC with respect to the GPU lease.
@@ -20,6 +22,9 @@ import (
 // LOCAL_OFFLOAD_STATE_DIR is the same override gpulease.ResolveStateRoot honours in
 // production, so this exercises the real resolution path rather than bypassing it.
 func TestMain(m *testing.M) {
+	// First: when this process is the stand-in nvidia-smi a test installed (internal/gpuprobe/smitest) it
+	// plays that part and exits, touching neither the state root nor a test.
+	smitest.MaybeRun()
 	dir, err := os.MkdirTemp("", "lo-pipeline-lease-")
 	if err != nil {
 		// Better to run non-hermetically than not at all, but say so loudly.

@@ -545,3 +545,66 @@ func TestRunGenerateVideo_PassesWanSplitAndFast(t *testing.T) {
 		t.Fatalf("fast=true must reach the runner as --fast; args=%v", args)
 	}
 }
+
+// TestRunGenerateVideo_PassesWanDecode: how the Wan graph decodes is this box's config
+// (videogen_wan_decode), not a constant in the graph builder. The default config hands the runner
+// "tiled" (today's graph), a configured plain or tiled is forced, a configured auto lets the runner
+// read the render card's size, an empty value passes nothing (the runner's own default is tiled),
+// and a videogen_families entry for the family that renders replaces the flat key wholesale, like
+// every other field of a binding.
+func TestRunGenerateVideo_PassesWanDecode(t *testing.T) {
+	requireNodePipeline(t)
+	run := func(t *testing.T, mut func(*config.Config), params map[string]any) []string {
+		t.Helper()
+		dir := t.TempDir()
+		cfg := config.Default()
+		cfg.VideoGenScript = writeArgStub(t, dir)
+		cfg.MediaDir = dir
+		mut(&cfg)
+		p := &Pipeline{cfg: cfg}
+		res := p.Run(context.Background(), core.Request{Task: core.TaskGenerateVideo, Input: "a slow push in", Params: params})
+		if !res.OK {
+			t.Fatalf("expected ok via stub, got defer: %s", res.Reason)
+		}
+		var out struct {
+			VideoPath string `json:"video_path"`
+		}
+		if err := json.Unmarshal(res.Data, &out); err != nil {
+			t.Fatal(err)
+		}
+		return readArgs(t, out.VideoPath)
+	}
+	none := func(*config.Config) {}
+	if args := run(t, none, nil); !hasFlagVal(args, "wan-decode", "tiled") {
+		t.Fatalf("the default config must hand the runner --wan-decode tiled; args=%v", args)
+	}
+	for _, mode := range []string{"plain", "tiled", "auto"} {
+		if args := run(t, func(c *config.Config) { c.VideoGenWanDecode = mode }, nil); !hasFlagVal(args, "wan-decode", mode) {
+			t.Fatalf("videogen_wan_decode %q must reach the runner as --wan-decode %s; args=%v", mode, mode, args)
+		}
+	}
+	if args := run(t, func(c *config.Config) { c.VideoGenWanDecode = "" }, nil); hasFlag(args, "wan-decode") {
+		t.Fatalf("an empty videogen_wan_decode must pass nothing (the runner defaults to tiled); args=%v", args)
+	}
+
+	// The family that renders decides. Seated on ltx25 with a wan22 entry, a model:"wan" request
+	// renders Wan with the ENTRY's decode, not the flat key.
+	seated := func(entry config.VideoFamilyBinding) func(*config.Config) {
+		return func(c *config.Config) {
+			c.VideoGenFamily = "ltx25"
+			c.VideoGenWanDecode = "plain"
+			c.VideoGenFamilies = map[string]config.VideoFamilyBinding{"wan22": entry}
+		}
+	}
+	wan := map[string]any{"model": "wan"}
+	if args := run(t, seated(config.VideoFamilyBinding{WanDecode: "tiled"}), wan); !hasFlagVal(args, "wan-decode", "tiled") {
+		t.Fatalf("videogen_families[wan22].wan_decode must reach the runner for a Wan render; args=%v", args)
+	}
+	if args := run(t, seated(config.VideoFamilyBinding{UnetHigh: "h.safetensors"}), wan); hasFlag(args, "wan-decode") {
+		t.Fatalf("a wan22 entry that sets no wan_decode must not inherit the flat key (the entry replaces the binding); args=%v", args)
+	}
+	// With no wan22 entry at all the flat key is the documented fallback, unchanged.
+	if args := run(t, func(c *config.Config) { c.VideoGenFamily = "ltx25"; c.VideoGenWanDecode = "plain" }, wan); !hasFlagVal(args, "wan-decode", "plain") {
+		t.Fatalf("with no wan22 entry the flat videogen_wan_decode is the fallback; args=%v", args)
+	}
+}

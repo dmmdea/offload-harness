@@ -205,6 +205,7 @@ type Emitter struct {
 	openDir     string // "" = no register
 	openMu      sync.Mutex
 	open        map[string]string // job id -> marker path
+	posting     map[string]int    // marker file name -> terminal posts in flight (orphans.go, ITS OWN POST); under openMu
 	selfOnce    sync.Once
 	selfStart   int64
 	sweepOnce   sync.Once
@@ -789,19 +790,46 @@ func (e *Emitter) Emit(ev Event) {
 	e.inflight.Add(1)
 	go func() {
 		defer e.inflight.Done()
-		if err == nil {
-			err = e.deliver(context.Background(), pl)
-		}
-		// The terminal marker goes only after the post was attempted: a
-		// process killed in between still leaves a marker to close the card,
-		// and a post that failed leaves the terminal frame for the sweep.
-		e.untrack(done, pl, err)
-		if err != nil {
-			e.warnOnce.Do(func() {
-				log.Printf("pairworkloads: PAIR ingress unreachable; harness jobs will not appear in PAIR's Jobs list (%v)", err)
-			})
-		}
+		e.settle(pl, done, err)
 	}()
+}
+
+// EmitSync is Emit that returns once the post was attempted (bounded by sendTimeout), for the frame a
+// caller's ANSWER must not outrun: the terminal frame of a call whose door replies the moment it
+// returns. A caller that runs the other way (answers, then its process is killed: an MCP client that
+// closes stdin and kills the door after each reply) loses a background Emit that has not posted yet, and
+// the card it opened is then closed by the orphan sweep as "harness process exited before the job
+// finished", whatever the call's outcome was (2026-10-09). The marker work is the same as Emit's:
+// the terminal verdict is parked on disk before the post (track), and removed after it (untrack).
+func (e *Emitter) EmitSync(ev Event) {
+	if !e.Enabled() {
+		return
+	}
+	e.SweepOrphansAsync()
+	pl, err := e.plan(ev)
+	done := ""
+	if err == nil {
+		done = e.track(ev, pl)
+	}
+	e.settle(pl, done, err)
+}
+
+// settle posts a planned frame (unless planning already failed with err), settles its marker, and
+// warns once per process when PAIR could not be reached. Emit runs it on a background goroutine,
+// EmitSync inline.
+func (e *Emitter) settle(pl sendPlan, done string, err error) {
+	if err == nil {
+		err = e.deliver(context.Background(), pl)
+	}
+	// The terminal marker goes only after the post was attempted: a
+	// process killed in between still leaves a marker to close the card,
+	// and a post that failed leaves the terminal frame for the sweep.
+	e.untrack(done, pl, err)
+	if err != nil {
+		e.warnOnce.Do(func() {
+			log.Printf("pairworkloads: PAIR ingress unreachable; harness jobs will not appear in PAIR's Jobs list (%v)", err)
+		})
+	}
 }
 
 // Wait blocks until every background Emit has finished (tests, shutdown).
@@ -853,9 +881,15 @@ func (e *Emitter) AttachLedger(l *ledger.Ledger) {
 		e.inflight.Add(1)
 		go func() {
 			defer e.inflight.Done()
-			ev := e.FromLedger(row)
+			ev := e.fromLedger(row, started != 0)
 			if open != nil {
+				// The call's door answers the moment Run returns, and Run's close waits for
+				// this frame (Begin's end): posted here, on the card's own sent signal, not
+				// in a background Emit nobody waits for.
+				defer close(open.sent)
 				ev = closeWith(ev, open, started)
+				e.EmitSync(ev)
+				return
 			}
 			e.Emit(ev)
 		}()
@@ -864,7 +898,12 @@ func (e *Emitter) AttachLedger(l *ledger.Ledger) {
 
 // FromLedger builds the terminal event for a finished tool call: the row's
 // timestamp is the completion, and the latency walks it back to the start.
-func (e *Emitter) FromLedger(row ledger.Entry) Event {
+func (e *Emitter) FromLedger(row ledger.Entry) Event { return e.fromLedger(row, false) }
+
+// fromLedger is FromLedger for a call whose card is known to have run (started): a row has no record
+// of its lane's start, and a held-back class (cardOutcome) closes quiet only when the lane never
+// held the card. The ledger observer passes what the call's card recorded.
+func (e *Emitter) fromLedger(row ledger.Entry, started bool) Event {
 	ts := row.TS
 	if ts == 0 {
 		ts = time.Now().Unix()
@@ -887,15 +926,12 @@ func (e *Emitter) FromLedger(row ledger.Entry) Event {
 			node, model = model[:i], model[i+1:]
 		}
 	}
-	state, errText := "completed", ""
-	if row.Deferred {
-		state = "failed"
-		// The short form: PAIR's error field has always held at most the 120 bytes
-		// the ledger used to cut a reason to, and the ledger now stores it whole.
-		errText = ledger.ShortReason(row.Reason)
-		if errText == "" {
-			errText = "deferred"
-		}
+	// The short form of the reason: PAIR's error field has always held at most the 120 bytes
+	// the ledger used to cut a reason to, and the ledger now stores it whole.
+	state, errText := cardOutcome(row.Deferred, row.ErrClass, ledger.ShortReason(row.Reason), started)
+	startedAt := created
+	if row.Deferred && state == "completed" {
+		startedAt = 0 // held back by another job's hold on the card: it never started
 	}
 	return Event{
 		JobID:       fmt.Sprintf("led-%d-%d", ts, e.seq.Add(1)),
@@ -906,7 +942,7 @@ func (e *Emitter) FromLedger(row ledger.Entry) Event {
 		Error:       errText,
 		Requester:   Requester(row.OriginSession),
 		CreatedAt:   created,
-		StartedAt:   created,
+		StartedAt:   startedAt,
 		CompletedAt: completed,
 	}
 }

@@ -108,7 +108,10 @@ restart, verify, automatic rollback on any failure) and, as an option, its rende
   places on no card (an unknown index, a prefix no card has or that fits two cards, a card
   named twice, a blank) or a box with no card table refuses the deploy before anything is
   touched, because a string that matched no lease would read as "no lease there" and the deploy
-  would go ahead past the render the operator meant. `--cards` with a health URL, given or
+  would go ahead past the render the operator meant. The table is read with the same retry as
+  `gpu reserve` (one attempt under 5 s and, if it ran out of time, one more under 15 s: see
+  [gpu-lease.md](gpu-lease.md#reserving-cards-the-card-table-and-the-reader-audit-plan-p3)), so
+  one slow `nvidia-smi` does not refuse a deploy; a table that could not be read twice does. `--cards` with a health URL, given or
   read from the node's config `fleet_listen`, is refused too (that wait is the job count, so
   the flag could only be ignored). Both detached launchers forward it (`-Cards` in
   `windows-node-swap-launch.ps1`, `--cards` in `linux-node-swap-launch.sh`).

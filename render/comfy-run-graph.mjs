@@ -6,9 +6,10 @@
 // teardown; run-graph owns the ComfyUI lifecycle itself. Ownership is keyed on the
 // manifest hash (NOT an ephemeral node pid). DEFER-never-cloud: every failure writes
 // {deferred:true, code, ref, detail} to the result and exits 0 (a defer is data, not a crash).
-import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { readFileSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { writeFileAtomic } from "./atomic-out.mjs";
 import { withGpuSlot, freeComfy as _freeComfy } from "./gpu-lock.mjs";
 import { comfyUp as _comfyUp, ensureComfy as _ensureComfy, resolveComfyDir, resolveComfyPy, comfyApi, resolveInstance, DEFAULT_COMFY_PORT } from "./comfy-lifecycle.mjs";
 import { parseManifest as _parse, manifestHash as _hash } from "./manifest.mjs";
@@ -44,7 +45,7 @@ export async function runGraphFlow(args, deps) {
     comfyUp, ensureComfy, killComfy, freeComfy, satisfy,
     preflight = preflightGraph,
     postGraph, collect = async (pid) => allOutputsByNode((await postGraph.history(pid)) || {}),
-    fetchToDir, writeResult = (p, o) => writeFileSync(p, JSON.stringify(o)),
+    fetchToDir, writeResult = (p, o) => writeFileAtomic(p, JSON.stringify(o)),
   } = deps;
 
   // A typed DEFER is a valid outcome: write it to the result (data the Go side reads) and return it.
@@ -167,7 +168,7 @@ async function main() {
   let cli = null; let api; let deps;
   try { api = comfyApi(flags.api); deps = instanceDeps(api); cli = resolveCli(); } catch (e) {
     const out = { deferred: true, code: "RUN_ERROR", ref: "", detail: String(e.message || e) };
-    writeFileSync(flags.result || "run-graph-result.json", JSON.stringify(out));
+    writeFileAtomic(flags.result || "run-graph-result.json", JSON.stringify(out));
     console.error("RUN-GRAPH DEFER", JSON.stringify(out));
     return;
   }
@@ -206,7 +207,7 @@ async function main() {
       fetchToDir: async (f, dir) => {
         const buf = await fetchView({ api, file: f });
         mkdirSync(dir, { recursive: true }); // standalone-mjs path: don't ENOENT on a fresh out-dir
-        const p = join(dir, f.filename); writeFileSync(p, buf);
+        const p = join(dir, f.filename); writeFileAtomic(p, buf);
         const { width, height } = pngSize(buf);
         return { path: p, type: f.type, kind: f.kind, width, height };
       },

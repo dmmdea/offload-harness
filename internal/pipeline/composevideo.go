@@ -332,7 +332,7 @@ func (p *Pipeline) runComposeVideo(ctx context.Context, req core.Request, meta c
 
 	wait := p.gpuWait()
 	if !takeComposeSlot(wait) {
-		meta.ErrClass = "compose_busy"
+		meta.ErrClass = core.ErrClassComposeBusy
 		return p.deferGen(req, meta, start, inputChars,
 			fmt.Sprintf("compose_video: busy — another composition in this process still holds the compose slot after %s", wait))
 	}

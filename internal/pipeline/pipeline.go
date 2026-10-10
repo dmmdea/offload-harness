@@ -82,6 +82,12 @@ type Pipeline struct {
 	instanceAPI func(gpuprobe.Card) string
 	stopKept    func(ctx context.Context, comfyDir string, epoch uint64) []comfyinst.Outcome
 
+	// afterClaimsRead is a test seam, nil in production. A media call that NAMED its cards (a pin, a
+	// pool, a declared device) runs it once it has read what is claimed and before it makes its gated
+	// claim (acquireCards). That call reads no card table, so the allocator's input never runs for it
+	// and alloc.Presence cannot mark the window between its read and its claim.
+	afterClaimsRead func()
+
 	// seatRatesPath is the per-seat rate store under the state root, resolved
 	// by seatRates() on each agent run (empty = no usable root).
 	seatRatesPath string
@@ -367,14 +373,16 @@ type cacheVal struct {
 // local model before ever deferring to Opus. Infra errors do not escalate.
 // CallTracker opens a PAIR Jobs card when a long call starts and closes it
 // when the call ends (pairworkloads.Emitter.Begin). working turns the card
-// running once the lane holds its engine (core.MarkWorking); both are nil when
-// nothing was opened.
+// running once the lane holds its engine (core.MarkWorking); end closes it
+// with the call's Result (a success completes it, a call held back by another
+// job's hold on the card closes it quiet, anything else fails it with the
+// reason); both are nil when nothing was opened.
 //
 // callID is the id of the card Begin opened ("" when none was): Run stamps it on
 // the call's Meta, the ledger row carries it, and the row closes exactly that
 // card (pairworkloads.Emitter.claim) instead of the oldest open card of the task.
 type CallTracker interface {
-	Begin(task, door string) (callID string, working func(), end func(deferred bool, reason string))
+	Begin(task, door string) (callID string, working func(), end func(res core.Result))
 }
 
 // SetCallTracker wires the tracker Run reports call starts to; nil = none.
@@ -382,13 +390,15 @@ func (p *Pipeline) SetCallTracker(t CallTracker) { p.tracker = t }
 
 // closeCall closes a tracked call's card with the call's outcome. Deferred
 // directly (recover works only there): a panic leaves the result zero, which
-// would read as success, so the card closes failed and the panic goes on.
-func closeCall(end func(deferred bool, reason string), res *core.Result) {
+// would read as success, so the card closes failed and the panic goes on. end
+// returns once the close is on the wire (pairworkloads.Emitter.Begin), so Run
+// does not return, and its door does not answer, before the card is closed.
+func closeCall(end func(res core.Result), res *core.Result) {
 	if r := recover(); r != nil {
-		end(true, fmt.Sprintf("panic: %v", r))
+		end(core.Result{Deferred: true, Reason: fmt.Sprintf("panic: %v", r)})
 		panic(r)
 	}
-	end(res.Deferred, res.Reason)
+	end(*res)
 }
 
 func (p *Pipeline) Run(ctx context.Context, req core.Request) (res core.Result) {
@@ -2121,6 +2131,7 @@ func (p *Pipeline) runEditImageGenerative(ctx context.Context, req core.Request,
 		Family:      cfg.GenEditFamily,
 		Resolution:  cfg.GenEditResolution,
 		CacheDevice: cfg.GenEditCacheDevice,
+		Schedule:    cfg.GenEditSchedule,
 		// The edit route renders on ONE card: the device pin applies.
 		Launch: comfyLaunch(cfg, true),
 	}
@@ -2914,6 +2925,13 @@ func (p *Pipeline) runGenerateVideo(ctx context.Context, req core.Request, meta 
 	if fb.WanLoader != "" {
 		args = append(args, "--wan-loader", fb.WanLoader)
 	}
+	// videogen_wan_decode (this box's, or the resolved family's, override): plain, tiled, or auto,
+	// which the runner decides from the render card's size. Unset passes nothing and the runner
+	// defaults to tiled. Only the Wan graph reads it; like the two Wan flags above it is passed
+	// whatever the family, and the other builders ignore it.
+	if fb.WanDecode != "" {
+		args = append(args, "--wan-decode", fb.WanDecode)
+	}
 	// LTX-2.5 family bindings (quality-first weight binding, same pattern as the
 	// Wan flags above): filenames + fps + the pooled-DiT placement from config.
 	// Gap 5: an explicit per-request `transformer` param wins over this box's
@@ -3461,8 +3479,10 @@ func (e *errGPUBusy) Error() string {
 	if e.detail != "" {
 		return "gpu busy: " + e.detail
 	}
-	return fmt.Sprintf("gpu busy: %s holds the lease (%ds, reason %q)",
-		e.info.Class, int(e.info.Age/time.Second), e.info.Reason)
+	// The holder is a LEASE of a class ("held by a text-class lease"), never the bare class: "text holds
+	// the lease" read as a text seat (gpulease.Class.LeasePhrase, the phrase `gpu status` leads with).
+	return fmt.Sprintf("gpu busy: held by %s (%ds, reason %q)",
+		e.info.Class.LeasePhrase(), int(e.info.Age/time.Second), e.info.Reason)
 }
 
 // IsGPUBusy reports whether err means the card was legitimately held by someone else
@@ -3579,6 +3599,10 @@ func (p *Pipeline) acquireWholeNode(ctx context.Context, reason string, ttl, wai
 		var held *gpulease.ErrHeld
 		if errors.As(err, &held) {
 			return nil, noop, &errGPUBusy{info: held.Info}
+		}
+		if errors.Is(err, gpulease.ErrStillQueued) {
+			// The card is free but a waiter registered earlier is ahead (register D-1xx-3): busy, not broken.
+			return nil, noop, &errGPUBusy{detail: err.Error()}
 		}
 		return nil, noop, err
 	}
@@ -5087,6 +5111,12 @@ func breakerFailure(errClass string, likelyColdSwap bool) bool {
 func classifyErr(err error) string {
 	if errors.Is(err, llamaclient.ErrLaneUnavailable) {
 		return errClassLaneGone
+	}
+	// A full volume (0.178.0), by the typed errno or the errno token in the text, never by prose: the
+	// image lanes classify with this function, and a batch item that failed on a full drive was
+	// recorded as "other" (gpugen.IsDiskFull is the one rule, shared with gpugen.ClassifyErr).
+	if gpugen.IsDiskFull(err) {
+		return "disk_full"
 	}
 	s := strings.ToLower(err.Error())
 	switch {

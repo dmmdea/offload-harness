@@ -6,6 +6,151 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.178.0] - 2026-10-10 - the lease queue is first come first served, media outputs are atomic, and held media jobs close cleanly
+
+### Fixed — a fresh `gpu reserve` queues behind registered waiters instead of winning a just-freed card
+
+- **`acquireQueued` probed the card with a bare `TryAcquire` before it ever queued.** The place in line was taken
+  only after that probe returned `ErrHeld`, so a card freed in the window between a holder's release and the front
+  waiter's next poll tick (1 s) went to whichever fresh reserve was launched in it, ahead of everyone registered.
+  A recipe that chains reserves back to back (its next `gpu reserve` starts the instant the previous one returns)
+  won that race every batch: on the reference 3-card box, 2026-10-09, three chained media reserves took card 2 as
+  epochs 1320, 1321 and 1322 while a text waiter for cards 0+2, registered for 1h26m and front of queue the whole
+  time, never got its turn; the recipe's own log printed "2 lease(s) queued behind this one" at each release and
+  never "queued behind". The same class sat in `gpulease.Acquire`, which returned a bare `TryAcquire` for
+  `Wait <= 0`, and in the two other direct `TryAcquire` callers (`gpu reserve --cards` without a wait, the media
+  admission's first claim). Now: `Acquire` with no wait runs the same registered, front-of-queue gated loop with a
+  deadline of now — one attempt if this caller is front of the line, else the queue's answer (`ErrHeld` for a held
+  card, `ErrStillQueued` naming the waiter ahead for a free one); `acquireQueued` never probes bare and prints its
+  one entry line from a read-only look at the line (`queueLine`: the holder, else the conflicting waiter);
+  `--wait 0` on a free card with a waiter ahead fails fast with the `--wait` hint; `gpu reserve --cards` and the
+  media admission go through the gated attempt and treat "still queued" as a lost claim (allocate again, then
+  queue), and both allocators read the line (`gpualloc.QueuedClaims`), so a card with a waiter ahead is not
+  picked as free; the pipeline's no-wait media lease maps it to `gpu busy`. Disjoint backfill is unchanged: a
+  waiter for other cards is no reason to wait, and a blocked text-load admission queues on its seat's cards.
+  `gpulease.DevicesConflict` is exported for the entry line. Tests: a no-wait `Acquire` yields to a registered
+  waiter on a free card and wins once it leaves; it still backfills a disjoint card; a fresh reserve (`--wait 0`
+  and `--wait 300ms`) queues behind a `RegisterSeatWaiter` entry on a free card and wins once it leaves; the
+  pipeline's no-wait whole-node lease reads a waiter ahead as `gpu busy` and is granted once it leaves — all four
+  red on the unpatched base (mutants: the bare probe restored in the CLI, the shortcut restored in `Acquire`, the
+  busy mapping removed, each red). The media admission already counted a registered waiter's place at allocation
+  (`gpualloc.QueuedClaims`, moved out of the pipeline so the reserve verb reads the same rule), so its gated
+  attempt only closes the gap between the allocation and the claim, and costs a call that resumed a place nothing;
+  a test pins that an image call with a seat waiter in line answers `gpu_queued` and starts nothing.
+  Not changed here: a binary older than this release keeps winning the gap (the
+  pinned copy that chained the incident's reserves must be refreshed to carry the fix).
+
+### Added — Qwen-Image-2.1-Turbo: a `turbo` schedule for the 2.1 image and edit graphs
+
+- **`render/wf-qwen-image-21.mjs` learns the Turbo checkpoint's saved schedule.** `Qwen/Qwen-Image-2.1-Turbo` (8 steps,
+  cfg 1, the same 7B architecture, Qwen Research License, generation and editing) ships its sampling schedule as
+  `sample_sigmas` in `model_index.json` with dynamic shifting off, shift 1.0 and no terminal stretch — a list the base
+  model's `official` schedule (dynamic mu, `shift_terminal` 0.02) does not reproduce at 8 steps, and ComfyUI's fixed
+  shift does not either. `imagegen_schedule: "turbo"` feeds that list through `ManualSigmas` (terminal 0 appended) and
+  refuses any step count but 8, naming the saved schedule. The 2.1 edit graph gains the same custom-sampler path behind
+  the new `gen_edit_schedule` (`comfy`, the KSampler default, or `turbo`; the size-dependent `official` mode has no
+  place on the encoder's latent); `comfy-edit.mjs --schedule` is a 2.1-only knob, refused on 2511. Bind the Turbo as
+  named families beside the 40-step ones (the Comfy-Org repack: `qwen_image_2.1_turbo_bf16.safetensors` /
+  `qwen_image_2.1_turbo_int8_convrot.safetensors`). Tests: the list pinned value for value, T2I and edit graphs at
+  several sizes, wrong step counts refused, the edit default graph unchanged, the 2511 refusal.
+- **doctor: the default `edit_image_generative` row names the named-families case.** A node whose only edit bindings
+  are `gen_edit_families` overlays (no `gen_edit_unet`) read "gen_edit_script/gen_edit_unet is unset" beside a
+  CONFIGURED family row, as if defective; it now says it edits through its named families.
+
+### Fixed — a failed render leaves nothing at its output path, a full disk stops a batch, and a batch with failed jobs says so
+
+- **Atomic outputs.** Every render helper delivers its final output through a staged sibling renamed into place
+  (`render/atomic-out.mjs`; `render/atomic_out.py` for the Python workers; the ffmpeg ops in `internal/mediaops` the same way).
+  A full data drive used to leave zero-byte pictures (21 of 36 in one batch, 2026-10-09) that skip-existing scripts read as
+  finished; now no file is left at the path and a good file already there survives.
+- **A full disk stops a batch.** A `--batch` stops at `ENOSPC`/`EDQUOT`/`EROFS` (recognised by its errno token, never by prose)
+  and records the remaining jobs as not run; the ledger files it under its own class, `disk_full`.
+- **Exit codes.** `comfy-generate`/`comfy-inpaint --batch` and `local-offload generate-image --batch` exit 4 when any job
+  failed (they exited 0); a clean batch is 0, a stop or setup error 1. The Go caller reads 4 as a finished batch.
+
+### Fixed — `gpu status` names what holds the card, and `offload_status` stops burying it
+
+- The `gpu status` headline, the `gpu reserve` refusal, the media lanes' queued answer and the brief `gpu_lease_verdict` say
+  `held by a media-class lease` / `a text-class lease` (was `held by media`, which read as a seat).
+- The owner line shows the lease's `--origin` when no session or pid owner is recorded (display only; still never orphaned).
+- `gpu_processes` folds a display card's unsizable processes (the Windows desktop: 31 rows on the reference 3-card box) into
+  `display_card_processes_unknown`, one `{index, gpu_uuid, name, count}` per card; every other row is still listed.
+
+### Fixed — a card-table read that runs out of time under load no longer hard-defers a media call
+
+- The allocator's `nvidia-smi` read is retried once under 15 s after its 5 s; a call whose re-read still fails is placed from the
+  newest table it holds and queued with a reason that says so, instead of a `gpu_lease_unavailable` defer. `gpu reserve`,
+  `node-swap --cards` and the drain/unload scope read the table with the same retry; the render helper asks `nvidia-smi -L`
+  once more and logs `COMFY-GPU-LIST-WARN` instead of silently leaving ComfyUI on card 0. The allocation reads only the
+  per-device `--query-gpu` fields (no process listing).
+
+### Fixed — a PAIR job is closed with its real outcome when the door answers a deferral
+
+- A door killed right after its reply no longer leaves a red "harness process exited before the job finished" card: the close
+  of a long call is on the wire before the door answers. A call that waited its window and found the card (`gpu_queued`,
+  `gpu_busy`) or the compose slot held closes quiet (`completed`, no start, the reason in `error`; PAIR has no cancelled
+  state); a render that broke still closes `failed`. A fleet node's job poll carries `err_class` (additive), so a remote call
+  whose node's card was held closes quiet on its asker too; remote lanes close on a panic; the call deadline's abandoned
+  subtasks have their cards closed.
+
+### Fixed — a short call's PAIR card is closed once, whichever way the scheduler runs the emitter's sweep
+
+- **An emitter's own sweep resent the terminal frame the emitter was posting.** The verdict is parked as a pending marker
+  before it is posted (the entry above), and the sweep every emitter makes on its first `Emit` runs on a goroutine: a call
+  short enough to close before that goroutine had read the register (a deferral, a refused dispatch, a lease card) was
+  closed twice, the second frame byte for byte the first. PAIR merges it, but it is a duplicate on the wire, and it failed
+  three tests of three packages (`TestLeaseCardLifecycle`, `TestPulledReclaimOfAFinishedJobEmitsNoSecondCard`,
+  `TestEndClosesUnstartedCardWithoutRow`) on the 4-vCPU Linux CI runner of this release while they passed on a 16-core
+  host: the sweep races the caller and wins as processors get scarcer (none of 50 runs on 16 CPUs, up to 8 of 50 on 2 to 4,
+  nearly every run on one). An emitter now remembers the markers it has a post in flight for and its sweeps leave them alone; a
+  post that fails parks the frame again and clears the mark, so the next sweep sends it as before. Another process's sweep,
+  or fleet-serve's periodic one, that reads the marker in those milliseconds still resends an identical frame, which PAIR
+  merges. Tests: a held terminal post and the emitter's own sweep (nothing sent), a refused post and the same emitter's
+  next sweep (one sent), a short card closed once on one processor; the first and the last red without the guard, the
+  second red when the mark is never cleared.
+
+### Fixed — two tests passed only on a host with a live llama-swap and a pinned Go cache
+
+- **`TestGPUReserveConfinementReadsTheCardTableWithTheRetry` counted card-table reads that depend on a llama-swap answering.** A
+  card-scoped `gpu reserve` hands its command the unload list for the render lane, cut from the llama-swap roster, and the cut
+  reads the card table only for a roster it could read. The test's scripted reads (`ok`, `ok`, `hang`) assumed that read
+  succeeded, which it does on a host with a live llama-swap on the config's default `127.0.0.1:11436` and does not on a CI
+  runner (connection refused): there the wrapper made one read fewer, its own confinement read took the second `ok`, and the
+  test saw `reads = [40ms 40ms]`. The code is right either way (a roster it cannot read leaves the render lane on its own
+  rule, and the log says so). The card-table tests now read a stand-in roster (`useRoster`), so the reads are the same
+  everywhere and a test run no longer asks the host's llama-swap anything. Checked on one Linux host with one binary: a fresh
+  loopback fails with the CI's message, the host's own loopback passes.
+- **`TestGenerateImageBatchExitCodesThroughTheBuiltBinary` built the binary under its temp HOME.** The test moves HOME to a temp
+  directory for the binary's runs and then ran `go build`. On Linux GOPATH, and with it GOMODCACHE and GOCACHE, follow HOME, so
+  the compiler downloaded the whole module tree into that directory (45 s per run) and Go's module cache is read-only: the
+  directory could not be removed ("TempDir RemoveAll cleanup: unlinkat .../go/pkg/mod/...: permission denied"). A Windows host
+  pins GOMODCACHE in its own `go env`, so it never showed there. The binary is now built first, under the caller's own HOME and
+  caches; what the test pins (exit 0, 4 and 1 and their stderr lines through the built binary) is unchanged.
+
+### Fixed — `offload_review_diff` no longer publishes hollow reviews, stacked restatements or discarded cut answers
+
+- **Root cause of the hollow findings:** the structured re-pack, told only `"findings" (array of strings)`, split
+  `severity | file:line | claim | why` lines into bare strings on the fleet's 9B and 35B seats. The lane now also reads the
+  seat's own answer (pipe lines, or JSON finding objects) and publishes whichever reading keeps more findings
+  (`salvaged:"repack_flattened"`).
+- Findings with no severity, file or why are dropped and counted (`dropped_hollow`); when nothing survives filtering and the
+  seat did not say NONE the lane defers instead of returning an empty success. Findings on the same file and line fold into
+  the most severe, the others' claims in `also`.
+- A review the seat wrote but the clock kept from being structured is read line by line through the same filters and
+  published with `salvaged:"output_truncated"|"wall"`.
+
+### Added — a decode mode for the Wan 2.2 graph: `videogen_wan_decode` (`tiled` | `auto` | `plain`), default `tiled`
+
+- `render/comfy-video.mjs --wan-decode tiled|auto|plain` (the pipeline passes `videogen_wan_decode`). `tiled` is today's
+  `VAEDecodeTiled` graph and stays the default. `plain` is `VAEDecode`; `auto` picks plain when the render card's
+  `GET /system_stats` `devices[0].vram_total` is 12 GiB or more, else tiled, and logs one `wan-decode:` line. Measured on an
+  RTX 5060 Ti 16 GB (2026-10-03, ComfyUI dynamic VRAM on, clip shape unrecorded): plain 38 s at a 10.3 GB peak against
+  412 s tiled, 45 dB PSNR apart.
+- **Why the default stays tiled:** no plain decode has been run at the 16 GB tiers' own shape (1280x720x81), where ComfyUI's
+  estimate is 12.0 GiB of a 15.9 GiB card; ComfyUI retries an out-of-memory plain decode tiled once, and a second
+  out-of-memory fails the clip after sampling. The default moves to `auto` after a live acceptance render at that shape
+  decodes in about 40 s with no `Ran out of memory when regular VAE decoding` line.
+
 ## [0.177.0] - 2026-10-09 - warm-back survives a llama-swap reload, the embedder can run from its own llama.cpp build, and two flaky tests stop reading the clock
 
 ### Fixed — a warm-back interrupted by a llama-swap reload or restart is re-sent, and the owed-warm marker clears when the debt is moot

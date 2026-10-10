@@ -675,7 +675,7 @@ type restamper func(fn func(*gpulease.Meta)) error
 type leaseScope struct{ gpualloc.LeaseScope }
 
 func newLeaseScope(ctx context.Context, cfg config.Config, ids []string) leaseScope {
-	return leaseScope{gpualloc.NewLeaseScope(ctx, cfg, ids, gpualloc.Deps{Cards: cardTable}, os.Stderr)}
+	return leaseScope{gpualloc.NewLeaseScope(ctx, cfg, ids, cardTableDeps(), os.Stderr)}
 }
 
 func (s leaseScope) bounded() bool                            { return s.Bounded() }
@@ -690,7 +690,7 @@ func (s leaseScope) split(models []string) (on, off []string) { return s.Split(m
 // for stays on the list (it could be anywhere). ok is false for a whole-node lease (nothing to
 // narrow: the render lane keeps its own rule) and when the roster is empty.
 func unloadModelsFor(ctx context.Context, cfg config.Config, roster []string, leaseIDs []string) ([]string, bool) {
-	return gpualloc.UnloadModels(ctx, cfg, roster, leaseIDs, gpualloc.Deps{Cards: cardTable}, os.Stderr)
+	return gpualloc.UnloadModels(ctx, cfg, roster, leaseIDs, cardTableDeps(), os.Stderr)
 }
 
 // unloadModelsEnv renders the list as the environment variable the render lane reads

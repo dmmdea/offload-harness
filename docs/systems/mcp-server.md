@@ -233,7 +233,9 @@ its structuring failed (`schema_miss`: the re-pack was skipped because the wall 
 stalled), the deferred payload carries the loop's prose as `output` with `schema_miss: true`, beside the defer's own
 `reason` and `defer_class`, for a local run and a routed one alike. It is never graded and never an `answer` field.
 `offload_review_diff` publishes no such field: what that lane returns went through its grounding filters, and the raw
-prose has not, so a review defer stays bare.
+prose has not, so a review defer stays bare and never carries `output`. The one thing it does with a finished or cut
+answer is read its lines itself, through those same filters, when the clock kept them from being structured (salvage,
+under `offload_review_diff` below).
 
 `agent_delegate`'s `route` argument picks the placement rule (see
 [fleet-node.md](fleet-node.md#placement-routes-and-the-retry-delegator-side) for the mechanics):
@@ -506,7 +508,7 @@ claim rather than a citation. The MECHANISM is independently supported: long-con
 degradation, measured across 18 SOTA models by Chroma's context-rot study and by Stanford's
 lost-in-the-middle work. The lane rests on the mechanism.
 
-Four design choices are load-bearing rather than incidental:
+These design choices are load-bearing rather than incidental:
 
 - **The diff rides in the GOAL, not in a context doc.** A context doc becomes a file the seat
   must find with `list_dir` and open with `read_file`, and the measured failure mode of a small
@@ -517,11 +519,44 @@ Four design choices are load-bearing rather than incidental:
   content check would either punish a clean diff or pass anything — the decorative acceptance
   `delegate.LintAcceptance` exists to name. What replaces it is a check the harness can actually
   make: a finding naming a file the diff never touched is dropped and reported as
-  `dropped_ungrounded`, since an invented path is how a small seat fails here.
+  `dropped_ungrounded`, since an invented path is how a small seat fails here, and a line with
+  no severity, no file and no why (a bare claim) is dropped and reported as `dropped_hollow`.
 - **Findings arrive as an array of strings.** `gbnf.FromJSONSchema` compiles any array to an
   array of strings, so an object-item schema would have become strings anyway; the prompt asks
   for one `severity | file:line | claim | why` line per defect and `ParseFindings` reads them
   back tolerantly, keeping what it cannot parse as an unranked claim rather than dropping it.
+  Whether such a claim *survives* is `Report`'s call (`DropHollow`): a line that carries any
+  structure — a known severity, a file or a why — is kept however badly the rest is formatted,
+  and only a bare claim is dropped, counted.
+- **The re-pack is a copy of the answer, and a lossy one, so the answer is read too (0.178.0).**
+  Three independent reports on 2026-10-09 showed findings with every field empty but the claim,
+  on a mimo-9b seat (twice) and a qwen3.6-35b-a3b seat (once). Running this lane's exact prompt
+  and schema on those fleet seats found two mechanisms, and in both the seat's own answer was
+  strictly richer than what the re-pack made of it. (1) The grammar-lane re-pack is told only
+  `"findings" (array of strings)`, so it SPLITS the seat's lines: on the qwen3.6 seat one perfectly
+  formed line, `severe | file:3764 | claim | why`, came back as its claim and its why in two list
+  items with the severity and the location dropped, and on two mimo-9b seats (no re-issue, finish
+  `stop`) five well-formed pipe lines came back as ten bare strings. That is the ordinary path on
+  these seats, not an edge, and it fits the reports: their counts (4, 6 and 2 findings) are all
+  even, as two strings per line gives. (2) A mimo-9b seat repeated a line; the loop's repetition guard read
+  that as a cut final (finish_reason was `stop`, 471 tokens of a 2,048 budget) and re-issued it
+  with `listCapInstruction`'s "Return the same JSON object that was asked for". This lane never
+  asked for JSON, so the seat invented one, `{"findings":[{"severity","path","line","claim","why"},…]}`,
+  and the re-pack kept one string per object: its claim. A control run (a 20-line diff, no re-issue)
+  came back with nine intact pipe lines and a faithful re-pack, so the split is not deterministic:
+  the prompt gives the seat no rule for what a list item is, and what it does varies with the
+  input. `reviewlane.RawLines` therefore reads
+  the answer in the two shapes seen (the pipe lines the prompt asks for, and a fenced or bare JSON
+  document of strings or `severity`/`path`|`file`/`line`/`claim`/`why` objects, rendered back to
+  pipe lines), `reviewPayload` runs both readings through the same filters and publishes whichever
+  keeps MORE findings, and a tie keeps the re-pack — what every run that worked has always shown,
+  including its stripping of a preamble that the raw reading would count as a hollow line.
+  When the answer's reading wins the result carries `salvaged: "repack_flattened"` and a note.
+  The objects the object-array schema option would have asked the re-pack for cannot be had on
+  this fleet anyway: `gbnf.FromJSONSchema` compiles object items to strings, and only vLLM seats
+  honour a full JSON schema. Not changed here, and the upstream of mechanism (2): the cut-final
+  re-issue asserts a JSON object for every schema contract whatever its goal asked for, and the
+  repetition guard (`minRepeats = 4`) turns a reviewer that repeats a line into that re-issue.
 - **An empty findings list is never published unless the seat EARNED it.** "No findings" is the
   one result a reader might take as reassurance, and a broken run reaches exactly that shape:
   `agent/loop.go` returns `stop_reason:"done"` as soon as the model stops requesting tools with
@@ -533,11 +568,64 @@ Four design choices are load-bearing rather than incidental:
   explicit `NONE` verdict the prompt asks for, and the handler defers with a distinct reason
   when it is absent. It checks for a signal, never for quality. When the list is genuinely
   empty, the response says in words that it is not a verification.
-- **Three counts say what is NOT in the list**, published on the same terms (present when
-  non-zero): `dropped_ungrounded`, `dropped_echo` (the prompt's own field spec or worked example
-  handed back as a finding — measured behaviour, so it is a byte-equality guard rather than a
-  human's vigilance), and `truncated_by_cap`. The `note` on an empty list is gated on them:
-  "found nothing" beside a non-zero drop count is false, and says so differently.
+- **A list the filters emptied is not a review either (0.178.0).** The gate above used to stand
+  down whenever any line had been dropped, on the reasoning that a run which produced text is
+  not the broken-run shape. A hollow or invented review produces text too: on 2026-10-09 a small
+  seat answered a 228-line diff with four bare claims that merely restated it, and the caller
+  got four findings with every other field empty, published as a success with no note and no
+  counts. Now whenever **no finding survives** and the raw answer does not read as a clean
+  `NONE`, the lane defers (`defer_class: abstention`), whatever was dropped, and the deferral
+  carries the non-zero counts and a reason naming them ("none of the seat's 4 findings survived
+  the lane's filters (4 had no severity, file or why) …"). A clean `NONE` with zero findings
+  stays an empty, noted result; the only emptied-list success left is that same clean verdict
+  beside lines that were all dropped, and its note says so.
+- **Five counts say what is NOT in the list**, published on the same terms (present when
+  non-zero, on a deferral as well as a delivered review): `dropped_ungrounded`, `dropped_echo`
+  (the prompt's own field spec or worked example handed back as a finding — measured behaviour,
+  so it is a byte-equality guard rather than a human's vigilance), `dropped_hollow` (no known
+  severity, no file and no why), `dropped_duplicate` (the same defect reported more than once,
+  and findings folded together by the same-line rule below) and `truncated_by_cap`. The `note`
+  on an empty list is gated on them: "found nothing" beside a non-zero drop count is false, and
+  says so differently.
+- **One file and line is one finding, and every claim stays readable (0.178.0).** `Dedupe` keys
+  on the normalised claim, so a seat that restates one issue in different words passed through
+  as several findings: on 2026-10-09 a 48 KB diff produced three, stacked on a single line of one
+  file. `reviewlane.MergeSameLine` now folds findings that cite the SAME file (compared by base
+  name, as `Ground` and `Dedupe` do) and line into the most severe one (a tie keeps the first
+  in the seat's order) and puts the others' claims in an additive `also` array on the kept
+  finding; each folded finding counts in `dropped_duplicate`. Line 0 means the seat did not say
+  where, so a finding with no line or no file is never merged on that alone. It runs after
+  `Dedupe` and before the cap, for the same register D-90 reason: a stack must not crowd a
+  genuinely different finding out of the published list. Nothing distinct is lost, since the
+  caller still reads every claim.
+- **A review the seat wrote is salvaged when the clock cut its structuring (0.178.0).** The
+  harness ledger for the 26 hours to 2026-10-09 held five review defers, and three of them read
+  `output failed schema: re-pack skipped: the final answer was cut at the completion budget
+  (output_truncated)`, on a 27B seat and a 9B one; a fourth read `structured re-pack skipped: 0 s
+  left to the wall + 30 s grace …`. In each, the seat had written review lines and the lane threw
+  them away. The answer format is line-oriented and `ParseFindings` already reads raw lines, so the
+  re-pack is a convenience here, not a requirement: `reviewlane.Salvage` takes the raw answer's
+  complete lines (a finished answer is read with `RawLines`, below, so JSON finding objects count;
+  a cut one is split on newlines and loses its last line) and `publishReview` runs them through the
+  normal `Report` path (echo, hollow, grounding, dedupe, same-line fold, cap). It keys on structure, never on prose: the node's own
+  `output_truncated` flag, or `schema_miss` with the `budget` class (a finished answer whose
+  re-pack the clock skipped, clamped or cut; a canceled re-pack is excluded because nobody is
+  waiting). A cut answer's last line is dropped, because it is a fragment. What survives is
+  published with `salvaged: "output_truncated"` or `"wall"` and a `note`: an `output_truncated`
+  list may be **incomplete** (whatever the seat had not yet written is unreviewed), a `wall` list
+  is the seat's whole answer. A cut answer is never a clean verdict, whatever words it holds. If
+  nothing survives, the lane defers exactly as above, and the deferral names both the drops and why
+  the answer reached the lane unstructured; a cut answer with no complete line keeps the node's
+  own deferral verbatim. Every other deferral — a busy card (`capacity`), a seat or stack failure
+  (`infrastructure`), a re-pack that answered the wrong shape (`abstention`) — is unchanged, even
+  when it carries a good answer in `output`. The raw prose is still never published, only what
+  survives the filters. The same read applies on the fenced-seat fleet path: a deferred fleet
+  review is salvaged with the fleet's provenance (`node`, `placement`, `fence`) instead of falling
+  through to a local wait behind the very lease that fenced it; a salvage that comes to no review
+  falls through exactly as before. `internal/pipeline`'s `TestReviewLaneReadsWhatTheRunnerFiles`
+  runs the lane's real contract through the real runner so the node and the lane cannot drift
+  apart. The pipeline's own ledger row still records the run as the defer it was; the salvage is
+  the door's.
 
 Everything the lane returns is ADVISORY: it never gates a merge and never substitutes for the
 final does-it-actually-work verification, which stays with the caller — as do security review,

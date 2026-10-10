@@ -1,7 +1,10 @@
 // node --test render/batch-jobs.test.mjs
 import { test } from "node:test";
 import assert from "node:assert";
-import { parseJobs, jobArgs, resultLine, runBatchJobs, JOB_PARAM_FLAGS, SHARED_BINDING_FLAGS } from "./batch-jobs.mjs";
+import {
+  parseJobs, jobArgs, resultLine, runBatchJobs, JOB_PARAM_FLAGS, SHARED_BINDING_FLAGS,
+  isDiskFullError, batchExitCode, batchEndLine, renderExitError, BATCH_EXIT_JOBS_FAILED, RENDER_EXIT_SERVER_UNUSABLE,
+} from "./batch-jobs.mjs";
 import * as batchMod from "./batch-jobs.mjs";
 import { buildRenderGraph, parseRenderArgs } from "./comfy-render.mjs";
 
@@ -120,10 +123,10 @@ test("runBatchJobs: a serverUnusable failure stops the batch — the failed job 
   assert.ok(logs.some((l) => /FAILED/.test(l)), "the failure is logged as a failure, not as done");
 });
 
-test("runBatchJobs: an ordinary failure is recorded and the batch goes on (Go reads per-job status from an exit-0 batch)", async () => {
+test("runBatchJobs: an ordinary failure is recorded and the batch goes on to the end (the Go side reads per-job status)", async () => {
   const jobs = [0, 1, 2].map((i) => ({ prompt: "p" + i, out: `o${i}.png` }));
   const ran = [], rows = [];
-  await runBatchJobs({
+  const summary = await runBatchJobs({
     jobs,
     runJob: async (j, i) => { ran.push(i); if (i === 1) throw new Error("comfy-render exited 1: ComfyUI exec error"); },
     record: (l) => rows.push(JSON.parse(l)),
@@ -131,6 +134,127 @@ test("runBatchJobs: an ordinary failure is recorded and the batch goes on (Go re
   });
   assert.deepEqual(ran, [0, 1, 2]);
   assert.deepEqual(rows.map((r) => r.ok), [true, false, true]);
+  assert.deepEqual(summary, { total: 3, ok: 2, failed: 1 });
+  assert.equal(batchExitCode(summary), BATCH_EXIT_JOBS_FAILED, "a batch that finished with a failed job must not exit 0");
+});
+
+test("runBatchJobs: a clean batch exits 0, and a batch of nothing but failures finishes with the failed-jobs code", async () => {
+  const jobs = [0, 1, 2].map((i) => ({ prompt: "p" + i, out: `o${i}.png` }));
+  const clean = await runBatchJobs({ jobs, runJob: async () => {}, record: () => {}, now: () => 0 });
+  assert.deepEqual(clean, { total: 3, ok: 3, failed: 0 });
+  assert.equal(batchExitCode(clean), 0);
+  const allBad = await runBatchJobs({ jobs, runJob: async () => { throw new Error("comfy-render exited 1: node error"); }, record: () => {}, now: () => 0 });
+  assert.deepEqual(allBad, { total: 3, ok: 0, failed: 3 });
+  assert.equal(batchExitCode(allBad), BATCH_EXIT_JOBS_FAILED);
+});
+
+test("the batch exit codes are distinct: 0 clean, 1 stopped, 2 usage, 3 is the child's server-unusable, and failed jobs get their own", () => {
+  assert.equal(BATCH_EXIT_JOBS_FAILED, 4);
+  assert.ok(![0, 1, 2, RENDER_EXIT_SERVER_UNUSABLE].includes(BATCH_EXIT_JOBS_FAILED), "a batch parent must not reuse a code with another meaning here");
+  assert.equal(batchExitCode({ total: 5, ok: 5, failed: 0 }), 0);
+  assert.equal(batchExitCode({ total: 5, ok: 4, failed: 1 }), BATCH_EXIT_JOBS_FAILED);
+  assert.equal(batchExitCode(undefined), 0);
+});
+
+test("batchEndLine: the log says what the exit code says, with the counts and the file that names the failures", () => {
+  const line = batchEndLine({ total: 36, ok: 15, failed: 21 }, "jobs.results.jsonl");
+  assert.match(line, /21 of 36 failed/);
+  assert.match(line, /15 ok/);
+  assert.match(line, /exit 4/);
+  assert.match(line, /jobs\.results\.jsonl/);
+});
+
+// 2026-10-09: the data drive filled mid-batch; the batch logged "batch 16/36 FAILED" and went on to
+// fail the other twenty, leaving zero-byte pictures behind.
+const fullDiskJobs = () => [0, 1, 2, 3, 4].map((i) => ({ prompt: "p" + i, out: `renders/o${i}.png`, seed: 10 + i }));
+
+test("runBatchJobs: a full disk at job 2 stops the batch: jobs 3..N get a 'not run' row, nothing else runs, and the error names the disk and the path", async () => {
+  const jobs = fullDiskJobs();
+  const ran = [], rows = [], logs = [];
+  const runJob = async (job, i) => {
+    ran.push(i);
+    if (i === 1) throw renderExitError(1, "queued p seed 11\nRENDER FAILED: ENOSPC: no space left on device, write (writing renders/o1.png)\n");
+  };
+  const err = await runBatchJobs({ jobs, runJob, record: (l) => rows.push(JSON.parse(l)), log: (l) => logs.push(l), now: () => 0 }).then(() => null, (e) => e);
+  assert.deepEqual(ran, [0, 1], "no job may run once the disk is full");
+  assert.ok(err, "the batch must fail loud so the caller's teardown frees the card and its lease");
+  assert.equal(err.diskFull, true);
+  assert.ok(!err.serverUnusable, "a full disk is not a dead server");
+  assert.match(err.message, /the disk is full at job 2\/5/);
+  assert.match(err.message, /renders\/o1\.png/, "the line names the path");
+  assert.match(err.message, /3 jobs not run, recorded as such/);
+  assert.deepEqual(rows.map((r) => [r.i, r.ok]), [[0, true], [1, false], [2, false], [3, false], [4, false]]);
+  assert.match(rows[1].error, /ENOSPC/);
+  assert.match(rows[2].error, /^not run: the disk is full at job 2\/5, writing renders\/o1\.png/);
+  assert.equal(rows[4].out, "renders/o4.png");
+  assert.equal(rows[4].seed, 14);
+  assert.ok(logs.some((l) => /batch 2\/5 FAILED/.test(l)), "the failure is logged as a failure");
+});
+
+test("runBatchJobs: EDQUOT and EROFS stop the batch like ENOSPC, by code (comfy-inpaint renders in-process) and by flag", async () => {
+  for (const make of [
+    () => Object.assign(new Error("EDQUOT: disk quota exceeded, write"), { code: "EDQUOT" }),
+    () => Object.assign(new Error("EROFS: read-only file system, open"), { code: "EROFS" }),
+    () => Object.assign(new Error("write failed"), { code: "EIO", diskFull: true }),
+  ]) {
+    const jobs = fullDiskJobs(); const ran = [];
+    const err = await runBatchJobs({ jobs, runJob: async (j, i) => { ran.push(i); if (i === 0) throw make(); }, record: () => {}, now: () => 0 }).then(() => null, (e) => e);
+    assert.deepEqual(ran, [0]);
+    assert.equal(err.diskFull, true);
+    assert.match(err.message, /4 jobs not run/);
+  }
+});
+
+test("runBatchJobs: a failure that is not a full disk or a dead server does not stop the batch (EACCES, a ComfyUI node error, a refused connection)", async () => {
+  for (const msg of ["EACCES: permission denied, open", "comfy-render exited 1: ComfyUI exec error: node 5 failed", "connect ECONNREFUSED 127.0.0.1:8188"]) {
+    const ran = [];
+    const summary = await runBatchJobs({ jobs: fullDiskJobs(), runJob: async (j, i) => { ran.push(i); if (i === 1) throw new Error(msg); }, record: () => {}, now: () => 0 });
+    assert.deepEqual(ran, [0, 1, 2, 3, 4], msg);
+    assert.equal(summary.failed, 1);
+  }
+});
+
+test("isDiskFullError: by errno code, by flag, and by the errno token a child or ComfyUI reports it with", () => {
+  for (const code of ["ENOSPC", "EDQUOT", "EROFS"]) assert.equal(isDiskFullError(Object.assign(new Error("x"), { code })), true, code);
+  assert.equal(isDiskFullError(Object.assign(new Error("x"), { diskFull: true })), true);
+  for (const text of [
+    "ENOSPC: no space left on device, write",
+    "comfy-render exited 1: ENOSPC: no space left on device, write (writing renders/a.png)",
+    "ComfyUI exec error: {\"exception_message\":\"[Errno 28] No space left on device\"}",
+    "OSError: [Errno 122] Disk quota exceeded",
+    "OSError: [Errno 30] Read-only file system: 'x.png'",
+    "OSError: [WinError 112] There is not enough space on the disk",
+    "EROFS: read-only file system, open 'x.png'",
+  ]) assert.equal(isDiskFullError(new Error(text)), true, text);
+  for (const text of [
+    "EACCES: permission denied, open 'x.png'",
+    "ENOENT: no such file or directory, open 'x.png'",
+    "view fetch 404",
+    "comfy-render exited 1: ComfyUI exec error: node 5 failed",
+    "connect ECONNREFUSED 127.0.0.1:8188",
+    "ENOSPCX is not an errno",
+    "OSError: [Errno 2] No such file or directory: 'x.png'",
+  ]) assert.equal(isDiskFullError(new Error(text)), false, text);
+  assert.equal(isDiskFullError(undefined), false);
+  assert.equal(isDiskFullError(null), false);
+});
+
+// A ComfyUI exec error echoes the failing node's inputs, the prompt text among them. Prose is not an
+// errno: a picture of a monitor reading "no space left on device" must not stop an overnight batch.
+test("isDiskFullError: a prompt that merely mentions a full disk is not a full disk", () => {
+  for (const text of [
+    "ComfyUI exec error: {\"status_str\":\"error\",\"current_inputs\":{\"text\":[\"a monitor reading: no space left on device\"]}}",
+    "comfy-render exited 1: ComfyUI exec error: node 6 failed (a read-only file system banner, disk quota exceeded)",
+    "There is not enough space on the disk.",
+  ]) assert.equal(isDiskFullError(new Error(text)), false, text);
+  assert.equal(isDiskFullError("no space left on device"), false, "a bare prose reason is not an errno either");
+});
+
+test("renderExitError carries a child's full-disk reason through to the classifier (the child -> parent crossing)", () => {
+  const e = renderExitError(1, "queued p seed 1\nRENDER FAILED: ENOSPC: no space left on device, write (writing renders/a.png)\n");
+  assert.equal(e.message, "comfy-render exited 1: ENOSPC: no space left on device, write (writing renders/a.png)");
+  assert.equal(isDiskFullError(e), true);
+  assert.equal(isDiskFullError(renderExitError(1, "RENDER FAILED: view fetch 404\n")), false);
 });
 
 test("renderExitError: exit 3 is serverUnusable and carries the child's RENDER FAILED reason (C-83)", () => {

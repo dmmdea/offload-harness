@@ -184,7 +184,7 @@ func TestSeatWaiterBlocksANewAcquireUntilItUnregisters(t *testing.T) {
 		t.Fatalf("setup acquire: %v", err)
 	}
 
-	refresh, unregister := RegisterSeatWaiter(m.leaseDir(), "transcribe voice_es.wav")
+	refresh, unregister := RegisterSeatWaiter(m.leaseDir(), "transcribe voice_es.wav", nil)
 	// Guarantee the seat waiter's SinceMs (millisecond resolution) strictly
 	// precedes the media Acquire's own registration below — found live on
 	// CI (a fast Linux runner, 2026-09-24): with no gap, RegisterSeatWaiter
@@ -800,4 +800,75 @@ func TestWaiterReadSurvivesAConcurrentRename(t *testing.T) {
 			t.Fatalf("statWaiterFile failed under a concurrent renamer (iteration %d): %v", i, err)
 		}
 	}
+}
+
+// A NO-WAIT ACQUIRE IS ONE GATED ATTEMPT (register D-1xx-3, 2026-10-09). THE
+// INCIDENT: a recipe chained `gpu reserve` calls back to back, and each call's first
+// probe was a bare TryAcquire (Acquire returned one straight away for Wait <= 0, and
+// the CLI probed bare before it ever queued), so the card freed by batch N went to
+// batch N+1's fresh call in the window before the front waiter's next poll tick —
+// epochs 1320, 1321 and 1322 on the reference 3-card box, while a text waiter
+// registered for 1h26m stayed front of queue the whole time and the recipe's log
+// never once printed "queued behind". This pins the no-wait path: with a registered
+// waiter ahead, a zero-Wait Acquire on a FREE card must not win it, must say who is
+// ahead, and must not call a free card "held"; once the waiter leaves, the same call
+// must win at once.
+func TestANoWaitAcquireYieldsToARegisteredWaiterOnAFreeCard(t *testing.T) {
+	m := realClockManager(t)
+	queued, unregister := m.registerWaiter(ClassText, Options{Reason: "translate-local waiter"})
+	if queued.path == "" {
+		t.Fatal("failed to register the queued waiter — test cannot proceed")
+	}
+	time.Sleep(5 * time.Millisecond) // the waiter's SinceMs strictly precedes the attempt
+
+	lease, err := m.Acquire(ClassMedia, Options{Reason: "krea2 batch 3", TTL: time.Hour})
+	if err == nil || lease != nil {
+		if lease != nil {
+			_ = lease.Release()
+		}
+		unregister()
+		t.Fatalf("a no-wait Acquire won a free card ahead of a registered waiter (lease=%v err=%v) — the bare-probe defect is back", lease, err)
+	}
+	var held *ErrHeld
+	if errors.As(err, &held) {
+		unregister()
+		t.Fatalf("a free card with a waiter ahead must not be reported as held: %v", err)
+	}
+	if !errors.Is(err, ErrStillQueued) || !strings.Contains(err.Error(), "translate-local waiter") {
+		unregister()
+		t.Fatalf("the refusal must be ErrStillQueued naming the waiter ahead, got: %v", err)
+	}
+
+	unregister()
+	lease, err = m.Acquire(ClassMedia, Options{Reason: "krea2 batch 3", TTL: time.Hour})
+	if err != nil || lease == nil {
+		t.Fatalf("after the waiter left, the same no-wait Acquire must win the free card: %v", err)
+	}
+	_ = lease.Release()
+}
+
+// Disjoint backfill survives the gate: a waiter in line for one card is no reason for a
+// no-wait request on another, free card to fail — only a request that CONFLICTS with the
+// waiter yields to it.
+func TestANoWaitAcquireStillBackfillsADisjointCard(t *testing.T) {
+	m := scopedRealClock(t)
+	const cardA, cardB = "card-a", "card-b"
+	queued, unregister := m.registerWaiter(ClassText, Options{Reason: "needs card a", Devices: []string{cardA}})
+	defer unregister()
+	if queued.path == "" {
+		t.Fatal("failed to register the queued waiter — test cannot proceed")
+	}
+	time.Sleep(5 * time.Millisecond)
+
+	if lease, err := m.Acquire(ClassMedia, Options{Reason: "render on a", TTL: time.Hour, Devices: []string{cardA}}); err == nil {
+		_ = lease.Release()
+		t.Fatal("a no-wait Acquire on the waiter's own card must yield to it")
+	} else if !errors.Is(err, ErrStillQueued) {
+		t.Fatalf("expected ErrStillQueued on the waiter's card, got: %v", err)
+	}
+	lease, err := m.Acquire(ClassMedia, Options{Reason: "render on b", TTL: time.Hour, Devices: []string{cardB}})
+	if err != nil {
+		t.Fatalf("a no-wait Acquire on a disjoint free card must be granted (disjoint backfill): %v", err)
+	}
+	_ = lease.Release()
 }

@@ -31,6 +31,7 @@ package fleetnode
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"sort"
@@ -58,6 +59,11 @@ type JobView struct {
 	State JobState
 	Data  json.RawMessage
 	Error string
+	// ErrClass is the err_class the failed run's lane filed its deferral under (core.Meta.ErrClass: gpu_busy,
+	// gpu_queued, timeout, ...), "" for a job that did not fail or whose failure carried none. It rides the
+	// poll beside Error as `err_class`, so the box that asked can tell a call another job held back from one
+	// that ran and broke without reading the reason's words (see classedError).
+	ErrClass string
 	// Agent marks a job created by an AGENT dispatch (AcceptAgent). The server
 	// keys /fleet/jobs/{id} bearer auth on it — media-created jobs stay
 	// tokenless (auth scope v1 = the agent lane only). Never serialized to the
@@ -94,6 +100,7 @@ type job struct {
 	state      JobState
 	data       json.RawMessage
 	err        string
+	errClass   string             // the err_class beside err (classedError); "" = none
 	agent      bool               // created via AcceptAgent → poll auth applies (server.go handleJob)
 	gated      bool               // AcceptSpec.Gated → poll auth applies without the agent marker (vision lane)
 	terminalAt time.Time          // set when state turns done|error; drives ttl eviction
@@ -877,11 +884,30 @@ func (j *Jobs) execute(id string, run func(context.Context) (json.RawMessage, er
 	}()
 	data, err := run(j.ctx)
 	if err != nil {
-		j.finish(id, nil, err.Error())
+		var ce *classedError
+		class := ""
+		if errors.As(err, &ce) {
+			class = ce.class
+		}
+		j.finish(id, nil, err.Error(), class)
 		return
 	}
-	j.finish(id, data, "")
+	j.finish(id, data, "", "")
 }
+
+// classedError is a run's failure together with the err_class the lane filed it under. A job that fails
+// publishes `error` (the reason, a sentence for a person) on its poll, and a lane that decided WHY it
+// did not run files a class beside the reason: gpu_busy and gpu_queued say another job held the card
+// the call needed, anything else (timeout, oom, ...) says it ran and broke. The class rides the poll as
+// `err_class`, so the box that asked can close the call's PAIR card quiet for the first and failed for
+// the second by the class and never by the reason's words (pairworkloads.CardOutcome). Only a run that
+// returned a deferral builds one; every other failure stays a plain error and publishes no class.
+type classedError struct {
+	msg   string
+	class string
+}
+
+func (e *classedError) Error() string { return e.msg }
 
 // Get returns a copy of the job's visible state; false = unknown/evicted (404).
 func (j *Jobs) Get(id string) (*JobView, bool) {
@@ -898,7 +924,7 @@ func (j *Jobs) viewLocked(id string) (*JobView, bool) {
 	if !ok {
 		return nil, false
 	}
-	return &JobView{ID: id, State: jb.state, Data: jb.data, Error: jb.err, Agent: jb.agent, Gated: jb.gated, WallSec: jb.wallSec, Progress: jb.progress}, true
+	return &JobView{ID: id, State: jb.state, Data: jb.data, Error: jb.err, ErrClass: jb.errClass, Agent: jb.agent, Gated: jb.gated, WallSec: jb.wallSec, Progress: jb.progress}, true
 }
 
 // Terminal reports whether a state is one a job never leaves (write-once).
@@ -1188,9 +1214,9 @@ func (j *Jobs) DrainAndStop(timeout time.Duration) {
 	j.stopOnce.Do(func() { close(j.stopJanitor) })
 }
 
-// finish records the run's outcome. Terminal states are write-once: a late
-// completion after a drain-mark (or an eviction) is dropped.
-func (j *Jobs) finish(id string, data json.RawMessage, errStr string) {
+// finish records the run's outcome (errClass is the class beside a failure's reason, "" = none).
+// Terminal states are write-once: a late completion after a drain-mark (or an eviction) is dropped.
+func (j *Jobs) finish(id string, data json.RawMessage, errStr, errClass string) {
 	j.mu.Lock()
 	jb, ok := j.m[id]
 	if !ok || jb.state == JobDone || jb.state == JobError {
@@ -1200,6 +1226,7 @@ func (j *Jobs) finish(id string, data json.RawMessage, errStr string) {
 	if errStr != "" {
 		jb.state = JobError
 		jb.err = errStr
+		jb.errClass = errClass
 	} else {
 		jb.state = JobDone
 		jb.data = data

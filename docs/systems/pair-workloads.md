@@ -22,13 +22,13 @@ pending work on the node that runs it. Off by default; two config keys turn it o
 
 | Path | Role |
 |---|---|
-| `internal/pairworkloads/pairworkloads.go` | the emitter: PAIR identity from `node-id.json` / `cluster/members.json`, `EngineFor`, `MethodFor`, frame building, `Send` / `Emit`, the ledger observer (`AttachLedger`, `FromLedger`) |
+| `internal/pairworkloads/pairworkloads.go` | the emitter: PAIR identity from `node-id.json` / `cluster/members.json`, `EngineFor`, `MethodFor`, frame building, `Send` / `Emit` / `EmitSync` (the post that returns when it has been attempted), the ledger observer (`AttachLedger`, `FromLedger`) |
 | `internal/delegate/pairevents.go` | `pairInflight` / `pairTerminal`: the delegation frames and the card identity pinned on `PlacedResult` |
 | `internal/delegate/run.go` | the call sites: `runRemote` (queued; running from the poll loop), `runLocal` (queued; running through `pairStartGate`), `attempt().finish` (terminal); `runner.pair` |
 | `gpu_leasecard.go` | the lease card: `leaseCardIdentity`, `newLeaseCard`, `running`, `finish`; wired into `runGPUReserve` (`gpu_cmd.go`) |
 | `internal/core/workmark.go` | `WithWorkingMark` / `MarkWorking`: the lane's "my work started" signal a call card turns running on |
-| `internal/pairworkloads/calls.go` | running cards for long tool calls: `Begin` (returns the call id), the per-task open-card queue the ledger observer `claim`s from (by call id first) |
-| `internal/pipeline/pipeline.go` | `CallTracker`, `SetCallTracker`, the `Begin` at the top of `Run` (stamps the call id on `core.Meta`) |
+| `internal/pairworkloads/calls.go` | running cards for long tool calls: `Begin` (returns the call id), the per-task open-card queue the ledger observer `claim`s from (by call id first), and `CardOutcome`, the one place a finished call becomes a terminal state (*A held card is not a failure*) |
+| `internal/pipeline/pipeline.go` | `CallTracker`, `SetCallTracker`, the `Begin` at the top of `Run` (stamps the call id on `core.Meta`), `closeCall` (the one deferred close: every return and a panic) |
 | `internal/ledger/ledger.go` | `Ledger.Observe`, called after every durable `Record` |
 | `internal/config/config.go` | `PairWorkloadsEnabled`, `PairWorkloadsEndpoint` |
 | `main.go` | attaches the ledger observer where the CLI/MCP ledger is opened |
@@ -37,7 +37,7 @@ pending work on the node that runs it. Off by default; two config keys turn it o
 | `internal/pairworkloads/relay.go` | the card relay (D26): `RelayConfig`, relay mode of the emitter (`relayRoute`, `buildRelay`, `postRelay`, `Mode`, `LocalIdentity`) and the member's decode (`ParseRelay`, `RelayJobID`, `RelayRequester`, `RelayLimiter`) |
 | `internal/fleetnode/pair_relay.go` | `POST /fleet/pair-relay`: the door (token gate, `PairRelayAdmissible`, asker, rate limit, body cap) |
 | `internal/pairworkloads/nodeinfo.go` | the identity fallback: this node's UUID from PAIR's loopback node-info when `node-id.json` is missing or unreadable, gated on the ingress answering (*Identity when the harness user is not PAIR's user*) |
-| `internal/pairworkloads/orphans.go` | the open-card register (0.133.1): one marker per in-flight card under `<state root>/pair-open/`, and the sweep that closes the cards of a dead process (`SweepOrphans`, `RunOrphanSweeper`) |
+| `internal/pairworkloads/orphans.go` | the open-card register (0.133.1): one marker per in-flight card under `<state root>/pair-open/`, and the sweep that closes the cards of a dead process (`SweepOrphans`, `RunOrphanSweeper`); a terminal frame parks its verdict in the marker before it is posted (`parkTerminal`) |
 | `internal/pairworkloads/remote.go` | `RemoteCall`: the one card and the one asker ledger row of a call routed to a fleet node (source 5 below) |
 | `internal/pairworkloads/wire.go` | the attribution headers an asker sends (`SetWireHeaders`, `WireHeadersFor`), `AskerName`, and `NodeName` (the dispatch host a node card is reported under) |
 | `internal/core/remoteattr.go` | `RemoteAttribution` / `RemoteAttributor`: the seam the remote lanes report through; `*pipeline.Pipeline` implements it (`internal/pipeline/remoteattr.go`) |
@@ -64,15 +64,80 @@ already using. PAIR's workload manager now accepts the same frames on a **loopba
 | `id`, `runId` | the harness job id (`agd-…` for delegations; `led-<ts>-<n>` for ledger rows). Both the same, so PAIR's store key `(originatedFrom, engine, runId, id)` is unique per job |
 | `model` | the seat / model tier (`qwen3.5-9b-agent`, `gemma-4-e4b`, …); for an NPU call the device (`coral-edgetpu`, `hailo-8l`, `rknpu`) — a forwarded call's ledger row is `<node>:<device>` and `FromLedger` splits it so the card runs on that node (`scheduledOn`) and shows the device |
 | `engine` | the real engine, with the identifiers PAIR's upstream engine PRs use: `llamacpp`, `vllm` (seat name contains `vllm`, or — for a seat behind this box's own endpoint — a name the box declares in `vllm_seats` directly or through the alias the llama-swap roster resolves it to: <node-b>'s `agent-pool` is an alias of `qwen3.8-27b-vllm-3card`; `Emitter.LocalEngine`, 0.132.7. Remote placements keep the name-based label, since a node's aliases live in its own roster), `whispercpp` (transcribe / whisper seats), `comfyui` (image, video, audio generation and editing, `run_graph`), and the accelerator itself for an NPU call (`coral-edgetpu`, `hailo-8l`, `rknpu`) — never `llamacpp` for work no llama.cpp seat did |
-| `state` | `queued` → `workload:submitted`, `running` → `workload:started`, `completed` → `workload:completed`, `failed` → `workload:errored` |
+| `state` | `queued` → `workload:submitted`, `running` → `workload:started`, `completed` → `workload:completed`, `failed` → `workload:errored`. These are PAIR's whole lifecycle: its workload manager defines no cancelled or skipped state, so a call that never ran closes `completed` or `failed` (*A held card is not a failure*) |
 | `originatedFrom` | this box's PAIR UUID, read from PAIR's `node-id.json` |
 | `scheduledOn` | the PAIR UUID of the node the job runs on, resolved by name from PAIR's `cluster/members.json`: for a remote placement's in-flight frames the name is the **host of the dispatch URL** (the tailnet name in `delegate_remotes`, which is the hostname PAIR's members carry — never the fleet node id, which PAIR cannot resolve; 0.126.1), and for the terminal frame the name the node reported; the local UUID for local work. **Since 0.131.2 a node is resolved from every name it goes by** (`Event.NodeAliases`: dispatch host, fleet node id, wire name) against member names *and* member addresses; the emitter remembers per job what the in-flight frame resolved to, so the terminal frame keeps the card where the job ran; a remote run none of the names resolves is stamped `null` — PAIR draws no line and names no node — never the delegator (before 0.131.2 every terminal frame of a node that reports its fleet id re-pointed the card at the delegator). **A view-only node resolves too** (unreleased): the names are matched against `<appdir>/configs/view-only-nodes.json` — the list of nodes the desktop shows that are not cluster members, `[{name, address, port, nodeUuid}]` — by name or address, case-insensitively, AFTER the members, so a member always wins; the file is cached and reloaded exactly as `members.json` is, and a missing or malformed file only means no view-only nodes (256 cards of a view-only node read `scheduledOn` null before) **A local run whose config `endpoint` is another box's engine** (a bench config aimed at <node-c>'s arm) carries that endpoint's host as the name, so the card lands on the box whose engine did the work, never on the delegator's (register C-58; `modelaffinity.EndpointHost`) |
 | `createdAt`, `startedAt`, `completedAt` | epoch ms; the last two `null` until known |
-| `error` | the defer reason / wire error / first failed acceptance check, on `failed` only |
+| `error` | the defer reason / wire error / first failed acceptance check, on `failed`; and the reason a call was held back, on the quiet `completed` close of a call that never got its card (*A held card is not a failure*) |
 | `requesterId` | `offload-harness/<session>` (the session the ledger already stamps), or `offload-harness` |
 
 Prompts, contexts and outputs are **never** part of the frame — PAIR's contract forbids them,
 and the harness has nothing to gain by sending them.
+
+### A held card is not a failure (unreleased)
+
+A media call that waited its window and found the card it needed held by another job does not fail:
+it either leaves a place in line and answers with a `waiter_token` (`err_class` `gpu_queued`) or, from a
+door that cannot resume, answers `gpu busy` (`gpu_busy`). A composition that waited its window for the
+process's one compose slot and found another composition holding it (`compose_busy`; the slot is no
+GPU card, a composition is CPU-class, but nothing ran and the answer says to call again) is the same
+case. "A busy card is a place in line" (register C-89, plan P13). Until 2026-10-09 such a call's card
+closed `failed`, red, with the reason; PAIR has no cancelled state to say "did not run", so the
+harness uses the two it has:
+
+| Call ended | Card closes | `startedAt` | `error` |
+|---|---|---|---|
+| succeeded | `completed` | when the lane held the engine | null |
+| **held back by another job's hold on what it needed** (`core.CardHeld`: `err_class` `gpu_queued`, `gpu_busy` or `compose_busy`) and its lane never held the engine | `completed`, a quiet card | null (never started) | the defer reason |
+| anything else that did not succeed (a render that broke, a configuration fault such as `gpu_lease_unavailable`, a deferral with no held class) | `failed`, red | when the lane held the engine, else null | the reason |
+| the lane panicked (a remote lane included: `core.CloseOnPanic`) | `failed` | as above | `panic: <value>`, posted before the panic goes on |
+
+`pairworkloads.CardOutcome` is the one function that decides this, and every writer of a call's closing
+frame goes through it, so the card is the same whichever of them gets there first: `Begin`'s `end`, the
+ledger row (`FromLedger`), `RemoteCall.Finish` and the node's fallback card (`nodeCard.finish`). The
+class decides, never the reason text. A **remote** card (`RemoteCall`, `nodeCard`) turns `running` when
+the node admits the job, which says nothing about the card, so its held close ignores the running mark
+and keeps whatever start the card showed.
+
+**The class has to reach the asker.** A call sent to a node closes its card on the asker's box, from the
+`Result` the lane rebuilt from the node's poll. The text, vision and stt lanes return the whole `Result` in
+the job's `data`, so they always carried the class. The media and compose lanes did not: a failed media job's
+poll published `error` (the reason) alone, and the lane rebuilt the deferral with an empty class, so a node
+whose card was held read, on its asker, as a red card that had started (found by the 2026-10-09 review of
+this fix, reproduced against the real node server). The node now files the class with the failure: the run
+closure returns a `classedError`, `Jobs.execute` stores it on the job record, and the poll publishes it as
+`err_class` beside `error` (`fleetnode.JobView.ErrClass`, `jobWire.err_class`); `mediaremote` and
+`composeremote` read it into `Meta.ErrClass`, so a deferral the node returned comes back to the caller with
+the class it was filed under, as a local one always did. The field is additive and `omitempty`, like
+`wall_sec` and `progress`: a failure with no class and a job that did not fail publish the keys they always
+did, an asker that does not know the field ignores it, and a node that does not publish it leaves the class
+empty, so its asker closes the card `failed` as it always did (update the node to get the quiet close).
+
+Why `completed` and not `workloads:remove`, the one other thing a producer can say: removal is outside the
+lifecycle the card relay carries (`ParseRelay` refuses it), so a relay-mode box could not use it, and it
+would drop the reason; the fork's local ingress does accept it, so on a box that reports to a local PAIR it
+remains an option. What `completed` costs, as the 2026-10-09 review read it from the fork's desktop source
+(`WorkloadItemCard.tsx`; not re-read while writing this, and the live dashboard was not looked at): the
+desktop paints a `completed` card gray, prints `error` only on a `failed` card, and labels every card that
+is not `running` "Ran on <node>" with a "Completed at" time. A held card therefore reads
+as a call that ran and finished, with the reason not on its face; it did not run, and the frame, PAIR's
+history, the harness ledger row (`gpu_queued`, `gpu_busy`, `compose_busy`) and the call's own reply all say
+so. Whether a quiet `completed` card or no card is the better reading is the operator's decision; either
+is this one function, plus the relay's method list for the second.
+
+Where the rule reaches, and where it stops. A text or vision call opens no `Begin` card (PAIR keys a
+card on its engine, and they learn it only as they run), so its only card is the ledger row's terminal
+one, and a `gpu_busy` row of such a call (a vision call skipped because a render held the card) now
+closes quiet through the same function; a door killed right after such a call loses that terminal-only
+card instead of leaving one open, which was already so and is benign (no false red, no orphan). Not
+switched, on purpose: the delegation card (`pairTerminal`) closes `failed` for any deferral. An
+agent contract's deferral carries a `defer_class`, not an `err_class`, and a placement that could not
+get a slot emits no card at all, so there is no held-card deferral on a delegation card to quiet. The
+relay member's terminal path for a card another box opened (`pl.remote`) is parked before its post like
+any other while this member still holds the card's in-flight marker in memory (the producer's frames
+arrive within one member process); a member that restarted since the in-flight frame finds the marker by
+name and writes the pending verdict only if the post fails, and a relayed card whose producer died closes
+by its terminal relayed frame or the age cap, as before.
 
 ## The two sources
 
@@ -109,8 +174,21 @@ and the harness has nothing to gain by sending them.
    marks (its wait is a whisper load inside llama-swap, which the lane cannot see), so its card
    stays queued until it ends. The call's own ledger row then closes THAT card (`claim`): same id,
    engine and creation, the start the mark recorded (none if it never started), the row's model and
-   outcome. A call that wrote no row (a cache hit) is closed when `Run` returns (`closeCall`; a
-   panic closes it failed). **A row names its call.** `Begin` returns the call id (the card's own
+   outcome. A call that wrote no row (a cache hit, or a ledger another process holds) is closed when
+   `Run` returns (`closeCall`, deferred at the `Begin`, so no return can skip it; a panic closes it
+   failed). **The close is on the wire before `Run` returns** (unreleased; the 2026-10-09 incident). A door
+   answers the moment its call returns, and a client that opens a fresh stdio door per attempt closes
+   stdin and kills the process right after the reply. The close used to be a background `Emit` (the
+   row's, from the observer's goroutine; `end`'s own), so a killed door left the card's `queued`
+   marker in the register and the orphan sweep closed the card "harness process exited before the job
+   finished" for a call that had answered cleanly: two red cards on the dashboard for two attempts
+   that each got a clean `gpu queued`. Now `end` posts its own close inline (`EmitSync`, bounded at
+   2 s), and when the row claimed the card `end` waits (`awaitRowClose`, at most 4 s) for the observer's
+   frame, posted inline on its own goroutine, to land. A PAIR that hangs on the POST therefore costs a
+   call that bound once and never its answer, and the terminal verdict is already parked in the marker
+   (below), so the sweep sends the true outcome even then. A hang EARLIER, in planning the frame (a
+   relay's health probe, a cold identity read), is not covered: the in-flight marker is then all the
+   register holds, and the sweep closes the card as an orphan. **A row names its call.** `Begin` returns the call id (the card's own
    job id), `Run` stamps it on `core.Meta.CallID`, the ledger row carries it as `call_id`, and
    `claim(task, callID)` closes exactly that card. Matching the oldest open card of the task
    instead (the rule before this change) let overlapping calls of one task trade cards: concurrent
@@ -182,7 +260,21 @@ never the entry tier's correctness-label snapshot, whose `cards_tokens` is the 0
      when the card opens (`hyperframes` for a composition, otherwise the task's own); the model is the
      task until the node's result names the seat. `queued` when the call is dispatched, `running`
      when the node's job state turns `running`, then `completed`, or `failed` with the result's
-     reason (a node that answered counts as started, so a finished card never reads "never started").
+     reason (a node that answered counts as started, so a finished card never reads "never started";
+     except a node that answered that another job held its card, which ran nothing and closes the card
+     quiet, *A held card is not a failure*; for the media and compose lanes the class arrives on the
+     node's poll, as `err_class`). The terminal frame is posted inline before the lane
+     returns its result (`Finish` uses `EmitSync`): the door answers at once and may be killed right
+     after, as for a local call. The asker's ledger row is recorded BEFORE that post (it is local file
+     I/O, and the post can take its whole bound when PAIR hangs), so a door killed inside the bound loses
+     the card's close, which the register has parked, and never the call's audit and savings row. Every
+     lane defers `core.CloseOnPanic(h)` right after `BeginRemote` (stt, text and vision on both routes):
+     a panic after the card opened (in the dispatch, the poll or the fetch) finishes the call as a deferred
+     infrastructure failure carrying the panic's text, so the card closes `failed` and the row is written,
+     and the panic goes on, as `closeCall` does for a local call. On a normal return the guard does
+     nothing. On the auto route's fallback to a local run, `Discard` closes the
+     attempt that reached a node the same way, so a PAIR that hangs delays the local run by the
+     post's bound (a refused connection is instant).
    - **One asker ledger row** (door, route, placement, `node`, `node_id`, `fleet_job_id`, latency,
      the deferred and error fields), written for every remote call. It carries `card_by_caller`,
      which `AttachLedger` skips, so the observer never cards it a second time.
@@ -487,7 +579,24 @@ side can know the producer died, so the harness retires its own orphans:
   (PAIR restarting, an answer slower than 2 s) replaces the marker as a *pending* terminal frame,
   which the next sweep resends as it is — the job's real verdict — without waiting for the
   producer to exit (dropping it would lose the only record of a card PAIR still shows running;
-  keeping the in-flight marker would later close a finished job as `failed`). The marker is written atomically
+  keeping the in-flight marker would later close a finished job as `failed`). **The pending marker is
+  written before the post, not after it** (unreleased; `track` → `parkTerminal`, on the caller's
+  goroutine): a process killed while its terminal post is in flight, or before a background post has
+  started, leaves the verdict itself in the register, and the sweep sends that instead of "harness
+  process exited before the job finished" for a job whose outcome it knew. The one cost is a window of
+  milliseconds in which a LIVE producer's marker is already pending. The producer's own emitter keeps
+  its sweeps out of it: it remembers the markers it has a post in flight for (`Emitter.posting`, set in
+  `track` before the marker is written and cleared in `untrack` once the marker is removed or parked
+  again), because its first-`Emit` sweep runs on a goroutine and a call short enough to close before
+  that goroutine ran (a deferral, a refused dispatch) was otherwise closed twice (2026-10-10: three tests
+  of three packages on a 4-vCPU CI runner, and on one processor every time). A post that fails parks
+  the frame again and clears the mark, so the next sweep, the emitter's own included, sends it. A
+  sweeper of another process, or fleet-serve's periodic one (an emitter of its own), that reads the
+  marker in that window resends an identical terminal frame, which PAIR merges as an equal-rank no-op,
+  and the producer's own removal of the marker after its post is idempotent. The other cost is one more marshal and
+  atomic write (with Windows' bounded rename retry) on the caller's goroutine for every terminal frame
+  that has an open marker: delegations, lease cards, node cards and seat-watch `closeAll` pay it too,
+  not only the door path. The marker is written atomically
   (temp + rename) on the caller's goroutine, so a job's markers follow its frames in order; every
   error is swallowed (a marker that cannot be written only means a card that cannot be closed after
   a crash — never a failed or slowed job).
@@ -589,6 +698,18 @@ appears in PAIR's Jobs list on this box **and** on the node that ran it, reading
   sweep closes it as `failed` within one fleet-serve sweep interval (45 s), or on the next emit of
   any harness process on the box. A card still stuck: check `<state root>/pair-open/` for its
   marker (`<pid>-<job id>.json`) and whether a harness process on the box has either key on.
+- **A red card "harness process exited before the job finished" for a call that answered**: before
+  this change (unreleased) a long call's close was a background post, and a client that kills its door the
+  moment it has the reply took the close with it. Now the close is on the wire before the call returns
+  and the verdict is parked before any post; seeing this on a current build means the process really
+  was killed mid-call (a crash, a killed session), which is what the text says.
+- **A held-card call shows `Completed`, not red**: that is *A held card is not a failure*. The reason
+  is in the frame's `error` (PAIR's `workloads-history.json`), not on the card face; the harness
+  ledger row says `gpu_queued`, `gpu_busy` or `compose_busy`.
+- **A remote media or compose call whose node's card was held still shows red and started**: the
+  node is older than this change and does not publish `err_class` on its poll, so its asker cannot tell
+  a held card from a render that broke and closes the card `failed`. Update the node. The text, vision and
+  stt lanes never had the gap.
 - **A remote call has no card on its asker**: the asker's emitter is not enabled (the node then cards it,
   as `Requested from fleet:<asker>`, only when the node's own emitter is enabled), or no node was chosen
   (a placement defer writes a row and no card), or the node is an older build that does not read the
@@ -608,4 +729,17 @@ appears in PAIR's Jobs list on this box **and** on the node that ran it, reading
 
 **Delivery before exit (0.132.8).** Frames go out on background goroutines; `delegate.RunWith` waits
 for its emitter before returning and the one-shot CLI cleanup waits for the ledger emitter, so a
-short-lived process never exits with a card's terminal frame still in flight.
+short-lived process never exits with a card's terminal frame still in flight. That covered a process
+that exits on its own; it did not cover a long-lived MCP door that a client kills right after a reply
+(2026-10-09, unreleased): a long call's close, and a remote call's, are now posted inline before the call
+returns (source 3 and 5), and the verdict is parked in the register before any post (*Orphaned cards*).
+**A delegation's abandoned subtask** is the last card that could outlive its answer: a seat that ignores
+its context is abandoned at the call deadline and the door answers a budget defer for it, but the
+goroutine's own terminal frame is dropped once the run is shut. `RunWith` therefore keeps an account of
+the cards it opened (`notePair`) and `shutPair` closes the ones still open, `failed`, under the
+identity their in-flight frames named, with the deadline's words ("call deadline reached: the subtask
+had not stopped when the call returned"), before `pair.Wait()` delivers them. Before this such a card
+stayed `queued` or `running` until the door's process died and the orphan sweep closed it. The verdict
+is the call's, not the node's: a subtask placed on a fleet node closes `failed` here while the node may
+still be running the job (the published budget defer says as much: it cannot be recalled), exactly as a
+cooperating subtask the deadline cancelled already did.

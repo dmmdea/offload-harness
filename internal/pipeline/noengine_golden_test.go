@@ -39,7 +39,8 @@ func TestEveryRouteWithNoEngineKeyKeepsItsExactArgv(t *testing.T) {
 	got := run(t, func(c *config.Config) { c.VideoGenScript = stub }, core.Request{
 		Task: core.TaskGenerateVideo, Input: "p", Params: map[string]any{"out": out("v1.mp4"), "seed": 123},
 	}, "video_path")
-	if want := []string{out("v1.mp4"), "p", "--seed", "123", "--wan-vvram-gb", "7"}; !reflect.DeepEqual(got, want) {
+	// 0.178.0 added videogen_wan_decode (default "tiled"), which the runner receives as --wan-decode.
+	if want := []string{out("v1.mp4"), "p", "--seed", "123", "--wan-vvram-gb", "7", "--wan-decode", "tiled"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("video argv changed:\n got %v\nwant %v", got, want)
 	}
 

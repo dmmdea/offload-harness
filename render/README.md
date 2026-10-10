@@ -36,6 +36,8 @@ node render/comfy-render.mjs out.png "an abstract product hero" \
 
 ## Notes
 - Writes a single PNG to the output path you give; first run after a model swap is slow on a low‑VRAM card. The poller waits **30 min by default**, tunable with `--wait-sec` or `COMFY_WAIT_SEC` (the Go harness sets `COMFY_WAIT_SEC` to match its own timeout, and its process-tree kill stays the hard stop). A ComfyUI that stops answering *mid-render* aborts early after `COMFY_DEAD_SEC` (default 240 s) to release the GPU slot — consecutive failed polls, not a slow one: a healthy server still answers `/history` with no output yet and resets the counter. `COMFY_WAIT_SEC` is wall-clock time, not a poll count (0.158.1). A ComfyUI that answers HTTP but can no longer render (a sticky CUDA error leaves `/history` empty and `/system_stats` answering an error) ends the wait after two HTTP-error answers from `/system_stats` in a row, probed 15 s apart, with a *server unusable* error; `comfy-render.mjs` then exits 3 (1 for any other failure, 2 for a caller mistake) and `comfy-generate.mjs --batch` stops at that job.
+- **The output is written atomically (0.178.0).** The png (and every other output of the helpers in this directory) goes to a staged sibling, `<out>.partial-<pid>-<n>`, in the same directory and is renamed over `<out>` only after the write finished, so a failed render never leaves a file at `<out>` and a good file already there is kept. Before, `writeFileSync(out, …)` truncated the target first: on 2026-10-09 a full data drive left 21 zero-byte PNGs in a 36-picture batch, and a skip-existing script reads a zero-byte file as finished. A failed write names the output in its error (`ENOSPC: no space left on device, write (writing <out>)`); an empty payload is refused. A runner killed mid-write can leave a `*.partial-<pid>-<n>` file; it never carries the output's name. The helper is `atomic-out.mjs` (`atomic_out.py` for the Python workers).
+- **`--batch` exit codes (`comfy-generate.mjs`, `comfy-inpaint.mjs`).** `0` every job rendered; `4` the batch ran every job and at least one failed (the rows with `"ok":false` in the `--results` file name them, and the last log line gives the counts); `1` the batch could not run to the end: a setup error, a ComfyUI that became unusable (above), or a full disk (`ENOSPC`, `EDQUOT`, `EROFS`), where the failed job and every later job get a row (`not run: the disk is full at job N/M, writing <out> …`; the inpaint batch writes its `_row: "aborted"` line with `reason: "disk_full"`); `2` usage. `local-offload generate-image --batch` ends with the same codes. Until 0.178.0 a batch with failed jobs exited 0, so a caller had to grep the log for `RENDER FAILED`. `4` is not `3` on purpose: `3` is `comfy-render.mjs`'s *server unusable* code for its parent. The results file format did not change. The table, with the Go door, is in `docs/systems/media-generation.md`.
 - Standalone tool (not part of the Go binary) — generation is a different stack (PyTorch/diffusion) from the GGUF text/vision tiers, and is intentionally kept separate.
 
 ---
@@ -65,6 +67,8 @@ zero-always-warm (it shares the 8 GB with llama-swap, so it must coordinate). Ta
   reclaim) + `freeLlamaSwap` / `freeComfy`.
 - **`comfy-output.mjs`** — finds the produced file in `/history`. `VHS_VideoCombine` writes
   mp4 under the **`gifs`** key for all formats (a ComfyUI quirk).
+- **`atomic-out.mjs`** — delivers the produced file: staged sibling, then rename (see the
+  image tool's Notes above); `atomic_out.py` is the same for the Python workers.
 - **`preflight-graph.mjs`** — validates a built graph against the live `/object_info` (all
   required inputs present) **before** spending a GPU cycle.
 
@@ -75,6 +79,7 @@ node render/comfy-video.mjs <out.mp4> <still.png> "<prompt>" \
      --model hunyuan --frames 17 --width 480 --height 848 \
      [--steps 50] [--seed N] [--negative "..."] [--reserve-vram 2.0] [--no-lock] [--keep-comfy]
 node render/comfy-video.mjs out.mp4 still.png "<prompt>" --model wan --frames 49   # secondary
+node render/comfy-video.mjs out.mp4 still.png "<prompt>" --wan-decode plain       # wan: tiled (default) | plain | auto
 node render/preflight-graph.mjs hunyuan   # validate a graph vs a running ComfyUI, no gen
 ```
 
@@ -85,6 +90,17 @@ node render/preflight-graph.mjs hunyuan   # validate a graph vs a running ComfyU
 - **VAE decode is the OOM cliff** — `temporal_size: 4096` (decode-all-at-once) HARD-CRASHED the
   display driver at 33 frames. `vaeTemporalSize: 16` chunks the decode temporally and fits;
   raise toward 4096 only on bigger GPUs (fewer motion seams).
+- **Wan 2.2's decode is a mode, `--wan-decode tiled|plain|auto`** (config `videogen_wan_decode`). `tiled` (the
+  default) is `VAEDecodeTiled`, the node the Wan graph always used; `plain` is `VAEDecode`, 38 s at a 10.3 GB peak
+  against 412 s at 3.2 GB on a 16 GB card (A/B 2026-10-03, with ComfyUI dynamic VRAM on; that A/B's tiled arm was one
+  chunk, and the clip's shape is unrecorded). `auto` reads the render card's total VRAM from `GET /system_stats` and
+  runs plain from 12 GiB, else tiled, and tiled when the card cannot be read; it logs its choice on stderr. `plain`
+  and `auto` are an explicit opt-in, because no render at the 16 GB tiers' own shape (1280x720x81) was ever run with
+  plain: ComfyUI's estimate for the plain decode follows the frame's resolution (12.0 GiB at 1280x720, on a card that
+  reports 15.9 GiB), it retries an out-of-memory plain decode tiled only once, and a second out-of-memory fails a
+  the whole render after sampling. The default flips to `auto` only after a live acceptance render at that shape
+  shows a decode close to the measured 38 s and no `Ran out of memory when regular VAE decoding` line in the ComfyUI log. Hunyuan 1.5 and
+  LTX 2.5 are not touched by it. Detail: `docs/systems/media-generation.md`.
 - **`--reserve-vram 2.0`** keeps headroom for the Windows display/WDDM (too low → a decode spike
   kills the whole process with no traceback).
 - **Qwen2.5-VL fp8 text encoder CPU-offloads automatically** (~free with 64 GB RAM, saves 4–6 GB).

@@ -44,6 +44,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/grounding"
 	"github.com/dmmdea/offload-harness/internal/health"
 	"github.com/dmmdea/offload-harness/internal/hostsample"
+	"github.com/dmmdea/offload-harness/internal/imagegen"
 	"github.com/dmmdea/offload-harness/internal/judge"
 	"github.com/dmmdea/offload-harness/internal/knn"
 	"github.com/dmmdea/offload-harness/internal/ledger"
@@ -215,9 +216,31 @@ func main() {
 		os.Exit(2)
 	}
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "error:", err)
-		os.Exit(1)
+		code, line := exitStatus(err)
+		fmt.Fprintln(os.Stderr, line)
+		os.Exit(code)
 	}
+}
+
+// exitCodeError is a verb that ran to the end and already printed its answer, but whose status says
+// the answer is not all good: it ends the process with its own exit code and a plain stderr line
+// instead of exit 1 and "error: ...". generate-image --batch uses it for "every job ran and some
+// failed" (imagegen.BatchExitJobsFailed, the code render/comfy-generate.mjs --batch ends with).
+type exitCodeError struct {
+	code int
+	msg  string
+}
+
+func (e *exitCodeError) Error() string { return e.msg }
+
+// exitStatus is the exit code and the stderr line for a verb's error: its own code for an
+// exitCodeError, else 1 and "error: <err>".
+func exitStatus(err error) (int, string) {
+	var ec *exitCodeError
+	if errors.As(err, &ec) {
+		return ec.code, ec.msg
+	}
+	return 1, "error: " + err.Error()
 }
 
 // hoistGlobalConfig pulls a global "--config <path>" / "--config=<path>" (or the
@@ -281,6 +304,7 @@ Usage:
   local-offload generate-audio <out> "<text>" [--kind voice|music] [--voice generalist|finetuned|endpoint] [--tts-voice NAME] [--clone ref.wav] [--lang es] [--seconds N] [--seed N]
   local-offload generate-image "<prompt>" [--negative "..."] [--width N] [--height N] [--steps N] [--seed N] [--out path] [--refine=false] [--family NAME] [--transparent]
   local-offload generate-image --batch jobs.jsonl    N prompts through ONE warm ComfyUI session (checkpoint loads once)
+                                         exit 0 every job rendered, 4 the batch ran every job and some failed (the JSON names them), 1 it stopped or errored
   local-offload inpaint-image <image> --mask m.png --prompt "..."   re-render ONLY the masked region (white=repaint)
   local-offload upscale-image <image> [--scale F] [--width N --height N] [--method lanczos] [--model name] [--out path]   ESRGAN enlarge (this machine's upscale_model)
   local-offload generate-video <out.mp4> <still.png> "<prompt>" [--model hunyuan|wan] [--frames 49] [--seed N] [--reserve-vram F] [--fast] [--upscale]
@@ -970,6 +994,15 @@ func runGenerateImage(args []string) error {
 			}
 		}
 		emitResult(res, *asJSON, "", *compactFlag)
+		// Every job ran and some failed (0.178.0): the JSON above keeps reporting per-job status, and the
+		// exit status says so too, with the code the render helpers end such a batch with, so a shell
+		// caller no longer has to parse the JSON (or grep a log) to learn that pictures are missing. A
+		// stop (berr), a deferral (a busy card) and a clean batch are unchanged.
+		if berr == nil && !res.Deferred && ok < len(items) {
+			return &exitCodeError{code: imagegen.BatchExitJobsFailed, msg: fmt.Sprintf(
+				"generate-image --batch: %d of %d jobs failed (exit %d); the items with \"ok\": false in the output name them",
+				len(items)-ok, len(items), imagegen.BatchExitJobsFailed)}
+		}
 		return berr
 	}
 

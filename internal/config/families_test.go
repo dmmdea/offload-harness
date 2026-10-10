@@ -249,6 +249,7 @@ func TestLaunchAndEditEnumsRefuseTheLoad(t *testing.T) {
 		"gen_edit_family":       `"flux-kontext"`,
 		"gen_edit_cache_device": `"vram"`,
 		"gen_edit_resolution":   `1000`,
+		"gen_edit_schedule":     `"official"`,
 	} {
 		t.Run(key, func(t *testing.T) {
 			_, err := Load(writeCfg(t, `{"model":"x","`+key+`":`+bad+`}`))
@@ -260,6 +261,7 @@ func TestLaunchAndEditEnumsRefuseTheLoad(t *testing.T) {
 	for _, good := range []string{
 		`"imagegen_schedule":"comfy"`, `"comfy_dynamic_vram":"off"`, `"comfy_cuda_device":"1,2"`,
 		`"gen_edit_family":"qwen-image-2.1"`, `"gen_edit_cache_device":"off"`, `"gen_edit_resolution":2048`,
+		`"imagegen_schedule":"turbo"`, `"gen_edit_schedule":"turbo"`,
 	} {
 		if _, err := Load(writeCfg(t, `{"model":"x",`+good+`}`)); err != nil {
 			t.Errorf("%s must load: %v", good, err)

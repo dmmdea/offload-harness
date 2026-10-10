@@ -213,6 +213,8 @@ func TestRemoteMediaRefusedDispatchClosesTheCardFailed(t *testing.T) {
 }
 
 // The node's own verdict on a job it ran (a render that deferred) closes the card failed with its reason.
+// This deferral carries no err_class, which is also what a node too old to publish the field sends: the
+// card cannot be told from a failure, so it closes as one.
 func TestRemoteMediaNodeDeferClosesTheCardFailed(t *testing.T) {
 	n := startNode(t, nodeOpts{})
 	n.runner.deferAs = "ltx: out of memory"
@@ -227,6 +229,102 @@ func TestRemoteMediaNodeDeferClosesTheCardFailed(t *testing.T) {
 	}
 	if rows := rig.rows(); len(rows) != 1 || !rows[0].Deferred || rows[0].Reason == "" {
 		t.Fatalf("rows = %+v", rows)
+	}
+}
+
+// sawRunning reports whether the asker has moved the card to running: it polled the node and saw the job
+// running.
+func (r *pairRig) sawRunning() bool {
+	r.e.Wait()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, f := range r.frames {
+		if f["params"].(map[string]any)["workloadInfo"].(map[string]any)["state"] == "running" {
+			return true
+		}
+	}
+	return false
+}
+
+// runAdmittedThenDeferred runs a remote call to a node that admits the job and then answers with the
+// deferral n.runner is set to give. A media job is claimed to running when the node admits it, before its
+// lane waits for the GPU, so in production the asker's polls see `running` first and the deferral comes
+// back tens of seconds later; hold keeps the node's runner from answering until the asker's card has
+// turned running, so the test runs that order and not whichever the scheduler picks.
+func runAdmittedThenDeferred(t *testing.T, n *node, rig *pairRig, hold chan struct{}, req core.Request) core.Result {
+	t.Helper()
+	go func() {
+		deadline := time.Now().Add(10 * time.Second)
+		for !rig.sawRunning() && time.Now().Before(deadline) {
+			time.Sleep(5 * time.Millisecond)
+		}
+		close(hold)
+	}()
+	return Run(context.Background(), clientCfg(t, n), rig.p, req, "remote", nil)
+}
+
+// The node's verdict that ANOTHER job holds its card (its lane deferred gpu_queued or gpu_busy: the render
+// never ran) is a call held back, not a failure. The err_class rides the node's poll back to the asker
+// (fleetnode `err_class`), whose card closes quiet: completed, the reason in `error`, no failed frame, on
+// both doors. Through the real node server, the real poll and the real Pipeline as the asker's attributor.
+// Before the class crossed the wire this card closed failed, red, for the same call (the 2026-10-09 review
+// of the pair-close fix reproduced it).
+func TestRemoteMediaNodeHeldDeferClosesTheCardQuiet(t *testing.T) {
+	reason := "gpu queued: card(s) 0000 held by media (epoch 7); your place in line is #1, call again with waiter_token=tk-9f2c"
+	for _, class := range []string{core.ErrClassGPUQueued, core.ErrClassGPUBusy} {
+		for name, door := range attrDoors(t) {
+			t.Run(class+" "+name, func(t *testing.T) {
+				hold := make(chan struct{})
+				n := startNode(t, nodeOpts{mediaInputs: true, hold: hold})
+				n.runner.deferAs, n.runner.deferClass = reason, class
+				rig := newPairRig(t, true, hostOf(t, n))
+				res := runAdmittedThenDeferred(t, n, rig, hold, door.req())
+				if res.OK || !res.Deferred || res.Meta.ErrClass != class || res.Meta.Node != "render-node" || res.Reason != reason {
+					t.Fatalf("Run: %+v, want the node's deferral with its class", res)
+				}
+				// RUN HAS RETURNED: THE DOOR ANSWERS NOW. The card is closed on the wire and out of the register,
+				// which is all the orphan sweep reads, so no later process can call it "harness process exited".
+				if open := rig.openMarkers(); len(open) != 0 {
+					t.Fatalf("the register still holds %v when the door answers: the sweep would close the card as an orphan", open)
+				}
+				cards := rig.cards()
+				if cards["failed"] != nil || cards["completed"] == nil || cards["completed"]["error"] != reason {
+					t.Fatalf("cards = %v, want one completed card carrying the reason and no failed frame", cards)
+				}
+				// The node admitted the job, so the card was already running when the answer came: the start it
+				// showed stays, and none is invented for a card that never ran.
+				if cards["running"] == nil || cards["completed"]["startedAt"] != cards["running"]["startedAt"] {
+					t.Fatalf("cards = %v, want the start the running frame showed", cards)
+				}
+				if rows := rig.rows(); len(rows) != 1 || !rows[0].Deferred || rows[0].ErrClass != class || rows[0].Node == "" || !rows[0].CardByCaller {
+					t.Fatalf("rows = %+v, the asker's row keeps the class", rows)
+				}
+			})
+		}
+	}
+}
+
+// A class that is not a held card (the render ran and broke) still closes failed with the node's reason
+// and the start the card showed.
+func TestRemoteMediaNodeBrokenRenderWithAClassClosesTheCardFailed(t *testing.T) {
+	for name, door := range attrDoors(t) {
+		t.Run(name, func(t *testing.T) {
+			hold := make(chan struct{})
+			n := startNode(t, nodeOpts{mediaInputs: true, hold: hold})
+			n.runner.deferAs, n.runner.deferClass = "image generation failed: ComfyUI did not answer in 600s", "timeout"
+			rig := newPairRig(t, true, hostOf(t, n))
+			res := runAdmittedThenDeferred(t, n, rig, hold, door.req())
+			if res.OK || res.Meta.ErrClass != "timeout" {
+				t.Fatalf("Run: %+v", res)
+			}
+			cards := rig.cards()
+			if cards["completed"] != nil || cards["failed"] == nil || cards["failed"]["error"] != n.runner.deferAs || cards["failed"]["startedAt"] == nil {
+				t.Fatalf("cards = %v, want one failed card that started, carrying the reason", cards)
+			}
+			if rows := rig.rows(); len(rows) != 1 || !rows[0].Deferred || rows[0].ErrClass != "timeout" {
+				t.Fatalf("rows = %+v", rows)
+			}
+		})
 	}
 }
 

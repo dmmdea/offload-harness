@@ -9,7 +9,7 @@
 //   node render/comfy-video.mjs <out.mp4> <still.(png|jpg)> "<prompt>" \
 //        [--model wan|hunyuan] [--frames 49] [--width 832] [--height 480] \
 //        [--steps N] [--cfg X] [--fast] [--hero] [--seed N] [--negative "..."] \
-//        [--wan-vvram-gb 7] [--wan-loader auto|native|gguf-distorch] \
+//        [--wan-vvram-gb 7] [--wan-loader auto|native|gguf-distorch] [--wan-decode auto|plain|tiled] \
 //        [--upscale-model name.pth] [--upscale-width 1920] [--upscale-height 1080] \
 //        [--api http://127.0.0.1:8188] [--no-lock] [--keep-comfy]   |   <out.mp4> --graph wf.json
 //   --fast: OPT-IN distilled speed path (wan; 8-step lightx2v, weaker motion). --hero:
@@ -19,20 +19,28 @@
 //   auto (default, decides per expert file by extension) | native (plain UNETLoader, no
 //   DisTorch2/MultiGPU, dynamic-VRAM streaming does the offload; refused on a .gguf
 //   expert) | gguf-distorch (forces the historical DisTorch2/MultiGPU wrapper on both
-//   experts). --upscale-model: post-decode ESRGAN upscale
-//   (+ --upscale-width/height to resize, e.g. 720p->1080p).
+//   experts). --wan-decode (the harness passes videogen_wan_decode; wan only): tiled (default;
+//   VAEDecodeTiled, the graph's historical node) | plain (VAEDecode) | auto. plain and auto are an explicit
+//   opt-in until a live render at the 16 GB tiers' shape (1280x720x81) has shown the plain decode fits there
+//   (docs/systems/media-generation.md, "The Wan decode is per card"). auto reads the
+//   render card's total VRAM from GET /system_stats (devices[0], the primary device) and runs the
+//   plain decode on a card of at least 12 GiB, else tiled; an unreadable answer is tiled. The
+//   chosen node and why go to stderr. LTX 2.5 and Hunyuan 1.5 ignore it (they keep VAEDecodeTiled).
+//   --upscale-model: post-decode ESRGAN upscale (+ --upscale-width/height to resize, e.g.
+//   720p->1080p).
 //
 // Before anything is submitted, every node class the graph names is checked against the
 // running ComfyUI's /object_info (render/comfy-nodes.mjs): a missing custom-node pack is a
 // one-line MISSING_NODE defer naming the class and the pack, not a 400 at the POST.
-import { writeFileSync, readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
+import { writeFileAtomic } from "./atomic-out.mjs";
 import { withGpuSlot } from "./gpu-lock.mjs";
 import { COMFY_DIR, comfyApi } from "./comfy-lifecycle.mjs";
 import { stageInput as stageToInput } from "./comfy-input.mjs";
 import { firstOutputFile } from "./comfy-output.mjs";
 import { assertNodeClasses } from "./comfy-nodes.mjs";
 import { buildHunyuan15I2V } from "./wf-hunyuan15-i2v.mjs";
-import { buildWan22I2V } from "./wf-wan22-i2v.mjs";
+import { buildWan22I2V, chooseWanDecode, WAN_DECODE_MODES, WAN_DECODE_DEFAULT } from "./wf-wan22-i2v.mjs";
 import { buildLtx25I2V } from "./wf-ltx25-i2v.mjs";
 import { buildH3AV } from "./wf-h3-av.mjs";
 import { buildAceStep } from "./wf-acestep.mjs";
@@ -71,6 +79,57 @@ export function wanVvramGb(flags) {
   return n;
 }
 
+// wanDecodeMode parses --wan-decode (the harness passes config videogen_wan_decode): absent is the builder's
+// default, tiled, and a value outside the builder's modes is refused rather than guessed, because one that
+// quietly fell back to the default would hide a typo behind a render that still works. An empty or dangling
+// flag is refused too.
+export function wanDecodeMode(flags) {
+  if (!("wan-decode" in flags)) return WAN_DECODE_DEFAULT;
+  const raw = flags["wan-decode"];
+  if (!WAN_DECODE_MODES.includes(raw)) {
+    throw new Error(`--wan-decode must be ${WAN_DECODE_MODES.join("|")}, got ${JSON.stringify(raw)}`);
+  }
+  return raw;
+}
+
+// readRenderCard asks the ComfyUI this run submits to how big its render card is: GET /system_stats,
+// devices[0].vram_total (bytes). devices[0] is the primary device, the one a VAE decode runs on: ComfyUI
+// lists it first on purpose, so clients that read devices[0] keep working while it also lists every
+// MultiGPU donor behind it. A CPU or MPS device reports the host's RAM as vram_total (ComfyUI's
+// get_total_memory), which says nothing about a card, so it is no reading. Returns { vramTotal, name }, or
+// { error } for every way the answer can fail to name a card; the caller then keeps the tiled decode.
+export async function readRenderCard(api, { fetchImpl = fetch, timeoutMs = 8000 } = {}) {
+  let r;
+  try {
+    r = await fetchImpl(`${api}/system_stats`, { signal: AbortSignal.timeout(timeoutMs) });
+  } catch (e) {
+    return { error: `GET /system_stats failed: ${e?.message || e}` };
+  }
+  if (!r || !r.ok) return { error: `GET /system_stats answered HTTP ${r?.status}` };
+  let body;
+  try { body = await r.json(); } catch { return { error: "GET /system_stats returned no JSON" }; }
+  const dev = Array.isArray(body?.devices) ? body.devices[0] : undefined;
+  if (!dev || typeof dev !== "object") return { error: "GET /system_stats lists no device" };
+  if (dev.type === "cpu" || dev.type === "mps") {
+    return { error: `the primary device is ${dev.type}, whose vram_total is the host's RAM, not a card's` };
+  }
+  const bytes = dev.vram_total;
+  if (typeof bytes !== "number" || !Number.isFinite(bytes) || bytes <= 0) {
+    return { error: "GET /system_stats gives its primary device no usable vram_total" };
+  }
+  return { vramTotal: bytes, name: typeof dev.name === "string" ? dev.name : "" };
+}
+
+// NON_WAN_MODELS are the --model values buildGraphFromArgs sends to a builder other than the Wan one;
+// every other value falls through to Wan, exactly as the dispatch there does. A test reads this file's
+// dispatch literals and fails when one is missing here, so a new family cannot start reading a card.
+const NON_WAN_MODELS = Object.freeze(["ace", "h3", "ltx25", "hunyuan"]);
+
+// runsWanGraph: does this invocation build the Wan 2.2 graph (so --wan-decode means something)?
+export function runsWanGraph(flags) {
+  return !flags.graph && !NON_WAN_MODELS.includes(flags.model);
+}
+
 // ComfyUI's LoadImage reads from <COMFY_DIR>/input. Stage the still there.
 function stageInput(stillPath) {
   return stageToInput("render_in", stillPath);
@@ -78,7 +137,9 @@ function stageInput(stillPath) {
 
 // buildGraphFromArgs builds the API-format graph the flags describe. stage copies a still
 // into ComfyUI's input dir and returns the name LoadImage reads (injectable for tests).
-export function buildGraphFromArgs(pos, flags, { stage = stageInput } = {}) {
+// vramTotalBytes is the render card's total VRAM when the caller has read it (buildGraphForRun
+// does); only the Wan graph's --wan-decode auto reads it, and without it auto builds the tiled decode.
+export function buildGraphFromArgs(pos, flags, { stage = stageInput, vramTotalBytes } = {}) {
   // model default is wan (Hunyuan needs files absent on this box). Declared here (NOT at
   // the graph-selection line) so the width/length ternaries below and the log line can
   // read it without a temporal-dead-zone ReferenceError.
@@ -171,10 +232,38 @@ export function buildGraphFromArgs(pos, flags, { stage = stageInput } = {}) {
       if (flags["pool-donor"]) common.poolDonor = flags["pool-donor"];
       graph = buildLtx25I2V(common);
     } else {
-      graph = model === "hunyuan" ? buildHunyuan15I2V(common) : buildWan22I2V(common);
+      // The decode mode goes to the Wan builder alone: Hunyuan 1.5 and LTX 2.5 keep their own
+      // VAEDecodeTiled (other VAEs, never measured), so their calls above are untouched by it.
+      graph = model === "hunyuan" ? buildHunyuan15I2V(common) : buildWan22I2V({ ...common, decode: wanDecodeMode(flags), vramTotalBytes });
     }
   }
   return { graph, seed, model };
+}
+
+// wanDecodeLine is the one stderr line that says which decode this run built and why. The node comes
+// from the graph that was built, and the reason from the same rule the builder used, so the line
+// cannot claim a decode the graph does not have.
+function wanDecodeLine(mode, card, graph) {
+  const node = Object.values(graph).map((n) => n.class_type).find((c) => /^VAEDecode/.test(c)) || "no VAE decode node";
+  const detail = card?.error ? `; ${card.error}` : card?.name ? `; card ${card.name}` : "";
+  return `wan-decode: ${node} (${chooseWanDecode(mode, card?.vramTotal).why}${detail})`;
+}
+
+// buildGraphForRun is the one path generate() takes to a graph. A run that builds the Wan graph in auto
+// decode mode first reads the render card's VRAM from the ComfyUI it is about to submit to, so
+// buildGraphFromArgs stays synchronous and the read happens once, only for the graph that uses it: an
+// tiled (the default) or plain makes no request, and neither does LTX 2.5, Hunyuan 1.5, ace, h3 or a --graph
+// file. A run buildGraphFromArgs would refuse for a missing still or prompt reads nothing either: it
+// exits right after, and exiting with a socket still closing is the Windows crash main() warns about.
+// Every Wan run logs its decode (log defaults to stderr).
+export async function buildGraphForRun(pos, flags, api, { stage = stageInput, fetchImpl = fetch, log = (m) => console.error(m) } = {}) {
+  const wan = runsWanGraph(flags);
+  const mode = wan ? wanDecodeMode(flags) : undefined; // a bad --wan-decode throws before anything is staged
+  const buildable = !!pos[1] && !!(pos[2] || flags.prompt);
+  const card = wan && mode === "auto" && buildable ? await readRenderCard(api, { fetchImpl }) : undefined;
+  const built = buildGraphFromArgs(pos, flags, { stage, vramTotalBytes: card?.vramTotal });
+  if (wan) log(wanDecodeLine(mode, card, built.graph));
+  return built;
 }
 
 // submitChecked is the ONE path a graph takes to ComfyUI: node-class preflight first,
@@ -186,7 +275,7 @@ export async function submitChecked({ api, graph, clientId, cli, fetchImpl = fet
 }
 
 async function generate(out, API, pos, flags) {
-  const { graph, seed, model } = buildGraphFromArgs(pos, flags);
+  const { graph, seed, model } = await buildGraphForRun(pos, flags, API);
   // Shared submission/polling/retrieval (comfy-submit.mjs): CLI-preferred submit with
   // byte-identical raw fallback; hardened poll loop (dead-server watchdog).
   const cli = resolveCli();
@@ -203,7 +292,7 @@ async function generate(out, API, pos, flags) {
     onExecError: () => finalizeRun({ api: API, promptId, cli }),
   });
   const file = firstOutputFile(h.outputs, graph);
-  writeFileSync(out, await fetchView({ api: API, file }));
+  writeFileAtomic(out, await fetchView({ api: API, file }));
   console.log("WROTE", out);
   await finalizeRun({ api: API, promptId, cli });
 }

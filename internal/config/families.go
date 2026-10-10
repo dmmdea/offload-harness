@@ -6,6 +6,7 @@ import (
 	"os"
 	"reflect"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -80,6 +81,7 @@ type VideoFamilyBinding struct {
 	LatentUpscaler   string  `json:"latent_upscaler,omitempty"`
 	WanVirtualVramGB float64 `json:"wan_virtual_vram_gb,omitempty"`
 	WanLoader        string  `json:"wan_loader,omitempty"`
+	WanDecode        string  `json:"wan_decode,omitempty"`
 	FPS              int     `json:"fps,omitempty"`
 	Width            int     `json:"width,omitempty"`
 	Height           int     `json:"height,omitempty"`
@@ -193,7 +195,7 @@ func (c Config) VideoDefaultFamilyBinding() VideoFamilyBinding {
 		UnetHigh: c.VideoGenUnetHigh, UnetLow: c.VideoGenUnetLow, TextEncoder: c.VideoGenTextEncoder,
 		Transformer: c.VideoGenTransformer, VideoVAE: c.VideoGenVideoVAE, AudioVAE: c.VideoGenAudioVAE,
 		LatentUpscaler: c.VideoGenLatentUpscaler, WanVirtualVramGB: c.VideoGenWanVirtualVramGB,
-		WanLoader: c.VideoGenWanLoader, FPS: c.VideoGenFPS, Width: c.VideoGenWidth, Height: c.VideoGenHeight,
+		WanLoader: c.VideoGenWanLoader, WanDecode: c.VideoGenWanDecode, FPS: c.VideoGenFPS, Width: c.VideoGenWidth, Height: c.VideoGenHeight,
 		Frames: c.VideoGenFrames, PoolVvramGB: c.VideoGenPoolVvramGB, PoolCompute: c.VideoGenPoolCompute,
 		PoolDonor: c.VideoGenPoolDonor, UpscaleModel: c.VideoGenUpscaleModel,
 		UpscaleWidth: c.VideoGenUpscaleWidth, UpscaleHeight: c.VideoGenUpscaleHeight,
@@ -292,7 +294,7 @@ var editOverlay = overlayKind{
 	clear: []string{
 		"gen_edit_unet", "gen_edit_family", "gen_edit_preset", "gen_edit_lora", "gen_edit_lora_strength",
 		"gen_edit_clip", "gen_edit_vae", "gen_edit_steps", "gen_edit_cfg", "gen_edit_sampler",
-		"gen_edit_scheduler", "gen_edit_megapixels", "gen_edit_resolution", "gen_edit_cache_device",
+		"gen_edit_scheduler", "gen_edit_schedule", "gen_edit_megapixels", "gen_edit_resolution", "gen_edit_cache_device",
 		"gen_edit_license", "gen_edit_commercial_use",
 	},
 	inherited: []string{"gen_edit_script", "gen_edit_timeout_sec"},
@@ -417,9 +419,14 @@ var cudaDeviceRe = regexp.MustCompile(`^\d+(,\d+)*$`)
 // ("" at the top level, `imagegen_families["x"].` inside an overlay).
 func validateMediaEnums(c Config, where string) error {
 	switch strings.TrimSpace(c.ImageGenSchedule) {
-	case "", "official", "comfy":
+	case "", "official", "comfy", "turbo":
 	default:
-		return fmt.Errorf("%simagegen_schedule: unknown schedule %q (valid: \"\", \"official\", \"comfy\")", where, c.ImageGenSchedule)
+		return fmt.Errorf("%simagegen_schedule: unknown schedule %q (valid: \"\", \"official\", \"comfy\", \"turbo\")", where, c.ImageGenSchedule)
+	}
+	switch strings.TrimSpace(c.GenEditSchedule) {
+	case "", "comfy", "turbo":
+	default:
+		return fmt.Errorf("%sgen_edit_schedule: unknown schedule %q (valid: \"\", \"comfy\", \"turbo\")", where, c.GenEditSchedule)
 	}
 	switch c.ComfyDynamicVRAM {
 	case "", "on", "off":
@@ -447,7 +454,30 @@ func validateMediaEnums(c Config, where string) error {
 	default:
 		return fmt.Errorf("%svideogen_wan_loader: %q is not \"\", \"auto\", \"native\" or \"gguf-distorch\"", where, c.VideoGenWanLoader)
 	}
+	if !validWanDecode(c.VideoGenWanDecode) {
+		return fmt.Errorf("%svideogen_wan_decode: %q is not \"\", %s", where, c.VideoGenWanDecode, quotedList(WanDecodeModes))
+	}
 	return nil
+}
+
+// WanDecodeModes is the vocabulary of videogen_wan_decode and of a videogen_families entry's
+// wan_decode, with "" reading as the runner's default, tiled: render/wf-wan22-i2v.mjs
+// WAN_DECODE_MODES is the same list (TestWanDecodeMirrorsTheBuilder reads it), so a mode the
+// runner would refuse is refused here, at load, instead of as a runner exit on every render.
+var WanDecodeModes = []string{"auto", "plain", "tiled"}
+
+func validWanDecode(s string) bool { return s == "" || slices.Contains(WanDecodeModes, s) }
+
+// quotedList renders ["a","b","c"] as `"a", "b" or "c"` for an enum error.
+func quotedList(vs []string) string {
+	q := make([]string, len(vs))
+	for i, v := range vs {
+		q[i] = fmt.Sprintf("%q", v)
+	}
+	if len(q) < 2 {
+		return strings.Join(q, "")
+	}
+	return strings.Join(q[:len(q)-1], ", ") + " or " + q[len(q)-1]
 }
 
 // validateVideoFamilies refuses an unknown videogen_families key by name — the
@@ -481,6 +511,9 @@ func validateVideoFamilies(c Config) error {
 		case "", "auto", "native", "gguf-distorch":
 		default:
 			return fmt.Errorf("videogen_families[%q].wan_loader: %q is not \"\", \"auto\", \"native\" or \"gguf-distorch\"", name, b.WanLoader)
+		}
+		if !validWanDecode(b.WanDecode) {
+			return fmt.Errorf("videogen_families[%q].wan_decode: %q is not \"\", %s", name, b.WanDecode, quotedList(WanDecodeModes))
 		}
 		switch {
 		case strings.TrimSpace(b.License) != "" && b.CommercialUse == nil:
