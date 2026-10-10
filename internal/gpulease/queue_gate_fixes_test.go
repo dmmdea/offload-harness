@@ -4,7 +4,7 @@ package gpulease
 // it: whom a refused request names, whether a seat admission holds back cards it has nothing
 // to do with, how long a waiter that declared a long wait is kept, and what a request that
 // could not take a place in line says. The headline tests are in queue_fifo_test.go; these pin
-// the edges the review closed.
+// the edges the pre-ship review of D-1xx-3 closed.
 
 import (
 	"errors"

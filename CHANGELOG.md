@@ -22,16 +22,19 @@ Versioning: [SemVer](https://semver.org/).
   card, `ErrStillQueued` naming the waiter ahead for a free one); `acquireQueued` never probes bare and prints its
   one entry line from a read-only look at the line (`queueLine`: the holder, else the conflicting waiter);
   `--wait 0` on a free card with a waiter ahead fails fast with the `--wait` hint; `gpu reserve --cards` and the
-  media admission go through the gated attempt and treat "still queued" as busy; the pipeline's no-wait media
-  lease maps it to `gpu busy`. Disjoint backfill is unchanged: a waiter for other cards is no reason to wait.
+  media admission go through the gated attempt and treat "still queued" as a lost claim (allocate again, then
+  queue), and both allocators read the line (`gpualloc.QueuedClaims`), so a card with a waiter ahead is not
+  picked as free; the pipeline's no-wait media lease maps it to `gpu busy`. Disjoint backfill is unchanged: a
+  waiter for other cards is no reason to wait, and a blocked text-load admission queues on its seat's cards.
   `gpulease.DevicesConflict` is exported for the entry line. Tests: a no-wait `Acquire` yields to a registered
   waiter on a free card and wins once it leaves; it still backfills a disjoint card; a fresh reserve (`--wait 0`
   and `--wait 300ms`) queues behind a `RegisterSeatWaiter` entry on a free card and wins once it leaves; the
   pipeline's no-wait whole-node lease reads a waiter ahead as `gpu busy` and is granted once it leaves — all four
   red on the unpatched base (mutants: the bare probe restored in the CLI, the shortcut restored in `Acquire`, the
   busy mapping removed, each red). The media admission already counted a registered waiter's place at allocation
-  (`queuedClaims`), so its gated attempt only closes the gap between the allocation and the claim; a test pins
-  that an image call with a seat waiter in line answers `gpu_queued` and starts nothing.
+  (`gpualloc.QueuedClaims`, moved out of the pipeline so the reserve verb reads the same rule), so its gated
+  attempt only closes the gap between the allocation and the claim, and costs a call that resumed a place nothing;
+  a test pins that an image call with a seat waiter in line answers `gpu_queued` and starts nothing.
   Not changed here: a binary older than this release keeps winning the gap (the
   pinned copy that chained the incident's reserves must be refreshed to carry the fix).
 

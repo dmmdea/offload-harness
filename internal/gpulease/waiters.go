@@ -582,7 +582,7 @@ func managerAt(leaseDir string) *Manager {
 // is gated by a registered waiter that CONFLICTS with it, so the set is what keeps this entry
 // from holding back work it has nothing to do with: registered as the whole node, a text-load
 // admission blocked on its seat's card stopped a fresh `gpu reserve --devices <other card>`
-// on a free, unrelated card (the 0.178.0 review). nil is the whole node, the right answer
+// on a free, unrelated card (pre-ship review of D-1xx-3, 2026-10-09). nil is the whole node, the right answer
 // only when the seat's cards cannot be named (an undeclared model, a pin the card table
 // cannot place, a card table that cannot be read): unknown is every card, the gate's rule.
 //

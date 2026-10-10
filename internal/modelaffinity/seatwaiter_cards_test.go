@@ -4,7 +4,7 @@ package modelaffinity
 // chained media claim cannot win the gap before its next poll. That place is on the cards the
 // admission is waiting for: the seat's own. Registered as the whole node it held back every
 // fresh claim on every card, including a free card the seat has nothing to do with, which is
-// the disjoint backfill the queue promises (the 0.178.0 review).
+// the disjoint backfill the queue promises (pre-ship review of D-1xx-3, 2026-10-09).
 
 import (
 	"context"

@@ -1553,7 +1553,9 @@ node ineligible for new delegated work (and its dispatch answers 503, re-placeab
 declared window is reported, never trusted — the wait runs its full length. **A free card with a waiter already in line
 is that waiter's**: a fresh reserve never probes the card bare, with or without `--wait` — it registers first and only the
 front of the line claims, so a recipe that chains reserves back to back queues behind an earlier waiter instead of winning
-every just-freed card (`--wait 0` then fails fast naming who is ahead; a waiter for OTHER cards is no reason to wait). `--unload-seat` (or `--exclusive`) stamps the
+every just-freed card (`--wait 0` then fails fast naming who is ahead; a waiter for OTHER cards, a blocked text-load
+admission included, which queues on its seat's cards only, is no reason to wait, and `--cards N` takes a card nobody is
+queued for). `--unload-seat` (or `--exclusive`) stamps the
 text lease **exclusive**, and the text-load gate then keeps models off the cleared cards for the lease's length — loads ride
 a `cascade_remote_lanes` lane or wait their own budget. `offload_status` publishes the local lease under `gpu_lease` with
 `queue_with`, the exact command. The rule for every session: **never refuse or defer GPU work because a card looks busy —

@@ -7,7 +7,7 @@ package pipeline
 //
 // What the gate may NOT do is cost a call that resumed a place its place. Acquire consumes the
 // token a waiter resumes, so an attempt that handed the token over and then lost would send the
-// call to the queue below as a new arrival (the 0.178.0 review). These tests pin the gate itself
+// call to the queue below as a new arrival (pre-ship review of D-1xx-3, 2026-10-09). These tests pin the gate itself
 // (restoring the bare claim there lets the call win ahead of the waiter) and that a lost attempt
 // leaves the place whole.
 

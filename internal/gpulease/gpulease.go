@@ -1521,7 +1521,7 @@ func (m *Manager) Acquire(class Class, opts Options) (*Lease, error) {
 // (waiterBefore) AND wanting a card self wants (devicesConflict). Naming the
 // first OTHER waiter in the listing instead pointed a request at an entry on a
 // disjoint card, or at one that arrived after it, as the thing it was waiting
-// for (the 0.178.0 review). waited is the window this request stood in line
+// for (the pre-ship review of D-1xx-3, 2026-10-09). waited is the window this request stood in line
 // (0 for a single gated attempt), so the message does not claim a wait that
 // never happened.
 func queueTimeoutErr(m *Manager, self Waiter, waited time.Duration) error {

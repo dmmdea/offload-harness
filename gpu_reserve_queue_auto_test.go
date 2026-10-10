@@ -3,7 +3,7 @@ package main
 // `gpu reserve --cards N` allocates AND claims. Since the claim became a gated attempt
 // (register D-1xx-3, 2026-10-09) it can be refused for a waiter registered ahead of it, not
 // only for a lease already held, and the loop has to treat that as what it is: a card taken
-// from under the allocation, to be chosen around. The 0.178.0 review found it ending the whole
+// from under the allocation, to be chosen around. The pre-ship review of D-1xx-3 found it ending the whole
 // reserve instead, which broke every fan-out of `--cards 1` reserves over free cards.
 
 import (
@@ -111,7 +111,7 @@ func TestAReserveWithNoWaitFailsFastWhenEveryUsableCardHasAWaiterAhead(t *testin
 
 // A waiter that registers between the allocation and the claim is a claim lost, like another
 // reserve's: the request allocates again with the waiter visible and takes the other card. The
-// 0.178.0 review found it ending the reserve instead (return on ErrStillQueued where the ErrHeld
+// pre-ship review (D-1xx-3) found it ending the reserve instead (return on ErrStillQueued where the ErrHeld
 // arm beside it continued), the shape every fan-out of `--cards 1` reserves over free cards hits.
 func TestAReserveThatLosesTheClaimToAWaiterAllocatesAgain(t *testing.T) {
 	cfg, m := scopedLeaseFixture(t)
