@@ -82,6 +82,7 @@ func TestEverySweptCardErrorFitsTheCardWhole(t *testing.T) {
 	variants := map[string]openMarker{
 		"queued":        {PID: 1234567, Info: map[string]json.RawMessage{"state": json.RawMessage(`"queued"`), "createdAt": json.RawMessage(`1000`)}},
 		"running":       {PID: 1234567, Info: map[string]json.RawMessage{"state": json.RawMessage(`"running"`), "startedAt": json.RawMessage(`2000`)}},
+		"transcribe":    {PID: 1234567, Info: map[string]json.RawMessage{"id": json.RawMessage(`"call-1000-1"`), "model": json.RawMessage(`"transcribe"`), "state": json.RawMessage(`"queued"`), "createdAt": json.RawMessage(`1000`)}},
 		"relayed":       {PID: 0, Info: map[string]json.RawMessage{"state": json.RawMessage(`"running"`), "startedAt": json.RawMessage(`2000`)}},
 		"agd-open":      {PID: 1234567, delegation: delegationOpen, Info: map[string]json.RawMessage{"id": json.RawMessage(`"agd-1"`), "state": json.RawMessage(`"running"`), "startedAt": json.RawMessage(`2000`)}},
 		"agd-recovered": {PID: 1234567, delegation: delegationRecovered, Info: map[string]json.RawMessage{"id": json.RawMessage(`"agd-1"`), "state": json.RawMessage(`"running"`), "startedAt": json.RawMessage(`2000`)}},
@@ -135,15 +136,20 @@ func TestSweepSaysADelegationsNodeMayHaveFinishedTheJob(t *testing.T) {
 	}
 }
 
-func TestSweepSaysARecoveredDelegationWasFinishedAndWhereItLanded(t *testing.T) {
+func TestSweepSaysARecoveredDelegationsNodeReportedItsEndAndWhereItLanded(t *testing.T) {
 	r := newOrphanRig(t)
 	writeIntents(t, r,
 		`{"e":"d","job":"agd-2","base":"http://node-a:18811","ts":1}`,
 		`{"e":"ok","job":"agd-2","note":"recovered to delegate-recovered/agd-2.json","ts":2}`)
 	got := sweepOne(t, r, "agd-2", 7)
-	want := fmt.Sprintf("%s: delegator pid %d gone; the node finished the job, result in delegate-recovered/", OrphanError, os.Getpid())
+	want := fmt.Sprintf("%s: delegator pid %d gone; the node reported the job's end; see delegate-recovered/", OrphanError, os.Getpid())
 	if got != want {
 		t.Errorf("error = %q\nwant    %q", got, want)
+	}
+	// The recovery pass files a node's ERRORED job the same way it files a finished one (the intent closes
+	// with "recovered to ..." for state done and state error alike), so the card must not say "finished".
+	if strings.Contains(strings.TrimPrefix(got, OrphanError), "finished") {
+		t.Errorf("the recovered note covers an errored job too; the card must not claim it finished: %q", got)
 	}
 }
 

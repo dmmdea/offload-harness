@@ -182,13 +182,22 @@ func orphanText(m openMarker, now time.Time) string {
 	var detail string
 	switch {
 	case m.delegation == delegationRecovered:
-		detail = "delegator " + who + " gone; the node finished the job, result in delegate-recovered/"
+		detail = "delegator " + who + " gone; the node reported the job's end; see delegate-recovered/"
 	case m.delegation == delegationOpen:
 		in := ""
 		if since != "" {
 			in = " " + since + " in"
 		}
 		detail = "delegator " + who + " gone" + in + "; the node may still finish it, see delegate-recovered/"
+	case state == "queued" && neverMarksWorking(m.Info):
+		// A call card of a lane that cannot mark its work started (transcribe) is "queued" while the engine runs:
+		// "it never started" would be false about a transcription killed mid-decode. Say how long the call had
+		// been open and that no outcome came.
+		into := ""
+		if created := infoInt(m.Info, "createdAt"); created > 0 {
+			into = " " + shortElapsed(now.Sub(time.UnixMilli(created))) + " in"
+		}
+		detail = who + " gone" + into + ", no outcome reported (killed, console closed or reboot)"
 	case state == "queued":
 		detail = who + " gone while queued: it never started, no outcome reported"
 	case state == "running":
@@ -231,6 +240,13 @@ func infoInt(info map[string]json.RawMessage, key string) int64 {
 		return int64(v)
 	}
 	return 0
+}
+
+// neverMarksWorking reports whether a card is the call card of a task whose lane never marks its work
+// started (tasksThatNeverMarkWorking): a card opened by Begin has the id "call-<ms>-<n>" and names its task as
+// its model.
+func neverMarksWorking(info map[string]json.RawMessage) bool {
+	return strings.HasPrefix(infoString(info, "id"), "call-") && tasksThatNeverMarkWorking[infoString(info, "model")]
 }
 
 // isSeatCard reports whether a card is a seat-watch stretch (seatwatch.go): direct traffic on a vLLM seat,
