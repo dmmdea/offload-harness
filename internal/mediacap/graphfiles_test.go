@@ -117,11 +117,12 @@ func TestScanGraphFindsLoadImageInputs(t *testing.T) {
 
 func TestScanGraphToleratesWhatItDoesNotRead(t *testing.T) {
 	for name, graph := range map[string]string{
-		"a node that is not an object":   `{"1": 7, "2": {"class_type":"X"}}`,
-		"inputs that are not an object":  `{"1": {"class_type":"UNETLoader","inputs":"x"}}`,
-		"a node with no inputs":          `{"1": {"class_type":"X"}}`,
-		"a value that is a number":       `{"1": {"class_type":"X","inputs":{"unet_name":3}}}`,
-		"a name with no known extension": `{"1": {"class_type":"X","inputs":{"unet_name":"model.bin"}}}`,
+		"a node that is not an object":                       `{"1": 7, "2": {"class_type":"X"}}`,
+		"inputs that are not an object":                      `{"1": {"class_type":"UNETLoader","inputs":"x"}}`,
+		"a node with no inputs":                              `{"1": {"class_type":"X"}}`,
+		"a value that is a number":                           `{"1": {"class_type":"X","inputs":{"unet_name":3}}}`,
+		"a name with no known extension":                     `{"1": {"class_type":"X","inputs":{"unet_name":"model.bin"}}}`,
+		"an input with no name on a class that is no loader": `{"1": {"class_type":"X","inputs":{"":"x.png"}}}`,
 	} {
 		got, err := ScanGraph([]byte(graph))
 		if err != nil || len(got.Models) != 0 || len(got.Inputs) != 0 {

@@ -16,6 +16,14 @@ package mediaremote
 // delegator, not a fix of the node: the same graph sent to such a node by hand, or run on its own machine, is the parked
 // local item (docs/systems/media-generation.md).
 //
+// INPUT FILES. The files a graph's input loaders read (LoadImage, LoadVideo, LoadAudio) are the caller's own and carry
+// generic names (image.png, ComfyUI_00001_.png [output]) that two machines share with different bytes. A node can match one
+// only by name, so a node holding a same-named file would run the graph on the wrong bytes and answer ok with a verified
+// file. A graph that reads one is therefore never auto-overflowed: the call waits for this machine's own lane, and the answer
+// says the fleet was not asked and why (overflowOutcome.note). Carrying a size and a hash of each file to the node, which
+// would restore the overflow for such graphs, is a named seam, not built. A caller who names a node by hand (route remote)
+// has chosen where the files are, and the node's check by name stays.
+//
 // MIN_VRAM_GB. A call can ask for a node whose largest card is at least N GB. Without the argument a graph that names the
 // family wan22 (model_family) and carries a height of 720 or more gets the default floor of 16 GB, CHOSEN from the film
 // owner's stated constraint that Wan 2.2 14B at 720p needs a 16 GB card; it is not a measurement of the harness. The
@@ -29,6 +37,7 @@ import (
 
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/delegate"
+	"github.com/dmmdea/offload-harness/internal/mediacap"
 )
 
 // graphNeed is what a run_graph call asks of a node beyond serving the task.
@@ -100,6 +109,37 @@ func graphHeight(graph []byte) int {
 		}
 	}
 	return int(tallest)
+}
+
+// inputFilesOf names the input files the graph of a planned run_graph reads, the way the loader names them ("ref.png",
+// "prev/step.png [output]"); nil when it reads none or the graph cannot be read.
+func inputFilesOf(pl planned) []string {
+	raw, ok := pl.payload["graph"].(json.RawMessage)
+	if !ok {
+		return nil
+	}
+	files, err := mediacap.ScanGraph(raw)
+	if err != nil {
+		return nil
+	}
+	var names []string
+	for _, in := range files.Inputs {
+		if in.Dir != "input" {
+			names = append(names, in.Name+" ["+in.Dir+"]")
+		} else {
+			names = append(names, in.Name)
+		}
+	}
+	return names
+}
+
+// inputFilesNote is the sentence that says why a graph that reads input files was not offered to the fleet.
+func inputFilesNote(names []string) string {
+	shown := names
+	if len(shown) > 3 {
+		shown = append(append([]string(nil), names[:3]...), fmt.Sprintf("and %d more", len(names)-3))
+	}
+	return fmt.Sprintf("this machine did not offer the graph to the fleet: it reads input files (%s), and a node can match an input file only by name, so a node's same-named file of other bytes would run in its place; the call waits for this machine's own lane (route remote sends it to a node you name)", strings.Join(shown, ", "))
 }
 
 // graphNeedOf is the graph-specific part of a call's need; nil for any other task.

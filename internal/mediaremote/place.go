@@ -264,12 +264,15 @@ type overflowOutcome struct {
 	res    core.Result
 	// rows say why the fleet did not take the call, per roster node, when it did not.
 	rows []ClusterRow
+	// note says why the fleet was not asked at all (a graph that reads input files, graph.go): no node was read, so there is
+	// no row to carry it.
+	note string
 }
 
 // annotate adds the cluster block to a local result that is a deferral, and quotes it in the reason. A result that is
 // not a deferral (the call ran here) and a call the fleet was never asked about are returned untouched.
 func (o overflowOutcome) annotate(res core.Result) core.Result {
-	if len(o.rows) == 0 || res.OK || !res.Deferred {
+	if (len(o.rows) == 0 && o.note == "") || res.OK || !res.Deferred {
 		return res
 	}
 	obj := map[string]any{}
@@ -278,15 +281,25 @@ func (o overflowOutcome) annotate(res core.Result) core.Result {
 			return res // data that is not an object stays as the pipeline made it
 		}
 	}
-	obj["cluster"] = o.rows
+	if len(o.rows) > 0 {
+		obj["cluster"] = o.rows
+	}
+	if o.note != "" {
+		obj["fleet_note"] = o.note
+	}
 	if b, err := json.Marshal(obj); err == nil {
 		res.Data = b
 	}
-	parts := make([]string, 0, len(o.rows))
-	for _, r := range o.rows {
-		parts = append(parts, r.Node+": "+r.Why)
+	if o.note != "" {
+		res.Reason += "; " + o.note
 	}
-	res.Reason += "; the fleet could not take it either: " + strings.Join(parts, "; ")
+	if len(o.rows) > 0 {
+		parts := make([]string, 0, len(o.rows))
+		for _, r := range o.rows {
+			parts = append(parts, r.Node+": "+r.Why)
+		}
+		res.Reason += "; the fleet could not take it either: " + strings.Join(parts, "; ")
+	}
 	return res
 }
 
@@ -342,6 +355,9 @@ func tryOverflow(ctx context.Context, cfg config.Config, runner Runner, req core
 	v := core.ProbeLane(ctx, runner, req)
 	if v.Free {
 		return overflowOutcome{}
+	}
+	if names := inputFilesOf(pl); len(names) > 0 {
+		return overflowOutcome{note: inputFilesNote(names)}
 	}
 	return place(ctx, cfg, runner, req, pl, bases, local, v)
 }
