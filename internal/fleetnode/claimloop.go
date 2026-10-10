@@ -9,7 +9,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -172,7 +171,9 @@ func (s *Server) claimOne(ctx context.Context, client *http.Client, holder, node
 		}
 		if !res.OK {
 			s.settle(ctx, client, holder, cfg, "ack", job.ID, nodeID, nil, res.Reason)
-			return nil, fmt.Errorf("%s", res.Reason)
+			// The class the lane filed rides the job record exactly as the push door files it (classedError,
+			// server.go): the two doors hand-write this sequence and must not drift.
+			return nil, &classedError{msg: res.Reason, class: res.Meta.ErrClass}
 		}
 		// The same artifacts the push door adds (server.go's dispatch run closure), computed before
 		// the holder is told so it stores the verified result too.
