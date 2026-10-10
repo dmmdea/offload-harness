@@ -22,7 +22,13 @@ import (
 // Merge the result into AllocInput.Claimed (Need.Claimed before BuildInput, or the map BuildInput
 // returned): a card in it is "not free right now", and the allocator still lists it among the cards
 // a queued request can be given.
-func QueuedClaims(m *gpulease.Manager, cards []gpuprobe.Card, ownToken string) map[string]bool {
+//
+// declaresHostRAM is whether the asker declares any host RAM: a waiter that waits ONLY on host RAM does
+// not hold its cards against one that declares none (gpulease.Waiter.HoldsItsCardsAgainst, G6 of the P0
+// plan), so those cards are free to it, as the gated claim will find them; without this the allocator
+// would steer a request that passes such a waiter away from an idle card, and a call that cannot wait would
+// be told the card is "promised to callers ahead" by a waiter it can pass.
+func QueuedClaims(m *gpulease.Manager, cards []gpuprobe.Card, ownToken string, declaresHostRAM bool) map[string]bool {
 	out := map[string]bool{}
 	add := func(devs []string) {
 		if len(devs) == 0 {
@@ -37,6 +43,9 @@ func QueuedClaims(m *gpulease.Manager, cards []gpuprobe.Card, ownToken string) m
 	}
 	for _, w := range m.Waiters() {
 		if ownToken != "" && w.Token == ownToken {
+			continue
+		}
+		if !w.HoldsItsCardsAgainst(declaresHostRAM) {
 			continue
 		}
 		add(w.Devices)

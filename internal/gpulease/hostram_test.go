@@ -310,11 +310,12 @@ func TestAcquireKeepsAHostRAMWaiterInTheSameLineAndGrantsWhenTheHostRecovers(t *
 		t.Fatalf("the waiter's record must say it waits on host RAM and what it declared, got %+v", rec)
 	}
 
-	// A later request for the same card, which declares nothing and so needs no RAM, is still behind it.
+	// A later request for the same card that DECLARES host RAM stays behind it: its memory competes with
+	// the waiter's (G6; the request that declares none passes: hostram_frontwaiter_test.go).
 	time.Sleep(5 * time.Millisecond)
-	_, err := m.Acquire(ClassMedia, Options{Reason: "behind", TTL: time.Hour, Devices: []string{card0}})
+	_, err := m.Acquire(ClassMedia, Options{Reason: "behind", TTL: time.Hour, Devices: []string{card0}, HostRAMGiB: 5})
 	if !errors.Is(err, ErrStillQueued) {
-		t.Fatalf("a request behind the host-RAM waiter for the same card must queue behind it, got %v", err)
+		t.Fatalf("a request that declares host RAM, behind the host-RAM waiter for the same card, must queue behind it, got %v", err)
 	}
 	// A later request for ANOTHER card is not held back by a waiter that wants other cards.
 	other, err := m.Acquire(ClassMedia, Options{Reason: "other card", TTL: time.Hour, Devices: []string{card1}})

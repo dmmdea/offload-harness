@@ -1599,8 +1599,9 @@ func (m *Manager) Acquire(class Class, opts Options) (*Lease, error) {
 // an entry that never tries — would be silently lost. Named after the waiter
 // that is actually ahead of self when Inspect itself has nothing to say.
 //
-// "Ahead" is the rule isFrontOfQueue applies, no looser: older than self
-// (waiterBefore) AND wanting a card self wants (devicesConflict). Naming the
+// "Ahead" is the rule isFrontOfQueue applies, no looser (holdsBack): older than self
+// (waiterBefore) AND wanting a card self wants (devicesConflict), unless it waits only
+// on host RAM and self declares none (BlocksArrival). Naming the
 // first OTHER waiter in the listing instead pointed a request at an entry on a
 // disjoint card, or at one that arrived after it, as the thing it was waiting
 // for (the pre-ship review of D-1xx-3, 2026-10-09). waited is the window this request stood in line
@@ -1611,10 +1612,15 @@ func queueTimeoutErr(m *Manager, self Waiter, waited time.Duration) error {
 		return m.heldErr(info)
 	}
 	for _, w := range m.Waiters() {
-		if w.path == self.path || !waiterBefore(w, self) || !devicesConflict(w.Devices, self.Devices) {
+		if w.path == self.path || !holdsBack(w, self) {
 			continue
 		}
-		return stillQueuedErr(waited, fmt.Sprintf("pid %d (%s, reason %q), which has not claimed the card", w.PID, w.Class, w.Reason))
+		what := "which has not claimed the card"
+		if w.WaitingFor == WaitHostRAM {
+			// The cards are free; what it is short of is memory. Say so, and what it asked for.
+			what = fmt.Sprintf("which is waiting for host RAM (needs %.1f GiB) and has not claimed the card", w.HostRAMGiB)
+		}
+		return stillQueuedErr(waited, fmt.Sprintf("pid %d (%s, reason %q), %s", w.PID, w.Class, w.Reason, what))
 	}
 	// A place held for a caller who left (tokens.go) keeps the line just as a waiter does.
 	for _, t := range m.Tokens() {

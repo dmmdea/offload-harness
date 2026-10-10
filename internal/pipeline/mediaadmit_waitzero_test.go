@@ -12,11 +12,15 @@ package pipeline
 
 import (
 	"context"
+	"math"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
+	"github.com/dmmdea/offload-harness/internal/gpulease"
 	"github.com/dmmdea/offload-harness/internal/gpuprobe"
 )
 
@@ -139,5 +143,83 @@ func TestWaitZeroKeepsTheGuardsSentenceForADoorThatCannotResume(t *testing.T) {
 				t.Errorf("a door that cannot resume must leave no place behind, found %d token(s)", n)
 			}
 		})
+	}
+}
+
+// ---------------------------------------------------------------------------------------------
+// G6 through the media admission
+// ---------------------------------------------------------------------------------------------
+
+// startHostRAMWaiter queues a request that declares 30 GiB for the card, on a host that cannot take it, and returns
+// once its record says it waits on the host's memory. The cleanup lets the host recover, so it takes the card and
+// leaves.
+func startHostRAMWaiter(t *testing.T, f *admitFixture, card string) {
+	t.Helper()
+	var commit atomic.Uint64
+	setCommit := func(gib float64) { commit.Store(math.Float64bits(gib)) }
+	setCommit(85) // 85 + 30 > 100 - 8
+	restore := gpuprobe.UseHostMemoryReader(func() (gpuprobe.HostMemory, bool) {
+		return shortHost(math.Float64frombits(commit.Load())), true
+	})
+	t.Cleanup(restore)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if l, err := f.m.Acquire(gpulease.ClassMedia, gpulease.Options{Reason: "a lane waiting for memory", TTL: time.Hour,
+			Devices: []string{leaseIDOf(card)}, HostRAMGiB: 30, Wait: 10 * time.Second, WaitOut: true}); err == nil {
+			_ = l.Release()
+		}
+	}()
+	t.Cleanup(func() {
+		setCommit(0)
+		select {
+		case <-done:
+		case <-time.After(15 * time.Second):
+			t.Error("the host-RAM waiter never ended")
+		}
+	})
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(2 * time.Millisecond) {
+		if ws := f.m.Waiters(); len(ws) == 1 && ws[0].WaitingFor == gpulease.WaitHostRAM {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the waiter never registered as waiting on host RAM: %+v", f.m.Waiters())
+		}
+	}
+}
+
+// A call whose weights fit its card declares no host RAM. Pinned to the card a waiter on memory is queued for, and with
+// no time to wait (gpu_wait_ms 0, one gated try), it still runs: the waiter holds nothing the call needs, and the
+// allocator and the gate agree about it. Before G6 it was told the card was "promised to callers ahead of this one".
+func TestACallThatDeclaresNoHostRAMPassesAHostRAMWaiterOnItsCardWithNoTimeToWait(t *testing.T) {
+	f := newAdmitFixtureWith(t, admitSpec{order: admitOrder, mutate: func(c *config.Config) { c.ComfyCudaDevice = "1"; c.GPUWaitMs = 0 }}) // ComfyUI position 1 is nvidia index 0 under admitOrder: card A
+	startHostRAMWaiter(t, f, admitUUIDA)
+
+	ch := f.image(nil)
+	probes := f.waitStarted(1)
+	if got := probes[0].Env["COMFY_CARD_UUID"]; !strings.EqualFold(got, admitUUIDA) {
+		t.Errorf("the call runs on the card the waiter was queued for, got %q", got)
+	}
+	f.letRunnersGo()
+	if res := f.await(ch); !res.OK {
+		t.Fatalf("a call that adds no memory passes a waiter that waits only on memory: class=%q %s", res.Meta.ErrClass, res.Reason)
+	}
+}
+
+// The other side of the same rule: a call that DECLARES host RAM competes with the waiter's memory, so it queues behind
+// it, and the answer is the line's true one (somebody IS ahead).
+func TestACallThatDeclaresHostRAMStaysBehindAHostRAMWaiterOnItsCard(t *testing.T) {
+	f := newAdmitFixtureWith(t, admitSpec{order: admitOrder, mutate: func(c *config.Config) {
+		krea2Binding(c)
+		c.ComfyCudaDevice, c.GPUWaitMs = "1", 0 // card A
+	}})
+	startHostRAMWaiter(t, f, admitUUIDA)
+
+	res := f.await(f.image(nil))
+	if res.OK || res.Meta.ErrClass != "gpu_queued" {
+		t.Fatalf("a declaring call queues behind the waiter, got ok=%v class=%q: %s", res.OK, res.Meta.ErrClass, res.Reason)
+	}
+	if n := len(f.started()); n != 0 {
+		t.Errorf("%d runner(s) started behind a waiter that is ahead of them", n)
 	}
 }

@@ -747,6 +747,10 @@ func (p *Pipeline) acquireCards(ctx context.Context, m *gpulease.Manager, reason
 	}
 	reads := &tableReads{cards: cards, at: start}
 	defer func() { err = withTableNote(err, reads.note()) }()
+	// askRAM is the host RAM the call declares against the largest card (the smallest answer): what the
+	// allocator's pre-filter reads, and whether the call declares any at all, which decides whether a waiter
+	// that waits only on host RAM holds its cards against it (gpualloc.QueuedClaims).
+	askRAM := p.declaredRAM(ctx, need, cards, nil)
 	// A call that resumes a place keeps the arrival time it left with, and keeps the place itself
 	// held while it waits (keepPlace). The keeper is stopped before the call spends the place
 	// (grantCards), consumes it (the lease wait registers a waiter) or leaves it again.
@@ -766,7 +770,7 @@ func (p *Pipeline) acquireCards(ctx context.Context, m *gpulease.Manager, reason
 	// cards callers in line are promised.
 	claimedNow := func() map[string]bool {
 		claimed := mediaSlots.held()
-		for id := range gpualloc.QueuedClaims(m, cards, tokenID) {
+		for id := range gpualloc.QueuedClaims(m, cards, tokenID, askRAM > 0) {
 			claimed[id] = true
 		}
 		return claimed
@@ -776,7 +780,7 @@ func (p *Pipeline) acquireCards(ctx context.Context, m *gpulease.Manager, reason
 	// call's need is read against the largest card (the smallest answer), so it never refuses what
 	// the grant, which knows the card, would admit.
 	build := func() (gpulease.AllocInput, error) {
-		allocNeed := gpualloc.Need{Claimed: claimedNow(), RAMGiB: p.declaredRAM(ctx, need, cards, nil)}
+		allocNeed := gpualloc.Need{Claimed: claimedNow(), RAMGiB: askRAM}
 		if !reads.stood() {
 			in, berr := gpualloc.BuildInput(ctx, m, p.cfg, allocNeed, p.alloc)
 			if berr == nil {

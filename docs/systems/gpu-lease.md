@@ -1218,8 +1218,22 @@ admit iff projected <= physical RAM - gpu_host_ram_headroom_gib        (default 
 * **A need of 0 is never read against the host.** The lease adds no memory, so a box that is already over is not made to
   wait for it, and the counters are not even read (`TestALeaseThatDeclaresNoNeedIsNeverReadAgainstTheHost`).
 * **A shortage waits in the same line.** The request stays a registered waiter, in the same FIFO, in the same place,
-  its record marked `waiting_for: host-ram` and carrying what it declared (`gpu status` shows both), and a request behind it
-  for the same cards stays behind it. The line `waiting for host RAM: needs 33.4 GiB, committed 96.4 of 127.7 GiB physical
+  its record marked `waiting_for: host-ram` and carrying what it declared (`gpu status` shows both). A request behind it
+  for the same cards stays behind it when that request declares host RAM too (its memory competes with the waiter's, and
+  the refusal it gets names what the waiter in front is waiting for: `which is waiting for host RAM (needs 30.0 GiB) and
+  has not claimed the card`). A request that declares **nothing** passes it (G6 of the P0 plan,
+  `Waiter.BlocksArrival`, `TestARequestThatDeclaresNoHostRAMPassesAWaiterThatWaitsOnlyOnMemory`): it adds none of the
+  memory the waiter is short of, so it cannot make the shortage worse, and a waiter that sat first for its whole `--wait`
+  (eight hours by default) used to stop a 0 GiB bench on an idle card, or, asking for the whole node, every request on the
+  box. The allocator reads the same exception (`gpualloc.QueuedClaims(..., declaresHostRAM)`), so a call that passes is not
+  steered off an idle card and a call that cannot wait is not told the card is promised to somebody. The cost is stated:
+  the request that passes takes the card the waiter wanted, so when memory recovers the waiter waits for that card. That
+  delay is bounded, not a stream, because the moment the waiter finds its card held it stops being a waiter on memory
+  (its `waiting_for` clears on `ErrHeld`) and is an ordinary front waiter nothing passes
+  (`TestThePassedWaiterIsServedRightAfterThePasserAndNothingElsePassesItMeanwhile`): at most the lease of whoever passed.
+  **Named limits.** Nothing reserves the waiter's memory against a declaring request on *disjoint* cards (disjoint backfill
+  was always allowed), and a place held for a caller who left (a token) still holds against everyone for its 30 s grace.
+  The line `waiting for host RAM: needs 33.4 GiB, committed 96.4 of 127.7 GiB physical
   (+12.0 GiB still to load by leases already running), 8.0 GiB headroom` is printed once per request, never per poll.
   `--wait 0` refuses with that text, the flag that waits, and `--ram` as the way out; the media admission answers the same
   words as a queued place in line (resumable doors) or a busy defer (the rest). That holds for a call with no time left

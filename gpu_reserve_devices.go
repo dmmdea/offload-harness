@@ -390,7 +390,7 @@ func buildAllocInput(ctx context.Context, m *gpulease.Manager, cfg config.Config
 	if err != nil {
 		return in, err
 	}
-	for id := range gpualloc.QueuedClaims(m, in.Cards, "") {
+	for id := range gpualloc.QueuedClaims(m, in.Cards, "", f.ramGiB > 0) {
 		in.Claimed[id] = true
 	}
 	return in, nil
