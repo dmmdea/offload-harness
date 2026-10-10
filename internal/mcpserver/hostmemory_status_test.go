@@ -66,12 +66,18 @@ func TestStatusNamesOverLoudlyOnTheBriefLine(t *testing.T) {
 	if hm["verdict"] != "OVER" {
 		t.Fatalf("committed 162.9 GiB on 127.7 GiB physical is OVER, got %v", hm["verdict"])
 	}
-	if note, _ := hm["note"].(string); !strings.Contains(note, "paging") || !strings.Contains(note, "never an acceptable state") {
-		t.Errorf("the block must say plainly that paging is not acceptable: %q", note)
+	// The block says what the reading shows (committed memory above physical RAM) and admits what it cannot
+	// know: whether the box is paging now needs page-file growth, which nothing here reads (G5).
+	if note, _ := hm["note"].(string); !strings.Contains(note, "committed memory (162.9 GiB) exceeds the 127.7 GiB of physical RAM") ||
+		!strings.Contains(note, "cannot say whether the box is paging now") || strings.Contains(note, "never an acceptable state") {
+		t.Errorf("the block must state the excess and nothing it cannot know: %q", note)
 	}
 	line := gpuLeaseVerdictLine(view)
-	if !strings.HasPrefix(line, "HOST RAM OVER (committed 162.9 of 127.7 GiB physical: the box is paging); ") {
+	if !strings.HasPrefix(line, "HOST RAM OVER (committed memory 162.9 GiB exceeds the 127.7 GiB of physical RAM); ") {
 		t.Fatalf("the brief line must lead with the OVER verdict, got:\n%s", line)
+	}
+	if strings.Contains(line, "paging") {
+		t.Errorf("the brief line asserts paging the code cannot know: %s", line)
 	}
 	if !strings.Contains(line, "free") || !strings.Contains(line, "queue with:") {
 		t.Errorf("the rest of the line is unchanged:\n%s", line)

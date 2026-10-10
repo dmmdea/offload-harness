@@ -501,8 +501,10 @@ func TestGPUStatusJSONCarriesTheHostBlockAndAnOverVerdict(t *testing.T) {
 			t.Errorf("host_memory.%s = %v, want %v", k, hm[k], want)
 		}
 	}
-	if note, _ := hm["note"].(string); !strings.Contains(note, "paging") {
-		t.Errorf("an OVER verdict says what it means: %q", note)
+	// What it says is what the reading shows: committed memory above physical RAM. It does not say the box
+	// is paging, which no reading here can know (G5).
+	if note, _ := hm["note"].(string); !strings.Contains(note, "committed memory (162.9 GiB) exceeds the 127.7 GiB of physical RAM") || !strings.Contains(note, "cannot say whether the box is paging now") {
+		t.Errorf("an OVER verdict says what it means and no more: %q", note)
 	}
 	leases, _ := doc["leases"].([]any)
 	if len(leases) != 1 || leases[0].(map[string]any)["host_ram_gib"] != 30.0 {
@@ -514,7 +516,7 @@ func TestGPUStatusJSONCarriesTheHostBlockAndAnOverVerdict(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
-	for _, want := range []string{"host memory: OVER", "127.7 GiB physical", "commit 162.9 of 187.7 GiB", "live leases declared 30.0 GiB", "host RAM 30.0 GiB", "never an acceptable state"} {
+	for _, want := range []string{"host memory: OVER", "127.7 GiB physical", "commit 162.9 of 187.7 GiB", "live leases declared 30.0 GiB", "host RAM 30.0 GiB", "exceeds the 127.7 GiB of physical RAM"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("the text status lacks %q:\n%s", want, out)
 		}

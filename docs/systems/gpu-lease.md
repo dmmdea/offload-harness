@@ -1120,13 +1120,14 @@ holder) restores the old ending; it is refused for the wrapper form, which has n
 required with `--detach`: it is the term the lease is judged by. A hold that nothing ever releases stays held until it is
 released or taken over, which is the point.
 
-## Host RAM: a lease declares what it will load, and paging is never an acceptable state (2026-10-09)
+## Host RAM: a lease declares what it will load, and the box never promises more memory than it has (2026-10-09)
 
 **The rule (AGENTS.md).** The cards do the inference; RAM is overflow only. Spill is allowed only while it is
-bounded, and it never makes the box unstable. **Paging, and committing more memory than the box has, is never
-an acceptable state.** A card has a hard edge (the driver refuses the allocation); host RAM does not (the OS pages and
-every other process stalls), so the harness refuses *before* the grant, on the number that includes what the granted
-jobs are about to load.
+bounded, and it never makes the box unstable. **The guard's reading of that rule** is that the box never promises more
+memory than it has: committed memory stays under physical RAM less a headroom. That line is the guard's own, chosen
+2026-10-09 as the conservative way to keep spill bounded; it is a definition, not a measurement of any box's paging. A
+card has a hard edge (the driver refuses the allocation); host RAM does not (the OS pages and every other process
+stalls), so the harness refuses *before* the grant, on the number that includes what the granted jobs are about to load.
 
 **The incident.** On the reference 3-card Windows box (127.7 GiB physical), two ComfyUI media lanes that stream bf16
 weights the card cannot hold ran at once under two card-scoped media leases (`gpu reserve --devices <card> --class media --
@@ -1244,11 +1245,11 @@ live leases declared), `pending_gib` (the part of it still to load), `admits_up_
 |---|---|
 | `OK` | committed memory is more than the headroom below physical RAM |
 | `NEAR` | committed memory is within the headroom of physical RAM: the next declaring lease waits |
-| `OVER` | committed memory is **above** physical RAM: the box is paging. New leases that declare host RAM wait until commit is back under physical less the headroom; end a lease or stop a kept ComfyUI instance to free it |
+| `OVER` | committed memory is **above** physical RAM. The reading cannot say whether the box is paging now (that takes page-file growth or the pages-out rate, which no surface here reads), so none of them claims it. New leases that declare host RAM wait until commit is back under physical less the headroom; end a lease or stop a kept ComfyUI instance to free it |
 | `unknown` | the reading could not be taken |
 
-The brief verdict line of `offload_status` leads with `HOST RAM OVER (committed 162.9 of 127.7 GiB physical: the box is
-paging)` in capitals, ahead of the lease verdict word, because `free` at the head of that line reads as "the box has room";
+The brief verdict line of `offload_status` leads with `HOST RAM OVER (committed memory 162.9 GiB exceeds the 127.7 GiB of
+physical RAM)` in capitals, ahead of the lease verdict word, because `free` at the head of that line reads as "the box has room";
 NEAR trails it. The lease rows show what each lease declared, and the queue rows what a waiter waits for
 (`TestGPUStatusJSONCarriesTheHostBlockAndAnOverVerdict`, `TestStatusNamesOverLoudlyOnTheBriefLine`).
 

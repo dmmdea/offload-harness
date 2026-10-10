@@ -267,14 +267,14 @@ it in `gpu reserve --class media` if you need to.
 
 **Host RAM is part of the lease (2026-10-09).** A lease declares the host RAM it will load and the grant admits it against
 committed memory: `committed now + the lease's need + what running leases have yet to load` must stay under physical RAM
-less `gpu_host_ram_headroom_gib` (default 8). Paging, and committing more memory than the box has, is never an acceptable
-state, and the harness holds a lease back rather than let it happen. `gpu reserve --ram <GiB>` states the need (0 =
+less `gpu_host_ram_headroom_gib` (default 8, a floor the harness chose and has not yet measured). The harness does not let
+the box promise more memory than it has: it holds a lease back rather than let that happen. `gpu reserve --ram <GiB>` states the need (0 =
 needs no host RAM); unset, it is estimated from the model files of a render helper call whose weights do not fit the card
 (a Krea 2 bf16 call on a 16 GiB card is about 33 GiB), else for a media lease the largest render family the box binds, and
 0 for a text lease. A lease that has to wait says `waiting for host RAM: needs N GiB, committed X of Y GiB physical, Z GiB
 headroom` once and keeps its place in the same queue; `--wait 0` refuses with that text. `gpu status` and `offload_status`
 show the host's memory with one verdict: `OK`, `NEAR` (within the headroom of physical RAM) or `OVER` (committed above
-physical RAM: the box is paging; the brief status line then starts `HOST RAM OVER`). Details:
+physical RAM; the brief status line then starts `HOST RAM OVER`). Details:
 [GPU lease, "Host RAM"](systems/gpu-lease.md).
 
 Two escape hatches, both of which keep the lease:

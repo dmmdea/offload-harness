@@ -55,15 +55,19 @@ const (
 	HostOK HostVerdict = "OK"
 	// HostNear: commit is within the headroom of physical RAM, so the next job to load pushes it over.
 	HostNear HostVerdict = "NEAR"
-	// HostOver: commit exceeds physical RAM. The OS keeps the difference in the page file, or kills
-	// something: the box is paging, which is never an acceptable state.
+	// HostOver: committed memory exceeds physical RAM. The OS can keep the difference in the page file,
+	// so memory touched later may page; whether the box is paging NOW is not something this reading can
+	// say (that takes page-file growth or the pages-out rate, and resident memory can sit well below
+	// commit), so nothing built on the verdict claims it.
 	HostOver HostVerdict = "OVER"
 	// HostUnknown: the reading could not be taken.
 	HostUnknown HostVerdict = "unknown"
 )
 
-// Verdict judges a reading against the configured headroom. OVER is commit used above physical RAM
-// (the operator's definition, 2026-10-09); NEAR is within the headroom of it.
+// Verdict judges a reading against the configured headroom. OVER is commit used above physical RAM and
+// NEAR is within the headroom of it. Both are the guard's own conservative lines for the house rule
+// (RAM is overflow only and never makes the box unstable), chosen 2026-10-09 and not measured: a
+// definition of "too much promised", not a reading of paging.
 func (m HostMemory) Verdict(headroomGiB float64) HostVerdict {
 	if m.PhysicalGiB <= 0 {
 		return HostUnknown

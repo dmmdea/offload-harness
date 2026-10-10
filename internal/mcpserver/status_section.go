@@ -227,8 +227,8 @@ var standingLead = map[string]string{
 // line, so the line always ends in how to join it.
 func gpuLeaseVerdictLine(view map[string]any) string {
 	var b strings.Builder
-	// A host that is paging leads the line, whatever the cards are doing: "free" at the head of it
-	// would read as "the box has room" while committed memory is above physical RAM.
+	// A host whose committed memory is above physical RAM leads the line, whatever the cards are doing:
+	// "free" at the head of it would read as "the box has room".
 	hostLead, hostLoud, hostTail := hostMemoryClauses(view)
 	if hostLoud {
 		b.WriteString(hostLead + "; ")
@@ -326,7 +326,7 @@ func hostMemoryClauses(view map[string]any) (lead string, loud bool, tail string
 	num := func(k string) float64 { f, _ := hm[k].(float64); return f }
 	switch hm["verdict"] {
 	case string(gpuprobe.HostOver):
-		return fmt.Sprintf("HOST RAM OVER (committed %.1f of %.1f GiB physical: the box is paging)", num("commit_used_gib"), num("physical_gib")), true, ""
+		return fmt.Sprintf("HOST RAM OVER (committed memory %.1f GiB exceeds the %.1f GiB of physical RAM)", num("commit_used_gib"), num("physical_gib")), true, ""
 	case string(gpuprobe.HostNear):
 		return "", false, fmt.Sprintf("host RAM NEAR the limit (committed %.1f of %.1f GiB physical, %.1f GiB headroom)", num("commit_used_gib"), num("physical_gib"), num("headroom_gib"))
 	}

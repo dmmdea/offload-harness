@@ -151,7 +151,7 @@ func runGPUStatus(args []string) error {
 	}
 	leases := modelaffinity.ScopeLeases(m.Dir(), m.Leases())
 	// The host's memory and what the live leases declared of it (internal/gpulease/hostram.go): the
-	// verdict OK / NEAR / OVER, OVER being committed memory above physical RAM, a box that is paging.
+	// verdict OK / NEAR / OVER, OVER being committed memory above physical RAM.
 	hostMem, hostOK := gpuprobe.ReadHostMemory()
 	host := gpucards.NewHostView(hostMem, hostOK, loadCfg(fs).GPUHostRAMHeadroom(), gpulease.DeclaredHostRAMGiB(leases), m.HostRAMPending())
 	if *asJSON {

@@ -1360,7 +1360,8 @@ type Config struct {
 	// need, plus what the leases already granted have yet to load, stays at or under physical RAM
 	// less this. It is also the margin of the NEAR verdict `gpu status` reports. The card allocator
 	// applies the same rule before it picks cards. A load that pushes the host into paging stalls
-	// every seat on the box, and paging is never an acceptable state here.
+	// every seat on the box; keeping committed memory under physical RAM less this is how the guard
+	// stays out of it.
 	// 0 = DefaultGPUHostRAMHeadroomGiB (8).
 	GPUHostRAMHeadroomGiB float64 `json:"gpu_host_ram_headroom_gib,omitempty"`
 	// GPUOrphanGraceMin (plan P8, default 15) is how many minutes an attended lease's

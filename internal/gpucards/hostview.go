@@ -12,10 +12,12 @@ import (
 // for how it stands (OK / NEAR / OVER). All three surfaces build it here, the way they share the card
 // rows, so a session reading one cannot be told something the other contradicts.
 //
-// OVER is committed memory above physical RAM: the box is paging, which is never an acceptable state
-// here. The grant's own rule (gpuprobe.HostRAMAdmits) is stricter than OVER (it holds new declaring
-// leases while commit + need + pending would pass physical RAM less the headroom), so a box reads OVER
-// only after something the grant never saw (a process outside every lease) took the memory.
+// OVER is committed memory above physical RAM. That is a statement about what the OS has promised, not
+// about paging: whether the box is paging now needs the page-file growth or the pages-out rate, which no
+// surface here reads, so none of them says it. The grant's own rule (gpuprobe.HostRAMAdmits) is stricter
+// than OVER (it holds new declaring leases while commit + need + pending would pass physical RAM less the
+// headroom), so a box reads OVER only after something the grant never saw (a process outside every lease)
+// took the memory.
 type HostView struct {
 	Read bool
 	Mem  gpuprobe.HostMemory
@@ -61,8 +63,8 @@ func (v HostView) Map() map[string]any {
 func round1(x float64) float64 { return math.Round(x*10) / 10 }
 
 func (v HostView) overNote() string {
-	return fmt.Sprintf("committed memory (%.1f GiB) exceeds the %.1f GiB of physical RAM: the box is paging, which is never an acceptable state here. "+
-		"A lease that declares host RAM waits until commit is back under %.1f GiB (physical RAM less the %.1f GiB headroom); "+
+	return fmt.Sprintf("committed memory (%.1f GiB) exceeds the %.1f GiB of physical RAM. This reading cannot say whether the box is paging now; "+
+		"a lease that declares host RAM waits until commit is back under %.1f GiB (physical RAM less the %.1f GiB headroom); "+
 		"end a lease or stop a kept ComfyUI instance to free it",
 		v.Mem.CommitUsedGiB, v.Mem.PhysicalGiB, max(v.Mem.PhysicalGiB-v.HeadroomGiB, 0), v.HeadroomGiB)
 }
@@ -94,7 +96,7 @@ func (v HostView) Line() string {
 func (v HostView) Lead() (lead string, loud bool) {
 	switch v.Verdict {
 	case gpuprobe.HostOver:
-		return fmt.Sprintf("HOST RAM OVER (committed %.1f of %.1f GiB physical: the box is paging)", v.Mem.CommitUsedGiB, v.Mem.PhysicalGiB), true
+		return fmt.Sprintf("HOST RAM OVER (committed memory %.1f GiB exceeds the %.1f GiB of physical RAM)", v.Mem.CommitUsedGiB, v.Mem.PhysicalGiB), true
 	case gpuprobe.HostNear:
 		return fmt.Sprintf("host RAM NEAR the limit (committed %.1f of %.1f GiB physical, %.1f GiB headroom)", v.Mem.CommitUsedGiB, v.Mem.PhysicalGiB, v.HeadroomGiB), false
 	}
