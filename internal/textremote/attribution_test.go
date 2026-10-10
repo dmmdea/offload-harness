@@ -134,6 +134,48 @@ func TestRemoteTextRefusedDispatchClosesTheCardFailed(t *testing.T) {
 	}
 }
 
+// A node that answered with a defer that is NOT a held card (the call ran and broke) closes the card
+// failed with the node's reason; the node ran it, so the card shows it started.
+func TestRemoteTextNodeDeferClosesTheCardFailed(t *testing.T) {
+	setBusy(t, false)
+	d := core.Deferf("text call failed: the seat did not answer", "", core.Meta{ErrClass: "timeout", Model: "npu-2b"})
+	node := newFakeNode(t, "rk-node-fleet", []string{"text"}, []string{"classify", "extract"}, d)
+	rig := newPairRig(t, true, hostOf(t, node))
+	res := Run(context.Background(), clientConfig(node), attrLocal{&localRunner{}, rig}, textReq(), "remote")
+	if !res.Deferred {
+		t.Fatalf("Run: %+v", res)
+	}
+	cards := rig.cards()
+	if cards["failed"] == nil || cards["failed"]["error"] != "text call failed: the seat did not answer" || cards["failed"]["startedAt"] == nil || cards["completed"] != nil {
+		t.Fatalf("cards = %v, want one failed card that started, carrying the node's reason", cards)
+	}
+	if rows := rig.rows(); len(rows) != 1 || !rows[0].Deferred || rows[0].ErrClass != "timeout" {
+		t.Fatalf("rows = %+v", rows)
+	}
+}
+
+// A node that answered that ANOTHER job holds its card (gpu_busy: the call never ran) is held back, not
+// failed: the card closes quiet, completed with no start and the reason in `error` (PAIR has no
+// cancelled state, pairworkloads.CardOutcome), and the asker's row keeps the class. The text wire
+// carries the whole Result back, so the class always arrives.
+func TestRemoteTextNodeHeldDeferClosesTheCardQuiet(t *testing.T) {
+	setBusy(t, false)
+	d := core.Deferf("gpu busy: a generation job holds the node's card", "", core.Meta{ErrClass: "gpu_busy", Model: "npu-2b"})
+	node := newFakeNode(t, "rk-node-fleet", []string{"text"}, []string{"classify", "extract"}, d)
+	rig := newPairRig(t, true, hostOf(t, node))
+	res := Run(context.Background(), clientConfig(node), attrLocal{&localRunner{}, rig}, textReq(), "remote")
+	if !res.Deferred || res.Meta.ErrClass != "gpu_busy" {
+		t.Fatalf("Run: %+v", res)
+	}
+	cards := rig.cards()
+	if cards["failed"] != nil || cards["completed"] == nil || cards["completed"]["error"] != "gpu busy: a generation job holds the node's card" || cards["completed"]["startedAt"] != nil {
+		t.Fatalf("cards = %v, want one completed card with no start carrying the reason, and no failed frame", cards)
+	}
+	if rows := rig.rows(); len(rows) != 1 || !rows[0].Deferred || rows[0].ErrClass != "gpu_busy" || rows[0].Node == "" {
+		t.Fatalf("rows = %+v, the asker's row keeps the class", rows)
+	}
+}
+
 // auto spilled to a node is attributed like remote, with the auto route and its placement note.
 func TestAutoSpilledTextIsOneCardAndOneRow(t *testing.T) {
 	setBusy(t, true)
