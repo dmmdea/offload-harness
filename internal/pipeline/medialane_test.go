@@ -232,11 +232,31 @@ func TestMediaLaneFreeWritesNothing(t *testing.T) {
 			if err != nil || d.IsDir() {
 				return nil
 			}
-			info, _ := d.Info()
-			b, _ := os.ReadFile(p)
 			rel, _ := filepath.Rel(root, p)
+			inWaiters := strings.Contains(filepath.ToSlash(rel), "waiters/")
+			if inWaiters && strings.HasSuffix(p, ".tmp") {
+				// A live waiter's refresher (the fixture's own, ten milliseconds apart) rewrites its record by writing a
+				// temp file beside it and renaming it over. That temp file is the FIXTURE's write, it exists for an
+				// instant, and whether a walk sees it is luck: it made this test fail in 4 runs of 12 on the host it
+				// was written on. It is not the probe's, so it is not part of what the probe may change.
+				return nil
+			}
+			info, ierr := d.Info()
+			if ierr != nil {
+				return nil // renamed away between the listing and the stat: it was a temp file of somebody's refresher
+			}
+			// The record is read with the retry the lease readers use (gpulease.readWaiterFile): on Windows the refresher's
+			// rename can fail a read for a moment, and one snapshot that read nothing is not a change the probe made.
+			var b []byte
+			for attempt := 0; attempt < 20; attempt++ {
+				var rerr error
+				if b, rerr = os.ReadFile(p); rerr == nil {
+					break
+				}
+				time.Sleep(5 * time.Millisecond)
+			}
 			stamp := info.ModTime().UTC().Format(time.RFC3339Nano)
-			if strings.Contains(filepath.ToSlash(rel), "waiters/") {
+			if inWaiters {
 				stamp = "" // a live waiter re-stamps its own record every poll; its content is what must not change
 			}
 			out = append(out, rel+"|"+stamp+"|"+string(b))
