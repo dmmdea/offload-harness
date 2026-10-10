@@ -1086,7 +1086,8 @@ runner. A kept instance that never answers is still killed, since a half-started
   another holds both. The incident's instance held 57 GiB private, probably that way (a Qwen-Image model cached next to a
   Krea 2 one: reconstructed, not observed; the session that handled it reported that POST `/free` released 52 GiB between
   prompts without killing a job, a reading no record of which survives here). A ComfyUI process launched fresh on 2026-10-10
-  held the same 57.7 GiB private about seven minutes after launch, so this fix may account for only part of the figure and the
+  held the same 57.7 GiB private about seven minutes after launch (a reading on the reference box, from a session, not recorded in
+  this repository), so this fix may account for only part of the figure and the
   footprint of one lane is unmeasured. The ways two families could come to share an instance, read from the code and the
   instances' logs: a runner killed before its `finally` (the pipeline's timeout kills the whole tree) never sent its
   end-of-run `/free`, and the post-run `/free` of `gpugen` waited one second; the holder's proof before stopping a kept

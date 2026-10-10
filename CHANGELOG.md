@@ -95,7 +95,8 @@ Versioning: [SemVer](https://semver.org/).
   largest measured resident peak once three runs exist). **This is a brake on declared loads, not a bound on what the box
   commits:** the rule applied to a commit reading of 81.6 GiB admits a 32.8 GiB Krea 2 declaration (114.4 GiB projected against
   119.7), and a ComfyUI lane holding 57.7 GiB private bytes (its family is not recorded) read 129.3 GiB committed on the 127.7 GiB
-  box hours later (docs/systems/gpu-lease.md, "Known limits"). The not-yet-loaded part of a granted lease is its declared need minus what the processes below its holder hold
+  box hours later (docs/systems/gpu-lease.md, "Known limits"; these readings were measured on the reference box on 2026-10-10 from
+  session readings that are not recorded in this repository, and are pinned only as arithmetic, `TestTheQuotedCounterexampleIsAdmittedOnBothTerms`). The not-yet-loaded part of a granted lease is its declared need minus what the processes below its holder hold
   RESIDENT (not private: committed-but-unoccupied memory is not RAM that has loaded). The default headroom is **8 GiB** (was
   4): chosen, not measured, and not a number the operator typed; it is a floor until each node's interactive working-set swing
   is measured (docs/systems/gpu-lease.md, "How the numbers get measured"). A shortage queues in the same FIFO as a card
@@ -124,7 +125,7 @@ Versioning: [SemVer](https://semver.org/).
   a 550-second prompt answers late); the pipeline's backstop `/free` waits 5 s instead of 1 s. The incident's 57 GiB instance is
   reconstructed from the code and the surviving logs, not observed, and its probable cause (a second family cached beside the
   first) may account for only part of the figure: a ComfyUI process launched fresh on 2026-10-10 held the same 57.7 GiB private
-  about seven minutes after launch, so the footprint of one lane is unmeasured (the S1 acceptance runs record it).
+  about seven minutes after launch (a reading on the reference box, from a session, not recorded in this repository), so the footprint of one lane is unmeasured (the S1 acceptance runs record it).
 - **Not changed, and said:** the guard checks the declared loads of the leases that pass through it. A pinned older binary (its leases declare
   nothing), a direct llama-swap request and a hand-started ComfyUI are outside it; a pipeline job under a parent's ambient
   `--devices` lease gets no admission of its own; a detached lease counts its whole need as still to load for its life; Linux

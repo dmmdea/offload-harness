@@ -52,6 +52,28 @@ func TestHostRAMAdmitsTheRule(t *testing.T) {
 	}
 }
 
+// The counterexample the docs and the rule's own comment quote (docs/systems/gpu-lease.md, "Known limits"): at a commit
+// reading of 81.6 GiB with 83 GiB available on the 127.7 GiB reference box (measured 2026-10-10, session readings not
+// recorded in this repository) a 32.8 GiB declaration is admitted by both terms: 114.4 GiB projected against a limit of
+// 119.7, 50.2 GiB left available. The rule does not read the commit limit, so the reading's is left unset. This pins the
+// arithmetic the docs claim, so they cannot drift from the rule.
+func TestTheQuotedCounterexampleIsAdmittedOnBothTerms(t *testing.T) {
+	mem := HostMemory{PhysicalGiB: 127.7, AvailableGiB: 83, CommitUsedGiB: 81.6}
+	got := hostRAMAdmits(mem, true, true, 32.8, 0, 8)
+	if !got.OK || got.Impossible {
+		t.Fatalf("the quoted reading admits a 32.8 GiB declaration, got ok=%v impossible=%v (%s)", got.OK, got.Impossible, got.Why)
+	}
+	if math.Abs(got.ProjectedGiB-114.4) > 1e-6 {
+		t.Errorf("projected = %v, want 114.4", got.ProjectedGiB)
+	}
+	if math.Abs(got.LimitGiB-119.7) > 1e-6 {
+		t.Errorf("limit = %v, want 119.7 (127.7 physical less 8 headroom)", got.LimitGiB)
+	}
+	if left := mem.AvailableGiB - 32.8; math.Abs(left-50.2) > 1e-6 || left < 8 {
+		t.Errorf("available left = %v, want 50.2, above the 8 GiB floor", left)
+	}
+}
+
 // The refusal reads as the operator asked for it: what the lease needs, what is committed of what is
 // physical, and the headroom, in one line a person can act on.
 func TestHostRAMRefusalTextNamesTheNumbers(t *testing.T) {

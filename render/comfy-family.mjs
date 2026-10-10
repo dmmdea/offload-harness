@@ -9,7 +9,8 @@
 // prompts without killing a job; no record of that reading survives in this repository.
 //
 // WHAT THIS DOES NOT EXPLAIN. A ComfyUI process launched fresh on 2026-10-10, about seven minutes before it
-// was read, held the same 57.7 GiB private as the earlier one. So a single lane may be that large without any
+// was read (a session's reading on the reference box, not recorded in this repository), held the same 57.7 GiB private as the
+// earlier one. So a single lane may be that large without any
 // long cache history, this fix may account for only part of the 57 GiB, and the footprint of ONE lane is
 // unmeasured: the S1 acceptance runs record it (docs/systems/gpu-lease.md, "Known limits").
 //

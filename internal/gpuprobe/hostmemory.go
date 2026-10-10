@@ -161,7 +161,8 @@ type HostRAMCheck struct {
 // 32.8 GiB declaration (the Krea 2 bf16 files) is admitted here (projected 114.4 GiB against a limit of
 // 119.7, 50.2 GiB left available), while a ComfyUI lane holding 57.7 GiB private bytes (its family is not
 // recorded) read 129.3 GiB committed on the same box some hours later (a separate reading, so the 47.7 GiB
-// between the two is the lane and whatever else changed), above its physical RAM.
+// between the two is the lane and whatever else changed), above its physical RAM. Those readings were measured on
+// the reference box on 2026-10-10 from session readings that are not recorded in this repository.
 func HostRAMAdmits(mem HostMemory, readable bool, needGiB, pendingGiB, headroomGiB float64) HostRAMCheck {
 	return hostRAMAdmits(mem, readable, HostMemorySupported, needGiB, pendingGiB, headroomGiB)
 }

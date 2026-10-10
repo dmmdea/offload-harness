@@ -1278,7 +1278,11 @@ which term refused: `committed X of Y GiB physical` or `only A GiB of Y GiB phys
 **Known limits, stated so they are not discovered.** **An admitted lane can still read OVER.** The rule applied to a commit
 reading of 81.6 GiB (the reference box between jobs, 2026-10-10 about 04:12 UTC; 83 GiB available, 127.7 GiB physical,
 headroom 8) admits a 32.8 GiB declaration, the Krea 2 bf16 files: projected 114.4 GiB against a limit of 119.7, 50.2 GiB left
-available, so both terms pass (`gpuprobe.HostRAMAdmits` on those numbers). At 06:01 UTC the box read 129.5 GiB committed with
+available, so both terms pass (`gpuprobe.HostRAMAdmits` on those numbers, pinned by
+`TestTheQuotedCounterexampleIsAdmittedOnBothTerms`). **Provenance:** the readings in this paragraph (81.6 GiB committed with
+83 GiB available; 57.7 GiB private bytes with a 40.7 GiB working set; 129.3 GiB committed with 49.1 GiB available and 2,298 MiB of
+page file in use) were measured on the reference box on 2026-10-10, from session readings that are not recorded in this
+repository; they were not re-measured for this document. At 06:01 UTC the box read 129.5 GiB committed with
 one ComfyUI lane running, a process six minutes after launch holding 57.7 GiB private bytes (working set 40.7 GiB); at 06:32 UTC
 a second process, launched fresh seven minutes earlier, held the same 57.7 GiB, and the box read 129.3 GiB committed and 49.1 GiB
 available with the page file unchanged (2,298 MiB in use): 1.6 GiB above physical RAM and 9.6 GiB past the guard's own line. The
@@ -1424,7 +1428,7 @@ still hold, a runner that finds another family there frees it before its first j
 retried and loud (a free that fails is said, and leaves the old family recorded so the next runner tries again); see "A kept
 instance (`--keep-comfy`)" in [media-generation.md](media-generation.md). It closes one way an instance can carry more than a
 lane's own weights; it does not explain the whole figure. A ComfyUI process launched fresh on 2026-10-10 held the same 57.7 GiB
-private about seven minutes after launch, so the footprint of a single lane is unmeasured here and the S1 acceptance runs
+private about seven minutes after launch (a reading on the reference box, from a session, not recorded in this repository), so the footprint of a single lane is unmeasured here and the S1 acceptance runs
 record it (see "Known limits").
 
 ## The fleet reads leases per card (plan P7)
