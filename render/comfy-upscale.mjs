@@ -13,7 +13,8 @@
 //   node render/comfy-upscale.mjs <out.png> <image> --model 4x-UltraSharp.pth \
 //        [--scale F] [--width N --height N] [--method lanczos|bicubic|bilinear|area|nearest-exact] \
 //        [--api http://127.0.0.1:8188] [--no-lock] [--reserve-vram F]
-import { readFileSync, writeFileSync, unlinkSync, mkdirSync } from "node:fs";
+import { readFileSync, unlinkSync, mkdirSync } from "node:fs";
+import { writeFileAtomic } from "./atomic-out.mjs";
 import { join, dirname } from "node:path";
 import { withGpuSlot } from "./gpu-lock.mjs";
 import { COMFY_DIR, comfyApi } from "./comfy-lifecycle.mjs";
@@ -95,7 +96,7 @@ async function render() {
     });
     const file = firstOutputFile(h.outputs, graph);
     mkdirSync(dirname(out) || ".", { recursive: true });
-    writeFileSync(out, await fetchView({ api: API, file }));
+    writeFileAtomic(out, await fetchView({ api: API, file }));
     console.log("WROTE", out);
     await finalizeRun({ api: API, promptId, cli });
   } finally {

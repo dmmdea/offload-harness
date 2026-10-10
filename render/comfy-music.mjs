@@ -27,8 +27,9 @@
 //        [--lyrics "..."] [--seconds N] [--seed N] [--steps N] [--cfg X] [--shift X] \
 //        [--unet name.safetensors] [--reserve-vram X] [--api http://127.0.0.1:8188] \
 //        [--no-lock] [--keep-comfy]   |   <out.flac> --graph wf.json
-import { writeFileSync, readFileSync, renameSync, unlinkSync } from "node:fs";
+import { readFileSync, unlinkSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { writeFileAtomic, commitPartial, discardPartial } from "./atomic-out.mjs";
 import { withGpuSlot } from "./gpu-lock.mjs";
 import { comfyApi } from "./comfy-lifecycle.mjs";
 import { firstOutputFile } from "./comfy-output.mjs";
@@ -119,9 +120,23 @@ async function renderOnce(out, API, graph, seed, cli) {
     onExecError: () => finalizeRun({ api: API, promptId, cli }),
   });
   const file = firstOutputFile(h.outputs, graph);
-  writeFileSync(out, await fetchView({ api: API, file }));
+  writeFileAtomic(out, await fetchView({ api: API, file }));
   console.log("WROTE", out);
   await finalizeRun({ api: API, promptId, cli });
+}
+
+// replaceOut: the re-encoded temp sibling takes over `out` in ONE rename. It used to unlink `out`
+// first, so a rename that then failed (a scanner holding the fresh file on Windows) left no file at
+// all. Never throws, because a post-processing hiccup never costs an already-produced render: a
+// swap that fails keeps `out` as it was and the caller ships that (commitPartial removes the temp).
+function replaceOut(tmpOut, out) {
+  try {
+    commitPartial(tmpOut, out);
+    return true;
+  } catch (e) {
+    console.error(`audio-qa: could not replace ${out} with its re-encoded copy (${e.message})`);
+    return false;
+  }
 }
 
 // applyTrim: best-effort in-place trim of `out` down to `seconds` (write-to-tmp then
@@ -133,10 +148,13 @@ async function renderOnce(out, API, graph, seed, cli) {
 function applyTrim(ffmpeg, out, seconds) {
   const tmpOut = out + ".trim.tmp" + (out.match(/\.[^.]+$/)?.[0] || ".flac");
   if (trimToSeconds(ffmpeg, out, seconds, tmpOut)) {
-    unlinkSync(out);
-    renameSync(tmpOut, out);
-    console.error(`audio-qa: trimmed the over-length render to the requested ${seconds}s (1.0s fade-out on the cut)`);
+    if (replaceOut(tmpOut, out)) {
+      console.error(`audio-qa: trimmed the over-length render to the requested ${seconds}s (1.0s fade-out on the cut)`);
+    } else {
+      console.error("audio-qa: trim could not be applied — measuring the over-length render as-is");
+    }
   } else {
+    discardPartial(tmpOut); // a failed encode on a full disk leaves a partial that holds the space
     console.error("audio-qa: trim to the requested length failed — measuring the over-length render as-is");
   }
 }
@@ -207,10 +225,13 @@ async function generate(out, API, graph, seed, { ffmpeg, ffprobe, seconds, rende
 
   const tmpOut = out + ".loudnorm.tmp" + (out.match(/\.[^.]+$/)?.[0] || ".flac");
   if (normalizeLoudness(ffmpeg, out, tmpOut)) {
-    unlinkSync(out);
-    renameSync(tmpOut, out);
-    console.error(`audio-qa: loudness-normalized to I=${LOUDNESS_TARGET_LUFS} LUFS / TP=${TRUE_PEAK_TARGET_DBTP} dBTP`);
+    if (replaceOut(tmpOut, out)) {
+      console.error(`audio-qa: loudness-normalized to I=${LOUDNESS_TARGET_LUFS} LUFS / TP=${TRUE_PEAK_TARGET_DBTP} dBTP`);
+    } else {
+      console.error("audio-qa: loudness normalization could not be applied — shipping the un-normalized render (never withhold an already-produced render)");
+    }
   } else {
+    discardPartial(tmpOut);
     console.error("audio-qa: loudness normalization failed or skipped — shipping the un-normalized render (never withhold an already-produced render)");
   }
 }

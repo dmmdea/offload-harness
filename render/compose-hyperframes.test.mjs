@@ -11,11 +11,12 @@ import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
 import vm from "node:vm";
 import { DEFAULTS as CAPTION_DEFAULTS, PACES as CAPTION_PACES, TEMPLATE_LIMITS as CAPTION_LIMITS, captionsFromSegments } from "./captions-groups.mjs";
+import { copyAtomic } from "./atomic-out.mjs";
 import { fileURLToPath } from "node:url";
 import {
   ALLOWED_BROWSER_SUBCOMMANDS, ALLOWED_SUBCOMMANDS, FORCED_ENV, PASSTHROUGH_ENV_KEYS, PINNED_VERSION, applyTemplateVariables, assertAllowedInvocation,
   buildCheckArgs, buildChildEnv, buildRenderArgs, buildSnapshotArgs, classifyFailure, compositionMeta,
-  listTemplates, materializeTemplate, parseJsonDoc, rewriteRootDuration, summarizeProbe, verifyOutput,
+  listTemplates, materializeTemplate, moveInto, parseJsonDoc, rewriteRootDuration, summarizeProbe, verifyOutput,
 } from "./compose-hyperframes.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -1409,4 +1410,60 @@ test("kit ports: the kit's brand colours are absent however they are spelled", (
       for (const t of colorTriples(text)) assert.ok(!KIT_BRAND_RGB.some((b) => b.every((v, i) => v === t[i])), `${name}/${file}: the colour rgb(${t.join(" ")}) is one of the kit's brand colours`);
     }
   }
+});
+
+// moveInto publishes the rendered output at its delivery path. The work dir is usually on another
+// volume, so the copy fallback is the common path, and it used to copy straight onto the destination:
+// a destination that filled up kept a partial video there that looked finished.
+function publishDirs() {
+  const root = mkdtempSync(join(tmpdir(), "compose-move-"));
+  const work = join(root, "work"); const out = join(root, "out");
+  mkdirSync(work); mkdirSync(out);
+  return { work, out, src: join(work, "output.mp4"), dst: join(out, "clip.mp4") };
+}
+const crossVolume = () => { throw Object.assign(new Error("EXDEV: cross-device link not permitted, rename"), { code: "EXDEV" }); };
+
+test("moveInto: where the rename works the output moves and nothing is left behind", () => {
+  const { src, dst, work, out } = publishDirs();
+  writeFileSync(src, "the clip");
+  moveInto(src, dst);
+  assert.equal(readFileSync(dst, "utf8"), "the clip");
+  assert.deepEqual(readdirSync(work), []);
+  assert.deepEqual(readdirSync(out), ["clip.mp4"]);
+});
+
+test("moveInto: when the rename cannot be used the copy lands through a staged sibling, then the source goes", () => {
+  const { src, dst, work, out } = publishDirs();
+  writeFileSync(src, "the clip");
+  writeFileSync(dst, "an older clip");
+  moveInto(src, dst, { rename: crossVolume });
+  assert.equal(readFileSync(dst, "utf8"), "the clip");
+  assert.deepEqual(readdirSync(out), ["clip.mp4"], "no staged copy left beside the delivery path");
+  assert.deepEqual(readdirSync(work), [], "the source is removed only after the copy landed");
+});
+
+test("moveInto: a destination that fills up during the fallback copy leaves no partial file, keeps the previous clip and keeps the source", () => {
+  const { src, dst, work, out } = publishDirs();
+  writeFileSync(src, "the clip");
+  writeFileSync(dst, "an older clip");
+  const fullDisk = (from, to) => copyAtomic(from, to, {
+    copy: (_f, partial) => { writeFileSync(partial, "th"); throw Object.assign(new Error("ENOSPC: no space left on device, write"), { code: "ENOSPC" }); },
+  });
+  assert.throws(() => moveInto(src, dst, { rename: crossVolume, copy: fullDisk }), (e) => e.code === "ENOSPC");
+  assert.equal(readFileSync(dst, "utf8"), "an older clip", "a half-copied clip must never replace the previous one");
+  assert.deepEqual(readdirSync(out), ["clip.mp4"], "and nothing is left beside it");
+  assert.equal(readFileSync(src, "utf8"), "the clip", "the rendered clip is still in the work dir");
+  assert.deepEqual(readdirSync(work), ["output.mp4"]);
+});
+
+test("moveInto: a frames directory copies whole through a staged sibling", () => {
+  const root = mkdtempSync(join(tmpdir(), "compose-move-"));
+  const frames = join(root, "work", "frames"); const dst = join(root, "out", "frames");
+  mkdirSync(frames, { recursive: true });
+  writeFileSync(join(frames, "frame-000001.png"), "1");
+  writeFileSync(join(frames, "frame-000002.png"), "2");
+  moveInto(frames, dst, { rename: crossVolume });
+  assert.deepEqual(readdirSync(dst).sort(), ["frame-000001.png", "frame-000002.png"]);
+  assert.deepEqual(readdirSync(join(root, "out")), ["frames"]);
+  assert.equal(existsSync(frames), false);
 });

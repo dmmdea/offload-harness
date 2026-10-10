@@ -29,6 +29,7 @@
 //   [--api http://127.0.0.1:8188] [--no-lock] [--keep-comfy] [--reserve-vram F]
 import { writeFileSync, unlinkSync, readFileSync, appendFileSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
+import { writeFileAtomic } from "./atomic-out.mjs";
 import { withGpuSlot } from "./gpu-lock.mjs";
 import { COMFY_DIR, comfyApi } from "./comfy-lifecycle.mjs";
 import { stageInput as stageToInput } from "./comfy-input.mjs";
@@ -175,7 +176,7 @@ async function renderJob(job, batchMode = false) {
     }
     const file = firstOutputFile(h.outputs, graph);
     mkdirSync(dirname(job.out) || ".", { recursive: true });
-    writeFileSync(job.out, await fetchView({ api: API, file }));
+    writeFileAtomic(job.out, await fetchView({ api: API, file }));
     console.log("WROTE", job.out);
     await finalizeRun({ api: API, promptId, cli });
   } finally {

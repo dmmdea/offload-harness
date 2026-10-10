@@ -36,9 +36,10 @@
 //     sd-cli wrote it, alpha intact.
 // The pipeline's SupportsTransparentImage gate already restricts --transparent to the
 // qwen-image-2.1 family before this script ever runs, so no family check happens here.
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, statSync } from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
+import { writeFileAtomic, partialSibling, commitPartial } from "./atomic-out.mjs";
 import { withGpuSlot } from "./gpu-lock.mjs";
 import { rgbaPrompt } from "./wf-qwen-image-21.mjs";
 import { flattenToOpaqueRGB } from "./png-alpha.mjs";
@@ -122,7 +123,9 @@ export function postprocessOutput(out, transparent) {
     return false;
   }
   if (after === before || after.equals(before)) return false;
-  writeFileSync(out, after);
+  // Atomic: this rewrites a FINISHED render in place, so a full disk here used to turn a good png into
+  // a truncated one. Now the finished file survives a failed rewrite untouched.
+  writeFileAtomic(out, after);
   return true;
 }
 
@@ -250,12 +253,24 @@ async function main() {
   if (!process.env.GGML_VK_VISIBLE_DEVICES) {
     process.env.GGML_VK_VISIBLE_DEVICES = resolveVulkanDevice(bin, "");
   }
-  const args = buildSdArgs(out, prompt, flags, extra);
+  // sd-cli writes -o itself, so a full disk or a kill mid-write left a truncated png at `out`, over a
+  // good one if there was one. It writes a staged sibling instead (sd-cli picks its format from the
+  // extension of -o, so the staged name keeps it last) and only a finished, post-processed image is
+  // renamed onto `out` (atomic-out.mjs).
+  const staged = partialSibling(out, { extLast: true });
+  const args = buildSdArgs(staged, prompt, flags, extra);
   await withGpuSlot({ noLock: flags["no-lock"], comfyManaged: false }, async () => {
-    const code = await new Promise((res) => spawn(bin, args, { stdio: "inherit" }).on("close", res));
-    if (code !== 0) throw new Error("sd-cli exited " + code);
-    if (!existsSync(out)) throw new Error("sd-cli exited 0 but produced no output at " + out);
-    postprocessOutput(out, flags.transparent);
+    try {
+      const code = await new Promise((res) => spawn(bin, args, { stdio: "inherit" }).on("close", res));
+      if (code !== 0) throw new Error("sd-cli exited " + code);
+      const made = statSync(staged, { throwIfNoEntry: false });
+      if (!made || made.size === 0) throw new Error(`sd-cli exited 0 but produced ${made ? "an empty file" : "no output"} at ${out}`);
+      postprocessOutput(staged, flags.transparent);
+      commitPartial(staged, out);
+    } catch (e) {
+      try { rmSync(staged, { force: true }); } catch { /* the failure being reported matters more */ }
+      throw e;
+    }
     console.log("WROTE", out);
   });
 }

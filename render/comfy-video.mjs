@@ -25,7 +25,8 @@
 // Before anything is submitted, every node class the graph names is checked against the
 // running ComfyUI's /object_info (render/comfy-nodes.mjs): a missing custom-node pack is a
 // one-line MISSING_NODE defer naming the class and the pack, not a 400 at the POST.
-import { writeFileSync, readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
+import { writeFileAtomic } from "./atomic-out.mjs";
 import { withGpuSlot } from "./gpu-lock.mjs";
 import { COMFY_DIR, comfyApi } from "./comfy-lifecycle.mjs";
 import { stageInput as stageToInput } from "./comfy-input.mjs";
@@ -203,7 +204,7 @@ async function generate(out, API, pos, flags) {
     onExecError: () => finalizeRun({ api: API, promptId, cli }),
   });
   const file = firstOutputFile(h.outputs, graph);
-  writeFileSync(out, await fetchView({ api: API, file }));
+  writeFileAtomic(out, await fetchView({ api: API, file }));
   console.log("WROTE", out);
   await finalizeRun({ api: API, promptId, cli });
 }

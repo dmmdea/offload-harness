@@ -43,8 +43,8 @@ const sleepSync = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),
 
 // discardPartial: best-effort removal of a staged file or directory. It never throws, because the
 // error being reported matters more than the litter, and on a full disk the removal is what gives the
-// partial bytes back.
-function discardPartial(partial, rm = rmSync) {
+// partial bytes back. Exported for the callers that stage a file through an external encoder.
+export function discardPartial(partial, rm = rmSync) {
   try { rm(partial, { recursive: true, force: true }); } catch { /* best effort */ }
 }
 
