@@ -51,7 +51,7 @@ Teardown is not special-cased — it is the same single teardown, now at the bat
 moves from per-render to per-batch rather than being abandoned.
 
 A failed render inside a batch is recorded and the loop continues (unless ComfyUI itself became unusable, or the output disk filled: the batch then stops at that job, the later jobs get `not run:` rows and the batch exits non-zero, register C-83, 0.158.1; the full disk 0.178.0); one JSONL result line is written
-per job. A batch that ran every job and had a failed one exits 4 (`render/comfy-generate.mjs`, `render/comfy-inpaint.mjs`; 0 is every job rendered, 1 a stop, 2 usage), and the Go caller reads that as a finished batch and takes the per-job rows. **The default single-render path is byte-identical to its pre-batch behavior.**
+per job. A batch that ran every job and had a failed one exits 4 (`render/comfy-generate.mjs`, `render/comfy-inpaint.mjs` and `local-offload generate-image --batch`; 0 is every job rendered, 1 a stop, 2 usage), and the Go caller reads the runner's 4 as a finished batch and takes the per-job rows. **The default single-render path is byte-identical to its pre-batch behavior.**
 
 Since 0.178.0 every render, single or batch, writes its output to a staged sibling file and renames it into place (`render/atomic-out.mjs`), so a failed render, a full disk included, leaves no file at its path and keeps a good file already there.
 

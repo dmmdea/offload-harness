@@ -195,33 +195,42 @@ lists every write left in the package, and `deliver_test.go` runs the real ops a
 **Warm batch.** `generate-image --batch` takes a jobs file and runs N renders in one session. The
 only behavioral change is omitting ComfyUI's `--cache-none`, so the checkpoint loads once; teardown
 still happens exactly once, at the batch boundary. A failed render is recorded and the batch
-continues, one JSONL result line per job. The exit code of a `--batch` runner
-(`comfy-generate.mjs`, `comfy-inpaint.mjs`) says how it ended: **0** every job rendered; **4** the
-batch ran every job and at least one failed (0.178.0; until then it exited 0 and a caller had to grep
-the log for `RENDER FAILED`: the rows with `"ok":false` in the results file name the failures, and
-the last log line gives the counts); **1** the batch could not run to the end; **2** usage. 4 is not
-3 on purpose: 3 is the child's *server unusable* code and `renderExitError` reads it as a verdict.
-The Go side (`imagegen.BatchExitJobsFailed`, pinned to `render/batch-jobs.mjs` by a test) treats 4
-with a non-empty results file as a finished batch and reads the rows, so `generate-image --batch` still
-reports per-job status in its JSON and is not an error for 35 good pictures out of 36; the results
-file format did not change. Two failures stop the batch instead of being recorded and passed over,
-because every later job would fail the same way. A server that became unusable (the child exits 3):
-the failed job and every later job get a row, the later ones with an `error` that starts `not run:
-ComfyUI became unusable at job N/M`, and the batch exits non-zero and its teardown frees the card and
-the lease, instead of failing every remaining job against the same server (C-83: 3 min each, after a
-48-minute wait on the first). A full disk (0.178.0: `ENOSPC`, `EDQUOT` or `EROFS`, read from the
-errno where the runner renders in-process and from the errno token in the child's `RENDER FAILED:`
-line or in ComfyUI's own `[Errno 28] No space left on device` otherwise; the name or number counts,
-never prose, because an exec error echoes the prompt and a prompt that mentions a full disk must not
-stop a batch): the same stop, with `error` starting `not run:
-the disk is full at job N/M, writing <out>`, exit 1 and the error line naming the path. It is
-deliberately batch-wide: the output directories of one batch are normally one volume. A failed job's
-`error` carries the child's own `RENDER FAILED:` reason rather than only `comfy-render exited N`.
-The inpaint batch (`comfy-inpaint.mjs --batch`) stops the same way on an unusable server and on a
-full disk (its `_row: "aborted"` line carries `reason`: `server_unusable`, `disk_full` or
+continues, one JSONL result line per job; the results file format did not change.
+
+Exit codes of a `--batch` run (0.178.0 added the 4; until then a batch with failed jobs exited 0 and
+a caller had to grep the log for `RENDER FAILED`):
+
+| Entry point | `0` | `4` | `1` | `2` |
+|---|---|---|---|---|
+| `render/comfy-generate.mjs --batch` | every job rendered | the batch ran every job and at least one failed: the rows with `"ok":false` in the results file name them, and the last log line gives the counts | the batch could not run to the end: a setup error, an unusable ComfyUI, a full disk (the jobs not run get a `not run:` row), the GPU slot | usage, or no jobs |
+| `render/comfy-inpaint.mjs --batch` | every job rendered | the batch ran every job and at least one failed but not all | stopped: an unusable ComfyUI, a full disk, the consecutive-failure limit, or every job failing (its `_row: "aborted"` line, or the "systemic" error) | usage, or a job that would fail before rendering |
+| `local-offload generate-image --batch` | every job rendered, or the batch was deferred because a card was busy (`err_class: gpu_busy`) | the batch ran every job and at least one failed: the JSON keeps reporting per-job status (`failed`, `items[].ok`) and the stderr line gives the counts | the batch stopped (the runner's exit 1) or the command failed before any job (a bad jobs file, `--family` with `--batch`) | an unknown verb or a flag error |
+
+4 is not 3 on purpose: 3 is `comfy-render.mjs`'s own *server unusable* code for its parent, and
+`renderExitError` reads it as a verdict. `imagegen.BatchExitJobsFailed` is the Go copy of the runner's
+`BATCH_EXIT_JOBS_FAILED` (pinned to `render/batch-jobs.mjs` by a test): `GenerateBatch` treats 4 with a
+non-empty results file as a finished batch and reads the rows, so the Go door reports 35 good pictures
+out of 36 as a batch with one failed item, then ends with the same 4 itself. No other Go entry point
+runs a media batch (`RunImageBatch` is called by the CLI verb only).
+
+Two failures stop the batch instead of being recorded and passed over, because every later job would
+fail the same way. A server that became unusable (the child exits 3): the failed job and every later
+job get a row, the later ones with an `error` that starts `not run: ComfyUI became unusable at job
+N/M`, and the batch exits non-zero and its teardown frees the card and the lease, instead of failing
+every remaining job against the same server (C-83: 3 min each, after a 48-minute wait on the first). A
+full disk (0.178.0: `ENOSPC`, `EDQUOT` or `EROFS`, read from the errno where the runner renders
+in-process and from the errno token in the child's `RENDER FAILED:` line or in ComfyUI's own `[Errno
+28] No space left on device` otherwise; the name or number counts, never prose, because an exec error
+echoes the prompt and a prompt that mentions a full disk must not stop a batch): the same stop, with
+`error` starting `not run: the disk is full at job N/M, writing <out>`, exit 1 and the error line
+naming the path. It is deliberately batch-wide: the output directories of one batch are normally one
+volume. The items such a stop took are ledgered with `err_class: disk_full` (they were `other`). A
+failed job's `error` carries the child's own `RENDER FAILED:` reason rather than only `comfy-render
+exited N`. The inpaint batch (`comfy-inpaint.mjs --batch`) stops the same way on an unusable server
+and on a full disk (its `_row: "aborted"` line carries `reason`: `server_unusable`, `disk_full` or
 `consecutive_failures`, with the count of jobs not attempted), and still stops after
-`COMFY_BATCH_MAX_CONSEC_FAIL` (3) consecutive failures; if every job fails it keeps its "systemic"
-stop (exit 1) rather than 4. **The default single-render path is unchanged.**
+`COMFY_BATCH_MAX_CONSEC_FAIL` (3) consecutive failures. **The default single-render path is
+unchanged.**
 
 **Prompt refiner (opt-in).** When `imagegen_refiner_model` names a llama-swap text model,
 `generate_image` first expands the raw prompt with concrete photographic detail (lighting,
