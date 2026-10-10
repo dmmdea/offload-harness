@@ -358,3 +358,76 @@ test("buildGraphForRun over real HTTP: a stand-in ComfyUI answering /system_stat
     await new Promise((r) => srv.close(r));
   }
 });
+
+// --- the glue and the two defaults the tests above could not see ------------------------------------------
+// generate() is the only caller of buildGraphForRun and only main() calls generate(); main() takes the GPU
+// lease and frees the inference server, so no test runs it. A refactor that put back the plain
+// buildGraphFromArgs call, or dropped the await, would leave every test above green while auto quietly became
+// "always tiled" (today's behaviour on the 16 GB tiers, so nothing would look broken). Pin the glue the way
+// the runsWanGraph test pins the dispatch: read the source, code only, so a comment cannot satisfy the pin.
+test("generate() takes its graph from buildGraphForRun, the one call that lets --wan-decode auto read the card", () => {
+  const src = readFileSync(new URL("./comfy-video.mjs", import.meta.url), "utf8");
+  const from = src.indexOf("async function generate(");
+  const to = src.indexOf("async function main(");
+  assert.ok(from >= 0 && to > from, "generate() is declared before main() in comfy-video.mjs");
+  const code = src.slice(from, to).replace(/\/\/[^\n]*/g, "");
+  assert.match(code, /const \{ graph, seed, model \} = await buildGraphForRun\(pos, flags, API\);/, "generate() awaits buildGraphForRun(pos, flags, API) for its graph");
+  assert.doesNotMatch(code, /buildGraphFromArgs\(/, "generate() must not build the graph around the card read");
+  assert.match(code, /submitChecked\(\{ api: API, graph,/, "and it submits that graph");
+});
+
+test("buildGraphForRun's default log is stderr: one wan-decode line there, nothing on stdout", async () => {
+  // Every test above injects log. The choice goes to stderr (stdout is where the runner's own queued/WROTE
+  // lines go), and the default is the one thing a refactor could move without a test noticing.
+  const errs = [], outs = [];
+  const realErr = console.error, realLog = console.log;
+  console.error = (...a) => errs.push(a.join(" "));
+  console.log = (...a) => outs.push(a.join(" "));
+  try {
+    const { pos, flags } = parseArgs(WAN_ARGV);
+    await buildGraphForRun(pos, flags, API, { stage, fetchImpl: systemStats(oneCard(16 * GIB)).fetchImpl });
+  } finally { console.error = realErr; console.log = realLog; }
+  assert.equal(errs.length, 1, "one stderr line per Wan run");
+  assert.match(errs[0], /^wan-decode: VAEDecode \(auto: the render card reports 16\.0 GiB/);
+  assert.deepStrictEqual(outs, [], "nothing on stdout");
+});
+
+test("readRenderCard stops waiting on a ComfyUI that takes the request and never answers, so the run goes on tiled instead of holding the GPU lease", async () => {
+  // main() runs the read inside withGpuSlot: a stalled /system_stats would hold the lease for the whole
+  // videogen timeout. The stub fetchImpl of the tests above ignores the signal, so only a real socket shows it.
+  const srv = createServer(() => {}); // takes the request, never answers
+  await new Promise((r) => srv.listen(0, "127.0.0.1", r));
+  let guard;
+  try {
+    const { port } = srv.address();
+    assert.ok(port < 8188 || port > 8191, "the stand-in must never sit on 8188-8191");
+    // The race is the test's own bound: with no abort signal the read waits forever, and a hang freezes the run
+    // instead of failing it.
+    const r = await Promise.race([
+      readRenderCard(`http://127.0.0.1:${port}`, { timeoutMs: 50 }),
+      new Promise((_, rej) => { guard = setTimeout(() => rej(new Error("readRenderCard ignored its timeout: still waiting after 1500 ms")), 1500); }),
+    ]);
+    assert.match(r.error, /^GET \/system_stats failed: /);
+    assert.equal(r.vramTotal, undefined);
+  } finally {
+    clearTimeout(guard);
+    srv.closeAllConnections?.();
+    await new Promise((r) => srv.close(r));
+  }
+});
+
+test("readRenderCard's default bound is seconds: it hands fetch an abort signal built from a short, finite timeout", async () => {
+  // buildGraphForRun does not forward timeoutMs, so production always runs on this default; pinning only an
+  // explicit value would let the default drift to minutes, or go, unnoticed.
+  const realTimeout = AbortSignal.timeout;
+  const asked = [], signals = [];
+  AbortSignal.timeout = (ms) => { asked.push(ms); return realTimeout.call(AbortSignal, ms); };
+  try {
+    const fetchImpl = async (_url, init) => { signals.push(init?.signal); return { ok: true, status: 200, json: async () => oneCard(16 * GIB) }; };
+    assert.equal((await readRenderCard(API, { fetchImpl })).vramTotal, 16 * GIB);
+  } finally { AbortSignal.timeout = realTimeout; }
+  assert.equal(signals.length, 1);
+  assert.ok(signals[0] instanceof AbortSignal, "the request carries an abort signal");
+  assert.equal(asked.length, 1, "built from exactly one timeout");
+  assert.ok(Number.isFinite(asked[0]) && asked[0] > 0 && asked[0] <= 15_000, `a few seconds, never the run's whole timeout (got ${asked[0]} ms)`);
+});
