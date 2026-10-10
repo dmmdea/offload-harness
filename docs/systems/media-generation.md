@@ -1097,14 +1097,21 @@ reason a media call is refused. What the call does instead depends on where the 
 | at admission | asks for the whole node, as it did before cards were leased | the log, on every such call; and a call that then has to wait is queued with a token whose reason reads "the card table could not be read (...), so this call asks for the whole node" |
 | inside the allocation of an unpinned call (the admission read had answered) | is placed from the newest table it did read (the admission one, at worst) with the operator's screen kept closed to it: a table it could not refresh is the one thing that could misstate the display card's free VRAM. Who holds what is the lease directory's, read fresh every time, so it still takes a free card, or queues on the cards that qualify. It does not ask nvidia-smi again for the rest of the call, so a wedged driver costs one retry per call and not one per stage | the log; and a call that waits gets the ordinary queued answer (`gpu_queued`, a token, the cards it waits for) whose reason says the table could not be re-read, how it was tried and how old the table it used was |
 | a call that named its cards (a `comfy_cuda_device` pin, a pool, a declared device) | does not read the table inside the allocation at all: nothing is left to choose, and what is taken comes from the lease directory, this process's slots and the places held in line (`gpualloc.Claims`) | nothing to say: it queues on the cards it named |
+| a call under its parent's lease (`gpu reserve --devices ... -- <cmd>`) | reads the table to pick which of the parent's cards to run on; a table that cannot be read (after the retry) sends it to the legacy path, inside the parent's lease: the default instance, with no card of its own (a healthy table binds it to one of the parent's cards) | the log, on every such call; a call that is then refused (another job in this process holds the node) carries the same words in its busy answer; a call that runs has no answer to carry them |
 
 The unload list a lease may take (`GPU_LEASE_UNLOAD_MODELS`) is scoped from the table the call already holds, not from a
 third read after the grant: which seat sits on which card needs the card list, not a fresh reading, and a read that ran
 out used to widen the list to every seat, so a render on one card emptied the seats on the others (register C-86).
 `TestAnAllocationReadTimeoutQueuesTheCallInsteadOfDeferringIt` and its neighbours in
-`internal/pipeline/mediaadmit_cardtable_test.go` pin each row. The render helper's own card count
+`internal/pipeline/mediaadmit_cardtable_test.go` pin each row; the same file pins that a degraded call places from the
+newest table it read (not the admission one), and that a caller who has gone while the read hangs is not placed at all and
+leaves no place in line. A call that names its cards still queues behind the place held for them
+(`TestACardHeldForAQueuedCallerIsNotFreeForANewcomerThatNamesIt`): that claim is the one thing keeping it from taking a card
+ahead of the caller in line, since a named plan never asks the allocator. The render helper's own card count
 (`nvidia-smi -L`, `cudaVisibleEnv`) is asked once more under a longer timeout when it ran out, for the same reason: "no
-listing" would leave ComfyUI on the Windows default of card 0 only.
+listing" would leave ComfyUI on the Windows default of card 0 only, and a pooled graph then fails validation with no hint
+of the cause; the retry, and a second timeout together with what the launch does instead, are written to stderr
+(`COMFY-GPU-LIST-WARN`).
 
 ## iGPU media engines: video, animate, voice, music (CT-49)
 
