@@ -9,6 +9,7 @@ import (
 
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/gpulease"
+	"github.com/dmmdea/offload-harness/internal/gpuprobe/smitest"
 )
 
 // stateIsolationPrefix names the root package's throwaway state root, so
@@ -33,6 +34,9 @@ const stateIsolationPrefix = "lo-root-state-"
 // this package's tests depends on the default resolution. Same shape as
 // internal/pipeline/leaseisolation_test.go and internal/pairworkloads/main_test.go.
 func TestMain(m *testing.M) {
+	// First, and outside runIsolated: when this process is the stand-in nvidia-smi a test installed
+	// (internal/gpuprobe/smitest) it plays that part and exits without touching the state root.
+	smitest.MaybeRun()
 	os.Exit(runIsolated(m, os.MkdirTemp, os.Setenv, os.RemoveAll))
 }
 

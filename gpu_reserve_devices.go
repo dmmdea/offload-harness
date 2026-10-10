@@ -376,12 +376,9 @@ var (
 // a card as "free", the gated claim is refused for the waiter ahead, and N reserves fanning out over
 // N free cards all lose to each other's momentary registrations on the lowest id.
 func buildAllocInput(ctx context.Context, m *gpulease.Manager, cfg config.Config, f reserveDeviceFlags) (gpulease.AllocInput, error) {
-	in, err := gpualloc.BuildInput(ctx, m, cfg, gpualloc.Need{VRAMGiB: f.vramGiB, RAMGiB: f.ramGiB}, gpualloc.Deps{
-		Cards:       cardTable,
-		ForeignBusy: foreignBusyFn,
-		Resident:    residentSeatsFn,
-		HostFreeRAM: hostFreeRAMFn,
-	})
+	deps := cardTableDeps()
+	deps.ForeignBusy, deps.Resident, deps.HostFreeRAM = foreignBusyFn, residentSeatsFn, hostFreeRAMFn
+	in, err := gpualloc.BuildInput(ctx, m, cfg, gpualloc.Need{VRAMGiB: f.vramGiB, RAMGiB: f.ramGiB}, deps)
 	if err != nil {
 		return in, err
 	}

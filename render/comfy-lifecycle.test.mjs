@@ -11,7 +11,8 @@ import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { EventEmitter } from "node:events";
 import {
-  ensureComfy, resolveComfyPy, resolveComfyDir, cudaVisibleEnv,
+  ensureComfy, resolveComfyPy, resolveComfyDir, cudaVisibleEnv, listGpusWith,
+  LIST_GPUS_TIMEOUT_MS, LIST_GPUS_RETRY_TIMEOUT_MS,
   comfyLogPath, rotateComfyLog, tailComfyLog, COMFY_LOG_TAIL_LINES,
 } from "./comfy-lifecycle.mjs";
 
@@ -265,6 +266,80 @@ test("cudaVisibleEnv: a --cuda-device in COMFY_EXTRA_ARGS wins (per-box escape h
 test("cudaVisibleEnv: single-GPU and no-nvidia-smi boxes are left on the upstream default", () => {
   assert.equal(cudaVisibleEnv({}, () => 1).CUDA_VISIBLE_DEVICES, undefined);
   assert.equal(cudaVisibleEnv({}, () => 0).CUDA_VISIBLE_DEVICES, undefined);
+});
+
+// F24 (render side). cudaVisibleEnv counts the cards with `nvidia-smi -L`, and a listing that ran out
+// of its 10 s used to read as "no nvidia-smi": ComfyUI stayed on the Windows default (card 0 only) and
+// a pooled graph then failed prompt validation (donor_device 'cuda:1' not in ['cpu','cuda:0']) for a
+// box that has three cards, because one slow read under load changed a launch. A listing that timed out
+// is asked once more under a longer timeout; any other failure is not (it would fail the same way).
+const SMI_LIST = "GPU 0: Card A (UUID: GPU-aaaa1111)\nGPU 1: Card B (UUID: GPU-bbbb2222)\nGPU 2: Card C (UUID: GPU-cccc3333)\n";
+const smiTimedOut = () => ({ status: null, signal: "SIGTERM", stdout: "", error: Object.assign(new Error("spawnSync nvidia-smi ETIMEDOUT"), { code: "ETIMEDOUT" }) });
+
+test("listGpusWith: a nvidia-smi -L that timed out is asked once more under a longer timeout", () => {
+  const calls = [];
+  const spawn = (cmd, args, opts) => {
+    calls.push({ cmd, args, timeout: opts.timeout });
+    return calls.length === 1 ? smiTimedOut() : { status: 0, stdout: SMI_LIST };
+  };
+  assert.equal(listGpusWith(spawn, () => {}), 3);
+  assert.equal(calls.length, 2);
+  assert.deepEqual(calls[0].args, ["-L"]);
+  assert.equal(calls[0].timeout, LIST_GPUS_TIMEOUT_MS);
+  assert.equal(calls[1].timeout, LIST_GPUS_RETRY_TIMEOUT_MS);
+  assert.ok(LIST_GPUS_RETRY_TIMEOUT_MS > LIST_GPUS_TIMEOUT_MS, "the retry gets the LONGER deadline");
+});
+
+test("listGpusWith: two timeouts read as no listing (the upstream default), after exactly two asks", () => {
+  let calls = 0;
+  assert.equal(listGpusWith(() => { calls++; return smiTimedOut(); }, () => {}), 0);
+  assert.equal(calls, 2);
+});
+
+test("listGpusWith: a failure that is not a timeout is not retried", () => {
+  let calls = 0;
+  assert.equal(listGpusWith(() => { calls++; return { status: 9, stdout: "" }; }), 0);
+  assert.equal(calls, 1);
+  calls = 0;
+  assert.equal(listGpusWith(() => { calls++; throw new Error("spawn nvidia-smi ENOENT"); }), 0);
+  assert.equal(calls, 1);
+});
+
+test("listGpusWith: a listing that answers the first time is read once", () => {
+  let calls = 0;
+  assert.equal(listGpusWith(() => { calls++; return { status: 0, stdout: SMI_LIST }; }), 3);
+  assert.equal(calls, 1);
+});
+
+// A listing that ran out of time is never silent (F24 review): "0" leaves ComfyUI on card 0 only and the
+// failure surfaces much later as a pooled graph that fails validation, so the retry is said, and so is the
+// second timeout together with what the launch does instead.
+test("listGpusWith: two timeouts say so, and say what the launch does instead", () => {
+  const lines = [];
+  assert.equal(listGpusWith(() => smiTimedOut(), (l) => lines.push(l)), 0);
+  assert.equal(lines.length, 2, `one line for the retry, one for the second timeout: ${JSON.stringify(lines)}`);
+  assert.match(lines[0], /^COMFY-GPU-LIST-WARN: nvidia-smi -L did not answer within 10 s; asking once more under 30 s$/);
+  assert.match(lines[1], /^COMFY-GPU-LIST-WARN: .*within 30 s either/);
+  assert.match(lines[1], /card 0 only/);
+  assert.match(lines[1], /CUDA_VISIBLE_DEVICES/);
+});
+
+test("listGpusWith: a retry that answers says only that the first ask was slow", () => {
+  const lines = [];
+  let calls = 0;
+  const spawn = () => (++calls === 1 ? smiTimedOut() : { status: 0, stdout: SMI_LIST });
+  assert.equal(listGpusWith(spawn, (l) => lines.push(l)), 3);
+  assert.equal(lines.length, 1, JSON.stringify(lines));
+  assert.match(lines[0], /asking once more/);
+});
+
+test("listGpusWith: says nothing when the first ask answers or fails at once (no nvidia-smi is not news)", () => {
+  const lines = [];
+  const warn = (l) => lines.push(l);
+  assert.equal(listGpusWith(() => ({ status: 0, stdout: SMI_LIST }), warn), 3);
+  assert.equal(listGpusWith(() => ({ status: 9, stdout: "" }), warn), 0);
+  assert.equal(listGpusWith(() => { throw new Error("spawn nvidia-smi ENOENT"); }, warn), 0);
+  assert.deepEqual(lines, []);
 });
 
 test("multi-GPU spawn env carries --disable-pinned-memory (upstream #15737 guidance)", async () => {

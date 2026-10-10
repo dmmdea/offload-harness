@@ -247,7 +247,9 @@ func planMedia(need mediaNeed, cards []gpuprobe.Card, tableErr error) (mediaPlan
 		return whole("")
 	}
 	if tableErr != nil || len(cards) == 0 {
-		return whole(fmt.Sprintf("the card table is unreadable (%v): this call holds the whole node, as it did before cards were leased", tableErr))
+		// Said by the caller, on every such call and in the answer (unreadableAtAdmission): the
+		// once-per-reason line of whole() would hide the second incident of a process's life.
+		return mediaPlan{whole: true}, nil
 	}
 	switch need.Kind {
 	case needSingle:
@@ -353,7 +355,12 @@ func (p *Pipeline) mediaGrantEnv(lease *gpulease.Lease, ids []string, unload str
 // unload may take, which excludes the seats pinned to cards the lease does not hold. Without it
 // the render lane unloads every model off the memory stack, and a render on one card empties the
 // seats on the others (register C-86). "" (no roster, unreadable) leaves the lane on its own rule.
-func (p *Pipeline) unloadEnv(ctx context.Context, ids []string) string {
+//
+// Which seat sits on which card needs the card LIST, not a fresh reading (uuids and indices do not
+// change under a running call), so it is scoped from the table the call already holds: a third
+// nvidia-smi read here, with the lease already granted, could only cost time, and one that ran out
+// widened the list to every seat, so a render on one card emptied the seats on the others.
+func (p *Pipeline) unloadEnv(ctx context.Context, ids []string, cards []gpuprobe.Card) string {
 	if len(ids) == 0 || strings.TrimSpace(p.cfg.Endpoint) == "" {
 		return ""
 	}
@@ -362,7 +369,9 @@ func (p *Pipeline) unloadEnv(ctx context.Context, ids []string) string {
 		log.Printf("media admission: the llama-swap roster could not be read (%v): the render lane keeps its own rule and unloads every model off the memory stack", err)
 		return ""
 	}
-	models, known := gpualloc.UnloadModels(ctx, p.cfg, roster.IDs(), ids, p.alloc, io.Discard)
+	held := p.alloc
+	held.Cards = func(context.Context, config.Config) ([]gpuprobe.Card, string, error) { return cards, "", nil }
+	models, known := gpualloc.UnloadModels(ctx, p.cfg, roster.IDs(), ids, held, io.Discard)
 	return gpualloc.UnloadEnv(models, known)
 }
 
@@ -419,10 +428,15 @@ func (p *Pipeline) stopKeptInstances(epoch uint64) {
 // cannot lease cards, takes the whole-node lease exactly as it always did (acquireWholeNode).
 func (p *Pipeline) acquireMediaLease(ctx context.Context, reason string, ttl, wait time.Duration, need mediaNeed) (mediaGrant, error) {
 	start := time.Now()
+	// tableNote is set when the call asked for the whole node ONLY because the card table could not
+	// be read: the answer says so.
+	tableNote := ""
 	if need.Kind != needWhole {
-		if g, handled, err := p.acquireCardScoped(ctx, reason, ttl, wait, need); handled {
+		g, handled, note, err := p.acquireCardScoped(ctx, reason, ttl, wait, need)
+		if handled {
 			return g, err
 		}
+		tableNote = note
 	}
 	// The whole-node path. A host that leases cards also keeps places in line for it: the place a
 	// caller resumes is looked up BEFORE the wait, because the wait's own waiter consumes the token
@@ -444,7 +458,7 @@ func (p *Pipeline) acquireMediaLease(ctx context.Context, reason string, ttl, wa
 	env, release, err := p.acquireWholeNode(ctx, reason, ttl, wait, need.Token)
 	stopKeep()
 	if err != nil {
-		return mediaGrant{}, p.wholeNodeBusy(err, reason, ttl, start, place, need.Resumable)
+		return mediaGrant{}, withTableNote(p.wholeNodeBusy(err, reason, ttl, start, place, need.Resumable), tableNote)
 	}
 	if place != nil {
 		place.m.DropToken(place.tok.ID) // served: the place is spent (a grant without a wait never consumed it)
@@ -491,29 +505,66 @@ func (p *Pipeline) wholeNodeBusy(err error, reason string, ttl time.Duration, st
 
 // acquireCardScoped is the per-card path. handled is false when the call is not eligible for it
 // (an ambient whole-node lease, a host that cannot write card-scoped leases, a plan that falls
-// back to the whole node): the caller then takes the legacy path.
-func (p *Pipeline) acquireCardScoped(ctx context.Context, reason string, ttl, wait time.Duration, need mediaNeed) (mediaGrant, bool, error) {
+// back to the whole node): the caller then takes the legacy path. note is non-empty only when the
+// fall back to the whole node is because the card table could not be read (after its one retry):
+// the legacy path's answer carries it (withTableNote).
+func (p *Pipeline) acquireCardScoped(ctx context.Context, reason string, ttl, wait time.Duration, need mediaNeed) (g mediaGrant, handled bool, note string, err error) {
 	inherited, ierr := ambientLeaseEnv()
 	if ierr != nil {
-		return mediaGrant{}, true, ierr
+		return mediaGrant{}, true, "", ierr
 	}
 	if inherited != nil {
 		return p.acquireInherited(ctx, inherited, wait, need)
 	}
 	m, err := p.scopedManager()
 	if err != nil || !m.CardScoped() {
-		return mediaGrant{}, false, nil // the legacy path reports the open error, or runs as before
+		return mediaGrant{}, false, "", nil // the legacy path reports the open error, or runs as before
 	}
 	cards, _, terr := p.alloc.CardTable(ctx, p.cfg)
 	plan, perr := planMedia(need, cards, terr)
 	if perr != nil {
-		return mediaGrant{}, true, perr
+		return mediaGrant{}, true, "", perr
 	}
 	if plan.whole {
-		return mediaGrant{}, false, nil
+		if terr != nil || len(cards) == 0 {
+			note = unreadableAtAdmission(terr)
+			log.Printf("media admission: %s", note)
+		}
+		return mediaGrant{}, false, note, nil
 	}
-	g, err := p.acquireCards(ctx, m, reason, ttl, wait, need, plan, cards)
-	return g, true, err
+	g, err = p.acquireCards(ctx, m, reason, ttl, wait, need, plan, cards)
+	return g, true, "", err
+}
+
+// unreadableAtAdmission is what a call says when the card table could not be read at all: it holds
+// the whole node, as it did before cards were leased, and the answer it may leave in line says why
+// it is waiting for the node and not for a card.
+func unreadableAtAdmission(tableErr error) string {
+	cause := "it listed no card"
+	if tableErr != nil {
+		cause = tableErr.Error()
+	}
+	return fmt.Sprintf("the card table could not be read (%s), so this call asks for the whole node, as it did before cards were leased", cause)
+}
+
+// withTableNote adds the words about an unreadable card table to the answer of a call that has to
+// wait (a place in line, or the plain busy answer): the reader of "gpu queued: card(s) x in use"
+// would otherwise not know the call was placed without a fresh table. An error that is neither
+// passes through unchanged, as does an empty note.
+func withTableNote(err error, note string) error {
+	if err == nil || note == "" {
+		return err
+	}
+	var queued *errGPUQueued
+	if errors.As(err, &queued) {
+		queued.Why += "; " + note
+		return err
+	}
+	var busy *errGPUBusy
+	if errors.As(err, &busy) {
+		return fmt.Errorf("%w; %s", err, note)
+	}
+	return err
 }
 
 // lookupCard finds the card with a lease id.
@@ -565,9 +616,49 @@ func keepPlace(m *gpulease.Manager, id string) (stop func()) {
 	}
 }
 
-// acquireCards holds a lease on the planned cards, allocating the card when the plan says so.
+// tableReads is what one allocation knows about the card table across its stages: the pick, the
+// grant-time check, the pick again after a lost claim. Each stage wants the table as it is NOW, and
+// a read that fails (after the retry of gpualloc.Deps.CardTable) must not fail the call: nvidia-smi
+// under load is slow, not gone, and the call has just been served by a table it read itself. So the
+// call goes on from the newest table it did read (the admission one, at worst): which cards exist,
+// which are the screen's and what they hold do not change in the seconds a call is placed in, and
+// who holds what comes from the lease directory, read fresh every time. Two things are kept
+// conservative: the screen's card stays closed to the call (the free VRAM that decides whether the
+// operator's desktop keeps its floor is the one thing a stale table could misstate), and the call
+// does not ask nvidia-smi again, so a wedged driver costs one retry per call and not one per stage.
+type tableReads struct {
+	cards []gpuprobe.Card // the newest table this call read
+	at    time.Time       // when it was read
+	// cause is why the call stopped reading: the failure of the read that sent it to cards.
+	cause error
+	age   string // how old cards were at that moment, in words
+}
+
+// stood reports whether the call is placing from a stored table.
+func (r *tableReads) stood() bool { return r.cause != nil }
+
+// fail records the read that failed and says so in the log, once per call.
+func (r *tableReads) fail(cause error) {
+	r.cause = cause
+	r.age = "less than a second earlier"
+	if d := time.Since(r.at).Round(time.Second); d >= time.Second {
+		r.age = d.String() + " earlier"
+	}
+	log.Printf("media admission: the card table could not be re-read (%v): this call is placed from the table it read %s, with the screen's card kept closed to it", cause, r.age)
+}
+
+// note is the sentence the call's answer carries when it waits after a failed read.
+func (r *tableReads) note() string {
+	if !r.stood() {
+		return ""
+	}
+	return fmt.Sprintf("the card table could not be re-read (%v): this call was placed from the table it read %s, with the screen's card kept closed to it", r.cause, r.age)
+}
+
+// acquireCards holds a lease on the planned cards, allocating the card when the plan says so. A card
+// table that cannot be read while it does so is never the reason the call fails (tableReads).
 func (p *Pipeline) acquireCards(ctx context.Context, m *gpulease.Manager, reason string, ttl, wait time.Duration,
-	need mediaNeed, plan mediaPlan, cards []gpuprobe.Card) (mediaGrant, error) {
+	need mediaNeed, plan mediaPlan, cards []gpuprobe.Card) (grant mediaGrant, err error) {
 	start := time.Now()
 	deadline := start.Add(wait)
 	remaining := func() time.Duration {
@@ -576,6 +667,8 @@ func (p *Pipeline) acquireCards(ctx context.Context, m *gpulease.Manager, reason
 		}
 		return 0
 	}
+	reads := &tableReads{cards: cards, at: start}
+	defer func() { err = withTableNote(err, reads.note()) }()
 	// A call that resumes a place keeps the arrival time it left with, and keeps the place itself
 	// held while it waits (keepPlace). The keeper is stopped before the call spends the place
 	// (grantCards), consumes it (the lease wait registers a waiter) or leaves it again.
@@ -589,12 +682,36 @@ func (p *Pipeline) acquireCards(ctx context.Context, m *gpulease.Manager, reason
 	optsFor := func(ids []string) gpulease.Options {
 		return gpulease.Options{Reason: reason, Origin: "pipeline", TTL: ttl, Devices: ids, ResumeToken: tokenID}
 	}
-	build := func() (gpulease.AllocInput, error) {
+	// claimedNow is what is taken that the lease directory cannot show: the in-process slots, and the
+	// cards callers in line are promised.
+	claimedNow := func() map[string]bool {
 		claimed := mediaSlots.held()
 		for id := range gpualloc.QueuedClaims(m, cards, tokenID) {
 			claimed[id] = true
 		}
-		return gpualloc.BuildInput(ctx, m, p.cfg, gpualloc.Need{Claimed: claimed}, p.alloc)
+		return claimed
+	}
+	// build is the allocator's input for an auto plan (the pick and the grant-time check).
+	build := func() (gpulease.AllocInput, error) {
+		need := gpualloc.Need{Claimed: claimedNow()}
+		if !reads.stood() {
+			in, berr := gpualloc.BuildInput(ctx, m, p.cfg, need, p.alloc)
+			if berr == nil {
+				reads.cards, reads.at = in.Cards, time.Now()
+				return in, nil
+			}
+			var unread *gpualloc.CardTableError
+			if !errors.As(berr, &unread) || ctx.Err() != nil {
+				return in, berr // not the table, or nobody is waiting for the answer any more
+			}
+			reads.fail(unread.Err)
+		}
+		stored := p.alloc
+		table := reads.cards
+		stored.Cards = func(context.Context, config.Config) ([]gpuprobe.Card, string, error) { return table, "", nil }
+		in, berr := gpualloc.BuildInput(ctx, m, p.cfg, need, stored)
+		in.AllowDisplay = false
+		return in, berr
 	}
 
 	// An auto plan chooses its card from the operator's presence and the desktop floor as they are
@@ -617,14 +734,14 @@ func (p *Pipeline) acquireCards(ctx context.Context, m *gpulease.Manager, reason
 				}
 				ids, free = picked, isFree
 			} else {
+				// The caller named these cards (a pin, a pool, a declared device): there is nothing
+				// to choose, so nothing to read from the card table. What the lease directory, this
+				// process and the line say is taken is all the answer depends on.
 				ids = plan.ids
-				in, err := build()
-				if err != nil {
-					return mediaGrant{}, err
-				}
-				free = !in.WholeNodeHeld
+				whole, claimed := gpualloc.Claims(m, gpualloc.Need{Claimed: claimedNow()})
+				free = !whole
 				for _, id := range ids {
-					if in.Claimed[id] {
+					if claimed[id] {
 						free = false
 					}
 				}
@@ -825,7 +942,7 @@ func (p *Pipeline) grantCards(ctx context.Context, m *gpulease.Manager, lease *g
 	}
 	// The card is ours from here: the call's PAIR card turns running.
 	core.MarkWorking(ctx)
-	g := mediaGrant{Env: p.mediaGrantEnv(lease, ids, p.unloadEnv(ctx, ids)), Release: release}
+	g := mediaGrant{Env: p.mediaGrantEnv(lease, ids, p.unloadEnv(ctx, ids, cards)), Release: release}
 	if plan.instance {
 		if c, ok := lookupCard(cards, ids[0]); ok {
 			g.Card, g.API = &c, p.instanceEndpoint(c)
@@ -867,8 +984,11 @@ func startHeartbeat(lease *gpulease.Lease) func() {
 // (`gpu reserve --devices ... -- <cmd>`): GPU_LEASE_DEVICES names them. The lease is not ours to
 // renew or release; the in-process slots arbitrate which of its cards this call runs on, so two
 // calls under a two-card lease run on both cards. handled is false when the lease holds the whole
-// node, or the call cannot be placed on its cards (the legacy path then serves it).
-func (p *Pipeline) acquireInherited(ctx context.Context, inherited []string, wait time.Duration, need mediaNeed) (mediaGrant, bool, error) {
+// node, or the call cannot be placed on its cards (the legacy path then serves it). note is non-empty
+// only when the legacy path serves it because the card table could not be read (after its one retry):
+// the call goes on in the default instance with no card of its own, which nobody asked for, so it is
+// logged on every such call and rides the answer if the legacy path then has to refuse (withTableNote).
+func (p *Pipeline) acquireInherited(ctx context.Context, inherited []string, wait time.Duration, need mediaNeed) (g mediaGrant, handled bool, note string, err error) {
 	var held []string
 	for _, id := range strings.Split(os.Getenv("GPU_LEASE_DEVICES"), ",") {
 		if id = strings.ToLower(strings.TrimSpace(id)); id != "" {
@@ -876,11 +996,13 @@ func (p *Pipeline) acquireInherited(ctx context.Context, inherited []string, wai
 		}
 	}
 	if len(held) == 0 || need.Kind != needSingle {
-		return mediaGrant{}, false, nil
+		return mediaGrant{}, false, "", nil
 	}
-	cards, _, err := p.alloc.CardTable(ctx, p.cfg)
-	if err != nil {
-		return mediaGrant{}, false, nil
+	cards, _, terr := p.alloc.CardTable(ctx, p.cfg)
+	if terr != nil {
+		note = unreadableUnderParent(terr)
+		log.Printf("media admission: %s", note)
+		return mediaGrant{}, false, note, nil
 	}
 	var cands []string
 	for _, id := range held {
@@ -889,20 +1011,20 @@ func (p *Pipeline) acquireInherited(ctx context.Context, inherited []string, wai
 		}
 	}
 	if len(cands) == 0 {
-		return mediaGrant{}, false, nil
+		return mediaGrant{}, false, "", nil
 	}
 	if need.Pin != "" {
 		// An explicit pin is the one card; it must be among the parent's, or the legacy path (and its
 		// own --cuda-device) serves the call exactly as it did.
 		plan, perr := planMedia(need, cards, nil)
 		if perr != nil || plan.whole || len(plan.ids) != 1 || !containsString(cands, plan.ids[0]) {
-			return mediaGrant{}, false, nil
+			return mediaGrant{}, false, "", nil
 		}
 		cands = plan.ids
 	}
 	picked, ok := mediaSlots.takeAny(cands, wait)
 	if !ok {
-		return mediaGrant{}, true, &errGPUBusy{detail: fmt.Sprintf("every card of the lease this process runs under (%s) is in use by another job here after %s", strings.Join(cands, ", "), wait)}
+		return mediaGrant{}, true, "", &errGPUBusy{detail: fmt.Sprintf("every card of the lease this process runs under (%s) is in use by another job here after %s", strings.Join(cands, ", "), wait)}
 	}
 	core.MarkWorking(ctx)
 	c, _ := lookupCard(cards, picked)
@@ -912,7 +1034,14 @@ func (p *Pipeline) acquireInherited(ctx context.Context, inherited []string, wai
 		Card:    &c,
 		API:     p.instanceEndpoint(c),
 		Release: func() { once.Do(func() { mediaSlots.release([]string{picked}) }) },
-	}, true, nil
+	}, true, "", nil
+}
+
+// unreadableUnderParent is what a call under its parent's lease says when the card table could not be
+// read: which of the parent's cards it would have run on is the table's to say, so the call goes on
+// the way it did before cards were leased, in the default instance, inside the parent's lease.
+func unreadableUnderParent(tableErr error) string {
+	return fmt.Sprintf("the card table could not be read (%s), so this call runs in the default instance under its parent's lease, with no card of its own, as it did before cards were leased", tableErr)
 }
 
 func containsString(list []string, s string) bool {

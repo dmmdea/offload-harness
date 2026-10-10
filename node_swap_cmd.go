@@ -136,7 +136,7 @@ func resolveNodeSwapCards(ctx context.Context, plan nodeswap.Plan, cfg config.Co
 	if log == nil {
 		log = func(string) {}
 	}
-	cards, _, err := cardTable(ctx, cfg)
+	cards, _, err := cardTablePatient(ctx, cfg)
 	if err != nil {
 		return plan, fmt.Errorf("--cards needs the card table to resolve %q and nvidia-smi gave none: %w (drop --cards to wait for every GPU lease)", strings.Join(plan.Cards, ","), err)
 	}

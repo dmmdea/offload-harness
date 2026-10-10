@@ -424,7 +424,7 @@ func runGPUReserve(args []string) error {
 		cmdEnv = func(string) string { return "" } // a detached holder runs no command to read cards from
 	}
 	plan, perr := planReserveDevices(devFlags, cmdArgs, cmdEnv, m.CardScoped(), func() ([]gpuprobe.Card, string, error) {
-		return cardTable(context.Background(), reserveCfg)
+		return cardTablePatient(context.Background(), reserveCfg)
 	})
 	if perr != nil {
 		return perr
@@ -582,7 +582,10 @@ func runGPUReserve(args []string) error {
 	// allocated its cards pins the command to them unless the command pins itself (see
 	// confineWrapped), and the wrapper says so when a pin of its own falls outside them.
 	if plan.Explicit {
-		launchCards, _, _ := cardTable(context.Background(), cfg) // best-effort: the UUID is rebuilt without it
+		// Read through the retry: a command's own pin (a bare index it inherited) resolves to a card only with
+		// the table, and without one the wrapper REPLACES a pin it could have confirmed. The UUID of a card
+		// the lease holds is rebuilt without the table, so a table that is still unreadable costs nothing else.
+		launchCards, _, _ := cardTablePatient(context.Background(), cfg)
 		conf := confineWrapped(true, lease.Devices(), cmdArgs, os.Getenv, launchCards)
 		cmd.Env = append(cmd.Env, conf.Env...)
 		if conf.Note != "" {
