@@ -172,17 +172,36 @@ func (r *laneReading) leasesIn(ids []string) {
 	r.block(why)
 }
 
+// placeSince is the arrival time of the place in line the call resumes (its waiter_token), zero when it resumes none. A
+// call that resumes a place registers with the arrival time it left with (gpulease registerWaiter), so on the whole-node
+// plan, which queues by arrival time (waiterBefore, tokenBlocks), a caller that joined the line after that place is
+// BEHIND the call even though it is in the directory now.
+func (r *laneReading) placeSince() time.Time {
+	if r.token == "" {
+		return time.Time{}
+	}
+	if tok, ok := r.m.ResumeToken(r.token); ok {
+		return tok.Since()
+	}
+	return time.Time{}
+}
+
 // callersAhead records the places in line a new arrival for ids (nil = the whole node) would queue behind: the live
 // waiters whose cards conflict with ids, except one that waits only on host RAM when the call declares none (G6: it
 // does not hold its cards against such a call), and the live tokens (a place held for a caller who may come back) on
-// those cards. The call's own token is never counted against it.
-func (r *laneReading) callersAhead(ids []string) {
+// those cards. The call's own token is never counted against it. since, when not zero, is the arrival time the call
+// registers with (placeSince): only a caller that arrived strictly before it is ahead, as the lease queue itself
+// orders them (a tie is not counted: the prober may only err toward "free"). The pinned and the allocated plans pass the
+// zero time because their admission does not order by arrival: every other caller in line claims the cards before the
+// call looks (gpualloc.QueuedClaims), a call that holds a place included.
+func (r *laneReading) callersAhead(ids []string, since time.Time) {
+	arrivedBefore := func(sinceMs int64) bool { return since.IsZero() || sinceMs < since.UnixMilli() }
 	n := 0
 	for _, w := range r.m.Waiters() {
 		if r.token != "" && w.Token == r.token {
 			continue
 		}
-		if w.BlocksArrival(ids, r.askRAM) {
+		if arrivedBefore(w.SinceMs) && w.BlocksArrival(ids, r.askRAM) {
 			n++
 		}
 	}
@@ -190,7 +209,7 @@ func (r *laneReading) callersAhead(ids []string) {
 		if t.ID == r.token || !r.m.TokenLive(t) {
 			continue
 		}
-		if conflict(t.Devices, ids) {
+		if arrivedBefore(t.SinceMs) && conflict(t.Devices, ids) {
 			n++
 		}
 	}
@@ -235,7 +254,7 @@ func (r *laneReading) hostRAMFor(ctx context.Context, need mediaNeed, ids []stri
 func (r *laneReading) wholeNode() {
 	r.slots(nil)
 	r.leasesIn(nil)
-	r.callersAhead(nil)
+	r.callersAhead(nil, r.placeSince())
 	if chk := r.m.HostRAMCheck(r.askRAM); !chk.OK {
 		r.hostRAM = chk.Why
 		r.block(chk.Why)
@@ -268,7 +287,7 @@ func (r *laneReading) named(ctx context.Context, need mediaNeed, ids []string) {
 	before := len(r.reasons)
 	r.leasesIn(ids)
 	r.slots(ids)
-	r.callersAhead(ids)
+	r.callersAhead(ids, time.Time{})
 	if len(r.reasons) == before { // taken by something that ended while it was being read
 		r.block(subjectOf(ids) + " are held, or promised to callers ahead of this one")
 	}
@@ -304,7 +323,7 @@ func (r *laneReading) allocated(ctx context.Context, need mediaNeed) {
 		before := len(r.reasons)
 		r.leasesIn(ids)
 		r.slots(ids)
-		r.callersAhead(ids)
+		r.callersAhead(ids, time.Time{})
 		if len(r.reasons) == before {
 			r.block(subjectOf(ids) + " are held, or promised to callers ahead of this one")
 		}
