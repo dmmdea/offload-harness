@@ -68,6 +68,34 @@ export function resultLine(i, job, ok, ms, error) {
 // A cross-process contract between comfy-render.mjs and its --batch parent.
 export const RENDER_EXIT_SERVER_UNUSABLE = 3;
 
+// BATCH_EXIT_JOBS_FAILED: the exit code of a --batch parent (comfy-generate.mjs, comfy-inpaint.mjs)
+// that ran every job to the end and at least one of them failed. Until 0.178.0 such a batch exited 0,
+// so a caller had to grep the log for RENDER FAILED to learn that jobs had failed (2026-10-09: 21 of
+// 36 pictures, after the disk filled). The set a --batch parent now ends with: 0 every job
+// rendered, this code (the ok:false rows of the results file name the failures), 1 the batch could not
+// run to the end (setup error, an unusable ComfyUI, a full disk; the jobs not run are recorded as
+// such), 2 usage. It is not 3 on purpose: 3 is the child's "server unusable", and a parent that reads
+// a child's 3 as that verdict (renderExitError) would misread a batch that merely had failed jobs.
+// A cross-process contract: internal/imagegen.BatchExitJobsFailed is the Go caller's copy of it.
+export const BATCH_EXIT_JOBS_FAILED = 4;
+
+// The errnos that mean the volume an output goes to cannot take another byte: ENOSPC (full), EDQUOT
+// (quota used up) and EROFS (remounted read-only, which is what a failing disk does).
+export const DISK_FULL_CODES = Object.freeze(["ENOSPC", "EDQUOT", "EROFS"]);
+const DISK_FULL_TEXT = /\b(?:ENOSPC|EDQUOT|EROFS)\b|no space left on device|disk quota exceeded|read-only file system|not enough space on the disk/i;
+
+// isDiskFullError: does this failure say the output volume is full? By errno code when the error
+// came from an fs call in this process (comfy-inpaint renders in-process), and by its words when it
+// crossed a process boundary: a comfy-render child reports only its "RENDER FAILED:" line, and a
+// ComfyUI that cannot save its own output reports Python's "[Errno 28] No space left on device"
+// in an exec error. Every later job writes to the same place and fails the same way, which is why
+// this class stops a batch (runBatchJobs, inpaint-jobs.mjs batchAbort).
+export function isDiskFullError(e) {
+  if (e == null) return false;
+  if (e.diskFull === true || DISK_FULL_CODES.includes(e.code)) return true;
+  return DISK_FULL_TEXT.test(String(e.message ?? e));
+}
+
 // renderExitError: the rejection for a comfy-render child that exited non-zero.
 // stderrTail is the end of the child's stderr; its last "RENDER FAILED:" line names the
 // reason, so a result row says why a job failed instead of only an exit code.
@@ -80,32 +108,58 @@ export function renderExitError(code, stderrTail = "") {
   return e;
 }
 
+// batchExitCode: how a --batch parent that ran every job ends: 0 when none failed,
+// BATCH_EXIT_JOBS_FAILED when any did. `summary` is what runBatchJobs returns.
+export function batchExitCode(summary) {
+  return summary && summary.failed > 0 ? BATCH_EXIT_JOBS_FAILED : 0;
+}
+
+// batchEndLine: the last stderr line of a batch that finished with failed jobs, so the
+// log says it too, not only the exit code.
+export function batchEndLine(summary, resultsPath) {
+  return `batch finished with failed jobs: ${summary.failed} of ${summary.total} failed, ${summary.ok} ok ` +
+    `(exit ${BATCH_EXIT_JOBS_FAILED}); the rows with "ok":false in ${resultsPath} name them`;
+}
+
 // runBatchJobs: the --batch loop. runJob renders one job and throws on failure; record
 // receives each result line; log receives the progress lines. The caller owns the
-// files and the GPU slot, so this stays free of I/O.
-// A failed job is recorded and the batch goes on (the Go side reads per-job status from
-// an exit-0 batch), unless the failure is serverUnusable: then every later job would fail
-// against the same server, so each gets a "not run" row and the batch throws. That is
-// what lets the caller's teardown free the card and its lease (C-83, 2026-10-01: a
-// poisoned ComfyUI failed jobs 3-6 over 57 min while the media lease held every card).
+// files and the GPU slot, so this stays free of I/O. Returns {total, ok, failed} for a
+// batch that ran every job (batchExitCode turns it into the exit code).
+// A failed job is recorded and the batch goes on (the Go side reads per-job status), unless
+// the failure means no later job can succeed either. Then each later job gets a "not run"
+// row and the batch throws, which is what lets the caller's teardown free the card and its
+// lease:
+//   - serverUnusable: every later job would fail against the same server (C-83, 2026-10-01:
+//     a poisoned ComfyUI failed jobs 3-6 over 57 min while the media lease held every card);
+//   - a full disk (isDiskFullError): every later job writes to the same volume (2026-10-09:
+//     the batch went on past a full drive and left 21 zero-byte pictures).
 export async function runBatchJobs({ jobs, runJob, record, log = () => {}, now = Date.now }) {
+  let ok = 0, failed = 0;
+  const stop = (i, why, flag) => {
+    for (let k = i + 1; k < jobs.length; k++) record(resultLine(k, jobs[k], false, 0, "not run: " + why));
+    const abort = new Error(`${why}; ${jobs.length - i - 1} jobs not run, recorded as such`);
+    abort[flag] = true;
+    return abort;
+  };
   for (let i = 0; i < jobs.length; i++) {
     const t0 = now();
     try {
       await runJob(jobs[i], i);
     } catch (e) {
+      failed++;
       record(resultLine(i, jobs[i], false, now() - t0, e.message));
       log(`batch ${i + 1}/${jobs.length} FAILED: ${e.message} (${Math.round((now() - t0) / 1000)}s)`);
       if (e && e.serverUnusable) {
-        const why = `ComfyUI became unusable at job ${i + 1}/${jobs.length} (${e.message})`;
-        for (let k = i + 1; k < jobs.length; k++) record(resultLine(k, jobs[k], false, 0, "not run: " + why));
-        const abort = new Error(`${why}; ${jobs.length - i - 1} jobs not run, recorded as such`);
-        abort.serverUnusable = true;
-        throw abort;
+        throw stop(i, `ComfyUI became unusable at job ${i + 1}/${jobs.length} (${e.message})`, "serverUnusable");
+      }
+      if (isDiskFullError(e)) {
+        throw stop(i, `the disk is full at job ${i + 1}/${jobs.length}, writing ${jobs[i].out} (${e.message})`, "diskFull");
       }
       continue;
     }
+    ok++;
     record(resultLine(i, jobs[i], true, now() - t0));
     log(`batch ${i + 1}/${jobs.length} done (${Math.round((now() - t0) / 1000)}s)`);
   }
+  return { total: jobs.length, ok, failed };
 }

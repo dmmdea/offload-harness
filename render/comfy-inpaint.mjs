@@ -17,6 +17,11 @@
 // than batch-jobs.mjs: inpaint jobs carry image+mask fields the shared T2I emit
 // lists deliberately do not know about. Results: one JSONL row per job
 // ({i, out, ok, wall_ms, error?}) to --results (default <batch>.results.jsonl).
+// Each output is written atomically (atomic-out.mjs): a failed render leaves nothing at its `out`
+// path, and a good file already there is kept. Batch exit codes: 0 every job rendered; 4 the batch
+// ran every job and at least one failed but not all (the "ok":false rows name them); 1 the batch
+// stopped (setup error, ComfyUI unusable, the disk full, the consecutive-failure limit, or every job
+// failing: the jobs not attempted are counted in the `_row: "aborted"` line); 2 usage.
 //
 // Usage:
 //   node render/comfy-inpaint.mjs <out.png> <image> <mask> "<prompt>" [flags]
@@ -36,7 +41,7 @@ import { stageInput as stageToInput } from "./comfy-input.mjs";
 import { buildSDXLInpaint } from "./wf-sdxl-inpaint.mjs";
 import { buildQwenInpaint, QWEN_INPAINT_PRESETS } from "./wf-qwen-inpaint.mjs";
 import { parseInpaintJobs, qwenRecipe, batchAbort } from "./inpaint-jobs.mjs";
-import { resultLine } from "./batch-jobs.mjs";
+import { resultLine, batchExitCode, batchEndLine } from "./batch-jobs.mjs";
 import { firstOutputFile } from "./comfy-output.mjs";
 import { resolveCli, submitGraph, pollOutputs, fetchView, finalizeRun } from "./comfy-submit.mjs";
 
@@ -228,7 +233,7 @@ if (flags.batch) {
         }
         appendFileSync(resultsPath, resultLine(i, jobs[i], ok, Date.now() - t0, errMsg) + "\n");
         console.error(`batch ${i + 1}/${jobs.length} ${ok ? "done" : "FAILED: " + errMsg} (${Math.round((Date.now() - t0) / 1000)}s)`);
-        const abort = batchAbort({ err, consecFail, maxConsecFail: MAX_CONSEC_FAIL });
+        const abort = batchAbort({ err, consecFail, maxConsecFail: MAX_CONSEC_FAIL, out: jobs[i].out });
         if (abort) {
           // A partial file that ADMITS it is partial is safe (the eval runner's
           // own abort discipline): without this row, "aborted at job 4" and
@@ -244,8 +249,17 @@ if (flags.batch) {
       if (okCount === 0) {
         throw new Error(`every job failed (first error: ${firstErr}) — systemic, not per-item`);
       }
+      return { total: jobs.length, ok: okCount, failed: failCount };
     },
-  ).catch((e) => { console.error("INPAINT BATCH FAILED:", e.message); process.exit(1); });
+  ).then((summary) => {
+    // The batch ran every job and some failed: it used to exit 0 (a caller had to grep the log),
+    // now BATCH_EXIT_JOBS_FAILED (batch-jobs.mjs). exitCode, not exit(): the teardown has run.
+    const code = batchExitCode(summary);
+    if (code !== 0) {
+      console.error(batchEndLine(summary, resultsPath));
+      process.exitCode = code;
+    }
+  }).catch((e) => { console.error("INPAINT BATCH FAILED:", e.message); process.exit(1); });
 } else {
   const job = {
     out, image: imagePath, mask: maskPath, prompt,

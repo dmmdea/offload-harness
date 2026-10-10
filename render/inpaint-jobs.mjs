@@ -4,7 +4,9 @@
 //
 // Inpaint jobs are deliberately NOT batch-jobs.mjs jobs: they carry image+mask
 // fields the shared T2I emit lists know nothing about, and their per-job knob
-// set (grow_mask/denoise/strength) is inpaint-specific.
+// set (grow_mask/denoise/strength) is inpaint-specific. Only the failure
+// classifier (isDiskFullError) is shared with it.
+import { isDiskFullError } from "./batch-jobs.mjs";
 
 /** Parse an inpaint batch JSONL. Every job needs out/image/mask/prompt (strings)
  * and a FINITE seed — reproducibility is the whole point of a sweep, so silent
@@ -67,11 +69,18 @@ export function qwenRecipe(job, flags, presets) {
 
 /** Why the inpaint --batch must stop after a failed job, or null to go on. An unusable
  * server (it vanished, or answers HTTP with a broken CUDA context: register C-83) fails
- * every later job, so it stops the batch at once; otherwise a run of consecutive failures
- * means the binding or the server is dead for the rest of the batch. */
-export function batchAbort({ err, consecFail, maxConsecFail }) {
+ * every later job, so it stops the batch at once; so does a full disk, because every later
+ * job writes to the same volume (2026-10-09: a batch went on past a full drive and left
+ * zero-byte pictures). Otherwise a run of consecutive failures means the binding or the
+ * server is dead for the rest of the batch. `out` is the failed job's output path, named in
+ * the full-disk message when the error does not already name it. */
+export function batchAbort({ err, consecFail, maxConsecFail, out }) {
   if (!err) return null;
   if (err.serverUnusable) return { reason: "server_unusable", message: `ComfyUI became unusable (${err.message})` };
+  if (isDiskFullError(err)) {
+    const where = out && !String(err.message).includes(out) ? ` writing ${out}` : "";
+    return { reason: "disk_full", message: `the disk is full${where} (${err.message})` };
+  }
   if (consecFail >= maxConsecFail) return { reason: "consecutive_failures", message: `${consecFail} consecutive failures (last: ${err.message})` };
   return null;
 }
