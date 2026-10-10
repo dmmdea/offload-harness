@@ -805,3 +805,98 @@ func TestFindingAlsoIsOmittedFromTheWireUnlessSomethingWasFolded(t *testing.T) {
 		t.Fatalf("a folded finding must publish its other claims: %s", folded)
 	}
 }
+
+// A review the seat WROTE, stopped only by the clock on the structuring step, is not lost work
+// (F20: three of five review defers in 26 hours). Salvage keys on what the node says about the
+// deferral - OutputTruncated, or SchemaMiss with the budget class - and on nothing else, so the
+// table below is the whole contract: which deferrals become a review, and which stay a defer.
+func TestSalvageReadsOnlyTheDefersWhereTheClockEndedTheStructuring(t *testing.T) {
+	const l1, l2 = "severe | run.go:5 | off-by-one | reads past the end", "moderate | run.go:9 | missing nil check | panics"
+	const cutReason = "output failed schema: re-pack skipped: the final answer was cut at the completion budget (output_truncated) - a partial cannot be re-packed into the requested object; the partial rides in output"
+	const skipReason = "structured re-pack skipped: 0 s left to the wall + 30 s grace at 5.6 tok/s buys 0 tokens < the answer's 91"
+	deferred := func(class, reason, output string, mut func(*core.AgentWireResult)) core.AgentWireResult {
+		w := core.AgentWireResult{Deferred: true, DeferClass: class, Reason: reason, Output: output, StopReason: "done"}
+		if mut != nil {
+			mut(&w)
+		}
+		return w
+	}
+	cut := func(w *core.AgentWireResult) { w.OutputTruncated = true }
+	miss := func(w *core.AgentWireResult) { w.SchemaMiss = true }
+	for _, tc := range []struct {
+		name  string
+		w     core.AgentWireResult
+		kind  string
+		lines []string
+	}{
+		{"cut final: the fragment after the last newline is dropped",
+			deferred(core.DeferClassAbstention, cutReason, l1+"\n"+l2+"\nminor | run.go:11 | the cut li", cut), SalvagedOutputTruncated, []string{l1, l2}},
+		{"cut final that ended on a newline loses no real line",
+			deferred(core.DeferClassAbstention, cutReason, l1+"\n"+l2+"\n", cut), SalvagedOutputTruncated, []string{l1, l2}},
+		{"cut final with one fragment and no complete line",
+			deferred(core.DeferClassAbstention, cutReason, "severe | run.go:5 | off", cut), SalvagedOutputTruncated, []string{}},
+		{"re-pack skipped for lack of wall: the answer is whole, every line kept",
+			deferred(core.DeferClassBudget, skipReason, l1+"\n"+l2, miss), SalvagedWall, []string{l1, l2}},
+		{"re-pack clamped and cut by the time left is the same clock",
+			deferred(core.DeferClassBudget, "structured re-pack re-pack truncated at 300 tokens (the time left set this budget)", l1+"\n"+l2, miss), SalvagedWall, []string{l1, l2}},
+
+		{"gpu busy is not the structuring step",
+			deferred(core.DeferClassCapacity, "gpu busy: a text job holds the GPU", l1, nil), "", nil},
+		{"a seat or stack failure during the re-pack is not the clock",
+			deferred(core.DeferClassInfrastructure, "structured re-pack unreachable: dial tcp: connection refused", l1, miss), "", nil},
+		{"a re-pack that answered the wrong shape is an abstention, not the clock",
+			deferred(core.DeferClassAbstention, "output failed schema: the model answered the wrong shape", l1, miss), "", nil},
+		{"a re-pack the caller canceled has nobody waiting",
+			deferred(core.DeferClassBudget, core.RepackCanceledReason+" (the caller's context ended)", l1, miss), "", nil},
+		{"a budget defer that is not a finished answer (no schema_miss flag)",
+			deferred(core.DeferClassBudget, "step budget exhausted (12 steps)", l1, nil), "", nil},
+		{"a deferral with no answer in it",
+			deferred(core.DeferClassBudget, skipReason, "  \n ", miss), "", nil},
+		{"a cut final with no answer in it",
+			deferred(core.DeferClassAbstention, cutReason, "", cut), "", nil},
+		{"a delivered result is never a salvage",
+			core.AgentWireResult{Output: l1, SchemaMiss: true, DeferClass: core.DeferClassBudget}, "", nil},
+		{"a deferral that already carries a structured object",
+			deferred(core.DeferClassBudget, skipReason, l1, func(w *core.AgentWireResult) { w.SchemaMiss = true; w.Structured = []byte(`{"findings":[]}`) }), "", nil},
+	} {
+		kind, lines := Salvage(tc.w)
+		if kind != tc.kind {
+			t.Errorf("%s: kind = %q, want %q", tc.name, kind, tc.kind)
+			continue
+		}
+		if tc.kind == "" {
+			if lines != nil {
+				t.Errorf("%s: a non-salvage must return no lines, got %q", tc.name, lines)
+			}
+			continue
+		}
+		if strings.Join(lines, "\n") != strings.Join(tc.lines, "\n") || len(lines) != len(tc.lines) {
+			t.Errorf("%s: lines = %q, want %q", tc.name, lines, tc.lines)
+		}
+	}
+}
+
+// Salvaged lines are ordinary lines: they meet every filter Report applies, so a cut answer
+// full of hollow, invented and echoed lines salvages to nothing and a mixed one keeps only
+// what a structured answer's survivors would be.
+func TestSalvagedLinesMeetEveryFilterReportApplies(t *testing.T) {
+	diff := "--- a/run.go\n+++ b/run.go\n@@ -1 +1 @@\n+x\n"
+	_, lines := Salvage(core.AgentWireResult{
+		Deferred: true, OutputTruncated: true, DeferClass: core.DeferClassAbstention,
+		Output: strings.Join([]string{
+			"severe | run.go:5 | off-by-one | reads past the end",
+			"The loop now iterates over every element", // hollow
+			"severe | ghost.go:1 | invented | not in the diff",
+			exampleFinding,
+			"moderate | run.go:5 | the bound is wrong | one past the end", // same line as the first
+			"minor | run.go:8 | the cut li",
+		}, "\n"),
+	})
+	rep := Report(lines, diff, 0)
+	if len(rep.Findings) != 1 || rep.Findings[0].Claim != "off-by-one" || len(rep.Findings[0].Also) != 1 {
+		t.Fatalf("want the one grounded finding with the same-line restatement folded into it: %+v", rep.Findings)
+	}
+	if rep.DroppedHollow != 1 || rep.DroppedUngrounded != 1 || rep.DroppedEcho != 1 || rep.DroppedDuplicate != 1 {
+		t.Fatalf("every filter must have counted its line, and the fragment must not be among them: %+v", rep)
+	}
+}

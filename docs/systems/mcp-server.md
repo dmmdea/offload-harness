@@ -233,7 +233,9 @@ its structuring failed (`schema_miss`: the re-pack was skipped because the wall 
 stalled), the deferred payload carries the loop's prose as `output` with `schema_miss: true`, beside the defer's own
 `reason` and `defer_class`, for a local run and a routed one alike. It is never graded and never an `answer` field.
 `offload_review_diff` publishes no such field: what that lane returns went through its grounding filters, and the raw
-prose has not, so a review defer stays bare.
+prose has not, so a review defer stays bare and never carries `output`. The one thing it does with a finished or cut
+answer is read its lines itself, through those same filters, when the clock kept them from being structured (salvage,
+under `offload_review_diff` below).
 
 `agent_delegate`'s `route` argument picks the placement rule (see
 [fleet-node.md](fleet-node.md#placement-routes-and-the-retry-delegator-side) for the mechanics):
@@ -567,6 +569,33 @@ These design choices are load-bearing rather than incidental:
   `Dedupe` and before the cap, for the same register D-90 reason: a stack must not crowd a
   genuinely different finding out of the published list. Nothing distinct is lost, since the
   caller still reads every claim.
+- **A review the seat wrote is salvaged when the clock cut its structuring (0.178.0).** The
+  harness ledger for the 26 hours to 2026-10-09 held five review defers, and three of them read
+  `output failed schema: re-pack skipped: the final answer was cut at the completion budget
+  (output_truncated)`, on a 27B seat and a 9B one; a fourth read `structured re-pack skipped: 0 s
+  left to the wall + 30 s grace …`. In each, the seat had written review lines and the lane threw
+  them away. The answer format is line-oriented and `ParseFindings` already reads raw lines, so the
+  re-pack is a convenience here, not a requirement: `reviewlane.Salvage` takes the raw answer's
+  complete lines and `publishReview` runs them through the normal `Report` path (echo, hollow,
+  grounding, dedupe, same-line fold, cap). It keys on structure, never on prose: the node's own
+  `output_truncated` flag, or `schema_miss` with the `budget` class (a finished answer whose
+  re-pack the clock skipped, clamped or cut; a canceled re-pack is excluded because nobody is
+  waiting). A cut answer's last line is dropped, because it is a fragment. What survives is
+  published with `salvaged: "output_truncated"` or `"wall"` and a `note`: an `output_truncated`
+  list may be **incomplete** (whatever the seat had not yet written is unreviewed), a `wall` list
+  is the seat's whole answer. A cut answer is never a clean verdict, whatever words it holds. If
+  nothing survives, the lane defers exactly as above, and the deferral names both the drops and why
+  the answer reached the lane unstructured; a cut answer with no complete line keeps the node's
+  own deferral verbatim. Every other deferral — a busy card (`capacity`), a seat or stack failure
+  (`infrastructure`), a re-pack that answered the wrong shape (`abstention`) — is unchanged, even
+  when it carries a good answer in `output`. The raw prose is still never published, only what
+  survives the filters. The same read applies on the fenced-seat fleet path: a deferred fleet
+  review is salvaged with the fleet's provenance (`node`, `placement`, `fence`) instead of falling
+  through to a local wait behind the very lease that fenced it; a salvage that comes to no review
+  falls through exactly as before. `internal/pipeline`'s `TestReviewLaneReadsWhatTheRunnerFiles`
+  runs the lane's real contract through the real runner so the node and the lane cannot drift
+  apart. The pipeline's own ledger row still records the run as the defer it was; the salvage is
+  the door's.
 
 Everything the lane returns is ADVISORY: it never gates a merge and never substitutes for the
 final does-it-actually-work verification, which stays with the caller — as do security review,

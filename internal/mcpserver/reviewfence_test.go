@@ -216,3 +216,86 @@ func TestReviewUnderAForeignFenceWithNoEligibleRemoteKeepsTheCapacityDefer(t *te
 		t.Errorf("the caller must be told the fleet was asked and why it took nothing: %v", out)
 	}
 }
+
+// TestReviewUnderAForeignFenceSalvagesAFleetSeatsWrittenAnswer (F20): a fleet seat that wrote the
+// review and was cut at the completion budget deferred it. The fallthrough would wait out the very
+// fence that sent the review to the fleet, to answer nothing; the lines the fleet seat wrote are
+// published instead, through the same filters, naming the node that wrote them.
+func TestReviewUnderAForeignFenceSalvagesAFleetSeatsWrittenAnswer(t *testing.T) {
+	localCalls := 0
+	s, _ := fenceServer(t, func(context.Context, core.AgentContract, delegate.LocalOptions) (core.AgentWireResult, error) {
+		localCalls++
+		return seatFindings(), nil
+	})
+	s.reviewFleet = func(context.Context, config.Config, delegate.LocalRunner, []core.AgentContract, string, []string, *delegate.RunOptions) ([]delegate.PlacedResult, delegate.Summary, error) {
+		return []delegate.PlacedResult{{
+			Node: "node-b", Seat: "qwen3.8-27b-vllm",
+			PlacementReason: "route=remote forced → node-b",
+			Result: cutWire(strings.Join([]string{
+				"severe | run.go:1 | the loop reads one past the end | index out of range at runtime",
+				"minor | nowhere.go:9 | invented file | must be dropped as ungrounded",
+				"moderate | run.go:3 | the comparison is not strict | a fence-post error",
+				"severe | run.go:4 | the second loop never terminat", // cut by the budget
+			}, "\n")),
+		}}, delegate.Summary{Deferred: 1}, nil
+	}
+	res, err := s.handleReviewDiff(context.Background(), callReq(reviewArgs(t, map[string]any{
+		"diff": reviewDiff, "task": "iterate over every element exactly once",
+	})))
+	if err != nil {
+		t.Fatalf("handleReviewDiff: %v", err)
+	}
+	if localCalls != 0 {
+		t.Errorf("the local seat is fenced and a salvage needs nothing from it (%d calls)", localCalls)
+	}
+	out := decodeResult(t, res)
+	if out["deferred"] != nil {
+		t.Fatalf("the fleet seat's written answer must be published, not deferred: %v", out)
+	}
+	if findings, _ := out["findings"].([]any); len(findings) != 2 {
+		t.Fatalf("want the two grounded complete lines (the invented file and the fragment dropped): %v", out["findings"])
+	}
+	if out["dropped_ungrounded"] != float64(1) || out["salvaged"] != "output_truncated" {
+		t.Errorf("the same filters and the salvage flag must apply on the fleet path: %v", out)
+	}
+	if out["node"] != "node-b" || out["executed_on"] != "fleet" || out["seat"] != "qwen3.8-27b-vllm" {
+		t.Errorf("the executing node must be published beside a salvaged fleet review: %v", out)
+	}
+	if p, _ := out["placement"].(string); !strings.Contains(p, "route=remote") {
+		t.Errorf("the placement must be published: %v", out)
+	}
+	if out["fence"] == nil {
+		t.Errorf("the fence that moved the review must be published: %v", out)
+	}
+}
+
+// TestReviewUnderAForeignFenceFallsThroughWhenTheFleetsSalvageComesToNothing: a fleet deferral
+// whose lines are all hollow (or that holds no answer) is not a review, so the fallthrough stands
+// exactly as it did - the local run - and the caller is still told what the fleet answered.
+func TestReviewUnderAForeignFenceFallsThroughWhenTheFleetsSalvageComesToNothing(t *testing.T) {
+	localCalls := 0
+	s, _ := fenceServer(t, func(context.Context, core.AgentContract, delegate.LocalOptions) (core.AgentWireResult, error) {
+		localCalls++
+		return seatFindings("severe | run.go:1 | the loop reads one past the end | index out of range at runtime"), nil
+	})
+	fleet := cutWire("The loop now iterates over every element\nA bounds check was added")
+	s.reviewFleet = func(context.Context, config.Config, delegate.LocalRunner, []core.AgentContract, string, []string, *delegate.RunOptions) ([]delegate.PlacedResult, delegate.Summary, error) {
+		return []delegate.PlacedResult{{Node: "node-b", Seat: "qwen3.8-27b-vllm", PlacementReason: "route=remote forced → node-b", Result: fleet}}, delegate.Summary{Deferred: 1}, nil
+	}
+	res, err := s.handleReviewDiff(context.Background(), callReq(reviewArgs(t, map[string]any{
+		"diff": reviewDiff, "task": "iterate over every element exactly once",
+	})))
+	if err != nil {
+		t.Fatalf("handleReviewDiff: %v", err)
+	}
+	if localCalls != 1 {
+		t.Errorf("a salvage that comes to no review must leave the local fallthrough alone (%d local calls)", localCalls)
+	}
+	out := decodeResult(t, res)
+	if findings, _ := out["findings"].([]any); len(findings) != 1 || out["salvaged"] != nil || out["node"] != nil {
+		t.Fatalf("the published review is the local one: %v", out)
+	}
+	if note, _ := out["fleet"].(string); !strings.Contains(note, "cut at the completion budget") {
+		t.Errorf("the caller must still be told why the fleet's answer was not used: %v", out["fleet"])
+	}
+}

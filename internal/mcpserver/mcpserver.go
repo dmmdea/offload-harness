@@ -549,7 +549,7 @@ func (s *Server) buildServer(version string) *mcp.Server {
 	// else (internal/reviewlane).
 	srv.AddTool(&mcp.Tool{
 		Name:        "offload_review_diff",
-		Description: "Review a code DIFF on a FREE local seat with CLEAN context — the reviewer sees only the diff and the task statement, never this conversation's history. That isolation is the mechanism: a reviewer without the author's accumulated context catches defects the author's own judgement has stopped seeing (long-window context degradation is the well-studied effect this exploits). Pass diff (inline) or diff_path (a file holding a unified diff) — exactly one — plus task, which is what the change was SUPPOSED to do: without stated intent a reviewer cannot tell a defect from a decision. Returns {findings:[{severity,file,line,claim,why,also?}] ranked severe|moderate|minor first, reviewed_bytes, seat, steps, stop_reason, note?, dropped_ungrounded?, dropped_echo?, dropped_hollow?, dropped_duplicate?, truncated_by_cap?}. note explains an EMPTY findings list in words — read it, the two cases mean different things. The five counts say what is not in the list: dropped_ungrounded named a file the diff never touched, dropped_echo handed the prompt's own template back, dropped_hollow had no severity, no file and no why (a bare claim, usually restating the diff), dropped_duplicate merges the same defect reported more than once, including findings that cite the same file and line in different words (the most severe is kept and the others' claims ride in its also[] so every claim stays readable; merging runs BEFORE the cap, so repeats never crowd out a unique finding), truncated_by_cap is what your max_findings hid. HOW TO USE THE RESULT: findings are TRIAGE INPUT, not verdicts. Read the flagged lines yourself and decide — never apply a finding unread, and treat a `severe` label from a small local model as a prompt to look, not as proof anything is wrong. Equally, an EMPTY findings list means this reviewer found nothing; it is not a verification that the change works. ADVISORY ONLY: this lane never gates a merge and never substitutes for the final does-it-actually-work check, which stays yours — as do security review, architecture judgement, and any call you are accountable for. dropped_ungrounded counts findings naming a file the diff never touched (an invented path is how a small seat fails here); they are removed and reported rather than silently kept. If NO finding survives filtering — the seat wrote nothing, or every line it wrote was hollow, echoed or ungrounded — and its raw answer does not read as an explicit clean NONE verdict, this DEFERS (defer_class abstention) rather than reporting an empty list, and the deferral carries the counts and a reason naming them: a broken or hollow run must never arrive looking like a clean diff, so review the diff yourself. Only the seat's own NONE earns an empty findings list. Caps: at most 10 findings (max_findings only narrows it), a diff of <=256 KiB inline or <=128 KiB via diff_path — split a larger one by path (git diff -- <dir>), which also keeps each review inside the seat's context window. On any failure it returns deferred:true with a reason and you review the diff yourself.",
+		Description: "Review a code DIFF on a FREE local seat with CLEAN context — the reviewer sees only the diff and the task statement, never this conversation's history. That isolation is the mechanism: a reviewer without the author's accumulated context catches defects the author's own judgement has stopped seeing (long-window context degradation is the well-studied effect this exploits). Pass diff (inline) or diff_path (a file holding a unified diff) — exactly one — plus task, which is what the change was SUPPOSED to do: without stated intent a reviewer cannot tell a defect from a decision. Returns {findings:[{severity,file,line,claim,why,also?}] ranked severe|moderate|minor first, reviewed_bytes, seat, steps, stop_reason, note?, salvaged?, dropped_ungrounded?, dropped_echo?, dropped_hollow?, dropped_duplicate?, truncated_by_cap?}. note explains an EMPTY findings list in words — read it, the two cases mean different things — and a SALVAGED list (below). The five counts say what is not in the list: dropped_ungrounded named a file the diff never touched, dropped_echo handed the prompt's own template back, dropped_hollow had no severity, no file and no why (a bare claim, usually restating the diff), dropped_duplicate merges the same defect reported more than once, including findings that cite the same file and line in different words (the most severe is kept and the others' claims ride in its also[] so every claim stays readable; merging runs BEFORE the cap, so repeats never crowd out a unique finding), truncated_by_cap is what your max_findings hid. HOW TO USE THE RESULT: findings are TRIAGE INPUT, not verdicts. Read the flagged lines yourself and decide — never apply a finding unread, and treat a `severe` label from a small local model as a prompt to look, not as proof anything is wrong. Equally, an EMPTY findings list means this reviewer found nothing; it is not a verification that the change works. ADVISORY ONLY: this lane never gates a merge and never substitutes for the final does-it-actually-work check, which stays yours — as do security review, architecture judgement, and any call you are accountable for. dropped_ungrounded counts findings naming a file the diff never touched (an invented path is how a small seat fails here); they are removed and reported rather than silently kept. If NO finding survives filtering — the seat wrote nothing, or every line it wrote was hollow, echoed or ungrounded — and its raw answer does not read as an explicit clean NONE verdict, this DEFERS (defer_class abstention) rather than reporting an empty list, and the deferral carries the counts and a reason naming them: a broken or hollow run must never arrive looking like a clean diff, so review the diff yourself. Only the seat's own NONE earns an empty findings list. SALVAGE: when the seat DID write its review and only the clock ended the structuring step — its final answer was cut at the completion budget (salvaged:\"output_truncated\"), or the wall had no time left for the structured re-pack (salvaged:\"wall\") — the lane reads the complete lines of the raw answer itself (a final line cut mid-way is dropped), runs them through the same filters, and publishes what survives with the flag and a note: an output_truncated list may be INCOMPLETE (whatever the seat had not yet written is unreviewed), a wall list is the seat's whole answer. If nothing survives it defers as above. Every other deferral (gpu busy, a seat or stack failure, a re-pack that answered the wrong shape) is unchanged. Caps: at most 10 findings (max_findings only narrows it), a diff of <=256 KiB inline or <=128 KiB via diff_path — split a larger one by path (git diff -- <dir>), which also keeps each review inside the seat's context window. On any failure it returns deferred:true with a reason and you review the diff yourself.",
 		InputSchema: json.RawMessage(`{"type":"object","properties":{"diff":{"type":"string","description":"the unified diff text, inline (mutually exclusive with diff_path; <=256 KiB)"},"diff_path":{"type":"string","description":"path to a file holding the unified diff, read by the HARNESS under read_root so your context never pays for it (<=128 KiB)"},"task":{"type":"string","description":"what this change was SUPPOSED to accomplish — the intent the reviewer judges the diff against"},"max_findings":{"type":"integer","description":"cap on returned findings (default 10, which is also the ceiling: the seat is never asked for more)"},"read_root":{"type":"string","description":"absolute directory diff_path is read from; nothing outside it can be read (default: the server working dir)"}},"required":["task"]}`),
 	}, s.handleReviewDiff)
 
@@ -3503,6 +3503,18 @@ func (s *Server) handleReviewDiff(ctx context.Context, req *mcp.CallToolRequest)
 		if ok {
 			return s.publishReview(wire, diff, in.MaxFindings, extra)
 		}
+		// A fleet seat that WROTE the review and was stopped by the clock on its
+		// structuring (F20: a cut final, a re-pack with no wall left) deferred it, and the
+		// fallthrough below would wait out this very fence to answer nothing. Its lines are
+		// worth more than that wait, so they get the same read a local review's would:
+		// published, with the fleet's provenance, only when they survive the filters.
+		// Anything else — and a salvage that comes to no review — falls through exactly
+		// as before.
+		if wire.Deferred {
+			if out, delivered := reviewPayload(wire, diff, in.MaxFindings, extra); delivered {
+				return jsonResult(out)
+			}
+		}
 		// Nothing out there took it. Today's path stands — the wait, then the
 		// capacity defer — and the note says the fleet WAS asked, so a caller
 		// reading "gpu busy" does not have to wonder whether the fallthrough
@@ -3601,15 +3613,8 @@ func (s *Server) contractOnFleet(ctx context.Context, contract core.AgentContrac
 		return core.AgentWireResult{}, nil, fmt.Sprintf("the fleet dispatch returned %d results for one review", len(results)), false
 	}
 	pr := results[0]
-	switch {
-	case pr.Err != "":
+	if pr.Err != "" {
 		return core.AgentWireResult{}, nil, "the fleet failed the review: " + pr.Err, false
-	case pr.Result.Deferred:
-		// The ordinary shape: "route=remote: no eligible remote" — nothing out
-		// there fits the diff, or nothing is up. Verbatim, because the reason
-		// distinguishes "no remotes configured" from "they answered and the diff
-		// does not fit their window", and those need different fixes.
-		return pr.Result, nil, pr.Result.Reason, false
 	}
 	extra := map[string]any{
 		"executed_on": "fleet",
@@ -3622,6 +3627,18 @@ func (s *Server) contractOnFleet(ctx context.Context, contract core.AgentContrac
 	}
 	if pr.Seat != "" {
 		extra["seat"] = pr.Seat
+	}
+	if pr.Result.Deferred {
+		// The ordinary shape: "route=remote: no eligible remote" — nothing out
+		// there fits the diff, or nothing is up. Verbatim, because the reason
+		// distinguishes "no remotes configured" from "they answered and the diff
+		// does not fit their window", and those need different fixes.
+		//
+		// The provenance map rides a deferral too (F20): the review lane can still
+		// salvage a fleet seat's written answer from one (reviewPayload), and must say
+		// which node wrote it. The doors that publish a bare defer read extra only on
+		// success, so they never see it.
+		return pr.Result, extra, pr.Result.Reason, false
 	}
 	return pr.Result, extra, "", true
 }
@@ -3657,9 +3674,8 @@ func withReviewExtra(out map[string]any, extra map[string]any) map[string]any {
 	return out
 }
 
-// publishReview turns ONE seat's wire result into the lane's published answer:
-// decode, drop hollow lines, ground, dedupe, rank, cap, then the clean-verdict gate and
-// the notes.
+// publishReview turns ONE seat's wire result into the lane's published answer (see
+// reviewPayload for what that comprises).
 //
 // It is shared by the local path and the fenced-seat fleet path on purpose. The
 // filters are the whole reason this lane's output is worth reading — a finding
@@ -3668,37 +3684,67 @@ func withReviewExtra(out map[string]any, extra map[string]any) map[string]any {
 // than not. A second copy of these rules for the fleet path would have been the
 // copy that drifted.
 func (s *Server) publishReview(wire core.AgentWireResult, diff string, maxFindings int, extra map[string]any) (*mcp.CallToolResult, error) {
-	if wire.Deferred {
-		return jsonResult(withReviewExtra(map[string]any{
+	out, _ := reviewPayload(wire, diff, maxFindings, extra)
+	return jsonResult(out)
+}
+
+// reviewPayload is publishReview's decision, apart from the transport so the fenced-seat fleet
+// path can put the same question to a deferred result. It reads the seat's findings — from the
+// structured object, or, for a deferral the CLOCK caused on an answer the seat had written,
+// straight from its raw lines (reviewlane.Salvage) — then drops hollow lines, grounds, dedupes,
+// folds same-line restatements, ranks and caps them, applies the clean-verdict gate and words the
+// notes. delivered is true when the payload is a REVIEW (findings, or the seat's own clean
+// verdict) and false when it is a deferral.
+func reviewPayload(wire core.AgentWireResult, diff string, maxFindings int, extra map[string]any) (out map[string]any, delivered bool) {
+	// bareDefer is the deferral exactly as the node filed it. Every deferral the lane cannot
+	// turn into a review keeps this shape, so a caller that read "gpu busy" or "seat down"
+	// before still reads it.
+	bareDefer := func() (map[string]any, bool) {
+		return withReviewExtra(map[string]any{
 			"deferred":    true,
 			"reason":      wire.Reason,
 			"defer_class": wire.DeferClass,
 			"seat":        wire.Seat,
 			"steps":       wire.Steps,
-		}, extra))
+		}, extra), false
 	}
-	var structured struct {
-		Findings []string `json:"findings"`
+	var lines []string
+	salvaged := ""
+	if wire.Deferred {
+		// A deferral is a review only when the clock ended the structuring of an answer the
+		// seat had written (F20, 2026-10-09: three of five review defers in 26 hours were a
+		// cut or un-repacked answer whose lines the lane threw away). Everything else — a
+		// busy card, a seat that failed, a re-pack that answered the wrong shape — is the
+		// bare defer it always was. The raw prose is still never published: only what
+		// survives the filters below is.
+		if salvaged, lines = reviewlane.Salvage(wire); salvaged == "" {
+			return bareDefer()
+		}
+	} else {
+		var structured struct {
+			Findings []string `json:"findings"`
+		}
+		// A non-deferred run with an OutputSchema always carries Structured
+		// (runAgentTask defers on every re-pack failure), so neither branch below
+		// should be reachable. They defer rather than publishing an empty findings
+		// list precisely because of what that list would MEAN: "this reviewer found
+		// nothing" is the one shape a caller might read as reassurance, so it must
+		// never be what a broken result degrades into.
+		if len(wire.Structured) == 0 {
+			return withReviewExtra(map[string]any{
+				"deferred": true, "reason": "the seat returned no structured findings (stop_reason " + wire.StopReason + ")",
+				"defer_class": core.DeferClassAbstention, "seat": wire.Seat, "steps": wire.Steps,
+			}, extra), false
+		}
+		if uerr := json.Unmarshal(wire.Structured, &structured); uerr != nil {
+			return withReviewExtra(map[string]any{
+				"deferred": true, "reason": "could not decode the seat's findings: " + uerr.Error(),
+				"defer_class": core.DeferClassAbstention, "seat": wire.Seat, "steps": wire.Steps,
+			}, extra), false
+		}
+		lines = structured.Findings
 	}
-	// A non-deferred run with an OutputSchema always carries Structured
-	// (runAgentTask defers on every re-pack failure), so neither branch below
-	// should be reachable. They defer rather than publishing an empty findings
-	// list precisely because of what that list would MEAN: "this reviewer found
-	// nothing" is the one shape a caller might read as reassurance, so it must
-	// never be what a broken result degrades into.
-	if len(wire.Structured) == 0 {
-		return jsonResult(withReviewExtra(map[string]any{
-			"deferred": true, "reason": "the seat returned no structured findings (stop_reason " + wire.StopReason + ")",
-			"defer_class": core.DeferClassAbstention, "seat": wire.Seat, "steps": wire.Steps,
-		}, extra))
-	}
-	if uerr := json.Unmarshal(wire.Structured, &structured); uerr != nil {
-		return jsonResult(withReviewExtra(map[string]any{
-			"deferred": true, "reason": "could not decode the seat's findings: " + uerr.Error(),
-			"defer_class": core.DeferClassAbstention, "seat": wire.Seat, "steps": wire.Steps,
-		}, extra))
-	}
-	rep := reviewlane.Report(structured.Findings, diff, maxFindings)
+	rep := reviewlane.Report(lines, diff, maxFindings)
 	// THE GATE. A zero-finding result is only published as a clean review when the seat's
 	// OWN raw answer says so. A structurally valid but UNEARNED empty array is reachable
 	// and indistinguishable from a real clean review at every other field. Until 0.115.8
@@ -3722,15 +3768,30 @@ func (s *Server) publishReview(wire core.AgentWireResult, diff string, maxFindin
 	// clean one, in a lane whose contract is that a broken run never looks like a clean diff.
 	// A list emptied by filtering is not a review any more than a list the seat left empty, so
 	// both face the same test, and only the seat's own explicit NONE earns an empty list.
-	if len(rep.Findings) == 0 && !reviewlane.VerdictReadsClean(wire.Output) {
-		return jsonResult(withReviewExtra(withReviewCounts(map[string]any{
+	//
+	// An answer the completion budget cut can never read as clean, whatever words it holds: the
+	// seat was stopped before it finished, so a "no issues" inside it is not an all-clear.
+	readsClean := reviewlane.VerdictReadsClean(wire.Output) && salvaged != reviewlane.SalvagedOutputTruncated
+	if len(rep.Findings) == 0 && !readsClean {
+		if salvaged != "" && rep.Filtered() == 0 {
+			// Nothing in the salvaged text was even finding-shaped: there is nothing to add
+			// to the node's own deferral, which says what happened to the answer.
+			return bareDefer()
+		}
+		reason := unearnedReason(rep)
+		if salvaged != "" {
+			// The caller loses nothing it used to be told: the drops AND why the answer
+			// reached the lane unstructured.
+			reason = "the seat's answer reached the lane unstructured (" + wire.Reason + "); read from its raw lines, " + reason
+		}
+		return withReviewExtra(withReviewCounts(map[string]any{
 			"deferred":    true,
-			"reason":      unearnedReason(rep),
+			"reason":      reason,
 			"defer_class": core.DeferClassAbstention,
 			"seat":        wire.Seat,
 			"steps":       wire.Steps,
 			"stop_reason": wire.StopReason,
-		}, rep), extra))
+		}, rep), extra), false
 	}
 	findings := rep.Findings
 	if findings == nil {
@@ -3738,7 +3799,7 @@ func (s *Server) publishReview(wire core.AgentWireResult, diff string, maxFindin
 		// null would read to a caller as a missing field.
 		findings = []reviewlane.Finding{}
 	}
-	out := map[string]any{
+	out = map[string]any{
 		"findings":       findings,
 		"reviewed_bytes": len(diff),
 		"seat":           wire.Seat,
@@ -3746,6 +3807,11 @@ func (s *Server) publishReview(wire core.AgentWireResult, diff string, maxFindin
 		"stop_reason":    wire.StopReason,
 	}
 	withReviewCounts(out, rep)
+	var notes []string
+	if salvaged != "" {
+		out["salvaged"] = salvaged
+		notes = append(notes, salvageNote(salvaged))
+	}
 	if len(findings) == 0 {
 		// Said in words, because this is the result most easily misread. Which words
 		// depends on WHY the list is empty: "found nothing" beside a non-zero drop count
@@ -3755,12 +3821,24 @@ func (s *Server) publishReview(wire core.AgentWireResult, diff string, maxFindin
 		// contradicting answer, or a re-pack that invented a line the answer never held);
 		// every other emptied list defers above.
 		if rep.DroppedUngrounded > 0 || rep.DroppedEcho > 0 || rep.DroppedHollow > 0 || rep.DroppedDuplicate > 0 {
-			out["note"] = "this reviewer's answer read as a clean NONE verdict, yet it also wrote findings and NONE survived filtering — they named files the diff does not touch, echoed the prompt's own template back, or carried no severity, file or why. That is a signal about the reviewer, not about the diff: nothing here says the change is correct, and nothing here says it is wrong"
+			notes = append(notes, "this reviewer's answer read as a clean NONE verdict, yet it also wrote findings and NONE survived filtering — they named files the diff does not touch, echoed the prompt's own template back, or carried no severity, file or why. That is a signal about the reviewer, not about the diff: nothing here says the change is correct, and nothing here says it is wrong")
 		} else {
-			out["note"] = "this reviewer found nothing in the diff — that is not a verification that the change works, which stays yours"
+			notes = append(notes, "this reviewer found nothing in the diff — that is not a verification that the change works, which stays yours")
 		}
 	}
-	return jsonResult(withReviewExtra(out, extra))
+	if len(notes) > 0 {
+		out["note"] = strings.Join(notes, " ")
+	}
+	return withReviewExtra(out, extra), true
+}
+
+// salvageNote says, in words, what a salvaged review is. The flag beside it is the
+// machine-readable half; this is the half a reader of the list cannot miss.
+func salvageNote(kind string) string {
+	if kind == reviewlane.SalvagedOutputTruncated {
+		return "the seat's final answer was cut at the completion budget, so the structured re-pack was skipped and these findings were read from the complete lines of its raw answer (the line cut mid-way was dropped). The list may be incomplete: whatever the seat had not yet written is unreviewed."
+	}
+	return "the wall had no time left for the structured re-pack, so these findings were read straight from the lines of the seat's finished answer, which is complete. They went through the same filters as any other result."
 }
 
 // withReviewCounts publishes a review's counts on the same terms for every payload that
@@ -3810,7 +3888,7 @@ func unearnedReason(rep reviewlane.Result) string {
 		return "the seat produced no findings and its raw answer did not read as a clean NONE verdict — likely a broken run, not a clean diff; review it yourself"
 	}
 	return fmt.Sprintf("none of the seat's %d findings survived the lane's filters (%s) and its raw answer did not read as a clean NONE verdict — a hollow or invented review, not a clean diff; review it yourself",
-		rep.DroppedHollow+rep.DroppedUngrounded+rep.DroppedEcho, strings.Join(parts, "; "))
+		rep.Filtered(), strings.Join(parts, "; "))
 }
 
 // callDeadlineAt is the instant a delegation door's call must be over: entered

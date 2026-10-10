@@ -264,6 +264,12 @@ type Result struct {
 	TruncatedByCap    int
 }
 
+// Filtered is how many of the seat's lines the filters that can EMPTY a list took: hollow,
+// ungrounded and echoed. A duplicate always leaves its survivor and the cap keeps at least one,
+// so those two never count here. Non-zero on an empty Findings means the seat DID write
+// finding-shaped lines and the lane discarded every one.
+func (r Result) Filtered() int { return r.DroppedHollow + r.DroppedUngrounded + r.DroppedEcho }
+
 // Report turns the seat's raw finding lines into what the caller is shown: template echoes
 // removed, parsed, hollow lines removed, grounded against the diff's own files,
 // deduplicated, same-line restatements folded together, severity-ranked, capped — with a
@@ -573,6 +579,67 @@ func VerdictReadsClean(output string) bool {
 	// An affirmative verdict, or nothing. A seat that reports a FAILURE ("I could not read
 	// the diff") must land here as not-clean, which is why neither branch is a length test.
 	return noneLineRe.MatchString(t) || noDefectRe.MatchString(t)
+}
+
+// What cut the structuring step short, as published in a result's `salvaged` field.
+const (
+	// SalvagedOutputTruncated: the seat's final answer ended on the completion budget, so what
+	// it wrote is a PARTIAL list. Its complete lines are read; the one cut mid-way is dropped.
+	SalvagedOutputTruncated = "output_truncated"
+	// SalvagedWall: the loop finished and the clock ended the structured re-pack — skipped for
+	// lack of wall, or clamped and cut by the time left. The answer is complete.
+	SalvagedWall = "wall"
+)
+
+// Salvage reads a DEFERRED agent result whose seat had already written the review and was
+// stopped only by the clock on the structuring step, and returns the lines to run through
+// Report. kind is "" for every other result, which the caller handles exactly as it always did.
+//
+// It answers a measured waste (the harness ledger, the 26 hours to 2026-10-09): of five review
+// defers, three read "output failed schema: re-pack skipped: the final answer was cut at the
+// completion budget" and a fourth "structured re-pack skipped: 0 s left to the wall", on a 27B
+// seat and on a 9B one. In every case the seat had written review lines and the lane threw them
+// away. The re-pack is a convenience for this lane, not a requirement: the answer format is
+// LINE-oriented, ParseFindings already reads raw lines, and the schema's one field is those
+// same lines split on newlines. So an answer the re-pack could not reach is still readable, and
+// each line then passes through every filter a structured one does (echo, hollow, grounding,
+// dedupe, the cap). The raw text itself is still never published, only what survives them.
+//
+// It keys on structure, not prose: OutputTruncated (the node's own flag for a cut final) and
+// SchemaMiss with the budget class (the node's flag for a finished answer whose structuring the
+// CLOCK ended: a re-pack skipped, clamped or cut by the time left; a canceled one is excluded,
+// because nobody is waiting for it). Everything else stays a defer: a gpu-busy or other
+// capacity defer, a seat or stack failure (infrastructure), a re-pack that answered the wrong
+// shape (abstention), and any defer that holds no answer. Those are the seat or the stack
+// failing, not the clock cutting short an answer that was fine.
+//
+// A cut answer's last line is dropped. The text after its final newline is where the budget
+// stopped the seat, so it is a fragment ("severe | run.go:5 | off-by-one in the l"), and a
+// fragment can parse into a plausible finding with the wrong claim. A finished answer keeps
+// every line.
+func Salvage(w core.AgentWireResult) (kind string, lines []string) {
+	if !w.Deferred || len(w.Structured) != 0 || strings.TrimSpace(w.Output) == "" {
+		return "", nil
+	}
+	switch {
+	case w.OutputTruncated:
+		return SalvagedOutputTruncated, answerLines(w.Output, true)
+	case w.SchemaMiss && w.DeferClass == core.DeferClassBudget && !strings.HasPrefix(w.Reason, core.RepackCanceledReason):
+		return SalvagedWall, answerLines(w.Output, false)
+	}
+	return "", nil
+}
+
+// answerLines splits a seat's raw final answer into its lines. cut means the answer was ended
+// by the completion budget, so whatever follows its last newline is a fragment and is dropped:
+// the final element of the split, which is "" when the text ended on a newline (nothing lost)
+// and the cut line otherwise.
+func answerLines(output string, cut bool) []string {
+	lines := strings.Split(output, "\n")
+	if cut {
+		lines = lines[:len(lines)-1]
+	}
+	return lines
 }
 
 // capFindings resolves the caller's cap: unset or over the ceiling means DefaultMaxFindings,

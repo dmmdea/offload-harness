@@ -612,3 +612,236 @@ func TestReviewDiffReadsDiffPathUnderReadRootAndRefusesOutsideIt(t *testing.T) {
 		t.Fatalf("a diff_path outside read_root must be refused: %v", m)
 	}
 }
+
+// cutWire is the wire result a node files when the seat's final answer ends on the completion
+// budget and the schema contract cannot be re-packed from a partial (pipeline.runAgentTask):
+// deferred as an abstention, flagged output_truncated, the partial riding in output. A hand-built
+// wire proves only that the lane reads its own reading of the node, so internal/pipeline's
+// TestReviewLaneReadsWhatTheRunnerFiles runs the lane's real contract through the real runner and
+// hands the wire it files to reviewlane.Salvage.
+func cutWire(output string) core.AgentWireResult {
+	return core.AgentWireResult{
+		SchemaVersion:   core.AgentWireSchemaVersion,
+		Seat:            "fake-seat",
+		Steps:           3,
+		StopReason:      "done",
+		Output:          output,
+		OutputTruncated: true,
+		Deferred:        true,
+		DeferClass:      core.DeferClassAbstention,
+		Reason:          "output failed schema: re-pack skipped: the final answer was cut at the completion budget (output_truncated) - a partial cannot be re-packed into the requested object; the partial rides in output",
+	}
+}
+
+// reviewOf runs one review whose seat returns exactly w and decodes what the door published.
+func reviewOf(t *testing.T, w core.AgentWireResult) map[string]any {
+	t.Helper()
+	s := askTestServer(t, func(_ context.Context, _ core.AgentContract, _ delegate.LocalOptions) (core.AgentWireResult, error) {
+		return w, nil
+	})
+	res, err := s.handleReviewDiff(context.Background(), callReq(reviewArgs(t, map[string]any{
+		"diff": reviewDiff, "task": "iterate over every element exactly once",
+	})))
+	if err != nil {
+		t.Fatalf("handleReviewDiff: %v", err)
+	}
+	return decodeResult(t, res)
+}
+
+// F20 (the harness ledger, the 26 hours to 2026-10-09): three of five review defers were
+// "output failed schema: re-pack skipped: the final answer was cut at the completion budget",
+// and in every one the seat had written review lines the lane threw away. The answer format is
+// line-oriented, so the complete lines are read, the one cut mid-way is dropped, and the
+// survivors are published flagged and noted.
+func TestReviewDiffSalvagesTheCompleteLinesOfACutAnswer(t *testing.T) {
+	m := reviewOf(t, cutWire(strings.Join([]string{
+		"severe | run.go:5 | off-by-one in the loop bound | indexes one past the end",
+		"moderate | run.go:9 | missing nil check | panics on empty input",
+		"minor | run.go:12 | naming is inconsistent | cosmetic",
+		"severe | run.go:14 | the second loop never terminat", // cut mid-way: the budget ended here
+	}, "\n")))
+	if m["deferred"] != nil {
+		t.Fatalf("a cut answer with complete lines is a review, not a defer: %v", m)
+	}
+	findings, _ := m["findings"].([]any)
+	if len(findings) != 3 {
+		t.Fatalf("want the 3 complete lines and not the fragment: %v", m["findings"])
+	}
+	if first, _ := findings[0].(map[string]any); first["claim"] != "off-by-one in the loop bound" {
+		t.Fatalf("the cut line parses as a SEVERE finding and would lead the list if kept: %v", first)
+	}
+	if m["salvaged"] != "output_truncated" {
+		t.Fatalf("the flag must say why the list was read from the raw lines: %v", m)
+	}
+	note, _ := m["note"].(string)
+	if !strings.Contains(note, "cut at the completion budget") || !strings.Contains(note, "may be incomplete") {
+		t.Fatalf("the note must say the answer was cut and the list may be incomplete: %q", note)
+	}
+	if m["reviewed_bytes"].(float64) != float64(len(reviewDiff)) || m["seat"] != "fake-seat" {
+		t.Errorf("a salvaged review publishes what any review does: %v", m)
+	}
+	if _, has := m["output"]; has {
+		t.Errorf("the raw prose is never published, only what survived the filters: %v", m)
+	}
+}
+
+// The other half of F20: the loop finished and the wall had no time left for the re-pack
+// ("structured re-pack skipped: 0 s left to the wall + 30 s grace ..."). The answer is whole,
+// so every line is kept - including the last, which has no trailing newline.
+func TestReviewDiffSalvagesAnAnswerWhoseRepackHadNoWallLeft(t *testing.T) {
+	m := reviewOf(t, schemaMissWire(strings.Join([]string{
+		"severe | run.go:5 | off-by-one in the loop bound | indexes one past the end",
+		"moderate | run.go:9 | missing nil check | panics on empty input",
+		"minor | run.go:12 | naming is inconsistent | cosmetic",
+	}, "\n")))
+	if m["deferred"] != nil {
+		t.Fatalf("a finished answer whose re-pack had no wall is a review: %v", m)
+	}
+	if findings, _ := m["findings"].([]any); len(findings) != 3 {
+		t.Fatalf("a finished answer keeps every line, the last one included: %v", m["findings"])
+	}
+	if m["salvaged"] != "wall" {
+		t.Fatalf("salvaged = %v, want wall", m["salvaged"])
+	}
+	if note, _ := m["note"].(string); !strings.Contains(note, "no time left for the structured re-pack") || strings.Contains(note, "incomplete") {
+		t.Errorf("the note must name the wall and must NOT claim the list is incomplete - the answer was finished: %q", note)
+	}
+}
+
+// Salvaging does not lower the bar. A cut answer whose complete lines are all hollow (or invented,
+// or echoed) comes to no review, so it defers as an abstention exactly as the unsalvaged shape of
+// the same lines does - and the caller is told both what the seat wrote and why it was unstructured.
+func TestReviewDiffDefersACutAnswerWhoseLinesAreAllHollow(t *testing.T) {
+	m := reviewOf(t, cutWire(strings.Join([]string{
+		"The loop now iterates over every element of the slice",
+		"A bounds check was added before the index is used",
+		"The result of the iteration is returned to the caller",
+		"the last line was cut mid-sen", // dropped as the fragment, so it is not counted
+	}, "\n")))
+	if m["deferred"] != true || m["defer_class"] != string(core.DeferClassAbstention) {
+		t.Fatalf("an all-hollow cut answer must defer as an abstention: %v", m)
+	}
+	if m["dropped_hollow"] != float64(3) {
+		t.Fatalf("the 3 complete hollow lines are counted and the fragment is not: %v", m)
+	}
+	reason, _ := m["reason"].(string)
+	for _, want := range []string{"none of the seat's 3 findings", "3 had no severity, file or why", "reached the lane unstructured", "cut at the completion budget"} {
+		if !strings.Contains(reason, want) {
+			t.Errorf("the reason must contain %q: %q", want, reason)
+		}
+	}
+	if m["findings"] != nil || m["salvaged"] != nil || m["note"] != nil {
+		t.Errorf("a defer carries no findings list, no salvage flag and no empty-review note: %v", m)
+	}
+}
+
+// Salvage is for the clock and nothing else. Every other deferral - even one that carries a
+// perfectly good review in output - stays the bare defer it always was, reason and class verbatim.
+func TestReviewDiffLeavesEveryOtherDeferralBare(t *testing.T) {
+	good := "severe | run.go:5 | off-by-one in the loop bound | indexes one past the end"
+	for name, tc := range map[string]struct {
+		class, reason string
+		schemaMiss    bool
+	}{
+		"gpu busy (capacity)":               {core.DeferClassCapacity, "gpu busy: a text job holds the GPU (pid 4242)", false},
+		"seat down during the re-pack":      {core.DeferClassInfrastructure, "seat down: the engine hung with work outstanding", true},
+		"re-pack unreachable":               {core.DeferClassInfrastructure, "structured re-pack unreachable: dial tcp: connection refused", true},
+		"re-pack answered the wrong shape":  {core.DeferClassAbstention, "output failed schema: the model answered the wrong shape", true},
+		"caller canceled the re-pack":       {core.DeferClassBudget, core.RepackCanceledReason + " (the caller's context ended)", true},
+		"step budget exhausted":             {core.DeferClassBudget, "step budget exhausted (12 steps)", false},
+		"wall expired with no finished one": {core.DeferClassBudget, "wall timeout after 300s (the caller's deadline, not this node's ceiling)", false},
+	} {
+		w := core.AgentWireResult{
+			SchemaVersion: core.AgentWireSchemaVersion, Seat: "fake-seat", Steps: 2, StopReason: "done",
+			Output: good, Deferred: true, DeferClass: tc.class, Reason: tc.reason, SchemaMiss: tc.schemaMiss,
+		}
+		m := reviewOf(t, w)
+		if m["deferred"] != true || m["reason"] != tc.reason || m["defer_class"] != tc.class {
+			t.Errorf("%s: must stay the node's own deferral, verbatim: %v", name, m)
+		}
+		for _, key := range []string{"findings", "salvaged", "note", "output", "dropped_hollow"} {
+			if _, has := m[key]; has {
+				t.Errorf("%s: a bare defer must not carry %q: %v", name, key, m)
+			}
+		}
+	}
+}
+
+// A cut answer with no complete line in it has nothing to salvage and nothing to add to the node's
+// own deferral, which already says what happened to the answer. It is published as that deferral.
+func TestReviewDiffACutAnswerWithNoCompleteLineKeepsTheNodesDeferral(t *testing.T) {
+	w := cutWire("severe | run.go:5 | off-by-one in the loop bou")
+	m := reviewOf(t, w)
+	if m["deferred"] != true || m["reason"] != w.Reason || m["defer_class"] != string(core.DeferClassAbstention) {
+		t.Fatalf("the node's deferral stands, verbatim: %v", m)
+	}
+	if _, has := m["dropped_hollow"]; has {
+		t.Fatalf("a fragment is not a dropped finding: %v", m)
+	}
+}
+
+// A cut answer can never read as an all-clear, whatever it says: the seat was stopped before it
+// finished. A finished one whose re-pack had no wall and whose answer IS the NONE verdict is the
+// ordinary clean review, flagged so the reader knows how it was read.
+func TestReviewDiffACutAnswerIsNeverACleanVerdict(t *testing.T) {
+	m := reviewOf(t, cutWire("NONE\nthe seat kept writing and was cut mi"))
+	if m["deferred"] != true {
+		t.Fatalf("a NONE inside a cut answer is not an affirmative all-clear: %v", m)
+	}
+	m = reviewOf(t, schemaMissWire("NONE"))
+	if m["deferred"] != nil {
+		t.Fatalf("a finished answer that is the NONE verdict is a clean review whatever skipped its re-pack: %v", m)
+	}
+	if findings, ok := m["findings"].([]any); !ok || len(findings) != 0 {
+		t.Fatalf("an empty list, published as [] rather than null: %v", m["findings"])
+	}
+	if m["salvaged"] != "wall" {
+		t.Fatalf("the flag must say how the verdict was read: %v", m)
+	}
+	note, _ := m["note"].(string)
+	if !strings.Contains(note, "no time left for the structured re-pack") || !strings.Contains(note, "not a verification") {
+		t.Fatalf("the note carries both what happened and what an empty list is not: %q", note)
+	}
+}
+
+// What a cut answer's complete lines come to is judged by the same filters as any other: invented
+// files are dropped and counted, and when nothing survives the deferral names them.
+func TestReviewDiffSalvagedLinesAllUngroundedDeferWithTheCount(t *testing.T) {
+	m := reviewOf(t, schemaMissWire(strings.Join([]string{
+		"severe | ghost.go:1 | invented file | not in the diff",
+		"minor | phantom.go:2 | also invented | still not in the diff",
+	}, "\n")))
+	if m["deferred"] != true || m["dropped_ungrounded"] != float64(2) {
+		t.Fatalf("invented files must defer and be counted: %v", m)
+	}
+	if reason, _ := m["reason"].(string); !strings.Contains(reason, "2 named files the diff never touched") || !strings.Contains(reason, "unstructured") {
+		t.Errorf("the reason must name the drops and the unstructured answer: %q", reason)
+	}
+}
+
+// The tool description is the lane's public contract: a caller learns the result shape from it and
+// nowhere else. Every key the door can publish, and every rule that changes what a caller should
+// do (the defer when nothing survives, the salvage), must be named there, or a caller reads a
+// result it was never told about. Adding a field to the payload means adding it to this list.
+func TestReviewDiffDescriptionNamesTheWholeResultShape(t *testing.T) {
+	for _, tool := range listTools(t, config.Default()) {
+		if tool.Name != "offload_review_diff" {
+			continue
+		}
+		for _, want := range []string{
+			// the findings object and the keys beside it
+			"severity,file,line,claim,why,also?", "reviewed_bytes", "stop_reason", "note?", "salvaged?",
+			// the five counts
+			"dropped_ungrounded", "dropped_echo", "dropped_hollow", "dropped_duplicate", "truncated_by_cap", "The five counts",
+			// the defer-when-nothing-survives rule, and the salvage that precedes it
+			"DEFERS (defer_class abstention)", "Only the seat's own NONE earns an empty findings list",
+			"SALVAGE", "output_truncated", "wall", "INCOMPLETE",
+		} {
+			if !strings.Contains(tool.Description, want) {
+				t.Errorf("the description must name %q", want)
+			}
+		}
+		return
+	}
+	t.Fatal("offload_review_diff not advertised on tools/list")
+}
