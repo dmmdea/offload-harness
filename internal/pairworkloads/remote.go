@@ -163,13 +163,17 @@ func (c *RemoteCall) Finish(res core.Result) {
 		}
 	}
 	c.mu.Unlock()
+	// The row first: it is local file I/O, and the post below can take its whole bound (a PAIR on a loaded
+	// box answers late, or not at all), during which the door may be killed by a client that gave up on
+	// the call; the call's audit and savings row must not be lost to that wait. CardByCaller makes the
+	// ledger observer skip it, so recording it posts nothing.
+	if c.led != nil {
+		_ = c.led.Record(row)
+	}
 	if card {
 		// Inline: the lane returns this result to its door, which answers at once and may be killed
 		// right after (see Begin), and a close on a background goroutine dies with the process.
 		c.e.EmitSync(ev)
-	}
-	if c.led != nil {
-		_ = c.led.Record(row)
 	}
 }
 

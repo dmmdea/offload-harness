@@ -410,6 +410,54 @@ func TestAHungPairDelaysTheAnswerByItsBoundNotForever(t *testing.T) {
 	}
 }
 
+// The wait for the frame a ledger row claimed is bounded as well. The observer's goroutine posts that frame
+// after planning it (a relay's health probe, a cold read of the PAIR identity), and a stall there that no
+// deadline covers would hold the call's answer for as long as it lasts. end waits for the row's signal at
+// most closeWait and then lets the door answer; the card stays in the register (its queued marker is
+// still there), and the row's frame closes it, once, when the stalled goroutine gets as far as posting.
+// The stall is built as the observer's own state: the row has claimed the card (claim allocates the
+// signal) and its goroutine has not posted yet.
+func TestAStalledRowFrameDelaysTheAnswerByItsBoundNotForever(t *testing.T) {
+	r := newCloseRig(t, 0)
+	e := r.emitter(nil, nil)
+	id, _, end := e.Begin("generate_image", "offload_generate_image")
+	e.Wait() // the queued frame landed
+	open, started := e.claim("generate_image", id)
+	if open == nil {
+		t.Fatal("the row did not claim the card")
+	}
+	start := time.Now()
+	returned := make(chan time.Duration, 1)
+	go func() {
+		end(heldResult())
+		returned <- time.Since(start)
+	}()
+	select {
+	case took := <-returned:
+		if took < closeWait/2 {
+			t.Fatalf("end returned after %s while the row's frame had not been posted: it does not wait for it (bound %s)", took, closeWait)
+		}
+	case <-time.After(closeWait + 3*time.Second): // the slack is for a busy box, not for a wait that has no bound
+		close(open.sent) // let the stalled wait go
+		t.Fatalf("end still held the call %s after the row claimed its card: the wait for the row's frame has no bound (%s)", time.Since(start), closeWait)
+	}
+	if files := r.files(t); len(files) != 1 {
+		t.Fatalf("the card is still open for the register while the row's frame is stalled: %v", files)
+	}
+	if n := len(r.failedFrames()); n != 0 {
+		t.Fatalf("end must not close the row's card itself, or it would close it twice: %d failed frame(s)", n)
+	}
+	// The stalled goroutine wakes: it posts the row's frame and signals, as the observer does.
+	ev := closeWith(e.fromLedger(*heldRow(id), started != 0), open, started)
+	e.EmitSync(ev)
+	close(open.sent)
+	c := r.readCard(t, id)
+	if c.closed == nil || c.method != "workload:completed" || c.closed["startedAt"] != nil {
+		t.Fatalf("the late frame closes the card quiet, once: %s %v", c.method, c.closed)
+	}
+	r.nothingLeftForTheSweep(t)
+}
+
 // A door that answers and is killed, for real: the child opens a card, the call is held back, it
 // closes its card and "answers" (prints), and the parent kills it with the PAIR it posted to still
 // slow. The production liveness rule then sweeps the register: it must find nothing.
@@ -523,6 +571,67 @@ func TestARemoteCallClosesBeforeItsDoorAnswers(t *testing.T) {
 			}
 			r.nothingLeftForTheSweep(t)
 		})
+	}
+}
+
+// The asker's ledger row is written BEFORE the terminal frame is posted: the post can take its whole
+// bound (a PAIR on a loaded box answers late or never), and a door killed by a client that gave up on the
+// call in that window must not lose the call's audit and savings row to it. The terminal post is held at
+// the ingress while the ledger is read.
+func TestARemoteCallRecordsItsRowBeforeItPostsItsClose(t *testing.T) {
+	r := &orphanRig{pair: &capture{}, appDir: writePairAppDir(t), dir: t.TempDir()}
+	arrived := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if strings.Contains(peekBody(req), `"workload:completed"`) {
+			once.Do(func() { close(arrived) })
+			<-release // the terminal post hangs here: the PAIR is slow
+		}
+		r.pair.handler(w, req)
+	}))
+	defer srv.Close()
+	r.url = srv.URL
+	e := r.emitter(nil, nil)
+	ledgerPath := filepath.Join(t.TempDir(), "ledger.jsonl")
+	led, err := ledger.Open(ledgerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer led.Close()
+	e.AttachLedger(led) // the observer must leave the caller-carded row alone
+	h := NewRemoteCall(e, led, core.Request{Task: core.TaskGenerateImage, Door: "offload_generate_image"}, "remote")
+	h.Dispatched("http://node-b:18811", "node-b-fleet16", "media-abc123")
+	e.Wait() // the queued frame landed
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		h.Finish(core.Result{OK: true, Meta: core.Meta{Node: "node-b-fleet16", Model: "comfyui:x"}})
+	}()
+	select {
+	case <-arrived:
+	case <-time.After(10 * time.Second):
+		close(release)
+		t.Fatal("the terminal post never reached the ingress")
+	}
+	rows, rerr := ledger.ReadAll(ledgerPath) // read while the close is still on its way to PAIR
+	close(release)
+	<-done
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	if len(rows) != 1 || !rows[0].CardByCaller || rows[0].NodeID != "node-b-fleet16" || rows[0].FleetJobID != "media-abc123" || rows[0].Task != "generate_image" {
+		t.Fatalf("while the close was in flight the ledger held %+v, want the call's one row", rows)
+	}
+	e.Wait()
+	terminals := 0
+	for i := 0; i < r.pair.count(); i++ {
+		if m := r.pair.method(i); m == "workload:completed" || m == "workload:errored" {
+			terminals++
+		}
+	}
+	if terminals != 1 {
+		t.Fatalf("%d terminal frames for one call; the ledger observer must not card a caller-carded row again", terminals)
 	}
 }
 
