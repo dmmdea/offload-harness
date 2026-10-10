@@ -128,6 +128,11 @@ func LeaseRows(leases []gpulease.Info) []map[string]any {
 		if !l.ExpiresAt.IsZero() {
 			row["expires_at"] = l.ExpiresAt.Format(time.RFC3339)
 		}
+		// The host RAM the lease declared, which the next grant counts as still to load until its
+		// processes hold it (internal/gpulease/hostram.go).
+		if l.HostRAMGiB > 0 {
+			row["host_ram_gib"] = round1(l.HostRAMGiB)
+		}
 		out = append(out, row)
 	}
 	return out
@@ -144,6 +149,13 @@ func QueueRows(waiters []gpulease.Waiter) []map[string]any {
 			row["scope"] = "card"
 		} else {
 			row["scope"] = "whole-node"
+		}
+		// A waiter the cards would admit and the host's memory does not says what it waits for.
+		if w.WaitingFor != "" {
+			row["waiting_for"] = w.WaitingFor
+		}
+		if w.HostRAMGiB > 0 {
+			row["host_ram_gib"] = round1(w.HostRAMGiB)
 		}
 		out = append(out, row)
 	}

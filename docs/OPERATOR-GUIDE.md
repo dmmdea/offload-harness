@@ -265,6 +265,33 @@ the binary is present, and on that path the harness has already taken the lease,
 inherits it. Invoking `comfyui-pp-cli` **standalone** against a live box is the bypass — wrap
 it in `gpu reserve --class media` if you need to.
 
+**Host RAM is part of the lease (2026-10-09).** A lease declares the host RAM it will load, and the grant holds it back when
+that declaration would pass a line the harness chose. Two readings of the OS are compared, and a grant needs both:
+`committed now + the lease's need + what running leases have yet to load` at or under physical RAM less
+`gpu_host_ram_headroom_gib` (default 8, a floor the harness chose and has not yet measured), and `available RAM now - the need -
+what running leases have yet to load` at or above the same headroom. **This is a brake on declared loads, not a guarantee about
+the box.** A declaration is an estimate: the size of the model files, until three measured runs of that family on the node raise
+it to the largest resident memory they reached. A lane's commit can carry its card allocations on top, so a lane can commit more
+than it declared: the rule applied to a commit reading of 81.6 GiB on the 127.7 GiB reference box admits a 32.8 GiB Krea 2 bf16
+declaration (114.4 GiB projected against a 119.7 GiB limit), and a ComfyUI lane holding 57.7 GiB private bytes (its family is not
+recorded) read 129.3 GiB committed on that box some hours later, above its physical RAM (readings measured on the reference box on
+2026-10-10 from session readings that are not recorded in this repository). The available-RAM term refuses against the declared loads at the moment of the decision; it
+does not bound a lane that holds more than it declared, and nothing here bounds a process that holds no lease. A lane already
+running is counted whole in the next decision, so the next lease waits, but the guard does not stop the lane that took the box
+over: read `gpu status` (below), not the admission, as the state of the box. `gpu reserve --ram <GiB>` states the need (0 =
+needs no host RAM); unset, it is estimated from the model files of a render helper call whose weights do not fit the card
+(a Krea 2 bf16 call on a 16 GiB card is about 33 GiB), else for a media lease the largest ComfyUI render family the box binds (a
+binding on the sd.cpp engine is not counted, whichever route it is on, so a node that binds only sd.cpp declares 0, its lanes are
+admitted whatever the host reads, and the weights `--offload-to-cpu` parks in RAM are outside the guard there), and
+0 for a text lease. A lease that has to wait says `waiting for host RAM: needs N GiB, committed X of Y GiB physical, Z GiB
+headroom` once and keeps its place in the same queue; `--wait 0` refuses with that text. The warm-back of the agent seat after a
+lease is admitted the same way against `agent_seat_host_ram_gib` (the host RAM the seat holds once loaded; unset, a chosen 21 GiB
+stands in: not a measurement, and below the 44 GB the 2026-09-10 incident recorded for a seat, so set the key from the node's own
+measurement before relying on the check) and never runs while another lane that declared host RAM is live. `gpu status` and `offload_status`
+show the host's memory with one verdict: `OK`, `NEAR` (within the headroom of physical RAM) or `OVER` (committed above
+physical RAM; the brief status line then starts `HOST RAM OVER`). Details:
+[GPU lease, "Host RAM"](systems/gpu-lease.md).
+
 Two escape hatches, both of which keep the lease:
 
 ```powershell
@@ -556,8 +583,10 @@ caps the bundle, 256 MB by default: the node holds the base64 body and the decod
 door. The outputs come back by name, each checked against the sha256 the node published; a mismatch defers and leaves no
 file. A node advertises `video-gen`, `animate`, `audio-gen` and `run-graph` only while its media route is CONFIGURED, so a
 node with a missing weight drops the task and `/fleet/health` `media_routes` says which route and why; `doctor` and
-`offload_status` print the same verdicts. `refine=false`, `tts_voice`, `transformer` and `run_graph`'s `devices` cannot travel and defer on a remote
-route; `run_graph`'s `out_dir` is where the fetched outputs land on the calling machine (created if missing, never sent to the node). A node that binds a media task but whose route is not CONFIGURED refuses a job for it with a 503 naming the route and its state (a delegator re-places that), not the 400 an unbound task gets. See [media-generation.md](systems/media-generation.md#remote-routing-and-the-media-job-door-adr-0077).
+`offload_status` print the same verdicts. `tts_voice`, `transformer` and `run_graph`'s `devices` cannot travel and defer on a remote
+route (`refine=false` travels, to a node whose health says `refine_honoured`); `run_graph`'s `out_dir` is where the fetched outputs land on the calling machine (created if missing, never sent to the node). A node that binds a media task but whose route is not CONFIGURED refuses a job for it with a 503 naming the route and its state (a delegator re-places that), not the 400 an unbound task gets. See [media-generation.md](systems/media-generation.md#remote-routing-and-the-media-job-door-adr-0077).
+
+**A busy image lane overflows to the fleet ([ADR 0082](architecture/decisions/0082-a-media-call-overflows-to-the-fleet-when-its-own-lane-cannot-take-it-and-a-family-is-identified-by-its-recipe.md)).** An `auto` image call on a machine that has the lane and a fleet asks its own pipeline whether the lane is free; when it is not (a lease holds the card, callers are in line, or the host-RAM guard is holding the lane back), the call goes to an idle node that renders **the same recipe**: the same weight files at the same sizes and the same sampling, compared as `digest` in `/fleet/health` `image_recipes`. A match is strict and never substitutes a quantization; it also needs the node on the same release, and the answer names the key that differs and the family of yours that would match (`send family=qwen-image-2.1-fast to use its qwen-image-2.1`). A node that holds any lease is not a candidate. When nothing admits, the call goes on to your own queue and its answer carries `cluster[]`: one row per node of `delegate_remotes` saying why the fleet could not take it. A node that took the call and passed it back (another job held its card, or its own lease could not be taken) is left alone for a minute, then five, and its row says so; the MCP server remembers that across the calls of a session, but a one-shot CLI call starts with no memory and pays the bounce again. A call that went to the fleet first joins your queue when it comes back, not from when it arrived (a bounce off a node can cost it up to that node's `gpu_wait_ms`, three nodes at most, and even a call no node matches pays for the lane question and the roster read), so a caller that arrived meanwhile is ahead of it; keeping its place is the job of the ticket queue, the next step. `route local` never leaves; a call that carries a `waiter_token` stays in the local line. A digest covers file names and byte sizes, not contents: two same-named files of one size with different bytes digest alike. Before relying on a match, read `image_recipes` on both nodes and compare the digests, and after replacing a model file in place on one node compare the files' hashes on both.
 
 **Adding a template.** Follow the contract in
 [`render/compose-templates/README.md`](../render/compose-templates/README.md): offline, deterministic,

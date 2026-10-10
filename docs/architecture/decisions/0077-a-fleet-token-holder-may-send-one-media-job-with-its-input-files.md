@@ -111,7 +111,8 @@ Three facts stood in the way.
   a file that begins like a PNG can still be malformed, and the decoder that opens it (ComfyUI's image loader, ffmpeg) is the
   boundary for that. The fleet token is held only by the operator's machines.
 - Some request fields cannot ride the fleet task and defer by name on a remote route instead of being dropped: `refine=false`
-  (image), `tts_voice` (audio), `transformer` (video), a run-graph's `devices` (a card id names a card on the calling
+  (image; **amended by [ADR 0082](0082-a-media-call-overflows-to-the-fleet-when-its-own-lane-cannot-take-it-and-a-family-is-identified-by-its-recipe.md): it now travels, and a node that does not carry it is a named miss**),
+  `tts_voice` (audio), `transformer` (video), a run-graph's `devices` (a card id names a card on the calling
   machine); a run-graph's `out_dir` is never sent (the node writes into its own media dir) but is honoured on the calling
   machine: the fetched outputs are written into it, created if missing. A `waiter_token` is not carried either, by design:
   it resumes a place in line on the calling machine, and a call that goes to a node leaves that place.
@@ -131,3 +132,18 @@ Three facts stood in the way.
   for jobs that carry one to four files. A single bundle reuses the extractor, the caps and the sweep that exist.
 - **Keep the config-only advertisement and let the client retry.** A job sent to a node that cannot run it costs a queue
   place and a failed render before the client learns; the node already knows.
+
+## Amendment (2026-10-10, [ADR 0082](0082-a-media-call-overflows-to-the-fleet-when-its-own-lane-cannot-take-it-and-a-family-is-identified-by-its-recipe.md))
+
+Three sentences above change; nothing else does.
+
+- **Decision 6, `auto`.** `auto` runs here when this machine has the lane and the lane is free. When the lane exists and is
+  NOT free, an image call goes to an idle node whose image recipe matches strictly, instead of waiting for the local lane
+  (the pipeline's `core.LaneProber` is asked first; a box with no `delegate_remotes` asks nothing and takes the path it
+  always did). With no lane here, `auto` is unchanged.
+- **The `refine=false` consequence.** An image job's `refine=false` is carried (`/fleet/dispatch` payload field `refine`, decoded
+  as the MCP handler does), and the client requires the node's `refine_honoured` health key before sending it, so a node that
+  predates it is a named miss in the defer instead of a contract refusal or a silent refinement. `tts_voice`, `transformer`
+  and a run-graph's `devices` still defer by name.
+- **The `waiter_token` consequence stands.** A call that goes to a node leaves the place it held in the local line, and a call
+  that carries a `waiter_token` stays in the local line (it is not overflowed).

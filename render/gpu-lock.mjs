@@ -22,7 +22,8 @@
 // No npm dependencies.
 import { writeFileSync, readFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
-import { ensureComfy as defaultEnsureComfy, tailComfyLog, comfyLogPath, COMFY_LOG_TAIL_LINES, resolveInstance, DEFAULT_COMFY_PORT } from "./comfy-lifecycle.mjs";
+import { ensureComfy as defaultEnsureComfy, tailComfyLog, comfyLogPath, COMFY_LOG_TAIL_LINES, resolveInstance, DEFAULT_COMFY_PORT, COMFY_DIR } from "./comfy-lifecycle.mjs";
+import { settleInstanceFamily, releaseInstanceFamily } from "./comfy-family.mjs";
 
 // LEASE_FORMAT_SIGNATURE is what `local-offload gpu doctor` looks for in a copy of this
 // file (internal/gpulease/audit.go, FormatSignature, pinned by a Go test): a reader that
@@ -406,15 +407,36 @@ export async function freeLlamaSwap(api = process.env.LLAMA_SWAP_API || "http://
   }
 }
 
-// freeComfy: tell ComfyUI to drop loaded models + free VRAM after a job (zero-warm).
-export async function freeComfy(api = process.env.COMFY_API || "http://127.0.0.1:8188") {
-  try {
-    await fetch(api + "/free", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ unload_models: true, free_memory: true }),
-      signal: withTimeout(10_000),
-    });
-  } catch {}
+// freeComfy: tell ComfyUI to drop loaded models and free the memory behind them (zero-warm). Both
+// flags, always: unload_models releases the weights, free_memory also resets the executor's caches;
+// either alone left an instance holding what the other keeps (comfy-family.mjs says why that matters).
+//
+// It RESOLVES TO true when ComfyUI acknowledged the request and to false when it did not, after one
+// retry, and says so once on `log`. It used to swallow every failure: a /free that never reached an
+// instance mid-prompt looked exactly like one that did, and the instance kept its models for the next
+// family to be loaded beside. An instance that is simply not there (connection refused) holds nothing,
+// so that is quiet and counts as freed. Never throws: a failing free must not turn a finished job into a
+// failed one.
+export async function freeComfy(api = process.env.COMFY_API || "http://127.0.0.1:8188", {
+  fetchImpl = fetch, log = (m) => console.error(m), attempts = 2, timeoutMs = 10_000,
+} = {}) {
+  let why = "";
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const r = await fetchImpl(api + "/free", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ unload_models: true, free_memory: true }),
+        signal: withTimeout(timeoutMs),
+      });
+      if (r && r.ok) return true;
+      why = `HTTP ${r && r.status}`;
+    } catch (e) {
+      if (e && e.cause && e.cause.code === "ECONNREFUSED") return true; // nothing is listening: nothing is held
+      why = (e && e.message) || String(e);
+    }
+  }
+  log(`COMFY-FREE-WARN: POST ${api}/free did not succeed (${why}); the instance may still hold its models`);
+  return false;
 }
 
 // withGpuSlot centralizes the single-slot GPU lifecycle every gen runner shares:
@@ -453,6 +475,14 @@ export async function withGpuSlot(opts, fn) {
     claimUnload = claimLeaseUnload,
     checkLease = checkInheritedLease,
     tailLog = tailComfyLog,
+    // family: the weights signature of this runner's job (comfy-family.mjs familySignature). When given,
+    // the launch marker of the instance remembers it, and a kept instance whose marker names ANOTHER
+    // family is freed before the first job, so it does not carry the previous family's weights into this
+    // one's. A free that fails leaves the old family recorded, and the next runner tries again.
+    family = "",
+    comfyDir = COMFY_DIR,
+    settleFamily = settleInstanceFamily,
+    releaseFamily = releaseInstanceFamily,
   } = opts || {};
 
   // No lease, and not explicitly opted out => refuse. Acquiring here is exactly the
@@ -474,7 +504,14 @@ export async function withGpuSlot(opts, fn) {
   let cleaning = false;
   const cleanup = async () => {
     if (cleaning) return; cleaning = true;
-    if (comfyManaged) { try { await (instanceKey || api ? freeCfy(instance.api) : freeCfy()); } catch {} }
+    if (comfyManaged) {
+      // ALWAYS, kept or not: a kept instance outlives this runner, and what it still holds is what the
+      // next lease's family is loaded beside. Only a free that reported failure leaves the family
+      // recorded (the next runner then tries again); a fake that returns nothing counts as done.
+      let freed;
+      try { freed = await (instanceKey || api ? freeCfy(instance.api) : freeCfy()); } catch { freed = false; }
+      if (freed !== false && family) releaseFamily({ comfyDir, key: instanceKey });
+    }
     if (comfyChild && !keepComfy) { try { comfyChild.kill(); } catch {} }
   };
   const onSig = async () => { await cleanup(); process.exit(130); };
@@ -506,6 +543,17 @@ export async function withGpuSlot(opts, fn) {
         // call is unchanged for a runner that tears its own ComfyUI down.
         ...(keepComfy ? { keep: true } : {}),
       });
+    }
+    if (comfyManaged && family) {
+      // The instance may be one a previous lease kept, still holding that lease's family. Free it
+      // BEFORE the first job when this job is another family (awaited: the job must not be queued
+      // beside the old weights), and record this one.
+      try {
+        await settleFamily({ comfyDir, key: instanceKey, api: instance.api, family, free: (a) => freeCfy(a) });
+      } catch (e) {
+        // Said, never fatal: a bookkeeping fault must not fail a render that would have worked.
+        console.error(`COMFY-FAMILY-WARN: could not settle the instance's family (${e && e.message}); the job runs, and the end-of-run free still follows`);
+      }
     }
     try {
       return await fn({ comfyChild, lease });

@@ -33,6 +33,7 @@ import { copyFileSync, readFileSync, unlinkSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { writeFileAtomic } from "./atomic-out.mjs";
 import { withGpuSlot } from "./gpu-lock.mjs";
+import { familySignature } from "./comfy-family.mjs";
 import { COMFY_DIR, comfyApi } from "./comfy-lifecycle.mjs";
 import { stagedInputName } from "./comfy-input.mjs";
 import { buildQwenImageEdit, QWEN_EDIT_PRESETS, resolveEditMegapixels } from "./wf-qwen-image-edit.mjs";
@@ -253,7 +254,8 @@ async function main() {
   }
 
   await withGpuSlot(
-    { noLock: flags["no-lock"], comfyManaged: true, api: API, reserveVram: flags["reserve-vram"] },
+    { noLock: flags["no-lock"], comfyManaged: true, api: API, reserveVram: flags["reserve-vram"],
+      family: familySignature(flags.family || EDIT_DEFAULT_FAMILY, flags.unet || process.env.COMFY_EDIT_UNET) },
     render,
   );
 }

@@ -1080,6 +1080,29 @@ runner. A kept instance that never answers is still killed, since a half-started
   holds at most three 5 MB archives plus the run in progress. The live file of a run is not truncated: the
   instance lives no longer than its lease, which bounds it. `tailComfyLog` (the lines a failure message
   carries) reads only the last 256 KB of the file, so a long-lived instance's log is never read whole.
+- **It is freed when its family changes (2026-10-09, `render/comfy-family.mjs`).** ComfyUI keeps the models it loaded in
+  host memory between prompts ("Using RAM pressure cache"; "Model Krea2 prepared for dynamic VRAM loading. 24449MB Staged" in
+  the instance's own log) and drops them only when told to; an instance that served one family and is handed a job of
+  another holds both. The incident's instance held 57 GiB private, probably that way (a Qwen-Image model cached next to a
+  Krea 2 one: reconstructed, not observed; the session that handled it reported that POST `/free` released 52 GiB between
+  prompts without killing a job, a reading no record of which survives here). A ComfyUI process launched fresh on 2026-10-10
+  held the same 57.7 GiB private about seven minutes after launch (a reading on the reference box, from a session, not recorded in
+  this repository), so this fix may account for only part of the figure and the
+  footprint of one lane is unmeasured. The ways two families could come to share an instance, read from the code and the
+  instances' logs: a runner killed before its `finally` (the pipeline's timeout kills the whole tree) never sent its
+  end-of-run `/free`, and the post-run `/free` of `gpugen` waited one second; the holder's proof before stopping a kept
+  instance at release (`GET /system_stats`, three seconds) failed on an instance busy with a 550-second prompt, so it
+  outlived its lease; the next lease reused it and loaded its family beside the first; and `run-graph` left whatever its
+  graph loaded on an instance that was already up. What changes: every ComfyUI runner passes a **family signature**
+  (the family plus the weights file, so a Q5 GGUF and a bf16 safetensors of one family count as two) to `withGpuSlot`;
+  the instance's launch marker records it (`lastFamily`); a runner that finds a kept instance whose marker names ANOTHER
+  family frees it, awaited, before its first job (`COMFY-FAMILY-FREE`), and the same family keeps its warm weights; the
+  end-of-run `/free` (both flags, always, kept or not) is awaited, retried once and loud when an instance that is
+  listening did not acknowledge it (`COMFY-FREE-WARN`), and clears the recorded family; a free that did not succeed
+  before the first job leaves the old family recorded so the next runner tries again; `run-graph` frees an instance it
+  ran on only when the harness launched it (live pid, the marker's exact argv); the holder's proof is asked three times of
+  eight seconds; `gpugen`'s post-run `/free` waits five seconds and says a failure that reached an instance. Tests run
+  against a fake ComfyUI that records the order of `/free` and the job (`render/comfy-hoard.test.mjs`).
 - **Who stops it.** A kept instance lives no longer than the GPU lease it was launched under; its marker
   records that lease epoch (`leaseEpoch`). The **holder of the lease stops it on release**: `gpu reserve`
   when its wrapped command ends, and the pipeline when its media lease is released
@@ -1115,6 +1138,22 @@ is given:
 | `run-graph` with ONE declared device | that card | a lease on it | its instance, pinned by uuid |
 | `run-graph` with several declared devices, or none, sd.cpp, voice | the whole node | the whole node | the default instance (none for sd.cpp and voice) |
 | any call on a host that does not lease cards, or whose card table cannot be read at admission (after one retry) | the whole node | the whole node | exactly as before this change, and the answer of a call that must wait says why it waits for the node ([below](#a-card-table-that-runs-out-of-time-is-not-a-refusal)) |
+
+**Host RAM.** A generation call also declares the host RAM its weights will stream from (the UNet or checkpoint and the
+text encoder of its binding, for a video call the family's binding with the request's own `transformer` put over it, counted
+in full when together they do not fit the card it runs on; 0 when they fit; the media
+class default for an arbitrary graph (`run-graph`, or a helper run with `--graph`), sd.cpp and the iGPU engines: the largest
+ComfyUI family the box binds, an upper bound that is not their own size, and **0 on a box that binds no ComfyUI family, so an
+sd.cpp-only node declares nothing**, its lanes are admitted whatever the host reads and the weights `--offload-to-cpu` parks in
+RAM are outside the guard there; nothing for upscale and voice) and the grant admits it
+against committed memory plus what the leases already granted have yet to load, under physical RAM less
+`gpu_host_ram_headroom_gib` (default 8), as a brake on declared loads (the declaration is an estimate until three measured runs
+raise it, and an admitted lane can still read OVER): see "Host RAM" in [gpu-lease.md](gpu-lease.md). Two Krea 2 bf16 lanes, each
+24.48 + 8.27 GiB, on a host that fits one: the first is admitted, the second finds idle cards and waits in the same line with
+`waiting for host RAM: needs 32.8 GiB, committed X of Y GiB physical, Z GiB headroom` (a queued place in line for a door that
+can resume, a busy defer for the rest) until the first is done
+(`TestTheSecondLaneWaitsWhileTheFirstIsStillLoading`). A need no state of the host admits is `gpu_lease_unavailable`, naming
+`--ram` and the headroom key.
 
 **The allocator and the display card.** An unpinned single-card call takes the allocator's card
 (`gpu_lease`, "The allocator"): not claimed by a live lease, not promised to a caller waiting in line
@@ -1603,6 +1642,12 @@ recorded as known offenders with their reason rather than silently skipped — a
   preset/builder-implied model files, the family rows `offload_status` publishes
 - [`internal/config/families.go`](../../internal/config/families.go) — family overlay validation and
   resolution, license notes (ADR 0058)
+- [`internal/mediacap/recipe.go`](../../internal/mediacap/recipe.go) — what an image family is: the resolved recipe,
+  its digest and its diff (ADR 0082); [`internal/fleetnode/image_recipe.go`](../../internal/fleetnode/image_recipe.go) —
+  the node's `image_recipes` rows and the 412 check
+- [`internal/pipeline/medialane.go`](../../internal/pipeline/medialane.go) — the read-only lane question;
+  [`internal/mediaremote/place.go`](../../internal/mediaremote/place.go) and
+  [`identity.go`](../../internal/mediaremote/identity.go) — overflow placement and the strict match
 - [`render/compose-hyperframes.mjs`](../../render/compose-hyperframes.mjs) — the composition runner:
   env allowlist, subcommand allowlist, `--json` everywhere, lint → check → render → ffprobe gate,
   typed `COMPOSE-FAIL` classes
@@ -1838,8 +1883,10 @@ render on a fleet node and get the output back hash-verified. The other media to
 **Where a job runs.**
 
 - `local` always runs here. It never touches the network.
-- `auto` (the default) runs here when this machine has the lane, and the call is then byte-identical to one made before
-  the route existed. "Has the lane" is read from the files, not the binding: `mediacap` derives the route (the script,
+- `auto` (the default) runs here when this machine has the lane and the lane is free, and the call is then byte-identical to
+  one made before the route existed. When the lane exists and is NOT free, an image call may go to an idle node that renders
+  the same recipe instead of waiting ([Overflow](#overflow-a-busy-lane-places-an-image-call-on-the-fleet-adr-0082) below);
+  nothing else about `auto` changed. "Has the lane" is read from the files, not the binding: `mediacap` derives the route (the script,
   the weights its graph loads, the custom nodes it names), so a default config, which binds every script, does not make a
   thin client look like a render box. With no lane here, `auto` goes to a node from `delegate_remotes`; with no lane and
   no fleet configured it runs here and returns the pipeline's own deferral, as before.
@@ -1861,8 +1908,11 @@ a reference and driver (`offload_animate_character`) or a clone sample (`offload
 bundle (each under its field name plus its extension, copied into a temp directory and packed with `composebundle`) and goes
 through `POST /fleet/media-job` ([fleet-node.md](fleet-node.md#the-media-job-door-artifacts-and-honest-advertisement-adr-0077)).
 `run-graph` carries its graph and manifest inline, so it never needs the door. The payload uses the field names the node's
-builders decode; `out` and `out_dir` never travel (`out_dir` is where the fetched outputs land here). Four request fields cannot ride the fleet task and defer by name
-(`defer_class` `contract`) instead of being dropped: `refine=false`, `tts_voice`, `transformer` and (`run_graph`) `devices`, whose card ids name cards on the calling machine.
+builders decode; `out` and `out_dir` never travel (`out_dir` is where the fetched outputs land here). Three request fields cannot ride the fleet task and defer by name
+(`defer_class` `contract`) instead of being dropped: `tts_voice`, `transformer` and (`run_graph`) `devices`, whose card ids name cards on the calling machine.
+An image job's `refine=false` travels (payload field `refine`, ADR 0082): the client sends it only to a node whose health
+says `refine_honoured`, and a node that predates it is a named miss in the defer (`capacity`), never one that refines the
+prompt anyway.
 
 **Node-side bounds.** A node holds at most one media-job body in flight (a body is about 0.58 GiB in memory at the 256 MiB
 default cap, the base64 text beside the decoded bundle): a caller over it waits for the slot and, past 30 s, is answered `503`
@@ -1910,6 +1960,111 @@ card closed red. A call that reached no node has its row and no card, and a pani
 panic before it goes on. Both POSTs, the plain
 dispatch and the media-job, carry `X-Offload-Asker` and, only when this machine's emitter is off, `X-Offload-Pair-Card: node`.
 The local route, and an auto call that runs here, are not attributed (the pipeline writes that row).
+
+## Overflow: a busy lane places an image call on the fleet (ADR 0082)
+
+A heavy image call on a box that has the lane used to wait for it however many other nodes stood idle with the same model on
+disk. `offload_generate_image` (CLI `generate-image`) with `route` `auto` now asks its own pipeline first, and when the lane is
+not free sends the call to an idle node that renders **the same recipe**. Everything else is as it was: a box with no
+`delegate_remotes` asks nothing and reads no node, `route local` never leaves, `route remote` is the ADR 0077 path, and a
+call that finds the lane free runs here with no node read at all.
+
+**Is the lane free?** `core.LaneProber`, implemented by the pipeline (`Pipeline.MediaLaneFree`, `internal/pipeline/medialane.go`),
+is a read-only question: would a wait-0 admission of this call be granted now? It reads the state the admission reads (the lease
+directory, the places in line, the in-process slots, the host's memory through the guard's own function, and the allocator for a
+call that names no card) and says busy only when something that makes the grant refuse is present. It creates nothing (no lease,
+place in line, epoch, waiter, ledger row, PAIR card or ComfyUI instance) and removes nothing: it reads the lease directory through
+`gpulease.Manager.ReadOnly`, a view that skips the records the line's readers prune as housekeeping (an expired place in line, a
+waiter that stopped polling) and leaves them on disk (`TestMediaLaneFreeWritesNothing`, with a state for each). It says free when it cannot say: a lease the process
+inherited (`gpu reserve -- local-offload ...`), a card table that does not read in 4 s (chosen, not measured), a task or a binding
+it does not model (sd.cpp, an unknown family). On the whole-node plan, where the lease queue orders by arrival, a call that resumes
+a place counts only the callers that arrived before that place; on the pinned and allocated plans every other caller in line counts
+(`TestMediaLaneFreeOrdersByArrivalOnlyOnTheWholeNodePlan`). A differential test (`TestMediaLaneFreeNeverRefusesAGrant`) drives the real
+admission over a table of lane states and fails if a lane the grant would serve is called busy.
+
+**What a family is.** A name says nothing about which weights sit under it. A family's identity is its **recipe**
+(`mediacap.ImageRecipe`): the checkpoint, text encoder, VAE and LoRA it loads, each with its byte size on the node's disk, and
+the sampling it renders with (steps, cfg, sampler, scheduler, schedule, shift, LoRA strength, preset), plus the license the result
+is tagged with, digested with sha256 over canonical JSON. The identity is **name plus size**, not content: two same-named files
+of the same size whose bytes differ (a corrupted full-length copy, a same-named re-release with the same tensor layout, a file
+updated in place on one node only) digest alike, and the node's own 412 check recomputes the same size-based digest, so it
+cannot catch them either; a content fingerprint per weight file is the named upgrade and is not built. The digest is over **resolved** values: a key the binding leaves unset
+takes the builder's default (Qwen-Image-2.1: 40 steps, cfg 1, euler, scheduler `simple`, schedule `official`), so a node that
+writes the default out and a node that leaves it unset are one recipe. That table is pinned by a test to the constants in
+`render/wf-qwen-image-21.mjs` and `render/comfy-render.mjs`; any other graph family leaves unset keys unset, which is stricter.
+Node-local keys (`comfy_*`, timeouts, scripts, `imagegen_reserve_vram`, the pool keys) are not part of it, and
+`TestRecipeClassifiesEveryClearListKey` fails when a key joins the image overlay's clear list without being classified. An sd.cpp
+binding has no recipe; a ComfyUI recipe never matches one.
+
+**What a node publishes.** `/fleet/health` gains `image_recipes[]` (one row per ComfyUI binding that names a checkpoint: `name`,
+`default`, `digest`, `files[{role,name,bytes}]`, the resolved sampling, `license`, `commercial_use`, and `explicit`, the sampling
+keys the binding actually set) and `refine_honoured`. The rows come from a memo of 60 s (the route cache's), so health stays
+cheap; `bytes` is `-1` for a file the node lacks, which never matches. An image-gen dispatch may carry `recipe_digest`: the node
+recomputes the digest of the family the payload names from the files on disk **now** and refuses a mismatch with **412**, creating
+no job.
+
+**Which node.** A node is a candidate when it serves `image-gen`; holds a family whose digest equals this machine's (strict,
+no substitution); runs this same release (`harness_version`: the graph builders ship with it); carries refine when the call sent
+`refine=false`; has the family's route (`generate_image` or `generate_image:<name>`) CONFIGURED when it reports its routes;
+accepts a per-request `steps` when the graph takes steps and cfg together (the node's binding must have **set** cfg, `explicit`);
+and holds **no lease of any class** (the delegator cannot know which card a node's lease sits on or which card the job would
+take, so it is conservative; the node's own grant, including the host-RAM guard, stays the authority). A roster entry that is this
+machine's own node (its `node_id` equals `fleet_node_id`, else the OS hostname, the rule `fleet-serve` names itself by) is never a
+candidate: it would match perfectly and send the call back into the lane that is not free. It is named in `cluster[]` as `skipped`. Candidates rank by the
+shorter queue (`queue_depth`), then config order. The job goes under the **node's own** family name for the recipe and with the
+digest; it never goes under the caller's name (a name binds different files on different nodes) and never with none (a call that
+names no family is this machine's default binding and must not land on a node's different default).
+
+**When a node says no.** At most 3 nodes are tried, each under a fresh job id. A refusal at the door (`503`, `429`, `412`, any
+other status, or a connection that was never made) means nothing ran, and the call moves on; so does a node that accepted the
+job and answers `gpu_busy` or `gpu_queued` (another job holds its card) or `gpu_lease_unavailable` (it could not take its lease:
+nothing ran). Any other answer after acceptance is final: a render that failed is the call's result and is never re-placed, a
+POST that was sent and got no answer is final too (the node may hold the job; `TestAnAmbiguousPostIsFinal`), a job a node holds
+is never also run here (a media job cannot be withdrawn, ADR 0064), and a node that goes away mid-job fails the call naming the
+node and the remote job. A node that does not answer a health read is left alone for 5, 15, 60 and then 300 s by consecutive
+failure (the last holds), a `Retry-After` pauses a node for that long (jittered once), and a node that took a call and passed it
+back is left alone for 60 s and then 300 s per consecutive bounce (only a call it serves clears the count; a health read does
+not): a node that reads idle but whose own grant refuses every job would otherwise park each call for its whole `gpu_wait_ms`.
+Chosen constants, not measurements (`TestABounceIsRememberedAndTheNodeComesBackAtTheNextStep`,
+`TestARetryAfterHoldsTheNodeAndReadsAsRefused`, `TestARefusedDialMovesOnAndBacksTheNodeOff`, `TestACallIsSentToAtMostThreeNodes`).
+The memory is per process (the placer is a package variable): the MCP server keeps it across the calls of its session, and a
+one-shot CLI call (`generate-image` and the other verbs) starts with none, so it pays a bounced node's `gpu_wait_ms` again.
+
+**Attribution.** The call's PAIR card opens on the first node that ACCEPTS the job, not before the POST, so a node that refused
+it leaves none. A node that accepted and then bounced it has its card closed quiet (`completed`, never started, the reason kept:
+`RemoteAttribution.Bounce`) and writes no ledger row; the call's one asker row names the node that served it, with the route
+`auto` and the placement text.
+
+**What the answer says.** A call that ran on a node answers with `meta.node` and `meta.placement`: `remote: this machine's image
+lane is not free (<what holds it, with its reason and the time its lease declared>); ran on <node>`. A call that nothing admitted
+goes on to the local admission, joining its queue when the fleet attempt is over and not from when it arrived (Named limits below),
+and if it ends in a deferral (a place in line, a busy defer) the answer carries `cluster[]`
+(`{node, state, why, differs?}` per roster node, in config order, and the reason quotes them). `state` is `busy` (the node holds a
+lease; the lease and its reason; or another call of this process already has a job there), `not-capable` (the key that differs, in the config key's own name, and the family of this
+machine that WOULD match: `send family=<ours> to use its <theirs>`; or the release, or the refine, the route or the steps rule),
+`unreachable`, `refused`, `bounced` or `skipped`; a node being left alone says why (`bounced`: it had the call and passed it back;
+`refused`: it answered the dispatch with a refusal; `unreachable`: it did not answer) and for how long. A node absent from `delegate_remotes` is not named: nothing in the config says
+it exists. A call that ran is never annotated.
+
+**What does not overflow.** A call that carries a `waiter_token` (it resumes a place in the local line and keeps it; the token
+of the first queued answer simply lapses after its grace if the call went to a node instead), a call that runs under a lease its
+process inherited, and anything but an image job: graphs arrive with their own file check (a whole-node graph placed on a
+multi-GPU node would land on its display card), and video, animation and audio carry no per-family identity yet.
+
+**Named limits.** One first-in-first-out line per delegating machine; cross-machine order is node arrival; late binding (a ticket
+that starts on the first lane that frees) is the next step. Every remote job pays ComfyUI's cold start (zero-warm). The same
+recipe and seed on a different GPU architecture is the same composition, not bit-identical pixels. A mis-predicted placement
+costs one bounce per node per pause: up to the node's `gpu_wait_ms` parked on the node and one deferred row there before the placer
+sees it. **A call that went to the fleet first queues locally from when it came back**, not from when it arrived: the caller joins the
+local line when the fleet attempt is over (the lane question and the roster read, then at most 3 nodes, each up to its
+`gpu_wait_ms`), so a caller that arrived meanwhile is ahead of it. Carrying
+the arrival time into the local admission needs the lease queue (it takes one) and the in-process slot queue (it serves callers in the
+order they join and takes none); the ticket queue of the next step keeps a call's place across the attempt and is where that is done.
+
+**Reading a node's recipes** (the first live check, before relying on a match): `curl -s http://<node>:18811/fleet/health` and
+read `image_recipes` on the target and, on a machine that also runs `fleet-serve`, on the delegator's own node: the digest of the
+family you will name there is the one the target's row must equal. Neither `offload_status` nor `cluster[]` shows a local digest
+(`cluster[]` names the keys that differ, not the digest); a delegator that does not serve has no surface that prints its own.
 
 ## Comfy workflow templates catalog (phase A)
 

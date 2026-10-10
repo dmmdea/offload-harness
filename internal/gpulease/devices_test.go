@@ -895,6 +895,9 @@ func TestMain(m *testing.M) {
 	if os.Getenv("GPULEASE_HELPER_ROOT") != "" {
 		os.Exit(contendHelper())
 	}
+	if os.Getenv("GPULEASE_HELPER_HOLD_MIB") != "" {
+		os.Exit(holdHelper())
+	}
 	os.Exit(m.Run())
 }
 

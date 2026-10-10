@@ -78,6 +78,9 @@ zero-always-warm (it shares the 8 GB with llama-swap, so it must coordinate). Ta
 node render/comfy-video.mjs <out.mp4> <still.png> "<prompt>" \
      --model hunyuan --frames 17 --width 480 --height 848 \
      [--steps 50] [--seed N] [--negative "..."] [--reserve-vram 2.0] [--no-lock] [--keep-comfy]
+     # A kept instance (--keep-comfy) is freed when its family changes: the runner records the family it
+     # loads on the instance's launch marker (comfy-family.mjs) and frees a kept instance that last ran
+     # another one before its first job; the end-of-run /free is awaited and loud (COMFY-FREE-WARN).
 node render/comfy-video.mjs out.mp4 still.png "<prompt>" --model wan --frames 49   # secondary
 node render/comfy-video.mjs out.mp4 still.png "<prompt>" --wan-decode plain       # wan: tiled (default) | plain | auto
 node render/preflight-graph.mjs hunyuan   # validate a graph vs a running ComfyUI, no gen

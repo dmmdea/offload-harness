@@ -16,14 +16,16 @@ import (
 
 // TestHelperWriteLeaseEnv is a helper process: when asked, it writes the lease
 // environment it was handed to a file, then stays alive for LO_HELPER_SLEEP_MS.
+// The stay does not depend on the file: a test that only watches the lease from
+// outside sets the sleep alone, and a helper that returned at once held the lease
+// for the few milliseconds a process takes to start, which a 40 ms poll caught on
+// a slow-spawning host and missed on a fast one (the Linux CI runner, every run).
 func TestHelperWriteLeaseEnv(t *testing.T) {
-	out := os.Getenv("LO_HELPER_ENV_OUT")
-	if out == "" {
-		return
+	if out := os.Getenv("LO_HELPER_ENV_OUT"); out != "" {
+		body := "devices=" + os.Getenv("GPU_LEASE_DEVICES") + "\nepoch=" + os.Getenv("GPU_LEASE_EPOCH") + "\n" +
+			"cuda_visible=" + os.Getenv("CUDA_VISIBLE_DEVICES") + "\ncuda_order=" + os.Getenv("CUDA_DEVICE_ORDER") + "\n"
+		_ = os.WriteFile(out, []byte(body), 0o644)
 	}
-	body := "devices=" + os.Getenv("GPU_LEASE_DEVICES") + "\nepoch=" + os.Getenv("GPU_LEASE_EPOCH") + "\n" +
-		"cuda_visible=" + os.Getenv("CUDA_VISIBLE_DEVICES") + "\ncuda_order=" + os.Getenv("CUDA_DEVICE_ORDER") + "\n"
-	_ = os.WriteFile(out, []byte(body), 0o644)
 	if ms := atoiOr(os.Getenv("LO_HELPER_SLEEP_MS")); ms > 0 {
 		time.Sleep(time.Duration(ms) * time.Millisecond)
 	}
@@ -49,15 +51,15 @@ func useCardTable(t *testing.T, order string) {
 		{Index: 1, UUID: "GPU-bbbb0000-x", Name: "T2", TotalGiB: 16, FreeGiB: 16, UtilKnown: true, DisplayActive: true},
 		{Index: 2, UUID: "GPU-cccc0000-x", Name: "T", TotalGiB: 16, FreeGiB: 16, UtilKnown: true},
 	}
-	oldCards, oldF, oldR, oldH := cardTableFn, foreignBusyFn, residentSeatsFn, hostFreeRAMFn
+	oldCards, oldF, oldR, oldH := cardTableFn, foreignBusyFn, residentSeatsFn, hostMemoryFn
 	cardTableFn = func(context.Context, config.Config) ([]gpuprobe.Card, string, error) {
 		cards, warn := gpuprobe.BuildCards(devs, order)
 		return cards, warn, nil
 	}
 	foreignBusyFn = func(context.Context, config.Config) map[string]string { return nil }
 	residentSeatsFn = func(context.Context, config.Config, []gpuprobe.Card) map[string]gpulease.ResidentInfo { return nil }
-	hostFreeRAMFn = func() (float64, bool) { return 64, true }
-	t.Cleanup(func() { cardTableFn, foreignBusyFn, residentSeatsFn, hostFreeRAMFn = oldCards, oldF, oldR, oldH })
+	hostMemoryFn = func() (gpuprobe.HostMemory, bool) { return roomyTestHost, true }
+	t.Cleanup(func() { cardTableFn, foreignBusyFn, residentSeatsFn, hostMemoryFn = oldCards, oldF, oldR, oldH })
 }
 
 func waitForLeases(t *testing.T, m *gpulease.Manager, n int) []gpulease.Info {
@@ -215,7 +217,7 @@ func TestResolveAutoCardsQueuesOnClaimedCards(t *testing.T) {
 	}, "")
 	build := func() (gpulease.AllocInput, error) {
 		return gpulease.AllocInput{Cards: cards, Claimed: map[string]bool{"gpu-aaaa0000-x": true, "gpu-cccc0000-x": true},
-			HostFreeOK: true, HostFreeGiB: 64}, nil
+			HostMemOK: true, HostMem: roomyTestHost}, nil
 	}
 	var out bytes.Buffer
 	ids, free, err := pickAutoCards(devicePlan{Auto: true, Min: 1, Max: 2}, time.Minute, build, &out, func(time.Duration) { t.Error("must queue, not poll") }, time.Now)
@@ -234,12 +236,12 @@ func TestResolveAutoCardsWaitsForAShortSupplyThenRefusesAtTheDeadline(t *testing
 	polls := 0
 	build := func() (gpulease.AllocInput, error) {
 		polls++
-		// Host RAM is short for the first two reads, then recovers.
-		free := 1.0
+		// Host RAM is short for the first two reads (committed 99 of 100 GiB), then recovers.
+		host := gpuprobe.HostMemory{PhysicalGiB: 100, AvailableGiB: 1, CommitUsedGiB: 99, CommitLimitGiB: 160}
 		if polls >= 3 {
-			free = 64
+			host = roomyTestHost
 		}
-		return gpulease.AllocInput{Cards: cards, HostFreeOK: true, HostFreeGiB: free, HostNeedGiB: 8, HostHeadroomGiB: 4}, nil
+		return gpulease.AllocInput{Cards: cards, HostMemOK: true, HostMem: host, HostNeedGiB: 8, HostHeadroomGiB: 4}, nil
 	}
 	clock := time.Unix(1000, 0)
 	now := func() time.Time { return clock }

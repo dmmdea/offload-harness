@@ -51,6 +51,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/dmmdea/offload-harness/internal/gpuprobe"
 )
 
 // Class labels what the holder intends to do with the card. Both classes are
@@ -264,6 +266,11 @@ type Meta struct {
 	// argv, clipped), so a reader of `gpu status` sees WHAT holds the cards, not
 	// only who.
 	Command string `json:"command,omitempty"`
+	// HostRAMGiB is the host RAM the holder declared it will load (hostram.go): what the grant
+	// admitted it against, and what a later grant counts as still to load until the holder's processes
+	// hold it. Additive and omitempty: a record without it declares nothing, which every reader
+	// (including a binary that predates the field, which ignores it) takes to mean "adds no host RAM".
+	HostRAMGiB float64 `json:"host_ram_gib,omitempty"`
 
 	// --- record v2 (card-scoped leases). Every field is omitempty and unknown to a
 	// pre-v2 reader, which ignores it: a record without Devices is whole-node. ---
@@ -355,6 +362,8 @@ type Info struct {
 	Draining bool
 	// Command mirrors Meta.Command: what the holder is running, when it said.
 	Command string
+	// HostRAMGiB mirrors Meta.HostRAMGiB: the host RAM the holder declared (0 = none declared).
+	HostRAMGiB float64
 	// HeartbeatAt is the holder's last renewal (the per-epoch heartbeat file,
 	// else the acquisition stamp). Zero when unknown.
 	HeartbeatAt time.Time
@@ -508,6 +517,18 @@ type Options struct {
 	Draining bool
 	// Command is recorded as Meta.Command (clipped to commandClip runes).
 	Command string
+	// HostRAMGiB is the host RAM the holder declares it will load (stamped as Meta.HostRAMGiB). The
+	// grant is admitted against it (hostram.go): committed memory now, plus this, plus what leases
+	// already granted have yet to load, must stay under physical RAM less the headroom. 0 declares
+	// nothing and is never read against the host. The callers resolve it: an explicit `gpu reserve
+	// --ram`, else an estimate from the model files of the render call, else a class default
+	// (internal/hostneed).
+	HostRAMGiB float64
+	// OnHostRAMWait, when set, is called ONCE per Acquire, at the first refusal on host-RAM grounds
+	// of a request that will keep waiting (Wait > 0): the CLI prints the "waiting for host RAM" line
+	// from it. Once, because a line per poll is a notification per second in the session that wraps
+	// the reserve.
+	OnHostRAMWait func(*ErrHostRAM)
 	// Devices names the cards the lease holds, by GPU UUID (plan invariant I2). Empty
 	// is a WHOLE-NODE lease, the only kind that existed before record v2. A non-empty
 	// set writes a v2 lease (per-card claims) and is refused unless the host has
@@ -601,6 +622,16 @@ type Manager struct {
 	// writeProbe is a test seam for "this process cannot write the lease directory"; nil
 	// means a real probe.
 	writeProbe func(dir string) error
+	// hostHeadroomGiB is this Manager's own host-RAM headroom (SetHostRAMHeadroom, a test seam); 0 = the
+	// process-wide one config.Load installed (SetDefaultHostRAMHeadroom).
+	hostHeadroomGiB float64
+	// hostMem and workload are test seams for the host-RAM term: the host's memory reading (nil = the
+	// real reader, gpuprobe.ReadHostMemory) and what the processes below a holder pid hold RESIDENT
+	// (nil = the real process-tree reader, descendantsResidentGiB). Production never sets them.
+	hostMem  func() (gpuprobe.HostMemory, bool)
+	workload func(holderPID int) (float64, bool)
+	// readOnly marks a view made by ReadOnly: the readers that prune a record they find dead or expired leave it.
+	readOnly bool
 }
 
 // ErrCardScopedOff is returned by an acquisition that names devices on a host that
@@ -617,6 +648,27 @@ func (m *Manager) EmulateLegacyWriter() { m.legacyWriter = true }
 // SetCardScoped turns the device-scoped WRITER on or off for this Manager. It is the
 // raw switch and checks nothing: production callers go through ApplyCardScopedConfig.
 func (m *Manager) SetCardScoped(on bool) { m.cardScoped = on }
+
+// ReadOnly returns a view of the same lease root whose readers of the line write nothing. Those readers (Waiters,
+// Tokens, ResumeToken) prune a record they find dead, stale or expired, as housekeeping for whoever reads next; through
+// the view they skip such a record exactly as before and leave it on disk. It is for a question that must not change
+// the state it asks about (the media lane probe, internal/pipeline/medialane.go): a helper that reads the line through
+// the view, gpualloc's included, prunes nothing. The view shares the root, the clock and the seams of m, and it does not
+// stop an acquisition or a release made through it, which are not reads and which the probe never makes.
+func (m *Manager) ReadOnly() *Manager {
+	v := *m
+	v.readOnly = true
+	return &v
+}
+
+// prune removes a record a reader found dead, stale or expired, unless this is a ReadOnly view. Best effort, like
+// every prune: the record is only debris, and the next reader that is allowed to write finds it again.
+func (m *Manager) prune(path string) {
+	if m.readOnly {
+		return
+	}
+	_ = os.Remove(path)
+}
 
 // CardScoped reports whether this Manager may write card-scoped leases (the per-host
 // switch, after ApplyCardScopedConfig).
@@ -1082,18 +1134,19 @@ func infoFrom(meta *Meta, now time.Time) Info {
 		expires = time.UnixMilli(meta.ExpiresAtMs)
 	}
 	return Info{
-		Held:      true,
-		Class:     meta.Class,
-		Epoch:     meta.Epoch,
-		PID:       meta.Holder.PID,
-		Age:       age,
-		Reason:    meta.Reason,
-		Origin:    meta.Origin,
-		JobID:     meta.JobID,
-		ExpiresAt: expires,
-		Exclusive: meta.Exclusive,
-		Draining:  meta.Draining,
-		Command:   meta.Command,
+		Held:       true,
+		Class:      meta.Class,
+		Epoch:      meta.Epoch,
+		PID:        meta.Holder.PID,
+		Age:        age,
+		Reason:     meta.Reason,
+		Origin:     meta.Origin,
+		JobID:      meta.JobID,
+		ExpiresAt:  expires,
+		Exclusive:  meta.Exclusive,
+		Draining:   meta.Draining,
+		Command:    meta.Command,
+		HostRAMGiB: meta.HostRAMGiB,
 
 		Devices:        append([]string(nil), meta.Devices...),
 		Epochs:         []uint64{meta.Epoch},
@@ -1213,6 +1266,14 @@ func (m *Manager) TryAcquire(class Class, opts Options) (*Lease, error) {
 		// frees between this read and that create just costs one wasted iteration.
 		if info := m.Inspect(); info.Held {
 			return nil, m.heldErr(info)
+		}
+
+		// HOST RAM, after the card is shown free and before an epoch is spent on it (a refusal here
+		// burns no fencing token). Nothing else is live (any live lease would have been ErrHeld
+		// just above), so no part of another lease is still to load; see hostram.go for why no lock
+		// is needed on this path.
+		if e := m.hostRAMRefusal(opts, nil); e != nil {
+			return nil, e
 		}
 
 		// THE DIRECTORY IS A CONTAINER, NEVER A CLAIM. Creating it must be
@@ -1462,6 +1523,7 @@ func (m *Manager) Acquire(class Class, opts Options) (*Lease, error) {
 	self, unregister := m.registerWaiter(class, opts)
 	defer unregister()
 	var err error
+	toldHostRAM := false
 	for first := true; ; first = false {
 		if !first {
 			remaining := deadline.Sub(m.now())
@@ -1518,10 +1580,35 @@ func (m *Manager) Acquire(class Class, opts Options) (*Lease, error) {
 			}
 			return got, nil
 		}
-		if !errors.As(aerr, new(*ErrHeld)) {
+		var short *ErrHostRAM
+		switch {
+		case errors.As(aerr, &short) && !short.Impossible:
+			// HOST RAM, NOT THE CARDS (hostram.go). The cards are free and this request is first in
+			// line for them, but the host's memory cannot take what it declared on top of what is
+			// committed and what the leases already granted have yet to load. It stays in the SAME
+			// line, in the same place, marked on its record as waiting for host RAM (so `gpu status`
+			// says what it is waiting for), and tries again next tick. A request behind it for the
+			// same cards stays behind it, as it would behind any other waiter.
+			err = aerr
+			if self.WaitingFor != WaitHostRAM {
+				self.WaitingFor = WaitHostRAM
+				m.refreshWaiter(self)
+				if wait > 0 && !toldHostRAM && opts.OnHostRAMWait != nil {
+					toldHostRAM = true
+					opts.OnHostRAMWait(short)
+				}
+			}
+			continue
+		case errors.As(aerr, new(*ErrHeld)):
+			err = aerr
+			if self.WaitingFor != "" {
+				self.WaitingFor = ""
+				m.refreshWaiter(self)
+			}
+		default:
+			// An impossible need included: waiting cannot cure it, so the request ends here.
 			return nil, aerr
 		}
-		err = aerr
 	}
 }
 
@@ -1535,8 +1622,9 @@ func (m *Manager) Acquire(class Class, opts Options) (*Lease, error) {
 // an entry that never tries — would be silently lost. Named after the waiter
 // that is actually ahead of self when Inspect itself has nothing to say.
 //
-// "Ahead" is the rule isFrontOfQueue applies, no looser: older than self
-// (waiterBefore) AND wanting a card self wants (devicesConflict). Naming the
+// "Ahead" is the rule isFrontOfQueue applies, no looser (holdsBack): older than self
+// (waiterBefore) AND wanting a card self wants (devicesConflict), unless it waits only
+// on host RAM and self declares none (BlocksArrival). Naming the
 // first OTHER waiter in the listing instead pointed a request at an entry on a
 // disjoint card, or at one that arrived after it, as the thing it was waiting
 // for (the pre-ship review of D-1xx-3, 2026-10-09). waited is the window this request stood in line
@@ -1547,10 +1635,15 @@ func queueTimeoutErr(m *Manager, self Waiter, waited time.Duration) error {
 		return m.heldErr(info)
 	}
 	for _, w := range m.Waiters() {
-		if w.path == self.path || !waiterBefore(w, self) || !devicesConflict(w.Devices, self.Devices) {
+		if w.path == self.path || !holdsBack(w, self) {
 			continue
 		}
-		return stillQueuedErr(waited, fmt.Sprintf("pid %d (%s, reason %q), which has not claimed the card", w.PID, w.Class, w.Reason))
+		what := "which has not claimed the card"
+		if w.WaitingFor == WaitHostRAM {
+			// The cards are free; what it is short of is memory. Say so, and what it asked for.
+			what = fmt.Sprintf("which is waiting for host RAM (needs %.1f GiB) and has not claimed the card", w.HostRAMGiB)
+		}
+		return stillQueuedErr(waited, fmt.Sprintf("pid %d (%s, reason %q), %s", w.PID, w.Class, w.Reason, what))
 	}
 	// A place held for a caller who left (tokens.go) keeps the line just as a waiter does.
 	for _, t := range m.Tokens() {
@@ -1604,6 +1697,7 @@ func (m *Manager) record(epoch uint64, class Class, opts Options) ([]byte, error
 		Exclusive:    opts.Exclusive && class == ClassText,
 		Draining:     opts.Draining,
 		Command:      clipCommand(opts.Command),
+		HostRAMGiB:   max(opts.HostRAMGiB, 0),
 
 		Group:          strings.TrimSpace(opts.Group),
 		WrapperVersion: strings.TrimSpace(opts.WrapperVersion),

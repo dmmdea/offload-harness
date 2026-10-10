@@ -221,3 +221,121 @@ func TestRemoteComposeCardIsHyperframes(t *testing.T) {
 		t.Fatalf("compose card: %v", f)
 	}
 }
+
+// A call the router placed on a node that answered "another job holds my card" goes on to another node. The first
+// attempt's card closes quiet (nothing ran there: completed, never started, the reason in `error`), the call keeps its
+// ONE ledger row (written by its Finish, naming the node that served it) and the next Dispatched opens a card of its
+// own on the next node under the fresh job id.
+func TestBounceClosesTheAttemptsCardQuietAndTheNextDispatchOpensANewOne(t *testing.T) {
+	r := newRemoteRig(t, true)
+	h := NewRemoteCall(r.e, r.led, core.Request{Task: core.TaskGenerateImage, Door: "offload_generate_image"}, "auto")
+	h.Dispatched("http://node-a:18811", "node-a", "media-aaaa")
+	h.Running()
+	held := core.Deferf("gpu busy: held by a media-class lease", "", core.Meta{Node: "node-a", ErrClass: core.ErrClassGPUBusy})
+	h.Bounce(held)
+	h.Bounce(held) // once: the handle is armed again and not yet dispatched
+	h.Dispatched("http://node-b:18811", "node-b", "media-bbbb")
+	h.Running()
+	h.Finish(core.Result{OK: true, Meta: core.Meta{Node: "node-b", Placement: "remote: the local image lane was held"}})
+
+	r.e.Wait()
+	byID := map[any]map[string]map[string]any{}
+	for i := 0; i < r.cap.count(); i++ {
+		wi := r.cap.info(i)
+		if byID[wi["id"]] == nil {
+			byID[wi["id"]] = map[string]map[string]any{}
+		}
+		byID[wi["id"]][wi["state"].(string)] = wi
+	}
+	if len(byID) != 2 {
+		t.Fatalf("want one card per node that held the job (2), got %d: %v", len(byID), byID)
+	}
+	a, b := byID["media-aaaa"], byID["media-bbbb"]
+	if a["queued"] == nil || a["running"] == nil || a["completed"] == nil || a["failed"] != nil {
+		t.Fatalf("the bounced attempt's card must close COMPLETED (a held call ran nothing), got %v", a)
+	}
+	if a["completed"]["startedAt"] != nil || a["completed"]["error"] == nil {
+		t.Errorf("a held attempt was never started and keeps its reason: %v", a["completed"])
+	}
+	if a["completed"]["scheduledOn"] != a["queued"]["scheduledOn"] {
+		t.Errorf("the bounced card closes on the node it opened on: %v vs %v", a["completed"]["scheduledOn"], a["queued"]["scheduledOn"])
+	}
+	if b["queued"] == nil || b["running"] == nil || b["completed"] == nil || b["completed"]["startedAt"] == nil {
+		t.Fatalf("the serving node's card goes queued, running, completed (a bounce must not leave the first attempt's state on the handle): %v", b)
+	}
+	if b["completed"]["startedAt"].(float64) < b["queued"]["createdAt"].(float64) {
+		t.Errorf("the serving node's card started before it was created: it carries the bounced attempt's start: %v", b)
+	}
+	if a["queued"]["createdAt"] == b["queued"]["createdAt"] && a["queued"]["scheduledOn"] == b["queued"]["scheduledOn"] {
+		t.Errorf("the second card is a new card on another node: %v vs %v", a["queued"], b["queued"])
+	}
+	rows := r.rows()
+	if len(rows) != 1 {
+		t.Fatalf("a bounce writes no row of its own: the call has ONE row, got %d: %+v", len(rows), rows)
+	}
+	if row := rows[0]; row.Node != "node-b" || row.FleetJobID != "media-bbbb" || row.Deferred || !row.CardByCaller {
+		t.Errorf("the row names the node that served the call: %+v", row)
+	}
+}
+
+// A BOUNCED attempt ran nothing on the node it was sent to, so its card closes quiet whatever the node's err_class
+// was. core.CardHeld says which deferrals are a place in line; it does not decide this, because a node that took the
+// call and could not take its lease (gpu_lease_unavailable, not CardHeld) ran nothing either, and a call that a second
+// node then serves must not show the first node's card red.
+func TestBounceClosesTheAttemptsCardQuietWhateverItsErrClass(t *testing.T) {
+	for _, class := range []string{
+		core.ErrClassGPUBusy,
+		core.ErrClassGPUQueued,
+		core.ErrClassComposeBusy,
+		core.ErrClassGPULeaseUnavailable,
+		"",
+		"timeout",
+	} {
+		t.Run("err_class="+class, func(t *testing.T) {
+			r := newRemoteRig(t, true)
+			h := NewRemoteCall(r.e, r.led, core.Request{Task: core.TaskGenerateImage, Door: "offload_generate_image"}, "auto")
+			h.Dispatched("http://node-a:18811", "node-a", "media-aaaa")
+			h.Running()
+			h.Bounce(core.Deferf("gpu lease unavailable: host RAM can never admit this need", "", core.Meta{Node: "node-a", ErrClass: class}))
+			r.e.Wait()
+			byState := map[string]map[string]any{}
+			for i := 0; i < r.cap.count(); i++ {
+				wi := r.cap.info(i)
+				byState[wi["state"].(string)] = wi
+			}
+			if byState["failed"] != nil {
+				t.Fatalf("a bounced attempt ran nothing and must close quiet (completed), but its card closed FAILED: %v", byState["failed"])
+			}
+			done := byState["completed"]
+			if done == nil {
+				t.Fatalf("the bounced attempt's card must close completed, got states %v", byState)
+			}
+			if done["startedAt"] != nil {
+				t.Errorf("a bounced attempt was never started: %v", done)
+			}
+			if done["error"] == nil {
+				t.Errorf("a bounced attempt keeps its reason in error: %v", done)
+			}
+		})
+	}
+}
+
+// A bounce before any dispatch, or after the call ended, changes nothing (the lane may call it on every refusal).
+func TestBounceBeforeDispatchOrAfterFinishDoesNothing(t *testing.T) {
+	r := newRemoteRig(t, true)
+	held := core.Deferf("gpu busy", "", core.Meta{ErrClass: core.ErrClassGPUBusy})
+	h := NewRemoteCall(r.e, r.led, vqaReq(), "auto")
+	h.Bounce(held)
+	h.Dispatched("http://node-b:18811", "node-b", "vision-9")
+	h.Finish(core.Result{OK: true, Meta: core.Meta{Node: "node-b"}})
+	h.Bounce(held)
+	var nilCall *RemoteCall
+	nilCall.Bounce(held)
+	r.e.Wait()
+	if r.cap.count() != 2 {
+		t.Fatalf("frames = %d, want queued and completed only", r.cap.count())
+	}
+	if rows := r.rows(); len(rows) != 1 {
+		t.Fatalf("rows = %d, want 1", len(rows))
+	}
+}

@@ -29,6 +29,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/delegate"
 	"github.com/dmmdea/offload-harness/internal/fleetnode"
 	"github.com/dmmdea/offload-harness/internal/gpulease"
+	"github.com/dmmdea/offload-harness/internal/mediacap"
 	"github.com/dmmdea/offload-harness/internal/nodeswap"
 )
 
@@ -567,5 +568,86 @@ func TestHealthPayloadOfAnOlderNodeDecodesWithNoLeases(t *testing.T) {
 	}
 	if len(fv.Leases) != 1 || fv.Leases[0].Epoch != 1 {
 		t.Fatalf("future payload decoded as %+v", fv.Leases)
+	}
+}
+
+// TestHealthStaysCompatibleWithOldReaders is the compatibility proof for the keys ADR 0082 adds (image_recipes and
+// refine_honoured). They are additive: the shipped decoder reads them from a real node's health without disturbing
+// the fields placement has always read, a node with no image lane publishes neither (an older reader and a
+// video-only node see the shape they always did), and the digest a delegator matches is the one the node computed.
+func TestHealthStaysCompatibleWithOldReaders(t *testing.T) {
+	comfy := t.TempDir()
+	for rel, n := range map[string]int{
+		"models/diffusion_models/qwen_image_2.1_uc_bf16.safetensors": 222,
+		"models/text_encoders/qwen3vl_8b_bf16.safetensors":           88,
+		"models/vae/qwen_image_2.1_vae_bf16.safetensors":             6,
+	} {
+		p := filepath.Join(comfy, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, make([]byte, n), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := config.Config{
+		ImageGenScript: "C:/x/comfy-generate.mjs", ComfyDir: comfy, FleetMaxQueueDepth: 7, FleetMaxConcurrentJobs: 2,
+		ImageGenFamilies: map[string]config.FamilyOverlay{"qwen-image-2.1": {
+			"license": json.RawMessage(`"Qwen Research License"`), "commercial_use": json.RawMessage(`false`),
+			"imagegen_family": json.RawMessage(`"qwen-image-2.1"`), "imagegen_ckpt": json.RawMessage(`"qwen_image_2.1_uc_bf16.safetensors"`),
+			"imagegen_clip": json.RawMessage(`"qwen3vl_8b_bf16.safetensors"`), "imagegen_vae": json.RawMessage(`"qwen_image_2.1_vae_bf16.safetensors"`),
+		}},
+	}
+	serve := func(c config.Config) *httptest.Server {
+		jobs := fleetnode.NewJobs(time.Hour, c.FleetConcurrencyLimit())
+		t.Cleanup(func() { jobs.DrainAndStop(2 * time.Second) })
+		srv := fleetnode.New(nopRunner{}, jobs, fleetnode.Options{
+			NodeID: "wire-node", Version: "test", Cfg: c,
+			Snapshot: func() (fleetnode.Snapshot, bool) {
+				return fleetnode.Snapshot{TotalGiB: 16, FreeGiB: 12, At: time.Now()}, true
+			},
+		})
+		ts := httptest.NewServer(srv.Handler())
+		t.Cleanup(ts.Close)
+		return ts
+	}
+
+	ts := serve(cfg)
+	view, err := delegate.FetchNodeView(context.Background(), ts.URL, "")
+	if err != nil {
+		t.Fatalf("the delegator's health decoder rejected a payload with image_recipes: %v", err)
+	}
+	if view.NodeID != "wire-node" || view.HarnessVersion != "test" {
+		t.Errorf("the old keys still decode: node %q version %q", view.NodeID, view.HarnessVersion)
+	}
+	if !view.RefineHonoured || len(view.ImageRecipes) != 1 {
+		t.Fatalf("refine_honoured=%v recipes=%+v, want the node's one named family", view.RefineHonoured, view.ImageRecipes)
+	}
+	eff, fi, err := cfg.ResolveImageFamily("qwen-image-2.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, ok := mediacap.ImageRecipe(eff, fi, mediacap.ModelRoots(comfy), nil)
+	if !ok {
+		t.Fatal("no recipe")
+	}
+	if got := view.ImageRecipes[0]; got.Digest != want.Digest() || got.Name != "qwen-image-2.1" || got.Steps != 40 || len(got.Files) != 3 || got.Files[0].Bytes != 222 {
+		t.Errorf("the delegator reads the row the node published: %+v (digest want %s)", got, want.Digest())
+	}
+
+	// A node with no image lane publishes neither key.
+	resp, err := http.Get(serve(config.Config{VideoGenScript: "C:/x/comfy-video.mjs"}).URL + "/fleet/health")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var raw map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"image_recipes", "refine_honoured"} {
+		if _, has := raw[k]; has {
+			t.Errorf("a node without image-gen published %s", k)
+		}
 	}
 }

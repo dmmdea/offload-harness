@@ -67,8 +67,9 @@ type Deps struct {
 	ForeignBusy func(ctx context.Context, cfg config.Config) map[string]string
 	// Resident maps a card to the configured seats loaded on it.
 	Resident func(ctx context.Context, cfg config.Config, cards []gpuprobe.Card) map[string]gpulease.ResidentInfo
-	// HostFreeRAM reads free host RAM in GiB.
-	HostFreeRAM func() (float64, bool)
+	// HostMemory reads the host's memory (physical, available, commit): the reading the host-RAM
+	// rule is applied to, here and at the lease grant.
+	HostMemory func() (gpuprobe.HostMemory, bool)
 	// Presence says whether the operator is known to be away from the desk.
 	Presence func(cfg config.Config) (known, away bool)
 }
@@ -104,8 +105,8 @@ func (d Deps) withDefaults() Deps {
 			return ResidentSeats(ctx, cfg, cards, nil)
 		}
 	}
-	if d.HostFreeRAM == nil {
-		d.HostFreeRAM = gpuprobe.HostFreeRAMGiB
+	if d.HostMemory == nil {
+		d.HostMemory = gpuprobe.ReadHostMemory
 	}
 	if d.Presence == nil {
 		d.Presence = func(cfg config.Config) (bool, bool) {
@@ -214,9 +215,12 @@ func BuildInput(ctx context.Context, m *gpulease.Manager, cfg config.Config, nee
 		FootprintGiB:    need.VRAMGiB,
 		HostNeedGiB:     need.RAMGiB,
 		HostHeadroomGiB: cfg.GPUHostRAMHeadroom(),
+		// The part of the leases already granted that has not loaded: without it the allocator would
+		// pick cards for a job the grant is about to refuse (the two apply one rule, gpuprobe.HostRAMAdmits).
+		HostPendingGiB: m.HostRAMPending(),
 	}
 	in.WholeNodeHeld, in.Claimed = Claims(m, need)
-	in.HostFreeGiB, in.HostFreeOK = deps.HostFreeRAM()
+	in.HostMem, in.HostMemOK = deps.HostMemory()
 	known, away := deps.Presence(cfg)
 	in.AllowDisplay = known && away
 	// The display card, once presence opens it, keeps the desktop floor the display layer guards

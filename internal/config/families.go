@@ -288,6 +288,11 @@ var imageOverlay = overlayKind{
 	},
 }
 
+// ImageOverlayClearKeys lists the image route's model-binding keys a family replaces wholesale (the overlay's clear
+// list). internal/mediacap reads it to prove that its recipe classifies every one of them, so a key cannot join the
+// list without someone deciding whether it is part of what an image family IS.
+func ImageOverlayClearKeys() []string { return append([]string(nil), imageOverlay.clear...) }
+
 var editOverlay = overlayKind{
 	key:      "gen_edit_families",
 	prefixes: []string{"gen_edit_", "comfy_"},

@@ -1354,10 +1354,22 @@ type Config struct {
 	// is set (or the box has one card). Unset, such a lease stays whole-node and says
 	// why; nothing is ever guessed. Measure it with a CUDA_VISIBLE_DEVICES=<uuid> probe.
 	GPUComfyOrder string `json:"gpu_comfy_order,omitempty"`
-	// GPUHostRAMHeadroomGiB is the host RAM the card allocator keeps free beyond a job's
-	// declared need (`gpu reserve --ram`), because a load that pushes the host into swap
-	// stalls every seat on the box. 0 = DefaultGPUHostRAMHeadroomGiB.
+	// GPUHostRAMHeadroomGiB is the host memory every GPU lease grant keeps UNCOMMITTED beyond what
+	// the lease declares (`gpu reserve --ram`, the estimate from its model files, the class default;
+	// internal/hostneed): a grant is admitted only while committed memory now, plus its declared
+	// need, plus what the leases already granted have yet to load, stays at or under physical RAM
+	// less this. It is also the margin of the NEAR verdict `gpu status` reports. The card allocator
+	// applies the same rule before it picks cards. A load that pushes the host into paging stalls
+	// every seat on the box, so a DECLARED load is held back while it would pass physical RAM less this. That
+	// bounds declarations, not what a lane then commits (gpu-lease.md, "Known limits").
+	// 0 = DefaultGPUHostRAMHeadroomGiB (8).
 	GPUHostRAMHeadroomGiB float64 `json:"gpu_host_ram_headroom_gib,omitempty"`
+	// AgentSeatHostRAMGiB is the host RAM the agent seat holds once it is loaded (resident set plus any staged
+	// KV cache, GiB): what the warm-back of a seat a lease unloaded must find room for before it loads the seat
+	// again (gpu_drain.go; internal/hostneed.SeatNeed). It is a figure to MEASURE on the node that runs the seat
+	// and to record beside the value as `measured <date> <node>`; 0 = unset, and an unset seat is not assumed to
+	// be small: hostneed.DefaultSeatHostGiB stands in, a chosen fail-closed figure and never 0.
+	AgentSeatHostRAMGiB float64 `json:"agent_seat_host_ram_gib,omitempty"`
 	// GPUOrphanGraceMin (plan P8, default 15) is how many minutes an attended lease's
 	// owner may be gone before `gpu status`, offload_status and the fleet health read the
 	// lease as orphaned. It only changes what is REPORTED: nothing reclaims, releases or
@@ -2364,6 +2376,10 @@ func loadArmed(path string) (Config, error) {
 	// The term limits are read by every acquirer (a record is stamped with them) and by every
 	// holder's tick, so they are installed here too.
 	gpulease.SetDefaultTerms(c.GPUMaxTerm(), c.GPUMaxTotal())
+	// The host-RAM headroom every lease grant keeps uncommitted is read by every grant path (the CLI,
+	// the pipeline's media admission, the detached holder), so it is installed here too: wired per
+	// constructor it was wired nowhere, and the grant ignored the key `gpu status` reported.
+	gpulease.SetDefaultHostRAMHeadroom(c.GPUHostRAMHeadroom())
 	if lerr := modelaffinity.SetGPULease(c.GPULockPath, c.StateDir); lerr != nil {
 		fmt.Fprintf(os.Stderr, "warning: GPU load gate disabled: %v\n"+
 			"  Text calls will not wait for a media render to finish with the card.\n", lerr)

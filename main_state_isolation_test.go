@@ -9,6 +9,7 @@ import (
 
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/gpulease"
+	"github.com/dmmdea/offload-harness/internal/gpuprobe"
 	"github.com/dmmdea/offload-harness/internal/gpuprobe/smitest"
 )
 
@@ -70,6 +71,9 @@ func runIsolated(m suiteRunner, mkdirTemp func(dir, pattern string) (string, err
 			return 1
 		}
 	}
+	// A reservation that declares host RAM reads the host before it is granted (internal/gpulease/hostram.go),
+	// so the suite runs against a known host and not against whatever the machine running it is doing.
+	defer gpuprobe.UseHostMemoryReader(func() (gpuprobe.HostMemory, bool) { return roomyTestHost, true })()
 	return m.Run()
 }
 

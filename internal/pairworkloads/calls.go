@@ -267,12 +267,24 @@ func cardOutcome(failed bool, errClass, reason string, started bool) (state, err
 	if !failed {
 		return "completed", ""
 	}
+	if core.CardHeld(errClass) && !started {
+		return quietCardOutcome(reason)
+	}
 	errText = reason
 	if errText == "" {
 		errText = "deferred"
 	}
-	if core.CardHeld(errClass) && !started {
-		return "completed", errText
-	}
 	return "failed", errText
+}
+
+// quietCardOutcome is the close of a card whose call ran nothing: completed (the lifecycle's quiet terminal
+// state), its start left null, and the reason in `error` ("deferred" when there is none). cardOutcome gives it to a
+// held call by class (core.CardHeld); RemoteCall.Bounce gives it to every bounced attempt, whatever its class,
+// because what decides there is that the attempt ran nothing on that node, not why.
+func quietCardOutcome(reason string) (state, errText string) {
+	errText = reason
+	if errText == "" {
+		errText = "deferred"
+	}
+	return "completed", errText
 }

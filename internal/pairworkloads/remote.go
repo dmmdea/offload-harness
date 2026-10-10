@@ -177,6 +177,37 @@ func (c *RemoteCall) Finish(res core.Result) {
 	}
 }
 
+// Bounce closes the card of an attempt a node took and handed back (it answered "another job holds my card", or that
+// it could not take its lease) and arms the handle for the next node. The card closes quiet (completed, never
+// started, the reason in `error`) WHATEVER the answer's err_class, because what decides is that nothing ran on that
+// node, not why: a class that is not core.CardHeld (gpu_lease_unavailable) bounces the same way, and a call that a
+// second node then serves must not show the first node's card red. It carries no ledger row: a call is one row,
+// written by its Finish with the node that served it. The next Dispatched opens a new card (PAIR keys a card on its
+// job id, and the next attempt carries a fresh one). Before a dispatch, or once the call has ended, it does nothing.
+func (c *RemoteCall) Bounce(res core.Result) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	if c.finished || !c.dispatched {
+		c.mu.Unlock()
+		return
+	}
+	// Quiet by the bounce, not by the class: a remote card turns running when the node ADMITS the job, which says
+	// nothing about whether the job ran, and the class of a handed-back answer need not be a held one.
+	state, errText := quietCardOutcome(res.Reason)
+	ev := c.eventLocked(state)
+	ev.StartedAt = 0
+	ev.Error = errText
+	ev.CompletedAt = time.Now().UnixMilli()
+	// Armed again: the next Dispatched names the next node and opens its card.
+	c.dispatched = false
+	c.base, c.host, c.nodeID, c.fleetJob, c.jobID = "", "", "", "", ""
+	c.started, c.created = 0, 0
+	c.mu.Unlock()
+	c.e.EmitSync(ev)
+}
+
 // Discard ends an attempt that is not the final answer (the auto route fell back to a local run). An
 // attempt that never reached a node writes nothing; one that did is finished as a deferred call.
 func (c *RemoteCall) Discard(reason string) {

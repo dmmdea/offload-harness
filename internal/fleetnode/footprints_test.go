@@ -278,3 +278,83 @@ func TestReloadIfChangedMergesOtherProcessRecords(t *testing.T) {
 		}
 	}
 }
+
+// --- host peaks (G3 of the P0 plan: the guard sizes a render from what renders were measured to hold) ---
+
+// RecordHost keeps the MAX private and the MAX resident peak per key and counts the runs; HostPeak reads them back.
+func TestFootprintsRecordHostPeaksMaxKeep(t *testing.T) {
+	f := OpenFootprints(filepath.Join(t.TempDir(), "footprints.json"))
+	if _, ok := f.HostPeak("krea2", "bf16", "image-gen"); ok {
+		t.Fatal("a key nobody recorded has no host peak")
+	}
+	f.RecordHost("krea2", "bf16", "image-gen", 40.0, 30.0)
+	f.RecordHost("krea2", "bf16", "image-gen", 57.7, 33.0) // higher private, lower resident than the next
+	f.RecordHost("krea2", "bf16", "image-gen", 50.0, 40.7)
+	got, ok := f.HostPeak("krea2", "bf16", "image-gen")
+	if !ok || got.PrivateGiB != 57.7 || got.ResidentGiB != 40.7 || got.Runs != 3 {
+		t.Fatalf("want private 57.7 (max), resident 40.7 (max, from another run), 3 runs; got %+v ok=%v", got, ok)
+	}
+	// A non-positive private peak is a sampling failure: dropped, and not counted as a run.
+	f.RecordHost("krea2", "bf16", "image-gen", 0, 5)
+	f.RecordHost("krea2", "bf16", "image-gen", -1, 5)
+	if got, _ := f.HostPeak("krea2", "bf16", "image-gen"); got.Runs != 3 {
+		t.Fatalf("a failed sample counted as a run: %+v", got)
+	}
+}
+
+// The wire shape gains host_peak_gb and host_resident_peak_gb for an entry that has a VRAM peak and host peaks,
+// and a store without host data is byte-identical to before (the keys are omitted, not zero).
+func TestFootprintsWireCarriesHostPeaksOnlyWhenMeasured(t *testing.T) {
+	f := OpenFootprints(filepath.Join(t.TempDir(), "fp.json"))
+	f.Record("sdxl", "", "image-gen", 6.0)
+	f.Record("krea2", "bf16", "image-gen", 15.0)
+	f.RecordHost("krea2", "bf16", "image-gen", 57.7, 40.7)
+	b, err := json.Marshal(f.Entries())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw []map[string]any
+	if err := json.Unmarshal(b, &raw); err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range raw {
+		switch m["model_family"] {
+		case "sdxl":
+			if _, ok := m["host_peak_gb"]; ok {
+				t.Errorf("an entry with no host data must not carry host keys: %v", m)
+			}
+		case "krea2":
+			if m["host_peak_gb"] != 57.7 || m["host_resident_peak_gb"] != 40.7 {
+				t.Errorf("host peaks missing from the wire entry: %v", m)
+			}
+		}
+	}
+}
+
+// Host peaks survive a reopen, and the cross-process merge is a per-field max: another process's higher host peak
+// and run count arrive, and neither process's VRAM peak or host peak is regressed by the other's write.
+func TestFootprintsHostPeaksPersistAndMergeAcrossProcesses(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "footprints.json")
+	a := OpenFootprints(path)
+	b := OpenFootprints(path) // another process, opened while the file was absent
+	a.Record("krea2", "bf16", "image-gen", 15.0)
+	a.RecordHost("krea2", "bf16", "image-gen", 50.0, 35.0)
+	b.RecordHost("krea2", "bf16", "image-gen", 57.7, 30.0) // must not clobber a's VRAM peak, and must merge a's resident
+
+	re := OpenFootprints(path)
+	got, ok := re.HostPeak("krea2", "bf16", "image-gen")
+	if !ok || got.PrivateGiB != 57.7 || got.ResidentGiB != 35.0 {
+		t.Fatalf("a reopened store keeps the max of each host field across processes: %+v ok=%v", got, ok)
+	}
+	if e := re.Entries(); len(e) != 1 || e[0].VramPeakGiB != 15.0 {
+		t.Fatalf("a concurrent host write clobbered the VRAM peak: %+v", e)
+	}
+	// An old store (no host fields) opens with none, rather than failing.
+	old := filepath.Join(t.TempDir(), "old.json")
+	if err := os.WriteFile(old, []byte(`[{"model_family":"sdxl","vram_peak_gb":6,"observed_peak_gb":6,"samples":2,"updated":"2026-10-01T00:00:00Z"}]`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := OpenFootprints(old).HostPeak("sdxl", "", ""); ok {
+		t.Fatal("an old record has no host peak")
+	}
+}

@@ -61,6 +61,7 @@ import (
 
 	"github.com/dmmdea/offload-harness/internal/gpulease"
 	"github.com/dmmdea/offload-harness/internal/gpuprobe"
+	"github.com/dmmdea/offload-harness/internal/hostneed"
 	"github.com/dmmdea/offload-harness/internal/imagegen"
 	"github.com/dmmdea/offload-harness/internal/swapclient"
 )
@@ -91,6 +92,126 @@ type mediaNeed struct {
 	// with no card; any other gets the plain "gpu busy" and leaves nothing behind, because a
 	// token it can never claim would hold a card back from the next caller for the grace.
 	Resumable bool
+	// RAM resolves the host RAM this call declares once the card it will run on is known (the
+	// estimate depends on whether its weights fit that card, internal/hostneed). nil declares
+	// nothing: a route whose weights always sit on the card (upscale, voice) adds no host memory the
+	// grant needs to see. The grant admits it against committed memory (gpulease/hostram.go).
+	RAM func(vramGiB float64) hostneed.Need
+	// Foot is the footprint-store key this call's renders are recorded under (the key the same route's sampling
+	// hook uses), so a declaration can be raised to what those renders were measured to hold (calibratedRAM). The
+	// zero value is not calibrated; only the image and video routes set it.
+	Foot footKey
+}
+
+// footKey is a footprint-store identity: family, quant, task.
+type footKey struct{ family, quant, task string }
+
+// withFootprint names the store key the call's renders are recorded under.
+func (n mediaNeed) withFootprint(k footKey) mediaNeed {
+	n.Foot = k
+	return n
+}
+
+// hostPeakMinRuns is how many measured runs of a key must exist before a measurement may raise a declaration.
+// Chosen 2026-10-10, not measured: a single run is one reading of a number that moves with the workflow, the
+// cached families and the desktop, and three is the fewest that lets one outlier be seen against two others in the
+// store's own records. A measurement only ever raises the declaration, so the number errs toward waiting for more
+// data, not toward admitting on less.
+const hostPeakMinRuns = 3
+
+// calibratedRAM raises a declared need to what renders of the call's key were measured to hold: the footprint
+// store's peak RESIDENT memory of the render's process tree, once at least hostPeakMinRuns runs exist, when that is
+// higher than the estimate from the model files. Three properties are the point:
+//
+//   - It only RAISES. The sampled tree can miss memory (a kept ComfyUI reused from an earlier lease is not under
+//     the runner), so a low reading says nothing about what must stream, and a measurement must never be what
+//     waves a lane through that the files say needs RAM.
+//   - It leaves 0 alone. A render whose weights fit its card streams nothing from RAM; the measured tree carries
+//     the runtime's own baseline and, on a driver that charges card allocations to the process, the card's memory,
+//     neither of which the guard is for.
+//   - It is RESIDENT, not private, because a declaration is in RAM units and the not-yet-loaded sum subtracts
+//     resident memory from it (gpulease.descendantsResidentGiB). The private peak is recorded beside it for the
+//     commit question and not consumed here.
+//
+// The unit that is still open is whether a declaration should ALSO cover the card memory a render's commit
+// carries; the commit term of the admission reads actual commit, so a lane already running is counted whole.
+func (p *Pipeline) calibratedRAM(n hostneed.Need, k footKey) hostneed.Need {
+	if n.GiB <= 0 || k.task == "" {
+		return n
+	}
+	store := p.FootprintStore()
+	if store == nil {
+		return n
+	}
+	hp, ok := store.HostPeak(k.family, k.quant, k.task)
+	if !ok || hp.Runs < hostPeakMinRuns || hp.ResidentGiB <= n.GiB {
+		return n
+	}
+	return hostneed.Need{GiB: hp.ResidentGiB, Source: hostneed.SourceMeasured,
+		Detail: fmt.Sprintf("measured: the resident memory of %s/%s renders peaked at %.1f GiB over %d runs, above the %.1f GiB their model files add up to",
+			k.family, k.task, hp.ResidentGiB, hp.Runs, n.GiB)}
+}
+
+// declaresRAM sets how the call's host RAM need is resolved.
+func (n mediaNeed) declaresRAM(f func(vramGiB float64) hostneed.Need) mediaNeed {
+	n.RAM = f
+	return n
+}
+
+// routeRAM resolves a route's need from the effective binding it is about to render with. A binding
+// whose files cannot be sized takes the media class default (this box's largest bound family), never
+// a guess, and never zero: an unknown is not "fits".
+func routeRAM(route hostneed.Route, cfg config.Config) func(float64) hostneed.Need {
+	return func(vram float64) hostneed.Need {
+		f := hostneed.Facts{Cfg: cfg, VRAMGiB: vram}
+		if n, ok := hostneed.ForRoute(route, cfg, f); ok {
+			return n
+		}
+		return hostneed.ClassDefault(f)
+	}
+}
+
+// videoRAM is routeRAM for the family that will render a video request, with the weight files the
+// request itself names (over) put over that family's binding: the runner loads those, so those are
+// what the host is asked to hold.
+func videoRAM(cfg config.Config, renderFamily string, over hostneed.VideoOverrides) func(float64) hostneed.Need {
+	return func(vram float64) hostneed.Need {
+		f := hostneed.Facts{Cfg: cfg, VRAMGiB: vram}
+		if n, ok := hostneed.ForVideoWith(cfg, renderFamily, over, f); ok {
+			return n
+		}
+		return hostneed.ClassDefault(f)
+	}
+}
+
+// classDefaultRAM is for a call whose weights the pipeline cannot name (an arbitrary graph, sd.cpp,
+// an iGPU engine): the media class default, the largest ComfyUI render family this box binds. A box that binds
+// none (sd.cpp only) gets 0, so those lanes declare nothing (hostneed.ClassDefault says why).
+func classDefaultRAM(cfg config.Config) func(float64) hostneed.Need {
+	return func(vram float64) hostneed.Need {
+		return hostneed.ClassDefault(hostneed.Facts{Cfg: cfg, VRAMGiB: vram})
+	}
+}
+
+// declaredRAM is the host RAM a call declares on the card(s) it runs on: ids are lease ids (nil =
+// the whole node), cards the card table (nil = read it here, best effort: a table that cannot be
+// read leaves the card's VRAM unknown, and then nothing is assumed to fit; an empty, non-nil table
+// is one the caller already tried and could not read, so it is not read again). Said once per
+// distinct answer in the log, the way a fallback to the whole node is.
+func (p *Pipeline) declaredRAM(ctx context.Context, need mediaNeed, cards []gpuprobe.Card, ids []string) float64 {
+	if need.RAM == nil {
+		return 0
+	}
+	if cards == nil {
+		if t, _, err := p.alloc.CardTable(ctx, p.cfg); err == nil {
+			cards = t
+		}
+	}
+	n := p.calibratedRAM(need.RAM(hostneed.LargestCardGiB(cards, ids)), need.Foot)
+	if n.GiB > 0 {
+		planNote("declaring host RAM: " + n.String())
+	}
+	return n.GiB
 }
 
 // resumableBy marks the need with whether the request's door can resume a place in line.
@@ -123,18 +244,24 @@ func declaredNeed(devices []string, token string) mediaNeed {
 
 // imageNeed is the need of the image-generation route (and its batch) for the resolved binding.
 func imageNeed(cfg config.Config, token string) mediaNeed {
+	fam, quant := imageFootprintKey(cfg)
+	foot := footKey{fam, quant, "image-gen"}
 	if cfg.ImagePooled() {
-		return pooledNeed(token, cfg.ImageGenPoolCompute, cfg.ImageGenPoolDonor)
+		return pooledNeed(token, cfg.ImageGenPoolCompute, cfg.ImageGenPoolDonor).declaresRAM(routeRAM(hostneed.RouteImage, cfg)).withFootprint(foot)
 	}
-	return singleCardNeed(cfg, token)
+	return singleCardNeed(cfg, token).declaresRAM(routeRAM(hostneed.RouteImage, cfg)).withFootprint(foot)
 }
 
 // videoNeed is the need of the video route: pooled, or a single card like image generation.
-func videoNeed(cfg config.Config, token string) mediaNeed {
+func videoNeed(cfg config.Config, token, renderFamily string, over hostneed.VideoOverrides) mediaNeed {
+	// The key the video route's sampling hook records under (runGenerateVideo): the family that renders and the
+	// quant of the binding it renders with.
+	fb := cfg.ResolveVideoFamilyBinding(renderFamily)
+	foot := footKey{videoFootprintFamily(renderFamily), videoFootprintQuant(fb, renderFamily), "video-gen"}
 	if cfg.VideoPooled() {
-		return pooledNeed(token, cfg.VideoGenPoolCompute, cfg.VideoGenPoolDonor)
+		return pooledNeed(token, cfg.VideoGenPoolCompute, cfg.VideoGenPoolDonor).declaresRAM(videoRAM(cfg, renderFamily, over)).withFootprint(foot)
 	}
-	return singleCardNeed(cfg, token)
+	return singleCardNeed(cfg, token).declaresRAM(videoRAM(cfg, renderFamily, over)).withFootprint(foot)
 }
 
 // mediaGrant is what a call holds while it renders.
@@ -431,12 +558,19 @@ func (p *Pipeline) acquireMediaLease(ctx context.Context, reason string, ttl, wa
 	// tableNote is set when the call asked for the whole node ONLY because the card table could not
 	// be read: the answer says so.
 	tableNote := ""
+	// readTable is what the whole-node path's host-RAM declaration sizes against: nil = read the table
+	// there; an empty, non-nil table = the admission already read it (twice) and it gave nothing, so the
+	// declaration takes the card as unknown and does not ask nvidia-smi again (F24: a wedged driver costs a
+	// call one retry, not one per stage).
+	var readTable []gpuprobe.Card
 	if need.Kind != needWhole {
 		g, handled, note, err := p.acquireCardScoped(ctx, reason, ttl, wait, need)
 		if handled {
 			return g, err
 		}
-		tableNote = note
+		if tableNote = note; note != "" {
+			readTable = []gpuprobe.Card{}
+		}
 	}
 	// The whole-node path. A host that leases cards also keeps places in line for it: the place a
 	// caller resumes is looked up BEFORE the wait, because the wait's own waiter consumes the token
@@ -455,7 +589,7 @@ func (p *Pipeline) acquireMediaLease(ctx context.Context, reason string, ttl, wa
 	if place != nil {
 		stopKeep = keepPlace(place.m, place.tok.ID)
 	}
-	env, release, err := p.acquireWholeNode(ctx, reason, ttl, wait, need.Token)
+	env, release, err := p.acquireWholeNodeWith(ctx, reason, ttl, wait, need.Token, p.declaredRAM(ctx, need, readTable, nil))
 	stopKeep()
 	if err != nil {
 		return mediaGrant{}, withTableNote(p.wholeNodeBusy(err, reason, ttl, start, place, need.Resumable), tableNote)
@@ -497,6 +631,10 @@ func (p *Pipeline) wholeNodeBusy(err error, reason string, ttl time.Duration, st
 		since, tokenID = place.tok.Since(), place.tok.ID
 	}
 	opts := gpulease.Options{Reason: reason, Origin: "pipeline", TTL: ttl, ResumeToken: tokenID}
+	if busy != nil && busy.hostRAM != nil {
+		// The whole node is free; the host's memory is not. The place in line says so.
+		return p.queuedAnswerWhy(m, nil, since, tokenID, opts, reason, nil, true, busy.hostRAM.Error())
+	}
 	if qerr := p.queuedAnswer(m, nil, since, tokenID, opts, reason, nil, true); qerr != nil {
 		return qerr
 	}
@@ -669,6 +807,10 @@ func (p *Pipeline) acquireCards(ctx context.Context, m *gpulease.Manager, reason
 	}
 	reads := &tableReads{cards: cards, at: start}
 	defer func() { err = withTableNote(err, reads.note()) }()
+	// askRAM is the host RAM the call declares against the largest card (the smallest answer): what the
+	// allocator's pre-filter reads, and whether the call declares any at all, which decides whether a waiter
+	// that waits only on host RAM holds its cards against it (gpualloc.QueuedClaims).
+	askRAM := p.declaredRAM(ctx, need, cards, nil)
 	// A call that resumes a place keeps the arrival time it left with, and keeps the place itself
 	// held while it waits (keepPlace). The keeper is stopped before the call spends the place
 	// (grantCards), consumes it (the lease wait registers a waiter) or leaves it again.
@@ -680,22 +822,27 @@ func (p *Pipeline) acquireCards(ctx context.Context, m *gpulease.Manager, reason
 	}
 	defer stopKeep()
 	optsFor := func(ids []string) gpulease.Options {
-		return gpulease.Options{Reason: reason, Origin: "pipeline", TTL: ttl, Devices: ids, ResumeToken: tokenID}
+		// The host RAM this call declares on THESE cards: whether its weights fit decides it.
+		return gpulease.Options{Reason: reason, Origin: "pipeline", TTL: ttl, Devices: ids, ResumeToken: tokenID,
+			HostRAMGiB: p.declaredRAM(ctx, need, cards, ids)}
 	}
 	// claimedNow is what is taken that the lease directory cannot show: the in-process slots, and the
 	// cards callers in line are promised.
 	claimedNow := func() map[string]bool {
 		claimed := mediaSlots.held()
-		for id := range gpualloc.QueuedClaims(m, cards, tokenID) {
+		for id := range gpualloc.QueuedClaims(m, cards, tokenID, askRAM > 0) {
 			claimed[id] = true
 		}
 		return claimed
 	}
-	// build is the allocator's input for an auto plan (the pick and the grant-time check).
+	// build is the allocator's input for an auto plan (the pick and the grant-time check). The
+	// allocator applies the same host-RAM rule the grant does before it picks a card, advisory: the
+	// call's need is read against the largest card (the smallest answer), so it never refuses what
+	// the grant, which knows the card, would admit.
 	build := func() (gpulease.AllocInput, error) {
-		need := gpualloc.Need{Claimed: claimedNow()}
+		allocNeed := gpualloc.Need{Claimed: claimedNow(), RAMGiB: askRAM}
 		if !reads.stood() {
-			in, berr := gpualloc.BuildInput(ctx, m, p.cfg, need, p.alloc)
+			in, berr := gpualloc.BuildInput(ctx, m, p.cfg, allocNeed, p.alloc)
 			if berr == nil {
 				reads.cards, reads.at = in.Cards, time.Now()
 				return in, nil
@@ -709,7 +856,7 @@ func (p *Pipeline) acquireCards(ctx context.Context, m *gpulease.Manager, reason
 		stored := p.alloc
 		table := reads.cards
 		stored.Cards = func(context.Context, config.Config) ([]gpuprobe.Card, string, error) { return table, "", nil }
-		in, berr := gpualloc.BuildInput(ctx, m, p.cfg, need, stored)
+		in, berr := gpualloc.BuildInput(ctx, m, p.cfg, allocNeed, stored)
 		in.AllowDisplay = false
 		return in, berr
 	}
@@ -721,6 +868,8 @@ func (p *Pipeline) acquireCards(ctx context.Context, m *gpulease.Manager, reason
 	// open when the call joined the line.
 	for refusals := 0; ; refusals++ {
 		var ids []string
+		// hostShort is set when the gated try was refused for the HOST's memory, with the cards free.
+		var hostShort *gpulease.ErrHostRAM
 		for lost := 0; ; lost++ {
 			free := true
 			if plan.auto {
@@ -781,10 +930,19 @@ func (p *Pipeline) acquireCards(ctx context.Context, m *gpulease.Manager, reason
 					}
 					mediaSlots.release(ids)
 					var held *gpulease.ErrHeld
-					if !errors.As(err, &held) && !errors.Is(err, gpulease.ErrStillQueued) {
+					var short *gpulease.ErrHostRAM
+					switch {
+					case errors.As(err, &short):
+						// The cards are free and the HOST's memory is not. Allocating again cannot
+						// help, so this call goes to the queue below, which waits for the room in the
+						// same line; a need no state of this host admits is the refusal it is.
+						if short.Impossible {
+							return mediaGrant{}, err
+						}
+						hostShort = short
+					case !errors.As(err, &held) && !errors.Is(err, gpulease.ErrStillQueued):
 						return mediaGrant{}, err
-					}
-					if plan.auto && lost < mediaClaimRetries {
+					case plan.auto && lost < mediaClaimRetries:
 						continue // another claimant took it first: allocate again with its claim visible
 					}
 					free = false
@@ -795,12 +953,23 @@ func (p *Pipeline) acquireCards(ctx context.Context, m *gpulease.Manager, reason
 
 		// Nothing is free: take a place in line. The in-process slots first (bounded, FIFO among this
 		// process's callers), then the lease queue, FIFO across processes, keeping the arrival time.
+		//
+		// A call with no time left (gpu_wait_ms 0, or a window spent) answers here, and the answer must say
+		// what is true: when the gated try was refused for the host's memory the cards are free and nobody is
+		// ahead, so it carries the guard's own sentence (hostRAMAnswer, as the waiting path below does) and
+		// not the line's "promised to callers ahead", which named nobody (G2 of the P0 plan).
+		noTime := func() error {
+			if hostShort != nil {
+				return p.hostRAMAnswer(m, ids, since, tokenID, optsFor(ids), reason, hostShort, need.Resumable)
+			}
+			return p.queuedAnswer(m, ids, since, tokenID, optsFor(ids), reason, nil, need.Resumable)
+		}
 		if !mediaSlots.take(ids, remaining()) {
-			return mediaGrant{}, p.queuedAnswer(m, ids, since, tokenID, optsFor(ids), reason, nil, need.Resumable)
+			return mediaGrant{}, noTime()
 		}
 		if remaining() <= 0 {
 			mediaSlots.release(ids)
-			return mediaGrant{}, p.queuedAnswer(m, ids, since, tokenID, optsFor(ids), reason, nil, need.Resumable)
+			return mediaGrant{}, noTime()
 		}
 		qo := optsFor(ids)
 		qo.Wait, qo.WaitOut = remaining(), true
@@ -821,6 +990,10 @@ func (p *Pipeline) acquireCards(ctx context.Context, m *gpulease.Manager, reason
 			if errors.As(err, &held) || errors.Is(err, gpulease.ErrStillQueued) {
 				return mediaGrant{}, p.queuedAnswer(m, ids, since, tokenID, optsFor(ids), reason, held, need.Resumable)
 			}
+			var short *gpulease.ErrHostRAM
+			if errors.As(err, &short) && !short.Impossible {
+				return mediaGrant{}, p.hostRAMAnswer(m, ids, since, tokenID, optsFor(ids), reason, short, need.Resumable)
+			}
 			return mediaGrant{}, err
 		}
 		return p.grantCards(ctx, m, lease, ids, plan, cards, tokenID), nil
@@ -837,12 +1010,25 @@ func (p *Pipeline) acquireCards(ctx context.Context, m *gpulease.Manager, reason
 // the plain busy defer, with the reason.
 func (p *Pipeline) noCardsAnswer(m *gpulease.Manager, none *gpulease.NoCardsError, since time.Time, tokenID string,
 	optsFor func([]string) gpulease.Options, reason string, resumable bool) error {
+	if none.HostImpossible {
+		return none // no card and no wait makes it fit: the refusal names the flag and the key to change
+	}
 	why := "no card can take this call right now: " + gpualloc.SkipSummary(none)
 	ids := none.Waitable
 	if !resumable || len(ids) == 0 {
 		return &errGPUBusy{detail: why}
 	}
 	return p.queuedAnswerWhy(m, ids, since, tokenID, optsFor(ids), reason, nil, true, why)
+}
+
+// hostRAMAnswer is the answer for a call that waited its window and the cards were free but the host's
+// memory was not: a call that can resume keeps its place in line with the reason, and any other gets
+// the plain busy defer carrying the same words.
+func (p *Pipeline) hostRAMAnswer(m *gpulease.Manager, ids []string, since time.Time, tokenID string, opts gpulease.Options, reason string, short *gpulease.ErrHostRAM, resumable bool) error {
+	if !resumable {
+		return &errGPUBusy{detail: short.Error(), hostRAM: short}
+	}
+	return p.queuedAnswerWhy(m, ids, since, tokenID, opts, reason, nil, true, short.Error())
 }
 
 // queuedAnswer leaves the place-keeping token for a call that waited its window and still has no

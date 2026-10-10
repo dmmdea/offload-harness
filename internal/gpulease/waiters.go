@@ -156,6 +156,12 @@ type Waiter struct {
 	// ignores the field and keeps its flat cap, the conservative direction for a record it cannot
 	// read the wait of.
 	DeadlineMs int64 `json:"deadline_ms,omitempty"`
+	// HostRAMGiB is the host RAM the waiter declared (Options.HostRAMGiB), and WaitingFor what it is
+	// waiting on when that is not the cards: WaitHostRAM once the cards are free and the host's memory
+	// is what is short (hostram.go). Both ride the record the waiter already rewrites every tick, so
+	// `gpu status` can say "waiting for host RAM". Additive and omitempty; an older reader ignores them.
+	HostRAMGiB float64 `json:"host_ram_gib,omitempty"`
+	WaitingFor string  `json:"waiting_for,omitempty"`
 	path       string
 }
 
@@ -239,7 +245,8 @@ func (m *Manager) registerWaiter(class Class, opts Options) (Waiter, func()) {
 	if tok, ok := m.ResumeToken(opts.ResumeToken); ok {
 		since, resumed = tok.Since(), tok.ID
 	}
-	w := Waiter{PID: pid, Class: class, Reason: clipCommand(opts.Reason), SinceMs: since.UnixMilli(), Devices: opts.Devices, Token: resumed}
+	w := Waiter{PID: pid, Class: class, Reason: clipCommand(opts.Reason), SinceMs: since.UnixMilli(), Devices: opts.Devices, Token: resumed,
+		HostRAMGiB: max(opts.HostRAMGiB, 0)}
 	if opts.Wait > 0 {
 		// The wait is the record's own: the debris cap is derived from it, not from the longest
 		// wait anyone is expected to pass (waiterOutlived).
@@ -290,6 +297,44 @@ func waiterBefore(a, b Waiter) bool {
 	return filepath.Base(a.path) < filepath.Base(b.path)
 }
 
+// BlocksArrival reports whether this waiter holds back a request that wants devices (nil = the whole
+// node) and declares hostRAMGiB of host RAM, when that request arrives after it. FIFO among waiters whose
+// cards CONFLICT, with one exception decided on purpose (G6 of the P0 plan, from the 2026-10-10 review): a
+// waiter that waits ONLY on host RAM (WaitingFor == WaitHostRAM: its cards are free, the memory is not) does
+// not hold back a request that declares none. That request adds nothing to the memory the waiter is short of,
+// so it cannot make the shortage worse, and the cards stand idle meanwhile; held for the length of a --wait
+// (eight hours by default) such a waiter was a barrier nothing on the box could pass, and a whole-node one
+// stopped a 0 GiB text bench on a free card with "which has not claimed the card".
+//
+// The cost, stated: the request that passes takes the cards the waiter wanted, so when the memory recovers the
+// waiter waits for them. That delay is bounded, not a stream: the instant the waiter finds its cards held it
+// stops being a waiter on memory (Acquire clears WaitingFor on ErrHeld), and from then on it is an ordinary
+// front waiter that nothing passes, so the wait is at most the lease of the request that passed it. A request
+// that DOES declare host RAM does not pass: its memory competes with the waiter's, which is how a stream of
+// small declaring requests could starve a large one, so it queues behind the waiter like any other.
+// One limit stays and is named: nothing reserves the waiter's memory against a declaring request on DISJOINT
+// cards, which this line never held back (disjoint backfill), so such a request can still take the memory the
+// waiter is waiting for (docs/systems/gpu-lease.md, "Host RAM").
+func (w Waiter) BlocksArrival(devices []string, hostRAMGiB float64) bool {
+	return devicesConflict(w.Devices, devices) && w.HoldsItsCardsAgainst(hostRAMGiB > 0)
+}
+
+// HoldsItsCardsAgainst says whether this waiter's cards are spoken for from the point of view of a request
+// that does (declaresHostRAM) or does not declare host RAM: every waiter holds them, except one that waits
+// only on host RAM, which does not hold them against a request that declares none. The card allocator reads it
+// (gpualloc.QueuedClaims) to decide which cards a newcomer may treat as free, so it does not steer a request
+// that would pass the waiter away from a card that is free to it.
+func (w Waiter) HoldsItsCardsAgainst(declaresHostRAM bool) bool {
+	return declaresHostRAM || w.WaitingFor != WaitHostRAM
+}
+
+// holdsBack reports whether the earlier waiter w holds self back: w is strictly ahead of self in FIFO order
+// and blocks what self wants (BlocksArrival). isFrontOfQueue and the message of a request that never reached
+// the front (queueTimeoutErr) both ask this, so the gate and the sentence cannot disagree.
+func holdsBack(w, self Waiter) bool {
+	return waiterBefore(w, self) && w.BlocksArrival(self.Devices, self.HostRAMGiB)
+}
+
 // isFrontOfQueue reports whether self is the OLDEST live waiter queued for the card
 // right now. Waiters() prunes dead and stale records as it reads, so a waiter that
 // died mid-queue drops out of every OTHER waiter's view on its very next poll — it
@@ -313,8 +358,10 @@ func (m *Manager) isFrontOfQueue(self Waiter) bool {
 		}
 		// FIFO among waiters that CONFLICT. A waiter ahead of us that wants other
 		// cards is no reason to wait (disjoint backfill); a whole-node waiter wants
-		// everything, so it is a barrier that every later waiter queues behind.
-		if waiterBefore(w, self) && devicesConflict(w.Devices, self.Devices) {
+		// everything, so it is a barrier that every later waiter queues behind, except
+		// that a waiter which waits only on host RAM does not stop a request that
+		// declares none (BlocksArrival).
+		if holdsBack(w, self) {
 			return false
 		}
 	}
@@ -453,7 +500,7 @@ func (m *Manager) Waiters() []Waiter {
 		}
 		var w Waiter
 		if json.Unmarshal(b, &w) != nil || w.PID <= 0 {
-			_ = os.Remove(p)
+			m.prune(p)
 			continue
 		}
 		alive := pidAlive(w.PID)
@@ -463,7 +510,7 @@ func (m *Manager) Waiters() []Waiter {
 			}
 		}
 		if !alive || waiterOutlived(w, nowMs) {
-			_ = os.Remove(p)
+			m.prune(p)
 			continue
 		}
 		// HEARTBEAT STALENESS. A live, non-recycled pid is not enough: the
@@ -482,7 +529,7 @@ func (m *Manager) Waiters() []Waiter {
 			continue // transient: do not prune a record we could not actually check
 		}
 		if now.Sub(fi.ModTime()) > staleWindow {
-			_ = os.Remove(p)
+			m.prune(p)
 			continue
 		}
 		w.path = p

@@ -54,6 +54,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/gpuactivity"
 	"github.com/dmmdea/offload-harness/internal/gpualloc"
 	"github.com/dmmdea/offload-harness/internal/gpulease"
+	"github.com/dmmdea/offload-harness/internal/hostneed"
 	"github.com/dmmdea/offload-harness/internal/modelaffinity"
 	"github.com/dmmdea/offload-harness/internal/seatload"
 	"github.com/dmmdea/offload-harness/internal/seatrate"
@@ -995,6 +996,42 @@ type warmGuard struct {
 	// last lease without --unload-seat never warms; both leave the seat cold, never loaded
 	// over live work.
 	others func(model string) (busy bool, why string)
+	// hostRAM says why the seat must not be loaded for the HOST's sake, "" when it may: the same
+	// admission a lease grant applies (gpulease.Manager.HostRAMCheckWithout), put to the seat's host
+	// footprint (seatNeed), and a refusal while any other lane that declared host RAM is live. A warm-back
+	// is a load like any other; it was the one load nothing sized (G4 of the P0 plan), and a cold seat
+	// costs one on-demand load where an overloaded host costs every caller. The warm stays owed.
+	hostRAM func(need hostneed.Need) string
+	// seatNeed is the host RAM the seat holds once loaded (hostneed.SeatNeed), set by warmBackGuarded from
+	// the config; the zero value is read as the fail-closed default by hostRAM's caller, never as 0.
+	seatNeed hostneed.Need
+}
+
+// hostRAMWarmCheck is warmGuard.hostRAM for the lease being released (epoch; 0 = whatever is held, which is the
+// one live lease when the release accepts it). Two refusals, both leaving the warm owed:
+//   - a lane that declared host RAM and is still live: a seat is not loaded while a lane streams, whatever the
+//     numbers say, because the lane's own growth is not in any counter yet;
+//   - the admission rule: committed memory now, plus the seat's footprint, plus what the other leases have yet to
+//     load, must stay under physical RAM less the headroom (so a host that reads NEAR or OVER never warms).
+//
+// The lease being released is left out of both: its command has exited and it will load nothing more.
+func hostRAMWarmCheck(m *gpulease.Manager, epoch uint64) func(need hostneed.Need) string {
+	return func(need hostneed.Need) string {
+		self := epoch
+		live := m.Leases()
+		if self == 0 && len(live) == 1 {
+			self = live[0].Epoch
+		}
+		for _, l := range live {
+			if l.Epoch != self && l.HostRAMGiB > 0 {
+				return fmt.Sprintf("a lane that declared %.1f GiB of host RAM is still live (%s lease epoch %d), and a seat is not loaded while a lane streams", l.HostRAMGiB, l.Class, l.Epoch)
+			}
+		}
+		if chk := m.HostRAMCheckWithout(need.GiB, self); !chk.OK {
+			return fmt.Sprintf("the host cannot take the seat's %.1f GiB (%s): %s", need.GiB, need.Source, chk.Why)
+		}
+		return ""
+	}
 }
 
 // otherLeaseOnSeat is warmGuard.others for the lease with epoch self: a held lease on the
@@ -1070,6 +1107,15 @@ func (g warmGuard) refusal(model string) string {
 			return fmt.Sprintf("NOT warming %s back yet: %s still sits on its cards; the warm stays owed and the last lease on them pays it", model, why)
 		}
 	}
+	if g.hostRAM != nil {
+		need := g.seatNeed
+		if need.GiB <= 0 {
+			need = hostneed.Need{GiB: hostneed.DefaultSeatHostGiB, Source: hostneed.SourceSeatDefault}
+		}
+		if why := g.hostRAM(need); why != "" {
+			return fmt.Sprintf("NOT warming %s back: %s; the warm stays owed, and the seat loads on its next request", model, why)
+		}
+	}
 	return ""
 }
 
@@ -1096,6 +1142,7 @@ func warmBackGuarded(cfg config.Config, g warmGuard, out io.Writer) {
 		return
 	}
 	out = &lockedWriter{w: out}
+	g.seatNeed = hostneed.SeatNeed(cfg)
 	if g.onlyIfOwed && g.owed != nil && g.owed() == "" {
 		fmt.Fprintf(out, "gpu: not warming %s back: it was not loaded when the lease took the card\n", model)
 		return

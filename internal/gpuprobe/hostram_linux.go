@@ -2,37 +2,20 @@
 
 package gpuprobe
 
-import (
-	"bufio"
-	"os"
-	"strconv"
-	"strings"
-)
+import "os"
 
-// hostRAMSupported tells the test whether a !ok from HostFreeRAMGiB is a
+// hostRAMSupported tells the test whether a !ok from ReadHostMemory is a
 // missing reader (fine) or a broken one (a failure).
 const hostRAMSupported = true
 
-// hostFreeRAMGiB reads /proc/meminfo MemAvailable — the kernel's own estimate
-// of what can be allocated without swapping (page cache that can be dropped
-// counts, unlike MemFree), which is what a multi-GB expert load needs.
-func hostFreeRAMGiB() (float64, bool) {
-	f, err := os.Open("/proc/meminfo")
+// readHostMemory reads /proc/meminfo. MemAvailable is the kernel's own estimate of what can be
+// allocated without swapping (page cache that can be dropped counts, unlike MemFree), which is
+// what a multi-GB expert load needs; Committed_AS and CommitLimit are the kernel's commit
+// accounting (parseMeminfo says why Committed_AS reads high on a CUDA host).
+func readHostMemory() (HostMemory, bool) {
+	b, err := os.ReadFile("/proc/meminfo")
 	if err != nil {
-		return 0, false
+		return HostMemory{}, false
 	}
-	defer f.Close()
-	sc := bufio.NewScanner(f)
-	for sc.Scan() {
-		fields := strings.Fields(sc.Text())
-		if len(fields) < 2 || fields[0] != "MemAvailable:" {
-			continue
-		}
-		kb, err := strconv.ParseFloat(fields[1], 64)
-		if err != nil || kb <= 0 {
-			return 0, false
-		}
-		return kb / (1 << 20), true
-	}
-	return 0, false
+	return parseMeminfo(string(b))
 }

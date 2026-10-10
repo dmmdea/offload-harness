@@ -9,6 +9,16 @@ package fleetnode
 // own ×1.2 on top of the dispatcher's margin double-inflated footprints and
 // made wan2.2/hidream unroutable on a 16GB node. We never write a
 // vram_peak_gb <= 0 entry (the contract has dispatchers ignore those).
+//
+// HOST peaks (G3 of the P0 plan). Beside the VRAM peak the store keeps, per key, the MAX private and the MAX
+// resident memory (GiB) of the render's process tree and how many runs they come from
+// (RecordHost / HostPeak). They are the measurement the host-RAM guard calibrates a declaration with
+// (internal/pipeline: a render whose weights stream from RAM declares what its files add up to, raised to what
+// the largest resident peak the store holds for the key, once at least hostPeakMinRuns (internal/pipeline) runs exist; it only raises).
+// They ride the wire as host_peak_gb (private)
+// and host_resident_peak_gb (resident), additive and omitted when unmeasured. Two quantities on purpose: on
+// Windows a process's GPU allocations may be charged to its private bytes and not appear in its working set,
+// so recording only one would leave the question "which of these is RAM?" unanswerable.
 
 import (
 	"encoding/json"
@@ -27,6 +37,10 @@ type FootprintEntry struct {
 	Quant       string  `json:"quant,omitempty"`
 	TaskType    string  `json:"task_type,omitempty"`
 	VramPeakGiB float64 `json:"vram_peak_gb"`
+	// HostPeakGiB / HostResidentPeakGiB are the measured peaks of the render's process tree (private bytes,
+	// resident set). Additive: a reader that does not know them ignores them.
+	HostPeakGiB         float64 `json:"host_peak_gb,omitempty"`
+	HostResidentPeakGiB float64 `json:"host_resident_peak_gb,omitempty"`
 }
 
 // footprintRecord is the on-disk shape: the wire fields plus the raw
@@ -39,6 +53,11 @@ type footprintRecord struct {
 	ObservedPeakGiB float64   `json:"observed_peak_gb"`
 	Samples         int       `json:"samples"`
 	Updated         time.Time `json:"updated"`
+	// The host side: the max private and max resident peak of the render's process tree and the runs they
+	// come from (RecordHost). Additive; an older store has none.
+	HostPeakGiB         float64 `json:"host_peak_gb,omitempty"`
+	HostResidentPeakGiB float64 `json:"host_resident_peak_gb,omitempty"`
+	HostRuns            int     `json:"host_runs,omitempty"`
 }
 
 type footprintKey struct {
@@ -131,8 +150,20 @@ func (f *Footprints) reloadMergeLocked() {
 	for i := range recs {
 		r := recs[i]
 		k := footprintKey{r.ModelFamily, r.Quant, r.TaskType}
-		if cur, ok := f.entries[k]; !ok || r.ObservedPeakGiB > cur.ObservedPeakGiB {
+		cur, ok := f.entries[k]
+		if !ok {
 			f.entries[k] = &r
+			continue
+		}
+		if r.ObservedPeakGiB > cur.ObservedPeakGiB {
+			// The other process saw a higher VRAM peak: its VRAM side wins, whole. The host side below is
+			// merged on its own, so a higher VRAM peak never drops a higher host peak (or the reverse).
+			cur.VramPeakGiB, cur.ObservedPeakGiB, cur.Samples, cur.Updated = r.VramPeakGiB, r.ObservedPeakGiB, r.Samples, r.Updated
+		}
+		cur.HostPeakGiB = math.Max(cur.HostPeakGiB, r.HostPeakGiB)
+		cur.HostResidentPeakGiB = math.Max(cur.HostResidentPeakGiB, r.HostResidentPeakGiB)
+		if r.HostRuns > cur.HostRuns {
+			cur.HostRuns = r.HostRuns
 		}
 	}
 }
@@ -175,6 +206,53 @@ func (f *Footprints) Record(family, quant, task string, observedGiB float64) {
 	}
 }
 
+// HostPeaks is what a render of one key was measured to hold on the host: the max private and the max resident
+// memory of its process tree (GiB) over Runs runs.
+type HostPeaks struct {
+	PrivateGiB, ResidentGiB float64
+	Runs                    int
+}
+
+// RecordHost folds one render's host peaks into the (family, quant, task) entry: the max of each, runs++, then
+// persist. A non-positive private peak is a sampling failure (an unreadable process table, a runner that exited
+// before the first tick) and is dropped, so a run that measured nothing is never counted as a run that held
+// nothing. The resident peak is kept as the max of whatever was read.
+func (f *Footprints) RecordHost(family, quant, task string, privateGiB, residentGiB float64) {
+	if privateGiB <= 0 {
+		return
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	key := footprintKey{family, quant, task}
+	rec, ok := f.entries[key]
+	if !ok {
+		rec = &footprintRecord{ModelFamily: family, Quant: quant, TaskType: task}
+		f.entries[key] = rec
+	}
+	rec.HostPeakGiB = math.Max(rec.HostPeakGiB, roundToTenth(privateGiB))
+	if residentGiB > 0 {
+		rec.HostResidentPeakGiB = math.Max(rec.HostResidentPeakGiB, roundToTenth(residentGiB))
+	}
+	rec.HostRuns++
+	rec.Updated = time.Now().UTC()
+	f.reloadMergeLocked()
+	if err := f.persistLocked(); err != nil {
+		log.Printf("footprints: persist %s failed (entry kept in memory): %v", f.path, err)
+	}
+}
+
+// HostPeak reports what the key's renders were measured to hold on the host, and false when none was measured.
+func (f *Footprints) HostPeak(family, quant, task string) (HostPeaks, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.reloadMergeLocked()
+	r, ok := f.entries[footprintKey{family, quant, task}]
+	if !ok || r.HostPeakGiB <= 0 {
+		return HostPeaks{}, false
+	}
+	return HostPeaks{PrivateGiB: r.HostPeakGiB, ResidentGiB: r.HostResidentPeakGiB, Runs: r.HostRuns}, true
+}
+
 // Entries returns the wire-shaped entries with vram_peak_gb > 0, sorted by
 // (family, quant, task) for stable health output.
 func (f *Footprints) Entries() []FootprintEntry {
@@ -186,10 +264,12 @@ func (f *Footprints) Entries() []FootprintEntry {
 			continue
 		}
 		out = append(out, FootprintEntry{
-			ModelFamily: r.ModelFamily,
-			Quant:       r.Quant,
-			TaskType:    r.TaskType,
-			VramPeakGiB: r.VramPeakGiB,
+			ModelFamily:         r.ModelFamily,
+			Quant:               r.Quant,
+			TaskType:            r.TaskType,
+			VramPeakGiB:         r.VramPeakGiB,
+			HostPeakGiB:         r.HostPeakGiB,
+			HostResidentPeakGiB: r.HostResidentPeakGiB,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool {

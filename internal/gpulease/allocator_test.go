@@ -19,8 +19,11 @@ func allocCards() []gpuprobe.Card {
 	}
 }
 
+// roomyHost is a host with room for anything these tests ask of it: 256 GiB physical, 40 committed.
+var roomyHost = gpuprobe.HostMemory{PhysicalGiB: 256, AvailableGiB: 200, CommitUsedGiB: 40, CommitLimitGiB: 400}
+
 func baseInput() AllocInput {
-	return AllocInput{Cards: allocCards(), Min: 1, Max: 1, HostFreeOK: true, HostFreeGiB: 64}
+	return AllocInput{Cards: allocCards(), Min: 1, Max: 1, HostMemOK: true, HostMem: roomyHost}
 }
 
 func skipReason(a Allocation, id string) string {
@@ -110,26 +113,52 @@ func TestAllocatorSkipsWhenVRAMDoesNotFit(t *testing.T) {
 
 func TestAllocatorSkipsWhenHostRamHeadroomLow(t *testing.T) {
 	in := baseInput()
-	in.HostFreeGiB = 10
+	in.HostMem = gpuprobe.HostMemory{PhysicalGiB: 100, AvailableGiB: 10, CommitUsedGiB: 90, CommitLimitGiB: 160}
 	in.HostNeedGiB = 8
-	in.HostHeadroomGiB = 4 // 10 < 8 + 4
+	in.HostHeadroomGiB = 4 // 90 + 8 = 98 > 100 - 4
 	_, err := Allocate(in)
 	var none *NoCardsError
 	if !errors.As(err, &none) {
 		t.Fatalf("host RAM headroom is low: want NoCardsError, got %v", err)
 	}
-	if none.HostReason == "" || !strings.Contains(none.HostReason, "RAM") {
-		t.Fatalf("the refusal must name host RAM, got %q", none.HostReason)
+	if none.HostReason == "" || !strings.Contains(none.HostReason, "host RAM") || none.HostImpossible {
+		t.Fatalf("the refusal must name host RAM and be a wait, got %q impossible=%v", none.HostReason, none.HostImpossible)
 	}
-	// Plenty of RAM: the same request allocates.
-	in.HostFreeGiB = 40
+	// The cards are free and only the host is short, so waiting can help: the cards stay listed.
+	if len(none.Waitable) == 0 {
+		t.Fatal("a host shortage must leave the cards waitable")
+	}
+	// Plenty of RAM: the same request allocates. (Both terms of the rule read the host: commit and what is
+	// available, so a host with room moves both.)
+	in.HostMem.CommitUsedGiB, in.HostMem.AvailableGiB = 40, 60
 	if a, err := Allocate(in); err != nil || len(a.Devices) != 1 {
 		t.Fatalf("with RAM to spare: %v %v", a.Devices, err)
 	}
-	// Unknown free RAM with a declared need fails closed.
-	in.HostFreeOK = false
+	// The part of leases already granted that has not loaded counts, as it does at the grant.
+	in.HostPendingGiB = 60
 	if _, err := Allocate(in); err == nil {
-		t.Fatal("an unreadable host RAM counter with a declared need must refuse")
+		t.Fatal("what leases already granted have yet to load must count against the host")
+	}
+	in.HostPendingGiB = 0
+	// A need no state of this host admits is impossible: no card makes it fit.
+	in.HostNeedGiB = 99
+	_, err = Allocate(in)
+	if !errors.As(err, &none) || !none.HostImpossible {
+		t.Fatalf("a need above physical RAM less the headroom is impossible, got %v", err)
+	}
+	in.HostNeedGiB = 8
+	// Unknown host memory with a declared need fails closed (on a platform with a reader).
+	if gpuprobe.HostMemorySupported {
+		in.HostMemOK = false
+		if _, err := Allocate(in); err == nil {
+			t.Fatal("an unreadable host memory reading with a declared need must refuse")
+		}
+	}
+	// A job that declares no need is not turned away by a host that is over.
+	in.HostMemOK, in.HostNeedGiB = true, 0
+	in.HostMem.CommitUsedGiB = 400
+	if a, err := Allocate(in); err != nil || len(a.Devices) != 1 {
+		t.Fatalf("a job that declares no host RAM adds none, got %v %v", a.Devices, err)
 	}
 }
 

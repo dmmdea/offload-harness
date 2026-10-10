@@ -43,6 +43,7 @@ func TestBrowseGrantRefusedByBuildDefersInsteadOfRunningWithout(t *testing.T) {
 	t.Setenv("HOME", "")
 	t.Setenv("HOMEDRIVE", "")
 	t.Setenv("HOMEPATH", "")
+	t.Setenv("LOCAL_OFFLOAD_HOME", "") // no resolvable home at all: TestMain's throwaway home would otherwise supply one
 	fake := &agentFake{
 		rosterIDs: []string{agentTestSeat},
 		loop: func(int64) string {

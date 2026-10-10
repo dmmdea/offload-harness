@@ -364,6 +364,15 @@ margin (CONTRACT v2.1 / ADR 0013). A node that padded its own ×1.2 on top of th
 dispatcher's margin double-inflated footprints and made wan2.2/hidream unroutable on a 16 GB
 node — so don't pad the store by hand.
 
+The same sampling tick also reads the **host** memory of the render's process tree and folds two more peaks into the same
+entry: `host_peak_gb` (private bytes, the commit-side figure) and `host_resident_peak_gb` (resident set, the RAM figure),
+with the number of runs they come from. Both are additive and omitted until measured. They are for this node's own
+host-RAM guard, which raises a render's declared need to the largest resident peak any of its runs reached once at least three
+runs exist (it never lowers one)
+([GPU lease, "How the numbers get measured"](systems/gpu-lease.md)); a dispatcher may ignore them. Private and resident
+are both kept on purpose: on Windows a process's GPU allocations may be charged to its private bytes without occupying
+RAM, so the two differ exactly where the question is open.
+
 ### Priming an empty store: `fleet-measure`
 
 A freshly-installed node has no footprints, so its health advertises none and the

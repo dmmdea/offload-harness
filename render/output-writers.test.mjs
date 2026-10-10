@@ -24,7 +24,7 @@ const ALLOWED = {
   "comfy-generate.mjs": [{ writeFileSync: 1, appendFileSync: 1 }, "the --results JSONL: created empty, then one appended row per job (the append is the contract; callers read it while it grows)"],
   "comfy-inpaint.mjs": [{ writeFileSync: 1, appendFileSync: 2 }, "the --results JSONL, as in comfy-generate.mjs"],
   "comfy-lifecycle.mjs": [{ writeFileSync: 1, createWriteStream: 1, renameSync: 2 }, "ComfyUI's console log, its rotation and its archive"],
-  "comfy-ownership.mjs": [{ writeFileSync: 3, renameSync: 1 }, "launch-owner marker files (the one rename is already a temp+rename)"],
+  "comfy-ownership.mjs": [{ writeFileSync: 4, renameSync: 2 }, "launch-owner marker files (the renames are already temp+rename: the owner stamp and stampLaunchFamily's family stamp)"],
   "compose-hyperframes.mjs": [{ writeFileSync: 4, cpSync: 2, renameSync: 1 }, "work-dir files (the template project, the batch rows) and the result JSON's own temp+rename; the delivery move is moveInto -> copyAtomic"],
   "gpu-lock.mjs": [{ writeFileSync: 1 }, "the lease's unload marker"],
   "igpu-engine.mjs": [{ writeFileSync: 1, renameSync: 1 }, "the owner file; deliverFile, the staged-partial rename the other lanes share"],

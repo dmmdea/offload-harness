@@ -6,6 +6,209 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.179.0] - 2026-10-10 - a busy image lane overflows to an idle node that renders the same recipe, and every GPU lease path has a host-RAM brake
+
+### Added — a busy image lane overflows to an idle node that renders the same recipe (F52, ADR 0082)
+
+- **The behaviour.** An `auto` image call (`offload_generate_image`, `generate-image`) on a machine that has the lane and a fleet
+  configured used to wait for its own lane however many other nodes stood idle. It now asks its pipeline whether the lane is free
+  right now and, when it is not (a lease holds the card, callers are in line, or the host-RAM guard is holding the lane back),
+  sends the call to an idle node whose **image recipe** digests alike, under the node's own family name. The answer says where it
+  ran and why it left (`meta.node`, `meta.placement`). A box with no `delegate_remotes` asks nothing and reads no node (the path is
+  unchanged), `route local` never leaves, a call that carries a `waiter_token` stays in the local line, a call under an inherited
+  lease stays, and only image jobs overflow (graphs arrive with their own file check). When no node admits, the call goes on to the local
+  queue, which it joins when the fleet attempt is over and not from when it arrived (see "Not changed, and said"), and a deferral it
+  ends in carries `cluster[]`: one row per `delegate_remotes` node (`busy`, `not-capable`,
+  `unreachable`, `refused`, `bounced`, `skipped`) with the reason in the node's own terms (the lease and its reason, the config key
+  that differs and the family of this machine that would match, the release or the refine it lacks).
+- **The question is read-only and a relaxation.** `core.LaneProber` / `Pipeline.MediaLaneFree` is built from the helpers the
+  admission already reads state with and edits nothing inside `acquireCards`: it says busy only when something that makes the real
+  wait-0 grant refuse is present, and free whenever it cannot say. `TestMediaLaneFreeNeverRefusesAGrant` drives the real admission
+  over 38 lane states and fails if a lane the grant would serve is called busy (and `TestMediaLaneFreeNeverRefusesAGrantOverRandomStates`
+  over 150 fixed-seed random ones); `TestMediaLaneFreeWritesNothing` snapshots the lease root in each of them. It removes nothing
+  either: it reads through `gpulease.Manager.ReadOnly`, a view whose readers skip the records the line's readers prune as
+  housekeeping (an expired place in line, a waiter that stopped polling, a dead one) and leave them on disk, and five of the 38
+  states hold exactly such a record. On the whole-node
+  plan, where the lease queue orders by arrival, a call that resumes a place counts only the callers that arrived before that place
+  (the randomized differential found the one state where the prober called such a lane busy; unreachable from the S1 trigger, live
+  for the ticket scan of the next step).
+- **Identity is the recipe, not the name, and the recipe is name plus size, not content.** `mediacap.ImageRecipe`: the checkpoint,
+  text encoder, VAE and LoRA a family loads with their names and byte sizes, and its sampling, digested over RESOLVED values (an unset Qwen-Image-2.1 key takes the builder's default from a
+  table `TestBuilderDefaultsMatchTheJSConstants` reads out of `render/wf-qwen-image-21.mjs` and `render/comfy-render.mjs`), so a node
+  that writes the default scheduler out and one that leaves it unset match, and a bf16, an int8 and an NVFP4 build of one family
+  name never do. Node-local keys are not in it, and a test fails when a key joins the image overlay's clear list unclassified.
+  No recipe exists for an sd.cpp binding. The match is strict, needs the same release, and never substitutes. Two same-named files
+  of one size whose bytes differ (a corrupted full-length copy, a same-named re-release with the same tensor layout, a file updated
+  in place on one node) digest alike, and the node's 412 re-check recomputes the same size-based digest, so it cannot catch them
+  either; a sha256 per weight file is the named upgrade and is not built.
+- **Nodes publish and check recipes.** `/fleet/health` gains `image_recipes[]` and `refine_honoured` (additive; absent on a node
+  without an image lane and on older nodes, which a delegator reads as "cannot be matched"), from a 60 s memo. An image-gen dispatch
+  may carry `recipe_digest`; the node recomputes the digest of the family it names from the files on disk at admission and answers
+  **412** with no job on a mismatch (not 409, which already means a job failed here before, and not 503, which means busy).
+  The delegator also decodes the singular lease block's class, reason and remaining seconds (published, never read).
+- **`refine=false` travels.** The node's image-gen payload decodes `refine` the way the MCP handler does, and the client sends it only
+  to a node whose health says `refine_honoured`; any other node is a named miss in the defer instead of a contract refusal or a
+  silent refinement (this applies to `route remote` and the no-lane `auto` path as well). `tts_voice`, `transformer` and a graph's
+  `devices` still defer by name.
+- **Refusals move on, an accepted job is final.** At most 3 nodes, each under a fresh job id; a refusal at the door (503, 429, 412,
+  any status, a dial that never connected) or an accepted job answered `gpu_busy`, `gpu_queued` or `gpu_lease_unavailable` (nothing
+  ran in any of them) is passed over; any other answer after acceptance is the call's result, a POST that was sent and got no answer
+  is final too, and a job a node holds is never also run here (pinned by `TestAnAmbiguousPostIsFinal` and
+  `TestACallIsSentToAtMostThreeNodes`). A node that does not answer is left alone for 5, 15, 60 and then 300 s, a `Retry-After`
+  pauses it, and a node that took a call and passed it back is left alone for 60 s and then 300 s per consecutive bounce, because a
+  node that reads idle in its health but whose own grant refuses every job would otherwise park each call for its whole
+  `gpu_wait_ms`; the cluster row names the pause as `bounced`, `refused` or `unreachable` and for how long (chosen constants, not
+  measurements). The memory is per process: the MCP server keeps it across the calls of a session, while a one-shot CLI call starts
+  with none and pays a bounced node's `gpu_wait_ms` again. `RemoteAttribution.Bounce` closes
+  the PAIR card of an attempt that ran nothing (completed, never started) whatever its `err_class`, `gpu_lease_unavailable` included,
+  and writes no ledger row; an overflowing call opens its
+  card only once a node has accepted the job, so the call has one row and one card per node that held it.
+- **A roster that lists the machine itself.** An entry whose `node_id` equals this machine's (`fleet_node_id`, else the hostname)
+  is never a candidate and is named in `cluster[]` as `skipped`: it would match the recipe perfectly and send the call back into the
+  lane that is not free.
+- **Cost.** Every `auto` image call on a lane-plus-fleet box now pays one `nvidia-smi` read (at most 4 s) for the lane question, and a
+  roster read when the lane is not free, including for families no node can match; a roster-first short circuit and a short table
+  copy for pinned plans are named follow-ups.
+- **Fixed on the way.** A seed (and width, height, steps) the caller gave as an integer reached a fleet node through a float64, so a
+  seed above 2^53 changed; the sender now reads integers exactly (`TestSeedTravelsExactly`).
+- **Not changed, and said.** One line per delegating machine, not one global order; a call resumed with its token is not moved
+  (late binding is the next step); a call that went to the fleet first queues locally from when it came back, not from when it arrived (each bounce off a node
+  can cost up to that node's `gpu_wait_ms`, three nodes at most, and a call no node matches pays the lane question and the roster
+  read; carrying
+  its arrival time in needs both the lease queue and the in-process slot queue, which takes none; the ticket queue of the next step
+  keeps a call's place across the attempt); every remote job cold-starts ComfyUI; the same recipe and seed on another GPU architecture is the
+  same composition, not bit-identical pixels. Nothing here was run against a live lease or a real render: the recipe match was
+  tested against fixtures that reproduce the image blocks of three live nodes as stored on 2026-10-09 and 2026-10-10 (config text),
+  one of them cut inside the block that matters, so the first live action reads `image_recipes` on both nodes.
+
+### Added — a host-RAM guard on every GPU lease path; a kept ComfyUI instance is freed when its family changes
+
+- **A declared load is checked before the grant, not discovered after it.** On the reference 3-card Windows box (127.7 GiB physical),
+  2026-10-09, two card-scoped media leases each streamed bf16 weights a 16 GiB card cannot hold: committed memory reached
+  162.9 GiB against a 187.7 GiB limit, the page file grew 60 to 68 GiB and free RAM bottomed at 3.2 GiB. The allocator's host
+  term read FREE RAM and applied only to `--cards`, so `--devices` (what every owner wrapper takes) bypassed it, and nothing
+  read committed memory. Now a lease carries a declared host-RAM need (`host_ram_gib`, an additive field of the lease record)
+  and every grant path (`--devices`, `--cards`, whole-node, the pipeline's media admission, the detached holder) admits it
+  atomically with the grant, under the epoch lock. The rule has two terms and a grant needs both:
+  `committed now + need + not-yet-loaded <= physical - gpu_host_ram_headroom_gib` and
+  `available now - need - not-yet-loaded >= gpu_host_ram_headroom_gib`. Commit is primary (it counts what the OS has promised,
+  which is what stops a second lane before it loads); on Windows a process's GPU allocations may be charged to its commit
+  without occupying RAM, so a lane's commit can exceed what it declared (a declaration is the model files' size, raised to the
+  largest measured resident peak once three runs exist). **This is a brake on declared loads, not a bound on what the box
+  commits:** the rule applied to a commit reading of 81.6 GiB admits a 32.8 GiB Krea 2 declaration (114.4 GiB projected against
+  119.7), and a ComfyUI lane holding 57.7 GiB private bytes (its family is not recorded) read 129.3 GiB committed on the 127.7 GiB
+  box hours later (docs/systems/gpu-lease.md, "Known limits"; these readings were measured on the reference box on 2026-10-10 from
+  session readings that are not recorded in this repository, and are pinned only as arithmetic, `TestTheQuotedCounterexampleIsAdmittedOnBothTerms`). The not-yet-loaded part of a granted lease is its declared need minus what the processes below its holder hold
+  RESIDENT (not private: committed-but-unoccupied memory is not RAM that has loaded). The default headroom is **8 GiB** (was
+  4): chosen, not measured, and not a number the operator typed; it is a floor until each node's interactive working-set swing
+  is measured (docs/systems/gpu-lease.md, "How the numbers get measured"). A shortage queues in the same FIFO as a card
+  shortage (`waiting for host RAM: needs N GiB, committed X of Y GiB physical (+P GiB still to load by leases already
+  running), Z GiB headroom`, printed once per request; the waiter's record and `gpu status` say it waits for host RAM);
+  `--wait 0` refuses with that text; a need no state of the box can admit is refused at once, naming `--ram` and
+  `gpu_host_ram_headroom_gib`, and the pipeline classes it `gpu_lease_unavailable`, not `gpu_busy`. A need of 0 is never read
+  against the host.
+- **Where the need comes from.** `gpu reserve --ram <GiB>` (0 allowed), else the model files of a recognised render-helper call
+  that do not fit the card, counted in FULL because ComfyUI's dynamic VRAM stages the whole file in host memory (a krea2 bf16
+  call on a 16 GiB card is 24.48 + 8.27 GiB; a file that cannot be sized takes the documented per-family size), else the media
+  class default (the largest ComfyUI render family the box binds; an sd.cpp binding counts nothing), and 0 for a text lease. The detached holder is handed the parent's
+  resolved number as `--ram`. The pipeline's media admission asks the same estimate per route from the binding it is about to
+  render with. A host with card-scoped leases off reads no card table, so its card is unknown and the files count in full.
+- **Visibility.** `gpu status` (text and `--json`) and `offload_status`'s `gpu_lease` block carry `host_memory` (physical,
+  available, commit used and limit, headroom, declared and still-to-load GiB, how much the next lease may declare) and one
+  verdict: OK, NEAR (within the headroom of physical RAM) or OVER (committed memory above physical RAM). The brief verdict line
+  leads with `HOST RAM OVER (committed memory X GiB exceeds the Y GiB of physical RAM)`. OVER is a statement about what the OS
+  has promised; no surface claims the box is paging, because no reading here can know it (the page file growing, or the
+  pages-output rate, would). Lease rows show what each lease declared; queue rows show what a waiter waits for.
+- **A kept ComfyUI instance is freed when its family changes.** The launch marker remembers the family (and weights file)
+  an instance may still hold. The runner's end-of-run `/free` is now awaited, retried once and loud (`COMFY-FREE-WARN`), sent
+  even when the instance is kept, and clears the recorded family only when it succeeded; a runner that finds a different
+  family on a kept instance frees it before its first job; `run-graph` frees an instance it ran on, including one it found
+  already up; the lease-close proof of a kept instance retries 3 times at 8 s instead of once at 3 s (a ComfyUI in the middle of
+  a 550-second prompt answers late); the pipeline's backstop `/free` waits 5 s instead of 1 s. The incident's 57 GiB instance is
+  reconstructed from the code and the surviving logs, not observed, and its probable cause (a second family cached beside the
+  first) may account for only part of the figure: a ComfyUI process launched fresh on 2026-10-10 held the same 57.7 GiB private
+  about seven minutes after launch (a reading on the reference box, from a session, not recorded in this repository), so the footprint of one lane is unmeasured (the S1 acceptance runs record it).
+- **Not changed, and said:** the guard checks the declared loads of the leases that pass through it. A pinned older binary (its leases declare
+  nothing), a direct llama-swap request and a hand-started ComfyUI are outside it; a pipeline job under a parent's ambient
+  `--devices` lease gets no admission of its own; a detached lease counts its whole need as still to load for its life; Linux
+  `Committed_AS` reads high; run-graph, sd.cpp and iGPU calls take the class default, which is the largest ComfyUI family the box
+  binds: on a box that binds none (an sd.cpp-only node) it is 0, so those lanes declare nothing and the guard does not see the
+  weights `--offload-to-cpu` parks in RAM (`TestAnSdcppOnlyBoxDeclaresNothing`); sizing sd.cpp from its own model files is not built.
+  A video family on the sd.cpp engine is left out of that default like the image, animate and music bindings (it was counted as the
+  runner family its name maps to, `TestAnSdcppVideoFamilyIsNotCountedInTheClassDefault`); the edit route has no engine key.
+
+### Added — the node's host-RAM verdict can be asked without taking anything (G1)
+
+- `gpulease.Manager.HostRAMCheck(need)` puts a need to the host as it reads now: the same function the grant calls
+  (`hostRAMCheckAgainst`), over the leases live now, with the numbers and the refusal sentence. It takes no lease, registers no
+  waiter, spends no epoch and writes nothing; a need of 0 is admitted without reading the host. A cluster placement can ask the
+  node before it sends a lane there and cannot disagree with the node's own grant (`TestHostRAMCheckIsTheRuleTheGrantApplies`).
+
+### Fixed — a media call that cannot wait answers the guard's sentence on every plan (G2)
+
+- With `gpu_wait_ms` 0 (one gated try) and the cards free but the host's memory short, a pinned or allocated plan fell through
+  the queue step and answered "card(s) X promised to callers ahead of this one" (or "held, or promised..."): false, and naming
+  nobody. It now answers the guard's own sentence, as a queued place for a door that can resume and as the busy defer
+  carrying the same words for one that cannot. The whole-node path and the allocator's own pre-filter already did; their
+  tests are the pins (`TestWaitZeroKeepsTheGuardsSentence...`).
+
+### Fixed — a waiter that waits only on host RAM no longer stops a request that declares none (G6)
+
+- A waiter the host refuses stays at the front of the FIFO for its whole `--wait` (eight hours by default), so a 0 GiB request
+  for the same card queued behind an idle card, and a whole-node waiter stopped every request on the box ("which has not
+  claimed the card"). A waiter whose record says it waits only on host RAM (`waiting_for: host-ram`) now does not hold back a
+  request that declares no host RAM: that request cannot make the shortage worse. A request that declares host RAM stays behind
+  it and is told what the waiter in front waits for. The delay the pass costs the waiter is bounded, not a stream: the moment
+  it finds its card held it stops being a waiter on memory and nothing else passes it. Named limits: nothing reserves the
+  waiter's memory against a declaring request on disjoint cards, and a token (a place held for a caller who left) still holds
+  for its 30 s grace. `gpualloc.QueuedClaims` takes whether the asker declares host RAM, so the allocator does not steer a
+  passing request off an idle card.
+
+### Added — the warm-back of the agent seat is admitted like a load; the seat declares its footprint (G4)
+
+- The warm-back after a lease (`--unload-seat`, `gpu release --warm-seat`) was the one load nothing sized. It now puts the
+  seat's host footprint (`agent_seat_host_ram_gib`, a new additive config key; unset, `hostneed.DefaultSeatHostGiB` = 21 GiB, a
+  chosen fail-closed figure and never 0: not a measurement, and below the 44 GB the 2026-09-10 incident recorded for a seat, so a
+  node that runs a seat sets the key from its own measurement) to the grant's admission over every lease
+  but the one being released (`Manager.HostRAMCheckWithout`), and refuses outright while another lane that declared host RAM is
+  live. A host that reads NEAR or OVER never warms; a refused warm stays owed and the seat loads on its next request. Not done,
+  on purpose: the owed warm is not counted as pending at another lease's grant (the seat was unloaded to make room for that
+  lease; the reload happens after it), and a text lease still declares 0 unless `--ram` says.
+
+### Added — what each render held on the host is measured; declarations are raised by it (G3)
+
+- Every sampled GPU render records, beside its VRAM peak, the peak private and the peak resident memory of its process tree
+  (`gpulease.TreeMemory`, sampled by gpugen on the same tick) into the footprint store as `host_peak_gb` and
+  `host_resident_peak_gb` with the number of runs; both ride `/fleet/health` `model_footprints[]` additively. The media admission
+  raises a declaration to the measured resident peak once at least three runs exist (image and video routes), never lowers one,
+  and leaves a declaration of 0 alone. Whether a GPU process's WDDM allocations count toward its private bytes is partly
+  measured and not settled (docs/systems/gpu-lease.md: one process steady-state fits, a second does not, the lane-start case
+  is unverified); the two-term rule and the resident not-yet-loaded sum are the guard's choice under that uncertainty, not a
+  proof that it holds whichever way it falls: an admitted lane can still read OVER (docs/systems/gpu-lease.md, "Known limits").
+  The pipeline test suite now isolates the offload home, so a test can no longer write the operator's footprint store.
+
+### Fixed — the host-RAM surfaces say what the reading shows (G5)
+
+- "OVER" is commit above physical RAM, the guard's own conservative line chosen 2026-10-09; it was labelled "the operator's
+  definition" and the status line said "the box is paging". Neither is true of what the code can know. The note, the brief line
+  and the docs say "committed memory X GiB exceeds the Y GiB of physical RAM" and that the reading cannot say whether the box is
+  paging now.
+
+### Fixed — PickAuto's poll loop is bounded by the polls the wait allows
+
+- `gpualloc.PickAuto` ended its poll loop only when the injected clock passed the deadline. A caller that injects a sleep that
+  does not advance that clock (a no-op sleep with the real clock, a frozen clock) turned it into a busy-spin building one
+  `AllocInput` per pass for the whole wait. A run of the tests of an interrupted patch (2026-10-10) held 52 GiB private on the
+  reference box, and the patch contains exactly that shape (reconstructed from it: the 52 GiB was not re-observed; the committed
+  tests do not grow). The loop is now also bounded by `wait/2s + 1` passes (the same bound in production);
+  `TestPickAutoPollsAreBoundedWhateverTheClockDoes` is the bound.
+
+### Fixed — merging the guard onto 0.178.0
+
+- `gpu reserve`'s host-RAM estimate reuses the card table its plan already read instead of taking a read of its own (F24: a
+  wedged `nvidia-smi` costs a command the reads it already makes), and the whole-node path of a media call whose admission read
+  failed sizes its declaration against an unknown card instead of reading the table again.
+
 ## [0.178.0] - 2026-10-10 - the lease queue is first come first served, media outputs are atomic, and held media jobs close cleanly
 
 ### Fixed — a fresh `gpu reserve` queues behind registered waiters instead of winning a just-freed card

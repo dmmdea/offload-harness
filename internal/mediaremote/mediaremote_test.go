@@ -22,6 +22,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/fleetnode"
+	"github.com/dmmdea/offload-harness/internal/gpulease"
 	"github.com/dmmdea/offload-harness/internal/mediacap"
 )
 
@@ -56,8 +57,22 @@ type node struct {
 	runner *nodeRunner
 	// tamper, when set, rewrites the body GET /fleet/media serves.
 	tamper func(name string, b []byte) []byte
-	// refusePost, when non-zero, answers every POST with that status before the node sees it.
-	refusePost int
+	// refusePost, when non-zero, answers every POST with that status before the node sees it, with refuseRetryAfter
+	// (seconds, as a node writes the header) as its Retry-After when that is set.
+	refusePost       int
+	refuseRetryAfter string
+	// dropAck, when set, runs every POST to /fleet/dispatch through the node and then closes the connection before a byte
+	// of the answer is written: the node HAS the job and the delegator never hears so (a lost acknowledgement).
+	dropAck bool
+	// healthEdit rewrites the decoded health body before it is served (nodeOpts.healthEdit).
+	healthEdit func(map[string]any)
+}
+
+func nodeID(id string) string {
+	if id == "" {
+		return "render-node"
+	}
+	return id
 }
 
 // nodeRunner writes the outputs a render of each task would and reports them the way the pipeline does.
@@ -136,6 +151,15 @@ type nodeOpts struct {
 	cfg         func(*config.Config)
 	routes      func(config.Config) []mediacap.Route
 	hold        chan struct{} // see nodeRunner.hold; the test closes it
+	// id is the node id health publishes ("" = render-node) and version its harness_version ("" = none).
+	id, version string
+	// lease, when set, is the node's GPU lease as health reads it (a held lease makes the node busy).
+	lease func() gpulease.Info
+	// healthEdit, when set, rewrites the decoded /fleet/health body before it is served: how a test makes a node
+	// that predates a key (delete it) or reports something the real node would not.
+	healthEdit func(map[string]any)
+	// deferAs / deferClass make the node's pipeline defer every job (see nodeRunner).
+	deferAs, deferClass string
 }
 
 // bindOnly is the derivation a fixture node runs on: a route is CONFIGURED when its script is bound.
@@ -171,17 +195,17 @@ func startNode(t *testing.T, o nodeOpts) *node {
 	if o.cfg != nil {
 		o.cfg(&cfg)
 	}
-	r := &nodeRunner{media: media, hold: o.hold}
+	r := &nodeRunner{media: media, hold: o.hold, deferAs: o.deferAs, deferClass: o.deferClass}
 	jobs := fleetnode.NewJobs(time.Hour, cfg.FleetConcurrencyLimit())
 	t.Cleanup(func() { jobs.DrainAndStop(2 * time.Second) })
 	s := fleetnode.New(r, jobs, fleetnode.Options{
-		NodeID: "render-node", Cfg: cfg, GpuVendor: "nvidia", GpuArch: "ampere",
+		NodeID: nodeID(o.id), Version: o.version, Cfg: cfg, GpuVendor: "nvidia", GpuArch: "ampere", Lease: o.lease,
 		Snapshot: func() (fleetnode.Snapshot, bool) {
 			return fleetnode.Snapshot{TotalGiB: 16, FreeGiB: 12, At: time.Now()}, true
 		},
 		Footprints: func() []fleetnode.FootprintEntry { return nil },
 	})
-	n := &node{runner: r, media: media}
+	n := &node{runner: r, media: media, healthEdit: o.healthEdit}
 	h := s.Handler()
 	n.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		var body []byte
@@ -191,11 +215,36 @@ func startNode(t *testing.T, o nodeOpts) *node {
 		}
 		n.mu.Lock()
 		n.log = append(n.log, seen{req.Method, req.URL.Path, req.Header.Get("Authorization"), body, req.Header.Clone()})
-		tamper, refuse := n.tamper, n.refusePost
+		tamper, refuse, retryAfter, drop := n.tamper, n.refusePost, n.refuseRetryAfter, n.dropAck
 		n.mu.Unlock()
 		if refuse != 0 && req.Method == http.MethodPost {
+			if retryAfter != "" {
+				w.Header().Set("Retry-After", retryAfter)
+			}
 			http.Error(w, "refused by the test", refuse)
 			return
+		}
+		if drop && req.Method == http.MethodPost && req.URL.Path == "/fleet/dispatch" {
+			h.ServeHTTP(httptest.NewRecorder(), req) // the node takes the job...
+			if hj, ok := w.(http.Hijacker); ok {
+				if conn, _, err := hj.Hijack(); err == nil {
+					_ = conn.Close() // ...and its answer is lost
+					return
+				}
+			}
+		}
+		if n.healthEdit != nil && req.Method == http.MethodGet && req.URL.Path == "/fleet/health" {
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			var m map[string]any
+			if json.Unmarshal(rec.Body.Bytes(), &m) == nil {
+				n.healthEdit(m)
+				b, _ := json.Marshal(m)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(rec.Code)
+				_, _ = w.Write(b)
+				return
+			}
 		}
 		if tamper != nil && strings.HasPrefix(req.URL.Path, "/fleet/media/") {
 			rec := httptest.NewRecorder()
@@ -1007,7 +1056,6 @@ func TestWhatTheNodeCannotCarryIsRefusedByNameNotDropped(t *testing.T) {
 		req  core.Request
 		want string
 	}{
-		"refine false":           {core.Request{Task: core.TaskGenerateImage, Input: "p", Params: map[string]any{"refine": false}}, "refine=false"},
 		"tts_voice":              {core.Request{Task: core.TaskGenerateAudio, Input: "p", Params: map[string]any{"tts_voice": "ana"}}, "tts_voice"},
 		"transformer":            {video(map[string]any{"transformer": "bf16.safetensors"}), "transformer"},
 		"run_graph devices":      {core.Request{Task: core.TaskRunGraph, Params: map[string]any{"graph_path": writeFile(t, dir, "g.json", []byte(`{"1":{}}`)), "devices": []string{"0"}}}, "devices"},
@@ -1027,7 +1075,8 @@ func TestWhatTheNodeCannotCarryIsRefusedByNameNotDropped(t *testing.T) {
 	if len(n.requests()) != 0 {
 		t.Fatalf("a refused contract must not touch the network: %+v", n.requests())
 	}
-	// refine=true (or absent) is fine: only an explicit false cannot travel.
+	// refine=true (or absent) is fine. An explicit refine=false is no longer in this list: it travels (ADR 0082), and a
+	// node that does not carry it is a named miss (TestRefineFalseCarriedOrNodeNamedMiss), not a contract refusal.
 	if res := Run(context.Background(), cfg, &recordingRunner{}, core.Request{Task: core.TaskGenerateImage, Input: "p", Params: map[string]any{"refine": true}}, "remote", nil); !res.OK {
 		t.Fatalf("%+v", res)
 	}
