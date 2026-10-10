@@ -41,6 +41,11 @@ func seatWaiterAt(t *testing.T, root, reason string, devices ...string) (leave f
 		})
 	}
 	t.Cleanup(leave)
+	// The waiter's SinceMs has millisecond resolution and must strictly precede whatever the test
+	// claims next: inside the SAME millisecond the order falls to the waiter files' random token
+	// (waiterBefore), a coin flip, and a claim that wins it goes ahead of the waiter. Measured on the
+	// whole-node test below without this gap: one run in five failed, on the branch's first commit too.
+	time.Sleep(5 * time.Millisecond)
 	return leave
 }
 

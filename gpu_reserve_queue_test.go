@@ -53,6 +53,10 @@ func TestAFreshReserveQueuesBehindARegisteredWaiterOnAFreeCard(t *testing.T) {
 	}
 	defer leave()
 
+	// The waiter's SinceMs (millisecond resolution) must strictly precede the reserve's: in the same
+	// millisecond the order is a coin flip on the waiter files' random token (waiterBefore).
+	time.Sleep(5 * time.Millisecond)
+
 	opts := gpulease.Options{Reason: "krea2 batch 3", TTL: time.Hour}
 
 	// --wait 0: one gated attempt, refused at once, naming the waiter and the flag that queues.
