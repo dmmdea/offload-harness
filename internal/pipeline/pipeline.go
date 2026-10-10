@@ -2915,6 +2915,13 @@ func (p *Pipeline) runGenerateVideo(ctx context.Context, req core.Request, meta 
 	if fb.WanLoader != "" {
 		args = append(args, "--wan-loader", fb.WanLoader)
 	}
+	// videogen_wan_decode (this box's, or the resolved family's, override): plain, tiled, or auto,
+	// which the runner decides from the render card's size. Unset passes nothing and the runner
+	// defaults to auto. Only the Wan graph reads it; like the two Wan flags above it is passed
+	// whatever the family, and the other builders ignore it.
+	if fb.WanDecode != "" {
+		args = append(args, "--wan-decode", fb.WanDecode)
+	}
 	// LTX-2.5 family bindings (quality-first weight binding, same pattern as the
 	// Wan flags above): filenames + fps + the pooled-DiT placement from config.
 	// Gap 5: an explicit per-request `transformer` param wins over this box's

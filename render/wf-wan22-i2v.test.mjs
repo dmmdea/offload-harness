@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert";
-import { buildWan22I2V } from "./wf-wan22-i2v.mjs";
+import { buildWan22I2V, chooseWanDecode, WAN_DECODE_MODES, WAN_DECODE_DEFAULT, WAN_PLAIN_DECODE_MIN_VRAM_BYTES } from "./wf-wan22-i2v.mjs";
 
 test("two-stage high->low with leftover-noise handoff + DisTorch2 loaders", () => {
   const g = buildWan22I2V({ imagePath: "s.png", prompt: "drive-by of a sports car", length: 49, steps: 20, seed: 7 });
@@ -215,4 +215,104 @@ test("loader:native works with --fast (lightx2v LoRA still applies) and with pos
     upscaleModel: "4x-UltraSharp.pth", upscaleWidth: 1920, upscaleHeight: 1080,
   });
   assert.ok(Object.values(gUpscale).find((n) => n.class_type === "UpscaleModelLoader"), "upscale chain still builds under the native loader");
+});
+
+// --- decode: videogen_wan_decode (auto | plain | tiled) ------------------------------------------------
+// Measured on a 16 GB card (A/B 2026-10-03; the tiled arm was one chunk, the clip's shape is unrecorded):
+// plain VAEDecode 38 s at a 10.3 GB peak, tiled 412 s at 3.2 GB.
+
+const GIB = 1024 ** 3;
+const decodeBase = { imagePath: "s.png", prompt: "p", seed: 7 };
+// The decode node exactly as the graph shipped it before the key existed. The oracle is a literal copy,
+// not a call into the builder, so a drift in the builder's tiled node cannot move it.
+const TILED_DECODE_NODE = { class_type: "VAEDecodeTiled", inputs: { samples: ["12", 0], vae: ["2", 0], tile_size: 256, overlap: 64, temporal_size: 32, temporal_overlap: 8 } };
+const PLAIN_DECODE_NODE = { class_type: "VAEDecode", inputs: { samples: ["12", 0], vae: ["2", 0] } };
+const decodeClass = (opts) => buildWan22I2V({ ...decodeBase, ...opts })["13"].class_type;
+
+test("decode:tiled builds today's VAEDecodeTiled node input for input; decode:plain builds a bare VAEDecode on the same id", () => {
+  const tiled = buildWan22I2V({ ...decodeBase, decode: "tiled" });
+  assert.deepStrictEqual(tiled["13"], TILED_DECODE_NODE);
+  assert.equal(JSON.stringify(tiled["13"]), JSON.stringify(TILED_DECODE_NODE), "same key order too: the POSTed graph does not change");
+  const plain = buildWan22I2V({ ...decodeBase, decode: "plain" });
+  assert.deepStrictEqual(plain["13"], PLAIN_DECODE_NODE);
+  // The two graphs differ in that one node and nothing else.
+  const without13 = (g) => Object.fromEntries(Object.entries(g).filter(([id]) => id !== "13"));
+  assert.deepStrictEqual(without13(plain), without13(tiled));
+  assert.equal(Object.values(plain).filter((n) => /^VAEDecode/.test(n.class_type)).length, 1, "exactly one decode node");
+  assert.equal(Object.values(tiled).filter((n) => /^VAEDecode/.test(n.class_type)).length, 1, "exactly one decode node");
+});
+
+test("decode defaults to auto, and auto without a card reading builds the tiled decode, so every earlier caller is unchanged", () => {
+  assert.equal(WAN_DECODE_DEFAULT, "auto");
+  assert.deepStrictEqual([...WAN_DECODE_MODES], ["auto", "plain", "tiled"]);
+  const g = buildWan22I2V(decodeBase);
+  assert.deepStrictEqual(g["13"], TILED_DECODE_NODE);
+  assert.deepStrictEqual(g, buildWan22I2V({ ...decodeBase, decode: "tiled" }), "the default graph IS the tiled graph");
+  assert.deepStrictEqual(g, buildWan22I2V({ ...decodeBase, decode: "auto" }));
+});
+
+test("decode:auto — a 16 GiB card runs the plain decode, an 8 GiB card the tiled one, an unreadable card the tiled one", () => {
+  assert.deepStrictEqual(buildWan22I2V({ ...decodeBase, decode: "auto", vramTotalBytes: 16 * GIB })["13"], PLAIN_DECODE_NODE);
+  assert.deepStrictEqual(buildWan22I2V({ ...decodeBase, decode: "auto", vramTotalBytes: 8 * GIB })["13"], TILED_DECODE_NODE);
+  assert.deepStrictEqual(buildWan22I2V({ ...decodeBase, decode: "auto", vramTotalBytes: undefined })["13"], TILED_DECODE_NODE);
+  // The default mode is auto, so the card alone decides.
+  assert.equal(decodeClass({ vramTotalBytes: 16 * GIB }), "VAEDecode");
+  assert.equal(decodeClass({ vramTotalBytes: 8 * GIB }), "VAEDecodeTiled");
+});
+
+test("decode:auto cuts at 12 GiB inclusive, and a value that is not a positive finite number is no reading", () => {
+  assert.equal(WAN_PLAIN_DECODE_MIN_VRAM_BYTES, 12 * GIB);
+  assert.equal(decodeClass({ vramTotalBytes: 12 * GIB }), "VAEDecode", "exactly 12 GiB runs plain");
+  assert.equal(decodeClass({ vramTotalBytes: 12 * GIB - 1 }), "VAEDecodeTiled", "one byte under stays tiled");
+  // The measured card class: a 16 GB card reports a little under 16 GiB.
+  assert.equal(decodeClass({ vramTotalBytes: 17_094_934_528 }), "VAEDecode");
+  for (const junk of [0, -1, NaN, Infinity, "17179869184", null, true, {}, []]) {
+    assert.equal(decodeClass({ vramTotalBytes: junk }), "VAEDecodeTiled", `${JSON.stringify(junk)} is no reading`);
+  }
+});
+
+test("an explicit decode ignores the card: plain on a 4 GiB card stays plain, tiled on a 24 GiB card stays tiled", () => {
+  assert.equal(decodeClass({ decode: "plain", vramTotalBytes: 4 * GIB }), "VAEDecode");
+  assert.equal(decodeClass({ decode: "plain" }), "VAEDecode");
+  assert.equal(decodeClass({ decode: "tiled", vramTotalBytes: 24 * GIB }), "VAEDecodeTiled");
+});
+
+test("decode: an unrecognized mode is refused rather than silently defaulting", () => {
+  for (const bad of ["bogus", "", "PLAIN", "fast", null, 1]) {
+    assert.throws(() => buildWan22I2V({ ...decodeBase, decode: bad }), /buildWan22I2V: decode must be auto\|plain\|tiled/, `value ${JSON.stringify(bad)}`);
+  }
+});
+
+test("both decodes keep id 13, so the upscale chain and the combine read the decoded frames either way", () => {
+  for (const decode of ["plain", "tiled"]) {
+    const up = buildWan22I2V({ ...decodeBase, decode, upscaleModel: "4x-UltraSharp.pth", upscaleWidth: 1920, upscaleHeight: 1080 });
+    assert.deepEqual(Object.values(up).find((n) => n.class_type === "ImageUpscaleWithModel").inputs.image, ["13", 0], decode);
+    const bare = buildWan22I2V({ ...decodeBase, decode });
+    assert.deepEqual(Object.values(bare).find((n) => n.class_type === "VHS_VideoCombine").inputs.images, ["13", 0], decode);
+    assert.match(bare["13"].class_type, /^VAEDecode/, decode);
+  }
+});
+
+test("decode composes with the other knobs: --fast and the native loader leave the decode alone, and it leaves them alone", () => {
+  const fast = buildWan22I2V({ ...decodeBase, fast: true, decode: "plain" });
+  assert.equal(fast["13"].class_type, "VAEDecode");
+  assert.equal(Object.values(fast).filter((n) => n.class_type === "LoraLoaderModelOnly").length, 2, "the distill LoRAs still attach");
+  const native = buildWan22I2V({ ...decodeBase, loader: "native", highUnet: "h.safetensors", lowUnet: "l.safetensors", decode: "plain" });
+  assert.equal(native["13"].class_type, "VAEDecode");
+  assert.equal(Object.values(native).filter((n) => n.class_type === "UNETLoader").length, 2);
+});
+
+test("chooseWanDecode says which node and why, in a sentence the runner can log", () => {
+  assert.deepStrictEqual(chooseWanDecode("plain", 1), { node: "VAEDecode", why: "plain decode requested" });
+  assert.deepStrictEqual(chooseWanDecode("tiled", 99 * GIB), { node: "VAEDecodeTiled", why: "tiled decode requested" });
+  const big = chooseWanDecode("auto", 15.9 * GIB);
+  assert.equal(big.node, "VAEDecode");
+  assert.match(big.why, /^auto: the render card reports 15\.9 GiB of VRAM, at least the 12\.0 GiB the plain decode wants$/);
+  const small = chooseWanDecode("auto", 8 * GIB);
+  assert.equal(small.node, "VAEDecodeTiled");
+  assert.match(small.why, /^auto: the render card reports 8\.0 GiB of VRAM, under the 12\.0 GiB the plain decode wants$/);
+  const none = chooseWanDecode("auto");
+  assert.equal(none.node, "VAEDecodeTiled");
+  assert.match(none.why, /VRAM was not read, so the tiled decode this graph always used stays/);
+  assert.throws(() => chooseWanDecode("nope", 16 * GIB), /decode must be auto\|plain\|tiled/);
 });
