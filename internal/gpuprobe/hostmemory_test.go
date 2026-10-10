@@ -128,15 +128,27 @@ func TestParseMeminfo(t *testing.T) {
 	if m != want {
 		t.Fatalf("parsed %+v, want %+v (kB to GiB)", m, want)
 	}
-	for _, drop := range []string{"MemTotal:", "MemAvailable:", "Committed_AS:", "CommitLimit:"} {
+	without := func(drop string) string {
 		var kept []string
 		for _, line := range strings.Split(sampleMeminfo, "\n") {
 			if !strings.HasPrefix(line, drop) {
 				kept = append(kept, line)
 			}
 		}
-		if _, ok := parseMeminfo(strings.Join(kept, "\n")); ok {
-			t.Errorf("a meminfo without %s must not be read as a complete reading", drop)
+		return strings.Join(kept, "\n")
+	}
+	for _, drop := range []string{"MemTotal:", "MemAvailable:"} {
+		if _, ok := parseMeminfo(without(drop)); ok {
+			t.Errorf("a meminfo without %s must not be read as a reading", drop)
+		}
+	}
+	// A sandbox that hides the commit accounting still yields a reading, from what the box visibly
+	// uses: the alternative is every lease that declares host RAM waiting forever.
+	for _, drop := range []string{"Committed_AS:", "CommitLimit:"} {
+		got, ok := parseMeminfo(without(drop))
+		want := HostMemory{PhysicalGiB: 128, AvailableGiB: 32, CommitUsedGiB: 96, CommitLimitGiB: 128}
+		if !ok || got != want {
+			t.Errorf("without %s: %+v ok=%v, want the used-memory fallback %+v", drop, got, ok, want)
 		}
 	}
 	if _, ok := parseMeminfo("MemTotal: banana kB\n"); ok {

@@ -1160,6 +1160,9 @@ admit iff projected <= physical RAM - gpu_host_ram_headroom_gib        (default 
 
 **Known limits, stated so they are not discovered.** Linux's `Committed_AS` counts mappings a process reserved and never
 touched (CUDA and large `mmap`s do), so it reads high there: the safe direction for a guard whose failure is paging. A
+`/proc/meminfo` that omits the commit counters (a sandbox that virtualises it) falls back to what the box visibly uses
+(`MemTotal - MemAvailable`, limit `MemTotal`), which under-counts reserved memory but keeps the rule working: no reading
+would make every declaring lease wait forever. A
 detached lease (`--detach`) has no command of its own below its holder, so its whole declared need counts as still to
 load for as long as it is held (a budget reservation). A kept ComfyUI whose runner has exited is reparented away from the
 holder's tree, so its loaded weights count both as pending and in the commit charge until that lease ends: that

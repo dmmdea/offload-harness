@@ -309,3 +309,43 @@ func TestResidentSeatsIsEmptyWhenLlamaSwapCannotBeRead(t *testing.T) {
 		t.Fatalf("no layers, nothing resident: %v", got)
 	}
 }
+
+// A host-RAM need no state of the host admits cannot be cured by waiting, so the allocator does not
+// poll for it: it returns at once with the refusal, however long the caller was willing to wait, and
+// it neither sleeps nor tells the line it is "waiting for that to change" (internal/gpulease/hostram.go).
+func TestPickAutoDoesNotPollForAnImpossibleHostNeed(t *testing.T) {
+	cards := threeCards()
+	build := func() (gpulease.AllocInput, error) {
+		return gpulease.AllocInput{
+			Cards:     cards,
+			HostMemOK: true, HostMem: gpuprobe.HostMemory{PhysicalGiB: 100, AvailableGiB: 50, CommitUsedGiB: 20, CommitLimitGiB: 160},
+			HostNeedGiB: 99, HostHeadroomGiB: 8, // 99 > 100 - 8: no state of this host admits it
+		}, nil
+	}
+	var out bytes.Buffer
+	sleeps := 0
+	_, _, err := PickAuto(Plan{Min: 1, Max: 1}, time.Hour, build, &out, func(time.Duration) { sleeps++ }, time.Now)
+	var none *gpulease.NoCardsError
+	if !errors.As(err, &none) || !none.HostImpossible {
+		t.Fatalf("want the impossible host refusal, got %v", err)
+	}
+	if sleeps != 0 || strings.Contains(out.String(), "waiting up to") {
+		t.Fatalf("an impossible need must not be polled for: %d sleep(s), output %q", sleeps, out.String())
+	}
+	if strings.Contains(err.Error(), "--wait") {
+		t.Fatalf("there is no --wait to suggest: %v", err)
+	}
+
+	// A host that is merely short IS waited for: the same request with a need that fits once the host frees.
+	short := func() (gpulease.AllocInput, error) {
+		in, _ := build()
+		in.HostNeedGiB, in.HostMem.CommitUsedGiB = 30, 90
+		return in, nil
+	}
+	sleeps = 0
+	clock := time.Unix(1000, 0)
+	_, _, err = PickAuto(Plan{Min: 1, Max: 1}, 10*time.Second, short, &out, func(d time.Duration) { sleeps++; clock = clock.Add(d) }, func() time.Time { return clock })
+	if !errors.As(err, &none) || none.HostImpossible || sleeps == 0 {
+		t.Fatalf("a shortage that waiting can cure is polled for (sleeps %d): %v", sleeps, err)
+	}
+}

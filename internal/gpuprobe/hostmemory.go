@@ -178,13 +178,19 @@ func hostRAMAdmits(mem HostMemory, readable, supported bool, needGiB, pendingGiB
 	return c
 }
 
-// parseMeminfo reads the four counters the Linux reader needs from /proc/meminfo text: MemTotal,
-// MemAvailable, Committed_AS and CommitLimit, all in kB. Any of them missing is no reading.
+// parseMeminfo reads the counters the Linux reader needs from /proc/meminfo text, all in kB:
+// MemTotal and MemAvailable are required (without them there is no reading); Committed_AS and
+// CommitLimit are the kernel's commit accounting and are present on every kernel this harness runs on,
+// but a sandbox that virtualises /proc/meminfo (a container's lxcfs, gVisor) can omit them. Then the
+// reading falls back to what the box visibly uses: commit used = MemTotal - MemAvailable, limit =
+// MemTotal. That under-counts memory a process reserved and never touched, but it keeps the rule
+// working: the alternative, no reading on a platform that has a reader, makes every lease that
+// declares host RAM wait forever.
 func parseMeminfo(text string) (HostMemory, bool) {
 	want := map[string]*float64{}
 	var total, avail, committed, limit float64
 	want["MemTotal"], want["MemAvailable"], want["Committed_AS"], want["CommitLimit"] = &total, &avail, &committed, &limit
-	seen := 0
+	seen := map[string]bool{}
 	sc := bufio.NewScanner(strings.NewReader(text))
 	for sc.Scan() {
 		fields := strings.Fields(sc.Text())
@@ -200,10 +206,13 @@ func parseMeminfo(text string) (HostMemory, bool) {
 			return HostMemory{}, false
 		}
 		*dst = kb / (1 << 20)
-		seen++
+		seen[strings.TrimSuffix(fields[0], ":")] = true
 	}
-	if seen < 4 || total <= 0 {
+	if !seen["MemTotal"] || !seen["MemAvailable"] || total <= 0 {
 		return HostMemory{}, false
+	}
+	if !seen["Committed_AS"] || !seen["CommitLimit"] {
+		committed, limit = total-avail, total
 	}
 	return HostMemory{PhysicalGiB: total, AvailableGiB: avail, CommitUsedGiB: committed, CommitLimitGiB: limit}, true
 }
