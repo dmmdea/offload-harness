@@ -120,12 +120,44 @@ confusion:
   authority's entry with the one `--mmproj <GGUF>` argument removed at render (`servingtmpl.dropEG2Projector`),
   every other flag identical (`--ubatch-size 2048` is load-bearing: the stack's hot budget is 1,900 tokens and a
   smaller ubatch returns HTTP 500 on long memories), and the installer does not download the projector for it.
-  The field is optional and absent means true. The projector is off by arithmetic: with it the entry would exceed
-  those cards beside the tier's seats (8,703 MiB on the 8 GB card, 16,375 MiB on the 16,311 MiB utility card of
-  the 3-card tier), text-only it fits (7,649 and 15,321 MiB), and `eg2CardBudget` in
-  `embeddinggemma2_stack_test.go` carries those sums, refuses the projector on a card its recorded sum exceeds and
-  refuses a text-only tier whose projector sum has come to fit; an on-box co-residency measurement can turn the
-  projector on. The entry joins the stack's residency
+  The field is optional and absent means true. The projector is off on the replicas: on a sum for the 8 GB card
+  and on a measurement for the 3-card tier. The sum: with the projector the entry would exceed those cards beside
+  the tier's seats (8,703 MiB on the 8 GB card, 16,375 MiB on the 16,311 MiB utility card of the 3-card tier),
+  text-only it fits (7,649 and 15,321 MiB), and `eg2CardBudget` in `embeddinggemma2_stack_test.go` carries those
+  sums, refuses the projector on a card its recorded sum exceeds and refuses a text-only tier whose projector sum
+  has come to fit. It is a necessary condition and models neither headroom nor the vLLM agent seat that shares
+  the 3-card tier's utility card; an on-box co-residency measurement can turn the projector on.
+
+  The measurement, taken 2026-10-09 on the reference 3-card box with that box's local pinned-pool seat
+  configuration (the `SEAT_KV_HEADROOM_GIB` path of `setup/templates/vllm-seat/seat_fg.sh`: `--kv-cache-memory-bytes`
+  is the smaller free memory of the seat's cards less 11.19 GiB non-KV and 0.5 GiB headroom, floored at 2.0 GiB and
+  capped at 3.4 GiB), **not** the shipped `setup/templates/vllm-seat/windows-wsl/seat.env`, which sizes the pool by
+  `gpu_memory_utilization`. The agent seat is tensor-parallel 2 over the two RTX 5060 Ti cards at `max_model_len`
+  163,840:
+
+  - (a) The three memory-stack residents (`embeddinggemma`, `bge-reranker-v2-m3` and the text-only
+    `embeddinggemma2`) all on one seat card, 1,648 MiB used on it: the agent seat's cold start **failed** after
+    about 208 s, vLLM's `_check_enough_kv_cache_memory` needing 2.66 GiB of KV for 163,840 tokens with 2.49 GiB
+    available.
+  - (b) `embeddinggemma2` moved to the seat's other card (the two cards read 1,049 and 600 MiB with the stack
+    loaded): cold start OK in 255 s, all four models ready afterwards.
+  - (c) Card-total deltas on the utility card (llama.cpp b11490; WDDM reports per-process memory as N/A):
+    `embeddinggemma` +505 MiB, text-only `embeddinggemma2` +501, the reranker +439; `embeddinggemma2` with its
+    projector 1,237 MiB (the projector +736).
+
+  What it supports, and nothing more: on a tier whose vLLM seat spans the memory-stack residents' card, the
+  residents must not all sit on one seat card at the declared window, and the projector stays off (it adds 736 MiB
+  to the shape that already failed). `TestTheTripleBlackwellTierStaysTextOnlyOnTheMeasuredRecord` holds the tier
+  text-only until a new measurement says otherwise. The shipped utilization-sized seat was not measured with the
+  second embedder; its pool is measured during startup profiling, device-wide, so a resident that loads in that
+  window shrinks it (`KVCacheMemoryBytes` in `internal/vllmseat`).
+
+  **Known gap:** the `win-triple-blackwell` template (`setup/templates/llama-swap.win-triple-blackwell.yaml`) pins
+  `embeddinggemma`, `embeddinggemma2` and the reranker all to device 2, the shape that failed in (a). It is not
+  changed in this release: the template's other seat card (device 0) carries the cascade and the `gemma4-26b-a4b`
+  resident tier, whose fit beside a 501 MiB resident is unmeasured, and a model is never re-pinned from a guess.
+
+  The entry joins the stack's residency
   set (`emb & rer & eg2`, or `emb & eg2` where a template has no reranker, or the one `resident` set of an
   all-resident template): resident beside the swappable seats, never swapped by them, with the stack's evict
   cost. With the flag off the entry, its matrix var and its evict row are all stripped. The `embeddinggemma`
@@ -136,7 +168,10 @@ confusion:
   makes offline media search a clean 400. It needs llama.cpp
   b11452 or newer (the `gemma-embedding2` architecture); on Windows `install.ps1` pins b11490 and downloads the two
   GGUFs (309,855,456 and 554,821,024 bytes) for a tier that carries the projector and the model alone for a text-only
-  tier, with no RAM gate (`Get-GatedModelKeys -IncludeEmbeddingGemma2Projector`).
+  tier, with no RAM gate (`Get-GatedModelKeys -IncludeEmbeddingGemma2Projector`). A node whose main build is older keeps
+  it for its other seats and runs this one entry from a second build (0.177.0, `--llama-bin-eg2`; see "A second llama.cpp
+  build for the embeddinggemma2 entry" under "Serving config on Linux" below), and `install render` refuses a build it
+  can read as older than b11452.
 - **The Windows llama.cpp pin is b11490** (was b9934): the pre-built assets are `win-cuda-12.4`, **`win-cuda-13.4`**
   (named `13.3` until b9934, so the `llama-cuda13` / `llama-cudart13` URLs moved, not only their hashes), `win-vulkan`
   and `win-cpu`, each pinned by the GitHub release API digest. `Select-CudaBuild` still keys on the DRIVER's CUDA
@@ -324,8 +359,101 @@ about 4.7 GiB of inference budget with the host's own workload (`uma_reserve_gib
 back). The template lists only what fits — one llama.cpp Vulkan chat entry, `GGML_VK_VISIBLE_DEVICES=0`,
 every layer offloaded — and places the tier's `rkllm` NPU seats (a model served by the Rockchip RKLLM
 runtime, with its own window, CPU mask and optional repeat-penalty default) as alternatives to it. No model runs on the CPU there: the
-tier declares no `alt_backends`, so `--llama-bin-cpu` is refused. `--llama-bin` still names a
+tier declares no `alt_backends`, so `--llama-bin-cpu` is refused, and it renders no `embeddinggemma2` entry, so
+`--llama-bin-eg2` is refused by name too. `--llama-bin` still names a
 llama.cpp build with the Vulkan backend, as for `vulkan`; the installer script needs nothing else.
+
+#### A second llama.cpp build for the embeddinggemma2 entry (`--llama-bin-eg2`)
+
+The `embeddinggemma2` entry needs llama.cpp b11452 or newer (the `gemma-embedding2` architecture). The render used to
+have one build for every entry, so a node whose main build is older, and has to stay that way for its other seats (the
+`ampere-6` reference box ran b10964 when the entry arrived), could not load the entry from a rendered config. Its only
+way out was a hand-edited config, which `audit-yaml` reads as HAND-EDITED or UNSTAMPED and which the next re-render
+would overwrite. `install render --llama-bin-eg2 <dir>` (`Params.EG2LlamaBin`, the sibling of `--llama-bin-cpu`, ADR
+[0081](../architecture/decisions/0081-the-embeddinggemma2-entry-may-run-from-a-second-llama-build.md)) points that one
+entry at a second build and leaves every other entry on `--llama-bin`:
+
+```
+local-offload install render --profile ampere-6 --home /opt/offload --llama-bin /opt/offload/build/llamacpp-b10964 --llama-bin-eg2 /opt/offload/build/llamacpp-b11490 --models /opt/offload/models --ram-tier low --out llama-swap.yaml
+```
+
+- **What moves.** The entry's `cmd` path and nothing else on a Windows template. On a Linux template (one that defines the
+  loader macro `ld:`) the entry's env also swaps its `${ld}` list item for a macro of its own, `ldembed`
+  (`LD_LIBRARY_PATH=<dir>:...`), inserted right after `ld:`, because the shared macro names the main build's directory and
+  a build links its own shared objects; the Vulkan template keeps its `${vk}` device pin beside it. With `--llama-bin-cpu`
+  as well the macros read `ld`, `ldcpu`, `ldembed`. Which path a render takes follows the template (does it define `ld:`),
+  not the target OS.
+- **How.** A rewrite of the `embeddinggemma2` block inside `servingtmpl.Render`, before substitution, on the same block
+  scanner as the text-only projector strip. No template and no `profiles.json` edit, so `template_sha256` and every
+  `profiles_entry_sha256` stay put: an unset render is byte-identical to the previous release's (pinned by sha256 on all ten
+  templates, projector kept and stripped, in `internal/servingtmpl/testdata/eg2bin-unset-render.golden`, taken from the
+  0.175.0 renderer), and no stamped node reads STALE because of this change. The rewrite is exact in
+  both directions: the entry must name `__LLAMA_BIN__` exactly once, and on a Linux template carry exactly one `${ld}`
+  item, or the render fails naming the entry.
+- **The value.** Backslashes become forward slashes and a trailing slash goes (llama-swap on Windows mis-parses
+  backslashes inside a `cmd`); the main build spelled again is no build of its own, so nothing is recorded and the render
+  is the unset one. A double quote, a line break or a `$` is refused (the value lands in a double-quoted YAML macro that
+  llama-swap expands), and so is a value that is only separators. A tier that does not carry `include_embeddinggemma2`
+  (the other CUDA tiers, the Rockchip board, an off-matrix box) refuses the flag by naming the tier and the flag, because
+  the stamp would record a build that serves nothing.
+- **The floor check, at write time only, and advisory.** `eg2MinLlamaBuild` is 11452. `install render` reads the build from
+  a `b<digits>` token of four to six digits in the build directory's own name (`llamacpp-b10964`, `llama.cpp-b11490`,
+  `llama-b11490-bin-win-cuda-12.4-x64`), or, when that name is the generic `bin` or `build` of a CMake tree or a release
+  archive, in the nearest directory above it that is not (`.../llamacpp-b10964/bin`, `.../llama-b11490/build/bin`). It
+  never runs `llama-server`, whose `--version` initialises every CUDA card on the box while `install render` runs on live
+  nodes. **The floor is therefore advisory, not a guarantee:** it protects a build whose directory path states its build,
+  and says plainly that it could not check any other (`/srv/offload/build/llamacpp/build/bin`, `<home>/llama`), whatever
+  build that directory really holds. Name build directories for their build to get the refusal. It checks the entry's own build when the flag is set and the main
+  build otherwise, and only for a render that includes the entry. A build the name states below the floor is refused
+  (`tier T renders embeddinggemma2, which needs llama.cpp b11452 or newer (gemma-embedding2), but <dir> is bN: pass
+  --llama-bin-eg2 <dir of a b11452+ build> - not written`), at or above it is silent, and a name that states none (a
+  directory called `llama`) is a `note:` line and the render proceeds. The note goes to stdout when `--out` is set
+  (`install.ps1` captures that stream, relays its `note:` lines to the operator, and its self-test treats stderr output as
+  an error) and to stderr otherwise, where stdout is the stamped config itself. `install.ps1` leaves out the note about its
+  own build (`<home>/llama` never states one, and the pinned tag is held at or above the floor), so on Windows the note
+  appears only for an `OFFLOAD_EG2_LLAMA_BIN` directory whose name states no build. **Behaviour change when the flag is unset:** a render whose main build is named
+  below b11452, on a tier that carries the entry, is now refused where it used to be written; that entry cannot start on
+  such a build. The replay never checks the floor (`audit-yaml` runs on another machine with another machine's recorded
+  paths and must not judge them), and `TestInstallPs1PinsABuildAtOrAboveTheEG2Floor` holds the Windows installer's pinned
+  tag at or above it.
+- **Provenance and audit.** The stamp's basis records `eg2_llama_bin` (omitted when unset, so an unset render keeps its
+  spec hash) and the replay carries it, so a node rendered with the flag audits MATCH. `audit-yaml` has no per-entry
+  view: an entry's path edited by hand still reads HAND-EDITED, and the same change made by the renderer (on a template
+  without a loader macro it is exactly that path edit) reads MATCH. The replay now also carries `--llama-bin-cpu`, which
+  it used to drop, so a node rendered with a CPU family would have read STALE for a path it chose itself (dormant: no tier
+  declares `alt_backends`). Each is a render input the tier must still permit: a stamp that records one the tier has since
+  withdrawn reads STALE with the renderer's own refusal as the detail (`this binary cannot re-derive tier T from the
+  recorded inputs: ...`) and no key list, not with "no longer in the tier table", which is kept for a tier that really
+  left it. **A binary older than 0.177.0 auditing a stamp that carries `eg2_llama_bin` reads HAND-EDITED**
+  (it drops the key it does not know, so the spec hash no longer matches): upgrade the binary before re-rendering with the
+  flag.
+- **Windows.** `install.ps1` installs one pinned tag for every node it installs (b11490, at or above the floor), so an
+  installer-managed node needs no second build. `OFFLOAD_EG2_LLAMA_BIN=<dir>` is the opt-in override for a node that keeps
+  an older main build: the directory must hold `llama-server.exe` (else the script throws), is normalised to forward
+  slashes, is appended to the render args as `--llama-bin-eg2`, and joins the Step 6 skip test so an upgrade re-renders (the test matches the executable's path,
+  `<dir>/llama-server.exe`, so a longer sibling directory is not mistaken for it). The
+  directory must be a complete extraction (the llama zip, plus the cudart zip for CUDA), because Windows resolves its DLLs
+  beside the executable and the entry carries no loader macro; a bare llama zip fails at load with a DLL error that reads
+  like a model problem. The skip test cannot tell that the variable was removed: dropping the override needs a fresh render
+  (`-RenderOnly`, or delete the yaml). A hand-kept config the installer does not render is not helped until the node
+  adopts `install render`.
+- **Linux.** `setup/install.sh --llama-bin-eg2 DIR` (it must be a directory; `install.sh` builds and downloads nothing, so
+  the operator supplies the build).
+- **Adopting it on a node that keeps an older main build.** (1) Put a b11452-or-newer build beside the old one, in a
+  directory named with its build. (2) Render to a scratch file with `--llama-bin <old> --llama-bin-eg2 <new>` and the box's
+  existing flags. (3) Diff it against the live config: expect the stamp header and the entry's path (and macro on Linux);
+  anything else is hand-wiring the render does not carry, to be decided line by line. (4) In a quiet window, swap the file
+  in and restart llama-swap (a restart drops every loaded seat). (5) `audit-yaml --against-render` reads
+  MATCH.
+
+> **Unverified:** whether llama-swap fails the whole residents set when one member (here the entry on a build too old to
+> load it) cannot start. The floor check exists either way: the entry cannot start on such a build.
+
+> **Unverified:** llama-swap's rule for macro names. `ldembed` is letters only, like the existing `ldcpu`, which is the
+> shape measured to work.
+
+> **Unverified:** that a build-consistency check across loaded seats (`llamaswap build check`) reports drift for a node that
+> runs two builds side by side, as this shape does. Read from its source, not run.
 
 #### What `install render` refuses to write
 
@@ -499,6 +627,9 @@ setup/install.sh --bin ./local-offload --llama-bin /path/to/llamacpp/build/bin [
 `--llama-bin` is required on every tier except one whose backend (`install tier-info`) is `rk3588`: that
 tier's template has no llama.cpp entry (the NPU serves), so a board there has no build to point at.
 `setup/install.tests.sh` pins the rule and the `--rknpu-home` pass-through with a stub binary under `--dry-run`.
+`--llama-bin-eg2 DIR` is optional (it must be a directory when given): the directory of the llama.cpp build that serves only
+the `embeddinggemma2` entry, for a node whose main build is older than b11452 (see "A second llama.cpp build for the
+embeddinggemma2 entry" above). The dry run names it in its `would render` line and the render call passes it only when set.
 
 It is **deliberately thin**. Every decision that can be wrong lives in the binary, which
 is cross-compiled and unit-tested; the script only fetches, places and registers:
@@ -686,7 +817,10 @@ version classifier). `setup/tests/` carries PowerShell tests for config-seed beh
 canary pure helpers (`selftest-canaries.test.ps1` — word-overlap, flash-attn log-state scan with
 live-captured log lines, cosine). Go-side config round-tripping is covered by
 `example_config_test.go` and `doctor_test.go`, which also guard against tier-key drift between
-`config.example.json` and the code.
+`config.example.json` and the code. The second-build flag is pinned by `internal/servingtmpl/eg2bin_test.go` (what the
+rewrite touches and refuses, on all ten templates, and the golden hashes of the unset renders), `install_render_eg2bin_test.go` (the flag, the floor check, the replay),
+`setup/install.tests.sh` and the `OFFLOAD_EG2_LLAMA_BIN` cases of `setup/render.tests.ps1` and
+`setup/tests/install-config-seed.test.ps1`.
 
 ## Common pitfalls
 

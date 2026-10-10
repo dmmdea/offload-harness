@@ -73,6 +73,11 @@ func (r eg2BudgetRow) sum(entryMiB int) int {
 // What it does catch is a render that declares co-resident a set the recorded numbers cannot hold: the
 // residency matrix says the combination is valid and llama-swap does not check VRAM, so the failure would
 // be a memory-stack embed request that cannot load beside the loaded agent seat.
+//
+// It models no headroom and no vLLM seat: the sum is over the llama.cpp footprints the records give, and
+// the vLLM agent seat that shares the 3-card tier's utility card is not in it (the reference 3-card box's
+// launcher keeps 0.5 GiB for its pinned KV pool, which is not here either). What residents do to such a
+// seat is a measured record, not arithmetic in this table (TestTheTripleBlackwellTierStaysTextOnlyOnTheMeasuredRecord).
 var eg2CardBudget = []eg2BudgetRow{
 	{"ampere-6", "RTX 3050 6 GB, nominal 6 GiB", 6144, []eg2Part{
 		{"qwen3.5-4b-agent, ctx 32768 q8_0 KV (win-cuda.yaml)", 3681},
@@ -85,6 +90,11 @@ var eg2CardBudget = []eg2BudgetRow{
 		{"mimo-9b-agent, ctx 65536 q8_0 KV, peak on the 3070 Laptop (win-cuda.yaml)", 6707},
 		{"embeddinggemma 300M (ampere16_coresidency_test.go)", 460},
 	}},
+	// The whisper is the 2.2 GiB the tier's layers declare (TestTheBlackwellTripleRowKeepsTheDeclaredWhisperOnPurpose),
+	// the residents are the co-residency tier's figures and the entry is at the reference 6 GB node's peaks: a
+	// necessary condition, not this tier's reason for staying text-only. On the utility card's own measured
+	// deltas (505 + 439 for the residents, 1,237 for the entry with its projector) the same sum is 16,184 MiB,
+	// under the card; the reason is the measured cold-start record.
 	{"blackwell-3x16", "RTX 5060 Ti 16 GB, card 2, 16,311 MiB (docs/FLEET-NODE.md)", 16311, []eg2Part{
 		{"vl-8b OCR seat measured alone on card 2 (win-triple-blackwell.yaml)", 11751},
 		{"whisper-stt, 2.2 GiB as declared in the tier's layers", 2252},
@@ -194,6 +204,81 @@ func TestTheEmbeddingGemma2ProjectorIsRefusedOnTheTextOnlyTiers(t *testing.T) {
 	ampere6.EmbeddingGemma2Projector = &off
 	if problems := eg2TierProblems(byTier["ampere-6"], ampere6); len(problems) != 1 || !strings.Contains(problems[0], "no recorded reason left") {
 		t.Errorf("a text-only ampere-6 must be flagged as having no recorded reason, got %v", problems)
+	}
+}
+
+// TestTheBlackwellTripleRowKeepsTheDeclaredWhisperOnPurpose: the sum adds whisper at the 2.2 GiB the
+// tier's layers declare (2,252 MiB), not the ~2,182 MiB measured alone, because the row records what the
+// residency set promises is co-resident. The choice is load-bearing: at the measured figure the projector
+// sum is 16,305 MiB, 6 under the card, and the sum alone would call the text-only state unfounded, which
+// is why the tier's reason is the measured record and not this margin.
+func TestTheBlackwellTripleRowKeepsTheDeclaredWhisperOnPurpose(t *testing.T) {
+	profiles, seedProfiles, _ := fleetCapProfiles(t)
+	const id = "blackwell-3x16"
+	var row eg2BudgetRow
+	for _, r := range eg2CardBudget {
+		if r.tier == id {
+			row = r
+		}
+	}
+	declared := 0
+	for _, l := range seedProfiles[id].Layers {
+		for _, s := range l.Seats {
+			if s.Role == "stt" && s.FootprintGiB > 0 {
+				declared = int(s.FootprintGiB * 1024)
+			}
+		}
+	}
+	at := -1
+	for i, part := range row.beside {
+		if strings.HasPrefix(part.what, "whisper-stt") {
+			at = i
+		}
+	}
+	if at < 0 || declared != 2252 || row.beside[at].mib != declared {
+		t.Fatalf("whisper in the row = part %d of %v, layers declare %d MiB: the row must carry the declared 2252", at, row.beside, declared)
+	}
+	if got := row.sum(eg2ProjectorPeakMiB); got != 16375 || got <= row.cardMiB {
+		t.Errorf("declared whisper: projector sum = %d, want 16375 and over the card %d", got, row.cardMiB)
+	}
+	measured := row
+	measured.beside = append([]eg2Part(nil), row.beside...)
+	measured.beside[at].mib = 2182
+	if got := measured.sum(eg2ProjectorPeakMiB); got != 16305 || got > measured.cardMiB {
+		t.Errorf("measured whisper: projector sum = %d, want 16305 and under the card %d (the hairline this test records)", got, measured.cardMiB)
+	}
+	if problems := eg2TierProblems(measured, profiles[id]); len(problems) != 1 || !strings.Contains(problems[0], "no recorded reason left") {
+		t.Errorf("measured whisper: the sum alone must call the text-only state unfounded, got %v", problems)
+	}
+}
+
+// TestTheTripleBlackwellTierStaysTextOnlyOnTheMeasuredRecord: blackwell-3x16 carries the entry without its
+// projector because of a measurement, not because of the sum in eg2CardBudget. Measured 2026-10-09 on the
+// reference 3-card box, with that box's local pinned-pool launcher (the seat's --kv-cache-memory-bytes is
+// the smaller free memory of the seat's cards less 11.19 GiB non-KV and 0.5 GiB headroom, floor 2.0, cap
+// 3.4; NOT the shipped seat.env, which sizes by utilization), the agent seat tensor-parallel 2 over the two
+// 5060 Ti cards at max_model_len 163,840:
+//
+//	(a) embeddinggemma, bge-reranker-v2-m3 and the TEXT-ONLY embeddinggemma2 all on ONE seat card,
+//	    1,648 MiB used on it: the agent seat's cold start FAILED after ~208 s, vLLM
+//	    _check_enough_kv_cache_memory: 2.66 GiB of KV needed for 163,840 tokens, 2.49 GiB available.
+//	(b) embeddinggemma2 moved to the seat's OTHER card (1,049 and 600 MiB on the two cards with the stack
+//	    loaded): cold start OK in 255 s, all four models ready afterwards.
+//	(c) card-total deltas on the utility card (WDDM, llama.cpp b11490): embeddinggemma +505 MiB, text-only
+//	    embeddinggemma2 +501, reranker +439; embeddinggemma2 WITH its projector 1,237 (projector +736).
+//
+// What it supports: on a tier whose vLLM seat spans the residents' card, the residents must not all sit
+// on one seat card at the declared window; the projector adds 736 MiB to the shape that already failed,
+// so it stays off. The template still pins all three residents to one card, a known gap recorded in the
+// tier's notes and in docs/systems/setup-installer.md.
+func TestTheTripleBlackwellTierStaysTextOnlyOnTheMeasuredRecord(t *testing.T) {
+	profiles, _, _ := fleetCapProfiles(t)
+	p := profiles["blackwell-3x16"]
+	if !p.IncludeEmbeddingGemma2 || !p.eg2TextOnly() {
+		t.Errorf("blackwell-3x16 must carry the entry text-only (include_embeddinggemma2 %v, text-only %v): the 2026-10-09 measurement "+
+			"failed the agent seat's cold start (2.49 of 2.66 GiB of KV) with the three residents on one seat card, and the projector adds 736 MiB to that shape. "+
+			"Turning it on takes a co-residency measurement on the real launcher with the residents placed, recorded in the tier's notes",
+			p.IncludeEmbeddingGemma2, p.eg2TextOnly())
 	}
 }
 

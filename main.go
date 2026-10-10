@@ -315,7 +315,7 @@ Usage:
   local-offload acceptance [--json]      the gate: EXERCISE every bound capability as this identity (lease writable, interpreters runnable, aliases live). Non-zero when a node must not be handed work.
   local-offload install detect [--json]  classify this machine into a hardware tier (works on every OS)
   local-offload install plan [--json]    the tier + the media bindings an install would seed here
-  local-offload install render [--profile ID] [--llama-bin DIR] [--models DIR] [--out FILE]   render this tier's llama-swap serving config (templates embedded)
+  local-offload install render [--profile ID] [--llama-bin DIR] [--llama-bin-cpu DIR] [--llama-bin-eg2 DIR] [--models DIR] [--out FILE]   render this tier's llama-swap serving config (templates embedded); --llama-bin-cpu adds the tier's CPU seat family (tier must declare alt_backends), --llama-bin-eg2 runs ONLY the embeddinggemma2 entry from a second llama.cpp build (b11452 or newer) for a node whose main build is older
   local-offload install volumes [--json] [--min-free-gb N] [--allow-os-volume] [--data]   where should this machine install? (most free space, never the OS drive by default; --data picks the volume for harness DATA and also skips cloud-synced virtual drives and FAT volumes)
   local-offload data status [--json]     where this node keeps its data, and whether any of it is on the OS drive (C: holds Windows and program installs, never data). Exit 1 when it is and a data volume qualifies.
   local-offload data migrate [--from DIR] [--to DIR] [--apply] [--stopped] [--json]   COPY the data tree to a data drive (never a move, never a junction, source untouched; dry run unless --apply; bbolt stores only with --stopped), then print the "home" line to set

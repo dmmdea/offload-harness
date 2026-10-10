@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -118,10 +119,20 @@ func TestRescueRepackAllowanceFollowsTheSeatRate(t *testing.T) {
 
 // the chat-lane fallback of the re-pack streams under liveness like the
 // grammar lane does. Both grammar attempts answer the wrong shape; the seat then
-// streams its chat answer for ten allowances.
+// streams its chat answer for twice the allowance.
+//
+// The allowance is a second, not the 200 ms the rule is about: the gap between
+// two deltas is 40 ms on the fake's clock, and on a starved runner (busy threads
+// sharing a couple of cores) the gap outgrew 200 ms and the monitor filed a stall
+// on a seat that was producing. At a second the gap is 25 times under the
+// allowance, and a seat that went back to one silent answer would still be silent
+// for the 2 s and filed as a stall. The elapsed check keeps the stream longer than
+// the allowance, or the test would prove nothing.
+// TestRepackChatFallbackReportsEveryDeltaToTheProgressHook holds the same rule
+// without a clock.
 func TestRepackChatFallbackStreamsUnderLiveness(t *testing.T) {
-	defer compressLiveness(t, 200*time.Millisecond, 100*time.Millisecond, core.AgentCeilingSecCap)()
-	defer compressRepackBound(t, 200*time.Millisecond)()
+	defer compressLiveness(t, time.Second, 100*time.Millisecond, core.AgentCeilingSecCap)()
+	defer compressRepackBound(t, time.Second)()
 	fake := &agentFake{
 		rosterIDs:  []string{agentTestSeat},
 		loop:       func(int64) string { return doneChat("The answer is 42.") },
@@ -130,9 +141,43 @@ func TestRepackChatFallbackStreamsUnderLiveness(t *testing.T) {
 	}
 	srv := fake.server(t)
 	defer srv.Close()
+	start := time.Now()
 	wire := decodeWire(t, agentTestPipeline(t, srv.URL).Run(context.Background(), agentTestRequest(t, testContract())))
 	if wire.Deferred || !strings.Contains(string(wire.Structured), `"answer":"42"`) {
 		t.Fatalf("deferred=%v %s / %q (attempts %d), want the streamed chat fallback delivered", wire.Deferred, wire.DeferClass, wire.Reason, wire.RepackAttempts)
+	}
+	if el := time.Since(start); el < 1500*time.Millisecond {
+		t.Fatalf("the re-pack finished in %s: the fake did not stream for longer than the 1 s allowance, the test proves nothing", el)
+	}
+}
+
+// the same rule as TestRepackChatFallbackStreamsUnderLiveness with no clock to
+// race: the chat fallback hands every streamed delta to the progress hook its
+// context carries, which is how the monitor hears a seat that is producing. The
+// fake streams 20 deltas at once, and the count does not depend on the runner
+// because the fake advances by the nominal gap, not by the clock.
+func TestRepackChatFallbackReportsEveryDeltaToTheProgressHook(t *testing.T) {
+	fake := &agentFake{
+		rosterIDs:  []string{agentTestSeat},
+		repack:     func(int64) string { return `{"wrong":"shape"}` },
+		chatStream: streamedRepackSeat(time.Millisecond, 20*time.Millisecond),
+	}
+	srv := fake.server(t)
+	defer srv.Close()
+	p := agentTestPipeline(t, srv.URL)
+	var heard atomic.Int64
+	ctx := agent.ContextWithProgress(context.Background(), func(int) { heard.Add(1) })
+
+	schema := json.RawMessage(`{"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"]}`)
+	structured, _, _, attempts, err := p.repackStructured(ctx, agentTestSeat, schema, "The answer is 42.", 0)
+	if err != nil || !strings.Contains(string(structured), `"answer":"42"`) {
+		t.Fatalf("structured = %s err = %v, want the streamed chat fallback delivered", structured, err)
+	}
+	if attempts != 3 {
+		t.Fatalf("attempts = %d, want 3: two wrong-shape grammar answers, then the chat lane", attempts)
+	}
+	if got := heard.Load(); got < 20 {
+		t.Fatalf("the progress hook heard %d events, want at least 20: the chat lane did not report each delta it streamed", got)
 	}
 }
 

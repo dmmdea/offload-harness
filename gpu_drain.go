@@ -41,12 +41,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/gpuactivity"
@@ -55,6 +57,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/modelaffinity"
 	"github.com/dmmdea/offload-harness/internal/seatload"
 	"github.com/dmmdea/offload-harness/internal/seatrate"
+	"github.com/dmmdea/offload-harness/internal/seatwait"
 	"github.com/dmmdea/offload-harness/internal/swapclient"
 )
 
@@ -337,59 +340,314 @@ func unloadSeat(ctx context.Context, client *http.Client, endpoint, model string
 // to schedule — so it builds its URL with modelaffinity.HolderUpstreamURL, the
 // one unfenced builder: this process holds the lease the fence would make it
 // wait on (only its child carries GPU_LEASE_EPOCH).
+//
+// The health request IS the load, so it can be interrupted, and it is re-sent
+// when what interrupted it was llama-swap reloading or restarting (see
+// warmSeatGated).
 func warmSeat(ctx context.Context, client *http.Client, endpoint, model string) error {
+	return warmSeatGated(ctx, client, endpoint, model, nil)
+}
+
+// warmSeatGated is warmSeat for a caller that must re-prove it may warm before it
+// re-sends the load: allow is asked before every re-send (never before the first
+// request, which is the caller's own check) and a false answer ends the warm with
+// errWarmGuardStopped. A nil allow always allows.
+//
+// What the answer to the health request means, by the seat's own state:
+//
+//   - 2xx: the load finished.
+//   - A 5xx while the load carries on: llama-swap gave up on its health wait, not
+//     the load failing (2026-09-18 19:5x, the 3-card seat: "status 500" while the
+//     engine came up minutes later, untracked by the lease that owed the warm). The
+//     seat is watched instead of trusting the status: a load in progress is waited
+//     out, a ready seat is a warm that succeeded, a seat that never started is the
+//     failure, at once.
+//   - llama-swap RELOADING (started with -watch-config, any write to its config
+//     does it): the reload builds a brand-new server, every model cold, swaps it in
+//     and only then shuts the old one down, so the request parked in the old router
+//     is answered "<router> is shutting down" (HTTP 500) while /running already
+//     speaks for the new server, empty. A restart drops the connection instead, or
+//     answers 502/503/504 from whatever fronts it. Those answers mean the load was
+//     interrupted, not refused: the first one opens a recovery window of
+//     warmReloadGrace in which a seat that reads cold (or unreadable, the server
+//     being down) gets the load re-sent after a back-off, and a seat that is
+//     starting (another client's request is already loading it on the new server)
+//     is waited for, not asked again. Inside the window any further 5xx or
+//     transport error other than a timeout is part of the recovery, except an
+//     answer that says the start died (next).
+//   - An answer whose body says the start died (the 502 "unable to start process:
+//     upstream command exited prematurely" this repo records, or the same words in a
+//     500) is a failed start whatever its status: it neither opens the recovery window nor is
+//     re-sent inside one, because re-sending it is a second failed engine launch
+//     while the lease stays held. The seat is still watched first: a seat another
+//     client is loading outranks the body.
+//   - A bare 5xx, with no such signature, over a seat that is not loading is a
+//     start that failed: re-sending it is a second failed load, so it fails at once.
+//   - A status below 500 that is not 2xx (404 "model not found" when the config
+//     edit renamed or removed the seat, 409, 429) was once taken as success whatever
+//     it said, and printed "warmed back" over a seat that never loaded. It is
+//     decided by the seat's state like a 5xx, and never retried.
+//
+// Every failure names the status and the first 120 bytes of the answer.
+func warmSeatGated(ctx context.Context, client *http.Client, endpoint, model string, allow func() bool) error {
 	wu, uerr := modelaffinity.HolderUpstreamURL(endpoint, model, "/health")
 	if uerr != nil {
 		return fmt.Errorf("warm %s: %w", model, uerr)
 	}
+	var (
+		reloaded  bool // a reload or restart signature was seen: the recovery window is open
+		graceEnd  time.Time
+		announced bool
+		delay     = warmRetryFirst
+	)
+	for {
+		a := warmOnce(ctx, client, wu)
+		if a.err != nil && !warmRetryable(ctx, a) {
+			return fmt.Errorf("warm %s: %w", model, a.err)
+		}
+		if a.err == nil && a.status >= 200 && a.status < 300 {
+			return nil
+		}
+		// transient is "the server was going away or not there", whatever the answer said about
+		// the load: the only kind of failure a recovery window covers. An answer that says the
+		// start died is a refusal, not an absence, inside the window as much as outside it.
+		transient := a.err != nil || (a.status >= 500 && !a.startFailed())
+		if !reloaded && warmRetryable(ctx, a) {
+			reloaded, graceEnd = true, time.Now().Add(warmReloadGrace)
+		}
+		// Outside a recovery an unreadable /running during a 5xx is waited out like the load it
+		// may hide (the old rule); inside one it means the server is not up yet, unless the
+		// watch has already seen the seat starting (watchWarm keeps that patience itself).
+		patient := a.err == nil && a.status >= 500 && !reloaded
+		seen, werr := watchWarm(ctx, client, endpoint, model, a, patient)
+		if werr != nil {
+			return werr
+		}
+		if seen == warmSeenReady {
+			return nil
+		}
+		if !reloaded || !transient {
+			return a.failure(model, seen)
+		}
+		if !time.Now().Add(delay).Before(graceEnd) {
+			return fmt.Errorf("warm %s: %s and %s; no recovery within %s of a llama-swap reload/restart",
+				model, a.describe(), seen.clause(), warmReloadGrace)
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return fmt.Errorf("warm %s: %w", model, ctx.Err())
+		case <-timer.C:
+		}
+		if delay *= 2; delay > warmRetryMax {
+			delay = warmRetryMax
+		}
+		if allow != nil && !allow() {
+			return errWarmGuardStopped
+		}
+		if !announced {
+			announced = true
+			state := "the seat is cold"
+			if seen == warmSeenUnknown {
+				state = "the seat reads cold or unreadable"
+			}
+			warmNote(fmt.Sprintf("gpu: warm of %s hit a llama-swap reload or restart (%s); %s, re-sending the load for up to %s",
+				model, a.describe(), state, warmReloadGrace))
+		}
+	}
+}
+
+// warmAttempt is one health request and what came back: a transport error, or a status with
+// the start of the body (kept for every non-2xx answer, bounded by warmBodyRead). bodyErr is
+// the error that cut the body short, when one did: body is then only what arrived before it.
+type warmAttempt struct {
+	status  int
+	body    string
+	bodyErr error
+	err     error
+}
+
+// warmOnce sends the health request once. The body of a non-2xx answer is read, at most
+// warmBodyRead bytes, so the failure can say what the server said and the retry class can
+// recognise a reload by its words.
+func warmOnce(ctx context.Context, client *http.Client, wu string) warmAttempt {
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, wu, nil)
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("warm %s: %w", model, err)
+		return warmAttempt{err: err}
 	}
-	resp.Body.Close()
-	if resp.StatusCode < 500 {
-		return nil
+	defer resp.Body.Close()
+	a := warmAttempt{status: resp.StatusCode}
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		b, rerr := io.ReadAll(io.LimitReader(resp.Body, warmBodyRead))
+		a.body, a.bodyErr = string(b), rerr
 	}
-	// A 5xx is llama-swap giving up on the health wait, not the load failing:
-	// the 3-card seat's cold load outlasts its healthCheckTimeout, and on
-	// 2026-09-18 19:5x the wrapper reported "status 500" while the engine kept
-	// loading and came up minutes later, untracked by the lease that owed the
-	// warm. Watch the seat's own state instead of trusting the status: a load
-	// in progress is waited out, a ready seat is a warm that succeeded, a seat
-	// that never started is the failure.
+	return a
+}
+
+// warmBodyRead is how much of a non-2xx answer the warm reads; warmSnippetMax is how much of
+// it an error message carries.
+const (
+	warmBodyRead   = 512
+	warmSnippetMax = 120
+)
+
+// warmReloadSignature is what llama-swap's router answers a request it was holding when a
+// config reload shut it down: HTTP 500 with "<router> is shutting down" (the router is
+// `matrix` or `group`, so the match starts at the verb). Read in the v236 and v256 sources.
+const warmReloadSignature = " is shutting down"
+
+// warmRetryable reports whether an attempt's failure means the server was reloading or
+// restarting: a transport error that is not the caller's cancellation and not a timeout (a
+// load that outlasted the client is not a reload), a 502/503/504, or the reload router's 500
+// (or a 500 whose body was cut short by such a transport error: the old router dies while it
+// is writing the answer). An answer that says the start died is none of these, whatever its
+// status: it is a failed start, and re-sending it is a second one.
+func warmRetryable(ctx context.Context, a warmAttempt) bool {
+	if a.err != nil {
+		return transportRetryable(ctx, a.err)
+	}
+	if a.startFailed() {
+		return false
+	}
+	switch a.status {
+	case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return true
+	case http.StatusInternalServerError:
+		return strings.Contains(strings.ToLower(a.body), warmReloadSignature) ||
+			(a.bodyErr != nil && transportRetryable(ctx, a.bodyErr))
+	}
+	return false
+}
+
+// transportRetryable reports whether a transport error is a connection that went away (reset,
+// refused, EOF) rather than the caller's cancellation or a timeout.
+func transportRetryable(ctx context.Context, err error) bool {
+	var ne net.Error
+	return ctx.Err() == nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) &&
+		!(errors.As(err, &ne) && ne.Timeout())
+}
+
+// startFailed reports whether the answer's body says the seat's process did not start
+// (seatwait.StartFailed; the contract path's classifier reads the same death marker).
+func (a warmAttempt) startFailed() bool {
+	return a.err == nil && seatwait.StartFailed(a.body)
+}
+
+// describe says what the attempt got: the transport error, or the status with a bounded
+// snippet of the answer and, when reading the answer failed, the error that cut it short.
+func (a warmAttempt) describe() string {
+	if a.err != nil {
+		return a.err.Error()
+	}
+	sn := warmSnippet(a.body)
+	switch {
+	case a.bodyErr != nil && sn != "":
+		return fmt.Sprintf("status %d (%s; the answer was cut short: %v)", a.status, sn, a.bodyErr)
+	case a.bodyErr != nil:
+		return fmt.Sprintf("status %d (the answer could not be read: %v)", a.status, a.bodyErr)
+	case sn != "":
+		return fmt.Sprintf("status %d (%s)", a.status, sn)
+	}
+	return fmt.Sprintf("status %d", a.status)
+}
+
+// failure is the error for an attempt whose seat did not come up and is not retried.
+func (a warmAttempt) failure(model string, seen warmSeen) error {
+	return fmt.Errorf("warm %s: %s and %s", model, a.describe(), seen.clause())
+}
+
+// warmSnippet is the start of an answer for an error message: whitespace collapsed, at most
+// warmSnippetMax bytes, cut on a character boundary.
+func warmSnippet(body string) string {
+	s := strings.Join(strings.Fields(body), " ")
+	if len(s) <= warmSnippetMax {
+		return s
+	}
+	cut := warmSnippetMax - len("...")
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "..."
+}
+
+// warmSeen is what a read of the seat's state said.
+type warmSeen int
+
+const (
+	warmSeenReady   warmSeen = iota // loaded and settled: the warm is done
+	warmSeenCold                    // /running read fine: the seat is not listed and nothing is loading it
+	warmSeenUnknown                 // /running unreadable (or ambiguous) and the caller did not ask to wait on that
+)
+
+// clause says what the reading found, for an error message.
+func (s warmSeen) clause() string {
+	if s == warmSeenUnknown {
+		return "the seat's state could not be read"
+	}
+	return "the seat is not loading"
+}
+
+// watchWarm reads the seat's state (/running only: it reads nothing at the seat) until it
+// settles. A ready seat or a cold one ends the watch at once; a seat that is starting is waited
+// for, bounded by warmWatch; an unreadable /running ends it as unknown unless patient or the
+// last reading that could be read found the seat starting, in which case it is waited out like
+// a load in progress (a poll that fails in the middle of a long load says nothing about the load).
+func watchWarm(ctx context.Context, client *http.Client, endpoint, model string, a warmAttempt, patient bool) (warmSeen, error) {
 	deadline := time.Now().Add(warmWatch)
 	if dl, ok := ctx.Deadline(); ok && dl.Before(deadline) {
 		deadline = dl
 	}
+	starting := false // the last reading that could be read found the seat starting
 	for {
-		// State only (/running): the watch needs loaded/starting, never the
-		// gauge, so it reads nothing at the seat.
 		rd, rerr := seatload.Running(ctx, client, endpoint, model)
+		if rerr == nil && !rd.Ambiguous {
+			starting = rd.Starting
+		}
 		switch {
 		case rerr == nil && rd.Loaded && !rd.Starting:
-			return nil
+			return warmSeenReady, nil
 		case rerr == nil && !rd.Loaded && !rd.Starting && !rd.Ambiguous:
-			return fmt.Errorf("warm %s: status %d and the seat is not loading", model, resp.StatusCode)
+			return warmSeenCold, nil
+		case (rerr != nil || rd.Ambiguous) && !patient && !starting:
+			if ctx.Err() != nil {
+				return 0, fmt.Errorf("warm %s: %w", model, ctx.Err())
+			}
+			return warmSeenUnknown, nil
 		}
 		if !time.Now().Before(deadline) {
-			return fmt.Errorf("warm %s: status %d and the seat did not become ready within %s", model, resp.StatusCode, warmWatch)
+			return 0, fmt.Errorf("warm %s: %s and the seat did not become ready within %s", model, a.describe(), warmWatch)
 		}
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("warm %s: %w", model, ctx.Err())
+			return 0, fmt.Errorf("warm %s: %w", model, ctx.Err())
 		case <-time.After(warmWatchEvery):
 		}
 	}
 }
 
 // warmWatch bounds how long a warm-back watches a load that outlasted
-// llama-swap's own health wait; warmWatchEvery is the poll cadence. Variables
-// so a test can shorten them.
+// llama-swap's own health wait; warmWatchEvery is the poll cadence.
+// warmReloadGrace bounds the recovery after a llama-swap reload or restart (sized against
+// llama-swap's 30 s shutdown wait and 2 s config poll), warmRetryFirst and warmRetryMax are the
+// back-off between re-sends (doubling from the first to the max). Variables so a test can
+// shorten them.
 var (
-	warmWatch      = 15 * time.Minute
-	warmWatchEvery = 5 * time.Second
+	warmWatch       = 15 * time.Minute
+	warmWatchEvery  = 5 * time.Second
+	warmReloadGrace = 60 * time.Second
+	warmRetryFirst  = 1 * time.Second
+	warmRetryMax    = 8 * time.Second
 )
+
+// warmNote says one line about a warm in progress (a retry starting), on stderr; a test
+// replaces it to read what the warm said.
+var warmNote = func(line string) { fmt.Fprintln(os.Stderr, line) }
+
+// errWarmGuardStopped ends a warm whose gate refused a re-send: the guards that allowed the
+// first request no longer allow another, and the caller has already said why.
+var errWarmGuardStopped = errors.New("a warm guard no longer allows the warm")
 
 // seatTarget resolves the seat the maintenance verbs act on: the config's
 // llama-swap endpoint and agent seat alias.
@@ -721,6 +979,9 @@ type warmGuard struct {
 	waiters func() []gpulease.Waiter
 	owed    func() string
 	clear   func()
+	// clearIfSeat is clear for a warm that failed and was then OBSERVED loaded: it removes the
+	// marker only while it still names the seat, and reports whether it did.
+	clearIfSeat func(seat string) bool
 	// onlyIfOwed skips the warm when no warm-back is owed (the seat was not
 	// resident when a lease unloaded it). The wrapper's automatic warm sets it;
 	// an explicit `gpu release --warm-seat` is the operator asking, and loads.
@@ -774,6 +1035,57 @@ func otherLeaseOnSeat(m *gpulease.Manager, self uint64) func(model string) (bool
 	}
 }
 
+// allowsWarm re-reads what a warm-back must hold to touch the card: it is still ours, nobody is
+// queued behind it, and no other live lease sits on the seat's cards. A refusal is said on out
+// and leaves the warm owed. It runs before the warm and before every re-send of a retried one:
+// the retry can run for the reload grace plus a load, and in that time a successor can queue or
+// the card can move on, and a re-send then is the warm landing on somebody else's lease.
+func (g warmGuard) allowsWarm(model string, out io.Writer) bool {
+	if why := g.refusal(model); why != "" {
+		fmt.Fprintf(out, "gpu: %s\n", why)
+		return false
+	}
+	return true
+}
+
+// refusal is allowsWarm's check without the printing: "" when the warm may touch the card, else
+// the sentence saying why not.
+func (g warmGuard) refusal(model string) string {
+	if g.held != nil {
+		if herr := g.held(); herr != nil {
+			return fmt.Sprintf("NOT warming %s back: the card is no longer ours (%v); the seat reloads on demand under whoever holds it", model, herr)
+		}
+	}
+	if g.waiters != nil {
+		if ws := g.waiters(); len(ws) > 0 {
+			names := make([]string, 0, len(ws))
+			for _, w := range ws {
+				names = append(names, fmt.Sprintf("pid %d (%s, queued %s)", w.PID, w.Class, time.Since(w.Since()).Round(time.Second)))
+			}
+			return fmt.Sprintf("NOT warming %s back: %d lease(s) queued behind this one — %s; the warm belongs to the last holder", model, len(ws), strings.Join(names, ", "))
+		}
+	}
+	if g.others != nil {
+		if busy, why := g.others(model); busy {
+			return fmt.Sprintf("NOT warming %s back yet: %s still sits on its cards; the warm stays owed and the last lease on them pays it", model, why)
+		}
+	}
+	return ""
+}
+
+// lockedWriter serialises writes to one writer: the warm's heartbeat goroutine and the warm's
+// own goroutine report on the same out.
+type lockedWriter struct {
+	mu sync.Mutex
+	w  io.Writer
+}
+
+func (l *lockedWriter) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.w.Write(p)
+}
+
 // warmBackGuarded reloads the config's seat when the guard allows it and
 // reports the decision on out. It never returns an error: a skipped or failed
 // warm-back is loud but not fatal — the lease release must still run (a leaked
@@ -783,31 +1095,13 @@ func warmBackGuarded(cfg config.Config, g warmGuard, out io.Writer) {
 	if err != nil {
 		return
 	}
+	out = &lockedWriter{w: out}
 	if g.onlyIfOwed && g.owed != nil && g.owed() == "" {
 		fmt.Fprintf(out, "gpu: not warming %s back: it was not loaded when the lease took the card\n", model)
 		return
 	}
-	if g.held != nil {
-		if herr := g.held(); herr != nil {
-			fmt.Fprintf(out, "gpu: NOT warming %s back: the card is no longer ours (%v); the seat reloads on demand under whoever holds it\n", model, herr)
-			return
-		}
-	}
-	if g.waiters != nil {
-		if ws := g.waiters(); len(ws) > 0 {
-			names := make([]string, 0, len(ws))
-			for _, w := range ws {
-				names = append(names, fmt.Sprintf("pid %d (%s, queued %s)", w.PID, w.Class, time.Since(w.Since()).Round(time.Second)))
-			}
-			fmt.Fprintf(out, "gpu: NOT warming %s back: %d lease(s) queued behind this one — %s; the warm belongs to the last holder\n", model, len(ws), strings.Join(names, ", "))
-			return
-		}
-	}
-	if g.others != nil {
-		if busy, why := g.others(model); busy {
-			fmt.Fprintf(out, "gpu: NOT warming %s back yet: %s still sits on its cards; the warm stays owed and the last lease on them pays it\n", model, why)
-			return
-		}
+	if !g.allowsWarm(model, out) {
+		return
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -842,16 +1136,77 @@ func warmBackGuarded(cfg config.Config, g warmGuard, out io.Writer) {
 			cancel()
 		})
 	}
-	werr := warmSeat(ctx, maintenanceClient, endpoint, model)
+	werr := warmSeatGated(ctx, maintenanceClient, endpoint, model, func() bool { return g.allowsWarm(model, out) })
 	stopRenew()
-	if werr != nil {
-		fmt.Fprintf(out, "gpu: warm-back of %s failed: %v\n", model, werr)
+	if errors.Is(werr, errWarmGuardStopped) {
+		// allowsWarm has said why; the marker stays for the holder that has the right to pay it.
+		fmt.Fprintf(out, "gpu: warm-back of %s stopped during its retry%s\n", model, g.owedNote())
 		return
 	}
-	if g.clear != nil {
-		g.clear()
+	// The request failed but the seat may be up: a load that outlasted the client, a request
+	// answered after someone else loaded the seat. What the seat does outranks how the request
+	// ended, so the debt is paid, once the guards still allow touching the marker: the read takes
+	// a moment and the lease can have gone since the heartbeat last ticked. A cancelled warm (the
+	// lease was lost) is excluded: the card is no longer ours, and a reading taken after that
+	// proves nothing.
+	var (
+		observed   bool
+		confirmErr error  // the confirming read failed: the seat's state is unknown
+		refused    string // the seat reads loaded, but the guards no longer allow clearing the marker
+	)
+	if werr != nil && ctx.Err() == nil {
+		var loaded bool
+		if loaded, confirmErr = seatSettledLoaded(endpoint, model); loaded {
+			if refused = g.refusal(model); refused == "" {
+				observed = true
+			}
+		}
+	}
+	switch {
+	case observed:
+		fmt.Fprintf(out, "gpu: warm-back of %s: the health request failed (%v) but the seat is loaded; treating it as warmed\n", model, werr)
+		if g.clearIfSeat != nil {
+			g.clearIfSeat(model)
+		}
+	case werr != nil:
+		line := fmt.Sprintf("gpu: warm-back of %s failed: %v", model, werr)
+		switch {
+		case refused != "":
+			line += fmt.Sprintf("; the seat reads loaded, but the marker is left alone (%s)", refused)
+		case confirmErr != nil:
+			line += fmt.Sprintf("; could not confirm the seat's state (%v)", confirmErr)
+		}
+		fmt.Fprintln(out, line+g.owedNote())
+		return
+	default:
+		if g.clear != nil {
+			g.clear()
+		}
 	}
 	fmt.Fprintf(out, "gpu: %s warmed back\n", model)
+}
+
+// owedNote ends a line about a warm that did not pay the debt: it says the warm stays owed,
+// and how the marker clears, only when a marker is there. An explicit `gpu release --warm-seat`
+// over a seat nothing was owed to has no debt to keep.
+func (g warmGuard) owedNote() string {
+	if g.owed == nil || g.owed() == "" {
+		return ""
+	}
+	return "; the warm stays owed (`gpu status` clears it once the seat is observed loaded)"
+}
+
+// seatSettledLoaded reads the seat's state once (/running only, so the reading never starts
+// the seat or resets its idle timer) and reports whether it is loaded and no longer starting or
+// stopping. When the read itself fails it says so: an unreadable seat is not a cold one.
+func seatSettledLoaded(endpoint, model string) (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	rd, err := seatload.Running(ctx, maintenanceClient, endpoint, model)
+	if err != nil {
+		return false, err
+	}
+	return rd.Loaded && !rd.Starting, nil
 }
 
 // renewUntilLost calls renew on a ticker until stop is called; the first

@@ -37,7 +37,7 @@ function Bad { param([string]$m) Write-Host "FAIL $m" -ForegroundColor Red; $scr
 
 # Render one profile via install.ps1 -RenderOnly. Returns @{ yaml=<text>; verdict=<obj> }.
 function Invoke-Render {
-  param([string]$Backend, [string]$ProfileId, [string]$RamTier, [bool]$BigRam)
+  param([string]$Backend, [string]$ProfileId, [string]$RamTier, [bool]$BigRam, [string]$Eg2Bin = '')
   $out = Join-Path $work ("$ProfileId-$RamTier.yaml")
   if (Test-Path $out) { Remove-Item $out -Force }
   $env:OFFLOAD_BACKEND  = $Backend
@@ -45,10 +45,11 @@ function Invoke-Render {
   $env:OFFLOAD_RAM_TIER = $RamTier
   if ($BigRam) { $env:OFFLOAD_BIG_RAM = '1' } else { Remove-Item Env:OFFLOAD_BIG_RAM -ErrorAction SilentlyContinue }
   $env:OFFLOAD_HOME = $work
+  if ($Eg2Bin) { $env:OFFLOAD_EG2_LLAMA_BIN = $Eg2Bin } else { Remove-Item Env:OFFLOAD_EG2_LLAMA_BIN -ErrorAction SilentlyContinue }
   try {
     $stdout = & $psExe -NoProfile -File $install -RenderOnly -RenderOut $out 2>&1
   } finally {
-    Remove-Item Env:OFFLOAD_BACKEND, Env:OFFLOAD_PROFILE, Env:OFFLOAD_RAM_TIER, Env:OFFLOAD_HOME -ErrorAction SilentlyContinue
+    Remove-Item Env:OFFLOAD_BACKEND, Env:OFFLOAD_PROFILE, Env:OFFLOAD_RAM_TIER, Env:OFFLOAD_HOME, Env:OFFLOAD_EG2_LLAMA_BIN -ErrorAction SilentlyContinue
     Remove-Item Env:OFFLOAD_BIG_RAM -ErrorAction SilentlyContinue
   }
   if (-not (Test-Path $out)) {
@@ -57,7 +58,7 @@ function Invoke-Render {
   }
   $jsonLine = ($stdout | Where-Object { $_ -match '^\s*\{.*"render_only".*\}\s*$' } | Select-Object -Last 1)
   $verdict = if ($jsonLine) { $jsonLine | ConvertFrom-Json } else { $null }
-  return @{ yaml = (Get-Content -Raw $out); verdict = $verdict; path = $out }
+  return @{ yaml = (Get-Content -Raw $out); verdict = $verdict; path = $out; text = ($stdout | Out-String) }
 }
 
 # The 'common' macro is a YAML folded scalar (>-) spanning 2 lines; join them so
@@ -382,6 +383,75 @@ foreach ($case in @(@('blackwell-16', 'mid'), @('volta-16', 'mid'), @('blackwell
   $eg2Functional = (($r.yaml -split "`r?`n") | Where-Object { $_.Trim() -and $_.Trim() -notmatch '^#' }) -join "`n"
   if ($eg2Functional -notmatch 'embeddinggemma2' -and $eg2Functional -notmatch '(?m)^\s{4}eg2:') { Ok "$pid2/$band renders no embeddinggemma2 (the tier does not carry it)" } else { Bad "$pid2/$band embeddinggemma2 leaked in" }
 }
+# OFFLOAD_EG2_LLAMA_BIN (install render --llama-bin-eg2): a second llama.cpp build for the embeddinggemma2
+# entry ALONE, for a node whose main build is older than b11452 and cannot load that entry. install.ps1
+# installs one pinned tag for every node it installs, so this is an opt-in override, never a default; the
+# renderer moves the entry's cmd path and nothing else, and a Windows build needs no loader macro.
+Write-Host "== OFFLOAD_EG2_LLAMA_BIN: the embeddinggemma2 entry on its own llama.cpp build =="
+$mainFwd = (Join-Path $work 'llama').Replace('\', '/')
+$eg2Dir  = Join-Path $work 'llama-b11490'
+New-Item -ItemType Directory -Force -Path $eg2Dir | Out-Null
+Set-Content -Path (Join-Path $eg2Dir 'llama-server.exe') -Value 'stub' -NoNewline   # the renderer never runs it; install.ps1 only checks it is there
+$eg2Fwd  = $eg2Dir.Replace('\', '/')
+$plainR  = Invoke-Render -Backend 'cuda' -ProfileId 'ampere-8' -RamTier 'mid' -BigRam $false
+$ownR    = Invoke-Render -Backend 'cuda' -ProfileId 'ampere-8' -RamTier 'mid' -BigRam $false -Eg2Bin $eg2Dir
+$plainEg2 = Get-ModelCmd $plainR.yaml 'embeddinggemma2'
+$ownEg2   = Get-ModelCmd $ownR.yaml 'embeddinggemma2'
+$ownE4b   = Get-ModelCmd $ownR.yaml 'offload-e4b'
+if ($plainEg2 -match [regex]::Escape("$mainFwd/llama-server.exe") -and $plainEg2 -notmatch [regex]::Escape($eg2Fwd)) { Ok 'OFFLOAD_EG2_LLAMA_BIN unset: the embeddinggemma2 entry runs from the main llama.cpp build' } else { Bad "OFFLOAD_EG2_LLAMA_BIN unset: embeddinggemma2 cmd is not on the main build (got: $plainEg2)" }
+if ($ownEg2 -match [regex]::Escape("$eg2Fwd/llama-server.exe") -and $ownEg2 -notmatch [regex]::Escape("$mainFwd/")) { Ok 'OFFLOAD_EG2_LLAMA_BIN set: the embeddinggemma2 entry runs from its own build, with forward slashes' } else { Bad "OFFLOAD_EG2_LLAMA_BIN set: embeddinggemma2 cmd is not on the entry's own build (got: $ownEg2)" }
+if ($ownE4b -match [regex]::Escape("$mainFwd/llama-server.exe") -and $ownE4b -notmatch [regex]::Escape($eg2Fwd)) { Ok 'OFFLOAD_EG2_LLAMA_BIN set: offload-e4b stays on the main build' } else { Bad "OFFLOAD_EG2_LLAMA_BIN set: offload-e4b moved (got: $ownE4b)" }
+if ($ownR.yaml -notmatch 'ldembed' -and $ownR.yaml -notmatch '__LLAMA_BIN__' -and $ownR.yaml -notmatch 'LD_LIBRARY_PATH') { Ok 'OFFLOAD_EG2_LLAMA_BIN set: a Windows render carries no loader macro and no leftover token' } else { Bad 'OFFLOAD_EG2_LLAMA_BIN set: a loader macro or a token leaked into the Windows render' }
+$plainLines = @(($plainR.yaml -split "`r?`n") | Where-Object { $_ -notmatch '^\s*#' })
+$ownLines   = @(($ownR.yaml -split "`r?`n") | Where-Object { $_ -notmatch '^\s*#' })
+$lineDiff   = @(Compare-Object $plainLines $ownLines)
+if ($plainLines.Count -eq $ownLines.Count -and $lineDiff.Count -eq 2) { Ok 'OFFLOAD_EG2_LLAMA_BIN set: exactly one functional line differs from the unset render (the entry''s cmd path)' } else { Bad "OFFLOAD_EG2_LLAMA_BIN set: $($lineDiff.Count) functional differences, want 2 (one line out, one in)" }
+# The env is cleared between cases (Invoke-Render's finally): a later render must not inherit it.
+$afterR = Invoke-Render -Backend 'cuda' -ProfileId 'ampere-8' -RamTier 'mid' -BigRam $false
+if ((Get-ModelCmd $afterR.yaml 'embeddinggemma2') -match [regex]::Escape("$mainFwd/llama-server.exe")) { Ok 'OFFLOAD_EG2_LLAMA_BIN does not leak into the next render' } else { Bad 'OFFLOAD_EG2_LLAMA_BIN leaked into a later render' }
+
+# The renderer's b11452 floor check cannot read a build from a directory whose name states none, and says so in
+# a `note:` line on stdout. install.ps1 must RELAY it to the console (its filter once passed only WARNING and
+# indented lines, so the note was printed and dropped) when the operator chose the build, and must NOT raise it
+# for its own build (<home>/llama never states one; the pinned tag is held above the floor by a Go test), where
+# it would be a false alarm on every embeddinggemma2 tier.
+$nameless = Join-Path $work 'llama-new'
+New-Item -ItemType Directory -Force -Path $nameless | Out-Null
+Set-Content -Path (Join-Path $nameless 'llama-server.exe') -Value 'stub' -NoNewline
+$noteR = Invoke-Render -Backend 'cuda' -ProfileId 'ampere-8' -RamTier 'mid' -BigRam $false -Eg2Bin $nameless
+if ($noteR.text -match '(?m)^\s*note: tier ampere-8 renders embeddinggemma2' -and $noteR.text -match 'could not be read from its directory name' -and $noteR.text -match 'so the floor was not checked' -and $noteR.text.Contains($nameless.Replace('\', '/'))) { Ok 'OFFLOAD_EG2_LLAMA_BIN naming no build: the floor note reaches the console, naming the directory' } else { Bad "OFFLOAD_EG2_LLAMA_BIN naming no build: the floor note was dropped (output: $($noteR.text))" }
+if ((Get-ModelCmd $noteR.yaml 'embeddinggemma2') -match [regex]::Escape(($nameless.Replace('\', '/')) + '/llama-server.exe')) { Ok 'OFFLOAD_EG2_LLAMA_BIN naming no build: the render proceeds on that build' } else { Bad 'OFFLOAD_EG2_LLAMA_BIN naming no build: the entry is not on the build it names' }
+if ($plainR.text -notmatch 'embeddinggemma2, which needs llama\.cpp' -and $ownR.text -notmatch 'embeddinggemma2, which needs llama\.cpp') { Ok 'the installer''s own build and an override named for its build (b11490) raise no floor note' } else { Bad "an unneeded floor note reached the console (own build: $($plainR.text) / b11490 override: $($ownR.text))" }
+
+# A directory with no llama-server.exe is refused by install.ps1 itself, and a tier that renders no
+# embeddinggemma2 entry is refused by the renderer, naming the flag; neither leaves a config behind.
+function Invoke-RenderExpectFail {
+  param([string]$Backend, [string]$ProfileId, [string]$RamTier, [string]$Eg2Bin)
+  $out = Join-Path $work ("$ProfileId-$RamTier-refused.yaml")
+  if (Test-Path $out) { Remove-Item $out -Force }
+  $env:OFFLOAD_BACKEND = $Backend; $env:OFFLOAD_PROFILE = $ProfileId; $env:OFFLOAD_RAM_TIER = $RamTier
+  $env:OFFLOAD_HOME = $work; $env:OFFLOAD_EG2_LLAMA_BIN = $Eg2Bin
+  # The child writes its refusal to stderr, which Windows PowerShell 5.1 (CI's installer-windows job)
+  # turns into a TERMINATING NativeCommandError under this file's 'Stop': capture on Continue, judge by
+  # the exit code (the same wrap as the seed-parity call below).
+  $prevEap = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try {
+    $text = & $psExe -NoProfile -File $install -RenderOnly -RenderOut $out 2>&1
+    $code = $LASTEXITCODE
+  } finally {
+    $ErrorActionPreference = $prevEap
+    Remove-Item Env:OFFLOAD_BACKEND, Env:OFFLOAD_PROFILE, Env:OFFLOAD_RAM_TIER, Env:OFFLOAD_HOME, Env:OFFLOAD_EG2_LLAMA_BIN -ErrorAction SilentlyContinue
+  }
+  return @{ code = $code; text = ($text | Out-String); wrote = (Test-Path $out) }
+}
+$emptyDir = Join-Path $work 'llama-empty'
+New-Item -ItemType Directory -Force -Path $emptyDir | Out-Null
+$f1 = Invoke-RenderExpectFail -Backend 'cuda' -ProfileId 'ampere-8' -RamTier 'mid' -Eg2Bin $emptyDir
+if ($f1.code -ne 0 -and -not $f1.wrote -and $f1.text -match 'OFFLOAD_EG2_LLAMA_BIN' -and $f1.text -match 'llama-server\.exe') { Ok 'OFFLOAD_EG2_LLAMA_BIN naming a directory without llama-server.exe is refused, nothing written' } else { Bad "OFFLOAD_EG2_LLAMA_BIN with no llama-server.exe: code=$($f1.code) wrote=$($f1.wrote) text=$($f1.text)" }
+$f2 = Invoke-RenderExpectFail -Backend 'cuda' -ProfileId 'blackwell-16' -RamTier 'mid' -Eg2Bin $eg2Dir
+if ($f2.code -ne 0 -and -not $f2.wrote -and $f2.text -match '--llama-bin-eg2' -and $f2.text -match 'blackwell-16') { Ok 'OFFLOAD_EG2_LLAMA_BIN on a tier without the entry is refused by name, nothing written' } else { Bad "OFFLOAD_EG2_LLAMA_BIN on blackwell-16: code=$($f2.code) wrote=$($f2.wrote) text=$($f2.text)" }
+
 # NEGATIVE: a tier that does NOT set include_qwen35_4b must have the entry, its var
 # and its set membership stripped — the mirror of the blackwell-32 qwen3.8 check.
 # Comment-insensitive: the template documents the seat in prose that survives the strip.

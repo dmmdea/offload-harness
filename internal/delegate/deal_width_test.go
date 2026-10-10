@@ -220,7 +220,7 @@ func TestRunBatchedDealsTwelvePagesAsOneBatchAcrossTheFleet(t *testing.T) {
 // that frees.
 func TestANodeThatPublishesNoCeilingIsHeldToFourWhenTheCallsOtherLegsFinish(t *testing.T) {
 	compressPolls(t, 5*time.Millisecond, 2*time.Second)
-	fast := newFanProbe(1, 5*time.Second)          // releases every job as soon as one is open
+	fast := newFanProbe(1, 5*time.Second)            // releases every job as soon as one is open
 	hold := newFanProbe(1000, 1500*time.Millisecond) // never reaches its peak, so each job is held 1.5 s
 	_, fastURL := fast.node(t, "n1", 4)
 	_, oldURL := hold.node(t, "old", 0)
@@ -425,42 +425,11 @@ func TestTheLocalSeatCountsOnlyItsRunCapRoomInTheWidth(t *testing.T) {
 
 // TestAWaitHoldingARunSlotOfAWideCallKeepsItsTTLWhileASubtaskIsUnstarted is ADR 0073 decision 9 with six slots instead of four:
 // seven subtasks, one node that publishes six slots and never has room. The deal opens six, the seventh waits behind them for a
-// slot, and the six that hold slots wait only the TTL (0.3 s) and say why; the seventh, started when the first slot freed, has
-// nothing behind it and waits for the call's horizon.
+// slot, and the six that hold slots wait only the TTL and say why; the seventh, started when the first slot freed, has
+// nothing behind it and waits for the call's horizon. heldSlotWait (callwait_slots_test.go) is the body the four-slot test
+// shares, and says what each assertion proves and when a run is skipped as the runner's stall.
 func TestAWaitHoldingARunSlotOfAWideCallKeepsItsTTLWhileASubtaskIsUnstarted(t *testing.T) {
-	compressPolls(t, 5*time.Millisecond, time.Second)
-	compressWait(t, 20*time.Millisecond, 0)
-	withCallReserve(t, 200*time.Millisecond)
-	withBuiltInWait(t, 300*time.Millisecond)
-	_, url := refusingNode(t, "node-full", http.StatusServiceUnavailable, func(f *fakeNode) {
-		f.maxConcurrentJobs, f.maxQueueDepth = 6, 12
-	})
-	cfg := testCfg(t)
-	cfg.AgentPlacementWaitSec = 0
-
-	results, sum, _ := runWithin(t, 10*time.Second, cfg, neverLocal(t), pages(7), "remote", []string{url}, deadlineIn(2500*time.Millisecond), nil)
-
-	if sum.Deferred != 7 {
-		t.Fatalf("summary %+v, want every subtask deferred for capacity: the node never had room", sum)
-	}
-	for i, pr := range results[:6] {
-		r := pr.Result.Reason
-		for _, want := range []string{"no node had room within 300ms", "subtask(s) of the call had not started"} {
-			if !strings.Contains(r, want) {
-				t.Errorf("result %d reason = %q, want it to contain %q: a wait holding a run slot keeps its TTL", i, r, want)
-			}
-		}
-		if pr.CapacityWaitSec > 1.2 {
-			t.Errorf("result %d waited %.2f s, want about the 0.3 s TTL: it held its slot for the call's horizon instead", i, pr.CapacityWaitSec)
-		}
-	}
-	last := results[6]
-	if !strings.Contains(last.Result.Reason, "before the call's deadline") || strings.Contains(last.Result.Reason, "had not started") {
-		t.Errorf("the last subtask's reason = %q, want it bounded by the call: nothing was behind it", last.Result.Reason)
-	}
-	if last.CapacityWaitSec < 1.0 {
-		t.Errorf("the last subtask waited %.2f s, want it to outwait the 0.3 s TTL the earlier ones were held to", last.CapacityWaitSec)
-	}
+	heldSlotWait(t, pages(7), func(f *fakeNode) { f.maxConcurrentJobs, f.maxQueueDepth = 6, 12 })
 }
 
 // TestASubtaskBehindAWideCallIsNotStartedInsideTheReserve is decision 10 with six slots: seven subtasks over two nodes that

@@ -111,6 +111,9 @@ func runGPUStatus(args []string) error {
 	if err != nil {
 		return err
 	}
+	// The readings below begin here: a marker stamped after this instant belongs to a lease
+	// they cannot speak for (see the stale-marker clear).
+	readsBegan := time.Now()
 	// With the scope the seat gates read (plan P4): a legacy whole-node lease arrives with the
 	// cards the evidence rule scoped it to, or with the reason it stayed whole-node.
 	info := modelaffinity.ScopeInfo(m.Dir(), m.Inspect())
@@ -121,6 +124,19 @@ func runGPUStatus(args []string) error {
 	// the agent seat is owed a warm-back by the last of them.
 	waiters := m.Waiters()
 	warmOwed := m.SeatWarmOwed()
+	// A marker the readings prove moot is removed, and said. The readings above took as long as
+	// the whole activity snapshot, so the clear itself checks what they cannot: that the marker
+	// is older than they are, and that no lease is live now. When it declines (a lease stamped
+	// a fresh marker meanwhile, or another status run got there first) the live value is
+	// reported, not the one read before.
+	clearedStale := ""
+	if warmOwedIsStale(info, act, warmOwed) {
+		if m.ClearSeatWarmOwedIfStale(warmOwed, readsBegan) {
+			clearedStale, warmOwed = warmOwed, ""
+		} else {
+			warmOwed = m.SeatWarmOwed()
+		}
+	}
 	// Non-harness processes holding significant VRAM right now (register
 	// D-1xx-4, 2026-09-23): visible here too, not only at acquire, because a
 	// session reading `gpu status` mid-investigation deserves the same
@@ -156,6 +172,11 @@ func runGPUStatus(args []string) error {
 			// The next step, spelled out: a session reading "held" used to conclude
 			// "refuse the work"; the honest answer is "queue behind it".
 			"queue_with": queueHint,
+		}
+		// The seat whose stale warm-back marker this run removed (the key is only present when
+		// one was), so a reader of the JSON can tell "nothing was owed" from "it was just cleared".
+		if clearedStale != "" {
+			out["seat_warm_owed_cleared"] = clearedStale
 		}
 		// Card-scoped leases (P2): the cards a lease holds and every live epoch. Only
 		// present when they matter, so a whole-node host's output is unchanged.
@@ -215,6 +236,9 @@ func runGPUStatus(args []string) error {
 				parts = append(parts, fmt.Sprintf("pid %d (%s%s, %s in line)", w.PID, w.Class, scope, time.Since(w.Since()).Round(time.Second)))
 			}
 			fmt.Printf("  queued: %d — %s\n", len(waiters), strings.Join(parts, ", "))
+		}
+		if clearedStale != "" {
+			fmt.Printf("  cleared the stale warm-back marker for %s: the seat is loaded and no lease holds the card\n", clearedStale)
 		}
 		if warmOwed != "" {
 			fmt.Printf("  seat warm-back owed: %s (paid by the last holder to release)\n", warmOwed)
@@ -1010,13 +1034,14 @@ func markWarmOwed(m *gpulease.Manager) func(seat string) {
 // heartbeats ownership; waiters and the marker come from the manager.
 func leaseWarmGuard(m *gpulease.Manager, l *gpulease.Lease) warmGuard {
 	return warmGuard{
-		held:       l.Check,
-		renew:      l.Renew,
-		waiters:    m.Waiters,
-		owed:       m.SeatWarmOwed,
-		clear:      m.ClearSeatWarmOwed,
-		onlyIfOwed: true,
-		others:     otherLeaseOnSeat(m, l.Epoch()),
+		held:        l.Check,
+		renew:       l.Renew,
+		waiters:     m.Waiters,
+		owed:        m.SeatWarmOwed,
+		clear:       m.ClearSeatWarmOwed,
+		clearIfSeat: m.ClearSeatWarmOwedIfSeat,
+		onlyIfOwed:  true,
+		others:      otherLeaseOnSeat(m, l.Epoch()),
 	}
 }
 
@@ -1037,11 +1062,12 @@ func releaseWarmGuard(m *gpulease.Manager, epoch uint64) warmGuard {
 		// No Lease object to heartbeat here (a detached holder's child does
 		// that), but the ownership check re-runs on the same cadence for the
 		// warm's whole length, so a card that moves on mid-load cancels it.
-		renew:   held,
-		waiters: m.Waiters,
-		owed:    m.SeatWarmOwed,
-		clear:   m.ClearSeatWarmOwed,
-		others:  otherLeaseOnSeat(m, epoch),
+		renew:       held,
+		waiters:     m.Waiters,
+		owed:        m.SeatWarmOwed,
+		clear:       m.ClearSeatWarmOwed,
+		clearIfSeat: m.ClearSeatWarmOwedIfSeat,
+		others:      otherLeaseOnSeat(m, epoch),
 	}
 }
 
@@ -1068,6 +1094,29 @@ func drainDeadline(explicit time.Duration, queuedAt time.Time, wait time.Duratio
 // root, its llama-swap and its agent seat, with a utilization sample.
 func activityOptions(cfg config.Config) gpuactivity.Options {
 	return gpuactivity.Options{LockOverride: cfg.GPULockPath, StateDir: cfg.StateDir, Endpoint: cfg.Endpoint, Seat: cfg.AgentPlannerModel(""), SampleGPU: true, Scope: modelaffinity.ScopeFunc(cfg.GPULockPath, cfg.StateDir), OrphanGrace: cfg.GPUOrphanGrace(), ComfyDir: cfg.ComfyDir}
+}
+
+// warmOwedIsStale reports whether the owed-warm marker is provably moot: the card is free of
+// EVERY lease and the agent seat the marker names is read loaded and settled. The marker means
+// "the seat was cleared for a lease and nobody has loaded it back"; a failed warm-back whose
+// load went through anyway, or any client's request, loads it, and nothing else ever cleared
+// the marker, so the next `--unload-seat` wrapper warmed a seat that was cold when its lease
+// began (the 2026-09-23 defect the was-resident check exists for).
+//
+// The free-card test is info.Held, which is true whenever ANY lease is live: the lease reader
+// returns the lowest live epoch's record (Held set for every live record) and a zero Info only
+// when nothing is live, and the legacy-scope pass leaves Held alone. Only the fields of that
+// summary that describe the lowest lease (epoch, devices) are the lowest lease's; Held is not
+// one of them. act.Held is the activity read's own, later, reading of the same fact.
+//
+// A seat that is starting or stopping has not settled, a seat that could not be read proves
+// nothing, and another seat's state says nothing about this one.
+func warmOwedIsStale(info gpulease.Info, act gpuactivity.View, owed string) bool {
+	if owed == "" || info.Held || act.Held {
+		return false
+	}
+	s := act.Seat
+	return s.Err == "" && s.Loaded && !s.Starting && !s.Stopping && strings.EqualFold(owed, s.Name)
 }
 
 func printActivity(v gpuactivity.View) {

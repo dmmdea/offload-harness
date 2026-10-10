@@ -2706,10 +2706,6 @@ type residency struct {
 	busy  string // "<id>:<state>" of a row for ANOTHER model that is mid-swap ("" = none)
 }
 
-// warmDeathMarker is llama-swap's own wording for a start whose engine exited
-// ("upstream command exited prematurely"): the one body that says a start died.
-const warmDeathMarker = "upstream command exited"
-
 // warmBodyMax bounds the part of a refused warm request's body that is read.
 const warmBodyMax = 4 << 10
 
@@ -2734,7 +2730,7 @@ func warmStartFailed(status int, body string, res residency, readErr error) (fai
 		return false, fmt.Sprintf("the seat's own row reads %s: a load is in flight", res.state)
 	case res.busy != "":
 		return false, res.busy + " is mid-swap: the seat may be queued behind it"
-	case strings.Contains(strings.ToLower(body), warmDeathMarker):
+	case strings.Contains(strings.ToLower(body), seatwait.DeathMarker):
 		return true, ""
 	case seatwait.Retryable(status, body):
 		return false, "llama-swap answered a busy shape: peers hold the seat"

@@ -15,6 +15,12 @@
 #                 directory on the data drive `local-offload install volumes --data` picks: never
 #                 the OS drive, a cloud-synced virtual drive or a FAT volume) | OFFLOAD_ALLOW_OS_DATA=1 (the explicit decision to keep data on the OS
 #                 drive, e.g. a one-disk machine; recorded, never a silent fallback)
+#                 OFFLOAD_EG2_LLAMA_BIN (opt-in; install render --llama-bin-eg2): a directory holding the
+#                 llama-server.exe of a SECOND llama.cpp build, b11452 or newer, that serves ONLY the
+#                 embeddinggemma2 entry. This script installs one pinned tag for every node it installs, so the
+#                 override is for a node that keeps an older main build. The directory must be a COMPLETE
+#                 extraction (the llama zip, plus the cudart zip for CUDA): Windows resolves DLLs beside the exe.
+#                 Removing the override does not re-render by itself; re-run with -RenderOnly (or delete the yaml).
 #
 # -RenderOnly (H2): resolve the profile + render llama-swap.yaml ONLY (Step 1 + Step 6),
 #                 Rendering is DELEGATED to `local-offload install render` (ADR 0021), so
@@ -1767,12 +1773,26 @@ $gatedSeats = [ordered]@{
 }
 # -RenderOnly always renders fresh: drop any stale output so the Step SKIP test can't short-circuit it.
 if ($RenderOnly -and (Test-Path $yamlDest)) { Remove-Item $yamlDest -Force }
+# OFFLOAD_EG2_LLAMA_BIN: the embeddinggemma2 entry's OWN llama.cpp build, for a node whose main build is older
+# than b11452 and cannot load it (the entry's architecture is gemma-embedding2). Opt-in and operator-managed:
+# the pinned tag above is already at or past the floor, so an installer-managed node needs no second build.
+# Forward slashes, like every rendered path (llama-swap on Windows chokes on backslash escapes). The renderer
+# refuses the flag, naming the tier, on a tier that renders no embeddinggemma2 entry.
+$eg2Bin = ''
+if ($env:OFFLOAD_EG2_LLAMA_BIN) {
+  $eg2Dir = $env:OFFLOAD_EG2_LLAMA_BIN.Trim()
+  if (-not (Test-Path -LiteralPath (Join-Path $eg2Dir 'llama-server.exe'))) {
+    throw "OFFLOAD_EG2_LLAMA_BIN=$eg2Dir holds no llama-server.exe - point it at the directory of a COMPLETE llama.cpp b11452-or-newer extraction (the llama zip, plus the cudart zip for CUDA), or unset it"
+  }
+  $eg2Bin = $eg2Dir.Replace('\', '/').TrimEnd('/')
+}
 Step "render llama-swap.yaml (backend=$tplBackend profile=$(if ($profileId) { $profileId } else { '(defaults)' }) ctx=$(if ($pp.known) { $pp.ctx } else { 'template' }) kv=$(if ($pp.known) { $pp.kv_k } else { 'template' }) 26b=$(if ($pp.known) { $pp.moe_mode } else { 'template' }))" `
   {
     (Test-Path $yamlDest) -and
     -not (Select-String -Path $yamlDest -Pattern '__(LLAMA_BIN|MODELS|NTHREADS|CTX|KV_K|KV_V|FLASH_ATTN|MOE_26B|M26_ALT|M26_AND|Q38_ALT|Q38_AND)__' -Quiet) -and
     -not (Select-String -Path $yamlDest -SimpleMatch -Pattern $llamaDir -Quiet) -and   # backslash path = stale pre-R3.6 render
     (($tplBackend -ne 'vulkan') -or (Select-String -Path $yamlDest -SimpleMatch -Pattern 'GGML_VK_VISIBLE_DEVICES' -Quiet)) -and   # J1: vulkan render without the device pin = stale pre-0.22.19 render
+    ((-not $eg2Bin) -or (Select-String -Path $yamlDest -SimpleMatch -Pattern "$eg2Bin/llama-server.exe" -Quiet)) -and   # OFFLOAD_EG2_LLAMA_BIN set but the entry not on that build = rendered before the override (or on another one): an upgrade must re-render. Anchored on the executable: a bare directory is a substring of a longer sibling (llama-b11490 inside llama-b11490-bin-win-cuda-12.4-x64)
     # A gated seat this tier enables but the rendered yaml does not contain = that yaml
     # PREDATES the seat. Without this probe an UPGRADE on an existing box downloads the
     # weights in Step 5 and then SKIPs the render here, so the installer prints all-OK
@@ -1810,6 +1830,8 @@ Step "render llama-swap.yaml (backend=$tplBackend profile=$(if ($profileId) { $p
       '--out', $yamlDest,
       '--root', (Split-Path -Parent $scriptDir)
     )
+    # The embeddinggemma2 entry's own build (OFFLOAD_EG2_LLAMA_BIN), only when the operator set one.
+    if ($eg2Bin) { $renderArgs += @('--llama-bin-eg2', $eg2Bin) }
     # An unknown/absent profile still renders: the binary carries the same off-matrix
     # backend defaults this script used to hold, keyed by the TEMPLATE's backend.
     if ($pp.known -and $profileId) { $renderArgs += @('--profile', $profileId) }
@@ -1838,7 +1860,13 @@ Step "render llama-swap.yaml (backend=$tplBackend profile=$(if ($profileId) { $p
     # Surface the binary's own warnings (e.g. a declared seat whose weights are absent).
     # The payload lines are indented continuations under the WARNING header — the old
     # header-only filter silently truncated every file list the warning exists to show.
-    $renderOut | Where-Object { $_ -match 'WARNING' -or $_ -match '^\s{2}\S' } | ForEach-Object { Write-Host "      $_" -ForegroundColor Yellow }
+    # `note:` lines are the renderer's advisories on stdout (stderr would abort this install, see above):
+    # an embeddinggemma2 build whose directory name states no b<number>, so the b11452 floor went unchecked.
+    # The one about THIS script's own build (<home>/llama, which never states a build) is not relayed:
+    # that build is the pinned tag, held at or above the floor by a test, so on every embeddinggemma2
+    # tier it would be a false alarm. With OFFLOAD_EG2_LLAMA_BIN set the operator chose the build, and
+    # the note is the only warning about it.
+    $renderOut | Where-Object { $_ -match 'WARNING' -or $_ -match '^\s{2}\S' -or ($_ -match '^note:' -and ($eg2Bin -or $_ -notmatch 'so the floor was not checked')) } | ForEach-Object { Write-Host "      $_" -ForegroundColor Yellow }
     if (-not (Test-Path $yamlDest)) { throw "install render reported success but wrote no $yamlDest" }
   }
 
