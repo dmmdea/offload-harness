@@ -528,6 +528,31 @@ These design choices are load-bearing rather than incidental:
   Whether such a claim *survives* is `Report`'s call (`DropHollow`): a line that carries any
   structure — a known severity, a file or a why — is kept however badly the rest is formatted,
   and only a bare claim is dropped, counted.
+- **The re-pack is a copy of the answer, and a lossy one, so the answer is read too (0.178.0).**
+  Three independent reports on 2026-10-09 showed findings with every field empty but the claim,
+  on a mimo-9b seat (twice) and a qwen3.6-35b-a3b seat (once). Running this lane's exact prompt
+  and schema on those fleet seats found two mechanisms, and in both the seat's own answer was
+  strictly richer than what the re-pack made of it. (1) The grammar-lane re-pack is told only
+  `"findings" (array of strings)`, so on the qwen3.6 seat it split one perfectly formed line,
+  `severe | file:3764 | claim | why`, into its claim and its why as two list items and dropped the
+  severity and the location. (2) A mimo-9b seat repeated a line; the loop's repetition guard read
+  that as a cut final (finish_reason was `stop`, 471 tokens of a 2,048 budget) and re-issued it
+  with `listCapInstruction`'s "Return the same JSON object that was asked for". This lane never
+  asked for JSON, so the seat invented one, `{"findings":[{"severity","path","line","claim","why"},…]}`,
+  and the re-pack kept one string per object: its claim. A control run (a 20-line diff, no re-issue)
+  came back with nine intact pipe lines and a faithful re-pack, so the re-pack is lossy when its
+  input is not already an array of strings, not by nature. `reviewlane.RawLines` therefore reads
+  the answer in the two shapes seen (the pipe lines the prompt asks for, and a fenced or bare JSON
+  document of strings or `severity`/`path`|`file`/`line`/`claim`/`why` objects, rendered back to
+  pipe lines), `reviewPayload` runs both readings through the same filters and publishes whichever
+  keeps MORE findings, and a tie keeps the re-pack — what every run that worked has always shown,
+  including its stripping of a preamble that the raw reading would count as a hollow line.
+  When the answer's reading wins the result carries `salvaged: "repack_flattened"` and a note.
+  The objects the object-array schema option would have asked the re-pack for cannot be had on
+  this fleet anyway: `gbnf.FromJSONSchema` compiles object items to strings, and only vLLM seats
+  honour a full JSON schema. Not changed here, and the upstream of mechanism (2): the cut-final
+  re-issue asserts a JSON object for every schema contract whatever its goal asked for, and the
+  repetition guard (`minRepeats = 4`) turns a reviewer that repeats a line into that re-issue.
 - **An empty findings list is never published unless the seat EARNED it.** "No findings" is the
   one result a reader might take as reassurance, and a broken run reaches exactly that shape:
   `agent/loop.go` returns `stop_reason:"done"` as soon as the model stops requesting tools with
@@ -576,8 +601,9 @@ These design choices are load-bearing rather than incidental:
   left to the wall + 30 s grace …`. In each, the seat had written review lines and the lane threw
   them away. The answer format is line-oriented and `ParseFindings` already reads raw lines, so the
   re-pack is a convenience here, not a requirement: `reviewlane.Salvage` takes the raw answer's
-  complete lines and `publishReview` runs them through the normal `Report` path (echo, hollow,
-  grounding, dedupe, same-line fold, cap). It keys on structure, never on prose: the node's own
+  complete lines (a finished answer is read with `RawLines`, below, so JSON finding objects count;
+  a cut one is split on newlines and loses its last line) and `publishReview` runs them through the
+  normal `Report` path (echo, hollow, grounding, dedupe, same-line fold, cap). It keys on structure, never on prose: the node's own
   `output_truncated` flag, or `schema_miss` with the `budget` class (a finished answer whose
   re-pack the clock skipped, clamped or cut; a canceled re-pack is excluded because nobody is
   waiting). A cut answer's last line is dropped, because it is a fragment. What survives is

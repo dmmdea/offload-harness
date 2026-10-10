@@ -589,6 +589,10 @@ const (
 	// SalvagedWall: the loop finished and the clock ended the structured re-pack — skipped for
 	// lack of wall, or clamped and cut by the time left. The answer is complete.
 	SalvagedWall = "wall"
+	// SalvagedRepackFlattened: the re-pack ran and returned, but it had flattened the findings
+	// (a bare sentence apiece, or one pipe line split into its fields) and the seat's own answer
+	// held strictly more findings once read. See RawLines.
+	SalvagedRepackFlattened = "repack_flattened"
 )
 
 // Salvage reads a DEFERRED agent result whose seat had already written the review and was
@@ -625,9 +629,123 @@ func Salvage(w core.AgentWireResult) (kind string, lines []string) {
 	case w.OutputTruncated:
 		return SalvagedOutputTruncated, answerLines(w.Output, true)
 	case w.SchemaMiss && w.DeferClass == core.DeferClassBudget && !strings.HasPrefix(w.Reason, core.RepackCanceledReason):
-		return SalvagedWall, answerLines(w.Output, false)
+		// A finished answer: read it the way a delivered one is, so the shapes a seat is seen
+		// to write (RawLines) are one reader's business and the two paths cannot diverge.
+		return SalvagedWall, RawLines(w.Output)
 	}
 	return "", nil
+}
+
+// Survivors is how many findings outlived every filter, before the cap hid any: what a reading
+// of the seat's answer is worth, and the number two readings of the same answer are compared on.
+func (r Result) Survivors() int { return len(r.Findings) + r.TruncatedByCap }
+
+// RawLines reads the lines of a seat's RAW final answer, the text the structured re-pack is only
+// a copy of. It exists because the copy is the weak link: on 2026-10-09 three review reports came
+// back as findings with every field empty but the claim, and a live probe of the same prompt on
+// the same fleet seats found two different ways the re-pack gets there.
+//
+//   - The grammar-lane re-pack is told only `"findings" (array of strings)`, so on a
+//     qwen3.6-35b-a3b seat it SPLIT one perfectly formed line (`severe | file:3764 | claim | why`)
+//     into its claim and its why as two list items and dropped the severity and the location.
+//   - A mimo-9b seat repeated a line, the loop's repetition guard read that as a cut final, and
+//     the cut-final re-issue told it to "return the same JSON object that was asked for". This
+//     lane never asked for JSON, so the seat invented one, {"findings":[{"severity", "path",
+//     "line", "claim", "why"}, ...]}, and the re-pack kept one string per object: its claim.
+//
+// In both, the raw answer is strictly richer than what the re-pack made of it. So the door reads
+// both and keeps the richer reading (see the door's use of Survivors); the re-pack stays the
+// default because it also strips a preamble, and a faithful one reads identically.
+//
+// Two shapes are recognised. Pipe lines, the format the prompt asks for, are the answer split on
+// newlines. A JSON document (fenced or bare, {"findings":[...]} or a bare array) whose items are
+// strings or objects is rendered back into pipe lines, one per item, so ParseFindings and every
+// filter see exactly what they see for a seat that followed the format. The keys read are the ones
+// the prompt's own placeholders spell: severity, path (or file), line, claim, why.
+func RawLines(output string) []string {
+	if lines := jsonFindingLines(output); len(lines) > 0 {
+		return lines
+	}
+	return strings.Split(output, "\n")
+}
+
+// jsonFindingLines returns the findings of the JSON document a seat answered with, one pipe line
+// each, or nil when the answer holds no such document. The document must open a LINE (after an
+// optional fence), so a bracket inside a pipe-line claim ("indexes xs[len(xs)]") can never hijack a
+// plain answer, and it must yield at least one non-empty line, so a stray array in prose reads as
+// the prose it is.
+func jsonFindingLines(output string) []string {
+	off := 0
+	for _, ln := range strings.SplitAfter(output, "\n") {
+		t := strings.TrimLeft(ln, " \t")
+		if strings.HasPrefix(t, "{") || strings.HasPrefix(t, "[") {
+			var doc any
+			if json.NewDecoder(strings.NewReader(output[off+len(ln)-len(t):])).Decode(&doc) != nil {
+				return nil
+			}
+			var items []any
+			switch d := doc.(type) {
+			case map[string]any:
+				items, _ = d["findings"].([]any)
+			case []any:
+				items = d
+			}
+			var lines []string
+			for _, it := range items {
+				var line string
+				switch v := it.(type) {
+				case string:
+					line = v
+				case map[string]any:
+					line = objectLine(v)
+				}
+				if strings.TrimSpace(line) != "" {
+					lines = append(lines, line)
+				}
+			}
+			return lines
+		}
+		off += len(ln)
+	}
+	return nil
+}
+
+// lineSuffixRe matches a trailing ":<line>" on a path.
+var lineSuffixRe = regexp.MustCompile(`:\d+$`)
+
+// objectLine renders one finding object as the pipe line the prompt asks for, leaving out the
+// parts it lacks so the line still reads in the shapes ParseFindings knows: "sev | file:line |
+// claim | why", "sev | claim | why", "file:line | claim | why", or the bare claim (which is hollow
+// and dropped). A pipe inside a value would shift the fields, so it is written as a slash.
+func objectLine(o map[string]any) string {
+	f := make(map[string]string, len(o))
+	for k, v := range o {
+		switch t := v.(type) {
+		case string:
+			f[strings.ToLower(k)] = strings.TrimSpace(t)
+		case float64:
+			f[strings.ToLower(k)] = strconv.Itoa(int(t))
+		}
+	}
+	pick := func(keys ...string) string {
+		for _, k := range keys {
+			if v := f[k]; v != "" {
+				return strings.TrimSpace(strings.ReplaceAll(v, "|", "/"))
+			}
+		}
+		return ""
+	}
+	sev, file, claim, why := pick("severity"), pick("path", "file"), pick("claim"), pick("why")
+	if line := pick("line"); file != "" && line != "" && line != "0" && !lineSuffixRe.MatchString(file) {
+		file += ":" + line
+	}
+	var parts []string
+	for _, p := range []string{sev, file, claim, why} {
+		if p != "" {
+			parts = append(parts, p)
+		}
+	}
+	return strings.Join(parts, " | ")
 }
 
 // answerLines splits a seat's raw final answer into its lines. cut means the answer was ended

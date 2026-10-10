@@ -900,3 +900,133 @@ func TestSalvagedLinesMeetEveryFilterReportApplies(t *testing.T) {
 		t.Fatalf("every filter must have counted its line, and the fragment must not be among them: %+v", rep)
 	}
 }
+
+// The live fixtures below are the seats' own words, captured 2026-10-09 by running this lane's
+// exact prompt and schema on the fleet (agent_delegate, one node pinned per call), trimmed to a
+// few findings. They are what the structured re-pack was handed, and RawLines is what reads them.
+const (
+	// A qwen3.6-35b-a3b seat: one perfectly formed line. The grammar-lane re-pack returned it as
+	// ["note text is inverted relative to intent", "the condition and branches swap ..."] - the
+	// claim and the why as two list items, the severity and the location gone.
+	liveQwenAnswer = `severe | internal/mcpserver/mcpserver.go:3764 | note text is inverted relative to intent | the condition and branches swap the "found nothing" vs "filtered" messages`
+
+	// A mimo-9b seat after the cut-final re-issue said "return the same JSON object that was asked
+	// for": a fenced JSON object of finding objects, not the lines the prompt asked for. The
+	// re-pack returned the three claims as bare strings.
+	liveMimoAnswer = "```json\n" + `{
+  "findings": [
+    {
+      "severity": "moderate",
+      "path": "internal/mcpserver/mcpserver.go",
+      "line": 3717,
+      "claim": "The clean-verdict gate now fires whenever any filter dropped anything, not only when nothing was filtered",
+      "why": "A run that produced text but was entirely filtered out now defers, conflating a hollow review with a broken run"
+    },
+    {
+      "severity": "minor",
+      "path": "internal/mcpserver/mcpserver.go",
+      "line": 3748,
+      "claim": "The empty-findings note is emitted after the defer gate, so it can never be reached for a deferred run",
+      "why": "The note branch is dead for the case it was written to explain"
+    },
+    {
+      "severity": "minor",
+      "path": "internal/mcpserver/mcpserver.go",
+      "line": 3762,
+      "claim": "unearnedReason counts only hollow, ungrounded and echo drops, silently ignoring DroppedDuplicate",
+      "why": "The stated total can undercount the dropped findings"
+    }
+  ]
+}
+` + "```"
+)
+
+func TestRawLinesReadsThePipeLinesAndTheJSONObjectsASeatFallsBackTo(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		output string
+		want   []string
+	}{
+		{"pipe lines are the answer split on newlines",
+			"severe | run.go:5 | off-by-one | reads past the end\nmoderate | run.go:9 | nil check | panics",
+			[]string{"severe | run.go:5 | off-by-one | reads past the end", "moderate | run.go:9 | nil check | panics"}},
+		{"the live qwen answer is one line",
+			liveQwenAnswer, []string{liveQwenAnswer}},
+		{"the live mimo answer: a fenced document of finding objects, rendered back to pipe lines",
+			liveMimoAnswer, []string{
+				"moderate | internal/mcpserver/mcpserver.go:3717 | The clean-verdict gate now fires whenever any filter dropped anything, not only when nothing was filtered | A run that produced text but was entirely filtered out now defers, conflating a hollow review with a broken run",
+				"minor | internal/mcpserver/mcpserver.go:3748 | The empty-findings note is emitted after the defer gate, so it can never be reached for a deferred run | The note branch is dead for the case it was written to explain",
+				"minor | internal/mcpserver/mcpserver.go:3762 | unearnedReason counts only hollow, ungrounded and echo drops, silently ignoring DroppedDuplicate | The stated total can undercount the dropped findings",
+			}},
+		{"the object the prompt's schema names, with string items",
+			`{"findings":["severe | run.go:5 | off-by-one | reads past the end","minor | run.go:9 | naming | cosmetic"]}`,
+			[]string{"severe | run.go:5 | off-by-one | reads past the end", "minor | run.go:9 | naming | cosmetic"}},
+		{"a bare array, the key file instead of path, the line as a string",
+			`[{"severity":"severe","file":"run.go","line":"5","claim":"off-by-one","why":"reads past the end"}]`,
+			[]string{"severe | run.go:5 | off-by-one | reads past the end"}},
+		{"no line: the file stands alone",
+			"{\"findings\":[{\"severity\":\"minor\",\"path\":\"run.go\",\"claim\":\"naming\",\"why\":\"cosmetic\"}]}",
+			[]string{"minor | run.go | naming | cosmetic"}},
+		{"a path that already carries its line is not given a second one",
+			`[{"severity":"minor","path":"run.go:7","line":7,"claim":"naming","why":"cosmetic"}]`,
+			[]string{"minor | run.go:7 | naming | cosmetic"}},
+		{"a pipe inside a value would shift the fields, so it is written as a slash",
+			`[{"severity":"minor","path":"run.go","line":3,"claim":"a | b is wrong","why":"x"}]`,
+			[]string{"minor | run.go:3 | a / b is wrong | x"}},
+		{"a sentence of preamble before the document",
+			"Here are the defects I found:\n[{\"severity\":\"severe\",\"path\":\"run.go\",\"line\":5,\"claim\":\"off-by-one\",\"why\":\"reads past the end\"}]",
+			[]string{"severe | run.go:5 | off-by-one | reads past the end"}},
+		{"a bracket inside a pipe-line claim cannot hijack a plain answer",
+			"severe | run.go:5 | indexes xs[len(xs)] | panics at runtime",
+			[]string{"severe | run.go:5 | indexes xs[len(xs)] | panics at runtime"}},
+		{"the loop's repetition marker is just another plain line",
+			"minor | run.go:5 | naming | cosmetic\n[repetition trimmed x4]",
+			[]string{"minor | run.go:5 | naming | cosmetic", "[repetition trimmed x4]"}},
+		{"a document cut mid-way does not parse, so the answer reads as plain lines",
+			"```json\n{\n  \"findings\": [\n    {\"severity\": \"minor\"",
+			[]string{"```json", "{", "  \"findings\": [", "    {\"severity\": \"minor\""}},
+		{"a document that yields no finding reads as the prose around it",
+			"I checked [1, 2, 3] and found nothing\nNONE",
+			[]string{"I checked [1, 2, 3] and found nothing", "NONE"}},
+	} {
+		got := RawLines(tc.output)
+		if strings.Join(got, "\n") != strings.Join(tc.want, "\n") || len(got) != len(tc.want) {
+			t.Errorf("%s:\n got %q\nwant %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+// What the raw reading is for, end to end through the filters: both live shapes reach the caller
+// with every field the seat wrote, where the re-pack's copy of the same answer is all hollow.
+func TestTheRawReadingKeepsWhatTheRepackFlattened(t *testing.T) {
+	diff := "--- a/internal/mcpserver/mcpserver.go\n+++ b/internal/mcpserver/mcpserver.go\n@@ -1 +1 @@\n+x\n"
+	for _, tc := range []struct {
+		name      string
+		output    string
+		flattened []string
+		want      int
+	}{
+		{"qwen3.6: one line split into its fields", liveQwenAnswer,
+			[]string{"note text is inverted relative to intent", `the condition and branches swap the "found nothing" vs "filtered" messages`}, 1},
+		{"mimo-9b: finding objects reduced to their claims", liveMimoAnswer,
+			[]string{
+				"The clean-verdict gate now fires whenever any filter dropped anything, not only when nothing was filtered",
+				"The empty-findings note is emitted after the defer gate, so it can never be reached for a deferred run",
+				"unearnedReason counts only hollow, ungrounded and echo drops, silently ignoring DroppedDuplicate",
+			}, 3},
+	} {
+		flat := Report(tc.flattened, diff, 0)
+		if flat.Survivors() != 0 || flat.DroppedHollow != len(tc.flattened) {
+			t.Fatalf("%s: the re-pack's copy must be all hollow (this is the reported shape): %+v", tc.name, flat)
+		}
+		raw := Report(RawLines(tc.output), diff, 0)
+		if raw.Survivors() != tc.want || raw.DroppedHollow != 0 {
+			t.Fatalf("%s: the seat's own answer holds %d findings: %+v", tc.name, tc.want, raw)
+		}
+		for _, f := range raw.Findings {
+			if f.Severity == "" || f.File != "internal/mcpserver/mcpserver.go" || f.Line == 0 || f.Claim == "" || f.Why == "" {
+				t.Errorf("%s: every field the seat wrote must survive: %+v", tc.name, f)
+			}
+		}
+	}
+}

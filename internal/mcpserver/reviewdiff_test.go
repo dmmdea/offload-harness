@@ -835,7 +835,7 @@ func TestReviewDiffDescriptionNamesTheWholeResultShape(t *testing.T) {
 			"dropped_ungrounded", "dropped_echo", "dropped_hollow", "dropped_duplicate", "truncated_by_cap", "The five counts",
 			// the defer-when-nothing-survives rule, and the salvage that precedes it
 			"DEFERS (defer_class abstention)", "Only the seat's own NONE earns an empty findings list",
-			"SALVAGE", "output_truncated", "wall", "INCOMPLETE",
+			"SALVAGE", "output_truncated", "wall", "INCOMPLETE", "READING", "repack_flattened",
 		} {
 			if !strings.Contains(tool.Description, want) {
 				t.Errorf("the description must name %q", want)
@@ -844,4 +844,193 @@ func TestReviewDiffDescriptionNamesTheWholeResultShape(t *testing.T) {
 		return
 	}
 	t.Fatal("offload_review_diff not advertised on tools/list")
+}
+
+// liveReviewDiff touches the file the live fixtures below cite, so grounding keeps their findings.
+const liveReviewDiff = "diff --git a/internal/mcpserver/mcpserver.go b/internal/mcpserver/mcpserver.go\n--- a/internal/mcpserver/mcpserver.go\n+++ b/internal/mcpserver/mcpserver.go\n@@ -1,3 +1,4 @@\n+x\n"
+
+// The seats' own words, captured 2026-10-09 by running this lane's exact prompt and schema on the
+// fleet (agent_delegate, one node pinned per call) and trimmed to a few findings. See
+// reviewlane's TestRawLinesReadsThePipeLinesAndTheJSONObjectsASeatFallsBackTo for the same
+// answers read on their own; here they arrive as a published review.
+const (
+	// A qwen3.6-35b-a3b seat: one perfectly formed line.
+	liveQwenAnswer = `severe | internal/mcpserver/mcpserver.go:3764 | note text is inverted relative to intent | the condition and branches swap the "found nothing" vs "filtered" messages`
+	// A mimo-9b seat after the cut-final re-issue said "return the same JSON object that was
+	// asked for": a fenced document of finding objects.
+	liveMimoAnswer = "```json\n" + `{"findings": [
+  {"severity": "moderate", "path": "internal/mcpserver/mcpserver.go", "line": 3717,
+   "claim": "The clean-verdict gate now fires whenever any filter dropped anything, not only when nothing was filtered",
+   "why": "A run that produced text but was entirely filtered out now defers, conflating a hollow review with a broken run"},
+  {"severity": "minor", "path": "internal/mcpserver/mcpserver.go", "line": 3748,
+   "claim": "The empty-findings note is emitted after the defer gate, so it can never be reached for a deferred run",
+   "why": "The note branch is dead for the case it was written to explain"}
+]}
+` + "```"
+	// A mimo-9b seat on another node: four pipe lines, one of them said again verbatim, then the
+	// loop's own marker. The node filed it as a cut final although finish_reason was "stop".
+	liveLoopTrimmedAnswer = `moderate | internal/mcpserver/mcpserver.go:3717 | the clean-verdict gate now fires whenever any filter dropped anything | a run that produced text but was fully filtered now defers as a broken run
+minor | internal/mcpserver/mcpserver.go:3752 | the "found nothing" note is emitted after withReviewCounts, which no longer writes it | the note is duplicated on the same payload
+minor | internal/mcpserver/mcpserver.go:3752 | the empty-list branch is unreachable for a clean NONE verdict | the gate above already defers in that case
+minor | internal/mcpserver/mcpserver.go:3752 | the "found nothing" note is emitted after withReviewCounts, which no longer writes it | the note is duplicated on the same payload
+[repetition trimmed x4]`
+)
+
+// reviewOfDiff is reviewOf over a chosen diff.
+func reviewOfDiff(t *testing.T, w core.AgentWireResult, diff string) map[string]any {
+	t.Helper()
+	s := askTestServer(t, func(_ context.Context, _ core.AgentContract, _ delegate.LocalOptions) (core.AgentWireResult, error) {
+		return w, nil
+	})
+	res, err := s.handleReviewDiff(context.Background(), callReq(reviewArgs(t, map[string]any{
+		"diff": diff, "task": "drop findings that carry no severity, file or why",
+	})))
+	if err != nil {
+		t.Fatalf("handleReviewDiff: %v", err)
+	}
+	return decodeResult(t, res)
+}
+
+// F1, root cause. Three independent reports on 2026-10-09 showed findings whose every field but
+// the claim was empty. Both mechanisms found live are pinned here from the seats' own answers: the
+// structured re-pack handed the lane bare claims, the answer behind it held the whole finding.
+// Before this the lane published the claims as hollow findings (and, since F1, deferred); now it
+// reads the answer and publishes the findings the seat wrote.
+func TestReviewDiffReadsTheSeatsOwnAnswerWhenTheRepackFlattenedIt(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		raw       string
+		flattened []string // what the re-pack returned for it
+		want      int
+	}{
+		{"qwen3.6: the re-pack split one line into its claim and its why", liveQwenAnswer,
+			[]string{"note text is inverted relative to intent", `the condition and branches swap the "found nothing" vs "filtered" messages`}, 1},
+		{"mimo-9b: the re-pack kept the claim of each finding object", liveMimoAnswer,
+			[]string{
+				"The clean-verdict gate now fires whenever any filter dropped anything, not only when nothing was filtered",
+				"The empty-findings note is emitted after the defer gate, so it can never be reached for a deferred run",
+			}, 2},
+	} {
+		m := reviewOfDiff(t, seatRaw(tc.raw, tc.flattened...), liveReviewDiff)
+		if m["deferred"] != nil {
+			t.Fatalf("%s: the seat's answer holds findings, so this is a review, not a defer: %v", tc.name, m)
+		}
+		findings, _ := m["findings"].([]any)
+		if len(findings) != tc.want {
+			t.Fatalf("%s: want %d findings, got %v", tc.name, tc.want, m["findings"])
+		}
+		for _, f := range findings {
+			f, _ := f.(map[string]any)
+			if f["severity"] == "" || f["file"] != "internal/mcpserver/mcpserver.go" || f["line"].(float64) == 0 || f["claim"] == "" || f["why"] == "" {
+				t.Errorf("%s: every field the seat wrote must reach the caller: %v", tc.name, f)
+			}
+		}
+		if m["salvaged"] != "repack_flattened" {
+			t.Errorf("%s: the flag must say the findings were read from the seat's own answer: %v", tc.name, m)
+		}
+		if note, _ := m["note"].(string); !strings.Contains(note, "flattened") {
+			t.Errorf("%s: the note must say what happened: %q", tc.name, note)
+		}
+		if _, has := m["dropped_hollow"]; has {
+			t.Errorf("%s: the published reading is the raw one, which holds no hollow line: %v", tc.name, m)
+		}
+	}
+}
+
+// Nothing changes for a run that worked: a faithful re-pack and the answer it copied agree, and a
+// tie keeps the re-pack, flag-free and note-free, exactly as before.
+func TestReviewDiffKeepsTheRepackWhenItIsFaithful(t *testing.T) {
+	lines := []string{
+		"severe | run.go:5 | off-by-one in the loop bound | indexes one past the end",
+		"moderate | run.go:9 | missing nil check | panics on empty input",
+	}
+	m := reviewOf(t, seatRaw(strings.Join(lines, "\n"), lines...))
+	if m["deferred"] != nil || m["salvaged"] != nil || m["note"] != nil {
+		t.Fatalf("a faithful re-pack is the ordinary review, unflagged and unnoted: %v", m)
+	}
+	if findings, _ := m["findings"].([]any); len(findings) != 2 {
+		t.Fatalf("want both findings: %v", m["findings"])
+	}
+	// A preamble the answer carries is the re-pack's to strip: both readings keep the same two
+	// findings, so the re-pack's report stands and the preamble is not counted as a hollow line.
+	m = reviewOf(t, seatRaw("Here are the defects I found:\n"+strings.Join(lines, "\n"), lines...))
+	if m["salvaged"] != nil {
+		t.Fatalf("equal readings must keep the re-pack: %v", m)
+	}
+	if _, has := m["dropped_hollow"]; has {
+		t.Fatalf("the preamble the re-pack stripped must not surface as a hollow count on a run that worked: %v", m)
+	}
+}
+
+// The raw reading only ever ADDS findings. When the answer holds nothing a reader can use, the
+// re-pack's findings are the review, however it got them.
+func TestReviewDiffFallsBackToTheRepackWhenTheAnswerHoldsNoFindings(t *testing.T) {
+	m := reviewOf(t, seatRaw("I reviewed the diff and listed the defects in the table below.",
+		"severe | run.go:5 | off-by-one in the loop bound | indexes one past the end"))
+	if m["deferred"] != nil || m["salvaged"] != nil {
+		t.Fatalf("a re-pack that holds the findings stands: %v", m)
+	}
+	if findings, _ := m["findings"].([]any); len(findings) != 1 {
+		t.Fatalf("want the re-pack's finding: %v", m["findings"])
+	}
+}
+
+// And when both readings are hollow it is still the F1 defer: reading the answer cannot invent a
+// finding the seat did not write.
+func TestReviewDiffStillDefersWhenTheAnswerIsHollowToo(t *testing.T) {
+	prose := []string{
+		"The loop now iterates over every element of the slice",
+		"A bounds check was added before the index is used",
+	}
+	m := reviewOf(t, seatRaw(strings.Join(prose, "\n"), prose...))
+	if m["deferred"] != true || m["dropped_hollow"] != float64(2) || m["salvaged"] != nil {
+		t.Fatalf("two readings, both hollow: the defer stands, and it was not salvaged: %v", m)
+	}
+}
+
+// A node-filed cut final as it really arrives (finish "stop", the loop's repetition guard reading a
+// repeated line as a cut): four pipe lines and the guard's marker. The marker is the last line and
+// goes with the fragment rule; the verbatim repeat is a duplicate; the third line is the same
+// place worded differently and folds into the first at that line. Two findings reach the caller.
+func TestReviewDiffSalvagesALoopTrimmedAnswerAsTheNodeFilesIt(t *testing.T) {
+	w := cutWire(liveLoopTrimmedAnswer)
+	w.StopNote = `repetition loop (5x "minor | internal/mcpserver/mcpserver.go:...")`
+	m := reviewOfDiff(t, w, liveReviewDiff)
+	if m["deferred"] != nil {
+		t.Fatalf("a loop-trimmed answer with complete lines is a review: %v", m)
+	}
+	findings, _ := m["findings"].([]any)
+	if len(findings) != 2 {
+		t.Fatalf("want the moderate finding and the one minor place: %v", m["findings"])
+	}
+	minor, _ := findings[1].(map[string]any)
+	if also, _ := minor["also"].([]any); len(also) != 1 {
+		t.Fatalf("the reworded claim at the same line must ride in also: %v", minor)
+	}
+	if m["dropped_duplicate"] != float64(2) {
+		t.Fatalf("one verbatim repeat and one same-line fold: %v", m)
+	}
+	if _, has := m["dropped_hollow"]; has {
+		t.Fatalf("the guard's marker is the dropped last line, not a hollow finding: %v", m)
+	}
+	if note, _ := m["note"].(string); !strings.Contains(note, "repetition loop") || !strings.Contains(note, "may be incomplete") {
+		t.Fatalf("the note must carry the node's own evidence for the cut: %q", note)
+	}
+}
+
+// The deferred path reads a finished answer with the same reader, so a wall-skipped re-pack whose
+// answer is the JSON objects a re-issued seat falls back to is a review too, not a pile of lines
+// that are all hollow.
+func TestReviewDiffSalvagesAWallSkippedAnswerThatIsJSONObjects(t *testing.T) {
+	m := reviewOfDiff(t, schemaMissWire(liveMimoAnswer), liveReviewDiff)
+	if m["deferred"] != nil || m["salvaged"] != "wall" {
+		t.Fatalf("a finished answer whose re-pack had no wall is a review: %v", m)
+	}
+	findings, _ := m["findings"].([]any)
+	if len(findings) != 2 {
+		t.Fatalf("want both finding objects read: %v", m["findings"])
+	}
+	if first, _ := findings[0].(map[string]any); first["severity"] != "moderate" || first["line"].(float64) != 3717 || first["why"] == "" {
+		t.Fatalf("the object's fields must survive the reading: %v", first)
+	}
 }
