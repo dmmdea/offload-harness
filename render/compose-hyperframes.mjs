@@ -29,7 +29,7 @@
 // Every failure is ONE typed line on stdout: `COMPOSE-FAIL: <CLASS>: <detail>`; the last stdout line
 // is always one JSON result object, also written to --result (the file the Go side reads).
 //
-// Dependency-free on purpose (node: builtins only): CI runs its tests with no HyperFrames installed.
+// Dependency-free on purpose (node: builtins and the sibling atomic-out.mjs only): CI runs its tests with no HyperFrames installed.
 import { spawn } from "node:child_process";
 import {
   cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync,
@@ -38,6 +38,7 @@ import {
 import { basename, delimiter, dirname, extname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { tmpdir } from "node:os";
+import { copyAtomic } from "./atomic-out.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -687,12 +688,17 @@ export function summarizeCheck(report) {
   return { ok: report.ok === true, findings: findings.slice(0, 40) };
 }
 
-function moveInto(src, dst) {
+// moveInto: publish the rendered output (a file, or the frames directory) at its delivery path. The
+// work dir is usually on another volume than `dst`, so the rename often cannot be used and the copy
+// is the real path: it goes through a staged sibling of `dst` (atomic-out.mjs), never straight onto
+// it, because a copy onto `dst` that ran out of disk left a partial video there that looked finished.
+// The source is removed only after the copy landed. `rename` and `copy` are injectable for tests only.
+export function moveInto(src, dst, { rename = renameSync, copy = copyAtomic } = {}) {
   mkdirSync(dirname(dst), { recursive: true });
   try {
-    renameSync(src, dst);
+    rename(src, dst);
   } catch {
-    cpSync(src, dst, { recursive: true });
+    copy(src, dst);
     rmSync(src, { recursive: true, force: true });
   }
 }

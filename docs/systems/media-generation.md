@@ -152,18 +152,84 @@ uses a `LoadVideo` node; every other video lane's `LoadImage` does not register 
 ComfyUI's execution outputs. `allOutputsByNode` (the `run_graph` lane, which addresses a specific
 node id from its own manifest rather than guessing) was not affected.
 
+**Outputs are delivered atomically (0.178.0).** Every ComfyUI runner (`comfy-render`, `-edit`,
+`-inpaint`, `-animate`, `-upscale`, `-video`, `-music`) used to fetch `/view` and call
+`writeFileSync(out, bytes)`, which opens, and so truncates, the target before it writes. On
+2026-10-09 the data drive filled to 0 GB in the middle of a 36-picture `comfy-generate --batch`:
+the writes failed with `ENOSPC`, 21 zero-byte PNGs were left at the jobs' `out` paths, and the
+batch went on to the next job. A zero-byte file passes every `exists()` check, so a skip-existing
+builder never re-renders it, and the same call destroys a previous good file at `out` whenever the
+new write fails. Now `render/atomic-out.mjs` (the Python workers: `render/atomic_out.py`) stages the
+bytes in a sibling of `out` in the same directory (`<out>.partial-<pid>-<n>`) and renames it over
+`out` only after the write finished (a POSIX rename, or MoveFileEx with replace on Windows). Any
+failure removes the staged file and rethrows the same error, so a failed render leaves **nothing at
+`out`** and a good file already there is **left untouched**. An empty payload is refused. A
+transient `EBUSY`, `EPERM` or `EACCES` on the rename (an antivirus scanner holding the staged file
+on Windows) is retried four times over 750 ms before it counts as a failure. The error names the
+output (`ENOSPC: no space left on device, write (writing <out>)`); Node's own message for a failed
+write names no path. The same helper delivers `run-graph`'s output files and its result envelope,
+`captions-groups.mjs --out`, `sdcpp-generate.mjs`'s engine output and its alpha rewrite (sd-cli
+writes a staged sibling, extension last, that is renamed after the rewrite), the cross-volume copy
+in `compose-hyperframes.mjs` (`moveInto`, which copied straight onto the destination), the music
+runner's trim and loudness swaps (one rename instead of unlink-then-rename, so a failed swap ships
+the render as it was), and the Python workers `edit_image.py` and `tts_chatterbox.py`. The igpu
+lanes below already worked this way. A runner killed mid-write (a taskkill cannot be caught) can
+leave a `*.partial-<pid>-<n>` file; it never carries the output's name. `render/output-writers.test.mjs`
+lists every direct file write left in `render/` and why it is not an output, so a new
+`writeFileSync(out, ...)` fails a test instead of the next batch.
+
+The Go media ops (`internal/mediaops`, behind `offload_media` and `offload_edit_image`) follow the same
+rule (`deliver.go`). ffmpeg (trim, concat, convert, mux_audio) used to be handed the output path with
+`-y`, which truncates it before the first byte: a clip that ran out of disk, or was killed at its
+timeout, was left at the output path half written. It is now pointed at a hidden staged sibling
+(`.<name>.partial-<pid>-<n>.<ext>`, the extension last because ffmpeg picks its muxer from it) and the
+sibling is renamed over the output only after an exit 0 with a non-empty file; any other ending removes
+it and leaves a previous good file untouched, with the same short retry of a rename that an antivirus
+scanner holds up. `extract_frames` extracts into a staging directory inside the destination and moves
+the frames in only when the whole run succeeded (the moves are renames within one volume, each atomic).
+An output that is also an input is refused by name, because ffmpeg's own in-place refusal can no longer
+fire on a staged name. GIMP never writes the destination: it exports to a private temp raster and the
+PIL worker, which delivers through `atomic_out.py`, makes the output. `internal/mediaops/writes_test.go`
+lists every write left in the package, and `deliver_test.go` runs the real ops against a fake engine.
+
 **Warm batch.** `generate-image --batch` takes a jobs file and runs N renders in one session. The
 only behavioral change is omitting ComfyUI's `--cache-none`, so the checkpoint loads once; teardown
 still happens exactly once, at the batch boundary. A failed render is recorded and the batch
-continues, one JSONL result line per job, and the script exits 0 (the Go side reads per-job
-status). The exception is a server that became unusable, where the child exits 3. Then the failed
-job and every later job get a row, the later ones with an `error` that starts `not run: ComfyUI
-became unusable at job N/M`. The batch exits non-zero and its teardown frees the card and the
-lease, instead of failing every remaining job against the same server (C-83: 3 min each, after a
-48-minute wait on the first). A failed job's `error` carries the child's own `RENDER FAILED:` reason
-rather than only `comfy-render exited N`. The inpaint batch (`comfy-inpaint.mjs --batch`) stops the
-same way on an unusable server, and still stops after `COMFY_BATCH_MAX_CONSEC_FAIL` (3) consecutive
-failures; its `_row: "aborted"` line now carries `reason`. **The default single-render path is
+continues, one JSONL result line per job; the results file format did not change.
+
+Exit codes of a `--batch` run (0.178.0 added the 4; until then a batch with failed jobs exited 0 and
+a caller had to grep the log for `RENDER FAILED`):
+
+| Entry point | `0` | `4` | `1` | `2` |
+|---|---|---|---|---|
+| `render/comfy-generate.mjs --batch` | every job rendered | the batch ran every job and at least one failed: the rows with `"ok":false` in the results file name them, and the last log line gives the counts | the batch could not run to the end: a setup error, an unusable ComfyUI, a full disk (the jobs not run get a `not run:` row), the GPU slot | usage, or no jobs |
+| `render/comfy-inpaint.mjs --batch` | every job rendered | the batch ran every job and at least one failed but not all | stopped: an unusable ComfyUI, a full disk, the consecutive-failure limit, or every job failing (its `_row: "aborted"` line, or the "systemic" error) | usage, or a job that would fail before rendering |
+| `local-offload generate-image --batch` | every job rendered, or the batch was deferred because a card was busy (`err_class: gpu_busy`) | the batch ran every job and at least one failed: the JSON keeps reporting per-job status (`failed`, `items[].ok`) and the stderr line gives the counts | the batch stopped (the runner's exit 1) or the command failed before any job (a bad jobs file, `--family` with `--batch`) | an unknown verb or a flag error |
+
+4 is not 3 on purpose: 3 is `comfy-render.mjs`'s own *server unusable* code for its parent, and
+`renderExitError` reads it as a verdict. `imagegen.BatchExitJobsFailed` is the Go copy of the runner's
+`BATCH_EXIT_JOBS_FAILED` (pinned to `render/batch-jobs.mjs` by a test): `GenerateBatch` treats 4 with a
+non-empty results file as a finished batch and reads the rows, so the Go door reports 35 good pictures
+out of 36 as a batch with one failed item, then ends with the same 4 itself. No other Go entry point
+runs a media batch (`RunImageBatch` is called by the CLI verb only).
+
+Two failures stop the batch instead of being recorded and passed over, because every later job would
+fail the same way. A server that became unusable (the child exits 3): the failed job and every later
+job get a row, the later ones with an `error` that starts `not run: ComfyUI became unusable at job
+N/M`, and the batch exits non-zero and its teardown frees the card and the lease, instead of failing
+every remaining job against the same server (C-83: 3 min each, after a 48-minute wait on the first). A
+full disk (0.178.0: `ENOSPC`, `EDQUOT` or `EROFS`, read from the errno where the runner renders
+in-process and from the errno token in the child's `RENDER FAILED:` line or in ComfyUI's own `[Errno
+28] No space left on device` otherwise; the name or number counts, never prose, because an exec error
+echoes the prompt and a prompt that mentions a full disk must not stop a batch): the same stop, with
+`error` starting `not run: the disk is full at job N/M, writing <out>`, exit 1 and the error line
+naming the path. It is deliberately batch-wide: the output directories of one batch are normally one
+volume. The items such a stop took are ledgered with `err_class: disk_full` (they were `other`). A
+failed job's `error` carries the child's own `RENDER FAILED:` reason rather than only `comfy-render
+exited N`. The inpaint batch (`comfy-inpaint.mjs --batch`) stops the same way on an unusable server
+and on a full disk (its `_row: "aborted"` line carries `reason`: `server_unusable`, `disk_full` or
+`consecutive_failures`, with the count of jobs not attempted), and still stops after
+`COMFY_BATCH_MAX_CONSEC_FAIL` (3) consecutive failures. **The default single-render path is
 unchanged.**
 
 **Prompt refiner (opt-in).** When `imagegen_refiner_model` names a llama-swap text model,
@@ -1135,6 +1201,7 @@ The typed errors a lane can return (`meta.err_class` in parentheses; the runner 
 | `ENGINE_CRASHED` | `engine_crashed` | the engine died of SIGSEGV / SIGABRT / SIGBUS / SIGFPE / SIGTRAP: a crash, not a timeout |
 | `OUT_OF_MEMORY` | `oom` | ggml `insufficient memory`, sd.cpp `alloc compute buffer failed`, a Vulkan allocation failure, or SIGKILL on a UMA box (the OOM killer) |
 | `DEVICE_INVALID` | `device_invalid` | `audiocpp_device` is not a device index (a configuration error, not a backend refusal) |
+| a full volume (0.178.0) | `disk_full` | `ENOSPC`, `EDQUOT` or `EROFS`: the typed errno of a Go file call, or the errno name/number in a runner's output (`ENOSPC:` from Node, `[Errno 28]` from Python; `[WinError 112]` on Windows), never the prose around it, because an exec error echoes the prompt. Both classifiers (`gpugen.ClassifyErr` and the image lanes' `pipeline.classifyErr`) share `gpugen.IsDiskFull`; a batch that stopped on a full drive was recorded as `other` before |
 | a client cancel | `timeout` | the caller cancelled the run: classified like every other media lane's cancel |
 
 ### The GPU timeout envelope: GPU_RESET and the token cap

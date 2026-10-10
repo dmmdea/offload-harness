@@ -288,8 +288,19 @@ func RunMedia(ctx context.Context, cfg MediaConfig, req MediaRequest) (MediaResu
 			}
 			req.Out = filepath.Join(req.Out, "frame_%05d.png")
 		}
-		if _, err := runToOutNoStat(ctx, cfg, req); err != nil {
-			return res, err
+		// The frames are extracted into a staging directory and moved in only when the run succeeded
+		// (deliverFrames): a failed extraction leaves the destination as it was.
+		derr := deliverFrames(req.Out, func(stagedPattern string) error {
+			r := req
+			r.Out = stagedPattern
+			_, err := runToOutNoStat(ctx, cfg, r)
+			return err
+		})
+		if errors.Is(derr, errNoOutput) {
+			return res, fmt.Errorf("extract_frames produced no frames at %s", req.Out)
+		}
+		if derr != nil {
+			return res, derr
 		}
 		frames, _ := filepath.Glob(strings.NewReplacer("%05d", "*", "%04d", "*", "%d", "*").Replace(req.Out))
 		if len(frames) == 0 {
@@ -304,14 +315,29 @@ func RunMedia(ctx context.Context, cfg MediaConfig, req MediaRequest) (MediaResu
 	return res, fmt.Errorf("unknown media op %q", req.Op)
 }
 
-// runToOut builds args, runs ffmpeg, and verifies a non-empty Out.
+// runToOut builds args, runs ffmpeg into a staged sibling of Out and delivers it (deliverFile): Out
+// is only ever replaced by a finished, non-empty result, and a failed or killed run leaves it as it was.
 func runToOut(ctx context.Context, cfg MediaConfig, req MediaRequest) (MediaResult, error) {
-	res, err := runToOutNoStat(ctx, cfg, req)
+	var res MediaResult
+	// ffmpeg refuses an output that is also an input ("cannot edit existing files in-place"); staged,
+	// that check no longer sees the clash, and the delivery rename would replace the SOURCE with the
+	// result. An explicit refusal keeps the old behaviour.
+	for _, in := range append([]string{req.In, req.Audio}, req.Inputs...) {
+		if samePath(in, req.Out) {
+			return res, fmt.Errorf("%s: out %s is also an input: choose another output path (ffmpeg cannot edit a file in place)", req.Op, req.Out)
+		}
+	}
+	err := deliverFile(req.Out, func(staged string) error {
+		r := req
+		r.Out = staged
+		_, err := runToOutNoStat(ctx, cfg, r)
+		return err
+	})
+	if errors.Is(err, errNoOutput) {
+		return res, fmt.Errorf("%s produced no output at %s", req.Op, req.Out)
+	}
 	if err != nil {
 		return res, err
-	}
-	if fi, err := os.Stat(req.Out); err != nil || fi.Size() == 0 {
-		return res, fmt.Errorf("%s produced no output at %s", req.Op, req.Out)
 	}
 	res.MediaPath = req.Out
 	return res, nil

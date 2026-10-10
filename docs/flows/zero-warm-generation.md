@@ -50,8 +50,10 @@ difference is that `--cache-none` is omitted, so the checkpoint loads once inste
 Teardown is not special-cased — it is the same single teardown, now at the batch boundary. Zero-warm
 moves from per-render to per-batch rather than being abandoned.
 
-A failed render inside a batch is recorded and the loop continues (unless ComfyUI itself became unusable: the batch then stops at that job, the later jobs get `not run:` rows and the batch exits non-zero, register C-83, 0.158.1); one JSONL result line is written
-per job. **The default single-render path is byte-identical to its pre-batch behavior.**
+A failed render inside a batch is recorded and the loop continues (unless ComfyUI itself became unusable, or the output disk filled: the batch then stops at that job, the later jobs get `not run:` rows and the batch exits non-zero, register C-83, 0.158.1; the full disk 0.178.0); one JSONL result line is written
+per job. A batch that ran every job and had a failed one exits 4 (`render/comfy-generate.mjs`, `render/comfy-inpaint.mjs` and `local-offload generate-image --batch`; 0 is every job rendered, 1 a stop, 2 usage), and the Go caller reads the runner's 4 as a finished batch and takes the per-job rows. **The default single-render path is byte-identical to its pre-batch behavior.**
+
+Since 0.178.0 every render, single or batch, writes its output to a staged sibling file and renames it into place (`render/atomic-out.mjs`), so a failed render, a full disk included, leaves no file at its path and keeps a good file already there.
 
 ## Data and state changes
 
@@ -104,6 +106,8 @@ from the repo root.
 - [`render/gpu-lock.mjs`](../../render/gpu-lock.mjs) — the slot, the free step, guarded teardown
 - [`render/comfy-lifecycle.mjs`](../../render/comfy-lifecycle.mjs) — cold start, warm flag, ownership
 - [`render/comfy-generate.mjs`](../../render/comfy-generate.mjs) — single vs batch
+- [`render/batch-jobs.mjs`](../../render/batch-jobs.mjs) — the batch loop, the stop conditions and the exit codes
+- [`render/atomic-out.mjs`](../../render/atomic-out.mjs) — delivers an output: a staged sibling, then a rename
 
 ## Related docs
 

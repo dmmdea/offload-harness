@@ -17,13 +17,19 @@
 //   ComfyUI session (checkpoint loads once), one result line per job appended to
 //   --results (default <jobs>.results.jsonl). Zero-always-warm holds at the batch
 //   boundary: withGpuSlot's single teardown frees VRAM + kills the spawned ComfyUI.
+//   Each output is written atomically (atomic-out.mjs): a failed render leaves nothing at
+//   its `out` path, and a good file already there is kept.
+//   Batch exit codes: 0 every job rendered; 4 the batch ran every job and at least one
+//   failed (the "ok":false rows of the results file name them); 1 the batch could not run
+//   to the end (setup error, ComfyUI unusable, the disk full: the jobs not run get a
+//   "not run" row); 2 usage.
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import { readFileSync, writeFileSync, appendFileSync, mkdirSync } from "node:fs";
 import { withGpuSlot } from "./gpu-lock.mjs";
 import { comfyApi } from "./comfy-lifecycle.mjs";
-import { parseJobs, jobArgs, runBatchJobs, renderExitError, JOB_PARAM_FLAGS, SHARED_BINDING_FLAGS } from "./batch-jobs.mjs";
+import { parseJobs, jobArgs, runBatchJobs, renderExitError, batchExitCode, batchEndLine, JOB_PARAM_FLAGS, SHARED_BINDING_FLAGS } from "./batch-jobs.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const argv = process.argv.slice(2);
@@ -88,7 +94,17 @@ if (flags.batch) {
       record: (line) => appendFileSync(resultsPath, line + "\n"),
       log: (line) => console.error(line),
     }),
-  ).catch((e) => { console.error("IMAGE BATCH FAILED:", e.message); process.exit(1); });
+  ).then((summary) => {
+    // The batch ran every job. It used to exit 0 whatever became of them, so a caller learned of
+    // failed jobs only by grepping the log for RENDER FAILED (2026-10-09: 21 of 36 pictures). Any
+    // failed job now ends it with BATCH_EXIT_JOBS_FAILED. exitCode, not exit(): the teardown has run,
+    // and exit() while a socket is still closing trips libuv on Windows (comfy-video.mjs).
+    const code = batchExitCode(summary);
+    if (code !== 0) {
+      console.error(batchEndLine(summary, resultsPath));
+      process.exitCode = code;
+    }
+  }).catch((e) => { console.error("IMAGE BATCH FAILED:", e.message); process.exit(1); });
 } else {
   if (!out || !prompt) {
     console.error('usage: node comfy-generate.mjs <out.png> "<prompt>" [--negative ...] [--width N] [--height N] [--steps N] [--seed N] [--ckpt name] | --batch jobs.jsonl [--results r.jsonl]');

@@ -12,7 +12,7 @@
 //        [--api http://127.0.0.1:8188] [--no-lock] [--keep-comfy]
 //   <prompt> describes the CHARACTER + BACKGROUND (what the output should show);
 //   --motion-prompt describes the driver video (what motion is being transferred).
-import { writeFileSync } from "node:fs";
+import { writeFileAtomic } from "./atomic-out.mjs";
 import { withGpuSlot } from "./gpu-lock.mjs";
 import { comfyApi } from "./comfy-lifecycle.mjs";
 import { stageInput as stageToInput } from "./comfy-input.mjs";
@@ -80,7 +80,7 @@ async function animate() {
     onExecError: () => finalizeRun({ api: API, promptId, cli }),
   });
   const file = firstOutputFile(h.outputs, graph);
-  writeFileSync(out, await fetchView({ api: API, file }));
+  writeFileAtomic(out, await fetchView({ api: API, file }));
   console.log("WROTE", out);
   await finalizeRun({ api: API, promptId, cli });
 }

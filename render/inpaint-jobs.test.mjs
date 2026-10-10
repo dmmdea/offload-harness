@@ -50,3 +50,23 @@ test("batchAbort: an unusable server stops the inpaint batch at once; ordinary f
   assert.equal(c.message, "3 consecutive failures (last: node error)");
   assert.equal(inpaintMod.batchAbort({ err: null, consecFail: 0, maxConsecFail: 3 }), null);
 });
+
+// 2026-10-09: a batch went on past a full drive and left zero-byte pictures. Every later job writes
+// to the same volume, so the first full-disk failure stops the batch; it does not wait for three.
+test("batchAbort: a full disk stops the inpaint batch at once, by errno code or by the words ComfyUI reports it in, and names the output", () => {
+  const byCode = Object.assign(new Error("ENOSPC: no space left on device, write"), { code: "ENOSPC" });
+  const a = inpaintMod.batchAbort({ err: byCode, consecFail: 1, maxConsecFail: 3, out: "renders/o1.png" });
+  assert.equal(a.reason, "disk_full");
+  assert.match(a.message, /the disk is full writing renders\/o1\.png/);
+  assert.match(a.message, /no space left on device/);
+
+  const named = Object.assign(new Error("ENOSPC: no space left on device, write (writing renders/o1.png)"), { code: "ENOSPC" });
+  assert.equal(inpaintMod.batchAbort({ err: named, consecFail: 1, maxConsecFail: 3, out: "renders/o1.png" }).message.match(/renders\/o1\.png/g).length, 1, "the path is named once");
+
+  const byWords = new Error("ComfyUI exec error: [Errno 28] No space left on device");
+  assert.equal(inpaintMod.batchAbort({ err: byWords, consecFail: 1, maxConsecFail: 3 }).reason, "disk_full");
+
+  const dead = new Error("poisoned"); dead.serverUnusable = true;
+  assert.equal(inpaintMod.batchAbort({ err: dead, consecFail: 1, maxConsecFail: 3 }).reason, "server_unusable", "an unusable server keeps its own reason");
+  assert.equal(inpaintMod.batchAbort({ err: new Error("node error"), consecFail: 1, maxConsecFail: 3 }), null, "an ordinary failure still goes on");
+});

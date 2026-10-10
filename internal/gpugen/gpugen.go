@@ -469,7 +469,7 @@ func freeComfyVRAM(api string) {
 	}
 }
 
-// ClassifyErr maps a gen failure to a coarse class (oom|timeout|conn_refused|other)
+// ClassifyErr maps a gen failure to a coarse class (oom|timeout|conn_refused|disk_full|other)
 // for the ledger's ErrClass. Mirrors pipeline.classifyErr; nil => "".
 func ClassifyErr(err error) string {
 	if err == nil {
@@ -480,6 +480,11 @@ func ClassifyErr(err error) string {
 	var re *RunError
 	if errors.As(err, &re) && re.Class != "" {
 		return re.Class
+	}
+	// A full volume (0.178.0): by the typed errno or the errno TOKEN in the text, never by its prose
+	// (IsDiskFull). Before this class a batch that stopped on a full drive was recorded as "other".
+	if IsDiskFull(err) {
+		return "disk_full"
 	}
 	s := strings.ToLower(err.Error())
 	switch {

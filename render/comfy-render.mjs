@@ -47,8 +47,9 @@
 // ...`, or imagegen_script bound straight at this file) omit it and get the full
 // self-managed lifecycle.
 
-import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { readFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
+import { writeFileAtomic } from "./atomic-out.mjs";
 import { withGpuSlot } from "./gpu-lock.mjs";
 import { comfyApi } from "./comfy-lifecycle.mjs";
 import { buildHiDreamO1 } from "./wf-hidream-o1.mjs";
@@ -386,7 +387,10 @@ async function generate(out, API, built, flags) {
   });
   const img = firstImage(h.outputs);
   const buf = await fetchView({ api: API, file: img });
-  writeFileSync(out, buf);
+  // Atomic: a full disk used to leave a ZERO-BYTE png here (writeFileSync truncates the target first)
+  // that a skip-existing caller then read as finished (2026-10-09). Now nothing is at `out` unless the
+  // whole image is, and a previous good file survives a failed write (atomic-out.mjs).
+  writeFileAtomic(out, buf);
   console.log("WROTE", out, buf.length, "bytes");
   // Bookkeeping AFTER the artifact is safe on disk: records authoritative timing
   // (execution_start -> execution_success) and releases the CLI's submission lease.

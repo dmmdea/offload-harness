@@ -36,8 +36,9 @@
 // wordsFromSegments merges every token without a leading space into the word before it, inside its segment,
 // and the pace, the word count and the break rules below all count those merged words. A segment without
 // words is spread over its span by character weight.
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
+import { writeFileAtomic } from "./atomic-out.mjs";
 
 export const PACES = Object.freeze({
   punchy: Object.freeze({ maxWords: 3 }),
@@ -317,7 +318,7 @@ export function main(argv = process.argv.slice(2), { stdout = process.stdout, st
   try {
     const doc = captionsFromSegments(JSON.parse(readFileSync(file, "utf8")), opts);
     const text = JSON.stringify(doc);
-    if (out) writeFileSync(out, text);
+    if (out) writeFileAtomic(out, text);
     else stdout.write(text + "\n");
     return 0;
   } catch (e) {

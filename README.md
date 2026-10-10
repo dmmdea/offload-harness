@@ -178,7 +178,7 @@ Input is a **file path** or `-` for stdin. Add `--json` for the full result obje
 {"prompt":"a paper sailboat on a calm pond at golden hour"}
 ```
 
-The result is a summary: `{"count":3,"succeeded":3,"failed":0,"items":[{"out":...,"seed":...,"ok":true,"ms":...},...]}`. A single failed render is recorded in its item and does not abort the batch, unless ComfyUI itself became unusable (it stopped answering, or a CUDA fault left it answering but unable to run a prompt): the batch then stops at that job, the jobs after it fail with an error that starts `not run: ComfyUI became unusable at job N/M`, and the command exits non-zero (0.158.1).
+The result is a summary: `{"count":3,"succeeded":3,"failed":0,"items":[{"out":...,"seed":...,"ok":true,"ms":...},...]}`. A single failed render is recorded in its item and does not abort the batch, unless ComfyUI itself became unusable (it stopped answering, or a CUDA fault left it answering but unable to run a prompt): the batch then stops at that job, the jobs after it fail with an error that starts `not run: ComfyUI became unusable at job N/M`, and the command exits non-zero (0.158.1); a full output disk stops it the same way (0.178.0). A batch that ran every job and had a failed one exits **4** (0.178.0; it used to exit 0), a clean batch exits 0, and the summary's `items` keep reporting each job; every picture is written atomically, so a failed render leaves no file at its `out` path.
 
 </details>
 

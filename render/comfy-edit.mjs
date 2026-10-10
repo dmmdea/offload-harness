@@ -29,8 +29,9 @@
 // the 2.1-only knobs (--ref, --resolution, --cache-*, --transparent) are REFUSED on
 // the other family (exit 2): a flag a graph never reads is a render that silently
 // differs from what was asked.
-import { copyFileSync, readFileSync, writeFileSync, unlinkSync, statSync } from "node:fs";
+import { copyFileSync, readFileSync, unlinkSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { writeFileAtomic } from "./atomic-out.mjs";
 import { withGpuSlot } from "./gpu-lock.mjs";
 import { COMFY_DIR, comfyApi } from "./comfy-lifecycle.mjs";
 import { stagedInputName } from "./comfy-input.mjs";
@@ -239,7 +240,7 @@ async function main() {
         onExecError: () => finalizeRun({ api: API, promptId, cli }),
       });
       const file = firstOutputFile(h.outputs, graph);
-      writeFileSync(out, await fetchView({ api: API, file }));
+      writeFileAtomic(out, await fetchView({ api: API, file }));
       console.log("WROTE", out);
       await finalizeRun({ api: API, promptId, cli });
     } finally {
