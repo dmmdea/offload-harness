@@ -192,14 +192,32 @@ export function cudaVisibleEnv(env = process.env, listGpus = defaultListGpus) {
   return { ...env, CUDA_VISIBLE_DEVICES: all };
 }
 
+// The listing's deadlines. A card listing is a tenth of a second on a quiet box and has run out ten
+// seconds under load; one that did is asked ONCE more under the longer timeout, because "no listing"
+// leaves ComfyUI on the Windows default (card 0 only) and a pooled graph then fails validation on a
+// box that has the cards: one slow read must not change a launch (F24, the Go side's same rule).
+export const LIST_GPUS_TIMEOUT_MS = 10000;
+export const LIST_GPUS_RETRY_TIMEOUT_MS = 30000;
+
+// listGpusWith counts the cards `nvidia-smi -L` lists (0 = no usable listing). Only a listing that
+// TIMED OUT is retried: a failure that came back at once fails the same way again. spawnSync is
+// injectable for tests.
+export function listGpusWith(spawnSync = nodeSpawnSync) {
+  const ask = (timeout) => {
+    try {
+      return spawnSync("nvidia-smi", ["-L"], { encoding: "utf8", timeout });
+    } catch {
+      return null;
+    }
+  };
+  let r = ask(LIST_GPUS_TIMEOUT_MS);
+  if (r && r.error && r.error.code === "ETIMEDOUT") r = ask(LIST_GPUS_RETRY_TIMEOUT_MS);
+  if (!r || r.status !== 0 || !r.stdout) return 0;
+  return (r.stdout.match(/GPU [0-9]+/g) || []).length;
+}
+
 function defaultListGpus() {
-  try {
-    const r = nodeSpawnSync("nvidia-smi", ["-L"], { encoding: "utf8", timeout: 10000 });
-    if (r.status !== 0 || !r.stdout) return 0;
-    return (r.stdout.match(/GPU [0-9]+/g) || []).length;
-  } catch {
-    return 0;
-  }
+  return listGpusWith();
 }
 
 // comfyUp: is a ComfyUI HTTP server already answering on api?
