@@ -885,7 +885,15 @@ evidence and a heartbeat the wrapper writes about itself proves only that the wr
 **Where the owner comes from.** `gpu reserve --owner-session ID --owner-pid N --owner-start-ms MS [--owner-remote]`,
 else the session label the ledger already resolves (`LOCAL_OFFLOAD_ORIGIN`, then `CLAUDE_CODE_SESSION_ID`) with NO pid:
 the process a wrapper happens to run from is usually a short-lived shell, and recording it would read every lease as
-abandoned the moment the shell exits. With neither, the owner is unknown. `local-offload gpu owner-flags [--pid N]`
+abandoned the moment the shell exits. With neither, the owner is unknown. A lease with no owner can still carry
+`--origin` (a free-text label of who asked, e.g. a launcher's name): it is not an owner and changes no verdict (the lease
+stays never-orphaned, judged by its window), but `gpu status` shows it in the owner line, `owner: none recorded — origin
+"<label>"; never orphaned, judged by its declared window only`, instead of `owner: unknown — no owner recorded`. A bench
+launched from a systemd unit has no session in its environment, so before this its `origin` was in the record and on the
+wire and nowhere in the text a person reads, and two sessions mixed up who held the card (F9, 2026-10-07). The origin is
+printed quoted, on one line, and only when no session, pid or remote owner is recorded (it never displaces one); on the
+wire it is `origin` in `gpu status --json` and in the `offload_status` lease block, and `activity.holder.origin`.
+`local-offload gpu owner-flags [--pid N]`
 prints the flags for the calling tree on one line (`--owner-session=ID --owner-pid=N --owner-start-ms=MS`), for a
 launcher that detaches before it takes the lease (a process created through WMI has no parent to ask and does not
 inherit the session). The hidden `gpu hold` child of a `--detach` reserve is passed the owner and the contract as flags
@@ -900,7 +908,8 @@ session, because the new server of a resumed session and the old one's exit woul
 record. States: `alive`; `gone` (nothing alive, and the owner could be tracked: it was in the registry when the lease
 was taken, or a pid was recorded); `unknown` (it could not be tracked, or the registry could not be read, so it is never
 orphaned; `gpu status` says which: a session that was never in the registry is "recorded but cannot be tracked", and
-"no owner recorded" is said only when none is); `remote`. A registry that cannot be READ (a permission error, a wrong
+"no owner recorded" is said only when none is, and a lease labelled only with `--origin` says "none recorded — origin ..."
+instead); `remote`. A registry that cannot be READ (a permission error, a wrong
 mount: anything but "the directory does not exist") is never read as "nobody in it"; a recorded process that is alive
 still stands. *Unverified
 beyond the environment variable the ledger already relies on: how a given Claude Code build maps a session to a live

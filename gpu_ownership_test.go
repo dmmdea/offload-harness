@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"os"
 	"path/filepath"
@@ -10,8 +12,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/gpuactivity"
 	"github.com/dmmdea/offload-harness/internal/gpulease"
+	"github.com/dmmdea/offload-harness/internal/gpuprobe"
 )
 
 // envOf is a getenv over a fixed map, so no test reads the real CLAUDE_CODE_SESSION_ID.
@@ -577,5 +581,131 @@ func TestGPUStatusOwnerLinesDescribeTheEscalatedLease(t *testing.T) {
 	}
 	if eps, _ := out["epochs"].([]any); len(eps) != 2 {
 		t.Errorf("epochs[] still lists every live lease: %v", out["epochs"])
+	}
+}
+
+// A lease with NO owner can still be labelled with who asked for it (--origin). `gpu status`
+// called such a lease "owner: unknown — no owner recorded" and never printed the origin, so a
+// bench launched from a unit with no session in its environment was identified by `reason:`
+// alone, and two sessions mixed up who held the card (F9, 2026-10-07). The label is shown in the
+// owner line; it is NOT an owner, so it never displaces a recorded one and the lease stays
+// never-orphaned, judged by its window.
+func TestOwnerStatusLineFallsBackToTheOriginWhenNoOwnerIsRecorded(t *testing.T) {
+	const origin = "claude bench-run-3 gpu-tuning"
+	line := func(h *gpuactivity.Holder) string {
+		return strings.Join(ownershipStatusLines(h, gpulease.Info{Held: true, Epoch: h.Epoch}), "\n")
+	}
+	got := line(&gpuactivity.Holder{Epoch: 7, OwnerState: "unknown", Origin: origin})
+	for _, want := range []string{`owner: none recorded`, `origin "` + origin + `"`, "never orphaned", "declared window only"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("a lease with an origin and no owner lacks %q:\n%s", want, got)
+		}
+	}
+	for _, bad := range []string{"owner: unknown", "no owner recorded"} {
+		if strings.Contains(got, bad) {
+			t.Errorf("the origin is known, so the line must not say %q:\n%s", bad, got)
+		}
+	}
+
+	// The origin is a label, never a replacement for a recorded owner.
+	for name, h := range map[string]*gpuactivity.Holder{
+		"session": {Epoch: 7, OwnerState: "alive", OwnerSession: "sess-real", Origin: origin},
+		"process": {Epoch: 7, OwnerState: "alive", OwnerPID: 4242, Origin: origin},
+		"remote":  {Epoch: 7, OwnerState: "remote", Origin: origin},
+		"untracked session": {Epoch: 7, OwnerState: "unknown", OwnerSession: "sess-untracked", Origin: origin,
+			OwnerNote: "the session was not in the session registry when the lease was taken, so whether it is still there cannot be told"},
+	} {
+		if text := line(h); strings.Contains(text, "none recorded") || strings.Contains(text, origin) {
+			t.Errorf("%s: a recorded owner is named as the owner, not displaced by the origin:\n%s", name, text)
+		}
+	}
+
+	// No origin, or one that is only whitespace: the line is byte-for-byte what it was.
+	for _, blank := range []string{"", "  \t "} {
+		text := line(&gpuactivity.Holder{Epoch: 7, OwnerState: "unknown", Origin: blank})
+		if !strings.Contains(text, "owner: unknown — no owner recorded: never orphaned, judged by its declared window only") {
+			t.Errorf("origin %q: the line without a label changed:\n%s", blank, text)
+		}
+	}
+
+	// An origin is free text from a flag: it prints quoted, on one line.
+	text := line(&gpuactivity.Holder{Epoch: 7, OwnerState: "unknown", Origin: "a \"b\"\nc"})
+	if !strings.Contains(text, `origin "a \"b\"\nc"`) || strings.Count(text, "\n") != 0 {
+		t.Errorf("a hostile origin must print as one quoted line:\n%q", text)
+	}
+}
+
+// useRealLeaseReadNoGPU keeps the REAL lease read behind `gpu status` (the holder's standing,
+// which useQuietStatus's synthetic view leaves out, so no owner line prints under it) and drops
+// every live read: no nvidia-smi, no process table, no llama-swap, no card table.
+func useRealLeaseReadNoGPU(t *testing.T) {
+	t.Helper()
+	oldCards, oldAct, oldForeign := cardTableFn, statusActivityFn, statusForeignFn
+	cardTableFn = func(context.Context, config.Config) ([]gpuprobe.Card, string, error) {
+		return nil, "", errors.New("synthetic: no card table")
+	}
+	statusActivityFn = func(ctx context.Context, o gpuactivity.Options) gpuactivity.View {
+		o.SampleGPU, o.Endpoint, o.Seat = false, "", ""
+		return gpuactivity.Snapshot(ctx, o)
+	}
+	statusForeignFn = func(context.Context, config.Config) []ForeignGPUHolder { return nil }
+	t.Cleanup(func() { cardTableFn, statusActivityFn, statusForeignFn = oldCards, oldAct, oldForeign })
+}
+
+// End to end through the verb, on a record shaped like the F9 incident's: a text bench taken
+// with --origin and no session, so no owner is recorded. The text names the origin in the owner
+// line; the JSON carries it where it already was (origin, activity.holder.origin) and the lease
+// is still unknown-owner and not orphaned.
+func TestGPUStatusNamesTheOriginWhenTheLeaseRecordsNoOwner(t *testing.T) {
+	const origin = "claude bench-run-3 gpu-tuning"
+	cfg, m := leaseFixture(t)
+	useRealLeaseReadNoGPU(t)
+	now := time.Now()
+	rec := map[string]any{
+		"epoch": 41, "class": "text", "reason": "kv bench (synthetic)", "origin": origin, "command": "python bench.py",
+		"holder":         map[string]any{"pid": os.Getpid(), "start_time_ms": 0},
+		"acquired_at_ms": now.Add(-5 * time.Minute).UnixMilli(), "expires_at_ms": now.Add(2 * time.Hour).UnixMilli(), "renewed_at_ms": now.UnixMilli(),
+	}
+	b, _ := json.Marshal(rec)
+	leaseDir := filepath.Join(m.Root(), "gpu", "lease")
+	if err := os.MkdirAll(leaseDir, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(leaseDir, "meta.json"), b, 0o666); err != nil {
+		t.Fatal(err)
+	}
+
+	text := captureStdout(t, func() {
+		if err := runGPUStatus([]string{"--config", cfg}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	for _, want := range []string{"GPU: held by a text-class lease", "reason: kv bench (synthetic)", `owner: none recorded — origin "` + origin + `"`, "never orphaned"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("status text lacks %q:\n%s", want, text)
+		}
+	}
+	if strings.Contains(text, "owner: unknown") {
+		t.Errorf("the origin is on the record, so the owner line must not read unknown:\n%s", text)
+	}
+
+	js := captureStdout(t, func() {
+		if err := runGPUStatus([]string{"--config", cfg, "--json"}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	var out map[string]any
+	if err := json.Unmarshal([]byte(js), &out); err != nil {
+		t.Fatalf("status --json is not JSON: %v\n%s", err, js)
+	}
+	holder, _ := out["activity"].(map[string]any)["holder"].(map[string]any)
+	if out["origin"] != origin || holder["origin"] != origin {
+		t.Errorf("the origin must be on the wire at origin and activity.holder.origin: %v / %v", out["origin"], holder["origin"])
+	}
+	if _, ok := out["owner"]; ok || holder["owner_state"] != "unknown" || holder["orphaned"] == true {
+		t.Errorf("an origin is a label, not an owner: owner=%v owner_state=%v orphaned=%v", out["owner"], holder["owner_state"], holder["orphaned"])
+	}
+	if v, _ := out["verdict"].(string); v == "held-orphaned" {
+		t.Errorf("a lease with no owner is never orphaned, whatever its origin: verdict %v", v)
 	}
 }

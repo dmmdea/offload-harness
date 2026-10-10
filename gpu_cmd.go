@@ -306,7 +306,7 @@ func runGPUReserve(args []string) error {
 	class := fs.String("class", "text", "lease class: text (a measurement/bench) or media (a generation job)")
 	dur := fs.Duration("for", 45*time.Minute, "how long the card is needed; stamped as the lease's declared window")
 	reason := fs.String("reason", "", "why the card is held (shown to whoever is waiting)")
-	origin := fs.String("origin", "", "who asked for it (session/host)")
+	origin := fs.String("origin", "", "who asked for it (a label: session/host); gpu status shows it in the owner line when no session or pid owner is recorded")
 	detach := fs.Bool("detach", false, "hold the lease in a hidden background process instead of wrapping a command")
 	drain := fs.Bool("drain", false, "after taking the lease, wait until the agent seat is IDLE — no request running or waiting on the engine, no load in progress, no registered agent run — before continuing; the lease is stamped DRAINING meanwhile (new runs wait, in-flight runs complete) and exclusive only once idle; a drain that misses its deadline releases the lease and exits non-zero")
 	drainTimeout := fs.Duration("drain-timeout", 0, "how long --drain waits for in-flight work; 0 (the default) = the rest of the --wait queue budget, never under 2m — one 27B step runs 3-4 min, which is why a fixed 2m window failed twice on 2026-09-14")
