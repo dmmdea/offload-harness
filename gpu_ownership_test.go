@@ -614,6 +614,10 @@ func TestOwnerStatusLineFallsBackToTheOriginWhenNoOwnerIsRecorded(t *testing.T) 
 		"remote":  {Epoch: 7, OwnerState: "remote", Origin: origin},
 		"untracked session": {Epoch: 7, OwnerState: "unknown", OwnerSession: "sess-untracked", Origin: origin,
 			OwnerNote: "the session was not in the session registry when the lease was taken, so whether it is still there cannot be told"},
+		// Not a state the standing produces (a recorded owner always carries a note when unknown), but the
+		// guard is on WHO is recorded, not on the note: a session on the record is the owner, whatever else.
+		"session, unknown, no note": {Epoch: 7, OwnerState: "unknown", OwnerSession: "sess-x", Origin: origin},
+		"pid, unknown, no note":     {Epoch: 7, OwnerState: "unknown", OwnerPID: 4242, Origin: origin},
 	} {
 		if text := line(h); strings.Contains(text, "none recorded") || strings.Contains(text, origin) {
 			t.Errorf("%s: a recorded owner is named as the owner, not displaced by the origin:\n%s", name, text)
