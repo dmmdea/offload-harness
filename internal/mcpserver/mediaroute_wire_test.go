@@ -32,7 +32,7 @@ func startWireNode(t *testing.T) *wireNode {
 	n.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/fleet/health":
-			fmt.Fprint(w, `{"node_id":"wire-node","schema_version":1,"queue_depth":0,"supported_task_types":["image-gen","video-gen","animate","audio-gen","run-graph","media-job"]}`)
+			fmt.Fprint(w, `{"node_id":"wire-node","schema_version":1,"queue_depth":0,"supported_task_types":["image-gen","video-gen","animate","audio-gen","run-graph","media-job"],"gpu_devices":[{"index":0,"uuid":"GPU-wire-0","name":"test card","vram_total_gb":15.92,"vram_free_gb":12}]}`)
 		case r.URL.Path == "/fleet/dispatch" || r.URL.Path == "/fleet/media-job":
 			b, _ := io.ReadAll(r.Body)
 			var m map[string]any
