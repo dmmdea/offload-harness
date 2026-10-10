@@ -1906,6 +1906,23 @@ state (`task_type "video-gen" is bound on this node but its route is not ready: 
 every delegator re-places; a task that is not bound at all keeps the `400 unsupported task_type`. A delegator reads `media_routes` through
 `delegate.NodeView` (`MediaRoutes`, `RouteState`); an absent field is unknown, never "no route".
 
+**Image recipes and `refine` (ADR 0082).** A node that serves `image-gen` also publishes `refine_honoured: true` (its image-gen
+task decodes `refine` the way the MCP handler does, so an explicit `refine=false` reaches the pipeline) and `image_recipes[]`:
+one row per ComfyUI image binding, default first then named families in name order, that names a checkpoint
+(`internal/fleetnode/image_recipe.go`, from `mediacap.ImageRecipe`). A row is `{name, default, digest, engine, graph,
+files:[{role, name, bytes}], steps, cfg, sampler, scheduler, schedule, shift, lora_strength, preset, license, commercial_use,
+explicit}`; `bytes` is the size on this node's disk and `-1` for a file it lacks; `explicit` lists the sampling keys the binding
+set (the rest are the builder's defaults, already resolved in the other fields and in `digest`, which does not include
+`explicit`). The rows are read from a memo of `mediaRoutesTTL` (60 s) so health stays cheap; a node without an image lane, an
+sd.cpp family, and a binding that names no checkpoint publish no row, and a node that predates the keys publishes none, which a
+delegator reads as "cannot be matched", never "matches anything". An `image-gen` payload may carry `recipe_digest`; admission
+recomputes the digest of the family the payload names (the default binding when `family` is empty or its own name) from the
+files on disk at that moment, and a mismatch, a family this node does not serve, or a non-ComfyUI binding is answered **`412`**
+with the node's digest, before any job exists: not `409` (a job that failed here before) and not `503` (busy). A delegator that
+reads `/fleet/health` decodes the rows (`delegate.NodeView.ImageRecipes`, `RefineHonoured`) and, beside them, the singular
+lease block's class, reason and remaining seconds (`LeaseClass`, `LeaseReason`, `LeaseRemainingSec`). See
+[media-generation.md](media-generation.md#overflow-a-busy-lane-places-an-image-call-on-the-fleet-adr-0082).
+
 ## Source map
 
 - [`internal/fleetnode/server.go`](../../internal/fleetnode/server.go) — routes, payloads, duplicate
@@ -1932,7 +1949,10 @@ every delegator re-places; a task that is not bound at all keeps the `400 unsupp
   media job
 - [`internal/fleetnode/media_ready.go`](../../internal/fleetnode/media_ready.go) — the cached mediacap reading behind
   the honest advertisement and `media_routes`
-- [`internal/mediaremote/`](../../internal/mediaremote/) — the client that places a media job on a node
+- [`internal/fleetnode/image_recipe.go`](../../internal/fleetnode/image_recipe.go) — the `image_recipes` rows
+  (memoised), the `recipe_digest` check and the 412
+- [`internal/mediaremote/`](../../internal/mediaremote/) — the client that places a media job on a node, and (ADR 0082) the
+  overflow of a busy image lane
 - [`internal/fleetnode/jobs.go`](../../internal/fleetnode/jobs.go) — state machine, the admit-then-
   schedule queue and its concurrency limit, eviction, drain, the agent job marker
 - [`internal/fleetnode/tasks.go`](../../internal/fleetnode/tasks.go) — `agentTaskConfigured`,

@@ -138,6 +138,16 @@ A `local` or `remote` route that came without a pin reason through a door that o
 `auto` places it and a hinted `remote` fleet-first, and each result's placement opens by saying whether the hint was
 honoured or overridden. See [architecture/decisions/0078-a-placement-pin-needs-a-reason-without-one-it-is-a-hint.md](architecture/decisions/0078-a-placement-pin-needs-a-reason-without-one-it-is-a-hint.md).
 
+## Image recipe
+
+What an image family IS, for the purpose of deciding whether another node would render the same picture: the weight files
+its graph loads (checkpoint, text encoder, VAE, LoRA) each with its byte size on that node's disk, and the sampling it renders
+with, digested with sha256 over RESOLVED values (a key the binding leaves unset takes the builder's own default, so a node that
+writes the default out and one that leaves it unset are the same recipe). Narrower than "named family": the name is a label, the
+recipe is the identity. Node-local keys (which card, timeouts, scripts, `reserve_vram`, the pool keys) are not in it, and an
+sd.cpp binding has none. A node publishes its recipes in `/fleet/health` `image_recipes[]`, a delegator matches the `digest`
+strictly, and the node re-checks it at admission (412 on a mismatch). See [ADR 0082](architecture/decisions/0082-a-media-call-overflows-to-the-fleet-when-its-own-lane-cannot-take-it-and-a-family-is-identified-by-its-recipe.md).
+
 ## Leak gate
 
 The test that keeps the names of the operator's machines, people and brands out of this public repository.
@@ -214,6 +224,13 @@ One image-editing operation inside the `edit-image` verb — the set is `crop`, 
 `composite`, `text`, `mask_boxes`, `grade`, `lut_cube`, `perspective_composite`, `finish`,
 `flatten_design`, `instantiate_design`. Ops are list items, not separate commands. `finish` should
 come last by convention, but the validator does not enforce ordering.
+
+## Overflow
+
+A media call leaving its own busy lane for an idle node of the fleet: an `auto` image call on a machine that has the lane and a
+fleet asks its pipeline whether the lane is free (`core.LaneProber`, a read-only relaxation of the real admission) and, when it
+is not, is sent to a node whose Image recipe matches. Not a substitute: a call no node matches waits in its own queue as before and
+says per node why (`cluster[]`). See [ADR 0082](architecture/decisions/0082-a-media-call-overflows-to-the-fleet-when-its-own-lane-cannot-take-it-and-a-family-is-identified-by-its-recipe.md).
 
 ## Park
 

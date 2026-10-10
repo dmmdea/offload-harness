@@ -6,6 +6,52 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added — a busy image lane overflows to an idle node that renders the same recipe (F52, ADR 0082)
+
+- **The behaviour.** An `auto` image call (`offload_generate_image`, `generate-image`) on a machine that has the lane and a fleet
+  configured used to wait for its own lane however many other nodes stood idle. It now asks its pipeline whether the lane is free
+  right now and, when it is not (a lease holds the card, callers are in line, or the host-RAM guard is holding the lane back),
+  sends the call to an idle node whose **image recipe** digests alike, under the node's own family name. The answer says where it
+  ran and why it left (`meta.node`, `meta.placement`). A box with no `delegate_remotes` asks nothing and reads no node (the path is
+  unchanged), `route local` never leaves, a call that carries a `waiter_token` stays in the local line, a call under an inherited
+  lease stays, and only image jobs overflow (graphs arrive with their own file check). When no node admits, the call waits here
+  exactly as before and a deferral it ends in carries `cluster[]`: one row per `delegate_remotes` node (`busy`, `not-capable`,
+  `unreachable`, `refused`, `bounced`, `skipped`) with the reason in the node's own terms (the lease and its reason, the config key
+  that differs and the family of this machine that would match, the release or the refine it lacks).
+- **The question is read-only and a relaxation.** `core.LaneProber` / `Pipeline.MediaLaneFree` is built from the helpers the
+  admission already reads state with and edits nothing inside `acquireCards`: it says busy only when something that makes the real
+  wait-0 grant refuse is present, and free whenever it cannot say. `TestMediaLaneFreeNeverRefusesAGrant` drives the real admission
+  over 27 lane states and fails if a lane the grant would serve is called busy; `TestMediaLaneFreeWritesNothing` snapshots the lease
+  root in each of them.
+- **Identity is the recipe, not the name.** `mediacap.ImageRecipe`: the checkpoint, text encoder, VAE and LoRA a family loads with
+  their byte sizes, and its sampling, digested over RESOLVED values (an unset Qwen-Image-2.1 key takes the builder's default from a
+  table `TestBuilderDefaultsMatchTheJSConstants` reads out of `render/wf-qwen-image-21.mjs` and `render/comfy-render.mjs`), so a node
+  that writes the default scheduler out and one that leaves it unset match, and a bf16, an int8 and an NVFP4 build of one family
+  name never do. Node-local keys are not in it, and a test fails when a key joins the image overlay's clear list unclassified.
+  No recipe exists for an sd.cpp binding. The match is strict, needs the same release, and never substitutes.
+- **Nodes publish and check recipes.** `/fleet/health` gains `image_recipes[]` and `refine_honoured` (additive; absent on a node
+  without an image lane and on older nodes, which a delegator reads as "cannot be matched"), from a 60 s memo. An image-gen dispatch
+  may carry `recipe_digest`; the node recomputes the digest of the family it names from the files on disk at admission and answers
+  **412** with no job on a mismatch (not 409, which already means a job failed here before, and not 503, which means busy).
+  The delegator also decodes the singular lease block's class, reason and remaining seconds (published, never read).
+- **`refine=false` travels.** The node's image-gen payload decodes `refine` the way the MCP handler does, and the client sends it only
+  to a node whose health says `refine_honoured`; any other node is a named miss in the defer instead of a contract refusal or a
+  silent refinement (this applies to `route remote` and the no-lane `auto` path as well). `tts_voice`, `transformer` and a graph's
+  `devices` still defer by name.
+- **Refusals move on, an accepted job is final.** At most 3 nodes, each under a fresh job id; a refusal at the door (503, 429, 412,
+  any status, a dial that never connected) or an accepted job answered `gpu_busy`/`gpu_queued` is passed over; any other answer
+  after acceptance is the call's result and a job a node holds is never also run here. A node that does not answer is left alone
+  for 5, 15, 60 and then 300 s, a `Retry-After` pauses it (chosen constants, not measurements). `RemoteAttribution.Bounce` closes
+  the PAIR card of an attempt that held nothing (completed, never started) and writes no ledger row; an overflowing call opens its
+  card only once a node has accepted the job, so the call has one row and one card per node that held it.
+- **Fixed on the way.** A seed (and width, height, steps) the caller gave as an integer reached a fleet node through a float64, so a
+  seed above 2^53 changed; the sender now reads integers exactly (`TestSeedTravelsExactly`).
+- **Not changed, and said.** One line per delegating machine, not one global order; a call resumed with its token is not moved
+  (late binding is the next step); every remote job cold-starts ComfyUI; the same recipe and seed on another GPU architecture is the
+  same composition, not bit-identical pixels. Nothing here was run against a live lease or a real render: the recipe match was
+  checked against the image blocks of three live nodes as read on 2026-10-10 (config text), one of them cut inside the block that
+  matters, so the first live action reads `image_recipes` on both nodes.
+
 ### Added — a host-RAM guard on every GPU lease path; a kept ComfyUI instance never holds two families' weights
 
 - **The memory is refused before the grant, not discovered after it.** On the reference 3-card Windows box (127.7 GiB physical),
