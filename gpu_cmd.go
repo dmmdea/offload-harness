@@ -695,9 +695,15 @@ func heldHint(err error, wait time.Duration) error {
 	if err == nil {
 		return nil
 	}
-	if errors.Is(err, gpulease.ErrStillQueued) && wait <= 0 {
-		// The card is free but someone registered earlier is ahead in line (register D-1xx-3).
-		return fmt.Errorf("%w; the card is free but a waiter registered earlier is ahead of this request — pass --wait <duration> (default %s) to queue behind it instead of failing", err, defaultReserveWait)
+	if errors.Is(err, gpulease.ErrStillQueued) {
+		// The card is free but someone registered earlier is ahead in line (register D-1xx-3);
+		// the error already says who, and whether this request waited at all. What it cannot
+		// say is which flag changes the outcome: none was passed (--wait 0), or the window that
+		// was passed ran out with the waiter still in front.
+		if wait <= 0 {
+			return fmt.Errorf("%w; pass --wait <duration> (default %s) to queue behind it instead of failing", err, defaultReserveWait)
+		}
+		return fmt.Errorf("%w; pass a longer --wait to keep queueing", err)
 	}
 	var held *gpulease.ErrHeld
 	if !errors.As(err, &held) {
@@ -783,7 +789,7 @@ func detachHolder(fs *flag.FlagSet, class string, dur, wait time.Duration, opts 
 		select {
 		case werr := <-childDone:
 			childProc = nil // nothing left to reap
-			return 0, fmt.Errorf("detached holder (pid %d) gave up before taking the lease: %v; its output is at %s", childPID, werr, errLog)
+			return 0, detachGaveUpError(childPID, werr, errLog)
 		default:
 		}
 		// With card-scoped leases several are live at once, so "the" holder is not the
@@ -842,6 +848,44 @@ func detachHolder(fs *flag.FlagSet, class string, dur, wait time.Duration, opts 
 		time.Sleep(150 * time.Millisecond)
 	}
 	return 0, fmt.Errorf("detached holder (pid %d) did not take the lease within %s; its output is at %s", childPID, (10*time.Second + wait).Round(time.Second), errLog)
+}
+
+// detachGaveUpError is the parent's answer when the hidden holder exited before it took the
+// lease: the exit status, the holder's own last words (childReason) and where the rest is.
+func detachGaveUpError(childPID int, werr error, errLog string) error {
+	return fmt.Errorf("detached holder (pid %d) gave up before taking the lease: %v%s; its full output is at %s", childPID, werr, childReason(errLog), errLog)
+}
+
+// childReasonMax bounds the detached holder's last words as the parent repeats them: an error
+// line is a sentence or two, and the log is still named for the rest.
+const childReasonMax = 600
+
+// childReason is the detached holder's own last words, read from the stderr the parent
+// captured for it: the error it exited with (main prints it as "error: ..."). It carries what
+// the parent cannot know, chiefly why the line did not move: who was ahead, and the flag a
+// foreground reserve would have named (`--wait` on a free card with a waiter in front). Without
+// it the parent reported only "gave up ... its output is at <temp log>" and the one sentence the
+// operator needed sat in a temp file. It returns "; <words>" so the caller's message reads whole,
+// or "" when the log is unreadable or empty.
+func childReason(errLog string) string {
+	b, err := os.ReadFile(errLog)
+	if err != nil {
+		return ""
+	}
+	last := ""
+	for _, line := range strings.Split(string(b), "\n") {
+		if l := strings.TrimSpace(line); l != "" {
+			last = l
+		}
+	}
+	last = strings.TrimSpace(strings.TrimPrefix(last, "error:"))
+	if last == "" {
+		return ""
+	}
+	if r := []rune(last); len(r) > childReasonMax {
+		last = string(r[:childReasonMax]) + "..."
+	}
+	return "; " + last
 }
 
 // holdArgs is the argv of the detached holder (`gpu hold ...`). A named card set travels as
@@ -930,6 +974,9 @@ func runGPUHold(args []string) error {
 			os.Stderr, time.Sleep, time.Now)
 	} else {
 		lease, err = m.Acquire(gpulease.Class(*class), holdOpts)
+		// This process's stderr is what the parent reads back when the holder gives up
+		// (childReason), so the refusal carries the same hint the foreground verb prints.
+		err = heldHint(err, *wait)
 	}
 	if err != nil {
 		return err
