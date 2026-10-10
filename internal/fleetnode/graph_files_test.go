@@ -1,0 +1,264 @@
+package fleetnode
+
+// The node's side of a remote graph (P0 plan, S4; ADR 0082 amendment). A run-graph dispatch names, inside its graph, the
+// weight files its loaders open and the images its LoadImage nodes read. A node that holds them all runs the graph; a node
+// that lacks one used to take its lease, cold-start ComfyUI and defer after, so the delegator learned it a render later.
+// Admission now reads the graph first and answers 503 (the re-placeable "this node cannot run this now") naming what is
+// missing, before any job, temp file or lease exists.
+
+import (
+	"errors"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/dmmdea/offload-harness/internal/config"
+)
+
+// graphNode is a run-graph node whose ComfyUI tree holds the given files (relative to the tree: models/<class>/..., input/...).
+func graphNode(t *testing.T, files ...string) config.Config {
+	t.Helper()
+	comfy := t.TempDir()
+	for _, rel := range files {
+		p := filepath.Join(comfy, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := fullCfg()
+	cfg.ComfyDir = comfy
+	return cfg
+}
+
+func graphDispatch(id, graph, manifest string) string {
+	m := ""
+	if manifest != "" {
+		m = `,"manifest":` + manifest
+	}
+	return `{"job_id":"` + id + `","task_type":"run-graph","payload":{"graph":` + graph + m + `}}`
+}
+
+const (
+	wanGraph = `{
+		"3": {"class_type":"UNETLoader","inputs":{"unet_name":"wan/high.safetensors"}},
+		"4": {"class_type":"CLIPLoader","inputs":{"clip_name":"umt5.safetensors"}},
+		"5": {"class_type":"VAELoader", "inputs":{"vae_name":"wan_vae.safetensors"}}
+	}`
+	refGraph = `{
+		"1": {"class_type":"LoadImage","inputs":{"image":"ref.png"}},
+		"3": {"class_type":"UNETLoader","inputs":{"unet_name":"wan/high.safetensors"}}
+	}`
+)
+
+// leftoverGraphFiles lists the temp files a refused dispatch must not leave behind. The test points the process's
+// temp directory at its own, so any file there came from the call.
+func isolatedTemp(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	for _, k := range []string{"TMP", "TEMP", "TMPDIR"} {
+		t.Setenv(k, dir)
+	}
+	return dir
+}
+
+func entries(t *testing.T, dir string) []string {
+	t.Helper()
+	es, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []string
+	for _, e := range es {
+		out = append(out, e.Name())
+	}
+	return out
+}
+
+// THE ACK CHECK. A graph that names a weight file the node does not hold is refused with 503, and the refusal names the
+// file (and only the files that are missing). No job exists, nothing runs, and the temp files the graph would have been
+// written to are never created.
+func TestRunGraphMissingLoaderFileIs503NamingIt(t *testing.T) {
+	cfg := graphNode(t, "models/diffusion_models/wan/high.safetensors", "models/text_encoders/umt5.safetensors")
+	tmp := isolatedTemp(t)
+	runner := &fakeRunner{}
+	s, jobs := newTestServer(t, cfg, runner, nil)
+
+	rec := do(t, s, http.MethodPost, "/fleet/dispatch", graphDispatch("g-missing", wanGraph, ""), nil)
+	wantErrorShape(t, rec, http.StatusServiceUnavailable, "wan_vae.safetensors")
+	body := rec.Body.String()
+	for _, held := range []string{"wan/high.safetensors", "umt5.safetensors"} {
+		if strings.Contains(body, held) {
+			t.Errorf("the refusal names a file the node holds (%s): %s", held, body)
+		}
+	}
+	if !strings.Contains(body, "run-graph") {
+		t.Errorf("the refusal must say which task it is about: %s", body)
+	}
+	if queued, running := jobs.Counts(); queued+running != 0 || len(runner.requests()) != 0 {
+		t.Errorf("a refused dispatch creates no job and runs nothing")
+	}
+	if rec := do(t, s, http.MethodGet, "/fleet/jobs/g-missing", "", nil); rec.Code != http.StatusNotFound {
+		t.Errorf("the refused job must not exist, got %d", rec.Code)
+	}
+	if left := entries(t, tmp); len(left) != 0 {
+		t.Errorf("a refused dispatch left temp files behind: %v", left)
+	}
+}
+
+// The same graph on a node that holds every file is admitted and run, so the check never refuses a node that could run it.
+func TestRunGraphWithEveryFileHeldIsAdmitted(t *testing.T) {
+	cfg := graphNode(t, "models/diffusion_models/wan/high.safetensors", "models/text_encoders/umt5.safetensors", "models/vae/wan_vae.safetensors")
+	runner := &fakeRunner{}
+	s, _ := newTestServer(t, cfg, runner, nil)
+	rec := do(t, s, http.MethodPost, "/fleet/dispatch", graphDispatch("g-held", wanGraph, ""), nil)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("a node that holds every file must accept the graph, got %d: %s", rec.Code, rec.Body.String())
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for len(runner.requests()) == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if len(runner.requests()) != 1 {
+		t.Fatalf("the admitted graph must run once, got %d", len(runner.requests()))
+	}
+}
+
+// The file is looked for the way ComfyUI opens it: under any class directory of any models root, so a node that keeps a
+// LoRA under loras and a UNet under diffusion_models, or on a second volume through extra_model_paths.yaml, holds both.
+func TestRunGraphFilesAreFoundUnderEveryClassDirectoryAndRoot(t *testing.T) {
+	cfg := graphNode(t, "models/unet/wan/high.safetensors", "models/clip/umt5.safetensors")
+	other := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(other, "vae"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(other, "vae", "wan_vae.safetensors"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	yaml := "second:\n  base_path: " + filepath.ToSlash(other) + "\n  vae: vae\n"
+	if err := os.WriteFile(filepath.Join(cfg.ComfyDir, "extra_model_paths.yaml"), []byte(yaml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, cleanup, err := BuildRequest(t.Context(), cfg, true, "run-graph", []byte(`{"graph":`+wanGraph+`}`))
+	defer cleanup()
+	if err != nil {
+		t.Fatalf("every file is held (legacy class aliases and a second root): %v", err)
+	}
+}
+
+// An input image does not travel with a graph (the dispatch door carries JSON only), so a LoadImage the node does not hold
+// is refused the same way, and the refusal says why the delegator cannot just send it.
+func TestRunGraphMissingInputImageIs503(t *testing.T) {
+	cfg := graphNode(t, "models/diffusion_models/wan/high.safetensors")
+	tmp := isolatedTemp(t)
+	runner := &fakeRunner{}
+	s, jobs := newTestServer(t, cfg, runner, nil)
+
+	rec := do(t, s, http.MethodPost, "/fleet/dispatch", graphDispatch("g-img", refGraph, ""), nil)
+	wantErrorShape(t, rec, http.StatusServiceUnavailable, "ref.png")
+	if !strings.Contains(rec.Body.String(), "do not travel") {
+		t.Errorf("the refusal must say input images do not travel with a graph: %s", rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "high.safetensors") {
+		t.Errorf("the weight file is held and must not be named: %s", rec.Body.String())
+	}
+	if queued, running := jobs.Counts(); queued+running != 0 || len(runner.requests()) != 0 {
+		t.Errorf("a refused dispatch creates no job and runs nothing")
+	}
+	if left := entries(t, tmp); len(left) != 0 {
+		t.Errorf("a refused dispatch left temp files behind: %v", left)
+	}
+
+	// The node that holds the image under its input directory takes it.
+	cfg2 := graphNode(t, "models/diffusion_models/wan/high.safetensors", "input/ref.png")
+	s2, _ := newTestServer(t, cfg2, &fakeRunner{}, nil)
+	if rec := do(t, s2, http.MethodPost, "/fleet/dispatch", graphDispatch("g-img-ok", refGraph, ""), nil); rec.Code != http.StatusAccepted {
+		t.Fatalf("a node that holds the input image must accept, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// Missing weights and a missing image are one refusal that names both; a long list is cut with a count.
+func TestRunGraphRefusalNamesEverythingMissingAndCutsALongList(t *testing.T) {
+	cfg := graphNode(t)
+	_, cleanup, err := BuildRequest(t.Context(), cfg, true, "run-graph", []byte(`{"graph":`+refGraph+`}`))
+	defer cleanup()
+	var nre *routeNotReadyError
+	if !errors.As(err, &nre) {
+		t.Fatalf("want the re-placeable route-not-ready refusal, got %v", err)
+	}
+	for _, want := range []string{"wan/high.safetensors", "ref.png"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal must name %s: %v", want, err)
+		}
+	}
+
+	var sb strings.Builder
+	sb.WriteString("{")
+	for i := 0; i < 9; i++ {
+		if i > 0 {
+			sb.WriteString(",")
+		}
+		sb.WriteString(`"` + string(rune('a'+i)) + `":{"class_type":"LoraLoader","inputs":{"lora_name":"l` + string(rune('a'+i)) + `.safetensors"}}`)
+	}
+	sb.WriteString("}")
+	_, cleanup2, err := BuildRequest(t.Context(), cfg, true, "run-graph", []byte(`{"graph":`+sb.String()+`}`))
+	defer cleanup2()
+	if err == nil || !strings.Contains(err.Error(), "la.safetensors") || !strings.Contains(err.Error(), "and 3 more") || strings.Contains(err.Error(), "li.safetensors") {
+		t.Fatalf("a refusal lists the first six and counts the rest: %v", err)
+	}
+}
+
+// A model the graph's manifest tells the node to fetch (a models[] entry with a source_url) is not missing: the satisfier
+// downloads it before it starts ComfyUI. An entry with no source_url is not provisioned by anyone and stays refused.
+func TestRunGraphAFileTheManifestFetchesIsNotMissing(t *testing.T) {
+	cfg := graphNode(t, "models/text_encoders/umt5.safetensors", "models/vae/wan_vae.safetensors")
+	s, _ := newTestServer(t, cfg, &fakeRunner{}, nil)
+
+	fetched := `{"models":[{"path":"models/diffusion_models/wan/high.safetensors","source_url":"https://example.invalid/high.safetensors"}]}`
+	if rec := do(t, s, http.MethodPost, "/fleet/dispatch", graphDispatch("g-man-ok", wanGraph, fetched), nil); rec.Code != http.StatusAccepted {
+		t.Fatalf("a file the manifest fetches must not be refused, got %d: %s", rec.Code, rec.Body.String())
+	}
+	noSource := `{"models":[{"path":"models/diffusion_models/wan/high.safetensors"}]}`
+	wantErrorShape(t, do(t, s, http.MethodPost, "/fleet/dispatch", graphDispatch("g-man-no", wanGraph, noSource), nil),
+		http.StatusServiceUnavailable, "wan/high.safetensors")
+}
+
+// A name is data from a tailnet peer: one that climbs out of the model roots or names an absolute path is looked up
+// nowhere, so it reads as missing (and is named) even when the file it points at exists.
+func TestRunGraphNamesThatLeaveTheModelRootsAreMissing(t *testing.T) {
+	cfg := graphNode(t, "models/vae/ok.safetensors")
+	outside := filepath.Join(filepath.Dir(cfg.ComfyDir), "outside.safetensors")
+	if err := os.WriteFile(outside, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Remove(outside) })
+	for _, name := range []string{"../../outside.safetensors", filepath.ToSlash(outside)} {
+		graph := `{"1":{"class_type":"VAELoader","inputs":{"vae_name":"` + name + `"}}}`
+		_, cleanup, err := BuildRequest(t.Context(), cfg, true, "run-graph", []byte(`{"graph":`+graph+`}`))
+		cleanup()
+		var nre *routeNotReadyError
+		if !errors.As(err, &nre) {
+			t.Errorf("%q: want a route-not-ready refusal, got %v", name, err)
+		}
+	}
+}
+
+// What the check does not read is unchanged: a graph that names no file is admitted by a node with no models root at all,
+// and a payload that is not a valid graph keeps its 400.
+func TestRunGraphThatNamesNoFileIsAdmittedAsBefore(t *testing.T) {
+	cfg := fullCfg()
+	cfg.ComfyDir = ""
+	s, _ := newTestServer(t, cfg, &fakeRunner{}, nil)
+	if rec := do(t, s, http.MethodPost, "/fleet/dispatch", graphDispatch("g-plain", `{"1":{"class_type":"KSampler","inputs":{"seed":1,"model":["2",0]}}}`, ""), nil); rec.Code != http.StatusAccepted {
+		t.Fatalf("a graph that names no file must be admitted, got %d: %s", rec.Code, rec.Body.String())
+	}
+	body := `{"job_id":"g-bad","task_type":"run-graph","payload":{"graph":[1]}}`
+	if rec := do(t, s, http.MethodPost, "/fleet/dispatch", body, nil); rec.Code != http.StatusBadRequest {
+		t.Fatalf("a graph that is not an object keeps its 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
