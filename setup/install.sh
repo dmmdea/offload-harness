@@ -22,7 +22,8 @@
 # PREREQUISITES (this script does not build or download them, and says so up front):
 #   - a built llama.cpp (llama-server + its shared objects); b11452 or newer for a tier that renders
 #     the embeddinggemma2 memory-stack entry, b10964 or newer for ampere-6's RAM-spill agent seat
-#     (b11490 is the build both were proven on)
+#     (b11490 is the build both were proven on). A node that must keep an older main build passes a
+#     second, b11452-or-newer build for the embeddinggemma2 entry alone as --llama-bin-eg2
 #   - the GGUF model files for the tier
 #   - node (for the render runners), and the local-offload binary itself
 set -euo pipefail
@@ -30,6 +31,7 @@ set -euo pipefail
 PREFIX=""
 LLAMA_BIN=""
 LLAMA_BIN_CPU=""
+LLAMA_BIN_EG2=""
 MODELS=""
 LISTEN="127.0.0.1:11436"
 NODE_ID="$(hostname)"
@@ -76,6 +78,9 @@ Usage: install.sh [options]
                       tier whose backend is rk3588: the NPU serves there and no llama.cpp runs)
   --llama-bin-cpu DIR directory of a CPU llama-server build: renders the tier's CPU seat family
                       beside its GPU seats (only for a tier that declares alt_backends [cpu])
+  --llama-bin-eg2 DIR directory of the llama.cpp build that serves ONLY the embeddinggemma2 entry
+                      (default: --llama-bin). For a node whose main build is older than b11452, which
+                      cannot load that entry; only for a tier that renders it (include_embeddinggemma2)
   --models DIR        directory holding the GGUF files (default: <prefix>/models)
   --listen ADDR       llama-swap listen address (default 127.0.0.1:11436)
   --node-id NAME      fleet node id (default: hostname)
@@ -105,6 +110,7 @@ while [ $# -gt 0 ]; do
     --prefix) PREFIX="${2:?}"; shift 2 ;;
     --llama-bin) LLAMA_BIN="${2:?}"; shift 2 ;;
     --llama-bin-cpu) LLAMA_BIN_CPU="${2:?}"; shift 2 ;;
+    --llama-bin-eg2) LLAMA_BIN_EG2="${2:?}"; shift 2 ;;
     --models) MODELS="${2:?}"; shift 2 ;;
     --listen) LISTEN="${2:?}"; shift 2 ;;
     --node-id) NODE_ID="${2:?}"; shift 2 ;;
@@ -213,6 +219,7 @@ if [ "$BACKEND" != "rk3588" ]; then
   [ -n "$LLAMA_BIN" ] || die "--llama-bin is required (the directory holding llama-server and its shared objects)"
 fi
 [ -z "$LLAMA_BIN" ] || [ -d "$LLAMA_BIN" ] || die "--llama-bin $LLAMA_BIN is not a directory"
+[ -z "$LLAMA_BIN_EG2" ] || [ -d "$LLAMA_BIN_EG2" ] || die "--llama-bin-eg2 $LLAMA_BIN_EG2 is not a directory"
 [ -n "$MODELS" ] || MODELS="$PREFIX/models"
 
 # ---- 3. lay out the tree ----------------------------------------------------
@@ -317,7 +324,7 @@ fi
 # ---- 5. the serving config --------------------------------------------------
 SWAP_YAML="$PREFIX/etc/llama-swap.yaml"
 if [ "$DRY_RUN" -eq 1 ]; then
-  say "  would render $SWAP_YAML for tier $TIER"
+  say "  would render $SWAP_YAML for tier $TIER${LLAMA_BIN:+ --llama-bin $LLAMA_BIN}${LLAMA_BIN_CPU:+ --llama-bin-cpu $LLAMA_BIN_CPU}${LLAMA_BIN_EG2:+ --llama-bin-eg2 $LLAMA_BIN_EG2}"
 else
   # --home is load-bearing: a tier's media seats name their binaries under the
   # install root, and without it the render REFUSES — after step 4 has already
@@ -326,7 +333,7 @@ else
     --rknpu-home "${RKNPU_HOME:-$PREFIX/rknpu}" --ram-tier "$RAM_TIER" \
     --vllm-user "$SERVICE_USER" --vllm-proxy-host "$TS_IP" \
     --vllm-venv "$VLLM_VENV" --hf-home "$HF_HOME_DIR" \
-    ${LLAMA_BIN:+--llama-bin "$LLAMA_BIN"} ${LLAMA_BIN_CPU:+--llama-bin-cpu "$LLAMA_BIN_CPU"} --models "$MODELS" --listen "$LISTEN" --out "$SWAP_YAML"
+    ${LLAMA_BIN:+--llama-bin "$LLAMA_BIN"} ${LLAMA_BIN_CPU:+--llama-bin-cpu "$LLAMA_BIN_CPU"} ${LLAMA_BIN_EG2:+--llama-bin-eg2 "$LLAMA_BIN_EG2"} --models "$MODELS" --listen "$LISTEN" --out "$SWAP_YAML"
 fi
 
 # ---- 5b. the persistent vLLM agent seat (ADR 0035), when this box can run it ----

@@ -59,6 +59,7 @@ func TestParamsBasisMirrorsParams(t *testing.T) {
 	p.VLLMRuntime = vllmseat.Runtime{User: "someone", ProxyHost: "203.0.113.9"}
 	p.IncludeQ38, p.IncludeQ359B, p.IncludeMimo9B, p.DisableCUDAGraphs = true, true, true, true
 	p.IncludeQ3827B, p.IncludeQ3635B, p.IncludeEG2, p.EG2TextOnly = true, true, true, true
+	p.EG2LlamaBin = "/opt/llama-b11490" // the embeddinggemma2 entry's own build: a BasisOf that forgot it would hash "" forever
 	// The composite tier’s display layer (ADR 0052) rides in the hashed set too:
 	// left nil here, a BasisOf that forgot to carry it would round-trip cleanly
 	// and hash nil forever on the one tier that actually sets it.
@@ -108,6 +109,7 @@ func TestSpecHashIsSensitiveToEveryInput(t *testing.T) {
 		{"params.include_qwen36_35b", func(b *SpecBasis) { b.Params.IncludeQ3635B = true }},
 		{"params.include_embeddinggemma2", func(b *SpecBasis) { b.Params.IncludeEG2 = true }},
 		{"params.eg2_text_only", func(b *SpecBasis) { b.Params.EG2TextOnly = true }},
+		{"params.eg2_llama_bin", func(b *SpecBasis) { b.Params.EG2LlamaBin = "/opt/llama-b11490" }},
 		{"params.seats", func(b *SpecBasis) {
 			b.Params.Seats = []mediaseat.Seat{{Kind: "vision", Name: "vlm", Model: "m.gguf", Residency: "swap"}}
 		}},
@@ -182,6 +184,29 @@ func TestTheCanonicalBasisOmitsTheStackMemberFieldWhenFalseAndCarriesItWhenTrue(
 	}
 	if !strings.Contains(string(on), `"include_embeddinggemma2":true`) {
 		t.Errorf("a basis WITH the stack member must carry the field, got:\n%s", on)
+	}
+}
+
+// TestTheCanonicalBasisOmitsTheEG2BinWhenUnsetAndCarriesItWhenSet is the omitempty promise for
+// eg2_llama_bin: a render that gave the embeddinggemma2 entry no build of its own (every render until
+// --llama-bin-eg2 existed) canonicalises to bytes that never mention the key, so the field adds nothing
+// to its Params portion; one that did carries the directory under that key.
+func TestTheCanonicalBasisOmitsTheEG2BinWhenUnsetAndCarriesItWhenSet(t *testing.T) {
+	_, off, err := SpecHash(basis())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(off), "eg2_llama_bin") {
+		t.Errorf("a basis without a build of its own for the entry must not carry the field, got:\n%s", off)
+	}
+	b := basis()
+	b.Params.EG2LlamaBin = "/opt/llama-b11490"
+	_, on, err := SpecHash(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(on), `"eg2_llama_bin":"/opt/llama-b11490"`) {
+		t.Errorf("a basis WITH a build of its own for the entry must carry the field, got:\n%s", on)
 	}
 }
 

@@ -126,6 +126,15 @@ type Params struct {
 	// (a text-only replica: text vectors are identical with and without the projector, cosine
 	// 1.0 measured, and a replica never embeds media) and is meaningful only with IncludeEG2.
 	EG2TextOnly bool
+	// EG2LlamaBin, when set and different from LlamaBin, is the directory of the llama.cpp build
+	// that serves ONLY the embeddinggemma2 entry (retargetEG2Bin): its cmd path moves to that build,
+	// and on a template with a loader macro (`ld:`) its env swaps `${ld}` for a macro of its own.
+	// Every other entry keeps LlamaBin. It exists for a node whose main build cannot load the
+	// entry's architecture (llama.cpp below b11452) but must keep that build for its other seats.
+	// Empty is the common case and renders byte-identically to a build with no support for it
+	// (TestEG2BinUnsetRendersTheBytes0175Rendered). Meaningful only with IncludeEG2: set without it,
+	// Render refuses.
+	EG2LlamaBin string
 
 	// Seats are the tier's alias-backed media seats (vision / STT). Empty is the
 	// common case and MUST render byte-identically to a build that had no seat
@@ -333,6 +342,17 @@ func Render(tmpl string, p Params) (string, error) {
 		var err error
 		if out, err = dropEG2Projector(out); err != nil {
 			return "", err
+		}
+	}
+	// The entry's own llama.cpp build, when it differs from the node's main one. After the projector strip
+	// (both rewrite the same entry, and the strip's exact-count check reads the template's own text) and
+	// before the seats and the substitution pass, which would otherwise resolve its token to the main build.
+	if p.IncludeEG2 {
+		if own := p.eg2OwnBin(); own != "" {
+			var err error
+			if out, err = retargetEG2Bin(out, own); err != nil {
+				return "", err
+			}
 		}
 	}
 	// Seats go in AFTER the 26B removal and BEFORE substitution: after, so a seat
@@ -601,7 +621,28 @@ func (p Params) servesWithoutLlama() bool {
 	return true
 }
 
+// validateEG2Bin refuses an own build the render cannot honour: one set for an entry the render does not
+// carry (it would be recorded in the stamp and mean nothing), and one whose characters would break the macro
+// it lands in, a double-quoted YAML scalar that llama-swap then expands (a quote or a line break ends the
+// scalar, a `$` starts a substitution).
+func (p Params) validateEG2Bin() error {
+	if p.EG2LlamaBin == "" {
+		return nil
+	}
+	if !p.IncludeEG2 {
+		return fmt.Errorf("EG2LlamaBin %q is set but this render carries no %s entry (IncludeEG2 is false): "+
+			"a build for an entry that does not render would be recorded and mean nothing", p.EG2LlamaBin, modelEG2)
+	}
+	if strings.ContainsAny(p.EG2LlamaBin, "\"\n\r$") {
+		return fmt.Errorf("EG2LlamaBin %q holds a double quote, a line break or a `$`: it lands inside a quoted YAML macro that llama-swap expands", p.EG2LlamaBin)
+	}
+	return nil
+}
+
 func (p Params) validate() error {
+	if err := p.validateEG2Bin(); err != nil {
+		return err
+	}
 	var missing []string
 	if p.LlamaBin == "" && !p.servesWithoutLlama() {
 		missing = append(missing, "llama bin dir")
@@ -1472,6 +1513,29 @@ const modelEG2 = "embeddinggemma2"
 // construction.
 const eg2ProjectorFlag = "--mmproj __MODELS__/mmproj-embeddinggemma-2-Q8_0.gguf "
 
+// eg2BlockLines marks, for each line, whether it belongs to the embeddinggemma2 entry's body. The
+// block starts at a line with the two-space key `embeddinggemma2:` (the key line itself is NOT marked:
+// the entry's functional lines are the ones under it) and ends at the next two-space key or at any
+// column-0 line, which opens a new top-level section. One scanner serves every rewrite that is scoped
+// to this entry (dropEG2Projector, retargetEG2Bin), so they can never disagree about where it ends.
+func eg2BlockLines(lines []string) []bool {
+	mark := make([]bool, len(lines))
+	inBlock := false
+	for i, l := range lines {
+		switch {
+		case strings.HasPrefix(l, "  "+modelEG2+":"):
+			inBlock = true
+			continue
+		case inBlock && l != "" && !strings.HasPrefix(l, " "):
+			inBlock = false
+		case inBlock && strings.HasPrefix(l, "  ") && !strings.HasPrefix(l, "   ") && strings.Contains(l, ":"):
+			inBlock = false
+		}
+		mark[i] = inBlock
+	}
+	return mark
+}
+
 // dropEG2Projector removes the projector argument from the embeddinggemma2 entry and from
 // nothing else, for a text-only tier. It is exact in both directions: the entry must carry the
 // flag exactly once, and no `--mmproj` may survive in the entry's functional lines, so a
@@ -1483,18 +1547,9 @@ func dropEG2Projector(tmpl string) (string, error) {
 		return tmpl, nil
 	}
 	lines := strings.Split(tmpl, "\n")
-	inBlock, hits := false, 0
+	inBlock, hits := eg2BlockLines(lines), 0
 	for i, l := range lines {
-		switch {
-		case strings.HasPrefix(l, "  "+modelEG2+":"):
-			inBlock = true
-			continue
-		case inBlock && l != "" && !strings.HasPrefix(l, " "):
-			inBlock = false
-		case inBlock && strings.HasPrefix(l, "  ") && !strings.HasPrefix(l, "   ") && strings.Contains(l, ":"):
-			inBlock = false
-		}
-		if !inBlock {
+		if !inBlock[i] {
 			continue
 		}
 		if n := strings.Count(l, eg2ProjectorFlag); n > 0 {
@@ -1511,6 +1566,93 @@ func dropEG2Projector(tmpl string) (string, error) {
 			"so a text-only render cannot be proven to differ from the authority's entry by that argument alone", modelEG2, strings.TrimSpace(eg2ProjectorFlag), hits)
 	}
 	return strings.Join(lines, "\n"), nil
+}
+
+// The llama.cpp build token every template writes into a cmd, and the pieces of the Linux loader-path
+// wiring retargetEG2Bin swaps: the shared macro the entries reference, the macro the retarget adds, and the
+// two spellings of the env list item that names them.
+const (
+	tokenLlamaBin   = "__LLAMA_BIN__"
+	ldMacroAnchor   = "\n  ld: "
+	eg2LoaderMacro  = "ldembed"
+	eg2LoaderItem   = `"${ld}"`
+	eg2LoaderItemEG = `"${` + eg2LoaderMacro + `}"`
+)
+
+// eg2OwnBin is the directory the embeddinggemma2 entry runs from when that is NOT the main build, or ""
+// when the entry follows the main build (EG2LlamaBin unset, or spelling the main build again).
+func (p Params) eg2OwnBin() string {
+	own := strings.TrimRight(p.EG2LlamaBin, "/")
+	if own == strings.TrimRight(p.LlamaBin, "/") {
+		return ""
+	}
+	return own
+}
+
+// retargetEG2Bin points the embeddinggemma2 entry, and that entry only, at the llama.cpp build in dir
+// instead of the node's main build. The entry's one `__LLAMA_BIN__` becomes dir, and on a template that
+// carries a Linux loader-path macro (`ld:`) the entry's env swaps its `${ld}` list item for a macro of its
+// own (`ldembed`, inserted right after `ld:`), because the shared macro names the main build's directory and
+// a build links its own shared objects. The swap is of the ITEM, not the line: the Vulkan template keeps the
+// `${vk}` device pin beside it. A Windows template has no loader macro, so only the cmd path moves; the
+// directory must hold a complete build there, since Windows resolves its DLLs beside the executable.
+//
+// Like the projector strip it runs on the template BEFORE substitution (so the stamp's body hash covers
+// exactly what was rendered) and is exact in both directions: the entry must name the build exactly once, and
+// a template with a loader macro must give the entry exactly one `${ld}` item, or the render fails by naming
+// the entry instead of shipping one that loads from the wrong build. A template with no entry is returned
+// untouched; Render's refusal-by-name reports that case. dir carries no trailing slash.
+func retargetEG2Bin(tmpl, dir string) (string, error) {
+	if !definesModel(tmpl, modelEG2) {
+		return tmpl, nil
+	}
+	lines := strings.Split(tmpl, "\n")
+	inBlock := eg2BlockLines(lines)
+	hits, items := 0, 0
+	for i, l := range lines {
+		if inBlock[i] {
+			hits += strings.Count(l, tokenLlamaBin)
+			items += strings.Count(l, eg2LoaderItem)
+		}
+	}
+	if hits != 1 {
+		return "", fmt.Errorf("the %s entry names the llama.cpp build (%s) %d times, want exactly 1 — the template's shape changed, "+
+			"so the entry cannot be pointed at its own build", modelEG2, tokenLlamaBin, hits)
+	}
+	hasLoader := strings.Contains(tmpl, ldMacroAnchor)
+	switch {
+	case hasLoader && items != 1:
+		return "", fmt.Errorf("the %s entry carries the loader item %s %d times, want exactly 1 — the template's shape changed, "+
+			"so the entry's loader path cannot be pointed at its own build", modelEG2, eg2LoaderItem, items)
+	case !hasLoader && items != 0:
+		return "", fmt.Errorf("the %s entry names the loader macro %s but the template defines no `ld:` macro to place `%s` beside",
+			modelEG2, eg2LoaderItem, eg2LoaderMacro)
+	case hasLoader && strings.Contains(tmpl, "\n  "+eg2LoaderMacro+": "):
+		return "", fmt.Errorf("the template already defines the `%s` macro the %s entry's own build needs — it is rendered, never hand-written into a template",
+			eg2LoaderMacro, modelEG2)
+	}
+	for i, l := range lines {
+		if !inBlock[i] {
+			continue
+		}
+		l = strings.ReplaceAll(l, tokenLlamaBin, dir)
+		if hasLoader {
+			l = strings.ReplaceAll(l, eg2LoaderItem, eg2LoaderItemEG)
+		}
+		lines[i] = l
+	}
+	out := strings.Join(lines, "\n")
+	if !hasLoader {
+		return out, nil
+	}
+	i := strings.Index(out, ldMacroAnchor)
+	eol := strings.Index(out[i+1:], "\n")
+	if eol < 0 {
+		return "", fmt.Errorf("the %s entry's own loader macro has no place to go: malformed macros block, `ld:` is the last line", modelEG2)
+	}
+	insertAt := i + 1 + eol + 1
+	macro := fmt.Sprintf("  %s: \"LD_LIBRARY_PATH=%s:${LD_LIBRARY_PATH:-}\"\n", eg2LoaderMacro, dir)
+	return out[:insertAt] + macro + out[insertAt:], nil
 }
 
 // evictRowEG2 is the stack's evict_costs row for the var `eg2`. dropModel removes a matrix var
