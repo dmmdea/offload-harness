@@ -101,9 +101,16 @@ paints `completed` gray and prints `error` only on a `failed` card, so the reaso
 history and the harness ledger, not on the card face. If the operator wants the card gone instead, it is
 this one function, plus the relay's method list.
 
-Not switched, on purpose: the delegation card (`pairTerminal`) closes `failed` for any deferral. An
+Where the rule reaches, and where it stops. A text or vision call opens no `Begin` card (PAIR keys a
+card on its engine, and they learn it only as they run), so its only card is the ledger row's terminal
+one, and a `gpu_busy` row of such a call (a vision call skipped because a render held the card) now
+closes quiet through the same function; a door killed right after such a call loses that terminal-only
+card instead of leaving one open, which was already so and is benign (no false red, no orphan). Not
+switched, on purpose: the delegation card (`pairTerminal`) closes `failed` for any deferral. An
 agent contract's deferral carries a `defer_class`, not an `err_class`, and a placement that could not
-get a slot emits no card at all, so there is no held-card deferral on a delegation card to quiet.
+get a slot emits no card at all, so there is no held-card deferral on a delegation card to quiet. The
+relay member's terminal path for a card another box opened (`pl.remote`) is not parked before its post
+either: it closes by its terminal relayed frame or the age cap, as before.
 
 ## The two sources
 
@@ -150,9 +157,11 @@ get a slot emits no card at all, so there is no held-card deferral on a delegati
    finished" for a call that had answered cleanly: two red cards on the dashboard for two attempts
    that each got a clean `gpu queued`. Now `end` posts its own close inline (`EmitSync`, bounded at
    2 s), and when the row claimed the card `end` waits (`awaitRowClose`, at most 4 s) for the observer's
-   frame, posted inline on its own goroutine, to land. A hung PAIR therefore costs a call that bound
-   once and never its answer, and the terminal verdict is already parked in the marker (below), so the
-   sweep sends the true outcome even then. **A row names its call.** `Begin` returns the call id (the card's own
+   frame, posted inline on its own goroutine, to land. A PAIR that hangs on the POST therefore costs a
+   call that bound once and never its answer, and the terminal verdict is already parked in the marker
+   (below), so the sweep sends the true outcome even then. A hang EARLIER, in planning the frame (a
+   relay's health probe, a cold identity read), is not covered: the in-flight marker is then all the
+   register holds, and the sweep closes the card as an orphan. **A row names its call.** `Begin` returns the call id (the card's own
    job id), `Run` stamps it on `core.Meta.CallID`, the ledger row carries it as `call_id`, and
    `claim(task, callID)` closes exactly that card. Matching the oldest open card of the task
    instead (the rule before this change) let overlapping calls of one task trade cards: concurrent
@@ -228,7 +237,9 @@ never the entry tier's correctness-label snapshot, whose `cards_tokens` is the 0
      except a node that answered that another job held its card, which ran nothing and closes the card
      quiet, *A held card is not a failure*). The terminal frame is posted inline before the lane
      returns its result (`Finish` uses `EmitSync`): the door answers at once and may be killed right
-     after, as for a local call.
+     after, as for a local call. On the auto route's fallback to a local run, `Discard` closes the
+     attempt that reached a node the same way, so a PAIR that hangs delays the local run by the
+     post's bound (a refused connection is instant).
    - **One asker ledger row** (door, route, placement, `node`, `node_id`, `fleet_job_id`, latency,
      the deferred and error fields), written for every remote call. It carries `card_by_caller`,
      which `AttachLedger` skips, so the observer never cards it a second time.
@@ -540,7 +551,10 @@ side can know the producer died, so the harness retires its own orphans:
   process exited before the job finished" for a job whose outcome it knew. The one cost is a window of
   milliseconds in which a LIVE producer's marker is already pending: a sweeper that reads it then
   resends an identical terminal frame, which PAIR merges as an equal-rank no-op, and the producer's
-  own removal of the marker after its post is idempotent. The marker is written atomically
+  own removal of the marker after its post is idempotent. The other cost is one more marshal and
+  atomic write (with Windows' bounded rename retry) on the caller's goroutine for every terminal frame
+  that has an open marker: delegations, lease cards, node cards and seat-watch `closeAll` pay it too,
+  not only the door path. The marker is written atomically
   (temp + rename) on the caller's goroutine, so a job's markers follow its frames in order; every
   error is swallowed (a marker that cannot be written only means a card that cannot be closed after
   a crash — never a failed or slowed job).
@@ -679,4 +693,7 @@ goroutine's own terminal frame is dropped once the run is shut. `RunWith` theref
 the cards it opened (`notePair`) and `shutPair` closes the ones still open, `failed`, under the
 identity their in-flight frames named, with the deadline's words ("call deadline reached: the subtask
 had not stopped when the call returned"), before `pair.Wait()` delivers them. Before this such a card
-stayed `queued` or `running` until the door's process died and the orphan sweep closed it.
+stayed `queued` or `running` until the door's process died and the orphan sweep closed it. The verdict
+is the call's, not the node's: a subtask placed on a fleet node closes `failed` here while the node may
+still be running the job (the published budget defer says as much: it cannot be recalled), exactly as a
+cooperating subtask the deadline cancelled already did.
