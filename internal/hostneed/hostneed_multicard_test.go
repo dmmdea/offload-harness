@@ -88,6 +88,8 @@ func TestThePlacementFlagMeansNothingToAFamilyWithoutARecipe(t *testing.T) {
 		"hidream":               "node render/comfy-generate.mjs o.png p --family hidream-o1 --ckpt krea2_turbo_bf16.safetensors --placement multicard",
 		"2512 bf16":             "node render/comfy-generate.mjs o.png p --family qwen-image --ckpt qwen_image_2.1_bf16.safetensors --placement multicard",
 		"2.1 int8 text encoder": strings.Replace(img21Cmd, "qwen3vl_8b_bf16", "qwen3vl_8b_int8", 1),
+		// the int8_convrot DiT has a row that is held back (its DiT on cuda:1 was never run), so it is no recipe: the runner refuses it by name
+		"2.1 int8 DiT": strings.Replace(img21Cmd, "qwen_image_2.1_bf16", "qwen_image_2.1_int8_convrot", 1),
 	} {
 		got, plain := need(t, cmd, f), need(t, without(cmd), f)
 		if got != plain {

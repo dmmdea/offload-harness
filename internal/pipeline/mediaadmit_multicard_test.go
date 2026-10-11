@@ -220,6 +220,10 @@ func TestAMulticardBindingWithNoRecipeIsRefusedBeforeAnyLease(t *testing.T) {
 			c.ImageGenFamily, c.ImageGenCkpt, c.ImageGenPlacement = "qwen-image", "qwen_image_2512_bf16.safetensors", "multicard"
 		},
 		"sdxl": func(c *config.Config) { c.ImageGenPlacement = "multicard" },
+		// a row that exists and is held back (its int8 DiT on cuda:1 never ran): refused before a lease, with the reason
+		"2.1 int8 DiT, held back": func(c *config.Config) {
+			c.ImageGenFamily, c.ImageGenCkpt, c.ImageGenCLIP, c.ImageGenPlacement = "qwen-image-2.1", "qwen_image_2.1_int8_convrot.safetensors", "qwen3vl_8b_bf16.safetensors", "multicard"
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newAdmitFixtureWith(t, admitSpec{order: admitOrder, mutate: bind})
@@ -229,6 +233,10 @@ func TestAMulticardBindingWithNoRecipeIsRefusedBeforeAnyLease(t *testing.T) {
 			}
 			if n := len(f.m.Leases()) + len(f.started()) + len(f.m.Tokens()); n != 0 {
 				t.Errorf("%d lease/runner/place for a call the runner would refuse", n)
+			}
+			// a row that exists and is held back says which one and why, so the operator knows it is a hold and not a gap in the table
+			if strings.Contains(name, "held back") && (!strings.Contains(res.Reason, "qwen-image-2.1/int8_convrot") || !strings.Contains(res.Reason, "held back") || !strings.Contains(res.Reason, "illegal memory access")) {
+				t.Errorf("the refusal of a held-back row must name it and say why: %s", res.Reason)
 			}
 		})
 	}
@@ -330,7 +338,7 @@ func TestANamedFamilyThatAsksForMulticardLeasesThePairAndTheDefaultStaysOnOneCar
 			"qi21-pair": {
 				"license": []byte(`"Qwen Research License"`), "commercial_use": []byte(`false`),
 				"imagegen_family":    []byte(`"qwen-image-2.1"`),
-				"imagegen_ckpt":      []byte(`"qwen_image_2.1_int8_convrot.safetensors"`),
+				"imagegen_ckpt":      []byte(`"qwen_image_2.1_bf16.safetensors"`),
 				"imagegen_clip":      []byte(`"qwen3vl_8b_bf16.safetensors"`),
 				"imagegen_vae":       []byte(`"qwen_image_2.1_vae_bf16.safetensors"`),
 				"imagegen_placement": []byte(`"multicard"`),

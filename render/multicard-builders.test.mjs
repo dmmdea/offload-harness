@@ -19,11 +19,17 @@ const rest = (g) => Object.fromEntries(Object.entries(g).filter(([id]) => !["1",
 
 // ---- qwen-image-2.1 text-to-image -------------------------------------------------------------------------------
 
-test("2.1 int8_convrot multicard: only the three loaders change; every other node is the single graph's, link for link", () => {
-  const single = buildQwenImage21({ ...QI21, unet: INT8 });
-  const g = buildQwenImage21({ ...QI21, unet: INT8, placement: "multicard" });
+test("2.1 int8_convrot multicard is held back: the builder refuses it by name instead of building a graph that puts the int8 DiT on cuda:1", () => {
+  assert.throws(() => buildQwenImage21({ ...QI21, unet: INT8, placement: "multicard" }), /int8_convrot.*held back/s);
+  assert.throws(() => buildQwenImage21({ ...QI21, unet: INT8, placement: "multicard", residentGb: 3 }), /int8_convrot.*held back/s);
+  // the single graph of the same file is untouched
+  assert.equal(buildQwenImage21({ ...QI21, unet: INT8 })["1"].class_type, "UNETLoader");
+});
+
+test("2.1 bf16 multicard: only the three loaders change; every other node is the single graph's, link for link", () => {
+  const single = buildQwenImage21({ ...QI21 });
+  const g = buildQwenImage21({ ...QI21, placement: "multicard" });
   assert.deepEqual(rest(g), rest(single));
-  assert.deepEqual(g["1"], { class_type: "UNETLoaderMultiGPU", inputs: { unet_name: INT8, weight_dtype: "default", device: "cuda:1" } });
   assert.equal(g["2"].class_type, "CLIPLoaderDisTorch2MultiGPU");
   assert.equal(g["2"].inputs.device, "cuda:0");
   assert.deepEqual(g["3"], { class_type: "VAELoaderMultiGPU", inputs: { vae_name: QI21.vae, device: "cuda:0" } });
@@ -50,7 +56,7 @@ test("2.1 multicard refuses what has no recipe, before it builds a graph", () =>
   assert.throws(() => buildQwenImage21({ ...QI21, placement: "multicard", clip: "qwen3vl_8b_int8.safetensors" }), /int8.*30 dB/s);
   assert.throws(() => buildQwenImage21({ ...QI21, placement: "multicard", unet: "qwen_image_2.1_fp8.safetensors" }), /no measured card-only recipe for qwen-image-2\.1/);
   assert.throws(() => buildQwenImage21({ ...QI21, placement: "bogus" }), /placement must be single\|multicard/);
-  assert.throws(() => buildQwenImage21({ ...QI21, unet: INT8, placement: "multicard", residentGb: 3 }), /whole DiT on the compute card/);
+  assert.throws(() => buildQwenImage21({ ...QI21, unet: INT8, placement: "multicard", residentGb: 3 }), /int8_convrot.*held back/s);
 });
 
 test("the 2.1 edit graph has no card-only placement: it takes no placement argument and builds as it did", () => {

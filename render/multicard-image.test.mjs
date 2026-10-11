@@ -90,8 +90,9 @@ test("say names the recipe, the two cards and their roles, once", () => {
 
 test("--resident-gb reaches the plan; a plain-pin recipe refuses it; one the compute card cannot hold beside the activations is refused with the numbers", () => {
   assert.equal(plan({ flags: { placement: "multicard", "resident-gb": "7.5" } }).residentGb, 7.5);
-  assert.throws(() => plan({ unet: "qwen_image_2.1_int8_convrot.safetensors", flags: { placement: "multicard", "resident-gb": "3" } }), /whole DiT on the compute card/);
-  assert.equal(plan({ unet: "qwen_image_2.1_int8_convrot.safetensors" }).residentGb, null);
+  // the one plain-pin recipe (int8_convrot) is held back, so the planner refuses it by name whatever else the call says, before any card table is read
+  assert.throws(() => plan({ unet: "qwen_image_2.1_int8_convrot.safetensors", flags: { placement: "multicard", "resident-gb": "3" }, cards: never }), /int8_convrot.*held back/s);
+  assert.throws(() => plan({ unet: "qwen_image_2.1_int8_convrot.safetensors", cards: never }), /int8_convrot.*held back/s);
   assert.throws(() => plan({ flags: { placement: "multicard", "resident-gb": "14" } }), /--resident-gb 14.*compute card \(idx 0, 15\.9 GiB\).*2\.5 GiB for the sampler's activations.*at most 12\.9 GiB/s);
 });
 

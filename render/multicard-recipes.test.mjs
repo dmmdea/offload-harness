@@ -11,6 +11,7 @@ import { NODE_PACKS } from "./comfy-nodes.mjs";
 
 const QI21 = { route: "image", family: "qwen-image-2.1", clip: "qwen3vl_8b_bf16.safetensors" };
 const find = (o) => findRecipe(o);
+const row = (id) => RECIPES.find((r) => r.id === id);
 const refusal = (o) => { try { findRecipe(o); } catch (e) { return e.message; } assert.fail("expected a refusal for " + JSON.stringify(o)); };
 
 test("the devices: the storage card is cuda:0 and the compute card cuda:1, the same two the Wan placement names", () => {
@@ -29,17 +30,37 @@ test("the table holds the five recipes, each with its evidence and an honest bas
     assert.ok(["image", "edit"].includes(r.route), r.id);
   }
   assert.deepEqual(RECIPES.filter((r) => r.basis === "measured").map((r) => r.id), ["qwen-image-edit-2511/fp8mixed"]);
+  // a row that may not launch says why, in a sentence; only the int8_convrot one is held back
+  assert.deepEqual(RECIPES.filter((r) => "blocked" in r).map((r) => r.id), ["qwen-image-2.1/int8_convrot"]);
+  for (const r of RECIPES.filter((x) => "blocked" in x)) assert.ok(typeof r.blocked === "string" && r.blocked.length > 80, `${r.id}: the reason is said`);
   assert.ok(Object.isFrozen(RECIPES) && RECIPES.every((r) => Object.isFrozen(r)), "a recipe is not edited in place");
 });
 
 test("findRecipe: the DiT's file picks the row", () => {
-  assert.equal(find({ ...QI21, unet: "qwen_image_2.1_int8_convrot.safetensors" }).id, "qwen-image-2.1/int8_convrot");
   assert.equal(find({ ...QI21, unet: "qwen_image_2.1_bf16.safetensors" }).id, "qwen-image-2.1/bf16");
   assert.equal(find({ route: "image", family: "qwen-image", unet: "qwen-image-2512-Q5_1.gguf" }).id, "qwen-image/gguf-q5_1");
   assert.equal(find({ route: "edit", family: "qwen-image-edit-2511", unet: "qwen_image_edit_2511_fp8mixed.safetensors" }).id, "qwen-image-edit-2511/fp8mixed");
   assert.equal(find({ route: "edit", family: "qwen-image-edit-2511", unet: "qwen-image-edit-2511-Q5_1.gguf" }).id, "qwen-image-edit-2511/gguf-q5_1");
   // the builders' own default text encoder stands in when the call names none
   assert.equal(find({ route: "image", family: "qwen-image", unet: "qwen-image-2512-Q5_1.gguf", clip: undefined }).id, "qwen-image/gguf-q5_1");
+});
+
+// The int8_convrot DiT is a comfy_kitchen int8 model. ComfyUI-MultiGPU's int8 dispatch path hits an illegal memory access when the compute device is not
+// cuda:0 (upstream issue 220, unfixed, and the reason the pooled LTX-2.5 seat keeps compute cuda:0). This row puts that DiT on cuda:1, and the benchmark arms
+// it cites ran the int8 DiT on cuda:0 with the text encoder on cuda:1: the placement itself never ran. So the runner refuses it by name, before a lease is spent.
+test("the int8_convrot recipe is held back: its DiT on cuda:1 was never run, and the int8 path is known to fault on a non-default device", () => {
+  const msg = refusal({ ...QI21, unet: "qwen_image_2.1_int8_convrot.safetensors" });
+  assert.match(msg, /qwen-image-2\.1\/int8_convrot.*held back/s);
+  assert.match(msg, /cuda:1.*illegal memory access/s);
+  assert.match(msg, /cuda:0.*text encoder on cuda:1/s, "the arms the row cites ran the other way round");
+  assert.match(msg, /blocked/, "and says where to lift it");
+  assert.match(refusal({ ...QI21, unet: "qwen-image-2.1-UC-int8_convrot.safetensors" }), /held back/, "the live fast family's file name matches the row");
+  // the data of the held-back row is kept (the proof arm builds its graph from it), and the loaders it names are unchanged
+  assert.equal(row("qwen-image-2.1/int8_convrot").unet.loader, "plain");
+  // the bf16 DiT of the same family is not held back
+  assert.equal(find({ ...QI21, unet: "qwen_image_2.1_bf16.safetensors" }).id, "qwen-image-2.1/bf16");
+  // the order of refusals is unchanged: an int8 text encoder is refused as one first
+  assert.match(refusal({ ...QI21, unet: "qwen_image_2.1_int8_convrot.safetensors", clip: "qwen3vl_8b_int8_convrot.safetensors" }), /int8.*30 dB/s);
 });
 
 test("a (family, quant) with no recipe is refused by name, never guessed", () => {
@@ -61,7 +82,7 @@ test("an int8 text encoder is never placed: it failed the 30 dB gate (PSNR 28.65
   assert.match(refusal({ ...QI21, unet: "qwen_image_2.1_int8_convrot.safetensors", clip: "qwen3vl_8b_int8_convrot.safetensors" }), /int8.*30 dB/s);
   assert.match(refusal({ route: "image", family: "qwen-image", unet: "qwen-image-2512-Q5_1.gguf", clip: "qwen_2.5_vl_7b_int8.safetensors" }), /int8.*30 dB/s);
   // the int8_convrot DiT is a different thing from an int8 text encoder, and is a recipe of its own
-  assert.equal(find({ ...QI21, unet: "qwen_image_2.1_int8_convrot.safetensors" }).quant, "int8_convrot");
+  assert.equal(row("qwen-image-2.1/int8_convrot").quant, "int8_convrot");
 });
 
 test("only the text encoder the recipe was built for is accepted", () => {
@@ -78,7 +99,7 @@ test("allocationString: the unit letter DisTorch2 requires, the remainder on the
 
 test("recipeResident: the recipe's default, an override only where the DiT is split, and never negative", () => {
   const bf16 = find({ ...QI21, unet: "qwen_image_2.1_bf16.safetensors" });
-  const int8 = find({ ...QI21, unet: "qwen_image_2.1_int8_convrot.safetensors" });
+  const int8 = row("qwen-image-2.1/int8_convrot");
   assert.equal(recipeResident(bf16), bf16.unet.residentGb);
   assert.equal(recipeResident(bf16, 6), 6);
   assert.equal(recipeResident(bf16, 0), 0);
@@ -90,7 +111,7 @@ test("recipeResident: the recipe's default, an override only where the DiT is sp
 // ---- the loader nodes, exactly -----------------------------------------------------------------------------
 
 test("2.1 int8_convrot: the DiT whole on the compute card, the bf16 text encoder split over both cards, the VAE on the storage card", () => {
-  const r = find({ ...QI21, unet: "qwen_image_2.1_int8_convrot.safetensors" });
+  const r = row("qwen-image-2.1/int8_convrot");
   const l = multicardLoaders(r, { unet: "qwen_image_2.1_int8_convrot.safetensors", clip: "qwen3vl_8b_bf16.safetensors", vae: "qwen_image_2.1_vae_bf16.safetensors" });
   assert.deepEqual(l["1"], { class_type: "UNETLoaderMultiGPU", inputs: { unet_name: "qwen_image_2.1_int8_convrot.safetensors", weight_dtype: "default", device: "cuda:1" } });
   assert.deepEqual(l["2"], {
