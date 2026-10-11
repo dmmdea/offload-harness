@@ -293,9 +293,23 @@ determine if a job is truly still going" — was not met by any of the three sur
       it does not wait for `wall_estimate_sec` to exceed the wall, because the loop overrunning
       its share is the condition and an explicit short `timeout_sec` produces it too. A re-pack
       the ceiling cannot hold is still skipped, and its note names what ran out (`the ceiling`,
-      or `the re-pack's owed time`), never the wall alone. The delegator needs nothing: the
-      re-pack publishes its allowance when the phase starts (item 8), so a poll that follows
-      progress follows the extension up to the node's ceiling. What is not changed: the wire's
+      or `the re-pack's owed time`), never the wall alone. **The owed time also stops at the
+      call's deadline** (`OwedCap`): the delegator's whole call ends at `agent_call_deadline_sec`
+      (ADR 0065, 1,500 s by default; this node's own setting stands in for the delegator's and is
+      counted from the wall's start, a chosen approximation, so a delegator that waited in line
+      first has less), and a re-pack that could only end after it is a finished answer nobody
+      collects. `repackOwed` sizes the answer at no more than the 8,192-token re-pack cap, so
+      the largest answer on a 3.4 tok/s seat is owed 1.5 x 8,192 / 3.4 = 3,614 s, which is
+      under the ceiling and far past the call's 1,500 s: with the cap that re-pack is skipped,
+      the note says `left to the call's deadline`, and the delegator's rescue (one completion
+      on its own seat) keeps the time it needs, exactly as before this change. A re-pack that
+      ends inside the deadline is the case that gains. Replaying the arithmetic on the ledger's
+      149 distinct starved skips (median 3.4 tok/s and 961 expected tokens, owed 27 to 1,009 s):
+      105 end inside 1,500 s when the re-pack starts at the row's recorded latency, 44 do not
+      and are skipped as before. That is an estimate, not a measurement: the row's latency is the
+      delegator's view and the node's wall started later. The re-pack publishes
+      its allowance when the phase starts (item 8), so a poll that follows progress follows the
+      extension up to the node's ceiling and the deadline. What is not changed: the wire's
       900 s cap on a declared `timeout_sec`, the estimate's worst-case terms (final and re-pack
       both priced at the 8,192-token cap, which is why the wall reads as below the estimate), and
       the rate order (`repackRate`). A re-pack that runs on its own time past a short wall is a
@@ -312,13 +326,17 @@ determine if a job is truly still going" — was not met by any of the three sur
       not set) marks the call: the next attempt is a second grammar attempt (the
       lane that constrains the shape) carrying the instruction `repackNoRepeatNote` and a
       `frequency_penalty` of `repackLoopPenalty` (0.5), then, if that loops too, the chat lane
-      carrying both. The first attempt never carries either, and a cut that more tokens cure
+      carrying both. The sentence is placed BEFORE the text in the prompt, where a seat reads
+      instructions: after `TEXT:` an extraction would read it as more text and might write it
+      back as a list item. The first attempt never carries either, and a cut that more tokens cure
       (item 9's resend at the cap) carries neither. `frequency_penalty` is the OpenAI-standard
       field both engines on the fleet read, which the engine-specific repeat and DRY samplers are
       not; the attempt's lane on the wire reads `grammar+no-repeat`, `json_schema+no-repeat` or
       `chat+no-repeat`. The three attempts are the call's limit as before.
     - **A complete object that loops is not published.** A loop that closes itself before the cap
-      is a schema-valid object (the grammar's list is unbounded and nothing validated repetition).
+      is a schema-valid object (the grammar's list is unbounded and nothing validated repetition),
+      so it would have been published as the structured result: inferred from the code path, not
+      counted in the ledger, whose successful rows carry no reason.
       A list field that repeats one item, or a block of two or three, at least `repackLoopRun` (6)
       times in a row, where the answer the object was written from holds the first item fewer
       times than it is repeated, fails the attempt as `re-pack repeated the list item ...`, marks

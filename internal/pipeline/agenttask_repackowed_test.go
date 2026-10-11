@@ -23,11 +23,12 @@ import (
 // never asked to structure it.
 
 // TestRunAgentTaskRepackIsOwedItsOwnTimeWhenTheLoopSpentTheWall is the starved
-// shape end to end against a fake seat: a 2 s wall, a loop whose only delta
-// arrives at 2.4 s (so the loop ends 0.3 s past the wall and its 0.1 s of
-// grace), and a seat that decodes at 100 tok/s. The one-line answer's re-pack is
-// about 1 s of decode; the time left to the wall plus grace is 0, which used to
-// skip it.
+// shape end to end against a fake seat: a 2 s wall, and a loop whose only delta
+// arrives at 2.4 s, so the loop ends 0.3 s past the wall and its 0.1 s of grace.
+// The rate the re-pack is sized against is the run's own observed 0.4 tok/s (one
+// delta at 2.4 s; repackRate prefers it to the configured 100), so the one-line
+// answer is owed about 258 s; the time left to the wall plus grace is 0, which
+// used to skip it.
 func TestRunAgentTaskRepackIsOwedItsOwnTimeWhenTheLoopSpentTheWall(t *testing.T) {
 	defer compressLiveness(t, 5*time.Second, 100*time.Millisecond, core.AgentCeilingSecCap)()
 	fake := okRepackFake()
@@ -137,6 +138,39 @@ func TestRunAgentTaskRepackOwedTimeIsNotRenewedForALaterAttempt(t *testing.T) {
 	}
 }
 
+// The owed time is not owed past the call's deadline. The delegator's call has a
+// horizon of its own (agent_call_deadline_sec, 1,500 s by default); a re-pack that
+// could only finish after it is a finished answer nobody collects, and skipping it
+// leaves the delegator's rescue the time it needs (the behaviour before the owed
+// time, which for a big answer on a slow seat was the better one). The same starved
+// shape as above, on a node whose call deadline ends 4 s after the wall began: the
+// re-pack is owed 258 s at the 0.4 tok/s the loop's one late delta measured, the
+// horizon leaves 1.6 s, and it is skipped naming the call's deadline.
+func TestRunAgentTaskRepackIsNotOwedTimePastTheCallsDeadline(t *testing.T) {
+	defer compressLiveness(t, 5*time.Second, 100*time.Millisecond, core.AgentCeilingSecCap)()
+	fake := okRepackFake()
+	fake.loopStream = slowFirstDeltaLoop(2400 * time.Millisecond)
+	srv := fake.server(t)
+	defer srv.Close()
+
+	p := rateTestPipeline(t, srv.URL, 100)
+	cfg := p.Cfg()
+	cfg.AgentCallDeadlineSec = 4
+	p.cfg = cfg
+	contract := testContract()
+	contract.TimeoutSec = 2
+	wire := decodeWire(t, p.Run(context.Background(), agentTestRequest(t, contract)))
+	if got := fake.grammarCNT.Load() + fake.chatFallbackCNT.Load(); got != 0 {
+		t.Fatalf("re-pack requests = %d, want 0: the owed time would end after the call's deadline", got)
+	}
+	if !wire.Deferred || wire.DeferClass != core.DeferClassBudget || !wire.SchemaMiss {
+		t.Fatalf("deferred=%v class=%q schema_miss=%v reason=%q, want a budget defer carrying the finished answer", wire.Deferred, wire.DeferClass, wire.SchemaMiss, wire.Reason)
+	}
+	if !strings.Contains(wire.RepackNote, "re-pack skipped:") || !strings.Contains(wire.RepackNote, "the call's deadline") {
+		t.Fatalf("repack_note = %q, want the skip to name the call's deadline", wire.RepackNote)
+	}
+}
+
 // repackOwed is the call-site arithmetic: 1.5 x the answer's expected tokens at
 // the seat's rate, the factor the re-pack's own stall allowance already uses. No
 // rate is no arithmetic.
@@ -164,6 +198,12 @@ func TestRepackFitUsesTheLaterOfTheWallAndTheOwedEnd(t *testing.T) {
 	if f := o.fit(now, time.Time{}, 1024, 100); f.Skip || !f.Clamped || f.Tokens != 800 || !strings.Contains(f.Note, "owed") {
 		t.Fatalf("owed end: fit = %+v, want 80 s (50 owed + 30 grace) = 800 tokens, and the note to say the time was owed", f)
 	}
+	// An owed end that was cut short by the call's deadline says so.
+	o.OwedCap = "the call's deadline"
+	if f := o.fit(now, time.Time{}, 1024, 100); !f.Clamped || !strings.Contains(f.Note, "the call's deadline") {
+		t.Fatalf("capped owed end: fit = %+v, want the note to name the call's deadline", f)
+	}
+	o.OwedCap = ""
 	// The ceiling still wins.
 	f := o.fit(now, now.Add(5*time.Second), 1024, 100)
 	if !f.Skip || !strings.Contains(f.Note, "the ceiling") {

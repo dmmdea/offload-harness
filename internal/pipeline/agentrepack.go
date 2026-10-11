@@ -110,6 +110,9 @@ type repackOpts struct {
 	// before. It is set once per call, never per attempt, so a later attempt does
 	// not get a fresh allowance: time only runs out.
 	OwedEnd time.Time
+	// OwedCap, when set, says OwedEnd was cut short by something other than the time
+	// the answer needs (the call's deadline), and is the words a note uses for it.
+	OwedCap string
 	// TokS is the seat's decode rate in tokens per second, and RateBasis says where
 	// it came from. 0 means unknown, and then the call does no time arithmetic at
 	// all: it fails open, like every other sizing decision that needs a rate.
@@ -222,6 +225,9 @@ func (o repackOpts) fit(now, ctxDeadline time.Time, budget, least int) repackFit
 // with the words the notes use for it. The zero time when neither is set.
 func (o repackOpts) boundEnd() (time.Time, string) {
 	if o.OwedEnd.After(o.WallEnd) {
+		if o.OwedCap != "" {
+			return o.OwedEnd, o.OwedCap
+		}
 		return o.OwedEnd, "the re-pack's owed time"
 	}
 	if o.WallEnd.IsZero() {

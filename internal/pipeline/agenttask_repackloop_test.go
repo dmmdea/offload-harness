@@ -45,6 +45,14 @@ func userText(body map[string]any) string {
 	return ""
 }
 
+// sentenceBeforeText reports whether a prompt carries the sentence AHEAD of the text
+// it asks the seat to extract from: a seat doing an extraction reads what follows
+// TEXT: as more text, and may write the sentence back as a list item.
+func sentenceBeforeText(prompt, sentence string) bool {
+	i, j := strings.Index(prompt, sentence), strings.Index(prompt, "TEXT:")
+	return i >= 0 && j >= 0 && i < j
+}
+
 // loopSeat answers every re-pack request (grammar and chat lane alike) the way a
 // greedy small seat does: the loop, cut at the request's max_tokens, unless the
 // request is conditioned against repeating, and then `clean`.
@@ -92,8 +100,8 @@ func TestRunAgentTaskRepackAfterADegenerateCutIsAskedNotToRepeat(t *testing.T) {
 	if fp, _ := second["frequency_penalty"].(float64); fp != repackLoopPenalty {
 		t.Fatalf("second attempt frequency_penalty = %v, want %v", second["frequency_penalty"], repackLoopPenalty)
 	}
-	if !strings.Contains(userText(second), repackNoRepeatNote) {
-		t.Fatalf("second attempt's prompt does not say not to repeat: %q", userText(second))
+	if !sentenceBeforeText(userText(second), repackNoRepeatNote) {
+		t.Fatalf("second attempt's prompt does not say not to repeat ahead of the text: %q", userText(second))
 	}
 	if fake.chatFallbackCNT.Load() != 0 {
 		t.Fatalf("chat requests = %d, want 0: the conditioned grammar attempt finished it", fake.chatFallbackCNT.Load())
@@ -161,7 +169,7 @@ func TestRunAgentTaskRepackChatLaneAfterALoopIsAskedNotToRepeat(t *testing.T) {
 		t.Fatalf("deferred (%s): %s\nrepack_note: %s", wire.DeferClass, wire.Reason, wire.RepackNote)
 	}
 	chat := <-fake.chatBodies
-	if !askedNoRepeat(chat) || !strings.Contains(userText(chat), repackNoRepeatNote) {
+	if !askedNoRepeat(chat) || !sentenceBeforeText(userText(chat), repackNoRepeatNote) {
 		t.Fatalf("the chat lane after a loop is not conditioned against repeating: %v", chat)
 	}
 	d := wire.RepackAttemptsDetail

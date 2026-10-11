@@ -1386,15 +1386,28 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	// share of the wall for this phase that a loop running past it forfeited.
 	// Anchored here, once, so the later attempts of the call share one bound.
 	var owedEnd time.Time
+	owedCap := ""
 	if owed := repackOwed(res.Output, repackTokS); owed > 0 {
 		owedEnd = repackStart.Add(owed)
-		if over := owedEnd.Sub(wallEnd.Add(livePolicy.Slack)); over > 0 {
-			log.Printf("agent task: re-pack for %s is owed %.0f s at %.1f tok/s (%s) and the wall + grace has %.0f s left: it runs on its own time, up to the ceiling",
-				seat, owed.Seconds(), repackTokS, repackBasis, max(time.Until(wallEnd.Add(livePolicy.Slack)), 0).Seconds())
+		// Not owed past the call's deadline: the delegator's whole call ends at
+		// agent_call_deadline_sec (ADR 0065; this node's own setting stands in for the
+		// delegator's, the default being the same 1,500 s), counted here from the
+		// wall's start, which is later than the call's. A re-pack that could only end
+		// after it is a finished answer nobody collects, and skipping it leaves the
+		// delegator's rescue the time it needs, which for a big answer on a slow seat
+		// was the better outcome before the owed time. CHOSEN approximation, not measured.
+		if horizon := p.cfg.CallDeadline(); horizon > 0 {
+			if end := wallEnd.Add(-wall).Add(horizon); end.Before(owedEnd) {
+				owedEnd, owedCap = end, "the call's deadline"
+			}
+		}
+		if owedEnd.After(wallEnd.Add(livePolicy.Slack)) {
+			log.Printf("agent task: re-pack for %s is owed %.0f s at %.1f tok/s (%s) and the wall + grace has %.0f s left: it runs on its own time, up to %s",
+				seat, owed.Seconds(), repackTokS, repackBasis, max(time.Until(wallEnd.Add(livePolicy.Slack)), 0).Seconds(), max(time.Until(owedEnd), 0).Round(time.Second))
 		}
 	}
 	structured, tokensOut, transport, attempts, serr := p.repackStructuredWith(agent.ContextWithProgress(cctx, repackProgress), seat, outSchema, res.Output, repackAttemptFloor(wall), 0,
-		repackOpts{WallEnd: wallEnd, OwedEnd: owedEnd, Grace: livePolicy.Slack, TokS: repackTokS, RateBasis: repackBasis, Trace: &trace})
+		repackOpts{WallEnd: wallEnd, OwedEnd: owedEnd, OwedCap: owedCap, Grace: livePolicy.Slack, TokS: repackTokS, RateBasis: repackBasis, Trace: &trace})
 	wire.RepackMs = time.Since(repackStart).Milliseconds()
 	wire.RepackAttempts = attempts
 	// Every attempt on the wire, and every attempt's generation in tokens_out: a
@@ -1780,6 +1793,10 @@ func (p *Pipeline) repackStructuredWith(ctx context.Context, seat string, rawSch
 	}
 	system := "You extract structured data from text. Output ONLY a JSON object with exactly the requested fields. Use empty values when a field is absent. " + repackTypeRule
 	user := fmt.Sprintf("Extract these fields from the text: %s.\n\nTEXT:\n%s", repackFieldList(names, props), output)
+	// The conditioned prompt carries the no-repeat sentence BEFORE the text: a seat
+	// doing an extraction reads what follows TEXT: as more text, and may write the
+	// sentence back as a list item.
+	userGuarded := fmt.Sprintf("Extract these fields from the text: %s.\n\n%s\n\nTEXT:\n%s", repackFieldList(names, props), repackNoRepeatNote, output)
 
 	// ONE set of lane-probe closures for the WHOLE call (register D-85/D-108,
 	// W-19): before this, repackClient built a fresh FleetLaneGates cache and
@@ -1882,7 +1899,7 @@ func (p *Pipeline) repackStructuredWith(ctx context.Context, seat string, rawSch
 		// out (register C-80).
 		attemptLane, attemptUser, attemptOpts := lane, user, structuredOpts
 		if guard {
-			attemptLane, attemptUser = lane+"+no-repeat", user+"\n\n"+repackNoRepeatNote
+			attemptLane, attemptUser = lane+"+no-repeat", userGuarded
 			attemptOpts = append(append([]llamaclient.GenOption(nil), structuredOpts...), llamaclient.WithFrequencyPenalty(repackLoopPenalty))
 		}
 		fit := opts.fit(time.Now(), deadlineOf(ctx), budget, floorTokens)
@@ -2393,9 +2410,9 @@ func (p *Pipeline) repackViaChat(ctx context.Context, client *llamaclient.Client
 	system := "You extract structured data from text. Output ONLY a JSON object — no prose, no code fences. " + repackTypeRule
 	user := fmt.Sprintf("Extract these fields from the text as a JSON object: %s.\n\nTEXT:\n%s", repackFieldList(names, props), output)
 	if noRepeat {
-		// An earlier attempt of this call looped: this one is told not to (the caller
-		// also sends the frequency penalty in extra).
-		user += "\n\n" + repackNoRepeatNote
+		// An earlier attempt of this call looped: this one is told not to, before the
+		// text (the caller also sends the frequency penalty in extra).
+		user = fmt.Sprintf("Extract these fields from the text as a JSON object: %s.\n\n%s\n\nTEXT:\n%s", repackFieldList(names, props), repackNoRepeatNote, output)
 	}
 	gres, gerr := client.Generate(ctx, seat, system, user, "", budget, p.cfg.Temperature, 0, append([]llamaclient.GenOption{llamaclient.WithoutThinking()}, extra...)...)
 	if gerr != nil {

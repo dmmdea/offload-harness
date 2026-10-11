@@ -367,6 +367,13 @@ Versioning: [SemVer](https://semver.org/).
   runs out" stands. Where the wall has room nothing changes. The gate is unconditional (it does not read `est.Below`): the loop spending
   the re-pack's share is the condition, and an explicit short `timeout_sec` produces it as well. A re-pack the ceiling cannot hold is still
   skipped, and the note now names what ran out: `left to the ceiling` or `left to the re-pack's owed time`.
+- **Capped at the call's deadline.** The owed time also stops at `agent_call_deadline_sec` (ADR 0065, 1,500 s by default, counted from the
+  wall's start with this node's own setting standing in for the delegator's: a chosen approximation). `repackOwed` sizes the answer at no
+  more than the 8,192-token re-pack cap, so the largest answer on a 3.4 tok/s seat is owed 1.5 x 8,192 / 3.4 = 3,614 s: under the ceiling
+  and far past the call's 1,500 s. That re-pack is skipped (`left to the call's deadline`) and the delegator's rescue keeps the time it needs,
+  as before this change. Replaying the arithmetic on the ledger's 149 distinct starved skips (median 3.4 tok/s and 961 expected tokens, owed 27
+  to 1,009 s): 105 end inside 1,500 s when the re-pack starts at the row's recorded latency and gain, 44 do not and are skipped as before. An
+  estimate, not a measurement: the row's latency is the delegator's view and the node's wall started later.
 - **Not changed.** The wire's 900 s cap on a declared `timeout_sec`, the estimate's worst-case terms (why the wall reads as below it), the
   rate order (`repackRate`), and the delegator (the re-pack publishes its allowance when the phase starts, so a poll that follows progress
   follows the extension up to the node's ceiling). A re-pack that runs on its own time moves work from the delegator's rescue to the slow
@@ -384,7 +391,8 @@ Versioning: [SemVer](https://semver.org/).
   did. In the code: the seat decodes greedy (`temperature` 0), the request carried nothing that discourages repeating, the grammar's list rule
   is unbounded (and does not compile the schema's `maxItems`), and the attempt after a degenerate cut was the chat lane with the same
   sampling and the same prompt, which a greedy seat answers the same way. A loop that closed itself before the cap was a complete,
-  schema-valid object and was published as the answer. The tail test looked for a repeated block of up to 64 bytes in the last 256, so two
+  schema-valid object that would have been published as the answer (inferred from the code path: successful ledger rows carry no reason,
+  so it is not counted). The tail test looked for a repeated block of up to 64 bytes in the last 256, so two
   alternating list items of 80 bytes read as "ran on" and were escalated to the 8,192-token cap.
 - **The fix.** A cut that is no budget problem (a degenerate tail, or the seat ran on past a budget the answer fits in, and the clock did not
   set that budget) marks the call. The next attempt is a second grammar attempt (the lane that constrains the shape) that carries the
