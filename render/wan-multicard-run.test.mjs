@@ -11,15 +11,15 @@ import { writeFileAtomic } from "./atomic-out.mjs";
 import * as M from "./wan-multicard.mjs";
 
 // Synthetic ids (the same placeholders wan-multicard.test.mjs uses): none names a real card.
-const U0 = "GPU-aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee";
+const U0 = "GPU-cccc3333-bbbb-cccc-dddd-eeeeeeeeeeee";
 const U1 = "GPU-bbbb2222-cccc-dddd-eeee-ffffffffffff";
-const U2 = "GPU-cccc3333-dddd-eeee-ffff-000000000000";
+const U2 = "GPU-aaaa1111-dddd-eeee-ffff-000000000000";
 const CARDS = M.parseCardTable([
   `0, ${U0}, Test GPU A, 16311, 16000, Disabled, No`,
   `1, ${U1}, Test GPU B, 16303, 13800, Disabled, Yes`,
   `2, ${U2}, Test GPU A, 16311, 16050, Disabled, No`,
 ].join("\n"));
-const LEASE = { GPU_LEASE_DEVICES: "gpu-cccc3333-dddd-eeee-ffff-000000000000,gpu-aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee" };
+const LEASE = { GPU_LEASE_DEVICES: "gpu-aaaa1111-dddd-eeee-ffff-000000000000,gpu-cccc3333-bbbb-cccc-dddd-eeeeeeeeeeee" };
 const ARGV = ["o.mp4", "s.png", "p", "--wan-placement", "multicard", "--high-unet", "high_fp8.safetensors", "--low-unet", "low_fp8.safetensors"];
 // planMulticard on the synthetic table, the way main() calls it but with the card table and the pack scan replaced
 const planFn = (a) => M.planMulticard({
@@ -64,7 +64,7 @@ test("planRun: the placement is for the Wan 2.2 graph only, so another model or 
 
 // ---- generate(): what the run does once it holds the GPU --------------------------------------------------------
 
-const PLAN = { launch: { key: "mc-cccc3333-aaaa1111" }, pair: {}, env: {} };
+const PLAN = { launch: { key: "mc-aaaa1111-cccc3333" }, pair: {}, env: {} };
 const GRAPH = { "20": { class_type: "VHS_VideoCombine", inputs: {} } };
 const DONE = { outputs: { "20": { gifs: [{ filename: "wan_00001.mp4", subfolder: "v", type: "output" }] } } };
 
@@ -149,7 +149,7 @@ test("a plain decode that ComfyUI retried tiled is not written to the requested 
   assert.ok(rec.out.includes("LATENT latents/wan_00001_.latent (in ComfyUI's output directory)"), "the latent that lets the decode be redone is named");
   assert.ok(!rec.out.includes("WROTE out/o.mp4"));
   assert.equal(rec.finalized, 1, "the run is finalized before it fails");
-  assert.deepEqual(rec.cursors, [["/c", "mc-cccc3333-aaaa1111"]], "the console read is this placement's own instance, and only this run's lines");
+  assert.deepEqual(rec.cursors, [["/c", "mc-aaaa1111-cccc3333"]], "the console read is this placement's own instance, and only this run's lines");
 });
 
 test("a plain decode whose console shows no retry is written to the requested path, and nothing is said", async () => {
@@ -206,7 +206,7 @@ test("generate() under multicard hands the poll a watch on THIS instance's conso
   const cursor = { path: "/c/log", read: () => ({ text: "Got an OOM, unloading all loaded models.\n", state: "ok" }) };
   const { io, rec } = fakeIo({ logCursor: (dir, key) => { rec.calls.push("logCursor"); made.push([dir, key]); return cursor; } });
   await generate("o.mp4", "http://x", [], {}, PLAN, io);
-  assert.deepEqual(made, [["/c", "mc-cccc3333-aaaa1111"]]);
+  assert.deepEqual(made, [["/c", "mc-aaaa1111-cccc3333"]]);
   assert.ok(rec.calls.indexOf("logCursor") > rec.calls.indexOf("verifyPack") && rec.calls.indexOf("logCursor") < rec.calls.indexOf("submit"), rec.calls.join(" "));
   assert.equal(typeof rec.polls[0].watch, "function");
   assert.match(rec.polls[0].watch(), /^WAN-OOM: /, "it is the OOM watch of that console");

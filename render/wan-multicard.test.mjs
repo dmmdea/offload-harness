@@ -16,9 +16,9 @@ import { scratchDir } from "./test-scratch.mjs";
 import { parseArgs, buildGraphFromArgs, buildGraphForRun, verifyMulticardDevices, verifyMulticardPack } from "./comfy-video.mjs";
 
 // Synthetic ids: a repeated-nibble head is a placeholder to the leak gate, and none of these names a real card.
-const U0 = "GPU-aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee";
+const U0 = "GPU-cccc3333-bbbb-cccc-dddd-eeeeeeeeeeee";
 const U1 = "GPU-bbbb2222-cccc-dddd-eeee-ffffffffffff";
-const U2 = "GPU-cccc3333-dddd-eeee-ffff-000000000000";
+const U2 = "GPU-aaaa1111-dddd-eeee-ffff-000000000000";
 const CSV = [
   `0, ${U0}, Test GPU A, 16311, 16000, Disabled, No`,
   `1, ${U1}, Test GPU B, 16303, 13800, Disabled, Yes`,
@@ -31,7 +31,7 @@ const ARGS = { imagePath: "s.png", prompt: "p", seed: 7, width: 720, height: 128
 const lines = () => { const got = []; return { got, warn: (l) => got.push(l) }; };
 const pair = () => M.resolveWanCards({ tokens: [U2, U0], source: "the GPU lease", cards: CARDS });
 const EXPERTS = { "high-unet": "high_fp8.safetensors", "low-unet": "low_fp8.safetensors" };
-const LEASE = { GPU_LEASE_DEVICES: "gpu-cccc3333-dddd-eeee-ffff-000000000000,gpu-aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee" };
+const LEASE = { GPU_LEASE_DEVICES: "gpu-aaaa1111-dddd-eeee-ffff-000000000000,gpu-cccc3333-bbbb-cccc-dddd-eeeeeeeeeeee" };
 // planMulticard on the synthetic table, under a lease that holds cards 2 and 0 unless a test says otherwise
 const planWith = (flags = {}, over = {}) => M.planMulticard({
   flags: { "wan-placement": "multicard", ...EXPERTS, ...flags }, env: { ...LEASE }, comfyDir: "/c", isWanGraph: true, cards: () => CARDS,
@@ -184,20 +184,36 @@ test("queryCards asks for display_attached and falls back to display_active alon
 test("wanCardTokens: --wan-cards, then the lease, then a UUID CUDA_VISIBLE_DEVICES; nothing says nothing", () => {
   const none = () => [];
   assert.deepEqual(M.wanCardTokens({ flags: { "wan-cards": "2, 0" }, env: { GPU_LEASE_DEVICES: "gpu-x" }, leaseDevicesFn: () => ["gpu-x"] }), { tokens: ["2", "0"], source: "--wan-cards" });
-  assert.deepEqual(M.wanCardTokens({ flags: {}, env: {}, leaseDevicesFn: () => ["gpu-aaaa1111", "gpu-cccc3333"] }), { tokens: ["gpu-aaaa1111", "gpu-cccc3333"], source: "the GPU lease" });
+  assert.deepEqual(M.wanCardTokens({ flags: {}, env: {}, leaseDevicesFn: () => ["gpu-cccc3333", "gpu-aaaa1111"] }), { tokens: ["gpu-cccc3333", "gpu-aaaa1111"], source: "the GPU lease" });
   assert.deepEqual(M.wanCardTokens({ flags: {}, env: { CUDA_VISIBLE_DEVICES: `${U2},${U0}` }, leaseDevicesFn: none }), { tokens: [U2, U0], source: "CUDA_VISIBLE_DEVICES" });
   assert.deepEqual(M.wanCardTokens({ flags: {}, env: { CUDA_VISIBLE_DEVICES: "0,2" }, leaseDevicesFn: none }), { tokens: [], source: "" }, "bare indices are no evidence: their order is not the driver's");
   assert.deepEqual(M.wanCardTokens({ flags: {}, env: {}, leaseDevicesFn: none }), { tokens: [], source: "" });
 });
 
-test("resolveWanCards: indices, UUIDs, UUID prefixes and lease ids all name the card; the second of two equal cards computes", () => {
+test("resolveWanCards: indices, UUIDs, UUID prefixes and lease ids all name the card; of two equal cards the one with the higher UUID computes", () => {
   const ids = (tokens) => { const r = M.resolveWanCards({ tokens, source: "t", cards: CARDS }); return [r.storage.index, r.compute.index]; };
-  assert.deepEqual(ids(["0", "2"]), [0, 2], "equal cards keep the given order: the second computes");
+  assert.ok(U2.toLowerCase() < U0.toLowerCase(), "the fixture: idx 2's id sorts before idx 0's, as on the machine the benchmark ran on");
+  assert.deepEqual(ids(["0", "2"]), [2, 0], "equal cards take their roles from their UUIDs, not from the order they were named in");
   assert.deepEqual(ids(["2", "0"]), [2, 0]);
   assert.deepEqual(ids([U2, U0]), [2, 0]);
-  assert.deepEqual(ids(["gpu-cccc3333-dddd-eeee-ffff-000000000000", "gpu-aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee"]), [2, 0], "the lease's own spelling");
-  assert.deepEqual(ids(["cccc3333", "GPU-AAAA1111"]), [2, 0], "a prefix, either case");
-  assert.deepEqual(ids(["0", U0, "2"]), [0, 2], "a card named twice counts once");
+  assert.deepEqual(ids(["gpu-aaaa1111-dddd-eeee-ffff-000000000000", "gpu-cccc3333-bbbb-cccc-dddd-eeeeeeeeeeee"]), [2, 0], "the lease's own spelling");
+  assert.deepEqual(ids(["aaaa1111", "GPU-AAAA1111"]), [2, 0], "a prefix, either case");
+  assert.deepEqual(ids(["0", U0, "2"]), [2, 0], "a card named twice counts once");
+});
+
+// F06 of the review of 2026-10-11. The lease sorts its ids (internal/gpulease NormalizeDevices), so a pair taken from the lease always arrives lower id first
+// and the benchmark's film run had the lower id on cuda:0 (storage). The same pair named with --wan-cards 0,2 arrived in the order the caller typed it and
+// got the opposite roles, a split nobody measured. Equal cards now take their roles from their ids, whoever names them and in whatever order.
+test("two cards of one size take their roles from their UUIDs: the lower id stores (cuda:0) and the higher computes (cuda:1), however they are named", () => {
+  const roles = (tokens, source = "--wan-cards") => { const r = M.resolveWanCards({ tokens, source, cards: CARDS }); return [r.storage.index, r.compute.index]; };
+  for (const tokens of [["0", "2"], ["2", "0"], [U0, U2], [U2, U0], ["0", U2.toLowerCase()], ["gpu-aaaa1111", "gpu-cccc3333"], ["gpu-cccc3333", "gpu-aaaa1111"]]) {
+    assert.deepEqual(roles(tokens), [2, 0], tokens.join());
+  }
+  // the same pair through the whole plan: --wan-cards in either order launches ComfyUI with the same pin, storage first
+  const viaCards = (cards) => planWith({ "wan-cards": cards }, { env: {} }).launch.cudaVisibleDevices;
+  assert.equal(viaCards("0,2"), `${U2},${U0}`);
+  assert.equal(viaCards("2,0"), `${U2},${U0}`);
+  assert.equal(planWith().launch.cudaVisibleDevices, `${U2},${U0}`, "and it is the pin the lease's own order gives");
 });
 
 test("resolveWanCards: the larger card computes whatever the order", () => {
@@ -235,7 +251,7 @@ test("multicardLaunch: the two uuids storage first, the placement's flags, the r
   const launch = M.multicardLaunch(pair(), { comfyDir: "/c", packDirsFn: () => ["ComfyUI-MultiGPU", "ComfyUI-VideoHelperSuite"] });
   assert.equal(launch.cudaVisibleDevices, `${U2},${U0}`, "storage first: it becomes cuda:0");
   assert.deepEqual(launch.cards, [U2, U0]);
-  assert.equal(launch.key, "mc-cccc3333-aaaa1111");
+  assert.equal(launch.key, "mc-aaaa1111-cccc3333");
   assert.match(launch.key, /^[A-Za-z0-9_-]{1,48}$/, "a valid instance key");
   assert.deepEqual(launch.flags, ["--gpu-only", "--disable-pinned-memory", "--extra-model-paths-config", M.EXT_YAML,
     "--disable-all-custom-nodes", "--whitelist-custom-nodes", "ComfyUI-MultiGPU", "ComfyUI-VideoHelperSuite", "offload_multicard"]);
@@ -267,7 +283,7 @@ test("multicardEnv drops the pins and the dynamic-VRAM setting that contradict t
 });
 
 test("checkComfyDevices compares ComfyUI's own device list with the pinned pair: count, then size in order", () => {
-  const dev = (mib, type = "cuda") => ({ type, vram_total: mib * 1024 ** 2, name: "n" });
+  const dev = (mib, type = "cuda") => ({ type, vram_total: mib * 1024 ** 2, name: "cuda:0 Test GPU A : cudaMallocAsync" });
   assert.deepEqual(M.checkComfyDevices([dev(16311), dev(16311)], pair()), []);
   assert.match(M.checkComfyDevices([dev(16311)], pair())[0], /sees 1 CUDA device.*not the 2/);
   assert.match(M.checkComfyDevices([dev(16311), dev(16311), dev(16311)], pair())[0], /sees 3/);
@@ -277,6 +293,52 @@ test("checkComfyDevices compares ComfyUI's own device list with the pinned pair:
   const big = M.resolveWanCards({ tokens: ["0", "2"], source: "t", cards: [{ ...CARDS[0], totalMiB: 16000 }, { ...CARDS[2], totalMiB: 24000 }] });
   assert.deepEqual(M.checkComfyDevices([dev(16000), dev(24000)], big), [], "storage (smaller) first, compute second");
   assert.equal(M.checkComfyDevices([dev(24000), dev(16000)], big).length, 2, "the order is checked, not only the pair");
+});
+
+// F15. All three cards of the machine are 15.9 GiB, and the display card (a different model) is within the 5 percent the size check allows, so a pin that
+// landed on it passed the size check. ComfyUI names each device as "cuda:N <torch device name> : <allocator>"; the nvidia-smi name must be inside it.
+test("checkComfyDevices also compares the device's name with the card's, so another model of the same size is caught", () => {
+  const cards = [{ ...CARDS[0], name: "Card Y", totalMiB: 16311 }, { ...CARDS[2], name: "Card X", totalMiB: 16311 }];
+  const named = M.resolveWanCards({ tokens: [U2, U0], source: "t", cards });
+  const dev = (name, mib = 16311) => ({ type: "cuda", vram_total: mib * 1024 ** 2, name });
+  assert.deepEqual(M.checkComfyDevices([dev("cuda:0 Card X : cudaMallocAsync"), dev("cuda:1 Card Y : cudaMallocAsync")], named), []);
+  assert.deepEqual(M.checkComfyDevices([dev("cuda:0 CARD  x : native"), dev("cuda:1 card y : native")], named), [], "case and spacing are not a difference");
+  // the display card (another model, 16303 MiB, inside the size tolerance) where the compute card should be
+  const wrong = M.checkComfyDevices([dev("cuda:0 Card X : cudaMallocAsync"), dev("cuda:1 Card Z : cudaMallocAsync", 16303)], named);
+  assert.equal(wrong.length, 1);
+  assert.match(wrong[0], /cuda:1 \(compute\) should be idx 0 \(Card Y\) but ComfyUI reports cuda:1 Card Z : cudaMallocAsync/);
+  // swapped, the two names say so even though the sizes agree
+  assert.equal(M.checkComfyDevices([dev("cuda:0 Card Y : cudaMallocAsync"), dev("cuda:1 Card X : cudaMallocAsync")], named).length, 2);
+  // a device that reports no name, or a card the driver gave none, is not a mismatch (the size check still stands)
+  assert.deepEqual(M.checkComfyDevices([dev(""), dev("")], named), []);
+  const unnamed = M.resolveWanCards({ tokens: [U2, U0], source: "t", cards: cards.map((c) => ({ ...c, name: "" })) });
+  assert.deepEqual(M.checkComfyDevices([dev("cuda:0 Card Q"), dev("cuda:1 Card R")], unnamed), []);
+});
+
+// F16. ComfyUI's main.py starts dynamic VRAM when --enable-dynamic-vram is given, whatever else the argv says (cli_args.enables_dynamic_vram returns True
+// before it looks at --gpu-only). COMFY_EXTRA_ARGS lands after the placement's flags, so an extra arg could switch streaming back on under a lease that
+// declared no host RAM, and the reuse check only looked for --gpu-only.
+test("a multicard launch drops --enable-dynamic-vram from the operator's extra args, said, and keeps the rest", () => {
+  const launch = fakeLaunch();
+  const instance = L.resolveInstance({ api: "http://127.0.0.1:18852", env: { COMFY_INSTANCE: launch.key } });
+  const warned = [];
+  const flags = L.launchFlags({ reserveVram: "1.0", extraArgs: "--x 1 --enable-dynamic-vram --y", launch, profile: { cudaDevice: "", dynamicVram: "", multicard: { cards: launch.cards } }, instance, comfyDir: "/c", warn: (l) => warned.push(l) });
+  assert.ok(!flags.includes("--enable-dynamic-vram"));
+  assert.ok(flags.includes("--gpu-only"));
+  assert.deepEqual(flags.slice(-3), ["--x", "1", "--y"]);
+  assert.equal(warned.filter((l) => /--enable-dynamic-vram.*dropped/.test(l)).length, 1, warned.join("\n"));
+  const none = [];
+  L.launchFlags({ reserveVram: "1.0", extraArgs: "--x 1", launch, profile: { cudaDevice: "", dynamicVram: "", multicard: { cards: launch.cards } }, instance, comfyDir: "/c", warn: (l) => none.push(l) });
+  assert.deepEqual(none, [], "nothing to say when the extra args are clean");
+  // outside the placement the operator's flag is theirs
+  assert.ok(L.launchFlags({ reserveVram: "1.0", extraArgs: "--enable-dynamic-vram" }).includes("--enable-dynamic-vram"));
+});
+
+test("a running ComfyUI is not the multicard placement's when its argv turns dynamic VRAM on", () => {
+  const mc = { cudaDevice: "", dynamicVram: "", multicard: { cards: ["a", "b"] } };
+  assert.equal(L.profileMismatch(["main.py", "--gpu-only"], mc), "");
+  assert.match(L.profileMismatch(["main.py", "--gpu-only", "--enable-dynamic-vram"], mc), /dynamic VRAM on.*multicard placement needs it off/);
+  assert.match(L.profileMismatch(["main.py", "--enable-dynamic-vram", "--gpu-only"], mc), /dynamic VRAM on/, "the order of the flags does not matter");
 });
 
 test("planMulticard: null for single without reading any card; a plan for multicard; refusals before anything starts", () => {
@@ -474,11 +536,11 @@ test("an '=' spelling of the placement's own flags is refused: the runner's pars
 });
 
 test("verifyMulticardPack stops the run when the harness's node pack did not load, under any decode, and when it cannot tell", async () => {
-  const plan = { launch: { key: "mc-cccc3333-aaaa1111" } };
+  const plan = { launch: { key: "mc-aaaa1111-cccc3333" } };
   const reply = (body) => async () => ({ ok: true, status: 200, json: async () => body });
   await verifyMulticardPack("http://x", plan, { fetchImpl: reply({ OffloadFreeForDecode: { input: {} } }) });
   await assert.rejects(verifyMulticardPack("http://x", plan, { fetchImpl: reply({}) }),
-    /WAN-PLACEMENT-PACK: ComfyUI at http:\/\/x has no OffloadFreeForDecode.*failed to import.*offload-comfyui-mc-cccc3333-aaaa1111\.log.*Nothing was submitted/s);
+    /WAN-PLACEMENT-PACK: ComfyUI at http:\/\/x has no OffloadFreeForDecode.*failed to import.*offload-comfyui-mc-aaaa1111-cccc3333\.log.*Nothing was submitted/s);
   await assert.rejects(verifyMulticardPack("http://x", plan, { fetchImpl: async () => ({ ok: false, status: 500 }) }), /WAN-PLACEMENT-PACK: .*cannot tell.*HTTP 500.*Nothing was submitted/s);
   await assert.rejects(verifyMulticardPack("http://x", plan, { fetchImpl: async () => { throw new Error("refused"); } }), /cannot tell.*refused/s);
 });
@@ -552,10 +614,10 @@ test("planMulticard refuses --fast and a GGUF or unnamed expert before anything 
 });
 
 test("--wan-cards can confirm the lease's cards or name them when no lease does, and never replaces a lease", () => {
-  const held = ["gpu-aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee", "gpu-cccc3333-dddd-eeee-ffff-000000000000"];
+  const held = ["gpu-cccc3333-bbbb-cccc-dddd-eeeeeeeeeeee", "gpu-aaaa1111-dddd-eeee-ffff-000000000000"];
   assert.doesNotThrow(() => planWith({ "wan-cards": "0,2" }, { leaseDevicesFn: () => held }), "the same two cards: confirmed");
   assert.doesNotThrow(() => planWith({ "wan-cards": "2,0" }, { leaseDevicesFn: () => held }), "in the other order");
-  assert.throws(() => planWith({ "wan-cards": "0,2" }, { leaseDevicesFn: () => ["gpu-aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee", "gpu-bbbb2222-cccc-dddd-eeee-ffffffffffff"] }),
+  assert.throws(() => planWith({ "wan-cards": "0,2" }, { leaseDevicesFn: () => ["gpu-cccc3333-bbbb-cccc-dddd-eeeeeeeeeeee", "gpu-bbbb2222-cccc-dddd-eeee-ffffffffffff"] }),
     /--wan-cards names idx 2, which the GPU lease does not hold.*the lease is the authority/);
   assert.throws(() => planWith({ "wan-cards": "0,2" }, { leaseDevicesFn: () => ["gpu-bbbb2222", "gpu-dddd4444"] }), /does not hold/);
   // no lease: --wan-cards is the caller's word, as before
@@ -710,7 +772,7 @@ test("oomWedgeLine: the line that says the prompt worker is gone, found through 
 
 test("comfyLogCursor reads only what the console gains after it was made, whatever the file held before", (t) => {
   const dir = scratchDir(t, "wan-mc-");
-  const key = "mc-aaaa1111-cccc3333";
+  const key = "mc-cccc3333-aaaa1111";
   const path = L.comfyLogPath(dir, key);
   writeFileSync(path, "an earlier run: Got an OOM, unloading all loaded models.\n");
   const cur = L.comfyLogCursor(dir, key);
@@ -735,9 +797,9 @@ test("comfyLogCursor reads only what the console gains after it was made, whatev
 
 test("comfyLogCursor: a console file that does not exist is said, and one that appears later is read from its start", (t) => {
   const dir = scratchDir(t, "wan-mc-");
-  const cur = L.comfyLogCursor(dir, "mc-aaaa1111-cccc3333");
+  const cur = L.comfyLogCursor(dir, "mc-cccc3333-aaaa1111");
   assert.deepEqual(cur.read(), { text: "", state: "absent" });
-  writeFileSync(L.comfyLogPath(dir, "mc-aaaa1111-cccc3333"), "boot\n");
+  writeFileSync(L.comfyLogPath(dir, "mc-cccc3333-aaaa1111"), "boot\n");
   assert.deepEqual(cur.read(), { text: "boot\n", state: "ok" });
 });
 
