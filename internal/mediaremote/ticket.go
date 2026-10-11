@@ -175,7 +175,8 @@ type ticketFile struct {
 	LaneWhy string `json:"lane_why,omitempty"`
 	// FleetNote, when set, says why this ticket is never offered to a node: a graph that reads input files stays on this
 	// machine's lane (graph.go), keeping its place and its position, and the note is part of every answer. A ticket with a note
-	// reads no roster, matches no node and holds none against a younger ticket.
+	// reads no roster and matches no node, so once its first scan has run it holds none against a younger ticket; until then it is
+	// first in line for every node, as any ticket that has not been scanned is (firstInLine).
 	FleetNote string `json:"fleet_note,omitempty"`
 
 	// The last scan: whether one happened, which nodes' recipes matched, what each node said, where the ticket stands.

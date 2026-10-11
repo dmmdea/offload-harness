@@ -94,3 +94,14 @@ fails outright when it resolves inside one; a relative install root counts as no
 inside the worktree. For a node that already had a `home`, the old trail stays at the old path and new
 entries start a new file: nothing moves or merges them, and the agent names both paths once per process
 when it finds the old one.
+
+## Amendment 2026-10-11 (the Linux `.git` mask covers a `.git` file)
+
+The second layer in the Consequences masked only a `.git` DIRECTORY. In a linked worktree, which is how the
+harness's own worktrees are made, `.git` is a FILE (`gitdir: <repo>/.git/worktrees/<name>`), and nothing masked
+it, so a shell with a writable worktree could rewrite the pointer to name a git directory of its own and the
+host's git would follow it later. The cage now bind-mounts that file onto itself read-only inside the private
+namespace (`maskDotGitFile`): it still reads, and it can no longer be rewritten, replaced or removed. A mask the
+kernel refuses is reported to the caller in a `[sandbox]` line, for the file as for the directory, and the run
+still goes ahead. So is a `.git` that is a symbolic link, which no mount can protect (a mount follows the link,
+and the link sits in the writable worktree). The Windows asymmetry above is unchanged.

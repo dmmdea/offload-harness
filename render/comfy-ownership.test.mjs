@@ -1,12 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { writeOwner, readOwner, isOwnedByUs, clearOwner, writeLaunchOwner, readLaunchOwner, clearLaunchOwner, harnessLaunched, sameArgv } from "./comfy-ownership.mjs";
+import { scratchDir } from "./test-scratch.mjs";
 
-test("launch marker: round-trip, separate from the run-graph provisioning marker", () => {
-  const dir = mkdtempSync(join(tmpdir(), "own-"));
+test("launch marker: round-trip, separate from the run-graph provisioning marker", (t) => {
+  const dir = scratchDir(t, "own-");
   assert.equal(readLaunchOwner(dir), null);
   writeOwner(dir, { manifestHash: "h" });
   writeLaunchOwner(dir, { pid: 12, ownerPid: 34, args: ["main.py", "--cuda-device", "1"], profile: { cudaDevice: "1", dynamicVram: "on" } });
@@ -31,8 +29,8 @@ test("harnessLaunched is a fingerprint: live pid AND the exact argv", () => {
   assert.equal(sameArgv(["a", "b"], ["a"]), false);
 });
 
-test("write/read/clear round-trip + live-pid ownership", () => {
-  const dir = mkdtempSync(join(tmpdir(), "own-"));
+test("write/read/clear round-trip + live-pid ownership", (t) => {
+  const dir = scratchDir(t, "own-");
   assert.equal(readOwner(dir), null);
   assert.equal(isOwnedByUs(dir), false);
   writeOwner(dir, { pid: process.pid, manifestHash: "abc" });
@@ -42,8 +40,8 @@ test("write/read/clear round-trip + live-pid ownership", () => {
   assert.equal(readOwner(dir), null);
 });
 
-test("isOwnedByUs is false for a dead pid", () => {
-  const dir = mkdtempSync(join(tmpdir(), "own-"));
+test("isOwnedByUs is false for a dead pid", (t) => {
+  const dir = scratchDir(t, "own-");
   writeOwner(dir, { pid: 999999999, manifestHash: "x" });  // not a live pid
   assert.equal(isOwnedByUs(dir), false);
 });

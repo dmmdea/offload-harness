@@ -354,9 +354,9 @@ func TestParseAcceptanceCheck(t *testing.T) {
 		{"nonempty:a|b|a", true},
 		{"min_items:a|b:2", false}, // only nonempty alternates; min_items takes its name literally
 		{"", true},
-		{"contains:", true},           // matches everything — cannot gate
-		{"not_contains:", true},       // matches nothing — cannot pass
-		{"regex:([", true},            // does not compile
+		{"contains:", true},            // matches everything — cannot gate
+		{"not_contains:", true},        // matches nothing — cannot pass
+		{"regex:([", true},             // does not compile
 		{"min_items:findings:0", true}, // min 0 can never fail
 		{"min_items:findings:x", true},
 		{"min_items:findings", true},

@@ -2,11 +2,11 @@
 import { test } from "node:test";
 import assert from "node:assert";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readdirSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync, existsSync, readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseEditArgs, planEdit, stageInputs, unstageInputs, UsageError, EDIT_FAMILIES } from "./comfy-edit.mjs";
+import { scratchDir } from "./test-scratch.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SCRIPT = join(HERE, "comfy-edit.mjs");
@@ -100,8 +100,8 @@ test("2.1 refusals: >10 images, missing files, 2511 knobs, pair guard, enums", (
     (e) => e instanceof UsageError && /input image not found: gone.png/.test(e.message));
 });
 
-test("stageInputs/unstageInputs: every source staged under a unique name and every one removed", () => {
-  const root = mkdtempSync(join(tmpdir(), "comfy-edit-"));
+test("stageInputs/unstageInputs: every source staged under a unique name and every one removed", (t) => {
+  const root = scratchDir(t, "comfy-edit-");
   const inputDir = join(root, "input");
   mkdirSync(inputDir);
   const srcs = ["t.png", "a.png", "b.png"].map((n) => { const p = join(root, n); writeFileSync(p, n); return p; });
@@ -116,8 +116,8 @@ test("stageInputs/unstageInputs: every source staged under a unique name and eve
   assert.deepEqual(readdirSync(inputDir), []);
 });
 
-test("a copy failure half-way still leaves the staged list complete for the finally", () => {
-  const root = mkdtempSync(join(tmpdir(), "comfy-edit-"));
+test("a copy failure half-way still leaves the staged list complete for the finally", (t) => {
+  const root = scratchDir(t, "comfy-edit-");
   const inputDir = join(root, "input");
   mkdirSync(inputDir);
   const good = join(root, "t.png");
@@ -129,8 +129,8 @@ test("a copy failure half-way still leaves the staged list complete for the fina
   assert.deepEqual(readdirSync(inputDir), []);
 });
 
-test("the real script exits 2 on a caller mistake, before the GPU slot is touched", () => {
-  const dir = mkdtempSync(join(tmpdir(), "comfy-edit-"));
+test("the real script exits 2 on a caller mistake, before the GPU slot is touched", (t) => {
+  const dir = scratchDir(t, "comfy-edit-");
   const img = join(dir, "t.png");
   writeFileSync(img, "x");
   for (const [extra, re] of [

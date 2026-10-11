@@ -25,6 +25,62 @@ func labelSDDL(t *testing.T, dir string) string {
 	return sd.String()
 }
 
+// labelableTempDir returns a fresh temp directory whose owner may change its mandatory
+// integrity label, which is what the cage needs of a worktree before it can lower the
+// label for a run (applyLowIntegrityLabel).
+//
+// WHY THE TEST CANNOT LEAVE THIS TO %TEMP%. Setting a mandatory label needs WRITE_OWNER on
+// the object, and owning a directory does not grant it (the owner holds only READ_CONTROL
+// and WRITE_DAC implicitly). Whether the owner holds WRITE_OWNER therefore comes from the
+// ACL the directory inherits. Under the user profile (the default %TEMP%) the user's own
+// full-control entry supplies it; on a data drive whose root ACL grants Authenticated
+// Users "Modify" and nothing to the user by name, it is missing, the label change fails
+// with "Access is denied", Run proceeds without lowering (best effort, fails safe), and a
+// low-integrity child cannot write the worktree. The test then measured where the temp
+// directory lived, not what the cage does.
+//
+// So the test states the precondition itself: an explicit full-control entry for the
+// current user, set through the owner's implicit WRITE_DAC, inherited by what the
+// directory contains. The label is NOT set here; Run lowers it, and reverts it, exactly as
+// it does for a real checkout. Pre-lowering it in the test would make the inside-write
+// assertion pass whether or not the cage's labelling works.
+func labelableTempDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatalf("read the current user's SID: %v", err)
+	}
+	sd, err := windows.GetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatalf("read the DACL of %s: %v", dir, err)
+	}
+	old, _, err := sd.DACL()
+	if err != nil {
+		t.Fatalf("read the DACL of %s: %v", dir, err)
+	}
+	merged, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{{
+		AccessPermissions: windows.GENERIC_ALL,
+		AccessMode:        windows.GRANT_ACCESS,
+		Inheritance:       windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT,
+		Trustee: windows.TRUSTEE{
+			TrusteeForm:  windows.TRUSTEE_IS_SID,
+			TrusteeType:  windows.TRUSTEE_IS_USER,
+			TrusteeValue: windows.TrusteeValueFromSID(user.User.Sid),
+		},
+	}}, old)
+	if err != nil {
+		t.Fatalf("add the owner's full-control entry to the DACL of %s: %v", dir, err)
+	}
+	// UNPROTECTED keeps the entries the directory inherits from its parent alongside the new one.
+	if err := windows.SetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.UNPROTECTED_DACL_SECURITY_INFORMATION,
+		nil, nil, merged, nil); err != nil {
+		t.Fatalf("grant the owner full control of %s: %v", dir, err)
+	}
+	return dir
+}
+
 // cmdExe is a benign, always-present Windows executable used across the tests as
 // the allowlisted program. Its base name (case-insensitive, ".exe" dropped) is
 // "cmd".
@@ -178,9 +234,10 @@ func TestWindowsOutputCapTruncates(t *testing.T) {
 // target dir's mandatory label / ACL), so a failure to demonstrate the block is
 // LOGGED, not fataled — the report documents it as a manual-verify item. The
 // inside-worktree write MUST still succeed (proving the child actually ran under
-// the token).
+// the token). The worktree comes from labelableTempDir, so that write depends on the
+// cage lowering the label and not on which drive the temp directory is on.
 func TestWindowsLowILWriteConfinement(t *testing.T) {
-	wt := t.TempDir()
+	wt := labelableTempDir(t)
 	inside := filepath.Join(wt, "inside.txt")
 
 	// A target OUTSIDE the worktree in a medium-IL location: the user profile dir.
@@ -246,7 +303,7 @@ func TestWindowsLowILWriteConfinement(t *testing.T) {
 // t.TempDir() has no explicit label; after a run it must again carry NO low-integrity
 // (LW) label ACE.
 func TestWindowsRelabelRevertedAfterRun(t *testing.T) {
-	wt := t.TempDir()
+	wt := labelableTempDir(t)
 	scratch := filepath.Join(wt, ".scratch")
 
 	before := labelSDDL(t, wt)

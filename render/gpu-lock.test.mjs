@@ -11,12 +11,13 @@ import { test } from "node:test";
 import assert from "node:assert";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { rmSync, mkdtempSync, writeFileSync, mkdirSync, unlinkSync } from "node:fs";
+import { writeFileSync, mkdirSync, unlinkSync } from "node:fs";
 import {
   memoryStack, quiesceLlamaSwap, freeLlamaSwap, parseUnloadModels, parseInflightMetrics,
   checkInheritedLease, claimLeaseUnload, readLease, inheritedLease, LEASE_FORMAT_SIGNATURE,
   leaseDevices,
 } from "./gpu-lock.mjs";
+import { scratchDir } from "./test-scratch.mjs";
 
 test("MEMORY_STACK is sourced from env, not a buried const (invariant 1)", () => {
   // Default (env unset) carries the canonical mem0 models — never unloaded: the embedder, the
@@ -42,8 +43,8 @@ test("MEMORY_STACK is sourced from env, not a buried const (invariant 1)", () =>
 // fence compares epochs, and a record Node cannot parse reads as "fenced out", which
 // would block every render.
 
-test("readLease parses a Go-shaped record, and returns null for a missing one", () => {
-  const dir = mkdtempSync(join(tmpdir(), "gpulease-read-"));
+test("readLease parses a Go-shaped record, and returns null for a missing one", (t) => {
+  const dir = scratchDir(t, "gpulease-read-");
   assert.equal(readLease(dir), null, "absent record => null");
   writeFileSync(join(dir, "meta.json"), JSON.stringify({
     epoch: 12, class: "media", holder: { pid: 4242, start_time_ms: 99 },
@@ -53,7 +54,6 @@ test("readLease parses a Go-shaped record, and returns null for a missing one", 
   assert.equal(m.epoch, 12);
   assert.equal(m.class, "media");
   assert.equal(m.holder.pid, 4242, "the nested holder.pid must survive the round trip");
-  rmSync(dir, { recursive: true, force: true });
 });
 
 test("inheritedLease requires BOTH dir and epoch, and carries the class", () => {
@@ -86,66 +86,59 @@ function v2Lease(dir, epoch, devices, { claimEpoch = epoch, state = "active", ex
   for (const d of devices) writeFileSync(join(dir, "cards", `${d}.claim`), JSON.stringify({ epoch: claimEpoch, at_ms: 1 }));
 }
 
-test("checkInheritedLease: a higher-epoch device lease is never fenced out by a lower one", () => {
-  const dir = mkdtempSync(join(tmpdir(), "gpulease-v2-"));
+test("checkInheritedLease: a higher-epoch device lease is never fenced out by a lower one", (t) => {
+  const dir = scratchDir(t, "gpulease-v2-");
   v2Lease(dir, 7, ["gpu-test-0"]);
   v2Lease(dir, 9, ["gpu-test-1"]);
   assert.equal(checkInheritedLease({ dir, epoch: 9 }), true, "the higher epoch must pass");
   assert.equal(checkInheritedLease({ dir, epoch: 7 }), true, "the lower epoch must pass");
   assert.equal(checkInheritedLease({ dir, epoch: 8 }), false, "an epoch nobody holds must not pass");
-  rmSync(dir, { recursive: true, force: true });
 });
 
-test("checkInheritedLease: a stolen or missing card claim fences the lease out", () => {
-  const dir = mkdtempSync(join(tmpdir(), "gpulease-v2-"));
+test("checkInheritedLease: a stolen or missing card claim fences the lease out", (t) => {
+  const dir = scratchDir(t, "gpulease-v2-");
   v2Lease(dir, 7, ["gpu-test-0", "gpu-test-1"]);
   assert.equal(checkInheritedLease({ dir, epoch: 7 }), true);
   writeFileSync(join(dir, "cards", "gpu-test-1.claim"), JSON.stringify({ epoch: 12 }));
   assert.equal(checkInheritedLease({ dir, epoch: 7 }), false, "a card that names another epoch");
   unlinkSync(join(dir, "cards", "gpu-test-1.claim"));
   assert.equal(checkInheritedLease({ dir, epoch: 7 }), false, "a card with no claim");
-  rmSync(dir, { recursive: true, force: true });
 });
 
-test("checkInheritedLease: a lease still being granted is not yet held", () => {
-  const dir = mkdtempSync(join(tmpdir(), "gpulease-v2-"));
+test("checkInheritedLease: a lease still being granted is not yet held", (t) => {
+  const dir = scratchDir(t, "gpulease-v2-");
   v2Lease(dir, 7, ["gpu-test-0"], { state: "granting" });
   assert.equal(checkInheritedLease({ dir, epoch: 7 }), false);
-  rmSync(dir, { recursive: true, force: true });
 });
 
-test("checkInheritedLease: a lease whose term ended unrenewed is still held (the expired label is not a fence)", () => {
+test("checkInheritedLease: a lease whose term ended unrenewed is still held (the expired label is not a fence)", (t) => {
   // Plan P9. An expired lease is held and heartbeating; the render child running under it
   // must keep working. The label is its own key (`expired`); the record's state stays
   // "active", which is the only word a reader built before terms accepts.
   const expired = { expired: true, expired_why: "its owner is gone", term_ms: 21600000 };
-  const dir = mkdtempSync(join(tmpdir(), "gpulease-v2-"));
+  const dir = scratchDir(t, "gpulease-v2-");
   v2Lease(dir, 7, ["gpu-test-0"], { extra: expired });
   assert.equal(checkInheritedLease({ dir, epoch: 7 }), true, "a card lease labelled expired");
-  rmSync(dir, { recursive: true, force: true });
-  const whole = mkdtempSync(join(tmpdir(), "gpulease-v1-"));
+  const whole = scratchDir(t, "gpulease-v1-");
   writeFileSync(join(whole, "meta.json"), JSON.stringify({ epoch: 5, class: "media", holder: { pid: 1 }, ...expired }));
   assert.equal(checkInheritedLease({ dir: whole, epoch: 5 }), true, "a whole-node lease labelled expired");
-  rmSync(whole, { recursive: true, force: true });
 });
 
-test("checkInheritedLease: with no v2 record the legacy meta.json compare is unchanged", () => {
-  const dir = mkdtempSync(join(tmpdir(), "gpulease-v1-"));
+test("checkInheritedLease: with no v2 record the legacy meta.json compare is unchanged", (t) => {
+  const dir = scratchDir(t, "gpulease-v1-");
   writeFileSync(join(dir, "meta.json"), JSON.stringify({ epoch: 5, class: "media", holder: { pid: 1 } }));
   assert.equal(checkInheritedLease({ dir, epoch: 5 }), true);
   assert.equal(checkInheritedLease({ dir, epoch: 6 }), false);
-  rmSync(dir, { recursive: true, force: true });
 });
 
-test("checkInheritedLease: a device id in a record that is not a plain token is refused", () => {
-  const dir = mkdtempSync(join(tmpdir(), "gpulease-v2-"));
+test("checkInheritedLease: a device id in a record that is not a plain token is refused", (t) => {
+  const dir = scratchDir(t, "gpulease-v2-");
   mkdirSync(join(dir, "e"), { recursive: true });
   writeFileSync(join(dir, "e", "7.json"), JSON.stringify({ epoch: 7, devices: ["../x"], state: "active" }));
   // The path "../x" would resolve to <dir>/x.claim: plant a perfectly good claim there, so
   // only the id check (not a missing file) can be what refuses the lease.
   writeFileSync(join(dir, "x.claim"), JSON.stringify({ epoch: 7 }));
   assert.equal(checkInheritedLease({ dir, epoch: 7 }), false);
-  rmSync(dir, { recursive: true, force: true });
 });
 
 // --- once-per-lease unload election ----------------------------------------
@@ -156,15 +149,14 @@ test("the reader carries the format signature `gpu doctor` audits for", () => {
   assert.strictEqual(LEASE_FORMAT_SIGNATURE, "gpu-lease-format-2/per-epoch-fence");
 });
 
-test("claimLeaseUnload elects exactly one unloader per lease epoch", () => {
-  const dir = mkdtempSync(join(tmpdir(), "gpulease-unload-"));
+test("claimLeaseUnload elects exactly one unloader per lease epoch", (t) => {
+  const dir = scratchDir(t, "gpulease-unload-");
   const lease = { dir, epoch: 11 };
   const winners = [claimLeaseUnload(lease), claimLeaseUnload(lease), claimLeaseUnload(lease)]
     .filter(Boolean).length;
   assert.equal(winners, 1, "exactly one job per lease may unload");
   // A NEW lease (higher epoch) gets its own unload — the card was handed over.
   assert.equal(claimLeaseUnload({ dir, epoch: 12 }), true, "a new lease unloads again");
-  rmSync(dir, { recursive: true, force: true });
 });
 
 test("claimLeaseUnload unloads when it cannot tell (correctness over saving a teardown)", () => {

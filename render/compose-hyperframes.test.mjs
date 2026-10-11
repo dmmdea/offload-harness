@@ -5,9 +5,8 @@
 import { test } from "node:test";
 import assert from "node:assert";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
 import vm from "node:vm";
 import { DEFAULTS as CAPTION_DEFAULTS, PACES as CAPTION_PACES, TEMPLATE_LIMITS as CAPTION_LIMITS, captionsFromSegments } from "./captions-groups.mjs";
@@ -16,8 +15,9 @@ import { fileURLToPath } from "node:url";
 import {
   ALLOWED_BROWSER_SUBCOMMANDS, ALLOWED_SUBCOMMANDS, FORCED_ENV, PASSTHROUGH_ENV_KEYS, PINNED_VERSION, applyTemplateVariables, assertAllowedInvocation,
   buildCheckArgs, buildChildEnv, buildRenderArgs, buildSnapshotArgs, classifyFailure, compositionMeta,
-  listTemplates, materializeTemplate, moveInto, parseJsonDoc, rewriteRootDuration, summarizeProbe, verifyOutput,
+  listTemplates, materializeTemplate, moveInto, parseJsonDoc, rewriteRootDuration, runCompose, summarizeProbe, verifyOutput,
 } from "./compose-hyperframes.mjs";
+import { scratchDir } from "./test-scratch.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const RUNNER = join(__dirname, "compose-hyperframes.mjs");
@@ -104,8 +104,8 @@ const TEMPLATE_HTML = `<!doctype html><html><body>
 <h1 class="clip" data-start="0" data-duration="6" data-var-text="title">Hello</h1></div></body></html>`;
 
 // fixture builds a throwaway hyperframes dir + stubs + templates, returns paths and a runner.
-function fixture(behavior = {}, probe = probeDoc()) {
-  const root = mkdtempSync(join(tmpdir(), "compose-test-"));
+function fixture(t, behavior = {}, probe = probeDoc()) {
+  const root = scratchDir(t, "compose-test-");
   const hf = join(root, "hf");
   const bin = join(hf, "node_modules", "hyperframes", "bin");
   mkdirSync(bin, { recursive: true });
@@ -219,8 +219,8 @@ test("buildRenderArgs: batch + json + every quality/determinism flag, verified a
 
 // --- end to end through the stub CLI ------------------------------------------------------------
 
-test("render: lint -> check -> render -> ffprobe, every call --json, scrubbed env, fresh empty cwd, result line + file", () => {
-  const fx = fixture();
+test("render: lint -> check -> render -> ffprobe, every call --json, scrubbed env, fresh empty cwd, result line + file", (t) => {
+  const fx = fixture(t);
   const r = fx.run(renderArgs(fx, ["--variables-file", (() => { const p = join(fx.root, "vars.json"); writeFileSync(p, JSON.stringify({ title: "Q3 results", duration: 4 })); return p; })(), "--snapshots", "1,2.5"]));
   assert.equal(r.status, 0, r.stdout + r.stderr);
   assert.equal(r.last.ok, true);
@@ -260,8 +260,8 @@ test("render: lint -> check -> render -> ffprobe, every call --json, scrubbed en
   assert.equal(readdirSync(join(fx.cache, "work")).length, 0, "the work dir is removed after the run");
 });
 
-test("render: the vetted-template copy gets the caller's values and duration; the template dir is never written", () => {
-  const fx = fixture();
+test("render: the vetted-template copy gets the caller's values and duration; the template dir is never written", (t) => {
+  const fx = fixture(t);
   const vars = join(fx.root, "vars.json");
   writeFileSync(vars, JSON.stringify({ title: "It's <b>bold</b>", duration: 4 }));
   const r = fx.run(renderArgs(fx, ["--variables-file", vars, "--keep-work"]));
@@ -275,8 +275,8 @@ test("render: the vetted-template copy gets the caller's values and duration; th
   assert.equal(readFileSync(join(fx.root, "templates", "demo", "index.html"), "utf8"), TEMPLATE_HTML);
 });
 
-test("render: lint errors fail typed LINT_ERRORS before any browser runs", () => {
-  const fx = fixture({ lint: { errorCount: 2, findings: [{ severity: "error", code: "missing_duration", message: "no duration" }] } });
+test("render: lint errors fail typed LINT_ERRORS before any browser runs", (t) => {
+  const fx = fixture(t, { lint: { errorCount: 2, findings: [{ severity: "error", code: "missing_duration", message: "no duration" }] } });
   const r = fx.run(renderArgs(fx));
   assert.equal(r.status, 1);
   assert.ok(r.lines.some((l) => l.startsWith("COMPOSE-FAIL: LINT_ERRORS: 2 lint error(s)")), r.stdout);
@@ -285,8 +285,8 @@ test("render: lint errors fail typed LINT_ERRORS before any browser runs", () =>
   assert.equal(JSON.parse(readFileSync(join(fx.root, "result.json"), "utf8")).class, "LINT_ERRORS");
 });
 
-test("render: check exit != 0 fails typed CHECK_FAILED", () => {
-  const fx = fixture({ check: { code: 1, report: { ok: false, runtime: { findings: [{ severity: "error", code: "console_error", message: "boom" }] } } } });
+test("render: check exit != 0 fails typed CHECK_FAILED", (t) => {
+  const fx = fixture(t, { check: { code: 1, report: { ok: false, runtime: { findings: [{ severity: "error", code: "console_error", message: "boom" }] } } } });
   const r = fx.run(renderArgs(fx));
   assert.equal(r.status, 1);
   assert.equal(r.last.class, "CHECK_FAILED");
@@ -294,8 +294,8 @@ test("render: check exit != 0 fails typed CHECK_FAILED", () => {
   assert.deepEqual(fx.calls().map((c) => c.argv[0]), ["lint", "check"]);
 });
 
-test("render: strict=false keeps going past lint errors and a failed check", () => {
-  const fx = fixture({ lint: { errorCount: 1 }, check: { code: 1 } });
+test("render: strict=false keeps going past lint errors and a failed check", (t) => {
+  const fx = fixture(t, { lint: { errorCount: 1 }, check: { code: 1 } });
   const r = fx.run(renderArgs(fx, ["--no-strict"]));
   assert.equal(r.status, 0, r.stdout);
   assert.deepEqual(r.last.lint, { errors: 1, warnings: 0 });
@@ -303,49 +303,61 @@ test("render: strict=false keeps going past lint errors and a failed check", () 
   assert.ok(!fx.calls()[2].argv.includes("--strict"));
 });
 
-test("render: a failed row fails RENDER_FAILED; the headroom gate fails DISK_HEADROOM", () => {
-  let fx = fixture({ render: { status: "failed", error: "Page crashed" } });
+test("render: a failed row fails RENDER_FAILED; the headroom gate fails DISK_HEADROOM", (t) => {
+  let fx = fixture(t, { render: { status: "failed", error: "Page crashed" } });
   let r = fx.run(renderArgs(fx));
   assert.equal(r.last.class, "RENDER_FAILED");
-  fx = fixture({ render: { status: "failed", error: "Disk capture may need ~16000.0 MB of temporary frame storage, but only 12.0 MB is free" } });
+  fx = fixture(t, { render: { status: "failed", error: "Disk capture may need ~16000.0 MB of temporary frame storage, but only 12.0 MB is free" } });
   r = fx.run(renderArgs(fx));
   assert.equal(r.last.class, "DISK_HEADROOM");
 });
 
-test("render: spawn EBUSY is retried ONCE (#4058); twice fails SPAWN_EBUSY", () => {
-  let fx = fixture({ render: { ebusyTimes: 1 } });
+test("render: spawn EBUSY is retried ONCE (#4058); twice fails SPAWN_EBUSY", (t) => {
+  let fx = fixture(t, { render: { ebusyTimes: 1 } });
   let r = fx.run(renderArgs(fx));
   assert.equal(r.status, 0, r.stdout);
   assert.equal(fx.calls().filter((c) => c.argv[0] === "render").length, 2);
-  fx = fixture({ render: { ebusyTimes: 2 } });
+  fx = fixture(t, { render: { ebusyTimes: 2 } });
   r = fx.run(renderArgs(fx));
   assert.equal(r.last.class, "SPAWN_EBUSY");
   assert.equal(fx.calls().filter((c) => c.argv[0] === "render").length, 2, "exactly one retry");
 });
 
-test("render: the deadline kills the step and fails TIMEOUT", () => {
-  const fx = fixture({ check: { sleepMs: 8000 } });
+test("render: the deadline kills the step and fails TIMEOUT", (t) => {
+  const fx = fixture(t, { check: { sleepMs: 8000 } });
   const t0 = Date.now();
   const r = fx.run(renderArgs(fx, ["--timeout-sec", "2"]));
   assert.equal(r.last.class, "TIMEOUT", r.stdout);
   assert.ok(Date.now() - t0 < 7000, "the child must be killed at the deadline, not waited out");
 });
 
-test("render: missing browser / ffmpeg / CLI are typed before anything spawns", () => {
-  let fx = fixture();
+test("render: missing browser / ffmpeg / CLI are typed before anything spawns", (t) => {
+  let fx = fixture(t);
   let r = fx.run(renderArgs(fx, ["--browser", join(fx.root, "nope.exe")]));
   assert.equal(r.last.class, "BROWSER_MISSING");
-  fx = fixture();
+  fx = fixture(t);
   r = fx.run(renderArgs(fx, ["--ffmpeg", join(fx.root, "no-ffmpeg.exe")]));
   assert.equal(r.last.class, "FFMPEG_MISSING");
-  fx = fixture();
+  fx = fixture(t);
   r = fx.run(renderArgs(fx, ["--hyperframes-dir", join(fx.root, "empty")]));
   assert.equal(r.last.class, "CLI_MISSING");
   assert.equal(fx.calls().length, 0);
 });
 
-test("render: bad input is refused BAD_INPUT", () => {
-  const fx = fixture();
+// The work dir is made before the first step, and it used to be removed by a `finally` that opened a few statements
+// later: anything that threw in between (here, the parent environment, which is enumerated to build the child's
+// environment) left an empty job-* folder in the cache for good.
+test("render: a throw after the work dir is made and before the first step still removes the work dir", async (t) => {
+  const fx = fixture(t);
+  const parentEnv = { ...process.env };
+  Object.defineProperty(parentEnv, "ZZ_COMPOSE_TRAP", { enumerable: true, get() { throw new Error("env trap"); } });
+  await assert.rejects(runCompose(renderArgs(fx), { parentEnv, log: () => {} }), /env trap/);
+  assert.deepEqual(readdirSync(join(fx.cache, "work")), [], "no job-* folder is left in the cache");
+  assert.equal(fx.calls().length, 0, "and no step ran");
+});
+
+test("render: bad input is refused BAD_INPUT", (t) => {
+  const fx = fixture(t);
   const cases = [
     ["--html-file", join(fx.root, "x.html")], // template + html
     ["--format", "hls"], ["--quality", "looks"], ["--fps", "0.5"], ["--workers", "99"], ["--resolution", "8k"],
@@ -367,22 +379,22 @@ test("render: bad input is refused BAD_INPUT", () => {
   assert.equal(fx.calls().length, 0, "bad input never reaches the CLI");
 });
 
-test("render: the ffprobe gate refuses an alpha format without alpha, and a size mismatch", () => {
-  let fx = fixture({}, probeDoc({ codec: "vp9", pix: "yuv420p" }));
+test("render: the ffprobe gate refuses an alpha format without alpha, and a size mismatch", (t) => {
+  let fx = fixture(t, {}, probeDoc({ codec: "vp9", pix: "yuv420p" }));
   let r = fx.run(renderArgs(fx, ["--format", "webm", "--out", join(fx.root, "o.webm")]));
   assert.equal(r.last.class, "RENDER_FAILED");
   assert.match(r.last.detail, /no alpha/);
-  fx = fixture({}, probeDoc({ codec: "vp9", pix: "yuv420p", tags: { ALPHA_MODE: "1" } }));
+  fx = fixture(t, {}, probeDoc({ codec: "vp9", pix: "yuv420p", tags: { ALPHA_MODE: "1" } }));
   r = fx.run(renderArgs(fx, ["--format", "webm", "--out", join(fx.root, "o.webm")]));
   assert.equal(r.status, 0, r.stdout);
   assert.equal(r.last.has_alpha, true);
-  fx = fixture({}, probeDoc({ w: 1280, h: 720 }));
+  fx = fixture(t, {}, probeDoc({ w: 1280, h: 720 }));
   r = fx.run(renderArgs(fx));
   assert.match(r.last.detail, /width 1280 \(want 1920\)/);
 });
 
-test("render: png-sequence publishes a frames_dir and never overwrites a non-empty directory", () => {
-  const fx = fixture({}, probeDoc({ codec: "png", pix: "rgba", packets: "1" }));
+test("render: png-sequence publishes a frames_dir and never overwrites a non-empty directory", (t) => {
+  const fx = fixture(t, {}, probeDoc({ codec: "png", pix: "rgba", packets: "1" }));
   const outDir = join(fx.root, "frames-out");
   const r = fx.run(renderArgs(fx, ["--format", "png-sequence", "--out", outDir, "--fps", "30"]));
   assert.equal(r.status, 0, r.stdout);
@@ -392,8 +404,8 @@ test("render: png-sequence publishes a frames_dir and never overwrites a non-emp
   assert.equal(again.last.class, "BAD_INPUT");
 });
 
-test("version and browser ops run through the same allowlist and env", () => {
-  const fx = fixture();
+test("version and browser ops run through the same allowlist and env", (t) => {
+  const fx = fixture(t);
   let r = fx.run(["version", "--hyperframes-dir", fx.hf]);
   assert.equal(r.status, 0, r.stdout);
   assert.equal(r.last.version, PINNED_VERSION);
@@ -417,8 +429,8 @@ test("version and browser ops run through the same allowlist and env", () => {
   }
 });
 
-test("a drifted install (not the runner's pin) is refused CLI_MISSING before anything spawns", () => {
-  const fx = fixture({ installed: "0.9.0" });
+test("a drifted install (not the runner's pin) is refused CLI_MISSING before anything spawns", (t) => {
+  const fx = fixture(t, { installed: "0.9.0" });
   let r = fx.run(renderArgs(fx));
   assert.equal(r.last.class, "CLI_MISSING", r.stdout);
   assert.match(r.last.detail, /holds hyperframes 0\.9\.0, not the runner's pin/);
@@ -427,7 +439,7 @@ test("a drifted install (not the runner's pin) is refused CLI_MISSING before any
   assert.equal(r.last.class, "CLI_MISSING");
   assert.equal(fx.calls().length, 0);
   // the CLI's own answer is checked too, not only package.json
-  const fy = fixture({ version: "0.8.60" });
+  const fy = fixture(t, { version: "0.8.60" });
   r = fy.run(["version", "--hyperframes-dir", fy.hf]);
   assert.equal(r.last.class, "CLI_MISSING", r.stdout);
 });
@@ -567,8 +579,8 @@ test("applyTemplateVariables: caller text never adds an attribute to the root el
   }
 });
 
-test("render: a value with $ patterns reaches the composition the runner copies, and the template dir is untouched", () => {
-  const fx = fixture();
+test("render: a value with $ patterns reaches the composition the runner copies, and the template dir is untouched", (t) => {
+  const fx = fixture(t);
   const vars = join(fx.root, "vars.json");
   const value = "Only $100, $& more, it's $1";
   writeFileSync(vars, JSON.stringify({ title: value, duration: 4 }));
@@ -775,14 +787,14 @@ test("kit ports: each README names its source card at the pinned kit commit and 
   }
 });
 
-test("kit ports: the kit's MIT licence and use permission are kept verbatim under _third_party, which is never a template", () => {
+test("kit ports: the kit's MIT licence and use permission are kept verbatim under _third_party, which is never a template", (t) => {
   const dir = join(TEMPLATES_DIR, "_third_party", "hyperframes-student-kit");
   // hashes of the two files as they sit at the pinned kit commit (LF); a CRLF checkout is folded first
   const sha = (f) => createHash("sha256").update(readFileSync(join(dir, f), "utf8").replace(/\r\n/g, "\n")).digest("hex");
   assert.equal(sha("LICENSE"), "263623d3ac61f5b09eeceec5af2395bb15e566d0507558f5b6c405f2ba132bd1");
   assert.equal(sha("PIPELINE-USE-PERMISSION.txt"), "51fc8998336079bd888662ac3ebc708ba05444a98b5ad26af757567f8125259d");
   assert.ok(!listTemplates(TEMPLATES_DIR).includes("_third_party"));
-  const scratch = mkdtempSync(join(tmpdir(), "compose-tp-"));
+  const scratch = scratchDir(t, "compose-tp-");
   assert.throws(() => materializeTemplate(TEMPLATES_DIR, "_third_party", {}, scratch), (e) => e.cls === "BAD_INPUT");
   assert.ok(/kit_commit|0d30152a82b9ceb93cfdd9bdbf46f0d5ab3cde86/.test(readFileSync(join(dir, "PROVENANCE.md"), "utf8")), "PROVENANCE.md pins the full kit commit");
 });
@@ -1415,16 +1427,16 @@ test("kit ports: the kit's brand colours are absent however they are spelled", (
 // moveInto publishes the rendered output at its delivery path. The work dir is usually on another
 // volume, so the copy fallback is the common path, and it used to copy straight onto the destination:
 // a destination that filled up kept a partial video there that looked finished.
-function publishDirs() {
-  const root = mkdtempSync(join(tmpdir(), "compose-move-"));
+function publishDirs(t) {
+  const root = scratchDir(t, "compose-move-");
   const work = join(root, "work"); const out = join(root, "out");
   mkdirSync(work); mkdirSync(out);
   return { work, out, src: join(work, "output.mp4"), dst: join(out, "clip.mp4") };
 }
 const crossVolume = () => { throw Object.assign(new Error("EXDEV: cross-device link not permitted, rename"), { code: "EXDEV" }); };
 
-test("moveInto: where the rename works the output moves and nothing is left behind", () => {
-  const { src, dst, work, out } = publishDirs();
+test("moveInto: where the rename works the output moves and nothing is left behind", (t) => {
+  const { src, dst, work, out } = publishDirs(t);
   writeFileSync(src, "the clip");
   moveInto(src, dst);
   assert.equal(readFileSync(dst, "utf8"), "the clip");
@@ -1432,8 +1444,8 @@ test("moveInto: where the rename works the output moves and nothing is left behi
   assert.deepEqual(readdirSync(out), ["clip.mp4"]);
 });
 
-test("moveInto: when the rename cannot be used the copy lands through a staged sibling, then the source goes", () => {
-  const { src, dst, work, out } = publishDirs();
+test("moveInto: when the rename cannot be used the copy lands through a staged sibling, then the source goes", (t) => {
+  const { src, dst, work, out } = publishDirs(t);
   writeFileSync(src, "the clip");
   writeFileSync(dst, "an older clip");
   moveInto(src, dst, { rename: crossVolume });
@@ -1442,8 +1454,8 @@ test("moveInto: when the rename cannot be used the copy lands through a staged s
   assert.deepEqual(readdirSync(work), [], "the source is removed only after the copy landed");
 });
 
-test("moveInto: a destination that fills up during the fallback copy leaves no partial file, keeps the previous clip and keeps the source", () => {
-  const { src, dst, work, out } = publishDirs();
+test("moveInto: a destination that fills up during the fallback copy leaves no partial file, keeps the previous clip and keeps the source", (t) => {
+  const { src, dst, work, out } = publishDirs(t);
   writeFileSync(src, "the clip");
   writeFileSync(dst, "an older clip");
   const fullDisk = (from, to) => copyAtomic(from, to, {
@@ -1456,8 +1468,8 @@ test("moveInto: a destination that fills up during the fallback copy leaves no p
   assert.deepEqual(readdirSync(work), ["output.mp4"]);
 });
 
-test("moveInto: a frames directory copies whole through a staged sibling", () => {
-  const root = mkdtempSync(join(tmpdir(), "compose-move-"));
+test("moveInto: a frames directory copies whole through a staged sibling", (t) => {
+  const root = scratchDir(t, "compose-move-");
   const frames = join(root, "work", "frames"); const dst = join(root, "out", "frames");
   mkdirSync(frames, { recursive: true });
   writeFileSync(join(frames, "frame-000001.png"), "1");

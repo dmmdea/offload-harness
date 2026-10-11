@@ -241,7 +241,7 @@ export async function satisfyManifest(manifest, deps) {
 }
 
 import { spawn as nodeSpawn } from "node:child_process";
-import { existsSync, writeFileSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, writeFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { createReadStream, createWriteStream } from "node:fs";
 import { tmpdir } from "node:os";
@@ -358,25 +358,16 @@ export function makeEnsurePack({ comfyDir, exists = existsSync, gitHead, gitRun 
 export function defaultSatisfyDeps({ comfyDir, comfyPy, api, cmCli }) {
   // Host pins are captured ONCE, lazily, at the first python-touching step
   // (resolveDeps — ensurePack before it is git-only), so the tripwire below always
-  // compares against the pre-install state and the constraints file exists before
-  // any pip/uv spawns.
+  // compares against the pre-install state. resolveDeps writes the constraints file
+  // from them before any pip/uv spawns, and removes it when the step ends.
   let hostPinsP = null;
   // A REJECTED promise must not stay memoized: ??= treats it as present, so a transient
   // spawn failure in `pip freeze` would make every retry re-await the same stale rejection
   // (adversarial-review finding, 2026-07-22). Clear the memo on rejection so a retry
   // actually re-spawns.
-  const hostPins = () => (hostPinsP ??= ((async () => {
-    const pins = buildHostConstraints(await runOut([comfyPy, "-m", "pip", "freeze"]));
-    let env = {};
-    if (pins.length) {
-      const p = join(tmpdir(), `offload-host-constraints-${process.pid}.txt`);
-      // Constraints file carries the PUBLIC pins (local +cuXXX builds don't exist
-      // on PyPI → unresolvable); the tripwire compares the FULL pins.
-      writeFileSync(p, pins.map(publicPin).join("\n") + "\n");
-      env = { PIP_CONSTRAINT: p, UV_CONSTRAINT: p };
-    }
-    return { pins, env };
-  })()).catch((e) => { hostPinsP = null; throw e; }));
+  const hostPins = () => (hostPinsP ??= ((async () => ({
+    pins: buildHostConstraints(await runOut([comfyPy, "-m", "pip", "freeze"])),
+  }))()).catch((e) => { hostPinsP = null; throw e; }));
   return {
     comfyDir,
     // The pack satisfier's hard tool is uv (unified resolve); derived from the venv
@@ -433,11 +424,27 @@ export function defaultSatisfyDeps({ comfyDir, comfyPy, api, cmCli }) {
         .map((p) => join(comfyDir, "custom_nodes", p.name, "requirements.txt"))
         .filter((p) => existsSync(p));
       if (!reqPaths.length) return;
-      const { env } = await hostPins();
+      const { pins } = await hostPins();
       const uvExe = join(dirname(comfyPy), "uv.exe");
-      const lockPath = join(tmpdir(), `offload-pack-lock-${process.pid}.txt`);
-      await run(buildCompileCmd(reqPaths, { uvExe, comfyPy, lockPath }), { env: { ...process.env, ...env } });
-      await run(buildInstallCmd(lockPath, { comfyPy }), { env: { ...process.env, ...env } });
+      // The constraints file and the unified lock are scratch for THIS step: they live in a folder of
+      // their own that is removed when the step ends, however it ends. (They were pid-named files in
+      // the OS temp dir that nothing removed, so every provisioning run left two behind.)
+      const scratch = mkdtempSync(join(tmpdir(), "offload-satisfy-"));
+      try {
+        let env = {};
+        if (pins.length) {
+          const p = join(scratch, "host-constraints.txt");
+          // Constraints file carries the PUBLIC pins (local +cuXXX builds don't exist
+          // on PyPI → unresolvable); the tripwire compares the FULL pins.
+          writeFileSync(p, pins.map(publicPin).join("\n") + "\n");
+          env = { PIP_CONSTRAINT: p, UV_CONSTRAINT: p };
+        }
+        const lockPath = join(scratch, "pack-lock.txt");
+        await run(buildCompileCmd(reqPaths, { uvExe, comfyPy, lockPath }), { env: { ...process.env, ...env } });
+        await run(buildInstallCmd(lockPath, { comfyPy }), { env: { ...process.env, ...env } });
+      } finally {
+        try { rmSync(scratch, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); } catch { /* best effort: the install's own result matters more */ }
+      }
     },
     ensurePack: makeEnsurePack({
       comfyDir,

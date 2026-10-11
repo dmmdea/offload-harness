@@ -48,6 +48,22 @@ func runProbe(name string, args []string) int {
 		} else {
 			fmt.Printf("write OK\n")
 		}
+	case "tamper":
+		// Every way a command could change the entry at args[0] (a linked worktree's .git
+		// file), one line per attempt (see tamper).
+		tamper(args[0])
+	case "replace":
+		// Replace the symlink at args[0] with one of the command's own: the thing the cage's note
+		// about a symlinked .git says a command can do.
+		if err := os.Remove(args[0]); err != nil {
+			fmt.Printf("replace DENIED: %v\n", err)
+			break
+		}
+		if err := os.Symlink("evil-gitdir", args[0]); err != nil {
+			fmt.Printf("replace DENIED: %v\n", err)
+			break
+		}
+		fmt.Printf("replace OK\n")
 	case "dial":
 		c, err := net.DialTimeout("tcp", args[0], 2*time.Second)
 		if err != nil {
@@ -330,18 +346,25 @@ func TestCageDeniesProc(t *testing.T) {
 // with a writable worktree, <worktree>/.git is masked by an ephemeral read-only
 // tmpfs, so a write into .git never reaches the host's .git — closing the deferred
 // host-side persistence vector (a hook firing when the human later runs git).
+//
+// The mask is an unprivileged tmpfs mounted over <worktree>/.git inside the worker's
+// user+mount namespace (sandbox_linux.go), and a host can refuse that mount while the
+// rest of the cage (Landlock, seccomp) works: the GitHub Actions runner does, and so
+// does any host whose AppArmor strips an unprivileged user namespace of its
+// capabilities (kernel.apparmor_restrict_unprivileged_userns, the Ubuntu 24.04
+// default). Such a host cannot show the mask, so the test asks the cage whether it
+// was refused (hostRefusesTheCagesMounts) and skips there, with the cage's note as the
+// measured reason. The skip depends on that note: a host that refuses the mount and
+// says nothing is not skipped, it reaches the assertion below and fails it, and
+// TestCageSaysWhenDotGitIsNotMasked holds the cage to saying so on every host. Where
+// the mount works the assertion is strict.
 func TestCageMasksDotGit(t *testing.T) {
 	requireCage(t)
-	// The .git mask is an unprivileged read-only tmpfs mounted over <worktree>/.git
-	// inside the worker's user+mount namespace (sandbox_linux.go). The GitHub Actions
-	// runner does not let that mount take effect, so the mask cannot be exercised
-	// here even though the rest of the cage (Landlock/seccomp) can — the other cage
-	// tests, which rely only on Landlock, still run. This property is verified on the
-	// real Linux/WSL hosts where the cage actually runs. (Note: sandbox_linux.go:133
-	// currently ignores the mount error — hardening it to fail-closed is tracked
-	// separately, and must be validated on a real host, not in CI.)
-	if os.Getenv("GITHUB_ACTIONS") == "true" {
-		t.Skip("unprivileged tmpfs mount over .git does not take effect on the GitHub Actions runner; .git mask is verified on real hosts")
+	if refused, note := hostRefusesTheCagesMounts(t); refused {
+		if !strings.HasPrefix(note, noteMarker) || !strings.Contains(note, "NOT masked read-only (mount: ") {
+			t.Fatalf("this host refuses the mount, but the cage's note is not the one callers are promised: %q", note)
+		}
+		t.Skipf("this host refuses the cage's unprivileged mounts (the cage says so: %s), so the .git mask cannot be shown here; it is verified on hosts where the mount works", note)
 	}
 	wt := t.TempDir()
 	hooks := filepath.Join(wt, ".git", "hooks")
