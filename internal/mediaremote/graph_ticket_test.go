@@ -730,9 +730,12 @@ func TestALocalOnlyGraphTicketIsNeverMovedAndHoldsNoNodeAgainOthers(t *testing.T
 	}
 }
 
-// What a graph asks of a node (the default VRAM floor reads the graph's height) is read ONCE, when the ticket is made: the MCP door's
-// temp file for an inline graph_json is not kept for the hours a ticket may wait, and a floor that vanished with the file would send
-// a Wan graph to the 8 GB node it was kept off.
+// What a graph asks of a node (the default VRAM floor reads the graph's height) is read ONCE, when the ticket is made, and the ticket
+// goes on with what it read. The ticket runs from its own copy of the graph (body-<id>-graph.json), which the caller's file can no
+// longer take away, but the copy is a file in a directory other processes sweep and an operator may clear, and a floor that vanished
+// with it would send a Wan graph to the 8 GB node it was kept off. So both files are removed here: removing the caller's alone cannot
+// tell a need read once from a need read at every scan (the copy is still there to be read), which is how the mutant "re-read at
+// every scan" came to survive this test once the ticket kept copies.
 func TestAGraphsNeedIsReadOnceWhenTheTicketIsMade(t *testing.T) {
 	e := newGEnv(t)
 	small := e.node("node-small", true, nodeOpts{}, krea2File)
@@ -742,8 +745,15 @@ func TestAGraphsNeedIsReadOnceWhenTheTicketIsMade(t *testing.T) {
 	if r, ok := rowFor(a.Cluster, "node-small"); !ok || r.State != "not-capable" || !strings.Contains(r.Why, "chosen") {
 		t.Fatalf("the 8 GB node is kept off a Wan graph at 720p and above by the default floor: %+v", r)
 	}
-	if err := os.Remove(req.Params["graph_path"].(string)); err != nil {
-		t.Fatal(err)
+	st, _ := storeFor(e.cfg)
+	ownCopy := st.bodyPath(a.Ticket, "graph")
+	if _, err := os.Stat(ownCopy); err != nil {
+		t.Fatalf("control: the ticket keeps its own copy of the graph, the file a scan would read the need from: %v", err)
+	}
+	for _, gone := range []string{req.Params["graph_path"].(string), ownCopy} {
+		if err := os.Remove(gone); err != nil {
+			t.Fatal(err)
+		}
 	}
 	e.free(0)
 	time.Sleep(300 * time.Millisecond) // several scans

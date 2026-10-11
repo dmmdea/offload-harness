@@ -78,11 +78,12 @@ type liveTicket struct {
 	remotes    []string
 	rosterFile string
 	runner     Runner
-	req        core.Request // params cloned, the seed fixed (an image; a graph is left as the caller sent it)
+	req        core.Request // params cloned, the seed fixed (an image), the graph and manifest paths pointed at the ticket's own copies (a graph)
 	pl         planned
 	local      localID
-	// need is what the call asks of a node beyond the recipe, read ONCE with the request (a graph's default VRAM floor reads
-	// the graph file, and a temp file the MCP door wrote can be gone by the ticket's tenth scan): needNow.
+	// need is what the call asks of a node beyond the recipe, read ONCE with the request (a graph's default VRAM floor reads the
+	// graph, which for a ticket is its own copy, body-<id>-graph.json: a file in a directory that other processes sweep and an
+	// operator may clear during the hours a ticket can wait, so the floor is not read again): needNow.
 	need    need
 	needSet bool
 
