@@ -29,6 +29,10 @@ type MulticardRow struct {
 	Measured bool
 	// MaxMegapixels is the largest edit canvas the compute peak is scaled to (0 = the row has none).
 	MaxMegapixels float64
+	// Blocked is why the row may not launch (empty = it may): the row stays in the table, but it is no recipe to FindMulticardRow, so the estimate, the
+	// doctor and the typed doors treat the binding as one without a recipe, and the runner refuses it by name (render/multicard-recipes.mjs findRecipe).
+	// The sentence is the JSON's "blocked", pinned by TestTheMulticardRowsAreTheRunnersRecipes.
+	Blocked string
 	// LoraLoader is the node class that applies a LoRA to the DiT under this recipe ("" = the recipe has none to name).
 	LoraLoader string
 	// Packs are the custom-node packs the recipe's loaders need: multigpu, and gguf for a GGUF DiT.
@@ -40,7 +44,8 @@ func (r MulticardRow) Plain() bool { return r.UnetLoader == "plain" }
 
 var multicardRows = []MulticardRow{
 	{ID: "qwen-image-2.1/int8_convrot", Route: "image", Family: "qwen-image-2.1", Quant: "int8_convrot", UnetMatch: `int8.*\.safetensors$`, ClipMatch: "bf16",
-		UnetLoader: "plain", ClipLoader: "distorch2", ClipResidentGiB: 5, ComputeGiB: 9.0, StorageGiB: 13.6, Packs: []string{"multigpu"}},
+		UnetLoader: "plain", ClipLoader: "distorch2", ClipResidentGiB: 5, ComputeGiB: 9.0, StorageGiB: 13.6, Packs: []string{"multigpu"},
+		Blocked: "the card-only placement puts this recipe's int8 DiT on cuda:1, and no run has: the benchmark arms the row cites ran the int8 DiT on cuda:0 with the bf16 text encoder on cuda:1, the reverse. A comfy_kitchen int8 model run through ComfyUI-MultiGPU with the compute device off cuda:0 is a recorded illegal memory access in the int8 dispatch path (upstream issue 220, unfixed; it is why the pooled LTX-2.5 seat keeps compute cuda:0). Run one int8 arm with the DiT on cuda:1, then clear \"blocked\" on this row in render/multicard-recipes.json and Blocked in internal/mediacap/multicard.go; or bind the bf16 DiT, which has a recipe"},
 	{ID: "qwen-image-2.1/bf16", Route: "image", Family: "qwen-image-2.1", Quant: "bf16", UnetMatch: `bf16.*\.safetensors$`, ClipMatch: "bf16",
 		UnetLoader: "distorch2", ResidentGiB: 8, ClipLoader: "distorch2", ClipResidentGiB: 5, ComputeGiB: 10.8, StorageGiB: 14.2, Packs: []string{"multigpu"}},
 	{ID: "qwen-image/gguf-q5_1", Route: "image", Family: "qwen-image", Quant: "gguf-q5_1", UnetMatch: `Q5_1\.gguf$`, ClipMatch: "fp8", DefaultClip: "qwen_2.5_vl_7b_fp8_scaled.safetensors",
@@ -75,9 +80,26 @@ func MulticardRows() []MulticardRow {
 }
 
 // FindMulticardRow finds the recipe for a call: the route ("image" or "edit"), the graph family, the DiT file and the text-encoder file (the binding's own,
-// else the builder's default), taken from the call's model files. nil = no recipe; the runner refuses such a call by name, and everything else sizes it as it
-// always did.
+// else the builder's default), taken from the call's model files. nil = no recipe (a row that is held back is no recipe); the runner refuses such a call by
+// name, and everything else sizes it as it always did.
 func FindMulticardRow(route, family string, files []ModelFile) *MulticardRow {
+	if r := matchMulticardRow(route, family, files); r != nil && r.Blocked == "" {
+		return r
+	}
+	return nil
+}
+
+// BlockedMulticardRow is the row a call matches when that row is held back (Blocked), else nil: a call with no row at all, or a launchable one, has none.
+// The typed door uses it to say which row and why when it refuses the binding.
+func BlockedMulticardRow(route, family string, files []ModelFile) *MulticardRow {
+	if r := matchMulticardRow(route, family, files); r != nil && r.Blocked != "" {
+		return r
+	}
+	return nil
+}
+
+// matchMulticardRow is the row of the call's files whether or not it is held back.
+func matchMulticardRow(route, family string, files []ModelFile) *MulticardRow {
 	var unet, clip string
 	for _, mf := range files {
 		switch mf.Role {

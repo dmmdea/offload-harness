@@ -1,6 +1,6 @@
 {
   "format": 1,
-  "about": "The card-only recipes of the image and edit routes: which (route, family, quant) may run across two cards, which loader puts which weight on which card, and the per-card VRAM peak a call is held to. cuda:0 is the STORAGE card (text encoder, VAE, the donor blocks of the DiT), cuda:1 the COMPUTE card (the DiT's resident share and the sampler's activations); render/multicard-recipes.mjs reads this file and internal/hostneed keeps a copy of the figures (a Go test pins the two). basis is 'measured' only for a row whose per-card peak was read in a run that used the read-only safetensors loader (a card-only run that charged no weights to host commit); every image arm of the 2026-10-11 two-card benchmark ran the stock loader, so those rows are 'predicted' and a call on them declares the ordinary estimate until a live run with the read-only loader promotes them.",
+  "about": "The card-only recipes of the image and edit routes: which (route, family, quant) may run across two cards, which loader puts which weight on which card, and the per-card VRAM peak a call is held to. cuda:0 is the STORAGE card (text encoder, VAE, the donor blocks of the DiT), cuda:1 the COMPUTE card (the DiT's resident share and the sampler's activations); render/multicard-recipes.mjs reads this file and internal/hostneed keeps a copy of the figures (a Go test pins the two). blocked, when present, is a sentence: the row exists but the runner refuses it by name until the thing it says was run is run (a held-back row is no recipe to the estimate, the doctor and the typed doors; its data stays for the proof arm). basis is 'measured' only for a row whose per-card peak was read in a run that used the read-only safetensors loader (a card-only run that charged no weights to host commit); every image arm of the 2026-10-11 two-card benchmark ran the stock loader, so those rows are 'predicted' and a call on them declares the ordinary estimate until a live run with the read-only loader promotes them.",
   "rows": [
     {
       "id": "qwen-image-2.1/int8_convrot",
@@ -12,6 +12,7 @@
       "unet": { "loader": "plain" },
       "clip": { "loader": "distorch2", "residentGb": 5 },
       "basis": "predicted",
+      "blocked": "the card-only placement puts this recipe's int8 DiT on cuda:1, and no run has: the benchmark arms the row cites ran the int8 DiT on cuda:0 with the bf16 text encoder on cuda:1, the reverse. A comfy_kitchen int8 model run through ComfyUI-MultiGPU with the compute device off cuda:0 is a recorded illegal memory access in the int8 dispatch path (upstream issue 220, unfixed; it is why the pooled LTX-2.5 seat keeps compute cuda:0). Run one int8 arm with the DiT on cuda:1, then clear \"blocked\" on this row in render/multicard-recipes.json and Blocked in internal/mediacap/multicard.go; or bind the bf16 DiT, which has a recipe",
       "peakGiB": { "compute": 9.0, "storage": 13.6 },
       "activationsGiB": 2.2,
       "packs": ["multigpu"],

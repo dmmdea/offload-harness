@@ -10,7 +10,8 @@
 //
 // WHAT IT REFUSES, by name and before a lease is taken: a family or quant with no recipe (2512 bf16 fits no card, krea2 has its
 // own pool flags, SDXL and HiDream fit one card); an int8 TEXT ENCODER (PSNR 28.65 dB against the 30 dB gate in the benchmark;
-// the int8_convrot DiT is a different file and a recipe of its own); a text encoder other than the one the recipe was built for.
+// the int8_convrot DiT is a different file and a recipe of its own, held back for now: its `blocked` sentence says why); a text
+// encoder other than the one the recipe was built for.
 // An fp8 text encoder is never placed on cuda:1 (two measured runs aborted the process there), so a recipe pins it whole to
 // cuda:0; only a bf16 encoder too big for one card is split, and a test walks every recipe to keep it that way.
 //
@@ -52,7 +53,7 @@ const FAMILY_HINTS = Object.freeze({
   sdxl: "it fits one card, so there is nothing to place across two",
   "hidream-o1": "it fits one card pair only with host RAM and was never measured card-only",
   "hidream-o1-dev": "it fits one card pair only with host RAM and was never measured card-only",
-  "qwen-image-2.1": "only the int8_convrot and bf16 safetensors DiTs have a recipe",
+  "qwen-image-2.1": "only the bf16 safetensors DiT has a launchable recipe (the int8_convrot one is held back, see the row's `blocked`)",
 });
 
 /**
@@ -78,6 +79,8 @@ export function findRecipe({ route, family, unet, clip } = {}) {
     const known = rows.map((r) => r.quant).join(", ");
     throw noRecipe(`the recipes of this family are ${known}; ${FAMILY_HINTS[fam] || "name one of those files"}`);
   }
+  // A row that exists and is held back (its `blocked` says why) is refused by name here, the one choke point every graph builder and the planner go through.
+  if (row.blocked) throw new RecipeRefusal(`the ${row.id} recipe is held back: ${row.blocked}`);
   const want = clipName || row.defaultClip || "";
   if (!want) throw new RecipeRefusal(`the card-only placement needs the text encoder file to pick its recipe for ${row.id}: name it (--clip)`);
   if (!new RegExp(row.clipMatch, "i").test(want)) {

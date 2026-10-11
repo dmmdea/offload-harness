@@ -238,6 +238,10 @@ func TestAMulticardBindingWithNoRecipeIsRefusedBeforeAnyLease(t *testing.T) {
 			if strings.Contains(name, "held back") && (!strings.Contains(res.Reason, "qwen-image-2.1/int8_convrot") || !strings.Contains(res.Reason, "held back") || !strings.Contains(res.Reason, "illegal memory access")) {
 				t.Errorf("the refusal of a held-back row must name it and say why: %s", res.Reason)
 			}
+			// and the recipes the table "has" are the ones that can launch, not the held-back one
+			if strings.Contains(name, "held back") && strings.Contains(res.Reason, "has qwen-image-2.1/int8_convrot") {
+				t.Errorf("the list of recipes offers the held-back row: %s", res.Reason)
+			}
 		})
 	}
 }

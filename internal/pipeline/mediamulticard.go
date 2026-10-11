@@ -84,12 +84,16 @@ func noRecipeRefusal(key, route, family string, files []mediacap.ModelFile) stri
 	}
 	var rows []string
 	for _, r := range mediacap.MulticardRows() {
-		if r.Route == route {
+		if r.Route == route && r.Blocked == "" { // a held-back row is named below, with its reason, not offered
 			rows = append(rows, r.ID)
 		}
 	}
-	return fmt.Sprintf("%s is multicard, but this binding (%s) has no card-only recipe (render/multicard-recipes.json has %s): the runner would refuse it by name after the pair was held, so nothing was leased; unset %s or bind a family and files that have a recipe",
-		key, binding, strings.Join(rows, ", "), key)
+	held := ""
+	if r := mediacap.BlockedMulticardRow(route, family, files); r != nil {
+		held = fmt.Sprintf(" The row this binding matches, %s, is held back: %s.", r.ID, r.Blocked)
+	}
+	return fmt.Sprintf("%s is multicard, but this binding (%s) has no card-only recipe (render/multicard-recipes.json has %s): the runner would refuse it by name after the pair was held, so nothing was leased; unset %s or bind a family and files that have a recipe.%s",
+		key, binding, strings.Join(rows, ", "), key, held)
 }
 
 // multicardRAM resolves a card-only call's host RAM once the cards of its lease are known: the recipe's verdict on those two cards, else the ordinary
