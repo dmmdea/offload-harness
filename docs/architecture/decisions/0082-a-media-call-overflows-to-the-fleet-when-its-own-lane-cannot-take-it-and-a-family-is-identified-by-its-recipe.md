@@ -82,9 +82,7 @@ Three facts made the obvious change unsafe as stated.
    `node_id` equals `fleet_node_id`, else the OS hostname: such an entry would match perfectly and send the call back into the
    lane that is not free; it is named in `cluster[]`). Candidates rank by the shorter queue, then config order. The family is sent under the node's own name for the recipe, never the caller's, and never empty: a call
    that names no family is this machine's default binding, and must not land on a node's different default.
-6. **Refusals move on; an accepted job is final.** (ADR 0083 replaced the bound of three nodes for an image call: the ticket tries
-   one node per scan and has no limit on how many it tries over its life. A graph keeps the bound: it is offered to at most three
-   nodes, once.) A refusal at the door (`503`, `429`, `412`, any
+6. **Refusals move on; an accepted job is final.** (ADR 0083 replaced the bound of three nodes for an image call: the ticket tries one node per scan and has no limit on how many it tries over its life. A graph kept the bound in 0.180.0, where it was offered to at most three nodes, once; its Amendment 1 makes the graph a ticket and lifts it.) A refusal at the door (`503`, `429`, `412`, any
    other status, or a dial that never connected) means nothing ran: the call goes on, under a fresh job id. A node that accepted
    the job and answers `gpu_busy` or `gpu_queued` (another job holds its card, nothing ran) or `gpu_lease_unavailable` (it could
    not take its lease: a lease location it cannot use, a host-RAM need no state of it admits; nothing ran) is passed over the
@@ -110,21 +108,20 @@ Three facts made the obvious change unsafe as stated.
    the answer carries `cluster[]`: one row per roster node in config order (`free`, `busy`, `draining`, `not-capable`,
    `unreachable`, `in-use`, `refused`, `bounced`, `skipped`), each with the reason in the node's own terms (the lease and its
    reason, the key that differs and the family of this machine that would match, the release or the refine it lacks) and since when.
-   A call that ran is not annotated. **A whole-node graph (Amendment 1) is not a ticket in 0.180.0:** when nothing admits it, it goes
-   on to the local admission from when it came back, joining the local line when the fleet attempt is over and not from when it
-   arrived, and a deferral it ends in carries the same `cluster[]`. A graph does not wait in the cluster queue yet.
+   A call that ran is not annotated. **A whole-node graph (Amendment 1) is a ticket too** (ADR 0083 Amendment 1, which supersedes the one-shot placement of 0.180.0: a graph that went on to the local admission from when it came back): when nothing admits it, it waits for
+   the first matching lane that frees, and its answer carries the same `cluster[]`.
 9. **Never overflow** a call that runs under a lease its process inherited, on a box with no `delegate_remotes` (that path is byte for
    byte what it was, and asks the lane nothing), or for anything but an image job or a whole-node graph in this release (Amendment 1
    adds the graph, under its own file check and a single-card rule). (An image call that resumed a place did not overflow in the
-   first cut; ADR 0083 brings its place into the ticket. A graph that carries a `waiter_token` resumes a place in the local line and
-   is still never moved.) Video, animation and audio carry no per-family identity yet.
+   first cut; ADR 0083 brings its place into the ticket, and its Amendment 1 does the same for a graph.) Video, animation and audio
+   carry no per-family identity yet.
 10. **ADR 0077 changes in three sentences.** Decision 6: `auto` runs here when the lane is free and, when it is not and a
     matching node is idle, there. The consequence that `refine=false` defers on a remote route no longer holds for image jobs:
     it travels, gated on `refine_honoured`. The consequence about `waiter_token` stands: a call that goes to a node leaves the
     local place.
-11. **Amended by ADR 0083** in four places, all for an image call: decision 2 (a resumed place is ordered by arrival on every plan),
-    decision 6 (no bound of three nodes), decision 8 (a ticket, not a late local run) and decision 9 (a call with a `waiter_token`
-    overflows). A graph is outside all four: it keeps the one-shot overflow of Amendment 1.
+11. **Amended by ADR 0083** in four places, for an image call and, by its Amendment 1, for a whole-node graph: decision 2 (a resumed
+    place is ordered by arrival on every plan), decision 6 (no bound of three nodes), decision 8 (a ticket, not a late local run) and
+    decision 9 (a call with a `waiter_token` overflows).
 
 ## Consequences
 
@@ -206,28 +203,19 @@ card. This amendment adds them under four rules; every other decision stands, an
    ships with the merge, before any delegator is deployed. The release proof holds for **every** remote placement of a graph, as
    rule 3's card rule does: the overflow asks it of its candidates, and `route remote` and a thin client's `auto` ask it when they
    pick a node, so a node on another release, or one that publishes none, is a named miss on all three.
-2. **The trigger is the image's; the placement is one-shot, not a ticket.** `Pipeline.MediaLaneFree` answers for a whole-node `run_graph` with the
+2. **The trigger is the image's; the placement is the ticket's.** `Pipeline.MediaLaneFree` answers for a whole-node `run_graph` with the
    whole-node reading (any lease, in-process slot or place in line, and the host's memory against the media class default, the
    largest family the box binds: the lease is taken for the graph as a whole before anything reads its weights, so that is an
    upper bound and not the graph's own size), under the same contract: a relaxation of the real wait-0 admission, held by
-   a differential test, that writes nothing. ADR 0083 turned an image call into a ticket; **a graph is not one in 0.180.0**: it
-   keeps the one-shot placement of the first cut, offered once to the nodes that can take it (at most three, one graph call of a
-   process per node, never a node a job of this machine has a claim on, a ticket's or another graph's, of any process of the
-   machine: the graph takes the same claim under the same lock, ADR 0083 decision 6; and never a node an older waiting ticket is
-   first in line for, by the ticket's own rule, ADR 0083 decision 12) and, when none admits it, it waits in this machine's own
-   queue, joining it when the fleet attempt is over. A graph's lane the pipeline could not read (`Unjudged`) is offered to the fleet
-   the same way, and the graph runs here when no node takes it. A graph that names `devices` (refused by `plan()` before the lane is asked), one
-   that carries a `waiter_token`, one under an inherited lease and one that reads an input file stay here; the last waits for
-   this machine's own lane, and if that wait ends in a deferral the deferral says the fleet was not asked and why (`fleet_note`;
-   a call that then runs here and succeeds carries no note, because only a deferral is annotated). A call with no lane of its own
-   to wait for (`route remote`, or `auto` on a thin client) is placed as before, checked by name only, and held to rule 1's release
-   proof and rules 3 and 4. Hashing each input file to
-   the node would lift that last exception and close that limit; it is not built. A node's 503 at the door moves the call to the
-   next node like any refusal at the door (decision 6) and counts toward the three attempts; like any 503 that names no
-   `Retry-After` it also leaves that node alone for about 5 s in the calling process (the placer's memory, the same for a graph as
-   for an image: a ticket's scan reads that node as refused for those seconds; the cause kept for a graph's 503 does not call the node
-   full, since the same 503 is a missing file). The call falls back to the local queue, and when that wait ends in a deferral the deferral carries `cluster[]`
-   naming, per node, the file it lacks.
+   a differential test, that writes nothing. ADR 0083 turned an image call into a ticket, and **its Amendment 1 does the same for a
+   graph** (it supersedes the one-shot placement of 0.180.0, which offered the graph once to at most three nodes and then joined the local queue late): a busy graph waits for the first matching lane that frees, the scanner applying rules 1, 3 and 4
+   below to each node. A node's 503 for a file the graph names carries `refusal: "not_capable"`: the ticket marks that node
+   not-capable for itself, quoting the node, and puts no pause on it (a full node's 503 is the placer's, as for an image). A graph
+   that names `devices` (refused by `plan()` before the lane is asked) and one under an inherited lease are no tickets and stay here.
+   One that reads an input file is a ticket that is never offered to a node; it waits for this machine's own lane, keeps its place and
+   position, and every answer says the fleet was not asked and why (`fleet_note`). A call with no lane of its own to wait for
+   (`route remote`, or `auto` on a thin client) is placed as before, checked by name only, and held to rule 1's release proof and
+   rules 3 and 4. Hashing each input file to the node would lift that last exception and close that limit; it is not built.
 3. **A whole-node graph is placed only on a node that publishes exactly one card.** A graph that names no devices holds the
    whole node and runs in the default ComfyUI instance, which sees every card; on a node with several, the delegator cannot
    know which card that instance picks and it may be the display card. So a node with more than one card is a named miss, and
@@ -245,12 +233,7 @@ card. This amendment adds them under four rules; every other decision stands, an
    cites it says so. The caller's number wins over it, 0 included. The floor filters remote candidates only: the local lane is
    the node's own grant.
 
-**Named limits of the amendment.** **A graph does not wait in the cluster queue yet** (decided for 0.180.0, the release that carries both
-the ticket queue and this amendment): it has no ticket, so it keeps no place in the cluster queue, does not start on a lane that
-frees after its one look at the fleet, and a repeat of the same graph is a second call, not the first one's ticket. Making it a
-ticket is a follow-up: a ticket's identity is the hash of the request's parameters, and a graph's parameters name files on this
-machine (`graph_path`, `manifest_path`) rather than carry them, so what makes two graph calls the same call needs a decision of its
-own. The file check is by name (a same-named file of other bytes is held), which is why a graph that
+**Named limits of the amendment.** *Closed by ADR 0083 Amendment 1:* in 0.180.0 a graph did not wait in the cluster queue; it is a ticket now, identified by the content of its graph and manifest. The file check is by name (a same-named file of other bytes is held), which is why a graph that
 reads an input file is not auto-overflowed, though a call that must leave its machine anyway keeps the same-named-file risk. Input files need to be on the node already when a node is named by hand. The node's
 host-RAM guard sizes a graph at the media class default, not at the files the door has resolved, so a graph naming weights bigger
 than every bound family can be under-counted. The default floor reads two things the harness otherwise never reads in a graph (`model_family`, the
@@ -260,4 +243,4 @@ operator's. With the fleet as the film owner described it on 2026-10-09 (the 16 
 workstation, the single-card nodes carry 8 GB cards) rules 3 and 4 together leave a graph that gets the default Wan floor no remote
 target: it waits for its own lane. The durable fix is on the node (keep a whole-node graph off the display card there). A graph is
 placed only on a node that runs this machine's release, on every route, so a fleet part-way through an upgrade routes graphs only
-to the nodes already on it (and `route remote` to a node still on the old release is a named miss, not a send). Nothing here was run live: A8 in the step report is the first.
+to the nodes already on it (and `route remote` to a node still on the old release is a named miss, not a send). Nothing here was run live: the live acceptance named A8 in the CHANGELOG entry of that change is the first.

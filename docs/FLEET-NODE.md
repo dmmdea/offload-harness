@@ -477,15 +477,17 @@ two are the exclusions the code keeps) and the files its input loaders read (`Lo
 `LoadImageOutput`, `LoadVideo`, `LoadAudio`). Each weight file must exist **by name** under any class directory of any of the node's
 models roots (`<comfy_dir>/models/*`, every `extra_model_paths.yaml` entry; a class directory that is a link counts); each input
 file must be in `<comfy_dir>/input` (`output` or `temp` when its `[output]` / `[temp]` annotation says so). A node
-that lacks one answers **503** (the re-placeable "this node cannot run this now", the same refusal as a route that is not CONFIGURED)
+that lacks one answers **503** (the re-placeable "this node cannot run this now", the same status as a route that is not CONFIGURED)
 naming what is missing, up to six names of each kind (past six weight files it says `7 or more files ... and more` and gives no
 count: the node stops looking at the seventh, because the door is open to any peer and a graph can name thousands of files; the
-delegator's `cluster[]` row keeps the first 300 bytes of that answer, so
-it shows the first two or three of a long list), and creates no job: the delegator places the graph on the next node instead of
-this one cold-starting ComfyUI to defer. **Input files do not travel with a graph** (`/fleet/dispatch` carries JSON, and the
+delegator's `cluster[]` row quotes the body's `error` sentence cut at 600 bytes, so it shows the first few of a long list), and
+creates no job. The body is `{"status":"error","error":"...","refusal":"not_capable"}`: the `refusal` member is the node's word that
+it is not full and not out of route but cannot run THIS graph (a route that is not CONFIGURED and a full queue leave it out), so a
+delegator marks the node not-capable for that ticket alone and puts no pause on it (ADR 0083 Amendment 1); it places the graph on
+the next node instead of this one cold-starting ComfyUI to defer. **Input files do not travel with a graph** (`/fleet/dispatch` carries JSON, and the
 media-job door carries no input for `run-graph`), so a file the node does not hold cannot be sent to it; the refusal says so. A
 model the graph's manifest tells the node to fetch (a `models[]` entry with a `source_url`) is not refused. The check is by name
-(a same-named file of other bytes is held; a delegator therefore never auto-overflows a graph that reads an input file, though a
+(a same-named file of other bytes is held; a delegator therefore never offers a graph that reads an input file to a node, though a
 call that must leave its machine anyway, `route remote` or `auto` on a machine with no graph lane, reaches this check with one) and a name that is absolute or climbs with `..` is never looked up.
 Health gains no key for it: a delegator requires the node to run its own release, on every remote placement of a graph (the
 overflow, `route remote` and a thin client alike), which proves the check only because the release that adds it carries a new

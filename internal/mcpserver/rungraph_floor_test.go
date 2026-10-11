@@ -107,3 +107,27 @@ func TestRunGraphToolAdvertisesMinVRAMAndModelFamily(t *testing.T) {
 	}
 	t.Fatal("offload_run_graph is not listed")
 }
+
+// wait_s is the window the graph door waits for its ticket (as the image door's is); it is the door's argument and never a
+// parameter of the request, so it cannot enter the request's identity or the payload sent to a node.
+func TestRunGraphDoorTakesWaitSAsAWindowNotAParameter(t *testing.T) {
+	s := New(nil)
+	var got []core.Request
+	s.runHook = func(_ context.Context, r core.Request) core.Result {
+		got = append(got, r)
+		return core.Result{OK: true, Data: json.RawMessage(`{}`)}
+	}
+	res, err := s.handleRunGraph(context.Background(), callReq(`{"graph_json":"{}","wait_s":5}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m := decodeResult(t, res); m["deferred"] == true {
+		t.Fatalf("wait_s is an argument of this tool: %v", m)
+	}
+	if len(got) != 1 {
+		t.Fatalf("requests = %+v", got)
+	}
+	if _, has := got[0].Params["wait_s"]; has {
+		t.Errorf("wait_s must not travel in the request: %#v", got[0].Params)
+	}
+}

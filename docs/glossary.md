@@ -230,15 +230,18 @@ come last by convention, but the validator does not enforce ordering.
 
 ## Overflow
 
-A media call leaving its own busy lane for an idle node of the fleet: an `auto` image call on a machine that has the lane and a
-fleet asks its pipeline whether the lane is free (`core.LaneProber`, a read-only relaxation of the real admission) and, when it
-is not, is sent to a node whose Image recipe matches. Not a substitute: a call no node matches becomes a Ticket. See [ADR 0082](architecture/decisions/0082-a-media-call-overflows-to-the-fleet-when-its-own-lane-cannot-take-it-and-a-family-is-identified-by-its-recipe.md).
+A media call leaving its own busy lane for an idle node of the fleet: an `auto` image call, or a whole-node `run_graph`, on a machine
+that has the lane and a fleet asks its pipeline whether the lane is free (`core.LaneProber`, a read-only relaxation of the real
+admission) and, when it is not, is sent to a node whose Image recipe matches (a graph: that holds the files it names, has one card and
+the card size asked for). Not a substitute: a call no node matches becomes a Ticket. See [ADR 0082](architecture/decisions/0082-a-media-call-overflows-to-the-fleet-when-its-own-lane-cannot-take-it-and-a-family-is-identified-by-its-recipe.md).
 
 ## Ticket
 
-A busy image call that the harness holds until the first matching lane frees, here or on a node: one file under
-`<state root>/media-queue/` (the state root of the GPU lease; no `state_dir` is needed), an identity (the sha256 of the task, prompt and parameters without the `waiter_token`, so an identical
-re-send attaches to it), one fixed seed, a place in the machine's own lease line that keeps its arrival time, and a state. One
+A busy image call, or a busy whole-node graph, that the harness holds until the first matching lane frees, here or on a node: one
+file under `<state root>/media-queue/` (the state root of the GPU lease; no `state_dir` is needed), an identity (the sha256 of the task, prompt and parameters without the `waiter_token`, so an
+identical re-send attaches to it; for a graph the content of its graph and manifest in place of their paths), one fixed seed for an
+image (a graph owns its sampling and gets none; it keeps its own copy of the graph and manifest beside the file), a place in the
+machine's own lease line that keeps its arrival time, and a state. One
 scanner per process looks at its tickets about every 10 s, oldest first, and a job is never sent to a node before a lane is free
 there. The answer to a call that waits says the ticket, its position and, per roster node, the state and why; the instruction in it
 is not to call again. A ticket whose owner died is swept (waiting) or adopted by the next identical call (a job already on a node).

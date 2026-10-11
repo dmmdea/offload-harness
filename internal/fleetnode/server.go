@@ -2519,7 +2519,7 @@ func (s *Server) admit(w http.ResponseWriter, r *http.Request, env dispatchEnvel
 		// state, not a malformed request: 503, which every delegator re-places elsewhere.
 		var nre *routeNotReadyError
 		if errors.As(err, &nre) {
-			writeError(w, http.StatusServiceUnavailable, err.Error())
+			writeRouteNotReady(w, err, nre)
 			return
 		}
 		// An image job whose recipe_digest is not the one of the family it names here: the node is not what the

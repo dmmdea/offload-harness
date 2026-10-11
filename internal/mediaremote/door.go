@@ -1,7 +1,7 @@
 package mediaremote
 
-// How a call meets the queue (P0 plan S2; ADR 0083). A busy image call on a box with a fleet does not wait for ONE lane
-// and does not loop: it becomes a ticket, and the call is only a way of waiting for it.
+// How a call meets the queue (P0 plan S2 and S5; ADR 0083 and its Amendment 1). A busy image call, or a busy whole-node graph, on a
+// box with a fleet does not wait for ONE lane and does not loop: it becomes a ticket, and the call is only a way of waiting for it.
 //
 //   - A call that carries waiter_token=mq-... collects THAT ticket's result (or finds it still waiting and answers again).
 //   - Any other call whose request is identical to a live ticket's attaches to it, with or without a token. That is what
@@ -78,7 +78,7 @@ func withoutParam(req core.Request, key string) core.Request {
 	return req
 }
 
-// runQueued is the busy-lane path of an auto image call on a box that has the lane and a fleet.
+// runQueued is the busy-lane path of an auto image call or whole-node graph on a box that has the lane and a fleet.
 func (q *queueRT) runQueued(ctx context.Context, cfg config.Config, runner Runner, req core.Request, remotes []string, w Wait) core.Result {
 	res, lt := q.admit(ctx, cfg, runner, req, remotes, w)
 	if lt != nil {
@@ -87,11 +87,15 @@ func (q *queueRT) runQueued(ctx context.Context, cfg config.Config, runner Runne
 	return res
 }
 
+// ticketable says which tasks have a busy-lane path that is a ticket: an image call (identified by its recipe) and a whole-node
+// graph (identified by its content, and by the files a node holds). Video, animation and audio carry no identity yet.
+func ticketable(t core.TaskType) bool { return t == core.TaskGenerateImage || t == core.TaskRunGraph }
+
 // admit decides what a call is: a result already (the lane was free and the call ran, or it joined a ticket and waited for
 // it), or a ticket this process just made and the caller is to wait for.
 func (q *queueRT) admit(ctx context.Context, cfg config.Config, runner Runner, req core.Request, remotes []string, w Wait) (core.Result, *liveTicket) {
 	st, ok := storeFor(cfg)
-	if req.Task != core.TaskGenerateImage || !ok {
+	if !ticketable(req.Task) || !ok {
 		return runner.Run(ctx, req), nil
 	}
 	key := reqKey(req)
@@ -101,13 +105,20 @@ func (q *queueRT) admit(ctx context.Context, cfg config.Config, runner Runner, r
 	if tok := str(req.Params, "waiter_token"); strings.HasPrefix(tok, "mq-") {
 		if validTicketID(tok) {
 			if t, found := st.read(tok); found {
-				if t.ReqKey != key {
+				// The same request is the same content. A graph's token is also its handle when the files it was sent with are gone or
+				// edited since (a ticket outlives the caller's file): the same paths and parameters name the same call, and the finished
+				// result must stay collectable by the token it was promised under. Only the token collects by paths; a repeat that
+				// carries no token attaches by content alone, so a file overwritten with the next shot is a new job.
+				sameContent := t.ReqKey == key
+				if !sameContent && !(t.PathKey != "" && t.PathKey == pathKey(req)) {
 					return contractDefer(fmt.Sprintf("waiter_token %s names the ticket of a different request: send the same request to collect it, or drop the token for a new one", tok), core.Meta{}), nil
 				}
 				if res, attached := q.attach(ctx, cfg, runner, req, remotes, w, st, t); attached {
 					return res, nil
 				}
-				inherit = time.UnixMilli(t.Created) // its owner is gone and it had sent nothing: the new ticket keeps its arrival
+				if sameContent {
+					inherit = time.UnixMilli(t.Created) // its owner is gone and it had sent nothing: the new ticket keeps its arrival
+				}
 			}
 		}
 		req = withoutParam(req, "waiter_token")
@@ -121,12 +132,18 @@ func (q *queueRT) admit(ctx context.Context, cfg config.Config, runner Runner, r
 	if _, err := candidateBases(cfg, remotes); err != nil {
 		return runner.Run(ctx, req), nil // a bad `remotes` is reported by the paths that use it, as before
 	}
-	local, okID, _ := localIdentity(cfg, str(req.Params, "family"))
-	if !okID {
-		return runner.Run(ctx, req), nil
+	// An image is identified by its recipe, which this machine must be able to name; a graph has no recipe (a node's identity
+	// for it is that it holds the files, which the node decides at its door), so it has no local identity to resolve.
+	var local localID
+	if req.Task == core.TaskGenerateImage {
+		l, okID, _ := localIdentity(cfg, str(req.Params, "family"))
+		if !okID {
+			return runner.Run(ctx, req), nil
+		}
+		local = l
 	}
 	if _, err := plan(req); err != nil {
-		return runner.Run(ctx, req), nil // the lane that runs it reports its own contract
+		return runner.Run(ctx, req), nil // the lane that runs it reports its own contract (a graph that names devices stays here)
 	}
 
 	// An identical request is the ticket it already made.
@@ -172,15 +189,36 @@ func (q *queueRT) create(ctx context.Context, cfg config.Config, runner Runner, 
 	for k, val := range req.Params {
 		params[k] = val
 	}
-	seed, given := posInt(params, "seed")
-	if !given {
-		seed = mintSeed()
-		params["seed"] = seed
+	id := newTicketID()
+	// An image ticket fixes one seed (ADR 0083 decision 3). A graph owns its own sampling (the harness reads no meaning into it),
+	// so the ticket gives it none and the node's payload and the local run are the graph as the caller sent it.
+	seed := 0
+	if req.Task == core.TaskGenerateImage {
+		var given bool
+		if seed, given = posInt(params, "seed"); !given {
+			seed = mintSeed()
+			params["seed"] = seed
+		}
 	}
 	req2.Params = params
 	pl, err := plan(req2) // the payload carries the fixed seed
 	if err != nil {
 		return nil, nil, err
+	}
+	// A graph ticket IS the bytes the plan holds: its key is made of them, the node is sent them, and the local run and an adopter
+	// read them from copies the ticket keeps, because the caller's file is the caller's and a ticket may wait for hours (ticket.go).
+	// Everything below that reads the graph (the need, the run) reads the copy.
+	pathID := ""
+	if req.Task == core.TaskRunGraph {
+		key = payloadKey(req, pl)
+		pathID = pathKey(req)
+		bodies, berr := st.writeBodies(id, pl)
+		if berr != nil {
+			return nil, nil, berr
+		}
+		for param, path := range bodies {
+			params[param] = path
+		}
 	}
 
 	created := inherit
@@ -194,14 +232,21 @@ func (q *queueRT) create(ctx context.Context, cfg config.Config, runner Runner, 
 	}
 	lt := &liveTicket{
 		q: q, st: st, cfg: cfg, remotes: remotes, rosterFile: w.RosterFile, runner: runner, req: req2, pl: pl, local: local,
-		done: make(chan struct{}), scanned: make(chan struct{}), rowSince: map[string]rowMemo{},
+		done: make(chan struct{}), scanned: make(chan struct{}), rowSince: map[string]rowMemo{}, need: needOf(req2), needSet: true,
 	}
 	lt.ctx, lt.cancel = context.WithCancel(q.rootCtx)
 	lt.first, lt.firstAt = &v, time.Now()
 	lt.t = ticketFile{
-		ID: newTicketID(), ReqKey: key, Created: created.UnixMilli(), Owner: q.owner, Beat: nowMs(),
-		Task: string(req.Task), Family: local.name, Digest: local.recipe.Digest(), Out: str(req.Params, "out"), Seed: seed,
-		State: stWaiting, LaneWhy: v.Why,
+		ID: id, ReqKey: key, PathKey: pathID, Created: created.UnixMilli(), Owner: q.owner, Beat: nowMs(),
+		Task: string(req.Task), Seed: seed, State: stWaiting, LaneWhy: v.Why,
+	}
+	lt.t.Family, lt.t.Digest, lt.t.Out = describe(req, local)
+	if req.Task == core.TaskRunGraph {
+		// A graph that reads input files is never offered to a node (a node can match such a file only by name): its ticket
+		// stays on this machine's lane, keeps its place in the line and says why the fleet is not asked (graph.go).
+		if names := inputFilesOf(pl); len(names) > 0 {
+			lt.t.FleetNote = inputFilesNote(names)
+		}
 	}
 	if perr == nil {
 		lt.t.Place = place.Token
@@ -221,6 +266,7 @@ func (q *queueRT) create(ctx context.Context, cfg config.Config, runner Runner, 
 	})
 	if err != nil || existing != nil {
 		lt.cancel()
+		st.removeBodies(id) // the ticket does not exist, so neither do its copies
 		if perr == nil && place.Token != carried {
 			core.DropPlace(runner, place.Token) // the place was made for this ticket, which does not exist
 		}
@@ -268,11 +314,18 @@ func (q *queueRT) attach(ctx context.Context, cfg config.Config, runner Runner, 
 // adopt takes over a placed ticket whose owner died: this process polls the recorded job and fetches its outputs. It never
 // sends the request again, so the job renders once. nil when another process took it first or it is not adoptable.
 func (q *queueRT) adopt(ctx context.Context, cfg config.Config, runner Runner, req core.Request, remotes []string, w Wait, st *store, t ticketFile) *liveTicket {
-	local, ok, _ := localIdentity(cfg, str(req.Params, "family"))
-	if !ok {
-		local = localID{}
+	// The job on the node was sent with the ticket's seed, and an adopted image is polled under it; a graph has none to carry.
+	var local localID
+	if req.Task == core.TaskGenerateImage {
+		if l, ok, _ := localIdentity(cfg, str(req.Params, "family")); ok {
+			local = l
+		}
+		req = withSeed(req, t.Seed)
 	}
-	pl, err := plan(withSeed(req, t.Seed))
+	// A graph is planned from the copies the ticket kept (its owner made them with the job it sent), not from the caller's files,
+	// which may be gone or another shot by now; a ticket without copies (an older build's) is planned from the request.
+	req = st.pinBodies(req, t.ID)
+	pl, err := plan(req)
 	if err != nil {
 		return nil
 	}
@@ -293,7 +346,7 @@ func (q *queueRT) adopt(ctx context.Context, cfg config.Config, runner Runner, r
 		return nil
 	}
 	lt := &liveTicket{
-		q: q, st: st, cfg: cfg, remotes: remotes, rosterFile: w.RosterFile, runner: runner, req: withSeed(req, t.Seed), pl: pl, local: local,
+		q: q, st: st, cfg: cfg, remotes: remotes, rosterFile: w.RosterFile, runner: runner, req: req, pl: pl, local: local,
 		done: make(chan struct{}), scanned: make(chan struct{}), rowSince: map[string]rowMemo{}, running: true, t: t,
 	}
 	lt.ctx, lt.cancel = context.WithCancel(q.rootCtx)
@@ -307,7 +360,7 @@ func (q *queueRT) adopt(ctx context.Context, cfg config.Config, runner Runner, r
 	go func() {
 		defer q.wg.Done()
 		start := time.Now()
-		placement := lanePlacement(t.LaneWhy, true)
+		placement := lanePlacement(lt.req, t.LaneWhy, true)
 		actx, cancel := context.WithTimeout(lt.ctx, Budgets[lt.pl.fleetTask])
 		defer cancel()
 		// A ticket that was only being sent when its owner ended may never have reached the node: ask it once. A node that
@@ -534,6 +587,9 @@ func clusterSummary(t ticketFile) string {
 	for _, r := range t.Cluster {
 		parts = append(parts, r.Node+": "+r.Why)
 	}
+	if t.FleetNote != "" {
+		parts = append(parts, t.FleetNote)
+	}
 	if t.PlaceNote != "" {
 		parts = append(parts, "no seniority in this machine's own line ("+t.PlaceNote+")")
 	}
@@ -558,6 +614,9 @@ func queuedAnswer(t ticketFile) core.Result {
 	}
 	if t.Local != nil {
 		data["local"] = t.Local
+	}
+	if t.FleetNote != "" {
+		data["fleet_note"] = t.FleetNote // why no node was asked (a graph that reads input files stays on this machine's lane)
 	}
 	if t.State != stWaiting {
 		data["state"] = t.State

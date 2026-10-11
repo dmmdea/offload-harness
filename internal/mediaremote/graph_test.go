@@ -84,6 +84,8 @@ func graphClient(t *testing.T, nodes ...*node) config.Config {
 	t.Cleanup(func() { hostnameFn = prevHost })
 	resetPlacer()
 	t.Cleanup(resetPlacer)
+	freshQueue(t)
+	freshRoster(t)
 	stubLocalRoutes(t, configured("run_graph"))
 	return clientCfg(t, nodes...)
 }
@@ -208,19 +210,22 @@ func TestRunGraphOverflowMovesPastANodeThatLacksTheFile(t *testing.T) {
 	}
 }
 
-// Nobody holds the file: the call goes on to its own queue from when it came back, and the deferral it ends in (the local
-// lane here answers a place in line) names, per node, the files that node lacks. The row carries the first 300 bytes of the
-// node's answer (post() truncates), so the refusal's sentence is short enough that two real Wan file names land inside them.
-func TestRunGraphNobodyHoldsTheFileFallsBackNamingIt(t *testing.T) {
+// Nobody holds the file: the graph is a ticket that waits for the first lane that frees (or a node that comes to hold the file),
+// and its answer names, per node, the files that node lacks, as the node's own door said them (not-capable for this ticket,
+// not a full node).
+func TestRunGraphNobodyHoldsTheFileWaitsAsATicketNamingIt(t *testing.T) {
 	a := startGraphNode(t, "node-a", nil, 7.96)
 	b := startGraphNode(t, "node-b", []string{"models/vae/other.safetensors"}, 15.92)
 	cfg := graphClient(t, a, b)
-	lr := &laneRunner{verdict: heldLane(), local: queuedLocal()}
-	res := Run(context.Background(), cfg, lr, graphReqOf(t, wanFilesGraph, nil), "auto", nil)
-	if probes, runs := lr.counts(); probes != 1 || runs != 1 {
-		t.Fatalf("the call waits in its own queue: probes %d runs %d (%+v)", probes, runs, res)
+	lr := newKeeperRunner(heldLane())
+	req := graphReqOf(t, wanFilesGraph, nil)
+	res := settle(t, cfg, lr, req, func(r core.Result) bool {
+		return rowIs("node-a", "not-capable")(r) && rowIs("node-b", "not-capable")(r)
+	})
+	if probes, runs := lr.counts(); probes < 1 || runs != 0 {
+		t.Fatalf("the graph waits as a ticket, asking its lane and running nothing here: probes %d runs %d (%+v)", probes, runs, res)
 	}
-	rows := clusterOf(t, res)
+	rows := answerOf(t, res).Cluster
 	if len(rows) != 2 {
 		t.Fatalf("one row per roster node: %+v", rows)
 	}
@@ -230,6 +235,9 @@ func TestRunGraphNobodyHoldsTheFileFallsBackNamingIt(t *testing.T) {
 				t.Errorf("the row names the files the node lacks (%s is missing from it): %+v", name, r)
 			}
 		}
+	}
+	if len(a.posts()) != 1 || len(b.posts()) != 1 {
+		t.Errorf("each node was asked once, and a refusal is remembered by the ticket: %d / %d POSTs", len(a.posts()), len(b.posts()))
 	}
 }
 
@@ -241,14 +249,14 @@ func TestWholeNodeGraphNeverPlacedOnMultiGPUNode(t *testing.T) {
 	blind := startGraphNode(t, "node-blind", []string{krea2File})
 	cfg := graphClient(t, multi, blind)
 
-	lr := &laneRunner{verdict: heldLane(), local: queuedLocal()}
-	res := Run(context.Background(), cfg, lr, graphReqOf(t, krea2Graph, nil), "auto", nil)
+	lr := newKeeperRunner(heldLane())
+	res := runDoor(cfg, lr, graphReqOf(t, krea2Graph, nil), AtOnce)
 	noPosts(t, "the three-card node", multi)
 	noPosts(t, "the node with no card list", blind)
-	if _, runs := lr.counts(); runs != 1 {
-		t.Fatalf("with no single-card node the call waits in its own queue: %+v", res)
+	if _, runs := lr.counts(); runs != 0 {
+		t.Fatalf("with no single-card node the graph waits as a ticket: %+v", res)
 	}
-	rows := clusterOf(t, res)
+	rows := answerOf(t, res).Cluster
 	if r, ok := rowFor(rows, "node-multi"); !ok || r.State != "not-capable" || !strings.Contains(r.Why, "3 cards") || !strings.Contains(r.Why, "display card") {
 		t.Errorf("the row says why a three-card node is not used: %+v", r)
 	}
@@ -314,23 +322,23 @@ func TestMinVRAMKeepsWanOnA16GBCard(t *testing.T) {
 		t.Fatalf("min_vram_gb 0 lifts the default floor: %+v", res)
 	}
 	resetPlacer()
-	lr := &laneRunner{verdict: heldLane(), local: queuedLocal()}
-	res = Run(context.Background(), cfg, lr, graphReqOf(t, graphWith(480), map[string]any{"min_vram_gb": "24"}), "auto", nil)
-	if _, runs := lr.counts(); runs != 1 {
-		t.Fatalf("no node has 24 GB: the call waits in its own queue: %+v", res)
+	lr := newKeeperRunner(heldLane())
+	res = runDoor(cfg, lr, graphReqOf(t, graphWith(480), map[string]any{"min_vram_gb": "24"}), AtOnce)
+	if _, runs := lr.counts(); runs != 0 {
+		t.Fatalf("no node has 24 GB: the graph waits as a ticket: %+v", res)
 	}
 	for _, name := range []string{"node-small", "node-big"} {
-		if r, ok := rowFor(clusterOf(t, res), name); !ok || r.State != "not-capable" || !strings.Contains(r.Why, "min_vram_gb 24") {
+		if r, ok := rowFor(answerOf(t, res).Cluster, name); !ok || r.State != "not-capable" || !strings.Contains(r.Why, "min_vram_gb 24") {
 			t.Errorf("%s: the row names the caller's floor: %+v", name, r)
 		}
 	}
 
 	// The default's row says it is a chosen number, not a measured one.
 	resetPlacer()
-	lr2 := &laneRunner{verdict: heldLane(), local: queuedLocal()}
+	lr2 := newKeeperRunner(heldLane())
 	only := graphClient(t, small)
-	res = Run(context.Background(), only, lr2, graphReqOf(t, graphWith(1280), wan), "auto", nil)
-	if r, ok := rowFor(clusterOf(t, res), "node-small"); !ok || !strings.Contains(r.Why, "chosen") || !strings.Contains(r.Why, "wan22") || !strings.Contains(r.Why, "7.96") {
+	res = runDoor(only, lr2, graphReqOf(t, graphWith(1280), wan), AtOnce)
+	if r, ok := rowFor(answerOf(t, res).Cluster, "node-small"); !ok || !strings.Contains(r.Why, "chosen") || !strings.Contains(r.Why, "wan22") || !strings.Contains(r.Why, "7.96") {
 		t.Errorf("the default floor is named as chosen, with the card it found: %+v", r)
 	}
 }
@@ -433,14 +441,14 @@ func asContract(err error, target **contractError) bool {
 	return ok
 }
 
-// A graph with devices (a card named by the operator), one that resumes a place in the local line, and one run under an
-// inherited lease are never overflowed: the lane is not even asked about them.
-func TestGraphOverflowNeverStartsForWhatStaysHere(t *testing.T) {
+// A graph with devices (a card named by the operator) and one run under an inherited lease are never offered to the fleet nor
+// made a ticket: the lane is not even asked about them. (A graph that resumes a place in the local line USED to be on this list;
+// as a ticket it brings its place along: TestAGraphThatArrivesWithAPlaceBringsItIntoTheTicket.)
+func TestGraphTicketNeverStartsForWhatStaysHere(t *testing.T) {
 	n := startGraphNode(t, "node-b", []string{krea2File}, 7.96)
 	cfg := graphClient(t, n)
 	for name, extra := range map[string]map[string]any{
 		"declared devices":    {"devices": []string{"0"}},
-		"a waiter_token":      {"waiter_token": "tk-abc12345"},
 		"declared device any": {"devices": []any{"GPU-aaaa"}},
 	} {
 		lr := &laneRunner{verdict: heldLane(), local: queuedLocal()}
@@ -478,18 +486,18 @@ func TestGraphOverflowCandidatesNeedTheReleaseAnIdleNodeAndTheRoute(t *testing.T
 		},
 		cfg: func(c *config.Config) { c.ComfyDir = graphTreeWith(t, krea2File) }})
 	cfg := graphClient(t, old, busy, noRoute, missing)
-	lr := &laneRunner{verdict: heldLane(), local: queuedLocal()}
-	res := Run(context.Background(), cfg, lr, graphReqOf(t, krea2Graph, nil), "auto", nil)
-	if _, runs := lr.counts(); runs != 1 {
-		t.Fatalf("no node can take it: %+v", res)
+	lr := newKeeperRunner(heldLane())
+	res := runDoor(cfg, lr, graphReqOf(t, krea2Graph, nil), AtOnce)
+	if _, runs := lr.counts(); runs != 0 {
+		t.Fatalf("no node can take it, so the graph waits as a ticket: %+v", res)
 	}
 	for _, n := range []*node{old, busy, noRoute, missing} {
 		noPosts(t, n.srv.URL, n)
 	}
-	if r, ok := rowFor(clusterOf(t, res), "node-missing"); !ok || r.State != "not-capable" || !strings.Contains(r.Why, "BOUND-BUT-MISSING") {
+	rows := answerOf(t, res).Cluster
+	if r, ok := rowFor(rows, "node-missing"); !ok || r.State != "not-capable" || !strings.Contains(r.Why, "BOUND-BUT-MISSING") {
 		t.Errorf("a node whose run_graph route is not configured: %+v", r)
 	}
-	rows := clusterOf(t, res)
 	if r, ok := rowFor(rows, "node-old"); !ok || r.State != "not-capable" || !strings.Contains(r.Why, "harness 0.1.0") {
 		t.Errorf("a node on another release: %+v", r)
 	}

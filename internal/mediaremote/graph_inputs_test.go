@@ -1,18 +1,20 @@
 package mediaremote
 
-// A graph that reads input files stays off the auto-overflow (graph.go), found by review of the first S4 round.
+// A graph that reads input files stays off the fleet (graph.go), found by review of the first S4 round.
 //
 // INPUT FILES. A graph's input files (LoadImage, LoadVideo, LoadAudio) are the caller's own, with names two machines share
 // with different bytes (image.png, ComfyUI_00001_.png [output]). A node can match one only by name, so a node holding a
-// same-named file would run the graph on the wrong bytes and answer ok with a sha-verified file. A graph that reads one
-// therefore never auto-overflows: it waits for its own lane, and when that wait ends in a deferral the deferral says why the
-// fleet was not asked. A call that then runs here and succeeds says nothing about the fleet (annotate touches only a deferral).
+// same-named file would run the graph on the wrong bytes and answer ok with a verified file. A graph that reads one is
+// therefore never offered to a node: it is a LOCAL-ONLY ticket (ADR 0083 Amendment 1), one per request, keeping its place in
+// this machine's line, and every answer it gives says why the fleet was not asked. A call that then runs here and succeeds
+// says nothing about the fleet.
 
 import (
 	"context"
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dmmdea/offload-harness/internal/core"
 )
@@ -41,11 +43,13 @@ func TestRunGraphThatReadsAnInputFileStaysOnThisMachine(t *testing.T) {
 			// The node holds the weight file AND files of the same names: by name it would take the graph.
 			n := startGraphNode(t, "node-b", []string{krea2File, "input/ref.png", "output/ref.png", "input/a.png", "input/b.png", "input/c.png", "input/d.png", "input/e.png"}, 7.96)
 			cfg := graphClient(t, n)
-			lr := &laneRunner{verdict: heldLane(), local: queuedLocal()}
-			res := Run(context.Background(), cfg, lr, graphReqOf(t, c.graph, nil), "auto", nil)
-			noPosts(t, "the node that holds a same-named file", n)
-			if probes, runs := lr.counts(); probes != 1 || runs != 1 {
-				t.Fatalf("the call waits for its own lane: probes %d runs %d (%s)", probes, runs, brief(res))
+			lr := newKeeperRunner(heldLane())
+			res := runDoor(cfg, lr, graphReqOf(t, c.graph, nil), AtOnce)
+			a := answerOf(t, res)
+			time.Sleep(150 * time.Millisecond) // several scans
+			untouched(t, "the node that holds a same-named file (the fleet is not even read)", n)
+			if probes, runs := lr.counts(); probes < 1 || runs != 0 {
+				t.Fatalf("the ticket asks its own lane and waits for it: probes %d runs %d (%s)", probes, runs, brief(res))
 			}
 			for _, want := range []string{c.shows, "by name"} {
 				if !strings.Contains(res.Reason, want) {
@@ -58,25 +62,28 @@ func TestRunGraphThatReadsAnInputFileStaysOnThisMachine(t *testing.T) {
 			if note, _ := decode(t, res)["fleet_note"].(string); !strings.Contains(note, c.shows) {
 				t.Errorf("the note is in the answer's data: %v", decode(t, res))
 			}
-			if rows := clusterOf(t, res); len(rows) != 0 {
-				t.Errorf("no node was asked, so there is no per-node row: %+v", rows)
+			if len(a.Cluster) != 0 {
+				t.Errorf("no node was asked, so there is no per-node row: %+v", a.Cluster)
 			}
 		})
 	}
 }
 
-// The note is on a deferral and only on one: a graph that reads an input file whose local run then succeeds is the caller's
-// answer as the lane gave it, with nothing added about the fleet and no node asked.
+// The note is on the ticket's answers and on no result: a graph that reads an input file whose local run then succeeds is the
+// caller's answer as the lane gave it, with nothing added about the fleet and no node asked.
 func TestAnInputFileGraphThatRunsHereAfterTheWaitCarriesNoFleetNote(t *testing.T) {
 	n := startGraphNode(t, "node-b", []string{krea2File, "input/ref.png"}, 7.96)
 	cfg := graphClient(t, n)
-	lr := &laneRunner{verdict: heldLane()} // the lane frees up and the local run succeeds
-	res := Run(context.Background(), cfg, lr, graphReqOf(t, refGraph, nil), "auto", nil)
-	if probes, runs := lr.counts(); !res.OK || probes != 1 || runs != 1 {
-		t.Fatalf("the graph waits for its own lane and runs there: probes %d runs %d (%s)", probes, runs, brief(res))
+	lr := newKeeperRunner(heldLane())
+	req := graphReqOf(t, refGraph, nil)
+	answerOf(t, runDoor(cfg, lr, req, AtOnce))
+	lr.set(core.LaneVerdict{Free: true}) // the lane frees up and the local run succeeds
+	res := settle(t, cfg, lr, req, func(r core.Result) bool { return r.OK })
+	if probes, runs := lr.counts(); probes < 1 || runs != 1 {
+		t.Fatalf("the graph waited for its own lane and ran there: probes %d runs %d (%s)", probes, runs, brief(res))
 	}
 	if _, has := decode(t, res)["fleet_note"]; has || strings.Contains(res.Reason, "by name") {
-		t.Errorf("a result that is not a deferral carries no note about the fleet: %s", string(res.Data))
+		t.Errorf("a result carries no note about the fleet: %s", string(res.Data))
 	}
 	untouched(t, "the node", n)
 }
