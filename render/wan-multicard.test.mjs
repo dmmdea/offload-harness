@@ -1,10 +1,9 @@
 // node --test render/wan-multicard.test.mjs
 // The card-only placement for Wan 2.2 (comfy-video.mjs --wan-placement multicard). Pure: the card table, the pack scan, the spawn,
-// the HTTP probes and the pid checks are injected; the only real I/O is scratch folders under the OS temp dir, removed after.
-import { test, after } from "node:test";
+// the HTTP probes and the pid checks are injected; the only real I/O is scratch folders (scratchDir) under the OS temp dir, gone when their test ends.
+import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, existsSync, readFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   buildWan22I2V, WAN_PLACEMENTS, WAN_PLACEMENT_DEFAULT, WAN_RESIDENT_GB_DEFAULT, WAN_STORAGE_DEVICE, WAN_COMPUTE_DEVICE,
@@ -13,6 +12,7 @@ import * as M from "./wan-multicard.mjs";
 import * as L from "./comfy-lifecycle.mjs";
 import * as O from "./comfy-ownership.mjs";
 import { withGpuSlot } from "./gpu-lock.mjs";
+import { scratchDir } from "./test-scratch.mjs";
 import { buildGraphFromArgs, buildGraphForRun, verifyMulticardDevices, verifyMulticardPack } from "./comfy-video.mjs";
 
 // Synthetic ids: a repeated-nibble head is a placeholder to the leak gate, and none of these names a real card.
@@ -27,10 +27,6 @@ const CSV = [
 const CARDS = M.parseCardTable(CSV);
 const FP8 = { highUnet: "high_fp8.safetensors", lowUnet: "low_fp8.safetensors" };
 const ARGS = { imagePath: "s.png", prompt: "p", seed: 7, width: 720, height: 1280, length: 81, ...FP8 };
-
-const scratch = [];
-const tmp = () => { const d = mkdtempSync(join(tmpdir(), "wan-mc-")); scratch.push(d); return d; };
-after(() => { for (const d of scratch) rmSync(d, { recursive: true, force: true }); });
 
 const lines = () => { const got = []; return { got, warn: (l) => got.push(l) }; };
 const pair = () => M.resolveWanCards({ tokens: [U2, U0], source: "the GPU lease", cards: CARDS });
@@ -336,8 +332,8 @@ test("launchFlags with a multicard launch: the base flags, the placement's, the 
   assert.equal(flags.filter((f) => f === "--disable-pinned-memory").length, 1);
 });
 
-function lifecycleHarness({ up = async () => false } = {}) {
-  const dir = tmp();
+function lifecycleHarness(t, { up = async () => false } = {}) {
+  const dir = scratchDir(t, "wan-mc-");
   const launch = fakeLaunch();
   const env = M.multicardEnv({ COMFY_CUDA_DEVICE: "2", COMFY_DYNAMIC_VRAM: "on", COMFY_CARD_UUID: U0, GPU_LEASE_EPOCH: "9" }, launch);
   const spawns = []; const logs = []; let started = false;
@@ -353,8 +349,8 @@ function lifecycleHarness({ up = async () => false } = {}) {
   };
 }
 
-test("ensureComfy with a multicard launch: the placement's argv, the two uuids storage first in the child env, the reader on, a marker with the pair", async () => {
-  const h = lifecycleHarness();
+test("ensureComfy with a multicard launch: the placement's argv, the two uuids storage first in the child env, the reader on, a marker with the pair", async (t) => {
+  const h = lifecycleHarness(t);
   const child = await L.ensureComfy(h.opts);
   assert.equal(child.pid, 7001);
   const { args, env } = h.spawns[0];
@@ -371,8 +367,8 @@ test("ensureComfy with a multicard launch: the placement's argv, the two uuids s
   assert.deepEqual(rec.args, args, "the fingerprint is the exact argv");
 });
 
-test("ensureComfy without a launch leaves the child env to envFor, exactly as before", async () => {
-  const h = lifecycleHarness();
+test("ensureComfy without a launch leaves the child env to envFor, exactly as before", async (t) => {
+  const h = lifecycleHarness(t);
   const sentinel = { SENTINEL: "1" };
   let calls = 0;
   const opts = { ...h.opts, launch: null, env: { GPU_LEASE_EPOCH: "9" }, api: undefined, envFor: () => { calls++; return sentinel; } };
@@ -389,8 +385,8 @@ const verdict = (h, marker, argv) => L.reuseVerdict({
   systemArgv: async () => argv, readLaunch: () => marker, alive: () => true,
 });
 
-test("reuseVerdict: a running ComfyUI is reused only when the launch marker proves it is ours, on this pair, in this order", async () => {
-  const h = lifecycleHarness();
+test("reuseVerdict: a running ComfyUI is reused only when the launch marker proves it is ours, on this pair, in this order", async (t) => {
+  const h = lifecycleHarness(t);
   const argv = runningArgv(h);
   const marker = (cards, extra = {}) => ({ pid: 5, args: argv, key: h.launch.key, port: 18852, profile: { multicard: { cards } }, ...extra });
   assert.deepEqual(await verdict(h, marker(h.launch.cards), argv), { reuse: true });
