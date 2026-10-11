@@ -16,9 +16,14 @@
 //
 // COST. The card table is an nvidia-smi exec, so it is read only when a held lease actually
 // names cards (a whole-node lease or an idle box never need it) and memoised for
-// cardTableTTL; the unfenced path still pays one ReadFile, as before. A seat's pins are looked
-// up on the same condition, and no sooner: they include the serving config, which costs a Stat
-// of the file, and an idle box or a whole-node lease has no use for them.
+// cardTableTTL; the unfenced path still pays one ReadFile, as before. The fence's own readers
+// (ScopeToModel, which Admit, AwaitUpstream, AwaitRunSlot, the seat yield and SeatLease all go
+// through, and SeatCards) look a seat's pins up on the same condition, and no sooner: they include
+// the serving config, which costs a Stat of the file, and an idle box or a whole-node lease has no
+// use for them. That is the fence's cost and not every reader's. PinsFor, and the callers of
+// Config.ModelPins that never read a lease (the agent run's recorded cards, the text and vision
+// auto routes, the delegator's run-cap line), ask on every call, an idle box included, and pay that
+// Stat each time (a parse only on the first call, after an edit and within three seconds of one).
 package modelaffinity
 
 import (

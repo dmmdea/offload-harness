@@ -967,11 +967,14 @@ the same fault returns after the file read cleanly; an unset path is the default
 (`TestPinsOfSaysOnceThatTheServingConfigCannotBeRead`, `TestPinsOfSaysNothingWhereThereIsNothingWrong`,
 `TestPinsOfSaysItAgainWhenTheSameFaultReturnsAfterTheFileWasRead`, `TestModelPinsSaysOnceThatTheServingConfigCannotBeRead`). The
 fence and the unload list cannot disagree about a model: both read one parser and `layers` outrank the file in both
-(`TestTheLoadFenceAndTheUnloadListPlaceEveryModelAlike`, `TestLayersOutrankTheServingConfigForTheFence`). A seat's pins are looked up
-only when a held lease names cards, so an idle box and a whole-node lease do not touch the file
-(`TestSeatPinsAreNotLookedUpWhenNoLeaseNamesCards`). The file is Stat-ed on each lookup and parsed again when its modification time
-or size changes, or when it changed less than three seconds before it was read, so a long-lived process (the MCP server, the fleet
-node) follows a llama-swap config reload on its next poll without a restart
+(`TestTheLoadFenceAndTheUnloadListPlaceEveryModelAlike`, `TestLayersOutrankTheServingConfigForTheFence`). The fence's own lookups of a
+seat's pins (`ScopeToModel`, which every admission, wait and yield goes through, and `SeatCards`) happen only when a held lease
+names cards, so under an idle box or a whole-node lease the fence does not touch the file
+(`TestSeatPinsAreNotLookedUpWhenNoLeaseNamesCards`, `TestOnlyTheFencesOwnLookupsWaitForALeaseThatNamesCards`). Every other reader of
+`Config.ModelPins` asks on every call, an idle box included: `PinsFor` (the cards an agent run records), the text and vision auto
+routes and the delegator's run-cap line each cost a Stat of the file per call. The file is Stat-ed on each lookup and parsed again
+when its modification time or size changes, or when it changed less than three seconds before it was read, so a long-lived process
+(the MCP server, the fleet node) follows a llama-swap config reload on its next poll without a restart
 (`TestTheFenceFollowsAnEditOfTheServingConfigWithoutARestart`, `TestTheServingPinsAreReReadWhenTheYamlChangesSize`,
 `TestLoadDoesNotTrustAReadOfAFileChangedInsideTheRacyWindow`). The same pins answer every reader of `Config.ModelPins`: the
 waiter's place in line (`SeatCards`), `PinsFor` (the cards a run records), the text and vision auto routes and the delegator's run-cap

@@ -313,9 +313,10 @@ func TestBlockedAdmissionIsAdmittedWhenTheHeldCardChanges(t *testing.T) {
 }
 
 // COST (the file header). A seat's pins now come from the layers AND from the serving config, a file
-// the fence stats on every lookup, so the unfenced paths must not look the pins up at all: an idle box,
-// and a box whose only lease is a whole-node one (which touches every seat whatever its pin). A lease
-// that names cards is the one case that needs them.
+// the fence stats on every lookup, so the fence's unfenced paths must not look the pins up at all: an
+// idle box, and a box whose only lease is a whole-node one (which touches every seat whatever its pin).
+// A lease that names cards is the one case that needs them. This pins Admit's path; the other fence
+// readers, and PinsFor, which is not gated on a lease, are in TestOnlyTheFencesOwnLookupsWaitForALeaseThatNamesCards.
 func TestSeatPinsAreNotLookedUpWhenNoLeaseNamesCards(t *testing.T) {
 	m := armLease(t) // not card-scoped: the only lease it can hold is a whole-node one
 	var lookups atomic.Int64

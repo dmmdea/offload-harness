@@ -33,8 +33,14 @@ Versioning: [SemVer](https://semver.org/).
   changed less than three seconds before the read (a rewrite in the same clock tick, to the same size, would otherwise hide behind the
   same pair: the rule git applies to its index). An unchanged file costs one Stat, a memo is never served for a file that is gone, and the
   memo holds at most 16 files.
-- **The idle path pays nothing new.** `ScopeToModel` looks a seat's pins up only for a lease that names cards, so an idle box and a
-  whole-node lease (which touches every seat whatever its pin) never touch the file.
+- **The fence's idle path pays nothing new; the other readers pay a Stat.** The fence's own readers (`ScopeToModel`, which `Admit`,
+  `AwaitUpstream`, `AwaitRunSlot`, the seat yield and `SeatLease` go through, and `SeatCards`) look a seat's pins up only for a lease
+  that names cards, so under an idle box and a whole-node lease (which touches every seat whatever its pin) the fence never touches the
+  file. `PinsFor` and the other callers of `Config.ModelPins` are not fence reads and ask on every call, an idle box included: the agent
+  run's recorded cards, the text and vision auto routes and the delegator's run-cap line. Before this change those were an in-memory
+  lookup of the layers; for a model no layer places, each now costs a Stat of the serving config, and a parse on the first call, after an
+  edit and within three seconds of one. (A review found the first wording of this bullet, of the `seatscope.go` header and of
+  `docs/systems/gpu-lease.md` wider than the code: it said an idle box never touched the file.)
 - **Fail closed, everywhere, and said once.** A serving config that is unset, missing or not YAML, a card table that cannot be read, a
   whole-node lease, a model the file does not list and every entry listed above as placing nothing keep the fence where it was: any
   lease fences them. A serving config that is set and cannot be read used to switch the narrowing off with no word, and the refusal a
@@ -64,6 +70,21 @@ Versioning: [SemVer](https://semver.org/).
   gone, or wording a missing file as a Stat; the copy-on-read dropped, names compared case-sensitively, and each of F15's five parser
   rules (proxy, bare index, contested alias, macro, an entry that pins nothing in env). One survived at first: the copy tests ran on a file
   edited moments ago, which the racy rule never memoises, so they passed with the copy removed; they settle the file now.
+- **Review round (two LOW findings, both confirmed against the code).**
+  1. *The fence discarded the serving-config read error.* Said once per cause now (the "said once" bullet above). Red first on the
+     previous tree: `TestPinsOfSaysOnceThatTheServingConfigCannotBeRead` and `TestPinsOfSaysItAgainWhenTheSameFaultReturnsAfterTheFileWasRead`
+     heard nothing. `TestModelPinsSaysOnceThatTheServingConfigCannotBeRead` ties it to `Config.ModelPins`, the door every caller asks, and
+     to the two quiet cases (a model a layer places, an unset path). `TestPinsOfSaysNothingWhereThereIsNothingWrong` and
+     `TestTheMemoryOfWhatWasSaidIsBounded` were green on the previous tree on purpose, as guards of the quiet direction.
+  2. *The cost claim was wider than the code.* Narrowed to the fence's own lookups (the bullet above). The implementation was right and
+     the prose was wrong, so the behaviour test (`TestOnlyTheFencesOwnLookupsWaitForALeaseThatNamesCards`: `ScopeToModel`,
+     `SeatLease` and `AwaitRunSlot` look nothing up on an idle box or under a whole-node lease, `PinsFor` looks up on every call) was
+     green before the wording changed. What was red first is `TestTheDocsDoNotClaimAnIdleBoxNeverTouchesTheServingConfig` (root), which
+     refused the four retired phrasings in this file, `docs/systems/gpu-lease.md` and the `seatscope.go` header.
+  3. *Mutants.* Nine small ones, each shown to compile (`go vet`), each restored byte for byte, each turning a named test red: the note
+     removed, the once-guard removed, an unset path that says too, a recovered file that is not forgotten, a memory kept for all paths
+     together, a memory that is unbounded, the serving config asked before the layers, `ScopeToModel` that looks up whatever the lease,
+     `PinsFor` that waits for a lease. A tenth, the three retired phrasings restored, turns the docs test red in each of its files.
 - **Not changed, and not verified here.** A vLLM seat is a `proxy:` entry in the serving config (its cards are pinned in its own unit) and
   `vllm_seats` carries names, not cards, so a lease on any card still fences it, and so the agent seat on a box that serves it through
   vLLM; placing it needs the unit's pin, a separate change. The fence is not a placement: nothing here chooses a seat or a card. No
