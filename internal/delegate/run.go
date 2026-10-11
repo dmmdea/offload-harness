@@ -6889,6 +6889,11 @@ func (r *runner) dispatchDetailed(ctx context.Context, base, jobID string, paylo
 		// Who asked, and whether the serving node must card the job because this box will not
 		// (D7/D11): a header, for the same reason the tenant is one.
 		r.pair.SetWireHeaders(req.Header)
+		if r.cardless() {
+			// A call pinned for measurement opens no card anywhere: this box opens none (pairInflight), so a box
+			// with no emitter of its own must not ask the serving node to open one for it either (register F48).
+			req.Header.Del(core.PairCardHeader)
+		}
 		resp, derr := fleetClient.Do(req)
 		if derr != nil {
 			cancel()

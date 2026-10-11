@@ -766,8 +766,10 @@ port) sat among the real ones in 48 hours. Three rules, one per way a run says w
    sends the asker name and no card header when the emitter is suppressed, which a node reads as "the asker cards
    it".
 3. **A call can declare itself.** A delegation pinned with `pin_reason: measurement` opens no card
-   (`runner.cardless`), and the ledger observer cards no row whose `ledger.ClassOf` is set (the measure door, a
-   measurement pin, a go-test escape).
+   (`runner.cardless`) and its dispatch deletes `X-Offload-Pair-Card`, so a thin client with no emitter of its own does not
+   ask the serving node to open the card either; `Begin` and the remote-call card (`RemoteCall.cardless`) refuse the
+   `cli:fleet-measure` door (the asker's ledger row is still written and says `measurement`), and the ledger observer
+   cards no row whose `ledger.ClassOf` is set (the measure door, a measurement pin, a go-test escape).
 
 `LOCAL_OFFLOAD_PAIR_TEST_CARDS=1` keeps the cards of a labelled run. `fleet-smoke` is deliberately unchanged: it is
 the harness's Test traffic button and exists to show a card. The `go-test` origin is **not** a process class

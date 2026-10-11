@@ -32,18 +32,27 @@ Versioning: [SemVer](https://semver.org/).
 - **PAIR.** A process with a run class opens no card (`pairworkloads.Config.Suppressed`, through the gate every card already
   uses) and asks no fleet node to card its jobs: an asker with no emitter sends `X-Offload-Pair-Card: node`, which would have put
   the card back on the node, so a suppressed asker sends the asker name and no card header. A delegation pinned for `measurement`
-  opens none, and the ledger observer cards no row of a class. `LOCAL_OFFLOAD_PAIR_TEST_CARDS=1` keeps the cards of a labelled run
+  opens none and its dispatch deletes the card header (a thin client with no emitter would otherwise have the serving node open
+  the card), `Begin` and the remote-call card refuse the `fleet-measure` door (the asker's row is still written), and the ledger
+  observer cards no row of a class. `LOCAL_OFFLOAD_PAIR_TEST_CARDS=1` keeps the cards of a labelled run
   (to test PAIR itself); `fleet-smoke` keeps its card; the `go-test` origin labels rows only, because the repo's own tests build
   real emitters against fixture ingresses.
-- **Not covered.** The class does not ride the fleet wire: a fleet node's own ledger row for work it ran for a labelled asker is
-  unlabelled (its card is not opened). The harness-share gate and any other reader outside this repository that sums the ledger
-  itself must skip rows with `run_class` set (and `origin_session: go-test` for rows written before the label).
+- **Not covered.** (1) A run is labelled only when its tool says so: nothing is guessed from a seat name, because a seat that is
+  not in the served roster is exactly what a mistyped `agent_model` looks like and must stay on every view, so the bake tool that
+  produced the 42 cards has to set `LOCAL_OFFLOAD_RUN_CLASS=bake` (or pin its calls for `measurement`). (2) The class does not
+  ride the fleet wire: a fleet node's own ledger row for work it ran for a labelled asker is unlabelled (its card is not opened,
+  because the asker sends no card header), and the media and vision lanes' asker headers know the config, not the door, so a
+  `fleet-measure` render from a box with no PAIR emitter that overflows to a node still has the node open its card. (3) The
+  harness-share gate and any other reader outside this repository that sums the ledger itself must skip rows with `run_class` set
+  (and `origin_session: go-test` for rows written before the label).
 - Tests: `TestOriginResolvesTheRunClassFromTheEnvironmentThenTheOriginPrefix`, `TestClassOfReadsTheLabelThenTheOriginThenWhatTheCallerDeclared`,
   `TestRecordStampsTheRunClassOnEveryRowAndLeavesProductionRowsByteIdentical`,
   `TestATestBinaryWritingOutsideItsTempDirectoryLabelsItsRowsTest`, `TestSummarizeFileExcludesNonProductionTrafficByDefaultAndSaysSo`,
   `TestProductionRowsDropsLabelledRowsAndTheInnerRowsOfLabelledJobsAndCountsThem` (ledger);
   `TestFromConfigOpensNoCardsForANonProductionRun`, `TestASuppressedAskerDoesNotAskTheNodeToCard`,
-  `TestTheLedgerObserverCardsNoRowOfANonProductionClass` (pairworkloads); `TestAMeasurementPinnedDelegationOpensNoPairCard` (delegate);
+  `TestTheLedgerObserverCardsNoRowOfANonProductionClass`, `TestBeginOpensNoCardForTheMeasureDoor`,
+  `TestARemoteCallThroughTheMeasureDoorOpensNoCardButStillWritesItsRow` (pairworkloads);
+  `TestAMeasurementPinnedDelegationOpensNoPairCard`, `TestAMeasurementPinnedDispatchAsksNoNodeToCard` (delegate);
   `TestLedgerCommandLeavesOutTestTrafficAndSaysSo`, `TestLoupeLeavesOutTestTrafficAndSaysSo`, `TestStatsAndAuditSampleLeaveOutTestTraffic`
   (root); the four `...ProductionRowsOnly` tests of the health, calibration, router and confhead packages.
 

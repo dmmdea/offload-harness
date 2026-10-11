@@ -134,3 +134,41 @@ func TestBeginOpensNoCardForTheMeasureDoor(t *testing.T) {
 		t.Fatalf("the measure door sent %d frame(s)", c.count()-before)
 	}
 }
+
+// A render of the measure door that overflows to a fleet node (ADR 0082) is a call whose card is the asker's
+// RemoteCall: it opens none, while the asker's ledger row is still written and still says what it was. The
+// control is the same call through an ordinary door.
+func TestARemoteCallThroughTheMeasureDoorOpensNoCardButStillWritesItsRow(t *testing.T) {
+	clearRunClassEnv(t)
+	c := &capture{}
+	srv := httptest.NewServer(http.HandlerFunc(c.handler))
+	defer srv.Close()
+	e := New(Config{Enabled: true, Endpoint: srv.URL, AppDir: writePairAppDir(t)})
+	lp := filepath.Join(t.TempDir(), "ledger.jsonl")
+	l, err := ledger.Open(lp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+
+	call := func(door string) {
+		rc := NewRemoteCall(e, l, core.Request{Task: core.TaskGenerateImage, Door: door, Input: "a plain gray sphere"}, "remote")
+		rc.Dispatched("http://node-b.example:18811", "node-b", "job-"+door)
+		rc.Running()
+		rc.Finish(core.Result{OK: true, Meta: core.Meta{Node: "node-b", Model: "img"}})
+		e.Wait()
+	}
+	call("cli:generate-image")
+	ordinary := c.count()
+	if ordinary == 0 {
+		t.Fatal("control: an ordinary door must open a card")
+	}
+	call("cli:fleet-measure")
+	if c.count() != ordinary {
+		t.Fatalf("the measure door's remote call sent %d frame(s) to PAIR", c.count()-ordinary)
+	}
+	rows, _ := ledger.ReadAll(lp)
+	if len(rows) != 2 || rows[1].Door != "cli:fleet-measure" || rows[1].RunClass != "measurement" {
+		t.Fatalf("the asker's row must still be written, and say what it was: %+v", rows)
+	}
+}
