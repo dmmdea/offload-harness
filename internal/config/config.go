@@ -2411,9 +2411,10 @@ func loadArmed(path string) (Config, error) {
 	}
 	// The gate also learns which cards each seat sits on, so a lease on one card fences
 	// only the seats on that card (plan P4). Armed here for the same reason the lease
-	// directory is: the pins are a property of the box's layers, and a launcher that read
-	// them separately could disagree with the gate. A box with no layers arms nothing the
-	// gate can use, and every lease then fences every seat, as it always did.
+	// directory is: the pins are a property of the box (its layers, else the serving
+	// config its seats are launched from, register C-86a), and a launcher that read them
+	// separately could disagree with the gate. A model neither places is on every card,
+	// and a lease then fences it, as it always did.
 	modelaffinity.SetSeatPins(c.ModelPins)
 	modelaffinity.SetCardOrder(c.GPUComfyOrder)
 	modelaffinity.SetComfyDir(c.ComfyDir)

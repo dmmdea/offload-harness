@@ -308,3 +308,48 @@ func TestBlockedAdmissionIsAdmittedWhenTheHeldCardChanges(t *testing.T) {
 		t.Fatalf("admitted after %s: the poll must narrow each read to the seat's cards", el)
 	}
 }
+
+// COST (the file header). A seat's pins now come from the layers AND from the serving config, a file
+// the fence stats on every lookup, so the unfenced paths must not look the pins up at all: an idle box,
+// and a box whose only lease is a whole-node one (which touches every seat whatever its pin). A lease
+// that names cards is the one case that needs them.
+func TestSeatPinsAreNotLookedUpWhenNoLeaseNamesCards(t *testing.T) {
+	m := armLease(t) // not card-scoped: the only lease it can hold is a whole-node one
+	var lookups atomic.Int64
+	SetSeatPins(func(model string) ([]string, bool) {
+		lookups.Add(1)
+		p, ok := tripleBoxPins[model]
+		return p, ok
+	})
+	prev := readCardTable
+	readCardTable = func(context.Context, string) ([]gpuprobe.Card, string, error) { return scopeCards(), "", nil }
+	resetCardMemo()
+	t.Cleanup(func() {
+		SetSeatPins(nil)
+		readCardTable = prev
+		resetCardMemo()
+	})
+
+	tk := admitFast(t, "http://pins-idle", "seat-card0")
+	tk.Release()
+	if n := lookups.Load(); n != 0 {
+		t.Fatalf("an idle box looked a seat's pins up %d time(s)", n)
+	}
+
+	l := holdLease(t, m, gpulease.ClassMedia, gpulease.Options{Reason: "legacy render"})
+	if _, err := Admit(context.Background(), "http://pins-whole", "seat-card0", 300*time.Millisecond); !IsLeaseRefusal(err) {
+		t.Fatalf("a whole-node lease fences every seat, got %v", err)
+	}
+	if n := lookups.Load(); n != 0 {
+		t.Fatalf("a whole-node lease touches every seat whatever its pin, but a seat's pins were looked up %d time(s)", n)
+	}
+	_ = l.Release()
+
+	m.SetCardScoped(true)
+	mediaLeaseOn(t, m, idCard2)
+	tk = admitFast(t, "http://pins-card", "seat-card0")
+	tk.Release()
+	if n := lookups.Load(); n == 0 {
+		t.Fatal("a lease that names cards needs the seat's pins, but they were never looked up")
+	}
+}

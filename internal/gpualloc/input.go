@@ -322,7 +322,7 @@ func leaving(state string) bool {
 // (gemma-4-e4b-display, gemma-4-e2b-display) are named only there, and a loaded twin sits on the
 // display card as surely as the pair's seat sits on its own. Counting only s.Model left that card
 // reading as empty, so it sorted first as the card with nothing to evict while it held a twin.
-// The same walk over the twins is config.ModelPins's, which answers the other direction (model →
+// The same walk over the twins is config.LayerPins's, which answers the other direction (model →
 // pins) and is what the lease's unload list already uses.
 //
 // The cost of taking the card is what the loaded models hold on it: per loaded model, footprint_gib,
