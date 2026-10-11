@@ -643,7 +643,7 @@ func (e *Emitter) SweepOrphans(ctx context.Context) int {
 	now := e.now()
 	selfPID, _ := e.selfIdentity()
 	sent := 0
-	var closed sweepCounts // what the delivered frames were, for the log line
+	var closed sweepCounts    // what the delivered frames were, for the log line
 	down := map[string]bool{} // endpoint keys that failed a post in this pass
 	for _, de := range entries {
 		if ctx.Err() != nil {

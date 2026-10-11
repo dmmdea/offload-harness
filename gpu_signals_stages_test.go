@@ -257,7 +257,7 @@ func TestASignalBeforeTheLeaseIsAskedForTakesNothing(t *testing.T) {
 func TestASignalWhileChoosingCardsEndsTheAllocation(t *testing.T) {
 	for name, vram := range map[string]float64{
 		"every card is held, so the request queues on a set": 0,
-		"no card has the VRAM, so the allocator polls":        100,
+		"no card has the VRAM, so the allocator polls":       100,
 	} {
 		vram := vram
 		t.Run(name, func(t *testing.T) {
