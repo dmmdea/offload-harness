@@ -80,11 +80,11 @@
       "clip": { "loader": "plain" },
       "loraLoader": "LoraLoaderModelOnly",
       "basis": "predicted",
-      "peakGiB": { "compute": 4.9, "storage": 12.6 },
-      "activationsGiB": 1.9,
+      "peakGiB": { "compute": 5.6, "storage": 12.6 },
+      "activationsGiB": 2.6,
       "maxMegapixels": 2.0,
       "packs": ["multigpu", "gguf"],
-      "evidence": "Benchmark 2026-10-11, section 4.6: Q5_1 GGUF at 1.47 MP on two 5060 Ti with every weight on the storage card: success in 192.3 s but only 0.3 GiB free there, 'too thin for production'; the benchmark's own prediction for a 3 GiB resident share on the compute card is storage about 12.6 GiB and compute about 4.9 GiB, not run. The run used the read-only loader (host growth 1.50 GiB)."
+      "evidence": "Benchmark 2026-10-11, section 4.6: Q5_1 GGUF at 1.47 MP on two 5060 Ti with every weight on the storage card: success in 192.3 s but only 0.3 GiB free there, 'too thin for production'; the benchmark's own prediction for a 3 GiB resident share on the compute card is storage about 12.6 GiB and compute about 4.9 GiB at that 1.47 MP canvas, not run. The compute figure here is scaled to the 2.0 MP cap this row claims, as the fp8mixed row's is: the 1.9 GiB the compute card held at 1.4727 MP grows to 2.6 GiB, so 3 + 2.6 = 5.6 GiB. The run used the read-only loader (host growth 1.50 GiB)."
     }
   ]
 }

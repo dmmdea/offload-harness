@@ -66,8 +66,15 @@ func multicardNeed(route hostneed.Route, cfg config.Config, token string) mediaN
 		}
 		files = mediacap.ImageModelFiles(cfg)
 	}
-	if mediacap.FindMulticardRow(string(route), family, files) == nil {
+	row := mediacap.FindMulticardRow(string(route), family, files)
+	switch {
+	case row == nil:
 		n.Refusal = noRecipeRefusal(n.PlacementKey, string(route), family, files)
+	case route == hostneed.RouteEdit && row.MaxMegapixels > 0 && cfg.GenEditMegapixels > row.MaxMegapixels:
+		// The recipe's peaks are scaled to a canvas of at most MaxMegapixels and gen_edit_megapixels is honoured verbatim by the runner, which refuses a larger
+		// one by name (render/comfy-edit.mjs planEdit) only after the pair was held: so the door refuses it first, before any lease.
+		n.Refusal = fmt.Sprintf("%s is multicard, but gen_edit_megapixels pins a %.1f MP edit canvas and the card-only recipe %s is scaled to at most %.1f MP: the runner would refuse it by name after the pair was held, so nothing was leased; lower gen_edit_megapixels to %.1f or less, or unset %s",
+			n.PlacementKey, cfg.GenEditMegapixels, row.ID, row.MaxMegapixels, row.MaxMegapixels, n.PlacementKey)
 	}
 	return n
 }

@@ -141,6 +141,13 @@ export function planEdit({ pos, flags, refs = [], env = process.env, measure = (
     let src = { width: 0, height: 0 };
     try { src = measure(imagePath); } catch { /* size stays unknown */ }
     const megapixels = resolveEditMegapixels({ configured: configuredMP, width: src.width, height: src.height });
+    // The card-only recipe's peaks are scaled to a canvas of at most recipe.maxMegapixels. resolveEditMegapixels holds a canvas it derives from the source to the
+    // cap itself, but honours a pinned one verbatim, and a pinned canvas above the cap is one no peak was measured or scaled for: on a 16 GB card it is the
+    // out-of-memory with both cards held. Refused here, before anything is started.
+    if (recipe && recipe.maxMegapixels > 0 && megapixels > recipe.maxMegapixels) {
+      const via = flags.megapixels ? `--megapixels ${flags.megapixels}` : `COMFY_EDIT_MEGAPIXELS ${env.COMFY_EDIT_MEGAPIXELS} (gen_edit_megapixels reaches the runner as --megapixels)`;
+      throw new UsageError(`error: ${via} pins a ${megapixels} MP edit canvas, and the card-only recipe ${recipe.id} is scaled to at most ${recipe.maxMegapixels.toFixed(1)} MP (its compute card holds ${recipe.activationsGiB} GiB of activations there, and a larger canvas needs more than the two cards have left): pin ${recipe.maxMegapixels.toFixed(1)} or less, or drop --placement multicard; nothing was started`);
+    }
     const srcNote = src.width > 0 ? `${src.width}x${src.height}` : "size-unknown";
     return {
       family, sources: [imagePath], seed,

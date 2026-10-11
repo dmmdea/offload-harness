@@ -27,7 +27,8 @@ type MulticardRow struct {
 	ComputeGiB, StorageGiB float64
 	// Measured: the row's host growth was read in a run that used the read-only loader.
 	Measured bool
-	// MaxMegapixels is the largest edit canvas the compute peak is scaled to (0 = the row has none).
+	// MaxMegapixels is the largest edit canvas the compute peak is scaled to (0 = the row has none). The runner refuses a pinned canvas above it
+	// (render/comfy-edit.mjs planEdit), and so does the typed door before it leases the pair (internal/pipeline multicardNeed).
 	MaxMegapixels float64
 	// Blocked is why the row may not launch (empty = it may): the row stays in the table, but it is no recipe to FindMulticardRow, so the estimate, the
 	// doctor and the typed doors treat the binding as one without a recipe, and the runner refuses it by name (render/multicard-recipes.mjs findRecipe).
@@ -53,7 +54,7 @@ var multicardRows = []MulticardRow{
 	{ID: "qwen-image-edit-2511/fp8mixed", Route: "edit", Family: "qwen-image-edit-2511", Quant: "fp8mixed", UnetMatch: `fp8mixed.*\.safetensors$`, ClipMatch: "fp8", DefaultClip: "qwen_2.5_vl_7b_fp8_scaled.safetensors",
 		UnetLoader: "distorch2", ResidentGiB: 9, ClipLoader: "plain", ComputeGiB: 13.0, StorageGiB: 11.0, Measured: true, MaxMegapixels: 2.0, LoraLoader: "LoraLoaderBypassModelOnly", Packs: []string{"multigpu"}},
 	{ID: "qwen-image-edit-2511/gguf-q5_1", Route: "edit", Family: "qwen-image-edit-2511", Quant: "gguf-q5_1", UnetMatch: `Q5_1\.gguf$`, ClipMatch: "fp8", DefaultClip: "qwen_2.5_vl_7b_fp8_scaled.safetensors",
-		UnetLoader: "gguf-distorch2", ResidentGiB: 3, ClipLoader: "plain", ComputeGiB: 4.9, StorageGiB: 12.6, MaxMegapixels: 2.0, LoraLoader: "LoraLoaderModelOnly", Packs: []string{"multigpu", "gguf"}},
+		UnetLoader: "gguf-distorch2", ResidentGiB: 3, ClipLoader: "plain", ComputeGiB: 5.6, StorageGiB: 12.6, MaxMegapixels: 2.0, LoraLoader: "LoraLoaderModelOnly", Packs: []string{"multigpu", "gguf"}},
 }
 
 // multicardMatchers are the rows' regular expressions, compiled once, in the rows' order.
