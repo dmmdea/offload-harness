@@ -136,6 +136,9 @@ func readLedger(path string) ([]ledger.Entry, error) {
 		if json.Unmarshal(line, &e) != nil {
 			continue // skip malformed / partial trailing lines
 		}
+		if ledger.ClassOf(e) != "" {
+			continue // test, bake and measurement rows are not the box's health (register F48)
+		}
 		out = append(out, e)
 	}
 	return out, sc.Err()

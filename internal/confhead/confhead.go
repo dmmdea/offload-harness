@@ -217,7 +217,9 @@ func FitWithMinRows(entries []ledger.Entry, minRowsArg int) *Model {
 // labelsPath (or a missing file) behaves like "no sidecar". The report notes how
 // many rows per task came from the sidecar.
 func Train(ledgerPath, labelsPath, outPath string) (string, error) {
-	entries, err := ledger.ReadAll(ledgerPath)
+	// Test, bake and measurement rows carry a fixture's margin and a fixture's grounding, not the box's
+	// (register F48): the head is fitted on production rows only.
+	entries, _, err := ledger.ReadProduction(ledgerPath)
 	if err != nil {
 		return "", fmt.Errorf("confhead.Train: read ledger: %w", err)
 	}
