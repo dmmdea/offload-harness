@@ -6,7 +6,8 @@ import (
 )
 
 // The cage's notes (see noteMarker) are plain lines at the start of a run's stderr. These tests pin
-// the few rules the platforms rely on, on every platform.
+// the few rules the platforms rely on, on every platform, because the Linux worker writes the lines
+// and the parent reads them back, and the Windows cage writes them for its own caller.
 
 // TestNoteLinesRendersOneMarkedLinePerNote: marker, text, eol, in order, and nothing for no notes.
 func TestNoteLinesRendersOneMarkedLinePerNote(t *testing.T) {
@@ -37,5 +38,51 @@ func TestAddfKeepsEveryNoteOnOneLine(t *testing.T) {
 	}
 	if !strings.Contains(notes[0], `C:\x y`) {
 		t.Errorf("the rest of the text, spaces in a path included, must survive; got %q", notes[0])
+	}
+}
+
+// TestSkipLeadingNotes: the lines noteLines wrote are skipped, however they end, and nothing else is.
+func TestSkipLeadingNotes(t *testing.T) {
+	for _, tc := range []struct{ name, in, want string }{
+		{"no notes", "hello\n", "hello\n"},
+		{"empty", "", ""},
+		{"one note LF", "[sandbox] a\nhello\n", "hello\n"},
+		{"two notes CRLF", "[sandbox] a\r\n[sandbox] b\r\nhello\r\n", "hello\r\n"},
+		{"notes only", "[sandbox] a\n[sandbox] b\n", ""},
+		{"notes only, no final line break", "[sandbox] a", ""},
+		{"a note-looking line after the command's own text is the command's", "hello\n[sandbox] not ours\n", "hello\n[sandbox] not ours\n"},
+		{"the marker must lead the line", " [sandbox] a\n", " [sandbox] a\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := skipLeadingNotes(tc.in); got != tc.want {
+				t.Errorf("skipLeadingNotes(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRefusedByReadsThroughNotes: a worker that wrote notes and then failed to exec has refused,
+// and the caller must still be told it was a refusal rather than a command that exited 126 or 127.
+// Output that merely contains the marker later is the command's, as before.
+func TestRefusedByReadsThroughNotes(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{"plain refusal", refusalMarker + "sandbox worker: landlock floor not met\n", true},
+		{"refusal behind a note", noteMarker + ".git is not masked\n" + refusalMarker + "sandbox worker: exec failed\n", true},
+		{"refusal behind two notes", noteMarker + "a\n" + noteMarker + "b\n" + refusalMarker + "x\n", true},
+		{"a note and the command's own output", noteMarker + "a\nhello\n", false},
+		{"the command's output", "hello\n", false},
+		{"marker later in the command's output", "hello\n" + refusalMarker + "forged\n", false},
+		{"marker after a note and output", noteMarker + "a\nhello\n" + refusalMarker + "forged\n", false},
+		{"nothing", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := refusedBy(tc.in); got != tc.want {
+				t.Errorf("refusedBy(%q) = %v, want %v", tc.in, got, tc.want)
+			}
+		})
 	}
 }

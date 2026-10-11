@@ -128,10 +128,14 @@ func runWorker() error {
 	// filtering), so mirror the protection here with an empty read-only tmpfs over
 	// the real .git. Only for a writable worktree holding a real .git directory; the
 	// mount lives in this private namespace and never touches the host's tree.
-	if spec.WorktreeWritable {
-		if gp := filepath.Join(spec.Worktree, ".git"); dirExists(gp) {
-			_ = unix.Mount("tmpfs", gp, "tmpfs", unix.MS_RDONLY|unix.MS_NOSUID|unix.MS_NODEV|unix.MS_NOEXEC, "")
-		}
+	//
+	// A mount the kernel refuses (an unprivileged user namespace that may not mount, as in
+	// some container and CI sandboxes) does not stop the run, and it is not silent either:
+	// maskDotGit returns a note, which goes to stderr just before the exec (see below) so the
+	// caller learns that the mask it was promised is not there.
+	var notes runNotes
+	if note := maskDotGit(spec, unix.Mount); note != "" {
+		notes.addf("%s", note)
 	}
 
 	// (2) chdir into the worktree BEFORE any restriction (no rule blocks it yet).
@@ -202,6 +206,13 @@ func runWorker() error {
 	_ = unix.Setrlimit(unix.RLIMIT_CORE, &unix.Rlimit{Cur: 0, Max: 0})
 	_ = unix.Setrlimit(unix.RLIMIT_FSIZE, &unix.Rlimit{Cur: 1 << 30, Max: 1 << 30})
 
+	// The notes go out now: after the last step that can refuse the run, so a refusal still
+	// leads stderr (refusedBy), and right before the exec, so the command's own stderr
+	// follows them. The exec replaces this process; nothing could be written after it.
+	if len(notes) > 0 {
+		fmt.Fprint(os.Stderr, noteLines(notes, "\n"))
+	}
+
 	// (5) exec the command inside the cage with a minimal env (cageEnv, the
 	// contract shared with the Windows cage — see sandbox.go). syscall.Exec
 	// replaces the process, so the cage (namespaces + seccomp + Landlock) is fully
@@ -229,6 +240,28 @@ var (
 func dirExists(p string) bool {
 	fi, err := os.Stat(p)
 	return err == nil && fi.IsDir()
+}
+
+// mountFunc has the shape of unix.Mount, so a test can stand in for a kernel that refuses.
+type mountFunc func(source, target, fstype string, flags uintptr, data string) error
+
+// maskDotGit mounts an empty read-only tmpfs over <worktree>/.git, for a writable worktree that
+// holds a real .git directory (see runWorker for why). It returns "" when the mask is in place or
+// does not apply, and a note when the mount was refused: then the command still runs, with
+// <worktree>/.git writable like the rest of the worktree, which is exactly what the mask exists
+// to prevent, and the caller must be told.
+func maskDotGit(spec Spec, mount mountFunc) string {
+	if !spec.WorktreeWritable {
+		return ""
+	}
+	gp := filepath.Join(spec.Worktree, ".git")
+	if !dirExists(gp) {
+		return ""
+	}
+	if err := mount("tmpfs", gp, "tmpfs", unix.MS_RDONLY|unix.MS_NOSUID|unix.MS_NODEV|unix.MS_NOEXEC, ""); err != nil {
+		return fmt.Sprintf("%s is NOT masked read-only (mount: %v): the command ran anyway and can write into it, hooks included", gp, err)
+	}
+	return ""
 }
 
 // installArchGuard adds a tiny classic-BPF seccomp filter that KILLs any syscall
@@ -308,11 +341,12 @@ func Run(ctx context.Context, spec Spec) (Result, error) {
 
 	runErr := cmd.Run()
 	res := Result{Stdout: stdout.String(), Stderr: stderr.String()}
-	// HasPrefix (not Contains): on a real refusal the worker writes the marker and
-	// exits WITHOUT exec'ing, so it is the first thing on stderr; on success the
-	// worker exec's (writes nothing) and the command owns stderr — so a command
-	// cannot spoof a refusal unless it deliberately leads its stderr with the marker.
-	res.Refused = strings.HasPrefix(res.Stderr, refusalMarker)
+	// A prefix test (not Contains): on a real refusal the worker writes the marker and
+	// exits WITHOUT exec'ing, so it is the first thing on stderr, behind at most the
+	// notes it wrote before an exec that then failed; on success the worker exec's and
+	// the command owns stderr after the notes — so a command cannot spoof a refusal
+	// unless it deliberately leads its stderr with the marker.
+	res.Refused = refusedBy(res.Stderr)
 	if cmd.ProcessState != nil {
 		res.ExitCode = cmd.ProcessState.ExitCode()
 		if ws, ok := cmd.ProcessState.Sys().(syscall.WaitStatus); ok && ws.Signaled() {

@@ -32,10 +32,10 @@ const workerEnv = "OFFLOAD_SANDBOX_WORKER"
 const refusalMarker = "[[SANDBOX-REFUSED]] "
 
 // noteMarker prefixes every line the cage itself puts ahead of a command's own stderr: a step it
-// could not complete (a folder it could not make writable, a label it could not put back) on a run
-// that goes ahead anyway. The command still runs, as it always did; what changes is that the caller
-// is told the run is not what its Spec asked for. The Windows timeout note ("[sandbox] command
-// killed after context timeout") has the same shape.
+// could not complete (a folder it could not make writable, a label it could not put back, a
+// read-only mask it could not mount) on a run that goes ahead anyway. The command still runs, as it
+// always did; what changes is that the caller is told the run is not what its Spec asked for. The
+// Windows timeout note ("[sandbox] command killed after context timeout") has the same shape.
 const noteMarker = "[sandbox] "
 
 // NetABIFloor is the Landlock ABI the cage's NETWORK guarantee needs: the
@@ -117,6 +117,25 @@ func noteLines(notes []string, eol string) string {
 		b.WriteString(eol)
 	}
 	return b.String()
+}
+
+// skipLeadingNotes returns s without the note lines at its start, however they end (LF or CRLF).
+func skipLeadingNotes(s string) string {
+	for strings.HasPrefix(s, noteMarker) {
+		_, rest, found := strings.Cut(s, "\n")
+		if !found {
+			return ""
+		}
+		s = rest
+	}
+	return s
+}
+
+// refusedBy reports whether stderr is a worker's refusal: the refusal marker leads it, behind at
+// most the notes a worker wrote before it failed to exec. A refusal that follows notes is still a
+// refusal; judging the raw prefix would turn it into a command that exited 126/127.
+func refusedBy(stderr string) bool {
+	return strings.HasPrefix(skipLeadingNotes(stderr), refusalMarker)
 }
 
 // defaultReadDirs are the read-only system directories a minimal command needs

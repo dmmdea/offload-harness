@@ -738,11 +738,12 @@ label cannot be lowered (the label change needs `WRITE_OWNER`, which a data driv
 the user nowhere does not give) is a folder the command cannot write; one whose label cannot be
 restored is left writable by every low-integrity process, and the next run takes that label for the
 folder's own, so it does not heal; one whose prior label cannot be read is cleared, not restored; a
-deadline whose kill of the job fails is not in force. In each case the command still runs (failing
-closed is a separate decision, not taken) and the cage puts a line starting with `[sandbox] ` ahead
-of the command's own stderr, appends the same text to the error of a run that fails before the
-command starts, and logs it once. `run` and `run_shell` return stderr to the model, so the model
-reads the note too.
+deadline whose kill of the job fails is not in force. On Linux, `<worktree>/.git` stays writable
+where the kernel refuses its read-only mask. In each case the command still runs (failing closed is
+a separate decision, not taken) and the cage puts a line starting with `[sandbox] ` ahead of the
+command's own stderr, appends the same text to the error of a run that fails before the command
+starts, and, on Windows, logs it once. `run` and `run_shell` return stderr to the model, so the
+model reads the note too.
 
 **The caged child's environment is built, never inherited, on both platforms** (`sandbox.cageEnv`,
 `sandbox.EnvAllowlist`). Linux execs with a fixed `PATH` plus `HOME`/`TMPDIR` pointed at the run's
