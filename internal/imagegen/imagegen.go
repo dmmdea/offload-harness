@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/dmmdea/offload-harness/internal/gpugen"
@@ -66,6 +67,9 @@ type Model struct {
 	// Schedule is the qwen-image-2.1 sigma schedule ("official" | "comfy"; "" = the
 	// builder default). Other families never read it.
 	Schedule string
+	// Placement is imagegen_placement: "multicard" asks the runner for the card-only recipe on the two cards of the lease (--placement multicard,
+	// render/multicard-image.mjs); "" and "single" emit nothing, so a box that binds none renders exactly what it rendered.
+	Placement string
 	// Launch is this binding's ComfyUI launch profile (env for the runner). The
 	// pipeline decides it — it knows whether the binding pools, and a pooled seat's
 	// placement belongs to its pool keys, never to a device pin.
@@ -243,8 +247,15 @@ func bindingArgs(m Model) []string {
 	if m.Schedule != "" {
 		args = append(args, "--schedule", m.Schedule)
 	}
+	if multicard(m.Placement) {
+		args = append(args, "--placement", "multicard")
+	}
 	return args
 }
+
+// multicard reports the placement word that asks the runner for the card-only recipe. The cards are the lease's (GPU_LEASE_DEVICES): the harness never
+// names them on the command line.
+func multicard(placement string) bool { return strings.TrimSpace(placement) == "multicard" }
 
 // paramTrue reads a boolean request param the way every door delivers it: a JSON
 // bool, or the strings a CLI/fleet payload may carry.
@@ -286,10 +297,10 @@ func paramStrings(v any) []string {
 // tier's engine). All paths are FULL paths — sd.cpp has no ComfyUI-style model-dir
 // convention. Steps/CFG/Sampler reuse the machine's imagegen_* sampler defaults.
 type SdcppModel struct {
-	Bin       string   // sd.exe path (exported to the runner as SDCPP_BIN). Required.
-	Model     string   // main model file (GGUF or safetensors). Required.
-	ModelKind string   // ""/"checkpoint" => -m; "diffusion" => --diffusion-model
-	VAE       string   // companion weights ("" = not passed)
+	Bin       string // sd.exe path (exported to the runner as SDCPP_BIN). Required.
+	Model     string // main model file (GGUF or safetensors). Required.
+	ModelKind string // ""/"checkpoint" => -m; "diffusion" => --diffusion-model
+	VAE       string // companion weights ("" = not passed)
 	ClipL     string
 	ClipG     string
 	T5        string
@@ -456,7 +467,9 @@ type EditModel struct {
 	// Schedule is the 2.1 edit graph's sigma schedule ("comfy" | "turbo"; "" = the
 	// builder default, comfy). The 2511 graph never reads it.
 	Schedule string
-	Launch      ComfyLaunch
+	// Placement is gen_edit_placement: "multicard" asks the runner for the card-only recipe (--placement multicard); "" and "single" emit nothing.
+	Placement string
+	Launch    ComfyLaunch
 }
 
 // EditFamilyQwenImage21 is the multi-reference 2.1 edit graph's family name.
@@ -557,6 +570,9 @@ func editArgs(out, image, prompt string, params map[string]any, m EditModel) []s
 	}
 	if paramTrue(params["transparent"]) {
 		args = append(args, "--transparent", "1")
+	}
+	if multicard(m.Placement) {
+		args = append(args, "--placement", "multicard")
 	}
 	return args
 }
