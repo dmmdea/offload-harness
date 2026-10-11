@@ -44,16 +44,11 @@ func (p *Pipeline) graphLaneFree(ctx context.Context, req core.Request) core.Lan
 	if err != nil {
 		return notJudged("the lease directory cannot be opened (" + err.Error() + "); the call reports it itself")
 	}
-	// The card table, once, under a bound of its own: it sizes the host-RAM need (the declaration depends on the largest card).
-	rctx, cancel := context.WithTimeout(ctx, laneProbeBound)
-	table, _, terr := p.alloc.CardTable(rctx, p.cfg)
-	cancel()
-	if terr != nil || len(table) == 0 {
-		cause := "it listed no card"
-		if terr != nil {
-			cause = terr.Error()
-		}
-		return notJudged("the card table could not be read (" + cause + "); the call reads it itself")
+	// The card table, under the probe's bounds (laneCardTable): it sizes the host-RAM need (the declaration depends on the
+	// largest card).
+	table, terr := p.laneCardTable(ctx, "run_graph")
+	if terr != nil {
+		return notJudged("the card table could not be read (" + terr.Error() + "); the call reads it itself")
 	}
 	// Every read below goes through a view that prunes nothing: the question must not change the state it asks about.
 	r := &laneReading{p: p, m: m.ReadOnly(), cards: table, token: token}

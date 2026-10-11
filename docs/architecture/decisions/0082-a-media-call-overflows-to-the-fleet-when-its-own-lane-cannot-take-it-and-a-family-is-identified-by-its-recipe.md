@@ -45,7 +45,7 @@ Three facts made the obvious change unsafe as stated.
    have served; it may call free a lane the grant then refuses, and the call then runs locally as before, after the one bounded card-table read the question costs. A call that resumes a place in line counts only the callers
    that arrived before that place, on every plan, because the lease queue serves a resumed place by arrival time (ADR 0083
    decision 4; `TestMediaLaneFreeOrdersByArrivalForACallThatResumesItsPlace`); a new arrival counts every other caller in line. Every doubt
-   (a lease this process inherited, a card table that does not read in 4 s, a request it does not model) reads as free. It
+   (a lease this process inherited, a card table that does not read in 4 s nor in the one 10 s retry that follows a read that ran out of time, a request it does not model) reads as free; the card table that was not read leaves one log line ("media lane probe", F55). It
    creates no lease, place in line, epoch, waiter record, ledger row, PAIR card or ComfyUI instance, and it removes nothing: the
    readers of the line it shares with the admission prune a record they find dead (an expired place, a waiter that stopped
    polling) as housekeeping, and the probe reads through `gpulease.Manager.ReadOnly`, a view that skips such a record and leaves
@@ -143,10 +143,10 @@ Three facts made the obvious change unsafe as stated.
 - **Measured and unmeasured.** The recipe tests use fixtures that reproduce the image blocks of three live nodes as they stood
   in config text read on 2026-10-09 and 2026-10-10 (two from stored extracts; text, not a render), and the extract of one of
   them was cut inside the block it matters for; the live acceptance reads `image_recipes` on both nodes first. Nothing here was
-  run against a live lease or a real render. The backoff steps, the attempt bound and the probe's 4 s card-table bound are chosen
+  run against a live lease or a real render. The backoff steps, the attempt bound and the probe's 4 s card-table bound and 10 s retry are chosen
   constants, not resource numbers; the host-RAM numbers are the guard's and are not chosen here.
 - **Cost, stated plainly.** Every `auto` image call on a box that has the lane and a fleet pays one `nvidia-smi` read (bounded at
-  4 s) for the lane question, and a roster read when the lane is not free, even when no node can ever match (the default family
+  4 s, and read once more under 10 s when it ran out of time) for the lane question, and a roster read when the lane is not free, even when no node can ever match (the default family
   and the 2512 bf16 family of the busiest submitter have no remote match today). A caller that re-sends without its token pays it
   per re-send. The first sketch kept a 60 s copy of the card table; it was dropped for the AUTO plan, where the allocator reads the
   display card's free memory and a minute-old table can call busy a lane the grant would serve, which the contract forbids. Two

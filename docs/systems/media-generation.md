@@ -1995,7 +1995,8 @@ call that names no card) and says busy only when something that makes the grant 
 place in line, epoch, waiter, ledger row, PAIR card or ComfyUI instance) and removes nothing: it reads the lease directory through
 `gpulease.Manager.ReadOnly`, a view that skips the records the line's readers prune as housekeeping (an expired place in line, a
 waiter that stopped polling) and leaves them on disk (`TestMediaLaneFreeWritesNothing`, with a state for each). It says free when it cannot say: a lease the process
-inherited (`gpu reserve -- local-offload ...`), a card table that does not read in 4 s (chosen, not measured), a task or a binding
+inherited (`gpu reserve -- local-offload ...`), a card table that does not read in 4 s, nor in the one 10 s retry that follows a read that ran out of time (both chosen, not measured; the
+retry is the admission's rule at a shorter bound, and a table still unread leaves one `media lane probe` line in the log, F55), a task or a binding
 it does not model (sd.cpp, an unknown family). A call that resumes a place
 in line (a ticket's local run) counts only the callers that arrived before that place, on every plan, because the lease queue serves
 a resumed place by arrival time (`TestMediaLaneFreeOrdersByArrivalForACallThatResumesItsPlace`); a new arrival counts every other
@@ -2136,7 +2137,7 @@ once, or that loses the race to another job, comes back with nothing run and the
 consecutive refusal (the node steps; a reading of busy resets them) and the fleet is looked at meanwhile, so a lane that reads free
 and refuses at once (`gpu_wait_ms` 0, or a younger place on the card that a call without a wait cannot pass) is not asked in a loop,
 each run writing the pipeline's own deferred row (`TestALostRaceOnTheLocalLaneIsNotARetryLoopAndTheFleetIsTriedMeanwhile`). A lane the
-pipeline TRIED to read and could not (the card table past its 4 s bound, the lease directory not opening: `core.LaneVerdict.Unjudged`)
+pipeline TRIED to read and could not (the card table past its 4 s bound and its 10 s retry, the lease directory not opening: `core.LaneVerdict.Unjudged`)
 is not a free lane: the fleet is looked at in the same scan, and the run here is the answer only when no node can take the call
 (`TestAnUnreadLaneStillLooksAtTheFleet`, `TestAnUnreadLaneWithNoNodeRunsHere`); a call the prober does not model at all (another task, a
 binding without a ComfyUI lane, an inherited lease) runs here at once;

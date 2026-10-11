@@ -32,6 +32,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"strings"
 	"time"
 
@@ -42,10 +43,19 @@ import (
 	"github.com/dmmdea/offload-harness/internal/gpuprobe"
 )
 
-// laneProbeBound is how long the probe may spend reading the card table before it gives up and calls the lane free
-// (the call then reads the table itself, with its own retry). Chosen, not measured: a read that has not answered in
-// this long is one the call must not wait behind twice.
-const laneProbeBound = 4 * time.Second
+// laneProbeBound is how long the probe's FIRST read of the card table may take, and laneProbeRetryBound the one retry
+// that follows a read that ran out of time (gpualloc.Deps.CardTable's rule: only a timeout is retried, a failure that is
+// not one fails the same way again). A table that does not read in either is one the probe gives up on and calls the
+// lane not judged, with one log line (the call then reads the table itself, with the admission's 5 s + 15 s). Both are
+// CHOSEN, not measured: 4 s is what the probe has always allowed one read; the retry is 10 s, shorter than the
+// admission's 15 s because the probe is asked before every image call and a ticket scan asks it once per waiting ticket,
+// so its worst case is 14 s per question, not 20. Before this the probe wrapped the caller's context in the 4 s, which made
+// the retry unreachable (a retry needs the caller's context to be good when the attempt ends), so a nvidia-smi that was
+// merely slow under load made every probe answer "not judged" at 4 s, silently (F55). They are variables for the tests.
+var (
+	laneProbeBound      = 4 * time.Second
+	laneProbeRetryBound = 10 * time.Second
+)
 
 var _ core.LaneProber = (*Pipeline)(nil)
 
@@ -58,6 +68,32 @@ type laneOf struct {
 	m     *gpulease.Manager
 	table []gpuprobe.Card
 	plan  mediaPlan
+}
+
+// laneCardTable reads the card table for a lane question: one read under laneProbeBound and, when that read ran out of time
+// while the caller still wanted the answer, one more under laneProbeRetryBound (gpualloc.Deps.CardTable's rule, which only
+// works when the bounds are the Deps' own and not a deadline wrapped around the caller's context: a read that ends because
+// the CALLER's context ended is not retried). A bound the Deps already carry (a test's) is kept. A table that is not
+// read, or lists no card, comes back as an error and leaves one line in the log: the verdict that follows is "not judged"
+// and the router does not log its reason, so without the line a call that waited while another node sat idle had no trace of
+// why (F55). kind says which probe asked.
+func (p *Pipeline) laneCardTable(ctx context.Context, kind string) ([]gpuprobe.Card, error) {
+	deps := p.alloc
+	if deps.ReadDeadline <= 0 {
+		deps.ReadDeadline = laneProbeBound
+	}
+	if deps.RetryDeadline <= 0 {
+		deps.RetryDeadline = laneProbeRetryBound
+	}
+	table, _, err := deps.CardTable(ctx, p.cfg)
+	if err == nil && len(table) == 0 {
+		err = errors.New("it listed no card")
+	}
+	if err != nil {
+		log.Printf("media lane probe (%s): the card table could not be read (%v); the lane is reported as not judged, so the router decides without a reading of this machine's lane and the call reads the table itself", kind, err)
+		return nil, err
+	}
+	return table, nil
 }
 
 // resolveLane resolves an image request against this box. why is not empty when the box cannot judge the request
@@ -93,17 +129,11 @@ func (p *Pipeline) resolveLane(ctx context.Context, req core.Request) (ln laneOf
 		return ln, "the lease directory cannot be opened (" + err.Error() + "); the call reports it itself", true
 	}
 	ln.m = m
-	// The card table, once, under a bound of its own. It sizes the host-RAM need (the call declares what does not fit
-	// its card) and, on a card-scoped host, fixes the plan.
-	rctx, cancel := context.WithTimeout(ctx, laneProbeBound)
-	table, _, terr := p.alloc.CardTable(rctx, p.cfg)
-	cancel()
-	if terr != nil || len(table) == 0 {
-		cause := "it listed no card"
-		if terr != nil {
-			cause = terr.Error()
-		}
-		return ln, "the card table could not be read (" + cause + "); the call reads it itself", true
+	// The card table, read under the probe's bounds (laneCardTable). It sizes the host-RAM need (the call declares what does
+	// not fit its card) and, on a card-scoped host, fixes the plan.
+	table, terr := p.laneCardTable(ctx, "image")
+	if terr != nil {
+		return ln, "the card table could not be read (" + terr.Error() + "); the call reads it itself", true
 	}
 	ln.table = table
 	ln.plan = mediaPlan{whole: true}
