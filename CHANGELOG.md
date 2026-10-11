@@ -6,6 +6,41 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added — `comfy-video.mjs --wan-placement multicard`: the card-only Wan 2.2 placement on the two non-display cards of a lease, with no host RAM
+
+- **What it is.** One Wan 2.2 14B fp8 expert is 13.3 GiB and a film-size clip (720x1280x81) needs 9.7-11.0 GiB more for the sampler, so
+  the clip fits no single 16 GB card, and the single-card way out (ComfyUI's dynamic VRAM) streams the experts through host RAM and costs
+  the host the whole file. `--wan-placement multicard` spends a second card instead: `cuda:0` stores the text encoder, the VAE and the
+  donor blocks of the expert in use, `cuda:1` computes with 3 GiB of the expert resident (`--wan-resident-gb`), and each expert loads
+  through DisTorch2 with `cuda:1,3gb;cuda:0,*`. `single` stays the default and its graph, argv and launch are byte for byte what they were
+  (pinned by tests). Measured on two RTX 5060 Ti 16 GB (benchmark 2026-10-11): 250 s per step at the film's geometry, 13.3 GiB on the
+  compute card and 11.1 GiB on the storage card at the peak, 2.3 GiB of host growth.
+- **The two cards are the lease's, never typed in.** They come from `GPU_LEASE_DEVICES` (else the lease's record, else `--wan-cards`), are
+  read against the driver's card table, and are refused unless there are exactly two and neither drives a display (`display_active` or
+  `display_attached`). The larger card computes; ComfyUI numbers its cards in the order of `CUDA_VISIBLE_DEVICES`, which the runner sets
+  from the two UUIDs storage first, and the running ComfyUI's device list is checked against the pair before anything is submitted.
+- **The launch.** The runner starts its own keyed ComfyUI (`mc-<uuid heads>`) with `--gpu-only --disable-pinned-memory`, the harness's
+  node folder through `--extra-model-paths-config` and the custom-node whitelist the measurement ran with. The caller's
+  `COMFY_CARD_UUID`, `COMFY_CUDA_DEVICE` and `COMFY_DYNAMIC_VRAM` are dropped for that launch (a single-card pin and dynamic VRAM
+  contradict it), and `--wan-loader` is not read (one stderr line when it would have chosen another loader). `ensureComfy` takes a
+  `launch` and records the pair in its launch marker, so a running ComfyUI is reused only when it is this instance on this pair in this
+  order. `--fast`, a GGUF expert, another family and a `--graph` file are refused: none was measured.
+- **`render/comfyui-ext`, the harness's own ComfyUI code (the shared install is not written to).** A read-only safetensors reader
+  (`OFFLOAD_RO_LOAD=1`): stock ComfyUI maps a safetensors file copy-on-write, which Windows charges to commit in full (+13.3 GiB per
+  expert); mapped read-only it charges nothing. And `OffloadFreeForDecode`, a pass-through latent node between the last sampler and the
+  plain `VAEDecode`: it saves the sampled latent, frees both cards of the experts (with `--gpu-only` ComfyUI's own unload frees nothing; the
+  experts leave when their patchers lose their last reference), logs each card's memory, and stops the run with `OFFLOAD-DECODE-NOFIT`
+  and the numbers when the decode card cannot hold a plain decode, because ComfyUI would retry it tiled with its own temporal chunking,
+  the seam the plain decode exists to avoid. After a successful run the runner says `WAN-DECODE-FALLBACK` if the console shows that retry.
+  `--wan-decode tiled` and `auto` keep their meaning.
+- **Host RAM.** `gpu reserve --devices <a>,<b> -- node render/comfy-video.mjs ... --wan-placement multicard` declares 0 when the largest
+  stage (one expert plus 11 GiB of film-size activations) fits the two leased cards' usable VRAM (`hostneed.estimateWith`, new
+  `Facts.CardsGiB` / `LeasedCardsGiB`); one card, three, no card table, no fit, another family or no flag keep the ordinary estimate. The
+  pipeline's media admission has no multicard door yet (every typed door leases one card).
+- **Tests.** 32 new render tests (31 in `wan-multicard.test.mjs`, and `comfyui-ext.test.mjs`, which runs the 12 Python tests of the node
+  pack) and the host-RAM tests, written red first. The one existing test that pinned `generate()`'s source takes the plan as a fourth argument.
+  Docs: `docs/systems/media-generation.md`, "Card-only Wan".
+
 ### Fixed — a render on one card no longer unloads the seats placed on the others, and a seat that comes back onto a leased card leaves before the next render (F15)
 
 - **The defect (register F15, from the 0.176.0 notes).** The render helper cleared "every non-keep-set model whatever card it sits
