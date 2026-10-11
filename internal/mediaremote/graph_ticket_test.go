@@ -145,6 +145,18 @@ func TestABusyGraphIsATicketAndTheSameGraphAttachesToIt(t *testing.T) {
 		t.Errorf("%d different graphs, %d tickets: %v", 1+len(other), len(ticketFiles(t, e.cfg)), files)
 	}
 
+	// A manifest is its content too: the same manifest from a file of its own attaches, an edited one is another job.
+	m1 := writeFile(t, t.TempDir(), "a.json", []byte(`{"models":[{"name":"x"}]}`))
+	m2 := writeFile(t, t.TempDir(), "b.json", []byte(`{"models":[{"name":"x"}]}`))
+	m3 := writeFile(t, t.TempDir(), "c.json", []byte(`{"models":[{"name":"y"}]}`))
+	withManifest := graphAnswer(t, runDoor(e.cfg, e.lr, resend(e, req, krea2Graph, map[string]any{"manifest_path": m1}), AtOnce))
+	if a := graphAnswer(t, runDoor(e.cfg, e.lr, resend(e, req, krea2Graph, map[string]any{"manifest_path": m2}), AtOnce)); a.Ticket != withManifest.Ticket {
+		t.Errorf("the same manifest from another file is the same ticket: %s vs %s", a.Ticket, withManifest.Ticket)
+	}
+	if a := graphAnswer(t, runDoor(e.cfg, e.lr, resend(e, req, krea2Graph, map[string]any{"manifest_path": m3}), AtOnce)); a.Ticket == withManifest.Ticket {
+		t.Errorf("another manifest is another ticket: %s", a.Ticket)
+	}
+
 	// A token names ITS request: sent with another graph it is refused by name, and nothing is made or collected.
 	wrong := runDoor(e.cfg, e.lr, resend(e, req, plainGraph, map[string]any{"waiter_token": first.Ticket}), AtOnce)
 	if wrong.OK || wrong.DeferClass != core.DeferClassContract || !strings.Contains(wrong.Reason, "different request") {
@@ -479,6 +491,33 @@ func TestAFileRefusalIsNotCapableForThatTicketAndNeverFull(t *testing.T) {
 	if n := len(lacks.posts()); n != 2 { // the refusal, and the other graph that it ran
 		t.Errorf("the node that lacks the file saw this graph once (and the other graph): %d POSTs", n)
 	}
+}
+
+// A refusal is a fact about the node on the day it was given: a ticket that waits for hours asks the node again after
+// notCapableAgain (an operator who placed the file wants it found), and the row counts the time down.
+func TestATicketAsksANodeThatRefusedItAgainAfterAWhile(t *testing.T) {
+	e := newGEnv(t)
+	lacks := e.node("node-a", false, nodeOpts{}, "models/vae/other.safetensors")
+	e.node("node-b", true, nodeOpts{}, krea2File)
+	e.start()
+	now := pinPlacerClock(t)
+	req := e.req(krea2Graph, nil)
+	graphAnswer(t, runDoor(e.cfg, e.lr, req, AtOnce))
+	waitFor(t, 5*time.Second, "the first refusal", func() bool { return len(lacks.posts()) == 1 })
+	a := settle(t, e.cfg, e.lr, req, rowIs("node-a", "not-capable"))
+	row, _ := rowFor(answerOf(t, a).Cluster, "node-a")
+	if !strings.Contains(row.Why, "asks it again in 5m0s") {
+		t.Errorf("the row says when the ticket asks again: %+v", row)
+	}
+	time.Sleep(200 * time.Millisecond)
+	if n := len(lacks.posts()); n != 1 {
+		t.Fatalf("not asked again inside the interval: %d POSTs", n)
+	}
+
+	// The interval passes (the node, which still lacks the file, answers the second ask as it did the first: a second POST is the
+	// proof that the ticket asked) with no call from the caller.
+	*now = now.Add(notCapableAgain + time.Second)
+	waitFor(t, 5*time.Second, "the ticket asks the node again", func() bool { return len(lacks.posts()) == 2 })
 }
 
 // With the node's refusal first in the roster and a node that holds the file after it, the graph is not delayed by the
