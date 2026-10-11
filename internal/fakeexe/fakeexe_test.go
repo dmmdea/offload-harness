@@ -63,45 +63,35 @@ func TestAStandInRunsAndItsDirectoryIsRemovedWhenItsTestEnds(t *testing.T) {
 	}
 }
 
-// The folder of a helper call is inside the calling test's own temp directory, not a folder of its own in the
-// shared temp root: a test run that is killed before its cleanups run (a timeout, a guard, a crash) then leaves
-// it inside the run's temp root, and a harness that deletes that root deletes it. A helper that made its own
-// folder in the temp root (MkdirTemp("", ...)) leaves one per call there whenever a run is killed. The temp
-// root here is private to the test, so the folders that appear in it are exactly this helper's.
-func TestAHelperCallLeavesNothingInTheTempRootBeforeOrAfterItsTestEnds(t *testing.T) {
-	root := t.TempDir()
-	for _, k := range []string{"TMPDIR", "TMP", "TEMP"} {
-		t.Setenv(k, root)
-	}
-	var dir string
+// The folder of a helper call is inside the calling test's own temp directory (the one testing makes for
+// t.TempDir and removes when the test ends), not a folder of its own in the shared temp root: a test run that
+// is killed before its cleanups run (a timeout, a guard, a crash) then leaves it inside the run's temp root, and
+// a harness that deletes that root deletes it. A helper that made its own folder in the temp root
+// (MkdirTemp("", ...)) leaves one per call there whenever a run is killed. (This cannot be seen by pointing
+// TMP elsewhere: testing fixes its temp base when the binary starts.) The test's directory is also gone,
+// with the helper's folders, once the test has ended.
+func TestAHelperCallStaysInsideTheTestsOwnTempDirAndIsGoneWhenItsTestEnds(t *testing.T) {
+	var home, dir, place string
 	t.Run("use", func(t *testing.T) {
+		home = filepath.Dir(t.TempDir()) // the test's own temp directory; its folders are numbered 001, 002, ...
 		dir = Dir(t)
 		Install(t, dir, "ffmpeg")
 		Install(t, dir, "ffprobe")
-		if parent := filepath.Dir(dir); parent == filepath.Clean(root) {
-			t.Errorf("the helper's folder %q is a direct child of the temp root: a killed run would leave it there", dir)
+		place = Place(t, "standin")
+		for _, d := range []string{dir, filepath.Dir(place)} {
+			if filepath.Dir(d) != home {
+				t.Errorf("the helper's folder %q is not inside the test's temp directory %q: a killed run would leave it in %q",
+					d, home, filepath.Dir(d))
+			}
 		}
-		if rel, err := filepath.Rel(root, dir); err != nil || strings.HasPrefix(rel, "..") {
-			t.Errorf("the helper's folder %q is outside the test's temp directory under %q", dir, root)
-		}
-		place := Place(t, "standin")
-		if parent := filepath.Dir(filepath.Dir(place)); parent == filepath.Clean(root) {
-			t.Errorf("Place's folder %q is a direct child of the temp root", filepath.Dir(place))
+		if dir == filepath.Dir(place) {
+			t.Errorf("Dir and Place returned the same folder %q", dir)
 		}
 	})
-	if _, err := os.Stat(dir); !os.IsNotExist(err) {
-		t.Errorf("the helper's folder %q is still there after its test ended (stat err %v)", dir, err)
-	}
-	left, err := os.ReadDir(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var names []string
-	for _, e := range left {
-		names = append(names, e.Name())
-	}
-	if len(names) != 0 {
-		t.Errorf("the temp root still holds %v after the test that used the helper ended", names)
+	for _, p := range []string{dir, filepath.Dir(place), home} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Errorf("%q is still there after the test that used the helper ended (stat err %v)", p, err)
+		}
 	}
 }
 
