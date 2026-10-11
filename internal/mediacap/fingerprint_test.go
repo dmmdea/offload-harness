@@ -388,28 +388,44 @@ func TestIsFingerprint(t *testing.T) {
 // Past its bound the cache drops the files asked for least recently, never the ones in use: a node's few dozen weight
 // files stay, and a churn of replaced files does not evict the warm ones.
 func TestTheCacheDropsTheLeastRecentlyUsedPastItsBound(t *testing.T) {
-	var hashes atomic.Int32
-	f := countingFingerprinter(&hashes)
+	var mu sync.Mutex
+	reads := map[string]int{}
+	f := NewFingerprinterWith(func(path string, size int64) (string, error) {
+		mu.Lock()
+		reads[filepath.Base(path)]++
+		mu.Unlock()
+		return FingerprintFile(path, size)
+	})
 	f.max = 8
 	dir := t.TempDir()
 	var paths []string
+	var sizes []int64
 	for i := 0; i < 12; i++ {
 		p := filepath.Join(dir, string(rune('a'+i))+".safetensors")
 		if err := os.WriteFile(p, bytes.Repeat([]byte{byte(i)}, 2000+i), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		paths = append(paths, p)
+		paths, sizes = append(paths, p), append(sizes, int64(2000+i))
 	}
-	hot := paths[0]
-	f.Await(hot, 2000)
-	for i := 1; i < 12; i++ {
-		f.Await(paths[i], int64(2000+i))
-		f.Await(hot, 2000) // asked for again between the others
+	for i := range paths {
+		f.Await(paths[i], sizes[i])
+		f.Await(paths[0], sizes[0]) // the first file is asked for again between the others: it is in use
 	}
-	before := hashes.Load()
-	f.Await(hot, 2000)
-	if hashes.Load() != before {
-		t.Error("the file in use was dropped by the bound")
+	mu.Lock()
+	hot, early := reads["a.safetensors"], reads["b.safetensors"]
+	mu.Unlock()
+	if hot != 1 {
+		t.Errorf("the file in use was read %d times: the bound must not drop it", hot)
+	}
+	if early != 1 {
+		t.Fatalf("premise: the early file was read %d times", early)
+	}
+	f.Await(paths[1], sizes[1])
+	mu.Lock()
+	again := reads["b.safetensors"]
+	mu.Unlock()
+	if again != 2 {
+		t.Errorf("an early file nobody asked for again should have been dropped by the bound and read again: %d reads", again)
 	}
 	f.mu.Lock()
 	n := len(f.m)

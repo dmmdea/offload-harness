@@ -163,7 +163,11 @@ func TestTwoPendingRecipesAreNeverAMatch(t *testing.T) {
 	if local.recipe.Digest() != row.Digest {
 		t.Fatal("the premise: both sides are the same string")
 	}
-	if m, ok := matchNode(local, v, need{}); ok {
+	m, ok := matchNode(local, v, need{})
+	if ok {
 		t.Fatalf("two pending recipes matched: %+v", m)
+	}
+	if !strings.Contains(m.why, "this machine has not fingerprinted") {
+		t.Errorf("the miss must say that THIS machine has no identity yet, not blame the node: %s", m.why)
 	}
 }
