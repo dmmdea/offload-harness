@@ -4,7 +4,7 @@
 // functions; this file covers the places they are wired in, which a one-line change can break without failing any of them.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { generate, planRun, GENERATE_IO, buildGraphForRun, submitChecked, verifyMulticardDevices, verifyMulticardPack } from "./comfy-video.mjs";
+import { generate, planRun, seamedPath, GENERATE_IO, buildGraphForRun, submitChecked, verifyMulticardDevices, verifyMulticardPack } from "./comfy-video.mjs";
 import { pollOutputs, fetchView, finalizeRun, resolveCli } from "./comfy-submit.mjs";
 import { comfyApi, comfyLogCursor } from "./comfy-lifecycle.mjs";
 import { writeFileAtomic } from "./atomic-out.mjs";
@@ -236,4 +236,14 @@ test("generate() under multicard gives the wait 2 h unless the caller chose a bu
   const single = await run({}, {}, null);
   assert.equal(single.wait, 5400, "the single placement keeps its budget");
   assert.deepEqual(single.err, []);
+});
+
+test("seamedPath keeps the clip beside the requested path: before the extension, whatever the separators and dots of the folder", () => {
+  assert.equal(seamedPath("o.mp4"), "o.seamed.mp4");
+  assert.equal(seamedPath("out/o.mp4"), "out/o.seamed.mp4");
+  assert.equal(seamedPath("C:\\out.v2\\o.mp4"), "C:\\out.v2\\o.seamed.mp4");
+  assert.equal(seamedPath("out.v2/o"), "out.v2/o.seamed", "a dot in the folder is not an extension");
+  assert.equal(seamedPath("C:\\out.v2\\o"), "C:\\out.v2\\o.seamed", "nor is one before a backslash");
+  assert.equal(seamedPath("out/.hidden"), "out/.hidden.seamed", "a leading dot is not an extension either");
+  assert.equal(seamedPath("a.b.mp4"), "a.b.seamed.mp4");
 });

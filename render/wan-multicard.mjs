@@ -468,8 +468,18 @@ export function oomWedgeLine(text) {
  */
 export function createOomWatch({ cursor, say = () => {} }) {
   let saidAbsent = false, saidCapped = false;
-  return () => {
-    const { text, state } = cursor.read();
+  let fellBack = false, capped = false, last = "ok";
+  // one read of the console, remembering what a later read must not forget: a plain-decode retry seen once is seen, and a capture that reached
+  // its cap is blind for the rest of the run
+  const step = () => {
+    const r = cursor.read();
+    last = r.state;
+    if (r.state === "capped") capped = true;
+    if (decodeFellBack(r.text)) fellBack = true;
+    return r;
+  };
+  const watch = () => {
+    const { text, state } = step();
     const line = oomWedgeLine(text);
     if (line) {
       return `WAN-OOM: ComfyUI ran out of memory and its prompt worker did not survive it (its console says "${line}"), so this prompt will never finish and will never be reported as failed; the wait ends here instead of holding the two leased cards for the rest of its budget. ComfyUI must be restarted; its console is ${cursor.path}.`;
@@ -483,6 +493,14 @@ export function createOomWatch({ cursor, say = () => {} }) {
     }
     return null;
   };
+  /** drain: read what the console still holds (one read takes at most 8 MiB), so the verdict covers the whole run. */
+  watch.drain = () => { for (let i = 0; i < 64; i++) { if (!step().text) break; } };
+  /**
+   * verdict, after the run: "fallback" when ComfyUI retried the plain decode tiled (seen on any read), "blind" when the console could not be read
+   * to the end (missing, or the capture reached its cap), else "clean". A verdict of "clean" is only as good as the console it was read from.
+   */
+  Object.defineProperty(watch, "verdict", { get: () => (fellBack ? "fallback" : capped || last === "absent" ? "blind" : "clean") });
+  return watch;
 }
 
 export { WAN_PLACEMENTS, WAN_PLACEMENT_DEFAULT, WAN_RESIDENT_GB_DEFAULT, WAN_STORAGE_DEVICE, WAN_COMPUTE_DEVICE };

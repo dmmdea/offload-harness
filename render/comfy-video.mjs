@@ -43,7 +43,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { writeFileAtomic } from "./atomic-out.mjs";
 import { withGpuSlot } from "./gpu-lock.mjs";
 import { familySignature } from "./comfy-family.mjs";
-import { COMFY_DIR, comfyApi, tailComfyLog, comfyLogPath, comfyLogCursor } from "./comfy-lifecycle.mjs";
+import { COMFY_DIR, comfyApi, comfyLogPath, comfyLogCursor } from "./comfy-lifecycle.mjs";
 import { stageInput as stageToInput } from "./comfy-input.mjs";
 import { firstOutputFile } from "./comfy-output.mjs";
 import { assertNodeClasses, missingNodeClasses } from "./comfy-nodes.mjs";
@@ -53,7 +53,7 @@ import { buildLtx25I2V } from "./wf-ltx25-i2v.mjs";
 import { buildH3AV } from "./wf-h3-av.mjs";
 import { buildAceStep } from "./wf-acestep.mjs";
 import { resolveCli, submitGraph, pollOutputs, fetchView, finalizeRun } from "./comfy-submit.mjs";
-import { planMulticard, checkComfyDevices, decodeFellBack, portNote, createOomWatch, MULTICARD_WAIT_SEC } from "./wan-multicard.mjs";
+import { planMulticard, checkComfyDevices, portNote, createOomWatch, MULTICARD_WAIT_SEC } from "./wan-multicard.mjs";
 
 // BOOL_FLAGS take no value. --fast was missing from this list, so the parser took the
 // NEXT token as its value: a trailing --fast (the harness appends it after --hero) read
@@ -320,7 +320,7 @@ export async function verifyMulticardPack(api, plan, { fetchImpl = fetch } = {})
 // defaults are the real ones; nothing else about the function changes.
 export const GENERATE_IO = Object.freeze({
   verifyDevices: verifyMulticardDevices, verifyPack: verifyMulticardPack, buildGraph: buildGraphForRun, submit: submitChecked,
-  poll: pollOutputs, view: fetchView, write: writeFileAtomic, tailLog: tailComfyLog, logCursor: comfyLogCursor, finalize: finalizeRun, resolveCli,
+  poll: pollOutputs, view: fetchView, write: writeFileAtomic, logCursor: comfyLogCursor, finalize: finalizeRun, resolveCli,
   stdout: (...a) => console.log(...a), stderr: (...a) => console.error(...a), env: process.env, comfyDir: COMFY_DIR,
 });
 
@@ -355,16 +355,39 @@ export async function generate(out, API, pos, flags, multicard, io = {}) {
     ...(watch ? { watch } : {}),
   });
   const file = firstOutputFile(h.outputs, graph);
-  x.write(out, await x.view({ api: API, file }));
-  x.stdout("WROTE", out);
+  const bytes = await x.view({ api: API, file });
   // multicard + plain decode: the sampled latent the free node saved (the line a failed decode's message carries too).
-  for (const f of h.outputs?.["21"]?.latents || []) x.stdout(`LATENT ${f.subfolder ? `${f.subfolder}/${f.filename}` : f.filename} (in ComfyUI's output directory)`);
-  if (multicard) {
-    // ComfyUI retries a plain decode that ran out of memory TILED, with its own temporal chunking: a clip that can seam. Said, not hidden.
-    const tail = x.tailLog(x.comfyDir, 4000, multicard.launch.key);
-    if (decodeFellBack(tail)) x.stderr(`WAN-DECODE-FALLBACK: ComfyUI ran out of memory in the plain decode and retried it tiled (see ${comfyLogPath(x.comfyDir, multicard.launch.key)}); check the clip for a seam at frames 24 and 48`);
+  const latents = (h.outputs?.["21"]?.latents || []).map((f) => (f.subfolder ? `${f.subfolder}/${f.filename}` : f.filename));
+  const sayLatents = () => { for (const l of latents) x.stdout(`LATENT ${l} (in ComfyUI's output directory)`); };
+  // --wan-decode plain asks for ONE decode pass, a clip without seams. ComfyUI retries a plain decode that ran out of memory TILED, with temporal tiles it
+  // sizes itself, and that clip can seam where its tiles meet: judged by what THIS run's console said (the watch's cursor began before the submit), never
+  // by the tail of a log that a kept instance shares with earlier runs. The tiled decode (the default) is the decode that was asked for.
+  const plain = !!watch && Object.values(graph).some((n) => n.class_type === "VAEDecode");
+  if (watch) watch.drain();
+  const verdict = watch ? watch.verdict : "clean";
+  const log = comfyLogPath(x.comfyDir, multicard ? multicard.launch.key : "");
+  if (plain && verdict === "fallback") {
+    // The finished clip is kept beside the requested path, not thrown away (the sample cost the whole run), and the run fails: a caller that keys on
+    // the exit code or on WROTE must not ship the seams.
+    const seamed = seamedPath(out);
+    x.write(seamed, bytes);
+    sayLatents();
+    await x.finalize({ api: API, promptId, cli });
+    throw new Error(`WAN-DECODE-FALLBACK: ComfyUI ran out of memory in the plain decode and retried it tiled with temporal tiles of its own, so the clip is not the single-pass decode that was asked for and can seam where its tiles meet (console: ${log}). The finished clip was kept as ${seamed} instead of ${out}${latents.length ? `; the sampled latent is ${latents.join(", ")} in ComfyUI's output directory, to decode again with more room` : ""}.`);
+  }
+  x.write(out, bytes);
+  x.stdout("WROTE", out);
+  sayLatents();
+  if (plain && verdict === "blind") {
+    x.stderr(`WAN-DECODE-UNVERIFIED: ComfyUI's console (${log}) could not be read to the end (it is missing, or its capture reached the 5 MB cap), so whether ComfyUI retried the plain decode tiled is unknown; check the clip for seams where temporal tiles would meet`);
   }
   await x.finalize({ api: API, promptId, cli });
+}
+
+/** seamedPath: where a clip that is not the one that was asked for is kept, beside the requested path (out/o.mp4 -> out/o.seamed.mp4). */
+export function seamedPath(out) {
+  const dot = out.lastIndexOf("."), slash = Math.max(out.lastIndexOf("/"), out.lastIndexOf("\\"));
+  return dot > slash + 1 ? `${out.slice(0, dot)}.seamed${out.slice(dot)}` : `${out}.seamed`;
 }
 
 const USAGE = 'usage: node comfy-video.mjs <out.mp4> <still> "<prompt>" [--model hunyuan|wan] [flags]   |   <out.mp4> --graph wf.json';
