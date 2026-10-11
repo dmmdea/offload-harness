@@ -174,3 +174,26 @@ test("generate() under multicard hands the poll a watch on THIS instance's conso
   await generate("o.mp4", "http://x", [], {}, null, plain.io);
   assert.ok(!("watch" in plain.rec.polls[0]), "the poll's options are what they always were");
 });
+
+// ---- the wait budget of a film-size run ------------------------------------------------------------------------
+
+// The benchmark measured 250.3 s per step at the film's geometry and a 4-step prompt wall of 1,165.7 s: the 20-step recipe is about 5,170 s
+// (the 164.5 s that is not sampling, plus 20 steps). The single-card default of 5,400 s leaves 4.5 percent; a run that is 5 percent slower is
+// killed at the end of an hour and a half of sampling and nothing of it is kept (the latent is saved after the second sampler).
+test("generate() under multicard gives the wait 2 h unless the caller chose a budget, and says which it used", async () => {
+  assert.equal(M.MULTICARD_WAIT_SEC, 7200);
+  assert.ok(M.MULTICARD_WAIT_SEC >= 1.35 * (164.5 + 20 * 250.3), "at least 35 percent over the measured projection of the 20-step film run");
+  const run = async (flags, env, plan) => { const { io, rec } = fakeIo({ env }); await generate("o.mp4", "http://x", [], flags, plan, io); return { wait: rec.polls[0].waitSec, err: rec.err }; };
+  const dflt = await run({}, {}, PLAN);
+  assert.equal(dflt.wait, 7200);
+  assert.ok(dflt.err.some((l) => /^WAN-WAIT-NOTE: .*7200 s.*--wait-sec/.test(l)), dflt.err.join("\n"));
+  const flag = await run({ "wait-sec": "9000" }, { COMFY_WAIT_SEC: "999" }, PLAN);
+  assert.equal(flag.wait, 9000);
+  assert.ok(!flag.err.some((l) => /WAN-WAIT-NOTE/.test(l)), "a budget the caller chose needs no note");
+  const env = await run({}, { COMFY_WAIT_SEC: "6000" }, PLAN);
+  assert.equal(env.wait, 6000);
+  assert.ok(!env.err.some((l) => /WAN-WAIT-NOTE/.test(l)));
+  const single = await run({}, {}, null);
+  assert.equal(single.wait, 5400, "the single placement keeps its budget");
+  assert.deepEqual(single.err, []);
+});
