@@ -2527,6 +2527,25 @@ func resolveOutDir(mediaDir, callerOutDir string) (string, error) {
 	return dir, nil
 }
 
+// runGraphEnvelopePath names the result envelope of one call: a random name under the media dir, so two runs, whichever graphs they
+// hold, never read or remove each other's.
+func runGraphEnvelopePath(mediaDir string) string {
+	var b [6]byte
+	_, _ = crand.Read(b[:]) // cannot fail on this toolchain (Go >= 1.24)
+	return filepath.Join(mediaDir, "run-graph-"+hex.EncodeToString(b[:])+".json")
+}
+
+// removeRunGraphEnvelope deletes the envelope of a call that has read it. A scanner that holds the file for a moment after the
+// runner wrote it (a sharing violation on Windows) is waited out for a short while; a file that is not there is not an error.
+func removeRunGraphEnvelope(path string) {
+	for i := 0; i < 20; i++ {
+		if err := os.Remove(path); err == nil || errors.Is(err, os.ErrNotExist) {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+}
+
 // runRunGraph executes an arbitrary ComfyUI API-format graph + satisfies its node manifest
 // on the LOCAL ComfyUI by shelling out to comfy-run-graph.mjs (shared GPU lock + ComfyUI
 // lifecycle via internal/rungraph → gpugen). Its own branch — no text models, no grammar,
@@ -2541,11 +2560,15 @@ func (p *Pipeline) runRunGraph(ctx context.Context, req core.Request, meta core.
 	if err != nil {
 		return p.deferGen(req, meta, start, len(req.Input), err.Error())
 	}
-	// Default the result envelope + output dir under the media dir so an inline caller need
-	// not pick paths; a stable name lets a re-run reuse one file.
+	// Default the result envelope under the media dir so an inline caller need not pick a path. It is the runner's note to this
+	// one call: read once below and removed when the call ends, whatever the run came to, so nothing it leaves behind grows with the
+	// number of calls. (It used to be named from the graph's path, "so a re-run reuses one file", but a caller that hands a graph
+	// file of its own for every call, which is what a graph ticket, an inline graph_json and a fleet node's job all do, got an
+	// envelope of its own that nothing ever removed.) A caller that names result_path owns that file: it is written there and kept.
 	if params.ResultPath == "" {
 		_ = os.MkdirAll(p.cfg.MediaDir, 0o755)
-		params.ResultPath = filepath.Join(p.cfg.MediaDir, "run-graph-"+sha256hex(params.GraphPath + params.ManifestPath)[:8]+".json")
+		params.ResultPath = runGraphEnvelopePath(p.cfg.MediaDir)
+		defer removeRunGraphEnvelope(params.ResultPath)
 	}
 	outDir, oerr := resolveOutDir(p.cfg.MediaDir, params.OutDir)
 	if oerr != nil {
