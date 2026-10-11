@@ -521,6 +521,13 @@ const (
 // no other job is in the way, so the call has no place in line to wait for.
 const ErrClassGPULeaseUnavailable = "gpu_lease_unavailable"
 
+// ErrClassNoNodeConfigured is the err_class of a media call the delegator could not place because EVERY node of its roster
+// was left out for a configuration fact: the node does not serve the task, a route the call needs is not configured on it,
+// it cannot carry refine=false, or the tailnet guard refused its roster entry. Nothing ran and waiting does not change any of
+// it, so it is not CardHeld (no place in line is coming); a roster with one node that is merely busy, text-leased or out of
+// reach never gets it, because that node may take the call later. The only producer is internal/mediaremote (pickNodeFor).
+const ErrClassNoNodeConfigured = "no_node_configured"
+
 // CardHeld reports whether errClass says the call was held back by another job's hold on what it
 // needed (the GPU card, or a composition's one slot). It decides by class and never by reason text:
 // the reason is a sentence for a person.

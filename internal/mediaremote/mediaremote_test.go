@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -987,11 +988,7 @@ func TestPlacementNamesEveryMissAndMediaJobIsRequiredForInputs(t *testing.T) {
 }
 
 func asPlacement(err error, target **placementError) bool {
-	pe, ok := err.(*placementError)
-	if ok {
-		*target = pe
-	}
-	return ok
+	return errors.As(err, target)
 }
 
 func TestRankingPrefersNoHeldLeaseThenTheShortestQueueThenConfigOrder(t *testing.T) {

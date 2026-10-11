@@ -26,7 +26,10 @@ package mediaremote
 // arrive then): {i, out, seed, ok, ms, error} (what pipeline.parseBatchResults reads from the render script) plus node,
 // family, sha256 and verdict. rendered: the lane ran it and the file at `out` is there, non-empty, hashed;
 // skipped-existing: --resume found the file already there AND proved it (non-empty, a PNG that decodes whole, the size the
-// job names); failed: it did not render (the reason is in error) and nothing is left at its out; queued: the command ended before the job did.
+// job names); failed: it did not render (the reason is in error) and this job wrote nothing that a --resume could take for a
+// picture (a picture that was already at `out` before the batch is not this job's to remove); queued: the job has no result
+// yet, because the command ended before it did or because no lane or node had a place for it (a busy card is a place in
+// line, never a failure: the reason is in error and --resume renders it).
 //
 // RESUME is fail-safe by construction. The ENOSPC night of 2026-10-09 left 21 zero-byte PNGs that a skip-existing script
 // took for finished work, so a file is skipped only when it proves itself, and anything doubtful is rendered again. A job
@@ -48,6 +51,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/dmmdea/offload-harness/internal/config"
@@ -159,6 +163,9 @@ type Batch struct {
 	Deferred bool
 	// Interrupted: the caller's context ended before every job did.
 	Interrupted bool
+	// Ceiling: a job waited the queue's own ceiling (BatchHoldWindow) for a place and found none, so the jobs not yet sent
+	// were queued at once instead of each waiting the ceiling in turn.
+	Ceiling bool
 	// Err is the error the warm call stopped with, if it did.
 	Err error
 }
@@ -209,8 +216,8 @@ func (b *Batch) OK() int {
 // ExitCode is the status the command ends with. 0: every job has its picture, or a busy lane kept the whole warm batch
 // waiting past its window (a defer, recoverable by running it again, as it always was: the rows are `queued`, so exit 0 does
 // NOT say every picture is there). imagegen.BatchExitJobsFailed: some job failed, whether it ran or failed before any lane was
-// asked, and a defer does not hide it. 1: it stopped (the warm call errored, or the caller interrupted it before every job
-// ended, or a job found no place within the queue's ceiling), so a wrapper can tell "some failed" from "stopped".
+// asked, and a defer does not hide it. 1: it stopped (the warm call errored, the caller interrupted it before every job
+// ended, or a job is queued because no lane or node had a place for it), so a wrapper can tell "some failed" from "stopped".
 func (b *Batch) ExitCode() int {
 	switch {
 	case b.Deferred:
@@ -346,6 +353,7 @@ func RunBatch(ctx context.Context, cfg config.Config, runner Runner, jobs []Batc
 	if ctx.Err() != nil {
 		b.Interrupted = b.Queued() > 0
 	}
+	b.Ceiling = st.ceiling.Load()
 	return b, nil
 }
 
@@ -411,7 +419,10 @@ type batchState struct {
 	// serial: the jobs go through the single-render call with no comparison of the recipe, so a row carries the family and
 	// the licence the node that rendered it reported.
 	serial bool
-	mu     sync.Mutex
+	// ceiling is set when a job waited the queue's ceiling for a place and found none: the jobs not yet sent are then queued
+	// at once (runJobs).
+	ceiling atomic.Bool
+	mu      sync.Mutex
 }
 
 // final records a job's row, the one time it is written, and hands it to the caller.
@@ -654,12 +665,19 @@ launch:
 		select {
 		case slots <- struct{}{}:
 		case <-ctx.Done():
-			s.notStarted(jobs, todo, i)
+			s.notStarted(jobs, todo, i, notStartedInterrupted)
 			break launch
 		}
 		if ctx.Err() != nil {
 			<-slots
-			s.notStarted(jobs, todo, i)
+			s.notStarted(jobs, todo, i, notStartedInterrupted)
+			break launch
+		}
+		if s.ceiling.Load() {
+			// A job waited the queue's whole ceiling for a place (the oldest in the line, or the one in front of this
+			// one): the fleet has none for this job either, and sending it would only hold it for another ceiling.
+			<-slots
+			s.notStarted(jobs, todo, i, fmt.Sprintf("not started: an earlier job of this batch waited %s for a place and found none, so none is likely for this one; run the batch again with --resume to render it", shortDuration(ticketMaxWait)))
 			break launch
 		}
 		wg.Add(1)
@@ -672,26 +690,42 @@ launch:
 	wg.Wait()
 }
 
-// notStarted records the jobs from `from` on, which the interrupt reached before they were sent anywhere.
-func (s *batchState) notStarted(jobs []BatchJob, todo []int, from int) {
+// notStartedInterrupted is the reason of a job the caller's interrupt reached before it was sent anywhere.
+const notStartedInterrupted = "not started: the batch was interrupted before this job was sent to a lane"
+
+// notStarted records the jobs from `from` on as queued with the reason: they were not sent anywhere.
+func (s *batchState) notStarted(jobs []BatchJob, todo []int, from int, why string) {
 	started := false
 	for _, i := range todo {
 		if i == from {
 			started = true
 		}
 		if started {
-			s.final(i, BatchRow{Out: jobs[i].Out, Seed: jobs[i].Seed, Verdict: VerdictQueued, Error: "not started: the batch was interrupted before this job was sent to a lane"})
+			s.final(i, BatchRow{Out: jobs[i].Out, Seed: jobs[i].Seed, Verdict: VerdictQueued, Error: why})
 		}
 	}
 }
 
+// shortDuration words a wait for a person: whole minutes from a minute up, the duration as it is below.
+func shortDuration(d time.Duration) string {
+	if d >= time.Minute {
+		return d.Round(time.Minute).String()
+	}
+	return d.String()
+}
+
 // runJob is one job's single-render call, with the wait for its lane inside it.
 //
-// A job is never failed for want of a place. On the ticket path the call blocks in the queue for its lane, and a lane that
-// read free but was taken by a sibling job a moment later is asked again a bounded number of times (batchBusyRetries). Where
-// the jobs go one at a time (serial) there is no ticket to hold the job, so a held card or a fleet with no node to take it
-// is asked again after a pause (batchWaitSteps) until the job is placed, the caller interrupts, or the queue's own ceiling
-// (ticketMaxWait) ends: then the job is `queued`, and --resume renders it. Anything else the call answers is final.
+// A job is never failed for want of a place: an answer that says no lane or node had one for it (a held card, the queue's
+// own ceiling, a fleet with no node free to take it) ends the job `queued` with that reason, and --resume renders it. On the
+// ticket path the call blocks in the queue for its lane, and a lane that read free but was taken by a sibling job a moment
+// later (a held card answered by the lane itself, not by the queue) is asked again a bounded number of times
+// (batchBusyRetries); the queue's own end of a ticket (queueEnded) is not that race and is never sent again, because that
+// would start another ticket and wait another ceiling. Where the jobs go one at a time (serial) there is no ticket to hold
+// the job, so a held card or a fleet with no node free to take it is asked again after a pause (batchWaitSteps) until the
+// job is placed, the caller interrupts, or the queue's own ceiling (ticketMaxWait) passes. A fleet that can NEVER take the
+// job (every node left out for a configuration fact, see noPlaceNow) is not waited for: the job fails at once, naming each
+// node's miss. Anything else the call answers is final.
 func (s *batchState) runJob(ctx context.Context, cfg config.Config, runner Runner, i int, j BatchJob, route string) BatchRow {
 	req := batchRequest(j, s.o.Family)
 	w := Wait{Window: -1, RosterFile: s.o.RosterFile}
@@ -718,7 +752,7 @@ func (s *batchState) runJob(ctx context.Context, cfg config.Config, runner Runne
 			}
 			continue
 		}
-		if attempt >= batchBusyRetries || !core.CardHeld(res.Meta.ErrClass) {
+		if attempt >= batchBusyRetries || !core.CardHeld(res.Meta.ErrClass) || queueEnded(res) {
 			break
 		}
 		// A lane that read free when this job was admitted was taken by another job of this batch first. Asked again, the
@@ -742,6 +776,19 @@ func (s *batchState) runJob(ctx context.Context, cfg config.Config, runner Runne
 			// Nothing is wrong with the job: the fleet had no room for the whole of the queue's ceiling.
 			row.Verdict = VerdictQueued
 			row.Error = fmt.Sprintf("waited %s for a place and found none (%s): the job is queued, run the batch again with --resume to render it", time.Since(start).Round(time.Second), row.Error)
+			s.ceiling.Store(true)
+		case res.Deferred && queueEnded(res):
+			// The queue ended the ticket without a place for this job (its ceiling, or a ticket it could not take over). Nothing
+			// is wrong with the job, and the queue has waited for it already: it is not sent again here.
+			row.Verdict = VerdictQueued
+			row.Error = fmt.Sprintf("the queue ended this job's ticket without a place for it (%s): the job is queued, run the batch again with --resume to render it", row.Error)
+			if queueCeiling(res) {
+				s.ceiling.Store(true)
+			}
+		case res.Deferred && core.CardHeld(res.Meta.ErrClass):
+			// A card that stays held is a place in line, not a failure: the lane itself answered held on every ask.
+			row.Verdict = VerdictQueued
+			row.Error = fmt.Sprintf("no place for it after %d ask(s) (%s): the job is queued, run the batch again with --resume to render it", 1+batchBusyRetries, row.Error)
 		default:
 			row.Verdict = VerdictFailed
 		}
@@ -781,8 +828,11 @@ func (s *batchState) runJob(ctx context.Context, cfg config.Config, runner Runne
 }
 
 // noPlaceNow says a call's answer is "there is no place for this job now" and not a verdict on the job: a card that is held
-// (a node's own busy answer), or the delegator's own capacity defer (no node is reachable, free of a text lease and able to
-// take it). Both clear by themselves.
+// (a node's own busy answer), or the delegator's own capacity defer that names no error class (no node is reachable, free
+// of a text lease and able to take it, or one refused the POST for want of room). All of these clear by themselves. A fleet
+// that can never take the job is NOT here: pickNodeFor files it under core.ErrClassNoNodeConfigured when every node was left
+// out for a configuration fact (it does not serve the task, a route is not configured, it cannot carry refine=false, the
+// tailnet guard refused its entry), and waiting does not clear those.
 func noPlaceNow(res core.Result) bool {
 	return core.CardHeld(res.Meta.ErrClass) || (res.DeferClass == core.DeferClassCapacity && res.Meta.ErrClass == "")
 }

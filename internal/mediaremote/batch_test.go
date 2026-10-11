@@ -1007,7 +1007,9 @@ func TestBatchAJobIsRenderedOnlyWhenItsFileIsThere(t *testing.T) {
 }
 
 // A job whose single render comes back "a card is held" (another job of the batch took the lane a moment after it read
-// free) is sent again, a bounded number of times, and then becomes a ticket; any other failure is final at once.
+// free) is sent again, a bounded number of times, and then becomes a ticket; any other failure is final at once. A card that
+// stays held is a place not had, so the job ends `queued` (never `failed`: a busy card is a place in line), and the queue's
+// own answers (its ceiling, a ticket it could not adopt) are not a lost race and are not sent again.
 func TestBatchRetriesALostLaneRaceAndOnlyThat(t *testing.T) {
 	e := newQEnv(t, 1, true)
 	var calls atomic.Int32
@@ -1040,12 +1042,45 @@ func TestBatchRetriesALostLaneRaceAndOnlyThat(t *testing.T) {
 		t.Errorf("one lost race: ok=%d calls=%d, want the second call to render it", b.OK(), calls.Load())
 	}
 	mk(core.ErrClassGPUBusy, 99)
-	if b := one(); b.Failed() != 1 || calls.Load() != 1+batchBusyRetries {
-		t.Errorf("a lane that stays held: failed=%d calls=%d, want %d calls and then a failed row", b.Failed(), calls.Load(), 1+batchBusyRetries)
+	if b := one(); b.Failed() != 0 || b.Queued() != 1 || calls.Load() != 1+batchBusyRetries {
+		t.Errorf("a lane that stays held: failed=%d queued=%d calls=%d, want %d calls and then a queued row (a place not had is never a failed row)", b.Failed(), b.Queued(), calls.Load(), 1+batchBusyRetries)
+	} else if r := b.Rows[0]; !strings.Contains(r.Error, "gpu busy: card c2 is held") || !strings.Contains(r.Error, "--resume") || b.Ceiling {
+		t.Errorf("the queued row = %+v ceiling=%v, want the lane's own reason and the way to render the job, and no ceiling (the queue was not waited for)", r, b.Ceiling)
 	}
 	mk("oom", 99)
 	if b := one(); b.Failed() != 1 || calls.Load() != 1 {
 		t.Errorf("another failure: failed=%d calls=%d, want no retry", b.Failed(), calls.Load())
+	}
+
+	// The queue's own answers say a ticket ended without a place (its ceiling, a ticket it could not adopt). They carry the
+	// held class like a lost race does, but nothing was lost a moment after it read free: sending the request again would
+	// start another ticket and another wait. One call, a queued row with the queue's reason, and not the race's words.
+	for name, tc := range map[string]struct {
+		class  string
+		reason string
+	}{
+		"the ceiling":        {core.DeferClassBudget, "ticket mq-abc123 waited 8h0m0s without a lane anywhere and ended; send the request again"},
+		"a ticket not taken": {core.DeferClassInfrastructure, "ticket mq-abc123 could not be adopted: its owner ended and the job could not be taken over; send the request again"},
+	} {
+		calls.Store(0)
+		batchCall = func(context.Context, config.Config, Runner, core.Request, string, []string, Wait) core.Result {
+			calls.Add(1)
+			res := core.Deferf(tc.reason, "", core.Meta{ErrClass: core.ErrClassGPUQueued})
+			res.DeferClass = tc.class
+			return res
+		}
+		var told []string
+		b, err := RunBatch(bctx(t), e.cfg, e.lr, manyJobs(t, 1), neverWarm(t), batchOpts(func(o *BatchOpts) { o.Notify = func(l string) { told = append(told, l) } }))
+		if err != nil {
+			t.Fatal(err)
+		}
+		r := b.Rows[0]
+		if b.Ceiling != (tc.class == core.DeferClassBudget) {
+			t.Errorf("%s: ceiling = %v, want it set for the queue's ceiling and for nothing else", name, b.Ceiling)
+		}
+		if calls.Load() != 1 || b.Failed() != 0 || b.Queued() != 1 || !strings.Contains(r.Error, tc.reason) || strings.Contains(r.Error, "lane was taken") || strings.Contains(strings.Join(told, "\n"), "lane was taken") {
+			t.Errorf("%s: calls=%d failed=%d queued=%d row=%+v lines=%q, want one call and a queued row with the queue's own reason", name, calls.Load(), b.Failed(), b.Queued(), r, told)
+		}
 	}
 }
 

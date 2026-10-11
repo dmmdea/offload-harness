@@ -14,6 +14,7 @@ func TestCardHeldIsExactlyTheHeldClasses(t *testing.T) {
 		"compose_busy":          true, // the compose slot is held by another composition
 		"":                      false,
 		"gpu_lease_unavailable": false, // a configuration fault: the lease location cannot be used
+		"no_node_configured":    false, // every roster node is left out for a configuration fact: no place is coming
 		"timeout":               false,
 		"oom":                   false,
 		"http_5xx":              false,

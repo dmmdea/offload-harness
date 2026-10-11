@@ -126,7 +126,8 @@ func TestBatchSerialWaitsForAPlaceAndNeverFailsTheJob(t *testing.T) {
 }
 
 // A job that has waited the queue's own ceiling without a place ends `queued`, never `failed`: nothing was wrong with it,
-// the fleet had no room, and --resume renders it. The exit says the batch is unfinished.
+// the fleet had no room, and --resume renders it. The exit says the batch is unfinished. The first job to wait the ceiling
+// carries the wait; the jobs behind it are queued at once (see TestBatchSerialCeilingQueuesTheJobsNotYetSent).
 func TestBatchSerialEndsQueuedAtTheCeilingNeverFailed(t *testing.T) {
 	e := newQEnv(t, 1, false)
 	fastWaits(t)
@@ -141,13 +142,17 @@ func TestBatchSerialEndsQueuedAtTheCeilingNeverFailed(t *testing.T) {
 	if b.Queued() != 2 || b.Failed() != 0 || b.ExitCode() != 1 {
 		t.Fatalf("queued=%d failed=%d exit=%d rows=%+v, want both jobs queued, none failed, exit 1", b.Queued(), b.Failed(), b.ExitCode(), b.Rows)
 	}
-	for _, r := range b.Rows {
-		if r.OK || !strings.Contains(r.Error, "waited") || !strings.Contains(r.Error, "gpu busy") {
-			t.Errorf("row %+v, want the wait and the node's own reason in the error", r)
-		}
+	if r := b.Rows[0]; r.OK || !strings.Contains(r.Error, "waited") || !strings.Contains(r.Error, "gpu busy") {
+		t.Errorf("row %+v, want the wait and the node's own reason in the error", r)
 	}
-	if calls.Load() < 4 {
-		t.Errorf("%d call(s): each job must have been asked more than once before it gave up", calls.Load())
+	if r := b.Rows[1]; r.OK || !strings.Contains(r.Error, "not started") || !strings.Contains(r.Error, "--resume") {
+		t.Errorf("row %+v, want the job queued at once as not started", r)
+	}
+	if !b.Ceiling {
+		t.Errorf("the batch must say a job waited the ceiling")
+	}
+	if calls.Load() < 2 {
+		t.Errorf("%d call(s): the first job must have been asked more than once before it gave up", calls.Load())
 	}
 }
 
