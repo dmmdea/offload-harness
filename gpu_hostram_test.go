@@ -651,3 +651,37 @@ func TestAMulticardWanCallDeclaresNothingOnTheTwoLeasedCards(t *testing.T) {
 		t.Fatalf("a multicard call on one leased card keeps the ordinary estimate, got %v", n)
 	}
 }
+
+// The same declaration when the estimate reads the card table ITSELF (resolveReserveHostRAM: the plan handed none over). The branch that reads it
+// must hand the estimate each leased card's size too; without that a multicard call on two fitting cards silently declares the ordinary 33.1 GiB, which is
+// the lease wait the placement exists to remove (the review of 2026-10-11 deleted the assignment and every test still passed).
+func TestAMulticardWanCallDeclaresNothingWhenTheEstimateReadsTheCardTableItself(t *testing.T) {
+	useCardTable(t, "")
+	cfg := config.Config{ComfyDir: t.TempDir()}
+	cards, _, err := cardTableFn(context.Background(), cfg)
+	if err != nil || len(cards) != 3 {
+		t.Fatalf("the synthetic card table: %v cards, err %v", len(cards), err)
+	}
+	pair := []string{cards[0].LeaseID(), cards[2].LeaseID()}
+	call := strings.Fields("node render/comfy-video.mjs o.mp4 s.png p --model wan --high-unet hi.safetensors --low-unet lo.safetensors")
+	reads := 0
+	inner := cardTableFn
+	cardTableFn = func(ctx context.Context, c config.Config) ([]gpuprobe.Card, string, error) {
+		reads++
+		return inner(ctx, c)
+	}
+	t.Cleanup(func() { cardTableFn = inner })
+	var out bytes.Buffer
+
+	n := resolveReserveHostRAM(false, 0, gpulease.ClassMedia, append(call, "--wan-placement", "multicard"), pair, cfg, true, &out)
+	if reads != 1 {
+		t.Fatalf("the estimate was to read the card table once itself, read %d time(s)", reads)
+	}
+	if n.GiB != 0 || n.Source == hostneed.SourceExplicit || !strings.Contains(n.Detail, "2 leased cards") {
+		t.Fatalf("a multicard Wan call on the two leased cards must declare 0 from the estimate when it reads the table itself, got %v", n)
+	}
+	n = resolveReserveHostRAM(false, 0, gpulease.ClassMedia, call, pair, cfg, true, &out)
+	if math.Abs(n.GiB-33.1) > 0.01 {
+		t.Fatalf("the same call without the flag is sized as it always was, got %v", n)
+	}
+}
