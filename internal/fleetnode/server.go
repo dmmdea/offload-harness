@@ -1267,6 +1267,13 @@ type healthPayload struct {
 	// sum by construction).
 	JobsQueued  int `json:"jobs_queued"`  // admitted, waiting for a worker
 	JobsRunning int `json:"jobs_running"` // executing right now
+	// JobsRunningCapped is the part of jobs_running that counts against max_concurrent_jobs (Jobs.CountsCapped):
+	// the jobs an agent job that is still `accepted` is waiting behind. jobs_running counts every job on the
+	// node, so a node with four renders running and four agent workers free reads "all busy" by that count,
+	// and a delegator deciding whether a queued job is waiting for a worker (internal/delegate stayInLine)
+	// needs this one. Additive and a pointer, so a published 0 is not an absent key; published with the agent
+	// lane only, and absent on a node that predates it, which a delegator reads as unknown (register C16).
+	JobsRunningCapped *int `json:"jobs_running_capped,omitempty"`
 	// JobsAdmitting is the SUBSET of jobs_running whose worker has not started
 	// generating yet: it is still in the run's admission phase — cordon, swap
 	// pre-flight, warm, coherence probe — which the node budgets up to 300 s
@@ -1713,6 +1720,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 			payload.SeatLoaded, payload.SeatStarting = &loaded, &starting
 		}
 		payload.JobsAdmitting = admitting
+		payload.JobsRunningCapped = &cappedRunning
 		if recentWall > 0 {
 			payload.RecentAgentWallSec = recentWall
 		}

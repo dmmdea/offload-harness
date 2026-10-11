@@ -40,6 +40,13 @@ func busyQueueNode(t *testing.T, startsAfter time.Duration, tune func(*fakeNode)
 			}
 			return 0
 		},
+		// The node publishes how many of its running jobs count against its workers (jobs_running_capped).
+		jobsRunningCappedFn: func() int {
+			if busy() {
+				return 1
+			}
+			return 0
+		},
 		queueDepthFn: func() int {
 			if busy() {
 				return 2 // the other tenant's running job and ours
@@ -139,6 +146,7 @@ func TestAQueuedJobIsGivenUpOnWhenTheNodesHealthCannotBeRead(t *testing.T) {
 func TestAQueuedJobIsStillGivenUpOnWhenTheNodeHasAFreeWorker(t *testing.T) {
 	f := busyQueueNode(t, 0, func(f *fakeNode) {
 		f.jobsRunningFn = func() int { return 0 }
+		f.jobsRunningCappedFn = func() int { return 0 }
 		f.queueDepthFn = func() int { return 1 }
 	})
 	results, sum, elapsed := runQueuedOn(t, f)
@@ -150,6 +158,56 @@ func TestAQueuedJobIsStillGivenUpOnWhenTheNodeHasAFreeWorker(t *testing.T) {
 	}
 	if strings.Contains(results[0].Err, "kept in line") {
 		t.Errorf("err = %q says the job was kept in line", results[0].Err)
+	}
+}
+
+// TestAQueuedJobIsGivenUpOnWhenTheBusyWorkersAreNotThoseThatRunItsJob: jobs_running counts every job on the
+// node, a render or a transcription included, and max_concurrent_jobs bounds only the jobs that count against
+// it. A node whose four workers' worth of jobs are renders reads "all busy" by the plain counters while its agent
+// workers are free, and a job still `accepted` there is not waiting for a worker. The delegator reads the
+// capped count the node publishes (jobs_running_capped) and withdraws at the budget.
+func TestAQueuedJobIsGivenUpOnWhenTheBusyWorkersAreNotThoseThatRunItsJob(t *testing.T) {
+	f := busyQueueNode(t, 0, func(f *fakeNode) {
+		// Idle when the job is placed; four renders start on the node after, and the job (admitted behind nothing
+		// that counts against its workers) is still reported `accepted`.
+		f.maxConcurrentJobs = 4
+		f.jobsRunningFn = func() int {
+			if f.dispatches.Load() > 0 {
+				return 4
+			}
+			return 0
+		}
+		f.jobsRunningCappedFn = func() int { return 0 }
+		f.queueDepthFn = func() int {
+			if f.dispatches.Load() > 0 {
+				return 5
+			}
+			return 0
+		}
+	})
+	results, sum, elapsed := runQueuedOn(t, f)
+	if sum.Failed != 1 || !strings.HasPrefix(results[0].Err, "queue deadline") {
+		t.Fatalf("summary = %+v err = %q, want the queue-deadline failure", sum, results[0].Err)
+	}
+	if elapsed > 1500*time.Millisecond {
+		t.Fatalf("gave up after %s, want the 300 ms budget: no agent worker was running", elapsed.Round(time.Millisecond))
+	}
+	if strings.Contains(results[0].Err, "kept in line") {
+		t.Errorf("err = %q says the job was kept in line behind renders", results[0].Err)
+	}
+}
+
+// TestAQueuedJobKeepsTheOldRuleOnANodeThatDoesNotPublishTheCappedCount: an older node publishes jobs_running
+// and no jobs_running_capped. The plain counters cannot say whether the running jobs are the ones the job
+// waits behind, so the unknown is not a reason to stay and the job is withdrawn at the budget as it always was.
+func TestAQueuedJobKeepsTheOldRuleOnANodeThatDoesNotPublishTheCappedCount(t *testing.T) {
+	f := busyQueueNode(t, 0, func(f *fakeNode) { f.jobsRunningCappedFn = nil })
+	results, sum, elapsed := runQueuedOn(t, f)
+	if sum.Failed != 1 || !strings.HasPrefix(results[0].Err, "queue deadline") {
+		t.Fatalf("summary = %+v err = %q, want the queue-deadline failure", sum, results[0].Err)
+	}
+	if elapsed > 1500*time.Millisecond {
+		t.Fatalf("gave up after %s, want the 300 ms budget: the node does not say whether its workers are busy", elapsed.Round(time.Millisecond))
 	}
 }
 

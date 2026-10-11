@@ -199,20 +199,33 @@ again after its cooldown, putting the job at the BACK of the same line. The wait
 started. That is the delegator refusing work that was making progress, and the operator's rule is to queue and never refuse.
 
 1. **At the budget the delegator asks before it withdraws** (`stayInLine`). It reads the node's health once more. The job stays in line
-   when the node's workers are all running (a published `max_concurrent_jobs`, that many `jobs_running`: the job is waiting for a worker,
-   which is a queue and not a wedge) **and** no other place has room for it now (`betterPlaceThan`: another eligible remote that
+   when the node's workers are all running (a published `max_concurrent_jobs` and that many `jobs_running_capped`, the running jobs
+   that count against it: the job is waiting for a worker, which is a queue and not a wedge; `jobs_running` is not that count, it
+   includes the renders and transcriptions that never wait behind the ceiling, so a node with four renders running and its agent
+   workers free is not "busy" here) **and** no other place has room for it now (`betterPlaceThan`: another eligible remote that
    passes the re-placement test, `withRoom`, or the local seat when the route allows it, no lease reserves or fences it and its run-cap
    line has a free slot). It is asked about again one step later (60 s, the budget's own floor, chosen), up to the patience the contract
    was given (its poll budget, which is where the ETA-derived budget was already capped). A node that reports a free worker and still has
-   not started the job is not working, and a node whose health cannot be read is "unknown, never a yes": both are withdrawn at the
-   budget exactly as before, and so is a job with a better place on offer.
+   not started the job is not working, and a node whose health cannot be read, or that does not publish `jobs_running_capped` (an older
+   node), is "unknown, never a yes": all of those are withdrawn at the budget exactly as before, and so is a job with a better place
+   on offer. `jobs_running_capped` is new on `/fleet/health` for this (additive, agent lane only, a pointer so a published 0 is not an
+   absent key).
 2. **What is unchanged.** The budget is still 1.5 x the ETA + 30 s, floored at 60 s and capped at the patience, still refreshed from a
    fresh read when the job is first seen queued, and the give-up at the end is still the one ADR 0064 describes; the failure text now
    says `kept in line N time(s) past the derived budget, up to the contract's patience: <why>` when the wait was extended. A job whose
-   node publishes no worker ceiling (an older node) keeps the old rule.
+   node publishes no worker ceiling or no capped count (an older node) keeps the old rule.
 3. **Not changed here.** The ETA itself (`new_job_wait_sec`) still ignores how long the running job has run, so the backlog gate can
    still place a job on a node that is mid-way through a long job; the job now waits there instead of being reshuffled, and the cost
    is a start later than another node's might have been. Pricing the running job's remaining wall into the ETA is its own change.
+4. **A queued job keeps its place in the call's width.** A job queued on a node is an open attempt, and unlike a capacity wait
+   (ADR 0073, 2026-10-10 amendment) it does not give its slot up while it stays: the job is on the node, and giving the slot up
+   would let the call open more attempts than its width on nodes that are already full. The cost is that a call with jobs staying in
+   line behind busy nodes keeps its width for up to the patience, where those jobs used to be withdrawn at the (shorter) derived
+   budget and free their slots; it is bounded by the patience, and a call's deadline still cuts what is left.
+5. **A known gap.** `betterPlaceThan` asks the fleet and the local seat but not the subtask's own `tried`/`excluded` sets (it runs
+   inside the poll of one job, not the placement chain). A node that already refused this subtask for a reason other than capacity can
+   therefore be named "has room"; the job is then withdrawn as before and `replacementNode`, which does know the sets, sends it back
+   to the wait. That is the pre-amendment behaviour, not a new loss.
 
 ## Alternatives considered
 

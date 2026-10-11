@@ -140,6 +140,9 @@ type fakeNode struct {
 	// jobsRunningFn, when set, answers jobs_running per health request (a
 	// node whose load CHANGES during the run — the liveness fixture).
 	jobsRunningFn func() int
+	// jobsRunningCappedFn, when set, publishes `jobs_running_capped` (register C16): how many of the running
+	// jobs count against max_concurrent_jobs. jobs_running counts every job on the node, a render included.
+	jobsRunningCappedFn func() int
 	// queueDepthFn is the same seam for queue_depth. A real node publishes
 	// queue_depth as its non-terminal job count, so a fixture whose
 	// jobs_running moves has to move queue_depth with it — otherwise it
@@ -248,6 +251,9 @@ func (f *fakeNode) server() *httptest.Server {
 			"jobs_running":        f.jobsRunningNow(),
 			"max_concurrent_jobs": f.maxConcurrentJobs,
 			"max_queue_depth":     f.maxQueueDepth,
+		}
+		if f.jobsRunningCappedFn != nil {
+			health["jobs_running_capped"] = f.jobsRunningCappedFn()
 		}
 		if f.saturation != nil {
 			health["saturation"] = f.saturation

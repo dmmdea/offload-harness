@@ -15,23 +15,31 @@ Versioning: [SemVer](https://semver.org/).
   which does not exclude the node it came from and asks it again after its cooldown, putting the job at the back of the same line:
   the wait already spent is thrown away to land where it started.
 - **The fix.** At the budget the delegator asks before it withdraws (`stayInLine`). It reads the node's health once more; the job
-  **stays** when the node's workers are all running (a published `max_concurrent_jobs`, that many `jobs_running`: the job waits for a
-  worker, which is a queue and not a wedge) and no other place has room for it now (`betterPlaceThan`: another eligible remote that
+  **stays** when the node's workers are all running (a published `max_concurrent_jobs`, that many `jobs_running_capped`: the job
+  waits for a worker, which is a queue and not a wedge) and no other place has room for it now (`betterPlaceThan`: another eligible remote that
   passes the re-placement test, or the local seat when the route allows it and no lease reserves or fences it and its run-cap line
   has a slot). It is asked about again one step later (60 s, chosen: the budget's own floor), up to the patience the contract was
   given, which is where the ETA-derived budget was already capped. A node with a free worker that still has not started the job, a
-  node whose health cannot be read, a node that publishes no worker ceiling, and a job with a better place on offer are withdrawn at the
-  budget exactly as before. The failure text says `kept in line N time(s) past the derived budget, up to the contract's patience:
+  node whose health cannot be read, a node that publishes no worker ceiling or no capped count (an older node), and a job with a better
+  place on offer are withdrawn at the budget exactly as before. The failure text says `kept in line N time(s) past the derived budget, up to the contract's patience:
   <why>` when the wait was extended.
+- **`jobs_running_capped`.** `/fleet/health` gains it (additive, agent lane only, a pointer so `0` is published): the part of
+  `jobs_running` that counts against `max_concurrent_jobs`. `jobs_running` counts every job on the node, so a node with four renders
+  running and free agent workers reads "all busy" by it, and a queued job there is not waiting for a worker.
+- **A queued job keeps its place in the call's width** (unlike a capacity wait, which gives its slot up, ADR 0073): it is an open
+  attempt on a node that is already full. A call with jobs staying in line keeps its width for up to the patience where those jobs used
+  to be withdrawn at the shorter derived budget. `betterPlaceThan` does not see the subtask's own tried/excluded sets (a known gap, ADR 0063).
 - **Not changed.** The ETA itself (`new_job_wait_sec`) still prices a new job at the median wall whatever the running job has done, so
   placement can still send a job to a node that is mid-way through a long one; it now waits there instead of being reshuffled.
 - **Tests.** `internal/delegate/queue_stay_test.go` (a busy node that starts the job at 3 times its budget is waited on to success;
   a node that stays busy is waited on to the end of the patience and no further, and the failure says so; a node with a free worker is
-  still withdrawn at the budget; a node whose health cannot be read is withdrawn too; another node with room, or no other node,
+  still withdrawn at the budget; a node whose health cannot be read, or whose running jobs are renders, or that does not publish the
+  capped count, is withdrawn too; another node with room, or no other node,
   is told apart, and the job leaves for the node with room end to end). `TestQueueRefreshFailureIsNamedOnTheDeadline` now counts the
-  question at the budget among the bounded health reads. 6 mutations were each caught; a seventh (treating a failed read as
-  readable) is equivalent, since a failed read decodes to a view with no worker ceiling. ADR 0063 Amendment 2026-10-10,
-  `docs/FLEET-NODE.md`.
+  question at the budget among the bounded health reads; `internal/fleetnode/jobs_running_capped_test.go` pins the new health key
+  (a render does not count, an agent job does, a published 0, absent with the lane off). 10 mutations were each caught; an eleventh
+  (treating a failed read as readable) is equivalent, since a failed read decodes to a view with no worker ceiling. ADR 0063
+  Amendment 2026-10-10, `docs/FLEET-NODE.md`.
 
 ### Fixed — a capacity wait that holds a run slot gives it up at its bound and keeps waiting, so a subtask in line for a node is not refused while the call has time (C16)
 

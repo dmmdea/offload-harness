@@ -132,7 +132,11 @@ does not start what it never began.
 Health publishes the split additively: `queue_depth` keeps its original meaning and shape,
 and `jobs_running`, `jobs_queued`, `max_concurrent_jobs`, `max_queue_depth` sit alongside it
 (always present — `0` is a real value, and for the two limits it means *unlimited*, which a
-reader must be able to tell apart from a pre-0.100.0 node that publishes no limit at all).
+reader must be able to tell apart from a pre-0.100.0 node that publishes no limit at all). With the agent lane on, health also
+publishes `jobs_running_capped` (register C16): the part of `jobs_running` that counts against `max_concurrent_jobs`. `jobs_running`
+counts every job on the node, a render or a transcription included, so a node with four renders running and its agent workers free
+reads "all busy" by it; the delegator that decides whether a queued job is waiting for a worker reads this one. A pointer, so a
+published `0` is not an absent key; absent on a node that predates it or whose lane is off, which a delegator reads as unknown.
 
 ## Running as a Windows scheduled task
 
@@ -984,7 +988,7 @@ the wait it is given is derived from the node's own ETA: `clamp(1.5 x etaStart +
 plus one slot, ADR 0073) or the arithmetic over its jobs and recent wall, read again when
 the job is first seen queued; a node that publishes no ETA keeps **5 minutes** (ADR 0063). That bound is where the delegator
 *asks* (ADR 0063 amendment 2026-10-10, register C16): it reads the node's health once more, and a job whose node has all its workers
-running (a published `max_concurrent_jobs`, that many `jobs_running`) while no other node, and not the local seat, has room for it
+running (a published `max_concurrent_jobs`, that many `jobs_running_capped`: the running jobs that count against it, which `jobs_running` does not say because it includes renders and transcriptions) while no other node, and not the local seat, has room for it
 **stays in line** and is asked about again one step later (60 s, chosen), up to the limit above. A node with a free worker that still
 has not started the job, a node whose health cannot be read, and a job with a better place on offer are withdrawn at the bound as
 before, because withdrawing a queued job only to land it at the back of the same line throws away the wait it has already spent.

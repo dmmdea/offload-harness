@@ -23,10 +23,12 @@ import (
 // The budget is therefore where the delegator asks whether there is a better place, and it leaves only if
 // there is one or the node gives no reason to wait:
 //
-//   - the node's workers are all running (a published ceiling, that many jobs running): the job is waiting
-//     for a worker, which is a queue and not a wedge. A node that reports a free worker and still has not
-//     started the job is not working, and the job is withdrawn at the budget as it always was; so is a
-//     node whose health cannot be read ("unknown is never a yes");
+//   - the node's workers are all running (a published ceiling, and that many running jobs that count
+//     against it: jobs_running_capped, not jobs_running, which includes the renders that never wait
+//     behind the ceiling): the job is waiting for a worker, which is a queue and not a wedge. A node that
+//     reports a free worker and still has not started the job is not working, and the job is withdrawn at
+//     the budget as it always was; so is a node whose health cannot be read, or that does not publish the
+//     capped count ("unknown is never a yes");
 //   - no other node, and not the local seat, has room for it now (betterPlaceThan): a withdrawal could only
 //     move the job to a place that is no better.
 //
@@ -46,13 +48,22 @@ func (r *runner) stayInLine(ctx context.Context, base string, contract core.Agen
 	if err != nil {
 		return "", false
 	}
-	if fresh.MaxConcurrentJobs <= 0 || fresh.JobsRunning < fresh.MaxConcurrentJobs {
+	if !workersAllBusy(fresh) {
 		return "", false
 	}
 	if _, better := r.betterPlaceThan(ctx, base, contract); better {
 		return "", false
 	}
-	return fmt.Sprintf("the node's workers were all busy (%d of %d running) and no other place had room", fresh.JobsRunning, fresh.MaxConcurrentJobs), true
+	return fmt.Sprintf("the node's workers were all busy (%d of %d running) and no other place had room", fresh.JobsRunningCapped, fresh.MaxConcurrentJobs), true
+}
+
+// workersAllBusy reports that the jobs a queued agent job waits behind fill the node's workers: the node
+// publishes its worker ceiling and the count of running jobs that count against it, and they are equal.
+// jobs_running is not that count - it includes the renders, transcriptions and pipeline routes that never
+// wait behind the ceiling - so a node that does not publish the capped count is unknown, and unknown is never
+// a reason to keep a job in a line (the job is withdrawn at the budget as it always was).
+func workersAllBusy(v NodeView) bool {
+	return v.MaxConcurrentJobs > 0 && v.JobsRunningCappedKnown && v.JobsRunningCapped >= v.MaxConcurrentJobs
 }
 
 // betterPlaceThan reports whether the contract could go somewhere other than base right now, and where: a
