@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 // The load fence places a model by the serving config when layers do not declare it (register C-86a).
@@ -177,6 +178,11 @@ models:
 func TestModelPinsFromTheServingConfigAreACopy(t *testing.T) {
 	c := Default()
 	c.ServingConfigPath = writeFenceServing(t, fenceServingYAML)
+	// A file edited moments ago is never memoised, and the copy is the memo's to protect.
+	old := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(c.ServingConfigPath, old, old); err != nil {
+		t.Fatal(err)
+	}
 	first, ok := c.ModelPins("qwen3.8-27b-262k")
 	if !ok || len(first) != 2 {
 		t.Fatalf("ModelPins = %v, %v", first, ok)

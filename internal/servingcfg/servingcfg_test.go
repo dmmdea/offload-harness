@@ -170,6 +170,7 @@ func TestIDsListsTheDeclaredModelsAndNotTheirAliases(t *testing.T) {
 // the fence hands it, and an edit there must not reach the next answer.
 func TestPinsOfPlacesOnlyWhatTheEnvPinsAndHandsBackACopy(t *testing.T) {
 	p := writeServing(t, servingYAML)
+	settle(t, p) // a file edited moments ago is never memoised, and the copy is the memo's to protect
 	if got, ok := PinsOf(p, "  YAML-CARD0-ALIAS "); !ok || !reflect.DeepEqual(got, []string{card0}) {
 		t.Errorf("PinsOf(alias) = %v, %v; names compare case-insensitively and trimmed", got, ok)
 	}

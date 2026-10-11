@@ -5,6 +5,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -13,6 +15,7 @@ import (
 
 	"github.com/dmmdea/offload-harness/internal/gpulease"
 	"github.com/dmmdea/offload-harness/internal/gpuprobe"
+	"github.com/dmmdea/offload-harness/internal/servingcfg"
 )
 
 // The consumers' half of card-scoped leases (plan P4): a lease on one card fences the
@@ -351,5 +354,83 @@ func TestSeatPinsAreNotLookedUpWhenNoLeaseNamesCards(t *testing.T) {
 	tk.Release()
 	if n := lookups.Load(); n == 0 {
 		t.Fatal("a lease that names cards needs the seat's pins, but they were never looked up")
+	}
+}
+
+// ---- Register C-86a: a seat the serving config pins ------------------------------------------------
+//
+// On a box without layers a seat's pins come from its entry in the serving config (config.ModelPins,
+// through internal/servingcfg), and the yaml writes them as full GPU UUIDs, not as the PCI-order
+// indices the layers use. The fence resolves them through the card table like any other pin; these
+// tests pin that with the real reader over a real file. The wiring that arms them from config.Load is
+// pinned in internal/config (end to end), which this package cannot import.
+
+const servingFixture = `
+models:
+  seat-yaml-card0:
+    env: ["CUDA_VISIBLE_DEVICES=GPU-aaaa0000"]
+  seat-yaml-card2:
+    env: ["CUDA_VISIBLE_DEVICES=GPU-cccc0000"]
+  seat-yaml-pair:
+    env: ["CUDA_VISIBLE_DEVICES=GPU-aaaa0000,GPU-cccc0000"]
+  seat-yaml-proxy:
+    proxy: http://127.0.0.1:1234
+    env: ["CUDA_VISIBLE_DEVICES=GPU-aaaa0000"]
+  seat-yaml-unpinned:
+    env: ["FOO=bar"]
+  seat-yaml-index-no-order:
+    env: ["CUDA_VISIBLE_DEVICES=0"]
+`
+
+// armServingPins arms the fence the way config.Load does for a box with no layers: the seat pins are
+// what the serving config says.
+func armServingPins(t *testing.T) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "llama-swap.yaml")
+	if err := os.WriteFile(path, []byte(servingFixture), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	armSeatScope(t, nil)
+	SetSeatPins(func(model string) ([]string, bool) { return servingcfg.PinsOf(path, model) })
+}
+
+func TestASeatPinnedByTheServingConfigLoadsUnderALeaseOnAnotherCard(t *testing.T) {
+	t.Run("a card-2 lease", func(t *testing.T) {
+		m := cardScoped(t)
+		armServingPins(t)
+		mediaLeaseOn(t, m, idCard2)
+		tk := admitFast(t, "http://yaml-c2-free", "seat-yaml-card0")
+		tk.Release()
+		for _, seat := range []string{"seat-yaml-card2", "seat-yaml-pair"} {
+			if _, err := Admit(context.Background(), "http://yaml-c2-"+seat, seat, 300*time.Millisecond); !IsLeaseRefusal(err) {
+				t.Errorf("%s sits on the leased card and must wait, got %v", seat, err)
+			}
+		}
+	})
+	t.Run("a card-0 lease", func(t *testing.T) {
+		m := cardScoped(t)
+		armServingPins(t)
+		mediaLeaseOn(t, m, idCard0)
+		tk := admitFast(t, "http://yaml-c0-free", "seat-yaml-card2")
+		tk.Release()
+		for _, seat := range []string{"seat-yaml-card0", "seat-yaml-pair"} {
+			if _, err := Admit(context.Background(), "http://yaml-c0-"+seat, seat, 300*time.Millisecond); !IsLeaseRefusal(err) {
+				t.Errorf("%s sits on the leased card and must wait, got %v", seat, err)
+			}
+		}
+	})
+}
+
+func TestAProxySeatAndAnUnpinnedEntryStayFencedByAnyLease(t *testing.T) {
+	m := cardScoped(t)
+	armServingPins(t)
+	mediaLeaseOn(t, m, idCard2)
+	// A proxy: seat pins its cards in its own engine, an entry with no env pin names none, and a bare
+	// index without CUDA_DEVICE_ORDER=PCI_BUS_ID is not an nvidia-smi index: the serving config places
+	// none of them, so any lease fences them, as it did before the fence read the file.
+	for _, seat := range []string{"seat-yaml-proxy", "seat-yaml-unpinned", "seat-yaml-index-no-order", "seat-not-in-the-yaml"} {
+		if _, err := Admit(context.Background(), "http://yaml-fenced-"+seat, seat, 300*time.Millisecond); !IsLeaseRefusal(err) {
+			t.Errorf("%s is placed nowhere and must stay fenced by a card-2 lease, got %v", seat, err)
+		}
 	}
 }
