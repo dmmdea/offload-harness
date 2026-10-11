@@ -330,18 +330,18 @@ func TestTwoMediaCallsRunOnTwoFreeCards(t *testing.T) {
 		if pr.Env["GPU_LEASE_CLASS"] != "media" || pr.Env["GPU_LEASE_EPOCH"] == "" || pr.Env["GPU_LEASE_DIR"] == "" {
 			t.Errorf("lease env incomplete: %v", pr.Env)
 		}
-		// A render on one card must not empty the seats on the others (register C-86, F15): the
-		// unload list is the models positively placed on the leased card. A seat pinned to another
-		// card stays, and so does the seat whose card nobody declared.
+		// A render on one card must not empty the seats on the others (register C-86, F15): the unload
+		// list is the roster minus the memory stack minus the models placed on other cards. The seat
+		// whose card nobody declared is unknown and goes, as before F15.
 		unload := pr.Env["GPU_LEASE_UNLOAD_MODELS"]
 		switch uuid {
 		case admitUUIDA:
-			if unload != "seat-a" {
-				t.Errorf("card 0's render may unload %q, want seat-a only", unload)
+			if unload != "seat-a,seat-unpinned" {
+				t.Errorf("card 0's render may unload %q, want seat-a and the unpinned seat only", unload)
 			}
 		case admitUUIDC:
-			if unload != "seat-c" {
-				t.Errorf("card 2's render may unload %q, want seat-c only", unload)
+			if unload != "seat-c,seat-unpinned" {
+				t.Errorf("card 2's render may unload %q, want seat-c and the unpinned seat only", unload)
 			}
 		}
 	}

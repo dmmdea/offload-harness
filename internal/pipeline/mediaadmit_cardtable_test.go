@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -404,8 +405,8 @@ func TestTheUnloadListIsScopedFromTheTableTheCallAlreadyHolds(t *testing.T) {
 	if probe.Env["COMFY_CARD_UUID"] != admitUUIDA {
 		t.Fatalf("premise: the call runs on card A, got %q", probe.Env["COMFY_CARD_UUID"])
 	}
-	if got := probe.Env["GPU_LEASE_UNLOAD_MODELS"]; got != "seat-a" {
-		t.Errorf("card A's render may unload %q, want seat-a only (seat-c sits on card C, and the unpinned seat's card is not known: it stays)", got)
+	if got := probe.Env["GPU_LEASE_UNLOAD_MODELS"]; got != "seat-a,seat-unpinned" {
+		t.Errorf("card A's render may unload %q, want seat-a and the unpinned seat only (seat-c sits on card C)", got)
 	}
 	f.letRunnersGo()
 	if r := f.await(ch); !r.OK {
@@ -414,8 +415,8 @@ func TestTheUnloadListIsScopedFromTheTableTheCallAlreadyHolds(t *testing.T) {
 }
 
 // A roster that cannot be read must not become "unload everything": the call is still handed a
-// list, the seats the config places on its card (register F15). The old answer left the variable
-// unset, and the render lane read that as every model off the memory stack.
+// list, the models the config declares judged like any other (register F15). The old answer left the
+// variable unset, and the render lane read that as every model off the memory stack.
 func TestAnUnreadableRosterStillHandsTheRenderLaneTheConfigSeatsOnItsCard(t *testing.T) {
 	f := newAdmitFixture(t, func(c *config.Config) { c.Endpoint = "http://127.0.0.1:1" })
 	ch := f.image(nil)
@@ -425,6 +426,34 @@ func TestAnUnreadableRosterStillHandsTheRenderLaneTheConfigSeatsOnItsCard(t *tes
 	}
 	if got := probe.Env["GPU_LEASE_UNLOAD_MODELS"]; got != "seat-a" {
 		t.Errorf("with no roster card A's render may unload %q, want the config's seat on card A only (never the unset variable)", got)
+	}
+	f.letRunnersGo()
+	if r := f.await(ch); !r.OK {
+		t.Fatalf("%+v", r)
+	}
+}
+
+// A model layers do not declare is placed by its device pin in the serving config (register F15):
+// pinned to card C it stays loaded under a render on card A.
+func TestTheServingConfigPlacesWhatLayersDoNotDeclare(t *testing.T) {
+	body := fmt.Sprintf(`models:
+  seat-unpinned:
+    env: ["CUDA_VISIBLE_DEVICES=%s"]
+`, admitUUIDC)
+	f := newAdmitFixture(t, func(c *config.Config) {
+		path := filepath.Join(t.TempDir(), "llama-swap.yaml")
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		c.ServingConfigPath = path
+	})
+	ch := f.image(nil)
+	probe := f.waitStarted(1)[0]
+	if probe.Env["COMFY_CARD_UUID"] != admitUUIDA {
+		t.Fatalf("premise: the call runs on card A, got %q", probe.Env["COMFY_CARD_UUID"])
+	}
+	if got := probe.Env["GPU_LEASE_UNLOAD_MODELS"]; got != "seat-a" {
+		t.Errorf("card A's render may unload %q, want seat-a only (seat-c is placed on card C by layers, and the serving config pins seat-unpinned to card C)", got)
 	}
 	f.letRunnersGo()
 	if r := f.await(ch); !r.OK {

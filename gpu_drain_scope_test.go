@@ -81,18 +81,24 @@ func TestUnloadSeatOnlyUnloadsIntersectingModels(t *testing.T) {
 		}
 	})
 	got := sortedCalls(f)
-	want := []string{"agent-pool", "qwen3-vl-8b"}
+	want := []string{"agent-pool", "mystery-model", "qwen3-vl-8b"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Fatalf("a card-2 lease unloads the seats that are placed on card 2 and nothing it cannot place, got %v want %v", got, want)
+		t.Fatalf("a card-2 lease unloads the seats placed on card 2 and the model nothing places, got %v want %v", got, want)
 	}
 	f.mu.Lock()
-	resident := f.loaded["gemma-4-26b-agent"] && f.loaded["embeddinggemma"] && f.loaded["mystery-model"]
+	resident := f.loaded["gemma-4-26b-agent"] && f.loaded["embeddinggemma"]
 	f.mu.Unlock()
 	if !resident {
-		t.Fatal("the card-0 seat, the memory stack and the model nobody placed must stay resident")
+		t.Fatal("the seat placed on card 0 and the memory stack must stay resident")
 	}
-	if !strings.Contains(out, "left resident") || !strings.Contains(out, "mystery-model") {
-		t.Fatalf("the model whose card is unknown is named as left resident:\n%s", out)
+	for _, line := range []string{
+		"gpu reserve: left resident, placed elsewhere by layers: gemma-4-26b-agent",
+		"gpu reserve: unloaded, placed on a leased card by layers: qwen3-vl-8b",
+		"gpu reserve: unloaded, placement unknown (serving_config_path is unset, so the serving config places no model): mystery-model",
+	} {
+		if !strings.Contains(out, line) {
+			t.Fatalf("the lane must say %q:\n%s", line, out)
+		}
 	}
 	if owed != "agent-pool" {
 		t.Fatalf("the configured agent seat was on the leased cards and is owed its warm-back, got %q", owed)
@@ -137,10 +143,7 @@ func TestUnloadSeatOnAWholeNodeLeaseStillUnloadsEverythingButTheStack(t *testing
 	}
 }
 
-// With no card table the drain still waits for every run (a doubt waits), and the unload takes only
-// the configured agent seat, which was asked for by name: no other seat can be placed on a card, and
-// evicting a seat on a card the lease does not hold is the harm this rule exists to stop.
-func TestUnloadSeatTakesOnlyTheAgentSeatWhenTheCardTableCannotBeRead(t *testing.T) {
+func TestUnloadSeatFailsClosedWhenTheCardTableCannotBeRead(t *testing.T) {
 	f := newMultiSeatSwap("agent-pool", "gemma-4-26b-agent")
 	srv := httptest.NewServer(f.handler())
 	defer srv.Close()
@@ -154,8 +157,8 @@ func TestUnloadSeatTakesOnlyTheAgentSeatWhenTheCardTableCannotBeRead(t *testing.
 	if err := maintainSeatScoped(context.Background(), cfg, nil, false, time.Time{}, true, false, nil, []string{leaseCard2ID}); err != nil {
 		t.Fatalf("maintainSeatScoped: %v", err)
 	}
-	if got := sortedCalls(f); strings.Join(got, ",") != "agent-pool" {
-		t.Fatalf("with no card table only the configured agent seat is unloaded, got %v", got)
+	if got := sortedCalls(f); strings.Join(got, ",") != "agent-pool,gemma-4-26b-agent" {
+		t.Fatalf("with no card table every seat is treated as on the leased cards (today's behaviour), got %v", got)
 	}
 }
 
@@ -222,12 +225,12 @@ func TestGPULeaseUnloadModelsListsOnlyWhatMayLeave(t *testing.T) {
 		t.Fatal("a roster and a card table: the list is known")
 	}
 	sort.Strings(got)
-	if strings.Join(got, ",") != "agent-pool,qwen3-vl-8b" {
-		t.Fatalf("list = %v, want the card-2 seats and not the model nobody placed", got)
+	if strings.Join(got, ",") != "agent-pool,mystery-model,qwen3-vl-8b" {
+		t.Fatalf("list = %v, want the card-2 seats and the model it cannot place", got)
 	}
 	got, ok = unloadModelsFor(context.Background(), cfg, roster, []string{leaseCard0ID})
 	sort.Strings(got)
-	if !ok || strings.Join(got, ",") != "agent-pool,gemma-4-26b-agent" {
+	if !ok || strings.Join(got, ",") != "agent-pool,gemma-4-26b-agent,mystery-model" {
 		t.Fatalf("card-0 list = %v ok=%v", got, ok)
 	}
 	// A whole-node lease exports nothing: the render lane keeps its own rule.
@@ -329,15 +332,15 @@ func TestReserveACardScopesTheUnloadAndHandsTheRenderLaneItsList(t *testing.T) {
 	if err := runGPUReserve(args); err != nil {
 		t.Fatalf("reserve: %v", err)
 	}
-	if got := sortedCalls(f); strings.Join(got, ",") != "agent-pool,qwen3-vl-8b" {
-		t.Fatalf("a card-2 reservation unloads the card-2 seats and nothing it cannot place, got %v", got)
+	if got := sortedCalls(f); strings.Join(got, ",") != "agent-pool,mystery-model,qwen3-vl-8b" {
+		t.Fatalf("a card-2 reservation unloads the card-2 seats and the one it cannot place, got %v", got)
 	}
 	f.mu.Lock()
-	stays := f.loaded["gemma-4-26b-agent"] && f.loaded["embeddinggemma"] && f.loaded["mystery-model"]
+	stays := f.loaded["gemma-4-26b-agent"] && f.loaded["embeddinggemma"]
 	warms, warmed := f.warms, f.loaded["agent-pool"]
 	f.mu.Unlock()
 	if !stays {
-		t.Fatal("the card-0 seat, the memory stack and the model nobody placed must stay resident")
+		t.Fatal("the card-0 seat and the memory stack must stay resident")
 	}
 	// The wrapper warms the agent seat back when its command ends. This test used to pass
 	// over a stand-in that answered that request 418, because a status below 500 counted as a
@@ -350,8 +353,8 @@ func TestReserveACardScopesTheUnloadAndHandsTheRenderLaneItsList(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the wrapped command did not run: %v", err)
 	}
-	if got := string(raw); !strings.HasPrefix(got, "set:") || !strings.Contains(got, "qwen3-vl-8b") || strings.Contains(got, "gemma-4-26b-agent") || strings.Contains(got, "embeddinggemma") || strings.Contains(got, "mystery-model") {
-		t.Fatalf("the render lane is handed the models that may leave (not the card-0 seat, not the stack, not the model nobody placed), got %q", got)
+	if got := string(raw); !strings.HasPrefix(got, "set:") || !strings.Contains(got, "qwen3-vl-8b") || strings.Contains(got, "gemma-4-26b-agent") || strings.Contains(got, "embeddinggemma") || !strings.Contains(got, "mystery-model") {
+		t.Fatalf("the render lane is handed the models that may leave (not the card-0 seat, not the stack; the model nothing places is on it), got %q", got)
 	}
 }
 
@@ -424,9 +427,9 @@ func TestDetachedMaintainScopesToTheEpochsCards(t *testing.T) {
 	}
 }
 
-// A seat pinned to a card the table does not have cannot be placed: an unload leaves it resident
-// (and says so), where the old answer unloaded it as "on the leased cards".
-func TestUnloadSeatLeavesAnUnplaceablePinResident(t *testing.T) {
+// A seat pinned to a card the table does not have cannot be placed: it is on the leased cards
+// (placement unknown goes, as before F15), and the lane says why.
+func TestUnloadSeatTreatsAnUnplaceablePinAsOnTheLeasedCards(t *testing.T) {
 	f := newMultiSeatSwap("agent-pool", "ghost-seat")
 	srv := httptest.NewServer(f.handler())
 	defer srv.Close()
@@ -450,11 +453,61 @@ func TestUnloadSeatLeavesAnUnplaceablePinResident(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
-	if got := sortedCalls(f); strings.Join(got, ",") != "agent-pool" {
-		t.Fatalf("a pin the card table cannot place is not placed on the leased cards: only the agent seat goes, got %v", got)
+	if got := sortedCalls(f); strings.Join(got, ",") != "agent-pool,ghost-seat" {
+		t.Fatalf("a pin the card table cannot place reads as on the leased cards, got %v", got)
 	}
-	if !strings.Contains(out, "ghost-seat") || !strings.Contains(out, "left resident") {
-		t.Fatalf("the seat left resident is named:\n%s", out)
+	if !strings.Contains(out, "unloaded, placement unknown (layers pin it to a card the card table cannot place): ghost-seat") {
+		t.Fatalf("the seat unloaded on a doubt is named with the reason:\n%s", out)
+	}
+}
+
+// A model layers do not declare is placed by its entry's device pin in the serving config
+// (serving_config_path, register F15): pinned to another card it stays, pinned to a leased card it
+// goes, and a proxy: seat (its cards live in its own engine) is unknown and goes with the reason.
+func TestUnloadSeatPlacesOtherResidentsByTheServingConfigPin(t *testing.T) {
+	f := newMultiSeatSwap("agent-pool", "qwen3-vl-8b", "gemma-4-26b-agent", "yaml-elsewhere", "yaml-here", "yaml-proxy", "embeddinggemma")
+	srv := httptest.NewServer(f.handler())
+	defer srv.Close()
+	old := maintenanceClient
+	maintenanceClient = srv.Client()
+	t.Cleanup(func() { maintenanceClient = old })
+	cfg := scopedDrainConfig(t, srv.URL, "agent-pool")
+	yamlPath := filepath.Join(t.TempDir(), "llama-swap.yaml")
+	body := `models:
+  yaml-elsewhere:
+    env: ["CUDA_VISIBLE_DEVICES=GPU-aaaa0000-x"]
+  yaml-here:
+    env: ["CUDA_VISIBLE_DEVICES=GPU-cccc0000-x"]
+  yaml-proxy:
+    proxy: http://127.0.0.1:1234
+    env: ["CUDA_VISIBLE_DEVICES=GPU-aaaa0000-x"]
+`
+	if err := os.WriteFile(yamlPath, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg.ServingConfigPath = yamlPath
+	out := captureStderr(t, func() {
+		if err := maintainSeatScoped(context.Background(), cfg, nil, false, time.Time{}, true, false, nil, []string{leaseCard2ID}); err != nil {
+			t.Fatalf("maintainSeatScoped: %v", err)
+		}
+	})
+	if got := sortedCalls(f); strings.Join(got, ",") != "agent-pool,qwen3-vl-8b,yaml-here,yaml-proxy" {
+		t.Fatalf("unloaded %v: the card-2 models and the proxy: seat go, the models placed on card 0 stay", got)
+	}
+	f.mu.Lock()
+	stays := f.loaded["gemma-4-26b-agent"] && f.loaded["yaml-elsewhere"] && f.loaded["embeddinggemma"]
+	f.mu.Unlock()
+	if !stays {
+		t.Fatal("the seat layers put on card 0, the model the serving config pins to card 0 and the memory stack must stay resident")
+	}
+	for _, line := range []string{
+		"gpu reserve: left resident, placed elsewhere by the serving config pin: yaml-elsewhere",
+		"gpu reserve: unloaded, placed on a leased card by the serving config pin: yaml-here",
+		"proxy: seat",
+	} {
+		if !strings.Contains(out, line) {
+			t.Fatalf("the lane must say %q:\n%s", line, out)
+		}
 	}
 }
 
@@ -554,20 +607,16 @@ func TestScopedMaintainSaysWhenTheCardTableCannotBeRead(t *testing.T) {
 			t.Fatalf("maintainSeatScoped: %v", err)
 		}
 	})
-	if !strings.Contains(out, "card table could not be read") || !strings.Contains(out, "every run") || !strings.Contains(out, "deadline exceeded") {
-		t.Fatalf("the operator must be told the drain waits for every run and the unload takes only the agent seat, and why:\n%s", out)
-	}
-	// The unload does not widen to the node: the configured agent seat was asked for by name and
-	// goes; no other seat can be placed on a card without the table, so it stays.
-	if got := sortedCalls(f); strings.Join(got, ",") != "agent-pool" {
-		t.Fatalf("without the card table only the agent seat is unloaded, got %v", got)
+	if !strings.Contains(out, "card table could not be read") || !strings.Contains(out, "every seat") || !strings.Contains(out, "deadline exceeded") {
+		t.Fatalf("the operator must be told the scoped unload fell back to every seat, and why:\n%s", out)
 	}
 }
 
-// Without the roster the wrapper still hands the render lane a list: the seats the config places on
-// the leased cards. An unset variable would be read by the lane as "every model off the memory
-// stack", which is the render emptying the seats on the other cards (register F15).
-func TestWrapperUnloadEnvWithoutARosterHandsOverTheConfigSeatsOnTheLeasedCards(t *testing.T) {
+// Without the roster the wrapper still hands the render lane a list: the models the config declares
+// and the serving config lists, judged like any other. An unset variable would be read by the lane
+// as "every model off the memory stack", which is the render emptying the seats placed on the other
+// cards (register F15).
+func TestWrapperUnloadEnvWithoutARosterJudgesTheModelsTheConfigDeclares(t *testing.T) {
 	cfg := scopedDrainConfig(t, "http://127.0.0.1:1", "agent-pool")
 	old := rosterIDsFn
 	rosterIDsFn = func(context.Context, string) ([]string, error) { return nil, errors.New("roster refused") }
@@ -583,11 +632,11 @@ func TestWrapperUnloadEnvWithoutARosterHandsOverTheConfigSeatsOnTheLeasedCards(t
 		have[m] = true
 	}
 	if !have["agent-pool"] || !have["qwen3-vl-8b"] || have["gemma-4-26b-agent"] || have["embeddinggemma"] {
-		t.Fatalf("the list is the config's seats on card 2 (not the card-0 seat, not the memory stack), got %q", got)
+		t.Fatalf("the list is the config's models placed on card 2 (not the card-0 seat, not the memory stack), got %q", got)
 	}
-	for _, want := range []string{"roster could not be read", "roster refused", "config"} {
+	for _, want := range []string{"roster could not be read", "roster refused", "the models the config declares"} {
 		if !strings.Contains(out, want) {
-			t.Fatalf("the wrapper must say it worked from the config's seats (%q missing):\n%s", want, out)
+			t.Fatalf("the wrapper must say it worked from the config's models (%q missing):\n%s", want, out)
 		}
 	}
 	if strings.Contains(out, "unloads every model") {
