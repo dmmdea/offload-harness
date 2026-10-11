@@ -62,6 +62,10 @@ const (
 	// expected answer at the seat's rate is a mean, and a seat under load or a
 	// long structured answer runs past it.
 	repackMargin = 1.5
+	// RepackMargin is repackMargin for the node-side re-pack's time bound
+	// (pipeline.repackOwed): the time a re-pack is owed is the generation time its
+	// own stall allowance already assumes, not a second number.
+	RepackMargin = repackMargin
 	// uncappedToolAllowance is the stall bound for a tool the loop runs with
 	// capping explicitly disabled (Tool.Timeout < 0): long by design.
 	uncappedToolAllowance = time.Hour

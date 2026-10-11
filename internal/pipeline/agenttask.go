@@ -1379,8 +1379,21 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	// The decode rate the re-pack is sized against: the store's, else this run's
 	// own (the loop has just measured it), else the box's agent_seat_tok_s.
 	repackTokS, repackBasis := repackRate(rates.Get(seat), wire.ObservedTokS, wire.SeatTokS, p.cfg.AgentSeatTokS)
+	// The re-pack is owed the time its own answer needs at that rate, whatever the
+	// loop left of the wall (register F44/C13): the wall is an expectation, the loop
+	// ran on its stall and ceiling rules, and the final-budget fit above reserved a
+	// share of the wall for this phase that a loop running past it forfeited.
+	// Anchored here, once, so the later attempts of the call share one bound.
+	var owedEnd time.Time
+	if owed := repackOwed(res.Output, repackTokS); owed > 0 {
+		owedEnd = repackStart.Add(owed)
+		if over := owedEnd.Sub(wallEnd.Add(livePolicy.Slack)); over > 0 {
+			log.Printf("agent task: re-pack for %s is owed %.0f s at %.1f tok/s (%s) and the wall + grace has %.0f s left: it runs on its own time, up to the ceiling",
+				seat, owed.Seconds(), repackTokS, repackBasis, max(time.Until(wallEnd.Add(livePolicy.Slack)), 0).Seconds())
+		}
+	}
 	structured, tokensOut, transport, attempts, serr := p.repackStructuredWith(agent.ContextWithProgress(cctx, repackProgress), seat, outSchema, res.Output, repackAttemptFloor(wall), 0,
-		repackOpts{WallEnd: wallEnd, Grace: livePolicy.Slack, TokS: repackTokS, RateBasis: repackBasis, Trace: &trace})
+		repackOpts{WallEnd: wallEnd, OwedEnd: owedEnd, Grace: livePolicy.Slack, TokS: repackTokS, RateBasis: repackBasis, Trace: &trace})
 	wire.RepackMs = time.Since(repackStart).Milliseconds()
 	wire.RepackAttempts = attempts
 	// Every attempt on the wire, and every attempt's generation in tokens_out: a

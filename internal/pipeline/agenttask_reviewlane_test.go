@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/reviewlane"
@@ -46,9 +47,11 @@ func TestReviewLaneReadsWhatTheRunnerFiles(t *testing.T) {
 		}
 	})
 
-	// The loop finished and the wall could not buy the re-pack (0.5 tok/s over a 30 s wall plus
-	// its slack): the clock decided, the finished answer rides in output flagged schema_miss.
+	// The loop finished and the run's ceiling could not hold the re-pack (0.5 tok/s, a 10 s
+	// ceiling; the wall alone no longer skips one, ADR 0055 item 10): the clock decided, the
+	// finished answer rides in output flagged schema_miss.
 	t.Run("a re-pack the wall could not buy", func(t *testing.T) {
+		defer compressLiveness(t, time.Minute, 30*time.Second, 10)()
 		short := contract
 		short.TimeoutSec, short.TimeoutAuto = 30, false // the lane's own contract auto-sizes its wall; this one pins it
 		fake := &agentFake{

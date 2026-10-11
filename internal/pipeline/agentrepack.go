@@ -97,6 +97,16 @@ type repackOpts struct {
 	// liveness policy gives its Slack (30 s in production), the padding the
 	// re-pack's own stall allowance already adds to its generation estimate.
 	Grace time.Duration
+	// OwedEnd is the instant the time this re-pack is OWED ends: when the call began
+	// plus what its own answer needs at the seat's rate (repackOwed). The wall is an
+	// expectation (ADR 0055 item 2) and a slow seat's loop routinely ends past it, so
+	// a re-pack held to the wall plus the grace was told "0 s left" and skipped, with
+	// a finished answer in hand (register F44/C13: 23 jobs in 48 h). The bound is the
+	// LATER of the wall's end and this one, plus the grace; the run's ceiling still
+	// caps it. The zero time is no owed time: the wall alone bounds the call, as
+	// before. It is set once per call, never per attempt, so a later attempt does
+	// not get a fresh allowance: time only runs out.
+	OwedEnd time.Time
 	// TokS is the seat's decode rate in tokens per second, and RateBasis says where
 	// it came from. 0 means unknown, and then the call does no time arithmetic at
 	// all: it fails open, like every other sizing decision that needs a rate.
@@ -176,9 +186,9 @@ func (o repackOpts) fit(now, ctxDeadline time.Time, budget, least int) repackFit
 	if !ctxDeadline.IsZero() {
 		deadline, what = ctxDeadline, "the ceiling"
 	}
-	if !o.WallEnd.IsZero() {
-		if end := o.WallEnd.Add(o.Grace); deadline.IsZero() || end.Before(deadline) {
-			deadline, what = end, fmt.Sprintf("the wall + %.0f s grace", o.Grace.Seconds())
+	if end, label := o.boundEnd(); !end.IsZero() {
+		if end = end.Add(o.Grace); deadline.IsZero() || end.Before(deadline) {
+			deadline, what = end, fmt.Sprintf("%s + %.0f s grace", label, o.Grace.Seconds())
 		}
 	}
 	if deadline.IsZero() {
@@ -202,6 +212,32 @@ func (o repackOpts) fit(now, ctxDeadline time.Time, budget, least int) repackFit
 	}
 	return repackFit{Skip: true, Note: fmt.Sprintf(
 		"re-pack skipped: %.0f s left to %s at %.1f tok/s buys %d tokens < the answer's %d%s", left.Seconds(), what, o.TokS, buys, least, basis)}
+}
+
+// boundEnd is where the time a re-pack may use ends before the grace: the wall's
+// end, or the end of the time the re-pack is owed (OwedEnd) when that is later,
+// with the words the notes use for it. The zero time when neither is set.
+func (o repackOpts) boundEnd() (time.Time, string) {
+	if o.OwedEnd.After(o.WallEnd) {
+		return o.OwedEnd, "the re-pack's owed time"
+	}
+	if o.WallEnd.IsZero() {
+		return time.Time{}, ""
+	}
+	return o.WallEnd, "the wall"
+}
+
+// repackOwed is the time a re-pack of output is owed at the seat's decode rate,
+// whatever the loop left of the wall: the answer's expected size in tokens
+// (expectedRepackTokens) at that rate, padded by the factor the re-pack's own stall
+// allowance pads its generation estimate with (agent.RepackMargin). 0 when no rate
+// is known: the wall bound then does no arithmetic at all, so there is nothing to
+// extend.
+func repackOwed(output string, tokS float64) time.Duration {
+	if tokS <= 0 {
+		return 0
+	}
+	return time.Duration(float64(expectedRepackTokens(output)) / tokS * agent.RepackMargin * float64(time.Second))
 }
 
 // repackSkipErr marks a re-pack that was not sent, or not sent again, because the
