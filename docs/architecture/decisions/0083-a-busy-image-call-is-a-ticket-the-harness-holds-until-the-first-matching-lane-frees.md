@@ -25,8 +25,10 @@ make the caller retry. Three things were still wrong once every lane was busy.
 
 1. **A busy image call is a ticket.** An `auto` image call on a machine that has the lane and a fleet asks the pipeline whether
    the lane is free (ADR 0082). A free lane runs the call here as it always did. A busy one becomes a ticket, one file
-   `<state_dir>/media-queue/mq-<id>.json`, written atomically, that any process of the machine can read, and the call is only a
-   way of waiting for it. The file holds what a process other than the owner needs: the owner (pid and start time) and its
+   `<state root>/media-queue/mq-<id>.json`, written atomically, that any process of the machine can read, and the call is only a
+   way of waiting for it. That root is the one the GPU lease uses (`state_dir`, else `LOCAL_OFFLOAD_STATE_DIR`, else `%ProgramData%\local-offload` on Windows or `/var/lib/local-offload` elsewhere; no config key is needed): the tickets, the node claims and the lease's place tokens of one
+   machine share one root, through the one function that resolves it (`gpulease.ResolveStateRoot`), and a config that sets no
+   `state_dir`, which is the usual one, has the queue. (`gpu_lock_path` moves only the lease directory, not the queue.) The file holds what a process other than the owner needs: the owner (pid and start time) and its
    beat, the request's key, the arrival time, the seed, the place in the local line, the state (`waiting`, `local`, `placing`,
    `placed`, `fetching`, `done`, `failed`), the node and the node's job id once there is one, the nodes whose recipe matched at
    the last scan, and the last answer. The request body stays in the owning process; the file keeps no prompt.
@@ -80,8 +82,9 @@ make the caller retry. Three things were still wrong once every lane was busy.
    graph's claim has no ticket file behind it: it names a graph call, and it is judged by its owner alone (a graph call has no
    scanner to write a beat; its call ends, and lets the node go, when its job does), which makes it live while its process is, and,
    when the process is gone, only for the first 2 minutes after the claim was taken (counted from the claim, not from the death, since
-   the call writes no beat; after that the node's own health speaks for the job). A machine with no `state_dir` keeps no queue and no claim directory; there only the
-   in-process hold of decision 12 stands between two graph calls of one process, and two processes can still stack two graphs. The lock is an operating-system file lock
+   the call writes no beat; after that the node's own health speaks for the job). Every machine has the claim directory (decision 1): only a machine whose lease root is refused (a
+   cloud-synced folder) keeps no queue, says so once in its log, and there only the in-process hold of decision 12 stands between
+   two graph calls of one process, and two processes can still stack two graphs. The lock is an operating-system file lock
    (`flock`, `LockFileEx`), never a file whose age decides it is stale: every way of breaking a stale file lock has a gap in which
    a slow contender removes the fresh lock of the one that broke it (two holders inside at once, 24 of 300 contended rounds on the
    first design), while the system frees an OS lock when its holder's process ends, however it ends. The lock file stays for good.

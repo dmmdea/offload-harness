@@ -11,7 +11,8 @@ other on a single shared card.
 - **State:** `<state_dir>/gpu/{lease/meta.json, epoch}` — default `%ProgramData%\local-offload` on
   Windows, `/var/lib/local-offload` on Linux (**see the one-time Linux setup below**). A card-scoped lease
   (opt-in, [below](#card-scoped-leases-record-v2)) lives in `lease/e/<epoch>.json` and `lease/cards/<id>.claim`
-  instead, and the first one writes `gpu/FORMAT`.
+  instead, and the first one writes `gpu/FORMAT`. The same root holds the media ticket queue (`media-queue/`, ADR 0083), so a
+  machine's tickets, node claims and place tokens share the root this resolves, with no config key.
 - **Decision record:** [ADR 0018](../architecture/decisions/0018-machine-wide-fenced-gpu-lease.md)
 
 ## Source map
