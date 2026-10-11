@@ -2250,7 +2250,9 @@ the results file.
 **How many in flight.** `--jobs N`, else 1 for this machine's lane plus one per roster node whose recipe matches (busy or idle: a busy node
 frees), at most 8, and never more than there are jobs (`TestBatchNeverHasMoreThanNInFlight`). The cap of 8 is a chosen constant, not a
 measurement; more tickets than lanes only wait. A job whose single render comes back "a card is held", because a sibling job took the lane a
-moment after it read free, is sent again at most twice (chosen) and then waits as a ticket (`TestBatchRetriesALostLaneRaceAndOnlyThat`).
+moment after it read free, is sent again, at most twice (chosen): asked again, a call that finds the lane busy becomes a ticket and waits, so the retry
+is what turns a lost race into a wait. A lane that refuses the same job three times in a row gives a `failed` row, and so does any other failure at
+once (`TestBatchRetriesALostLaneRaceAndOnlyThat`).
 
 **The rows.** One per job, in the printed JSON (`items`) and in `--results`: `{i, out, seed, ok, ms, error?, node?, family?, sha256?, verdict}`, the first
 six keys being the ones `pipeline.parseBatchResults` reads from the render script's own results file.
@@ -2291,6 +2293,11 @@ render's, so one prompt and seed under two families are two files (`TestNormaliz
 random one on each run. An interrupted batch leaves a job already on a node running there (it cannot be recalled, ADR 0064) and its ticket for the
 next *identical* command to adopt: run the same file again, and give each job an explicit `seed`, or the re-run's minted seeds are new requests and
 the node's job is rendered twice.
+
+**Interrupt.** The verb runs both paths under one interrupt context. The first Ctrl-C cancels a ticket that has sent nothing and, on the warm
+session, the render itself: the child is built with `exec.CommandContext` and a tree kill (`gpugen.Generate`), so it and its descendants are killed,
+and the process stays up to release the lease and tear ComfyUI down. Before the fleet batch the warm session ran under `context.Background()` and a
+Ctrl-C killed the whole process. The second Ctrl-C is the default one.
 
 **Exit status.** 0: every job has its picture, or a busy lane deferred the warm batch (nothing ran, the jobs are `queued`, as it always was). 4: it
 ran every job and some failed (`imagegen.BatchExitJobsFailed`). 1: it stopped (the warm call's error), was interrupted (`queued` rows), or was

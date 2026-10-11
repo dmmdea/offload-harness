@@ -265,7 +265,8 @@ family, an unwritable `--results`).
 
 `--resume` skips a job only when the file at its `out` proves itself: not empty, a PNG that decodes whole, the width and height the job names.
 A zero-byte file, a file cut short or of another size, and a missing file are rendered again. A job with no `out` is never skipped, and a size
-off the family's grid (qwen-image-2.1 floors to 32) never matches. A Ctrl-C cancels the tickets that have sent nothing; a job already on a node
+off the family's grid (qwen-image-2.1 floors to 32) never matches. The first Ctrl-C cancels the tickets that have sent nothing and, on the warm
+session, the render itself (its process tree is killed and the lease released); a job already on a node
 cannot be recalled, and the same command adopts it if its jobs carry explicit seeds.
 
 ### Never post a graph to `:8188` directly ⛔

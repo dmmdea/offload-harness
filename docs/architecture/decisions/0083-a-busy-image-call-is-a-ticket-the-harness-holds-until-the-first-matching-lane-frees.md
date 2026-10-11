@@ -157,7 +157,9 @@ make the caller retry. Three things were still wrong once every lane was busy.
   up to `gpu_wait_ms` and defers as before, and says which node does not match and why. A batch of a 2.1 family pays a ComfyUI cold start per job
   on a node (zero-warm, ADR 0009), which beats waiting only while this machine's lane is held by a long job and a node is idle.
 - **An interrupted batch leaves its jobs on the nodes.** A job already on a node cannot be recalled (ADR 0064); the same command adopts it only if
-  the jobs carry explicit seeds (the ticket's identity is the request, and a seed minted afresh is a new request).
+  the jobs carry explicit seeds (the ticket's identity is the request, and a seed minted afresh is a new request). The verb runs both
+  paths under one interrupt context, so on the warm session the first interrupt cancels the render too (its process tree is killed and
+  the lease released); before, the warm session ran under `context.Background()` and an interrupt killed the whole process.
 - **Measured and unmeasured.** Everything is proved against real fleet-node servers, a real lease manager and fakes (the S1
   pattern); nothing was run against a live lease, a live node or a render. The scan interval, its jitter, the pause steps, the
   owner and keep timings and the 8 h ceiling are chosen constants, not resource numbers (docs/systems/media-generation.md,

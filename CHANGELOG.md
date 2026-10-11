@@ -101,7 +101,7 @@ Versioning: [SemVer](https://semver.org/).
 
 - **The behaviour.** `local-offload generate-image --batch jobs.jsonl [--family F] [--route auto|local|remote] [--results r.jsonl] [--resume]
   [--jobs N]`. Where the jobs run is decided once, at the start, and never mixed. If this machine's lane is free (or the route is local, or
-  there is no fleet, no state dir or an inherited lease) the whole batch goes through the warm session exactly as before. If the lane is held
+  there is no fleet, no state dir or an inherited lease) the whole batch goes through the warm session as before (one change, below: an interrupt). If the lane is held
   (or could not be read) and at least one roster node renders the batch's recipe, **each job is one ticket** of the queue above: it starts on
   the first matching lane that frees, here or on a node, in file order, at most N in flight (default: this machine's lane plus one per matching
   node, at most 8, a chosen cap; `--jobs` overrides), and the command blocks until they have all ended. A node is claimed by the ticket that has a
@@ -129,7 +129,11 @@ Versioning: [SemVer](https://semver.org/).
   ledger label and every item's tag and license are the family's (`TestRunImageBatchFamilySeam`, `TestRunImageBatchAsAsksForTheFamilysCard`,
   `TestRunImageBatchAsLeasesForTheFamilysTimeout`). A family on stable-diffusion.cpp has no warm session and is refused by name. The family is now
   part of a default `out`'s hash, as it is of the single render's; no family hashes exactly as before.
-- **Changed, said.** `--family` and `--route remote` are no longer refused on a batch (`--transparent` still is, `family_cli_test.go` follows);
+- **Changed, said.** The warm session now runs under the verb's interrupt context; before, `generate-image --batch` ran it under
+  `context.Background()` and a Ctrl-C killed the whole process. Now the first Ctrl-C cancels the render: `gpugen.Generate` builds the child with
+  `exec.CommandContext` and a tree kill (the child and its descendants are killed), and the process stays up to run the deferred lease release
+  and teardown; the second Ctrl-C is the default one. The ticket path needs the same context (a ticket that sent nothing is canceled by it).
+  `--family` and `--route remote` are no longer refused on a batch (`--transparent` still is, `family_cli_test.go` follows);
   `--results`, `--resume` and `--jobs` without `--batch` are refused by name. The printed JSON keeps its shape and adds `mode`, `skipped`,
   `cluster` and a verdict, hash and node on every item; a warm batch a busy lane deferred now lists its jobs as `queued` items (its `count` was 0)
   and still exits 0. Two *different* pictures for one `out` are refused before anything runs (the second used to replace the first); an empty
