@@ -587,7 +587,7 @@ VRAM, which streams the experts through host RAM: the host pays the whole file, 
 |---|---|
 | `--wan-placement single\|multicard` | `single` (default) changes nothing. `multicard` is the placement below; `--high-unet` / `--low-unet` must name the fp8 safetensors experts. |
 | `--wan-cards <a>,<b>` | The two cards, as nvidia-smi indices or UUIDs, for a call made outside a lease. Under a lease the lease's cards (`GPU_LEASE_DEVICES`, else the lease's own record) are the authority and this can only confirm them: a card the lease does not hold is refused. With neither, the UUIDs in `CUDA_VISIBLE_DEVICES`. |
-| `--wan-resident-gb N` | GiB of each expert kept on the compute card (default 3, the measured split; at most what the compute card holds beside the sampler's activations at the call's geometry: 5.1 GiB at film size on a 15.9 GiB card). The rest sits on the storage card. |
+| `--wan-resident-gb N` | GiB of each expert kept on the compute card (default 3, the measured split; at most what the compute card holds beside the sampler's activations at the call's geometry: 3.2 GiB at film size on a 15.9 GiB card). The rest sits on the storage card. |
 | `--wan-decode plain` | Under multicard: save the sampled latent, free both cards, then the plain `VAEDecode` (below). `tiled` and `auto` keep their meaning. |
 | `--wan-loader` | Not read under multicard (the placement is the loader). `native`, which a film driver may still pass, is ignored with one stderr line. |
 
@@ -607,7 +607,7 @@ driver does not report (never assumed screenless). It also refuses what was not 
 lease slot is taken, llama-swap is unloaded or ComfyUI starts: `--fast`, a GGUF expert, an expert nobody named (`--high-unet` and
 `--low-unet` are required: the builder's defaults are GGUF), another family (`--model ltx25`, a `--graph` file), a `--wan-resident-gb`
 the compute card cannot hold beside the sampler (the card's size less 0.5 GiB for the context less the sampler's activations at the call's
-geometry: the measured 10.3 GiB at the film's 75,600 tokens, scaled by the tokens, never under 2 GiB, so 5.1 GiB at most at film size), and
+geometry: the measured 12.2 GiB beyond the resident share at the film's 75,600 tokens, scaled by the tokens, never under 2 GiB, so 3.2 GiB at most at film size), and
 the placement's own flags lost to an `=` (`--wan-placement=multicard`, or `--seed=7 --wan-placement multicard`: this runner's parser does
 not split `=`, so the flag is lost or swallowed, and the lease sizing, which does split it, would declare no host RAM for a call that then
 ran single; write each flag as `--name value`). After ComfyUI is up and before the graph is POSTed the runner compares the
@@ -665,13 +665,20 @@ no fit, another family or no flag keep the ordinary estimate, the whole set (33 
 over ComfyUI's idle, inside the headroom the brake keeps anyway. The pipeline's media admission has no multicard door: every typed door leases one card, so the placement
 is reached through the render helper under an explicit `gpu reserve --devices`.
 
-**Measured.** The recipe comes from a benchmark of 2026-10-11 on two RTX 5060 Ti 16 GB, the two non-display cards of a three-card box.
-At the film's geometry (720x1280x81) with 4 of the 20 steps it ran at 250 s per step on either expert, with a peak of 13.3 GiB on the
-compute card and 11.1 GiB on the storage card (of 15.9), and a host growth of 2.3 GiB over ComfyUI's idle 3.2 GiB; no black or blank
-frame. One 5060 Ti alone ran out of memory in the first sampler step, and a 5060 Ti with the display card either hit the display
-card's cap or ran out of memory. That benchmark decoded tiled and was not a quality sample. The 20-step clip of this build, with the
-plain decode after the cards are freed and the frame check at 24 and 48, was queued behind another lease on the first card when this
-section was written, so its numbers are not here yet.
+**Measured.** On two RTX 5060 Ti 16 GB, the two non-display cards of a three-card box, in one media lease with `--ram 0` (2026-10-11).
+The film geometry (720x1280x81, 20 steps, boundary at 10, cfg 3.5, fp8 experts, plain decode) ran at 250.5 s per step on both experts: the runner
+took 5136 s (85.6 min), of which 67 s to the first step, 24 s for the hand-over to the second expert and 31.5 s from the free node to the finished
+video (the free node released both cards in 1.1 s, leaving 14.4 GiB on each; the plain decode asks about 10.2). Per card (nvidia-smi): the compute card
+13.3 to 13.65 GiB while the first expert samples, 15.18 GiB (95 % of the card) at the peak, which comes about 90 s before the hand-over, and 14.9 GiB
+steady while the second samples; the storage card 10.86 GiB (68 %). The compute card therefore keeps a margin of 0.7 GiB at the peak, and each GiB more kept resident is a GiB less of it: the runner refuses more than 3.2 GiB at this
+geometry, and a larger clip needs a smaller `--wan-resident-gb`. Host RAM: ComfyUI idles at 2.9 GiB private; beyond the 1:1 VRAM charge its growth is 2.3 GiB steady (2.6 at most),
+with two working-set peaks of 15 GiB lasting under 15 s each (the experts' read-only maps being read at the first load and at the hand-over; file-backed,
+not commit). A first benchmark of the same recipe, 4 of the 20 steps with the tiled decode, gave the same 250 s per step and the same per-card peaks.
+The clip passes the frame check: the chroma step into the tile joins 24, 48 and 72 is z 1.9, 1.2 and 0.0 (the pre-fix tiled clips measure z 6 to 18),
+the frame differences at 24 and 48 are 0.69x and 0.82x the clip's median, no frozen or repeated frame, no jump, and the walk cycle is continuous through
+both joins when viewed. The Qwen-Image-Edit 2511 call at the film's full
+preset (fp8mixed, 40 steps, cfg 4, no LoRA, 1.47 MP) also runs on the same pair with 9 GiB of the DiT resident on the compute card: 15.98 s per step,
+12 min per image, 10.5 and 10.6 GiB per card; its output carries the known 1.47 MP bottom-edge strip, as the single-card runs do.
 
 **What it says when it refuses.** `WAN-PLACEMENT: ...` (cards, display card, missing pack: nothing launched);
 `WAN-PLACEMENT-MISMATCH` (ComfyUI's devices are not the pinned pair: nothing submitted); `WAN-PLACEMENT-PACK` (the harness's pack failed

@@ -307,8 +307,8 @@ export function wanGeometry(flags) {
   return { w, h, f, tokens: Math.ceil(w / 16) * Math.ceil(h / 16) * (Math.floor((f - 1) / 4) + 1) };
 }
 const FILM_TOKENS = 75600;
-/** What the sampler needs on the compute card beyond the resident weights at the film's size: the benchmark's compute-card peak, 13.3 GiB, less its 3 GiB resident share. */
-const FILM_ACTIVATIONS_GIB = 10.3;
+/** What the compute card holds beyond the resident weights at the film's size: the film-size run's compute-card peak, 15.18 GiB (nvidia-smi, at the second expert's load), less its 3 GiB resident share. */
+const FILM_ACTIVATIONS_GIB = 12.2;
 /** Scaled with the tokens, never under this: even a small clip holds a context's worth of buffers. */
 const ACTIVATIONS_FLOOR_GIB = 2.0;
 /** The CUDA context and the allocator's slack on the compute card, beyond the activations. */
@@ -317,7 +317,7 @@ const COMPUTE_CARD_CONTEXT_GIB = 0.5;
 /**
  * checkResident: a resident share larger than the compute card can hold beside the sampler's activations at this geometry would
  * run out of memory in the first sampler step, 80 minutes into a film-size run's lease. The estimate is the measured compute-card
- * peak scaled by the tokens (floor 2 GiB), so the film's own 3 GiB passes with room and 6 does not; the lease sizing in
+ * peak scaled by the tokens (floor 2 GiB), so the film's own 3 GiB passes and 4 does not; the lease sizing in
  * internal/hostneed is stricter on purpose (it only decides whether a call needs host RAM declared).
  */
 function checkResident(residentGb, pair, flags) {

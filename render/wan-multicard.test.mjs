@@ -569,16 +569,16 @@ test("a row without a numeric size is no card, so a size check can never pass on
 });
 
 test("--wan-resident-gb above what the compute card can hold beside the sampler's activations at THIS geometry is refused with the numbers", () => {
-  // the default geometry (832x480x49: 20,280 tokens, about 2.8 GiB beyond the weights): 15.9 - 2.8 - 0.5 = 12.7 GiB at most
+  // the default geometry (832x480x49: 20,280 tokens, about 3.3 GiB beyond the weights): 15.9 - 3.3 - 0.5 = 12.2 GiB at most
   assert.equal(planWith({ "wan-resident-gb": "12" }).residentGb, 12);
-  assert.throws(() => planWith({ "wan-resident-gb": "13" }), /--wan-resident-gb 13 .*compute card \(idx 0, 15\.9 GiB\).*832x480x49.*at most 12\.7/);
+  assert.throws(() => planWith({ "wan-resident-gb": "13" }), /--wan-resident-gb 13 .*compute card \(idx 0, 15\.9 GiB\).*832x480x49.*at most 12\.2/);
   assert.throws(() => planWith({ "wan-resident-gb": "40" }), /--wan-resident-gb 40/);
-  // the film's geometry (720x1280x81: 75,600 tokens, 10.3 GiB beyond the resident share, measured): the measured 3 passes, 6 and 8 would run out of memory
+  // the film's geometry (720x1280x81: 75,600 tokens, 12.2 GiB beyond the resident share, measured at the film-size run's peak): the measured 3 passes, 4 and above would run out of memory
   const film = { width: "720", height: "1280", frames: "81" };
   assert.equal(planWith({ ...film, "wan-resident-gb": "3" }).residentGb, 3);
-  assert.equal(planWith({ ...film, "wan-resident-gb": "5" }).residentGb, 5, "15.9 - 10.3 - 0.5 = 5.1 GiB at most");
-  assert.throws(() => planWith({ ...film, "wan-resident-gb": "6" }), /--wan-resident-gb 6 .*720x1280x81 \(75600 tokens\).*at most 5\.1/);
-  assert.throws(() => planWith({ ...film, "wan-resident-gb": "8" }), /--wan-resident-gb 8 /);
+  assert.equal(planWith({ ...film, "wan-resident-gb": "3.2" }).residentGb, 3.2, "15.9 - 12.2 - 0.5 = 3.2 GiB at most");
+  assert.throws(() => planWith({ ...film, "wan-resident-gb": "4" }), /--wan-resident-gb 4 .*720x1280x81 \(75600 tokens\).*at most 3\.2/);
+  assert.throws(() => planWith({ ...film, "wan-resident-gb": "6" }), /--wan-resident-gb 6 /);
   // a small clip needs little: the estimate has a 2 GiB floor (480x832x17: 7,800 tokens)
   assert.equal(planWith({ width: "480", height: "832", frames: "17", "wan-resident-gb": "13" }).residentGb, 13, "15.9 - 2 - 0.5 = 13.4 GiB at most");
   assert.throws(() => planWith({ width: "480", height: "832", frames: "17", "wan-resident-gb": "14" }), /--wan-resident-gb 14 .*at most 13\.4/);
