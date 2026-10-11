@@ -54,8 +54,9 @@ jobs:
       # reads that line, fetches the release and runs under it, so build, vet and test judge the
       # compiler that ships. setup-go@v5 leaves GOTOOLCHAIN alone. From v6 the action exports
       # GOTOOLCHAIN=local, and under it the go command ignores a toolchain line without a word, so a
-      # bump to v6 must read go.mod (`go-version-file: go.mod`) instead of naming 1.26.x;
-      # TestCISetupGoLeavesTheToolchainSwitchAlone fails until it does.
+      # bump to v6 must read go.mod (`go-version-file: go.mod`, and no `go-version`, which would win)
+      # instead of naming 1.26.x; TestCISetupGoLeavesTheToolchainSwitchAlone fails until it does, and
+      # accepts exactly that.
       - name: Set up Go
         uses: actions/setup-go@v5
         with:

@@ -14,9 +14,11 @@ package main
 // govulncheck job in ci.yml reports a standard-library finding for as long as the pin lags it.
 
 import (
+	"fmt"
 	gover "go/version"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -249,8 +251,7 @@ func TestGoModPinCheckReportsEachProblem(t *testing.T) {
 // compiler and ignores the toolchain line without printing anything (measured with go1.27.1 installed and
 // `toolchain go1.27.2` in go.mod: go build succeeds and go version -m reads go1.27.1). A bump of the
 // action, or a GOTOOLCHAIN=local in the workflow, would therefore turn "CI tests the compiler that ships"
-// into a false claim with every check green. This test is the tripwire: when it fails, read the v6 notes
-// (go-version-file: go.mod installs the toolchain line's version and pins it) and extend it.
+// into a false claim with every check green. This test is the tripwire; setupGoProblem is its rule.
 func TestCISetupGoLeavesTheToolchainSwitchAlone(t *testing.T) {
 	w := loadCIWorkflow(t)
 	if v, ok := w.Env["GOTOOLCHAIN"]; ok {
@@ -265,10 +266,94 @@ func TestCISetupGoLeavesTheToolchainSwitchAlone(t *testing.T) {
 			if v, ok := st.Env["GOTOOLCHAIN"]; ok {
 				t.Errorf("step %q of job %s sets GOTOOLCHAIN=%q: the toolchain line of go.mod must decide", st.label(), name, v)
 			}
-			if ref, ok := strings.CutPrefix(st.Uses, "actions/setup-go@"); ok && ref != "v5" && !strings.HasPrefix(ref, "v5.") {
-				t.Errorf("job %s uses actions/setup-go@%s: only v5 is known to leave GOTOOLCHAIN alone (v6 exports "+
-					"GOTOOLCHAIN=local, which makes the toolchain line of go.mod a silent no-op)", name, ref)
+			if p := setupGoProblem(st); p != "" {
+				t.Errorf("job %s, step %q: %s", name, st.label(), p)
 			}
+		}
+	}
+}
+
+// setupGoProblem says why a step that uses actions/setup-go would stop go.mod's toolchain line from deciding
+// the compiler of its job, and "" when the step is fine or is not a setup-go step.
+//
+//   - v5 and v5.x leave GOTOOLCHAIN alone, so `go-version: '1.26.x'` only supplies a go command to start from
+//     and the first go command switches to the toolchain line (go.dev/doc/toolchain).
+//   - From v6 the action exports GOTOOLCHAIN=local, so the switch never happens; the one way left is to have
+//     the action install the pinned release itself: `go-version-file: go.mod`, where the action takes the
+//     toolchain line before the go line. `go-version` wins over `go-version-file` when both are set (the
+//     action logs a warning), so it must not be there. By the action's documented run order it reads the file
+//     before it exports local, so the job's first setup-go step sees the toolchain line and a second one in
+//     the same job would see local already and read the go line (read from its documentation, not measured
+//     on a runner: no hosted run of this change exists yet).
+//
+// Any other reference (a commit hash, a branch) is refused: nothing here knows what it does.
+func setupGoProblem(st ciStep) string {
+	ref, ok := strings.CutPrefix(st.Uses, "actions/setup-go@")
+	if !ok {
+		return ""
+	}
+	const base = "uses actions/setup-go@"
+	m := setupGoTagRe.FindStringSubmatch(ref)
+	if m == nil {
+		return base + ref + ": only v5 is known to leave GOTOOLCHAIN alone, and this is no release tag whose behaviour is known"
+	}
+	major, _ := strconv.Atoi(m[1])
+	switch {
+	case major == 5:
+		return ""
+	case major < 5:
+		return base + ref + ": only v5 is known to leave GOTOOLCHAIN alone"
+	}
+	file, _ := st.With["go-version-file"].(string)
+	switch {
+	case file == "":
+		return base + ref + ": only v5 is known to leave GOTOOLCHAIN alone; this release exports GOTOOLCHAIN=local, which makes " +
+			"the toolchain line of go.mod a silent no-op. Set `go-version-file: go.mod` (and no go-version) so the action installs " +
+			"the toolchain line's release itself"
+	case file != "go.mod":
+		return base + ref + ": go-version-file is " + strconv.Quote(file) + ", and only go.mod carries the toolchain line this " +
+			"repository pins"
+	}
+	if v, has := st.With["go-version"]; has && v != nil && fmt.Sprint(v) != "" {
+		return base + ref + ": go-version and go-version-file are both set, and go-version wins, so go.mod's toolchain line " +
+			"is never read"
+	}
+	return ""
+}
+
+// setupGoTagRe is a release tag of the action: v5, v5.6 or v5.6.0. The major version is its first group.
+var setupGoTagRe = regexp.MustCompile(`^v([0-9]+)(?:\.[0-9]+){0,2}$`)
+
+// TestSetupGoRuleKnowsTheMigrationFromV5: the rule above in a table, because the real workflow only ever holds
+// the shapes it holds today. The accepted rows are the ones ci.yml and the CHANGELOG name as the way to bump
+// the action; the refused rows are the ways a bump goes wrong with every check green.
+func TestSetupGoRuleKnowsTheMigrationFromV5(t *testing.T) {
+	cases := []struct {
+		name   string
+		uses   string
+		with   map[string]any
+		expect string // a substring of the problem; "" for none
+	}{
+		{"v5 with a version range", "actions/setup-go@v5", map[string]any{"go-version": "1.26.x"}, ""},
+		{"a v5 patch release", "actions/setup-go@v5.6.0", map[string]any{"go-version": "1.26.x"}, ""},
+		{"not a setup-go step", "actions/checkout@v4", nil, ""},
+		{"v6 with a version range", "actions/setup-go@v6", map[string]any{"go-version": "1.26.x"}, "only v5 is known"},
+		{"v6 with nothing", "actions/setup-go@v6", nil, "only v5 is known"},
+		{"v6 reading go.mod", "actions/setup-go@v6", map[string]any{"go-version-file": "go.mod"}, ""},
+		{"v7 reading go.mod, cache off", "actions/setup-go@v7", map[string]any{"go-version-file": "go.mod", "cache": false}, ""},
+		{"v6 reading go.mod and naming a version", "actions/setup-go@v6", map[string]any{"go-version-file": "go.mod", "go-version": "1.26.x"}, "go-version wins"},
+		{"v6 reading go.mod and a numeric version", "actions/setup-go@v6", map[string]any{"go-version-file": "go.mod", "go-version": 1.26}, "go-version wins"},
+		{"v6 reading another file", "actions/setup-go@v6", map[string]any{"go-version-file": ".go-version"}, "only go.mod"},
+		{"v6 reading a go.mod of a nested module", "actions/setup-go@v6", map[string]any{"go-version-file": "tools/comfyui/go.mod"}, "only go.mod"},
+		{"a commit hash", "actions/setup-go@0123456789abcdef0123456789abcdef01234567", map[string]any{"go-version-file": "go.mod"}, "only v5 is known"},
+	}
+	for _, c := range cases {
+		got := setupGoProblem(ciStep{Uses: c.uses, With: c.with})
+		switch {
+		case c.expect == "" && got != "":
+			t.Errorf("%s: reported %q, want nothing", c.name, got)
+		case c.expect != "" && !strings.Contains(got, c.expect):
+			t.Errorf("%s: reported %q, want a problem containing %q", c.name, got, c.expect)
 		}
 	}
 }

@@ -22,7 +22,9 @@ Versioning: [SemVer](https://semver.org/).
   older Go needs it. The oldest compiler the module accepts is unchanged. `build` and `installer-windows` keep `go-version:
   '1.26.x'` and switch to the pinned compiler through the same line, which holds for setup-go@v5 (its v5.6.0 source never mentions
   GOTOOLCHAIN or the toolchain directive) and not for v6, which exports `GOTOOLCHAIN=local`: a bump to v6 must switch to
-  `go-version-file: go.mod`, and `TestCISetupGoLeavesTheToolchainSwitchAlone` fails until it does.
+  `go-version-file: go.mod` and drop `go-version` (which would win), and `TestCISetupGoLeavesTheToolchainSwitchAlone` fails until it
+  does and accepts exactly that (`TestSetupGoRuleKnowsTheMigrationFromV5` holds the rule in a table: v6 or v7 reading go.mod passes;
+  v6 with a version range, with both inputs, reading another file, or pinned by a commit hash does not).
 - **The scan.** A new `govulncheck` job (ubuntu-latest, the standard free runner, no module cache) reads GOTOOLCHAIN from go.mod's
   toolchain line (a go.mod without the line fails the step instead of scanning unpinned), installs `govulncheck@v1.8.0` with it,
   and scans `.`, `tools/comfyui` and `tools/llamaswap` for `GOOS=linux` and `GOOS=windows`: the printed CLIs are separate modules the
