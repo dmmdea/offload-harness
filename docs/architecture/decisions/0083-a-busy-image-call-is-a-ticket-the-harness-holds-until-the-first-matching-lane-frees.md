@@ -60,8 +60,9 @@ make the caller retry. Three things were still wrong once every lane was busy.
    the pipeline tried to read and could not, `core.LaneVerdict.Unjudged`: the card table past its 4 s bound, the lease directory
    not opening, is not a free lane; the fleet is looked at in the same scan and the run here is the answer only when no node can
    take the call; a call the prober does not model at all still runs here); else asks the fleet with ADR 0082's
-   own filter and ranking (`candidatesFor`, not forked), minus the nodes a ticket of the machine has a job on and the nodes an
-   older waiting ticket of the machine matches (an older ticket that has not been scanned yet is first in line for every node).
+   own filter and ranking (`candidatesFor`, not forked), minus the nodes a job of the machine has a claim on (a ticket's, or a
+   whole-node graph call's, decision 6) and the nodes an older waiting ticket of the machine matches (an older ticket that has not
+   been scanned yet is first in line for every node).
    Nothing is sent to a node until a lane is free there: **late binding**, no job parked anywhere. One node is tried per scan; a
    node that refuses or bounces the job goes back to waiting and is paused by the placer's memory (a full node that names no
    `Retry-After` for 5 s, a bounce for 60 s and then 300 s; a node that does not answer for 5, 15, 60 and then 300 s, with one
@@ -71,14 +72,20 @@ make the caller retry. Three things were still wrong once every lane was busy.
    0, a younger place on the card that a call without a wait cannot pass) is not asked in a loop, each run writing the pipeline's
    own deferred row; the fleet is looked at meanwhile. A ticket never gives up on a lane (the S1 bound of three nodes is gone); it
    ends after 8 h without one.
-6. **A node a ticket has a job on is in use for every scanner on the machine.** A claim file per node is written, together with
-   the ticket's `placing` state and the id of the job about to be sent, under a directory lock, before the job is sent: the read and
-   the write are one step, so two processes never send one single-job node two jobs. The lock is an operating-system file lock
+6. **A node a job of this machine has a claim on is in use for every scanner on the machine.** A claim file per node is written,
+   together with the ticket's `placing` state and the id of the job about to be sent, under a directory lock, before the job is
+   sent: the read and the write are one step, so two processes never send one single-job node two jobs. **A whole-node graph call
+   (decision 12) takes the same claim, under the same lock, before it sends**, so a ticket is never sent a node a graph is running
+   on, a graph is never sent a node a ticket is running on, and two graph calls of two processes do not stack on one node. A
+   graph's claim has no ticket file behind it: it names a graph call, and it is judged by its owner alone (a graph call has no
+   scanner to write a beat; its call ends, and lets the node go, when its job does), which makes it live while its process is, and
+   for the same 2 minutes after the process ended. A machine with no `state_dir` keeps no queue and no claim directory; there only the
+   in-process hold of decision 12 stands between two graph calls of one process, and two processes can still stack two graphs. The lock is an operating-system file lock
    (`flock`, `LockFileEx`), never a file whose age decides it is stale: every way of breaking a stale file lock has a gap in which
    a slow contender removes the fresh lock of the one that broke it (two holders inside at once, 24 of 300 contended rounds on the
    first design), while the system frees an OS lock when its holder's process ends, however it ends. The lock file stays for good.
    A cancel that lands while the claim waits for the lock is seen under the ticket's lock after the claim returns: the claim is let
-   go and nothing is sent. A claim is live while its ticket has a job in flight on that node and
+   go and nothing is sent. A ticket's claim is live while its ticket has a job in flight on that node and
    its owner is alive, or died less than 2 minutes ago (chosen: the job it sent keeps running on the node, which shows its lease
    only once the job is admitted, and in those seconds the node would read idle); after that the node's own health speaks for it.
 7. **Owners die; tickets are adopted or swept.** An owner is dead when its process is gone or when it has not written its beat
@@ -119,10 +126,16 @@ make the caller retry. Three things were still wrong once every lane was busy.
     holds the files it names) is released together with this ADR. The ticket is the only busy-lane path of an IMAGE call; a graph
     keeps the one-shot placement of the first cut (`tryGraphOverflow` and `placeGraph` in `internal/mediaremote/place.go`, reached
     from `RunWith` before the ticket door): it is offered once to the nodes that can take it, at most three, one graph call of a
-    process per node, and never a node a ticket of this machine has a job on (it reads the claim files and writes none), and when
-    none admits it, it waits in this machine's own queue. **A graph does not wait in the cluster queue yet.** It has no ticket, so
-    it keeps no place in the cluster queue, does not start on a lane that frees after its one look at the fleet, and a repeat of the
-    same graph is a second call. The reason it is left out is that a ticket's identity is the hash of the request's parameters
+    process per node, and when none admits it, it waits in this machine's own queue. **It shares the nodes with the tickets by the
+    tickets' own two rules.** It never takes a node a job of this machine has a claim on, and it takes the claim of the node it
+    uses (decision 6), so a ticket and a graph cannot both be sent one node. And it yields to the tickets: every ticket that is
+    waiting is older than a graph that arrives now, so a node an older waiting ticket matched at its last scan is left to that
+    ticket (the answer's row reads `free ... ticket mq-... is older and first in line for it`), and so is every node while that
+    ticket has not been scanned yet (its first scan comes within about one scan interval of its creation). The graph then waits in this machine's own queue, which is
+    never a refusal. A lane the pipeline tried to read and could not (`Unjudged`, decision 5) is not a free lane for a graph either:
+    the fleet is looked at first and the graph runs here when no node takes it. **A graph does not wait in the cluster queue yet.**
+    It has no ticket, so it keeps no place in the cluster queue, does not start on a lane that frees after its one look at the
+    fleet, and a repeat of the same graph is a second call. The reason it is left out is that a ticket's identity is the hash of the request's parameters
     (decision 2), and a graph's parameters name files on this machine (`graph_path`, `manifest_path`) rather than carry them, so what
     makes two graph calls the same call needs a decision of its own; making the graph a ticket is the follow-up.
 
@@ -131,7 +144,8 @@ make the caller retry. Three things were still wrong once every lane was busy.
 - The operator's "even if all PCs are full" holds for images: the job waits for the first matching lane that frees anywhere, in the
   order it arrived, with no caller loop, and the answer says per node why it is not running yet. Late binding costs up to one scan
   interval (12 s) plus however long the scan before it took (each waiting ticket costs one lane question of up to 4 s) between a
-  lane freeing and the ticket noticing, and a freed node can be taken by a caller that is not a ticket in that interval; the job
+  lane freeing and the ticket noticing, and a freed node can be taken in that interval by a caller that is neither a ticket nor a
+  whole-node graph (a video, animation or audio call placed on the fleet, or any call forced to a node); the job
   then costs one bounce (a 5 s pause for a full node, 60 s for a bounce).
 - **One first-in-first-out line per delegating machine.** Two machines each hold their own queue and meet only at a node's own
   grant; a holder node's queue (ADR 0030) is still the named upgrade, not built. The order among a machine's tickets is arrival
@@ -157,7 +171,8 @@ make the caller retry. Three things were still wrong once every lane was busy.
 - **Keep S1's synchronous placement beside the ticket.** Rejected for an image call: a first call that placed itself outside the
   ticket bypassed the claim, so two processes' first calls could still stack on one idle node, and a bounced first call still
   rejoined the local line late. It is kept for a whole-node graph only, which is not a ticket in this release (decision 12), and
-  that path reads the claim files so that it does not take a node a ticket is using.
+  that path takes the ticket's claim and honours the ticket's order, so that it neither takes a node a ticket is using nor jumps an
+  older waiting ticket.
 - **Make a whole-node graph a ticket in the same release.** Deferred, not rejected: the identity of a graph call (decision 12) is
   undecided, and the graph overflow (ADR 0082 Amendment 1) was built and tested against the one-shot placement.
 - **Park the job on the first node that will be free soonest.** Rejected: a lease end is a ceiling, not a promise, and a job parked

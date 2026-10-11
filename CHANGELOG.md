@@ -50,7 +50,10 @@ Versioning: [SemVer](https://semver.org/).
 - **A node a ticket has a job on is in use for every scanner on the machine** (`TestPlacedTicketMarksNodeInUse`): a claim file per
   node is written with the ticket's `placing` state, and the id of the job about to be sent, under a directory lock before the job is
   sent, so two processes never send one single-job node two jobs (`TestTwoProcessesNeverDispatchTwoTicketsToOneSingleJobNode`, which
-  turns the ordering rule off so that only the claim stands between them). This closes the S1 open issue 6.
+  turns the ordering rule off so that only the claim stands between them). This closes the S1 open issue 6. **A whole-node graph call
+  takes the same claim**, under the same lock, before it sends (a record marked `graph`, with no ticket file behind it, live while its
+  process is and for the same 2 minutes after it ended; next section): a ticket is never sent a node a graph is running on, and the
+  reverse (`TestATicketNeverSendsANodeAGraphHasAJobOn`, `TestAGraphAndATicketNeverHoldOneNodeTogether`).
 - **A dead owner's claim holds its node for 2 minutes** (chosen), not a moment less: the job it sent keeps running on the node, which
   shows its lease only once the job is admitted, and in those seconds another process would have sent the node a second job.
   **A node that does not answer is logged once per backoff step** (5, 15, 60, then 300 s), never per scan.
@@ -125,14 +128,24 @@ Versioning: [SemVer](https://semver.org/).
   0.179.0 now covers it, **as a path of its own for graphs**: an image call is a ticket in this release (the section above) and a
   graph is not. A busy graph is offered once to the idle nodes that can take it (no family and no digest travel; a node's 503 at the
   door moves the call to the next node, which, like any 503 that names no `Retry-After`, leaves that node alone for about 5 s in
-  this process), and when none admits it the graph waits in this machine's own queue, joining it when the fleet attempt is over and not
+  this process; a ticket's scan reads that node as refused for those seconds, and the cause kept for a graph's 503 does not call the
+  node full, because the same 503 is a missing file), and when none admits it the graph waits in this machine's own queue, joining it when the fleet attempt is over and not
   from when it arrived; if that wait ends in a deferral, the deferral carries `cluster[]` naming, per node, the file it lacks (a call
   that then runs here and succeeds carries none). A graph with `devices`, a `waiter_token`, an inherited lease or an input file stays
-  here. The graph path keeps three limits of the old image overflow that the ticket removed for images: a graph is sent to at most
-  three nodes, two graph calls of one process never stack on one node, and a graph leaves a node a ticket of this machine has a job on
-  (it reads that claim and never takes one). The hold is per process: **two graph calls from two processes** (two MCP sessions,
-  or a CLI beside an MCP server) can still both send one idle node a graph, because the claim file is the ticket's and a graph
-  writes none (a node's second job costs one bounce); only a ticket is protected across processes.
+  here. The graph path keeps one limit of the old image overflow that the ticket removed for images: a graph is sent to at most
+  three nodes. **It shares the nodes with the tickets by the tickets' own two rules.** It takes the machine-wide claim of the node it
+  uses, under the directory lock, before it sends (an in-process hold stands first, and is the whole cover on a machine with no
+  `state_dir`), so no ticket and no other graph call, of this process or of another, is sent a node it is running on, and it leaves a
+  node any such claim holds (`in-use`, `a job of this machine is running there (graph call, since ...)`;
+  `TestTwoProcessesNeverStackTwoGraphsOnOneNode`). And it **yields to the tickets**: every ticket that is waiting is older than a
+  graph that arrives now, so a node an older waiting ticket matched at its last scan is left to that ticket, and so is every node while
+  that ticket has not been scanned yet (its first scan comes within about one scan interval of its creation); the row reads `free`,
+  `idle, but ticket mq-... is older and first in line for it`, and the graph goes on to its own lane
+  (`TestAGraphLeavesANodeAnOlderTicketIsFirstInLineFor`). **A lane the pipeline could not read is not a free lane for a graph
+  either** (the card table past its 4 s bound, the lease directory not opening: `core.LaneVerdict.Unjudged`, as for an image): the
+  fleet is looked at first, the placement reads `this machine's graph lane could not be judged (...)`, and the graph runs on this
+  machine's lane when no node takes it (`TestAGraphWithAnUnreadLaneStillLooksAtTheFleet`, `TestMediaLaneFreeGraphIsFreeWhenTheCardTableCannotBeRead`,
+  `TestMediaLaneFreeGraphIsUnjudgedWhenTheLeaseDirectoryCannotBeOpened`). Two machines (two state dirs) still meet only at a node's own grant.
 - **A graph does not wait in the cluster queue yet** (a named limit of this release). It is not a ticket: it keeps no place in the
   cluster queue, does not start on a lane that frees after its one look at the fleet, and is not attached by content (a repeat of the
   same graph is a second call, not the first one's ticket). A graph that finds every lane busy therefore waits in this machine's

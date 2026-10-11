@@ -331,7 +331,10 @@ with `--min-vram-gb N`, its largest card must be at least N GB (a 16 GB card rea
 with a graph height of 720 or more gets a 16 GB floor **chosen** from the film owner's stated constraint (Wan 2.2 14B at 720p needs a 16 GB
 card), not measured; `--min-vram-gb 0` lifts it. The floor filters nodes only: `--route local` never reads it. With the fleet as
 the film owner described it on 2026-10-09 (the 16 GB cards are the multi-card workstation's three; the single-card nodes have 8 GB
-cards) the two rules together leave a default-floor Wan graph no remote node: it waits for its own lane. A graph that reads an input
+cards) the two rules together leave a default-floor Wan graph no remote node: it waits for its own lane. A graph shares the nodes
+with the image tickets of its machine: it takes the same per-node claim, so a node a ticket (or another graph call) is running on is
+left alone, and it leaves an idle node an older waiting ticket is first in line for; it then waits for its own lane. A lane the
+pipeline could not read (a card table that does not read in 4 s) is not taken for a free one: the fleet is asked first. A graph that reads an input
 file (`LoadImage`, `LoadVideo`, `LoadAudio`) is never auto-overflowed either, because a node can match such a file only by name; the
 call waits for this machine's own lane, and if that wait ends in a deferral the deferral says the fleet was not asked and why (a
 call that then runs here and succeeds carries no such note). A call that must leave this machine anyway (`--route remote`, or

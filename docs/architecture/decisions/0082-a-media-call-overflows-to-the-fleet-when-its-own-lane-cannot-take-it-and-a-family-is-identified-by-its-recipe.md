@@ -45,7 +45,9 @@ Three facts made the obvious change unsafe as stated.
    have served; it may call free a lane the grant then refuses, and the call then runs locally as before, after the one bounded card-table read the question costs. A call that resumes a place in line counts only the callers
    that arrived before that place, on every plan, because the lease queue serves a resumed place by arrival time (ADR 0083
    decision 4; `TestMediaLaneFreeOrdersByArrivalForACallThatResumesItsPlace`); a new arrival counts every other caller in line. Every doubt
-   (a lease this process inherited, a card table that does not read in 4 s, a request it does not model) reads as free. It
+   (a lease this process inherited, a card table that does not read in 4 s, a request it does not model) reads as free; the card
+   table that does not read and a lease directory that does not open are marked unread (`Unjudged`, ADR 0083 decision 5), and a
+   router then looks at the fleet before it runs the call here. It
    creates no lease, place in line, epoch, waiter record, ledger row, PAIR card or ComfyUI instance, and it removes nothing: the
    readers of the line it shares with the admission prune a record they find dead (an expired place, a waiter that stopped
    polling) as housekeeping, and the probe reads through `gpulease.Manager.ReadOnly`, a view that skips such a record and leaves
@@ -210,8 +212,11 @@ card. This amendment adds them under four rules; every other decision stands, an
    upper bound and not the graph's own size), under the same contract: a relaxation of the real wait-0 admission, held by
    a differential test, that writes nothing. ADR 0083 turned an image call into a ticket; **a graph is not one in 0.180.0**: it
    keeps the one-shot placement of the first cut, offered once to the nodes that can take it (at most three, one graph call of a
-   process per node, and never a node a ticket of this machine has a job on: the graph reads that claim and takes none) and, when
-   none admits it, it waits in this machine's own queue, joining it when the fleet attempt is over. A graph that names `devices` (refused by `plan()` before the lane is asked), one
+   process per node, never a node a job of this machine has a claim on, a ticket's or another graph's, of any process of the
+   machine: the graph takes the same claim under the same lock, ADR 0083 decision 6; and never a node an older waiting ticket is
+   first in line for, by the ticket's own rule, ADR 0083 decision 12) and, when none admits it, it waits in this machine's own
+   queue, joining it when the fleet attempt is over. A graph's lane the pipeline could not read (`Unjudged`) is offered to the fleet
+   the same way, and the graph runs here when no node takes it. A graph that names `devices` (refused by `plan()` before the lane is asked), one
    that carries a `waiter_token`, one under an inherited lease and one that reads an input file stay here; the last waits for
    this machine's own lane, and if that wait ends in a deferral the deferral says the fleet was not asked and why (`fleet_note`;
    a call that then runs here and succeeds carries no note, because only a deferral is annotated). A call with no lane of its own
@@ -220,7 +225,8 @@ card. This amendment adds them under four rules; every other decision stands, an
    the node would lift that last exception and close that limit; it is not built. A node's 503 at the door moves the call to the
    next node like any refusal at the door (decision 6) and counts toward the three attempts; like any 503 that names no
    `Retry-After` it also leaves that node alone for about 5 s in the calling process (the placer's memory, the same for a graph as
-   for an image). The call falls back to the local queue, and when that wait ends in a deferral the deferral carries `cluster[]`
+   for an image: a ticket's scan reads that node as refused for those seconds; the cause kept for a graph's 503 does not call the node
+   full, since the same 503 is a missing file). The call falls back to the local queue, and when that wait ends in a deferral the deferral carries `cluster[]`
    naming, per node, the file it lacks.
 3. **A whole-node graph is placed only on a node that publishes exactly one card.** A graph that names no devices holds the
    whole node and runs in the default ComfyUI instance, which sees every card; on a node with several, the delegator cannot

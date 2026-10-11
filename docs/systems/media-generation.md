@@ -2049,8 +2049,10 @@ back is left alone for 60 s and then 300 s per consecutive bounce (only a call i
 not): a node that reads idle but whose own grant refuses every job would otherwise park each call for its whole `gpu_wait_ms`.
 Chosen constants, not measurements (`TestABounceIsRememberedAndTheNodeComesBackAtTheNextStep`,
 `TestARetryAfterHoldsTheNodeAndReadsAsRefused`, `TestARefusedDialMovesOnAndBacksTheNodeOff`, `TestABouncedAttemptGoesBackToWaitingAndTheNextScanTriesTheNextNode`).
-A node that answers 503 or 429 with no `Retry-After` is left alone for the first step (5 s); one that refuses with another status is
-left alone like a bounce. The memory is per process (the placer is a package variable): the MCP server keeps it across the calls
+A node that answers 503 or 429 with no `Retry-After` is left alone for the first step (5 s; the row's cause calls an image's node
+full, and a graph's `it answered 503 to the last dispatch at its door`, because a graph's 503 is also a missing file); one that refuses
+with another status is left alone like a bounce. The memory is shared by the tickets and the graph path: a graph refused at a node's
+door hides that node from an image ticket's scan for those seconds, and the reverse. The memory is per process (the placer is a package variable): the MCP server keeps it across the calls
 of its session, and a one-shot CLI call (`generate-image` and the other verbs) starts with none, though its ticket keeps it across
 its own scans, so it pays a bounced node's `gpu_wait_ms` once.
 
@@ -2140,8 +2142,8 @@ pipeline TRIED to read and could not (the card table past its 4 s bound, the lea
 is not a free lane: the fleet is looked at in the same scan, and the run here is the answer only when no node can take the call
 (`TestAnUnreadLaneStillLooksAtTheFleet`, `TestAnUnreadLaneWithNoNodeRunsHere`); a call the prober does not model at all (another task, a
 binding without a ComfyUI lane, an inherited lease) runs here at once;
-(3) otherwise asks the fleet with ADR 0082's own filter and ranking (`candidatesFor`), minus the nodes a ticket of the machine has
-a job on and the nodes an **older** waiting ticket of the machine matches (an older ticket not yet scanned is first in line for every
+(3) otherwise asks the fleet with ADR 0082's own filter and ranking (`candidatesFor`), minus the nodes a job of the machine has a
+claim on (a ticket's, or a whole-node graph call's) and the nodes an **older** waiting ticket of the machine matches (an older ticket not yet scanned is first in line for every
 node: `TestTicketOldestFirstPerNode`), and sends the first node left the job. **Late binding**: nothing is sent to a node until a
 lane is free there, so no job sits parked on a node that frees later than another (`TestLateBindingStartsOnFirstFreedLane`). One node
 is tried per scan; a node that refuses or bounces the job is left alone (5 s for a full node that names no `Retry-After`, 60 s
@@ -2150,8 +2152,8 @@ without one. A freed lane is noticed within one scan interval (at most 12 s) plu
 its tickets one after another and each costs one lane question: that is N reads per interval for N waiting tickets, each bounded
 by 4 s and a few hundred milliseconds when the table reads.
 
-**A node a ticket has a job on is in use for every scanner on the machine.** Reading the tickets and then sending would leave the
-window in which two processes both read a node idle and both send it a job. A claim file per node (`use-<hash>.json`) is written
+**A node a job of this machine has a claim on is in use for every scanner on the machine.** Reading the tickets and then sending would
+leave the window in which two processes both read a node idle and both send it a job. A claim file per node (`use-<hash>.json`) is written
 together with the ticket's `placing` state, which already names the job about to be sent (its id is minted before the claim), under
 a directory lock (`.lock`, an operating-system file lock held for a few file operations: `flock`, `LockFileEx`), before the job is
 sent (`TestTwoProcessesNeverDispatchTwoTicketsToOneSingleJobNode`, `TestClaimNodeIsExclusiveAndLetsGoOfTheDead`, `TestTheTicketNamesItsJobBeforeThePost`).
@@ -2163,7 +2165,15 @@ contender lock a new file while an earlier holder still has the old. A cancel th
 ticket before anything is sent: the claim is let go and nothing reaches the node (`TestACancelDuringTheClaimSendsNothingAndFinishesOnce`). A claim is
 live while its ticket has a job in flight on that node and its owner is alive, or died less than 2 minutes ago (chosen: the job it
 sent keeps running on the node, which shows its lease only once the job is admitted; after the grace the node's own health speaks
-for it, `TestClaimNodeIsExclusiveAndLetsGoOfTheDead`).
+for it, `TestClaimNodeIsExclusiveAndLetsGoOfTheDead`). **A whole-node graph call takes the same claim, under the same lock, before it
+sends** (`claimGraph`): the record is marked `kind: graph`, names the call (`gr-...`), has no ticket file behind it and no scanner to
+beat for it, and is live while its process is (and younger than the longest call budget plus an hour) and for the same 2 minutes
+after the process ended (`TestAGraphClaimHoldsWhileItsOwnerLivesAndForTheGraceAfter`); the call lets the node go when its job does.
+So a ticket is never sent a node a graph is running on, a graph is never sent a node a ticket is running on, and two graph calls of two
+processes never stack (`TestATicketNeverSendsANodeAGraphHasAJobOn`, `TestAGraphAndATicketNeverHoldOneNodeTogether`,
+`TestTwoProcessesNeverStackTwoGraphsOnOneNode`); a row for such a node reads `a job of this machine is running there (graph call,
+since ...)`. A machine with no `state_dir` keeps no queue and no claim directory: there only the in-process hold stands between two
+graph calls of one process, and two processes can still stack two graphs.
 
 **Owners die.** An owner is dead when its process is gone or it has not written its beat for 10 minutes (chosen). A `waiting` ticket
 of a dead owner, and a `local` one (its render died with its process), are swept by the next scan or call of any process and their
@@ -2214,7 +2224,8 @@ a node's own grant; a holder node's queue (ADR 0030) is the named upgrade. A CLI
 placed one adopted). A process suspended for longer than 10 minutes reads as dead to the others until it writes its beat again: its
 waiting tickets can be swept meanwhile, an identical call can then make a second ticket, and a placed one is adopted rather than
 re-sent (the job is then polled by two processes); a guard that also requires the pid to be gone is the named follow-up. Each waiting ticket costs one lane question (a bounded `nvidia-smi` read) and one roster read per scan; the first
-scan reuses the creation reading for 2 s. A node that frees between two scans can be taken by a caller that is not a ticket; the
+scan reuses the creation reading for 2 s. A node that frees between two scans can be taken by a caller that is neither a ticket nor a whole-node graph (a video,
+animation or audio call placed on the fleet, or any call forced to a node; a graph yields to the older waiting tickets, below); the
 job then costs one bounce. The scan interval and jitter, the pause steps, the owner and keep timings and the 8 h ceiling are chosen
 constants, not measurements. Nothing here was run against a live lease, a live node or a render.
 
@@ -2226,10 +2237,19 @@ node a fit is that it **holds the files the graph names**, and the node says so 
 
 **A graph is not a ticket.** The ticket queue above is the busy-lane path of an IMAGE call and of nothing else. A graph keeps the
 one-shot overflow of 0.179.0 (`tryGraphOverflow` and `placeGraph` in `internal/mediaremote/place.go`, the only overflow code left
-that is not the ticket's): it is offered once to the nodes that can take it, in the roster's order, at most three of them, one graph
-call of a process per node (the in-process hold) and never a node a ticket of this machine has a job on (a graph reads the claim
-files and never writes one); a node that refuses or bounces is left alone by the same placer memory the tickets use. When no node
-admits it, the graph waits in this machine's own queue, joining it when the fleet attempt is over and not from when it arrived.
+that is not the ticket's): it is offered once to the nodes that can take it, in the roster's order, at most three of them; a node
+that refuses or bounces is left alone by the same placer memory the tickets use. It shares the nodes with the image tickets of its
+machine by the tickets' own two rules. It never takes a node a job of this machine has a claim on, and it takes the claim of the node
+it uses (above; one graph call of a process per node is also held in process, which is the whole cover on a machine with no
+`state_dir`), so no ticket and no other graph call of any process is sent a node it is running on. And it yields to the tickets: every
+ticket that is waiting is older than a graph that arrives now, so a node an older waiting ticket matched at its last scan is left to
+that ticket, and so is every node while that ticket has not been scanned yet (its first scan comes within about one scan interval of
+its creation); the row reads `free`, `idle, but ticket mq-... is older and first in line for it`, and the graph goes on to its own lane,
+never to a refusal (`TestAGraphLeavesANodeAnOlderTicketIsFirstInLineFor`). A lane the pipeline TRIED to read and could not (the card table
+past its 4 s bound, the lease directory not opening: `core.LaneVerdict.Unjudged`) is not a free lane for a graph either, as for an
+image: the fleet is looked at first, the placement reads `this machine's graph lane could not be judged (...)`, and the graph runs on
+this machine's lane when no node takes it (`TestAGraphWithAnUnreadLaneStillLooksAtTheFleet`). When no node admits it, the graph waits in
+this machine's own queue, joining it when the fleet attempt is over and not from when it arrived.
 **A graph does not wait in the cluster queue yet**: it keeps no place in it, does not start on a lane that frees after its one look
 at the fleet, and a repeat of the same graph is a second call, not the first one's ticket (`TestAGraphIsNotATicket`). A ticket's
 identity is the hash of the request's parameters, and a graph's parameters name files on this machine rather than carry them; what
