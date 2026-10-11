@@ -52,7 +52,8 @@ Versioning: [SemVer](https://semver.org/).
   scanner decides for each waiting ticket, oldest first, and never runs a job: a job runs in a goroutine of its own, so a local run
   waiting in the lease line stalls neither another ticket's scan nor the touch that keeps each place alive. It starts the local run
   when the lane question says the ticket would be served now (one ticket per scan), else asks the fleet with ADR 0082's own filter and
-  ranking, minus the nodes a ticket of the machine has a job on and the nodes an older waiting ticket of the machine matches. Nothing
+  ranking, minus the nodes a job of the machine has a claim on (a ticket's, or a whole-node graph call's) and the nodes an older
+  waiting ticket of the machine matches. Nothing
   is sent to a node before a lane is free there. **A run on this machine's lane that the lane refuses at once although it read free**
   (`gpu_wait_ms` 0, or a younger place on the same card that a call without a wait cannot pass) does not make the scanner ask again at
   once: the ticket pauses the lane for 5, 15, 60 and then 300 s (the node steps) while the fleet is looked at, so no loop of runs, each
@@ -67,9 +68,12 @@ Versioning: [SemVer](https://semver.org/).
   node is written with the ticket's `placing` state, and the id of the job about to be sent, under a directory lock before the job is
   sent, so two processes never send one single-job node two jobs (`TestTwoProcessesNeverDispatchTwoTicketsToOneSingleJobNode`, which
   turns the ordering rule off so that only the claim stands between them). This closes the S1 open issue 6. **A whole-node graph call
-  takes the same claim**, under the same lock, before it sends (a record marked `graph`, with no ticket file behind it, live while its
-  process is, and, when the process is gone, only for the first 2 minutes after the claim was taken; next section): a ticket is never sent a node a graph is running on, and the
-  reverse (`TestATicketNeverSendsANodeAGraphHasAJobOn`, `TestAGraphAndATicketNeverHoldOneNodeTogether`).
+  that overflows by itself** (`route` auto on a machine with the graph lane) **takes the same claim**, under the same lock, before it
+  sends (a record marked `graph`, with no ticket file behind it, live while its process is, and, when the process is gone, only for the
+  first 2 minutes after the claim was taken; next section): a ticket is never sent a node such a graph is running on, and the reverse
+  (`TestATicketNeverSendsANodeAGraphHasAJobOn`, `TestAGraphAndATicketNeverHoldOneNodeTogether`). A call forced to a node (`route`
+  remote, or `auto` on a machine with no lane for it, image or graph) takes no claim and reads none, as before this release: it is
+  ranked by the nodes' own lease and queue answers, and the node's grant is what stands between it and a ticket's job.
 - **A dead owner's claim holds its node for 2 minutes** (chosen), not a moment less: the job it sent keeps running on the node, which
   shows its lease only once the job is admitted, and in those seconds another process would have sent the node a second job.
   **A node that does not answer is logged once per backoff step** (5, 15, 60, then 300 s), never per scan.
@@ -151,7 +155,8 @@ Versioning: [SemVer](https://semver.org/).
   here. The graph path keeps one limit of the old image overflow that the ticket removed for images: a graph is sent to at most
   three nodes. **It shares the nodes with the tickets by the tickets' own two rules.** It takes the machine-wide claim of the node it
   uses, under the directory lock, before it sends (an in-process hold stands first, and is the whole cover on a machine whose lease
-  root is refused and so keeps no queue), so no ticket and no other graph call, of this process or of another, is sent a node it is running on, and it leaves a
+  root is refused and so keeps no queue), so no ticket and no other overflowing graph call, of this process or of another, is sent a
+  node it is running on (a call forced to a node takes no claim; see the ticket section), and it leaves a
   node any such claim holds (`in-use`, `a job of this machine is running there (graph call, since ...)`;
   `TestTwoProcessesNeverStackTwoGraphsOnOneNode`). And it **yields to the tickets**: every ticket that is waiting is older than a
   graph that arrives now, so a node an older waiting ticket matched at its last scan is left to that ticket, and so is every node while

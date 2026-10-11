@@ -77,8 +77,10 @@ make the caller retry. Three things were still wrong once every lane was busy.
 6. **A node a job of this machine has a claim on is in use for every scanner on the machine.** A claim file per node is written,
    together with the ticket's `placing` state and the id of the job about to be sent, under a directory lock, before the job is
    sent: the read and the write are one step, so two processes never send one single-job node two jobs. **A whole-node graph call
-   (decision 12) takes the same claim, under the same lock, before it sends**, so a ticket is never sent a node a graph is running
-   on, a graph is never sent a node a ticket is running on, and two graph calls of two processes do not stack on one node. A
+   (decision 12) takes the same claim, under the same lock, before it sends**, so a ticket is never sent a node such a graph is
+   running on, such a graph is never sent a node a ticket is running on, and two such graph calls of two processes do not stack on
+   one node. A call forced to a node (`route` remote, or `auto` on a machine with no lane for it, image or graph) takes no claim and
+   reads none, as before this decision: the node's own grant is what stands between it and a ticket's job. A
    graph's claim has no ticket file behind it: it names a graph call, and it is judged by its owner alone (a graph call has no
    scanner to write a beat; its call ends, and lets the node go, when its job does), which makes it live while its process is, and,
    when the process is gone, only for the first 2 minutes after the claim was taken (counted from the claim, not from the death, since
@@ -132,7 +134,8 @@ make the caller retry. Three things were still wrong once every lane was busy.
     from `RunWith` before the ticket door): it is offered once to the nodes that can take it, at most three, one graph call of a
     process per node, and when none admits it, it waits in this machine's own queue. **It shares the nodes with the tickets by the
     tickets' own two rules.** It never takes a node a job of this machine has a claim on, and it takes the claim of the node it
-    uses (decision 6), so a ticket and a graph cannot both be sent one node. And it yields to the tickets: every ticket that is
+    uses (decision 6), so a ticket and an overflowing graph cannot both be sent one node (a graph forced to a node takes no
+    claim; decision 6). And it yields to the tickets: every ticket that is
     waiting is older than a graph that arrives now, so a node an older waiting ticket matched at its last scan is left to that
     ticket (the answer's row reads `free ... ticket mq-... is older and first in line for it`), and so is every node while that
     ticket has not been scanned yet (its first scan comes within about one scan interval of its creation). The graph then waits in this machine's own queue, which is

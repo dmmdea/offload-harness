@@ -2173,10 +2173,11 @@ beat for it, and is live while its process is (and younger than the longest call
 2 minutes after the claim was taken, counted from the claim and not from the death, since the call writes no beat: that is the window in
 which the job may be on the node before its lease shows, and after it the node's own health speaks for it
 (`TestAGraphClaimHoldsWhileItsOwnerLivesAndForTheGraceAfter`); the call lets the node go when its job does.
-So a ticket is never sent a node a graph is running on, a graph is never sent a node a ticket is running on, and two graph calls of two
-processes never stack (`TestATicketNeverSendsANodeAGraphHasAJobOn`, `TestAGraphAndATicketNeverHoldOneNodeTogether`,
+So a ticket is never sent a node an overflowing graph is running on, such a graph is never sent a node a ticket is running on, and two
+such graph calls of two processes never stack (`TestATicketNeverSendsANodeAGraphHasAJobOn`, `TestAGraphAndATicketNeverHoldOneNodeTogether`,
 `TestTwoProcessesNeverStackTwoGraphsOnOneNode`); a row for such a node reads `a job of this machine is running there (graph call,
-since ...)`. Every machine has the claim directory: only one whose lease root is refused (a cloud-synced folder) keeps no queue, says so
+since ...)`. A call forced to a node (`route` remote, or `auto` on a machine with no lane for it, image or graph) goes through
+`callWith`, takes no claim and reads none, as before this release: the node's own grant is what stands between it and a ticket's job. Every machine has the claim directory: only one whose lease root is refused (a cloud-synced folder) keeps no queue, says so
 once in its log, and there only the in-process hold stands between two graph calls of one process, and two processes can still stack
 two graphs (`TestARefusedStateRootKeepsNoQueueAndSaysSo`).
 
