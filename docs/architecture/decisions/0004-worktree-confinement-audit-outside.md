@@ -103,4 +103,5 @@ it, so a shell with a writable worktree could rewrite the pointer to name a git 
 host's git would follow it later. The cage now bind-mounts that file onto itself read-only inside the private
 namespace (`maskDotGitFile`): it still reads, and it can no longer be rewritten, replaced or removed. A mask the
 kernel refuses is reported to the caller in a `[sandbox]` line, for the file as for the directory, and the run
-still goes ahead. The Windows asymmetry above is unchanged.
+still goes ahead. So is a `.git` that is a symbolic link, which no mount can protect (a mount follows the link,
+and the link sits in the writable worktree). The Windows asymmetry above is unchanged.

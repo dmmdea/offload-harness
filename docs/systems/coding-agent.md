@@ -741,7 +741,8 @@ folder's own, so it does not heal; one whose prior label cannot be read is clear
 deadline whose kill of the job fails is not in force; a command whose exit status cannot be read
 (`GetExitCodeProcess` fails) reports exit code -1, not the 0 that every caller reads as success. On
 Linux, `<worktree>/.git` stays writable where the kernel refuses its read-only mask: the empty tmpfs
-over a `.git` directory, or the read-only bind of a `.git` file onto itself (below). In each case
+over a `.git` directory, or the read-only bind of a `.git` file onto itself (below); and a `.git`
+that is a symbolic link cannot be masked at all (below). In each case
 the command still runs (failing closed is a separate decision, not taken) and the cage puts a line
 starting with `[sandbox] ` ahead of the command's own stderr, appends the same text to the error of
 a run that fails before the command starts, and, on Windows, logs it once. `run` and `run_shell`
@@ -758,8 +759,12 @@ link to it is refused, because the new name would be on another mount). The git 
 outside the cage's write roots already; the pointer in the worktree is what the mask protects. The
 remount names every flag a user namespace locks on the mount (read-only, nosuid, nodev, noexec) and
 no atime flag, so it works on a worktree under a mount that carries them (a shared-memory mount is
-nosuid and nodev, as is a tmpfs `/tmp` on many systems). A `.git` that is a symlink is left alone,
-because a mount follows the link.
+nosuid and nodev, as is a tmpfs `/tmp` on many systems). A `.git` that is a symbolic link no mount
+can protect, because a mount follows the link and lands on its target, and the link itself sits in
+the writable worktree: a command can replace it and point git at a directory of its own. The cage
+says so in a `[sandbox]` note (`<worktree>/.git is a symbolic link: it cannot be masked read-only,
+...`) for a link to a file, to a directory and to nothing, and the run goes ahead. A link to a
+directory keeps what the cage always did with it, the read-only tmpfs over the target.
 
 **The caged child's environment is built, never inherited, on both platforms** (`sandbox.cageEnv`,
 `sandbox.EnvAllowlist`). Linux execs with a fixed `PATH` plus `HOME`/`TMPDIR` pointed at the run's

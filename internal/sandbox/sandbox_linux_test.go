@@ -52,6 +52,18 @@ func runProbe(name string, args []string) int {
 		// Every way a command could change the entry at args[0] (a linked worktree's .git
 		// file), one line per attempt (see tamper).
 		tamper(args[0])
+	case "replace":
+		// Replace the symlink at args[0] with one of the command's own: the thing the cage's note
+		// about a symlinked .git says a command can do.
+		if err := os.Remove(args[0]); err != nil {
+			fmt.Printf("replace DENIED: %v\n", err)
+			break
+		}
+		if err := os.Symlink("evil-gitdir", args[0]); err != nil {
+			fmt.Printf("replace DENIED: %v\n", err)
+			break
+		}
+		fmt.Printf("replace OK\n")
 	case "dial":
 		c, err := net.DialTimeout("tcp", args[0], 2*time.Second)
 		if err != nil {

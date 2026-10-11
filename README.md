@@ -658,8 +658,8 @@ The **coding agent** (`local-agent`) is designed **safe-by-default** for a model
     limited. Inside it `.git` is read-only, so a command cannot plant a hook or aim git at a
     directory of its own: a read-only tmpfs over a `.git` directory, and for a linked worktree
     (`git worktree add`, where `.git` is a pointer file) a read-only bind of that file, which still
-    reads. Where the kernel refuses that mount the run goes ahead and the cage says so in a
-    `[sandbox]` line at the start of stderr.
+    reads. Where the kernel refuses that mount, or `.git` is a symlink (which no mount can protect),
+    the run goes ahead and the cage says so in a `[sandbox]` line at the start of stderr.
 - **Prompt-injection defenses.** Untrusted web content pulled by `web_fetch` is **fenced** before it
   reaches the planner, and fetch is **egress-allowlisted** (deny-all unless you name hosts with
   `--egress-host`), so injected instructions can't redirect the agent to arbitrary endpoints.

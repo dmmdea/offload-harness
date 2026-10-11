@@ -133,9 +133,10 @@ func runWorker() error {
 	// private namespace and never touch the host's tree.
 	//
 	// A mount the kernel refuses (an unprivileged user namespace that may not mount, as in
-	// some container and CI sandboxes) does not stop the run, and it is not silent either:
-	// maskDotGit returns a note, which goes to stderr just before the exec (see below) so the
-	// caller learns that the mask it was promised is not there.
+	// some container and CI sandboxes), or a .git that no mount can protect (a symbolic link),
+	// does not stop the run, and it is not silent either: maskDotGit returns a note, which goes
+	// to stderr just before the exec (see below) so the caller learns that the mask it was
+	// promised is not there.
 	var notes runNotes
 	if note := maskDotGit(spec, unix.Mount); note != "" {
 		notes.addf("%s", note)
@@ -253,30 +254,45 @@ func isRegularFile(p string) bool {
 	return err == nil && fi.Mode().IsRegular()
 }
 
+// isSymlink reports whether p ITSELF is a symbolic link, whatever it points at (or at nothing).
+func isSymlink(p string) bool {
+	fi, err := os.Lstat(p)
+	return err == nil && fi.Mode()&os.ModeSymlink != 0
+}
+
 // mountFunc has the shape of unix.Mount, so a test can stand in for a kernel that refuses.
 type mountFunc func(source, target, fstype string, flags uintptr, data string) error
 
 // maskDotGit makes <worktree>/.git read-only for the command, for a writable worktree (see runWorker
 // for why): an empty read-only tmpfs over a .git directory, a read-only bind of the file onto itself
-// where .git is a file (maskDotGitFile). It returns "" when the mask is in place or does not apply
-// (no .git, or one that is neither a directory nor a regular file: a symlink, say, which no mount
-// can protect), and a note when a mount was refused: then the command still runs, with
-// <worktree>/.git writable like the rest of the worktree, which is exactly what the mask exists to
-// prevent, and the caller must be told.
+// where .git is a file (maskDotGitFile). A .git that is a symbolic link no mount can protect: a mount
+// follows the link, so it lands on the link's target (which is what the tmpfs does for a link to a
+// directory, as it always did) and the link itself, in the writable worktree, can be replaced.
+//
+// It returns "" when the mask is in place or there is nothing to mask (no .git), and otherwise the
+// notes, joined into one line: one for each mount that was refused, and one for a symbolic link.
+// Then the command still runs, with <worktree>/.git writable like the rest of the worktree, which is
+// exactly what the mask exists to prevent, and the caller must be told.
 func maskDotGit(spec Spec, mount mountFunc) string {
 	if !spec.WorktreeWritable {
 		return ""
 	}
 	gp := filepath.Join(spec.Worktree, ".git")
+	var notes []string
 	switch {
-	case dirExists(gp):
+	case dirExists(gp): // a directory, or a link to one: the mount follows the link
 		if err := mount("tmpfs", gp, "tmpfs", unix.MS_RDONLY|unix.MS_NOSUID|unix.MS_NODEV|unix.MS_NOEXEC, ""); err != nil {
-			return fmt.Sprintf("%s is NOT masked read-only (mount: %v): a command in this cage can write into it, hooks included", gp, err)
+			notes = append(notes, fmt.Sprintf("%s is NOT masked read-only (mount: %v): a command in this cage can write into it, hooks included", gp, err))
 		}
 	case isRegularFile(gp):
-		return maskDotGitFile(gp, mount)
+		if note := maskDotGitFile(gp, mount); note != "" {
+			notes = append(notes, note)
+		}
 	}
-	return ""
+	if isSymlink(gp) {
+		notes = append(notes, fmt.Sprintf("%s is a symbolic link: it cannot be masked read-only, so a command in this cage can replace it and point git at a directory of its own", gp))
+	}
+	return strings.Join(notes, "; ")
 }
 
 // dotGitFileRemount is the flag set of the read-only remount in maskDotGitFile. A user namespace
