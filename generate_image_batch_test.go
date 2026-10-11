@@ -431,6 +431,21 @@ func TestBatchPayloadReportsRefineFallbacksOnlyWhereTheyWereMeasured(t *testing.
 	if _, has := batchPayload(&mediaremote.Batch{Rows: rows, Mode: mediaremote.ModeWarm, WarmJobs: []int{0, 1}}, config.FamilyInfo{}, true, items, false)["refine_fallbacks"]; has {
 		t.Errorf("refine_fallbacks reported with no refiner configured")
 	}
+	// A warm batch whose warm call did not run to the end measured nothing: a busy lane that kept it waiting past its window
+	// (deferred), a call that stopped (an error), a call that returned no item. A 0 there would say every job was refined or
+	// opted out. Each cause alone is enough to leave it out.
+	for name, c := range map[string]struct {
+		b     *mediaremote.Batch
+		items []pipeline.ImageBatchItem
+	}{
+		"the warm call was deferred": {&mediaremote.Batch{Rows: rows, Mode: mediaremote.ModeWarm, WarmJobs: []int{0, 1}, Deferred: true}, items},
+		"the warm call stopped":      {&mediaremote.Batch{Rows: rows, Mode: mediaremote.ModeWarm, WarmJobs: []int{0, 1}, Err: errors.New("the render stopped")}, items},
+		"the warm call gave no item": {&mediaremote.Batch{Rows: rows, Mode: mediaremote.ModeWarm, WarmJobs: []int{0, 1}}, nil},
+	} {
+		if _, has := batchPayload(c.b, config.FamilyInfo{}, true, c.items, true)["refine_fallbacks"]; has {
+			t.Errorf("%s: refine_fallbacks is printed, but nothing was measured", name)
+		}
+	}
 }
 
 // Where the recipe was never compared (serial), the printed batch must not stamp THIS machine's family and licence on a

@@ -98,6 +98,9 @@ func runImageBatchVerb(fs *flag.FlagSet, a imageBatchArgs) error {
 		if rf, err = mediaremote.OpenResults(a.results); err != nil {
 			return err
 		}
+		if kept := rf.KeptAside(); kept != "" {
+			fmt.Fprintf(os.Stderr, "--results: an earlier batch left its rows in %s.partial; they are kept as %s, and this batch writes a fresh %s.partial\n", a.results, kept, a.results)
+		}
 	}
 
 	// The batch IS the wait: when every lane is busy its jobs become tickets and the command blocks until they end. The
@@ -177,8 +180,24 @@ func batchExit(b *mediaremote.Batch) error {
 	if b.Err != nil {
 		return b.Err
 	}
-	return fmt.Errorf("generate-image --batch: stopped with %d of %d jobs unfinished (verdict queued): a job already on a node cannot be recalled, so run the same batch again with --resume (give each job a seed so the node's job is collected, not rendered twice)",
-		b.Queued(), len(b.Rows))
+	return fmt.Errorf("generate-image --batch: %s", unfinishedText(b))
+}
+
+// unfinishedText says why the jobs with verdict queued are unfinished, by cause: an interrupt (a job already on a node cannot
+// be recalled, so it is collected by a repeat with the same seed), or no place for them (a job waited the queue's ceiling and
+// the jobs behind it were not sent, or a card stayed held: nothing was sent that needs recalling, and the rows say why).
+func unfinishedText(b *mediaremote.Batch) string {
+	n, total := b.Queued(), len(b.Rows)
+	waited := fmt.Sprintf("a job waited the queue's %g h ceiling for a place and found none, and the jobs behind it were not sent", mediaremote.BatchHoldWindow().Hours())
+	switch {
+	case b.Interrupted && b.Ceiling:
+		return fmt.Sprintf("interrupted with %d of %d jobs unfinished (verdict queued; also %s): a job already on a node cannot be recalled, so run the same batch again with --resume (give each job a seed so the node's job is collected, not rendered twice)", n, total, waited)
+	case b.Interrupted:
+		return fmt.Sprintf("interrupted with %d of %d jobs unfinished (verdict queued): a job already on a node cannot be recalled, so run the same batch again with --resume (give each job a seed so the node's job is collected, not rendered twice)", n, total)
+	case b.Ceiling:
+		return fmt.Sprintf("%d of %d jobs are queued (verdict queued): %s; nothing is wrong with them, so run the same batch again with --resume when the fleet has room", n, total, waited)
+	}
+	return fmt.Sprintf("%d of %d jobs are queued (verdict queued): no lane or node had a place for them, and the error of each row says why; nothing is wrong with them, so run the same batch again with --resume", n, total)
 }
 
 // sameFile says two paths name one file that exists: the same file on disk, whatever the spelling, the case or the link
@@ -202,7 +221,7 @@ func sameFile(a, b string) bool {
 //
 // The binding's family and licence are stamped only where the batch COMPARED its recipe with the one that rendered
 // (everywhere but ModeSerial); a serial item carries the family and licence its node reported, and the header names none.
-// refine_fallbacks counts warm items, so it is reported for a warm batch only.
+// refine_fallbacks counts warm items, so it is reported for a warm batch whose warm call ran and answered only.
 func batchPayload(b *mediaremote.Batch, fam config.FamilyInfo, resolved bool, warmItems []pipeline.ImageBatchItem, refiner bool) map[string]any {
 	if b.Mode == mediaremote.ModeSerial {
 		fam, resolved = config.FamilyInfo{}, false
@@ -234,9 +253,10 @@ func batchPayload(b *mediaremote.Batch, fam config.FamilyInfo, resolved bool, wa
 	if len(b.Cluster) > 0 {
 		payload["cluster"] = b.Cluster
 	}
-	// Surface the refiner fallback count in the batch summary when a refiner is configured and the batch ran warm (0 = all
-	// jobs refined or opted out) — absent otherwise: tickets and serial renders were not measured, and a 0 would say they were.
-	if refiner && b.Mode == mediaremote.ModeWarm {
+	// Surface the refiner fallback count in the batch summary when a refiner is configured and the warm call ran and answered
+	// (0 = all jobs refined or opted out) — absent otherwise: tickets and serial renders were not measured, a warm call that a
+	// busy lane kept waiting or that stopped measured nothing either, and a 0 would say they did.
+	if refiner && b.Mode == mediaremote.ModeWarm && !b.Deferred && b.Err == nil && len(warmItems) > 0 {
 		payload["refine_fallbacks"] = refineFallbacks
 	}
 	if resolved {
