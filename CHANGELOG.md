@@ -28,7 +28,7 @@ Versioning: [SemVer](https://semver.org/).
   contradict it), and `--wan-loader` is not read (one stderr line when `native` was asked). `ensureComfy` takes a `launch` and records
   the pair in its launch marker, so a running ComfyUI is reused only when it is this instance on this pair in this order. Refused before
   the lease slot, llama-swap or ComfyUI are touched: `--fast`, a GGUF or unnamed expert (`--high-unet` / `--low-unet` are required), another
-  family, a `--graph` file, a `--wan-resident-gb` either card cannot hold at the call's geometry (3.9 GiB of an expert at most at film size; the storage card must
+  family, a `--graph` file, a `--wan-resident-gb` that one of the two cards cannot hold at the call's geometry (3.9 GiB of an expert at most at film size; the storage card must
   hold the rest of the expert beside the VAE), a UUID prefix that names two cards, and the placement's own flags lost to an `=` (`--wan-placement=multicard`, or `--seed=7 --wan-placement multicard`: the runner's
   parser does not split it while the lease sizing does; write each flag as `--name value`).
 - **`render/comfyui-ext`, the harness's own ComfyUI code (the shared install is not written to).** A read-only safetensors reader
@@ -55,8 +55,10 @@ Versioning: [SemVer](https://semver.org/).
 ### Fixed — the card-only Wan placement, the second review round: what the merged branch got wrong or could not prove
 
 An independent review of the merged branch found sixteen things (two HIGH, six MEDIUM, eight LOW; three pairs were the same defect reported
-twice). All are fixed or answered here, each written red first and mutation-checked (each fix reverted in turn fails a test it names, the mutant
-parsing or compiling, the restore byte-identical).
+twice). All are fixed or answered here. Each change of behaviour was written red first; the findings that are about a missing test (the Wan-only
+guard's test, `main()` and `generate()`, the host-RAM branch that reads the card table) are pins that pass on this tree, each proved by the one-line
+mutant that makes it fail. Every fix was mutation-checked: reverted in turn it fails a test it names, the mutant parsing or compiling, the restore
+byte-identical.
 
 - **A flag spelled with `=` that swallowed the placement's own flag, in the `=` spelling (HIGH).** `--seed=7 --wan-placement=multicard` and
   `--steps --wan-placement=multicard --wan-decode plain` reach this runner's parser (which does not split `=`) as the value of the flag before

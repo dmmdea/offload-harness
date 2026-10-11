@@ -607,7 +607,7 @@ Enabled or `display_attached` Yes, the harness's own rule, so a monitor on a sle
 driver does not report (never assumed screenless). It also refuses what was not measured or cannot run, in the same place, before the
 lease slot is taken, llama-swap is unloaded or ComfyUI starts: `--fast`, a GGUF expert, an expert nobody named (`--high-unet` and
 `--low-unet` are required: the builder's defaults are GGUF), another family (`--model ltx25`, a `--graph` file), a `--wan-resident-gb`
-either card cannot hold at the call's geometry (the compute card: its size less `--reserve-vram`, 1 GiB by default, less the sampler's
+that one of the two cards cannot hold at the call's geometry (the compute card: its size less `--reserve-vram`, 1 GiB by default, less the sampler's
 activations, the benchmark's reserved allocator peaks as an envelope of 0.31 GiB per 1,000 tokens (never under 2 GiB) capped at the film's
 11.0 GiB, so 3.9 GiB of an expert at most at film size and 8.6 at the default 832x480x49; the storage card: the rest of the 13.4 GiB expert
 plus 0.8 GiB for the VAE and the context, so a 24 GiB card beside an 8 GiB one is refused with the share that would fit), a UUID prefix that
