@@ -6,6 +6,38 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed — a nested `output_schema` no longer fails on llama.cpp seats: objects and lists of objects are constrained to their own shape (F43, C12)
+
+- **The defect.** The schema-to-grammar step (`internal/gbnf`) knew no object and no list of objects: `FromJSONSchema` read every
+  array as a list of strings and every object as a string, so the grammar a llama.cpp seat was sent forced `"labels":["..."]` where
+  the contract's schema wanted `"labels":[{...}]`. The seat obeyed; the schema's validator then rejected all three re-pack attempts
+  (`at '/labels/0': got string, want object`), the finished run deferred as `output failed schema`, and the grammar-free chat
+  attempt, shown only "array of objects" with no keys, wrote objects with their required keys missing. About 20 jobs in 48 hours on
+  four llama.cpp nodes; deterministic for any nested schema. The same flattening sat in `JSONSchema`, the vLLM rendering of the
+  extract task's fields, and in the unconstrained-seat shape instruction.
+- **The fix.** `Field` is a tree now: `TObject` carries its own `Props`, `TArray` carries its `Items`. `FromJSONSchema` reads a
+  nested object's own `properties` to any depth (ordered by that level's `required`, then by name) and arrays of objects or of
+  arrays; `Object` writes each as a rule of its own, named by position (`obj-N`, `arr-N`) because llama.cpp's parser takes only
+  letters, digits and dashes in a rule name and a key such as `key_facts` is not one. The root production stays on one line (the
+  thinking wrapper reads it), and a flat schema compiles byte for byte as before (`TestFlatGrammarIsByteIdentical`). An object the
+  schema leaves open is admitted as any JSON object, not a string. `JSONSchema` carries the nested shape and round-trips it
+  (`TestNestedJSONSchemaRoundTrips`).
+- **The prompts say the keys.** The re-pack prompt, on the grammar lane and the chat lane alike, names each nested object's fields
+  with their types (`array of objects, each with fields "name" (string), "score" (number)`), and the type rule tells the seat that an
+  object field holds exactly the fields listed for it. The shape instruction for a seat that cannot take a grammar states nested
+  keys, and its strict schema enforces them.
+- **How it is tested.** `internal/gbnf/gbnftest` is a small reference interpreter of the GBNF subset the package emits: it answers
+  "does this grammar admit this text", and refuses a rule name llama.cpp's parser would. The grammar built from a nested schema is
+  checked to admit the nested object and to refuse the strings it used to force
+  (`TestNestedSchemaGrammarAdmitsTheNestedAnswer`), and the re-pack test runs a seat that obeys the grammar it is sent
+  (`TestRepackOnALlamaCppSeatConstrainsANestedSchemaToItsOwnShape`): before the change it failed with the three attempts above, now
+  the first attempt delivers. The grammar was not compiled by a live llama.cpp in this change; the first nested request on a seat is
+  the confirmation.
+- **Still read as strings**, now stated where the schema limits are documented (ADR 0002's amendment, `contracts/README.md`,
+  FLEET-NODE.md, the operator guide): a list of numbers, booleans or enum values (quoted by the grammar, converted back by the
+  re-pack's coercion), a type list, `anyOf`, `oneOf`, `allOf` and `$ref`. Every property a schema lists is required by the grammar,
+  at every depth, whether or not the schema's own `required` names it.
+
 ### Added — a busy image call is a ticket the harness holds until the first matching lane frees, anywhere (the P0's "even when every machine is full", ADR 0083)
 
 - **The behaviour.** An `auto` image call (`offload_generate_image`, `generate-image`) on a machine that has the lane and a fleet, whose

@@ -17,7 +17,7 @@ JSON carries no comments, so the field guidance lives here.
 | `goal` | yes | Self-contained — the sub-agent sees only this plus the context docs. Name the output you want and what "wrong" looks like; a vague goal is the number-one cause of schema-valid garbage. |
 | `context_paths` | no | Files the **delegator** reads and inlines as context docs (≤ 128 KiB each), confined to `--read-root`. The templates ship placeholders — replace them. |
 | `context` | no | Inline docs `[{name, text}]` if you already hold the text; ≤ 16 docs, ≤ 256 KiB total including anything `context_paths` adds. |
-| `output_schema` | for remote | JSON Schema, flat `properties` map only — string / number / integer / boolean / string-array / `enum` fields (the grammar-compilable subset). **Required for any remote placement**; keep `required` listed, the validator enforces it. |
+| `output_schema` | for remote | JSON Schema with a `properties` map — string / number / integer / boolean / `enum` fields, lists of strings, and objects and lists of objects nested to any depth (the grammar-compilable subset). A list of numbers, booleans or enum values is written by the grammar as a list of quoted strings and converted back to the schema's type; a type list, `anyOf`, `oneOf` or `$ref` reads as a string; every property the schema lists is required by the grammar, at every depth. **Required for any remote placement**; keep `required` listed, the validator enforces it. |
 | `acceptance` | recommended | Delegator-evaluated DSL (below). A result failing any check is `failed_verification`, never a success. |
 | `profile` | no | Default `research` (read-over-docs). |
 | `max_steps` | no | Default 12, clamped to 12. |

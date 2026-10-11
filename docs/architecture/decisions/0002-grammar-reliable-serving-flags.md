@@ -97,7 +97,8 @@ Both send sites are pinned by
 - Structured output works on every backend — CUDA, Vulkan, and CPU serve the same aliases with the
   same grammar mechanism.
 - The harness owns schema-to-grammar compilation, so schema features are limited to what
-  `internal/gbnf` can express — a real constraint, and the right place for it.
+  `internal/gbnf` can express — a real constraint, and the right place for it. (What it can
+  express is the subset in the amendment note of 2026-10-10 below.)
 - Anyone adding a serving template must carry `--jinja` and `--reasoning off` forward. Omitting
   `--reasoning off` produces empty output, which reads as a model problem rather than a config
   problem and costs real debugging time.
@@ -141,3 +142,5 @@ Both send sites are pinned by
   substitution
 
 **Amendment note 2026-09-18 (same day, A-100 proof):** on a vLLM seat the re-pack sends the contract's OWN JSON Schema in `structured_outputs.json`, never the GBNF-typed projection (`gbnf.JSONSchema`), because `internal/gbnf` has no object or array-of-object type and the projection had constrained a nested schema into strings. The GBNF projection remains the llama.cpp path and its documented limit.
+
+**Amendment note 2026-10-10 (register F43, job-error class C12):** the llama.cpp GBNF projection now carries nested shapes, so the limit the 2026-09-18 note recorded is gone for objects. `gbnf.FromJSONSchema` reads a nested object (its own `properties`, to any depth) and a list of objects or of lists, and `gbnf.Object` writes each as a rule of its own (`obj-N`, `arr-N`, named by position because llama.cpp's parser takes only letters, digits and dashes in a rule name); the root production stays on one line, so `WrapThinking` is unchanged, and a flat schema compiles byte for byte as before. An object the schema leaves open (no `properties`) is admitted as any JSON object. Before the change an object compiled to a string and a list of objects to a list of strings, so about twenty jobs in 48 hours were constrained into the wrong shape and deferred `output failed schema ... got string, want object`. What the grammar still reads as strings: a list of numbers, booleans or enum values (the re-pack's coercion converts them back), a type list, `anyOf`, `oneOf`, `allOf` and `$ref`. The vLLM lane still sends the contract's own schema.
