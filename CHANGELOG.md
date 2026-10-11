@@ -197,8 +197,13 @@ Versioning: [SemVer](https://semver.org/).
   both declare keeps the `layers` reading. Only the env pin counts; device flags in `cmd` are never read. A model whose entry names
   no device in env (an unpinned dual-card `-sm layer` / `--tensor-split` entry), a `proxy:` seat (a vLLM engine: its cards are
   pinned in its own unit, not in this file), a pin that is a macro, an alias two entries claim with different pins, and a bare
-  index when the entry does not also set `CUDA_DEVICE_ORDER=PCI_BUS_ID` (without it a CUDA index is not an nvidia-smi index) stay
-  UNKNOWN, each with its reason. If the file cannot be read, or `serving_config_path` is unset, every model `layers` do not declare
+  index when the same entry does not also set `CUDA_DEVICE_ORDER=PCI_BUS_ID` (without it a CUDA index is not an nvidia-smi
+  index) stay UNKNOWN, each with its reason. The `layers` path trusts a bare index without that check; the serving-config path
+  is stricter on purpose, and its cost is only that an index pin without the order variable is unloaded instead of kept. In
+  `setup/templates/profiles.json` the multi-card tiers (`blackwell-2x16`, `blackwell-3x16`) carry `CUDA_DEVICE_ORDER=PCI_BUS_ID`
+  in `gpu_env`, which the renderer appends to every model's env, so an index pin rendered from them places; the single-card tiers
+  pin `CUDA_VISIBLE_DEVICES=0` without it, and a lease on their only card is the whole node anyway. Whether the live yaml of any
+  box carries it was not checked. If the file cannot be read, or `serving_config_path` is unset, every model `layers` do not declare
   is unknown and the lane says so once.
 - **What a lease unloads.** `LeaseScope.Judge`: a model placed on a leased card goes; **a model placed on another card, by `layers`
   or by the serving config pin, stays** (the F15 gain); a model whose placement is unknown goes, exactly as before F15, because
@@ -219,7 +224,9 @@ Versioning: [SemVer](https://semver.org/).
   still clear costs two reads and no unload. A whole-node lease, a lease with no list and the none sentinel keep the
   once-per-lease election. A card lease handed no list at all (an older wrapper, a hand-built environment) unloads every model off
   the memory stack, and says that it had no list.
-- **Tests, written first and red.** `internal/gpualloc`: a model nothing places is on the list, the serving config's pins place a
+- **Tests, written first and red** (all but one: `TestTheServingConfigPlacesWhatLayersDoNotDeclare` in the pipeline passed against
+  the previous positive-only rule too, because that rule also kept the unpinned seat, so it is proven by a mutant only, the one
+  that ignores the serving config pins). `internal/gpualloc`: a model nothing places is on the list, the serving config's pins place a
   model `layers` do not (UUID, index with and without the PCI order, alias, a pair spanning the leased card), `layers` outrank the
   serving config, a `proxy:` seat, an entry with no env pin and a cmd-only pin are unknown, an unreadable or unset serving config
   is said once, no roster judges what the config declares and lists, no card table unloads every model, the memory stack stays out
@@ -234,9 +241,10 @@ Versioning: [SemVer](https://semver.org/).
   in `--unload-seat`, the unset variable on a roster error and on a missing endpoint, the pipeline's roster fallback, the media
   clause, the draining clause and the per-card scoping of the fence, the Node no-list log, the re-clear and its card condition,
   the left-resident log).
-- **Not changed, and not verified here.** The load fence (`modelaffinity`, armed from `config.ModelPins`) still places a model
-  through `layers` only, so on a box without `layers` a text load waits for any media lease, whatever card it is on; the serving
-  config is not read there. A client that is not the harness can still load a model onto a leased card; the re-clear removes it
+- **Not changed, and not verified here.** First and most important for a box without `layers`: the unload now knows from the
+  serving config which card a model is on, and the load fence does not. The fence (`modelaffinity`, armed from `config.ModelPins`)
+  still places a model through `layers` only, so on such a box a text load waits for any media lease, whatever card it is on,
+  exactly as before this change; reading the serving config there is a separate change. Also: a client that is not the harness can still load a model onto a leased card; the re-clear removes it
   before the next render, it does not stop it, and it unloads what the first job's unload would have (a model whose placement is
   unknown, in-flight requests drained first, then forced). The serving config is a path in the harness config that no default
   fills in: a box that does not set `serving_config_path` has no model placed by it. Two parallel jobs of one lease can both read the
