@@ -76,7 +76,7 @@ const batchFamily = "qwen-image-2.1-fast"
 
 // neverWarm is the warm call of a test that must not reach it.
 func neverWarm(t *testing.T) WarmFunc {
-	return func(context.Context, []BatchJob) ([]BatchRow, bool, error) {
+	return func(context.Context, []BatchJob, time.Duration) ([]BatchRow, bool, error) {
 		t.Error("the warm batch ran, but the jobs should have gone through tickets")
 		return nil, false, nil
 	}
@@ -113,9 +113,11 @@ func TestBatchLocalWhenLaneFree(t *testing.T) {
 	}
 	var calls int
 	var got []BatchJob
-	warm := func(_ context.Context, js []BatchJob) ([]BatchRow, bool, error) {
+	var gotWait time.Duration
+	warm := func(_ context.Context, js []BatchJob, wait time.Duration) ([]BatchRow, bool, error) {
 		calls++
 		got = js
+		gotWait = wait
 		rows := make([]BatchRow, len(js))
 		for i, j := range js {
 			writeBatchPNG(t, j.Out, 8, 8)
@@ -142,6 +144,9 @@ func TestBatchLocalWhenLaneFree(t *testing.T) {
 	if probes, runs := e.lr.counts(); probes != 1 || runs != 0 {
 		t.Errorf("lane probes=%d single runs=%d, want one probe and no single render", probes, runs)
 	}
+	if gotWait != 0 {
+		t.Errorf("a free lane asked the warm call to wait %v, want its own window (0)", gotWait)
+	}
 }
 
 // route local never asks the fleet, whatever the lane says; a box with no fleet is the batch it always was.
@@ -149,7 +154,9 @@ func TestBatchLocalRouteAndNoFleetRunWarmWithoutAskingTheLane(t *testing.T) {
 	e := newQEnv(t, 1, false) // the lane is HELD and a node is idle: the two would make tickets under auto
 	dir := t.TempDir()
 	jobs := []BatchJob{{Prompt: "a red door", Out: filepath.Join(dir, "a.png"), Seed: 5}}
-	warm := func(_ context.Context, js []BatchJob) ([]BatchRow, bool, error) {
+	var waits []time.Duration
+	warm := func(_ context.Context, js []BatchJob, wait time.Duration) ([]BatchRow, bool, error) {
+		waits = append(waits, wait)
 		writeBatchPNG(t, js[0].Out, 8, 8)
 		return []BatchRow{{Out: js[0].Out, Seed: js[0].Seed, OK: true}}, false, nil
 	}
@@ -168,6 +175,13 @@ func TestBatchLocalRouteAndNoFleetRunWarmWithoutAskingTheLane(t *testing.T) {
 	b, err = RunBatch(bctx(t), noFleet, e.lr, jobs, warm, batchOpts(func(o *BatchOpts) { o.Notify = func(l string) { lines = append(lines, l) } }))
 	if err != nil || b.Mode != ModeWarm || len(lines) != 0 {
 		t.Fatalf("no fleet: mode=%q err=%v lines=%q, want the warm batch without a word", b.Mode, err, lines)
+	}
+	// What the caller asked for by route, or what has no fleet, waits the pipeline's own window as it always did: only a
+	// busy lane that no node can relieve makes the batch hold its place (see the next section).
+	for i, w := range waits {
+		if w != 0 {
+			t.Errorf("warm call %d was asked to wait %v, want the pipeline's own window (0)", i, w)
+		}
 	}
 }
 
@@ -279,8 +293,8 @@ func TestBatchWritesExactOutPathsAndResultsFile(t *testing.T) {
 			mu.Lock()
 			progressive = append(progressive, r.I)
 			mu.Unlock()
-			// A row is on disk by the time its callback returns.
-			if raw, _ := os.ReadFile(results); !strings.Contains(string(raw), `"out":`) {
+			// A row is on disk (in the partial file beside the target) by the time its callback returns.
+			if raw, _ := os.ReadFile(results + ".partial"); !strings.Contains(string(raw), `"out":`) {
 				t.Errorf("the results file has no row yet when row %d is final: %q", r.I, raw)
 			}
 		}
@@ -484,8 +498,10 @@ func TestBatchWithNoRemoteMatchRunsWarmOnThisMachineAndSaysWhy(t *testing.T) {
 	jobs := []BatchJob{{Prompt: "a red door", Out: filepath.Join(dir, "a.png"), Seed: 1}, {Prompt: "a blue door", Out: filepath.Join(dir, "b.png"), Seed: 2}}
 	var calls int
 	var lines []string
-	warm := func(_ context.Context, js []BatchJob) ([]BatchRow, bool, error) {
+	var gotWait time.Duration
+	warm := func(_ context.Context, js []BatchJob, wait time.Duration) ([]BatchRow, bool, error) {
 		calls++
+		gotWait = wait
 		rows := make([]BatchRow, len(js))
 		for i, j := range js {
 			writeBatchPNG(t, j.Out, 8, 8)
@@ -516,6 +532,14 @@ func TestBatchWithNoRemoteMatchRunsWarmOnThisMachineAndSaysWhy(t *testing.T) {
 	}
 	if n := len(ticketFiles(t, e.cfg)); n != 0 {
 		t.Errorf("%d ticket(s) for a batch no node can take", n)
+	}
+	// The lane is held and nobody can relieve it: the batch KEEPS ITS PLACE for the lane (the queue's own ceiling), it does
+	// not give up after the pipeline's 90 s window and end `queued` with exit 0 (the resend loop the queue exists to end).
+	if gotWait != BatchHoldWindow() || gotWait < time.Hour {
+		t.Errorf("the warm call was asked to wait %v, want the queue's ceiling %v", gotWait, BatchHoldWindow())
+	}
+	if !strings.Contains(strings.Join(lines, "\n"), "place in line") {
+		t.Errorf("the line must say the batch holds its place: %q", lines)
 	}
 }
 
@@ -567,7 +591,7 @@ func TestBatchResumeSkipsOnlyExistingAndVerifying(t *testing.T) {
 	jobs = append([]BatchJob(nil), jobs...)
 
 	var renderedIdx []int
-	warm := func(_ context.Context, js []BatchJob) ([]BatchRow, bool, error) {
+	warm := func(_ context.Context, js []BatchJob, _ time.Duration) ([]BatchRow, bool, error) {
 		rows := make([]BatchRow, len(js))
 		for k, j := range js {
 			out := j.Out
@@ -671,7 +695,7 @@ func TestBatchExit4OnAnyFailure(t *testing.T) {
 		{Prompt: "ok too", Out: filepath.Join(dir, "ok2.png"), Seed: 3},
 	}
 	warm := func(failIdx int) WarmFunc {
-		return func(_ context.Context, js []BatchJob) ([]BatchRow, bool, error) {
+		return func(_ context.Context, js []BatchJob, _ time.Duration) ([]BatchRow, bool, error) {
 			rows := make([]BatchRow, len(js))
 			for i, j := range js {
 				if i == failIdx {
@@ -703,7 +727,7 @@ func TestBatchExit4OnAnyFailure(t *testing.T) {
 	}
 
 	// A warm call that stopped (the batch aborted) is exit 1, not 4: a wrapper tells "some failed" from "stopped".
-	stop := func(_ context.Context, js []BatchJob) ([]BatchRow, bool, error) {
+	stop := func(_ context.Context, js []BatchJob, _ time.Duration) ([]BatchRow, bool, error) {
 		return []BatchRow{{Out: js[0].Out, Seed: js[0].Seed, Error: "ENOSPC"}}, false, context.DeadlineExceeded
 	}
 	b, _ = RunBatch(bctx(t), cfg, nil, jobs, stop, o)
@@ -712,12 +736,27 @@ func TestBatchExit4OnAnyFailure(t *testing.T) {
 	}
 
 	// A busy lane that kept the whole batch waiting is a defer: nothing ran, the jobs are queued, exit 0 as it always was.
-	busy := func(context.Context, []BatchJob) ([]BatchRow, bool, error) {
+	busy := func(context.Context, []BatchJob, time.Duration) ([]BatchRow, bool, error) {
 		return nil, true, context.Canceled
 	}
 	b, _ = RunBatch(bctx(t), cfg, nil, jobs, busy, o)
 	if b.ExitCode() != 0 || !b.Deferred || b.Queued() != 3 {
 		t.Errorf("a deferred batch: exit %d deferred=%v queued=%d, want exit 0 with three queued jobs", b.ExitCode(), b.Deferred, b.Queued())
+	}
+
+	// ... but a job that failed BEFORE any lane was asked (its folder cannot be made) is a failure the defer must not hide: a
+	// wrapper reading exit 0 would take a batch with a failed row for a batch that merely waits.
+	afile := filepath.Join(dir, "afile.txt")
+	if err := os.WriteFile(afile, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mixed := []BatchJob{
+		{Prompt: "unplaceable", Out: filepath.Join(afile, "sub", "no.png"), Seed: 7},
+		{Prompt: "fine", Out: filepath.Join(dir, "fine.png"), Seed: 8},
+	}
+	b, _ = RunBatch(bctx(t), cfg, nil, mixed, busy, o)
+	if b.ExitCode() != imagegen.BatchExitJobsFailed || !b.Deferred || b.Failed() != 1 || b.Queued() != 1 {
+		t.Errorf("a deferred batch with a failed row: exit %d deferred=%v failed=%d queued=%d, want exit 4", b.ExitCode(), b.Deferred, b.Failed(), b.Queued())
 	}
 }
 
@@ -797,7 +836,7 @@ func TestBatchRefusalsBeforeAnythingRuns(t *testing.T) {
 
 	// The same picture twice is not a clash.
 	e.lr.set(core.LaneVerdict{Free: true})
-	warm := func(_ context.Context, js []BatchJob) ([]BatchRow, bool, error) {
+	warm := func(_ context.Context, js []BatchJob, _ time.Duration) ([]BatchRow, bool, error) {
 		rows := make([]BatchRow, len(js))
 		for i, j := range js {
 			writeBatchPNG(t, j.Out, 8, 8)
@@ -823,7 +862,7 @@ func TestBatchAnOutThatCannotBeMadeFailsOnlyThatJob(t *testing.T) {
 		{Prompt: "fine too", Out: filepath.Join(dir, "c.png"), Seed: 3},
 	}
 	var handed []string
-	warm := func(_ context.Context, js []BatchJob) ([]BatchRow, bool, error) {
+	warm := func(_ context.Context, js []BatchJob, _ time.Duration) ([]BatchRow, bool, error) {
 		rows := make([]BatchRow, len(js))
 		for i, j := range js {
 			handed = append(handed, j.Prompt)
@@ -884,7 +923,7 @@ func TestBatchOutsThatDifferOnlyInCaseClashOnWindows(t *testing.T) {
 		t.Skip("file names are case-sensitive here")
 	}
 	dir := t.TempDir()
-	warm := func(_ context.Context, js []BatchJob) ([]BatchRow, bool, error) {
+	warm := func(_ context.Context, js []BatchJob, _ time.Duration) ([]BatchRow, bool, error) {
 		rows := make([]BatchRow, len(js))
 		for i, j := range js {
 			writeBatchPNG(t, j.Out, 8, 8)
@@ -942,6 +981,28 @@ func TestBatchAJobIsRenderedOnlyWhenItsFileIsThere(t *testing.T) {
 		if r.Verdict != VerdictFailed || r.OK || !strings.Contains(r.Error, want) || r.SHA256 != "" {
 			t.Errorf("row %d = %+v, want failed (%q), no hash", i, r, want)
 		}
+	}
+	// A failed job leaves nothing at its path: an empty file is removed, and a file the batch rejected must not be promoted by
+	// the next --resume. The picture the node sent is set aside beside it, not destroyed, and the row says where.
+	if _, err := os.Stat(jobs[1].Out); err == nil {
+		t.Errorf("the empty file the lane left is still at %s", jobs[1].Out)
+	}
+	unverified := jobs[2].Out
+	if _, err := os.Stat(unverified); err == nil {
+		t.Errorf("the rejected file is still at %s", unverified)
+	}
+	if !strings.Contains(b.Rows[2].Error, unverified+".unverified") {
+		t.Errorf("the row must name where the file was set aside: %q", b.Rows[2].Error)
+	}
+	if !pngVerifies(unverified+".unverified", 8, 8) {
+		t.Errorf("the picture the node sent was not kept beside the out")
+	}
+	b2, err := RunBatch(bctx(t), e.cfg, e.lr, jobs[2:3], neverWarm(t), batchOpts(func(o *BatchOpts) { o.Resume = true }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b2.Skipped() != 0 || b2.Rows[0].Verdict != VerdictFailed || b2.ExitCode() != imagegen.BatchExitJobsFailed {
+		t.Errorf("--resume over a rejected file: row %+v exit %d, want it rendered again (and rejected again), never skipped-existing", b2.Rows[0], b2.ExitCode())
 	}
 }
 
@@ -1041,9 +1102,13 @@ func TestResultsFileKeepsRowsAsJobsEndAndEndsInJobOrder(t *testing.T) {
 	rf.Append(rows[2]) // the jobs end in the order 2, 0, 1
 	rf.Append(rows[0])
 	rf.Append(rows[1])
-	raw, _ := os.ReadFile(path)
+	// The rows are written beside the target, so a record an earlier run left at the path is whole until this run ends.
+	raw, _ := os.ReadFile(path + ".partial")
 	if lines := strings.Split(strings.TrimSpace(string(raw)), "\n"); len(lines) != 3 || !strings.Contains(lines[0], `"i":2`) {
-		t.Fatalf("before Close the file holds the rows as they ended, got %q", raw)
+		t.Fatalf("before Close the partial file holds the rows as they ended, got %q", raw)
+	}
+	if _, err := os.Stat(path); err == nil {
+		t.Errorf("the target exists before the batch ended")
 	}
 	if err := rf.Close(rows); err != nil {
 		t.Fatal(err)
@@ -1062,6 +1127,9 @@ func TestResultsFileKeepsRowsAsJobsEndAndEndsInJobOrder(t *testing.T) {
 	if _, err := os.Stat(path + ".tmp"); err == nil {
 		t.Errorf("the temp file of the rewrite was left behind")
 	}
+	if _, err := os.Stat(path + ".partial"); err == nil {
+		t.Errorf("the partial file was left behind after the batch ended")
+	}
 	// A path that cannot be written stops the command before it starts; a refused batch leaves nothing.
 	if _, err := OpenResults(filepath.Join(path, "x.jsonl")); err == nil {
 		t.Errorf("a results path under a file must be refused")
@@ -1075,6 +1143,46 @@ func TestResultsFileKeepsRowsAsJobsEndAndEndsInJobOrder(t *testing.T) {
 	if _, err := os.Stat(d); err == nil {
 		t.Errorf("a discarded results file must be gone")
 	}
+	if _, err := os.Stat(d + ".partial"); err == nil {
+		t.Errorf("a discarded results file must leave no partial behind")
+	}
+}
+
+// A batch the command refuses, or an earlier run's record when a later one is still going, must not cost the earlier run's
+// results: the node, the milliseconds and the hash of every picture are only there.
+func TestResultsFileNeverCostsAnEarlierRecordUntilTheBatchEnds(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "r.jsonl")
+	const earlier = "{\"i\":0,\"out\":\"a\",\"node\":\"node-a\",\"sha256\":\"abc\",\"verdict\":\"rendered\"}\n"
+	if err := os.WriteFile(path, []byte(earlier), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	same := func(when string) {
+		t.Helper()
+		if raw, err := os.ReadFile(path); err != nil || string(raw) != earlier {
+			t.Fatalf("%s: the earlier record is %q (%v), want it untouched", when, raw, err)
+		}
+	}
+	// refused before it began
+	rf, err := OpenResults(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	same("after the file was opened")
+	rf.Discard()
+	same("after a refused batch discarded its file")
+	// a batch that is still running, then one that ends
+	rf, err = OpenResults(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rf.Append(BatchRow{I: 0, Out: "a", Verdict: VerdictRendered, OK: true})
+	same("while the new batch runs")
+	if err := rf.Close([]BatchRow{{I: 0, Out: "a", Verdict: VerdictRendered, OK: true}, {I: 1, Out: "b", Verdict: VerdictFailed}}); err != nil {
+		t.Fatal(err)
+	}
+	if raw, _ := os.ReadFile(path); strings.Count(string(raw), "\n") != 2 || strings.Contains(string(raw), "node-a") {
+		t.Errorf("after the batch ended the file must hold this run's rows, got %q", raw)
+	}
 }
 
 // ---- the cases that keep a batch on this machine -------------------------------------------------------------------------
@@ -1084,7 +1192,7 @@ func TestResultsFileKeepsRowsAsJobsEndAndEndsInJobOrder(t *testing.T) {
 // ticket and does the same.
 func TestBatchStaysWarmUnderAnInheritedLeaseOrWithoutAStateDir(t *testing.T) {
 	warm := func(t *testing.T, calls *int) WarmFunc {
-		return func(_ context.Context, js []BatchJob) ([]BatchRow, bool, error) {
+		return func(_ context.Context, js []BatchJob, _ time.Duration) ([]BatchRow, bool, error) {
 			*calls++
 			rows := make([]BatchRow, len(js))
 			for i, j := range js {
@@ -1199,7 +1307,7 @@ func TestBatchABadRemoteKeepsTheBatchOnThisMachine(t *testing.T) {
 	e := newQEnv(t, 1, false)
 	var lines []string
 	var calls int
-	warm := func(_ context.Context, js []BatchJob) ([]BatchRow, bool, error) {
+	warm := func(_ context.Context, js []BatchJob, _ time.Duration) ([]BatchRow, bool, error) {
 		calls++
 		rows := make([]BatchRow, len(js))
 		for i, j := range js {
@@ -1233,7 +1341,7 @@ func TestBatchJobsFlagOnAWarmBatchIsSaidNotApplied(t *testing.T) {
 	e := newQEnv(t, 1, false)
 	e.lr.set(core.LaneVerdict{Free: true})
 	var lines []string
-	warm := func(_ context.Context, js []BatchJob) ([]BatchRow, bool, error) {
+	warm := func(_ context.Context, js []BatchJob, _ time.Duration) ([]BatchRow, bool, error) {
 		rows := make([]BatchRow, len(js))
 		for i, j := range js {
 			writeBatchPNG(t, j.Out, 8, 8)
@@ -1277,7 +1385,7 @@ func TestBatchMintsASeedAndCarriesStepsAndOnlyAnExplicitRefineFalse(t *testing.T
 func TestBatchWarmJobThatReportedOKWithoutAFileIsFailed(t *testing.T) {
 	dir := t.TempDir()
 	jobs := []BatchJob{{Prompt: "a", Out: filepath.Join(dir, "a.png"), Seed: 1}, {Prompt: "b", Out: filepath.Join(dir, "b.png"), Seed: 2}}
-	warm := func(_ context.Context, js []BatchJob) ([]BatchRow, bool, error) {
+	warm := func(_ context.Context, js []BatchJob, _ time.Duration) ([]BatchRow, bool, error) {
 		writeBatchPNG(t, js[0].Out, 8, 8) // the second is reported rendered and never written
 		return []BatchRow{{Out: js[0].Out, Seed: 1, OK: true}, {Out: js[1].Out, Seed: 2, OK: true}}, false, nil
 	}
