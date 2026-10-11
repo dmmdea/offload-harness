@@ -79,6 +79,21 @@ Versioning: [SemVer](https://semver.org/).
   against a live node, a ComfyUI instance or a llama-swap; the render helper was exercised against stand-ins for `/v1/models`,
   `/running` and the unload routes only, and the yaml reader against fixtures shaped like the rendered config.
 
+### Fixed — the ledger row of an adopted ticket named no node (found in the 0.180.0 live acceptance, A6)
+
+- **The defect.** A `placed` ticket whose owner process ended is adopted by the next identical call (ADR 0083). The adopter never
+  dispatches, so that its handle opens no second PAIR card, and the node, node id and fleet job id of a remote call's ledger row came
+  only from the dispatch: the adopted call's row said it ran remotely and not where. The one other place the node appeared, the
+  placement note's `; ran on <node>` tail, does not reach the ledger, which keeps the first 120 bytes of a placement, and the lane
+  sentence ahead of that tail (the cards the lane was held on, the holder's reason and declared term) is longer than that. In the
+  recorded run the adopted row had an empty `node`, `node_id` and `fleet_job_id`, and a placement cut inside the lane sentence.
+- **The fix.** The adopter tells its attribution handle the node and the job the ticket recorded before it collects the result
+  (`core.NameNode`, the optional `core.NodeNamer`, `pairworkloads.RemoteCall.Ran`), so the one row carries `node`, `node_id` and
+  `fleet_job_id` exactly as a dispatched call's does, and still opens no card (`TestAnAdoptedTicketsRowNamesTheNodeItRanOn`,
+  `TestRanNamesTheNodeOnTheRowAndOpensNoCard`). A handle that was dispatched keeps the node it was dispatched to; an adopted job the
+  node passed back still writes no row. The placement note is unchanged. A reader that looks for where a remote call ran should read
+  `node_id`, not search the placement text.
+
 ## [0.180.0] - 2026-10-10 - a busy image call waits for the first matching lane anywhere in the cluster, graphs overflow to a node that holds their files, and a live render keeps its lease
 
 ### Fixed — the ticket queue was off on any machine whose config sets no `state_dir`, which is the usual config (ADR 0083)

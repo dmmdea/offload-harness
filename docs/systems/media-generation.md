@@ -2195,7 +2195,10 @@ of a dead owner, and a `local` one (its render died with its process), are swept
 places let go (`TestWaitingTicketOfDeadOwnerIsSwept`); the identical call that finds one makes a new ticket that keeps its arrival
 time (`TestDeadOwnerLocalTicketIsSweptAndRerendered`). A `placed` or `fetching` ticket stays for 6 hours (chosen) and is **adopted by
 the next identical call**: the new owner polls the recorded node job and fetches its outputs and never sends the request again, so
-the job renders once; the adopted call writes its one ledger row and opens no card (`TestDeadOwnerPlacedTicketIsAdopted`). A `placing`
+the job renders once; the adopted call writes its one ledger row and opens no card (`TestDeadOwnerPlacedTicketIsAdopted`), and that row
+names the node and the job like any remote call's (`node`, `node_id`, `fleet_job_id`; the adopter never dispatches, so its handle is told the
+ticket's recorded node and job, `core.NameNode`) because the placement note's `; ran on <node>` tail is cut by the ledger's 120-byte cap
+whenever the lane sentence before it is long (`TestAnAdoptedTicketsRowNamesTheNodeItRanOn`). A `placing`
 ticket (the owner ended while the job was being sent) is asked about at the node once: a node that denies the job was never given it, and
 the ticket goes back in line with its arrival (`TestADeadOwnersPlacingTicketThatWasNeverSentGoesBackInLine`); one with no job id (a file
 of an older build) is not polled, and the answer says the job may be on the node (`TestAPlacingTicketWithNoJobIdIsNeverPolled`). A job

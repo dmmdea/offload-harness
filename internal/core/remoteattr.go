@@ -55,6 +55,24 @@ func (NopAttribution) Finish(Result)                     {}
 func (NopAttribution) Discard(string)                    {}
 func (NopAttribution) Bounce(Result)                     {}
 
+// NodeNamer is implemented by an attribution handle that can be told which node a call ran on WITHOUT opening a card. A call
+// that dispatches learns the node from Dispatched, which also opens the call's card; the process that adopts a placed ticket of an
+// owner that ended (internal/mediaremote) never dispatches, because the ended process's card is already open and a second would
+// be a double, so without this its ledger row names no node: the only other place the node appears is the placement note's
+// "; ran on <node>" tail, and the ledger keeps just the first 120 bytes of a placement while the lane sentence ahead of that
+// tail is longer.
+type NodeNamer interface {
+	Ran(base, nodeID, fleetJobID string)
+}
+
+// NameNode tells h which node the call ran on, when h can be told. A handle that cannot (the no-op handle, a test double) ignores it,
+// and a handle that was already dispatched keeps the node it was dispatched to.
+func NameNode(h RemoteAttribution, base, nodeID, fleetJobID string) {
+	if n, ok := h.(NodeNamer); ok {
+		n.Ran(base, nodeID, fleetJobID)
+	}
+}
+
 // CloseOnPanic is deferred right after BeginRemote (defer core.CloseOnPanic(h)): a lane that panics after
 // it opened the call's card (in the dispatch, the poll or the fetch) would leave the card queued and the
 // call without its row, until the orphan sweep of a later process closes it "harness process exited". The

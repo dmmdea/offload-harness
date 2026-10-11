@@ -53,6 +53,7 @@ func NewRemoteCall(e *Emitter, led *ledger.Ledger, req core.Request, route strin
 }
 
 var _ core.RemoteAttribution = (*RemoteCall)(nil)
+var _ core.NodeNamer = (*RemoteCall)(nil)
 
 // remoteModel is the model a remote call's card names before the node has said which seat it used.
 func remoteModel(task string) string {
@@ -88,6 +89,23 @@ func (c *RemoteCall) Dispatched(base, nodeID, fleetJobID string) {
 	ev := c.eventLocked("queued")
 	c.mu.Unlock()
 	c.e.Emit(ev)
+}
+
+// Ran names the node the call ran on and the job it carried WITHOUT opening a card (core.NodeNamer): the row Finish writes then
+// carries node, node_id and fleet_job_id as a dispatched call's does. It is for the adopter of a ticket whose owner ended, which
+// never dispatches because the card is already open. A call that was dispatched keeps the node it was dispatched to, and one that
+// has ended is left alone.
+func (c *RemoteCall) Ran(base, nodeID, fleetJobID string) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.finished || c.dispatched {
+		return
+	}
+	c.base, c.nodeID, c.fleetJob = base, nodeID, fleetJobID
+	c.host = NodeName(base, nodeID)
 }
 
 // Running turns the card running, once, when the node reports the job started.
