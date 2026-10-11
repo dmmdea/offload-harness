@@ -74,7 +74,9 @@ func TestTheCardSaysWhichSignalEndedTheCommand(t *testing.T) {
 // The cards' cause text is quoted in the CHANGELOG and in the system docs, and one quote went stale when the code's text changed:
 // the C02 entry kept the first wording ("terminated: its console was closed, or the session is ending or the machine is shutting
 // down") after the card began to say the cause is likely and a plain kill is the same signal. A quote of the SIGTERM clause must be
-// the code's text whole, and the retired wording must not come back.
+// the code's text whole, and the retired wording must not come back. A released section of the CHANGELOG is history, not a quote of
+// today's code: 0.180.0 shipped the first wording and its entry is never edited, so the retired wording is refused only above that
+// heading (the unreleased section and any release after it), and the CHANGELOG is still held to quote the new clause whole.
 func TestTheDocsQuoteTheSIGTERMCardTextTheCodeProduces(t *testing.T) {
 	const marker = "ended on SIGTERM: "
 	for _, name := range []string{"CHANGELOG.md", "docs/systems/pair-workloads.md", "docs/systems/gpu-lease.md"} {
@@ -83,8 +85,16 @@ func TestTheDocsQuoteTheSIGTERMCardTextTheCodeProduces(t *testing.T) {
 			t.Fatal(err)
 		}
 		text := strings.Join(strings.Fields(string(raw)), " ") // a quote wraps across lines
+		current := text
+		if name == "CHANGELOG.md" {
+			i := strings.Index(text, "## [0.180.0] ")
+			if i < 0 {
+				t.Fatalf("%s has no [0.180.0] heading: the check cannot tell released history from the current text", name)
+			}
+			current = text[:i]
+		}
 		for _, retired := range []string{"its console was closed, or the session is ending", "terminated: its console was closed"} {
-			if strings.Contains(text, retired) {
+			if strings.Contains(current, retired) {
 				t.Errorf("%s still quotes the retired card text %q", name, retired)
 			}
 		}
