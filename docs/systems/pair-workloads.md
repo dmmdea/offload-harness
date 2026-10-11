@@ -736,10 +736,13 @@ side can know the producer died, so the harness retires its own orphans:
   sweep reads the operator's real markers. The lease-card test once did: it closed real orphan
   markers into its own httptest ingress and deleted them, leaving the real cards "Running" for 31.9 h
   (the endpoint scoping above now stops that second-hand, but the isolation is still the rule). The
-  root, `internal/delegate`, `internal/mcpserver`, `internal/mediaremote`, `internal/pipeline` and
-  `internal/pairworkloads` packages each carry a `TestMain` that points the variable at a throwaway
-  directory and fails closed: when that directory or the variable cannot be set up it exits 1 without
-  running a test, instead of falling back to the machine-wide root. The root, `internal/mediaremote` and
+  root, `internal/delegate`, `internal/mcpserver`, `internal/mediaremote` and `internal/pairworkloads`
+  packages each carry a `TestMain` that points the variable at a throwaway directory and fails closed:
+  when that directory or the variable cannot be set up it exits 1 without running a test, instead of
+  falling back to the machine-wide root (`TestRunIsolatedFailsClosed` in each). `internal/pipeline`
+  carries one too and fails open on purpose: it says so on stderr and runs the suite anyway (its own
+  comment: better non-hermetic than not at all), so a run of that package whose setup failed has not
+  been kept off the machine-wide root. The root, `internal/mediaremote` and
   `internal/pairworkloads` suites also re-launch their own test binary, and a copy that is killed or ends
   by `os.Exit` never removes a root of its own, so each exports its root's path in
   `LO_ROOT_SUITE_STATE_ROOT`, `LO_MEDIAREMOTE_SUITE_STATE_ROOT` or `LO_PAIRWORKLOADS_SUITE_STATE_ROOT`,

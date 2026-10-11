@@ -896,6 +896,14 @@ Versioning: [SemVer](https://semver.org/).
   Red before (Windows): `a re-launched copy of the test binary left 1 entries in its temp dir, want none: [lo-root-state-…]` (and
   `lo-pairworkloads-state-…`, `lo-mediaremote-state-…`). `TestMainIsolatesTheStateRoot`, `TestMainIsolatesTheHomeAndTheLedger` and
   `TestRunIsolatedFailsClosed` are unchanged.
+- **Review round: `internal/pairworkloads` now fails closed.** Its `TestMain` logged and ran the suite anyway when `os.MkdirTemp` or
+  either `os.Setenv` failed, so a suite whose setup failed ran against the machine-wide state root, while its comment and
+  `docs/systems/pair-workloads.md` called it fail-closed (the F77b suite variable had copied the idiom). It now goes through a
+  `runIsolated` like the root, `internal/delegate`, `internal/mcpserver` and `internal/mediaremote`: any of the three failures returns 1
+  without running a test and removes the directory it made. `TestRunIsolatedFailsClosed` is new there; red before: `code = 0, ran = true;
+  want 1, false` for the mkdir, state-dir and suite-variable cases (and the removal assertions fail when the deferred removal is dropped).
+  The docs paragraph no longer lists `internal/pipeline` among the fail-closed packages: its `TestMain` fails open on purpose (its own
+  comment says so) and the paragraph now says that.
 
 ### Fixed — `offload_run_graph` and `run-graph` remove the temp files an inline graph or manifest became, whichever way the call ends (F79)
 
