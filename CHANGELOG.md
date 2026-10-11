@@ -191,6 +191,43 @@ Versioning: [SemVer](https://semver.org/).
   no loop. 18 mutations of the fix were each caught (the run threshold survived once because its test was written in terms of the constant,
   and is now pinned by literals). ADR 0055 item 10, `docs/systems/fleet-node.md`.
 
+### Fixed — a research digest's quotes are the page's own words, or they are flagged (F4)
+
+- **The defect.** A research goal that asked for exact wording (UI labels, a button's text) got digests that paraphrased it, so a
+  fact-checker could not find the "quote" on the page. Nothing asked a seat to copy, the goal's length rule ("at most 18 words
+  each") invites shortening, and nothing looked a quote up in the page afterwards.
+- **The goal.** `Build` adds one sentence to the goal of any schema that has a `quotes` list, the default digest's included:
+  exact wording the goal asks for (a quotation, a label, button or menu text) goes in `quotes`, copied character for character
+  from the file, never shortened, reworded, translated or re-cased, and a shorter exact stretch beats a paraphrase. It sits
+  before the verdict ask, which stays the goal's last sentence. A schema without a `quotes` list gets nothing new.
+- **The check.** After the engine returns, the delegator looks every quote up in the page its digest was written from
+  (`research.VerifyQuotes`, applied by `offload_research` and the `research` verb through `research.AnnotateWire`). A quote that
+  is already the page's bytes is left alone. Otherwise it is looked for with case, runs of white space, typographic quote marks
+  and dashes, no-break and zero-width characters set aside and, failing that, with all punctuation set aside too (a colon the
+  seat added after a label, a table's cell borders), always on word boundaries; an ellipsis is a gap between parts that must each
+  be found in page order. A quote found only that way is replaced in the published digest by the page's own span, so it is the
+  page's bytes by construction. A quote found nowhere (a paraphrase, or words stitched together from separate places) stays
+  where the seat put it and is listed in the result row's new `quote_check` block (`checked`, `verbatim`, `corrected`,
+  `unverified`, `note`). The block is absent when the digest has no quotes to look up, and no other door publishes it. **A
+  flagged quote never fails the digest and is never dropped**: an acceptance failure discards a whole run (see 0.171.0), and a
+  new acceptance verb would be refused at the ACK by every node one release behind, so the check lives on the delegator,
+  outside the contract.
+- **Measured.** Replayed over the 112 research digests one delegator logged on the day the defect was filed (104 carried
+  quotes): of 877 quotes, 479 were already the page's bytes, 211 were found only through the tolerant forms (the seat had
+  changed a mark, a space, a case or some punctuation) and now publish as the page's own span, and 187 (21 %, in 49 digests)
+  are on the page nowhere as written. The replay is of what the seats had already written, so it measures the check, not the
+  new goal sentence; the sentence's effect on the seats is unmeasured.
+- **Limits.** The page is the text the fetch kept: navigation, header and footer are stripped before a seat sees the page, so a
+  label that lives only there cannot be verified. The field is found by its name, so a caller's schema that keeps its verbatim
+  text in a field not called `quotes` is not checked. The delegation-log corpus and the ledger rows are written inside the
+  engine, before this step, and keep the seat's raw answer; the published body carries the corrected one. On the MCP door the
+  body's untrusted pass (`internal/untrusted`) runs after this step: it drops the hidden characters a page carries, neutralizes
+  chat-template markers and caps each string at 16,000 characters, so a published span can differ from the page by those only.
+- **F45 (the `nonempty:verdict` failures of the research lane) needed no code change.** 0.171.0 had already replaced the check
+  with `nonempty:key_facts|numbers|quotes|verdict`, and every recorded failure precedes that release's deploy. What was missing
+  is an end-to-end pin, added here: through the real handler, a digest with populated lists and an empty verdict succeeds, and
+  a digest that said nothing still fails verification.
+
 ## [0.180.0] - 2026-10-10 - a busy image call waits for the first matching lane anywhere in the cluster, graphs overflow to a node that holds their files, and a live render keeps its lease
 
 ### Fixed — the ticket queue was off on any machine whose config sets no `state_dir`, which is the usual config (ADR 0083)
