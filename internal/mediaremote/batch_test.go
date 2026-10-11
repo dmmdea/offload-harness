@@ -1,0 +1,953 @@
+package mediaremote
+
+// The image batch across the fleet (P0 plan S3; ADR 0083 decision 12). Everything below runs against real fleet-node
+// servers (their doors, job store and recipe advertisement) whose leases the test toggles, a delegator whose pipeline is
+// the S2 runner that answers the lane question, and the real ticket files in a temp state dir. The warm call, the one
+// thing that needs a ComfyUI, is a function the test hands in and counts.
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"image"
+	"image/color"
+	pngenc "image/png"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/dmmdea/offload-harness/internal/config"
+	"github.com/dmmdea/offload-harness/internal/core"
+	"github.com/dmmdea/offload-harness/internal/imagegen"
+)
+
+// batchPNG encodes a real PNG of the given size.
+func batchPNG(t testing.TB, w, h int) []byte {
+	t.Helper()
+	img := image.NewNRGBA(image.Rect(0, 0, w, h))
+	for x := 0; x < w; x++ {
+		img.Set(x, x%h, color.NRGBA{R: uint8(x), G: 200, B: 30, A: 255})
+	}
+	var buf bytes.Buffer
+	if err := pngenc.Encode(&buf, img); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+func writeBatchPNG(t testing.TB, path string, w, h int) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, batchPNG(t, w, h), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// sizedPNGNodes makes every node of a qEnv render a real PNG of the size the job asked for.
+func sizedPNGNodes(t *testing.T) func(i int, o *nodeOpts) {
+	return func(_ int, o *nodeOpts) {
+		o.imageBody = func(req core.Request) []byte {
+			w, _ := posInt(req.Params, "width")
+			h, _ := posInt(req.Params, "height")
+			if w == 0 || h == 0 {
+				w, h = 8, 8
+			}
+			return batchPNG(t, w, h)
+		}
+	}
+}
+
+const batchFamily = "qwen-image-2.1-fast"
+
+// neverWarm is the warm call of a test that must not reach it.
+func neverWarm(t *testing.T) WarmFunc {
+	return func(context.Context, []BatchJob) ([]BatchRow, bool, error) {
+		t.Error("the warm batch ran, but the jobs should have gone through tickets")
+		return nil, false, nil
+	}
+}
+
+// bctx is the context of a test batch, bounded so a regression that waits for ever ends the test in seconds.
+func bctx(t *testing.T) context.Context {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	t.Cleanup(cancel)
+	return ctx
+}
+
+func batchOpts(extra ...func(*BatchOpts)) BatchOpts {
+	o := BatchOpts{Family: batchFamily}
+	for _, f := range extra {
+		f(&o)
+	}
+	return o
+}
+
+// ---- where the batch runs ------------------------------------------------------------------------------------------------
+
+// A lane that is free at the start renders the WHOLE batch through the warm call, once, and asks the fleet nothing: no
+// roster read, no ticket, no job on a node.
+func TestBatchLocalWhenLaneFree(t *testing.T) {
+	e := newQEnv(t, 1, false)
+	e.lr.set(core.LaneVerdict{Free: true})
+	dir := t.TempDir()
+	jobs := []BatchJob{
+		{Prompt: "a red door", Out: filepath.Join(dir, "a.png"), Seed: 11},
+		{Prompt: "a blue door", Out: filepath.Join(dir, "b.png"), Seed: 22},
+		{Prompt: "a green door", Out: filepath.Join(dir, "c.png"), Seed: 33},
+	}
+	var calls int
+	var got []BatchJob
+	warm := func(_ context.Context, js []BatchJob) ([]BatchRow, bool, error) {
+		calls++
+		got = js
+		rows := make([]BatchRow, len(js))
+		for i, j := range js {
+			writeBatchPNG(t, j.Out, 8, 8)
+			rows[i] = BatchRow{Out: j.Out, Seed: j.Seed, OK: true, Ms: 7}
+		}
+		return rows, false, nil
+	}
+	b, err := RunBatch(bctx(t), e.cfg, e.lr, jobs, warm, batchOpts())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Mode != ModeWarm || calls != 1 || len(got) != 3 {
+		t.Fatalf("mode=%q warm calls=%d jobs=%d, want one warm call with all three jobs", b.Mode, calls, len(got))
+	}
+	for i, r := range b.Rows {
+		if !r.OK || r.Verdict != VerdictRendered || r.I != i || r.Out != jobs[i].Out || r.Seed != jobs[i].Seed || r.SHA256 == "" || r.Node == "" || r.Family != "qwen-image-2.1-fast" {
+			t.Errorf("row %d = %+v, want a rendered row with the job's out and seed, a hash, the node that rendered it and the family", i, r)
+		}
+	}
+	untouched(t, "the idle node", e.nodes[0])
+	if n := len(ticketFiles(t, e.cfg)); n != 0 {
+		t.Errorf("%d ticket file(s) for a batch that ran warm", n)
+	}
+	if probes, runs := e.lr.counts(); probes != 1 || runs != 0 {
+		t.Errorf("lane probes=%d single runs=%d, want one probe and no single render", probes, runs)
+	}
+}
+
+// route local never asks the fleet, whatever the lane says; a box with no fleet is the batch it always was.
+func TestBatchLocalRouteAndNoFleetRunWarmWithoutAskingTheLane(t *testing.T) {
+	e := newQEnv(t, 1, false) // the lane is HELD and a node is idle: the two would make tickets under auto
+	dir := t.TempDir()
+	jobs := []BatchJob{{Prompt: "a red door", Out: filepath.Join(dir, "a.png"), Seed: 5}}
+	warm := func(_ context.Context, js []BatchJob) ([]BatchRow, bool, error) {
+		writeBatchPNG(t, js[0].Out, 8, 8)
+		return []BatchRow{{Out: js[0].Out, Seed: js[0].Seed, OK: true}}, false, nil
+	}
+	b, err := RunBatch(bctx(t), e.cfg, e.lr, jobs, warm, batchOpts(func(o *BatchOpts) { o.Route = "local" }))
+	if err != nil || b.Mode != ModeWarm {
+		t.Fatalf("route local: mode=%q err=%v, want the warm batch", b.Mode, err)
+	}
+	untouched(t, "the idle node", e.nodes[0])
+	if probes, _ := e.lr.counts(); probes != 0 {
+		t.Errorf("route local asked the lane %d time(s); it has nothing to decide", probes)
+	}
+
+	noFleet := e.cfg
+	noFleet.DelegateRemotes = nil
+	b, err = RunBatch(bctx(t), noFleet, e.lr, jobs, warm, batchOpts())
+	if err != nil || b.Mode != ModeWarm {
+		t.Fatalf("no fleet: mode=%q err=%v, want the warm batch", b.Mode, err)
+	}
+}
+
+// Each job of a batch whose lane is held becomes a ticket, and the node gets it exactly as the job was written: the
+// seed, the negative, the size, refine=false, the family under the node's own name. The files land at the given outs, each
+// row names the node and carries the hash of what is on disk.
+func TestBatchJobsPlacedThroughTickets(t *testing.T) {
+	e := newQEnv(t, 2, false, sizedPNGNodes(t))
+	dir := t.TempDir()
+	off := false
+	jobs := []BatchJob{
+		{Prompt: "a red door", Out: filepath.Join(dir, "one.png"), Seed: 101, Width: 1664, Height: 928, Negative: "people, text", Refine: &off},
+		{Prompt: "a blue door", Out: filepath.Join(dir, "sub", "two.png"), Seed: 102, Width: 1024, Height: 1024},
+		{Prompt: "a green door", Out: filepath.Join(dir, "three.png"), Seed: 103, Width: 64, Height: 32},
+	}
+	b, err := RunBatch(bctx(t), e.cfg, e.lr, jobs, neverWarm(t), batchOpts())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Mode != ModeTickets || b.InFlight != 3 {
+		t.Fatalf("mode=%q in flight=%d, want tickets with 1 + 2 matching nodes = 3 in flight", b.Mode, b.InFlight)
+	}
+	if b.ExitCode() != 0 || b.Failed() != 0 {
+		t.Fatalf("rows %+v", b.Rows)
+	}
+
+	var posts []seen
+	for _, n := range e.nodes {
+		posts = append(posts, n.posts()...)
+	}
+	if len(posts) != 3 {
+		t.Fatalf("%d job(s) reached the nodes, want 3", len(posts))
+	}
+	bySeed := map[int]map[string]any{}
+	for _, p := range posts {
+		var wire struct {
+			Payload map[string]any `json:"payload"`
+		}
+		if err := json.Unmarshal(p.body, &wire); err != nil {
+			t.Fatal(err)
+		}
+		bySeed[int(wire.Payload["seed"].(float64))] = wire.Payload
+		if wire.Payload["family"] != "qwen-image-2.1" || wire.Payload["recipe_digest"] == "" {
+			t.Errorf("the job must be sent under the node's own family name with the recipe digest: %v", wire.Payload)
+		}
+	}
+	want := map[int]struct {
+		w, h     float64
+		negative string
+		refine   bool
+	}{101: {1664, 928, "people, text", true}, 102: {1024, 1024, "", false}, 103: {64, 32, "", false}}
+	for seed, w := range want {
+		p := bySeed[seed]
+		if p == nil {
+			t.Errorf("no job with seed %d reached a node: %v", seed, bySeed)
+			continue
+		}
+		if p["width"] != w.w || p["height"] != w.h {
+			t.Errorf("seed %d: size %vx%v, want %vx%v exactly", seed, p["width"], p["height"], w.w, w.h)
+		}
+		if w.negative == "" && p["negative"] != nil || w.negative != "" && p["negative"] != w.negative {
+			t.Errorf("seed %d: negative = %v, want %q (absent when the job has none)", seed, p["negative"], w.negative)
+		}
+		if r, has := p["refine"]; w.refine && (!has || r != false) || !w.refine && has {
+			t.Errorf("seed %d: refine = %v (present %v), want refine=false only on the job that set it", seed, r, has)
+		}
+	}
+	for i, r := range b.Rows {
+		data, err := os.ReadFile(jobs[i].Out)
+		if err != nil {
+			t.Fatalf("job %d: nothing at its out: %v", i, err)
+		}
+		cfgImg, err := pngenc.DecodeConfig(bytes.NewReader(data))
+		if err != nil || cfgImg.Width != jobs[i].Width || cfgImg.Height != jobs[i].Height {
+			t.Errorf("job %d: the file at out is %v (%v), want a %dx%d PNG", i, cfgImg, err, jobs[i].Width, jobs[i].Height)
+		}
+		if r.Verdict != VerdictRendered || !r.OK || r.SHA256 != sha(data) || (r.Node != "node-a" && r.Node != "node-b") || r.Out != jobs[i].Out {
+			t.Errorf("row %d = %+v, want rendered on a roster node, with the hash of the file at out", i, r)
+		}
+	}
+	if n := len(ticketFiles(t, e.cfg)); n != 0 {
+		t.Errorf("%d ticket file(s) left by a finished batch", n)
+	}
+}
+
+// The results file holds one row per job in job order with every key, a row is on disk as soon as its job is final, and
+// the keys the render script's results already had are the ones parseBatchResults reads.
+func TestBatchWritesExactOutPathsAndResultsFile(t *testing.T) {
+	e := newQEnv(t, 2, false, sizedPNGNodes(t))
+	dir := t.TempDir()
+	results := filepath.Join(dir, "deep", "r.jsonl")
+	rf, err := OpenResults(results)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobs := []BatchJob{
+		{Prompt: "p1", Out: filepath.Join(dir, "exact", "x1.png"), Seed: 7, Width: 64, Height: 32},
+		{Prompt: "p2", Out: filepath.Join(dir, "exact", "x2.png"), Seed: 8, Width: 64, Height: 32},
+	}
+	var progressive []int
+	var mu sync.Mutex
+	b, err := RunBatch(bctx(t), e.cfg, e.lr, jobs, neverWarm(t), batchOpts(func(o *BatchOpts) {
+		o.OnRow = func(r BatchRow) {
+			rf.Append(r)
+			mu.Lock()
+			progressive = append(progressive, r.I)
+			mu.Unlock()
+			// A row is on disk by the time its callback returns.
+			if raw, _ := os.ReadFile(results); !strings.Contains(string(raw), `"out":`) {
+				t.Errorf("the results file has no row yet when row %d is final: %q", r.I, raw)
+			}
+		}
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rf.Close(b.Rows); err != nil {
+		t.Fatal(err)
+	}
+	if len(progressive) != 2 {
+		t.Errorf("OnRow ran %d time(s), want once per job", len(progressive))
+	}
+	raw, err := os.ReadFile(results)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("results file has %d line(s): %q", len(lines), raw)
+	}
+	for i, line := range lines {
+		var row map[string]any
+		if err := json.Unmarshal([]byte(line), &row); err != nil {
+			t.Fatalf("line %d: %v", i, err)
+		}
+		for _, k := range []string{"i", "out", "seed", "ok", "ms", "node", "family", "sha256", "verdict"} {
+			if _, has := row[k]; !has {
+				t.Errorf("line %d lacks %q: %s", i, k, line)
+			}
+		}
+		// The keys parseBatchResults reads, with the types it reads them as.
+		var legacy struct {
+			I     int    `json:"i"`
+			Out   string `json:"out"`
+			Seed  int    `json:"seed"`
+			OK    bool   `json:"ok"`
+			Ms    int64  `json:"ms"`
+			Error string `json:"error"`
+		}
+		if err := json.Unmarshal([]byte(line), &legacy); err != nil || legacy.I != i || legacy.Out != jobs[i].Out || legacy.Seed != jobs[i].Seed || !legacy.OK {
+			t.Errorf("line %d does not read back as the legacy row: %+v (%v)", i, legacy, err)
+		}
+		if body, _ := os.ReadFile(jobs[i].Out); row["sha256"] != sha(body) {
+			t.Errorf("line %d: sha256 %v is not the hash of the file at out (%s)", i, row["sha256"], sha(body))
+		}
+	}
+}
+
+// ---- the bound on jobs in flight --------------------------------------------------------------------------------------
+
+// instantCall is a stand-in for the single-render call that renders (writes the out) after a short while and counts the
+// calls in flight.
+type instantCall struct {
+	cur, peak atomic.Int32
+	calls     atomic.Int32
+}
+
+func (c *instantCall) install(t *testing.T, hold time.Duration) {
+	t.Helper()
+	prev := batchCall
+	t.Cleanup(func() { batchCall = prev })
+	batchCall = func(_ context.Context, _ config.Config, _ Runner, req core.Request, _ string, _ []string, _ Wait) core.Result {
+		c.calls.Add(1)
+		n := c.cur.Add(1)
+		for {
+			p := c.peak.Load()
+			if n <= p || c.peak.CompareAndSwap(p, n) {
+				break
+			}
+		}
+		time.Sleep(hold)
+		c.cur.Add(-1)
+		out, _ := req.Params["out"].(string)
+		writeBatchPNG(t, out, 8, 8)
+		data, _ := json.Marshal(map[string]any{"image_path": out, "node": "node-a"})
+		return core.Result{OK: true, Data: data}
+	}
+}
+
+func manyJobs(t *testing.T, n int) []BatchJob {
+	dir := t.TempDir()
+	jobs := make([]BatchJob, n)
+	for i := range jobs {
+		jobs[i] = BatchJob{Prompt: "a door", Out: filepath.Join(dir, "j"+string(rune('a'+i))+".png"), Seed: i + 1}
+	}
+	return jobs
+}
+
+// At most N jobs are in flight, whatever the file lists: the default is this machine's lane plus one per node that
+// matches, at most the cap; --jobs overrides it.
+func TestBatchNeverHasMoreThanNInFlight(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		nodes int
+		jobs  int // --jobs
+		files int
+		want  int // the bound, and the peak a 12-job file reaches
+	}{
+		{"default: this machine's lane and each matching node", 3, 0, 9, 4},
+		{"--jobs lowers it", 3, 2, 9, 2},
+		{"--jobs 1 is a queue of one", 3, 1, 5, 1},
+		{"the default is capped", batchInFlightCap + 1, 0, batchInFlightCap + 4, batchInFlightCap},
+		{"never more than there are jobs", 3, 0, 2, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newQEnv(t, tc.nodes, true) // every matching node busy: they match, and none takes a job
+			c := &instantCall{}
+			c.install(t, 40*time.Millisecond)
+			b, err := RunBatch(bctx(t), e.cfg, e.lr, manyJobs(t, tc.files), neverWarm(t), batchOpts(func(o *BatchOpts) { o.Jobs = tc.jobs }))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if b.Mode != ModeTickets || b.InFlight != tc.want {
+				t.Fatalf("mode=%q in flight=%d, want tickets bounded at %d", b.Mode, b.InFlight, tc.want)
+			}
+			if got := int(c.peak.Load()); got != tc.want {
+				t.Errorf("%d jobs were in flight at once, want exactly the bound %d", got, tc.want)
+			}
+			if int(c.calls.Load()) != tc.files || b.OK() != tc.files {
+				t.Errorf("%d call(s) for %d jobs, %d ok", c.calls.Load(), tc.files, b.OK())
+			}
+		})
+	}
+}
+
+// Where nothing claims a node for a job, the jobs run one at a time whatever --jobs asked, and the line says so: route
+// remote, and a machine with no image lane (both go through the single-render call, whose pick of a node is not a claim).
+func TestBatchOneAtATimeWhereNoClaimProtectsANode(t *testing.T) {
+	e := newQEnv(t, 2, false)
+	stubLocalRoutes(t, configured()) // this machine has no image lane (route remote does not look)
+	for _, route := range []string{"remote", "auto"} {
+		t.Run("route "+route, func(t *testing.T) {
+			c := &instantCall{}
+			c.install(t, 30*time.Millisecond)
+			var lines []string
+			b, err := RunBatch(bctx(t), e.cfg, e.lr, manyJobs(t, 5), neverWarm(t), batchOpts(func(o *BatchOpts) {
+				o.Route, o.Jobs = route, 4
+				o.Notify = func(l string) { lines = append(lines, l) }
+			}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if b.Mode != ModeSerial || b.InFlight != 1 || c.peak.Load() != 1 {
+				t.Errorf("mode=%q in flight=%d peak=%d, want serial and one at a time", b.Mode, b.InFlight, c.peak.Load())
+			}
+			if !strings.Contains(strings.Join(lines, "\n"), "--jobs 4 does not apply") {
+				t.Errorf("the caller asked for 4 and must be told it did not apply: %q", lines)
+			}
+		})
+	}
+}
+
+// A batch never sends two jobs to one single-job node at once: with one idle node, the lane held and four jobs allowed in
+// flight, the node holds one job until it ends, and the next goes only after.
+func TestBatchNeverDispatchesTwoJobsToOneSingleJobNodeAtOnce(t *testing.T) {
+	hold := make(chan struct{})
+	e := newQEnv(t, 1, false, func(_ int, o *nodeOpts) { o.hold = hold }, sizedPNGNodes(t))
+	node := e.nodes[0]
+	jobs := manyJobs(t, 3)
+	type outcome struct {
+		b   *Batch
+		err error
+	}
+	done := make(chan outcome, 1)
+	ctx := bctx(t)
+	go func() {
+		b, err := RunBatch(ctx, e.cfg, e.lr, jobs, neverWarm(t), batchOpts(func(o *BatchOpts) { o.Jobs = 4 }))
+		done <- outcome{b, err}
+	}()
+	waitFor(t, 10*time.Second, "the first job to reach the node", func() bool { return len(node.posts()) >= 1 })
+	// Many scans pass (40 ms each in a test) while the node holds its job; the others must not be sent.
+	deadline := time.Now().Add(600 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if n := len(node.posts()); n != 1 {
+			t.Fatalf("%d job(s) were sent to a node that holds one", n)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	close(hold)
+	select {
+	case r := <-done:
+		if r.err != nil || r.b.OK() != 3 {
+			t.Fatalf("err=%v rows=%+v", r.err, r.b.Rows)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("the batch did not finish once the node was free")
+	}
+	if n := len(node.posts()); n != 3 {
+		t.Errorf("%d job(s) reached the node in the end, want 3", n)
+	}
+}
+
+// ---- krea2 and the 2512 build: no node renders them -----------------------------------------------------------------------
+
+// A busy lane and no node that renders the recipe: the batch waits for the lane ONCE and runs warm on it, as before, and
+// says which node does not match and why. Per-job tickets would be one cold start per picture on the same lane.
+func TestBatchWithNoRemoteMatchRunsWarmOnThisMachineAndSaysWhy(t *testing.T) {
+	e := newQEnv(t, 2, false) // the nodes bind the 2.1 family; the default binding of this machine is krea2, which they do not hold
+	dir := t.TempDir()
+	jobs := []BatchJob{{Prompt: "a red door", Out: filepath.Join(dir, "a.png"), Seed: 1}, {Prompt: "a blue door", Out: filepath.Join(dir, "b.png"), Seed: 2}}
+	var calls int
+	var lines []string
+	warm := func(_ context.Context, js []BatchJob) ([]BatchRow, bool, error) {
+		calls++
+		rows := make([]BatchRow, len(js))
+		for i, j := range js {
+			writeBatchPNG(t, j.Out, 8, 8)
+			rows[i] = BatchRow{Out: j.Out, Seed: j.Seed, OK: true}
+		}
+		return rows, false, nil
+	}
+	b, err := RunBatch(bctx(t), e.cfg, e.lr, jobs, warm, BatchOpts{Notify: func(l string) { lines = append(lines, l) }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Mode != ModeWarm || calls != 1 || b.OK() != 2 {
+		t.Fatalf("mode=%q warm calls=%d ok=%d, want one warm call", b.Mode, calls, b.OK())
+	}
+	for _, n := range e.nodes {
+		noPosts(t, "a node that cannot render krea2", n)
+	}
+	if len(b.Cluster) != 2 {
+		t.Fatalf("cluster = %+v, want a row per roster node", b.Cluster)
+	}
+	for _, r := range b.Cluster {
+		if r.State != "not-capable" || r.Why == "" {
+			t.Errorf("row %+v, want not-capable with the reason", r)
+		}
+	}
+	if joined := strings.Join(lines, "\n"); !strings.Contains(joined, "no node of the roster renders this recipe") || !strings.Contains(joined, "node-a") {
+		t.Errorf("the batch must say why it stayed on this machine, naming the nodes: %q", lines)
+	}
+	if n := len(ticketFiles(t, e.cfg)); n != 0 {
+		t.Errorf("%d ticket(s) for a batch no node can take", n)
+	}
+}
+
+// ---- resume -------------------------------------------------------------------------------------------------------------------
+
+// --resume skips a job only when the file at its out proves itself: it exists, is not empty, decodes whole as a PNG and has
+// the size the job names. A zero-byte file (the ENOSPC night), a cut-short file, a file of another size, a file that is not
+// a picture, a missing one: all rendered again. A job with no out cannot be proven and is never skipped. Without the flag
+// nothing is skipped.
+func TestBatchResumeSkipsOnlyExistingAndVerifying(t *testing.T) {
+	dir := t.TempDir()
+	good := filepath.Join(dir, "good.png")
+	writeBatchPNG(t, good, 64, 32)
+	noSize := filepath.Join(dir, "nosize.png")
+	writeBatchPNG(t, noSize, 17, 9)
+	zero := filepath.Join(dir, "zero.png")
+	if err := os.WriteFile(zero, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	wrong := filepath.Join(dir, "wrong.png")
+	writeBatchPNG(t, wrong, 10, 10)
+	cut := filepath.Join(dir, "cut.png")
+	full := batchPNG(t, 64, 32)
+	if err := os.WriteFile(cut, full[:len(full)/2], 0o644); err != nil {
+		t.Fatal(err)
+	}
+	garbage := filepath.Join(dir, "garbage.png")
+	if err := os.WriteFile(garbage, []byte("IMG"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	onlyWidth := filepath.Join(dir, "onlywidth.png")
+	writeBatchPNG(t, onlyWidth, 64, 99)
+	jobs := []BatchJob{
+		{Prompt: "good", Out: good, Seed: 1, Width: 64, Height: 32},             // 0 skipped
+		{Prompt: "nosize", Out: noSize, Seed: 2},                                // 1 skipped: the job names no size, any picture will do
+		{Prompt: "zero", Out: zero, Seed: 3, Width: 64, Height: 32},             // 2 rendered
+		{Prompt: "wrong", Out: wrong, Seed: 4, Width: 64, Height: 32},           // 3 rendered
+		{Prompt: "cut", Out: cut, Seed: 5, Width: 64, Height: 32},               // 4 rendered
+		{Prompt: "garbage", Out: garbage, Seed: 6, Width: 64, Height: 32},       // 5 rendered
+		{Prompt: "missing", Out: filepath.Join(dir, "m.png"), Seed: 7},          // 6 rendered
+		{Prompt: "onlywidth", Out: onlyWidth, Seed: 8, Width: 64, Height: 32},   // 7 rendered: 64x99 is not 64x32
+		{Prompt: "no out", Seed: 9},                                             // 8 rendered, never skipped
+		{Prompt: "onlywidth ok", Out: onlyWidth + ".b.png", Seed: 10, Width: 5}, // 9 rendered: nothing there
+	}
+	writeBatchPNG(t, jobs[9].Out, 5, 77) // width matches, height not named: skipped
+	jobs = append([]BatchJob(nil), jobs...)
+
+	var renderedIdx []int
+	warm := func(_ context.Context, js []BatchJob) ([]BatchRow, bool, error) {
+		rows := make([]BatchRow, len(js))
+		for k, j := range js {
+			out := j.Out
+			if out == "" {
+				out = filepath.Join(dir, "default.png")
+			}
+			writeBatchPNG(t, out, 64, 32)
+			rows[k] = BatchRow{Out: out, Seed: j.Seed, OK: true, Ms: 5}
+			renderedIdx = append(renderedIdx, int(j.Seed))
+		}
+		return rows, false, nil
+	}
+
+	b, err := RunBatch(bctx(t), config.Config{StateDir: t.TempDir()}, nil, jobs, warm, BatchOpts{Resume: true, Route: "local"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantSkipped := map[int]bool{0: true, 1: true, 9: true}
+	for i, r := range b.Rows {
+		if r.I != i {
+			t.Errorf("row %d carries i=%d: the rows must keep the job's own index after the skipped ones are taken out", i, r.I)
+		}
+		if wantSkipped[i] {
+			if r.Verdict != VerdictSkipped || !r.OK || r.Ms != 0 || r.SHA256 == "" || r.Node != "" {
+				t.Errorf("row %d = %+v, want skipped-existing with the hash of the file, no time, no node", i, r)
+			}
+			continue
+		}
+		if r.Verdict != VerdictRendered || !r.OK {
+			t.Errorf("row %d = %+v, want rendered", i, r)
+		}
+	}
+	if b.Skipped() != 3 || len(renderedIdx) != 7 {
+		t.Errorf("skipped %d and rendered %d, want 3 and 7 (jobs %v were handed to the render)", b.Skipped(), len(renderedIdx), renderedIdx)
+	}
+
+	// Without the flag every job renders, even the ones that would have proven themselves.
+	renderedIdx = nil
+	for _, p := range []string{good, noSize} {
+		writeBatchPNG(t, p, 64, 32)
+	}
+	b, err = RunBatch(bctx(t), config.Config{StateDir: t.TempDir()}, nil, jobs, warm, BatchOpts{Route: "local"})
+	if err != nil || b.Skipped() != 0 || len(renderedIdx) != len(jobs) {
+		t.Errorf("without --resume: skipped %d, rendered %d of %d (err %v)", b.Skipped(), len(renderedIdx), len(jobs), err)
+	}
+}
+
+// The A7 shape on fakes: a batch over the fleet, then the same batch with --resume skips the files it left, and after one is
+// lost and one is cut short only those two are placed again.
+func TestBatchResumeAfterTicketsPlacesOnlyWhatIsMissing(t *testing.T) {
+	e := newQEnv(t, 2, false, sizedPNGNodes(t))
+	dir := t.TempDir()
+	jobs := []BatchJob{
+		{Prompt: "one", Out: filepath.Join(dir, "1.png"), Seed: 1, Width: 64, Height: 32},
+		{Prompt: "two", Out: filepath.Join(dir, "2.png"), Seed: 2, Width: 64, Height: 32},
+		{Prompt: "three", Out: filepath.Join(dir, "3.png"), Seed: 3, Width: 64, Height: 32},
+	}
+	run := func(resume bool) *Batch {
+		b, err := RunBatch(bctx(t), e.cfg, e.lr, jobs, neverWarm(t), batchOpts(func(o *BatchOpts) { o.Resume = resume }))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	posts := func() int {
+		n := 0
+		for _, nd := range e.nodes {
+			n += len(nd.posts())
+		}
+		return n
+	}
+	if b := run(false); b.OK() != 3 || posts() != 3 {
+		t.Fatalf("first run: ok=%d posts=%d", b.OK(), posts())
+	}
+	b := run(true)
+	if b.Skipped() != 3 || posts() != 3 || b.Mode != ModeNone {
+		t.Fatalf("resume of a finished batch: skipped=%d posts=%d mode=%q, want all skipped and nothing sent", b.Skipped(), posts(), b.Mode)
+	}
+	if err := os.Remove(jobs[0].Out); err != nil {
+		t.Fatal(err)
+	}
+	full, _ := os.ReadFile(jobs[2].Out)
+	if err := os.WriteFile(jobs[2].Out, full[:len(full)/3], 0o644); err != nil {
+		t.Fatal(err)
+	}
+	b = run(true)
+	if b.Skipped() != 1 || posts() != 5 || b.Rows[1].Verdict != VerdictSkipped || b.Rows[0].Verdict != VerdictRendered || b.Rows[2].Verdict != VerdictRendered {
+		t.Fatalf("resume after losing one file and cutting another: skipped=%d posts=%d rows=%+v", b.Skipped(), posts(), b.Rows)
+	}
+}
+
+// ---- how it ends --------------------------------------------------------------------------------------------------------------
+
+// Exit 4 when any job failed (imagegen.BatchExitJobsFailed), 1 when the batch stopped or was interrupted, 0 otherwise, and
+// the failed job's reason is in its row.
+func TestBatchExit4OnAnyFailure(t *testing.T) {
+	dir := t.TempDir()
+	jobs := []BatchJob{
+		{Prompt: "ok", Out: filepath.Join(dir, "ok.png"), Seed: 1},
+		{Prompt: "fails", Out: filepath.Join(dir, "fails.png"), Seed: 2},
+		{Prompt: "ok too", Out: filepath.Join(dir, "ok2.png"), Seed: 3},
+	}
+	warm := func(failIdx int) WarmFunc {
+		return func(_ context.Context, js []BatchJob) ([]BatchRow, bool, error) {
+			rows := make([]BatchRow, len(js))
+			for i, j := range js {
+				if i == failIdx {
+					rows[i] = BatchRow{Out: j.Out, Seed: j.Seed, Error: "comfy-render exited 1: ComfyUI exec error"}
+					continue
+				}
+				writeBatchPNG(t, j.Out, 8, 8)
+				rows[i] = BatchRow{Out: j.Out, Seed: j.Seed, OK: true}
+			}
+			return rows, false, nil
+		}
+	}
+	cfg := config.Config{StateDir: t.TempDir()}
+	o := BatchOpts{Route: "local"}
+
+	b, err := RunBatch(bctx(t), cfg, nil, jobs, warm(-1), o)
+	if err != nil || b.ExitCode() != 0 {
+		t.Fatalf("a clean batch: exit %d err %v", b.ExitCode(), err)
+	}
+	b, err = RunBatch(bctx(t), cfg, nil, jobs, warm(1), o)
+	if err != nil || b.ExitCode() != imagegen.BatchExitJobsFailed || imagegen.BatchExitJobsFailed != 4 {
+		t.Fatalf("a batch with a failed job: exit %d err %v, want 4", b.ExitCode(), err)
+	}
+	if r := b.Rows[1]; r.OK || r.Verdict != VerdictFailed || !strings.Contains(r.Error, "ComfyUI exec error") || r.SHA256 != "" {
+		t.Errorf("the failed row = %+v, want failed with the render's own reason and no hash", r)
+	}
+	if b.Rows[0].Verdict != VerdictRendered || b.Rows[2].Verdict != VerdictRendered {
+		t.Errorf("one failure must not take the other jobs with it: %+v", b.Rows)
+	}
+
+	// A warm call that stopped (the batch aborted) is exit 1, not 4: a wrapper tells "some failed" from "stopped".
+	stop := func(_ context.Context, js []BatchJob) ([]BatchRow, bool, error) {
+		return []BatchRow{{Out: js[0].Out, Seed: js[0].Seed, Error: "ENOSPC"}}, false, context.DeadlineExceeded
+	}
+	b, _ = RunBatch(bctx(t), cfg, nil, jobs, stop, o)
+	if b.ExitCode() != 1 || b.Rows[1].Verdict != VerdictFailed {
+		t.Errorf("a stopped batch: exit %d rows %+v, want 1 with the jobs it never reached failed", b.ExitCode(), b.Rows)
+	}
+
+	// A busy lane that kept the whole batch waiting is a defer: nothing ran, the jobs are queued, exit 0 as it always was.
+	busy := func(context.Context, []BatchJob) ([]BatchRow, bool, error) {
+		return nil, true, context.Canceled
+	}
+	b, _ = RunBatch(bctx(t), cfg, nil, jobs, busy, o)
+	if b.ExitCode() != 0 || !b.Deferred || b.Queued() != 3 {
+		t.Errorf("a deferred batch: exit %d deferred=%v queued=%d, want exit 0 with three queued jobs", b.ExitCode(), b.Deferred, b.Queued())
+	}
+}
+
+// The same on the ticket path: a node that fails one job fails that row only, and the exit says so.
+func TestBatchTicketJobThatFailsOnItsNodeIsOneFailedRow(t *testing.T) {
+	e := newQEnv(t, 1, false, func(_ int, o *nodeOpts) { o.deferAs, o.deferClass = "ComfyUI exec error", "other" })
+	jobs := manyJobs(t, 2)
+	b, err := RunBatch(bctx(t), e.cfg, e.lr, jobs, neverWarm(t), batchOpts())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.ExitCode() != imagegen.BatchExitJobsFailed || b.Failed() != 2 {
+		t.Fatalf("exit %d failed %d rows %+v", b.ExitCode(), b.Failed(), b.Rows)
+	}
+	for _, r := range b.Rows {
+		if r.OK || r.Verdict != VerdictFailed || !strings.Contains(r.Error, "ComfyUI exec error") {
+			t.Errorf("row %+v, want failed with the node's reason", r)
+		}
+	}
+}
+
+// An interrupt ends the batch: the jobs that had not ended are queued (a ticket that sent nothing is canceled, a job on a
+// node cannot be recalled), none is sent to a node, and the exit is 1.
+func TestBatchInterruptLeavesQueuedRowsAndExit1(t *testing.T) {
+	e := newQEnv(t, 2, true) // every node busy: nothing can start
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	done := make(chan *Batch, 1)
+	go func() {
+		b, _ := RunBatch(ctx, e.cfg, e.lr, manyJobs(t, 5), neverWarm(t), batchOpts(func(o *BatchOpts) { o.Jobs = 2 }))
+		done <- b
+	}()
+	waitFor(t, 15*time.Second, "two tickets", func() bool { return len(ticketFiles(t, e.cfg)) == 2 })
+	cancel()
+	var b *Batch
+	select {
+	case b = <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the batch did not end after the interrupt")
+	}
+	if b.Queued() != 5 || !b.Interrupted || b.ExitCode() != 1 {
+		t.Fatalf("queued=%d interrupted=%v exit=%d rows=%+v, want all five queued and exit 1", b.Queued(), b.Interrupted, b.ExitCode(), b.Rows)
+	}
+	for _, n := range e.nodes {
+		noPosts(t, "a busy node", n)
+	}
+	waitFor(t, 10*time.Second, "the canceled tickets to be gone", func() bool { return len(ticketFiles(t, e.cfg)) == 0 })
+}
+
+// ---- refusals and single-job failures --------------------------------------------------------------------------------------
+
+func TestBatchRefusalsBeforeAnythingRuns(t *testing.T) {
+	e := newQEnv(t, 1, false)
+	dir := t.TempDir()
+	ok := BatchJob{Prompt: "a door", Out: filepath.Join(dir, "a.png"), Seed: 1}
+	for name, tc := range map[string]struct {
+		jobs []BatchJob
+		opts BatchOpts
+		want string
+	}{
+		"empty":              {nil, batchOpts(), "empty batch"},
+		"an empty prompt":    {[]BatchJob{ok, {Prompt: "  ", Out: filepath.Join(dir, "b.png")}}, batchOpts(), "job 1: empty prompt"},
+		"two different pics": {[]BatchJob{ok, {Prompt: "another", Out: ok.Out, Seed: 2}}, batchOpts(), "jobs 0 and 1 are different pictures with the same out"},
+		"an unknown family":  {[]BatchJob{ok}, BatchOpts{Family: "nope"}, `unknown image family "nope"`},
+		"an unknown route":   {[]BatchJob{ok}, batchOpts(func(o *BatchOpts) { o.Route = "everywhere" }), "unrecognized route"},
+		"a negative --jobs":  {[]BatchJob{ok}, batchOpts(func(o *BatchOpts) { o.Jobs = -1 }), "--jobs -1"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			b, err := RunBatch(bctx(t), e.cfg, e.lr, tc.jobs, neverWarm(t), tc.opts)
+			if err == nil || !strings.Contains(err.Error(), tc.want) || b != nil {
+				t.Fatalf("want a refusal containing %q, got b=%v err=%v", tc.want, b, err)
+			}
+		})
+	}
+	untouched(t, "the node", e.nodes[0])
+
+	// The same picture twice is not a clash.
+	e.lr.set(core.LaneVerdict{Free: true})
+	warm := func(_ context.Context, js []BatchJob) ([]BatchRow, bool, error) {
+		rows := make([]BatchRow, len(js))
+		for i, j := range js {
+			writeBatchPNG(t, j.Out, 8, 8)
+			rows[i] = BatchRow{Out: j.Out, Seed: j.Seed, OK: true}
+		}
+		return rows, false, nil
+	}
+	if _, err := RunBatch(bctx(t), e.cfg, e.lr, []BatchJob{ok, ok}, warm, batchOpts()); err != nil {
+		t.Errorf("two identical jobs write one file twice, which is not a clash: %v", err)
+	}
+}
+
+// A job whose out cannot be made fails alone, before any lane is asked for it: it costs nothing and spoils nothing.
+func TestBatchAnOutThatCannotBeMadeFailsOnlyThatJob(t *testing.T) {
+	dir := t.TempDir()
+	blocker := filepath.Join(dir, "afile")
+	if err := os.WriteFile(blocker, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	jobs := []BatchJob{
+		{Prompt: "fine", Out: filepath.Join(dir, "a.png"), Seed: 1},
+		{Prompt: "unplaceable", Out: filepath.Join(blocker, "b.png"), Seed: 2},
+		{Prompt: "fine too", Out: filepath.Join(dir, "c.png"), Seed: 3},
+	}
+	var handed []string
+	warm := func(_ context.Context, js []BatchJob) ([]BatchRow, bool, error) {
+		rows := make([]BatchRow, len(js))
+		for i, j := range js {
+			handed = append(handed, j.Prompt)
+			writeBatchPNG(t, j.Out, 8, 8)
+			rows[i] = BatchRow{Out: j.Out, Seed: j.Seed, OK: true}
+		}
+		return rows, false, nil
+	}
+	b, err := RunBatch(bctx(t), config.Config{StateDir: t.TempDir()}, nil, jobs, warm, BatchOpts{Route: "local"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(handed, ",") != "fine,fine too" {
+		t.Errorf("the render was handed %v, want only the jobs that can be placed", handed)
+	}
+	if r := b.Rows[1]; r.Verdict != VerdictFailed || !strings.Contains(r.Error, "cannot make the folder for out") || r.I != 1 {
+		t.Errorf("row 1 = %+v, want failed naming the folder", r)
+	}
+	if b.ExitCode() != imagegen.BatchExitJobsFailed || b.Rows[0].Verdict != VerdictRendered || b.Rows[2].Verdict != VerdictRendered {
+		t.Errorf("exit %d rows %+v, want exit 4 with the other two rendered", b.ExitCode(), b.Rows)
+	}
+}
+
+// A lane that said it rendered what is not there, or nothing, or something nobody could check, did not render it.
+func TestBatchAJobIsRenderedOnlyWhenItsFileIsThere(t *testing.T) {
+	e := newQEnv(t, 1, true)
+	dir := t.TempDir()
+	jobs := []BatchJob{
+		{Prompt: "missing", Out: filepath.Join(dir, "missing.png"), Seed: 1},
+		{Prompt: "empty", Out: filepath.Join(dir, "empty.png"), Seed: 2},
+		{Prompt: "unverified", Out: filepath.Join(dir, "unverified.png"), Seed: 3},
+		{Prompt: "fine", Out: filepath.Join(dir, "fine.png"), Seed: 4},
+	}
+	prev := batchCall
+	t.Cleanup(func() { batchCall = prev })
+	batchCall = func(_ context.Context, _ config.Config, _ Runner, req core.Request, _ string, _ []string, _ Wait) core.Result {
+		out, _ := req.Params["out"].(string)
+		extra := map[string]any{"image_path": out, "node": "node-a"}
+		switch req.Input {
+		case "empty":
+			_ = os.WriteFile(out, nil, 0o644)
+		case "unverified":
+			writeBatchPNG(t, out, 8, 8)
+			extra["unverified"] = true
+		case "fine":
+			writeBatchPNG(t, out, 8, 8)
+		}
+		data, _ := json.Marshal(extra)
+		return core.Result{OK: true, Data: data}
+	}
+	b, err := RunBatch(bctx(t), e.cfg, e.lr, jobs, neverWarm(t), batchOpts())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, want := range []string{"cannot be read", "is empty", "published no sha256", ""} {
+		r := b.Rows[i]
+		if want == "" {
+			if r.Verdict != VerdictRendered || r.SHA256 == "" {
+				t.Errorf("row %d = %+v, want rendered", i, r)
+			}
+			continue
+		}
+		if r.Verdict != VerdictFailed || r.OK || !strings.Contains(r.Error, want) || r.SHA256 != "" {
+			t.Errorf("row %d = %+v, want failed (%q), no hash", i, r, want)
+		}
+	}
+}
+
+// A job whose single render comes back "a card is held" (another job of the batch took the lane a moment after it read
+// free) is sent again, a bounded number of times, and then becomes a ticket; any other failure is final at once.
+func TestBatchRetriesALostLaneRaceAndOnlyThat(t *testing.T) {
+	e := newQEnv(t, 1, true)
+	var calls atomic.Int32
+	prev := batchCall
+	t.Cleanup(func() { batchCall = prev })
+	mk := func(class string, okAfter int32) {
+		calls.Store(0)
+		batchCall = func(_ context.Context, _ config.Config, _ Runner, req core.Request, _ string, _ []string, _ Wait) core.Result {
+			n := calls.Add(1)
+			out, _ := req.Params["out"].(string)
+			if n > okAfter {
+				writeBatchPNG(t, out, 8, 8)
+				data, _ := json.Marshal(map[string]any{"image_path": out})
+				return core.Result{OK: true, Data: data}
+			}
+			res := core.Deferf("gpu busy: card c2 is held", "", core.Meta{ErrClass: class})
+			res.DeferClass = core.DeferClassCapacity
+			return res
+		}
+	}
+	one := func() *Batch {
+		b, err := RunBatch(bctx(t), e.cfg, e.lr, manyJobs(t, 1), neverWarm(t), batchOpts())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	mk(core.ErrClassGPUBusy, 1)
+	if b := one(); b.OK() != 1 || calls.Load() != 2 {
+		t.Errorf("one lost race: ok=%d calls=%d, want the second call to render it", b.OK(), calls.Load())
+	}
+	mk(core.ErrClassGPUBusy, 99)
+	if b := one(); b.Failed() != 1 || calls.Load() != 1+batchBusyRetries {
+		t.Errorf("a lane that stays held: failed=%d calls=%d, want %d calls and then a failed row", b.Failed(), calls.Load(), 1+batchBusyRetries)
+	}
+	mk("oom", 99)
+	if b := one(); b.Failed() != 1 || calls.Load() != 1 {
+		t.Errorf("another failure: failed=%d calls=%d, want no retry", b.Failed(), calls.Load())
+	}
+}
+
+// What a human at the terminal is told is prefixed with the job it is about.
+func TestBatchLinesNameTheirJob(t *testing.T) {
+	e := newQEnv(t, 1, false, sizedPNGNodes(t))
+	var mu sync.Mutex
+	var lines []string
+	b, err := RunBatch(bctx(t), e.cfg, e.lr, manyJobs(t, 2), neverWarm(t), batchOpts(func(o *BatchOpts) {
+		o.Notify = func(l string) { mu.Lock(); lines = append(lines, l); mu.Unlock() }
+	}))
+	if err != nil || b.OK() != 2 {
+		t.Fatalf("err=%v ok=%d", err, b.OK())
+	}
+	if len(lines) == 0 || !strings.Contains(lines[0], "tickets") {
+		t.Fatalf("the batch must say where it runs first: %q", lines)
+	}
+	seenJob := false
+	for _, l := range lines[1:] {
+		if !strings.HasPrefix(l, "job 0: ") && !strings.HasPrefix(l, "job 1: ") {
+			t.Errorf("a ticket line without its job: %q", l)
+		}
+		seenJob = true
+	}
+	if !seenJob {
+		t.Errorf("no ticket line was told: %q", lines)
+	}
+}
+
+// A hand-forced remote batch on a machine with no fleet is refused up front, once, not as one failed row per job.
+func TestBatchRouteRemoteWithoutAFleetIsRefusedUpFront(t *testing.T) {
+	cfg := config.Config{StateDir: t.TempDir()}
+	_, err := RunBatch(bctx(t), cfg, nil, manyJobs(t, 3), nil, BatchOpts{Route: "remote"})
+	if err == nil || !strings.Contains(err.Error(), "delegate_remotes") {
+		t.Fatalf("want the missing fleet named, got %v", err)
+	}
+}
