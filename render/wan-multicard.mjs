@@ -380,6 +380,15 @@ export function planMulticard({ flags, env = process.env, comfyDir, isWanGraph, 
   return plan;
 }
 
+/**
+ * MULTICARD_WAIT_SEC: the poll budget of a card-only run when the caller named none (--wait-sec, COMFY_WAIT_SEC). The benchmark measured 250.3 s
+ * per sampler step at the film's geometry and a 4-step prompt wall of 1,165.7 s, so the 20-step recipe takes about 164.5 + 20 x 250.3 = 5,170 s.
+ * The single-card default of 5,400 s leaves 4.5 percent over that, and a run that is 5 percent slower loses an hour and a half of sampling
+ * (the sampled latent is saved only after the second sampler). 7,200 s is 1.39 times the projection. A geometry bigger than the film's is
+ * unmeasured: pass --wait-sec for it.
+ */
+export const MULTICARD_WAIT_SEC = 7200;
+
 /** decodeFellBack: did ComfyUI retry a plain decode tiled (its own OOM fallback, which chunks time)? Reads a stretch of its console. */
 export function decodeFellBack(logText) {
   return /Ran out of memory when regular VAE decoding/i.test(String(logText || ""));

@@ -53,7 +53,7 @@ import { buildLtx25I2V } from "./wf-ltx25-i2v.mjs";
 import { buildH3AV } from "./wf-h3-av.mjs";
 import { buildAceStep } from "./wf-acestep.mjs";
 import { resolveCli, submitGraph, pollOutputs, fetchView, finalizeRun } from "./comfy-submit.mjs";
-import { planMulticard, checkComfyDevices, decodeFellBack, portNote, createOomWatch } from "./wan-multicard.mjs";
+import { planMulticard, checkComfyDevices, decodeFellBack, portNote, createOomWatch, MULTICARD_WAIT_SEC } from "./wan-multicard.mjs";
 
 // BOOL_FLAGS take no value. --fast was missing from this list, so the parser took the
 // NEXT token as its value: a trailing --fast (the harness appends it after --hero) read
@@ -342,7 +342,11 @@ export async function generate(out, API, pos, flags, multicard, io = {}) {
   // Poll budget: the native quality recipe at 720p legitimately exceeds the old ~20-min
   // ceiling. Default 90 min; the Go harness passes COMFY_WAIT_SEC aligned to its own
   // videogen timeout and its process-tree kill remains the hard stop.
-  const waitSec = Number(flags["wait-sec"] || x.env.COMFY_WAIT_SEC || 5400);
+  // The card-only placement samples for about 86 minutes at the film's size, so its default is longer (MULTICARD_WAIT_SEC); a budget the caller
+  // chose, by flag or environment, is theirs.
+  const chosen = flags["wait-sec"] || x.env.COMFY_WAIT_SEC;
+  const waitSec = Number(chosen || (multicard ? MULTICARD_WAIT_SEC : 5400));
+  if (multicard && !chosen) x.stderr(`WAN-WAIT-NOTE: no --wait-sec or COMFY_WAIT_SEC, so the wait for the video is ${MULTICARD_WAIT_SEC} s (the 20-step film recipe measured about 5170 s); pass --wait-sec <seconds> to change it`);
   const h = await x.poll({
     api: API, promptId, waitSec,
     isDone: (entry) => !!firstOutputFile(entry.outputs, graph),

@@ -134,7 +134,7 @@ test("generate() reads the console of THIS placement's instance (its key) after 
   assert.deepEqual(rec.tails, [["/c", 4000, "mc-cccc3333-aaaa1111"]], "the multicard instance's own log, not the default one");
   assert.ok(rec.err.some((l) => /^WAN-DECODE-FALLBACK: ComfyUI ran out of memory in the plain decode and retried it tiled \(see .*offload-comfyui-mc-cccc3333-aaaa1111\.log\)/.test(l)), rec.err.join("\n"));
   const clean = fakeIo();
-  await generate("o.mp4", "http://x", [], {}, PLAN, clean.io);
+  await generate("o.mp4", "http://x", [], { "wait-sec": "60" }, PLAN, clean.io); // a budget of its own: the default budget is said on stderr
   assert.deepEqual(clean.rec.err, [], "a console without the retry says nothing");
 });
 
