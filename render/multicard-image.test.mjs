@@ -258,17 +258,14 @@ test("comfy-generate refuses a family with no recipe by name, and a batch is ref
   assert.match(b.err, /bf16 fits no card/);
 });
 
-test("the wiring: comfy-generate and comfy-edit hand the plan to withGpuSlot, and every runner verifies the pair before it submits", () => {
-  const gen = readFileSync(join(HERE, "comfy-generate.mjs"), "utf8");
-  const rnd = readFileSync(join(HERE, "comfy-render.mjs"), "utf8");
-  const edt = readFileSync(join(HERE, "comfy-edit.mjs"), "utf8");
+test("the wiring: comfy-generate, comfy-render and comfy-edit hand the plan to withGpuSlot and to the function that renders (the order inside it is multicard-image-run.test.mjs's)", () => {
+  const code = (f) => readFileSync(join(HERE, f), "utf8").split(/\r?\n/).filter((l) => !/^\s*\/\//.test(l)).join("\n");
+  const gen = code("comfy-generate.mjs"), rnd = code("comfy-render.mjs"), edt = code("comfy-edit.mjs");
   assert.equal((gen.match(/\.\.\.lifecycleOptions\(placement\)/g) || []).length, 2, "the single render and the batch both start the pair's instance");
   assert.match(gen, /comfyApi\(flags\.api, placement \? placement\.env : process\.env\)/);
   assert.match(rnd, /\.\.\.lifecycleOptions\(placement\)/);
-  assert.equal((rnd.match(/verifyImagePlacement\(API, placement\)/g) || []).length, 1, "one place verifies, and both the standalone path and the --no-lifecycle child go through it");
   assert.match(edt, /\.\.\.lifecycleOptions\(placement\)/);
-  assert.match(edt, /verifyImagePlacement\(/);
-  // the verification comes before the first thing that is posted
-  assert.ok(rnd.indexOf("verifyImagePlacement(API, placement)") < rnd.indexOf("submitGraph("), "comfy-render verifies before submitting");
-  assert.ok(edt.indexOf("verifyImagePlacement(API, placement)") < edt.indexOf("submitGraph("), "comfy-edit verifies before submitting");
+  // both ways into comfy-render's generate() (the --no-lifecycle child and the standalone slot) hand it the plan; comfy-edit's render step gets it too
+  assert.equal((rnd.match(/generate\(out, API, built, flags, placement\)/g) || []).length, 2);
+  assert.match(edt, /renderEdit\(\{ out, API, plan, placement, inputDir \}\)/);
 });

@@ -393,36 +393,45 @@ const firstImage = (outputs) => {
 // node_errors verbatim, run-row provenance) with raw POST as the byte-identical
 // fallback; polling keeps the dead-server watchdog + suspend/resume fence documented
 // there (2026-07-30 incident class).
-async function generate(out, API, built, flags, placement) {
+//
+// `io` is the outside world generate() touches, replaced by recording fakes in render/multicard-image-run.test.mjs; the defaults are the real calls.
+// The poll is a literal `pollOutputs(` call: gpu_progress_test.go finds the render helpers that heartbeat by it.
+export const GENERATE_IO = Object.freeze({
+  verifyPlacement: verifyImagePlacement, resolveCli, submit: submitGraph, poll: (opts) => pollOutputs(opts), view: fetchView, write: writeFileAtomic,
+  finalize: finalizeRun, stdout: (...a) => console.log(...a), env: process.env,
+});
+
+export async function generate(out, API, built, flags, placement, io = {}) {
+  const x = { ...GENERATE_IO, ...io };
   // The card-only placement: the running ComfyUI's own cards must be the pinned pair and the harness's pack must have loaded, before
   // anything is posted (the same check the Wan runner makes; a mismatch submits nothing).
-  if (placement) await verifyImagePlacement(API, placement);
+  if (placement) await x.verifyPlacement(API, placement);
   const { graph, seed, width, height } = built;
-  const cli = resolveCli();
-  const { promptId } = await submitGraph({ api: API, graph, clientId: "render-" + seed, cli });
-  console.log("queued", promptId, flags.graph ? `(graph: ${flags.graph})` : `seed ${seed} ${width}x${height}`);
+  const cli = x.resolveCli();
+  const { promptId } = await x.submit({ api: API, graph, clientId: "render-" + seed, cli });
+  x.stdout("queued", promptId, flags.graph ? `(graph: ${flags.graph})` : `seed ${seed} ${width}x${height}`);
   // Poll budget: quality-first renders (e.g. HiDream-O1 bf16 at native 2048, 40-step
   // SDE, RAM-offloaded) legitimately run far beyond the old ~6-min ceiling. Default
   // 30 min; the Go harness passes COMFY_WAIT_SEC aligned to its own timeout and its
   // process-tree kill remains the hard stop.
-  const waitSec = Number(flags["wait-sec"] || process.env.COMFY_WAIT_SEC || 1800);
-  const h = await pollOutputs({
+  const waitSec = Number(flags["wait-sec"] || x.env.COMFY_WAIT_SEC || 1800);
+  const h = await x.poll({
     api: API, promptId, waitSec,
     isDone: (entry) => !!firstImage(entry.outputs),
     noOutputMsg: "no image produced in time",
-    onExecError: () => finalizeRun({ api: API, promptId, cli }),
+    onExecError: () => x.finalize({ api: API, promptId, cli }),
   });
   const img = firstImage(h.outputs);
-  const buf = await fetchView({ api: API, file: img });
+  const buf = await x.view({ api: API, file: img });
   // Atomic: a full disk used to leave a ZERO-BYTE png here (writeFileSync truncates the target first)
   // that a skip-existing caller then read as finished (2026-10-09). Now nothing is at `out` unless the
   // whole image is, and a previous good file survives a failed write (atomic-out.mjs).
-  writeFileAtomic(out, buf);
-  console.log("WROTE", out, buf.length, "bytes");
+  x.write(out, buf);
+  x.stdout("WROTE", out, buf.length, "bytes");
   // Bookkeeping AFTER the artifact is safe on disk: records authoritative timing
   // (execution_start -> execution_success) and releases the CLI's submission lease.
   // Warn-only inside — a finished render is never re-opened by bookkeeping.
-  await finalizeRun({ api: API, promptId, cli });
+  await x.finalize({ api: API, promptId, cli });
 }
 
 async function main() {

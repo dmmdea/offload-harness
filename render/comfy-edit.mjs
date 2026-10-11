@@ -240,6 +240,44 @@ export function unstageInputs(staged, { inputDir, unlink = unlinkSync } = {}) {
   for (const n of staged) { try { unlink(join(inputDir, n)); } catch {} }
 }
 
+// The outside world renderEdit() touches, replaced by recording fakes in render/multicard-image-run.test.mjs; the defaults are the real calls.
+// The poll is a literal `pollOutputs(` call: gpu_progress_test.go finds the render helpers that heartbeat by it.
+export const RENDER_IO = Object.freeze({
+  verifyPlacement: verifyImagePlacement, stage: stageInputs, unstage: unstageInputs, resolveCli, submit: submitGraph, poll: (opts) => pollOutputs(opts),
+  view: fetchView, write: writeFileAtomic, finalize: finalizeRun, stdout: (...a) => console.log(...a), env: process.env,
+});
+
+/** renderEdit: what the run does once it holds the GPU slot: check the placement, stage the inputs, submit, wait, write, finalize, unstage. */
+export async function renderEdit({ out, API, plan, placement, inputDir }, io = {}) {
+  const x = { ...RENDER_IO, ...io };
+  // The card-only placement: the running ComfyUI's own cards must be the pinned pair and the harness's pack must have loaded, before
+  // anything is staged or posted (a mismatch submits nothing).
+  if (placement) await x.verifyPlacement(API, placement);
+  const staged = [];
+  try {
+    x.stage(plan.sources, staged, { inputDir });
+    const graph = plan.build(staged);
+    // Shared submission/polling/retrieval (comfy-submit.mjs): CLI-preferred submit with
+    // byte-identical raw fallback; hardened poll loop (dead-server watchdog).
+    const cli = x.resolveCli();
+    const { promptId } = await x.submit({ api: API, graph, clientId: "edit-" + plan.seed, cli });
+    x.stdout("queued", promptId, "seed", plan.seed, plan.describe);
+    const waitSec = Number(x.env.COMFY_WAIT_SEC || 1800);
+    const h = await x.poll({
+      api: API, promptId, waitSec,
+      isDone: (entry) => !!firstOutputFile(entry.outputs, graph),
+      noOutputMsg: "no edited image produced in time",
+      onExecError: () => x.finalize({ api: API, promptId, cli }),
+    });
+    const file = firstOutputFile(h.outputs, graph);
+    x.write(out, await x.view({ api: API, file }));
+    x.stdout("WROTE", out);
+    await x.finalize({ api: API, promptId, cli });
+  } finally {
+    x.unstage(staged, { inputDir });
+  }
+}
+
 async function main() {
   const { pos, flags, refs } = parseEditArgs(process.argv.slice(2));
   // The card-only placement is planned first: it refuses, before anything is launched, every request it cannot honour (no recipe, no cards
@@ -259,34 +297,7 @@ async function main() {
   const out = pos[0];
   const inputDir = join(COMFY_DIR, "input");
 
-  async function render() {
-    // The card-only placement: the running ComfyUI's own cards must be the pinned pair and the harness's pack must have loaded, before
-    // anything is staged or posted (a mismatch submits nothing).
-    if (placement) await verifyImagePlacement(API, placement);
-    const staged = [];
-    try {
-      stageInputs(plan.sources, staged, { inputDir });
-      const graph = plan.build(staged);
-      // Shared submission/polling/retrieval (comfy-submit.mjs): CLI-preferred submit with
-      // byte-identical raw fallback; hardened poll loop (dead-server watchdog).
-      const cli = resolveCli();
-      const { promptId } = await submitGraph({ api: API, graph, clientId: "edit-" + plan.seed, cli });
-      console.log("queued", promptId, "seed", plan.seed, plan.describe);
-      const waitSec = Number(process.env.COMFY_WAIT_SEC || 1800);
-      const h = await pollOutputs({
-        api: API, promptId, waitSec,
-        isDone: (entry) => !!firstOutputFile(entry.outputs, graph),
-        noOutputMsg: "no edited image produced in time",
-        onExecError: () => finalizeRun({ api: API, promptId, cli }),
-      });
-      const file = firstOutputFile(h.outputs, graph);
-      writeFileAtomic(out, await fetchView({ api: API, file }));
-      console.log("WROTE", out);
-      await finalizeRun({ api: API, promptId, cli });
-    } finally {
-      unstageInputs(staged, { inputDir });
-    }
-  }
+  const render = () => renderEdit({ out, API, plan, placement, inputDir });
 
   await withGpuSlot(
     { noLock: flags["no-lock"], comfyManaged: true, api: API, reserveVram: flags["reserve-vram"],
