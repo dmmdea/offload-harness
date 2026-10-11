@@ -237,7 +237,7 @@ is not, is sent to a node whose Image recipe matches. Not a substitute: a call n
 ## Ticket
 
 A busy image call that the harness holds until the first matching lane frees, here or on a node: one file under
-`<state_dir>/media-queue/`, an identity (the sha256 of the task, prompt and parameters without the `waiter_token`, so an identical
+`<state root>/media-queue/` (the state root of the GPU lease; no `state_dir` is needed), an identity (the sha256 of the task, prompt and parameters without the `waiter_token`, so an identical
 re-send attaches to it), one fixed seed, a place in the machine's own lease line that keeps its arrival time, and a state. One
 scanner per process looks at its tickets about every 10 s, oldest first, and a job is never sent to a node before a lane is free
 there. The answer to a call that waits says the ticket, its position and, per roster node, the state and why; the instruction in it

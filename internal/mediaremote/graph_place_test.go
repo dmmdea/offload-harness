@@ -9,6 +9,7 @@ package mediaremote
 
 import (
 	"context"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -72,15 +73,16 @@ func TestAGraphIsNotATicket(t *testing.T) {
 
 // Two graph calls of one process that both read a node idle must not both send it a job: the second would wait out the node's
 // whole window in the node's own queue and come back as a bounce. The node a graph has a job on is held for it, and the second
-// goes on to its own lane and says why. (S1's test for the image path, kept for the path that still has the hold. On a machine
-// with a state directory the claim file answers first and the row says so, graph_ticket_test.go; the in-process hold is the whole
-// of the cover on a machine without one, which is what this test runs on.)
+// goes on to its own lane and says why. (S1's test for the image path, kept for the path that still has the hold. Where the queue
+// directory opens, which is every machine but one whose state root the lease refuses, the claim file answers first and the row says
+// so, graph_ticket_test.go; the in-process hold is the whole of the cover on a machine without a queue, which is what this test runs
+// on: its state root is one the lease refuses.)
 func TestTwoGraphCallsDoNotStackOnOneNode(t *testing.T) {
 	hold := make(chan struct{})
 	n := startGraphNodeWith(t, "node-b", nodeOpts{hold: hold}, krea2File)
 	t.Cleanup(func() { close(hold) })
 	cfg := graphClient(t, n)
-	cfg.StateDir = "" // no queue directory, so no claim file: only the in-process hold stands between the two calls
+	cfg.StateDir = filepath.Join(t.TempDir(), "Google Drive", "state") // a cloud-synced root is refused: no queue directory, so no claim file, and only the in-process hold stands between the two calls
 
 	first := make(chan core.Result, 1)
 	go func() {

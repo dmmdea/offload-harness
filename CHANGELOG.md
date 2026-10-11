@@ -6,6 +6,22 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed — the ticket queue was off on any machine whose config sets no `state_dir`, which is the usual config (ADR 0083)
+
+- **The defect.** The ticket store opened only when `state_dir` was set (`storeFor`), and nothing resolved the platform default the
+  way the GPU lease does, so on a machine that leaves `state_dir` unset a busy image call fell back to the local line, a whole-node
+  graph took no claim, and `offload_status.media_queue[]` never listed a ticket. Every test of the queue set `state_dir` in its
+  fixture, so the default every real config takes was never exercised.
+- **The fix.** The queue, its tickets and both kinds of node claim (a ticket's and a graph call's) live under the state root the GPU
+  lease resolves, through the one function that resolves it (`gpulease.ResolveStateRoot`: `state_dir`, else `LOCAL_OFFLOAD_STATE_DIR`,
+  else `%ProgramData%\local-offload` on Windows or `/var/lib/local-offload` elsewhere), so the tickets, the claims and the lease's
+  place tokens of a machine share one root and no config key is needed (`TestTicketQueueNeedsNoStateDirKey`,
+  `TestAGraphReadsTheTicketClaimsOfTheDefaultStateRoot`, `TestTicketStoreAndLeaseShareOneStateRoot`). A root the lease refuses (a
+  cloud-synced folder) keeps no queue, and says so once in the log with the lease's reason (`TestARefusedStateRootKeepsNoQueueAndSaysSo`);
+  before, a `state_dir` in such a folder opened a queue the lease itself would have refused. The package's tests now run against a
+  throwaway state root (`TestMain`), as the other packages' do, so a fixture with no `state_dir` cannot write tickets under a real one.
+  No other S2 or S4 code keys on `state_dir`.
+
 ### Added — a busy image call is a ticket the harness holds until the first matching lane frees, anywhere (the P0's "even when every machine is full", ADR 0083)
 
 - **The behaviour.** An `auto` image call (`offload_generate_image`, `generate-image`) on a machine that has the lane and a fleet, whose
@@ -14,7 +30,7 @@ Versioning: [SemVer](https://semver.org/).
   a **ticket**: the harness holds the job and starts it on the first matching lane that frees, this machine's own or a node's, in the
   order the call arrived, with no caller loop. A free lane runs the call here exactly as before; a box with no `delegate_remotes`
   asks nothing; `route local` and `route remote` are unchanged.
-- **One request, one ticket.** A ticket is a file, `<state_dir>/media-queue/mq-<id>.json`, any process of the machine can read. Its
+- **One request, one ticket.** A ticket is a file, `<state root>/media-queue/mq-<id>.json`, under the state root the GPU lease uses (no `state_dir` is needed), any process of the machine can read. Its
   identity is the sha256 of the task, the prompt and the parameters without the `waiter_token`: **any identical re-send attaches to
   the live ticket**, with or without a token (`TestIdenticalResendAttachesToTheLiveTicket`). `waiter_token=mq-...` collects the
   result; a token of another request is refused by name; an unknown one is a new arrival; an `mq-` token never reaches the lease line.
@@ -134,8 +150,8 @@ Versioning: [SemVer](https://semver.org/).
   that then runs here and succeeds carries none). A graph with `devices`, a `waiter_token`, an inherited lease or an input file stays
   here. The graph path keeps one limit of the old image overflow that the ticket removed for images: a graph is sent to at most
   three nodes. **It shares the nodes with the tickets by the tickets' own two rules.** It takes the machine-wide claim of the node it
-  uses, under the directory lock, before it sends (an in-process hold stands first, and is the whole cover on a machine with no
-  `state_dir`), so no ticket and no other graph call, of this process or of another, is sent a node it is running on, and it leaves a
+  uses, under the directory lock, before it sends (an in-process hold stands first, and is the whole cover on a machine whose lease
+  root is refused and so keeps no queue), so no ticket and no other graph call, of this process or of another, is sent a node it is running on, and it leaves a
   node any such claim holds (`in-use`, `a job of this machine is running there (graph call, since ...)`;
   `TestTwoProcessesNeverStackTwoGraphsOnOneNode`). And it **yields to the tickets**: every ticket that is waiting is older than a
   graph that arrives now, so a node an older waiting ticket matched at its last scan is left to that ticket, and so is every node while

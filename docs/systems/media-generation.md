@@ -2096,8 +2096,10 @@ holds the job and starts it on the first matching lane that frees, here or on a 
 why, and no caller loop. A free lane runs the call here as it always did; a box with no `delegate_remotes` asks nothing; `route
 local` and `route remote` are unchanged.
 
-**The ticket.** One file per ticket, `<state_dir>/media-queue/mq-<id>.json`, written atomically, readable by every process of the
-machine (`internal/mediaremote/ticket.go`). It holds the owner (pid and start time) and its beat, the request's key, the arrival
+**The ticket.** One file per ticket, `<state root>/media-queue/mq-<id>.json`, written atomically, readable by every process of the
+machine (`internal/mediaremote/ticket.go`). That root is the one the GPU lease uses (`state_dir`, else `LOCAL_OFFLOAD_STATE_DIR`, else `%ProgramData%\local-offload` on Windows or `/var/lib/local-offload` elsewhere; no config key is needed), so a config that sets no `state_dir` has
+the queue, and the tickets, the node claims and the lease's place tokens of a machine share one root
+(`TestTicketQueueNeedsNoStateDirKey`, `TestTicketStoreAndLeaseShareOneStateRoot`). `gpu_lock_path` moves only the lease directory. It holds the owner (pid and start time) and its beat, the request's key, the arrival
 time, the seed, the place in the local line, the state, the node and the node's job id once there is one, the nodes whose recipe
 matched at the last scan, and the last answer; the request body stays in the owning process, so the file keeps no prompt. States:
 `waiting`, `local` (the local run is in flight), `placing` (a node is claimed and the job is being sent), `placed` (the node
@@ -2174,8 +2176,9 @@ which the job may be on the node before its lease shows, and after it the node's
 So a ticket is never sent a node a graph is running on, a graph is never sent a node a ticket is running on, and two graph calls of two
 processes never stack (`TestATicketNeverSendsANodeAGraphHasAJobOn`, `TestAGraphAndATicketNeverHoldOneNodeTogether`,
 `TestTwoProcessesNeverStackTwoGraphsOnOneNode`); a row for such a node reads `a job of this machine is running there (graph call,
-since ...)`. A machine with no `state_dir` keeps no queue and no claim directory: there only the in-process hold stands between two
-graph calls of one process, and two processes can still stack two graphs.
+since ...)`. Every machine has the claim directory: only one whose lease root is refused (a cloud-synced folder) keeps no queue, says so
+once in its log, and there only the in-process hold stands between two graph calls of one process, and two processes can still stack
+two graphs (`TestARefusedStateRootKeepsNoQueueAndSaysSo`).
 
 **Owners die.** An owner is dead when its process is gone or it has not written its beat for 10 minutes (chosen). A `waiting` ticket
 of a dead owner, and a `local` one (its render died with its process), are swept by the next scan or call of any process and their
@@ -2242,8 +2245,8 @@ one-shot overflow of 0.179.0 (`tryGraphOverflow` and `placeGraph` in `internal/m
 that is not the ticket's): it is offered once to the nodes that can take it, in the roster's order, at most three of them; a node
 that refuses or bounces is left alone by the same placer memory the tickets use. It shares the nodes with the image tickets of its
 machine by the tickets' own two rules. It never takes a node a job of this machine has a claim on, and it takes the claim of the node
-it uses (above; one graph call of a process per node is also held in process, which is the whole cover on a machine with no
-`state_dir`), so no ticket and no other graph call of any process is sent a node it is running on. And it yields to the tickets: every
+it uses (above; one graph call of a process per node is also held in process, which is the whole cover on a machine whose lease
+root is refused and so keeps no queue), so no ticket and no other graph call of any process is sent a node it is running on. And it yields to the tickets: every
 ticket that is waiting is older than a graph that arrives now, so a node an older waiting ticket matched at its last scan is left to
 that ticket, and so is every node while that ticket has not been scanned yet (its first scan comes within about one scan interval of
 its creation); the row reads `free`, `idle, but ticket mq-... is older and first in line for it`, and the graph goes on to its own lane,
