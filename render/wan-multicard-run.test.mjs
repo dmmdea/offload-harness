@@ -5,7 +5,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { generate, planRun, seamedPath, GENERATE_IO, buildGraphForRun, submitChecked, verifyMulticardDevices, verifyMulticardPack } from "./comfy-video.mjs";
-import { pollOutputs, fetchView, finalizeRun, resolveCli } from "./comfy-submit.mjs";
+import { fetchView, finalizeRun, resolveCli } from "./comfy-submit.mjs";
 import { comfyApi, comfyLogCursor } from "./comfy-lifecycle.mjs";
 import { writeFileAtomic } from "./atomic-out.mjs";
 import * as M from "./wan-multicard.mjs";
@@ -90,12 +90,20 @@ function fakeIo(over = {}) {
   return { io, rec };
 }
 
-test("generate()'s defaults are the real calls: the graph comes from buildGraphForRun (the one that lets --wan-decode auto read the card), the rest from their modules", () => {
+test("generate()'s defaults are the real calls: the graph comes from buildGraphForRun (the one that lets --wan-decode auto read the card), the rest from their modules", async () => {
   assert.equal(GENERATE_IO.buildGraph, buildGraphForRun);
   assert.equal(GENERATE_IO.submit, submitChecked);
   assert.equal(GENERATE_IO.verifyDevices, verifyMulticardDevices);
   assert.equal(GENERATE_IO.verifyPack, verifyMulticardPack);
-  assert.equal(GENERATE_IO.poll, pollOutputs);
+  // the poll is reached through a literal `pollOutputs(` call (gpu_progress_test.go finds the heartbeating helpers by it), so it is checked by what it does
+  const seen = [];
+  const entry = { outputs: { 20: { gifs: [{ filename: "a.mp4" }] } } };
+  const h = await GENERATE_IO.poll({
+    api: "http://x", promptId: "p1", waitSec: 60, isDone: (e) => !!e.outputs, env: {}, sleep: async () => {}, now: () => 0,
+    fetchImpl: async (url) => { seen.push(String(url)); return { ok: true, json: async () => ({ p1: entry }) }; },
+  });
+  assert.equal(h, entry, "it is pollOutputs: the history entry of the finished prompt");
+  assert.ok(seen.some((u) => u.endsWith("/history/p1")), seen.join());
   assert.equal(GENERATE_IO.view, fetchView);
   assert.equal(GENERATE_IO.write, writeFileAtomic);
   assert.equal(GENERATE_IO.logCursor, comfyLogCursor);

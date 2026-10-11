@@ -323,7 +323,8 @@ export async function verifyMulticardPack(api, plan, { fetchImpl = fetch } = {})
 // defaults are the real ones; nothing else about the function changes.
 export const GENERATE_IO = Object.freeze({
   verifyDevices: verifyMulticardDevices, verifyPack: verifyMulticardPack, buildGraph: buildGraphForRun, submit: submitChecked,
-  poll: pollOutputs, view: fetchView, write: writeFileAtomic, logCursor: comfyLogCursor, finalize: finalizeRun, resolveCli,
+  // a literal call, not the bare function: gpu_progress_test.go finds the render helpers that heartbeat (gpulease.HeartbeatHelperNames) by their `pollOutputs(` call
+  poll: (opts) => pollOutputs(opts), view: fetchView, write: writeFileAtomic, logCursor: comfyLogCursor, finalize: finalizeRun, resolveCli,
   stdout: (...a) => console.log(...a), stderr: (...a) => console.error(...a), env: process.env, comfyDir: COMFY_DIR,
 });
 
