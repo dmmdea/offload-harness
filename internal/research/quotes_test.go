@@ -274,3 +274,43 @@ func TestVerifyQuotesDoesNotHTMLEscapeThePagesText(t *testing.T) {
 		t.Fatalf("structured = %s, want the span unescaped", out)
 	}
 }
+
+// A seat often adds or drops punctuation around words that are the page's own:
+// a colon after a label, an arrow where the page has none, a closing full stop.
+// The words alone decide, and the published item is the page's span, so the
+// punctuation the seat invented is not published.
+func TestVerifyQuotesSetsAsideAddedAndDroppedPunctuation(t *testing.T) {
+	arrow := string(rune(0x2192))
+	page := "Plan\tBest for Students, hobbyists, and other personal use\nIdentity verification: No.\n" +
+		"Open Settings " + arrow + " Device care " + arrow + " Battery before you start."
+	out, qc := VerifyQuotes(page, digestWith(
+		"Best for: Students, hobbyists, and other personal use.",
+		"Menu path: Settings > Device care > Battery",
+		"Identity verification - No",
+	))
+	if qc == nil || qc.Checked != 3 || qc.Corrected != 2 || len(qc.Unverified) != 1 {
+		t.Fatalf("report = %+v, want the first two corrected and the label the page does not carry flagged", qc)
+	}
+	// The second quote opens with words the page does not carry ("Menu path:"), so it stays as written and is the flagged one.
+	want := []string{
+		"Best for Students, hobbyists, and other personal use",
+		"Menu path: Settings > Device care > Battery",
+		"Identity verification: No",
+	}
+	if got := quotesOf(t, out); !reflect.DeepEqual(got, want) {
+		t.Fatalf("quotes = %q, want %q", got, want)
+	}
+	if !reflect.DeepEqual(qc.Unverified, []string{"Menu path: Settings > Device care > Battery"}) {
+		t.Fatalf("unverified = %q", qc.Unverified)
+	}
+}
+
+// A tolerant match never starts or ends inside a word: a seat's "NO" is not the
+// page's "another". (An exact copy is the page's bytes wherever they sit, as a
+// reader's find-in-page would have it.)
+func TestVerifyQuotesDoesNotFindATolerantQuoteInsideAWord(t *testing.T) {
+	_, qc := VerifyQuotes("Choose another option.", digestWith("NO", "Another Option"))
+	if qc == nil || qc.Checked != 2 || qc.Corrected != 1 || !reflect.DeepEqual(qc.Unverified, []string{"NO"}) {
+		t.Fatalf("report = %+v, want only the whole-word copy found", qc)
+	}
+}

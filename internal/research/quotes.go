@@ -20,9 +20,10 @@ import (
 // digest was written from.
 //
 //   - Locate tolerantly, publish exactly. A quote is found with case, spacing,
-//     typographic quote marks and dashes set aside, and when it is found the
-//     published item is the PAGE's span, so it is the page's bytes by
-//     construction. This is the extraction step: the seat points, the delegator
+//     typographic quote marks and dashes set aside and, failing that, with
+//     punctuation set aside too (the seat's added colon, a table's cell borders),
+//     and when it is found the published item is the PAGE's span, so it is the
+//     page's bytes by construction. This is the extraction step: the seat points, the delegator
 //     copies.
 //   - A quote found nowhere is FLAGGED, never dropped and never failed. An
 //     acceptance failure discards a whole run (register C15, 36 pages lost to
@@ -104,7 +105,7 @@ func VerifyQuotes(page string, structured json.RawMessage) (json.RawMessage, *de
 		return structured, nil
 	}
 	qc := &delegate.QuoteCheck{}
-	var folded *foldedText
+	folds := &pageFolds{page: page}
 	changed := false
 	for i, it := range items {
 		var q string
@@ -112,11 +113,7 @@ func VerifyQuotes(page string, structured json.RawMessage) (json.RawMessage, *de
 			continue
 		}
 		qc.Checked++
-		if folded == nil {
-			f := fold(page)
-			folded = &f
-		}
-		span, how := locateQuote(page, folded, q)
+		span, how := locateQuote(page, folds, q)
 		switch how {
 		case quoteVerbatim:
 			qc.Verbatim++
@@ -139,7 +136,7 @@ func VerifyQuotes(page string, structured json.RawMessage) (json.RawMessage, *de
 		return structured, nil
 	}
 	if len(qc.Unverified) > 0 {
-		qc.Note = fmt.Sprintf("%d of %d quotes are not on the fetched page (case, spacing, quote marks and dashes set aside): they are the seat's wording, not the page's, and cannot be checked against it", len(qc.Unverified), qc.Checked)
+		qc.Note = fmt.Sprintf("%d of %d quotes are not on the fetched page (case, spacing and punctuation set aside): they are the seat's wording, not the page's, and cannot be checked against it", len(qc.Unverified), qc.Checked)
 	}
 	if !changed {
 		return structured, qc
@@ -180,41 +177,67 @@ const (
 // bracketed form included.
 var elision = regexp.MustCompile(`\s*(?:\[\s*(?:\.\.\.|\x{2026})\s*\]|\.\.\.|\x{2026})\s*`)
 
-// locateQuote returns the text to publish for q and how it was found.
-func locateQuote(page string, folded *foldedText, q string) (string, quoteHow) {
+// pageFolds holds the folded forms of one page, each built on first use.
+type pageFolds struct {
+	page          string
+	strict, loose *foldedText
+}
+
+func (p *pageFolds) get(loose bool) foldedText {
+	slot := &p.strict
+	if loose {
+		slot = &p.loose
+	}
+	if *slot == nil {
+		f := foldWith(p.page, loose)
+		*slot = &f
+	}
+	return **slot
+}
+
+// locateQuote returns the text to publish for q and how it was found. The page's
+// own bytes come first (what a reader's find-in-page does); then the tolerant
+// forms, strict before loose: strict sets case, spacing, quote marks and dashes
+// aside and keeps the rest of the punctuation, loose compares the words alone
+// (a colon a seat added after a label, a table's cell borders).
+func locateQuote(page string, folds *pageFolds, q string) (string, quoteHow) {
 	raw := strings.TrimSpace(q)
 	if strings.Contains(page, raw) {
 		return raw, quoteVerbatim
 	}
-	// An elided quote whose parts are each the page's bytes, in page order.
-	if parts := splitElision(raw); len(parts) > 1 && inOrder(page, parts) {
+	parts := splitElision(raw)
+	if len(parts) > 1 && inOrder(page, parts) {
 		return raw, quoteVerbatim
 	}
-	needle := strings.TrimSpace(fold(raw).s)
-	for _, cand := range quoteCandidates(needle) {
-		if lo, hi, ok := folded.find(cand, 0); ok {
-			return folded.span(page, lo, hi), quoteCorrected
+	for _, loose := range []bool{false, true} {
+		f := folds.get(loose)
+		if s, ok := findFolded(page, f, []string{raw}, loose); ok {
+			return s, quoteCorrected
 		}
-	}
-	if parts := splitElision(needle); len(parts) > 1 {
-		var spans []string
-		pos := 0
-		for _, p := range parts {
-			found := false
-			for _, cand := range quoteCandidates(p) {
-				if lo, hi, ok := folded.find(cand, pos); ok {
-					spans = append(spans, folded.span(page, lo, hi))
-					pos, found = hi, true
-					break
-				}
-			}
-			if !found {
-				return q, quoteUnverified
+		if len(parts) > 1 {
+			if s, ok := findFolded(page, f, parts, loose); ok {
+				return s, quoteCorrected
 			}
 		}
-		return strings.Join(spans, " ... "), quoteCorrected
 	}
 	return q, quoteUnverified
+}
+
+// findFolded looks the parts of a quote up in a folded page, each after the one
+// before, and returns the page's own span (the parts' spans joined by " ... " when
+// there are several).
+func findFolded(page string, f foldedText, parts []string, loose bool) (string, bool) {
+	var spans []string
+	pos := 0
+	for _, part := range parts {
+		lo, hi, ok := f.find(strings.TrimSpace(foldWith(part, loose).s), pos)
+		if !ok {
+			return "", false
+		}
+		spans = append(spans, f.span(page, lo, hi))
+		pos = hi
+	}
+	return strings.Join(spans, " ... "), true
 }
 
 // splitElision returns the non-empty parts of s around its ellipses.
@@ -241,47 +264,20 @@ func inOrder(page string, parts []string) bool {
 	return true
 }
 
-// quoteCandidates lists the forms of a folded quote worth looking up, most
-// specific first: as written, without one layer of wrapping quote marks, and each
-// without the sentence punctuation a copy may have gained at its end.
-func quoteCandidates(c string) []string {
-	var out []string
-	add := func(s string) {
-		s = strings.TrimSpace(s)
-		if s == "" {
-			return
-		}
-		for _, o := range out {
-			if o == s {
-				return
-			}
-		}
-		out = append(out, s)
-	}
-	unwrapped := c
-	if len(c) >= 2 && (c[0] == '"' || c[0] == '\'') && c[len(c)-1] == c[0] {
-		unwrapped = c[1 : len(c)-1]
-	}
-	add(c)
-	add(unwrapped)
-	add(strings.TrimRight(c, " .,;:!?"))
-	add(strings.TrimRight(unwrapped, " .,;:!?"))
-	return out
-}
-
 // foldedText is a text folded for tolerant LOCATING with the map back to the
 // original's bytes: case is folded, typographic quote marks and dashes become
 // their ASCII forms, runs of white space (a no-break space and a line break
-// included) become one space, and zero-width characters vanish. start[i] and
-// end[i] are the original byte offsets of the character that produced folded
-// byte i.
+// included) become one space, and zero-width characters vanish. The loose form
+// also turns every other character that is not a letter or a digit into
+// space, so only the words are compared. start[i] and end[i] are the original byte
+// offsets of the character that produced folded byte i.
 type foldedText struct {
 	s     string
 	start []int
 	end   []int
 }
 
-func fold(text string) foldedText {
+func foldWith(text string, loose bool) foldedText {
 	var b strings.Builder
 	var start, end []int
 	lastSpace := false
@@ -291,7 +287,7 @@ func fold(text string) foldedText {
 		switch {
 		case isInvisible(r):
 			// No unit: it neither starts nor ends a span, and does not break a run of spaces.
-		case unicode.IsSpace(r):
+		case unicode.IsSpace(r) || (loose && !isWordRune(foldRune(r))):
 			if lastSpace {
 				end[len(end)-1] = j
 			} else {
@@ -334,17 +330,45 @@ func foldRune(r rune) rune {
 }
 
 // find returns the folded byte range of the first occurrence of needle at or
-// after from.
+// after from that starts and ends on a word boundary: a quote of "no" is not
+// found inside "another".
 func (f foldedText) find(needle string, from int) (lo, hi int, ok bool) {
-	if needle == "" || from > len(f.s) {
+	if needle == "" {
 		return 0, 0, false
 	}
-	i := strings.Index(f.s[from:], needle)
-	if i < 0 {
-		return 0, 0, false
+	for from <= len(f.s) {
+		i := strings.Index(f.s[from:], needle)
+		if i < 0 {
+			return 0, 0, false
+		}
+		lo, hi = from+i, from+i+len(needle)
+		if f.bounded(lo, hi) {
+			return lo, hi, true
+		}
+		_, w := utf8.DecodeRuneInString(f.s[lo:])
+		from = lo + w
 	}
-	return from + i, from + i + len(needle), true
+	return 0, 0, false
 }
+
+// bounded reports whether the folded range [lo, hi) does not cut a word at either end.
+func (f foldedText) bounded(lo, hi int) bool {
+	first, _ := utf8.DecodeRuneInString(f.s[lo:])
+	last, _ := utf8.DecodeLastRuneInString(f.s[:hi])
+	if isWordRune(first) && lo > 0 {
+		if prev, _ := utf8.DecodeLastRuneInString(f.s[:lo]); isWordRune(prev) {
+			return false
+		}
+	}
+	if isWordRune(last) && hi < len(f.s) {
+		if next, _ := utf8.DecodeRuneInString(f.s[hi:]); isWordRune(next) {
+			return false
+		}
+	}
+	return true
+}
+
+func isWordRune(r rune) bool { return unicode.IsLetter(r) || unicode.IsDigit(r) }
 
 // span is the original text under the folded range [lo, hi).
 func (f foldedText) span(page string, lo, hi int) string {
