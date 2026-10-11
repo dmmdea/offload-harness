@@ -78,8 +78,9 @@ make the caller retry. Three things were still wrong once every lane was busy.
    (decision 12) takes the same claim, under the same lock, before it sends**, so a ticket is never sent a node a graph is running
    on, a graph is never sent a node a ticket is running on, and two graph calls of two processes do not stack on one node. A
    graph's claim has no ticket file behind it: it names a graph call, and it is judged by its owner alone (a graph call has no
-   scanner to write a beat; its call ends, and lets the node go, when its job does), which makes it live while its process is, and
-   for the same 2 minutes after the process ended. A machine with no `state_dir` keeps no queue and no claim directory; there only the
+   scanner to write a beat; its call ends, and lets the node go, when its job does), which makes it live while its process is, and,
+   when the process is gone, only for the first 2 minutes after the claim was taken (counted from the claim, not from the death, since
+   the call writes no beat; after that the node's own health speaks for the job). A machine with no `state_dir` keeps no queue and no claim directory; there only the
    in-process hold of decision 12 stands between two graph calls of one process, and two processes can still stack two graphs. The lock is an operating-system file lock
    (`flock`, `LockFileEx`), never a file whose age decides it is stale: every way of breaking a stale file lock has a gap in which
    a slow contender removes the fresh lock of the one that broke it (two holders inside at once, 24 of 300 contended rounds on the

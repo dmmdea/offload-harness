@@ -52,7 +52,7 @@ Versioning: [SemVer](https://semver.org/).
   sent, so two processes never send one single-job node two jobs (`TestTwoProcessesNeverDispatchTwoTicketsToOneSingleJobNode`, which
   turns the ordering rule off so that only the claim stands between them). This closes the S1 open issue 6. **A whole-node graph call
   takes the same claim**, under the same lock, before it sends (a record marked `graph`, with no ticket file behind it, live while its
-  process is and for the same 2 minutes after it ended; next section): a ticket is never sent a node a graph is running on, and the
+  process is, and, when the process is gone, only for the first 2 minutes after the claim was taken; next section): a ticket is never sent a node a graph is running on, and the
   reverse (`TestATicketNeverSendsANodeAGraphHasAJobOn`, `TestAGraphAndATicketNeverHoldOneNodeTogether`).
 - **A dead owner's claim holds its node for 2 minutes** (chosen), not a moment less: the job it sent keeps running on the node, which
   shows its lease only once the job is admitted, and in those seconds another process would have sent the node a second job.

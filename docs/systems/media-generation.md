@@ -2167,8 +2167,10 @@ live while its ticket has a job in flight on that node and its owner is alive, o
 sent keeps running on the node, which shows its lease only once the job is admitted; after the grace the node's own health speaks
 for it, `TestClaimNodeIsExclusiveAndLetsGoOfTheDead`). **A whole-node graph call takes the same claim, under the same lock, before it
 sends** (`claimGraph`): the record is marked `kind: graph`, names the call (`gr-...`), has no ticket file behind it and no scanner to
-beat for it, and is live while its process is (and younger than the longest call budget plus an hour) and for the same 2 minutes
-after the process ended (`TestAGraphClaimHoldsWhileItsOwnerLivesAndForTheGraceAfter`); the call lets the node go when its job does.
+beat for it, and is live while its process is (and younger than the longest call budget plus an hour) and, when the process is gone, only for the first
+2 minutes after the claim was taken, counted from the claim and not from the death, since the call writes no beat: that is the window in
+which the job may be on the node before its lease shows, and after it the node's own health speaks for it
+(`TestAGraphClaimHoldsWhileItsOwnerLivesAndForTheGraceAfter`); the call lets the node go when its job does.
 So a ticket is never sent a node a graph is running on, a graph is never sent a node a ticket is running on, and two graph calls of two
 processes never stack (`TestATicketNeverSendsANodeAGraphHasAJobOn`, `TestAGraphAndATicketNeverHoldOneNodeTogether`,
 `TestTwoProcessesNeverStackTwoGraphsOnOneNode`); a row for such a node reads `a job of this machine is running there (graph call,

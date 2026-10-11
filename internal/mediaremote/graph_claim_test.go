@@ -70,9 +70,9 @@ func TestAGraphAndATicketNeverHoldOneNodeTogether(t *testing.T) {
 	}
 }
 
-// A graph's claim holds its node while its process lives, and for the dead-owner grace after the process ends (the crash window
-// that matters is the seconds right after the send, before the node's own lease shows). Nothing else keeps it: a claim whose
-// owner is dead and past the grace holds nothing, and the sweep takes it away.
+// A graph's claim holds its node while its process lives, and, once its process is gone, for the dead-owner grace counted from the
+// claim (the call writes no beat; the window that matters is the seconds right after the send, before the node's own lease shows).
+// Nothing else keeps it: a claim whose owner is dead and older than the grace holds nothing, and the sweep takes it away.
 func TestAGraphClaimHoldsWhileItsOwnerLivesAndForTheGraceAfter(t *testing.T) {
 	st := &store{dir: t.TempDir()}
 	const base = "http://node-y.test:2"
