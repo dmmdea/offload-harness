@@ -949,35 +949,87 @@ func fileSHA256(path string) (sum string, n int64, err error) {
 // ResultsFile is the results.jsonl of a batch. A row is appended to <path>.partial as soon as its job is FINAL, and Close
 // rewrites the rows whole in job order into <path>, atomically. Nothing touches <path> until then, so a record an earlier run
 // left there (the node, the time and the hash of every picture are only in it) survives a batch the command refuses and one
-// that dies: the dead one leaves <path>.partial, with every job that ended. On the warm path the jobs end together when the
-// warm session does, so their rows arrive then; the ticket path and the pre-flight failures arrive as they happen.
+// that dies: the dead one leaves <path>.partial, with every job that ended. A run that reopens the same name (the --resume
+// that recovers a killed batch) first sets that record aside as <path>.partial.prev (one is kept, the newest), so the
+// recovery run does not destroy the record it is recovering from. On the warm path the jobs end together when the warm
+// session does, so their rows arrive then; the ticket path and the pre-flight failures arrive as they happen.
 type ResultsFile struct {
 	path string
 	f    *os.File
 	mu   sync.Mutex
 	werr error
+	// kept is where the record of an earlier batch was set aside (<path>.partial.prev); "" when there was none.
+	kept string
 }
 
 // OpenResults creates (truncating) <path>.partial and the folder it is in. It is opened BEFORE the batch starts, so a path
-// that cannot be written stops the command before any lane time is spent. <path> itself is not touched.
+// that cannot be written stops the command before any lane time is spent: a folder, and (where a rename over it fails) a
+// read-only file, are refused now and not at the rename that ends the batch. <path> itself is not touched. A non-empty
+// <path>.partial left by an earlier batch is set aside first (see ResultsFile.KeptAside); if it cannot be, the command is
+// refused rather than destroy it.
 func OpenResults(path string) (*ResultsFile, error) {
+	if fi, err := os.Stat(path); err == nil {
+		switch {
+		case fi.IsDir():
+			return nil, fmt.Errorf("--results %s: that path is a folder, not a file; name the file the rows are to be written to", path)
+		case runtime.GOOS == "windows" && fi.Mode().Perm()&0o200 == 0:
+			// Windows refuses to rename a file over a read-only one, so the batch would run for hours and fail at its end.
+			return nil, fmt.Errorf("--results %s: the file is read-only, so the results could not be written over it when the batch ends; clear its read-only attribute or name another file", path)
+		}
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("--results %s: %w", path, err)
 	}
-	f, err := os.OpenFile(path+".partial", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	partial := path + ".partial"
+	kept, err := setPartialAside(partial)
 	if err != nil {
 		return nil, fmt.Errorf("--results %s: %w", path, err)
 	}
-	return &ResultsFile{path: path, f: f}, nil
+	f, err := os.OpenFile(partial, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		restorePartial(partial, kept)
+		return nil, fmt.Errorf("--results %s: %w", path, err)
+	}
+	return &ResultsFile{path: path, f: f, kept: kept}, nil
 }
 
+// setPartialAside moves the record an earlier batch left in partial to partial+".prev", replacing a .prev from before (one is
+// kept: chosen). An empty or missing partial holds no record, so it is left to be truncated and never replaces a .prev that
+// does. It returns where the record went, "" when there was none; an error when it is there and cannot be moved.
+func setPartialAside(partial string) (string, error) {
+	fi, err := os.Lstat(partial)
+	if err != nil || !fi.Mode().IsRegular() || fi.Size() == 0 {
+		return "", nil
+	}
+	prev := partial + ".prev"
+	_ = os.Remove(prev)
+	if err := os.Rename(partial, prev); err != nil {
+		return "", fmt.Errorf("an earlier batch left its record in %s and it could not be set aside as %s (%v); move it away and run again", partial, prev, err)
+	}
+	return prev, nil
+}
+
+// restorePartial puts a record that was set aside back under its own name.
+func restorePartial(partial, kept string) {
+	if kept != "" {
+		_ = os.Remove(partial)
+		_ = os.Rename(kept, partial)
+	}
+}
+
+// KeptAside is where the record of an earlier, unfinished batch was set aside when this file was opened
+// (<path>.partial.prev), or "" when there was none: the caller says so.
+func (r *ResultsFile) KeptAside() string { return r.kept }
+
 // Discard closes and removes the partial file: the batch was refused before it began and has no results to keep. A results
-// file an earlier run left at the path is not touched.
+// file an earlier run left at the path is not touched, and the record of an earlier batch that was set aside is put back
+// under its own name.
 func (r *ResultsFile) Discard() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	_ = r.f.Close()
 	_ = os.Remove(r.path + ".partial")
+	restorePartial(r.path+".partial", r.kept)
 }
 
 // Append writes one row. A failed write is remembered and reported by Close; it does not stop the batch.
