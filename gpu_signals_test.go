@@ -51,13 +51,20 @@ func TestTheCardSaysWhichSignalEndedTheCommand(t *testing.T) {
 	if n := len([]rune(signalWhy(syscall.SIGTERM) + " exit status 1")); n > 140-20 {
 		t.Errorf("the card clause is %d characters; the card shows 140 in all and the exit status goes before it", n)
 	}
-	for _, claim := range []string{"its console was closed", "the session is ending", "the machine is shutting down"} {
-		if strings.Contains(warmSkippedOnTermSentence, claim) {
-			t.Errorf("the warm-skipped sentence states a cause as fact (%q)", claim)
+	for _, stage := range []string{"", stageQueued, stageDraining, stageBeforeStart} {
+		sentence := warmSkippedOnTerm(stage)
+		for _, claim := range []string{"its console was closed", "the session is ending", "the machine is shutting down"} {
+			if strings.Contains(sentence, claim) {
+				t.Errorf("the warm-skipped sentence for stage %q states a cause as fact (%q)", stage, claim)
+			}
 		}
-	}
-	if !strings.Contains(warmSkippedOnTermSentence, "SIGTERM") || !strings.Contains(warmSkippedOnTermSentence, "plain kill") {
-		t.Errorf("the warm-skipped sentence must name the signal and say a plain kill sends it too: %s", warmSkippedOnTermSentence)
+		if !strings.Contains(sentence, "SIGTERM") || !strings.Contains(sentence, "plain kill") {
+			t.Errorf("the warm-skipped sentence for stage %q must name the signal and say a plain kill sends it too: %s", stage, sentence)
+		}
+		// Only a command that ran can have been ended; a signal that found the wrapper in an earlier stage ended the wrapper.
+		if said := strings.Contains(sentence, "the command was ended"); said != (stage == "") {
+			t.Errorf("the warm-skipped sentence for stage %q says the command was ended = %v: %s", stage, said, sentence)
+		}
 	}
 	if other := signalWhy(syscall.SIGHUP); !strings.Contains(other, "signal") {
 		t.Errorf("an unknown signal is named as a signal: %q", other)

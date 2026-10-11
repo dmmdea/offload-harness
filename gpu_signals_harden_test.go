@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -95,11 +96,51 @@ func TestASignalBetweenTheDrainAndTheCommandStartsNothing(t *testing.T) {
 			if tc.warmStaysOwed && !strings.Contains(out, "NOT warming the seat back") {
 				t.Errorf("the wrapper must say it left the warm owed:\n%s", out)
 			}
+			// No command ran: what the signal ended is the wrapper, and the sentence must not say the command was ended.
+			if tc.warmStaysOwed && (!strings.Contains(out, "the wrapper was ended on SIGTERM before its command started") || strings.Contains(out, "the command was ended")) {
+				t.Errorf("the sentence must say the wrapper was ended before its command started, not that the command was ended:\n%s", out)
+			}
 			if info := r.m.Inspect(); info.Held {
 				t.Errorf("the lease must be released: %+v", info)
 			}
 		})
 	}
+}
+
+// loseTheLeaseToAnIntruder takes away the lease the reserve holds once ready reads true of it: the epoch is released out from
+// under it and another request takes the card. It returns once the reserve has noticed (at its next heartbeat) and queued again
+// behind that holder; the lease returned is the intruder's, and the caller releases it.
+func loseTheLeaseToAnIntruder(t *testing.T, r *stageRig, ready func(gpulease.Info) bool) *gpulease.Lease {
+	t.Helper()
+	var first uint64
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+		if info := r.m.Inspect(); info.Held && ready(info) {
+			first = info.Epoch
+			break
+		}
+	}
+	if first == 0 {
+		t.Fatal("the reserve never took the lease in the state the test waits for")
+	}
+	if _, rerr := r.m.ReleaseByEpoch(first); rerr != nil {
+		t.Fatal(rerr)
+	}
+	intruder, ierr := r.m.TryAcquire(gpulease.ClassText, gpulease.Options{Reason: "concurrent acquire", TTL: time.Hour})
+	if ierr != nil {
+		t.Fatal(ierr)
+	}
+	queued := false
+	for deadline := time.Now().Add(15 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+		if len(r.m.Waiters()) == 1 {
+			queued = true
+			break
+		}
+	}
+	if !queued {
+		_ = intruder.Release()
+		t.Fatal("the reserve never queued again after its lease was taken away")
+	}
+	return intruder
 }
 
 // THE RE-QUEUE: a lease lost during the drain is taken again in the same line, and a signal there ends that wait the way it
@@ -128,35 +169,9 @@ func TestASignalWhileQueuedAgainAfterALostLeaseNamesTheSignal(t *testing.T) {
 		stderr = captureStderr(t, func() { err = runGPUReserve(args) })
 	}()
 
-	var first uint64
-	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
-		if info := r.m.Inspect(); info.Held && info.Draining {
-			first = info.Epoch
-			break
-		}
-	}
-	if first == 0 {
-		t.Fatal("the reserve never took a draining lease")
-	}
-	if _, rerr := r.m.ReleaseByEpoch(first); rerr != nil {
-		t.Fatal(rerr)
-	}
-	intruder, ierr := r.m.TryAcquire(gpulease.ClassText, gpulease.Options{Reason: "concurrent acquire", TTL: time.Hour})
-	if ierr != nil {
-		t.Fatal(ierr)
-	}
-	defer func() { _ = intruder.Release() }()
 	// The reserve notices the loss at its next heartbeat and queues again behind the intruder.
-	queued := false
-	for deadline := time.Now().Add(15 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
-		if len(r.m.Waiters()) == 1 {
-			queued = true
-			break
-		}
-	}
-	if !queued {
-		t.Fatal("the reserve never queued again after its lease was taken away")
-	}
+	intruder := loseTheLeaseToAnIntruder(t, r, func(info gpulease.Info) bool { return info.Draining })
+	defer func() { _ = intruder.Release() }()
 	<-ready
 	feed <- syscall.SIGTERM
 	select {
@@ -199,6 +214,85 @@ func TestASignalWhileQueuedAgainAfterALostLeaseNamesTheSignal(t *testing.T) {
 	}
 }
 
+// THE RE-QUEUE AFTER A CANCELLED UNLOAD: the only way a wrapper that queues again can owe a warm. The lease is taken away while
+// the unload request is in flight; the reserve cancels the request, which may or may not have taken the seat down, and records
+// the debt (the unload test above); it queues again behind the holder that took the card, and a SIGTERM there ends the wrapper
+// with that debt on record. What it says then: the wrapper was ended while queued, before its command started (no command ever
+// ran), and the warm stays owed.
+func TestASignalWhileQueuedAgainAfterACancelledUnloadSaysTheWrapperWasEndedAndLeavesTheWarmOwed(t *testing.T) {
+	r := newStageRig(t) // the seat is resident, nothing in flight: the drain ends at once and the unload is asked for
+	old := drainRenewEvery
+	drainRenewEvery = 300 * time.Millisecond
+	t.Cleanup(func() { drainRenewEvery = old })
+
+	oldFeed := wrapperSignalFeed
+	var feed chan<- os.Signal
+	ready := make(chan struct{})
+	wrapperSignalFeed = func(c chan<- os.Signal) { feed = c; close(ready) }
+	t.Cleanup(func() { wrapperSignalFeed = oldFeed })
+	unloading := make(chan struct{})
+	var once sync.Once
+	r.swap.onUnload = func() {
+		once.Do(func() { close(unloading) })
+		time.Sleep(2500 * time.Millisecond) // the request is cancelled when the lease is taken away; the server finishes it after
+	}
+
+	var err error
+	var stderr string
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		args := append([]string{"--config", r.cfg, "--wait", "30s", "--drain", "--unload-seat", "--reason", "cancelled-unload"}, markerCmd()...)
+		stderr = captureStderr(t, func() { err = runGPUReserve(args) })
+	}()
+	select {
+	case <-unloading:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the unload request never arrived")
+	}
+	intruder := loseTheLeaseToAnIntruder(t, r, func(gpulease.Info) bool { return true })
+	defer func() { _ = intruder.Release() }()
+	<-ready
+	feed <- syscall.SIGTERM
+	select {
+	case <-done:
+	case <-time.After(15 * time.Second):
+		t.Fatal("the re-queue wait did not end on the signal")
+	}
+
+	if err == nil {
+		t.Fatalf("a wait ended by a signal is not a success\n%s", stderr)
+	}
+	for _, w := range []string{"SIGTERM", "likely", "while queued", "never started"} {
+		if !strings.Contains(err.Error(), w) {
+			t.Errorf("the error %q lacks %q", err, w)
+		}
+	}
+	if owed := r.m.SeatWarmOwed(); owed == "" {
+		t.Errorf("the cancelled unload left the debt, and the lease that owed it is gone: the marker is all that records it\n%s", stderr)
+	}
+	for _, want := range []string{"the wrapper was ended on SIGTERM while queued, before its command started", "NOT warming the seat back", "the warm stays owed"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("the wrapper's output lacks %q:\n%s", want, stderr)
+		}
+	}
+	if strings.Contains(stderr, "the command was ended") {
+		t.Errorf("no command ever ran, so none was ended:\n%s", stderr)
+	}
+	if n := r.swap.warms.Load(); n != 0 {
+		t.Errorf("a wrapper ended on SIGTERM does not warm the seat back inside the grace: warms=%d", n)
+	}
+	if r.commandStarted() {
+		t.Error("the command must not start after the signal")
+	}
+	if n := len(r.m.Waiters()); n != 0 {
+		t.Errorf("the waiter must leave the line, %d record(s) remain", n)
+	}
+	if cerr := intruder.Check(); cerr != nil {
+		t.Errorf("the signal disturbed the lease that took the card: %v", cerr)
+	}
+}
+
 // THE UNLOAD: a signal that cancels the unload request can arrive after llama-swap has taken the seat down (the server
 // finishes what it was asked, the client only stops waiting). The wrapper cannot tell, so it records the debt: "could not
 // tell must not cost a warm seat". Without the marker the seat stays cold and nothing owes its reload.
@@ -233,6 +327,10 @@ func TestASignalDuringTheUnloadRequestLeavesTheWarmOwed(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "the warm stays owed") {
 		t.Errorf("the wrapper must say the warm stays owed:\n%s", stderr)
+	}
+	// No command ran either: the signal ended the wrapper while it drained the seat.
+	if !strings.Contains(stderr, "the wrapper was ended on SIGTERM while draining the seat, before its command started") || strings.Contains(stderr, "the command was ended") {
+		t.Errorf("the sentence must say the wrapper was ended while draining the seat, not that the command was ended:\n%s", stderr)
 	}
 	if info := r.m.Inspect(); info.Held {
 		t.Errorf("the lease must be released: %+v", info)

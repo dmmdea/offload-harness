@@ -619,6 +619,7 @@ func runGPUReserve(args []string) error {
 	// bounded at 60 s that is usually seconds) and the warm stays owed (the marker is the debt; the next holder to release, `gpu
 	// release --warm-seat` or the seat's next request pays it).
 	endedOnTerm := false
+	endedAt := "" // the stage a signal found the wrapper in when its command never ran ("" = the command ran), for the sentence below
 	finish := func() {
 		// A progress file this wrapper minted goes with the command it was minted for, and FIRST: left in place
 		// through the seat's warm-back (minutes) it would go stale and `gpu status` would read the lease
@@ -632,7 +633,7 @@ func runGPUReserve(args []string) error {
 		stopInstancesOfLease(cfg, lease, os.Stderr)
 		switch {
 		case *unload && endedOnTerm && m.SeatWarmOwed() != "":
-			fmt.Fprintln(os.Stderr, warmSkippedOnTermSentence)
+			fmt.Fprintln(os.Stderr, warmSkippedOnTerm(endedAt))
 		case *unload && endedOnTerm:
 			// Ended inside the grace before the seat was unloaded (a signal during the drain): there is no warm to
 			// skip and none owed, so nothing is said that is not so.
@@ -673,6 +674,7 @@ func runGPUReserve(args []string) error {
 			if sig := sw.Signal(); sig != nil {
 				// Decided before the deferred finish runs: it chooses between the warm-back and its skip by this.
 				endedOnTerm = endsGraceBounded(sig)
+				endedAt = stageDraining
 				err := endedBySignal(sig, stageDraining)
 				card.finish(err)
 				return err
@@ -701,6 +703,7 @@ func runGPUReserve(args []string) error {
 					// The wait ended on the signal (opts carries its cancel): say so, like the first wait. The old lease is
 					// released and the seat was never unloaded under the new one, so finish() has no warm to skip.
 					endedOnTerm = endsGraceBounded(sig)
+					endedAt = stageQueued
 					err := endedBySignal(sig, stageQueued)
 					card.finish(err)
 					return err
@@ -717,6 +720,7 @@ func runGPUReserve(args []string) error {
 	}
 	if sig := sw.Signal(); sig != nil {
 		endedOnTerm = endsGraceBounded(sig)
+		endedAt = stageBeforeStart
 		err := endedBySignal(sig, stageBeforeStart)
 		card.finish(err)
 		return err

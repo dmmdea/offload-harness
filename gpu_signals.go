@@ -189,9 +189,20 @@ func (w *signalWatch) Stop() {
 // then releases its lease at once and leaves the seat's warm-back owed instead of doing it first.
 func endsGraceBounded(s os.Signal) bool { return s == syscall.SIGTERM }
 
-// warmSkippedOnTermSentence is what the wrapper says in place of the warm-back. It names the signal and gives the cause as
-// likely (termCauseLikely): a SIGTERM is also what a plain kill sends.
-const warmSkippedOnTermSentence = "gpu reserve: the command was ended on SIGTERM (" + termCauseLikely + "), and a console close gives the process about five seconds: releasing the lease now and NOT warming the seat back; the warm stays owed (`gpu status` shows it) and the seat loads on its next request, or with `gpu release --warm-seat`"
+// warmSkippedOnTerm is what the wrapper says in place of the warm-back. It names the signal and gives the cause as likely
+// (termCauseLikely): a SIGTERM is also what a plain kill sends. What the signal ended depends on where it found the wrapper:
+// stage "" is a command that was running; any other stage (the texts endedBySignal takes) is a wrapper that never started its
+// command, which must not be said to have been ended (the seat's unload may still have gone through, so the warm can be owed).
+func warmSkippedOnTerm(stage string) string {
+	ended := "the command was ended on SIGTERM"
+	if stage != "" {
+		ended = "the wrapper was ended on SIGTERM " + stage
+		if stage != stageBeforeStart {
+			ended += ", before its command started"
+		}
+	}
+	return "gpu reserve: " + ended + " (" + termCauseLikely + "), and a console close gives the process about five seconds: releasing the lease now and NOT warming the seat back; the warm stays owed (`gpu status` shows it) and the seat loads on its next request, or with `gpu release --warm-seat`"
+}
 
 // signalWhy is the clause the wrapper appends to the exit status on the card of a command it ended on a
 // signal. " (interrupted)" is what a Ctrl-C always read.

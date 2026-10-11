@@ -107,7 +107,7 @@ func TestWrapperEndedOnTermReleasesAtOnceAndLeavesTheWarmOwed(t *testing.T) {
 	if n := f.unloads.Load(); n != 1 {
 		t.Errorf("the seat was unloaded %d times, want 1 (the wrapper ran its drain and unload first)\n%s", n, out)
 	}
-	for _, want := range []string{"ended on SIGTERM", "likely", "NOT warming the seat back", "the warm stays owed"} {
+	for _, want := range []string{"the command was ended on SIGTERM", "likely", "NOT warming the seat back", "the warm stays owed"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("the wrapper's output lacks %q:\n%s", want, out)
 		}
