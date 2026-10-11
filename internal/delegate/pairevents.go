@@ -38,6 +38,13 @@ func pairNodeName(base, fallback string) string {
 // differ from the seat the in-flight frame named, and two identities would be
 // two cards, one stuck "running" until PAIR's staleness sweep failed it.
 
+// cardless reports a call that opens no PAIR card because its caller declared it a measurement: a call
+// pinned with pin_reason "measurement" is a benchmark, a bake or a seat A/B, and a card for each on the
+// operator's dashboard is the noise register F48 / C23 counted (42 cards in 48 h). The ledger rows of the
+// call carry the same class (ledger.ClassOf), so the production views skip them and say so. A process
+// that declares a class of its own has no emitter at all (pairworkloads.FromConfig).
+func (r *runner) cardless() bool { return r.pin.reason == PinMeasurement }
+
 // pairInflight emits the queued / running frame for a subtask and pins the
 // card identity on pr. node is the harness node name ("" = this box), aliases
 // the other names the same node goes by (its fleet node id, the name it
@@ -45,7 +52,7 @@ func pairNodeName(base, fallback string) string {
 // seat is behind this box's own endpoint, so its alias can be resolved to an
 // engine (a remote node's aliases live in its own roster).
 func (r *runner) pairInflight(pr *PlacedResult, jobID, node string, aliases []string, seat, state string, local bool) {
-	if r.pair == nil || !r.pair.Enabled() {
+	if r.pair == nil || !r.pair.Enabled() || r.cardless() {
 		return
 	}
 	now := time.Now().UnixMilli()
@@ -85,7 +92,7 @@ func (r *runner) pairInflight(pr *PlacedResult, jobID, node string, aliases []st
 // defer or a failed acceptance check is "failed", with the same reason text
 // the ledger records.
 func (r *runner) pairTerminal(jobID string, pr *PlacedResult) {
-	if r.pair == nil || pr.pairModel == "" || !r.pair.Enabled() {
+	if r.pair == nil || pr.pairModel == "" || !r.pair.Enabled() || r.cardless() {
 		return
 	}
 	state, errText := "completed", ""

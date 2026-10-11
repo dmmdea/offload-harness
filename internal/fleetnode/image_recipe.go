@@ -4,19 +4,27 @@ package fleetnode
 //
 // A delegator that overflows an image job to this node needs to know the node would render what its own lane
 // would have. /fleet/health therefore publishes what each of the node's ComfyUI image families IS (mediacap.Recipe:
-// the weight files with their sizes, the resolved sampling, the license a result is tagged with, and its digest),
-// and an image-gen dispatch may carry the digest it matched: the node recomputes the digest of the family the
-// payload names and refuses a dispatch whose digest is not that one, with 412. The digest is the whole contract; the
-// check below and the delegator's match read the same mediacap.Recipe.Digest, so they cannot disagree. That is also its
-// limit: the digest covers file names and byte sizes, not contents, so the 412 check cannot catch what the published
-// digest cannot (two same-named, same-size files with different bytes; mediacap/recipe.go says so).
+// the weight files with their sizes and content fingerprints, the resolved sampling, the license a result is tagged
+// with, and its digest), and an image-gen dispatch may carry the digest it matched: the node recomputes the digest of
+// the family the payload names and refuses a dispatch whose digest is not that one, with 412. The digest is the whole
+// contract; the check below and the delegator's match read the same mediacap.Recipe.Digest, so they cannot disagree.
+// The fingerprint (mediacap/fingerprint.go) is a sample of each file, so the check sees a file replaced by one of the
+// same name and size and does not see a change confined to the stretch between two sample blocks.
 //
-// Health stays cheap (server.go: only cached or cheap reads): the rows come from a memo of mediaRoutesTTL, the same
-// freshness a route verdict has. The admission check does not use the memo. It stats the three or four weight files of
-// the one family a dispatch names, once per dispatch, and a node whose files changed in size a second ago must not admit
-// a job on a recipe it no longer holds.
+// Health stays cheap (server.go: only cached or cheap reads) and NEVER waits for a hash: the rows come from a memo of
+// mediaRoutesTTL, the same freshness a route verdict has, built with the fingerprinter's Peek, which answers from its
+// cache and starts the read of a file it has not hashed in the background. A family with a file still being hashed is
+// published with that file "pending" and with NO digest: a digest of unhashed files would be one that two nodes in the
+// same state share, which is the match by size this exists to end. The memo is rebuilt as soon as a read settles
+// (Generation), so a pending answer does not outlive its hash by the minute. The admission check does not use the memo.
+// It stats the three or four weight files of the one family a dispatch names, once per dispatch, and WAITS for any
+// fingerprint it does not have (AwaitContext): a node whose files changed a second ago must not admit a job on a recipe it
+// no longer holds, and a dispatch is not health. The wait ends when the request's context does and, whatever the context,
+// after the fingerprinter's own bound (mediacap fingerprintAwaitMax); a file still unread then is named "pending" in the
+// refusal, so a stalled disk costs a 412 that the delegator answers by reading health again, not a handler that hangs.
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"strings"
@@ -25,9 +33,15 @@ import (
 	"github.com/dmmdea/offload-harness/internal/mediacap"
 )
 
+// recipeFingerprints is the cache the node's health and its 412 check read weight-file fingerprints through: the
+// process-wide one (a fingerprint belongs to the file, not to a server), a var so a test can hold or fail a read.
+var recipeFingerprints = mediacap.SharedFingerprints()
+
 // ImageRecipeHealth is one row of /fleet/health image_recipes: a binding a payload's `family` can select, and what it is.
 // Name is the family's request-facing name (the default binding's own family name, which may be empty on a node whose
-// default is the generic graph); Default marks the default binding.
+// default is the generic graph); Default marks the default binding. Digest is empty while any of the family's files has
+// no content fingerprint yet (their `fingerprint` says "pending" or "unreadable"): such a row names what it will be and
+// is not an identity.
 type ImageRecipeHealth struct {
 	Name    string `json:"name"`
 	Default bool   `json:"default"`
@@ -39,7 +53,7 @@ type ImageRecipeHealth struct {
 // name order (config.ImageFamilies' order). A binding is listed only when its recipe names a checkpoint: a binding that
 // leaves the file to the runner's own default has nothing to identify, and a node must not be matched on a name alone.
 // An sd.cpp binding has no recipe. Missing files are listed (with bytes -1) so a delegator can say which file a node
-// lacks; such a recipe never matches.
+// lacks; such a recipe never matches. It never waits for a hash (see the file header).
 func ImageRecipes(cfg config.Config) []ImageRecipeHealth {
 	var out []ImageRecipeHealth
 	for _, fi := range cfg.ImageFamilies() {
@@ -54,11 +68,15 @@ func ImageRecipes(cfg config.Config) []ImageRecipeHealth {
 				continue
 			}
 		}
-		r, ok := mediacap.ImageRecipe(eff, fi, mediacap.ModelRoots(eff.ComfyDir), nil)
+		r, ok := mediacap.ImageRecipeWith(eff, fi, mediacap.ModelRoots(eff.ComfyDir), nil, recipeFingerprints.Peek)
 		if !ok || !namesACheckpoint(r) {
 			continue
 		}
-		out = append(out, ImageRecipeHealth{Name: fi.Name, Default: fi.Default, Digest: r.Digest(), Recipe: r})
+		row := ImageRecipeHealth{Name: fi.Name, Default: fi.Default, Recipe: r}
+		if len(r.Unfingerprinted()) == 0 {
+			row.Digest = r.Digest()
+		}
+		out = append(out, row)
 	}
 	return out
 }
@@ -72,13 +90,16 @@ func namesACheckpoint(r mediacap.Recipe) bool {
 	return false
 }
 
-// imageRecipeRows is the memoised ImageRecipes of this server's config.
+// imageRecipeRows is the memoised ImageRecipes of this server's config. The memo is also dropped when a fingerprint
+// read has settled since it was built, so a row published pending turns into its digest on the next health read and not
+// a minute later. The generation is read BEFORE the rows are built: a read that settles during the build then shows as
+// a newer generation on the next call and the rows are built again.
 func (s *Server) imageRecipeRows() []ImageRecipeHealth {
 	s.recipeMu.Lock()
 	defer s.recipeMu.Unlock()
 	now := mediaClock()
-	if !s.recipeRead || now.Sub(s.recipeAt) >= mediaRoutesTTL {
-		s.recipeRows, s.recipeAt, s.recipeRead = ImageRecipes(s.opts.Cfg), now, true
+	if gen := recipeFingerprints.Generation(); !s.recipeRead || now.Sub(s.recipeAt) >= mediaRoutesTTL || gen != s.recipeGen {
+		s.recipeRows, s.recipeAt, s.recipeRead, s.recipeGen = ImageRecipes(s.opts.Cfg), now, true, gen
 	}
 	return s.recipeRows
 }
@@ -91,6 +112,10 @@ type recipeMismatchError struct {
 	family string
 	want   string
 	why    string
+	// cause is the word the refusal carries in its JSON body (mediacap.RecipeRefusalCauseKey): pending, unreadable or
+	// changed. A delegator reads it to tell a node that has only not finished reading its weight files, which is a wait,
+	// from one that is not what it published, which is a difference, without matching a sentence.
+	cause string
 }
 
 func (e *recipeMismatchError) Error() string {
@@ -102,6 +127,20 @@ func (e *recipeMismatchError) Error() string {
 		shortDigest(e.want), name, e.why)
 }
 
+// gapCause is the cause of a refusal for a recipe that has files with no content fingerprint: pending when every such file is
+// still being read (nothing is known to have changed, and a later read may settle it), unreadable as soon as one of them is
+// there and could not be read (or reads as a state this build does not publish), because the node will not be able to vouch for
+// the family when the others land. A file the node does not hold is not a gap here (Missing's, and its bytes are -1).
+func gapCause(r mediacap.Recipe) string {
+	cause := mediacap.RecipeRefusalPending
+	for _, f := range r.Files {
+		if f.Bytes >= 0 && !mediacap.IsFingerprint(f.Fingerprint) && f.Fingerprint != mediacap.FingerprintPending {
+			cause = mediacap.RecipeRefusalUnreadable
+		}
+	}
+	return cause
+}
+
 func shortDigest(d string) string {
 	if len(d) > 12 {
 		return d[:12] + "…"
@@ -110,15 +149,22 @@ func shortDigest(d string) string {
 }
 
 // checkRecipe admits an image-gen payload that named recipe_digest want for family only if this node's family digests
-// to it, computed now from the files on disk.
-func checkRecipe(cfg config.Config, family, want string) error {
+// to it, computed now from the files on disk. It waits for the fingerprints it needs for as long as ctx and the
+// fingerprinter's bound allow.
+func checkRecipe(ctx context.Context, cfg config.Config, family, want string) error {
 	eff, fi, err := cfg.ResolveImageFamily(family)
 	if err != nil {
-		return &recipeMismatchError{family: family, want: want, why: err.Error()}
+		return &recipeMismatchError{family: family, want: want, why: err.Error(), cause: mediacap.RecipeRefusalChanged}
 	}
-	rec, ok := mediacap.ImageRecipe(eff, fi, mediacap.ModelRoots(eff.ComfyDir), nil)
+	await := func(path string, size int64) string { return recipeFingerprints.AwaitContext(ctx, path, size) }
+	rec, ok := mediacap.ImageRecipeWith(eff, fi, mediacap.ModelRoots(eff.ComfyDir), nil, await)
 	if !ok {
-		return &recipeMismatchError{family: family, want: want, why: "that binding is not a ComfyUI one, which has no recipe to match"}
+		return &recipeMismatchError{family: family, want: want, why: "that binding is not a ComfyUI one, which has no recipe to match", cause: mediacap.RecipeRefusalChanged}
+	}
+	// A family with a file this node could not fingerprint is not an identity, whatever it would digest to. Whether it is a wait
+	// (the file is still being read) or not (it cannot be read) is the refusal's cause.
+	if gaps := rec.Unfingerprinted(); len(gaps) > 0 {
+		return &recipeMismatchError{family: family, want: want, why: "this node cannot fingerprint " + strings.Join(gaps, ", "), cause: gapCause(rec)}
 	}
 	if have := rec.Digest(); have != strings.TrimSpace(want) {
 		why := fmt.Sprintf("this node's family digests to %s", shortDigest(have))
@@ -126,7 +172,7 @@ func checkRecipe(cfg config.Config, family, want string) error {
 			sort.Strings(missing)
 			why += " and is missing " + strings.Join(missing, ", ")
 		}
-		return &recipeMismatchError{family: family, want: want, why: why}
+		return &recipeMismatchError{family: family, want: want, why: why, cause: mediacap.RecipeRefusalChanged}
 	}
 	return nil
 }

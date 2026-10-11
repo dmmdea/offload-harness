@@ -643,6 +643,7 @@ func (e *Emitter) SweepOrphans(ctx context.Context) int {
 	now := e.now()
 	selfPID, _ := e.selfIdentity()
 	sent := 0
+	var closed sweepCounts    // what the delivered frames were, for the log line
 	down := map[string]bool{} // endpoint keys that failed a post in this pass
 	for _, de := range entries {
 		if ctx.Err() != nil {
@@ -742,11 +743,48 @@ func (e *Emitter) SweepOrphans(ctx context.Context) int {
 		removeRetrying(path) // the marker BEFORE the lock: see RACING SWEEPERS
 		removeRetrying(lock)
 		sent++
+		switch {
+		case m.Pending:
+			closed.parked++
+		case isSeatCard(m.Info):
+			closed.seat++
+		default:
+			closed.orphans++
+		}
 	}
 	if sent > 0 {
-		log.Printf("pairworkloads: closed %d PAIR card(s) whose harness process exited before the job finished", sent)
+		log.Print(closed.line())
 	}
 	return sent
+}
+
+// sweepCounts is what one sweep's delivered frames were. The log line used to count them all as "harness process exited
+// before the job finished", which is true of the first kind only: a seat-watch stretch is closed COMPLETED when its
+// watcher dies (sweepFrame, C04: the seat and its callers did not die), and a parked frame is a verdict its producer
+// reached and could not post.
+type sweepCounts struct {
+	orphans int // a harness job whose process exited before it finished: closed failed
+	seat    int // a seat-watch stretch whose watcher exited: closed completed
+	parked  int // a terminal frame the producer built and could not deliver: sent as it is
+}
+
+// line is the sweep's log line. A sweep that closed orphans alone keeps the line operators grep for, word for word.
+func (c sweepCounts) line() string {
+	total := c.orphans + c.seat + c.parked
+	if c.seat == 0 && c.parked == 0 {
+		return fmt.Sprintf("pairworkloads: closed %d PAIR card(s) whose harness process exited before the job finished", total)
+	}
+	var parts []string
+	if c.orphans > 0 {
+		parts = append(parts, fmt.Sprintf("%d whose harness process exited before the job finished", c.orphans))
+	}
+	if c.seat > 0 {
+		parts = append(parts, fmt.Sprintf("%d seat-watch stretch(es) whose watcher exited (closed completed: the seat and its callers did not)", c.seat))
+	}
+	if c.parked > 0 {
+		parts = append(parts, fmt.Sprintf("%d terminal frame(s) their producer built and could not deliver", c.parked))
+	}
+	return fmt.Sprintf("pairworkloads: closed %d PAIR card(s): %s", total, strings.Join(parts, "; "))
 }
 
 // rejectedError is a close PAIR answered with an HTTP 400, 413 or 422: the frame itself is

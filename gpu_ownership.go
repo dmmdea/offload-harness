@@ -164,6 +164,10 @@ func ownerHoldArgs(opts gpulease.Options) []string {
 // has no parent to ask, and the session environment does not survive the hop).
 func runGPUOwnerFlags(args []string) error {
 	fs := flag.NewFlagSet("gpu owner-flags", flag.ExitOnError)
+	// Accepted and not read: `gpu --config <path> <verb>` hoists the global flag behind the verb (runGPU), and a flag set
+	// that did not define it refused the call with exit 2 (this was the one verb that did not). The line it prints
+	// comes from the process tree and the session environment, never from config.
+	fs.String("config", "", "config file path (accepted so the global --config works in front of every gpu verb; this verb reads no config)")
 	pid := fs.Int("pid", 0, "the process whose death means the owner is gone (default: this command's parent, the caller's shell or launcher)")
 	_ = fs.Parse(args)
 	p := *pid

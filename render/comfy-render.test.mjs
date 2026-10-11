@@ -5,13 +5,13 @@
 import { test } from "node:test";
 import assert from "node:assert";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildRenderGraph, parseRenderArgs, parseBoolFlag, UsageError, KNOWN_FAMILIES, BOOL_FLAGS, waitServer } from "./comfy-render.mjs";
 import * as renderMod from "./comfy-render.mjs";
 import { rgbaPrompt } from "./wf-qwen-image-21.mjs";
+import { scratchDir } from "./test-scratch.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SCRIPT = join(HERE, "comfy-render.mjs");
@@ -34,8 +34,8 @@ test("unknown --family is a UsageError that names it and the known set", () => {
   assert.throws(() => build(["o.png", "p", "--family", "flux"]), UsageError);
 });
 
-test("unknown --family exits 2 through the real script, before any ComfyUI work", () => {
-  const dir = mkdtempSync(join(tmpdir(), "comfy-render-"));
+test("unknown --family exits 2 through the real script, before any ComfyUI work", (t) => {
+  const dir = scratchDir(t, "comfy-render-");
   const r = spawnSync(process.execPath, [SCRIPT, join(dir, "o.png"), "a prompt", "--family", "sdxl-turbo",
     "--api", "http://127.0.0.1:9"], { encoding: "utf8", timeout: 30000 });
   assert.equal(r.status, 2, `exit ${r.status}; stderr: ${r.stderr}`);
@@ -56,8 +56,8 @@ test("the existing families still dispatch to their own builders", () => {
   assert.ok(classes(build(["o.png", "p", "--family", "hidream-o1", "--ckpt", "h.safetensors"]).graph).includes("EmptyHiDreamO1LatentImage"));
 });
 
-test("--graph bypasses the family check and posts the caller's workflow", () => {
-  const dir = mkdtempSync(join(tmpdir(), "comfy-render-"));
+test("--graph bypasses the family check and posts the caller's workflow", (t) => {
+  const dir = scratchDir(t, "comfy-render-");
   const f = join(dir, "wf.json");
   writeFileSync(f, JSON.stringify({ "1": { class_type: "X", inputs: {} } }));
   const { graph } = build(["o.png", "--graph", f, "--family", "whatever"]);
@@ -149,13 +149,13 @@ test("parseRenderArgs: no-lock/keep-comfy/no-lifecycle are booleans, trailing or
   assert.deepEqual(BOOL_FLAGS, ["no-lock", "keep-comfy", "no-lifecycle"]);
 });
 
-test("standalone (no --no-lifecycle): self-manages via withGpuSlot — refuses fast with no GPU lease, before any ComfyUI network call", () => {
+test("standalone (no --no-lifecycle): self-manages via withGpuSlot — refuses fast with no GPU lease, before any ComfyUI network call", (t) => {
   // Gap 4: comfy-render.mjs used to have NO lifecycle at all, so this exact invocation
   // (no --no-lifecycle) used to hang waiting on waitServer() against an address nothing
   // answers on. Now withGpuSlot's own "no lease, no --no-lock" refusal fires immediately
   // — proof the self-managed lifecycle is actually wired into main(), without needing a
   // real ComfyUI or a slow poll budget in this test.
-  const dir = mkdtempSync(join(tmpdir(), "comfy-render-"));
+  const dir = scratchDir(t, "comfy-render-");
   const env = { ...process.env };
   delete env.GPU_LEASE_DIR; delete env.GPU_LEASE_EPOCH; delete env.GPU_LEASE_CLASS;
   const r = spawnSync(process.execPath, [SCRIPT, join(dir, "o.png"), "a prompt", "--api", "http://127.0.0.1:9"],
@@ -164,7 +164,7 @@ test("standalone (no --no-lifecycle): self-manages via withGpuSlot — refuses f
   assert.match(r.stderr, /GPU lease missing/);
 });
 
-test("--no-lifecycle: skips withGpuSlot entirely — unset lease does not block it (falls through to waitServer instead)", () => {
+test("--no-lifecycle: skips withGpuSlot entirely — unset lease does not block it (falls through to waitServer instead)", (t) => {
   // The inverse proof: with --no-lifecycle, the SAME missing-lease condition must NOT
   // refuse (a batch child must never need its own lease — the parent already has one).
   // It instead reaches waitServer()'s poll loop against the same bad API, which has no
@@ -172,7 +172,7 @@ test("--no-lifecycle: skips withGpuSlot entirely — unset lease does not block 
   // (a short spawnSync timeout) rather than letting waitServer's own ~3min budget run;
   // a forced kill (signal set / ETIMEDOUT) after that short window is itself the proof
   // the process was still alive and polling, not refused-and-exited like the sibling test.
-  const dir = mkdtempSync(join(tmpdir(), "comfy-render-"));
+  const dir = scratchDir(t, "comfy-render-");
   const env = { ...process.env };
   delete env.GPU_LEASE_DIR; delete env.GPU_LEASE_EPOCH; delete env.GPU_LEASE_CLASS;
   const r = spawnSync(process.execPath,

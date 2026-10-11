@@ -103,7 +103,9 @@ Two details of the free step are easy to get wrong:
 
 - **It frees per model, not everything.** The always-loaded embedding and reranker models are
   small (a few hundred MiB each; the larger EmbeddingGemma-2 entry on the tiers that carry it, 1,196 to 1,536 MiB with its projector and 460 to 482 MiB text-only) and, on the reference box, pinned to the utility card, not the render card. An earlier unload-all implementation tore that memory stack down
-  on every generation job for no VRAM benefit; the keep-set now protects it.
+  on every generation job for no VRAM benefit; the keep-set now protects it. Under a lease on some cards it also leaves the
+  models positively placed on the other cards loaded (F15, by `layers` or by the serving config's device pin), so a render on one
+  card leaves the seats placed on the others; a model nothing places is unloaded.
 - **ComfyUI is only killed if the harness started it.** An already-running instance is left alone.
 
 Full rationale in [ADR 0009](../architecture/decisions/0009-zero-warm-gpu-lifecycle.md).
@@ -205,7 +207,9 @@ lists every write left in the package, and `deliver_test.go` runs the real ops a
 **Warm batch.** `generate-image --batch` takes a jobs file and runs N renders in one session. The
 only behavioral change is omitting ComfyUI's `--cache-none`, so the checkpoint loads once; teardown
 still happens exactly once, at the batch boundary. A failed render is recorded and the batch
-continues, one JSONL result line per job; the results file format did not change.
+continues, one JSONL result line per job; the render script's results file format did not change. The verb
+adds `--family`, `--route`, `--results`, `--resume` and `--jobs`, and sends the jobs through the fleet when this machine's
+lane is busy and a node renders the recipe: see "The image batch across the fleet" below.
 
 Exit codes of a `--batch` run (0.178.0 added the 4; until then a batch with failed jobs exited 0 and
 a caller had to grep the log for `RENDER FAILED`):
@@ -214,14 +218,14 @@ a caller had to grep the log for `RENDER FAILED`):
 |---|---|---|---|---|
 | `render/comfy-generate.mjs --batch` | every job rendered | the batch ran every job and at least one failed: the rows with `"ok":false` in the results file name them, and the last log line gives the counts | the batch could not run to the end: a setup error, an unusable ComfyUI, a full disk (the jobs not run get a `not run:` row), the GPU slot | usage, or no jobs |
 | `render/comfy-inpaint.mjs --batch` | every job rendered | the batch ran every job and at least one failed but not all | stopped: an unusable ComfyUI, a full disk, the consecutive-failure limit, or every job failing (its `_row: "aborted"` line, or the "systemic" error) | usage, or a job that would fail before rendering |
-| `local-offload generate-image --batch` | every job rendered, or the batch was deferred because a card was busy (`err_class: gpu_busy`) | the batch ran every job and at least one failed: the JSON keeps reporting per-job status (`failed`, `items[].ok`) and the stderr line gives the counts | the batch stopped (the runner's exit 1) or the command failed before any job (a bad jobs file, `--family` with `--batch`) | an unknown verb or a flag error |
+| `local-offload generate-image --batch` | every job has its picture (rendered now, or skipped by `--resume` because the file proved itself), or the warm batch was deferred because a card was busy (`err_class: gpu_busy`; the jobs are `queued`, so a 0 does not by itself say every picture is there: read the `verdict`s) | some job failed (the batch ran every job, or was deferred after a job had failed before any lane was asked): the JSON and the `--results` file keep reporting per-job status (`failed`, `items[].ok`, `verdict`) and the stderr line gives the counts | the batch stopped (the runner's exit 1), was interrupted (the jobs that had not ended are `queued`), a one-at-a-time job found no place within the queue's ceiling (`queued`), or the command failed before any job (a bad jobs file, an empty prompt, two different pictures for one `out`, an unknown family or route, an unwritable `--results`) | an unknown verb or a flag error |
 
 4 is not 3 on purpose: 3 is `comfy-render.mjs`'s own *server unusable* code for its parent, and
 `renderExitError` reads it as a verdict. `imagegen.BatchExitJobsFailed` is the Go copy of the runner's
 `BATCH_EXIT_JOBS_FAILED` (pinned to `render/batch-jobs.mjs` by a test): `GenerateBatch` treats 4 with a
 non-empty results file as a finished batch and reads the rows, so the Go door reports 35 good pictures
 out of 36 as a batch with one failed item, then ends with the same 4 itself. No other Go entry point
-runs a media batch (`RunImageBatch` is called by the CLI verb only).
+runs a media batch (`RunImageBatchAs`, and `RunImageBatch` which is it with no family, are called by the CLI verb only).
 
 Two failures stop the batch instead of being recorded and passed over, because every later job would
 fail the same way. A server that became unusable (the child exits 3): the failed job and every later
@@ -731,9 +735,9 @@ list only the families that are genuinely bound — never a phantom default row 
 label for a route this node does not serve. A dispatch naming no `family` on such a node still gets
 the plain "no image-gen route configured" defer (same as any unconfigured node), never a silent
 render of one family as if it were the default. A warm batch
-(`generate-image --batch`) always renders the default binding, so every batch item — and the batch
-payload's top level — carries that binding's `family` and, when declared, its `license`
-and `commercial_use`. `width`/`height` in a
+(`generate-image --batch [--family F]`) renders ONE binding, the default or the family named, so every
+batch item — and the batch payload's top level — carries that binding's `family` and, when declared, its
+`license` and `commercial_use`. `width`/`height` in a
 `generate_image` or `edit_image_generative` result are **measured** from the written file
 (`imagegen.OutputSize`), not echoed from the request.
 
@@ -751,7 +755,9 @@ render opaque. `images` (multi-reference) needs a 2.1 edit family and is
 capped at 10 images in all, target included; a 2511 `preset` on a 2.1 edit defers by name. The render
 runner closes the same gap one layer down: `comfy-render.mjs --family` is a closed set, and an
 unknown value exits 2 before any GPU work — it used to render the generic SDXL graph silently.
-`generate-image --batch` renders the default binding only; `--family` with `--batch` is refused.
+`generate-image --batch --family F` renders every job under that family (`RunImageBatchAs`: the family's checkpoint, card pin,
+timeout and license, and the lease asked for on the family's card); a family on stable-diffusion.cpp has no warm session and is refused
+by name, and `--transparent` with `--batch` is refused (an alpha channel is one render's).
 
 **`doctor` sees the whole family.** `media.routes` gains `generate_image:<name>` and
 `edit_image_generative:<name>`: CONFIGURED only when the family's script resolves AND every model file
@@ -1152,10 +1158,11 @@ is given:
 **Host RAM.** A generation call also declares the host RAM its weights will stream from (the UNet or checkpoint and the
 text encoder of its binding, for a video call the family's binding with the request's own `transformer` put over it, counted
 in full when together they do not fit the card it runs on; 0 when they fit; the media
-class default for an arbitrary graph (`run-graph`, or a helper run with `--graph`), sd.cpp and the iGPU engines: the largest
-ComfyUI family the box binds, an upper bound that is not their own size, and **0 on a box that binds no ComfyUI family, so an
-sd.cpp-only node declares nothing**, its lanes are admitted whatever the host reads and the weights `--offload-to-cpu` parks in
-RAM are outside the guard there; nothing for upscale and voice) and the grant admits it
+class default for an arbitrary graph (`run-graph`, or a helper run with `--graph`) and the audio.cpp lanes: the largest
+ComfyUI family the box binds, an upper bound that is not their own size, and 0 on a box that binds none; **the sd.cpp lanes
+declare the larger of that and the weights they park themselves** (the bound files in full when the lane's extra args carry
+`--offload-to-cpu`, an estimate from their sizes until three measured runs raise it, F60), so an sd.cpp-only node's spill is inside
+the guard; nothing for upscale and voice) and the grant admits it
 against committed memory plus what the leases already granted have yet to load, under physical RAM less
 `gpu_host_ram_headroom_gib` (default 8), as a brake on declared loads (the declaration is an estimate until three measured runs
 raise it, and an admitted lane can still read OVER): see "Host RAM" in [gpu-lease.md](gpu-lease.md). Two Krea 2 bf16 lanes, each
@@ -1199,10 +1206,17 @@ uuid, never an index: `COMFY_CUDA_DEVICE` is blank) and `COMFY_API` (the instanc
 port, 8189, plus the card's nvidia-smi index, so 8189, 8190 and 8191 on the 3-card box; `COMFY_PORT_BASE`
 moves the range). The port is stable per card because the render layer refuses to reuse an instance whose
 launch marker records another port. And `GPU_LEASE_UNLOAD_MODELS`: the models the runner's unload may
-take, which is the llama-swap roster minus the memory stack minus the seats pinned to cards the lease
-does not hold (`gpualloc.UnloadModels`, the rule `gpu reserve --devices` uses). Without it the runner
-unloads every model off the memory stack and a render on one card empties the seats on the others
-(register C-86). The post-run `/free` goes to the endpoint the runner was given.
+take, which is every model of the roster except the memory stack and the models positively placed on
+another card (`gpualloc.UnloadModels`, the rule `gpu reserve --devices` uses). A model is placed by `layers`,
+else by the device pin of its entry in the serving config (`serving_config_path`); a seat placed on another
+card stays, and a model nothing places goes (a `proxy:` seat with no `layers` entry is unloaded under any
+card lease). A card call gets the variable whenever the roster was read: with no llama-swap endpoint it is `-`, and with
+the roster unreadable it gets none, because nothing then says what is resident and a list built from the config alone is
+never complete: the render lane keeps its own rule (every model off the memory stack) and the log says why. An unset variable
+makes the runner unload every model off the memory stack, so a render on one card empties the seats placed on the others
+(register C-86, F15): the price of an unreadable roster, taken because it is the safe direction. A runner that finds a lease
+on cards with no list unloads every model off the memory stack and says that it had none (`render/gpu-lock.mjs`). The post-run
+`/free` goes to the endpoint the runner was given.
 
 **In-process slots.** `mediaSlot`, a single slot for the whole process, is now a set with one slot per
 card: two jobs on different cards hold theirs at once, a job that holds the whole node conflicts with every
@@ -1314,7 +1328,8 @@ reason a media call is refused. What the call does instead depends on where the 
 
 The unload list a lease may take (`GPU_LEASE_UNLOAD_MODELS`) is scoped from the table the call already holds, not from a
 third read after the grant: which seat sits on which card needs the card list, not a fresh reading, and a read that ran
-out used to widen the list to every seat, so a render on one card emptied the seats on the others (register C-86).
+out used to widen the list to every seat, so a render on one card emptied the seats on the others (register C-86). A model
+placed on another card is no longer on the list (F15; by `layers` or by its serving config pin), and one nothing places still is.
 `TestAnAllocationReadTimeoutQueuesTheCallInsteadOfDeferringIt` and its neighbours in
 `internal/pipeline/mediaadmit_cardtable_test.go` pin each row; the same file pins that a degraded call places from the
 newest table it read (not the admission one), and that a caller who has gone while the read hangs is not placed at all and
@@ -1585,6 +1600,16 @@ so a broken binding surfaces even when llama-swap is down.
 semantics, and output parsing. Go-side coverage sits in `internal/pipeline/` for the media dispatch
 and defer paths, and `internal/mediacap/` for the derived verdicts.
 
+A run of the suite leaves nothing in the OS temp dir. A test that needs a folder takes it from
+`scratchDir(t, prefix)` (`render/test-scratch.mjs`), which removes it when the test ends, passed or failed;
+`render/test-scratch.test.mjs` fails on a new bare `mkdtemp` in a render test or in its support modules (the few
+that remain are listed there with the reason each is removed on every path) and when the Windows stub launcher of
+`igpu-stub.mjs` leaves anything behind. The runners' own scratch is held to the same rule: `makeTempDir`
+(`igpu-engine.mjs`) removes its folder on every exit path, signals included, and sweeps what a killed runner
+left; the compose work dir and the provisioning scratch of `manifest-satisfy.mjs` are removed when their step
+ends, passed or failed (`igpu-lifecycle.test.mjs`, `compose-hyperframes.test.mjs` and
+`manifest-satisfy.test.mjs` pin them).
+
 `render/compose-hyperframes.test.mjs` also pins the shipped compose templates: the offline, deterministic and
 declared-variable contract, the ported templates' provenance, the retained licence texts by hash, the residue gate
 (no creator names, brand palette, placeholder copy or CDN host), the no-scale-above-1 guard for the ports, the
@@ -1653,8 +1678,9 @@ recorded as known offenders with their reason rather than silently skipped — a
 - [`internal/config/families.go`](../../internal/config/families.go) — family overlay validation and
   resolution, license notes (ADR 0058)
 - [`internal/mediacap/recipe.go`](../../internal/mediacap/recipe.go) — what an image family is: the resolved recipe,
-  its digest and its diff (ADR 0082); [`internal/fleetnode/image_recipe.go`](../../internal/fleetnode/image_recipe.go) —
-  the node's `image_recipes` rows and the 412 check
+  its digest and its diff (ADR 0082); [`internal/mediacap/fingerprint.go`](../../internal/mediacap/fingerprint.go) — the
+  sampled content fingerprint of a weight file and its cache (Amendment 2);
+  [`internal/fleetnode/image_recipe.go`](../../internal/fleetnode/image_recipe.go) — the node's `image_recipes` rows and the 412 check
 - [`internal/pipeline/medialane.go`](../../internal/pipeline/medialane.go) — the read-only lane question;
   [`internal/mediaremote/place.go`](../../internal/mediaremote/place.go) and
   [`identity.go`](../../internal/mediaremote/identity.go) — overflow placement and the strict match;
@@ -1664,8 +1690,10 @@ recorded as known offenders with their reason rather than silently skipped — a
   [`internal/core/place.go`](../../internal/core/place.go) — the place a ticket keeps in the machine's own line
 - [`internal/mediacap/graphfiles.go`](../../internal/mediacap/graphfiles.go) — the files a graph names and which of them a tree
   lacks; [`internal/fleetnode/graph_files.go`](../../internal/fleetnode/graph_files.go) — the node's 503 at the door;
-  [`internal/pipeline/medialane_graph.go`](../../internal/pipeline/medialane_graph.go) — the lane question for a whole-node graph;
-  [`internal/mediaremote/graph.go`](../../internal/mediaremote/graph.go) — the one-card rule, `min_vram_gb` and its default table
+  [`internal/pipeline/medialane_graph.go`](../../internal/pipeline/medialane_graph.go) — the lane question for a whole-node graph and the
+  place such a graph keeps in the line while it is a ticket;
+  [`internal/mediaremote/graph.go`](../../internal/mediaremote/graph.go) — the one-card rule, `min_vram_gb` and its default table, and
+  what keeps a graph that reads input files on this machine
 - [`render/compose-hyperframes.mjs`](../../render/compose-hyperframes.mjs) — the composition runner:
   env allowlist, subcommand allowlist, `--json` everywhere, lint → check → render → ffprobe gate,
   typed `COMPOSE-FAIL` classes
@@ -1995,7 +2023,8 @@ call that names no card) and says busy only when something that makes the grant 
 place in line, epoch, waiter, ledger row, PAIR card or ComfyUI instance) and removes nothing: it reads the lease directory through
 `gpulease.Manager.ReadOnly`, a view that skips the records the line's readers prune as housekeeping (an expired place in line, a
 waiter that stopped polling) and leaves them on disk (`TestMediaLaneFreeWritesNothing`, with a state for each). It says free when it cannot say: a lease the process
-inherited (`gpu reserve -- local-offload ...`), a card table that does not read in 4 s (chosen, not measured), a task or a binding
+inherited (`gpu reserve -- local-offload ...`), a card table that does not read in 4 s, nor in the one 10 s retry that follows a read that ran out of time (both chosen, not measured; the
+retry is the admission's rule at a shorter bound, and a table still unread leaves a `media lane probe` line in the log, once a minute per probe and cause while the fault lasts, F55), a task or a binding
 it does not model (sd.cpp, an unknown family). A call that resumes a place
 in line (a ticket's local run) counts only the callers that arrived before that place, on every plan, because the lease queue serves
 a resumed place by arrival time (`TestMediaLaneFreeOrdersByArrivalForACallThatResumesItsPlace`); a new arrival counts every other
@@ -2003,12 +2032,25 @@ caller in line. A differential test (`TestMediaLaneFreeNeverRefusesAGrant`) driv
 admission over a table of lane states and fails if a lane the grant would serve is called busy.
 
 **What a family is.** A name says nothing about which weights sit under it. A family's identity is its **recipe**
-(`mediacap.ImageRecipe`): the checkpoint, text encoder, VAE and LoRA it loads, each with its byte size on the node's disk, and
+(`mediacap.ImageRecipeWith`): the checkpoint, text encoder, VAE and LoRA it loads, each with its byte size on the node's disk and a content fingerprint, and
 the sampling it renders with (steps, cfg, sampler, scheduler, schedule, shift, LoRA strength, preset), plus the license the result
-is tagged with, digested with sha256 over canonical JSON. The identity is **name plus size**, not content: two same-named files
-of the same size whose bytes differ (a corrupted full-length copy, a same-named re-release with the same tensor layout, a file
-updated in place on one node only) digest alike, and the node's own 412 check recomputes the same size-based digest, so it
-cannot catch them either; a content fingerprint per weight file is the named upgrade and is not built. The digest is over **resolved** values: a key the binding leaves unset
+is tagged with, digested with sha256 over canonical JSON. The identity is **name, size and content** (F59, ADR 0082 Amendment 2).
+The first cut (0.179.0) had name and size only, so two same-named files of one size with different bytes (a same-named re-release
+with the same tensor layout, a file updated in place on one node only) digested alike and the node's 412 check could not catch
+them. Each present weight file now carries a **fingerprint**: a sha256 of a scheme tag, the file's size and a SAMPLE of its bytes,
+64 blocks of 1 MiB at evenly spaced offsets (the first at the start of the file, the last ending at its end; a file of 64 MiB or
+less is hashed whole). The block size and count are chosen. It is a sample and not a full hash for a measured reason (time) and a judged one (the window): on one
+workstation, page cache not controlled (read these as warm-cache figures), it read 0.17 to 0.87 s per file for files of 0.36 to 42 GB, while a whole-file sha256 ran at 389 MB/s on a core (about
+50 s for a 20 GB checkpoint, about 110 s for 42 GB, extrapolated), minutes per node after every release or model change with no
+match possible meanwhile. That the window is too costly is a judgement; RAM was not the reason (a streaming hash holds one 1 MiB buffer). It separates two real builds of one 42 GB model that share a size (58 of 64 sample blocks differed). It
+does **not** see a change confined to the stretch between two sampled blocks (the blocks are evenly spaced, so that stretch is
+about a sixty-third of the file: roughly 0.3 GB of a 20 GB checkpoint and 0.65 GB of a 42 GB one; a layer-wise merge or a baked-in
+VAE can sit inside it, and a pinned test shows a rewritten stretch leaving the fingerprint unchanged), nor a file replaced by one of
+the same size and the same modification time while the process that cached the old reading runs; compare whole-file hashes after a
+merge you swap in or a copy you doubt; the cache (path, size, modification time) is in memory and a
+restart reads again (a one-shot CLI call is a fresh process, so on a busy lane it reads its family's samples on every call, before
+it makes its ticket: an estimate of one to three seconds from the measured rates; on a free lane it reads nothing, because the
+lane is asked first). `RecipeVersion` is 2, so a digest of 0.179.0 never equals one of this release. The digest is over **resolved** values: a key the binding leaves unset
 takes the builder's default (Qwen-Image-2.1: 40 steps, cfg 1, euler, scheduler `simple`, schedule `official`), so a node that
 writes the default out and a node that leaves it unset are one recipe. That table is pinned by a test to the constants in
 `render/wf-qwen-image-21.mjs` and `render/comfy-render.mjs`; any other graph family leaves unset keys unset, which is stricter.
@@ -2017,11 +2059,21 @@ Node-local keys (`comfy_*`, timeouts, scripts, `imagegen_reserve_vram`, the pool
 binding has no recipe; a ComfyUI recipe never matches one.
 
 **What a node publishes.** `/fleet/health` gains `image_recipes[]` (one row per ComfyUI binding that names a checkpoint: `name`,
-`default`, `digest`, `files[{role,name,bytes}]`, the resolved sampling, `license`, `commercial_use`, and `explicit`, the sampling
-keys the binding actually set) and `refine_honoured`. The rows come from a memo of 60 s (the route cache's), so health stays
-cheap; `bytes` is `-1` for a file the node lacks, which never matches. An image-gen dispatch may carry `recipe_digest`: the node
-recomputes the digest of the family the payload names from the files on disk **now** and refuses a mismatch with **412**, creating
-no job.
+`default`, `digest`, `files[{role,name,bytes,fingerprint}]`, the resolved sampling, `license`, `commercial_use`, and `explicit`, the
+sampling keys the binding actually set) and `refine_honoured`. The rows come from a memo of 60 s (the route cache's), so health stays
+cheap; `bytes` is `-1` for a file the node lacks, which never matches. **Health never waits for a hash.** It reads the fingerprint
+cache; a file not hashed yet starts one background read (one file at a time in this process) and is published `"fingerprint":"pending"` (`"unreadable"`
+when it cannot be read, retried after 30 s), and **a row with any such file has an empty `digest`**, because two nodes that were both
+pending would otherwise share a digest of unhashed files. The memo is rebuilt as soon as a read settles, so a pending row becomes its
+digest on the next health read. An image-gen dispatch may carry `recipe_digest`: the node recomputes the digest of the family the
+payload names from the files on disk **now** (waiting for each fingerprint it does not have, because a dispatch is not health: for 20 s at most per file or until the request is gone, and a file still unread is named `pending`) and refuses a mismatch, or a file it cannot
+fingerprint, with **412**, creating no job. The refusal's JSON body names the `cause` beside `error`: `pending` (every file it lacks
+a fingerprint for is still being read: it cannot say yet whether the family changed), `unreadable` (a file is there and cannot be read) or `changed`
+(the family no longer digests to the digest sent, or the node no longer serves it); the delegator reads health again, and reads the
+cause to decide how long to leave the node alone (below). A read that does not finish in 60 s is given up on:
+that file reads `"unreadable"`, the single reader serves the others, and the harness logs it once; until then it holds the reader and
+the other files stay `pending`. The "send family=X to use its Y" hint reads this machine's other families from the cache without
+waiting, and a call with no fleet overflow because of a file this machine could not fingerprint logs which file and why.
 
 **Which node.** A node is a candidate when it serves `image-gen`; holds a family whose digest equals this machine's (strict,
 no substitution); runs this same release (`harness_version`: the graph builders ship with it); carries refine when the call sent
@@ -2049,10 +2101,15 @@ back is left alone for 60 s and then 300 s per consecutive bounce (only a call i
 not): a node that reads idle but whose own grant refuses every job would otherwise park each call for its whole `gpu_wait_ms`.
 Chosen constants, not measurements (`TestABounceIsRememberedAndTheNodeComesBackAtTheNextStep`,
 `TestARetryAfterHoldsTheNodeAndReadsAsRefused`, `TestARefusedDialMovesOnAndBacksTheNodeOff`, `TestABouncedAttemptGoesBackToWaitingAndTheNextScanTriesTheNextNode`).
-A node that answers 503 or 429 with no `Retry-After` is left alone for the first step (5 s; the row's cause calls an image's node
-full, and a graph's `it answered 503 to the last dispatch at its door`, because a graph's 503 is also a missing file); one that refuses
-with another status is left alone like a bounce. The memory is shared by the tickets and the graph path: a graph refused at a node's
-door hides that node from an image ticket's scan for those seconds, and the reverse. The memory is per process (the placer is a package variable): the MCP server keeps it across the calls
+A node that answers 503 or 429 with no `Retry-After` is left alone for the first step (5 s; a graph's 503 that carries no refusal word is
+the node's own state and its row's cause reads `it answered 503 to the last dispatch at its door`, not "full"; a graph's 503 for a file the
+node lacks carries the word `not_capable`, is that ticket's own `not-capable` row and pauses nothing: Graphs on the fleet, below); one that
+refuses with another status is left alone like a bounce. A 412 is read by its `cause`: `pending` (the node has not finished reading its
+weight files, so it cannot say yet whether they changed) leaves the node alone for a minute, the first bounce step (chosen), and is **not**
+counted as a bounce, so a run of them never reaches the five-minute step and a later `changed` still starts at a minute; `unreadable`,
+`changed` and a 412 that names no cause this build knows are bounced like any other refusal, and the cluster row says which it was (for the
+last, that the node did not say why). The memory is shared by every ticket, an image's and a graph's: a node paused for one is paused for
+the others. The memory is per process (the placer is a package variable): the MCP server keeps it across the calls
 of its session, and a one-shot CLI call (`generate-image` and the other verbs) starts with none, though its ticket keeps it across
 its own scans, so it pays a bounced node's `gpu_wait_ms` once.
 
@@ -2074,8 +2131,8 @@ the node in that state. A node absent from `delegate_remotes` is not named: noth
 
 **What does not overflow.** A call under a lease its process inherited, a call on a box with no `delegate_remotes`, and anything but an
 image job or a whole-node graph ([Graphs on the fleet](#graphs-on-the-fleet-adr-0082-amendment-1) below): video, animation and
-audio carry no per-family identity yet. An image call that carries a `waiter_token` is not exempt any more: it joins the ticket
-queue and brings its place. A graph that carries a `waiter_token` resumes a place in the local line and keeps it, and is never moved.
+audio carry no per-family identity yet. A call that carries a `waiter_token` is not exempt any more: an image call or a graph joins
+the ticket queue and brings its place (ADR 0083, and Amendment 1 for the graph).
 
 **Named limits of overflow.** Every remote job pays ComfyUI's cold start (zero-warm). The same recipe and seed on a different GPU
 architecture is the same composition, not bit-identical pixels. A mis-predicted placement costs one bounce per node per pause: up
@@ -2085,10 +2142,19 @@ locally from when it came back, not from when it arrived).
 
 **Reading a node's recipes** (the first live check, before relying on a match): `curl -s http://<node>:18811/fleet/health` and
 read `image_recipes` on the target and, on a machine that also runs `fleet-serve`, on the delegator's own node: the digest of the
-family you will name there is the one the target's row must equal. Neither `offload_status` nor `cluster[]` shows a local digest
+family you will name there is the one the target's row must equal. A row whose files say `pending` and whose `digest` is empty is
+a node that has not finished reading them: read it again in a few seconds (a row that stays `pending` for minutes, or says
+`unreadable`, has a disk problem and the harness log has the line). **Every node must run the same release for digests to
+match** (the digest is version 2 and a recipe is compared only between the same release), so read the three live matches of
+0.179.0 again only after every node of them runs this one. A pair that does not match once both publish digests is a finding about
+the files (other bytes under one name), not a defect to fix in the matcher: the cluster answer names the file and prints the first
+twelve hex digits of each fingerprint. Neither `offload_status` nor `cluster[]` shows a local digest
 (`cluster[]` names the keys that differ, not the digest); a delegator that does not serve has no surface that prints its own.
 
 ## The ticket queue: a busy image call waits for the first matching lane that frees anywhere (ADR 0083)
+
+(A busy whole-node **graph** is a ticket too, with its own identity and its own rules for who may take it: see [Graphs on the
+fleet](#graphs-on-the-fleet-adr-0082-amendment-1). Everything below that does not say "image" holds for both.)
 
 Overflow sends a busy call to an idle node. When **every** lane is busy the call used to wait in one place and, if it was an MCP
 call, come back as a queued answer the caller was told to re-send. A call whose lane is not free is now a **ticket**: the harness
@@ -2096,12 +2162,15 @@ holds the job and starts it on the first matching lane that frees, here or on a 
 why, and no caller loop. A free lane runs the call here as it always did; a box with no `delegate_remotes` asks nothing; `route
 local` and `route remote` are unchanged.
 
-**The ticket.** One file per ticket, `<state root>/media-queue/mq-<id>.json`, written atomically, readable by every process of the
-machine (`internal/mediaremote/ticket.go`). That root is the one the GPU lease uses (`state_dir`, else `LOCAL_OFFLOAD_STATE_DIR`, else `%ProgramData%\local-offload` on Windows or `/var/lib/local-offload` elsewhere; no config key is needed), so a config that sets no `state_dir` has
+**The ticket.** One file per ticket, `<state root>/media-queue/mq-<id>.json`, written atomically and owner-only (0600 on POSIX, in a
+directory made 0700 where the queue creates it; on Windows the ACL of the state root decides), so readable by every process of the
+same user (`internal/mediaremote/ticket.go`, `queuefs.go`). That root is the one the GPU lease uses (`state_dir`, else `LOCAL_OFFLOAD_STATE_DIR`, else `%ProgramData%\local-offload` on Windows or `/var/lib/local-offload` elsewhere; no config key is needed), so a config that sets no `state_dir` has
 the queue, and the tickets, the node claims and the lease's place tokens of a machine share one root
-(`TestTicketQueueNeedsNoStateDirKey`, `TestTicketStoreAndLeaseShareOneStateRoot`). `gpu_lock_path` moves only the lease directory. It holds the owner (pid and start time) and its beat, the request's key, the arrival
-time, the seed, the place in the local line, the state, the node and the node's job id once there is one, the nodes whose recipe
-matched at the last scan, and the last answer; the request body stays in the owning process, so the file keeps no prompt. States:
+(`TestTicketQueueNeedsNoStateDirKey`, `TestTicketStoreAndLeaseShareOneStateRoot`, `TestABusyGraphIsATicketOnAMachineWithNoStateDirKey`). `gpu_lock_path` moves only the lease directory. It holds the owner (pid and start time) and its beat, the request's key, the
+arrival time, the seed, the place in the local line, the state, the node and the node's job id once there is one, the nodes whose recipe
+matched at the last scan, and the last answer; the request body stays in the owning process, so the file keeps no prompt (a graph's
+body is the one the store keeps, beside the file, below; and a finished ticket keeps the call's result, which carries an image's
+refined prompt, so every file of the queue is owner-only). States:
 `waiting`, `local` (the local run is in flight), `placing` (a node is claimed and the job is being sent), `placed` (the node
 accepted it), `fetching`, `done`, `failed`.
 
@@ -2123,7 +2192,7 @@ MCP runner, wraps the lease manager's place-keeping tokens and adds no admission
 ticket's arrival time on the cards the real admission would queue the call on (the pin, or the card the allocator would pick),
 touched on its own rhythm (a place holds its cards for 30 s after its last touch; a keeper touches every waiting ticket's place every
 scan interval, ~10 s, without waiting for the scan, because a scan visits its tickets one after another and each visit asks one lane
-question of up to 4 s, so a place touched only at its ticket's turn would lapse once enough tickets wait:
+question of up to 14 s (the card table's 4 s read and, when that ran out, its one 10 s retry), so a place touched only at its ticket's turn would lapse once enough tickets wait:
 `TestAPlaceIsTouchedWhileASlowScanIsRunning`), left again with the SAME arrival time if it lapsed, let go when the ticket ends, and spent by the final local run through the `waiter_token` path every
 resumed call takes. A caller that arrives after the ticket queues behind it. A host that does not lease cards keeps no places: the
 ticket waits without local seniority and its answer says so. The lane question for a call that resumes a place is ordered by arrival
@@ -2140,19 +2209,19 @@ once, or that loses the race to another job, comes back with nothing run and the
 consecutive refusal (the node steps; a reading of busy resets them) and the fleet is looked at meanwhile, so a lane that reads free
 and refuses at once (`gpu_wait_ms` 0, or a younger place on the card that a call without a wait cannot pass) is not asked in a loop,
 each run writing the pipeline's own deferred row (`TestALostRaceOnTheLocalLaneIsNotARetryLoopAndTheFleetIsTriedMeanwhile`). A lane the
-pipeline TRIED to read and could not (the card table past its 4 s bound, the lease directory not opening: `core.LaneVerdict.Unjudged`)
+pipeline TRIED to read and could not (the card table past its 4 s bound and its 10 s retry, the lease directory not opening: `core.LaneVerdict.Unjudged`)
 is not a free lane: the fleet is looked at in the same scan, and the run here is the answer only when no node can take the call
 (`TestAnUnreadLaneStillLooksAtTheFleet`, `TestAnUnreadLaneWithNoNodeRunsHere`); a call the prober does not model at all (another task, a
 binding without a ComfyUI lane, an inherited lease) runs here at once;
 (3) otherwise asks the fleet with ADR 0082's own filter and ranking (`candidatesFor`), minus the nodes a job of the machine has a
-claim on (a ticket's, or a whole-node graph call's) and the nodes an **older** waiting ticket of the machine matches (an older ticket not yet scanned is first in line for every
+claim on (an image ticket's or a graph ticket's) and the nodes an **older** waiting ticket of the machine matches (an older ticket not yet scanned is first in line for every
 node: `TestTicketOldestFirstPerNode`), and sends the first node left the job. **Late binding**: nothing is sent to a node until a
 lane is free there, so no job sits parked on a node that frees later than another (`TestLateBindingStartsOnFirstFreedLane`). One node
 is tried per scan; a node that refuses or bounces the job is left alone (5 s for a full node that names no `Retry-After`, 60 s
 and then 300 s for a bounce) and the ticket tries the next at its next scan. A ticket never gives up on a lane; it ends after 8 h
 without one. A freed lane is noticed within one scan interval (at most 12 s) plus the time the previous scan took, since a scan visits
-its tickets one after another and each costs one lane question: that is N reads per interval for N waiting tickets, each bounded
-by 4 s and a few hundred milliseconds when the table reads.
+its tickets one after another and each costs one lane question: that is N reads per interval for N waiting tickets, each a few hundred
+milliseconds when the table reads and bounded by 14 s when it does not (the 4 s read and its one 10 s retry).
 
 **A node a job of this machine has a claim on is in use for every scanner on the machine.** Reading the tickets and then sending would
 leave the window in which two processes both read a node idle and both send it a job. A claim file per node (`use-<hash>.json`) is written
@@ -2167,26 +2236,34 @@ contender lock a new file while an earlier holder still has the old. A cancel th
 ticket before anything is sent: the claim is let go and nothing reaches the node (`TestACancelDuringTheClaimSendsNothingAndFinishesOnce`). A claim is
 live while its ticket has a job in flight on that node and its owner is alive, or died less than 2 minutes ago (chosen: the job it
 sent keeps running on the node, which shows its lease only once the job is admitted; after the grace the node's own health speaks
-for it, `TestClaimNodeIsExclusiveAndLetsGoOfTheDead`). **A whole-node graph call takes the same claim, under the same lock, before it
-sends** (`claimGraph`): the record is marked `kind: graph`, names the call (`gr-...`), has no ticket file behind it and no scanner to
-beat for it, and is live while its process is (and younger than the longest call budget plus an hour) and, when the process is gone, only for the first
-2 minutes after the claim was taken, counted from the claim and not from the death, since the call writes no beat: that is the window in
-which the job may be on the node before its lease shows, and after it the node's own health speaks for it
-(`TestAGraphClaimHoldsWhileItsOwnerLivesAndForTheGraceAfter`); the call lets the node go when its job does.
-So a ticket is never sent a node an overflowing graph is running on, such a graph is never sent a node a ticket is running on, and two
-such graph calls of two processes never stack (`TestATicketNeverSendsANodeAGraphHasAJobOn`, `TestAGraphAndATicketNeverHoldOneNodeTogether`,
-`TestTwoProcessesNeverStackTwoGraphsOnOneNode`); a row for such a node reads `a job of this machine is running there (graph call,
-since ...)`. A call forced to a node (`route` remote, or `auto` on a machine with no lane for it, image or graph) goes through
-`callWith`, takes no claim and reads none, as before this release: the node's own grant is what stands between it and a ticket's job. Every machine has the claim directory: only one whose lease root is refused (a cloud-synced folder) keeps no queue, says so
-once in its log, and there only the in-process hold stands between two graph calls of one process, and two processes can still stack
-two graphs (`TestARefusedStateRootKeepsNoQueueAndSaysSo`).
+for it, `TestClaimNodeIsExclusiveAndLetsGoOfTheDead`). **A whole-node graph is a ticket and takes the same claim, under the same lock, before it
+sends**, so an image ticket is never sent a node a graph ticket is running on, a graph ticket is never sent a node an image ticket is
+running on, and two graph tickets of two processes never stack (`TestAnImageTicketNeverSendsANodeAGraphTicketHasAJobOn`,
+`TestAGraphTicketLeavesANodeAnotherTicketHasAJobOn`, `TestTwoProcessesNeverStackTwoGraphsOnOneNode`,
+`TestAPlacedGraphMarksItsNodeInUseForTheOtherProcess`); a row for such a node reads `a job of this machine is running there (ticket
+mq-..., since ...)`. **A claim of an older release.** A 0.180.0 process took this claim for its one-shot graph call, which had no
+ticket: the record is marked `kind: graph`, names the call (`gr-...`), has no ticket file behind it and no scanner to beat for it, and
+is live while its process is (and younger than the longest call budget plus an hour) and, when the process is gone, only for the first
+2 minutes after the claim was taken, counted from the claim and not from the death, since the call wrote no beat: that is the window in
+which the job may be on the node before its lease shows, and after it the node's own health speaks for it. This release writes none
+and still reads and honours it, because the processes of one machine are not all restarted at a deploy (an MCP server keeps its
+process for days) and a scanner that did not honour it would send the node a second job
+(`TestAnOlderReleasesGraphClaimHoldsWhileItsOwnerLivesAndForTheGraceAfter`, `TestATicketNeverSendsANodeAnOlderReleasesGraphCallHasAJobOn`);
+a row for such a node reads `a job of this machine is running there (graph call, since ...)`. A call forced to a node (`route` remote,
+or `auto` on a machine with no lane for it, image or graph) goes through `callWith`, takes no claim and reads none, as before this
+release: the node's own grant is what stands between it and a ticket's job. Every machine has the claim directory: only one whose lease
+root is refused (a cloud-synced folder) keeps no queue, says so once in its log, and there nothing is a ticket: `auto` places neither an
+image nor a graph on the fleet and the call waits in the machine's own line (`TestARefusedStateRootKeepsNoQueueAndSaysSo`).
 
 **Owners die.** An owner is dead when its process is gone or it has not written its beat for 10 minutes (chosen). A `waiting` ticket
 of a dead owner, and a `local` one (its render died with its process), are swept by the next scan or call of any process and their
 places let go (`TestWaitingTicketOfDeadOwnerIsSwept`); the identical call that finds one makes a new ticket that keeps its arrival
 time (`TestDeadOwnerLocalTicketIsSweptAndRerendered`). A `placed` or `fetching` ticket stays for 6 hours (chosen) and is **adopted by
 the next identical call**: the new owner polls the recorded node job and fetches its outputs and never sends the request again, so
-the job renders once; the adopted call writes its one ledger row and opens no card (`TestDeadOwnerPlacedTicketIsAdopted`). A `placing`
+the job renders once; the adopted call writes its one ledger row and opens no card (`TestDeadOwnerPlacedTicketIsAdopted`), and that row
+names the node and the job like any remote call's (`node`, `node_id`, `fleet_job_id`; the adopter never dispatches, so its handle is told the
+ticket's recorded node and job, `core.NameNode`) because the placement note's `; ran on <node>` tail is cut by the ledger's 120-byte cap
+whenever the lane sentence before it is long (`TestAnAdoptedTicketsRowNamesTheNodeItRanOn`). A `placing`
 ticket (the owner ended while the job was being sent) is asked about at the node once: a node that denies the job was never given it, and
 the ticket goes back in line with its arrival (`TestADeadOwnersPlacingTicketThatWasNeverSentGoesBackInLine`); one with no job id (a file
 of an older build) is not polled, and the answer says the job may be on the node (`TestAPlacingTicketWithNoJobIdIsNeverPolled`). A job
@@ -2237,30 +2314,82 @@ constants, not measurements. Nothing here was run against a live lease, a live n
 
 ## Graphs on the fleet (ADR 0082, Amendment 1)
 
-`offload_run_graph` (CLI `run-graph`) with `route` `auto` is offered once to the fleet when its own lane is not free, and every route
-that sends a graph to a node holds it to the rules below. The graph is the caller's, so it has no recipe and no family: what makes a
-node a fit is that it **holds the files the graph names**, and the node says so itself.
+`offload_run_graph` (CLI `run-graph`) with `route` `auto` is a **ticket** when its own lane is not free (ADR 0083 Amendment 1), and
+every route that sends a graph to a node holds it to the rules below. The graph is the caller's, so it has no recipe and no family:
+what makes a node a fit is that it **holds the files the graph names**, and the node says so itself.
 
-**A graph is not a ticket.** The ticket queue above is the busy-lane path of an IMAGE call and of nothing else. A graph keeps the
-one-shot overflow of 0.179.0 (`tryGraphOverflow` and `placeGraph` in `internal/mediaremote/place.go`, the only overflow code left
-that is not the ticket's): it is offered once to the nodes that can take it, in the roster's order, at most three of them; a node
-that refuses or bounces is left alone by the same placer memory the tickets use. It shares the nodes with the image tickets of its
-machine by the tickets' own two rules. It never takes a node a job of this machine has a claim on, and it takes the claim of the node
-it uses (above; one graph call of a process per node is also held in process, which is the whole cover on a machine whose lease
-root is refused and so keeps no queue), so no ticket and no other graph call of any process is sent a node it is running on. And it yields to the tickets: every
-ticket that is waiting is older than a graph that arrives now, so a node an older waiting ticket matched at its last scan is left to
-that ticket, and so is every node while that ticket has not been scanned yet (its first scan comes within about one scan interval of
-its creation); the row reads `free`, `idle, but ticket mq-... is older and first in line for it`, and the graph goes on to its own lane,
-never to a refusal (`TestAGraphLeavesANodeAnOlderTicketIsFirstInLineFor`). A lane the pipeline TRIED to read and could not (the card table
-past its 4 s bound, the lease directory not opening: `core.LaneVerdict.Unjudged`) is not a free lane for a graph either, as for an
-image: the fleet is looked at first, the placement reads `this machine's graph lane could not be judged (...)`, and the graph runs on
-this machine's lane when no node takes it (`TestAGraphWithAnUnreadLaneStillLooksAtTheFleet`). When no node admits it, the graph waits in
-this machine's own queue, joining it when the fleet attempt is over and not from when it arrived.
-**A graph does not wait in the cluster queue yet**: it keeps no place in it, does not start on a lane that frees after its one look
-at the fleet, and a repeat of the same graph is a second call, not the first one's ticket (`TestAGraphIsNotATicket`). A ticket's
-identity is the hash of the request's parameters, and a graph's parameters name files on this machine rather than carry them; what
-makes two graph calls the same call needs a decision of its own, which is why this is a follow-up and not part of the release that
-introduced both.
+**A graph is a ticket.** The ticket queue above is the busy-lane path of an image call and of a whole-node graph (a graph that names
+`devices` is card-scoped: it is never offered to a node, and it is no ticket). A lane the pipeline could not READ (the card table past
+its bound, the lease directory not opening) is not a free lane for a graph either, as for an image: the graph is a ticket and its first
+scan looks at the fleet (`TestMediaLaneFreeGraphIsFreeWhenTheCardTableCannotBeRead`,
+`TestMediaLaneFreeGraphIsUnjudgedWhenTheLeaseDirectoryCannotBeOpened`, `TestAnUnreadLaneStillLooksAtTheFleetForAGraph`,
+`TestAnUnreadLaneWithNoNodeRunsAGraphHere`). Five things differ from an image's, each held by a test:
+
+- **Identity is the graph's content.** The key is the sha256 of the task and the parameters without the `waiter_token`, with the
+  graph and the manifest taken as what they say (canonical JSON: keys sorted, whitespace dropped, numbers as written) in place of the
+  paths they were read from. The MCP door writes an inline `graph_json` to a new temp file on every call, so a key made of the path
+  would make every resend a new job; and a file edited under the same path is another graph. `out_dir`, `reserve_vram`,
+  `min_vram_gb` and `model_family` are part of the key (the same graph sent to another folder is another job). One ticket per identical
+  request, from either of two processes, and `waiter_token=mq-...` collects it (`TestABusyGraphIsATicketAndTheSameGraphAttachesToIt`,
+  `TestAGraphsKeyIsItsContent`, `TestTwoProcessesAskingForOneGraphAtOnceMakeOneTicket`). The ticket mints no seed and sends no
+  recipe digest: the graph owns its own sampling (`TestAGraphTicketKeepsItsPlaceInTheLocalLine`).
+- **The ticket is its bytes.** A ticket may wait for hours and the caller's graph file is the caller's: reused for the next shot,
+  edited, removed. The ticket writes the graph and the manifest as the plan holds them into its queue directory
+  (`body-<id>-graph.json`, `body-<id>-manifest.json`; the one request body the store keeps, owner-only like every file of the queue
+because a graph carries its prompt text), takes its key from those bytes, and
+  the node's payload, the local run, the need and an adopter all read them, so whichever lane serves it renders the same graph
+  (`TestAGraphTicketRunsTheBytesItWasAdmittedWith`, `TestAGraphTicketSendsTheBytesItWasAdmittedWithToANode`,
+  `TestACreatedGraphTicketIsKeyedByWhatItHolds`, `TestAGraphTicketsKeyComesFromTheBytesItHolds`). The copies go with the ticket and
+  stay while a dead owner's placed ticket can be adopted (`TestAGraphTicketsCopiesLiveAndDieWithTheirTicket`,
+  `TestALosingCreateLeavesNoCopies`). The ticket also stores a path key (the same paths and parameters, no file read): a
+  `waiter_token` is accepted for a request with the same content or the same path key, so a finished result is collected by its token
+  and a dead owner's placed job is adopted from the copies after the file is gone or overwritten
+  (`TestAGraphTicketIsCollectedByItsTokenOnceItsFilesAreGoneOrEdited`,
+  `TestADeadOwnersPlacedGraphIsAdoptedAfterTheCallersFilesAreGone`); a repeat WITHOUT a token attaches by content alone, and an
+  abandoned ticket's arrival is inherited only by the same content
+  (`TestATokenOfAnAbandonedGraphTicketInheritsItsArrivalOnlyForTheSameContent`).
+- **Seniority.** The place a graph keeps in this machine's line is the whole-node token the real admission leaves for a waiting graph
+  (no card named, reason `run-graph`; `Pipeline.leaveGraphPlace`), at the ticket's arrival time; a place the call already held is
+  brought along; the final local run spends it through `waiter_token`
+  (`TestAGraphPlaceHoldsSeniorityAndIsSpentByTheLocalRun`, `TestAGraphThatArrivesWithAPlaceBringsItIntoTheTicket`). A host that
+  does not lease cards keeps none, and the answer says so (`TestAGraphTicketOnABoxWithoutPlacesSaysSo`).
+- **The node decides identity at its door, and a refusal is about THIS ticket.** The 503 a node answers when the graph names a file
+  it does not hold carries `refusal: "not_capable"` in its body (a full node's and a route-not-ready 503 do not). The delegator reads
+  the word, not the sentence: the ticket's row for that node is `not-capable` with the node's own words, **no pause is put on the
+  node** (the placer's 5 s for a 503 that names no `Retry-After` is for a node that is full, and it would hide the node from an image
+  ticket and from every other graph it can serve), the ticket asks that node again only after 5 minutes (chosen, not measured: the
+  longest pause the placer puts on any node, and the interval at which an operator who places the missing file finds the ticket
+  waiting for it), and the next candidate is tried in the same breath. The memory is the owning process's; the cluster row it writes
+  is what the other processes read (`TestAFileRefusalIsNotCapableForThatTicketAndNeverFull`,
+  `TestATicketAsksANodeThatRefusedItAgainAfterAWhile`, `TestAFileRefusalMovesTheGraphOnAtOnce`, and on the node
+  `TestAGraphFileRefusalCarriesTheNotCapableWord`, `TestARouteThatIsNotReadyIsNotSaidToBeNotCapable`).
+- **A graph that reads input files is a local-only ticket.** A node can match such a file only by name, so the ticket is never offered
+  to a node: it reads no roster, matches no node (so, once its first scan has run, it holds none against a younger ticket; before that it
+  is first in line for every node, like any ticket not yet scanned) and runs when this machine's lane serves
+  it. It is still a ticket: one per request, a place and a position in this machine's line, and every answer carries `fleet_note`
+  (and the same sentence in its reason) saying why the fleet was not asked
+  (`TestAGraphThatReadsAnInputFileIsALocalOnlyTicketThatKeepsItsPlace`, `TestALocalOnlyGraphTicketIsNeverMovedAndHoldsNoNodeAgainOthers`).
+
+What the ticket closes of the one-shot overflow it replaces, and what it keeps. Closed: the late local join (a graph no node took
+joined this machine's own line from when its fleet attempt was over), the lane that frees after the one look at the fleet, the repeat
+that was a second call, the bound of three nodes (`TestABouncingGraphIsNotBoundedToThreeNodes`), the `tk-` token a caller had to
+re-send, and the abandoned job: a graph a dead process sent is adopted by the next identical call, polled and fetched and never sent
+again (`TestADeadOwnersPlacedGraphIsAdopted`). Kept, as the ticket's own rules and no longer a second copy of them: the claim file is
+taken under the directory lock, so two processes, or two calls of one process, never put two graphs on one node and a graph and an
+image never share one (`TestTwoProcessesNeverStackTwoGraphsOnOneNode`, `TestTwoGraphCallsOfOneProcessDoNotStackOnOneNode`,
+`TestAnImageTicketNeverSendsANodeAGraphTicketHasAJobOn`, `TestAGraphTicketLeavesANodeAnotherTicketHasAJobOn`), and a graph is an
+ordinary member of the line, so a node an older waiting ticket matches is that ticket's, whichever kind it is
+(`TestAGraphDoesNotTakeANodeAnOlderImageTicketIsFirstInLineFor`, `TestAGraphTicketLeavesANodeAnOlderTicketIsFirstInLineFor`,
+`TestAnImageTicketLeavesANodeAnOlderGraphTicketIsFirstInLineFor`). The one-shot path itself (`tryGraphOverflow`, `placeGraph`, the
+in-process hold) is removed. **The doors**: the MCP door answers inside `wait_s` (else `gpu_wait_ms`) with the ticket and the ticket
+goes on; `run-graph` on the CLI blocks until the job is done, prints on stderr where the ticket stands, and the first interrupt cancels
+a ticket that sent nothing.
+
+**What an operator sees differently from 0.180.0** (the whole list is in ADR 0083 Amendment 1 and the CHANGELOG): a busy graph comes
+back with a ticket and `cluster[]`, not the local lane's queued answer with a `tk-` token to re-send; a graph that carries a `tk-`
+`waiter_token` is no longer kept on this machine, its place comes into the ticket and it may go to a node (`TestAGraphThatArrivesWithAPlaceBringsItIntoTheTicket`);
+the deferral a graph ends in after a failed local run no longer carries `cluster[]`; and on a machine whose lease root is refused, so
+that it keeps no queue, a busy graph is no longer offered to the fleet (it waits in the machine's own line, as an image always did).
 
 **The node's door (the ACK check).** Before it writes a temp file, takes a lease or starts ComfyUI, `buildRunGraph`
 (`internal/fleetnode/graph_files.go`, with `mediacap.ScanGraph` and `mediacap.MissingModelFiles`) reads the graph:
@@ -2290,13 +2419,13 @@ A node that lacks any of them answers **503** with the existing route-not-ready 
 of each kind), and **no job, temp file or lease exists**. Past six missing weight files it says `7 or more files ... and more` and
 gives no count: the node stops looking at the seventh (the door is open to any peer and a graph can name thousands of files, and a
 missing name costs a stat in every class directory of every models root, so the work is bounded by the six shown and not by the
-graph); a list of missing input files is short and is counted exactly. The delegator's `cluster[]` row keeps the first 300 bytes of that answer's body
-(`post()` truncates), so the sentence is short and two real Wan file names fit; a graph missing many long names shows its first two or
-three there, and the node's own 503 body (a `curl` of the dispatch) lists up to six. 503 is what every delegator re-places, so the call goes to the next node
-instead of this one cold-starting ComfyUI to defer. The check is by **name, not content**: a same-named file of other bytes is held. For a
+graph); a list of missing input files is short and is counted exactly. The 503 body is `{status, error, refusal}`, and `refusal` is
+`"not_capable"` (the node is not full and not out of route: it cannot run THIS graph). The delegator's `cluster[]` row quotes the
+`error` sentence, cut at 600 bytes, so a graph missing many long names shows its first few there, and the node's own 503 body (a
+`curl` of the dispatch) lists up to six. The ticket goes on to the next node instead of this one cold-starting ComfyUI to defer. The check is by **name, not content**: a same-named file of other bytes is held. For a
 weight file the name is the practical identity (a model is published under one). For an **input file** it is not enough, because
 those are the caller's own and carry generic names (`image.png`, `ComfyUI_00001_.png [output]`) that two machines share with
-different bytes; so the delegator never auto-overflows a graph that reads one (below). A call that must leave its machine anyway
+different bytes; so the delegator never offers a graph that reads one to a node (above). A call that must leave its machine anyway
 (`route remote`, or `auto` on a machine with no graph lane of its own) still reaches this check with one, and for it the check
 stays by name: that is a named limit. A custom node's own file key is not read.
 
@@ -2312,16 +2441,14 @@ in-process slot or place in line, and the host's memory against the media class 
 lease is taken for the graph as a whole before anything reads the weights it names, so that is an upper bound for the families the
 box binds and not the graph's own size, and a graph that names weights bigger than every bound family can be under-counted, a
 named limit), under the same relaxation contract as the image's (`TestMediaLaneFreeGraphNeverRefusesAGrant`,
-`TestMediaLaneFreeGraphWritesNothing`). The graph travels as it is: no family, no digest, `out_dir` and `min_vram_gb` never. A node's
-503 moves the call on like any refusal at the door (and, like any 503 that names no `Retry-After`, leaves that node alone for about
-5 s in the calling process) and counts toward the three attempts; when nothing admits, the call waits in
-this machine's own queue, and when that wait ends in a deferral the deferral carries `cluster[]` naming, per node, the file it
-lacks (a call that then runs here and succeeds carries no `cluster[]` and no note: only a deferral is annotated). A graph that names `devices`, one
-that carries a `waiter_token`, one under an inherited lease and one that **reads an input file** are not overflowed. The last waits
-for this machine's own lane, and the deferral it ends in says that the fleet was not asked and why (`fleet_note` in its data and in
-its reason). A call with no lane of its own to wait for (`route remote`, or `auto` on a thin client) is placed on a node as before,
-checked by name only, and held to the same release proof and the two rules below. Sending a size and a hash of each input file to the node would restore the overflow for such graphs and
-close that limit; it is not built.
+`TestMediaLaneFreeGraphWritesNothing`). The graph travels as it is: no family, no digest, no seed, `out_dir` and `min_vram_gb` never. A node's
+503 for a file it lacks moves the ticket to the next lane and marks that node not-capable for that ticket (above); any other 503 (a
+full node, a route that is not CONFIGURED) is the placer's, as for an image: a node that names no `Retry-After` is left alone for about
+5 s in the calling process. When nothing admits, the ticket waits and its answer carries `cluster[]` naming, per node, the file it
+lacks. A graph that names `devices`, or runs under an inherited lease, is never a ticket and is not offered to a node; one that **reads an
+input file** is a ticket that is not offered to a node (above). A call with no lane of its own to wait for (`route remote`, or `auto`
+on a thin client) is placed on a node as before, checked by name only, and held to the same release proof and the two rules below.
+Sending a size and a hash of each input file to the node would lift the restriction for such graphs and close that limit; it is not built.
 
 **One card.** A graph that names no devices holds the whole node and runs in the default ComfyUI instance, which sees every
 card. On a node with several, the delegator cannot tell which card that instance picks, and it may be the display card. So a
@@ -2351,9 +2478,165 @@ The floor filters **remote** candidates only: the local lane is this machine's o
 malformed value (negative, not a number) is refused by name on every route (`mediaremote.Run`), so a call that stays on this
 machine never drops it silently.
 
-**Not built.** Input files for graphs, and with them a size and hash of each to restore the overflow for a graph that reads one; a
+**Named limits of the graph ticket.** The graph is read once, when its ticket is made, and the ticket keeps that copy, so a file
+overwritten or removed meanwhile changes nothing (a repeat of the overwritten file is another ticket). What it does not keep is the
+input files a graph reads: their bytes are no part of the key, so a finished result nobody collected (kept up to six hours) answers a
+repeat of the same graph even when the caller has put other bytes under the same input name; set another `out_dir` (part of the key)
+or collect first. The ticket remembers a node's refusal in the owning process only: an adopter of a ticket that went back to waiting
+asks that node once more. A graph ticket's place in this machine's line is the whole-node token, so every call that arrives after it
+queues behind it on this machine's own lane, an image call whose own card is idle included (it can still go to an idle node), until
+the ticket runs, is canceled or ends (8 h at most); that is the seniority the operator asked for, and it is also what it costs. Nothing
+here was run against a live lease, a live node or a render: the live acceptance in the CHANGELOG entry of this change (A9) is the
+first live evidence.
+
+**Not built.** Input files for graphs, and with them a size and hash of each to let a graph that reads one go to a node; a
 content check of the files; `devices` on a remote graph; a custom node's own file key; a default floor for other families or for
 video (`offload_generate_video` takes no `min_vram_gb`).
+
+## The image batch across the fleet: one ticket per job when the lane is busy and a node can render the recipe (ADR 0083, decision 13)
+
+`local-offload generate-image --batch jobs.jsonl [--family F] [--route auto|local|remote] [--results r.jsonl] [--resume] [--jobs N]` is the
+P0's batch (register F28): jobs in, a picture at the exact `out` of each, a verdict per job, and the lanes of the whole roster when this
+machine's own is held. The orchestration is `mediaremote.RunBatch` (`internal/mediaremote/batch.go`); the verb (`generate_image_batch.go`)
+reads the file, wires the warm session (`pipeline.RunImageBatchAs`, which needs a ComfyUI and so cannot live in `mediaremote`) and keeps
+the results file.
+
+| flag | meaning |
+|---|---|
+| `--family F` | the family every job renders under (the single render's `family`; default: this machine's default binding) |
+| `--route auto` (default) | where the jobs run is decided once, below |
+| `--route local` | the warm batch on this machine whatever the lane says, as before the fleet existed |
+| `--route remote` | each job sent to a roster node through the single-render call, one at a time; refused up front without `delegate_remotes`; there is no ticket, so a job whose every node is busy, text-leased or not answering is asked again after a pause (5 s, 15 s, 1 min, then every 5 min; chosen) for up to the queue's 8 h ceiling, and ends `queued`, never `failed`, if it finds no place by then (the jobs not sent yet are then queued at once); a fleet that cannot take the job as configured (no node serves it, a route is not configured, no node carries `refine=false`, a roster entry the tailnet guard refuses) is not waited for, and the job fails at once naming each node's miss; a node chosen and then lost when the job is sent, or after, fails it too; the node's recipe is not compared (below) |
+| `--results r.jsonl` | one row per job, kept in `r.jsonl.partial` as each job is final and written whole, in job order, over `r.jsonl` when the batch ends; an earlier `r.jsonl` is untouched until then, so a batch the command refuses leaves it whole and one that dies leaves `r.jsonl.partial` with the jobs that ended; the run that reopens the name (the `--resume` that recovers a killed batch) first sets that record aside as `r.jsonl.partial.prev` (one is kept, the newest; an empty partial never replaces it), says so, and puts it back if the batch is then refused; opened before anything runs, so an unwritable path, a folder, and on Windows a read-only file stop the command with no lane time spent; it may not name the `--batch` file |
+| `--resume` | skip a job whose `out` already holds a file that proves itself (below) |
+| `--jobs N` | the most tickets in flight (0 = the default below); applies to the ticket path only |
+
+**Where the batch runs.** Decided once, at the start, and never mixed:
+
+1. **One warm session** (`RunImageBatchAs`: the checkpoint loads once, the batch boundary tears ComfyUI down once) when `--route local`;
+   when the machine has no `delegate_remotes`; when the process runs under an inherited lease (`gpu reserve -- local-offload ...`: its card was
+   chosen for it); when it has no queue (the lease refuses the state root, so there is nowhere to keep a ticket; a config with no `state_dir` has one); when this machine's lane is **free** (`MediaLaneFree` for the batch's
+   family: free, and readable); and when the lane is not free but **no roster node renders the recipe**. The last is the honest limit: krea2 and
+   the 2512 build exist on this machine's files only (the nodes hold no such weights, so the recipe match of ADR 0082 finds none), so a batch of
+   either runs on the workstation as before. The batch **keeps its place in the lease line** for the lane for up to the queue's own 8 h ceiling
+   (`BatchHoldWindow`, chosen, not measured), not the 90 s `gpu_wait_ms` window: the command blocks until it has the lane instead of coming back
+   `queued` with exit 0 to be re-run from the back of the line (`TestBatchWithNoRemoteMatchRunsWarmOnThisMachineAndSaysWhy`,
+   `TestRunImageBatchWaitingKeepsItsPlaceUntilTheCardFrees`), and Ctrl-C ends the wait at once with the rows `queued`
+   (`TestRunImageBatchWaitingEndsOnInterruptAndLeavesNoLease`). The line it prints names each node and why it does not match (`not-capable`, the
+   key that differs), which is also in the JSON as `cluster`. Per-job tickets would be one cold start per picture on the same lane, which is
+   slower than waiting for it once. Every other warm case (a free lane, `--route local`, no fleet, an inherited lease, no queue) waits
+   the pipeline's own `gpu_wait_ms` window and defers as before; a node that gains the weights later matches by recipe and the batch then splits.
+2. **One ticket per job** when the lane is not free (busy, or the pipeline could not read it) and at least one roster node renders the recipe.
+   Each job is the ticket queue's own call (`RunWith`, blocking), so it starts on the first matching lane that frees, here or on a node, in file
+   order, with every guarantee of the queue. A node is claimed by the ticket that has a job on it, so **a batch never sends two jobs to one
+   single-job node at once** (`TestBatchNeverDispatchesTwoJobsToOneSingleJobNodeAtOnce`). The job reaches the node as it was written:
+   `refine=false` only when the job says so, the seed, the negative, `width`, `height` and `steps` exactly, the family under the node's own name
+   (`TestBatchJobsPlacedThroughTickets`). The output is fetched, checked against the sha256 the node published, to the exact `out`. A node renders
+   under its own zero-warm lifecycle (ADR 0009): one ComfyUI cold start per job. There is no mixed local/remote work stealing and no batch task on
+   the fleet in v1: a node renders one job per ticket and the warm session exists only here. **A ticket that ends without a place is not a failed job
+   and is not sent again**: the queue's own ceiling (a ticket that waited 8 h without a lane anywhere) and a ticket it could not take over carry the held
+   class like a lost race does, but they come from a ticket that is over, so the job is `queued` with the queue's reason and `--resume` renders it; a new
+   ticket would only wait another ceiling (`TestBatchTicketThatExpiresIsQueuedAndNotSentAgain`). Once one job has waited the ceiling, the jobs not yet
+   sent are queued at once as `not started`, not sent to wait it again in turn (`TestBatchTicketCeilingQueuesTheJobsNotYetSent`).
+3. **One at a time** through the single-render call when `--route remote`, or when this machine has no image lane at all (a thin client). The claim
+   belongs to the ticket queue and that call picks a node without one, so two jobs in flight could pick one idle node; `--jobs` is told it did not
+   apply (`TestBatchOneAtATimeWhereNoClaimProtectsANode`). Three things are different here, and the first line printed says them. **A busy place
+   is waited for**: there is no ticket to hold the job, so a held card (a node's `gpu_busy`) or a fleet with no node free to take it (every node
+   unreachable or text-leased, or a node refusing the send for want of room: the delegator's own capacity defer) is asked again after a pause until
+   the job is placed, Ctrl-C ends it, or the queue's 8 h ceiling passes, and then the job is `queued` and `--resume` renders it, and so are the jobs
+   not sent yet (`TestBatchSerialCeilingQueuesTheJobsNotYetSent`). **A place that can never come is not waited for**: `pickNodeFor` files
+   `core.ErrClassNoNodeConfigured` (the defer class stays capacity) when it has no node and every node was left out for a configuration fact (it does
+   not serve image generation, a route the call needs is not configured on it, it cannot carry `refine=false`, the tailnet guard refused its roster
+   entry) and none for a reason that passes (unreachable, text-leased), and the job fails at once with the reason naming each node's miss; one
+   node that may take it later keeps the wait (`TestBatchSerialFailsAtOnceWhereNoNodeCanEverTakeTheJob`,
+   `TestPickNodeFilesNoNodeConfiguredOnlyWhenEveryNodeIsLeftOutForConfiguration`, `TestBatchSerialStillWaitsWhereAnyNodeMightTakeTheJobLater`). Any
+   other answer (a failed render, a refused contract, a node chosen and then lost when the job was sent or after) is final at once
+   (`TestBatchSerialWaitsForAPlaceAndNeverFailsTheJob`, `TestBatchSerialEndsQueuedAtTheCeilingNeverFailed`, `TestBatchSerialWaitsOnlyForAPlace`,
+   `TestBatchSerialInterruptEndsTheWait`). **The recipe is not compared** with this machine's: a row carries
+   the `family`, `license` and `commercial_use` the node that rendered it reported (nothing when it reported nothing), and the printed header
+   names none, so a node whose own default is another family is never recorded under this machine's default binding
+   (`TestBatchSerialRowsCarryTheNodesOwnFamilyAndLicense`, `TestBatchPayloadSerialCarriesNoLocalFamilyOrLicense`). **A family only the nodes
+   define is carried by name** under `--route remote`, and on a machine with no image lane, as a single render carries it; a machine that renders
+   locally still refuses a name it does not know (`TestBatchCarriesAFamilyThisMachineCannotResolveWhereItCannotRenderLocally`).
+
+**How many in flight.** `--jobs N`, else 1 for this machine's lane plus one per roster node whose recipe matches (busy or idle: a busy node
+frees), at most 8, and never more than there are jobs (`TestBatchNeverHasMoreThanNInFlight`). The cap of 8 is a chosen constant, not a
+measurement; more tickets than lanes only wait. A job whose single render comes back "a card is held", because a sibling job took the lane a
+moment after it read free, is sent again, at most twice (chosen): asked again, a call that finds the lane busy becomes a ticket and waits, so the retry
+is what turns a lost race into a wait. A lane that refuses the same job three times in a row is a place not had, so the row is `queued`, never `failed`; any
+other failure is a `failed` row at once, and the queue's own end of a ticket is not a lost race and is not asked again (`TestBatchRetriesALostLaneRaceAndOnlyThat`).
+
+**The rows.** One per job, in the printed JSON (`items`) and in `--results`: `{i, out, seed, ok, ms, error?, node?, family?, sha256?, verdict}`, the first
+six keys being the ones `pipeline.parseBatchResults` reads from the render script's own results file.
+
+| `verdict` | meaning |
+|---|---|
+| `rendered` | a lane ran it, and the file at `out` is there, not empty, and hashed (`sha256`); `node` is the roster node's id, or this machine's own id for a render here |
+| `skipped-existing` | `--resume` found the file and it proved itself; `ms` is 0, there is no `node`, `sha256` is the file's |
+| `failed` | it did not render; `error` says why |
+| `queued` | the job has no result yet: the command ended before it did (an interrupt, a warm batch a busy lane kept waiting past its window), or no lane or node had a place for it (the queue's ceiling, a card that stayed held, a job not sent because an earlier one had waited the ceiling); `error` says which, and `--resume` renders it |
+
+`ms` is the render's wall time as its lane reports it (the wait for a lane is not in it). `family` is the name THIS machine gives the recipe: a node
+renders the same recipe under its own name for it, and the row says where (`node`), not under which name. `sha256` is read from the file on disk; for
+a node's job the fetch had already verified the file against the hash the node published. A lane that said it rendered a file that is missing, or
+empty, or that came back from a node that published no sha256, did not render it (`TestBatchAJobIsRenderedOnlyWhenItsFileIsThere`). A failed job
+leaves no file of its own at its path: an empty file a lane left is removed, and the fetch has already put a node's unverified file at `out`, so the batch moves it beside it as `<out>.unverified` (the
+render took minutes; the row names where it went) and a later `--resume` renders the job again instead of taking the file for finished. A picture that was already at `out` before the batch is
+not a failed job's to remove: a render that fails keeps it (the render helpers write atomically), and only the node's file the fetch put at `out` replaced it. A job whose `out`
+folder cannot be made fails alone, before any lane is asked for it (`TestBatchAnOutThatCannotBeMadeFailsOnlyThatJob`). The printed JSON keeps its shape
+(`count`, `succeeded`, `failed`, `items`, `family`, `license`, `commercial_use`, `refine_fallbacks`) and gains `mode` (`warm`, `tickets`, `serial` or
+`none`), `skipped` and, when no node matched, `cluster`; every item gains the row's keys. `refine_fallbacks` counts the warm items whose refiner fell
+back, so it is present only for a warm batch with a refiner configured whose warm call ran and answered (a ticket or one-at-a-time render does not measure it, nor does a
+warm call a busy lane kept waiting or that stopped, and a 0 would claim it did: `TestBatchPayloadReportsRefineFallbacksOnlyWhereTheyWereMeasured`). A one-at-a-time batch carries no `family`, `license` or `commercial_use` in its header, and its items carry the node's. A deferred warm batch now lists its jobs as `queued` items
+(its `count` was 0).
+
+**Resume is fail-safe by construction.** On 2026-10-09 a full disk left 21 zero-byte PNGs at the `out` paths, and a skip-existing script read them as
+finished. `--resume` skips a job only when the file at its `out` exists, is a regular file, is not empty, **decodes whole as a PNG** (a file cut
+short fails), and has the width and height the job names (a size the job does not name is not checked). The header is read first: a canvas that
+is not the named size, or is over 64 Mpx (`resumeMaxPixels`, chosen, not measured), is rendered again without being decoded, because a decode
+allocates the whole canvas and a stray huge file at an `out` must not take the RAM of a resume pre-pass (`TestResumeDoesNotDecodeACanvasItCannotUse`). Anything doubtful is rendered again
+(`TestBatchResumeSkipsOnlyExistingAndVerifying`: a zero-byte file, a file cut short, another size, not a picture, missing;
+`TestGenerateImageBatchResultsFileAndResume` through the verb). Two limits, said. A job with no `out` is never skipped, because its default name hashes
+a seed minted afresh each run. A family that snaps the size (qwen-image-2.1 floors to 32) gives back a smaller picture than a size off its grid asks
+for, which never matches and is rendered again, so give a resumable batch sizes on the family's grid. Resume does not read the previous `--results`
+file: the files are the truth, and each run writes its own full results.
+
+**Before anything runs** the command refuses, by name: an empty batch, an empty prompt (`job N: empty prompt`, as before), two *different* jobs for one
+`out` (the second would replace the first; two identical jobs are one picture; one file spelled two ways, relative and absolute or in another case
+where the file system ignores case, is one `out`: `TestBatchOutsThatNameOneFileTwoWaysClash`), an unknown family on a machine that renders locally,
+an unknown route, a negative `--jobs`, `--transparent`, `--results` naming the `--batch` file, and `--route remote` with no `delegate_remotes`
+(`TestBatchRefusalsBeforeAnythingRuns`, `TestGenerateImageBatchFlagRefusals`, `TestGenerateImageBatchResultsFileIsNeverTheJobsFileNorLostToARefusal`). A `--remote` that is not in
+`delegate_remotes` keeps the batch on this machine and says why.
+
+**Seeds, names and adoption.** The verb gives every job its seed and its `out` once, before it decides where the batch runs
+(`pipeline.NormalizeImageBatch`), so both paths name a job the same way; the family is part of a default `out`'s hash, as it is of the single
+render's, so one prompt and seed under two families are two files (`TestNormalizeImageBatchFamilyIsPartOfTheDefaultOut`). A job with no seed gets a
+random one on each run. An interrupted batch leaves a job already on a node running there (it cannot be recalled, ADR 0064) and its ticket for the
+next *identical* command to adopt: run the same file again, and give each job an explicit `seed`, or the re-run's minted seeds are new requests and
+the node's job is rendered twice.
+
+**Interrupt.** The verb runs both paths under one interrupt context. The first Ctrl-C cancels a ticket that has sent nothing and, on the warm
+session, the render itself: the child is built with `exec.CommandContext` and a tree kill (`gpugen.Generate`), so it and its descendants are killed,
+and the process stays up to release the lease and tear ComfyUI down. Before the fleet batch the warm session ran under `context.Background()` and a
+Ctrl-C killed the whole process. The second Ctrl-C is the default one.
+
+**Exit status.** 0: every job has its picture, or a busy lane deferred the whole warm batch (nothing ran, the jobs are `queued`, as it always
+was: so a 0 is not "every picture is there", count the `queued` rows). 4: some job failed (`imagegen.BatchExitJobsFailed`), whether the batch ran
+every job or was deferred after a job had failed before any lane was asked. 1: it stopped (the warm call's error), was interrupted (`queued` rows),
+a job found no place (the queue's ceiling, or a card that stayed held: `queued` rows, and the jobs not sent yet with them), or it was refused before any job, so a wrapper tells "some failed"
+from "stopped" (`TestBatchExit4OnAnyFailure`, `TestBatchInterruptLeavesQueuedRowsAndExit1`). The line the command prints says which: an interrupt (a job already on a node cannot be
+recalled), a job that waited the ceiling (and the jobs behind it were not sent), or jobs no lane or node had a place for (`TestBatchExitSaysWhyTheJobsAreUnfinished`).
+
+**Named limits.** Nothing here was run against a live lease, a live node or a render: the tests use the real fleet-node servers, ticket files and
+results file with fakes for the pipeline and the renderer, and a node stub for the warm session. The 8-ticket cap, the two retries, the 8 h hold
+and ceiling, the pauses between asks and the 64 Mpx resume ceiling are chosen, not measured, as are the queue's own constants. **The warm path writes
+its rows when its session ends**: the render script runs to the end before the batch sees any job's result, so the rows of the jobs it renders reach
+the results file (`<results>.partial`) together at that point, and a kill, crash or power loss mid-render leaves, for those jobs, only the render
+script's own `batch-<stamp>.results.jsonl` in the media dir. A pre-flight failure or a skipped job is written as soon as the mode is chosen (a lane
+and roster read, before any job runs), and the ticket path writes each row as its job ends. The batch moves a rejected file onto `<out>.unverified` over
+any earlier file of that name. A node job costs a ComfyUI cold start, so for the 2.1 families the ticket path pays off when the lane is held
+by a long job and a node is idle, not when the lane is free (that is the warm session's case). The ticket path inherits the queue's named limits:
+one line per delegating machine, a CLI ticket dies with the CLI, a late-binding gap of up to a scan interval.
 
 ## Comfy workflow templates catalog (phase A)
 

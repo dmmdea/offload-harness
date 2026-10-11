@@ -92,12 +92,13 @@ type Finding struct {
 	Also []string `json:"also,omitempty"`
 }
 
-// reviewOutputSchema is a flat object whose one field is an array of STRINGS, and both
-// halves are forced by gbnf.FromJSONSchema's supported subset: nested object items compile
-// to `stringarray` regardless of what the schema says, so an array of {severity,file,...}
-// objects would silently become an array of strings anyway. Asking for the line format
-// explicitly (see promptFormatTail) and parsing it delegator-side is the honest version of the
-// same thing — and ParseFindings keeps whatever it cannot parse rather than dropping it.
+// reviewOutputSchema is a flat object whose one field is an array of STRINGS. That was forced
+// when this was written: gbnf.FromJSONSchema compiled object items to `stringarray` regardless of
+// what the schema said, so an array of {severity,file,...} objects silently became an array of
+// strings anyway (register F43 has since taught it nested objects, and this schema is left as it
+// was). Asking for the line format explicitly (see promptFormatTail) and parsing it delegator-side
+// is still how a finding is read, and ParseFindings keeps whatever it cannot parse rather than
+// dropping it.
 var reviewOutputSchema = json.RawMessage(`{"type":"object","properties":{"findings":{"type":"array","items":{"type":"string"}}},"required":["findings"]}`)
 
 // promptHeader is the whole of the reviewer's instructions. It says "you have no prior

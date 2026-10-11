@@ -16,7 +16,7 @@ func TestNodeViewDecodesRecipesAndLeaseReason(t *testing.T) {
 		"refine_honoured": true,
 		"image_recipes": [
 			{"name": "qwen-image-2.1", "default": false, "digest": "d1", "engine": "comfyui", "graph": "qwen-image-2.1",
-			 "files": [{"role": "ckpt", "name": "a.safetensors", "bytes": 10}, {"role": "vae", "name": "v.safetensors", "bytes": -1}],
+			 "files": [{"role": "ckpt", "name": "a.safetensors", "bytes": 10, "fingerprint": "fp-a"}, {"role": "vae", "name": "v.safetensors", "bytes": -1}],
 			 "steps": 40, "cfg": 1, "sampler": "euler", "scheduler": "simple", "schedule": "official", "shift": 1.5,
 			 "lora_strength": 0.5, "license": "Qwen Research License", "commercial_use": false, "explicit": ["steps", "cfg"]},
 			{"name": "krea2", "default": true, "digest": "d2", "engine": "comfyui", "graph": "krea2", "files": []}
@@ -40,7 +40,7 @@ func TestNodeViewDecodesRecipesAndLeaseReason(t *testing.T) {
 		len(r.Explicit) != 2 {
 		t.Errorf("recipe row = %+v", r)
 	}
-	if len(r.Files) != 2 || r.Files[0].Role != "ckpt" || r.Files[0].Name != "a.safetensors" || r.Files[0].Bytes != 10 || r.Files[1].Bytes != -1 {
+	if len(r.Files) != 2 || r.Files[0].Role != "ckpt" || r.Files[0].Name != "a.safetensors" || r.Files[0].Bytes != 10 || r.Files[0].Fingerprint != "fp-a" || r.Files[1].Bytes != -1 || r.Files[1].Fingerprint != "" {
 		t.Errorf("files = %+v", r.Files)
 	}
 	if !v.ImageRecipes[1].Default || v.ImageRecipes[1].Name != "krea2" {

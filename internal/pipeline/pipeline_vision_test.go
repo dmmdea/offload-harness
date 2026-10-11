@@ -49,6 +49,12 @@ func baseVisionCfg(srv *httptest.Server, visionModel string) config.Config {
 	cfg.CachePath = ""
 	cfg.LedgerPath = ""
 	cfg.GPULockPath = filepath.Join(os.TempDir(), "lo-vision-test-absent", "no.lock")
+	// F49: the cold-load wait sends a residency read (and, on a cold seat, a warm-up request)
+	// before the vision request. The fakes built on this config answer EVERY path with a chat
+	// reply or count every request as a model call, so the wait is off here and each of these
+	// tests keeps testing exactly the branch it names. The wait has its own tests against a
+	// router-shaped fake (pipeline_vision_coldload_test.go), which set it explicitly.
+	cfg.VisionColdLoadWaitSec = 0
 	return cfg
 }
 

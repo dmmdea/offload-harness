@@ -121,7 +121,9 @@ call deadline instead of a fixed TTL)", and listed the wait under "Not solved he
    is asked after the hint would have ended on its own, is not narrated as lifted (`cooldowns.liftNarration`). Unknown,
    saturated and backlogged readings keep the cooldown, as before.
 
-9. **A wait does not hold a run slot to the horizon while subtasks of the call have not started.** A call runs
+9. **A wait does not hold a run slot to the horizon while subtasks of the call have not started.** *(Amended
+   2026-10-10, register C16: the wait no longer ENDS at the bound below; it gives the slot up and runs on to the horizon.
+   See the Amendment at the end of the decisions.)* A call runs
    `runConcurrency` (4) subtasks at a time and a waiting subtask holds its slot. *(Amended by
    [0076](0076-a-calls-width-is-sized-from-its-deal-a-batch-of-up-to-16-is-one-deal-and-auto-counts-the-local-run-cap-line.md):
    the 4 is the floor of a width that follows the call's deal. The rule below is stated in terms of
@@ -144,11 +146,39 @@ call deadline instead of a fixed TTL)", and listed the wait under "Not solved he
     whose prefix means the deadline passed and which it had not. A call that never had more than the reserve (a deadline
     configured at 10 s) has nothing to take the reserve out of, and keeps starting its subtasks as before.
 
+## Amendment 2026-10-10 (register C16, a wait that holds a slot gives it up and keeps waiting)
+
+Decision 9 kept a wait that holds a run slot to its old bound, and the wait ENDED there as a capacity defer. On a saturated
+fleet that refused the subtasks it was protecting the others from: a research fan-out ended a subtask at `capacity wait:
+no node had room within 2m0s ... 4 subtask(s) of the call had not started, so this wait could not hold its run slot to the call's
+deadline` while the call still had time left, and the operator's rule is to queue and never refuse (a capacity wait is progress).
+The slot was the cost the bound existed to cap, and the subtask paid it.
+
+1. **At the bound the wait gives the slot up and runs on to the call's horizon.** `awaitCapacity` (`extendHeld`) extends a wait
+   that was capped by a held slot to the horizon the moment its bound is reached, and releases the subtask's place in the
+   call's width if a subtask of the call has not started, so that one can begin. A wait with nobody behind it keeps its place, as
+   the last subtask always did. The wait that ends at the horizon says what ended it, like any wait the call bounds (`before the
+   call's deadline`, with the call's time when the wait began); the `N subtask(s) of the call had not started` words now appear only
+   when the call had no horizon left to extend to.
+2. **A wait that gave its place up takes one again only to dispatch.** It keeps probing the fleet every tick, a node that frees is
+   found the same tick, and before the attempt it takes a place back (`runSlot.acquire`, bounded by the horizon); if it had to
+   wait for one it reads the fleet again, since what it saw is old. A refused attempt gives the place back before the wait
+   sleeps. The number of attempts a call has open at once is therefore still its width, which is the reason this ADR's first
+   version rejected releasing the slot outright (the process gate and the cooldowns sized for `runConcurrency` attempts keep
+   pacing the asks as before). The place is `runSlot` (`internal/delegate/runslot.go`), carried to the wait on the context; a wait
+   that has none (a direct call outside `RunWith`) is bounded as it always was.
+3. **Not changed.** A call with no whole-call deadline (the `delegate` CLI verb, `agent_run` and `offload_ask` with a route) still
+   waits `agent_placement_wait_sec` (decision 2): it has no horizon to extend to, and its operator can raise the key. The composite
+   decision's eviction wait and the verification retry's wait keep their TTL (decision 3). Later chunks of a batched call still start
+   only when the earlier chunk returns, so a chunk whose waits run to the horizon leaves its later chunks to the no-room defer of
+   decision 10; their subtasks would have waited on the same saturated fleet.
+
 ## Consequences
 
 - A fully saturated fleet holds the last subtask of a call to the horizon, about 24 minutes of a default call, where it
   used to defer a subtask after 2. That is the point of the change, and it has three costs. The subtasks ahead of the
-  last still wait only their TTL (decision 9), so a saturated fleet does not hold four run slots for the whole call: a
+  last hold their slot only for the TTL (decision 9; since the 2026-10-10 amendment they then give it up and keep waiting, instead
+  of ending), so a saturated fleet does not hold four run slots for the whole call: a
   call is as wide as it was, and longer by the last subtask's wait; a wider run limit is its own change. A subtask whose
   only places in line are leases that outlast the call holds the call to the horizon too, then ends as the
   holder-naming deferral (the holder and the soonest end are in it); the wait is not shortened by a guess at when a
@@ -170,7 +200,7 @@ call deadline instead of a fixed TTL)", and listed the wait under "Not solved he
 
 ## Alternatives considered
 
-- **Release the run slot while a subtask waits.** Rejected for now: the waiters would no longer bound the call's width,
+- **Release the run slot while a subtask waits.** *(Adopted in a narrower form by the 2026-10-10 amendment: the slot is released at the wait's bound and taken again to dispatch, which keeps the width as the bound on open attempts that the argument below asks for.)* Rejected for now: the waiters would no longer bound the call's width,
   so the subtasks behind them would start at once and dispatch in the same ticks, every one of them reading the same
   health and competing for the same room, and the process gate, the deal's headroom and the Retry-After pacing were all
   sized for `runConcurrency` open attempts. Capping the wait of a slot-holder at its old bound changes one number and

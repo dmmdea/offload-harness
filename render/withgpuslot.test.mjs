@@ -184,6 +184,46 @@ test("a LATER job under the same lease skips the unload (once per lease, not per
     "unloading per job is the arithmetic behind 3,356 teardowns");
 });
 
+// BETWEEN RENDERS (register F15). The once-per-lease election leaves jobs 2..N with a card that the
+// first job cleared, and nothing keeps a seat from coming back onto a leased card afterwards: the
+// holder's own children are exempt from the load fence by design, and a client that is not the
+// harness is not fenced by it at all. Under a lease that holds some cards and was handed a list, a
+// job that lost the election therefore re-checks its list: freeLlamaSwap unloads a listed model only
+// when /running shows it resident, so a card that is still clear costs two reads and no unload.
+test("a LATER job under a card lease with a list re-clears what came back (between renders)", async () => {
+  const h = harness();
+  await withGpuSlot({ ...h.opts, ...h.deps, claimUnload: () => false, reclear: () => true },
+    async () => { h.calls.push("fn"); });
+  assert.ok(h.calls.indexOf("freeLlamaSwap") >= 0 && h.calls.indexOf("freeLlamaSwap") < h.calls.indexOf("fn"),
+    "a seat that reloaded onto the leased cards must leave before the next render");
+});
+
+test("a LATER job under a whole-node lease (or one with no list) does not re-clear", async () => {
+  const h = harness();
+  await withGpuSlot({ ...h.opts, ...h.deps, claimUnload: () => false, reclear: () => false },
+    async () => { h.calls.push("fn"); });
+  assert.ok(!h.calls.includes("freeLlamaSwap"), "once per lease stays the rule where there is no list to re-check");
+});
+
+test("the default re-clear is on only for a lease that holds cards AND was handed a non-empty list", async () => {
+  const run = async (env) => {
+    const h = harness();
+    const prev = { l: process.env.GPU_LEASE_UNLOAD_MODELS, d: process.env.GPU_LEASE_DEVICES };
+    for (const [k, v] of Object.entries(env)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+    try {
+      await withGpuSlot({ ...h.opts, ...h.deps, claimUnload: () => false }, async () => {});
+    } finally {
+      if (prev.l === undefined) delete process.env.GPU_LEASE_UNLOAD_MODELS; else process.env.GPU_LEASE_UNLOAD_MODELS = prev.l;
+      if (prev.d === undefined) delete process.env.GPU_LEASE_DEVICES; else process.env.GPU_LEASE_DEVICES = prev.d;
+    }
+    return h.calls.includes("freeLlamaSwap");
+  };
+  assert.equal(await run({ GPU_LEASE_UNLOAD_MODELS: "a,b", GPU_LEASE_DEVICES: "gpu-cccc" }), true, "cards + list: re-check");
+  assert.equal(await run({ GPU_LEASE_UNLOAD_MODELS: "-", GPU_LEASE_DEVICES: "gpu-cccc" }), false, "cards + none list: nothing may leave");
+  assert.equal(await run({ GPU_LEASE_UNLOAD_MODELS: undefined, GPU_LEASE_DEVICES: "gpu-cccc" }), false, "cards, no list: there is no list to re-check");
+  assert.equal(await run({ GPU_LEASE_UNLOAD_MODELS: "a,b", GPU_LEASE_DEVICES: undefined }), false, "a list without cards is not a card lease");
+});
+
 // CLASS GATE. A `text` lease is a benchmark's reservation; unloading under it destroys
 // exactly the run the lease exists to protect. This regressed once: skipping the unload
 // for ANY inherited lease made text safe by accident, and electing an unloader without

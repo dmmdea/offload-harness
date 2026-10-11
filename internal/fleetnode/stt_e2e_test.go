@@ -12,7 +12,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -20,6 +19,7 @@ import (
 
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
+	"github.com/dmmdea/offload-harness/internal/fakeexe"
 	"github.com/dmmdea/offload-harness/internal/fleetnode"
 	"github.com/dmmdea/offload-harness/internal/pipeline"
 	"github.com/dmmdea/offload-harness/internal/sttclient"
@@ -108,21 +108,7 @@ func (w *whisperSwap) stats() (peak, total, unloads, aborted int) {
 
 func fakeFFmpegBinary(t *testing.T) string {
 	t.Helper()
-	ext := ""
-	if runtime.GOOS == "windows" {
-		ext = ".exe"
-	}
-	dst := filepath.Join(t.TempDir(), "ffmpeg"+ext)
-	if err := os.Link(os.Args[0], dst); err != nil {
-		b, rerr := os.ReadFile(os.Args[0])
-		if rerr != nil {
-			t.Fatal(rerr)
-		}
-		if werr := os.WriteFile(dst, b, 0o755); werr != nil {
-			t.Fatal(werr)
-		}
-	}
-	return dst
+	return fakeexe.Place(t, "ffmpeg")
 }
 
 // A burst of uploads through the real pipeline against a whisper that aborts what an unload finds in

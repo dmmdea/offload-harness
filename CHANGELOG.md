@@ -6,6 +6,962 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.181.0] - 2026-10-11 - a busy graph waits as a ticket anywhere in the cluster, image batches run across the fleet, a family is identified by its content, the text lane keeps its structured answers and its place in line, and the cages say what they could not do
+
+### Fixed — a render on one card no longer unloads the seats placed on the others, and a seat that comes back onto a leased card leaves before the next render (F15)
+
+- **The defect (register F15, from the 0.176.0 notes).** The render helper cleared "every non-keep-set model whatever card it sits
+  on", and a media lease was said not to be exclusive, so a text seat reloaded under it between renders. The first half traced to
+  code: the unload list for a lease on some cards (`gpualloc.UnloadModels`, the rule `gpu reserve --unload-seat` uses) placed a
+  model only through `layers` (`Config.ModelPins`), and read everything it could not place as "on the leased cards"; a roster that
+  could not be read, or a host with no llama-swap endpoint, left `GPU_LEASE_UNLOAD_MODELS` unset, which `render/gpu-lock.mjs` read
+  as today's rule, every model off the memory stack. The installer's tier seeds write no `layers`, so on a box nobody wrote them
+  for, every model was "unknown" and a render on card 2 emptied card 0 too. The second half is not a missing fence:
+  `blocksLoadOne` already gates a media lease, per card, through `Admit`, `AwaitUpstream` and `AwaitRunSlot`; it never read the
+  exclusive flag for it (a text-lease field). Two doors stay open: the holder's own process tree (`insideLease`, by design) and
+  clients that are not the harness.
+- **A model is placed by `layers`, else by its pin in the serving config.** New `internal/gpualloc/serving.go` reads
+  `serving_config_path` (the llama-swap yaml the box runs) and takes, per model id and alias, the env pin
+  `CUDA_VISIBLE_DEVICES=<uuid or index>[,...]`, matched against the card table. `LeaseScope.Locate` tries `layers` first, so a model
+  both declare keeps the `layers` reading. Only the env pin counts; device flags in `cmd` are never read. A model whose entry names
+  no device in env (an unpinned dual-card `-sm layer` / `--tensor-split` entry), a `proxy:` seat (a vLLM engine: its cards are
+  pinned in its own unit, not in this file), a pin that is a macro, an alias two entries claim with different pins, and a bare
+  index when the same entry does not also set `CUDA_DEVICE_ORDER=PCI_BUS_ID` (without it a CUDA index is not an nvidia-smi
+  index) stay UNKNOWN, each with its reason. The `layers` path trusts a bare index without that check; the serving-config path
+  is stricter on purpose, and its cost is only that an index pin without the order variable is unloaded instead of kept. In
+  `setup/templates/profiles.json` the multi-card tiers (`blackwell-2x16`, `blackwell-3x16`) carry `CUDA_DEVICE_ORDER=PCI_BUS_ID`
+  in `gpu_env`, which the renderer appends to every model's env, so an index pin rendered from them places; the single-card tiers
+  pin `CUDA_VISIBLE_DEVICES=0` without it, and a lease on their only card is the whole node anyway. Whether the live yaml of any
+  box carries it was not checked. If the file cannot be read, or `serving_config_path` is unset, every model `layers` do not declare
+  is unknown and the lane says so once.
+- **What a lease unloads.** `LeaseScope.Judge`: a model placed on a leased card goes; **a model placed on another card, by `layers`
+  or by the serving config pin, stays** (the F15 gain); a model whose placement is unknown goes, exactly as before F15, because
+  the render needs its card (a `proxy:` seat with no `layers` entry is unloaded under any card lease); the memory stack never goes.
+  That judgement runs on a roster that was READ. A roster that could not be read is not judged at all: see "A card lease gets a
+  list" below.
+  A lease that names every card the table lists is still the whole node (`holdsAll`: a one-card box's only card, all three of
+  three). `Touches` is the same reading, so the drain and the agent seat agree with the unload. The card table unreadable: every
+  model is unknown and goes, as before.
+- **The lane says what it did and why.** One line per reason, from `gpualloc.Explain`, in the wrapper's stderr and the media
+  admission's log: `unloaded, placed on a leased card by layers: ...`, `left resident, placed elsewhere by the serving config
+  pin: ...`, `unloaded, placement unknown (it is a proxy: seat, ...): ...`. The render helper logs the models it left on a list.
+- **A card lease gets a list, unless the roster could not be read.** `wrapperUnloadEnv` (`gpu reserve --devices`) and the media
+  admission's `unloadEnv` export `GPU_LEASE_UNLOAD_MODELS=-` when there is nothing to unload (no endpoint, nothing the verdicts
+  select) instead of leaving the variable unset. A whole-node lease has no list, and neither has a card lease whose llama-swap
+  roster could not be read: that is not an empty roster, nothing says what is resident, and a list built from the config alone is
+  never complete (with `layers` only, a resident model neither they nor the serving config name would never be judged and would
+  stay on the leased card; with neither, the list is empty and the lane unloads nothing). `gpualloc.UnloadModels` takes the
+  roster read's error and returns no list for it, whatever the config declares, so the variable stays unset and
+  `render/gpu-lock.mjs` keeps its own rule, every model off the memory stack, exactly as before F15; the wrapper and the media
+  admission log that they fell back because the roster could not be read. A roster that was read and is empty means nothing is
+  resident and is judged like any other. `gpu reserve --unload-seat` judges the other residents with the same verdicts.
+- **Between renders.** The unload is elected once per lease, so a seat that came back onto the leased cards stayed for the rest of
+  the lease. A job that lost the election under a card lease with a non-empty list now reads that list against `/running` again
+  before it submits (`withGpuSlot` `reclear`); `freeLlamaSwap` unloads a listed model only when it is resident, so a card that is
+  still clear costs two reads and no unload. A whole-node lease, a lease with no list and the none sentinel keep the
+  once-per-lease election. A card lease handed no list at all (an older wrapper, a hand-built environment) unloads every model off
+  the memory stack, and says that it had no list.
+- **Tests, written first and red** (all but one: `TestTheServingConfigPlacesWhatLayersDoNotDeclare` in the pipeline passed against
+  the previous positive-only rule too, because that rule also kept the unpinned seat, so it is proven by a mutant only, the one
+  that ignores the serving config pins). `internal/gpualloc`: a model nothing places is on the list, the serving config's pins place a
+  model `layers` do not (UUID, index with and without the PCI order, alias, a pair spanning the leased card), `layers` outrank the
+  serving config, a `proxy:` seat, an entry with no env pin and a cmd-only pin are unknown, an unreadable or unset serving config
+  is said once, an unreadable roster makes no list whatever the config declares (nothing placed, `layers` only, `layers` and a serving config) while a roster read and empty still has one, no card table unloads every model, the memory stack stays out
+  even when placed on a leased card, a lease on every card is the whole node. Root: the same through `unloadModelsFor`,
+  `--unload-seat` (layers and the serving config), the wrapper form end to end, the roster-unreadable and no-endpoint wrappers,
+  the unplaceable pin and the unreadable table. Pipeline: an unreadable roster hands the call no list and says why; the serving config
+  keeps a model on card C off card A's list. `render/`: a later job re-clears under a card lease with a list and under no other,
+  a card lease with no list says so and unloads as before, a list names what stays. `internal/modelaffinity`: a media lease fences
+  its own cards through every door exactly as an exclusive text lease does and lets a free card through, and the fence starts when
+  the drain ends. Each rule has a mutant that turns its test red (unknown stays, serving pins ignored, the proxy rule, the PCI
+  order rule, the serving config outranking `layers`, aliases, the hold-every-card reading, the memory-stack filter, the verdicts
+  in `--unload-seat`, the unset variable on a missing endpoint, the roster-error branch of `UnloadModels` and each caller dropping the roster error, the media
+  clause, the draining clause and the per-card scoping of the fence, the Node no-list log, the re-clear and its card condition,
+  the left-resident log).
+- **Not changed, and not verified here.** First, a limit of the fix: the roster read is the one input the unload cannot check. When
+  it fails, F15's gain is off for that lease: the render lane keeps its own rule and unloads every model off the memory stack, the
+  seats placed on other cards included, and says so; this is the safe direction (a card that stays occupied fails the render, a
+  seat that is reloaded costs a warm-up), chosen over a list built from the config, which can leave a resident model on the leased
+  card. A roster that was read and is empty is trusted to mean nothing is resident. Second, for a box without `layers`: the unload now knows from the
+  serving config which card a model is on, and the load fence does not. The fence (`modelaffinity`, armed from `config.ModelPins`)
+  still places a model through `layers` only, so on such a box a text load waits for any media lease, whatever card it is on,
+  exactly as before this change; reading the serving config there is a separate change. Also: a client that is not the harness can still load a model onto a leased card; the re-clear removes it
+  before the next render, it does not stop it, and it unloads what the first job's unload would have (a model whose placement is
+  unknown, in-flight requests drained first, then forced). The serving config is a path in the harness config that no default
+  fills in: a box that does not set `serving_config_path` has no model placed by it. Two parallel jobs of one lease can both read the
+  same resident model and both ask for its unload (idempotent; the second may log a failed per-model unload). Nothing here was run
+  against a live node, a ComfyUI instance or a llama-swap; the render helper was exercised against stand-ins for `/v1/models`,
+  `/running` and the unload routes only, and the yaml reader against fixtures shaped like the rendered config.
+
+### Fixed — the ledger row of an adopted ticket named no node (found in the 0.180.0 live acceptance, A6)
+
+- **The defect.** A `placed` ticket whose owner process ended is adopted by the next identical call (ADR 0083). The adopter never
+  dispatches, so that its handle opens no second PAIR card, and the node, node id and fleet job id of a remote call's ledger row came
+  only from the dispatch: the adopted call's row said it ran remotely and not where. The one other place the node appeared, the
+  placement note's `; ran on <node>` tail, does not reach the ledger, which keeps the first 120 bytes of a placement, and the lane
+  sentence ahead of that tail (the cards the lane was held on, the holder's reason and declared term) is longer than that. In the
+  recorded run the adopted row had an empty `node`, `node_id` and `fleet_job_id`, and a placement cut inside the lane sentence.
+- **The fix.** The adopter tells its attribution handle the node and the job the ticket recorded before it collects the result
+  (`core.NameNode`, the optional `core.NodeNamer`, `pairworkloads.RemoteCall.Ran`), so the one row carries `node`, `node_id` and
+  `fleet_job_id` exactly as a dispatched call's does, and still opens no card (`TestAnAdoptedTicketsRowNamesTheNodeItRanOn`,
+  `TestRanNamesTheNodeOnTheRowAndOpensNoCard`). A handle that was dispatched keeps the node it was dispatched to; an adopted job the
+  node passed back still writes no row. The placement note is unchanged. A reader that looks for where a remote call ran should read
+  `node_id`, not search the placement text.
+
+### Fixed — a nested `output_schema` no longer fails on llama.cpp seats: objects and lists of objects are constrained to their own shape (F43, C12)
+
+- **The defect.** The schema-to-grammar step (`internal/gbnf`) knew no object and no list of objects: `FromJSONSchema` read every
+  array as a list of strings and every object as a string, so the grammar a llama.cpp seat was sent forced `"labels":["..."]` where
+  the contract's schema wanted `"labels":[{...}]`. The seat obeyed; the schema's validator then rejected all three re-pack attempts
+  (`at '/labels/0': got string, want object`), the finished run deferred as `output failed schema`, and the grammar-free chat
+  attempt, shown only "array of objects" with no keys, wrote objects with their required keys missing. About 20 jobs in 48 hours on
+  four llama.cpp nodes; deterministic for any nested schema. The same flattening sat in `JSONSchema`, the vLLM rendering of the
+  extract task's fields, and in the unconstrained-seat shape instruction.
+- **The fix.** `Field` is a tree now: `TObject` carries its own `Props`, `TArray` carries its `Items`. `FromJSONSchema` reads a
+  nested object's own `properties` to any depth (ordered by that level's `required`, then by name) and arrays of objects or of
+  arrays; `Object` writes each as a rule of its own, named by position (`obj-N`, `arr-N`) because llama.cpp's parser takes only
+  letters, digits and dashes in a rule name and a key such as `key_facts` is not one. The root production stays on one line (the
+  thinking wrapper reads it), and a flat schema compiles byte for byte as before (`TestFlatGrammarIsByteIdentical`). An object the
+  schema leaves open is admitted as any JSON object, not a string. `JSONSchema` carries the nested shape and round-trips it
+  (`TestNestedJSONSchemaRoundTrips`).
+- **The prompts say the keys.** The re-pack prompt, on the grammar lane and the chat lane alike, names each nested object's fields
+  with their types (`array of objects, each with fields "name" (string), "score" (number)`), and the type rule tells the seat that an
+  object field holds exactly the fields listed for it. The shape instruction for a seat that cannot take a grammar states nested
+  keys, and its strict schema enforces them.
+- **How it is tested.** `internal/gbnf/gbnftest` is a small reference interpreter of the GBNF subset the package emits: it answers
+  "does this grammar admit this text", and refuses a rule name llama.cpp's parser would. The grammar built from a nested schema is
+  checked to admit the nested object and to refuse the strings it used to force
+  (`TestNestedSchemaGrammarAdmitsTheNestedAnswer`), and the re-pack test runs a seat that obeys the grammar it is sent
+  (`TestRepackOnALlamaCppSeatConstrainsANestedSchemaToItsOwnShape`): before the change it failed with the three attempts above, now
+  the first attempt delivers. The grammar was not compiled by a live llama.cpp in this change; the first nested request on a seat is
+  the confirmation.
+- **Still read as strings**, now stated where the schema limits are documented (ADR 0002's amendment, `contracts/README.md`,
+  FLEET-NODE.md, the operator guide): a list of numbers, booleans or enum values (quoted by the grammar, converted back by the
+  re-pack's coercion), a type list, `anyOf`, `oneOf`, `allOf` and `$ref`. Every property a schema lists is required by the grammar,
+  at every depth, whether or not the schema's own `required` names it.
+- **The coercion follows the schema to every depth.** The conversion above was promised at every depth and done at the top level only
+  (`coerceToSchemaNoted` read the schema's top-level properties and the items of top-level lists), so a numeric or boolean list inside an
+  object or inside a list of objects could never validate on a seat that obeys the grammar: every grammar attempt failed `at
+  '/meta/scores/0': got string, want number`, and the delegator's one-completion rescue could not deliver such a schema at all. It now
+  reads every property and every list item along the schema's `properties` and `items`, with the same lossless rule and the same
+  full re-validation, and the note names a nested field by its path (`meta.scores (2 items)`, `rows[].scores (3 items)`, `meta.owner.id`);
+  the top level is named as before. Red before: `internal/pipeline/agenttask_repackcoerce_nested_test.go` (the table; the premise that the
+  grammar quotes the list and refuses the real one; a seat that obeys the grammar, through `repackStructured` and through a run). Six
+  mutations of the fix were each caught.
+
+### Fixed — a structured re-pack is owed the time its own answer needs, so a loop that overran a short wall no longer skips it (F44/C13)
+
+- **The defect.** The wall is an expectation (ADR 0055 item 2): the loop ends on a stall or the ceiling, not on the wall. The auto wall is
+  the seat-rate estimate clamped to `[300, 900]` s, and on a slow seat (3 to 6 tok/s) the estimate is 1,500 to 3,400 s with the final answer
+  and the re-pack both priced at the 8,192-token cap, so the log line `wall 900 s is BELOW the estimate 3371 s` appeared on 54 of 55 agent
+  tasks of one node. The loop ran past the wall, and the structured re-pack, which `repackOpts.fit` held to the wall's end plus the 30 s
+  grace, was told `0 s left to the wall + 30 s grace ... buys 0 tokens < the answer's 1463` and skipped with a finished answer in hand: 23
+  jobs in 48 h, each a `budget` defer left to the delegator's rescue (the ledger also holds rows where that rescue of such an answer ended `call deadline reached`).
+- **The fix.** The bound a re-pack call runs under is the later of the wall's end and `OwedEnd`, the instant the call began plus
+  `1.5 x the answer's expected tokens / the seat's decode rate` (`repackOwed`), then the grace; the run's ceiling still caps it. The 1.5
+  is `agent.RepackMargin`, the margin the re-pack's own stall allowance pads its generation estimate with (now exported), so no number is
+  new. `OwedEnd` is set once per call: the resend and the chat lane share it and get no fresh allowance, so ADR 0055 item 9's "time only
+  runs out" stands. Where the wall has room nothing changes. The gate is unconditional (it does not read `est.Below`): the loop spending
+  the re-pack's share is the condition, and an explicit short `timeout_sec` produces it as well. A re-pack the ceiling cannot hold is still
+  skipped, and the note now names what ran out: `left to the ceiling` or `left to the re-pack's owed time`.
+- **Capped at the call's deadline.** The owed time also stops at `agent_call_deadline_sec` (ADR 0065, 1,500 s by default, counted from the
+  wall's start with this node's own setting standing in for the delegator's: a chosen approximation). `repackOwed` sizes the answer at no
+  more than the 8,192-token re-pack cap, so the largest answer on a 3.4 tok/s seat is owed 1.5 x 8,192 / 3.4 = 3,614 s: under the ceiling
+  and far past the call's 1,500 s. That re-pack is skipped (`left to the call's deadline`) and the delegator's rescue keeps the time it needs,
+  as before this change. Replaying the arithmetic on the ledger's 149 distinct starved skips (median 3.4 tok/s and 961 expected tokens, owed 27
+  to 1,009 s): 105 end inside 1,500 s when the re-pack starts at the row's recorded latency and gain, 44 do not and are skipped as before. An
+  estimate, not a measurement: the row's latency is the delegator's view and the node's wall started later.
+- **Not changed.** The wire's 900 s cap on a declared `timeout_sec`, the estimate's worst-case terms (why the wall reads as below it), the
+  rate order (`repackRate`), and the delegator (the re-pack publishes its allowance when the phase starts, so a poll that follows progress
+  follows the extension up to the node's ceiling). A re-pack that runs on its own time moves work from the delegator's rescue to the slow
+  seat; the rescue still catches what the ceiling refuses.
+- **Tests.** `internal/pipeline/agenttask_repackowed_test.go`: a 2 s wall and a loop that ends at 2.4 s (red before: `skipped: 0 s left to
+  the wall + 0 s grace`), a slow seat with an instant loop (red before: `60 s left ... buys 29 tokens < the answer's 69`), the ceiling that
+  cannot hold it, the owed time not renewed for a later attempt, `repackOwed` and the later-of-two-ends arithmetic. Two tests whose premise
+  was the defect (`TestRunAgentTaskRepackIsSkippedWhenTheCeilingCannotBuyTheAnswer`, the review-lane subtest `a re-pack the wall could not buy`)
+  now pin the ceiling-bound skip. Four mutations of the fix were each caught. ADR 0055 item 10, `docs/systems/fleet-node.md`.
+
+### Fixed — a re-pack that loops is asked differently the next time, and a looped list is not published (C14)
+
+- **The defect.** 28 re-packs in 48 h were cut at the budget: 11 degenerate repetition, 17 "ran on past the budget" (`the answer needs about
+  725 tokens, inside the 1173-token budget`), and the register's own rows show the chat lane looping on the same text after the grammar lane
+  did. In the code: the seat decodes greedy (`temperature` 0), the request carried nothing that discourages repeating, the grammar's list rule
+  is unbounded (and does not compile the schema's `maxItems`), and the attempt after a degenerate cut was the chat lane with the same
+  sampling and the same prompt, which a greedy seat answers the same way. A loop that closed itself before the cap was a complete,
+  schema-valid object that would have been published as the answer (inferred from the code path: successful ledger rows carry no reason,
+  so it is not counted). The tail test looked for a repeated block of up to 64 bytes in the last 256, so two
+  alternating list items of 80 bytes read as "ran on" and were escalated to the 8,192-token cap.
+- **The fix.** A cut that is no budget problem (a degenerate tail, or the seat ran on past a budget the answer fits in, and the clock did not
+  set that budget) marks the call. The next attempt is a second grammar attempt (the lane that constrains the shape) that carries the
+  sentence `repackNoRepeatNote` and `frequency_penalty` 0.5 (`llamaclient.WithFrequencyPenalty`, the OpenAI-standard field both engines on
+  the fleet read), and the chat lane after it carries both. The first attempt never does, and a cut that more tokens cure (the resend at
+  the cap) does not. The lane on the wire reads `grammar+no-repeat`, `json_schema+no-repeat` or `chat+no-repeat`. A complete object whose
+  list repeats one item (or a block of two or three) at least 6 times in a row, where the answer it was written from holds the item fewer
+  times, is not published: the attempt fails as `re-pack repeated the list item "x" N times in a row ...`, marks the call, and ends as an
+  abstention naming the item when every attempt does it. An item may be a string, a number, a boolean, an object or a list (F43 lets a
+  llama.cpp seat write a list of objects, and a loop closes inside those as well): an object or a list is compared by its compact JSON with
+  the keys sorted, one that holds nothing but empty values (`{}`, `""`, `0`, `false`) is never a loop, the answer is taken to hold an object
+  as often as it holds the longest string in it (an object with no string in it is judged by its repeat alone), a finding clips a long item
+  to 100 bytes, and every list is read at every depth, named by its path (`meta.labels`, `rows[2].tags`). The detector keeps its two original
+  tests and their order and adds a third pass for a block of 65 to 192 bytes in the last 1,024 (whitespace still reads the last 256).
+- **Chosen, not measured, and unverified.** `frequency_penalty` 0.5, the run of 6, the period of 3, the 1,024/192 window. No seat was
+  replayed with the penalty: that it ends a loop on the fleet's seats is the mechanism's expectation, and its fidelity cost on an honest copy
+  (paid only on an attempt after a failure) is unmeasured. llama.cpp's sampler (count in the last `penalty_last_n` tokens times the penalty,
+  subtracted from the logit) was read in its source; the server's mapping of the request field `frequency_penalty` to it was not probed on a
+  live seat. The real heads and tails of the 28 cuts were not recorded, so which of the 17
+  "ran on" cuts were loops and which a restating schema's honest length is not known; a restating schema now gets one more attempt of the
+  same length before it defers. Compiling `maxItems` into the grammar was left out: it cannot be verified without a live llama.cpp compile.
+- **Tests.** `internal/pipeline/agenttask_repackloop_test.go` (a greedy-seat fake that loops until the request is conditioned: red before on
+  the register's own shape, `attempt 2/3 ... chat re-pack truncated ... degenerate`; the published repeated list; the detector),
+  `internal/pipeline/repack_objectloop_test.go` (a list of objects, a list of lists and a list at depth: the detector's table, and a seat that
+  obeys the grammar and loops inside it, end to end: red before, the eight-object list was published as the result),
+  `internal/llamaclient/frequencypenalty_test.go` (the key only on request, the option-free body byte-identical). Three existing tests
+  pinned the old flow (a loop goes straight to the chat lane) and now pin the new one; the chat lane's time-skip test moved to a cut that is
+  no loop. 18 mutations of the fix were each caught (the run threshold survived once because its test was written in terms of the constant,
+  and is now pinned by literals). ADR 0055 item 10, `docs/systems/fleet-node.md`.
+
+### Fixed — a research digest's quotes are the page's own words, or they are flagged (F4)
+
+- **The defect.** A research goal that asked for exact wording (UI labels, a button's text) got digests that paraphrased it, so a
+  fact-checker could not find the "quote" on the page. Nothing asked a seat to copy, the goal's length rule ("at most 18 words
+  each") invites shortening, and nothing looked a quote up in the page afterwards.
+- **The goal.** `Build` adds one sentence to the goal of any schema that has a `quotes` list, the default digest's included:
+  exact wording the goal asks for (a quotation, a label, button or menu text) goes in `quotes`, copied character for character
+  from the file, never shortened, reworded, translated or re-cased, and a shorter exact stretch beats a paraphrase. It sits
+  before the verdict ask, which stays the goal's last sentence. A schema without a `quotes` list gets nothing new.
+- **The check.** After the engine returns, the delegator looks every quote up in the page its digest was written from
+  (`research.VerifyQuotes`, applied by `offload_research` and the `research` verb through `research.AnnotateWire`). A quote that
+  is already the page's bytes is left alone. Otherwise it is looked for with case, runs of white space, typographic quote marks
+  and dashes, no-break and zero-width characters set aside and, failing that, with all punctuation set aside too (a colon the
+  seat added after a label, a table's cell borders), always on word boundaries; an ellipsis is a gap between parts that must each
+  be found in page order. A quote found only that way is replaced in the published digest by the page's own span, so it is the
+  page's bytes by construction. A quote found nowhere (a paraphrase, or words stitched together from separate places) stays
+  where the seat put it and is listed in the result row's new `quote_check` block (`checked`, `verbatim`, `corrected`,
+  `unverified`, `note`). The block is absent when the digest has no quotes to look up, and no other door publishes it. **A
+  flagged quote never fails the digest and is never dropped**: an acceptance failure discards a whole run (see 0.171.0), and a
+  new acceptance verb would be refused at the ACK by every node one release behind, so the check lives on the delegator,
+  outside the contract.
+- **Measured.** Replayed over the 112 research digests one delegator logged on the day the defect was filed (104 carried
+  quotes): of 877 quotes, 479 were already the page's bytes, 211 were found only through the tolerant forms (the seat had
+  changed a mark, a space, a case or some punctuation) and now publish as the page's own span, and 187 (21 %, in 49 digests)
+  are on the page nowhere as written. The replay is of what the seats had already written, so it measures the check, not the
+  new goal sentence; the sentence's effect on the seats is unmeasured.
+- **Limits.** The page is the text the fetch kept: navigation, header and footer are stripped before a seat sees the page, so a
+  label that lives only there cannot be verified. The field is found by its name, so a caller's schema that keeps its verbatim
+  text in a field not called `quotes` is not checked. The delegation-log corpus and the ledger rows are written inside the
+  engine, before this step, and keep the seat's raw answer; the published body carries the corrected one. On the MCP door the
+  body's untrusted pass (`internal/untrusted`) runs after this step: it drops the hidden characters a page carries, neutralizes
+  chat-template markers and caps each string at 16,000 characters, so a published span can differ from the page by those only.
+- **F45 (the `nonempty:verdict` failures of the research lane) needed no code change.** 0.171.0 had already replaced the check
+  with `nonempty:key_facts|numbers|quotes|verdict`, and every recorded failure precedes that release's deploy. What was missing
+  is an end-to-end pin, added here: through the real handler, a digest with populated lists and an empty verdict succeeds, and
+  a digest that said nothing still fails verification.
+
+### Fixed — a job queued on a busy node stays in line at its queue budget when nothing better is on offer, instead of being withdrawn to the back of the same line (C16)
+
+- **The defect.** The queue budget (`clamp(1.5 x ETA + 30 s, 60 s, patience)`) is derived from the node's ETA, which is the median of
+  its recent walls, so a one-worker node mid-way through a job that runs three times its median publishes a wait that is a fraction of
+  the one a new job faces. One box's ledger shows nine delegated jobs withdrawn at their queue budget (60 s to 11 min) in a day and a
+  half. A withdrawn job is filed as a capacity refusal (ADR 0064); with no other node to take it, it goes back to the capacity wait,
+  which does not exclude the node it came from and asks it again after its cooldown, putting the job at the back of the same line:
+  the wait already spent is thrown away to land where it started.
+- **The fix.** At the budget the delegator asks before it withdraws (`stayInLine`). It reads the node's health once more; the job
+  **stays** when the node's workers are all running (a published `max_concurrent_jobs`, that many `jobs_running_capped`: the job
+  waits for a worker, which is a queue and not a wedge) and no other place has room for it now (`betterPlaceThan`: another eligible remote that
+  passes the re-placement test, or the local seat when the route allows it and no lease reserves or fences it and its run-cap line
+  has a slot). It is asked about again one step later (60 s, chosen: the budget's own floor), up to the patience the contract was
+  given, which is where the ETA-derived budget was already capped. A node with a free worker that still has not started the job, a
+  node whose health cannot be read, a node that publishes no worker ceiling or no capped count (an older node), and a job with a better
+  place on offer are withdrawn at the budget exactly as before. The failure text says `kept in line N time(s) past the derived budget, up to the contract's patience:
+  <why>` when the wait was extended.
+- **`jobs_running_capped`.** `/fleet/health` gains it (additive, agent lane only, a pointer so `0` is published): the part of
+  `jobs_running` that counts against `max_concurrent_jobs`. `jobs_running` counts every job on the node, so a node with four renders
+  running and free agent workers reads "all busy" by it, and a queued job there is not waiting for a worker.
+- **A queued job keeps its place in the call's width** (unlike a capacity wait, which gives its slot up, ADR 0073): it is an open
+  attempt on a node that is already full. A call with jobs staying in line keeps its width for up to the patience where those jobs used
+  to be withdrawn at the shorter derived budget. `betterPlaceThan` does not see the subtask's own tried/excluded sets (a known gap, ADR 0063).
+- **Not changed.** The ETA itself (`new_job_wait_sec`) still prices a new job at the median wall whatever the running job has done, so
+  placement can still send a job to a node that is mid-way through a long one; it now waits there instead of being reshuffled.
+- **Tests.** `internal/delegate/queue_stay_test.go` (a busy node that starts the job at 3 times its budget is waited on to success;
+  a node that stays busy is waited on to the end of the patience and no further, and the failure says so; a node with a free worker is
+  still withdrawn at the budget; a node whose health cannot be read, or whose running jobs are renders, or that does not publish the
+  capped count, is withdrawn too; another node with room, or no other node,
+  is told apart, and the job leaves for the node with room end to end). `TestQueueRefreshFailureIsNamedOnTheDeadline` now counts the
+  question at the budget among the bounded health reads; `internal/fleetnode/jobs_running_capped_test.go` pins the new health key
+  (a render does not count, an agent job does, a published 0, absent with the lane off). 10 mutations were each caught; an eleventh
+  (treating a failed read as readable) is equivalent, since a failed read decodes to a view with no worker ceiling. ADR 0063
+  Amendment 2026-10-10, `docs/FLEET-NODE.md`.
+
+### Fixed — a capacity wait that holds a run slot gives it up at its bound and keeps waiting, so a subtask in line for a node is not refused while the call has time (C16)
+
+- **The defect.** A fan-out on a saturated fleet ended subtasks as `capacity wait: no node had room within 2m0s (waited 2m0s;
+  agent_placement_wait_sec=0; ... 4 subtask(s) of the call had not started, so this wait could not hold its run slot to the call's
+  deadline)` while the call still had time left. ADR 0073 decision 9 capped a wait that holds a run slot while a sibling
+  has not started at its old TTL so that waiters could not hold every slot to the deadline, and the cap **ended the wait**: the
+  subtask paid for the protection of its siblings. A node freeing a minute later would have taken it, and the operator's rule is to
+  queue and never refuse (a capacity wait is progress).
+- **The fix.** At the bound the wait gives the subtask's place in the call's width up (when a subtask has not started, so that one
+  can begin) and runs on to the call's horizon like the last subtask to start (`extendHeld`). It keeps probing the fleet every tick
+  and takes a place again only to dispatch (`runSlot.acquire`, bounded by the horizon, reading the fleet again if it had to wait for
+  one); a refused attempt gives the place back before the wait sleeps. The attempts a call has open at once are therefore still its
+  width, which is why ADR 0073 had rejected releasing the slot outright; the process gate and the cooldowns pace the asks as before.
+  A wait with nobody behind it keeps its place. Every subtask of a saturated call now ends at the horizon with the defer that says the
+  call bounded it, none at its TTL.
+- **Not changed.** A call with no whole-call deadline (`delegate` CLI, `agent_run` / `offload_ask` with a route) still waits
+  `agent_placement_wait_sec` (default 120 s): it has no horizon to extend to. The composite decision's eviction wait and the
+  verification retry's wait keep their TTL. A chunk of a batched call whose waits run to the horizon leaves its later chunks to the
+  existing no-room defer (decision 10).
+- **Tests.** `internal/delegate/callwait_yield_test.go` (all five subtasks of a saturated call land when the node frees after the
+  TTL, and the fifth began while the node was still full; the node never holds more of the call's jobs than its width when eight
+  subtasks wait on a node that publishes no queue ceiling; a wait holds no place between refused attempts, keeps it for its TTL,
+  and holds one when it lands; the last subtask to start keeps its place). `callwait_slots_test.go` and `deal_width_test.go` pinned
+  the old ending and now pin the new one. 7 mutations were each caught. ADR 0073 Amendment 2026-10-10, `docs/systems/fleet-node.md`,
+  `docs/OPERATOR-GUIDE.md`.
+
+### Fixed — the prefill stall clock is sized from the whole prompt and the seat's slow recent rate, so a long prefill on a heat-soaked seat is not read as silence (F10)
+
+- **The defect.** A 4,613-token prefill on a heat-soaked seat showed "silent 59 s of 60 s allowed" while the seat was working,
+  one tick from a prefill stall. The allowance (`pending ÷ prefill rate × 1.5 + 30 s`, floor 60 s) was sized from two wrong
+  inputs. **The prompt was the transcript alone**: the loop passed `estimateTokens(msgs)` (4 bytes a token) and left out the
+  tool-spec block that ships with every request, which the loop already measures for compaction (`specReserve`, 1-6k tokens on a
+  full build). On a seat measured at about 180 tok/s a 4,613-token prompt allows 68 s, and any transcript estimate under about
+  3,600 tokens allows the 60 s floor, so the undercount alone turned a thin allowance into the floor. **The rate was an
+  average**: `prefill_tok_s` is an EMA over runs, so a run on a seat that had heat-soaked was averaged with the cool ones.
+- **The prompt.** `agent.prefillPending`: the transcript estimate at the run's token density plus the tool-spec block, never
+  under what the server counted for the previous call's prompt (the transcript only grows). The density is `assumedPromptDensity`
+  1.3 until a call reports (the low end of the 1.3-1.4 the budget-calibration fit already measured), then the density the call
+  showed, clamped to 3 (chosen) so one odd usage reading cannot make the clock unbounded. Run-local, so `--serve` handlers sharing
+  one `*Loop` do not share it.
+- **The rate.** The seat-rates store keeps the last 5 solo prefill rates (`prefill_rates`; 5 is chosen, not measured: one run folds
+  in up to two samples) and their slowest (`prefill_slow_tok_s`), the rule `cold_load_sec` already follows (the slowest of its
+  window: a stall bound must hold the slow case). `pipeline.LivenessPolicyFor` sizes the prefill clock from
+  `Seat.StallPrefillTokS()` (the slowest, else the EMA of a store written before the window). A shared-seat sample still teaches
+  nothing (ADR 0066). `/fleet/health` `seat_rate` publishes `prefill_tok_s` and `prefill_slow_tok_s` (additive, omitted until a
+  solo prefill is measured), so the number a "silent N s of M s allowed" line rests on can be read.
+- **An unmeasured seat waits longer on its first run.** Its rate is the assumed 100 tok/s, and the prompt now includes the tool block,
+  so a full build with about 3,000 tokens of tool JSON earns 3,000 / 100 x 1.5 + 30 s = 75 s before the transcript is counted, where the
+  transcript alone earned the 60 s floor. The first run measures the rate. The silent-seat fixture of `internal/pipeline` now names a
+  measured prefill, as the cold-load tests do.
+- **A wedged seat still stalls.** The allowance is still bounded by the prompt and the slowest recent rate, and the busy hold's
+  flat bound still ends a seat whose engine does no work (`TestWedgedSeatStillStallsUnderTheSizedPrefillClock`).
+- **Tests.** `internal/agent/prefill_pending_test.go` (the spec block is in the clock; the server's count is a floor; the density is
+  learned; the first call uses the assumed density; a wedged seat stalls), `internal/seatrate/prefill_window_test.go`,
+  `internal/pipeline/liveness_prefill_slow_test.go`, `internal/fleetnode/seatrate_prefill_health_test.go`. 12 mutations of the
+  sizing, the window and the wiring were each caught. ADR 0055 Amendment 2026-10-10, `docs/FLEET-NODE.md`, `docs/OPERATOR-GUIDE.md`.
+
+### Fixed — the first vision call after an idle unload no longer fails on the seat's cold load (F49)
+
+- **The defect.** The vision seat unloads after its idle ttl. The next vision call (`vqa`, `ocr`, `assess_image`,
+  `video_describe`, each `video_watch` window) met a cold seat, and llama-swap holds that request open for the whole load, so the
+  client's single `request_timeout_sec` (120 s) had to cover the load AND the inference. A 32B vision seat's cold load plus a
+  many-frame video prefill outlasted it: the call failed with `Client.Timeout exceeded while awaiting headers` (`err_class: timeout`,
+  120.3 s in the ledger, a 499 at 2m0.016s in the router's log) while the load carried on: the router logged the seat's health check
+  passing after the cancel. The next vision call, seconds later, succeeded in 29.6 s. The pipeline already knew a first call after an idle gap was likely cold, but only to keep
+  that timeout out of the circuit breaker (`breakerFailure`); the call itself still failed.
+- **The fix.** `runVisionGen` reads `/running` once after its GPU-lease gate. A seat not listed ready is warmed first with the
+  agent door's warm-up (`warmSeat`): one passthrough request that triggers the load, passes the GPU-lease fence like every
+  deliberate load, and holds until the seat is up, for at most the new `vision_coldload_wait_sec`. The vision request is sent only
+  afterwards, so it keeps its full `request_timeout_sec` for inference alone. Every vision door shares the one function, so all of
+  them get it. A seat already ready costs one `/running` read and nothing else; a model routed off this box (`seat_endpoints`, a
+  cascade lane) is not warmed on the local router; `vision_coldload_wait_sec: 0` restores the old behaviour.
+- **The bound is chosen, and it is a bound.** Default 180 s, **chosen, not measured as one figure**: first requests to a cold seat
+  took 14 to 84 s, load plus their own inference (the first chat completion in the router's access log after each of the last 25
+  cold starts, 21 of which completed), and one load outlasted the 120 s client timeout; 180 s is about twice the slowest completed one and far inside the router's own 600 s health-check
+  ceiling. It limits how long the caller is held, not whether the call is made: when a load outlasts it the call goes on and the
+  load carries on behind the request, and a defer after a wait says so (`(the vision seat was cold: waited Ns for its load before
+  sending)`). A cold call's worst case is now the wait plus `request_timeout_sec` (300 s with the defaults, which equals the
+  delegator's fleet vision budget), and `vision_gpu_wait_sec` before both when a render holds the card first. Config: `vision_coldload_wait_sec`; `docs/systems/offload-pipeline.md`, `docs/OPERATOR-GUIDE.md`.
+- **Proof.** `TestVisionColdSeatIsWaitedForBeforeTheRequestIsSent` has a router that starts the load on the first request for the
+  model and holds the request until the seat is up (the real behaviour), with a load three times the request timeout: it failed
+  with the production error before the change and passes after, and the vision request arrives only once the seat is ready.
+  `TestVisionColdLoadWaitIsBounded`, `TestVisionResidentSeatIsNotWarmed`, `TestVisionSeatRoutedElsewhereIsNotWarmedLocally` and
+  `TestVisionColdLoadWaitOffLeavesTheLoadToTheRequest` pin the bound, the free resident case, the off-box case and the off switch;
+  stubbing the wait out, removing its bound and removing the off-box guard each fail the test that names them.
+
+### Fixed — test, bake and measurement traffic no longer lands on the production ledger views or the PAIR dashboard (register F48, job-error class C23)
+
+- **The defect.** In 48 hours, 42 PAIR cards for a seat named `bake` that no endpoint served (`agent seat "bake" is not in the
+  endpoint's served roster`, connection refused on the bake's own port) and 444 ledger rows for a fixture seat reached the
+  operator's production surfaces, so every error rate and the fleet-share figure read off the ledger mixed test traffic with real
+  work. Nothing marked a row or a card as a bake, a measurement or a test.
+- **A row now carries its run class.** `run_class` (`test`, `bake`, `measurement`, or an operator label) is settled in `Record`, the
+  one path every writer takes, and is absent on every production row, so an ordinary row is byte-identical to before. It comes
+  from, in order: the writer; the process (`LOCAL_OFFLOAD_RUN_CLASS=bake`, any clean lower-case label, or a class-prefixed
+  `LOCAL_OFFLOAD_ORIGIN` such as `bake:run-7`; `production` sets nothing); a test binary that opened a ledger outside its own
+  throwaway directory (`test`: this is how test rows reached the real ledger); and what the row declares, so rows already on
+  disk read the same way: a call pinned with `pin_reason: measurement`, the `cli:fleet-measure` and `cli:fleet-smoke` doors, and
+  the `go-test` origin the repo's suites set. `ledger.ClassOf` is the one reading of it. **Nothing is guessed from a seat name**: a
+  seat that is not in the served roster is a real misconfiguration (a mistyped `agent_model` fails exactly like the bake's seat) and
+  stays on every view.
+- **The views leave it out and say so.** `ledger`, `loupe`, `stats` and `audit-sample` skip the labelled jobs by default and report
+  how many they skipped per class (`excluded_non_production` in the `ledger` and `loupe` JSON, a `left out:` line, a note on stderr
+  for `stats` and `audit-sample`, whose stdout keeps its shape); `--include-test-traffic` counts them again. The inner `agent` row of a
+  labelled job is skipped with its parent, so a measurement's savings do not leak into `tokens_saved`. `ledger.SummarizeFile`
+  and `TopDeferReasons` default the same way (`SummarizeFileWith` / `TopDeferReasonsWith` include them), `ledger.ReadProduction`
+  and `ledger.ProductionRows` are the filtered readers, and `ledger.ReadAll` stays the raw one. The confidence calibration, the
+  tier health report, the router and the correctness head are fitted on production rows only: a fixture's margin would move the
+  live thresholds. The calibration, the health report and the router read the file with their own scanners, and they judge the rows
+  TOGETHER (`ledger.ProductionRows`), so the inner `agent` row of a measurement-pinned job, which names its parent and carries no
+  class of its own, leaves with its parent as it does in the views above (a first version judged each row alone and counted it).
+  `TestEveryRawLedgerReaderFiltersTestTraffic` fails when a new report reads the raw rows without dropping them.
+- **PAIR.** A process with a run class opens no card (`pairworkloads.Config.Suppressed`, through the gate every card already
+  uses) and asks no fleet node to card its jobs: an asker with no emitter sends `X-Offload-Pair-Card: node`, which would have put
+  the card back on the node, so a suppressed asker sends the asker name and no card header. A delegation pinned for `measurement`
+  opens none and its dispatch deletes the card header (a thin client with no emitter would otherwise have the serving node open
+  the card), `Begin` and the remote-call card refuse the `fleet-measure` door (the asker's row is still written), and the ledger
+  observer cards no row of a class. `LOCAL_OFFLOAD_PAIR_TEST_CARDS=1` keeps the cards of a labelled run
+  (to test PAIR itself); `fleet-smoke` keeps its card; the `go-test` origin labels rows only, because the repo's own tests build
+  real emitters against fixture ingresses.
+- **Not covered.** (1) A run is labelled only when its tool says so: nothing is guessed from a seat name, because a seat that is
+  not in the served roster is exactly what a mistyped `agent_model` looks like and must stay on every view, so the bake tool that
+  produced the 42 cards has to set `LOCAL_OFFLOAD_RUN_CLASS=bake` (or pin its calls for `measurement`). (2) The class does not
+  ride the fleet wire: a fleet node's own ledger row for work it ran for a labelled asker is unlabelled (its card is not opened,
+  because the asker sends no card header), and the media and vision lanes' asker headers know the config, not the door, so a
+  `fleet-measure` render from a box with no PAIR emitter that overflows to a node still has the node open its card. (3) The
+  harness-share gate and any other reader outside this repository that sums the ledger itself must skip rows with `run_class` set
+  (and `origin_session: go-test` for rows written before the label).
+- Tests: `TestOriginResolvesTheRunClassFromTheEnvironmentThenTheOriginPrefix`, `TestClassOfReadsTheLabelThenTheOriginThenWhatTheCallerDeclared`,
+  `TestRecordStampsTheRunClassOnEveryRowAndLeavesProductionRowsByteIdentical`,
+  `TestATestBinaryWritingOutsideItsTempDirectoryLabelsItsRowsTest`, `TestSummarizeFileExcludesNonProductionTrafficByDefaultAndSaysSo`,
+  `TestProductionRowsDropsLabelledRowsAndTheInnerRowsOfLabelledJobsAndCountsThem` (ledger);
+  `TestFromConfigOpensNoCardsForANonProductionRun`, `TestASuppressedAskerDoesNotAskTheNodeToCard`,
+  `TestTheLedgerObserverCardsNoRowOfANonProductionClass`, `TestBeginOpensNoCardForTheMeasureDoor`,
+  `TestARemoteCallThroughTheMeasureDoorOpensNoCardButStillWritesItsRow` (pairworkloads);
+  `TestAMeasurementPinnedDelegationOpensNoPairCard`, `TestAMeasurementPinnedDispatchAsksNoNodeToCard` (delegate);
+  `TestLedgerCommandLeavesOutTestTrafficAndSaysSo`, `TestLoupeLeavesOutTestTrafficAndSaysSo`, `TestStatsAndAuditSampleLeaveOutTestTraffic`
+  (root); the four `...ProductionRowsOnly` tests of the health, calibration, router and confhead packages, and the inner-row twins of
+  three of them (`TestHealthLeavesOutTheInnerRowOfALabelledJob`, `TestRouterTrainsWithoutTheInnerRowsOfALabelledJob`,
+  `TestCalibrationLeavesOutTheInnerRowsOfALabelledJob`: red before, three mutants each caught).
+
+### Added — a busy whole-node graph is a ticket in the cluster queue, and a node's "I do not hold this file" is about that ticket only (S5, ADR 0083 Amendment 1)
+
+- **What changed for a graph, in one place (0.180.0 to this release).** *Changed:* (a) a busy `auto` graph that names no `devices`, on a
+  machine that has the lane, a fleet and a queue, is a ticket: it starts on the first matching lane that frees anywhere, in order of
+  arrival, and the call answers with the ticket, its position and `cluster[]` instead of the local lane's queued answer with a `tk-`
+  token to re-send; (b) the bound of three nodes is gone; (c) a node's 503 for a file the graph names carries `refusal: "not_capable"`:
+  the ticket marks that node not-capable for itself and puts no pause on it (0.180.0 put the placer's 5 s pause on the node for every
+  call); (d) a graph that reads input files is a local-only ticket with a place and a position, and every answer carries `fleet_note`
+  (0.180.0 annotated only a deferral); (e) **a graph that carries a `tk-` `waiter_token` no longer stays on this machine**: its place
+  comes into the ticket and it may go to a node, as an image's does (0.180.0 never moved it); (f) the deferral a graph ends in after a
+  local failure no longer carries `cluster[]` (the per-node reasons live in the queued answers, as for an image); (g) **on a machine
+  whose lease root is refused, so that it keeps no queue, a busy graph is no longer offered to the fleet** (an image never was; 0.180.0
+  offered it with only the in-process hold between two calls); (h) the MCP tool takes `wait_s` and `run-graph` blocks on its ticket.
+  *Unchanged, and held on the ticket path by tests of both kinds:* a graph and an image ticket share one per-node claim, taken under
+  the directory lock, and one order, in which an older waiting ticket is first in line; a lane the pipeline could not read is a ticket
+  and the fleet is looked at first; the queue lives under the lease's state root, so a config with no `state_dir` has it; a node's file
+  check at its door, the one-card rule, `min_vram_gb` and the release proof; a graph that names `devices`, or runs under a lease its
+  process inherited, stays on this machine and is no ticket.
+- **The behaviour.** A `run_graph` call (`offload_run_graph`, `run-graph`) that names no devices, on a machine that has the lane, a
+  fleet and a queue, whose lane is not free (or could not be read), was offered in 0.180.0 once to at most three idle nodes and then
+  waited in this machine's own queue, joining it late, with a `tk-` token the caller had to send again. It is now a **ticket**, as an
+  image call is: the harness holds it and starts it on the first matching lane that frees anywhere, here or on an idle single-card node
+  that holds the files it names, in order of arrival, with one answer that says per node why not (`cluster[]`) and no caller loop. The
+  MCP door answers inside `wait_s` (new argument; else the machine's `gpu_wait_ms`) and the ticket goes on after the call returns;
+  `run-graph` on the CLI blocks until the job is done, prints on stderr where the ticket stands, and the first Ctrl-C cancels a ticket
+  that sent nothing. **This closes the limit 0.180.0 stated for graphs** ("a graph does not wait in the cluster queue yet"). **A graph
+  whose lane could not be read is a ticket too**: 0.180.0 already marked that lane `Unjudged` (a lease directory that would not open, a
+  card table that did not read inside its 4 s bound; the card table is slowest to read exactly when a heavy render holds the card) and
+  offered such a graph to the fleet once, running it here when no node took it. As a ticket, its first scan looks at the fleet, and
+  the run on this machine's lane is the answer only when no node can take the graph
+  (`TestMediaLaneFreeGraphIsFreeWhenTheCardTableCannotBeRead`,
+  `TestMediaLaneFreeGraphIsUnjudgedWhenTheLeaseDirectoryCannotBeOpened`, `TestAnUnreadLaneStillLooksAtTheFleetForAGraph`,
+  `TestAnUnreadLaneWithNoNodeRunsAGraphHere`).
+- **A graph is the same call when its content is.** The key is the sha256 of the task and the parameters without the `waiter_token`,
+  with the graph and the manifest taken as canonical JSON (keys sorted, whitespace dropped, numbers as written) in place of their
+  paths: the MCP door writes an inline `graph_json` to a new temp file on every call, so a key made of the path would never attach,
+  and a file edited under the same path is another graph. `out_dir`, `reserve_vram`, `min_vram_gb` and `model_family` are part of the
+  key. One ticket per identical request, from either of two processes; `waiter_token=mq-...` collects it. The ticket mints no seed and
+  sends no recipe: the graph owns its sampling.
+- **The ticket is the bytes it was admitted with.** The key was the graph file's content at admit, and the node was sent that content,
+  but this machine's own lane was handed the file's PATH and read it when the lane freed, up to eight hours later: a caller that reuses
+  one file (shot 1 written, "queued", shot 2 written over it) got shot 2 rendered under shot 1's key and shot 1 never rendered, a
+  different result depending on which lane served the ticket, and a finished result that could not be collected by its own token once
+  the file was removed or edited (the key is recomputed from the file at every call). The ticket now writes the graph and the manifest
+  as the plan holds them into its queue directory (`body-<id>-graph.json`, `body-<id>-manifest.json`), takes its key from those bytes,
+  and the node's payload, the local run, the need and an adopter all read them; the copies go with the ticket (finished, canceled, swept
+  after an owner that died before sending, the loser of a create race), stay while a dead owner's placed ticket can be adopted, and are
+  never swept while a ticket may still be being made. A graph ticket also records a path key (the same paths and parameters, no file
+  read): a `waiter_token` is accepted for a request with the same content or the same path key, so the result stays collectable and a
+  dead owner's placed job is adopted from the copies after the file is gone or overwritten, while a repeat WITHOUT a token attaches by
+  content alone (a file overwritten with the next shot is a new job and inherits no arrival).
+- **It keeps its place in this machine's line.** `LeaveMediaPlace` answered "only image generation is probed" for a graph; it now
+  leaves the whole-node token the real admission leaves for a waiting graph (reason `run-graph`) at the ticket's arrival time, brings
+  along a `tk-` place the call already held, and the final local run spends it through `waiter_token`. A host that leases no cards keeps
+  none and the answer says so.
+- **A node's refusal of a file is "not this graph", not "full".** The 503 a node answers when the graph names a file it does not hold now
+  carries `refusal: "not_capable"` in its body (a full node's 503 and a route-not-ready 503 do not). The ticket marks that node
+  not-capable for **itself** with the node's own words, **puts no pause on the node** (before, the 5 s the placer sets for any 503 that names no `Retry-After` hid the node from every image ticket and every other graph it could serve; 0.180.0 had already stopped calling that pause "full"),
+  does not ask that node again for 5 minutes (chosen, not measured: the longest pause the placer puts on any node) and tries the next
+  candidate at once. A node held not-capable is not one the ticket matches, so it holds it against nobody. `cluster[]` rows quote the
+  node's sentence from the body (cut at 600 bytes) instead of the first 300 bytes of the raw body.
+- **A graph that reads input files is a local-only ticket.** Never offered to a node, it reads no roster and matches no node, but it is
+  one ticket per request with a place and a position, and runs when this machine's lane serves it; every answer carries `fleet_note`.
+- **What it closes, and what it keeps.** Closed: the late local join, the lane that frees after the graph's one look at the fleet, the
+  repeat that was a second call (a ticket's identity is the graph's content), the bound of three nodes, the `tk-` token a caller had to
+  re-send, and the abandoned job (a graph a dead process sent is adopted by the next identical call, polled and fetched, never sent
+  again). The result's placement text names the graph lane (it said "image lane" for every task). Kept, as the ticket's own rules and no
+  longer a second copy of them: the per-node claim taken under the directory lock, so two processes (two MCP sessions, or a CLI beside
+  an MCP server), or two calls of one process, never put two graphs on one node and a graph and an image never share one, and the
+  order, in which a node an older waiting ticket of the machine matches is that ticket's, whichever kind it is. (0.180.0's integration
+  fix round had given the one-shot call both; they are the ticket's own now, and `tryGraphOverflow`, `placeGraph`, `overflowOutcome`,
+  the in-process hold and the writer of the graph-kind claim are removed. The claim of that kind is still READ, below.) One behaviour
+  changes on purpose, as the image ticket already has it: the one-shot path added `cluster[]` to the deferral the LOCAL run ended in (a
+  graph that, after its wait, failed here with a typed code); the final result of a ticket is the lane's own, and the per-node reasons
+  live in the queued answers.
+- **Tests, mutation-checked.** Written first and run against the one-shot path as it stood when this work began (before the 0.180.0 integration fix round): 17 of the 19 graph-ticket tests of the delegator failed or
+  timed out, and 3 of the 4 place tests of the pipeline failed (the three that passed held a behaviour that survives: the move to the next
+  node on a file refusal, the shared refusal word, and a graph that names devices keeping no place). Tests that encoded the old limit were rewritten for the ticket (a graph is a ticket; a bouncing graph is not bounded to three nodes; two calls of one process and two processes never stack). The tests the fix round wrote for the one-shot call were carried to the ticket path, so that each guarantee it gave is still held and tested: the claim and the order, in both directions (`TestAnImageTicketNeverSendsANodeAGraphTicketHasAJobOn`, `TestAGraphTicketLeavesANodeAnotherTicketHasAJobOn`, `TestAGraphTicketLeavesANodeAnOlderTicketIsFirstInLineFor`, `TestAnImageTicketLeavesANodeAnOlderGraphTicketIsFirstInLineFor`, `TestTwoProcessesNeverStackTwoGraphsOnOneNode`), the unread lane, the lease's state root (`TestAGraphTicketReadsTheTicketClaimsOfTheDefaultStateRoot`, `TestABusyGraphIsATicketOnAMachineWithNoStateDirKey`), a refusal at the door that is not "full" (`TestAFileRefusalIsNotCapableForThatTicketAndNeverFull`), and the claim a 0.180.0 process wrote for a graph call (`TestAnOlderReleasesGraphClaimHoldsWhileItsOwnerLivesAndForTheGraceAfter`, `TestATicketNeverSendsANodeAnOlderReleasesGraphCallHasAJobOn`). 27 mutations of the rules above, each applied once to the LF text of one file, proven applied, run through the
+  RAM guard, restored byte for byte: all 27 were killed when they were run. One survived the first set of tests (a need re-read at every
+  scan, which a graph file that has gone would turn into a lost VRAM floor) and was killed by the test added for it. That test stopped
+  being able to tell it apart once the ticket kept its own copy of the graph (the bullet "The ticket is the bytes it was admitted with":
+  the copy was still there to be read), so for a time the count of 27 was not true of the code; the polish round below makes the test
+  remove the copy as well and shows it red with the mutant applied. One is killed by a timeout and not by an assertion (a refusal that
+  is not remembered makes the ticket POST in a loop). The order of two lines in the not-capable path (the refusal is kept before the
+  ticket goes back in line) is a race too narrow to fail on demand and is not mutation-checked.
+- **Review fixes, mutation-checked.** The two defects above (the local run reading the live path, and the unread lane) were reproduced
+  by the reviewers and written as tests first: the lane ran the overwritten file's bytes, the token was refused as "a different request"
+  after the file was removed or edited, the adopter could not plan after the file was gone, and, on this branch's base, the graph probe returned `Unjudged: false` for an unreadable table and an unopenable lease directory (the 0.180.0 integration fix round made the same correction on main; the merge keeps one implementation and the tests of both); every one failed before the change. Nineteen mutations of the new
+  rules (no repointing to the copies, the token ignoring the path key, the adopter planning from the caller's path, a losing create or
+  a finished ticket or a removed one keeping its copies, the sweep taking a young orphan, an in-flight ticket's copies or never an old
+  orphan, a key that is not the plan's bytes, no path key recorded, an arrival inherited for other content, five choices of the
+  `Unjudged` flag, and the two places that would run an unread lane here) were each proven applied, run through the RAM guard and
+  restored byte for byte: all 19 are killed. The first set left two surviving (a removal covered only by a redundant one, an inherited
+  arrival) and four that did not compile; the tests added for the first two and valid forms of the rest are the 19.
+- **Compatibility.** No config key or file format changed: a ticket file gains an optional `fleet_note` and an optional `path_key`, the
+  queue directory `body-*` files while a graph ticket lives, the 503 body an optional `refusal`, `offload_run_graph` an optional
+  `wait_s`. A 0.180.0 process that is still running keeps the one-shot path until it restarts: it writes a graph call's claim (kind `graph`), which this release's scanners read and honour (`TestAnOlderReleasesGraphClaimHoldsWhileItsOwnerLivesAndForTheGraceAfter`), and it reads this release's graph tickets as it reads any ticket (their claims, their place in the line), so a node is not sent two jobs across the two releases. A node on the build before this one answers its file refusal without the word, which a delegator of this build reads as a 503 for a full node (the old behaviour); graph placement already requires
+  an equal `harness_version`, so such a node is not a candidate while the numbers differ.
+- Not changed, and said: the file check is by name, not content, and the bytes of a graph's input files are no part of its key (a
+  finished result nobody collected, kept up to six hours, answers a repeat of the same graph even if the caller has put other bytes
+  under the same input name: set another `out_dir`, which is part of the key, or collect first); the ticket remembers a node's refusal
+  in the owning process only; a waiting graph ticket's place is the whole-node token, so every call that arrives after it queues behind
+  it on this machine's own lane, an image call whose own card is idle included (it can still go to an idle node), until the ticket
+  runs, is canceled or ends (8 h at most), which is the seniority asked for and also what it costs. No VERSION or buildinfo bump.
+  **Nothing here was run live**: live acceptance A9 (the workstation lane and the headless node held, a graph call gets one ticket
+  answer and then runs on the first node released; with the workstation's card table slow to read while a render holds it, the same
+  holds, because an unread lane is a ticket) is the first evidence.
+
+### Fixed — the graph ticket's queue files are owner-only, a run-graph call leaves no result envelope behind, and the mutation count is true again (S5, polish round)
+
+- **The queue's files are readable by their owner only.** The queue wrote every file 0644 into a 0755 directory, although `ticket.go`
+  says a request body that carries a prompt is kept out of the store. The one body it does keep, a graph ticket's copies of the graph
+  and the manifest (`body-<id>-graph.json`, `body-<id>-manifest.json`), carries the graph's prompt text, and a finished ticket's file
+  carries the call's result, an image's refined prompt among it; on a POSIX host both were readable by every user of the machine. Now
+  every file of the queue (the tickets, the copies, the node claims and the lock) is 0600 and the queue directory is 0700 where the
+  queue creates it. It does not touch the state root above it (the GPU lease's, open to every user of the machine on purpose: a parent
+  the queue has to create is made the way the lease makes it), and it does not change the mode of a queue directory that exists (an
+  older build made it 0755): a file an older build left keeps 0644 until its ticket is written again, which a live ticket's owner does
+  at every scan. Written first and red before (files 0644, the directory 0755; unix build tag, run on Linux): `TestEveryFileOfTheQueueAndTheQueueDirectoryAreOwnerOnly`, `TestAFinishedTicketsFileHoldsItsResultAndIsOwnerOnly` and `TestAQueueDirectoryThatExistsKeepsItsMode` (red on its second assertion, that what the queue writes into a directory it did not create is owner-only; its first, that such a directory keeps its mode, held before the change and guards the fix). On Windows a mode means nothing: the ACL of the state root decides who can read the
+  copies there, and that root is readable by the machine's users by design (a named limit).
+- **A run-graph call leaves no result envelope behind.** `run-graph` names its result envelope under the media dir when the caller gives
+  no `result_path`, and named it from the paths of the graph and the manifest ("so a re-run reuses one file"). A caller that hands a
+  graph file of its own for every call therefore left one `run-graph-<hash>.json` per call that nothing removed: every graph ticket that
+  ran on this machine's lane (its graph is the ticket's own copy, new for every ticket), every MCP or CLI call with an inline graph
+  (a new temp file per call) and every graph a fleet node ran for a delegator. The envelope is the runner's note to one call and is read
+  once, so it now has a name of that call's own (random, in the media dir) and is removed when the call ends, whatever the run came to
+  (done, a typed defer in the envelope, a runner that fails after writing it); a caller that names `result_path` keeps the file it
+  named. (A name made of the graph's content would not end the growth: the content moves with the seed, so each shot is another file.)
+  Envelopes an earlier build left in a media dir, and the one a process killed in the middle of a run leaves, are not removed by this
+  change. Red before: `TestARunGraphLeavesNoEnvelopeBehind` (three runs left three envelopes, in each of the three endings). The other two were not red before, and are named for what they are: `TestARunGraphKeepsTheEnvelopeACallerNamed` passed on the old code (nothing was ever removed, so it guards the new removal against taking a file the caller named) and `TestRunGraphEnvelopeNamesAreOneToACall` had no function to call (the random name is new).
+- **The mutation count is true again.** The entry above says all 27 mutations are killed, and one of them (a need re-read at every
+  scan) had stopped being killed when the ticket began to keep its own copy of the graph: `TestAGraphsNeedIsReadOnceWhenTheTicketIsMade`
+  removed only the caller's file, and with the copy still there to be read, a need read at every scan and a need read once gave the same
+  answer (the test passed with the mutant applied). It now removes the ticket's copy as well, after checking it is there; with the
+  mutant applied it fails (the 8 GB node is sent the Wan graph its default floor keeps it off), with the code it passes. The two code
+  comments that gave the caller's vanished temp file as the reason (`liveTicket.need`, `liveTicket.req`) name the copy.
+- **A contention test of this change no longer races itself.** `TestTwoProcessesNeverStackTwoGraphsOnOneNode` started eight goroutines
+  per queue, so one ticket was stepped by several scans at once, which no process does (a process has one scanner): one step could
+  write the ticket's file with the state it had before its claim while the other process judged that claim, and the node was sent two
+  graphs, 13 runs of 30 on one Windows box, with no product code involved. Each queue's scans now run one after another and the two
+  queues against each other: 0 failures in 60 runs, and a claim that ignores a live holder still fails it (10 of 10 runs). The image ticket's equivalent, `TestTwoProcessesNeverDispatchTwoTicketsToOneSingleJobNode`, was built the same way and failed the same way on this branch's base (13 to 17 of 30 runs on that box, 2 of 30 on a Linux one); the 0.180.0 fix round fixed it in the same manner.
+- **Mutations of this round: twelve, all killed.** Each applied once to the text of one file, proven applied (its hash changed and
+  `git diff --stat` showed it), run, and restored byte for byte (the hash checked): the need re-read at every scan (it passed the old
+  test), no removal of the envelope, removal also of a caller's `result_path`, removal only after a success, one envelope name for every
+  call, the queue's files 0644 again, the lock file 0644, the directory 0755, a chmod of a directory that exists, the state root stamped
+  private, a claim that ignores a live holder (against the reworked contention test), and a door that asks for `cfg.StateDir` itself instead of `storeFor` (against `TestABusyGraphIsATicketOnAMachineWithNoStateDirKey`, which only a door that goes through the lease's state root can pass). The tests of the modes ran on
+  Linux, where a mode means something; the others through the RAM guard.
+- **Named limit (parked): a narrow re-key race.** The door keys a request from the graph file as it reads it (`admit`, `reqKey`), and
+  `create` keys the ticket again from the bytes the plan holds (`payloadKey`). A caller that overwrites its file between those two reads
+  gets a ticket for the bytes it holds, which is what runs (never another graph), but the attach and arrival-inheritance decisions made
+  between the two reads were made on the first read: it can attach to a live ticket of the first read's bytes, or inherit the arrival
+  of an abandoned ticket of other content. The window is the time between two reads of one local file.
+- **Named limit (parked): a create that stalls for more than a minute loses its copies.** `create` writes the graph's copies first and
+  the ticket's file after the place is left and the directory lock is taken, and another process's sweep treats a copy with no ticket as
+  debris after `tmpStale` (one minute). A create stalled longer than that between the two (a suspended process, a lease read that does
+  not return) can have its copies swept: the ticket then fails loudly (its run on this machine's lane cannot read its graph and ends in
+  a deferral, an adopter cannot plan; a dispatch to a node still carries the bytes the plan holds in memory) and a repeat of the
+  request makes a new ticket. It never renders other bytes.
+- **Compatibility.** No config key, tool argument or file format changed. The queue's files are written 0600 and its directory 0700
+  where the queue makes it, and the result envelope's name is random instead of a hash of the paths and the file no longer outlives
+  the call. No VERSION or buildinfo bump. Nothing here was run live.
+
+### Added — `generate-image --batch` across the fleet: a family, a verdict per job, a results file, a resume, and one ticket per job when the lane is held (F28, ADR 0083 decision 13)
+
+- **The behaviour.** `local-offload generate-image --batch jobs.jsonl [--family F] [--route auto|local|remote] [--results r.jsonl] [--resume]
+  [--jobs N]`. Where the jobs run is decided once, at the start, and never mixed. If this machine's lane is free (or the route is local, or there is no fleet, no queue (a state root the lease refuses) or an inherited lease) the whole batch goes through the warm session as before (one change, below: an interrupt). If the lane is held
+  (or could not be read) and at least one roster node renders the batch's recipe, **each job is one ticket** of the ticket queue (ADR 0083): it starts on
+  the first matching lane that frees, here or on a node, in file order, at most N in flight (default: this machine's lane plus one per matching
+  node, at most 8, a chosen cap; `--jobs` overrides), and the command blocks until they have all ended. A node is claimed by the ticket that has a
+  job on it, so a batch never sends two jobs to one single-job node at once (`TestBatchNeverDispatchesTwoJobsToOneSingleJobNodeAtOnce`).
+  Each job reaches the node as written (`refine=false` only when the job says so, the seed, the negative, `width`, `height`, `steps` exact; the
+  family under the node's own name) and its output is fetched, checked against the sha256 the node published, to the exact `out`
+  (`TestBatchJobsPlacedThroughTickets`). No mixed local/remote work stealing and no batch task on the fleet in v1.
+- **The honest limit.** krea2 and the 2512 build have no remote match (the nodes hold no such weights), so a batch of either never goes to the
+  fleet: it keeps its place in the lease line for this machine's lane (up to the queue's 8 h ceiling, a chosen constant, not the 90 s `gpu_wait_ms`;
+  Ctrl-C ends the wait) and runs warm on it, and the command prints, and the JSON carries as
+  `cluster`, which node does not match and why (`TestBatchWithNoRemoteMatchRunsWarmOnThisMachineAndSaysWhy`). Per-job tickets would be a cold
+  start per picture on the same lane. Where no claim protects a node (`--route remote`, a machine with no image lane) the jobs run one at a time.
+- **A row per job** in the printed JSON and in `--results`, kept in `<results>.partial` as each job is final and written whole, in job order, over
+  `--results` when the batch ends (an earlier results file survives a batch the command refuses or one that dies; the warm path's rows arrive when its
+  session ends, because the render script runs to the end before the batch sees a result):
+  `{i, out, seed, ok, ms, error, node, family, sha256, verdict}`, the first six being what `parseBatchResults` already reads. `verdict` is
+  `rendered`, `skipped-existing`, `failed` or `queued` (the command ended before the job did, or no lane or node had a place for it). A job counts as rendered only when the file at `out` is there,
+  not empty, and hashed; a lane that said it rendered a missing or empty file, or a node's file with no published sha256, did not render it.
+  **Exit 4** when any job failed (`imagegen.BatchExitJobsFailed`; also when a deferred warm batch already had a failed row), **1** when it stopped,
+  was interrupted or a job is `queued` for want of a place, so a wrapper tells "some failed" from "stopped"; **0** also when a busy lane deferred the whole warm batch (its rows are `queued`).
+  A job whose `out` folder cannot be made fails alone before any lane is asked for it.
+- **`--resume` is fail-safe** (the 21 zero-byte PNGs of 2026-10-09): a job is skipped only when the file at its `out` is not empty, **decodes
+  whole as a PNG** and has the width and height the job names; a zero-byte file, a file cut short, another size, not a picture and a missing file are
+  rendered again (`TestBatchResumeSkipsOnlyExistingAndVerifying`, `TestBatchResumeAfterTicketsPlacesOnlyWhatIsMissing`,
+  `TestGenerateImageBatchResultsFileAndResume`). A job with no `out` is never skipped, and a size off the family's grid (2.1 floors to 32)
+  never matches: both are said in the docs.
+- **A busy place is waited for, never failed; a place that can never come is not waited for** (review of this step, and its second round). An answer that
+  says no lane or node had a place for a job ends the job `queued` with the true reason, never `failed` (exit 1, `--resume` renders it). On the ticket path the
+  queue's own end of a ticket (its 8 h ceiling, or a ticket it could not take over) is no lost race and is not sent again as a new ticket; before, it was taken for
+  "the lane was taken a moment after it read free", re-sent twice with another 8 h wait each, and the row failed after about 24 h. A lane that read free and was taken a
+  moment later is still asked again, at most twice, and a card that stays held ends `queued` (`TestBatchTicketThatExpiresIsQueuedAndNotSentAgain`,
+  `TestBatchRetriesALostLaneRaceAndOnlyThat`). Where jobs go one at a time (`--route remote`, a machine with no image lane) a held card or a fleet with no node
+  free to take the job is asked again after a pause (5 s, 15 s, 1 min, then every 5 min; chosen) until the job is placed, Ctrl-C ends it, or the queue's 8 h
+  ceiling passes and the job is `queued` (`TestBatchSerialWaitsForAPlaceAndNeverFailsTheJob`, `TestBatchSerialEndsQueuedAtTheCeilingNeverFailed`,
+  `TestBatchSerialWaitsOnlyForAPlace`, `TestBatchSerialInterruptEndsTheWait`). A fleet that cannot take the job as configured (every node left out because it does
+  not serve image generation, a route is not configured on it, it cannot carry `refine=false`, or the tailnet guard refused its roster entry; none merely busy,
+  text-leased or out of reach) is not waited for: `pickNodeFor` files `core.ErrClassNoNodeConfigured` (the defer class is unchanged) and the job fails at once,
+  naming each node's miss (`TestBatchSerialFailsAtOnceWhereNoNodeCanEverTakeTheJob`, `TestPickNodeFilesNoNodeConfiguredOnlyWhenEveryNodeIsLeftOutForConfiguration`);
+  one node that may take it later keeps the wait (`TestBatchSerialStillWaitsWhereAnyNodeMightTakeTheJobLater`). A node chosen and then lost when the job is sent, or
+  after, and every other answer, is final at once. Once one job has waited the ceiling for a place, the jobs not yet sent are queued at once, on both paths,
+  instead of each waiting the ceiling in turn (200 jobs, 200 ceilings: `TestBatchSerialCeilingQueuesTheJobsNotYetSent`, `TestBatchTicketCeilingQueuesTheJobsNotYetSent`),
+  and the exit-1 line says which cause ended the batch (`TestBatchExitSaysWhyTheJobsAreUnfinished`). The warm batch of a busy lane no node can relieve holds its place in line instead of giving up at 90 s
+  (`pipeline.RunImageBatchWaiting`; the wait ends the moment the context does and a grant that arrives after is given back:
+  `TestRunImageBatchWaitingKeepsItsPlaceUntilTheCardFrees`, `TestRunImageBatchWaitingEndsOnInterruptAndLeavesNoLease`).
+- **What a one-at-a-time row says.** The node's recipe is not compared there, so a row carries the family, licence and `commercial_use` the node that
+  rendered it reported (nothing if it reported nothing), the printed header names none, and a family only the nodes define is carried by name under
+  `--route remote` or on a machine with no image lane (`TestBatchSerialRowsCarryTheNodesOwnFamilyAndLicense`,
+  `TestBatchCarriesAFamilyThisMachineCannotResolveWhereItCannotRenderLocally`). `refine_fallbacks` is printed for a warm batch whose warm call ran and answered only
+  (`TestBatchPayloadReportsRefineFallbacksOnlyWhereTheyWereMeasured`).
+- **A failed job leaves no file of its own at its path.** An empty file a lane left is removed, and a node's file with no published sha256 is moved aside as
+  `<out>.unverified` (the picture is kept, the row names it) so a later `--resume` cannot take it for finished (`TestBatchAJobIsRenderedOnlyWhenItsFileIsThere`).
+  A picture that was already at `out` before the batch is not a failed job's to remove: a render that fails keeps it (the render helpers write atomically), and only the
+  node's file the fetch has already put at `out` replaced it. `--results` may not name the
+  `--batch` file, and an earlier results file is replaced only when the batch ends (`TestResultsFileNeverCostsAnEarlierRecordUntilTheBatchEnds`,
+  `TestGenerateImageBatchResultsFileIsNeverTheJobsFileNorLostToARefusal`). A folder as `--results`, and on Windows a read-only file, are refused when the file is opened, before any
+  lane time is spent (`TestOpenResultsRefusesAFolderAtOnce`); the `--resume` run that recovers a killed batch no longer truncates the `<results>.partial` that batch left: it is
+  set aside as `<results>.partial.prev` (one is kept, the newest), the command says so, and a refused run puts it back
+  (`TestOpenResultsKeepsAnEarlierBatchsRecordAside`, `TestGenerateImageBatchKeepsTheRecordOfAKilledBatchBesideTheRecoveryRun`). One file spelled two ways (relative and absolute, another case where the file
+  system ignores it) is one `out` (`TestBatchOutsThatNameOneFileTwoWaysClash`). `--resume` reads the PNG header first and renders again, without decoding,
+  a canvas that is not the named size or is over 64 Mpx (a chosen ceiling; `TestResumeDoesNotDecodeACanvasItCannotUse`).
+- **`RunImageBatchAs(ctx, family, jobs)`** is the family seam: `RunImageBatch` is it with no family. Every read of the binding goes through the
+  family's resolved config, not `p.cfg`: the lease is asked for on the family's card and with its timeout, the launch is its pin, the runner script,
+  ledger label and every item's tag and license are the family's (`TestRunImageBatchFamilySeam`, `TestRunImageBatchAsAsksForTheFamilysCard`,
+  `TestRunImageBatchAsLeasesForTheFamilysTimeout`). A family on stable-diffusion.cpp has no warm session and is refused by name. The family is now
+  part of a default `out`'s hash, as it is of the single render's; no family hashes exactly as before.
+- **Changed, said.** The warm session now runs under the verb's interrupt context; before, `generate-image --batch` ran it under
+  `context.Background()` and a Ctrl-C killed the whole process. Now the first Ctrl-C cancels the render: `gpugen.Generate` builds the child with
+  `exec.CommandContext` and a tree kill (the child and its descendants are killed), and the process stays up to run the deferred lease release
+  and teardown; the second Ctrl-C is the default one. The ticket path needs the same context (a ticket that sent nothing is canceled by it).
+  `--family` and `--route remote` are no longer refused on a batch (`--transparent` still is, `family_cli_test.go` follows);
+  `--results`, `--resume` and `--jobs` without `--batch` are refused by name. The printed JSON keeps its shape and adds `mode`, `skipped`,
+  `cluster` and a verdict, hash and node on every item; a warm batch a busy lane deferred now lists its jobs as `queued` items (its `count` was 0)
+  and still exits 0 (4 if a job had already failed). Two *different* pictures for one `out` are refused before anything runs (the second used to replace the first); an empty
+  prompt still refuses the whole batch with `job N: empty prompt`.
+- **Not changed, and said.** An interrupt leaves a job already on a node running (ADR 0064); the same command adopts it only if its jobs carry
+  explicit seeds. A node job pays a ComfyUI cold start. Nothing here was run against a live lease, a live node or a render: the tests use the real
+  fleet-node servers, ticket files and results file with fakes for the pipeline and the renderer. The 8-ticket cap and the two retries of a job
+  whose lane a sibling took are chosen constants, not measurements.
+
+### Added — a family's identity includes the content of its weight files (F59, ADR 0082 Amendment 2)
+
+- **The hole.** A recipe identified a weight file by its name and byte size, so a same-named file of the same size with different
+  weights on another node digested alike and matched; the node's 412 re-check recomputed the same size-based digest and could not
+  catch it. Each present weight file now carries a **content fingerprint** in `mediacap.RecipeFile` (`fingerprint`), and it is in
+  the digest, which is now version 2: a digest of 0.180.0 or any release before it never equals one of this release.
+- **What the fingerprint is.** A sha256 of a scheme tag, the file's size and a SAMPLE of its bytes: 64 blocks of 1 MiB at evenly
+  spaced offsets, the first at the start of the file and the last ending at its end, or the whole file when it is 64 MiB or smaller
+  (block size and count are chosen). A sample and not a full hash: on one workstation, page cache not controlled (read these as
+  warm-cache figures), it read 0.17 to 0.87 s per file for files of 0.36 to 42 GB, against 389 MB/s for a whole-file sha256 on a core
+  (about 50 s for 20 GB and 110 s for 42 GB, extrapolated), minutes per node after every release or model change in which the node
+  cannot be matched; that this window is too costly is a judgement, and RAM was not the reason. Two real 42 GB builds that share a
+  size differed in 58 of the 64 sample blocks. **It does not see a change confined to the stretch between two sampled blocks (the
+  blocks are evenly spaced, so that stretch is about a sixty-third of the file: roughly 0.3 GB of a 20 GB checkpoint and 0.65 GB of
+  a 42 GB one; a layer-wise merge or a baked-in VAE can sit inside it), nor a replacement with the same size and the same
+  modification time while the process that cached the old reading runs** (the cache is in memory, by path, size and
+  modification time, and a restart reads again; a one-shot CLI call is a fresh process, so on a busy lane it reads its family's
+  samples on every call, an estimated one to three seconds from the rates above, before it makes its ticket, and on a free lane it
+  reads nothing: the lane is asked first); compare whole-file hashes after a merge you swap in or a copy you doubt.
+- **Health never waits for it.** `/fleet/health` reads the fingerprint cache; a file not hashed yet starts one background read (one
+  file at a time in this process) and is published `"fingerprint":"pending"` (`"unreadable"` when it cannot be read, retried after 30 s). **A row
+  with any such file publishes an empty `digest`**, so two nodes that were both pending cannot share one. The row memo (60 s) is
+  rebuilt as soon as a read settles. The node's 412 re-check and the delegator's own recipe wait for a fingerprint they do not have.
+- **A wait for a fingerprint ends, and a stalled read is given up on.** The 412 re-check and the delegator's door wait through `AwaitContext`, once for each file: a wait ends when the request's context does and, whatever the context, after 20 s (chosen; the bound is per file, so a recipe whose files are all unread and stalled can wait up to its file count times 20 s, four files 80 s, if the request lives that long), and a file still unread is
+  named `pending` (the 412 names it and carries the cause `pending`, which the delegator reads as a wait; at the door the family has
+  no identity for that call and it runs on the local line). A read that does not finish in 60 s (chosen) is given up on: that file reads `unreadable`, the single
+  reader serves the other files, the file is not read again while the first read is out, and the harness logs it once; until then a
+  stalled read holds the reader and the other files stay `pending`. The "send family=X to use its Y" hint reads this machine's other
+  families from the cache without waiting (a family not hashed yet is left out), and a call that has no fleet overflow because a file
+  of its own family could not be fingerprinted logs which file and why, from the door and from the adopter of a dead owner's ticket.
+  A file still being copied is read again on every health refresh (the 30 s retry is keyed on its size and time).
+- **A recipe that is not fully fingerprinted is never compared.** This machine's family with such a file has no identity (the call
+  runs here, as for a missing file); a node whose rows are not all hashed is a `not-capable` row that says it has not finished (a
+  candidate once it has), whether or not the row carries a digest; two all-pending recipes are never taken for one match; and a
+  same-named, same-size file with other bytes is a miss that names the file: `imagegen_ckpt: <name> has the same size on both and
+  different content (fingerprint <12 hex> vs <12 hex>)`. A node whose file cannot be read answers the 412 with the file and its state.
+- **A free lane reads no fingerprint.** In 0.180.0 the door built this machine's identity (what its family is: three or four stats) before it asked the lane. With a content fingerprint that step waits for each fingerprint it has not got (up to 20 s per file), so every free-lane call on a box with a fleet would have paid the reads first, against the door's own promise that a free lane runs the call here exactly as it always did. The lane is asked first, and the identity is built only when the lane read busy (or could not be read) and a ticket is about to be made (an image only: a graph has no recipe and builds no identity)
+  (`TestAFreeLaneNeverWaitsOnAFingerprintRead`: every read held, the call returns and no weight file is read;
+  `TestABusyLaneReadsTheFingerprintsOnlyAfterTheLaneWasAsked`). A call without an identity logs why only when its lane was not free.
+  One consequence, pinned by `TestARepeatOfALiveTicketAttachesWhileThisMachineHasNoIdentity`: a repeat of a request identical to a live
+  ticket attaches to it even when this machine cannot read its weight files at that moment, where it used to run a second copy here.
+- **A 412 says why, and a wait is not counted as a bounce.** A node answered every 412 the same way and the delegator read each one
+  as "its files changed since it published them": a minute's pause, a longer one on the next, each counted as a bounce. Since F59 a
+  node also answers 412 when it has not finished reading its files and cannot say yet whether they changed, which is a wait. The
+  refusal's JSON body now carries a `cause`
+  beside `status` and `error`: `pending` (every file it lacks a fingerprint for is still being read), `unreadable` (a file is there
+  and cannot be read, so it cannot vouch for the family) or `changed` (the family no longer digests to the digest sent, or the node
+  no longer serves it). A delegator that reads `pending` leaves the node alone for a minute (the first bounce step; chosen, and
+  about as old as the node's published rows can be) and does not count it as a bounce, so a run of them never reaches the
+  five-minute step and a later real change still starts at one minute; `unreadable` and `changed` are bounced as before, and a
+  refusal that names no cause this build knows is bounced like `changed`, its row saying the node did not say why. The cluster row
+  says which cause it was. The node's half is pinned in `internal/fleetnode/image_recipe_cause_test.go`, the delegator's in `internal/mediaremote/recipe_refusal_test.go`.
+- **Deploying.** Every node that should take overflow must run this release: the digest is version 2 and a recipe is compared only
+  between the same release (`harness_version`), so a fleet part-way through the upgrade matches only inside each release, and an
+  overflow between releases falls back to the local line and the ticket. A dispatch goes only to a node whose health row carries a
+  digest, which it publishes once it has read its files, so the first dispatch after a node restarts finds them cached and is not
+  refused for want of them. One that meets a file the node has not read (it changed after the row was published) waits for it (until the request ends and, whatever the request, 20 s at most for each file; a few seconds for a family of four files on the machine measured) and is admitted when the digest then matches; only a read still unfinished at that bound is answered 412 with the
+  cause `pending`, which the delegator reads as a wait. After the upgrade the three live matches of 0.179.0 are read again (`image_recipes` on both nodes of each pair); a pair that no longer
+  matches is a finding about the files, and the cluster answer names the file. Nothing here was run against a live fleet.
+- **Named limits of the polish round (F59), one line each.**
+  - The one-minute pause for a `pending` refusal is chosen, not measured: it is the first bounce step and about the age of the rows a
+    node publishes (a 60 s memo).
+  - `changed` is one cause for three things the node's own sentence tells apart (a file replaced, a family the node no longer
+    serves, a binding that is not ComfyUI); no finer word was added.
+  - The delegator's tests serve `pending` and `unreadable` from the fixture in the node's own shape and drive a real node to a real
+    `changed` only: a real node answers `pending` after a 20 s wait that no test outside `mediacap` can shorten. The node's half is
+    pinned apart, in `internal/fleetnode`, on the same constants.
+  - A call with no identity (an unknown family, an sd.cpp binding, a file this machine lacks) now asks the lane before it runs on
+    its own line, where it ran at once: one read-only question, bounded, and the price of not reading the files on a free lane.
+  - The adopter of a dead owner's ticket still builds the identity before it knows whether the job will be passed back (a
+    passed-back job re-enters the scan and needs it); only the free path was changed.
+  - The log line for a read that is given up on is once per stalled read; the line for a caller that stops waiting (the 20 s bound of one file) is one per file it stopped waiting for, and no test pins that one.
+  - `mediacap.ImageRecipe` has no production caller (its comment says so); it stays because tests and documents name it, and
+    deleting it is a separate cleanup.
+- **Found in the integration review, fixed.** (1) The lane reading a call hands its ticket's first scan was dated from the ticket and not
+  from the question: the door asks the lane, then waits on the identity (up to 20 s for each weight file), then makes the ticket, so a lane
+  that freed during that wait was still taken for held and the ticket waited one more scan or went to an idle node. The reading now carries
+  the instant it was made and the scan reuses it only inside the 2 s `verdictFresh`
+  (`TestTheFirstScanReusesTheLaneReadingOnlyWhileItIsFresh`, three mutants caught). (2) The batch's order, the lane first and the
+  identity only after a held lane, was pinned for the single call and not for `generate-image --batch`: moving the identity above the
+  lane question passed every test of the package. `TestBatchOnAFreeLaneNeverWaitsOnAFingerprintRead` (every read held, the batch returns,
+  zero reads) and its control `TestBatchOnABusyLaneReadsTheFingerprintsOnlyAfterTheLaneWasAsked` now pin it, and the mutant that builds the
+  identity first is killed by both.
+
+### Fixed — the hardening batch: a console close at any stage of `gpu reserve`, `gpu owner-flags --config`, voice cards, honest cause wording, and the host-RAM guard's loose ends (F55, F56, F57, F58, F60, F63)
+
+- **`gpu reserve` answers a console close at every stage, not only once its command runs.** The SIGTERM/Ctrl-C handler was
+  registered after the card was opened, the queue wait (`acquireQueued`, `acquireAutoCards`) and the drain/unload loop, so a
+  close during `--wait 8h` or a long drain found no handler: Go ended the process on the spot, its PAIR card stayed open until
+  a sweep closed it "harness process exited before the job finished", and its waiter record stayed in the line. The handler
+  (`signalWatch`) is now the first thing the wrapper does, and each stage returns on it: a queued `Acquire` ends at its next
+  poll through the new `gpulease.Options.Cancel` (`ErrCancelled`; the waiter leaves through `Acquire`'s own defer, nothing is
+  claimed, a cancel closed before the call asks for nothing even on a free card), `--cards` refuses the allocator's next read
+  and wakes its sleeps, the drain's context is cancelled, and checkpoints sit before the card opens and before the command
+  starts. The card closes failed with the stage and the cause ("ended on SIGTERM while queued (...); never started"), the lease
+  is released, and the "NOT warming the seat back; the warm stays owed" sentence is printed only when a warm is owed (a signal
+  during the drain unloaded nothing, so none is). Pinned at each stage with the signal delivered through the wrapper's seam
+  (`TestASignalWhileQueued...`, `...DuringTheDrain...`, `...BeforeTheLeaseIsAskedFor...`, `...WhileChoosingCards...`,
+  `TestACancelledAcquire...`, and, from the review of this batch, `...BetweenTheDrainAndTheCommandStartsNothing` for the checkpoint
+  between the drain and the command's start, which deleting left every test green, and `...WhileQueuedAgainAfterALostLeaseNamesTheSignal`
+  for the re-queue after a lease lost during the drain, whose cancel used to come back as "the wait for the card was cancelled by its
+  caller" with no signal named); a real console close still cannot be driven from a test. Two more faults of the same stage work, found
+  by the same review: a signal that cancels the **unload request** can arrive after llama-swap has already taken the seat down, and
+  the debt was written only after the request returned, so the seat stayed cold with nothing owing its reload (a cancelled unload
+  of a seat that was resident now records the debt; a warm of a seat that is in fact still loaded costs one health request,
+  `TestASignalDuringTheUnloadRequestLeavesTheWarmOwed`); and the SIGTERM card text for the pre-start stage was 141 characters
+  against the 140 the card keeps, so it ended "never start..." (the cause clause is shortened and every stage text is asserted to
+  fit whole, `TestEveryStageTextFitsTheCardWhole`). The stage tests became deterministic or reached further: the pre-card
+  checkpoint test waits for the watch to record the signal (`wrapperBeforeCard`; before, it relied on the scheduler running the
+  feed and the watch first, and failed with a delay injected into the watch), `--cards` is driven through `gpu reserve` itself
+  (`TestASignalWhileChoosingCardsThroughTheReserveEndsTheWait`: the lease line's cancel and the allocator's wake-up sleep are wired
+  by the wrapper, which the loop-level test above could not see), and the re-queue is driven from a cancelled unload to the signal
+  (`TestASignalWhileQueuedAgainAfterACancelledUnload...`), the one path where a wrapper that queues again owes a warm.
+  **A second signal is still dropped, and that is now said instead of justified
+  by the OS:** the OS ends the process after its grace for a console close, a logoff and a shutdown only, so a second Ctrl-C or a
+  plain kill during a stage that never consults the signal (the plan's card-table read, up to 20 s; the stop of the ComfyUI instances
+  kept under the lease, up to 60 s; the seat's warm-back after a Ctrl-C, minutes) waits for that stage, where before this batch the
+  stages ahead of the lease had no handler at all and Ctrl-C ended the process with its card open. Ending the process at once on a
+  second signal is not done here (an exit skips the deferred release and leaves the instances running).
+- **`gpu --config <path> owner-flags` no longer exits 2.** `runGPUOwnerFlags` defined only `--pid`, so the hoisted `--config`
+  (F35) was refused by its flag set while the other six verbs took it. It accepts and ignores the flag, and
+  `TestEveryGPUVerbAcceptsTheHoistedConfig` runs every verb of `gpuVerbs` in a child with `--config` before and after the verb
+  (a flag set exits the process, so it cannot be caught in-process).
+- **A voice render on the `tts_endpoint` lane marks its PAIR card running.** The lane takes no media lease (the server owns its
+  GPU) and so never reached `core.MarkWorking`, which every other lane reaches through its lease: its card was queued for the
+  whole synthesis and a sweep of a card whose process died mid-synthesis said the call never started. `runVoiceEndpoint` marks
+  the card right before its request, and a call that defers on its input marks nothing. `TestOnlyTranscribeNeverMarksWorking`
+  said it pinned the list of lanes that never mark "in both directions" and counted marks (">= 5"), which the tts lane passed
+  through; it now names the lane functions of every long-call task (checked against `longCallTasks` both ways) and requires each
+  to reach a mark by name, transcribe's to reach none. Reachability says a lane marks somewhere, not on every path, so the lease
+  path has a behavioural test of its own (queued behind another lease: not marked; holding the card: marked once).
+- **Cards and logs no longer claim a cause they cannot know.** `signalWhy` and the warm-skipped sentence said the console was
+  closed, or the session was ending, or the machine shutting down, for any SIGTERM; a plain kill sends the same signal (and on
+  Linux it is the only way it comes). They now name the signal and give the causes as likely ("ended on SIGTERM: likely a console
+  close, a logoff or a shutdown; a plain kill sends it too"). The sentence the wrapper prints in place of the seat's warm-back says
+  what the signal ended: "the command was ended on SIGTERM" only when a command ran; for a signal that found the wrapper earlier it
+  says the wrapper was ended at that stage ("the wrapper was ended on SIGTERM while draining the seat, before its command started",
+  likewise "while queued, ...", and "the wrapper was ended on SIGTERM before its command started" for the last stage, which names
+  that itself), where it used to say the command was ended even when none had ever run (`warmSkippedOnTerm`). The sweep's log line
+  counted every card it closed as
+  "harness process exited before the job finished", which is false of a seat-watch stretch (closed completed since C04) and of a
+  terminal frame its producer built and could not post: the count is split by kind, and a sweep that closed orphans alone logs the
+  line it always did.
+- **F55: the lane probe reads a slow card table once more before it gives up, and says so when it still cannot.** The probe
+  wrapped the caller's context in its 4 s bound and called `gpualloc.Deps.CardTable` under it; `CardTable` retries only a read
+  that ran out of time while the caller's context was still good, and the caller's context was the 4 s one, so the admission's
+  retry (5 s, then 15 s) was unreachable here: a `nvidia-smi` that was merely slow made every probe answer "not judged" at 4 s,
+  silently. Both probes (image and `run_graph`) now read through `laneCardTable`: 4 s, one retry under 10 s, one `media lane probe`
+  log line when the table is still unread (none when the caller's own context ended: a client that disconnected mid-probe is not a
+  card-table fault, `TestTheLaneProbeLogsNothingWhenTheCallerWentAway`). A table that stays unreadable fails every question the
+  same way, and a ticket scan asks once per waiting ticket every 10 s, so the line is written for the first occurrence and then once
+  a minute per probe and cause while the fault lasts (`laneFaultLog`, kept per process;
+  `TestTheLaneProbeLogsAPersistentCardTableFaultOncePerMinute`). **The 10 s is chosen, not measured** (shorter than the
+  admission's 15 s because a ticket scan asks the lane question once per waiting ticket: worst case 14 s per question, not 20).
+- **F56: the host-RAM calibration reads a high percentile of the last twenty runs, clamped, and says so once per key.** It took
+  the all-time max of a key's resident peaks, so one inflated run raised a family's declaration until `footprints.json` was
+  edited by hand, a figure above what the box can ever admit made the lane read "can never admit" for every later call (`gpu
+  reserve --ram` is no remedy for a pipeline call), and the log note carried the run count, so each render added a map entry and
+  a log line. The store keeps the last 20 runs per key (`host_recent`, additive) and `HostPeak` answers with their 90th percentile
+  by nearest rank (under ten runs that is the maximum, so outlier rejection starts where there is something to reject against; a
+  bad run leaves the window after twenty more); the declaration is clamped at twice the model files' sum and says which percentile
+  of how many runs it read and whether it was clamped; the note is made once per key and figure. A store written before the window
+  lets its maxima stand in, once, for the runs it does not hold; the wire fields stay the all-time maxima. `RecordHost` now merges
+  before it folds its own run (merging after replaced the fresh run with the other process's window, and lost its run count).
+  **Window 20, percentile 90 and clamp 2x are chosen, not measured.**
+- **F57: a card-scoped grant takes its host readings before the epoch lock.** The check ran in full inside the machine-wide lock: the
+  host's counters and, for every live lease that declared a need, a walk of its holder's process tree with a memory read per process
+  (about 26 ms median, 63 ms worst for one holder, by the reviewer's measurement, on every grant attempt and every waiter poll,
+  inside a lock everyone else spins on for 2 s). `readHost` takes them before the lock and `hostRAMCheckWith` compares them inside:
+  the decision is still made against the leases live then, so a grant that lands between the reading and the lock is counted
+  (`TestAGrantThatLandsAfterTheReadingIsStillCountedInsideTheLock`, through a test-only hook), and the early parts err the
+  conservative way. `TestTheHostReadingsAreTakenBeforeTheEpochLockAndOnlyComparedInside` counts the reads made while the lock file
+  exists: none. A held card now costs no readings at all.
+- **F58: askRAM is sized on the cards the plan names, and the two orderings it rests on are pinned.** The admission and the probe
+  sized the figure on the largest card of the whole table even for a pin, a pool or a declared device, while the lease the call then
+  takes declares on those cards: on a mixed box a krea2 render pinned to a 16 GiB card declared 32.8 GiB at the grant and 0 in the
+  pre-filter, so a waiter that waits only on host RAM was not counted ahead of it (`askRAMFor`). The grant already asked the cards
+  before the memory on both paths, and `BuildInput` already fed the allocator what granted leases have yet to load, but nothing
+  pinned either (the swap and the deleted line left every test green); both are pinned now. The admission's half of the sizing is
+  pinned by the size it asks for (`TestTheAdmissionSizesItsFigureOnTheCardsThePlanNames` drives the real admission and records the
+  VRAM of each sizing request), not by its answer: the queued answer is the same whichever card the figure was sized on, so no test
+  of the answer can tell the two apart (the earlier pin searched the source text for the call).
+- **F60: the sd.cpp lanes declare the weights they park in RAM.** The class default is the largest ComfyUI family a box binds, so an
+  sd.cpp-only node declared 0 for its image, video and animate lanes and the 5.5 to 6.2 GiB `--offload-to-cpu` parks in RAM there
+  were outside the brake. `hostneed.ForSdcpp` sizes the bound files in full when the lane's extra args carry the flag (nothing
+  without it), and each lane declares the larger of the class default (unchanged) and its own bytes. A file that cannot be sized
+  (missing, empty) does not take the estimate with it, which the review of this batch showed it did: the class default is 0 on an
+  sd.cpp-only box, so one mistyped VAE path put the whole spill back outside the brake with no line. The files that can be sized
+  are summed and worded as a **lower bound** (`Need.Unsized` names the rest by binding key), and the lane says once per lane and set
+  of files which it could not size; when none can be sized the class default stands and the lane says that once too.
+  **It is an estimate from the files' sizes, not a measurement, and says so**; the need carries the lane's footprint key, so
+  three measured runs raise it like a ComfyUI family's. Not covered (the named limits, last bullet of this batch): the audio.cpp lanes, the animate lane's depth model, and
+  `gpu reserve` around an sd.cpp helper (the CLI recognises only the ComfyUI helpers).
+- **F63: the deletion-guard test no longer depends on which shell started `go test`.** On a plain PowerShell PATH the name `bash` is
+  the WSL launcher, which drops the backslashes of the Windows script path, so the test failed from PowerShell and passed from Git
+  Bash (reproduced both ways). It finds Git's own bash from `git --exec-path`, puts Git's `usr/bin` first on the guard's PATH
+  (started by path from a PowerShell it finds no `cut`), passes the script with forward slashes, and skips with the reason when the
+  only bash is the launcher.
+- **`gpu doctor` reads this build's version whatever literal the linker lays next to its marker.** The build marker
+  (`offload-build-version=0.179.0`) was embedded with no terminator, the audit reads the version as the longest run of
+  `[0-9A-Za-z.+-]` after the prefix, and the linker packs string literals back to back: a new error format beginning "interrupted"
+  made the built binary read back as `0.179.0interrupted`, which `TestBuiltBinaryCarriesTheFormatSignatureAndBuildMarker` caught in
+  the final gate of this batch. The embedded marker now ends in a NUL (`embeddedBuildMarker`; the doctor's JSON still shows it without),
+  which every reader, old and new, stops at; before, any literal added anywhere could have done the same.
+- **Not changed, and said.** The `--detach` form's hidden holder queues in its own process and has no signal handling of its own
+  here. F60's three limits, one by one: the audio.cpp voice and music lanes keep the class default (0 on a node that binds no
+  ComfyUI family), so what they park, if anything, is outside the brake; the animate lane's depth model (a separate, small binary)
+  is not counted in its figure; and `gpu reserve` around an sd.cpp helper declares the class default or what `--ram` says, not the
+  weights `--offload-to-cpu` parks (the CLI recognises only the ComfyUI helpers). The comment on `keepLoop` in
+  `internal/mediaremote/scan.go` now says a lane question is bounded by `laneProbeBound` plus
+  the retry (a comment-only change). Nothing here was measured on a node: every figure
+  above that is new (10 s, 20, 90, 2x, a minute) is chosen, and no real `gpu reserve`, ComfyUI, PAIR or llama-swap was touched.
+
+### Fixed — a re-placement after a refusal never reuses a fleet snapshot whose probe began at the refusal's own clock reading (F66)
+
+- **The bug.** A subtask refused for capacity is offered to another node from a fresh read of the fleet: the run's cached probe
+  (2 s) is reused only when it was taken after the refusal, so a node the run's own siblings had just filled is not picked again.
+  The comparison was "at or after". On a clock that ticks coarsely (Windows: a millisecond or so) a probe that ended before the
+  refusal reads the same as the refusal when both fall in one tick, and the stale picture was reused. It is now "strictly after":
+  a probe that began at the refusal's own reading is read again, one more probe in a rare tie. `TestRunSpreadReplacementReprobesTheFleet`
+  failed 46 and 50 times in 400 on a Windows PC and never in 800 on Linux; `TestAProbeMemoThatBeganAtTheInstantOfTheRefusalIsNotReused`
+  pins the boundary on the readings themselves.
+
+### Fixed — tests that depended on the machine that ran them (no product change)
+
+- **`internal/sandbox` `TestWindowsLowILWriteConfinement` passed only when the temp directory sat under the user profile.** The cage lowers a worktree's mandatory integrity label for a run, which needs `WRITE_OWNER` on it, and owning a directory does not grant that. On a drive whose root ACL gives Authenticated Users "Modify" and the user nothing by name, the label change is refused ("Access is denied"), `Run` goes on without lowering (best effort, fails safe) and a low-integrity child cannot write the worktree, so the test failed on any temp directory off the profile. The test's worktree now comes from `labelableTempDir`, which grants the owner an explicit full-control entry and leaves the labelling to `Run`, so the test proves the cage's labelling and not the temp directory's inherited ACL (disabling `applyLowIntegrityLabel` fails it on every drive). `TestWindowsRelabelRevertedAfterRun` takes the same directory: on such a drive it had passed without ever seeing a label to revert (a no-op revert passed it). That entry changes no product code: the cage still proceeds unlabelled when the label change is refused, and as of the next section it says so.
+- **The root package's `TestGenerateImageBatchExitCodesThroughTheBuiltBinary` failed whenever the machine's committed memory was high.** The test's config named a family the host-RAM guard cannot size but bound no ComfyUI install, and on Windows an unset `comfy_dir` is the reference install, so the unsizable family fell back to the media class default (the largest render family the box binds, 33.1 GiB of Wan 2.2 weights). The built binary is a child process and reads the real host, so at 89.9 GiB committed of 127.7 it deferred the batch as "waiting for host RAM" and exited 0 where 0, 4 and 1 were expected. The fixture now sets `comfy_dir` to `""` (`hostneed.ClassDefault`: no ComfyUI install bound, nothing to size, so the batch declares no host RAM and the brake has nothing to judge), and the test fails on every host, not only a loaded one, if the child ever logs a host-RAM declaration again. Config only: no production seam was added, and the in-process batch tests, which already ran on a stand-in host, now declare nothing as well.
+- **`internal/sandbox` `TestCageMasksDotGit` failed on any host that refuses the cage's unprivileged mounts.** The mask it proves is a tmpfs mounted over `<worktree>/.git` inside the worker's user and mount namespace, and a host can refuse that mount while the rest of the cage works. The test skipped only when `GITHUB_ACTIONS` was `true`, so on a host whose AppArmor restricts unprivileged user namespaces (`kernel.apparmor_restrict_unprivileged_userns=1`, the Ubuntu 24.04 default; measured on one of the two Linux hosts the cage tests were gated on, where the mount fails with `permission denied`) the write reached the real `.git` and the test failed with `SECURITY:`, on the base commit of this branch as well. It now asks the cage whether the mask was refused (`hostRefusesTheCagesMounts`, the control `TestCageMasksTheDotGitFileOfALinkedWorktree` uses), checks that the note is the one callers are promised (`[sandbox] ... NOT masked read-only (mount: ...)`), and skips with that note as the measured reason; on the host above it went from a failure to a skip, and on the host where the mount works it still runs for real. The skip depends on the note: a host that refuses the mount and says nothing is not skipped and fails the assertion as before (with `maskDotGit` made to swallow the refusal, the test fails on that host), and `TestCageSaysWhenDotGitIsNotMasked` holds the cage to saying so everywhere. The blanket skip on `GITHUB_ACTIONS` is gone: a runner that refuses the mount skips with the cage's note, and one that allows it now runs the assertion. Test only.
+
+### Fixed — the cage said nothing when it could not make a folder writable, put a label back, end a command at its deadline, or mask `.git`
+
+- **The defect.** On Windows `Run` lowers the mandatory integrity label of the worktree (when it is writable) and of the scratch folder so its low-integrity child can write them, and restores the label afterwards. Each step can fail, and each failure was dropped. Setting a label needs `WRITE_OWNER` on the folder, which owning a directory does not grant and which a data drive whose root ACL names the user nowhere does not either: the lowering was refused, `Run` went on, and the child could not write a folder the caller had asked to be writable. The caller saw the child's own `Access is denied` and nothing that explained it. A restore that was refused left the folder at low integrity, writable by every low-integrity process on the machine, with nobody told, and the next run read that leftover label as the folder's own and restored it again, so it never healed: that is the worst of the failures. A prior label that could not be read was taken for "no label", so the restore removed whatever label the folder had. A kill of the command's job at its deadline that failed left `Run` waiting for the command to finish by itself, with the caller's time limit not in force, and the timeout note then said the command had been killed.
+- **The fix.** Each is now a note. `Run` puts a line starting with `[sandbox] ` ahead of the command's own stderr in `Result.Stderr`, naming the folder (or the limit) and the cause; appends the same text to the error of a run that fails before the command starts (there is no stderr then); and logs it once (`sandbox: ...`). The wording says what the caller lost (a folder it cannot write, a label that was not restored, a deadline that was not enforced), not "confinement is off": a refused lowering fails safe, because the child runs at low integrity either way. A failed kill no longer claims a kill. A run with nothing to report is what it was, byte for byte. **Whether the command runs is unchanged**: it still runs when a label is refused or a kill fails. Failing closed there is a separate decision, parked with the operator. The Win32 calls go through three package variables (`setLabelSACL`, `getLabelSD`, `terminateJob`), so `TestWindowsLabelRefusalIsReportedToTheCaller` and six more refuse them on demand and assert the exact cause and folder in `Result.Stderr`, in the error and in the log, instead of depending on the ACLs of the machine that runs them (a clean run asserts the opposite: nothing on stderr, nothing logged).
+- **The same defect on Linux.** The read-only tmpfs over `<worktree>/.git`, which keeps a shell with a writable worktree from planting a git hook that fires on the host later, is a mount, and the worker dropped its error. Where the kernel refuses it (an unprivileged user namespace that may not mount, as in some container and CI sandboxes) the shell ran with a writable `.git` and nobody was told. The worker now writes `[sandbox] <worktree>/.git is NOT masked read-only (mount: ...)` to stderr after its last refusable step and right before the exec (`TestMaskDotGitSaysWhenTheKernelRefusesTheMount`, and `TestCageSaysWhenDotGitIsNotMasked`, which ties the note to what the kernel actually did on the host it runs on). `Result.Refused` reads through such lines, so a worker that wrote one and then failed to exec is still a refusal and not a command that exited 127 (`TestRefusedByReadsThroughNotes`). The mask is still not fail-closed.
+- **Looked at and left alone, with the reason.** Linux: the `/proc` mount and the mount-propagation call (defense in depth behind Landlock, which denies `/proc` whether or not the mount worked); the two `setrlimit` calls (documented best effort; a failure leaves the stricter limit already in force); `IgnoreIfMissing` on the Landlock rules (a skipped grant only removes access). Windows: the inheritance flag on the capture pipes' read ends and the `TerminateProcess` of a child whose job assignment failed (it never ran); the pipe reads and the handle closes (result fidelity, not confinement).
+
+### Fixed — the Linux cage left a linked worktree's `.git` file writable, so a command could aim the host's git at a directory of its own
+
+- **The defect.** The cage masks `<worktree>/.git` for a shell with a writable worktree, so that it cannot plant a git hook or rewrite a config that runs later, on the host, the next time git is used there. It did so only where `.git` is a directory. In a linked worktree, which is how the harness's own worktrees are made (`git worktree add`), `.git` is a FILE holding `gitdir: <repo>/.git/worktrees/<name>`, and nothing masked it. The git directory it names is outside the cage's write roots, but the pointer sits in the writable worktree: a command could rewrite the file, or rename another over it, to name a directory it controls, hooks and config included, and the next git command run on the host in that worktree would follow it. Measured on two Linux hosts before the fix: rewrite, append, truncate, a hard link written through, rename over and rename away of the file all succeeded, and the cage said nothing.
+- **The fix.** For a writable worktree whose `.git` is a regular file, the worker bind-mounts the file onto itself and remounts that bind read-only (`maskDotGitFile`), in the cage's private mount namespace, so nothing on the host changes. Measured with the worktree under the temp directory and under a shared-memory mount: the file still reads (git run in the cage over the worktree reports its status and its history), and every attempt above is refused: rewrite, append and truncate with `EROFS`, a link to it with `EXDEV` (the read-only flag belongs to the mount, so a second name on the worktree's own mount would be a way around it, and a link across the two mounts is refused), rename over, rename away and remove with `EBUSY`; the file is byte for byte what it was. The remount names read-only, nosuid, nodev and noexec and no atime flag, because a user namespace locks those flags on every mount it inherits and the kernel refuses a remount that clears one (measured: with the nosuid, nodev and noexec left out, the remount of a worktree under the shared-memory mount, which is nosuid and nodev, fails with `operation not permitted`), and a remount that names no atime flag keeps the mount's own. A refused bind or remount is the same kind of note as the directory's, `[sandbox] <worktree>/.git is NOT masked read-only (bind mount: ...)` or `(read-only remount: ...)`, written before the exec. The command still runs, as it does when the directory mask is refused, and failing closed stays a separate decision.
+- **Tests.** `TestCageMasksTheDotGitFileOfALinkedWorktree` builds the linked worktree with git itself, makes seven attempts from inside the cage, and fails with `SECURITY:` unless every one is refused and the entry is still the same file with the same bytes; it runs on the temp directory and on a shared-memory mount, where the locked flags bite. `TestCageSaysWhenTheDotGitFileIsNotMasked` ties the note to what the kernel did (a write reaches the file exactly when the cage says it is not masked) and runs on every host. `TestCageStillReadsALinkedWorktree` runs `git status` and `git log` in the cage over the masked worktree. `TestMaskDotGitFileBindsItReadOnly`, `TestMaskDotGitFileSaysWhenTheKernelRefuses` and `TestMaskDotGitFileStaysQuietWhenThereIsNothingToSay` stand in for the kernel and pin the two calls and their flags, the note for either refusal, and the cases that make no mount. A host that refuses the cage's unprivileged mounts, as a CI runner or a host whose AppArmor restricts unprivileged user namespaces does, cannot show the mask: the first test then asks the directory mask whether the host mounts at all and skips with the cage's note when it does not, and fails when the host mounts over a `.git` directory and refuses the file.
+- **Looked at and left alone, with the reason.** A `.git` inside a nested repository below the worktree root, which the mask never covered, directory or file. (A `.git` that is a symlink is reported, below.) The cage grants no read of a linked worktree's git directory (`run` and `run_shell` pass no `ReadDirs`), so `git status` in the cage over a linked worktree reports `fatal: not a git repository: <git directory>` unless the caller grants that directory (measured with the mask in place; the mask is on the pointer file, not on the git directory, and the tests above grant it as a caller that wants git to work there must): that predates the mask, and granting reads is a separate decision.
+
+### Fixed — a Windows run whose exit status could not be read reported exit 0, which every caller reads as success
+
+- **The defect.** `Run` reads how the command ended with `GetExitCodeProcess` and set `Result.ExitCode` only when the call succeeded. When it failed, the command had run and its output was in hand, and `ExitCode` stayed at its zero value: the run read as a success, which is what every caller takes 0 to mean (`run` and `run_shell` print `exit=0` for it). A command that had failed, or that the job had ended, was reported as having worked, with nothing to say otherwise.
+- **The fix.** The call goes through a package variable (`readExitCode`), like the three Win32 calls the notes above cover. When it fails, `ExitCode` is -1 (`noExitStatus`, the value `os.ProcessState.ExitCode` gives a process it has no code for) and the caller gets a note ahead of the command's stderr, `[sandbox] the command's exit status could not be read (GetExitCodeProcess: ...): its exit code is reported as -1, not 0, because a run whose outcome is unknown is not a success`, which is also logged once. That is how this file already reports a run that went ahead with a caveat (a command that exits non-zero comes back as a code and no error, one ended at its deadline as a code and a note), so the run is otherwise as it was: no error, no refusal, the output kept, and `internal/agent` shows the model `exit=-1` with the note in its stderr. `Result` documents the value.
+- **Tests.** `TestWindowsUnreadableExitStatusIsNotTakenForSuccess` makes the read fail on demand and asserts the exact code, the cause in `Result.Stderr` (leading) and once in the log, and that the output is kept; `TestWindowsExitCodeReachesTheCaller` is the control: with the real call, exit codes 0, 1, 3 and 42 come back as they are, with nothing on stderr and nothing logged. Both have skip stubs on the other platforms. Each of three mutations (the error ignored again, the note dropped, the code left at 0) fails the first test; the same overlay with the unmutated file passes.
+
+### Fixed — a `.git` symlink in a writable worktree was unprotected, and the Linux cage said nothing
+
+- **The defect.** `maskDotGit` mounts over `.git` where it is a directory or a regular file and returned nothing for anything else, and a symbolic link was something else: a mount follows the link, so none can protect the link itself, which sits in the writable worktree. A command in the cage could remove it and put a `.git` of its own in its place (a link or a directory), and the next git command run on the host in that worktree would follow it, as it would have followed a rewritten pointer file. A link to a directory was only half covered (the tmpfs went over the target, which protects the target and not the link), and for a link to a file or to nothing the cage did nothing at all. Neither `git worktree add` nor `git init` makes such a link, and nothing told the caller one was there.
+- **The fix.** The cage reports it: `[sandbox] <worktree>/.git is a symbolic link: it cannot be masked read-only, so a command in this cage can replace it and point git at a directory of its own`, to stderr just before the exec like every other note, for a link to a file, to a directory and to nothing. The command still runs, and what the cage did before it still does: a link to a directory keeps the read-only tmpfs over its target, and a refusal of that mount is reported too, in the same line. A worktree the command cannot write and a worktree with no `.git` get no note. The check is on the link itself (`Lstat`), so a link to a regular file is no longer taken for the file it points at.
+- **Tests.** `TestMaskDotGitSaysWhenDotGitIsASymlink` stands in for the kernel and pins the note, the mounts made (none for a link to a file or to nothing, one for a link to a directory) and the quiet cases. `TestCageSaysWhenDotGitIsASymlink` runs the real cage for each kind of link, asserts that the note leads stderr and that it is true: the command removes the link and puts one of its own there, and the host sees it afterwards. It does not depend on what the host's kernel allows. The case that pinned "no mount and no note" for a symlink in `TestMaskDotGitFileStaysQuietWhenThereIsNothingToSay` is gone with that behavior.
+
+### Fixed
+
+- Tests on Windows: the fake `ffmpeg` of the `audioio`, `fleetnode`, `pipeline` and `sttremote` tests was a hard link to the running test binary, which some Windows hosts will not unlink ("Access is denied" in the `TempDir` cleanup, 51 cleanup failures on one host); it is now a copy installed by the new `internal/fakeexe` test helper, which removes its own directory and starts the stand-in once so its slow first start is outside a test's time budget (test-only, no product code changed).
+- The `internal/fakeexe` test helper keeps a stand-in's folder inside the calling test's own `t.TempDir` (removed first, with a bounded retry on Windows) instead of a folder of its own in the shared temp directory, and a stand-in that runs tests instead of answering as a tool cannot start another (the warm-up start exits in the helper's `init`; one that reaches `Dir` or `Install` exits with status 97), so a killed run leaves nothing outside its own temp root and the helper cannot recurse (`TestAHelperCallStaysInsideTheTestsOwnTempDirAndIsGoneWhenItsTestEnds`, `TestAWarmUpStartExitsBeforeAnyTestRuns`, `TestAStandInThatRunsTestsRefusesToInstallAnother`).
+
+### Fixed — a run of the render tests left about 150 folders in the OS temp dir, and three pieces of render code left scratch behind
+
+- **The defect.** `node --test render/*.test.mjs` made its scratch folders with a bare `mkdtempSync(join(tmpdir(), ...))`. Most tests
+  never removed theirs and some removed theirs with an `rmSync` on the success path only, so one run left 149 folders (counted with
+  the OS temp dir pointed at an empty folder), and a workstation that runs the suite all day collected thousands of them on its system
+  drive (4,674 matching folders, about 0.9 GB, in one OS temp dir).
+- **The fix, in the tests.** New `render/test-scratch.mjs`: `scratchDir(t, prefix)` makes the folder and registers its removal with the test
+  that asked for it, so it goes when that test ends. node:test runs a test's `after` hooks whether the test passed or failed, so a failing
+  run leaves nothing either (`render/test-scratch.test.mjs` proves it with a child run that fails on purpose). 72 raw `mkdtempSync` calls in
+  21 test files use it, and the fixture builders (`fixture`, `keyedHarness`, `cliFixture`, ...) take the test's `t` and pass it on. A call
+  without `t` is refused before any folder is made. The same file fails on a new raw `mkdtemp` in a render test or in one of its two
+  support modules unless it is listed there with the reason its removal is on every path (22 remain, each removed in a `finally`, by an
+  exit hook, or by the test's own after-hook).
+- **The fix, in the code.** Three places in `render/` made scratch and did not remove it on every path. `igpu-stub.mjs` (test support)
+  built its Windows launcher into one per-machine cache folder, `igpu-stub-launcher-v1`, that nothing removed, and every process that
+  raced to build it left its own `build-<pid>-<ms>` folder inside it; it is now built per process into a folder that goes when the
+  process ends (a cold build measured 0.8 s). `manifest-satisfy.mjs`: `resolveDeps` wrote the host-constraints file and the
+  unified pack lock as pid-named files in the OS temp dir and never removed them, so every provisioning run left two; both now live in a
+  folder of the step's own that is removed when the step ends, passed or failed. `compose-hyperframes.mjs`: the render work dir was
+  made a few statements before the `try` whose `finally` removes it, so a throw in between left an empty `job-*` folder in the cache for
+  good; the `try` now opens right after the folder exists. Each has a test that fails without the change.
+- **Measured (Windows).** With the OS temp dir pointed at an empty folder, one run of `node --test render/*.test.mjs` left 149 folders before
+  and 0 after (twice); the 1,286 tests that were there are all still there and pass (23 skipped, as before), and the run has 12 more.
+
 ## [0.180.0] - 2026-10-10 - a busy image call waits for the first matching lane anywhere in the cluster, graphs overflow to a node that holds their files, and a live render keeps its lease
 
 ### Fixed — the ticket queue was off on any machine whose config sets no `state_dir`, which is the usual config (ADR 0083)

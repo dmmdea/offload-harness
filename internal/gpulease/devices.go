@@ -529,11 +529,17 @@ func (m *Manager) tryAcquireDevices(class Class, opts Options, devs []string) (*
 			return nil, fmt.Errorf("gpulease: could not create %s: %w", d, err)
 		}
 	}
+	// The host's readings come BEFORE the lock (F57): the walk of each declaring holder's process tree does not belong in a
+	// critical section every other acquirer on the machine spins on for two seconds. They are compared inside it.
+	reading := m.readHost(opts.HostRAMGiB)
+	if m.afterHostReadHook != nil {
+		m.afterHostReadHook()
+	}
 	var lease *Lease
 	var held *ErrHeld
 	err := m.withEpochLock(func() error {
 		var gerr error
-		lease, held, gerr = m.grantDevicesLocked(class, opts, devs)
+		lease, held, gerr = m.grantDevicesLocked(class, opts, devs, reading)
 		return gerr
 	})
 	if err != nil {
@@ -547,8 +553,9 @@ func (m *Manager) tryAcquireDevices(class Class, opts Options, devs []string) (*
 
 // grantDevicesLocked is steps (2) to (7) of tryAcquireDevices. The caller holds the
 // epoch lock. It returns the lease, or a non-nil *ErrHeld when the cards are not free,
-// or an error; a refusal leaves nothing behind.
-func (m *Manager) grantDevicesLocked(class Class, opts Options, devs []string) (*Lease, *ErrHeld, error) {
+// or an error; a refusal leaves nothing behind. host is the machine's side of the host-RAM check, read before the lock
+// (readHost); nil reads it here.
+func (m *Manager) grantDevicesLocked(class Class, opts Options, devs []string, host *hostReading) (*Lease, *ErrHeld, error) {
 	m.sweepDebrisLocked()
 	r := m.reader()
 
@@ -578,14 +585,14 @@ func (m *Manager) grantDevicesLocked(class Class, opts Options, devs []string) (
 		return nil, m.heldErr(info), nil
 	}
 
-	// (4b) HOST RAM (hostram.go). Here, and not before the lock, so that the leases this reads (and
-	// the part of them still to load) are exactly the ones live at the instant this grant writes its
-	// own record in (5) to (7): two grants on different cards cannot both see the same headroom,
-	// because the second one's read includes the first one's record. After the cards, so a held card
-	// is reported as held and not as a memory shortage. Before the epoch, so a refusal burns none.
-	// The cost is the host's counters and, only when another lease declared a need, a walk of its
-	// holder's process tree: a few syscalls inside a critical section that is already file I/O.
-	if e := m.hostRAMRefusal(opts, r.infos()); e != nil {
+	// (4b) HOST RAM (hostram.go). The DECISION is made here, under the lock, so that the leases it is judged against (and
+	// the part of them still to load) are exactly the ones live at the instant this grant writes its own record in (5) to
+	// (7): two grants on different cards cannot both see the same headroom, because the second one's check includes the
+	// first one's record. After the cards, so a held card is reported as held and not as a memory shortage (and its waiter
+	// is not marked as waiting for memory). Before the epoch, so a refusal burns none. The machine's side of the check (the
+	// host's counters and the walk of each declaring holder's process tree) was READ before the lock (readHost, F57), so
+	// what runs here is a comparison against the leases live now, whose records r.infos() has already read.
+	if e := m.hostRAMRefusalWith(opts, r.infos(), host); e != nil {
 		return nil, nil, e
 	}
 

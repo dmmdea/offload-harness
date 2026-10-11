@@ -295,6 +295,7 @@ func TestAgentContractValidateOutputSchema(t *testing.T) {
 	}{
 		{"typed properties compile", `{"type":"object","properties":{"digest":{"type":"string"},"count":{"type":"integer"}},"required":["digest"]}`, false},
 		{"enum and array compile", `{"properties":{"verdict":{"enum":["go","kill"]},"items":{"type":"array"}}}`, false},
+		{"nested objects and arrays of objects compile", `{"type":"object","properties":{"rows":{"type":"array","items":{"type":"object","properties":{"id":{"type":"integer"}}}},"meta":{"type":"object","properties":{"src":{"type":"string"}}}},"required":["rows","meta"]}`, false},
 		{"not json", `{nope`, true},
 		{"no properties map", `{"type":"string"}`, true},
 		{"empty properties", `{"properties":{}}`, true},
@@ -353,9 +354,9 @@ func TestParseAcceptanceCheck(t *testing.T) {
 		{"nonempty:a|b|a", true},
 		{"min_items:a|b:2", false}, // only nonempty alternates; min_items takes its name literally
 		{"", true},
-		{"contains:", true},           // matches everything — cannot gate
-		{"not_contains:", true},       // matches nothing — cannot pass
-		{"regex:([", true},            // does not compile
+		{"contains:", true},            // matches everything — cannot gate
+		{"not_contains:", true},        // matches nothing — cannot pass
+		{"regex:([", true},             // does not compile
 		{"min_items:findings:0", true}, // min 0 can never fail
 		{"min_items:findings:x", true},
 		{"min_items:findings", true},

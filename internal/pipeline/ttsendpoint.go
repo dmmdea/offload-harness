@@ -65,6 +65,11 @@ func (p *Pipeline) runVoiceEndpoint(ctx context.Context, req core.Request, meta 
 		out = filepath.Join(p.cfg.MediaDir, "voice-"+sha256hex(text + tasks.StableParamsKey(req.Params))[:8]+".wav")
 	}
 	timeout := time.Duration(p.cfg.AudioGenTimeoutSec) * time.Second
+	// This lane takes no media lease (the server owns its GPU), and every other lane turns the call's PAIR card from
+	// queued to running when it takes its lease or slot (core.MarkWorking). So the lane marks it here, where the work
+	// starts: without it the card stayed queued for the whole synthesis, and a sweep of a card whose process died in
+	// the middle of it said the call never started (0.180 final check).
+	core.MarkWorking(ctx)
 	res, err := ttsclient.Speak(ctx, ttsclient.Request{
 		Base:     p.cfg.TTSEndpoint,
 		APIKey:   p.cfg.TTSAPIKey,

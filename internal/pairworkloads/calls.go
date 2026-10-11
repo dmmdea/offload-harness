@@ -54,7 +54,9 @@ var longCallTasks = map[string]bool{
 // calls core.MarkWorking for them, so their card is "queued" from the first frame to the last, whether the
 // work is waiting or half done. A card in that state says nothing about whether the work started, and the
 // orphan sweep (orphanText) must not claim it had not. TestOnlyTranscribeNeverMarksWorking pins the list to
-// internal/pipeline.
+// internal/pipeline in BOTH directions: transcribe's lane reaches no core.MarkWorking, and every lane of every other
+// long-call task (laneEntries in that test) reaches one. The voice endpoint of generate_audio takes no lease and so
+// marks its card itself, where its request to the server starts.
 var tasksThatNeverMarkWorking = map[string]bool{"transcribe": true}
 
 // FleetDoor is the door a fleet node stamps on work it serves FOR another box
@@ -92,10 +94,15 @@ func (c *openCall) callID() string { return c.jobID }
 // the call's ledger row already closed it, in which case end waits for that
 // frame). end returns after the close is on the wire, so the caller may answer
 // and be killed. The id is "" and both functions are nil when nothing was
-// opened: emitter disabled, a task whose engine is not fixed by the task, or
-// work this box serves for another (FleetDoor).
+// opened: emitter disabled, a task whose engine is not fixed by the task, work
+// this box serves for another (FleetDoor), or a door that makes test traffic.
 func (e *Emitter) Begin(task, door string) (callID string, working func(), end func(res core.Result)) {
 	if !e.Enabled() || !longCallTasks[task] || door == FleetDoor {
+		return "", nil, nil
+	}
+	// A call through a door that exists to produce measurement traffic (fleet-measure) opens no card, like the
+	// row that would close it (register F48; AttachLedger).
+	if ledger.ClassOfDoor(door) != "" && !e.keepTestCards() {
 		return "", nil, nil
 	}
 	now := e.now().UnixMilli()

@@ -8,6 +8,8 @@ package mediacap
 // the same file); a test that needs a different size says so.
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -31,6 +33,13 @@ var recipeSizes = map[string]int64{
 	"text_encoders/qwen3vl_4b_bf16.safetensors":                   8_890_000_000,
 	"vae/qwen_image_2.1_vae_bf16.safetensors":                     320_000_000,
 	"vae/qwen_image_vae.safetensors":                              254_000_000,
+}
+
+// fixtureFingerprint is the content of a fixture file, which exists only as a name and a size here: a copy of a file is
+// the same file, so equal names and equal sizes are equal content, and a file of another size is other content.
+func fixtureFingerprint(path string, size int64) string {
+	sum := sha256.Sum256([]byte(filepath.Base(path) + "\n" + strconv.FormatInt(size, 10)))
+	return hex.EncodeToString(sum[:])
 }
 
 // recipeEnv is a models root whose classes are the ones the graphs load from, and a stat that answers from recipeSizes
@@ -107,7 +116,7 @@ func familyRecipe(t *testing.T, blocks map[string]string, name string, extra map
 		t.Fatalf("family %q: %v", name, err)
 	}
 	roots, stat := recipeEnv(extra)
-	r, ok := ImageRecipe(eff, fi, roots, stat)
+	r, ok := ImageRecipeWith(eff, fi, roots, stat, fixtureFingerprint)
 	if !ok {
 		t.Fatalf("family %q has no recipe", name)
 	}
@@ -243,7 +252,7 @@ func TestExactNeedsSameBytes(t *testing.T) {
 		}
 		return 0, false
 	}
-	b, _ := ImageRecipe(eff, fi, roots, short)
+	b, _ := ImageRecipeWith(eff, fi, roots, short, fixtureFingerprint)
 	if a.Digest() == b.Digest() {
 		t.Fatal("a file one byte off is not the same file")
 	}
@@ -256,7 +265,7 @@ func TestExactNeedsSameBytes(t *testing.T) {
 		}
 		return short(path)
 	}
-	c, _ := ImageRecipe(eff, fi, roots, gone)
+	c, _ := ImageRecipeWith(eff, fi, roots, gone, fixtureFingerprint)
 	if m := c.Missing(); len(m) != 1 || m[0] != "qwen3vl_8b_bf16.safetensors" {
 		t.Errorf("Missing = %v, want the text encoder", m)
 	}
@@ -348,7 +357,7 @@ func recipeOf(t *testing.T, cfg config.Config) Recipe {
 	roots, stat := recipeEnv(map[string]int64{"loras/base_lora.safetensors": 1_000, "loras/l.safetensors": 2_000,
 		"checkpoints/other_ckpt.safetensors": 5, "diffusion_models/other_ckpt.safetensors": 5,
 		"vae/other_vae.safetensors": 6, "text_encoders/other_clip.safetensors": 7})
-	r, ok := ImageRecipe(cfg, fi, roots, stat)
+	r, ok := ImageRecipeWith(cfg, fi, roots, stat, fixtureFingerprint)
 	if !ok {
 		t.Fatal("no recipe")
 	}

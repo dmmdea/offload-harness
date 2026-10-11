@@ -330,8 +330,9 @@ func TestTwoMediaCallsRunOnTwoFreeCards(t *testing.T) {
 		if pr.Env["GPU_LEASE_CLASS"] != "media" || pr.Env["GPU_LEASE_EPOCH"] == "" || pr.Env["GPU_LEASE_DIR"] == "" {
 			t.Errorf("lease env incomplete: %v", pr.Env)
 		}
-		// A render on one card must not empty the seats on the others (register C-86): the unload
-		// list is the roster minus the memory stack minus the seats pinned to other cards.
+		// A render on one card must not empty the seats on the others (register C-86, F15): the unload
+		// list is the roster minus the memory stack minus the models placed on other cards. The seat
+		// whose card nobody declared is unknown and goes, as before F15.
 		unload := pr.Env["GPU_LEASE_UNLOAD_MODELS"]
 		switch uuid {
 		case admitUUIDA:

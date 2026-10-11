@@ -612,6 +612,16 @@ func TestHealthStaysCompatibleWithOldReaders(t *testing.T) {
 		return ts
 	}
 
+	// The node publishes a digest for files it has hashed, so the delegator side hashes them first, as it does before it
+	// matches (and through the cache the node reads).
+	eff, fi, err := cfg.ResolveImageFamily("qwen-image-2.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, ok := mediacap.ImageRecipe(eff, fi, mediacap.ModelRoots(comfy), nil)
+	if !ok {
+		t.Fatal("no recipe")
+	}
 	ts := serve(cfg)
 	view, err := delegate.FetchNodeView(context.Background(), ts.URL, "")
 	if err != nil {
@@ -622,14 +632,6 @@ func TestHealthStaysCompatibleWithOldReaders(t *testing.T) {
 	}
 	if !view.RefineHonoured || len(view.ImageRecipes) != 1 {
 		t.Fatalf("refine_honoured=%v recipes=%+v, want the node's one named family", view.RefineHonoured, view.ImageRecipes)
-	}
-	eff, fi, err := cfg.ResolveImageFamily("qwen-image-2.1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	want, ok := mediacap.ImageRecipe(eff, fi, mediacap.ModelRoots(comfy), nil)
-	if !ok {
-		t.Fatal("no recipe")
 	}
 	if got := view.ImageRecipes[0]; got.Digest != want.Digest() || got.Name != "qwen-image-2.1" || got.Steps != 40 || len(got.Files) != 3 || got.Files[0].Bytes != 222 {
 		t.Errorf("the delegator reads the row the node published: %+v (digest want %s)", got, want.Digest())

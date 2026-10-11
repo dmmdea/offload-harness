@@ -25,6 +25,10 @@ type Origin struct {
 	Session string
 	PID     int
 	PPID    int
+	// Class is the run class of this process when it declares one (register F48): LOCAL_OFFLOAD_RUN_CLASS, else a
+	// "<class>:<name>" origin label (bake:run-7). Empty is production. Record stamps it on every row the process
+	// writes and the PAIR emitters open no card while it is set (runclass.go).
+	Class string
 }
 
 // maxOriginLen bounds the session label the way the dispatch tenant is
@@ -58,13 +62,19 @@ func OriginFromEnv(getenv func(string) string) Origin {
 // knows better (a printed CLI, an opencode session) can name itself.
 func originFrom(getenv func(string) string, pid, ppid int) Origin {
 	o := Origin{PID: pid, PPID: ppid}
+	o.Session = sessionFrom(getenv)
+	o.Class = processClass(getenv, o.Session)
+	return o
+}
+
+// sessionFrom is the session label alone: LOCAL_OFFLOAD_ORIGIN, else CLAUDE_CODE_SESSION_ID.
+func sessionFrom(getenv func(string) string) string {
 	for _, key := range []string{"LOCAL_OFFLOAD_ORIGIN", "CLAUDE_CODE_SESSION_ID"} {
 		if v := cleanOrigin(getenv(key)); v != "" {
-			o.Session = v
-			return o
+			return v
 		}
 	}
-	return o
+	return ""
 }
 
 // cleanOrigin trims s and refuses anything that is not printable ASCII within

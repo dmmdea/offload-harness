@@ -175,6 +175,10 @@ type Pipeline struct {
 	visionGPUWait   time.Duration
 	visionGPUPoll   time.Duration
 	visionRetryWait time.Duration
+	// visionColdLoadWait (F49) bounds the wait for a COLD vision seat to load before the
+	// request is sent (cfg.VisionColdLoadWaitSec, floored at one admission poll). Zero turns
+	// the wait off. Resolved once in New; a field so tests can shrink it.
+	visionColdLoadWait time.Duration
 	// Passive fleet footprint recording (docs/FLEET-NODE.md): every GPU render
 	// carries a gpugen sampling hook keyed by this machine's bindings, so
 	// measured VRAM peaks accumulate during NORMAL harness use, not just fleet
@@ -214,6 +218,8 @@ type Pipeline struct {
 	// seatVerdictFn the test seam that replaces it.
 	seatGuard     *seatguard.Guard
 	seatVerdictFn func(ctx context.Context, model string) seatguard.Verdict
+	// laneFaults keeps the media lane probe's card-table fault lines to one per probe and cause per minute (laneCardTable).
+	laneFaults laneFaultLog
 }
 
 // digestMedia resolves a media file's content identity (test seam aware).
@@ -298,6 +304,11 @@ func New(cfg config.Config, c *llamaclient.Client, ca *cache.Cache, l *ledger.Le
 	p.visionGPUWait = time.Duration(cfg.VisionGPUWaitSec) * time.Second
 	p.visionGPUPoll = 2 * time.Second
 	p.visionRetryWait = 3 * time.Second
+	if sec := cfg.VisionColdLoadWaitSec; sec > 0 {
+		// A wait shorter than warmSeat's one-poll floor would be read as "no budget left" and
+		// skip the warm-up silently; the floor makes a small setting mean the shortest real wait.
+		p.visionColdLoadWait = max(time.Duration(sec)*time.Second, admissionPoll)
+	}
 	p.thresholds = loadThresholds(cfg.ThresholdsPath)    // Phase 2
 	p.router = router.Load(cfg.RouterWeightsPath)        // Phase 5
 	p.overrides = loadOverrides(cfg.TierOverridesPath)   // Phase 4
@@ -1032,6 +1043,16 @@ func (p *Pipeline) runVisionGen(ctx context.Context, req core.Request, built tas
 		return core.Deferf(reason, "", meta)
 	}
 
+	// F49: a COLD vision seat is loaded BEFORE the request is sent, not inside it. The seat
+	// unloads after its idle ttl, and llama-swap holds the first request open for the whole
+	// load, so the request's timeout (request_timeout_sec) had to cover the load AND the
+	// inference: a 32B seat's cold load plus a many-frame prefill outlasted it and the call
+	// failed with "Client.Timeout exceeded while awaiting headers" while the load was still
+	// running. The bounded wait below (vision_coldload_wait_sec) is a separate passthrough
+	// request, so the vision request keeps its full timeout for inference. A seat already
+	// listed ready costs one /running read.
+	coldNote := p.waitForColdVisionSeat(ctx, meta.Model)
+
 	// LO-9 parity for the vision tier: stamp the call so a cold-swap timeout is
 	// exempt from breaker accounting (http_5xx / warm timeouts still count).
 	likelyColdSwap := p.noteTierCall(meta.Model)
@@ -1061,6 +1082,11 @@ func (p *Pipeline) runVisionGen(ctx context.Context, req core.Request, built tas
 		meta.LatencyMs = time.Since(start).Milliseconds()
 		meta.ErrClass = classifyErr(gerr)
 		reason := "vision model call failed: " + gerr.Error()
+		if coldNote != "" {
+			// Say that the seat was cold and how long the load was waited for, so a
+			// failure after a long cold load is not read as a failure of a warm call.
+			reason += coldNote
+		}
 		// A context-overflow defer that runVideoDescribe is about to retry at a
 		// smaller frame width is a STEP of that call, not the call: its row is
 		// an inner row of the row the final attempt writes.
@@ -1781,7 +1807,8 @@ func (p *Pipeline) runGenerateImageSdcpp(ctx context.Context, req core.Request, 
 	}
 	imgFamily, imgQuant := imageFootprintKey(cfg)
 	// sd.cpp has no ComfyUI instance to bind to a card: the whole node, as always.
-	grant, lerr := p.acquireMediaLease(ctx, "image-gen (sdcpp)", timeout, p.gpuWait(), wholeNeed(paramStr(req.Params, "waiter_token")).declaresRAM(classDefaultRAM(p.cfg)).resumableBy(req))
+	// It declares the weights it parks itself (sdcppneed.go, F60), not only the class default: an sd.cpp-only box has none.
+	grant, lerr := p.acquireMediaLease(ctx, "image-gen (sdcpp)", timeout, p.gpuWait(), p.sdcppImageNeed(cfg, imgFamily, imgQuant, paramStr(req.Params, "waiter_token")).resumableBy(req))
 	if lerr != nil {
 		return p.deferForLease(lerr, req.Task, meta, len(req.Input), start)
 	}
@@ -2268,6 +2295,13 @@ func (it *ImageBatchItem) tagLicense(fam config.FamilyInfo) {
 // (a concrete seed BEFORE the render so the report is reproducible; a stable output
 // path under mediaDir) and renders the jobs file the render script consumes. Pure.
 func normalizeImageBatch(jobs []ImageBatchJob, mediaDir string) ([]ImageBatchJob, string) {
+	return normalizeImageBatchFor(jobs, mediaDir, "")
+}
+
+// normalizeImageBatchFor is normalizeImageBatch for a batch of one named family: the family is part of a default out's
+// hash, as it is part of the single render's (its `family` param is in the hashed params), so the same prompt and seed
+// under two families are two files and not one overwriting the other. No family hashes exactly as it always did.
+func normalizeImageBatchFor(jobs []ImageBatchJob, mediaDir, family string) ([]ImageBatchJob, string) {
 	norm := make([]ImageBatchJob, len(jobs))
 	for i, j := range jobs {
 		if j.Seed <= 0 {
@@ -2278,6 +2312,9 @@ func normalizeImageBatch(jobs []ImageBatchJob, mediaDir string) ([]ImageBatchJob
 			// negative): two jobs differing only in negative must not share an output
 			// path, or the second silently overwrites the first.
 			params := map[string]any{"seed": j.Seed, "width": j.Width, "height": j.Height, "steps": j.Steps, "negative": j.Negative}
+			if family = strings.TrimSpace(family); family != "" {
+				params["family"] = family
+			}
 			j.Out = filepath.Join(mediaDir, "render-"+sha256hex(j.Prompt + tasks.StableParamsKey(params))[:8]+".png")
 		}
 		norm[i] = j
@@ -2349,13 +2386,52 @@ func batchErrClass(itemErr string, gerr error) string {
 	return classifyErr(fmt.Errorf("%s", itemErr))
 }
 
-// RunImageBatch renders N prompts through ONE warm ComfyUI session (the checkpoint
+// NormalizeImageBatch is normalizeImageBatchFor without the jobs file: the batch's jobs with a concrete seed and a concrete
+// out filled in, exactly as RunImageBatchAs fills them. The CLI calls it before it chooses where the batch runs, so a job
+// that names neither has the same seed and out whether the whole batch renders warm here or each job is placed on the
+// fleet (the default out is a hash of the seed, so a seed minted twice would be two files). Idempotent: a job that already
+// has both is unchanged.
+func NormalizeImageBatch(jobs []ImageBatchJob, mediaDir, family string) []ImageBatchJob {
+	norm, _ := normalizeImageBatchFor(jobs, mediaDir, family)
+	return norm
+}
+
+// RunImageBatch renders N prompts through ONE warm ComfyUI session under the machine's default binding: the batch of
+// RunImageBatchAs with no family.
+func (p *Pipeline) RunImageBatch(ctx context.Context, jobs []ImageBatchJob) ([]ImageBatchItem, error) {
+	return p.RunImageBatchAs(ctx, "", jobs)
+}
+
+// RunImageBatchAs renders N prompts through ONE warm ComfyUI session (the checkpoint
 // loads once) while preserving zero-always-warm AT THE BATCH BOUNDARY: the render
 // script's single teardown + gpugen's deferred /free restore a clean GPU when the
 // batch ends, however it ends. Ledger: one entry per job, same model label as the
 // single-render path (health tiers must not fragment).
-func (p *Pipeline) RunImageBatch(ctx context.Context, jobs []ImageBatchJob) ([]ImageBatchItem, error) {
-	if p.cfg.ImageGenScript == "" {
+//
+// family selects the binding exactly as the single render's `family` does (ADR 0058): "" or the default binding's own
+// name is this machine's default, a named overlay renders under its own config copy (its checkpoint, steps, card pin,
+// license) and tags every item with it. EVERY read of the binding below goes through that resolved copy, never p.cfg: the
+// lease is asked for on the family's card and sized from the family's files, the launch is the family's pin, and the
+// ledger label and the tag are the family's. Only what no overlay changes (the prompt refiner, the ledger) stays on p.cfg.
+// A family on stable-diffusion.cpp has no warm session to share, so it is refused by name: its jobs render one at a time.
+func (p *Pipeline) RunImageBatchAs(ctx context.Context, family string, jobs []ImageBatchJob) ([]ImageBatchItem, error) {
+	return p.RunImageBatchWaiting(ctx, family, jobs, 0)
+}
+
+// RunImageBatchWaiting is RunImageBatchAs for a batch that has to wait for a busy lane: the fleet cannot relieve it (no
+// roster node renders its recipe), so it keeps its place in the lease line instead of giving up at the pipeline's own window
+// and coming back `queued`, which the caller would only run again from the back of the line. wait > 0 is how long it keeps
+// that place; 0 is the pipeline's own gpu_wait_ms window, the call RunImageBatchAs always was. The wait ends the moment ctx
+// does, with an error that says so and is not a busy answer (IsGPUBusy is false for it).
+func (p *Pipeline) RunImageBatchWaiting(ctx context.Context, family string, jobs []ImageBatchJob, wait time.Duration) ([]ImageBatchItem, error) {
+	cfg, fam, ferr := p.cfg.ResolveImageFamily(family)
+	if ferr != nil {
+		return nil, ferr
+	}
+	if strings.TrimSpace(family) != "" && cfg.ImageGenEngine == "sdcpp" {
+		return nil, fmt.Errorf("image family %q renders on stable-diffusion.cpp, which has no warm ComfyUI session to batch through: render its jobs one at a time", family)
+	}
+	if cfg.ImageGenScript == "" {
 		return nil, fmt.Errorf("no image-gen route configured")
 	}
 	if len(jobs) == 0 {
@@ -2366,12 +2442,12 @@ func (p *Pipeline) RunImageBatch(ctx context.Context, jobs []ImageBatchJob) ([]I
 			return nil, fmt.Errorf("job %d: empty prompt", i)
 		}
 	}
-	script, serr := gpugen.ResolveScript(p.cfg.ImageGenScript)
+	script, serr := gpugen.ResolveScript(cfg.ImageGenScript)
 	if serr != nil {
 		return nil, serr
 	}
-	_ = os.MkdirAll(p.cfg.MediaDir, 0o755)
-	norm, jsonl := normalizeImageBatch(jobs, p.cfg.MediaDir)
+	_ = os.MkdirAll(cfg.MediaDir, 0o755)
+	norm, jsonl := normalizeImageBatchFor(jobs, cfg.MediaDir, family)
 	// The batch file stamp derives from the RAW jobs, BEFORE any refinement:
 	// refined text is temperature-sampled, so hashing it would mint new
 	// jobs/results filenames for every run of an identical batch.
@@ -2427,8 +2503,8 @@ func (p *Pipeline) RunImageBatch(ctx context.Context, jobs []ImageBatchJob) ([]I
 			jsonl = jobsJSONL(norm)
 		}
 	}
-	jobsPath := filepath.Join(p.cfg.MediaDir, "batch-"+stamp+".jobs.jsonl")
-	resultsPath := filepath.Join(p.cfg.MediaDir, "batch-"+stamp+".results.jsonl")
+	jobsPath := filepath.Join(cfg.MediaDir, "batch-"+stamp+".jobs.jsonl")
+	resultsPath := filepath.Join(cfg.MediaDir, "batch-"+stamp+".results.jsonl")
 	if err := os.WriteFile(jobsPath, []byte(jsonl), 0o644); err != nil {
 		return nil, err
 	}
@@ -2437,31 +2513,36 @@ func (p *Pipeline) RunImageBatch(ctx context.Context, jobs []ImageBatchJob) ([]I
 	// actually renders with; UNBOUND keeps the historical "comfyui-sdxl" label so
 	// health tiers don't fragment.
 	modelLabel := "comfyui-sdxl"
-	if p.cfg.ImageGenCkpt != "" {
-		modelLabel = "comfyui:" + p.cfg.ImageGenCkpt
+	if cfg.ImageGenCkpt != "" {
+		modelLabel = "comfyui:" + cfg.ImageGenCkpt
 	}
-	model := imageModelFromConfig(p.cfg)
+	model := imageModelFromConfig(cfg)
 	// The whole batch shares one timeout: per-image budget × N (the first job also
 	// absorbs the ComfyUI cold start, which the per-image budget already covers today).
-	timeout := time.Duration(p.cfg.ImageGenTimeoutSec) * time.Second * time.Duration(len(norm))
+	timeout := time.Duration(cfg.ImageGenTimeoutSec) * time.Second * time.Duration(len(norm))
 	// ONE lease for the WHOLE batch. That is the point of batching: the tier is torn
 	// down once for N renders instead of once each, which is the arithmetic behind the
 	// 3,356 unloads in the server log.
 	// This helper returns items+error rather than a core.Result, so a busy card surfaces
 	// as an error for the caller to classify — no items were produced.
-	grant, lerr := p.acquireMediaLease(ctx, "image-gen batch", timeout, p.gpuWait(), imageNeed(p.cfg, ""))
+	var grant mediaGrant
+	var lerr error
+	if wait > 0 {
+		grant, lerr = p.acquireMediaLeaseHeld(ctx, "image-gen batch", timeout, wait, imageNeed(cfg, ""))
+	} else {
+		grant, lerr = p.acquireMediaLease(ctx, "image-gen batch", timeout, p.gpuWait(), imageNeed(cfg, ""))
+	}
 	if lerr != nil {
 		return nil, lerr
 	}
 	defer grant.Release()
 	model.Launch = grant.launch(model.Launch)
-	gerr := imagegen.GenerateBatch(ctx, p.cfg.NodePath, script, p.cfg.ComfyDir, jobsPath, resultsPath, model, timeout, grant.Env...)
+	gerr := imagegen.GenerateBatch(ctx, cfg.NodePath, script, cfg.ComfyDir, jobsPath, resultsPath, model, timeout, grant.Env...)
 
 	raw, _ := os.ReadFile(resultsPath) // best-effort even on gerr: partial results are real work
 	items := parseBatchResults(raw, norm)
-	// The default binding (""), exactly what the single path resolves for a request
-	// without a family: every item is tagged with it (ADR 0058).
-	_, fam, _ := p.cfg.ResolveImageFamily("")
+	// The binding the batch rendered under (the default for no family, exactly what the
+	// single path resolves for a request without one): every item is tagged with it (ADR 0058).
 	for i, it := range items {
 		items[i].tagLicense(fam)
 		// Refiner outcome onto the item (single-path result-key parity: with a
@@ -2478,8 +2559,7 @@ func (p *Pipeline) RunImageBatch(ctx context.Context, jobs []ImageBatchJob) ([]I
 		}
 		// Ledger input-chars parity with the single path: the RAW prompt is the
 		// caller's input (jobs[i]; norm[i].Prompt may hold the refined text).
-		// Batches render the DEFAULT binding (no family param on this path), so its
-		// declared license, if any, is the one every row carries.
+		// Every row carries the license the rendering binding declares, if any.
 		meta := core.Meta{Model: modelLabel, LatencyMs: it.Ms, License: fam.License}
 		if it.OK {
 			p.record(core.TaskGenerateImage, meta, len(jobs[i].Prompt))
@@ -2527,6 +2607,25 @@ func resolveOutDir(mediaDir, callerOutDir string) (string, error) {
 	return dir, nil
 }
 
+// runGraphEnvelopePath names the result envelope of one call: a random name under the media dir, so two runs, whichever graphs they
+// hold, never read or remove each other's.
+func runGraphEnvelopePath(mediaDir string) string {
+	var b [6]byte
+	_, _ = crand.Read(b[:]) // cannot fail on this toolchain (Go >= 1.24)
+	return filepath.Join(mediaDir, "run-graph-"+hex.EncodeToString(b[:])+".json")
+}
+
+// removeRunGraphEnvelope deletes the envelope of a call that has read it. A scanner that holds the file for a moment after the
+// runner wrote it (a sharing violation on Windows) is waited out for a short while; a file that is not there is not an error.
+func removeRunGraphEnvelope(path string) {
+	for i := 0; i < 20; i++ {
+		if err := os.Remove(path); err == nil || errors.Is(err, os.ErrNotExist) {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+}
+
 // runRunGraph executes an arbitrary ComfyUI API-format graph + satisfies its node manifest
 // on the LOCAL ComfyUI by shelling out to comfy-run-graph.mjs (shared GPU lock + ComfyUI
 // lifecycle via internal/rungraph → gpugen). Its own branch — no text models, no grammar,
@@ -2541,11 +2640,15 @@ func (p *Pipeline) runRunGraph(ctx context.Context, req core.Request, meta core.
 	if err != nil {
 		return p.deferGen(req, meta, start, len(req.Input), err.Error())
 	}
-	// Default the result envelope + output dir under the media dir so an inline caller need
-	// not pick paths; a stable name lets a re-run reuse one file.
+	// Default the result envelope under the media dir so an inline caller need not pick a path. It is the runner's note to this
+	// one call: read once below and removed when the call ends, whatever the run came to, so nothing it leaves behind grows with the
+	// number of calls. (It used to be named from the graph's path, "so a re-run reuses one file", but a caller that hands a graph
+	// file of its own for every call, which is what a graph ticket, an inline graph_json and a fleet node's job all do, got an
+	// envelope of its own that nothing ever removed.) A caller that names result_path owns that file: it is written there and kept.
 	if params.ResultPath == "" {
 		_ = os.MkdirAll(p.cfg.MediaDir, 0o755)
-		params.ResultPath = filepath.Join(p.cfg.MediaDir, "run-graph-"+sha256hex(params.GraphPath + params.ManifestPath)[:8]+".json")
+		params.ResultPath = runGraphEnvelopePath(p.cfg.MediaDir)
+		defer removeRunGraphEnvelope(params.ResultPath)
 	}
 	outDir, oerr := resolveOutDir(p.cfg.MediaDir, params.OutDir)
 	if oerr != nil {
@@ -3742,7 +3845,8 @@ func (p *Pipeline) footprintSampling(family, quant, task string) *gpugen.Samplin
 // hostSampleFunc is the host-memory sample of a render: the private and the resident memory of the process tree
 // rooted at the runner, root included (gpulease.TreeMemory). p.hostSample overrides it in tests. A ComfyUI
 // instance kept from an earlier lease and reused by this runner is not under it, so a run can read LOW; the one
-// consumer (calibratedRAM) only ever raises a declaration with it, and the store keeps the max over runs.
+// consumer (calibratedRAM) only ever raises a declaration with it, and the store keeps the last twenty runs of a key and
+// answers with their 90th percentile (fleetnode.HostPeaks), so one run that read high or low does not decide it.
 func (p *Pipeline) hostSampleFunc() func(childPid int) (float64, float64, error) {
 	if p.hostSample != nil {
 		return p.hostSample
@@ -5173,6 +5277,34 @@ func (p *Pipeline) noteTierCall(model string) bool {
 // beyond RequestTimeoutSec and is deterministic to unit-test.
 func breakerFailure(errClass string, likelyColdSwap bool) bool {
 	return errClass != "" && !(likelyColdSwap && errClass == "timeout")
+}
+
+// waitForColdVisionSeat (F49) loads a cold vision seat before the vision request is sent, and
+// returns the note a failed call should carry ("" when nothing was waited for).
+//
+// It reuses the agent door's warm-up (warmSeat): one passthrough request that makes llama-swap
+// load the seat and holds until the load is done, preceded by one /running read that makes a
+// seat already listed ready cost nothing more. The warm-up passes the GPU-lease fence like every
+// other deliberate load, so a render's card is not loaded onto. The wait is bounded by
+// vision_coldload_wait_sec; when the load outlasts it the call goes on regardless and the load
+// carries on behind the request (the router keeps loading after a client hangs up), so the bound
+// limits how long the caller is held, never whether the call is made.
+//
+// Only this box's own llama-swap is warmed: a model routed to another base (seat_endpoints, a
+// cascade lane) is that base's to load, and asking the local router for it would load a model
+// here that none of this box's calls use.
+func (p *Pipeline) waitForColdVisionSeat(ctx context.Context, model string) string {
+	if p.visionColdLoadWait <= 0 || model == "" || p.client == nil || strings.TrimSpace(p.cfg.Endpoint) == "" {
+		return ""
+	}
+	if p.client.BaseFor(model) != strings.TrimRight(p.cfg.Endpoint, "/") {
+		return ""
+	}
+	spent, _, attempted := warmSeat(ctx, p.cfg.Endpoint, model, p.visionColdLoadWait)
+	if !attempted {
+		return ""
+	}
+	return fmt.Sprintf(" (the vision seat was cold: waited %.0fs for its load before sending)", spent.Seconds())
 }
 
 // classifyErr buckets an infra error for the ledger + circuit breaker (Phase 3).

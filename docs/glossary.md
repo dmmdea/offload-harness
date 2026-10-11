@@ -141,13 +141,14 @@ honoured or overridden. See [architecture/decisions/0078-a-placement-pin-needs-a
 ## Image recipe
 
 What an image family IS, for the purpose of deciding whether another node would render the same picture: the weight files
-its graph loads (checkpoint, text encoder, VAE, LoRA) each with its name and its byte size on that node's disk, and the
-sampling it renders with, digested with sha256 over RESOLVED values (a key the binding leaves unset takes the builder's own
-default, so a node that writes the default out and one that leaves it unset are the same recipe). Narrower than "named
-family": the name is a label, the recipe is the identity the harness can check. That identity is **name plus size**, not
-content: it separates a bf16 build from an int8 one and catches a truncated copy, but two same-named files of the same size
-with different bytes (a corrupted full-length copy, a re-release with the same tensor layout) digest alike, and the node's own
-check recomputes the same digest. A content fingerprint is not built. Node-local keys (which card, timeouts, scripts, `reserve_vram`, the pool keys) are not in it, and an
+its graph loads (checkpoint, text encoder, VAE, LoRA) each with its name, its byte size on that node's disk and a **content
+fingerprint**, and the sampling it renders with, digested with sha256 over RESOLVED values (a key the binding leaves unset takes
+the builder's own default, so a node that writes the default out and one that leaves it unset are the same recipe). Narrower than
+"named family": the name is a label, the recipe is the identity the harness can check. The fingerprint is a sha256 of the file's
+size and a SAMPLE of its bytes (64 evenly spaced blocks of 1 MiB, the whole file when it is 64 MiB or smaller): it separates a
+bf16 build from an int8 one, catches a truncated copy, and tells two same-named files of one size apart when their weights differ,
+but it does not see a change confined to the stretch between two sampled blocks (about a sixty-third of the file). A file not hashed yet is published `pending` and the
+family has no digest and no match until it is. Node-local keys (which card, timeouts, scripts, `reserve_vram`, the pool keys) are not in it, and an
 sd.cpp binding has none. A node publishes its recipes in `/fleet/health` `image_recipes[]`, a delegator matches the `digest`
 strictly, and the node re-checks it at admission (412 on a mismatch). See [ADR 0082](architecture/decisions/0082-a-media-call-overflows-to-the-fleet-when-its-own-lane-cannot-take-it-and-a-family-is-identified-by-its-recipe.md).
 
@@ -230,15 +231,18 @@ come last by convention, but the validator does not enforce ordering.
 
 ## Overflow
 
-A media call leaving its own busy lane for an idle node of the fleet: an `auto` image call on a machine that has the lane and a
-fleet asks its pipeline whether the lane is free (`core.LaneProber`, a read-only relaxation of the real admission) and, when it
-is not, is sent to a node whose Image recipe matches. Not a substitute: a call no node matches becomes a Ticket. See [ADR 0082](architecture/decisions/0082-a-media-call-overflows-to-the-fleet-when-its-own-lane-cannot-take-it-and-a-family-is-identified-by-its-recipe.md).
+A media call leaving its own busy lane for an idle node of the fleet: an `auto` image call, or a whole-node `run_graph`, on a machine
+that has the lane and a fleet asks its pipeline whether the lane is free (`core.LaneProber`, a read-only relaxation of the real
+admission) and, when it is not, is sent to a node whose Image recipe matches (a graph: that holds the files it names, has one card and
+the card size asked for). Not a substitute: a call no node matches becomes a Ticket. See [ADR 0082](architecture/decisions/0082-a-media-call-overflows-to-the-fleet-when-its-own-lane-cannot-take-it-and-a-family-is-identified-by-its-recipe.md).
 
 ## Ticket
 
-A busy image call that the harness holds until the first matching lane frees, here or on a node: one file under
-`<state root>/media-queue/` (the state root of the GPU lease; no `state_dir` is needed), an identity (the sha256 of the task, prompt and parameters without the `waiter_token`, so an identical
-re-send attaches to it), one fixed seed, a place in the machine's own lease line that keeps its arrival time, and a state. One
+A busy image call, or a busy whole-node graph, that the harness holds until the first matching lane frees, here or on a node: one
+file under `<state root>/media-queue/` (the state root of the GPU lease; no `state_dir` is needed), an identity (the sha256 of the task, prompt and parameters without the `waiter_token`, so an
+identical re-send attaches to it; for a graph the content of its graph and manifest in place of their paths), one fixed seed for an
+image (a graph owns its sampling and gets none; it keeps its own copy of the graph and manifest beside the file), a place in the
+machine's own lease line that keeps its arrival time, and a state. One
 scanner per process looks at its tickets about every 10 s, oldest first, and a job is never sent to a node before a lane is free
 there. The answer to a call that waits says the ticket, its position and, per roster node, the state and why; the instruction in it
 is not to call again. A ticket whose owner died is swept (waiting) or adopted by the next identical call (a job already on a node).
@@ -420,7 +424,9 @@ swap. The architect gets read and search only.
 ## Warm Batch
 
 The opt-in `generate-image --batch` session where the checkpoint loads once for N renders. Teardown
-still happens exactly once, at the batch boundary — Zero-Warm moves from per-render to per-batch.
+still happens exactly once, at the batch boundary — Zero-Warm moves from per-render to per-batch. When
+this machine's lane is held and a roster node renders the recipe, the batch is one ticket per job instead
+(ADR 0083, decision 13), and the warm session exists only on this machine.
 
 ## Worktree
 

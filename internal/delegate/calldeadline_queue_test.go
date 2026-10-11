@@ -22,7 +22,11 @@ import (
 	"github.com/dmmdea/offload-harness/internal/fleetqueue"
 )
 
-// claimAll claims every queued job (as a node's claim loop would) and returns them.
+// claimAll claims jobs as a node's claim loop would, until it holds want of them, and returns them. It
+// waits for the delegator to submit: callers run it in a goroutine beside the call, and a claim that
+// took only what was queued at one fixed moment (after a 50 ms sleep) raced the submit on a loaded box,
+// found nothing, and left the call waiting for a job nobody would finish (register F66). It gives up
+// quietly when the test ends.
 func claimAll(t *testing.T, q *fleetqueue.Queue, want int) []*fleetqueue.Job {
 	t.Helper()
 	var out []*fleetqueue.Job
@@ -32,10 +36,15 @@ func claimAll(t *testing.T, q *fleetqueue.Queue, want int) []*fleetqueue.Job {
 			t.Errorf("claim: %v", err)
 			return out
 		}
-		if !ok {
-			return out
+		if ok {
+			out = append(out, job)
+			continue
 		}
-		out = append(out, job)
+		select {
+		case <-t.Context().Done():
+			return out
+		case <-time.After(2 * time.Millisecond):
+		}
 	}
 	return out
 }
@@ -60,7 +69,6 @@ func TestQueueRouteReturnsAJobTheHolderFinishedBehindASlowerOne(t *testing.T) {
 	holder := queueHolder(t)
 	cfg := config.Config{FleetQueueHolder: holder.url, StateDir: t.TempDir()}
 	go func() {
-		time.Sleep(50 * time.Millisecond)
 		for _, job := range claimAll(t, holder.q, 2) {
 			if strings.Contains(goalOf(t, job), "two") {
 				w, _ := json.Marshal(core.AgentWireResult{SchemaVersion: core.AgentWireSchemaVersion, NodeID: "claimant", Seat: "seat-x", Output: "job two is done", StopReason: "done"})
@@ -219,7 +227,6 @@ func TestQueueRouteEvaluatesAcceptanceOnAFinishedJob(t *testing.T) {
 		holder := queueHolder(t)
 		cfg := config.Config{FleetQueueHolder: holder.url, StateDir: t.TempDir()}
 		go func() {
-			time.Sleep(50 * time.Millisecond)
 			for _, job := range claimAll(t, holder.q, 1) {
 				finish(holder.q, job, "no such token here")
 			}
@@ -234,7 +241,6 @@ func TestQueueRouteEvaluatesAcceptanceOnAFinishedJob(t *testing.T) {
 		holder := queueHolder(t)
 		cfg := config.Config{FleetQueueHolder: holder.url, StateDir: t.TempDir()}
 		go func() {
-			time.Sleep(50 * time.Millisecond)
 			for _, job := range claimAll(t, holder.q, 2) {
 				if strings.Contains(goalOf(t, job), "two") {
 					finish(holder.q, job, "no such token here")

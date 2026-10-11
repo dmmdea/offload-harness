@@ -32,6 +32,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -1379,8 +1380,34 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	// The decode rate the re-pack is sized against: the store's, else this run's
 	// own (the loop has just measured it), else the box's agent_seat_tok_s.
 	repackTokS, repackBasis := repackRate(rates.Get(seat), wire.ObservedTokS, wire.SeatTokS, p.cfg.AgentSeatTokS)
+	// The re-pack is owed the time its own answer needs at that rate, whatever the
+	// loop left of the wall (register F44/C13): the wall is an expectation, the loop
+	// ran on its stall and ceiling rules, and the final-budget fit above reserved a
+	// share of the wall for this phase that a loop running past it forfeited.
+	// Anchored here, once, so the later attempts of the call share one bound.
+	var owedEnd time.Time
+	owedCap := ""
+	if owed := repackOwed(res.Output, repackTokS); owed > 0 {
+		owedEnd = repackStart.Add(owed)
+		// Not owed past the call's deadline: the delegator's whole call ends at
+		// agent_call_deadline_sec (ADR 0065; this node's own setting stands in for the
+		// delegator's, the default being the same 1,500 s), counted here from the
+		// wall's start, which is later than the call's. A re-pack that could only end
+		// after it is a finished answer nobody collects, and skipping it leaves the
+		// delegator's rescue the time it needs, which for a big answer on a slow seat
+		// was the better outcome before the owed time. CHOSEN approximation, not measured.
+		if horizon := p.cfg.CallDeadline(); horizon > 0 {
+			if end := wallEnd.Add(-wall).Add(horizon); end.Before(owedEnd) {
+				owedEnd, owedCap = end, "the call's deadline"
+			}
+		}
+		if owedEnd.After(wallEnd.Add(livePolicy.Slack)) {
+			log.Printf("agent task: re-pack for %s is owed %.0f s at %.1f tok/s (%s) and the wall + grace has %.0f s left: it runs on its own time, up to %s",
+				seat, owed.Seconds(), repackTokS, repackBasis, max(time.Until(wallEnd.Add(livePolicy.Slack)), 0).Seconds(), max(time.Until(owedEnd), 0).Round(time.Second))
+		}
+	}
 	structured, tokensOut, transport, attempts, serr := p.repackStructuredWith(agent.ContextWithProgress(cctx, repackProgress), seat, outSchema, res.Output, repackAttemptFloor(wall), 0,
-		repackOpts{WallEnd: wallEnd, Grace: livePolicy.Slack, TokS: repackTokS, RateBasis: repackBasis, Trace: &trace})
+		repackOpts{WallEnd: wallEnd, OwedEnd: owedEnd, OwedCap: owedCap, Grace: livePolicy.Slack, TokS: repackTokS, RateBasis: repackBasis, Trace: &trace})
 	wire.RepackMs = time.Since(repackStart).Milliseconds()
 	wire.RepackAttempts = attempts
 	// Every attempt on the wire, and every attempt's generation in tokens_out: a
@@ -1678,8 +1705,9 @@ func (p *Pipeline) repackStructured(ctx context.Context, seat string, rawSchema 
 // ONE completion and never the chat lane), 0 keeps the full repackMaxAttempts.
 // opts is what else this call is handed beside its context (repackOpts): with a
 // wall and a decode rate, each attempt is sized against the time left before the
-// wall's end plus the grace, clamped to what that buys or skipped when it cannot
-// buy the answer; with a trace, each attempt is recorded for the wire.
+// later of the wall's end and the re-pack's owed end (F44), plus the grace,
+// clamped to what that buys or skipped when it cannot buy the answer; with a
+// trace, each attempt is recorded for the wire.
 //
 // tokensOut is the generation of EVERY attempt, the failed ones included: it was
 // seat time spent whether or not the answer was usable (register C-80).
@@ -1737,12 +1765,15 @@ func (p *Pipeline) repackStructuredWith(ctx context.Context, seat string, rawSch
 	if p.isVLLMSeat(ctx, seat) {
 		grammar = ""
 		lane = "json_schema"
-		// The CONTRACT's schema, not the GBNF projection: internal/gbnf has no
-		// object or array-of-object type, so gbnf.JSONSchema(fields) turned a
-		// nested schema into strings and vLLM then CONSTRAINED the answer into
-		// the wrong shape (A-100 proof, 2026-09-18: three attempts "got string,
-		// want object"). vLLM accepts full JSON Schema; the validator below
-		// checks against the same schema, so the two finally agree.
+		// The CONTRACT's schema, not the GBNF projection. Until register F43
+		// internal/gbnf had no object or array-of-object type, so
+		// gbnf.JSONSchema(fields) turned a nested schema into strings and vLLM
+		// then CONSTRAINED the answer into the wrong shape (A-100 proof,
+		// 2026-09-18: three attempts "got string, want object"). The projection
+		// carries nested shapes now, but it still keeps only the shape: every
+		// other keyword the contract's schema holds is dropped, and a list of
+		// scalars reads as a list of strings. vLLM accepts full JSON Schema and
+		// the validator below checks against the same schema, so the two agree.
 		structuredOpts = append(structuredOpts, llamaclient.WithJSONSchema(schema))
 	}
 	// The re-pack IS an extract over the loop's final text — the system/user
@@ -1752,20 +1783,27 @@ func (p *Pipeline) repackStructuredWith(ctx context.Context, seat string, rawSch
 	// of strings).
 	//
 	// On the grammar lane the types are the GRAMMAR's reading of the schema, not the
-	// schema's own: gbnf compiles every array to a list of strings and a type it has
-	// none for (an object) to a string, and a prompt that says "array of numbers"
-	// beside a grammar that forces a quote after the `[` hands the seat a contradiction
-	// it can only settle by writing the numbers inside a string that never closes.
-	// The coercion below turns what the grammar admits into what the schema wants (a
-	// quoted number into a number, an item at a time), so the prompt says what the
-	// grammar allows. The vLLM lane constrains by the contract's own schema, and the
-	// chat lane has no grammar, so both read the schema's types.
+	// schema's own: gbnf compiles a list of scalars to a list of strings and a type it
+	// has none for (a type list, anyOf) to a string, and a prompt that says "array of
+	// numbers" beside a grammar that forces a quote after the `[` hands the seat a
+	// contradiction it can only settle by writing the numbers inside a string that
+	// never closes. The coercion below turns what the grammar admits into what the
+	// schema wants (a quoted number into a number, an item at a time), so the prompt
+	// says what the grammar allows. An object and a list of objects are no longer in
+	// that set (register F43): the grammar compiles them to their own shape, the
+	// projection carries it, and the prompt names their fields. The vLLM lane
+	// constrains by the contract's own schema, and the chat lane has no grammar, so
+	// both read the schema's types.
 	props, _ := schema["properties"].(map[string]any)
 	if lane == "grammar" {
 		props, _ = gbnf.JSONSchema(fields)["properties"].(map[string]any)
 	}
 	system := "You extract structured data from text. Output ONLY a JSON object with exactly the requested fields. Use empty values when a field is absent. " + repackTypeRule
 	user := fmt.Sprintf("Extract these fields from the text: %s.\n\nTEXT:\n%s", repackFieldList(names, props), output)
+	// The conditioned prompt carries the no-repeat sentence BEFORE the text: a seat
+	// doing an extraction reads what follows TEXT: as more text, and may write the
+	// sentence back as a list item.
+	userGuarded := fmt.Sprintf("Extract these fields from the text: %s.\n\n%s\n\nTEXT:\n%s", repackFieldList(names, props), repackNoRepeatNote, output)
 
 	// ONE set of lane-probe closures for the WHOLE call (register D-85/D-108,
 	// W-19): before this, repackClient built a fresh FleetLaneGates cache and
@@ -1811,6 +1849,11 @@ func (p *Pipeline) repackStructuredWith(ctx context.Context, seat string, rawSch
 	// cut attempt has shown it needs more (the resend below).
 	least := expectedRepackTokens(output)
 	floorTokens := least
+	// guard is set once an attempt of this call has looped (a cut that more tokens
+	// cannot cure, or a complete object that repeats a list item): every attempt
+	// after it, the chat lane included, is a different request, told not to repeat
+	// and carrying repackLoopPenalty (register C14). The first attempt never is.
+	guard := false
 	var skipped *repackSkipErr
 	// Under the liveness monitor (a ProgressFunc on ctx, which is every run of
 	// runAgentTask) the CONTEXT owns the deadline: the stall watch cancels a
@@ -1861,10 +1904,15 @@ func (p *Pipeline) repackStructuredWith(ctx context.Context, seat string, rawSch
 		// the busy hold and the stall watch are untouched). An attempt that cannot
 		// buy the answer is not sent, and neither is any later one: time only runs
 		// out (register C-80).
+		attemptLane, attemptUser, attemptOpts := lane, user, structuredOpts
+		if guard {
+			attemptLane, attemptUser = lane+"+no-repeat", userGuarded
+			attemptOpts = append(append([]llamaclient.GenOption(nil), structuredOpts...), llamaclient.WithFrequencyPenalty(repackLoopPenalty))
+		}
 		fit := opts.fit(time.Now(), deadlineOf(ctx), budget, floorTokens)
 		if fit.Skip {
 			skipped = &repackSkipErr{msg: fit.Note}
-			opts.Trace.skip(attempts+1, lane, fit.Note)
+			opts.Trace.skip(attempts+1, attemptLane, fit.Note)
 			break
 		}
 		sent, clampedFrom := fit.Tokens, 0
@@ -1904,14 +1952,14 @@ func (p *Pipeline) repackStructuredWith(ctx context.Context, seat string, rawSch
 		// deadline from the wall the caller classifies a failure against.
 		attemptTimeout := repackAttemptDeadline(ctx, p.cfg, sent, limit-attempts+1)
 		attemptStart := time.Now()
-		gres, gerr := p.repackClient(p.cfg.CompletionPath, attemptTimeout, gates).Generate(ctx, seat, system, user, grammar, sent, p.cfg.Temperature, 0, append([]llamaclient.GenOption{llamaclient.WithoutThinking()}, structuredOpts...)...)
+		gres, gerr := p.repackClient(p.cfg.CompletionPath, attemptTimeout, gates).Generate(ctx, seat, system, attemptUser, grammar, sent, p.cfg.Temperature, 0, append([]llamaclient.GenOption{llamaclient.WithoutThinking()}, attemptOpts...)...)
 		// What the attempt generated counts whether or not it answered: a stream that
 		// died mid-body (a stall or the ceiling cutting a producing seat, a dropped
 		// connection) cost the seat its tokens and wrote something worth a clip.
 		gres = partialOf(gres, gerr)
 		tokensOut += gres.TokensOut
 		if gerr != nil {
-			note(attempts, lane, sent, clampedFrom, gres, time.Since(attemptStart), repackWhy(gerr))
+			note(attempts, attemptLane, sent, clampedFrom, gres, time.Since(attemptStart), repackWhy(gerr))
 			recordFailure(gerr, boundFor(attemptTimeout), attempts)
 			if seatBusyExhausted(gerr) {
 				// The contract's busy-seat budget is spent: the seat answered
@@ -1958,13 +2006,29 @@ func (p *Pipeline) repackStructuredWith(ctx context.Context, seat string, rawSch
 			if fit.Clamped {
 				clampNote = fit.Note
 			}
-			terr := truncatedRepackErr("re-pack", sent, len(output), cut, clampNote, resendSkip)
-			note(attempts, lane, sent, clampedFrom, gres, time.Since(attemptStart), terr.Error())
+			// A cut that more tokens cannot cure (a loop, or a seat that ran on past a
+			// budget the answer fits in) is answered by a request that differs from the
+			// one just cut, not by the same one again (register C14: the chat lane
+			// carried the same sampling and the same prompt and looped on the same
+			// text). A cut the clock set is the clock's, and is not a loop.
+			looped := !resend && cut.loops(sent) && (cut.Degenerate != "" || !fit.Clamped)
+			extra := resendSkip
+			if looped {
+				extra = strings.TrimPrefix(extra+"; the next attempt is told not to repeat and carries frequency_penalty "+strconv.FormatFloat(repackLoopPenalty, 'f', -1, 64), "; ")
+			}
+			terr := truncatedRepackErr("re-pack", sent, len(output), cut, clampNote, extra)
+			note(attempts, attemptLane, sent, clampedFrom, gres, time.Since(attemptStart), terr.Error())
 			recordFailure(terr, boundFor(attemptTimeout), attempts)
-			if !resend {
+			if looped {
+				guard = true
+				log.Printf("agent task: re-pack for %s looped (%s): the next attempt is told not to repeat", seat, cut.observed(sent))
+			}
+			if !resend && !looped {
 				break
 			}
-			budget, floorTokens = agentRepackMaxTokensCap, resendFloor
+			if resend {
+				budget, floorTokens = agentRepackMaxTokensCap, resendFloor
+			}
 			continue
 		}
 		// Trim to the outermost {...} before validating. This is the BELT, not
@@ -1977,20 +2041,31 @@ func (p *Pipeline) repackStructuredWith(ctx context.Context, seat string, rawSch
 		// whose alias could not be resolved against a dead roster, still
 		// falls back to the grammar path — and because a trim costs nothing.
 		content := []byte(outerObject(gres.Content))
+		delivered, coercedWhy := content, ""
 		if verr := validator.Validate(content, schema); verr != nil {
-			if fixed, changed, ok := coerceToSchemaNoted(content, schema); ok {
-				// Delivered, but not as the seat wrote it: the record says what was re-typed.
-				why := coercedNote(changed)
-				note(attempts, lane, sent, clampedFrom, gres, time.Since(attemptStart), why)
-				opts.Trace.setCoerced(why)
-				return json.RawMessage(fixed), tokensOut, false, attempts, nil
+			fixed, changed, ok := coerceToSchemaNoted(content, schema)
+			if !ok {
+				note(attempts, attemptLane, sent, clampedFrom, gres, time.Since(attemptStart), repackWhy(verr))
+				recordFailure(verr, boundFor(attemptTimeout), attempts)
+				continue
 			}
-			note(attempts, lane, sent, clampedFrom, gres, time.Since(attemptStart), repackWhy(verr))
-			recordFailure(verr, boundFor(attemptTimeout), attempts)
+			// Delivered, but not as the seat wrote it: the record says what was re-typed.
+			delivered, coercedWhy = fixed, coercedNote(changed)
+		}
+		// A complete object whose list repeats one item is a loop that closed itself,
+		// not content (register C14): it is not published, and the next attempt is told.
+		if loopWhy := degenerateList(delivered, output); loopWhy != "" {
+			lerr := errors.New("re-pack " + loopWhy)
+			note(attempts, attemptLane, sent, clampedFrom, gres, time.Since(attemptStart), repackWhy(lerr))
+			recordFailure(lerr, boundFor(attemptTimeout), attempts)
+			guard = true
 			continue
 		}
-		note(attempts, lane, sent, clampedFrom, gres, time.Since(attemptStart), "")
-		return json.RawMessage(content), tokensOut, false, attempts, nil
+		note(attempts, attemptLane, sent, clampedFrom, gres, time.Since(attemptStart), coercedWhy)
+		if coercedWhy != "" {
+			opts.Trace.setCoerced(coercedWhy)
+		}
+		return json.RawMessage(delivered), tokensOut, false, attempts, nil
 	}
 	// FINAL fallback: one grammar-FREE attempt over /v1/chat/completions.
 	// Found live wiring the <node-c> FreeToken agent seat (2026-08-27): the two
@@ -2031,15 +2106,20 @@ func (p *Pipeline) repackStructuredWith(ctx context.Context, seat string, rawSch
 		if underLiveness {
 			chatOpts = append(chatOpts, llamaclient.WithoutClientTimeout(), llamaclient.WithProgress(progress))
 		}
+		chatLane := "chat"
+		if guard {
+			chatLane = "chat+no-repeat"
+			chatOpts = append(chatOpts, llamaclient.WithFrequencyPenalty(repackLoopPenalty))
+		}
 		chatStart := time.Now()
-		structured, cres, chatCoerced, cerr := p.repackViaChat(ctx, chatClient, seat, schema, output, chatSent, chatClampNote, chatOpts...)
+		structured, cres, chatCoerced, cerr := p.repackViaChat(ctx, chatClient, seat, schema, output, chatSent, chatClampNote, guard, chatOpts...)
 		tokensOut += cres.TokensOut
 		if cerr == nil {
-			note(attempts, "chat", chatSent, chatClamped, cres, time.Since(chatStart), chatCoerced)
+			note(attempts, chatLane, chatSent, chatClamped, cres, time.Since(chatStart), chatCoerced)
 			opts.Trace.setCoerced(chatCoerced)
 			return structured, tokensOut, false, attempts, nil
 		}
-		note(attempts, "chat", chatSent, chatClamped, cres, time.Since(chatStart), repackWhy(cerr))
+		note(attempts, chatLane, chatSent, chatClamped, cres, time.Since(chatStart), repackWhy(cerr))
 		recordFailure(cerr, boundFor(chatTimeout), attempts)
 	}
 
@@ -2323,7 +2403,7 @@ func repackBudget(output string) int {
 // returned error; repackViaChat makes no infrastructure/budget/abstention
 // judgment of its own. The GenResult is whatever completion came back, usable or
 // not (zero when none did), so the caller can count and record a failed attempt.
-func (p *Pipeline) repackViaChat(ctx context.Context, client *llamaclient.Client, seat string, schema map[string]any, output string, budget int, clampNote string, extra ...llamaclient.GenOption) (json.RawMessage, llamaclient.GenResult, string, error) {
+func (p *Pipeline) repackViaChat(ctx context.Context, client *llamaclient.Client, seat string, schema map[string]any, output string, budget int, clampNote string, noRepeat bool, extra ...llamaclient.GenOption) (json.RawMessage, llamaclient.GenResult, string, error) {
 	props, _ := schema["properties"].(map[string]any)
 	names := make([]string, 0, len(props))
 	for name := range props {
@@ -2336,6 +2416,11 @@ func (p *Pipeline) repackViaChat(ctx context.Context, client *llamaclient.Client
 	// list of strings (register C-80).
 	system := "You extract structured data from text. Output ONLY a JSON object — no prose, no code fences. " + repackTypeRule
 	user := fmt.Sprintf("Extract these fields from the text as a JSON object: %s.\n\nTEXT:\n%s", repackFieldList(names, props), output)
+	if noRepeat {
+		// An earlier attempt of this call looped: this one is told not to, before the
+		// text (the caller also sends the frequency penalty in extra).
+		user = fmt.Sprintf("Extract these fields from the text as a JSON object: %s.\n\n%s\n\nTEXT:\n%s", repackFieldList(names, props), repackNoRepeatNote, output)
+	}
 	gres, gerr := client.Generate(ctx, seat, system, user, "", budget, p.cfg.Temperature, 0, append([]llamaclient.GenOption{llamaclient.WithoutThinking()}, extra...)...)
 	if gerr != nil {
 		return nil, partialOf(gres, gerr), "", gerr
@@ -2349,7 +2434,13 @@ func (p *Pipeline) repackViaChat(ctx context.Context, client *llamaclient.Client
 		if !ok {
 			return nil, gres, "", verr
 		}
+		if loopWhy := degenerateList(fixed, output); loopWhy != "" {
+			return nil, gres, "", errors.New("chat re-pack " + loopWhy)
+		}
 		return json.RawMessage(fixed), gres, coercedNote(changed), nil
+	}
+	if loopWhy := degenerateList([]byte(content), output); loopWhy != "" {
+		return nil, gres, "", errors.New("chat re-pack " + loopWhy)
 	}
 	return json.RawMessage(content), gres, "", nil
 }
@@ -2359,14 +2450,17 @@ func (p *Pipeline) repackViaChat(ctx context.Context, client *llamaclient.Client
 // where the schema wants a number, "true" where it wants a bool, and, the other
 // way, a bare 7 where it wants the string "7" (register C-80: a research digest's
 // `numbers` list holds strings, and the chat lane answered JSON numbers for it).
-// It reads a property and every item of an array property. Found live on the
-// FreeToken gpt-oss seat (2026-08-27/28): the model answers correctly and quotes
-// every scalar, so each typed contract abstained after a CORRECT answer.
+// It reads every property and every item of an array property, at EVERY depth along
+// the schema's `properties` and `items` (F43: the grammar of a llama.cpp seat quotes
+// a list of numbers or booleans wherever it sits, and this is what turns it back).
+// Found live on the FreeToken gpt-oss seat (2026-08-27/28): the model answers
+// correctly and quotes every scalar, so each typed contract abstained after a
+// CORRECT answer.
 // Coercion is deterministic and lossless — a value is converted only when the
 // schema demands the type AND its text says the same thing in that type — and the
 // result must re-validate in full before it counts. Anything beyond scalar
-// re-typing (missing fields, wrong structure, null, nested values) still fails
-// honestly.
+// re-typing (missing fields, wrong structure, null, an object where a scalar goes)
+// still fails honestly.
 //
 // Numbers are decoded with UseNumber, so they stay the text the seat wrote: 12.50
 // becomes the string "12.50", never "12.5", and a number nothing touched comes
@@ -2378,7 +2472,10 @@ func coerceToSchema(content []byte, schema map[string]any) ([]byte, bool) {
 
 // coerceToSchemaNoted is coerceToSchema that also names what it re-typed, one entry
 // per field in name order ("id", or "numbers (3 items)" for a list), so the object a
-// run delivers is never silently different from the one the seat wrote.
+// run delivers is never silently different from the one the seat wrote. A field below
+// the top is named by its path: "meta.owner.id", and "rows[].scores (3 items)" for the
+// scalar items of the lists inside every object of a list (the count is over all of
+// them).
 func coerceToSchemaNoted(content []byte, schema map[string]any) ([]byte, []string, bool) {
 	dec := json.NewDecoder(bytes.NewReader(content))
 	dec.UseNumber()
@@ -2393,7 +2490,46 @@ func coerceToSchemaNoted(content []byte, schema map[string]any) ([]byte, []strin
 	if !ok {
 		return nil, nil, false
 	}
-	var changed []string
+	lg := &coerceLog{items: map[string]int{}}
+	coerceProps(obj, props, "", lg)
+	changed := lg.notes()
+	if len(changed) == 0 {
+		return nil, nil, false
+	}
+	fixed, merr := json.Marshal(obj)
+	if merr != nil {
+		return nil, nil, false
+	}
+	if validator.Validate(fixed, schema) != nil {
+		return nil, nil, false
+	}
+	return fixed, changed, true
+}
+
+// coerceLog is what one coercion re-typed: the scalar fields by path, and the count of
+// re-typed items per list path.
+type coerceLog struct {
+	scalars []string
+	items   map[string]int
+}
+
+// notes is the log as the note entries, sorted: "id", "numbers (3 items)", "s (1 item)".
+func (lg *coerceLog) notes() []string {
+	out := append([]string(nil), lg.scalars...)
+	for path, n := range lg.items {
+		unit := "items"
+		if n == 1 {
+			unit = "item"
+		}
+		out = append(out, fmt.Sprintf("%s (%d %s)", path, n, unit))
+	}
+	sort.Strings(out)
+	return out
+}
+
+// coerceProps re-types the properties of one decoded object along its schema's `properties`,
+// in place. path is the object's own path ("" at the top).
+func coerceProps(obj map[string]any, props map[string]any, path string, lg *coerceLog) {
 	for name, raw := range props {
 		spec, ok := raw.(map[string]any)
 		if !ok {
@@ -2403,45 +2539,51 @@ func coerceToSchemaNoted(content []byte, schema map[string]any) ([]byte, []strin
 		if !present {
 			continue
 		}
-		want, _ := spec["type"].(string)
-		if want == "array" {
-			items, _ := spec["items"].(map[string]any)
-			itemWant, _ := items["type"].(string)
-			if arr, ok := got.([]any); ok {
-				n := 0
-				for i, el := range arr {
-					if v, ok := coerceScalar(el, itemWant); ok {
-						arr[i] = v
-						n++
-					}
-				}
-				if n > 0 {
-					unit := "items"
-					if n == 1 {
-						unit = "item"
-					}
-					changed = append(changed, fmt.Sprintf("%s (%d %s)", name, n, unit))
+		obj[name] = coerceValue(got, spec, joinCoercePath(path, name), lg)
+	}
+}
+
+// coerceValue re-types one decoded value along its schema and returns it: a list is read item by
+// item (a scalar item is re-typed to the items' type, and counted against the list's path; an
+// object or list item is read along the items' schema, its own paths below "<path>[]"), an
+// object is read along its `properties`, and a scalar is re-typed to the schema's type. A value
+// the schema does not describe by its shape is returned as it came.
+func coerceValue(v any, spec map[string]any, path string, lg *coerceLog) any {
+	switch t := v.(type) {
+	case []any:
+		items, _ := spec["items"].(map[string]any)
+		itemWant, _ := items["type"].(string)
+		for i, el := range t {
+			switch el.(type) {
+			case []any, map[string]any:
+				t[i] = coerceValue(el, items, path+"[]", lg)
+			default:
+				if nv, ok := coerceScalar(el, itemWant); ok {
+					t[i] = nv
+					lg.items[path]++
 				}
 			}
-			continue
 		}
-		if v, ok := coerceScalar(got, want); ok {
-			obj[name] = v
-			changed = append(changed, name)
+		return t
+	case map[string]any:
+		if props, ok := spec["properties"].(map[string]any); ok {
+			coerceProps(t, props, path, lg)
 		}
+		return t
 	}
-	if len(changed) == 0 {
-		return nil, nil, false
+	want, _ := spec["type"].(string)
+	if nv, ok := coerceScalar(v, want); ok {
+		lg.scalars = append(lg.scalars, path)
+		return nv
 	}
-	sort.Strings(changed)
-	fixed, merr := json.Marshal(obj)
-	if merr != nil {
-		return nil, nil, false
+	return v
+}
+
+func joinCoercePath(path, name string) string {
+	if path == "" {
+		return name
 	}
-	if validator.Validate(fixed, schema) != nil {
-		return nil, nil, false
-	}
-	return fixed, changed, true
+	return path + "." + name
 }
 
 // coercedNote is what an attempt's record and the run's repack_note say when the

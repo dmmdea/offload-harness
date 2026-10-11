@@ -94,8 +94,10 @@ func LivenessPolicyFor(cfg config.Config, known seatrate.Seat, admission time.Du
 	}
 	coldLoad, basis := coldLoadCeiling(known)
 	return agent.StallPolicy{
-		Admission:     admission,
-		PrefillTokS:   known.PrefillTokS,
+		Admission: admission,
+		// The prefill clock is a STALL bound, so it holds the seat's slow recent rate, not its
+		// average (register F10): the slowest of its recent solo samples, else the EMA.
+		PrefillTokS:   known.StallPrefillTokS(),
 		TokS:          tokS,
 		ToolTimeout:   0, // the loop hands each tool's own cap to the monitor (Loop.dispatch)
 		Repack:        livenessRepack,

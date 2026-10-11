@@ -20,6 +20,7 @@ import { resolveFfmpeg, resolveFfprobe } from "./audio-qa.mjs";
 import {
   descendantsOf, pidGone, waitUntilGone, sweepStaleTempDirs, ENGINE_EXIT_WAIT_MS, enginePids, runEngine, createLogGuard, killTree,
 } from "./igpu-engine.mjs";
+import { scratchDir } from "./test-scratch.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const isWin = process.platform === "win32";
@@ -49,8 +50,8 @@ const SD_HEADER = [
 ];
 
 // One runner under test: where it runs, its argv, the engine's pid file and the private TEMP.
-function setup(kind) {
-  const root = mkdtempSync(join(tmpdir(), "igpu-life-"));
+function setup(t, kind) {
+  const root = scratchDir(t, "igpu-life-");
   const work = join(root, "work");
   const priv = join(root, "tmp");
   mkdirSync(work);
@@ -101,8 +102,8 @@ const kindSkip = (kind) => skipAll || (kind === "animate" && !hasFfmpeg && "the 
 // ---------------------------------------------------------------- SIL4: the parent goes away
 
 for (const kind of KINDS) {
-  test(`${kind} runner: when its parent is SIGKILLed the runner and its engine die and the temp dirs go (installLifecycle is wired into main)`, { skip: kindSkip(kind), timeout: 120000 }, async () => {
-    const sb = setup(kind);
+  test(`${kind} runner: when its parent is SIGKILLed the runner and its engine die and the temp dirs go (installLifecycle is wired into main)`, { skip: kindSkip(kind), timeout: 120000 }, async (t) => {
+    const sb = setup(t, kind);
     let runnerPid = 0;
     let parent;
     try {
@@ -133,8 +134,8 @@ setInterval(() => {}, 1000);`);
 
 for (const kind of KINDS) {
   for (const [sig, code] of [["SIGTERM", 143], ["SIGINT", 130], ["SIGHUP", 129]]) {
-    test(`${kind} runner: ${sig} exits ${code} only after the engine is gone, and removes the temp dirs`, { skip: kindSkip(kind) || (isWin && "POSIX signals"), timeout: 120000 }, async () => {
-      const sb = setup(kind);
+    test(`${kind} runner: ${sig} exits ${code} only after the engine is gone, and removes the temp dirs`, { skip: kindSkip(kind) || (isWin && "POSIX signals"), timeout: 120000 }, async (t) => {
+      const sb = setup(t, kind);
       let child;
       try {
         child = spawn(process.execPath, [sb.script, ...sb.args], { env: sb.env, stdio: ["ignore", "ignore", "pipe"] });
@@ -161,8 +162,8 @@ for (const kind of KINDS) {
 
 // ---------------------------------------------------------------- SIL3: the process group
 
-test("video runner: the engine is in the runner's process group; SIGKILL of that group (gpugen's escalation) takes it along, and the next job sweeps the leaked temp dir", { skip: skipAll || (process.platform !== "linux" && "reads /proc and needs POSIX groups"), timeout: 120000 }, async () => {
-  const sb = setup("video");
+test("video runner: the engine is in the runner's process group; SIGKILL of that group (gpugen's escalation) takes it along, and the next job sweeps the leaked temp dir", { skip: skipAll || (process.platform !== "linux" && "reads /proc and needs POSIX groups"), timeout: 120000 }, async (t) => {
+  const sb = setup(t, "video");
   let runner;
   try {
     runner = spawn(process.execPath, [sb.script, ...sb.args], { env: sb.env, stdio: "ignore", detached: true }); // detached = its own group, as gpugen's Setpgid makes it
@@ -371,9 +372,9 @@ function startEngine(script) {
   return out;
 }
 
-test("enginePids on real children: a live engine is listed with its descendants; none is listed once it has been killed and settled", { skip: skipAll, timeout: 60000 }, async () => {
+test("enginePids on real children: a live engine is listed with its descendants; none is listed once it has been killed and settled", { skip: skipAll, timeout: 60000 }, async (t) => {
   assert.deepEqual(enginePids(), [], "no engine, nothing to find");
-  const dir = mkdtempSync(join(tmpdir(), "igpu-pids-"));
+  const dir = scratchDir(t, "igpu-pids-");
   const gpid = join(dir, "grandchild.pid");
   const script = `const { spawn } = require("node:child_process"); const g = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
     require("node:fs").writeFileSync(${JSON.stringify(gpid)}, String(g.pid)); setInterval(() => {}, 1000);`;
@@ -388,7 +389,6 @@ test("enginePids on real children: a live engine is listed with its descendants;
   }
   await e.settled;
   assert.deepEqual(enginePids(), [], "a settled engine is no longer listed");
-  rmSync(dir, { recursive: true, force: true });
 });
 
 test("enginePids on real children: an engine that has exited but whose pipes are still held open (so it is still in the live set) is not listed", { skip: skipAll || (isWin && "POSIX process model"), timeout: 60000 }, async () => {

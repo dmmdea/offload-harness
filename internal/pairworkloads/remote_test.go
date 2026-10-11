@@ -168,6 +168,44 @@ func TestRemoteCallThatNeverReachedANodeHasARowAndNoCard(t *testing.T) {
 	}
 }
 
+// An adopter (a process that takes over a placed ticket of an owner that ended) never dispatches, because it must not open a second
+// card, yet its row still says where the call ran: Ran names the node on the handle and opens nothing.
+func TestRanNamesTheNodeOnTheRowAndOpensNoCard(t *testing.T) {
+	r := newRemoteRig(t, true)
+	h := NewRemoteCall(r.e, r.led, vqaReq(), "auto")
+	h.Ran("http://NODE-B:18811", "node-b-fleet16", "vision-9")
+	h.Running() // no card was opened, so there is nothing to turn running
+	h.Finish(core.Result{OK: true, Meta: core.Meta{Node: "node-b-fleet16", Placement: "remote: x"}})
+	r.e.Wait()
+	if r.cap.count() != 0 {
+		t.Fatalf("naming the node opened a card: %d frames", r.cap.count())
+	}
+	rows := r.rows()
+	if len(rows) != 1 || rows[0].Node != "node-b" || rows[0].NodeID != "node-b-fleet16" || rows[0].FleetJobID != "vision-9" || !rows[0].CardByCaller || rows[0].Deferred {
+		t.Fatalf("the row must name the node and the job: %+v", rows)
+	}
+
+	// The dispatch is the node's first word: a handle that was dispatched keeps the node it was dispatched to.
+	d := newRemoteRig(t, true)
+	g := NewRemoteCall(d.e, d.led, vqaReq(), "auto")
+	g.Dispatched("http://node-b:18811", "node-b-fleet16", "vision-1")
+	g.Ran("http://node-c:18811", "node-c", "vision-2")
+	g.Finish(core.Result{OK: true})
+	if rows := d.rows(); len(rows) != 1 || rows[0].Node != "node-b" || rows[0].NodeID != "node-b-fleet16" || rows[0].FleetJobID != "vision-1" {
+		t.Fatalf("a late Ran must not rename a dispatched call: %+v", rows)
+	}
+
+	// An adopted job the node passed back ran nothing: naming the node does not make it a call that wrote a row.
+	p := newRemoteRig(t, true)
+	q := NewRemoteCall(p.e, p.led, vqaReq(), "auto")
+	q.Ran("http://node-b:18811", "node-b-fleet16", "vision-3")
+	q.Discard("the node passed the adopted job back")
+	p.e.Wait()
+	if p.cap.count() != 0 || len(p.rows()) != 0 {
+		t.Fatalf("a discarded attempt that was never dispatched writes nothing: frames %d rows %d", p.cap.count(), len(p.rows()))
+	}
+}
+
 // The auto route falling back to a local run writes the local run's own row, so an attempt that never
 // reached a node leaves nothing behind, and one that did leaves a failed card and its row.
 func TestDiscardWritesNothingBeforeDispatchAndClosesTheCardAfter(t *testing.T) {

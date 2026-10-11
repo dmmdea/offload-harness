@@ -1206,7 +1206,7 @@ func TestDeviceGrantRefusesUnderTheLockWhileAWholeNodeClaimIsLive(t *testing.T) 
 	var held *ErrHeld
 	err := m.withEpochLock(func() error {
 		var gerr error
-		l, held, gerr = m.grantDevicesLocked(ClassMedia, Options{Reason: "x", Devices: []string{card0}}, []string{card0})
+		l, held, gerr = m.grantDevicesLocked(ClassMedia, Options{Reason: "x", Devices: []string{card0}}, []string{card0}, nil)
 		return gerr
 	})
 	if err != nil || l != nil || held == nil {

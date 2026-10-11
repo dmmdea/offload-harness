@@ -57,12 +57,17 @@ process.exitCode = mode === "failed" ? 4 : mode === "stop" ? 1 : 0;
 // ComfyUI it is told about when a run ends, so COMFY_API is aimed at a closed port: a test run never
 // reaches a ComfyUI that happens to be running on the machine.
 //
-// The image family is a name the host-RAM guard cannot size ("stub-family": no documented sizes, no model
-// files, no ComfyUI install bound), so the batch declares no host RAM. The built-binary test below runs a
+// The batch declares no host RAM, so the host-RAM brake has nothing to judge whatever the machine is
+// doing. Two things make that so, and both are needed. The image family is a name the guard cannot size
+// ("stub-family": no documented sizes, no model files), and the config binds no ComfyUI install
+// (comfy_dir ""), because a family the guard cannot size falls back to the media class default: the
+// largest render family THIS BOX binds, and on a Windows box an unset comfy_dir is the reference install
+// with its video bindings (hostneed.ClassDefault: wan22, 33.1 GiB). The built-binary test below runs a
 // child process, which cannot be handed a stand-in host the way an in-process test is (gpuprobe.UseHost
-// MemoryReader), and a family the guard CAN size (krea2: 32.8 GiB) made the child read the machine's real
-// memory: on a box with 105 GiB committed of 127.7 it was refused as "waiting for host RAM" and the test
-// failed for a reason that has nothing to do with exit codes. This file is about exit codes, not host RAM.
+// MemoryReader), so that child read the machine's real memory: on a box with 88.8 GiB committed of 127.7
+// it was refused as "waiting for host RAM", the batch ended deferred with exit 0, and the test failed for
+// a reason that has nothing to do with exit codes. The stub is not a ComfyUI render, so "no ComfyUI
+// install bound" is what the fixture is. This file is about exit codes, not host RAM.
 func batchHome(t *testing.T) (home, cfgPath, jobsPath, ledgerPath string) {
 	t.Helper()
 	requireNode(t)
@@ -77,7 +82,7 @@ func batchHome(t *testing.T) (home, cfgPath, jobsPath, ledgerPath string) {
 	ledgerPath = filepath.Join(home, "ledger.jsonl")
 	cfgPath = filepath.Join(home, "config.json")
 	cfgJSON := `{"endpoint":"http://127.0.0.1:1","state_dir":` + strconvQuote(filepath.ToSlash(home)) + `,"gpu_wait_ms":5000,"media_dir":` + strconvQuote(filepath.ToSlash(filepath.Join(home, "media"))) +
-		`,"ledger_path":` + strconvQuote(filepath.ToSlash(ledgerPath)) + `,"imagegen_script":` + strconvQuote(filepath.ToSlash(stub)) + `,"imagegen_family":"stub-family"}`
+		`,"ledger_path":` + strconvQuote(filepath.ToSlash(ledgerPath)) + `,"imagegen_script":` + strconvQuote(filepath.ToSlash(stub)) + `,"imagegen_family":"stub-family","comfy_dir":""}`
 	if err := os.WriteFile(cfgPath, []byte(cfgJSON), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -235,6 +240,12 @@ func TestGenerateImageBatchExitCodesThroughTheBuiltBinary(t *testing.T) {
 		}
 		if got != c.code {
 			t.Errorf("%s batch: exit %d, want %d\nstderr: %s", c.mode, got, c.code, stderr.String())
+		}
+		// The child reads the machine's real memory, so the only way this test stays independent of it is a
+		// batch that declares none: a declaration here (the child logs "declaring host RAM") fails the test
+		// on every host, not only on a loaded one.
+		if strings.Contains(stderr.String(), "host RAM") {
+			t.Errorf("%s batch: the fixture must declare no host RAM, or the machine's memory decides the exit code\nstderr: %s", c.mode, stderr.String())
 		}
 		if c.stderr != "" && !strings.Contains(stderr.String(), c.stderr) {
 			t.Errorf("%s batch: stderr %q lacks %q", c.mode, stderr.String(), c.stderr)

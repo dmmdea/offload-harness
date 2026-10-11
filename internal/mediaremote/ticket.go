@@ -1,7 +1,7 @@
 package mediaremote
 
-// The ticket queue (P0 plan S2; ADR 0083): a busy image call is a TICKET, and the harness holds it until the first
-// matching lane that frees ANYWHERE in the cluster runs it, with no caller loop.
+// The ticket queue (P0 plan S2 and S5; ADR 0083 and its Amendment 1): a busy image call, or a busy whole-node graph, is a TICKET,
+// and the harness holds it until the first matching lane that frees ANYWHERE in the cluster runs it, with no caller loop.
 //
 // S1 made a busy local lane overflow to an IDLE matching node. A ticket is the other half of the operator's P0 ("route
 // work to any PC in the cluster, even if all PCs are full"): when every lane is full the call waits for the first one
@@ -10,12 +10,17 @@ package mediaremote
 // process of the machine needs to know about it: who owns it, where it stands, which node holds its job. The request
 // BODY is held by the owning process only (it carries paths and a prompt the file has no business keeping); the file is
 // enough to answer for a ticket, to collect its result, to see which nodes the machine is using, and to adopt a job
-// whose owner died.
+// whose owner died. The one body the store does keep is a graph's (and its manifest's): body-<id>-graph.json and
+// body-<id>-manifest.json, the exact bytes the ticket was identified by and the node is sent, so that the local run, the
+// dispatch and an adopter all read what the ticket IS and not whatever the caller's file says hours later (bodyPath). A graph
+// carries its prompt text, so those copies are owner-only like every file of the store (queueFileMode, queuefs.go), and the
+// directory is made owner-only where the queue creates it.
 //
 // What is persisted, and why each:
 //
-//	req_key       sha256 of (task, prompt, params minus waiter_token): any identical re-send attaches to the live ticket
-//	              instead of making a second job (what ends the 85-answers loop, even for a caller that ignores the text)
+//	req_key       sha256 of (task, prompt, params minus waiter_token; for a graph, the graph's and the manifest's CONTENT in
+//	              place of their paths): any identical re-send attaches to the live ticket instead of making a second job
+//	              (what ends the 85-answers loop, even for a caller that ignores the text)
 //	seed          fixed once at creation when the caller gave none, so a bounce, a re-placement and an adoption all render
 //	              the same composition
 //	owner, beat   the process that runs it and the last time it said so; an owner that is gone (or silent past
@@ -149,6 +154,10 @@ type ticketFile struct {
 	Out    string `json:"out,omitempty"`
 	Seed   int    `json:"seed"`
 
+	// PathKey is a graph's key made of the file PATHS it was sent with and the parameters (pathKey), the handle a token collects by
+	// when the files themselves are gone or edited; empty for every other task, whose files are not part of their identity.
+	PathKey string `json:"path_key,omitempty"`
+
 	// Place is the lease-line token that keeps the ticket's arrival time on this machine; PlaceNote says why there is none.
 	Place     string `json:"local_token,omitempty"`
 	PlaceNote string `json:"local_place_note,omitempty"`
@@ -164,6 +173,11 @@ type ticketFile struct {
 	// LaneWhy is the sentence of the last lane reading that found this machine's lane busy: the placement text of a result
 	// that ran on a node says what the call left behind.
 	LaneWhy string `json:"lane_why,omitempty"`
+	// FleetNote, when set, says why this ticket is never offered to a node: a graph that reads input files stays on this
+	// machine's lane (graph.go), keeping its place and its position, and the note is part of every answer. A ticket with a note
+	// reads no roster and matches no node, so once its first scan has run it holds none against a younger ticket; until then it is
+	// first in line for every node, as any ticket that has not been scanned is (firstInLine).
+	FleetNote string `json:"fleet_note,omitempty"`
 
 	// The last scan: whether one happened, which nodes' recipes matched, what each node said, where the ticket stands.
 	Scanned  bool         `json:"scanned,omitempty"`
@@ -199,11 +213,48 @@ func newTicketID() string { return "mq-" + randHex(6) }
 // reqKey identifies a request by its content: sha256 of the task, the prompt and the parameters AS SENT without the
 // waiter_token. It is taken before the ticket fixes its seed, so a re-send that names none attaches, and a re-send that
 // names another seed is another job. Numbers are canonicalised through JSON, so 2048, 2048.0 and a json.Number agree.
+// A graph's parameters name files on this machine, so its graph and manifest enter the key as what they say (graphContent).
 func reqKey(req core.Request) string {
+	return keyOf(req, func(_, path string) (string, bool) { return graphContent(path) })
+}
+
+// pathKey is reqKey with a graph's files left as the paths they were named by: no file is read, so it is the same before and
+// after the caller edits or removes them. It is the handle a ticket's token is collected by once the files are not what they
+// were (door.go admit); a repeat of the request never attaches by it, because the content is what says it is the same job.
+func pathKey(req core.Request) string {
+	return keyOf(req, func(string, string) (string, bool) { return "", false })
+}
+
+// payloadKey is reqKey from the bytes a plan carries, not from the files the paths name now: the ticket's identity is the bytes it
+// will be sent and run with, and a file edited between the call's first look and the plan cannot make the two differ.
+func payloadKey(req core.Request, pl planned) string {
+	return keyOf(req, func(param, _ string) (string, bool) {
+		field := "graph"
+		if param == "manifest_path" {
+			field = "manifest"
+		}
+		raw, ok := pl.payload[field].(json.RawMessage)
+		if !ok {
+			return "", false
+		}
+		return graphDigest(raw), true
+	})
+}
+
+// keyOf hashes the request with ident deciding what stands in for each graph file: a string that replaces the path, or ok false
+// to keep the path.
+func keyOf(req core.Request, ident func(param, path string) (string, bool)) string {
 	params := map[string]any{}
 	for k, v := range req.Params {
 		if k != "waiter_token" {
 			params[k] = v
+		}
+	}
+	if req.Task == core.TaskRunGraph {
+		for _, k := range []string{"graph_path", "manifest_path"} {
+			if c, ok := ident(k, str(params, k)); ok {
+				params[k] = c
+			}
 		}
 	}
 	b, err := json.Marshal(struct {
@@ -223,6 +274,48 @@ func reqKey(req core.Request) string {
 	}
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
+}
+
+// graphContent is the identity of a graph or manifest file: "content:" and the sha256 of its JSON as a canonical document (keys
+// sorted, no insignificant whitespace, numbers as written), so a graph read from a file of its own name (the MCP door writes an
+// inline graph_json to a new temp file on every call), saved again with another layout, or sent by another client, is the same
+// graph. ok is false when the file is not a plain readable file within the size a dispatch carries; the key then keeps the path,
+// and the lane that runs the call reports the contract (plan).
+func graphContent(path string) (string, bool) {
+	if path == "" {
+		return "", false
+	}
+	if fi, err := os.Stat(path); err != nil || !fi.Mode().IsRegular() || fi.Size() > maxGraphBytes {
+		return "", false
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "", false
+	}
+	return graphDigest(b), true
+}
+
+// graphDigest is graphContent of bytes already read.
+func graphDigest(b []byte) string {
+	var doc any
+	dec := json.NewDecoder(strings.NewReader(string(b)))
+	dec.UseNumber()
+	if dec.Decode(&doc) == nil {
+		if canon, merr := json.Marshal(doc); merr == nil {
+			b = canon
+		}
+	}
+	sum := sha256.Sum256(b)
+	return "content:" + hex.EncodeToString(sum[:])
+}
+
+// describe is what the ticket file shows of the call: the family and recipe digest of an image, the model_family of a graph (which
+// has no recipe), and where the output goes (an image's `out`, a graph's `out_dir`).
+func describe(req core.Request, local localID) (family, digest, out string) {
+	if req.Task == core.TaskRunGraph {
+		return str(req.Params, "model_family"), "", str(req.Params, "out_dir")
+	}
+	return local.name, local.recipe.Digest(), str(req.Params, "out")
 }
 
 // store is the directory of ticket files of one machine.
@@ -301,6 +394,7 @@ func (s *store) markCollected(id string) {
 func (s *store) remove(id string) {
 	if validTicketID(id) {
 		removeFile(s.path(id))
+		s.removeBodies(id)
 	}
 }
 
@@ -337,29 +431,117 @@ func (t ticketFile) dead() bool {
 	return t.Beat > 0 && time.Since(time.UnixMilli(t.Beat)) > ownerStale
 }
 
+// ---- a graph ticket's body ----------------------------------------------------------------------------------------------
+
+// bodyPrefix names the files that hold a graph ticket's body. It matches none of the prefixes sweep reads as a ticket (mq-), a
+// claim (use-) or debris (.tmp), so nothing else in the directory mistakes one for its own.
+const bodyPrefix = "body-"
+
+// graphBodyFields maps a graph request's file parameters to the field of the plan that carries their bytes and to the suffix of
+// the ticket's copy.
+var graphBodyFields = map[string]string{"graph_path": "graph", "manifest_path": "manifest"}
+
+// bodyPath is where ticket id keeps its copy of the graph (what "graph") or the manifest (what "manifest"), absolute, because
+// the render is a child process with a directory of its own.
+func (s *store) bodyPath(id, what string) string {
+	p := filepath.Join(s.dir, bodyPrefix+id+"-"+what+".json")
+	if abs, err := filepath.Abs(p); err == nil {
+		return abs
+	}
+	return p
+}
+
+// writeBodies keeps the graph and the manifest of a planned run_graph exactly as the plan holds them, and returns the file
+// parameter each one replaces. A ticket is identified by these bytes and sent to a node with these bytes; the local run and an
+// adopter read them too (pinBodies), so a caller that reuses, edits or removes its own file while the ticket waits for hours
+// changes nothing the ticket does. Nothing is left behind when one of the writes fails.
+func (s *store) writeBodies(id string, pl planned) (map[string]string, error) {
+	out := map[string]string{}
+	for param, field := range graphBodyFields {
+		raw, ok := pl.payload[field].(json.RawMessage)
+		if !ok {
+			continue
+		}
+		path := s.bodyPath(id, field)
+		if err := writeFileAtomic(path, raw); err != nil {
+			s.removeBodies(id)
+			return nil, err
+		}
+		out[param] = path
+	}
+	return out, nil
+}
+
+// bodyTicket is the ticket a copy's file name belongs to; ok is false for a name that is not one.
+func bodyTicket(name string) (string, bool) {
+	rest, ok := strings.CutPrefix(name, bodyPrefix)
+	if !ok {
+		return "", false
+	}
+	for _, field := range graphBodyFields {
+		if id, cut := strings.CutSuffix(rest, "-"+field+".json"); cut && validTicketID(id) {
+			return id, true
+		}
+	}
+	return "", false
+}
+
+// removeBodies deletes ticket id's copies (a file that is not there is not an error).
+func (s *store) removeBodies(id string) {
+	if !validTicketID(id) {
+		return
+	}
+	for _, field := range graphBodyFields {
+		removeFile(s.bodyPath(id, field))
+	}
+}
+
+// pinBodies points a graph request at the copies ticket id kept, for each one that is on file: an adopter plans from what the
+// ticket was made of even when the caller's own files are gone. A ticket made without copies (an older build's) leaves the
+// request as it is.
+func (s *store) pinBodies(req core.Request, id string) core.Request {
+	if req.Task != core.TaskRunGraph || !validTicketID(id) {
+		return req
+	}
+	params := make(map[string]any, len(req.Params))
+	for k, v := range req.Params {
+		params[k] = v
+	}
+	for param, field := range graphBodyFields {
+		p := s.bodyPath(id, field)
+		if fi, err := os.Stat(p); err == nil && fi.Mode().IsRegular() {
+			params[param] = p
+		}
+	}
+	req.Params = params
+	return req
+}
+
 // ---- node claims ---------------------------------------------------------------------------------------------------
 
-// claim says a job of this machine is on a node: a ticket's, or a whole-node graph call's. It is the machine-wide "in use":
+// claim says a job of this machine is on a node: a ticket's, an image's or a graph's. It is the machine-wide "in use":
 // every scanner on the machine reads the claims before it sends a node a job, and takes one (under the directory lock,
-// which makes the read and the write one step) before it does, and so does a graph call. Reading the tickets' states and
-// then sending would leave exactly the window in which two processes both read a node idle and both send it a job.
+// which makes the read and the write one step) before it does. Reading the tickets' states and then sending would leave
+// exactly the window in which two processes both read a node idle and both send it a job.
 type claim struct {
 	Base string `json:"base"`
-	// Ticket is the holder's id: a ticket's (mq-...) or, for a graph call, the id the call minted for its claim (gr-...).
+	// Ticket is the holder's id: a ticket's (mq-...) or, in a claim an older release wrote for a graph call, the id that call
+	// minted for it (gr-...).
 	Ticket string `json:"ticket"`
-	// Kind is empty for a ticket's claim and claimKindGraph for a graph call's.
+	// Kind is empty for a ticket's claim. claimKindGraph is the claim of the one-shot graph call that 0.180.0 made, which this
+	// release no longer writes.
 	Kind  string  `json:"kind,omitempty"`
 	Owner ownerID `json:"owner"`
 	At    int64   `json:"at_ms"`
 }
 
-// claimKindGraph marks the claim of a whole-node graph call (placeGraph). A graph is not a ticket: it has no ticket file and no
-// scanner to write a beat for it, so its claim is judged by its owner alone (claimLive). The call ends, and lets its node go,
-// when its job does.
+// claimKindGraph marks the claim a 0.180.0 process wrote for a whole-node graph call that was not a ticket (its one-shot
+// overflow). A busy graph is a ticket in this release and takes a ticket's claim, so nothing here writes this kind any more. It
+// is still READ, because the processes of one machine are not all restarted at a deploy (an MCP server keeps its session's
+// process for days): a 0.180.0 process that is running a graph on a node holds it by this claim, and a scanner of this release
+// that did not honour it would send the node a second job. It has no ticket file and no scanner to write a beat for it, so it is
+// judged by its owner alone (claimLive), and the call lets its node go when its job ends.
 const claimKindGraph = "graph"
-
-// graphClaimID is the id a graph call claims its nodes under.
-func graphClaimID() string { return "gr-" + randHex(6) }
 
 // words is the cluster row's sentence for a node this claim holds.
 func (c claim) words() string {
@@ -389,9 +571,10 @@ func (s *store) readClaim(path string) (claim, bool) {
 
 // claimLive: the claim's ticket is on file with a job in flight on that node, and its owner is alive (and has written its beat
 // within ownerStale) or died less than deadClaimGrace ago. Anything else is a leak, or a dead process's long after, and does
-// not hold the node. A graph call's claim has no ticket to read: it holds while its owner is alive (and is younger than the
-// longest call budget plus an hour, the same bound that sweeps a fetch leftover), and for deadClaimGrace after the claim if its
-// owner is gone, which is the window that matters (the node shows the job's lease only once it admitted it).
+// not hold the node. A graph call's claim (claimKindGraph, written by a 0.180.0 process) has no ticket to read: it holds while
+// its owner is alive (and is younger than the longest call budget plus an hour, the same bound that sweeps a fetch leftover), and
+// for deadClaimGrace after the claim if its owner is gone, which is the window that matters (the node shows the job's lease only
+// once it admitted it).
 func (s *store) claimLive(c claim) bool {
 	if c.Kind == claimKindGraph {
 		age := time.Since(time.UnixMilli(c.At))
@@ -426,27 +609,6 @@ func (s *store) claimNode(t *ticketFile, base, nodeID, state string) (ok bool, h
 			return err
 		}
 		b, _ := json.Marshal(claim{Base: normBase(base), Ticket: t.ID, Owner: t.Owner, At: nowMs()})
-		if err := writeFileAtomic(path, b); err != nil {
-			return err
-		}
-		ok = true
-		return nil
-	})
-	return ok, holder, err
-}
-
-// claimGraph takes base for one whole-node graph call, under the lock a ticket's claim is taken under: ok is false, with the
-// holder, when another live claim has it, a ticket's or another graph's, of this process or of any other of the machine. The
-// graph writes no ticket file; the claim record names it, and releaseNode(base, id) lets it go.
-func (s *store) claimGraph(id, base string) (ok bool, holder claim, err error) {
-	owner := selfOwner() // a process lookup: not inside the lock
-	err = s.withLock(func() error {
-		path := s.claimPath(base)
-		if c, have := s.readClaim(path); have && c.Ticket != id && s.claimLive(c) {
-			holder = c
-			return nil
-		}
-		b, _ := json.Marshal(claim{Base: normBase(base), Ticket: id, Kind: claimKindGraph, Owner: owner, At: nowMs()})
 		if err := writeFileAtomic(path, b); err != nil {
 			return err
 		}
@@ -544,6 +706,21 @@ func (s *store) sweep(all []ticketFile) (dropped []string) {
 				if fi, err := e.Info(); err == nil && now.Sub(fi.ModTime()) > tmpStale {
 					removeFile(path) // does not parse and is not being written
 				}
+			}
+		case strings.HasPrefix(name, bodyPrefix) && strings.HasSuffix(name, ".json"):
+			// A graph ticket's copy. It is debris once its ticket is finished, or gone for longer than a ticket takes to be made: a
+			// ticket that is being made wrote its copies moments ago and has not written its own file yet, so a younger copy is never
+			// taken for an orphan.
+			id, ok := bodyTicket(name)
+			if !ok {
+				continue
+			}
+			t, found := s.read(id)
+			if found && !terminalState(t.State) {
+				continue
+			}
+			if fi, err := e.Info(); err == nil && (found || now.Sub(fi.ModTime()) > tmpStale) {
+				removeFile(path)
 			}
 		}
 	}
