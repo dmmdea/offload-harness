@@ -198,6 +198,9 @@ Versioning: [SemVer](https://semver.org/).
   of the machine matches is that ticket's. A graph a dead process sent is adopted by the next identical call (polled and fetched,
   never sent again). The result's placement text names the graph lane (it said "image lane" for every task). The bound of three nodes is
   gone with the one-shot call that needed it; `tryGraphOverflow`, `placeGraph`, the in-process hold and `overflowOutcome` are removed.
+  One behaviour changes on purpose, as the image ticket already has it: the one-shot path added `cluster[]` to the deferral the LOCAL
+  run ended in (a graph that, after its wait, failed here with a typed code); the final result of a ticket is the lane's own, and the
+  per-node reasons live in the queued answers.
 - **Tests, mutation-checked.** Written first and run against the one-shot path: 17 of the 19 graph-ticket tests of the delegator failed or
   timed out, and 3 of the 4 place tests of the pipeline failed (the three that passed held a behaviour that survives: the move to the next
   node on a file refusal, the shared refusal word, and a graph that names devices keeping no place). Tests that encoded the old limit

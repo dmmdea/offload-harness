@@ -227,7 +227,9 @@ supersedes decision 12.
 
 **Consequences.** A graph call that finds every lane busy no longer comes back as the local lane's own queued answer with a `tk-`
 token the caller must re-send; it comes back with a ticket and does not loop, as an image does. A caller that obeyed the old text and
-re-sends with its `tk-` token still gets a ticket, bringing its place. A node that lacks a file is asked once per ticket per 5
+re-sends with its `tk-` token still gets a ticket, bringing its place. The one-shot path added `cluster[]` to the deferral the local
+run ended in (a graph that, after its wait, failed here with a typed code); the final result of a ticket is the lane's own, as an image
+ticket's is, and the per-node reasons live in the queued answers. A node that lacks a file is asked once per ticket per 5
 minutes instead of being hidden for 5 s from everything. Every waiting graph ticket costs what an image ticket costs: one lane
 question and one roster read per scan (a local-only ticket reads no roster). The graph is read once, when the ticket is made, for the
 nodes; the local run reads the file again when this machine's lane serves it, so a file edited meanwhile runs here as edited (and a
