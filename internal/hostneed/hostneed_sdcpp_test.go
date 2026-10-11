@@ -62,17 +62,59 @@ func TestSdcppWithoutTheOffloadFlagParksNothing(t *testing.T) {
 	}
 }
 
-// A file whose size cannot be read, or a binding that names none, is no estimate: the caller keeps the class default it had.
-func TestSdcppWithAnUnreadableFileOrNoFilesIsNoEstimate(t *testing.T) {
-	missing := map[string]float64{"models/z_image_turbo-Q8_0.gguf": 6.73}
-	if _, ok := ForSdcpp("z-image", zImageFiles, []string{OffloadToCPUFlag}, sdcppFacts(missing)); ok {
-		t.Error("a bound file that cannot be sized makes the estimate unknown, never a smaller number")
-	}
+// A binding that names no file, or whose files none can be sized, is no estimate: the caller keeps the class default it had.
+func TestSdcppWithNoSizableFileIsNoEstimate(t *testing.T) {
 	if _, ok := ForSdcpp("z-image", nil, []string{OffloadToCPUFlag}, sdcppFacts(nil)); ok {
 		t.Error("no files, no estimate")
 	}
 	if _, ok := ForSdcpp("z-image", []SdcppFile{{Label: "sdcpp_vae", Path: "  "}}, []string{OffloadToCPUFlag}, sdcppFacts(nil)); ok {
 		t.Error("a blank path names no file")
+	}
+	// Every file unreadable: no number to declare, but the caller is told which files and says so (it is the loud half of
+	// the rule: an unreadable binding must not take the spill back outside the brake in silence).
+	n, ok := ForSdcpp("z-image", zImageFiles, []string{OffloadToCPUFlag}, sdcppFacts(nil))
+	if ok || n.GiB != 0 {
+		t.Fatalf("nothing could be sized, so there is no estimate: %v ok=%v", n, ok)
+	}
+	for _, label := range []string{"sdcpp_model", "sdcpp_llm", "sdcpp_vae"} {
+		if !strings.Contains(n.Unsized, label) {
+			t.Errorf("the files that could not be sized are named (%q missing from %q)", label, n.Unsized)
+		}
+	}
+}
+
+// ONE unreadable file does not take the whole estimate with it (0.180 hardening): the class default is 0 on an sd.cpp-only
+// box, so dropping the estimate over a mistyped VAE path put the 5.5 to 6.2 GiB spill back outside the brake, which is the
+// defect F60 fixes. The files that can be sized are summed (a lower bound, said so) and the ones that cannot are named.
+func TestSdcppWithOneUnreadableFileIsALowerBoundNotNothing(t *testing.T) {
+	missing := map[string]float64{"models/z_image_turbo-Q8_0.gguf": 6.73, "models/Qwen3-4B-Instruct-2507-Q4_K_M.gguf": 2.33} // the VAE cannot be sized
+	n, ok := ForSdcpp("z-image", zImageFiles, []string{OffloadToCPUFlag}, sdcppFacts(missing))
+	if !ok || !near(n.GiB, 6.73+2.33) {
+		t.Fatalf("the two files that can be sized are parked: %v ok=%v", n, ok)
+	}
+	if n.Unsized != "sdcpp_vae" {
+		t.Errorf("the file that could not be sized is named by its binding key: %q", n.Unsized)
+	}
+	for _, want := range []string{"at least", "lower bound", "sdcpp_vae", "could not be sized", "estimate"} {
+		if !strings.Contains(n.Detail, want) {
+			t.Errorf("the detail must say %q: %s", want, n.Detail)
+		}
+	}
+	// A file of size 0 is as unreadable as a missing one (a placeholder is no weights).
+	zero := map[string]float64{"models/z_image_turbo-Q8_0.gguf": 6.73, "models/Qwen3-4B-Instruct-2507-Q4_K_M.gguf": 0, "models/zimage_ae.safetensors": 0.31}
+	n, ok = ForSdcpp("z-image", zImageFiles, []string{OffloadToCPUFlag}, sdcppFacts(zero))
+	if !ok || !near(n.GiB, 6.73+0.31) || n.Unsized != "sdcpp_llm" {
+		t.Errorf("an empty file is unsized: %v ok=%v", n, ok)
+	}
+	// Fully sized: nothing is unsized and the detail does not claim a lower bound.
+	n, _ = ForSdcpp("z-image", zImageFiles, []string{OffloadToCPUFlag}, sdcppFacts(zImageSizes))
+	if n.Unsized != "" || strings.Contains(n.Detail, "lower bound") {
+		t.Errorf("a fully sized binding is an estimate, not a lower bound: %v", n)
+	}
+	// Without the flag nothing is read at all, so nothing is unsized.
+	n, _ = ForSdcpp("z-image", zImageFiles, nil, sdcppFacts(nil))
+	if n.Unsized != "" {
+		t.Errorf("no --offload-to-cpu, no file is read: %q", n.Unsized)
 	}
 }
 

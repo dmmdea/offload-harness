@@ -74,6 +74,10 @@ type Need struct {
 	Source Source
 	// Detail is one sentence for the line the CLI prints and the docs quote.
 	Detail string
+	// Unsized names, comma-separated by their binding keys, the weight files an sd.cpp estimate (ForSdcpp) could not size. Set
+	// together with a figure that is then a LOWER BOUND, or alone when nothing could be sized; the caller says so once.
+	// A string, not a slice, so a Need stays comparable.
+	Unsized string
 }
 
 func (n Need) String() string {
@@ -447,8 +451,12 @@ const OffloadToCPUFlag = "--offload-to-cpu"
 
 // ForSdcpp is the host RAM an sd.cpp call parks (F60): with --offload-to-cpu among its extra args, every distinct weight file
 // its binding names, in full (the diffusion model, a high-noise expert, the text encoders, the VAE); without it the weights go
-// straight to the device and nothing is parked. ok is false when the binding names no file or one whose size cannot be read: an
-// unknown is no estimate, and the caller keeps the class default it had, never a smaller number.
+// straight to the device and nothing is parked. A file whose size cannot be read (missing, or empty) does not take the whole
+// estimate with it: the files that can be sized are summed, Need.Unsized names the rest and the detail says the figure is a
+// lower bound, because the class default is 0 on an sd.cpp-only box and dropping the estimate over one mistyped path put the
+// whole spill back outside the brake in silence (0.180 hardening). ok is false when the binding names no file or none of them
+// can be sized: there is no number to declare, and the caller keeps the class default it had (Unsized still names the files,
+// so the caller can say why).
 //
 // It is an ESTIMATE, from the files' sizes, and says so: sd.cpp may hold a little more (compute buffers) or stage lazily, and
 // nothing here has been measured on a node. The footprint store raises the declaration to what the lane's runs were measured
@@ -484,15 +492,24 @@ func ForSdcpp(family string, files []SdcppFile, extraArgs []string, f Facts) (Ne
 		return Need{GiB: 0, Source: SourceEstimate, Detail: fmt.Sprintf("%s: sd.cpp without %s loads its weights straight to the device, so nothing is parked in RAM", family, OffloadToCPUFlag)}, true
 	}
 	var total float64
-	var parts []string
+	var parts, unsized []string
 	for _, sf := range uniq {
 		n, ok := stat(sf.Path)
 		if !ok || n <= 0 {
-			return Need{}, false
+			unsized = append(unsized, sf.Label)
+			continue
 		}
 		g := float64(n) / gib
 		total += g
 		parts = append(parts, fmt.Sprintf("%s %.1f", path.Base(strings.ReplaceAll(sf.Path, `\`, "/")), g))
+	}
+	missing := strings.Join(unsized, ", ")
+	if len(parts) == 0 {
+		return Need{Unsized: missing}, false
+	}
+	if missing != "" {
+		return Need{GiB: total, Source: SourceEstimate, Unsized: missing,
+			Detail: fmt.Sprintf("%s: sd.cpp parks at least %s = %.1f GiB in RAM with %s (a lower bound: %s could not be sized and is not counted; an estimate from the files' sizes, not a measurement: measured runs raise it after three)", family, strings.Join(parts, " + "), total, OffloadToCPUFlag, missing)}, true
 	}
 	return Need{GiB: total, Source: SourceEstimate,
 		Detail: fmt.Sprintf("%s: sd.cpp parks %s = %.1f GiB in RAM with %s (an estimate from the files' sizes, not a measurement: measured runs raise it after three)", family, strings.Join(parts, " + "), total, OffloadToCPUFlag)}, true

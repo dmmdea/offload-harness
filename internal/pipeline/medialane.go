@@ -90,7 +90,11 @@ func (p *Pipeline) laneCardTable(ctx context.Context, kind string) ([]gpuprobe.C
 		err = errors.New("it listed no card")
 	}
 	if err != nil {
-		log.Printf("media lane probe (%s): the card table could not be read (%v); the lane is reported as not judged, so the router decides without a reading of this machine's lane and the call reads the table itself", kind, err)
+		// A read that ended because the CALLER went away (a client that disconnected mid-probe) says nothing about the
+		// table, and the line is the only trace of a real nvidia-smi fault: it is not written for a cancelled caller.
+		if ctx.Err() == nil {
+			log.Printf("media lane probe (%s): the card table could not be read (%v); the lane is reported as not judged, so the router decides without a reading of this machine's lane and the call reads the table itself", kind, err)
+		}
 		return nil, err
 	}
 	return table, nil

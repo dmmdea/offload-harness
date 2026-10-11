@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/dmmdea/offload-harness/internal/config"
+	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/gpuprobe"
 )
 
@@ -155,6 +156,32 @@ func TestTheLaneProbeDoesNotRetryAnErrorThatIsNotATimeout(t *testing.T) {
 	}
 	if got := linesWith(buf, "media lane probe"); len(got) != 1 {
 		t.Errorf("the failure still leaves its one line, got %v", got)
+	}
+}
+
+// A read that ended because the CALLER went away (a client that disconnected mid-probe) is not a fault of the card table, so it
+// leaves no line saying the table "could not be read": that line is the only trace of an nvidia-smi fault and a cancelled call
+// would write it on every probe. The verdict is still the not-judged one (the caller is gone, nothing acts on it).
+func TestTheLaneProbeLogsNothingWhenTheCallerWentAway(t *testing.T) {
+	buf := captureLogLines(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	for name, c := range map[string]struct {
+		spec admitSpec
+		req  core.Request
+	}{
+		"image": {admitSpec{order: admitOrder, mutate: pinA}, laneReq(nil)},
+		"graph": {admitSpec{order: admitOrder}, graphLaneReq(nil)},
+	} {
+		f := newAdmitFixtureWith(t, c.spec)
+		var calls atomic.Int64
+		f.p.alloc.Cards = neverAnswers(&calls)
+		if v := f.p.MediaLaneFree(ctx, c.req); !v.Free || !strings.Contains(v.Why, "card table") {
+			t.Errorf("%s: a probe whose caller left reads as not judged, with its reason: %+v", name, v)
+		}
+	}
+	if got := linesWith(buf, "media lane probe"); len(got) != 0 {
+		t.Errorf("a cancelled caller is not a card-table fault, but the log says so: %v", got)
 	}
 }
 

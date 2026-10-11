@@ -89,12 +89,62 @@ func TestAnSdcppLaneOnAMixedBoxDeclaresTheLargerOfTheClassDefaultAndItsOwnBytes(
 	}
 }
 
-// An unreadable file leaves the declaration where it was (the class default), never a smaller number.
-func TestAnSdcppLaneWithAnUnsizedFileKeepsTheClassDefault(t *testing.T) {
-	withSdcppSizes(t, map[string]float64{"z_image_turbo-Q8_0.gguf": 6.73}) // the LLM and the VAE cannot be sized
+// A file that cannot be sized does not take the spill back outside the brake (0.180 hardening): the lane declares the files it
+// could size, as a lower bound, and says once which it could not. The class default is 0 on this box, so before the fix one
+// mistyped VAE path declared nothing at all, silently.
+func TestAnSdcppLaneWithAnUnsizedFileDeclaresTheLowerBoundAndSaysSoOnce(t *testing.T) {
+	withSdcppSizes(t, map[string]float64{"z_image_turbo-Q8_0.gguf": 6.73, "Qwen3-4B-Instruct-2507-Q4_K_M.gguf": 2.33}) // the VAE cannot be sized
 	cfg := sdcppOnlyCfg("--offload-to-cpu")
-	if got := (&Pipeline{cfg: cfg}).sdcppImageNeed(cfg, "z-image", "q8_0", "").RAM(16); got.GiB != 0 {
-		t.Errorf("an sd.cpp-only box with an unsized file declares what it did: %v", got)
+	buf := captureLogLines(t)
+	need := (&Pipeline{cfg: cfg}).sdcppImageNeed(cfg, "z-image-lb", "q8_0", "")
+	got := need.RAM(16)
+	if got.GiB < 9.05 || got.GiB > 9.07 {
+		t.Fatalf("the two sized files (6.73 + 2.33 = 9.06 GiB) are declared, not nothing: %v", got)
+	}
+	for _, want := range []string{"lower bound", "sdcpp_vae"} {
+		if !strings.Contains(got.Detail, want) {
+			t.Errorf("the declaration says what it could not size (%q): %s", want, got.Detail)
+		}
+	}
+	need.RAM(16) // the admission asks again on every poll: the line is made once
+	need.RAM(16)
+	lines := linesWith(buf, "could not size")
+	if len(lines) != 1 {
+		t.Fatalf("exactly one line says a weight file could not be sized, got %d:\n%s", len(lines), buf.String())
+	}
+	for _, want := range []string{"sdcpp_vae", "z-image-lb", "lower bound"} {
+		if !strings.Contains(lines[0], want) {
+			t.Errorf("the line %q lacks %q", lines[0], want)
+		}
+	}
+}
+
+// Nothing could be sized: there is no number to declare, so the class default stands (0 here), and the lane says so once
+// instead of passing unbraked in silence.
+func TestAnSdcppLaneWhoseFilesCannotBeSizedKeepsTheClassDefaultAndSaysSo(t *testing.T) {
+	withSdcppSizes(t, map[string]float64{})
+	cfg := sdcppOnlyCfg("--offload-to-cpu")
+	buf := captureLogLines(t)
+	need := (&Pipeline{cfg: cfg}).sdcppImageNeed(cfg, "z-image-none", "q8_0", "")
+	if got := need.RAM(16); got.GiB != 0 {
+		t.Errorf("no file could be sized: the class default stands, never a made-up number: %v", got)
+	}
+	need.RAM(16)
+	lines := linesWith(buf, "could not size")
+	if len(lines) != 1 {
+		t.Fatalf("exactly one line says no weight file could be sized, got %d:\n%s", len(lines), buf.String())
+	}
+	for _, want := range []string{"sdcpp_model", "class default", "z-image-none"} {
+		if !strings.Contains(lines[0], want) {
+			t.Errorf("the line %q lacks %q", lines[0], want)
+		}
+	}
+	// A lane that does not offload reads no file and says nothing.
+	cfg2 := sdcppOnlyCfg("--vae-tiling")
+	buf2 := captureLogLines(t)
+	(&Pipeline{cfg: cfg2}).sdcppImageNeed(cfg2, "z-image-noflag", "q8_0", "").RAM(16)
+	if lines := linesWith(buf2, "could not size"); len(lines) != 0 {
+		t.Errorf("a lane that parks nothing has no file to size: %v", lines)
 	}
 }
 

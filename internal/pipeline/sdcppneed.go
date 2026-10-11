@@ -7,15 +7,20 @@ package pipeline
 // parks in RAM there were outside the brake on the boxes whose memory matters most. Each of those lanes now declares the
 // LARGER of the class default (unchanged: on a box that also binds ComfyUI families it is the proxy it was, an upper bound
 // that is not the lane's own size) and the weights the lane parks itself (hostneed.ForSdcpp: the bound files in full, when
-// its extra args carry --offload-to-cpu). The own figure is an estimate and is worded as one; a lane whose files cannot be
-// sized keeps the class default. The need also carries the lane's footprint key, so the footprint store's measured runs raise
-// the estimate after three, like a ComfyUI family's (calibratedRAM; it only raises and leaves 0 alone).
+// its extra args carry --offload-to-cpu). The own figure is an estimate and is worded as one. A file that cannot be sized
+// does not take the estimate with it: the files that can are summed, the figure is worded as a lower bound and the lane says
+// ONCE (per lane and set of files) which it could not size; a lane none of whose files can be sized keeps the class default
+// and says so once the same way, so a mistyped binding path cannot take the spill back outside the brake in silence. The
+// need also carries the lane's footprint key, so the footprint store's measured runs raise the estimate after three, like a
+// ComfyUI family's (calibratedRAM; it only raises and leaves 0 alone).
 //
 // Not covered: the audio.cpp voice and music lanes (not sd.cpp: they keep the class default) and the CLI's `gpu reserve`
 // around an sd.cpp helper (hostneed.Resolve recognises only the ComfyUI helpers), which still declares the class default or
 // what --ram says.
 
 import (
+	"fmt"
+
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/hostneed"
 )
@@ -26,11 +31,26 @@ func sdcppDeclared(proxy config.Config, family string, files []hostneed.SdcppFil
 	return func(vram float64) hostneed.Need {
 		f := hostneed.Facts{Cfg: proxy, VRAMGiB: vram}
 		class := hostneed.ClassDefault(f)
-		if own, ok := hostneed.ForSdcpp(family, files, extra, f); ok && own.GiB > class.GiB {
+		own, ok := hostneed.ForSdcpp(family, files, extra, f)
+		if own.Unsized != "" {
+			sdcppUnsizedNote(family, own, ok, class)
+		}
+		if ok && own.GiB > class.GiB {
 			return own
 		}
 		return class
 	}
+}
+
+// sdcppUnsizedNote says, once per lane and set of unsized files, that a weight file of an sd.cpp lane could not be sized.
+// The admission asks for the declaration on every poll, so the key (not the call) makes the line once.
+func sdcppUnsizedNote(family string, own hostneed.Need, sizedSome bool, class hostneed.Need) {
+	key := "sdcpp-unsized|" + family + "|" + own.Unsized
+	if sizedSome {
+		planNoteKeyed(key, fmt.Sprintf("the %s sd.cpp lane could not size %s, so its host-RAM need counts only the files it could (%.1f GiB, a lower bound): check those bindings", family, own.Unsized, own.GiB))
+		return
+	}
+	planNoteKeyed(key, fmt.Sprintf("the %s sd.cpp lane could not size any of its weight files (%s), so it declares the class default (%.1f GiB), which parks nothing on a box with no ComfyUI family: check those bindings", family, own.Unsized, class.GiB))
 }
 
 // imageSdcppFiles are the weight files of the sd.cpp image binding (the default or a named family's overlay).
