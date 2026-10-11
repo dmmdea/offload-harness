@@ -944,6 +944,7 @@ func (lt *liveTicket) finish(res core.Result, canceled bool) {
 		lt.persistLocked()
 	}
 	lt.mu.Unlock()
+	lt.st.removeBodies(id) // a graph ticket's copies: the result is on file and nothing will run or adopt the body again
 	if base != "" {
 		lt.st.releaseNode(base, id)
 	}

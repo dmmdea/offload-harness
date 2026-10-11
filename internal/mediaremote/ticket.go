@@ -9,7 +9,9 @@ package mediaremote
 // process of the machine needs to know about it: who owns it, where it stands, which node holds its job. The request
 // BODY is held by the owning process only (it carries paths and a prompt the file has no business keeping); the file is
 // enough to answer for a ticket, to collect its result, to see which nodes the machine is using, and to adopt a job
-// whose owner died.
+// whose owner died. The one body the store does keep is a graph's (and its manifest's): body-<id>-graph.json and
+// body-<id>-manifest.json, the exact bytes the ticket was identified by and the node is sent, so that the local run, the
+// dispatch and an adopter all read what the ticket IS and not whatever the caller's file says hours later (bodyPath).
 //
 // What is persisted, and why each:
 //
@@ -147,6 +149,10 @@ type ticketFile struct {
 	Out    string `json:"out,omitempty"`
 	Seed   int    `json:"seed"`
 
+	// PathKey is a graph's key made of the file PATHS it was sent with and the parameters (pathKey), the handle a token collects by
+	// when the files themselves are gone or edited; empty for every other task, whose files are not part of their identity.
+	PathKey string `json:"path_key,omitempty"`
+
 	// Place is the lease-line token that keeps the ticket's arrival time on this machine; PlaceNote says why there is none.
 	Place     string `json:"local_token,omitempty"`
 	PlaceNote string `json:"local_place_note,omitempty"`
@@ -203,6 +209,35 @@ func newTicketID() string { return "mq-" + randHex(6) }
 // names another seed is another job. Numbers are canonicalised through JSON, so 2048, 2048.0 and a json.Number agree.
 // A graph's parameters name files on this machine, so its graph and manifest enter the key as what they say (graphContent).
 func reqKey(req core.Request) string {
+	return keyOf(req, func(_, path string) (string, bool) { return graphContent(path) })
+}
+
+// pathKey is reqKey with a graph's files left as the paths they were named by: no file is read, so it is the same before and
+// after the caller edits or removes them. It is the handle a ticket's token is collected by once the files are not what they
+// were (door.go admit); a repeat of the request never attaches by it, because the content is what says it is the same job.
+func pathKey(req core.Request) string {
+	return keyOf(req, func(string, string) (string, bool) { return "", false })
+}
+
+// payloadKey is reqKey from the bytes a plan carries, not from the files the paths name now: the ticket's identity is the bytes it
+// will be sent and run with, and a file edited between the call's first look and the plan cannot make the two differ.
+func payloadKey(req core.Request, pl planned) string {
+	return keyOf(req, func(param, _ string) (string, bool) {
+		field := "graph"
+		if param == "manifest_path" {
+			field = "manifest"
+		}
+		raw, ok := pl.payload[field].(json.RawMessage)
+		if !ok {
+			return "", false
+		}
+		return graphDigest(raw), true
+	})
+}
+
+// keyOf hashes the request with ident deciding what stands in for each graph file: a string that replaces the path, or ok false
+// to keep the path.
+func keyOf(req core.Request, ident func(param, path string) (string, bool)) string {
 	params := map[string]any{}
 	for k, v := range req.Params {
 		if k != "waiter_token" {
@@ -211,7 +246,7 @@ func reqKey(req core.Request) string {
 	}
 	if req.Task == core.TaskRunGraph {
 		for _, k := range []string{"graph_path", "manifest_path"} {
-			if c, ok := graphContent(str(params, k)); ok {
+			if c, ok := ident(k, str(params, k)); ok {
 				params[k] = c
 			}
 		}
@@ -251,6 +286,11 @@ func graphContent(path string) (string, bool) {
 	if err != nil {
 		return "", false
 	}
+	return graphDigest(b), true
+}
+
+// graphDigest is graphContent of bytes already read.
+func graphDigest(b []byte) string {
 	var doc any
 	dec := json.NewDecoder(strings.NewReader(string(b)))
 	dec.UseNumber()
@@ -260,7 +300,7 @@ func graphContent(path string) (string, bool) {
 		}
 	}
 	sum := sha256.Sum256(b)
-	return "content:" + hex.EncodeToString(sum[:]), true
+	return "content:" + hex.EncodeToString(sum[:])
 }
 
 // describe is what the ticket file shows of the call: the family and recipe digest of an image, the model_family of a graph (which
@@ -332,6 +372,7 @@ func (s *store) markCollected(id string) {
 func (s *store) remove(id string) {
 	if validTicketID(id) {
 		removeFile(s.path(id))
+		s.removeBodies(id)
 	}
 }
 
@@ -366,6 +407,92 @@ func (t ticketFile) dead() bool {
 		return true
 	}
 	return t.Beat > 0 && time.Since(time.UnixMilli(t.Beat)) > ownerStale
+}
+
+// ---- a graph ticket's body ----------------------------------------------------------------------------------------------
+
+// bodyPrefix names the files that hold a graph ticket's body. It matches none of the prefixes sweep reads as a ticket (mq-), a
+// claim (use-) or debris (.tmp), so nothing else in the directory mistakes one for its own.
+const bodyPrefix = "body-"
+
+// graphBodyFields maps a graph request's file parameters to the field of the plan that carries their bytes and to the suffix of
+// the ticket's copy.
+var graphBodyFields = map[string]string{"graph_path": "graph", "manifest_path": "manifest"}
+
+// bodyPath is where ticket id keeps its copy of the graph (what "graph") or the manifest (what "manifest"), absolute, because
+// the render is a child process with a directory of its own.
+func (s *store) bodyPath(id, what string) string {
+	p := filepath.Join(s.dir, bodyPrefix+id+"-"+what+".json")
+	if abs, err := filepath.Abs(p); err == nil {
+		return abs
+	}
+	return p
+}
+
+// writeBodies keeps the graph and the manifest of a planned run_graph exactly as the plan holds them, and returns the file
+// parameter each one replaces. A ticket is identified by these bytes and sent to a node with these bytes; the local run and an
+// adopter read them too (pinBodies), so a caller that reuses, edits or removes its own file while the ticket waits for hours
+// changes nothing the ticket does. Nothing is left behind when one of the writes fails.
+func (s *store) writeBodies(id string, pl planned) (map[string]string, error) {
+	out := map[string]string{}
+	for param, field := range graphBodyFields {
+		raw, ok := pl.payload[field].(json.RawMessage)
+		if !ok {
+			continue
+		}
+		path := s.bodyPath(id, field)
+		if err := writeFileAtomic(path, raw); err != nil {
+			s.removeBodies(id)
+			return nil, err
+		}
+		out[param] = path
+	}
+	return out, nil
+}
+
+// bodyTicket is the ticket a copy's file name belongs to; ok is false for a name that is not one.
+func bodyTicket(name string) (string, bool) {
+	rest, ok := strings.CutPrefix(name, bodyPrefix)
+	if !ok {
+		return "", false
+	}
+	for _, field := range graphBodyFields {
+		if id, cut := strings.CutSuffix(rest, "-"+field+".json"); cut && validTicketID(id) {
+			return id, true
+		}
+	}
+	return "", false
+}
+
+// removeBodies deletes ticket id's copies (a file that is not there is not an error).
+func (s *store) removeBodies(id string) {
+	if !validTicketID(id) {
+		return
+	}
+	for _, field := range graphBodyFields {
+		removeFile(s.bodyPath(id, field))
+	}
+}
+
+// pinBodies points a graph request at the copies ticket id kept, for each one that is on file: an adopter plans from what the
+// ticket was made of even when the caller's own files are gone. A ticket made without copies (an older build's) leaves the
+// request as it is.
+func (s *store) pinBodies(req core.Request, id string) core.Request {
+	if req.Task != core.TaskRunGraph || !validTicketID(id) {
+		return req
+	}
+	params := make(map[string]any, len(req.Params))
+	for k, v := range req.Params {
+		params[k] = v
+	}
+	for param, field := range graphBodyFields {
+		p := s.bodyPath(id, field)
+		if fi, err := os.Stat(p); err == nil && fi.Mode().IsRegular() {
+			params[param] = p
+		}
+	}
+	req.Params = params
+	return req
 }
 
 // ---- node claims ---------------------------------------------------------------------------------------------------
@@ -525,6 +652,21 @@ func (s *store) sweep(all []ticketFile) (dropped []string) {
 				if fi, err := e.Info(); err == nil && now.Sub(fi.ModTime()) > tmpStale {
 					removeFile(path) // does not parse and is not being written
 				}
+			}
+		case strings.HasPrefix(name, bodyPrefix) && strings.HasSuffix(name, ".json"):
+			// A graph ticket's copy. It is debris once its ticket is finished, or gone for longer than a ticket takes to be made: a
+			// ticket that is being made wrote its copies moments ago and has not written its own file yet, so a younger copy is never
+			// taken for an orphan.
+			id, ok := bodyTicket(name)
+			if !ok {
+				continue
+			}
+			t, found := s.read(id)
+			if found && !terminalState(t.State) {
+				continue
+			}
+			if fi, err := e.Info(); err == nil && (found || now.Sub(fi.ModTime()) > tmpStale) {
+				removeFile(path)
 			}
 		}
 	}

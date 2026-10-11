@@ -243,6 +243,11 @@ func TestTwoProcessesAskingForOneGraphAtOnceMakeOneTicket(t *testing.T) {
 			t.Fatalf("round %d: two processes asking at once made %d tickets for one graph", round, n)
 		}
 	}
+	// The process that lost the race made copies of the graph for a ticket that does not exist: they are gone, one per ticket remains.
+	st, _ := storeFor(e.cfg)
+	if tickets, copies := len(st.list()), len(queueFiles(t, e.cfg, "body-")); copies != tickets {
+		t.Errorf("%d tickets, %d graph copies: the loser of each race removed its own", tickets, copies)
+	}
 }
 
 // ---- late binding ---------------------------------------------------------------------------------------------------------
@@ -883,5 +888,43 @@ func TestPostReadsTheNodesRefusalWordAndABoundedSentence(t *testing.T) {
 		if !utf8.ValidString(pe.detail) {
 			t.Errorf("%s: the cut sentence splits a character: %q", name, pe.detail)
 		}
+	}
+}
+
+// ---- a lane the pipeline could not read -----------------------------------------------------------------------------------------
+
+// A graph's lane that could not be READ (the card table is slowest to read exactly when a heavy render holds the card) is not a free
+// lane for a graph either: the call is a ticket, the fleet is looked at in the same scan, and an idle matching node takes it. This
+// is the loaded-box shape the live acceptance sets up; the pipeline half (the probe says Unjudged) is held in the pipeline package.
+func TestAnUnreadLaneStillLooksAtTheFleetForAGraph(t *testing.T) {
+	e := newGEnv(t)
+	e.node("node-a", false, nodeOpts{}, krea2File) // idle
+	e.start()
+	e.lr.set(unjudgedLane())
+	e.lr.local = core.Deferf("gpu queued: card(s) c2 held", "", core.Meta{ErrClass: core.ErrClassGPUQueued})
+	res := runDoor(e.cfg, e.lr, e.req(krea2Graph, nil), callWindow)
+	if !res.OK || res.Meta.Node != "node-a" {
+		t.Fatalf("the idle node takes a graph whose lane could not be read: %+v", res)
+	}
+	if !strings.Contains(res.Meta.Placement, "could not be judged") || !strings.Contains(res.Meta.Placement, "graph lane") {
+		t.Errorf("the placement says the graph lane could not be judged, not that it was busy: %q", res.Meta.Placement)
+	}
+	if _, runs := e.lr.counts(); runs != 0 {
+		t.Errorf("no run on this machine's lane when a node took the graph: %d", runs)
+	}
+}
+
+// With no node able to take it, a graph whose lane could not be read runs here, in the scan that found no node, as it always did.
+func TestAnUnreadLaneWithNoNodeRunsAGraphHere(t *testing.T) {
+	e := newGEnv(t)
+	e.node("node-a", true, nodeOpts{}, krea2File) // busy
+	e.start()
+	e.lr.set(unjudgedLane())
+	res := runDoor(e.cfg, e.lr, e.req(krea2Graph, nil), callWindow)
+	if !res.OK || string(res.Data) != `{"local":true}` {
+		t.Fatalf("the graph runs on this machine's lane: %+v", res)
+	}
+	if _, runs := e.lr.counts(); runs != 1 {
+		t.Errorf("one run: %d", runs)
 	}
 }

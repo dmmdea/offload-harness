@@ -105,13 +105,20 @@ func (q *queueRT) admit(ctx context.Context, cfg config.Config, runner Runner, r
 	if tok := str(req.Params, "waiter_token"); strings.HasPrefix(tok, "mq-") {
 		if validTicketID(tok) {
 			if t, found := st.read(tok); found {
-				if t.ReqKey != key {
+				// The same request is the same content. A graph's token is also its handle when the files it was sent with are gone or
+				// edited since (a ticket outlives the caller's file): the same paths and parameters name the same call, and the finished
+				// result must stay collectable by the token it was promised under. Only the token collects by paths; a repeat that
+				// carries no token attaches by content alone, so a file overwritten with the next shot is a new job.
+				sameContent := t.ReqKey == key
+				if !sameContent && !(t.PathKey != "" && t.PathKey == pathKey(req)) {
 					return contractDefer(fmt.Sprintf("waiter_token %s names the ticket of a different request: send the same request to collect it, or drop the token for a new one", tok), core.Meta{}), nil
 				}
 				if res, attached := q.attach(ctx, cfg, runner, req, remotes, w, st, t); attached {
 					return res, nil
 				}
-				inherit = time.UnixMilli(t.Created) // its owner is gone and it had sent nothing: the new ticket keeps its arrival
+				if sameContent {
+					inherit = time.UnixMilli(t.Created) // its owner is gone and it had sent nothing: the new ticket keeps its arrival
+				}
 			}
 		}
 		req = withoutParam(req, "waiter_token")
@@ -182,6 +189,7 @@ func (q *queueRT) create(ctx context.Context, cfg config.Config, runner Runner, 
 	for k, val := range req.Params {
 		params[k] = val
 	}
+	id := newTicketID()
 	// An image ticket fixes one seed (ADR 0083 decision 3). A graph owns its own sampling (the harness reads no meaning into it),
 	// so the ticket gives it none and the node's payload and the local run are the graph as the caller sent it.
 	seed := 0
@@ -196,6 +204,21 @@ func (q *queueRT) create(ctx context.Context, cfg config.Config, runner Runner, 
 	pl, err := plan(req2) // the payload carries the fixed seed
 	if err != nil {
 		return nil, nil, err
+	}
+	// A graph ticket IS the bytes the plan holds: its key is made of them, the node is sent them, and the local run and an adopter
+	// read them from copies the ticket keeps, because the caller's file is the caller's and a ticket may wait for hours (ticket.go).
+	// Everything below that reads the graph (the need, the run) reads the copy.
+	pathID := ""
+	if req.Task == core.TaskRunGraph {
+		key = payloadKey(req, pl)
+		pathID = pathKey(req)
+		bodies, berr := st.writeBodies(id, pl)
+		if berr != nil {
+			return nil, nil, berr
+		}
+		for param, path := range bodies {
+			params[param] = path
+		}
 	}
 
 	created := inherit
@@ -214,7 +237,7 @@ func (q *queueRT) create(ctx context.Context, cfg config.Config, runner Runner, 
 	lt.ctx, lt.cancel = context.WithCancel(q.rootCtx)
 	lt.first, lt.firstAt = &v, time.Now()
 	lt.t = ticketFile{
-		ID: newTicketID(), ReqKey: key, Created: created.UnixMilli(), Owner: q.owner, Beat: nowMs(),
+		ID: id, ReqKey: key, PathKey: pathID, Created: created.UnixMilli(), Owner: q.owner, Beat: nowMs(),
 		Task: string(req.Task), Seed: seed, State: stWaiting, LaneWhy: v.Why,
 	}
 	lt.t.Family, lt.t.Digest, lt.t.Out = describe(req, local)
@@ -243,6 +266,7 @@ func (q *queueRT) create(ctx context.Context, cfg config.Config, runner Runner, 
 	})
 	if err != nil || existing != nil {
 		lt.cancel()
+		st.removeBodies(id) // the ticket does not exist, so neither do its copies
 		if perr == nil && place.Token != carried {
 			core.DropPlace(runner, place.Token) // the place was made for this ticket, which does not exist
 		}
@@ -298,6 +322,9 @@ func (q *queueRT) adopt(ctx context.Context, cfg config.Config, runner Runner, r
 		}
 		req = withSeed(req, t.Seed)
 	}
+	// A graph is planned from the copies the ticket kept (its owner made them with the job it sent), not from the caller's files,
+	// which may be gone or another shot by now; a ticket without copies (an older build's) is planned from the request.
+	req = st.pinBodies(req, t.ID)
 	pl, err := plan(req)
 	if err != nil {
 		return nil
