@@ -653,13 +653,28 @@ side can know the producer died, so the harness retires its own orphans:
   card (requester `llama-swap/direct`) is not a harness job at all, so its orphan is closed `completed` with no
   error, as a clean stop closes it. Its `completedAt` is the moment the sweep found the watcher gone: the register
   holds the stretch's start and not its last busy poll, so after a long outage the stretch can read longer than the
-  traffic it carried.
+  traffic it carried. **The sweep's log line counts what it closed by kind** (it counted every card as "harness process
+  exited before the job finished", which is false of a seat-watch stretch, closed completed, and of a terminal frame the
+  producer parked and the sweep delivered): "closed 3 PAIR card(s): 2 whose harness process exited before the job
+  finished; 1 seat-watch stretch(es) whose watcher exited (closed completed: ...)". A sweep that closed orphans alone
+  logs the line it always did.
 - **The wrapper answers a console close itself.** `gpu reserve -- <command>` asks for `SIGTERM` as well as
   `os.Interrupt` (`gpu_signals.go`). Go on Windows delivers a console close, a logoff and a shutdown as
   `SIGTERM`, and ends the process only after its handler has had its grace, so the wrapper kills its command,
-  closes its card with "terminated: its console was closed, or the session is ending or the machine is shutting
-  down" and releases its lease instead of dying silent (the 01:09:59 incident: five card-scoped leases and two
-  queued ones, exit `0xC000013A`). With `--drain --unload-seat` it skips the seat's warm-back (a reload of
+  closes its card with "ended on SIGTERM: likely a console close, a logoff or a shutdown, though a plain kill sends it
+  too" and releases its lease instead of dying silent (the 01:09:59 incident: five card-scoped leases and two
+  queued ones, exit `0xC000013A`). The card names the signal and gives its cause as **likely**: a plain `kill` (and, on
+  Linux, every `SIGTERM`) arrives as the same signal, so the wrapper cannot tell a console close from a kill, and the
+  text no longer claims one. **The handler is registered first** (before the lease directory is opened), and every stage
+  returns on it: a signal while the wrapper is **queued** (`--wait`, up to hours) or **choosing cards** (`--cards`) ends the
+  wait through `gpulease.Options.Cancel`, takes its waiter record out of the line, closes the card failed with "ended on
+  SIGTERM while queued (...); never started" and leaves the other holder's lease alone; a signal **during the drain**
+  cancels the drain, releases the lease, unloads and warms nothing and says nothing about a warm owed (none is: the seat
+  was not unloaded); a signal while the wrapper **plans** (before its card opens) ends it with nothing opened. Before
+  this the handler was registered only after the drain, so a console close in any of those stages was unhandled: Go
+  ended the process at once, the card stayed open until the sweep closed it "harness process exited before the job
+  finished" and the waiter's record stayed in the line until a reader found its pid gone. With `--drain --unload-seat`
+  and a seat that was unloaded, a command ended on SIGTERM skips the seat's warm-back (a reload of
   minutes inside a grace of seconds, with a model loading while the machine goes down) and releases the lease right
   after stopping the ComfyUI instances kept under it (a step bounded at 60 s, usually seconds): the warm stays owed in the seat marker, and `gpu release --warm-seat` or the seat's next request pays
   it. A Ctrl-C has no deadline and still warms the seat back first. A `taskkill /F` or a `SIGKILL` gives the process no signal; nothing in-process

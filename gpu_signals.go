@@ -12,26 +12,167 @@ package main
 // nothing in-process can answer it: the orphan sweep's text covers that case (pairworkloads.orphanText).
 
 import (
+	"errors"
 	"fmt"
 	"os"
+	"os/signal"
+	"sync"
 	"syscall"
+	"time"
+
+	"github.com/dmmdea/offload-harness/internal/gpulease"
 )
 
 // wrapperSignals are the signals the wrapper asks for while its command runs.
 var wrapperSignals = []os.Signal{os.Interrupt, syscall.SIGTERM}
 
-// wrapperSignalFeed is a test seam: when set, it is handed the wrapper's signal channel once the wrapper is
-// listening, so a test can deliver the signal a console close would (a real one cannot be driven from a test,
-// and Windows cannot send SIGTERM to a process). Production leaves it nil.
+// wrapperSignalFeed is a test seam: when set, it is handed the wrapper's signal channel the moment the wrapper
+// starts listening (which is now the first thing it does, before any lease work), so a test can deliver the signal a
+// console close would at the stage it wants (a real one cannot be driven from a test, and Windows cannot send
+// SIGTERM to a process). Production leaves it nil.
 var wrapperSignalFeed func(chan<- os.Signal)
+
+// wrapperCommandStarted is a test seam called once the wrapped command is running, for a test that wants its signal to
+// arrive while the command runs (the stage the feed's clock used to start at, before the handler moved up).
+var wrapperCommandStarted func()
+
+// The stages a signal can find the wrapper in before its command runs, worded for the card (140 characters, cut after).
+const (
+	stageBeforeCard  = "before it asked for the card"
+	stageQueued      = "while queued"
+	stageDraining    = "while draining the seat"
+	stageBeforeStart = "before its command started"
+)
+
+// termCauseLikely is what a SIGTERM most likely is, said as likely: Go on Windows delivers a console close, a logoff and
+// a shutdown as SIGTERM, but a plain kill sends the same signal (and on Linux it is the only way SIGTERM comes), so the
+// wrapper cannot tell which it was. Text that named one of them as the cause claimed what nothing here can know.
+const termCauseLikely = "likely a console close, a logoff or a shutdown, though a plain kill sends it too"
+
+// endedBySignal is the error a wrapper ends with when a signal stopped it at stage, before its command ran: the signal
+// named, the cause as likely, and that the command never started. It is also the text of the card.
+func endedBySignal(s os.Signal, stage string) error {
+	switch s {
+	case os.Interrupt:
+		return fmt.Errorf("interrupted %s; never started", stage)
+	case syscall.SIGTERM:
+		return fmt.Errorf("ended on SIGTERM %s (%s); never started", stage, termCauseLikely)
+	}
+	return fmt.Errorf("ended on signal %v %s; never started", s, stage)
+}
+
+// signalEndedWait turns the cancel of a queue wait into the error that says why: when a signal closed the watch and the
+// wait answered ErrCancelled, the wait ended on that signal; any other error is the queue's own and is returned as it is.
+func signalEndedWait(w *signalWatch, err error, stage string) error {
+	if err == nil || !errors.Is(err, gpulease.ErrCancelled) {
+		return err
+	}
+	if sig := w.Signal(); sig != nil {
+		return endedBySignal(sig, stage)
+	}
+	return err
+}
+
+// cancelClosed reports whether a cancel channel is closed; a nil one never is.
+func cancelClosed(c <-chan struct{}) bool {
+	select {
+	case <-c:
+		return true
+	default:
+		return false
+	}
+}
+
+// signalWatch is the wrapper's one consumer of wrapperSignals, registered BEFORE anything else the wrapper does
+// (0.180 final check). It used to be registered after the card was opened, the queue wait and the drain, so a console
+// close during `--wait 8h` or a long drain found no handler: Go ended the process on the spot, its PAIR card stayed
+// open and its waiter record stayed in the line. Now every stage of the wrapper watches Done and returns on it.
+//
+// One goroutine reads the signal channel once and closes Done; the stages that block (the queue wait, the card
+// choice, the drain) are handed Done, and the command stage selects on it. A second signal is dropped on the
+// channel's full buffer: the first one is the news, and the OS ends the process after its grace either way.
+// A nil *signalWatch is the detached form (no wrapper, nothing to watch) and every method is inert.
+type signalWatch struct {
+	sigc chan os.Signal
+	done chan struct{}
+	quit chan struct{}
+	once sync.Once
+
+	mu  sync.Mutex
+	got os.Signal
+}
+
+// watchWrapperSignals starts listening. wrapperSignalFeed, when a test set it, is handed the channel at once.
+func watchWrapperSignals() *signalWatch {
+	w := &signalWatch{sigc: make(chan os.Signal, 1), done: make(chan struct{}), quit: make(chan struct{})}
+	signal.Notify(w.sigc, wrapperSignals...)
+	if wrapperSignalFeed != nil {
+		go wrapperSignalFeed(w.sigc)
+	}
+	go func() {
+		select {
+		case s := <-w.sigc:
+			w.mu.Lock()
+			w.got = s
+			w.mu.Unlock()
+			close(w.done)
+		case <-w.quit:
+		}
+	}()
+	return w
+}
+
+// Done is closed once a signal has arrived; nil (never ready) for the detached form.
+func (w *signalWatch) Done() <-chan struct{} {
+	if w == nil {
+		return nil
+	}
+	return w.done
+}
+
+// Signal is the signal that arrived, nil before one did.
+func (w *signalWatch) Signal() os.Signal {
+	if w == nil {
+		return nil
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.got
+}
+
+// Sleep is time.Sleep that a signal cuts short, for the polling loops of the card choice.
+func (w *signalWatch) Sleep(d time.Duration) {
+	if w == nil {
+		time.Sleep(d)
+		return
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+	case <-w.done:
+	}
+}
+
+// Stop ends the listening; safe to call twice.
+func (w *signalWatch) Stop() {
+	if w == nil {
+		return
+	}
+	w.once.Do(func() {
+		signal.Stop(w.sigc)
+		close(w.quit)
+	})
+}
 
 // endsGraceBounded reports whether the signal is one after which the OS ends the process in a few seconds:
 // SIGTERM, which is how a console close, a logoff and a shutdown reach a Go program on Windows. The wrapper
 // then releases its lease at once and leaves the seat's warm-back owed instead of doing it first.
 func endsGraceBounded(s os.Signal) bool { return s == syscall.SIGTERM }
 
-// warmSkippedOnTermSentence is what the wrapper says in place of the warm-back.
-const warmSkippedOnTermSentence = "gpu reserve: the command was ended on a termination signal (its console was closed, or the session is ending or the machine is shutting down), and the OS gives that about five seconds: releasing the lease now and NOT warming the seat back; the warm stays owed (`gpu status` shows it) and the seat loads on its next request, or with `gpu release --warm-seat`"
+// warmSkippedOnTermSentence is what the wrapper says in place of the warm-back. It names the signal and gives the cause as
+// likely (termCauseLikely): a SIGTERM is also what a plain kill sends.
+const warmSkippedOnTermSentence = "gpu reserve: the command was ended on SIGTERM (" + termCauseLikely + "), and a console close gives the process about five seconds: releasing the lease now and NOT warming the seat back; the warm stays owed (`gpu status` shows it) and the seat loads on its next request, or with `gpu release --warm-seat`"
 
 // signalWhy is the clause the wrapper appends to the exit status on the card of a command it ended on a
 // signal. " (interrupted)" is what a Ctrl-C always read.
@@ -40,7 +181,7 @@ func signalWhy(s os.Signal) string {
 	case os.Interrupt:
 		return " (interrupted)"
 	case syscall.SIGTERM:
-		return " (terminated: its console was closed, or the session is ending or the machine is shutting down)"
+		return " (ended on SIGTERM: " + termCauseLikely + ")"
 	}
 	return fmt.Sprintf(" (ended on signal %v)", s)
 }

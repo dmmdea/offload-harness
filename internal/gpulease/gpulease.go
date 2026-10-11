@@ -157,6 +157,10 @@ const QueueHint = "local-offload gpu reserve --wait 8h --drain --unload-seat --f
 // that was refused on the spot.
 var ErrStillQueued = errors.New("gpulease: still queued")
 
+// ErrCancelled ends a queued Acquire whose caller closed Options.Cancel: it was told to stop while it stood in line.
+// Nothing was claimed and the waiter's record is gone. It is not a fault of the card and not a place in line.
+var ErrCancelled = errors.New("gpulease: the wait for the card was cancelled by its caller")
+
 // stillQueuedErr is the ErrStillQueued answer, worded for what the request did: waited > 0 is a
 // request that stood in line for its window, 0 one that made a single gated attempt and was
 // refused. behind names who was ahead.
@@ -576,6 +580,15 @@ type Options struct {
 	// the grant and not only at the enqueue. It runs with the cards already claimed by this request,
 	// so a reader of the lease directory sees its own claim.
 	GrantCheck func() error
+
+	// Cancel, when closed, ends a queued Acquire at its next poll with ErrCancelled: the waiter record leaves the line
+	// through Acquire's own defer and nothing is claimed. It is for a caller that is told to stop while it stands in
+	// line (the `gpu reserve` wrapper on a console close or a kill, which may stand there for --wait 8h): without it
+	// the only way out of the wait was to end the process and leave its record in the line for a later reader to
+	// prune. nil = never. It is checked before the waiter registers and before every attempt, so a request cancelled
+	// before it began asks for nothing, even on a free card; a lease already granted when it closes is returned and
+	// is the caller's to release.
+	Cancel <-chan struct{}
 }
 
 // Manager binds a resolved state root. Construct with Open, which performs the
@@ -727,6 +740,32 @@ func (m *Manager) pause(d time.Duration) {
 		return
 	}
 	m.sleep(d)
+}
+
+// pauseOrCancel is pause that a closed cancel channel cuts short, so a waiter told to stop is out of the line within
+// a poll and not after one. A Manager with a sleep seam (tests) sleeps through it: the caller checks the channel
+// after the pause either way.
+func (m *Manager) pauseOrCancel(d time.Duration, cancel <-chan struct{}) {
+	if cancel == nil || m.sleep != nil {
+		m.pause(d)
+		return
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+	case <-cancel:
+	}
+}
+
+// cancelled reports whether the channel is closed; a nil channel never is.
+func cancelled(c <-chan struct{}) bool {
+	select {
+	case <-c:
+		return true
+	default:
+		return false
+	}
 }
 
 // pollInterval is how long Acquire waits between probes.
@@ -1520,6 +1559,9 @@ func (m *Manager) Acquire(class Class, opts Options) (*Lease, error) {
 	// in the common uncontested case: with no other waiters, isFrontOfQueue is
 	// immediately true and the first attempt below still fires without
 	// waiting a single poll interval, exactly like the old fast path did.
+	if cancelled(opts.Cancel) {
+		return nil, ErrCancelled // told to stop before it began: no record in the line, no attempt
+	}
 	self, unregister := m.registerWaiter(class, opts)
 	defer unregister()
 	var err error
@@ -1549,7 +1591,10 @@ func (m *Manager) Acquire(class Class, opts Options) (*Lease, error) {
 			if remaining < pause {
 				pause = remaining
 			}
-			m.pause(pause)
+			m.pauseOrCancel(pause, opts.Cancel)
+			if cancelled(opts.Cancel) {
+				return nil, ErrCancelled // the waiter leaves the line through the defer above
+			}
 
 			// Prove we are still actually polling, whether or not we are front
 			// of queue this tick: an alive-but-wedged waiter (suspended, stuck

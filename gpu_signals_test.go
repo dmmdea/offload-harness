@@ -34,11 +34,30 @@ func TestTheCardSaysWhichSignalEndedTheCommand(t *testing.T) {
 	if got := signalWhy(os.Interrupt); got != " (interrupted)" {
 		t.Errorf("interrupt = %q, the text every existing reader knows", got)
 	}
+	// The card names the signal and gives the cause as LIKELY: a SIGTERM is also what a plain kill sends, and nothing in the
+	// wrapper can tell which it was (0.180 final check). Text that named the console close as the cause claimed what it
+	// could not know.
 	got := signalWhy(syscall.SIGTERM)
-	for _, want := range []string{"terminated", "console was closed", "session"} {
+	for _, want := range []string{"SIGTERM", "likely", "console close", "plain kill"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("SIGTERM text %q lacks %q", got, want)
 		}
+	}
+	for _, claim := range []string{"its console was closed", "the session is ending", "the machine is shutting down", "terminated:"} {
+		if strings.Contains(got, claim) {
+			t.Errorf("SIGTERM text %q states a cause as fact (%q)", got, claim)
+		}
+	}
+	if n := len([]rune(signalWhy(syscall.SIGTERM) + " exit status 1")); n > 140-20 {
+		t.Errorf("the card clause is %d characters; the card shows 140 in all and the exit status goes before it", n)
+	}
+	for _, claim := range []string{"its console was closed", "the session is ending", "the machine is shutting down"} {
+		if strings.Contains(warmSkippedOnTermSentence, claim) {
+			t.Errorf("the warm-skipped sentence states a cause as fact (%q)", claim)
+		}
+	}
+	if !strings.Contains(warmSkippedOnTermSentence, "SIGTERM") || !strings.Contains(warmSkippedOnTermSentence, "plain kill") {
+		t.Errorf("the warm-skipped sentence must name the signal and say a plain kill sends it too: %s", warmSkippedOnTermSentence)
 	}
 	if other := signalWhy(syscall.SIGHUP); !strings.Contains(other, "signal") {
 		t.Errorf("an unknown signal is named as a signal: %q", other)
@@ -46,20 +65,32 @@ func TestTheCardSaysWhichSignalEndedTheCommand(t *testing.T) {
 }
 
 // The wrapper's loop is long and drives a real command, so the wiring is pinned where it is made: the
-// signals it asks for are wrapperSignals (not a literal os.Interrupt that would drop SIGTERM again) and
-// the card's text comes from the signal that arrived.
+// signals it asks for are wrapperSignals (not a literal os.Interrupt that would drop SIGTERM again), they are asked
+// for FIRST (before the lease is opened: the handler used to be registered after the queue wait and the drain) and the
+// card's text comes from the signal that arrived.
 func TestTheWrapperLoopUsesTheSignalSetAndTheSignalsOwnText(t *testing.T) {
-	src, err := os.ReadFile("gpu_cmd.go")
-	if err != nil {
-		t.Fatal(err)
+	read := func(name string) string {
+		src, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.ReplaceAll(string(src), "\r\n", "\n")
 	}
-	text := string(src)
-	for _, want := range []string{"signal.Notify(sigc, wrapperSignals...)", "why = signalWhy(sig)"} {
-		if !strings.Contains(text, want) {
+	cmd, sigs := read("gpu_cmd.go"), read("gpu_signals.go")
+	for _, want := range []string{"sw = watchWrapperSignals()", "why = signalWhy(sig)"} {
+		if !strings.Contains(cmd, want) {
 			t.Errorf("gpu_cmd.go no longer contains %q", want)
 		}
 	}
-	if strings.Contains(text, "signal.Notify(sigc, os.Interrupt)") {
+	if !strings.Contains(sigs, "signal.Notify(w.sigc, wrapperSignals...)") {
+		t.Error("the watch no longer asks for wrapperSignals")
+	}
+	if strings.Contains(cmd+sigs, "signal.Notify(sigc, os.Interrupt)") || strings.Contains(cmd+sigs, "Notify(w.sigc, os.Interrupt)") {
 		t.Error("the wrapper asks for os.Interrupt alone again")
+	}
+	// The handler is registered before the lease directory is opened, so no stage runs unhandled.
+	body := cmd[strings.Index(cmd, "func runGPUReserve("):]
+	if w, o := strings.Index(body, "sw = watchWrapperSignals()"), strings.Index(body, "m, err := openLease(fs)"); w < 0 || o < 0 || w > o {
+		t.Error("the signal handler must be registered before openLease: every stage of the wrapper runs after it")
 	}
 }

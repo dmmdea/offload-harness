@@ -32,7 +32,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -451,6 +450,17 @@ func runGPUReserve(args []string) error {
 		return errors.New("--progress-file auto mints a file for the command the wrapper form runs; a --detach hold wraps none and runs several over its life, so name the file the jobs append to (--progress-file <path> --stall <window>)")
 	}
 
+	// THE SIGNAL HANDLER COMES FIRST (0.180 final check). It used to be registered after the card was opened, the
+	// queue wait and the drain, so a console close during `--wait 8h` or a long drain found no handler and Go ended the
+	// process on the spot: its PAIR card stayed open, its waiter record stayed in the line. Every stage below now
+	// returns on sw.Done(): the plan (a checkpoint), the queue wait and the card choice (opts.Cancel, sw.Sleep), the
+	// drain (its context), the command (the loop's select). The detached form wraps no command and keeps nil.
+	var sw *signalWatch
+	if !*detach {
+		sw = watchWrapperSignals()
+		defer sw.Stop()
+	}
+
 	m, err := openLease(fs)
 	if err != nil {
 		return err
@@ -464,7 +474,7 @@ func runGPUReserve(args []string) error {
 	exclusiveAfter := (*exclusive || *unload) && *drain
 	opts := gpulease.Options{Reason: *reason, Origin: *origin, TTL: *dur,
 		Exclusive: *exclusive && !*drain, Draining: *drain, Command: strings.Join(cmdArgs, " "),
-		WrapperVersion: version, Group: strings.TrimSpace(*groupFlag)}
+		WrapperVersion: version, Group: strings.TrimSpace(*groupFlag), Cancel: sw.Done()}
 	if err := owner.apply(&opts, os.Getenv); err != nil {
 		return err
 	}
@@ -569,13 +579,18 @@ func runGPUReserve(args []string) error {
 		return nil
 	}
 
+	// A signal that came in while the plan was made (the card table is read, patiently, above) ends the reserve before
+	// anything is opened: no card to close, no place in line to leave, nothing held.
+	if sig := sw.Signal(); sig != nil {
+		return endedBySignal(sig, stageBeforeCard)
+	}
 	// The job's PAIR card: queued now, in the lease queue and through the
 	// drain; running once the command starts; closed with its exit.
 	cfg := loadCfg(fs)
 	card := newLeaseCard(cfg, cmdArgs, *origin)
 	var lease *gpulease.Lease
 	if plan.Auto {
-		lease, err = acquireAutoCards(m, gpulease.Class(*class), opts, plan, *wait, buildAlloc, os.Stderr, time.Sleep, time.Now)
+		lease, err = acquireAutoCards(m, gpulease.Class(*class), opts, plan, *wait, buildAlloc, os.Stderr, sw.Sleep, time.Now)
 		if err == nil {
 			// A lease lost during the drain is taken again on the cards this one held.
 			opts.Devices = lease.Devices()
@@ -585,6 +600,7 @@ func runGPUReserve(args []string) error {
 		lease, err = acquireQueued(m, gpulease.Class(*class), opts, *wait)
 	}
 	if err != nil {
+		err = signalEndedWait(sw, err, stageQueued)
 		card.finish(err)
 		return err
 	}
@@ -615,8 +631,11 @@ func runGPUReserve(args []string) error {
 		// the next holder both want, and they live no longer than the lease (gpu_instances.go).
 		stopInstancesOfLease(cfg, lease, os.Stderr)
 		switch {
-		case *unload && endedOnTerm:
+		case *unload && endedOnTerm && m.SeatWarmOwed() != "":
 			fmt.Fprintln(os.Stderr, warmSkippedOnTermSentence)
+		case *unload && endedOnTerm:
+			// Ended inside the grace before the seat was unloaded (a signal during the drain): there is no warm to
+			// skip and none owed, so nothing is said that is not so.
 		case *unload:
 			warmBackGuarded(cfg, leaseWarmGuard(m, lease), os.Stderr)
 		}
@@ -636,11 +655,27 @@ func runGPUReserve(args []string) error {
 			// the failure to the restamp, hours later, and the command never started.
 			mctx, cancelMaintain := context.WithCancel(context.Background())
 			stopRenew := renewWhile(lease, drainRenewEvery, func(error) { cancelMaintain() })
+			// A signal ends the drain at once (the OS gives a console close about five seconds): cancelling its
+			// context makes maintainSeatScoped stop; the goroutine ends with the context.
+			go func() {
+				select {
+				case <-sw.Done():
+					cancelMaintain()
+				case <-mctx.Done():
+				}
+			}()
 			merr := maintainSeatScoped(mctx, cfg, lease.Restamp, *drain, drainDeadline(*drainTimeout, queuedAt, *wait), *unload, exclusiveAfter, markWarmOwed(m), lease.Devices())
 			stopRenew()
 			cancelMaintain()
 			if merr == nil {
 				break
+			}
+			if sig := sw.Signal(); sig != nil {
+				// Decided before the deferred finish runs: it chooses between the warm-back and its skip by this.
+				endedOnTerm = endsGraceBounded(sig)
+				err := endedBySignal(sig, stageDraining)
+				card.finish(err)
+				return err
 			}
 			lost := lease.Check()
 			if lost == nil {
@@ -669,11 +704,11 @@ func runGPUReserve(args []string) error {
 			lease = next
 		}
 	}
-	sigc := make(chan os.Signal, 1)
-	signal.Notify(sigc, wrapperSignals...)
-	defer signal.Stop(sigc)
-	if wrapperSignalFeed != nil {
-		go wrapperSignalFeed(sigc)
+	if sig := sw.Signal(); sig != nil {
+		endedOnTerm = endsGraceBounded(sig)
+		err := endedBySignal(sig, stageBeforeStart)
+		card.finish(err)
+		return err
 	}
 
 	cmd := exec.Command(cmdArgs[0], cmdArgs[1:]...)
@@ -731,6 +766,9 @@ func runGPUReserve(args []string) error {
 		return err
 	}
 	card.running()
+	if wrapperCommandStarted != nil {
+		wrapperCommandStarted()
+	}
 	why := "" // what cut the command short, for the card
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
@@ -740,6 +778,7 @@ func runGPUReserve(args []string) error {
 	tick := time.NewTicker(wrapperTickEvery)
 	defer tick.Stop()
 	terms := newTermTicker(lease)
+	sigDone := sw.Done() // set to nil once handled: a closed channel would be ready for ever
 	for {
 		select {
 		case err := <-done:
@@ -751,9 +790,11 @@ func runGPUReserve(args []string) error {
 			}
 			card.finish(err)
 			return err
-		case sig := <-sigc:
+		case <-sigDone:
+			sig := sw.Signal()
 			why = signalWhy(sig)
 			endedOnTerm = endsGraceBounded(sig)
+			sigDone = nil
 			_ = cmd.Process.Kill()
 		case <-tick.C:
 			// LOSING THE LEASE MUST BE LOUD. Discarding this error left the wrapped

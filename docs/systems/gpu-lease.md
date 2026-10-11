@@ -1615,11 +1615,15 @@ per-model route fails, the legacy `GET /unload` is used only when no stack membe
 whatever `?model=` says, so when the stack is resident or `/running` cannot be read, the reserve fails and names the
 stack. The wrapper form warms the seat back (`GET /upstream/<model>/health`) BEFORE releasing, so the first
 contract placed here again finds a loaded seat, unless its command was ended on `SIGTERM` (C02): that is how a console
-close, a logoff and a shutdown reach a Go program on Windows, and the OS ends the process about five seconds later, so
+close, a logoff and a shutdown reach a Go program on Windows (a plain kill sends the same signal, so the wrapper says the
+cause is likely, never known), and the OS ends the process about five seconds later, so
 a reload of minutes inside that grace would stand in the warm-back with the lease held while the machine goes down. The
 lease is released right after the ComfyUI instances kept under it are stopped (a step bounded at 60 s, usually
 seconds), the wrapper says the warm-back was skipped, and the warm stays owed (the marker below;
-`gpu release --warm-seat` or the seat's next request pays it). A Ctrl-C has no such deadline and still warms. The detach
+`gpu release --warm-seat` or the seat's next request pays it). A signal that arrives earlier, while the wrapper is queued,
+choosing cards or draining, is answered too (the handler is registered before anything else, `pair-workloads.md`): the
+queue wait ends (`Options.Cancel`), the lease is released, the seat is not warmed, and the wrapper claims a warm owed only
+when the seat was unloaded. A Ctrl-C has no such deadline and still warms. The detach
 form's counterpart is `gpu release --warm-seat`. That request
 is the load, so a llama-swap reload or restart can interrupt it: the warm re-sends it for up to 60 s (see "A warm-back
 interrupted by a llama-swap reload is re-sent" below), and the owed marker is cleared once the seat is observed loaded.

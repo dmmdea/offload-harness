@@ -293,8 +293,20 @@ func acquireAutoCards(m *gpulease.Manager, class gpulease.Class, opts gpulease.O
 	}
 	var queuedSince time.Time
 	refusals := 0
+	// A cancel (opts.Cancel: the wrapper was told to stop) ends the allocation wherever it stands: the allocator's read is
+	// refused once it is closed, so its polling loop returns, and the queue wait and the gated claim below carry the same
+	// channel to the lease line.
+	buildC := func() (gpulease.AllocInput, error) {
+		if cancelClosed(opts.Cancel) {
+			return gpulease.AllocInput{}, gpulease.ErrCancelled
+		}
+		return build()
+	}
 	for lost := 0; ; lost++ {
-		ids, free, err := pickAutoCards(plan, remaining(), build, out, sleep, now)
+		if cancelClosed(opts.Cancel) {
+			return nil, gpulease.ErrCancelled
+		}
+		ids, free, err := pickAutoCards(plan, remaining(), buildC, out, sleep, now)
 		if err != nil {
 			return nil, err
 		}
