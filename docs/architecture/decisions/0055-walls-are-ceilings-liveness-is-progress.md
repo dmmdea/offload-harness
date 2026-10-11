@@ -204,7 +204,8 @@ determine if a job is truly still going" — was not met by any of the three sur
      node-side re-pack, whatever the seat's speed or the answer's size (a 2 KB answer on a 30 tok/s
      seat is a re-pack of about 25 s): the time left buys no tokens, so the re-pack is skipped, and the
      structured result depends on the delegator's rescue (item 8), which makes one grammar
-     completion on the delegator's own agent seat. That rescue is wired on `agent_delegate`,
+     completion on the delegator's own agent seat. (Item 10 amends this paragraph: a re-pack is owed
+     the time its own answer needs, whatever the loop left of the wall.) That rescue is wired on `agent_delegate`,
      `offload_research` and the `delegate` and `research` verbs and, as
      [coding-agent.md](../../systems/coding-agent.md) records, deliberately not on `agent_run` (no
      schema to structure), on the review lane's fenced fallthrough, or on `offload_ask`: a deferred
@@ -232,6 +233,9 @@ determine if a job is truly still going" — was not met by any of the three sur
      `repackBudget` (the same estimate plus 512, between 1,024 and 8,192) for every answer length
      below the cap, and at the cap an escalation is a request identical to the first. Otherwise
      the loop goes to the chat lane, which is a different request, and the note says what was seen.
+     (Item 10 changes both halves of this for a loop: the repeated-block test reads 192 bytes over
+     the last 1,024, and the chat lane was NOT a different request in sampling or prompt, so the
+     attempt after a loop is now conditioned against repeating.)
 
      > **Unverified:** the gate was not replayed against the incident's request. It is a
      > heuristic: a legitimate re-pack whose JSON is longer than the answer's own size at the
@@ -266,6 +270,101 @@ determine if a job is truly still going" — was not met by any of the three sur
      died mid-stream (a stall, the ceiling, a dropped connection) keeps the deltas it had streamed
      and what had arrived, a lower bound of its tokens. The row an `agent_delegate` caller reads
      carries the first four records.
+10. **A re-pack is owed the time its own answer needs, and one that looped is asked differently
+    (amendment 2026-10-10, register F44/C13 and C14).** Item 9 filed two outcomes as deliberate
+    that the register's 48-hour sweep counted as defects.
+    - **Wall starvation (F44/C13, 23 jobs).** Item 9's "a loop that ends after the wall plus its
+      grace never gets a node-side re-pack" was written for a seat that is fast and a loop that
+      overran by accident. On the seats that are slow it is the ordinary case: the auto wall is the
+      estimate clamped to `[300, 900]` s, a seat at 3 to 6 tok/s has an estimate of 1,500 to 3,400 s
+      (`wall 900 s is BELOW the estimate 3371 s`; 54 of 55 agent tasks on one node), the loop
+      is held by stall and ceiling (item 2) and not by the wall, and so it ends past the wall.
+      The final-budget fit splits the wall between the final answer and its re-pack and the estimate
+      prices the re-pack in, but a loop that overran spent the re-pack's share, and the re-pack was told `0 s left
+      to the wall + 30 s grace ... buys 0 tokens` with a finished answer in hand and the seat idle.
+      The bound a re-pack call is held to is now the LATER of the wall's end and `OwedEnd`, the
+      instant the call began plus `1.5 x the answer's expected tokens / the seat's decode rate`
+      (`repackOwed`); the grace is added after it and the run's ceiling still caps it. The 1.5 is
+      not a new number: it is the margin the re-pack's own stall allowance pads its generation
+      estimate with (`agent.RepackMargin`, item 8), so the bound and the allowance describe the same
+      time. `OwedEnd` is fixed once per call, so a later attempt does not get a fresh allowance
+      and item 9's rule that time only runs out stands for the resend and the chat lane. Where the
+      wall has room the later end is the wall's, and nothing changes. The gate is unconditional:
+      it does not wait for `wall_estimate_sec` to exceed the wall, because the loop overrunning
+      its share is the condition and an explicit short `timeout_sec` produces it too. A re-pack
+      the ceiling cannot hold is still skipped, and its note names what ran out (`the ceiling`,
+      or `the re-pack's owed time`), never the wall alone. **The owed time also stops at the
+      call's deadline** (`OwedCap`): the delegator's whole call ends at `agent_call_deadline_sec`
+      (ADR 0065, 1,500 s by default; this node's own setting stands in for the delegator's and is
+      counted from the wall's start, a chosen approximation, so a delegator that waited in line
+      first has less), and a re-pack that could only end after it is a finished answer nobody
+      collects. `repackOwed` sizes the answer at no more than the 8,192-token re-pack cap, so
+      the largest answer on a 3.4 tok/s seat is owed 1.5 x 8,192 / 3.4 = 3,614 s, which is
+      under the ceiling and far past the call's 1,500 s: with the cap that re-pack is skipped,
+      the note says `left to the call's deadline`, and the delegator's rescue (one completion
+      on its own seat) keeps the time it needs, exactly as before this change. A re-pack that
+      ends inside the deadline is the case that gains. Replaying the arithmetic on the ledger's
+      149 distinct starved skips (median 3.4 tok/s and 961 expected tokens, owed 27 to 1,009 s):
+      105 end inside 1,500 s when the re-pack starts at the row's recorded latency, 44 do not
+      and are skipped as before. That is an estimate, not a measurement: the row's latency is the
+      delegator's view and the node's wall started later. The re-pack publishes
+      its allowance when the phase starts (item 8), so a poll that follows progress follows the
+      extension up to the node's ceiling and the deadline. What is not changed: the wire's
+      900 s cap on a declared `timeout_sec`, the estimate's worst-case terms (final and re-pack
+      both priced at the 8,192-token cap, which is why the wall reads as below the estimate), and
+      the rate order (`repackRate`). A re-pack that runs on its own time past a short wall is a
+      cost: it moves the work from the delegator's rescue to the slow seat, and the rescue
+      still catches the cases the ceiling refuses.
+    - **A loop is not asked again the same way (C14, 28 jobs).** Of the 28 truncated re-packs 11
+      were degenerate repetition and 17 "ran on past the budget"; the row beside them has the chat
+      lane looping on the same text after the grammar lane did. The causes in the code: the seat
+      decodes greedy (`temperature` 0), the request carries nothing that discourages repeating,
+      the grammar's list rule has no bound (and does not compile the schema's `maxItems`), and the
+      attempt after a degenerate cut was the chat lane with the same sampling and the same
+      prompt, which a greedy seat answers the same way. Now a cut that is no budget problem (the
+      tail is degenerate, or the seat ran on past a budget the answer fits in that the clock did
+      not set) marks the call: the next attempt is a second grammar attempt (the
+      lane that constrains the shape) carrying the instruction `repackNoRepeatNote` and a
+      `frequency_penalty` of `repackLoopPenalty` (0.5), then, if that loops too, the chat lane
+      carrying both. The sentence is placed BEFORE the text in the prompt, where a seat reads
+      instructions: after `TEXT:` an extraction would read it as more text and might write it
+      back as a list item. The first attempt never carries either, and a cut that more tokens cure
+      (item 9's resend at the cap) carries neither. `frequency_penalty` is the OpenAI-standard
+      field both engines on the fleet read, which the engine-specific repeat and DRY samplers are
+      not; the attempt's lane on the wire reads `grammar+no-repeat`, `json_schema+no-repeat` or
+      `chat+no-repeat`. The three attempts are the call's limit as before.
+    - **A complete object that loops is not published.** A loop that closes itself before the cap
+      is a schema-valid object (the grammar's list is unbounded and nothing validated repetition),
+      so it would have been published as the structured result: inferred from the code path, not
+      counted in the ledger, whose successful rows carry no reason.
+      A list field that repeats one item, or a block of two or three, at least `repackLoopRun` (6)
+      times in a row, where the answer the object was written from holds the first item fewer
+      times than it is repeated, fails the attempt as `re-pack repeated the list item ...`, marks
+      the call as above, and ends as an abstention naming the item when every attempt does it;
+      the finished answer rides in `output`. An answer that really holds the repeat, or an empty
+      item, is not a loop.
+    - **The detector sees longer loops.** The tail test looked for a block of up to 64 bytes across
+      the last 256. It keeps that test and the line-block test exactly as they were, in their
+      order, and adds a third pass after them: a block of 65 to 192 bytes across the last 1,024
+      (whitespace still reads the last 256). Two alternating list items of about 80 bytes are
+      named, are not escalated to the cap, and ride the same path; every output the first two
+      tests named keeps its words.
+
+      > **Unverified, and chosen not measured:** `repackLoopPenalty` 0.5, `repackLoopRun` 6, the
+      > 1,024/192 detector window and the period of 3 are chosen; no seat was replayed with the
+      > penalty, so that it ends a loop on the fleet's seats is the mechanism's expectation and not
+      > a measurement, and the fidelity cost on an honest copy is unmeasured (it is paid only on
+      > an attempt after a failure). llama.cpp's sampler lowers a token's logit by its count in the
+      > last `penalty_last_n` tokens times the penalty (read in its source); that its server maps
+      > the request field `frequency_penalty` to it, and the window that applies, were not probed
+      > on a live seat, and vLLM's reading of the field is its documented OpenAI-compatible one. The real heads and tails of the 28 cuts were not recorded in
+      > the ledger, so which of the 17 "ran on past it" were loops the old detector missed, and
+      > which were a restating schema's honest length (item 9's own caveat), is not known: a
+      > restating schema now gets one more attempt of the same length before it defers. Compiling
+      > `maxItems` into the grammar's list rule (`{0,N}`) was left out because it cannot be
+      > verified without a live llama.cpp compile; the list cap and the bound remain the schema's
+      > validator and the attempts above. The per-attempt `head` and `tail` and the new lane names
+      > show in production which path an attempt took.
 
 ## Consequences
 

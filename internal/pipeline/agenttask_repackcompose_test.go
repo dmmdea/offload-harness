@@ -123,11 +123,12 @@ func TestRunAgentTaskRepackClampedAttemptIsNotResentAndSaysTheClockSetItsBudget(
 	}
 }
 
-// The chat lane is sized against the time left like the grammar lane. A
+// The attempt after a loop is sized against the time left like any other. A
 // whitespace runaway cut the first request after 1.7 s of the wall; what is left
-// (about 0.35 s) cannot buy the answer's own 564 tokens, so the chat request is
-// not sent and the verdict is the first attempt's, with the arithmetic beside it.
-func TestRunAgentTaskChatLaneIsSkippedWhenTheTimeLeftCannotBuyTheAnswer(t *testing.T) {
+// (about 0.35 s) cannot buy the answer's own 564 tokens, so the conditioned retry
+// is not sent (and, time only running out, neither is the chat lane after it) and the
+// verdict is the first attempt's, with the arithmetic beside it.
+func TestRunAgentTaskAttemptAfterALoopIsSkippedWhenTheTimeLeftCannotBuyTheAnswer(t *testing.T) {
 	defer compressLiveness(t, 200*time.Millisecond, 100*time.Millisecond, core.AgentCeilingSecCap)()
 	answer := answerOfChars(1500)
 	fake := &agentFake{
@@ -158,10 +159,47 @@ func TestRunAgentTaskChatLaneIsSkippedWhenTheTimeLeftCannotBuyTheAnswer(t *testi
 	}
 	d := wire.RepackAttemptsDetail
 	if len(d) != 2 || d[0].Lane != "grammar" || !strings.Contains(d[0].Why, "degenerate") ||
-		!d[1].Skipped || d[1].Lane != "chat" || !strings.Contains(d[1].Why, "re-pack skipped:") {
-		t.Fatalf("detail = %+v, want the cut grammar attempt (degenerate), then the chat lane skipped with its arithmetic", d)
+		!d[1].Skipped || d[1].Lane != "grammar+no-repeat" || !strings.Contains(d[1].Why, "re-pack skipped:") {
+		t.Fatalf("detail = %+v, want the cut grammar attempt (degenerate), then the conditioned retry skipped with its arithmetic", d)
 	}
 	if !strings.Contains(wire.RepackNote, "re-pack skipped:") {
-		t.Errorf("repack_note = %q, want the skipped chat request's arithmetic", wire.RepackNote)
+		t.Errorf("repack_note = %q, want the skipped request's arithmetic", wire.RepackNote)
+	}
+}
+
+// The chat lane is sized against the time left like the grammar lane. The budget is
+// already the cap, so a cut that more tokens cannot cure and that is no loop goes
+// straight to the chat lane; the first request cut after 1.7 s of the wall leaves
+// about 0.35 s, which at 5,000 tok/s cannot buy the answer's own 8,192 tokens, so the
+// chat request is not sent and the verdict is the first attempt's.
+func TestRunAgentTaskChatLaneIsSkippedWhenTheTimeLeftCannotBuyTheAnswer(t *testing.T) {
+	defer compressLiveness(t, 200*time.Millisecond, 100*time.Millisecond, core.AgentCeilingSecCap)()
+	answer := answerOfChars(30000)
+	fake := &agentFake{
+		rosterIDs: []string{agentTestSeat},
+		loop:      func(int64) string { return doneChat(answer) },
+		repackStream: func(n int64, body map[string]any, w http.ResponseWriter, _ *http.Request) {
+			time.Sleep(1700 * time.Millisecond)
+			writeCompletion(w, `{"key_facts":["`+digitNoise(2000), "length", int(body["max_tokens"].(float64)))
+		},
+		chatFallback: func(int64) string { return doneChat(`{"answer":"42"}`) },
+		repackBodies: make(chan map[string]any, 8),
+	}
+	srv := fake.server(t)
+	defer srv.Close()
+
+	wire := decodeWire(t, rateTestPipeline(t, srv.URL, 5000).Run(context.Background(), agentTestRequest(t, composeContract())))
+	if got := fake.grammarCNT.Load(); got != 1 {
+		t.Fatalf("grammar requests = %d, want 1 (no larger budget exists, and this is no loop)", got)
+	}
+	if got := fake.chatFallbackCNT.Load(); got != 0 {
+		t.Fatalf("chat requests = %d, want 0: ~0.35 s at 5,000 tok/s buys fewer tokens than the answer's own size", got)
+	}
+	if !wire.Deferred || wire.DeferClass != core.DeferClassAbstention || wire.RepackAttempts != 1 {
+		t.Fatalf("deferred=%v class=%q attempts=%d reason=%q, want the first attempt's verdict, one request sent", wire.Deferred, wire.DeferClass, wire.RepackAttempts, wire.Reason)
+	}
+	d := wire.RepackAttemptsDetail
+	if len(d) != 2 || d[0].Lane != "grammar" || !d[1].Skipped || d[1].Lane != "chat" || !strings.Contains(d[1].Why, "re-pack skipped:") {
+		t.Fatalf("detail = %+v, want the cut grammar attempt, then the chat lane skipped with its arithmetic", d)
 	}
 }

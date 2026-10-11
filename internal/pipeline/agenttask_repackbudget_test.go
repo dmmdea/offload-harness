@@ -214,7 +214,7 @@ func TestRunAgentTaskRepackTruncationIsNamedAndRetriedAtTheCap(t *testing.T) {
 		}
 	})
 
-	t.Run("a short answer that fits: straight to the chat lane", func(t *testing.T) {
+	t.Run("a short answer that fits: a conditioned retry at the same budget, then the chat lane", func(t *testing.T) {
 		fake := &agentFake{
 			rosterIDs:       []string{agentTestSeat},
 			loop:            func(int64) string { return doneChat("The answer is 42, and a great deal more.") },
@@ -233,11 +233,21 @@ func TestRunAgentTaskRepackTruncationIsNamedAndRetriedAtTheCap(t *testing.T) {
 		if !strings.Contains(wire.Reason, "re-pack truncated at") || strings.Contains(wire.Reason, "unexpected end of JSON") {
 			t.Fatalf("reason = %q, want the truncation named rather than an invalid-json verdict", wire.Reason)
 		}
-		if fake.grammarCNT.Load() != 1 {
-			t.Fatalf("grammar attempts = %d, want 1: a 40-character answer cannot need more than the 1,024 it was given", fake.grammarCNT.Load())
+		// A 40-character answer cannot need more than the 1,024 it was given, so a
+		// larger budget is never sent; the seat ran on past what the answer needs,
+		// which a request sent again as it was would do again (register C14), so the
+		// second attempt is the same budget, told not to repeat.
+		if fake.grammarCNT.Load() != 2 {
+			t.Fatalf("grammar attempts = %d, want 2: the cut one and a conditioned one at the same budget", fake.grammarCNT.Load())
 		}
-		if mt1, _ := (<-fake.repackBodies)["max_tokens"].(float64); int(mt1) != agentRepackMaxTokens {
-			t.Fatalf("first attempt max_tokens = %v, want the floor %d for a short answer", mt1, agentRepackMaxTokens)
+		first, second := <-fake.repackBodies, <-fake.repackBodies
+		for i, b := range []map[string]any{first, second} {
+			if mt := maxTokensOf(t, b); mt != agentRepackMaxTokens {
+				t.Fatalf("attempt %d max_tokens = %d, want the floor %d for a short answer", i+1, mt, agentRepackMaxTokens)
+			}
+		}
+		if askedNoRepeat(first) || !askedNoRepeat(second) {
+			t.Fatalf("told not to repeat: first=%v second=%v, want only the second attempt", askedNoRepeat(first), askedNoRepeat(second))
 		}
 		if strings.Contains(wire.Reason, "cannot hold it") || !strings.Contains(wire.Reason, "inside the 1024-token budget") {
 			t.Fatalf("reason = %q, want what was observed (the answer fits the budget), not what cannot be known", wire.Reason)

@@ -126,6 +126,71 @@ Versioning: [SemVer](https://semver.org/).
   re-pack's coercion), a type list, `anyOf`, `oneOf`, `allOf` and `$ref`. Every property a schema lists is required by the grammar,
   at every depth, whether or not the schema's own `required` names it.
 
+### Fixed — a structured re-pack is owed the time its own answer needs, so a loop that overran a short wall no longer skips it (F44/C13)
+
+- **The defect.** The wall is an expectation (ADR 0055 item 2): the loop ends on a stall or the ceiling, not on the wall. The auto wall is
+  the seat-rate estimate clamped to `[300, 900]` s, and on a slow seat (3 to 6 tok/s) the estimate is 1,500 to 3,400 s with the final answer
+  and the re-pack both priced at the 8,192-token cap, so the log line `wall 900 s is BELOW the estimate 3371 s` appeared on 54 of 55 agent
+  tasks of one node. The loop ran past the wall, and the structured re-pack, which `repackOpts.fit` held to the wall's end plus the 30 s
+  grace, was told `0 s left to the wall + 30 s grace ... buys 0 tokens < the answer's 1463` and skipped with a finished answer in hand: 23
+  jobs in 48 h, each a `budget` defer left to the delegator's rescue (the ledger also holds rows where that rescue of such an answer ended `call deadline reached`).
+- **The fix.** The bound a re-pack call runs under is the later of the wall's end and `OwedEnd`, the instant the call began plus
+  `1.5 x the answer's expected tokens / the seat's decode rate` (`repackOwed`), then the grace; the run's ceiling still caps it. The 1.5
+  is `agent.RepackMargin`, the margin the re-pack's own stall allowance pads its generation estimate with (now exported), so no number is
+  new. `OwedEnd` is set once per call: the resend and the chat lane share it and get no fresh allowance, so ADR 0055 item 9's "time only
+  runs out" stands. Where the wall has room nothing changes. The gate is unconditional (it does not read `est.Below`): the loop spending
+  the re-pack's share is the condition, and an explicit short `timeout_sec` produces it as well. A re-pack the ceiling cannot hold is still
+  skipped, and the note now names what ran out: `left to the ceiling` or `left to the re-pack's owed time`.
+- **Capped at the call's deadline.** The owed time also stops at `agent_call_deadline_sec` (ADR 0065, 1,500 s by default, counted from the
+  wall's start with this node's own setting standing in for the delegator's: a chosen approximation). `repackOwed` sizes the answer at no
+  more than the 8,192-token re-pack cap, so the largest answer on a 3.4 tok/s seat is owed 1.5 x 8,192 / 3.4 = 3,614 s: under the ceiling
+  and far past the call's 1,500 s. That re-pack is skipped (`left to the call's deadline`) and the delegator's rescue keeps the time it needs,
+  as before this change. Replaying the arithmetic on the ledger's 149 distinct starved skips (median 3.4 tok/s and 961 expected tokens, owed 27
+  to 1,009 s): 105 end inside 1,500 s when the re-pack starts at the row's recorded latency and gain, 44 do not and are skipped as before. An
+  estimate, not a measurement: the row's latency is the delegator's view and the node's wall started later.
+- **Not changed.** The wire's 900 s cap on a declared `timeout_sec`, the estimate's worst-case terms (why the wall reads as below it), the
+  rate order (`repackRate`), and the delegator (the re-pack publishes its allowance when the phase starts, so a poll that follows progress
+  follows the extension up to the node's ceiling). A re-pack that runs on its own time moves work from the delegator's rescue to the slow
+  seat; the rescue still catches what the ceiling refuses.
+- **Tests.** `internal/pipeline/agenttask_repackowed_test.go`: a 2 s wall and a loop that ends at 2.4 s (red before: `skipped: 0 s left to
+  the wall + 0 s grace`), a slow seat with an instant loop (red before: `60 s left ... buys 29 tokens < the answer's 69`), the ceiling that
+  cannot hold it, the owed time not renewed for a later attempt, `repackOwed` and the later-of-two-ends arithmetic. Two tests whose premise
+  was the defect (`TestRunAgentTaskRepackIsSkippedWhenTheWallCannotBuyTheAnswer`, the review-lane subtest `a re-pack the wall could not buy`)
+  now pin the ceiling-bound skip. Four mutations of the fix were each caught. ADR 0055 item 10, `docs/systems/fleet-node.md`.
+
+### Fixed — a re-pack that loops is asked differently the next time, and a looped list is not published (C14)
+
+- **The defect.** 28 re-packs in 48 h were cut at the budget: 11 degenerate repetition, 17 "ran on past the budget" (`the answer needs about
+  725 tokens, inside the 1173-token budget`), and the register's own rows show the chat lane looping on the same text after the grammar lane
+  did. In the code: the seat decodes greedy (`temperature` 0), the request carried nothing that discourages repeating, the grammar's list rule
+  is unbounded (and does not compile the schema's `maxItems`), and the attempt after a degenerate cut was the chat lane with the same
+  sampling and the same prompt, which a greedy seat answers the same way. A loop that closed itself before the cap was a complete,
+  schema-valid object that would have been published as the answer (inferred from the code path: successful ledger rows carry no reason,
+  so it is not counted). The tail test looked for a repeated block of up to 64 bytes in the last 256, so two
+  alternating list items of 80 bytes read as "ran on" and were escalated to the 8,192-token cap.
+- **The fix.** A cut that is no budget problem (a degenerate tail, or the seat ran on past a budget the answer fits in, and the clock did not
+  set that budget) marks the call. The next attempt is a second grammar attempt (the lane that constrains the shape) that carries the
+  sentence `repackNoRepeatNote` and `frequency_penalty` 0.5 (`llamaclient.WithFrequencyPenalty`, the OpenAI-standard field both engines on
+  the fleet read), and the chat lane after it carries both. The first attempt never does, and a cut that more tokens cure (the resend at
+  the cap) does not. The lane on the wire reads `grammar+no-repeat`, `json_schema+no-repeat` or `chat+no-repeat`. A complete object whose
+  list repeats one item (or a block of two or three) at least 6 times in a row, where the answer it was written from holds the item fewer
+  times, is not published: the attempt fails as `re-pack repeated the list item "x" N times in a row ...`, marks the call, and ends as an
+  abstention naming the item when every attempt does it. The detector keeps its two original tests and their order and adds a third pass
+  for a block of 65 to 192 bytes in the last 1,024 (whitespace still reads the last 256).
+- **Chosen, not measured, and unverified.** `frequency_penalty` 0.5, the run of 6, the period of 3, the 1,024/192 window. No seat was
+  replayed with the penalty: that it ends a loop on the fleet's seats is the mechanism's expectation, and its fidelity cost on an honest copy
+  (paid only on an attempt after a failure) is unmeasured. llama.cpp's sampler (count in the last `penalty_last_n` tokens times the penalty,
+  subtracted from the logit) was read in its source; the server's mapping of the request field `frequency_penalty` to it was not probed on a
+  live seat. The real heads and tails of the 28 cuts were not recorded, so which of the 17
+  "ran on" cuts were loops and which a restating schema's honest length is not known; a restating schema now gets one more attempt of the
+  same length before it defers. Compiling `maxItems` into the grammar was left out: it cannot be verified without a live llama.cpp compile.
+- **Tests.** `internal/pipeline/agenttask_repackloop_test.go` (a greedy-seat fake that loops until the request is conditioned: red before on
+  the register's own shape, `attempt 2/3 ... chat re-pack truncated ... degenerate`; the published repeated list; the detector),
+  `internal/llamaclient/frequencypenalty_test.go` (the key only on request, the option-free body byte-identical). Three existing tests
+  pinned the old flow (a loop goes straight to the chat lane) and now pin the new one; the chat lane's time-skip test moved to a cut that is
+  no loop. 18 mutations of the fix were each caught (the run threshold survived once because its test was written in terms of the constant,
+  and is now pinned by literals). ADR 0055 item 10, `docs/systems/fleet-node.md`.
+
 ## [0.180.0] - 2026-10-10 - a busy image call waits for the first matching lane anywhere in the cluster, graphs overflow to a node that holds their files, and a live render keeps its lease
 
 ### Fixed — the ticket queue was off on any machine whose config sets no `state_dir`, which is the usual config (ADR 0083)

@@ -30,6 +30,36 @@ type genOpts struct {
 	// progress, when set, streams the completion and hears every delta
 	// (WithProgress, stream.go).
 	progress func(tokensSoFar int)
+	// frequencyPenalty, when positive, rides the body as `frequency_penalty`
+	// (WithFrequencyPenalty). 0, the zero value, is no field at all.
+	frequencyPenalty float64
+}
+
+// frequencyPenaltyPtr is the request-body value for this option set: nil (the key
+// omitted) unless a positive penalty was asked for.
+func (o genOpts) frequencyPenaltyPtr() *float64 {
+	if o.frequencyPenalty <= 0 {
+		return nil
+	}
+	p := o.frequencyPenalty
+	return &p
+}
+
+// WithFrequencyPenalty sets the OpenAI-standard `frequency_penalty` on the
+// request: each token's logit is lowered in proportion to how often it has
+// already been written, so a constrained decoder that has fallen into a loop
+// (the same list item again and again, greedy at temperature 0) is pushed off it
+// by the loop's own repetition. Both engines on the fleet read the field
+// (llama.cpp's server and vLLM), unlike their engine-specific repeat or DRY
+// samplers, which is why a seat of either kind can be sent it unconditionally. A
+// value of 0 or less is no option, so the request is byte-identical to the
+// historical one.
+func WithFrequencyPenalty(p float64) GenOption {
+	return func(o *genOpts) {
+		if p > 0 {
+			o.frequencyPenalty = p
+		}
+	}
 }
 
 // ownsDeadline reports whether the call's context bounds it instead of the

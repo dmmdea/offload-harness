@@ -2,10 +2,13 @@ package pipeline
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"math"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -129,6 +132,19 @@ type repackOpts struct {
 	// liveness policy gives its Slack (30 s in production), the padding the
 	// re-pack's own stall allowance already adds to its generation estimate.
 	Grace time.Duration
+	// OwedEnd is the instant the time this re-pack is OWED ends: when the call began
+	// plus what its own answer needs at the seat's rate (repackOwed). The wall is an
+	// expectation (ADR 0055 item 2) and a slow seat's loop routinely ends past it, so
+	// a re-pack held to the wall plus the grace was told "0 s left" and skipped, with
+	// a finished answer in hand (register F44/C13: 23 jobs in 48 h). The bound is the
+	// LATER of the wall's end and this one, plus the grace; the run's ceiling still
+	// caps it. The zero time is no owed time: the wall alone bounds the call, as
+	// before. It is set once per call, never per attempt, so a later attempt does
+	// not get a fresh allowance: time only runs out.
+	OwedEnd time.Time
+	// OwedCap, when set, says OwedEnd was cut short by something other than the time
+	// the answer needs (the call's deadline), and is the words a note uses for it.
+	OwedCap string
 	// TokS is the seat's decode rate in tokens per second, and RateBasis says where
 	// it came from. 0 means unknown, and then the call does no time arithmetic at
 	// all: it fails open, like every other sizing decision that needs a rate.
@@ -208,9 +224,9 @@ func (o repackOpts) fit(now, ctxDeadline time.Time, budget, least int) repackFit
 	if !ctxDeadline.IsZero() {
 		deadline, what = ctxDeadline, "the ceiling"
 	}
-	if !o.WallEnd.IsZero() {
-		if end := o.WallEnd.Add(o.Grace); deadline.IsZero() || end.Before(deadline) {
-			deadline, what = end, fmt.Sprintf("the wall + %.0f s grace", o.Grace.Seconds())
+	if end, label := o.boundEnd(); !end.IsZero() {
+		if end = end.Add(o.Grace); deadline.IsZero() || end.Before(deadline) {
+			deadline, what = end, fmt.Sprintf("%s + %.0f s grace", label, o.Grace.Seconds())
 		}
 	}
 	if deadline.IsZero() {
@@ -234,6 +250,35 @@ func (o repackOpts) fit(now, ctxDeadline time.Time, budget, least int) repackFit
 	}
 	return repackFit{Skip: true, Note: fmt.Sprintf(
 		"re-pack skipped: %.0f s left to %s at %.1f tok/s buys %d tokens < the answer's %d%s", left.Seconds(), what, o.TokS, buys, least, basis)}
+}
+
+// boundEnd is where the time a re-pack may use ends before the grace: the wall's
+// end, or the end of the time the re-pack is owed (OwedEnd) when that is later,
+// with the words the notes use for it. The zero time when neither is set.
+func (o repackOpts) boundEnd() (time.Time, string) {
+	if o.OwedEnd.After(o.WallEnd) {
+		if o.OwedCap != "" {
+			return o.OwedEnd, o.OwedCap
+		}
+		return o.OwedEnd, "the re-pack's owed time"
+	}
+	if o.WallEnd.IsZero() {
+		return time.Time{}, ""
+	}
+	return o.WallEnd, "the wall"
+}
+
+// repackOwed is the time a re-pack of output is owed at the seat's decode rate,
+// whatever the loop left of the wall: the answer's expected size in tokens
+// (expectedRepackTokens) at that rate, padded by the factor the re-pack's own stall
+// allowance pads its generation estimate with (agent.RepackMargin). 0 when no rate
+// is known: the wall bound then does no arithmetic at all, so there is nothing to
+// extend.
+func repackOwed(output string, tokS float64) time.Duration {
+	if tokS <= 0 {
+		return 0
+	}
+	return time.Duration(float64(expectedRepackTokens(output)) / tokS * agent.RepackMargin * float64(time.Second))
 }
 
 // repackSkipErr marks a re-pack that was not sent, or not sent again, because the
@@ -391,6 +436,112 @@ func repackWhy(err error) string {
 	return s[:cut] + "…"
 }
 
+const (
+	// repackLoopPenalty is the frequency_penalty a re-pack attempt carries once an
+	// earlier attempt of the same call has looped (register C14). CHOSEN, not
+	// measured: no seat was replayed with it. 0.5 is a moderate OpenAI-scale value
+	// (the field runs 0 to 2): the penalty on a token grows with how often the seat
+	// has already written it, so a list item written ten times is pushed off far
+	// harder than a quote or a comma written once, which is what ends a loop, and
+	// it is sent only on a retry that would otherwise be the request that just
+	// failed, so the fidelity it costs on an honest copy is never paid by a re-pack
+	// that finished the first time.
+	repackLoopPenalty = 0.5
+	// repackNoRepeatNote is the sentence a conditioned attempt adds to its prompt,
+	// the re-pack's counterpart of agent.NoRepeatInstruction: a seat that looped
+	// once on a request loops again on the same request unless it is told.
+	repackNoRepeatNote = "A previous attempt to write this object got stuck repeating the same list item until it ran out of room. Write each list item exactly once, in the order the TEXT gives it, then close the list and the object."
+	// repackLoopRun is how many times in a row a list item (or a short block of
+	// items) may repeat in a re-packed object before it is read as a loop when the
+	// answer it was written from does not hold the item that often. CHOSEN, not
+	// measured: the agent loop reads four repeats of a line as a loop; a list of
+	// short items has more honest repeats in it than a list of lines, so this is
+	// 6, and the answer-count test below is what spares a repeat the answer holds.
+	repackLoopRun = 6
+	// repackLoopMaxPeriod is the longest block of items degenerateList looks for: a
+	// pair or a triple alternating, which is what a greedy seat falls into between
+	// two items it cannot choose between. CHOSEN.
+	repackLoopMaxPeriod = 3
+)
+
+// degenerateList reads a COMPLETE re-packed object for the repetition a cut
+// completion shows at its tail: a list field that repeats one item, or a block of up
+// to repackLoopMaxPeriod items, at least repackLoopRun times in a row, where the
+// answer the object was written from holds the first item fewer times than it was
+// repeated. The object validates (a list of strings has no bound in the grammar,
+// and a loop that ended before the cap closed itself), so without this it was
+// published as the structured result. It says what it found, or "" for an object
+// that reads as content. An empty item is the schema's empty value, never a loop.
+func degenerateList(content []byte, source string) string {
+	var obj map[string]any
+	if json.Unmarshal(content, &obj) != nil {
+		return ""
+	}
+	names := make([]string, 0, len(obj))
+	for name := range obj {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		arr, _ := obj[name].([]any)
+		if len(arr) < repackLoopRun {
+			continue
+		}
+		items := make([]string, len(arr))
+		for i, el := range arr {
+			items[i] = listItemText(el)
+		}
+		for period := 1; period <= repackLoopMaxPeriod; period++ {
+			for i := 0; i+period*repackLoopRun <= len(items); {
+				k := 1
+				for i+(k+1)*period <= len(items) && equalItems(items[i:i+period], items[i+k*period:i+(k+1)*period]) {
+					k++
+				}
+				if k < repackLoopRun {
+					i++
+					continue
+				}
+				if first := items[i]; first != "" {
+					if held := strings.Count(source, first); held < k {
+						quoted := make([]string, period)
+						for j := range quoted {
+							quoted[j] = strconv.Quote(items[i+j])
+						}
+						return fmt.Sprintf("repeated the list item %s %d times in a row in %q and the answer holds %q %d time(s): a loop, not content",
+							strings.Join(quoted, ", "), k, name, first, held)
+					}
+				}
+				i += k * period
+			}
+		}
+	}
+	return ""
+}
+
+// listItemText is a list element as the text it would have in the answer: the
+// string itself, a number or boolean as written, and "" for a nested value (which
+// is never compared).
+func listItemText(el any) string {
+	switch v := el.(type) {
+	case string:
+		return v
+	case float64:
+		return strconv.FormatFloat(v, 'f', -1, 64)
+	case bool:
+		return strconv.FormatBool(v)
+	}
+	return ""
+}
+
+func equalItems(a, b []string) bool {
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 // repackCut is what a grammar completion cut at max_tokens shows about WHY it was
 // cut. The retry used to go to the completion cap on every truncation, a second
 // request that a greedy seat answers byte for byte like the first (register C-80:
@@ -434,6 +585,16 @@ func (c repackCut) escalates(budget int) bool {
 	return c.Degenerate == "" && budget < agentRepackMaxTokensCap && c.Needed > budget
 }
 
+// loops reports whether the cut is no budget problem: the output was a loop, or the
+// seat ran on past a budget that already held what the answer needs. A request
+// sent again as it was would write the same thing (the seat decodes greedy), so
+// the attempt after it must differ (register C14). It is the other half of
+// escalates: a cut is one, the other, or neither (the budget is already the cap and
+// still too small).
+func (c repackCut) loops(budget int) bool {
+	return c.Degenerate != "" || c.Needed <= budget
+}
+
 // observed spells what the truncated attempt showed, for its note: the
 // degenerate tail, a budget that was too small, one that already is the cap, or
 // an answer that fits the budget and an output that ran on past it.
@@ -450,12 +611,21 @@ func (c repackCut) observed(budget int) string {
 }
 
 const (
-	// degenerateTailBytes is how much of the end of a cut completion is read for a loop.
+	// degenerateTailBytes is how much of the end of a cut completion is read for
+	// whitespace, and degenerateLoopBytes how much for a repeated block.
 	degenerateTailBytes = 256
-	// degenerateMaxPeriod bounds the block a repeat test looks for, in bytes, and
-	// degenerateMinReps is how many times it must repeat.
-	degenerateMaxPeriod = 64
-	degenerateMinReps   = 4
+	degenerateLoopBytes = 1024
+	// degenerateShortPeriod bounds the block the first repeat test looks for, in
+	// bytes (the whole of the original test), and degenerateMinReps is how many times
+	// a block must repeat. degenerateMaxPeriod (192) bounds the second repeat test,
+	// which runs after the line-block test and reads only what the first two cannot:
+	// two alternating list items of about 80 bytes, the loop a 64-byte block could not
+	// see, which was called "ran on past the budget" and escalated to the cap. The
+	// window must hold degenerateMinReps periods, hence degenerateLoopBytes. CHOSEN,
+	// not measured: the real tails were not recorded.
+	degenerateShortPeriod = 64
+	degenerateMaxPeriod   = 192
+	degenerateMinReps     = 4
 	// degenerateMinCover is how much of the end of the output a repeat of visible text
 	// must cover: half the window. A loop runs to the END (it is what spent the budget),
 	// and a run of one byte or a short block that is not that long is ordinary content on
@@ -480,18 +650,28 @@ func degenerateTail(content string) string {
 	if strings.TrimSpace(content) == "" {
 		return "nothing but whitespace"
 	}
-	tail := content
-	if len(tail) > degenerateTailBytes {
-		cut := len(tail) - degenerateTailBytes
-		for cut < len(tail) && !utf8.RuneStart(tail[cut]) {
-			cut++
-		}
-		tail = tail[cut:]
-	}
+	tail := lastBytes(content, degenerateTailBytes)
 	if strings.TrimSpace(tail) == "" {
 		return fmt.Sprintf("only whitespace in its last %d bytes", len(tail))
 	}
-	for period := 1; period <= degenerateMaxPeriod && period <= len(tail); period++ {
+	window := lastBytes(content, degenerateLoopBytes)
+	if why := repeatedBlock(window, 1, degenerateShortPeriod); why != "" {
+		return why
+	}
+	if rep, ok := agent.DetectRepetitionLoop(content); ok && len(content)-rep.CutAt >= degenerateMinCover {
+		return fmt.Sprintf("repeating a %d-line block %d times", rep.Period, rep.Count)
+	}
+	// Longer blocks last, so that every output the original two tests named keeps the
+	// words it had: this one only names what they read as content.
+	return repeatedBlock(window, degenerateShortPeriod+1, degenerateMaxPeriod)
+}
+
+// repeatedBlock says what the end of tail repeats when a block of between from and
+// to bytes covers enough of it to be a loop (degenerateMinCover of it, or
+// degenerateMinBlank for whitespace, and at least degenerateMinReps copies), "" when
+// none does.
+func repeatedBlock(tail string, from, to int) string {
+	for period := from; period <= to && period <= len(tail); period++ {
 		block := tail[len(tail)-period:]
 		need := degenerateMinCover
 		if strings.TrimSpace(block) == "" {
@@ -507,10 +687,20 @@ func degenerateTail(content string) string {
 		}
 		return fmt.Sprintf("repeating %q", block)
 	}
-	if rep, ok := agent.DetectRepetitionLoop(content); ok && len(content)-rep.CutAt >= degenerateMinCover {
-		return fmt.Sprintf("repeating a %d-line block %d times", rep.Period, rep.Count)
-	}
 	return ""
+}
+
+// lastBytes is the last n bytes of s (all of it when it is shorter), cut on a
+// character boundary.
+func lastBytes(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	cut := len(s) - n
+	for cut < len(s) && !utf8.RuneStart(s[cut]) {
+		cut++
+	}
+	return s[cut:]
 }
 
 // periodicSuffix is the length of the longest suffix of s that repeats with the
