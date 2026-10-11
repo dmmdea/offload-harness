@@ -276,6 +276,24 @@ Versioning: [SemVer](https://semver.org/).
 - **Tests.** `internal/gpuactivity/f38_test.go` (6), `f38_display_rule_test.go` and `internal/gpulease/progressdir_test.go`; six
   mutations of the shipped code were each caught, and 1 more for the display rule. `docs/systems/gpu-lease.md` (the verdict table).
 
+### Fixed — `gpu status` no longer flags the display card for desktop load as a possible device-trespass (F34)
+
+- **The defect.** While a lease held other cards, `gpu status` and `offload_status.gpu_lease` printed `possible device-trespass`
+  against the workstation's display card for ordinary desktop load (15 % or more). The flag exempted the display card by
+  `display_active` alone, which reads Disabled on every card whenever no lit screen or game is initialised, while
+  `display_attached` stays Yes on the monitor's card; so the card the card table marks `display` was never exempt. The docs
+  already promised "not flagged: the display card".
+- **The fix.** The flag now exempts a card the card table marks display (`display_active` Enabled **or** `display_attached` Yes,
+  the placement rule the desktop-process fold of F18 already uses), together with the cards `display_active` alone marks, so
+  neither reading's card loses its exemption. A card another live lease holds, a card a registered run is pinned to, a busy seat
+  and a whole-node lease stay excluded as before, and a busy card that is not marked display is still flagged. The verdict's own
+  load reading (`held-working`, `busy-outside`, the foreign-load sentence) is unchanged: it keeps `display_active` alone.
+- **A named limit.** The exemption is the card's marking, not its load, so an unleased heavy job on the display card is not
+  flagged either; from the activity view the desktop's use and a stray job on that card look the same.
+- **Tests.** `internal/gpuactivity/f34_trespass_display_test.go` (3: the `display_attached`-only card at 23 % and at 95 % with the
+  lease's card busy or quiet, the unleased non-display card still flagged, the union where the placement rule marks nothing).
+  Five mutations of the shipped line were each caught. `docs/systems/gpu-lease.md` (the `device-trespass` paragraph).
+
 ### Fixed — `gpu --help` prints usage, and `gpu --config <path> <subcommand>` works (F35)
 
 - `local-offload gpu --help`, `-h`, `-help` and `help` print the subcommands on stdout and exit 0 (they answered `unknown gpu

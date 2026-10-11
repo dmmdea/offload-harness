@@ -159,9 +159,14 @@ type View struct {
 // legal, and the harness registers the runs of only two doors (agent_run and the delegation
 // door) and watches only the planner seat's gauge, so a cascade call on a router seat, an OCR or
 // speech seat, or the desktop looks the same from here. Not flagged: the display card (the
-// desktop's own use), a card another live lease holds, a card a registered run is pinned to,
-// anything while the seat itself is busy (its card is unknown here, so the busy card cannot be
-// attributed), and a whole-node lease (it has no outside).
+// desktop's own use: any card the card table marks "display", display_active OR display_attached,
+// because on the workstation display_active reads Disabled on every card whenever no lit screen or
+// game is initialised while display_attached stays Yes on the monitor's card, F34), a card another
+// live lease holds, a card a registered run is pinned to, anything while the seat itself is busy
+// (its card is unknown here, so the busy card cannot be attributed), and a whole-node lease (it has
+// no outside). The display exemption is by marking, not by load: an unleased heavy job on the
+// display card is therefore not flagged either (a named limit; the desktop's use and a stray job
+// look the same from here).
 func trespassOf(v View) []GPU {
 	if !v.Held || v.Holder == nil || len(v.Holder.Devices) == 0 {
 		return nil
@@ -176,10 +181,12 @@ func trespassOf(v View) []GPU {
 	for _, d := range v.OtherDevices {
 		held[strings.ToLower(strings.TrimSpace(d))] = true
 	}
-	display := displayCards(v)
+	// The display card is the one the card table marks (the placement rule, screenCards), not only the
+	// one driving a screen right now (displayCards): the union keeps either reading's card exempt.
+	display, screen := displayCards(v), screenCards(v)
 	var out []GPU
 	for _, g := range v.GPUs {
-		if !g.UtilKnown || g.UtilPct < utilBusyPct || display[g.UUID] || held[strings.ToLower(g.UUID)] {
+		if !g.UtilKnown || g.UtilPct < utilBusyPct || display[g.UUID] || screen[strings.ToLower(g.UUID)] || held[strings.ToLower(g.UUID)] {
 			continue
 		}
 		if runOnCard(v.Runs, g) {
@@ -625,7 +632,7 @@ func (d DisplayCardProcs) Sentence() string {
 // (display.go, measured 2026-10-03), so the load-attribution rule (displayCards: display_active
 // alone) would fold nothing exactly when an unattended session reads the lease. Empty on a box
 // with no non-display card: its only card is its work card (the single-card guard every display
-// rule carries).
+// rule carries). trespassOf reads it too (F34), so the monitor's card is not flagged for desktop load.
 func screenCards(v View) map[string]bool {
 	devs := make([]gpuprobe.Device, 0, len(v.GPUs))
 	for _, g := range v.GPUs {
