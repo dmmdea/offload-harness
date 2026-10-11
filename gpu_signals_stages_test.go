@@ -239,6 +239,11 @@ func TestASignalBeforeTheLeaseIsAskedForTakesNothing(t *testing.T) {
 	if info := r.m.Inspect(); info.Held || r.commandStarted() {
 		t.Errorf("nothing may be taken or started: held=%v started=%v", info.Held, r.commandStarted())
 	}
+	// No card was opened, so none needs closing: a card opened "queued" and failed in the same breath is noise on the
+	// Jobs list for a job that never asked for anything.
+	if _, _, methods := r.cardEnd(t); len(methods) != 0 {
+		t.Errorf("a signal before the card opened must open no card, frames: %v", methods)
+	}
 }
 
 // THE CARD CHOICE: `--cards N` waits inside the allocator (polling for cards that qualify, then queueing on a set), and
