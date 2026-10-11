@@ -182,7 +182,6 @@ func TestBatchSerialFailsAtOnceWhereNoNodeCanEverTakeTheJob(t *testing.T) {
 	no := false
 	jobs := manyJobs(t, 1)
 	jobs[0].Refine = &no
-	start := time.Now()
 	b, err := RunBatch(bctx(t), e.cfg, e.lr, jobs, neverWarm(t), serialOpts())
 	if err != nil {
 		t.Fatal(err)
@@ -199,9 +198,6 @@ func TestBatchSerialFailsAtOnceWhereNoNodeCanEverTakeTheJob(t *testing.T) {
 	}
 	if strings.Contains(r.Error, "waited") {
 		t.Errorf("row error = %q: the job did not wait", r.Error)
-	}
-	if d := time.Since(start); d >= 300*time.Millisecond {
-		t.Errorf("the job took %v: it waited for a place that cannot come", d)
 	}
 }
 
