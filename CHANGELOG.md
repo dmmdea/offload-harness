@@ -430,6 +430,12 @@ Versioning: [SemVer](https://semver.org/).
   Bash (reproduced both ways). It finds Git's own bash from `git --exec-path`, puts Git's `usr/bin` first on the guard's PATH
   (started by path from a PowerShell it finds no `cut`), passes the script with forward slashes, and skips with the reason when the
   only bash is the launcher.
+- **`gpu doctor` reads this build's version whatever literal the linker lays next to its marker.** The build marker
+  (`offload-build-version=0.179.0`) was embedded with no terminator, the audit reads the version as the longest run of
+  `[0-9A-Za-z.+-]` after the prefix, and the linker packs string literals back to back: a new error format beginning "interrupted"
+  made the built binary read back as `0.179.0interrupted`, which `TestBuiltBinaryCarriesTheFormatSignatureAndBuildMarker` caught in
+  the final gate of this batch. The embedded marker now ends in a NUL (`embeddedBuildMarker`; the doctor's JSON still shows it without),
+  which every reader, old and new, stops at; before, any literal added anywhere could have done the same.
 - **Not changed, and said.** The `--detach` form's hidden holder queues in its own process and has no signal handling of its own
   here. A comment in `internal/mediaremote/scan.go` still says a lane question is bounded by `laneProbeBound` (it is now that plus
   the retry); the file belongs to the ticket queue's branch and was left alone. Nothing here was measured on a node: every figure

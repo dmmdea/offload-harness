@@ -42,7 +42,18 @@ import (
 // buildMarker is this binary's own build marker; the audit reads it back from other
 // binaries to show their versions, and a binary that carries it is one built after the
 // marker existed.
-const buildMarker = gpulease.BuildMarkerPrefix + version
+//
+// It is embedded NUL-TERMINATED (embeddedBuildMarker). The audit reads the version as the longest run of
+// [0-9A-Za-z.+-] after the prefix, and the Go linker packs string literals back to back, so a marker with no terminator
+// read back with the first letters of whichever literal the linker put next to it: a new error format that began
+// "interrupted" made `gpu doctor` show this build as "0.179.0interrupted" and failed
+// TestBuiltBinaryCarriesTheFormatSignatureAndBuildMarker (2026-10-10). Any literal added anywhere could have done it.
+// Readers of older binaries are unchanged; this one is read correctly by every reader, old and new, because the NUL is
+// outside the class they stop at.
+const embeddedBuildMarker = gpulease.BuildMarkerPrefix + version + "\x00"
+
+// buildMarker is the marker as it is shown (the doctor's JSON): the embedded literal without its terminator.
+var buildMarker = strings.TrimSuffix(embeddedBuildMarker, "\x00")
 
 // Seams, so tests audit a fixture host and not the machine they run on.
 var (
