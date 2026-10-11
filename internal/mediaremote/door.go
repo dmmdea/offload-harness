@@ -152,7 +152,7 @@ func (q *queueRT) admit(ctx context.Context, cfg config.Config, runner Runner, r
 	}
 
 	// A lane that reads free runs the call here, as it always did, and it is asked BEFORE anything of this machine's own is read
-	// for the fleet: the identity below waits on the fingerprints of its weight files (up to 20 s on a cold cache), and a call
+	// for the fleet: the identity below waits on the fingerprints of its weight files (up to 20 s for each file on a cold cache), and a call
 	// that does not become a ticket has no use for it. One the pipeline could not read (v.Unjudged) is not a free lane: the call
 	// becomes a ticket, whose first scan looks at the fleet and runs the call here only if no node can take it.
 	v := core.ProbeLane(ctx, runner, req)

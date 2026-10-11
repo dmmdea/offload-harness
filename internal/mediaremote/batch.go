@@ -503,7 +503,7 @@ func chooseBatchMode(ctx context.Context, cfg config.Config, runner Runner, firs
 	if v := core.ProbeLane(ctx, runner, req); v.Free && !v.Unjudged {
 		return warmOr("") // the lane is free: one warm session renders the whole batch
 	}
-	// This machine's own identity (F59: it waits on the fingerprints of its weight files, up to 20 s on a cold cache, so it is built
+	// This machine's own identity (F59: it waits on the fingerprints of its weight files, up to 20 s for each on a cold cache, so it is built
 	// only now, after the lane was asked and found held, as the single call's door does). Without one the batch is what it was.
 	local, okID := identityOrLog(ctx, cfg, o.Family)
 	if !okID {

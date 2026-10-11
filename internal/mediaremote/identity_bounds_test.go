@@ -199,7 +199,7 @@ func TestTheAdopterLogsWhyItHasNoIdentity(t *testing.T) {
 }
 
 // A FREE LANE NEVER WAITS ON A FINGERPRINT. This machine's identity (what its family IS, down to the content of its weight
-// files, which can take a wait of up to 20 s on a cold cache) is what a ticket is matched on, so it is built once the lane has
+// files, which can take a wait of up to 20 s for each file on a cold cache) is what a ticket is matched on, so it is built once the lane has
 // read busy and a ticket is about to be made, never before the lane is asked: a free lane runs the call here, exactly as it
 // always did, on a box that has a fleet as on one that has none. Every read here is held for good, so a call that asks for one
 // first never returns; and the log has nothing to say about a family the call did not need an identity for.
