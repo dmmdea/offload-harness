@@ -265,6 +265,8 @@ func TestMediaLaneFreeGraphIsFreeForWhatItDoesNotModel(t *testing.T) {
 	} {
 		if v := f.p.MediaLaneFree(context.Background(), graphLaneReq(params)); !v.Free || !strings.Contains(v.Why, "devices") {
 			t.Errorf("%s: want free (not judged) naming the devices, got %+v", name, v)
+		} else if v.Unjudged {
+			t.Errorf("%s: a card-scoped graph is not in question on this lane, so it is not an UNREAD lane: %+v", name, v)
 		}
 	}
 
@@ -273,8 +275,8 @@ func TestMediaLaneFreeGraphIsFreeForWhatItDoesNotModel(t *testing.T) {
 		k, v, _ := strings.Cut(kv, "=")
 		t.Setenv(k, v)
 	}
-	if v := f.p.MediaLaneFree(context.Background(), graphLaneReq(nil)); !v.Free || !strings.Contains(v.Why, "inherit") {
-		t.Errorf("under an inherited lease the lane is the parent's: %+v", v)
+	if v := f.p.MediaLaneFree(context.Background(), graphLaneReq(nil)); !v.Free || !strings.Contains(v.Why, "inherit") || v.Unjudged {
+		t.Errorf("under an inherited lease the lane is the parent's, and not in question: %+v", v)
 	}
 }
 
@@ -286,5 +288,26 @@ func TestMediaLaneFreeGraphIsFreeWhenTheCardTableCannotBeRead(t *testing.T) {
 	}
 	if v := f.p.MediaLaneFree(context.Background(), graphLaneReq(nil)); !v.Free || !strings.Contains(v.Why, "card table") {
 		t.Errorf("an unreadable table must read as free with the reason: %+v", v)
+	} else if !v.Unjudged {
+		// core.LaneVerdict.Unjudged: the card table is slowest to read exactly when a heavy render holds the card, so a lane that
+		// could not be read must not be taken for a free one, a graph's lane no more than an image's.
+		t.Errorf("an unreadable table is a lane that could not be read, which a router must not take for a free lane: %+v", v)
+	}
+}
+
+// A lease directory that cannot be opened is a lane that could not be read as well (the same flag as an unreadable card table).
+func TestMediaLaneFreeGraphIsUnjudgedWhenTheLeaseDirectoryCannotBeOpened(t *testing.T) {
+	f := newAdmitFixtureWith(t, admitSpec{order: admitOrder})
+	if v := f.p.MediaLaneFree(context.Background(), graphLaneReq(nil)); !v.Free || v.Unjudged {
+		t.Fatalf("control: the lane reads and nothing holds it: %+v", v)
+	}
+	notADir := filepath.Join(t.TempDir(), "a-file")
+	if err := os.WriteFile(notADir, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f.p.cfg.GPULockPath = filepath.Join(notADir, "gpu.lock") // a lease root under a file: it cannot be made
+	v := f.p.MediaLaneFree(context.Background(), graphLaneReq(nil))
+	if !v.Free || !v.Unjudged || !strings.Contains(v.Why, "lease directory") {
+		t.Errorf("an unopenable lease directory is an unread lane: %+v", v)
 	}
 }
