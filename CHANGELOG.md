@@ -20,13 +20,13 @@ Versioning: [SemVer](https://semver.org/).
   result; a token of another request is refused by name; an unknown one is a new arrival; an `mq-` token never reaches the lease line.
   The result a call takes stays on file, marked collected, for 2 minutes (chosen), so the other calls waiting for the same ticket
   (an MCP door and a CLI of another process, or a second caller naming the token) get it too and nothing renders twice; a request
-  that only repeats the content after that is a new job. The ticket **fixes one seed** at creation when the caller gave none (1 to 1e9), so a bounce, a
-  re-placement, an adoption and a local run render one composition (`TestTicketFixesOneSeed`).
+  that only repeats the content after that is a new job. The ticket **fixes one seed** at creation when the caller gave none (1 to
+  1e9), so a bounce, a re-placement, an adoption and a local run render one composition (`TestTicketFixesOneSeed`).
 - **It keeps its seniority in the machine's own line.** New `core.PlaceKeeper` (the pipeline implements it, the MCP runner forwards
   it) wraps the lease manager's place-keeping tokens and adds no admission logic: a place is left at creation with the ticket's
   arrival time on the cards the real admission would queue the call on, touched on its own rhythm (a keeper that does not wait for
-  the scan, so a scan that spends its time in slow lane questions cannot let the places behind it lapse), left again with the same arrival time
-  if it lapsed, let go when the ticket ends, and spent by the final local run as its `waiter_token`. **The lane question for a call
+  the scan, so a scan that spends its time in slow lane questions cannot let the places behind it lapse), left again with the same
+  arrival time if it lapsed, let go when the ticket ends, and spent by the final local run as its `waiter_token`. **The lane question for a call
   that resumes a place is now ordered by arrival on every plan** (`gpualloc.QueuedClaimsBefore`); before, two places on one idle card
   each read the other as in its way and neither would ever have been served. (`TestMediaLaneFreeOrdersByArrivalOnlyOnTheWholeNodePlan`
   became `...ForACallThatResumesItsPlace`, and the pinned-plan row of the differential no longer requires the prober to call that state
@@ -44,13 +44,13 @@ Versioning: [SemVer](https://semver.org/).
   before). **A lane the pipeline could not read is not a free lane**: when the card table does not read inside its 4 s bound, or the
   lease directory does not open, `core.LaneVerdict.Unjudged` is set, the call becomes a ticket, the fleet is looked at in the same scan
   and the run on this machine's lane is the answer only when no node can take the call (`TestAnUnreadLaneStillLooksAtTheFleet`); a call
-  the prober does not model at all (another task, a binding without a lane, an inherited lease) still runs here at once. One node is tried per scan; a refusal or bounce pauses the node (5 s for a full node
-  that names no `Retry-After`, 60 s then 300 s for a bounce) and the ticket goes on; the S1 bound of three nodes is gone, and a ticket
-  ends only after 8 h without a lane.
+  the prober does not model at all (another task, a binding without a lane, an inherited lease) still runs here at once. One node is
+  tried per scan; a refusal or bounce pauses the node (5 s for a full node that names no `Retry-After`, 60 s then 300 s for a bounce)
+  and the ticket goes on; the S1 bound of three nodes is gone, and a ticket ends only after 8 h without a lane.
 - **A node a ticket has a job on is in use for every scanner on the machine** (`TestPlacedTicketMarksNodeInUse`): a claim file per
   node is written with the ticket's `placing` state, and the id of the job about to be sent, under a directory lock before the job is
-  sent, so two processes never send one single-job node two jobs (`TestTwoProcessesNeverDispatchTwoTicketsToOneSingleJobNode`, which turns the ordering rule off so that only
-  the claim stands between them). This closes the S1 open issue 6.
+  sent, so two processes never send one single-job node two jobs (`TestTwoProcessesNeverDispatchTwoTicketsToOneSingleJobNode`, which
+  turns the ordering rule off so that only the claim stands between them). This closes the S1 open issue 6.
 - **A dead owner's claim holds its node for 2 minutes** (chosen), not a moment less: the job it sent keeps running on the node, which
   shows its lease only once the job is admitted, and in those seconds another process would have sent the node a second job.
   **A node that does not answer is logged once per backoff step** (5, 15, 60, then 300 s), never per scan.
@@ -62,9 +62,9 @@ Versioning: [SemVer](https://semver.org/).
   ended while the job was being sent is asked about at the node: a node that denies the job was never given it, and the ticket goes back
   in line with its arrival; a job the node accepted and passed back goes back in line too, and the node is left alone for a while.
 - **The directory lock is an operating-system file lock** (`flock` / `LockFileEx`), not a file whose age decides whether it is stale: every
-  way of breaking a stale file lock has a gap in which a slow contender removes the fresh lock of the one that broke it, and 24 of 300
-  contended rounds had two holders inside on the first design (`TestTheDirectoryLockNeverHasTwoHolders`, 14 of 200 on the same
-  design). The system frees the lock when its holder's process ends, however it ends (`TestACrashedHoldersLockIsFreedWhenItsProcessEnds`).
+  way of breaking a stale file lock has a gap in which a slow contender removes the fresh lock of the one that broke it: on the first
+  design 24 of 300 contended rounds in the review, and 14 of 200 in `TestTheDirectoryLockNeverHasTwoHolders`, had two holders inside.
+  The system frees the lock when its holder's process ends, however it ends (`TestACrashedHoldersLockIsFreedWhenItsProcessEnds`).
   The lock file stays in the queue directory for good. A cancel that lands while the scan is claiming a node ends the ticket before
   anything is sent: the claim is let go and nothing reaches the node (`TestACancelDuringTheClaimSendsNothingAndFinishesOnce`; before, the
   job was sent after the cancel and the ticket was finished twice).
@@ -94,8 +94,8 @@ Versioning: [SemVer](https://semver.org/).
   prompt differs in a seed). Each waiting ticket costs one lane question and one roster read per scan. A refused run on the local lane
   writes the pipeline's own deferred row (one per refusal, spaced by the pause). A process that is suspended for longer than 10 minutes
   reads as dead to the others until it writes its beat again (its waiting tickets can be swept meanwhile; a placed one is adopted, not
-  re-sent). Nothing here was run against a live lease, a live node or a render; the scan interval, jitter,
-  pause steps, owner and keep timings and the 8 h ceiling are chosen constants, not measurements.
+  re-sent). Nothing here was run against a live lease, a live node or a render; the scan interval, jitter, pause steps, owner and
+  keep timings and the 8 h ceiling are chosen constants, not measurements.
 
 ## [0.179.0] - 2026-10-10 - a busy image lane overflows to an idle node that renders the same recipe, and every GPU lease path has a host-RAM brake
 
