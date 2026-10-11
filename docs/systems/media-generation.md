@@ -2332,7 +2332,9 @@ results file with fakes for the pipeline and the renderer, and a node stub for t
 and ceiling, the pauses between asks and the 64 Mpx resume ceiling are chosen, not measured, as are the queue's own constants. **The warm path writes
 its rows when its session ends**: the render script runs to the end before the batch sees any job's result, so the rows of the jobs it renders reach
 the results file (`<results>.partial`) together at that point, and a kill, crash or power loss mid-render leaves, for those jobs, only the render
-script's own `batch-<stamp>.results.jsonl` in the media dir. Pre-flight failures and the ticket path write each row as its job ends. A node job costs a ComfyUI cold start, so for the 2.1 families the ticket path pays off when the lane is held
+script's own `batch-<stamp>.results.jsonl` in the media dir. A pre-flight failure or a skipped job is written as soon as the mode is chosen (a lane
+and roster read, before any job runs), and the ticket path writes each row as its job ends. The batch moves a rejected file onto `<out>.unverified` over
+any earlier file of that name. A node job costs a ComfyUI cold start, so for the 2.1 families the ticket path pays off when the lane is held
 by a long job and a node is idle, not when the lane is free (that is the warm session's case). The ticket path inherits the queue's named limits:
 one line per delegating machine, a CLI ticket dies with the CLI, a late-binding gap of up to a scan interval.
 
