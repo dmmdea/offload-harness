@@ -368,12 +368,12 @@ Versioning: [SemVer](https://semver.org/).
   them get it. A seat already ready costs one `/running` read and nothing else; a model routed off this box (`seat_endpoints`, a
   cascade lane) is not warmed on the local router; `vision_coldload_wait_sec: 0` restores the old behaviour.
 - **The bound is chosen, and it is a bound.** Default 180 s, **chosen, not measured as one figure**: first requests to a cold seat
-  took 14 to 84 s, load plus their own inference (the router's access log, 20 completed loads), and one load outlasted the
-  120 s client timeout; 180 s is about twice the slowest completed one and far inside the router's own 600 s health-check
+  took 14 to 84 s, load plus their own inference (the first chat completion in the router's access log after each of the last 25
+  cold starts, 21 of which completed), and one load outlasted the 120 s client timeout; 180 s is about twice the slowest completed one and far inside the router's own 600 s health-check
   ceiling. It limits how long the caller is held, not whether the call is made: when a load outlasts it the call goes on and the
   load carries on behind the request, and a defer after a wait says so (`(the vision seat was cold: waited Ns for its load before
   sending)`). A cold call's worst case is now the wait plus `request_timeout_sec` (300 s with the defaults, which equals the
-  delegator's fleet vision budget). Config: `vision_coldload_wait_sec`; `docs/systems/offload-pipeline.md`, `docs/OPERATOR-GUIDE.md`.
+  delegator's fleet vision budget), and `vision_gpu_wait_sec` before both when a render holds the card first. Config: `vision_coldload_wait_sec`; `docs/systems/offload-pipeline.md`, `docs/OPERATOR-GUIDE.md`.
 - **Proof.** `TestVisionColdSeatIsWaitedForBeforeTheRequestIsSent` has a router that starts the load on the first request for the
   model and holds the request until the seat is up (the real behaviour), with a load three times the request timeout: it failed
   with the production error before the change and passes after, and the vision request arrives only once the seat is ready.

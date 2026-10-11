@@ -209,15 +209,15 @@ behind it. `runVisionGen` now reads `/running` once after its GPU-lease gate; a 
 ready is warmed by the agent door's warm-up (`warmSeat`: one passthrough request that triggers the load,
 passes the GPU-lease fence like every deliberate load, and holds until the seat is up) for at most
 `vision_coldload_wait_sec` (default 180 s, **chosen, not measured as one figure**: first requests to a
-cold seat took 14 to 84 s, load plus their own inference, over 20 completed loads, and one load outlasted
-a 120 s client timeout). The vision request is sent only afterwards, so it keeps its full
+cold seat took 14 to 84 s, load plus their own inference: the first chat completion logged after each of the last
+25 cold starts, 21 of which completed; and one load outlasted a 120 s client timeout). The vision request is sent only afterwards, so it keeps its full
 timeout for inference. The bound limits how long the caller is held, not whether the call is made: when
 the load outlasts it the call goes on and the load carries on behind the request, and a defer after a
 wait names it (`(the vision seat was cold: waited Ns for its load before sending)`). A seat that is
 already ready costs the one read; a model routed off this box (`seat_endpoints`, a cascade lane) is not
 warmed here; `vision_coldload_wait_sec` 0 turns the wait off. `vqa`/`ocr`/`assess_image`,
 `video_describe` and each `video_watch` window all pass through `runVisionGen`, so all three get it. A
-cold call's worst case is now the wait plus `request_timeout_sec`
+cold call's worst case is now the wait plus `request_timeout_sec` (and `vision_gpu_wait_sec` before both, when a render holds the card first)
 (`TestVisionColdSeatIsWaitedForBeforeTheRequestIsSent`, `TestVisionColdLoadWaitIsBounded`).
 
 **Whole-video watching** (`offload_video_watch`, `runVideoWatch`) sweeps a video window by window

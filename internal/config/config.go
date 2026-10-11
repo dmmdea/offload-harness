@@ -1433,11 +1433,12 @@ type Config struct {
 	// here. It is a BOUND, not a promise: when the load outlasts it the call proceeds anyway and
 	// the load carries on behind the request. 0 or negative turns the wait off (the request
 	// then carries the load, as before). Default 180: CHOSEN, not measured as a single figure.
-	// Observed on the reference box: first requests to a cold seat (load plus their own
-	// inference) took 14-84 s over 20 completed loads, and one load outlasted a 120 s client
-	// timeout; 180 s is about twice the slowest completed one and sits far inside llama-swap's
-	// own 600 s health-check ceiling. Worst case a cold call now costs this wait plus
-	// request_timeout_sec.
+	// Observed on the reference box: the first chat completion logged after each of the last 25
+	// cold starts (load plus its own inference) took 14-84 s in the 21 that completed, and one
+	// load outlasted a 120 s client timeout; 180 s is about twice the slowest completed one and
+	// sits far inside llama-swap's own 600 s health-check ceiling. Worst case a cold call now
+	// costs this wait plus request_timeout_sec (and vision_gpu_wait_sec before both, when a
+	// render holds the card first).
 	VisionColdLoadWaitSec int `json:"vision_coldload_wait_sec,omitempty"`
 	// MemoryStack lists the llama-swap models of the load-bearing mem0 stack, which
 	// nothing that clears cards for a GPU job may unload: not the render runner's
