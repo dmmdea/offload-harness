@@ -322,6 +322,8 @@ export function serverUnusableError(message) {
 // how many answered errors in a row condemn the server.
 const STATS_PROBE_EVERY_MS = 15_000;
 const STATS_PROBE_FAILS = 2;
+// How often a caller's `watch` is asked while the prompt has not finished.
+const WATCH_EVERY_MS = 15_000;
 
 // probeStats: {state:"ok"}, {state:"error", status} (the server ANSWERED with an error
 // status) or {state:"none"} (no answer; silence is the dead-server watchdog's question,
@@ -370,6 +372,11 @@ async function promptOnServer(fetchImpl, api, promptId) {
 //     the wait with a serverUnusableError. Every runner only submits after /system_stats
 //     answered OK (waitServer, comfyUp), so an error answer here is a change on this
 //     server, not an endpoint that never worked. A healthy probe resets the count.
+// watch (optional): for a wedge no question to the server can reveal. A ComfyUI whose prompt worker died after an out-of-memory error keeps
+// answering HTTP (/history lists nothing, /system_stats is healthy, /queue still shows the prompt), so a caller that can read the server's
+// console passes a function that does: every WATCH_EVERY_MS, while the prompt has not finished and ComfyUI has not reported it failed, it is
+// asked; a message it returns ends the wait with a serverUnusableError carrying that message. A watch that throws or rejects is best-effort and
+// is not a verdict. ComfyUI's own exec error is never pre-empted by it, and without a watch the loop is what it was.
 // onExecError (optional) runs best-effort before an exec-error throw — the CLI-path
 // hook that finalizes the run row with the server's verbatim failure.
 // HEARTBEAT (F8, lease-progress.mjs): under a lease that declares a progress file (`gpu reserve` hands
@@ -382,6 +389,7 @@ export async function pollOutputs({
   api, promptId, waitSec = 1800, isDone,
   noOutputMsg = "no output produced in time",
   onExecError = null,
+  watch = null,
   fetchImpl = fetch,
   sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
   now = Date.now,
@@ -395,6 +403,7 @@ export async function pollOutputs({
   let lastAnswerAt = startedAt;
   let prevTickAt = startedAt;
   let nextProbeAt = null; // armed when /history first answers without this prompt
+  let nextWatchAt = startedAt;
   let failedProbes = 0;
   for (let first = true; first || now() < deadline; first = false) {
     await sleep(2000);
@@ -435,6 +444,12 @@ export async function pollOutputs({
     const h = failed ? null : hist[promptId];
     if (heartbeat.due() && (h || await promptOnServer(fetchImpl, api, promptId))) {
       heartbeat.beat(`ComfyUI is ${h ? "finishing" : "running"} prompt ${String(promptId).slice(0, 8)} (${Math.round((now() - startedAt) / 1000)}s into the wait)`);
+    }
+    if (watch && now() >= nextWatchAt && !(h && h.status && h.status.status_str === "error") && !(h && isDone(h))) {
+      nextWatchAt = now() + WATCH_EVERY_MS;
+      let verdict = null;
+      try { verdict = await watch(); } catch { /* best-effort: a watch that cannot read is not a verdict */ }
+      if (verdict) throw serverUnusableError(String(verdict));
     }
     if (!h) {
       if (nextProbeAt === null) { nextProbeAt = now() + STATS_PROBE_EVERY_MS; continue; }
