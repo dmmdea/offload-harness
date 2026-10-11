@@ -18,6 +18,11 @@ import (
 // caller exported.
 const stateIsolationPrefix = "lo-root-state-"
 
+// suiteStateRootEnv is set by the suite process, once it has made its throwaway state root, to that root's path. A copy of this
+// test binary that the suite re-launches inherits it (every re-launch site passes the process environment on), and
+// inheritedSuiteRoot reads it as "the suite that started me owns the root".
+const suiteStateRootEnv = "LO_ROOT_SUITE_STATE_ROOT"
+
 // TestMain keeps the root package's tests off the machine-wide state root
 // (%ProgramData%\local-offload on Windows), the root seat-inflight, the GPU
 // lease, the delegate intent ledger and the PAIR open-card register all share.
@@ -38,7 +43,33 @@ func TestMain(m *testing.M) {
 	// First, and outside runIsolated: when this process is the stand-in nvidia-smi a test installed
 	// (internal/gpuprobe/smitest) it plays that part and exits without touching the state root.
 	smitest.MaybeRun()
+	// A copy of this test binary that a test re-launched (the helper processes of the gpu verb tests: a wrapped command the parent
+	// kills, or one that ends by os.Exit from inside a test) never reaches the removal in runIsolated, so a root of its own was left in
+	// the OS temp dir by every launch. It shares the root of the suite that launched it, through the environment it inherited, and
+	// runs on the same known host.
+	if _, ok := inheritedSuiteRoot(os.Getenv); ok {
+		os.Exit(runOnTestHost(m))
+	}
 	os.Exit(runIsolated(m, os.MkdirTemp, os.Setenv, os.RemoveAll))
+}
+
+// inheritedSuiteRoot reports the state root of the suite that launched this process, when this process is a copy of the test binary
+// that the suite re-launched. The environment must say so three ways: the suite's variable names a root, that root is the one
+// LOCAL_OFFLOAD_STATE_DIR points at, and it is one of this package's throwaway roots and still on disk. Anything less is not a copy
+// to trust, and TestMain then makes a root of its own, as it always did: this net exists to keep the suite off the machine-wide
+// state root, so it fails closed.
+func inheritedSuiteRoot(getenv func(string) string) (string, bool) {
+	root := getenv(suiteStateRootEnv)
+	if filepath.Clean(getenv("LOCAL_OFFLOAD_STATE_DIR")) != filepath.Clean(root) {
+		return "", false
+	}
+	if !strings.HasPrefix(filepath.Base(root), stateIsolationPrefix) {
+		return "", false
+	}
+	if fi, err := os.Stat(root); err != nil || !fi.IsDir() {
+		return "", false
+	}
+	return root, true
 }
 
 // suiteRunner is what TestMain runs: *testing.M, or a stub in the fail-closed test.
@@ -61,6 +92,11 @@ func runIsolated(m suiteRunner, mkdirTemp func(dir, pattern string) (string, err
 		os.Stderr.WriteString("root tests: could not set LOCAL_OFFLOAD_STATE_DIR: " + err.Error() + "\n")
 		return 1
 	}
+	// After the state dir it names, so that a copy of this binary that inherits the pair finds them agreeing (inheritedSuiteRoot).
+	if err := setenv(suiteStateRootEnv, filepath.Clean(dir)); err != nil {
+		os.Stderr.WriteString("root tests: could not set " + suiteStateRootEnv + ": " + err.Error() + "\n")
+		return 1
+	}
 	// The offload home holds the ledger, the delegation corpus and every other config.Default() path (DefaultBase),
 	// and config.Default() fixes them when it is called: a test that builds its config with it and sets Home
 	// afterwards still wrote the operator's real ledger (2026-10-03: 1,204 agent_run fixture rows read as fleet
@@ -71,8 +107,13 @@ func runIsolated(m suiteRunner, mkdirTemp func(dir, pattern string) (string, err
 			return 1
 		}
 	}
-	// A reservation that declares host RAM reads the host before it is granted (internal/gpulease/hostram.go),
-	// so the suite runs against a known host and not against whatever the machine running it is doing.
+	return runOnTestHost(m)
+}
+
+// runOnTestHost runs the suite against a known host. A reservation that declares host RAM reads the host before it is granted
+// (internal/gpulease/hostram.go), so the suite runs against a known host and not against whatever the machine running it is doing;
+// a re-launched copy runs on the same one.
+func runOnTestHost(m suiteRunner) int {
 	defer gpuprobe.UseHostMemoryReader(func() (gpuprobe.HostMemory, bool) { return roomyTestHost, true })()
 	return m.Run()
 }

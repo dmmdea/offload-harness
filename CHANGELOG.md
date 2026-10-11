@@ -877,6 +877,26 @@ Versioning: [SemVer](https://semver.org/).
   same endpoint) and `... "agent-pool" outlived ...` (mcpserver). The three tests the register names pass 30 repetitions in a row; that
   does not force the port reuse, so the new tests are the proof.
 
+### Fixed — the root, pairworkloads and mediaremote suites left a state-root folder in the OS temp dir for every copy of their test binary that a test re-launches (F77b)
+
+- **The defect.** Each of the three packages makes a throwaway state root in its `TestMain` (`lo-root-state-*`, `lo-pairworkloads-state-*`,
+  `lo-mediaremote-state-*`) and removes it after `m.Run`. They also re-launch their own test binary (the helper processes of the gpu verb
+  tests, a child that sends a frame and is killed, the holder of a queue lock). A copy runs `TestMain` too, and a copy that is killed or
+  ends by `os.Exit` from inside a test never reaches the removal, so every launch left a root of its own. Counted with the temp dir pointed
+  at an empty folder on Windows, one run of `internal/pairworkloads` left 2 and one run of `internal/mediaremote` left 1, and one run of the root package's tests left 20 (on Windows and on Linux alike).
+- **The fix (test code only).** The suite process exports `LO_ROOT_SUITE_STATE_ROOT`, `LO_PAIRWORKLOADS_SUITE_STATE_ROOT` or
+  `LO_MEDIAREMOTE_SUITE_STATE_ROOT` once its root exists, set to that root's path, and every re-launch site already passes the process
+  environment on. A copy shares the root of the suite that launched it and makes none, but only when the environment agrees three ways:
+  the variable names a root, `LOCAL_OFFLOAD_STATE_DIR` points at the same one, and it is one of the package's own throwaway roots and
+  still on disk; anything less gets a root of its own, as before (the net exists to keep the suite off the machine-wide root, so it
+  fails closed). The root package's copy still runs on the same known host reading as the suite.
+- **Tests, written first and red.** `TestARelaunchedTestBinaryLeavesNothingInTheTempDir` in each package re-launches the test binary at a
+  helper that ends with `os.Exit(0)` from inside the test, with `TMP`, `TEMP` and `TMPDIR` on its environment pointed at an empty folder,
+  and requires the folder to stay empty; `TestACopyTrustsTheSuitesStateRootOnlyWhenTheEnvironmentAgreesWithIt` holds the three conditions.
+  Red before (Windows): `a re-launched copy of the test binary left 1 entries in its temp dir, want none: [lo-root-state-…]` (and
+  `lo-pairworkloads-state-…`, `lo-mediaremote-state-…`). `TestMainIsolatesTheStateRoot`, `TestMainIsolatesTheHomeAndTheLedger` and
+  `TestRunIsolatedFailsClosed` are unchanged.
+
 ## [0.180.0] - 2026-10-10 - a busy image call waits for the first matching lane anywhere in the cluster, graphs overflow to a node that holds their files, and a live render keeps its lease
 
 ### Fixed — the ticket queue was off on any machine whose config sets no `state_dir`, which is the usual config (ADR 0083)
