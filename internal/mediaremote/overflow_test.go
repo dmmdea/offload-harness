@@ -145,7 +145,7 @@ func TestHeldLaneOverflowsToMatchingNode(t *testing.T) {
 
 func mustRecipe(t *testing.T, cfg config.Config, family string) mediacap.Recipe {
 	t.Helper()
-	l, ok, why := localIdentity(cfg, family)
+	l, ok, why := localIdentity(context.Background(), cfg, family)
 	if !ok {
 		t.Fatalf("no recipe for %q: %s", family, why)
 	}

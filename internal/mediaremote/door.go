@@ -121,7 +121,7 @@ func (q *queueRT) admit(ctx context.Context, cfg config.Config, runner Runner, r
 	if _, err := candidateBases(cfg, remotes); err != nil {
 		return runner.Run(ctx, req), nil // a bad `remotes` is reported by the paths that use it, as before
 	}
-	local, okID, _ := localIdentity(cfg, str(req.Params, "family"))
+	local, okID := identityOrLog(ctx, cfg, str(req.Params, "family"))
 	if !okID {
 		return runner.Run(ctx, req), nil
 	}
@@ -268,10 +268,7 @@ func (q *queueRT) attach(ctx context.Context, cfg config.Config, runner Runner, 
 // adopt takes over a placed ticket whose owner died: this process polls the recorded job and fetches its outputs. It never
 // sends the request again, so the job renders once. nil when another process took it first or it is not adoptable.
 func (q *queueRT) adopt(ctx context.Context, cfg config.Config, runner Runner, req core.Request, remotes []string, w Wait, st *store, t ticketFile) *liveTicket {
-	local, ok, _ := localIdentity(cfg, str(req.Params, "family"))
-	if !ok {
-		local = localID{}
-	}
+	local, _ := identityOrLog(ctx, cfg, str(req.Params, "family")) // the zero localID when there is none
 	pl, err := plan(withSeed(req, t.Seed))
 	if err != nil {
 		return nil

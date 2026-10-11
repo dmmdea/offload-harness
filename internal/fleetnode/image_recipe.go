@@ -18,10 +18,13 @@ package fleetnode
 // same state share, which is the match by size this exists to end. The memo is rebuilt as soon as a read settles
 // (Generation), so a pending answer does not outlive its hash by the minute. The admission check does not use the memo.
 // It stats the three or four weight files of the one family a dispatch names, once per dispatch, and WAITS for any
-// fingerprint it does not have (Await): a node whose files changed a second ago must not admit a job on a recipe it no
-// longer holds, and a dispatch is not health.
+// fingerprint it does not have (AwaitContext): a node whose files changed a second ago must not admit a job on a recipe it
+// no longer holds, and a dispatch is not health. The wait ends when the request's context does and, whatever the context,
+// after the fingerprinter's own bound (mediacap fingerprintAwaitMax); a file still unread then is named "pending" in the
+// refusal, so a stalled disk costs a 412 that the delegator answers by reading health again, not a handler that hangs.
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"strings"
@@ -128,13 +131,15 @@ func shortDigest(d string) string {
 }
 
 // checkRecipe admits an image-gen payload that named recipe_digest want for family only if this node's family digests
-// to it, computed now from the files on disk.
-func checkRecipe(cfg config.Config, family, want string) error {
+// to it, computed now from the files on disk. It waits for the fingerprints it needs for as long as ctx and the
+// fingerprinter's bound allow.
+func checkRecipe(ctx context.Context, cfg config.Config, family, want string) error {
 	eff, fi, err := cfg.ResolveImageFamily(family)
 	if err != nil {
 		return &recipeMismatchError{family: family, want: want, why: err.Error()}
 	}
-	rec, ok := mediacap.ImageRecipeWith(eff, fi, mediacap.ModelRoots(eff.ComfyDir), nil, recipeFingerprints.Await)
+	await := func(path string, size int64) string { return recipeFingerprints.AwaitContext(ctx, path, size) }
+	rec, ok := mediacap.ImageRecipeWith(eff, fi, mediacap.ModelRoots(eff.ComfyDir), nil, await)
 	if !ok {
 		return &recipeMismatchError{family: family, want: want, why: "that binding is not a ComfyUI one, which has no recipe to match"}
 	}

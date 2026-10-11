@@ -5,6 +5,7 @@ package mediaremote
 // named miss, never a match by size.
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -121,14 +122,14 @@ func TestARowWithADigestButPendingFilesIsNotAMatch(t *testing.T) {
 func TestLocalIdentityNamesAFileItCannotFingerprint(t *testing.T) {
 	cfg := overflowClient(t, "krea2", map[string]string{"qwen-image-2.1": block(int8Ckpt, "")})
 	prev := localFingerprints
-	localFingerprints = func(path string, size int64) string {
+	localFingerprints = func(ctx context.Context, path string, size int64) string {
 		if strings.Contains(filepath.ToSlash(path), "/text_encoders/") {
 			return mediacap.FingerprintUnreadable
 		}
-		return prev(path, size)
+		return prev(ctx, path, size)
 	}
 	t.Cleanup(func() { localFingerprints = prev })
-	_, ok, why := localIdentity(cfg, "qwen-image-2.1")
+	_, ok, why := localIdentity(context.Background(), cfg, "qwen-image-2.1")
 	if ok {
 		t.Fatal("a family with a file this machine cannot fingerprint has no identity")
 	}
@@ -141,7 +142,7 @@ func TestLocalIdentityNamesAFileItCannotFingerprint(t *testing.T) {
 // alike: two recipes whose files are all "pending" are the same string, and must not be one match.
 func TestTwoPendingRecipesAreNeverAMatch(t *testing.T) {
 	cfg := overflowClient(t, "krea2", map[string]string{"qwen-image-2.1": block(int8Ckpt, "")})
-	local, ok, why := localIdentity(cfg, "qwen-image-2.1")
+	local, ok, why := localIdentity(context.Background(), cfg, "qwen-image-2.1")
 	if !ok {
 		t.Fatal(why)
 	}

@@ -10,7 +10,9 @@ package mediaremote
 // that is a named miss (never a match by size, and never two "pending" recipes taken for one).
 
 import (
+	"context"
 	"fmt"
+	"log"
 	"sort"
 	"strings"
 
@@ -22,9 +24,14 @@ import (
 )
 
 // localFingerprints is how this machine's own recipe reads the content of its weight files: through the process-wide
-// cache, waiting for a file it has not hashed. The delegator computes its fingerprints the way a node does. A var so a
-// test can fail a read.
-var localFingerprints mediacap.FingerprintFunc = mediacap.SharedFingerprints().Await
+// cache, waiting for a file it has not hashed, for as long as the call's context and the fingerprinter's bound allow (a
+// file still unread then is "pending" and the family has no identity for this call). The delegator computes its
+// fingerprints the way a node does. A var so a test can hold or fail a read.
+var localFingerprints func(ctx context.Context, path string, size int64) string = mediacap.SharedFingerprints().AwaitContext
+
+// localPeek is how the hint of this machine's OTHER families reads a weight file: from the cache only, never waiting (a
+// family still being hashed is left out of the hint, and its hash is started for the next call).
+var localPeek mediacap.FingerprintFunc = mediacap.SharedFingerprints().Peek
 
 // localID is the identity of the family a request resolves to on this machine.
 type localID struct {
@@ -32,8 +39,9 @@ type localID struct {
 	name   string
 	recipe mediacap.Recipe
 	// others is the recipe of every other image family this machine binds, by name: a node that misses the family may
-	// match another of them, and the answer then says which to name. It stats each family's weight files, so it is read
-	// only when a node misses (once per call), never on the path of a match.
+	// match another of them, and the answer then says which to name. It stats each family's weight files and takes their
+	// fingerprints from the cache without waiting (localPeek), so it is read only when a node misses (once per call), never
+	// on the path of a match, and never holds the ticket scan up on a hash: a family not hashed yet is not in it.
 	others func() map[string]mediacap.Recipe
 }
 
@@ -41,12 +49,13 @@ type localID struct {
 // family name is the DEFAULT binding, so a call that names none is never taken for a node's own default). ok is false,
 // with the reason, when there is no recipe to compare: an unknown family, an sd.cpp binding, or a binding whose files
 // are not all here or one of them cannot be fingerprinted.
-func localIdentity(cfg config.Config, family string) (localID, bool, string) {
+func localIdentity(ctx context.Context, cfg config.Config, family string) (localID, bool, string) {
 	eff, fi, err := cfg.ResolveImageFamily(family)
 	if err != nil {
 		return localID{}, false, err.Error()
 	}
-	r, ok := mediacap.ImageRecipeWith(eff, fi, mediacap.ModelRoots(eff.ComfyDir), nil, localFingerprints)
+	await := func(path string, size int64) string { return localFingerprints(ctx, path, size) }
+	r, ok := mediacap.ImageRecipeWith(eff, fi, mediacap.ModelRoots(eff.ComfyDir), nil, await)
 	if !ok {
 		return localID{}, false, "this binding is not a ComfyUI one, which has no recipe to compare"
 	}
@@ -73,13 +82,25 @@ func localIdentity(cfg config.Config, family string) (localID, bool, string) {
 			if oerr != nil {
 				continue
 			}
-			if or, ok := mediacap.ImageRecipeWith(o, fi, mediacap.ModelRoots(o.ComfyDir), nil, localFingerprints); ok && len(or.Missing()) == 0 && len(or.Unfingerprinted()) == 0 {
+			if or, ok := mediacap.ImageRecipeWith(o, fi, mediacap.ModelRoots(o.ComfyDir), nil, localPeek); ok && len(or.Missing()) == 0 && len(or.Unfingerprinted()) == 0 {
 				memo[fi.Name] = or
 			}
 		}
 		return memo
 	}
 	return localID{name: strings.TrimSpace(family), recipe: r, others: others}, true, ""
+}
+
+// identityOrLog is localIdentity for a call that goes on without one: the call then runs on this machine's own line and
+// never asks the fleet, so the reason is logged, once per call. It is not noise: an image call is minutes of GPU, and a file
+// that read back "unreadable" under load is a transient that turns overflow off with nothing else to show for it (a missing
+// file or an sd.cpp binding is stable, and the line says so too).
+func identityOrLog(ctx context.Context, cfg config.Config, family string) (localID, bool) {
+	local, ok, why := localIdentity(ctx, cfg, family)
+	if !ok {
+		log.Printf("mediaremote: image call (family %q) has no fleet overflow and runs on this machine's own line: %s", family, why)
+	}
+	return local, ok
 }
 
 // need is what one call asks of a node beyond the recipe.
