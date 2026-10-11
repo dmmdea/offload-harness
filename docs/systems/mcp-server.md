@@ -389,6 +389,27 @@ goal now also ends with one sentence asking for the verdict (a caller's schema g
 the verdict is normally there. The any-of `nonempty:` is evaluated by the delegator like every
 other check; a node only parses it at the ACK, so a node one release behind admits the contract.
 
+**A digest's `quotes` are the page's own words, or they are flagged (register F4).** A goal that asked for exact UI labels got
+digests that paraphrased them, and a fact-checker could not find the "quote" on the page. Two halves, and neither is an
+acceptance check: a new verb would be refused at the ACK by every node one release behind, and an acceptance failure discards a
+whole run (the `nonempty:verdict` lesson above). `Build` adds one sentence to the goal of any schema with a `quotes` list, the
+default digest's included: exact wording the goal asks for (a quotation, a label, button or menu text) goes in `quotes`,
+copied character for character from the file, never shortened, reworded, translated or re-cased, and a shorter exact stretch
+beats a paraphrase. It sits before the verdict ask, which stays the goal's last sentence. After the engine returns, the
+delegator looks every quote up in the page that digest was written from (`research.VerifyQuotes`, applied by both doors
+through `research.AnnotateWire`). A quote that is already the page's bytes is left alone. Otherwise it is looked for with case,
+runs of white space, typographic quote marks and dashes, and no-break and zero-width characters set aside and, failing that,
+with all punctuation set aside too (a colon the seat added after a label, a table's cell borders), always starting and ending
+on a word boundary; an ellipsis (`...`, the single-character form, or `[...]`) is a gap between parts that must each be found
+in page order. A quote found only that way is REPLACED in the published digest by the page's own span, so it is the page's
+bytes by construction; a quote found nowhere (a paraphrase, or words stitched together from separate places) stays where the seat put it and is listed in the result's `quote_check`
+(`checked`, `verbatim`, `corrected`, `unverified`, `note`), and the digest still succeeds. `quote_check` is absent when the
+digest has no quotes to look up, and only the research doors publish it. Two limits: the page is the text the fetch kept
+(navigation, header and footer are stripped before a seat sees the page, so a label that lives only there cannot be
+verified), and the field is found by its name, so a caller's schema that keeps its verbatim text in a field not called
+`quotes` is not checked. The delegation-log corpus and the ledger rows are written inside the engine, before this step, and
+keep the seat's raw answer.
+
 A research page that fails only its own checks (a shape, an item count) is not re-run on another
 node: a second seat given the same page mostly repeats the verdict at the cost of a whole second
 run, and the result's `retry_note` says so. A failed document fingerprint (`docanchor`) is a

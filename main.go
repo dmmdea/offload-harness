@@ -4947,6 +4947,8 @@ func runResearch(args []string) error {
 		lints = lints[:len(results)]
 	}
 	wire := delegate.WireResponse(results, sum, lints)
+	// The same quote check as the MCP door (register F4); the results map to the pages that produced a digest.
+	research.AnnotateWire(&wire, research.ResultSources(sources), fetched)
 	out, err := json.MarshalIndent(struct {
 		Summary any               `json:"summary"`
 		Sources []research.Source `json:"sources"`
