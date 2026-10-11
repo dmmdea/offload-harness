@@ -226,7 +226,7 @@ func run(ctx context.Context, spec Spec, notes *runNotes) (Result, error) {
 		revert, err := applyLowIntegrityLabel(dir, notes)
 		if err != nil {
 			notes.addf("the %s %s could not be made writable for this run: its low-integrity label was not applied (%v); "+
-				"the command ran anyway, as a low-integrity process, so writes there are expected to be refused", role, dir, err)
+				"the command runs at low integrity, so its writes there are expected to be refused", role, dir, err)
 			return nil
 		}
 		return func() {

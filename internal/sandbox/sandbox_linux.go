@@ -259,7 +259,7 @@ func maskDotGit(spec Spec, mount mountFunc) string {
 		return ""
 	}
 	if err := mount("tmpfs", gp, "tmpfs", unix.MS_RDONLY|unix.MS_NOSUID|unix.MS_NODEV|unix.MS_NOEXEC, ""); err != nil {
-		return fmt.Sprintf("%s is NOT masked read-only (mount: %v): the command ran anyway and can write into it, hooks included", gp, err)
+		return fmt.Sprintf("%s is NOT masked read-only (mount: %v): a command in this cage can write into it, hooks included", gp, err)
 	}
 	return ""
 }
