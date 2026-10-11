@@ -191,9 +191,24 @@ func TestGenerateImageBatchResultsFileAndResume(t *testing.T) {
 	}
 
 	// 2. --resume: the two pictures are there and prove themselves; nothing is rendered, the failed job fails again.
-	_, err = run("--resume")
+	out, err = run("--resume")
 	if code, _ := exitStatus(err); code != imagegen.BatchExitJobsFailed {
 		t.Fatalf("resume of a batch with one unplaceable job: %v", err)
+	}
+	var resumed struct {
+		Result struct {
+			Skipped int `json:"skipped"`
+			Items   []map[string]any
+		} `json:"result"`
+	}
+	if err := json.Unmarshal([]byte(out), &resumed); err != nil || resumed.Result.Skipped != 2 || len(resumed.Result.Items) != 3 {
+		t.Fatalf("the printed JSON counts what was skipped: %v %+v", err, resumed.Result)
+	}
+	for i := 0; i < 2; i++ {
+		it := resumed.Result.Items[i]
+		if it["verdict"] != "skipped-existing" || it["license"] != "Default License" || it["commercial_use"] != true || it["family"] != "stub-family" {
+			t.Errorf("a skipped item carries its verdict and the binding's family and license like any other: %v", it)
+		}
 	}
 	rows = readResults(t, results)
 	for i := 0; i < 2; i++ {

@@ -14,6 +14,7 @@ import (
 	pngenc "image/png"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -845,6 +846,51 @@ func TestBatchAnOutThatCannotBeMadeFailsOnlyThatJob(t *testing.T) {
 	}
 }
 
+// The time in a row is the lane's own when it reports one (a render's wall time), and the call's wall time when it does not.
+func TestBatchMsIsTheLanesOwnWhenItReportsOne(t *testing.T) {
+	e := newQEnv(t, 1, true)
+	prev := batchCall
+	t.Cleanup(func() { batchCall = prev })
+	batchCall = func(_ context.Context, _ config.Config, _ Runner, req core.Request, _ string, _ []string, _ Wait) core.Result {
+		out, _ := req.Params["out"].(string)
+		writeBatchPNG(t, out, 8, 8)
+		data, _ := json.Marshal(map[string]any{"image_path": out})
+		res := core.Result{OK: true, Data: data}
+		if req.Input == "reports" {
+			res.Meta.LatencyMs = 4321
+		} else {
+			time.Sleep(30 * time.Millisecond)
+		}
+		return res
+	}
+	dir := t.TempDir()
+	jobs := []BatchJob{{Prompt: "reports", Out: filepath.Join(dir, "a.png"), Seed: 1}, {Prompt: "silent", Out: filepath.Join(dir, "b.png"), Seed: 2}}
+	b, err := RunBatch(bctx(t), e.cfg, e.lr, jobs, neverWarm(t), batchOpts())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Rows[0].Ms != 4321 {
+		t.Errorf("ms = %d, want the lane's own 4321", b.Rows[0].Ms)
+	}
+	if b.Rows[1].Ms < 30 || b.Rows[1].Ms > 20000 {
+		t.Errorf("ms = %d, want the call's wall time (at least the 30 ms it took) when the lane reports none", b.Rows[1].Ms)
+	}
+}
+
+// Outs that differ only in case are one file on Windows: two different pictures for them are a clash there.
+func TestBatchOutsThatDifferOnlyInCaseClashOnWindows(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("file names are case-sensitive here")
+	}
+	dir := t.TempDir()
+	_, err := RunBatch(bctx(t), config.Config{StateDir: t.TempDir()}, nil, []BatchJob{
+		{Prompt: "a", Out: filepath.Join(dir, "Pic.png")}, {Prompt: "b", Out: filepath.Join(dir, "pic.PNG")},
+	}, nil, BatchOpts{Route: "local"})
+	if err == nil || !strings.Contains(err.Error(), "same out") {
+		t.Fatalf("want a clash, got %v", err)
+	}
+}
+
 // A lane that said it rendered what is not there, or nothing, or something nobody could check, did not render it.
 func TestBatchAJobIsRenderedOnlyWhenItsFileIsThere(t *testing.T) {
 	e := newQEnv(t, 1, true)
@@ -1011,8 +1057,15 @@ func TestResultsFileKeepsRowsAsJobsEndAndEndsInJobOrder(t *testing.T) {
 	if _, err := OpenResults(filepath.Join(path, "x.jsonl")); err == nil {
 		t.Errorf("a results path under a file must be refused")
 	}
-	rf2, _ := OpenResults(filepath.Join(t.TempDir(), "d.jsonl"))
+	d := filepath.Join(t.TempDir(), "d.jsonl")
+	rf2, err := OpenResults(d)
+	if err != nil {
+		t.Fatal(err)
+	}
 	rf2.Discard()
+	if _, err := os.Stat(d); err == nil {
+		t.Errorf("a discarded results file must be gone")
+	}
 }
 
 // ---- the cases that keep a batch on this machine -------------------------------------------------------------------------
