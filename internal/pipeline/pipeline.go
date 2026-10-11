@@ -4065,6 +4065,15 @@ func imageFootprintKey(cfg config.Config) (family, quant string) {
 			}
 		}
 	}
+	// The card-only placement peaks per card and its host growth is the read-only loader's: a bucket of its own, not the single-card one it would pull toward
+	// numbers true of neither (the VRAM peak, and the host p90 a single-card declaration is raised to).
+	if cfg.ImageMulticard() {
+		if quant == "" {
+			quant = "multicard"
+		} else {
+			quant += "+multicard"
+		}
+	}
 	return family, quant
 }
 

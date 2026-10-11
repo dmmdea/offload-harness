@@ -243,7 +243,7 @@ func (p *Pipeline) declaredRAM(ctx context.Context, need mediaNeed, cards []gpup
 		declared = need.RAM(hostneed.LargestCardGiB(cards, ids))
 	}
 	n := p.calibratedRAM(declared, need.Foot)
-	if n.GiB > 0 {
+	if n.GiB > 0 || n.CardOnly { // a measured card-only 0 is said too: nothing corrects it afterwards, so the log is where a false one can be seen
 		key := "declaring host RAM: " + n.String()
 		if n.Source == hostneed.SourceMeasured {
 			// A measured declaration's text carries the run counts, which move with every render: the note is made once

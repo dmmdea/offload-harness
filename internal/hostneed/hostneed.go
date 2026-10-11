@@ -78,6 +78,9 @@ type Need struct {
 	// together with a figure that is then a LOWER BOUND, or alone when nothing could be sized; the caller says so once.
 	// A string, not a slice, so a Need stays comparable.
 	Unsized string
+	// CardOnly marks the 0 a measured card-only recipe earns (the image and edit placement, estimatePlaced). A 0 is otherwise the silent default of a
+	// declaration; this one is said wherever a figure is, with its Detail, because nothing can correct it afterwards (calibratedRAM leaves 0 alone).
+	CardOnly bool
 }
 
 func (n Need) String() string {
