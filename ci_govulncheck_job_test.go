@@ -392,7 +392,7 @@ func TestEveryTrackedGoModuleIsScannedOrNamedAsExcluded(t *testing.T) {
 			found = append(found, path.Dir(p))
 		}
 	}
-	if !hasModuleDir(found, ".") {
+	if !hasString(found, ".") {
 		t.Fatalf("the tracked files hold no root go.mod (%d files, go.mod directories %v): the check went blind", len(files), found)
 	}
 	for _, p := range moduleScanProblems(found, govulncheckModules, govulncheckExcluded) {
@@ -448,7 +448,7 @@ func TestModuleScanCheckReportsEachProblem(t *testing.T) {
 	}
 }
 
-func hasModuleDir(list []string, want string) bool {
+func hasString(list []string, want string) bool {
 	for _, s := range list {
 		if s == want {
 			return true

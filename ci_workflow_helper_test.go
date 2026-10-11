@@ -38,12 +38,21 @@ type ciWorkflow struct {
 }
 
 type ciJob struct {
-	RunsOn any               `yaml:"runs-on"`
-	Env    map[string]string `yaml:"env"`
-	Steps  []ciStep          `yaml:"steps"`
+	RunsOn   any               `yaml:"runs-on"`
+	Env      map[string]string `yaml:"env"`
+	Defaults ciDefaults        `yaml:"defaults"`
+	Steps    []ciStep          `yaml:"steps"`
 	// Extra holds every other key of the job, so that `if` and `continue-on-error` are seen where they are
 	// written: they are what turns a job off without deleting it (ciAlwaysGatesProblems).
 	Extra map[string]any `yaml:",inline"`
+}
+
+// ciDefaults is a job's `defaults:` block: the working directory every `run:` step starts in.
+type ciDefaults struct {
+	Run struct {
+		WorkingDirectory string `yaml:"working-directory"`
+		Shell            string `yaml:"shell"`
+	} `yaml:"run"`
 }
 
 type ciStep struct {

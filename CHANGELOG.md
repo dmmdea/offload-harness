@@ -21,7 +21,11 @@ Versioning: [SemVer](https://semver.org/).
   ignored (measured: a build with go1.27.1 installed and the line present succeeds and reports go1.27.1), so an offline build on an
   older Go needs it. The oldest compiler the module accepts is unchanged. `build` and `installer-windows` keep `go-version:
   '1.26.x'` and switch to the pinned compiler through the same line, which holds for setup-go@v5 (its v5.6.0 source never mentions
-  GOTOOLCHAIN or the toolchain directive) and not for v6, which exports `GOTOOLCHAIN=local`: a bump to v6 must switch to
+  GOTOOLCHAIN or the toolchain directive) and not for v6, which exports `GOTOOLCHAIN=local`. Each of the two jobs then asks the go
+  command itself, in a step of its own right after Set up Go (`go env GOVERSION`), and fails unless the answer is exactly the release
+  go.mod's toolchain line names: a switch that stopped working (a runner image that exports `GOTOOLCHAIN=local`, a changed action)
+  would otherwise leave both jobs green on go1.26.x, judging a compiler that does not ship. The step's log line names both
+  releases (`go.mod names go1.27.2; the go command runs go1.27.2`). A bump to v6 must switch to
   `go-version-file: go.mod` and drop `go-version` (which would win), and `TestCISetupGoLeavesTheToolchainSwitchAlone` fails until it
   does and accepts exactly that (`TestSetupGoRuleKnowsTheMigrationFromV5` holds the rule in a table: v6 or v7 reading go.mod passes;
   v6 with a version range, with both inputs, reading another file, or pinned by a commit hash does not).
@@ -53,12 +57,21 @@ Versioning: [SemVer](https://semver.org/).
   `TestGoModPinCheckReportsEachProblem` proves each rule of the pin check (a missing, invalid, too old or below-the-go-line
   toolchain, and x/sys, x/text and go-sdk gone back) on parsed go.mod text, because a real go.mod with an older module no longer
   builds; `TestGoVersionCompareIsNumeric` holds the comparators to numbers (go1.27.10 above go1.27.2, v0.100.0 above v0.48.0).
+  `TestCIJobsProveTheCompilerGoModNames` finds the jobs that set up Go and compile the root module (not the printed-CLI jobs, which have
+  no toolchain line, and not the govulncheck job, which pins GOTOOLCHAIN itself), requires the proof step after setup-go, before any
+  other go command, with `shell: bash` and no `if` or `continue-on-error`, and runs its script with a stand-in go: the release the
+  line names passes (LF and CRLF go.mod, a go command that prints a carriage return); an older compiler, a newer one, a prefix of
+  the release, a longer release that begins with it, nothing, a failing `go env`, no toolchain line and `toolchain default` fail with
+  the versions named in the log.
   The shared loader and the bash sandbox are in `ci_workflow_helper_test.go`.
 - **What is not shown.** No hosted-runner run of this change exists yet. The steps were run end to end on the workstation under
   Git Bash with the real go and govulncheck: all six scans exit 0 under go1.27.2 (38 s); with `toolchain go1.27.1` planted in go.mod
   the toolchain step follows it and all six scans fail (eleven called standard-library advisories in the root module, nine in each
   printed CLI); with the vulnerability database unreachable all six fail; a planted call into x/text v0.39.0 (GO-2026-6629) exits 3.
-  The first run of `build` and `installer-windows` on the go1.27 line is the first CI has seen of it.
+  The proof step's own script, run end to end on the workstation with the real go (installed go1.27.1, `toolchain go1.27.2`): with
+  GOTOOLCHAIN at its default it prints `go.mod names go1.27.2; the go command runs go1.27.2` and exits 0; with `GOTOOLCHAIN=local`
+  it prints the error line and exits 1. The first run of `build` and `installer-windows` on the go1.27 line is the first CI has seen
+  of it.
 
 ### Added — the Windows cage's environment proof runs on a Windows runner on every change (D-98, phase 1)
 

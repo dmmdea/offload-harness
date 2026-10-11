@@ -251,7 +251,9 @@ func TestGoModPinCheckReportsEachProblem(t *testing.T) {
 // compiler and ignores the toolchain line without printing anything (measured with go1.27.1 installed and
 // `toolchain go1.27.2` in go.mod: go build succeeds and go version -m reads go1.27.1). A bump of the
 // action, or a GOTOOLCHAIN=local in the workflow, would therefore turn "CI tests the compiler that ships"
-// into a false claim with every check green. This test is the tripwire; setupGoProblem is its rule.
+// into a false claim with every check green. This test is the tripwire for the causes the yaml shows;
+// setupGoProblem is its rule. What a runner exports is not in the yaml, so the jobs also ask the go command
+// itself (TestCIJobsProveTheCompilerGoModNames).
 func TestCISetupGoLeavesTheToolchainSwitchAlone(t *testing.T) {
 	w := loadCIWorkflow(t)
 	if v, ok := w.Env["GOTOOLCHAIN"]; ok {

@@ -62,6 +62,31 @@ jobs:
         with:
           go-version: '1.26.x'
 
+      # H-26. The switch described above can stop working without a message, and then the job is green on a
+      # compiler that does not ship: GOTOOLCHAIN=local (setup-go from v6 exports it; a runner image can set it)
+      # makes the go command ignore the toolchain line. This step asks the go command itself, before anything else
+      # uses it, and fails unless it runs exactly the release the line names; its log line names both.
+      # Exactly, because the govulncheck job scans under that release and the jobs must not disagree about
+      # which compiler ships; raise `go-version` past the pin only together with the pin.
+      - name: The go command runs the toolchain go.mod names (H-26)
+        shell: bash
+        run: |
+          set -euo pipefail
+          want=$(awk '$1 == "toolchain" { sub(/\r$/, "", $2); print $2; exit }' go.mod)
+          if ! [[ "$want" =~ ^go[0-9]+\.[0-9]+(\.[0-9]+|rc[0-9]+)?$ ]]; then
+            echo "::error file=go.mod::go.mod has no usable toolchain line (found '$want'); H-26 pins one"
+            exit 1
+          fi
+          if ! have=$(go env GOVERSION | tr -d '\r'); then
+            echo "::error::'go env GOVERSION' failed, so the compiler this job runs is unknown (go.mod's toolchain line names '$want')"
+            exit 1
+          fi
+          echo "go.mod names $want; the go command runs $have"
+          if [ "$have" != "$want" ]; then
+            echo "::error::the go command runs '$have' and go.mod's toolchain line names '$want': the line was not applied (GOTOOLCHAIN=local?), so this job does not judge the compiler that ships"
+            exit 1
+          fi
+
       - name: Build
         run: go build ./...
 
@@ -119,6 +144,27 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: '1.26.x'
+
+      # H-26: the same proof as in the build job, here on the Windows runner (bash, whose go.exe answers the
+      # same question).
+      - name: The go command runs the toolchain go.mod names (H-26)
+        shell: bash
+        run: |
+          set -euo pipefail
+          want=$(awk '$1 == "toolchain" { sub(/\r$/, "", $2); print $2; exit }' go.mod)
+          if ! [[ "$want" =~ ^go[0-9]+\.[0-9]+(\.[0-9]+|rc[0-9]+)?$ ]]; then
+            echo "::error file=go.mod::go.mod has no usable toolchain line (found '$want'); H-26 pins one"
+            exit 1
+          fi
+          if ! have=$(go env GOVERSION | tr -d '\r'); then
+            echo "::error::'go env GOVERSION' failed, so the compiler this job runs is unknown (go.mod's toolchain line names '$want')"
+            exit 1
+          fi
+          echo "go.mod names $want; the go command runs $have"
+          if [ "$have" != "$want" ]; then
+            echo "::error::the go command runs '$have' and go.mod's toolchain line names '$want': the line was not applied (GOTOOLCHAIN=local?), so this job does not judge the compiler that ships"
+            exit 1
+          fi
 
       # D-98. The Windows cage's environment proof runs here, on a Windows runner, on every change. Its
       # two tests are SKIP stubs on every other OS, so `go test ./...` in the build job proves nothing
