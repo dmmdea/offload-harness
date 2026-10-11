@@ -743,7 +743,8 @@ No transcript field exists — remote reasoning never crosses the wire.
 "agent_enabled": true, "agent_seat": "offload-e4b",
 "agent_ctx_tokens": 16384, "agent_seat_resident": true,
 "seat_budget": {"step_tokens": 1024, "final_tokens": 4096, "thinking": "auto"},
-"seat_rate": {"tok_s": 24.6, "cold_load_sec": 34.3, "samples": 2, "min_turn_sec": 201}
+"seat_rate": {"tok_s": 24.6, "cold_load_sec": 34.3, "samples": 2, "min_turn_sec": 201,
+              "prefill_tok_s": 412.0, "prefill_slow_tok_s": 188.5}
 ```
 
 A COMPOSITE node (ADR 0052) publishes two more, under the same lane predicate:
@@ -778,6 +779,10 @@ standard quality instrument, register H-04) reads it here. `seat_rate` (0.117.2)
 rate and cold load from this node's seat-rates store (`seat-rates.json` under the state root, written by every
 agent run since 0.115.21) with `min_turn_sec` = cold load + one final turn at this node's final budget; absent until
 the seat has a sample; cached for 30 s. The delegator sizes a RETRY that lands here by it (register D-46).
+`prefill_tok_s` and `prefill_slow_tok_s` (register F10) are the seat's prefill rate — the average over runs, and the
+slowest of its last five solo samples, which is the rate the prefill stall allowance is sized from (a heat-soaked seat
+is judged at the speed it runs now, not the average of the cool ones). Both are omitted until a solo prefill has been
+measured, never published as 0, and only a run known to have had the seat to itself moves them (ADR 0066).
 `agent_seat_resident` is a cached, alias-aware roster probe refreshed in the background at most
 once per 30 s — **fail-closed**: `false` until the first probe lands, and `false` again on any
 probe failure (a stale "resident" while llama-swap is down would route work at a node that

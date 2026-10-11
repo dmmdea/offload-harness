@@ -2038,6 +2038,11 @@ type SeatRateHealth struct {
 	ColdLoadSec float64 `json:"cold_load_sec"`
 	Samples     int     `json:"samples"`
 	MinTurnSec  int     `json:"min_turn_sec"`
+	// PrefillTokS is the seat's remembered prefill rate (an average over runs) and PrefillSlowTokS the
+	// slowest of its recent solo samples: the rate the stall allowance of a prefill is sized from
+	// (register F10). Both are omitted until a solo prefill has been measured, never published as 0.
+	PrefillTokS     float64 `json:"prefill_tok_s,omitempty"`
+	PrefillSlowTokS float64 `json:"prefill_slow_tok_s,omitempty"`
 }
 
 // seatRateTTL bounds how often health re-reads the seat-rates file: the
@@ -2080,7 +2085,8 @@ func (s *Server) seatRate() *SeatRateHealth {
 	}
 	b := s.seatBudget()
 	s.seatRateCache = &SeatRateHealth{TokS: known.TokS, ColdLoadSec: known.ColdLoadSec, Samples: known.Samples,
-		MinTurnSec: seatrate.MinTurnFor(known.ColdLoadSec, b.FinalTokens, 0, known.TokS)}
+		MinTurnSec:  seatrate.MinTurnFor(known.ColdLoadSec, b.FinalTokens, 0, known.TokS),
+		PrefillTokS: known.PrefillTokS, PrefillSlowTokS: known.PrefillSlowTokS}
 	return s.seatRateCache
 }
 

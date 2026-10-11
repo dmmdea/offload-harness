@@ -460,6 +460,10 @@ type SeatRateView struct {
 	ColdLoadSec float64 `json:"cold_load_sec"`
 	Samples     int     `json:"samples"`
 	MinTurnSec  int     `json:"min_turn_sec"`
+	// PrefillTokS / PrefillSlowTokS: the seat's prefill rate (average, and the slowest recent solo
+	// sample its stall bound is sized from). 0 = the node publishes none (register F10).
+	PrefillTokS     float64 `json:"prefill_tok_s,omitempty"`
+	PrefillSlowTokS float64 `json:"prefill_slow_tok_s,omitempty"`
 }
 
 // SeatBudgetView mirrors fleetnode.SeatBudgetHealth.

@@ -6,6 +6,33 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed — the prefill stall clock is sized from the whole prompt and the seat's slow recent rate, so a long prefill on a heat-soaked seat is not read as silence (F10)
+
+- **The defect.** A 4,613-token prefill on a heat-soaked seat showed "silent 59 s of 60 s allowed" while the seat was working,
+  one tick from a prefill stall. The allowance (`pending ÷ prefill rate × 1.5 + 30 s`, floor 60 s) was sized from two wrong
+  inputs. **The prompt was the transcript alone**: the loop passed `estimateTokens(msgs)` (4 bytes a token) and left out the
+  tool-spec block that ships with every request, which the loop already measures for compaction (`specReserve`, 1-6k tokens on a
+  full build). On a seat measured at about 180 tok/s a 4,613-token prompt allows 68 s, and any transcript estimate under about
+  3,600 tokens allows the 60 s floor, so the undercount alone turned a thin allowance into the floor. **The rate was an
+  average**: `prefill_tok_s` is an EMA over runs, so a run on a seat that had heat-soaked was averaged with the cool ones.
+- **The prompt.** `agent.prefillPending`: the transcript estimate at the run's token density plus the tool-spec block, never
+  under what the server counted for the previous call's prompt (the transcript only grows). The density is `assumedPromptDensity`
+  1.3 until a call reports (the low end of the 1.3-1.4 the budget-calibration fit already measured), then the density the call
+  showed, clamped to 3 (chosen) so one odd usage reading cannot make the clock unbounded. Run-local, so `--serve` handlers sharing
+  one `*Loop` do not share it.
+- **The rate.** The seat-rates store keeps the last 5 solo prefill rates (`prefill_rates`; 5 is chosen, not measured: one run folds
+  in up to two samples) and their slowest (`prefill_slow_tok_s`), the rule `cold_load_sec` already follows (the slowest of its
+  window: a stall bound must hold the slow case). `pipeline.LivenessPolicyFor` sizes the prefill clock from
+  `Seat.StallPrefillTokS()` (the slowest, else the EMA of a store written before the window). A shared-seat sample still teaches
+  nothing (ADR 0066). `/fleet/health` `seat_rate` publishes `prefill_tok_s` and `prefill_slow_tok_s` (additive, omitted until a
+  solo prefill is measured), so the number a "silent N s of M s allowed" line rests on can be read.
+- **A wedged seat still stalls.** The allowance is still bounded by the prompt and the slowest recent rate, and the busy hold's
+  flat bound still ends a seat whose engine does no work (`TestWedgedSeatStillStallsUnderTheSizedPrefillClock`).
+- **Tests.** `internal/agent/prefill_pending_test.go` (the spec block is in the clock; the server's count is a floor; the density is
+  learned; the first call uses the assumed density; a wedged seat stalls), `internal/seatrate/prefill_window_test.go`,
+  `internal/pipeline/liveness_prefill_slow_test.go`, `internal/fleetnode/seatrate_prefill_health_test.go`. 12 mutations of the
+  sizing, the window and the wiring were each caught. ADR 0055 Amendment 2026-10-10, `docs/FLEET-NODE.md`, `docs/OPERATOR-GUIDE.md`.
+
 ### Added — a busy image call is a ticket the harness holds until the first matching lane frees, anywhere (the P0's "even when every machine is full", ADR 0083)
 
 - **The behaviour.** An `auto` image call (`offload_generate_image`, `generate-image`) on a machine that has the lane and a fleet, whose
