@@ -28,15 +28,15 @@ func TestOverflowRewritesFamilyToTheNodesName(t *testing.T) {
 	}
 }
 
-// Only an image job overflows in this release. A graph or a clip whose local lane is busy is not asked about, not
-// placed, and the fleet is not read: their identity (the files a graph loads, a video family's recipe) is not defined yet.
+// Only an image job and a whole-node graph overflow (graph_test.go has the graph's side). A clip, a character or a voice
+// whose local lane is busy is not asked about, not placed, and the fleet is not read: their identity (a video family's
+// recipe) is not defined yet.
 func TestOnlyImageJobsOverflow(t *testing.T) {
 	n := startImageNode(t, "node-b", "hidream-o1", nil, nodeOpts{})
 	cfg := overflowClient(t, "krea2", nil, n)
 	stubLocalRoutes(t, configured("generate_image", "run_graph", "generate_video", "animate_character", "generate_audio:voice"))
 	graph := writeFile(t, t.TempDir(), "g.json", []byte(`{"1":{}}`))
 	for name, req := range map[string]core.Request{
-		"a graph":     {Task: core.TaskRunGraph, Params: map[string]any{"graph_path": graph}},
 		"a clip":      video(nil),
 		"a character": {Task: core.TaskAnimateCharacter, Input: "p", Params: map[string]any{"ref": graph, "driver": graph}},
 		"a voice":     {Task: core.TaskGenerateAudio, Input: "hello", Params: map[string]any{"voice": "generalist"}},

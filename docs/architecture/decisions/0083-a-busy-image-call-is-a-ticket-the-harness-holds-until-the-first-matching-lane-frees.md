@@ -114,7 +114,17 @@ make the caller retry. Three things were still wrong once every lane was busy.
 11. **ADR 0082 changes in four places.** Decision 2: a call that resumes a place is ordered by arrival on every plan (the test that
     pinned the other rule is renamed). Decision 6: no bound of three nodes; the ticket waits instead. Decision 8: when nothing
     admits, the call is a ticket, not a local run that joins the line late. Decision 9: a call that carries a `waiter_token`
-    overflows like any other, bringing its place along.
+    overflows like any other, bringing its place along. All four are for an image call (see 12).
+12. **A whole-node graph is not a ticket in 0.180.0.** ADR 0082's Amendment 1 (a graph overflows to an idle single-card node that
+    holds the files it names) is released together with this ADR. The ticket is the only busy-lane path of an IMAGE call; a graph
+    keeps the one-shot placement of the first cut (`tryGraphOverflow` and `placeGraph` in `internal/mediaremote/place.go`, reached
+    from `RunWith` before the ticket door): it is offered once to the nodes that can take it, at most three, one graph call of a
+    process per node, and never a node a ticket of this machine has a job on (it reads the claim files and writes none), and when
+    none admits it, it waits in this machine's own queue. **A graph does not wait in the cluster queue yet.** It has no ticket, so
+    it keeps no place in the cluster queue, does not start on a lane that frees after its one look at the fleet, and a repeat of the
+    same graph is a second call. The reason it is left out is that a ticket's identity is the hash of the request's parameters
+    (decision 2), and a graph's parameters name files on this machine (`graph_path`, `manifest_path`) rather than carry them, so what
+    makes two graph calls the same call needs a decision of its own; making the graph a ticket is the follow-up.
 
 ## Consequences
 
@@ -144,9 +154,12 @@ make the caller retry. Three things were still wrong once every lane was busy.
 
 ## Alternatives considered
 
-- **Keep S1's synchronous placement beside the ticket.** Rejected: a first call that placed itself outside the ticket bypassed
-  the claim, so two processes' first calls could still stack on one idle node, and a bounced first call still rejoined the local
-  line late.
+- **Keep S1's synchronous placement beside the ticket.** Rejected for an image call: a first call that placed itself outside the
+  ticket bypassed the claim, so two processes' first calls could still stack on one idle node, and a bounced first call still
+  rejoined the local line late. It is kept for a whole-node graph only, which is not a ticket in this release (decision 12), and
+  that path reads the claim files so that it does not take a node a ticket is using.
+- **Make a whole-node graph a ticket in the same release.** Deferred, not rejected: the identity of a graph call (decision 12) is
+  undecided, and the graph overflow (ADR 0082 Amendment 1) was built and tested against the one-shot placement.
 - **Park the job on the first node that will be free soonest.** Rejected: a lease end is a ceiling, not a promise, and a job parked
   on a node cannot be recalled; late binding starts it on whichever lane frees first.
 - **Read the state files and then send.** Rejected for the in-use rule: that is exactly the window in which two processes both
@@ -155,7 +168,7 @@ make the caller retry. Three things were still wrong once every lane was busy.
 
 ## Related code
 
-- `internal/mediaremote/ticket.go`, `queuefs.go`, `scan.go`, `door.go`, `place.go`, `mediaremote.go` (`RunWith`)
+- `internal/mediaremote/ticket.go`, `queuefs.go`, `scan.go`, `door.go`, `place.go` (the placement both paths share; `tryGraphOverflow` and `placeGraph` are the graph's), `mediaremote.go` (`RunWith`)
 - `internal/core/place.go` (`PlaceKeeper`), `internal/pipeline/medialane_place.go`, `medialane.go`, `internal/gpualloc/queued.go`
 - `internal/mcpserver/mcpserver.go` (`wait_s`, the place forwarding), `status_section.go` (`media_queue`), `main.go` (`generate-image`)
 

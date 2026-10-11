@@ -128,13 +128,22 @@ func mediaTaskRouteReady(v *mediaView, taskType string) bool {
 // as CONFIGURED (a weight or custom node went missing under a running node, or never arrived). It is not a
 // malformed request: another node may well serve the job, so admission answers 503, which every delegator
 // re-places, instead of the 400 that means "this job is wrong". A task that is not bound at all keeps the
-// plain unsupported-task 400.
+// plain unsupported-task 400. The same refusal carries the other thing a node cannot do for THIS request alone: a
+// run-graph whose graph names a file the node does not hold (detail, graph_files.go).
 type routeNotReadyError struct {
 	task   string
 	routes string // "generate_video BOUND-BUT-MISSING", one entry per derived route of the task
+	// detail, when set, replaces routes: the route is ready, but THIS request names something the node does not hold (a
+	// run-graph whose graph loads a weight file or reads an input file that is not here, graph_files.go).
+	detail string
 }
 
 func (e *routeNotReadyError) Error() string {
+	if e.detail != "" {
+		// Short on purpose: the delegator's cluster row keeps the first 300 bytes of this answer's body (truncate in
+		// mediaremote), and the names the sentence is for must land inside them.
+		return fmt.Sprintf("task_type %q cannot run this request here: %s (place it on a node that holds them)", e.task, e.detail)
+	}
 	return fmt.Sprintf("task_type %q is bound on this node but its route is not ready: %s (the route is not CONFIGURED, so this node cannot run it now; place the job on another node, or restore the files the route needs and retry)",
 		e.task, e.routes)
 }

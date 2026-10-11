@@ -13,6 +13,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/dmmdea/offload-harness/internal/buildinfo"
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/pipeline"
 )
@@ -32,7 +33,9 @@ func startWireNode(t *testing.T) *wireNode {
 	n.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/fleet/health":
-			fmt.Fprint(w, `{"node_id":"wire-node","schema_version":1,"queue_depth":0,"supported_task_types":["image-gen","video-gen","animate","audio-gen","run-graph","media-job"]}`)
+			// harness_version is this release: a graph is placed only on a node that proves it runs the release whose file check
+			// it relies on (mediaremote graph.go), on every route.
+			fmt.Fprintf(w, `{"node_id":"wire-node","schema_version":1,"harness_version":%q,"queue_depth":0,"supported_task_types":["image-gen","video-gen","animate","audio-gen","run-graph","media-job"],"gpu_devices":[{"index":0,"uuid":"GPU-wire-0","name":"test card","vram_total_gb":15.92,"vram_free_gb":12}]}`, buildinfo.Version)
 		case r.URL.Path == "/fleet/dispatch" || r.URL.Path == "/fleet/media-job":
 			b, _ := io.ReadAll(r.Body)
 			var m map[string]any

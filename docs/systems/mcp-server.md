@@ -64,7 +64,9 @@ host that leases cards, a call that has no card after its `gpu_wait_ms` does not
 declared window left on the lease in the way: a ceiling), `devices` and `held_by` in its data. Re-send the same
 request with that `waiter_token` and the call resumes the place it left. The token lives ten minutes after its last
 poll and holds its place against later callers for the first 30 seconds of that; see
-[media-generation.md](media-generation.md), "Per-card media admission". `offload_run_graph` also takes an
+[media-generation.md](media-generation.md), "Per-card media admission". `offload_run_graph` also takes `min_vram_gb` (the least
+size in GB of the largest card of the fleet node that takes the graph; 0 lifts the default floor) and `model_family` (which that
+default keys on), both forwarded only when given ([Graphs on the fleet](media-generation.md#graphs-on-the-fleet-adr-0082-amendment-1)), and
 `devices` (for the operator's use; nvidia-smi indices or GPU uuid prefixes): absent or several, the graph holds the whole
 node; one device runs in that card's own ComfyUI instance, which sees no other card. A host that does not lease cards answers `gpu_busy` as it always did, and
 so does any call that did not come through this server (the CLI verbs, the fleet dispatch, the image batch): the

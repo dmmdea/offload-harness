@@ -416,7 +416,7 @@ func (lt *liveTicket) step(ctx context.Context, cs *cycleState) {
 		rows  []rowAt
 	)
 	if berr == nil {
-		cands, rows = candidatesFor(sctx, cfg, bases, lt.local, needOf(lt.req.Params))
+		cands, rows = candidatesFor(sctx, cfg, bases, lt.local, needOf(lt.req))
 	}
 	all := lt.st.list()
 	claims := lt.st.claims()

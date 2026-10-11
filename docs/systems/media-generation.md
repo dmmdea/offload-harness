@@ -1652,6 +1652,10 @@ recorded as known offenders with their reason rather than silently skipped — a
   [`door.go`](../../internal/mediaremote/door.go) and [`queuefs.go`](../../internal/mediaremote/queuefs.go) (with its
   `queuefs_lock_*.go` per-platform file lock) — the ticket queue (ADR 0083); [`internal/pipeline/medialane_place.go`](../../internal/pipeline/medialane_place.go) and
   [`internal/core/place.go`](../../internal/core/place.go) — the place a ticket keeps in the machine's own line
+- [`internal/mediacap/graphfiles.go`](../../internal/mediacap/graphfiles.go) — the files a graph names and which of them a tree
+  lacks; [`internal/fleetnode/graph_files.go`](../../internal/fleetnode/graph_files.go) — the node's 503 at the door;
+  [`internal/pipeline/medialane_graph.go`](../../internal/pipeline/medialane_graph.go) — the lane question for a whole-node graph;
+  [`internal/mediaremote/graph.go`](../../internal/mediaremote/graph.go) — the one-card rule, `min_vram_gb` and its default table
 - [`render/compose-hyperframes.mjs`](../../render/compose-hyperframes.mjs) — the composition runner:
   env allowlist, subcommand allowlist, `--json` everywhere, lint → check → render → ffprobe gate,
   typed `COMPOSE-FAIL` classes
@@ -1889,7 +1893,8 @@ render on a fleet node and get the output back hash-verified. The other media to
 - `local` always runs here. It never touches the network.
 - `auto` (the default) runs here when this machine has the lane and the lane is free, and the call is then byte-identical to
   one made before the route existed. When the lane exists and is NOT free, an image call may go to an idle node that renders
-  the same recipe instead of waiting ([Overflow](#overflow-a-busy-lane-places-an-image-call-on-the-fleet-adr-0082) below);
+  the same recipe instead of waiting ([Overflow](#overflow-a-busy-lane-places-an-image-call-on-the-fleet-adr-0082) below), and a
+  whole-node graph to an idle single-card node that holds its files ([Graphs](#graphs-on-the-fleet-adr-0082-amendment-1) below);
   nothing else about `auto` changed. "Has the lane" is read from the files, not the binding: `mediacap` derives the route (the script,
   the weights its graph loads, the custom nodes it names), so a default config, which binds every script, does not make a
   thin client look like a render box. With no lane here, `auto` goes to a node from `delegate_remotes`; with no lane and
@@ -2055,9 +2060,10 @@ WOULD match: `send family=<ours> to use its <theirs>`; or the release, or the re
 answered the dispatch with a refusal; `unreachable`: it did not answer) and for how long, and `since` is when the ticket first found
 the node in that state. A node absent from `delegate_remotes` is not named: nothing in the config says it exists.
 
-**What does not overflow.** A call under a lease its process inherited, and anything but an image job: graphs arrive with their own
-file check (a whole-node graph placed on a multi-GPU node would land on its display card), and video, animation and audio carry no
-per-family identity yet. (A call that carries a `waiter_token` is not exempt any more: it joins the ticket queue and brings its place.)
+**What does not overflow.** A call under a lease its process inherited, a call on a box with no `delegate_remotes`, and anything but an
+image job or a whole-node graph ([Graphs on the fleet](#graphs-on-the-fleet-adr-0082-amendment-1) below): video, animation and
+audio carry no per-family identity yet. An image call that carries a `waiter_token` is not exempt any more: it joins the ticket
+queue and brings its place. A graph that carries a `waiter_token` resumes a place in the local line and keeps it, and is never moved.
 
 **Named limits of overflow.** Every remote job pays ComfyUI's cold start (zero-warm). The same recipe and seed on a different GPU
 architecture is the same composition, not bit-identical pixels. A mis-predicted placement costs one bounce per node per pause: up
@@ -2201,6 +2207,117 @@ re-sent (the job is then polled by two processes); a guard that also requires th
 scan reuses the creation reading for 2 s. A node that frees between two scans can be taken by a caller that is not a ticket; the
 job then costs one bounce. The scan interval and jitter, the pause steps, the owner and keep timings and the 8 h ceiling are chosen
 constants, not measurements. Nothing here was run against a live lease, a live node or a render.
+
+## Graphs on the fleet (ADR 0082, Amendment 1)
+
+`offload_run_graph` (CLI `run-graph`) with `route` `auto` is offered once to the fleet when its own lane is not free, and every route
+that sends a graph to a node holds it to the rules below. The graph is the caller's, so it has no recipe and no family: what makes a
+node a fit is that it **holds the files the graph names**, and the node says so itself.
+
+**A graph is not a ticket.** The ticket queue above is the busy-lane path of an IMAGE call and of nothing else. A graph keeps the
+one-shot overflow of 0.179.0 (`tryGraphOverflow` and `placeGraph` in `internal/mediaremote/place.go`, the only placement code left
+that is not the ticket's): it is offered once to the nodes that can take it, in the roster's order, at most three of them, one graph
+call of a process per node (the in-process hold) and never a node a ticket of this machine has a job on (a graph reads the claim
+files and never writes one); a node that refuses or bounces is left alone by the same placer memory the tickets use. When no node
+admits it, the graph waits in this machine's own queue, joining it when the fleet attempt is over and not from when it arrived.
+**A graph does not wait in the cluster queue yet**: it keeps no place in it, does not start on a lane that frees after its one look
+at the fleet, and a repeat of the same graph is a second call, not the first one's ticket (`TestAGraphIsNotATicket`). A ticket's
+identity is the hash of the request's parameters, and a graph's parameters name files on this machine rather than carry them; what
+makes two graph calls the same call needs a decision of its own, which is why this is a follow-up and not part of the release that
+introduced both.
+
+**The node's door (the ACK check).** Before it writes a temp file, takes a lease or starts ComfyUI, `buildRunGraph`
+(`internal/fleetnode/graph_files.go`, with `mediacap.ScanGraph` and `mediacap.MissingModelFiles`) reads the graph:
+
+- a **weight file** is any string input, under **any key but one**, whose value ends in `.safetensors`, `.gguf`, `.pth`, `.pt`,
+  `.ckpt` or `.sft`: `ckpt_name`, `unet_name`, `vae_name`, `lora_name`, but also a `ModelPatchLoader`'s `name`, a wrapper loader's
+  `model`, an `ipadapter_file` or a primitive's `value` (every custom node picks its own key; the extension is the stable part).
+  The two exclusions the code keeps: the key `filename_prefix` (an output prefix, whatever its value) is never read, and neither is
+  a value that contains `://` (a URL). A link and a number are not strings and are not files either. The price is a text that
+  itself ends in a weight extension: it reads as a file name and costs a re-placeable 503 (the graph still runs on its own
+  machine). It must
+  resolve **by name** under **any class directory of any models root** of the node (`<comfy_dir>/models/*` and every entry of
+  `extra_model_paths.yaml`), as a ComfyUI loader opens it: the name relative to the class directory, subfolders included, never a
+  search for the basename. A class directory that is a symlink or a Windows junction counts. The class is not matched to the
+  loader (the harness does not know every loader; ComfyUI's own preflight stays the authority on a file under a class its loader
+  will not open).
+- an **input file** is the file input of an input loader: `image` of `LoadImage`, `LoadImageMask` and `LoadImageOutput`, `file` of
+  `LoadVideo`, `audio` of `LoadAudio`; it must be in `<comfy_dir>/input` (or `output` or `temp` when its `[output]` / `[temp]`
+  annotation says so). **Input files do not travel with a graph**: `/fleet/dispatch` carries JSON and the media-job door carries no
+  input for `run-graph`, so a node that lacks the file cannot be given it, and the refusal says so (carrying them is a named seam,
+  not built).
+- a name that is absolute or climbs out with `..` is never looked up and reads as missing (the name is data from a peer).
+- a model the **manifest** tells the node to fetch (a `models[]` entry with a `source_url`) is not missing: the satisfier
+  downloads it before it starts ComfyUI, as it always did.
+
+A node that lacks any of them answers **503** with the existing route-not-ready refusal, naming what is missing (up to six names
+of each kind), and **no job, temp file or lease exists**. Past six missing weight files it says `7 or more files ... and more` and
+gives no count: the node stops looking at the seventh (the door is open to any peer and a graph can name thousands of files, and a
+missing name costs a stat in every class directory of every models root, so the work is bounded by the six shown and not by the
+graph); a list of missing input files is short and is counted exactly. The delegator's `cluster[]` row keeps the first 300 bytes of that answer's body
+(`post()` truncates), so the sentence is short and two real Wan file names fit; a graph missing many long names shows its first two or
+three there, and the node's own 503 body (a `curl` of the dispatch) lists up to six. 503 is what every delegator re-places, so the call goes to the next node
+instead of this one cold-starting ComfyUI to defer. The check is by **name, not content**: a same-named file of other bytes is held. For a
+weight file the name is the practical identity (a model is published under one). For an **input file** it is not enough, because
+those are the caller's own and carry generic names (`image.png`, `ComfyUI_00001_.png [output]`) that two machines share with
+different bytes; so the delegator never auto-overflows a graph that reads one (below). A call that must leave its machine anyway
+(`route remote`, or `auto` on a machine with no graph lane of its own) still reaches this check with one, and for it the check
+stays by name: that is a named limit. A custom node's own file key is not read.
+
+**Which node.** A candidate serves `run-graph` with `run_graph` CONFIGURED when it reports its routes, runs this release (the
+file check ships with it: an equal `harness_version` proves that only when the release that adds the check carries a new version
+number, so the version bump ships with the merge, before any delegator is deployed), holds no lease of any class, is not this machine's own node, and passes the two rules below. The
+release proof and the two rules hold for **every** remote placement of a graph, not only the overflow: `route remote` and a thin
+client's `auto` pick a node by the same health fields and refuse a node that runs another release, or publishes none, by name
+(they do not read the media lease; the node's own grant refuses a job it cannot take). A fleet part-way through an upgrade
+therefore cannot place a graph on a node that is not yet on this release. The
+lane question is the whole-node reading of `Pipeline.MediaLaneFree` (`internal/pipeline/medialane_graph.go`: any lease,
+in-process slot or place in line, and the host's memory against the media class default, the largest family the box binds: the
+lease is taken for the graph as a whole before anything reads the weights it names, so that is an upper bound for the families the
+box binds and not the graph's own size, and a graph that names weights bigger than every bound family can be under-counted, a
+named limit), under the same relaxation contract as the image's (`TestMediaLaneFreeGraphNeverRefusesAGrant`,
+`TestMediaLaneFreeGraphWritesNothing`). The graph travels as it is: no family, no digest, `out_dir` and `min_vram_gb` never. A node's
+503 moves the call on like any refusal at the door (and, like any 503 that names no `Retry-After`, leaves that node alone for about
+5 s in the calling process) and counts toward the three attempts; when nothing admits, the call waits in
+this machine's own queue, and when that wait ends in a deferral the deferral carries `cluster[]` naming, per node, the file it
+lacks (a call that then runs here and succeeds carries no `cluster[]` and no note: only a deferral is annotated). A graph that names `devices`, one
+that carries a `waiter_token`, one under an inherited lease and one that **reads an input file** are not overflowed. The last waits
+for this machine's own lane, and the deferral it ends in says that the fleet was not asked and why (`fleet_note` in its data and in
+its reason). A call with no lane of its own to wait for (`route remote`, or `auto` on a thin client) is placed on a node as before,
+checked by name only, and held to the same release proof and the two rules below. Sending a size and a hash of each input file to the node would restore the overflow for such graphs and
+close that limit; it is not built.
+
+**One card.** A graph that names no devices holds the whole node and runs in the default ComfyUI instance, which sees every
+card. On a node with several, the delegator cannot tell which card that instance picks, and it may be the display card. So a
+whole-node graph is placed **only on a node that publishes exactly one card** in `gpu_devices`: a node with more is a named miss
+(`has 3 cards, ...`), and so is a node that publishes none (unknown is never a pass). This is a rule of this client's placement, and
+it covers every remote placement of a graph (the overflow, `route remote`, a thin client): this client cannot send a graph to a
+multi-GPU node. It does not change what such a node does with a graph sent to it by hand, nor a graph run on its own machine, whose
+whole-node instance can still pick the display card; that local case is parked. A single card that **drives a display** passes the
+rule: a box whose only card is its display card runs there by necessity, the allocator's own carve-out (`gpuprobe/display.go`), so
+the rule protects the display card of a multi-GPU box and nothing else.
+
+**What the two rules place today.** With the fleet as the film owner described it on 2026-10-09 (the 16 GB cards are the three of
+the multi-card workstation; the single-card nodes carry 8 GB cards), a graph that gets the default Wan floor below has **no remote
+target**: the one-card rule excludes the node with the 16 GB cards and the floor excludes the nodes the rule admits. It waits for
+its own lane, and a thin client cannot reach the workstation for a graph at all. That is the film owner's statement of the fleet,
+not a measurement. The durable fix is on the node (keep a whole-node graph off its display card there), which is the parked local
+item.
+
+**`min_vram_gb`.** `offload_run_graph` and `run-graph --min-vram-gb N` ask for a node whose **largest** card is at least N GB;
+a node that publishes no cards cannot be shown to have it. A card counts as the size it rounds to: nvidia-smi reports MiB/1024,
+so a 16 GB card reads 15.92 or 15.93 GiB and a literal comparison with 16 would shut out every 16 GB card
+(`TestMinVRAMReadsTheLargestCardAndTheNominalSize`). With no argument, a graph that names `model_family` `wan22` (`wan2.2` and `wan`
+are the same) via `model_family` / `--model-family` and carries a `height` input of 720 or more (the tallest of any node; none = no
+floor) gets a floor of 16 GB. **That row is chosen from the film owner's stated constraint that Wan 2.2 14B at 720p needs a 16 GB
+card; the harness did not measure it**, and every row that cites it says "chosen". The caller's number wins over it and 0 lifts it.
+The floor filters **remote** candidates only: the local lane is this machine's own grant, and `route local` never reads it. A
+malformed value (negative, not a number) is refused by name on every route (`mediaremote.Run`), so a call that stays on this
+machine never drops it silently.
+
+**Not built.** Input files for graphs, and with them a size and hash of each to restore the overflow for a graph that reads one; a
+content check of the files; `devices` on a remote graph; a custom node's own file key; a default floor for other families or for
+video (`offload_generate_video` takes no `min_vram_gb`).
 
 ## Comfy workflow templates catalog (phase A)
 

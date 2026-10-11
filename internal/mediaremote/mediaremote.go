@@ -205,6 +205,13 @@ func RunWith(ctx context.Context, cfg config.Config, runner Runner, req core.Req
 	if !ok {
 		return contractDefer(fmt.Sprintf("unrecognized route %q; use local, auto or remote", route), core.Meta{})
 	}
+	// A bad min_vram_gb is the caller's mistake whatever the route: refused here by name, before the lane is asked or a node
+	// is read, so a call that stays on this machine never drops the typo silently.
+	if req.Task == core.TaskRunGraph {
+		if _, _, err := minVRAMArg(req.Params); err != nil {
+			return contractDefer(err.Error(), core.Meta{})
+		}
+	}
 	if r == RouteLocal {
 		return runner.Run(ctx, req)
 	}
@@ -216,7 +223,18 @@ func RunWith(ctx context.Context, cfg config.Config, runner Runner, req core.Req
 			if noFleet {
 				return runner.Run(ctx, req)
 			}
-			// A lane here AND a fleet: a free lane runs the call here; a busy one makes it a ticket that runs on the
+			// A lane here AND a fleet. A whole-node GRAPH is offered once to an idle single-card node that holds the files
+			// it names when its lane is not free, and otherwise waits in this machine's own lane; the deferral it ends in
+			// says per node why the fleet did not take it (ADR 0082 Amendment 1). It is not a ticket: a graph does not wait
+			// in the cluster queue yet (ADR 0083).
+			if req.Task == core.TaskRunGraph {
+				ov := tryGraphOverflow(ctx, cfg, runner, req, remotes)
+				if ov.placed {
+					return ov.res
+				}
+				return ov.annotate(runner.Run(ctx, req))
+			}
+			// Any other call: a free lane runs it here; a busy one makes an IMAGE call a ticket that runs on the
 			// first matching lane that frees, here or on an idle node that renders the same recipe (ADR 0082,
 			// ADR 0083). The answer, when the call's window ends first, says per node why not.
 			return defaultQ.runQueued(ctx, cfg, runner, req, remotes, w)
@@ -335,7 +353,7 @@ func callWith(ctx context.Context, cfg config.Config, req core.Request, remotes 
 	if len(pl.inputs) > 0 {
 		route, taskForNode = "/fleet/media-job", taskMediaJob
 	}
-	base, node, err := pickNodeFor(ctx, cfg, bases, pl.fleetTask, taskForNode, nodeRoutes(req), needOf(req.Params))
+	base, node, err := pickNodeFor(ctx, cfg, bases, pl.fleetTask, taskForNode, nodeRoutes(req), needOf(req))
 	if err != nil {
 		return core.Result{}, err
 	}
@@ -607,7 +625,8 @@ func pickNode(ctx context.Context, cfg config.Config, bases []string, task, door
 }
 
 // pickNodeFor is pickNode for a call that asks something more of the node (need): an image job sent with refine=false
-// needs a node that carries it, and a node that does not is a named miss.
+// needs a node that carries it, and a graph needs a node on this release (releaseRefuses) with one card and the card size it
+// asked for (refuses); a node that does not is a named miss.
 func pickNodeFor(ctx context.Context, cfg config.Config, bases []string, task, doorTask string, routes []string, n need) (base, node string, err error) {
 	type cand struct {
 		base, node string
@@ -648,6 +667,14 @@ func pickNodeFor(ctx context.Context, cfg config.Config, bases []string, task, d
 		}
 		if n.refineOff && task == taskImage && !v.RefineHonoured {
 			misses = append(misses, fmt.Sprintf("%s: does not honour refine=false (an older harness would refine the prompt anyway)", who))
+			continue
+		}
+		if why := n.releaseRefuses(v); why != "" {
+			misses = append(misses, fmt.Sprintf("%s: %s", who, why))
+			continue
+		}
+		if why := n.refuses(v); why != "" {
+			misses = append(misses, fmt.Sprintf("%s: %s", who, why))
 			continue
 		}
 		id := v.NodeID

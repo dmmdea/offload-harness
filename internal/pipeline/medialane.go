@@ -117,7 +117,8 @@ func (p *Pipeline) resolveLane(ctx context.Context, req core.Request) (ln laneOf
 	return ln, "", false
 }
 
-// MediaLaneFree implements core.LaneProber for an image generation request.
+// MediaLaneFree implements core.LaneProber for an image generation request, and for a whole-node run_graph (medialane_graph.go,
+// which answers its own question and writes nothing).
 //
 // Two questions, told apart by whether the request resumes a place in line (a waiter_token that can still be resumed).
 // A NEW arrival asks whether a wait-0 try would be granted, which is the relaxation described above. A call that
@@ -125,6 +126,9 @@ func (p *Pipeline) resolveLane(ctx context.Context, req core.Request) (ln laneOf
 // callers that arrived before the place are ahead of it (the ticket queue's question, P0 plan S2): the lease queue
 // serves a resumed place by arrival time, so a caller behind it never holds the card against it.
 func (p *Pipeline) MediaLaneFree(ctx context.Context, req core.Request) core.LaneVerdict {
+	if req.Task == core.TaskRunGraph {
+		return p.graphLaneFree(ctx, req)
+	}
 	ln, why, unread := p.resolveLane(ctx, req)
 	if why != "" {
 		return core.LaneVerdict{Free: true, Why: "not judged: " + why, Unjudged: unread}

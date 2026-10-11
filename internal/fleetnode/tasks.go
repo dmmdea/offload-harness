@@ -492,7 +492,7 @@ func buildRequestIn(ctx context.Context, v *mediaView, loopbackListener bool, ta
 	case "audio-gen":
 		return buildAudioGen(payload)
 	case "run-graph":
-		return buildRunGraph(payload)
+		return buildRunGraph(cfg, payload)
 	case ComposeTask:
 		return buildComposeVideo(payload)
 	case ComposeProjectTask:
@@ -798,7 +798,11 @@ func buildAudioGen(payload json.RawMessage) (core.Request, func(), error) {
 // runner reads files — mcpserver.materialize's pattern) whose removal is the
 // returned cleanup's job. A caller's `out_dir` is dropped: outputs land in the node's
 // media_dir, the only directory /fleet/media serves.
-func buildRunGraph(payload json.RawMessage) (core.Request, func(), error) {
+//
+// Before anything is written, the graph is read for the files it names (graph_files.go): a node that does not hold one
+// answers with the re-placeable route-not-ready refusal naming it, so the delegator places the graph elsewhere instead of
+// this node cold-starting ComfyUI to defer.
+func buildRunGraph(cfg config.Config, payload json.RawMessage) (core.Request, func(), error) {
 	noop := func() {}
 	var in struct {
 		Graph       json.RawMessage `json:"graph"`
@@ -827,6 +831,9 @@ func buildRunGraph(payload json.RawMessage) (core.Request, func(), error) {
 		if err := json.Unmarshal(in.Manifest, &manifestObj); err != nil {
 			return core.Request{}, noop, fmt.Errorf("run-graph payload: manifest must be a JSON object: %v", err)
 		}
+	}
+	if nre := graphFilesRefusal(cfg, in.Graph, in.Manifest); nre != nil {
+		return core.Request{}, noop, nre
 	}
 
 	graphPath, err := materializeRaw(in.Graph, "fleet-run-graph-*.json")
