@@ -8,13 +8,21 @@ Versioning: [SemVer](https://semver.org/).
 
 ### Added — `comfy-video.mjs --wan-placement multicard`: the card-only Wan 2.2 placement on the two non-display cards of a lease, with no host RAM
 
-- **What it is.** One Wan 2.2 14B fp8 expert is 13.3 GiB and a film-size clip (720x1280x81) needs 9.7-11.0 GiB more for the sampler, so
+- **What it is.** One Wan 2.2 14B fp8 expert is 13.3 GiB and a film-size clip (720x1280x81) needs 12.2 GiB more for the sampler beyond the 3 GiB of the
+  expert kept resident (the film-size run's compute-card peak, 15.18 GiB, less those 3; the 4-step benchmark before it had read 9.7 to 11.0), so
   the clip fits no single 16 GB card, and the single-card way out (ComfyUI's dynamic VRAM) streams the experts through host RAM and costs
   the host the whole file. `--wan-placement multicard` spends a second card instead: `cuda:0` stores the text encoder, the VAE and the
   donor blocks of the expert in use, `cuda:1` computes with 3 GiB of the expert resident (`--wan-resident-gb`), and each expert loads
   through DisTorch2 with `cuda:1,3gb;cuda:0,*`. `single` stays the default and its graph, argv and launch are byte for byte what they were
-  (pinned by tests). Measured on two RTX 5060 Ti 16 GB in the 2026-10-11 benchmark (a 4-step run of the 20-step film recipe at the
-  film's geometry): 250 s per step, 13.3 GiB on the compute card and 11.1 GiB on the storage card at the peak, 2.3 GiB of host growth.
+  (pinned by tests). Measured on two RTX 5060 Ti 16 GB, 2026-10-11: a 4-step benchmark of the film recipe (250 s per step, 13.3 and
+  11.1 GiB, 2.3 GiB of host growth), then the full film-size clip in one media lease with `--ram 0`, run on commit 090fbd95, the tip of this branch before
+  the second review round (that round's fixes were not re-run on the cards): 720x1280x81, 20 steps, plain decode, 250.5 s per step on both experts, runner
+  wall 5136 s (85.6 min), the plain decode 31.5 s after the free node released both cards in 1.1 s; 15.18 GiB peak on the compute card (95.3 %, with 3.0 GiB
+  of the expert resident; 14.9 steady) and 10.86 GiB on the storage card; host growth 2.33 GiB steady beyond the VRAM charge. Frame check CLEAN: the chroma
+  step into the joins 24, 48 and 72 is z 1.92, 1.17 and 0.0 where the tiled decode measures z 6 to 18, the frame differences at the joins 24 and 48 are 0.69x and
+  0.82x the clip's median, no frozen or repeated frame, the walk continuous through both joins. The
+  Qwen-Image-Edit 2511 call at the film's full preset also runs on the pair (9 GiB of the DiT resident on the compute card, 15.98 s per step, 10.5 and
+  10.6 GiB per card).
 - **The two cards are the lease's.** They come from `GPU_LEASE_DEVICES` (else the lease's record); `--wan-cards <a>,<b>` names them only
   when no lease does, and under a lease it can only confirm them (a card the lease does not hold is refused). They are read against the
   driver's card table and refused unless there are exactly two, neither drives a display (`display_active` or `display_attached`) and
@@ -28,8 +36,8 @@ Versioning: [SemVer](https://semver.org/).
   contradict it), and `--wan-loader` is not read (one stderr line when `native` was asked). `ensureComfy` takes a `launch` and records
   the pair in its launch marker, so a running ComfyUI is reused only when it is this instance on this pair in this order. Refused before
   the lease slot, llama-swap or ComfyUI are touched: `--fast`, a GGUF or unnamed expert (`--high-unet` / `--low-unet` are required), another
-  family, a `--graph` file, a `--wan-resident-gb` that one of the two cards cannot hold at the call's geometry (3.9 GiB of an expert at most at film size; the storage card must
-  hold the rest of the expert beside the VAE), a UUID prefix that names two cards, and the placement's own flags lost to an `=` (`--wan-placement=multicard`, or `--seed=7 --wan-placement multicard`: the runner's
+  family, a `--graph` file, a `--wan-resident-gb` that one of the two cards cannot hold at the call's geometry (3.2 GiB of an expert at most at film size, from the film-size
+  run's measured compute-card peak; the storage card must hold the rest of the expert beside the VAE), a UUID prefix that names two cards, and the placement's own flags lost to an `=` (`--wan-placement=multicard`, or `--seed=7 --wan-placement multicard`: the runner's
   parser does not split it while the lease sizing does; write each flag as `--name value`).
 - **`render/comfyui-ext`, the harness's own ComfyUI code (the shared install is not written to).** A read-only safetensors reader
   (`OFFLOAD_RO_LOAD=1`): stock ComfyUI maps a safetensors file copy-on-write, which Windows charges to commit in full (+13.3 GiB per
@@ -75,8 +83,9 @@ byte-identical.
   card-only run waits 7,200 s unless `--wait-sec` or `COMFY_WAIT_SEC` says otherwise, and says which budget it used (`WAN-WAIT-NOTE`).
 - **The resident-share guard (MEDIUM, reported twice) and the storage card (LOW).** The guard admitted 5.1 GiB at film size where the benchmark says 4 is
   too thin, and scaled the activations linearly where the benchmark measured about twice that at mid sizes. It now holds both cards to the figures the
-  lease declares against (the film's 11.0 GiB, the benchmark's reserved allocator peaks as an envelope below it, `--reserve-vram`, the storage card's
-  13.4 - share + 0.8 GiB): 3.9 GiB at most at film size. A pair such as 24 + 8 GiB is refused before anything starts, with the share that would fit.
+  lease declares against (the film's activations, the benchmark's reserved allocator peaks as an envelope below it, the storage card's 13.4 - share + 0.8
+  GiB inside its size less `--reserve-vram`): 3.9 GiB at most at film size on the 11.0 GiB and the reserve of that round, 3.2 GiB on the film-size run's
+  12.2 GiB and the 0.5 GiB context margin of the entry below. A pair such as 24 + 8 GiB is refused before anything starts, with the share that would fit.
   A Go test fails when the runner's and `internal/hostneed`'s figures drift apart. A UUID prefix that names two cards is refused (it resolved to the first).
 - **A plain decode that ComfyUI retried tiled (MEDIUM).** It wrote the seamed clip to the requested path and exited 0, from the tail of a log that a
   kept instance shares with earlier runs, and read an unreadable log as "no fallback". It is now judged by this run's console: the clip is kept as
@@ -97,7 +106,9 @@ byte-identical.
   a behaviour test now). 34 new render tests (33 net: a source-text pin was replaced by a behaviour test) and 2 Go tests.
 - **Answered, not changed.** The reviewer's claim that the CHANGELOG's "every mutant fails a test" was overstated was right for the first round; that
   sentence now points here. No live run was made in this round: everything above is proved with fakes and with the benchmark's logs, not on the
-  cards, and the 20-step acceptance run goes through the lease queue.
+  cards. The 20-step acceptance run is the one in the entry above, made on 090fbd95, the tip before this round (720x1280x81, 20 steps, plain decode,
+  250.5 s per step, 5136 s of runner wall, host growth 2.33 GiB, frame check CLEAN, 15.18 GiB on the compute card and 10.86 GiB on the storage card); this round's
+  changes were not re-run on the cards.
 
 ### Fixed — `gpu reserve` says why its declared figure is the media class default, and that `--ram` states the real one (F71)
 

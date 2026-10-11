@@ -647,26 +647,30 @@ test("a row without a numeric size is no card, so a size check can never pass on
 });
 
 test("--wan-resident-gb above what the compute card can hold beside the sampler's activations at THIS geometry is refused with the numbers", () => {
-  // The sampler's activations are the benchmark's reserved figures (RESULTS 3.5) as an upper envelope below the film's size, and the film's 11.0 GiB
-  // (internal/hostneed wanActivationsGiB, the top of 9.7-11.0) from there up; the card keeps --reserve-vram (default 1.0), as the lease sizing does.
-  // The default geometry (832x480x49: 20,280 tokens, 6.3 GiB): 15.9 - 6.3 - 1.0 = 8.6 GiB at most
-  assert.equal(planWith({ "wan-resident-gb": "8" }).residentGb, 8);
-  assert.throws(() => planWith({ "wan-resident-gb": "9" }), /--wan-resident-gb 9 .*compute card \(idx 0, 15\.9 GiB\).*832x480x49.*at most 8\.6/);
+  // The sampler's activations are the benchmark's reserved figures (RESULTS 3.5) as an upper envelope below the film's size, and the film-size
+  // run's 12.2 GiB (internal/hostneed wanActivationsGiB: the compute card's measured 15.18 GiB peak less its 3 GiB resident share) from there up.
+  // The compute card keeps WAN_COMPUTE_CONTEXT_GIB (0.5) for the CUDA context beyond that figure. --reserve-vram is a model-load margin, not an
+  // activation ceiling: it is the storage card's margin (the storage test below), as in the lease sizing.
+  // The default geometry (832x480x49: 20,280 tokens, 6.3 GiB): 15.9 - 6.3 - 0.5 = 9.1 GiB at most
+  assert.equal(planWith({ "wan-resident-gb": "9" }).residentGb, 9);
+  assert.throws(() => planWith({ "wan-resident-gb": "10" }), /--wan-resident-gb 10 .*compute card \(idx 0, 15\.9 GiB\).*832x480x49.*at most 9\.1/);
   assert.throws(() => planWith({ "wan-resident-gb": "40" }), /--wan-resident-gb 40/);
-  // the film's geometry (720x1280x81: 75,600 tokens, 11.0 GiB beyond the resident share, the top of what the benchmark measured): the measured 3 passes,
-  // 4 leaves 0.9 GiB ("too thin for a single shot", RESULTS 3.1) and is refused, the same line the lease sizing draws
+  // the film's geometry (720x1280x81: 75,600 tokens, 12.2 GiB beyond the resident share: the film-size run's compute-card peak, 15.18 GiB, less its
+  // 3 GiB resident): the measured 3 passes, and so does 3.2, the planner's ceiling; above it the second expert's load runs out of memory
   const film = { width: "720", height: "1280", frames: "81" };
-  assert.equal(planWith({ ...film, "wan-resident-gb": "3" }).residentGb, 3);
-  assert.equal(planWith({ ...film, "wan-resident-gb": "3.9" }).residentGb, 3.9, "15.9 - 11.0 - 1.0 = 3.9 GiB at most");
-  assert.throws(() => planWith({ ...film, "wan-resident-gb": "4" }), /--wan-resident-gb 4 .*720x1280x81 \(75600 tokens\).*at most 3\.9/);
-  assert.throws(() => planWith({ ...film, "wan-resident-gb": "5" }), /--wan-resident-gb 5 /, "5 GiB was accepted before the review: it needs 16 of 15.9");
+  assert.equal(planWith({ ...film, "wan-resident-gb": "3" }).residentGb, 3, "the measured recipe is never refused by its own planner");
+  assert.equal(planWith({ ...film, "wan-resident-gb": "3.2" }).residentGb, 3.2, "15.9 - 12.2 - 0.5 = 3.2 GiB at most");
+  assert.throws(() => planWith({ ...film, "wan-resident-gb": "3.3" }), /--wan-resident-gb 3\.3 .*720x1280x81 \(75600 tokens\).*at most 3\.2/);
+  assert.throws(() => planWith({ ...film, "wan-resident-gb": "4" }), /--wan-resident-gb 4 .*at most 3\.2/);
   assert.throws(() => planWith({ ...film, "wan-resident-gb": "8" }), /--wan-resident-gb 8 /);
-  // a bigger clip than the film's needs no more than the film's figure says (the cap), and the runner's --reserve-vram is the card's reserve
-  assert.equal(planWith({ width: "1280", height: "1280", frames: "121", "wan-resident-gb": "3.9" }).residentGb, 3.9);
-  assert.throws(() => planWith({ ...film, "reserve-vram": "2", "wan-resident-gb": "3" }), /--wan-resident-gb 3 .*at most 2\.9/);
+  // a bigger clip than the film's needs no more than the film's figure says (the cap)
+  assert.equal(planWith({ width: "1280", height: "1280", frames: "121", "wan-resident-gb": "3.2" }).residentGb, 3.2);
+  assert.throws(() => planWith({ width: "1280", height: "1280", frames: "121", "wan-resident-gb": "3.3" }), /--wan-resident-gb 3\.3 /);
+  // --reserve-vram does not take the compute card's room: the measured recipe under a 2 GiB reserve is the same call
+  assert.equal(planWith({ ...film, "reserve-vram": "2", "wan-resident-gb": "3" }).residentGb, 3);
   // a small clip needs little: the estimate has a 2 GiB floor (480x832x17: 7,800 tokens, 2.4 GiB)
-  assert.equal(planWith({ width: "480", height: "832", frames: "17", "wan-resident-gb": "12" }).residentGb, 12, "15.9 - 2.4 - 1.0 = 12.5 GiB at most");
-  assert.throws(() => planWith({ width: "480", height: "832", frames: "17", "wan-resident-gb": "13" }), /--wan-resident-gb 13 .*at most 12\.5/);
+  assert.equal(planWith({ width: "480", height: "832", frames: "17", "wan-resident-gb": "12" }).residentGb, 12, "15.9 - 2.4 - 0.5 = 13.0 GiB at most");
+  assert.throws(() => planWith({ width: "480", height: "832", frames: "17", "wan-resident-gb": "14" }), /--wan-resident-gb 14 .*at most 13\.0/);
 });
 
 test("wanActivationsGib is never under the benchmark's reserved allocator peaks (RESULTS 3.5) and is capped at the film's figure", () => {
@@ -677,7 +681,8 @@ test("wanActivationsGib is never under the benchmark's reserved allocator peaks 
   assert.equal(M.wanActivationsGib(75600), M.WAN_FILM_ACTIVATIONS_GIB, "the film's size is the cap");
   assert.equal(M.wanActivationsGib(200000), M.WAN_FILM_ACTIVATIONS_GIB, "and nothing above it asks for more");
   assert.equal(M.wanActivationsGib(100), 2, "a floor under a tiny clip");
-  assert.equal(M.WAN_FILM_ACTIVATIONS_GIB, 11, "the top of the benchmark's 9.7-11.0 GiB, the figure internal/hostneed declares against");
+  assert.equal(M.WAN_FILM_ACTIVATIONS_GIB, 12.2, "the film-size run's compute-card peak (15.18 GiB) less its 3 GiB resident share, the figure internal/hostneed declares against");
+  assert.equal(M.WAN_COMPUTE_CONTEXT_GIB, 0.5, "the CUDA context kept beyond it: 15.9 - 12.2 - 0.5 = 3.2 GiB, the film-size ceiling");
 });
 
 test("the storage card is checked too: the rest of the expert, the VAE and the context must fit it", () => {
@@ -697,6 +702,8 @@ test("the storage card is checked too: the rest of the expert, the VAE and the c
   assert.equal(planOn(16, 16).residentGb, 3);
   assert.equal(planOn(16, 16, { "wan-resident-gb": "0" }).residentGb, 0);
   assert.throws(() => planOn(16, 12, { "wan-resident-gb": "0" }), /storage card/);
+  // --reserve-vram is the storage card's margin: 5 GiB of it leaves 11.0 of 16, the donor blocks and the VAE need 11.2
+  assert.throws(() => planOn(16, 16, { "reserve-vram": "5" }), /storage card \(idx 2, 16\.0 GiB\).*11\.2 GiB.*11\.0 GiB usable.*at least 3\.2/);
   assert.equal(M.WAN_EXPERT_GIB, 13.4);
   assert.equal(M.WAN_STORAGE_OVERHEAD_GIB, 0.8);
 });

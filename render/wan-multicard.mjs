@@ -6,9 +6,10 @@
 //   cuda:0 = the STORAGE card: text encoder, VAE and the donor blocks of the expert in use (about 10.3 GiB);
 //   cuda:1 = the COMPUTE card: a resident share of the expert (3 GiB) plus the sampler's activations; the donor
 //            blocks stream to it one at a time over the card-to-card copy (about 1.7 s of a 250 s step).
-// Measured on two RTX 5060 Ti 16 GB at the film's geometry (the 2026-10-11 benchmark, a 4-step run of the 20-step film
-// recipe; docs/systems/media-generation.md, "Card-only Wan"): compute card 13.3 GiB, storage card 11.1 GiB peak, host
-// growth 2.3 GiB over ComfyUI's idle.
+// Measured on two RTX 5060 Ti 16 GB at the film's geometry (docs/systems/media-generation.md, "Card-only Wan"): the
+// 2026-10-11 benchmark, a 4-step run of the 20-step film recipe, peaked at 13.3 GiB on the compute card and 11.1 GiB on the
+// storage card; the full 20-step clip of that day peaked at 15.18 GiB and 10.86 GiB, with 2.3 GiB of host growth over
+// ComfyUI's idle.
 //
 // WHAT THIS FILE DECIDES, all of it before ComfyUI starts, so a wrong card is a refusal and not a render:
 //   - which two cards (the lease's: GPU_LEASE_DEVICES, else the lease record; --wan-cards names them only when no lease
@@ -334,25 +335,29 @@ export function wanGeometry(flags) {
 /**
  * The stage sizes of the card-only placement, one set for the runner and for the lease sizing (internal/hostneed declares against the same
  * figures, and a Go test fails when either side drifts):
- *   WAN_FILM_ACTIVATIONS_GIB   what the sampler needs on the compute card beyond the resident weights at the film's size (720x1280x81, 75,600
- *                              tokens): the TOP of the benchmark's 9.7-11.0 GiB, which already holds the allocator's slack and the VAE encode;
+ *   WAN_FILM_ACTIVATIONS_GIB   what the compute card holds beyond the resident weights at the film's size (720x1280x81, 75,600 tokens): the
+ *                              film-size run's compute-card peak, 15.18 GiB (nvidia-smi, at the second expert's load), less its 3 GiB resident
+ *                              share, which already holds the allocator's slack and the CUDA context;
+ *   WAN_COMPUTE_CONTEXT_GIB    what the compute card keeps free beyond that figure, for the CUDA context and the driver: with it a 15.9 GiB card
+ *                              takes 3.2 GiB of an expert resident at film size (15.9 - 12.2 - 0.5), the film-size run's measured 3 with 0.2 to spare;
  *   WAN_STORAGE_OVERHEAD_GIB   what the storage card holds besides the donor blocks: the VAE, the CUDA context and the allocator's slack;
  *   WAN_EXPERT_GIB             an fp8 expert (internal/hostneed's documented Wan 2.2 size, rounded up).
  */
-export const WAN_FILM_ACTIVATIONS_GIB = 11.0;
+export const WAN_FILM_ACTIVATIONS_GIB = 12.2;
+export const WAN_COMPUTE_CONTEXT_GIB = 0.5;
 export const WAN_STORAGE_OVERHEAD_GIB = 0.8;
 export const WAN_EXPERT_GIB = 13.4;
 /** Below the film's size the activations follow the benchmark's allocator traces (RESULTS 3.5, compute-card peak RESERVED, which is what the card must hold). */
 const ACTIVATIONS_GIB_PER_1000_TOKENS = 0.31;
 /** Scaled with the tokens, never under this: even a small clip holds a context's worth of buffers. */
 const ACTIVATIONS_FLOOR_GIB = 2.0;
-/** What the card keeps for the display and the driver: the runner's --reserve-vram, default 1.0 (internal/hostneed's default too). */
+/** What the storage card keeps back: the runner's --reserve-vram, default 1.0 (internal/hostneed's default too). A model-load margin, so the compute card's check does not use it. */
 const DEFAULT_RESERVE_GIB = 1.0;
 
 /**
  * wanActivationsGib: the sampler's activations on the compute card at this many tokens. The benchmark reserved 2.19 GiB at 7,800 tokens, 3.66 at
  * 14,040, 5.31 at 20,280 (5.67 on the native allocator, 6.16 with sage attention) and 5.50 at 32,400; 0.31 GiB per 1,000 tokens is never under
- * any of them. The film's own size is the cap: the full model there was measured at 9.7-11.0 GiB, so nothing above it asks for more.
+ * any of them. The film's own size is the cap: the full model there was measured at 12.2 GiB beyond its resident share (the film-size run), so nothing above it asks for more.
  */
 export function wanActivationsGib(tokens) {
   return Math.min(WAN_FILM_ACTIVATIONS_GIB, Math.max(ACTIVATIONS_FLOOR_GIB, (tokens / 1000) * ACTIVATIONS_GIB_PER_1000_TOKENS));
@@ -361,8 +366,10 @@ export function wanActivationsGib(tokens) {
 /**
  * checkResident: a resident share one of the two cards cannot hold would run out of memory in the first sampler step, 80 minutes into a
  * film-size run's lease, with both cards held. The compute card holds the share and the sampler's activations; the storage card holds the rest of
- * the expert (the donor blocks), the VAE and the context. Each must fit its card less the reserve, with the figures internal/hostneed declares
- * against, at this geometry (the smaller the clip, the less the activations need).
+ * the expert (the donor blocks), the VAE and the context. The compute card must hold the share + the activations + WAN_COMPUTE_CONTEXT_GIB, which is
+ * the measured peak plus a margin (15.9 - 12.2 - 0.5 = 3.2 GiB at film size, and the measured 3 passes); the storage card must fit its blocks inside its
+ * size less --reserve-vram, which is ComfyUI's model-load margin and not an activation ceiling, so the compute card's check does not use it. Both
+ * with the figures internal/hostneed declares against, at this geometry (the smaller the clip, the less the activations need).
  */
 function checkResident(residentGb, pair, flags) {
   const reserveRaw = Number(flags["reserve-vram"]);
@@ -370,9 +377,9 @@ function checkResident(residentGb, pair, flags) {
   const computeGib = pair.compute.totalMiB / 1024, storageGib = pair.storage.totalMiB / 1024;
   const { w, h, f, tokens } = wanGeometry(flags);
   const activations = wanActivationsGib(tokens);
-  const most = computeGib - activations - reserve;
+  const most = computeGib - activations - WAN_COMPUTE_CONTEXT_GIB;
   if (residentGb > most) {
-    throw placementError(`--wan-resident-gb ${residentGb} leaves the compute card (idx ${pair.compute.index}, ${computeGib.toFixed(1)} GiB) about ${activations.toFixed(1)} GiB for the sampler's activations at ${w}x${h}x${f} (${tokens} tokens) and ${reserve} GiB of --reserve-vram: at most ${most.toFixed(1)} GiB of an expert can stay resident there (the measured film-size recipe keeps ${WAN_RESIDENT_GB_DEFAULT})`);
+    throw placementError(`--wan-resident-gb ${residentGb} leaves the compute card (idx ${pair.compute.index}, ${computeGib.toFixed(1)} GiB) about ${activations.toFixed(1)} GiB for the sampler's activations at ${w}x${h}x${f} (${tokens} tokens) and ${WAN_COMPUTE_CONTEXT_GIB} GiB for the CUDA context: at most ${most.toFixed(1)} GiB of an expert can stay resident there (the measured film-size recipe keeps ${WAN_RESIDENT_GB_DEFAULT})`);
   }
   const donor = WAN_EXPERT_GIB - residentGb;
   const stored = donor + WAN_STORAGE_OVERHEAD_GIB;
