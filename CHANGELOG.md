@@ -192,6 +192,16 @@ Versioning: [SemVer](https://semver.org/).
   can be under-counted (a named limit; the numbers are the RAM guard's). Nothing here was run live: the live acceptance (A8) is the
   first.
 
+### Fixed — a re-placement after a refusal never reuses a fleet snapshot whose probe began at the refusal's own clock reading (F66)
+
+- **The bug.** A subtask refused for capacity is offered to another node from a fresh read of the fleet: the run's cached probe
+  (2 s) is reused only when it was taken after the refusal, so a node the run's own siblings had just filled is not picked again.
+  The comparison was "at or after". On a clock that ticks coarsely (Windows: a millisecond or so) a probe that ended before the
+  refusal reads the same as the refusal when both fall in one tick, and the stale picture was reused. It is now "strictly after":
+  a probe that began at the refusal's own reading is read again, one more probe in a rare tie. `TestRunSpreadReplacementReprobesTheFleet`
+  failed 46 and 50 times in 400 on a Windows PC and never in 800 on Linux; `TestAProbeMemoThatBeganAtTheInstantOfTheRefusalIsNotReused`
+  pins the boundary on the readings themselves.
+
 ### Fixed — a healthy long render's lease (a render helper, or a script that runs one) is no longer labelled "expired ... open to a takeover" (F8)
 
 - **The defect.** A 1,394 s Qwen-Image still run as `gpu reserve --for ... -- node render/comfy-generate.mjs ...` had its

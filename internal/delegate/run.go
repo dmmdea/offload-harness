@@ -7069,8 +7069,11 @@ func (r *runner) fetchViewsDetailed(ctx context.Context) ([]NodeView, []string, 
 
 // fetchViewsSince is fetchViews for a caller that has just learned its picture of
 // the fleet was wrong - a re-placement after a refusal: the memo serves it only
-// when the snapshot was taken AT OR AFTER notBefore. A snapshot taken after the
-// refusal is shared; one that predates it is the stale picture and is never reused.
+// when the snapshot's probe began strictly AFTER notBefore. A snapshot taken after the
+// refusal is shared; one that predates it is the stale picture and is never reused, and
+// so is one whose probe began at the very reading of notBefore: on a clock that ticks
+// coarsely (Windows: a millisecond or so) a probe that ended before the refusal reads
+// the same as the refusal when both fall in one tick, and which came first is unknown.
 // Siblings that refuse together are not deduped by this: each one's refusal is newer
 // than the probe another began, so each reads the fleet once.
 func (r *runner) fetchViewsSince(ctx context.Context, notBefore time.Time) ([]NodeView, []string, []string) {
@@ -7115,7 +7118,7 @@ func (r *runner) memoisedProbe(notBefore time.Time) *probeSnapshot {
 	if r.probeMemo == nil || time.Since(r.probeMemo.at) >= fetchViewsMemoTTL {
 		return nil
 	}
-	if !notBefore.IsZero() && r.probeMemo.at.Before(notBefore) {
+	if !notBefore.IsZero() && !r.probeMemo.at.After(notBefore) {
 		return nil
 	}
 	return r.probeMemo

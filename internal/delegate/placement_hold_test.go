@@ -95,6 +95,35 @@ func TestRunSpreadReplacementReprobesTheFleet(t *testing.T) {
 	}
 }
 
+// TestAProbeMemoThatBeganAtTheInstantOfTheRefusalIsNotReused pins the boundary the test above
+// crossed by luck: the memo is shared with a re-placement only when its probe began strictly
+// after the refusal. On a clock that ticks coarsely (Windows: a millisecond or so) a probe that
+// ended before the refusal reads the same as the refusal when both fall in one tick, and
+// "at or after" reused it: TestRunSpreadReplacementReprobesTheFleet failed 46 and 50 times in
+// 400 on a Windows PC and never in 800 on Linux (register F66). Built on the readings, not on
+// the clock, so it does not depend on how fast the box is.
+func TestAProbeMemoThatBeganAtTheInstantOfTheRefusalIsNotReused(t *testing.T) {
+	refusedAt := time.Now()
+	for _, tc := range []struct {
+		name      string
+		at        time.Time
+		notBefore time.Time
+		want      bool
+	}{
+		{"the probe began before the refusal", refusedAt.Add(-time.Millisecond), refusedAt, false},
+		{"the probe began at the reading of the refusal (one clock tick)", refusedAt, refusedAt, false},
+		{"the probe began after the refusal", refusedAt.Add(time.Millisecond), refusedAt, true},
+		{"a plain read, no refusal to be after", refusedAt, time.Time{}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &runner{probeMemo: &probeSnapshot{at: tc.at}}
+			if got := r.memoisedProbe(tc.notBefore) != nil; got != tc.want {
+				t.Fatalf("memo reused = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestRunReplacementSkipsANodeThatJustRefusedForCapacity: node A refuses with a
 // Retry-After and node B is full right now. The wait must not ask A again while
 // its cooldown runs (its health still advertises the room it just denied), and
