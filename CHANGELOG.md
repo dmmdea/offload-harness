@@ -6,6 +6,406 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.180.0] - 2026-10-10 - a busy image call waits for the first matching lane anywhere in the cluster, graphs overflow to a node that holds their files, and a live render keeps its lease
+
+### Fixed — the ticket queue was off on any machine whose config sets no `state_dir`, which is the usual config (ADR 0083)
+
+- **The defect.** The ticket store opened only when `state_dir` was set (`storeFor`), and nothing resolved the platform default the
+  way the GPU lease does, so on a machine that leaves `state_dir` unset a busy image call fell back to the local line, a whole-node
+  graph took no claim, and `offload_status.media_queue[]` never listed a ticket. Every test of the queue set `state_dir` in its
+  fixture, so the default every real config takes was never exercised.
+- **The fix.** The queue, its tickets and both kinds of node claim (a ticket's and a graph call's) live under the state root the GPU
+  lease resolves, through the one function that resolves it (`gpulease.ResolveStateRoot`: `state_dir`, else `LOCAL_OFFLOAD_STATE_DIR`,
+  else `%ProgramData%\local-offload` on Windows or `/var/lib/local-offload` elsewhere), so the tickets, the claims and the lease's
+  place tokens of a machine share one root and no config key is needed (`TestTicketQueueNeedsNoStateDirKey`,
+  `TestAGraphReadsTheTicketClaimsOfTheDefaultStateRoot`, `TestTicketStoreAndLeaseShareOneStateRoot`). A root the lease refuses (a
+  cloud-synced folder) keeps no queue, and says so once in the log with the lease's reason (`TestARefusedStateRootKeepsNoQueueAndSaysSo`);
+  before, a `state_dir` in such a folder opened a queue the lease itself would have refused. The package's tests now run against a
+  throwaway state root (`TestMain`), as the other packages' do, so a fixture with no `state_dir` cannot write tickets under a real one.
+  No other S2 or S4 code keys on `state_dir`.
+
+### Added — a busy image call is a ticket the harness holds until the first matching lane frees, anywhere (the P0's "even when every machine is full", ADR 0083)
+
+- **The behaviour.** An `auto` image call (`offload_generate_image`, `generate-image`) on a machine that has the lane and a fleet, whose
+  lane is not free, used to overflow once to an idle matching node and otherwise fall back to the local line, joining it late; a
+  caller that looped on the queued answer re-sent the same request until something freed (85 answers in one recorded loop). It is now
+  a **ticket**: the harness holds the job and starts it on the first matching lane that frees, this machine's own or a node's, in the
+  order the call arrived, with no caller loop. A free lane runs the call here exactly as before; a box with no `delegate_remotes`
+  asks nothing; `route local` and `route remote` are unchanged.
+- **One request, one ticket.** A ticket is a file, `<state root>/media-queue/mq-<id>.json`, under the state root the GPU lease uses (no `state_dir` is needed), any process of the machine can read. Its
+  identity is the sha256 of the task, the prompt and the parameters without the `waiter_token`: **any identical re-send attaches to
+  the live ticket**, with or without a token (`TestIdenticalResendAttachesToTheLiveTicket`). `waiter_token=mq-...` collects the
+  result; a token of another request is refused by name; an unknown one is a new arrival; an `mq-` token never reaches the lease line.
+  The result a call takes stays on file, marked collected, for 2 minutes (chosen), so the other calls waiting for the same ticket
+  (an MCP door and a CLI of another process, or a second caller naming the token) get it too and nothing renders twice; a request
+  that only repeats the content after that is a new job. The ticket **fixes one seed** at creation when the caller gave none (1 to
+  1e9), so a bounce, a re-placement, an adoption and a local run render one composition (`TestTicketFixesOneSeed`).
+- **It keeps its seniority in the machine's own line.** New `core.PlaceKeeper` (the pipeline implements it, the MCP runner forwards
+  it) wraps the lease manager's place-keeping tokens and adds no admission logic: a place is left at creation with the ticket's
+  arrival time on the cards the real admission would queue the call on, touched on its own rhythm (a keeper that does not wait for
+  the scan, so a scan that spends its time in slow lane questions cannot let the places behind it lapse), left again with the same
+  arrival time if it lapsed, let go when the ticket ends, and spent by the final local run as its `waiter_token`. **The lane question for a call
+  that resumes a place is now ordered by arrival on every plan** (`gpualloc.QueuedClaimsBefore`); before, two places on one idle card
+  each read the other as in its way and neither would ever have been served. (`TestMediaLaneFreeOrdersByArrivalOnlyOnTheWholeNodePlan`
+  became `...ForACallThatResumesItsPlace`, and the pinned-plan row of the differential no longer requires the prober to call that state
+  busy; it still must never call busy a lane the real wait-0 admission grants.) A host that does not lease cards keeps no places; the
+  ticket waits without local seniority and the answer says so.
+- **One scanner per process, local first, then the fleet, late binding.** Every 10 s +/- 20 % (a chosen transport constant) the
+  scanner decides for each waiting ticket, oldest first, and never runs a job: a job runs in a goroutine of its own, so a local run
+  waiting in the lease line stalls neither another ticket's scan nor the touch that keeps each place alive. It starts the local run
+  when the lane question says the ticket would be served now (one ticket per scan), else asks the fleet with ADR 0082's own filter and
+  ranking, minus the nodes a job of the machine has a claim on (a ticket's, or a whole-node graph call's) and the nodes an older
+  waiting ticket of the machine matches. Nothing
+  is sent to a node before a lane is free there. **A run on this machine's lane that the lane refuses at once although it read free**
+  (`gpu_wait_ms` 0, or a younger place on the same card that a call without a wait cannot pass) does not make the scanner ask again at
+  once: the ticket pauses the lane for 5, 15, 60 and then 300 s (the node steps) while the fleet is looked at, so no loop of runs, each
+  writing the pipeline's own deferred row (`TestALostRaceOnTheLocalLaneIsNotARetryLoopAndTheFleetIsTriedMeanwhile`; 71 runs in 0.6 s
+  before). **A lane the pipeline could not read is not a free lane**: when the card table does not read inside its 4 s bound, or the
+  lease directory does not open, `core.LaneVerdict.Unjudged` is set, the call becomes a ticket, the fleet is looked at in the same scan
+  and the run on this machine's lane is the answer only when no node can take the call (`TestAnUnreadLaneStillLooksAtTheFleet`); a call
+  the prober does not model at all (another task, a binding without a lane, an inherited lease) still runs here at once. One node is
+  tried per scan; a refusal or bounce pauses the node (5 s for a full node that names no `Retry-After`, 60 s then 300 s for a bounce)
+  and the ticket goes on; the S1 bound of three nodes is gone, and a ticket ends only after 8 h without a lane.
+- **A node a ticket has a job on is in use for every scanner on the machine** (`TestPlacedTicketMarksNodeInUse`): a claim file per
+  node is written with the ticket's `placing` state, and the id of the job about to be sent, under a directory lock before the job is
+  sent, so two processes never send one single-job node two jobs (`TestTwoProcessesNeverDispatchTwoTicketsToOneSingleJobNode`, which
+  turns the ordering rule off so that only the claim stands between them). This closes the S1 open issue 6. **A whole-node graph call
+  that overflows by itself** (`route` auto on a machine with the graph lane) **takes the same claim**, under the same lock, before it
+  sends (a record marked `graph`, with no ticket file behind it, live while its process is, and, when the process is gone, only for the
+  first 2 minutes after the claim was taken; next section): a ticket is never sent a node such a graph is running on, and the reverse
+  (`TestATicketNeverSendsANodeAGraphHasAJobOn`, `TestAGraphAndATicketNeverHoldOneNodeTogether`). A call forced to a node (`route`
+  remote, or `auto` on a machine with no lane for it, image or graph) takes no claim and reads none, as before this release: it is
+  ranked by the nodes' own lease and queue answers, and the node's grant is what stands between it and a ticket's job.
+- **A dead owner's claim holds its node for 2 minutes** (chosen), not a moment less: the job it sent keeps running on the node, which
+  shows its lease only once the job is admitted, and in those seconds another process would have sent the node a second job.
+  **A node that does not answer is logged once per backoff step** (5, 15, 60, then 300 s), never per scan.
+- **Owners die.** A `waiting` or `local` ticket of a dead owner (process gone, or no beat for 10 minutes) is swept by the next scan or
+  call of any process and its place let go; a `placed` or `fetching` one is **adopted by the next identical call**, which polls the
+  recorded node job and fetches its outputs and never sends the request again, so the job renders once (`TestDeadOwnerPlacedTicketIsAdopted`:
+  one POST in all, one ledger row, no second card). A finished ticket nobody collected stays 6 hours when its job succeeded (chosen: the
+  caller was told to call once and come back for it) and 10 minutes when it failed (a repeat should try again). A ticket whose owner
+  ended while the job was being sent is asked about at the node: a node that denies the job was never given it, and the ticket goes back
+  in line with its arrival; a job the node accepted and passed back goes back in line too, and the node is left alone for a while.
+- **The directory lock is an operating-system file lock** (`flock` / `LockFileEx`), not a file whose age decides whether it is stale: every
+  way of breaking a stale file lock has a gap in which a slow contender removes the fresh lock of the one that broke it: on the first
+  design 24 of 300 contended rounds in the review, and 14 of 200 in `TestTheDirectoryLockNeverHasTwoHolders`, had two holders inside.
+  The system frees the lock when its holder's process ends, however it ends (`TestACrashedHoldersLockIsFreedWhenItsProcessEnds`).
+  The lock file stays in the queue directory for good. A cancel that lands while the scan is claiming a node ends the ticket before
+  anything is sent: the claim is let go and nothing reaches the node (`TestACancelDuringTheClaimSendsNothingAndFinishesOnce`; before, the
+  job was sent after the cancel and the ticket was finished twice).
+- **A scan writes no PAIR card, no ledger row and no lease waiter** (`TestScanNeverWritesCardsOrRows`, the C01 regression); the
+  call's one row and one card open at dispatch.
+- **The answer.** A call whose window ends first answers `{queued, scope: "cluster", ticket, waiter_token, position, local, cluster[],
+  next}` as a capacity deferral of class `gpu_queued`: the position among the machine's waiting tickets, this machine's own lane (state,
+  holder, callers ahead), and EVERY roster node in config order with its state (`free`, `busy`, `draining`, `not-capable`,
+  `unreachable`, `in-use`, `bounced`, `refused`, `skipped`), why, the key that differs, who holds it and since when; `next` says the
+  harness holds the job, not to call again, that a repeat attaches, and that `waiter_token=mq-...` only collects.
+- **The doors.** `offload_generate_image` takes `wait_s` (default `gpu_wait_ms`; 0 answers after the ticket's first look; at most
+  3600) and the ticket outlives the call. The CLI `generate-image` blocks until the job is done, prints where the ticket stands on
+  stderr, and the first Ctrl-C cancels a ticket that sent nothing (a job already on a node cannot be recalled; the next identical
+  command adopts it). `offload_status` gains `media_queue[]` (absent when there are none). The tool texts say not to call again.
+- **A node added to `delegate_remotes` joins a running session.** An MCP session never reloads its config; the ticket re-reads
+  `delegate_remotes` from the config file when its mtime or size changes (the server and the CLI pass the file), and only that key
+  moves (`TestRosterReReadWithoutRestart`).
+- **Closes** the S1 open issues 5 (a call carrying a `waiter_token` never overflowed, so a looping caller stayed in the local line) and
+  6 (two processes could stack two jobs on one idle node), and the parked finding that a call that bounced off the fleet rejoined the
+  local line from when it came back.
+- **Changed tests, said.** 13 of the 35 S1 overflow tests that asserted the fallback to the local queue (or the order of a single
+  call's attempts) now assert the ticket's answer (same rows, same reasons); 20 are unchanged and green (one of them needed a code fix: a
+  node that answers 503 with no `Retry-After` is now left alone for the first backoff step, or every scan would send it the job again); `TestACallIsSentToAtMostThreeNodes` and `TestConcurrentCallsDoNotStackOnOneNode`
+  are replaced by `TestABouncedAttemptGoesBackToWaitingAndTheNextScanTriesTheNextNode` and `TestPlacedTicketMarksNodeInUse`.
+- **Not changed, and said.** One line per delegating machine (its state dir); two machines meet only at a node's own grant. A CLI ticket
+  dies with the CLI. A repeat of an identical request while its result is uncollected returns that result (a second picture of one
+  prompt differs in a seed). Each waiting ticket costs one lane question and one roster read per scan. A refused run on the local lane
+  writes the pipeline's own deferred row (one per refusal, spaced by the pause). A process that is suspended for longer than 10 minutes
+  reads as dead to the others until it writes its beat again (its waiting tickets can be swept meanwhile; a placed one is adopted, not
+  re-sent). Nothing here was run against a live lease, a live node or a render; the scan interval, jitter, pause steps, owner and
+  keep timings and the 8 h ceiling are chosen constants, not measurements.
+- **Only an image call is a ticket.** A whole-node `run_graph` keeps its own one-shot overflow (the next section) and is **not** held
+  by the queue: **a graph does not wait in the cluster queue yet** (named limit, see that section). Video, animation and audio calls,
+  and an image call under a lease its process inherited, run as before.
+
+### Added — a whole-node graph runs on the fleet: a node checks the files it names, one card only, and a VRAM floor (F32, ADR 0082 Amendment 1)
+
+- **A node refuses a run-graph that names a file it does not hold, before any job exists.** `/fleet/dispatch` reads the graph at
+  the door (`mediacap.ScanGraph`): any string input, under any key but `filename_prefix`, whose value ends `.safetensors`,
+  `.gguf`, `.pth`, `.pt`, `.ckpt` or `.sft` and does not contain `://` is a weight file (a `ModelPatchLoader`'s `name` and a wrapper
+  loader's `model` count, not only `*_name` keys; those two, the key `filename_prefix` and a value containing `://`, are the
+  exclusions the code keeps), and the file input of `LoadImage`, `LoadImageMask`, `LoadImageOutput` (`image`), `LoadVideo` (`file`) and
+  `LoadAudio` (`audio`) is an input file. A weight file must exist by name under any class directory of any models root, a class
+  directory that is a symlink or a junction included (the same class-directory enumeration the host-RAM estimate and doctor's model
+  bindings use); an input file must be in the
+  ComfyUI input, output or temp directory. A node that lacks one answers **503** with the existing re-placeable route-not-ready
+  refusal naming it (up to six names of each kind; past six weight files it says `7 or more files ... and more` and gives no count,
+  because the node stops looking at the seventh: the door is open to any peer and a graph can name thousands of files, so the work is
+  bounded by what the refusal shows and not by the graph), before a temp file, a lease or ComfyUI exists, so a delegator moves on instead of a
+  node cold-starting ComfyUI to defer. The class-directory-link fix lives in `classDirs` (`internal/mediacap/modelbindings.go`), which
+  doctor's model bindings and the host-RAM estimate read too, so on a node whose class directory is a link they now find the files
+  behind it as well, not only this check. **Input files do not travel with a graph**, and the refusal says so. A model the manifest
+  tells the node to fetch (`source_url`) is not refused; a name that is absolute or climbs with `..` is never looked up. The check is
+  by name, not content.
+- **A busy lane places a whole-node graph on an idle node.** `Pipeline.MediaLaneFree` answers for a `run_graph` that names no
+  devices with the whole-node reading (any lease, slot or place in line; host RAM against the media class default) under the image
+  probe's contract (a relaxation of the real admission, held by a differential test; it writes nothing). The one-shot overflow of
+  0.179.0 now covers it, **as a path of its own for graphs**: an image call is a ticket in this release (the section above) and a
+  graph is not. A busy graph is offered once to the idle nodes that can take it (no family and no digest travel; a node's 503 at the
+  door moves the call to the next node, which, like any 503 that names no `Retry-After`, leaves that node alone for about 5 s in
+  this process; a ticket's scan reads that node as refused for those seconds, and the cause kept for a graph's 503 does not call the
+  node full, because the same 503 is a missing file), and when none admits it the graph waits in this machine's own queue, joining it when the fleet attempt is over and not
+  from when it arrived; if that wait ends in a deferral, the deferral carries `cluster[]` naming, per node, the file it lacks (a call
+  that then runs here and succeeds carries none). A graph with `devices`, a `waiter_token`, an inherited lease or an input file stays
+  here. The graph path keeps one limit of the old image overflow that the ticket removed for images: a graph is sent to at most
+  three nodes. **It shares the nodes with the tickets by the tickets' own two rules.** It takes the machine-wide claim of the node it
+  uses, under the directory lock, before it sends (an in-process hold stands first, and is the whole cover on a machine whose lease
+  root is refused and so keeps no queue), so no ticket and no other overflowing graph call, of this process or of another, is sent a
+  node it is running on (a call forced to a node takes no claim; see the ticket section), and it leaves a
+  node any such claim holds (`in-use`, `a job of this machine is running there (graph call, since ...)`;
+  `TestTwoProcessesNeverStackTwoGraphsOnOneNode`). And it **yields to the tickets**: every ticket that is waiting is older than a
+  graph that arrives now, so a node an older waiting ticket matched at its last scan is left to that ticket, and so is every node while
+  that ticket has not been scanned yet (its first scan comes within about one scan interval of its creation); the row reads `free`,
+  `idle, but ticket mq-... is older and first in line for it`, and the graph goes on to its own lane
+  (`TestAGraphLeavesANodeAnOlderTicketIsFirstInLineFor`). **A lane the pipeline could not read is not a free lane for a graph
+  either** (the card table past its 4 s bound, the lease directory not opening: `core.LaneVerdict.Unjudged`, as for an image): the
+  fleet is looked at first, the placement reads `this machine's graph lane could not be judged (...)`, and the graph runs on this
+  machine's lane when no node takes it (`TestAGraphWithAnUnreadLaneStillLooksAtTheFleet`, `TestMediaLaneFreeGraphIsFreeWhenTheCardTableCannotBeRead`,
+  `TestMediaLaneFreeGraphIsUnjudgedWhenTheLeaseDirectoryCannotBeOpened`). Two machines (two state dirs) still meet only at a node's own grant.
+- **A graph does not wait in the cluster queue yet** (a named limit of this release). It is not a ticket: it keeps no place in the
+  cluster queue, does not start on a lane that frees after its one look at the fleet, and is not attached by content (a repeat of the
+  same graph is a second call, not the first one's ticket). A graph that finds every lane busy therefore waits in this machine's
+  own queue, as it did in 0.179.0, and its caller may need to call again with the `waiter_token` the local lane returned. Making a
+  graph a ticket is a follow-up: a ticket's identity is the hash of the request's parameters, and a graph's parameters name files on
+  this machine (`graph_path`, `manifest_path`) rather than carry them, so what makes two graph calls the same call needs a decision
+  of its own.
+- **A graph that reads an input file is not auto-overflowed.** Input files are the caller's own and carry generic names
+  (`image.png`, `ComfyUI_00001_.png [output]`) that two machines share with different bytes, and a node can match one only by name,
+  so a node holding a same-named file would have run the graph on the wrong bytes and answered ok with a sha-verified output. The
+  call waits for this machine's own lane instead, and a deferral it ends in says why the fleet was not asked (`fleet_note` in its
+  data, and in its reason). A call that must leave this machine anyway (`route remote`, or `auto` on a machine with no graph lane of
+  its own, which has no queue to wait in) is placed as before, with the node's check by name only: the same-named-file risk
+  remains there, a named limit. Sending a size and a hash of each file to the node, which would restore the overflow for these
+  graphs, is a named seam, not built.
+- **A whole-node graph is placed only on a node that publishes exactly one card.** A graph that names no devices runs in the default
+  ComfyUI instance, which sees every card, and on a multi-GPU node could land on its display card. A node with more than one card is
+  a named miss, and so is a node that publishes no `gpu_devices`. This covers every remote placement of a graph, `route remote` and a
+  thin client included: this client no longer sends a graph to a multi-GPU node. (A graph sent to such a node by hand, or run on its
+  own machine, is unchanged; that local case stays parked.)
+- **`min_vram_gb` / `--min-vram-gb`, and `model_family` / `--model-family`, on `offload_run_graph` / `run-graph`.** Only a node whose
+  largest `gpu_devices[].vram_total_gb` is at least N GB takes the graph; a card counts as the size it rounds to (nvidia-smi reports
+  a 16 GB card as 15.92 GiB). With no argument, a graph that names `model_family` `wan22` and carries a `height` input of 720 or more
+  gets a 16 GB floor: a row **chosen** from the film owner's stated constraint that Wan 2.2 14B at 720p needs a 16 GB card, not
+  measured, and labelled so in every answer that cites it. The caller's number wins, 0 included. It filters remote candidates only.
+  A malformed value (negative, not a number) is refused by name on every route; a call that stayed on this machine used to drop it
+  silently.
+- **What the two placement rules place today, said plainly.** With the fleet as the film owner described it on 2026-10-09 (the 16 GB
+  cards are the three of the multi-card workstation; the single-card nodes carry 8 GB cards), a graph that gets the default Wan
+  floor has **no remote target**: the one-card rule excludes the node with the 16 GB cards and the floor excludes the nodes the
+  rule admits. It waits for its own lane, and a thin client cannot reach the workstation for a graph at all. The durable fix is on
+  the node (keep a whole-node graph off its display card there) and is the parked local item. A single card that drives a display
+  passes the one-card rule: it is the allocator's own carve-out for a box whose only card is its display card.
+- **The release that ships this must carry a new version number before any delegator is deployed.** A delegator takes an equal
+  `harness_version` as proof that a node has the file check; this change adds no version, so a node still on the build before it
+  would read as equal and take a graph it cannot check. The bump belongs to the merge (a deploy precondition, not a code switch).
+- **A graph is placed only on a node that runs this machine's release, on every route.** The proof above was first asked only by the
+  overflow; `route remote` and a thin client's `auto` pick their node by another function and did not compare `harness_version`, so
+  they could send a graph to a node on another release. They now refuse such a node, and one that publishes no version, by name, as the
+  overflow does. A fleet part-way through an upgrade therefore takes graphs only on the nodes already upgraded.
+- Not changed, and said: this change adds no VERSION or buildinfo bump of its own. A hash of the input files, `devices` on a remote
+  graph and a custom node's own file keys are named seams, not built. The node's host-RAM guard sizes a graph at the media class
+  default (the largest family the box binds), not at the files it names, so a graph naming weights bigger than every bound family
+  can be under-counted (a named limit; the numbers are the RAM guard's). Nothing here was run live: the live acceptance (A8) is the
+  first.
+
+### Fixed — a healthy long render's lease (a render helper, or a script that runs one) is no longer labelled "expired ... open to a takeover" (F8)
+
+- **The defect.** A 1,394 s Qwen-Image still run as `gpu reserve --for ... -- node render/comfy-generate.mjs ...` had its
+  lease labelled "expired ... still held and heartbeating, reading held-overdue and open to a takeover" at the end of its
+  first term while it was rendering normally: the caller declared no progress contract, the lease recorded no owner it could
+  tell apart, and the render helpers never wrote a progress file, so nothing vouched for the job (the term rule renews on
+  progress for such an owner and on nothing else). A waiter reading `gpu status` was told a healthy job was abandoned. The
+  first form of this fix recognised only the direct command line `node render/comfy-*.mjs ...`; the long renders of this
+  workspace are launched from a recipe (`cmd /c render-both.cmd`, `bash render-card-v3.sh`: 8 of the 9 orphaned
+  lease-wrapper cards in the C02 evidence), with the helper's path inside the script, and those leases were still labelled. The recipe form is
+  covered below.
+- **The wrapper declares the contract.** `gpu reserve` in its wrapper form, running a render helper that heartbeats
+  (`comfy-generate`, `-render`, `-edit`, `-inpaint`, `-video`, `-animate`, `-music`, `-upscale`, `-run-graph`) with no
+  `--progress-file` of the caller's, records a progress contract on the lease: a file under `<state root>/progress/` and a
+  15 minute stall window (chosen, not measured; the figure and why are in `docs/systems/gpu-lease.md`). It prints one line
+  saying so (and where it found the helper), creates the file just before the command starts, removes it when the command
+  ends, and hands the path to the command in the new `GPU_LEASE_PROGRESS_FILE` (a caller's own `--progress-file` is kept as
+  it is and handed down the same way, and never removed). `gpulease.SweepMintedProgress` removes minted files a killed wrapper
+  left, after seven days, inline in the next wrapper that mints one.
+- **Where it looks for the helper.** The helper is found as an argument behind an interpreter, in the inline command line of
+  one (`cmd /c "node ..."`, `bash -c`, `pwsh -Command`), or **in a script the command runs**: `gpulease.HeartbeatHelperBehind`
+  reads the script (`.cmd`, `.bat`, `.ps1`, `.sh`, `.bash`, `.py`, `.mjs`, `.js`, `.cjs`; the first 64 KiB, comment lines
+  skipped) and the scripts it names (8 files, 2 deep) for a helper's path, which is how `set "R=...\comfy-generate.mjs"` and
+  `GEN="...comfy-generate.mjs"` are found. It reads text and does not parse shell; a script it cannot find or open is "nothing
+  found" and the lease behaves as before. **`--progress-file auto`** asks for the minted file for a command the scan cannot
+  read (a compiled driver, a name built at run time), with your `--stall` or the 15 minute default. A bench, `sdcpp-generate`
+  or a Go verb gets nothing declared unless asked. A `--detach` hold wraps no command and runs several over its life, so it
+  declares nothing by itself and `--detach --progress-file auto` is refused: name its file with `--progress-file <path>
+  --stall <window>`, which the helpers find through the lease record. A script that names a helper and also runs long steps
+  that are not render helpers reads `held-stalled` during them (it would have been labelled expired at the end of its first
+  term without a contract); pass your own `--progress-file` for such a recipe.
+- **What `gpu status` says while the file is absent.** The wrapper's file exists only while its command runs, so a lease in
+  its queue, its drain (`--drain-timeout 90m` is ordinary), the seat's unload or the warm-back declares a file that is not
+  there. The status line told such a lease "has not appeared in 1h0m0s, past its 15m0s stall window: the job has not written
+  to it or the path is wrong"; for the wrapper's own file it now says "does not exist: the wrapper creates it when its command
+  starts and removes it when the command ends, so it is absent while the lease queues, drains, unloads the seat or warms it
+  back". The verdict never changed (a missing file reads unknown, never stalled). The file is removed before the warm-back, not
+  after the release: left in place it would go stale during a warm-back of minutes and read stalled.
+- **The helper heartbeats it.** New `render/lease-progress.mjs`: `pollOutputs` (the poll loop every ComfyUI runner shares)
+  appends one JSON line to the file, at most every 30 s, when ComfyUI answered a poll and still lists the prompt (in
+  `/history`, or running or pending in `/queue`); `comfy-generate --batch` writes one before and after every picture,
+  `withGpuSlot` one when the slot is ready, and `comfy-run-graph` one per manifest model while it provisions them. A helper under a lease whose record declares a progress file but that the wrapper
+  did not start (a detached hold with `--progress-file`) finds it in the record. The lines are appended (the file may be a
+  log the caller keeps), never throw, and do nothing when no file is declared.
+- **A hung or lost render is still labelled.** A hung helper stops polling, a ComfyUI that stops answering is an unanswered
+  poll, a prompt a restarted ComfyUI lost is listed nowhere, and a poisoned CUDA context ends the wait through the poll
+  loop's own probe: each stops the lines, the file stops moving, the lease reads `held-stalled` after its window and its
+  term is labelled expired at the end, as for any lease with a progress contract that stops moving. Nothing is killed or
+  released. **Not caught:** a prompt that sits in ComfyUI's running queue with a wedged sampler while HTTP keeps answering
+  and `/system_stats` stays healthy (ComfyUI has no polled step counter; its progress events are websocket-only and the
+  render tree is dependency-free): that stays bounded by `COMFY_WAIT_SEC` and the lease's maximum total, not by a stall
+  verdict.
+- **Tests.** `render/lease-progress.test.mjs` (22; the end-to-end one runs the real `comfy-generate.mjs --batch` and the
+  `comfy-render.mjs` child it spawns against a fake ComfyUI; two cover a `/history` that answers HTTP 500, which is no
+  evidence of a live prompt unless `/queue` lists it), `gpu_progress_test.go` and `gpu_progress_script_test.go` (the decision,
+  the helper list pinned to what `render/` contains, the real wrapper renewing a beating helper's lease, labelling a silent
+  one, keeping a caller's own file, reading a batch file and declaring from it, `--progress-file auto`),
+  `gpu_progress_drain_test.go` (the file does not exist through a drain and exists while the command runs),
+  `internal/gpulease/helperscan_test.go` (the scan and its bounds) and `internal/gpuactivity/minted_unknown_test.go`.
+  23 mutations of the first form were each caught; 22 more of this follow-up's code were each caught (one survived its first
+  test, an unset variable expanding to a path with a hole in it, and was killed after the test was sharpened).
+- **Docs.** `docs/systems/gpu-lease.md` (a new paragraph; the two passages that said an attended job without a progress file
+  is labelled at the end of its first term now say which job that still is), `docs/systems/media-generation.md`,
+  `render/README.md`, ADR 0070 (its amendment).
+
+### Fixed — `gpu status` no longer calls a card the display card because it is busy, and a batch between pictures does not read idle (F38)
+
+- **The defect.** `gpu status` printed `HELD-IDLE` on a live krea2 batch between two pictures and called card 0 "the display
+  card". The note said "that is the display card" about the busiest card the verdict had excluded from the holder's work,
+  whatever that card was: a lease on one card over a busy neighbour (a seat, another lease, another process) named the
+  neighbour the display card although it drives no screen.
+- **The naming.** A card is called the display card only when the card table says it is driving a screen right now
+  (`display_active`; never by index). Any other busy card the lease does not hold is named as **outside this lease's cards**
+  (a seat, another lease or another process is using it), and when both kinds are busy the note names each for what it is.
+  This is narrower than the placement rule: the allocator and `gpu cards` also mark a card display when a monitor is attached
+  to it with the screen asleep, so such a busy card outside the lease reads "outside this lease's cards" in `gpu status`
+  while `gpu cards` marks it display (both true; neither calls the load the holder's), and a test pins it.
+- **The batch.** With the progress contract a wrapped render helper now keeps (F8), a batch between two pictures reads
+  `held-working` while its file moves, and its note says the cards are quiet between items. A batch that stops writing
+  reads `held-stalled` as before. A lease running a render helper with no contract (an older wrapper, a caller that pinned
+  an old binary) stays `held-idle` and says why it cannot tell idle from stalled.
+- **Tests.** `internal/gpuactivity/f38_test.go` (6), `f38_display_rule_test.go` and `internal/gpulease/progressdir_test.go`; six
+  mutations of the shipped code were each caught, and 1 more for the display rule. `docs/systems/gpu-lease.md` (the verdict table).
+
+### Fixed — `gpu status` no longer flags the display card for desktop load as a possible device-trespass (F34)
+
+- **The defect.** While a lease held other cards, `gpu status` and `offload_status.gpu_lease` printed `possible device-trespass`
+  against the workstation's display card for ordinary desktop load (15 % or more). The flag exempted the display card by
+  `display_active` alone, which reads Disabled on every card whenever no lit screen or game is initialised, while
+  `display_attached` stays Yes on the monitor's card; so the card the card table marks `display` was never exempt. The docs
+  already promised "not flagged: the display card".
+- **The fix.** The flag now exempts a card the card table marks display (`display_active` Enabled **or** `display_attached` Yes,
+  the placement rule the desktop-process fold of F18 already uses), together with the cards `display_active` alone marks, so
+  neither reading's card loses its exemption. A card another live lease holds, a card a registered run is pinned to, a busy seat
+  and a whole-node lease stay excluded as before, and a busy card that is not marked display is still flagged. The verdict's own
+  load reading (`held-working`, `busy-outside`, the foreign-load sentence) is unchanged: it keeps `display_active` alone.
+- **A named limit.** The exemption is the card's marking, not its load, so an unleased heavy job on the display card is not
+  flagged either; from the activity view the desktop's use and a stray job on that card look the same.
+- **Tests.** `internal/gpuactivity/f34_trespass_display_test.go` (3: the `display_attached`-only card at 23 % and at 95 % with the
+  lease's card busy or quiet, the unleased non-display card still flagged, the union where the placement rule marks nothing).
+  Five mutations of the shipped line were each caught. `docs/systems/gpu-lease.md` (the `device-trespass` paragraph).
+
+### Fixed — `gpu --help` prints usage, and `gpu --config <path> <subcommand>` works (F35)
+
+- `local-offload gpu --help`, `-h`, `-help` and `help` print the subcommands on stdout and exit 0 (they answered `unknown gpu
+  subcommand "--help"` and exited 1); a bare `gpu` and an unknown subcommand are still errors, and the unknown-subcommand
+  message now points at `gpu --help`. A `--config <path>` (or `--config=<path>`) in front of the subcommand is handed to it,
+  as the top-level verb already did: `gpu --config x status` dispatched on `--config` and failed. `gpuVerbs` lists the
+  dispatcher's cases and a test pins the list to the switch and the usage to the list.
+- **Tests.** `gpu_usage_test.go` (5); six mutations were each caught. `docs/systems/gpu-lease.md` ("Using it").
+
+### Fixed — a transcription of a file with no audio stream says so (F21), and every deferred ledger row carries a reason code (F22)
+
+- **F21.** `offload_transcribe` on a file with no audio stream deferred with ffmpeg's raw text (`audio convert: audioio: ffmpeg
+  failed: exit status 234 ([out#0/wav @ 0x...] Output file does not contain any stream ...)`). `audioio` now returns
+  `ErrNoAudioStream` for it (matched on ffmpeg's own words, checked against a real ffmpeg on a video with no audio track), and the door
+  defers with **"the input has no audio stream"**, defer class `contract` (the caller's file is what is wrong, so it is not read as a
+  broken stack), `err_class` `bad_input`, and the ledger reason code `bad_input`. The remote lane no longer uploads such a file to a node
+  (the failed Opus conversion fell back to sending the original, and the node then failed on it with ffmpeg's words).
+- **F22.** The reason code was settled for `task == agent_delegate` alone, so a deferred row of any other door carried free text and,
+  on the media doors, an `err_class`: on one node 23 of 23 deferred rows, on another 21 of 100 had none (the review lane's local
+  "gpu busy" row among them). `Record`, the one path every writer takes, now settles the code of **every deferred row**: the
+  writer's own code from the closed set wins, otherwise the row is classified from its `err_class` (`ledger.DeferCode`) and then from the
+  stable prefix of its reason (`gpu busy:`, `seat busy:`, `no ... configured`, `audio convert:`, ...), and `other` when neither names it.
+  The closed set gains **`bad_input`** (additive). A row of another task that did not defer still carries none.
+- **F22 follow-up: the codes that were still `other`.** Replaying the real ledgers of a 48 hour window (221 deferred rows that are
+  not `agent_delegate`), the first form coded 162 of them `other`: the agent door's 96, the 48 `imagegen_families[...] ... is
+  required` rows of a config fault, the audio and video `generation failed:` rows (the identical image sentence was coded and
+  these were not) and others. Now: **the agent door's deferred rows carry the node's defer class as their code** (the door
+  knows it when it defers: `output failed schema`, `structured re-pack skipped` and `step budget exhausted` are prose, the
+  class is `budget`, `abstention`, `infrastructure`...; `capacity` is `node_busy`), `ledger.CodeForDeferClass`, pinned to every
+  `core.DeferClass*`; the audio and video `generation failed:`, `imagegen_families[`, `unknown image/edit family`, `refused:`
+  and the media doors' own empty-prompt and unknown-kind sentences have prefixes; and `audio convert:` is no longer a blanket
+  `bad_input`: ffmpeg that could not be run at all (`audioio.ErrFFmpegUnavailable`, an error that is not an `*exec.ExitError`)
+  files as `ffmpeg_unavailable` (`config`), a temp directory that could not be made as `infrastructure`, and what is left is
+  ffmpeg refusing the file. On the same 221 rows the words alone now code all but 96 of them, and those 96 are the agent door's,
+  which carry their class from now on (rows already in a ledger are not backfilled, so that figure cannot be replayed).
+  `TestEveryLiteralReasonAPipelineDoorDefersWithHasACode` walks the pipeline's writers (every literal reason passed to
+  `recordDefer` or `deferGen`) and fails when a new sentence classifies as `other` and is not listed with the reason it cannot
+  be classified from its words, which the file-name pin of `TestEveryWriterOfALedgerRowIsKnown` could not do. 14 mutations of this
+  follow-up's code were each caught.
+- **The writers are walked.** `TestEveryDeferredRowCarriesAReasonCodeFromTheClosedSet` records a row shaped like each writer's output
+  (the pipeline doors, the review lane's local defer, the media doors' err_classes, `RecordAccel`, the remote lane's row, a fleet node's
+  executor row); `TestEveryWriterOfALedgerRowIsKnown` parses the tree and fails when a file that builds a `ledger.Entry` or calls
+  `Record` on a ledger is not on its list; `TestEveryCoreErrClassHasALedgerReasonCode` pins every `core.ErrClass*` to the table; and
+  `TestADocumentedCodeIsAMemberAndTheFleetNodeDocListsEveryMember` keeps `docs/FLEET-NODE.md` listing every member.
+- **Tests.** `internal/audioio/noaudio_test.go`, `internal/sttremote/noaudio_test.go`, `internal/pipeline/transcribe_noaudio_test.go`,
+  `internal/ledger/defer_code_test.go`. `docs/FLEET-NODE.md`, `docs/OPERATOR-GUIDE.md`, `docs/systems/offload-pipeline.md`.
+
+### Fixed — PAIR cards that outlived what they described, and orphaned cards that say what happened (C02, C03, C04)
+
+- **C04, a seat-watch card that stays open.** Two paths left a seat-watch card "running" for as long as the watcher lived,
+  until the next fleet-serve's first sweep closed it "harness process exited". `Poll` returned at once when llama-swap's own
+  `/running` was unreadable, with no bound; and a harness load that could not be resolved held an open card untouched, with no
+  bound. **Which path, if either, held the one observed card for 642 s was not established**: the stretch may have been real,
+  with the fleet-serve that watched it stopped by a deploy swap; these are the two unbounded holes found in the code. After `seatUnreadableLimit` consecutive polls (a minute) the first now fails every open card once
+  ("llama-swap stopped answering while this seat served direct traffic"), and the second completes the card at its last busy poll.
+  Both counts reset on one good poll. And a seat card orphaned by the death of its **watcher** (a fleet-serve killed by a deploy
+  swap) is closed `completed` with no error, as a clean stop closes it: it was never a harness job, and a red "harness process
+  exited before the job finished" over a stretch whose seat may have been fine is a red card for no failure. Its `completedAt`
+  is the moment the sweep found the watcher gone (the register holds the stretch's start, not its last busy poll), so after a
+  long outage the stretch can read longer than the traffic it carried.
+- **C02, a killed wrapper.** The cards of the lease wrappers that died in the same second (a console close, exit `0xC000013A`)
+  and of the ones a session killed on purpose were correct to be red: the job died. The decision is to keep them red and have the
+  card say what happened. The sweep's text now names the process, whether the job was still queued ("it never started") or
+  running ("gone 7m into the run"), that no outcome was reported, and the causes it has seen (killed, console closed, reboot).
+  "Queued" means "never started" only where the producer marks its card running when its work starts (a lease card, a
+  delegation, a media call); a **transcription** never does (the wait is inside llama-swap), so its swept card says "gone 9m
+  in, no outcome reported" and does not claim the work had not begun (the first form said "it never started" about a
+  transcription killed mid-decode). The text
+  fits the 140-character card whole, and still starts with the words consumers match. It cannot say who ended the process: the
+  register holds a pid and a start time. `gpu reserve -- <command>` now also asks for `SIGTERM`: Go on Windows delivers a console
+  close, a logoff and a shutdown as `SIGTERM` and ends the process only after its handler has had its grace, so the wrapper kills
+  its command, closes its card ("terminated: its console was closed, or the session is ending or the machine is shutting down")
+  and releases its lease instead of dying silent. With `--drain --unload-seat` it skips the seat's warm-back (a reload of
+  minutes inside a grace of seconds, with a model loading while the machine goes down) and releases the lease right after
+  stopping the ComfyUI instances kept under it (a step bounded at 60 s, usually seconds): the warm stays owed in the seat marker, and `gpu release --warm-seat` or the seat's next request pays it. A Ctrl-C has
+  no such deadline and still warms the seat back first. A `taskkill /F` gives no signal; the sweep's text covers it. The cause of
+  the 01:09:59 incident itself was never established.
+- **C03, a recovered delegation.** A job a node finished and a recovery pass filed under `delegate-recovered/` had a card that
+  said it never finished. A delegation's orphan card now reads the delegator's intent ledger: "the node may still finish it, see
+  delegate-recovered/" while the dispatch is open, "the node reported the job's end; see delegate-recovered/" once a recovery
+  pass has filed the answer (the pass files an errored job the same way as a finished one, so the card does not say "finished").
+  It stays `failed`, because the call did fail (its caller got no answer), and a card keeps the text it was closed with: a
+  recovery filed after the sweep (the observed case, one minute after) does not rewrite it. Whether PAIR would let a later
+  `completed` frame replace a card that is already terminal cannot be established from this tree, so none is sent.
+- **Tests.** `internal/pairworkloads/seatwatch_exit_test.go`, `orphans_text_test.go`, `orphans_callcard_test.go`,
+  `gpu_signals_test.go`, `gpu_signals_warm_test.go` (the wrapper runs in a child process and the signal is delivered through a
+  seam; a console close cannot be driven from a test); 16 mutations were each caught, and 9 more for the transcription
+  text, the recovered-card wording and the warm-back. `docs/systems/pair-workloads.md`.
+
 ## [0.179.0] - 2026-10-10 - a busy image lane overflows to an idle node that renders the same recipe, and every GPU lease path has a host-RAM brake
 
 ### Added — a busy image lane overflows to an idle node that renders the same recipe (F52, ADR 0082)

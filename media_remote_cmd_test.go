@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/dmmdea/offload-harness/internal/buildinfo"
 )
 
 // mediaFakeNode is a hand-written fleet node for the media CLI verbs: health advertising the tasks and routes,
@@ -27,7 +29,9 @@ func startMediaFakeNode(t *testing.T, tasks []string, jobData, fileName, fileBod
 	n.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/fleet/health":
-			fmt.Fprintf(w, `{"node_id":"cli-node","schema_version":1,"supported_task_types":%s,"queue_depth":0}`, taskJSON)
+			// One card, as a single-GPU node publishes it: a whole-node graph is placed only on a node that says it has one. And
+			// this release: a graph is placed only on a node whose harness_version proves it has the file check that ships with it.
+			fmt.Fprintf(w, `{"node_id":"cli-node","schema_version":1,"harness_version":%q,"supported_task_types":%s,"queue_depth":0,"gpu_devices":[{"index":0,"uuid":"GPU-cli-0","name":"test card","vram_total_gb":15.92,"vram_free_gb":12}]}`, buildinfo.Version, taskJSON)
 		case r.URL.Path == "/fleet/dispatch" || r.URL.Path == "/fleet/media-job":
 			b, _ := io.ReadAll(r.Body)
 			var m map[string]any

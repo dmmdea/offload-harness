@@ -258,9 +258,12 @@ func laneCases() []laneCase {
 				}
 			},
 			params: ownPlace(nil, 0)},
-		// The pinned and the allocated plans do not queue by arrival time: every other caller in line claims the card
-		// before the call looks (gpualloc.QueuedClaims), a call with a place included, so a later waiter IS in its way.
-		{name: "pinned: a registered waiter that arrived after the call's own place is still in its way", spec: pinned, grants: false, mustSeeBusy: true,
+		// The real WAIT-0 admission of a pinned or an allocated plan does not queue by arrival time: every other caller in
+		// line claims the card before the call looks (gpualloc.QueuedClaims), a call with a place included, so a later
+		// waiter refuses the try (grants: false). The prober does NOT call it busy any more for a call that resumes a
+		// place (S2): such a call is a ticket's, and the question is whether it would be served before the caller behind
+		// it, which it is: the lease queue serves a resumed place by arrival time once it waits.
+		{name: "pinned: a registered waiter that arrived after the call's own place is behind it", spec: pinned, grants: false, mustSeeBusy: false,
 			setup:  func(t *testing.T, f *admitFixture) { seatWaiterAt(t, f.root, "transcribe a.wav", A) },
 			params: ownPlace([]string{A}, 5*time.Second)},
 		{name: "the call's own place in line is not in its way", spec: pinned, grants: true,
@@ -453,6 +456,8 @@ func TestMediaLaneFreeIsFreeForWhatItDoesNotModel(t *testing.T) {
 	} {
 		if v := f.p.MediaLaneFree(context.Background(), req); !v.Free {
 			t.Errorf("%s: want free (not judged), got busy: %s", name, v.Why)
+		} else if v.Unjudged {
+			t.Errorf("%s: the lane is not in question for a call the prober does not model, so it is not an UNREAD lane: %+v", name, v)
 		}
 	}
 	if v := f.p.MediaLaneFree(context.Background(), laneReq(nil)); v.Free {
@@ -466,8 +471,8 @@ func TestMediaLaneFreeIsFreeForWhatItDoesNotModel(t *testing.T) {
 		k, v, _ := strings.Cut(kv, "=")
 		t.Setenv(k, v)
 	}
-	if v := f.p.MediaLaneFree(context.Background(), laneReq(nil)); !v.Free || !strings.Contains(v.Why, "inherit") {
-		t.Errorf("under an inherited lease the lane is the parent's: %+v", v)
+	if v := f.p.MediaLaneFree(context.Background(), laneReq(nil)); !v.Free || !strings.Contains(v.Why, "inherit") || v.Unjudged {
+		t.Errorf("under an inherited lease the lane is the parent's, and not in question: %+v", v)
 	}
 }
 
@@ -485,6 +490,26 @@ func TestMediaLaneFreeIsFreeWhenTheCardTableCannotBeRead(t *testing.T) {
 	}
 	if v := f.p.MediaLaneFree(context.Background(), laneReq(nil)); !v.Free || !strings.Contains(v.Why, "card table") {
 		t.Errorf("an unreadable table must read as free with the reason: %+v", v)
+	} else if !v.Unjudged {
+		t.Errorf("an unreadable table is a lane that could not be read, which a router must not take for a free lane: %+v", v)
+	}
+}
+
+// A lease directory that cannot be opened is a lane that could not be read as well (the same flag as an unreadable card
+// table), and a call whose request the card table cannot plan is too.
+func TestMediaLaneFreeIsUnjudgedWhenTheLeaseDirectoryCannotBeOpened(t *testing.T) {
+	f := newAdmitFixtureWith(t, admitSpec{order: admitOrder, mutate: pinA})
+	if v := f.p.MediaLaneFree(context.Background(), laneReq(nil)); !v.Free || v.Unjudged {
+		t.Fatalf("control: the lane reads and nothing holds it: %+v", v)
+	}
+	notADir := filepath.Join(t.TempDir(), "a-file")
+	if err := os.WriteFile(notADir, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f.p.cfg.GPULockPath = filepath.Join(notADir, "gpu.lock") // a lease root under a file: it cannot be made
+	v := f.p.MediaLaneFree(context.Background(), laneReq(nil))
+	if !v.Free || !v.Unjudged || !strings.Contains(v.Why, "lease directory") {
+		t.Errorf("an unopenable lease directory is an unread lane: %+v", v)
 	}
 }
 
@@ -527,36 +552,6 @@ func TestMediaLaneFreeCountsOnlyTheCallersThatHoldTheCallBack(t *testing.T) {
 	}
 	if got := since(time.Minute); got != 2 {
 		t.Errorf("callers that arrived before the call's place are ahead of it: %d ahead", got)
-	}
-}
-
-// Arrival order decides only on the whole-node plan. A call that resumes its place, with a waiter that joined the line
-// AFTER that place: on a plan that names its cards the waiter claims them before the call looks, so it is in the way and the
-// verdict counts it; on the whole-node plan, which queues by arrival time, it is behind the call and nothing is in the way.
-func TestMediaLaneFreeOrdersByArrivalOnlyOnTheWholeNodePlan(t *testing.T) {
-	A := leaseIDOf(admitUUIDA)
-	for _, tc := range []struct {
-		name      string
-		spec      admitSpec
-		devices   []string
-		wantFree  bool
-		wantAhead int
-	}{
-		{"a pin names its cards", admitSpec{order: admitOrder, mutate: pinA}, []string{A}, false, 1},
-		{"the whole node", admitSpec{order: admitOrder, mutate: pinSeveral}, nil, true, 0},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			f := newAdmitFixtureWith(t, tc.spec)
-			seatWaiterAt(t, f.root, "transcribe a.wav", tc.devices...)
-			tok, err := f.m.LeaveToken(gpulease.ClassMedia, gpulease.Options{Reason: "image-gen", Devices: tc.devices}, time.Now().Add(-5*time.Second))
-			if err != nil {
-				t.Fatal(err)
-			}
-			v := f.p.MediaLaneFree(context.Background(), laneReq(map[string]any{"waiter_token": tok.ID}))
-			if v.Free != tc.wantFree || v.Ahead != tc.wantAhead {
-				t.Errorf("free=%v ahead=%d (%s), want free=%v ahead=%d", v.Free, v.Ahead, v.Why, tc.wantFree, tc.wantAhead)
-			}
-		})
 	}
 }
 

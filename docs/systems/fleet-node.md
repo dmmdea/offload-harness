@@ -1920,8 +1920,18 @@ recomputes the digest of the family the payload names (the default binding when 
 files on disk at that moment, and a mismatch, a family this node does not serve, or a non-ComfyUI binding is answered **`412`**
 with the node's digest, before any job exists: not `409` (a job that failed here before) and not `503` (busy). A delegator that
 reads `/fleet/health` decodes the rows (`delegate.NodeView.ImageRecipes`, `RefineHonoured`) and, beside them, the singular
-lease block's class, reason and remaining seconds (`LeaseClass`, `LeaseReason`, `LeaseRemainingSec`). See
+lease block's class, reason and remaining seconds (`LeaseClass`, `LeaseReason`, `LeaseRemainingSec`) and, when it lists more than
+one lease, the first one's epoch (it names the holder in a ticket's answer). See
 [media-generation.md](media-generation.md#overflow-a-busy-lane-places-an-image-call-on-the-fleet-adr-0082).
+
+**A delegator holds a busy call as a ticket (ADR 0083); a node publishes and checks nothing more for it.** What the node already
+publishes (`image_recipes[]`, `refine_honoured`, the lease block and `leases[]`, `queue_depth`) and does (the 412 recheck, the
+503 and 429 refusals, the `gpu_busy` / `gpu_queued` / `gpu_lease_unavailable` answers a bounce reads, its own grant as the authority)
+is all a ticket reads: the delegator's scanner reads `/fleet/health` of every roster node about every 10 s per waiting ticket and sends a job
+only to a node that holds no lease, so a node sees one `POST /fleet/dispatch` per job, never a parked one. A job whose delegator
+died is still on the node under its job id; the next identical call from that machine polls it and fetches its outputs
+(`GET /fleet/jobs/{id}`, `GET /fleet/media/{name}`), so the node's job store keeps the finished job as long as it always did. See
+[media-generation.md](media-generation.md#the-ticket-queue-a-busy-image-call-waits-for-the-first-matching-lane-that-frees-anywhere-adr-0083).
 
 ## Source map
 

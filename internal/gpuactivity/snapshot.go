@@ -159,9 +159,14 @@ type View struct {
 // legal, and the harness registers the runs of only two doors (agent_run and the delegation
 // door) and watches only the planner seat's gauge, so a cascade call on a router seat, an OCR or
 // speech seat, or the desktop looks the same from here. Not flagged: the display card (the
-// desktop's own use), a card another live lease holds, a card a registered run is pinned to,
-// anything while the seat itself is busy (its card is unknown here, so the busy card cannot be
-// attributed), and a whole-node lease (it has no outside).
+// desktop's own use: any card the card table marks "display", display_active OR display_attached,
+// because on the workstation display_active reads Disabled on every card whenever no lit screen or
+// game is initialised while display_attached stays Yes on the monitor's card, F34), a card another
+// live lease holds, a card a registered run is pinned to, anything while the seat itself is busy
+// (its card is unknown here, so the busy card cannot be attributed), and a whole-node lease (it has
+// no outside). The display exemption is by marking, not by load: an unleased heavy job on the
+// display card is therefore not flagged either (a named limit; the desktop's use and a stray job
+// look the same from here).
 func trespassOf(v View) []GPU {
 	if !v.Held || v.Holder == nil || len(v.Holder.Devices) == 0 {
 		return nil
@@ -176,10 +181,12 @@ func trespassOf(v View) []GPU {
 	for _, d := range v.OtherDevices {
 		held[strings.ToLower(strings.TrimSpace(d))] = true
 	}
-	display := displayCards(v)
+	// The display card is the one the card table marks (the placement rule, screenCards), not only the
+	// one driving a screen right now (displayCards): the union keeps either reading's card exempt.
+	display, screen := displayCards(v), screenCards(v)
 	var out []GPU
 	for _, g := range v.GPUs {
-		if !g.UtilKnown || g.UtilPct < utilBusyPct || display[g.UUID] || held[strings.ToLower(g.UUID)] {
+		if !g.UtilKnown || g.UtilPct < utilBusyPct || display[g.UUID] || screen[strings.ToLower(g.UUID)] || held[strings.ToLower(g.UUID)] {
 			continue
 		}
 		if runOnCard(v.Runs, g) {
@@ -376,7 +383,7 @@ func Assess(v View) (verdict, note string) {
 	// re-derive why a busy box still reads idle under the lease.
 	foreignTail := ""
 	if cardsBusy && !workCardsBusy {
-		foreignTail = " — the cards ARE busy (" + busyCard + ") but that is the display card, and with no seat request in flight that load is the desktop's, not the holder's work"
+		foreignTail = foreignLoadTail(v, display, leaseCards)
 	}
 
 	work := describeWork(v, now)
@@ -407,7 +414,10 @@ func Assess(v View) (verdict, note string) {
 	case v.Held && workCardsBusy:
 		return VerdictHeldWorking, "the lease is held and the cards are busy under it — " + workCard + "; the seat is idle, so this is the holder's own job" + trespassTail(v) + evidenceTail(h) + ownerCaveat(h) + factsTail(h) + holderTail(v)
 	case progressAdvancing:
-		return VerdictHeldWorking, "the lease is held and its progress file is advancing (" + progressSentence(h) + "); the seat is idle and the cards are quiet" + ownerCaveat(h) + factsTail(h) + holderTail(v)
+		// The cards of a lease that is moving its progress file are quiet BETWEEN items (a batch loads the next
+		// picture's prompt, a video is assembled on the CPU): quiet cards under a live contract are the job's
+		// own rhythm, not idleness (F38, a krea2 batch read held-idle between two pictures).
+		return VerdictHeldWorking, "the lease is held and its progress file is advancing (" + progressSentence(h) + "); the seat is idle and the lease's cards are quiet right now, which is how a job reads between two items or in a phase that does not load the GPU" + ownerCaveat(h) + factsTail(h) + holderTail(v)
 	case v.Held:
 		n := "the lease is held but NOTHING is running on the cards right now: no request in flight on the seat"
 		if v.Seat.Name == "" {
@@ -421,7 +431,7 @@ func Assess(v View) (verdict, note string) {
 			n += " (GPU utilization unknown: " + v.GPUErr + ")"
 		}
 		n += foreignTail
-		n += " — the holder is waiting (a drain, a queue), loading, or stalled" + trespassTail(v) + evidenceTail(h) + ownerCaveat(h) + factsTail(h) + holderTail(v)
+		n += " — the holder is waiting (a drain, a queue), loading, or stalled" + trespassTail(v) + evidenceTail(h) + helperTail(h) + ownerCaveat(h) + factsTail(h) + holderTail(v)
 		return VerdictHeldIdle, n
 	case seatBusy || runs > 0:
 		return VerdictWorking, "unreserved, and work is in flight on the seat: " + work + staleTail
@@ -440,6 +450,63 @@ func Assess(v View) (verdict, note string) {
 	default:
 		return VerdictFree, "no lease, no request in flight, cards quiet"
 	}
+}
+
+// foreignLoadTail names, by what each is, the busy cards that are NOT the holder's work. It is said only for
+// a card that is driving a display right now (displayCards: the card table's display_active, the rule the
+// verdict uses to keep a desktop's load out of the holder's work, never a card's index) and, apart from that,
+// for a card outside the cards this lease holds. The sentence used to call whichever card was busiest "the
+// display card": a lease on card 2 over a busy card 0 (a seat, another lease, another process) read "that is
+// the display card" for a card that drives no screen (F38).
+//
+// This is NOT the placement rule. The allocator and `gpu cards` also mark a card "display" when a monitor is
+// attached to it and its screen is asleep (display_attached, gpuprobe.ScreenCardUUIDs), because they must
+// keep new work off the desktop's card; this attribution reads display_active alone (screenCards, below, is
+// the wider rule). A busy card of that kind outside the lease therefore reads "outside this lease's cards"
+// here while `gpu cards` marks it display: both are true, and neither says the load is the holder's.
+func foreignLoadTail(v View, display map[string]bool, leaseCards map[string]bool) string {
+	var disp, outside *GPU
+	for i := range v.GPUs {
+		g := &v.GPUs[i]
+		if !g.UtilKnown || g.UtilPct < utilBusyPct {
+			continue
+		}
+		switch {
+		case display[g.UUID]:
+			if disp == nil || g.UtilPct > disp.UtilPct {
+				disp = g
+			}
+		case leaseCards != nil && !leaseCards[strings.ToLower(g.UUID)]:
+			if outside == nil || g.UtilPct > outside.UtilPct {
+				outside = g
+			}
+		}
+	}
+	switch {
+	case disp != nil && outside != nil:
+		return " — the cards ARE busy, but not with the holder's work: " + describeCard(*disp) + " is the display card (the desktop's load), and " +
+			describeCard(*outside) + " is outside this lease's cards (a seat, another lease or another process is using it)"
+	case disp != nil:
+		return " — the cards ARE busy (" + describeCard(*disp) + ") but that is the display card, and with no seat request in flight that load is the desktop's, not the holder's work"
+	case outside != nil:
+		return " — the cards ARE busy (" + describeCard(*outside) + ") but that card is outside this lease's cards (a seat, another lease or another process is using it), so it is not the holder's work"
+	}
+	return ""
+}
+
+// helperTail says, on a held-idle reading, what a lease with no progress contract that is running a render
+// helper was probably doing: between two pictures of a batch, or loading the next model, the cards are quiet
+// too, and without a contract there is nothing to tell that from a stall (F38). "" for a lease that declares
+// one (its own reading says so) or runs no helper.
+func helperTail(h *Holder) string {
+	if h == nil || h.Progress != nil {
+		return ""
+	}
+	helper, ok := gpulease.HeartbeatHelperInCommand(h.Command)
+	if !ok {
+		return ""
+	}
+	return "; it is running " + helper + ", whose cards are quiet between two pictures too, and it declared no progress contract that would say which this is (a `gpu reserve` that runs a render helper declares one itself)"
 }
 
 // describeCard is the one phrasing for "which card, how busy".
@@ -565,7 +632,7 @@ func (d DisplayCardProcs) Sentence() string {
 // (display.go, measured 2026-10-03), so the load-attribution rule (displayCards: display_active
 // alone) would fold nothing exactly when an unattended session reads the lease. Empty on a box
 // with no non-display card: its only card is its work card (the single-card guard every display
-// rule carries).
+// rule carries). trespassOf reads it too (F34), so the monitor's card is not flagged for desktop load.
 func screenCards(v View) map[string]bool {
 	devs := make([]gpuprobe.Device, 0, len(v.GPUs))
 	for _, g := range v.GPUs {

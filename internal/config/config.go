@@ -1401,8 +1401,11 @@ type Config struct {
 	// machine-wide or the GPU lease silently becomes per-user again.
 	Home string `json:"home,omitempty"`
 	// StateDir overrides the MACHINE-WIDE state root that holds the GPU lease
-	// (<state_dir>/gpu/lease) and future durable harness state. Empty = the platform
+	// (<state_dir>/gpu/lease), the media ticket queue (<state_dir>/media-queue) and
+	// future durable harness state. Empty = LOCAL_OFFLOAD_STATE_DIR, else the platform
 	// default: %ProgramData%\local-offload on Windows, /var/lib/local-offload elsewhere.
+	// Nothing needs it set: every consumer resolves the root through
+	// gpulease.ResolveStateRoot.
 	//
 	// It is machine-wide ON PURPOSE. The previous GPU lock defaulted under the OS temp
 	// dir, which is PER-USER on Windows, so a process in another security context took a

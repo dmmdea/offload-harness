@@ -514,6 +514,17 @@ const (
 	ErrClassComposeBusy = "compose_busy"
 )
 
+// ErrClassBadInput is the err_class of a call whose own input cannot be processed as given: an audio file
+// with no audio stream (F21), a picture that does not load. Nothing is wrong with the stack or the
+// contract, and no other node or retry changes the answer; the file does. The ledger files it under the
+// reason code bad_input.
+const ErrClassBadInput = "bad_input"
+
+// ErrClassFFmpegUnavailable is the err_class of a call that could not run because ffmpeg could not be run at
+// all: not on the PATH, or the configured path is wrong. The stack is at fault, not the caller's file. The
+// ledger files it under the reason code config (the same class the media runners already write).
+const ErrClassFFmpegUnavailable = "ffmpeg_unavailable"
+
 // ErrClassGPULeaseUnavailable is the err_class of a media call that did not run because its lease could not be taken
 // for a reason that is not another job's hold: a lease location the node cannot use, or a host-RAM need that no state
 // of the host admits. Nothing ran (the only producer, internal/pipeline deferForLease, sees acquisition errors and

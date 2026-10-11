@@ -13,6 +13,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/gpulease"
 	"io"
 	"log"
+	"math"
 	"net"
 	"os"
 	"os/exec"
@@ -309,7 +310,9 @@ Usage:
   local-offload upscale-image <image> [--scale F] [--width N --height N] [--method lanczos] [--model name] [--out path]   ESRGAN enlarge (this machine's upscale_model)
   local-offload generate-video <out.mp4> <still.png> "<prompt>" [--model hunyuan|wan] [--frames 49] [--seed N] [--reserve-vram F] [--fast] [--upscale]
   local-offload animate-character <out.mp4> <ref.png> <driver.mp4> "<prompt>" [--motion-prompt "..."] [--frames 81] [--seed N]
-  local-offload run-graph --graph <g.json> [--manifest <m.json>] [--out-dir <d>] [--reserve-vram F] [--json]
+  local-offload run-graph --graph <g.json> [--manifest <m.json>] [--out-dir <d>] [--reserve-vram F] [--min-vram-gb N] [--model-family wan22] [--route local|auto|remote] [--remote URL]... [--json]
+                                         with a fleet, a whole-node graph goes to an idle node with ONE card that holds the files it names; --min-vram-gb N asks for a node whose largest card is at least N GB
+                                         (without it, --model-family wan22 and a height of 720 or more get a 16 GB floor chosen from the film owner's stated constraint, not measured; 0 lifts it)
   local-offload compose-video --template <name> [--variables '<json>'] | --html <file> | --project-dir <dir>
                               [--format mp4|webm|mov|png-sequence|gif] [--fps N] [--quality draft|standard|high]
                               [--resolution landscape|...] [--workers N] [--strict=false] [--snapshots 1,2.5] [--out path] [--json]
@@ -1010,7 +1013,7 @@ func runGenerateImage(args []string) error {
 		return fmt.Errorf("generate-image requires a prompt (not stdin): local-offload generate-image \"<prompt>\" [--width 1024]")
 	}
 
-	cfg := loadCfg(fs)
+	cfg, src := loadCfgWithSource(fs)
 	p, cleanup, err := openPipeline(cfg)
 	if err != nil {
 		return err
@@ -1047,12 +1050,26 @@ func runGenerateImage(args []string) error {
 	if *transparent {
 		params["transparent"] = true
 	}
-	res := mediaremote.Run(context.Background(), cfg, p, core.Request{
+	// This verb IS the wait: when every lane is busy it becomes a ticket (ADR 0083) and blocks until the first matching lane
+	// that frees has rendered it, telling the operator where it stands on stderr. The first Ctrl-C cancels a ticket that has
+	// sent nothing anywhere (a job already on a node cannot be recalled; run the same command to collect it); the second
+	// interrupt is the default one.
+	ictx, stopInterrupt := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stopInterrupt()
+	go func() {
+		<-ictx.Done()
+		stopInterrupt()
+	}()
+	wait := mediaremote.Wait{Window: -1, Notify: func(line string) { fmt.Fprintln(os.Stderr, line) }}
+	if src.Loaded() {
+		wait.RosterFile = src.Path
+	}
+	res := mediaremote.RunWith(ictx, cfg, p, core.Request{
 		Task:   core.TaskGenerateImage,
 		Door:   "cli:generate-image",
 		Input:  positional,
 		Params: params,
-	}, *route, remotes)
+	}, *route, remotes, wait)
 	emitResult(res, *asJSON, "", *compactFlag)
 	return nil
 }
@@ -1205,6 +1222,8 @@ func runRunGraph(args []string) error {
 	fs.String("manifest-json", "", "inline node manifest JSON (alternative to --manifest)")
 	fs.String("out-dir", "", "directory for output files (default under the media dir)")
 	fs.String("reserve-vram", "", "ComfyUI --reserve-vram override")
+	fs.String("min-vram-gb", "", "only a fleet node whose largest card is at least N GB may take the graph (0 lifts the default floor)")
+	fs.String("model-family", "", "the family this graph belongs to (wan22 for Wan 2.2); only the default --min-vram-gb floor reads it")
 	route := fs.String("route", "auto", "local | auto (here when this machine has the lane, derived from the files its route loads, else a fleet node from delegate_remotes) | remote (a fleet node; input files travel in a hash-checked bundle and the output is fetched back verified; ADR 0077)")
 	var remotes repeatedFlag
 	fs.Var(&remotes, "remote", "fleet node base URL for this call (repeatable); must be one of delegate_remotes")
@@ -1244,6 +1263,8 @@ func runGraphParams(args []string) (map[string]any, error) {
 	manifestJSON := fs.String("manifest-json", "", "")
 	outDir := fs.String("out-dir", "", "")
 	reserve := fs.String("reserve-vram", "", "")
+	minVRAM := fs.String("min-vram-gb", "", "")
+	family := fs.String("model-family", "", "")
 	fs.String("route", "", "")
 	fs.Var(new(repeatedFlag), "remote", "")
 	if err := fs.Parse(args); err != nil {
@@ -1251,6 +1272,14 @@ func runGraphParams(args []string) (map[string]any, error) {
 	}
 	if *graph == "" && *graphJSON == "" {
 		return nil, fmt.Errorf("run-graph: --graph or --graph-json required")
+	}
+	var floor *float64
+	if s := strings.TrimSpace(*minVRAM); s != "" {
+		v, err := strconv.ParseFloat(s, 64)
+		if err != nil || v < 0 || math.IsNaN(v) || math.IsInf(v, 0) {
+			return nil, fmt.Errorf("run-graph: --min-vram-gb must be a number of GB, 0 or more; got %q", s)
+		}
+		floor = &v
 	}
 	graphPath, err := materializeArg(*graph, *graphJSON, "run-graph-*.json")
 	if err != nil {
@@ -1260,12 +1289,19 @@ func runGraphParams(args []string) (map[string]any, error) {
 	if err != nil {
 		return nil, fmt.Errorf("manifest: %w", err)
 	}
-	return map[string]any{
+	params := map[string]any{
 		"graph_path":    graphPath,
 		"manifest_path": manifestPath,
 		"out_dir":       *outDir,
 		"reserve_vram":  *reserve,
-	}, nil
+	}
+	if floor != nil {
+		params["min_vram_gb"] = *floor
+	}
+	if f := strings.TrimSpace(*family); f != "" {
+		params["model_family"] = f
+	}
+	return params, nil
 }
 
 // materializeArg returns path if set, else writes inline json to a temp file and returns
@@ -2255,7 +2291,13 @@ func runMCP(args []string) error {
 		}
 	}()
 
-	err = mcpserver.New(p).WithConfigError(src.LoadErr).Run(ctx, version)
+	srv := mcpserver.New(p).WithConfigError(src.LoadErr)
+	if src.Loaded() {
+		// The server never reloads its config, so the ticket queue re-reads delegate_remotes from this file when it changes
+		// (ADR 0083): a node added to the file joins the running session.
+		srv = srv.WithConfigSource(src.Path)
+	}
+	err = srv.Run(ctx, version)
 	stopSignals()
 	<-flushDone
 	// A cancelled context IS the clean shutdown here, not a failure. Returning it

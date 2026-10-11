@@ -1250,6 +1250,21 @@ func (p *Pipeline) runTranscribe(ctx context.Context, req core.Request, meta cor
 	wav, cleanup, cerr := audioio.ConvertToWav16k(req.Audio, p.cfg.FFmpegPath)
 	if cerr != nil {
 		meta.LatencyMs = time.Since(start).Milliseconds()
+		if errors.Is(cerr, audioio.ErrNoAudioStream) {
+			// The file has nothing to transcribe: say so in the caller's words, not ffmpeg's, and class it as a
+			// bad input (the contract class, so it is not read as a broken stack): no node and no retry changes it
+			// (F21).
+			meta.ErrClass = core.ErrClassBadInput
+			p.recordDefer(req.Task, meta, len(req.Audio), audioio.ErrNoAudioStream.Error())
+			res := core.Deferf(audioio.ErrNoAudioStream.Error(), "", meta)
+			res.DeferClass = core.DeferClassContract
+			return res
+		}
+		if errors.Is(cerr, audioio.ErrFFmpegUnavailable) {
+			// ffmpeg never ran: the box has none or the configured path is wrong. That is the stack's, and the
+			// ledger must not file it as the caller's file (bad_input) with the ffmpeg exit codes beside it.
+			meta.ErrClass = core.ErrClassFFmpegUnavailable
+		}
 		p.recordDefer(req.Task, meta, len(req.Audio), "audio convert: "+cerr.Error())
 		return core.Deferf("audio convert: "+cerr.Error(), "", meta)
 	}
@@ -4934,6 +4949,21 @@ func (p *Pipeline) recordDefer(task core.TaskType, meta core.Meta, inputChars in
 	}
 	e := callRowFrom(task, meta, true, inputChars)
 	e.Reason = reason
+	_ = p.led.Record(e)
+}
+
+// recordDeferClassed is recordDefer for a defer that carries its class (the agent door's, core.DeferClass*).
+// The class is the typed fact the reason's prose cannot give a reader who groups rows: "output failed
+// schema", "structured re-pack skipped" and "step budget exhausted" are three sentences and one class
+// (F22: 31 + 20 + 4 of the agent door's deferred rows on one night filed as "other"). The ledger settles the
+// reason code from it when it knows the class, and from the reason otherwise.
+func (p *Pipeline) recordDeferClassed(task core.TaskType, meta core.Meta, inputChars int, reason, deferClass string) {
+	if p.led == nil {
+		return
+	}
+	e := callRowFrom(task, meta, true, inputChars)
+	e.Reason = reason
+	e.ReasonCode = ledger.CodeForDeferClass(deferClass)
 	_ = p.led.Record(e)
 }
 

@@ -47,7 +47,7 @@ func TestNoFleetBoxIsByteIdentical(t *testing.T) {
 	lr := &laneRunner{verdict: heldLane(), rig: rig, local: queuedLocal()}
 	req := overflowReq(t, "", nil)
 	want := queuedLocal()
-	got := Run(context.Background(), cfg, lr, req, "auto", nil)
+	got := runBounded(cfg, lr, req, "auto", nil)
 	if probes, runs := lr.counts(); probes != 0 || runs != 1 {
 		t.Fatalf("a box with no fleet asks nothing and runs the call once: probes %d runs %d", probes, runs)
 	}
@@ -64,7 +64,7 @@ func TestNoFleetBoxIsByteIdentical(t *testing.T) {
 	n := startImageNode(t, "node-b", "krea2", nil, nodeOpts{})
 	cfg.DelegateRemotes = []string{n.srv.URL}
 	lr2 := &laneRunner{verdict: heldLane()}
-	if res := Run(context.Background(), cfg, lr2, req, "local", nil); !res.OK {
+	if res := runBounded(cfg, lr2, req, "local", nil); !res.OK {
 		t.Fatal(res)
 	}
 	if probes, runs := lr2.counts(); probes != 0 || runs != 1 {
@@ -78,7 +78,7 @@ func TestFreeLaneRunsLocalUnchanged(t *testing.T) {
 	n := startImageNode(t, "node-b", "krea2", map[string]string{"qwen-image-2.1": block(int8Ckpt, "")}, nodeOpts{})
 	cfg := overflowClient(t, "krea2", map[string]string{"qwen-image-2.1-fast": block(int8Ckpt, "")}, n)
 	lr := &laneRunner{verdict: core.LaneVerdict{Free: true}}
-	res := Run(context.Background(), cfg, lr, overflowReq(t, "qwen-image-2.1-fast", nil), "auto", nil)
+	res := runBounded(cfg, lr, overflowReq(t, "qwen-image-2.1-fast", nil), "auto", nil)
 	if !res.OK || string(res.Data) != `{"local":true}` {
 		t.Fatalf("the call runs here: %+v", res)
 	}
@@ -98,7 +98,7 @@ func TestHeldLaneOverflowsToMatchingNode(t *testing.T) {
 	req := overflowReq(t, "qwen-image-2.1-fast", nil)
 	out := req.Params["out"].(string)
 
-	res := Run(context.Background(), cfg, lr, req, "auto", nil)
+	res := runBounded(cfg, lr, req, "auto", nil)
 	if !res.OK {
 		t.Fatalf("the idle matching node must take the call: %+v", res)
 	}
@@ -161,7 +161,7 @@ func TestEmptyFamilyNeverLandsOnADifferentDefault(t *testing.T) {
 	cfg := overflowClient(t, "qwen-image-2.1-int8", nil, other, match)
 	lr := &laneRunner{verdict: heldLane()}
 
-	res := Run(context.Background(), cfg, lr, overflowReq(t, "", nil), "auto", nil)
+	res := runBounded(cfg, lr, overflowReq(t, "", nil), "auto", nil)
 	if !res.OK || res.Meta.Node != "node-b" {
 		t.Fatalf("the node that binds this machine's default recipe takes it: %+v", res)
 	}
@@ -184,9 +184,9 @@ func TestStrictMismatchNamesTheDifferingKey(t *testing.T) {
 	}, n)
 	lr := &laneRunner{verdict: heldLane(), local: queuedLocal()}
 
-	res := Run(context.Background(), cfg, lr, overflowReq(t, "qwen-image-2.1", nil), "auto", nil)
-	if probes, runs := lr.counts(); probes != 1 || runs != 1 {
-		t.Fatalf("nothing matches: the call runs here once: probes %d runs %d", probes, runs)
+	res := runDoor(cfg, lr, overflowReq(t, "qwen-image-2.1", nil), AtOnce)
+	if _, runs := lr.counts(); runs != 0 {
+		t.Fatalf("nothing matches: the call is a ticket that waits for a lane, it does not run here: runs %d", runs)
 	}
 	noPosts(t, "the node with the int8 build", n)
 	rows := clusterOf(t, res)
@@ -202,8 +202,8 @@ func TestStrictMismatchNamesTheDifferingKey(t *testing.T) {
 	if len(row.Differs) != 1 || !strings.HasPrefix(row.Differs[0], "imagegen_ckpt: ") {
 		t.Errorf("differs = %v", row.Differs)
 	}
-	if !strings.Contains(res.Reason, row.Why) || !strings.Contains(string(res.Data), "tk-abc12345") {
-		t.Errorf("the local answer keeps its place in line and quotes the cluster: %s | %s", res.Reason, res.Data)
+	if !res.Deferred || !strings.Contains(res.Reason, row.Why) || !strings.Contains(string(res.Data), `"waiter_token":"mq-`) {
+		t.Errorf("the answer is the ticket's and quotes the cluster: %s | %s", res.Reason, res.Data)
 	}
 }
 
@@ -216,7 +216,7 @@ func TestRefineFalseCarriedOrNodeNamedMiss(t *testing.T) {
 	cfg := overflowClient(t, "krea2", map[string]string{"qwen-image-2.1-fast": block(int8Ckpt, "")}, oldNode, newNode)
 	lr := &laneRunner{verdict: heldLane(), local: queuedLocal()}
 
-	res := Run(context.Background(), cfg, lr, overflowReq(t, "qwen-image-2.1-fast", map[string]any{"refine": false}), "auto", nil)
+	res := runBounded(cfg, lr, overflowReq(t, "qwen-image-2.1-fast", map[string]any{"refine": false}), "auto", nil)
 	if !res.OK || res.Meta.Node != "node-b" {
 		t.Fatalf("the node that carries refine takes it: %+v", res)
 	}
@@ -232,25 +232,25 @@ func TestRefineFalseCarriedOrNodeNamedMiss(t *testing.T) {
 	// With only the old node, the call is not placed and the answer names it.
 	alone := overflowClient(t, "krea2", map[string]string{"qwen-image-2.1-fast": block(int8Ckpt, "")}, oldNode)
 	lr2 := &laneRunner{verdict: heldLane(), local: queuedLocal()}
-	res = Run(context.Background(), alone, lr2, overflowReq(t, "qwen-image-2.1-fast", map[string]any{"refine": false}), "auto", nil)
+	res = runDoor(alone, lr2, overflowReq(t, "qwen-image-2.1-fast", map[string]any{"refine": false}), AtOnce)
 	row, ok := rowFor(clusterOf(t, res), "node-c")
 	if !ok || row.State != "not-capable" || !strings.Contains(row.Why, "refine=false") {
 		t.Fatalf("the old node must be a named miss: %+v | %s", row, res.Data)
 	}
 	// Without refine=false the same old node is a fine target.
 	lr3 := &laneRunner{verdict: heldLane()}
-	if res := Run(context.Background(), alone, lr3, overflowReq(t, "qwen-image-2.1-fast", nil), "auto", nil); !res.OK || res.Meta.Node != "node-c" {
+	if res := runBounded(alone, lr3, overflowReq(t, "qwen-image-2.1-fast", nil), "auto", nil); !res.OK || res.Meta.Node != "node-c" {
 		t.Errorf("a call that does not ask for refine=false is not held to it: %+v", res)
 	}
 	// The same rule on the path that always went to a node: refine=false to a node that cannot carry it is a miss, not a
 	// contract refusal (and not a silent refinement).
 	forced := clientCfg(t, oldNode)
-	r := Run(context.Background(), forced, &recordingRunner{}, core.Request{Task: core.TaskGenerateImage, Input: "p", Params: map[string]any{"refine": false}}, "remote", nil)
+	r := runBounded(forced, &recordingRunner{}, core.Request{Task: core.TaskGenerateImage, Input: "p", Params: map[string]any{"refine": false}}, "remote", nil)
 	if r.OK || r.DeferClass != core.DeferClassCapacity || !strings.Contains(r.Reason, "refine=false") {
 		t.Errorf("route remote must name the node that cannot carry refine=false: %+v", r)
 	}
 	forcedNew := clientCfg(t, newNode)
-	if r := Run(context.Background(), forcedNew, &recordingRunner{}, core.Request{Task: core.TaskGenerateImage, Input: "p", Params: map[string]any{"refine": false}}, "remote", nil); !r.OK {
+	if r := runBounded(forcedNew, &recordingRunner{}, core.Request{Task: core.TaskGenerateImage, Input: "p", Params: map[string]any{"refine": false}}, "remote", nil); !r.OK {
 		t.Errorf("route remote to a node that carries it: %+v", r)
 	}
 }
@@ -265,7 +265,7 @@ func TestStepsOverrideNeedsCFGSetOnTheNode(t *testing.T) {
 	cfg := overflowClient(t, "krea2", map[string]string{"qwen-image-2.1-fast": block(int8Ckpt, "")}, left, set)
 	lr := &laneRunner{verdict: heldLane()}
 
-	res := Run(context.Background(), cfg, lr, overflowReq(t, "qwen-image-2.1-fast", map[string]any{"steps": 30}), "auto", nil)
+	res := runBounded(cfg, lr, overflowReq(t, "qwen-image-2.1-fast", map[string]any{"steps": 30}), "auto", nil)
 	if !res.OK || res.Meta.Node != "node-c" {
 		t.Fatalf("the node that set cfg takes a call with steps: %+v", res)
 	}
@@ -273,7 +273,7 @@ func TestStepsOverrideNeedsCFGSetOnTheNode(t *testing.T) {
 
 	// Without a per-request steps the two spellings of the same recipe are equal: the first node in config order wins.
 	lr2 := &laneRunner{verdict: heldLane()}
-	if res := Run(context.Background(), cfg, lr2, overflowReq(t, "qwen-image-2.1-fast", nil), "auto", nil); !res.OK || res.Meta.Node != "node-b" {
+	if res := runBounded(cfg, lr2, overflowReq(t, "qwen-image-2.1-fast", nil), "auto", nil); !res.OK || res.Meta.Node != "node-b" {
 		t.Errorf("an unset steps/cfg is the builder's 40 / 1, the same recipe: %+v", res)
 	}
 }
@@ -284,7 +284,7 @@ func TestHarnessVersionMustMatch(t *testing.T) {
 	old := startImageNode(t, "node-b", "hidream-o1", fams, nodeOpts{healthEdit: func(m map[string]any) { m["harness_version"] = "0.178.0" }})
 	cfg := overflowClient(t, "krea2", map[string]string{"qwen-image-2.1-fast": block(int8Ckpt, "")}, old)
 	lr := &laneRunner{verdict: heldLane(), local: queuedLocal()}
-	res := Run(context.Background(), cfg, lr, overflowReq(t, "qwen-image-2.1-fast", nil), "auto", nil)
+	res := runDoor(cfg, lr, overflowReq(t, "qwen-image-2.1-fast", nil), AtOnce)
 	row, ok := rowFor(clusterOf(t, res), "node-b")
 	if !ok || row.State != "not-capable" || !strings.Contains(row.Why, "0.178.0") || !strings.Contains(row.Why, fixtureVersion) {
 		t.Fatalf("a node on another release is a named miss: %+v", row)
@@ -298,9 +298,9 @@ func TestAnIdleNodeIsTheOnlyCandidate(t *testing.T) {
 	busy := startImageNode(t, "node-a", "hidream-o1", fams, nodeOpts{lease: leased()})
 	cfg := overflowClient(t, "krea2", map[string]string{"qwen-image-2.1-fast": block(int8Ckpt, "")}, busy)
 	lr := &laneRunner{verdict: heldLane(), local: queuedLocal()}
-	res := Run(context.Background(), cfg, lr, overflowReq(t, "qwen-image-2.1-fast", nil), "auto", nil)
-	if probes, runs := lr.counts(); probes != 1 || runs != 1 {
-		t.Fatalf("no node can take it: it runs here: probes %d runs %d", probes, runs)
+	res := runDoor(cfg, lr, overflowReq(t, "qwen-image-2.1-fast", nil), AtOnce)
+	if _, runs := lr.counts(); runs != 0 {
+		t.Fatalf("no node can take it: the ticket waits, nothing runs here: runs %d", runs)
 	}
 	a, ok := rowFor(clusterOf(t, res), "node-a")
 	if !ok || a.State != "busy" || !strings.Contains(a.Why, "a bench render") || !strings.Contains(a.Why, "media-class lease") || !strings.Contains(a.Why, "left") {
@@ -317,7 +317,7 @@ func TestTheFamilysRouteMustBeConfiguredWhenTheNodeReportsIt(t *testing.T) {
 	}})
 	cfg := overflowClient(t, "krea2", map[string]string{"qwen-image-2.1-fast": block(int8Ckpt, "")}, missing)
 	lr := &laneRunner{verdict: heldLane(), local: queuedLocal()}
-	res := Run(context.Background(), cfg, lr, overflowReq(t, "qwen-image-2.1-fast", nil), "auto", nil)
+	res := runDoor(cfg, lr, overflowReq(t, "qwen-image-2.1-fast", nil), AtOnce)
 	b, ok := rowFor(clusterOf(t, res), "node-b")
 	if !ok || b.State != "not-capable" || !strings.Contains(b.Why, "generate_image:qwen-image-2.1") || !strings.Contains(b.Why, "BOUND-BUT-MISSING") {
 		t.Errorf("node-b: %+v", b)
@@ -333,7 +333,7 @@ func TestCandidatesRankByQueueThenConfigOrder(t *testing.T) {
 	second := startImageNode(t, "node-c", "hidream-o1", fams, nodeOpts{})
 	cfg := overflowClient(t, "krea2", map[string]string{"qwen-image-2.1-fast": block(int8Ckpt, "")}, queued, first, second)
 	lr := &laneRunner{verdict: heldLane()}
-	res := Run(context.Background(), cfg, lr, overflowReq(t, "qwen-image-2.1-fast", nil), "auto", nil)
+	res := runBounded(cfg, lr, overflowReq(t, "qwen-image-2.1-fast", nil), "auto", nil)
 	if !res.OK || res.Meta.Node != "node-b" {
 		t.Fatalf("the shorter queue first, then config order: %+v", res)
 	}
@@ -353,7 +353,7 @@ func TestBounceOnGPUBusyUsesFreshJobID(t *testing.T) {
 	cfg.PairWorkloadsEnabled = true
 	lr := &laneRunner{verdict: heldLane(), rig: rig}
 
-	res := Run(context.Background(), cfg, lr, overflowReq(t, "qwen-image-2.1-fast", nil), "auto", nil)
+	res := runBounded(cfg, lr, overflowReq(t, "qwen-image-2.1-fast", nil), "auto", nil)
 	if !res.OK || res.Meta.Node != "node-b" {
 		t.Fatalf("the second node serves the bounced call: %+v", res)
 	}
@@ -403,7 +403,7 @@ func TestOneCardOnTheAcceptingNode(t *testing.T) {
 	cfg.PairWorkloadsEnabled = true
 	lr := &laneRunner{verdict: heldLane(), rig: rig}
 
-	res := Run(context.Background(), cfg, lr, overflowReq(t, "qwen-image-2.1-fast", nil), "auto", nil)
+	res := runBounded(cfg, lr, overflowReq(t, "qwen-image-2.1-fast", nil), "auto", nil)
 	if !res.OK || res.Meta.Node != "node-b" {
 		t.Fatalf("%+v", res)
 	}
@@ -427,7 +427,7 @@ func TestObservedNodeErrorIsNeverReplaced(t *testing.T) {
 	b := startImageNode(t, "node-b", "hidream-o1", fams, nodeOpts{})
 	cfg := overflowClient(t, "krea2", map[string]string{"qwen-image-2.1-fast": block(int8Ckpt, "")}, a, b)
 	lr := &laneRunner{verdict: heldLane()}
-	res := Run(context.Background(), cfg, lr, overflowReq(t, "qwen-image-2.1-fast", nil), "auto", nil)
+	res := runBounded(cfg, lr, overflowReq(t, "qwen-image-2.1-fast", nil), "auto", nil)
 	if res.OK || !res.Deferred || !strings.Contains(res.Reason, "ComfyUI exited") || res.Meta.Node != "node-a" {
 		t.Fatalf("the node's own deferral is the call's result: %+v", res)
 	}
@@ -449,7 +449,7 @@ func TestFailureAfterAcceptanceNeverFallsBackToLocal(t *testing.T) {
 	lr := &laneRunner{verdict: heldLane()}
 	done := make(chan core.Result, 1)
 	go func() {
-		done <- Run(context.Background(), cfg, lr, overflowReq(t, "qwen-image-2.1-fast", nil), "auto", nil)
+		done <- runBounded(cfg, lr, overflowReq(t, "qwen-image-2.1-fast", nil), "auto", nil)
 	}()
 	// Until the client has polled the job at least once, the node has certainly accepted it.
 	deadline := time.Now().Add(10 * time.Second)
@@ -481,7 +481,7 @@ func TestInheritedLeaseNeverOverflows(t *testing.T) {
 	t.Setenv("GPU_LEASE_EPOCH", "7")
 	t.Setenv("GPU_LEASE_CLASS", "media")
 	lr := &laneRunner{verdict: heldLane()}
-	if res := Run(context.Background(), cfg, lr, overflowReq(t, "qwen-image-2.1-fast", nil), "auto", nil); !res.OK {
+	if res := runBounded(cfg, lr, overflowReq(t, "qwen-image-2.1-fast", nil), "auto", nil); !res.OK {
 		t.Fatal(res)
 	}
 	if probes, runs := lr.counts(); probes != 0 || runs != 1 {
@@ -499,7 +499,7 @@ func TestDeclaredDevicesNeverOverflow(t *testing.T) {
 	graph := writeFile(t, t.TempDir(), "g.json", []byte(`{"1":{}}`))
 	lr := &laneRunner{verdict: heldLane()}
 	req := core.Request{Task: core.TaskRunGraph, Params: map[string]any{"graph_path": graph, "devices": []string{"0"}}}
-	if res := Run(context.Background(), cfg, lr, req, "auto", nil); !res.OK {
+	if res := runBounded(cfg, lr, req, "auto", nil); !res.OK {
 		t.Fatal(res)
 	}
 	if probes, runs := lr.counts(); probes != 0 || runs != 1 {
@@ -508,20 +508,31 @@ func TestDeclaredDevicesNeverOverflow(t *testing.T) {
 	untouched(t, "the node", n)
 }
 
-// A call that resumes a place in the local line (it carries its waiter_token) keeps that place: it is not placed
-// elsewhere, and the place is not spent. (Late binding across the fleet is the ticket queue's, not this release's.)
-func TestAResumedCallStaysInTheLocalLine(t *testing.T) {
+// A call that resumes a place in the local line (it carries its waiter_token from a local queued answer) joins the cluster
+// queue and brings the place with it: it overflows to an idle matching node like any other call (the S1 release kept it in
+// the local line, so a caller that looped on a queued answer never reached the fleet), and the place it held is the
+// ticket's own, with the arrival time it left with.
+func TestAResumedCallJoinsTheClusterAndBringsItsPlace(t *testing.T) {
 	n := startImageNode(t, "node-b", "hidream-o1", map[string]string{"qwen-image-2.1": block(int8Ckpt, "")}, nodeOpts{})
 	cfg := overflowClient(t, "krea2", map[string]string{"qwen-image-2.1-fast": block(int8Ckpt, "")}, n)
-	lr := &laneRunner{verdict: heldLane()}
+	lr := newKeeperRunner(heldLane())
+	arrived := time.Now().Add(-4 * time.Minute)
+	lr.placeFor("tk-abc12345", arrived)
 	req := overflowReq(t, "qwen-image-2.1-fast", map[string]any{"waiter_token": "tk-abc12345"})
-	if res := Run(context.Background(), cfg, lr, req, "auto", nil); !res.OK {
-		t.Fatal(res)
+	res := runBounded(cfg, lr, req, "auto", nil)
+	if !res.OK || res.Meta.Node != "node-b" {
+		t.Fatalf("a call that carried a place is placed on the idle node: %+v", res)
 	}
-	if probes, runs := lr.counts(); probes != 0 || runs != 1 {
-		t.Errorf("a resumed call runs where its place is: probes %d runs %d", probes, runs)
+	if _, runs := lr.counts(); runs != 0 {
+		t.Errorf("a call a node served is not also run here: %d", runs)
 	}
-	untouched(t, "the node", n)
+	lv := lr.leaveCalls()
+	if len(lv) != 1 || lv[0].req.Params["waiter_token"] != "tk-abc12345" || lv[0].token != "tk-abc12345" {
+		t.Fatalf("the ticket resumes the place the call held: %+v", lv)
+	}
+	if lr.dropped("tk-abc12345") != 1 {
+		t.Errorf("the place is let go when the job is done: drops %v", lr.drops)
+	}
 }
 
 // A `remotes` argument that is not among delegate_remotes is the contract defer of the paths that use it; a call that
@@ -531,7 +542,7 @@ func TestABadRemotesArgumentDoesNotBreakALocalCall(t *testing.T) {
 	stranger := startImageNode(t, "node-z", "hidream-o1", nil, nodeOpts{})
 	cfg := overflowClient(t, "krea2", map[string]string{"qwen-image-2.1-fast": block(int8Ckpt, "")}, n)
 	lr := &laneRunner{verdict: heldLane()}
-	if res := Run(context.Background(), cfg, lr, overflowReq(t, "qwen-image-2.1-fast", nil), "auto", []string{stranger.srv.URL}); !res.OK {
+	if res := runBounded(cfg, lr, overflowReq(t, "qwen-image-2.1-fast", nil), "auto", []string{stranger.srv.URL}); !res.OK {
 		t.Fatalf("%+v", res)
 	}
 	if probes, runs := lr.counts(); probes != 0 || runs != 1 {
@@ -541,23 +552,23 @@ func TestABadRemotesArgumentDoesNotBreakALocalCall(t *testing.T) {
 	untouched(t, "the configured node", n)
 }
 
-// Nothing admits: the call falls through to today's local run and its deferral carries a cluster[] block with one row
-// per roster entry, in config order, each with the state and the reason in the node's own terms.
-func TestNothingAdmitsFallsBackWithClusterBlock(t *testing.T) {
+// Nothing admits: the call becomes a ticket, and the answer is the ticket's: one cluster[] row per roster entry, in config
+// order, each with the state and the reason in the node's own terms, and the instruction not to call again.
+func TestNothingAdmitsAnswersWithTheTicketAndAClusterBlock(t *testing.T) {
 	fams := map[string]string{"qwen-image-2.1": block(int8Ckpt, "")}
 	busy := startImageNode(t, "node-a", "hidream-o1", fams, nodeOpts{lease: leased()})
 	gone := startImageNode(t, "node-b", "hidream-o1", fams, nodeOpts{})
 	gone.srv.Close()
 	other := startImageNode(t, "node-c", "hidream-o1", map[string]string{"qwen-image-2.1": block(fp4Ckpt, "")}, nodeOpts{})
 	cfg := overflowClient(t, "krea2", map[string]string{"qwen-image-2.1-fast": block(int8Ckpt, "")}, busy, gone, other)
-	lr := &laneRunner{verdict: heldLane(), local: queuedLocal()}
+	lr := &laneRunner{verdict: heldLane()}
 
-	res := Run(context.Background(), cfg, lr, overflowReq(t, "qwen-image-2.1-fast", nil), "auto", nil)
-	if probes, runs := lr.counts(); probes != 1 || runs != 1 {
-		t.Fatalf("the local run is today's: probes %d runs %d", probes, runs)
+	res := runDoor(cfg, lr, overflowReq(t, "qwen-image-2.1-fast", nil), AtOnce)
+	if _, runs := lr.counts(); runs != 0 {
+		t.Fatalf("nothing runs here: the ticket waits: runs %d", runs)
 	}
-	if res.OK || res.Meta.ErrClass != core.ErrClassGPUQueued || !strings.Contains(string(res.Data), `"waiter_token":"tk-abc12345"`) {
-		t.Fatalf("the local deferral and its place in line are kept: %+v", res)
+	if res.OK || !res.Deferred || res.Meta.ErrClass != core.ErrClassGPUQueued || !strings.Contains(string(res.Data), `"waiter_token":"mq-`) {
+		t.Fatalf("the ticket's answer: %+v", res)
 	}
 	rows := clusterOf(t, res)
 	if len(rows) != 3 {
@@ -578,13 +589,6 @@ func TestNothingAdmitsFallsBackWithClusterBlock(t *testing.T) {
 	}
 	noPosts(t, "the busy node", busy)
 	noPosts(t, "the other build", other)
-
-	// A free local result is never annotated: the block belongs to a deferral.
-	lr2 := &laneRunner{verdict: heldLane()}
-	ok := Run(context.Background(), cfg, lr2, overflowReq(t, "qwen-image-2.1-fast", nil), "auto", nil)
-	if !ok.OK || strings.Contains(string(ok.Data), "cluster") {
-		t.Errorf("a local call that ran is not annotated: %+v", ok)
-	}
 }
 
 // A node that stopped answering is not probed again at once: it backs off 5, 15, 60 and then 300 seconds per
@@ -620,7 +624,7 @@ func TestDeadNodeBacksOff(t *testing.T) {
 
 	call := func() core.Result {
 		lr := &laneRunner{verdict: heldLane()}
-		res := Run(context.Background(), cfg, lr, overflowReq(t, "qwen-image-2.1-fast", nil), "auto", nil)
+		res := runBounded(cfg, lr, overflowReq(t, "qwen-image-2.1-fast", nil), "auto", nil)
 		if !res.OK || res.Meta.Node != "node-b" {
 			t.Fatalf("the live node serves the call whatever the dead one does: %+v", res)
 		}
@@ -673,7 +677,7 @@ func TestSeedTravelsExactly(t *testing.T) {
 	n := startImageNode(t, "node-b", "hidream-o1", map[string]string{"qwen-image-2.1": block(int8Ckpt, "")}, nodeOpts{})
 	cfg := overflowClient(t, "krea2", map[string]string{"qwen-image-2.1-fast": block(int8Ckpt, "")}, n)
 	lr := &laneRunner{verdict: heldLane()}
-	if res := Run(context.Background(), cfg, lr, overflowReq(t, "qwen-image-2.1-fast", map[string]any{"seed": big}), "auto", nil); !res.OK {
+	if res := runBounded(cfg, lr, overflowReq(t, "qwen-image-2.1-fast", map[string]any{"seed": big}), "auto", nil); !res.OK {
 		t.Fatal(res)
 	}
 	if got := n.runner.last().Params["seed"]; got != big {

@@ -137,8 +137,14 @@ export function batchEndLine(summary, resultsPath) {
 //     a poisoned ComfyUI failed jobs 3-6 over 57 min while the media lease held every card);
 //   - a full disk (isDiskFullError): every later job writes to the same volume (2026-10-09:
 //     the batch went on past a full drive and left 21 zero-byte pictures).
-export async function runBatchJobs({ jobs, runJob, record, log = () => {}, now = Date.now }) {
+// progress (optional) is told where the batch is, before and after every job: the parent process's
+// heartbeat to the lease's progress file (lease-progress.mjs). Each job is a child that beats from its own
+// poll loop, but the gaps between children (a spawn, a failed job's cleanup) are the parent's, and a batch
+// between two pictures must not read as idle. It is called with a sentence and must not throw.
+export async function runBatchJobs({ jobs, runJob, record, log = () => {}, now = Date.now, progress = () => {} }) {
   let ok = 0, failed = 0;
+  // A heartbeat that fails must never fail the batch it reports on.
+  const tell = (line) => { try { progress(line); } catch { /* see above */ } };
   const stop = (i, why, flag) => {
     for (let k = i + 1; k < jobs.length; k++) record(resultLine(k, jobs[k], false, 0, "not run: " + why));
     const abort = new Error(`${why}; ${jobs.length - i - 1} jobs not run, recorded as such`);
@@ -147,12 +153,14 @@ export async function runBatchJobs({ jobs, runJob, record, log = () => {}, now =
   };
   for (let i = 0; i < jobs.length; i++) {
     const t0 = now();
+    tell(`batch job ${i + 1}/${jobs.length} starting`);
     try {
       await runJob(jobs[i], i);
     } catch (e) {
       failed++;
       record(resultLine(i, jobs[i], false, now() - t0, e.message));
       log(`batch ${i + 1}/${jobs.length} FAILED: ${e.message} (${Math.round((now() - t0) / 1000)}s)`);
+      tell(`batch job ${i + 1}/${jobs.length} failed`);
       if (e && e.serverUnusable) {
         throw stop(i, `ComfyUI became unusable at job ${i + 1}/${jobs.length} (${e.message})`, "serverUnusable");
       }
@@ -164,6 +172,7 @@ export async function runBatchJobs({ jobs, runJob, record, log = () => {}, now =
     ok++;
     record(resultLine(i, jobs[i], true, now() - t0));
     log(`batch ${i + 1}/${jobs.length} done (${Math.round((now() - t0) / 1000)}s)`);
+    tell(`batch job ${i + 1}/${jobs.length} done`);
   }
   return { total: jobs.length, ok, failed };
 }

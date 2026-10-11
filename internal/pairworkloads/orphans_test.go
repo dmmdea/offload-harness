@@ -3,6 +3,7 @@ package pairworkloads
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -137,7 +138,7 @@ func TestSweepClosesADeadProducersCard(t *testing.T) {
 			t.Errorf("%s: orphan frame %v != running frame %v (a different identity is a different card)", k, f[k], running[k])
 		}
 	}
-	if f["id"] != "agd-91c2" || f["createdAt"].(float64) != 1000 || f["state"] != "failed" || f["error"] != OrphanError || f["completedAt"].(float64) != 9_000_000 {
+	if f["id"] != "agd-91c2" || f["createdAt"].(float64) != 1000 || f["state"] != "failed" || !strings.HasPrefix(fmt.Sprint(f["error"]), OrphanError) || f["completedAt"].(float64) != 9_000_000 {
 		t.Fatalf("orphan frame wrong: %v", f)
 	}
 	if files := r.files(t); len(files) != 0 {
@@ -269,7 +270,10 @@ func TestFirstEmitSweepsOnce(t *testing.T) {
 }
 
 // TestSeatWatchCardOfAKilledNodeIsClosed: fleet-serve killed with a
-// seat-activity card open (no closeAll) leaves a marker the next sweep closes.
+// seat-activity card open (no closeAll) leaves a marker the next sweep closes. As COMPLETED, since C04
+// (2026-10-09): a seat-watch stretch is not a harness job, its producer is the watcher, and the watcher
+// being killed (a deploy swap) says nothing about the seat or its callers. It used to be closed failed
+// with "harness process exited before the job finished", a red card for no failure.
 func TestSeatWatchCardOfAKilledNodeIsClosed(t *testing.T) {
 	rig := newSeatRig(t)
 	dir := t.TempDir()
@@ -288,8 +292,11 @@ func TestSeatWatchCardOfAKilledNodeIsClosed(t *testing.T) {
 		t.Fatalf("the killed node's seat card was not closed: %d", n)
 	}
 	last := rig.pair.count() - 1
-	if rig.pair.method(last) != "workload:errored" || rig.pair.info(last)["id"] != id || rig.pair.info(last)["requesterId"] != SeatRequester {
+	if rig.pair.method(last) != "workload:completed" || rig.pair.info(last)["id"] != id || rig.pair.info(last)["requesterId"] != SeatRequester {
 		t.Fatalf("wrong closing frame: %v %v", rig.pair.method(last), rig.pair.info(last))
+	}
+	if _, has := rig.pair.info(last)["error"]; has {
+		t.Fatalf("a seat stretch closed by a sweep carries no failure text: %v", rig.pair.info(last)["error"])
 	}
 }
 

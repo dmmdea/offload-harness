@@ -24,6 +24,7 @@ import { writeFileSync, readFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { ensureComfy as defaultEnsureComfy, tailComfyLog, comfyLogPath, COMFY_LOG_TAIL_LINES, resolveInstance, DEFAULT_COMFY_PORT, COMFY_DIR } from "./comfy-lifecycle.mjs";
 import { settleInstanceFamily, releaseInstanceFamily } from "./comfy-family.mjs";
+import { leaseBeat } from "./lease-progress.mjs";
 
 // LEASE_FORMAT_SIGNATURE is what `local-offload gpu doctor` looks for in a copy of this
 // file (internal/gpulease/audit.go, FormatSignature, pinned by a Go test): a reader that
@@ -483,6 +484,9 @@ export async function withGpuSlot(opts, fn) {
     comfyDir = COMFY_DIR,
     settleFamily = settleInstanceFamily,
     releaseFamily = releaseInstanceFamily,
+    // The lease's progress file (lease-progress.mjs): told once the GPU work is about to start, so the file
+    // moves across the cold start of ComfyUI (the longest stretch before the poll loop begins to beat).
+    beat = leaseBeat,
   } = opts || {};
 
   // No lease, and not explicitly opted out => refuse. Acquiring here is exactly the
@@ -556,6 +560,7 @@ export async function withGpuSlot(opts, fn) {
       }
     }
     try {
+      beat("GPU work starting: the slot is ready and ComfyUI is up", { force: true });
       return await fn({ comfyChild, lease });
     } catch (err) {
       // F-38 audit: ComfyUI's own console output used to be discarded entirely

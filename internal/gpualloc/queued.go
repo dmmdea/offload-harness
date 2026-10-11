@@ -1,6 +1,8 @@
 package gpualloc
 
 import (
+	"time"
+
 	"github.com/dmmdea/offload-harness/internal/gpulease"
 	"github.com/dmmdea/offload-harness/internal/gpuprobe"
 )
@@ -29,6 +31,17 @@ import (
 // would steer a request that passes such a waiter away from an idle card, and a call that cannot wait would
 // be told the card is "promised to callers ahead" by a waiter it can pass.
 func QueuedClaims(m *gpulease.Manager, cards []gpuprobe.Card, ownToken string, declaresHostRAM bool) map[string]bool {
+	return QueuedClaimsBefore(m, cards, ownToken, declaresHostRAM, time.Time{})
+}
+
+// QueuedClaimsBefore is QueuedClaims for a caller that RESUMES a place in line that arrived at since: only the
+// waiters and places that arrived strictly before it are ahead of it, because the lease queue itself serves a
+// resumed place by arrival time (a caller behind it does not hold the card against it, and a tie is not counted: the
+// answer errs toward free). A zero since is a new arrival, for whom everyone in line is ahead (QueuedClaims). It
+// exists for the ticket queue: with two places on one idle card each read the other as in its way, and neither
+// would ever be started (P0 plan S2).
+func QueuedClaimsBefore(m *gpulease.Manager, cards []gpuprobe.Card, ownToken string, declaresHostRAM bool, since time.Time) map[string]bool {
+	ahead := func(sinceMs int64) bool { return since.IsZero() || sinceMs < since.UnixMilli() }
 	out := map[string]bool{}
 	add := func(devs []string) {
 		if len(devs) == 0 {
@@ -45,13 +58,13 @@ func QueuedClaims(m *gpulease.Manager, cards []gpuprobe.Card, ownToken string, d
 		if ownToken != "" && w.Token == ownToken {
 			continue
 		}
-		if !w.HoldsItsCardsAgainst(declaresHostRAM) {
+		if !w.HoldsItsCardsAgainst(declaresHostRAM) || !ahead(w.SinceMs) {
 			continue
 		}
 		add(w.Devices)
 	}
 	for _, t := range m.Tokens() {
-		if t.ID == ownToken || !m.TokenLive(t) {
+		if t.ID == ownToken || !m.TokenLive(t) || !ahead(t.SinceMs) {
 			continue
 		}
 		add(t.Devices)

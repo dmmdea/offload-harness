@@ -50,6 +50,13 @@ var longCallTasks = map[string]bool{
 	"transcribe":            true,
 }
 
+// tasksThatNeverMarkWorking are the long-call tasks whose lane cannot tell when its engine starts: nothing
+// calls core.MarkWorking for them, so their card is "queued" from the first frame to the last, whether the
+// work is waiting or half done. A card in that state says nothing about whether the work started, and the
+// orphan sweep (orphanText) must not claim it had not. TestOnlyTranscribeNeverMarksWorking pins the list to
+// internal/pipeline.
+var tasksThatNeverMarkWorking = map[string]bool{"transcribe": true}
+
 // FleetDoor is the door a fleet node stamps on work it serves FOR another box
 // (fleetnode.dispatchDoor, register A-102). The box that asked reports that
 // work; the serving node reporting it too would show one job as two cards.

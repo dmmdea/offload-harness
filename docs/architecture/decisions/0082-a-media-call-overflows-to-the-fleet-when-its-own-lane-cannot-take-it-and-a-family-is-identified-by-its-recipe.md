@@ -42,12 +42,12 @@ Three facts made the obvious change unsafe as stated.
    admission reads state with (`planMedia`, `gpualloc.Claims` and `QueuedClaims`, the in-process slots, the grant's own
    host-RAM function, and the allocator itself for a call that names no card) and edits nothing inside `acquireCards`. It says
    "busy" only when something that makes the real wait-0 grant refuse is present, so it never calls busy a lane the grant would
-   have served; it may call free a lane the grant then refuses, and the call then runs locally as before, after the one bounded card-table read the question costs. The lease
-   queue orders by arrival only on the whole-node plan, so there a call that resumes a place counts only the callers that
-   arrived before that place; on the pinned and allocated plans every other caller in line counts
-   (`TestMediaLaneFreeOrdersByArrivalOnlyOnTheWholeNodePlan`; the S1 trigger never asks about a call that carries a token, the
-   ticket scan of the next step does). Every doubt
-   (a lease this process inherited, a card table that does not read in 4 s, a request it does not model) reads as free. It
+   have served; it may call free a lane the grant then refuses, and the call then runs locally as before, after the one bounded card-table read the question costs. A call that resumes a place in line counts only the callers
+   that arrived before that place, on every plan, because the lease queue serves a resumed place by arrival time (ADR 0083
+   decision 4; `TestMediaLaneFreeOrdersByArrivalForACallThatResumesItsPlace`); a new arrival counts every other caller in line. Every doubt
+   (a lease this process inherited, a card table that does not read in 4 s, a request it does not model) reads as free; the card
+   table that does not read and a lease directory that does not open are marked unread (`Unjudged`, ADR 0083 decision 5), and a
+   router then looks at the fleet before it runs the call here. It
    creates no lease, place in line, epoch, waiter record, ledger row, PAIR card or ComfyUI instance, and it removes nothing: the
    readers of the line it shares with the admission prune a record they find dead (an expired place, a waiter that stopped
    polling) as housekeeping, and the probe reads through `gpulease.Manager.ReadOnly`, a view that skips such a record and leaves
@@ -82,7 +82,9 @@ Three facts made the obvious change unsafe as stated.
    `node_id` equals `fleet_node_id`, else the OS hostname: such an entry would match perfectly and send the call back into the
    lane that is not free; it is named in `cluster[]`). Candidates rank by the shorter queue, then config order. The family is sent under the node's own name for the recipe, never the caller's, and never empty: a call
    that names no family is this machine's default binding, and must not land on a node's different default.
-6. **Refusals move on; an accepted job is final.** At most 3 nodes are tried. A refusal at the door (`503`, `429`, `412`, any
+6. **Refusals move on; an accepted job is final.** (ADR 0083 replaced the bound of three nodes for an image call: the ticket tries
+   one node per scan and has no limit on how many it tries over its life. A graph keeps the bound: it is offered to at most three
+   nodes, once.) A refusal at the door (`503`, `429`, `412`, any
    other status, or a dial that never connected) means nothing ran: the call goes on, under a fresh job id. A node that accepted
    the job and answers `gpu_busy` or `gpu_queued` (another job holds its card, nothing ran) or `gpu_lease_unavailable` (it could
    not take its lease: a lease location it cannot use, a host-RAM need no state of it admits; nothing ran) is passed over the
@@ -95,29 +97,34 @@ Three facts made the obvious change unsafe as stated.
    rule keeps closed, a quarantined card, a host short of RAM, a card another process holds that no lease shows) refuses every
    call alike, and each call sent to it would park for the node's whole `gpu_wait_ms` before the bounce came back; a call the node
    serves forgets the count, a health read does not. The cluster row says which pause it is (`bounced`, `refused`,
-   `unreachable`) and for how long the call was not offered to the node. The step and attempt numbers are chosen, not measured. The
+   `unreachable`) and for how long the call was not offered to the node. The step numbers are chosen, not measured. The
    memory is the placer's package variable, so it is per process: the MCP server keeps it across the calls of its session, and a
-   one-shot CLI call starts with none, so it pays a bounced node's `gpu_wait_ms` again (the node-published verdict that would
-   replace the memory is not built).
+   one-shot CLI call starts with none (its ticket keeps it across its own scans), so it pays a bounced node's `gpu_wait_ms` once
+   (the node-published verdict that would replace the memory is not built).
 7. **Attribution stays one card per node that held the job and one row per call.** An overflowing call opens its PAIR card only
    once a node has ACCEPTED the job. A node that bounces it after accepting has its card closed quiet (completed, never
    started, the reason kept; `core.RemoteAttribution.Bounce`) and writes no ledger row; the call's one asker row names the node
    that served it.
-8. **When nothing admits, the call goes on to the local admission, from when it came back.** It joins the local line when the
-   fleet attempt is over and not from when it arrived (Named limits). If that ends in a deferral (a place in line, a busy
-   defer), the answer carries `cluster[]`: one row per roster node in config order (`busy`, `not-capable`, `unreachable`,
-   `refused`, `bounced`, `skipped`), each with the reason in the node's own terms (the lease and its reason, the key that
-   differs and the family of this machine that would match, the release or the refine it lacks), and the reason quotes them. A
-   call that ran is not annotated.
-9. **Never overflow** a call that resumes a place in the local line (it carries `waiter_token`: the place is kept, and the first
-   queued answer's token simply lapses if the call went to a node instead), that runs under a lease its process inherited, on a
-   box with no `delegate_remotes` (that path is byte for byte what it was, and asks the lane nothing), or for anything but an
-   image job in this release. Graphs arrive with their own file check (a whole-node graph placed on a multi-GPU node would land
-   on its display card); video, animation and audio carry no per-family identity yet.
+8. **When nothing admits, an image call is a ticket (ADR 0083).** It does not go on to the local admission from when it came back,
+   as the first cut did: it waits for the first matching lane that frees anywhere, keeping its arrival time in the local line, and
+   the answer carries `cluster[]`: one row per roster node in config order (`free`, `busy`, `draining`, `not-capable`,
+   `unreachable`, `in-use`, `refused`, `bounced`, `skipped`), each with the reason in the node's own terms (the lease and its
+   reason, the key that differs and the family of this machine that would match, the release or the refine it lacks) and since when.
+   A call that ran is not annotated. **A whole-node graph (Amendment 1) is not a ticket in 0.180.0:** when nothing admits it, it goes
+   on to the local admission from when it came back, joining the local line when the fleet attempt is over and not from when it
+   arrived, and a deferral it ends in carries the same `cluster[]`. A graph does not wait in the cluster queue yet.
+9. **Never overflow** a call that runs under a lease its process inherited, on a box with no `delegate_remotes` (that path is byte for
+   byte what it was, and asks the lane nothing), or for anything but an image job or a whole-node graph in this release (Amendment 1
+   adds the graph, under its own file check and a single-card rule). (An image call that resumed a place did not overflow in the
+   first cut; ADR 0083 brings its place into the ticket. A graph that carries a `waiter_token` resumes a place in the local line and
+   is still never moved.) Video, animation and audio carry no per-family identity yet.
 10. **ADR 0077 changes in three sentences.** Decision 6: `auto` runs here when the lane is free and, when it is not and a
     matching node is idle, there. The consequence that `refine=false` defers on a remote route no longer holds for image jobs:
     it travels, gated on `refine_honoured`. The consequence about `waiter_token` stands: a call that goes to a node leaves the
     local place.
+11. **Amended by ADR 0083** in four places, all for an image call: decision 2 (a resumed place is ordered by arrival on every plan),
+    decision 6 (no bound of three nodes), decision 8 (a ticket, not a late local run) and decision 9 (a call with a `waiter_token`
+    overflows). A graph is outside all four: it keeps the one-shot overflow of Amendment 1.
 
 ## Consequences
 
@@ -129,14 +136,9 @@ Three facts made the obvious change unsafe as stated.
   one bounce per node per pause (60 s, then 300 s): up to the node's `gpu_wait_ms` (90 s by default) parked on the node and one
   deferred row there, before the placer sees it. The health pre-filter (no lease of any class) makes that rare; if the logs show it is not, a place-now header read in
   admission is the first optimisation (a lane verdict published by the node, answered before a job exists), not built here.
-- **Named limits.** The recipe is name plus size, not content (decision 3). One FIFO per delegating machine; cross-machine order is node arrival. A call resumed with its token stays in
-  the local line, so a node that frees later is not used by it (the ticket queue with late binding is the next step). **A call
-  that went to the fleet first queues locally from when it came back**, not from when it arrived: it joins the local line only
-  when the fleet attempt is over (the lane question and the roster read, then at most 3 nodes, each up to its `gpu_wait_ms`), so a
-  caller that arrived meanwhile is ahead of it, and one bounce can cost it 90 s of seniority (270 s for three nodes). Two halves would have to be fixed to carry the arrival time into the
-  local admission: the lease queue (it takes an arrival time) and the in-process slot queue, which serves callers in the order they
-  join and has no arrival time to take; the ticket queue of the next step keeps a call's place across the attempt and is where
-  that is done, not here. Every
+- **Named limits.** The recipe is name plus size, not content (decision 3). One FIFO per delegating machine; cross-machine order is node arrival. ADR 0083 closes the two limits the first cut named: a call resumed with
+  its token joins the cluster queue and brings its place with it, and a call no node could take keeps its arrival time through the
+  ticket's place in the local line, so a bounce no longer costs it its seniority. Every
   remote job pays ComfyUI's cold start. The same recipe and seed on a different GPU architecture is the same composition, not
   bit-identical pixels. A hand-forced `route=remote` can still park beside a placed job (`concurrencyCapped` is false for media).
   A per-request `steps` needs the node's binding to have set cfg for a graph that takes both together.
@@ -174,3 +176,88 @@ Three facts made the obvious change unsafe as stated.
   node's default, which is another model.
 - **Substitute a quantization when none matches.** The operator's rule that one node stays on the fast family, and the licence
   tag on a result, both make a silent substitution wrong; the answer names the family that would match instead.
+
+## Amendment 1 (2026-10-10, P0 step S4): a whole-node graph overflows too
+
+Decision 9 left graphs out: a graph has no recipe, and a whole-node graph placed on a multi-GPU node could land on its display
+card. This amendment adds them under four rules; every other decision stands, and none of the four is a recipe.
+
+1. **A graph's identity is that the node holds the files it names, and the node decides it at its door.** Before it writes a
+   temp file, takes a lease or starts ComfyUI, `buildRunGraph` reads the graph: any string input, under any key but one, whose
+   value ends in `.safetensors`, `.gguf`, `.pth`, `.pt`, `.ckpt` or `.sft` is a weight file (the loaders' key names are
+   open-ended, the extension is not). The two exclusions the code keeps: the key `filename_prefix` (an output prefix, whatever
+   its value) is never read, and neither is a value that contains `://` (a URL). The file input of `LoadImage`, `LoadImageMask`,
+   `LoadImageOutput`, `LoadVideo` and `LoadAudio` is an
+   input file. A weight file must resolve **by name** under any class directory of any of the node's models roots (a class
+   directory that is a link counts), the way a ComfyUI loader opens it (subfolders included, no search for the basename;
+   `mediacap.MissingModelFilesUpTo`); an input file must be in ComfyUI's `input` directory (`output` or `temp` when its annotation
+   says so). A name that is absolute or climbs out with `..` is never looked up and reads as missing. A node
+   that lacks any of them answers with the existing re-placeable route-not-ready refusal, **503**, naming what is missing (up to
+   six names of each kind; past six weight files it says `7 or more files ... and more` and gives no count, because the node stops
+   looking at the seventh: the door is open to any peer and a graph can name thousands of files, so the work is bounded by what
+   the refusal shows and not by the graph), before any job exists. A model the graph's manifest tells the node to fetch (a `models[]` entry with a
+   `source_url`) is not refused: the satisfier downloads it before ComfyUI starts. **Input files do not travel with a graph**
+   (the dispatch door carries JSON; the media-job door carries no input for `run-graph`), so the refusal says so; carrying
+   them is a named seam, not built. "Holds" is **name, not content**. For a weight file the name is the practical identity; an
+   input file is the caller's own with a generic name, so a same-named file of other bytes would run the graph on the wrong
+   bytes, and rule 2 keeps such a graph off the auto-overflow. A custom node's own file key is not read. The delegator sends no
+   family and no digest, and requires the node to run its own release (the check ships with it), where a new health key would
+   have said the same; that proves the check only because the release that adds it carries a new version number, so the bump
+   ships with the merge, before any delegator is deployed. The release proof holds for **every** remote placement of a graph, as
+   rule 3's card rule does: the overflow asks it of its candidates, and `route remote` and a thin client's `auto` ask it when they
+   pick a node, so a node on another release, or one that publishes none, is a named miss on all three.
+2. **The trigger is the image's; the placement is one-shot, not a ticket.** `Pipeline.MediaLaneFree` answers for a whole-node `run_graph` with the
+   whole-node reading (any lease, in-process slot or place in line, and the host's memory against the media class default, the
+   largest family the box binds: the lease is taken for the graph as a whole before anything reads its weights, so that is an
+   upper bound and not the graph's own size), under the same contract: a relaxation of the real wait-0 admission, held by
+   a differential test, that writes nothing. ADR 0083 turned an image call into a ticket; **a graph is not one in 0.180.0**: it
+   keeps the one-shot placement of the first cut, offered once to the nodes that can take it (at most three, one graph call of a
+   process per node, never a node a job of this machine has a claim on, a ticket's or another graph's, of any process of the
+   machine: the graph takes the same claim under the same lock, ADR 0083 decision 6; and never a node an older waiting ticket is
+   first in line for, by the ticket's own rule, ADR 0083 decision 12) and, when none admits it, it waits in this machine's own
+   queue, joining it when the fleet attempt is over. A graph's lane the pipeline could not read (`Unjudged`) is offered to the fleet
+   the same way, and the graph runs here when no node takes it. A graph that names `devices` (refused by `plan()` before the lane is asked), one
+   that carries a `waiter_token`, one under an inherited lease and one that reads an input file stay here; the last waits for
+   this machine's own lane, and if that wait ends in a deferral the deferral says the fleet was not asked and why (`fleet_note`;
+   a call that then runs here and succeeds carries no note, because only a deferral is annotated). A call with no lane of its own
+   to wait for (`route remote`, or `auto` on a thin client) is placed as before, checked by name only, and held to rule 1's release
+   proof and rules 3 and 4. Hashing each input file to
+   the node would lift that last exception and close that limit; it is not built. A node's 503 at the door moves the call to the
+   next node like any refusal at the door (decision 6) and counts toward the three attempts; like any 503 that names no
+   `Retry-After` it also leaves that node alone for about 5 s in the calling process (the placer's memory, the same for a graph as
+   for an image: a ticket's scan reads that node as refused for those seconds; the cause kept for a graph's 503 does not call the node
+   full, since the same 503 is a missing file). The call falls back to the local queue, and when that wait ends in a deferral the deferral carries `cluster[]`
+   naming, per node, the file it lacks.
+3. **A whole-node graph is placed only on a node that publishes exactly one card.** A graph that names no devices holds the
+   whole node and runs in the default ComfyUI instance, which sees every card; on a node with several, the delegator cannot
+   know which card that instance picks and it may be the display card. So a node with more than one card is a named miss, and
+   so is a node that publishes no `gpu_devices` (unknown is never a pass). The rule is the delegator's **placement** rule and it
+   covers every remote placement of a graph: the overflow, `route remote` and a thin client alike, so a graph cannot be sent to
+   a multi-GPU node by this client at all. It does not change what such a node does with a graph sent to it by hand or run on
+   its own machine: that local whole-node case is the parked item the operator knows. A single card that drives a display passes
+   the rule: a box whose only card is its display card runs there by necessity (the allocator's carve-out, as for an image).
+4. **`min_vram_gb`.** A call may ask for a node whose largest `gpu_devices[].vram_total_gb` is at least N GB; a node that
+   publishes no cards cannot be shown to have it and is a miss. A card counts as the size it rounds to: nvidia-smi reports
+   MiB/1024, so a 16 GB card reads 15.92 or 15.93 GiB (the figures in `docs/FLEET-NODE.md`) and a literal comparison with 16
+   would shut out every one. Absent the argument, a graph that names `model_family` `wan22` (or `wan2.2`, `wan`) and carries a
+   `height` input of 720 or more (the tallest of any node; none = no floor) gets a floor of 16. **That row is CHOSEN from the
+   film owner's stated constraint that Wan 2.2 14B at 720p needs a 16 GB card; it is not a measurement**, and every answer that
+   cites it says so. The caller's number wins over it, 0 included. The floor filters remote candidates only: the local lane is
+   the node's own grant.
+
+**Named limits of the amendment.** **A graph does not wait in the cluster queue yet** (decided for 0.180.0, the release that carries both
+the ticket queue and this amendment): it has no ticket, so it keeps no place in the cluster queue, does not start on a lane that
+frees after its one look at the fleet, and a repeat of the same graph is a second call, not the first one's ticket. Making it a
+ticket is a follow-up: a ticket's identity is the hash of the request's parameters, and a graph's parameters name files on this
+machine (`graph_path`, `manifest_path`) rather than carry them, so what makes two graph calls the same call needs a decision of its
+own. The file check is by name (a same-named file of other bytes is held), which is why a graph that
+reads an input file is not auto-overflowed, though a call that must leave its machine anyway keeps the same-named-file risk. Input files need to be on the node already when a node is named by hand. The node's
+host-RAM guard sizes a graph at the media class default, not at the files the door has resolved, so a graph naming weights bigger
+than every bound family can be under-counted. The default floor reads two things the harness otherwise never reads in a graph (`model_family`, the
+`height` inputs), and a graph that uses neither key gets none. A forced or thin-client graph can no longer reach a multi-GPU
+node, the workstation among them; whether to relax that for the operator's own machine, once the monitors-off detector exists, is the
+operator's. With the fleet as the film owner described it on 2026-10-09 (the 16 GB cards are the three of the multi-card
+workstation, the single-card nodes carry 8 GB cards) rules 3 and 4 together leave a graph that gets the default Wan floor no remote
+target: it waits for its own lane. The durable fix is on the node (keep a whole-node graph off the display card there). A graph is
+placed only on a node that runs this machine's release, on every route, so a fleet part-way through an upgrade routes graphs only
+to the nodes already on it (and `route remote` to a node still on the old release is a named miss, not a send). Nothing here was run live: A8 in the step report is the first.

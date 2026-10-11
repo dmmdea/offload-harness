@@ -113,7 +113,7 @@ func (r *closeRig) nothingLeftForTheSweep(t *testing.T) {
 		t.Fatalf("the sweep found %d card(s) of a call that had answered", n)
 	}
 	for _, f := range r.failedFrames() {
-		if f["error"] == OrphanError {
+		if e, _ := f["error"].(string); strings.HasPrefix(e, OrphanError) {
 			t.Fatalf("a card was closed as an orphan: %v", f)
 		}
 	}

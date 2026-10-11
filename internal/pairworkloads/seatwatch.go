@@ -79,6 +79,7 @@ type seatEpisode struct {
 	lastBusyAt int64 // ms
 	idle       int   // consecutive polls with no direct traffic
 	unreadable int   // consecutive polls with the metrics unreadable
+	blind      int   // consecutive polls with the harness's own load on the seat unresolvable
 }
 
 // seatState is what the watcher remembers per seat between polls.
@@ -103,6 +104,7 @@ type SeatWatcher struct {
 	now         func() time.Time
 
 	mu       sync.Mutex
+	swapDown int                   // consecutive polls llama-swap's own /running was unreadable
 	seats    map[string]*seatState // canonical seat id -> state
 	roster   swapclient.Roster
 	rosterOK bool
@@ -148,7 +150,22 @@ func (w *SeatWatcher) Run(ctx context.Context) {
 func (w *SeatWatcher) Poll(ctx context.Context) {
 	running, err := w.readRunning(ctx)
 	if err != nil {
-		// llama-swap itself unreadable: nothing is known, nothing changes.
+		// llama-swap itself unreadable: nothing is known about any seat, so nothing changes, for a while. Not
+		// for ever (C04, 2026-10-09): llama-swap owns the seat processes, so a llama-swap that never answers
+		// again (it crashed, or was replaced, and took the seat with it) left a card "running" until a fleet
+		// restart swept it. After the limit the open cards close like those of a seat whose metrics are
+		// unreadable, and exactly once: the cards are gone, so later silent polls have nothing to close.
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		w.swapDown++
+		if w.swapDown >= seatUnreadableLimit {
+			now := w.now().UnixMilli()
+			for seat, st := range w.seats {
+				if st.open != nil {
+					w.finish(seat, st, "failed", "llama-swap stopped answering while this seat served direct traffic", now)
+				}
+			}
+		}
 		return
 	}
 	harness, harnessKnown := w.harnessBySeat(ctx)
@@ -156,6 +173,7 @@ func (w *SeatWatcher) Poll(ctx context.Context) {
 
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	w.swapDown = 0
 	seen := map[string]bool{}
 	for _, rs := range running {
 		seat := rs.model
@@ -171,8 +189,20 @@ func (w *SeatWatcher) Poll(ctx context.Context) {
 			// what we have would report a harness request as direct traffic —
 			// the one thing this watcher must never do — so the seat is left
 			// exactly as it was: no card opens, and an open one neither closes
-			// nor fails while the answer is unknown.
+			// nor fails while the answer is unknown, for a while. A stretch that stays unresolvable past the
+			// limit can no longer be followed, so it ends where it was last seen, completed as a shutdown
+			// completes it (C04): a card left open for as long as the harness's marker names something the
+			// roster does not know would otherwise stay "running" until a fleet restart swept it.
+			if st.open != nil {
+				st.open.blind++
+				if st.open.blind >= seatUnreadableLimit {
+					w.finish(seat, st, "completed", "", st.open.lastBusyAt)
+				}
+			}
 			continue
+		}
+		if st.open != nil {
+			st.open.blind = 0
 		}
 		total, ok := w.readLoad(ctx, rs.proxy)
 		if !ok {
