@@ -44,14 +44,19 @@ const OWN_FLAGS = Object.freeze(["wan-placement", "wan-resident-gb", "wan-cards"
  * refuseEqualsSpelling: this runner's parser (comfy-video.mjs parseArgs) does not split `--flag=value`: it reads the whole thing as
  * one flag NAME, takes the next argument as its value and leaves the real value behind as a positional. The Go side that sizes the
  * lease does split it, so `--wan-placement=multicard` would declare no host RAM and then run the single-card placement, which
- * streams the whole set through RAM. The placement's own flags are therefore refused in that spelling, before anything starts.
- * Every other `=` key is none of this placement's business and passes.
+ * streams the whole set through RAM. Two spellings lose the placement's flags, and both are refused before anything starts: one of
+ * the placement's own flags spelled with '=', and any other flag spelled with '=' that swallowed one of ours as its value
+ * (`--seed=7 --wan-placement multicard`). A `=` key that swallowed something else is none of this placement's business and passes.
  */
 export function refuseEqualsSpelling(flags) {
-  for (const key of Object.keys(flags || {})) {
+  for (const [key, value] of Object.entries(flags || {})) {
     const own = OWN_FLAGS.find((f) => key.startsWith(f + "="));
     if (own) {
       throw new Error(`--${key} is spelled with '=', which this runner's parser does not split (it reads the whole thing as one flag name, takes the next flag as its value, and the call would run the single-card placement): write --${own} ${key.slice(own.length + 1)}`);
+    }
+    const lost = typeof value === "string" ? OWN_FLAGS.find((f) => value === "--" + f) : undefined;
+    if (lost) {
+      throw new Error(`--${key} took --${lost} as its value (this runner's parser does not split '=': a flag spelled --name=value swallows the flag after it), so the placement's own flag would be lost and the call would run the single-card placement: write each flag as --name value`);
     }
   }
 }
@@ -293,18 +298,35 @@ function refuseUnmeasuredWan(flags) {
   }
 }
 
-/** What the compute card needs besides the resident share of an expert: the sampler's activations, the CUDA context and --reserve-vram. */
-const COMPUTE_CARD_HEADROOM_GIB = 3.5;
+/**
+ * The Wan 2.2 sampler's tokens for a clip, from the flags the builder reads (defaults 832x480x49): the latent is 1/8 per side, the patches
+ * 2x2 and a latent frame holds 4 frames, so the film's 720x1280x81 is 45 x 80 x 21 = 75,600.
+ */
+export function wanGeometry(flags) {
+  const w = Number(flags.width) || 832, h = Number(flags.height) || 480, f = Number(flags.frames) || 49;
+  return { w, h, f, tokens: Math.ceil(w / 16) * Math.ceil(h / 16) * (Math.floor((f - 1) / 4) + 1) };
+}
+const FILM_TOKENS = 75600;
+/** What the sampler needs on the compute card beyond the resident weights at the film's size: the benchmark's compute-card peak, 13.3 GiB, less its 3 GiB resident share. */
+const FILM_ACTIVATIONS_GIB = 10.3;
+/** Scaled with the tokens, never under this: even a small clip holds a context's worth of buffers. */
+const ACTIVATIONS_FLOOR_GIB = 2.0;
+/** The CUDA context and the allocator's slack on the compute card, beyond the activations. */
+const COMPUTE_CARD_CONTEXT_GIB = 0.5;
 
 /**
- * checkResident: a resident share larger than the compute card can hold beside its activations would out-of-memory in the sampler,
- * 80 minutes in. The measured recipe keeps 3 GiB; what a card can take is its size less COMPUTE_CARD_HEADROOM_GIB, whatever the clip.
+ * checkResident: a resident share larger than the compute card can hold beside the sampler's activations at this geometry would
+ * run out of memory in the first sampler step, 80 minutes into a film-size run's lease. The estimate is the measured compute-card
+ * peak scaled by the tokens (floor 2 GiB), so the film's own 3 GiB passes with room and 6 does not; the lease sizing in
+ * internal/hostneed is stricter on purpose (it only decides whether a call needs host RAM declared).
  */
-function checkResident(residentGb, pair) {
+function checkResident(residentGb, pair, flags) {
   const cardGib = pair.compute.totalMiB / 1024;
-  const most = cardGib - COMPUTE_CARD_HEADROOM_GIB;
+  const { w, h, f, tokens } = wanGeometry(flags);
+  const activations = Math.max(ACTIVATIONS_FLOOR_GIB, FILM_ACTIVATIONS_GIB * tokens / FILM_TOKENS);
+  const most = cardGib - activations - COMPUTE_CARD_CONTEXT_GIB;
   if (residentGb > most) {
-    throw placementError(`--wan-resident-gb ${residentGb} leaves the compute card (idx ${pair.compute.index}, ${cardGib.toFixed(1)} GiB) less than ${COMPUTE_CARD_HEADROOM_GIB} GiB for the sampler's activations, the CUDA context and --reserve-vram: at most ${most.toFixed(1)} GiB of an expert can stay resident there (the measured film-size recipe keeps ${WAN_RESIDENT_GB_DEFAULT})`);
+    throw placementError(`--wan-resident-gb ${residentGb} leaves the compute card (idx ${pair.compute.index}, ${cardGib.toFixed(1)} GiB) about ${activations.toFixed(1)} GiB for the sampler's activations at ${w}x${h}x${f} (${tokens} tokens) and ${COMPUTE_CARD_CONTEXT_GIB} GiB for the CUDA context: at most ${most.toFixed(1)} GiB of an expert can stay resident there (the measured film-size recipe keeps ${WAN_RESIDENT_GB_DEFAULT})`);
   }
 }
 
@@ -347,7 +369,7 @@ export function planMulticard({ flags, env = process.env, comfyDir, isWanGraph, 
   const { tokens, source } = wanCardTokens({ flags, env, leaseDevicesFn });
   const pair = resolveWanCards({ tokens, source, cards: cards() });
   if (source === "--wan-cards") confirmWithLease(pair, leaseDevicesFn(env));
-  checkResident(residentGb, pair);
+  checkResident(residentGb, pair, flags);
   const launch = launchFn(pair, { comfyDir });
   const plan = { pair, launch, residentGb, env: multicardEnv(env, launch) };
   const line = (role, dev, c) => `${role} ${dev} = idx ${c.index} ${c.name} (${(c.totalMiB / 1024).toFixed(1)} GiB, ${c.uuid.slice(0, 12)})`;

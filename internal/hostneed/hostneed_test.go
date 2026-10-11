@@ -544,7 +544,8 @@ func TestAnSdcppOnlyBoxDeclaresNothing(t *testing.T) {
 
 // THE CARD-ONLY WAN PLACEMENT (comfy-video.mjs --wan-placement multicard, measured 2026-10-11). The two experts never sit on the
 // cards together and the text encoder is gone before the first expert lands, so the set does not have to fit ONE card, and it does
-// not have to fit as a sum either: what must fit is the largest stage (one expert + the film-size activations) across the TWO
+// not have to fit as a sum either: what must fit is each card's own stage (the larger card's resident share + the film-size activations, the
+// other card's donor blocks + the VAE and the context) on the TWO
 // cards the lease holds. Measured: 24.4 GiB in use across the pair at the peak, 2.3 GiB of host growth, so the call declares 0.
 const wanMulticardCmd = "node render/comfy-video.mjs o.mp4 s.png p --model wan --high-unet hi.safetensors --low-unet lo.safetensors --text-encoder te.safetensors --wan-placement multicard"
 
@@ -567,7 +568,7 @@ func wanNeed(t *testing.T, cmd string, f Facts) Need {
 func TestAMulticardWanCallOnTwoLeasedCardsDeclaresNothing(t *testing.T) {
 	n := wanNeed(t, wanMulticardCmd, wanFacts(t, 15.9, 15.9))
 	if n.GiB != 0 || n.Source != SourceEstimate {
-		t.Fatalf("a multicard Wan call whose largest stage fits the two leased cards streams nothing from RAM: %v", n)
+		t.Fatalf("a multicard Wan call whose stages fit the two leased cards streams nothing from RAM: %v", n)
 	}
 	for _, want := range []string{"multicard", "2 leased cards", "13.4", "fits"} {
 		if !strings.Contains(n.Detail, want) {
@@ -621,17 +622,18 @@ func TestAMulticardWanCallThatDoesNotFitTheLeasedPairIsSizedAsBefore(t *testing.
 	if n := wanNeed(t, wanMulticardCmd, wanFacts(t, 24, 24)); n.GiB != 0 {
 		t.Fatalf("two 24 GiB cards: %v, want 0", n)
 	}
-	// unequal cards: a big card and a small one that cannot hold the donor share (13.4 - 3 + 0.6 = 11.0 GiB + the 1 GiB reserve)
+	// unequal cards: a big card and a small one that cannot hold the donor share (13.4 - 3 + 0.8 = 11.2 GiB + the 1 GiB reserve)
 	ordinary("24 + 8 GiB", wanNeed(t, wanMulticardCmd, wanFacts(t, 24, 8)))
 	ordinary("8 + 24 GiB, the other order", wanNeed(t, wanMulticardCmd, wanFacts(t, 8, 24)))
 	if n := wanNeed(t, wanMulticardCmd, wanFacts(t, 16, 13)); n.GiB != 0 {
-		t.Fatalf("16 + 13 GiB: the 16 GiB card computes (3 + 11 = 14 of 15 usable) and the 13 GiB card holds 11.0 of 12 usable: %v, want 0", n)
+		t.Fatalf("16 + 13 GiB: the 16 GiB card computes (3 + 11 = 14 of 15 usable) and the 13 GiB card holds 11.2 of 12 usable: %v, want 0", n)
 	}
 	// the storage card's margin is the VAE and the context beside the donor blocks: 10.4 GiB of blocks fit a 11.7 GiB card (10.7 usable) only
-	// without them, 11.0 GiB do not
+	// without them, 11.2 GiB do not (the benchmark's storage card peaked at 11.1 GiB with 10.3 GiB of blocks)
 	ordinary("16 + 11.7 GiB", wanNeed(t, wanMulticardCmd, wanFacts(t, 16, 11.7)))
-	if n := wanNeed(t, wanMulticardCmd, wanFacts(t, 16, 12.2)); n.GiB != 0 {
-		t.Fatalf("16 + 12.2 GiB (11.2 usable >= 11.0): %v, want 0", n)
+	ordinary("16 + 12.1 GiB: 11.1 usable against the 11.2 the measured 0.8 GiB overhead asks for", wanNeed(t, wanMulticardCmd, wanFacts(t, 16, 12.1)))
+	if n := wanNeed(t, wanMulticardCmd, wanFacts(t, 16, 12.5)); n.GiB != 0 {
+		t.Fatalf("16 + 12.5 GiB (11.5 usable >= 11.2): %v, want 0", n)
 	}
 	// the compute card: resident 3 + 11 GiB of activations must fit its size less the reserve (1.0 by default)
 	ordinary("2 x 14.5 GiB", wanNeed(t, wanMulticardCmd, wanFacts(t, 14.5, 14.5)))
@@ -656,7 +658,7 @@ func TestTheResidentShareIsReadFromTheCall(t *testing.T) {
 	}
 	ordinary("a 6 GiB share (6 + 11 = 17 > 14.9 usable on the compute card)", wanNeed(t, wanMulticardCmd+" --wan-resident-gb 6", two))
 	if n := wanNeed(t, wanMulticardCmd+" --wan-resident-gb 0", two); n.GiB != 0 {
-		t.Fatalf("a 0 GiB share (everything on the storage card: 13.4 + 0.6 = 14.0 of 14.9 usable): %v, want 0", n)
+		t.Fatalf("a 0 GiB share (everything on the storage card: 13.4 + 0.8 = 14.2 of 14.9 usable): %v, want 0", n)
 	}
 	if n := wanNeed(t, wanMulticardCmd+" --wan-resident-gb=3.5", two); n.GiB != 0 {
 		t.Fatalf("the --name=value form is read as the flag: %v, want 0", n)
@@ -670,7 +672,7 @@ func TestTheResidentShareIsReadFromTheCall(t *testing.T) {
 	// the storage card holds the rest of the expert: a 0 GiB share does not fit a 12 GiB card beside a 16 GiB one
 	ordinary("a 0 GiB share on 16 + 12 GiB", wanNeed(t, wanMulticardCmd+" --wan-resident-gb 0", wanFacts(t, 16, 12)))
 	if n := wanNeed(t, wanMulticardCmd, wanFacts(t, 16, 13)); n.GiB != 0 {
-		t.Fatalf("the default 3 GiB share on 16 + 13 GiB (the 13 GiB card holds 11.0 GiB of donor blocks, 12 usable): %v, want 0", n)
+		t.Fatalf("the default 3 GiB share on 16 + 13 GiB (the 13 GiB card holds 11.2 GiB, 12 usable): %v, want 0", n)
 	}
 }
 

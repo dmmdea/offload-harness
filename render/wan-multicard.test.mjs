@@ -465,6 +465,11 @@ test("an '=' spelling of the placement's own flags is refused: the runner's pars
   assert.throws(() => M.planMulticard({ flags: flags("wan-placement=multicard"), comfyDir: "/c", isWanGraph: true, cards: boom }), /--wan-placement=multicard is spelled with '='.*write --wan-placement multicard/);
   assert.throws(() => M.planMulticard({ flags: flags("wan-resident-gb=4"), comfyDir: "/c", isWanGraph: true, cards: boom }), /--wan-resident-gb=4 is spelled with '='.*write --wan-resident-gb 4/);
   assert.throws(() => M.planMulticard({ flags: flags("wan-cards=0,2"), comfyDir: "/c", isWanGraph: true, cards: boom }), /--wan-cards=0,2 is spelled with '='.*write --wan-cards 0,2/);
+  // a flag spelled with '=' takes the NEXT argument as its value: when that is one of ours, ours is lost and the call would run single
+  for (const own of ["wan-placement", "wan-resident-gb", "wan-cards"]) {
+    assert.throws(() => M.planMulticard({ flags: { "seed=7": `--${own}` }, comfyDir: "/c", isWanGraph: true, cards: boom }), new RegExp(`--seed=7 took --${own} as its value.*write each flag as --name value`), own);
+  }
+  assert.equal(M.planMulticard({ flags: { "seed=7": "x" }, comfyDir: "/c", isWanGraph: true, cards: boom }), null, "swallowing something that is not ours is the single path's old behaviour");
   // no other '=' key is this placement's business: the single path is what it was, flag by flag
   assert.equal(M.planMulticard({ flags: { "high-unet=x.safetensors": "y" }, comfyDir: "/c", isWanGraph: true, cards: boom }), null);
   assert.equal(M.planMulticard({ flags: { "wan-decode=plain": "x" }, comfyDir: "/c", isWanGraph: true, cards: boom }), null);
@@ -563,10 +568,20 @@ test("a row without a numeric size is no card, so a size check can never pass on
   assert.equal(M.parseCardTable(`2, ${U2}, A, 16311, [N/A], Disabled, No`)[0].freeMiB, 0, "a free column that is not a number is 0");
 });
 
-test("--wan-resident-gb above what the compute card can hold beside the activations is refused with the numbers", () => {
-  assert.equal(planWith({ "wan-resident-gb": "12" }).residentGb, 12, "15.9 GiB card - 3.5 = 12.4 GiB at most");
-  assert.throws(() => planWith({ "wan-resident-gb": "13" }), /--wan-resident-gb 13 .*compute card .*idx 0.*15\.9 GiB.*at most 12\.4/);
+test("--wan-resident-gb above what the compute card can hold beside the sampler's activations at THIS geometry is refused with the numbers", () => {
+  // the default geometry (832x480x49: 20,280 tokens, about 2.8 GiB beyond the weights): 15.9 - 2.8 - 0.5 = 12.7 GiB at most
+  assert.equal(planWith({ "wan-resident-gb": "12" }).residentGb, 12);
+  assert.throws(() => planWith({ "wan-resident-gb": "13" }), /--wan-resident-gb 13 .*compute card \(idx 0, 15\.9 GiB\).*832x480x49.*at most 12\.7/);
   assert.throws(() => planWith({ "wan-resident-gb": "40" }), /--wan-resident-gb 40/);
+  // the film's geometry (720x1280x81: 75,600 tokens, 10.3 GiB beyond the resident share, measured): the measured 3 passes, 6 and 8 would run out of memory
+  const film = { width: "720", height: "1280", frames: "81" };
+  assert.equal(planWith({ ...film, "wan-resident-gb": "3" }).residentGb, 3);
+  assert.equal(planWith({ ...film, "wan-resident-gb": "5" }).residentGb, 5, "15.9 - 10.3 - 0.5 = 5.1 GiB at most");
+  assert.throws(() => planWith({ ...film, "wan-resident-gb": "6" }), /--wan-resident-gb 6 .*720x1280x81 \(75600 tokens\).*at most 5\.1/);
+  assert.throws(() => planWith({ ...film, "wan-resident-gb": "8" }), /--wan-resident-gb 8 /);
+  // a small clip needs little: the estimate has a 2 GiB floor (480x832x17: 7,800 tokens)
+  assert.equal(planWith({ width: "480", height: "832", frames: "17", "wan-resident-gb": "13" }).residentGb, 13, "15.9 - 2 - 0.5 = 13.4 GiB at most");
+  assert.throws(() => planWith({ width: "480", height: "832", frames: "17", "wan-resident-gb": "14" }), /--wan-resident-gb 14 .*at most 13\.4/);
 });
 
 test("portNote names the port a multicard instance falls back to when no --api or COMFY_API gives it one", () => {

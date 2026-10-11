@@ -212,9 +212,10 @@ const wanActivationsGiB = 11.0
 // render/wf-wan22-i2v.mjs WAN_RESIDENT_GB_DEFAULT (a test pins the two together).
 const wanResidentDefaultGiB = 3.0
 
-// wanStorageOverheadGiB is what the storage card holds besides the donor blocks of the expert in use: the VAE (0.24 GiB) and the CUDA
-// context. Measured: 10.85 GiB at the peak with 10.3 GiB of donor blocks.
-const wanStorageOverheadGiB = 0.6
+// wanStorageOverheadGiB is what the storage card holds besides the donor blocks of the expert in use: the VAE (0.24 GiB), the CUDA
+// context and the allocator's slack. Measured on the benchmark pair: the storage card peaked at 11.1 GiB (NVML) with 10.3 GiB of donor
+// blocks (the 13.3 GiB expert less its 3 GiB resident share), so 0.8.
+const wanStorageOverheadGiB = 0.8
 
 // CardOnly is the card-only Wan placement a call asked for (--wan-placement multicard on the Wan 2.2 graph), and what the call says about it.
 type CardOnly struct {

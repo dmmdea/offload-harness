@@ -124,7 +124,8 @@ class ReadOnlyReader(unittest.TestCase):
 
     def test_a_truncated_file_is_a_clear_error_not_a_torch_shape_error(self):
         utils = self._reader()
-        raw = open(self.path, "rb").read()
+        with open(self.path, "rb") as source:
+            raw = source.read()
         cut = os.path.join(self.dir.name, "cut.safetensors")
         with open(cut, "wb") as fh:
             fh.write(raw[:-8])

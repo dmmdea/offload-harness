@@ -27,8 +27,9 @@ Versioning: [SemVer](https://semver.org/).
   contradict it), and `--wan-loader` is not read (one stderr line when `native` was asked). `ensureComfy` takes a `launch` and records
   the pair in its launch marker, so a running ComfyUI is reused only when it is this instance on this pair in this order. Refused before
   the lease slot, llama-swap or ComfyUI are touched: `--fast`, a GGUF or unnamed expert (`--high-unet` / `--low-unet` are required), another
-  family, a `--graph` file, a `--wan-resident-gb` the compute card cannot hold beside the sampler, and the placement's own flags spelled
-  with `=` (the runner's parser does not split it while the lease sizing does: write `--wan-placement multicard`).
+  family, a `--graph` file, a `--wan-resident-gb` the compute card cannot hold beside the sampler at the call's geometry (5.1 GiB at most at
+  film size), and the placement's own flags lost to an `=` (`--wan-placement=multicard`, or `--seed=7 --wan-placement multicard`: the runner's
+  parser does not split it while the lease sizing does; write each flag as `--name value`).
 - **`render/comfyui-ext`, the harness's own ComfyUI code (the shared install is not written to).** A read-only safetensors reader
   (`OFFLOAD_RO_LOAD=1`): stock ComfyUI maps a safetensors file copy-on-write, which Windows charges to commit in full (+13.3 GiB per
   expert); mapped read-only it charges nothing. And `OffloadFreeForDecode`, a pass-through latent node between the last sampler and the
@@ -41,7 +42,7 @@ Versioning: [SemVer](https://semver.org/).
   of host commit lives in the same pack; a missing-node message for the harness's own pack says it failed to import, not "install it".
 - **Host RAM.** `gpu reserve --devices <a>,<b> -- node render/comfy-video.mjs ... --wan-placement multicard` declares 0 when each leased
   card fits its own stage (`hostneed.estimateWith`, new `Facts.CardsGiB` / `LeasedCardsGiB`): the larger card, the resident share of the
-  expert (`--wan-resident-gb`, default 3) plus 11 GiB of film-size activations, the other the rest of the expert plus 0.6 GiB; one card,
+  expert (`--wan-resident-gb`, default 3) plus 11 GiB of film-size activations, the other the rest of the expert plus 0.8 GiB; one card,
   three, no card table, no fit, another family or no flag keep the ordinary estimate. The pipeline's media admission has no multicard door
   yet (every typed door leases one card).
 - **Tests.** 45 new render tests (44 in `wan-multicard.test.mjs`, and `comfyui-ext.test.mjs`, which runs the 14 Python tests of the node
