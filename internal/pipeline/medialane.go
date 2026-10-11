@@ -34,6 +34,7 @@ import (
 	"io"
 	"log"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/dmmdea/offload-harness/internal/config"
@@ -91,13 +92,49 @@ func (p *Pipeline) laneCardTable(ctx context.Context, kind string) ([]gpuprobe.C
 	}
 	if err != nil {
 		// A read that ended because the CALLER went away (a client that disconnected mid-probe) says nothing about the
-		// table, and the line is the only trace of a real nvidia-smi fault: it is not written for a cancelled caller.
-		if ctx.Err() == nil {
+		// table, and the line is the only trace of a real nvidia-smi fault: it is not written for a cancelled caller. Nor is it
+		// written again for a fault it just reported: a table that stays unreadable fails every question the same way, and a
+		// ticket scan asks once per waiting ticket every 10 s, so the line is written for the first occurrence and then once a
+		// minute per probe and cause while the fault lasts (laneFaultLog).
+		if ctx.Err() == nil && p.laneFaults.due(kind+"|"+err.Error(), p.now()) {
 			log.Printf("media lane probe (%s): the card table could not be read (%v); the lane is reported as not judged, so the router decides without a reading of this machine's lane and the call reads the table itself", kind, err)
 		}
 		return nil, err
 	}
 	return table, nil
+}
+
+// laneFaultEvery is how long the line for a card-table fault stays unwritten after it was written. It is CHOSEN, not measured: a
+// ticket scan runs every 10 s, so a minute turns the lines of six scans of one fault into one and still says, once a minute, that
+// the fault lasts.
+const laneFaultEvery = time.Minute
+
+// laneFaultLog remembers when the line for each fault of the lane probe's card-table read was last written. The zero value is
+// ready. It belongs to a Pipeline (the fleet-serve process has one), so a test that builds its own starts with nothing written.
+type laneFaultLog struct {
+	mu   sync.Mutex
+	last map[string]time.Time
+}
+
+// due reports whether the line for key (the probe and the text of the fault) is to be written at now, and notes that it was. The
+// first occurrence is always due, the same one again inside laneFaultEvery is not, and another fault is another key and is due at
+// once. Entries older than the window are dropped here, so a fault whose text keeps changing cannot grow the map.
+func (l *laneFaultLog) due(key string, now time.Time) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for k, at := range l.last {
+		if now.Sub(at) >= laneFaultEvery {
+			delete(l.last, k)
+		}
+	}
+	if _, quiet := l.last[key]; quiet {
+		return false
+	}
+	if l.last == nil {
+		l.last = map[string]time.Time{}
+	}
+	l.last[key] = now
+	return true
 }
 
 // resolveLane resolves an image request against this box. why is not empty when the box cannot judge the request

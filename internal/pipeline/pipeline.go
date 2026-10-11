@@ -214,6 +214,8 @@ type Pipeline struct {
 	// seatVerdictFn the test seam that replaces it.
 	seatGuard     *seatguard.Guard
 	seatVerdictFn func(ctx context.Context, model string) seatguard.Verdict
+	// laneFaults keeps the media lane probe's card-table fault lines to one per probe and cause per minute (laneCardTable).
+	laneFaults laneFaultLog
 }
 
 // digestMedia resolves a media file's content identity (test seam aware).

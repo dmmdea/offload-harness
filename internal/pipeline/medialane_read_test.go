@@ -11,6 +11,8 @@ package pipeline
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"log"
 	"strings"
 	"sync/atomic"
@@ -182,6 +184,84 @@ func TestTheLaneProbeLogsNothingWhenTheCallerWentAway(t *testing.T) {
 	}
 	if got := linesWith(buf, "media lane probe"); len(got) != 0 {
 		t.Errorf("a cancelled caller is not a card-table fault, but the log says so: %v", got)
+	}
+}
+
+// A card table that stays unreadable fails every question the same way, and the lane question is asked once per waiting ticket on
+// every scan of the ticket queue (every 10 s): a persistent fault would write a line per ticket per scan. The line is written for
+// the first occurrence (and kept), then not again for the same fault of the same probe inside a minute. Another fault is another
+// line at once, the other probe's question is its own line (the line names the probe), and a fault that outlasts the minute is
+// said again. The verdict is the not-judged one every time.
+func TestTheLaneProbeLogsAPersistentCardTableFaultOncePerMinute(t *testing.T) {
+	f := newAdmitFixtureWith(t, admitSpec{order: admitOrder, mutate: pinA})
+	cause := errors.New("nvidia-smi: exit status 9") // not a timeout: read once, no retry
+	f.p.alloc.Cards = func(context.Context, config.Config) ([]gpuprobe.Card, string, error) { return nil, "", cause }
+	now := time.Unix(1_700_000_000, 0)
+	f.p.nowFn = func() time.Time { return now }
+	buf := captureLogLines(t)
+	ask := func(req core.Request) {
+		t.Helper()
+		if v := f.p.MediaLaneFree(context.Background(), req); !v.Free || !strings.Contains(v.Why, "card table") {
+			t.Fatalf("an unreadable table is the not-judged verdict however often it is asked: %+v", v)
+		}
+	}
+	lines := func() []string { return linesWith(buf, "media lane probe") }
+
+	// A caller that went away is told nothing and tells nothing: it writes no line and does not use up the first one.
+	gone, cancel := context.WithCancel(context.Background())
+	cancel()
+	if v := f.p.MediaLaneFree(gone, laneReq(nil)); !v.Free || !strings.Contains(v.Why, "card table") {
+		t.Fatalf("a probe whose caller left reads as not judged: %+v", v)
+	}
+	if got := lines(); len(got) != 0 {
+		t.Fatalf("a cancelled caller writes no line, got %v", got)
+	}
+
+	for i := 0; i < 5; i++ { // a scan with five tickets waiting
+		ask(laneReq(nil))
+	}
+	if got := lines(); len(got) != 1 {
+		t.Fatalf("five questions about one fault leave ONE line, and it is the first, got %d:\n%s", len(got), buf.String())
+	}
+	now = now.Add(time.Minute - time.Second)
+	ask(laneReq(nil))
+	if got := lines(); len(got) != 1 {
+		t.Errorf("inside the minute the same fault is not said again, got %d lines", len(got))
+	}
+	ask(graphLaneReq(nil))
+	if got := lines(); len(got) != 2 || !strings.Contains(got[1], "(run_graph)") {
+		t.Errorf("the run_graph probe's question is its own line, naming the probe: %v", got)
+	}
+	cause = errors.New("nvidia-smi: exit status 255")
+	ask(laneReq(nil))
+	if got := lines(); len(got) != 3 || !strings.Contains(got[2], "exit status 255") {
+		t.Errorf("another fault is another line at once: %v", got)
+	}
+	now = now.Add(time.Second) // a minute since the first fault's line
+	cause = errors.New("nvidia-smi: exit status 9")
+	ask(laneReq(nil))
+	if got := lines(); len(got) != 4 || !strings.Contains(got[3], "exit status 9") {
+		t.Errorf("a fault that outlasts the minute is said again: %v", got)
+	}
+	ask(graphLaneReq(nil))
+	if got := lines(); len(got) != 4 {
+		t.Errorf("the graph probe wrote its line a second ago and stays quiet: %v", got)
+	}
+
+	// A fault whose text changes every time (a pid or a time in the tool's own message) must not grow the memory without bound:
+	// what is older than the window is dropped when the next fault is judged.
+	for i := 0; i < 50; i++ {
+		cause = fmt.Errorf("nvidia-smi: failed at attempt %d", i)
+		ask(laneReq(nil))
+	}
+	now = now.Add(2 * time.Minute)
+	cause = errors.New("nvidia-smi: exit status 9")
+	ask(laneReq(nil))
+	f.p.laneFaults.mu.Lock()
+	kept := len(f.p.laneFaults.last)
+	f.p.laneFaults.mu.Unlock()
+	if kept != 1 {
+		t.Errorf("only the fault of the last minute is remembered, got %d entries", kept)
 	}
 }
 
