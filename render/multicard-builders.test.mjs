@@ -182,6 +182,26 @@ test("comfy-render: --placement multicard on a family with no recipe, or on a --
   assert.throws(() => build(["--graph", "wf.json", "--placement", "multicard"], { multicard: { residentGb: 3 } }), (e) => e instanceof UsageError && /--graph/.test(e.message));
 });
 
+// The rows' compute peaks assume the activations of a canvas of at most `maxMegapixels` (2.0 MP). The runner honours --megapixels, COMFY_EDIT_MEGAPIXELS and
+// gen_edit_megapixels verbatim (resolveEditMegapixels), so a pinned canvas above the cap is a canvas no peak was measured or scaled for: on a 16 GB card it is the
+// out-of-memory with both cards held. A canvas the runner derives from the source is held to the cap by resolveEditMegapixels itself.
+test("comfy-edit: a canvas the call pins above the recipe's cap is refused before ComfyUI starts, whichever way it is pinned; at the cap, and derived from the source, it runs", () => {
+  const plan = (flags, extra = {}) => planEdit({ pos: ["o.png", "in.png", "make it orange"], flags, env: {}, measure: () => ({ width: 928, height: 1664 }), exists: () => true, random: () => 0.5, ...extra });
+  const mc = { multicard: { residentGb: 9 } };
+  const refused = (e) => e instanceof EditUsageError && /--megapixels 4.*qwen-image-edit-2511\/fp8mixed.*at most 2\.0/s.test(e.message) && /nothing was started/.test(e.message);
+  assert.throws(() => plan({ unet: FP8, placement: "multicard", megapixels: "4" }, mc), refused);
+  assert.throws(() => plan({ unet: FP8, placement: "multicard" }, { ...mc, env: { COMFY_EDIT_MEGAPIXELS: "4" } }), (e) => e instanceof EditUsageError && /COMFY_EDIT_MEGAPIXELS 4.*at most 2\.0/s.test(e.message));
+  assert.throws(() => plan({ unet: EGGUF, placement: "multicard", megapixels: "2.5" }, { multicard: { residentGb: 3 } }), (e) => e instanceof EditUsageError && /qwen-image-edit-2511\/gguf-q5_1.*at most 2\.0/s.test(e.message));
+  // the cap itself, a smaller pin and a source-derived canvas all run
+  assert.match(plan({ unet: FP8, placement: "multicard", megapixels: "2" }, mc).describe, /mp 2/);
+  assert.match(plan({ unet: FP8, placement: "multicard", megapixels: "0.9" }, mc).describe, /mp 0\.9/);
+  const huge = plan({ unet: FP8, placement: "multicard" }, { ...mc, measure: () => ({ width: 6000, height: 4000 }) });
+  assert.match(huge.describe, /mp 2\b/, "a 24 MP source is held to the 2.0 MP cap by the resolver");
+  // the single placement is not this recipe's business: a 4 MP pin is today's behaviour, byte for byte
+  assert.match(plan({ unet: FP8, megapixels: "4" }).describe, /mp 4\b/);
+  assert.match(plan({ unet: FP8, placement: "single", megapixels: "4" }).describe, /mp 4\b/);
+});
+
 test("comfy-edit: --placement multicard plans the 2511 recipe from the --unet the binding names", () => {
   const plan = (flags, extra = {}) => planEdit({ pos: ["o.png", "in.png", "make it orange"], flags, env: {}, measure: () => ({ width: 928, height: 1664 }), exists: () => true, random: () => 0.5, ...extra });
   const fp8 = plan({ unet: FP8, placement: "multicard" }, { multicard: { residentGb: 9 } });

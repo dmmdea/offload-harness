@@ -185,6 +185,20 @@ test("every non-core class a recipe's loaders name has a MISSING_NODE hint namin
   assert.ok(classes.has("CLIPLoaderDisTorch2MultiGPU") && classes.has("UNETLoaderMultiGPU"));
 });
 
+// A row that claims a canvas cap (`maxMegapixels`) has its activations scaled to it: the benchmark measured the 2511 edit at 1.4727 MP, and the activations
+// grow with the canvas (2.6 GiB there, 3.5 at 2.0 MP, which is how the fp8mixed row was made). The GGUF edit row said 2.0 MP and kept its 1.47 MP figure.
+test("a row with a canvas cap holds the activations of that cap, and its compute peak holds the resident share beside them", () => {
+  const MEASURED_AT = 1.4727; // MP of the benchmark's edit canvas (section 4.6)
+  const MEASURED_ACTIVATIONS = { "qwen-image-edit-2511/fp8mixed": 2.6, "qwen-image-edit-2511/gguf-q5_1": 1.9 }; // GiB on the compute card at that canvas
+  const capped = RECIPES.filter((r) => r.maxMegapixels > 0);
+  assert.deepEqual(capped.map((r) => r.id).sort(), Object.keys(MEASURED_ACTIVATIONS).sort(), "every capped row has its measured activations here");
+  for (const r of capped) {
+    const atCap = (MEASURED_ACTIVATIONS[r.id] * r.maxMegapixels) / MEASURED_AT;
+    assert.ok(r.activationsGiB >= atCap - 0.06, `${r.id}: ${r.activationsGiB} GiB of activations is below the ${atCap.toFixed(2)} GiB the ${r.maxMegapixels} MP cap needs`);
+    assert.ok(r.peakGiB.compute + 1e-9 >= (r.unet.residentGb || 0) + r.activationsGiB, `${r.id}: the compute peak ${r.peakGiB.compute} is less than the resident share ${r.unet.residentGb} plus ${r.activationsGiB} GiB of activations`);
+  }
+});
+
 test("the recipe file names no machine, user or path", () => {
   const text = JSON.stringify(RECIPES);
   assert.ok(!/[A-Za-z]:[\\/]|\/home\/|\/Users\/|\.local|GPU-[0-9a-f]{8}/i.test(text));

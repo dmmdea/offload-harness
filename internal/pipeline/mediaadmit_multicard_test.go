@@ -246,6 +246,34 @@ func TestAMulticardBindingWithNoRecipeIsRefusedBeforeAnyLease(t *testing.T) {
 	}
 }
 
+// The edit recipes' peaks are scaled to a canvas of at most 2.0 MP. gen_edit_megapixels is honoured verbatim by the runner, so a binding that pins a larger
+// canvas has no recipe's figures: the runner refuses it after the pair was held, so the door refuses it before any lease and says which number.
+func TestAMulticardEditBindingThatPinsACanvasAboveTheRecipesCapIsRefusedBeforeAnyLease(t *testing.T) {
+	for _, tc := range []struct {
+		mp    float64
+		fails bool
+	}{{4, true}, {2.01, true}, {2.0, false}, {0.9, false}, {0, false}} {
+		f := newAdmitFixtureWith(t, admitSpec{order: admitOrder, mutate: both(multicardEditBinding, func(c *config.Config) { c.GenEditMegapixels = tc.mp })})
+		ch := f.edit(nil)
+		if !tc.fails {
+			f.waitStarted(1)
+			if n := len(f.m.Leases()); n != 1 {
+				t.Errorf("a %.2f MP canvas: %d lease(s), want the pair's one", tc.mp, n)
+			}
+			f.letRunnersGo()
+			f.await(ch)
+			continue
+		}
+		res := f.await(ch)
+		if res.OK || res.Meta.ErrClass != core.ErrClassGPULeaseUnavailable || !strings.Contains(res.Reason, "gen_edit_megapixels") || !strings.Contains(res.Reason, "gen_edit_placement") || !strings.Contains(res.Reason, "2.0") {
+			t.Errorf("a %.2f MP canvas: want a refusal naming gen_edit_megapixels, gen_edit_placement and the 2.0 MP cap, got ok=%v class=%q: %s", tc.mp, res.OK, res.Meta.ErrClass, res.Reason)
+		}
+		if n := len(f.m.Leases()) + len(f.started()) + len(f.m.Tokens()); n != 0 {
+			t.Errorf("a %.2f MP canvas: %d lease/runner/place for a call the runner would refuse", tc.mp, n)
+		}
+	}
+}
+
 func TestAnInheritedLeaseOnTwoCardsServesAMulticardImageCallOnBothCards(t *testing.T) {
 	f := newAdmitFixtureWith(t, admitSpec{order: admitOrder, mutate: multicardBinding})
 	parent := f.underParent(admitUUIDA, admitUUIDC)
