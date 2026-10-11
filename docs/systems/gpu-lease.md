@@ -927,14 +927,28 @@ using a card it did not claim, so a waiter handed that card as free could collid
 It is never an accusation. Card-scoped leases make text seats on the free cards legal, and the harness registers the runs of
 only two doors (`agent_run` and the delegation door) and watches only the planner seat's gauge, so a cascade call on a router
 seat, an OCR or speech seat, or the desktop looks the same from here; the note says it is not attributed to the holder and
-names what it cannot rule out (`TestTrespassIsOnlyPossibleAndNeverAccusesTheHolder`). Not flagged: the display card (the desktop's own use), a card
+names what it cannot rule out (`TestTrespassIsOnlyPossibleAndNeverAccusesTheHolder`). Not flagged: the display card (the desktop's own use; the card table's marking, below), a card
 another live lease holds, a card a registered run is pinned to, anything while the seat itself is busy (its card is unknown
 here), and a whole-node lease (it has no outside). It is a flag on the existing verdicts, not a new verdict word. With a
 bounded lease, `held-working` now means **its** cards are busy: a busy card outside the set is a seat's or another lease's,
 never the holder's own job.
 
+**Which card is "the display card" for the flag (F34, 2026-10-10).** The card table's marking: a card whose `display_active` reads
+Enabled **or** whose `display_attached` reads Yes (`gpuprobe.ScreenCardUUIDs`, the rule that also keeps new work off the
+monitor's card and folds the desktop's processes into one count), and, as a union, a card `display_active` alone marks. The flag
+used to read `display_active` alone, which reads Disabled on every card of the reference 3-card box whenever no lit screen or game
+is initialised, so 15 % or more of ordinary desktop load on the monitor's card, with a lease holding other cards, raised
+`possible device-trespass` against the desktop
+(`TestTrespassExemptsTheMonitorsCardWhoseDisplayActiveReadsDisabled`; a busy card that is not marked display is still flagged,
+`TestTrespassStillFlagsAnUnleasedCardThatIsNotTheMonitors`; the union, `TestTrespassKeepsTheLitDisplayCardExemptWhereThePlacementRuleMarksNothing`).
+A single-card box marks no display card (its only card is its work card), as in every display rule. **Named limit:** the
+exemption is the card's marking, not its load, so an UNLEASED heavy job on the display card is not flagged either; from the
+activity view the desktop's use and a stray job on that card look the same. The verdict's load reading (`held-working`,
+`busy-outside`, the foreign-load sentence) keeps `display_active` alone, as before (`gpuprobe/display.go` says why).
+
 **Not done here.** The activity snapshot trusts the nvidia-smi utilisation of a card, which on Windows includes the desktop
-(only the display card is excluded); the trespass flag inherits that, and does not exclude a card that hosts a resident or busy
+(only the display card is excluded: by `display_active` in the verdict's load reading, by the card table's marking in the
+trespass flag); the trespass flag inherits that, and does not exclude a card that hosts a resident or busy
 llama-swap seat (the view has no per-seat card map, so it can only soften its wording). A drain or unload whose facts cannot be
 read (the card table, the roster, the lease's epoch) falls back to the whole-node behaviour and **says so on stderr**. The pipeline's own media lease exports no unload list
 until it holds one card per render (P13). Fleet health reads the cards since P7 (see "The fleet reads leases per card").
