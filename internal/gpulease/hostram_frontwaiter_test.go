@@ -79,19 +79,6 @@ func startRAMWaiter(t *testing.T, m *Manager, f *fakeHost, need float64, devs ..
 	return nil
 }
 
-// waitForWaitingOnHostRAM waits until the lone waiter reads as waiting for host RAM again.
-func waitForWaitingOnHostRAM(t *testing.T, m *Manager) {
-	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if ws := m.Waiters(); len(ws) == 1 && ws[0].WaitingFor == WaitHostRAM {
-			return
-		}
-		time.Sleep(2 * time.Millisecond)
-	}
-	t.Fatalf("the waiter never read as waiting on host RAM again: %+v", m.Waiters())
-}
-
 // A request for the SAME card that declares nothing passes a waiter that waits only on memory: the card is idle,
 // and the request adds no memory to what the waiter is short of.
 func TestARequestThatDeclaresNoHostRAMPassesAWaiterThatWaitsOnlyOnMemory(t *testing.T) {
@@ -139,13 +126,24 @@ func TestAWholeNodeHostRAMWaiterDoesNotStopARequestThatDeclaresNoHostRAM(t *test
 	}
 	_ = bench.Release()
 
-	// While the bench held its card the whole-node waiter read as waiting for the card, and its host-RAM mark is put back on its
-	// next poll: a request refused in between is told the generic sentence ("has not claimed the card"). The sentence under test
-	// is the one the waiter's own mark makes, so the test asks for the refusal once the mark is back (as startRAMWaiter does).
-	waitForWaitingOnHostRAM(t, m)
-	_, err = m.Acquire(ClassMedia, Options{Reason: "also declares", TTL: time.Hour, Devices: []string{card1}, HostRAMGiB: 5})
-	if !errors.Is(err, ErrStillQueued) || !strings.Contains(err.Error(), "waiting for host RAM (needs 30.0 GiB)") {
-		t.Fatalf("a request that declares host RAM stays behind the whole-node waiter and says why, got %v", err)
+	// The request is refused EVERY time (it never passes the waiter), and the refusal names what the waiter waits for once the
+	// waiter's own mark stands. The mark is the waiter's, not the request's: it is cleared while another holder has the cards
+	// (the bench's release is a poll or two old here) and put back on the waiter's next poll, and a refusal read in between is
+	// told the generic sentence ("has not claimed the card"). So the sentence is asked for again, within a bound, while the
+	// refusal itself is asserted on every try.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		_, err = m.Acquire(ClassMedia, Options{Reason: "also declares", TTL: time.Hour, Devices: []string{card1}, HostRAMGiB: 5})
+		if !errors.Is(err, ErrStillQueued) {
+			t.Fatalf("a request that declares host RAM stays behind the whole-node waiter, got %v", err)
+		}
+		if strings.Contains(err.Error(), "waiting for host RAM (needs 30.0 GiB)") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("a request that declares host RAM stays behind the whole-node waiter and says why, got %v", err)
+		}
+		time.Sleep(2 * time.Millisecond)
 	}
 }
 
