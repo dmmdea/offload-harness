@@ -1274,7 +1274,7 @@ it counts memory the OS has promised, touched or not, which is what stops a seco
 process's GPU allocations may be charged to its commit without ever occupying system RAM (see the finding below), and that cuts
 two ways. Where the commit counter already carries the VRAM in use it reads high, and a rule that read only commit would make a
 lane wait longer than it needs to. But a declaration is the size of the model files, or, once three measured runs of that
-family exist on the node, the largest *resident* memory those runs reached (never lowered), so a lane whose commit carries card
+family exist on the node, the *resident* memory those runs reached (a high percentile of the last twenty, clamped at twice the files' sum; it never lowers a declaration below the files), so a lane whose commit carries card
 allocations on top commits **more than it declared**, and the commit term learns that only after the lane has started. The
 physical term reads what can be handed out without paging, so it refuses a load that resident memory cannot take even when
 commit does not show it; but it measures the box against the *declared* loads at the moment of the decision, so it does not
@@ -1428,11 +1428,24 @@ Every figure this rule uses is the harness's: chosen or measured, and labelled a
   the footprint store as `host_peak_gb` and `host_resident_peak_gb` with the number of runs (`host_runs`); both ride
   `/fleet/health` `model_footprints[]` additively. Two quantities on purpose: they differ exactly where the open question
   below bites. The media admission reads them back (`Pipeline.calibratedRAM`) and **raises** a declaration to the measured
-  resident peak once at least three runs exist (`hostPeakMinRuns`, chosen), for the image and video routes. It only
+  resident figure once at least three runs exist (`hostPeakMinRuns`, chosen), for the image and video routes. It only
   raises: the sampled tree can miss memory (a ComfyUI instance kept from an earlier lease and reused is not under the
-  runner that is sampled), a render whose weights fit its card still declares 0, and the store keeps the max over runs, not
-  a percentile. Edit, inpaint, animate and music keep the estimate from their model files until their sampling keys carry a
-  family.
+  runner that is sampled), and a render whose weights fit its card still declares 0. **The figure is not the all-time maximum**
+  (F56: one inflated run raised a family's declaration for good, until footprints.json was edited by hand): the store keeps the
+  last twenty runs' host peaks of each key (`hostRecentRuns`, `host_recent` in the file) and the calibration reads their 90th
+  percentile by nearest rank (`hostPeakPercentile`), so one outlier among ten or more runs is not the answer and a bad run
+  leaves the window after twenty more. Under ten runs the 90th percentile of the window is its maximum, so outlier rejection
+  starts at ten runs and below that the calibration errs toward declaring more. A store written before the window has the
+  maxima and a run count: its maxima stand in, once, for the runs the window does not hold, until the window fills. **The raise
+  is clamped** at twice the sum of the model files (`hostPeakMaxRaise`): a tree that reads more than twice its files is an
+  estimate that is wrong or a sampler that counts card memory, not a need to declare, and an unclamped figure above what the
+  box can ever admit made the lane read "can never admit" for every later call with `gpu reserve --ram` no remedy for a
+  pipeline call. The declaration says it was clamped, and says which percentile of how many runs it read; **the note is made
+  once per key and figure**, not per render (it used to add a map entry and a log line for every render of a fleet-serve's
+  life). Two processes share the file: a process merges what the other wrote before it folds its own run in, and the record with more runs
+  supplies the window (a race between two writers can still lose one run's sample). The window (20), the percentile (90) and the clamp (2x) are chosen, not measured; the wire fields `host_peak_gb` and
+  `host_resident_peak_gb` stay the all-time maxima, a peak being a peak. Edit, inpaint, animate and music keep the estimate
+  from their model files until their sampling keys carry a family.
 
 * **Does a GPU process's WDDM allocation count toward its private bytes / commit? Partly measured, not settled.**
   *Measured 2026-10-10 on the reference 3-card box, read-only* (Windows performance counters, no lease, nothing started; 60

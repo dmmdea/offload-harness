@@ -271,7 +271,7 @@ that declaration would pass a line the harness chose. Two readings of the OS are
 `gpu_host_ram_headroom_gib` (default 8, a floor the harness chose and has not yet measured), and `available RAM now - the need -
 what running leases have yet to load` at or above the same headroom. **This is a brake on declared loads, not a guarantee about
 the box.** A declaration is an estimate: the size of the model files, until three measured runs of that family on the node raise
-it to the largest resident memory they reached. A lane's commit can carry its card allocations on top, so a lane can commit more
+it to the resident memory they reached (the 90th percentile of the last twenty runs, so one inflated run does not stick, and never above twice the files). A lane's commit can carry its card allocations on top, so a lane can commit more
 than it declared: the rule applied to a commit reading of 81.6 GiB on the 127.7 GiB reference box admits a 32.8 GiB Krea 2 bf16
 declaration (114.4 GiB projected against a 119.7 GiB limit), and a ComfyUI lane holding 57.7 GiB private bytes (its family is not
 recorded) read 129.3 GiB committed on that box some hours later, above its physical RAM (readings measured on the reference box on

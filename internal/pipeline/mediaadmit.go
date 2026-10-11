@@ -57,6 +57,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/comfyinst"
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
+	"github.com/dmmdea/offload-harness/internal/fleetnode"
 	"github.com/dmmdea/offload-harness/internal/gpualloc"
 
 	"github.com/dmmdea/offload-harness/internal/gpulease"
@@ -119,6 +120,14 @@ func (n mediaNeed) withFootprint(k footKey) mediaNeed {
 // data, not toward admitting on less.
 const hostPeakMinRuns = 3
 
+// hostPeakMaxRaise is the most a measurement may raise a declaration above the sum of the model files, as a multiple of it.
+// Chosen 2026-10-10, not measured: the files are what must stream and the tree around them is the runtime's own baseline
+// plus caches, so a tree that reads more than twice its files is an estimate that is wrong or a sampler that is charging
+// card memory to the process (a driver does, on Windows), and either is a finding for the estimate and not a number to
+// declare. Unclamped, a declaration above what the box can ever admit makes the lane read "can never admit" for every
+// later call, and `gpu reserve --ram` is no remedy for a pipeline call (F56). The clamp is said in the declaration.
+const hostPeakMaxRaise = 2.0
+
 // calibratedRAM raises a declared need to what renders of the call's key were measured to hold: the footprint
 // store's peak RESIDENT memory of the render's process tree, once at least hostPeakMinRuns runs exist, when that is
 // higher than the estimate from the model files. Three properties are the point:
@@ -147,9 +156,20 @@ func (p *Pipeline) calibratedRAM(n hostneed.Need, k footKey) hostneed.Need {
 	if !ok || hp.Runs < hostPeakMinRuns || hp.ResidentGiB <= n.GiB {
 		return n
 	}
-	return hostneed.Need{GiB: hp.ResidentGiB, Source: hostneed.SourceMeasured,
-		Detail: fmt.Sprintf("measured: the resident memory of %s/%s renders peaked at %.1f GiB over %d runs, above the %.1f GiB their model files add up to",
-			k.family, k.task, hp.ResidentGiB, hp.Runs, n.GiB)}
+	// The figure is a high percentile of the last runs, not the all-time maximum (fleetnode.HostPeaks): one inflated run is
+	// not the declaration. And the raise is clamped (hostPeakMaxRaise).
+	declared, clamp := hp.ResidentGiB, ""
+	if limit := n.GiB * hostPeakMaxRaise; declared > limit {
+		declared = limit
+		clamp = fmt.Sprintf("; clamped at %.0fx the files' sum (%.1f GiB): a tree that reads more than that is an estimate that is wrong or a sampler that counts card memory, not a need to declare", hostPeakMaxRaise, limit)
+	}
+	runs := hp.Window
+	if runs == 0 {
+		runs = hp.Runs // a store written before the window existed: its maxima over its runs
+	}
+	return hostneed.Need{GiB: declared, Source: hostneed.SourceMeasured,
+		Detail: fmt.Sprintf("the resident memory of %s/%s renders measured %.1f GiB at the %dth percentile of the last %d runs (%d recorded, the largest %.1f GiB), above the %.1f GiB their model files add up to%s",
+			k.family, k.task, hp.ResidentGiB, fleetnode.HostPeakPercentile, runs, hp.Runs, hp.MaxResidentGiB, n.GiB, clamp)}
 }
 
 // declaresRAM sets how the call's host RAM need is resolved.
@@ -209,7 +229,14 @@ func (p *Pipeline) declaredRAM(ctx context.Context, need mediaNeed, cards []gpup
 	}
 	n := p.calibratedRAM(need.RAM(hostneed.LargestCardGiB(cards, ids)), need.Foot)
 	if n.GiB > 0 {
-		planNote("declaring host RAM: " + n.String())
+		key := "declaring host RAM: " + n.String()
+		if n.Source == hostneed.SourceMeasured {
+			// A measured declaration's text carries the run counts, which move with every render: the note is made once
+			// per key and figure, not once per render (one map entry and one log line per render, for the life of a
+			// fleet-serve, was F56). A figure that moves is a new note.
+			key = fmt.Sprintf("measured|%s|%s|%s|%.1f", need.Foot.family, need.Foot.quant, need.Foot.task, n.GiB)
+		}
+		planNoteKeyed(key, "declaring host RAM: "+n.String())
 	}
 	return n.GiB
 }
@@ -363,9 +390,13 @@ func (p *Pipeline) scopedManager() (*gpulease.Manager, error) {
 var planNoteOnce sync.Map // note -> struct{}
 
 // planNote logs why a call fell back to the whole-node lease, once per distinct reason.
-func planNote(why string) {
-	if _, dup := planNoteOnce.LoadOrStore(why, struct{}{}); !dup {
-		log.Printf("media admission: %s", why)
+func planNote(why string) { planNoteKeyed(why, why) }
+
+// planNoteKeyed is planNote for a text that carries something that changes without the fact changing: the note is made
+// once per key.
+func planNoteKeyed(key, text string) {
+	if _, dup := planNoteOnce.LoadOrStore(key, struct{}{}); !dup {
+		log.Printf("media admission: %s", text)
 	}
 }
 
