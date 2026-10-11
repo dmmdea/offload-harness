@@ -38,6 +38,9 @@ export const NODE_PACKS = Object.freeze({
   // DiT's own DisTorch2 loader above.
   CLIPLoaderMultiGPU: `ComfyUI-MultiGPU (https://github.com/pollockjj/ComfyUI-MultiGPU)${MULTIGPU_ARCHIVAL_NOTE}`,
   VAELoaderMultiGPU: `ComfyUI-MultiGPU (https://github.com/pollockjj/ComfyUI-MultiGPU)${MULTIGPU_ARCHIVAL_NOTE}`,
+  // The harness's own pack (render/comfyui-ext), which --wan-placement multicard adds through --extra-model-paths-config and
+  // never installs into custom_nodes. Missing means the pack failed to import: the reason is in ComfyUI's console log.
+  OffloadFreeForDecode: "offload_multicard, the harness's own pack in render/comfyui-ext (loaded by --wan-placement multicard; when it is missing it failed to import, see ComfyUI's console log)",
 });
 
 // graphClasses: the distinct class_type values of an API-format graph, in first-seen order.

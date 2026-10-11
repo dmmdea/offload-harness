@@ -100,6 +100,15 @@ test("multicard + tiled decode (and an auto that reads a small card): today's ti
   }
 });
 
+test("every non-core class the multicard graph names has a MISSING_NODE hint, the harness's own node included", async () => {
+  const { graphClasses, NODE_PACKS } = await import("./comfy-nodes.mjs");
+  const core = new Set(["LoadImage", "CLIPTextEncode", "WanImageToVideo", "ModelSamplingSD3", "KSamplerAdvanced", "VAEDecode", "VAEDecodeTiled", "ImageScale", "ImageUpscaleWithModel", "UpscaleModelLoader"]);
+  for (const decode of ["plain", "tiled"]) {
+    const g = buildWan22I2V({ ...ARGS, placement: "multicard", decode, upscaleModel: "u.pth", upscaleWidth: 1920, upscaleHeight: 1080 });
+    for (const c of graphClasses(g)) if (!core.has(c)) assert.ok(NODE_PACKS[c], `${c} has no pack hint`);
+  }
+});
+
 test("multicard refuses what was not measured, and a bad placement, with the reason", () => {
   assert.throws(() => buildWan22I2V({ ...ARGS, placement: "everywhere" }), /placement must be single\|multicard/);
   assert.throws(() => buildWan22I2V({ ...ARGS, placement: "multicard", fast: true }), /native recipe only/);
