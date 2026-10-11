@@ -225,10 +225,13 @@ Versioning: [SemVer](https://semver.org/).
   node on a file refusal, the shared refusal word, and a graph that names devices keeping no place). Tests that encoded the old limit
   were rewritten for the ticket (a graph is a ticket; a bouncing graph is not bounded to three nodes; two calls of one process and two
   processes never stack). 27 mutations of the rules above, each applied once to the LF text of one file, proven applied, run through the
-  RAM guard, restored byte for byte: all 27 are killed. One survived the first set of tests (a need re-read at every scan, which a graph
-  file that has gone would turn into a lost VRAM floor) and is killed by the test added for it; one is killed by a timeout and not by an
-  assertion (a refusal that is not remembered makes the ticket POST in a loop). The order of two lines in the not-capable path (the
-  refusal is kept before the ticket goes back in line) is a race too narrow to fail on demand and is not mutation-checked.
+  RAM guard, restored byte for byte: all 27 were killed when they were run. One survived the first set of tests (a need re-read at every
+  scan, which a graph file that has gone would turn into a lost VRAM floor) and was killed by the test added for it. That test stopped
+  being able to tell it apart once the ticket kept its own copy of the graph (the bullet "The ticket is the bytes it was admitted with":
+  the copy was still there to be read), so for a time the count of 27 was not true of the code; the polish round below makes the test
+  remove the copy as well and shows it red with the mutant applied. One is killed by a timeout and not by an assertion (a refusal that
+  is not remembered makes the ticket POST in a loop). The order of two lines in the not-capable path (the refusal is kept before the
+  ticket goes back in line) is a race too narrow to fail on demand and is not mutation-checked.
 - **Review fixes, mutation-checked.** The two defects above (the local run reading the live path, and the unread lane) were reproduced
   by the reviewers and written as tests first: the lane ran the overwritten file's bytes, the token was refused as "a different request"
   after the file was removed or edited, the adopter could not plan after the file was gone, and the graph probe returned `Unjudged:
@@ -253,6 +256,58 @@ Versioning: [SemVer](https://semver.org/).
   **Nothing here was run live**: live acceptance A9 (the workstation lane and the headless node held, a graph call gets one ticket
   answer and then runs on the first node released; with the workstation's card table slow to read while a render holds it, the same
   holds, because an unread lane is a ticket) is the first evidence.
+
+### Fixed — the graph ticket's queue files are owner-only, a run-graph call leaves no result envelope behind, and the mutation count is true again (S5, polish round)
+
+- **The queue's files are readable by their owner only.** The queue wrote every file 0644 into a 0755 directory, although `ticket.go`
+  says a request body that carries a prompt is kept out of the store. The one body it does keep, a graph ticket's copies of the graph
+  and the manifest (`body-<id>-graph.json`, `body-<id>-manifest.json`), carries the graph's prompt text, and a finished ticket's file
+  carries the call's result, an image's refined prompt among it; on a POSIX host both were readable by every user of the machine. Now
+  every file of the queue (the tickets, the copies, the node claims and the lock) is 0600 and the queue directory is 0700 where the
+  queue creates it. It does not touch the state root above it (the GPU lease's, open to every user of the machine on purpose: a parent
+  the queue has to create is made the way the lease makes it), and it does not change the mode of a queue directory that exists (an
+  older build made it 0755): a file an older build left keeps 0644 until its ticket is written again, which a live ticket's owner does
+  at every scan. Written first and red before (files 0644, the directory 0755; unix build tag, run on Linux):
+  `TestEveryFileOfTheQueueAndTheQueueDirectoryAreOwnerOnly`, `TestAFinishedTicketsFileHoldsItsResultAndIsOwnerOnly`,
+  `TestAQueueDirectoryThatExistsKeepsItsMode`. On Windows a mode means nothing: the ACL of the state root decides who can read the
+  copies there, and that root is readable by the machine's users by design (a named limit).
+- **A run-graph call leaves no result envelope behind.** `run-graph` names its result envelope under the media dir when the caller gives
+  no `result_path`, and named it from the paths of the graph and the manifest ("so a re-run reuses one file"). A caller that hands a
+  graph file of its own for every call therefore left one `run-graph-<hash>.json` per call that nothing removed: every graph ticket that
+  ran on this machine's lane (its graph is the ticket's own copy, new for every ticket), every MCP or CLI call with an inline graph
+  (a new temp file per call) and every graph a fleet node ran for a delegator. The envelope is the runner's note to one call and is read
+  once, so it now has a name of that call's own (random, in the media dir) and is removed when the call ends, whatever the run came to
+  (done, a typed defer in the envelope, a runner that fails after writing it); a caller that names `result_path` keeps the file it
+  named. (A name made of the graph's content would not end the growth: the content moves with the seed, so each shot is another file.)
+  Envelopes an earlier build left in a media dir are not removed by this change. Red before (three runs left three envelopes, in each
+  of the three endings): `TestARunGraphLeavesNoEnvelopeBehind`, `TestARunGraphKeepsTheEnvelopeACallerNamed`,
+  `TestRunGraphEnvelopeNamesAreOneToACall`.
+- **The mutation count is true again.** The entry above says all 27 mutations are killed, and one of them (a need re-read at every
+  scan) had stopped being killed when the ticket began to keep its own copy of the graph: `TestAGraphsNeedIsReadOnceWhenTheTicketIsMade`
+  removed only the caller's file, and with the copy still there to be read, a need read at every scan and a need read once gave the same
+  answer (the test passed with the mutant applied). It now removes the ticket's copy as well, after checking it is there; with the
+  mutant applied it fails (the 8 GB node is sent the Wan graph its default floor keeps it off), with the code it passes. The two code
+  comments that gave the caller's vanished temp file as the reason (`liveTicket.need`, `liveTicket.req`) name the copy.
+- **Mutations of this round: eleven, all killed.** Each applied once to the text of one file, proven applied (its hash changed and
+  `git diff --stat` showed it), run, and restored byte for byte (the hash checked): the need re-read at every scan (it passed the old
+  test), no removal of the envelope, removal also of a caller's `result_path`, removal only after a success, one envelope name for every
+  call, the queue's files 0644 again, the lock file 0644, the directory 0755, a chmod of a directory that exists, the state root stamped
+  private, and a door that asks for `cfg.StateDir` itself instead of `storeFor` (against a scratch tree in which `storeFor` resolves the
+  lease's state root). The tests of the modes ran on Linux, where a mode means something; the others through the RAM guard.
+- **Named limit (parked): a narrow re-key race.** The door keys a request from the graph file as it reads it (`admit`, `reqKey`), and
+  `create` keys the ticket again from the bytes the plan holds (`payloadKey`). A caller that overwrites its file between those two reads
+  gets a ticket for the bytes it holds, which is what runs (never another graph), but the attach and arrival-inheritance decisions made
+  between the two reads were made on the first read: it can attach to a live ticket of the first read's bytes, or inherit the arrival
+  of an abandoned ticket of other content. The window is the time between two reads of one local file.
+- **Named limit (parked): a create that stalls for more than a minute loses its copies.** `create` writes the graph's copies first and
+  the ticket's file after the place is left and the directory lock is taken, and another process's sweep treats a copy with no ticket as
+  debris after `tmpStale` (one minute). A create stalled longer than that between the two (a suspended process, a lease read that does
+  not return) can have its copies swept: the ticket then fails loudly (its run on this machine's lane cannot read its graph and ends in
+  a deferral, an adopter cannot plan; a dispatch to a node still carries the bytes the plan holds in memory) and a repeat of the
+  request makes a new ticket. It never renders other bytes.
+- **Compatibility.** No config key, tool argument or file format changed. The queue's files are written 0600 and its directory 0700
+  where the queue makes it, and the result envelope's name is random instead of a hash of the paths and the file no longer outlives
+  the call. No VERSION or buildinfo bump. Nothing here was run live.
 
 ### Fixed — a healthy long render's lease (a render helper, or a script that runs one) is no longer labelled "expired ... open to a takeover" (F8)
 

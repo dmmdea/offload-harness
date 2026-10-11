@@ -2099,10 +2099,13 @@ holds the job and starts it on the first matching lane that frees, here or on a 
 why, and no caller loop. A free lane runs the call here as it always did; a box with no `delegate_remotes` asks nothing; `route
 local` and `route remote` are unchanged.
 
-**The ticket.** One file per ticket, `<state_dir>/media-queue/mq-<id>.json`, written atomically, readable by every process of the
-machine (`internal/mediaremote/ticket.go`). It holds the owner (pid and start time) and its beat, the request's key, the arrival
-time, the seed, the place in the local line, the state, the node and the node's job id once there is one, the nodes whose recipe
-matched at the last scan, and the last answer; the request body stays in the owning process, so the file keeps no prompt. States:
+**The ticket.** One file per ticket, `<state_dir>/media-queue/mq-<id>.json`, written atomically and owner-only (0600 on POSIX, in a
+directory made 0700 where the queue creates it; on Windows the ACL of the state root decides), so readable by every process of the
+same user (`internal/mediaremote/ticket.go`, `queuefs.go`). It holds the owner (pid and start time) and its beat, the request's key, the
+arrival time, the seed, the place in the local line, the state, the node and the node's job id once there is one, the nodes whose recipe
+matched at the last scan, and the last answer; the request body stays in the owning process, so the file keeps no prompt (a graph's
+body is the one the store keeps, beside the file, below; and a finished ticket keeps the call's result, which carries an image's
+refined prompt, so every file of the queue is owner-only). States:
 `waiting`, `local` (the local run is in flight), `placing` (a node is claimed and the job is being sent), `placed` (the node
 accepted it), `fetching`, `done`, `failed`.
 
@@ -2246,7 +2249,8 @@ scan looks at the fleet (`TestMediaLaneFreeGraphIsFreeWhenTheCardTableCannotBeRe
   recipe digest: the graph owns its own sampling (`TestAGraphTicketKeepsItsPlaceInTheLocalLine`).
 - **The ticket is its bytes.** A ticket may wait for hours and the caller's graph file is the caller's: reused for the next shot,
   edited, removed. The ticket writes the graph and the manifest as the plan holds them into its queue directory
-  (`body-<id>-graph.json`, `body-<id>-manifest.json`; the one request body the store keeps), takes its key from those bytes, and
+  (`body-<id>-graph.json`, `body-<id>-manifest.json`; the one request body the store keeps, owner-only like every file of the queue
+because a graph carries its prompt text), takes its key from those bytes, and
   the node's payload, the local run, the need and an adopter all read them, so whichever lane serves it renders the same graph
   (`TestAGraphTicketRunsTheBytesItWasAdmittedWith`, `TestAGraphTicketSendsTheBytesItWasAdmittedWithToANode`,
   `TestACreatedGraphTicketIsKeyedByWhatItHolds`, `TestAGraphTicketsKeyComesFromTheBytesItHolds`). The copies go with the ticket and

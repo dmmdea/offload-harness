@@ -231,7 +231,9 @@ supersedes decision 12.
    edited, removed. So the ticket writes the graph and the manifest exactly as the plan holds them into its queue directory
    (`body-<id>-graph.json`, `body-<id>-manifest.json`), takes its key from those bytes, and the node's payload, the local run, the
    need and an adopter all read them: whichever lane serves the ticket renders the same graph, and nothing the caller does to its own
-   file afterwards changes it. They are the one request body the store keeps (an image's lives in the owning process). They go with
+   file afterwards changes it. They are the one request body the store keeps (an image's lives in the owning process), and like every
+   file of the store they are owner-only (0600 on POSIX; the directory is 0700 where the queue creates it), because a graph carries its
+   prompt text. They go with
    the ticket (finished, canceled, swept after an owner that died before sending, the loser of a create race), stay while a dead
    owner's placed ticket can still be adopted, and are never swept while a ticket may still be being made (younger than a minute).
    The ticket also stores a **path key** (the same paths and parameters, no file read): a `waiter_token` is accepted for a request
