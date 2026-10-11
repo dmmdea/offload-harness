@@ -53,7 +53,7 @@ func TestTheGraphToolAdvertisesTheTicketAndWaitS(t *testing.T) {
 			t.Errorf("the text still describes the one-shot path (%q): %s / %s", gone, route, desc)
 		}
 	}
-	for _, want := range []string{"becomes a TICKET", "do not call again", "waiter_token=mq-", "not-capable", "stays on this machine"} {
+	for _, want := range []string{"becomes a TICKET", "do not call again", "waiter_token=mq-", "not-capable", "stays on this machine", "keeps its own copy of the graph"} {
 		if !strings.Contains(desc, want) {
 			t.Errorf("the graph tool must say %q: %s", want, desc)
 		}
