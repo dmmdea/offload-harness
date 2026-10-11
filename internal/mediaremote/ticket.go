@@ -11,7 +11,9 @@ package mediaremote
 // enough to answer for a ticket, to collect its result, to see which nodes the machine is using, and to adopt a job
 // whose owner died. The one body the store does keep is a graph's (and its manifest's): body-<id>-graph.json and
 // body-<id>-manifest.json, the exact bytes the ticket was identified by and the node is sent, so that the local run, the
-// dispatch and an adopter all read what the ticket IS and not whatever the caller's file says hours later (bodyPath).
+// dispatch and an adopter all read what the ticket IS and not whatever the caller's file says hours later (bodyPath). A graph
+// carries its prompt text, so those copies are owner-only like every file of the store (queueFileMode, queuefs.go), and the
+// directory is made owner-only where the queue creates it.
 //
 // What is persisted, and why each:
 //

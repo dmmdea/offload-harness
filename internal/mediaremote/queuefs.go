@@ -33,6 +33,35 @@ const (
 	fsPause = 5 * time.Millisecond
 )
 
+// Modes of what the queue writes. Everything in the queue directory is the user's own: a graph ticket keeps copies of the graph and
+// the manifest it was sent (a ComfyUI graph carries its prompt text), and a finished ticket's file keeps the call's result (an
+// image's refined prompt among it), so no file of the queue is readable by another user of the machine, and the directory is made
+// the same where the queue creates it. A mode means nothing on Windows, where the ACL of the state root decides who reads.
+const (
+	queueFileMode os.FileMode = 0o600
+	queueDirMode  os.FileMode = 0o700
+)
+
+// makePrivateDir makes dir, owner-only, when it does not exist. The state root above it is the GPU lease's, which that package makes
+// open to every user of the machine on purpose: a parent this call has to create is made the way the lease makes it (0777 less the
+// umask) and is never stamped private, which would shut the lease's other users out. A directory that exists keeps the mode it has:
+// an older build made the queue directory 0755, and the processes of the machine that rely on it are not this call's to lock out.
+func makePrivateDir(dir string) error {
+	if fi, err := os.Stat(dir); err == nil && fi.IsDir() {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(dir), 0o777); err != nil {
+		return err
+	}
+	if err := os.Mkdir(dir, queueDirMode); err != nil {
+		if fi, serr := os.Stat(dir); serr == nil && fi.IsDir() {
+			return nil // another process made it first
+		}
+		return err
+	}
+	return nil
+}
+
 // lockWait bounds how long a claim waits for the directory lock. The lock is held for a few file operations
 // (microseconds), so the bound is generous. Chosen, not measured.
 var lockWait = 3 * time.Second
@@ -52,13 +81,14 @@ func randHex(n int) string {
 }
 
 // writeFileAtomic writes b to path through a uniquely named temp file beside it and a rename, so a reader never sees a
-// half-written record and two writers never share a temp file.
+// half-written record and two writers never share a temp file. The file is owner-only (queueFileMode), and so is the directory
+// if this call has to make it.
 func writeFileAtomic(path string, b []byte) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := makePrivateDir(filepath.Dir(path)); err != nil {
 		return err
 	}
 	tmp := fmt.Sprintf("%s.%d.%s.tmp", path, os.Getpid(), randHex(4))
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+	if err := os.WriteFile(tmp, b, queueFileMode); err != nil {
 		_ = os.Remove(tmp)
 		return err
 	}
@@ -86,10 +116,10 @@ func removeFile(path string) {
 // withLock runs fn holding the queue directory's lock. A caller that cannot get it inside lockWait gets errLockBusy and
 // does not do what it wanted (a claim that cannot be taken is a node left for the next scan, never a job sent without it).
 func (s *store) withLock(fn func() error) error {
-	if err := os.MkdirAll(s.dir, 0o755); err != nil {
+	if err := makePrivateDir(s.dir); err != nil {
 		return err
 	}
-	f, err := os.OpenFile(filepath.Join(s.dir, lockName), os.O_CREATE|os.O_RDWR, 0o644)
+	f, err := os.OpenFile(filepath.Join(s.dir, lockName), os.O_CREATE|os.O_RDWR, queueFileMode)
 	if err != nil {
 		return err
 	}
