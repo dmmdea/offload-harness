@@ -884,9 +884,17 @@ func TestBatchOutsThatDifferOnlyInCaseClashOnWindows(t *testing.T) {
 		t.Skip("file names are case-sensitive here")
 	}
 	dir := t.TempDir()
+	warm := func(_ context.Context, js []BatchJob) ([]BatchRow, bool, error) {
+		rows := make([]BatchRow, len(js))
+		for i, j := range js {
+			writeBatchPNG(t, j.Out, 8, 8)
+			rows[i] = BatchRow{Out: j.Out, Seed: j.Seed, OK: true}
+		}
+		return rows, false, nil
+	}
 	_, err := RunBatch(bctx(t), config.Config{StateDir: t.TempDir()}, nil, []BatchJob{
 		{Prompt: "a", Out: filepath.Join(dir, "Pic.png")}, {Prompt: "b", Out: filepath.Join(dir, "pic.PNG")},
-	}, nil, BatchOpts{Route: "local"})
+	}, warm, BatchOpts{Route: "local"})
 	if err == nil || !strings.Contains(err.Error(), "same out") {
 		t.Fatalf("want a clash, got %v", err)
 	}
