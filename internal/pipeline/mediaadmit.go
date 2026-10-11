@@ -600,6 +600,40 @@ func (p *Pipeline) acquireMediaLease(ctx context.Context, reason string, ttl, wa
 	return mediaGrant{Env: env, Release: release}, nil
 }
 
+// acquireMediaLeaseHeld is acquireMediaLease for a caller that waits a long time for its card (a batch with nowhere else to
+// go): the wait is the lease queue's, so the place in line is kept for the whole of it, and it ends the moment ctx does. The
+// queue's wait takes no context, so it runs beside the caller; if the card is granted after the caller left, the grant is
+// given straight back, so an interrupted batch leaves no lease behind. The abandoned wait ends with the process or at its own
+// deadline.
+func (p *Pipeline) acquireMediaLeaseHeld(ctx context.Context, reason string, ttl, wait time.Duration, need mediaNeed) (mediaGrant, error) {
+	return holdAcquire(ctx, func() (mediaGrant, error) { return p.acquireMediaLease(ctx, reason, ttl, wait, need) })
+}
+
+// holdAcquire runs acquire beside the caller and returns when it does or when ctx ends, whichever is first. A grant that
+// arrives after the caller left is released at once.
+func holdAcquire(ctx context.Context, acquire func() (mediaGrant, error)) (mediaGrant, error) {
+	type result struct {
+		g   mediaGrant
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		g, err := acquire()
+		done <- result{g, err}
+	}()
+	select {
+	case r := <-done:
+		return r.g, r.err
+	case <-ctx.Done():
+		go func() {
+			if r := <-done; r.err == nil && r.g.Release != nil {
+				r.g.Release()
+			}
+		}()
+		return mediaGrant{}, fmt.Errorf("interrupted while waiting for the GPU lane: %w", ctx.Err())
+	}
+}
+
 // wholePlace is a place in line a whole-node call resumes.
 type wholePlace struct {
 	m   *gpulease.Manager

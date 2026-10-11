@@ -2373,6 +2373,15 @@ func (p *Pipeline) RunImageBatch(ctx context.Context, jobs []ImageBatchJob) ([]I
 // ledger label and the tag are the family's. Only what no overlay changes (the prompt refiner, the ledger) stays on p.cfg.
 // A family on stable-diffusion.cpp has no warm session to share, so it is refused by name: its jobs render one at a time.
 func (p *Pipeline) RunImageBatchAs(ctx context.Context, family string, jobs []ImageBatchJob) ([]ImageBatchItem, error) {
+	return p.RunImageBatchWaiting(ctx, family, jobs, 0)
+}
+
+// RunImageBatchWaiting is RunImageBatchAs for a batch that has to wait for a busy lane: the fleet cannot relieve it (no
+// roster node renders its recipe), so it keeps its place in the lease line instead of giving up at the pipeline's own window
+// and coming back `queued`, which the caller would only run again from the back of the line. wait > 0 is how long it keeps
+// that place; 0 is the pipeline's own gpu_wait_ms window, the call RunImageBatchAs always was. The wait ends the moment ctx
+// does, with an error that says so and is not a busy answer (IsGPUBusy is false for it).
+func (p *Pipeline) RunImageBatchWaiting(ctx context.Context, family string, jobs []ImageBatchJob, wait time.Duration) ([]ImageBatchItem, error) {
 	cfg, fam, ferr := p.cfg.ResolveImageFamily(family)
 	if ferr != nil {
 		return nil, ferr
@@ -2474,7 +2483,13 @@ func (p *Pipeline) RunImageBatchAs(ctx context.Context, family string, jobs []Im
 	// 3,356 unloads in the server log.
 	// This helper returns items+error rather than a core.Result, so a busy card surfaces
 	// as an error for the caller to classify — no items were produced.
-	grant, lerr := p.acquireMediaLease(ctx, "image-gen batch", timeout, p.gpuWait(), imageNeed(cfg, ""))
+	var grant mediaGrant
+	var lerr error
+	if wait > 0 {
+		grant, lerr = p.acquireMediaLeaseHeld(ctx, "image-gen batch", timeout, wait, imageNeed(cfg, ""))
+	} else {
+		grant, lerr = p.acquireMediaLease(ctx, "image-gen batch", timeout, p.gpuWait(), imageNeed(cfg, ""))
+	}
 	if lerr != nil {
 		return nil, lerr
 	}
