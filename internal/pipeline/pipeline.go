@@ -218,6 +218,8 @@ type Pipeline struct {
 	// seatVerdictFn the test seam that replaces it.
 	seatGuard     *seatguard.Guard
 	seatVerdictFn func(ctx context.Context, model string) seatguard.Verdict
+	// laneFaults keeps the media lane probe's card-table fault lines to one per probe and cause per minute (laneCardTable).
+	laneFaults laneFaultLog
 }
 
 // digestMedia resolves a media file's content identity (test seam aware).
@@ -1805,7 +1807,8 @@ func (p *Pipeline) runGenerateImageSdcpp(ctx context.Context, req core.Request, 
 	}
 	imgFamily, imgQuant := imageFootprintKey(cfg)
 	// sd.cpp has no ComfyUI instance to bind to a card: the whole node, as always.
-	grant, lerr := p.acquireMediaLease(ctx, "image-gen (sdcpp)", timeout, p.gpuWait(), wholeNeed(paramStr(req.Params, "waiter_token")).declaresRAM(classDefaultRAM(p.cfg)).resumableBy(req))
+	// It declares the weights it parks itself (sdcppneed.go, F60), not only the class default: an sd.cpp-only box has none.
+	grant, lerr := p.acquireMediaLease(ctx, "image-gen (sdcpp)", timeout, p.gpuWait(), p.sdcppImageNeed(cfg, imgFamily, imgQuant, paramStr(req.Params, "waiter_token")).resumableBy(req))
 	if lerr != nil {
 		return p.deferForLease(lerr, req.Task, meta, len(req.Input), start)
 	}
@@ -3842,7 +3845,8 @@ func (p *Pipeline) footprintSampling(family, quant, task string) *gpugen.Samplin
 // hostSampleFunc is the host-memory sample of a render: the private and the resident memory of the process tree
 // rooted at the runner, root included (gpulease.TreeMemory). p.hostSample overrides it in tests. A ComfyUI
 // instance kept from an earlier lease and reused by this runner is not under it, so a run can read LOW; the one
-// consumer (calibratedRAM) only ever raises a declaration with it, and the store keeps the max over runs.
+// consumer (calibratedRAM) only ever raises a declaration with it, and the store keeps the last twenty runs of a key and
+// answers with their 90th percentile (fleetnode.HostPeaks), so one run that read high or low does not decide it.
 func (p *Pipeline) hostSampleFunc() func(childPid int) (float64, float64, error) {
 	if p.hostSample != nil {
 		return p.hostSample

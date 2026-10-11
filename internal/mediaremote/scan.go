@@ -294,8 +294,8 @@ func (q *queueRT) scanLoop() {
 }
 
 // keepLoop touches the place of every waiting ticket on its own rhythm (scanEvery), for as long as the scanner lives. A scan
-// visits its tickets one after another and each visit asks the lane one question (a bounded card-table read, up to
-// laneProbeBound), so with enough waiting tickets the turn of the last one comes later than the 30 s the local line holds a
+// visits its tickets one after another and each visit asks the lane one question (a bounded card-table read: laneProbeBound,
+// and one retry under laneProbeRetryBound when the first ran out of time, 14 s in all), so with enough waiting tickets the turn of the last one comes later than the 30 s the local line holds a
 // place for; a place touched only at its ticket's turn would lapse and be left again, and the ticket would not hold its
 // card against a later caller in between. A touch is one file write, and a place that already lapsed is left again by its
 // ticket's next turn (keepPlace), with the ticket's own arrival.

@@ -1313,10 +1313,21 @@ and its RAM-pressure cache keeps it there between prompts. The same principle sa
 from RAM, so it declares nothing. The media admission (`internal/pipeline`) asks the same estimate per route, from the
 binding it is about to render with, once the card it will run on is known: image, edit, inpaint, video (by the family that
 will render, with the request's own `transformer` put over the family's binding, because that is the file the runner
-loads: `TestAVideoRequestsOwnTransformerIsWhatTheAdmissionDeclares`), animate and music read their files; `run-graph`, sd.cpp and the iGPU engines take the class default (the largest ComfyUI
-family the box binds, an upper bound that is not their own size; **a box that binds no ComfyUI family, an sd.cpp-only node,
-declares 0 for them**, so those lanes are admitted whatever the host reads and the weights `--offload-to-cpu` parks in RAM are
-outside the guard there; `TestAnSdcppOnlyBoxDeclaresNothing`); upscale and voice declare nothing, their weights sit on the card.
+loads: `TestAVideoRequestsOwnTransformerIsWhatTheAdmissionDeclares`), animate and music read their files; `run-graph` and the audio.cpp lanes take the class default (the largest ComfyUI
+family the box binds, an upper bound that is not their own size; a box that binds no ComfyUI family, an sd.cpp-only node, has
+a class default of 0, `TestAnSdcppOnlyBoxDeclaresNothing`). **The sd.cpp lanes (image, video, animate) declare the larger of that
+default and the weights they park themselves** (F60, `hostneed.ForSdcpp`, `pipeline.sdcppDeclared`): the bound files in full
+(the diffusion model, a Wan 2.2 high-noise expert, the text encoders, the VAE), when the lane's extra args carry
+`--offload-to-cpu`, which parks the weights in RAM and stages them to the device (sanctioned spill, 5.5 to 6.2 GiB on the small
+nodes per the review); without the flag nothing is parked and the lane declares what it did. So on an sd.cpp-only node the spill
+is inside the brake. **It is an estimate, from the files' sizes, and says so; nothing here was measured on a node.** The need
+carries the lane's footprint key, so three measured runs raise it like a ComfyUI family's (`calibratedRAM`). A file whose size
+cannot be read (missing, empty) is left out of the sum and named: the figure is then worded as a **lower bound** (`Need.Unsized`
+lists the binding keys), the lane never declares less than the class default, and it says once per lane and set of files which it
+could not size (`media admission:` log line). When none of its files can be sized the class default stands, which is 0 on an
+sd.cpp-only node, and the lane says that once too. Not covered: the audio.cpp voice and music lanes, the depth
+model of the animate lane, and `gpu reserve` around an sd.cpp helper (the CLI recognises only the ComfyUI helpers, so it still
+declares the class default or `--ram`); upscale and voice declare nothing, their weights sit on the card.
 
 **An unknown card counts everything.** A set that fits the card declares 0 only when the card is known. A host that has not
 enabled card-scoped leases reads no card table (its leases are whole-node, as before, and it may have no NVIDIA card to
@@ -1339,7 +1350,7 @@ it counts memory the OS has promised, touched or not, which is what stops a seco
 process's GPU allocations may be charged to its commit without ever occupying system RAM (see the finding below), and that cuts
 two ways. Where the commit counter already carries the VRAM in use it reads high, and a rule that read only commit would make a
 lane wait longer than it needs to. But a declaration is the size of the model files, or, once three measured runs of that
-family exist on the node, the largest *resident* memory those runs reached (never lowered), so a lane whose commit carries card
+family exist on the node, the *resident* memory those runs reached (a high percentile of the last twenty, clamped at twice the files' sum; it never lowers a declaration below the files), so a lane whose commit carries card
 allocations on top commits **more than it declared**, and the commit term learns that only after the lane has started. The
 physical term reads what can be handed out without paging, so it refuses a load that resident memory cannot take even when
 commit does not show it; but it measures the box against the *declared* loads at the moment of the decision, so it does not
@@ -1352,12 +1363,28 @@ which term refused: `committed X of Y GiB physical` or `only A GiB of Y GiB phys
   `grantDevicesLocked`, under the epoch lock, after the cards are shown free and before the epoch is issued; the record that
   carries the declared need is written in the same critical section, so two grants on different cards cannot both read the
   same headroom: the second one's check sees the first one's record
-  (`TestConcurrentGrantsOnDifferentCardsCannotBothTakeTheLastHeadroom`: exactly one of four racers fits, 25 rounds). A
+  (`TestConcurrentGrantsOnDifferentCardsCannotBothTakeTheLastHeadroom`: exactly one of four racers fits, 25 rounds).
+  **The readings are taken before the lock and only compared inside it** (`readHost`, F57): the host's counters and, for every
+  live lease that declared a need, the resident memory below its holder (a walk of the process tree with a memory read per
+  process, which the reviewer measured at about 26 ms median and 63 ms worst for one holder, on every grant attempt and every
+  waiter poll, inside a lock everyone else spins on for 2 s). The decision is still made under the lock, against the leases
+  live then: their declared needs are read from the records there, so a grant that lands between the reading and the lock is
+  counted (`TestAGrantThatLandsAfterTheReadingIsStillCountedInsideTheLock`); the early parts err the conservative way (a
+  resident figure read a moment early is lower, so more of a declared need is still to load; a holder that appeared after the
+  reading counts as having loaded nothing), and a need of 0 reads nothing
+  (`TestTheHostReadingsAreTakenBeforeTheEpochLockAndOnlyComparedInside` counts the host and process-tree reads made while the
+  lock file exists: none). A
   whole-node grant checks in `TryAcquire` before its epoch is bumped, so a refusal burns none; it needs no lock because a
   whole-node lease conflicts with every other live lease, so nothing else is live to account for. The detached holder
   receives the parent's resolved number as `--ram` and declares exactly that. The card allocator applies the same function
-  before it picks cards, advisory (it never refuses what the grant would admit: the media admission passes it the need
-  against the largest card); the grant is the authority.
+  before it picks cards, advisory (it never refuses what the grant would admit: the media admission passes it the need sized on
+  the cards its plan names, a pin, a pool or a declared device, as the lease it then takes declares it, and against the largest
+  card on the box when the plan names none, `askRAMFor`, `TestAskRAMIsSizedOnTheCardsAPlanNames`; its third term, what leases
+  already granted have yet to load, is `Manager.HostRAMPending` through `gpualloc.BuildInput`, pinned by
+  `TestBuildInputCarriesWhatGrantedLeasesHaveYetToLoadAndTheAllocatorUsesIt`); the grant is the authority. **Cards first, memory
+  second**, on both grant paths: a held card is reported as held and its waiter is not marked "waiting for host RAM" (that mark
+  is what lets a call that declares none pass it), whatever the host reads (`TestAHeldCardIsReportedHeldNotShortOfHostRAM`,
+  `TestAWaiterOnAHeldCardIsNotMarkedWaitingForHostRAM`).
 * **Asked without taking: `Manager.HostRAMCheck(need)`.** A placement that wants to know whether this node would admit a
   lane before it sends the lane here asks the node's own Manager, which applies the same function the grant calls
   (`hostRAMCheckAgainst`: the host as it reads now, the not-yet-loaded part of the live leases, this Manager's headroom).
@@ -1477,11 +1504,24 @@ Every figure this rule uses is the harness's: chosen or measured, and labelled a
   the footprint store as `host_peak_gb` and `host_resident_peak_gb` with the number of runs (`host_runs`); both ride
   `/fleet/health` `model_footprints[]` additively. Two quantities on purpose: they differ exactly where the open question
   below bites. The media admission reads them back (`Pipeline.calibratedRAM`) and **raises** a declaration to the measured
-  resident peak once at least three runs exist (`hostPeakMinRuns`, chosen), for the image and video routes. It only
+  resident figure once at least three runs exist (`hostPeakMinRuns`, chosen), for the image and video routes. It only
   raises: the sampled tree can miss memory (a ComfyUI instance kept from an earlier lease and reused is not under the
-  runner that is sampled), a render whose weights fit its card still declares 0, and the store keeps the max over runs, not
-  a percentile. Edit, inpaint, animate and music keep the estimate from their model files until their sampling keys carry a
-  family.
+  runner that is sampled), and a render whose weights fit its card still declares 0. **The figure is not the all-time maximum**
+  (F56: one inflated run raised a family's declaration for good, until footprints.json was edited by hand): the store keeps the
+  last twenty runs' host peaks of each key (`hostRecentRuns`, `host_recent` in the file) and the calibration reads their 90th
+  percentile by nearest rank (`hostPeakPercentile`), so one outlier among ten or more runs is not the answer and a bad run
+  leaves the window after twenty more. Under ten runs the 90th percentile of the window is its maximum, so outlier rejection
+  starts at ten runs and below that the calibration errs toward declaring more. A store written before the window has the
+  maxima and a run count: its maxima stand in, once, for the runs the window does not hold, until the window fills. **The raise
+  is clamped** at twice the sum of the model files (`hostPeakMaxRaise`): a tree that reads more than twice its files is an
+  estimate that is wrong or a sampler that counts card memory, not a need to declare, and an unclamped figure above what the
+  box can ever admit made the lane read "can never admit" for every later call with `gpu reserve --ram` no remedy for a
+  pipeline call. The declaration says it was clamped, and says which percentile of how many runs it read; **the note is made
+  once per key and figure**, not per render (it used to add a map entry and a log line for every render of a fleet-serve's
+  life). Two processes share the file: a process merges what the other wrote before it folds its own run in, and the record with more runs
+  supplies the window (a race between two writers can still lose one run's sample). The window (20), the percentile (90) and the clamp (2x) are chosen, not measured; the wire fields `host_peak_gb` and
+  `host_resident_peak_gb` stay the all-time maxima, a peak being a peak. Edit, inpaint, animate and music keep the estimate
+  from their model files until their sampling keys carry a family.
 
 * **Does a GPU process's WDDM allocation count toward its private bytes / commit? Partly measured, not settled.**
   *Measured 2026-10-10 on the reference 3-card box, read-only* (Windows performance counters, no lease, nothing started; 60
@@ -1680,11 +1720,22 @@ per-model route fails, the legacy `GET /unload` is used only when no stack membe
 whatever `?model=` says, so when the stack is resident or `/running` cannot be read, the reserve fails and names the
 stack. The wrapper form warms the seat back (`GET /upstream/<model>/health`) BEFORE releasing, so the first
 contract placed here again finds a loaded seat, unless its command was ended on `SIGTERM` (C02): that is how a console
-close, a logoff and a shutdown reach a Go program on Windows, and the OS ends the process about five seconds later, so
+close, a logoff and a shutdown reach a Go program on Windows (a plain kill sends the same signal, so the wrapper says the
+cause is likely, never known), and the OS ends the process about five seconds later, so
 a reload of minutes inside that grace would stand in the warm-back with the lease held while the machine goes down. The
 lease is released right after the ComfyUI instances kept under it are stopped (a step bounded at 60 s, usually
 seconds), the wrapper says the warm-back was skipped, and the warm stays owed (the marker below;
-`gpu release --warm-seat` or the seat's next request pays it). A Ctrl-C has no such deadline and still warms. The detach
+`gpu release --warm-seat` or the seat's next request pays it). A signal that arrives earlier, while the wrapper is queued
+(or queued again after a lease lost during the drain), choosing cards, draining, or between the end of the drain and the
+command's start, is answered too (the handler is registered before anything else, `pair-workloads.md`): the
+queue wait ends (`Options.Cancel`), the lease is released, the command never starts, the seat is not warmed, and the wrapper
+claims a warm owed only when the seat was unloaded (and then says the wrapper was ended at that stage, never that a command
+was: none ran). A signal that cancels the unload request itself leaves the warm owed
+whenever the seat was resident, because llama-swap may have finished the unload the client stopped waiting for (a warm of a seat
+that is in fact still loaded is one health request). A Ctrl-C has no such deadline and still warms. A second signal is not acted
+on: the OS ends the process after its grace for a console close, a logoff and a shutdown only, so a second Ctrl-C or a plain kill
+during a stage that never consults the signal (the plan's card-table read, up to 20 s; stopping the kept ComfyUI instances, up to
+60 s; the seat's warm-back after a Ctrl-C) waits for that stage to end. The detach
 form's counterpart is `gpu release --warm-seat`. That request
 is the load, so a llama-swap reload or restart can interrupt it: the warm re-sends it for up to 60 s (see "A warm-back
 interrupted by a llama-swap reload is re-sent" below), and the owed marker is cleared once the seat is observed loaded.

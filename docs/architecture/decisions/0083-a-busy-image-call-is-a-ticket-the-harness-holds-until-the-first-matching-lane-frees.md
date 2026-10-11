@@ -59,7 +59,7 @@ make the caller retry. Three things were still wrong once every lane was busy.
    decides and never runs a job, so a local run that waits in the lease line does not stall the scan of another ticket or the
    touch that keeps each ticket's place alive. For a waiting ticket it: keeps the place; **starts the local run when the lane
    question says the ticket would be served now** (at most one ticket per scan, the oldest) **and could read the lane** (a lane
-   the pipeline tried to read and could not, `core.LaneVerdict.Unjudged`: the card table past its 4 s bound, the lease directory
+   the pipeline tried to read and could not, `core.LaneVerdict.Unjudged`: the card table that did not read in its 4 s bound nor in its one 10 s retry, the lease directory
    not opening, is not a free lane; the fleet is looked at in the same scan and the run here is the answer only when no node can
    take the call; a call the prober does not model at all still runs here); else asks the fleet with ADR 0082's
    own filter and ranking (`candidatesFor`, not forked), minus the nodes a job of the machine has a claim on (an image ticket's or a graph ticket's, decision 6) and the nodes an older waiting ticket of the machine matches (an older ticket that has not
@@ -164,7 +164,7 @@ make the caller retry. Three things were still wrong once every lane was busy.
 
 - The operator's "even if all PCs are full" holds for images and, by Amendment 1, for a whole-node graph: the job waits for the first matching lane that frees anywhere, in the
   order it arrived, with no caller loop, and the answer says per node why it is not running yet. Late binding costs up to one scan
-  interval (12 s) plus however long the scan before it took (each waiting ticket costs one lane question of up to 4 s) between a
+  interval (12 s) plus however long the scan before it took (each waiting ticket costs one lane question of up to 14 s: the 4 s read and its 10 s retry, when the first ran out of time) between a
   lane freeing and the ticket noticing, and a freed node can be taken in that interval by a caller that is not a ticket (a video, animation or audio call placed on the fleet, or any call forced to a node); the job
   then costs one bounce (a 5 s pause for a full node, 60 s for a bounce).
 - **One first-in-first-out line per delegating machine.** Two machines each hold their own queue and meet only at a node's own

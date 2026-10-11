@@ -130,6 +130,12 @@ older base — and run again. Run it locally the same way CI does:
 bash ./scripts/check-deletions.sh origin/main HEAD
 ```
 
+On Windows run it from Git Bash. The test above does not depend on which shell started `go test`: it finds Git's own
+bash from `git --exec-path`, puts Git's `usr/bin` on the guard's PATH (a plain PowerShell has only git's `cmd`
+directory there, and the script calls `cut` and `grep`) and passes the script as a forward-slash path, because on a
+plain PowerShell PATH the name `bash` is the WSL launcher, which drops the backslashes of a Windows path and so never
+finds the script. When the only bash on the machine is that launcher, the test skips and says so.
+
 ## Opening a pull request
 
 1. Fork the repo and create a branch off `main`.

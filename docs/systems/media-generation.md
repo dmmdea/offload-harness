@@ -1158,10 +1158,11 @@ is given:
 **Host RAM.** A generation call also declares the host RAM its weights will stream from (the UNet or checkpoint and the
 text encoder of its binding, for a video call the family's binding with the request's own `transformer` put over it, counted
 in full when together they do not fit the card it runs on; 0 when they fit; the media
-class default for an arbitrary graph (`run-graph`, or a helper run with `--graph`), sd.cpp and the iGPU engines: the largest
-ComfyUI family the box binds, an upper bound that is not their own size, and **0 on a box that binds no ComfyUI family, so an
-sd.cpp-only node declares nothing**, its lanes are admitted whatever the host reads and the weights `--offload-to-cpu` parks in
-RAM are outside the guard there; nothing for upscale and voice) and the grant admits it
+class default for an arbitrary graph (`run-graph`, or a helper run with `--graph`) and the audio.cpp lanes: the largest
+ComfyUI family the box binds, an upper bound that is not their own size, and 0 on a box that binds none; **the sd.cpp lanes
+declare the larger of that and the weights they park themselves** (the bound files in full when the lane's extra args carry
+`--offload-to-cpu`, an estimate from their sizes until three measured runs raise it, F60), so an sd.cpp-only node's spill is inside
+the guard; nothing for upscale and voice) and the grant admits it
 against committed memory plus what the leases already granted have yet to load, under physical RAM less
 `gpu_host_ram_headroom_gib` (default 8), as a brake on declared loads (the declaration is an estimate until three measured runs
 raise it, and an admitted lane can still read OVER): see "Host RAM" in [gpu-lease.md](gpu-lease.md). Two Krea 2 bf16 lanes, each
@@ -2011,7 +2012,8 @@ call that names no card) and says busy only when something that makes the grant 
 place in line, epoch, waiter, ledger row, PAIR card or ComfyUI instance) and removes nothing: it reads the lease directory through
 `gpulease.Manager.ReadOnly`, a view that skips the records the line's readers prune as housekeeping (an expired place in line, a
 waiter that stopped polling) and leaves them on disk (`TestMediaLaneFreeWritesNothing`, with a state for each). It says free when it cannot say: a lease the process
-inherited (`gpu reserve -- local-offload ...`), a card table that does not read in 4 s (chosen, not measured), a task or a binding
+inherited (`gpu reserve -- local-offload ...`), a card table that does not read in 4 s, nor in the one 10 s retry that follows a read that ran out of time (both chosen, not measured; the
+retry is the admission's rule at a shorter bound, and a table still unread leaves a `media lane probe` line in the log, once a minute per probe and cause while the fault lasts, F55), a task or a binding
 it does not model (sd.cpp, an unknown family). A call that resumes a place
 in line (a ticket's local run) counts only the callers that arrived before that place, on every plan, because the lease queue serves
 a resumed place by arrival time (`TestMediaLaneFreeOrdersByArrivalForACallThatResumesItsPlace`); a new arrival counts every other
@@ -2196,7 +2198,7 @@ once, or that loses the race to another job, comes back with nothing run and the
 consecutive refusal (the node steps; a reading of busy resets them) and the fleet is looked at meanwhile, so a lane that reads free
 and refuses at once (`gpu_wait_ms` 0, or a younger place on the card that a call without a wait cannot pass) is not asked in a loop,
 each run writing the pipeline's own deferred row (`TestALostRaceOnTheLocalLaneIsNotARetryLoopAndTheFleetIsTriedMeanwhile`). A lane the
-pipeline TRIED to read and could not (the card table past its 4 s bound, the lease directory not opening: `core.LaneVerdict.Unjudged`)
+pipeline TRIED to read and could not (the card table past its 4 s bound and its 10 s retry, the lease directory not opening: `core.LaneVerdict.Unjudged`)
 is not a free lane: the fleet is looked at in the same scan, and the run here is the answer only when no node can take the call
 (`TestAnUnreadLaneStillLooksAtTheFleet`, `TestAnUnreadLaneWithNoNodeRunsHere`); a call the prober does not model at all (another task, a
 binding without a ComfyUI lane, an inherited lease) runs here at once;
