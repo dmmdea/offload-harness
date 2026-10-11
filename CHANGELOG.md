@@ -352,6 +352,89 @@ Versioning: [SemVer](https://semver.org/).
   seam; a console close cannot be driven from a test); 16 mutations were each caught, and 9 more for the transcription
   text, the recovered-card wording and the warm-back. `docs/systems/pair-workloads.md`.
 
+### Fixed — the hardening batch: a console close at any stage of `gpu reserve`, `gpu owner-flags --config`, voice cards, honest cause wording, and the host-RAM guard's loose ends (F55, F56, F57, F58, F60, F63)
+
+- **`gpu reserve` answers a console close at every stage, not only once its command runs.** The SIGTERM/Ctrl-C handler was
+  registered after the card was opened, the queue wait (`acquireQueued`, `acquireAutoCards`) and the drain/unload loop, so a
+  close during `--wait 8h` or a long drain found no handler: Go ended the process on the spot, its PAIR card stayed open until
+  a sweep closed it "harness process exited before the job finished", and its waiter record stayed in the line. The handler
+  (`signalWatch`) is now the first thing the wrapper does, and each stage returns on it: a queued `Acquire` ends at its next
+  poll through the new `gpulease.Options.Cancel` (`ErrCancelled`; the waiter leaves through `Acquire`'s own defer, nothing is
+  claimed, a cancel closed before the call asks for nothing even on a free card), `--cards` refuses the allocator's next read
+  and wakes its sleeps, the drain's context is cancelled, and checkpoints sit before the card opens and before the command
+  starts. The card closes failed with the stage and the cause ("ended on SIGTERM while queued (...); never started"), the lease
+  is released, and the "NOT warming the seat back; the warm stays owed" sentence is printed only when a warm is owed (a signal
+  during the drain unloaded nothing, so none is). Pinned at each stage with the signal delivered through the wrapper's seam
+  (`TestASignalWhileQueued...`, `...DuringTheDrain...`, `...BeforeTheLeaseIsAskedFor...`, `...WhileChoosingCards...`,
+  `TestACancelledAcquire...`); a real console close still cannot be driven from a test.
+- **`gpu --config <path> owner-flags` no longer exits 2.** `runGPUOwnerFlags` defined only `--pid`, so the hoisted `--config`
+  (F35) was refused by its flag set while the other six verbs took it. It accepts and ignores the flag, and
+  `TestEveryGPUVerbAcceptsTheHoistedConfig` runs every verb of `gpuVerbs` in a child with `--config` before and after the verb
+  (a flag set exits the process, so it cannot be caught in-process).
+- **A voice render on the `tts_endpoint` lane marks its PAIR card running.** The lane takes no media lease (the server owns its
+  GPU) and so never reached `core.MarkWorking`, which every other lane reaches through its lease: its card was queued for the
+  whole synthesis and a sweep of a card whose process died mid-synthesis said the call never started. `runVoiceEndpoint` marks
+  the card right before its request, and a call that defers on its input marks nothing. `TestOnlyTranscribeNeverMarksWorking`
+  said it pinned the list of lanes that never mark "in both directions" and counted marks (">= 5"), which the tts lane passed
+  through; it now names the lane functions of every long-call task (checked against `longCallTasks` both ways) and requires each
+  to reach a mark by name, transcribe's to reach none. Reachability says a lane marks somewhere, not on every path, so the lease
+  path has a behavioural test of its own (queued behind another lease: not marked; holding the card: marked once).
+- **Cards and logs no longer claim a cause they cannot know.** `signalWhy` and the warm-skipped sentence said the console was
+  closed, or the session was ending, or the machine shutting down, for any SIGTERM; a plain kill sends the same signal (and on
+  Linux it is the only way it comes). They now name the signal and give the causes as likely ("ended on SIGTERM: likely a console
+  close, a logoff or a shutdown, though a plain kill sends it too"). The sweep's log line counted every card it closed as
+  "harness process exited before the job finished", which is false of a seat-watch stretch (closed completed since C04) and of a
+  terminal frame its producer built and could not post: the count is split by kind, and a sweep that closed orphans alone logs the
+  line it always did.
+- **F55: the lane probe reads a slow card table once more before it gives up, and says so when it still cannot.** The probe
+  wrapped the caller's context in its 4 s bound and called `gpualloc.Deps.CardTable` under it; `CardTable` retries only a read
+  that ran out of time while the caller's context was still good, and the caller's context was the 4 s one, so the admission's
+  retry (5 s, then 15 s) was unreachable here: a `nvidia-smi` that was merely slow made every probe answer "not judged" at 4 s,
+  silently. Both probes (image and `run_graph`) now read through `laneCardTable`: 4 s, one retry under 10 s, one `media lane probe`
+  log line when the table is still unread. **The 10 s is chosen, not measured** (shorter than the admission's 15 s because a ticket
+  scan asks the lane question once per waiting ticket: worst case 14 s per question, not 20).
+- **F56: the host-RAM calibration reads a high percentile of the last twenty runs, clamped, and says so once per key.** It took
+  the all-time max of a key's resident peaks, so one inflated run raised a family's declaration until `footprints.json` was
+  edited by hand, a figure above what the box can ever admit made the lane read "can never admit" for every later call (`gpu
+  reserve --ram` is no remedy for a pipeline call), and the log note carried the run count, so each render added a map entry and
+  a log line. The store keeps the last 20 runs per key (`host_recent`, additive) and `HostPeak` answers with their 90th percentile
+  by nearest rank (under ten runs that is the maximum, so outlier rejection starts where there is something to reject against; a
+  bad run leaves the window after twenty more); the declaration is clamped at twice the model files' sum and says which percentile
+  of how many runs it read and whether it was clamped; the note is made once per key and figure. A store written before the window
+  lets its maxima stand in, once, for the runs it does not hold; the wire fields stay the all-time maxima. `RecordHost` now merges
+  before it folds its own run (merging after replaced the fresh run with the other process's window, and lost its run count).
+  **Window 20, percentile 90 and clamp 2x are chosen, not measured.**
+- **F57: a card-scoped grant takes its host readings before the epoch lock.** The check ran in full inside the machine-wide lock: the
+  host's counters and, for every live lease that declared a need, a walk of its holder's process tree with a memory read per process
+  (about 26 ms median, 63 ms worst for one holder, by the reviewer's measurement, on every grant attempt and every waiter poll,
+  inside a lock everyone else spins on for 2 s). `readHost` takes them before the lock and `hostRAMCheckWith` compares them inside:
+  the decision is still made against the leases live then, so a grant that lands between the reading and the lock is counted
+  (`TestAGrantThatLandsAfterTheReadingIsStillCountedInsideTheLock`, through a test-only hook), and the early parts err the
+  conservative way. `TestTheHostReadingsAreTakenBeforeTheEpochLockAndOnlyComparedInside` counts the reads made while the lock file
+  exists: none. A held card now costs no readings at all.
+- **F58: askRAM is sized on the cards the plan names, and the two orderings it rests on are pinned.** The admission and the probe
+  sized the figure on the largest card of the whole table even for a pin, a pool or a declared device, while the lease the call then
+  takes declares on those cards: on a mixed box a krea2 render pinned to a 16 GiB card declared 32.8 GiB at the grant and 0 in the
+  pre-filter, so a waiter that waits only on host RAM was not counted ahead of it (`askRAMFor`). The grant already asked the cards
+  before the memory on both paths, and `BuildInput` already fed the allocator what granted leases have yet to load, but nothing
+  pinned either (the swap and the deleted line left every test green); both are pinned now.
+- **F60: the sd.cpp lanes declare the weights they park in RAM.** The class default is the largest ComfyUI family a box binds, so an
+  sd.cpp-only node declared 0 for its image, video and animate lanes and the 5.5 to 6.2 GiB `--offload-to-cpu` parks in RAM there
+  were outside the brake. `hostneed.ForSdcpp` sizes the bound files in full when the lane's extra args carry the flag (nothing
+  without it; an unreadable file is no estimate), and each lane declares the larger of the class default (unchanged) and its own
+  bytes. **It is an estimate from the files' sizes, not a measurement, and says so**; the need carries the lane's footprint key, so
+  three measured runs raise it like a ComfyUI family's. Not covered: the audio.cpp lanes, the animate lane's depth model, and
+  `gpu reserve` around an sd.cpp helper (the CLI recognises only the ComfyUI helpers).
+- **F63: the deletion-guard test no longer depends on which shell started `go test`.** On a plain PowerShell PATH the name `bash` is
+  the WSL launcher, which drops the backslashes of the Windows script path, so the test failed from PowerShell and passed from Git
+  Bash (reproduced both ways). It finds Git's own bash from `git --exec-path`, puts Git's `usr/bin` first on the guard's PATH
+  (started by path from a PowerShell it finds no `cut`), passes the script with forward slashes, and skips with the reason when the
+  only bash is the launcher.
+- **Not changed, and said.** The `--detach` form's hidden holder queues in its own process and has no signal handling of its own
+  here. A comment in `internal/mediaremote/scan.go` still says a lane question is bounded by `laneProbeBound` (it is now that plus
+  the retry); the file belongs to the ticket queue's branch and was left alone. Nothing here was measured on a node: every figure
+  above that is new (10 s, 20, 90, 2x) is chosen, and no real `gpu reserve`, ComfyUI, PAIR or llama-swap was touched.
+
 ## [0.179.0] - 2026-10-10 - a busy image lane overflows to an idle node that renders the same recipe, and every GPU lease path has a host-RAM brake
 
 ### Added — a busy image lane overflows to an idle node that renders the same recipe (F52, ADR 0082)
