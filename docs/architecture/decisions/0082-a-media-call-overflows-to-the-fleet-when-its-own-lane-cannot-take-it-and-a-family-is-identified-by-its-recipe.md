@@ -309,6 +309,8 @@ file can see. Every other decision stands.
 
 **Named limits of the amendment.** For a few seconds after a node starts, or after one of its weight files changes, its family is
 `pending` and the node is a named miss; a delegator that starts reads its own files once, a sample per file, before its first
-comparison. The two sizes and the 30 s retry are chosen, and the timings above are one machine's. Nothing here was run against a
+comparison. **A one-shot CLI call is a fresh process, so it reads its family's samples again on every call, before the lane
+question** (an estimate from the figures above: one to three seconds for a family of three or four files; the MCP server and
+`fleet-serve` keep the cache for the life of the process). The two sizes and the 30 s retry are chosen, and the timings above are one machine's. Nothing here was run against a
 live fleet: the acceptance is the three live matches of 0.179.0 read again after every node runs this release
 (docs/systems/media-generation.md, "Reading a node's recipes").

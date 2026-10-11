@@ -2017,7 +2017,8 @@ workstation it read 0.17 to 0.87 s per file for files of 0.36 to 42 GB, while a 
 match possible meanwhile. It separates two real builds of one 42 GB model that share a size (58 of 64 sample blocks differed). It
 does **not** see a few corrupted bytes between the sampled blocks, nor a file replaced by one of the same size and the same
 modification time while the process that cached the old reading runs; the cache (path, size, modification time) is in memory and a
-restart reads again. `RecipeVersion` is 2, so a digest of 0.179.0 never equals one of this release. The digest is over **resolved** values: a key the binding leaves unset
+restart reads again (a one-shot CLI call is a fresh process, so it reads its family's samples on every call: an estimate of one
+to three seconds from the measured rates). `RecipeVersion` is 2, so a digest of 0.179.0 never equals one of this release. The digest is over **resolved** values: a key the binding leaves unset
 takes the builder's default (Qwen-Image-2.1: 40 steps, cfg 1, euler, scheduler `simple`, schedule `official`), so a node that
 writes the default out and a node that leaves it unset are one recipe. That table is pinned by a test to the constants in
 `render/wf-qwen-image-21.mjs` and `render/comfy-render.mjs`; any other graph family leaves unset keys unset, which is stricter.

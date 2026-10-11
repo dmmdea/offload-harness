@@ -365,7 +365,9 @@ Versioning: [SemVer](https://semver.org/).
   extrapolated), minutes per node after every release or model change. Two real 42 GB builds that share a size differed in 58 of
   the 64 sample blocks. **It does not see a few corrupted bytes between the sampled blocks, nor a replacement with the same size
   and the same modification time while the process that cached the old reading runs** (the cache is in memory, by path, size and
-  modification time, and a restart reads again); compare whole-file hashes after a copy you doubt.
+  modification time, and a restart reads again; a one-shot CLI call is a fresh process, so it reads its family's samples on every
+  call, an estimated one to three seconds from the rates above, before the lane question); compare whole-file hashes after a copy
+  you doubt.
 - **Health never waits for it.** `/fleet/health` reads the fingerprint cache; a file not hashed yet starts one background read (one
   file at a time) and is published `"fingerprint":"pending"` (`"unreadable"` when it cannot be read, retried after 30 s). **A row
   with any such file publishes an empty `digest`**, so two nodes that were both pending cannot share one. The row memo (60 s) is
