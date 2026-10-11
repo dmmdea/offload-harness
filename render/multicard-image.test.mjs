@@ -189,15 +189,72 @@ test("lifecycleOptions: a plan hands withGpuSlot its launch and environment; no 
   assert.deepEqual(I.lifecycleOptions(p), { launch: p.launch, instanceEnv: p.env });
 });
 
+// What a ComfyUI answers for GET /object_info/<class> when the class is installed: { <class>: { input: { required, optional, hidden } } }. `declare` builds that
+// from the inputs a recipe's loader node sets, so the fake server knows exactly the inputs the runner is about to send; `without` names one it does not know.
+const objectInfoFor = (plan, { pack = true, absent = [], without = {}, bare = [] } = {}) => {
+  const nodes = I.recipeLoaderNodes(plan);
+  const byClass = {};
+  for (const n of Object.values(nodes)) byClass[n.class_type] = n.inputs;
+  return async (url) => {
+    const cls = decodeURIComponent(String(url).split("/object_info/")[1] || "");
+    if (!/object_info/.test(String(url))) return { ok: true, json: async () => ({ devices: GOOD_DEVICES }) };
+    if (cls === "OffloadFreeForDecode") return { ok: true, json: async () => (pack ? { OffloadFreeForDecode: { input: { required: {} } } } : {}) };
+    if (absent.includes(cls) || !byClass[cls]) return { ok: true, json: async () => ({}) };
+    if (bare.includes(cls)) return { ok: true, json: async () => ({ [cls]: {} }) };
+    const known = Object.keys(byClass[cls]).filter((k) => !(without[cls] || []).includes(k));
+    return { ok: true, json: async () => ({ [cls]: { input: { required: Object.fromEntries(known.slice(0, 2).map((k) => [k, ["STRING"]])), optional: Object.fromEntries(known.slice(2).map((k) => [k, ["STRING"]])) } } }) };
+  };
+};
+const GOOD_DEVICES = [{ type: "cuda", vram_total: 16311 * 1024 * 1024 }, { type: "cuda", vram_total: 16311 * 1024 * 1024 }];
+
 test("verifyImagePlacement stops the run, before anything is submitted, when ComfyUI's cards are not the pinned pair or the harness's pack did not load", async () => {
   const p = plan();
   const stats = (devices) => async () => ({ ok: true, json: async () => ({ devices }) });
-  const good = [{ type: "cuda", vram_total: 16311 * 1024 * 1024 }, { type: "cuda", vram_total: 16311 * 1024 * 1024 }];
-  const object = (have) => async (url) => (/object_info/.test(String(url)) ? { ok: true, json: async () => (have ? { OffloadFreeForDecode: {} } : {}) } : stats(good)());
-  await I.verifyImagePlacement("http://x", p, { fetchImpl: object(true) });
-  await assert.rejects(I.verifyImagePlacement("http://x", p, { fetchImpl: stats([good[0]]) }), /IMAGE-PLACEMENT-MISMATCH.*1 CUDA device.*Nothing was submitted/s);
+  await I.verifyImagePlacement("http://x", p, { fetchImpl: objectInfoFor(p) });
+  await assert.rejects(I.verifyImagePlacement("http://x", p, { fetchImpl: stats([GOOD_DEVICES[0]]) }), /IMAGE-PLACEMENT-MISMATCH.*1 CUDA device.*Nothing was submitted/s);
   await assert.rejects(I.verifyImagePlacement("http://x", p, { fetchImpl: async () => { throw new Error("down"); } }), /IMAGE-PLACEMENT-MISMATCH.*no device list/s);
-  await assert.rejects(I.verifyImagePlacement("http://x", p, { fetchImpl: object(false) }), /IMAGE-PLACEMENT-PACK.*offload_multicard.*Nothing was submitted/s);
+  await assert.rejects(I.verifyImagePlacement("http://x", p, { fetchImpl: objectInfoFor(p, { pack: false }) }), /IMAGE-PLACEMENT-PACK.*offload_multicard.*Nothing was submitted/s);
+});
+
+test("verifyImagePlacement asks for the recipe's own loader classes too: a class the pack does not register is MISSING_NODE with the pack hint, and nothing is submitted", async () => {
+  const p = plan();
+  for (const [cls, pack] of [["CLIPLoaderDisTorch2MultiGPU", /ComfyUI-MultiGPU/], ["UNETLoaderDisTorch2MultiGPU", /ComfyUI-MultiGPU/], ["VAELoaderMultiGPU", /ComfyUI-MultiGPU/]]) {
+    await assert.rejects(I.verifyImagePlacement("http://x", p, { fetchImpl: objectInfoFor(p, { absent: [cls] }) }), (e) => e.message.startsWith("MISSING_NODE: ") && e.message.includes(cls) && pack.test(e.message) && /Nothing was submitted/.test(e.message), cls);
+  }
+  // a GGUF recipe also needs ComfyUI-GGUF to have registered its DisTorch2 loader
+  const g = plan({ family: "qwen-image", unet: "qwen-image-2512-Q5_1.gguf", clip: undefined });
+  await I.verifyImagePlacement("http://x", g, { fetchImpl: objectInfoFor(g) });
+  await assert.rejects(I.verifyImagePlacement("http://x", g, { fetchImpl: objectInfoFor(g, { absent: ["UnetLoaderGGUFDisTorch2MultiGPU"] }) }), /MISSING_NODE: .*UnetLoaderGGUFDisTorch2MultiGPU.*ComfyUI-GGUF/s);
+});
+
+test("verifyImagePlacement refuses a loader whose pack no longer declares an input the recipe sets: ComfyUI would drop it and the split would silently not happen", async () => {
+  const p = plan();
+  await assert.rejects(
+    I.verifyImagePlacement("http://x", p, { fetchImpl: objectInfoFor(p, { without: { UNETLoaderDisTorch2MultiGPU: ["expert_mode_allocations"] } }) }),
+    /^Error: IMAGE-PLACEMENT-NODE-INPUT: .*UNETLoaderDisTorch2MultiGPU.*expert_mode_allocations.*qwen-image-2\.1\/bf16.*silently.*Nothing was submitted/s,
+  );
+  await assert.rejects(
+    I.verifyImagePlacement("http://x", p, { fetchImpl: objectInfoFor(p, { without: { CLIPLoaderDisTorch2MultiGPU: ["expert_mode_allocations", "eject_models"] } }) }),
+    /CLIPLoaderDisTorch2MultiGPU.*expert_mode_allocations, eject_models/s,
+  );
+  // an answer that carries no input section says nothing about inputs, so it is not a refusal
+  await I.verifyImagePlacement("http://x", p, { fetchImpl: objectInfoFor(p, { bare: ["UNETLoaderDisTorch2MultiGPU"] }) });
+});
+
+test("verifyImagePlacement cannot tell whether a recipe class is there when /object_info does not answer: that is a refusal, not a pass", async () => {
+  const p = plan();
+  const inner = objectInfoFor(p);
+  await assert.rejects(
+    I.verifyImagePlacement("http://x", p, { fetchImpl: async (url) => (/object_info\/VAELoaderMultiGPU/.test(String(url)) ? { ok: false, status: 500, json: async () => ({}) } : inner(url)) }),
+    /IMAGE-PLACEMENT-PACK: cannot tell.*VAELoaderMultiGPU.*HTTP 500.*Nothing was submitted/s,
+  );
+});
+
+test("recipeLoaderNodes: the three loader nodes the recipe puts in a graph, from the plan's own share", () => {
+  const nodes = I.recipeLoaderNodes(plan({ flags: { placement: "multicard", "resident-gb": "6" } }));
+  assert.deepEqual(Object.keys(nodes), ["1", "2", "3"]);
+  assert.equal(nodes["1"].inputs.expert_mode_allocations, "cuda:1,6gb;cuda:0,*");
+  assert.equal(I.recipeLoaderNodes(plan({ family: "qwen-image", unet: "qwen-image-2512-Q5_1.gguf", clip: undefined }))["1"].class_type, "UnetLoaderGGUFDisTorch2MultiGPU");
 });
 
 test("portNote says which port a pair instance falls back to, in the image runners' words", () => {

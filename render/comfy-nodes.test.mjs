@@ -2,7 +2,7 @@
 // The node-class preflight's answers, against a stubbed /object_info.
 import { test } from "node:test";
 import assert from "node:assert";
-import { graphClasses, missingNodeClasses, missingNodeMessage, NODE_PACKS } from "./comfy-nodes.mjs";
+import { graphClasses, missingNodeClasses, fetchNodeInfo, missingNodeMessage, NODE_PACKS } from "./comfy-nodes.mjs";
 import { buildWan22I2V } from "./wf-wan22-i2v.mjs";
 import { buildHunyuan15I2V } from "./wf-hunyuan15-i2v.mjs";
 
@@ -17,6 +17,26 @@ test("missingNodeClasses: 200 {} is a missing class; 200 {cls:...} is present", 
   const g = { "1": { class_type: "Have" }, "2": { class_type: "Lack" } };
   const res = await missingNodeClasses("http://c", g, { fetchImpl: async (u) => reply(200, u.endsWith("/Have") ? { Have: {} } : {}) });
   assert.deepEqual(res, { checked: true, missing: ["Lack"] });
+});
+
+test("fetchNodeInfo: the /object_info entry of every class asked for, none for a class the server lacks; a transport error or a non-2xx is 'not checked'", async () => {
+  const info = { input: { required: { a: ["INT"] }, optional: { b: ["STRING"] } } };
+  const res = await fetchNodeInfo("http://c", ["Have", "Lack"], { fetchImpl: async (u) => reply(200, u.endsWith("/Have") ? { Have: info } : {}) });
+  assert.deepEqual(res, { checked: true, info: { Have: info, Lack: undefined } });
+  const down = await fetchNodeInfo("http://c", ["X"], { fetchImpl: async () => { throw new Error("ECONNREFUSED"); } });
+  assert.equal(down.checked, false);
+  assert.match(down.reason, /GET \/object_info\/X failed: ECONNREFUSED/);
+  const old = await fetchNodeInfo("http://c", ["X"], { fetchImpl: async () => reply(404, {}) });
+  assert.match(old.reason, /GET \/object_info\/X answered HTTP 404/);
+  const junk = await fetchNodeInfo("http://c", ["X"], { fetchImpl: async () => ({ ok: true, status: 200, json: async () => { throw new Error("bad json"); } }) });
+  assert.match(junk.reason, /returned no JSON/);
+  assert.deepEqual(await fetchNodeInfo("http://c", [], { fetchImpl: async () => { throw new Error("no request for no class"); } }), { checked: true, info: {} });
+});
+
+test("missingNodeClasses is the classes fetchNodeInfo found no entry for, in the graph's first-seen order", async () => {
+  const g = { "1": { class_type: "B" }, "2": { class_type: "A" }, "3": { class_type: "B" } };
+  const res = await missingNodeClasses("http://c", g, { fetchImpl: async () => reply(200, {}) });
+  assert.deepEqual(res, { checked: true, missing: ["B", "A"] });
 });
 
 test("missingNodeClasses: a transport error or a non-2xx is 'not checked', never 'missing'", async () => {
