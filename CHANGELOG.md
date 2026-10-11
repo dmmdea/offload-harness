@@ -6,6 +6,79 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed — a render on one card no longer unloads the seats placed on the others, and a seat that comes back onto a leased card leaves before the next render (F15)
+
+- **The defect (register F15, from the 0.176.0 notes).** The render helper cleared "every non-keep-set model whatever card it sits
+  on", and a media lease was said not to be exclusive, so a text seat reloaded under it between renders. The first half traced to
+  code: the unload list for a lease on some cards (`gpualloc.UnloadModels`, the rule `gpu reserve --unload-seat` uses) placed a
+  model only through `layers` (`Config.ModelPins`), and read everything it could not place as "on the leased cards"; a roster that
+  could not be read, or a host with no llama-swap endpoint, left `GPU_LEASE_UNLOAD_MODELS` unset, which `render/gpu-lock.mjs` read
+  as today's rule, every model off the memory stack. The installer's tier seeds write no `layers`, so on a box nobody wrote them
+  for, every model was "unknown" and a render on card 2 emptied card 0 too. The second half is not a missing fence:
+  `blocksLoadOne` already gates a media lease, per card, through `Admit`, `AwaitUpstream` and `AwaitRunSlot`; it never read the
+  exclusive flag for it (a text-lease field). Two doors stay open: the holder's own process tree (`insideLease`, by design) and
+  clients that are not the harness.
+- **A model is placed by `layers`, else by its pin in the serving config.** New `internal/gpualloc/serving.go` reads
+  `serving_config_path` (the llama-swap yaml the box runs) and takes, per model id and alias, the env pin
+  `CUDA_VISIBLE_DEVICES=<uuid or index>[,...]`, matched against the card table. `LeaseScope.Locate` tries `layers` first, so a model
+  both declare keeps the `layers` reading. Only the env pin counts; device flags in `cmd` are never read. A model whose entry names
+  no device in env (an unpinned dual-card `-sm layer` / `--tensor-split` entry), a `proxy:` seat (a vLLM engine: its cards are
+  pinned in its own unit, not in this file), a pin that is a macro, an alias two entries claim with different pins, and a bare
+  index when the same entry does not also set `CUDA_DEVICE_ORDER=PCI_BUS_ID` (without it a CUDA index is not an nvidia-smi
+  index) stay UNKNOWN, each with its reason. The `layers` path trusts a bare index without that check; the serving-config path
+  is stricter on purpose, and its cost is only that an index pin without the order variable is unloaded instead of kept. In
+  `setup/templates/profiles.json` the multi-card tiers (`blackwell-2x16`, `blackwell-3x16`) carry `CUDA_DEVICE_ORDER=PCI_BUS_ID`
+  in `gpu_env`, which the renderer appends to every model's env, so an index pin rendered from them places; the single-card tiers
+  pin `CUDA_VISIBLE_DEVICES=0` without it, and a lease on their only card is the whole node anyway. Whether the live yaml of any
+  box carries it was not checked. If the file cannot be read, or `serving_config_path` is unset, every model `layers` do not declare
+  is unknown and the lane says so once.
+- **What a lease unloads.** `LeaseScope.Judge`: a model placed on a leased card goes; **a model placed on another card, by `layers`
+  or by the serving config pin, stays** (the F15 gain); a model whose placement is unknown goes, exactly as before F15, because
+  the render needs its card (a `proxy:` seat with no `layers` entry is unloaded under any card lease); the memory stack never goes.
+  A lease that names every card the table lists is still the whole node (`holdsAll`: a one-card box's only card, all three of
+  three). `Touches` is the same reading, so the drain and the agent seat agree with the unload. The card table unreadable: every
+  model is unknown and goes, as before.
+- **The lane says what it did and why.** One line per reason, from `gpualloc.Explain`, in the wrapper's stderr and the media
+  admission's log: `unloaded, placed on a leased card by layers: ...`, `left resident, placed elsewhere by the serving config
+  pin: ...`, `unloaded, placement unknown (it is a proxy: seat, ...): ...`. The render helper logs the models it left on a list.
+- **A card lease always gets a list.** `wrapperUnloadEnv` (`gpu reserve --devices`) and the media admission's `unloadEnv` export
+  `GPU_LEASE_UNLOAD_MODELS=-` when there is nothing to unload (no endpoint, nothing the verdicts select) instead of leaving the
+  variable unset; with the roster unreadable the candidates are the models `layers` declare and the serving config lists. Only a
+  whole-node lease has no list. `gpu reserve --unload-seat` judges the other residents with the same verdicts.
+- **Between renders.** The unload is elected once per lease, so a seat that came back onto the leased cards stayed for the rest of
+  the lease. A job that lost the election under a card lease with a non-empty list now reads that list against `/running` again
+  before it submits (`withGpuSlot` `reclear`); `freeLlamaSwap` unloads a listed model only when it is resident, so a card that is
+  still clear costs two reads and no unload. A whole-node lease, a lease with no list and the none sentinel keep the
+  once-per-lease election. A card lease handed no list at all (an older wrapper, a hand-built environment) unloads every model off
+  the memory stack, and says that it had no list.
+- **Tests, written first and red** (all but one: `TestTheServingConfigPlacesWhatLayersDoNotDeclare` in the pipeline passed against
+  the previous positive-only rule too, because that rule also kept the unpinned seat, so it is proven by a mutant only, the one
+  that ignores the serving config pins). `internal/gpualloc`: a model nothing places is on the list, the serving config's pins place a
+  model `layers` do not (UUID, index with and without the PCI order, alias, a pair spanning the leased card), `layers` outrank the
+  serving config, a `proxy:` seat, an entry with no env pin and a cmd-only pin are unknown, an unreadable or unset serving config
+  is said once, no roster judges what the config declares and lists, no card table unloads every model, the memory stack stays out
+  even when placed on a leased card, a lease on every card is the whole node. Root: the same through `unloadModelsFor`,
+  `--unload-seat` (layers and the serving config), the wrapper form end to end, the roster-unreadable and no-endpoint wrappers,
+  the unplaceable pin and the unreadable table. Pipeline: an unreadable roster still hands the call a list; the serving config
+  keeps a model on card C off card A's list. `render/`: a later job re-clears under a card lease with a list and under no other,
+  a card lease with no list says so and unloads as before, a list names what stays. `internal/modelaffinity`: a media lease fences
+  its own cards through every door exactly as an exclusive text lease does and lets a free card through, and the fence starts when
+  the drain ends. Each rule has a mutant that turns its test red (unknown stays, serving pins ignored, the proxy rule, the PCI
+  order rule, the serving config outranking `layers`, aliases, the hold-every-card reading, the memory-stack filter, the verdicts
+  in `--unload-seat`, the unset variable on a roster error and on a missing endpoint, the pipeline's roster fallback, the media
+  clause, the draining clause and the per-card scoping of the fence, the Node no-list log, the re-clear and its card condition,
+  the left-resident log).
+- **Not changed, and not verified here.** First and most important for a box without `layers`: the unload now knows from the
+  serving config which card a model is on, and the load fence does not. The fence (`modelaffinity`, armed from `config.ModelPins`)
+  still places a model through `layers` only, so on such a box a text load waits for any media lease, whatever card it is on,
+  exactly as before this change; reading the serving config there is a separate change. Also: a client that is not the harness can still load a model onto a leased card; the re-clear removes it
+  before the next render, it does not stop it, and it unloads what the first job's unload would have (a model whose placement is
+  unknown, in-flight requests drained first, then forced). The serving config is a path in the harness config that no default
+  fills in: a box that does not set `serving_config_path` has no model placed by it. Two parallel jobs of one lease can both read the
+  same resident model and both ask for its unload (idempotent; the second may log a failed per-model unload). Nothing here was run
+  against a live node, a ComfyUI instance or a llama-swap; the render helper was exercised against stand-ins for `/v1/models`,
+  `/running` and the unload routes only, and the yaml reader against fixtures shaped like the rendered config.
+
 ## [0.180.0] - 2026-10-10 - a busy image call waits for the first matching lane anywhere in the cluster, graphs overflow to a node that holds their files, and a live render keeps its lease
 
 ### Fixed — the ticket queue was off on any machine whose config sets no `state_dir`, which is the usual config (ADR 0083)

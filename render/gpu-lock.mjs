@@ -154,12 +154,15 @@ export function memoryStack(env = process.env.MEMORY_STACK) {
 }
 
 // GPU_LEASE_UNLOAD_MODELS: the models the Go wrapper says may leave under a lease that holds some
-// cards, not the whole node (plan P5, register C-86). `gpu reserve --devices <cards> -- <render>`
-// computes it (the roster, minus the memory stack, minus the seats pinned to cards the lease does
-// not hold) and exports it; freeLlamaSwap then unloads that list instead of every model off the
-// memory stack, so a card-2 render no longer empties the seats on card 0.
+// cards, not the whole node (plan P5, register C-86, F15). `gpu reserve --devices <cards> -- <render>`
+// and the media admission compute it (every model except the memory stack and the models POSITIVELY
+// placed on another card, by layers or by the serving config's device pin; a model nothing places is on
+// it) and export it; freeLlamaSwap then unloads that list instead of every model off the memory stack,
+// so a card-2 render no longer empties the seats placed on card 0.
 //
-//   unset / empty -> null   today's rule: every model off the memory stack
+//   unset / empty -> null   no list: today's rule, every model off the memory stack (every placement is
+//                           unknown). A lease on some cards (leaseDevices) says so, because the wrapper
+//                           always hands it a list.
 //   "-"           -> []     the wrapper says nothing may leave
 //   "a,b"         -> [a,b]  exactly these
 export function parseUnloadModels(raw = process.env.GPU_LEASE_UNLOAD_MODELS) {
@@ -168,6 +171,29 @@ export function parseUnloadModels(raw = process.env.GPU_LEASE_UNLOAD_MODELS) {
   if (t === "") return null;
   if (t === "-") return [];
   return t.split(",").map((s) => s.trim()).filter(Boolean);
+}
+
+// leaseDevices: the cards the inherited lease holds, [] for a whole-node lease. The Go side exports them as
+// GPU_LEASE_DEVICES (the reserve wrapper and the media admission both do); a lease whose environment lost
+// the variable still names them in its epoch record (e/<epoch>.json, record v2). The lane needs this to
+// tell a lease on SOME cards, whose unload must be a list, from one that holds every card and may unload
+// today's way. A record that names devices is a card lease whatever the spelling of its ids: an id this
+// file will not open as a claim is still a card the lease holds, and reading it as "none" would send a
+// card lease down the whole-node rule.
+export function leaseDevices(env = process.env, lease = inheritedLease(env), readRecord = readEpochRecord) {
+  const fromEnv = String((env && env.GPU_LEASE_DEVICES) || "").split(",").map((s) => s.trim()).filter(Boolean);
+  if (fromEnv.length > 0) return fromEnv;
+  if (!lease) return [];
+  const rec = readRecord(lease.dir, lease.epoch);
+  if (!rec || !Array.isArray(rec.devices)) return [];
+  return rec.devices.filter((d) => typeof d === "string" && d.trim() !== "");
+}
+
+// defaultReclear: should a job that lost the unload election check its list again? Only under a lease
+// that holds some cards and was handed a non-empty list (see withGpuSlot).
+function defaultReclear() {
+  const list = parseUnloadModels();
+  return Array.isArray(list) && list.length > 0 && leaseDevices().length > 0;
 }
 
 // withTimeout: every network call here needs its own deadline. Node's fetch has NO
@@ -325,9 +351,17 @@ export async function freeLlamaSwap(api = process.env.LLAMA_SWAP_API || "http://
     log = (m) => console.error(m),
   } = opts;
   const keep = memoryStack();
-  // The list the wrapper handed over (null = today's rule). A list narrows what may leave; the
-  // memory stack still never does, whatever the list names.
+  // The list the wrapper handed over (null = none). A list narrows what may leave; the memory stack
+  // still never does, whatever the list names.
   const supplied = opts.unloadModels !== undefined ? opts.unloadModels : parseUnloadModels();
+  const devices = opts.leaseDevices !== undefined ? opts.leaseDevices : leaseDevices();
+  if (!supplied && devices.length > 0) {
+    // A lease on SOME cards and no list (register F15): nothing says which models sit where, so every
+    // placement is unknown, and an unknown placement is unloaded (the render needs its card), exactly as
+    // before F15. Said, because the wrapper always hands a card lease a list: this is an older wrapper
+    // or a hand-built environment, and the models placed on the other cards go with the rest.
+    log(`freeLlamaSwap: this lease holds the card(s) ${devices.join(",")} but was handed no unload list: the placement of every model is unknown, so every model off the memory stack is unloaded`);
+  }
   const allowed = supplied ? new Set(supplied) : null;
   let ids = [];
   try {
@@ -356,6 +390,11 @@ export async function freeLlamaSwap(api = process.env.LLAMA_SWAP_API || "http://
   } catch (e) {
     log(`freeLlamaSwap: could not read /running (${e && e.message}); NOT unloading (cannot see what is loaded)`);
     return;
+  }
+  if (allowed) {
+    // Said, so the operator can tell a seat that stayed from a seat that was missed.
+    const stays = [...running].filter((id) => !keep.has(id) && !allowed.has(id));
+    if (stays.length > 0) log(`freeLlamaSwap: left resident (not on this lease's unload list: placed on other cards): ${stays.join(", ")}`);
   }
   const loaded = ids.filter((id) => running.has(id));
   if (loaded.length === 0) return; // nothing of ours is holding VRAM
@@ -446,7 +485,9 @@ export async function freeComfy(api = process.env.COMFY_API || "http://127.0.0.1
 //      the card,
 //   2. FENCE against it, then unload llama-swap ONCE PER LEASE and only for a `media`
 //      lease — a `text` lease is a benchmark's reservation and unloading under it
-//      destroys exactly the run it was taken to protect,
+//      destroys exactly the run it was taken to protect. A lease on SOME cards that
+//      was handed an unload list also re-reads that list against /running before each
+//      later job, so a seat that came back onto the leased cards leaves again,
 //   3. optionally ensureComfy(); warm:true is the BATCH-SESSION mode,
 //   4. await fn(),
 //   5. run ONE guarded teardown: freeComfy() + kill a ComfyUI we spawned.
@@ -474,6 +515,8 @@ export async function withGpuSlot(opts, fn) {
     freeComfy: freeCfy = freeComfy,
     lease = inheritedLease(),
     claimUnload = claimLeaseUnload,
+    // reclear: should a job that lost the election check the lease's list again (see the unload below)?
+    reclear = defaultReclear,
     checkLease = checkInheritedLease,
     tailLog = tailComfyLog,
     // family: the weights signature of this runner's job (comfy-family.mjs familySignature). When given,
@@ -534,8 +577,19 @@ export async function withGpuSlot(opts, fn) {
     }
     // Then the class gate, then the once-per-lease election.
     const mayUnload = !lease || lease.class !== "text";
-    if (mayUnload && (!lease || claimUnload(lease))) {
-      await freeLS();
+    if (mayUnload) {
+      if (!lease || claimUnload(lease)) {
+        await freeLS();
+      } else if (reclear()) {
+        // BETWEEN RENDERS (register F15). The election clears the leased cards once, for the lease. A
+        // seat can come back onto them afterwards by a door the load fence does not close: the holder's
+        // own children are exempt from it (a text call in the render's process tree must not queue
+        // behind its parent), and a client that is not the harness is not fenced by it at all. A lease
+        // that holds some cards and was handed a list can say exactly what may leave, so a later job
+        // reads that list against /running again before it submits. freeLlamaSwap unloads a listed
+        // model only when it is resident, so a card that is still clear costs two reads and no unload.
+        await freeLS();
+      }
     }
     if (comfyManaged) {
       comfyChild = await ensureComfy({

@@ -479,26 +479,35 @@ func (p *Pipeline) mediaGrantEnv(lease *gpulease.Lease, ids []string, unload str
 }
 
 // unloadEnv is the GPU_LEASE_UNLOAD_MODELS entry for a lease on ids: the models the runner's
-// unload may take, which excludes the seats pinned to cards the lease does not hold. Without it
-// the render lane unloads every model off the memory stack, and a render on one card empties the
-// seats on the others (register C-86). "" (no roster, unreadable) leaves the lane on its own rule.
+// unload may take (gpualloc.UnloadModels): every model of the roster except the memory stack and the
+// models positively placed on another card, by layers or by the serving config's device pin. A model
+// placed on the call's card goes, and so does a model nothing places, as before F15. Without the
+// variable the render lane unloads every model off the memory stack, and a render on one card
+// empties the seats placed on the others (register C-86, F15). "" only for a whole-node call (no
+// ids), which holds every card; a card call always gets a list: with the roster unreadable the
+// candidates are the models the config declares and the serving config lists, and with no llama-swap
+// endpoint it is the none sentinel.
 //
 // Which seat sits on which card needs the card LIST, not a fresh reading (uuids and indices do not
 // change under a running call), so it is scoped from the table the call already holds: a third
 // nvidia-smi read here, with the lease already granted, could only cost time, and one that ran out
-// widened the list to every seat, so a render on one card emptied the seats on the others.
+// used to widen the list to every seat, so a render on one card emptied the seats on the others.
 func (p *Pipeline) unloadEnv(ctx context.Context, ids []string, cards []gpuprobe.Card) string {
-	if len(ids) == 0 || strings.TrimSpace(p.cfg.Endpoint) == "" {
+	if len(ids) == 0 {
 		return ""
 	}
-	roster, err := swapclient.FetchRoster(ctx, p.cfg.Endpoint, 5*time.Second)
-	if err != nil {
-		log.Printf("media admission: the llama-swap roster could not be read (%v): the render lane keeps its own rule and unloads every model off the memory stack", err)
-		return ""
+	if strings.TrimSpace(p.cfg.Endpoint) == "" {
+		return gpualloc.UnloadEnv(nil, true)
+	}
+	var roster []string
+	if r, err := swapclient.FetchRoster(ctx, p.cfg.Endpoint, 5*time.Second); err != nil {
+		log.Printf("media admission: the llama-swap roster could not be read (%v): the candidates for the render lane are the models the config declares and the serving config lists", err)
+	} else {
+		roster = r.IDs()
 	}
 	held := p.alloc
 	held.Cards = func(context.Context, config.Config) ([]gpuprobe.Card, string, error) { return cards, "", nil }
-	models, known := gpualloc.UnloadModels(ctx, p.cfg, roster.IDs(), ids, held, io.Discard)
+	models, known := gpualloc.UnloadModels(ctx, p.cfg, roster, ids, held, log.Writer())
 	return gpualloc.UnloadEnv(models, known)
 }
 

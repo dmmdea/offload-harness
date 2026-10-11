@@ -49,7 +49,7 @@ other on a single shared card.
 | `internal/gpulock` | the read-only vision gate; the held rule is `gpulease.InspectDir`'s, read through the caller's own narrowing (`WaitFreeScoped`: the vision pre-check passes the seat-narrowed reading the text gate uses) |
 | `internal/modelaffinity/gpuwait.go` | READ-ONLY: text admissions that would make llama-swap load a model wait out a `media` holder (ADR 0026); armed from `config.Load` via `LeaseDir` |
 | `internal/modelaffinity/upstream.go` | READ-ONLY: `AwaitUpstream`, the ONE builder of a llama-swap `/upstream/<model>/…` URL, and `AwaitModelRoute`, the builder for a model-dispatched route (`/v1/chat/completions`, `/v1/embeddings`, …) sent without `Admit` — every probe, tokenizer, warm-up, transcription, chat-lane forward and embedding passes the same fence as a generation (see "Probes pass the fence too") |
-| `gpu_drain.go` (`leaseScope`, `maintainSeatScoped`, `unloadModelsFor`), `render/gpu-lock.mjs` (`parseUnloadModels`) | plan P5: the drain and unload take only the seats on the leased cards, and the render lane unloads the list the wrapper exports (`GPU_LEASE_UNLOAD_MODELS`) |
+| `gpu_drain.go` (`leaseScope`, `maintainSeatScoped`, `unloadModelsFor`), `internal/gpualloc/scope.go` (`LeaseScope.Locate`, `Judge`, `UnloadModels`), `internal/gpualloc/serving.go` (`ServingPins`), `render/gpu-lock.mjs` (`parseUnloadModels`, `leaseDevices`) | plan P5 and F15: the drain waits for the runs on the leased cards, the unload takes the models placed on them or not placed at all and leaves the models placed on other cards (by `layers`, else by the serving config pin), and the render lane unloads the list the wrapper exports (`GPU_LEASE_UNLOAD_MODELS`) |
 | `internal/modelaffinity/seatscope.go`, `scoper.go`, `seatyield.go` | the gate's per-seat reading (`SetSeatPins`, `ScopeToPins`, `SeatLease`, `CardsHeld`), the production wiring of the evidence rule (`InspectLease` for the load gate, which remembers what it sees; `PeekLease`, `ScopeInfo`, `ScopeFunc`, `ScopeLeases` for inspectors, which write nothing), and the seat race rule (`YieldIfFenced`) |
 | `internal/mcpserver` | registers the session this MCP server serves in the session registry at start and removes it at exit |
 | `internal/config` | `state_dir`, `gpu_lock_path`, `gpu_card_scoped_leases`, `gpu_legacy_scope_inference`, `gpu_comfy_order`, `gpu_host_ram_headroom_gib` (default 8, chosen and not measured; `Load` installs it process-wide, `gpulease.SetDefaultHostRAMHeadroom`), `agent_seat_host_ram_gib` (the host RAM the agent seat holds once loaded, for the warm-back; unset = `hostneed.DefaultSeatHostGiB`), `gpu_orphan_grace_min`, `gpu_max_term_min`, `gpu_max_total_min`; `ModelPins` (a model's device pins, read from the layers) |
@@ -894,12 +894,19 @@ cards** when its declared pin (`config.ModelPins`, resolved through the card tab
 unknown, cannot be placed, or is read while the card table cannot be, is on them (today's behaviour, the direction of every
 doubt). Then:
 
-- The configured agent seat is drained and unloaded only when it is on the leased cards. A seat on card 0 under a card-2
-  lease is neither drained nor unloaded, no warm-back is owed for it, and the wrapper says so on stderr
-  (`TestUnloadSeatLeavesAnAgentSeatOnAnotherCard`).
-- The other resident models are split the same way: those on the leased cards and those nobody declared a pin for are
-  unloaded; the rest are left resident and named (`gpu reserve: left resident (not on the leased cards): ...`)
-  (`TestUnloadSeatOnlyUnloadsIntersectingModels`). The memory stack is still never unloaded.
+- The configured agent seat is drained and unloaded unless it is positively placed on another card (by `layers`, else by its
+  serving-config pin). A seat on card 0 under a card-2 lease is neither drained nor unloaded, no warm-back is owed for it, and
+  the wrapper says so on stderr (`TestUnloadSeatLeavesAnAgentSeatOnAnotherCard`). A seat nothing places is on the leased cards.
+- The other resident models are judged by `LeaseScope.Judge`, from where they are placed (`LeaseScope.Locate`): by `layers`
+  first, else by the device pin of the model's entry in the serving config (`serving_config_path`; see "Placement from the
+  serving config" below). A model placed on a leased card is unloaded; **a model placed on another card stays** (F15); a model
+  whose placement is unknown (nobody declared it, no usable pin in the serving config, a pin the card table cannot place, a
+  card table that could not be read) is unloaded, exactly as before F15, because the render needs its card. The memory stack is
+  never unloaded. The wrapper names each group with its reason, one line per reason (`gpu reserve: left resident, placed
+  elsewhere by the serving config pin: ...`, `gpu reserve: unloaded, placement unknown (...): ...`;
+  `TestUnloadSeatOnlyUnloadsIntersectingModels`, `TestUnloadSeatPlacesOtherResidentsByTheServingConfigPin`,
+  `TestUnloadSeatTreatsAnUnplaceablePinAsOnTheLeasedCards`). The drain and the fence read a doubt the same way (`LeaseScope.Touches`:
+  a doubt waits).
 - The legacy `GET /unload` is total (it ignores `?model=`), so it is refused while any model that has to stay is resident,
   the seats left on other cards as well as the memory stack.
 - **The drain waits only for runs on the leased cards.** The run registry records each run's seat pins (`Run.Devices`, set by
@@ -907,14 +914,57 @@ doubt). Then:
   the seat they run on when a record predates the field, and skips the agent seat's own gauge when that seat is on other cards
   (`TestDrainWaitsOnlyForIntersectingRuns`). A run on card 0 does not hold a card-2 lease.
 
-**The render lane unloads the list the wrapper hands it.** For a card lease the wrapper exports `GPU_LEASE_UNLOAD_MODELS` to
-the wrapped command: the llama-swap roster, minus the memory stack, minus the seats pinned to cards the lease does not hold
-(`unloadModelsFor`). `render/gpu-lock.mjs` `freeLlamaSwap` unloads exactly that list (drained first, as always) instead of every
-model off the memory stack. Unset or empty keeps today's rule, `-` means nothing may leave, the memory stack never leaves
+**The render lane unloads the list the wrapper hands it.** For a card lease the wrapper (and the pipeline's own per-card media
+admission) exports `GPU_LEASE_UNLOAD_MODELS` to the command it runs: every model of the llama-swap roster except the memory stack
+and the models positively placed on another card (`gpualloc.UnloadModels`, the verdicts above). A model nothing places is on the
+list. The reasons are said on stderr or in the log, one line each. `render/gpu-lock.mjs` `freeLlamaSwap` unloads exactly that list
+(drained first, as always) instead of every model off the memory stack, `-` means nothing may leave, the memory stack never leaves
 whatever the list names, and the total-unload fallback is refused while a model outside the list is resident
-(`render/gpu-lock.test.mjs`, "freeLlamaSwap honours the supplied list"). A whole-node lease, a host that cannot read the roster
-and a command that was not started by the wrapper export nothing, so the lane keeps its own rule. The pipeline's own media
-lease is whole-node until plan P13 takes one card per render, so it exports no list yet.
+(`render/gpu-lock.test.mjs`, "freeLlamaSwap honours the supplied list"). It logs the models it left (`left resident (not on this
+lease's unload list: placed on other cards)`).
+
+A lease on some cards ALWAYS gets a list (F15). When the llama-swap roster cannot be read the candidates are the models `layers`
+declare (`Config.LayerSeatModels`) and the serving config lists, judged like any other, and the wrapper says so; with no
+llama-swap endpoint the list is `-`; with no card table every model is unknown and goes, as before. The old answer in each of the
+first two cases was an unset variable, which the lane read as "every model off the memory stack": the render on one card emptied
+the seats placed on the others (`TestWrapperUnloadEnvForACardLeaseIsNeverUnset`,
+`TestAnUnreadableRosterStillHandsTheRenderLaneTheConfigSeatsOnItsCard`). Only a whole-node lease has no list: it holds every card,
+so the lane keeps its own rule. A lease that names every card the card table lists is the whole node whatever it is called (a
+one-card box's only card, all three of three), so its list is every model off the memory stack (`LeaseScope` `holdsAll`). A card
+lease that nevertheless arrives at the render side with no list (a lease whose environment names cards, `GPU_LEASE_DEVICES`, else
+`devices` in the epoch record, `leaseDevices`; an older wrapper, a hand-built environment) has no placement for any model, so it
+unloads every model off the memory stack, as before, and says that it had no list (`render/gpu-lock.test.mjs`, "a card lease with
+NO list").
+
+**Placement from the serving config (F15).** A box that declares no `layers` has no declared card for any seat (the installer's
+tier seeds do not write `layers`), so `layers` alone placed nothing there. `serving_config_path` is the llama-swap yaml the box
+runs, and nearly every llama.cpp model in it pins its cards with an env entry, `CUDA_VISIBLE_DEVICES=<uuid>[,<uuid>]` (GPU UUIDs,
+sometimes indices). `gpualloc.ServingPins` reads that pin for each model id and alias, and `LeaseScope.Locate` matches it against
+the card table when `layers` do not declare the model (a model both declare keeps the `layers` reading). Only the env pin counts;
+device flags in `cmd` are never read. Unknown, with the reason: an entry whose env names no device (an unpinned dual-card
+`-sm layer` / `--tensor-split` entry), a `proxy:` seat (a vLLM engine: its cards are pinned in its own unit, so **a `proxy:` seat
+with no `layers` entry is unloaded under any card lease**), a pin that is a macro, an alias two entries claim with different pins, a
+bare index when the entry does not also set `CUDA_DEVICE_ORDER=PCI_BUS_ID` (without it a CUDA index is not an nvidia-smi index),
+and every model when the file cannot be read or `serving_config_path` is unset (said once). The file is read per lease, only when a
+model needs it (`TestServingPinsReadsOnlyTheEnvPin`, `TestUnloadModelsPlacesWhatLayersDoNotDeclareFromTheServingConfig`,
+`TestUnloadModelsSaysOnceWhenTheServingConfigCannotBeRead`). The load fence still places a model through `layers` only, so on a box
+without them a text load waits for any media lease, whatever card it is on.
+
+**Between renders (F15).** A `media` lease is not stamped exclusive (`Meta.Exclusive` is a text-lease flag), but the load
+fence does not read the flag for it: `blocksLoadOne` gates `ClassMedia` from the end of its drain (a draining hold waits for the
+runs in flight and fences once the stamp clears), to the cards it holds, through every door a harness load goes through. A load
+that would land on a leased card waits (or, with a cascade remote lane, rides the lane), and a load onto a card nobody holds
+proceeds at once, exactly as under an exclusive text lease (`TestMediaLeaseFencesTextLoadsOnItsCardsExactlyLikeAnExclusiveTextLease`,
+`TestMediaLeaseFenceStartsWhenTheDrainEnds`, with the existing per-card cases in `seatscope_test.go`). Two doors stay open on
+purpose or by reach: the holder's own process tree is exempt (`insideLease`: a text call in the render's children must not queue
+behind its parent), and a client that is not the harness is not fenced by it at all (a hand-run check straight at llama-swap). A
+seat that comes back through either would stay resident for the rest of the lease, because the unload is elected once per
+lease. So a job that lost the election under a card lease with a non-empty list reads that list against `/running` again before
+it submits (`withGpuSlot`, `reclear`): `freeLlamaSwap` unloads a listed model only when it is resident, so a card that is still
+clear costs two reads and no unload, and a seat that came back leaves before the next render (that includes a model whose
+placement is unknown, which is on the list). A whole-node lease, a lease with no list and the none sentinel keep the
+once-per-lease election. Holding one lease across a batch (`--detach --for`) is still what keeps a text seat from loading between
+two SEPARATE leases: with no lease held there is nothing to fence.
 
 **A single-card seat's run-cap line is its card's.** The cap (`fleet_max_concurrent_jobs`, the local run line) counted the runs
 registered on the seat by name. For a seat pinned to one card it now counts the runs on that card, whatever seat they run on

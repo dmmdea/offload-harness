@@ -103,7 +103,9 @@ Two details of the free step are easy to get wrong:
 
 - **It frees per model, not everything.** The always-loaded embedding and reranker models are
   small (a few hundred MiB each; the larger EmbeddingGemma-2 entry on the tiers that carry it, 1,196 to 1,536 MiB with its projector and 460 to 482 MiB text-only) and, on the reference box, pinned to the utility card, not the render card. An earlier unload-all implementation tore that memory stack down
-  on every generation job for no VRAM benefit; the keep-set now protects it.
+  on every generation job for no VRAM benefit; the keep-set now protects it. Under a lease on some cards it also leaves the
+  models positively placed on the other cards loaded (F15, by `layers` or by the serving config's device pin), so a render on one
+  card leaves the seats placed on the others; a model nothing places is unloaded.
 - **ComfyUI is only killed if the harness started it.** An already-running instance is left alone.
 
 Full rationale in [ADR 0009](../architecture/decisions/0009-zero-warm-gpu-lifecycle.md).
@@ -1199,10 +1201,16 @@ uuid, never an index: `COMFY_CUDA_DEVICE` is blank) and `COMFY_API` (the instanc
 port, 8189, plus the card's nvidia-smi index, so 8189, 8190 and 8191 on the 3-card box; `COMFY_PORT_BASE`
 moves the range). The port is stable per card because the render layer refuses to reuse an instance whose
 launch marker records another port. And `GPU_LEASE_UNLOAD_MODELS`: the models the runner's unload may
-take, which is the llama-swap roster minus the memory stack minus the seats pinned to cards the lease
-does not hold (`gpualloc.UnloadModels`, the rule `gpu reserve --devices` uses). Without it the runner
-unloads every model off the memory stack and a render on one card empties the seats on the others
-(register C-86). The post-run `/free` goes to the endpoint the runner was given.
+take, which is every model of the roster except the memory stack and the models positively placed on
+another card (`gpualloc.UnloadModels`, the rule `gpu reserve --devices` uses). A model is placed by `layers`,
+else by the device pin of its entry in the serving config (`serving_config_path`); a seat placed on another
+card stays, and a model nothing places goes (a `proxy:` seat with no `layers` entry is unloaded under any
+card lease). A card call always gets the variable: with the roster unreadable the candidates are the models
+`layers` declare and the serving config lists, with no llama-swap endpoint it is `-`. An unset variable
+would make the runner unload every model off the memory stack, and a render on one card would empty the
+seats placed on the others (register C-86, F15); a runner that does find a lease on cards with no list
+unloads every model off the memory stack and says that it had none (`render/gpu-lock.mjs`). The post-run
+`/free` goes to the endpoint the runner was given.
 
 **In-process slots.** `mediaSlot`, a single slot for the whole process, is now a set with one slot per
 card: two jobs on different cards hold theirs at once, a job that holds the whole node conflicts with every
@@ -1314,7 +1322,8 @@ reason a media call is refused. What the call does instead depends on where the 
 
 The unload list a lease may take (`GPU_LEASE_UNLOAD_MODELS`) is scoped from the table the call already holds, not from a
 third read after the grant: which seat sits on which card needs the card list, not a fresh reading, and a read that ran
-out used to widen the list to every seat, so a render on one card emptied the seats on the others (register C-86).
+out used to widen the list to every seat, so a render on one card emptied the seats on the others (register C-86). A model
+placed on another card is no longer on the list (F15; by `layers` or by its serving config pin), and one nothing places still is.
 `TestAnAllocationReadTimeoutQueuesTheCallInsteadOfDeferringIt` and its neighbours in
 `internal/pipeline/mediaadmit_cardtable_test.go` pin each row; the same file pins that a degraded call places from the
 newest table it read (not the admission one), and that a caller who has gone while the read hangs is not placed at all and

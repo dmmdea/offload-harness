@@ -31,7 +31,8 @@ script.
 2. **Free the llama-swap tiers**, giving the render the whole card. This enumerates loaded models and
    unloads them **individually, skipping a keep-set** — the always-loaded embedding and reranker
    models are small and, on the reference box, pinned to the utility card, not the render card, and an earlier unload-everything implementation destroyed
-   that memory stack on every job for no benefit.
+   that memory stack on every job for no benefit. Under a lease on SOME cards the helper also leaves the models positively placed on the other cards (by `layers`
+   or by the serving config's device pin) resident; it unloads the list the lease hands it, which includes a model nothing places.
 
 3. **Cold-start ComfyUI** with `--disable-smart-memory`, `--cache-none`, and a VRAM reservation.
    If an instance is already running, the harness uses it and does **not** take ownership — it will
