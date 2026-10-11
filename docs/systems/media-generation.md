@@ -1666,8 +1666,9 @@ recorded as known offenders with their reason rather than silently skipped — a
 - [`internal/config/families.go`](../../internal/config/families.go) — family overlay validation and
   resolution, license notes (ADR 0058)
 - [`internal/mediacap/recipe.go`](../../internal/mediacap/recipe.go) — what an image family is: the resolved recipe,
-  its digest and its diff (ADR 0082); [`internal/fleetnode/image_recipe.go`](../../internal/fleetnode/image_recipe.go) —
-  the node's `image_recipes` rows and the 412 check
+  its digest and its diff (ADR 0082); [`internal/mediacap/fingerprint.go`](../../internal/mediacap/fingerprint.go) — the
+  sampled content fingerprint of a weight file and its cache (Amendment 2);
+  [`internal/fleetnode/image_recipe.go`](../../internal/fleetnode/image_recipe.go) — the node's `image_recipes` rows and the 412 check
 - [`internal/pipeline/medialane.go`](../../internal/pipeline/medialane.go) — the read-only lane question;
   [`internal/mediaremote/place.go`](../../internal/mediaremote/place.go) and
   [`identity.go`](../../internal/mediaremote/identity.go) — overflow placement and the strict match;
@@ -2018,12 +2019,25 @@ caller in line. A differential test (`TestMediaLaneFreeNeverRefusesAGrant`) driv
 admission over a table of lane states and fails if a lane the grant would serve is called busy.
 
 **What a family is.** A name says nothing about which weights sit under it. A family's identity is its **recipe**
-(`mediacap.ImageRecipe`): the checkpoint, text encoder, VAE and LoRA it loads, each with its byte size on the node's disk, and
+(`mediacap.ImageRecipeWith`): the checkpoint, text encoder, VAE and LoRA it loads, each with its byte size on the node's disk and a content fingerprint, and
 the sampling it renders with (steps, cfg, sampler, scheduler, schedule, shift, LoRA strength, preset), plus the license the result
-is tagged with, digested with sha256 over canonical JSON. The identity is **name plus size**, not content: two same-named files
-of the same size whose bytes differ (a corrupted full-length copy, a same-named re-release with the same tensor layout, a file
-updated in place on one node only) digest alike, and the node's own 412 check recomputes the same size-based digest, so it
-cannot catch them either; a content fingerprint per weight file is the named upgrade and is not built. The digest is over **resolved** values: a key the binding leaves unset
+is tagged with, digested with sha256 over canonical JSON. The identity is **name, size and content** (F59, ADR 0082 Amendment 2).
+The first cut (0.179.0) had name and size only, so two same-named files of one size with different bytes (a same-named re-release
+with the same tensor layout, a file updated in place on one node only) digested alike and the node's 412 check could not catch
+them. Each present weight file now carries a **fingerprint**: a sha256 of a scheme tag, the file's size and a SAMPLE of its bytes,
+64 blocks of 1 MiB at evenly spaced offsets (the first at the start of the file, the last ending at its end; a file of 64 MiB or
+less is hashed whole). The block size and count are chosen. It is a sample and not a full hash for a measured reason (time) and a judged one (the window): on one
+workstation, page cache not controlled (read these as warm-cache figures), it read 0.17 to 0.87 s per file for files of 0.36 to 42 GB, while a whole-file sha256 ran at 389 MB/s on a core (about
+50 s for a 20 GB checkpoint, about 110 s for 42 GB, extrapolated), minutes per node after every release or model change with no
+match possible meanwhile. That the window is too costly is a judgement; RAM was not the reason (a streaming hash holds one 1 MiB buffer). It separates two real builds of one 42 GB model that share a size (58 of 64 sample blocks differed). It
+does **not** see a change confined to the stretch between two sampled blocks (the blocks are evenly spaced, so that stretch is
+about a sixty-third of the file: roughly 0.3 GB of a 20 GB checkpoint and 0.65 GB of a 42 GB one; a layer-wise merge or a baked-in
+VAE can sit inside it, and a pinned test shows a rewritten stretch leaving the fingerprint unchanged), nor a file replaced by one of
+the same size and the same modification time while the process that cached the old reading runs; compare whole-file hashes after a
+merge you swap in or a copy you doubt; the cache (path, size, modification time) is in memory and a
+restart reads again (a one-shot CLI call is a fresh process, so on a busy lane it reads its family's samples on every call, before
+it makes its ticket: an estimate of one to three seconds from the measured rates; on a free lane it reads nothing, because the
+lane is asked first). `RecipeVersion` is 2, so a digest of 0.179.0 never equals one of this release. The digest is over **resolved** values: a key the binding leaves unset
 takes the builder's default (Qwen-Image-2.1: 40 steps, cfg 1, euler, scheduler `simple`, schedule `official`), so a node that
 writes the default out and a node that leaves it unset are one recipe. That table is pinned by a test to the constants in
 `render/wf-qwen-image-21.mjs` and `render/comfy-render.mjs`; any other graph family leaves unset keys unset, which is stricter.
@@ -2032,11 +2046,21 @@ Node-local keys (`comfy_*`, timeouts, scripts, `imagegen_reserve_vram`, the pool
 binding has no recipe; a ComfyUI recipe never matches one.
 
 **What a node publishes.** `/fleet/health` gains `image_recipes[]` (one row per ComfyUI binding that names a checkpoint: `name`,
-`default`, `digest`, `files[{role,name,bytes}]`, the resolved sampling, `license`, `commercial_use`, and `explicit`, the sampling
-keys the binding actually set) and `refine_honoured`. The rows come from a memo of 60 s (the route cache's), so health stays
-cheap; `bytes` is `-1` for a file the node lacks, which never matches. An image-gen dispatch may carry `recipe_digest`: the node
-recomputes the digest of the family the payload names from the files on disk **now** and refuses a mismatch with **412**, creating
-no job.
+`default`, `digest`, `files[{role,name,bytes,fingerprint}]`, the resolved sampling, `license`, `commercial_use`, and `explicit`, the
+sampling keys the binding actually set) and `refine_honoured`. The rows come from a memo of 60 s (the route cache's), so health stays
+cheap; `bytes` is `-1` for a file the node lacks, which never matches. **Health never waits for a hash.** It reads the fingerprint
+cache; a file not hashed yet starts one background read (one file at a time in this process) and is published `"fingerprint":"pending"` (`"unreadable"`
+when it cannot be read, retried after 30 s), and **a row with any such file has an empty `digest`**, because two nodes that were both
+pending would otherwise share a digest of unhashed files. The memo is rebuilt as soon as a read settles, so a pending row becomes its
+digest on the next health read. An image-gen dispatch may carry `recipe_digest`: the node recomputes the digest of the family the
+payload names from the files on disk **now** (waiting for each fingerprint it does not have, because a dispatch is not health: for 20 s at most per file or until the request is gone, and a file still unread is named `pending`) and refuses a mismatch, or a file it cannot
+fingerprint, with **412**, creating no job. The refusal's JSON body names the `cause` beside `error`: `pending` (every file it lacks
+a fingerprint for is still being read: it cannot say yet whether the family changed), `unreadable` (a file is there and cannot be read) or `changed`
+(the family no longer digests to the digest sent, or the node no longer serves it); the delegator reads health again, and reads the
+cause to decide how long to leave the node alone (below). A read that does not finish in 60 s is given up on:
+that file reads `"unreadable"`, the single reader serves the others, and the harness logs it once; until then it holds the reader and
+the other files stay `pending`. The "send family=X to use its Y" hint reads this machine's other families from the cache without
+waiting, and a call with no fleet overflow because of a file this machine could not fingerprint logs which file and why.
 
 **Which node.** A node is a candidate when it serves `image-gen`; holds a family whose digest equals this machine's (strict,
 no substitution); runs this same release (`harness_version`: the graph builders ship with it); carries refine when the call sent
@@ -2064,10 +2088,15 @@ back is left alone for 60 s and then 300 s per consecutive bounce (only a call i
 not): a node that reads idle but whose own grant refuses every job would otherwise park each call for its whole `gpu_wait_ms`.
 Chosen constants, not measurements (`TestABounceIsRememberedAndTheNodeComesBackAtTheNextStep`,
 `TestARetryAfterHoldsTheNodeAndReadsAsRefused`, `TestARefusedDialMovesOnAndBacksTheNodeOff`, `TestABouncedAttemptGoesBackToWaitingAndTheNextScanTriesTheNextNode`).
-A node that answers 503 or 429 with no `Retry-After` is left alone for the first step (5 s; the row's cause calls an image's node
-full, and a graph's `it answered 503 to the last dispatch at its door`, because a graph's 503 is also a missing file); one that refuses
-with another status is left alone like a bounce. The memory is shared by the tickets and the graph path: a graph refused at a node's
-door hides that node from an image ticket's scan for those seconds, and the reverse. The memory is per process (the placer is a package variable): the MCP server keeps it across the calls
+A node that answers 503 or 429 with no `Retry-After` is left alone for the first step (5 s; a graph's 503 that carries no refusal word is
+the node's own state and its row's cause reads `it answered 503 to the last dispatch at its door`, not "full"; a graph's 503 for a file the
+node lacks carries the word `not_capable`, is that ticket's own `not-capable` row and pauses nothing: Graphs on the fleet, below); one that
+refuses with another status is left alone like a bounce. A 412 is read by its `cause`: `pending` (the node has not finished reading its
+weight files, so it cannot say yet whether they changed) leaves the node alone for a minute, the first bounce step (chosen), and is **not**
+counted as a bounce, so a run of them never reaches the five-minute step and a later `changed` still starts at a minute; `unreadable`,
+`changed` and a 412 that names no cause this build knows are bounced like any other refusal, and the cluster row says which it was (for the
+last, that the node did not say why). The memory is shared by every ticket, an image's and a graph's: a node paused for one is paused for
+the others. The memory is per process (the placer is a package variable): the MCP server keeps it across the calls
 of its session, and a one-shot CLI call (`generate-image` and the other verbs) starts with none, though its ticket keeps it across
 its own scans, so it pays a bounced node's `gpu_wait_ms` once.
 
@@ -2100,7 +2129,13 @@ locally from when it came back, not from when it arrived).
 
 **Reading a node's recipes** (the first live check, before relying on a match): `curl -s http://<node>:18811/fleet/health` and
 read `image_recipes` on the target and, on a machine that also runs `fleet-serve`, on the delegator's own node: the digest of the
-family you will name there is the one the target's row must equal. Neither `offload_status` nor `cluster[]` shows a local digest
+family you will name there is the one the target's row must equal. A row whose files say `pending` and whose `digest` is empty is
+a node that has not finished reading them: read it again in a few seconds (a row that stays `pending` for minutes, or says
+`unreadable`, has a disk problem and the harness log has the line). **Every node must run the same release for digests to
+match** (the digest is version 2 and a recipe is compared only between the same release), so read the three live matches of
+0.179.0 again only after every node of them runs this one. A pair that does not match once both publish digests is a finding about
+the files (other bytes under one name), not a defect to fix in the matcher: the cluster answer names the file and prints the first
+twelve hex digits of each fingerprint. Neither `offload_status` nor `cluster[]` shows a local digest
 (`cluster[]` names the keys that differ, not the digest); a delegator that does not serve has no surface that prints its own.
 
 ## The ticket queue: a busy image call waits for the first matching lane that frees anywhere (ADR 0083)

@@ -757,6 +757,9 @@ type postError struct {
 	// status is the HTTP status the node answered (0: no answer), retryAfter its Retry-After.
 	status     int
 	retryAfter time.Duration
+	// cause is the reason a node named in the body of its refusal (mediacap.RecipeRefusalCauseKey: one of
+	// mediacap.RecipeRefusal*), "" when it named none this build knows. Only a 412 carries one.
+	cause string
 	// neverReached: the connection was never made, so nothing was sent.
 	neverReached bool
 	// refusal is the "refusal" member of a 503 body (refusalNotCapable: the node is not full, it cannot run THIS request), and
@@ -803,7 +806,7 @@ func post(ctx context.Context, cfg config.Config, base, route string, body []byt
 		if secs, perr := strconv.Atoi(strings.TrimSpace(resp.Header.Get("Retry-After"))); perr == nil && secs > 0 {
 			retry = time.Duration(secs) * time.Second
 		}
-		pe := &postError{placementError: &placementError{class, rosterprobe.Scrub(base, fmt.Errorf("dispatch %s: status %d: %s", url, resp.StatusCode, truncate(rb)))}, status: resp.StatusCode, retryAfter: retry}
+		pe := &postError{placementError: &placementError{class, rosterprobe.Scrub(base, fmt.Errorf("dispatch %s: status %d: %s", url, resp.StatusCode, truncate(rb)))}, status: resp.StatusCode, retryAfter: retry, cause: refusalCause(rb)}
 		// The node's own word for the kind of refusal, and its sentence, from a body it wrote (a proxy's body is no JSON and says
 		// nothing): a delegator tells "not this request" from "not now" by the member and never by the wording.
 		var wire struct {

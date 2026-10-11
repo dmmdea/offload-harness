@@ -4,9 +4,15 @@ package mediaremote
 // node's published recipes include it. The comparison is strict: a node either holds a family whose recipe digests
 // to this machine's, or it is not a candidate, and the answer says which key differs. Nothing is ever substituted, so
 // a caller who accepts another build names that family himself.
+//
+// A recipe is compared on CONTENT as well as name and size (F59): each present weight file carries a fingerprint
+// (mediacap/fingerprint.go). A machine or a node that has not got one for every present file has no identity yet, and
+// that is a named miss (never a match by size, and never two "pending" recipes taken for one).
 
 import (
+	"context"
 	"fmt"
+	"log"
 	"sort"
 	"strings"
 
@@ -17,27 +23,40 @@ import (
 	"github.com/dmmdea/offload-harness/internal/mediacap"
 )
 
+// localFingerprints is how this machine's own recipe reads the content of its weight files: through the process-wide
+// cache, waiting for a file it has not hashed, for as long as the call's context and the fingerprinter's bound allow (a
+// file still unread then is "pending" and the family has no identity for this call). The delegator computes its
+// fingerprints the way a node does. A var so a test can hold or fail a read.
+var localFingerprints func(ctx context.Context, path string, size int64) string = mediacap.SharedFingerprints().AwaitContext
+
+// localPeek is how the hint of this machine's OTHER families reads a weight file: from the cache only, never waiting (a
+// family still being hashed is left out of the hint, and its hash is started for the next call).
+var localPeek mediacap.FingerprintFunc = mediacap.SharedFingerprints().Peek
+
 // localID is the identity of the family a request resolves to on this machine.
 type localID struct {
 	// name is what the request named ("" = this machine's default binding).
 	name   string
 	recipe mediacap.Recipe
 	// others is the recipe of every other image family this machine binds, by name: a node that misses the family may
-	// match another of them, and the answer then says which to name. It stats each family's weight files, so it is read
-	// only when a node misses (once per call), never on the path of a match.
+	// match another of them, and the answer then says which to name. It stats each family's weight files and takes their
+	// fingerprints from the cache without waiting (localPeek), so it is read only when a node misses (once per call), never
+	// on the path of a match, and never holds the ticket scan up on a hash: a family not hashed yet is not in it, and the
+	// map is built again at the next miss until every family is (a ticket lives for hours; a hash lands in seconds).
 	others func() map[string]mediacap.Recipe
 }
 
 // localIdentity resolves family on this machine, the way the pipeline resolves it ("" or the default binding's own
 // family name is the DEFAULT binding, so a call that names none is never taken for a node's own default). ok is false,
 // with the reason, when there is no recipe to compare: an unknown family, an sd.cpp binding, or a binding whose files
-// are not all here.
-func localIdentity(cfg config.Config, family string) (localID, bool, string) {
+// are not all here or one of them cannot be fingerprinted.
+func localIdentity(ctx context.Context, cfg config.Config, family string) (localID, bool, string) {
 	eff, fi, err := cfg.ResolveImageFamily(family)
 	if err != nil {
 		return localID{}, false, err.Error()
 	}
-	r, ok := mediacap.ImageRecipe(eff, fi, mediacap.ModelRoots(eff.ComfyDir), nil)
+	await := func(path string, size int64) string { return localFingerprints(ctx, path, size) }
+	r, ok := mediacap.ImageRecipeWith(eff, fi, mediacap.ModelRoots(eff.ComfyDir), nil, await)
 	if !ok {
 		return localID{}, false, "this binding is not a ComfyUI one, which has no recipe to compare"
 	}
@@ -47,6 +66,9 @@ func localIdentity(cfg config.Config, family string) (localID, bool, string) {
 	if missing := r.Missing(); len(missing) > 0 {
 		return localID{}, false, "this machine is missing " + strings.Join(missing, ", ")
 	}
+	if gaps := r.Unfingerprinted(); len(gaps) > 0 {
+		return localID{}, false, "this machine could not fingerprint " + strings.Join(gaps, ", ")
+	}
 	var (
 		memo map[string]mediacap.Recipe
 		done bool
@@ -55,19 +77,39 @@ func localIdentity(cfg config.Config, family string) (localID, bool, string) {
 		if done {
 			return memo
 		}
-		memo, done = map[string]mediacap.Recipe{}, true
+		memo = map[string]mediacap.Recipe{}
+		complete := true
 		for _, fi := range cfg.ImageFamilies() {
 			o, _, oerr := cfg.ResolveImageFamily(fi.Name)
 			if oerr != nil {
 				continue
 			}
-			if or, ok := mediacap.ImageRecipe(o, fi, mediacap.ModelRoots(o.ComfyDir), nil); ok && len(or.Missing()) == 0 {
-				memo[fi.Name] = or
+			or, ok := mediacap.ImageRecipeWith(o, fi, mediacap.ModelRoots(o.ComfyDir), nil, localPeek)
+			if !ok || len(or.Missing()) > 0 {
+				continue // not a family with a recipe here, or a file missing: nothing a later look would change
 			}
+			if len(or.Unfingerprinted()) > 0 {
+				complete = false // being hashed (Peek started it) or unreadable: look again at the next miss
+				continue
+			}
+			memo[fi.Name] = or
 		}
+		done = complete
 		return memo
 	}
 	return localID{name: strings.TrimSpace(family), recipe: r, others: others}, true, ""
+}
+
+// identityOrLog is localIdentity for a call that goes on without one: the call then runs on this machine's own line and
+// never asks the fleet, so the reason is logged, once per call. It is not noise: an image call is minutes of GPU, and a file
+// that read back "unreadable" under load is a transient that turns overflow off with nothing else to show for it (a missing
+// file or an sd.cpp binding is stable, and the line says so too).
+func identityOrLog(ctx context.Context, cfg config.Config, family string) (localID, bool) {
+	local, ok, why := localIdentity(ctx, cfg, family)
+	if !ok {
+		log.Printf("mediaremote: image call (family %q) has no fleet overflow and runs on this machine's own line: %s", family, why)
+	}
+	return local, ok
 }
 
 // need is what one call asks of a node beyond the recipe.
@@ -113,6 +155,11 @@ func matchNode(local localID, v delegate.NodeView, n need) (m nodeMatch, ok bool
 	if n.refineOff && !v.RefineHonoured {
 		return miss("does not honour refine=false (an older harness would refine the prompt anyway); send without it, or render it on a node that does")
 	}
+	// Two recipes whose files are all "pending" digest alike, so a recipe without a fingerprint on every present file is
+	// never compared: this machine's here, the node's rows below.
+	if gaps := local.recipe.Unfingerprinted(); len(gaps) > 0 {
+		return miss("this machine has not fingerprinted " + strings.Join(gaps, ", ") + ", so it has no identity to compare yet")
+	}
 	want := local.recipe.Digest()
 	var equal []delegate.ImageRecipeView
 	for _, row := range v.ImageRecipes {
@@ -121,6 +168,9 @@ func matchNode(local localID, v delegate.NodeView, n need) (m nodeMatch, ok bool
 		}
 	}
 	if len(equal) == 0 {
+		if m, hashing := stillHashing(local, v); hashing {
+			return m, false
+		}
 		return closest(local, v)
 	}
 	var reasons []string
@@ -136,6 +186,10 @@ func matchNode(local localID, v delegate.NodeView, n need) (m nodeMatch, ok bool
 
 // rowUnusable says why a node's matching family cannot take this call, "" when it can.
 func rowUnusable(row delegate.ImageRecipeView, v delegate.NodeView, n need) string {
+	// A row whose digest equals ours but whose files are not all fingerprinted claims an identity it has not got.
+	if gaps := recipeOfView(row).Unfingerprinted(); len(gaps) > 0 {
+		return fmt.Sprintf("its family %q publishes a matching digest but has not fingerprinted %s", row.Name, strings.Join(gaps, ", "))
+	}
 	route := "generate_image"
 	if !row.Default {
 		route = mediacap.ImageFamilyRoute(row.Name)
@@ -148,6 +202,23 @@ func rowUnusable(row delegate.ImageRecipeView, v delegate.NodeView, n need) stri
 		return fmt.Sprintf("its family %q matches, but a per-request steps needs imagegen_cfg set in that node's binding (this graph takes steps and cfg together, and the node leaves cfg to the builder)", row.Name)
 	}
 	return ""
+}
+
+// stillHashing words the miss of a node that holds this machine's build by name, size and sampling but has not
+// fingerprinted all of it yet (a node that was just started, or whose file just changed, publishes its rows pending and
+// with no digest). It is a wait, not a difference: the same read of its health a little later can match.
+func stillHashing(local localID, v delegate.NodeView) (nodeMatch, bool) {
+	shape := local.recipe.WithoutContent().Digest()
+	for _, row := range v.ImageRecipes {
+		r := recipeOfView(row)
+		gaps := r.Unfingerprinted()
+		if len(gaps) == 0 || r.WithoutContent().Digest() != shape {
+			continue
+		}
+		why := fmt.Sprintf("its %s holds this machine's build by name and size but has not fingerprinted %s, and a family is matched on content: it is a candidate once the node has (read its /fleet/health image_recipes again in a moment)", familyLabel(row), strings.Join(gaps, ", "))
+		return nodeMatch{why: why, differs: gaps, state: "not-capable"}, true
+	}
+	return nodeMatch{}, false
 }
 
 // closest words the miss of a node none of whose families digests alike: the family that differs least, in which keys,
@@ -215,7 +286,7 @@ func recipeOfView(v delegate.ImageRecipeView) mediacap.Recipe {
 		Explicit: v.Explicit,
 	}
 	for _, f := range v.Files {
-		r.Files = append(r.Files, mediacap.RecipeFile{Role: f.Role, Name: f.Name, Bytes: f.Bytes})
+		r.Files = append(r.Files, mediacap.RecipeFile{Role: f.Role, Name: f.Name, Bytes: f.Bytes, Fingerprint: f.Fingerprint})
 	}
 	return r
 }

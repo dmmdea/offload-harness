@@ -33,7 +33,8 @@ var treeFiles = map[string]int{
 	"models/vae/qwen_image_vae.safetensors":                              5,
 }
 
-// comfyTree writes treeFiles into a fresh directory and returns it.
+// comfyTree writes treeFiles into a fresh directory and returns it. The files are fingerprinted before it returns: a node
+// publishes a digest only for files it has hashed, and a fixture node is meant to stand for one that has been up a while.
 func comfyTree(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -44,6 +45,9 @@ func comfyTree(t *testing.T) string {
 		}
 		if err := os.WriteFile(p, make([]byte, n), 0o644); err != nil {
 			t.Fatal(err)
+		}
+		if got := mediacap.SharedFingerprints().Await(p, int64(n)); !mediacap.IsFingerprint(got) {
+			t.Fatalf("fingerprint of %s = %q", p, got)
 		}
 	}
 	return dir

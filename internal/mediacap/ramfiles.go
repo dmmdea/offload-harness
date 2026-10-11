@@ -147,6 +147,13 @@ func MusicModelFiles() []ModelFile { return fromNeeds(musicNeeds()) }
 // walks a tree looking for the basename, because the host-RAM estimate runs at every grant and a
 // walk of a 70 GiB model tree is not free. stat is os.Stat unless a test supplies a table.
 func ResolveModelFile(roots []ModelRoot, f ModelFile, stat func(path string) (size int64, ok bool)) (int64, bool) {
+	_, n, ok := ResolveModelFilePath(roots, f, stat)
+	return n, ok
+}
+
+// ResolveModelFilePath is ResolveModelFile that also says WHICH file it found, for a reader that must open it (the
+// recipe's content fingerprint).
+func ResolveModelFilePath(roots []ModelRoot, f ModelFile, stat func(path string) (size int64, ok bool)) (path string, size int64, ok bool) {
 	if stat == nil {
 		stat = osStatSize
 	}
@@ -156,12 +163,13 @@ func ResolveModelFile(roots []ModelRoot, f ModelFile, stat func(path string) (si
 			if !contains(f.Classes, cd[0]) {
 				continue
 			}
-			if n, ok := stat(filepath.Join(cd[1], rel)); ok {
-				return n, true
+			p := filepath.Join(cd[1], rel)
+			if n, ok := stat(p); ok {
+				return p, n, true
 			}
 		}
 	}
-	return 0, false
+	return "", 0, false
 }
 
 func osStatSize(path string) (int64, bool) {

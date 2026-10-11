@@ -63,6 +63,9 @@ type node struct {
 	// (seconds, as a node writes the header) as its Retry-After when that is set.
 	refusePost       int
 	refuseRetryAfter string
+	// refuseBody, when set, is the JSON body of that refusal (a node's own words), as the fleet node writes its refusals;
+	// without it the refusal is a plain-text one.
+	refuseBody string
 	// dropAck, when set, runs every POST to /fleet/dispatch through the node and then closes the connection before a byte
 	// of the answer is written: the node HAS the job and the delegator never hears so (a lost acknowledgement).
 	dropAck bool
@@ -238,6 +241,7 @@ func startNode(t *testing.T, o nodeOpts) *node {
 		n.mu.Lock()
 		n.log = append(n.log, seen{req.Method, req.URL.Path, req.Header.Get("Authorization"), body, req.Header.Clone()})
 		tamper, refuse, retryAfter, drop, before := n.tamper, n.refusePost, n.refuseRetryAfter, n.dropAck, n.beforePost
+		refuseBody := n.refuseBody
 		n.mu.Unlock()
 		if before != nil && req.Method == http.MethodPost {
 			before(body)
@@ -245,6 +249,12 @@ func startNode(t *testing.T, o nodeOpts) *node {
 		if refuse != 0 && req.Method == http.MethodPost {
 			if retryAfter != "" {
 				w.Header().Set("Retry-After", retryAfter)
+			}
+			if refuseBody != "" {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(refuse)
+				_, _ = w.Write([]byte(refuseBody))
+				return
 			}
 			http.Error(w, "refused by the test", refuse)
 			return

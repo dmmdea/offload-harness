@@ -27,7 +27,7 @@ func TestAnAdoptedTicketsRowNamesTheNodeItRanOn(t *testing.T) {
 	req := e.req("a red door", nil)
 	n := e.nodes[0]
 
-	local, _, _ := localIdentity(e.cfg, "qwen-image-2.1-fast")
+	local, _, _ := localIdentity(context.Background(), e.cfg, "qwen-image-2.1-fast")
 	jobID := "media-deadbeef00000002"
 	body, _ := json.Marshal(map[string]any{"job_id": jobID, "task_type": taskImage, "payload": map[string]any{
 		"prompt": req.Input, "family": "qwen-image-2.1", "seed": 424242, "width": 2048, "height": 2048, "recipe_digest": local.recipe.Digest()}})

@@ -217,6 +217,9 @@ type Server struct {
 	recipeRows []ImageRecipeHealth
 	recipeAt   time.Time
 	recipeRead bool
+	// recipeGen is the fingerprinter's generation the rows were built at: a read that settled since turns a pending row
+	// into its digest without waiting for the memo's minute.
+	recipeGen uint64
 	// agentSeat is the resolved agent planner seat (config.AgentPlannerModel:
 	// agent_model > workhorse Model), computed once here at construction —
 	// the config cannot change under a running server. Advertised (and probed
@@ -1241,7 +1244,7 @@ type healthPayload struct {
 	// a family whose commercial_use is false, and read a null license as UNKNOWN.
 	// Omitted on a node with no named families — the pre-0.134 shape.
 	ImageFamilies []ImageFamily `json:"image_families,omitempty"`
-	// ImageRecipes is what each ComfyUI image binding IS: the weight files with their sizes, the resolved sampling,
+	// ImageRecipes is what each ComfyUI image binding IS: the weight files with their sizes and content fingerprints, the resolved sampling,
 	// the license a result is tagged with, and the digest a delegator matches and sends back as recipe_digest
 	// (image_recipe.go, ADR 0082). Additive; omitted on a node with no ComfyUI binding that names a checkpoint, and
 	// on a node that predates it, which a reader takes as "cannot be matched", never as "matches anything".
@@ -2523,10 +2526,12 @@ func (s *Server) admit(w http.ResponseWriter, r *http.Request, env dispatchEnvel
 			return
 		}
 		// An image job whose recipe_digest is not the one of the family it names here: the node is not what the
-		// delegator matched (its files changed since it read health). 412, and no job exists (image_recipe.go).
+		// delegator matched (its files changed since it read health, or it has not finished reading them). 412, and no job
+		// exists (image_recipe.go). The body names the cause beside the sentence, so a delegator tells a wait from a change by a
+		// member and not by matching words.
 		var rme *recipeMismatchError
 		if errors.As(err, &rme) {
-			writeError(w, http.StatusPreconditionFailed, err.Error())
+			writeJSON(w, http.StatusPreconditionFailed, map[string]string{"status": "error", "error": err.Error(), mediacap.RecipeRefusalCauseKey: rme.cause})
 			return
 		}
 		// A failure that is this node's own (a disk that filled while unpacking a project) is not the

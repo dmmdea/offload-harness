@@ -54,7 +54,8 @@ Three facts made the obvious change unsafe as stated.
    it on disk. A differential test drives the real wait-0 admission over a table of lane states and holds the prober to the one
    direction that matters, and `TestMediaLaneFreeWritesNothing` snapshots the lease root over each of them, those records included.
 3. **A family is its recipe (`mediacap.ImageRecipe`).** The recipe is the weight files the graph loads (checkpoint, text
-   encoder, VAE, LoRA), each with its name and byte size on the node's disk, and the sampling it renders with, digested (sha256
+   encoder, VAE, LoRA), each with its name, byte size on the node's disk and sampled content fingerprint (Amendment 2), and the
+   sampling it renders with, digested (sha256
    of canonical JSON) over RESOLVED values: a key the binding leaves unset takes the builder's own default, from a table that a
    test reads out of `render/wf-qwen-image-21.mjs` and `render/comfy-render.mjs`, so it cannot drift from the code that renders
    (Qwen-Image-2.1 only in this release; any other graph leaves unset keys unset, which is stricter, never looser). The license
@@ -62,14 +63,15 @@ Three facts made the obvious change unsafe as stated.
    a test fails when a key joins the image overlay's clear list unclassified. No recipe exists for an sd.cpp binding, so a
    ComfyUI recipe never matches one. The match is strict, also requires the same `harness_version` (the graph builders ship
    with the release) and a recipe with no missing file, and never substitutes: a caller who accepts another build names that
-   family himself, and the answer tells him which of his own families would match. **The identity is name plus size, not
-   content.** It tells a bf16 build from an int8 one and catches a truncated copy; it cannot tell two same-named files of one
-   size whose bytes differ (a full-length corrupted copy, a same-named re-release with the same tensor layout, a file updated in
-   place on one node), and the node's 412 re-check recomputes the same size-based digest, so it does not catch them either. A
-   sha256 per weight file, cached by path, size and mtime and published in `image_recipes`, is the upgrade and is not built.
+   family himself, and the answer tells him which of his own families would match. **The first cut (0.179.0) identified a file by
+   name plus size, not content**: it told a bf16 build from an int8 one and caught a truncated copy, but not two same-named files
+   of one size whose bytes differ (a full-length altered copy, a same-named re-release with the same tensor layout, a file updated
+   in place on one node), and the node's 412 re-check recomputed the same size-based digest, so it did not catch them either.
+   Amendment 2 adds a content fingerprint per weight file and says what it sees and what it does not.
 4. **Nodes publish and check recipes.** `/fleet/health` gains `image_recipes[]` (one row per ComfyUI binding that names a
-   checkpoint: name, default, digest, files with sizes, resolved sampling, license, and which sampling keys the binding set) and
-   `refine_honoured`, from a memo of the route cache's 60 s so health stays cheap. An image-gen dispatch may carry
+   checkpoint: name, default, digest, files with sizes and fingerprints, resolved sampling, license, and which sampling keys the
+   binding set) and `refine_honoured`, from a memo of the route cache's 60 s so health stays cheap (and never waiting for a hash:
+   Amendment 2). An image-gen dispatch may carry
    `recipe_digest`; the node recomputes the digest of the family the payload names from the files on disk now and refuses a
    mismatch with `412` and no job (not `409`, which already means "this job failed here before", nor `503`, which means busy).
    `refine` is decoded as the MCP handler does, so `refine=false` reaches the pipeline; a delegator that sends it requires
@@ -133,7 +135,7 @@ Three facts made the obvious change unsafe as stated.
   one bounce per node per pause (60 s, then 300 s): up to the node's `gpu_wait_ms` (90 s by default) parked on the node and one
   deferred row there, before the placer sees it. The health pre-filter (no lease of any class) makes that rare; if the logs show it is not, a place-now header read in
   admission is the first optimisation (a lane verdict published by the node, answered before a job exists), not built here.
-- **Named limits.** The recipe is name plus size, not content (decision 3). One FIFO per delegating machine; cross-machine order is node arrival. ADR 0083 closes the two limits the first cut named: a call resumed with
+- **Named limits.** The content check is a sample of each weight file, not a full hash, and does not see a change confined to the stretch between two sample blocks (about a sixty-third of the file; Amendment 2). One FIFO per delegating machine; cross-machine order is node arrival. ADR 0083 closes the two limits the first cut named: a call resumed with
   its token joins the cluster queue and brings its place with it, and a call no node could take keeps its arrival time through the
   ticket's place in the local line, so a bounce no longer costs it its seniority. Every
   remote job pays ComfyUI's cold start. The same recipe and seed on a different GPU architecture is the same composition, not
@@ -151,8 +153,7 @@ Three facts made the obvious change unsafe as stated.
   display card's free memory and a minute-old table can call busy a lane the grant would serve, which the contract forbids. Two
   follow-ups, neither built: a roster-first short circuit (health is memoised 2 s; when no published digest equals the local one the
   lane question need not be asked), and a short table copy for the pinned and whole-node plans only, where the table maps a pin
-  to a card and sizes the host-RAM need (total VRAM) and nothing else. The delegator's own recipe is three or four stats of its
-  model tree per call that gets as far as the lane question; the recipes of its OTHER families are read only when a node misses, to
+  to a card and sizes the host-RAM need (total VRAM) and nothing else. The delegator's own recipe is three or four stats of its model tree per call whose lane read busy or could not be read (the lane is asked first, and a call whose lane is free reads no weight file) and, the first time this process sees a file, a read of a sample of at most 64 MiB of it (Amendment 2); the recipes of its OTHER families are read only when a node misses, from the fingerprint cache without waiting, to
   name the family that would match. A node's health rows are 60 s old at worst, and the node re-checks the digest at admission from
   the files then on disk.
 - **An attribution edge.** An overflowing call opens its PAIR card when the node's 202 arrives, not before the POST. If the caller's
@@ -244,3 +245,102 @@ workstation, the single-card nodes carry 8 GB cards) rules 3 and 4 together leav
 target: it waits for its own lane. The durable fix is on the node (keep a whole-node graph off the display card there). A graph is
 placed only on a node that runs this machine's release, on every route, so a fleet part-way through an upgrade routes graphs only
 to the nodes already on it (and `route remote` to a node still on the old release is a named miss, not a send). Nothing here was run live: the live acceptance named A8 in the CHANGELOG entry of that change is the first.
+
+## Amendment 2 (2026-10-10, P0 step F59): a family's identity includes the content of its weight files
+
+Decision 3 identified a weight file by its name and byte size and named the limit: two same-named files of one size with
+different bytes digested alike, so a delegator could send a job to a node that renders other pixels, and the node's 412
+re-check, which recomputes the same digest, could not catch it. This amendment closes that for the differences a sample of a
+file can see. Every other decision stands.
+
+1. **Each present weight file carries a content fingerprint, and it is in the digest.** `mediacap.RecipeFile.Fingerprint` is a
+   sha256 over a scheme tag, the file's size and a sample of its bytes: 64 blocks of 1 MiB at evenly spaced offsets, the first
+   at the start of the file and the last ending at its end, or the whole file when it is 64 MiB or smaller. The block size and
+   the block count are **chosen**, not derived from a requirement. The path is not in it (the same bytes under two paths are one
+   file, which is what lets two machines agree), and `RecipeVersion` is 2, so a digest of the first cut can never equal one of
+   this release. A family that has a file the node does not hold keeps `bytes` -1 and no fingerprint, and never matches.
+2. **A sample, not the whole file, and why (the times are measured, the weight given to the window is a judgement).** On one workstation on 2026-10-10 (its local model store;
+   the page cache was not controlled, so read these as warm-cache figures) the sample read 0.17 to 0.87 s per file for files from 0.36 GB to 42 GB. A whole-file
+   sha256 of the same store ran at 389 MB/s on one core (3.8 s for a 1.47 GB file), which extrapolates (not run) to about 50 s for
+   a 20 GB checkpoint and about 110 s for a 42 GB one, per node, after every release and every model change, with the node unable
+   to match until it finished: minutes of a core and of the disk, and a window in which the fleet cannot take a call. That the
+   window is too costly is a judgement, not a measurement, and RAM was not the reason (a streaming hash holds one 1 MiB buffer). The sample catches the failure this exists for: two real builds
+   of one 42 GB transformer that share a size differed in 58 of the 64 sample blocks. There is no persisted cache: the
+   fingerprint cache is in memory, keyed by path, size and modification time, so a restart reads each file's sample again
+   (0.17 to 0.87 s per file on the machine measured; a cold or network disk was not measured) and nothing on disk can go stale or be written by two processes.
+3. **What it does not see (named).** (a) A change confined to the stretch between two sample blocks. The blocks are evenly
+   spaced, so that stretch is about a sixty-third of the file less one block: roughly 0.3 GB of a 20 GB checkpoint and 0.65 GB of
+   a 42 GB one (`TestTheUnsampledStretchBetweenTwoBlocksIsAboutASixtyThirdOfTheFile` pins those widths, and a test rewrites a
+   whole stretch and shows the fingerprint unchanged). Every byte in it can differ and the digest is the same: a layer-wise merge
+   that changes a few transformer blocks, a VAE or text encoder baked into a checkpoint, a few corrupted bytes. A retrain or a
+   fine-tune that touches the weights throughout is seen; a change that leaves such a stretch alone may not be. (b) A file
+   replaced by one of the same size **and** the same modification time (a copy that preserves times) while the process that
+   cached the old reading is still running. A full hash would catch both; after a copy that is suspect, or a merge swapped in,
+   compare whole-file hashes (`sha256sum`) on the nodes. Amendment 1's weight check for a graph is still by name and is not
+   changed by this one.
+4. **Computed off the request path; a file not yet hashed is a named miss.** `/fleet/health` never waits for a hash. It reads the
+   cache (`Fingerprinter.Peek`); a file not yet hashed starts one background read, one file at a time in this process (a model load in
+   another process, ComfyUI's, is not coordinated with), and is published `"fingerprint":"pending"`; a file that could not be read, or that changed while it was read, is
+   `"unreadable"` and is tried again after 30 s (chosen). **A row with any such file publishes an empty `digest`**: two nodes
+   that were both pending would otherwise share a digest of unhashed files, which is the match by size this amendment ends. The
+   row memo is also rebuilt when a read settles, so a pending row turns into its digest on the next health read and not up to
+   a minute later. The node's 412 re-check and the delegator's own recipe wait for a fingerprint they do not have
+   (`Fingerprinter.AwaitContext`, the same cache and the same single worker), because a dispatch and a placement are not health.
+   **The wait has a bound, and it is per file**: the wait for one file's fingerprint ends when the request's context does (the dispatch handler's, the door's) and, whatever the context, after 20 s (chosen; a cold family of four files read in a few seconds on the machine measured), and answers `pending` for that file. A recipe waits for its files one after another, so the bound of a whole recipe is its file count times 20 s (four files: 80 s) and is reached only when the request lives that long and every read is stalled behind the single worker; the request's own end stops all of it at once.
+   A family with a file the node cannot fingerprint, or has not finished, is refused with 412 naming the file and its state, and
+   the cause (decision 7); at the door the same state is no identity for that call, which runs on the local line and logs the
+   reason once (the identity is built only when the lane read busy: a free lane reads no file). **A read that does not finish in
+   60 s (chosen) is given up on**: its file is `unreadable`, the worker serves
+   the other files, and the read, which cannot be cancelled, runs on until the disk lets it return; the file is not read again
+   meanwhile, so a hung disk costs one goroutine and one handle per stuck file, and one log line. Until the 60 s pass, a stalled
+   read holds the single worker and every other file stays `pending`: the node publishes no digest for those families and is a
+   named miss, which is what a node with a hung disk should be. Nothing watches the disk beyond that (no watchdog, by the
+   operator's rule).
+5. **A recipe that is not fully fingerprinted is never compared, on either side.** `localIdentity` gives no identity to a family
+   with an unfingerprinted present file (the call runs as it does for a missing file, and the door and the adopter log why); `matchNode` refuses to compare when this
+   machine's recipe has one (two all-pending recipes are the same string), and a node row whose files are not all hashed is a
+   miss whether or not it carries a digest (the files are read, not only the digest). When the node holds this machine's build
+   by name, size and sampling and has only not finished hashing it, the cluster row is `not-capable` and says so, and that the
+   node is a candidate once it has; the ticket's next scan reads health again. A same-named, same-size file with other bytes is
+   a miss that names it: `imagegen_ckpt: <name> has the same size on both and different content (fingerprint <12 hex> vs <12 hex>)`. The
+   "send family=X to use its Y" hint reads this machine's other families from the cache without waiting and leaves out a family
+   not hashed yet, so it never holds the ticket scan up on a hash; it is built again at the next miss while any family was left
+   out, so a ticket that waits for hours gains the hint once the hashes land.
+6. **The deploy story.** The digest is version 2 and a recipe is compared only between the same release (`harness_version`), so a
+   fleet part-way through the upgrade matches only inside each release: a delegator at this release finds no match on a node still
+   on the one before, and a node at this release is matched by no older delegator, and an overflow then degrades to the local
+   line and the ticket as it does for any release skew. **Every node that should take overflow must run this release before
+   the live matches can be read again.** A dispatch is sent only to a node whose health row carries a
+   digest, which the node publishes once it has read its files, so the first dispatch after a node restarts finds them cached and is
+   not refused for want of them. A dispatch that does meet a file the node has not read (one that changed after its row was
+   published, or a cache that was dropped) waits for it (decision 4: until the request ends and, whatever the request, 20 s at most for each file; a family of four files read in a few seconds on the machine measured) and is admitted when the digest then matches. Only a
+   read still unfinished at that bound (a slow or cold disk, a stalled read) is answered 412 with the cause `pending`, which the
+   delegator reads as a wait and not as a finding (decision 7).
+7. **A 412 says why, and the delegator tells a wait from a difference.** A 412 used to mean one thing, that the node's files had
+   changed since it published them, and the delegator left such a node alone for a minute and, on the next, for the cap (5 minutes),
+   counting each as a bounce. A node can now also refuse because it has not finished reading its weight files and cannot say yet
+   whether the family is what it was sent, which is a wait for an answer and not a finding. The refusal's JSON body carries a
+   `cause` beside `status` and `error`, one of `pending` (every file the node lacks a fingerprint for is still being read),
+   `unreadable` (a file is there and could not be read, so the node cannot vouch for the family) or `changed` (the family no longer
+   digests to the digest sent, or the node no longer serves it or binds it to another engine). The member is read as a member and
+   not matched out of a sentence, and the node's words choose nothing beyond these three: a refusal that names none this build
+   knows (a proxy, a node of another build, a node of an earlier build) is bounced like `changed`, the conservative reading, and its
+   row says the node did not say why. A delegator that reads `pending` leaves the node alone for the first bounce step (a minute:
+   chosen) and does **not** count it as a bounce, so a run of `pending` answers never reaches the cap and a later `changed` still
+   starts at a minute. `unreadable` and `changed` are bounced as before. The cluster row names the cause. The pause is there because
+   the rows a node published can be up to a minute old (its health memo is 60 s) and would offer it the job again at the next scan,
+   each dispatch waiting up to 20 s for the same answer; what the node is, is decided by the health row the next scan reads, not by
+   the pause, and it is a minute and not the cap because a node that is reading its files is expected to have read them by then.
+
+**Named limits of the amendment.** For a window of seconds after a node starts, or after one of its weight files changes (0.17 to
+0.87 s per file on the machine measured, with a warm cache; a cold disk was not measured), its family is
+`pending` and the node is a named miss; a delegator that starts reads its own files once, a sample per file, before its first
+comparison. **A one-shot CLI call is a fresh process, so on a busy lane it reads its family's samples again on every call, before
+it makes its ticket** (an estimate from the figures above: one to three seconds for a family of three or four files), and on a free
+lane it reads nothing, because the lane is asked first; the MCP server and `fleet-serve` keep the cache for the life of the
+process. The two sizes, the 30 s retry, the 20 s wait and the 60 s read bound are chosen, and the timings above are one machine's, with the
+page cache not controlled. The 30 s retry is keyed on the file's state (path, size, modification time), so a file still being
+copied, whose size or time keeps moving, is read again on every health refresh (64 MiB at most per read, bounded by the health
+poll) and not once per 30 s. Nothing here was run against a
+live fleet: the acceptance is the three live matches of 0.179.0 read again after every node runs this release
+(docs/systems/media-generation.md, "Reading a node's recipes").

@@ -493,6 +493,25 @@ Health gains no key for it: a delegator requires the node to run its own release
 overflow, `route remote` and a thin client alike), which proves the check only because the release that adds it carries a new
 version number. A graph that names no file is admitted as before, on a node with no models root too.
 
+### Image recipes carry a content fingerprint (ADR 0082 Amendment 2)
+
+A node that serves `image-gen` publishes `image_recipes[]` in `/fleet/health`: one row per ComfyUI image binding, each with its
+weight files (`role`, `name`, `bytes`, `fingerprint`) and a `digest` a delegator compares. The `fingerprint` is a sha256 of the
+file's size and a SAMPLE of its bytes (64 evenly spaced blocks of 1 MiB; the whole file when it is 64 MiB or smaller), so two
+files of one name and one size with different weights no longer digest alike; a change confined to the stretch between two sampled
+blocks (about a sixty-third of the file, roughly 0.3 GB of a 20 GB checkpoint) is not seen, so compare whole-file hashes after you
+swap in a layer-wise merge. **Health never waits for it.** For a few seconds after the node starts, or after a weight file changes, that
+file reads `"fingerprint":"pending"` (`"unreadable"` if it cannot be read, tried again after 30 s) and the row's `digest` is
+empty; it fills in on the next health read once the file has been read (this process reads one weight file at a time, 64 MiB at
+most each; a model load in another process is not coordinated with). A read that has not finished in 60 s is given up on: that file
+reads `"unreadable"`, the others are read, and the harness logs it once. The node re-checks a `recipe_digest` at admission from the
+files then on disk (waiting for each fingerprint it has not got, for 20 s at most per file or until the request is gone; a file still unread is
+named `pending`) and answers **412** on a mismatch or on a file it cannot fingerprint; the body names the `cause` (`pending`: files still
+being read, so it cannot say yet whether they changed; `unreadable`; `changed`) and the delegator then reads health again. **Every node must run the same release for digests to match**: the
+digest is version 2, and a delegator compares recipes only between nodes on its own release, so upgrade the fleet before relying
+on a match. The cache is in memory (path, size, modification time); a restart reads each file's sample again (0.17 to 0.87 s per file on the one workstation measured, page cache not controlled; a cold or network disk was not measured).
+Details: [media-generation.md](systems/media-generation.md#overflow-a-busy-lane-places-an-image-call-on-the-fleet-adr-0082).
+
 ## Pipeline-job task families
 
 `pipelines` (`internal/config` `Config.Pipelines map[string]PipelineSpec`) lets this node

@@ -6,8 +6,9 @@ package mediaremote
 //   - A call that carries waiter_token=mq-... collects THAT ticket's result (or finds it still waiting and answers again).
 //   - Any other call whose request is identical to a live ticket's attaches to it, with or without a token. That is what
 //     ends a caller's loop of resends: the tenth identical request is the first one's ticket, not a tenth job.
-//   - Otherwise the lane is asked (core.LaneProber). A free lane runs the call here, exactly as it always did. A busy one
-//     makes the ticket, and the call waits for its first scan.
+//   - Otherwise the lane is asked (core.LaneProber). A free lane runs the call here, exactly as it always did, before any
+//     weight file of this machine is read for the fleet. A busy one builds this machine's identity (the recipe its ticket is
+//     matched on, which reads the fingerprints of its weight files), makes the ticket, and the call waits for its first scan.
 //
 // How long a call waits depends on the door (Wait). The MCP doors answer inside their window (gpu_wait_ms, or wait_s) and
 // the ticket keeps running in the process; the CLI blocks until the job is done and cancels a ticket that sent nothing
@@ -132,16 +133,6 @@ func (q *queueRT) admit(ctx context.Context, cfg config.Config, runner Runner, r
 	if _, err := candidateBases(cfg, remotes); err != nil {
 		return runner.Run(ctx, req), nil // a bad `remotes` is reported by the paths that use it, as before
 	}
-	// An image is identified by its recipe, which this machine must be able to name; a graph has no recipe (a node's identity
-	// for it is that it holds the files, which the node decides at its door), so it has no local identity to resolve.
-	var local localID
-	if req.Task == core.TaskGenerateImage {
-		l, okID, _ := localIdentity(cfg, str(req.Params, "family"))
-		if !okID {
-			return runner.Run(ctx, req), nil
-		}
-		local = l
-	}
 	if _, err := plan(req); err != nil {
 		return runner.Run(ctx, req), nil // the lane that runs it reports its own contract (a graph that names devices stays here)
 	}
@@ -160,11 +151,26 @@ func (q *queueRT) admit(ctx context.Context, cfg config.Config, runner Runner, r
 		}
 	}
 
-	// A lane that reads free runs the call here, as it always did. One the pipeline could not read (v.Unjudged) is not a free
-	// lane: the call becomes a ticket, whose first scan looks at the fleet and runs the call here only if no node can take it.
+	// A lane that reads free runs the call here, as it always did, and it is asked BEFORE anything of this machine's own is read
+	// for the fleet: the identity below waits on the fingerprints of its weight files (up to 20 s on a cold cache), and a call
+	// that does not become a ticket has no use for it. One the pipeline could not read (v.Unjudged) is not a free lane: the call
+	// becomes a ticket, whose first scan looks at the fleet and runs the call here only if no node can take it.
 	v := core.ProbeLane(ctx, runner, req)
 	if v.Free && !v.Unjudged {
 		return runner.Run(ctx, req), nil
+	}
+	// What this machine's family IS, to match the nodes on. An image is identified by its recipe, which this machine must be able
+	// to name; a graph has no recipe (a node's identity for it is that it holds the files, which the node decides at its door), so
+	// it has no local identity to build and no fingerprint to wait for. Without one (an unknown family, an sd.cpp binding, a weight
+	// file that is missing or not fingerprinted) an image has nothing to compare and the call waits in this machine's own line, as
+	// before the fleet.
+	var local localID
+	if req.Task == core.TaskGenerateImage {
+		l, okID := identityOrLog(ctx, cfg, str(req.Params, "family"))
+		if !okID {
+			return runner.Run(ctx, req), nil
+		}
+		local = l
 	}
 	lt, existing, err := q.create(ctx, cfg, runner, req, remotes, w, st, key, local, v, inherit)
 	if err != nil {
@@ -317,9 +323,7 @@ func (q *queueRT) adopt(ctx context.Context, cfg config.Config, runner Runner, r
 	// The job on the node was sent with the ticket's seed, and an adopted image is polled under it; a graph has none to carry.
 	var local localID
 	if req.Task == core.TaskGenerateImage {
-		if l, ok, _ := localIdentity(cfg, str(req.Params, "family")); ok {
-			local = l
-		}
+		local, _ = identityOrLog(ctx, cfg, str(req.Params, "family")) // the zero localID when there is none
 		req = withSeed(req, t.Seed)
 	}
 	// A graph is planned from the copies the ticket kept (its owner made them with the job it sent), not from the caller's files,
