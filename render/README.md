@@ -63,8 +63,14 @@ zero-always-warm (it shares the 8 GB with llama-swap, so it must coordinate). Ta
   → fetches the mp4 → frees ComfyUI VRAM → releases the lock.
 - **`wf-hunyuan15-i2v.mjs`** / **`wf-wan22-i2v.mjs`** — pure API-format graph builders, wired
   against the **live** ComfyUI node schema (see Reconciliation).
-- **`gpu-lock.mjs`** — cross-process single-slot GPU mutex (mkdir-lockdir + PID/TTL stale
-  reclaim) + `freeLlamaSwap` / `freeComfy`.
+- **`gpu-lock.mjs`** — the Node side of the machine-wide GPU lease. It does not acquire (`internal/gpulease`
+  does); it honours and fences the lease a runner inherits, elects one unloader per lease, drains, and runs
+  `freeLlamaSwap` / `freeComfy`. `freeLlamaSwap` unloads only what the lease may take: a lease on the whole node
+  unloads every model off the memory stack; a lease on SOME cards unloads the list in `GPU_LEASE_UNLOAD_MODELS`
+  (the models positively placed on those cards; `-` = none) and leaves every other model resident, and with no list it
+  unloads nothing and says why (`GPU_LEASE_DEVICES` names a card lease). A job that lost the once-per-lease election
+  under a card lease with a list reads that list against `/running` again before it submits, so a seat that came back
+  onto the leased cards leaves again (F15; `docs/systems/gpu-lease.md`, "Between renders").
 - **`comfy-output.mjs`** — finds the produced file in `/history`. `VHS_VideoCombine` writes
   mp4 under the **`gifs`** key for all formats (a ComfyUI quirk).
 - **`atomic-out.mjs`** — delivers the produced file: staged sibling, then rename (see the

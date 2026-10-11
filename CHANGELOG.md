@@ -179,6 +179,56 @@ Versioning: [SemVer](https://semver.org/).
   can be under-counted (a named limit; the numbers are the RAM guard's). Nothing here was run live: the live acceptance (A8) is the
   first.
 
+### Fixed — a render on one card no longer unloads the seats on the others, and a seat that comes back onto a leased card leaves before the next render (F15)
+
+- **The defect (register F15, from the 0.176.0 notes).** The render helper cleared "every non-keep-set model whatever card it sits
+  on", and a media lease was said not to be exclusive, so a text seat reloaded under it between renders. Both halves traced to
+  code, not to a missing fence. The unload list for a lease on some cards (`gpualloc.UnloadModels`, the same rule `gpu reserve
+  --unload-seat` uses) read a DOUBT as "on the leased cards": a model nobody declared a pin for, a pin the card table could not
+  place and a card table that could not be read each put every such model on the list; and a roster that could not be read, or a
+  host with no llama-swap endpoint, left `GPU_LEASE_UNLOAD_MODELS` unset, which `render/gpu-lock.mjs` read as today's rule, every
+  model off the memory stack. A box that declares no layers has no placement for any model, so there every model was "unknown" and
+  a render on card 2 emptied card 0 too. (Reading the rest of the fence: `blocksLoadOne` already gates a media lease, per card,
+  through `Admit`, `AwaitUpstream` and `AwaitRunSlot`; it never read the exclusive flag for it. The flag is a text-lease field.)
+- **Only what is placed on the leased cards is unloaded.** New `LeaseScope.Placement` reads positive knowledge only: the config
+  declares the seat's pins and the card table places every one of them. `UnloadModels` lists those models minus the memory stack.
+  A model placed on another card stays, and a model whose card is not known stays and is named (`left resident, placement unknown
+  (...)`). The drain and the fence keep the other direction (`Touches`: a doubt waits). With no roster the candidates are the
+  seats the config declares, said so; with no card table nothing can be placed, so the list is empty and the reason is named.
+  Only a whole-node lease has no list (it holds every card).
+- **A card lease always gets a list.** `wrapperUnloadEnv` (`gpu reserve --devices`) and the media admission's `unloadEnv` export
+  `GPU_LEASE_UNLOAD_MODELS=-` when there is nothing to unload (no endpoint, nothing placed) instead of leaving the variable
+  unset. `gpu reserve --unload-seat` unloads the configured agent seat (asked for by name) and the other residents that are
+  placed on the leased cards; the rest are left resident and named.
+- **The render helper agrees.** `freeLlamaSwap` on a lease whose environment names cards (`GPU_LEASE_DEVICES`, else the epoch
+  record's `devices`: new `leaseDevices`) and carries no list unloads nothing and says why, so an older wrapper, a hand-built
+  environment or a pinned copy of the helper's caller can no longer fall to the whole-node rule. A list in effect logs the
+  models it left resident.
+- **Between renders.** The unload is elected once per lease, so a seat that came back onto the leased cards stayed for the rest of
+  the lease: the holder's own process tree is exempt from the load fence by design (`insideLease`), and a client that is not the
+  harness is not fenced by it. A job that lost the election under a card lease with a non-empty list now reads that list against
+  `/running` again before it submits (`withGpuSlot` `reclear`); `freeLlamaSwap` unloads a listed model only when it is resident,
+  so a card that is still clear costs two reads and no unload. A whole-node lease, a lease with no list and the none sentinel keep
+  the once-per-lease election.
+- **Tests, written first and red.** `internal/gpualloc`: the unplaced model is not listed, a box with no layers lists nothing and
+  says so, no roster lists the config's seats on the card, no card table lists nothing and names the error, the memory stack
+  stays out even when placed on a leased card, `Placement` against `Touches`. Root: the same through `unloadModelsFor`,
+  `--unload-seat`, the wrapper form end to end, the roster-unreadable and no-endpoint wrappers, the unplaceable pin and the
+  unreadable table. Pipeline: an unreadable roster still hands the call the config's seat on its card. `render/`: a card lease
+  with no list unloads nothing (list from the environment and from the epoch record), a list names what stays, a whole-node lease
+  keeps its rule, a later job re-clears under a card lease with a list and under no other. `internal/modelaffinity`: a media lease
+  fences its own cards through every door exactly as an exclusive text lease does and lets a free card through, and the fence
+  starts when the drain ends. Each rule has a mutant that turns its test red (the unknown-as-unload direction, the config fallback,
+  the placement itself, the memory-stack filter, the unset variable on a roster error and on a missing endpoint, the old split in
+  `--unload-seat`, the pipeline's roster fallback, the media clause, the draining clause, the per-card scoping, the Node hands-off,
+  the re-clear and its card condition, the left-resident line).
+- **Not changed, and not verified here.** A client that is not the harness can still load a model onto a leased card; the re-clear
+  removes it before the next render, it does not stop it. A box that declares no layers now leaves every seat on llama-swap alone
+  under a card lease: declare the seats' devices in `layers` (or hold the whole node) to have a card cleared. Two parallel jobs of
+  one lease can both read the same resident model and both ask for its unload (idempotent; the second may log a failed per-model
+  unload). Nothing here was run against a live node, a ComfyUI instance or a llama-swap; the render helper was exercised against
+  stand-ins for `/v1/models`, `/running` and the unload routes only.
+
 ### Fixed — a healthy long render's lease (a render helper, or a script that runs one) is no longer labelled "expired ... open to a takeover" (F8)
 
 - **The defect.** A 1,394 s Qwen-Image still run as `gpu reserve --for ... -- node render/comfy-generate.mjs ...` had its

@@ -1199,10 +1199,14 @@ uuid, never an index: `COMFY_CUDA_DEVICE` is blank) and `COMFY_API` (the instanc
 port, 8189, plus the card's nvidia-smi index, so 8189, 8190 and 8191 on the 3-card box; `COMFY_PORT_BASE`
 moves the range). The port is stable per card because the render layer refuses to reuse an instance whose
 launch marker records another port. And `GPU_LEASE_UNLOAD_MODELS`: the models the runner's unload may
-take, which is the llama-swap roster minus the memory stack minus the seats pinned to cards the lease
-does not hold (`gpualloc.UnloadModels`, the rule `gpu reserve --devices` uses). Without it the runner
-unloads every model off the memory stack and a render on one card empties the seats on the others
-(register C-86). The post-run `/free` goes to the endpoint the runner was given.
+take, which are the models the config and the card table POSITIVELY place on a leased card, minus the
+memory stack (`gpualloc.UnloadModels`, the rule `gpu reserve --devices` uses). A seat placed on another
+card stays, and so does a model whose card is not known. A card call always gets the variable: with the
+roster unreadable it is the config's seats on the call's card, with no llama-swap endpoint it is `-`. An
+unset variable would make the runner unload every model off the memory stack, and a render on one card
+would empty the seats on the others (register C-86, F15); a runner that does find a lease on cards with no
+list unloads nothing and says so (`render/gpu-lock.mjs`). The post-run `/free` goes to the endpoint the
+runner was given.
 
 **In-process slots.** `mediaSlot`, a single slot for the whole process, is now a set with one slot per
 card: two jobs on different cards hold theirs at once, a job that holds the whole node conflicts with every
@@ -1314,7 +1318,8 @@ reason a media call is refused. What the call does instead depends on where the 
 
 The unload list a lease may take (`GPU_LEASE_UNLOAD_MODELS`) is scoped from the table the call already holds, not from a
 third read after the grant: which seat sits on which card needs the card list, not a fresh reading, and a read that ran
-out used to widen the list to every seat, so a render on one card emptied the seats on the others (register C-86).
+out used to widen the list to every seat, so a render on one card emptied the seats on the others (register C-86). A seat
+whose card is not known is no longer on the list at all (F15): the list is what is positively placed on the call's card.
 `TestAnAllocationReadTimeoutQueuesTheCallInsteadOfDeferringIt` and its neighbours in
 `internal/pipeline/mediaadmit_cardtable_test.go` pin each row; the same file pins that a degraded call places from the
 newest table it read (not the admission one), and that a caller who has gone while the read hangs is not placed at all and
