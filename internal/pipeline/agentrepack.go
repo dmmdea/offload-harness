@@ -13,6 +13,7 @@ import (
 
 	"github.com/dmmdea/offload-harness/internal/agent"
 	"github.com/dmmdea/offload-harness/internal/core"
+	"github.com/dmmdea/offload-harness/internal/gbnf"
 	"github.com/dmmdea/offload-harness/internal/llamaclient"
 	"github.com/dmmdea/offload-harness/internal/seatrate"
 )
@@ -25,8 +26,11 @@ import (
 // unquoted": a seat that read the name of a `numbers` list answered bare JSON
 // numbers where the schema wants strings, on every lane that has no grammar
 // (register C-80). The rule says what each kind of field holds, so the schema's
-// own types are what the seat reads.
-const repackTypeRule = `Respect each field's type exactly: a string, or a list of strings, holds quoted text only, even when that text is a number (write "42", never 42); a number or integer field holds a bare JSON number; a boolean field holds true or false.`
+// own types are what the seat reads. An object field holds exactly the fields
+// listed for it and a list of objects one such object per item: the list of fields
+// names the keys, and the first rule keeps a seat from collapsing an object into
+// a string (register F43).
+const repackTypeRule = `Respect each field's type exactly: a string, or a list of strings, holds quoted text only, even when that text is a number (write "42", never 42); a number or integer field holds a bare JSON number; a boolean field holds true or false; an object field holds a JSON object with exactly the fields listed for it, and a list of objects holds one such object per item.`
 
 // repackFieldList renders the fields of a schema for a re-pack prompt, one
 // `"name" (type)` each, in the order given. A property with no usable type reads
@@ -43,22 +47,50 @@ func repackFieldList(names []string, props map[string]any) string {
 // fieldTypeText spells one schema property's type for a prompt: "string",
 // "number", "integer", "boolean", `string, one of "a", "b"` for an enum, and for a
 // list the type of its items too ("array of strings"): the item type is exactly
-// what a prompt that says only "array" leaves a seat to guess.
+// what a prompt that says only "array" leaves a seat to guess. An object, and a
+// list of objects, also name their fields, each with its own type, to any depth:
+// `array of objects, each with fields "name" (string), "score" (number)`. The
+// grammar fixes the keys, but only this text tells the seat what each one is for,
+// and the grammar-free chat lane has nothing else (a chat re-pack of an array of
+// objects came back with the items present and their required keys missing).
 func fieldTypeText(spec map[string]any) string {
 	if typ, _ := spec["type"].(string); typ == "array" {
 		items, _ := spec["items"].(map[string]any)
 		if len(items) == 0 {
 			return "array"
 		}
-		return "array of " + pluralType(typeName(items)) + enumTail(items, ", each one of ")
+		if typ, _ := items["type"].(string); typ == "array" {
+			return "array of " + fieldTypeText(items)
+		}
+		return "array of " + pluralType(typeName(items)) + enumTail(items, ", each one of ") + fieldsTail(items, ", each with ")
 	}
-	return typeName(spec) + enumTail(spec, ", one of ")
+	return typeName(spec) + enumTail(spec, ", one of ") + fieldsTail(spec, " with ")
 }
 
-// typeName is a property's declared scalar type, "string" when it names none.
+// fieldsTail renders an object schema's properties as `<lead>fields "a" (type),
+// "b" (type)`, in the order the grammar writes them (the schema's required list
+// first, then the rest by name), or "" for a schema that lists none.
+func fieldsTail(spec map[string]any, lead string) string {
+	fields := gbnf.FromJSONSchema(spec)
+	if len(fields) == 0 {
+		return ""
+	}
+	props, _ := spec["properties"].(map[string]any)
+	names := make([]string, 0, len(fields))
+	for _, f := range fields {
+		names = append(names, f.Name)
+	}
+	return lead + "fields " + repackFieldList(names, props)
+}
+
+// typeName is a property's declared scalar type, "string" when it names none, or
+// "object" when it names none and lists properties.
 func typeName(spec map[string]any) string {
 	if typ, _ := spec["type"].(string); typ != "" {
 		return typ
+	}
+	if _, ok := spec["properties"].(map[string]any); ok {
+		return "object"
 	}
 	return "string"
 }

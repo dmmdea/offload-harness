@@ -1737,12 +1737,15 @@ func (p *Pipeline) repackStructuredWith(ctx context.Context, seat string, rawSch
 	if p.isVLLMSeat(ctx, seat) {
 		grammar = ""
 		lane = "json_schema"
-		// The CONTRACT's schema, not the GBNF projection: internal/gbnf has no
-		// object or array-of-object type, so gbnf.JSONSchema(fields) turned a
-		// nested schema into strings and vLLM then CONSTRAINED the answer into
-		// the wrong shape (A-100 proof, 2026-09-18: three attempts "got string,
-		// want object"). vLLM accepts full JSON Schema; the validator below
-		// checks against the same schema, so the two finally agree.
+		// The CONTRACT's schema, not the GBNF projection. Until register F43
+		// internal/gbnf had no object or array-of-object type, so
+		// gbnf.JSONSchema(fields) turned a nested schema into strings and vLLM
+		// then CONSTRAINED the answer into the wrong shape (A-100 proof,
+		// 2026-09-18: three attempts "got string, want object"). The projection
+		// carries nested shapes now, but it still keeps only the shape: every
+		// other keyword the contract's schema holds is dropped, and a list of
+		// scalars reads as a list of strings. vLLM accepts full JSON Schema and
+		// the validator below checks against the same schema, so the two agree.
 		structuredOpts = append(structuredOpts, llamaclient.WithJSONSchema(schema))
 	}
 	// The re-pack IS an extract over the loop's final text — the system/user
@@ -1752,14 +1755,17 @@ func (p *Pipeline) repackStructuredWith(ctx context.Context, seat string, rawSch
 	// of strings).
 	//
 	// On the grammar lane the types are the GRAMMAR's reading of the schema, not the
-	// schema's own: gbnf compiles every array to a list of strings and a type it has
-	// none for (an object) to a string, and a prompt that says "array of numbers"
-	// beside a grammar that forces a quote after the `[` hands the seat a contradiction
-	// it can only settle by writing the numbers inside a string that never closes.
-	// The coercion below turns what the grammar admits into what the schema wants (a
-	// quoted number into a number, an item at a time), so the prompt says what the
-	// grammar allows. The vLLM lane constrains by the contract's own schema, and the
-	// chat lane has no grammar, so both read the schema's types.
+	// schema's own: gbnf compiles a list of scalars to a list of strings and a type it
+	// has none for (a type list, anyOf) to a string, and a prompt that says "array of
+	// numbers" beside a grammar that forces a quote after the `[` hands the seat a
+	// contradiction it can only settle by writing the numbers inside a string that
+	// never closes. The coercion below turns what the grammar admits into what the
+	// schema wants (a quoted number into a number, an item at a time), so the prompt
+	// says what the grammar allows. An object and a list of objects are no longer in
+	// that set (register F43): the grammar compiles them to their own shape, the
+	// projection carries it, and the prompt names their fields. The vLLM lane
+	// constrains by the contract's own schema, and the chat lane has no grammar, so
+	// both read the schema's types.
 	props, _ := schema["properties"].(map[string]any)
 	if lane == "grammar" {
 		props, _ = gbnf.JSONSchema(fields)["properties"].(map[string]any)

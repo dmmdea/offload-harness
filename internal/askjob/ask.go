@@ -109,10 +109,11 @@ var identRe = regexp.MustCompile(`[A-Za-z_][A-Za-z0-9_]{` + strconv.Itoa(anchorM
 // while staying ONE content check, still grounded, still non-parrot, and still deterministic.
 const anchorAlternatives = 3
 
-// askOutputSchema is the flat {answer, evidence} shape. Flat and string-only because the
-// contract's structured re-pack is grammar-constrained through gbnf.FromJSONSchema, whose
-// supported subset is flat objects — and because two fields is the whole promise: the
-// answer, and the lines it rests on so the caller can spot-check without re-reading.
+// askOutputSchema is the flat {answer, evidence} shape. Flat and string-only because two fields
+// is the whole promise: the answer, and the lines it rests on so the caller can spot-check
+// without re-reading. (It was also the only shape the contract's grammar-constrained re-pack
+// could express when this was written; gbnf.FromJSONSchema now reads nested objects too, and
+// this schema is left as it was.)
 //
 // An output_schema is not optional here even though a LOCAL placement would run without
 // one: it is what makes the same contract eligible for a remote seat, and it is what

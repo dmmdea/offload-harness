@@ -523,8 +523,10 @@ These design choices are load-bearing rather than incidental:
   make: a finding naming a file the diff never touched is dropped and reported as
   `dropped_ungrounded`, since an invented path is how a small seat fails here, and a line with
   no severity, no file and no why (a bare claim) is dropped and reported as `dropped_hollow`.
-- **Findings arrive as an array of strings.** `gbnf.FromJSONSchema` compiles any array to an
-  array of strings, so an object-item schema would have become strings anyway; the prompt asks
+- **Findings arrive as an array of strings.** The schema is a flat list of strings by choice.
+  (`gbnf.FromJSONSchema` once compiled any array to an array of strings, so an object-item schema
+  would have become strings anyway; it reads arrays of objects since register F43, and this
+  lane's schema was not changed.) The prompt asks
   for one `severity | file:line | claim | why` line per defect and `ParseFindings` reads them
   back tolerantly, keeping what it cannot parse as an unranked claim rather than dropping it.
   Whether such a claim *survives* is `Report`'s call (`DropHollow`): a line that carries any
@@ -554,9 +556,10 @@ These design choices are load-bearing rather than incidental:
   keeps MORE findings, and a tie keeps the re-pack — what every run that worked has always shown,
   including its stripping of a preamble that the raw reading would count as a hollow line.
   When the answer's reading wins the result carries `salvaged: "repack_flattened"` and a note.
-  The objects the object-array schema option would have asked the re-pack for cannot be had on
-  this fleet anyway: `gbnf.FromJSONSchema` compiles object items to strings, and only vLLM seats
-  honour a full JSON schema. Not changed here, and the upstream of mechanism (2): the cut-final
+  The objects the object-array schema option would have asked the re-pack for could not be had on
+  this fleet when this was written: `gbnf.FromJSONSchema` compiled object items to strings, and
+  only vLLM seats honoured a full JSON schema. Since register F43 it compiles them (a separate
+  decision whether this lane should ask for them). Not changed here, and the upstream of mechanism (2): the cut-final
   re-issue asserts a JSON object for every schema contract whatever its goal asked for, and the
   repetition guard (`minRepeats = 4`) turns a reviewer that repeats a line into that re-issue.
 - **An empty findings list is never published unless the seat EARNED it.** "No findings" is the

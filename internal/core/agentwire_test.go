@@ -295,6 +295,7 @@ func TestAgentContractValidateOutputSchema(t *testing.T) {
 	}{
 		{"typed properties compile", `{"type":"object","properties":{"digest":{"type":"string"},"count":{"type":"integer"}},"required":["digest"]}`, false},
 		{"enum and array compile", `{"properties":{"verdict":{"enum":["go","kill"]},"items":{"type":"array"}}}`, false},
+		{"nested objects and arrays of objects compile", `{"type":"object","properties":{"rows":{"type":"array","items":{"type":"object","properties":{"id":{"type":"integer"}}}},"meta":{"type":"object","properties":{"src":{"type":"string"}}}},"required":["rows","meta"]}`, false},
 		{"not json", `{nope`, true},
 		{"no properties map", `{"type":"string"}`, true},
 		{"empty properties", `{"properties":{}}`, true},
