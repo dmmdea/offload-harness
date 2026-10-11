@@ -34,7 +34,9 @@
 //   a display card, launches its own ComfyUI on them (--gpu-only, a read-only safetensors reader, the harness's node folder) and
 //   builds the graph with the DisTorch2 loaders: --wan-resident-gb N (default 3) is the GiB of each expert kept on the compute card.
 //   --wan-decode plain under multicard frees both cards of the experts before the plain VAEDecode and saves the sampled latent
-//   (a LATENT line names it); --wan-loader is not used. Needs --high-unet / --low-unet to name the fp8 safetensors experts.
+//   (a LATENT line names it); a plain decode that ComfyUI retried tiled fails the run (WAN-DECODE-FALLBACK) and keeps the clip beside <out> as
+//   <name>.seamed<ext>; --wan-loader is not used. Needs --high-unet / --low-unet to name the fp8 safetensors experts. The wait is 7200 s unless
+//   --wait-sec / COMFY_WAIT_SEC say otherwise, and the run watches the instance's console for an out-of-memory wedge (WAN-OOM).
 //
 // Before anything is submitted, every node class the graph names is checked against the
 // running ComfyUI's /object_info (render/comfy-nodes.mjs): a missing custom-node pack is a

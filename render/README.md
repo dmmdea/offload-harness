@@ -103,7 +103,10 @@ node render/comfy-video.mjs out.mp4 still.png "<prompt>" --wan-decode plain     
 node render/comfy-video.mjs out.mp4 still.png "<prompt>" --high-unet <fp8 high> --low-unet <fp8 low> \
      --wan-decode plain --wan-placement multicard    # wan on the TWO non-display cards of a lease, no host RAM
      # run it under `local-offload gpu reserve --devices <a>,<b> --class media --ram 0 -- ...`, flags spelled `--flag value` (not `--flag=value`);
-     # [--api http://127.0.0.1:<own port>] [--wan-resident-gb 3] [--wan-cards <a>,<b>, outside a lease]; docs/systems/media-generation.md, "Card-only Wan"
+     # [--api http://127.0.0.1:<own port>] [--wan-resident-gb 3 (3.9 at most at film size)] [--wan-cards <a>,<b>, outside a lease]
+     # [--wait-sec N: 7200 by default under multicard, the 20-step film recipe measured about 5170 s]; the run watches ComfyUI's console
+     # (WAN-OOM ends the wait when its prompt worker died of an out-of-memory error); a plain decode that ComfyUI retried tiled fails
+     # the run (WAN-DECODE-FALLBACK, the clip kept as <out>.seamed.<ext>); docs/systems/media-generation.md, "Card-only Wan"
 node render/preflight-graph.mjs hunyuan   # validate a graph vs a running ComfyUI, no gen
 ```
 
