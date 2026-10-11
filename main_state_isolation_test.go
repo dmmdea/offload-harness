@@ -53,11 +53,20 @@ func TestMain(m *testing.M) {
 	os.Exit(runIsolated(m, os.MkdirTemp, os.Setenv, os.RemoveAll))
 }
 
+// suiteOrigin is the LOCAL_OFFLOAD_ORIGIN every process of the suite carries, so that a ledger row that escapes names its writer.
+const suiteOrigin = "go-test"
+
+// suiteHome is the offload home of the suite whose throwaway state root is root: a folder inside it.
+func suiteHome(root string) string { return filepath.Join(filepath.Clean(root), "home") }
+
 // inheritedSuiteRoot reports the state root of the suite that launched this process, when this process is a copy of the test binary
-// that the suite re-launched. The environment must say so three ways: the suite's variable names a root, that root is the one
-// LOCAL_OFFLOAD_STATE_DIR points at, and it is one of this package's throwaway roots and still on disk. Anything less is not a copy
-// to trust, and TestMain then makes a root of its own, as it always did: this net exists to keep the suite off the machine-wide
-// state root, so it fails closed.
+// that the suite re-launched. The environment must say so five ways: the suite's variable names a root, that root is the one
+// LOCAL_OFFLOAD_STATE_DIR points at, it is one of this package's throwaway roots and still on disk, LOCAL_OFFLOAD_HOME is the home
+// inside it and LOCAL_OFFLOAD_ORIGIN is go-test. The last two are what runIsolated pins for the suite, and a copy skips runIsolated, so
+// a copy launched from a test that had cleared or moved them (every launcher passes the environment as that test left it) would
+// otherwise build config.Default() on the operator's real home and write its real ledger (2026-10-03: 1,204 fixture rows). Anything
+// less is not a copy to trust, and TestMain then makes a root of its own, which pins all of them, as it always did: this net exists to
+// keep the suite off the machine-wide state root and the real ledger, so it fails closed.
 func inheritedSuiteRoot(getenv func(string) string) (string, bool) {
 	root := getenv(suiteStateRootEnv)
 	if filepath.Clean(getenv("LOCAL_OFFLOAD_STATE_DIR")) != filepath.Clean(root) {
@@ -67,6 +76,12 @@ func inheritedSuiteRoot(getenv func(string) string) (string, bool) {
 		return "", false
 	}
 	if fi, err := os.Stat(root); err != nil || !fi.IsDir() {
+		return "", false
+	}
+	if home := getenv("LOCAL_OFFLOAD_HOME"); home == "" || filepath.Clean(home) != suiteHome(root) {
+		return "", false
+	}
+	if getenv("LOCAL_OFFLOAD_ORIGIN") != suiteOrigin {
 		return "", false
 	}
 	return root, true
@@ -101,7 +116,7 @@ func runIsolated(m suiteRunner, mkdirTemp func(dir, pattern string) (string, err
 	// and config.Default() fixes them when it is called: a test that builds its config with it and sets Home
 	// afterwards still wrote the operator's real ledger (2026-10-03: 1,204 agent_run fixture rows read as fleet
 	// traffic). LOCAL_OFFLOAD_ORIGIN labels any row that still escapes.
-	for _, kv := range [][2]string{{"LOCAL_OFFLOAD_HOME", filepath.Join(filepath.Clean(dir), "home")}, {"LOCAL_OFFLOAD_ORIGIN", "go-test"}} {
+	for _, kv := range [][2]string{{"LOCAL_OFFLOAD_HOME", suiteHome(dir)}, {"LOCAL_OFFLOAD_ORIGIN", suiteOrigin}} {
 		if err := setenv(kv[0], kv[1]); err != nil {
 			os.Stderr.WriteString("root tests: could not set " + kv[0] + ": " + err.Error() + "\n")
 			return 1

@@ -53,10 +53,12 @@ func TestARelaunchedTestBinaryLeavesNothingInTheTempDir(t *testing.T) {
 	}
 }
 
-// A copy of the test binary shares the suite's state root only when the environment says so three ways (inheritedSuiteRoot): the
-// suite's variable names a root, LOCAL_OFFLOAD_STATE_DIR points at the same one, and it is one of the root package's throwaway roots that is
-// still on disk. Any other environment is no copy to trust and gets a root of its own, because the net exists to keep the suite off
-// the machine-wide state root.
+// A copy of the test binary shares the suite's state root only when the environment says so five ways (inheritedSuiteRoot): the
+// suite's variable names a root, LOCAL_OFFLOAD_STATE_DIR points at the same one, it is one of the root package's throwaway roots that
+// is still on disk, LOCAL_OFFLOAD_HOME is that root's "home" and LOCAL_OFFLOAD_ORIGIN is go-test. The last two are what runIsolated
+// pins for the suite (the ledger guard of 2026-10-03: 1,204 fixture rows written to the real ledger); a copy skips runIsolated, so a
+// copy whose environment lost them must not run on trust and gets a root of its own, which pins them. Any other environment is no
+// copy to trust either, because the net exists to keep the suite off the machine-wide state root.
 func TestACopyTrustsTheSuitesStateRootOnlyWhenTheEnvironmentAgreesWithIt(t *testing.T) {
 	base := t.TempDir()
 	root := filepath.Join(base, stateIsolationPrefix+"1234")
@@ -71,34 +73,49 @@ func TestACopyTrustsTheSuitesStateRootOnlyWhenTheEnvironmentAgreesWithIt(t *test
 		t.Fatal(err)
 	}
 	gone := filepath.Join(base, stateIsolationPrefix+"gone")
-	env := func(owner, state string) func(string) string {
+	type environ struct{ owner, state, home, origin string }
+	env := func(e environ) func(string) string {
 		return func(key string) string {
 			switch key {
 			case suiteStateRootEnv:
-				return owner
+				return e.owner
 			case "LOCAL_OFFLOAD_STATE_DIR":
-				return state
+				return e.state
+			case "LOCAL_OFFLOAD_HOME":
+				return e.home
+			case "LOCAL_OFFLOAD_ORIGIN":
+				return e.origin
 			}
 			return ""
 		}
 	}
+	// What the suite process has in its environment once runIsolated has run: the home inside the root, the origin go-test.
+	suite := func(root string) environ {
+		return environ{owner: root, state: root, home: filepath.Join(root, "home"), origin: "go-test"}
+	}
+	with := func(e environ, edit func(*environ)) environ { edit(&e); return e }
 	for _, c := range []struct {
-		name         string
-		owner, state string
-		want         bool
+		name string
+		e    environ
+		want bool
 	}{
-		{"a copy: the suite's variable and the state dir name one live throwaway root", root, root, true},
-		{"the suite's variable is not set", "", root, false},
-		{"the state dir is not set", root, "", false},
-		{"the state dir points at another folder", root, elsewhere, false},
-		{"the root is not one of this package's throwaway roots", elsewhere, elsewhere, false},
-		{"the root is gone", gone, gone, false},
-		{"the root is a file", file, file, false},
+		{"a copy: the suite's variable, the state dir, the home and the origin all agree on one live throwaway root", suite(root), true},
+		{"the suite's variable is not set", with(suite(root), func(e *environ) { e.owner = "" }), false},
+		{"the state dir is not set", with(suite(root), func(e *environ) { e.state = "" }), false},
+		{"the state dir points at another folder", with(suite(root), func(e *environ) { e.state = elsewhere }), false},
+		{"the root is not one of this package's throwaway roots", suite(elsewhere), false},
+		{"the root is gone", suite(gone), false},
+		{"the root is a file", suite(file), false},
+		{"the home is not set", with(suite(root), func(e *environ) { e.home = "" }), false},
+		{"the home is the operator's own, outside the root", with(suite(root), func(e *environ) { e.home = elsewhere }), false},
+		{"the home is the root itself, not its home folder", with(suite(root), func(e *environ) { e.home = root }), false},
+		{"the origin is not set", with(suite(root), func(e *environ) { e.origin = "" }), false},
+		{"the origin names another writer", with(suite(root), func(e *environ) { e.origin = "another-writer" }), false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			got, ok := inheritedSuiteRoot(env(c.owner, c.state))
-			if ok != c.want || (ok && got != c.owner) {
-				t.Fatalf("inheritedSuiteRoot(owner %q, state %q) = %q, %v; want trusted=%v", c.owner, c.state, got, ok, c.want)
+			got, ok := inheritedSuiteRoot(env(c.e))
+			if ok != c.want || (ok && got != c.e.owner) {
+				t.Fatalf("inheritedSuiteRoot(%+v) = %q, %v; want trusted=%v", c.e, got, ok, c.want)
 			}
 		})
 	}

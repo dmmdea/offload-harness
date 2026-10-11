@@ -896,6 +896,14 @@ Versioning: [SemVer](https://semver.org/).
   Red before (Windows): `a re-launched copy of the test binary left 1 entries in its temp dir, want none: [lo-root-state-…]` (and
   `lo-pairworkloads-state-…`, `lo-mediaremote-state-…`). `TestMainIsolatesTheStateRoot`, `TestMainIsolatesTheHomeAndTheLedger` and
   `TestRunIsolatedFailsClosed` are unchanged.
+- **Review round: a re-launched copy of the root suite also checks the home and the origin.** The copy skips `runIsolated`, which is
+  also what pins `LOCAL_OFFLOAD_HOME` (to the root's `home` folder) and `LOCAL_OFFLOAD_ORIGIN` (to `go-test`), the ledger guard of
+  2026-10-03 (1,204 fixture rows written to the operator's real ledger); the copy read both from the environment of whichever test
+  launched it, unchecked, so a launcher that had cleared or moved them would have run `config.Default()` on the real home. A copy now
+  trusts the suite's root only when the home and the origin also agree (five conditions); otherwise it makes a root of its own, which
+  pins them, as it did before F77b. Red before: the home-not-set, home-outside-the-root, home-is-the-root, origin-not-set and
+  origin-of-another-writer cases of `TestACopyTrustsTheSuitesStateRootOnlyWhenTheEnvironmentAgreesWithIt` returned `trusted=true`;
+  deleting either check turns its cases red.
 - **Review round: `internal/pairworkloads` now fails closed.** Its `TestMain` logged and ran the suite anyway when `os.MkdirTemp` or
   either `os.Setenv` failed, so a suite whose setup failed ran against the machine-wide state root, while its comment and
   `docs/systems/pair-workloads.md` called it fail-closed (the F77b suite variable had copied the idiom). It now goes through a

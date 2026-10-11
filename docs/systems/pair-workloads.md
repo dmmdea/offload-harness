@@ -747,7 +747,10 @@ side can know the producer died, so the harness retires its own orphans:
   by `os.Exit` never removes a root of its own, so each exports its root's path in
   `LO_ROOT_SUITE_STATE_ROOT`, `LO_MEDIAREMOTE_SUITE_STATE_ROOT` or `LO_PAIRWORKLOADS_SUITE_STATE_ROOT`,
   and a copy shares that root, making none, only when `LOCAL_OFFLOAD_STATE_DIR` names the same, still
-  existing, throwaway root (anything less gets a root of its own, as before).
+  existing, throwaway root (anything less gets a root of its own, as before). The root package's copy
+  also needs `LOCAL_OFFLOAD_HOME` to be that root's `home` folder and `LOCAL_OFFLOAD_ORIGIN` to be
+  `go-test`, the two values its `runIsolated` pins for the ledger guard, because a copy skips
+  `runIsolated` and would otherwise take both from whatever the launching test left in the environment.
 
 ## The PAIR side (what has to be true on the box)
 
