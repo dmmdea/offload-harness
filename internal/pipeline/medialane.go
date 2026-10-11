@@ -169,8 +169,9 @@ func (p *Pipeline) MediaLaneFree(ctx context.Context, req core.Request) core.Lan
 
 	r := &laneReading{p: p, m: m, cards: ln.table, token: ln.token}
 	r.since = r.placeSince()
-	// The smallest declaration the call can make (its largest card): if that is refused, every card's would be.
-	r.askRAM = p.declaredRAM(ctx, need, ln.table, nil)
+	// The declaration the call makes on the cards its plan names, else the smallest it can make (its largest card): if that is
+	// refused, every card's would be. The admission sizes it the same way (askRAMFor).
+	r.askRAM = p.askRAMFor(ctx, need, plan, ln.table)
 	switch {
 	case plan.whole:
 		r.wholeNode()

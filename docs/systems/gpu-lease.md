@@ -1291,8 +1291,14 @@ which term refused: `committed X of Y GiB physical` or `only A GiB of Y GiB phys
   whole-node grant checks in `TryAcquire` before its epoch is bumped, so a refusal burns none; it needs no lock because a
   whole-node lease conflicts with every other live lease, so nothing else is live to account for. The detached holder
   receives the parent's resolved number as `--ram` and declares exactly that. The card allocator applies the same function
-  before it picks cards, advisory (it never refuses what the grant would admit: the media admission passes it the need
-  against the largest card); the grant is the authority.
+  before it picks cards, advisory (it never refuses what the grant would admit: the media admission passes it the need sized on
+  the cards its plan names, a pin, a pool or a declared device, as the lease it then takes declares it, and against the largest
+  card on the box when the plan names none, `askRAMFor`, `TestAskRAMIsSizedOnTheCardsAPlanNames`; its third term, what leases
+  already granted have yet to load, is `Manager.HostRAMPending` through `gpualloc.BuildInput`, pinned by
+  `TestBuildInputCarriesWhatGrantedLeasesHaveYetToLoadAndTheAllocatorUsesIt`); the grant is the authority. **Cards first, memory
+  second**, on both grant paths: a held card is reported as held and its waiter is not marked "waiting for host RAM" (that mark
+  is what lets a call that declares none pass it), whatever the host reads (`TestAHeldCardIsReportedHeldNotShortOfHostRAM`,
+  `TestAWaiterOnAHeldCardIsNotMarkedWaitingForHostRAM`).
 * **Asked without taking: `Manager.HostRAMCheck(need)`.** A placement that wants to know whether this node would admit a
   lane before it sends the lane here asks the node's own Manager, which applies the same function the grant calls
   (`hostRAMCheckAgainst`: the host as it reads now, the not-yet-loaded part of the live leases, this Manager's headroom).

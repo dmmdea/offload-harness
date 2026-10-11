@@ -214,6 +214,21 @@ func (p *Pipeline) declaredRAM(ctx context.Context, need mediaNeed, cards []gpup
 	return n.GiB
 }
 
+// askRAMFor is the host RAM a call declares against the cards its PLAN names, for the readers that need the figure before the
+// card is held: the allocator's pre-filter and the lane probe, and whether the call declares any at all, which decides whether a
+// waiter that waits only on host RAM holds its cards against it (gpualloc.QueuedClaims, G6). A plan that names its cards (a
+// pin, a pool, a declared device) is sized on THEM, as the lease the call then takes is (optsFor): sized on the largest card of
+// the whole table a krea2 render pinned to a 16 GiB card declared nothing on a box that also has a 48 GiB one, and disagreed
+// with its own grant (F58). A plan that does not name them (the whole node, an allocator pick that cannot be known yet) keeps
+// the largest card on the box: the smallest answer, which can only err toward "nothing in the way".
+func (p *Pipeline) askRAMFor(ctx context.Context, need mediaNeed, plan mediaPlan, cards []gpuprobe.Card) float64 {
+	var ids []string
+	if !plan.auto && !plan.whole {
+		ids = plan.ids
+	}
+	return p.declaredRAM(ctx, need, cards, ids)
+}
+
 // resumableBy marks the need with whether the request's door can resume a place in line.
 func (n mediaNeed) resumableBy(req core.Request) mediaNeed {
 	n.Resumable = req.Resumable
@@ -807,10 +822,10 @@ func (p *Pipeline) acquireCards(ctx context.Context, m *gpulease.Manager, reason
 	}
 	reads := &tableReads{cards: cards, at: start}
 	defer func() { err = withTableNote(err, reads.note()) }()
-	// askRAM is the host RAM the call declares against the largest card (the smallest answer): what the
-	// allocator's pre-filter reads, and whether the call declares any at all, which decides whether a waiter
-	// that waits only on host RAM holds its cards against it (gpualloc.QueuedClaims).
-	askRAM := p.declaredRAM(ctx, need, cards, nil)
+	// askRAM is the host RAM the call declares: against the cards its plan names, else against the largest card
+	// (askRAMFor, the smallest answer). What the allocator's pre-filter reads, and whether the call declares any at all,
+	// which decides whether a waiter that waits only on host RAM holds its cards against it (gpualloc.QueuedClaims).
+	askRAM := p.askRAMFor(ctx, need, plan, cards)
 	// A call that resumes a place keeps the arrival time it left with, and keeps the place itself
 	// held while it waits (keepPlace). The keeper is stopped before the call spends the place
 	// (grantCards), consumes it (the lease wait registers a waiter) or leaves it again.
