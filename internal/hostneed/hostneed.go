@@ -218,6 +218,11 @@ const wanActivationsGiB = 11.0
 // render/wf-wan22-i2v.mjs WAN_RESIDENT_GB_DEFAULT (a test pins the two together).
 const wanResidentDefaultGiB = 3.0
 
+// wanComputeContextGiB is what the compute card keeps free beyond the activations, for the CUDA context and the driver: render/wan-multicard.mjs
+// WAN_COMPUTE_CONTEXT_GIB (a test pins the two together). With it a 15.9 GiB card takes 3.2 GiB of an expert resident at film size, the runner's
+// own ceiling (15.9 - 12.2 - 0.5).
+const wanComputeContextGiB = 0.5
+
 // wanStorageOverheadGiB is what the storage card holds besides the donor blocks of the expert in use: the VAE (0.24 GiB), the CUDA
 // context and the allocator's slack. Measured on the benchmark pair: the storage card peaked at 11.1 GiB (NVML) with 10.3 GiB of donor
 // blocks (the 13.3 GiB expert less its 3 GiB resident share), so 0.8.
