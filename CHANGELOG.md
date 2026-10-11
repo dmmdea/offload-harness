@@ -52,6 +52,35 @@ Versioning: [SemVer](https://semver.org/).
   printed CLI); with the vulnerability database unreachable all six fail; a planted call into x/text v0.39.0 (GO-2026-6629) exits 3.
   The first run of `build` and `installer-windows` on the go1.27 line is the first CI has seen of it.
 
+### Added — the Windows cage's environment proof runs on a Windows runner on every change (D-98, phase 1)
+
+- **The gap.** The Windows cage hands its child an explicit environment block instead of the parent's (until 0.117.7 it passed
+  `nil`, which means "inherit", so every `run` child received the delegator's credentials). `TestWindowsChildDoesNotInheritParentSecrets`
+  and `TestWindowsChildGetsTheAllowlistedEnvironment` prove it, and on every other system the same names are skipped stubs. The
+  `build` job runs `go test ./...` on Linux, where both are skips, and the one job on a Windows runner never ran `go test`: the proof
+  ran only on a developer's own Windows machine, and a regression could merge with every check green.
+- **The step.** `installer-windows` runs, right after Set up Go and before the PowerShell self-tests so that an unrelated failure there
+  cannot hide it, `go test -count=1 -timeout 5m -v -run '^TestWindowsChild' ./internal/sandbox/` in bash and then requires the
+  `--- PASS:` line of each of the two tests. `go test` exits 0 when the pattern matches nothing and when the tests skip (measured: `-run
+  ^TestNothingMatchesHere` prints "no tests to run" and exits 0), so the exit code alone proves nothing; bash, which the runner starts
+  with pipefail, keeps a failing test from hiding behind the pipe to tee; the PASS line must be a line of its own, not the same words
+  inside other output. Only the standard `windows-latest` label is used (a larger runner is always billed).
+- **Tests, written first and red.** `TestCIRunsTheWindowsCageProofOnWindows` failed on the tree before the change (no step of any job runs
+  `go test` on `./internal/sandbox`). It requires the step in a job whose `runs-on` is exactly `windows-latest`, after setup-go and
+  before any PowerShell step, with `shell: bash`, and runs the step's own script, as the runner starts it and under a bare bash,
+  against a stand-in `go` that plays back real `go test -v` output: both proofs passing exits 0; either one skipped, no test run, the
+  PASS words only quoted inside other output, only subtests' indented PASS lines, a longer-named sibling passing while the proof is
+  skipped (`-run` is a prefix pattern), no output at all, or `go test` failing after printing both PASS lines (only pipefail catches
+  that) exits non-zero. It also requires `-count=1` (a cached result would replay the PASS lines), `-v`, `-timeout`, the anchored
+  `-run` and the package.
+- **What is not shown.** The first run of the cage (CreateProcessAsUser, the job object and the low-integrity token) on a hosted runner has
+  not happened. Both proofs pass on the workstation, and the step's script run end to end there with the real `go test` exits 0, and exits 1
+  with an error line per test when the pattern matches nothing; with the environment block of `CreateProcessAsUser` replaced by `nil` (the
+  0.117.7 defect) both proofs fail on the workstation ("the caged child inherited GITHUB_TOKEN"). If the runner refuses the low-integrity
+  spawn the step goes red, which is what it is for; a weaker test of the environment block alone would not close this item. Phase 2
+  widens the step to the whole `./internal/sandbox/...` package once the tests that cover the exit-status reading are merged, and this
+  test changes with it.
+
 ### Fixed — a render on one card no longer unloads the seats placed on the others, and a seat that comes back onto a leased card leaves before the next render (F15)
 
 - **The defect (register F15, from the 0.176.0 notes).** The render helper cleared "every non-keep-set model whatever card it sits

@@ -739,7 +739,11 @@ copy-by-name allowlist (`SystemRoot`, `SystemDrive`, `windir`, `PATH`, `PATHEXT`
 `TEMP`/`TMP`/`TMPDIR` set to the scratch dir. Nothing else crosses: no `GITHUB_TOKEN`, no
 `MEM0_API_KEY`, no fleet token, no `APPDATA`/`LOCALAPPDATA` pointing at the real profile. Until
 0.117.7 the Windows side passed a nil `lpEnvironment`, which means "inherit the caller's block",
-so a `run` child received the delegator's whole environment.
+so a `run` child received the delegator's whole environment. The proof is
+`TestWindowsChildDoesNotInheritParentSecrets` and `TestWindowsChildGetsTheAllowlistedEnvironment`
+(`internal/sandbox`); they are skipped stubs on every other system, so CI runs them on a Windows
+runner (the `installer-windows` job) and requires their `--- PASS:` lines, because `go test` exits 0
+for a skipped or unmatched test (D-98).
 
 **Reads of secret material pass a read floor** (register SF-07, `internal/agent/readfloor.go`).
 Every tool that reads file content consults one gate: `read_file`, `summarize_file`, `search_files`,

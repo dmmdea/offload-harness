@@ -119,6 +119,29 @@ jobs:
         with:
           go-version: '1.26.x'
 
+      # D-98. The Windows cage's environment proof runs here, on a Windows runner, on every change. Its
+      # two tests are SKIP stubs on every other OS, so `go test ./...` in the build job proves nothing
+      # about them, and until this step the proof ran only on a developer's own Windows machine.
+      # `go test` exits 0 when -run matches nothing and when the tests skip, so the step demands the
+      # `--- PASS:` line of each test itself; bash, which the runner starts with pipefail on, stops a
+      # failing test from hiding behind the pipe to tee. It sits before the PowerShell self-tests so an
+      # unrelated failure there cannot hide it. Phase 2 widens it to the whole ./internal/sandbox/...
+      # package once the tests that cover the exit-status reading are merged.
+      - name: Windows cage environment proof (D-98)
+        shell: bash
+        run: |
+          set -euo pipefail
+          log=$(mktemp)
+          go test -count=1 -timeout 5m -v -run '^TestWindowsChild' ./internal/sandbox/ | tee "$log"
+          missing=0
+          for name in TestWindowsChildDoesNotInheritParentSecrets TestWindowsChildGetsTheAllowlistedEnvironment; do
+            if ! grep -q -e "^--- PASS: $name " "$log"; then
+              echo "::error::no '--- PASS: $name' line: the proof was skipped or did not run"
+              missing=1
+            fi
+          done
+          exit "$missing"
+
       - name: detect.ps1 classifier self-test
         shell: powershell
         run: .\setup\detect.tests.ps1
