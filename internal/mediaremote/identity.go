@@ -41,7 +41,8 @@ type localID struct {
 	// others is the recipe of every other image family this machine binds, by name: a node that misses the family may
 	// match another of them, and the answer then says which to name. It stats each family's weight files and takes their
 	// fingerprints from the cache without waiting (localPeek), so it is read only when a node misses (once per call), never
-	// on the path of a match, and never holds the ticket scan up on a hash: a family not hashed yet is not in it.
+	// on the path of a match, and never holds the ticket scan up on a hash: a family not hashed yet is not in it, and the
+	// map is built again at the next miss until every family is (a ticket lives for hours; a hash lands in seconds).
 	others func() map[string]mediacap.Recipe
 }
 
@@ -76,16 +77,24 @@ func localIdentity(ctx context.Context, cfg config.Config, family string) (local
 		if done {
 			return memo
 		}
-		memo, done = map[string]mediacap.Recipe{}, true
+		memo = map[string]mediacap.Recipe{}
+		complete := true
 		for _, fi := range cfg.ImageFamilies() {
 			o, _, oerr := cfg.ResolveImageFamily(fi.Name)
 			if oerr != nil {
 				continue
 			}
-			if or, ok := mediacap.ImageRecipeWith(o, fi, mediacap.ModelRoots(o.ComfyDir), nil, localPeek); ok && len(or.Missing()) == 0 && len(or.Unfingerprinted()) == 0 {
-				memo[fi.Name] = or
+			or, ok := mediacap.ImageRecipeWith(o, fi, mediacap.ModelRoots(o.ComfyDir), nil, localPeek)
+			if !ok || len(or.Missing()) > 0 {
+				continue // not a family with a recipe here, or a file missing: nothing a later look would change
 			}
+			if len(or.Unfingerprinted()) > 0 {
+				complete = false // being hashed (Peek started it) or unreadable: look again at the next miss
+				continue
+			}
+			memo[fi.Name] = or
 		}
+		done = complete
 		return memo
 	}
 	return localID{name: strings.TrimSpace(family), recipe: r, others: others}, true, ""

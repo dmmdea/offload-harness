@@ -90,6 +90,7 @@ func TestTheAlternativeFamiliesHintNeverWaitsForAHash(t *testing.T) {
 	}
 
 	l, _, _ = localIdentity(context.Background(), cfg, "qwen-image-2.1") // a fresh memo
+	warmPeek := localPeek
 	f := heldFingerprinter(t)
 	swapLocalReaders(t, func(context.Context, string, int64) string {
 		t.Error("the hint waited for a fingerprint (Await)")
@@ -98,6 +99,13 @@ func TestTheAlternativeFamiliesHintNeverWaitsForAHash(t *testing.T) {
 	others := inTime(t, 5*time.Second, "the hint of a machine whose other families are not hashed", l.others)
 	if len(others) != 0 {
 		t.Errorf("families whose files are not fingerprinted are left out of the hint: %v", others)
+	}
+
+	// A ticket keeps its localID for hours, so a hint built while a family was still being hashed must be built again once
+	// the hash has landed (the CLI is a fresh process: its first miss always finds the other families cold).
+	localPeek = warmPeek
+	if again := l.others(); len(again) == 0 {
+		t.Error("the hint stayed empty after the other families were hashed: it must be built again while a family was left out")
 	}
 }
 

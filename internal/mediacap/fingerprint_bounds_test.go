@@ -96,28 +96,28 @@ func TestAwaitIsBoundedAndAnswersPendingWhenItRunsOut(t *testing.T) {
 	}
 }
 
-// ONE deadline covers the whole call, the retry-at-once included. The first read fails after 320 ms of a 400 ms bound; the
-// retry it asks for then stalls. Sharing the deadline ends the call near 400 ms; a second full wait for the retry would end
-// near 720 ms. (Timing-based: the margin on either side of the 560 ms threshold is 160 ms.)
+// ONE deadline covers the whole call, the retry-at-once included. The first read fails after 640 ms of an 800 ms bound; the
+// retry it asks for then stalls. Sharing the deadline ends the call near 800 ms; a second full wait for the retry would end
+// near 1440 ms. (Timing-based: the margin on either side of the 1120 ms threshold is 320 ms, for a box that shares builds.)
 func TestAwaitsDeadlineCoversItsRetry(t *testing.T) {
 	var calls atomic.Int32
 	gate := make(chan struct{})
 	t.Cleanup(func() { close(gate) })
 	f := NewFingerprinterWith(func(path string, size int64) (string, error) {
 		if calls.Add(1) == 1 {
-			time.Sleep(320 * time.Millisecond)
+			time.Sleep(640 * time.Millisecond)
 			return "", errors.New("device not ready")
 		}
 		<-gate
 		return FingerprintFile(path, size)
 	})
-	f.awaitMax = 400 * time.Millisecond
+	f.awaitMax = 800 * time.Millisecond
 	p, n := smallWeight(t, t.TempDir(), "w.safetensors", 1)
 	start := time.Now()
 	if got := within(t, 5*time.Second, "Await whose retry stalls", func() string { return f.Await(p, n) }); got != FingerprintPending {
 		t.Errorf("Await = %q, want pending: the retry was still running when the bound ran out", got)
 	}
-	if el := time.Since(start); el > 560*time.Millisecond {
+	if el := time.Since(start); el > 1120*time.Millisecond {
 		t.Errorf("Await took %s: the retry got a wait of its own instead of what was left of the one bound (%s)", el, f.awaitMax)
 	}
 	if calls.Load() != 2 {

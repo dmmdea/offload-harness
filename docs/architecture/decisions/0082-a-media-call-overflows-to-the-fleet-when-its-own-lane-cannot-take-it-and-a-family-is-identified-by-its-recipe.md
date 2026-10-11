@@ -317,7 +317,8 @@ file can see. Every other decision stands.
    node is a candidate once it has; the ticket's next scan reads health again. A same-named, same-size file with other bytes is
    a miss that names it: `imagegen_ckpt: <name> has the same size on both and different content (fingerprint <12 hex> vs <12 hex>)`. The
    "send family=X to use its Y" hint reads this machine's other families from the cache without waiting and leaves out a family
-   not hashed yet, so it never holds the ticket scan up on a hash.
+   not hashed yet, so it never holds the ticket scan up on a hash; it is built again at the next miss while any family was left
+   out, so a ticket that waits for hours gains the hint once the hashes land.
 6. **The deploy story.** The digest is version 2 and a recipe is compared only between the same release (`harness_version`), so a
    fleet part-way through the upgrade matches only inside each release: a delegator at this release finds no match on a node still
    on the one before, and a node at this release is matched by no older delegator, and an overflow then degrades to the local
