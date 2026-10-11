@@ -11,12 +11,13 @@ package pipeline
 
 import (
 	"context"
-	"os"
-	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/gpuprobe"
+	"github.com/dmmdea/offload-harness/internal/hostneed"
 )
 
 // mixedCards is a 16 GiB card A, the 16 GiB screen's card B and a 48 GiB card C.
@@ -80,24 +81,41 @@ func TestTheLaneProbeCountsAHostRAMWaiterAheadOfACallPinnedToASmallCard(t *testi
 	}
 }
 
-// The admission's pre-filter and the probe are the two readers of the figure; the admission's difference from the probe's is
-// not observable from outside (a gated attempt that the pre-filter would have skipped answers the same queued answer), so
-// the wiring is pinned where it is made: both ask askRAMFor, with their plan, and neither sizes on the whole table again.
-func TestBothReadersOfAskRAMSizeItOnThePlan(t *testing.T) {
-	for file, want := range map[string]string{
-		"mediaadmit.go": "askRAM := p.askRAMFor(ctx, need, plan, cards)",
-		"medialane.go":  "r.askRAM = p.askRAMFor(ctx, need, plan, ln.table)",
-	} {
-		b, err := os.ReadFile(file)
-		if err != nil {
-			t.Fatal(err)
-		}
-		text := strings.ReplaceAll(string(b), "\r\n", "\n")
-		if !strings.Contains(text, want) {
-			t.Errorf("%s no longer contains %q: the figure must be sized on the cards the plan names", file, want)
-		}
-		if strings.Contains(text, "askRAM := p.declaredRAM(ctx, need, cards, nil)") || strings.Contains(text, "r.askRAM = p.declaredRAM(ctx, need, ln.table, nil)") {
-			t.Errorf("%s sizes askRAM on the largest card of the whole table again (F58)", file)
+// The admission's pre-filter is the other reader of the figure. Its difference from the probe's does not show in what the
+// admission ANSWERS: a pre-filter that sized the figure on the whole table would read the waiter's card as free and send the call
+// to its one gated attempt, which the lease line (sizing on the plan's cards itself) refuses for the same waiter, so both end in
+// the same queued answer. What does show is what the pre-filter sized the figure ON: the VRAM it asks the call's need to size
+// for. This drives the real admission with a need that records it and requires the card the plan names (16 GiB), never the
+// largest card of the table (48 GiB). The probe's half is pinned by what it answers, above.
+func TestTheAdmissionSizesItsFigureOnTheCardsThePlanNames(t *testing.T) {
+	f := newAdmitFixtureWith(t, admitSpec{order: admitOrder, mutate: krea2Binding})
+	mixed := mixedCards()
+	f.cards = mixed
+	startHostRAMWaiter(t, f, admitUUIDA) // a waiter that waits only on host RAM, for the 16 GiB card
+
+	var mu sync.Mutex
+	var sizedOn []float64
+	need := imageNeed(f.cfg, "")
+	size := need.RAM
+	need.RAM = func(vramGiB float64) hostneed.Need {
+		mu.Lock()
+		sizedOn = append(sizedOn, vramGiB)
+		mu.Unlock()
+		return size(vramGiB)
+	}
+	grant, err := f.p.acquireCards(context.Background(), f.m, "askram", time.Hour, 0, need, mediaPlan{ids: []string{leaseIDOf(admitUUIDA)}}, mixed)
+	if err == nil {
+		grant.Release()
+		t.Fatal("a krea2 render pinned to the 16 GiB card cannot be granted ahead of the waiter for it")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(sizedOn) == 0 {
+		t.Fatal("the admission never asked the call's need for a figure")
+	}
+	for i, vram := range sizedOn {
+		if vram != 16 {
+			t.Errorf("sizing request %d was for %.0f GiB; the plan names the 16 GiB card, and the largest card of the table is the size that disagrees with the lease the call then takes (F58): %v", i+1, vram, sizedOn)
 		}
 	}
 }
