@@ -642,7 +642,7 @@ side can know the producer died, so the harness retires its own orphans:
   somewhere, not on every path, and the lease path and the voice endpoint have behavioural tests of their own). The
   **voice endpoint** of `generate_audio` (`tts_endpoint`) takes no lease, so it marks its card running itself, where its
   request to the speech server starts; until it did, a swept card of a voice render that died mid-synthesis said it never
-  started. It
+  started. The sweep
   cannot say who ended the process: the register holds a pid and a
   start time, not a cause, so it names the causes it has seen and no more. A **delegation's** card ("agd-"
   id) reads the delegator's intent ledger (`<state root>/delegate-intent.jsonl`, `internal/delegate`):

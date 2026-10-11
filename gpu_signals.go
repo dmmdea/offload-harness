@@ -7,7 +7,7 @@ package main
 // for a console close). Asking for os.Interrupt alone meant the wrapper of a 7 hour render died with its
 // console and said nothing: its PAIR card stayed open until a fleet-node sweep closed it "harness process
 // exited before the job finished", and its lease was found stale. Asking for SIGTERM too lets the wrapper
-// kill its command, close the card with the true cause and release the lease without waiting for a seat reload (the warm-back is skipped on this path). On Linux and
+// kill its command, close the card saying what ended it (the cause as likely, termCauseLikely) and release the lease without waiting for a seat reload (the warm-back is skipped on this path). On Linux and
 // macOS the same signal is a plain `kill`. A `taskkill /F` or a SIGKILL gives the process no signal, and
 // nothing in-process can answer it: the orphan sweep's text covers that case (pairworkloads.orphanText).
 
