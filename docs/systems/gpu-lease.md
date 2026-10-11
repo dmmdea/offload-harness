@@ -1256,8 +1256,11 @@ default and the weights they park themselves** (F60, `hostneed.ForSdcpp`, `pipel
 `--offload-to-cpu`, which parks the weights in RAM and stages them to the device (sanctioned spill, 5.5 to 6.2 GiB on the small
 nodes per the review); without the flag nothing is parked and the lane declares what it did. So on an sd.cpp-only node the spill
 is inside the brake. **It is an estimate, from the files' sizes, and says so; nothing here was measured on a node.** The need
-carries the lane's footprint key, so three measured runs raise it like a ComfyUI family's (`calibratedRAM`), and a file whose size
-cannot be read leaves the class default, never a smaller number. Not covered: the audio.cpp voice and music lanes, the depth
+carries the lane's footprint key, so three measured runs raise it like a ComfyUI family's (`calibratedRAM`). A file whose size
+cannot be read (missing, empty) is left out of the sum and named: the figure is then worded as a **lower bound** (`Need.Unsized`
+lists the binding keys), the lane never declares less than the class default, and it says once per lane and set of files which it
+could not size (`media admission:` log line). When none of its files can be sized the class default stands, which is 0 on an
+sd.cpp-only node, and the lane says that once too. Not covered: the audio.cpp voice and music lanes, the depth
 model of the animate lane, and `gpu reserve` around an sd.cpp helper (the CLI recognises only the ComfyUI helpers, so it still
 declares the class default or `--ram`); upscale and voice declare nothing, their weights sit on the card.
 
@@ -1657,10 +1660,16 @@ cause is likely, never known), and the OS ends the process about five seconds la
 a reload of minutes inside that grace would stand in the warm-back with the lease held while the machine goes down. The
 lease is released right after the ComfyUI instances kept under it are stopped (a step bounded at 60 s, usually
 seconds), the wrapper says the warm-back was skipped, and the warm stays owed (the marker below;
-`gpu release --warm-seat` or the seat's next request pays it). A signal that arrives earlier, while the wrapper is queued,
-choosing cards or draining, is answered too (the handler is registered before anything else, `pair-workloads.md`): the
-queue wait ends (`Options.Cancel`), the lease is released, the seat is not warmed, and the wrapper claims a warm owed only
-when the seat was unloaded. A Ctrl-C has no such deadline and still warms. The detach
+`gpu release --warm-seat` or the seat's next request pays it). A signal that arrives earlier, while the wrapper is queued
+(or queued again after a lease lost during the drain), choosing cards, draining, or between the end of the drain and the
+command's start, is answered too (the handler is registered before anything else, `pair-workloads.md`): the
+queue wait ends (`Options.Cancel`), the lease is released, the command never starts, the seat is not warmed, and the wrapper
+claims a warm owed only when the seat was unloaded. A signal that cancels the unload request itself leaves the warm owed
+whenever the seat was resident, because llama-swap may have finished the unload the client stopped waiting for (a warm of a seat
+that is in fact still loaded is one health request). A Ctrl-C has no such deadline and still warms. A second signal is not acted
+on: the OS ends the process after its grace for a console close, a logoff and a shutdown only, so a second Ctrl-C or a plain kill
+during a stage that never consults the signal (the plan's card-table read, up to 20 s; stopping the kept ComfyUI instances, up to
+60 s; the seat's warm-back after a Ctrl-C) waits for that stage to end. The detach
 form's counterpart is `gpu release --warm-seat`. That request
 is the load, so a llama-swap reload or restart can interrupt it: the warm re-sends it for up to 60 s (see "A warm-back
 interrupted by a llama-swap reload is re-sent" below), and the owed marker is cleared once the seat is observed loaded.

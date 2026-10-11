@@ -667,7 +667,7 @@ side can know the producer died, so the harness retires its own orphans:
 - **The wrapper answers a console close itself.** `gpu reserve -- <command>` asks for `SIGTERM` as well as
   `os.Interrupt` (`gpu_signals.go`). Go on Windows delivers a console close, a logoff and a shutdown as
   `SIGTERM`, and ends the process only after its handler has had its grace, so the wrapper kills its command,
-  closes its card with "ended on SIGTERM: likely a console close, a logoff or a shutdown, though a plain kill sends it
+  closes its card with "ended on SIGTERM: likely a console close, a logoff or a shutdown; a plain kill sends it
   too" and releases its lease instead of dying silent (the 01:09:59 incident: five card-scoped leases and two
   queued ones, exit `0xC000013A`). The card names the signal and gives its cause as **likely**: a plain `kill` (and, on
   Linux, every `SIGTERM`) arrives as the same signal, so the wrapper cannot tell a console close from a kill, and the
@@ -676,7 +676,14 @@ side can know the producer died, so the harness retires its own orphans:
   wait through `gpulease.Options.Cancel`, takes its waiter record out of the line, closes the card failed with "ended on
   SIGTERM while queued (...); never started" and leaves the other holder's lease alone; a signal **during the drain**
   cancels the drain, releases the lease, unloads and warms nothing and says nothing about a warm owed (none is: the seat
-  was not unloaded); a signal while the wrapper **plans** (before its card opens) ends it with nothing opened. Before
+  was not unloaded, unless the signal cancelled the unload request itself: then the warm stays owed); a signal while the wrapper
+  is **queued again** after a lease lost during the drain ends that wait the same way, and one that lands **between the end of the
+  drain and the command's start** closes the card "ended on SIGTERM before its command started (...); never started" and starts
+  nothing; a signal while the wrapper **plans** (before its card opens) ends it with nothing opened. Every stage text fits the
+  card's 140 characters whole (`TestEveryStageTextFitsTheCardWhole`). A second signal is dropped (see `gpu_signals.go`): the OS
+  ends the process after its grace only for a console close, a logoff or a shutdown, so a second Ctrl-C or a plain kill waits for
+  a stage that never consults the signal (the plan's card-table read, stopping the kept ComfyUI instances, a Ctrl-C's warm-back).
+  Before
   this the handler was registered only after the drain, so a console close in any of those stages was unhandled: Go
   ended the process at once, the card stayed open until the sweep closed it "harness process exited before the job
   finished" and the waiter's record stayed in the line until a reader found its pid gone. With `--drain --unload-seat`
