@@ -303,9 +303,6 @@ func acquireAutoCards(m *gpulease.Manager, class gpulease.Class, opts gpulease.O
 		return build()
 	}
 	for lost := 0; ; lost++ {
-		if cancelClosed(opts.Cancel) {
-			return nil, gpulease.ErrCancelled
-		}
 		ids, free, err := pickAutoCards(plan, remaining(), buildC, out, sleep, now)
 		if err != nil {
 			return nil, err

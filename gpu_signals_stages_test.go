@@ -174,6 +174,12 @@ func TestASignalWhileQueuedEndsTheWaitAndLeavesTheLine(t *testing.T) {
 					t.Errorf("the card's error %q lacks %q", errText, w)
 				}
 			}
+			if sig == syscall.SIGTERM {
+				// The cause is said as likely, never as fact: a plain kill is the same signal.
+				if !strings.Contains(errText, "likely") || strings.Contains(errText, "its console was closed") {
+					t.Errorf("the card names the cause as likely, not as known: %q", errText)
+				}
+			}
 			if !strings.Contains(err.Error(), want) {
 				t.Errorf("the returned error %q lacks %q", err, want)
 			}
@@ -247,36 +253,44 @@ func TestASignalBeforeTheLeaseIsAskedForTakesNothing(t *testing.T) {
 }
 
 // THE CARD CHOICE: `--cards N` waits inside the allocator (polling for cards that qualify, then queueing on a set), and
-// a cancel ends both.
+// a cancel ends both: the queue through the lease line's own cancel, the polling through the allocator's read.
 func TestASignalWhileChoosingCardsEndsTheAllocation(t *testing.T) {
-	_, m := scopedLeaseFixture(t)
-	useCardTable(t, "")
-	holder, err := m.TryAcquire(gpulease.ClassMedia, gpulease.Options{Reason: "whole node", TTL: time.Hour})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = holder.Release() }()
-	cancel := make(chan struct{})
-	time.AfterFunc(300*time.Millisecond, func() { close(cancel) })
-	build := func() (gpulease.AllocInput, error) {
-		return buildAllocInput(context.Background(), m, config.Config{}, reserveDeviceFlags{})
-	}
-	var out bytes.Buffer
-	start := time.Now()
-	lease, err := acquireAutoCards(m, gpulease.ClassMedia, gpulease.Options{Reason: "auto", TTL: time.Hour, Cancel: cancel}, oneCard,
-		time.Minute, build, &out, time.Sleep, time.Now)
-	if lease != nil {
-		_ = lease.Release()
-		t.Fatal("a cancelled allocation must take nothing")
-	}
-	if !errors.Is(err, gpulease.ErrCancelled) {
-		t.Fatalf("want gpulease.ErrCancelled, got %v\n%s", err, out.String())
-	}
-	if d := time.Since(start); d > 8*time.Second {
-		t.Errorf("the allocation ended %s after the cancel", d)
-	}
-	if n := len(m.Waiters()); n != 0 {
-		t.Errorf("the waiter must leave the line, %d remain", n)
+	for name, vram := range map[string]float64{
+		"every card is held, so the request queues on a set": 0,
+		"no card has the VRAM, so the allocator polls":        100,
+	} {
+		vram := vram
+		t.Run(name, func(t *testing.T) {
+			_, m := scopedLeaseFixture(t)
+			useCardTable(t, "")
+			holder, err := m.TryAcquire(gpulease.ClassMedia, gpulease.Options{Reason: "whole node", TTL: time.Hour})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = holder.Release() }()
+			cancel := make(chan struct{})
+			time.AfterFunc(300*time.Millisecond, func() { close(cancel) })
+			build := func() (gpulease.AllocInput, error) {
+				return buildAllocInput(context.Background(), m, config.Config{}, reserveDeviceFlags{vramGiB: vram})
+			}
+			var out bytes.Buffer
+			start := time.Now()
+			lease, err := acquireAutoCards(m, gpulease.ClassMedia, gpulease.Options{Reason: "auto", TTL: time.Hour, Cancel: cancel}, oneCard,
+				time.Minute, build, &out, time.Sleep, time.Now)
+			if lease != nil {
+				_ = lease.Release()
+				t.Fatal("a cancelled allocation must take nothing")
+			}
+			if !errors.Is(err, gpulease.ErrCancelled) {
+				t.Fatalf("want gpulease.ErrCancelled, got %v\n%s", err, out.String())
+			}
+			if d := time.Since(start); d > 8*time.Second {
+				t.Errorf("the allocation ended %s after the cancel", d)
+			}
+			if n := len(m.Waiters()); n != 0 {
+				t.Errorf("the waiter must leave the line, %d remain", n)
+			}
+		})
 	}
 }
 
