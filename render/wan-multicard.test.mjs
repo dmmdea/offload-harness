@@ -561,19 +561,66 @@ test("a row without a numeric size is no card, so a size check can never pass on
 });
 
 test("--wan-resident-gb above what the compute card can hold beside the sampler's activations at THIS geometry is refused with the numbers", () => {
-  // the default geometry (832x480x49: 20,280 tokens, about 2.8 GiB beyond the weights): 15.9 - 2.8 - 0.5 = 12.7 GiB at most
-  assert.equal(planWith({ "wan-resident-gb": "12" }).residentGb, 12);
-  assert.throws(() => planWith({ "wan-resident-gb": "13" }), /--wan-resident-gb 13 .*compute card \(idx 0, 15\.9 GiB\).*832x480x49.*at most 12\.7/);
+  // The sampler's activations are the benchmark's reserved figures (RESULTS 3.5) as an upper envelope below the film's size, and the film's 11.0 GiB
+  // (internal/hostneed wanActivationsGiB, the top of 9.7-11.0) from there up; the card keeps --reserve-vram (default 1.0), as the lease sizing does.
+  // The default geometry (832x480x49: 20,280 tokens, 6.3 GiB): 15.9 - 6.3 - 1.0 = 8.6 GiB at most
+  assert.equal(planWith({ "wan-resident-gb": "8" }).residentGb, 8);
+  assert.throws(() => planWith({ "wan-resident-gb": "9" }), /--wan-resident-gb 9 .*compute card \(idx 0, 15\.9 GiB\).*832x480x49.*at most 8\.6/);
   assert.throws(() => planWith({ "wan-resident-gb": "40" }), /--wan-resident-gb 40/);
-  // the film's geometry (720x1280x81: 75,600 tokens, 10.3 GiB beyond the resident share, measured): the measured 3 passes, 6 and 8 would run out of memory
+  // the film's geometry (720x1280x81: 75,600 tokens, 11.0 GiB beyond the resident share, the top of what the benchmark measured): the measured 3 passes,
+  // 4 leaves 0.9 GiB ("too thin for a single shot", RESULTS 3.1) and is refused, the same line the lease sizing draws
   const film = { width: "720", height: "1280", frames: "81" };
   assert.equal(planWith({ ...film, "wan-resident-gb": "3" }).residentGb, 3);
-  assert.equal(planWith({ ...film, "wan-resident-gb": "5" }).residentGb, 5, "15.9 - 10.3 - 0.5 = 5.1 GiB at most");
-  assert.throws(() => planWith({ ...film, "wan-resident-gb": "6" }), /--wan-resident-gb 6 .*720x1280x81 \(75600 tokens\).*at most 5\.1/);
+  assert.equal(planWith({ ...film, "wan-resident-gb": "3.9" }).residentGb, 3.9, "15.9 - 11.0 - 1.0 = 3.9 GiB at most");
+  assert.throws(() => planWith({ ...film, "wan-resident-gb": "4" }), /--wan-resident-gb 4 .*720x1280x81 \(75600 tokens\).*at most 3\.9/);
+  assert.throws(() => planWith({ ...film, "wan-resident-gb": "5" }), /--wan-resident-gb 5 /, "5 GiB was accepted before the review: it needs 16 of 15.9");
   assert.throws(() => planWith({ ...film, "wan-resident-gb": "8" }), /--wan-resident-gb 8 /);
-  // a small clip needs little: the estimate has a 2 GiB floor (480x832x17: 7,800 tokens)
-  assert.equal(planWith({ width: "480", height: "832", frames: "17", "wan-resident-gb": "13" }).residentGb, 13, "15.9 - 2 - 0.5 = 13.4 GiB at most");
-  assert.throws(() => planWith({ width: "480", height: "832", frames: "17", "wan-resident-gb": "14" }), /--wan-resident-gb 14 .*at most 13\.4/);
+  // a bigger clip than the film's needs no more than the film's figure says (the cap), and the runner's --reserve-vram is the card's reserve
+  assert.equal(planWith({ width: "1280", height: "1280", frames: "121", "wan-resident-gb": "3.9" }).residentGb, 3.9);
+  assert.throws(() => planWith({ ...film, "reserve-vram": "2", "wan-resident-gb": "3" }), /--wan-resident-gb 3 .*at most 2\.9/);
+  // a small clip needs little: the estimate has a 2 GiB floor (480x832x17: 7,800 tokens, 2.4 GiB)
+  assert.equal(planWith({ width: "480", height: "832", frames: "17", "wan-resident-gb": "12" }).residentGb, 12, "15.9 - 2.4 - 1.0 = 12.5 GiB at most");
+  assert.throws(() => planWith({ width: "480", height: "832", frames: "17", "wan-resident-gb": "13" }), /--wan-resident-gb 13 .*at most 12\.5/);
+});
+
+test("wanActivationsGib is never under the benchmark's reserved allocator peaks (RESULTS 3.5) and is capped at the film's figure", () => {
+  // compute-card allocator peak, reserved GiB, by tokens: the async allocator, the native one (+0.4) and sage attention (+0.9) at 20,280
+  for (const [tokens, reserved] of [[7800, 2.19], [14040, 3.66], [20280, 5.31], [20280, 5.67], [20280, 6.16], [32400, 5.50]]) {
+    assert.ok(M.wanActivationsGib(tokens) >= reserved, `${tokens} tokens: ${M.wanActivationsGib(tokens)} GiB against a measured ${reserved}`);
+  }
+  assert.equal(M.wanActivationsGib(75600), M.WAN_FILM_ACTIVATIONS_GIB, "the film's size is the cap");
+  assert.equal(M.wanActivationsGib(200000), M.WAN_FILM_ACTIVATIONS_GIB, "and nothing above it asks for more");
+  assert.equal(M.wanActivationsGib(100), 2, "a floor under a tiny clip");
+  assert.equal(M.WAN_FILM_ACTIVATIONS_GIB, 11, "the top of the benchmark's 9.7-11.0 GiB, the figure internal/hostneed declares against");
+});
+
+test("the storage card is checked too: the rest of the expert, the VAE and the context must fit it", () => {
+  // The expert is 13.4 GiB (internal/hostneed's documented size of a Wan 2.2 fp8 expert); the storage card holds expert - share + 0.8.
+  const cardsOf = (a, b) => M.parseCardTable([
+    `0, ${U0}, Test GPU A, ${a * 1024}, 16000, Disabled, No`,
+    `2, ${U2}, Test GPU A, ${b * 1024}, 16050, Disabled, No`,
+  ].join("\n"));
+  const planOn = (a, b, flags = {}) => planWith(flags, { cards: () => cardsOf(a, b) });
+  // 24 GiB computing, 8 GiB storing: 13.4 - 3 + 0.8 = 11.2 GiB of donor blocks does not fit 8 - 1.0
+  assert.throws(() => planOn(24, 8), /storage card \(idx 2, 8\.0 GiB\).*11\.2 GiB.*7\.0 GiB usable/);
+  assert.throws(() => planOn(8, 24), /storage card \(idx 0, 8\.0 GiB\)/, "whichever of the pair is the small one");
+  // a bigger share on the compute card is the way out, and the message says how much would do
+  assert.throws(() => planOn(24, 8), /--wan-resident-gb of at least 7\.2/);
+  assert.equal(planOn(24, 8, { "wan-resident-gb": "8" }).residentGb, 8, "13.4 - 8 + 0.8 = 6.2 of 7.0 usable, and 8 + 6.3 fits the 24 GiB card");
+  // the measured pair: equal cards, the default share and none at all fit (13.4 + 0.8 = 14.2 of 14.9 usable)
+  assert.equal(planOn(16, 16).residentGb, 3);
+  assert.equal(planOn(16, 16, { "wan-resident-gb": "0" }).residentGb, 0);
+  assert.throws(() => planOn(16, 12, { "wan-resident-gb": "0" }), /storage card/);
+  assert.equal(M.WAN_EXPERT_GIB, 13.4);
+  assert.equal(M.WAN_STORAGE_OVERHEAD_GIB, 0.8);
+});
+
+test("a UUID prefix that names two cards is ambiguous and refused, never resolved to the first", () => {
+  const A = "GPU-dddd4444-aaaa-bbbb-cccc-111111111111";
+  const B = "GPU-dddd4444-aaaa-bbbb-cccc-222222222222";
+  const cards = M.parseCardTable([`0, ${A}, Test GPU A, 16311, 16000, Disabled, No`, `2, ${B}, Test GPU A, 16311, 16050, Disabled, No`].join("\n"));
+  assert.throws(() => M.resolveWanCards({ tokens: ["dddd4444", "2"], source: "--wan-cards", cards }), /"dddd4444" matches 2 cards \(idx 0, idx 2\).*longer prefix/);
+  assert.deepEqual(M.resolveWanCards({ tokens: ["dddd4444-aaaa-bbbb-cccc-1", "2"], source: "--wan-cards", cards }).storage.index, 0, "a long enough prefix names one card");
 });
 
 test("portNote names the port a multicard instance falls back to when no --api or COMFY_API gives it one", () => {

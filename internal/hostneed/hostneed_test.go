@@ -12,6 +12,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/gpulease"
 	"github.com/dmmdea/offload-harness/internal/gpuprobe"
+	"github.com/dmmdea/offload-harness/internal/mediacap"
 )
 
 // The sizes below are the incident's lane, read off the reference box's model tree: the bf16 Krea 2
@@ -697,14 +698,60 @@ func TestTheResidentDefaultMirrorsTheRunner(t *testing.T) {
 }
 
 // Only the Wan graph has this placement: the flag on another family, or on a --graph file, is not read as it.
+//
+// The pair is two 24 GiB cards on purpose: the card-only stage maths (a share of the expert + 11 GiB of activations on one card, the rest of the
+// expert + 0.8 GiB on the other) cannot fit LTX 2.5's 20 GiB transformer on two 16 GiB cards, so there the figure is the ordinary one with or
+// without the model == "wan22" guard in RenderCall.Estimate, and a test on such a pair passes with the guard deleted (the review of
+// 2026-10-11 deleted it and nothing failed). On 24 GiB cards the unguarded code would declare 0 for a call that streams the whole set.
 func TestTheMulticardFlagMeansNothingToAnotherFamily(t *testing.T) {
-	f := ltxFacts(t, 16)
-	f.CardsGiB = []float64{16, 16}
+	f := ltxFacts(t, 24)
+	f.CardsGiB = []float64{24, 24}
 	ltx := func(flags string) Need {
 		return Resolve(Request{Class: gpulease.ClassMedia, Args: strings.Fields("node render/comfy-video.mjs o.mp4 s.png p " + flags)}, f)
 	}
-	if a, b := ltx("--model ltx25"), ltx("--model ltx25 --wan-placement multicard"); a.GiB != b.GiB || a.Detail != b.Detail {
+	a, b := ltx("--model ltx25"), ltx("--model ltx25 --wan-placement multicard")
+	if a.GiB <= 0 {
+		t.Fatalf("the premise of this test: ltx25 does not fit one 24 GiB card and streams from RAM, got %v", a)
+	}
+	if a.GiB != b.GiB || a.Detail != b.Detail {
 		t.Fatalf("ltx25 with the flag = %v, without = %v", b, a)
+	}
+	for _, n := range []Need{a, b} {
+		if strings.Contains(n.Detail, "card-only") {
+			t.Fatalf("another family's declaration must never talk about the card-only placement: %v", n)
+		}
+	}
+	// the Wan call on the same pair is the one that does fit it, so the two figures differ by the placement alone
+	w := wanFacts(t, 24, 24)
+	if n := wanNeed(t, wanMulticardCmd, w); n.GiB != 0 || !strings.Contains(n.Detail, "card-only") {
+		t.Fatalf("the Wan call on two 24 GiB cards: %v, want the card-only 0", n)
+	}
+}
+
+// The stage sizes are the runner's: render/wan-multicard.mjs checks the same two stages (the compute card and the storage card) against the
+// cards it was given before it starts, and a different number on either side would make the lease declare for a placement the runner then
+// refuses, or run one the lease sized against other figures. A test reads the runner's constants and fails when they drift.
+func TestTheStageSizesMirrorTheRunner(t *testing.T) {
+	src, err := os.ReadFile(filepath.Join("..", "..", "render", "wan-multicard.mjs"))
+	if err != nil {
+		t.Skipf("the render folder is not beside this package: %v", err)
+	}
+	read := func(name string) float64 {
+		m := regexp.MustCompile(`export const ` + name + ` = ([0-9.]+);`).FindSubmatch(src)
+		if m == nil {
+			t.Fatalf("render/wan-multicard.mjs no longer exports %s; this package reads it", name)
+		}
+		v, _ := strconv.ParseFloat(string(m[1]), 64)
+		return v
+	}
+	if got := read("WAN_FILM_ACTIVATIONS_GIB"); got != wanActivationsGiB {
+		t.Fatalf("the runner sizes the film's activations at %v GiB, this package at %v", got, wanActivationsGiB)
+	}
+	if got := read("WAN_STORAGE_OVERHEAD_GIB"); got != wanStorageOverheadGiB {
+		t.Fatalf("the runner sizes the storage card's overhead at %v GiB, this package at %v", got, wanStorageOverheadGiB)
+	}
+	if got, want := read("WAN_EXPERT_GIB"), familySizes["wan22"][mediacap.RoleDiffusion][0]; got != want {
+		t.Fatalf("the runner sizes an expert at %v GiB, this package's documented Wan 2.2 expert is %v", got, want)
 	}
 }
 
