@@ -342,7 +342,11 @@ determine if a job is truly still going" — was not met by any of the three sur
       times than it is repeated, fails the attempt as `re-pack repeated the list item ...`, marks
       the call as above, and ends as an abstention naming the item when every attempt does it;
       the finished answer rides in `output`. An answer that really holds the repeat, or an empty
-      item, is not a loop.
+      item, is not a loop. An item is a scalar or, since F43 lets a llama.cpp seat write them, an
+      object or a list: it is compared by its compact JSON with the keys sorted, a composite that
+      holds nothing but empty values is empty, the answer holds an object as often as it holds the
+      longest string in it (an object with no string is judged by its repeat alone, chosen and not
+      measured), and every list is read at every depth and named by its path (`meta.labels`).
     - **The detector sees longer loops.** The tail test looked for a block of up to 64 bytes across
       the last 256. It keeps that test and the line-block test exactly as they were, in their
       order, and adds a third pass after them: a block of 65 to 192 bytes across the last 1,024

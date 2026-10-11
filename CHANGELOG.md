@@ -175,8 +175,12 @@ Versioning: [SemVer](https://semver.org/).
   the cap) does not. The lane on the wire reads `grammar+no-repeat`, `json_schema+no-repeat` or `chat+no-repeat`. A complete object whose
   list repeats one item (or a block of two or three) at least 6 times in a row, where the answer it was written from holds the item fewer
   times, is not published: the attempt fails as `re-pack repeated the list item "x" N times in a row ...`, marks the call, and ends as an
-  abstention naming the item when every attempt does it. The detector keeps its two original tests and their order and adds a third pass
-  for a block of 65 to 192 bytes in the last 1,024 (whitespace still reads the last 256).
+  abstention naming the item when every attempt does it. An item may be a string, a number, a boolean, an object or a list (F43 lets a
+  llama.cpp seat write a list of objects, and a loop closes inside those as well): an object or a list is compared by its compact JSON with
+  the keys sorted, one that holds nothing but empty values (`{}`, `""`, `0`, `false`) is never a loop, the answer is taken to hold an object
+  as often as it holds the longest string in it (an object with no string in it is judged by its repeat alone), a finding clips a long item
+  to 100 bytes, and every list is read at every depth, named by its path (`meta.labels`, `rows[2].tags`). The detector keeps its two original
+  tests and their order and adds a third pass for a block of 65 to 192 bytes in the last 1,024 (whitespace still reads the last 256).
 - **Chosen, not measured, and unverified.** `frequency_penalty` 0.5, the run of 6, the period of 3, the 1,024/192 window. No seat was
   replayed with the penalty: that it ends a loop on the fleet's seats is the mechanism's expectation, and its fidelity cost on an honest copy
   (paid only on an attempt after a failure) is unmeasured. llama.cpp's sampler (count in the last `penalty_last_n` tokens times the penalty,
@@ -186,6 +190,8 @@ Versioning: [SemVer](https://semver.org/).
   same length before it defers. Compiling `maxItems` into the grammar was left out: it cannot be verified without a live llama.cpp compile.
 - **Tests.** `internal/pipeline/agenttask_repackloop_test.go` (a greedy-seat fake that loops until the request is conditioned: red before on
   the register's own shape, `attempt 2/3 ... chat re-pack truncated ... degenerate`; the published repeated list; the detector),
+  `internal/pipeline/repack_objectloop_test.go` (a list of objects, a list of lists and a list at depth: the detector's table, and a seat that
+  obeys the grammar and loops inside it, end to end: red before, the eight-object list was published as the result),
   `internal/llamaclient/frequencypenalty_test.go` (the key only on request, the option-free body byte-identical). Three existing tests
   pinned the old flow (a loop goes straight to the chat lane) and now pin the new one; the chat lane's time-skip test moved to a cut that is
   no loop. 18 mutations of the fix were each caught (the run threshold survived once because its test was written in terms of the constant,
