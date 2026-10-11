@@ -32,6 +32,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -1824,6 +1825,11 @@ func (p *Pipeline) repackStructuredWith(ctx context.Context, seat string, rawSch
 	// cut attempt has shown it needs more (the resend below).
 	least := expectedRepackTokens(output)
 	floorTokens := least
+	// guard is set once an attempt of this call has looped (a cut that more tokens
+	// cannot cure, or a complete object that repeats a list item): every attempt
+	// after it, the chat lane included, is a different request, told not to repeat
+	// and carrying repackLoopPenalty (register C14). The first attempt never is.
+	guard := false
 	var skipped *repackSkipErr
 	// Under the liveness monitor (a ProgressFunc on ctx, which is every run of
 	// runAgentTask) the CONTEXT owns the deadline: the stall watch cancels a
@@ -1874,10 +1880,15 @@ func (p *Pipeline) repackStructuredWith(ctx context.Context, seat string, rawSch
 		// the busy hold and the stall watch are untouched). An attempt that cannot
 		// buy the answer is not sent, and neither is any later one: time only runs
 		// out (register C-80).
+		attemptLane, attemptUser, attemptOpts := lane, user, structuredOpts
+		if guard {
+			attemptLane, attemptUser = lane+"+no-repeat", user+"\n\n"+repackNoRepeatNote
+			attemptOpts = append(append([]llamaclient.GenOption(nil), structuredOpts...), llamaclient.WithFrequencyPenalty(repackLoopPenalty))
+		}
 		fit := opts.fit(time.Now(), deadlineOf(ctx), budget, floorTokens)
 		if fit.Skip {
 			skipped = &repackSkipErr{msg: fit.Note}
-			opts.Trace.skip(attempts+1, lane, fit.Note)
+			opts.Trace.skip(attempts+1, attemptLane, fit.Note)
 			break
 		}
 		sent, clampedFrom := fit.Tokens, 0
@@ -1917,14 +1928,14 @@ func (p *Pipeline) repackStructuredWith(ctx context.Context, seat string, rawSch
 		// deadline from the wall the caller classifies a failure against.
 		attemptTimeout := repackAttemptDeadline(ctx, p.cfg, sent, limit-attempts+1)
 		attemptStart := time.Now()
-		gres, gerr := p.repackClient(p.cfg.CompletionPath, attemptTimeout, gates).Generate(ctx, seat, system, user, grammar, sent, p.cfg.Temperature, 0, append([]llamaclient.GenOption{llamaclient.WithoutThinking()}, structuredOpts...)...)
+		gres, gerr := p.repackClient(p.cfg.CompletionPath, attemptTimeout, gates).Generate(ctx, seat, system, attemptUser, grammar, sent, p.cfg.Temperature, 0, append([]llamaclient.GenOption{llamaclient.WithoutThinking()}, attemptOpts...)...)
 		// What the attempt generated counts whether or not it answered: a stream that
 		// died mid-body (a stall or the ceiling cutting a producing seat, a dropped
 		// connection) cost the seat its tokens and wrote something worth a clip.
 		gres = partialOf(gres, gerr)
 		tokensOut += gres.TokensOut
 		if gerr != nil {
-			note(attempts, lane, sent, clampedFrom, gres, time.Since(attemptStart), repackWhy(gerr))
+			note(attempts, attemptLane, sent, clampedFrom, gres, time.Since(attemptStart), repackWhy(gerr))
 			recordFailure(gerr, boundFor(attemptTimeout), attempts)
 			if seatBusyExhausted(gerr) {
 				// The contract's busy-seat budget is spent: the seat answered
@@ -1971,13 +1982,29 @@ func (p *Pipeline) repackStructuredWith(ctx context.Context, seat string, rawSch
 			if fit.Clamped {
 				clampNote = fit.Note
 			}
-			terr := truncatedRepackErr("re-pack", sent, len(output), cut, clampNote, resendSkip)
-			note(attempts, lane, sent, clampedFrom, gres, time.Since(attemptStart), terr.Error())
+			// A cut that more tokens cannot cure (a loop, or a seat that ran on past a
+			// budget the answer fits in) is answered by a request that differs from the
+			// one just cut, not by the same one again (register C14: the chat lane
+			// carried the same sampling and the same prompt and looped on the same
+			// text). A cut the clock set is the clock's, and is not a loop.
+			looped := !resend && cut.loops(sent) && (cut.Degenerate != "" || !fit.Clamped)
+			extra := resendSkip
+			if looped {
+				extra = strings.TrimPrefix(extra+"; the next attempt is told not to repeat and carries frequency_penalty "+strconv.FormatFloat(repackLoopPenalty, 'f', -1, 64), "; ")
+			}
+			terr := truncatedRepackErr("re-pack", sent, len(output), cut, clampNote, extra)
+			note(attempts, attemptLane, sent, clampedFrom, gres, time.Since(attemptStart), terr.Error())
 			recordFailure(terr, boundFor(attemptTimeout), attempts)
-			if !resend {
+			if looped {
+				guard = true
+				log.Printf("agent task: re-pack for %s looped (%s): the next attempt is told not to repeat", seat, cut.observed(sent))
+			}
+			if !resend && !looped {
 				break
 			}
-			budget, floorTokens = agentRepackMaxTokensCap, resendFloor
+			if resend {
+				budget, floorTokens = agentRepackMaxTokensCap, resendFloor
+			}
 			continue
 		}
 		// Trim to the outermost {...} before validating. This is the BELT, not
@@ -1990,20 +2017,31 @@ func (p *Pipeline) repackStructuredWith(ctx context.Context, seat string, rawSch
 		// whose alias could not be resolved against a dead roster, still
 		// falls back to the grammar path — and because a trim costs nothing.
 		content := []byte(outerObject(gres.Content))
+		delivered, coercedWhy := content, ""
 		if verr := validator.Validate(content, schema); verr != nil {
-			if fixed, changed, ok := coerceToSchemaNoted(content, schema); ok {
-				// Delivered, but not as the seat wrote it: the record says what was re-typed.
-				why := coercedNote(changed)
-				note(attempts, lane, sent, clampedFrom, gres, time.Since(attemptStart), why)
-				opts.Trace.setCoerced(why)
-				return json.RawMessage(fixed), tokensOut, false, attempts, nil
+			fixed, changed, ok := coerceToSchemaNoted(content, schema)
+			if !ok {
+				note(attempts, attemptLane, sent, clampedFrom, gres, time.Since(attemptStart), repackWhy(verr))
+				recordFailure(verr, boundFor(attemptTimeout), attempts)
+				continue
 			}
-			note(attempts, lane, sent, clampedFrom, gres, time.Since(attemptStart), repackWhy(verr))
-			recordFailure(verr, boundFor(attemptTimeout), attempts)
+			// Delivered, but not as the seat wrote it: the record says what was re-typed.
+			delivered, coercedWhy = fixed, coercedNote(changed)
+		}
+		// A complete object whose list repeats one item is a loop that closed itself,
+		// not content (register C14): it is not published, and the next attempt is told.
+		if loopWhy := degenerateList(delivered, output); loopWhy != "" {
+			lerr := errors.New("re-pack " + loopWhy)
+			note(attempts, attemptLane, sent, clampedFrom, gres, time.Since(attemptStart), repackWhy(lerr))
+			recordFailure(lerr, boundFor(attemptTimeout), attempts)
+			guard = true
 			continue
 		}
-		note(attempts, lane, sent, clampedFrom, gres, time.Since(attemptStart), "")
-		return json.RawMessage(content), tokensOut, false, attempts, nil
+		note(attempts, attemptLane, sent, clampedFrom, gres, time.Since(attemptStart), coercedWhy)
+		if coercedWhy != "" {
+			opts.Trace.setCoerced(coercedWhy)
+		}
+		return json.RawMessage(delivered), tokensOut, false, attempts, nil
 	}
 	// FINAL fallback: one grammar-FREE attempt over /v1/chat/completions.
 	// Found live wiring the <node-c> FreeToken agent seat (2026-08-27): the two
@@ -2044,15 +2082,20 @@ func (p *Pipeline) repackStructuredWith(ctx context.Context, seat string, rawSch
 		if underLiveness {
 			chatOpts = append(chatOpts, llamaclient.WithoutClientTimeout(), llamaclient.WithProgress(progress))
 		}
+		chatLane := "chat"
+		if guard {
+			chatLane = "chat+no-repeat"
+			chatOpts = append(chatOpts, llamaclient.WithFrequencyPenalty(repackLoopPenalty))
+		}
 		chatStart := time.Now()
-		structured, cres, chatCoerced, cerr := p.repackViaChat(ctx, chatClient, seat, schema, output, chatSent, chatClampNote, chatOpts...)
+		structured, cres, chatCoerced, cerr := p.repackViaChat(ctx, chatClient, seat, schema, output, chatSent, chatClampNote, guard, chatOpts...)
 		tokensOut += cres.TokensOut
 		if cerr == nil {
-			note(attempts, "chat", chatSent, chatClamped, cres, time.Since(chatStart), chatCoerced)
+			note(attempts, chatLane, chatSent, chatClamped, cres, time.Since(chatStart), chatCoerced)
 			opts.Trace.setCoerced(chatCoerced)
 			return structured, tokensOut, false, attempts, nil
 		}
-		note(attempts, "chat", chatSent, chatClamped, cres, time.Since(chatStart), repackWhy(cerr))
+		note(attempts, chatLane, chatSent, chatClamped, cres, time.Since(chatStart), repackWhy(cerr))
 		recordFailure(cerr, boundFor(chatTimeout), attempts)
 	}
 
@@ -2336,7 +2379,7 @@ func repackBudget(output string) int {
 // returned error; repackViaChat makes no infrastructure/budget/abstention
 // judgment of its own. The GenResult is whatever completion came back, usable or
 // not (zero when none did), so the caller can count and record a failed attempt.
-func (p *Pipeline) repackViaChat(ctx context.Context, client *llamaclient.Client, seat string, schema map[string]any, output string, budget int, clampNote string, extra ...llamaclient.GenOption) (json.RawMessage, llamaclient.GenResult, string, error) {
+func (p *Pipeline) repackViaChat(ctx context.Context, client *llamaclient.Client, seat string, schema map[string]any, output string, budget int, clampNote string, noRepeat bool, extra ...llamaclient.GenOption) (json.RawMessage, llamaclient.GenResult, string, error) {
 	props, _ := schema["properties"].(map[string]any)
 	names := make([]string, 0, len(props))
 	for name := range props {
@@ -2349,6 +2392,11 @@ func (p *Pipeline) repackViaChat(ctx context.Context, client *llamaclient.Client
 	// list of strings (register C-80).
 	system := "You extract structured data from text. Output ONLY a JSON object — no prose, no code fences. " + repackTypeRule
 	user := fmt.Sprintf("Extract these fields from the text as a JSON object: %s.\n\nTEXT:\n%s", repackFieldList(names, props), output)
+	if noRepeat {
+		// An earlier attempt of this call looped: this one is told not to (the caller
+		// also sends the frequency penalty in extra).
+		user += "\n\n" + repackNoRepeatNote
+	}
 	gres, gerr := client.Generate(ctx, seat, system, user, "", budget, p.cfg.Temperature, 0, append([]llamaclient.GenOption{llamaclient.WithoutThinking()}, extra...)...)
 	if gerr != nil {
 		return nil, partialOf(gres, gerr), "", gerr
@@ -2362,7 +2410,13 @@ func (p *Pipeline) repackViaChat(ctx context.Context, client *llamaclient.Client
 		if !ok {
 			return nil, gres, "", verr
 		}
+		if loopWhy := degenerateList(fixed, output); loopWhy != "" {
+			return nil, gres, "", errors.New("chat re-pack " + loopWhy)
+		}
 		return json.RawMessage(fixed), gres, coercedNote(changed), nil
+	}
+	if loopWhy := degenerateList([]byte(content), output); loopWhy != "" {
+		return nil, gres, "", errors.New("chat re-pack " + loopWhy)
 	}
 	return json.RawMessage(content), gres, "", nil
 }

@@ -141,10 +141,14 @@ type chatReq struct {
 	// request and changed the payload of call sites that never opted in
 	// (thinking.go owns the option and the rationale).
 	ChatTemplateKwargs *chatTemplateKwargs `json:"chat_template_kwargs,omitempty"`
-	Logprobs           bool                `json:"logprobs,omitempty"`
-	TopLogprobs        int                 `json:"top_logprobs,omitempty"`
-	CachePrompt        bool                `json:"cache_prompt"`
-	Stream             bool                `json:"stream"`
+	// FrequencyPenalty is nil, and so absent from the body, on every call that did
+	// not pass WithFrequencyPenalty: the same pointer-with-omitempty contract as
+	// ChatTemplateKwargs, so an option-free body stays byte-identical.
+	FrequencyPenalty *float64 `json:"frequency_penalty,omitempty"`
+	Logprobs         bool     `json:"logprobs,omitempty"`
+	TopLogprobs      int      `json:"top_logprobs,omitempty"`
+	CachePrompt      bool     `json:"cache_prompt"`
+	Stream           bool     `json:"stream"`
 	// StreamOptions is nil, and so absent from the body, on every call that does
 	// not stream (WithProgress).
 	StreamOptions *streamOptions `json:"stream_options,omitempty"`
@@ -251,6 +255,7 @@ func (c *Client) Generate(ctx context.Context, model, system, user, grammar stri
 		// TestGenerateWithoutOptionOmitsChatTemplateKwargs).
 		ChatTemplateKwargs: o.templateKwargs(),
 		StructuredOutputs:  o.structured(),
+		FrequencyPenalty:   o.frequencyPenaltyPtr(),
 	}
 	if topLogprobs > 0 {
 		body.Logprobs = true

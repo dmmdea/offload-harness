@@ -81,8 +81,12 @@ func maxTokensOf(t *testing.T, body map[string]any) int {
 // The grammar lane is cut at max_tokens and the retry used to go to the CAP
 // unconditionally: an identical greedy request that ran to the cap again
 // (register C-80: 8,192 tokens at 5.6 tok/s is 24 minutes). The second request
-// now goes out only when the truncated attempt shows the budget was the problem;
-// otherwise the loop goes straight to the chat lane.
+// now goes out only when the truncated attempt shows the budget was the problem.
+// Otherwise a loop is answered by a request at the SAME budget that is told not to
+// repeat (register C14: the chat lane used to follow, with the same sampling and the
+// same prompt, and looped on the same text), then the conditioned chat lane; a budget
+// that is already the cap goes straight to the chat lane. No request ever carries more
+// than the budget that was cut.
 func TestRunAgentTaskRepackDoesNotEscalateWhenMoreTokensCannotHelp(t *testing.T) {
 	answer := answerOfChars(2800) // ~1,445-token budget
 	budget := repackBudget(answer)
@@ -92,12 +96,13 @@ func TestRunAgentTaskRepackDoesNotEscalateWhenMoreTokensCannotHelp(t *testing.T)
 		tokens  int
 		answer  string
 		why     string // the attempt's recorded reason must say this
+		looped  bool   // a loop: the next attempt is conditioned; false: straight to the chat lane
 	}{
-		{"a whitespace tail", `{"key_facts":["a"],"numbers":[` + strings.Repeat(" \n  ", 200), budget, answer, "degenerate"},
-		{"a repeating tail", `{"key_facts":["a"],"numbers":[` + proseNoise(500) + strings.Repeat(`"", `, 60), budget, answer, "degenerate"},
-		{"a single repeated byte", `{"key_facts":["a"],"numbers":[` + proseNoise(500) + strings.Repeat("!", 160), budget, answer, "degenerate"},
-		{"prose that already fits the budget", `{"key_facts":["` + proseNoise(budget*4), budget, answer, "inside"},
-		{"a budget that is already the cap", `{"key_facts":["` + digitNoise(8192), agentRepackMaxTokensCap, answerOfChars(30000), "cap"},
+		{"a whitespace tail", `{"key_facts":["a"],"numbers":[` + strings.Repeat(" \n  ", 200), budget, answer, "degenerate", true},
+		{"a repeating tail", `{"key_facts":["a"],"numbers":[` + proseNoise(500) + strings.Repeat(`"", `, 60), budget, answer, "degenerate", true},
+		{"a single repeated byte", `{"key_facts":["a"],"numbers":[` + proseNoise(500) + strings.Repeat("!", 160), budget, answer, "degenerate", true},
+		{"prose that already fits the budget", `{"key_facts":["` + proseNoise(budget*4), budget, answer, "inside", true},
+		{"a budget that is already the cap", `{"key_facts":["` + digitNoise(8192), agentRepackMaxTokensCap, answerOfChars(30000), "cap", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -108,18 +113,27 @@ func TestRunAgentTaskRepackDoesNotEscalateWhenMoreTokensCannotHelp(t *testing.T)
 			if wire.Deferred {
 				t.Fatalf("deferred (%s): %s", wire.DeferClass, wire.Reason)
 			}
-			if got := fake.grammarCNT.Load(); got != 1 {
-				t.Fatalf("grammar requests = %d, want 1: a second request could not have finished what the first could not", got)
+			wantGrammar, wantAttempts, wantChatLane := int64(1), 2, "chat"
+			if tc.looped {
+				wantGrammar, wantAttempts, wantChatLane = 2, 3, "chat+no-repeat"
+			}
+			if got := fake.grammarCNT.Load(); got != wantGrammar {
+				t.Fatalf("grammar requests = %d, want %d", got, wantGrammar)
+			}
+			for i := int64(0); i < wantGrammar; i++ {
+				if mt := maxTokensOf(t, <-fake.repackBodies); mt != tc.tokens {
+					t.Fatalf("grammar request %d max_tokens = %d, want the %d that was cut: more tokens cannot help", i+1, mt, tc.tokens)
+				}
 			}
 			if got := fake.chatFallbackCNT.Load(); got != 1 {
-				t.Fatalf("chat requests = %d, want 1: the loop goes straight to the chat lane", got)
+				t.Fatalf("chat requests = %d, want 1", got)
 			}
-			if wire.RepackAttempts != 2 {
-				t.Fatalf("repack_attempts = %d, want 2 (the cut grammar request and the chat lane)", wire.RepackAttempts)
+			if wire.RepackAttempts != wantAttempts {
+				t.Fatalf("repack_attempts = %d, want %d", wire.RepackAttempts, wantAttempts)
 			}
 			d := wire.RepackAttemptsDetail
-			if len(d) != 2 || d[0].FinishReason != "length" || !strings.Contains(d[0].Why, tc.why) || d[1].Lane != "chat" {
-				t.Fatalf("detail = %+v, want a cut grammar attempt whose reason says %q, then the chat lane", d, tc.why)
+			if len(d) != wantAttempts || d[0].FinishReason != "length" || !strings.Contains(d[0].Why, tc.why) || d[len(d)-1].Lane != wantChatLane {
+				t.Fatalf("detail = %+v, want a cut grammar attempt whose reason says %q, then the %s lane", d, tc.why, wantChatLane)
 			}
 			if strings.Contains(d[0].Why, "cannot hold it") {
 				t.Fatalf("the truncation note still says what it cannot know: %q", d[0].Why)
