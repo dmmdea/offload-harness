@@ -24,12 +24,19 @@ import (
 // writeBatchProbeStub is a --batch runner that renders every job and records argv and the launch environment.
 func writeBatchProbeStub(t *testing.T, dir string) string {
 	t.Helper()
-	script := filepath.Join(dir, "batch-probe-stub.mjs")
+	return writeNamedBatchProbeStub(t, dir, "default")
+}
+
+// writeNamedBatchProbeStub is writeBatchProbeStub for a runner that says which one it is (--stub NAME in the argv it
+// records), so a test can tell the default binding's script from a family's.
+func writeNamedBatchProbeStub(t *testing.T, dir, name string) string {
+	t.Helper()
+	script := filepath.Join(dir, "batch-probe-stub-"+name+".mjs")
 	content := `import {readFileSync, writeFileSync} from "node:fs";
 const args = process.argv.slice(2);
 const env = {};
 for (const k of ["COMFY_CUDA_DEVICE", "COMFY_DYNAMIC_VRAM", "COMFY_DIR"]) if (k in process.env) env[k] = process.env[k];
-if (process.env.RUNNER_PROBE) writeFileSync(process.env.RUNNER_PROBE, JSON.stringify({argv: args, env}));
+if (process.env.RUNNER_PROBE) writeFileSync(process.env.RUNNER_PROBE, JSON.stringify({argv: args.concat(["--stub", "NAME"]), env}));
 const lines = readFileSync(args[args.indexOf("--batch") + 1], "utf8").split("\n").filter(l => l.trim());
 const results = lines.map((l, i) => {
   const j = JSON.parse(l);
@@ -38,7 +45,7 @@ const results = lines.map((l, i) => {
 });
 writeFileSync(args[args.indexOf("--results") + 1], results.join("\n") + "\n");
 `
-	if err := os.WriteFile(script, []byte(content), 0o644); err != nil {
+	if err := os.WriteFile(script, []byte(strings.ReplaceAll(content, "NAME", name)), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	return script
@@ -48,6 +55,7 @@ writeFileSync(args[args.indexOf("--results") + 1], results.join("\n") + "\n");
 // two named families: a ComfyUI one on card 2 and one on stable-diffusion.cpp.
 func familySeamPipeline(t *testing.T, dir, stub string) *Pipeline {
 	t.Helper()
+	familyStub := writeNamedBatchProbeStub(t, dir, "family")
 	cfg := config.Default()
 	cfg.MediaDir = dir
 	cfg.ImageGenScript = stub
@@ -62,6 +70,7 @@ func familySeamPipeline(t *testing.T, dir, stub string) *Pipeline {
 		"qwen-image-2.1": {
 			"license": []byte(`"Qwen Research License"`), "commercial_use": []byte(`false`),
 			"imagegen_family":    []byte(`"qwen-image-2.1"`),
+			"imagegen_script":    mustJSON(familyStub),
 			"imagegen_ckpt":      []byte(`"qwen_image_2.1_bf16.safetensors"`),
 			"imagegen_clip":      []byte(`"qwen3vl_8b_bf16.safetensors"`),
 			"imagegen_vae":       []byte(`"qwen_image_2.1_vae_bf16.safetensors"`),
@@ -113,6 +122,9 @@ func TestRunImageBatchFamilySeam(t *testing.T) {
 		if v, _ := flagVal(got.Argv, "--ckpt"); v != "qwen_image_2.1_bf16.safetensors" {
 			t.Errorf("--ckpt = %q, want the family's checkpoint (argv %v)", v, got.Argv)
 		}
+		if v, _ := flagVal(got.Argv, "--stub"); v != "family" {
+			t.Errorf("the batch ran the %q runner, want the family's own script (argv %v)", v, got.Argv)
+		}
 		if v, _ := flagVal(got.Argv, "--family"); v != "qwen-image-2.1" {
 			t.Errorf("--family = %q, want the family's name (argv %v)", v, got.Argv)
 		}
@@ -147,6 +159,9 @@ func TestRunImageBatchFamilySeam(t *testing.T) {
 			got := read()
 			if v, _ := flagVal(got.Argv, "--ckpt"); v != "krea2_turbo_bf16.safetensors" {
 				t.Errorf("%s: --ckpt = %q, want the default binding's", name, v)
+			}
+			if v, _ := flagVal(got.Argv, "--stub"); v != "default" {
+				t.Errorf("%s: ran the %q runner, want the default binding's script", name, v)
 			}
 			if got.Env["COMFY_CUDA_DEVICE"] != "1" {
 				t.Errorf("%s: card pin = %q, want the default's 1", name, got.Env["COMFY_CUDA_DEVICE"])
@@ -257,4 +272,54 @@ func TestNormalizeImageBatchFamilyIsPartOfTheDefaultOut(t *testing.T) {
 	if once[0] != twice[0] || once[0].Seed <= 0 || once[0].Out == "" {
 		t.Errorf("normalising twice must change nothing: %+v then %+v", once[0], twice[0])
 	}
+}
+
+// The batch's lease runs for the FAMILY's timeout times the jobs, not the default binding's: the term of a lease is what
+// other callers and the RAM guard wait on, and a family that renders in minutes must not hold a card for the default's
+// hours.
+func TestRunImageBatchAsLeasesForTheFamilysTimeout(t *testing.T) {
+	f := newAdmitFixtureWith(t, admitSpec{order: admitOrder, mutate: func(c *config.Config) {
+		c.ComfyCudaDevice = "2"
+		c.ImageGenFamily = "krea2"
+		c.ImageGenTimeoutSec = 3000
+		c.ImageGenFamilies = map[string]config.FamilyOverlay{
+			"quick": {
+				"license": []byte(`"Test License"`), "commercial_use": []byte(`false`),
+				"imagegen_family":      []byte(`"quick"`),
+				"imagegen_ckpt":        []byte(`"quick.safetensors"`),
+				"imagegen_timeout_sec": []byte(`100`),
+				"comfy_cuda_device":    []byte(`"0"`),
+			},
+		}
+	}})
+	done := make(chan error, 1)
+	go func() {
+		_, err := f.p.RunImageBatchAs(context.Background(), "quick", []ImageBatchJob{
+			{Prompt: "a calm ocean at dawn", Out: filepath.Join(f.dir, "q1.png")}, {Prompt: "a calm ocean at dusk", Out: filepath.Join(f.dir, "q2.png")},
+		})
+		done <- err
+	}()
+	f.waitStarted(1)
+	leases := f.m.Leases()
+	if len(leases) != 1 {
+		t.Fatalf("want the batch's one lease, got %+v", leases)
+	}
+	if left := time.Until(leases[0].ExpiresAt); left <= 0 || left > 300*time.Second {
+		t.Errorf("the batch's lease has %s left; two jobs of a family with a 100 s timeout need about 200 s, the default binding's 3000 s would be 6000 s", left.Round(time.Second))
+	}
+	f.letRunnersGo()
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the batch did not end")
+	}
+}
+
+// mustJSON is a JSON string literal for an overlay value.
+func mustJSON(v string) []byte {
+	b, err := json.Marshal(v)
+	if err != nil {
+		panic(err)
+	}
+	return b
 }

@@ -24,6 +24,8 @@ const pngBatchStub = `import {readFileSync, writeFileSync, appendFileSync} from 
 import {deflateSync} from "node:zlib";
 const a = process.argv.slice(2);
 if (process.env.STUB_ARGV) writeFileSync(process.env.STUB_ARGV, JSON.stringify(a));
+// What the caller's results file held the moment the render began (the rows of the jobs that ended before it).
+if (process.env.STUB_WATCH && process.env.STUB_WATCH_COPY) { try { writeFileSync(process.env.STUB_WATCH_COPY, readFileSync(process.env.STUB_WATCH)); } catch {} }
 const jobs = readFileSync(a[a.indexOf("--batch") + 1], "utf8").split("\n").filter(l => l.trim());
 const table = new Uint32Array(256).map((_, n) => { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; return c >>> 0; });
 const crc = (b) => { let c = 0xffffffff; for (const x of b) c = table[(c ^ x) & 255] ^ (c >>> 8); return (c ^ 0xffffffff) >>> 0; };
@@ -137,6 +139,9 @@ func TestGenerateImageBatchResultsFileAndResume(t *testing.T) {
 		`{"prompt":"a blue car","out":`+strconvQuote(filepath.ToSlash(outs[1]))+`,"seed":102,"width":96,"height":48}`,
 		`{"prompt":"a green boat","out":`+strconvQuote(filepath.ToSlash(outs[2]))+`,"seed":103}`)
 	results := filepath.Join(home, "r", "results.jsonl")
+	watched := filepath.Join(home, "watched.jsonl")
+	t.Setenv("STUB_WATCH", results)
+	t.Setenv("STUB_WATCH_COPY", watched)
 	run := func(extra ...string) (string, error) {
 		var err error
 		out := captureStdout(t, func() {
@@ -165,6 +170,11 @@ func TestGenerateImageBatchResultsFileAndResume(t *testing.T) {
 	}
 	if n := rendersSoFar(t, countPath); n != 2 {
 		t.Fatalf("%d render(s), want 2 (the unplaceable job costs no render)", n)
+	}
+	// The row of the job that failed before the render began was already in the results file when the render began: a
+	// batch that dies mid-run leaves the jobs that ended.
+	if seen, _ := os.ReadFile(watched); !strings.Contains(string(seen), `"verdict":"failed"`) {
+		t.Errorf("the results file held %q when the render began, want the failed job's row already in it", seen)
 	}
 	var printed struct {
 		Result struct {
@@ -295,7 +305,7 @@ func TestGenerateImageBatchFlagRefusals(t *testing.T) {
 		"--jobs alone":           {[]string{"a prompt", "--config", cfgPath, "--jobs", "2"}, "--jobs belongs to --batch"},
 		"a negative --jobs":      {[]string{"--batch", jobs, "--config", cfgPath, "--jobs", "-3"}, "--jobs -3"},
 		"--transparent":          {[]string{"--batch", jobs, "--config", cfgPath, "--transparent"}, "--transparent"},
-		"an unknown family":      {[]string{"--batch", jobs, "--config", cfgPath, "--family", "nope"}, `unknown image family "nope"`},
+		"an unknown family":      {[]string{"--batch", jobs, "--config", cfgPath, "--family", "nope", "--results", filepath.Join(home, "r.jsonl")}, `unknown image family "nope"`},
 		"an unwritable results":  {[]string{"--batch", jobs, "--config", cfgPath, "--results", filepath.Join(home, "jobs.jsonl", "r.jsonl")}, "--results"},
 		"a route nobody knows":   {[]string{"--batch", jobs, "--config", cfgPath, "--route", "everywhere"}, "unrecognized route"},
 		"remote without a fleet": {[]string{"--batch", jobs, "--config", cfgPath, "--route", "remote"}, "delegate_remotes"},
