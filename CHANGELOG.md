@@ -240,9 +240,9 @@ Versioning: [SemVer](https://semver.org/).
   restored byte for byte: all 19 are killed. The first set left two surviving (a removal covered only by a redundant one, an inherited
   arrival) and four that did not compile; the tests added for the first two and valid forms of the rest are the 19.
 - **Compatibility.** No config key or file format changed: a ticket file gains an optional `fleet_note` and an optional `path_key`, the
-  queue directory `body-*` files while a graph ticket lives, the 503 body an optional `refusal`, `offload_run_graph` an optional `wait_s`. A session started before the deploy keeps the one-shot path until restarted; it
-  reads the claim files and honours them, and writes none (the old limit). A node on the build before this one answers its file refusal
-  without the word, which a delegator of this build reads as a 503 for a full node (the old behaviour); graph placement already requires
+  queue directory `body-*` files while a graph ticket lives, the 503 body an optional `refusal`, `offload_run_graph` an optional
+  `wait_s`. A session started before the deploy keeps the one-shot path until restarted; it reads the claim files and honours them,
+  and writes none (the old limit). A node on the build before this one answers its file refusal without the word, which a delegator of this build reads as a 503 for a full node (the old behaviour); graph placement already requires
   an equal `harness_version`, so such a node is not a candidate while the numbers differ.
 - Not changed, and said: the file check is by name, not content, and the bytes of a graph's input files are no part of its key (a
   finished result nobody collected, kept up to six hours, answers a repeat of the same graph even if the caller has put other bytes
