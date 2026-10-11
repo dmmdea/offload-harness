@@ -2178,11 +2178,15 @@ func (p *Pipeline) runEditImageGenerative(ctx context.Context, req core.Request,
 		Resolution:  cfg.GenEditResolution,
 		CacheDevice: cfg.GenEditCacheDevice,
 		Schedule:    cfg.GenEditSchedule,
+		Placement:   cfg.GenEditPlacement,
 		// The edit route renders on ONE card: the device pin applies.
 		Launch: comfyLaunch(cfg, true),
 	}
+	if cfg.EditMulticard() {
+		m.Launch = multicardLaunch(cfg) // two cards: no pin, no dynamic VRAM
+	}
 	timeout := time.Duration(cfg.GenEditTimeoutSec) * time.Second
-	grant, lerr := p.acquireMediaLease(ctx, "edit", timeout, p.gpuWait(), singleCardNeed(cfg, paramStr(req.Params, "waiter_token")).declaresRAM(routeRAM(hostneed.RouteEdit, cfg)).resumableBy(req))
+	grant, lerr := p.acquireMediaLease(ctx, "edit", timeout, p.gpuWait(), editNeed(cfg, paramStr(req.Params, "waiter_token")).resumableBy(req))
 	if lerr != nil {
 		return p.deferForLease(lerr, req.Task, meta, len(req.Input), start)
 	}
@@ -3916,7 +3920,7 @@ func runNvidiaSmiMemory() (string, error) {
 // added to imagegen.Model gets mapped here.
 
 func imageModelFromConfig(cfg config.Config) imagegen.Model {
-	return imagegen.Model{
+	m := imagegen.Model{
 		Ckpt:         cfg.ImageGenCkpt,
 		VAE:          cfg.ImageGenVAE,
 		Steps:        cfg.ImageGenSteps,
@@ -3934,10 +3938,18 @@ func imageModelFromConfig(cfg config.Config) imagegen.Model {
 		PoolCompute:  cfg.ImageGenPoolCompute,
 		PoolDonor:    cfg.ImageGenPoolDonor,
 		Schedule:     cfg.ImageGenSchedule,
+		Placement:    cfg.ImageGenPlacement,
 		// A pooled seat is placed by its pool keys; the device pin is for the
 		// single-card shape only (see comfyLaunch).
 		Launch: comfyLaunch(cfg, !cfg.ImagePooled()),
 	}
+	if cfg.ImageMulticard() {
+		// The card-only placement is another placement than a pool: the recipe places the DiT itself on the lease's two cards, so the pool keys are not
+		// passed (the runner refuses them beside it) and neither is the single-card launch (mediamulticard.go).
+		m.PoolVvramGB, m.PoolCompute, m.PoolDonor = 0, "", ""
+		m.Launch = multicardLaunch(cfg)
+	}
+	return m
 }
 
 // comfyLaunch maps a binding's comfy_* keys onto the runner's launch profile.
