@@ -279,9 +279,9 @@ Versioning: [SemVer](https://semver.org/).
   once, so it now has a name of that call's own (random, in the media dir) and is removed when the call ends, whatever the run came to
   (done, a typed defer in the envelope, a runner that fails after writing it); a caller that names `result_path` keeps the file it
   named. (A name made of the graph's content would not end the growth: the content moves with the seed, so each shot is another file.)
-  Envelopes an earlier build left in a media dir are not removed by this change. Red before (three runs left three envelopes, in each
-  of the three endings): `TestARunGraphLeavesNoEnvelopeBehind`, `TestARunGraphKeepsTheEnvelopeACallerNamed`,
-  `TestRunGraphEnvelopeNamesAreOneToACall`.
+  Envelopes an earlier build left in a media dir, and the one a process killed in the middle of a run leaves, are not removed by this
+  change. Red before (three runs left three envelopes, in each of the three endings): `TestARunGraphLeavesNoEnvelopeBehind`,
+  `TestARunGraphKeepsTheEnvelopeACallerNamed`, `TestRunGraphEnvelopeNamesAreOneToACall`.
 - **The mutation count is true again.** The entry above says all 27 mutations are killed, and one of them (a need re-read at every
   scan) had stopped being killed when the ticket began to keep its own copy of the graph: `TestAGraphsNeedIsReadOnceWhenTheTicketIsMade`
   removed only the caller's file, and with the copy still there to be read, a need read at every scan and a need read once gave the same
