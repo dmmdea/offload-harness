@@ -422,11 +422,14 @@ type ImageRecipeView struct {
 	Explicit      []string              `json:"explicit"`
 }
 
-// ImageRecipeFileView is one weight file of a recipe: its role, its name and its size on the node (-1: not found there).
+// ImageRecipeFileView is one weight file of a recipe: its role, its name, its size on the node (-1: not found there) and
+// its content fingerprint (a sha256 in hex, "pending" while the node is still hashing it, "unreadable", or "" for a file
+// that is not there or a node that predates the field: only a hash is an identity).
 type ImageRecipeFileView struct {
-	Role  string `json:"role"`
-	Name  string `json:"name"`
-	Bytes int64  `json:"bytes"`
+	Role        string `json:"role"`
+	Name        string `json:"name"`
+	Bytes       int64  `json:"bytes"`
+	Fingerprint string `json:"fingerprint"`
 }
 
 // MediaRouteConfigured is the state string of a route that can run right now.

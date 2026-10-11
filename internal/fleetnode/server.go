@@ -217,6 +217,9 @@ type Server struct {
 	recipeRows []ImageRecipeHealth
 	recipeAt   time.Time
 	recipeRead bool
+	// recipeGen is the fingerprinter's generation the rows were built at: a read that settled since turns a pending row
+	// into its digest without waiting for the memo's minute.
+	recipeGen uint64
 	// agentSeat is the resolved agent planner seat (config.AgentPlannerModel:
 	// agent_model > workhorse Model), computed once here at construction —
 	// the config cannot change under a running server. Advertised (and probed
