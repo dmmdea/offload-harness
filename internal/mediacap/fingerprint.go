@@ -245,6 +245,9 @@ func (f *Fingerprinter) AwaitContext(ctx context.Context, path string, size int6
 	timer := time.NewTimer(f.awaitMax)
 	defer timer.Stop()
 	wait := func(e *fpEntry) bool {
+		if e.settled() {
+			return true // a cached answer is given even to a caller that is gone: select would pick among ready cases at random
+		}
 		select {
 		case <-e.done:
 			return true

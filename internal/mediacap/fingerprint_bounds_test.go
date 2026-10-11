@@ -144,6 +144,28 @@ func TestAwaitContextStopsWaitingWhenItsCallerIsGone(t *testing.T) {
 	}
 }
 
+// A fingerprint that is already cached is answered even to a caller that is gone: the select between "settled" and "caller
+// gone" is random when both are ready, so without a look at the entry first a cache hit would answer pending half the time.
+func TestACachedFingerprintIsAnsweredEvenToAGoneCaller(t *testing.T) {
+	var hashes atomic.Int32
+	f := countingFingerprinter(&hashes)
+	p, n := smallWeight(t, t.TempDir(), "w.safetensors", 1)
+	want := f.Await(p, n)
+	if !IsFingerprint(want) {
+		t.Fatalf("Await = %q", want)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	for i := 0; i < 60; i++ {
+		if got := f.AwaitContext(ctx, p, n); got != want {
+			t.Fatalf("call %d: AwaitContext of a cached file for a gone caller = %q, want the cached hash", i, got)
+		}
+	}
+	if hashes.Load() != 1 {
+		t.Errorf("%d hashes, want 1", hashes.Load())
+	}
+}
+
 // THE SINGLE WORKER'S CONSEQUENCE, PINNED: while one read holds the worker, a wait for ANOTHER file also runs out. It
 // ends in pending at the bound, not in a hang, and that file is read once the worker is free.
 func TestAWaitForAnotherFileQueuedBehindAStalledReadEndsAtTheBound(t *testing.T) {
