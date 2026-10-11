@@ -142,6 +142,9 @@ func Build(req Request, fetched []Fetched) (specs []delegate.SubtaskSpec, source
 		derived = nonEmptyChecks(req.OutputSchema)
 	}
 	schema = core.RequireAcceptanceFields(schema, append(append([]string{}, derived...), req.Acceptance...))
+	// A schema with a `quotes` list gets the sentence that makes it the page's own
+	// words (verbatimQuotesAsk); VerifyQuotes is the delegator's check of the result.
+	hasQuotes := schemaHasQuotes(schema)
 	goal := strings.TrimSpace(req.Goal)
 	if len(req.Questions) > 0 {
 		goal += " Also answer, from the document only: " + strings.Join(req.Questions, " ")
@@ -168,6 +171,9 @@ func Build(req Request, fetched []Fetched) (specs []delegate.SubtaskSpec, source
 		// (2026-08-30, "invalid json: unexpected end of JSON input") — the seat
 		// abstained, not the caller. Bounded lists fit every seat's re-pack budget.
 		fullGoal := head + goal + " Answer only from the file; omit anything it does not contain rather than inventing it. Keep every list to at most 6 items of at most 18 words each — the most important first — and every string field under 40 words."
+		if hasQuotes {
+			fullGoal += verbatimQuotesAsk
+		}
 		if defaultDigest {
 			fullGoal += defaultVerdictAsk
 		}
