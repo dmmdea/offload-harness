@@ -59,28 +59,37 @@ export function graphClasses(graph) {
   return [...seen];
 }
 
-// missingNodeClasses asks /object_info/<class> for every class the graph names.
-// Returns { checked: true, missing: [...] }, or { checked: false, reason } when the server
-// could not answer the question (the caller then submits and lets the server speak).
-export async function missingNodeClasses(api, graph, { fetchImpl = fetch, timeoutMs = 10_000 } = {}) {
-  const missing = [];
-  for (const cls of graphClasses(graph)) {
+// fetchNodeInfo asks /object_info/<class> for every class named. Returns { checked: true, info: { <class>: <the server's entry for it, or undefined when it
+// has none> } }, or { checked: false, reason } when the server could not answer the question (the caller then decides what an unanswered question means).
+export async function fetchNodeInfo(api, classes, { fetchImpl = fetch, timeoutMs = 10_000 } = {}) {
+  const info = {};
+  for (const cls of classes) {
     let r;
     try {
       r = await fetchImpl(`${api}/object_info/${encodeURIComponent(cls)}`, { signal: AbortSignal.timeout(timeoutMs) });
     } catch (e) {
-      return { checked: false, missing: [], reason: `GET /object_info/${cls} failed: ${e?.message || e}` };
+      return { checked: false, reason: `GET /object_info/${cls} failed: ${e?.message || e}` };
     }
     if (!r || !r.ok) {
-      return { checked: false, missing: [], reason: `GET /object_info/${cls} answered HTTP ${r?.status}` };
+      return { checked: false, reason: `GET /object_info/${cls} answered HTTP ${r?.status}` };
     }
     let body;
     try { body = await r.json(); } catch {
-      return { checked: false, missing: [], reason: `GET /object_info/${cls} returned no JSON` };
+      return { checked: false, reason: `GET /object_info/${cls} returned no JSON` };
     }
-    if (!body || typeof body !== "object" || !Object.prototype.hasOwnProperty.call(body, cls)) missing.push(cls);
+    info[cls] = body && typeof body === "object" && Object.prototype.hasOwnProperty.call(body, cls) ? body[cls] : undefined;
   }
-  return { checked: true, missing };
+  return { checked: true, info };
+}
+
+// missingNodeClasses asks /object_info/<class> for every class the graph names.
+// Returns { checked: true, missing: [...] }, or { checked: false, reason } when the server
+// could not answer the question (the caller then submits and lets the server speak).
+export async function missingNodeClasses(api, graph, { fetchImpl = fetch, timeoutMs = 10_000 } = {}) {
+  const classes = graphClasses(graph);
+  const res = await fetchNodeInfo(api, classes, { fetchImpl, timeoutMs });
+  if (!res.checked) return { checked: false, missing: [], reason: res.reason };
+  return { checked: true, missing: classes.filter((cls) => res.info[cls] === undefined) };
 }
 
 // missingNodeMessage is the one line a defer carries: greppable code, every missing class

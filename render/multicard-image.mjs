@@ -14,13 +14,15 @@
 // Dependency-free; the card table and the pack scan are injectable for tests.
 import { readdirSync } from "node:fs";
 import { leaseDevices } from "./gpu-lock.mjs";
-import { missingNodeClasses } from "./comfy-nodes.mjs";
-import { comfyLogPath } from "./comfy-lifecycle.mjs";
+import { fetchNodeInfo, missingNodeMessage } from "./comfy-nodes.mjs";
+import { comfyLogPath, comfyLogCursor } from "./comfy-lifecycle.mjs";
 import {
   queryCards, wanCardTokens, resolveWanCards, confirmWithLease, refuseEqualsSpelling, multicardLaunch, multicardEnv, packDirs,
-  checkComfyDevices, PACK_MULTIGPU, PACK_GGUF,
+  checkComfyDevices, createOomWatch, PACK_MULTIGPU, PACK_GGUF,
 } from "./wan-multicard.mjs";
-import { findRecipe, recipeResident, PLACEMENTS, PLACEMENT_DEFAULT, MULTICARD_STORAGE, MULTICARD_COMPUTE } from "./multicard-recipes.mjs";
+import {
+  findRecipe, recipeResident, recipePeaks, multicardLoaders, PLACEMENTS, PLACEMENT_DEFAULT, MULTICARD_STORAGE, MULTICARD_COMPUTE,
+} from "./multicard-recipes.mjs";
 
 /** The image runners' flags: the Wan placement's --wan-placement, --wan-resident-gb and --wan-cards with the prefix dropped. */
 export const IMAGE_FLAG_NAMES = Object.freeze(["placement", "resident-gb", "cards"]);
@@ -85,16 +87,13 @@ function checkResident(recipe, residentGb, pair) {
 }
 
 /**
- * checkPeaks: the recipe's per-card peak against the two cards it was handed, each less --reserve-vram. The DiT's total is the invariant, so
- * a resident share moves bytes between the cards one for one: a larger share raises the compute card's peak, and a smaller one puts the
- * same bytes on the storage card (the allocation string keeps `residentGb` on the compute card and sends the REMAINDER to the storage card).
- * The storage figure is never lowered by a larger share, because no run measured that: the recipe's own stands. For a recipe whose storage
- * peak is its text-encoder stage (the 2.1 bf16 one) a smaller share is therefore refused somewhat early, on the conservative side.
+ * checkPeaks: the recipe's per-card peak (recipePeaks: a resident share moves bytes between the cards one for one) against the two cards it was
+ * handed, each less --reserve-vram.
  */
 function checkPeaks(recipe, residentGb, pair, flags) {
   const reserve = reserveGiB(flags);
-  const shift = residentGb === null ? 0 : residentGb - recipe.unet.residentGb;
-  const asks = [["compute", pair.compute, recipe.peakGiB.compute + shift], ["storage", pair.storage, recipe.peakGiB.storage + Math.max(0, -shift)]];
+  const peaks = recipePeaks(recipe, residentGb);
+  const asks = [["compute", pair.compute, peaks.compute], ["storage", pair.storage, peaks.storage]];
   for (const [role, card, peak] of asks) {
     const total = card.totalMiB / 1024;
     if (peak > total - reserve) {
@@ -145,11 +144,26 @@ export function lifecycleOptions(plan) {
   return plan ? { launch: plan.launch, instanceEnv: plan.env } : {};
 }
 
+/** recipeLoaderNodes: the three loader nodes ("1" DiT, "2" text encoder, "3" VAE) the plan's recipe puts in a graph, with placeholder file names. */
+export function recipeLoaderNodes(plan) {
+  return multicardLoaders(plan.recipe, { unet: "unet", clip: "clip", vae: "vae", residentGb: plan.residentGb ?? undefined });
+}
+
+/** The inputs a /object_info entry declares, whatever section (required, optional, hidden) names them; null when the entry says nothing about inputs. */
+function declaredInputs(entry) {
+  const input = entry && typeof entry === "object" ? entry.input : null;
+  if (!input || typeof input !== "object") return null;
+  return new Set(["required", "optional", "hidden"].flatMap((k) => (input[k] && typeof input[k] === "object" ? Object.keys(input[k]) : [])));
+}
+
 /**
  * verifyImagePlacement: ComfyUI numbers its cards in the order of the CUDA_VISIBLE_DEVICES it was launched with, and the graph names cuda:0
  * (storage) and cuda:1 (compute). Before anything is submitted, the running ComfyUI's own device list is compared with the two cards it was
  * pinned to, and the harness's node pack (render/comfyui-ext, which installs the read-only safetensors reader and raises on import when it
- * cannot) is asked for by one of its classes. A mismatch, a pack that did not load and an answer that cannot be had are all refusals.
+ * cannot) is asked for by one of its classes. The recipe's own loader classes are asked for too (a class the pack does not register is
+ * MISSING_NODE, with its pack hint), and each must still declare every input the recipe sets: ComfyUI drops an input a class does not declare
+ * without a word, so a renamed `expert_mode_allocations` would run with no split at all. A mismatch, a pack or class that did not load and an
+ * answer that cannot be had are all refusals.
  */
 export async function verifyImagePlacement(api, plan, { fetchImpl = fetch } = {}) {
   let body;
@@ -162,11 +176,84 @@ export async function verifyImagePlacement(api, plan, { fetchImpl = fetch } = {}
   }
   const problems = checkComfyDevices(body?.devices, plan.pair);
   if (problems.length) throw new Error(`IMAGE-PLACEMENT-MISMATCH: ${problems.join("; ")}. Nothing was submitted.`);
-  const res = await missingNodeClasses(api, { 1: { class_type: "OffloadFreeForDecode" } }, { fetchImpl });
-  if (!res.checked) throw new Error(`IMAGE-PLACEMENT-PACK: cannot tell whether the harness's node pack (offload_multicard) loaded: ${res.reason}. Nothing was submitted.`);
-  if (res.missing.length) {
+  const loaders = Object.values(recipeLoaderNodes(plan));
+  const classes = ["OffloadFreeForDecode", ...new Set(loaders.map((n) => n.class_type))];
+  const res = await fetchNodeInfo(api, classes, { fetchImpl });
+  if (!res.checked) throw new Error(`IMAGE-PLACEMENT-PACK: cannot tell whether the harness's node pack (offload_multicard) and the ${plan.recipe.id} recipe's loaders are there: ${res.reason}. Nothing was submitted.`);
+  if (res.info.OffloadFreeForDecode === undefined) {
     throw new Error(`IMAGE-PLACEMENT-PACK: ComfyUI at ${api} has no OffloadFreeForDecode, so the harness's node pack offload_multicard failed to import (it refuses to load when its read-only safetensors reader cannot be installed, and without that reader each weight file would charge its whole size to host commit): ComfyUI's console log says why (${comfyLogPath(plan.comfyDir || "", plan.launch.key)}). Nothing was submitted.`);
   }
+  const missing = classes.filter((cls) => cls !== "OffloadFreeForDecode" && res.info[cls] === undefined);
+  if (missing.length) throw new Error(missingNodeMessage(api, missing, plan.comfyDir || ""));
+  for (const node of loaders) {
+    const declared = declaredInputs(res.info[node.class_type]);
+    const lost = declared ? Object.keys(node.inputs).filter((k) => !declared.has(k)) : [];
+    if (lost.length) {
+      throw new Error(`IMAGE-PLACEMENT-NODE-INPUT: ComfyUI at ${api} has ${node.class_type}, but it declares no input ${lost.join(", ")}, which the ${plan.recipe.id} recipe sets. ComfyUI drops an input a class does not declare without a word, so the placement would silently not happen (the pack on this ComfyUI is not the one the recipe was written against). Nothing was submitted.`);
+    }
+  }
+}
+
+// ---- the console watch and the decode verdict -----------------------------------------------------------------------------
+
+const toImageWords = (m) => String(m).replace(/^WAN-OOM(-WATCH)?: /, (_, w) => `IMAGE-PLACEMENT-OOM${w || ""}: `);
+
+/**
+ * beginPlacedWatch: the `watch` the runner hands the poll while a card-only prompt runs; null for no plan. A ComfyUI whose prompt worker died after an
+ * out-of-memory error inside DisTorch2 keeps answering HTTP (/history lists nothing), so the wait would run to the end of its budget with both cards
+ * leased; the instance's own console says so, and the wait ends with a message that names the line, the recipe and the per-card peaks it was held to.
+ * Made BEFORE the prompt is submitted, so it reads this run's lines and not an earlier run's. It also remembers whether ComfyUI retried the decode tiled
+ * (`.drain()` then `.verdict`: "clean", "fallback" or "blind"; settlePlacedRun reads them). The detection is the Wan runner's (createOomWatch), in the
+ * image runners' words.
+ */
+export function beginPlacedWatch(plan, { cursorFn = comfyLogCursor, comfyDir = plan && plan.comfyDir, say = (m) => console.error(m) } = {}) {
+  if (!plan) return null;
+  const inner = createOomWatch({ cursor: cursorFn(comfyDir, plan.launch.key), say: (m) => say(toImageWords(m)) });
+  const peaks = recipePeaks(plan.recipe, plan.residentGb);
+  const gib = (c) => (c.totalMiB / 1024).toFixed(1);
+  const numbers = ` The ${plan.recipe.id} recipe holds ${peaks.compute.toFixed(1)} GiB on the compute card (idx ${plan.pair.compute.index}, ${gib(plan.pair.compute)} GiB) and ${peaks.storage.toFixed(1)} GiB on the storage card (idx ${plan.pair.storage.index}, ${gib(plan.pair.storage)} GiB).`;
+  const watch = () => {
+    const verdict = inner();
+    return verdict ? toImageWords(verdict) + numbers : verdict;
+  };
+  watch.drain = () => inner.drain();
+  Object.defineProperty(watch, "verdict", { get: () => inner.verdict });
+  return watch;
+}
+
+/** tiledPath: where an image that is not the one that was asked for is kept, beside the requested path (out/o.png -> out/o.tiled.png). */
+export function tiledPath(out) {
+  const dot = out.lastIndexOf("."), slash = Math.max(out.lastIndexOf("/"), out.lastIndexOf("\\"));
+  return dot > slash + 1 ? `${out.slice(0, dot)}.tiled${out.slice(dot)}` : `${out}.tiled`;
+}
+
+/**
+ * settlePlacedRun: the bytes of a finished card-only render, written. ComfyUI retries a VAE decode that ran out of memory TILED, with tiles it sizes
+ * itself, and says so only in its console: an image made that way can show seams where its tiles meet, and is not the single-pass decode the recipe was
+ * measured on. Judged by what THIS run's console said (the watch's cursor began before the submit), never by the tail of a log that a kept instance
+ * shares with earlier runs. The finished image is kept beside the requested path (the sampling cost the whole run), the run is finalized, and it fails: a
+ * caller that keys on the exit code or on WROTE must not ship the seams. A console that cannot be read to the end is said, and the image is delivered:
+ * unknown is not a fallback. With no watch (no plan) the bytes are simply written to `out`. Returns the verdict.
+ */
+export async function settlePlacedRun({ watch, plan, out, bytes, write, finalize, stderr = (m) => console.error(m) }) {
+  if (!watch) {
+    write(out, bytes);
+    return "clean";
+  }
+  watch.drain();
+  const verdict = watch.verdict;
+  const log = comfyLogPath(plan.comfyDir || "", plan.launch.key);
+  if (verdict === "fallback") {
+    const kept = tiledPath(out);
+    write(kept, bytes);
+    await finalize();
+    throw new Error(`IMAGE-DECODE-FALLBACK: ComfyUI ran out of memory in the VAE decode and retried it tiled with tiles of its own, so the image is not the single-pass decode the ${plan.recipe.id} recipe was measured on and can show seams where its tiles meet (console: ${log}). The finished image was kept as ${kept} instead of ${out}.`);
+  }
+  write(out, bytes);
+  if (verdict === "blind") {
+    stderr(`IMAGE-DECODE-UNVERIFIED: ComfyUI's console (${log}) could not be read to the end (it is missing, or its capture reached the 5 MB cap), so whether ComfyUI retried the VAE decode tiled is unknown; check the image for seams where tiles would meet`);
+  }
+  return verdict;
 }
 
 export { PLACEMENTS, PLACEMENT_DEFAULT };

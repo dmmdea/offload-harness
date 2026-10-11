@@ -54,8 +54,9 @@ import { dirname } from "node:path";
 import { writeFileAtomic } from "./atomic-out.mjs";
 import { withGpuSlot } from "./gpu-lock.mjs";
 import { familySignature } from "./comfy-family.mjs";
-import { COMFY_DIR, comfyApi } from "./comfy-lifecycle.mjs";
-import { planImageMulticard, lifecycleOptions, verifyImagePlacement, imagePlacementMode } from "./multicard-image.mjs";
+import { COMFY_DIR, comfyApi, comfyLogCursor } from "./comfy-lifecycle.mjs";
+import { assertNodeClasses } from "./comfy-nodes.mjs";
+import { planImageMulticard, lifecycleOptions, verifyImagePlacement, imagePlacementMode, beginPlacedWatch, settlePlacedRun } from "./multicard-image.mjs";
 import { findRecipe, RecipeRefusal } from "./multicard-recipes.mjs";
 import { buildHiDreamO1 } from "./wf-hidream-o1.mjs";
 import { buildKrea2 } from "./wf-krea2.mjs";
@@ -397,8 +398,9 @@ const firstImage = (outputs) => {
 // `io` is the outside world generate() touches, replaced by recording fakes in render/multicard-image-run.test.mjs; the defaults are the real calls.
 // The poll is a literal `pollOutputs(` call: gpu_progress_test.go finds the render helpers that heartbeat by it.
 export const GENERATE_IO = Object.freeze({
-  verifyPlacement: verifyImagePlacement, resolveCli, submit: submitGraph, poll: (opts) => pollOutputs(opts), view: fetchView, write: writeFileAtomic,
-  finalize: finalizeRun, stdout: (...a) => console.log(...a), env: process.env,
+  verifyPlacement: verifyImagePlacement, preflight: assertNodeClasses, logCursor: comfyLogCursor, resolveCli, submit: submitGraph,
+  poll: (opts) => pollOutputs(opts), view: fetchView, write: writeFileAtomic, finalize: finalizeRun,
+  stdout: (...a) => console.log(...a), stderr: (...a) => console.error(...a), env: process.env, comfyDir: COMFY_DIR,
 });
 
 export async function generate(out, API, built, flags, placement, io = {}) {
@@ -408,6 +410,11 @@ export async function generate(out, API, built, flags, placement, io = {}) {
   if (placement) await x.verifyPlacement(API, placement);
   const { graph, seed, width, height } = built;
   const cli = x.resolveCli();
+  // The card-only placement: the graph's node classes are asked for (a loader class the install lacks is MISSING_NODE with its pack hint, not a bare
+  // rejected POST after the pair was leased), and the instance's console is watched while the prompt runs (an out-of-memory wedge ComfyUI does not report,
+  // a decode it retried tiled). The cursor is made BEFORE the submit, so it reads this run's lines and not an earlier run's.
+  if (placement) await x.preflight(API, graph, { comfyDir: x.comfyDir });
+  const watch = beginPlacedWatch(placement, { cursorFn: x.logCursor, comfyDir: x.comfyDir, say: x.stderr });
   const { promptId } = await x.submit({ api: API, graph, clientId: "render-" + seed, cli });
   x.stdout("queued", promptId, flags.graph ? `(graph: ${flags.graph})` : `seed ${seed} ${width}x${height}`);
   // Poll budget: quality-first renders (e.g. HiDream-O1 bf16 at native 2048, 40-step
@@ -420,13 +427,14 @@ export async function generate(out, API, built, flags, placement, io = {}) {
     isDone: (entry) => !!firstImage(entry.outputs),
     noOutputMsg: "no image produced in time",
     onExecError: () => x.finalize({ api: API, promptId, cli }),
+    ...(watch ? { watch } : {}),
   });
   const img = firstImage(h.outputs);
   const buf = await x.view({ api: API, file: img });
   // Atomic: a full disk used to leave a ZERO-BYTE png here (writeFileSync truncates the target first)
   // that a skip-existing caller then read as finished (2026-10-09). Now nothing is at `out` unless the
   // whole image is, and a previous good file survives a failed write (atomic-out.mjs).
-  x.write(out, buf);
+  await settlePlacedRun({ watch, plan: placement, out, bytes: buf, write: x.write, finalize: () => x.finalize({ api: API, promptId, cli }), stderr: x.stderr });
   x.stdout("WROTE", out, buf.length, "bytes");
   // Bookkeeping AFTER the artifact is safe on disk: records authoritative timing
   // (execution_start -> execution_success) and releases the CLI's submission lease.

@@ -101,6 +101,18 @@ export function allocationString(residentGb) {
 }
 
 /**
+ * recipePeaks: the per-card VRAM peak (GiB) a call on this recipe is held to at a given resident share (null = the recipe's own, or a plain pin that has none).
+ * The DiT's total is the invariant: --resident-gb keeps that many GiB of it on the compute card and the allocation string sends the REMAINDER to the storage
+ * card. A larger share raises the compute peak; a smaller one puts the same bytes on the storage card. The storage figure is never lowered by a larger share,
+ * because no run measured that: the recipe's own stands. For a recipe whose storage peak is its text-encoder stage (the 2.1 bf16 one) a smaller share is
+ * therefore refused somewhat early, on the conservative side.
+ */
+export function recipePeaks(row, residentGb) {
+  const shift = residentGb === null || residentGb === undefined || row.unet.loader === "plain" ? 0 : residentGb - row.unet.residentGb;
+  return { compute: row.peakGiB.compute + shift, storage: row.peakGiB.storage + Math.max(0, -shift) };
+}
+
+/**
  * recipeResident: the GiB of the DiT kept on the compute card: the recipe's own, or the caller's override (--resident-gb). A recipe
  * that puts the whole DiT on the compute card has no share to set, and an override for it is refused rather than ignored.
  */

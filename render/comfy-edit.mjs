@@ -36,8 +36,9 @@ import { join } from "node:path";
 import { writeFileAtomic } from "./atomic-out.mjs";
 import { withGpuSlot } from "./gpu-lock.mjs";
 import { familySignature } from "./comfy-family.mjs";
-import { COMFY_DIR, comfyApi } from "./comfy-lifecycle.mjs";
-import { planImageMulticard, lifecycleOptions, verifyImagePlacement, imagePlacementMode } from "./multicard-image.mjs";
+import { COMFY_DIR, comfyApi, comfyLogCursor } from "./comfy-lifecycle.mjs";
+import { assertNodeClasses } from "./comfy-nodes.mjs";
+import { planImageMulticard, lifecycleOptions, verifyImagePlacement, imagePlacementMode, beginPlacedWatch, settlePlacedRun } from "./multicard-image.mjs";
 import { findRecipe, RecipeRefusal } from "./multicard-recipes.mjs";
 import { stagedInputName } from "./comfy-input.mjs";
 import { buildQwenImageEdit, QWEN_EDIT_PRESETS, resolveEditMegapixels } from "./wf-qwen-image-edit.mjs";
@@ -243,8 +244,9 @@ export function unstageInputs(staged, { inputDir, unlink = unlinkSync } = {}) {
 // The outside world renderEdit() touches, replaced by recording fakes in render/multicard-image-run.test.mjs; the defaults are the real calls.
 // The poll is a literal `pollOutputs(` call: gpu_progress_test.go finds the render helpers that heartbeat by it.
 export const RENDER_IO = Object.freeze({
-  verifyPlacement: verifyImagePlacement, stage: stageInputs, unstage: unstageInputs, resolveCli, submit: submitGraph, poll: (opts) => pollOutputs(opts),
-  view: fetchView, write: writeFileAtomic, finalize: finalizeRun, stdout: (...a) => console.log(...a), env: process.env,
+  verifyPlacement: verifyImagePlacement, preflight: assertNodeClasses, logCursor: comfyLogCursor, stage: stageInputs, unstage: unstageInputs, resolveCli,
+  submit: submitGraph, poll: (opts) => pollOutputs(opts), view: fetchView, write: writeFileAtomic, finalize: finalizeRun,
+  stdout: (...a) => console.log(...a), stderr: (...a) => console.error(...a), env: process.env, comfyDir: COMFY_DIR,
 });
 
 /** renderEdit: what the run does once it holds the GPU slot: check the placement, stage the inputs, submit, wait, write, finalize, unstage. */
@@ -260,6 +262,10 @@ export async function renderEdit({ out, API, plan, placement, inputDir }, io = {
     // Shared submission/polling/retrieval (comfy-submit.mjs): CLI-preferred submit with
     // byte-identical raw fallback; hardened poll loop (dead-server watchdog).
     const cli = x.resolveCli();
+    // The card-only placement: the graph's node classes are asked for before it is posted, and the instance's console is watched while the prompt runs
+    // (an out-of-memory wedge ComfyUI does not report, a decode it retried tiled); the cursor is made BEFORE the submit.
+    if (placement) await x.preflight(API, graph, { comfyDir: x.comfyDir });
+    const watch = beginPlacedWatch(placement, { cursorFn: x.logCursor, comfyDir: x.comfyDir, say: x.stderr });
     const { promptId } = await x.submit({ api: API, graph, clientId: "edit-" + plan.seed, cli });
     x.stdout("queued", promptId, "seed", plan.seed, plan.describe);
     const waitSec = Number(x.env.COMFY_WAIT_SEC || 1800);
@@ -268,9 +274,11 @@ export async function renderEdit({ out, API, plan, placement, inputDir }, io = {
       isDone: (entry) => !!firstOutputFile(entry.outputs, graph),
       noOutputMsg: "no edited image produced in time",
       onExecError: () => x.finalize({ api: API, promptId, cli }),
+      ...(watch ? { watch } : {}),
     });
     const file = firstOutputFile(h.outputs, graph);
-    x.write(out, await x.view({ api: API, file }));
+    const bytes = await x.view({ api: API, file });
+    await settlePlacedRun({ watch, plan: placement, out, bytes, write: x.write, finalize: () => x.finalize({ api: API, promptId, cli }), stderr: x.stderr });
     x.stdout("WROTE", out);
     await x.finalize({ api: API, promptId, cli });
   } finally {

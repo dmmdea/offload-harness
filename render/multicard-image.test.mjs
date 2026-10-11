@@ -251,9 +251,9 @@ test("verifyImagePlacement cannot tell whether a recipe class is there when /obj
 });
 
 test("recipeLoaderNodes: the three loader nodes the recipe puts in a graph, from the plan's own share", () => {
-  const nodes = I.recipeLoaderNodes(plan({ flags: { placement: "multicard", "resident-gb": "6" } }));
+  const nodes = I.recipeLoaderNodes(plan({ flags: { placement: "multicard", "resident-gb": "7.5" } }));
   assert.deepEqual(Object.keys(nodes), ["1", "2", "3"]);
-  assert.equal(nodes["1"].inputs.expert_mode_allocations, "cuda:1,6gb;cuda:0,*");
+  assert.equal(nodes["1"].inputs.expert_mode_allocations, "cuda:1,7.5gb;cuda:0,*");
   assert.equal(I.recipeLoaderNodes(plan({ family: "qwen-image", unet: "qwen-image-2512-Q5_1.gguf", clip: undefined }))["1"].class_type, "UnetLoaderGGUFDisTorch2MultiGPU");
 });
 
