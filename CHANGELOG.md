@@ -368,17 +368,17 @@ Versioning: [SemVer](https://semver.org/).
   blocks are evenly spaced, so that stretch is about a sixty-third of the file: roughly 0.3 GB of a 20 GB checkpoint and 0.65 GB of
   a 42 GB one; a layer-wise merge or a baked-in VAE can sit inside it), nor a replacement with the same size and the same
   modification time while the process that cached the old reading runs** (the cache is in memory, by path, size and
-  modification time, and a restart reads again; a one-shot CLI call is a fresh process, so it reads its family's samples on every
-  call, an estimated one to three seconds from the rates above, before the lane question); compare whole-file hashes after a merge
-  you swap in or a copy you doubt.
+  modification time, and a restart reads again; a one-shot CLI call is a fresh process, so on a busy lane it reads its family's
+  samples on every call, an estimated one to three seconds from the rates above, before it makes its ticket, and on a free lane it
+  reads nothing: the lane is asked first); compare whole-file hashes after a merge you swap in or a copy you doubt.
 - **Health never waits for it.** `/fleet/health` reads the fingerprint cache; a file not hashed yet starts one background read (one
   file at a time in this process) and is published `"fingerprint":"pending"` (`"unreadable"` when it cannot be read, retried after 30 s). **A row
   with any such file publishes an empty `digest`**, so two nodes that were both pending cannot share one. The row memo (60 s) is
   rebuilt as soon as a read settles. The node's 412 re-check and the delegator's own recipe wait for a fingerprint they do not have.
 - **A wait for a fingerprint ends, and a stalled read is given up on.** The 412 re-check and the delegator's door wait through
   `AwaitContext`: it ends when the request's context does and, whatever the context, after 20 s (chosen), and a file still unread is
-  named `pending` (the 412 names it and the delegator reads health again; at the door the family has no identity for that call and
-  it runs on the local line). A read that does not finish in 60 s (chosen) is given up on: that file reads `unreadable`, the single
+  named `pending` (the 412 names it and carries the cause `pending`, which the delegator reads as a wait; at the door the family has
+  no identity for that call and it runs on the local line). A read that does not finish in 60 s (chosen) is given up on: that file reads `unreadable`, the single
   reader serves the other files, the file is not read again while the first read is out, and the harness logs it once; until then a
   stalled read holds the reader and the other files stay `pending`. The "send family=X to use its Y" hint reads this machine's other
   families from the cache without waiting (a family not hashed yet is left out), and a call that has no fleet overflow because a file
@@ -389,12 +389,50 @@ Versioning: [SemVer](https://semver.org/).
   candidate once it has), whether or not the row carries a digest; two all-pending recipes are never taken for one match; and a
   same-named, same-size file with other bytes is a miss that names the file: `imagegen_ckpt: <name> has the same size on both and
   different content (fingerprint <12 hex> vs <12 hex>)`. A node whose file cannot be read answers the 412 with the file and its state.
+- **A free lane reads no fingerprint.** The door built this machine's identity (what its family is, which waits up to 20 s for a
+  fingerprint it has not got) before it asked the lane, so every free-lane call on a box with a fleet paid the reads first, against
+  the door's own promise that a free lane runs the call here exactly as it always did. The lane is now asked first, and the identity
+  is built only when the lane read busy (or could not be read) and a ticket is about to be made
+  (`TestAFreeLaneNeverWaitsOnAFingerprintRead`: every read held, the call returns and no weight file is read;
+  `TestABusyLaneReadsTheFingerprintsOnlyAfterTheLaneWasAsked`). A call without an identity logs why only when its lane was not free.
+  One consequence, pinned by `TestARepeatOfALiveTicketAttachesWhileThisMachineHasNoIdentity`: a repeat of a request identical to a live
+  ticket attaches to it even when this machine cannot read its weight files at that moment, where it used to run a second copy here.
+- **A 412 says why, and a wait is not counted as a bounce.** A node answered every 412 the same way and the delegator read each one
+  as "its files changed since it published them": a minute's pause, a longer one on the next, each counted as a bounce. Since F59 a
+  node also answers 412 when it has not finished reading its files and cannot say yet whether they changed, which is a wait. The
+  refusal's JSON body now carries a `cause`
+  beside `status` and `error`: `pending` (every file it lacks a fingerprint for is still being read), `unreadable` (a file is there
+  and cannot be read, so it cannot vouch for the family) or `changed` (the family no longer digests to the digest sent, or the node
+  no longer serves it). A delegator that reads `pending` leaves the node alone for a minute (the first bounce step; chosen, and
+  about as old as the node's published rows can be) and does not count it as a bounce, so a run of them never reaches the
+  five-minute step and a later real change still starts at one minute; `unreadable` and `changed` are bounced as before, and a
+  refusal that names no cause this build knows is bounced like `changed`, its row saying the node did not say why. The cluster row
+  says which cause it was. The node's half is pinned in `internal/fleetnode/image_recipe_cause_test.go`, the delegator's in `internal/mediaremote/recipe_refusal_test.go`.
 - **Deploying.** Every node that should take overflow must run this release: the digest is version 2 and a recipe is compared only
   between the same release (`harness_version`), so a fleet part-way through the upgrade matches only inside each release, and an
-  overflow between releases falls back to the local line and the ticket. The first dispatch after a node restarts can be answered
-  412 naming a file `pending`; the delegator reads health again. After the upgrade the three live matches of 0.179.0 are
-  read again (`image_recipes` on both nodes of each pair); a pair that no longer matches is a finding about the files, and the
-  cluster answer names the file. Nothing here was run against a live fleet.
+  overflow between releases falls back to the local line and the ticket. A dispatch goes only to a node whose health row carries a
+  digest, which it publishes once it has read its files, so the first dispatch after a node restarts finds them cached and is not
+  refused for want of them. One that meets a file the node has not read (it changed after the row was published) waits for it
+  (until the request ends and, whatever the request, 20 s at most; a few seconds for a family of four files on the machine
+  measured) and is admitted when the digest then matches; only a read still unfinished at that bound is answered 412 with the
+  cause `pending`, which the delegator reads as a wait. After the upgrade the three live matches of 0.179.0 are read again (`image_recipes` on both nodes of each pair); a pair that no longer
+  matches is a finding about the files, and the cluster answer names the file. Nothing here was run against a live fleet.
+- **Named limits of the polish round (F59), one line each.**
+  - The one-minute pause for a `pending` refusal is chosen, not measured: it is the first bounce step and about the age of the rows a
+    node publishes (a 60 s memo).
+  - `changed` is one cause for three things the node's own sentence tells apart (a file replaced, a family the node no longer
+    serves, a binding that is not ComfyUI); no finer word was added.
+  - The delegator's tests serve `pending` and `unreadable` from the fixture in the node's own shape and drive a real node to a real
+    `changed` only: a real node answers `pending` after a 20 s wait that no test outside `mediacap` can shorten. The node's half is
+    pinned apart, in `internal/fleetnode`, on the same constants.
+  - A call with no identity (an unknown family, an sd.cpp binding, a file this machine lacks) now asks the lane before it runs on
+    its own line, where it ran at once: one read-only question, bounded, and the price of not reading the files on a free lane.
+  - The adopter of a dead owner's ticket still builds the identity before it knows whether the job will be passed back (a
+    passed-back job re-enters the scan and needs it); only the free path was changed.
+  - The log line for a read that is given up on is once per stalled read; the line for a caller that stops waiting (the 20 s
+    bound) is one per affected call, and no test pins that one.
+  - `mediacap.ImageRecipe` has no production caller (its comment says so); it stays because tests and documents name it, and
+    deleting it is a separate cleanup.
 
 ## [0.179.0] - 2026-10-10 - a busy image lane overflows to an idle node that renders the same recipe, and every GPU lease path has a host-RAM brake
 

@@ -500,7 +500,8 @@ empty; it fills in on the next health read once the file has been read (this pro
 most each; a model load in another process is not coordinated with). A read that has not finished in 60 s is given up on: that file
 reads `"unreadable"`, the others are read, and the harness logs it once. The node re-checks a `recipe_digest` at admission from the
 files then on disk (waiting for a fingerprint it has not got, for 20 s at most or until the request is gone; a file still unread is
-named `pending`) and answers **412** on a mismatch or on a file it cannot fingerprint; the delegator then reads health again. **Every node must run the same release for digests to match**: the
+named `pending`) and answers **412** on a mismatch or on a file it cannot fingerprint; the body names the `cause` (`pending`: files still
+being read, so it cannot say yet whether they changed; `unreadable`; `changed`) and the delegator then reads health again. **Every node must run the same release for digests to match**: the
 digest is version 2, and a delegator compares recipes only between nodes on its own release, so upgrade the fleet before relying
 on a match. The cache is in memory (path, size, modification time); a restart reads each file's sample again (0.17 to 0.87 s per file on the one workstation measured, page cache not controlled; a cold or network disk was not measured).
 Details: [media-generation.md](systems/media-generation.md#overflow-a-busy-lane-places-an-image-call-on-the-fleet-adr-0082).

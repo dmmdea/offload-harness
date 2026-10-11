@@ -301,9 +301,10 @@ file can see. Every other decision stands.
    (`Fingerprinter.AwaitContext`, the same cache and the same single worker), because a dispatch and a placement are not health.
    **The wait has a bound**: it ends when the request's context does (the dispatch handler's, the door's) and, whatever the
    context, after 20 s (chosen; a cold family of four files read in a few seconds on the machine measured), and answers `pending`.
-   A family with a file the node cannot fingerprint, or has not finished, is refused with 412 naming the file and its state (the
-   delegator reads health again); at the door the same state is no identity for that call, which runs on the local line and logs
-   the reason once. **A read that does not finish in 60 s (chosen) is given up on**: its file is `unreadable`, the worker serves
+   A family with a file the node cannot fingerprint, or has not finished, is refused with 412 naming the file and its state, and
+   the cause (decision 7); at the door the same state is no identity for that call, which runs on the local line and logs the
+   reason once (the identity is built only when the lane read busy: a free lane reads no file). **A read that does not finish in
+   60 s (chosen) is given up on**: its file is `unreadable`, the worker serves
    the other files, and the read, which cannot be cancelled, runs on until the disk lets it return; the file is not read again
    meanwhile, so a hung disk costs one goroutine and one handle per stuck file, and one log line. Until the 60 s pass, a stalled
    read holds the single worker and every other file stays `pending`: the node publishes no digest for those families and is a
@@ -323,15 +324,36 @@ file can see. Every other decision stands.
    fleet part-way through the upgrade matches only inside each release: a delegator at this release finds no match on a node still
    on the one before, and a node at this release is matched by no older delegator, and an overflow then degrades to the local
    line and the ticket as it does for any release skew. **Every node that should take overflow must run this release before
-   the live matches can be read again.** The first dispatch after a node restarts can be answered 412 naming a file `pending` (its
-   files are not read yet): the delegator reads health again.
+   the live matches can be read again.** A dispatch is sent only to a node whose health row carries a
+   digest, which the node publishes once it has read its files, so the first dispatch after a node restarts finds them cached and is
+   not refused for want of them. A dispatch that does meet a file the node has not read (one that changed after its row was
+   published, or a cache that was dropped) waits for it (decision 4: until the request ends and, whatever the request, 20 s at
+   most; a family of four files read in a few seconds on the machine measured) and is admitted when the digest then matches. Only a
+   read still unfinished at that bound (a slow or cold disk, a stalled read) is answered 412 with the cause `pending`, which the
+   delegator reads as a wait and not as a finding (decision 7).
+7. **A 412 says why, and the delegator tells a wait from a difference.** A 412 used to mean one thing, that the node's files had
+   changed since it published them, and the delegator left such a node alone for a minute and, on the next, for the cap (5 minutes),
+   counting each as a bounce. A node can now also refuse because it has not finished reading its weight files and cannot say yet
+   whether the family is what it was sent, which is a wait for an answer and not a finding. The refusal's JSON body carries a
+   `cause` beside `status` and `error`, one of `pending` (every file the node lacks a fingerprint for is still being read),
+   `unreadable` (a file is there and could not be read, so the node cannot vouch for the family) or `changed` (the family no longer
+   digests to the digest sent, or the node no longer serves it or binds it to another engine). The member is read as a member and
+   not matched out of a sentence, and the node's words choose nothing beyond these three: a refusal that names none this build
+   knows (a proxy, a node of another build, a node of an earlier build) is bounced like `changed`, the conservative reading, and its
+   row says the node did not say why. A delegator that reads `pending` leaves the node alone for the first bounce step (a minute:
+   chosen) and does **not** count it as a bounce, so a run of `pending` answers never reaches the cap and a later `changed` still
+   starts at a minute. `unreadable` and `changed` are bounced as before. The cluster row names the cause. The pause is there because
+   the rows a node published can be up to a minute old (its health memo is 60 s) and would offer it the job again at the next scan,
+   each dispatch waiting up to 20 s for the same answer; what the node is, is decided by the health row the next scan reads, not by
+   the pause, and it is a minute and not the cap because a node that is reading its files is expected to have read them by then.
 
 **Named limits of the amendment.** For a window of seconds after a node starts, or after one of its weight files changes (0.17 to
 0.87 s per file on the machine measured, with a warm cache; a cold disk was not measured), its family is
 `pending` and the node is a named miss; a delegator that starts reads its own files once, a sample per file, before its first
-comparison. **A one-shot CLI call is a fresh process, so it reads its family's samples again on every call, before the lane
-question** (an estimate from the figures above: one to three seconds for a family of three or four files; the MCP server and
-`fleet-serve` keep the cache for the life of the process). The two sizes, the 30 s retry, the 20 s wait and the 60 s read bound are chosen, and the timings above are one machine's, with the
+comparison. **A one-shot CLI call is a fresh process, so on a busy lane it reads its family's samples again on every call, before
+it makes its ticket** (an estimate from the figures above: one to three seconds for a family of three or four files), and on a free
+lane it reads nothing, because the lane is asked first; the MCP server and `fleet-serve` keep the cache for the life of the
+process. The two sizes, the 30 s retry, the 20 s wait and the 60 s read bound are chosen, and the timings above are one machine's, with the
 page cache not controlled. The 30 s retry is keyed on the file's state (path, size, modification time), so a file still being
 copied, whose size or time keeps moving, is read again on every health refresh (64 MiB at most per read, bounded by the health
 poll) and not once per 30 s. Nothing here was run against a

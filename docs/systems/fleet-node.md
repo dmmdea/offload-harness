@@ -1909,7 +1909,7 @@ every delegator re-places; a task that is not bound at all keeps the `400 unsupp
 **Image recipes and `refine` (ADR 0082).** A node that serves `image-gen` also publishes `refine_honoured: true` (its image-gen
 task decodes `refine` the way the MCP handler does, so an explicit `refine=false` reaches the pipeline) and `image_recipes[]`:
 one row per ComfyUI image binding, default first then named families in name order, that names a checkpoint
-(`internal/fleetnode/image_recipe.go`, from `mediacap.ImageRecipe`). A row is `{name, default, digest, engine, graph,
+(`internal/fleetnode/image_recipe.go`, from `mediacap.ImageRecipeWith`, read through the fingerprint cache without waiting). A row is `{name, default, digest, engine, graph,
 files:[{role, name, bytes, fingerprint}], steps, cfg, sampler, scheduler, schedule, shift, lora_strength, preset, license,
 commercial_use, explicit}`; `bytes` is the size on this node's disk and `-1` for a file it lacks; `fingerprint` is the sampled
 content hash of the file (`internal/mediacap/fingerprint.go`: a sha256 of the size and 64 blocks of 1 MiB), or `"pending"` while the
@@ -1924,7 +1924,12 @@ delegator reads as "cannot be matched", never "matches anything". An `image-gen`
 recomputes the digest of the family the payload names (the default binding when `family` is empty or its own name) from the
 files on disk at that moment (waiting for a fingerprint it has not got, for 20 s at most or until the request is gone), and a mismatch, a file it cannot fingerprint, a family
 this node does not serve, or a non-ComfyUI binding is answered **`412`**
-with the node's digest, before any job exists: not `409` (a job that failed here before) and not `503` (busy). A delegator that
+with the node's digest, before any job exists: not `409` (a job that failed here before) and not `503` (busy). The body carries
+`{"status":"error","error":"...","cause":"pending|unreadable|changed"}`: `pending` when every file the node lacks a fingerprint for is
+still being read (a wait, the node cannot say yet whether anything changed: a delegator leaves the node alone for a minute and does
+not count it as a bounce), `unreadable` when a file is there and cannot be read, `changed` for everything else (the digest differs,
+or the family is not served or not a ComfyUI binding); a delegator that finds no cause it knows bounces the refusal like `changed`
+and says the node did not say why. A delegator that
 reads `/fleet/health` decodes the rows (`delegate.NodeView.ImageRecipes`, `RefineHonoured`) and, beside them, the singular
 lease block's class, reason and remaining seconds (`LeaseClass`, `LeaseReason`, `LeaseRemainingSec`) and, when it lists more than
 one lease, the first one's epoch (it names the holder in a ticket's answer). See

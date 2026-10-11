@@ -2004,7 +2004,7 @@ caller in line. A differential test (`TestMediaLaneFreeNeverRefusesAGrant`) driv
 admission over a table of lane states and fails if a lane the grant would serve is called busy.
 
 **What a family is.** A name says nothing about which weights sit under it. A family's identity is its **recipe**
-(`mediacap.ImageRecipe`): the checkpoint, text encoder, VAE and LoRA it loads, each with its byte size on the node's disk and a content fingerprint, and
+(`mediacap.ImageRecipeWith`): the checkpoint, text encoder, VAE and LoRA it loads, each with its byte size on the node's disk and a content fingerprint, and
 the sampling it renders with (steps, cfg, sampler, scheduler, schedule, shift, LoRA strength, preset), plus the license the result
 is tagged with, digested with sha256 over canonical JSON. The identity is **name, size and content** (F59, ADR 0082 Amendment 2).
 The first cut (0.179.0) had name and size only, so two same-named files of one size with different bytes (a same-named re-release
@@ -2020,8 +2020,9 @@ about a sixty-third of the file: roughly 0.3 GB of a 20 GB checkpoint and 0.65 G
 VAE can sit inside it, and a pinned test shows a rewritten stretch leaving the fingerprint unchanged), nor a file replaced by one of
 the same size and the same modification time while the process that cached the old reading runs; compare whole-file hashes after a
 merge you swap in or a copy you doubt; the cache (path, size, modification time) is in memory and a
-restart reads again (a one-shot CLI call is a fresh process, so it reads its family's samples on every call: an estimate of one
-to three seconds from the measured rates). `RecipeVersion` is 2, so a digest of 0.179.0 never equals one of this release. The digest is over **resolved** values: a key the binding leaves unset
+restart reads again (a one-shot CLI call is a fresh process, so on a busy lane it reads its family's samples on every call, before
+it makes its ticket: an estimate of one to three seconds from the measured rates; on a free lane it reads nothing, because the
+lane is asked first). `RecipeVersion` is 2, so a digest of 0.179.0 never equals one of this release. The digest is over **resolved** values: a key the binding leaves unset
 takes the builder's default (Qwen-Image-2.1: 40 steps, cfg 1, euler, scheduler `simple`, schedule `official`), so a node that
 writes the default out and a node that leaves it unset are one recipe. That table is pinned by a test to the constants in
 `render/wf-qwen-image-21.mjs` and `render/comfy-render.mjs`; any other graph family leaves unset keys unset, which is stricter.
@@ -2039,7 +2040,10 @@ pending would otherwise share a digest of unhashed files. The memo is rebuilt as
 digest on the next health read. An image-gen dispatch may carry `recipe_digest`: the node recomputes the digest of the family the
 payload names from the files on disk **now** (waiting for a fingerprint it does not have, because a dispatch is not health: for
 20 s at most or until the request is gone, and a file still unread is named `pending`) and refuses a mismatch, or a file it cannot
-fingerprint, with **412**, creating no job (the delegator reads health again). A read that does not finish in 60 s is given up on:
+fingerprint, with **412**, creating no job. The refusal's JSON body names the `cause` beside `error`: `pending` (every file it lacks
+a fingerprint for is still being read: it cannot say yet whether the family changed), `unreadable` (a file is there and cannot be read) or `changed`
+(the family no longer digests to the digest sent, or the node no longer serves it); the delegator reads health again, and reads the
+cause to decide how long to leave the node alone (below). A read that does not finish in 60 s is given up on:
 that file reads `"unreadable"`, the single reader serves the others, and the harness logs it once; until then it holds the reader and
 the other files stay `pending`. The "send family=X to use its Y" hint reads this machine's other families from the cache without
 waiting, and a call with no fleet overflow because of a file this machine could not fingerprint logs which file and why.
@@ -2071,7 +2075,11 @@ not): a node that reads idle but whose own grant refuses every job would otherwi
 Chosen constants, not measurements (`TestABounceIsRememberedAndTheNodeComesBackAtTheNextStep`,
 `TestARetryAfterHoldsTheNodeAndReadsAsRefused`, `TestARefusedDialMovesOnAndBacksTheNodeOff`, `TestABouncedAttemptGoesBackToWaitingAndTheNextScanTriesTheNextNode`).
 A node that answers 503 or 429 with no `Retry-After` is left alone for the first step (5 s); one that refuses with another status is
-left alone like a bounce. The memory is per process (the placer is a package variable): the MCP server keeps it across the calls
+left alone like a bounce. A 412 is read by its `cause`: `pending` (the node has not finished reading its weight files, so it cannot
+say yet whether they changed) leaves the node alone for a minute, the first bounce step (chosen), and is **not** counted as a
+bounce, so a run of them never reaches the five-minute step and a later `changed` still starts at a minute; `unreadable`, `changed`
+and a 412 that names no cause this build knows are bounced like any other refusal, and the cluster row says which it was (for the
+last, that the node did not say why). The memory is per process (the placer is a package variable): the MCP server keeps it across the calls
 of its session, and a one-shot CLI call (`generate-image` and the other verbs) starts with none, though its ticket keeps it across
 its own scans, so it pays a bounced node's `gpu_wait_ms` once.
 
