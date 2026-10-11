@@ -615,3 +615,39 @@ func TestTheHostRAMEstimateReusesTheTableThePlanRead(t *testing.T) {
 		t.Errorf("without the plan's table the estimate reads it once, read %d time(s)", reads)
 	}
 }
+
+// The card-only Wan placement (comfy-video.mjs --wan-placement multicard) runs on the TWO cards the lease holds and
+// streams nothing from RAM, so a `gpu reserve --devices a,b` wrapping that call declares 0 where the same call without the
+// flag declares the whole set (33.1 GiB), which is what the host-RAM grant waited on. The estimate needs each leased card's
+// size, not only the largest one.
+func TestAMulticardWanCallDeclaresNothingOnTheTwoLeasedCards(t *testing.T) {
+	useCardTable(t, "")
+	table, _ := gpuprobe.BuildCards([]gpuprobe.Device{
+		{Index: 0, UUID: "GPU-aaaa0000-x", Name: "T", TotalGiB: 15.9, FreeGiB: 15.9, UtilKnown: true},
+		{Index: 1, UUID: "GPU-bbbb0000-x", Name: "T", TotalGiB: 15.9, FreeGiB: 13.7, UtilKnown: true},
+		{Index: 2, UUID: "GPU-cccc0000-x", Name: "T", TotalGiB: 15.9, FreeGiB: 15.9, UtilKnown: true},
+	}, "")
+	pair := []string{table[0].LeaseID(), table[2].LeaseID()}
+	cfg := config.Config{ComfyDir: t.TempDir()}
+	call := strings.Fields("node render/comfy-video.mjs o.mp4 s.png p --model wan --high-unet hi.safetensors --low-unet lo.safetensors")
+	var out bytes.Buffer
+
+	n := resolveReserveHostRAMWith(false, 0, gpulease.ClassMedia, append(call, "--wan-placement", "multicard"), pair, cfg, true, table, &out)
+	if n.GiB != 0 || n.Source == hostneed.SourceExplicit || !strings.Contains(n.Detail, "2 leased cards") {
+		t.Fatalf("a multicard Wan call on the two leased cards must declare 0 from the estimate, got %v", n)
+	}
+	n = resolveReserveHostRAMWith(false, 0, gpulease.ClassMedia, call, pair, cfg, true, table, &out)
+	if math.Abs(n.GiB-33.1) > 0.01 {
+		t.Fatalf("the same call without the flag is sized as it always was (13.4 + 13.4 + 6.3 on one card), got %v", n)
+	}
+	// the whole node (no named cards) is three cards, which is not the placement: the ordinary estimate stands
+	n = resolveReserveHostRAMWith(false, 0, gpulease.ClassMedia, append(call, "--wan-placement", "multicard"), nil, cfg, true, table, &out)
+	if math.Abs(n.GiB-33.1) > 0.01 {
+		t.Fatalf("a multicard call on a whole-node lease holds three cards, not two, and keeps the ordinary estimate, got %v", n)
+	}
+	// one leased card cannot be the placement either
+	n = resolveReserveHostRAMWith(false, 0, gpulease.ClassMedia, append(call, "--wan-placement", "multicard"), pair[:1], cfg, true, table, &out)
+	if math.Abs(n.GiB-33.1) > 0.01 {
+		t.Fatalf("a multicard call on one leased card keeps the ordinary estimate, got %v", n)
+	}
+}

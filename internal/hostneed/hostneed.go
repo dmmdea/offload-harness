@@ -115,6 +115,8 @@ type Facts struct {
 	// ReserveVRAMGiB is VRAM the runner holds back for the display (its --reserve-vram); 0 = the
 	// cfg's imagegen_reserve_vram, else the runners' own 1.0.
 	ReserveVRAMGiB float64
+	// CardsGiB is the total VRAM of EACH card of the leased set (none = unknown). Only the card-only Wan placement reads it.
+	CardsGiB []float64
 	// Stat reports a file's size; nil = os.Stat. A table in tests, because a 24 GiB fixture is not an option.
 	Stat func(path string) (size int64, ok bool)
 	// Env reads an environment variable (COMFY_CKPT and friends); nil = none set.
@@ -148,6 +150,18 @@ func LargestCardGiB(cards []gpuprobe.Card, ids []string) float64 {
 		best = math.Max(best, c.VRAMTotalGiB)
 	}
 	return best
+}
+
+// LeasedCardsGiB is the total VRAM of each card among ids (lease ids; none = every card), in the table's order.
+func LeasedCardsGiB(cards []gpuprobe.Card, ids []string) []float64 {
+	var out []float64
+	for _, c := range cards {
+		if len(ids) > 0 && !containsFold(ids, c.LeaseID()) {
+			continue
+		}
+		out = append(out, c.VRAMTotalGiB)
+	}
+	return out
 }
 
 func containsFold(list []string, s string) bool {
@@ -189,10 +203,25 @@ type slot struct {
 	from  string // "file" (size read), "default" (the documented per-family size), "" (unknown)
 }
 
+// wanActivationsGiB is what a Wan 2.2 sampler needs beyond the weights at the film's geometry (720x1280, 81 frames: 75,600
+// tokens): 8.0 GiB live and 9.7-11.0 GiB with the allocator's slack and the VAE encode, measured on the card-only placement
+// (benchmarks 2026-10-11). The top of that range, so an estimate errs toward declaring.
+const wanActivationsGiB = 11.0
+
 // estimate is the rule: the files the family loads, sized, and counted in full when together they
 // do not fit the card. files are what the binding names (mediacap's tables); family picks the
 // documented fallbacks and the roles the family is known to load.
 func estimate(family string, files []mediacap.ModelFile, f Facts) (Need, bool) {
+	return estimateWith(family, files, f, false)
+}
+
+// estimateWith is estimate for a call that may ask for the card-only Wan placement (cardOnly: --wan-placement multicard on the
+// Wan 2.2 graph). That placement does not stream weights from RAM: the two experts load one after the other (the first is gone
+// before the second lands) and the text encoder is gone before the first expert, so the set that has to fit is the LARGEST STAGE
+// (one expert plus the sampler's activations), and it fits across the TWO cards the lease holds, not one. When it does, the call
+// declares 0 (measured: 24.4 GiB in use across the pair at the peak, 2.3 GiB of host growth over ComfyUI's idle). Anything that is
+// not exactly that (one card, three, no table, a stage that does not fit) is the ordinary estimate, which counts the whole set.
+func estimateWith(family string, files []mediacap.ModelFile, f Facts, cardOnly bool) (Need, bool) {
 	roots := mediacap.ModelRoots(f.Cfg.ComfyDir)
 	defaults := familySizes[family]
 	stat := f.Stat
@@ -242,6 +271,21 @@ func estimate(family string, files []mediacap.ModelFile, f Facts) (Need, bool) {
 		src = SourceFamilyDefault
 	}
 	set := strings.Join(parts, " + ")
+	if cardOnly && len(f.CardsGiB) == 2 {
+		var expert float64
+		for _, s := range slots {
+			if s.role == mediacap.RoleDiffusion && s.gib > expert {
+				expert = s.gib
+			}
+		}
+		var usablePair float64
+		for _, c := range f.CardsGiB {
+			usablePair += c - f.reserve()
+		}
+		if stage := expert + wanActivationsGiB; f.CardsGiB[0] > 0 && f.CardsGiB[1] > 0 && stage <= usablePair {
+			return Need{GiB: 0, Source: src, Detail: fmt.Sprintf("%s: the card-only placement (--wan-placement multicard) on 2 leased cards (%.1f + %.1f GiB, %.1f GiB usable): its largest stage, one %.1f GiB expert + %.1f GiB of film-size activations = %.1f GiB, fits, and the weights are mapped read-only, so no weights stream from RAM (the set is %s)", family, f.CardsGiB[0], f.CardsGiB[1], usablePair, expert, wanActivationsGiB, stage, set)}, true
+		}
+	}
 	usable := f.VRAMGiB - f.reserve()
 	if f.VRAMGiB > 0 && total <= usable {
 		return Need{GiB: 0, Source: src, Detail: fmt.Sprintf("%s: %s = %.1f GiB fits the %.1f GiB card (%.1f GiB usable), so no weights stream from RAM", family, set, total, f.VRAMGiB, usable)}, true

@@ -120,7 +120,9 @@ func (c RenderCall) Estimate(f Facts) (Need, bool) {
 			Transformer: c.Flags["transformer"], UnetHigh: c.Flags["high-unet"],
 			UnetLow: c.Flags["low-unet"], TextEncoder: c.Flags["text-encoder"],
 		}
-		return estimate(model, mediacap.VideoModelFilesFor(model, fb), f)
+		// The card-only Wan placement (--wan-placement multicard) is read for the Wan graph alone: no other family has it.
+		cardOnly := model == "wan22" && strings.EqualFold(strings.TrimSpace(c.Flags["wan-placement"]), "multicard")
+		return estimateWith(model, mediacap.VideoModelFilesFor(model, fb), f, cardOnly)
 	}
 	return Need{}, false
 }

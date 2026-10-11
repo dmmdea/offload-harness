@@ -539,3 +539,119 @@ func TestAnSdcppOnlyBoxDeclaresNothing(t *testing.T) {
 		t.Errorf("a ComfyUI edit family beside the sd.cpp bindings decides the class default, got %v", n)
 	}
 }
+
+// THE CARD-ONLY WAN PLACEMENT (comfy-video.mjs --wan-placement multicard, measured 2026-10-11). The two experts never sit on the
+// cards together and the text encoder is gone before the first expert lands, so the set does not have to fit ONE card, and it does
+// not have to fit as a sum either: what must fit is the largest stage (one expert + the film-size activations) across the TWO
+// cards the lease holds. Measured: 24.4 GiB in use across the pair at the peak, 2.3 GiB of host growth, so the call declares 0.
+const wanMulticardCmd = "node render/comfy-video.mjs o.mp4 s.png p --model wan --high-unet hi.safetensors --low-unet lo.safetensors --text-encoder te.safetensors --wan-placement multicard"
+
+func wanFacts(t *testing.T, cards ...float64) Facts {
+	dir, stat := comfyTree(t, map[string]float64{"hi.safetensors": 13.3, "lo.safetensors": 13.4, "te.safetensors": 6.3})
+	f := Facts{Cfg: config.Config{ComfyDir: dir}, Stat: stat, CardsGiB: cards}
+	for _, c := range cards {
+		if c > f.VRAMGiB {
+			f.VRAMGiB = c
+		}
+	}
+	return f
+}
+
+func wanNeed(t *testing.T, cmd string, f Facts) Need {
+	t.Helper()
+	return Resolve(Request{Class: gpulease.ClassMedia, Args: strings.Fields(cmd)}, f)
+}
+
+func TestAMulticardWanCallOnTwoLeasedCardsDeclaresNothing(t *testing.T) {
+	n := wanNeed(t, wanMulticardCmd, wanFacts(t, 15.9, 15.9))
+	if n.GiB != 0 || n.Source != SourceEstimate {
+		t.Fatalf("a multicard Wan call whose largest stage fits the two leased cards streams nothing from RAM: %v", n)
+	}
+	for _, want := range []string{"multicard", "2 leased cards", "13.4", "fits"} {
+		if !strings.Contains(n.Detail, want) {
+			t.Errorf("the detail must say why (%q missing): %q", want, n.Detail)
+		}
+	}
+	// the flag in its --name=value form is the same call
+	if n := wanNeed(t, strings.Replace(wanMulticardCmd, "--wan-placement multicard", "--wan-placement=multicard", 1), wanFacts(t, 15.9, 15.9)); n.GiB != 0 {
+		t.Fatalf("--wan-placement=multicard: %v", n)
+	}
+}
+
+// The default placement is untouched: the same call without the flag, or with the single placement, on the same two cards.
+func TestTheSingleWanPlacementIsSizedAsItAlwaysWas(t *testing.T) {
+	for _, cmd := range []string{
+		strings.Replace(wanMulticardCmd, " --wan-placement multicard", "", 1),
+		strings.Replace(wanMulticardCmd, "--wan-placement multicard", "--wan-placement single", 1),
+	} {
+		n := wanNeed(t, cmd, wanFacts(t, 15.9, 15.9))
+		if !near(n.GiB, 13.3+13.4+6.3) || !strings.Contains(n.Detail, "does not fit") {
+			t.Fatalf("a call that does not ask for the card-only placement is sized against the ONE largest card: %v", n)
+		}
+	}
+}
+
+// The placement runs on exactly two cards. One card, three cards or an unreadable table are not that placement, so the
+// ordinary (conservative) estimate stands.
+func TestAMulticardWanCallThatDoesNotHoldTwoCardsKeepsTheOrdinaryEstimate(t *testing.T) {
+	for name, cards := range map[string][]float64{"one card": {15.9}, "three cards": {15.9, 15.9, 15.9}, "no table": nil} {
+		f := wanFacts(t, cards...)
+		if len(cards) == 0 {
+			f.VRAMGiB = 0
+		}
+		if n := wanNeed(t, wanMulticardCmd, f); !near(n.GiB, 13.3+13.4+6.3) {
+			t.Errorf("%s: %v, want the ordinary 33.0", name, n)
+		}
+	}
+}
+
+// What must fit is the largest stage across the pair: two 8 GiB cards (13 GiB usable) cannot hold a 13.4 GiB expert and its
+// activations, and two 24 GiB cards can.
+func TestAMulticardWanCallThatDoesNotFitTheLeasedPairIsSizedAsBefore(t *testing.T) {
+	if n := wanNeed(t, wanMulticardCmd, wanFacts(t, 8, 8)); !near(n.GiB, 13.3+13.4+6.3) || !strings.Contains(n.Detail, "does not fit") {
+		t.Fatalf("two 8 GiB cards: %v, want the ordinary 33.0 that does not fit", n)
+	}
+	if n := wanNeed(t, wanMulticardCmd, wanFacts(t, 24, 24)); n.GiB != 0 {
+		t.Fatalf("two 24 GiB cards: %v, want 0", n)
+	}
+	// the margin is the sum of what each card has left after the runner's reserve: 2 x (13.7 - 1.0) = 25.4 >= 13.4 + 11.0, but 2 x (12.9 - 1.0) = 23.8 is not
+	if n := wanNeed(t, wanMulticardCmd, wanFacts(t, 13.7, 13.7)); n.GiB != 0 {
+		t.Fatalf("2 x 13.7 GiB: %v, want 0", n)
+	}
+	if n := wanNeed(t, wanMulticardCmd, wanFacts(t, 12.9, 12.9)); n.GiB == 0 {
+		t.Fatalf("2 x 12.9 GiB cannot hold a 13.4 GiB expert and 11 GiB of activations: %v", n)
+	}
+	// --reserve-vram is the runner's: a larger reserve takes more of each card
+	if n := wanNeed(t, wanMulticardCmd+" --reserve-vram 3", wanFacts(t, 13.7, 13.7)); n.GiB == 0 {
+		t.Fatalf("a 3 GiB reserve on each of 2 x 13.7 GiB leaves 21.4 < 24.4: %v", n)
+	}
+}
+
+// Only the Wan graph has this placement: the flag on another family, or on a --graph file, is not read as it.
+func TestTheMulticardFlagMeansNothingToAnotherFamily(t *testing.T) {
+	f := ltxFacts(t, 16)
+	f.CardsGiB = []float64{16, 16}
+	ltx := func(flags string) Need {
+		return Resolve(Request{Class: gpulease.ClassMedia, Args: strings.Fields("node render/comfy-video.mjs o.mp4 s.png p " + flags)}, f)
+	}
+	if a, b := ltx("--model ltx25"), ltx("--model ltx25 --wan-placement multicard"); a.GiB != b.GiB || a.Detail != b.Detail {
+		t.Fatalf("ltx25 with the flag = %v, without = %v", b, a)
+	}
+}
+
+func TestLeasedCardsGiB(t *testing.T) {
+	cards := []gpuprobe.Card{
+		{UUID: "GPU-aaaa0000", VRAMTotalGiB: 16},
+		{UUID: "GPU-bbbb0000", VRAMTotalGiB: 24},
+		{UUID: "GPU-cccc0000", VRAMTotalGiB: 8},
+	}
+	if got := LeasedCardsGiB(cards, []string{cards[0].LeaseID(), cards[2].LeaseID()}); len(got) != 2 || got[0] != 16 || got[1] != 8 {
+		t.Fatalf("the leased cards, in table order: %v, want [16 8]", got)
+	}
+	if got := LeasedCardsGiB(cards, nil); len(got) != 3 {
+		t.Fatalf("no ids is every card: %v", got)
+	}
+	if got := LeasedCardsGiB(nil, nil); len(got) != 0 {
+		t.Fatalf("no card table: %v, want none (unknown)", got)
+	}
+}
