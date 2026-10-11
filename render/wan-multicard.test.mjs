@@ -656,7 +656,7 @@ test("--wan-resident-gb above what the compute card can hold beside the sampler'
   assert.throws(() => planWith({ "wan-resident-gb": "10" }), /--wan-resident-gb 10 .*compute card \(idx 0, 15\.9 GiB\).*832x480x49.*at most 9\.1/);
   assert.throws(() => planWith({ "wan-resident-gb": "40" }), /--wan-resident-gb 40/);
   // the film's geometry (720x1280x81: 75,600 tokens, 12.2 GiB beyond the resident share: the film-size run's compute-card peak, 15.18 GiB, less its
-  // 3 GiB resident): the measured 3 passes, and so does 3.2, the planner's ceiling; above it the second expert's load runs out of memory
+  // 3 GiB resident): the measured 3 passes, and so does 3.2, the planner's ceiling; above it the compute card has no room left for its peak, 90 s before the hand-over to the second expert
   const film = { width: "720", height: "1280", frames: "81" };
   assert.equal(planWith({ ...film, "wan-resident-gb": "3" }).residentGb, 3, "the measured recipe is never refused by its own planner");
   assert.equal(planWith({ ...film, "wan-resident-gb": "3.2" }).residentGb, 3.2, "15.9 - 12.2 - 0.5 = 3.2 GiB at most");

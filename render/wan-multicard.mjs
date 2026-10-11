@@ -336,7 +336,7 @@ export function wanGeometry(flags) {
  * The stage sizes of the card-only placement, one set for the runner and for the lease sizing (internal/hostneed declares against the same
  * figures, and a Go test fails when either side drifts):
  *   WAN_FILM_ACTIVATIONS_GIB   what the compute card holds beyond the resident weights at the film's size (720x1280x81, 75,600 tokens): the
- *                              film-size run's compute-card peak, 15.18 GiB (nvidia-smi, at the second expert's load), less its 3 GiB resident
+ *                              film-size run's compute-card peak, 15.18 GiB (nvidia-smi, 90 s before the hand-over to the second expert), less its 3 GiB resident
  *                              share, which already holds the allocator's slack and the CUDA context;
  *   WAN_COMPUTE_CONTEXT_GIB    what the compute card keeps free beyond that figure, for the CUDA context and the driver: with it a 15.9 GiB card
  *                              takes 3.2 GiB of an expert resident at film size (15.9 - 12.2 - 0.5), the film-size run's measured 3 with 0.2 to spare;

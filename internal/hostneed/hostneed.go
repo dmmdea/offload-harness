@@ -209,10 +209,11 @@ type slot struct {
 	from  string // "file" (size read), "default" (the documented per-family size), "" (unknown)
 }
 
-// wanActivationsGiB is what a Wan 2.2 sampler needs beyond the weights at the film's geometry (720x1280, 81 frames: 75,600
-// tokens): 8.0 GiB live and 9.7-11.0 GiB with the allocator's slack and the VAE encode, measured on the card-only placement
-// (benchmarks 2026-10-11). The top of that range, so an estimate errs toward declaring.
-const wanActivationsGiB = 11.0
+// wanActivationsGiB is what the compute card holds beyond the resident weights at the film's geometry (720x1280, 81 frames: 75,600
+// tokens): the film-size run's compute-card peak, 15.18 GiB (nvidia-smi, from about 2485 s, 90 s before the hand-over to the second expert), less its
+// 3.0 GiB resident share (2026-10-11, 20 steps, plain decode, --ram 0). The 4-step benchmark before it had read 9.7-11.0 GiB: it ended at about
+// 1000 s, before the peak. render/wan-multicard.mjs WAN_FILM_ACTIVATIONS_GIB (a test pins the two together).
+const wanActivationsGiB = 12.2
 
 // wanResidentDefaultGiB is the share of each Wan expert the card-only placement keeps on the compute card when the call names none:
 // render/wf-wan22-i2v.mjs WAN_RESIDENT_GB_DEFAULT (a test pins the two together).
@@ -244,9 +245,9 @@ func estimate(family string, files []mediacap.ModelFile, f Facts) (Need, bool) {
 // estimateWith is estimate for a call that may ask for the card-only Wan placement (co: --wan-placement multicard on the Wan 2.2
 // graph). That placement does not stream weights from RAM: the two experts load one after the other (the first is gone before the
 // second lands) and the text encoder is gone before the first expert, so what has to fit is the largest STAGE, on each of the TWO
-// cards the lease holds: the larger card computes (its resident share of the expert + the sampler's activations) and the other holds
-// the donor blocks (the rest of the expert + the VAE and the CUDA context). When both fit, the call declares 0 (measured on two
-// equal cards: 13.3 and 11.1 GiB at the peak, 2.3 GiB of host growth over ComfyUI's idle). Anything that is not exactly that (one
+// cards the lease holds: the larger card computes (its resident share of the expert + the sampler's activations + the CUDA context) and the
+// other holds the donor blocks (the rest of the expert + the VAE and the CUDA context). When both fit, the call declares 0 (measured on two
+// equal cards at film size: 15.18 and 10.86 GiB at the peak, 2.3 GiB of host growth over ComfyUI's idle). Anything that is not exactly that (one
 // card, three, no table, a card too small for its stage) is the ordinary estimate, which counts the whole set.
 func estimateWith(family string, files []mediacap.ModelFile, f Facts, co *CardOnly) (Need, bool) {
 	roots := mediacap.ModelRoots(f.Cfg.ComfyDir)
@@ -309,11 +310,14 @@ func estimateWith(family string, files []mediacap.ModelFile, f Facts, co *CardOn
 		if small > large {
 			small, large = large, small
 		}
+		// The compute card is held to what was measured, its peak plus the context: --reserve-vram is ComfyUI's model-load margin, not an activation
+		// ceiling, and with the film-size run's 12.2 GiB it would refuse the call that run measured (3.0 + 12.2 = 15.2 > 14.9). It stays the storage
+		// card's margin.
 		reserve := f.reserve()
-		compute := co.ResidentGiB + wanActivationsGiB
+		compute := co.ResidentGiB + wanActivationsGiB + wanComputeContextGiB
 		storage := expert - co.ResidentGiB + wanStorageOverheadGiB
-		if expert > 0 && small > 0 && compute <= large-reserve && storage <= small-reserve {
-			return Need{GiB: 0, Source: src, Detail: fmt.Sprintf("%s: the card-only placement (--wan-placement multicard) on 2 leased cards (%.1f + %.1f GiB): the compute card holds %.1f GiB of the %.1f GiB expert + %.1f GiB of film-size activations = %.1f GiB (of %.1f usable) and the storage card %.1f GiB of donor blocks + %.1f GiB for the VAE and the context = %.1f GiB (of %.1f usable), so each card fits its stage, and the weights are mapped read-only: no weights stream from RAM (the set is %s)", family, small, large, co.ResidentGiB, expert, wanActivationsGiB, compute, large-reserve, expert-co.ResidentGiB, wanStorageOverheadGiB, storage, small-reserve, set)}, true
+		if expert > 0 && small > 0 && compute <= large && storage <= small-reserve {
+			return Need{GiB: 0, Source: src, Detail: fmt.Sprintf("%s: the card-only placement (--wan-placement multicard) on 2 leased cards (%.1f + %.1f GiB): the compute card holds %.1f GiB of the %.1f GiB expert + %.1f GiB of film-size activations + %.1f GiB of CUDA context = %.1f GiB (of the %.1f GiB card) and the storage card %.1f GiB of donor blocks + %.1f GiB for the VAE and the context = %.1f GiB (of %.1f usable), so each card fits its stage, and the weights are mapped read-only: no weights stream from RAM (the set is %s)", family, small, large, co.ResidentGiB, expert, wanActivationsGiB, wanComputeContextGiB, compute, large, expert-co.ResidentGiB, wanStorageOverheadGiB, storage, small-reserve, set)}, true
 		}
 	}
 	usable := f.VRAMGiB - f.reserve()
