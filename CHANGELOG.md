@@ -858,6 +858,25 @@ Versioning: [SemVer](https://semver.org/).
   failed 46 and 50 times in 400 on a Windows PC and never in 800 on Linux; `TestAProbeMemoThatBeganAtTheInstantOfTheRefusalIsNotReused`
   pins the boundary on the readings themselves.
 
+### Fixed — a test that earned a remembered incoherent-seat verdict no longer leaves it for the next test on the same loopback address (F78)
+
+- **The hole.** The incoherent-seat memo (`internal/pipeline/coherence.go`) is one table for the whole process, keyed by endpoint and
+  seat for ten minutes, and a run on a seat that is already resident defers on a remembered verdict without asking the seat anything.
+  A test's fake server gets a loopback port the OS can hand to a later fake, and the tests that earn a broken verdict
+  (`TestRunAgentTaskDefersAnIncoherentSeatAfterColdLoad` and `TestNoWallIsReportedUntilTheWallStarts` in `internal/pipeline`;
+  `TestAgentRunDefersAnIncoherentSeat`, `TestAgentRunDefersAWarmRunOnTheRememberedIncoherentSeat` and
+  `TestAgentRunIncoherentSeatDefersCarrySizing` in `internal/mcpserver`) left it behind; only the tests of the memo itself cleared
+  theirs. The register names `TestTheWarmUpKeepsItsBudgetAfterAWaitInLine` as the victim: it takes the warm path against a fresh fake
+  and would defer on a verdict that was earned elsewhere.
+- **The fix (test code only).** `agentFake.server` drops every verdict filed under its server's endpoint, whichever seat it names,
+  when the test that asked for it ends (the endpoint is matched whole, so a server on `:1234` never takes `:12345` with it), and
+  `coherenceSeatServer` clears the seat it serves the same way.
+- **Tests, written first and red.** `TestAnIncoherentSeatVerdictDoesNotOutliveTheTestThatEarnedIt` in both packages runs the cold load in
+  a subtest, asserts the verdict IS remembered there (so the check after it cannot pass vacuously) and that it is gone once the subtest
+  has returned. Red before: `the verdict on seat "seat-x" outlived the test that earned it` (pipeline, and for a second seat on the
+  same endpoint) and `... "agent-pool" outlived ...` (mcpserver). The three tests the register names pass 30 repetitions in a row; that
+  does not force the port reuse, so the new tests are the proof.
+
 ## [0.180.0] - 2026-10-10 - a busy image call waits for the first matching lane anywhere in the cluster, graphs overflow to a node that holds their files, and a live render keeps its lease
 
 ### Fixed — the ticket queue was off on any machine whose config sets no `state_dir`, which is the usual config (ADR 0083)
