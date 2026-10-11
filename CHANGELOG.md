@@ -130,7 +130,9 @@ Versioning: [SemVer](https://semver.org/).
   that then runs here and succeeds carries none). A graph with `devices`, a `waiter_token`, an inherited lease or an input file stays
   here. The graph path keeps three limits of the old image overflow that the ticket removed for images: a graph is sent to at most
   three nodes, two graph calls of one process never stack on one node, and a graph leaves a node a ticket of this machine has a job on
-  (it reads that claim and never takes one).
+  (it reads that claim and never takes one). The hold is per process: **two graph calls from two processes** (two MCP sessions,
+  or a CLI beside an MCP server) can still both send one idle node a graph, because the claim file is the ticket's and a graph
+  writes none (a node's second job costs one bounce); only a ticket is protected across processes.
 - **A graph does not wait in the cluster queue yet** (a named limit of this release). It is not a ticket: it keeps no place in the
   cluster queue, does not start on a lane that frees after its one look at the fleet, and is not attached by content (a repeat of the
   same graph is a second call, not the first one's ticket). A graph that finds every lane busy therefore waits in this machine's
