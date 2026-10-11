@@ -11,33 +11,50 @@ package mediacap
 // WHAT IT IS. A SAMPLED hash: sha256 over the scheme tag, the file size and fingerprintBlocks blocks of fingerprintBlock
 // bytes at evenly spaced offsets (the first and the last block always among them); a file no larger than the sample is
 // hashed whole. fingerprintBlock and fingerprintBlocks are CHOSEN, not measured against a requirement: 64 MiB at most per
-// file, so a family of four files reads 256 MiB at most, with no cold window after a restart and no persisted cache to
-// keep honest. MEASURED on one workstation (2026-10-10, its local model store, page cache not controlled): 0.17 to 0.87 s
-// per file for files of 0.36 to 42 GB, so a family is a few seconds the first time and nothing after. For comparison a FULL sha256 ran at 389 MB/s
-// on one core there (3.8 s for a 1.47 GB file), which is about 50 s for a 20 GB checkpoint and about 110 s for a 42 GB one
-// (extrapolated from that rate, not run): the whole-file hash was rejected for the operator's rules (no RAM overload, no
-// paging, no minutes of one core and the disk per node after every release or model change, and no cold window in which
-// the fleet cannot match).
+// file, so a family of four files reads 256 MiB at most and there is no persisted cache to keep honest. After a restart a
+// family is pending for the seconds its files take to read, not the minutes a whole-file hash takes. MEASURED on one
+// workstation (2026-10-10, its local model store, page cache not controlled, so read these as warm-cache figures: a cold
+// disk or a network share can be slower, and that was not measured): 0.17 to 0.87 s per file for files of 0.36 to 42 GB. For
+// comparison a FULL sha256 ran at 389 MB/s on one core there (3.8 s for a 1.47 GB file), which is about 50 s for a 20 GB
+// checkpoint and about 110 s for a 42 GB one (extrapolated from that rate, not run). The whole-file hash was rejected on
+// that time and on the window it opens after every release or model change, in which a node cannot be matched. That the
+// window matters is a JUDGEMENT, not a measurement. RAM was not the reason: a streaming hash holds one 1 MiB buffer.
 //
-// WHAT IT SEES. Any wholesale difference in weights: a retrain, a fine-tune, a re-quantisation of the same size, a
-// different build with the same layout (two real 42 GB transformer builds that share a size differed in 58 of the 64
-// sample blocks), and a copy whose tail is missing or zero-filled. WHAT IT DOES NOT SEE: a few corrupted bytes between
-// sample points (a sample is 64 MiB of a file of tens of GB), and a file replaced by one with the same size AND the same
-// modification time (the cache key; a copy that preserves times does it). A full hash would see the first and not the
-// second, and costs the minutes above.
+// WHAT IT SEES. Any wholesale difference in weights: a retrain, a fine-tune that touches the weights throughout, a
+// re-quantisation of the same size, a different build with the same layout (two real 42 GB transformer builds that share a
+// size differed in 58 of the 64 sample blocks), and a copy whose tail is missing or zero-filled. WHAT IT DOES NOT SEE:
+//   - A contiguous region between two blocks. The blocks are evenly spaced, so the stretch between two of them is about a
+//     sixty-third of the file less one block: roughly 0.3 GB of a 20 GB file and 0.65 GB of a 42 GB one
+//     (TestTheUnsampledStretchBetweenTwoBlocksIsAboutASixtyThirdOfTheFile pins those widths). Every byte of it can differ
+//     and the fingerprint is the same: a layer-wise merge that changes a few transformer blocks, a VAE or text encoder baked
+//     into a checkpoint. An operator who swaps such a file compares whole-file hashes (sha256sum) on the nodes.
+//   - A file replaced by one with the same size AND the same modification time (the cache key; a copy that preserves times
+//     does it).
+//
+// A full hash would see the first and not the second, and costs the minutes above.
 //
 // WHEN IT IS COMPUTED. Never on the path of /fleet/health: Peek answers from the cache and, on a miss, starts the hash in
-// the background (one file at a time, so the disk is never raced) and answers FingerprintPending. Await is for a caller
-// that must have the answer (the delegator's own recipe, the node's 412 re-check): it waits for the same single worker.
-// The cache is in memory, keyed by path, size and modification time, and shared by the process (SharedFingerprints), so
-// the node's health, its admission check and a delegator in the same process hash a file once. A restart hashes again.
+// the background (this process reads one weight file at a time; another process, such as ComfyUI loading a checkpoint, is
+// not coordinated with) and answers FingerprintPending. AwaitContext (and Await, which is it with no caller context) is for
+// a caller that must have the answer (the delegator's own recipe, the node's 412 re-check): it waits for the same single
+// worker, but for at most awaitMax or until its caller is gone, and then answers FingerprintPending, so a request names a
+// file that is not hashed yet and does not hang on it. A read that does not finish in readMax is GIVEN UP ON: its entry
+// settles unreadable and the worker is free for the other files. The read itself cannot be cancelled, so it runs on until
+// the disk lets it return; that file is not read again meanwhile, so a hung disk costs one goroutine and one handle per stuck
+// file and not a pile. It is logged once. Until readMax passes, a stalled read holds the worker and every other file stays
+// pending. The cache is in memory, keyed by path, size and modification time, and shared by the process
+// (SharedFingerprints), so the node's health, its admission check and a delegator in the same process hash a file once. A
+// restart hashes again.
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"io"
+	"log"
 	"os"
+	"path/filepath"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -61,6 +78,13 @@ const (
 	// fingerprintRetry is how long a failed read is remembered before the next Peek tries again (CHOSEN; health's own
 	// memo is 60 s, so a file that was busy is looked at again on the next refresh after this).
 	fingerprintRetry = 30 * time.Second
+	// fingerprintAwaitMax is how long Await waits before it answers pending (CHOSEN). A cold family of four files read in a
+	// few seconds on the one workstation measured, so 20 s leaves several times that for a slower disk, and still ends well
+	// inside the minutes a dispatch or a render is allowed.
+	fingerprintAwaitMax = 20 * time.Second
+	// fingerprintReadMax is how long one read may run before it is given up on (CHOSEN): 64 MiB at 1 MiB/s, a disk far
+	// slower than anything the measured files came from, so a read this long is a stalled one and not a slow one.
+	fingerprintReadMax = 60 * time.Second
 	// fingerprintMaxEntries bounds the cache (CHOSEN): a node holds a few dozen weight files, so more only ever means
 	// files that were replaced or removed. Past it the older half of the settled entries goes, least recently used first.
 	fingerprintMaxEntries = 1024
@@ -151,14 +175,17 @@ func (e *fpEntry) settled() bool {
 type Fingerprinter struct {
 	hash func(path string, size int64) (string, error)
 	now  func() time.Time
-	// sem is the one worker: a node reads one weight file at a time, whoever asked.
+	// sem is the one worker: this process reads one weight file at a time, whoever asked.
 	sem chan struct{}
 	gen atomic.Uint64
 	max int
+	// awaitMax and readMax are fingerprintAwaitMax and fingerprintReadMax; a test shortens them.
+	awaitMax, readMax time.Duration
 
-	mu   sync.Mutex
-	m    map[fpKey]*fpEntry
-	tick uint64
+	mu    sync.Mutex
+	m     map[fpKey]*fpEntry
+	tick  uint64
+	stuck map[string]bool // paths with a read given up on that has not returned yet (guarded by mu)
 }
 
 // NewFingerprinter builds a Fingerprinter that reads the real files.
@@ -166,7 +193,8 @@ func NewFingerprinter() *Fingerprinter { return NewFingerprinterWith(Fingerprint
 
 // NewFingerprinterWith is NewFingerprinter over a different hash, for a test that must count, delay or fail the read.
 func NewFingerprinterWith(hash func(path string, size int64) (string, error)) *Fingerprinter {
-	return &Fingerprinter{hash: hash, now: time.Now, sem: make(chan struct{}, 1), max: fingerprintMaxEntries, m: map[fpKey]*fpEntry{}}
+	return &Fingerprinter{hash: hash, now: time.Now, sem: make(chan struct{}, 1), max: fingerprintMaxEntries,
+		awaitMax: fingerprintAwaitMax, readMax: fingerprintReadMax, m: map[fpKey]*fpEntry{}, stuck: map[string]bool{}}
 }
 
 var shared = NewFingerprinter()
@@ -200,20 +228,43 @@ func (f *Fingerprinter) Peek(path string, size int64) string {
 	return FingerprintPending
 }
 
-// Await answers with the file's fingerprint, reading it when it is not cached (behind any read already running). It
-// answers FingerprintUnreadable for a file it cannot read.
+// Await is AwaitContext for a caller with no context of its own: it still ends at awaitMax.
 func (f *Fingerprinter) Await(path string, size int64) string {
+	return f.AwaitContext(context.Background(), path, size)
+}
+
+// AwaitContext answers with the file's fingerprint, reading it when it is not cached (behind any read already running). It
+// answers FingerprintUnreadable for a file it cannot read, and FingerprintPending when the read has not settled by the
+// time awaitMax has passed or ctx is done: the read goes on and a later call finds its result. One deadline covers the
+// whole call, the retry-at-once below included.
+func (f *Fingerprinter) AwaitContext(ctx context.Context, path string, size int64) string {
 	e, ok := f.entry(path, size, false)
 	if !ok {
 		return FingerprintUnreadable
 	}
-	<-e.done
+	timer := time.NewTimer(f.awaitMax)
+	defer timer.Stop()
+	wait := func(e *fpEntry) bool {
+		select {
+		case <-e.done:
+			return true
+		case <-ctx.Done():
+		case <-timer.C:
+			log.Printf("mediacap: gave up waiting %s for the fingerprint of %s: its read is queued or stalled (it goes on; ask again)", f.awaitMax, filepath.Base(path))
+		}
+		return false
+	}
+	if !wait(e) {
+		return FingerprintPending
+	}
 	if e.fp == "" {
 		// A failed read is asked again at once: this caller needs an answer, and a failure is cheap.
 		if e, ok = f.entry(path, size, true); !ok {
 			return FingerprintUnreadable
 		}
-		<-e.done
+		if !wait(e) {
+			return FingerprintPending
+		}
 		if e.fp == "" {
 			return FingerprintUnreadable
 		}
@@ -273,7 +324,7 @@ func (f *Fingerprinter) evictLocked() {
 // one the key describes: a file that grew or was replaced while it was read (a copy in progress) is a failed read.
 func (f *Fingerprinter) read(k fpKey, e *fpEntry) {
 	f.sem <- struct{}{}
-	fp, err := f.hashGuarded(k)
+	fp, err := f.hashBounded(k)
 	<-f.sem
 	if err == nil {
 		if st, serr := os.Stat(k.path); serr != nil || st.Size() != k.size || st.ModTime().UnixNano() != k.mtime {
@@ -286,6 +337,48 @@ func (f *Fingerprinter) read(k fpKey, e *fpEntry) {
 	e.at = f.now()
 	close(e.done) // e.fp and e.at are written before this, and read only after it
 	f.gen.Add(1)
+}
+
+// hashBounded runs the hash for at most readMax. A read that is still running then is GIVEN UP ON, not cancelled (a read
+// blocked in the kernel cannot be): the caller settles the entry as failed and frees the worker, the path is marked stuck so
+// that no second read of it starts while the first is out, and the goroutine clears the mark when its read finally returns.
+func (f *Fingerprinter) hashBounded(k fpKey) (string, error) {
+	f.mu.Lock()
+	stuck := f.stuck[k.path]
+	f.mu.Unlock()
+	if stuck {
+		return "", fmt.Errorf("an earlier read of %s is still stuck", k.path)
+	}
+	type result struct {
+		fp  string
+		err error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		fp, err := f.hashGuarded(k)
+		ch <- result{fp, err} // before the lock below: see the timeout case
+		f.mu.Lock()
+		delete(f.stuck, k.path)
+		f.mu.Unlock()
+	}()
+	timer := time.NewTimer(f.readMax)
+	defer timer.Stop()
+	select {
+	case r := <-ch:
+		return r.fp, r.err
+	case <-timer.C:
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	select {
+	case r := <-ch: // it returned in the instant the timer fired
+		return r.fp, r.err
+	default:
+	}
+	// Marked under the lock the goroutine takes to clear it, after it has sent: it cannot clear the mark before it is set.
+	f.stuck[k.path] = true
+	log.Printf("mediacap: the read of %s has not finished in %s and was given up on; its fingerprint is unreadable until a read of it returns, and the other weight files are read meanwhile", filepath.Base(k.path), f.readMax)
+	return "", fmt.Errorf("the read of %s did not finish in %s", k.path, f.readMax)
 }
 
 // hashGuarded is the hash, with a panic in it turned into a failed read: a worker that never settled its entry would
