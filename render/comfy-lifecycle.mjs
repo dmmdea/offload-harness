@@ -6,7 +6,7 @@
 // caller still tears the session down at the batch boundary). tts.mjs does
 // NOT use this (its Chatterbox worker is not ComfyUI; it passes comfyManaged:false to
 // withGpuSlot). Dependency-free; deps are injectable purely for tests.
-import { existsSync, createWriteStream, renameSync, rmSync, readFileSync, mkdirSync, openSync, closeSync, readSync, fstatSync, writeFileSync } from "node:fs";
+import { existsSync, createWriteStream, renameSync, rmSync, readFileSync, mkdirSync, openSync, closeSync, readSync, fstatSync, statSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { join } from "node:path";
 import { spawn as nodeSpawn, spawnSync as nodeSpawnSync } from "node:child_process";
@@ -599,6 +599,50 @@ export function tailComfyLog(comfyDir = COMFY_DIR, n = COMFY_LOG_TAIL_LINES, key
   } finally {
     if (fd !== undefined) { try { closeSync(fd); } catch {} }
   }
+}
+
+/** The most one comfyLogCursor read takes, and how much of the last read it keeps to finish a line the end of a read cut. */
+const COMFY_LOG_CURSOR_MAX_READ_BYTES = 8 * 1024 * 1024;
+const COMFY_LOG_CURSOR_CARRY_CHARS = 256;
+
+/**
+ * comfyLogCursor: a reader of what this instance's ComfyUI console gains from now on. tailComfyLog answers "what did the console end with"
+ * once, after the fact; the cursor answers "what has it said since the run began", again and again while the run waits, without reading the
+ * file twice or mistaking an earlier run's lines (a kept instance's log holds them) for this one's. `read()` returns { text, state }:
+ * text is what was appended since the last read, prefixed with the tail of the one before it so a line cut by the end of a read is whole in
+ * the next; state is "ok", "absent" (no console file: nothing captured, or a ComfyUI this harness did not start) or "capped" (the capture
+ * reached its 5 MB cap, after which ComfyUI's output is no longer written: everything later is invisible). A file that is shorter than the
+ * cursor's position was replaced and is read from its start; one that appears later is read from its start. Never throws.
+ */
+export function comfyLogCursor(comfyDir = COMFY_DIR, key = "") {
+  const path = comfyLogPath(comfyDir, key);
+  let offset = null; // null: the file did not exist when the cursor was made
+  try { offset = statSync(path).size; } catch { /* absent */ }
+  let carry = "";
+  return {
+    path,
+    read() {
+      let size;
+      try { size = statSync(path).size; } catch { return { text: "", state: "absent" }; }
+      if (offset === null || size < offset) { offset = 0; carry = ""; }
+      if (size === offset) return { text: "", state: "ok" };
+      const len = Math.min(size - offset, COMFY_LOG_CURSOR_MAX_READ_BYTES);
+      const buf = Buffer.alloc(len);
+      let fd;
+      try {
+        fd = openSync(path, "r");
+        readSync(fd, buf, 0, len, offset);
+      } catch {
+        return { text: "", state: "absent" };
+      } finally {
+        if (fd !== undefined) { try { closeSync(fd); } catch {} }
+      }
+      offset += len;
+      const text = carry + buf.toString("utf8");
+      carry = text.slice(-COMFY_LOG_CURSOR_CARRY_CHARS);
+      return { text, state: /offload-comfyui\.log capped at/.test(text) ? "capped" : "ok" };
+    },
+  };
 }
 
 /** captureComfyOutput: pipes a just-spawned ComfyUI child's stdout+stderr into the

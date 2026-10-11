@@ -385,4 +385,54 @@ export function decodeFellBack(logText) {
   return /Ran out of memory when regular VAE decoding/i.test(String(logText || ""));
 }
 
+// ---- the console watch ----------------------------------------------------------------------------
+
+/**
+ * What ComfyUI's console says when its prompt worker is gone after running out of memory. The benchmark's full-size probe log shows the
+ * sequence: the node's error handler logs "Got an OOM, unloading all loaded models", the unload runs out of memory as well, and the worker
+ * thread dies ("Exception in thread Thread-5 (prompt_worker)"); /history then lists nothing, and /system_stats and /queue go on answering.
+ * Only these two lines mean that. The same log's "FP8 _scaled_mm failed ... falling back to dequantization" is a warning ComfyUI recovers from,
+ * sd.py's "Ran out of memory when regular VAE decoding, retrying" is a recovery too, and "!!! Exception during processing !!!" is a node error
+ * that reaches /history, where the poll reads it: none of them is matched, because ending a healthy run on them would lose hours of sampling.
+ */
+const OOM_WEDGE_PATTERNS = Object.freeze([
+  /Got an OOM, unloading all loaded models/,
+  /Exception in thread [^\r\n]*\(prompt_worker\)/,
+]);
+const ANSI_CODES = /\u001b\[[0-9;]*[A-Za-z]/g;
+
+/** oomWedgeLine: the first console line (colour codes removed, trimmed) that says the prompt worker is gone, or "". */
+export function oomWedgeLine(text) {
+  for (const raw of String(text || "").replace(ANSI_CODES, "").split(/\r?\n/)) {
+    const line = raw.trim();
+    if (OOM_WEDGE_PATTERNS.some((p) => p.test(line))) return line;
+  }
+  return "";
+}
+
+/**
+ * createOomWatch: the `watch` pollOutputs asks while the prompt runs (comfy-submit.mjs). `cursor` is comfyLogCursor's reader of this
+ * instance's console, made before the prompt was submitted. Returns null while the console is quiet, and the message that ends the wait when
+ * it shows the worker gone. A console it cannot see (no file, or the capture's cap reached) is said once through `say` and is never a verdict:
+ * the wait is then bounded by its budget alone, as it was.
+ */
+export function createOomWatch({ cursor, say = () => {} }) {
+  let saidAbsent = false, saidCapped = false;
+  return () => {
+    const { text, state } = cursor.read();
+    const line = oomWedgeLine(text);
+    if (line) {
+      return `WAN-OOM: ComfyUI ran out of memory and its prompt worker did not survive it (its console says "${line}"), so this prompt will never finish and will never be reported as failed; the wait ends here instead of holding the two leased cards for the rest of its budget. ComfyUI must be restarted; its console is ${cursor.path}.`;
+    }
+    if (state === "absent" && !saidAbsent) {
+      saidAbsent = true;
+      say(`WAN-OOM-WATCH: ${cursor.path} does not exist (no console file), so an out-of-memory wedge of ComfyUI cannot be seen from here; the wait is bounded by its budget alone`);
+    } else if (state === "capped" && !saidCapped) {
+      saidCapped = true;
+      say(`WAN-OOM-WATCH: the console capture ${cursor.path} is capped (5 MB), so nothing ComfyUI says from here on can be seen; an out-of-memory wedge would be bounded by the wait budget alone`);
+    }
+    return null;
+  };
+}
+
 export { WAN_PLACEMENTS, WAN_PLACEMENT_DEFAULT, WAN_RESIDENT_GB_DEFAULT, WAN_STORAGE_DEVICE, WAN_COMPUTE_DEVICE };

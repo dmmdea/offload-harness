@@ -43,7 +43,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { writeFileAtomic } from "./atomic-out.mjs";
 import { withGpuSlot } from "./gpu-lock.mjs";
 import { familySignature } from "./comfy-family.mjs";
-import { COMFY_DIR, comfyApi, tailComfyLog, comfyLogPath } from "./comfy-lifecycle.mjs";
+import { COMFY_DIR, comfyApi, tailComfyLog, comfyLogPath, comfyLogCursor } from "./comfy-lifecycle.mjs";
 import { stageInput as stageToInput } from "./comfy-input.mjs";
 import { firstOutputFile } from "./comfy-output.mjs";
 import { assertNodeClasses, missingNodeClasses } from "./comfy-nodes.mjs";
@@ -53,7 +53,7 @@ import { buildLtx25I2V } from "./wf-ltx25-i2v.mjs";
 import { buildH3AV } from "./wf-h3-av.mjs";
 import { buildAceStep } from "./wf-acestep.mjs";
 import { resolveCli, submitGraph, pollOutputs, fetchView, finalizeRun } from "./comfy-submit.mjs";
-import { planMulticard, checkComfyDevices, decodeFellBack, portNote } from "./wan-multicard.mjs";
+import { planMulticard, checkComfyDevices, decodeFellBack, portNote, createOomWatch } from "./wan-multicard.mjs";
 
 // BOOL_FLAGS take no value. --fast was missing from this list, so the parser took the
 // NEXT token as its value: a trailing --fast (the harness appends it after --hero) read
@@ -320,7 +320,7 @@ export async function verifyMulticardPack(api, plan, { fetchImpl = fetch } = {})
 // defaults are the real ones; nothing else about the function changes.
 export const GENERATE_IO = Object.freeze({
   verifyDevices: verifyMulticardDevices, verifyPack: verifyMulticardPack, buildGraph: buildGraphForRun, submit: submitChecked,
-  poll: pollOutputs, view: fetchView, write: writeFileAtomic, tailLog: tailComfyLog, finalize: finalizeRun, resolveCli,
+  poll: pollOutputs, view: fetchView, write: writeFileAtomic, tailLog: tailComfyLog, logCursor: comfyLogCursor, finalize: finalizeRun, resolveCli,
   stdout: (...a) => console.log(...a), stderr: (...a) => console.error(...a), env: process.env, comfyDir: COMFY_DIR,
 });
 
@@ -334,6 +334,9 @@ export async function generate(out, API, pos, flags, multicard, io = {}) {
   // Shared submission/polling/retrieval (comfy-submit.mjs): CLI-preferred submit with
   // byte-identical raw fallback; hardened poll loop (dead-server watchdog).
   const cli = x.resolveCli();
+  // Under multicard the instance's console is watched while the prompt runs (an out-of-memory wedge ComfyUI does not report). The cursor is
+  // made BEFORE the submit, so it reads this run's lines and not an earlier run's.
+  const watch = multicard ? createOomWatch({ cursor: x.logCursor(x.comfyDir, multicard.launch.key), say: x.stderr }) : null;
   const { promptId } = await x.submit({ api: API, graph, clientId: "video-" + seed, cli });
   x.stdout("queued", promptId, flags.graph ? `(graph ${flags.graph})` : `${model} seed ${seed}`);
   // Poll budget: the native quality recipe at 720p legitimately exceeds the old ~20-min
@@ -345,6 +348,7 @@ export async function generate(out, API, pos, flags, multicard, io = {}) {
     isDone: (entry) => !!firstOutputFile(entry.outputs, graph),
     noOutputMsg: "no video produced in time",
     onExecError: () => x.finalize({ api: API, promptId, cli }),
+    ...(watch ? { watch } : {}),
   });
   const file = firstOutputFile(h.outputs, graph);
   x.write(out, await x.view({ api: API, file }));
