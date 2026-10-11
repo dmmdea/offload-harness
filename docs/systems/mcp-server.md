@@ -193,7 +193,7 @@ named or placed seat with no rate of its own is left as it was. The answer, and 
 than 1,024 tokens of final keeps the floor, and `budget_note` says the wall will be the stop. A final the seat ended on that budget
 (`finish_reason: length`) is a partial, and the fit makes that end likelier on purpose: it is still published as `output`, because a cut answer is
 the caller's to use, and the result says so with `output_truncated: true`, the loop's own `stop_note` and a `truncation_note` naming the budget the final
-opened at when the fit narrowed it (a complete answer carries none of the three). A resolved planner absent from the endpoint's served roster fails loud with
+opened at when the loop's fit narrowed it, not the fit predicted at run start (a complete answer carries none of the three). A resolved planner absent from the endpoint's served roster fails loud with
 `deferred: true` naming the model, never a silent fall back to the workhorse — "served" means
 matched against canonical ids **or** `meta.llamaswap.aliases`, since a tier-seeded `agent_model`
 is normally an alias. Every response

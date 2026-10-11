@@ -28,7 +28,8 @@ A fix round on the two `agent_run` entries below, from two independent reviews o
   on purpose, and a final the seat ends on that budget (`finish_reason: length`) is marked by the loop (`OutputTruncated`) but ended
   `done`, and the local `agent_run` door never read the mark: the half-sentence was published as a clean success. It is still the `output`
   (a partial is the caller's to use), and the result now carries `output_truncated: true`, the loop's `stop_note` and a `truncation_note` that
-  names the budget the fit opened the final at and points at `budget_note`. A complete answer carries none of the three.
+  names the budget the loop's fit opened the final at, when it narrowed it (not the fit predicted at run start), and points at `budget_note`.
+  A complete answer carries none of the three.
 - **Tests, written first and red.** Each failed on the unfixed code for the reason in its finding: the named-seat retry (abstention and
   seat-down, one node and two) ran this box's seat and published the false seat-change reason; the deferral test published another seat's
   prose and an unreported seat's; the cut-final test published no flag. Mutants, each compiled and each killed: the pin reason dropped, the

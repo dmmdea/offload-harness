@@ -1094,7 +1094,7 @@ not shorten the tool steps, and a wall that buys less than the 1,024-token floor
 (`budget_note` says `the wall will be the stop`). `final_budget_fit` and `budget_note` ride on the answer and on a run that died at its
 wall, only when the fit narrowed something (a run whose own final was not narrowed, because it answered early, was cut before its forced final or reached it with wall to spare, carries the fit predicted when its wall started, as the node's result does); the refusal (which starts no run), a wall with room and a seat with no rate carry neither. A final the seat ended on that budget
 (`finish_reason: length`) is a partial: it is still the `output`, flagged `output_truncated: true` with the loop's `stop_note` and a `truncation_note`
-naming the budget the fit opened it at, and a complete answer carries none of them. The
+naming the budget the loop's fit opened it at when it narrowed it, and a complete answer carries none of them. The
 two agent doors share one copy of the arithmetic (`pipeline.InstallFinalFit`), so the node and this door size one run alike. A call
 refused before a seat is chosen (a bad argument, or a composite placement guard refusing the seat) carries no numbers, and a routed call carries no sizing of this box either: a contract sent
 through the fleet carries its wall to the node, where it is an expectation (ADR 0055).
