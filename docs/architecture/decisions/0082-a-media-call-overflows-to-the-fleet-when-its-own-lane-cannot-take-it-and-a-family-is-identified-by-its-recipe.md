@@ -42,11 +42,9 @@ Three facts made the obvious change unsafe as stated.
    admission reads state with (`planMedia`, `gpualloc.Claims` and `QueuedClaims`, the in-process slots, the grant's own
    host-RAM function, and the allocator itself for a call that names no card) and edits nothing inside `acquireCards`. It says
    "busy" only when something that makes the real wait-0 grant refuse is present, so it never calls busy a lane the grant would
-   have served; it may call free a lane the grant then refuses, and the call then runs locally as before, after the one bounded card-table read the question costs. The lease
-   queue orders by arrival only on the whole-node plan, so there a call that resumes a place counts only the callers that
-   arrived before that place; on the pinned and allocated plans every other caller in line counts
-   (`TestMediaLaneFreeOrdersByArrivalOnlyOnTheWholeNodePlan`; the S1 trigger never asks about a call that carries a token, the
-   ticket scan of the next step does). Every doubt
+   have served; it may call free a lane the grant then refuses, and the call then runs locally as before, after the one bounded card-table read the question costs. A call that resumes a place in line counts only the callers
+   that arrived before that place, on every plan, because the lease queue serves a resumed place by arrival time (ADR 0083
+   decision 4; `TestMediaLaneFreeOrdersByArrivalForACallThatResumesItsPlace`); a new arrival counts every other caller in line. Every doubt
    (a lease this process inherited, a card table that does not read in 4 s, a request it does not model) reads as free. It
    creates no lease, place in line, epoch, waiter record, ledger row, PAIR card or ComfyUI instance, and it removes nothing: the
    readers of the line it shares with the admission prune a record they find dead (an expired place, a waiter that stopped
@@ -82,7 +80,8 @@ Three facts made the obvious change unsafe as stated.
    `node_id` equals `fleet_node_id`, else the OS hostname: such an entry would match perfectly and send the call back into the
    lane that is not free; it is named in `cluster[]`). Candidates rank by the shorter queue, then config order. The family is sent under the node's own name for the recipe, never the caller's, and never empty: a call
    that names no family is this machine's default binding, and must not land on a node's different default.
-6. **Refusals move on; an accepted job is final.** At most 3 nodes are tried. A refusal at the door (`503`, `429`, `412`, any
+6. **Refusals move on; an accepted job is final.** (ADR 0083 replaced the bound of three nodes: the ticket tries one node per scan
+   and has no limit on how many it tries over its life.) A refusal at the door (`503`, `429`, `412`, any
    other status, or a dial that never connected) means nothing ran: the call goes on, under a fresh job id. A node that accepted
    the job and answers `gpu_busy` or `gpu_queued` (another job holds its card, nothing ran) or `gpu_lease_unavailable` (it could
    not take its lease: a lease location it cannot use, a host-RAM need no state of it admits; nothing ran) is passed over the
@@ -95,29 +94,31 @@ Three facts made the obvious change unsafe as stated.
    rule keeps closed, a quarantined card, a host short of RAM, a card another process holds that no lease shows) refuses every
    call alike, and each call sent to it would park for the node's whole `gpu_wait_ms` before the bounce came back; a call the node
    serves forgets the count, a health read does not. The cluster row says which pause it is (`bounced`, `refused`,
-   `unreachable`) and for how long the call was not offered to the node. The step and attempt numbers are chosen, not measured. The
+   `unreachable`) and for how long the call was not offered to the node. The step numbers are chosen, not measured. The
    memory is the placer's package variable, so it is per process: the MCP server keeps it across the calls of its session, and a
-   one-shot CLI call starts with none, so it pays a bounced node's `gpu_wait_ms` again (the node-published verdict that would
-   replace the memory is not built).
+   one-shot CLI call starts with none (its ticket keeps it across its own scans), so it pays a bounced node's `gpu_wait_ms` once
+   (the node-published verdict that would replace the memory is not built).
 7. **Attribution stays one card per node that held the job and one row per call.** An overflowing call opens its PAIR card only
    once a node has ACCEPTED the job. A node that bounces it after accepting has its card closed quiet (completed, never
    started, the reason kept; `core.RemoteAttribution.Bounce`) and writes no ledger row; the call's one asker row names the node
    that served it.
-8. **When nothing admits, the call goes on to the local admission, from when it came back.** It joins the local line when the
-   fleet attempt is over and not from when it arrived (Named limits). If that ends in a deferral (a place in line, a busy
-   defer), the answer carries `cluster[]`: one row per roster node in config order (`busy`, `not-capable`, `unreachable`,
-   `refused`, `bounced`, `skipped`), each with the reason in the node's own terms (the lease and its reason, the key that
-   differs and the family of this machine that would match, the release or the refine it lacks), and the reason quotes them. A
-   call that ran is not annotated.
-9. **Never overflow** a call that resumes a place in the local line (it carries `waiter_token`: the place is kept, and the first
-   queued answer's token simply lapses if the call went to a node instead), that runs under a lease its process inherited, on a
-   box with no `delegate_remotes` (that path is byte for byte what it was, and asks the lane nothing), or for anything but an
-   image job in this release. Graphs arrive with their own file check (a whole-node graph placed on a multi-GPU node would land
-   on its display card); video, animation and audio carry no per-family identity yet.
+8. **When nothing admits, the call is a ticket (ADR 0083).** It does not go on to the local admission from when it came back, as the
+   first cut did: it waits for the first matching lane that frees anywhere, keeping its arrival time in the local line, and the
+   answer carries `cluster[]`: one row per roster node in config order (`free`, `busy`, `draining`, `not-capable`, `unreachable`,
+   `in-use`, `refused`, `bounced`, `skipped`), each with the reason in the node's own terms (the lease and its reason, the key that
+   differs and the family of this machine that would match, the release or the refine it lacks) and since when. A call that ran is
+   not annotated.
+9. **Never overflow** a call that runs under a lease its process inherited, on a box with no `delegate_remotes` (that path is byte for
+   byte what it was, and asks the lane nothing), or for anything but an image job in this release. (A call that resumed a place
+   did not overflow in the first cut; ADR 0083 brings its place into the ticket.) Graphs arrive with their own file check (a
+   whole-node graph placed on a multi-GPU node would land on its display card); video, animation and audio carry no per-family
+   identity yet.
 10. **ADR 0077 changes in three sentences.** Decision 6: `auto` runs here when the lane is free and, when it is not and a
     matching node is idle, there. The consequence that `refine=false` defers on a remote route no longer holds for image jobs:
     it travels, gated on `refine_honoured`. The consequence about `waiter_token` stands: a call that goes to a node leaves the
     local place.
+11. **Amended by ADR 0083** in four places: decision 2 (a resumed place is ordered by arrival on every plan), decision 6 (no bound
+    of three nodes), decision 8 (a ticket, not a late local run) and decision 9 (a call with a `waiter_token` overflows).
 
 ## Consequences
 
@@ -129,14 +130,9 @@ Three facts made the obvious change unsafe as stated.
   one bounce per node per pause (60 s, then 300 s): up to the node's `gpu_wait_ms` (90 s by default) parked on the node and one
   deferred row there, before the placer sees it. The health pre-filter (no lease of any class) makes that rare; if the logs show it is not, a place-now header read in
   admission is the first optimisation (a lane verdict published by the node, answered before a job exists), not built here.
-- **Named limits.** The recipe is name plus size, not content (decision 3). One FIFO per delegating machine; cross-machine order is node arrival. A call resumed with its token stays in
-  the local line, so a node that frees later is not used by it (the ticket queue with late binding is the next step). **A call
-  that went to the fleet first queues locally from when it came back**, not from when it arrived: it joins the local line only
-  when the fleet attempt is over (the lane question and the roster read, then at most 3 nodes, each up to its `gpu_wait_ms`), so a
-  caller that arrived meanwhile is ahead of it, and one bounce can cost it 90 s of seniority (270 s for three nodes). Two halves would have to be fixed to carry the arrival time into the
-  local admission: the lease queue (it takes an arrival time) and the in-process slot queue, which serves callers in the order they
-  join and has no arrival time to take; the ticket queue of the next step keeps a call's place across the attempt and is where
-  that is done, not here. Every
+- **Named limits.** The recipe is name plus size, not content (decision 3). One FIFO per delegating machine; cross-machine order is node arrival. ADR 0083 closes the two limits the first cut named: a call resumed with
+  its token joins the cluster queue and brings its place with it, and a call no node could take keeps its arrival time through the
+  ticket's place in the local line, so a bounce no longer costs it its seniority. Every
   remote job pays ComfyUI's cold start. The same recipe and seed on a different GPU architecture is the same composition, not
   bit-identical pixels. A hand-forced `route=remote` can still park beside a placed job (`concurrencyCapped` is false for media).
   A per-request `steps` needs the node's binding to have set cfg for a graph that takes both together.

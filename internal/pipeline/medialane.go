@@ -49,60 +49,94 @@ const laneProbeBound = 4 * time.Second
 
 var _ core.LaneProber = (*Pipeline)(nil)
 
-// MediaLaneFree implements core.LaneProber for an image generation request.
-func (p *Pipeline) MediaLaneFree(ctx context.Context, req core.Request) core.LaneVerdict {
-	notJudged := func(why string) core.LaneVerdict { return core.LaneVerdict{Free: true, Why: "not judged: " + why} }
+// laneOf is what a question about the lane needs to know before it reads the line: the binding the call would render
+// with, its need, the lease directory's manager, the card table (read once) and the plan.
+type laneOf struct {
+	need  mediaNeed
+	token string
+	// m is the live manager of the lease directory; a question that only reads works on m.ReadOnly().
+	m     *gpulease.Manager
+	table []gpuprobe.Card
+	plan  mediaPlan
+}
+
+// resolveLane resolves an image request against this box. why is not empty when the box cannot judge the request
+// (a task it does not model, a binding that is not a ComfyUI one, a lease the process inherited, a lease directory or a
+// card table that would not open or read): the sentence is the reason, and every caller degrades toward the way the call
+// ran before the question existed. unread is true only for the reasons that are a READ that failed (the lease directory,
+// the card table, a plan the table cannot make): there the lane is in question and the box could not look at it, which the
+// router must not take for a free lane (core.LaneVerdict.Unjudged). The others say the lane is not in question at all.
+func (p *Pipeline) resolveLane(ctx context.Context, req core.Request) (ln laneOf, why string, unread bool) {
 	if req.Task != core.TaskGenerateImage {
-		return notJudged("only image generation is probed")
+		return ln, "only image generation is probed", false
 	}
 	if strings.TrimSpace(req.Input) == "" {
-		return notJudged("the request has no prompt")
+		return ln, "the request has no prompt", false
 	}
 	// The binding the call would render with, resolved the way runGenerateImage resolves it.
 	cfg, _, ferr := p.cfg.ResolveImageFamily(paramStr(req.Params, "family"))
 	if ferr != nil {
-		return notJudged(ferr.Error())
+		return ln, ferr.Error(), false
 	}
 	if cfg.ImageGenEngine == "sdcpp" || cfg.ImageGenScript == "" {
-		return notJudged("this binding is not a ComfyUI one")
+		return ln, "this binding is not a ComfyUI one", false
 	}
-	token := paramStr(req.Params, "waiter_token")
-	need := imageNeed(cfg, token)
+	ln.token = paramStr(req.Params, "waiter_token")
+	ln.need = imageNeed(cfg, ln.token)
 
 	// A call that runs under a lease its parent holds (`gpu reserve -- local-offload ...`) has a card chosen for it.
 	if inherited, ierr := ambientLeaseEnv(); ierr != nil || inherited != nil {
-		return notJudged("this process runs under a GPU lease it inherited, so the lane is its parent's")
+		return ln, "this process runs under a GPU lease it inherited, so the lane is its parent's", false
 	}
 	m, err := p.scopedManager()
 	if err != nil {
-		return notJudged("the lease directory cannot be opened (" + err.Error() + "); the call reports it itself")
+		return ln, "the lease directory cannot be opened (" + err.Error() + "); the call reports it itself", true
 	}
-	// Every read below goes through a view that prunes nothing: the question must not change the state it asks about.
-	m = m.ReadOnly()
+	ln.m = m
 	// The card table, once, under a bound of its own. It sizes the host-RAM need (the call declares what does not fit
 	// its card) and, on a card-scoped host, fixes the plan.
 	rctx, cancel := context.WithTimeout(ctx, laneProbeBound)
 	table, _, terr := p.alloc.CardTable(rctx, p.cfg)
 	cancel()
 	if terr != nil || len(table) == 0 {
-		why := "it listed no card"
+		cause := "it listed no card"
 		if terr != nil {
-			why = terr.Error()
+			cause = terr.Error()
 		}
-		return notJudged("the card table could not be read (" + why + "); the call reads it itself")
+		return ln, "the card table could not be read (" + cause + "); the call reads it itself", true
 	}
-	plan := mediaPlan{whole: true}
+	ln.table = table
+	ln.plan = mediaPlan{whole: true}
 	if m.CardScoped() {
-		pl, perr := planMedia(need, table, nil)
+		pl, perr := planMedia(ln.need, table, nil)
 		if perr != nil {
-			return notJudged(perr.Error())
+			return ln, perr.Error(), true
 		}
-		plan = pl
+		ln.plan = pl
 	}
+	return ln, "", false
+}
 
-	r := &laneReading{p: p, m: m, cards: table, token: token}
+// MediaLaneFree implements core.LaneProber for an image generation request.
+//
+// Two questions, told apart by whether the request resumes a place in line (a waiter_token that can still be resumed).
+// A NEW arrival asks whether a wait-0 try would be granted, which is the relaxation described above. A call that
+// RESUMES a place asks whether it would be served before anyone who came after its place, so on every plan only the
+// callers that arrived before the place are ahead of it (the ticket queue's question, P0 plan S2): the lease queue
+// serves a resumed place by arrival time, so a caller behind it never holds the card against it.
+func (p *Pipeline) MediaLaneFree(ctx context.Context, req core.Request) core.LaneVerdict {
+	ln, why, unread := p.resolveLane(ctx, req)
+	if why != "" {
+		return core.LaneVerdict{Free: true, Why: "not judged: " + why, Unjudged: unread}
+	}
+	// Every read below goes through a view that prunes nothing: the question must not change the state it asks about.
+	m := ln.m.ReadOnly()
+	need, plan := ln.need, ln.plan
+
+	r := &laneReading{p: p, m: m, cards: ln.table, token: ln.token}
+	r.since = r.placeSince()
 	// The smallest declaration the call can make (its largest card): if that is refused, every card's would be.
-	r.askRAM = p.declaredRAM(ctx, need, table, nil)
+	r.askRAM = p.declaredRAM(ctx, need, ln.table, nil)
 	switch {
 	case plan.whole:
 		r.wholeNode()
@@ -116,10 +150,12 @@ func (p *Pipeline) MediaLaneFree(ctx context.Context, req core.Request) core.Lan
 
 // laneReading collects what a probe finds in the way.
 type laneReading struct {
-	p      *Pipeline
-	m      *gpulease.Manager
-	cards  []gpuprobe.Card
-	token  string
+	p     *Pipeline
+	m     *gpulease.Manager
+	cards []gpuprobe.Card
+	token string
+	// since is the arrival time of the place in line the call resumes, zero for a new arrival (placeSince).
+	since  time.Time
 	askRAM float64
 
 	reasons []string
@@ -196,9 +232,9 @@ func (r *laneReading) placeSince() time.Time {
 // does not hold its cards against such a call), and the live tokens (a place held for a caller who may come back) on
 // those cards. The call's own token is never counted against it. since, when not zero, is the arrival time the call
 // registers with (placeSince): only a caller that arrived strictly before it is ahead, as the lease queue itself
-// orders them (a tie is not counted: the prober may only err toward "free"). The pinned and the allocated plans pass the
-// zero time because their admission does not order by arrival: every other caller in line claims the cards before the
-// call looks (gpualloc.QueuedClaims), a call that holds a place included.
+// orders them (a tie is not counted: the prober may only err toward "free"). A NEW arrival has no place, so every
+// caller in line is ahead of it: its admission does not order by arrival on the pinned and the allocated plans, every
+// other caller in line claims the cards before the call looks (gpualloc.QueuedClaims).
 func (r *laneReading) callersAhead(ids []string, since time.Time) {
 	arrivedBefore := func(sinceMs int64) bool { return since.IsZero() || sinceMs < since.UnixMilli() }
 	n := 0
@@ -270,7 +306,7 @@ func (r *laneReading) wholeNode() {
 // are promised (the same two sets acquireCards counts).
 func (r *laneReading) claimed() map[string]bool {
 	c := mediaSlots.held()
-	for id := range gpualloc.QueuedClaims(r.m, r.cards, r.token, r.askRAM > 0) {
+	for id := range gpualloc.QueuedClaimsBefore(r.m, r.cards, r.token, r.askRAM > 0, r.since) {
 		c[id] = true
 	}
 	return c
@@ -292,26 +328,37 @@ func (r *laneReading) named(ctx context.Context, need mediaNeed, ids []string) {
 	before := len(r.reasons)
 	r.leasesIn(ids)
 	r.slots(ids)
-	r.callersAhead(ids, time.Time{})
+	r.callersAhead(ids, r.since)
 	if len(r.reasons) == before { // taken by something that ended while it was being read
 		r.block(subjectOf(ids) + " are held, or promised to callers ahead of this one")
 	}
 }
 
+// autoInput is the allocator's input for a call that names no card: the same one the admission gives it, built from the
+// one card-table read the question made.
+func (r *laneReading) autoInput(ctx context.Context) func() (gpulease.AllocInput, error) {
+	stored := r.p.alloc
+	table := r.cards
+	stored.Cards = func(context.Context, config.Config) ([]gpuprobe.Card, string, error) { return table, "", nil }
+	return func() (gpulease.AllocInput, error) {
+		return gpualloc.BuildInput(ctx, r.m, r.p.cfg, gpualloc.Need{Claimed: r.claimed(), RAMGiB: r.askRAM}, stored)
+	}
+}
+
+// pickAuto asks the allocator which card the call would take, from one reading of the world (a wait of 0, so no
+// polling): free says that card is free now, and when it is not, ids is the set the call would queue on.
+func (r *laneReading) pickAuto(ctx context.Context) (ids []string, free bool, err error) {
+	return gpualloc.PickAuto(gpualloc.Plan{Min: 1, Max: 1}, 0, r.autoInput(ctx), io.Discard, time.Sleep, time.Now)
+}
+
 // allocated reads a call that names no card: the allocator chooses, from the same input the admission gives it, and
-// one reading of the world (a wait of 0, so no polling).
+// one reading of the world.
 func (r *laneReading) allocated(ctx context.Context, need mediaNeed) {
 	if mediaSlots.wholeHeld() {
 		r.slots(nil)
 		return
 	}
-	stored := r.p.alloc
-	table := r.cards
-	stored.Cards = func(context.Context, config.Config) ([]gpuprobe.Card, string, error) { return table, "", nil }
-	build := func() (gpulease.AllocInput, error) {
-		return gpualloc.BuildInput(ctx, r.m, r.p.cfg, gpualloc.Need{Claimed: r.claimed(), RAMGiB: r.askRAM}, stored)
-	}
-	ids, free, err := gpualloc.PickAuto(gpualloc.Plan{Min: 1, Max: 1}, 0, build, io.Discard, time.Sleep, time.Now)
+	ids, free, err := r.pickAuto(ctx)
 	if err != nil {
 		var none *gpulease.NoCardsError
 		if errors.As(err, &none) {
@@ -328,7 +375,7 @@ func (r *laneReading) allocated(ctx context.Context, need mediaNeed) {
 		before := len(r.reasons)
 		r.leasesIn(ids)
 		r.slots(ids)
-		r.callersAhead(ids, time.Time{})
+		r.callersAhead(ids, r.since)
 		if len(r.reasons) == before {
 			r.block(subjectOf(ids) + " are held, or promised to callers ahead of this one")
 		}

@@ -1,32 +1,29 @@
 package mediaremote
 
-// Overflow (P0 plan, S1; ADR 0082): a media call on a box that has the lane no longer waits for it while another node
-// of the fleet stands idle with the same recipe.
+// Placement on the fleet (P0 plan S1 and S2; ADR 0082, ADR 0083): which node can take an image call whose own lane is
+// busy, and what happens when the node says no.
 //
-// WHEN. Only an `auto` image call on a machine that has the lane and a fleet configured, that is not resuming a
-// place in the local line (waiter_token), does not run under a lease its process inherited, and whose pipeline
-// answers that the lane is NOT free right now (core.LaneProber; a runner that cannot say reads as free). Every other
-// call takes the path it always took, byte for byte: a box with no delegate_remotes asks nothing and reads no node.
+// S1 made it the call's own business: a busy lane sent the call, once, to an idle node that renders the same recipe. S2
+// moved the decision into the ticket queue (ticket.go, scan.go), which asks the same questions on every scan and holds
+// the call until a lane frees; this file keeps what both rest on, so that there is one filter, one ranking and one
+// bounce rule, not two.
 //
 // WHERE. A node is a candidate when it serves image-gen, holds a family whose recipe digests to this machine's (the
 // strict match of identity.go; the family is sent under the node's OWN name, with the digest, and the node refuses a
 // mismatch with 412), carries refine when the caller sent refine=false, runs this release, has the family's route
 // configured when it reports its routes, and holds no lease of any class (the delegator cannot know which card a
 // node's lease sits on or which card the job would take, so it is conservative and the node's own grant is the
-// authority). Candidates rank by the shorter queue, then config order.
+// authority). Candidates rank by the shorter queue, then config order. A ticket then also leaves out the nodes a ticket
+// of this machine has a job on, and the ones an older waiting ticket matches.
 //
-// HOW IT ENDS. A node that refuses the POST (503, 429) or accepts the job and answers that another job holds its
+// HOW AN ATTEMPT ENDS. A node that refuses the POST (503, 429) or accepts the job and answers that another job holds its
 // card (gpu_busy, gpu_queued) or that its lease cannot be taken (gpu_lease_unavailable: in all three nothing ran) is
-// passed over, under a fresh job id, at most maxPlacements times, and is not offered another call by this process for a while (a
-// node that read idle in health but whose own grant refuses the job refuses every call alike, and each one would park
-// for the node's whole gpu_wait_ms before the bounce came back). A node's own answer after it accepted the job is
-// final: a render that failed is the call's result and is never placed elsewhere, and a job a node holds is never also
-// run here (a media job cannot be recalled, ADR 0064). When nothing admits, the call goes on to the local admission,
-// and if that ends in a deferral it carries a cluster[] block that says, per node, why the fleet could not take it.
-// It joins the local queue when this attempt is over, not from when it arrived: the lane question, the roster read and
-// each bounce (up to the node's gpu_wait_ms, at most maxPlacements nodes) are time the local queue does not count, so
-// a caller that arrived meanwhile is ahead of it. Carrying the arrival time into the local admission is not built (the
-// in-process slot queue takes none); the ticket queue of the next step keeps a call's place across the attempt.
+// passed over and is not offered another call by this process for a while (a node that read idle in health but whose own
+// grant refuses the job refuses every call alike, and each one would park for the node's whole gpu_wait_ms before the
+// bounce came back). A node's own answer after it accepted the job is final: a render that failed is the call's result
+// and is never placed elsewhere, and a job a node holds is never also run here (a media job cannot be recalled, ADR
+// 0064). The ticket waits for the next lane; it does not give up the way the S1 call did, and it keeps the arrival time
+// the S1 call lost on every bounce.
 
 import (
 	"context"
@@ -43,13 +40,9 @@ import (
 	"github.com/dmmdea/offload-harness/internal/buildinfo"
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
+	"github.com/dmmdea/offload-harness/internal/delegate"
 	"github.com/dmmdea/offload-harness/internal/rosterprobe"
 )
-
-// maxPlacements bounds the POST attempts of one overflowing call. Chosen, not measured: a call that three nodes have
-// refused or bounced is better served by its own queue than by a fourth wait, though it joins that queue from when it
-// came back and not from when it arrived.
-const maxPlacements = 3
 
 // backoffSteps is how long a node that failed to answer is left alone, by consecutive failure (the last step holds).
 // Chosen transport constants, not resource numbers: a powered-off box costs one probe per step, not one per call.
@@ -81,11 +74,25 @@ var (
 // when the call stayed on its own queue.
 type ClusterRow struct {
 	Node string `json:"node"`
-	// State is one of busy (it holds a lease), not-capable (it cannot render this recipe), unreachable, bounced (it
-	// had the call and passed it back), refused (it answered the POST with a refusal) or skipped.
+	// State is one of free (idle, but another ticket is first in line for it), busy (it holds a lease), draining (its
+	// card is being drained for one), not-capable (it cannot render this recipe), unreachable, in-use (a job of this
+	// machine is running there), bounced (it had the call and passed it back), refused (it answered the POST with a
+	// refusal) or skipped.
 	State   string   `json:"state"`
 	Why     string   `json:"why"`
 	Differs []string `json:"differs,omitempty"`
+	// Holder is what holds a busy node, in the node's own terms.
+	Holder *RowHolder `json:"holder,omitempty"`
+	// Since is when the node was first found in this state by the ticket (RFC 3339, UTC).
+	Since string `json:"since,omitempty"`
+}
+
+// RowHolder is the lease that holds a node or this machine's lane.
+type RowHolder struct {
+	Epoch        uint64 `json:"epoch,omitempty"`
+	Class        string `json:"class"`
+	Reason       string `json:"reason,omitempty"`
+	RemainingSec int    `json:"remaining_s,omitempty"`
 }
 
 // placerState is this PROCESS's memory of the nodes it is leaving alone: nodes that did not answer (a call after a call
@@ -96,10 +103,6 @@ type ClusterRow struct {
 type placerState struct {
 	mu    sync.Mutex
 	nodes map[string]*nodeBackoff
-	// held is the nodes this process has a job on right now. Two calls of one process (an MCP server answers its
-	// session's calls in parallel) that both read a node idle must not both send it a job: the second would sit in the
-	// node's own queue for its whole window and come back as a bounce.
-	held map[string]bool
 }
 
 // nodeBackoff is what the placer remembers about a node it is leaving alone.
@@ -128,31 +131,12 @@ func (z pause) why() string {
 	return fmt.Sprintf("%s: %s; looking again in %s", lead, z.cause, z.left.Round(time.Second))
 }
 
-var placer = &placerState{nodes: map[string]*nodeBackoff{}, held: map[string]bool{}}
+var placer = &placerState{nodes: map[string]*nodeBackoff{}}
 
 func resetPlacer() {
 	placer.mu.Lock()
 	defer placer.mu.Unlock()
 	placer.nodes = map[string]*nodeBackoff{}
-	placer.held = map[string]bool{}
-}
-
-// hold takes base for one call of this process; false when another call already has a job there.
-func (p *placerState) hold(base string) bool {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.held[base] {
-		return false
-	}
-	p.held[base] = true
-	return true
-}
-
-// release gives base back.
-func (p *placerState) release(base string) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	delete(p.held, base)
 }
 
 // backedOff reports whether base is being left alone, for how much longer and why.
@@ -177,8 +161,8 @@ func (p *placerState) entry(base string) *nodeBackoff {
 	return nb
 }
 
-// failed records one more consecutive failure to reach base and sets its pause.
-func (p *placerState) failed(base string) {
+// failed records one more consecutive failure to reach base and sets its pause, which it returns.
+func (p *placerState) failed(base string) time.Duration {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	nb := p.entry(base)
@@ -189,6 +173,7 @@ func (p *placerState) failed(base string) {
 	nb.fails++
 	nb.until = placerNow().Add(backoffSteps[step])
 	nb.state, nb.cause = "unreachable", "it did not answer a moment ago"
+	return backoffSteps[step]
 }
 
 // cooldown leaves base alone for d (a node's Retry-After, jittered once so several delegators do not return together).
@@ -257,39 +242,6 @@ func (p *placerState) served(base string) {
 	}
 }
 
-// overflowOutcome is what an attempt to place a call on the fleet came to.
-type overflowOutcome struct {
-	// placed: a node took the call (or held it and failed); res is the call's result and nothing runs here.
-	placed bool
-	res    core.Result
-	// rows say why the fleet did not take the call, per roster node, when it did not.
-	rows []ClusterRow
-}
-
-// annotate adds the cluster block to a local result that is a deferral, and quotes it in the reason. A result that is
-// not a deferral (the call ran here) and a call the fleet was never asked about are returned untouched.
-func (o overflowOutcome) annotate(res core.Result) core.Result {
-	if len(o.rows) == 0 || res.OK || !res.Deferred {
-		return res
-	}
-	obj := map[string]any{}
-	if len(res.Data) > 0 {
-		if err := json.Unmarshal(res.Data, &obj); err != nil {
-			return res // data that is not an object stays as the pipeline made it
-		}
-	}
-	obj["cluster"] = o.rows
-	if b, err := json.Marshal(obj); err == nil {
-		res.Data = b
-	}
-	parts := make([]string, 0, len(o.rows))
-	for _, r := range o.rows {
-		parts = append(parts, r.Node+": "+r.Why)
-	}
-	res.Reason += "; the fleet could not take it either: " + strings.Join(parts, "; ")
-	return res
-}
-
 // selfNodeID is this machine's node id the way fleet-serve derives its own (main.go fleetServeParams): fleet_node_id,
 // else the OS hostname. A roster that lists this machine's own node names the lane that is busy: it matches the recipe
 // perfectly, and sending the call back into it would only wait the node's window and bounce.
@@ -315,30 +267,6 @@ func ambientLease() bool {
 	return false
 }
 
-// tryOverflow places the call on the fleet when its local lane is not free. The zero outcome means "run it here".
-func tryOverflow(ctx context.Context, cfg config.Config, runner Runner, req core.Request, remotes []string) overflowOutcome {
-	if req.Task != core.TaskGenerateImage || str(req.Params, "waiter_token") != "" || ambientLease() {
-		return overflowOutcome{}
-	}
-	bases, err := candidateBases(cfg, remotes)
-	if err != nil {
-		return overflowOutcome{} // a bad `remotes` is reported by the paths that use it, as before
-	}
-	local, ok, _ := localIdentity(cfg, str(req.Params, "family"))
-	if !ok {
-		return overflowOutcome{}
-	}
-	pl, err := plan(req)
-	if err != nil {
-		return overflowOutcome{} // the lane that runs it reports its own contract
-	}
-	v := core.ProbeLane(ctx, runner, req)
-	if v.Free {
-		return overflowOutcome{}
-	}
-	return place(ctx, cfg, runner, req, pl, bases, local, v)
-}
-
 // candidate is a node that can take the call, with the name it knows the recipe by.
 type candidate struct {
 	base, node, shown string
@@ -350,71 +278,10 @@ type candidate struct {
 type rowAt struct {
 	idx int
 	row ClusterRow
-}
-
-func place(ctx context.Context, cfg config.Config, runner Runner, req core.Request, pl planned, bases []string, local localID, v core.LaneVerdict) overflowOutcome {
-	cands, rows := candidatesFor(ctx, cfg, bases, local, needOf(req.Params))
-	out := overflowOutcome{}
-	flush := func(extra []rowAt) {
-		all := append(append([]rowAt(nil), rows...), extra...)
-		sort.SliceStable(all, func(i, j int) bool { return all[i].idx < all[j].idx })
-		for _, r := range all {
-			out.rows = append(out.rows, r.row)
-		}
-	}
-	if len(cands) == 0 {
-		flush(nil)
-		return out
-	}
-	if _, has := ctx.Deadline(); !has {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, Budgets[pl.fleetTask])
-		defer cancel()
-	}
-	start := time.Now()
-	placement := "remote: this machine's image lane is not free (" + v.Why + ")"
-	h := core.BeginRemote(runner, req, RouteAuto)
-	defer core.CloseOnPanic(h)
-
-	var after []rowAt
-	attempts := 0
-	for _, c := range cands {
-		if attempts >= maxPlacements {
-			after = append(after, rowAt{c.idx, ClusterRow{Node: c.shown, State: "skipped", Why: fmt.Sprintf("not tried: a call is sent to at most %d nodes", maxPlacements)}})
-			continue
-		}
-		if ctx.Err() != nil {
-			break
-		}
-		if !placer.hold(c.base) {
-			after = append(after, rowAt{c.idx, ClusterRow{Node: c.shown, State: "busy", Why: "another call of this machine has a job there"}})
-			continue
-		}
-		attempts++
-		a := func() attemptResult {
-			defer placer.release(c.base)
-			return attempt(ctx, cfg, req, pl, c, local, start, h)
-		}()
-		switch a.kind {
-		case attemptDone:
-			a.res.Meta.Placement = placement + "; ran on " + c.node
-			h.Finish(a.res)
-			return overflowOutcome{placed: true, res: a.res}
-		case attemptFailed:
-			res := placementDefer(a.err, placement)
-			h.Finish(res)
-			return overflowOutcome{placed: true, res: res}
-		case attemptBounce:
-			after = append(after, rowAt{c.idx, a.row})
-		case attemptOut:
-			after = append(after, rowAt{c.idx, a.row})
-		}
-	}
-	// Nothing took it. A handle that never reached a node writes nothing; one whose every attempt bounced was
-	// re-armed by each Bounce and is not dispatched now.
-	h.Discard("no node of the fleet took the call")
-	flush(after)
-	return out
+	// base is the node's URL, and matched says its recipe matched the call (it is busy or paused for another reason): the
+	// nodes an older ticket is first in line for.
+	base    string
+	matched bool
 }
 
 // candidatesFor reads the roster and splits it into the nodes that can take the call, best first, and a row for every
@@ -433,7 +300,7 @@ func candidatesFor(ctx context.Context, cfg config.Config, bases []string, local
 			if name == "" {
 				name = rosterprobe.Members([]string{b})[0].Shown()
 			}
-			rows = append(rows, rowAt{i, ClusterRow{Node: name, State: pz.state, Why: pz.why()}})
+			rows = append(rows, rowAt{idx: i, base: b, row: ClusterRow{Node: name, State: pz.state, Why: pz.why()}})
 			continue
 		}
 		live = append(live, b)
@@ -442,31 +309,36 @@ func candidatesFor(ctx context.Context, cfg config.Config, bases []string, local
 	for _, r := range probeRoster(ctx, live, cfg.FleetAuthToken, healthTimeout) {
 		i := idxOf[r.Base]
 		if r.Err != nil {
-			if !rosterprobe.IsRefusal(r.Err) && r.Source == rosterprobe.SourceProbe {
-				placer.failed(r.Base)
-			}
 			why := r.Miss()
+			if !rosterprobe.IsRefusal(r.Err) && r.Source == rosterprobe.SourceProbe {
+				// One line per backoff step, not per scan: a node in its pause is not probed, so it is not logged.
+				logQueue("%s; not probing it again for %s", why, placer.failed(r.Base))
+			}
 			state := "unreachable"
 			if rosterprobe.IsRefusal(r.Err) {
 				state = "refused"
 			}
-			rows = append(rows, rowAt{i, ClusterRow{Node: r.Shown(), State: state, Why: strings.TrimPrefix(why, r.Shown()+": ")}})
+			rows = append(rows, rowAt{idx: i, base: r.Base, row: ClusterRow{Node: r.Shown(), State: state, Why: strings.TrimPrefix(why, r.Shown()+": ")}})
 			continue
 		}
 		placer.ok(r.Base)
 		v := r.View
 		who := fmt.Sprintf("%s (%s)", r.Shown(), v.NodeID)
 		if self != "" && strings.EqualFold(strings.TrimSpace(v.NodeID), self) {
-			rows = append(rows, rowAt{i, ClusterRow{Node: who, State: "skipped", Why: "this machine's own node: the lane that is not free is the one it would use"}})
+			rows = append(rows, rowAt{idx: i, base: r.Base, row: ClusterRow{Node: who, State: "skipped", Why: "this machine's own node: the lane that is not free is the one it would use"}})
 			continue
 		}
 		m, ok := matchNode(local, v, n)
 		if !ok {
-			rows = append(rows, rowAt{i, ClusterRow{Node: who, State: m.state, Why: m.why, Differs: m.differs}})
+			rows = append(rows, rowAt{idx: i, base: r.Base, row: ClusterRow{Node: who, State: m.state, Why: m.why, Differs: m.differs}})
 			continue
 		}
 		if v.LeaseHeld || len(v.Leases) > 0 || v.LeaseDraining {
-			rows = append(rows, rowAt{i, ClusterRow{Node: who, State: "busy", Why: leaseWords(v)}})
+			row := ClusterRow{Node: who, State: "busy", Why: leaseWords(v), Holder: holderOf(v)}
+			if v.LeaseDraining && !v.LeaseHeld && len(v.Leases) == 0 {
+				row.State, row.Why = "draining", "its card is being drained for a lease that is about to be granted"
+			}
+			rows = append(rows, rowAt{idx: i, base: r.Base, matched: true, row: row})
 			continue
 		}
 		id := v.NodeID
@@ -482,6 +354,21 @@ func candidatesFor(ctx context.Context, cfg config.Config, bases []string, local
 		return cands[a].idx < cands[b].idx
 	})
 	return cands, rows
+}
+
+// holderOf is the lease that holds a node, as its health states it (the worst of the live leases when several are held).
+func holderOf(v delegate.NodeView) *RowHolder {
+	if !v.LeaseHeld && len(v.Leases) == 0 {
+		return nil
+	}
+	h := &RowHolder{Class: v.LeaseClass, Reason: v.LeaseReason, RemainingSec: v.LeaseRemainingSec}
+	if len(v.Leases) > 0 {
+		h.Epoch = v.Leases[0].Epoch
+		if h.Class == "" {
+			h.Class = v.Leases[0].Class
+		}
+	}
+	return h
 }
 
 type attemptKind int
@@ -500,8 +387,16 @@ type attemptResult struct {
 	row  ClusterRow
 }
 
-// attempt sends the call to c under a fresh job id and brings the result back.
-func attempt(ctx context.Context, cfg config.Config, req core.Request, pl planned, c candidate, local localID, start time.Time, h core.RemoteAttribution) attemptResult {
+// passedBack says a node's answer is a job it accepted and handed back: another job holds its card, or it could not take its
+// lease. Nothing ran there, so the call goes on (to the next lane that frees) and the node is left alone for a while.
+func passedBack(res core.Result) bool {
+	return !res.OK && (core.CardHeld(res.Meta.ErrClass) || res.Meta.ErrClass == core.ErrClassGPULeaseUnavailable)
+}
+
+// attempt sends the call to c under jobID and brings the result back. The caller mints the id BEFORE it records the claim, so
+// the ticket on disk names the job from the instant it may be on the node (a process that ends in between leaves an id an
+// adopter can ask the node about).
+func attempt(ctx context.Context, cfg config.Config, req core.Request, pl planned, c candidate, local localID, start time.Time, jobID string, h core.RemoteAttribution) attemptResult {
 	payload := make(map[string]any, len(pl.payload)+2)
 	for k, v := range pl.payload {
 		payload[k] = v
@@ -516,10 +411,6 @@ func attempt(ctx context.Context, cfg config.Config, req core.Request, pl planne
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		return attemptResult{kind: attemptFailed, err: &contractError{fmt.Sprintf("the %s request cannot be encoded for the wire: %v", pl.fleetTask, err)}}
-	}
-	jobID, err := newJobID()
-	if err != nil {
-		return attemptResult{kind: attemptFailed, err: &placementError{core.DeferClassInfrastructure, "job id: " + err.Error()}}
 	}
 	body, err := json.Marshal(map[string]any{"job_id": jobID, "task_type": pl.fleetTask, "payload": json.RawMessage(raw)})
 	if err != nil {
@@ -559,16 +450,31 @@ func attempt(ctx context.Context, cfg config.Config, req core.Request, pl planne
 	if errors.As(serr, &pe) && ctx.Err() == nil {
 		switch {
 		case pe.neverReached:
-			placer.failed(c.base)
+			logQueue("%s did not take the connection; not offering it a job for %s", c.shown, placer.failed(c.base))
 			return attemptResult{kind: attemptOut, row: ClusterRow{Node: c.shown, State: "unreachable", Why: "did not take the connection: " + pe.Error()}}
 		case pe.status == 503 || pe.status == 429:
-			placer.cooldown(c.base, pe.retryAfter, c.shown, fmt.Sprintf("it answered %d to the last dispatch and asked to be left alone", pe.status))
+			// A node that names no Retry-After is still left alone for the first backoff step: the ticket tries the
+			// roster again at its next scan, and a full node must not be the first one every scan sends the job to.
+			cause := fmt.Sprintf("it answered %d to the last dispatch and asked to be left alone", pe.status)
+			if pe.retryAfter <= 0 {
+				cause = fmt.Sprintf("it answered %d to the last dispatch (it is full)", pe.status)
+			}
+			placer.cooldown(c.base, maxDuration(pe.retryAfter, backoffSteps[0]), c.shown, cause)
 			return attemptResult{kind: attemptBounce, row: ClusterRow{Node: c.shown, State: "refused", Why: fmt.Sprintf("answered %d to the dispatch: %s", pe.status, pe.Error())}}
 		case pe.status == 412:
+			placer.bounced(c.base, c.shown, "refused", "it refused the recipe (412): its files changed since it published them")
 			return attemptResult{kind: attemptOut, row: ClusterRow{Node: c.shown, State: "refused", Why: "refused the recipe (412): its files changed since it published them; " + pe.Error()}}
 		case pe.status != 0:
+			placer.bounced(c.base, c.shown, "refused", fmt.Sprintf("it answered %d to the last dispatch", pe.status))
 			return attemptResult{kind: attemptOut, row: ClusterRow{Node: c.shown, State: "refused", Why: fmt.Sprintf("answered %d to the dispatch: %s", pe.status, pe.Error())}}
 		}
 	}
 	return attemptResult{kind: attemptFailed, err: serr}
+}
+
+func maxDuration(a, b time.Duration) time.Duration {
+	if a > b {
+		return a
+	}
+	return b
 }

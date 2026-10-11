@@ -41,7 +41,7 @@ func TestABounceIsRememberedAndTheNodeComesBackAtTheNextStep(t *testing.T) {
 	call := func(step string) {
 		t.Helper()
 		lr := &laneRunner{verdict: heldLane()}
-		res := Run(context.Background(), cfg, lr, overflowReq(t, "qwen-image-2.1-fast", nil), "auto", nil)
+		res := runBounded(cfg, lr, overflowReq(t, "qwen-image-2.1-fast", nil), "auto", nil)
 		if !res.OK || res.Meta.Node != "node-b" {
 			t.Fatalf("%s: the node that admits serves the call: %+v", step, res)
 		}
@@ -97,7 +97,7 @@ func TestACallTheNodeServesForgetsItsBounces(t *testing.T) {
 		}
 	}
 	call := func() core.Result {
-		return Run(context.Background(), cfg, &laneRunner{verdict: heldLane()}, overflowReq(t, "qwen-image-2.1-fast", nil), "auto", nil)
+		return runBounded(cfg, &laneRunner{verdict: heldLane()}, overflowReq(t, "qwen-image-2.1-fast", nil), "auto", nil)
 	}
 
 	if res := call(); !res.OK || res.Meta.Node != "node-b" || len(a.posts()) != 1 {
@@ -129,21 +129,20 @@ func TestABouncedNodeReadsAsBouncedAndNeverAsUnreachable(t *testing.T) {
 	cfg := overflowClient(t, "krea2", map[string]string{"qwen-image-2.1-fast": block(int8Ckpt, "")}, a)
 	pinPlacerClock(t)
 
-	first := Run(context.Background(), cfg, &laneRunner{verdict: heldLane(), local: queuedLocal()}, overflowReq(t, "qwen-image-2.1-fast", nil), "auto", nil)
-	row, ok := rowFor(clusterOf(t, first), "node-a")
-	if !ok || row.State != "bounced" || !strings.Contains(row.Why, "passed it back") || !strings.Contains(row.Why, "not offered another call for 1m0s") {
-		t.Fatalf("the call that was bounced says so and says for how long the node is left alone: %+v", row)
+	// The ticket's answer reads the node as the placer does once the attempt is over: bounced, why, and for how long.
+	lr := &laneRunner{verdict: heldLane()}
+	req := overflowReq(t, "qwen-image-2.1-fast", nil)
+	answer := settle(t, cfg, lr, req, rowIs("node-a", "bounced"))
+	row, _ := rowFor(clusterOf(t, answer), "node-a")
+	if !strings.HasPrefix(row.Why, "not offered a call: ") || !strings.Contains(row.Why, "took the last call and passed it back") || !strings.Contains(row.Why, "looking again in 1m0s") {
+		t.Fatalf("the ticket is told why the node is not offered the job, and for how long: %+v", row)
 	}
-	second := Run(context.Background(), cfg, &laneRunner{verdict: heldLane(), local: queuedLocal()}, overflowReq(t, "qwen-image-2.1-fast", nil), "auto", nil)
-	row, ok = rowFor(clusterOf(t, second), "node-a")
-	if !ok || row.State != "bounced" || !strings.HasPrefix(row.Why, "not offered a call: ") || !strings.Contains(row.Why, "took the last call and passed it back") || !strings.Contains(row.Why, "looking again in 1m0s") {
-		t.Fatalf("the next call is told why the node was not offered it: %+v", row)
-	}
-	if strings.Contains(row.Why, "did not answer") || row.State == "unreachable" {
+	row, ok := rowFor(clusterOf(t, runDoor(cfg, lr, req, AtOnce)), "node-a")
+	if !ok || strings.Contains(row.Why, "did not answer") || row.State == "unreachable" {
 		t.Errorf("a node that answered never reads as one that did not: %+v", row)
 	}
 	if got := len(a.posts()); got != 1 {
-		t.Errorf("the node was sent the call once, not once per call: %d", got)
+		t.Errorf("the node was sent the job once, not once per scan: %d", got)
 	}
 }
 
@@ -154,13 +153,13 @@ func TestARetryAfterHoldsTheNodeAndReadsAsRefused(t *testing.T) {
 	n.refusePost, n.refuseRetryAfter = 503, "30"
 	cfg := overflowClient(t, "krea2", map[string]string{"qwen-image-2.1-fast": block(int8Ckpt, "")}, n)
 	now := pinPlacerClock(t)
-	call := func() core.Result {
-		return Run(context.Background(), cfg, &laneRunner{verdict: heldLane(), local: queuedLocal()}, overflowReq(t, "qwen-image-2.1-fast", nil), "auto", nil)
-	}
+	lr := &laneRunner{verdict: heldLane()}
+	req := overflowReq(t, "qwen-image-2.1-fast", nil)
+	call := func() core.Result { return runDoor(cfg, lr, req, AtOnce) }
 
-	first := call()
-	if row, ok := rowFor(clusterOf(t, first), "node-c"); !ok || row.State != "refused" || !strings.Contains(row.Why, "503") {
-		t.Fatalf("the call that was refused says so: %+v", row)
+	first := settle(t, cfg, lr, req, rowIs("node-c", "refused"))
+	if row, ok := rowFor(clusterOf(t, first), "node-c"); !ok || !strings.Contains(row.Why, "503") {
+		t.Fatalf("the ticket that was refused says so: %+v", row)
 	}
 	second := call()
 	row, ok := rowFor(clusterOf(t, second), "node-c")
@@ -174,10 +173,7 @@ func TestARetryAfterHoldsTheNodeAndReadsAsRefused(t *testing.T) {
 		t.Fatalf("held for its Retry-After, the node is not sent a second job: %d POSTs", got)
 	}
 	*now = now.Add(31 * time.Second)
-	call()
-	if got := len(n.posts()); got != 2 {
-		t.Errorf("once the Retry-After is over the node is tried again: %d POSTs", got)
-	}
+	waitFor(t, 5*time.Second, "once the Retry-After is over the node is tried again", func() bool { return len(n.posts()) == 2 })
 }
 
 // A node that accepted the job and could not take its lease (a lease location it cannot use, a host-RAM need no state of
@@ -190,7 +186,7 @@ func TestALeaseThatCannotBeTakenMovesTheCallOnAndPausesTheNode(t *testing.T) {
 	cfg := overflowClient(t, "krea2", map[string]string{"qwen-image-2.1-fast": block(int8Ckpt, "")}, a, b)
 	pinPlacerClock(t)
 	lr := &laneRunner{verdict: heldLane()}
-	res := Run(context.Background(), cfg, lr, overflowReq(t, "qwen-image-2.1-fast", nil), "auto", nil)
+	res := runBounded(cfg, lr, overflowReq(t, "qwen-image-2.1-fast", nil), "auto", nil)
 	if !res.OK || res.Meta.Node != "node-b" {
 		t.Fatalf("the next node serves a call the first could not admit: %+v", res)
 	}
@@ -207,9 +203,9 @@ func TestALeaseThatCannotBeTakenMovesTheCallOnAndPausesTheNode(t *testing.T) {
 	// Alone, the call stays in its own queue and the row says what happened, as a refusal and not as a bounce off a card.
 	only := overflowClient(t, "krea2", map[string]string{"qwen-image-2.1-fast": block(int8Ckpt, "")}, a)
 	pinPlacerClock(t)
-	res = Run(context.Background(), only, &laneRunner{verdict: heldLane(), local: queuedLocal()}, overflowReq(t, "qwen-image-2.1-fast", nil), "auto", nil)
-	row, ok := rowFor(clusterOf(t, res), "node-a")
-	if !ok || row.State != "refused" || !strings.Contains(row.Why, "could not take its lease") || !strings.Contains(row.Why, "nothing ran") {
+	res = settle(t, only, &laneRunner{verdict: heldLane()}, overflowReq(t, "qwen-image-2.1-fast", nil), rowIs("node-a", "refused"))
+	row, _ := rowFor(clusterOf(t, res), "node-a")
+	if !strings.Contains(row.Why, "could not take its lease") {
 		t.Errorf("the row names the fault: %+v", row)
 	}
 }
@@ -228,7 +224,7 @@ func TestAnAmbiguousPostIsFinal(t *testing.T) {
 
 	done := make(chan core.Result, 1)
 	go func() {
-		done <- Run(context.Background(), cfg, lr, overflowReq(t, "qwen-image-2.1-fast", nil), "auto", nil)
+		done <- runBounded(cfg, lr, overflowReq(t, "qwen-image-2.1-fast", nil), "auto", nil)
 	}()
 	var res core.Result
 	select {
@@ -277,7 +273,7 @@ func TestARefusedDialMovesOnAndBacksTheNodeOff(t *testing.T) {
 	t.Cleanup(func() { probeRoster = prev })
 
 	lr := &laneRunner{verdict: heldLane()}
-	res := Run(context.Background(), cfg, lr, overflowReq(t, "qwen-image-2.1-fast", nil), "auto", nil)
+	res := runBounded(cfg, lr, overflowReq(t, "qwen-image-2.1-fast", nil), "auto", nil)
 	if !res.OK || res.Meta.Node != "node-b" {
 		t.Fatalf("a dial that never connected sent nothing, so the next node serves the call: %+v", res)
 	}
@@ -288,48 +284,15 @@ func TestARefusedDialMovesOnAndBacksTheNodeOff(t *testing.T) {
 	if pz, _ := placer.backedOff(a.srv.URL); pz.why() != "not probed: it did not answer a moment ago; looking again in 3s" {
 		t.Errorf("a node that was never reached reads as not probed, and says for how long: %q", pz.why())
 	}
-	if res := Run(context.Background(), cfg, &laneRunner{verdict: heldLane()}, overflowReq(t, "qwen-image-2.1-fast", nil), "auto", nil); !res.OK || res.Meta.Node != "node-b" {
+	if res := runBounded(cfg, &laneRunner{verdict: heldLane()}, overflowReq(t, "qwen-image-2.1-fast", nil), "auto", nil); !res.OK || res.Meta.Node != "node-b" {
 		t.Fatalf("%+v", res)
 	}
-	if len(asked) != 2 || len(asked[1]) != 1 || asked[1][0] != b.srv.URL {
-		t.Errorf("inside its pause the node is not even read: %v", asked)
+	if len(asked) < 2 || len(asked[0]) != 2 {
+		t.Fatalf("the first read has both nodes: %v", asked)
 	}
-}
-
-// A call is sent to at most three nodes: a fourth idle node that would also bounce is named and not tried. Without the
-// bound a roster of bouncing nodes parks the call for each node's whole window in turn.
-func TestACallIsSentToAtMostThreeNodes(t *testing.T) {
-	fams := map[string]string{"qwen-image-2.1": block(int8Ckpt, "")}
-	busy := nodeOpts{deferAs: "gpu busy: card(s) held by a media-class lease", deferClass: core.ErrClassGPUBusy}
-	var nodes []*node
-	for _, id := range []string{"node-a", "node-b", "node-c", "node-d"} {
-		nodes = append(nodes, startImageNode(t, id, "hidream-o1", fams, busy))
-	}
-	cfg := overflowClient(t, "krea2", map[string]string{"qwen-image-2.1-fast": block(int8Ckpt, "")}, nodes...)
-	pinPlacerClock(t)
-	lr := &laneRunner{verdict: heldLane(), local: queuedLocal()}
-	res := Run(context.Background(), cfg, lr, overflowReq(t, "qwen-image-2.1-fast", nil), "auto", nil)
-	if probes, runs := lr.counts(); probes != 1 || runs != 1 {
-		t.Fatalf("every node bounced, so the call runs here once: probes %d runs %d", probes, runs)
-	}
-	total := 0
-	for _, n := range nodes {
-		total += len(n.posts())
-	}
-	if total != maxPlacements {
-		t.Fatalf("a call is sent to at most %d nodes: %d POSTs in all", maxPlacements, total)
-	}
-	noPosts(t, "the fourth node", nodes[3])
-	rows := clusterOf(t, res)
-	if len(rows) != 4 {
-		t.Fatalf("one row per roster node: %+v", rows)
-	}
-	for i, want := range []string{"bounced", "bounced", "bounced", "skipped"} {
-		if rows[i].State != want {
-			t.Errorf("row %d (%s) = %s, want %s: %+v", i, rows[i].Node, rows[i].State, want, rows[i])
+	for i, read := range asked[1:] {
+		if len(read) != 1 || read[0] != b.srv.URL {
+			t.Errorf("inside its pause the node is not even read (read %d): %v", i+2, asked)
 		}
-	}
-	if !strings.Contains(rows[3].Why, "at most 3 nodes") {
-		t.Errorf("the fourth row says why it was not tried: %+v", rows[3])
 	}
 }

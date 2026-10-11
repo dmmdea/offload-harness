@@ -28,6 +28,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/gpucards"
 	"github.com/dmmdea/offload-harness/internal/gpulease"
 	"github.com/dmmdea/offload-harness/internal/gpuprobe"
+	"github.com/dmmdea/offload-harness/internal/mediaremote"
 	"github.com/dmmdea/offload-harness/internal/modelaffinity"
 	"github.com/dmmdea/offload-harness/internal/pairworkloads"
 )
@@ -74,6 +75,14 @@ var statusBlockTable = []statusBlock{
 	// How this box's PAIR cards are reported (docs/systems/pair-workloads.md): reported only when
 	// pair_workloads_enabled is on, so a box that never opted in answers byte-identically to before.
 	{"pair", func(_ *Server, _ context.Context, cfg config.Config) any { return statusPair(cfg) }},
+	// The media tickets of this machine (ADR 0083): reported only while there are any, so a box that never queued a call
+	// answers byte-identically to before. A nil slice must come back as an untyped nil, or it would read as a present block.
+	{"media_queue", func(_ *Server, _ context.Context, cfg config.Config) any {
+		if q := mediaremote.Queue(cfg); len(q) > 0 {
+			return q
+		}
+		return nil
+	}},
 }
 
 // statusSectionValues is the section enum: the two composites, then every block.

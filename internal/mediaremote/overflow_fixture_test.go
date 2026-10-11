@@ -134,6 +134,8 @@ func overflowClient(t *testing.T, defaultFamily string, families map[string]stri
 	t.Cleanup(func() { hostnameFn = prevHost })
 	resetPlacer()
 	t.Cleanup(resetPlacer)
+	freshQueue(t)
+	freshRoster(t)
 	cfg := clientCfg(t, nodes...)
 	binding(comfyTree(t), defaultFamily, families)(&cfg)
 	names := []string{"generate_image"}
@@ -152,8 +154,24 @@ type laneRunner struct {
 	probes  int
 	probed  []core.Request
 	runs    int
+	ran     []core.Request
+	begins  int
 	local   core.Result
 	rig     *pairRig
+}
+
+// set changes the lane's verdict: the bench render ended, or another began.
+func (l *laneRunner) set(v core.LaneVerdict) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.verdict = v
+}
+
+// ranCalls is every request the runner ran.
+func (l *laneRunner) ranCalls() []core.Request {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]core.Request(nil), l.ran...)
 }
 
 func (l *laneRunner) MediaLaneFree(_ context.Context, req core.Request) core.LaneVerdict {
@@ -164,10 +182,11 @@ func (l *laneRunner) MediaLaneFree(_ context.Context, req core.Request) core.Lan
 	return l.verdict
 }
 
-func (l *laneRunner) Run(context.Context, core.Request) core.Result {
+func (l *laneRunner) Run(_ context.Context, req core.Request) core.Result {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.runs++
+	l.ran = append(l.ran, req)
 	if l.local.OK || l.local.Deferred {
 		return l.local
 	}
@@ -175,6 +194,9 @@ func (l *laneRunner) Run(context.Context, core.Request) core.Result {
 }
 
 func (l *laneRunner) BeginRemote(req core.Request, route string) core.RemoteAttribution {
+	l.mu.Lock()
+	l.begins++
+	l.mu.Unlock()
 	if l.rig == nil {
 		return nil
 	}

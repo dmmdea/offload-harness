@@ -19,7 +19,7 @@ import "context"
 // LaneVerdict is a prober's answer for one request.
 type LaneVerdict struct {
 	// Free: the lane would take the call now, OR the prober cannot say (a task it does not model, a lease this process
-	// inherited, a card table that would not read). A router acts on a false Free only.
+	// inherited, a card table that would not read). A router acts on a false Free, and on a true Free that is not Unjudged.
 	Free bool `json:"free"`
 	// Why is the sentence for a person: what is in the way when Free is false, or why the prober could not judge when
 	// Free is true and the answer is not a plain yes. Empty for a plain yes.
@@ -30,6 +30,13 @@ type LaneVerdict struct {
 	Ahead int `json:"ahead,omitempty"`
 	// HostRAM is the host-RAM guard's own sentence when the memory, not the card, is what is short.
 	HostRAM string `json:"host_ram,omitempty"`
+	// Unjudged: the prober TRIED to read the lane and could not (the card table did not read inside its bound, the lease
+	// directory did not open). Free is true then only because the real admission will judge, so a router must not take it
+	// for a lane that is free: it looks at the rest of the cluster first (the card table is slowest to read exactly when a
+	// heavy render holds the card) and keeps this machine's lane as the answer when no node can take the call. It is not
+	// set when the prober does not model the call at all (another task, a binding without a lane, a lease the process
+	// inherited): there the lane is not in question and the call runs on it.
+	Unjudged bool `json:"unjudged,omitempty"`
 }
 
 // LaneHolder is one live lease in the way, as `gpu status` would list it.

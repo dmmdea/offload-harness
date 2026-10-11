@@ -81,6 +81,12 @@ type Server struct {
 	// laneHook is the seam the lane question (core.LaneProber) is answered through: nil (production) is the pipeline's
 	// MediaLaneFree, or "free" when there is no pipeline; tests inject one to see that the question reaches the pipeline.
 	laneHook func(context.Context, core.Request) core.LaneVerdict
+	// placeHook is the seam the place a queued call keeps in this box's line (core.PlaceKeeper) is kept through: nil
+	// (production) is the pipeline, or "this box keeps none" when there is no pipeline.
+	placeHook core.PlaceKeeper
+	// configPath is the config file this server's config came from: the ticket queue re-reads its delegate_remotes when
+	// the file changes, because a running server never reloads its config (WithConfigSource).
+	configPath string
 	// localAgent is the LOCAL execution seam shared by agent_delegate and offload_ask:
 	// nil (production)
 	// resolves to p.RunAgentContract at call time; tests inject a fake so the
@@ -166,6 +172,14 @@ type Server struct {
 func New(p *pipeline.Pipeline) *Server {
 	return &Server{p: p, askCache: askcache.New(), quarantine: delegate.NewQuarantine(0), pins: delegate.NewPinTally(), tenant: delegate.DefaultTenant(),
 		originSession: func() string { return ledger.ProcessOrigin().Session }}
+}
+
+// WithConfigSource records the config file this server runs on, so a node added to its delegate_remotes joins the running
+// session instead of waiting for a restart (internal/mediaremote: the ticket re-reads the file when its mtime changes). An
+// empty path (built-in defaults) leaves the roster the server started with.
+func (s *Server) WithConfigSource(path string) *Server {
+	s.configPath = path
+	return s
 }
 
 // WithConfigError records the config validation error this server is running
@@ -270,6 +284,37 @@ func (r runTaskAs) MediaLaneFree(ctx context.Context, req core.Request) core.Lan
 }
 
 var _ core.LaneProber = runTaskAs{}
+
+// LeaveMediaPlace, KeepMediaPlace and DropMediaPlace make the runner the place keeper mediaremote's ticket queue asks to keep a
+// queued call's arrival time in this box's own line (ADR 0083). A server built without a pipeline keeps none.
+func (r runTaskAs) LeaveMediaPlace(ctx context.Context, req core.Request, since time.Time) (core.MediaPlace, error) {
+	if r.s.placeHook != nil {
+		return r.s.placeHook.LeaveMediaPlace(ctx, req, since)
+	}
+	if r.s.p == nil {
+		return core.MediaPlace{}, core.ErrNoMediaPlace
+	}
+	return r.s.p.LeaveMediaPlace(ctx, req, since)
+}
+
+func (r runTaskAs) KeepMediaPlace(token string) bool {
+	if r.s.placeHook != nil {
+		return r.s.placeHook.KeepMediaPlace(token)
+	}
+	return r.s.p != nil && r.s.p.KeepMediaPlace(token)
+}
+
+func (r runTaskAs) DropMediaPlace(token string) {
+	if r.s.placeHook != nil {
+		r.s.placeHook.DropMediaPlace(token)
+		return
+	}
+	if r.s.p != nil {
+		r.s.p.DropMediaPlace(token)
+	}
+}
+
+var _ core.PlaceKeeper = runTaskAs{}
 
 // withMediaPlace threads the waiter_token a queued media answer returned into the request's params,
 // so the call resumes the place in line it left (internal/gpulease/tokens.go). Absent or blank is a
@@ -434,7 +479,7 @@ func (s *Server) buildServer(version string) *mcp.Server {
 	srv.AddTool(&mcp.Tool{
 		Name:        "offload_generate_image",
 		Description: "Generate an IMAGE from a text prompt on THIS machine's LOCAL image engine for FREE — no cloud, runs on the local GPU, using its configured model at its highest-quality settings (the engine is ComfyUI or stable-diffusion.cpp per machine; offload_status media.routes reports which one is bound here — e.g. HiDream-O1 bf16 at native 2048 via its official graph, SDXL on smaller boxes). QUALITY-FIRST: renders can take many minutes — that is intended; do not lower steps/resolution to speed things up unless the caller explicitly asks for a draft. prompt is required (prose sentences beat tag lists on DiT models; quoted text renders as literal text); optional: negative (active on models served with real CFG), width/height (default = the model's native resolution), steps, seed, out. It takes the shared single-slot GPU lock (and, on the ComfyUI engine, auto-starts ComfyUI), so it serializes with other local gen/inference and may wait. Where this machine configures a prompt-refiner model (imagegen_refiner_model), the prompt is first expanded with photographic detail on the free local text tier. Double-quoted text spans (straight or curly quotes) are guarded: if the refined text drops or alters one, or adds new quoted text, the raw prompt is rendered instead — same fallback as on any refiner error, recorded in the result as refine_fallback. The result then carries refined (plus refined_prompt when true); set refine=false to render your prompt verbatim. Caveat: unpaired quote marks used as inch marks can pair into unintended spans and force the (safe) raw-prompt fallback — spell out inches when a prompt also quotes text. NAMED FAMILIES: family selects one of this machine's opt-in bindings (offload_status media.image_families lists them); omit it for the default binding, which is what every call without it renders. transparent=true keeps an alpha channel (only a qwen-image-2.1 family has an RGBA VAE; any other binding defers rather than render opaque). Returns {image_path, width, height, seed, family} plus license/commercial_use when the binding declares a license — width/height are MEASURED from the written file (a family snaps sizes, e.g. qwen-image-2.1 floors to /32 and defaults to 2048x2048). On any failure (unknown family, transparent on a family without alpha, render error) it returns deferred:true — then generate the image another way.",
-		InputSchema: json.RawMessage(`{"type":"object","properties":{"waiter_token":{"type":"string","description":"OPTIONAL. The waiter_token a QUEUED answer of this tool returned (err_class gpu_queued: every card was busy for the whole wait, so the call kept a place in line instead of failing). Re-send the SAME request with it within 10 minutes to resume that place with the arrival time it had; omit it on a first call."},"prompt":{"type":"string","description":"positive text prompt describing the image"},"negative":{"type":"string","description":"hard exclusions, e.g. people, text, watermark"},"out":{"type":"string","description":"output PNG path (optional; default under the media dir)"},"width":{"type":"integer","description":"width px (default 1024)"},"height":{"type":"integer","description":"height px (default 1024)"},"steps":{"type":"integer","description":"sampler steps (default 30)"},"seed":{"type":"integer","description":"RNG seed for reproducibility"},"refine":{"type":"boolean","description":"set false to skip this machine's opt-in prompt refiner and render the prompt verbatim (default: refine when a refiner model is configured; no-op otherwise)"},"family":{"type":"string","description":"OPTIONAL named image family (offload_status media.image_families); omit for this machine's default binding"},"transparent":{"type":"boolean","description":"keep an alpha channel (RGBA PNG with a transparent background; the prompt is wrapped in the model's official RGBA template). Only a qwen-image-2.1 family supports it; default false = opaque RGB"},` + mediaRouteSchema + `},"required":["prompt"]}`),
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"waiter_token":{"type":"string","description":"OPTIONAL. The waiter_token a QUEUED answer of this tool returned (err_class gpu_queued). mq-...: the ticket the harness is holding for this request, which starts on the first matching lane that frees anywhere; do NOT call again to wait for it (a repeat of the identical request attaches to the same ticket), and send the SAME request with waiter_token=mq-... only to collect the result. tk-...: a place in this machine's own line; re-send the SAME request with it within 10 minutes to resume that place, and the call brings the place into the cluster queue. Omit it on a first call."},"prompt":{"type":"string","description":"positive text prompt describing the image"},"negative":{"type":"string","description":"hard exclusions, e.g. people, text, watermark"},"out":{"type":"string","description":"output PNG path (optional; default under the media dir)"},"width":{"type":"integer","description":"width px (default 1024)"},"height":{"type":"integer","description":"height px (default 1024)"},"steps":{"type":"integer","description":"sampler steps (default 30)"},"seed":{"type":"integer","description":"RNG seed for reproducibility"},"refine":{"type":"boolean","description":"set false to skip this machine's opt-in prompt refiner and render the prompt verbatim (default: refine when a refiner model is configured; no-op otherwise)"},"family":{"type":"string","description":"OPTIONAL named image family (offload_status media.image_families); omit for this machine's default binding"},"transparent":{"type":"boolean","description":"keep an alpha channel (RGBA PNG with a transparent background; the prompt is wrapped in the model's official RGBA template). Only a qwen-image-2.1 family supports it; default false = opaque RGB"},"wait_s":{"type":"integer","description":"OPTIONAL. How many seconds this call waits for its job before it answers 'queued' with the ticket (default: this machine's gpu_wait_ms, 90 s; 0 = answer after the ticket's first look; at most 3600). The job goes on when the call returns; keep it under your client's tool-call timeout."},` + mediaRouteSchema + `},"required":["prompt"]}`),
 	}, s.handleGenerateImage)
 
 	srv.AddTool(&mcp.Tool{
@@ -1574,7 +1619,7 @@ func (s *Server) textRun(ctx context.Context, req core.Request, route string) co
 // offload_generate_video, offload_animate_character, offload_generate_audio, offload_run_graph; ADR 0077): one
 // string so the five descriptions cannot drift. The default is auto, which runs here whenever this machine
 // has the lane, so a caller that never passes it is unchanged on a render box.
-const mediaRouteSchema = `"route":{"type":"string","enum":["local","auto","remote"],"description":"where the job runs (ADR 0077): auto (default; here when this machine has the lane, derived from the files its routes load, else a fleet node from delegate_remotes; a box with no lane and no fleet runs it here and gets the lane's own deferral), remote (always a fleet node; the input files you name travel to it in a hash-checked bundle and the output is fetched back and verified against the sha256 the node published), local (always this machine). meta.node and meta.placement say where it ran. out_dir (run_graph) is where the fetched outputs land on this machine (created if missing; it is never sent to the node). Not carried to a node: tts_voice, transformer and devices (those defer on a remote route). refine=false IS carried, to a node whose health says it honours it (any other node is a named miss). waiter_token resumes a place in line on THIS machine only. With a fleet configured, an auto IMAGE call whose own lane is not free goes to an idle node that renders the SAME recipe (same weight files and sizes, same sampling, strict; ADR 0082) under that node's own family name, and when none admits it goes on to the local queue, joining it when the fleet attempt is over and not from when it arrived, and its answer carries cluster[] saying per node why not; a call that carries a waiter_token is never moved"},"remotes":{"type":"array","items":{"type":"string"},"description":"fleet node base URLs for this call, tailnet-only (e.g. http://node-c:18811); each must be one of delegate_remotes, so a call can narrow the fleet and never extend it. Default: delegate_remotes"}`
+const mediaRouteSchema = `"route":{"type":"string","enum":["local","auto","remote"],"description":"where the job runs (ADR 0077): auto (default; here when this machine has the lane, derived from the files its routes load, else a fleet node from delegate_remotes; a box with no lane and no fleet runs it here and gets the lane's own deferral), remote (always a fleet node; the input files you name travel to it in a hash-checked bundle and the output is fetched back and verified against the sha256 the node published), local (always this machine). meta.node and meta.placement say where it ran. out_dir (run_graph) is where the fetched outputs land on this machine (created if missing; it is never sent to the node). Not carried to a node: tts_voice, transformer and devices (those defer on a remote route). refine=false IS carried, to a node whose health says it honours it (any other node is a named miss). With a fleet configured, an auto IMAGE call whose own lane is not free becomes a TICKET (ADR 0083): the harness holds the job and starts it on the first matching lane that frees anywhere, in order of arrival, either this machine's own or an idle node that renders the SAME recipe (same weight files and sizes, same sampling, strict; ADR 0082) under that node's own family name. The call answers inside its window (wait_s) with the ticket, its position and cluster[] saying per node why not; do not call again, a repeat of the identical request attaches to the same ticket and waiter_token=mq-... collects the result. A tk- waiter_token (a place in this machine's own line) is brought into the ticket"},"remotes":{"type":"array","items":{"type":"string"},"description":"fleet node base URLs for this call, tailnet-only (e.g. http://node-c:18811); each must be one of delegate_remotes, so a call can narrow the fleet and never extend it. Default: delegate_remotes"}`
 
 // textRouteSchema is the `route` property offload_classify and offload_extract share. Adding it
 // changed tools/list on every box (0.154.0): the default is local, so every caller that never
@@ -1789,6 +1834,7 @@ func (s *Server) handleGenerateImage(ctx context.Context, req *mcp.CallToolReque
 		Transparent bool     `json:"transparent"`
 		Route       string   `json:"route"`
 		Remotes     []string `json:"remotes"`
+		WaitS       *int     `json:"wait_s"`
 	}
 	if bad := parseArgs(req.Params.Arguments, &in); bad != nil {
 		return bad, nil
@@ -1825,7 +1871,33 @@ func (s *Server) handleGenerateImage(ctx context.Context, req *mcp.CallToolReque
 	if in.Refine != nil && !*in.Refine {
 		params["refine"] = false
 	}
-	return result(mediaremote.Run(ctx, s.mediaCfg(), runTaskAs{s}, core.Request{Task: core.TaskGenerateImage, Door: "offload_generate_image", Input: in.Prompt, Params: withMediaPlace(req.Params.Arguments, params)}, in.Route, in.Remotes))
+	// A busy lane makes the call a ticket the process keeps (ADR 0083): this door answers inside its window (gpu_wait_ms, or
+	// wait_s) and the ticket goes on, so the wait is the harness's and the caller is not asked to loop.
+	return result(mediaremote.RunWith(ctx, s.mediaCfg(), runTaskAs{s}, core.Request{Task: core.TaskGenerateImage, Door: "offload_generate_image", Input: in.Prompt, Params: withMediaPlace(req.Params.Arguments, params)},
+		in.Route, in.Remotes, s.imageWait(in.WaitS)))
+}
+
+// imageWait is how the image door waits for its ticket: inside its window, with the ticket outliving the call, re-reading
+// delegate_remotes from the config file this server runs on.
+func (s *Server) imageWait(waitS *int) mediaremote.Wait {
+	return mediaremote.Wait{Window: waitWindow(waitS), Detach: true, RosterFile: s.configPath}
+}
+
+// maxWaitS caps wait_s: an hour is already longer than any tool call a client will hold open.
+const maxWaitS = 3600
+
+// waitWindow turns the door's wait_s into the window a call blocks for its ticket: absent is the default (gpu_wait_ms),
+// 0 answers at once (after the ticket's first look), and anything else is that many seconds, capped.
+func waitWindow(waitS *int) time.Duration {
+	switch {
+	case waitS == nil:
+		return 0
+	case *waitS <= 0:
+		return mediaremote.AtOnce
+	case *waitS > maxWaitS:
+		return maxWaitS * time.Second
+	}
+	return time.Duration(*waitS) * time.Second
 }
 
 func (s *Server) handleEditImageGenerative(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
