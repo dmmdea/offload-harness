@@ -679,11 +679,10 @@ func newLeaseScope(ctx context.Context, cfg config.Config, ids []string) leaseSc
 	return leaseScope{gpualloc.NewLeaseScope(ctx, cfg, ids, cardTableDeps(), os.Stderr)}
 }
 
-func (s leaseScope) bounded() bool                            { return s.Bounded() }
-func (s leaseScope) touchesPins(pins []string) bool           { return s.TouchesPins(pins) }
-func (s leaseScope) touches(model string) bool                { return s.Touches(model) }
-func (s leaseScope) touchesRun(r gpuactivity.Run) bool        { return s.TouchesRun(r) }
-func (s leaseScope) split(models []string) (on, off []string) { return s.Split(models) }
+func (s leaseScope) bounded() bool                     { return s.Bounded() }
+func (s leaseScope) touchesPins(pins []string) bool    { return s.TouchesPins(pins) }
+func (s leaseScope) touches(model string) bool         { return s.Touches(model) }
+func (s leaseScope) touchesRun(r gpuactivity.Run) bool { return s.TouchesRun(r) }
 func (s leaseScope) splitPlaced(models []string) (on, off, unplaced []string) {
 	return s.SplitPlaced(models)
 }

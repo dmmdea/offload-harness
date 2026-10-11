@@ -24,6 +24,9 @@ type LeaseScope struct {
 	cardsOK bool
 	// cardsWhy says why the table is unusable: the read's error, or that it listed no card.
 	cardsWhy string
+	// holdsAll: the lease names every card the table lists, so it holds the whole node however it is
+	// spelled (a one-card box's only card, a lease on all three).
+	holdsAll bool
 }
 
 // NewLeaseScope reads the card table once (deps.CardTable, which retries a read that ran out of
@@ -47,6 +50,19 @@ func NewLeaseScope(ctx context.Context, cfg config.Config, ids []string, deps De
 			// cards); an unload takes the opposite one (only a seat placed on a leased card goes).
 			// Said, because the operator would otherwise believe the card table had been read.
 			fmt.Fprintf(warn, "gpu reserve: the card table could not be read (%s): the drain waits for every run on the node, and no seat but the configured agent seat can be placed on a card, so only that one is unloaded\n", s.cardsWhy)
+		}
+	}
+	if s.cardsOK {
+		held := map[string]bool{}
+		for _, id := range ids {
+			held[strings.ToLower(strings.TrimSpace(id))] = true
+		}
+		s.holdsAll = true
+		for _, c := range cards {
+			if !held[c.LeaseID()] {
+				s.holdsAll = false
+				break
+			}
 		}
 	}
 	return s
@@ -77,14 +93,15 @@ func (s LeaseScope) CardsWhy() string { return s.cardsWhy }
 // the config declares the seat's pins and the card table places every one of them, and then on says
 // whether any of those cards is a leased one. A model nobody declared, a pin the table cannot
 // place and a table that cannot be read are known=false: the placement is not known, and on is
-// false with it. A whole-node lease holds every card, so every seat is on it and known.
+// false with it. A whole-node lease holds every card, so every seat is on it and known; so does a
+// lease that names every card the table lists.
 //
 // This is the reading an UNLOAD takes, because an unload evicts a model for good (plan P5, F15).
 // Touches reads the same facts in the other direction (a doubt is "on the leased cards"), which is
 // right for a drain or a fence: waiting for a run that is not there costs a moment, and unloading a
 // seat that is not there costs someone's work.
 func (s LeaseScope) Placement(model string) (on, known bool) {
-	if !s.Bounded() {
+	if !s.Bounded() || s.holdsAll {
 		return true, true
 	}
 	if !s.cardsOK {
@@ -120,18 +137,6 @@ func (s LeaseScope) TouchesRun(r gpuactivity.Run) bool {
 		return s.TouchesPins(r.Devices)
 	}
 	return s.Touches(r.Seat)
-}
-
-// Split divides models into those on the leased cards and those that are not.
-func (s LeaseScope) Split(models []string) (on, off []string) {
-	for _, m := range models {
-		if s.Touches(m) {
-			on = append(on, m)
-		} else {
-			off = append(off, m)
-		}
-	}
-	return on, off
 }
 
 // SplitPlaced divides models for an unload: on are the ones positively placed on a leased card,
@@ -198,7 +203,7 @@ func UnloadModels(ctx context.Context, cfg config.Config, roster []string, lease
 		models = append(models, id)
 	}
 	if fromConfig && warn != nil {
-		fmt.Fprintf(warn, "gpu reserve: the llama-swap roster is empty or could not be read: the unload list is the seats the config places on the leased cards, nothing else\n")
+		fmt.Fprintf(warn, "unload list: the llama-swap roster is empty or could not be read, so the list is the seats the config places on the leased cards and nothing else\n")
 	}
 	if len(models) == 0 {
 		return nil, true
@@ -210,7 +215,7 @@ func UnloadModels(ctx context.Context, cfg config.Config, roster []string, lease
 		if !scope.CardsReadable() {
 			why = "the card table could not be read (" + scope.CardsWhy() + "), so no seat can be placed on a card"
 		}
-		fmt.Fprintf(warn, "gpu reserve: left resident, placement unknown (%s): %s\n", why, strings.Join(unplaced, ", "))
+		fmt.Fprintf(warn, "unload list: left resident, placement unknown (%s): %s\n", why, strings.Join(unplaced, ", "))
 	}
 	return on, true
 }

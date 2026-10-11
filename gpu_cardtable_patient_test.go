@@ -166,7 +166,8 @@ func TestGPUReserveCardsSurvivesOneSlowCardTableRead(t *testing.T) {
 }
 
 // The scope of a drain or an unload is read through the retry too: without a table every seat counts as
-// on the leased cards, so one slow read would unload the seats on the cards the lease does not hold.
+// on the leased cards for a drain (it waits for every run) and no seat can be placed for an unload, so one
+// slow read would either hold a drain on runs that are not on the lease's cards or leave the seats that are.
 func TestALeaseScopeSurvivesOneSlowCardTableRead(t *testing.T) {
 	s := useSlowTable(t, statusCards(), 1)
 	scope := newLeaseScope(context.Background(), config.Config{Layers: []config.LayerSpec{{Name: "single", Seats: []config.LayerSeat{

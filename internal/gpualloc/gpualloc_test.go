@@ -248,6 +248,29 @@ func TestUnloadModelsOnABoxWithNoLayersUnloadsNothingItCannotPlace(t *testing.T)
 	}
 }
 
+// A lease that names every card the box has holds the whole node whatever it is called: every model
+// is on a leased card, so the list is every model off the memory stack. Without this a one-card
+// box (or a lease on all three cards) with no layers would unload nothing and the render would run
+// against the agent seat it was meant to clear.
+func TestUnloadModelsOnALeaseThatHoldsEveryCardListsEveryModelButTheStack(t *testing.T) {
+	cards := threeCards()
+	all := []string{cards[0].LeaseID(), cards[1].LeaseID(), cards[2].LeaseID()}
+	got, ok := UnloadModels(context.Background(), config.Config{MemoryStack: []string{"embed"}}, []string{"a", "b", "embed"}, all, hostDeps(cards, false), nil)
+	if !ok || len(got) != 2 || got[0] != "a" || got[1] != "b" {
+		t.Fatalf("three cards of three: list = %v ok=%v, want a and b (the memory stack never leaves)", got, ok)
+	}
+	one := cards[:1]
+	got, ok = UnloadModels(context.Background(), config.Config{MemoryStack: []string{"embed"}}, []string{"a", "b", "embed"}, []string{one[0].LeaseID()}, hostDeps(one, false), nil)
+	if !ok || len(got) != 2 {
+		t.Fatalf("the only card of a one-card box: list = %v ok=%v, want a and b", got, ok)
+	}
+	// Two of three is a card lease: nothing is placed, so nothing is listed.
+	got, ok = UnloadModels(context.Background(), config.Config{MemoryStack: []string{"embed"}}, []string{"a", "b", "embed"}, all[:2], hostDeps(cards, false), nil)
+	if !ok || len(got) != 0 {
+		t.Fatalf("two cards of three: list = %v ok=%v, want an empty, known list", got, ok)
+	}
+}
+
 // Without the roster the lease still has a list: the seats the config itself places on the leased
 // cards. It is never the unknown list that the render lane reads as "everything".
 func TestUnloadModelsWithoutARosterListsTheConfigSeatsOnTheLeasedCards(t *testing.T) {
