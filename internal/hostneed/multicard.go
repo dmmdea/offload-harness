@@ -68,5 +68,5 @@ func estimatePlaced(route Route, family string, files []mediacap.ModelFile, f Fa
 	if !row.Measured {
 		return note(fmt.Sprintf("the card-only recipe %s fits the two leased cards (%.1f + %.1f GiB): %s; but its host growth is predicted, not measured with the read-only loader, so the call declares the set until a run has measured it (render/multicard-recipes.json, basis predicted)", row.ID, small, large, peaks))
 	}
-	return Need{GiB: 0, Source: n.Source, Detail: fmt.Sprintf("%s: the card-only placement (--placement multicard, recipe %s) on 2 leased cards (%.1f + %.1f GiB): %s, measured with the read-only safetensors loader (1.9 GiB of host growth over the runtime's idle), so no weights stream from RAM", family, row.ID, small, large, peaks)}, true
+	return Need{GiB: 0, Source: n.Source, Detail: fmt.Sprintf("%s: the card-only placement (--placement multicard, recipe %s) on 2 leased cards (%.1f + %.1f GiB): %s, measured with the read-only safetensors loader, so no weights stream from RAM", family, row.ID, small, large, peaks)}, true
 }
