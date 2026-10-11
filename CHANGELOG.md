@@ -96,9 +96,9 @@ Versioning: [SemVer](https://semver.org/).
   reads as dead to the others until it writes its beat again (its waiting tickets can be swept meanwhile; a placed one is adopted, not
   re-sent). Nothing here was run against a live lease, a live node or a render; the scan interval, jitter, pause steps, owner and
   keep timings and the 8 h ceiling are chosen constants, not measurements.
-- **Only an image call is a ticket.** A whole-node `run_graph` keeps its own one-shot overflow (the next section) and is **not** held
-  by the queue: **a graph does not wait in the cluster queue yet** (named limit, see that section). Video, animation and audio calls,
-  and an image call under a lease its process inherited, run as before.
+- **An image call and a whole-node graph are tickets.** A busy whole-node `run_graph` is held by the same queue, with an identity,
+  a place and a rule for who may take it of its own (the sections below). Video, animation and audio calls, and a call under a lease
+  its process inherited, run as before.
 
 ### Added — a whole-node graph runs on the fleet: a node checks the files it names, one card only, and a VRAM floor (F32, ADR 0082 Amendment 1)
 
@@ -121,30 +121,14 @@ Versioning: [SemVer](https://semver.org/).
   by name, not content.
 - **A busy lane places a whole-node graph on an idle node.** `Pipeline.MediaLaneFree` answers for a `run_graph` that names no
   devices with the whole-node reading (any lease, slot or place in line; host RAM against the media class default) under the image
-  probe's contract (a relaxation of the real admission, held by a differential test; it writes nothing). The one-shot overflow of
-  0.179.0 now covers it, **as a path of its own for graphs**: an image call is a ticket in this release (the section above) and a
-  graph is not. A busy graph is offered once to the idle nodes that can take it (no family and no digest travel; a node's 503 at the
-  door moves the call to the next node, which, like any 503 that names no `Retry-After`, leaves that node alone for about 5 s in
-  this process), and when none admits it the graph waits in this machine's own queue, joining it when the fleet attempt is over and not
-  from when it arrived; if that wait ends in a deferral, the deferral carries `cluster[]` naming, per node, the file it lacks (a call
-  that then runs here and succeeds carries none). A graph with `devices`, a `waiter_token`, an inherited lease or an input file stays
-  here. The graph path keeps three limits of the old image overflow that the ticket removed for images: a graph is sent to at most
-  three nodes, two graph calls of one process never stack on one node, and a graph leaves a node a ticket of this machine has a job on
-  (it reads that claim and never takes one). The hold is per process: **two graph calls from two processes** (two MCP sessions,
-  or a CLI beside an MCP server) can still both send one idle node a graph, because the claim file is the ticket's and a graph
-  writes none (a node's second job costs one bounce); only a ticket is protected across processes.
-- **A graph does not wait in the cluster queue yet** (a named limit of this release). It is not a ticket: it keeps no place in the
-  cluster queue, does not start on a lane that frees after its one look at the fleet, and is not attached by content (a repeat of the
-  same graph is a second call, not the first one's ticket). A graph that finds every lane busy therefore waits in this machine's
-  own queue, as it did in 0.179.0, and its caller may need to call again with the `waiter_token` the local lane returned. Making a
-  graph a ticket is a follow-up: a ticket's identity is the hash of the request's parameters, and a graph's parameters name files on
-  this machine (`graph_path`, `manifest_path`) rather than carry them, so what makes two graph calls the same call needs a decision
-  of its own.
-- **A graph that reads an input file is not auto-overflowed.** Input files are the caller's own and carry generic names
+  probe's contract (a relaxation of the real admission, held by a differential test; it writes nothing). A busy graph is a ticket
+  (the next section): the scanner offers it to the idle nodes that can take it (no family and no digest travel), and a graph with
+  `devices` or under an inherited lease stays here.
+- **A graph that reads an input file is never offered to a node.** Input files are the caller's own and carry generic names
   (`image.png`, `ComfyUI_00001_.png [output]`) that two machines share with different bytes, and a node can match one only by name,
-  so a node holding a same-named file would have run the graph on the wrong bytes and answered ok with a sha-verified output. The
-  call waits for this machine's own lane instead, and a deferral it ends in says why the fleet was not asked (`fleet_note` in its
-  data, and in its reason). A call that must leave this machine anyway (`route remote`, or `auto` on a machine with no graph lane of
+  so a node holding a same-named file would have run the graph on the wrong bytes and answered ok with a sha-verified output. It is a
+  ticket that waits for this machine's own lane (the next section), and every answer it gives says why the fleet was not asked
+  (`fleet_note` in its data, and in its reason). A call that must leave this machine anyway (`route remote`, or `auto` on a machine with no graph lane of
   its own, which has no queue to wait in) is placed as before, with the node's check by name only: the same-named-file risk
   remains there, a named limit. Sending a size and a hash of each file to the node, which would restore the overflow for these
   graphs, is a named seam, not built.
@@ -178,6 +162,61 @@ Versioning: [SemVer](https://semver.org/).
   default (the largest family the box binds), not at the files it names, so a graph naming weights bigger than every bound family
   can be under-counted (a named limit; the numbers are the RAM guard's). Nothing here was run live: the live acceptance (A8) is the
   first.
+
+### Added — a busy whole-node graph is a ticket in the cluster queue, and a node's "I do not hold this file" is about that ticket only (S5, ADR 0083 Amendment 1)
+
+- **The behaviour.** A `run_graph` call (`offload_run_graph`, `run-graph`) that names no devices, on a machine that has the lane and a
+  fleet, whose lane is not free, used to be offered once to at most three idle nodes and then wait in this machine's own queue,
+  joining it late, with a `tk-` token the caller had to send again. It is now a **ticket**, as an image call is: the harness holds it
+  and starts it on the first matching lane that frees anywhere, here or on an idle single-card node that holds the files it names, in
+  order of arrival, with one answer that says per node why not (`cluster[]`) and no caller loop. The MCP door answers inside `wait_s`
+  (new argument; else the machine's `gpu_wait_ms`) and the ticket goes on after the call returns; `run-graph` on the CLI blocks until
+  the job is done, prints on stderr where the ticket stands, and the first Ctrl-C cancels a ticket that sent nothing. This closes the
+  limit this release stated for graphs ("a graph does not wait in the cluster queue yet").
+- **A graph is the same call when its content is.** The key is the sha256 of the task and the parameters without the `waiter_token`,
+  with the graph and the manifest taken as canonical JSON (keys sorted, whitespace dropped, numbers as written) in place of their
+  paths: the MCP door writes an inline `graph_json` to a new temp file on every call, so a key made of the path would never attach,
+  and a file edited under the same path is another graph. `out_dir`, `reserve_vram`, `min_vram_gb` and `model_family` are part of the
+  key. One ticket per identical request, from either of two processes; `waiter_token=mq-...` collects it. The ticket mints no seed and
+  sends no recipe: the graph owns its sampling.
+- **It keeps its place in this machine's line.** `LeaveMediaPlace` answered "only image generation is probed" for a graph; it now
+  leaves the whole-node token the real admission leaves for a waiting graph (reason `run-graph`) at the ticket's arrival time, brings
+  along a `tk-` place the call already held, and the final local run spends it through `waiter_token`. A host that leases no cards keeps
+  none and the answer says so.
+- **A node's refusal of a file is "not this graph", not "full".** The 503 a node answers when the graph names a file it does not hold now
+  carries `refusal: "not_capable"` in its body (a full node's 503 and a route-not-ready 503 do not). The ticket marks that node
+  not-capable for **itself** with the node's own words, **puts no pause on the node** (before, the 5 s the placer sets for any 503 that
+  names no `Retry-After` hid the node from every image ticket and every other graph it could serve, under the wording "it is full"),
+  does not ask that node again for 5 minutes (chosen, not measured: the longest pause the placer puts on any node) and tries the next
+  candidate at once. A node held not-capable is not one the ticket matches, so it holds it against nobody. `cluster[]` rows quote the
+  node's sentence from the body (cut at 600 bytes) instead of the first 300 bytes of the raw body.
+- **A graph that reads input files is a local-only ticket.** Never offered to a node, it reads no roster and matches no node, but it is
+  one ticket per request with a place and a position, and runs when this machine's lane serves it; every answer carries `fleet_note`.
+- **What it closes.** Two processes (two MCP sessions, or a CLI beside an MCP server), or two calls of one process, can no longer put two
+  graphs on one idle node: the claim file is taken under the directory lock, as for an image (the per-process hold of the one-shot
+  path could not do that, and this release's text named it a limit). A graph no longer bypasses the queue: a node an older image ticket
+  of the machine matches is that ticket's. A graph a dead process sent is adopted by the next identical call (polled and fetched,
+  never sent again). The result's placement text names the graph lane (it said "image lane" for every task). The bound of three nodes is
+  gone with the one-shot call that needed it; `tryGraphOverflow`, `placeGraph`, the in-process hold and `overflowOutcome` are removed.
+- **Tests, mutation-checked.** Written first and run against the one-shot path: 17 of the 19 graph-ticket tests of the delegator failed or
+  timed out, and 3 of the 4 place tests of the pipeline failed (the three that passed held a behaviour that survives: the move to the next
+  node on a file refusal, the shared refusal word, and a graph that names devices keeping no place). Tests that encoded the old limit
+  were rewritten for the ticket (a graph is a ticket; a bouncing graph is not bounded to three nodes; two calls of one process and two
+  processes never stack). 27 mutations of the rules above, each applied once to the LF text of one file, proven applied, run through the
+  RAM guard, restored byte for byte: all 27 are killed. One survived the first set of tests (a need re-read at every scan, which a graph
+  file that has gone would turn into a lost VRAM floor) and is killed by the test added for it; one is killed by a timeout and not by an
+  assertion (a refusal that is not remembered makes the ticket POST in a loop). The order of two lines in the not-capable path (the
+  refusal is kept before the ticket goes back in line) is a race too narrow to fail on demand and is not mutation-checked.
+- **Compatibility.** No config key or file format changed: a ticket file gains an optional `fleet_note`, the 503 body an optional
+  `refusal`, `offload_run_graph` an optional `wait_s`. A session started before the deploy keeps the one-shot path until restarted; it
+  reads the claim files and honours them, and writes none (the old limit). A node on the build before this one answers its file refusal
+  without the word, which a delegator of this build reads as a 503 for a full node (the old behaviour); graph placement already requires
+  an equal `harness_version`, so such a node is not a candidate while the numbers differ.
+- Not changed, and said: the file check is by name, not content; a graph is read once when its ticket is made, for the nodes, and the
+  local run reads the file when this machine's lane serves it (a file edited meanwhile runs here as edited); the ticket remembers a
+  node's refusal in the owning process only. No VERSION or buildinfo bump. **Nothing here was run live**: live acceptance A9 (the
+  workstation lane and the headless node held, a graph call gets one ticket answer and then runs on the first node released) is the
+  first evidence.
 
 ### Fixed — a healthy long render's lease (a render helper, or a script that runs one) is no longer labelled "expired ... open to a takeover" (F8)
 
