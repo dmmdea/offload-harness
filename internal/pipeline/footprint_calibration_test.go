@@ -58,6 +58,17 @@ func TestAMeasurementIsClampedAtAMultipleOfTheFilesSum(t *testing.T) {
 	}
 }
 
+// The declaration says how many runs its figure was read from and how many were recorded: they differ once the window is full.
+func TestTheDeclarationSaysHowManyRunsItReadAndHowManyWereRecorded(t *testing.T) {
+	p, cfg := calibrationFixture(t, 25, 60, 40)
+	got := declaredFor(t, p, cfg, 16)
+	for _, w := range []string{"last 20 runs", "25 recorded"} {
+		if !strings.Contains(got.Detail, w) {
+			t.Errorf("the detail must say %q: %s", w, got.Detail)
+		}
+	}
+}
+
 // The note is made once per key and declared figure, however many renders (and so recorded runs) lie between two
 // declarations; a figure that moves is said again.
 func TestTheCalibrationNoteIsMadeOncePerKeyAndFigureNotPerRender(t *testing.T) {
