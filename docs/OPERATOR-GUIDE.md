@@ -1002,11 +1002,12 @@ liveness line per run — `producing 3.4 tok/s, last token 2s ago (allowed 60s i
 `silent 187s of 214s allowed in prefill` while it does not — beside the holder heartbeat (they are different things:
 register C-32). `/fleet/jobs/{id}` publishes the same as `progress`. A `stalled:` reason means the SEAT went quiet
 inside its allowance (check the seat, not the contract); a `ceiling` reason means the run was still producing at the
-safety ceiling (size the contract, or split it). The seat-rates store's new `prefill_tok_s` is what sizes the prefill
+safety ceiling (size the contract, or split it). The seat-rates store's `prefill_slow_tok_s`, the slowest of the last five solo
+samples (the average `prefill_tok_s` for a store with no window yet), is what sizes the prefill
 allowance; until a seat has measured one, 100 tok/s is assumed and the reason says `assumed`. It is one
 request's rate: when other requests share the seat (this box's run registry, and the busy hold's engine gauges) the
 prefill allowance divides it by the load and the reason prints it (`24000 tok / (400 tok/s / load 4) x 1.5 + 30s`),
-and only a run known to have had the seat to itself updates `prefill_tok_s` (a run whose load nothing could answer
+and only a run known to have had the seat to itself updates `prefill_tok_s` and its window (a run whose load nothing could answer
 for, or that waited out a seat going down, teaches it nothing). The busy hold's wedge bound follows the load only on
 an engine that cannot see a prefill (`/slots`, or vLLM without a KV-usage gauge). A `seat down:` reason means the
 seat's engine hung or died under the run and did not come back inside the recovery wait (see the table); a

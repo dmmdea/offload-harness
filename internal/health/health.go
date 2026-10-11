@@ -136,12 +136,16 @@ func readLedger(path string) ([]ledger.Entry, error) {
 		if json.Unmarshal(line, &e) != nil {
 			continue // skip malformed / partial trailing lines
 		}
-		if ledger.ClassOf(e) != "" {
-			continue // test, bake and measurement rows are not the box's health (register F48)
-		}
 		out = append(out, e)
 	}
-	return out, sc.Err()
+	if err := sc.Err(); err != nil {
+		return out, err
+	}
+	// Test, bake and measurement rows are not the box's health (register F48). The rows are judged TOGETHER:
+	// the inner `agent` row of a labelled job names its parent and carries no class of its own, so a row judged
+	// alone would count as real work.
+	kept, _ := ledger.ProductionRows(out)
+	return kept, nil
 }
 
 // keepScale drops rows written on a different margin scale than the one this

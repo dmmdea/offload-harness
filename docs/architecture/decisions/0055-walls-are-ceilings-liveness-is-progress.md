@@ -246,8 +246,10 @@ determine if a job is truly still going" — was not met by any of the three sur
    - **The prompts and the grammar stop permitting the suspected runaway.** Both prompts give each
      field's type and a list's item type (the chat prompt used to end "numbers unquoted", which a
      seat read together with a field called `numbers`). The grammar lane names the types its
-     grammar enforces, not the schema's own: gbnf compiles every array to a list of strings and an
-     object to a string, so a prompt that said "array of numbers" beside a grammar that forces a
+     grammar enforces, not the schema's own: gbnf compiles a list of scalars to a list of strings
+     (before F43 every array, and an object to a string; an object and a list of objects now keep
+     their own shape and the prompt names their fields), so a prompt that said "array of numbers"
+     beside a grammar that forces a
      quote after the `[` was a contradiction; the chat lane and a vLLM seat's schema lane name the
      schema's types. The grammar's whitespace rule is llama.cpp's own bounded one instead of an
      unbounded repetition, and the scalar coercion turns a bare JSON number into the string a
@@ -342,7 +344,11 @@ determine if a job is truly still going" — was not met by any of the three sur
       times than it is repeated, fails the attempt as `re-pack repeated the list item ...`, marks
       the call as above, and ends as an abstention naming the item when every attempt does it;
       the finished answer rides in `output`. An answer that really holds the repeat, or an empty
-      item, is not a loop.
+      item, is not a loop. An item is a scalar or, since F43 lets a llama.cpp seat write them, an
+      object or a list: it is compared by its compact JSON with the keys sorted, a composite that
+      holds nothing but empty values is empty, the answer holds an object as often as it holds the
+      longest string in it (an object with no string is judged by its repeat alone, chosen and not
+      measured), and every list is read at every depth and named by its path (`meta.labels`).
     - **The detector sees longer loops.** The tail test looked for a block of up to 64 bytes across
       the last 256. It keeps that test and the line-block test exactly as they were, in their
       order, and adds a third pass after them: a block of 65 to 192 bytes across the last 1,024

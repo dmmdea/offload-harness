@@ -529,10 +529,11 @@ func (p *Pipeline) mediaGrantEnv(lease *gpulease.Lease, ids []string, unload str
 // models positively placed on another card, by layers or by the serving config's device pin. A model
 // placed on the call's card goes, and so does a model nothing places, as before F15. Without the
 // variable the render lane unloads every model off the memory stack, and a render on one card
-// empties the seats placed on the others (register C-86, F15). "" only for a whole-node call (no
-// ids), which holds every card; a card call always gets a list: with the roster unreadable the
-// candidates are the models the config declares and the serving config lists, and with no llama-swap
-// endpoint it is the none sentinel.
+// empties the seats placed on the others (register C-86, F15). "" for a whole-node call (no ids),
+// which holds every card, and "" for a card call whose roster could not be read: nothing then says
+// what is resident, a list built from the config alone could leave a resident model on the leased card
+// (or, on a box that declares nothing, unload nothing), so the lane keeps its own rule and the log says
+// so. Otherwise a card call gets a list, and with no llama-swap endpoint it is the none sentinel.
 //
 // Which seat sits on which card needs the card LIST, not a fresh reading (uuids and indices do not
 // change under a running call), so it is scoped from the table the call already holds: a third
@@ -546,14 +547,13 @@ func (p *Pipeline) unloadEnv(ctx context.Context, ids []string, cards []gpuprobe
 		return gpualloc.UnloadEnv(nil, true)
 	}
 	var roster []string
-	if r, err := swapclient.FetchRoster(ctx, p.cfg.Endpoint, 5*time.Second); err != nil {
-		log.Printf("media admission: the llama-swap roster could not be read (%v): the candidates for the render lane are the models the config declares and the serving config lists", err)
-	} else {
+	r, rosterErr := swapclient.FetchRoster(ctx, p.cfg.Endpoint, 5*time.Second)
+	if rosterErr == nil {
 		roster = r.IDs()
 	}
 	held := p.alloc
 	held.Cards = func(context.Context, config.Config) ([]gpuprobe.Card, string, error) { return cards, "", nil }
-	models, known := gpualloc.UnloadModels(ctx, p.cfg, roster, ids, held, log.Writer())
+	models, known := gpualloc.UnloadModels(ctx, p.cfg, roster, rosterErr, ids, held, log.Writer())
 	return gpualloc.UnloadEnv(models, known)
 }
 

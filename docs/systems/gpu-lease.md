@@ -890,9 +890,9 @@ lease reads exactly as before.*
 
 **`--drain` and `--unload-seat` take the cards the lease holds.** `gpu reserve --devices|--cards ... --drain --unload-seat`
 (and the detached holder's `maintain` step) pass the lease's card ids to `maintainSeatScoped`. A seat is **on the leased
-cards** when its declared pin (`config.ModelPins`, resolved through the card table) intersects them; a seat whose pin is
-unknown, cannot be placed, or is read while the card table cannot be, is on them (today's behaviour, the direction of every
-doubt). Then:
+cards** when it is placed on them: by `layers`, else by its pin in the serving config (`LeaseScope.Locate`, resolved
+through the card table); a seat nothing places, whose pin the card table cannot resolve, or that is read while the card table
+cannot be, is on them (today's behaviour, the direction of every doubt). Then:
 
 - The configured agent seat is drained and unloaded unless it is positively placed on another card (by `layers`, else by its
   serving-config pin). A seat on card 0 under a card-2 lease is neither drained nor unloaded, no warm-back is owed for it, and
@@ -923,13 +923,19 @@ whatever the list names, and the total-unload fallback is refused while a model 
 (`render/gpu-lock.test.mjs`, "freeLlamaSwap honours the supplied list"). It logs the models it left (`left resident (not on this
 lease's unload list: placed on other cards)`).
 
-A lease on some cards ALWAYS gets a list (F15). When the llama-swap roster cannot be read the candidates are the models `layers`
-declare (`Config.LayerSeatModels`) and the serving config lists, judged like any other, and the wrapper says so; with no
-llama-swap endpoint the list is `-`; with no card table every model is unknown and goes, as before. The old answer in each of the
-first two cases was an unset variable, which the lane read as "every model off the memory stack": the render on one card emptied
-the seats placed on the others (`TestWrapperUnloadEnvForACardLeaseIsNeverUnset`,
-`TestAnUnreadableRosterStillHandsTheRenderLaneTheConfigSeatsOnItsCard`). Only a whole-node lease has no list: it holds every card,
-so the lane keeps its own rule. A lease that names every card the card table lists is the whole node whatever it is called (a
+A lease on some cards gets a list (F15) when the llama-swap roster was read: with no llama-swap endpoint the list is `-`; with
+no card table every model is unknown and goes, as before; a roster that was read and is empty means nothing is resident (the
+candidates are then the models `layers` declare and the serving config lists). A roster that could NOT be read is not an empty
+roster: nothing says what is resident, and a list built from the config alone is never complete (with `layers` only, a resident
+model neither they nor the serving config name would never be judged and would stay on the leased card; with neither the list
+would be empty and nothing would be unloaded). `gpualloc.UnloadModels` takes the roster read's error and makes NO list for it,
+whatever the config declares, so the variable stays unset and the lane keeps its own rule, every model off the memory stack, exactly
+as before F15 (the seats placed on other cards go with the rest: the price of not knowing what is resident). The wrapper and the
+media admission say so (`the llama-swap roster could not be read ... the render lane keeps its own rule`;
+`TestWrapperUnloadEnvWithAnUnreadableRosterLeavesTheLaneOnItsOwnRule`, `TestAnUnreadableRosterLeavesTheRenderLaneOnItsOwnRule`,
+`TestUnloadModelsWithAnUnreadableRosterMakesNoListAndSaysWhy`). The card lease that has no endpoint still gets `-`
+(`TestWrapperUnloadEnvForACardLeaseIsNeverUnset`). A whole-node lease has no list either: it holds every card, so the lane keeps
+its own rule. A lease that names every card the card table lists is the whole node whatever it is called (a
 one-card box's only card, all three of three), so its list is every model off the memory stack (`LeaseScope` `holdsAll`). A card
 lease that nevertheless arrives at the render side with no list (a lease whose environment names cards, `GPU_LEASE_DEVICES`, else
 `devices` in the epoch record, `leaseDevices`; an older wrapper, a hand-built environment) has no placement for any model, so it

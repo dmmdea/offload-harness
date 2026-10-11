@@ -236,6 +236,17 @@ card. This amendment adds them under four rules; every other decision stands, an
    cites it says so. The caller's number wins over it, 0 included. The floor filters remote candidates only: the local lane is
    the node's own grant.
 
+**Named limit of the lane probe at an exact tie (found in the 0.181.0 integration).** The lane table orders places by the millisecond
+they were left, and the real admission counts only a place STRICTLY earlier as ahead of a call (so simultaneous arrivals do not wait
+on each other). On the whole-node path, for a NEW arrival, the probe (`laneReading.callersAhead` with no `since`) counts every live place
+on the call's cards as ahead without comparing times, so when a place was left in the very millisecond the call arrives the probe says
+busy where the grant would succeed: the one direction the probe's contract forbids. The window is one millisecond and the cost is a
+ticket whose first scan grants it. A
+test of the table had stated an order it did not guarantee (a place left with `time.Now()` against a call arriving in the same
+millisecond) and was fixed in the TEST (`nextMillisecond`, the lane tables of `medialane_graph_test.go` and `medialane_test.go`); the
+probe is not changed. The follow-up that closes it is to pass the call's own arrival as `since` for a new arrival in
+`laneReading.wholeNode`.
+
 **Named limits of the amendment.** *Closed by ADR 0083 Amendment 1:* in 0.180.0 a graph did not wait in the cluster queue; it is a ticket now, identified by the content of its graph and manifest. The file check is by name (a same-named file of other bytes is held), which is why a graph that
 reads an input file is not auto-overflowed, though a call that must leave its machine anyway keeps the same-named-file risk. Input files need to be on the node already when a node is named by hand. The node's
 host-RAM guard sizes a graph at the media class default, not at the files the door has resolved, so a graph naming weights bigger
