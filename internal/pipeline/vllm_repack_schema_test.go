@@ -15,12 +15,13 @@ import (
 // Register D-129, found by the A-100 proof contract (2026-09-18 23:42, <node-c>
 // 35B seat, three re-pack attempts all "got string, want object"): the re-pack
 // handed vLLM `gbnf.JSONSchema(fields)` — the GBNF-typed projection of the
-// contract's schema — and internal/gbnf has no object or array-of-object type,
-// so a contract whose schema nests objects was CONSTRAINED into the wrong
+// contract's schema — and internal/gbnf then had no object or array-of-object
+// type, so a contract whose schema nests objects was CONSTRAINED into the wrong
 // shape on every vLLM seat, where before D-129 the ignored grammar at least
 // let the model answer freely. vLLM accepts full JSON Schema: the re-pack on
 // a vLLM seat sends the contract's own schema. llama.cpp seats keep the GBNF
-// projection (the documented ADR 0002 limit).
+// projection, which carries nested shapes since register F43 (see
+// repack_nested_schema_test.go for that lane).
 func TestRepackSendsTheContractsOwnSchemaToAVLLMSeat(t *testing.T) {
 	const vseat = "qwen3.8-27b-vllm"
 	fake := &structuredSwapFake{

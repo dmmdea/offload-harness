@@ -164,3 +164,56 @@ func TestShapeInstructionQuotesEnumValues(t *testing.T) {
 		t.Errorf("the example must itself be valid JSON: %v (%s)", err, ex)
 	}
 }
+
+// A nested extract schema (an array of objects, an object) used to compile to a list of strings
+// and a string, so the shape instruction told an unconstrained seat to write strings and the
+// Strict schema rejected the objects the contract's own schema asks for (register F43). The
+// instruction now states the keys of every nested object, and Strict is the nested shape.
+func TestUnconstrainedExtractStatesAndEnforcesANestedSchema(t *testing.T) {
+	req := core.Request{Task: core.TaskExtract, Input: "Two labels.",
+		Params: map[string]any{"schema": map[string]any{
+			"type":     "object",
+			"required": []any{"title", "labels", "meta"},
+			"properties": map[string]any{
+				"title": map[string]any{"type": "string"},
+				"labels": map[string]any{"type": "array", "items": map[string]any{
+					"type": "object", "required": []any{"name", "score"},
+					"properties": map[string]any{"name": map[string]any{"type": "string"}, "score": map[string]any{"type": "number"}}}},
+				"meta": map[string]any{"type": "object", "required": []any{"source"},
+					"properties": map[string]any{"source": map[string]any{"type": "string"}}},
+			}}}}
+	b, err := BuildFor(req, Caps{Unconstrained: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`"labels" (an array whose every element is an object with exactly these keys, each once, in this order: "name" (a string), "score" (a number))`,
+		`"meta" (an object with exactly these keys, each once, in this order: "source" (a string))`,
+		`{"title":"...","labels":[{"name":"...","score":0.5}],"meta":{"source":"..."}}`,
+	} {
+		if !strings.Contains(b.System, want) {
+			t.Errorf("system prompt lacks %q:\n%s", want, b.System)
+		}
+	}
+	for _, tc := range []struct {
+		name   string
+		reply  string
+		accept bool
+	}{
+		{"nested ok", `{"title":"t","labels":[{"name":"x","score":1},{"name":"y","score":2.5}],"meta":{"source":"s"}}`, true},
+		{"no labels", `{"title":"t","labels":[],"meta":{"source":"s"}}`, true},
+		{"labels as strings", `{"title":"t","labels":["x"],"meta":{"source":"s"}}`, false},
+		{"meta as a string", `{"title":"t","labels":[],"meta":"s"}`, false},
+		{"label missing a key", `{"title":"t","labels":[{"name":"x"}],"meta":{"source":"s"}}`, false},
+		{"label with an extra key", `{"title":"t","labels":[{"name":"x","score":1,"z":0}],"meta":{"source":"s"}}`, false},
+		{"label score as a string", `{"title":"t","labels":[{"name":"x","score":"1"}],"meta":{"source":"s"}}`, false},
+	} {
+		err := validator.Validate([]byte(tc.reply), b.Strict)
+		if tc.accept && err != nil {
+			t.Errorf("%s: should be accepted, got %v", tc.name, err)
+		}
+		if !tc.accept && err == nil {
+			t.Errorf("%s: must be rejected", tc.name)
+		}
+	}
+}

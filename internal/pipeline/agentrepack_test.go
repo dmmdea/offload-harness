@@ -60,6 +60,23 @@ func TestFieldTypeText(t *testing.T) {
 		{"list with an untyped item", map[string]any{"type": "array", "items": map[string]any{"description": "x"}}, "array of strings"},
 		{"list with no items", map[string]any{"type": "array"}, "array"},
 		{"list of enum strings", map[string]any{"type": "array", "items": map[string]any{"type": "string", "enum": []any{"x", "y"}}}, `array of strings, each one of "x", "y"`},
+
+		// Nested shapes name their fields, in the grammar's order (required first,
+		// then the rest by name), each with its own type (register F43).
+		{"object with fields", map[string]any{"type": "object", "required": []any{"b", "a"}, "properties": map[string]any{
+			"a": map[string]any{"type": "string"}, "b": map[string]any{"type": "integer"}}}, `object with fields "b" (integer), "a" (string)`},
+		{"object with fields and no type written", map[string]any{"properties": map[string]any{
+			"a": map[string]any{"type": "string"}}}, `object with fields "a" (string)`},
+		{"list of objects with fields", map[string]any{"type": "array", "items": map[string]any{"type": "object", "properties": map[string]any{
+			"name": map[string]any{"type": "string"}, "score": map[string]any{"type": "number"}}}}, `array of objects, each with fields "name" (string), "score" (number)`},
+		{"object inside an object inside a list", map[string]any{"type": "array", "items": map[string]any{"type": "object", "properties": map[string]any{
+			"owner": map[string]any{"type": "object", "properties": map[string]any{"id": map[string]any{"type": "integer"}}},
+			"tags":  map[string]any{"type": "array", "items": map[string]any{"type": "string"}}}}},
+			`array of objects, each with fields "owner" (object with fields "id" (integer)), "tags" (array of strings)`},
+		{"list of lists", map[string]any{"type": "array", "items": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}}, "array of array of strings"},
+		{"list of lists of objects", map[string]any{"type": "array", "items": map[string]any{"type": "array", "items": map[string]any{"type": "object", "properties": map[string]any{
+			"v": map[string]any{"type": "integer"}}}}}, `array of array of objects, each with fields "v" (integer)`},
+		{"open object", map[string]any{"type": "object"}, "object"},
 	}
 	for _, tc := range cases {
 		if got := fieldTypeText(tc.spec); got != tc.want {
