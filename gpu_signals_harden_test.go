@@ -11,6 +11,7 @@ package main
 //   - the card text: every stage's wording fits the 140 characters the card keeps, whole.
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"strings"
@@ -375,6 +376,31 @@ func TestASignalDuringTheUnloadRequestOfAColdSeatOwesNoWarm(t *testing.T) {
 	}
 	if info := r.m.Inspect(); info.Held {
 		t.Errorf("the lease must be released: %+v", info)
+	}
+}
+
+// THE DEBT CALLBACK: the debt is recorded through a callback, and the callers that have none (the drain's own tests call the
+// function with none) must not be called through nil when a request is cancelled: the cancel comes back as an error, as it does
+// for any other, and nothing is recorded.
+func TestACancelledUnloadWithNoDebtCallbackReturnsTheErrorAndRecordsNothing(t *testing.T) {
+	f := &orderedSwap{drainSwap: &drainSwap{}}
+	f.loaded.Store(true)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f.onUnload = func() {
+		cancel() // the caller stops waiting while the server holds the request
+		time.Sleep(500 * time.Millisecond)
+	}
+	cfgPath, m := handoffFixture(t, f)
+	var err error
+	stderr := captureStderr(t, func() {
+		err = maintainSeatScoped(ctx, loadCfgPath(cfgPath), nil, false, time.Time{}, true, false, nil, nil)
+	})
+	if err == nil {
+		t.Fatalf("a cancelled unload is an error\n%s", stderr)
+	}
+	if owed := m.SeatWarmOwed(); owed != "" {
+		t.Errorf("no callback, so nothing is recorded, but the marker reads %q\n%s", owed, stderr)
 	}
 }
 
