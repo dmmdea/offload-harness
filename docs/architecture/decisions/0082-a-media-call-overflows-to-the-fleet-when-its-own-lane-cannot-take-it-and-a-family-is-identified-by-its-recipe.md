@@ -247,4 +247,4 @@ operator's. With the fleet as the film owner described it on 2026-10-09 (the 16 
 workstation, the single-card nodes carry 8 GB cards) rules 3 and 4 together leave a graph that gets the default Wan floor no remote
 target: it waits for its own lane. The durable fix is on the node (keep a whole-node graph off the display card there). A graph is
 placed only on a node that runs this machine's release, on every route, so a fleet part-way through an upgrade routes graphs only
-to the nodes already on it (and `route remote` to a node still on the old release is a named miss, not a send). Nothing here was run live: A8 in the step report is the first.
+to the nodes already on it (and `route remote` to a node still on the old release is a named miss, not a send). Nothing here was run live: the live acceptance named A8 in the CHANGELOG entry of that change is the first.
