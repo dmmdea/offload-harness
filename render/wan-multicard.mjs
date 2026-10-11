@@ -54,9 +54,12 @@ export function refuseEqualsSpelling(flags) {
     if (own) {
       throw new Error(`--${key} is spelled with '=', which this runner's parser does not split (it reads the whole thing as one flag name, takes the next flag as its value, and the call would run the single-card placement): write --${own} ${key.slice(own.length + 1)}`);
     }
-    const lost = typeof value === "string" ? OWN_FLAGS.find((f) => value === "--" + f) : undefined;
+    // The swallowed token is one of ours in either spelling: `--wan-placement` (the other flag was spelled with '=') or `--wan-placement=multicard`
+    // (the lease reads that one as the flag with its value, the parser as the value of the flag before it). A token that only STARTS like ours
+    // (`--wan-placements`) is not one of ours.
+    const lost = typeof value === "string" ? OWN_FLAGS.find((f) => value === "--" + f || value.startsWith("--" + f + "=")) : undefined;
     if (lost) {
-      throw new Error(`--${key} took --${lost} as its value (this runner's parser does not split '=': a flag spelled --name=value swallows the flag after it), so the placement's own flag would be lost and the call would run the single-card placement: write each flag as --name value`);
+      throw new Error(`--${key} took ${value.split(/\s/)[0]} as its value (this runner's parser does not split '=': a flag spelled --name=value swallows the flag after it), so the placement's own flag --${lost} would be lost and the call would run the single-card placement: write each flag as --name value`);
     }
   }
 }
