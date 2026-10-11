@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -35,6 +36,11 @@ import (
 //
 // The child is created SUSPENDED, assigned to the job, THEN resumed — closing the
 // race where a child could spawn escapees before it is confined by the job.
+//
+// A label step that fails does not stop the run, and it is never silent either. The caller asked
+// for a writable worktree (or scratch) and a restored label; when the cage cannot give either it
+// says so ahead of the command's stderr, in the error of a run that fails, and in the log (see Run
+// and runNotes), because the alternative is a child's unexplained "Access is denied".
 //
 // HONEST RESIDUAL RISK (documented, not hidden): during a run the worktree is
 // temporarily set to LOW integrity, so a low-integrity process could write into it
@@ -143,7 +149,33 @@ func allowed(exePath string, list []string) bool {
 // Windows, captures head+tail-capped combined output, and honors ctx (a deadline
 // terminates the whole job tree). Returns Result{Refused:true} WITHOUT launching if
 // the executable is not allowlisted.
+//
+// What the cage could not do for the run is told to the caller, not swallowed: a folder whose
+// low-integrity label could not be applied (so the command cannot write it), one whose label could
+// not be restored afterwards (so other low-integrity processes can write it), one whose prior label
+// could not be read (so the restore can only clear it). Each is a line starting with "[sandbox] "
+// ahead of the command's own stderr in Result.Stderr, is appended to the error of a run that
+// fails, and is logged once. None of them changes whether the command runs.
 func Run(ctx context.Context, spec Spec) (Result, error) {
+	var notes runNotes
+	res, err := run(ctx, spec, &notes)
+	if len(notes) == 0 {
+		return res, err
+	}
+	for _, n := range notes {
+		log.Printf("sandbox: %s", n)
+	}
+	res.Stderr = noteLines(notes, "\r\n") + res.Stderr
+	if err != nil {
+		err = fmt.Errorf("%w (%s)", err, strings.Join(notes, "; "))
+	}
+	return res, err
+}
+
+// run is Run without the reporting. It records what the caller must hear in notes; Run delivers
+// them once run has returned, which is after the deferred label restores have run and had their
+// say.
+func run(ctx context.Context, spec Spec, notes *runNotes) (Result, error) {
 	if len(spec.Argv) == 0 {
 		return Result{}, fmt.Errorf("sandbox.Run: empty Argv")
 	}
@@ -179,16 +211,40 @@ func Run(ctx context.Context, spec Spec) (Result, error) {
 	// worktree (often the user's real git checkout) is LOW only while the command
 	// runs, not permanently writable by any low-IL process afterward. Runs are
 	// sequential (the agent calls tools one at a time), so there is no concurrency
-	// concern. A hard crash between lower and revert could leave a dir LOW; that is
-	// acceptable because the next run re-lowers and re-reverts it.
+	// concern. A hard crash between lower and revert could leave a dir LOW, and that does NOT
+	// heal itself: the next run reads the leftover LOW label as the folder's own and restores it
+	// as it finds it. This is why a restore that fails is reported to the caller (below) instead
+	// of being left for a later run to put right.
+	//
+	// Neither step can stop the run, and neither is silent: a label that cannot be lowered leaves
+	// a folder the command cannot write (it runs at low integrity), a label that cannot be restored
+	// leaves a folder every low-integrity process can write. Both go into notes.
+	//
+	// lowerFolder lowers dir's label and returns the func that puts it back (to be deferred), or
+	// nil when the label was not lowered. role names the folder for the caller.
+	lowerFolder := func(role, dir string) (restore func()) {
+		revert, err := applyLowIntegrityLabel(dir, notes)
+		if err != nil {
+			notes.addf("the %s %s could not be made writable for this run: its low-integrity label was not applied (%v); "+
+				"the command runs at low integrity, so its writes there are expected to be refused", role, dir, err)
+			return nil
+		}
+		return func() {
+			if err := revert(); err != nil {
+				notes.addf("the low-integrity label on the %s %s was not restored after the run (%v); "+
+					"until it is removed, every low-integrity process can write there, and the next run will take that label for the folder's own",
+					role, dir, err)
+			}
+		}
+	}
 	if spec.WorktreeWritable {
-		if revert, err := applyLowIntegrityLabel(spec.Worktree); err == nil {
-			defer revert()
+		if restore := lowerFolder("worktree", spec.Worktree); restore != nil {
+			defer restore()
 		}
 	}
 	if spec.Scratch != "" {
-		if revert, err := applyLowIntegrityLabel(spec.Scratch); err == nil {
-			defer revert()
+		if restore := lowerFolder("scratch folder", spec.Scratch); restore != nil {
+			defer restore()
 		}
 	}
 
@@ -344,11 +400,17 @@ func Run(ctx context.Context, spec Spec) (Result, error) {
 
 	var res Result
 	timedOut := false
+	var killErr error
 	select {
 	case <-ctx.Done():
 		timedOut = true
-		_ = windows.TerminateJobObject(job, 1)
-		<-done // the process is now dead; wait for the WaitForSingleObject goroutine
+		// A kill that fails is not a kill: the wait below then lasts as long as the command
+		// chooses, the deadline the caller set is not in force, and the caller is told so.
+		if killErr = terminateJob(job, 1); killErr != nil {
+			notes.addf("the command outlived its time limit (%v): the cage could not end its job (%v) and waited for the command to finish by itself",
+				ctx.Err(), killErr)
+		}
+		<-done // the process is now dead (or, if the kill failed, ends by itself); wait for the WaitForSingleObject goroutine
 	case <-done:
 	}
 	wg.Wait()
@@ -359,7 +421,7 @@ func Run(ctx context.Context, spec Spec) (Result, error) {
 	}
 	res.Stdout = capOutput(string(stdout))
 	res.Stderr = capOutput(string(stderr))
-	if timedOut {
+	if timedOut && killErr == nil { // a failed kill has its own note; "killed" would be a claim the cage cannot make
 		note := fmt.Sprintf("[sandbox] command killed after context timeout (%v)", ctx.Err())
 		if res.Stderr == "" {
 			res.Stderr = note
@@ -410,6 +472,23 @@ func lowIntegrityToken() (windows.Token, error) {
 	return dup, nil
 }
 
+// The Win32 calls whose failure the cage has to report, held in variables so a test can make
+// them fail (or succeed) on demand instead of depending on the ACLs and the state of the machine
+// that runs it. Production never reassigns them; tests that do must not run in parallel.
+var (
+	// setLabelSACL writes dir's mandatory label: sacl is the label to set, nil removes it.
+	setLabelSACL = func(dir string, sacl *windows.ACL) error {
+		return windows.SetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT,
+			windows.LABEL_SECURITY_INFORMATION, nil, nil, nil, sacl)
+	}
+	// getLabelSD reads dir's security descriptor with its mandatory label.
+	getLabelSD = func(dir string) (*windows.SECURITY_DESCRIPTOR, error) {
+		return windows.GetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT, windows.LABEL_SECURITY_INFORMATION)
+	}
+	// terminateJob ends every process of the job; the deadline a caller sets depends on it.
+	terminateJob = windows.TerminateJobObject
+)
+
 // applyLowIntegrityLabel lowers dir's mandatory (integrity) label to LOW, with
 // object+container inheritance so files created under it are LOW too. A LOW child
 // process can then write here (a LOW subject may write a LOW object), while the
@@ -423,12 +502,19 @@ func lowIntegrityToken() (windows.Token, error) {
 // SACL removes the LOW ACE, returning the dir to implicit MEDIUM integrity.
 //
 // Best-effort: on failure the caller proceeds without lowering (the child simply
-// won't be able to write, which fails safe) and does NOT install a revert.
-func applyLowIntegrityLabel(dir string) (revert func(), err error) {
+// won't be able to write, which fails safe) and does NOT install a revert. The
+// failure is returned, and Run turns it into a note for ITS caller (it is the
+// caller that asked for a writable folder). The revert closure returns the error
+// of the restore for the same reason: a restore that fails leaves dir LOW.
+//
+// One caveat is recorded here, in notes, because only this function knows it: when
+// the prior label could not be READ, the restore can only clear the label (a read
+// error is not a dir without a label, and the old code took it for one).
+func applyLowIntegrityLabel(dir string, notes *runNotes) (revert func() error, err error) {
 	// (a) CAPTURE the prior mandatory-label SACL so we can restore it verbatim.
 	// A dir with no explicit label yields a nil/empty SACL here; restoring that
 	// removes our LOW ACE (verified: SDDL goes from "(ML;…;LW)" back to no ML ACE).
-	priorSACL := priorLabelSACL(dir)
+	priorSACL, priorErr := priorLabelSACL(dir)
 
 	// (b) LOWER to LOW. SDDL SACL: (ML=mandatory label; OICI=object+container
 	// inherit; NW=no-write-up; ;;LW=Low integrity SID S-1-16-4096).
@@ -440,33 +526,42 @@ func applyLowIntegrityLabel(dir string) (revert func(), err error) {
 	if err != nil {
 		return nil, fmt.Errorf("extract SACL: %w", err)
 	}
-	if err := windows.SetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT,
-		windows.LABEL_SECURITY_INFORMATION, nil, nil, nil, sacl); err != nil {
-		return nil, fmt.Errorf("SetNamedSecurityInfo(low label) on %s: %w", dir, err)
+	if err := setLabelSACL(dir, sacl); err != nil {
+		return nil, fmt.Errorf("SetNamedSecurityInfo(low label): %w", err)
+	}
+	if priorErr != nil {
+		// Only now: a label that was never lowered is never restored, so there is nothing to say
+		// about how the restore will go.
+		notes.addf("the prior label of %s could not be read (%v); after the run its low-integrity label is removed, "+
+			"not restored to what it was", dir, priorErr)
 	}
 
 	// (c) REVERT closure: restore the captured prior label (or its absence). Runs
-	// in a defer after the child exits.
-	return func() {
-		_ = windows.SetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT,
-			windows.LABEL_SECURITY_INFORMATION, nil, nil, nil, priorSACL)
+	// in a defer after the child exits. Its error is the caller's to report.
+	return func() error {
+		return setLabelSACL(dir, priorSACL)
 	}, nil
 }
 
 // priorLabelSACL reads dir's current mandatory (integrity) label SACL so it can be
-// restored later. Returns nil when the dir has no explicit label (the common case):
-// restoring a nil label SACL removes any LOW ACE we add, dropping the dir back to
-// implicit MEDIUM integrity.
-func priorLabelSACL(dir string) *windows.ACL {
-	sd, err := windows.GetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT, windows.LABEL_SECURITY_INFORMATION)
-	if err != nil || sd == nil {
-		return nil
+// restored later. Returns (nil, nil) when the dir has no explicit label (the common
+// case): restoring a nil label SACL removes any LOW ACE we add, dropping the dir
+// back to implicit MEDIUM integrity. A label that cannot be READ is not "no label",
+// so that is an error, and the (nil) SACL returned with it is what a restore will
+// write.
+func priorLabelSACL(dir string) (*windows.ACL, error) {
+	sd, err := getLabelSD(dir)
+	if err != nil {
+		return nil, err
+	}
+	if sd == nil {
+		return nil, nil
 	}
 	sacl, _, err := sd.SACL()
 	if err != nil {
-		return nil // no label present → restore "no label"
+		return nil, nil // no label present (x/sys reports an absent SACL as an error) → restore "no label"
 	}
-	return sacl
+	return sacl, nil
 }
 
 // buildCommandLine joins argv into a single Windows command line with each argument

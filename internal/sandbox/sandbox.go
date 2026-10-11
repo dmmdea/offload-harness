@@ -15,6 +15,7 @@ package sandbox
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 )
 
@@ -29,6 +30,13 @@ const workerEnv = "OFFLOAD_SANDBOX_WORKER"
 // caller can distinguish a refusal from a real command's non-zero exit (both can
 // surface as exit 126/127). Run() sets Result.Refused when it sees this prefix.
 const refusalMarker = "[[SANDBOX-REFUSED]] "
+
+// noteMarker prefixes every line the cage itself puts ahead of a command's own stderr: a step it
+// could not complete (a folder it could not make writable, a label it could not put back, a
+// read-only mask it could not mount) on a run that goes ahead anyway. The command still runs, as it
+// always did; what changes is that the caller is told the run is not what its Spec asked for. The
+// Windows timeout note ("[sandbox] command killed after context timeout") has the same shape.
+const noteMarker = "[sandbox] "
 
 // NetABIFloor is the Landlock ABI the cage's NETWORK guarantee needs: the
 // rule set is landlock.V4 (paths + TCP bind/connect handling), and with FS
@@ -74,12 +82,60 @@ type Spec struct {
 }
 
 // Result is the outcome of a caged run.
+//
+// Stderr is the command's own stderr, behind the cage's notes when it has any: lines that start with
+// "[sandbox] " and say what the cage could not do for this run. They lead the stream, so a caller
+// that shows Stderr shows them and a caller that wants to react finds them first. The command is not
+// stopped by them (failing closed is a separate decision), and a run with nothing to report has
+// none. A run that returns an error carries the same notes in the error text.
 type Result struct {
 	Stdout   string
 	Stderr   string
 	ExitCode int
 	Signal   int  // terminating signal number if the command was killed (e.g. SIGSYS=31 from a seccomp KILL), else 0
 	Refused  bool // true if the CAGE refused to run (setup failed) — distinct from the command running and exiting non-zero
+}
+
+// runNotes collects the notes of one run (see noteMarker). Every note is ONE line: addf flattens any
+// line break an error text carries, which is what lets noteLines and skipLeadingNotes treat a line
+// as a note.
+type runNotes []string
+
+func (n *runNotes) addf(format string, args ...any) {
+	*n = append(*n, noteFlatten.Replace(fmt.Sprintf(format, args...)))
+}
+
+var noteFlatten = strings.NewReplacer("\r\n", " ", "\r", " ", "\n", " ")
+
+// noteLines renders notes as the lines that go ahead of the command's stderr: noteMarker, the note,
+// eol. The caller picks eol to match the stream it prepends to (CRLF on Windows).
+func noteLines(notes []string, eol string) string {
+	var b strings.Builder
+	for _, n := range notes {
+		b.WriteString(noteMarker)
+		b.WriteString(n)
+		b.WriteString(eol)
+	}
+	return b.String()
+}
+
+// skipLeadingNotes returns s without the note lines at its start, however they end (LF or CRLF).
+func skipLeadingNotes(s string) string {
+	for strings.HasPrefix(s, noteMarker) {
+		_, rest, found := strings.Cut(s, "\n")
+		if !found {
+			return ""
+		}
+		s = rest
+	}
+	return s
+}
+
+// refusedBy reports whether stderr is a worker's refusal: the refusal marker leads it, behind at
+// most the notes a worker wrote before it failed to exec. A refusal that follows notes is still a
+// refusal; judging the raw prefix would turn it into a command that exited 126/127.
+func refusedBy(stderr string) bool {
+	return strings.HasPrefix(skipLeadingNotes(stderr), refusalMarker)
 }
 
 // defaultReadDirs are the read-only system directories a minimal command needs

@@ -337,9 +337,11 @@ func TestCageMasksDotGit(t *testing.T) {
 	// runner does not let that mount take effect, so the mask cannot be exercised
 	// here even though the rest of the cage (Landlock/seccomp) can — the other cage
 	// tests, which rely only on Landlock, still run. This property is verified on the
-	// real Linux/WSL hosts where the cage actually runs. (Note: sandbox_linux.go:133
-	// currently ignores the mount error — hardening it to fail-closed is tracked
-	// separately, and must be validated on a real host, not in CI.)
+	// real Linux/WSL hosts where the cage actually runs. (Note: a refused mount no
+	// longer goes unmentioned: maskDotGit turns it into a stderr note, and
+	// TestCageSaysWhenDotGitIsNotMasked runs on the runner too. Hardening it to
+	// fail-closed is tracked separately, and must be validated on a real host, not
+	// in CI.)
 	if os.Getenv("GITHUB_ACTIONS") == "true" {
 		t.Skip("unprivileged tmpfs mount over .git does not take effect on the GitHub Actions runner; .git mask is verified on real hosts")
 	}
