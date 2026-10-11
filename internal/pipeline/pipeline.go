@@ -1781,7 +1781,8 @@ func (p *Pipeline) runGenerateImageSdcpp(ctx context.Context, req core.Request, 
 	}
 	imgFamily, imgQuant := imageFootprintKey(cfg)
 	// sd.cpp has no ComfyUI instance to bind to a card: the whole node, as always.
-	grant, lerr := p.acquireMediaLease(ctx, "image-gen (sdcpp)", timeout, p.gpuWait(), wholeNeed(paramStr(req.Params, "waiter_token")).declaresRAM(classDefaultRAM(p.cfg)).resumableBy(req))
+	// It declares the weights it parks itself (sdcppneed.go, F60), not only the class default: an sd.cpp-only box has none.
+	grant, lerr := p.acquireMediaLease(ctx, "image-gen (sdcpp)", timeout, p.gpuWait(), p.sdcppImageNeed(cfg, imgFamily, imgQuant, paramStr(req.Params, "waiter_token")).resumableBy(req))
 	if lerr != nil {
 		return p.deferForLease(lerr, req.Task, meta, len(req.Input), start)
 	}

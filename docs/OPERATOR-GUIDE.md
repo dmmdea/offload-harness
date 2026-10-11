@@ -281,9 +281,9 @@ running is counted whole in the next decision, so the next lease waits, but the 
 over: read `gpu status` (below), not the admission, as the state of the box. `gpu reserve --ram <GiB>` states the need (0 =
 needs no host RAM); unset, it is estimated from the model files of a render helper call whose weights do not fit the card
 (a Krea 2 bf16 call on a 16 GiB card is about 33 GiB), else for a media lease the largest ComfyUI render family the box binds (a
-binding on the sd.cpp engine is not counted, whichever route it is on, so a node that binds only sd.cpp declares 0, its lanes are
-admitted whatever the host reads, and the weights `--offload-to-cpu` parks in RAM are outside the guard there), and
-0 for a text lease. A lease that has to wait says `waiting for host RAM: needs N GiB, committed X of Y GiB physical, Z GiB
+binding on the sd.cpp engine is not counted, whichever route it is on, so for `gpu reserve` a node that binds only sd.cpp declares 0
+unless `--ram` says; the pipeline's own sd.cpp lanes are different: they declare the weights `--offload-to-cpu` parks in RAM,
+sized from their bound files as an estimate), and 0 for a text lease. A lease that has to wait says `waiting for host RAM: needs N GiB, committed X of Y GiB physical, Z GiB
 headroom` once and keeps its place in the same queue; `--wait 0` refuses with that text. The warm-back of the agent seat after a
 lease is admitted the same way against `agent_seat_host_ram_gib` (the host RAM the seat holds once loaded; unset, a chosen 21 GiB
 stands in: not a measurement, and below the 44 GB the 2026-09-10 incident recorded for a seat, so set the key from the node's own

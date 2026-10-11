@@ -1248,10 +1248,18 @@ and its RAM-pressure cache keeps it there between prompts. The same principle sa
 from RAM, so it declares nothing. The media admission (`internal/pipeline`) asks the same estimate per route, from the
 binding it is about to render with, once the card it will run on is known: image, edit, inpaint, video (by the family that
 will render, with the request's own `transformer` put over the family's binding, because that is the file the runner
-loads: `TestAVideoRequestsOwnTransformerIsWhatTheAdmissionDeclares`), animate and music read their files; `run-graph`, sd.cpp and the iGPU engines take the class default (the largest ComfyUI
-family the box binds, an upper bound that is not their own size; **a box that binds no ComfyUI family, an sd.cpp-only node,
-declares 0 for them**, so those lanes are admitted whatever the host reads and the weights `--offload-to-cpu` parks in RAM are
-outside the guard there; `TestAnSdcppOnlyBoxDeclaresNothing`); upscale and voice declare nothing, their weights sit on the card.
+loads: `TestAVideoRequestsOwnTransformerIsWhatTheAdmissionDeclares`), animate and music read their files; `run-graph` and the audio.cpp lanes take the class default (the largest ComfyUI
+family the box binds, an upper bound that is not their own size; a box that binds no ComfyUI family, an sd.cpp-only node, has
+a class default of 0, `TestAnSdcppOnlyBoxDeclaresNothing`). **The sd.cpp lanes (image, video, animate) declare the larger of that
+default and the weights they park themselves** (F60, `hostneed.ForSdcpp`, `pipeline.sdcppDeclared`): the bound files in full
+(the diffusion model, a Wan 2.2 high-noise expert, the text encoders, the VAE), when the lane's extra args carry
+`--offload-to-cpu`, which parks the weights in RAM and stages them to the device (sanctioned spill, 5.5 to 6.2 GiB on the small
+nodes per the review); without the flag nothing is parked and the lane declares what it did. So on an sd.cpp-only node the spill
+is inside the brake. **It is an estimate, from the files' sizes, and says so; nothing here was measured on a node.** The need
+carries the lane's footprint key, so three measured runs raise it like a ComfyUI family's (`calibratedRAM`), and a file whose size
+cannot be read leaves the class default, never a smaller number. Not covered: the audio.cpp voice and music lanes, the depth
+model of the animate lane, and `gpu reserve` around an sd.cpp helper (the CLI recognises only the ComfyUI helpers, so it still
+declares the class default or `--ram`); upscale and voice declare nothing, their weights sit on the card.
 
 **An unknown card counts everything.** A set that fits the card declares 0 only when the card is known. A host that has not
 enabled card-scoped leases reads no card table (its leases are whole-node, as before, and it may have no NVIDIA card to
