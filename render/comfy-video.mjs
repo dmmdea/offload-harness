@@ -316,55 +316,74 @@ export async function verifyMulticardPack(api, plan, { fetchImpl = fetch } = {})
   }
 }
 
-async function generate(out, API, pos, flags, multicard) {
+// The calls generate() makes to the outside world, as one table a test can replace entry by entry (generate's last argument). The
+// defaults are the real ones; nothing else about the function changes.
+export const GENERATE_IO = Object.freeze({
+  verifyDevices: verifyMulticardDevices, verifyPack: verifyMulticardPack, buildGraph: buildGraphForRun, submit: submitChecked,
+  poll: pollOutputs, view: fetchView, write: writeFileAtomic, tailLog: tailComfyLog, finalize: finalizeRun, resolveCli,
+  stdout: (...a) => console.log(...a), stderr: (...a) => console.error(...a), env: process.env, comfyDir: COMFY_DIR,
+});
+
+export async function generate(out, API, pos, flags, multicard, io = {}) {
+  const x = { ...GENERATE_IO, ...io };
   if (multicard) {
-    await verifyMulticardDevices(API, multicard);
-    await verifyMulticardPack(API, multicard);
+    await x.verifyDevices(API, multicard);
+    await x.verifyPack(API, multicard);
   }
-  const { graph, seed, model } = await buildGraphForRun(pos, flags, API, { multicard });
+  const { graph, seed, model } = await x.buildGraph(pos, flags, API, { multicard });
   // Shared submission/polling/retrieval (comfy-submit.mjs): CLI-preferred submit with
   // byte-identical raw fallback; hardened poll loop (dead-server watchdog).
-  const cli = resolveCli();
-  const { promptId } = await submitChecked({ api: API, graph, clientId: "video-" + seed, cli });
-  console.log("queued", promptId, flags.graph ? `(graph ${flags.graph})` : `${model} seed ${seed}`);
+  const cli = x.resolveCli();
+  const { promptId } = await x.submit({ api: API, graph, clientId: "video-" + seed, cli });
+  x.stdout("queued", promptId, flags.graph ? `(graph ${flags.graph})` : `${model} seed ${seed}`);
   // Poll budget: the native quality recipe at 720p legitimately exceeds the old ~20-min
   // ceiling. Default 90 min; the Go harness passes COMFY_WAIT_SEC aligned to its own
   // videogen timeout and its process-tree kill remains the hard stop.
-  const waitSec = Number(flags["wait-sec"] || process.env.COMFY_WAIT_SEC || 5400);
-  const h = await pollOutputs({
+  const waitSec = Number(flags["wait-sec"] || x.env.COMFY_WAIT_SEC || 5400);
+  const h = await x.poll({
     api: API, promptId, waitSec,
     isDone: (entry) => !!firstOutputFile(entry.outputs, graph),
     noOutputMsg: "no video produced in time",
-    onExecError: () => finalizeRun({ api: API, promptId, cli }),
+    onExecError: () => x.finalize({ api: API, promptId, cli }),
   });
   const file = firstOutputFile(h.outputs, graph);
-  writeFileAtomic(out, await fetchView({ api: API, file }));
-  console.log("WROTE", out);
+  x.write(out, await x.view({ api: API, file }));
+  x.stdout("WROTE", out);
   // multicard + plain decode: the sampled latent the free node saved (the line a failed decode's message carries too).
-  for (const f of h.outputs?.["21"]?.latents || []) console.log(`LATENT ${f.subfolder ? `${f.subfolder}/${f.filename}` : f.filename} (in ComfyUI's output directory)`);
+  for (const f of h.outputs?.["21"]?.latents || []) x.stdout(`LATENT ${f.subfolder ? `${f.subfolder}/${f.filename}` : f.filename} (in ComfyUI's output directory)`);
   if (multicard) {
     // ComfyUI retries a plain decode that ran out of memory TILED, with its own temporal chunking: a clip that can seam. Said, not hidden.
-    const tail = tailComfyLog(COMFY_DIR, 4000, multicard.launch.key);
-    if (decodeFellBack(tail)) console.error(`WAN-DECODE-FALLBACK: ComfyUI ran out of memory in the plain decode and retried it tiled (see ${comfyLogPath(COMFY_DIR, multicard.launch.key)}); check the clip for a seam at frames 24 and 48`);
+    const tail = x.tailLog(x.comfyDir, 4000, multicard.launch.key);
+    if (decodeFellBack(tail)) x.stderr(`WAN-DECODE-FALLBACK: ComfyUI ran out of memory in the plain decode and retried it tiled (see ${comfyLogPath(x.comfyDir, multicard.launch.key)}); check the clip for a seam at frames 24 and 48`);
   }
-  await finalizeRun({ api: API, promptId, cli });
+  await x.finalize({ api: API, promptId, cli });
+}
+
+const USAGE = 'usage: node comfy-video.mjs <out.mp4> <still> "<prompt>" [--model hunyuan|wan] [flags]   |   <out.mp4> --graph wf.json';
+
+/**
+ * planRun: everything main() decides before it takes the GPU. The card-only placement is planned first: it refuses, before anything is
+ * launched, every request it cannot honour (no cards named, not two, a display card). Its own environment names the instance, so the api and
+ * the lease slot read it too. `slot` is withGpuSlot's options: the card-only launch and its environment ride in it only for that placement.
+ */
+export function planRun(argv, { env = process.env, comfyDir = COMFY_DIR, planFn = planMulticard, say = (m) => console.error(m) } = {}) {
+  const { pos, flags } = parseArgs(argv);
+  const multicard = planFn({ flags, env, comfyDir, isWanGraph: runsWanGraph(flags), say });
+  const api = comfyApi(flags.api, multicard ? multicard.env : env);
+  const note = multicard ? portNote(flags, multicard.env, api) : "";
+  const slot = {
+    noLock: flags["no-lock"], keepComfy: flags["keep-comfy"], comfyManaged: true, api, reserveVram: flags["reserve-vram"],
+    family: familySignature("video-" + (flags.model || "wan"), flags.transformer || flags["high-unet"]),
+    ...(multicard ? { launch: multicard.launch, instanceEnv: multicard.env } : {}),
+  };
+  return { pos, flags, out: pos[0], multicard, api, note, slot };
 }
 
 async function main() {
-  const { pos, flags } = parseArgs(process.argv.slice(2));
-  const out = pos[0];
-  // The card-only placement is planned first: it refuses, before anything is launched, every request it cannot honour (no cards
-  // named, not two, a display card). Its own environment names the instance, so the api and the lease slot read it too.
-  const multicard = planMulticard({ flags, comfyDir: COMFY_DIR, isWanGraph: runsWanGraph(flags), say: (m) => console.error(m) });
-  const API = comfyApi(flags.api, multicard ? multicard.env : process.env);
-  if (multicard) { const note = portNote(flags, multicard.env, API); if (note) console.error(note); }
-  if (!out) { console.error('usage: node comfy-video.mjs <out.mp4> <still> "<prompt>" [--model hunyuan|wan] [flags]   |   <out.mp4> --graph wf.json'); process.exit(2); }
-  await withGpuSlot(
-    { noLock: flags["no-lock"], keepComfy: flags["keep-comfy"], comfyManaged: true, api: API, reserveVram: flags["reserve-vram"],
-      family: familySignature("video-" + (flags.model || "wan"), flags.transformer || flags["high-unet"]),
-      ...(multicard ? { launch: multicard.launch, instanceEnv: multicard.env } : {}) },
-    () => generate(out, API, pos, flags, multicard),
-  );
+  const run = planRun(process.argv.slice(2));
+  if (run.note) console.error(run.note);
+  if (!run.out) { console.error(USAGE); process.exit(2); }
+  await withGpuSlot(run.slot, () => generate(run.out, run.api, run.pos, run.flags, run.multicard));
 }
 
 // Run only as a script (the harness spawns this file), never on import — the test imports

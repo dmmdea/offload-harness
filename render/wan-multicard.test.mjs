@@ -483,11 +483,7 @@ test("verifyMulticardPack stops the run when the harness's node pack did not loa
   await assert.rejects(verifyMulticardPack("http://x", plan, { fetchImpl: async () => { throw new Error("refused"); } }), /cannot tell.*refused/s);
 });
 
-test("generate() verifies the devices and then the pack, before it builds or submits anything", () => {
-  const src = readFileSync(new URL("./comfy-video.mjs", import.meta.url), "utf8");
-  const body = src.slice(src.indexOf("async function generate("), src.indexOf("async function main("));
-  assert.match(body, /if \(multicard\) \{\s*await verifyMulticardDevices\(API, multicard\);\s*await verifyMulticardPack\(API, multicard\);\s*\}\s*const \{ graph, seed, model \} = await buildGraphForRun/);
-});
+// (the order of the device check, the pack check and the graph build in generate() is pinned by behaviour in wan-multicard-run.test.mjs)
 
 test("the missing-node message for the harness's own pack says it failed to import, not 'install it into custom_nodes'", async () => {
   const { missingNodeMessage, NODE_PACKS } = await import("./comfy-nodes.mjs");

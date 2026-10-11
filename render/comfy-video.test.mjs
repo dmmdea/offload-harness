@@ -386,9 +386,10 @@ test("generate() takes its graph from buildGraphForRun, the one call that lets -
   const to = src.indexOf("async function main(");
   assert.ok(from >= 0 && to > from, "generate() is declared before main() in comfy-video.mjs");
   const code = src.slice(from, to).replace(/\/\/[^\n]*/g, "");
-  assert.match(code, /const \{ graph, seed, model \} = await buildGraphForRun\(pos, flags, API(, \{ multicard \})?\);/, "generate() awaits buildGraphForRun(pos, flags, API) for its graph (the card-only placement adds its plan as the fourth argument)");
+  // generate() reaches its calls through the table GENERATE_IO; wan-multicard-run.test.mjs pins that the table's graph entry IS buildGraphForRun.
+  assert.match(code, /const \{ graph, seed, model \} = await x\.buildGraph\(pos, flags, API(, \{ multicard \})?\);/, "generate() awaits buildGraph(pos, flags, API) for its graph (the card-only placement adds its plan as the fourth argument)");
   assert.doesNotMatch(code, /buildGraphFromArgs\(/, "generate() must not build the graph around the card read");
-  assert.match(code, /submitChecked\(\{ api: API, graph,/, "and it submits that graph");
+  assert.match(code, /x\.submit\(\{ api: API, graph,/, "and it submits that graph");
 });
 
 test("buildGraphForRun's default log is stderr: one wan-decode line there, nothing on stdout", async () => {
