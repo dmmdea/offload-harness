@@ -738,13 +738,14 @@ label cannot be lowered (the label change needs `WRITE_OWNER`, which a data driv
 the user nowhere does not give) is a folder the command cannot write; one whose label cannot be
 restored is left writable by every low-integrity process, and the next run takes that label for the
 folder's own, so it does not heal; one whose prior label cannot be read is cleared, not restored; a
-deadline whose kill of the job fails is not in force. On Linux, `<worktree>/.git` stays writable
-where the kernel refuses its read-only mask: the empty tmpfs over a `.git` directory, or the
-read-only bind of a `.git` file onto itself (below). In each case the command still runs (failing
-closed is a separate decision, not taken) and the cage puts a line starting with `[sandbox] ` ahead
-of the command's own stderr, appends the same text to the error of a run that fails before the
-command starts, and, on Windows, logs it once. `run` and `run_shell` return stderr to the model, so
-the model reads the note too.
+deadline whose kill of the job fails is not in force; a command whose exit status cannot be read
+(`GetExitCodeProcess` fails) reports exit code -1, not the 0 that every caller reads as success. On
+Linux, `<worktree>/.git` stays writable where the kernel refuses its read-only mask: the empty tmpfs
+over a `.git` directory, or the read-only bind of a `.git` file onto itself (below). In each case
+the command still runs (failing closed is a separate decision, not taken) and the cage puts a line
+starting with `[sandbox] ` ahead of the command's own stderr, appends the same text to the error of
+a run that fails before the command starts, and, on Windows, logs it once. `run` and `run_shell`
+return stderr to the model, so the model reads the note too.
 
 **The shell path's `.git` mask covers a linked worktree** (`sandbox.maskDotGit`, Linux). With a
 writable worktree the cage makes `<worktree>/.git` read-only inside its private mount namespace, so

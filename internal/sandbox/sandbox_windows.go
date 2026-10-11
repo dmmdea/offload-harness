@@ -153,9 +153,10 @@ func allowed(exePath string, list []string) bool {
 // What the cage could not do for the run is told to the caller, not swallowed: a folder whose
 // low-integrity label could not be applied (so the command cannot write it), one whose label could
 // not be restored afterwards (so other low-integrity processes can write it), one whose prior label
-// could not be read (so the restore can only clear it). Each is a line starting with "[sandbox] "
-// ahead of the command's own stderr in Result.Stderr, is appended to the error of a run that
-// fails, and is logged once. None of them changes whether the command runs.
+// could not be read (so the restore can only clear it), a command whose exit status could not be
+// read (its ExitCode is -1, never the 0 that every caller reads as success). Each is a line starting
+// with "[sandbox] " ahead of the command's own stderr in Result.Stderr, is appended to the error of a
+// run that fails, and is logged once. None of them changes whether the command runs.
 func Run(ctx context.Context, spec Spec) (Result, error) {
 	var notes runNotes
 	res, err := run(ctx, spec, &notes)
@@ -415,8 +416,15 @@ func run(ctx context.Context, spec Spec, notes *runNotes) (Result, error) {
 	}
 	wg.Wait()
 
+	// How the command ended. A read that fails leaves a command that has run, its output in hand, and
+	// an outcome the cage does not know. ExitCode left at its zero value would report that as success,
+	// which is what every caller takes 0 to mean, so it is noExitStatus and the caller is told why.
 	var exitCode uint32
-	if err := windows.GetExitCodeProcess(pi.Process, &exitCode); err == nil {
+	if err := readExitCode(pi.Process, &exitCode); err != nil {
+		res.ExitCode = noExitStatus
+		notes.addf("the command's exit status could not be read (GetExitCodeProcess: %v): its exit code is reported as %d, not 0, "+
+			"because a run whose outcome is unknown is not a success", err, noExitStatus)
+	} else {
 		res.ExitCode = int(exitCode)
 	}
 	res.Stdout = capOutput(string(stdout))
@@ -487,6 +495,8 @@ var (
 	}
 	// terminateJob ends every process of the job; the deadline a caller sets depends on it.
 	terminateJob = windows.TerminateJobObject
+	// readExitCode reads a finished process's exit status; the ExitCode of every Result depends on it.
+	readExitCode = windows.GetExitCodeProcess
 )
 
 // applyLowIntegrityLabel lowers dir's mandatory (integrity) label to LOW, with

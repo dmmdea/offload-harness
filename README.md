@@ -648,7 +648,8 @@ The **coding agent** (`local-agent`) is designed **safe-by-default** for a model
     cage cannot lower that label (it needs `WRITE_OWNER` on the folder, which a data drive's default
     root ACL does not give its owner) the child cannot write the folder, and when it cannot restore it
     the folder stays writable by other low-integrity processes; either way the run goes ahead and the
-    cage says so in `[sandbox]` lines at the start of stderr. **But
+    cage says so in `[sandbox]` lines at the start of stderr. A run whose exit status the cage cannot
+    read reports exit code `-1` and says so the same way, never `0`. **But
     reads and network are NOT contained on native Windows** — the low-IL token restricts writes, not
     reads or sockets — so the Windows cage is a **weaker boundary than Linux**. This matches every
     shipping tool's stance on native Windows; an AppContainer network-deny layer is future work.
