@@ -314,6 +314,10 @@ was one tick from a prefill stall. The allowance formula was right; its two inpu
   written before the window). Shared-seat samples still teach nothing (ADR 0066), so contention cannot loosen it.
   `/fleet/health` publishes both rates in `seat_rate` (additive, omitted until measured).
 
+An unmeasured seat (the assumed 100 tok/s) therefore waits longer on its first run when its tool block is large: about 3,000 tokens of
+tool JSON is 3,000 ÷ 100 × 1.5 + 30 s = 75 s before the transcript, where the transcript alone earned the 60 s floor; the first run
+measures the rate.
+
 A wedged seat still stalls: the allowance stays `pending ÷ rate × 1.5 + 30 s`, bounded by the prompt and the slowest
 recent rate, and a seat whose engine does no work is still ended by the busy hold's flat bound (ADR 0061). Not
 changed: the per-run live rate (a run's first prefill is judged on the store's window, not on what it has not yet

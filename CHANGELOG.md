@@ -87,6 +87,10 @@ Versioning: [SemVer](https://semver.org/).
   `Seat.StallPrefillTokS()` (the slowest, else the EMA of a store written before the window). A shared-seat sample still teaches
   nothing (ADR 0066). `/fleet/health` `seat_rate` publishes `prefill_tok_s` and `prefill_slow_tok_s` (additive, omitted until a
   solo prefill is measured), so the number a "silent N s of M s allowed" line rests on can be read.
+- **An unmeasured seat waits longer on its first run.** Its rate is the assumed 100 tok/s, and the prompt now includes the tool block,
+  so a full build with about 3,000 tokens of tool JSON earns 3,000 / 100 x 1.5 + 30 s = 75 s before the transcript is counted, where the
+  transcript alone earned the 60 s floor. The first run measures the rate. The silent-seat fixture of `internal/pipeline` now names a
+  measured prefill, as the cold-load tests do.
 - **A wedged seat still stalls.** The allowance is still bounded by the prompt and the slowest recent rate, and the busy hold's
   flat bound still ends a seat whose engine does no work (`TestWedgedSeatStillStallsUnderTheSizedPrefillClock`).
 - **Tests.** `internal/agent/prefill_pending_test.go` (the spec block is in the clock; the server's count is a floor; the density is
