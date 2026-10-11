@@ -51,7 +51,8 @@ Versioning: [SemVer](https://semver.org/).
   of host commit lives in the same pack; a missing-node message for the harness's own pack says it failed to import, not "install it".
 - **Host RAM.** `gpu reserve --devices <a>,<b> -- node render/comfy-video.mjs ... --wan-placement multicard` declares 0 when each leased
   card fits its own stage (`hostneed.estimateWith`, new `Facts.CardsGiB` / `LeasedCardsGiB`): the larger card, the resident share of the
-  expert (`--wan-resident-gb`, default 3) plus 11 GiB of film-size activations, the other the rest of the expert plus 0.8 GiB; one card,
+  expert (`--wan-resident-gb`, default 3) plus 12.2 GiB of film-size activations and 0.5 GiB of CUDA context, the other the rest of the expert
+  plus 0.8 GiB inside its size less `--reserve-vram`; one card,
   three, no card table, no fit, another family or no flag keep the ordinary estimate. The pipeline's media admission has no multicard door
   yet (every typed door leases one card).
 - **Tests.** 45 new render tests (44 in `wan-multicard.test.mjs`, and `comfyui-ext.test.mjs`, which runs the 14 Python tests of the node
@@ -79,7 +80,7 @@ byte-identical.
   `watch`; the multicard run hands it a reader (`comfyLogCursor`, made before the prompt is submitted so an earlier run's lines in a kept instance's
   log do not count) of the instance's console that matches only the two lines that mean the worker is gone, never the recoverable ones in the same
   log (`WAN-OOM`; a console it cannot see is said once, `WAN-OOM-WATCH`).
-- **The wait budget (MEDIUM, reported twice).** The 20-step film recipe measures about 5,170 s and the single-card default left 4.5 percent. A
+- **The wait budget (MEDIUM, reported twice).** The 20-step film recipe was projected at about 5,170 s (the film-size run then took 5,136 s of runner wall) and the single-card default left 4.5 percent. A
   card-only run waits 7,200 s unless `--wait-sec` or `COMFY_WAIT_SEC` says otherwise, and says which budget it used (`WAN-WAIT-NOTE`).
 - **The resident-share guard (MEDIUM, reported twice) and the storage card (LOW).** The guard admitted 5.1 GiB at film size where the benchmark says 4 is
   too thin, and scaled the activations linearly where the benchmark measured about twice that at mid sizes. It now holds both cards to the figures the
@@ -109,6 +110,30 @@ byte-identical.
   cards. The 20-step acceptance run is the one in the entry above, made on 090fbd95, the tip before this round (720x1280x81, 20 steps, plain decode,
   250.5 s per step, 5136 s of runner wall, host growth 2.33 GiB, frame check CLEAN, 15.18 GiB on the compute card and 10.86 GiB on the storage card); this round's
   changes were not re-run on the cards.
+
+### Fixed — the card-only Wan placement follows the film-size run: 12.2 GiB of activations, a 0.5 GiB context on the compute card, 3.2 GiB of share at most
+
+The independent check of the fix round found that the run's numbers contradicted the guard's. The film-size run (commit 090fbd95, the tip before the
+second review round) peaked at 15.18 GiB on the compute card with 3.0 GiB of the expert resident, so the sampler side is 12.2 GiB, not the 11.0
+(the top of the 4-step benchmark's 9.7 to 11.0, which ended at about 1000 s, before the peak at about 2485 s). The acceptance criterion follows the
+measurement, in both places that draw this line.
+
+- **The figure.** `WAN_FILM_ACTIVATIONS_GIB` in `render/wan-multicard.mjs` and `wanActivationsGiB` in `internal/hostneed` are 12.2 (a Go test pins them
+  together, and the new `WAN_COMPUTE_CONTEXT_GIB` / `wanComputeContextGiB`, 0.5, the same way `wanResidentDefaultGiB` is pinned).
+- **The compute card's margin is the CUDA context, not `--reserve-vram`.** Both the runner's resident-share guard and the lease sizing held the
+  compute card to its size less `--reserve-vram` (1.0 GiB by default), ComfyUI's model-load margin and not an activation ceiling. With 12.2 GiB
+  that refuses the measured call: 15.9 - 12.2 - 1.0 = 2.7 GiB against the runner's own default of 3 (the guard), and 3.0 + 12.2 = 15.2 > 14.9 (the
+  sizing, which would then declare the whole 33 GiB set for a call measured to run with `--ram 0`, and the host-RAM brake holds a grant that size back
+  for hours). The compute card now needs the share + 12.2 + 0.5 GiB of context to fit its size: 3.2 GiB of share at most at film size on a 15.9 GiB card,
+  and the guard and the sizing admit the same shares (a Go test draws the ceiling from the runner's constants and checks both sides of it).
+  `--reserve-vram` is the storage card's margin and nothing else; that check is unchanged (the run's 10.86 GiB sits inside the 11.2 it predicts).
+- **Red before.** The new render assertions failed with the figure at 12.2 and the old margin (the measured recipe refused, `at most 2.7 GiB`); the Go
+  tests failed with 11.0 (a 3.3 GiB share declared 0 where the runner refuses it, the mirror test saw 12.2 against 11) and, with only the constant
+  raised, with the measured call itself declared as the ordinary 33.0 GiB. Mutants, each compiling and restored byte for byte: the Go figure back to
+  11.0, the old reserve check, no context term, a 0.4 context, the compute check against the smaller card, no reserve on the storage card (red in 5, 5,
+  4, 4, 2 and 1 Go tests); the render margin back to `--reserve-vram` (red).
+- **Behaviour change to know.** A `--reserve-vram` above the default no longer shrinks the compute card's share (`--reserve-vram 2` with the default
+  share used to be refused at film size; it is the call that was measured now); it shrinks the storage card's room, as before.
 
 ### Fixed — `gpu reserve` says why its declared figure is the media class default, and that `--ram` states the real one (F71)
 

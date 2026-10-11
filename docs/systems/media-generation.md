@@ -668,7 +668,7 @@ tiles of 8 latent frames overlapping by 2, each written at 4 times its first lat
 frames), which the `WAN-PLACEMENT-NOTE` at the start of such a run names for the clip being made.
 
 **While it waits.** The poll budget of a card-only run is 7,200 s unless `--wait-sec` or `COMFY_WAIT_SEC` names one (a line says which): the
-20-step film recipe measured about 5,170 s (164.5 s that is not sampling plus 20 steps of 250.3 s), the single-card default of 5,400 s left 4.5
+20-step film recipe was projected at about 5,170 s from the benchmark (164.5 s that is not sampling plus 20 steps of 250.3 s) and took 5,136 s of runner wall, the single-card default of 5,400 s left 4.5
 percent, and the sampled latent is saved only after the second sampler. A bigger clip than the film's was not measured: pass `--wait-sec`.
 A lease taken with `gpu reserve` renews on the poll's heartbeat while ComfyUI still lists the prompt, so the wait may outlast the `--for` term.
 The run also reads ComfyUI's console while it waits (a cursor made before the prompt is submitted, asked every 15 s): ComfyUI can
@@ -679,12 +679,17 @@ loaded models` and a dead `prompt_worker` thread) end the wait with `WAN-OOM` an
 said once (`WAN-OOM-WATCH`) and the wait is then bounded by the budget alone. A failed prompt's exception message reaches the error whole.
 
 **Host RAM.** `gpu reserve --devices <a>,<b> -- node render/comfy-video.mjs ... --wan-placement multicard` declares 0 when each of the
-two leased cards fits its own stage, as the runner will place it (`hostneed.estimateWith`, `Facts.CardsGiB`, each card's size less the
-runner's `--reserve-vram`): the larger card computes, so it must hold the resident share of the expert (`--wan-resident-gb`, default 3)
-plus 11 GiB of film-size activations, and the other holds the rest of the expert plus 0.8 GiB for the VAE and the context (the benchmark's
-storage card peaked at 11.1 GiB with 10.3 GiB of blocks); the runner checks the same two stages before it starts, with the same figures
-(a Go test fails when its `WAN_FILM_ACTIVATIONS_GIB`, `WAN_STORAGE_OVERHEAD_GIB` or `WAN_EXPERT_GIB` drift from these). A sum would pass a 24 GiB card beside an 8 GiB one; the 8 GiB card cannot hold the
-donor blocks. The reserve counts: a `--reserve-vram` of 1.9 GiB or more no longer fits two 15.9 GiB cards, and that call takes the ordinary
+two leased cards fits its own stage, as the runner will place it (`hostneed.estimateWith`, `Facts.CardsGiB`, each card's size): the larger
+card computes, so it must hold the resident share of the expert (`--wan-resident-gb`, default 3) plus 12.2 GiB of film-size activations (the
+film-size run's compute-card peak, 15.18 GiB, less its 3 GiB resident share) plus 0.5 GiB for the CUDA context, which is 15.7 GiB with the default
+share and 3.2 GiB of share at most on a 15.9 GiB card; the other holds the rest of the expert plus 0.8 GiB for the VAE and the context inside its
+size less `--reserve-vram` (the film-size run's storage card peaked at 10.86 GiB, the 4-step benchmark's at 11.1 GiB with 10.3 GiB of blocks). The
+runner checks the same two stages before it starts, with the same figures (a Go test fails when its `WAN_FILM_ACTIVATIONS_GIB`,
+`WAN_COMPUTE_CONTEXT_GIB`, `WAN_STORAGE_OVERHEAD_GIB` or `WAN_EXPERT_GIB` drift from these, and another that the two sides admit the same share
+at film size). A sum would pass a 24 GiB card beside an 8 GiB one; the 8 GiB card cannot hold the
+donor blocks. `--reserve-vram` is ComfyUI's model-load margin, not an activation ceiling, so it is the storage card's margin and not the compute
+card's (with it on the compute card the measured call, 3.0 + 12.2 = 15.2 GiB, would have been refused on a 15.9 GiB card and declared the whole
+33 GiB set): a `--reserve-vram` above 4.7 GiB no longer fits the donor blocks on a 15.9 GiB storage card, and that call takes the ordinary
 estimate (the lease it needs then declares the whole set, or `--ram 0` explicitly). One card, three (a whole-node lease), no card table,
 no fit, another family or no flag keep the ordinary estimate, the whole set (33 GiB). Measured host growth in the benchmark was 2.3 GiB
 over ComfyUI's idle, inside the headroom the brake keeps anyway. The pipeline's media admission has no multicard door: every typed door leases one card, so the placement
