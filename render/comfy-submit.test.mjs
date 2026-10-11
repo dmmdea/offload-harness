@@ -786,3 +786,55 @@ test("pollOutputs: an error status whose BODY read fails still counts as an answ
   });
   assert.equal(h.outputs[9].images[0].filename, "ok.png");
 });
+
+// ---------------------------------------------------------------------------------------
+// pollOutputs: the watch hook (a wedge the server does not report)
+// ---------------------------------------------------------------------------------------
+// A ComfyUI whose prompt worker died after an out-of-memory error keeps answering HTTP: /history lists nothing, /system_stats is healthy, /queue
+// still shows the prompt, and the lease keeps beating. Nothing the poll asks the server can tell, so a caller that can read the server's
+// console hands the poll a `watch` that does: a message ends the wait.
+
+test("pollOutputs: a watch that reports a wedge ends the wait with a server-unusable error, and is asked no more often than every 15 s", async () => {
+  const c = clock();
+  const start = c.now();
+  const asked = [];
+  const fetchImpl = async (url) => (isStats(url) ? entry({ system: {}, devices: [] }) : entry({}));
+  const err = await pollOutputs({
+    api: "http://x", promptId: "p1", waitSec: 5400, isDone: () => false,
+    watch: () => { asked.push(c.now() - start); return asked.length < 4 ? null : "WAN-OOM: the worker died"; },
+    fetchImpl, sleep: c.sleep, now: c.now, env: {},
+  }).then(() => null, (e) => e);
+  assert.ok(err, "a wedged prompt must not be waited on for the whole budget");
+  assert.match(err.message, /^WAN-OOM: the worker died/);
+  assert.equal(err.serverUnusable, true, "no later job can run on a worker that is gone");
+  assert.equal(asked.length, 4);
+  for (let i = 1; i < asked.length; i++) assert.ok(asked[i] - asked[i - 1] >= 15_000, `asked ${asked[i] - asked[i - 1]} ms after the last time`);
+  assert.ok((c.now() - start) / 1000 <= 90, `ended within about a minute, spent ${(c.now() - start) / 1000} s`);
+});
+
+test("pollOutputs: a watch that throws or rejects is best-effort, never the end of the wait", async () => {
+  const c = clock();
+  let polls = 0, asked = 0;
+  const fetchImpl = async (url) => {
+    if (isStats(url)) return entry({ system: {} });
+    polls++;
+    return polls < 40 ? entry({}) : entry({ p1: { outputs: { 9: { images: [{ filename: "a.png" }] } }, status: { status_str: "success" } } });
+  };
+  const h = await pollOutputs({
+    api: "http://x", promptId: "p1", waitSec: 600, isDone: (e) => !!e.outputs?.[9]?.images?.[0],
+    watch: async () => { asked++; if (asked % 2) throw new Error("the log cannot be read"); return Promise.reject(new Error("nor this")); },
+    fetchImpl, sleep: c.sleep, now: c.now, env: {},
+  });
+  assert.equal(h.outputs[9].images[0].filename, "a.png");
+  assert.ok(asked >= 2, "it was asked, and the failures did not stop the wait");
+});
+
+test("pollOutputs: a prompt that ComfyUI itself reports as failed is reported with ComfyUI's own words, whatever the watch would say", async () => {
+  const c = clock();
+  const status = { status_str: "error", messages: [] };
+  const fetchImpl = async () => entry({ p1: { outputs: {}, status } });
+  await assert.rejects(
+    pollOutputs({ api: "http://x", promptId: "p1", waitSec: 60, isDone: () => false, watch: () => "WAN-OOM: would pre-empt", fetchImpl, sleep: c.sleep, now: c.now, env: {} }),
+    /^Error: ComfyUI exec error: /,
+  );
+});

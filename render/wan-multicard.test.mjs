@@ -3,7 +3,7 @@
 // the HTTP probes and the pid checks are injected; the only real I/O is scratch folders (scratchDir) under the OS temp dir, gone when their test ends.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, appendFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   buildWan22I2V, WAN_PLACEMENTS, WAN_PLACEMENT_DEFAULT, WAN_RESIDENT_GB_DEFAULT, WAN_STORAGE_DEVICE, WAN_COMPUTE_DEVICE,
@@ -608,4 +608,88 @@ test("a flag spelled with '=' that swallowed one of the placement's own flags, i
   assert.equal(plan(["o.mp4", "s.png", "p", "--seed=7", "--wan-decode=plain"]), null);
   assert.equal(plan(["o.mp4", "s.png", "p", "--negative", "--wan-placements are words"]), null, "a prompt that is not one of our flags passes");
   assert.equal(plan(["o.mp4", "s.png", "p", "--seed", "7"]), null);
+});
+
+// ---- the console watch: an out-of-memory wedge ComfyUI does not report (the review of 2026-10-11) ---------------------------
+// The benchmark's results note: "After an OOM inside DisTorch2 distribution ComfyUI can wedge with no error in history". The log of that
+// run (the full-size probe) shows how: the node's error handler logs "Got an OOM, unloading all loaded models" and the unload itself runs
+// out of memory, which kills the prompt worker thread. The lines below are that log's, with the ANSI colours ComfyUI prints.
+
+const ESC = String.fromCharCode(27);
+const WEDGE_LOG = [
+  `  0%|          | 0/1 [00:00<?, ?it/s]${ESC}[1m${ESC}[33m[WARNING]${ESC}[0m FP8 _scaled_mm failed: Allocation on device 0 would exceed allowed memory. (out of memory)`,
+  "Currently allocated     : 14.44 GiB",
+  `${ESC}[1m${ESC}[31m[ERROR]${ESC}[0m !!! Exception during processing !!! Allocation on device 0 would exceed allowed memory. (out of memory)`,
+  `${ESC}[1m${ESC}[31m[ERROR]${ESC}[0m Got an OOM, unloading all loaded models.`,
+  "Exception in thread Thread-5 (prompt_worker):",
+  "Traceback (most recent call last):",
+  "torch.OutOfMemoryError: Allocation on device 0 would exceed allowed memory. (out of memory)",
+].join("\n");
+
+test("oomWedgeLine: the line that says the prompt worker is gone, found through the colour codes, and only that", () => {
+  assert.equal(M.oomWedgeLine(WEDGE_LOG), "[ERROR] Got an OOM, unloading all loaded models.");
+  assert.equal(M.oomWedgeLine("Exception in thread Thread-5 (prompt_worker):\nTraceback"), "Exception in thread Thread-5 (prompt_worker):");
+  // recoverable or already reported: ComfyUI falls back, or puts the error in /history where the poll reads it
+  assert.equal(M.oomWedgeLine(WEDGE_LOG.split("\n").slice(0, 3).join("\n")), "", "the _scaled_mm warning and the node error alone are not the wedge");
+  assert.equal(M.oomWedgeLine("Warning: Ran out of memory when regular VAE decoding, retrying with tiled VAE decoding.\n"), "");
+  assert.equal(M.oomWedgeLine("Exception in thread Thread-9 (some_other_worker):"), "");
+  assert.equal(M.oomWedgeLine(""), "");
+  assert.equal(M.oomWedgeLine(undefined), "");
+});
+
+test("comfyLogCursor reads only what the console gains after it was made, whatever the file held before", (t) => {
+  const dir = scratchDir(t, "wan-mc-");
+  const key = "mc-aaaa1111-cccc3333";
+  const path = L.comfyLogPath(dir, key);
+  writeFileSync(path, "an earlier run: Got an OOM, unloading all loaded models.\n");
+  const cur = L.comfyLogCursor(dir, key);
+  assert.deepEqual(cur.read(), { text: "", state: "ok" }, "the earlier run's lines are not this run's");
+  appendFileSync(path, "step 1\n");
+  assert.deepEqual(cur.read(), { text: "step 1\n", state: "ok" });
+  assert.deepEqual(cur.read(), { text: "", state: "ok" }, "nothing new, nothing returned");
+  // a line cut by the end of a read is finished by the next one
+  appendFileSync(path, "Got an OOM, unl");
+  const a = cur.read();
+  appendFileSync(path, "oading all loaded models.\n");
+  const b = cur.read();
+  assert.equal(M.oomWedgeLine(a.text), "");
+  assert.equal(M.oomWedgeLine(b.text), "Got an OOM, unloading all loaded models.");
+  // a log that was replaced by a shorter one is read from its start
+  writeFileSync(path, "fresh\n");
+  assert.deepEqual(cur.read(), { text: "fresh\n", state: "ok" });
+  // the capture's own cap marker means everything after it is lost to a reader
+  appendFileSync(path, "\n... [offload-comfyui.log capped at 5MB for this run] ...\n");
+  assert.equal(cur.read().state, "capped");
+});
+
+test("comfyLogCursor: a console file that does not exist is said, and one that appears later is read from its start", (t) => {
+  const dir = scratchDir(t, "wan-mc-");
+  const cur = L.comfyLogCursor(dir, "mc-aaaa1111-cccc3333");
+  assert.deepEqual(cur.read(), { text: "", state: "absent" });
+  writeFileSync(L.comfyLogPath(dir, "mc-aaaa1111-cccc3333"), "boot\n");
+  assert.deepEqual(cur.read(), { text: "boot\n", state: "ok" });
+});
+
+test("createOomWatch: silent while the console is quiet, one message naming the line and the log when the worker is gone, a loud word when it cannot see", () => {
+  const reads = [];
+  const said = [];
+  const cursor = { path: "/c/offload-comfyui-mc-x.log", read: () => reads.shift() };
+  const watch = M.createOomWatch({ cursor, say: (m) => said.push(m) });
+  reads.push({ text: "", state: "ok" }, { text: "step 2\n", state: "ok" });
+  assert.equal(watch(), null);
+  assert.equal(watch(), null);
+  reads.push({ text: WEDGE_LOG, state: "ok" });
+  const msg = watch();
+  assert.match(msg, /^WAN-OOM: ComfyUI ran out of memory and its prompt worker did not survive it/);
+  assert.match(msg, /\[ERROR\] Got an OOM, unloading all loaded models\./);
+  assert.match(msg, /offload-comfyui-mc-x\.log/);
+  assert.match(msg, /ComfyUI must be restarted/);
+  assert.deepEqual(said, []);
+  // blind: said once each, never a verdict
+  const blind = [];
+  const w2 = M.createOomWatch({ cursor: { path: "/c/x.log", read: () => blind.shift() }, say: (m) => said.push(m) });
+  blind.push({ text: "", state: "absent" }, { text: "", state: "absent" }, { text: "", state: "capped" }, { text: "", state: "capped" });
+  for (let i = 0; i < 4; i++) assert.equal(w2(), null);
+  assert.equal(said.filter((m) => /^WAN-OOM-WATCH: .*no console file/.test(m)).length, 1);
+  assert.equal(said.filter((m) => /^WAN-OOM-WATCH: .*capped/.test(m)).length, 1);
 });

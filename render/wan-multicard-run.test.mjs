@@ -158,3 +158,19 @@ test("main() hands the lease slot planRun's slot and generate() planRun's own pi
   assert.match(code, /if \(!run\.out\) \{ console\.error\(USAGE\); process\.exit\(2\); \}/);
   assert.match(code, /await withGpuSlot\(run\.slot, \(\) => generate\(run\.out, run\.api, run\.pos, run\.flags, run\.multicard\)\);/);
 });
+
+// ---- the console watch in the run ------------------------------------------------------------------------------
+
+test("generate() under multicard hands the poll a watch on THIS instance's console, made before the prompt is submitted; without the placement the poll gets none", async () => {
+  const made = [];
+  const cursor = { path: "/c/log", read: () => ({ text: "Got an OOM, unloading all loaded models.\n", state: "ok" }) };
+  const { io, rec } = fakeIo({ logCursor: (dir, key) => { rec.calls.push("logCursor"); made.push([dir, key]); return cursor; } });
+  await generate("o.mp4", "http://x", [], {}, PLAN, io);
+  assert.deepEqual(made, [["/c", "mc-cccc3333-aaaa1111"]]);
+  assert.ok(rec.calls.indexOf("logCursor") > rec.calls.indexOf("verifyPack") && rec.calls.indexOf("logCursor") < rec.calls.indexOf("submit"), rec.calls.join(" "));
+  assert.equal(typeof rec.polls[0].watch, "function");
+  assert.match(rec.polls[0].watch(), /^WAN-OOM: /, "it is the OOM watch of that console");
+  const plain = fakeIo({ logCursor: () => { throw new Error("no console is read without the placement"); } });
+  await generate("o.mp4", "http://x", [], {}, null, plain.io);
+  assert.ok(!("watch" in plain.rec.polls[0]), "the poll's options are what they always were");
+});
