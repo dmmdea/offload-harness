@@ -132,6 +132,14 @@ node render/preflight-graph.mjs hunyuan   # validate a graph vs a running ComfyU
   shared ComfyUI). Under `--wan-decode plain` the experts are freed from both cards before the plain `VAEDecode`, and the sampled latent
   is saved first. `--wan-loader` is not read, and a GGUF or unnamed expert and `--fast` are refused before anything starts (not measured). A driver script that wraps the helper is not a recognised render helper, so its lease declares the class default unless its `gpu reserve` passes `--ram 0` (the verb says so on a second line). Detail and numbers:
   `docs/systems/media-generation.md`.
+- **Qwen-Image on two cards, `--placement multicard`** (`comfy-generate.mjs`, `comfy-render.mjs`, `comfy-edit.mjs`; default `single`, today's graph, byte for byte). The text encoder and the VAE
+  load on one leased non-display card and the DiT on the other, or split between them, through the MultiGPU loaders, with the
+  recipe of `render/multicard-recipes.json` (the 2.1 int8 and bf16, the 2512 Q5_1 GGUF, the 2511 edit fp8mixed and Q5_1; krea2, 2512 bf16 and sdxl have none and are refused by
+  name). The two cards are the lease's (`--cards` only names them when no lease does), never a display card, and the runner starts its
+  own keyed ComfyUI on them, the one the Wan placement uses. Run it under `local-offload gpu reserve --devices <a>,<b> -- node render/comfy-edit.mjs
+  out.png in.png "<instruction>" --unet <fp8mixed file> --placement multicard`, flags spelled `--flag value`; `[--resident-gb N]` moves the DiT's share on the
+  compute card. Only the 2511 fp8mixed edit has a *measured* row, so it alone declares 0 host RAM; the others declare the ordinary estimate until a run with the
+  read-only loader promotes them. `docs/systems/media-generation.md`, "Card-only image and edit".
 - **`--reserve-vram 2.0`** keeps headroom for the Windows display/WDDM (too low → a decode spike
   kills the whole process with no traceback).
 - **Qwen2.5-VL fp8 text encoder CPU-offloads automatically** (~free with 64 GB RAM, saves 4–6 GB).

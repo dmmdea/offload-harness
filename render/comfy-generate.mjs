@@ -9,7 +9,10 @@
 // Usage:
 //   node render/comfy-generate.mjs <out.png> "<prompt>" \
 //        [--negative "..."] [--width 1024] [--height 1024] [--steps 30] [--seed N] \
-//        [--ckpt name.safetensors] [--api http://127.0.0.1:8188] [--no-lock] [--keep-comfy]
+//        [--ckpt name.safetensors] [--api http://127.0.0.1:8188] [--no-lock] [--keep-comfy] \r
+//        [--placement single|multicard [--resident-gb N] [--cards <a>,<b>]]
+//   --placement multicard puts the text encoder + VAE on one leased non-display card and the DiT on the other (recipes: render/multicard-recipes.json;
+//   docs/systems/media-generation.md, "Card-only image and edit"); the single placement, the default, is the graph and launch it always was.
 //   node render/comfy-generate.mjs --batch jobs.jsonl [--results r.jsonl] \
 //        [--negative ...] [--ckpt ...] [--vae ...] [--cfg ...] [--sampler ...] \
 //        [--scheduler ...] [--family ...] [--api ...] [--no-lock] [--reserve-vram F]

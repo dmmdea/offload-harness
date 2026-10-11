@@ -6,6 +6,38 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added — `--placement multicard` for Qwen-Image generation and edit: the text encoder and VAE on one leased non-display card, the DiT on the other, and the typed image and edit doors that lease the pair (`imagegen_placement`, `gen_edit_placement`)
+
+- **What it is.** The Wan card-only placement (below) generalised to the image routes. `comfy-generate.mjs`, `comfy-render.mjs` and `comfy-edit.mjs` take
+  `--placement single|multicard`, `--resident-gb` and `--cards` (the Wan flags without the `wan-` prefix). Under `multicard` the loaders of the graph are the
+  ComfyUI-MultiGPU ones, per the recipe of `render/multicard-recipes.json`: the text encoder and VAE on `cuda:0` (storage), the DiT on `cuda:1` (compute) whole or
+  split by a DisTorch2 allocation (`cuda:1,<N>gb;cuda:0,*`), all through the pair's keyed ComfyUI instance and the read-only safetensors reader the Wan
+  placement ships. Five recipes: Qwen-Image-2.1 int8 and bf16, Qwen-Image 2512 Q5_1 GGUF, Qwen-Image-Edit 2511 fp8mixed and Q5_1 GGUF. krea2, 2512 bf16,
+  sdxl, hidream, the 2.1 edit, an int8, int4 or nf4 text encoder, a text encoder the recipe was not built for and a `--graph` file are refused by name before anything starts.
+  `single`, the default, is the graph, argv and launch it was (the fourteen graphs built before are pinned node for node by a golden test).
+- **Measured and predicted, said per row.** Only the 2511 fp8mixed edit was measured with the read-only loader (145.5 s at 1.47 MP on two 16 GB cards, 1.87 GiB of
+  host growth). Every image arm of the 2026-10-11 benchmark ran the stock loader, so the other four rows are `predicted` (`basis` in the JSON, `Measured` in
+  `internal/mediacap/multicard.go`, pinned together by a test) and declare the ordinary host-RAM estimate; a live run with the read-only loader promotes a row.
+- **The typed doors.** `imagegen_placement` and `gen_edit_placement` (`""`/`single`, or `multicard`; unset by default, family-overlay keys) take a new need kind in the media
+  admission: the box's TWO non-display cards, named as a set, never the display card (at the desk or away) and never a card whose display state is unknown. A held card of
+  the pair is a place in line (the token names both); two multicard calls serialize and a multicard call never shares a card with a single-card one; the batch
+  takes one pair. A box without exactly two such cards, a host that does not lease cards and an unreadable card table answer `gpu_lease_unavailable` with the
+  reason and the way out (`gpu reserve --devices`), and run nothing: never one card, never the whole node. A binding with no recipe is refused before any
+  lease, naming the key. The runner gets `--placement multicard` and `GPU_LEASE_DEVICES`, and no per-card instance, pin, dynamic VRAM or `--pool-*`. Under
+  a parent lease the call runs on both its cards if it holds exactly two non-display cards, and is refused with the reason otherwise. The lane probe and the
+  place-in-line keeper read the same plan, and the differential table of lane states gains the card-only states. A binding without the key takes exactly the lease,
+  argv and declaration it always did (pinned).
+- **Host RAM.** `hostneed.estimatePlaced` sizes the declaration on the pair (`Facts.Placement`, `ResidentGiB`, `Megapixels`): 0 only for a measured recipe whose
+  per-card peaks fit the two cards less `--reserve-vram`; one card, three, no fit, an edit canvas over the recipe's cap, a predicted row and no recipe keep the
+  ordinary estimate, with the reason in the declaring line. `gpu reserve` around the three runners reads the same recipe from their flags.
+- **Config.** Both keys are validated (`""`, `single`, `multicard`), carried by named-family overlays, and warned about at load when the placement cannot work: no recipe for
+  the family, the sd.cpp engine, pool keys that are ignored, a `comfy_cuda_device` pin or `comfy_dynamic_vram` it does not apply, a host with card-scoped leases off.
+- **Not measured.** The read-only reader on the int8 convrot DiT and the bf16 text encoder (the tests use fakes of the loaders); the bf16 split shares and the 2512
+  Q5_1 peaks (arithmetic from the benchmark's arms); the port fallback of a pair instance with neither `--api` nor `COMFY_API`; the installed ComfyUI-MultiGPU is a newer
+  commit than the benchmark's pin (the loader classes the recipes name are present); the lane probe covers the image route, not the edit route; a box with three
+  non-display cards is refused until `gpu reserve --devices` names the pair.
+- **Docs.** `docs/systems/media-generation.md` ("Card-only image and edit"), `render/README.md`, ADR 0039 (Amendment 2026-10-11).
+
 ### Added — `comfy-video.mjs --wan-placement multicard`: the card-only Wan 2.2 placement on the two non-display cards of a lease, with no host RAM
 
 - **What it is.** One Wan 2.2 14B fp8 expert is 13.3 GiB and a film-size clip (720x1280x81) needs 9.7-11.0 GiB more for the sampler, so

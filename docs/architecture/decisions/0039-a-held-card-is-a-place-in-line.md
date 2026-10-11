@@ -159,3 +159,38 @@ Related code: `internal/pipeline/mediaadmit.go`, `mediaslots.go`, `internal/gpul
 `internal/gpualloc`, `internal/comfyinst`. Related docs: [media-generation.md](../../systems/media-generation.md)
 ("Per-card media admission"), [gpu-lease.md](../../systems/gpu-lease.md) ("A place in line for a caller that
 cannot stay").
+
+## Amendment 2026-10-11 (the card-only placement: a pair is the place in line, and a pair is never one card)
+
+The per-card media admission above leases ONE card per call. The Wan placement (0.181.0) showed that a clip too big for one card can run on two
+leased non-display cards with no host RAM, and the Qwen-Image routes have the same shape: the text encoder and the VAE on one card, the DiT on the
+other (or split), through the MultiGPU loaders and a read-only weight reader. Their typed doors had to lease the PAIR, and the questions were what a
+pair is, what happens when the box cannot give one, and what the call declares.
+
+Decision, for a binding with `imagegen_placement` or `gen_edit_placement` set to `multicard` (opt-in, unset by default; a binding without it is the
+lease, the argv and the declaration it always was):
+
+1. **The plan is a named pair, not an allocation.** The box's two non-display cards, as a set. The display card is never in it, with the operator at the
+   desk or away, and a card whose display state the driver did not report is not counted (the display-card rule of ADR 0057, without the away-operator opening of
+   ADR 0075, which is for a one-card call). Which two of three non-display cards is a measurement nobody made, so a box with more than two is refused until the operator names
+   the pair with `gpu reserve --devices`.
+2. **A held card of the pair is a place in line, as any other.** The token names both cards, two multicard calls serialize, and a multicard call and a
+   single-card call never share a card; the in-process slots are set-based, so the same rule holds under an inherited lease, where the call runs on both
+   cards of a parent lease that holds exactly two non-display cards and is refused with the reason otherwise.
+3. **It is never degraded.** A box without two such cards, a host that does not lease cards and an unreadable card table answer `gpu_lease_unavailable`
+   (which a router may place elsewhere) with the reason and the way out, and run nothing: the whole-node fallback of every other route would hold the
+   node for a call the runner then refuses, because it names no cards. A binding with no recipe is refused before any lease.
+4. **The declaration is the pair's.** 0 host RAM only for a recipe whose host growth was measured with the read-only loader and whose per-card peaks fit
+   the two leased cards; a predicted recipe declares the ordinary estimate and says it is predicted. An early merge of a guess costs a wait, never a
+   false 0.
+
+Alternatives rejected. *The allocator with a pair-sized plan* (`PickAuto` with two cards): it would let the display card into the pair when the operator is
+away, and it chooses among cards by free VRAM, which says nothing about which two a recipe was measured on. *Falling back to one card* when one of the
+pair is held: the placement exists because the model fits no single card, so a one-card run is an out-of-memory run that holds a card. *Falling back to the
+whole node*: the same call, with the node held. *Declaring 0 for every recipe*: four of the five rows have no read-only-loader measurement.
+
+Related code: `internal/pipeline/mediamulticard.go`, `mediaadmit.go` (`needMulticard`, `planMedia`, `acquireInherited`), `medialane.go`,
+`internal/hostneed/multicard.go`, `internal/mediacap/multicard.go`, `internal/config` (`imagegen_placement`, `gen_edit_placement`),
+`render/multicard-image.mjs`, `render/multicard-recipes.json`. Related docs: [media-generation.md](../../systems/media-generation.md) ("Card-only
+image and edit"); [ADR 0057](0057-placement-scores-the-cards-the-harness-can-use.md); [ADR 0075](0075-the-display-layer-opens-under-the-presence-guard-and-leaves-when-the-operator-returns.md); [ADR 0058](0058-non-commercial-model-families-ship-only-as-named-license-tagged-opt-ins.md)
+(a family overlay may carry the key).

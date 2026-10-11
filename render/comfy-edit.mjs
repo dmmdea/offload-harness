@@ -19,6 +19,8 @@
 //        [--megapixels F] \
 //        [--clip name] [--vae name] [--sampler s] [--scheduler s] [--shift F] \
 //        [--seed N] [--api http://127.0.0.1:8188] [--no-lock] [--reserve-vram F]
+//        [--placement single|multicard [--resident-gb N] [--cards <a>,<b>]]   # multicard: the 2511 edit on the TWO non-display cards of a lease
+//                                      # (docs/systems/media-generation.md, "Card-only image and edit"); flags spelled `--flag value`
 //   node render/comfy-edit.mjs <out.png> <target> "<instruction>" --family qwen-image-2.1 \
 //        --unet qwen_image_2.1_bf16.safetensors --clip qwen3vl_8b_bf16.safetensors \
 //        --vae qwen_image_2.1_vae_bf16.safetensors [--ref <image2> --ref <image3> ...] \
