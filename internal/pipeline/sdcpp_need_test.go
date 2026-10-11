@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/dmmdea/offload-harness/internal/config"
+	"github.com/dmmdea/offload-harness/internal/core"
+	"github.com/dmmdea/offload-harness/internal/gpugen"
 	"github.com/dmmdea/offload-harness/internal/gpuprobe"
 	"github.com/dmmdea/offload-harness/internal/hostneed"
 )
@@ -134,6 +136,45 @@ func TestTheSdcppVideoAndAnimateBindingsAreSizedFromTheirOwnFiles(t *testing.T) 
 	got = sdcppDeclared(cfg, "wan-animate", animateSdcppFiles(cfg), cfg.AnimateGenSdcppExtraArgs)(16)
 	if got.GiB < 13.2 || got.GiB > 13.3 {
 		t.Errorf("animate: 7 + 0.25 + 6 = 13.25 GiB parked, got %v", got)
+	}
+}
+
+// runIGPU is where a lane's declaration meets the lease: the lease record carries what the lane's own sizing said, a lane with
+// none keeps the class default it always had, and the footprint key rides only with a lane's own sizing.
+func TestRunIGPUTakesTheLeaseWithTheLanesOwnDeclaration(t *testing.T) {
+	f := newAdmitFixtureWith(t, admitSpec{order: admitOrder})
+	declaredAtRun := func(ram func(float64) hostneed.Need) float64 {
+		var got float64
+		old := generateIGPU
+		generateIGPU = func(ctx context.Context, spec gpugen.Spec) (string, error) {
+			for _, l := range f.m.Leases() {
+				got += l.HostRAMGiB
+			}
+			return spec.Out, nil
+		}
+		defer func() { generateIGPU = old }()
+		meta := core.Meta{}
+		_, dres := f.p.runIGPU(context.Background(), core.Request{Task: core.TaskGenerateVideo, Input: "x"}, &meta, time.Now(), igpuRun{
+			leaseReason: "video-gen (sdcpp)", failVerb: "video generation failed", fpFamily: "wan22", fpQuant: "q8_0", fpTask: "video-gen",
+			script: "render/sdcpp-video.mjs", out: filepath.Join(t.TempDir(), "o.mp4"), timeout: time.Minute, ram: ram,
+		})
+		if dres != nil {
+			t.Fatalf("the lane was deferred: %+v", *dres)
+		}
+		return got
+	}
+	own := func(float64) hostneed.Need {
+		return hostneed.Need{GiB: 7, Source: hostneed.SourceEstimate, Detail: "its own"}
+	}
+	if got := declaredAtRun(own); got < 6.99 || got > 7.01 {
+		t.Errorf("the lease carries the lane's own 7 GiB: %.2f", got)
+	}
+	want := classDefaultRAM(f.p.cfg)(16).GiB // this fixture binds ComfyUI families: the class default is large
+	if want < 20 {
+		t.Fatalf("control: the fixture's class default should be large, got %.2f", want)
+	}
+	if got := declaredAtRun(nil); got < want-0.01 || got > want+0.01 {
+		t.Errorf("a lane with no sizing of its own keeps the class default %.2f, got %.2f", want, got)
 	}
 }
 
