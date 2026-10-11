@@ -5,7 +5,8 @@ package mediaremote
 //
 // S1 made a busy local lane overflow to an IDLE matching node. A ticket is the other half of the operator's P0 ("route
 // work to any PC in the cluster, even if all PCs are full"): when every lane is full the call waits for the first one
-// to free instead of being refused or looping. One file per ticket under <state_dir>/media-queue records what every
+// to free instead of being refused or looping. One file per ticket under <state root>/media-queue (the root the GPU lease
+// uses: state_dir, else LOCAL_OFFLOAD_STATE_DIR, else the platform default; storeFor) records what every
 // process of the machine needs to know about it: who owns it, where it stands, which node holds its job. The request
 // BODY is held by the owning process only (it carries paths and a prompt the file has no business keeping); the file is
 // enough to answer for a ticket, to collect its result, to see which nodes the machine is using, and to adopt a job
@@ -39,6 +40,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/dmmdea/offload-harness/internal/config"
@@ -226,13 +228,29 @@ func reqKey(req core.Request) string {
 // store is the directory of ticket files of one machine.
 type store struct{ dir string }
 
-// storeFor opens the queue directory of cfg's state dir; ok is false when the machine has none (no state_dir), and then
-// there is no queue.
+// storeFor opens the queue directory under the machine-wide state root the GPU lease uses (gpulease.ResolveStateRoot:
+// state_dir, else LOCAL_OFFLOAD_STATE_DIR, else the platform default, %ProgramData%\local-offload or /var/lib/local-offload),
+// so the tickets, the node claims and the lease's place tokens of one machine always live under one root and no config key
+// is needed. Reading cfg.StateDir alone switched the whole queue off on every host that leaves state_dir unset, which is the
+// usual config (the same lesson as the offload_nim base audit, SF-05). ok is false only when the lease itself refuses the root
+// (a cloud-synced or unusable path); that is said once per distinct reason, because a queue that is silently off is the defect.
 func storeFor(cfg config.Config) (*store, bool) {
-	if strings.TrimSpace(cfg.StateDir) == "" {
+	root, err := gpulease.ResolveStateRoot(cfg.StateDir)
+	if err != nil {
+		warnNoQueue(err)
 		return nil, false
 	}
-	return &store{dir: filepath.Join(cfg.StateDir, queueDirName)}, true
+	return &store{dir: filepath.Join(root, queueDirName)}, true
+}
+
+// noQueueWarned holds the reasons already logged, so a root the lease refuses is reported once per process and not once per
+// call, scan or status read.
+var noQueueWarned sync.Map
+
+func warnNoQueue(err error) {
+	if _, dup := noQueueWarned.LoadOrStore(err.Error(), struct{}{}); !dup {
+		logQueue("there is no ticket queue on this machine, a busy call waits in the local line: %v", err)
+	}
 }
 
 func (s *store) path(id string) string { return filepath.Join(s.dir, id+".json") }
