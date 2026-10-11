@@ -1400,8 +1400,9 @@ func releaseWarmGuard(m *gpulease.Manager, epoch uint64) warmGuard {
 
 // drainFloor is the least a drain waits, whatever the queue budget says: a
 // caller that asked to fail fast on the LEASE (`--wait 0`) still gets a real
-// window for in-flight work — the old fixed default, kept as the floor.
-const drainFloor = 2 * time.Minute
+// window for in-flight work — the old fixed default, kept as the floor. A
+// variable so a test can shorten it.
+var drainFloor = 2 * time.Minute
 
 // drainDeadline: an explicit --drain-timeout wins; otherwise the drain runs
 // inside the same queue budget as the lease (--wait, measured from when the
