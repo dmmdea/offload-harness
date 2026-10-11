@@ -279,7 +279,7 @@ export function resolveLaunchProfile(env = process.env) {
   return { cudaDevice, dynamicVram, ...(cardUuid ? { cardUuid } : {}) };
 }
 
-const profileRequested = (p) => !!(p && (p.cudaDevice || p.dynamicVram || p.cardUuid));
+const profileRequested = (p) => !!(p && (p.cudaDevice || p.dynamicVram || p.cardUuid || p.multicard));
 
 /** Remove every `flag value` pair (and a `flag=value` form) from an argv list. */
 function stripValued(args, flag) {
@@ -299,18 +299,23 @@ function stripValued(args, flag) {
  * or --default-device the extra args carry — argparse takes the last occurrence, so
  * leaving them in would silently override the binding.
  */
-export function launchFlags({ reserveVram = "1.0", warm = false, extraArgs = "", profile = { cudaDevice: "", dynamicVram: "" }, instance = null, comfyDir = "", warn = () => {} } = {}) {
+export function launchFlags({ reserveVram = "1.0", warm = false, extraArgs = "", profile = { cudaDevice: "", dynamicVram: "" }, instance = null, comfyDir = "", warn = () => {}, launch = null } = {}) {
   const flags = ["--disable-smart-memory"];
   // warm: a BATCH session keeps ComfyUI's model cache ON so the checkpoint loads once
   // for N renders; the caller still tears the whole session down at the batch boundary
   // (zero-always-warm moves from per-render to per-batch). Default stays cache-none.
   if (!warm) flags.push("--cache-none");
   flags.push("--reserve-vram", String(reserveVram || "1.0"));
+  // A multicard launch (render/wan-multicard.mjs multicardLaunch) adds the flags its placement needs right after the base ones:
+  // --gpu-only, --disable-pinned-memory, the harness's extra-model-paths yaml and the custom-node whitelist. Its two cards are
+  // pinned by uuid in the child env, so a --cuda-device / --default-device in the extra args (main.py would rewrite
+  // CUDA_VISIBLE_DEVICES from it) is dropped, said, exactly as for a single card pinned by uuid. Nothing is added without `launch`.
+  if (launch && Array.isArray(launch.flags)) flags.push(...launch.flags);
   // J4 seam: COMFY_EXTRA_ARGS appends verbatim (whitespace-split) launch flags —
   // the per-box escape hatch for non-CUDA backends (--directml, device pinning)
   // without touching shared code. Empty/unset = byte-identical launch.
   let extra = String(extraArgs || "").split(/\s+/).filter(Boolean);
-  if (profile.cardUuid) {
+  if (profile.cardUuid || profile.multicard) {
     // A card pin by uuid lives in the child env (CUDA_VISIBLE_DEVICES), never in a flag:
     // --cuda-device would rewrite that env from an index in a different order.
     const had = extra.some((f) => /^--(cuda|default)-device(=|$)/.test(f));
@@ -390,6 +395,12 @@ export function profileMismatch(argv, profile) {
       why.push(`it runs with dynamic VRAM ${on ? "on" : "off"}; this binding needs it ${profile.dynamicVram}`);
     }
   }
+  if (profile.multicard) {
+    // The two cards are provable only by the launch marker (reuseVerdict); the argv can still disprove the placement.
+    if (!argv.map(String).includes("--gpu-only")) why.push("it runs without --gpu-only, which the multicard placement needs (dynamic VRAM off, everything on the cards)");
+    const got = argvFlagValue(argv, "--cuda-device");
+    if (got !== null) why.push(`it runs with --cuda-device ${got}, which overrides the multicard pin by uuid`);
+  }
   return why.join("; ");
 }
 
@@ -453,13 +464,24 @@ export async function reuseVerdict({ api, comfyDir, profile, key = "", port = nu
   // names, and two cards of one model are indistinguishable), so it is provable only by
   // the keyed launch marker: the instance is ours (live pid + the exact argv) AND was
   // launched on this very card. Anything else is a mismatch, never a pass.
-  const marker = comfyDir && (reason || key || profile.cardUuid) ? (key ? readLaunch(comfyDir, key) : readLaunch(comfyDir)) : null;
+  const marker = comfyDir && (reason || key || profile.cardUuid || profile.multicard) ? (key ? readLaunch(comfyDir, key) : readLaunch(comfyDir)) : null;
   if (!reason && profile.cardUuid) {
     const got = harnessLaunched(marker, argv, alive) ? String((marker.profile && marker.profile.cardUuid) || "") : null;
     if (got === null) {
       reason = `its card pin cannot be read from a running process, and no launch marker of this harness proves it was started on card ${profile.cardUuid}`;
     } else if (got.toLowerCase() !== profile.cardUuid.toLowerCase()) {
       reason = `it was launched ${got ? "on card " + got : "with no card pin"}; this binding needs card ${profile.cardUuid}`;
+    }
+  }
+  if (!reason && profile.multicard) {
+    // Same proof as a single card's: the pair cannot be read off a running process, only off the launch marker of an instance
+    // that is ours (live pid + the exact argv) and was launched on these two cards in this order (storage first).
+    const got = harnessLaunched(marker, argv, alive) ? ((marker.profile && marker.profile.multicard && marker.profile.multicard.cards) || []) : null;
+    const want = profile.multicard.cards || [];
+    if (got === null) {
+      reason = `its two cards cannot be read from a running process, and no launch marker of this harness proves it was started on ${want.join(" + ")}`;
+    } else if (got.map((c) => String(c).toLowerCase()).join(",") !== want.map((c) => String(c).toLowerCase()).join(",")) {
+      reason = `it was launched on ${got.length ? got.join(" + ") : "no card pair"}; this binding needs ${want.join(" + ")} (storage card first)`;
     }
   }
   if (!reason && key) {
@@ -670,6 +692,9 @@ export async function ensureComfy(opts = {}) {
     spawn = nodeSpawn,
     envFor = cudaVisibleEnv,
     env = process.env,
+    // launch: the card-only (multicard) placement's launch (render/wan-multicard.mjs multicardLaunch): extra flags, the two cards
+    // to pin by uuid (storage first) and the env the placement needs. Absent = every launch behaves exactly as before.
+    launch = null,
     systemArgv = fetchSystemArgv,
     readLaunch = readLaunchOwner,
     writeLaunch = writeLaunchOwner,
@@ -699,6 +724,7 @@ export async function ensureComfy(opts = {}) {
   const instance = resolveInstance({ api: apiOpt || process.env.COMFY_API, env });
   const { api, key } = instance;
   const profile = resolveLaunchProfile(env);
+  if (launch) profile.multicard = { cards: [...launch.cards] };
   // Can this call launch an instance on `api` at all? A keyed instance owns its --port; the
   // default endpoint is what an unlaunched ComfyUI listens on; an UNKEYED instance on any other
   // endpoint has no --port of its own, so only the operator's own extra args can put it there.
@@ -771,7 +797,7 @@ export async function ensureComfy(opts = {}) {
     const { outputDir, tempDir } = instancePaths(comfyDir, key);
     for (const d of [outputDir, tempDir]) { try { mkdirs(d); } catch {} }
   }
-  const flags = launchFlags({ reserveVram, warm, extraArgs: env.COMFY_EXTRA_ARGS, profile, instance: key ? instance : null, comfyDir, warn: log });
+  const flags = launchFlags({ reserveVram, warm, extraArgs: env.COMFY_EXTRA_ARGS, profile, instance: key ? instance : null, comfyDir, warn: log, launch });
   // A --cuda-device launch has already scoped the cards (main.py rewrites
   // CUDA_VISIBLE_DEVICES to it), so the multi-GPU visibility restore below does not
   // apply — and neither does its --disable-pinned-memory: one visible card is not the
@@ -779,12 +805,15 @@ export async function ensureComfy(opts = {}) {
   // (dynamic VRAM) bf16 DiT fast.
   // A card-bound instance is pinned by uuid in the child env, which is the whole pin:
   // one visible card, so neither the multi-GPU restore nor --cuda-device applies.
-  const spawnEnv = profile.cardUuid ? { ...env, CUDA_VISIBLE_DEVICES: profile.cardUuid }
+  // A multicard launch pins its two cards by uuid, storage card first: CUDA numbers the visible cards in that order, so the first
+  // is cuda:0 whatever its nvidia-smi index, and the graph's cuda:0 / cuda:1 are the cards the lease holds.
+  const spawnEnv = launch ? { ...env, CUDA_VISIBLE_DEVICES: launch.cudaVisibleDevices, ...(launch.env || {}) }
+    : profile.cardUuid ? { ...env, CUDA_VISIBLE_DEVICES: profile.cardUuid }
     : flags.includes("--cuda-device") ? env : envFor();
   // A keyed instance with no card is not pinned to anything: it sees every card its
   // environment shows, the display card included. That is the operator's explicit choice
   // (a side-by-side instance, a test), so it is allowed, but never silent.
-  if (key && !profile.cardUuid && env.CUDA_VISIBLE_DEVICES === undefined && !flags.includes("--cuda-device")) {
+  if (key && !launch && !profile.cardUuid && env.CUDA_VISIBLE_DEVICES === undefined && !flags.includes("--cuda-device")) {
     log(`COMFY-INSTANCE-WARN: instance '${key}' is not bound to a card (no COMFY_CARD_UUID), so nothing pins it: it sees every card this environment shows, the display card included`);
   }
   // Upstream's own guidance for the multi-GPU Windows path it now hides by default:
