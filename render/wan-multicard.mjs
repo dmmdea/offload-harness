@@ -160,13 +160,19 @@ export function wanCardTokens({ flags = {}, env = process.env, leaseDevicesFn = 
   return { tokens: [], source: "" };
 }
 
-function matchCard(token, cards) {
+/** matchCards: the cards a token names: an nvidia-smi index (one card), or a lease id / UUID / UUID prefix of 8+ characters (every card it begins). */
+function matchCards(token, cards) {
   const t = token.trim().toLowerCase();
-  if (/^\d+$/.test(t)) return cards.find((c) => c.index === Number(t)) || null;
-  // a lease id is the lower-cased UUID with "gpu-" in front; a UUID prefix of 8+ characters names one card
+  if (/^\d+$/.test(t)) return cards.filter((c) => c.index === Number(t));
+  // a lease id is the lower-cased UUID with "gpu-" in front
   const bare = t.replace(/^gpu-/, "");
-  if (bare.length < 8) return null;
-  const hits = cards.filter((c) => c.uuid.toLowerCase().replace(/^gpu-/, "").startsWith(bare));
+  if (bare.length < 8) return [];
+  return cards.filter((c) => c.uuid.toLowerCase().replace(/^gpu-/, "").startsWith(bare));
+}
+
+/** matchCard: the one card a token names, or null when it names none or (a prefix shared by two cards) more than one. */
+function matchCard(token, cards) {
+  const hits = matchCards(token, cards);
   return hits.length === 1 ? hits[0] : null;
 }
 
@@ -181,7 +187,11 @@ export function resolveWanCards({ tokens, source, cards }) {
   }
   const found = [];
   for (const token of tokens) {
-    const card = matchCard(token, cards);
+    const hits = matchCards(token, cards);
+    if (hits.length > 1) {
+      throw placementError(`${source} names a card ambiguously: ${JSON.stringify(token)} matches ${hits.length} cards (${hits.map((c) => `idx ${c.index}`).join(", ")}); name the card by its nvidia-smi index or a longer prefix of its UUID`);
+    }
+    const card = hits[0];
     if (!card) throw placementError(`${source} names ${JSON.stringify(token)}, which is no card in the driver's table (${cards.map((c) => `${c.index}:${c.uuid}`).join(", ")}): name the card by its nvidia-smi index or its UUID`);
     if (!found.includes(card)) found.push(card);
   }
@@ -309,27 +319,58 @@ export function wanGeometry(flags) {
   const w = Number(flags.width) || 832, h = Number(flags.height) || 480, f = Number(flags.frames) || 49;
   return { w, h, f, tokens: Math.ceil(w / 16) * Math.ceil(h / 16) * (Math.floor((f - 1) / 4) + 1) };
 }
-const FILM_TOKENS = 75600;
-/** What the sampler needs on the compute card beyond the resident weights at the film's size: the benchmark's compute-card peak, 13.3 GiB, less its 3 GiB resident share. */
-const FILM_ACTIVATIONS_GIB = 10.3;
+/**
+ * The stage sizes of the card-only placement, one set for the runner and for the lease sizing (internal/hostneed declares against the same
+ * figures, and a Go test fails when either side drifts):
+ *   WAN_FILM_ACTIVATIONS_GIB   what the sampler needs on the compute card beyond the resident weights at the film's size (720x1280x81, 75,600
+ *                              tokens): the TOP of the benchmark's 9.7-11.0 GiB, which already holds the allocator's slack and the VAE encode;
+ *   WAN_STORAGE_OVERHEAD_GIB   what the storage card holds besides the donor blocks: the VAE, the CUDA context and the allocator's slack;
+ *   WAN_EXPERT_GIB             an fp8 expert (internal/hostneed's documented Wan 2.2 size, rounded up).
+ */
+export const WAN_FILM_ACTIVATIONS_GIB = 11.0;
+export const WAN_STORAGE_OVERHEAD_GIB = 0.8;
+export const WAN_EXPERT_GIB = 13.4;
+/** Below the film's size the activations follow the benchmark's allocator traces (RESULTS 3.5, compute-card peak RESERVED, which is what the card must hold). */
+const ACTIVATIONS_GIB_PER_1000_TOKENS = 0.31;
 /** Scaled with the tokens, never under this: even a small clip holds a context's worth of buffers. */
 const ACTIVATIONS_FLOOR_GIB = 2.0;
-/** The CUDA context and the allocator's slack on the compute card, beyond the activations. */
-const COMPUTE_CARD_CONTEXT_GIB = 0.5;
+/** What the card keeps for the display and the driver: the runner's --reserve-vram, default 1.0 (internal/hostneed's default too). */
+const DEFAULT_RESERVE_GIB = 1.0;
 
 /**
- * checkResident: a resident share larger than the compute card can hold beside the sampler's activations at this geometry would
- * run out of memory in the first sampler step, 80 minutes into a film-size run's lease. The estimate is the measured compute-card
- * peak scaled by the tokens (floor 2 GiB), so the film's own 3 GiB passes with room and 6 does not; the lease sizing in
- * internal/hostneed is stricter on purpose (it only decides whether a call needs host RAM declared).
+ * wanActivationsGib: the sampler's activations on the compute card at this many tokens. The benchmark reserved 2.19 GiB at 7,800 tokens, 3.66 at
+ * 14,040, 5.31 at 20,280 (5.67 on the native allocator, 6.16 with sage attention) and 5.50 at 32,400; 0.31 GiB per 1,000 tokens is never under
+ * any of them. The film's own size is the cap: the full model there was measured at 9.7-11.0 GiB, so nothing above it asks for more.
+ */
+export function wanActivationsGib(tokens) {
+  return Math.min(WAN_FILM_ACTIVATIONS_GIB, Math.max(ACTIVATIONS_FLOOR_GIB, (tokens / 1000) * ACTIVATIONS_GIB_PER_1000_TOKENS));
+}
+
+/**
+ * checkResident: a resident share one of the two cards cannot hold would run out of memory in the first sampler step, 80 minutes into a
+ * film-size run's lease, with both cards held. The compute card holds the share and the sampler's activations; the storage card holds the rest of
+ * the expert (the donor blocks), the VAE and the context. Each must fit its card less the reserve, with the figures internal/hostneed declares
+ * against, at this geometry (the smaller the clip, the less the activations need).
  */
 function checkResident(residentGb, pair, flags) {
-  const cardGib = pair.compute.totalMiB / 1024;
+  const reserveRaw = Number(flags["reserve-vram"]);
+  const reserve = Number.isFinite(reserveRaw) && reserveRaw > 0 ? reserveRaw : DEFAULT_RESERVE_GIB;
+  const computeGib = pair.compute.totalMiB / 1024, storageGib = pair.storage.totalMiB / 1024;
   const { w, h, f, tokens } = wanGeometry(flags);
-  const activations = Math.max(ACTIVATIONS_FLOOR_GIB, FILM_ACTIVATIONS_GIB * tokens / FILM_TOKENS);
-  const most = cardGib - activations - COMPUTE_CARD_CONTEXT_GIB;
+  const activations = wanActivationsGib(tokens);
+  const most = computeGib - activations - reserve;
   if (residentGb > most) {
-    throw placementError(`--wan-resident-gb ${residentGb} leaves the compute card (idx ${pair.compute.index}, ${cardGib.toFixed(1)} GiB) about ${activations.toFixed(1)} GiB for the sampler's activations at ${w}x${h}x${f} (${tokens} tokens) and ${COMPUTE_CARD_CONTEXT_GIB} GiB for the CUDA context: at most ${most.toFixed(1)} GiB of an expert can stay resident there (the measured film-size recipe keeps ${WAN_RESIDENT_GB_DEFAULT})`);
+    throw placementError(`--wan-resident-gb ${residentGb} leaves the compute card (idx ${pair.compute.index}, ${computeGib.toFixed(1)} GiB) about ${activations.toFixed(1)} GiB for the sampler's activations at ${w}x${h}x${f} (${tokens} tokens) and ${reserve} GiB of --reserve-vram: at most ${most.toFixed(1)} GiB of an expert can stay resident there (the measured film-size recipe keeps ${WAN_RESIDENT_GB_DEFAULT})`);
+  }
+  const donor = WAN_EXPERT_GIB - residentGb;
+  const stored = donor + WAN_STORAGE_OVERHEAD_GIB;
+  const usable = storageGib - reserve;
+  if (stored > usable) {
+    const least = WAN_EXPERT_GIB + WAN_STORAGE_OVERHEAD_GIB - usable;
+    const way = least <= most
+      ? `a --wan-resident-gb of at least ${least.toFixed(1)} (and at most ${most.toFixed(1)}) keeps enough of the expert on the compute card`
+      : "no resident share fits both cards at this geometry: lease two larger cards";
+    throw placementError(`--wan-resident-gb ${residentGb} leaves the storage card (idx ${pair.storage.index}, ${storageGib.toFixed(1)} GiB) ${donor.toFixed(1)} GiB of donor blocks + ${WAN_STORAGE_OVERHEAD_GIB} GiB for the VAE and the context = ${stored.toFixed(1)} GiB against ${usable.toFixed(1)} GiB usable (the card less ${reserve} GiB of --reserve-vram): ${way}`);
   }
 }
 
