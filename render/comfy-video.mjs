@@ -53,7 +53,7 @@ import { buildLtx25I2V } from "./wf-ltx25-i2v.mjs";
 import { buildH3AV } from "./wf-h3-av.mjs";
 import { buildAceStep } from "./wf-acestep.mjs";
 import { resolveCli, submitGraph, pollOutputs, fetchView, finalizeRun } from "./comfy-submit.mjs";
-import { planMulticard, checkComfyDevices, portNote, createOomWatch, MULTICARD_WAIT_SEC } from "./wan-multicard.mjs";
+import { planMulticard, checkComfyDevices, portNote, createOomWatch, MULTICARD_WAIT_SEC, wanGeometry, tiledSeamFrames, describeFrames } from "./wan-multicard.mjs";
 
 // BOOL_FLAGS take no value. --fast was missing from this list, so the parser took the
 // NEXT token as its value: a trailing --fast (the harness appends it after --hero) read
@@ -275,7 +275,8 @@ export async function buildGraphForRun(pos, flags, api, { stage = stageInput, fe
   if (wan) log(wanDecodeLine(mode, card, built.graph));
   // Under multicard the decode that was not asked for is the tiled one (the default), which fits beside the expert and seams the clip: said once.
   if (wan && multicard && Object.values(built.graph).some((n) => n.class_type === "VAEDecodeTiled")) {
-    log("WAN-PLACEMENT-NOTE: the tiled decode under multicard fits beside the expert (+2.3 GiB measured) but seams the clip at frames 24 and 48; --wan-decode plain frees both cards of the experts first and decodes in one pass");
+    const seams = describeFrames(tiledSeamFrames(wanGeometry(flags).f));
+    log(`WAN-PLACEMENT-NOTE: the tiled decode under multicard fits beside the expert (+2.3 GiB measured) but tiles the decode, so the clip can seam where its tiles meet${seams ? `, in time at ${seams}` : ""}; --wan-decode plain frees both cards of the experts first and decodes in one pass`);
   }
   return built;
 }

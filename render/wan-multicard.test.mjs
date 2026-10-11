@@ -530,6 +530,8 @@ test("tiledSeamFrames reproduces the temporal tiling of VAEDecodeTiled: where on
   assert.deepEqual(M.tiledSeamFrames(121), [24, 48, 72, 96]);
   assert.deepEqual(M.tiledSeamFrames(81, 64, 8), [56], "the node's own default of 64 / 8: tiles of 16, overlap 2, stride 14");
   assert.deepEqual(M.tiledSeamFrames(81, 8, 8), Array.from({ length: 19 }, (_, i) => 4 * (i + 1)), "a temporal size under twice the overlap halves the overlap: tile 2, overlap 1");
+  assert.deepEqual(M.tiledSeamFrames(81, 28, 16), [20, 40, 60], "a tile under twice the overlap halves the overlap first: 16 becomes 8, so tile 7 and overlap 2 (not 3)");
+  assert.deepEqual(M.tiledSeamFrames(81, 32, 3), [28, 56], "an overlap under 4 frames is still one latent frame: tile 8, overlap 1");
   assert.equal(M.describeFrames([24, 48, 72]), "frames 24, 48 and 72");
   assert.equal(M.describeFrames([24, 48]), "frames 24 and 48");
   assert.equal(M.describeFrames([24]), "frame 24");

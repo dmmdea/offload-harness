@@ -430,6 +430,37 @@ export function planMulticard({ flags, env = process.env, comfyDir, isWanGraph, 
  */
 export const MULTICARD_WAIT_SEC = 7200;
 
+/**
+ * tiledSeamFrames: the frames at which one temporal tile of the tiled decode meets the next, for a clip of `frames` frames, as ComfyUI 0.38 cuts them
+ * (the builder asks for temporal_size 32 and temporal_overlap 8 frames):
+ *   nodes.py VAEDecodeTiled   halves the overlap when the tile is under twice of it, then divides both by the Wan VAE's temporal compression 4
+ *                             (tile at least 2, overlap at least 1 and at most half the tile);
+ *   comfy/utils.py            tiled_scale_multidim: a clip of no more latent frames than one tile is decoded whole; otherwise a tile starts every
+ *                             (tile - overlap) latent frames while the start is under (latent frames - overlap);
+ *   comfy/sd.py               the Wan VAE writes a tile starting at latent frame s at pixel frame 4 x s (its upscale_index_formula).
+ * The film's 81 frames are 21 latent frames: tiles of 8 overlapping by 2 start at 0, 6, 12 and 18, so they meet at frames 24, 48 and 72.
+ * (ComfyUI's own out-of-memory fallback halves the temporal tile on its own, so ITS boundaries are elsewhere: that is why a plain decode that fell
+ * back is reported as a failure and not as a list of frames.) Spatial tiles (256 px, overlap 64) meet too; this is the temporal axis only.
+ */
+export function tiledSeamFrames(frames, temporalSize = 32, temporalOverlap = 8) {
+  const latent = Math.floor((Number(frames) - 1) / 4) + 1;
+  let overlap = temporalOverlap;
+  if (temporalSize < overlap * 2) overlap = Math.floor(overlap / 2);
+  const tile = Math.max(2, Math.floor(temporalSize / 4));
+  overlap = Math.max(1, Math.min(Math.floor(tile / 2), Math.floor(overlap / 4)));
+  if (!Number.isFinite(latent) || latent <= tile) return [];
+  const seams = [];
+  for (let start = tile - overlap; start < latent - overlap; start += tile - overlap) seams.push(4 * start);
+  return seams;
+}
+
+/** describeFrames: "frames 24, 48 and 72", "frames 24 and 48", "frame 24", or "" for none. */
+export function describeFrames(list) {
+  if (!list.length) return "";
+  if (list.length === 1) return `frame ${list[0]}`;
+  return `frames ${list.slice(0, -1).join(", ")} and ${list[list.length - 1]}`;
+}
+
 /** decodeFellBack: did ComfyUI retry a plain decode tiled (its own OOM fallback, which chunks time)? Reads a stretch of its console. */
 export function decodeFellBack(logText) {
   return /Ran out of memory when regular VAE decoding/i.test(String(logText || ""));

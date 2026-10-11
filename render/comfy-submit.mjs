@@ -353,6 +353,19 @@ async function promptOnServer(fetchImpl, api, promptId) {
   }
 }
 
+// execErrorText: a failed prompt's status for the error message. The status is JSON.stringify(status) cut to 500 characters, as it always was, plus, when
+// that cut lost it, the exception ComfyUI raised, whole: in a real history status the execution_error entry comes after the ids of the start and cached
+// entries and the whole list of executed nodes, so the message (a node's own words, e.g. where a latent was saved) often sits past the cut.
+function execErrorText(status) {
+  const cut = JSON.stringify(status).slice(0, 500);
+  const err = (Array.isArray(status.messages) ? status.messages : []).find((m) => Array.isArray(m) && m[0] === "execution_error");
+  const body = err && err[1];
+  const message = body && typeof body.exception_message === "string" ? body.exception_message.trim() : "";
+  if (!message || cut.includes(JSON.stringify(message).slice(1, -1))) return cut;
+  const who = [body.node_type, body.exception_type].filter((v) => typeof v === "string" && v).join(" ");
+  return `${cut} | ${who ? who + ": " : ""}${message.slice(0, 4000)}`;
+}
+
 // pollOutputs: poll /history/<id> every 2s until isDone(entry) or the budget runs out.
 // This is comfy-render.mjs's hardened loop (2026-07-30 dead-server watchdog + 2026-08
 // suspend/resume fence + per-poll 30s abort), now shared by every runner:
@@ -465,7 +478,7 @@ export async function pollOutputs({
     }
     if (h.status && h.status.status_str === "error") {
       if (onExecError) { try { await onExecError(); } catch { /* best-effort only */ } }
-      throw new Error("ComfyUI exec error: " + JSON.stringify(h.status).slice(0, 500));
+      throw new Error("ComfyUI exec error: " + execErrorText(h.status));
     }
     if (isDone(h)) return h;
   }
