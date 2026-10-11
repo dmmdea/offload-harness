@@ -28,6 +28,13 @@ func TestMain(m *testing.M) {
 	// First: when this process is the stand-in nvidia-smi a test installed (internal/gpuprobe/smitest) it
 	// plays that part and exits, touching neither the state root nor a test.
 	smitest.MaybeRun()
+	// A copy of this binary that a browse test re-launched as the fake sidecar (TestBrowseHelperProcess) speaks
+	// stdio and ends with os.Exit from inside the test, so it never reaches the RemoveAll below: a root of its
+	// own was left in the OS temp dir by every launch (13 per run, counted with the temp dir pointed at an
+	// empty folder). It touches no lease, home or ledger, so it runs without one.
+	if isBrowseSidecarCopy() {
+		os.Exit(m.Run())
+	}
 	dir, err := os.MkdirTemp("", "lo-pipeline-lease-")
 	if err != nil {
 		// Better to run non-hermetically than not at all, but say so loudly.
@@ -51,6 +58,13 @@ func TestMain(m *testing.M) {
 	restoreHost()
 	_ = os.RemoveAll(dir)
 	os.Exit(code)
+}
+
+// isBrowseSidecarCopy reports whether this process is the test binary re-launched as the fake browse sidecar.
+// The sidecar's environment is an allowlist (browseRunnerEnv), so no variable the suite set can reach it:
+// its argument is what identifies it, the same check TestBrowseHelperProcess makes to know it is the child.
+func isBrowseSidecarCopy() bool {
+	return len(os.Args) >= 2 && os.Args[1] == browseHelperArg
 }
 
 // TestMainIsolatesTheHomeAndTheFootprintStore pins the half of the safety net the host-RAM measurement needs

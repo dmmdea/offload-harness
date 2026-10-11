@@ -33,7 +33,8 @@ var remoteMediaPayloads = map[string]string{
 // agent/accel/vision/text lanes produce JSON only.
 var remoteNonWriters = []string{"stt", STTUploadTask, "agent", "accel", VisionTask, TextTask}
 
-func remoteOutCfg() config.Config {
+func remoteOutCfg(t *testing.T) config.Config {
+	t.Helper()
 	cfg := fullCfg()
 	cfg.AnimateGenScript = "render/comfy-animate.mjs"
 	cfg.ComposeScript = "render/compose-hyperframes.mjs"
@@ -42,10 +43,13 @@ func remoteOutCfg() config.Config {
 	// The project-bundle door writes too (it extracts a bundle), so it is open here.
 	cfg.FleetComposeProjects = true
 	cfg.FleetAuthToken = "tok"
-	cfg.ComposeCacheDir = composeProjectTestCache
+	// One folder for the compose cache and the media dir, as before, but the calling test's own: t.TempDir
+	// removes it when that test ends.
+	dir := t.TempDir()
+	cfg.ComposeCacheDir = dir
 	// ... and so does the media-input door (ADR 0077).
 	cfg.FleetMediaInputs = true
-	cfg.MediaDir = composeProjectTestCache
+	cfg.MediaDir = dir
 	return cfg
 }
 
@@ -63,7 +67,7 @@ func TestRemoteMediaTaskOutNeverReachesThePipeline(t *testing.T) {
 		"C:/Windows/System32/drivers/etc/hosts", "/etc/passwd", "../../escape.png",
 		`\\server\share\x.png`, "D:x.png", victim, "evil.png",
 	}
-	cfg := remoteOutCfg()
+	cfg := remoteOutCfg(t)
 	for task, base := range remoteMediaPayloads {
 		for _, target := range hostile {
 			var payload map[string]any
