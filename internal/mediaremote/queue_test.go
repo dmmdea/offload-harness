@@ -517,7 +517,12 @@ func TestPlacedTicketMarksNodeInUse(t *testing.T) {
 }
 
 // Two processes scanning at the same instant never send one single-job node two tickets: the claim is taken under the
-// directory lock, so the read and the write are one step.
+// directory lock, so the read and the write are one step. Each queue stands for one process, and a process has ONE scanner
+// (scanLoop), which visits its tickets one after another: a queue's cycles are therefore run one after another here, the two
+// queues against each other. (Eight goroutines per queue made the same ticket be stepped by two cycles at once, which no
+// process does: one step could write the ticket's file with the state it had before its claim while the other process judged
+// that claim, the claim read as dead, and the node was sent two jobs, 5 times in 150 runs under load, on the tree before the
+// fix round as well as after it; serialized, 0 in 300.)
 func TestTwoProcessesNeverDispatchTwoTicketsToOneSingleJobNode(t *testing.T) {
 	hold := make(chan struct{})
 	e := newQEnv(t, 1, false, func(_ int, o *nodeOpts) { o.hold = hold })
@@ -533,15 +538,15 @@ func TestTwoProcessesNeverDispatchTwoTicketsToOneSingleJobNode(t *testing.T) {
 	admitOn(t, q2, e.cfg, e.lr, e.req("second", nil))
 	var wg sync.WaitGroup
 	start := make(chan struct{})
-	for i := 0; i < 8; i++ {
-		for _, q := range []*queueRT{q1, q2} {
-			wg.Add(1)
-			go func(q *queueRT) {
-				defer wg.Done()
-				<-start
+	for _, q := range []*queueRT{q1, q2} {
+		wg.Add(1)
+		go func(q *queueRT) {
+			defer wg.Done()
+			<-start
+			for i := 0; i < 8; i++ {
 				q.cycle(context.Background())
-			}(q)
-		}
+			}
+		}(q)
 	}
 	close(start)
 	wg.Wait()
