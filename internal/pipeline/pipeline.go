@@ -3745,7 +3745,8 @@ func (p *Pipeline) footprintSampling(family, quant, task string) *gpugen.Samplin
 // hostSampleFunc is the host-memory sample of a render: the private and the resident memory of the process tree
 // rooted at the runner, root included (gpulease.TreeMemory). p.hostSample overrides it in tests. A ComfyUI
 // instance kept from an earlier lease and reused by this runner is not under it, so a run can read LOW; the one
-// consumer (calibratedRAM) only ever raises a declaration with it, and the store keeps the max over runs.
+// consumer (calibratedRAM) only ever raises a declaration with it, and the store keeps the last twenty runs of a key and
+// answers with their 90th percentile (fleetnode.HostPeaks), so one run that read high or low does not decide it.
 func (p *Pipeline) hostSampleFunc() func(childPid int) (float64, float64, error) {
 	if p.hostSample != nil {
 		return p.hostSample

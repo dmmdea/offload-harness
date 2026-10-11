@@ -18,7 +18,8 @@ package pipeline
 //
 // A graph with operator-declared devices is a card-scoped graph the delegator never places on another node (request.go in
 // mediaremote refuses to carry devices), so the question is not asked for it. An inherited lease and a card table that does not
-// read in laneProbeBound read as free, as for an image: the call then takes the path it always took.
+// read in laneProbeBound, nor in the one retry under laneProbeRetryBound that follows a read that ran out of time, read as free,
+// as for an image: the call then takes the path it always took.
 
 import (
 	"context"
