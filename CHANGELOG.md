@@ -895,6 +895,30 @@ Versioning: [SemVer](https://semver.org/).
 - Tests on Windows: the fake `ffmpeg` of the `audioio`, `fleetnode`, `pipeline` and `sttremote` tests was a hard link to the running test binary, which some Windows hosts will not unlink ("Access is denied" in the `TempDir` cleanup, 51 cleanup failures on one host); it is now a copy installed by the new `internal/fakeexe` test helper, which removes its own directory and starts the stand-in once so its slow first start is outside a test's time budget (test-only, no product code changed).
 - The `internal/fakeexe` test helper keeps a stand-in's folder inside the calling test's own `t.TempDir` (removed first, with a bounded retry on Windows) instead of a folder of its own in the shared temp directory, and a stand-in that runs tests instead of answering as a tool cannot start another (the warm-up start exits in the helper's `init`; one that reaches `Dir` or `Install` exits with status 97), so a killed run leaves nothing outside its own temp root and the helper cannot recurse (`TestAHelperCallStaysInsideTheTestsOwnTempDirAndIsGoneWhenItsTestEnds`, `TestAWarmUpStartExitsBeforeAnyTestRuns`, `TestAStandInThatRunsTestsRefusesToInstallAnother`).
 
+### Fixed — a run of the render tests left about 150 folders in the OS temp dir, and three pieces of render code left scratch behind
+
+- **The defect.** `node --test render/*.test.mjs` made its scratch folders with a bare `mkdtempSync(join(tmpdir(), ...))`. Most tests
+  never removed theirs and some removed theirs with an `rmSync` on the success path only, so one run left 149 folders (counted with
+  the OS temp dir pointed at an empty folder), and a workstation that runs the suite all day collected thousands of them on its system
+  drive (4,674 matching folders, about 0.9 GB, in one OS temp dir).
+- **The fix, in the tests.** New `render/test-scratch.mjs`: `scratchDir(t, prefix)` makes the folder and registers its removal with the test
+  that asked for it, so it goes when that test ends. node:test runs a test's `after` hooks whether the test passed or failed, so a failing
+  run leaves nothing either (`render/test-scratch.test.mjs` proves it with a child run that fails on purpose). 72 raw `mkdtempSync` calls in
+  21 test files use it, and the fixture builders (`fixture`, `keyedHarness`, `cliFixture`, ...) take the test's `t` and pass it on. A call
+  without `t` is refused before any folder is made. The same file fails on a new raw `mkdtemp` in a render test or in one of its two
+  support modules unless it is listed there with the reason its removal is on every path (22 remain, each removed in a `finally`, by an
+  exit hook, or by the test's own after-hook).
+- **The fix, in the code.** Three places in `render/` made scratch and did not remove it on every path. `igpu-stub.mjs` (test support)
+  built its Windows launcher into one per-machine cache folder, `igpu-stub-launcher-v1`, that nothing removed, and every process that
+  raced to build it left its own `build-<pid>-<ms>` folder inside it; it is now built per process into a folder that goes when the
+  process ends (a cold build measured 0.8 s). `manifest-satisfy.mjs`: `resolveDeps` wrote the host-constraints file and the
+  unified pack lock as pid-named files in the OS temp dir and never removed them, so every provisioning run left two; both now live in a
+  folder of the step's own that is removed when the step ends, passed or failed. `compose-hyperframes.mjs`: the render work dir was
+  made a few statements before the `try` whose `finally` removes it, so a throw in between left an empty `job-*` folder in the cache for
+  good; the `try` now opens right after the folder exists. Each has a test that fails without the change.
+- **Measured (Windows).** With the OS temp dir pointed at an empty folder, one run of `node --test render/*.test.mjs` left 149 folders before
+  and 0 after (twice); the 1,286 tests that were there are all still there and pass (23 skipped, as before), and the run has 12 more.
+
 ## [0.180.0] - 2026-10-10 - a busy image call waits for the first matching lane anywhere in the cluster, graphs overflow to a node that holds their files, and a live render keeps its lease
 
 ### Fixed — the ticket queue was off on any machine whose config sets no `state_dir`, which is the usual config (ADR 0083)

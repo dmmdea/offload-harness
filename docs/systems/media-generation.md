@@ -1599,6 +1599,16 @@ so a broken binding surfaces even when llama-swap is down.
 semantics, and output parsing. Go-side coverage sits in `internal/pipeline/` for the media dispatch
 and defer paths, and `internal/mediacap/` for the derived verdicts.
 
+A run of the suite leaves nothing in the OS temp dir. A test that needs a folder takes it from
+`scratchDir(t, prefix)` (`render/test-scratch.mjs`), which removes it when the test ends, passed or failed;
+`render/test-scratch.test.mjs` fails on a new bare `mkdtemp` in a render test or in its support modules (the few
+that remain are listed there with the reason each is removed on every path) and when the Windows stub launcher of
+`igpu-stub.mjs` leaves anything behind. The runners' own scratch is held to the same rule: `makeTempDir`
+(`igpu-engine.mjs`) removes its folder on every exit path, signals included, and sweeps what a killed runner
+left; the compose work dir and the provisioning scratch of `manifest-satisfy.mjs` are removed when their step
+ends, passed or failed (`igpu-lifecycle.test.mjs`, `compose-hyperframes.test.mjs` and
+`manifest-satisfy.test.mjs` pin them).
+
 `render/compose-hyperframes.test.mjs` also pins the shipped compose templates: the offline, deterministic and
 declared-variable contract, the ported templates' provenance, the retained licence texts by hash, the residue gate
 (no creator names, brand palette, placeholder copy or CDN host), the no-scale-above-1 guard for the ports, the

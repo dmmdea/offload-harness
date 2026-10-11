@@ -15,8 +15,7 @@ import assert from "node:assert/strict";
 import { createServer } from "node:net";
 import { PassThrough } from "node:stream";
 import { EventEmitter } from "node:events";
-import { mkdtempSync, readFileSync, writeFileSync, existsSync, readdirSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, writeFileSync, existsSync, readdirSync } from "node:fs";
 import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
@@ -24,13 +23,14 @@ import { withGpuSlot } from "./gpu-lock.mjs";
 import * as RG from "./comfy-run-graph.mjs";
 import * as L from "./comfy-lifecycle.mjs";
 import * as O from "./comfy-ownership.mjs";
+import { scratchDir } from "./test-scratch.mjs";
 
 // Synthetic ids: the keyless leak-gate shape rule treats a repeated-nibble head as a placeholder.
 const U0 = "GPU-aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee";
 const U1 = "GPU-bbbb2222-cccc-dddd-eeee-ffffffffffff";
 const K0 = "gaaaa1111";
 const BASE_FLAGS = ["--disable-smart-memory", "--cache-none", "--reserve-vram", "1.0"];
-const scratch = () => mkdtempSync(join(tmpdir(), "comfy-inst-"));
+const scratch = (t) => scratchDir(t, "comfy-inst-");
 const boom = (what) => () => { throw new Error(what); };
 
 // ---- 1. the empty key is today's launch, byte for byte --------------------------------
@@ -45,8 +45,8 @@ test("empty key: launchFlags is today's argv, with or without an instance argume
     ["--disable-smart-memory", "--reserve-vram", "1.0", "--cuda-device", "2"], "the legacy pin path is unchanged");
 });
 
-test("empty key: marker, log and rotation names are today's", () => {
-  const dir = scratch();
+test("empty key: marker, log and rotation names are today's", (t) => {
+  const dir = scratch(t);
   assert.equal(L.comfyLogPath(dir), join(dir, "offload-comfyui.log"));
   assert.equal(L.comfyLogPath(dir, ""), join(dir, "offload-comfyui.log"));
   O.writeLaunchOwner(dir, { pid: 5, ownerPid: 6, args: ["main.py"], profile: { cudaDevice: "", dynamicVram: "" } });
@@ -58,8 +58,8 @@ test("empty key: marker, log and rotation names are today's", () => {
   assert.deepEqual(readdirSync(dir), []);
 });
 
-test("empty key: ensureComfy spawns today's argv in today's env, writes today's marker, never probes the port", async () => {
-  const dir = scratch();
+test("empty key: ensureComfy spawns today's argv in today's env, writes today's marker, never probes the port", async (t) => {
+  const dir = scratch(t);
   const sentinelEnv = { SENTINEL: "1" };
   let spawned = null; let envForCalls = 0; let up = false;
   const writes = [];
@@ -183,8 +183,8 @@ test("resolveLaunchProfile: a keyed instance never takes a device index, card-bo
   }
 });
 
-test("keyed ensureComfy: an explicit key plus a device index is refused before anything is launched", async () => {
-  const h = keyedHarness();
+test("keyed ensureComfy: an explicit key plus a device index is refused before anything is launched", async (t) => {
+  const h = keyedHarness(t);
   h.opts.env = { COMFY_INSTANCE: "side", COMFY_CUDA_DEVICE: "2" };
   h.opts.api = "http://localhost:8190";
   await assert.rejects(L.ensureComfy(h.opts), /COMFY-INSTANCE-CONFLICT/);
@@ -243,8 +243,8 @@ test("launchFlags: a card-bound instance passes NO --cuda-device and drops one f
 
 // ---- 4. ownership marker and log, keyed ----------------------------------------------
 
-test("keyed launch marker: its own file, the lease epoch, and it never touches the default marker", () => {
-  const dir = scratch();
+test("keyed launch marker: its own file, the lease epoch, and it never touches the default marker", (t) => {
+  const dir = scratch(t);
   O.writeLaunchOwner(dir, { pid: 1, ownerPid: 2, args: ["main.py"], profile: {} });
   O.writeLaunchOwner(dir, { pid: 11, ownerPid: 12, args: ["main.py", "--port", "8189"], profile: { cardUuid: U0 }, key: K0, port: 8189, leaseEpoch: 42 });
   assert.deepEqual(readdirSync(dir).sort(), [".offload-launch-" + K0 + ".json", ".offload-launch.json"].sort());
@@ -263,8 +263,8 @@ test("keyed launch marker: its own file, the lease epoch, and it never touches t
   assert.ok(!("leaseEpoch" in O.readLaunchOwner(dir, "p8190")), "no epoch field without a lease");
 });
 
-test("keyed log: its own file and its own rotation; the default log is left alone", () => {
-  const dir = scratch();
+test("keyed log: its own file and its own rotation; the default log is left alone", (t) => {
+  const dir = scratch(t);
   assert.equal(L.comfyLogPath(dir, K0), join(dir, "offload-comfyui-" + K0 + ".log"));
   writeFileSync(L.comfyLogPath(dir), "default run");
   writeFileSync(L.comfyLogPath(dir, K0), "card run 1\nline2\nline3");
@@ -279,8 +279,8 @@ test("keyed log: its own file and its own rotation; the default log is left alon
 
 // ---- 5. ensureComfy, keyed ----------------------------------------------------------
 
-function keyedHarness({ up = async () => false, portFree = async () => true } = {}) {
-  const dir = scratch();
+function keyedHarness(t, { up = async () => false, portFree = async () => true } = {}) {
+  const dir = scratch(t);
   const made = []; const spawns = []; const probes = [];
   let started = false;
   return {
@@ -298,8 +298,8 @@ function keyedHarness({ up = async () => false, portFree = async () => true } = 
   };
 }
 
-test("keyed ensureComfy: own port and directories, uuid pin in the child env, no --cuda-device", async () => {
-  const h = keyedHarness();
+test("keyed ensureComfy: own port and directories, uuid pin in the child env, no --cuda-device", async (t) => {
+  const h = keyedHarness(t);
   const child = await L.ensureComfy(h.opts);
   assert.equal(child.pid, 9001);
   const { args, env } = h.spawns[0];
@@ -312,8 +312,8 @@ test("keyed ensureComfy: own port and directories, uuid pin in the child env, no
   assert.deepEqual(h.probes[0], [8189, "127.0.0.1"], "bound where ComfyUI listens (no --listen: loopback IPv4), not at the api's host spelling");
 });
 
-test("keyed ensureComfy: the marker is its own file and records the owner pid and the lease epoch", async () => {
-  const h = keyedHarness();
+test("keyed ensureComfy: the marker is its own file and records the owner pid and the lease epoch", async (t) => {
+  const h = keyedHarness(t);
   await L.ensureComfy(h.opts);
   assert.ok(existsSync(join(h.dir, ".offload-launch-" + K0 + ".json")));
   assert.ok(!existsSync(join(h.dir, ".offload-launch.json")), "the default marker is not written");
@@ -326,17 +326,17 @@ test("keyed ensureComfy: the marker is its own file and records the owner pid an
   assert.deepEqual(rec.args, h.spawns[0].args, "the fingerprint is the exact argv");
 });
 
-test("keyed ensureComfy: no lease epoch in the env => none recorded; a non-number is not recorded either", async () => {
+test("keyed ensureComfy: no lease epoch in the env => none recorded; a non-number is not recorded either", async (t) => {
   for (const epoch of [undefined, "", "abc"]) {
-    const h = keyedHarness();
+    const h = keyedHarness(t);
     h.opts.env = { COMFY_CARD_UUID: U0, ...(epoch === undefined ? {} : { GPU_LEASE_EPOCH: epoch }) };
     await L.ensureComfy(h.opts);
     assert.ok(!("leaseEpoch" in O.readLaunchOwner(h.dir, K0)), `epoch=${JSON.stringify(epoch)}`);
   }
 });
 
-test("keyed ensureComfy: its console goes to its own log", async () => {
-  const h = keyedHarness();
+test("keyed ensureComfy: its console goes to its own log", async (t) => {
+  const h = keyedHarness(t);
   h.opts.spawn = () => {
     const c = new EventEmitter(); c.pid = 9002; c.stdout = new PassThrough(); c.stderr = new PassThrough(); c.kill = () => {};
     setImmediate(() => { c.stdout.write("card console line\n"); c.emit("exit", 0); });
@@ -350,21 +350,21 @@ test("keyed ensureComfy: its console goes to its own log", async () => {
   assert.ok(!existsSync(L.comfyLogPath(h.dir)), "the default log is not created by a keyed instance");
 });
 
-test("keyed ensureComfy: a port held by something that is not ComfyUI is refused, and never killed", async () => {
-  const h = keyedHarness({ portFree: async () => false });
+test("keyed ensureComfy: a port held by something that is not ComfyUI is refused, and never killed", async (t) => {
+  const h = keyedHarness(t, { portFree: async () => false });
   await assert.rejects(L.ensureComfy(h.opts), /COMFY-PORT-TAKEN.*8189/);
   assert.equal(h.spawns.length, 0, "no launch onto a taken port");
   assert.equal(readdirSync(h.dir).length, 0, "and no marker or log left behind");
 });
 
-test("keyed ensureComfy: a default-port ComfyUI answering does not block the card's own instance", async () => {
-  const h = keyedHarness({ up: async (a) => a.endsWith(":8188") });
+test("keyed ensureComfy: a default-port ComfyUI answering does not block the card's own instance", async (t) => {
+  const h = keyedHarness(t, { up: async (a) => a.endsWith(":8188") });
   const child = await L.ensureComfy(h.opts);
   assert.equal(child.pid, 9001, "the card's instance launched on its own port");
 });
 
-test("keyed ensureComfy: an explicit key without a card gets its own port and files but does not pin", async () => {
-  const h = keyedHarness();
+test("keyed ensureComfy: an explicit key without a card gets its own port and files but does not pin", async (t) => {
+  const h = keyedHarness(t);
   h.opts.env = { COMFY_INSTANCE: "side" };
   h.opts.api = "http://localhost:8190";
   h.opts.envFor = () => ({ FROM: "envFor" });
@@ -376,9 +376,9 @@ test("keyed ensureComfy: an explicit key without a card gets its own port and fi
   assert.ok(existsSync(join(h.dir, ".offload-launch-side.json")));
 });
 
-test("keyed ensureComfy: an instance that nothing pins to a card says so, and one that is pinned stays quiet", async () => {
+test("keyed ensureComfy: an instance that nothing pins to a card says so, and one that is pinned stays quiet", async (t) => {
   const warnOf = async (env) => {
-    const h = keyedHarness(); const lines = [];
+    const h = keyedHarness(t); const lines = [];
     h.opts.log = (l) => lines.push(l);
     h.opts.api = "http://localhost:8190";
     h.opts.env = env;
@@ -394,8 +394,8 @@ test("keyed ensureComfy: an instance that nothing pins to a card says so, and on
   assert.deepEqual(await warnOf({ COMFY_INSTANCE: "side", COMFY_CARD_UUID: U0 }), [], "bound to a card by uuid");
 });
 
-test("an --api on another port with no key launches only when the operator's own extra args carry that --port: unkeyed argv, the default marker", async () => {
-  const dir = scratch(); let spawned = null; let up = false;
+test("an --api on another port with no key launches only when the operator's own extra args carry that --port: unkeyed argv, the default marker", async (t) => {
+  const dir = scratch(t); let spawned = null; let up = false;
   await L.ensureComfy({
     api: "http://localhost:8190", env: { COMFY_EXTRA_ARGS: "--port 8190" }, comfyDir: dir, py: "py", pollMs: 1, envFor: () => ({}), comfyUp: async () => up,
     portFree: boom("no bind check without a key"), mkdirs: boom("no directories without a key"),
@@ -405,8 +405,8 @@ test("an --api on another port with no key launches only when the operator's own
   assert.deepEqual(readdirSync(dir).filter((f) => f.startsWith(".offload-launch")), [".offload-launch.json"]);
 });
 
-test("an --api on another port with no key and no --port of the operator's own is refused, never launched on 8188 (plan section 7, finding 7)", async () => {
-  const dir = scratch(); let spawned = 0; const asked = [];
+test("an --api on another port with no key and no --port of the operator's own is refused, never launched on 8188 (plan section 7, finding 7)", async (t) => {
+  const dir = scratch(t); let spawned = 0; const asked = [];
   await assert.rejects(L.ensureComfy({
     api: "http://localhost:8190", env: {}, comfyDir: dir, py: "py", pollMs: 1, log: () => {}, envFor: () => ({}),
     comfyUp: async (a) => { asked.push(a); return false; },
@@ -500,8 +500,8 @@ test("reuse by uuid: a --cuda-device in the running argv overrides the pin", asy
   assert.match(foreign.reason, /--cuda-device 0.*not started by this harness/);
 });
 
-test("ensureComfy keyed: a wrong-card orphan is stopped and its KEYED marker cleared, then relaunched on the right card", async () => {
-  const h = keyedHarness();
+test("ensureComfy keyed: a wrong-card orphan is stopped and its KEYED marker cleared, then relaunched on the right card", async (t) => {
+  const h = keyedHarness(t);
   let alive = true; const cleared = []; let killed = null;
   const oldArgv = ["main.py", "--port", "8189", "old"];
   Object.assign(h.opts, {
@@ -520,8 +520,8 @@ test("ensureComfy keyed: a wrong-card orphan is stopped and its KEYED marker cle
   assert.equal(h.spawns[0].env.CUDA_VISIBLE_DEVICES, U0);
 });
 
-test("ensureComfy keyed: a foreign instance on the card's port with no marker is refused and not reused", async () => {
-  const h = keyedHarness();
+test("ensureComfy keyed: a foreign instance on the card's port with no marker is refused and not reused", async (t) => {
+  const h = keyedHarness(t);
   Object.assign(h.opts, { comfyUp: async () => true, systemArgv: async () => ARGV, readLaunch: () => null });
   await assert.rejects(L.ensureComfy(h.opts), /COMFY-PROFILE-MISMATCH.*card pin/);
   assert.equal(h.spawns.length, 0);
@@ -606,8 +606,8 @@ test("run-graph takes its ComfyUI start and free from instanceDeps, never straig
   assert.match(rg, /instanceDeps\(api\)/, "main resolves its deps through instanceDeps");
 });
 
-test("run-graph: a bad instance env is a typed defer in the result file and exit 0, never an untyped exit 1", () => {
-  const dir = scratch(); const result = join(dir, "r.json");
+test("run-graph: a bad instance env is a typed defer in the result file and exit 0, never an untyped exit 1", (t) => {
+  const dir = scratch(t); const result = join(dir, "r.json");
   const r = spawnSync(process.execPath, [fileURLToPath(new URL("./comfy-run-graph.mjs", import.meta.url)), "--graph", join(dir, "nope.json"), "--result", result],
     { encoding: "utf8", env: { ...process.env, COMFY_CARD_UUID: "1", COMFY_INSTANCE: "" }, timeout: 60000 });
   assert.equal(r.status, 0, "exit " + r.status + ": " + r.stderr);
@@ -662,8 +662,8 @@ test("reuse by key: another key's or port's marker, a dead pid, a different or u
   }
 });
 
-test("ensureComfy: two explicit keys that resolve to the same port do not share one instance", async () => {
-  const dir = scratch();
+test("ensureComfy: two explicit keys that resolve to the same port do not share one instance", async (t) => {
+  const dir = scratch(t);
   const argvA = ["main.py", ...BASE_FLAGS, "--port", "8189", "--output-directory", join(dir, "instances", "a", "output"), "--temp-directory", join(dir, "instances", "a")];
   O.writeLaunchOwner(dir, { pid: 77, ownerPid: 5151, args: argvA, profile: sideProfile, key: "a", port: 8189 });
   const common = {
@@ -675,8 +675,8 @@ test("ensureComfy: two explicit keys that resolve to the same port do not share 
   await assert.rejects(L.ensureComfy({ ...common, env: { COMFY_INSTANCE: "b" } }), /COMFY-PROFILE-MISMATCH.*instance 'b'/);
 });
 
-test("ensureComfy: a foreign ComfyUI answering on an explicit key's port, with no marker at all, is refused and not reused", async () => {
-  const h = keyedHarness();
+test("ensureComfy: a foreign ComfyUI answering on an explicit key's port, with no marker at all, is refused and not reused", async (t) => {
+  const h = keyedHarness(t);
   Object.assign(h.opts, { env: { COMFY_INSTANCE: "side" }, api: "http://127.0.0.1:8190", comfyUp: async () => true, systemArgv: async () => ["main.py", "--port", "8190"], readLaunch: () => null });
   await assert.rejects(L.ensureComfy(h.opts), /COMFY-PROFILE-MISMATCH.*instance 'side'/);
   assert.equal(h.spawns.length, 0);
@@ -696,26 +696,26 @@ test("bindHosts: the addresses ComfyUI will listen on, from its --listen flag", 
   assert.deepEqual(L.bindHosts("--listen 127.0.0.2 --listen 127.0.0.9"), ["127.0.0.9"], "the last occurrence wins, as in argparse");
 });
 
-test("keyed ensureComfy: the bind check covers every address ComfyUI will listen on", async () => {
+test("keyed ensureComfy: the bind check covers every address ComfyUI will listen on", async (t) => {
   const env = { COMFY_CARD_UUID: U0, COMFY_EXTRA_ARGS: "--listen 127.0.0.2,127.0.0.3" };
-  const h = keyedHarness();
+  const h = keyedHarness(t);
   h.opts.env = env;
   await L.ensureComfy(h.opts);
   assert.deepEqual(h.probes, [[8189, "127.0.0.2"], [8189, "127.0.0.3"]]);
-  const t = keyedHarness({ portFree: async (p, host) => host !== "127.0.0.3" });
-  t.opts.env = env;
-  await assert.rejects(L.ensureComfy(t.opts), /COMFY-PORT-TAKEN.*127\.0\.0\.3/);
-  assert.equal(t.spawns.length, 0);
+  const taken = keyedHarness(t, { portFree: async (p, host) => host !== "127.0.0.3" });
+  taken.opts.env = env;
+  await assert.rejects(L.ensureComfy(taken.opts), /COMFY-PORT-TAKEN.*127\.0\.0\.3/);
+  assert.equal(taken.spawns.length, 0);
 });
 
-test("keyed ensureComfy: a foreign holder of 127.0.0.1:port is detected even when the api spells the host localhost", async () => {
+test("keyed ensureComfy: a foreign holder of 127.0.0.1:port is detected even when the api spells the host localhost", async (t) => {
   const srv = createServer();
   await new Promise((r) => srv.listen({ port: 0, host: "127.0.0.1" }, r));
   const port = srv.address().port;
   try {
     let spawned = 0;
     await assert.rejects(L.ensureComfy({
-      api: `http://localhost:${port}`, comfyDir: scratch(), py: "py", pollMs: 1, log: () => {}, env: { COMFY_CARD_UUID: U0 },
+      api: `http://localhost:${port}`, comfyDir: scratch(t), py: "py", pollMs: 1, log: () => {}, env: { COMFY_CARD_UUID: U0 },
       envFor: boom("never reached"), comfyUp: async () => false, portFree: L.portIsFree, mkdirs: () => {},
       spawn: () => { spawned++; return { pid: 1, kill() {} }; },
     }), /COMFY-PORT-TAKEN/);

@@ -6,12 +6,12 @@
 // the other. A name must be unique across processes, not only inside one.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, readdirSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readFileSync, writeFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import * as I from "./comfy-input.mjs";
+import { scratchDir } from "./test-scratch.mjs";
 
-const scratch = () => mkdtempSync(join(tmpdir(), "comfy-input-"));
+const scratch = (t) => scratchDir(t, "comfy-input-");
 
 test("stagedInputName: one file staged by two processes in the same millisecond gets two names", () => {
   const base = { now: () => 5, rand: () => "aa", n: 0 };
@@ -34,8 +34,8 @@ test("stagedInputName: without injection it is unique per call and per process, 
   assert.notEqual(I.stagedInputName("x", "f.png", fixed), I.stagedInputName("x", "f.png", fixed), "an image and its mask staged in one millisecond never share a name, whatever the randomness");
 });
 
-test("stageInput: copies into the input directory under that name and returns it", () => {
-  const root = scratch(); const inputDir = join(root, "input");
+test("stageInput: copies into the input directory under that name and returns it", (t) => {
+  const root = scratch(t); const inputDir = join(root, "input");
   writeFileSync(join(root, "src.png"), "px");
   const copies = [];
   const name = I.stageInput("inpaint_in", join(root, "src.png"), { inputDir, copy: (...a) => copies.push(a), now: () => 9, pid: 3, rand: () => "cc", n: 4 });

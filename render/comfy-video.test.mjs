@@ -4,14 +4,14 @@
 // effects (it runs main() only when invoked as the script).
 import { test } from "node:test";
 import assert from "node:assert";
-import { readFileSync, mkdtempSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   BOOL_FLAGS, parseArgs, wanVvramGb, wanDecodeMode, readRenderCard, runsWanGraph,
   buildGraphFromArgs, buildGraphForRun, submitChecked,
 } from "./comfy-video.mjs";
+import { scratchDir } from "./test-scratch.mjs";
 
 const stage = (p) => "staged_" + p; // stands in for the copy into <COMFY_DIR>/input
 
@@ -279,8 +279,8 @@ test("an explicit --wan-decode reads no card: zero requests, and the log names t
   }
 });
 
-test("a run that does not build the Wan graph reads no card and logs nothing", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "wan-decode-"));
+test("a run that does not build the Wan graph reads no card and logs nothing", async (t) => {
+  const dir = scratchDir(t, "wan-decode-");
   const graphFile = join(dir, "wf.json");
   writeFileSync(graphFile, JSON.stringify({ "1": { class_type: "LoadImage", inputs: { image: "x.png" } } }));
   const argvs = [

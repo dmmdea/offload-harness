@@ -7,14 +7,14 @@
 import { test } from "node:test";
 import assert from "node:assert";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, existsSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import {
   parseSilences, parseLoudness, assessDeadAir, rewireSeed,
   resolveFfmpeg, resolveFfprobe, assertFfmpegAvailable, measure, normalizeLoudness, trimToSeconds,
   LOUDNESS_TARGET_LUFS,
 } from "./audio-qa.mjs";
+import { scratchDir } from "./test-scratch.mjs";
 
 // ---- pure-function tests (no ffmpeg) ---------------------------------------------
 
@@ -167,7 +167,7 @@ function makeToneWav(ffmpeg, dir, name, toneSec, silenceSec) {
 test("fixture: a genuinely tail-silent clip is measured and flagged dead-air end to end", (t) => {
   const bins = haveFfmpeg();
   if (!bins) return t.skip("ffmpeg/ffprobe not on PATH");
-  const dir = mkdtempSync(join(tmpdir(), "audio-qa-"));
+  const dir = scratchDir(t, "audio-qa-");
   const file = makeToneWav(bins.ffmpeg, dir, "tail-silent.wav", 8, 7); // 8s tone + 7s true silence = 15s
   const measured = measure(bins.ffmpeg, bins.ffprobe, file);
   assert.ok(measured, "measure() must return a result for a real file");
@@ -179,7 +179,7 @@ test("fixture: a genuinely tail-silent clip is measured and flagged dead-air end
 test("fixture: a clip with tone all the way through passes clean", (t) => {
   const bins = haveFfmpeg();
   if (!bins) return t.skip("ffmpeg/ffprobe not on PATH");
-  const dir = mkdtempSync(join(tmpdir(), "audio-qa-"));
+  const dir = scratchDir(t, "audio-qa-");
   const file = makeToneWav(bins.ffmpeg, dir, "clean.wav", 15, 0);
   const measured = measure(bins.ffmpeg, bins.ffprobe, file);
   assert.ok(measured, "measure() must return a result for a real file");
@@ -190,7 +190,7 @@ test("fixture: a clip with tone all the way through passes clean", (t) => {
 test("fixture: normalizeLoudness moves a loud clip's measured loudness toward the target", (t) => {
   const bins = haveFfmpeg();
   if (!bins) return t.skip("ffmpeg/ffprobe not on PATH");
-  const dir = mkdtempSync(join(tmpdir(), "audio-qa-"));
+  const dir = scratchDir(t, "audio-qa-");
   const file = makeToneWav(bins.ffmpeg, dir, "loud.wav", 5, 0);
   const before = measure(bins.ffmpeg, bins.ffprobe, file);
   const tmpOut = join(dir, "loud.norm.wav");
@@ -262,8 +262,8 @@ test("assertFfmpegAvailable: does not throw when both resolved", () => {
 // ending (see audio-qa.mjs's header), then calls this to cut back to what the
 // caller asked for before the dead-air gate above ever measures the file.
 
-test("trimToSeconds: a nonexistent ffmpeg path or a non-positive seconds fails cleanly (no throw)", () => {
-  const dir = mkdtempSync(join(tmpdir(), "audio-qa-trim-"));
+test("trimToSeconds: a nonexistent ffmpeg path or a non-positive seconds fails cleanly (no throw)", (t) => {
+  const dir = scratchDir(t, "audio-qa-trim-");
   assert.equal(trimToSeconds("", join(dir, "in.wav"), 10, join(dir, "out.wav")), false);
   assert.equal(trimToSeconds("ffmpeg", join(dir, "in.wav"), 0, join(dir, "out.wav")), false);
   assert.equal(trimToSeconds("ffmpeg", join(dir, "in.wav"), -5, join(dir, "out.wav")), false);
@@ -272,7 +272,7 @@ test("trimToSeconds: a nonexistent ffmpeg path or a non-positive seconds fails c
 test("fixture: trimToSeconds cuts an over-length clip down to exactly the requested duration", (t) => {
   const bins = haveFfmpeg();
   if (!bins) return t.skip("ffmpeg/ffprobe not on PATH");
-  const dir = mkdtempSync(join(tmpdir(), "audio-qa-trim-"));
+  const dir = scratchDir(t, "audio-qa-trim-");
   // Mirrors the real defect shape: over-length render (36s) that must come back down
   // to the requested 30s, same as comfy-music.mjs's computeRenderSeconds(30) = 36.
   const file = makeToneWav(bins.ffmpeg, dir, "over-length.wav", 36, 0);
@@ -287,7 +287,7 @@ test("fixture: trimToSeconds cuts an over-length clip down to exactly the reques
 test("fixture: trimToSeconds's default 1.0s fade-out means the very end of the cut measures quieter than the tone", (t) => {
   const bins = haveFfmpeg();
   if (!bins) return t.skip("ffmpeg/ffprobe not on PATH");
-  const dir = mkdtempSync(join(tmpdir(), "audio-qa-trim-"));
+  const dir = scratchDir(t, "audio-qa-trim-");
   const file = makeToneWav(bins.ffmpeg, dir, "steady-tone.wav", 20, 0);
   const tmpOut = join(dir, "trimmed-fade.wav");
   assert.ok(trimToSeconds(bins.ffmpeg, file, 10, tmpOut), "trim should succeed");
