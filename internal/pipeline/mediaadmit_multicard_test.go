@@ -451,6 +451,12 @@ func TestAMulticardNeedDeclaresRAMFromThePairNotTheLargestCard(t *testing.T) {
 	if got := f.p.declaredRAM(ctx, edit, cards, nil); got <= 0 {
 		t.Errorf("the whole table (three cards): %.1f GiB, want the ordinary streaming figure", got)
 	}
+	// the edit canvas the binding pins reaches the verdict: the recipe's peaks are scaled to 2.0 MP, so a larger canvas is not the row
+	big := f.cfg
+	big.GenEditMegapixels = 3.0
+	if got := f.p.declaredRAM(ctx, editNeed(big, ""), cards, pairIDs()); got <= 0 {
+		t.Errorf("an edit canvas of 3.0 MP is above the recipe's 2.0 MP cap: %.1f GiB, want the ordinary streaming figure", got)
+	}
 
 	// a PREDICTED row declares the ordinary estimate until a run has measured it: an early merge costs a wasteful wait, never a false 0
 	img := imageNeed(f.cfg, "")
