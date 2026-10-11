@@ -720,3 +720,128 @@ func TestALocalOnlyGraphTicketIsNeverMovedAndHoldsNoNodeAgainOthers(t *testing.T
 		t.Errorf("the local-only ticket still waits for this machine's lane, first in its line: %+v", s)
 	}
 }
+
+// What a graph asks of a node (the default VRAM floor reads the graph's height) is read ONCE, when the ticket is made: the MCP door's
+// temp file for an inline graph_json is not kept for the hours a ticket may wait, and a floor that vanished with the file would send
+// a Wan graph to the 8 GB node it was kept off.
+func TestAGraphsNeedIsReadOnceWhenTheTicketIsMade(t *testing.T) {
+	e := newGEnv(t)
+	small := e.node("node-small", true, nodeOpts{}, krea2File)
+	e.start()
+	req := e.req(graphWith(1280), map[string]any{"model_family": "wan22"})
+	a := graphAnswer(t, runDoor(e.cfg, e.lr, req, AtOnce))
+	if r, ok := rowFor(a.Cluster, "node-small"); !ok || r.State != "not-capable" || !strings.Contains(r.Why, "chosen") {
+		t.Fatalf("the 8 GB node is kept off a Wan graph at 720p and above by the default floor: %+v", r)
+	}
+	if err := os.Remove(req.Params["graph_path"].(string)); err != nil {
+		t.Fatal(err)
+	}
+	e.free(0)
+	time.Sleep(300 * time.Millisecond) // several scans
+	noPosts(t, "the 8 GB node (the floor was read when the ticket was made)", small)
+	if rows := Queue(e.cfg); len(rows) != 1 || !strings.Contains(rows[0].Why, "chosen") {
+		t.Errorf("the ticket still names the default floor: %+v", rows)
+	}
+}
+
+// ---- the doors ------------------------------------------------------------------------------------------------------------
+
+// The CLI's `run-graph` IS the wait: it blocks while every lane is busy, tells the human once per change of standing where the ticket
+// is, returns the result when a lane frees, and a first Ctrl-C before anything was sent cancels the ticket and lets go of its place
+// (a job already on a node cannot be recalled, ADR 0064). The same ticket is the MCP door's, which only answers inside its window.
+func TestTheGraphCLIBlocksAndCancelsUndispatched(t *testing.T) {
+	e := newGEnv(t)
+	e.node("node-a", true, nodeOpts{}, krea2File)
+	e.start()
+	prevPoll := attachPoll
+	attachPoll = time.Hour // the human is told by the ticket itself, not by a poll that might happen to see it
+	t.Cleanup(func() { attachPoll = prevPoll })
+
+	var lines []string
+	var lm sync.Mutex
+	done := make(chan core.Result, 1)
+	go func() {
+		done <- RunWith(context.Background(), e.cfg, e.lr, e.req(krea2Graph, nil), "auto", nil, Wait{Window: -1, Notify: func(s string) {
+			lm.Lock()
+			lines = append(lines, s)
+			lm.Unlock()
+		}})
+	}()
+	select {
+	case res := <-done:
+		t.Fatalf("the CLI blocks while every lane is busy: %+v", res)
+	case <-time.After(400 * time.Millisecond):
+	}
+	waitFor(t, 5*time.Second, "the human is told it is queued", func() bool {
+		lm.Lock()
+		defer lm.Unlock()
+		return len(lines) > 0 && strings.Contains(lines[0], "queued")
+	})
+	e.free(0)
+	select {
+	case res := <-done:
+		if !res.OK || res.Meta.Node != "node-a" {
+			t.Fatalf("the freed node ran the graph: %+v", res)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the CLI never returned")
+	}
+	lm.Lock()
+	if last := lines[len(lines)-1]; !strings.Contains(last, "started on") {
+		t.Errorf("the human is told when it started: %v", lines)
+	}
+	lm.Unlock()
+
+	// Ctrl-C before anything was sent cancels the ticket and lets go of its place.
+	e.hold(0)
+	ctx, cancel := context.WithCancel(context.Background())
+	cdone := make(chan core.Result, 1)
+	go func() { cdone <- RunWith(ctx, e.cfg, e.lr, e.req(plainGraph, nil), "auto", nil, Wait{Window: -1}) }()
+	waitFor(t, 5*time.Second, "the second ticket exists", func() bool { return len(ticketFiles(t, e.cfg)) == 1 })
+	place := ""
+	for _, lc := range e.lr.leaveCalls() {
+		place = lc.token
+	}
+	cancel()
+	select {
+	case res := <-cdone:
+		if res.OK || !res.Deferred || !strings.Contains(res.Reason, "canceled before anything was sent") {
+			t.Fatalf("the interrupted call says its ticket was canceled: %+v", res)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the interrupt never returned")
+	}
+	if n := len(ticketFiles(t, e.cfg)); n != 0 {
+		t.Errorf("the canceled ticket is gone: %d", n)
+	}
+	if e.lr.dropped(place) != 1 {
+		t.Errorf("its place in the line is let go: %v", e.lr.drops)
+	}
+	if n := len(e.nodes[0].posts()); n != 1 {
+		t.Errorf("nothing was sent for the canceled ticket (the one POST is the first job's): %d", n)
+	}
+}
+
+// An MCP door that ends does not end the graph's ticket: it outlives the call, and still runs when a lane frees.
+func TestAGraphDoorThatEndsLeavesTheTicketRunning(t *testing.T) {
+	e := newGEnv(t)
+	e.node("node-a", true, nodeOpts{}, krea2File)
+	e.start()
+	req := e.req(krea2Graph, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan core.Result, 1)
+	go func() { done <- RunWith(ctx, e.cfg, e.lr, req, "auto", nil, Wait{Window: time.Minute, Detach: true}) }()
+	waitFor(t, 5*time.Second, "the ticket exists", func() bool { return len(ticketFiles(t, e.cfg)) == 1 })
+	cancel()
+	res := <-done
+	if res.OK || !strings.Contains(res.Reason, "keeps running") {
+		t.Fatalf("the call says the ticket goes on: %+v", res)
+	}
+	if n := len(ticketFiles(t, e.cfg)); n != 1 {
+		t.Errorf("the ticket is still on file: %d", n)
+	}
+	e.free(0)
+	if res := settle(t, e.cfg, e.lr, req, func(r core.Result) bool { return r.OK }); res.Meta.Node != "node-a" {
+		t.Errorf("it still runs when a lane frees: %+v", res)
+	}
+}

@@ -23,7 +23,8 @@ package mediaremote
 // bounce came back). A node's own answer after it accepted the job is final: a render that failed is the call's result
 // and is never placed elsewhere, and a job a node holds is never also run here (a media job cannot be recalled, ADR
 // 0064). The ticket waits for the next lane; it does not give up the way the S1 call did, and it keeps the arrival time
-// the S1 call lost on every bounce.
+// the S1 call lost on every bounce. (A node that refuses a graph at its door because it lacks a file is the exception below: it
+// is not passed over for a while, because it is not busy.)
 //
 // A NODE'S "NOT THIS REQUEST". A graph is identified by the files a node holds, and the node decides that at its door: a 503 that
 // carries the refusal word (refusalNotCapable) says the graph names a file the node does not hold. That is the node's answer about

@@ -862,8 +862,10 @@ func (lt *liveTicket) startRemote(ctx context.Context, c candidate) {
 			lt.finish(res, false)
 		case attemptNotCapable: // the node's door said "not this request": nothing ran there, and it is not busy
 			h.Discard("the node cannot run this request; the ticket goes on to the next lane that frees")
-			lt.backToWaiting(c.base)
+			// The refusal is kept BEFORE the ticket is let back into the line: a scan that found it waiting without the memory
+			// would offer the same node the same graph again.
 			lt.rememberNotCapable(c, a.row)
+			lt.backToWaiting(c.base)
 			lt.q.nudge()
 		default: // the node passed the job back or was not reached: nothing ran there
 			h.Discard("the ticket goes on to the next lane that frees")
