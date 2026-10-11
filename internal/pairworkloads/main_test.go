@@ -36,7 +36,7 @@ type suiteRunner interface{ Run() int }
 
 // runIsolated points LOCAL_OFFLOAD_STATE_DIR at a throwaway directory, runs the suite, and removes the directory. It FAILS CLOSED:
 // when the directory or either variable cannot be set up it returns 1 without running a single test, because a suite that fell back
-// to the machine-wide state root would be exposed to the live data this net exists to protect (the 31.9 h ghost card above). The
+// to the machine-wide state root would be exposed to the live data this net exists to protect (the 31.9 h ghost card in docs/systems/pair-workloads.md, "Tests must isolate their state root"). The
 // three effects are parameters so TestRunIsolatedFailsClosed can make each one fail.
 func runIsolated(m suiteRunner, mkdirTemp func(dir, pattern string) (string, error), setenv func(key, value string) error, removeAll func(string) error) int {
 	dir, err := mkdirTemp("", stateRootPrefix)
@@ -83,7 +83,7 @@ func (s *stubRunner) Run() int { s.ran = true; return 0 }
 
 // TestRunIsolatedFailsClosed pins the fail-closed rule: a directory or variable that cannot be set up ends the suite with a non-zero
 // code and no test run, and the directory a failed setup made is removed. A suite that fell back to the machine-wide state root
-// would sweep the operator's own open-card markers into a test's ingress (the 31.9 h ghost card in the header above).
+// would sweep the operator's own open-card markers into a test's ingress (the 31.9 h ghost card in docs/systems/pair-workloads.md).
 func TestRunIsolatedFailsClosed(t *testing.T) {
 	boom := errors.New("boom")
 	made := func(string, string) (string, error) { return t.TempDir(), nil }
