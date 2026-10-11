@@ -13,7 +13,7 @@ import * as L from "./comfy-lifecycle.mjs";
 import * as O from "./comfy-ownership.mjs";
 import { withGpuSlot } from "./gpu-lock.mjs";
 import { scratchDir } from "./test-scratch.mjs";
-import { buildGraphFromArgs, buildGraphForRun, verifyMulticardDevices, verifyMulticardPack } from "./comfy-video.mjs";
+import { parseArgs, buildGraphFromArgs, buildGraphForRun, verifyMulticardDevices, verifyMulticardPack } from "./comfy-video.mjs";
 
 // Synthetic ids: a repeated-nibble head is a placeholder to the leak gate, and none of these names a real card.
 const U0 = "GPU-aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee";
@@ -588,4 +588,28 @@ test("portNote names the port a multicard instance falls back to when no --api o
 
 test("packDirs keeps the reason a custom_nodes listing failed", () => {
   assert.throws(() => M.packDirs("/c", () => { throw new Error("EACCES: nope"); }), /no comfyui-multigpu pack.*EACCES: nope/s);
+});
+
+// ---- the fix round (2026-10-11): what the review of the merged branch found --------------------------------------------
+
+// The '=' spelling, through the runner's own parser: internal/hostneed splits `--name=value` (strings.Cut), this runner's parseArgs does not, so
+// a flag spelled with '=' swallows the NEXT token whole, whatever that token is. The lease reads the call as multicard and declares no host RAM;
+// the runner must never read it as anything else than a refusal.
+test("a flag spelled with '=' that swallowed one of the placement's own flags, in ANY spelling of it, is refused (the parser's own output)", () => {
+  const boom = () => { throw new Error("must not be read"); };
+  const plan = (argv) => { const { flags } = parseArgs(argv); return M.planMulticard({ flags, comfyDir: "/c", isWanGraph: true, cards: boom }); };
+  const lost = [
+    ["--seed=7", "--wan-placement=multicard"],
+    ["--seed=7", "--wan-resident-gb=4"],
+    ["--seed=7", "--wan-cards=0,2"],
+    ["--steps", "--wan-placement=multicard", "--wan-decode", "plain"],
+    ["--seed=7", "--wan-placement", "multicard"],
+  ];
+  for (const argv of lost) {
+    assert.throws(() => plan(["o.mp4", "s.png", "p", ...argv]), /took --wan-.* as its value/, argv.join(" "));
+  }
+  // flags that merely START like ours are not ours: nothing is lost, the single path runs untouched
+  assert.equal(plan(["o.mp4", "s.png", "p", "--seed=7", "--wan-decode=plain"]), null);
+  assert.equal(plan(["o.mp4", "s.png", "p", "--negative", "--wan-placements are words"]), null, "a prompt that is not one of our flags passes");
+  assert.equal(plan(["o.mp4", "s.png", "p", "--seed", "7"]), null);
 });
