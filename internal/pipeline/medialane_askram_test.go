@@ -11,6 +11,8 @@ package pipeline
 
 import (
 	"context"
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/dmmdea/offload-harness/internal/config"
@@ -73,5 +75,27 @@ func TestTheLaneProbeCountsAHostRAMWaiterAheadOfACallPinnedToASmallCard(t *testi
 	}
 	if v.Ahead != 1 {
 		t.Errorf("the waiter that waits only on host RAM holds its card against a call that declares RAM, so it is ahead: Ahead=%d (%+v)", v.Ahead, v)
+	}
+}
+
+// The admission's pre-filter and the probe are the two readers of the figure; the admission's difference from the probe's is
+// not observable from outside (a gated attempt that the pre-filter would have skipped answers the same queued answer), so
+// the wiring is pinned where it is made: both ask askRAMFor, with their plan, and neither sizes on the whole table again.
+func TestBothReadersOfAskRAMSizeItOnThePlan(t *testing.T) {
+	for file, want := range map[string]string{
+		"mediaadmit.go": "askRAM := p.askRAMFor(ctx, need, plan, cards)",
+		"medialane.go":  "r.askRAM = p.askRAMFor(ctx, need, plan, ln.table)",
+	} {
+		b, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		text := strings.ReplaceAll(string(b), "\r\n", "\n")
+		if !strings.Contains(text, want) {
+			t.Errorf("%s no longer contains %q: the figure must be sized on the cards the plan names", file, want)
+		}
+		if strings.Contains(text, "askRAM := p.declaredRAM(ctx, need, cards, nil)") || strings.Contains(text, "r.askRAM = p.declaredRAM(ctx, need, ln.table, nil)") {
+			t.Errorf("%s sizes askRAM on the largest card of the whole table again (F58)", file)
+		}
 	}
 }
