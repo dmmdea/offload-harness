@@ -48,7 +48,9 @@ script.
 `generate-image --batch` runs N renders inside **one** slot acquisition. The only behavioral
 difference is that `--cache-none` is omitted, so the checkpoint loads once instead of per render.
 Teardown is not special-cased — it is the same single teardown, now at the batch boundary. Zero-warm
-moves from per-render to per-batch rather than being abandoned.
+moves from per-render to per-batch rather than being abandoned. When this machine's lane is held and a
+roster node renders the recipe, the batch is instead one ticket per job (ADR 0083, decision 12): each job
+is a node's own zero-warm render, a ComfyUI cold start apiece, and the warm session exists only here.
 
 A failed render inside a batch is recorded and the loop continues (unless ComfyUI itself became unusable, or the output disk filled: the batch then stops at that job, the later jobs get `not run:` rows and the batch exits non-zero, register C-83, 0.158.1; the full disk 0.178.0); one JSONL result line is written
 per job. A batch that ran every job and had a failed one exits 4 (`render/comfy-generate.mjs`, `render/comfy-inpaint.mjs` and `local-offload generate-image --batch`; 0 is every job rendered, 1 a stop, 2 usage), and the Go caller reads the runner's 4 as a finished batch and takes the per-job rows. **The default single-render path is byte-identical to its pre-batch behavior.**

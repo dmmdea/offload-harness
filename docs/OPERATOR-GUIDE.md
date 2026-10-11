@@ -243,6 +243,31 @@ first job ~32s (absorbs the checkpoint load), warm jobs ~22s. A failed job is re
 its result item and does not abort the rest, unless ComfyUI itself became unusable (it stopped answering, or a CUDA fault left it answering but unable to run a prompt): the batch then stops at that job, the jobs after it fail with an error that starts `not run: ComfyUI became unusable at job N/M`, and the command exits non-zero (register C-83, 0.158.1). A full output disk (`ENOSPC`, `EDQUOT`, `EROFS`) stops it the same way (0.178.0): the jobs after it fail with `not run: the disk is full at job N/M, writing <path>` and the command exits non-zero. Every picture is written atomically, to a staged file renamed into place: a failed render leaves nothing at its `out` path (before 0.178.0 a full disk left zero-byte PNGs that a skip-existing script read as finished) and a good file already there is kept. The exit code says how a batch ended, whether you run `local-offload generate-image --batch jobs.jsonl` or the helpers directly (`node render/comfy-generate.mjs --batch jobs.jsonl`, `render/comfy-inpaint.mjs --batch`): `0` every job rendered, `4` it ran every job and some failed (0.178.0; the `"ok":false` rows of the results file, or of the `generate-image` JSON, name them: the JSON keeps reporting per-job status), `1` it stopped (an unusable ComfyUI, a full disk, a setup error), `2` usage. The table is in `docs/systems/media-generation.md`. Single (unbatched) renders keep the zero-warm
 default — nothing changes unless you pass `--batch`.
 
+**A batch across the fleet (`--family`, `--route`, `--results`, `--resume`, `--jobs`).**
+
+```powershell
+local-offload generate-image --batch jobs.jsonl --family qwen-image-2.1-fast --results results.jsonl
+local-offload generate-image --batch jobs.jsonl --family qwen-image-2.1-fast --results results.jsonl --resume
+```
+
+Where the jobs run is decided once, at the start. If this machine's lane is **free**, the whole batch renders on one warm session, as above. If it
+is **held** and a roster node renders the same recipe, each job becomes a ticket (ADR 0083): it starts on the first matching lane that frees, here or
+on a node, at most N in flight (`--jobs`; default: this machine's lane plus one per matching node, at most 8), and the command blocks until every job
+has ended, telling you on stderr where each stands. A node renders one job per ticket and pays a ComfyUI cold start for it; the picture is fetched back,
+checked against the hash the node published, to the exact `out` you gave. **krea2 and the 2512 build have no node that renders them**, so a batch of
+either is never split across the fleet: it waits for this machine's lane and runs warm on it as before, and says which node does not match and why.
+
+One row per job goes to the printed JSON and to `--results` as each job ends: `{i, out, seed, ok, ms, error, node, family, sha256, verdict}` with
+`verdict` `rendered`, `skipped-existing`, `failed` or `queued`. Give each job its own `out` and, for a batch you may have to re-run, its own `seed`.
+Exit **0** every job has its picture, **4** it ran every job and some failed (the rows with `failed` say why), **1** it stopped, was interrupted
+(the jobs that had not ended are `queued`) or was refused before it began (an empty prompt, two different pictures for one `out`, an unknown
+family, an unwritable `--results`).
+
+`--resume` skips a job only when the file at its `out` proves itself: not empty, a PNG that decodes whole, the width and height the job names.
+A zero-byte file, a file cut short or of another size, and a missing file are rendered again. A job with no `out` is never skipped, and a size
+off the family's grid (qwen-image-2.1 floors to 32) never matches. A Ctrl-C cancels the tickets that have sent nothing; a job already on a node
+cannot be recalled, and the same command adopts it if its jobs carry explicit seeds.
+
 ### Never post a graph to `:8188` directly ⛔
 
 Every render goes through the harness — `generate-image`, `generate-video`, `run-graph`, or
