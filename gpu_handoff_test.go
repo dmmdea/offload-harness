@@ -32,6 +32,8 @@ type orderedSwap struct {
 	// onUnload runs when an unload request arrives, before the seat is touched (a test that wants a signal to land
 	// during the unload sends it here and holds the request).
 	onUnload func()
+	// unloadStatus, when non-zero, is what the per-model unload route answers, leaving the seat as it was (a refused unload).
+	unloadStatus int
 }
 
 func (o *orderedSwap) note(ev string) {
@@ -53,6 +55,10 @@ func (o *orderedSwap) handler(model string) http.Handler {
 		o.note("unload")
 		if o.onUnload != nil {
 			o.onUnload()
+		}
+		if o.unloadStatus != 0 {
+			w.WriteHeader(o.unloadStatus)
+			return
 		}
 		inner.ServeHTTP(w, r)
 	})

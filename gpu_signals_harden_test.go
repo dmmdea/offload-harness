@@ -239,6 +239,73 @@ func TestASignalDuringTheUnloadRequestLeavesTheWarmOwed(t *testing.T) {
 	}
 }
 
+// THE UNLOAD OF A COLD SEAT: the debt a cancelled unload leaves is written only for a seat that was resident. A seat that was
+// cold owes no warm, and a marker for it would load it at the release with nothing asking (a lease over a cold seat once brought
+// a three-card model up on all its cards that way).
+func TestASignalDuringTheUnloadRequestOfAColdSeatOwesNoWarm(t *testing.T) {
+	r := newStageRig(t)
+	r.swap.loaded.Store(false) // the seat is not resident: nothing to unload, nothing to warm back
+
+	oldFeed := wrapperSignalFeed
+	var feed chan<- os.Signal
+	ready := make(chan struct{})
+	wrapperSignalFeed = func(c chan<- os.Signal) { feed = c; close(ready) }
+	t.Cleanup(func() { wrapperSignalFeed = oldFeed })
+	r.swap.onUnload = func() {
+		<-ready
+		feed <- syscall.SIGTERM
+		time.Sleep(1500 * time.Millisecond) // the client's request is cancelled meanwhile
+	}
+
+	args := append([]string{"--config", r.cfg, "--wait", "30s", "--drain", "--unload-seat", "--reason", "cold"}, markerCmd()...)
+	var err error
+	stderr := captureStderr(t, func() { err = runGPUReserve(args) })
+	if err == nil || !strings.Contains(err.Error(), "SIGTERM") {
+		t.Fatalf("a signal during the unload ends the reserve naming it: %v\n%s", err, stderr)
+	}
+	if owed := r.m.SeatWarmOwed(); owed != "" {
+		t.Errorf("a seat that was not resident owes no warm, but the marker reads %q\n%s", owed, stderr)
+	}
+	if strings.Contains(stderr, "NOT warming") || strings.Contains(stderr, "the warm stays owed") {
+		t.Errorf("nothing was owed, so nothing is said about a warm:\n%s", stderr)
+	}
+	if n := r.swap.warms.Load(); n != 0 {
+		t.Errorf("warms = %d, want 0", n)
+	}
+	if r.commandStarted() {
+		t.Error("the command must not start after the signal")
+	}
+	if info := r.m.Inspect(); info.Held {
+		t.Errorf("the lease must be released: %+v", info)
+	}
+}
+
+// THE REFUSED UNLOAD: the debt is for a request the CALLER cancelled, whose outcome nobody knows. A request the server answered
+// with a refusal left the seat as it was, so no debt is written for it and no warm-back runs for a seat that never went down.
+func TestARefusedUnloadOfAResidentSeatWritesNoDebt(t *testing.T) {
+	r := newStageRig(t) // the seat is resident, nothing in flight
+	r.swap.unloadStatus = 500
+
+	args := append([]string{"--config", r.cfg, "--wait", "30s", "--drain", "--unload-seat", "--reason", "refused"}, markerCmd()...)
+	var err error
+	stderr := captureStderr(t, func() { err = runGPUReserve(args) })
+	if err == nil || !strings.Contains(err.Error(), "unload") {
+		t.Fatalf("a refused unload ends the reserve as a seat fault: %v\n%s", err, stderr)
+	}
+	if owed := r.m.SeatWarmOwed(); owed != "" {
+		t.Errorf("a refused unload owes no warm, but the marker reads %q\n%s", owed, stderr)
+	}
+	if n := r.swap.warms.Load(); n != 0 {
+		t.Errorf("a warm-back ran for a seat that never went down: warms=%d\n%s", n, stderr)
+	}
+	if r.commandStarted() {
+		t.Error("the command must not start after a failed unload")
+	}
+	if info := r.m.Inspect(); info.Held {
+		t.Errorf("the lease must be released: %+v", info)
+	}
+}
+
 // THE CARD TEXT: the card keeps 140 characters (pairworkloads.CardErrorMax) and cuts the rest, so a stage text longer than
 // that loses exactly the end that says what happened ("... never start..."). Every stage text, for every signal the wrapper
 // asks for, fits whole.
