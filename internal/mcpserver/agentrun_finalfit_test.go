@@ -521,17 +521,22 @@ func TestAgentRunPublishesTheRunStartFitWhenItsOwnFinalWasNotNarrowed(t *testing
 // likelier, because it deliberately opens the final at a budget narrower than the configured one, and the door published
 // the half-sentence as a clean answer: deferred false, stop_reason done, nothing saying it was cut. The answer is still the
 // caller's to use, so it stays an answer; the flag, the loop's own stop note and a sentence naming the budget it was cut at
-// are what the caller was owed. A complete answer carries none of the three.
+// are what the caller was owed. A complete answer carries none of the three. The sentence names a budget only when the LOOP
+// opened the final there: a run whose own final was not narrowed carries the fit predicted at run start (the 900 s row), and
+// a cut at the configured budget must not be worded as a cut at that prediction.
 func TestAgentRunSaysWhenItsFinalAnswerWasCutAtItsBudget(t *testing.T) {
+	const prediction = 6174 // the 900 s wall's run-start fit, which its own forced final never opens at
 	cases := []struct {
-		name    string
-		cut     bool
-		wallSec int
-		fitted  bool // the fit narrowed the final, so the result carries it
+		name      string
+		cut       bool
+		wallSec   int
+		loopFit   bool // the loop narrowed the forced final
+		published bool // the result carries final_budget_fit (the loop's narrowing, else the run-start prediction)
 	}{
-		{name: "cut at a budget the fit narrowed", cut: true, wallSec: finalFitWallSec, fitted: true},
+		{name: "cut at a budget the fit narrowed", cut: true, wallSec: finalFitWallSec, loopFit: true, published: true},
 		{name: "cut at the configured budget", cut: true, wallSec: 3600},
-		{name: "a complete answer", cut: false, wallSec: finalFitWallSec, fitted: true},
+		{name: "cut at the configured budget beside a run-start prediction", cut: true, wallSec: 900, published: true},
+		{name: "a complete answer", cut: false, wallSec: finalFitWallSec, loopFit: true, published: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -543,8 +548,11 @@ func TestAgentRunSaysWhenItsFinalAnswerWasCutAtItsBudget(t *testing.T) {
 				t.Fatalf("the run must answer, got %v", m)
 			}
 			final, _ := forcedFinalOf(t, seat)
-			if tc.fitted != (final < finalFitFinalTok) {
-				t.Fatalf("test premise: the forced final opened at %d tokens, which is not the case this row names (fitted=%v)", final, tc.fitted)
+			if tc.loopFit != (final < finalFitFinalTok) {
+				t.Fatalf("test premise: the forced final opened at %d tokens, which is not the case this row names (loop narrowed it: %v)", final, tc.loopFit)
+			}
+			if _, has := m["final_budget_fit"]; has != tc.published {
+				t.Fatalf("test premise: final_budget_fit present = %v, this row names %v: %v", has, tc.published, m["final_budget_fit"])
 			}
 			if !tc.cut {
 				for _, k := range []string{"output_truncated", "stop_note", "truncation_note"} {
@@ -567,18 +575,17 @@ func TestAgentRunSaysWhenItsFinalAnswerWasCutAtItsBudget(t *testing.T) {
 			if !strings.Contains(note, "cut") || !strings.Contains(note, "partial") {
 				t.Errorf("truncation_note = %q, want a sentence saying the answer was cut and is partial", note)
 			}
-			if tc.fitted {
+			if tc.loopFit {
 				if got, _ := m["final_budget_fit"].(float64); int(got) != final {
 					t.Errorf("final_budget_fit = %v, want %d, the budget the cut final was sent", m["final_budget_fit"], final)
 				}
 				if !strings.Contains(note, fmt.Sprint(final)) || !strings.Contains(note, "budget_note") {
 					t.Errorf("truncation_note = %q, want it to name the %d-token budget the fit opened the final at and point at budget_note", note, final)
 				}
-			} else {
-				requireNoFinalFit(t, m)
-				if strings.Contains(note, "budget_note") {
-					t.Errorf("truncation_note = %q: the budget was not narrowed, so there is no budget_note to point at", note)
-				}
+				return
+			}
+			if strings.Contains(note, "budget_note") || strings.Contains(note, "opened at") || strings.Contains(note, fmt.Sprint(prediction)) {
+				t.Errorf("truncation_note = %q: the loop did not narrow the final (it opened at the configured %d), so the note must not word the cut as a cut at the fit", note, final)
 			}
 		})
 	}

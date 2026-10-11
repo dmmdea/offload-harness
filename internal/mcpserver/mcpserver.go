@@ -2695,7 +2695,7 @@ func withFinalFit(out map[string]any, start seatrate.FinalFitResult, res agent.R
 // still ended "done", because a cut answer is the caller's to use. The door published it as a clean success, and the final-answer
 // fit (register D-134) makes that end likelier on purpose, since it opens the final narrower than the configured budget.
 // The flag and the loop's own stop note use the delegation wire's names; the sentence names the budget the final was cut at
-// when the fit narrowed it, and says where its arithmetic is. A complete answer carries none of the three.
+// when the loop's fit narrowed it, and says where its arithmetic is. A complete answer carries none of the three.
 func withTruncation(out map[string]any, res agent.Result) {
 	if !res.OutputTruncated {
 		return
@@ -2705,8 +2705,10 @@ func withTruncation(out map[string]any, res agent.Result) {
 		out["stop_note"] = res.StopNote
 	}
 	note := "the final answer was cut at its completion budget, so output is partial"
-	if fit, narrowed := out["final_budget_fit"]; narrowed {
-		note += fmt.Sprintf(": the forced final opened at %v tokens to fit the wall that was left (budget_note has the arithmetic)", fit)
+	if res.FinalBudgetFit > 0 {
+		// The loop's own narrowing, not the fit predicted when the wall started (withFinalFit may publish either): only the former
+		// is the budget this final was cut at.
+		note += fmt.Sprintf(": the forced final opened at %d tokens to fit the wall that was left (budget_note has the arithmetic)", res.FinalBudgetFit)
 	}
 	out["truncation_note"] = note
 }
