@@ -18,6 +18,7 @@ import (
 
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/gpulease"
+	"github.com/dmmdea/offload-harness/internal/tasks"
 )
 
 // writeBatchProbeStub is a --batch runner that renders every job and records argv and the launch environment.
@@ -224,5 +225,36 @@ func TestRunImageBatchAsKeepsTheEmptyBatchAndPromptRules(t *testing.T) {
 	data, _ := json.Marshal(ImageBatchItem{})
 	if strings.Contains(string(data), "node") {
 		t.Errorf("an item carries no node: that belongs to the CLI's result rows, not the pipeline's item: %s", data)
+	}
+}
+
+// A default out is a hash of the prompt and the params, and the family is one of them, as it is for the single render: the
+// same prompt and seed under two families are two files, and no family hashes exactly as it always did. An out the caller
+// named is never touched, and normalising twice changes nothing (the CLI normalises, then RunImageBatchAs does).
+func TestNormalizeImageBatchFamilyIsPartOfTheDefaultOut(t *testing.T) {
+	dir := t.TempDir()
+	job := ImageBatchJob{Prompt: "a red bike", Seed: 5, Negative: "people"}
+	legacy := filepath.Join(dir, "render-"+sha256hex("a red bike" + tasks.StableParamsKey(map[string]any{"seed": 5, "width": 0, "height": 0, "steps": 0, "negative": "people"}))[:8]+".png")
+
+	none := NormalizeImageBatch([]ImageBatchJob{job}, dir, "")[0].Out
+	alt := NormalizeImageBatch([]ImageBatchJob{job}, dir, "alt")[0].Out
+	other := NormalizeImageBatch([]ImageBatchJob{job}, dir, "other")[0].Out
+	if none != legacy {
+		t.Errorf("no family must hash as it always did: got %s want %s", none, legacy)
+	}
+	if alt == none || alt == other || other == none {
+		t.Errorf("one prompt and seed under three families wrote %s, %s and %s: they must be three files", none, alt, other)
+	}
+	if got := NormalizeImageBatch([]ImageBatchJob{job}, dir, " alt ")[0].Out; got != alt {
+		t.Errorf("the family is trimmed before it is hashed: %s vs %s", got, alt)
+	}
+	named := ImageBatchJob{Prompt: "a red bike", Seed: 5, Out: filepath.Join(dir, "mine.png")}
+	if got := NormalizeImageBatch([]ImageBatchJob{named}, dir, "alt")[0]; got.Out != named.Out || got.Seed != 5 {
+		t.Errorf("a named out and a given seed are never touched: %+v", got)
+	}
+	once := NormalizeImageBatch([]ImageBatchJob{{Prompt: "p"}}, dir, "alt")
+	twice := NormalizeImageBatch(once, dir, "alt")
+	if once[0] != twice[0] || once[0].Seed <= 0 || once[0].Out == "" {
+		t.Errorf("normalising twice must change nothing: %+v then %+v", once[0], twice[0])
 	}
 }

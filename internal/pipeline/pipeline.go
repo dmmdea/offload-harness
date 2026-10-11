@@ -2253,6 +2253,13 @@ func (it *ImageBatchItem) tagLicense(fam config.FamilyInfo) {
 // (a concrete seed BEFORE the render so the report is reproducible; a stable output
 // path under mediaDir) and renders the jobs file the render script consumes. Pure.
 func normalizeImageBatch(jobs []ImageBatchJob, mediaDir string) ([]ImageBatchJob, string) {
+	return normalizeImageBatchFor(jobs, mediaDir, "")
+}
+
+// normalizeImageBatchFor is normalizeImageBatch for a batch of one named family: the family is part of a default out's
+// hash, as it is part of the single render's (its `family` param is in the hashed params), so the same prompt and seed
+// under two families are two files and not one overwriting the other. No family hashes exactly as it always did.
+func normalizeImageBatchFor(jobs []ImageBatchJob, mediaDir, family string) ([]ImageBatchJob, string) {
 	norm := make([]ImageBatchJob, len(jobs))
 	for i, j := range jobs {
 		if j.Seed <= 0 {
@@ -2263,6 +2270,9 @@ func normalizeImageBatch(jobs []ImageBatchJob, mediaDir string) ([]ImageBatchJob
 			// negative): two jobs differing only in negative must not share an output
 			// path, or the second silently overwrites the first.
 			params := map[string]any{"seed": j.Seed, "width": j.Width, "height": j.Height, "steps": j.Steps, "negative": j.Negative}
+			if family = strings.TrimSpace(family); family != "" {
+				params["family"] = family
+			}
 			j.Out = filepath.Join(mediaDir, "render-"+sha256hex(j.Prompt + tasks.StableParamsKey(params))[:8]+".png")
 		}
 		norm[i] = j
@@ -2334,13 +2344,13 @@ func batchErrClass(itemErr string, gerr error) string {
 	return classifyErr(fmt.Errorf("%s", itemErr))
 }
 
-// NormalizeImageBatch is normalizeImageBatch without the jobs file: the batch's jobs with a concrete seed and a concrete
-// out filled in, exactly as RunImageBatch fills them. The CLI calls it before it chooses where the batch runs, so a job
+// NormalizeImageBatch is normalizeImageBatchFor without the jobs file: the batch's jobs with a concrete seed and a concrete
+// out filled in, exactly as RunImageBatchAs fills them. The CLI calls it before it chooses where the batch runs, so a job
 // that names neither has the same seed and out whether the whole batch renders warm here or each job is placed on the
 // fleet (the default out is a hash of the seed, so a seed minted twice would be two files). Idempotent: a job that already
 // has both is unchanged.
-func NormalizeImageBatch(jobs []ImageBatchJob, mediaDir string) []ImageBatchJob {
-	norm, _ := normalizeImageBatch(jobs, mediaDir)
+func NormalizeImageBatch(jobs []ImageBatchJob, mediaDir, family string) []ImageBatchJob {
+	norm, _ := normalizeImageBatchFor(jobs, mediaDir, family)
 	return norm
 }
 
@@ -2386,7 +2396,7 @@ func (p *Pipeline) RunImageBatchAs(ctx context.Context, family string, jobs []Im
 		return nil, serr
 	}
 	_ = os.MkdirAll(cfg.MediaDir, 0o755)
-	norm, jsonl := normalizeImageBatch(jobs, cfg.MediaDir)
+	norm, jsonl := normalizeImageBatchFor(jobs, cfg.MediaDir, family)
 	// The batch file stamp derives from the RAW jobs, BEFORE any refinement:
 	// refined text is temperature-sampled, so hashing it would mint new
 	// jobs/results filenames for every run of an identical batch.
