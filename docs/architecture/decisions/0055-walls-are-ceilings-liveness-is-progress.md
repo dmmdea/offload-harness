@@ -246,8 +246,10 @@ determine if a job is truly still going" — was not met by any of the three sur
    - **The prompts and the grammar stop permitting the suspected runaway.** Both prompts give each
      field's type and a list's item type (the chat prompt used to end "numbers unquoted", which a
      seat read together with a field called `numbers`). The grammar lane names the types its
-     grammar enforces, not the schema's own: gbnf compiles every array to a list of strings and an
-     object to a string, so a prompt that said "array of numbers" beside a grammar that forces a
+     grammar enforces, not the schema's own: gbnf compiles a list of scalars to a list of strings
+     (before F43 every array, and an object to a string; an object and a list of objects now keep
+     their own shape and the prompt names their fields), so a prompt that said "array of numbers"
+     beside a grammar that forces a
      quote after the `[` was a contradiction; the chat lane and a vLLM seat's schema lane name the
      schema's types. The grammar's whitespace rule is llama.cpp's own bounded one instead of an
      unbounded repetition, and the scalar coercion turns a bare JSON number into the string a

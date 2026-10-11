@@ -209,8 +209,9 @@ type repackFit struct {
 }
 
 // fit sizes one attempt against the time left: before the earlier of the run's
-// own deadline (its liveness ceiling) and the wall's end plus the grace, at the
-// seat's rate. An attempt whose budget fits is sent as it is; one that does not is
+// own deadline (its liveness ceiling) and the later of the wall's end and the
+// re-pack's owed end (F44), plus the grace, at the seat's rate. An attempt whose
+// budget fits is sent as it is; one that does not is
 // clamped to the tokens the time buys, as long as that still holds the answer
 // (least, the answer's own size in tokens); one that cannot is skipped, and the
 // note says why. It is a token budget and a deadline check, never a transport

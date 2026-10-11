@@ -1705,8 +1705,9 @@ func (p *Pipeline) repackStructured(ctx context.Context, seat string, rawSchema 
 // ONE completion and never the chat lane), 0 keeps the full repackMaxAttempts.
 // opts is what else this call is handed beside its context (repackOpts): with a
 // wall and a decode rate, each attempt is sized against the time left before the
-// wall's end plus the grace, clamped to what that buys or skipped when it cannot
-// buy the answer; with a trace, each attempt is recorded for the wire.
+// later of the wall's end and the re-pack's owed end (F44), plus the grace,
+// clamped to what that buys or skipped when it cannot buy the answer; with a
+// trace, each attempt is recorded for the wire.
 //
 // tokensOut is the generation of EVERY attempt, the failed ones included: it was
 // seat time spent whether or not the answer was usable (register C-80).
