@@ -12,7 +12,7 @@ Versioning: [SemVer](https://semver.org/).
   `Admit`, `AwaitUpstream`, `AwaitRunSlot`) narrows a lease to the cards of the seat that loads, and it learns a seat's cards from one
   place, `Config.ModelPins`, which read the declared `layers` and nothing else. The installer's tier seeds write no `layers`, so on such
   a box every harness text load waited for a media lease on ANY card: a render on card 2 held back a text model pinned to card 0. F15
-  (the entry below) had taught the unload side to place a model by the `CUDA_VISIBLE_DEVICES` of its entry in the serving config
+  had taught the unload side to place a model by the `CUDA_VISIBLE_DEVICES` of its entry in the serving config
   (`serving_config_path`, the llama-swap yaml the box runs) and named the fence as the half it left.
 - **The fence places a model the way the unload list does.** `Config.ModelPins` asks the layers first (new `Config.LayerPins`, the
   previous body) and then the serving config's env pin, through the one reader both sides share, with F15's strictness unchanged: only
@@ -132,8 +132,8 @@ Versioning: [SemVer](https://semver.org/).
 - **Not changed, and not verified here.** First and most important for a box without `layers`: this entry made the unload know from
   the serving config which card a model is on, and left the load fence not knowing. The fence (`modelaffinity`, armed from
   `config.ModelPins`) placed a model through `layers` only, so on such a box a text load waited for any media lease, whatever card it
-  was on. The entry above (register C-86a) changes that in the same release: the fence reads the same serving config pin through the
-  same reader. Also: a client that is not the harness can still load a model onto a leased card; the re-clear removes it
+  was on. A later change (register C-86a) gives the fence the same serving config pin through the same reader. Also: a client that is
+  not the harness can still load a model onto a leased card; the re-clear removes it
   before the next render, it does not stop it, and it unloads what the first job's unload would have (a model whose placement is
   unknown, in-flight requests drained first, then forced). The serving config is a path in the harness config that no default
   fills in: a box that does not set `serving_config_path` has no model placed by it. Two parallel jobs of one lease can both read the
