@@ -303,10 +303,12 @@ func TestMediaLaneFreeNeverRefusesAGrant(t *testing.T) {
 			if c.setup != nil {
 				c.setup(t, f)
 			}
+			nextMillisecond() // see medialane_graph_test.go: a tie is not "ahead", so the order the table states must be strict
 			params := map[string]any{}
 			if c.params != nil {
 				params = c.params(t, f)
 			}
+			nextMillisecond()
 			req := laneReq(params)
 			v := f.p.MediaLaneFree(context.Background(), req)
 

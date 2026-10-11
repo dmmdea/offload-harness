@@ -130,6 +130,22 @@ func graphLaneCases() []laneCase {
 	}
 }
 
+// nextMillisecond waits until the wall clock has left the millisecond it is in. The lease queue orders the places in a line by the
+// millisecond each was left (Token.SinceMs, Waiter.SinceMs) and does not count a tie as "ahead" (tokens.go tokenBlocks and
+// gpualloc.QueuedClaimsBefore count only a place strictly earlier; waiters.go: a tie breaks on the waiter's file name), so two
+// events stamped in one millisecond are not in the order a fixture meant. A case that leaves a place with time.Now() and lets the
+// call arrive straight after it tied on a host fast enough to do both inside one millisecond (a Linux disk: 36 of 50 runs of
+// "a live place in line on a card" failed on one box, "the table is stale: the real wait-0 admission granted=true"), and the real
+// admission, which is right not to wait on a tie, granted a call the table says is behind a place. The code is as designed; this
+// makes the order the table states a strict one by leaving the next millisecond between the step that leaves a place and the
+// step that arrives.
+func nextMillisecond() {
+	start := time.Now().UnixMilli()
+	for time.Now().UnixMilli() == start {
+		time.Sleep(100 * time.Microsecond)
+	}
+}
+
 // THE CONTRACT, for a whole-node graph. Over every state of the table a lane the real wait-0 admission would grant is never
 // called busy, and a state the prober reads is called busy.
 func TestMediaLaneFreeGraphNeverRefusesAGrant(t *testing.T) {
@@ -140,10 +156,12 @@ func TestMediaLaneFreeGraphNeverRefusesAGrant(t *testing.T) {
 			if c.setup != nil {
 				c.setup(t, f)
 			}
+			nextMillisecond() // the places the setup left are strictly earlier than the place the params leave and than the call
 			params := map[string]any{}
 			if c.params != nil {
 				params = c.params(t, f)
 			}
+			nextMillisecond() // ...and than the arrival of the call, which is stamped inside the probe and the admission below
 			req := graphLaneReq(params)
 			v := f.p.MediaLaneFree(context.Background(), req)
 			granted, gerr := graphGrant(f, req)
