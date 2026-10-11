@@ -30,6 +30,26 @@ func TestAHeldCardIsReportedHeldNotShortOfHostRAM(t *testing.T) {
 		_, err = m.TryAcquire(ClassMedia, Options{Reason: "other card", TTL: time.Hour, Devices: []string{card1}, HostRAMGiB: 30})
 		asHostRAM(t, err)
 	})
+	// The cheap held-probe at the top of the grant answers a card that is held when the request arrives. The order INSIDE the
+	// grant is reached only when the card is taken in the window between that probe and the epoch lock; a hook lands it there.
+	t.Run("card-scoped, taken between the probe and the lock", func(t *testing.T) {
+		m, _ := ramScoped(t, 70)
+		var rival *Lease
+		m.afterHostReadHook = func() {
+			m.afterHostReadHook = nil
+			rival, _ = m.TryAcquire(ClassMedia, Options{Reason: "rival", TTL: time.Hour, Devices: []string{card0}})
+		}
+		_, err := m.TryAcquire(ClassMedia, Options{Reason: "second", TTL: time.Hour, Devices: []string{card0}, HostRAMGiB: 30})
+		if rival == nil {
+			t.Fatal("the rival never took the card")
+		}
+		defer func() { _ = rival.Release() }()
+		var held *ErrHeld
+		var short *ErrHostRAM
+		if !errors.As(err, &held) || errors.As(err, &short) {
+			t.Fatalf("the card was taken first, so the grant says it is held and not that memory is short, got %T: %v", err, err)
+		}
+	})
 	t.Run("whole node", func(t *testing.T) {
 		m, _ := ramScoped(t, 70)
 		holder, err := m.TryAcquire(ClassMedia, Options{Reason: "holder", TTL: time.Hour})

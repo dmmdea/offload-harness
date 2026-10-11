@@ -49,7 +49,9 @@ func TestAskRAMIsSizedOnTheCardsAPlanNames(t *testing.T) {
 		{"pinned to the 48 GiB card: they fit, so it declares nothing", mediaPlan{ids: []string{C}}, 0},
 		{"a pool of both: the lease declares on the largest of THEM, which fits", mediaPlan{ids: []string{A, C}}, 0},
 		{"the allocator chooses: the smallest answer, the largest card on the box", mediaPlan{auto: true}, 0},
+		{"the allocator chooses, with candidates in the plan: they are not the card", mediaPlan{auto: true, ids: []string{A}}, 0},
 		{"the whole node: the same smallest answer", mediaPlan{whole: true}, 0},
+		{"the whole node, with ids left in the plan: still the whole node", mediaPlan{whole: true, ids: []string{A}}, 0},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

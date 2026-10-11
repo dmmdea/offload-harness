@@ -30,14 +30,20 @@ func shortProbeBounds(t *testing.T, first, retry time.Duration) {
 }
 
 // slowThenFast is a card-table reader whose first read hangs until its context ends (a nvidia-smi under load that does not
-// answer in time) and whose later reads answer at once with cards.
+// answer in time) and whose later reads answer after 3x the first bound (slow, but inside the retry's longer one), honouring
+// their context: a retry given the same short bound as the first read would not get its answer.
 func slowThenFast(cards []gpuprobe.Card, calls *atomic.Int64) func(context.Context, config.Config) ([]gpuprobe.Card, string, error) {
 	return func(ctx context.Context, _ config.Config) ([]gpuprobe.Card, string, error) {
 		if calls.Add(1) == 1 {
 			<-ctx.Done()
 			return nil, "", ctx.Err()
 		}
-		return cards, "", nil
+		select {
+		case <-time.After(3 * laneProbeBound):
+			return cards, "", nil
+		case <-ctx.Done():
+			return nil, "", ctx.Err()
+		}
 	}
 }
 
@@ -114,6 +120,20 @@ func TestTheLaneProbeLogsOneLineWhenItCouldNotReadTheCardTable(t *testing.T) {
 		if !strings.Contains(got[0], want) {
 			t.Errorf("the line %q lacks %q", got[0], want)
 		}
+	}
+}
+
+// A table that reads but lists no card is no reading either, and says so the same way.
+func TestTheLaneProbeTreatsAnEmptyCardTableAsUnread(t *testing.T) {
+	f := newAdmitFixtureWith(t, admitSpec{order: admitOrder, mutate: pinA})
+	f.p.alloc.Cards = func(context.Context, config.Config) ([]gpuprobe.Card, string, error) { return nil, "", nil }
+	buf := captureLogLines(t)
+	v := f.p.MediaLaneFree(context.Background(), laneReq(nil))
+	if !v.Free || !v.Unjudged || !strings.Contains(v.Why, "listed no card") {
+		t.Fatalf("an empty table is unjudged, with its reason: %+v", v)
+	}
+	if got := linesWith(buf, "media lane probe"); len(got) != 1 {
+		t.Errorf("one line: %v", got)
 	}
 }
 
