@@ -41,8 +41,9 @@ package mediacap
 // file that is not hashed yet and does not hang on it. A read that does not finish in readMax is GIVEN UP ON: its entry
 // settles unreadable and the worker is free for the other files. The read itself cannot be cancelled, so it runs on until
 // the disk lets it return; that file is not read again meanwhile, so a hung disk costs one goroutine and one handle per stuck
-// file and not a pile. It is logged once. Until readMax passes, a stalled read holds the worker and every other file stays
-// pending. The cache is in memory, keyed by path, size and modification time, and shared by the process
+// file and not a pile. It is logged once per stalled read, however often the file is asked for while that read is out
+// (TestAGivenUpReadIsLoggedOnceHoweverOftenItIsAskedFor). Until readMax passes, a stalled read holds the worker and every
+// other file stays pending. The cache is in memory, keyed by path, size and modification time, and shared by the process
 // (SharedFingerprints), so the node's health, its admission check and a delegator in the same process hash a file once. A
 // restart hashes again.
 

@@ -7,8 +7,10 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -220,6 +222,88 @@ func TestAStalledReadIsGivenUpOnAndDoesNotPinTheOtherFiles(t *testing.T) {
 	}
 	if c := g.count("stuck.safetensors"); c != 2 {
 		t.Errorf("%d reads of the stuck file, want 2", c)
+	}
+}
+
+// lockedBuffer is a log destination the test can read while the fingerprinter's goroutines are still writing to it.
+type lockedBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (l *lockedBuffer) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *lockedBuffer) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
+}
+
+// capturedLog sends the standard logger to a buffer for the rest of the test.
+func capturedLog(t *testing.T) *lockedBuffer {
+	t.Helper()
+	buf := &lockedBuffer{}
+	prev := log.Writer()
+	log.SetOutput(buf)
+	t.Cleanup(func() { log.SetOutput(prev) })
+	return buf
+}
+
+// A GIVEN-UP READ IS LOGGED ONCE. Five documents promise it (the header of fingerprint.go, FLEET-NODE.md, media-generation.md,
+// the CHANGELOG and decision 4 of ADR 0082), and it is the one place an operator learns that a disk has hung: a hung disk is
+// asked about by every health refresh and every dispatch, so a line per ask would be a flood and no line at all would hide
+// the fact. ONE line names the file and the bound when the read is given up on, and none follows while that read is still out,
+// however often the file is asked for or peeked at, or when it is read again after the first read has returned. (The wait
+// that ends at awaitMax logs a line of its own, a caller giving up and not a read; it is another sentence, and it is not
+// counted here.)
+func TestAGivenUpReadIsLoggedOnceHoweverOftenItIsAskedFor(t *testing.T) {
+	logs := capturedLog(t)
+	f, g := newGated(t, func(name string) bool { return name == "stuck.safetensors" })
+	f.readMax = 60 * time.Millisecond
+	dir := t.TempDir()
+	stuck, sn := smallWeight(t, dir, "stuck.safetensors", 1)
+	other, on := smallWeight(t, dir, "other.safetensors", 2)
+	const gaveUp = "was given up on"
+
+	if got := f.Peek(stuck, sn); got != FingerprintPending {
+		t.Fatalf("first Peek = %q", got)
+	}
+	if got := within(t, 5*time.Second, "Await of a file queued behind a stuck read", func() string { return f.Await(other, on) }); !IsFingerprint(got) {
+		t.Fatalf("the other file = %q: the stuck read must be given up on after readMax", got)
+	}
+	waitFor(t, func() bool { return f.Peek(stuck, sn) == FingerprintUnreadable })
+	for i := 0; i < 5; i++ {
+		if got := f.Await(stuck, sn); got != FingerprintUnreadable {
+			t.Errorf("Await of the stuck file = %q, want unreadable", got)
+		}
+		f.Peek(stuck, sn)
+	}
+
+	out := logs.String()
+	if n := strings.Count(out, gaveUp); n != 1 {
+		t.Fatalf("%d lines say a read was given up on, want exactly one however often the file was asked for:\n%s", n, out)
+	}
+	for _, want := range []string{"stuck.safetensors", f.readMax.String(), "unreadable"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the line must name the file, the bound and what the file reads as (%q): %s", want, out)
+		}
+	}
+	if strings.Contains(out, "other.safetensors") {
+		t.Errorf("a file that was read is not mentioned: %s", out)
+	}
+
+	// The first read returns and the file is read again, which is no give-up: still one line.
+	g.release()
+	waitFor(t, func() bool { f.mu.Lock(); defer f.mu.Unlock(); return len(f.stuck) == 0 })
+	if got := f.Await(stuck, sn); !IsFingerprint(got) {
+		t.Errorf("once the first read has returned the file is read again: %q", got)
+	}
+	if n := strings.Count(logs.String(), gaveUp); n != 1 {
+		t.Errorf("a file read again after the first read returned adds no line: %d in\n%s", n, logs.String())
 	}
 }
 
