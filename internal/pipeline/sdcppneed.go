@@ -47,7 +47,7 @@ func sdcppDeclared(proxy config.Config, family string, files []hostneed.SdcppFil
 func sdcppUnsizedNote(family string, own hostneed.Need, sizedSome bool, class hostneed.Need) {
 	key := "sdcpp-unsized|" + family + "|" + own.Unsized
 	if sizedSome {
-		planNoteKeyed(key, fmt.Sprintf("the %s sd.cpp lane could not size %s, so its host-RAM need counts only the files it could (%.1f GiB, a lower bound): check those bindings", family, own.Unsized, own.GiB))
+		planNoteKeyed(key, fmt.Sprintf("the %s sd.cpp lane could not size %s, so its own host-RAM figure counts only the files it could (%.1f GiB, a lower bound) and the lane declares the larger of that and the class default (%.1f GiB): check those bindings", family, own.Unsized, own.GiB, class.GiB))
 		return
 	}
 	planNoteKeyed(key, fmt.Sprintf("the %s sd.cpp lane could not size any of its weight files (%s), so it declares the class default (%.1f GiB), which parks nothing on a box with no ComfyUI family: check those bindings", family, own.Unsized, class.GiB))
