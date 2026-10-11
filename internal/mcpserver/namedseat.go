@@ -20,9 +20,10 @@ package mcpserver
 // seat, and the door can honour a name only when it IS a node's agent seat (or the agent-role seat of one of its layers,
 // which the contract names through its existing layer field). A name a node merely serves, as an alias or a non-agent
 // seat, is refused naming the seat that node does run; nothing is guessed. A node that changes its agent seat between the
-// probe and the dispatch is caught by the seat check on the result: an answer from another seat is withheld. A contract that
-// names a seat is also a reasoned remote pin (delegate.PinOperator, contractOnFleetAt): a second chance for it is another node
-// that runs the name or none, never this box's own agent seat, which is a different model. Running a
+// probe and the dispatch is caught by the seat check on the result: an answer from another seat is withheld, and so is the
+// finished prose a deferral carries (schema_miss) when another seat wrote it. A contract that names a seat is also a reasoned
+// remote pin (delegate.PinOperator, contractOnFleetAt): a second chance for it is another node that runs the name or none,
+// never this box's own agent seat, which is a different model. Running a
 // non-agent seat on a node needs the contract to name the seat, which is a wire field and a node-side change that widens
 // what a fleet-token holder can make a node load; it is not here.
 
@@ -185,6 +186,25 @@ func layerRunningAsAgent(rows []placement.LayerRow, model string) (string, bool)
 	return "", false
 }
 
+// ranSeat reports whether the seat a result says it came from is the model the caller named (without regard to case).
+func ranSeat(seat, model string) bool {
+	return strings.EqualFold(strings.TrimSpace(seat), strings.TrimSpace(model))
+}
+
+// seatLabel words the seat a result reports for a reason: its name, or that it named none.
+func seatLabel(seat string) string {
+	if seat = strings.TrimSpace(seat); seat != "" {
+		return fmt.Sprintf("seat %q", seat)
+	}
+	return "a seat that reported no name"
+}
+
+// carriesFinishedAnswer reports a deferral that withFinishedAnswer would publish the prose of: the loop finished and only
+// its structuring failed.
+func carriesFinishedAnswer(w core.AgentWireResult) bool {
+	return w.SchemaMiss && strings.TrimSpace(w.Output) != ""
+}
+
 func servesName(served []string, model string) bool {
 	for _, m := range served {
 		if strings.EqualFold(strings.TrimSpace(m), model) {
@@ -278,9 +298,15 @@ func (s *Server) runOnFleet(ctx context.Context, cfg config.Config, call agentRu
 		if len(notes) > 0 {
 			out["notes"] = notes
 		}
+		if model != "" && carriesFinishedAnswer(wire) && !ranSeat(wire.Seat, model) {
+			// The prose a deferral carries is an answer like any other: from a seat other than the name it is not published
+			// (the check below is for a result that came back done). The deferral stays what the node filed, and says what was held.
+			out["reason"] = fmt.Sprintf("%s; the finished answer it carries came from %s, not the model named (%q), so it is withheld", note, seatLabel(wire.Seat), model)
+			return jsonResult(withReviewExtra(out, extra))
+		}
 		return jsonResult(withReviewExtra(withFinishedAnswer(out, wire), extra))
 	}
-	if model != "" && !strings.EqualFold(strings.TrimSpace(wire.Seat), model) {
+	if model != "" && !ranSeat(wire.Seat, model) {
 		// The delegator placed the contract on a node whose agent seat WAS the name when it probed, and the node says it ran
 		// another (an operator edit in between): the answer is not from the model the caller named, so it is not published.
 		return jsonResult(withReviewExtra(map[string]any{"deferred": true, "defer_class": core.DeferClassConfig, "route": route, "steps": wire.Steps,

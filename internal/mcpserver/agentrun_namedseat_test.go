@@ -1044,3 +1044,85 @@ func TestAgentRunNamedSeatIsNeverRetriedOnThisBoxsSeat(t *testing.T) {
 		})
 	}
 }
+
+// TestAgentRunDoesNotPublishAFinishedAnswerThatCameFromAnotherSeatOnADeferral (D-125): the seat check that withholds an
+// answer from a seat other than the named one sat behind the deferral's return, so a deferral carrying the loop's finished
+// prose (schema_miss) published that prose as `output` whatever seat wrote it. A node that changed its agent seat between
+// the read and the dispatch, with a structured re-pack that then failed, handed the caller another model's answer as the
+// named model's. The deferral itself stays what the node filed (its reason and class); only the prose is held back, and
+// the reason says so.
+func TestAgentRunDoesNotPublishAFinishedAnswerThatCameFromAnotherSeatOnADeferral(t *testing.T) {
+	deferral := func(seat string, schemaMiss bool) core.AgentWireResult {
+		w := core.AgentWireResult{SchemaVersion: core.AgentWireSchemaVersion, Seat: seat, Steps: 5, Deferred: true,
+			Reason: "structured re-pack unreachable", DeferClass: core.DeferClassInfrastructure}
+		if schemaMiss {
+			w.SchemaMiss, w.Output = true, "prose written by another seat"
+		}
+		return w
+	}
+	for _, tc := range []struct {
+		name string
+		wire core.AgentWireResult
+		// held says the finished answer must be withheld, and the reason must say so
+		held bool
+	}{
+		{"another seat wrote the finished answer", deferral("some-other-seat", true), true},
+		{"the node reports no seat", deferral("", true), true},
+		{"another seat, and no finished answer to publish", deferral("some-other-seat", false), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := newNSNode(t, "node-a", nsFastSeat, nsFastSeat)
+			s, _ := nsDoor(t, []string{nsLocalSeat}, []string{a.url}, nil)
+			var e engineArgs
+			s.reviewFleet = e.seam(tc.wire, "node-a")
+
+			m := runNS(t, s, nsMarker(t), map[string]any{"route": "remote", "model": nsFastSeat})
+
+			if m["deferred"] != true || m["defer_class"] != core.DeferClassInfrastructure {
+				t.Fatalf("the node's deferral and its class must reach the caller, got %v", m)
+			}
+			if out, has := m["output"]; has {
+				t.Errorf("a finished answer from a seat other than %q must not be published as output, got %v", nsFastSeat, out)
+			}
+			if _, has := m["schema_miss"]; has {
+				t.Errorf("schema_miss flags a published finished answer, and none was published: %v", m)
+			}
+			reason := nsReason(m)
+			if !strings.HasPrefix(reason, "structured re-pack unreachable") {
+				t.Errorf("the node's own reason must stay the reason, got %q", reason)
+			}
+			if tc.held {
+				if !strings.Contains(reason, "withheld") || !strings.Contains(reason, nsFastSeat) {
+					t.Errorf("the reason must say the finished answer was withheld and name the model named, got %q", reason)
+				}
+				if tc.wire.Seat != "" && !strings.Contains(reason, tc.wire.Seat) {
+					t.Errorf("the reason must name the seat that wrote the answer (%q), got %q", tc.wire.Seat, reason)
+				}
+			} else if reason != "structured re-pack unreachable" {
+				t.Errorf("a deferral with no finished answer must be left exactly as the node filed it, got %q", reason)
+			}
+			if m["node"] != "node-a" || m["executed_on"] != "fleet" {
+				t.Errorf("the deferral must say where it ran: %v", m)
+			}
+		})
+	}
+}
+
+// TestAgentRunARoutedDeferralFromTheNamedSeatKeepsItsFinishedAnswer is the guard on the check above: the named seat's own
+// finished answer rides a deferral, flagged schema_miss, exactly as before.
+func TestAgentRunARoutedDeferralFromTheNamedSeatKeepsItsFinishedAnswer(t *testing.T) {
+	a := newNSNode(t, "node-a", nsFastSeat, nsFastSeat)
+	s, _ := nsDoor(t, []string{nsLocalSeat}, []string{a.url}, nil)
+	var e engineArgs
+	s.reviewFleet = e.seam(core.AgentWireResult{SchemaVersion: core.AgentWireSchemaVersion, Seat: strings.ToUpper(nsFastSeat), Steps: 5, Deferred: true,
+		Reason: "structured re-pack unreachable", DeferClass: core.DeferClassInfrastructure, SchemaMiss: true, Output: "the named seat's prose"}, "node-a")
+
+	m := runNS(t, s, nsMarker(t), map[string]any{"route": "remote", "model": nsFastSeat})
+
+	if m["deferred"] != true || m["output"] != "the named seat's prose" || m["schema_miss"] != true {
+		t.Fatalf("the named seat's finished answer must ride its deferral, flagged schema_miss: %v", m)
+	}
+	if reason := nsReason(m); reason != "structured re-pack unreachable" {
+		t.Errorf("nothing was withheld, so the reason is the node's own, got %q", reason)
+	}
+}
