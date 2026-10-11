@@ -50,3 +50,14 @@ func TestWindowsLabelNotesPrecedeTheChildsOwnStderr(t *testing.T) {
 func TestWindowsKillFailureAtTheDeadlineIsReported(t *testing.T) {
 	t.Skip("windows-only: the deadline proof needs a Windows Job Object; run `go test ./internal/sandbox/` on Windows")
 }
+
+// And for the proof that a run whose exit status cannot be read is not reported as success
+// (sandbox_windows_exitcode_test.go): the exit-status read is a Windows process-handle call.
+
+func TestWindowsUnreadableExitStatusIsNotTakenForSuccess(t *testing.T) {
+	t.Skip("windows-only: the exit-status proof needs a Windows process handle; run `go test ./internal/sandbox/` on Windows")
+}
+
+func TestWindowsExitCodeReachesTheCaller(t *testing.T) {
+	t.Skip("windows-only: the exit-status proof needs a Windows process handle; run `go test ./internal/sandbox/` on Windows")
+}

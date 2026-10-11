@@ -648,13 +648,18 @@ The **coding agent** (`local-agent`) is designed **safe-by-default** for a model
     cage cannot lower that label (it needs `WRITE_OWNER` on the folder, which a data drive's default
     root ACL does not give its owner) the child cannot write the folder, and when it cannot restore it
     the folder stays writable by other low-integrity processes; either way the run goes ahead and the
-    cage says so in `[sandbox]` lines at the start of stderr. **But
+    cage says so in `[sandbox]` lines at the start of stderr. A run whose exit status the cage cannot
+    read reports exit code `-1` and says so the same way, never `0`. **But
     reads and network are NOT contained on native Windows** — the low-IL token restricts writes, not
     reads or sockets — so the Windows cage is a **weaker boundary than Linux**. This matches every
     shipping tool's stance on native Windows; an AppContainer network-deny layer is future work.
   - **On Linux** `run` (and `run_shell`, `--allow-shell`, **Linux only**) route through the Landlock +
     seccomp + user-namespace OS cage: no network, filesystem confined to the worktree, syscalls
-    limited.
+    limited. Inside it `.git` is read-only, so a command cannot plant a hook or aim git at a
+    directory of its own: a read-only tmpfs over a `.git` directory, and for a linked worktree
+    (`git worktree add`, where `.git` is a pointer file) a read-only bind of that file, which still
+    reads. Where the kernel refuses that mount, or `.git` is a symlink (which no mount can protect),
+    the run goes ahead and the cage says so in a `[sandbox]` line at the start of stderr.
 - **Prompt-injection defenses.** Untrusted web content pulled by `web_fetch` is **fenced** before it
   reaches the planner, and fetch is **egress-allowlisted** (deny-all unless you name hosts with
   `--egress-host`), so injected instructions can't redirect the agent to arbitrary endpoints.

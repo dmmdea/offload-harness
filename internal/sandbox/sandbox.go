@@ -33,9 +33,10 @@ const refusalMarker = "[[SANDBOX-REFUSED]] "
 
 // noteMarker prefixes every line the cage itself puts ahead of a command's own stderr: a step it
 // could not complete (a folder it could not make writable, a label it could not put back, a
-// read-only mask it could not mount) on a run that goes ahead anyway. The command still runs, as it
-// always did; what changes is that the caller is told the run is not what its Spec asked for. The
-// Windows timeout note ("[sandbox] command killed after context timeout") has the same shape.
+// read-only mask it could not mount, an exit status it could not read) on a run that goes ahead
+// anyway. The command still runs, as it always did; what changes is that the caller is told the run
+// is not what its Spec asked for. The Windows timeout note ("[sandbox] command killed after context
+// timeout") has the same shape.
 const noteMarker = "[sandbox] "
 
 // NetABIFloor is the Landlock ABI the cage's NETWORK guarantee needs: the
@@ -88,6 +89,11 @@ type Spec struct {
 // that shows Stderr shows them and a caller that wants to react finds them first. The command is not
 // stopped by them (failing closed is a separate decision), and a run with nothing to report has
 // none. A run that returns an error carries the same notes in the error text.
+//
+// ExitCode is the command's exit status, or noExitStatus when there is none to report: the command
+// was ended by a signal (Signal says which; Linux), or it ran and the cage could not read how it ended
+// (Windows; a note says why). It is never 0 unless the command exited 0, because every caller reads 0
+// as success.
 type Result struct {
 	Stdout   string
 	Stderr   string
@@ -95,6 +101,10 @@ type Result struct {
 	Signal   int  // terminating signal number if the command was killed (e.g. SIGSYS=31 from a seccomp KILL), else 0
 	Refused  bool // true if the CAGE refused to run (setup failed) — distinct from the command running and exiting non-zero
 }
+
+// noExitStatus is the Result.ExitCode of a run that has no exit status to report, the value
+// os.ProcessState.ExitCode gives a process that a signal ended.
+const noExitStatus = -1
 
 // runNotes collects the notes of one run (see noteMarker). Every note is ONE line: addf flattens any
 // line break an error text carries, which is what lets noteLines and skipLeadingNotes treat a line
