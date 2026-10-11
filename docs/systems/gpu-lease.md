@@ -632,7 +632,7 @@ that has not claimed, or a place held for another caller); callers that answer w
 ([media-generation.md](media-generation.md#the-ticket-queue-a-busy-image-call-waits-for-the-first-matching-lane-that-frees-anywhere-adr-0083))
 waits for a lane anywhere in the cluster, far longer than a window, and must stay senior to every caller that arrives after it. It
 leaves a token at creation, with the ticket's arrival time, on the cards the real admission would queue the call on; the owner's
-scan touches it (`TouchToken`, about every 10 s against the 30 s grace); a place that lapsed or was spent is left again with the
+place keeper touches it (`TouchToken`, every scan interval, about 10 s against the 30 s grace; a keeper of its own and not the scan, which visits its tickets one after another and could let the places behind it lapse); a place that lapsed or was spent is left again with the
 same arrival time (`LeaveToken`); the ticket drops it when it ends; and the final local run resumes it as a `waiter_token` like any
 resumed call. `core.PlaceKeeper` is the seam (the pipeline implements it, `internal/pipeline/medialane_place.go`); it wraps
 these calls and adds no admission logic. The lane question for a call that resumes a place counts only the callers that arrived
