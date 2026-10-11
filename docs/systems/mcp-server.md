@@ -190,7 +190,10 @@ the largest budget the remaining wall can decode at the seat's rate instead of t
 tokens), floored at 1,024, off the live clock; the tool steps are untouched. The rate is the one the wall gate sized the run from, so a
 named or placed seat with no rate of its own is left as it was. The answer, and a run that died at its wall, then carry `final_budget_fit`
 (the budget the forced final opened at) and `budget_note` (the arithmetic), only when the fit narrowed something (a run whose own final was not narrowed, because it answered early, was cut before its forced final or reached it with wall to spare, carries the fit predicted when its wall started, as the node's result does); a wall that buys fewer
-than 1,024 tokens of final keeps the floor, and `budget_note` says the wall will be the stop. A resolved planner absent from the endpoint's served roster fails loud with
+than 1,024 tokens of final keeps the floor, and `budget_note` says the wall will be the stop. A final the seat ended on that budget
+(`finish_reason: length`) is a partial, and the fit makes that end likelier on purpose: it is still published as `output`, because a cut answer is
+the caller's to use, and the result says so with `output_truncated: true`, the loop's own `stop_note` and a `truncation_note` naming the budget the final
+opened at when the fit narrowed it (a complete answer carries none of the three). A resolved planner absent from the endpoint's served roster fails loud with
 `deferred: true` naming the model, never a silent fall back to the workhorse — "served" means
 matched against canonical ids **or** `meta.llamaswap.aliases`, since a tier-seeded `agent_model`
 is normally an alias. Every response
@@ -300,7 +303,15 @@ defers naming why. The response names `node`, `placement`, `seat`, `model` (the 
   seat. A name a node merely serves (an alias, a non-agent seat) is refused naming the seat that node does run; nothing is
   guessed. A router seat's `model_map` twins are not matched either.
 - **The answer is checked against the name.** A node that changed its agent seat between the probe and the dispatch runs
-  another seat; an answer whose `seat` differs from the name is withheld and deferred (`defer_class: config`).
+  another seat; an answer whose `seat` differs from the name is withheld and deferred (`defer_class: config`). The finished
+  prose a deferral carries (`schema_miss`) is checked the same way: from a seat other than the name, or from a node that reports
+  none, it is not published, and the node's own reason and class stay with a clause saying what was withheld.
+- **The contract is a reasoned remote pin (`pin_reason: operator`), so its second chance is never this box's seat.** The caller
+  named the model, so the placement is theirs, and the delegator retries an attempt it retries (a seat that abstained, a seat
+  that went down) on another of the nodes that run the name, or does not retry. A bare `route=remote` would retry remote -> local,
+  which for a named seat runs the whole goal on this box's own agent seat, a different model, only for the door to withhold that
+  answer. `offload_status` counts the call under `pins.reasoned.operator`; an `agent_run` that names no model keeps the bare remote
+  route and is still counted as `unreasoned`.
 - **A name nobody runs keeps the roster sentence and says where the fleet looked,** one clause per node (its id, its agent
   seat, and a name it serves without running it as its agent seat). `defer_class` is `config` when every node answered and
   `infrastructure` when one did not; the reason names that node. A box with no `delegate_remotes` has nobody to ask and

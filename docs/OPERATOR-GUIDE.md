@@ -1092,7 +1092,9 @@ decode at the seat's rate, not at the configured worst case: a final that would 
 instead of being cut at the deadline. The fit narrows the final answer only. It does
 not shorten the tool steps, and a wall that buys less than the 1,024-token floor at the seat's rate still ends at the deadline
 (`budget_note` says `the wall will be the stop`). `final_budget_fit` and `budget_note` ride on the answer and on a run that died at its
-wall, only when the fit narrowed something (a run whose own final was not narrowed, because it answered early, was cut before its forced final or reached it with wall to spare, carries the fit predicted when its wall started, as the node's result does); the refusal (which starts no run), a wall with room and a seat with no rate carry neither. The
+wall, only when the fit narrowed something (a run whose own final was not narrowed, because it answered early, was cut before its forced final or reached it with wall to spare, carries the fit predicted when its wall started, as the node's result does); the refusal (which starts no run), a wall with room and a seat with no rate carry neither. A final the seat ended on that budget
+(`finish_reason: length`) is a partial: it is still the `output`, flagged `output_truncated: true` with the loop's `stop_note` and a `truncation_note`
+naming the budget the fit opened it at, and a complete answer carries none of them. The
 two agent doors share one copy of the arithmetic (`pipeline.InstallFinalFit`), so the node and this door size one run alike. A call
 refused before a seat is chosen (a bad argument, or a composite placement guard refusing the seat) carries no numbers, and a routed call carries no sizing of this box either: a contract sent
 through the fleet carries its wall to the node, where it is an expectation (ADR 0055).
@@ -1101,7 +1103,9 @@ through the fleet carries its wall to the node, where it is an expectation (ADR 
 however many nodes ran it. A name the local roster lacks is now looked up on the fleet: the door reads the roster's health once
 and sends ONE contract, at `route=remote` and narrowed to the nodes that match, to a node whose `agent_seat` is that name
 (without regard to case; a composite node's agent seat in a named layer counts). The result names `node`, `placement`, `seat`,
-`model` and `executed_on`, and is withheld if it came from another seat (a node that changed its agent seat after it was read).
+`model` and `executed_on`, and is withheld if it came from another seat (a node that changed its agent seat after it was read; so is
+the finished prose a deferral carries). The contract is a reasoned remote pin (`pin_reason: operator`), so when the delegator retries an
+attempt (a seat that abstained or went down) the retry goes to another node that runs the name or is not run, and never to this box's own agent seat.
 A name nobody runs keeps the old refusal and adds where the fleet looked, `config` when every node answered and `infrastructure`
 when one did not; a name a node serves without running it as its agent seat is refused naming the seat it does run, because the
 contract names no seat and the node runs its own. `route: "auto"`, `"spread"` and `"queue"` refuse a model (they place by

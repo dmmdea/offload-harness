@@ -6,6 +6,34 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed — a named-seat `agent_run` is never retried on this box's own seat, a deferral never publishes another seat's answer, and a final cut at its budget says so (D-125, D-102, register D-134)
+
+A fix round on the two `agent_run` entries below, from two independent reviews of the branch: five findings, three defects.
+
+- **A named seat's second chance is another node that runs it, or none; it was this box's own agent seat.** `agent_run(model: <seat>)`
+  handed the delegator a bare `route=remote`, and a bare remote route keeps the engine's remote -> local retry: when the node's first
+  attempt abstained (the new flat `{answer}` schema makes a cut or empty final likely) or its seat went down, the retry ran the whole
+  goal on THIS box's agent seat, a different model. The door then withheld that clean answer for a seat mismatch and blamed the node
+  (`answered from seat "<this box's seat>", not the model named: its agent seat changed after the fleet was read`), after this box's GPU
+  had done the work, and the first attempt's real reason was gone. The contract of a named seat is now a reasoned remote pin
+  (`pin_reason: operator`, the caller having chosen the placement by naming the model), which the engine already obeys to the end of the
+  subtask: the retry goes to another node whose agent seat is the name, and with none the node's own deferral stays the result. First
+  placement is unchanged (it never fell back to local), and `offload_status` counts the call under `pins.reasoned.operator` instead of
+  `unreasoned`; an `agent_run` that names no model keeps the bare remote route and its remote -> local retry.
+- **The seat check covers a deferral's finished answer.** The check that withholds an answer from a seat other than the named one sat
+  behind the deferral's return, so a deferral carrying the loop's finished prose (`schema_miss`) published that prose as `output`
+  whatever seat wrote it. The prose is now held back when the seat that wrote it is not the name, or is not reported; the deferral keeps
+  the node's own reason and class, and the reason gains a clause saying what was withheld. A deferral from the named seat keeps its prose.
+- **A final cut at its budget is published as cut.** The final-answer fit (D-134) opens the forced final narrower than the configured budget
+  on purpose, and a final the seat ends on that budget (`finish_reason: length`) is marked by the loop (`OutputTruncated`) but ended
+  `done`, and the local `agent_run` door never read the mark: the half-sentence was published as a clean success. It is still the `output`
+  (a partial is the caller's to use), and the result now carries `output_truncated: true`, the loop's `stop_note` and a `truncation_note` that
+  names the budget the fit opened the final at and points at `budget_note`. A complete answer carries none of the three.
+- **Tests, written first and red.** Each failed on the unfixed code for the reason in its finding: the named-seat retry (abstention and
+  seat-down, one node and two) ran this box's seat and published the false seat-change reason; the deferral test published another seat's
+  prose and an unreported seat's; the cut-final test published no flag. Mutants, each compiled and each killed: the pin reason dropped, the
+  deferral's seat check disabled, the truncation flag never published, the fit clause of the truncation note dropped.
+
 ### Fixed — `agent_run` fits its final answer to the wall that is left, so a wall between the minimal-answer floor and the estimate answers instead of being cut (D-102, register D-134)
 
 `agent_run` runs its loop under a context deadline, and the loop was built without the final-budget fit (register D-95) that the

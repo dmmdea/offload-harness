@@ -134,7 +134,9 @@ reasons are for the surfaces where a session decides.
    `fleet-smoke` still measures the node it names; the review lane's fallthrough still never runs on the fenced seat (a hint would
    park it in a capacity wait, which that path must not do); `offload_ask` and `agent_run` still pass their route through. The ones
    that run inside the MCP server and reach the engine (the review lane's fallthrough, and the remote route of `offload_ask` and
-   `agent_run`) hand the server's tally over, so `offload_status` counts their pins as `unreasoned`. An explicit `route:"local"` on
+   `agent_run`) hand the server's tally over, so `offload_status` counts their pins as `unreasoned` (an `agent_run` that names a model to run on a
+   fleet node is the exception, since register D-125: the model is the caller's reason, the call is placed as a reasoned `operator` pin and counted
+   under `reasoned`). An explicit `route:"local"` on
    `offload_ask` or `agent_run` runs on this box's seat without reaching the engine and is counted nowhere, so for that route the gap
    is still a belief.
 

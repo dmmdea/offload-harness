@@ -1307,7 +1307,8 @@ the authoritative pin it always had. Everything this document says of `route=loc
 - **`offload_status`.** The fleet block has a `pins` object, counted by this server in subtasks since it started (`started_at`): `reasoned` by
   reason, `hints`, `hints_overridden` (a local hint placed on a node, a remote hint placed on the local seat) and `unreasoned` (pins through
   the callers above that run inside the server and reach the engine: the review lane's fallthrough and the remote route of `offload_ask` and
-  `agent_run`; their explicit local route runs on this box's seat without reaching it and is not counted). It is `delegate.PinTally`, which each door hands the engine in `RunOptions.PinTally`, counted
+  `agent_run`; their explicit local route runs on this box's seat without reaching it and is not counted; an `agent_run` that names a model
+  to run on a fleet node (register D-125) is a reasoned pin and is counted under `reasoned.operator`). It is `delegate.PinTally`, which each door hands the engine in `RunOptions.PinTally`, counted
   once per published result; nothing scans the ledger. It is absent when delegation is off.
 
 ### Expected-completion ranking and the joint deal (route=auto/remote, PR-5)
