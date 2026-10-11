@@ -561,7 +561,12 @@ func TestTheNodesRefusalWordIsTheOneTheClientReads(t *testing.T) {
 
 // Two processes of one machine, each with a graph ticket, both read one idle single-card node and both scan at once: the claim
 // is taken under the directory lock, so the node is sent ONE graph. (The per-process hold of the one-shot path could not do
-// that; the order rule is turned off so that only the claim stands between the two sends.)
+// that; the order rule is turned off so that only the claim stands between the two sends.) Each queue stands for one process, and a
+// process has ONE scanner (scanLoop), which visits its tickets one after another: a queue's cycles are therefore run one after
+// another here, the two queues against each other. Eight goroutines per queue made the same ticket be stepped by two cycles at once,
+// which no process does: one step could write the ticket's file with the state it had before its claim (waiting, no node) while the
+// other process judged that claim, the claim read as dead, and the node was sent two graphs (13 runs of 30 on one Windows box, with no
+// product code involved). Ignoring a live holder in claimNode still makes this test fail.
 func TestTwoProcessesNeverStackTwoGraphsOnOneNode(t *testing.T) {
 	hold := make(chan struct{})
 	e := newGEnv(t)
@@ -576,15 +581,15 @@ func TestTwoProcessesNeverStackTwoGraphsOnOneNode(t *testing.T) {
 	admitOn(t, q2, e.cfg, e.lr, e.req(krea2Graph, nil))
 	var wg sync.WaitGroup
 	start := make(chan struct{})
-	for i := 0; i < 8; i++ {
-		for _, q := range []*queueRT{q1, q2} {
-			wg.Add(1)
-			go func(q *queueRT) {
-				defer wg.Done()
-				<-start
+	for _, q := range []*queueRT{q1, q2} {
+		wg.Add(1)
+		go func(q *queueRT) {
+			defer wg.Done()
+			<-start
+			for i := 0; i < 8; i++ {
 				q.cycle(context.Background())
-			}(q)
-		}
+			}
+		}(q)
 	}
 	close(start)
 	wg.Wait()
