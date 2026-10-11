@@ -731,6 +731,19 @@ writes outside the worktree are blocked by MIC, but **network egress is not seve
 the worktree are not blocked**. The source calls this "HONEST RESIDUAL RISK (documented, not hidden)"
 and the tool description the model sees says the same.
 
+**What the cage could not do for a run is said, not swallowed** (`internal/sandbox`, `Result.Stderr`).
+A step that confines or un-confines a run can fail without making the run unsafe to start, and the
+caller still has to hear of it. On native Windows, a worktree or scratch folder whose low-integrity
+label cannot be lowered (the label change needs `WRITE_OWNER`, which a data drive whose root ACL names
+the user nowhere does not give) is a folder the command cannot write; one whose label cannot be
+restored is left writable by every low-integrity process, and the next run takes that label for the
+folder's own, so it does not heal; one whose prior label cannot be read is cleared, not restored; a
+deadline whose kill of the job fails is not in force. In each case the command still runs (failing
+closed is a separate decision, not taken) and the cage puts a line starting with `[sandbox] ` ahead
+of the command's own stderr, appends the same text to the error of a run that fails before the
+command starts, and logs it once. `run` and `run_shell` return stderr to the model, so the model
+reads the note too.
+
 **The caged child's environment is built, never inherited, on both platforms** (`sandbox.cageEnv`,
 `sandbox.EnvAllowlist`). Linux execs with a fixed `PATH` plus `HOME`/`TMPDIR` pointed at the run's
 scratch dir; Windows passes CreateProcess an explicit UTF-16 block of the same shape — a closed
@@ -806,6 +819,9 @@ replaces the default. `cmd/local-agent/serve_test.go` covers the loopback guard.
 - Assuming `--profile` and `--two-tier` are unconditionally exclusive. Only a non-default profile
   conflicts.
 - Assuming the Windows cage is equivalent to the Linux one. It is weaker, deliberately and visibly.
+- Reading an `Access is denied` from a Windows `run` as the command's own failure. Look at the top of
+  stderr first: a `[sandbox]` line there says the cage could not make a folder writable (or restore its
+  label), and why.
 - Pointing `--audit` inside the worktree — a startup error, on purpose.
 
 ## Source map

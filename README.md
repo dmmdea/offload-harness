@@ -644,7 +644,11 @@ The **coding agent** (`local-agent`) is designed **safe-by-default** for a model
   - **On Windows** the child is confined by a **Job Object** (kill-on-close, an active-process limit,
     a per-process memory cap, and a wall-clock timeout) and a **low-integrity token**: the worktree is
     *temporarily* relabeled low-integrity for the run (so the child can write it) and **reverted
-    afterward**, and writes outside the worktree are blocked by Mandatory Integrity Control. **But
+    afterward**, and writes outside the worktree are blocked by Mandatory Integrity Control. When the
+    cage cannot lower that label (it needs `WRITE_OWNER` on the folder, which a data drive's default
+    root ACL does not give its owner) the child cannot write the folder, and when it cannot restore it
+    the folder stays writable by other low-integrity processes; either way the run goes ahead and the
+    cage says so in `[sandbox]` lines at the start of stderr. **But
     reads and network are NOT contained on native Windows** — the low-IL token restricts writes, not
     reads or sockets — so the Windows cage is a **weaker boundary than Linux**. This matches every
     shipping tool's stance on native Windows; an AppContainer network-deny layer is future work.
