@@ -102,9 +102,11 @@ type NodeView struct {
 	LeaseReason       string
 	LeaseRemainingSec int
 	// ImageRecipes is what each ComfyUI image family on the node IS (health `image_recipes`, ADR 0082): the weight
-	// files with their sizes, the resolved sampling and a digest. nil on a node that predates it or that has no
-	// binding to identify, which is "cannot be matched", never "matches anything". RefineHonoured is health
-	// `refine_honoured`: the node's image-gen task carries an explicit refine=false.
+	// files with their sizes and their content fingerprints (F59: a sampled sha256, or `pending` while the node is
+	// still reading the file and `unreadable` when it cannot), the resolved sampling and a digest, which is empty on
+	// a row that has a file without a fingerprint yet. nil on a node that predates it or that has no binding to
+	// identify, which is "cannot be matched", never "matches anything". RefineHonoured is health `refine_honoured`:
+	// the node's image-gen task carries an explicit refine=false.
 	ImageRecipes   []ImageRecipeView
 	RefineHonoured bool
 	// MediaRoutes is the node's own verdict on each file-backed media route (health
