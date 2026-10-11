@@ -197,7 +197,7 @@ test("resolveWanCards: indices, UUIDs, UUID prefixes and lease ids all name the 
   assert.deepEqual(ids(["2", "0"]), [2, 0]);
   assert.deepEqual(ids([U2, U0]), [2, 0]);
   assert.deepEqual(ids(["gpu-aaaa1111-dddd-eeee-ffff-000000000000", "gpu-cccc3333-bbbb-cccc-dddd-eeeeeeeeeeee"]), [2, 0], "the lease's own spelling");
-  assert.deepEqual(ids(["aaaa1111", "GPU-AAAA1111"]), [2, 0], "a prefix, either case");
+  assert.deepEqual(ids(["aaaa1111", "GPU-CCCC3333"]), [2, 0], "a prefix, either case");
   assert.deepEqual(ids(["0", U0, "2"]), [2, 0], "a card named twice counts once");
 });
 
@@ -337,7 +337,7 @@ test("a multicard launch drops --enable-dynamic-vram from the operator's extra a
 test("a running ComfyUI is not the multicard placement's when its argv turns dynamic VRAM on", () => {
   const mc = { cudaDevice: "", dynamicVram: "", multicard: { cards: ["a", "b"] } };
   assert.equal(L.profileMismatch(["main.py", "--gpu-only"], mc), "");
-  assert.match(L.profileMismatch(["main.py", "--gpu-only", "--enable-dynamic-vram"], mc), /dynamic VRAM on.*multicard placement needs it off/);
+  assert.match(L.profileMismatch(["main.py", "--gpu-only", "--enable-dynamic-vram"], mc), /dynamic VRAM on.*multicard placement needs off/);
   assert.match(L.profileMismatch(["main.py", "--enable-dynamic-vram", "--gpu-only"], mc), /dynamic VRAM on/, "the order of the flags does not matter");
 });
 
@@ -506,7 +506,7 @@ test("buildGraphFromArgs builds the multicard graph only when handed a plan, and
 });
 
 test("verifyMulticardDevices stops the run, before anything is submitted, when ComfyUI's cards are not the pinned pair", async () => {
-  const dev = (mib) => ({ type: "cuda", vram_total: mib * 1024 ** 2, name: "n" });
+  const dev = (mib) => ({ type: "cuda", vram_total: mib * 1024 ** 2, name: "cuda:0 Test GPU A : cudaMallocAsync" });
   const reply = (devices) => async () => ({ ok: true, json: async () => ({ devices }) });
   const plan = { pair: pair() };
   await verifyMulticardDevices("http://x", plan, { fetchImpl: reply([dev(16311), dev(16311)]) });
@@ -620,9 +620,9 @@ test("--wan-cards can confirm the lease's cards or name them when no lease does,
   assert.throws(() => planWith({ "wan-cards": "0,2" }, { leaseDevicesFn: () => ["gpu-cccc3333-bbbb-cccc-dddd-eeeeeeeeeeee", "gpu-bbbb2222-cccc-dddd-eeee-ffffffffffff"] }),
     /--wan-cards names idx 2, which the GPU lease does not hold.*the lease is the authority/);
   assert.throws(() => planWith({ "wan-cards": "0,2" }, { leaseDevicesFn: () => ["gpu-bbbb2222", "gpu-dddd4444"] }), /does not hold/);
-  // no lease: --wan-cards is the caller's word, as before
+  // no lease: --wan-cards is the caller's word, but the roles of two equal cards come from their ids, not from the order it was typed in
   const p = planWith({ "wan-cards": "0,2" }, { leaseDevicesFn: () => [], env: {} });
-  assert.deepEqual([p.pair.storage.index, p.pair.compute.index], [0, 2]);
+  assert.deepEqual([p.pair.storage.index, p.pair.compute.index], [2, 0]);
   // a dangling or empty flag names no card and is not skipped for the lease
   for (const bad of [undefined, "", " , "]) assert.throws(() => M.wanCardTokens({ flags: { "wan-cards": bad }, env: {}, leaseDevicesFn: () => held }), /--wan-cards needs/, JSON.stringify(bad));
 });

@@ -196,7 +196,8 @@ test("main() hands the lease slot planRun's slot and generate() planRun's own pi
   assert.match(code, /const run = planRun\(process\.argv\.slice\(2\)\);/);
   assert.match(code, /if \(run\.note\) console\.error\(run\.note\);/);
   assert.match(code, /if \(!run\.out\) \{ console\.error\(USAGE\); process\.exit\(2\); \}/);
-  assert.match(code, /await withGpuSlot\(run\.slot, \(\) => generate\(run\.out, run\.api, run\.pos, run\.flags, run\.multicard\)\);/);
+  assert.match(code, /const API = run\.api;/);
+  assert.match(code, /await withGpuSlot\(\{ \.\.\.run\.slot, comfyManaged: true, api: API \}, \(\) => generate\(run\.out, API, run\.pos, run\.flags, run\.multicard\)\);/);
 });
 
 // ---- the console watch in the run ------------------------------------------------------------------------------

@@ -325,6 +325,13 @@ export function launchFlags({ reserveVram = "1.0", warm = false, extraArgs = "",
     extra = stripValued(stripValued(extra, "--cuda-device"), "--default-device");
     flags.push("--cuda-device", profile.cudaDevice);
   }
+  if (profile.multicard) {
+    // ComfyUI's main.py starts dynamic VRAM whenever --enable-dynamic-vram is given, beside --gpu-only too (cli_args.enables_dynamic_vram checks it first), and
+    // the operator's extra args land after the placement's flags: it would stream the experts through host RAM under a lease that declared none.
+    const had = extra.includes("--enable-dynamic-vram");
+    extra = extra.filter((f) => f !== "--enable-dynamic-vram");
+    if (had) warn("COMFY-INSTANCE-WARN: the extra args carry --enable-dynamic-vram, which ComfyUI honours even beside --gpu-only and which would stream the experts through host RAM under a card-only lease; dropped");
+  }
   if (profile.dynamicVram === "on") {
     extra = extra.filter((f) => f !== "--disable-dynamic-vram");
     const still = extra.filter((f) => DYNAMIC_VRAM_DISABLERS.includes(f));
@@ -400,6 +407,7 @@ export function profileMismatch(argv, profile) {
     if (!argv.map(String).includes("--gpu-only")) why.push("it runs without --gpu-only, which the multicard placement needs (dynamic VRAM off, everything on the cards)");
     const got = argvFlagValue(argv, "--cuda-device");
     if (got !== null) why.push(`it runs with --cuda-device ${got}, which overrides the multicard pin by uuid`);
+    if (argvDynamicVram(argv)) why.push("it runs with dynamic VRAM on, which the multicard placement needs off (--gpu-only keeps everything on the cards; --enable-dynamic-vram turns the streaming back on)");
   }
   return why.join("; ");
 }

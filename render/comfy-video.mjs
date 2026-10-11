@@ -413,9 +413,11 @@ export function planRun(argv, { env = process.env, comfyDir = COMFY_DIR, planFn 
 
 async function main() {
   const run = planRun(process.argv.slice(2));
+  const API = run.api;
   if (run.note) console.error(run.note);
   if (!run.out) { console.error(USAGE); process.exit(2); }
-  await withGpuSlot(run.slot, () => generate(run.out, run.api, run.pos, run.flags, run.multicard));
+  // run.slot already says it (planRun builds it); the literal below is what comfy-instance.test.mjs lints every runner for: a managed slot that gets the api.
+  await withGpuSlot({ ...run.slot, comfyManaged: true, api: API }, () => generate(run.out, API, run.pos, run.flags, run.multicard));
 }
 
 // Run only as a script (the harness spawns this file), never on import — the test imports

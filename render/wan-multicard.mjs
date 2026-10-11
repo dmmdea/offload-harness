@@ -179,7 +179,7 @@ function matchCard(token, cards) {
 /**
  * resolveWanCards turns the tokens into the two cards and their roles. It refuses (with the reason) when there are not
  * exactly two distinct cards, when a token names no card of the driver's table, or when a card drives a display.
- * Roles: the larger card is the compute card (cuda:1); equal cards keep the order the caller gave (the second computes).
+ * Roles: the larger card is the compute card (cuda:1); of two equal cards the one with the higher UUID computes.
  */
 export function resolveWanCards({ tokens, source, cards }) {
   if (!tokens || tokens.length === 0) {
@@ -207,7 +207,12 @@ export function resolveWanCards({ tokens, source, cards }) {
     throw placementError(`cannot tell whether idx ${unsure[0].index} (${unsure[0].name}) drives a display (the driver reported display_active ${unsure[0].displayActive || "nothing"}, display_attached ${unsure[0].displayAttached || "nothing"}), and the multicard placement never uses a display card, so it will not guess: lease two cards whose display state the driver reports`);
   }
   const [first, second] = found;
-  const [storage, compute] = second.totalMiB >= first.totalMiB ? [first, second] : [second, first];
+  // The larger card computes. Cards of one size take their roles from their ids: the lower one stores (cuda:0), the higher one computes (cuda:1), which is
+  // the order the lease sorts its ids in (internal/gpulease NormalizeDevices), so a pair named with --wan-cards gets the roles the same pair gets under a
+  // lease, the split the benchmark measured, whatever order the caller typed it in.
+  let storage, compute;
+  if (first.totalMiB !== second.totalMiB) [storage, compute] = second.totalMiB > first.totalMiB ? [first, second] : [second, first];
+  else [storage, compute] = first.uuid.toLowerCase() <= second.uuid.toLowerCase() ? [first, second] : [second, first];
   return { storage, compute, source };
 }
 
@@ -272,8 +277,11 @@ export function multicardEnv(env, launch) {
 
 /**
  * checkComfyDevices compares what the running ComfyUI reports (GET /system_stats devices) with the two cards it was
- * pinned to: cuda:0 must be the storage card and cuda:1 the compute card. ComfyUI numbers its cards in the order of
- * CUDA_VISIBLE_DEVICES; a count or a size that does not match means the pin did not take. Returns the problems found.
+ * pinned to: cuda:0 should be the storage card and cuda:1 the compute card. ComfyUI numbers its cards in the order of
+ * CUDA_VISIBLE_DEVICES; a count, a size or a model name that does not match means the pin did not take. Returns the problems found.
+ * What it can prove is the count, the size (to 5 percent) and the model name ("cuda:N <torch name> : <allocator>" holds the nvidia-smi name) of each
+ * device. It cannot tell two cards of one model apart, and /system_stats carries no UUID: the order of two such cards is the pin's
+ * (CUDA_VISIBLE_DEVICES lists UUIDs, storage first) and the roles' (the lower UUID stores).
  */
 export function checkComfyDevices(devices, pair) {
   const problems = [];
@@ -286,8 +294,12 @@ export function checkComfyDevices(devices, pair) {
   want.forEach(([label, card], i) => {
     const got = cuda[i];
     const gib = Number(got.vram_total) / 1024 ** 3, expect = card.totalMiB / 1024;
+    const squash = (s) => String(s || "").toLowerCase().replace(/\s+/g, " ").trim();
     if (!Number.isFinite(gib) || !Number.isFinite(expect) || Math.abs(gib - expect) > 0.05 * expect) {
       problems.push(`${label} should be idx ${card.index} (${expect.toFixed(1)} GiB) but ComfyUI reports ${Number.isFinite(gib) ? gib.toFixed(1) + " GiB" : "no size"}${got.name ? ` (${got.name})` : ""}`);
+    } else if (squash(got.name) && squash(card.name) && !squash(got.name).includes(squash(card.name))) {
+      // the same size, another model: a pin that landed on the display card (all three cards of the machine are 15.9 GiB)
+      problems.push(`${label} should be idx ${card.index} (${card.name}) but ComfyUI reports ${got.name}`);
     }
   });
   return problems;
