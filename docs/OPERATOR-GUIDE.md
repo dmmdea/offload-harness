@@ -254,14 +254,22 @@ Where the jobs run is decided once, at the start. If this machine's lane is **fr
 is **held** and a roster node renders the same recipe, each job becomes a ticket (ADR 0083): it starts on the first matching lane that frees, here or
 on a node, at most N in flight (`--jobs`; default: this machine's lane plus one per matching node, at most 8), and the command blocks until every job
 has ended, telling you on stderr where each stands. A node renders one job per ticket and pays a ComfyUI cold start for it; the picture is fetched back,
-checked against the hash the node published, to the exact `out` you gave. **krea2 and the 2512 build have no node that renders them**, so a batch of
-either is never split across the fleet: it waits for this machine's lane and runs warm on it as before, and says which node does not match and why.
+checked against the hash the node published, to the exact `out` you gave. **When no roster node publishes a matching recipe** (today krea2 and the 2512
+build: the nodes hold no such weights, and a node that gains them will match), the batch is not split across the fleet: it keeps its place in line for
+this machine's lane for up to the queue's 8 h ceiling (not the 90 s `gpu_wait_ms`), runs warm on it, and says which node does not match and why; Ctrl-C
+ends the wait. With `--route remote`, or on a machine with no image lane, the jobs go one at a time and a busy or unreachable node is waited for (a pause
+of 5 s growing to 5 min, up to 8 h), never turned into a `failed` row; the node's recipe is not compared there, so each row carries the family and
+licence the node reports.
 
-One row per job goes to the printed JSON and to `--results` as each job ends: `{i, out, seed, ok, ms, error, node, family, sha256, verdict}` with
+One row per job goes to the printed JSON and to `--results`: `{i, out, seed, ok, ms, error, node, family, sha256, verdict}` (kept in
+`results.jsonl.partial` as jobs end and written over `results.jsonl` when the batch ends, so an earlier `results.jsonl` survives a refused or a dead
+batch; a warm batch's rows arrive when its session ends) with
 `verdict` `rendered`, `skipped-existing`, `failed` or `queued`. Give each job its own `out` and, for a batch you may have to re-run, its own `seed`.
-Exit **0** every job has its picture, **4** it ran every job and some failed (the rows with `failed` say why), **1** it stopped, was interrupted
-(the jobs that had not ended are `queued`) or was refused before it began (an empty prompt, two different pictures for one `out`, an unknown
-family, an unwritable `--results`).
+Exit **0** every job has its picture, or a busy lane deferred the whole warm batch (its rows are `queued`: count them, a 0 is not "all done" then),
+**4** some job failed (the rows with `failed` say why), **1** it stopped, was interrupted (the jobs that had not ended are `queued`), a one-at-a-time
+job found no place within 8 h, or was refused before it began (an empty prompt, two different pictures for one `out`, an unknown family, an unwritable
+`--results`, a `--results` that is the `--batch` file). A picture a node sent without a published hash is set aside as `out.unverified` and its job is
+`failed`, so `--resume` renders it again.
 
 `--resume` skips a job only when the file at its `out` proves itself: not empty, a PNG that decodes whole, the width and height the job names.
 A zero-byte file, a file cut short or of another size, and a missing file are rendered again. A job with no `out` is never skipped, and a size

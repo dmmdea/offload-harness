@@ -121,16 +121,21 @@ make the caller retry. Three things were still wrong once every lane was busy.
     mixes. The whole batch goes through the warm session (`pipeline.RunImageBatchAs`: one ComfyUI, the checkpoint loads once) when the route is
     local, the machine has no fleet, no state dir or an inherited lease, its lane is free, or its lane is not free **and no roster node renders the
     recipe** (krea2 and the 2512 build exist on this machine's files only, so per-job tickets would be a cold start per picture on the one lane that
-    can run them: slower than waiting for the lane once). Otherwise each job is one ticket of decisions 1 to 10, at most N in flight (default 1 for
+    can run them: slower than waiting for the lane once; that batch keeps its place in the lease line for the lane, up to the queue's 8 h ceiling and
+    not the 90 s window, so the command blocks until it has the lane instead of ending `queued` with exit 0 to be re-run from the back of the line,
+    and an interrupt ends the wait). Otherwise each job is one ticket of decisions 1 to 10, at most N in flight (default 1 for
     this machine's lane plus one per matching node, at most 8, chosen), so a node's claim (decision 6) is what keeps a batch from sending two jobs to
     one single-job node; where no claim protects a node (`--route remote`, a machine with no image lane: the single-render call picks a node without
-    one) the jobs run one at a time. The jobs reach a node exactly as written (decision 3 fixes a seed the job did not give; `refine=false` only
+    one) the jobs run one at a time. There is no ticket to hold such a job, so a held card or a fleet with no free node is asked again after a pause
+    (5 s, 15 s, 1 min, then every 5 min; chosen) up to the same ceiling, and a job that finds no place is `queued`, never `failed`; the node's
+    recipe is not compared there, so a row carries the family and licence the node reports, and a family only the nodes define is carried by name. The jobs reach a node exactly as written (decision 3 fixes a seed the job did not give; `refine=false` only
     when the job says so), and each output is fetched, checked against the sha256 the node published, to its exact `out`. There is no mixed
     local/remote work stealing and no batch task on the fleet (v1). Each job ends in a row `{i, out, seed, ok, ms, error, node, family, sha256,
-    verdict}` (`rendered`, `skipped-existing`, `failed`, `queued`), appended to the results file as it ends. `--resume` skips a job only when the file
+    verdict}` (`rendered`, `skipped-existing`, `failed`, `queued`), kept beside the results file (`<results>.partial`) as its job is final and written over it when the batch ends, so an earlier results file survives a refused or a dead batch; a file the batch rejects (a node's file with no published sha256) is set aside as `<out>.unverified`, so a failed job leaves nothing at its path. `--resume` skips a job only when the file
     at its `out` is not empty, decodes whole as a PNG and has the size the job names; anything doubtful is rendered again (the 21 zero-byte PNGs of
-    2026-10-09). A job whose `out` cannot be made fails alone before a lane is asked for it. Exit 0 every job has its picture, 4 some failed, 1 it
-    stopped or was interrupted.
+    2026-10-09). A job whose `out` cannot be made fails alone before a lane is asked for it. Exit 0 every job has its picture or a busy lane deferred
+    the whole warm batch (rows `queued`), 4 some job failed (also in a deferred batch), 1 it stopped, was interrupted or a job found no place within the
+    ceiling.
 
 ## Consequences
 
@@ -153,8 +158,8 @@ make the caller retry. Three things were still wrong once every lane was busy.
 - **Cost.** Each waiting ticket pays a lane question (one bounded `nvidia-smi` read) and a roster read per scan; the creation
   reading is reused by the first scan for 2 s. N waiting tickets are N reads per interval; a roster-first short circuit and a
   shared table read are named follow-ups.
-- **A batch of krea2 or of the 2512 build never leaves this machine** (decision 12): no node renders them, so the batch waits for the lane
-  up to `gpu_wait_ms` and defers as before, and says which node does not match and why. A batch of a 2.1 family pays a ComfyUI cold start per job
+- **A batch of krea2 or of the 2512 build never leaves this machine** (decision 12): no node renders them, so the batch keeps its place in line
+  for the lane (up to the 8 h ceiling) and runs warm on it, and says which node does not match and why. A batch of a 2.1 family pays a ComfyUI cold start per job
   on a node (zero-warm, ADR 0009), which beats waiting only while this machine's lane is held by a long job and a node is idle.
 - **An interrupted batch leaves its jobs on the nodes.** A job already on a node cannot be recalled (ADR 0064); the same command adopts it only if
   the jobs carry explicit seeds (the ticket's identity is the request, and a seed minted afresh is a new request). The verb runs both
