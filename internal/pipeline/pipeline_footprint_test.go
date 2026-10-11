@@ -318,3 +318,30 @@ func TestRunGenerateVideo_SeatedProvenanceEndToEnd(t *testing.T) {
 		}
 	}
 }
+
+// A card-only run (imagegen_placement: multicard) peaks per card, not on one, and its host growth is the read-only loader's: recorded under the single-card
+// key it would pull that key's 90th percentile (which a declaration is raised to) and its VRAM peak toward numbers true of neither placement. The
+// placement is part of the identity.
+func TestTheCardOnlyPlacementHasItsOwnFootprintKey(t *testing.T) {
+	for ckpt, want := range map[string]string{
+		"qwen_image_2.1_bf16.safetensors": "bf16+multicard",
+		"qwen_image_2.1.safetensors":      "multicard",
+	} {
+		cfg := config.Default()
+		cfg.ImageGenFamily = config.FamilyQwenImage21
+		cfg.ImageGenCkpt = ckpt
+		fam, single := imageFootprintKey(cfg)
+		cfg.ImageGenPlacement = "single"
+		if f2, q2 := imageFootprintKey(cfg); f2 != fam || q2 != single {
+			t.Errorf("%s: placement single is the single key (%q, %q), got (%q, %q)", ckpt, fam, single, f2, q2)
+		}
+		cfg.ImageGenPlacement = "multicard"
+		f3, quant := imageFootprintKey(cfg)
+		if f3 != fam || quant != want || quant == single {
+			t.Errorf("%s: the card-only key is (%q, %q), want (%q, %q) and not the single-card %q", ckpt, f3, quant, fam, want, single)
+		}
+		if got := imageNeed(cfg, "").Foot; got != (footKey{fam, want, "image-gen"}) {
+			t.Errorf("%s: the card-only need records under %+v, want the card-only key", ckpt, got)
+		}
+	}
+}

@@ -663,3 +663,30 @@ func multicardLaneCases() []laneCase {
 			spec: admitSpec{order: admitOrder, mutate: func(c *config.Config) { krea2Binding(c); c.ImageGenPlacement = "multicard" }}},
 	}
 }
+
+// The measured card-only zero is said in the log once per key, like every other declaration: a 0 the footprint store can never correct (calibratedRAM leaves
+// 0 alone) is the one a reader of the log must be able to see.
+func TestAMeasuredCardOnlyDeclarationOfZeroIsSaidInTheLogOncePerKey(t *testing.T) {
+	f := newAdmitFixtureWith(t, admitSpec{order: admitOrder, mutate: multicardEditBinding})
+	planNoteOnce.Range(func(k, _ any) bool { planNoteOnce.Delete(k); return true })
+	buf := captureLogLines(t)
+	ctx := context.Background()
+	edit := editNeed(f.cfg, "")
+	for i := 0; i < 3; i++ {
+		if got := f.p.declaredRAM(ctx, edit, f.cards, pairIDs()); got != 0 {
+			t.Fatalf("the pair: %.1f GiB, want 0", got)
+		}
+	}
+	lines := linesWith(buf, "declaring host RAM: 0.0 GiB host RAM")
+	if len(lines) != 1 || !strings.Contains(lines[0], "card-only placement") || !strings.Contains(lines[0], "read-only safetensors loader") {
+		t.Fatalf("three declarations of one zero leave one line that says why, got %d:\n%s", len(lines), buf.String())
+	}
+	// a figure that is not zero is said as it always was, and a zero that is not the recipe's says nothing
+	before := len(linesWith(buf, "declaring host RAM: "))
+	if got := f.p.declaredRAM(ctx, edit, f.cards, pairIDs()[:1]); got <= 0 {
+		t.Fatalf("one card: %.1f GiB, want the ordinary figure", got)
+	}
+	if after := len(linesWith(buf, "declaring host RAM: ")); after != before+1 {
+		t.Errorf("the ordinary figure is one more line, got %d -> %d:\n%s", before, after, buf.String())
+	}
+}

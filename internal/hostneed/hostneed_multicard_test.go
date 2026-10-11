@@ -237,3 +237,27 @@ func TestThePlacementDoesNotChangeTheClassDefault(t *testing.T) {
 		t.Fatalf("class default %v with a placement, %v without", b, a)
 	}
 }
+
+// A 0 is the silent default of a declaration, so the one a card-only recipe earns must be marked: the lease verb and the pipeline say it aloud, with the
+// detail that explains it, because a false 0 (the reader not engaged, a pack upgrade that changed the loaders) streams silently otherwise.
+func TestOnlyAMeasuredCardOnlyDeclarationIsMarkedCardOnly(t *testing.T) {
+	two := imgFacts(t, 15.9, 15.9)
+	if n := need(t, editFp8Cmd, two); n.GiB != 0 || !n.CardOnly {
+		t.Fatalf("the measured fp8mixed row on two fitting cards: %+v, want 0 and marked card-only", n)
+	}
+	for name, c := range map[string]struct {
+		cmd string
+		f   Facts
+	}{
+		"a predicted row":                      {img21Cmd, two},
+		"a row that does not fit":              {editFp8Cmd, imgFacts(t, 12, 12)},
+		"one card":                             {editFp8Cmd, imgFacts(t, 15.9)},
+		"no placement":                         {without(editFp8Cmd), two},
+		"a canvas above the row's cap":         {editFp8Cmd + " --megapixels 3.5", two},
+		"a share the storage card cannot hold": {editFp8Cmd + " --resident-gb 5", two},
+	} {
+		if n := need(t, c.cmd, c.f); n.CardOnly {
+			t.Errorf("%s: %+v is marked card-only, but it is not the measured zero", name, n)
+		}
+	}
+}
