@@ -781,6 +781,7 @@ func TestBatchRefusalsBeforeAnythingRuns(t *testing.T) {
 		"empty":              {nil, batchOpts(), "empty batch"},
 		"an empty prompt":    {[]BatchJob{ok, {Prompt: "  ", Out: filepath.Join(dir, "b.png")}}, batchOpts(), "job 1: empty prompt"},
 		"two different pics": {[]BatchJob{ok, {Prompt: "another", Out: ok.Out, Seed: 2}}, batchOpts(), "jobs 0 and 1 are different pictures with the same out"},
+		"two seedless jobs":  {[]BatchJob{{Prompt: "a door", Out: ok.Out}, {Prompt: "a door", Out: ok.Out}}, batchOpts(), "jobs 0 and 1 are different pictures with the same out"},
 		"an unknown family":  {[]BatchJob{ok}, BatchOpts{Family: "nope"}, `unknown image family "nope"`},
 		"an unknown route":   {[]BatchJob{ok}, batchOpts(func(o *BatchOpts) { o.Route = "everywhere" }), "unrecognized route"},
 		"a negative --jobs":  {[]BatchJob{ok}, batchOpts(func(o *BatchOpts) { o.Jobs = -1 }), "--jobs -1"},

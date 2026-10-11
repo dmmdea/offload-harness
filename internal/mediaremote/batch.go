@@ -244,15 +244,16 @@ func RunBatch(ctx context.Context, cfg config.Config, runner Runner, jobs []Batc
 	if ferr != nil {
 		return nil, ferr
 	}
-	if err := distinctOuts(jobs); err != nil {
-		return nil, err
-	}
-
+	// A seed a job did not give is minted now, before the outs are compared: two seedless jobs for one out are two different
+	// pictures, whatever else they share.
 	jobs = append([]BatchJob(nil), jobs...)
 	for i := range jobs {
 		if jobs[i].Seed <= 0 {
 			jobs[i].Seed = mintSeed()
 		}
+	}
+	if err := distinctOuts(jobs); err != nil {
+		return nil, err
 	}
 	b := &Batch{Rows: make([]BatchRow, len(jobs)), Mode: ModeNone}
 	st := &batchState{b: b, o: o, fam: fam.Name, self: selfOrLocal(cfg)}
