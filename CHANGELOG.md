@@ -125,6 +125,15 @@ Versioning: [SemVer](https://semver.org/).
   FLEET-NODE.md, the operator guide): a list of numbers, booleans or enum values (quoted by the grammar, converted back by the
   re-pack's coercion), a type list, `anyOf`, `oneOf`, `allOf` and `$ref`. Every property a schema lists is required by the grammar,
   at every depth, whether or not the schema's own `required` names it.
+- **The coercion follows the schema to every depth.** The conversion above was promised at every depth and done at the top level only
+  (`coerceToSchemaNoted` read the schema's top-level properties and the items of top-level lists), so a numeric or boolean list inside an
+  object or inside a list of objects could never validate on a seat that obeys the grammar: every grammar attempt failed `at
+  '/meta/scores/0': got string, want number`, and the delegator's one-completion rescue could not deliver such a schema at all. It now
+  reads every property and every list item along the schema's `properties` and `items`, with the same lossless rule and the same
+  full re-validation, and the note names a nested field by its path (`meta.scores (2 items)`, `rows[].scores (3 items)`, `meta.owner.id`);
+  the top level is named as before. Red before: `internal/pipeline/agenttask_repackcoerce_nested_test.go` (the table; the premise that the
+  grammar quotes the list and refuses the real one; a seat that obeys the grammar, through `repackStructured` and through a run). Six
+  mutations of the fix were each caught.
 
 ### Fixed — a structured re-pack is owed the time its own answer needs, so a loop that overran a short wall no longer skips it (F44/C13)
 
