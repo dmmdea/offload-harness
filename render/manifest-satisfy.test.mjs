@@ -1,11 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { satisfyModels, defaultSatisfyDeps, parseExtraModelPaths, modelCandidates } from "./manifest-satisfy.mjs";
-import { mkdtempSync, existsSync, readFileSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { mkdtempSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { join, resolve, sep } from "node:path";
 import { tmpdir } from "node:os";
 import { satisfyManifest, buildHostConstraints, publicPin, isSpawnFailure, runRetryOnSpawn } from "./manifest-satisfy.mjs";
 import { parseManifest } from "./manifest.mjs";
+import { makeStub, stubAvailable } from "./igpu-stub.mjs";
+import { scratchDir } from "./test-scratch.mjs";
 import { buildCompileCmd, buildInstallCmd, buildEnsurePackCmd, buildClonePackCmd, makeEnsurePack } from "./manifest-satisfy.mjs";
 
 const base = {
@@ -591,4 +593,47 @@ test("defaultSatisfyDeps.download streams the body to disk (no >2GB Buffer cap)"
     globalThis.fetch = origFetch;
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// Production leak: the host-constraints file and the pack lock `resolveDeps` writes were pid-named files in the OS temp dir
+// that nothing removed, so every provisioning run left two behind. They now live in a folder of the step's own that goes
+// when the step ends, however it ends. The real glue runs here against stub executables for the venv python (it answers
+// `pip freeze` with a host-pinned torch) and for uv (it writes the lock it is asked for at `-o`, then exits as told), with
+// the OS temp dir pointed at a private folder.
+async function resolveInPrivateTemp(t, { uvExit }) {
+  const bin = scratchDir(t, "satisfy-bin-");
+  const comfy = scratchDir(t, "satisfy-comfy-");
+  const priv = scratchDir(t, "satisfy-tmp-");
+  const uvLog = join(bin, "uv-calls.jsonl");
+  const py = makeStub(bin, "python", { stdout: ["torch==2.11.0+cu128", "requests==2.32.0"] });
+  makeStub(bin, process.platform === "win32" ? "uv" : "uv.exe", { // resolveDeps looks for uv.exe beside the python
+    exit: uvExit, record: uvLog, writes: { kind: "file_o", base64: Buffer.from("requests==2.32.0\n").toString("base64") },
+  });
+  mkdirSync(join(comfy, "custom_nodes", "PackA"), { recursive: true });
+  writeFileSync(join(comfy, "custom_nodes", "PackA", "requirements.txt"), "requests\n");
+  const saved = { TEMP: process.env.TEMP, TMP: process.env.TMP, TMPDIR: process.env.TMPDIR };
+  t.after(() => { for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; } });
+  process.env.TEMP = process.env.TMP = process.env.TMPDIR = priv;
+  const deps = defaultSatisfyDeps({ comfyDir: comfy, comfyPy: py, api: "http://127.0.0.1:0", cmCli: "" });
+  const outcome = await deps.resolveDeps([{ name: "PackA" }]).then(() => "resolved", (e) => e);
+  const compile = JSON.parse(readFileSync(uvLog, "utf8").trim().split("\n")[0]).argv; // uv pip compile ... -o <lock>
+  const lock = compile[compile.indexOf("-o") + 1];
+  return { outcome, left: readdirSync(priv), lock, priv };
+}
+
+const stubSkip = () => (stubAvailable() ? false : "cannot build a stub executable here (needs go on Windows)");
+const underDir = (file, dir) => resolve(file).startsWith(resolve(dir) + sep);
+
+test("defaultSatisfyDeps.resolveDeps leaves no host-constraints file or pack lock in the OS temp dir when the install resolves", { skip: stubSkip() }, async (t) => {
+  const r = await resolveInPrivateTemp(t, { uvExit: 0 });
+  assert.equal(r.outcome, "resolved");
+  assert.ok(underDir(r.lock, r.priv), `uv was asked to write the lock under the OS temp dir (${r.lock}), so the check below is not vacuous`);
+  assert.deepEqual(r.left, []);
+});
+
+test("defaultSatisfyDeps.resolveDeps leaves no host-constraints file or pack lock in the OS temp dir when uv fails", { skip: stubSkip() }, async (t) => {
+  const r = await resolveInPrivateTemp(t, { uvExit: 1 });
+  assert.ok(r.outcome instanceof Error && /exit 1/.test(r.outcome.message), "the uv failure still reaches the caller: " + r.outcome);
+  assert.ok(underDir(r.lock, r.priv), `uv had written the lock under the OS temp dir (${r.lock}) before it failed`);
+  assert.deepEqual(r.left, []);
 });
