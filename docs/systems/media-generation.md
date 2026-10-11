@@ -1210,11 +1210,12 @@ take, which is every model of the roster except the memory stack and the models 
 another card (`gpualloc.UnloadModels`, the rule `gpu reserve --devices` uses). A model is placed by `layers`,
 else by the device pin of its entry in the serving config (`serving_config_path`); a seat placed on another
 card stays, and a model nothing places goes (a `proxy:` seat with no `layers` entry is unloaded under any
-card lease). A card call always gets the variable: with the roster unreadable the candidates are the models
-`layers` declare and the serving config lists, with no llama-swap endpoint it is `-`. An unset variable
-would make the runner unload every model off the memory stack, and a render on one card would empty the
-seats placed on the others (register C-86, F15); a runner that does find a lease on cards with no list
-unloads every model off the memory stack and says that it had none (`render/gpu-lock.mjs`). The post-run
+card lease). A card call gets the variable whenever the roster was read: with no llama-swap endpoint it is `-`, and with
+the roster unreadable it gets none, because nothing then says what is resident and a list built from the config alone is
+never complete: the render lane keeps its own rule (every model off the memory stack) and the log says why. An unset variable
+makes the runner unload every model off the memory stack, so a render on one card empties the seats placed on the others
+(register C-86, F15): the price of an unreadable roster, taken because it is the safe direction. A runner that finds a lease
+on cards with no list unloads every model off the memory stack and says that it had none (`render/gpu-lock.mjs`). The post-run
 `/free` goes to the endpoint the runner was given.
 
 **In-process slots.** `mediaSlot`, a single slot for the whole process, is now a set with one slot per

@@ -35,16 +35,24 @@ Versioning: [SemVer](https://semver.org/).
 - **What a lease unloads.** `LeaseScope.Judge`: a model placed on a leased card goes; **a model placed on another card, by `layers`
   or by the serving config pin, stays** (the F15 gain); a model whose placement is unknown goes, exactly as before F15, because
   the render needs its card (a `proxy:` seat with no `layers` entry is unloaded under any card lease); the memory stack never goes.
+  That judgement runs on a roster that was READ. A roster that could not be read is not judged at all: see "A card lease gets a
+  list" below.
   A lease that names every card the table lists is still the whole node (`holdsAll`: a one-card box's only card, all three of
   three). `Touches` is the same reading, so the drain and the agent seat agree with the unload. The card table unreadable: every
   model is unknown and goes, as before.
 - **The lane says what it did and why.** One line per reason, from `gpualloc.Explain`, in the wrapper's stderr and the media
   admission's log: `unloaded, placed on a leased card by layers: ...`, `left resident, placed elsewhere by the serving config
   pin: ...`, `unloaded, placement unknown (it is a proxy: seat, ...): ...`. The render helper logs the models it left on a list.
-- **A card lease always gets a list.** `wrapperUnloadEnv` (`gpu reserve --devices`) and the media admission's `unloadEnv` export
-  `GPU_LEASE_UNLOAD_MODELS=-` when there is nothing to unload (no endpoint, nothing the verdicts select) instead of leaving the
-  variable unset; with the roster unreadable the candidates are the models `layers` declare and the serving config lists. Only a
-  whole-node lease has no list. `gpu reserve --unload-seat` judges the other residents with the same verdicts.
+- **A card lease gets a list, unless the roster could not be read.** `wrapperUnloadEnv` (`gpu reserve --devices`) and the media
+  admission's `unloadEnv` export `GPU_LEASE_UNLOAD_MODELS=-` when there is nothing to unload (no endpoint, nothing the verdicts
+  select) instead of leaving the variable unset. A whole-node lease has no list, and neither has a card lease whose llama-swap
+  roster could not be read: that is not an empty roster, nothing says what is resident, and a list built from the config alone is
+  never complete (with `layers` only, a resident model neither they nor the serving config name would never be judged and would
+  stay on the leased card; with neither, the list is empty and the lane unloads nothing). `gpualloc.UnloadModels` takes the
+  roster read's error and returns no list for it, whatever the config declares, so the variable stays unset and
+  `render/gpu-lock.mjs` keeps its own rule, every model off the memory stack, exactly as before F15; the wrapper and the media
+  admission log that they fell back because the roster could not be read. A roster that was read and is empty means nothing is
+  resident and is judged like any other. `gpu reserve --unload-seat` judges the other residents with the same verdicts.
 - **Between renders.** The unload is elected once per lease, so a seat that came back onto the leased cards stayed for the rest of
   the lease. A job that lost the election under a card lease with a non-empty list now reads that list against `/running` again
   before it submits (`withGpuSlot` `reclear`); `freeLlamaSwap` unloads a listed model only when it is resident, so a card that is
@@ -56,19 +64,23 @@ Versioning: [SemVer](https://semver.org/).
   that ignores the serving config pins). `internal/gpualloc`: a model nothing places is on the list, the serving config's pins place a
   model `layers` do not (UUID, index with and without the PCI order, alias, a pair spanning the leased card), `layers` outrank the
   serving config, a `proxy:` seat, an entry with no env pin and a cmd-only pin are unknown, an unreadable or unset serving config
-  is said once, no roster judges what the config declares and lists, no card table unloads every model, the memory stack stays out
+  is said once, an unreadable roster makes no list whatever the config declares (nothing placed, `layers` only, `layers` and a serving config) while a roster read and empty still has one, no card table unloads every model, the memory stack stays out
   even when placed on a leased card, a lease on every card is the whole node. Root: the same through `unloadModelsFor`,
   `--unload-seat` (layers and the serving config), the wrapper form end to end, the roster-unreadable and no-endpoint wrappers,
-  the unplaceable pin and the unreadable table. Pipeline: an unreadable roster still hands the call a list; the serving config
+  the unplaceable pin and the unreadable table. Pipeline: an unreadable roster hands the call no list and says why; the serving config
   keeps a model on card C off card A's list. `render/`: a later job re-clears under a card lease with a list and under no other,
   a card lease with no list says so and unloads as before, a list names what stays. `internal/modelaffinity`: a media lease fences
   its own cards through every door exactly as an exclusive text lease does and lets a free card through, and the fence starts when
   the drain ends. Each rule has a mutant that turns its test red (unknown stays, serving pins ignored, the proxy rule, the PCI
   order rule, the serving config outranking `layers`, aliases, the hold-every-card reading, the memory-stack filter, the verdicts
-  in `--unload-seat`, the unset variable on a roster error and on a missing endpoint, the pipeline's roster fallback, the media
+  in `--unload-seat`, the unset variable on a missing endpoint, the roster-error branch of `UnloadModels` and each caller dropping the roster error, the media
   clause, the draining clause and the per-card scoping of the fence, the Node no-list log, the re-clear and its card condition,
   the left-resident log).
-- **Not changed, and not verified here.** First and most important for a box without `layers`: the unload now knows from the
+- **Not changed, and not verified here.** First, a limit of the fix: the roster read is the one input the unload cannot check. When
+  it fails, F15's gain is off for that lease: the render lane keeps its own rule and unloads every model off the memory stack, the
+  seats placed on other cards included, and says so; this is the safe direction (a card that stays occupied fails the render, a
+  seat that is reloaded costs a warm-up), chosen over a list built from the config, which can leave a resident model on the leased
+  card. A roster that was read and is empty is trusted to mean nothing is resident. Second, for a box without `layers`: the unload now knows from the
   serving config which card a model is on, and the load fence does not. The fence (`modelaffinity`, armed from `config.ModelPins`)
   still places a model through `layers` only, so on such a box a text load waits for any media lease, whatever card it is on,
   exactly as before this change; reading the serving config there is a separate change. Also: a client that is not the harness can still load a model onto a leased card; the re-clear removes it
@@ -164,7 +176,7 @@ Versioning: [SemVer](https://semver.org/).
 - **Tests.** `internal/pipeline/agenttask_repackowed_test.go`: a 2 s wall and a loop that ends at 2.4 s (red before: `skipped: 0 s left to
   the wall + 0 s grace`), a slow seat with an instant loop (red before: `60 s left ... buys 29 tokens < the answer's 69`), the ceiling that
   cannot hold it, the owed time not renewed for a later attempt, `repackOwed` and the later-of-two-ends arithmetic. Two tests whose premise
-  was the defect (`TestRunAgentTaskRepackIsSkippedWhenTheWallCannotBuyTheAnswer`, the review-lane subtest `a re-pack the wall could not buy`)
+  was the defect (`TestRunAgentTaskRepackIsSkippedWhenTheCeilingCannotBuyTheAnswer`, the review-lane subtest `a re-pack the wall could not buy`)
   now pin the ceiling-bound skip. Four mutations of the fix were each caught. ADR 0055 item 10, `docs/systems/fleet-node.md`.
 
 ### Fixed — a re-pack that loops is asked differently the next time, and a looped list is not published (C14)
