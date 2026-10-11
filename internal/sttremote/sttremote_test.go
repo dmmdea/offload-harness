@@ -733,9 +733,13 @@ func TestRemoteWaitEndsOnTheDeadlineAndOnAnEvictedJob(t *testing.T) {
 	setBusy(t, false)
 	slow := newFakeNode(t, "node-slow", sttTasks, okResult(sampleSegments, false))
 	slow.stayRunning = true
+	// The stand-in is installed before the clock starts: that takes as long as a scanner takes to look at a
+	// new executable, and the deadline is for the wait.
+	cfg := askerCfg(t, slow, fakeFFmpeg(t, false))
+	req := sttReq(srcAudio(t), nil)
 	ctx, cancel := context.WithTimeout(context.Background(), 1200*time.Millisecond)
 	defer cancel()
-	got := Run(ctx, askerCfg(t, slow, fakeFFmpeg(t, false)), &localRunner{}, sttReq(srcAudio(t), nil), "remote")
+	got := Run(ctx, cfg, &localRunner{}, req, "remote")
 	if !got.Deferred || got.DeferClass != core.DeferClassInfrastructure || !strings.Contains(got.Reason, "node-slow") || !strings.Contains(got.Reason, "still running") {
 		t.Fatalf("result = %+v, want an infrastructure defer naming the node whose job was still running", got)
 	}
