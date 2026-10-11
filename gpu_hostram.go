@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/gpulease"
@@ -27,7 +28,8 @@ import (
 // leases are whole-node, exactly as before, and it may have no NVIDIA card to ask), so its card is
 // unknown by construction and the estimate is the conservative one. It says what it declared and
 // why on out, but only when the number is not zero by default: the operator needs the line when a
-// lease will wait on it.
+// lease will wait on it. When the figure is the media class default and the operator did not choose
+// it, one more line says why and that --ram states the real figure (classDefaultHint, F71).
 func resolveReserveHostRAM(ramGiven bool, ramGiB float64, class gpulease.Class, cmdArgs []string, ids []string, cfg config.Config, readCards bool, out io.Writer) hostneed.Need {
 	return resolveReserveHostRAMWith(ramGiven, ramGiB, class, cmdArgs, ids, cfg, readCards, nil, out)
 }
@@ -43,7 +45,7 @@ func resolveReserveHostRAMWith(ramGiven bool, ramGiB float64, class gpulease.Cla
 		req.Explicit = &ramGiB
 	}
 	facts := hostneed.Facts{Cfg: cfg, Env: os.Getenv}
-	_, recognised := hostneed.ParseRenderCall(cmdArgs)
+	call, recognised := hostneed.ParseRenderCall(cmdArgs)
 	if readCards && !ramGiven && (recognised || class == gpulease.ClassMedia) {
 		// CardsGiB is each leased card's size: the card-only Wan placement (comfy-video.mjs --wan-placement multicard) runs on
 		// exactly two of them and is sized against the pair, where every other call is sized against the largest one.
@@ -58,6 +60,36 @@ func resolveReserveHostRAMWith(ramGiven bool, ramGiB float64, class gpulease.Cla
 	need := hostneed.Resolve(req, facts)
 	if need.GiB > 0 || need.Source == hostneed.SourceExplicit {
 		fmt.Fprintf(out, "gpu reserve: declaring %s\n", need)
+		if hint := classDefaultHint(need, cmdArgs, call, recognised); hint != "" {
+			fmt.Fprintln(out, hint)
+		}
 	}
 	return need
+}
+
+// classDefaultHint is the line after the declaring one when the declared figure is the media class default (the largest
+// ComfyUI family this box binds, sized as if it streamed from RAM) and the operator gave no --ram (F71). The default is a
+// figure for a call the lease could not read, so the caller whose weights sit on the cards cannot tell from "class default"
+// that it is theirs to correct; the film session declared 46.8 GiB for a driver script that wrapped renders with their
+// weights on two cards, and waited a queue cycle on it. Resolve reaches the class default for exactly four reasons, and the
+// line names the one that applies: nothing is wrapped (a hold), the wrapped command is not a render helper it knows (named
+// from the same table that recognises them), a recognised helper runs its own --graph, or a recognised helper's weight
+// files could not be sized. It is one line, and it never contains the word the declaring line is grepped by, so a script
+// that greps for the declaration still sees one. It changes no figure.
+func classDefaultHint(need hostneed.Need, cmdArgs []string, call hostneed.RenderCall, recognised bool) string {
+	if need.Source != hostneed.SourceClassDefault {
+		return ""
+	}
+	var why string
+	switch {
+	case len(cmdArgs) == 0:
+		why = "no command is wrapped, so there is nothing to size"
+	case !recognised:
+		why = "the wrapped command is not a recognised render helper (" + strings.Join(hostneed.RenderHelpers(), ", ") + "), so its weights are not sized"
+	case call.RunsOwnGraph():
+		why = call.Script + " runs its own --graph, and what a graph loads is not known to the lease"
+	default:
+		why = "the weight files " + call.Script + " names could not be sized (a named file is not in the ComfyUI model tree and its family has no documented size)"
+	}
+	return "gpu reserve: that is the class default, not a measure of this command: " + why + ". Pass --ram <GiB> to state the real figure (--ram 0 when the weights sit on the cards)"
 }

@@ -75,7 +75,7 @@ func (c RenderCall) Estimate(f Facts) (Need, bool) {
 	// loads is as unknown to the caller as what run-graph loads, and the media class default stands in.
 	// Sizing it as the helper's default family declared 0 for a 40 GiB graph (SDXL fits the card) and
 	// the wrong family for a video one (review of 2026-10-10).
-	if strings.TrimSpace(c.Flags["graph"]) != "" {
+	if c.RunsOwnGraph() {
 		return Need{}, false
 	}
 	if v := c.Flags["reserve-vram"]; v != "" {
