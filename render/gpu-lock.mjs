@@ -155,13 +155,14 @@ export function memoryStack(env = process.env.MEMORY_STACK) {
 
 // GPU_LEASE_UNLOAD_MODELS: the models the Go wrapper says may leave under a lease that holds some
 // cards, not the whole node (plan P5, register C-86, F15). `gpu reserve --devices <cards> -- <render>`
-// and the media admission compute it (the models the config and the card table POSITIVELY place on a
-// leased card, minus the memory stack) and export it; freeLlamaSwap then unloads that list instead of
-// every model off the memory stack, so a card-2 render no longer empties the seats on card 0.
+// and the media admission compute it (every model except the memory stack and the models POSITIVELY
+// placed on another card, by layers or by the serving config's device pin; a model nothing places is on
+// it) and export it; freeLlamaSwap then unloads that list instead of every model off the memory stack,
+// so a card-2 render no longer empties the seats placed on card 0.
 //
-//   unset / empty -> null   no list. For a lease that holds every card, today's rule: every model off
-//                           the memory stack. For a lease on some cards (leaseDevices) nothing leaves,
-//                           because which seats sit on those cards is not known here.
+//   unset / empty -> null   no list: today's rule, every model off the memory stack (every placement is
+//                           unknown). A lease on some cards (leaseDevices) says so, because the wrapper
+//                           always hands it a list.
 //   "-"           -> []     the wrapper says nothing may leave
 //   "a,b"         -> [a,b]  exactly these
 export function parseUnloadModels(raw = process.env.GPU_LEASE_UNLOAD_MODELS) {
@@ -355,11 +356,11 @@ export async function freeLlamaSwap(api = process.env.LLAMA_SWAP_API || "http://
   const supplied = opts.unloadModels !== undefined ? opts.unloadModels : parseUnloadModels();
   const devices = opts.leaseDevices !== undefined ? opts.leaseDevices : leaseDevices();
   if (!supplied && devices.length > 0) {
-    // A lease on SOME cards and no list (register F15): which seats sit on those cards is not known
-    // here, and "every model off the memory stack" empties the seats on the cards the lease does not
-    // hold. Today's rule belongs to a lease that holds every card, so this one unloads nothing.
-    log(`freeLlamaSwap: this lease holds the card(s) ${devices.join(",")} but was handed no unload list: NOT unloading (which seats sit on those cards is not known here, and unloading every model would empty the seats on the cards the lease does not hold); the render runs against whatever VRAM remains`);
-    return;
+    // A lease on SOME cards and no list (register F15): nothing says which models sit where, so every
+    // placement is unknown, and an unknown placement is unloaded (the render needs its card), exactly as
+    // before F15. Said, because the wrapper always hands a card lease a list: this is an older wrapper
+    // or a hand-built environment, and the models placed on the other cards go with the rest.
+    log(`freeLlamaSwap: this lease holds the card(s) ${devices.join(",")} but was handed no unload list: the placement of every model is unknown, so every model off the memory stack is unloaded`);
   }
   const allowed = supplied ? new Set(supplied) : null;
   let ids = [];
@@ -393,7 +394,7 @@ export async function freeLlamaSwap(api = process.env.LLAMA_SWAP_API || "http://
   if (allowed) {
     // Said, so the operator can tell a seat that stayed from a seat that was missed.
     const stays = [...running].filter((id) => !keep.has(id) && !allowed.has(id));
-    if (stays.length > 0) log(`freeLlamaSwap: left resident (not on this lease's cards): ${stays.join(", ")}`);
+    if (stays.length > 0) log(`freeLlamaSwap: left resident (not on this lease's unload list: placed on other cards): ${stays.join(", ")}`);
   }
   const loaded = ids.filter((id) => running.has(id));
   if (loaded.length === 0) return; // nothing of ours is holding VRAM

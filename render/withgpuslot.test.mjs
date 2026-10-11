@@ -220,7 +220,7 @@ test("the default re-clear is on only for a lease that holds cards AND was hande
   };
   assert.equal(await run({ GPU_LEASE_UNLOAD_MODELS: "a,b", GPU_LEASE_DEVICES: "gpu-cccc" }), true, "cards + list: re-check");
   assert.equal(await run({ GPU_LEASE_UNLOAD_MODELS: "-", GPU_LEASE_DEVICES: "gpu-cccc" }), false, "cards + none list: nothing may leave");
-  assert.equal(await run({ GPU_LEASE_UNLOAD_MODELS: undefined, GPU_LEASE_DEVICES: "gpu-cccc" }), false, "cards, no list: nothing is known");
+  assert.equal(await run({ GPU_LEASE_UNLOAD_MODELS: undefined, GPU_LEASE_DEVICES: "gpu-cccc" }), false, "cards, no list: there is no list to re-check");
   assert.equal(await run({ GPU_LEASE_UNLOAD_MODELS: "a,b", GPU_LEASE_DEVICES: undefined }), false, "a list without cards is not a card lease");
 });
 
