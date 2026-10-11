@@ -104,6 +104,14 @@ test("a recipe whose per-card peak does not fit the leased cards (after --reserv
   assert.ok(plan({ cards: () => tight, flags: { placement: "multicard", "reserve-vram": "0.2" } }), "a 0.2 GiB reserve leaves 14.8 GiB");
 });
 
+test("the compute card's peak moves with the resident share, and --reserve-vram counts against both cards", () => {
+  // bf16: 8 GiB resident is 10.8 GiB on the compute card. 12.5 GiB passes the activations check (at most 12.9) but is 15.3 GiB against 14.9 usable.
+  assert.ok(plan({ flags: { placement: "multicard", "resident-gb": "11" } }), "13.8 GiB fits 14.9 GiB usable");
+  assert.ok(plan({ flags: { placement: "multicard", "resident-gb": "4" } }), "a smaller share leaves the compute card room");
+  assert.throws(() => plan({ flags: { placement: "multicard", "resident-gb": "12.5" } }), /needs the compute card.*to hold 15\.3 GiB.*14\.9 GiB usable after --reserve-vram 1/s);
+  assert.ok(plan({ flags: { placement: "multicard", "resident-gb": "12.5", "reserve-vram": "0.1" } }), "the same share fits when the call asks for less reserve");
+});
+
 test("refused before any card table is read: no recipe, a --graph file, and no card named at all", () => {
   assert.throws(() => plan({ cards: never, family: "krea2", unet: "k.safetensors" }), /no measured card-only recipe for krea2.*--pool-vvram/s);
   assert.throws(() => plan({ cards: never, unet: "qwen_image_2512_bf16.safetensors", family: "qwen-image" }), /bf16 fits no card/);
