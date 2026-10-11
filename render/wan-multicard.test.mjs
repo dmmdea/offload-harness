@@ -717,6 +717,22 @@ test("comfyLogCursor: a console file that does not exist is said, and one that a
   assert.deepEqual(cur.read(), { text: "boot\n", state: "ok" });
 });
 
+test("createOomWatch remembers ComfyUI's plain-decode retry across reads, and says whether the console could be trusted to tell", () => {
+  const verdict = (reads) => {
+    const queue = [...reads];
+    const watch = M.createOomWatch({ cursor: { path: "/c/x.log", read: () => queue.shift() || { text: "", state: "ok" } }, say: () => {} });
+    for (let i = 0; i < reads.length; i++) watch();
+    return watch.verdict;
+  };
+  const RETRY = "Warning: Ran out of memory when regular VAE decoding, retrying with tiled VAE decoding.\n";
+  assert.equal(verdict([{ text: "a\n", state: "ok" }, { text: "b\n", state: "ok" }]), "clean");
+  assert.equal(verdict([{ text: RETRY, state: "ok" }, { text: "later\n", state: "ok" }]), "fallback", "a retry seen on an earlier read is not forgotten");
+  assert.equal(verdict([{ text: "a\n", state: "ok" }, { text: "", state: "absent" }]), "blind", "a console that is gone at the end cannot say");
+  assert.equal(verdict([{ text: "x", state: "capped" }, { text: "", state: "ok" }]), "blind", "a capture that reached its cap is blind for the rest of the run, whatever it reads later");
+  assert.equal(verdict([{ text: RETRY, state: "ok" }, { text: "", state: "absent" }]), "fallback", "seen is seen");
+  assert.equal(verdict([]), "clean", "a watch never asked has seen nothing wrong");
+});
+
 test("createOomWatch: silent while the console is quiet, one message naming the line and the log when the worker is gone, a loud word when it cannot see", () => {
   const reads = [];
   const said = [];

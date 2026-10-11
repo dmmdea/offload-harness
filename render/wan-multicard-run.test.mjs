@@ -6,7 +6,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { generate, planRun, GENERATE_IO, buildGraphForRun, submitChecked, verifyMulticardDevices, verifyMulticardPack } from "./comfy-video.mjs";
 import { pollOutputs, fetchView, finalizeRun, resolveCli } from "./comfy-submit.mjs";
-import { tailComfyLog, comfyApi } from "./comfy-lifecycle.mjs";
+import { comfyApi, comfyLogCursor } from "./comfy-lifecycle.mjs";
 import { writeFileAtomic } from "./atomic-out.mjs";
 import * as M from "./wan-multicard.mjs";
 
@@ -69,7 +69,7 @@ const GRAPH = { "20": { class_type: "VHS_VideoCombine", inputs: {} } };
 const DONE = { outputs: { "20": { gifs: [{ filename: "wan_00001.mp4", subfolder: "v", type: "output" }] } } };
 
 function fakeIo(over = {}) {
-  const rec = { calls: [], out: [], err: [], polls: [], tails: [], written: [] };
+  const rec = { calls: [], out: [], err: [], polls: [], written: [], cursors: [], finalized: 0 };
   const io = {
     verifyDevices: async () => { rec.calls.push("verifyDevices"); },
     verifyPack: async () => { rec.calls.push("verifyPack"); },
@@ -79,8 +79,9 @@ function fakeIo(over = {}) {
     poll: async (opt) => { rec.calls.push("poll"); rec.polls.push(opt); return DONE; },
     view: async () => { rec.calls.push("view"); return Buffer.from("mp4"); },
     write: (p, b) => { rec.calls.push("write"); rec.written.push([p, b]); },
-    tailLog: (dir, n, key) => { rec.calls.push("tailLog"); rec.tails.push([dir, n, key]); return ""; },
-    finalize: async () => { rec.calls.push("finalize"); },
+    // the instance's console as the run's cursor reads it: quiet unless a test says otherwise (rec.reads is a queue of { text, state })
+    logCursor: (dir, key) => { rec.cursors.push([dir, key]); return { path: `${dir}/offload-comfyui-${key}.log`, read: () => (rec.reads && rec.reads.length ? rec.reads.shift() : { text: "", state: "ok" }) }; },
+    finalize: async () => { rec.calls.push("finalize"); rec.finalized++; },
     stdout: (...a) => rec.out.push(a.join(" ")),
     stderr: (...a) => rec.err.push(a.join(" ")),
     env: {}, comfyDir: "/c",
@@ -97,7 +98,7 @@ test("generate()'s defaults are the real calls: the graph comes from buildGraphF
   assert.equal(GENERATE_IO.poll, pollOutputs);
   assert.equal(GENERATE_IO.view, fetchView);
   assert.equal(GENERATE_IO.write, writeFileAtomic);
-  assert.equal(GENERATE_IO.tailLog, tailComfyLog);
+  assert.equal(GENERATE_IO.logCursor, comfyLogCursor);
   assert.equal(GENERATE_IO.finalize, finalizeRun);
   assert.equal(GENERATE_IO.resolveCli, resolveCli);
 });
@@ -105,7 +106,7 @@ test("generate()'s defaults are the real calls: the graph comes from buildGraphF
 test("generate() under multicard checks the devices and then the pack, before it builds or submits anything, and finalizes last", async () => {
   const { io, rec } = fakeIo();
   await generate("o.mp4", "http://x", ["o.mp4", "s.png", "p"], {}, PLAN, io);
-  assert.deepEqual(rec.calls, ["verifyDevices", "verifyPack", "buildGraph", "resolveCli", "submit", "poll", "view", "write", "tailLog", "finalize"]);
+  assert.deepEqual(rec.calls, ["verifyDevices", "verifyPack", "buildGraph", "resolveCli", "submit", "poll", "view", "write", "finalize"]);
   assert.deepEqual(rec.written.map((w) => [w[0], String(w[1])]), [["o.mp4", "mp4"]]);
   assert.deepEqual(rec.out, ["queued p1 wan seed 7", "WROTE o.mp4"]);
 });
@@ -127,15 +128,54 @@ test("generate() names the sampled latent the free node saved, once per file, af
   assert.ok(!none.rec.out.some((l) => l.startsWith("LATENT")), "a run without the free node prints no LATENT line");
 });
 
-test("generate() reads the console of THIS placement's instance (its key) after the run, and says when ComfyUI retried the plain decode tiled", async () => {
-  const tail = "got prompt\nWarning: Ran out of memory when regular VAE decoding, retrying with tiled VAE decoding.\nPrompt executed in 5000 seconds\n";
-  const { io, rec } = fakeIo({ tailLog: (dir, n, key) => { rec.tails.push([dir, n, key]); return tail; } });
-  await generate("o.mp4", "http://x", [], {}, PLAN, io);
-  assert.deepEqual(rec.tails, [["/c", 4000, "mc-cccc3333-aaaa1111"]], "the multicard instance's own log, not the default one");
-  assert.ok(rec.err.some((l) => /^WAN-DECODE-FALLBACK: ComfyUI ran out of memory in the plain decode and retried it tiled \(see .*offload-comfyui-mc-cccc3333-aaaa1111\.log\)/.test(l)), rec.err.join("\n"));
-  const clean = fakeIo();
-  await generate("o.mp4", "http://x", [], { "wait-sec": "60" }, PLAN, clean.io); // a budget of its own: the default budget is said on stderr
-  assert.deepEqual(clean.rec.err, [], "a console without the retry says nothing");
+// ---- the plain decode that ComfyUI retried tiled ----------------------------------------------------------------
+// --wan-decode plain asks for ONE decode pass, the clip without seams. When that decode runs out of memory ComfyUI retries it tiled with temporal
+// tiles it sizes itself (sd.py, "Ran out of memory when regular VAE decoding, retrying with tiled VAE decoding"), and the clip can seam where the
+// tiles meet. Writing that clip to the path the caller named and exiting 0 hands the seams to whoever keys on the exit code.
+const PLAIN_GRAPH = { "13": { class_type: "VAEDecode", inputs: {} }, "20": { class_type: "VHS_VideoCombine", inputs: {} } };
+const TILED_GRAPH = { "13": { class_type: "VAEDecodeTiled", inputs: {} }, "20": { class_type: "VHS_VideoCombine", inputs: {} } };
+const RETRY = "Warning: Ran out of memory when regular VAE decoding, retrying with tiled VAE decoding.\n";
+const LATENT_OUT = { outputs: { ...DONE.outputs, "21": { latents: [{ filename: "wan_00001_.latent", subfolder: "latents", type: "output" }] } } };
+const decodeRun = (graph, reads, over = {}) => {
+  const f = fakeIo({ buildGraph: async () => ({ graph, seed: 7, model: "wan" }), poll: async (opt) => { f.rec.polls.push(opt); return LATENT_OUT; }, ...over });
+  f.rec.reads = reads;
+  return f;
+};
+
+test("a plain decode that ComfyUI retried tiled is not written to the requested path: the clip is kept beside it and the run fails, naming the latent", async () => {
+  const { io, rec } = decodeRun(PLAIN_GRAPH, [{ text: "got prompt\n", state: "ok" }, { text: RETRY + "Prompt executed in 5000 seconds\n", state: "ok" }]);
+  await assert.rejects(generate("out/o.mp4", "http://x", [], { "wait-sec": "60" }, PLAN, io), /^Error: WAN-DECODE-FALLBACK: ComfyUI ran out of memory in the plain decode and retried it tiled.*out\/o\.seamed\.mp4.*instead of out\/o\.mp4.*latents\/wan_00001_\.latent/s);
+  assert.deepEqual(rec.written.map((w) => w[0]), ["out/o.seamed.mp4"], "nothing at the requested path, and the finished clip is not thrown away");
+  assert.ok(rec.out.includes("LATENT latents/wan_00001_.latent (in ComfyUI's output directory)"), "the latent that lets the decode be redone is named");
+  assert.ok(!rec.out.includes("WROTE out/o.mp4"));
+  assert.equal(rec.finalized, 1, "the run is finalized before it fails");
+  assert.deepEqual(rec.cursors, [["/c", "mc-cccc3333-aaaa1111"]], "the console read is this placement's own instance, and only this run's lines");
+});
+
+test("a plain decode whose console shows no retry is written to the requested path, and nothing is said", async () => {
+  const { io, rec } = decodeRun(PLAIN_GRAPH, [{ text: "step\n", state: "ok" }]);
+  await generate("o.mp4", "http://x", [], { "wait-sec": "60" }, PLAN, io);
+  assert.deepEqual(rec.written.map((w) => w[0]), ["o.mp4"]);
+  assert.deepEqual(rec.err, []);
+});
+
+test("a retry seen by the watch DURING the wait still counts at the end, and a tiled decode (the default) is never judged by it", async () => {
+  const mid = decodeRun(PLAIN_GRAPH, []);
+  const io = { ...mid.io, poll: async (opt) => { mid.rec.polls.push(opt); mid.rec.reads.push({ text: RETRY, state: "ok" }); opt.watch(); mid.rec.reads.push({ text: "later lines\n", state: "ok" }); return LATENT_OUT; } };
+  await assert.rejects(generate("o.mp4", "http://x", [], { "wait-sec": "60" }, PLAN, io), /WAN-DECODE-FALLBACK/);
+  const tiled = decodeRun(TILED_GRAPH, [{ text: RETRY, state: "ok" }]);
+  await generate("o.mp4", "http://x", [], { "wait-sec": "60" }, PLAN, tiled.io);
+  assert.deepEqual(tiled.rec.written.map((w) => w[0]), ["o.mp4"], "the tiled decode is the one that was asked for");
+  assert.deepEqual(tiled.rec.err, []);
+});
+
+test("a console that cannot be read says so loudly, and the clip is still written: unknown is not a fallback", async () => {
+  for (const reads of [[{ text: "", state: "absent" }], [{ text: "boot\n... [offload-comfyui.log capped at 5MB for this run] ...\n", state: "capped" }, { text: "", state: "ok" }]]) {
+    const { io, rec } = decodeRun(PLAIN_GRAPH, reads);
+    await generate("o.mp4", "http://x", [], { "wait-sec": "60" }, PLAN, io);
+    assert.deepEqual(rec.written.map((w) => w[0]), ["o.mp4"]);
+    assert.ok(rec.err.some((l) => /^WAN-DECODE-UNVERIFIED: .*plain decode.*check the clip for seams/.test(l)), rec.err.join("\n"));
+  }
 });
 
 test("generate() hands the poll the run's wait budget: --wait-sec, else COMFY_WAIT_SEC, else the default", async () => {
