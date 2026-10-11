@@ -381,7 +381,9 @@ Versioning: [SemVer](https://semver.org/).
 - **Limits.** The page is the text the fetch kept: navigation, header and footer are stripped before a seat sees the page, so a
   label that lives only there cannot be verified. The field is found by its name, so a caller's schema that keeps its verbatim
   text in a field not called `quotes` is not checked. The delegation-log corpus and the ledger rows are written inside the
-  engine, before this step, and keep the seat's raw answer; the published body carries the corrected one.
+  engine, before this step, and keep the seat's raw answer; the published body carries the corrected one. On the MCP door the
+  body's untrusted pass (`internal/untrusted`) runs after this step: it drops the hidden characters a page carries, neutralizes
+  chat-template markers and caps each string at 16,000 characters, so a published span can differ from the page by those only.
 - **F45 (the `nonempty:verdict` failures of the research lane) needed no code change.** 0.171.0 had already replaced the check
   with `nonempty:key_facts|numbers|quotes|verdict`, and every recorded failure precedes that release's deploy. What was missing
   is an end-to-end pin, added here: through the real handler, a digest with populated lists and an empty verdict succeeds, and

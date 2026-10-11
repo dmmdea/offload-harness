@@ -408,7 +408,9 @@ digest has no quotes to look up, and only the research doors publish it. Two lim
 (navigation, header and footer are stripped before a seat sees the page, so a label that lives only there cannot be
 verified), and the field is found by its name, so a caller's schema that keeps its verbatim text in a field not called
 `quotes` is not checked. The delegation-log corpus and the ledger rows are written inside the engine, before this step, and
-keep the seat's raw answer.
+keep the seat's raw answer. On the MCP door the body's untrusted pass (`internal/untrusted`, described below) runs after this
+step: it drops the hidden characters a page carries, neutralizes chat-template markers and caps each string at 16,000
+characters, so a published span can differ from the page by those only.
 
 A research page that fails only its own checks (a shape, an item count) is not re-run on another
 node: a second seat given the same page mostly repeats the verdict at the cost of a whole second
