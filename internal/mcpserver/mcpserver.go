@@ -3760,6 +3760,14 @@ func (s *Server) contractOnFleet(ctx context.Context, contract core.AgentContrac
 // checked against it (RosterOnly), so a door can only narrow the fleet, never add to
 // it. agent_run names the nodes whose agent seat is the model the caller asked for
 // (register D-125). nil remotes is the configured roster, as before.
+//
+// A narrowed call is also a REASONED remote pin (delegate.PinOperator): the caller
+// named the model, so the placement is theirs and a second chance for the contract is
+// another of those nodes or none. A bare route=remote keeps the engine's remote ->
+// local retry, and for a named seat that retry runs the goal on THIS box's own agent
+// seat, a different model: the door then withholds that clean answer for a seat
+// mismatch and blames the node, after this box's GPU did the whole goal. Only the
+// retry changes; the first placement of route=remote already never falls back to local.
 func (s *Server) contractOnFleetAt(ctx context.Context, contract core.AgentContract, route, fence string, remotes []string) (core.AgentWireResult, map[string]any, string, bool) {
 	dispatch := s.reviewFleet // test seam
 	if dispatch == nil {
@@ -3769,8 +3777,11 @@ func (s *Server) contractOnFleetAt(ctx context.Context, contract core.AgentContr
 	if local == nil {
 		local = s.p.RunAgentContract
 	}
-	results, _, err := dispatch(ctx, s.p.Cfg(), local, []core.AgentContract{contract}, route, remotes,
-		&delegate.RunOptions{Quarantine: s.quarantine, Tenant: s.tenant, PinTally: s.pins, RosterOnly: len(remotes) > 0})
+	opts := &delegate.RunOptions{Quarantine: s.quarantine, Tenant: s.tenant, PinTally: s.pins, RosterOnly: len(remotes) > 0}
+	if len(remotes) > 0 && route == "remote" {
+		opts.PinReason = delegate.PinOperator
+	}
+	results, _, err := dispatch(ctx, s.p.Cfg(), local, []core.AgentContract{contract}, route, remotes, opts)
 	switch {
 	case err != nil:
 		return core.AgentWireResult{}, nil, "the fleet could not be asked: " + err.Error(), false

@@ -57,7 +57,11 @@ type nsNode struct {
 	ran       string // the seat the job's result says it came from; "" = the agent seat
 	layers    []placetable.LayerRow
 	agentOff  bool // the node does not advertise the agent lane
-	url       string
+	// reply, when set, is asked for each job the node is polled for: a non-nil result is the job's wire result as the
+	// node reports it (a deferral, a seat that is down, a finished answer on another seat), nil leaves the default
+	// finished answer. The node's id and the wire schema version are filled in when the script leaves them out.
+	reply func(n *nsNode) *core.AgentWireResult
+	url   string
 
 	healths    atomic.Int64
 	dispatches atomic.Int64
@@ -114,10 +118,20 @@ func newNSNode(t *testing.T, id, agentSeat string, served ...string) *nsNode {
 		if seat == "" {
 			seat = n.agentSeat
 		}
-		wire, _ := json.Marshal(core.AgentWireResult{
+		res := core.AgentWireResult{
 			SchemaVersion: core.AgentWireSchemaVersion, NodeID: n.id, Seat: seat, Output: nsAnswer,
 			Structured: json.RawMessage(`{"answer":"` + nsAnswer + `"}`), Steps: 3, StopReason: "done",
-		})
+		}
+		if n.reply != nil {
+			if scripted := n.reply(n); scripted != nil {
+				res = *scripted
+				res.SchemaVersion = core.AgentWireSchemaVersion
+				if res.NodeID == "" {
+					res.NodeID = n.id
+				}
+			}
+		}
+		wire, _ := json.Marshal(res)
 		_, _ = io.WriteString(w, fmt.Sprintf(`{"job_id":%q,"state":"done","data":%s}`, r.PathValue("id"), wire))
 	})
 	srv := httptest.NewServer(mux)
@@ -918,5 +932,115 @@ func TestAgentRunNamedSeatRefusesABrowseGrant(t *testing.T) {
 	}
 	if a.dispatches.Load() != 0 {
 		t.Errorf("a refused call dispatches nothing")
+	}
+}
+
+// nsFirstJobDefers makes the first node the fleet is polled for a job answer that job with first(node), and every job
+// after it (on any node, the retry's included) answer as a node does by default. A re-poll of the first job returns the
+// same deferral.
+func nsFirstJobDefers(first func(n *nsNode) core.AgentWireResult, nodes ...*nsNode) {
+	var claimed atomic.Pointer[nsNode]
+	for _, n := range nodes {
+		n.reply = func(n *nsNode) *core.AgentWireResult {
+			claimed.CompareAndSwap(nil, n)
+			if claimed.Load() != n {
+				return nil
+			}
+			w := first(n)
+			return &w
+		}
+	}
+}
+
+// nsRetryableFirstAttempts are the first attempts the delegator retries (delegate.retryable): the seat abstained, and its
+// engine went down under the run. Each is a deferral the node files itself, with the class and the reason the engine reads.
+var nsRetryableFirstAttempts = []struct {
+	name  string
+	class string
+	first func(n *nsNode) core.AgentWireResult
+}{
+	{"an abstention", core.DeferClassAbstention, func(n *nsNode) core.AgentWireResult {
+		return core.AgentWireResult{Seat: nsFastSeat, Steps: 4, Deferred: true, DeferClass: core.DeferClassAbstention,
+			Reason: "output failed schema: the final answer was cut at the completion budget"}
+	}},
+	{"a seat-down defer", core.DeferClassInfrastructure, func(n *nsNode) core.AgentWireResult {
+		return core.AgentWireResult{Seat: nsFastSeat, Steps: 2, Deferred: true, DeferClass: core.DeferClassInfrastructure,
+			Reason: core.SeatDownReason + "the seat's engine went down under the run"}
+	}},
+}
+
+// nsCountLocalRuns replaces the door's local runner, which nsDoor arms to fail the test, with one that counts its runs and
+// answers cleanly on this box's own seat: the failure to catch is a run on this box whose clean answer would be published
+// (or withheld, blaming the wrong cause), so the runner must be able to run.
+func nsCountLocalRuns(s *Server) *atomic.Int64 {
+	var runs atomic.Int64
+	s.localAgent = func(_ context.Context, c core.AgentContract, _ delegate.LocalOptions) (core.AgentWireResult, error) {
+		runs.Add(1)
+		return core.AgentWireResult{SchemaVersion: core.AgentWireSchemaVersion, Seat: nsLocalSeat, Output: "answer from this box's own seat",
+			Structured: json.RawMessage(`{"answer":"answer from this box's own seat"}`), Steps: 1, StopReason: "done"}, nil
+	}
+	return &runs
+}
+
+// TestAgentRunNamedSeatIsNeverRetriedOnThisBoxsSeat (D-125): the contract of a named seat goes to the delegator as a
+// reasoned remote pin, so the delegator's second chance for an attempt it retries (a seat that abstained, a seat that went
+// down) is another fleet node or none, and never this box's agent seat, which is a different model. A bare route=remote
+// retries remote -> local: the run then answers on this box's seat and the door withholds that answer for a seat mismatch,
+// blaming the node, after this box's GPU has done the whole goal.
+func TestAgentRunNamedSeatIsNeverRetriedOnThisBoxsSeat(t *testing.T) {
+	for _, fa := range nsRetryableFirstAttempts {
+		t.Run(fa.name+"/no other node", func(t *testing.T) {
+			a := newNSNode(t, "node-a", nsFastSeat, nsFastSeat)
+			s, _ := nsDoor(t, []string{nsLocalSeat}, []string{a.url}, nil)
+			localRuns := nsCountLocalRuns(s)
+			a.reply = func(n *nsNode) *core.AgentWireResult { w := fa.first(n); return &w } // every job of the only node defers
+
+			m := runNS(t, s, nsMarker(t), map[string]any{"model": nsFastSeat})
+
+			if n := localRuns.Load(); n != 0 {
+				t.Errorf("this box's own seat ran the goal %d time(s): a named fleet seat must never fall back to this box (answer: %v)", n, m)
+			}
+			if n := a.dispatches.Load(); n != 1 {
+				t.Errorf("the one node that runs the name must take the contract once, got %d", n)
+			}
+			if m["deferred"] != true || m["defer_class"] != fa.class {
+				t.Fatalf("with nowhere else to go the node's own deferral must reach the caller, got %v", m)
+			}
+			if r := nsReason(m); strings.Contains(r, "answered from seat") || strings.Contains(r, "agent seat changed") {
+				t.Errorf("the node's own reason must not be replaced by a seat-mismatch story about a run on this box: %q", r)
+			}
+			if _, has := m["output"]; has {
+				t.Errorf("no answer may be published: %v", m)
+			}
+			if m["node"] != a.id {
+				t.Errorf("the deferral must name the node that took the contract, got node %v", m["node"])
+			}
+			st := s.pins.Snapshot()
+			if st.Reasoned[delegate.PinOperator] != 1 || st.Unreasoned != 0 {
+				t.Errorf("a named seat is a pin the caller chose: want it counted once under %q and not as unreasoned, got %+v", delegate.PinOperator, st)
+			}
+		})
+		t.Run(fa.name+"/another node runs the name", func(t *testing.T) {
+			a := newNSNode(t, "node-a", nsFastSeat, nsFastSeat)
+			b := newNSNode(t, "node-b", nsFastSeat, nsFastSeat)
+			s, _ := nsDoor(t, []string{nsLocalSeat}, []string{a.url, b.url}, nil)
+			localRuns := nsCountLocalRuns(s)
+			nsFirstJobDefers(fa.first, a, b)
+
+			m := runNS(t, s, nsMarker(t), map[string]any{"model": nsFastSeat})
+
+			if n := localRuns.Load(); n != 0 {
+				t.Errorf("this box's own seat ran the goal %d time(s): the retry belongs to the other node that runs %q (answer: %v)", n, nsFastSeat, m)
+			}
+			if a.dispatches.Load() != 1 || b.dispatches.Load() != 1 {
+				t.Fatalf("each of the two nodes must take the contract once (the first attempt and its retry): a=%d b=%d, answer %v", a.dispatches.Load(), b.dispatches.Load(), m)
+			}
+			if m["deferred"] == true || m["output"] != nsAnswer || m["seat"] != nsFastSeat || m["model"] != nsFastSeat {
+				t.Fatalf("the retry's answer, from the named seat, must be published: %v", m)
+			}
+			if p, _ := m["placement"].(string); !strings.Contains(p, "retry on "+fmt.Sprint(m["node"])) || strings.Contains(p, "retry on local") {
+				t.Errorf("placement must say the retry went to the node that answered, got %q", p)
+			}
+		})
 	}
 }

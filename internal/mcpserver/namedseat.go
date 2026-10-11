@@ -20,7 +20,9 @@ package mcpserver
 // seat, and the door can honour a name only when it IS a node's agent seat (or the agent-role seat of one of its layers,
 // which the contract names through its existing layer field). A name a node merely serves, as an alias or a non-agent
 // seat, is refused naming the seat that node does run; nothing is guessed. A node that changes its agent seat between the
-// probe and the dispatch is caught by the seat check on the result: an answer from another seat is withheld. Running a
+// probe and the dispatch is caught by the seat check on the result: an answer from another seat is withheld. A contract that
+// names a seat is also a reasoned remote pin (delegate.PinOperator, contractOnFleetAt): a second chance for it is another node
+// that runs the name or none, never this box's own agent seat, which is a different model. Running a
 // non-agent seat on a node needs the contract to name the seat, which is a wire field and a node-side change that widens
 // what a fleet-token holder can make a node load; it is not here.
 
