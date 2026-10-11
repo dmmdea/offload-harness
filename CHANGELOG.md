@@ -228,6 +228,98 @@ Versioning: [SemVer](https://semver.org/).
   is an end-to-end pin, added here: through the real handler, a digest with populated lists and an empty verdict succeeds, and
   a digest that said nothing still fails verification.
 
+### Fixed — a job queued on a busy node stays in line at its queue budget when nothing better is on offer, instead of being withdrawn to the back of the same line (C16)
+
+- **The defect.** The queue budget (`clamp(1.5 x ETA + 30 s, 60 s, patience)`) is derived from the node's ETA, which is the median of
+  its recent walls, so a one-worker node mid-way through a job that runs three times its median publishes a wait that is a fraction of
+  the one a new job faces. One box's ledger shows nine delegated jobs withdrawn at their queue budget (60 s to 11 min) in a day and a
+  half. A withdrawn job is filed as a capacity refusal (ADR 0064); with no other node to take it, it goes back to the capacity wait,
+  which does not exclude the node it came from and asks it again after its cooldown, putting the job at the back of the same line:
+  the wait already spent is thrown away to land where it started.
+- **The fix.** At the budget the delegator asks before it withdraws (`stayInLine`). It reads the node's health once more; the job
+  **stays** when the node's workers are all running (a published `max_concurrent_jobs`, that many `jobs_running_capped`: the job
+  waits for a worker, which is a queue and not a wedge) and no other place has room for it now (`betterPlaceThan`: another eligible remote that
+  passes the re-placement test, or the local seat when the route allows it and no lease reserves or fences it and its run-cap line
+  has a slot). It is asked about again one step later (60 s, chosen: the budget's own floor), up to the patience the contract was
+  given, which is where the ETA-derived budget was already capped. A node with a free worker that still has not started the job, a
+  node whose health cannot be read, a node that publishes no worker ceiling or no capped count (an older node), and a job with a better
+  place on offer are withdrawn at the budget exactly as before. The failure text says `kept in line N time(s) past the derived budget, up to the contract's patience:
+  <why>` when the wait was extended.
+- **`jobs_running_capped`.** `/fleet/health` gains it (additive, agent lane only, a pointer so `0` is published): the part of
+  `jobs_running` that counts against `max_concurrent_jobs`. `jobs_running` counts every job on the node, so a node with four renders
+  running and free agent workers reads "all busy" by it, and a queued job there is not waiting for a worker.
+- **A queued job keeps its place in the call's width** (unlike a capacity wait, which gives its slot up, ADR 0073): it is an open
+  attempt on a node that is already full. A call with jobs staying in line keeps its width for up to the patience where those jobs used
+  to be withdrawn at the shorter derived budget. `betterPlaceThan` does not see the subtask's own tried/excluded sets (a known gap, ADR 0063).
+- **Not changed.** The ETA itself (`new_job_wait_sec`) still prices a new job at the median wall whatever the running job has done, so
+  placement can still send a job to a node that is mid-way through a long one; it now waits there instead of being reshuffled.
+- **Tests.** `internal/delegate/queue_stay_test.go` (a busy node that starts the job at 3 times its budget is waited on to success;
+  a node that stays busy is waited on to the end of the patience and no further, and the failure says so; a node with a free worker is
+  still withdrawn at the budget; a node whose health cannot be read, or whose running jobs are renders, or that does not publish the
+  capped count, is withdrawn too; another node with room, or no other node,
+  is told apart, and the job leaves for the node with room end to end). `TestQueueRefreshFailureIsNamedOnTheDeadline` now counts the
+  question at the budget among the bounded health reads; `internal/fleetnode/jobs_running_capped_test.go` pins the new health key
+  (a render does not count, an agent job does, a published 0, absent with the lane off). 10 mutations were each caught; an eleventh
+  (treating a failed read as readable) is equivalent, since a failed read decodes to a view with no worker ceiling. ADR 0063
+  Amendment 2026-10-10, `docs/FLEET-NODE.md`.
+
+### Fixed — a capacity wait that holds a run slot gives it up at its bound and keeps waiting, so a subtask in line for a node is not refused while the call has time (C16)
+
+- **The defect.** A fan-out on a saturated fleet ended subtasks as `capacity wait: no node had room within 2m0s (waited 2m0s;
+  agent_placement_wait_sec=0; ... 4 subtask(s) of the call had not started, so this wait could not hold its run slot to the call's
+  deadline)` while the call still had time left. ADR 0073 decision 9 capped a wait that holds a run slot while a sibling
+  has not started at its old TTL so that waiters could not hold every slot to the deadline, and the cap **ended the wait**: the
+  subtask paid for the protection of its siblings. A node freeing a minute later would have taken it, and the operator's rule is to
+  queue and never refuse (a capacity wait is progress).
+- **The fix.** At the bound the wait gives the subtask's place in the call's width up (when a subtask has not started, so that one
+  can begin) and runs on to the call's horizon like the last subtask to start (`extendHeld`). It keeps probing the fleet every tick
+  and takes a place again only to dispatch (`runSlot.acquire`, bounded by the horizon, reading the fleet again if it had to wait for
+  one); a refused attempt gives the place back before the wait sleeps. The attempts a call has open at once are therefore still its
+  width, which is why ADR 0073 had rejected releasing the slot outright; the process gate and the cooldowns pace the asks as before.
+  A wait with nobody behind it keeps its place. Every subtask of a saturated call now ends at the horizon with the defer that says the
+  call bounded it, none at its TTL.
+- **Not changed.** A call with no whole-call deadline (`delegate` CLI, `agent_run` / `offload_ask` with a route) still waits
+  `agent_placement_wait_sec` (default 120 s): it has no horizon to extend to. The composite decision's eviction wait and the
+  verification retry's wait keep their TTL. A chunk of a batched call whose waits run to the horizon leaves its later chunks to the
+  existing no-room defer (decision 10).
+- **Tests.** `internal/delegate/callwait_yield_test.go` (all five subtasks of a saturated call land when the node frees after the
+  TTL, and the fifth began while the node was still full; the node never holds more of the call's jobs than its width when eight
+  subtasks wait on a node that publishes no queue ceiling; a wait holds no place between refused attempts, keeps it for its TTL,
+  and holds one when it lands; the last subtask to start keeps its place). `callwait_slots_test.go` and `deal_width_test.go` pinned
+  the old ending and now pin the new one. 7 mutations were each caught. ADR 0073 Amendment 2026-10-10, `docs/systems/fleet-node.md`,
+  `docs/OPERATOR-GUIDE.md`.
+
+### Fixed — the prefill stall clock is sized from the whole prompt and the seat's slow recent rate, so a long prefill on a heat-soaked seat is not read as silence (F10)
+
+- **The defect.** A 4,613-token prefill on a heat-soaked seat showed "silent 59 s of 60 s allowed" while the seat was working,
+  one tick from a prefill stall. The allowance (`pending ÷ prefill rate × 1.5 + 30 s`, floor 60 s) was sized from two wrong
+  inputs. **The prompt was the transcript alone**: the loop passed `estimateTokens(msgs)` (4 bytes a token) and left out the
+  tool-spec block that ships with every request, which the loop already measures for compaction (`specReserve`, 1-6k tokens on a
+  full build). On a seat measured at about 180 tok/s a 4,613-token prompt allows 68 s, and any transcript estimate under about
+  3,600 tokens allows the 60 s floor, so the undercount alone turned a thin allowance into the floor. **The rate was an
+  average**: `prefill_tok_s` is an EMA over runs, so a run on a seat that had heat-soaked was averaged with the cool ones.
+- **The prompt.** `agent.prefillPending`: the transcript estimate at the run's token density plus the tool-spec block, never
+  under what the server counted for the previous call's prompt (the transcript only grows). The density is `assumedPromptDensity`
+  1.3 until a call reports (the low end of the 1.3-1.4 the budget-calibration fit already measured), then the density the call
+  showed, clamped to 3 (chosen) so one odd usage reading cannot make the clock unbounded. Run-local, so `--serve` handlers sharing
+  one `*Loop` do not share it.
+- **The rate.** The seat-rates store keeps the last 5 solo prefill rates (`prefill_rates`; 5 is chosen, not measured: one run folds
+  in up to two samples) and their slowest (`prefill_slow_tok_s`), the rule `cold_load_sec` already follows (the slowest of its
+  window: a stall bound must hold the slow case). `pipeline.LivenessPolicyFor` sizes the prefill clock from
+  `Seat.StallPrefillTokS()` (the slowest, else the EMA of a store written before the window). A shared-seat sample still teaches
+  nothing (ADR 0066). `/fleet/health` `seat_rate` publishes `prefill_tok_s` and `prefill_slow_tok_s` (additive, omitted until a
+  solo prefill is measured), so the number a "silent N s of M s allowed" line rests on can be read.
+- **An unmeasured seat waits longer on its first run.** Its rate is the assumed 100 tok/s, and the prompt now includes the tool block,
+  so a full build with about 3,000 tokens of tool JSON earns 3,000 / 100 x 1.5 + 30 s = 75 s before the transcript is counted, where the
+  transcript alone earned the 60 s floor. The first run measures the rate. The silent-seat fixture of `internal/pipeline` now names a
+  measured prefill, as the cold-load tests do.
+- **A wedged seat still stalls.** The allowance is still bounded by the prompt and the slowest recent rate, and the busy hold's
+  flat bound still ends a seat whose engine does no work (`TestWedgedSeatStillStallsUnderTheSizedPrefillClock`).
+- **Tests.** `internal/agent/prefill_pending_test.go` (the spec block is in the clock; the server's count is a floor; the density is
+  learned; the first call uses the assumed density; a wedged seat stalls), `internal/seatrate/prefill_window_test.go`,
+  `internal/pipeline/liveness_prefill_slow_test.go`, `internal/fleetnode/seatrate_prefill_health_test.go`. 12 mutations of the
+  sizing, the window and the wiring were each caught. ADR 0055 Amendment 2026-10-10, `docs/FLEET-NODE.md`, `docs/OPERATOR-GUIDE.md`.
+
 ## [0.180.0] - 2026-10-10 - a busy image call waits for the first matching lane anywhere in the cluster, graphs overflow to a node that holds their files, and a live render keeps its lease
 
 ### Fixed — the ticket queue was off on any machine whose config sets no `state_dir`, which is the usual config (ADR 0083)

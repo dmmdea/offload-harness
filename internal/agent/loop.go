@@ -378,6 +378,55 @@ type Loop struct {
 	noReadBudget bool
 }
 
+// The prefill clock's prompt size (register F10). The stall allowance of a seat call is
+// pending / prefill rate x 1.5 + slack, and `pending` used to be estimateTokens(msgs): the
+// transcript alone, at 4 bytes a token. That is two undercounts. The request also carries the
+// tool-spec block (specReserve: 1-6k tokens on a full build, the same ~900 the calibration fit
+// found as its fixed payload), and dense text runs 1.3-1.4 tokens per estimated token (the
+// WithTokenCalibration fit). On the seat that reported "silent 59 s of 60 s allowed" the sum was
+// enough to turn a thin allowance into the 60 s floor for a 4,613-token prefill. Over-counting is
+// the safe direction for an allowance exactly as it is for the spec reservation: the cost of
+// too much is a wedged seat found a few seconds later, and the busy hold's engine bound still
+// ends one that does no work.
+const (
+	// assumedPromptDensity is tokens per estimated token before any call of the run has
+	// reported its prompt size: the low end of the density the calibration fit measured (1.3-1.4).
+	assumedPromptDensity = 1.3
+	// maxPromptDensity clamps an observed density so one odd usage reading (a server that counts a
+	// cached or templated prefix we cannot see) cannot make the clock effectively unbounded.
+	maxPromptDensity = 3.0
+)
+
+// prefillPending is the prompt, in tokens, a seat call will have to prefill: the transcript
+// estimate at the run's density (never below 1) plus the tool-spec block that ships with every
+// request, and never under what the server counted for the previous call's prompt (lastPrompt,
+// 0 before any call reported): the transcript only grows, so the next prompt is at least that
+// big whatever the estimate says. The clamp on the density cannot undo that floor.
+func prefillPending(msgEstimate, specReserve int, density float64, lastPrompt int) int {
+	if density < 1 {
+		density = 1
+	}
+	return max(int(float64(msgEstimate)*density)+specReserve, lastPrompt)
+}
+
+// observedPromptDensity is the density a finished call showed: the tokens the server counted for
+// the prompt, less the tool-spec block, per estimated token of the transcript. With no usage
+// block (or nothing sent) it is the assumed density, so a backend that reports nothing keeps the
+// first-call sizing for the whole run.
+func observedPromptDensity(usagePrompt, specReserve, msgEstimate int) float64 {
+	if usagePrompt <= 0 || msgEstimate <= 0 {
+		return assumedPromptDensity
+	}
+	d := float64(usagePrompt-specReserve) / float64(msgEstimate)
+	switch {
+	case d < 0:
+		return 0
+	case d > maxPromptDensity:
+		return maxPromptDensity
+	}
+	return d
+}
+
 // defaultCtxTokens is the model context window the loop budgets against. It
 // matches the shipped serving templates (llama-swap.win-*.yaml: --ctx-size
 // 8192). WithContextTokens overrides it for a differently-served model.
@@ -949,6 +998,11 @@ func (l *Loop) run(ctx context.Context, objective string, bs *budgetState) (Resu
 	// run continue, and a LATER empty final earns its own re-issue — review
 	// finding 2, 0.115.8 — but never more than maxReissues of them).
 	retryNoThink, lastWasReissue, reissues := false, false, 0
+	// density is tokens per estimated token for this run's prefill clock (prefillPending): the
+	// assumed one until a call reports its prompt size, then the one it showed. lastPrompt is the
+	// prompt size the server counted for the previous call (0 before any). Both are per run, never
+	// on the Loop: --serve shares one *Loop across concurrent handlers.
+	density, lastPrompt := assumedPromptDensity, 0
 	// stickyNoThink: once a re-issue rendered without thinking (ThinkingAuto),
 	// every later planner call in this run does too — see the re-issue branch.
 	stickyNoThink := false
@@ -1246,7 +1300,11 @@ func (l *Loop) run(ctx context.Context, objective string, bs *budgetState) (Resu
 		// the stall allowance is sized from its length — and every streamed
 		// delta of the completion is a progress event. The same stepCtx serves
 		// the empty-final re-issue below, so it inherits both.
-		l.phase(PhasePrefill, estimateTokens(msgs))
+		// The clock is sized from the prompt the seat will prefill - the transcript at this run's
+		// density plus the tool-spec block every request carries - not the transcript alone
+		// (register F10; prefillPending).
+		sentEst := estimateTokens(msgs)
+		l.phase(PhasePrefill, prefillPending(sentEst, int(l.specReserve.Load()), density, lastPrompt))
 		if fn := l.progressFunc(tokOut); fn != nil {
 			stepCtx = ContextWithProgress(stepCtx, fn)
 		}
@@ -1442,6 +1500,12 @@ func (l *Loop) run(ctx context.Context, objective string, bs *budgetState) (Resu
 		// feature was still mutating shared state from several goroutines at once.
 		if l.tokenCalOn && comp.Serve != nil {
 			l.tokenCal.Observe(estimateTokens(msgs), comp.Serve.UsagePromptTokens)
+		}
+		// The next call's prefill clock is held to what the server says this prompt cost (a
+		// per-run local, so it is ungated and race-free, unlike the calibrator above).
+		if comp.Serve != nil && comp.Serve.UsagePromptTokens > 0 {
+			density = observedPromptDensity(comp.Serve.UsagePromptTokens, int(l.specReserve.Load()), sentEst)
+			lastPrompt = comp.Serve.UsagePromptTokens
 		}
 		// T2-B instrument. UNGATED on purpose, unlike the calibrator above: it only
 		// sums numbers the backend already returned, and an instrument that must be

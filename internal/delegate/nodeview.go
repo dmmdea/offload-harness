@@ -54,6 +54,11 @@ type NodeView struct {
 	JobsQueued        int
 	MaxConcurrentJobs int
 	MaxQueueDepth     int
+	// JobsRunningCapped is the part of JobsRunning that counts against MaxConcurrentJobs (health
+	// jobs_running_capped), valid when JobsRunningCappedKnown: JobsRunning counts every job on the node, a
+	// render included, so only this says whether the workers a queued agent job waits for are busy.
+	JobsRunningCapped      int
+	JobsRunningCappedKnown bool
 	// ServedModels is the node's advertised roster (health served_models).
 	// nil/empty = UNKNOWN (a pre-0.113.0 node): never a refusal. When
 	// published, the agent seat must be in it — a stronger check than the
@@ -460,6 +465,10 @@ type SeatRateView struct {
 	ColdLoadSec float64 `json:"cold_load_sec"`
 	Samples     int     `json:"samples"`
 	MinTurnSec  int     `json:"min_turn_sec"`
+	// PrefillTokS / PrefillSlowTokS: the seat's prefill rate (average, and the slowest recent solo
+	// sample its stall bound is sized from). 0 = the node publishes none (register F10).
+	PrefillTokS     float64 `json:"prefill_tok_s,omitempty"`
+	PrefillSlowTokS float64 `json:"prefill_slow_tok_s,omitempty"`
 }
 
 // SeatBudgetView mirrors fleetnode.SeatBudgetHealth.
@@ -489,6 +498,9 @@ type healthWire struct {
 	JobsQueued        int `json:"jobs_queued"`
 	MaxConcurrentJobs int `json:"max_concurrent_jobs"`
 	MaxQueueDepth     int `json:"max_queue_depth"`
+	// Additive (register C16): the part of jobs_running that counts against max_concurrent_jobs. nil = the
+	// node does not publish it (it predates it, or its agent lane is off).
+	JobsRunningCapped *int `json:"jobs_running_capped"`
 	// Additive (0.113.0). Absent on a pre-0.113.0 node, which decodes to the
 	// zero value — nil/false, both read as UNKNOWN by the gate.
 	ServedModels []string `json:"served_models"`
@@ -671,6 +683,9 @@ func FetchNodeView(ctx context.Context, base, token string) (NodeView, error) {
 	}
 	if w.Lease != nil && w.Lease.Held {
 		v.LeaseClass, v.LeaseReason, v.LeaseRemainingSec = strings.ToLower(w.Lease.Class), w.Lease.Reason, w.Lease.RemainingSec
+	}
+	if w.JobsRunningCapped != nil {
+		v.JobsRunningCapped, v.JobsRunningCappedKnown = *w.JobsRunningCapped, true
 	}
 	if w.Saturation != nil {
 		v.SaturationKnown = true

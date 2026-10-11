@@ -132,7 +132,11 @@ does not start what it never began.
 Health publishes the split additively: `queue_depth` keeps its original meaning and shape,
 and `jobs_running`, `jobs_queued`, `max_concurrent_jobs`, `max_queue_depth` sit alongside it
 (always present — `0` is a real value, and for the two limits it means *unlimited*, which a
-reader must be able to tell apart from a pre-0.100.0 node that publishes no limit at all).
+reader must be able to tell apart from a pre-0.100.0 node that publishes no limit at all). With the agent lane on, health also
+publishes `jobs_running_capped` (register C16): the part of `jobs_running` that counts against `max_concurrent_jobs`. `jobs_running`
+counts every job on the node, a render or a transcription included, so a node with four renders running and its agent workers free
+reads "all busy" by it; the delegator that decides whether a queued job is waiting for a worker reads this one. A pointer, so a
+published `0` is not an absent key; absent on a node that predates it or whose lane is off, which a delegator reads as unknown.
 
 ## Running as a Windows scheduled task
 
@@ -743,7 +747,8 @@ No transcript field exists — remote reasoning never crosses the wire.
 "agent_enabled": true, "agent_seat": "offload-e4b",
 "agent_ctx_tokens": 16384, "agent_seat_resident": true,
 "seat_budget": {"step_tokens": 1024, "final_tokens": 4096, "thinking": "auto"},
-"seat_rate": {"tok_s": 24.6, "cold_load_sec": 34.3, "samples": 2, "min_turn_sec": 201}
+"seat_rate": {"tok_s": 24.6, "cold_load_sec": 34.3, "samples": 2, "min_turn_sec": 201,
+              "prefill_tok_s": 412.0, "prefill_slow_tok_s": 188.5}
 ```
 
 A COMPOSITE node (ADR 0052) publishes two more, under the same lane predicate:
@@ -778,6 +783,10 @@ standard quality instrument, register H-04) reads it here. `seat_rate` (0.117.2)
 rate and cold load from this node's seat-rates store (`seat-rates.json` under the state root, written by every
 agent run since 0.115.21) with `min_turn_sec` = cold load + one final turn at this node's final budget; absent until
 the seat has a sample; cached for 30 s. The delegator sizes a RETRY that lands here by it (register D-46).
+`prefill_tok_s` and `prefill_slow_tok_s` (register F10) are the seat's prefill rate — the average over runs, and the
+slowest of its last five solo samples, which is the rate the prefill stall allowance is sized from (a heat-soaked seat
+is judged at the speed it runs now, not the average of the cool ones). Both are omitted until a solo prefill has been
+measured, never published as 0, and only a run known to have had the seat to itself moves them (ADR 0066).
 `agent_seat_resident` is a cached, alias-aware roster probe refreshed in the background at most
 once per 30 s — **fail-closed**: `false` until the first probe lands, and `false` again on any
 probe failure (a stale "resident" while llama-swap is down would route work at a node that
@@ -977,7 +986,13 @@ The wait is **bounded** — a job may wait for a slot at most as long as it was 
 the wait it is given is derived from the node's own ETA: `clamp(1.5 x etaStart + 30 s, 60 s, that limit)`, where
 `etaStart` is the wait the node publishes for a NEW job (`new_job_wait_sec`; an older node's `queue_wait_estimate_sec`
 plus one slot, ADR 0073) or the arithmetic over its jobs and recent wall, read again when
-the job is first seen queued; a node that publishes no ETA keeps **5 minutes** (ADR 0063). Hitting that bound while
+the job is first seen queued; a node that publishes no ETA keeps **5 minutes** (ADR 0063). That bound is where the delegator
+*asks* (ADR 0063 amendment 2026-10-10, register C16): it reads the node's health once more, and a job whose node has all its workers
+running (a published `max_concurrent_jobs`, that many `jobs_running_capped`: the running jobs that count against it, which `jobs_running` does not say because it includes renders and transcriptions) while no other node, and not the local seat, has room for it
+**stays in line** and is asked about again one step later (60 s, chosen), up to the limit above. A node with a free worker that still
+has not started the job, a node whose health cannot be read, and a job with a better place on offer are withdrawn at the bound as
+before, because withdrawing a queued job only to land it at the back of the same line throws away the wait it has already spent.
+Hitting the bound while
 the job is *still queued* is a **failure**,
 not a defer, with its own stable prefix:
 

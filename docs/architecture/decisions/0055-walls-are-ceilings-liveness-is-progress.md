@@ -391,6 +391,37 @@ determine if a job is truly still going" — was not met by any of the three sur
 Register: plan `plans/2026-09-20-liveness-walls.md` (AI Ecosystem), rows C-32 (partial) and
 the D-row this ADR is filed under. Supersedes the enforcement half of D-03; D-03's sizing stands.
 
+## Amendment 2026-10-10 (register F10, the prefill clock holds the whole prompt and the slow case)
+
+A 4,613-token prefill on a heat-soaked seat sat "silent 59 s of 60 s allowed" while the seat was working and
+was one tick from a prefill stall. The allowance formula was right; its two inputs were not:
+
+- **The prompt was the transcript alone.** `l.phase(PhasePrefill, estimateTokens(msgs))` counted the messages at 4
+  bytes a token and left out the tool-spec block that ships with every request (1-6k tokens on a full build; the
+  loop already reserves it for compaction as `specReserve`). The prefill clock is now sized from
+  `prefillPending`: the transcript estimate at the run's token density plus the tool-spec block, and never under
+  what the server counted for the previous call's prompt (the transcript only grows). Before a call has reported,
+  the density is `assumedPromptDensity` 1.3, the low end of the 1.3-1.4 the budget-calibration fit measured; after
+  it, the density the call showed (clamped to 3). Over-counting is the safe direction for an allowance, as it is for
+  the spec reservation: the cost is a wedged seat found seconds later, and the busy hold's engine bound still ends
+  a seat that does no work.
+- **The rate was an average.** The store's `prefill_tok_s` is an EMA over runs, so one heat-soaked run was averaged
+  with the cool ones and the allowance stayed the cool seat's. The store now also keeps the last 5 solo prefill
+  samples (`prefill_rates`, chosen: one run folds in up to two, so five cover the last two or three runs) and their
+  slowest (`prefill_slow_tok_s`), the same rule `cold_load_sec` already follows (the slowest of its window: a bound
+  must hold the slow case). The policy's prefill rate is that slowest (`Seat.StallPrefillTokS`; the EMA for a store
+  written before the window). Shared-seat samples still teach nothing (ADR 0066), so contention cannot loosen it.
+  `/fleet/health` publishes both rates in `seat_rate` (additive, omitted until measured).
+
+An unmeasured seat (the assumed 100 tok/s) therefore waits longer on its first run when its tool block is large: about 3,000 tokens of
+tool JSON is 3,000 ÷ 100 × 1.5 + 30 s = 75 s before the transcript, where the transcript alone earned the 60 s floor; the first run
+measures the rate.
+
+A wedged seat still stalls: the allowance stays `pending ÷ rate × 1.5 + 30 s`, bounded by the prompt and the slowest
+recent rate, and a seat whose engine does no work is still ended by the busy hold's flat bound (ADR 0061). Not
+changed: the per-run live rate (a run's first prefill is judged on the store's window, not on what it has not yet
+measured) and the Monitor's reason text, which prints the arithmetic with the larger `pending`.
+
 ## Alternatives considered
 
 - **Raise the cap** (900 s → 3,600 s). Rejected: it moves the cliff, it does not remove it — a

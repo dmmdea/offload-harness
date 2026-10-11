@@ -107,8 +107,10 @@ func TestQueueRefreshFailureIsNamedOnTheDeadline(t *testing.T) {
 			t.Errorf("err = %q, want it to contain %q", results[0].Err, want)
 		}
 	}
-	if got := f.healths.Load(); got != 4 {
-		t.Fatalf("the node's health was read %d times, want the placement read plus 3 bounded refresh attempts", got)
+	// The placement read, the 3 bounded refresh attempts, and the one question the delegator asks at the budget
+	// before it withdraws (stayInLine, ADR 0063 amendment 2026-10-10): still bounded, and not one per queued poll.
+	if got := f.healths.Load(); got != 5 {
+		t.Fatalf("the node's health was read %d times, want the placement read, 3 bounded refresh attempts and the question at the budget", got)
 	}
 	if !strings.Contains(logs.String(), "queue-budget refresh") {
 		t.Fatalf("the failed refresh was not logged:\n%s", logs.String())
