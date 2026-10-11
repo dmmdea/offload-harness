@@ -728,15 +728,21 @@ call bounded it (`bounded by the call's deadline, not by agent_placement_wait_se
 that never bounded it), and nothing is dispatched inside the reserve: a job placed there could only be cut, and would run on in its
 node with nobody waiting for it. A call with less left than the reserve does not wait, and says so. A call with no deadline (the
 `delegate` CLI verb, `agent_run` and `offload_ask` with a route) keeps `agent_placement_wait_sec`, 0 = 120 s. Negative switches
-the wait off for every call, and a deadline does not switch it back on. Sheddable work is still shed at once. Three waits keep
+the wait off for every call, and a deadline does not switch it back on. Sheddable work is still shed at once. Two waits keep
 their old bound under a deadline: a composite decision's eviction wait (its expiry RUNS the contract on the decided seat, which needs the
-time the reserve takes away), the verification retry's wait for a busy seat (an optional second opinion on an answer the subtask
-already holds), and a wait that holds a run slot while subtasks of the call have not started. A call runs only as many subtasks at a
+time the reserve takes away) and the verification retry's wait for a busy seat (an optional second opinion on an answer the subtask
+already holds); a third, a wait that holds a run slot while subtasks of the call have not started, holds the slot for its old bound and
+then gives it up and runs on to the horizon. A call runs only as many subtasks at a
 time as its deal committed (never fewer than four, below) and a waiter holds its slot, so that many subtasks waiting to the horizon
 would keep the rest of the call, and every later chunk of a batched one, from starting until the waiters ended, and then from
-starting with more than the reserve left: only the **last subtask to start** waits to the horizon, the earlier ones wait the larger of `agent_placement_wait_sec` and `agent_lease_wait_sec` (or the
-call's end, if sooner), and their defer says `N subtask(s) of the call had not started, so this wait could not hold its run slot to the
-call's deadline`. A wait the call bounds ends at the horizon even when `agent_lease_wait_sec` is longer: a wait past the deadline helps no
+starting with more than the reserve left: a wait that holds a slot while a subtask has not started holds it for the larger of
+`agent_placement_wait_sec` and `agent_lease_wait_sec` (or the call's end, if sooner) and **then gives the slot up and keeps waiting**
+(2026-10-10 amendment, register C16; before it the wait ENDED there as a capacity defer saying `N subtask(s) of the call had not
+started, so this wait could not hold its run slot to the call's deadline`, which refused 4 subtasks of a fan-out that a node freeing a
+minute later would have taken). A wait without a slot probes the fleet every tick as before and takes a slot again only to dispatch, and
+a refused attempt gives it back, so the attempts a call has open at once are still its width, and the process gate and the per-node
+cooldowns pace the asks as before. Every wait, not only the last subtask's, now ends at the horizon, with the defer that says the call
+bounded it. A wait the call bounds ends at the horizon even when `agent_lease_wait_sec` is longer: a wait past the deadline helps no
 one. Nor does anything start inside the reserve: a subtask (or a later chunk) that would begin with no more than the reserve left ends
 at once as a `capacity` defer, `not started: the call's deadline left no room`, not as the call-deadline cut (a call that never had more
 than the reserve keeps starting its subtasks). One consequence to know: a subtask whose only places in line

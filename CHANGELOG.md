@@ -6,6 +6,32 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed — a capacity wait that holds a run slot gives it up at its bound and keeps waiting, so a subtask in line for a node is not refused while the call has time (C16)
+
+- **The defect.** A fan-out on a saturated fleet ended subtasks as `capacity wait: no node had room within 2m0s (waited 2m0s;
+  agent_placement_wait_sec=0; ... 4 subtask(s) of the call had not started, so this wait could not hold its run slot to the call's
+  deadline)` while the call still had time left. ADR 0073 decision 9 capped a wait that holds a run slot while a sibling
+  has not started at its old TTL so that waiters could not hold every slot to the deadline, and the cap **ended the wait**: the
+  subtask paid for the protection of its siblings. A node freeing a minute later would have taken it, and the operator's rule is to
+  queue and never refuse (a capacity wait is progress).
+- **The fix.** At the bound the wait gives the subtask's place in the call's width up (when a subtask has not started, so that one
+  can begin) and runs on to the call's horizon like the last subtask to start (`extendHeld`). It keeps probing the fleet every tick
+  and takes a place again only to dispatch (`runSlot.acquire`, bounded by the horizon, reading the fleet again if it had to wait for
+  one); a refused attempt gives the place back before the wait sleeps. The attempts a call has open at once are therefore still its
+  width, which is why ADR 0073 had rejected releasing the slot outright; the process gate and the cooldowns pace the asks as before.
+  A wait with nobody behind it keeps its place. Every subtask of a saturated call now ends at the horizon with the defer that says the
+  call bounded it, none at its TTL.
+- **Not changed.** A call with no whole-call deadline (`delegate` CLI, `agent_run` / `offload_ask` with a route) still waits
+  `agent_placement_wait_sec` (default 120 s): it has no horizon to extend to. The composite decision's eviction wait and the
+  verification retry's wait keep their TTL. A chunk of a batched call whose waits run to the horizon leaves its later chunks to the
+  existing no-room defer (decision 10).
+- **Tests.** `internal/delegate/callwait_yield_test.go` (all five subtasks of a saturated call land when the node frees after the
+  TTL, and the fifth began while the node was still full; the node never holds more of the call's jobs than its width when eight
+  subtasks wait on a node that publishes no queue ceiling; a wait holds no place between refused attempts, keeps it for its TTL,
+  and holds one when it lands; the last subtask to start keeps its place). `callwait_slots_test.go` and `deal_width_test.go` pinned
+  the old ending and now pin the new one. 7 mutations were each caught. ADR 0073 Amendment 2026-10-10, `docs/systems/fleet-node.md`,
+  `docs/OPERATOR-GUIDE.md`.
+
 ### Fixed — the prefill stall clock is sized from the whole prompt and the seat's slow recent rate, so a long prefill on a heat-soaked seat is not read as silence (F10)
 
 - **The defect.** A 4,613-token prefill on a heat-soaked seat showed "silent 59 s of 60 s allowed" while the seat was working,
