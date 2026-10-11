@@ -4,10 +4,10 @@ package main
 // Windows cage step, and whatever edits the workflow next.
 //
 // Why they read the workflow instead of trusting it. A CI job that is deleted, indented into a no-op,
-// moved to the wrong runner, or left running `go test` where the test only SKIPS is green by
-// construction, and nothing else in the repository notices: the Windows cage's environment proof ran
-// only on a developer's own Windows machine, because the one job on a Windows runner never ran
-// `go test`. So each rule here is checked twice: the yaml says the right
+// switched off with an `if` or a `continue-on-error`, moved to the wrong runner, or left running `go test`
+// where the test only SKIPS is green by construction, and nothing else in the repository notices: the
+// Windows cage's environment proof ran only on a developer's own Windows machine, because the one job on a
+// Windows runner never ran `go test`. So each rule here is checked twice: the yaml says the right
 // thing (structure), and the step's own script, run under bash with stand-ins for the commands it
 // calls, does the right thing (behaviour). The second half is the one that catches a script that
 // reads fine and exits 0 when it should not.
@@ -23,6 +23,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -40,6 +41,9 @@ type ciJob struct {
 	RunsOn any               `yaml:"runs-on"`
 	Env    map[string]string `yaml:"env"`
 	Steps  []ciStep          `yaml:"steps"`
+	// Extra holds every other key of the job, so that `if` and `continue-on-error` are seen where they are
+	// written: they are what turns a job off without deleting it (ciAlwaysGatesProblems).
+	Extra map[string]any `yaml:",inline"`
 }
 
 type ciStep struct {
@@ -48,9 +52,54 @@ type ciStep struct {
 	Uses  string            `yaml:"uses"`
 	Run   string            `yaml:"run"`
 	Shell string            `yaml:"shell"`
-	If    string            `yaml:"if"`
 	Env   map[string]string `yaml:"env"`
 	With  map[string]any    `yaml:"with"`
+	Extra map[string]any    `yaml:",inline"` // as on the job: `if` and `continue-on-error` land here
+}
+
+// ciSwitchKeys are the keys that leave a job or a step in the file and still stop it from gating a change: an
+// `if` skips it for the events it names (or for all of them), and `continue-on-error` lets the run stay green
+// when the step fails (or the job: the workflow's verdict ignores it). Any value counts, a literal or an
+// expression, because the value can change with the event or with a repository variable.
+var ciSwitchKeys = []string{"if", "continue-on-error"}
+
+// ciSwitches lists the switch keys present in extra, in a fixed order.
+func ciSwitches(extra map[string]any) []string {
+	var keys []string
+	for _, k := range ciSwitchKeys {
+		if _, ok := extra[k]; ok {
+			keys = append(keys, k)
+		}
+	}
+	return keys
+}
+
+// ciAlwaysGatesProblems says what could stop a job, or the listed steps of it, from gating a pull request
+// without being deleted: a switch key on the job, or on a listed step (every step of the job when none is
+// listed). The structure tests read the yaml for the right runner, order and script, and every one of those
+// passes for a proof that never runs on a pull request; this is the part that notices.
+func ciAlwaysGatesProblems(jobName string, job ciJob, steps ...int) []string {
+	var problems []string
+	for _, k := range ciSwitches(job.Extra) {
+		problems = append(problems, "job "+jobName+" has `"+k+"`: the job can be skipped or can fail without failing the run, "+
+			"so what it proves does not gate a pull request; the structure checks cannot see that")
+	}
+	if len(steps) == 0 {
+		for i := range job.Steps {
+			steps = append(steps, i)
+		}
+	}
+	for _, i := range steps {
+		if i < 0 || i >= len(job.Steps) {
+			continue
+		}
+		st := job.Steps[i]
+		for _, k := range ciSwitches(st.Extra) {
+			problems = append(problems, "step "+strconv.Quote(st.label())+" of job "+jobName+" has `"+k+"`: the step can be skipped "+
+				"or can fail without failing the job, so what it proves does not gate a pull request")
+		}
+	}
+	return problems
 }
 
 // runner is the job's runs-on label when it is a single string, and "" for a list or a matrix
@@ -389,6 +438,77 @@ func TestCIScriptSandboxStartsAStepLikeTheRunner(t *testing.T) {
 		}
 		if out, rc := sb.runPlain(c.script); rc != 0 || !strings.Contains(out, "reached") {
 			t.Errorf("%s, under a bare bash: the step must carry on (rc=%d, output=%q)", c.name, rc, out)
+		}
+	}
+}
+
+// TestCIGateSwitchesAreSeen: a job or a step switched off without being deleted is reported, whatever the value of
+// the switch, and a switch on a step nobody asked about is not. The workflows here are parsed from text, because the
+// real one holds none of these (which is the point).
+func TestCIGateSwitchesAreSeen(t *testing.T) {
+	const steps = `
+    runs-on: ubuntu-latest
+    steps:
+      - name: set up
+        uses: actions/setup-go@v5
+      - name: proof
+        run: echo proof
+      - name: after
+        run: echo after
+`
+	cases := []struct {
+		name   string
+		job    string // the yaml of the job's own keys, before its steps
+		steps  string // the steps, when the case needs its own
+		listed []int
+		expect []string // one substring per problem, in order; none for a job that always gates
+	}{
+		{name: "a job that always gates", job: "", listed: []int{1}},
+		{name: "a switch on a step nobody asked about", job: "", listed: []int{1},
+			steps: "\n    runs-on: ubuntu-latest\n    steps:\n      - name: set up\n        if: github.event_name == 'push'\n      - name: proof\n        run: echo proof\n"},
+		{name: "a job-level if", job: "    if: github.event_name == 'push'", listed: []int{1},
+			expect: []string{"job gate has `if`"}},
+		{name: "a job-level if false", job: "    if: false", listed: []int{1},
+			expect: []string{"job gate has `if`"}},
+		{name: "a job-level if with no value", job: "    if:", listed: []int{1},
+			expect: []string{"job gate has `if`"}},
+		{name: "a job-level continue-on-error", job: "    continue-on-error: true", listed: []int{1},
+			expect: []string{"job gate has `continue-on-error`"}},
+		{name: "a job-level continue-on-error that is an expression", job: "    continue-on-error: ${{ github.event_name == 'push' }}", listed: []int{1},
+			expect: []string{"job gate has `continue-on-error`"}},
+		{name: "a job-level continue-on-error false is still a switch", job: "    continue-on-error: false", listed: []int{1},
+			expect: []string{"job gate has `continue-on-error`"}},
+		{name: "both on the job", job: "    if: false\n    continue-on-error: true", listed: []int{1},
+			expect: []string{"job gate has `if`", "job gate has `continue-on-error`"}},
+		{name: "a step-level if", listed: []int{1},
+			steps:  "\n    runs-on: ubuntu-latest\n    steps:\n      - name: set up\n        uses: actions/setup-go@v5\n      - name: proof\n        if: github.event_name == 'push'\n        run: echo proof\n",
+			expect: []string{`step "proof" of job gate has ` + "`if`"}},
+		{name: "a step-level continue-on-error", listed: []int{1},
+			steps:  "\n    runs-on: ubuntu-latest\n    steps:\n      - name: set up\n        uses: actions/setup-go@v5\n      - name: proof\n        run: echo proof\n        continue-on-error: true\n",
+			expect: []string{`step "proof" of job gate has ` + "`continue-on-error`"}},
+		{name: "no step listed: every step is read", listed: nil,
+			steps:  "\n    runs-on: ubuntu-latest\n    steps:\n      - name: set up\n        if: false\n      - name: proof\n        run: echo proof\n        continue-on-error: true\n",
+			expect: []string{`step "set up" of job gate has ` + "`if`", `step "proof" of job gate has ` + "`continue-on-error`"}},
+	}
+	for _, c := range cases {
+		body := c.steps
+		if body == "" {
+			body = steps
+		}
+		src := "jobs:\n  gate:\n" + c.job + "\n" + body
+		var w ciWorkflow
+		if err := yaml.Unmarshal([]byte(src), &w); err != nil {
+			t.Fatalf("%s: the case does not parse: %v\n%s", c.name, err, src)
+		}
+		got := ciAlwaysGatesProblems("gate", w.Jobs["gate"], c.listed...)
+		if len(got) != len(c.expect) {
+			t.Errorf("%s: reported %v, want %d problem(s) %v", c.name, got, len(c.expect), c.expect)
+			continue
+		}
+		for i, want := range c.expect {
+			if !strings.Contains(got[i], want) {
+				t.Errorf("%s: problem %d is %q, want it to contain %q", c.name, i, got[i], want)
+			}
 		}
 	}
 }

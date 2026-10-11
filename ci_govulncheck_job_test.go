@@ -189,6 +189,10 @@ func TestCIRunsGovulncheckOnEveryModuleOnBothOSes(t *testing.T) {
 		t.Errorf("job %s installs govulncheck@%s: pin a release tag such as v1.8.0, so a new release of the "+
 			"scanner cannot change what a pull request is judged by", g.name, tag)
 	}
+	// A job that is there and never gates: an `if` or a `continue-on-error` on the job or on any of its steps.
+	for _, p := range ciAlwaysGatesProblems(g.name, job) {
+		t.Error(p)
+	}
 	if g.setupGo < 0 {
 		t.Errorf("job %s has no actions/setup-go step before its toolchain step", g.name)
 	}
@@ -341,11 +345,35 @@ func TestCIRunsGovulncheckOnEveryModuleOnBothOSes(t *testing.T) {
 		}
 		// 1: the scan could not run (the vulnerability database is unreachable, a package does not load).
 		failures = append(failures, failure{govulncheckModules[len(govulncheckModules)-1], govulncheckOSes[len(govulncheckOSes)-1], 1})
+		scans := len(govulncheckModules) * len(govulncheckOSes)
 		for _, f := range failures {
-			sb := newScanSandbox(t)
-			out, rc := sb.run(scan.Run, "FAKE_VULN_FAIL="+f.module+" "+f.goos, fmt.Sprintf("FAKE_VULN_RC=%d", f.code))
-			if rc == 0 {
-				t.Errorf("govulncheck exited %d in %s for GOOS=%s and the step exited 0:\n%s", f.code, f.module, f.goos, out)
+			// As the runner starts the step (-e on) and under a bare bash: the script must keep its own count of
+			// the failures, not lean on an option the runner may drop.
+			for _, how := range []string{"as the runner starts it", "under a bare bash"} {
+				sb := newScanSandbox(t)
+				run := sb.run
+				if how == "under a bare bash" {
+					run = sb.runPlain
+				}
+				out, rc := run(scan.Run, "FAKE_VULN_FAIL="+f.module+" "+f.goos, fmt.Sprintf("FAKE_VULN_RC=%d", f.code))
+				if rc == 0 {
+					t.Errorf("%s: govulncheck exited %d in %s for GOOS=%s and the step exited 0:\n%s", how, f.code, f.module, f.goos, out)
+				}
+				// All of them run, whichever one fails: a step that stops at the first finding hides what the others
+				// would have reported, and the log of a red run is where the next fix starts.
+				if n := len(sb.calls("govulncheck")); n != scans {
+					t.Errorf("%s: govulncheck failed with %d in %s for GOOS=%s and only %d of the %d scans ran:\n%s",
+						how, f.code, f.module, f.goos, n, scans, out)
+				}
+				// The failing scan is named, so the log says which module and system to look at.
+				named := false
+				for _, line := range strings.Split(out, "\n") {
+					named = named || (strings.Contains(line, "::error::") &&
+						strings.Contains(line, fmt.Sprintf("in %s for GOOS=%s", f.module, f.goos)))
+				}
+				if !named {
+					t.Errorf("%s: no ::error:: line names %s for GOOS=%s:\n%s", how, f.module, f.goos, out)
+				}
 			}
 		}
 	})

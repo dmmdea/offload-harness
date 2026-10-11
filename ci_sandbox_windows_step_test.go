@@ -130,6 +130,9 @@ func TestCIRunsTheWindowsCageProofOnWindows(t *testing.T) {
 	step := job.Steps[idx]
 
 	// What only the yaml can show.
+	for _, p := range ciAlwaysGatesProblems(jobName, job, idx) {
+		t.Error(p)
+	}
 	if step.Shell != "bash" {
 		t.Errorf("step %q of job %s has shell %q: it needs `shell: bash`, which the runner starts with pipefail on "+
 			"(the Windows default is PowerShell, where `go test | tee` and grep behave differently)", step.label(), jobName, step.Shell)

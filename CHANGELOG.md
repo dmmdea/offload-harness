@@ -43,7 +43,10 @@ Versioning: [SemVer](https://semver.org/).
   for the install step, under a bare bash too: the toolchain step must read go.mod (a made-up version proves it; a CRLF file, a file
   without the line and `toolchain default` are cases), govulncheck must be built under that GOTOOLCHAIN and be on PATH, each of the
   three modules must be scanned for each of the two systems with `-show version ./...` under that GOTOOLCHAIN, and a finding or an
-  error in any one of the six must fail the step.
+  error in any one of the six must fail the step while the other five still run (counted, as the runner starts the step and under a
+  bare bash) and an `::error::` line names the module and system that failed. The job and each of its steps must carry no `if` and no
+  `continue-on-error`, of any value (`TestCIGateSwitchesAreSeen` holds that check on parsed text): a proof switched off without being
+  deleted passed every structure test.
   `TestEveryTrackedGoModuleIsScannedOrNamedAsExcluded` closes "every module": it lists the tracked `go.mod` files and fails for one
   that is neither in the scan set nor named, with its reason, among the exclusions (today the two write-door contract fixtures), so a
   new printed CLI cannot go unscanned with every check green (`TestModuleScanCheckReportsEachProblem` holds each way it can fail).
@@ -77,7 +80,7 @@ Versioning: [SemVer](https://semver.org/).
   PASS words only quoted inside other output, only subtests' indented PASS lines, a longer-named sibling passing while the proof is
   skipped (`-run` is a prefix pattern), no output at all, or `go test` failing after printing both PASS lines (only pipefail catches
   that) exits non-zero. It also requires `-count=1` (a cached result would replay the PASS lines), `-v`, `-timeout`, the anchored
-  `-run` and the package.
+  `-run` and the package, and that the step and its job carry no `if` and no `continue-on-error`.
 - **What is not shown.** The first run of the cage (CreateProcessAsUser, the job object and the low-integrity token) on a hosted runner has
   not happened. Both proofs pass on the workstation, and the step's script run end to end there with the real `go test` exits 0, and exits 1
   with an error line per test when the pattern matches nothing; with the environment block of `CreateProcessAsUser` replaced by `nil` (the
