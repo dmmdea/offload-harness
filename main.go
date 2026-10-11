@@ -305,8 +305,9 @@ Usage:
   local-offload generate-image --batch jobs.jsonl [--family F] [--route auto|local|remote] [--results r.jsonl] [--resume] [--jobs N]
                                          N prompts: ONE warm ComfyUI session when this machine's lane is free, else each job a ticket on the
                                          first matching lane that frees (fleet nodes included); a verdict per job; --resume re-renders only
-                                         what is missing or does not prove itself. exit 0 every job has its picture, 4 the batch ran every
-                                         job and some failed (the JSON and the results file name them), 1 it stopped, errored or was interrupted
+                                         what is missing or does not prove itself; rows go to r.jsonl.partial and over r.jsonl when the batch
+                                         ends. exit 0 every job has its picture (or a busy lane deferred the whole warm batch: rows queued),
+                                         4 some job failed (the JSON and the results file name them), 1 it stopped, errored or was interrupted
   local-offload inpaint-image <image> --mask m.png --prompt "..."   re-render ONLY the masked region (white=repaint)
   local-offload upscale-image <image> [--scale F] [--width N --height N] [--method lanczos] [--model name] [--out path]   ESRGAN enlarge (this machine's upscale_model)
   local-offload generate-video <out.mp4> <still.png> "<prompt>" [--model hunyuan|wan] [--frames 49] [--seed N] [--reserve-vram F] [--fast] [--upscale]

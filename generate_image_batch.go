@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"time"
 
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
@@ -72,6 +73,9 @@ func fromBatchJobs(in []mediaremote.BatchJob) []pipeline.ImageBatchJob {
 
 // runImageBatchVerb runs the batch and reports it. fs carries --config (and nothing else it needs).
 func runImageBatchVerb(fs *flag.FlagSet, a imageBatchArgs) error {
+	if a.results != "" && sameFile(a.results, a.file) {
+		return fmt.Errorf("--results %s is the same file as --batch: the results would overwrite the jobs", a.results)
+	}
 	jobs, err := readBatchJobs(a.file)
 	if err != nil {
 		return err
@@ -107,8 +111,8 @@ func runImageBatchVerb(fs *flag.FlagSet, a imageBatchArgs) error {
 	}()
 
 	var warmItems []pipeline.ImageBatchItem
-	warm := func(ctx context.Context, js []mediaremote.BatchJob) ([]mediaremote.BatchRow, bool, error) {
-		items, berr := p.RunImageBatchAs(ctx, a.family, fromBatchJobs(js))
+	warm := func(ctx context.Context, js []mediaremote.BatchJob, wait time.Duration) ([]mediaremote.BatchRow, bool, error) {
+		items, berr := p.RunImageBatchWaiting(ctx, a.family, fromBatchJobs(js), wait)
 		warmItems = items
 		rows := make([]mediaremote.BatchRow, len(items))
 		for i, it := range items {
@@ -137,16 +141,7 @@ func runImageBatchVerb(fs *flag.FlagSet, a imageBatchArgs) error {
 	}
 
 	_, fam, ferr := p.Cfg().ResolveImageFamily(a.family)
-	payload := batchPayload(b, fam, warmItems, p.Cfg().ImageGenRefinerModel != "")
-	if ferr == nil {
-		payload["family"] = fam.Name
-		if fam.License != "" {
-			payload["license"] = fam.License
-		}
-		if fam.CommercialUse != nil {
-			payload["commercial_use"] = *fam.CommercialUse
-		}
-	}
+	payload := batchPayload(b, fam, ferr == nil, warmItems, p.Cfg().ImageGenRefinerModel != "")
 	data, _ := json.Marshal(payload)
 	res := core.Result{OK: b.Err == nil && b.OK() == len(b.Rows), Data: data}
 	if b.Err != nil {
@@ -186,10 +181,32 @@ func batchExit(b *mediaremote.Batch) error {
 		b.Queued(), len(b.Rows))
 }
 
+// sameFile says two paths name one file that exists: the same file on disk, whatever the spelling, the case or the link
+// between them. A jobs file that does not exist stops the command on its own, so a name that exists nowhere needs no answer.
+func sameFile(a, b string) bool {
+	ai, err := os.Stat(a)
+	if err != nil {
+		return false
+	}
+	bi, err := os.Stat(b)
+	if err != nil {
+		return false
+	}
+	return os.SameFile(ai, bi)
+}
+
 // batchPayload is the JSON a batch prints: the shape it always had (count, succeeded, failed, items, and the refiner's
 // fallback count when a refiner is configured) with the new keys added, a verdict, hash and node on every item and the mode
-// the batch ran in. A warm item keeps what only the warm call knows (the refiner's outcome).
-func batchPayload(b *mediaremote.Batch, fam config.FamilyInfo, warmItems []pipeline.ImageBatchItem, refiner bool) map[string]any {
+// the batch ran in. A warm item keeps what only the warm call knows (the refiner's outcome). resolved says fam is this
+// machine's binding of the named family.
+//
+// The binding's family and licence are stamped only where the batch COMPARED its recipe with the one that rendered
+// (everywhere but ModeSerial); a serial item carries the family and licence its node reported, and the header names none.
+// refine_fallbacks counts warm items, so it is reported for a warm batch only.
+func batchPayload(b *mediaremote.Batch, fam config.FamilyInfo, resolved bool, warmItems []pipeline.ImageBatchItem, refiner bool) map[string]any {
+	if b.Mode == mediaremote.ModeSerial {
+		fam, resolved = config.FamilyInfo{}, false
+	}
 	warmAt := map[int]pipeline.ImageBatchItem{}
 	for k, idx := range b.WarmJobs {
 		if k < len(warmItems) {
@@ -217,10 +234,19 @@ func batchPayload(b *mediaremote.Batch, fam config.FamilyInfo, warmItems []pipel
 	if len(b.Cluster) > 0 {
 		payload["cluster"] = b.Cluster
 	}
-	// Surface the refiner fallback count in the batch summary whenever a refiner is configured (0 = all jobs refined or
-	// opted out) — absent otherwise, keeping the refiner-less payload as it was.
-	if refiner {
+	// Surface the refiner fallback count in the batch summary when a refiner is configured and the batch ran warm (0 = all
+	// jobs refined or opted out) — absent otherwise: tickets and serial renders were not measured, and a 0 would say they were.
+	if refiner && b.Mode == mediaremote.ModeWarm {
 		payload["refine_fallbacks"] = refineFallbacks
+	}
+	if resolved {
+		payload["family"] = fam.Name
+		if fam.License != "" {
+			payload["license"] = fam.License
+		}
+		if fam.CommercialUse != nil {
+			payload["commercial_use"] = *fam.CommercialUse
+		}
 	}
 	return payload
 }

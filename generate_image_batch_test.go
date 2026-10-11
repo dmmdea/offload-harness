@@ -15,7 +15,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/imagegen"
+	"github.com/dmmdea/offload-harness/internal/mediaremote"
+	"github.com/dmmdea/offload-harness/internal/pipeline"
 )
 
 // pngBatchStub is a --batch runner that renders every job as a real PNG of the size the job names (64x32 when it names
@@ -140,7 +143,7 @@ func TestGenerateImageBatchResultsFileAndResume(t *testing.T) {
 		`{"prompt":"a green boat","out":`+strconvQuote(filepath.ToSlash(outs[2]))+`,"seed":103}`)
 	results := filepath.Join(home, "r", "results.jsonl")
 	watched := filepath.Join(home, "watched.jsonl")
-	t.Setenv("STUB_WATCH", results)
+	t.Setenv("STUB_WATCH", results+".partial") // the rows are kept beside the target until the batch ends
 	t.Setenv("STUB_WATCH_COPY", watched)
 	run := func(extra ...string) (string, error) {
 		var err error
@@ -171,10 +174,13 @@ func TestGenerateImageBatchResultsFileAndResume(t *testing.T) {
 	if n := rendersSoFar(t, countPath); n != 2 {
 		t.Fatalf("%d render(s), want 2 (the unplaceable job costs no render)", n)
 	}
-	// The row of the job that failed before the render began was already in the results file when the render began: a
-	// batch that dies mid-run leaves the jobs that ended.
+	// The row of the job that failed before the render began was already on disk when the render began: a batch that dies
+	// mid-run leaves the jobs that ended (in <results>.partial; the results file itself is replaced only when the batch ends).
 	if seen, _ := os.ReadFile(watched); !strings.Contains(string(seen), `"verdict":"failed"`) {
-		t.Errorf("the results file held %q when the render began, want the failed job's row already in it", seen)
+		t.Errorf("the partial results file held %q when the render began, want the failed job's row already in it", seen)
+	}
+	if _, err := os.Stat(results + ".partial"); err == nil {
+		t.Errorf("the partial file was left behind by a batch that ended")
 	}
 	var printed struct {
 		Result struct {
@@ -340,5 +346,119 @@ func TestGenerateImageBatchFlagRefusals(t *testing.T) {
 	// A refused batch leaves no results file behind.
 	if _, err := os.Stat(filepath.Join(home, "r.jsonl")); err == nil {
 		t.Errorf("a results file was left by a command that was refused")
+	}
+}
+
+// --results never names the jobs file (it would be overwritten), and a command the batch refuses leaves an earlier run's
+// results exactly as they were: the node, the time and the hash of every picture are only there.
+func TestGenerateImageBatchResultsFileIsNeverTheJobsFileNorLostToARefusal(t *testing.T) {
+	home, cfgPath, countPath, _ := pngBatchHome(t)
+	jobs := filepath.Join(home, "jobs.jsonl")
+	writeJobs(t, jobs, `{"prompt":"a red bike"}`)
+	jobsBefore, _ := os.ReadFile(jobs)
+
+	var err error
+	captureStdout(t, func() { err = runGenerateImage([]string{"--batch", jobs, "--config", cfgPath, "--results", jobs}) })
+	if err == nil || !strings.Contains(err.Error(), "same file as --batch") {
+		t.Fatalf("--results naming the jobs file must be refused by name, got %v", err)
+	}
+	if after, _ := os.ReadFile(jobs); string(after) != string(jobsBefore) {
+		t.Errorf("the jobs file was changed by a refused command: %q", after)
+	}
+	// the same file spelled another way
+	if err := os.MkdirAll(filepath.Join(home, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	alias := home + string(filepath.Separator) + "sub" + string(filepath.Separator) + ".." + string(filepath.Separator) + "jobs.jsonl"
+	captureStdout(t, func() { err = runGenerateImage([]string{"--batch", jobs, "--config", cfgPath, "--results", alias}) })
+	if err == nil || !strings.Contains(err.Error(), "same file as --batch") {
+		t.Fatalf("an alias of the jobs file must be refused too, got %v", err)
+	}
+
+	// the same file under another name (a hard link), which no spelling shows
+	link := filepath.Join(home, "link.jsonl")
+	if lerr := os.Link(jobs, link); lerr == nil {
+		captureStdout(t, func() { err = runGenerateImage([]string{"--batch", jobs, "--config", cfgPath, "--results", link}) })
+		if err == nil || !strings.Contains(err.Error(), "same file as --batch") {
+			t.Fatalf("a hard link to the jobs file must be refused too, got %v", err)
+		}
+	}
+
+	results := filepath.Join(home, "r.jsonl")
+	const earlier = "an earlier run's record\n"
+	if err := os.WriteFile(results, []byte(earlier), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	captureStdout(t, func() {
+		err = runGenerateImage([]string{"--batch", jobs, "--config", cfgPath, "--family", "nope", "--resume", "--results", results})
+	})
+	if err == nil || !strings.Contains(err.Error(), `unknown image family "nope"`) {
+		t.Fatalf("want the unknown family refused, got %v", err)
+	}
+	if raw, rerr := os.ReadFile(results); rerr != nil || string(raw) != earlier {
+		t.Errorf("a refused re-run destroyed the earlier results: %q (%v)", raw, rerr)
+	}
+	if _, serr := os.Stat(results + ".partial"); serr == nil {
+		t.Errorf("a refused command left a partial results file")
+	}
+	if n := rendersSoFar(t, countPath); n != 0 {
+		t.Errorf("%d render(s) for refused commands", n)
+	}
+}
+
+// refine_fallbacks counts the warm items whose refiner fell back, so it is reported only where it was measured: a batch that
+// ran as tickets, one at a time, or not at all refined nothing here, and a 0 would claim every job was refined or opted out.
+func TestBatchPayloadReportsRefineFallbacksOnlyWhereTheyWereMeasured(t *testing.T) {
+	rows := []mediaremote.BatchRow{
+		{I: 0, Out: "a", OK: true, Verdict: mediaremote.VerdictRendered},
+		{I: 1, Out: "b", OK: true, Verdict: mediaremote.VerdictRendered},
+	}
+	items := []pipeline.ImageBatchItem{{Out: "a", OK: true, RefineFallback: "the refiner timed out"}, {Out: "b", OK: true}}
+	for mode, want := range map[string]bool{
+		mediaremote.ModeWarm: true, mediaremote.ModeTickets: false, mediaremote.ModeSerial: false, mediaremote.ModeNone: false,
+	} {
+		b := &mediaremote.Batch{Rows: rows, Mode: mode, WarmJobs: []int{0, 1}}
+		p := batchPayload(b, config.FamilyInfo{}, true, items, true)
+		got, has := p["refine_fallbacks"]
+		if has != want {
+			t.Errorf("mode %q: refine_fallbacks present=%v, want %v", mode, has, want)
+		}
+		if mode == mediaremote.ModeWarm && got != 1 {
+			t.Errorf("warm: refine_fallbacks = %v, want the 1 item that fell back", got)
+		}
+	}
+	// no refiner configured: absent, as it always was
+	if _, has := batchPayload(&mediaremote.Batch{Rows: rows, Mode: mediaremote.ModeWarm, WarmJobs: []int{0, 1}}, config.FamilyInfo{}, true, items, false)["refine_fallbacks"]; has {
+		t.Errorf("refine_fallbacks reported with no refiner configured")
+	}
+}
+
+// Where the recipe was never compared (serial), the printed batch must not stamp THIS machine's family and licence on a
+// picture some node rendered: the item carries the node's own words, and the header names no family at all.
+func TestBatchPayloadSerialCarriesNoLocalFamilyOrLicense(t *testing.T) {
+	no := false
+	local := config.FamilyInfo{Name: "local-family", License: "Local License", CommercialUse: &no}
+	node := true
+	rows := []mediaremote.BatchRow{
+		{I: 0, Out: "a", OK: true, Verdict: mediaremote.VerdictRendered, Family: "node-family", License: "Node License", CommercialUse: &node},
+		{I: 1, Out: "b", OK: true, Verdict: mediaremote.VerdictRendered},
+	}
+	p := batchPayload(&mediaremote.Batch{Rows: rows, Mode: mediaremote.ModeSerial}, local, true, nil, false)
+	for _, k := range []string{"family", "license", "commercial_use"} {
+		if _, has := p[k]; has {
+			t.Errorf("a serial batch's header names %q from this machine's binding", k)
+		}
+	}
+	items := p["items"].([]map[string]any)
+	if items[0]["license"] != "Node License" || items[0]["family"] != "node-family" || items[0]["commercial_use"] != true {
+		t.Errorf("item 0 = %v, want the node's own family and licence", items[0])
+	}
+	if _, has := items[1]["license"]; has {
+		t.Errorf("item 1 = %v, a node that said nothing must not be given this machine's licence", items[1])
+	}
+	// every other mode keeps stamping the binding it compared, as items always carried
+	p = batchPayload(&mediaremote.Batch{Rows: rows[1:], Mode: mediaremote.ModeTickets}, local, true, nil, false)
+	if p["family"] != "local-family" || p["license"] != "Local License" || p["items"].([]map[string]any)[0]["license"] != "Local License" {
+		t.Errorf("a ticket batch must keep the local binding's family and licence, got %v", p)
 	}
 }
