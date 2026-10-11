@@ -6258,6 +6258,9 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 	// the node's backlog" across time the node was doing something else.
 	var queuedCredit time.Duration
 	var lastQueuedAt time.Time
+	// keptInLine counts the times the job was left in the node's line at its budget (stayInLine) and
+	// keptWhy is the last reason, for the deferral if it is finally given up.
+	keptInLine, keptWhy := 0, ""
 	// queuedPolls counts ONLY the polls that actually answered `accepted`.
 	// Deliberately not the total poll count: this run may also have seen 404s
 	// and 5xxs, and a message saying "N polls, every one queued" over a total
@@ -6616,6 +6619,16 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 					setDeadline()
 				}
 				lastQueuedAt = now
+				if queuedCredit >= queuedWaitBudget && queuedWaitBudget < pollBudget {
+					// The budget is where the delegator asks whether there is a better place (stayInLine,
+					// ADR 0063 amendment 2026-10-10): a job waiting for a busy node's worker with nowhere
+					// better to go stays in line, since withdrawing it would put it at the back of the
+					// same line. It is asked about again a step later, up to the contract's patience.
+					if why, stay := r.stayInLine(ctx, base, contract); stay {
+						queuedWaitBudget = min(queuedWaitBudget+queueStayStep(), pollBudget)
+						keptInLine, keptWhy = keptInLine+1, why
+					}
+				}
 				if queuedCredit >= queuedWaitBudget {
 					// Bounded give-up while STILL QUEUED. Deliberately an
 					// ERROR, not a defer, for three reasons — and note that
@@ -6657,7 +6670,7 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 						// how the wait was sized, then what was done at its end, so a row that says the
 						// node did not take the job back still ENDS with that clause (ADR 0064).
 						pr.Err = fmt.Sprintf("queue deadline after %s: the node accepted the job but never started it — it waited in the node's backlog and never reached running (%d poll(s) answered `accepted`)",
-							queuedWaitBudget, queuedPolls) + queueRefreshNote(refreshErr, refreshTries)
+							queuedWaitBudget, queuedPolls) + queueRefreshNote(refreshErr, refreshTries) + keptInLineNote(keptInLine, keptWhy)
 						if verdict == withdrawConfirmed {
 							// The node took it back: it will never run there, so the
 							// subtask may be offered to another node, and the intent

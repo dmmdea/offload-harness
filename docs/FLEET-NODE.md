@@ -982,7 +982,13 @@ The wait is **bounded** — a job may wait for a slot at most as long as it was 
 the wait it is given is derived from the node's own ETA: `clamp(1.5 x etaStart + 30 s, 60 s, that limit)`, where
 `etaStart` is the wait the node publishes for a NEW job (`new_job_wait_sec`; an older node's `queue_wait_estimate_sec`
 plus one slot, ADR 0073) or the arithmetic over its jobs and recent wall, read again when
-the job is first seen queued; a node that publishes no ETA keeps **5 minutes** (ADR 0063). Hitting that bound while
+the job is first seen queued; a node that publishes no ETA keeps **5 minutes** (ADR 0063). That bound is where the delegator
+*asks* (ADR 0063 amendment 2026-10-10, register C16): it reads the node's health once more, and a job whose node has all its workers
+running (a published `max_concurrent_jobs`, that many `jobs_running`) while no other node, and not the local seat, has room for it
+**stays in line** and is asked about again one step later (60 s, chosen), up to the limit above. A node with a free worker that still
+has not started the job, a node whose health cannot be read, and a job with a better place on offer are withdrawn at the bound as
+before, because withdrawing a queued job only to land it at the back of the same line throws away the wait it has already spent.
+Hitting the bound while
 the job is *still queued* is a **failure**,
 not a defer, with its own stable prefix:
 

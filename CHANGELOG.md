@@ -6,6 +6,33 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed — a job queued on a busy node stays in line at its queue budget when nothing better is on offer, instead of being withdrawn to the back of the same line (C16)
+
+- **The defect.** The queue budget (`clamp(1.5 x ETA + 30 s, 60 s, patience)`) is derived from the node's ETA, which is the median of
+  its recent walls, so a one-worker node mid-way through a job that runs three times its median publishes a wait that is a fraction of
+  the one a new job faces. One box's ledger shows nine delegated jobs withdrawn at their queue budget (60 s to 11 min) in a day and a
+  half. A withdrawn job is filed as a capacity refusal (ADR 0064); with no other node to take it, it goes back to the capacity wait,
+  which does not exclude the node it came from and asks it again after its cooldown, putting the job at the back of the same line:
+  the wait already spent is thrown away to land where it started.
+- **The fix.** At the budget the delegator asks before it withdraws (`stayInLine`). It reads the node's health once more; the job
+  **stays** when the node's workers are all running (a published `max_concurrent_jobs`, that many `jobs_running`: the job waits for a
+  worker, which is a queue and not a wedge) and no other place has room for it now (`betterPlaceThan`: another eligible remote that
+  passes the re-placement test, or the local seat when the route allows it and no lease reserves or fences it and its run-cap line
+  has a slot). It is asked about again one step later (60 s, chosen: the budget's own floor), up to the patience the contract was
+  given, which is where the ETA-derived budget was already capped. A node with a free worker that still has not started the job, a
+  node whose health cannot be read, a node that publishes no worker ceiling, and a job with a better place on offer are withdrawn at the
+  budget exactly as before. The failure text says `kept in line N time(s) past the derived budget, up to the contract's patience:
+  <why>` when the wait was extended.
+- **Not changed.** The ETA itself (`new_job_wait_sec`) still prices a new job at the median wall whatever the running job has done, so
+  placement can still send a job to a node that is mid-way through a long one; it now waits there instead of being reshuffled.
+- **Tests.** `internal/delegate/queue_stay_test.go` (a busy node that starts the job at 3 times its budget is waited on to success;
+  a node that stays busy is waited on to the end of the patience and no further, and the failure says so; a node with a free worker is
+  still withdrawn at the budget; a node whose health cannot be read is withdrawn too; another node with room, or no other node,
+  is told apart, and the job leaves for the node with room end to end). `TestQueueRefreshFailureIsNamedOnTheDeadline` now counts the
+  question at the budget among the bounded health reads. 6 mutations were each caught; a seventh (treating a failed read as
+  readable) is equivalent, since a failed read decodes to a view with no worker ceiling. ADR 0063 Amendment 2026-10-10,
+  `docs/FLEET-NODE.md`.
+
 ### Fixed — a capacity wait that holds a run slot gives it up at its bound and keeps waiting, so a subtask in line for a node is not refused while the call has time (C16)
 
 - **The defect.** A fan-out on a saturated fleet ended subtasks as `capacity wait: no node had room within 2m0s (waited 2m0s;
