@@ -30,6 +30,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log"
 	"os"
 	"regexp"
 	"sort"
@@ -254,6 +255,72 @@ func asOpenError(err error) error {
 	return err
 }
 
+// noteLogf is where the fence says it cannot read the serving config. A variable so a test can listen
+// (SetNoteLogger); the default writes to the process log like the rest of the fence's notes.
+var noteLogf = log.Printf
+
+// SetNoteLogger replaces where the unreadable-serving-config note goes and returns a function that puts
+// the previous one back; nil restores the process log. A test installs its own so that the note is
+// heard and the process-wide once-per-cause memory starts empty.
+func SetNoteLogger(fn func(format string, args ...any)) (restore func()) {
+	noteMu.Lock()
+	prev := noteLogf
+	if fn == nil {
+		fn = log.Printf
+	}
+	noteLogf = fn
+	noted = map[string]string{}
+	noteMu.Unlock()
+	return func() {
+		noteMu.Lock()
+		noteLogf = prev
+		noted = map[string]string{}
+		noteMu.Unlock()
+	}
+}
+
+var (
+	noteMu sync.Mutex
+	// noted is, for each serving config path, the text of the error last said about it.
+	noted = map[string]string{}
+)
+
+// sayUnreadable tells the operator, once per cause, that the fence cannot place a model by the serving
+// config. Failing closed is the right answer and an invisible one: the refusal a blocked load prints
+// names only the lease holder, so a moved, mid-edit or mistyped llama-swap config would read as the
+// behaviour the fence had before it could place a seat at all. An unset path is the default and not a
+// fault, so it says nothing; a set path that cannot be read, or is not YAML, is said again only when
+// its cause changes or after the file was readable in between.
+func sayUnreadable(path string, err error) {
+	if errors.Is(err, errUnset) {
+		return
+	}
+	path = strings.TrimSpace(path)
+	cause := err.Error()
+	noteMu.Lock()
+	if noted[path] == cause {
+		noteMu.Unlock()
+		return
+	}
+	if _, known := noted[path]; !known && len(noted) >= maxCached {
+		noted = map[string]string{}
+	}
+	noted[path] = cause
+	logf := noteLogf
+	noteMu.Unlock()
+	logf("servingcfg: the serving config at %s cannot be read (%v): the load fence places no model by it, so a lease on any card fences every seat the layers do not place (said once per cause)", path, err)
+}
+
+// sayReadable forgets what was said about path once it reads, so the same fault coming back later is
+// said again.
+func sayReadable(path string) {
+	noteMu.Lock()
+	if len(noted) > 0 {
+		delete(noted, strings.TrimSpace(path))
+	}
+	noteMu.Unlock()
+}
+
 // PinsOf is the placement the load fence uses: the pins the serving config at path gives model, as the
 // caller's own copy. ok is false when the config places it nowhere (path unset or unreadable, the
 // model not listed, a proxy: seat, an entry that pins nothing it can read), which every caller reads
@@ -261,8 +328,10 @@ func asOpenError(err error) error {
 func PinsOf(path, model string) ([]string, bool) {
 	snap, err := Load(path)
 	if err != nil {
+		sayUnreadable(path, err)
 		return nil, false
 	}
+	sayReadable(path)
 	p, ok := snap.Pin(model)
 	if !ok || len(p.Pins) == 0 {
 		return nil, false

@@ -35,8 +35,13 @@ Versioning: [SemVer](https://semver.org/).
   memo holds at most 16 files.
 - **The idle path pays nothing new.** `ScopeToModel` looks a seat's pins up only for a lease that names cards, so an idle box and a
   whole-node lease (which touches every seat whatever its pin) never touch the file.
-- **Fail closed, everywhere.** A serving config that is unset, missing or not YAML, a card table that cannot be read, a whole-node lease,
-  a model the file does not list and every entry listed above as placing nothing keep the fence where it was: any lease fences them.
+- **Fail closed, everywhere, and said once.** A serving config that is unset, missing or not YAML, a card table that cannot be read, a
+  whole-node lease, a model the file does not list and every entry listed above as placing nothing keep the fence where it was: any
+  lease fences them. A serving config that is set and cannot be read used to switch the narrowing off with no word, and the refusal a
+  blocked load prints names only the lease holder, so it read as the fence's old behaviour. The fence's reader now says, once per
+  cause and per path, in the process log: `servingcfg: the serving config at <path> cannot be read (<cause>): the load fence places no
+  model by it, so a lease on any card fences every seat the layers do not place`. The same fault coming back after the file read
+  cleanly is said again; an unset path is the default and says nothing, and neither does a model a layer places (the file is not read).
 - **Tests, written first and red on the previous tree.** `internal/config`: the fallback for each kind of entry
   (`TestModelPinsFallBackToTheServingConfigOnABoxWithNoLayers`), a box with layers still placing the models they do not declare
   (`TestLayersOutrankTheServingConfigForTheFence`), the copy-on-read (`TestModelPinsFromTheServingConfigAreACopy`), and the fence end to

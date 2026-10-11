@@ -1,10 +1,12 @@
 package servingcfg
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -346,5 +348,132 @@ func TestLoadMemoIsBounded(t *testing.T) {
 	cacheMu.Unlock()
 	if n > maxCached {
 		t.Fatalf("the memo holds %d files, want at most %d", n, maxCached)
+	}
+}
+
+// ---- the note: a serving config the fence cannot read is said once, not silently ---------------------
+//
+// An unreadable serving config turns the fence back into "any lease fences every seat the layers do
+// not place", and the refusal it produces names only the lease holder, so it reads as the old
+// behaviour. The unload side words the same fault (gpualloc servingState.problem); the fence says it
+// once per cause. An unset path is not a fault: it is the default, and a box that never configured one
+// gets no line.
+
+// heard installs a listener for the note and hands back the lines it gets.
+func heard(t *testing.T) func() []string {
+	t.Helper()
+	var mu sync.Mutex
+	var lines []string
+	t.Cleanup(SetNoteLogger(func(format string, args ...any) {
+		mu.Lock()
+		defer mu.Unlock()
+		lines = append(lines, fmt.Sprintf(format, args...))
+	}))
+	return func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]string(nil), lines...)
+	}
+}
+
+func TestPinsOfSaysOnceThatTheServingConfigCannotBeRead(t *testing.T) {
+	notes := heard(t)
+
+	gone := filepath.Join(t.TempDir(), "gone.yaml")
+	for i := 0; i < 3; i++ {
+		if got, ok := PinsOf(gone, "m"); ok || got != nil {
+			t.Fatalf("PinsOf of a missing file = %v, %v; want unknown", got, ok)
+		}
+	}
+	got := notes()
+	if len(got) != 1 {
+		t.Fatalf("a missing serving config was said %d times over three asks, want once: %q", len(got), got)
+	}
+	for _, want := range []string{gone, "open ", "fences every seat"} {
+		if !strings.Contains(got[0], want) {
+			t.Errorf("the note %q does not say %q", got[0], want)
+		}
+	}
+
+	// Another cause on the same path is another note; the same cause again is not.
+	rewrite(t, gone, "models: [unclosed")
+	settle(t, gone)
+	for i := 0; i < 3; i++ {
+		PinsOf(gone, "m")
+	}
+	got = notes()
+	if len(got) != 2 || !strings.Contains(got[1], "not parseable YAML") || !strings.Contains(got[1], gone) {
+		t.Fatalf("a file that stopped being YAML must be said once, with its cause and its path; heard %q", got)
+	}
+
+	// Another file with the very same cause is its own fault: the memory is per path.
+	other := writeServing(t, "models: [unclosed")
+	settle(t, other)
+	PinsOf(other, "m")
+	PinsOf(other, "m")
+	if got = notes(); len(got) != 3 || !strings.Contains(got[2], other) {
+		t.Fatalf("a different path is a different fault, even with the same cause; heard %q", got)
+	}
+}
+
+func TestPinsOfSaysNothingWhereThereIsNothingWrong(t *testing.T) {
+	notes := heard(t)
+
+	// Unset is the default (config.example.json ships ""), not a fault.
+	for _, p := range []string{"", "   "} {
+		PinsOf(p, "yaml-card0")
+	}
+	// A readable file says nothing, whether or not it places the model.
+	p := writeServing(t, servingYAML)
+	settle(t, p)
+	for _, m := range []string{"yaml-card0", "yaml-pair", "yaml-proxy", "yaml-unpinned", "not-listed", ""} {
+		PinsOf(p, m)
+	}
+	if got := notes(); len(got) != 0 {
+		t.Fatalf("nothing was wrong, but the fence said %q", got)
+	}
+}
+
+// A fault that returns after the file was readable again is news again: the process lives for days
+// and the first note is long gone from the log by then.
+func TestPinsOfSaysItAgainWhenTheSameFaultReturnsAfterTheFileWasRead(t *testing.T) {
+	notes := heard(t)
+	p := writeServing(t, "models: [unclosed")
+	settle(t, p)
+	PinsOf(p, "m")
+	PinsOf(p, "m")
+	if got := notes(); len(got) != 1 {
+		t.Fatalf("first break: heard %q, want one note", got)
+	}
+
+	rewrite(t, p, oneModel(card2))
+	settle(t, p)
+	if got, ok := PinsOf(p, "m"); !ok || !reflect.DeepEqual(got, []string{card2}) {
+		t.Fatalf("after the fix PinsOf = %v, %v", got, ok)
+	}
+	if got := notes(); len(got) != 1 {
+		t.Fatalf("a readable file said something: %q", got)
+	}
+
+	rewrite(t, p, "models: [unclosed")
+	settle(t, p)
+	PinsOf(p, "m")
+	PinsOf(p, "m")
+	if got := notes(); len(got) != 2 {
+		t.Fatalf("the same fault after a recovery must be said again; heard %q", got)
+	}
+}
+
+// The memory of what was said is bounded like the memo: a process asked about many paths keeps few.
+func TestTheMemoryOfWhatWasSaidIsBounded(t *testing.T) {
+	heard(t)
+	for i := 0; i < maxCached+5; i++ {
+		PinsOf(filepath.Join(t.TempDir(), "gone.yaml"), "m")
+	}
+	noteMu.Lock()
+	n := len(noted)
+	noteMu.Unlock()
+	if n > maxCached {
+		t.Fatalf("the note memory holds %d paths, want at most %d", n, maxCached)
 	}
 }

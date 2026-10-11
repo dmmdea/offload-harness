@@ -959,8 +959,14 @@ fenced every seat: a media lease on one card held back a text load for a model t
 card, the pairs that span it and every model nothing places, and a load for a model pinned to another card goes through at once
 (`TestAOneCardLeaseFencesOnlyTheSeatsTheServingConfigPlacesOnThatCard`, in both directions). Everything listed as unknown above
 stays fenced by any lease, and so do a whole-node lease, a card table that cannot be read and a serving config that is unset,
-missing or not YAML (`TestTheFenceStaysClosedWhereTheServingConfigCannotPlaceAModel`). The fence and the unload list cannot
-disagree about a model: both read one parser and `layers` outrank the file in both
+missing or not YAML (`TestTheFenceStaysClosedWhereTheServingConfigCannotPlaceAModel`). A serving config that is set and cannot be
+read is not left invisible: the refusal a blocked load prints names only the lease holder, so the fence's reader says once per
+cause, in the process log (stderr), `servingcfg: the serving config at <path> cannot be read (<cause>): the load fence places no
+model by it, so a lease on any card fences every seat the layers do not place`. It says it again when the cause changes or when
+the same fault returns after the file read cleanly; an unset path is the default and says nothing
+(`TestPinsOfSaysOnceThatTheServingConfigCannotBeRead`, `TestPinsOfSaysNothingWhereThereIsNothingWrong`,
+`TestPinsOfSaysItAgainWhenTheSameFaultReturnsAfterTheFileWasRead`, `TestModelPinsSaysOnceThatTheServingConfigCannotBeRead`). The
+fence and the unload list cannot disagree about a model: both read one parser and `layers` outrank the file in both
 (`TestTheLoadFenceAndTheUnloadListPlaceEveryModelAlike`, `TestLayersOutrankTheServingConfigForTheFence`). A seat's pins are looked up
 only when a held lease names cards, so an idle box and a whole-node lease do not touch the file
 (`TestSeatPinsAreNotLookedUpWhenNoLeaseNamesCards`). The file is Stat-ed on each lookup and parsed again when its modification time

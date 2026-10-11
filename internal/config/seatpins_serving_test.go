@@ -1,12 +1,16 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/dmmdea/offload-harness/internal/servingcfg"
 )
 
 // The load fence places a model by the serving config when layers do not declare it (register C-86a).
@@ -142,6 +146,48 @@ func TestModelPinsServingConfigThatCannotBeReadPlacesNothing(t *testing.T) {
 		if pins, ok := c.ModelPins("gemma-4-26b"); ok || len(pins) != 0 {
 			t.Errorf("%s serving config: ModelPins = %v, %v; want unknown", name, pins, ok)
 		}
+	}
+}
+
+// Failing closed is invisible: the refusal a blocked load prints names only the lease holder, so a
+// serving config that moved, is mid-edit or has a typo would read as the fence's old behaviour. The
+// fence's reader says so once per cause, through ModelPins, the one door every caller asks. A layer
+// that places a model never reads the file, and an unset path is the default: neither says anything.
+func TestModelPinsSaysOnceThatTheServingConfigCannotBeRead(t *testing.T) {
+	var mu sync.Mutex
+	var lines []string
+	t.Cleanup(servingcfg.SetNoteLogger(func(format string, args ...any) {
+		mu.Lock()
+		defer mu.Unlock()
+		lines = append(lines, fmt.Sprintf(format, args...))
+	}))
+	heard := func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]string(nil), lines...)
+	}
+
+	c := Default()
+	c.ServingConfigPath = filepath.Join(t.TempDir(), "gone.yaml")
+	for i := 0; i < 3; i++ {
+		if pins, ok := c.ModelPins("gemma-4-26b"); ok || len(pins) != 0 {
+			t.Fatalf("ModelPins with an unreadable serving config = %v, %v; want unknown", pins, ok)
+		}
+	}
+	got := heard()
+	if len(got) != 1 || !strings.Contains(got[0], c.ServingConfigPath) || !strings.Contains(got[0], "fences every seat") {
+		t.Fatalf("an unreadable serving config must be said once, naming the file and what the fence does instead; heard %q", got)
+	}
+
+	layered := CompositeFixture()
+	layered.ServingConfigPath = filepath.Join(t.TempDir(), "never-read.yaml")
+	if pins, ok := layered.ModelPins("qwen3-vl-8b"); !ok || !reflect.DeepEqual(pins, []string{"2"}) {
+		t.Fatalf("ModelPins(qwen3-vl-8b) = %v, %v; the layers place it", pins, ok)
+	}
+	unset := Default()
+	unset.ModelPins("gemma-4-26b")
+	if again := heard(); len(again) != 1 {
+		t.Fatalf("a model the layers place, and an unset path, must say nothing; heard %q", again)
 	}
 }
 
