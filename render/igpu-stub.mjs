@@ -5,7 +5,7 @@
 // `-M vid_gen ...`, da3-cli's `depth ...`, audiocpp_cli's `--task ...`), so a stand-in has to be
 // an executable file with that interface. makeStub writes one into a temp dir:
 //   POSIX    a #!/bin/sh script that execs node on this file with a JSON spec,
-//   Windows  a tiny Go launcher (built once, cached) that does the same, because a .cmd / .js
+//   Windows  a tiny Go launcher (built once per process, removed when it ends) that does the same, because a .cmd / .js
 //            cannot be spawned without a shell and node.exe would parse the engine's flags.
 // Run as a script, this file IS the engine: it records its argv, prints a log, writes the
 // output the real engine would, and exits (or hangs, for the kill tests).
@@ -31,7 +31,7 @@
 //
 // Dependency-free (Node 18+ built-ins only).
 import { spawnSync } from "node:child_process";
-import { appendFileSync, chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync, writeSync } from "node:fs";
+import { appendFileSync, chmodSync, copyFileSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
@@ -72,20 +72,23 @@ func main() {
 
 let launcherExe = null;
 
-// windowsLauncher: the compiled launcher, built once per machine (cached under the OS temp dir).
+// windowsLauncher: the compiled launcher, built once per PROCESS into a folder of its own under the OS temp dir
+// and removed when the process ends. It used to be one per-machine cache (igpu-stub-launcher-v1) that no run
+// ever removed, and every process that raced to build it left its own build-<pid>-<ms> folder inside it. A stub
+// is a COPY of this exe, so nothing needs the original once its process is gone, and building it takes under a
+// second.
 function windowsLauncher() {
   if (launcherExe) return launcherExe;
-  const dir = join(tmpdir(), "igpu-stub-launcher-v1");
+  const dir = mkdtempSync(join(tmpdir(), "igpu-stub-launcher-"));
+  // retries: on Windows a scanner can hold the fresh exe for a moment
+  const remove = () => { try { rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); } catch { /* best effort */ } };
+  process.once("exit", remove);
+  writeFileSync(join(dir, "launcher.go"), LAUNCHER_GO);
   const exe = join(dir, "launcher.exe");
-  if (!existsSync(exe)) {
-    mkdirSync(dir, { recursive: true });
-    const unique = join(dir, `build-${process.pid}-${Date.now()}`);
-    mkdirSync(unique, { recursive: true });
-    writeFileSync(join(unique, "launcher.go"), LAUNCHER_GO);
-    const out = join(unique, "launcher.exe");
-    const r = spawnSync("go", ["build", "-o", out, "launcher.go"], { cwd: unique, encoding: "utf8", env: { ...process.env, GOFLAGS: "" } });
-    if (r.status !== 0 || !existsSync(out)) throw new Error("cannot build the stub launcher with go: " + (r.stderr || r.error?.message || "unknown"));
-    try { renameSync(out, exe); } catch { if (!existsSync(exe)) copyFileSync(out, exe); }
+  const r = spawnSync("go", ["build", "-o", exe, "launcher.go"], { cwd: dir, encoding: "utf8", env: { ...process.env, GOFLAGS: "" } });
+  if (r.status !== 0 || !existsSync(exe)) {
+    remove();
+    throw new Error("cannot build the stub launcher with go: " + (r.stderr || r.error?.message || "unknown"));
   }
   launcherExe = exe;
   return exe;

@@ -276,7 +276,6 @@ func DocName(i int, finalURL, rawURL string) string {
 // "download", "release" on a page about ffmpeg).
 var boilerplate = map[string]struct{}{}
 
-
 func init() {
 	for _, w := range strings.Fields("version versions release releases download downloads install installation installed " +
 		"license licensed documentation documented latest stable update updates updated support supported github " +
@@ -287,4 +286,3 @@ func init() {
 		boilerplate[w] = struct{}{}
 	}
 }
-

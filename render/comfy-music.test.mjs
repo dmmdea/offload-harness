@@ -5,13 +5,13 @@
 // invoked as the main module (so importing it here has no side effects).
 import { test } from "node:test";
 import assert from "node:assert";
-import { writeFileSync, mkdtempSync, existsSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import {
   parseArgs, buildGraphFromArgs, computeRenderSeconds, RESERVE_VRAM_DEFAULT,
   cleanupFailedDeadAirOutput,
 } from "./comfy-music.mjs";
+import { scratchDir } from "./test-scratch.mjs";
 
 test("parseArgs: positionals + flags (out, prompt, --seconds/--seed/--lyrics/--reserve-vram)", () => {
   const { pos, flags } = parseArgs([
@@ -74,9 +74,9 @@ test("buildGraphFromArgs: missing prompt throws (defer-not-crash maps exit!=0 �
   assert.throws(() => buildGraphFromArgs(pos, flags), /prompt/i);
 });
 
-test("buildGraphFromArgs: --graph <file> passthrough uses the supplied graph verbatim", () => {
+test("buildGraphFromArgs: --graph <file> passthrough uses the supplied graph verbatim", (t) => {
   const customGraph = { "1": { class_type: "CheckpointLoaderSimple", inputs: { ckpt_name: "x.safetensors" } } };
-  const gf = join(mkdtempSync(join(tmpdir(), "music-graph-")), "wf.json");
+  const gf = join(scratchDir(t, "music-graph-"), "wf.json");
   writeFileSync(gf, JSON.stringify(customGraph));
   const { graph } = buildGraphFromArgs(["out.flac"], { graph: gf, seed: "5" });
   assert.deepEqual(graph, customGraph);
@@ -130,9 +130,9 @@ test("buildGraphFromArgs: trim defaults to false — unchanged behavior for an e
   assert.equal(lat.inputs.seconds, 30, "graph is built at the requested seconds, exactly as before this fix");
 });
 
-test("buildGraphFromArgs: --graph passthrough ignores trim:true (its duration is opaque to this function)", () => {
+test("buildGraphFromArgs: --graph passthrough ignores trim:true (its duration is opaque to this function)", (t) => {
   const customGraph = { "1": { class_type: "CheckpointLoaderSimple", inputs: { ckpt_name: "x.safetensors" } } };
-  const gf = join(mkdtempSync(join(tmpdir(), "music-graph-trim-")), "wf.json");
+  const gf = join(scratchDir(t, "music-graph-trim-"), "wf.json");
   writeFileSync(gf, JSON.stringify(customGraph));
   const { graph, seconds, renderSeconds } = buildGraphFromArgs(["out.flac"], { graph: gf, seed: "5" }, { trim: true });
   assert.deepEqual(graph, customGraph);
@@ -147,8 +147,8 @@ test("buildGraphFromArgs: --graph passthrough ignores trim:true (its duration is
 // air music request with a "*.wav" out path left FLAC bytes under that .wav name on
 // disk after the DEAD_AIR defer — reproduced R1, 2026-09-23. generate() now calls
 // this before throwing; these tests pin the cleanup decision itself.
-test("cleanupFailedDeadAirOutput: removes the stray file left by a failed render", () => {
-  const dir = mkdtempSync(join(tmpdir(), "music-deadair-"));
+test("cleanupFailedDeadAirOutput: removes the stray file left by a failed render", (t) => {
+  const dir = scratchDir(t, "music-deadair-");
   const p = join(dir, "out.wav");
   writeFileSync(p, "flac-bytes-under-a-wav-name");
   assert.equal(existsSync(p), true, "fixture file must exist before cleanup");

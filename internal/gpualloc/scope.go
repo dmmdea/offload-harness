@@ -241,15 +241,30 @@ func EffectiveMemoryStack(cfg config.Config) []string {
 // that is the direction every doubt took before F15. warn, when not nil, names what was unloaded and
 // what was left, each with its reason.
 //
-// The candidates are the llama-swap roster. When the roster is empty or could not be read they
-// are the models the config declares (Config.LayerSeatModels) and the serving config lists, said so.
+// The candidates are the llama-swap roster. When the roster was read and is empty nothing is
+// resident, and the candidates are the models the config declares (Config.LayerSeatModels) and the
+// serving config lists, said so.
 //
-// ok is false only for a whole-node lease (no ids): it holds every card, so nothing narrows and the
+// rosterErr is the error of the roster read, nil when it was read. A roster that could NOT be read is
+// not an empty roster: nothing says what is resident, so no candidate list built from the config can
+// be complete (a resident model neither the layers nor the serving config name would never be
+// judged), and on a box that declares neither the list would be empty and nothing would be unloaded.
+// ok is then false, whatever the config declares, and the render lane keeps its own rule: every model
+// off the memory stack, as before F15. F15's per-card judgement applies to a roster that was read.
+//
+// ok is false for a whole-node lease (no ids): it holds every card, so nothing narrows and the
 // render lane keeps its own rule. A lease that names every card the box has is the whole node too.
-// A card lease always has a list, empty when nothing would be unloaded (exported as the none
-// sentinel by UnloadEnv).
-func UnloadModels(ctx context.Context, cfg config.Config, roster []string, leaseIDs []string, deps Deps, warn io.Writer) ([]string, bool) {
+// ok is false for a card lease too when the roster could not be read (above). Otherwise a card lease
+// always has a list, empty when nothing would be unloaded (exported as the none sentinel by
+// UnloadEnv).
+func UnloadModels(ctx context.Context, cfg config.Config, roster []string, rosterErr error, leaseIDs []string, deps Deps, warn io.Writer) ([]string, bool) {
 	if len(leaseIDs) == 0 {
+		return nil, false
+	}
+	if rosterErr != nil {
+		if warn != nil {
+			fmt.Fprintf(warn, "unload list: the llama-swap roster could not be read (%v), so nothing says what is resident: no list is made and the render lane keeps its own rule (it unloads every model off the memory stack)\n", rosterErr)
+		}
 		return nil, false
 	}
 	candidates, fromConfig := roster, false
@@ -272,7 +287,7 @@ func UnloadModels(ctx context.Context, cfg config.Config, roster []string, lease
 		models = append(models, id)
 	}
 	if fromConfig && warn != nil {
-		fmt.Fprintf(warn, "unload list: the llama-swap roster is empty or could not be read, so the candidates are the models the config declares and the serving config lists\n")
+		fmt.Fprintf(warn, "unload list: the llama-swap roster is empty, so the candidates are the models the config declares and the serving config lists\n")
 	}
 	if len(models) == 0 {
 		return nil, true

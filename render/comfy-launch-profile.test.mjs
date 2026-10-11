@@ -5,14 +5,12 @@
 import { test } from "node:test";
 import assert from "node:assert";
 import http from "node:http";
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import {
   ensureComfy, launchFlags, resolveLaunchProfile, profileMismatch, argvDynamicVram,
   reuseVerdict, fetchSystemArgv, comfyUp,
 } from "./comfy-lifecycle.mjs";
 import { writeLaunchOwner, readLaunchOwner } from "./comfy-ownership.mjs";
+import { scratchDir } from "./test-scratch.mjs";
 
 const NO_PROFILE = { cudaDevice: "", dynamicVram: "" };
 const BOUND_DIR = "/fake/comfyui";
@@ -100,13 +98,13 @@ test("reuse: no profile requested => a running ComfyUI is reused without reading
   } finally { await s.close(); }
 });
 
-test("COMFY-PROFILE-MISMATCH: a foreign ComfyUI without the binding's --cuda-device is refused, never reused", async () => {
+test("COMFY-PROFILE-MISMATCH: a foreign ComfyUI without the binding's --cuda-device is refused, never reused", async (t) => {
   const s = await stubComfy(["main.py", "--disable-dynamic-vram"]);
   const logs = [];
   try {
     await assert.rejects(
       ensureComfy({ api: s.api, env: { COMFY_CUDA_DEVICE: "1" }, spawn: noSpawn, envFor: envSame,
-        comfyDir: mkdtempSync(join(tmpdir(), "comfy-own-")), log: (l) => logs.push(l) }),
+        comfyDir: scratchDir(t, "comfy-own-"), log: (l) => logs.push(l) }),
       /^Error: COMFY-PROFILE-MISMATCH: ComfyUI on http:\/\/127\.0\.0\.1:\d+: it runs with no --cuda-device/);
     assert.ok(logs.some((l) => l.startsWith("COMFY-PROFILE-MISMATCH: ")), "greppable line on stderr: " + logs.join(" | "));
     assert.match(logs.join("\n"), /not started by this harness/);
@@ -142,10 +140,10 @@ test("an unreadable argv with a profile requested is refused (it cannot be prove
   } finally { await s.close(); }
 });
 
-test("harness-launched, orphaned, wrong profile => stopped and relaunched with the binding's flags", async () => {
+test("harness-launched, orphaned, wrong profile => stopped and relaunched with the binding's flags", async (t) => {
   const oldArgv = ["main.py", "--disable-smart-memory", "--cache-none", "--reserve-vram", "1.0", "--disable-dynamic-vram"];
   const s = await stubComfy(oldArgv);
-  const dir = mkdtempSync(join(tmpdir(), "comfy-own-"));
+  const dir = scratchDir(t, "comfy-own-");
   // pid 4242 is "alive" (faked), its spawner 5151 is gone.
   writeLaunchOwner(dir, { pid: 4242, ownerPid: 5151, args: oldArgv, profile: NO_PROFILE });
   let killed = null; let spawned = null; let closed = false;
@@ -173,10 +171,10 @@ test("harness-launched, orphaned, wrong profile => stopped and relaunched with t
   } finally { if (!closed) await s.close(); }
 });
 
-test("harness-launched but still held by a live spawner => refused, not killed", async () => {
+test("harness-launched but still held by a live spawner => refused, not killed", async (t) => {
   const argv = ["main.py", "--disable-smart-memory"];
   const s = await stubComfy(argv);
-  const dir = mkdtempSync(join(tmpdir(), "comfy-own-"));
+  const dir = scratchDir(t, "comfy-own-");
   writeLaunchOwner(dir, { pid: 4242, ownerPid: 5151, args: argv, profile: NO_PROFILE });
   try {
     await assert.rejects(
@@ -187,9 +185,9 @@ test("harness-launched but still held by a live spawner => refused, not killed",
   } finally { await s.close(); }
 });
 
-test("a stale marker (argv differs from what the server reports) never makes a foreign ComfyUI look ours", async () => {
+test("a stale marker (argv differs from what the server reports) never makes a foreign ComfyUI look ours", async (t) => {
   const s = await stubComfy(["main.py", "--listen"]);
-  const dir = mkdtempSync(join(tmpdir(), "comfy-own-"));
+  const dir = scratchDir(t, "comfy-own-");
   writeLaunchOwner(dir, { pid: 4242, ownerPid: 5151, args: ["main.py", "--disable-smart-memory"], profile: NO_PROFILE });
   try {
     const v = await reuseVerdict({ api: s.api, comfyDir: dir, profile: { cudaDevice: "1", dynamicVram: "" }, alive: () => true });
@@ -199,8 +197,8 @@ test("a stale marker (argv differs from what the server reports) never makes a f
   } finally { await s.close(); }
 });
 
-test("a fresh launch with a profile carries --cuda-device and records its fingerprint", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "comfy-own-"));
+test("a fresh launch with a profile carries --cuda-device and records its fingerprint", async (t) => {
+  const dir = scratchDir(t, "comfy-own-");
   let spawned = null;
   const child = await ensureComfy({
     comfyUp: async () => spawned !== null, env: { COMFY_CUDA_DEVICE: "2" }, comfyDir: dir, pollMs: 1,

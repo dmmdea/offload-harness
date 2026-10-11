@@ -220,7 +220,7 @@ func TestGPULeaseUnloadModelsListsOnlyWhatMayLeave(t *testing.T) {
 	// memory stack minus the seats pinned to cards the lease does not hold.
 	roster := []string{"agent-pool", "qwen3-vl-8b", "gemma-4-26b-agent", "mystery-model", "embeddinggemma"}
 	cfg := scopedDrainConfig(t, "http://127.0.0.1:1", "agent-pool")
-	got, ok := unloadModelsFor(context.Background(), cfg, roster, []string{leaseCard2ID})
+	got, ok := unloadModelsFor(context.Background(), cfg, roster, nil, []string{leaseCard2ID})
 	if !ok {
 		t.Fatal("a roster and a card table: the list is known")
 	}
@@ -228,13 +228,13 @@ func TestGPULeaseUnloadModelsListsOnlyWhatMayLeave(t *testing.T) {
 	if strings.Join(got, ",") != "agent-pool,mystery-model,qwen3-vl-8b" {
 		t.Fatalf("list = %v, want the card-2 seats and the model it cannot place", got)
 	}
-	got, ok = unloadModelsFor(context.Background(), cfg, roster, []string{leaseCard0ID})
+	got, ok = unloadModelsFor(context.Background(), cfg, roster, nil, []string{leaseCard0ID})
 	sort.Strings(got)
 	if !ok || strings.Join(got, ",") != "agent-pool,gemma-4-26b-agent,mystery-model" {
 		t.Fatalf("card-0 list = %v ok=%v", got, ok)
 	}
 	// A whole-node lease exports nothing: the render lane keeps its own rule.
-	if got, ok := unloadModelsFor(context.Background(), cfg, roster, nil); ok || got != nil {
+	if got, ok := unloadModelsFor(context.Background(), cfg, roster, nil, nil); ok || got != nil {
 		t.Fatalf("a whole-node lease has no list, got %v %v", got, ok)
 	}
 	if env := unloadModelsEnv([]string{"a", "b"}, true); env != "GPU_LEASE_UNLOAD_MODELS=a,b" {
@@ -612,35 +612,51 @@ func TestScopedMaintainSaysWhenTheCardTableCannotBeRead(t *testing.T) {
 	}
 }
 
-// Without the roster the wrapper still hands the render lane a list: the models the config declares
-// and the serving config lists, judged like any other. An unset variable would be read by the lane
-// as "every model off the memory stack", which is the render emptying the seats placed on the other
-// cards (register F15).
-func TestWrapperUnloadEnvWithoutARosterJudgesTheModelsTheConfigDeclares(t *testing.T) {
-	cfg := scopedDrainConfig(t, "http://127.0.0.1:1", "agent-pool")
+// A roster that could NOT be read is not an empty roster. The wrapper then has no idea what is
+// resident, so it hands the render lane NO list, and the lane keeps its own rule: every model off the
+// memory stack (register F15; the old answer judged only the models the config declares, so with no
+// layers and no serving config a roster timeout unloaded nothing, and with layers a resident model
+// neither layers nor the yaml name stayed on the leased card). The wrapper says why.
+func TestWrapperUnloadEnvWithAnUnreadableRosterLeavesTheLaneOnItsOwnRule(t *testing.T) {
+	for name, mk := range map[string]func(t *testing.T) config.Config{
+		"no layers and no serving config": func(t *testing.T) config.Config {
+			cfg := config.Default()
+			cfg.Endpoint = "http://127.0.0.1:1"
+			return cfg
+		},
+		"layers only": func(t *testing.T) config.Config {
+			return scopedDrainConfig(t, "http://127.0.0.1:1", "agent-pool")
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := mk(t)
+			old := rosterIDsFn
+			rosterIDsFn = func(context.Context, string) ([]string, error) { return nil, errors.New("roster refused") }
+			t.Cleanup(func() { rosterIDsFn = old })
+			var got string
+			out := captureStderr(t, func() { got = wrapperUnloadEnv(context.Background(), cfg, []string{leaseCard2ID}) })
+			if got != "" {
+				t.Fatalf("a roster that could not be read leaves the variable unset, so the lane keeps its own rule (every model off the memory stack); got %q", got)
+			}
+			for _, want := range []string{"roster could not be read", "roster refused", "own rule"} {
+				if !strings.Contains(out, want) {
+					t.Fatalf("the wrapper must say it fell back because the roster could not be read (%q missing):\n%s", want, out)
+				}
+			}
+		})
+	}
+}
+
+// A roster that WAS read and is empty means nothing is resident: a card lease still gets a list (the
+// none sentinel on a box that places nothing), never the unset variable.
+func TestWrapperUnloadEnvWithAnEmptyRosterThatWasReadIsTheNoneSentinel(t *testing.T) {
+	cfg := config.Default()
+	cfg.Endpoint = "http://127.0.0.1:1"
 	old := rosterIDsFn
-	rosterIDsFn = func(context.Context, string) ([]string, error) { return nil, errors.New("roster refused") }
+	rosterIDsFn = func(context.Context, string) ([]string, error) { return nil, nil }
 	t.Cleanup(func() { rosterIDsFn = old })
-	var got string
-	out := captureStderr(t, func() { got = wrapperUnloadEnv(context.Background(), cfg, []string{leaseCard2ID}) })
-	if !strings.HasPrefix(got, "GPU_LEASE_UNLOAD_MODELS=") || got == "GPU_LEASE_UNLOAD_MODELS=" {
-		t.Fatalf("no roster is still a list, never the unset variable: got %q", got)
-	}
-	list := strings.Split(strings.TrimPrefix(got, "GPU_LEASE_UNLOAD_MODELS="), ",")
-	have := map[string]bool{}
-	for _, m := range list {
-		have[m] = true
-	}
-	if !have["agent-pool"] || !have["qwen3-vl-8b"] || have["gemma-4-26b-agent"] || have["embeddinggemma"] {
-		t.Fatalf("the list is the config's models placed on card 2 (not the card-0 seat, not the memory stack), got %q", got)
-	}
-	for _, want := range []string{"roster could not be read", "roster refused", "the models the config declares"} {
-		if !strings.Contains(out, want) {
-			t.Fatalf("the wrapper must say it worked from the config's models (%q missing):\n%s", want, out)
-		}
-	}
-	if strings.Contains(out, "unloads every model") {
-		t.Fatalf("the wrapper no longer says the lane unloads every model:\n%s", out)
+	if got := wrapperUnloadEnv(context.Background(), cfg, []string{leaseCard2ID}); got != "GPU_LEASE_UNLOAD_MODELS=-" {
+		t.Fatalf("an empty roster that was read: want the none sentinel, got %q", got)
 	}
 }
 

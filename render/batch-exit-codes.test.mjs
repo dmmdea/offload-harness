@@ -15,10 +15,10 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { scratchDir } from "./test-scratch.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const GENERATE = join(HERE, "comfy-generate.mjs");
@@ -96,7 +96,7 @@ async function scenario(t, body) {
     return;
   }
   const fake = await fakeComfy();
-  const dir = mkdtempSync(join(tmpdir(), "batch-exit-"));
+  const dir = scratchDir(t, "batch-exit-");
   const comfyDir = join(dir, "comfy");
   mkdirSync(join(comfyDir, "input"), { recursive: true });
   const outDir = join(dir, "renders");
@@ -105,7 +105,6 @@ async function scenario(t, body) {
     await body({ fake, dir, outDir, env: scrubbedEnv(comfyDir), jobsPath: join(dir, "jobs.jsonl"), resultsPath: join(dir, "results.jsonl") });
   } finally {
     await fake.close();
-    rmSync(dir, { recursive: true, force: true });
   }
 }
 

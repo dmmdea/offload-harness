@@ -16,12 +16,10 @@
 // injected, and 8188-8191 are never contacted.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { ensureComfy } from "./comfy-lifecycle.mjs";
 import { withGpuSlot } from "./gpu-lock.mjs";
 import { instanceDeps } from "./comfy-run-graph.mjs";
+import { scratchDir } from "./test-scratch.mjs";
 
 const boom = (what) => () => { throw new Error("must not be reached: " + what); };
 const OTHER = "http://127.0.0.1:8189";
@@ -58,10 +56,10 @@ test("withGpuSlot: a keyed instance is unchanged", async () => {
 
 // ---- ensureComfy never launches 8188 for another endpoint ------------------------------------
 
-function harness({ up = false, env = {} } = {}) {
+function harness(t, { up = false, env = {} } = {}) {
   const calls = { up: [], spawn: [], marker: [] };
   const opts = {
-    api: OTHER, env, comfyDir: mkdtempSync(join(tmpdir(), "comfy-unkeyed-")), py: "py", pollMs: 1, maxPolls: 3, log: () => {},
+    api: OTHER, env, comfyDir: scratchDir(t, "comfy-unkeyed-"), py: "py", pollMs: 1, maxPolls: 3, log: () => {},
     envFor: () => ({}),
     comfyUp: async (a) => { calls.up.push(a); return up; },
     portFree: boom("an unkeyed launch makes no bind check"),
@@ -73,15 +71,15 @@ function harness({ up = false, env = {} } = {}) {
   return { calls, opts };
 }
 
-test("ensureComfy: another endpoint that answers is reused, and only that endpoint is asked", async () => {
-  const { calls, opts } = harness({ up: true });
+test("ensureComfy: another endpoint that answers is reused, and only that endpoint is asked", async (t) => {
+  const { calls, opts } = harness(t, { up: true });
   assert.equal(await ensureComfy(opts), null);
   assert.deepEqual(calls.up, [OTHER], "the probe goes to the endpoint the run drives, never to 8188");
   assert.equal(calls.spawn.length, 0);
 });
 
-test("ensureComfy: another endpoint that does not answer is a named failure, and nothing is launched", async () => {
-  const { calls, opts } = harness({ up: false });
+test("ensureComfy: another endpoint that does not answer is a named failure, and nothing is launched", async (t) => {
+  const { calls, opts } = harness(t, { up: false });
   await assert.rejects(ensureComfy(opts), (e) => {
     assert.match(e.message, /COMFY-ENDPOINT-DOWN/);
     assert.match(e.message, new RegExp(OTHER.replace(/\./g, "\\.")), "it names the endpoint");
@@ -93,8 +91,8 @@ test("ensureComfy: another endpoint that does not answer is a named failure, and
   assert.deepEqual(calls.up, [OTHER]);
 });
 
-test("ensureComfy: extra args that carry the endpoint's own --port still launch (the operator named the port)", async () => {
-  const { calls, opts } = harness({ up: false, env: { COMFY_EXTRA_ARGS: "--port 8189 --listen 127.0.0.1" } });
+test("ensureComfy: extra args that carry the endpoint's own --port still launch (the operator named the port)", async (t) => {
+  const { calls, opts } = harness(t, { up: false, env: { COMFY_EXTRA_ARGS: "--port 8189 --listen 127.0.0.1" } });
   let up = false;
   opts.comfyUp = async (a) => { calls.up.push(a); return up; };
   opts.spawn = (...a) => { calls.spawn.push(a); up = true; return { pid: 5, kill() {}, once() {} }; };
@@ -105,14 +103,14 @@ test("ensureComfy: extra args that carry the endpoint's own --port still launch 
   assert.deepEqual(argv.slice(argv.indexOf("--port")), ["--port", "8189", "--listen", "127.0.0.1"]);
 });
 
-test("ensureComfy: extra args that name ANOTHER port do not excuse the launch", async () => {
-  const { calls, opts } = harness({ up: false, env: { COMFY_EXTRA_ARGS: "--port 9999" } });
+test("ensureComfy: extra args that name ANOTHER port do not excuse the launch", async (t) => {
+  const { calls, opts } = harness(t, { up: false, env: { COMFY_EXTRA_ARGS: "--port 9999" } });
   await assert.rejects(ensureComfy(opts), /COMFY-ENDPOINT-DOWN/);
   assert.equal(calls.spawn.length, 0);
 });
 
-test("ensureComfy: the default endpoint launches exactly as before", async () => {
-  const { calls, opts } = harness({ up: false });
+test("ensureComfy: the default endpoint launches exactly as before", async (t) => {
+  const { calls, opts } = harness(t, { up: false });
   opts.api = "http://127.0.0.1:8188";
   let up = false;
   opts.comfyUp = async (a) => { calls.up.push(a); return up; };
@@ -136,13 +134,13 @@ test("instanceDeps: an unkeyed run-graph on another endpoint starts and frees TH
 
 // ---- a replacement that cannot be launched is not started ------------------------------------
 
-test("ensureComfy: an orphan on another endpoint that needs replacing is refused BEFORE it is stopped when the relaunch cannot land there", async () => {
+test("ensureComfy: an orphan on another endpoint that needs replacing is refused BEFORE it is stopped when the relaunch cannot land there", async (t) => {
   // harness-launched (the marker's pid is alive and its spawner is gone), wrong profile: the
   // verdict is "restart". An unkeyed relaunch with no --port would start 8188, not this endpoint,
   // so stopping the orphan first would leave the operator with neither.
   const { writeLaunchOwner } = await import("./comfy-ownership.mjs");
   const oldArgv = ["main.py", "--disable-smart-memory", "--cache-none", "--reserve-vram", "1.0", "--disable-dynamic-vram"];
-  const dir = mkdtempSync(join(tmpdir(), "comfy-unkeyed-restart-"));
+  const dir = scratchDir(t, "comfy-unkeyed-restart-");
   writeLaunchOwner(dir, { pid: 4242, ownerPid: 5151, args: oldArgv, profile: { cudaDevice: "", dynamicVram: "" } });
   let killed = null; let spawned = 0;
   await assert.rejects(ensureComfy({
