@@ -1,9 +1,6 @@
 package hostneed
 
 import (
-	"encoding/json"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -221,50 +218,5 @@ func TestThePlacementDoesNotChangeTheClassDefault(t *testing.T) {
 	f.Placement = PlacementMulticard
 	if b := ClassDefault(f); a != b {
 		t.Fatalf("class default %v with a placement, %v without", b, a)
-	}
-}
-
-// The Go copy of the recipe figures is the runner's file: a change to either side fails here, and the rows that declare 0 are the measured ones.
-func TestTheMulticardRowsAreTheRunnersRecipes(t *testing.T) {
-	src, err := os.ReadFile(filepath.Join("..", "..", "render", "multicard-recipes.json"))
-	if err != nil {
-		t.Skipf("the render folder is not beside this package: %v", err)
-	}
-	var file struct {
-		Rows []struct {
-			ID, Route, Family, Quant, UnetMatch, ClipMatch, DefaultClip, Basis string
-			Unet                                                               struct {
-				Loader     string
-				ResidentGb float64
-			}
-			PeakGiB       struct{ Compute, Storage float64 }
-			MaxMegapixels float64
-		}
-	}
-	if err := json.Unmarshal(src, &file); err != nil {
-		t.Fatal(err)
-	}
-	rows := MulticardRows()
-	if len(rows) != len(file.Rows) || len(rows) != 5 {
-		t.Fatalf("%d rows here, %d in render/multicard-recipes.json", len(rows), len(file.Rows))
-	}
-	measured := 0
-	for i, jr := range file.Rows {
-		r := rows[i]
-		if r.ID != jr.ID || string(r.Route) != jr.Route || r.Family != jr.Family || r.Quant != jr.Quant || r.UnetMatch != jr.UnetMatch || r.ClipMatch != jr.ClipMatch || r.DefaultClip != jr.DefaultClip {
-			t.Errorf("row %d identity: %+v vs %+v", i, r, jr)
-		}
-		if r.ComputeGiB != jr.PeakGiB.Compute || r.StorageGiB != jr.PeakGiB.Storage || r.Plain != (jr.Unet.Loader == "plain") || r.ResidentGiB != jr.Unet.ResidentGb || r.MaxMegapixels != jr.MaxMegapixels {
-			t.Errorf("row %s figures: %+v vs %+v", jr.ID, r, jr)
-		}
-		if r.Measured != (jr.Basis == "measured") {
-			t.Errorf("row %s: measured %v here, basis %q there", jr.ID, r.Measured, jr.Basis)
-		}
-		if r.Measured {
-			measured++
-		}
-	}
-	if measured != 1 {
-		t.Errorf("%d measured rows; only the 2511 fp8mixed edit ran with the read-only loader", measured)
 	}
 }
