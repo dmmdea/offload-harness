@@ -154,11 +154,26 @@ func TestACardOnlyImageCallThatDoesNotFitTheLeasedPairIsSizedAsBefore(t *testing
 	ordinary("a zero-size card", need(t, editFp8Cmd, imgFacts(t, 0, 15.9)))
 }
 
-// The resident share (--resident-gb) moves the compute card's peak one for one; a plain-pin recipe has none.
+// The resident share (--resident-gb) moves bytes between the two cards one for one: a larger share raises the compute card's peak, and a smaller one
+// puts the same bytes on the storage card (the DiT's total is the invariant, the allocation string sends the remainder to the storage card).
 func TestTheResidentShareIsReadFromTheImageCall(t *testing.T) {
 	two := imgFacts(t, 15.9, 15.9)
-	if n := need(t, editFp8Cmd+" --resident-gb 5", two); n.GiB != 0 || !strings.Contains(n.Detail, "9.0") {
-		t.Fatalf("a 5 GiB share (9 GiB resident in the row, so 13.0 - 4 = 9.0 GiB on the compute card): %v, want 0", n)
+	if n := need(t, editFp8Cmd+" --resident-gb 8", two); n.GiB != 0 || !strings.Contains(n.Detail, "storage card at 12.0") {
+		t.Fatalf("an 8 GiB share (9 GiB resident in the row, so the storage card takes 1 GiB more: 11.0 + 1 = 12.0 of 14.9 usable): %v, want 0", n)
+	}
+	if n := need(t, editFp8Cmd+" --resident-gb 5", two); n.GiB <= 0 || !strings.Contains(n.Detail, "does not fit the two leased cards") || !strings.Contains(n.Detail, "storage card at 15.0") {
+		t.Fatalf("a 5 GiB share puts 4 GiB more of the 19.1 GiB DiT on the storage card (11.0 + 4 = 15.0 of 14.9 usable): %v, want the ordinary estimate and the storage card's figure", n)
+	}
+	if n := need(t, editFp8Cmd+" --resident-gb 0", two); n.GiB <= 0 {
+		t.Fatalf("a 0 GiB share leaves the whole 19.1 GiB DiT on the storage card, which ran out of memory at load in the benchmark (edit-gpuonly): %v, want the ordinary estimate", n)
+	}
+	// a share above the row's does not lower the storage figure: that is a guess no run has measured
+	if n := need(t, editFp8Cmd+" --resident-gb 10", two); n.GiB != 0 || !strings.Contains(n.Detail, "storage card at 11.0") {
+		t.Fatalf("a 10 GiB share keeps the measured 11.0 GiB on the storage card: %v, want 0", n)
+	}
+	// the GGUF row's storage peak is the DiT stage too: 15.6 GiB with every weight on the storage card is what the benchmark measured there
+	if n := need(t, editGgufCmd+" --resident-gb 0", two); n.GiB <= 0 || !strings.Contains(n.Detail, "storage card at 15.6") {
+		t.Fatalf("the GGUF row with a 0 GiB share (12.6 + 3 = 15.6 GiB, the benchmark's measured peak with every weight on the storage card): %v", n)
 	}
 	if n := need(t, editFp8Cmd+" --resident-gb=12", two); n.GiB <= 0 {
 		t.Fatalf("a 12 GiB share (13.0 + 3 = 16.0 GiB on the compute card, 14.9 usable): %v, want the ordinary estimate", n)

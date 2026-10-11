@@ -89,7 +89,7 @@ test("say names the recipe, the two cards and their roles, once", () => {
 });
 
 test("--resident-gb reaches the plan; a plain-pin recipe refuses it; one the compute card cannot hold beside the activations is refused with the numbers", () => {
-  assert.equal(plan({ flags: { placement: "multicard", "resident-gb": "6" } }).residentGb, 6);
+  assert.equal(plan({ flags: { placement: "multicard", "resident-gb": "7.5" } }).residentGb, 7.5);
   assert.throws(() => plan({ unet: "qwen_image_2.1_int8_convrot.safetensors", flags: { placement: "multicard", "resident-gb": "3" } }), /whole DiT on the compute card/);
   assert.equal(plan({ unet: "qwen_image_2.1_int8_convrot.safetensors" }).residentGb, null);
   assert.throws(() => plan({ flags: { placement: "multicard", "resident-gb": "14" } }), /--resident-gb 14.*compute card \(idx 0, 15\.9 GiB\).*2\.5 GiB for the sampler's activations.*at most 12\.9 GiB/s);
@@ -107,9 +107,29 @@ test("a recipe whose per-card peak does not fit the leased cards (after --reserv
 test("the compute card's peak moves with the resident share, and --reserve-vram counts against both cards", () => {
   // bf16: 8 GiB resident is 10.8 GiB on the compute card. 12.5 GiB passes the activations check (at most 12.9) but is 15.3 GiB against 14.9 usable.
   assert.ok(plan({ flags: { placement: "multicard", "resident-gb": "11" } }), "13.8 GiB fits 14.9 GiB usable");
-  assert.ok(plan({ flags: { placement: "multicard", "resident-gb": "4" } }), "a smaller share leaves the compute card room");
   assert.throws(() => plan({ flags: { placement: "multicard", "resident-gb": "12.5" } }), /needs the compute card.*to hold 15\.3 GiB.*14\.9 GiB usable after --reserve-vram 1/s);
   assert.ok(plan({ flags: { placement: "multicard", "resident-gb": "12.5", "reserve-vram": "0.1" } }), "the same share fits when the call asks for less reserve");
+});
+
+// The DiT's total is the invariant: --resident-gb N keeps N GiB of it on the compute card and the allocation string sends the remainder to the STORAGE card, so a
+// share below the recipe's puts the same bytes there. The storage card's room is the thinner one (14.9 usable on a 16 GB card); a split that does not fit it is
+// refused before anything starts, not run to an out-of-memory error with both cards held.
+const FP8 = { route: "edit", family: "qwen-image-edit-2511", unet: "qwen_image_edit_2511_fp8mixed.safetensors", clip: undefined };
+test("a resident share below the recipe's moves the same bytes onto the storage card, and a split that card cannot hold is refused", () => {
+  const share = (gb, extra = {}) => ({ ...FP8, flags: { placement: "multicard", "resident-gb": String(gb), ...extra } });
+  // fp8mixed: 19.1 GiB DiT, 9 GiB resident, 11.0 GiB on the storage card at the row's share. A share of 5 is 15.0 GiB there against 14.9 usable.
+  assert.equal(plan(share(8)).residentGb, 8, "8 GiB: 12.0 GiB on the storage card fits");
+  assert.equal(plan(share(6)).residentGb, 6, "6 GiB: 14.0 GiB on the storage card fits");
+  assert.throws(() => plan(share(5)), /needs the storage card \(idx 2.*to hold 15\.0 GiB.*14\.9 GiB usable after --reserve-vram 1/s);
+  assert.throws(() => plan(share(0)), /needs the storage card.*to hold 20\.0 GiB/s, "the whole DiT on the storage card is the benchmark's out-of-memory at load");
+  // a larger share does not lower the storage figure: no run measured it, so the row's own 11.0 stands (and the compute card refuses it first at 14.9)
+  assert.equal(plan(share(10)).residentGb, 10);
+  // --reserve-vram counts against the storage card too
+  assert.ok(plan(share(5, { "reserve-vram": "0.5" })), "15.0 GiB fits 15.4 usable");
+  assert.throws(() => plan(share(7, { "reserve-vram": "3.5" })), /needs the storage card.*to hold 13\.0 GiB.*12\.4 GiB usable/s, "13.0 GiB on the storage card against 15.9 - 3.5");
+  // bf16: the row's storage peak (14.2) is its text-encoder stage, so a smaller share is refused early, on the conservative side
+  assert.throws(() => plan({ flags: { placement: "multicard", "resident-gb": "4" } }), /needs the storage card.*to hold 18\.2 GiB/s);
+  assert.equal(plan({ flags: { placement: "multicard", "resident-gb": "7.5" } }).residentGb, 7.5, "14.7 GiB on the storage card fits 14.9 usable");
 });
 
 test("refused before any card table is read: no recipe, a --graph file, and no card named at all", () => {
