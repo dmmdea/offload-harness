@@ -2690,6 +2690,27 @@ func withFinalFit(out map[string]any, start seatrate.FinalFitResult, res agent.R
 	out["budget_note"] = note
 }
 
+// withTruncation tells the caller of a local agent_run that its final answer is a partial: the loop ended it on the
+// completion budget (finish_reason "length", or a repetition loop trimmed off its tail), marked it Result.OutputTruncated and
+// still ended "done", because a cut answer is the caller's to use. The door published it as a clean success, and the final-answer
+// fit (register D-134) makes that end likelier on purpose, since it opens the final narrower than the configured budget.
+// The flag and the loop's own stop note use the delegation wire's names; the sentence names the budget the final was cut at
+// when the fit narrowed it, and says where its arithmetic is. A complete answer carries none of the three.
+func withTruncation(out map[string]any, res agent.Result) {
+	if !res.OutputTruncated {
+		return
+	}
+	out["output_truncated"] = true
+	if res.StopNote != "" {
+		out["stop_note"] = res.StopNote
+	}
+	note := "the final answer was cut at its completion budget, so output is partial"
+	if fit, narrowed := out["final_budget_fit"]; narrowed {
+		note += fmt.Sprintf(": the forced final opened at %v tokens to fit the wall that was left (budget_note has the arithmetic)", fit)
+	}
+	out["truncation_note"] = note
+}
+
 // wallRefusalReason is the agent_run door's refusal of a wall that cannot hold
 // even the smallest answer on the seat (register D-102): the wall it was given
 // and where that number came from, the least wall one answer needs, what the
@@ -3280,6 +3301,7 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 	withCoherence(out, coherenceNote)
 	withSizing(out, sizing.Estimate)
 	withFinalFit(out, startFit, res)
+	withTruncation(out, res)
 	if res.TokenizerPath != "" {
 		// Which drop rung the ladder is on — same visibility rule as ctx_window:
 		// a sticky fail-open downgrade must be reportable, not inferred.

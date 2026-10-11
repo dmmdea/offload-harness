@@ -69,8 +69,11 @@ type finalFitSeat struct {
 }
 
 type finalFitSeatOpts struct {
-	eager  bool     // answer the first completion instead of calling tools
-	models []string // the served roster; default: the box's agent seat
+	eager bool // answer the first completion instead of calling tools
+	// cutFinal answers the forced final with a half-sentence that ended on the completion budget (finish_reason
+	// "length"), the shape a final cut at a narrowed budget takes.
+	cutFinal bool
+	models   []string // the served roster; default: the box's agent seat
 	// onChat runs when a completion arrives, before it is answered; hang then holds
 	// the request open until its context ends (a run cut mid-completion).
 	onChat func()
@@ -128,6 +131,10 @@ func newFinalFitSeat(t *testing.T, o finalFitSeatOpts) *finalFitSeat {
 				case <-r.Context().Done():
 				case <-seat.release:
 				}
+				return
+			}
+			if forced && o.cutFinal {
+				fmt.Fprint(w, `{"choices":[{"message":{"role":"assistant","content":"The answer begins with 42, and then"},"finish_reason":"length"}]}`)
 				return
 			}
 			if forced || o.eager {
@@ -506,5 +513,73 @@ func TestAgentRunPublishesTheRunStartFitWhenItsOwnFinalWasNotNarrowed(t *testing
 	}
 	if wire.FinalBudgetFit != wantFit || wire.BudgetNote != wantNote {
 		t.Errorf("the node published %d %q, want %d %q: the door and the node must publish one prediction", wire.FinalBudgetFit, wire.BudgetNote, wantFit, wantNote)
+	}
+}
+
+// TestAgentRunSaysWhenItsFinalAnswerWasCutAtItsBudget: a forced final that ended on the completion budget (finish_reason
+// "length") is a partial, and the loop marks it (Result.OutputTruncated) while still ending "done". The fit makes that end
+// likelier, because it deliberately opens the final at a budget narrower than the configured one, and the door published
+// the half-sentence as a clean answer: deferred false, stop_reason done, nothing saying it was cut. The answer is still the
+// caller's to use, so it stays an answer; the flag, the loop's own stop note and a sentence naming the budget it was cut at
+// are what the caller was owed. A complete answer carries none of the three.
+func TestAgentRunSaysWhenItsFinalAnswerWasCutAtItsBudget(t *testing.T) {
+	cases := []struct {
+		name    string
+		cut     bool
+		wallSec int
+		fitted  bool // the fit narrowed the final, so the result carries it
+	}{
+		{name: "cut at a budget the fit narrowed", cut: true, wallSec: finalFitWallSec, fitted: true},
+		{name: "cut at the configured budget", cut: true, wallSec: 3600},
+		{name: "a complete answer", cut: false, wallSec: finalFitWallSec, fitted: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			seat := newFinalFitSeat(t, finalFitSeatOpts{cutFinal: tc.cut})
+			s := finalFitDoor(t, seat.srv.URL, finalFitDoorOpts{seedStore: true})
+
+			m := callFinalFitRun(t, context.Background(), s, tc.wallSec, "")
+			if m["deferred"] == true {
+				t.Fatalf("the run must answer, got %v", m)
+			}
+			final, _ := forcedFinalOf(t, seat)
+			if tc.fitted != (final < finalFitFinalTok) {
+				t.Fatalf("test premise: the forced final opened at %d tokens, which is not the case this row names (fitted=%v)", final, tc.fitted)
+			}
+			if !tc.cut {
+				for _, k := range []string{"output_truncated", "stop_note", "truncation_note"} {
+					if v, has := m[k]; has {
+						t.Errorf("a complete answer must not carry %s, got %v", k, v)
+					}
+				}
+				return
+			}
+			if got, _ := m["output"].(string); got != "The answer begins with 42, and then" {
+				t.Errorf("the partial answer is still published as output, got %q", got)
+			}
+			if m["output_truncated"] != true {
+				t.Fatalf("output_truncated = %v, want true: a final cut at its budget is a partial and the caller must be told: %v", m["output_truncated"], m)
+			}
+			if note, _ := m["stop_note"].(string); !strings.Contains(note, "forced final answer") {
+				t.Errorf("stop_note = %q, want the loop's own note on the forced final", note)
+			}
+			note, _ := m["truncation_note"].(string)
+			if !strings.Contains(note, "cut") || !strings.Contains(note, "partial") {
+				t.Errorf("truncation_note = %q, want a sentence saying the answer was cut and is partial", note)
+			}
+			if tc.fitted {
+				if got, _ := m["final_budget_fit"].(float64); int(got) != final {
+					t.Errorf("final_budget_fit = %v, want %d, the budget the cut final was sent", m["final_budget_fit"], final)
+				}
+				if !strings.Contains(note, fmt.Sprint(final)) || !strings.Contains(note, "budget_note") {
+					t.Errorf("truncation_note = %q, want it to name the %d-token budget the fit opened the final at and point at budget_note", note, final)
+				}
+			} else {
+				requireNoFinalFit(t, m)
+				if strings.Contains(note, "budget_note") {
+					t.Errorf("truncation_note = %q: the budget was not narrowed, so there is no budget_note to point at", note)
+				}
+			}
+		})
 	}
 }
