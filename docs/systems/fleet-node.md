@@ -766,7 +766,8 @@ of what the deal committed to each place:
   with no run cap (`fleet_max_concurrent_jobs` < 0) counts at most four;
 - a subtask the deal gave **no place** (the overflow handed to the capacity wait, a local slot a text lease reserves) counts nothing. It
   starts behind the dealt subtasks as their slots free, so the rules of the paragraph above hold at any width: the wait of a slot-holder
-  keeps its TTL while a subtask has not started, only the last waits to the horizon, and nothing starts inside the reserve.
+  holds its slot for the TTL while a subtask has not started and then gives it up and keeps waiting to the horizon (as does the last
+  subtask's, which has nothing behind it), and nothing starts inside the reserve.
 
 A pinned `route=local` has no deal and keeps four (a reasonless one is a hint, applied as `auto`, ADR 0078; `route=queue` hands its subtasks to the pull holders before any semaphore exists, ADR 0030).
 The width is logged (`fan-out width N for M subtask(s)`) when it is not four. `RunBatched` (`offload_research`, `local-offload research`) deals up to **16** subtasks as ONE joint deal, so a research call's 12
