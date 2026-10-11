@@ -1,6 +1,6 @@
 package mediaremote
 
-// The scanner and the tickets it runs (P0 plan S2; ADR 0083). See ticket.go for what a ticket is.
+// The scanner and the tickets it runs (P0 plan S2 and S5; ADR 0083 and its Amendment 1). See ticket.go for what a ticket is.
 //
 // ONE SCANNER PER PROCESS, every scanEvery +/- scanSpread, started when the process has its first ticket and gone when
 // it has none. Each scan visits the process's own waiting tickets, OLDEST FIRST, and decides; it never runs a job. A job
@@ -16,11 +16,14 @@ package mediaremote
 //     question a ticket asks is "would anyone who arrived after me go first", see pipeline.MediaLaneFree). If so, and no
 //     older ticket took the lane in this scan, start the local run with the place as its waiter_token: the final local
 //     run spends the place through the path every resumed call takes.
-//  3. Else the fleet, with S1's own filter and ranking (candidatesFor): the nodes whose recipe matches, that hold no
-//     lease, that are not being left alone for a bounce, minus the ones a ticket of THIS MACHINE has a job on (the claims)
+//  3. Else the fleet, with S1's own filter and ranking (candidatesFor): the nodes whose recipe matches (a graph: that serve
+//     the task on this release with one card and the card size asked for, graph.go), that hold no lease, that are not being
+//     left alone for a bounce, minus the ones a ticket of THIS MACHINE has a job on (the claims), minus the ones that
+//     refused THIS ticket at their door (a graph that names a file they do not hold: not-capable, remembered by the ticket)
 //     and minus the ones an OLDER waiting ticket of this machine matches (first in line). The first node left is
 //     claimed under the directory lock and the job is sent: LATE BINDING, since nothing is sent anywhere before a lane
-//     is free, so no job sits parked on a node that frees later than another.
+//     is free, so no job sits parked on a node that frees later than another. A ticket with a FleetNote (a graph that reads
+//     input files) skips this step altogether: it is only ever served by this machine's lane.
 //
 // A scan writes the ticket's own file (beat, matches, the answer) and touches its place. It opens no PAIR card, writes
 // no ledger row and registers no lease waiter: that is what made the first design of this loop pollute the PAIR
@@ -75,9 +78,13 @@ type liveTicket struct {
 	remotes    []string
 	rosterFile string
 	runner     Runner
-	req        core.Request // params cloned, the seed fixed
+	req        core.Request // params cloned, the seed fixed (an image; a graph is left as the caller sent it)
 	pl         planned
 	local      localID
+	// need is what the call asks of a node beyond the recipe, read ONCE with the request (a graph's default VRAM floor reads
+	// the graph file, and a temp file the MCP door wrote can be gone by the ticket's tenth scan): needNow.
+	need    need
+	needSet bool
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -110,6 +117,12 @@ type liveTicket struct {
 	// placeTried is when the ticket last asked the box for a place in its line.
 	placeTried time.Time
 
+	// notCapable is the nodes that refused THIS ticket at their door, by base: the identity of a graph is decided by the node
+	// (it holds the files or it does not), so a refusal is a fact about the pair of this graph and that node, kept by the ticket
+	// for notCapableAgain and never put on the node for anyone else (placer). In memory: the owning process asks, and the
+	// cluster row it writes is what the other processes read.
+	notCapable map[string]notCapableMemo
+
 	// first is the lane reading the call made when it became a ticket, reused by the first scan if it is still fresh:
 	// the card table is one nvidia-smi read, and the same question twice in a second is not a second question.
 	first   *core.LaneVerdict
@@ -118,6 +131,44 @@ type liveTicket struct {
 
 // verdictFresh is how long the reading a call made at creation may stand in for the first scan's. Chosen.
 const verdictFresh = 2 * time.Second
+
+// notCapableAgain is how long a ticket leaves a node that refused it at the door (the graph names a file the node does not
+// hold) before it asks that node again. Chosen, not measured: the longest pause the placer puts on any node (maxCooldown), because
+// asking costs one POST of a graph (up to 900 KB) answered with no job and no lease, and an operator who places the missing file
+// wants a ticket that waits for hours to find it within minutes, not to keep asking every scan.
+const notCapableAgain = maxCooldown
+
+// notCapableMemo is why a node refused a ticket and until when the ticket does not ask it again.
+type notCapableMemo struct {
+	why   string
+	until time.Time
+}
+
+// needNow is the call's need, read when the ticket was made (or, for an adopted one, the first time it is asked).
+func (lt *liveTicket) needNow() need {
+	lt.mu.Lock()
+	defer lt.mu.Unlock()
+	if !lt.needSet {
+		lt.need, lt.needSet = needOf(lt.req), true
+	}
+	return lt.need
+}
+
+// refusedBy says whether base refused this ticket at its door and is not asked again yet, with the sentence for the row.
+func (lt *liveTicket) refusedBy(base string) (string, bool) {
+	lt.mu.Lock()
+	defer lt.mu.Unlock()
+	m, ok := lt.notCapable[normBase(base)]
+	if !ok {
+		return "", false
+	}
+	left := m.until.Sub(placerNow())
+	if left <= 0 {
+		delete(lt.notCapable, normBase(base))
+		return "", false
+	}
+	return fmt.Sprintf("%s; this ticket asks it again in %s", m.why, left.Round(time.Second)), true
+}
 
 // queueRT is one process's share of the queue.
 type queueRT struct {
@@ -408,15 +459,18 @@ func (lt *liveTicket) step(ctx context.Context, cs *cycleState) {
 		return
 	}
 
-	// 3. the fleet
+	// 3. the fleet (a ticket with a FleetNote is never offered to a node: no roster read, no row, no match)
 	cfg := lt.liveCfg()
-	bases, berr := candidateBases(cfg, lt.remotes)
 	var (
 		cands []candidate
 		rows  []rowAt
+		berr  error
 	)
-	if berr == nil {
-		cands, rows = candidatesFor(sctx, cfg, bases, lt.local, needOf(lt.req))
+	if !lt.localOnly() {
+		var bases []string
+		if bases, berr = candidateBases(cfg, lt.remotes); berr == nil {
+			cands, rows = candidatesFor(sctx, cfg, bases, lt.local, lt.needNow())
+		}
 	}
 	all := lt.st.list()
 	claims := lt.st.claims()
@@ -464,6 +518,12 @@ func (lt *liveTicket) step(ctx context.Context, cs *cycleState) {
 	}
 	for i := range cands {
 		c := cands[i]
+		// A node that refused THIS ticket at its door is not one this ticket matches: an older ticket that cannot use a node
+		// holds it against nobody.
+		if why, no := lt.refusedBy(c.base); no {
+			extra = append(extra, rowAt{idx: c.idx, row: ClusterRow{Node: c.shown, State: "not-capable", Why: why}})
+			continue
+		}
 		matched = append(matched, normBase(c.base))
 		if h, held := claims[normBase(c.base)]; held && h.Ticket != selfID {
 			extra = append(extra, rowAt{idx: c.idx, row: ClusterRow{Node: c.shown, State: "in-use",
@@ -508,16 +568,24 @@ func plural(n int, what string) string {
 	return fmt.Sprintf("%d %ss", n, what)
 }
 
+// localOnly says the ticket is never offered to a node (FleetNote: a graph that reads input files).
+func (lt *liveTicket) localOnly() bool {
+	lt.mu.Lock()
+	defer lt.mu.Unlock()
+	return lt.t.FleetNote != ""
+}
+
 // lanePlacement is the placement sentence of a result that ran on a node, from the reading of this machine's lane that sent it
-// there (was: the call was sent earlier, by a process that has since ended).
-func lanePlacement(why string, was bool) string {
+// there (was: the call was sent earlier, by a process that has since ended). The lane is named for the call: image, graph.
+func lanePlacement(req core.Request, why string, was bool) string {
+	lane := laneName(req)
 	if rest, unread := strings.CutPrefix(why, "not judged: "); unread {
-		return "remote: this machine's image lane could not be judged (" + rest + ")"
+		return "remote: this machine's " + lane + " lane could not be judged (" + rest + ")"
 	}
 	if was {
-		return "remote: this machine's image lane was not free (" + why + ")"
+		return "remote: this machine's " + lane + " lane was not free (" + why + ")"
 	}
-	return "remote: this machine's image lane is not free (" + why + ")"
+	return "remote: this machine's " + lane + " lane is not free (" + why + ")"
 }
 
 // markScanned says the first scan of the ticket is over (a call waits for it before it answers).
@@ -772,7 +840,7 @@ func (lt *liveTicket) startRemote(ctx context.Context, c candidate) {
 		return
 	}
 	lt.t.State, lt.t.Base, lt.t.Node, lt.t.Job = cp.State, cp.Base, cp.Node, cp.Job
-	placement := lanePlacement(lt.t.LaneWhy, false)
+	placement := lanePlacement(lt.req, lt.t.LaneWhy, false)
 	lt.mu.Unlock()
 	lt.q.wg.Add(1)
 	go func() {
@@ -792,6 +860,11 @@ func (lt *liveTicket) startRemote(ctx context.Context, c candidate) {
 			res := placementDefer(a.err, placement)
 			h.Finish(res)
 			lt.finish(res, false)
+		case attemptNotCapable: // the node's door said "not this request": nothing ran there, and it is not busy
+			h.Discard("the node cannot run this request; the ticket goes on to the next lane that frees")
+			lt.backToWaiting(c.base)
+			lt.rememberNotCapable(c, a.row)
+			lt.q.nudge()
 		default: // the node passed the job back or was not reached: nothing ran there
 			h.Discard("the ticket goes on to the next lane that frees")
 			lt.backToWaiting(c.base)
@@ -812,6 +885,21 @@ func (lt *liveTicket) backToWaiting(base string) {
 	lt.persistLocked()
 	lt.mu.Unlock()
 	lt.st.releaseNode(base, id)
+}
+
+// rememberNotCapable keeps a node's refusal of THIS ticket (the graph names a file it does not hold) and writes its row: the ticket
+// does not ask that node again for notCapableAgain, and the next scan, which comes at once, goes on to the next candidate.
+func (lt *liveTicket) rememberNotCapable(c candidate, row ClusterRow) {
+	lt.mu.Lock()
+	if lt.notCapable == nil {
+		lt.notCapable = map[string]notCapableMemo{}
+	}
+	lt.notCapable[normBase(c.base)] = notCapableMemo{why: row.Why, until: placerNow().Add(notCapableAgain)}
+	lt.mu.Unlock()
+	if why, ok := lt.refusedBy(c.base); ok {
+		row.Why = why
+	}
+	lt.rememberAttempt(c, row)
 }
 
 // rememberAttempt keeps what a refused or bounced attempt said about a node until the node is read again.

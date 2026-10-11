@@ -1,7 +1,7 @@
 package mediaremote
 
-// The ticket queue (P0 plan S2; ADR 0083): a busy image call is a TICKET, and the harness holds it until the first
-// matching lane that frees ANYWHERE in the cluster runs it, with no caller loop.
+// The ticket queue (P0 plan S2 and S5; ADR 0083 and its Amendment 1): a busy image call, or a busy whole-node graph, is a TICKET,
+// and the harness holds it until the first matching lane that frees ANYWHERE in the cluster runs it, with no caller loop.
 //
 // S1 made a busy local lane overflow to an IDLE matching node. A ticket is the other half of the operator's P0 ("route
 // work to any PC in the cluster, even if all PCs are full"): when every lane is full the call waits for the first one
@@ -13,8 +13,9 @@ package mediaremote
 //
 // What is persisted, and why each:
 //
-//	req_key       sha256 of (task, prompt, params minus waiter_token): any identical re-send attaches to the live ticket
-//	              instead of making a second job (what ends the 85-answers loop, even for a caller that ignores the text)
+//	req_key       sha256 of (task, prompt, params minus waiter_token; for a graph, the graph's and the manifest's CONTENT in
+//	              place of their paths): any identical re-send attaches to the live ticket instead of making a second job
+//	              (what ends the 85-answers loop, even for a caller that ignores the text)
 //	seed          fixed once at creation when the caller gave none, so a bounce, a re-placement and an adoption all render
 //	              the same composition
 //	owner, beat   the process that runs it and the last time it said so; an owner that is gone (or silent past
@@ -161,6 +162,10 @@ type ticketFile struct {
 	// LaneWhy is the sentence of the last lane reading that found this machine's lane busy: the placement text of a result
 	// that ran on a node says what the call left behind.
 	LaneWhy string `json:"lane_why,omitempty"`
+	// FleetNote, when set, says why this ticket is never offered to a node: a graph that reads input files stays on this
+	// machine's lane (graph.go), keeping its place and its position, and the note is part of every answer. A ticket with a note
+	// reads no roster, matches no node and holds none against a younger ticket.
+	FleetNote string `json:"fleet_note,omitempty"`
 
 	// The last scan: whether one happened, which nodes' recipes matched, what each node said, where the ticket stands.
 	Scanned  bool         `json:"scanned,omitempty"`
@@ -196,11 +201,19 @@ func newTicketID() string { return "mq-" + randHex(6) }
 // reqKey identifies a request by its content: sha256 of the task, the prompt and the parameters AS SENT without the
 // waiter_token. It is taken before the ticket fixes its seed, so a re-send that names none attaches, and a re-send that
 // names another seed is another job. Numbers are canonicalised through JSON, so 2048, 2048.0 and a json.Number agree.
+// A graph's parameters name files on this machine, so its graph and manifest enter the key as what they say (graphContent).
 func reqKey(req core.Request) string {
 	params := map[string]any{}
 	for k, v := range req.Params {
 		if k != "waiter_token" {
 			params[k] = v
+		}
+	}
+	if req.Task == core.TaskRunGraph {
+		for _, k := range []string{"graph_path", "manifest_path"} {
+			if c, ok := graphContent(str(params, k)); ok {
+				params[k] = c
+			}
 		}
 	}
 	b, err := json.Marshal(struct {
@@ -220,6 +233,43 @@ func reqKey(req core.Request) string {
 	}
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
+}
+
+// graphContent is the identity of a graph or manifest file: "content:" and the sha256 of its JSON as a canonical document (keys
+// sorted, no insignificant whitespace, numbers as written), so a graph read from a file of its own name (the MCP door writes an
+// inline graph_json to a new temp file on every call), saved again with another layout, or sent by another client, is the same
+// graph. ok is false when the file is not a plain readable file within the size a dispatch carries; the key then keeps the path,
+// and the lane that runs the call reports the contract (plan).
+func graphContent(path string) (string, bool) {
+	if path == "" {
+		return "", false
+	}
+	if fi, err := os.Stat(path); err != nil || !fi.Mode().IsRegular() || fi.Size() > maxGraphBytes {
+		return "", false
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "", false
+	}
+	var doc any
+	dec := json.NewDecoder(strings.NewReader(string(b)))
+	dec.UseNumber()
+	if dec.Decode(&doc) == nil {
+		if canon, merr := json.Marshal(doc); merr == nil {
+			b = canon
+		}
+	}
+	sum := sha256.Sum256(b)
+	return "content:" + hex.EncodeToString(sum[:]), true
+}
+
+// describe is what the ticket file shows of the call: the family and recipe digest of an image, the model_family of a graph (which
+// has no recipe), and where the output goes (an image's `out`, a graph's `out_dir`).
+func describe(req core.Request, local localID) (family, digest, out string) {
+	if req.Task == core.TaskRunGraph {
+		return str(req.Params, "model_family"), "", str(req.Params, "out_dir")
+	}
+	return local.name, local.recipe.Digest(), str(req.Params, "out")
 }
 
 // store is the directory of ticket files of one machine.

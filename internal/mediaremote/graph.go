@@ -1,10 +1,15 @@
 package mediaremote
 
-// A graph on the fleet (P0 plan, S4; ADR 0082 amendment).
+// A graph on the fleet (P0 plan, S4 and S5; ADR 0082 amendment, ADR 0083 amendment).
+//
+// A busy whole-node graph is a ticket, as a busy image is (ADR 0083 Amendment 1): the harness holds it until the first matching
+// lane that frees anywhere runs it. This file is what makes it a graph's ticket and not an image's: what a node must be to take it,
+// and what keeps it on this machine.
 //
 // IDENTITY. An image is identified by its recipe; a graph is the caller's, so its identity is only that the node holds
 // every file the graph names, and the NODE decides that at its door (internal/fleetnode graph_files.go answers 503 naming
-// what it lacks, which the placer treats like any refusal at the door: the call goes on to the next node). The delegator
+// what it lacks, with the refusal word that says "not this request": the ticket marks that node not-capable for itself and
+// goes on to the next one, and puts no pause on the node, which is not full). The delegator
 // therefore sends no family and no digest, and asks of a candidate only what it can read from health: that it serves
 // run-graph with the route configured, runs this release (the file check ships with it: an equal harness_version is the
 // proof, releaseRefuses), holds no lease, and the two rules below. The release and the two rules hold for EVERY remote
@@ -22,13 +27,14 @@ package mediaremote
 // INPUT FILES. The files a graph's input loaders read (LoadImage, LoadVideo, LoadAudio) are the caller's own and carry
 // generic names (image.png, ComfyUI_00001_.png [output]) that two machines share with different bytes. A node can match one
 // only by name, so a node holding a same-named file would run the graph on the wrong bytes and answer ok with a verified
-// file. A graph that reads one is therefore never auto-overflowed: the call waits for this machine's own lane. When that wait
-// ends in a deferral, the deferral says the fleet was not asked and why (overflowOutcome.note: in its reason, and in its data
-// as fleet_note); a call that then runs here and succeeds carries no note, because annotate leaves a result that is not a
-// deferral untouched. Carrying a size and a hash of each file to the node, which would restore the overflow for such graphs,
-// is a named seam, not built. A call that must leave this machine anyway (route remote, or auto on a machine with no graph
-// lane of its own, which has no queue to wait in) keeps the node's check by name: refusing it would turn a placement into a
-// refusal, and the files it names live wherever the caller put them. The same-named-file risk stays there, a named limit.
+// file. A graph that reads one is therefore never auto-placed on a node: its ticket is LOCAL-ONLY. It is still a ticket (one per
+// request, a place in this machine's line, a position, an answer), it reads no roster and is offered to no node, and it runs
+// when this machine's own lane serves it; every answer it gives carries the sentence that says why the fleet was not asked
+// (ticketFile.FleetNote: in the reason, and in the data as fleet_note). Carrying a size and a hash of each file to the node,
+// which would lift the restriction for such graphs, is a named seam, not built. A call that must leave this machine anyway
+// (route remote, or auto on a machine with no graph lane of its own, which has no queue to wait in) keeps the node's check by
+// name: refusing it would turn a placement into a refusal, and the files it names live wherever the caller put them. The
+// same-named-file risk stays there, a named limit.
 //
 // MIN_VRAM_GB. A call can ask for a node whose largest card is at least N GB. Without the argument a graph that names the
 // family wan22 (model_family) and carries a height of 720 or more gets the default floor of 16 GB, CHOSEN from the film
@@ -139,13 +145,13 @@ func inputFilesOf(pl planned) []string {
 	return names
 }
 
-// inputFilesNote is the sentence that says why a graph that reads input files was not offered to the fleet.
+// inputFilesNote is the sentence that says why a graph that reads input files is not offered to the fleet.
 func inputFilesNote(names []string) string {
 	shown := names
 	if len(shown) > 3 {
 		shown = append(append([]string(nil), names[:3]...), fmt.Sprintf("and %d more", len(names)-3))
 	}
-	return fmt.Sprintf("this machine did not offer the graph to the fleet: it reads input files (%s), and a node can match an input file only by name, so a node's same-named file of other bytes would run in its place; the call waits for this machine's own lane (route remote sends it to a node you name)", strings.Join(shown, ", "))
+	return fmt.Sprintf("this machine did not offer the graph to the fleet: it reads input files (%s), and a node can match an input file only by name, so a node's same-named file of other bytes would run in its place; the ticket waits for this machine's own lane and keeps its place there (route remote sends it to a node you name)", strings.Join(shown, ", "))
 }
 
 // graphNeedOf is the graph-specific part of a call's need; nil for any other task.
