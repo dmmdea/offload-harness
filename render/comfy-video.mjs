@@ -46,14 +46,14 @@ import { familySignature } from "./comfy-family.mjs";
 import { COMFY_DIR, comfyApi, tailComfyLog, comfyLogPath } from "./comfy-lifecycle.mjs";
 import { stageInput as stageToInput } from "./comfy-input.mjs";
 import { firstOutputFile } from "./comfy-output.mjs";
-import { assertNodeClasses } from "./comfy-nodes.mjs";
+import { assertNodeClasses, missingNodeClasses } from "./comfy-nodes.mjs";
 import { buildHunyuan15I2V } from "./wf-hunyuan15-i2v.mjs";
 import { buildWan22I2V, chooseWanDecode, WAN_DECODE_MODES, WAN_DECODE_DEFAULT } from "./wf-wan22-i2v.mjs";
 import { buildLtx25I2V } from "./wf-ltx25-i2v.mjs";
 import { buildH3AV } from "./wf-h3-av.mjs";
 import { buildAceStep } from "./wf-acestep.mjs";
 import { resolveCli, submitGraph, pollOutputs, fetchView, finalizeRun } from "./comfy-submit.mjs";
-import { planMulticard, checkComfyDevices, decodeFellBack } from "./wan-multicard.mjs";
+import { planMulticard, checkComfyDevices, decodeFellBack, portNote } from "./wan-multicard.mjs";
 
 // BOOL_FLAGS take no value. --fast was missing from this list, so the parser took the
 // NEXT token as its value: a trailing --fast (the harness appends it after --hero) read
@@ -273,6 +273,10 @@ export async function buildGraphForRun(pos, flags, api, { stage = stageInput, fe
   const card = wan && mode === "auto" && buildable ? await readRenderCard(api, { fetchImpl }) : undefined;
   const built = buildGraphFromArgs(pos, flags, { stage, vramTotalBytes: card?.vramTotal, multicard });
   if (wan) log(wanDecodeLine(mode, card, built.graph));
+  // Under multicard the decode that was not asked for is the tiled one (the default), which fits beside the expert and seams the clip: said once.
+  if (wan && multicard && Object.values(built.graph).some((n) => n.class_type === "VAEDecodeTiled")) {
+    log("WAN-PLACEMENT-NOTE: the tiled decode under multicard fits beside the expert (+2.3 GiB measured) but seams the clip at frames 24 and 48; --wan-decode plain frees both cards of the experts first and decodes in one pass");
+  }
   return built;
 }
 
@@ -300,8 +304,23 @@ export async function verifyMulticardDevices(api, plan, { fetchImpl = fetch } = 
   if (problems.length) throw new Error(`WAN-PLACEMENT-MISMATCH: ${problems.join("; ")}. Nothing was submitted.`);
 }
 
+// verifyMulticardPack: the harness's node pack (render/comfyui-ext) is what installs the read-only safetensors reader, and it raises on import
+// when it cannot, so a pack that is not registered means each expert would charge its whole file to host commit. The graph names one of its classes
+// only under the plain decode, so the node-class preflight alone would let any other decode run without the reader: this asks for it every time,
+// and, unlike that preflight, an answer that cannot be had is a refusal too (the server just answered /system_stats).
+export async function verifyMulticardPack(api, plan, { fetchImpl = fetch } = {}) {
+  const res = await missingNodeClasses(api, { 1: { class_type: "OffloadFreeForDecode" } }, { fetchImpl });
+  if (!res.checked) throw new Error(`WAN-PLACEMENT-PACK: cannot tell whether the harness's node pack (offload_multicard) loaded: ${res.reason}. Nothing was submitted.`);
+  if (res.missing.length) {
+    throw new Error(`WAN-PLACEMENT-PACK: ComfyUI at ${api} has no OffloadFreeForDecode, so the harness's node pack offload_multicard failed to import (it refuses to load when its read-only safetensors reader cannot be installed, and without that reader each expert would charge its whole file to host commit): ComfyUI's console log says why (${comfyLogPath(COMFY_DIR, plan.launch.key)}). Nothing was submitted.`);
+  }
+}
+
 async function generate(out, API, pos, flags, multicard) {
-  if (multicard) await verifyMulticardDevices(API, multicard);
+  if (multicard) {
+    await verifyMulticardDevices(API, multicard);
+    await verifyMulticardPack(API, multicard);
+  }
   const { graph, seed, model } = await buildGraphForRun(pos, flags, API, { multicard });
   // Shared submission/polling/retrieval (comfy-submit.mjs): CLI-preferred submit with
   // byte-identical raw fallback; hardened poll loop (dead-server watchdog).
@@ -338,6 +357,7 @@ async function main() {
   // named, not two, a display card). Its own environment names the instance, so the api and the lease slot read it too.
   const multicard = planMulticard({ flags, comfyDir: COMFY_DIR, isWanGraph: runsWanGraph(flags), say: (m) => console.error(m) });
   const API = comfyApi(flags.api, multicard ? multicard.env : process.env);
+  if (multicard) { const note = portNote(flags, multicard.env, API); if (note) console.error(note); }
   if (!out) { console.error('usage: node comfy-video.mjs <out.mp4> <still> "<prompt>" [--model hunyuan|wan] [flags]   |   <out.mp4> --graph wf.json'); process.exit(2); }
   await withGpuSlot(
     { noLock: flags["no-lock"], keepComfy: flags["keep-comfy"], comfyManaged: true, api: API, reserveVram: flags["reserve-vram"],

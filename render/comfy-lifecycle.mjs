@@ -578,7 +578,8 @@ const COMFY_LOG_TAIL_WINDOW_BYTES = 256 * 1024;
 
 /** tailComfyLog: the last `n` lines of THIS run's ComfyUI console capture, or ""
  * when there is none (no harness-managed launch this run, or nothing captured yet).
- * Synchronous — only ever called once, on a render failure, never on the happy path.
+ * Synchronous — called once on a render failure, and once after a successful multicard run
+ * (comfy-video.mjs reads it for ComfyUI's tiled-decode retry); never on any other happy path.
  * Reads only the last COMFY_LOG_TAIL_WINDOW_BYTES of the file; when that window starts
  * inside a line, the cut line is dropped rather than shown half. */
 export function tailComfyLog(comfyDir = COMFY_DIR, n = COMFY_LOG_TAIL_LINES, key = "") {

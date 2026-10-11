@@ -6,12 +6,14 @@
 //   cuda:0 = the STORAGE card: text encoder, VAE and the donor blocks of the expert in use (about 10.3 GiB);
 //   cuda:1 = the COMPUTE card: a resident share of the expert (3 GiB) plus the sampler's activations; the donor
 //            blocks stream to it one at a time over the card-to-card copy (about 1.7 s of a 250 s step).
-// Measured on two RTX 5060 Ti 16 GB at the film's geometry: compute card 13.3 GiB, storage card 11.1 GiB peak, host
-// growth 2.3 GiB over ComfyUI's idle (2026-10-11 benchmark; docs/systems/media-generation.md, "Card-only Wan").
+// Measured on two RTX 5060 Ti 16 GB at the film's geometry (the 2026-10-11 benchmark, a 4-step run of the 20-step film
+// recipe; docs/systems/media-generation.md, "Card-only Wan"): compute card 13.3 GiB, storage card 11.1 GiB peak, host
+// growth 2.3 GiB over ComfyUI's idle.
 //
 // WHAT THIS FILE DECIDES, all of it before ComfyUI starts, so a wrong card is a refusal and not a render:
-//   - which two cards (the lease's: GPU_LEASE_DEVICES, else the lease record, else --wan-cards), read from the
-//     driver's card table, never typed in; neither may drive a display;
+//   - which two cards (the lease's: GPU_LEASE_DEVICES, else the lease record; --wan-cards names them only when no lease
+//     does, and under a lease it can only confirm them), read from the driver's card table; neither may drive a display,
+//     and a card whose display state the driver does not report is refused too;
 //   - which of them is cuda:0 and which cuda:1 (the larger card computes; equal cards keep the lease's order);
 //   - the ComfyUI launch that placement needs (flags, env, instance key), as plain data for ensureComfy;
 //   - the DisTorch2 allocation string.
@@ -35,6 +37,24 @@ const REQUIRED_PACKS = Object.freeze([
 ]);
 
 const placementError = (msg) => new Error("WAN-PLACEMENT: " + msg);
+
+const OWN_FLAGS = Object.freeze(["wan-placement", "wan-resident-gb", "wan-cards"]);
+
+/**
+ * refuseEqualsSpelling: this runner's parser (comfy-video.mjs parseArgs) does not split `--flag=value`: it reads the whole thing as
+ * one flag NAME, takes the next argument as its value and leaves the real value behind as a positional. The Go side that sizes the
+ * lease does split it, so `--wan-placement=multicard` would declare no host RAM and then run the single-card placement, which
+ * streams the whole set through RAM. The placement's own flags are therefore refused in that spelling, before anything starts.
+ * Every other `=` key is none of this placement's business and passes.
+ */
+export function refuseEqualsSpelling(flags) {
+  for (const key of Object.keys(flags || {})) {
+    const own = OWN_FLAGS.find((f) => key.startsWith(f + "="));
+    if (own) {
+      throw new Error(`--${key} is spelled with '=', which this runner's parser does not split (it reads the whole thing as one flag name, takes the next flag as its value, and the call would run the single-card placement): write --${own} ${key.slice(own.length + 1)}`);
+    }
+  }
+}
 
 /** wanPlacementMode parses --wan-placement: absent is the single-card path, today's, byte for byte; anything else is refused. */
 export function wanPlacementMode(flags) {
@@ -65,28 +85,40 @@ const QUERY = "index,uuid,name,memory.total,memory.free,display_active,display_a
  * parseCardTable reads `nvidia-smi --query-gpu=index,uuid,name,memory.total,memory.free,display_active,display_attached
  * --format=csv,noheader,nounits`. A card drives a display when display_active is Enabled OR display_attached is Yes (the
  * harness's own rule, internal/gpuprobe/display.go: a monitor on the card counts with the screen asleep too). A column the
- * driver does not give is "unknown", and an unknown is never a yes.
+ * driver does not give, or gives as something else than Enabled/Disabled and Yes/No, is "unknown": `display` stays false (an
+ * unknown is never a yes) and `displayUnknown` is true, which resolveWanCards refuses for a chosen card. A row whose size is not
+ * a number is no card (a size check on NaN would pass); a free column that is not a number reads as 0.
  */
 export function parseCardTable(text) {
   const cards = [];
   for (const raw of String(text || "").split(/\r?\n/)) {
     const cols = raw.split(",").map((c) => c.trim());
     if (cols.length < 5 || !/^\d+$/.test(cols[0]) || !/^GPU-/i.test(cols[1])) continue;
+    const totalMiB = Number(cols[3]), freeMiB = Number(cols[4]);
+    if (!Number.isFinite(totalMiB) || totalMiB <= 0) continue;
     const active = (cols[5] || "").toLowerCase(), attached = (cols[6] || "").toLowerCase();
     cards.push({
       index: Number(cols[0]), uuid: cols[1], name: cols[2],
-      totalMiB: Number(cols[3]), freeMiB: Number(cols[4]),
+      totalMiB, freeMiB: Number.isFinite(freeMiB) ? freeMiB : 0,
       display: active === "enabled" || attached === "yes",
+      displayUnknown: !(["enabled", "disabled"].includes(active) && ["yes", "no"].includes(attached)),
+      displayActive: cols[5] || "", displayAttached: cols[6] || "",
     });
   }
   return cards;
 }
 
-/** queryCards asks the driver for the card table; a driver that rejects display_attached is asked again without it. */
+/**
+ * queryCards asks the driver for the card table. A failed query is asked once more before a driver is taken to lack
+ * display_attached (a transient failure is not a missing column); the fallback without it leaves every card's display state
+ * unknown, which the selection refuses.
+ */
 export function queryCards(spawnSync = nodeSpawnSync) {
   const ask = (fields) => spawnSync("nvidia-smi", [`--query-gpu=${fields}`, "--format=csv,noheader,nounits"], { encoding: "utf8", timeout: 30000 });
+  const failed = (r) => !r || r.status !== 0 || !r.stdout;
   let r = ask(QUERY);
-  if (!r || r.status !== 0 || !r.stdout) r = ask("index,uuid,name,memory.total,memory.free,display_active");
+  if (failed(r)) r = ask(QUERY);
+  if (failed(r)) r = ask("index,uuid,name,memory.total,memory.free,display_active");
   if (!r || r.status !== 0 || !r.stdout) {
     throw placementError("nvidia-smi gave no card table, so the two cards cannot be told from the display card" + (r && r.error ? ` (${r.error.message})` : ""));
   }
@@ -99,14 +131,19 @@ export function queryCards(spawnSync = nodeSpawnSync) {
 
 /**
  * wanCardTokens: the cards this run is allowed, as the tokens that name them, strongest source first:
- *   --wan-cards a,b                     the caller's word (a card index as nvidia-smi counts, or a UUID / UUID prefix);
+ *   --wan-cards a,b                     the caller's word (a card index as nvidia-smi counts, or a UUID / UUID prefix); under a
+ *                                       lease planMulticard checks that the lease holds them, so it can only confirm, never replace;
  *   GPU_LEASE_DEVICES, else the lease's own record   the cards the lease holds (gpu-lock.mjs leaseDevices);
  *   CUDA_VISIBLE_DEVICES, when it lists UUIDs        the wrapper's pin.
- * Returns { tokens, source } and no tokens when nothing says.
+ * Returns { tokens, source } and no tokens when nothing says. A --wan-cards that names no card (dangling or empty) is refused,
+ * not skipped: a caller who typed it meant something.
  */
 export function wanCardTokens({ flags = {}, env = process.env, leaseDevicesFn = leaseDevices } = {}) {
   const split = (s) => String(s || "").split(",").map((t) => t.trim()).filter(Boolean);
   const given = split(flags["wan-cards"]);
+  if ("wan-cards" in flags && given.length === 0) {
+    throw placementError(`--wan-cards needs <card>,<card> (nvidia-smi indices or UUIDs), got ${JSON.stringify(flags["wan-cards"])}`);
+  }
   if (given.length) return { tokens: given, source: "--wan-cards" };
   const held = leaseDevicesFn(env);
   if (held.length) return { tokens: held, source: "the GPU lease" };
@@ -137,7 +174,7 @@ export function resolveWanCards({ tokens, source, cards }) {
   const found = [];
   for (const token of tokens) {
     const card = matchCard(token, cards);
-    if (!card) throw placementError(`${source} names ${JSON.stringify(token)}, which is no card in the driver's table (${cards.map((c) => `${c.index}:${c.uuid}`).join(", ")})`);
+    if (!card) throw placementError(`${source} names ${JSON.stringify(token)}, which is no card in the driver's table (${cards.map((c) => `${c.index}:${c.uuid}`).join(", ")}): name the card by its nvidia-smi index or its UUID`);
     if (!found.includes(card)) found.push(card);
   }
   if (found.length !== 2) {
@@ -146,6 +183,10 @@ export function resolveWanCards({ tokens, source, cards }) {
   const screen = found.filter((c) => c.display);
   if (screen.length) {
     throw placementError(`card idx ${screen[0].index} (${screen[0].name}) drives a display, and the multicard placement never uses the display card: lease the two non-display cards`);
+  }
+  const unsure = found.filter((c) => c.displayUnknown);
+  if (unsure.length) {
+    throw placementError(`cannot tell whether idx ${unsure[0].index} (${unsure[0].name}) drives a display (the driver reported display_active ${unsure[0].displayActive || "nothing"}, display_attached ${unsure[0].displayAttached || "nothing"}), and the multicard placement never uses a display card, so it will not guess: lease two cards whose display state the driver reports`);
   }
   const [first, second] = found;
   const [storage, compute] = second.totalMiB >= first.totalMiB ? [first, second] : [second, first];
@@ -157,12 +198,12 @@ export function resolveWanCards({ tokens, source, cards }) {
 /** packDirs finds the custom-node folders a multicard launch must load, by name, in the install's custom_nodes. */
 export function packDirs(comfyDir, list = (d) => readdirSync(d, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name)) {
   const dir = join(comfyDir, "custom_nodes");
-  let names;
-  try { names = list(dir); } catch { names = []; }
+  let names, why = "";
+  try { names = list(dir); } catch (e) { names = []; why = ` (the listing failed: ${e && e.message ? e.message : e})`; }
   const out = [];
   for (const need of REQUIRED_PACKS) {
     const hit = names.find((n) => n.toLowerCase() === need.match);
-    if (!hit) throw placementError(`ComfyUI has no ${need.match} pack in ${dir} (${need.why}); the multicard placement needs it`);
+    if (!hit) throw placementError(`ComfyUI has no ${need.match} pack in ${dir}${why} (${need.why}); the multicard placement needs it`);
     out.push(hit);
   }
   return out;
@@ -227,7 +268,7 @@ export function checkComfyDevices(devices, pair) {
   want.forEach(([label, card], i) => {
     const got = cuda[i];
     const gib = Number(got.vram_total) / 1024 ** 3, expect = card.totalMiB / 1024;
-    if (!Number.isFinite(gib) || Math.abs(gib - expect) > 0.05 * expect) {
+    if (!Number.isFinite(gib) || !Number.isFinite(expect) || Math.abs(gib - expect) > 0.05 * expect) {
       problems.push(`${label} should be idx ${card.index} (${expect.toFixed(1)} GiB) but ComfyUI reports ${Number.isFinite(gib) ? gib.toFixed(1) + " GiB" : "no size"}${got.name ? ` (${got.name})` : ""}`);
     }
   });
@@ -235,20 +276,78 @@ export function checkComfyDevices(devices, pair) {
 }
 
 /**
+ * refuseUnmeasuredWan: the builder (wf-wan22-i2v.mjs) refuses --fast and a GGUF expert under multicard, and its defaults for an
+ * expert nobody named are GGUF files, so a call without --high-unet / --low-unet would be refused too. It does that after the
+ * lease is taken, llama-swap is unloaded and ComfyUI has cold-started; the same refusals are made here, before any of it.
+ */
+function refuseUnmeasuredWan(flags) {
+  if (flags.fast) throw new Error("--wan-placement multicard was measured on the native recipe only: drop --fast (or use --wan-placement single)");
+  for (const flag of ["high-unet", "low-unet"]) {
+    const name = flags[flag];
+    if (typeof name !== "string" || !name.trim()) {
+      throw new Error(`--wan-placement multicard needs --${flag} to name the fp8 safetensors expert (the builder's default experts are GGUF files, which fit one card: use --wan-placement single for those)`);
+    }
+    if (/\.gguf$/i.test(name.trim())) {
+      throw new Error(`--wan-placement multicard was measured with the fp8 safetensors experts, and --${flag} ${name} is a GGUF file (it fits one card: use --wan-placement single)`);
+    }
+  }
+}
+
+/** What the compute card needs besides the resident share of an expert: the sampler's activations, the CUDA context and --reserve-vram. */
+const COMPUTE_CARD_HEADROOM_GIB = 3.5;
+
+/**
+ * checkResident: a resident share larger than the compute card can hold beside its activations would out-of-memory in the sampler,
+ * 80 minutes in. The measured recipe keeps 3 GiB; what a card can take is its size less COMPUTE_CARD_HEADROOM_GIB, whatever the clip.
+ */
+function checkResident(residentGb, pair) {
+  const cardGib = pair.compute.totalMiB / 1024;
+  const most = cardGib - COMPUTE_CARD_HEADROOM_GIB;
+  if (residentGb > most) {
+    throw placementError(`--wan-resident-gb ${residentGb} leaves the compute card (idx ${pair.compute.index}, ${cardGib.toFixed(1)} GiB) less than ${COMPUTE_CARD_HEADROOM_GIB} GiB for the sampler's activations, the CUDA context and --reserve-vram: at most ${most.toFixed(1)} GiB of an expert can stay resident there (the measured film-size recipe keeps ${WAN_RESIDENT_GB_DEFAULT})`);
+  }
+}
+
+/** confirmWithLease: --wan-cards may name the two cards when no lease does; when a lease holds cards it can only confirm them. */
+function confirmWithLease(pair, held) {
+  if (!held || held.length === 0) return;
+  const outside = [pair.storage, pair.compute].filter((c) => !held.some((id) => matchCard(id, [c]) === c));
+  if (outside.length) {
+    throw placementError(`--wan-cards names idx ${outside.map((c) => c.index).join(", ")}, which the GPU lease does not hold (it holds ${held.join(", ")}): the lease is the authority on which cards this run may touch, so --wan-cards can only confirm them`);
+  }
+}
+
+/**
+ * portNote: a multicard instance with no --api and no COMFY_API listens where its instance key falls back to (COMFY_PORT_BASE + index,
+ * the port the per-card instances use too). A ComfyUI already holding it stops the run, closed (COMFY-PORT-TAKEN / COMFY-PROFILE-MISMATCH),
+ * so the caller is told which port it got and how to pick its own. "" when the caller gave one.
+ */
+export function portNote(flags, env, api) {
+  if ((flags && flags.api) || (env && env.COMFY_API)) return "";
+  return `wan-placement: no --api or COMFY_API was given, so the multicard instance falls back to ${api}; a ComfyUI already holding that port stops the run (COMFY-PORT-TAKEN or COMFY-PROFILE-MISMATCH): give it its own port with --api http://127.0.0.1:<port>`;
+}
+
+/**
  * planMulticard is the one call the runner makes before anything starts: null for the single-card path (the default, which
  * reads no card table and touches nothing), otherwise the whole plan of the card-only placement. It refuses, with the reason,
- * every request it cannot honour: a graph that is not the Wan 2.2 one, no cards named, not two cards, a display card, a missing
- * pack. `cards` reads the driver's card table (injectable); `isWanGraph` says whether this invocation builds the Wan 2.2 graph.
+ * every request it cannot honour: the placement's own flags spelled with '=', a graph that is not the Wan 2.2 one, --fast or a
+ * GGUF / unnamed expert, no cards named, not two cards, a card the lease does not hold, a display card or one whose display
+ * state is unknown, a resident share the compute card cannot hold, a missing pack. `cards` reads the driver's card table
+ * (injectable); `isWanGraph` says whether this invocation builds the Wan 2.2 graph; `leaseDevicesFn` names the cards the lease holds.
  */
-export function planMulticard({ flags, env = process.env, comfyDir, isWanGraph, cards = queryCards, launchFn = multicardLaunch, say = () => {} }) {
+export function planMulticard({ flags, env = process.env, comfyDir, isWanGraph, cards = queryCards, launchFn = multicardLaunch, leaseDevicesFn = leaseDevices, say = () => {} }) {
+  refuseEqualsSpelling(flags);
   const mode = wanPlacementMode(flags);
   if (mode !== "multicard") return null;
   if (!isWanGraph) {
     throw new Error(`--wan-placement multicard places the Wan 2.2 graph; this invocation builds ${flags.graph ? "a --graph file" : `--model ${flags.model}`}, which it does not touch`);
   }
+  refuseUnmeasuredWan(flags);
   const residentGb = wanResidentGb(flags);
-  const { tokens, source } = wanCardTokens({ flags, env });
+  const { tokens, source } = wanCardTokens({ flags, env, leaseDevicesFn });
   const pair = resolveWanCards({ tokens, source, cards: cards() });
+  if (source === "--wan-cards") confirmWithLease(pair, leaseDevicesFn(env));
+  checkResident(residentGb, pair);
   const launch = launchFn(pair, { comfyDir });
   const plan = { pair, launch, residentGb, env: multicardEnv(env, launch) };
   const line = (role, dev, c) => `${role} ${dev} = idx ${c.index} ${c.name} (${(c.totalMiB / 1024).toFixed(1)} GiB, ${c.uuid.slice(0, 12)})`;

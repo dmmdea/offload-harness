@@ -4,6 +4,8 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -605,25 +607,90 @@ func TestAMulticardWanCallThatDoesNotHoldTwoCardsKeepsTheOrdinaryEstimate(t *tes
 	}
 }
 
-// What must fit is the largest stage across the pair: two 8 GiB cards (13 GiB usable) cannot hold a 13.4 GiB expert and its
-// activations, and two 24 GiB cards can.
+// What must fit is each card's own stage: the LARGER card computes (its resident share of an expert + the film-size activations) and the
+// other holds the donor blocks (the rest of the expert + the VAE and the CUDA context). Two 8 GiB cards cannot, two 24 GiB cards can, and
+// the SUM of two unequal cards proves nothing: 24 + 8 GiB adds up to plenty, but the 8 GiB card cannot hold a 10.4 GiB donor share.
 func TestAMulticardWanCallThatDoesNotFitTheLeasedPairIsSizedAsBefore(t *testing.T) {
-	if n := wanNeed(t, wanMulticardCmd, wanFacts(t, 8, 8)); !near(n.GiB, 13.3+13.4+6.3) || !strings.Contains(n.Detail, "does not fit") {
-		t.Fatalf("two 8 GiB cards: %v, want the ordinary 33.0 that does not fit", n)
+	ordinary := func(name string, n Need) {
+		t.Helper()
+		if !near(n.GiB, 13.3+13.4+6.3) || !strings.Contains(n.Detail, "does not fit") {
+			t.Fatalf("%s: %v, want the ordinary 33.0 that does not fit", name, n)
+		}
 	}
+	ordinary("two 8 GiB cards", wanNeed(t, wanMulticardCmd, wanFacts(t, 8, 8)))
 	if n := wanNeed(t, wanMulticardCmd, wanFacts(t, 24, 24)); n.GiB != 0 {
 		t.Fatalf("two 24 GiB cards: %v, want 0", n)
 	}
-	// the margin is the sum of what each card has left after the runner's reserve: 2 x (13.7 - 1.0) = 25.4 >= 13.4 + 11.0, but 2 x (12.9 - 1.0) = 23.8 is not
-	if n := wanNeed(t, wanMulticardCmd, wanFacts(t, 13.7, 13.7)); n.GiB != 0 {
-		t.Fatalf("2 x 13.7 GiB: %v, want 0", n)
+	// unequal cards: a big card and a small one that cannot hold the donor share (13.4 - 3 + 0.6 = 11.0 GiB + the 1 GiB reserve)
+	ordinary("24 + 8 GiB", wanNeed(t, wanMulticardCmd, wanFacts(t, 24, 8)))
+	ordinary("8 + 24 GiB, the other order", wanNeed(t, wanMulticardCmd, wanFacts(t, 8, 24)))
+	if n := wanNeed(t, wanMulticardCmd, wanFacts(t, 16, 13)); n.GiB != 0 {
+		t.Fatalf("16 + 13 GiB: the 16 GiB card computes (3 + 11 = 14 of 15 usable) and the 13 GiB card holds 11.0 of 12 usable: %v, want 0", n)
 	}
-	if n := wanNeed(t, wanMulticardCmd, wanFacts(t, 12.9, 12.9)); n.GiB == 0 {
-		t.Fatalf("2 x 12.9 GiB cannot hold a 13.4 GiB expert and 11 GiB of activations: %v", n)
+	// the storage card's margin is the VAE and the context beside the donor blocks: 10.4 GiB of blocks fit a 11.7 GiB card (10.7 usable) only
+	// without them, 11.0 GiB do not
+	ordinary("16 + 11.7 GiB", wanNeed(t, wanMulticardCmd, wanFacts(t, 16, 11.7)))
+	if n := wanNeed(t, wanMulticardCmd, wanFacts(t, 16, 12.2)); n.GiB != 0 {
+		t.Fatalf("16 + 12.2 GiB (11.2 usable >= 11.0): %v, want 0", n)
+	}
+	// the compute card: resident 3 + 11 GiB of activations must fit its size less the reserve (1.0 by default)
+	ordinary("2 x 14.5 GiB", wanNeed(t, wanMulticardCmd, wanFacts(t, 14.5, 14.5)))
+	if n := wanNeed(t, wanMulticardCmd, wanFacts(t, 15.1, 15.1)); n.GiB != 0 {
+		t.Fatalf("2 x 15.1 GiB (14.1 usable >= 14): %v, want 0", n)
 	}
 	// --reserve-vram is the runner's: a larger reserve takes more of each card
-	if n := wanNeed(t, wanMulticardCmd+" --reserve-vram 3", wanFacts(t, 13.7, 13.7)); n.GiB == 0 {
-		t.Fatalf("a 3 GiB reserve on each of 2 x 13.7 GiB leaves 21.4 < 24.4: %v", n)
+	ordinary("a 3 GiB reserve on 2 x 15.9 GiB", wanNeed(t, wanMulticardCmd+" --reserve-vram 3", wanFacts(t, 15.9, 15.9)))
+	// a card whose size is unknown (0) is no pair
+	ordinary("a zero-size card", wanNeed(t, wanMulticardCmd, wanFacts(t, 0, 15.9)))
+}
+
+// The resident share is the call's --wan-resident-gb (default 3, the runner's own): a bigger share needs more of the compute card and
+// less of the storage card.
+func TestTheResidentShareIsReadFromTheCall(t *testing.T) {
+	two := wanFacts(t, 15.9, 15.9)
+	ordinary := func(name string, n Need) {
+		t.Helper()
+		if !near(n.GiB, 13.3+13.4+6.3) {
+			t.Fatalf("%s: %v, want the ordinary 33.0", name, n)
+		}
+	}
+	ordinary("a 6 GiB share (6 + 11 = 17 > 14.9 usable on the compute card)", wanNeed(t, wanMulticardCmd+" --wan-resident-gb 6", two))
+	if n := wanNeed(t, wanMulticardCmd+" --wan-resident-gb 0", two); n.GiB != 0 {
+		t.Fatalf("a 0 GiB share (everything on the storage card: 13.4 + 0.6 = 14.0 of 14.9 usable): %v, want 0", n)
+	}
+	if n := wanNeed(t, wanMulticardCmd+" --wan-resident-gb=3.5", two); n.GiB != 0 {
+		t.Fatalf("the --name=value form is read as the flag: %v, want 0", n)
+	}
+	// an unreadable or out-of-range value is the default (the runner refuses such a call before it starts)
+	for _, bad := range []string{"x", "-1", "65", "NaN", "Inf"} {
+		if n := wanNeed(t, wanMulticardCmd+" --wan-resident-gb "+bad, two); n.GiB != 0 {
+			t.Fatalf("--wan-resident-gb %s: %v, want the default share (0 on two 15.9 GiB cards)", bad, n)
+		}
+	}
+	// the storage card holds the rest of the expert: a 0 GiB share does not fit a 12 GiB card beside a 16 GiB one
+	ordinary("a 0 GiB share on 16 + 12 GiB", wanNeed(t, wanMulticardCmd+" --wan-resident-gb 0", wanFacts(t, 16, 12)))
+	if n := wanNeed(t, wanMulticardCmd, wanFacts(t, 16, 13)); n.GiB != 0 {
+		t.Fatalf("the default 3 GiB share on 16 + 13 GiB (the 13 GiB card holds 11.0 GiB of donor blocks, 12 usable): %v, want 0", n)
+	}
+}
+
+// The default share is the runner's: render/wf-wan22-i2v.mjs names it, and the two must stay one number (a different default here would
+// size a call the runner then runs differently).
+func TestTheResidentDefaultMirrorsTheRunner(t *testing.T) {
+	src, err := os.ReadFile(filepath.Join("..", "..", "render", "wf-wan22-i2v.mjs"))
+	if err != nil {
+		t.Skipf("the render folder is not beside this package: %v", err)
+	}
+	m := regexp.MustCompile(`WAN_RESIDENT_GB_DEFAULT = ([0-9.]+);`).FindSubmatch(src)
+	if m == nil {
+		t.Fatal("render/wf-wan22-i2v.mjs no longer defines WAN_RESIDENT_GB_DEFAULT; this package reads it")
+	}
+	got, _ := strconv.ParseFloat(string(m[1]), 64)
+	if got != wanResidentDefaultGiB {
+		t.Fatalf("the runner keeps %v GiB of each expert resident by default, this package assumes %v", got, wanResidentDefaultGiB)
+	}
+	if !regexp.MustCompile(`WAN_PLACEMENTS = Object\.freeze\(\["single", "multicard"\]\)`).Match(src) {
+		t.Fatal("the runner's placements are no longer single|multicard; --wan-placement multicard is what this package sizes")
 	}
 }
 

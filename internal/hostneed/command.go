@@ -1,6 +1,7 @@
 package hostneed
 
 import (
+	"math"
 	"strconv"
 	"strings"
 
@@ -121,10 +122,27 @@ func (c RenderCall) Estimate(f Facts) (Need, bool) {
 			UnetLow: c.Flags["low-unet"], TextEncoder: c.Flags["text-encoder"],
 		}
 		// The card-only Wan placement (--wan-placement multicard) is read for the Wan graph alone: no other family has it.
-		cardOnly := model == "wan22" && strings.EqualFold(strings.TrimSpace(c.Flags["wan-placement"]), "multicard")
+		var cardOnly *CardOnly
+		if model == "wan22" && strings.EqualFold(strings.TrimSpace(c.Flags["wan-placement"]), "multicard") {
+			cardOnly = &CardOnly{ResidentGiB: wanResidentGiB(c.Flags)}
+		}
 		return estimateWith(model, mediacap.VideoModelFilesFor(model, fb), f, cardOnly)
 	}
 	return Need{}, false
+}
+
+// wanResidentGiB reads --wan-resident-gb (the share of each Wan expert the card-only placement keeps on the compute card). The runner
+// refuses a value it cannot read or one outside 0..64 before it starts, so sizing the call as the default one is only ever a sizing.
+func wanResidentGiB(flags map[string]string) float64 {
+	raw, ok := flags["wan-resident-gb"]
+	if !ok {
+		return wanResidentDefaultGiB
+	}
+	v, err := strconv.ParseFloat(strings.TrimSpace(raw), 64)
+	if err != nil || math.IsNaN(v) || v < 0 || v > 64 {
+		return wanResidentDefaultGiB
+	}
+	return v
 }
 
 func firstNonEmpty(vals ...string) string {

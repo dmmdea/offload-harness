@@ -12,7 +12,12 @@ shared install. Two parts:
    backed by that read-only map and is otherwise a drop-in for comfy.utils.load_torch_file on a CPU load
    of a .safetensors file; every other load goes to the original function. If the reader cannot be
    installed this module raises, so ComfyUI reports the pack as failed and the runner's node check
-   stops the run before any GPU work (a placement that would silently charge 15 GiB per expert).
+   (verifyMulticardPack in render/comfy-video.mjs, asked under every decode) stops the run before any
+   GPU work (a placement that would silently charge 15 GiB per expert).
+   ASSUMPTION, not a guarantee: nothing writes into a loaded weight in place on this path. The map is
+   read-only, so such a write would not corrupt the file: it would crash ComfyUI with a Windows access
+   violation. None exists on the Wan load path read at ComfyUI 0.38.0 (under --gpu-only the weights are
+   copied to the card, not assigned in place) and the runs made so far wrote none.
 
 2. OffloadFreeForDecode, a pass-through LATENT node that sits between the last sampler and a plain
    VAEDecode. With --gpu-only the offload device IS the card, so ComfyUI's own "unload" frees
@@ -39,9 +44,6 @@ DECODE_SHARE_OF_ESTIMATE = 0.85
 # Used when the VAE gives no estimate (a graph that wires no VAE in).
 DECODE_FALLBACK_GIB = 10.2
 
-log = logging.getLogger("offload_multicard")
-
-
 def _say(message):
     # ComfyUI's console goes to the harness's log file; one prefix makes every line findable.
     logging.info("[offload_multicard] %s", message)
@@ -59,17 +61,42 @@ def _install_readonly_loader():
     original = cu.load_torch_file
 
     def read_only(path):
-        handle = open(path, "rb")
-        mapped = mmap.mmap(handle.fileno(), 0, access=mmap.ACCESS_READ)
+        shown = os.path.basename(str(path))
+        # the map keeps its own duplicate of the file handle (CPython's mmap does on Windows and POSIX alike), so the file object is closed here
+        with open(path, "rb") as handle:
+            mapped = mmap.mmap(handle.fileno(), 0, access=mmap.ACCESS_READ)
         view = memoryview(mapped)
-        (header_len,) = struct.unpack("<Q", view[:8])
-        header = json.loads(bytes(view[8:8 + header_len]).decode("utf-8"))
-        base = 8 + header_len
-        metadata = header.pop("__metadata__", {})
+        try:
+            (header_len,) = struct.unpack("<Q", view[:8])
+            header = json.loads(bytes(view[8:8 + header_len]).decode("utf-8"))
+            base = 8 + header_len
+            metadata = header.pop("__metadata__", {})
+            data_size = len(mapped) - base
+            plan = []
+            for name, info in header.items():
+                start, end = info["data_offsets"]
+                dtype = cu._TYPES[info["dtype"]]
+                if start != end:
+                    # upstream's reader checks the header against the file; this one says the same in words, because torch's own error for
+                    # a short buffer ("shape '[3]' is invalid for input of size 1") names neither the file nor the tensor
+                    if start < 0 or end < start or end > data_size:
+                        raise ValueError(f"{shown}: tensor {name!r} needs bytes {start}:{end} of the data section but the file holds only "
+                                         f"{data_size} bytes after its header (truncated file?)")
+                    count = 1
+                    for dim in info["shape"]:
+                        count *= dim
+                    want = count * torch.empty(0, dtype=dtype).element_size()
+                    if end - start != want:
+                        raise ValueError(f"{shown}: tensor {name!r} has shape {info['shape']} ({want} bytes as {info['dtype']}) "
+                                         f"but its data_offsets cover {end - start} bytes: not a valid safetensors file")
+                plan.append((name, info, start, end, dtype))
+        except BaseException:
+            # nothing is cut from the map yet, so it can be closed here instead of waiting for the collector
+            view.release()
+            mapped.close()
+            raise
         state = {}
-        for name, info in header.items():
-            start, end = info["data_offsets"]
-            dtype = cu._TYPES[info["dtype"]]
+        for name, info, start, end, dtype in plan:
             if start == end:
                 state[name] = torch.empty(info["shape"], dtype=dtype)
                 continue
@@ -78,9 +105,9 @@ def _install_readonly_loader():
                 warnings.filterwarnings("ignore", message="The given buffer is not writable")
                 tensor = torch.frombuffer(view[base + start: base + end], dtype=dtype).view(info["shape"])
             # the mapping lives exactly as long as any tensor cut from it
-            setattr(tensor.untyped_storage(), "_offload_ro_refs", (handle, mapped, view))
+            setattr(tensor.untyped_storage(), "_offload_ro_refs", (mapped, view))
             state[name] = tensor
-        _say(f"read-only map of {os.path.basename(str(path))}: {len(state)} tensors, {len(mapped) / GIB:.2f} GiB")
+        _say(f"read-only map of {shown}: {len(state)} tensors, {len(mapped) / GIB:.2f} GiB")
         return state, metadata
 
     def load_torch_file(ckpt, safe_load=False, device=None, return_metadata=False):

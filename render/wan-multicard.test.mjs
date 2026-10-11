@@ -3,7 +3,7 @@
 // the HTTP probes and the pid checks are injected; the only real I/O is scratch folders under the OS temp dir, removed after.
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, existsSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -13,7 +13,7 @@ import * as M from "./wan-multicard.mjs";
 import * as L from "./comfy-lifecycle.mjs";
 import * as O from "./comfy-ownership.mjs";
 import { withGpuSlot } from "./gpu-lock.mjs";
-import { buildGraphFromArgs, verifyMulticardDevices } from "./comfy-video.mjs";
+import { buildGraphFromArgs, buildGraphForRun, verifyMulticardDevices, verifyMulticardPack } from "./comfy-video.mjs";
 
 // Synthetic ids: a repeated-nibble head is a placeholder to the leak gate, and none of these names a real card.
 const U0 = "GPU-aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee";
@@ -34,6 +34,13 @@ after(() => { for (const d of scratch) rmSync(d, { recursive: true, force: true 
 
 const lines = () => { const got = []; return { got, warn: (l) => got.push(l) }; };
 const pair = () => M.resolveWanCards({ tokens: [U2, U0], source: "the GPU lease", cards: CARDS });
+const EXPERTS = { "high-unet": "high_fp8.safetensors", "low-unet": "low_fp8.safetensors" };
+const LEASE = { GPU_LEASE_DEVICES: "gpu-cccc3333-dddd-eeee-ffff-000000000000,gpu-aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee" };
+// planMulticard on the synthetic table, under a lease that holds cards 2 and 0 unless a test says otherwise
+const planWith = (flags = {}, over = {}) => M.planMulticard({
+  flags: { "wan-placement": "multicard", ...EXPERTS, ...flags }, env: { ...LEASE }, comfyDir: "/c", isWanGraph: true, cards: () => CARDS,
+  launchFn: (p) => M.multicardLaunch(p, { comfyDir: "/c", packDirsFn: () => ["ComfyUI-MultiGPU", "ComfyUI-VideoHelperSuite"] }), ...over,
+});
 
 // ---- the builder ------------------------------------------------------------------------------------------
 
@@ -159,6 +166,9 @@ test("parseCardTable reads the driver's csv: a display is display_active Enabled
   assert.equal(lit[0].display, true, "active alone");
   const unknown = M.parseCardTable(`0, ${U0}, X, 100, 50, [N/A], [Not Supported]\n1, ${U1}, X, 100, 50`);
   assert.deepEqual(unknown.map((c) => c.display), [false, false]);
+  assert.deepEqual(unknown.map((c) => c.displayUnknown), [true, true], "and said: a selection must not treat unknown as screenless");
+  assert.deepEqual(CARDS.map((c) => c.displayUnknown), [false, false, false]);
+  assert.deepEqual(M.parseCardTable(`0, ${U0}, X, [N/A], 50, Disabled, No`), [], "a row without a size is no card");
   assert.deepEqual(M.parseCardTable("garbage\n\nindex, uuid, name"), [], "headers and noise are skipped");
 });
 
@@ -169,7 +179,7 @@ test("queryCards asks for display_attached and falls back to display_active alon
     return /display_attached/.test(args[0]) ? { status: 2, stdout: "" } : { status: 0, stdout: `0, ${U0}, X, 100, 50, Enabled` };
   };
   const cards = M.queryCards(spawn);
-  assert.equal(asked.length, 2);
+  assert.equal(asked.length, 3, "the full query, once more (a transient failure is not a driver that lacks the column), then the fallback");
   assert.equal(cards[0].display, true);
   assert.throws(() => M.queryCards(() => ({ status: 1, stdout: "" })), /nvidia-smi gave no card table/);
   assert.throws(() => M.queryCards(() => ({ status: 0, stdout: "no cards here" })), /listed no card/);
@@ -279,7 +289,7 @@ test("planMulticard: null for single without reading any card; a plan for multic
   assert.equal(M.planMulticard({ flags: { "wan-placement": "single" }, comfyDir: "/c", isWanGraph: false, cards: boom }), null, "single on any graph is today's path");
   const said = [];
   const plan = M.planMulticard({
-    flags: { "wan-placement": "multicard", "wan-resident-gb": "4" }, env: { GPU_LEASE_DEVICES: `gpu-cccc3333-dddd-eeee-ffff-000000000000,gpu-aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee`, COMFY_DYNAMIC_VRAM: "on" },
+    flags: { "wan-placement": "multicard", "wan-resident-gb": "4", ...EXPERTS }, env: { ...LEASE, COMFY_DYNAMIC_VRAM: "on" },
     comfyDir: "/c", isWanGraph: true, cards: () => CARDS, launchFn: (p) => M.multicardLaunch(p, { comfyDir: "/c", packDirsFn: () => ["ComfyUI-MultiGPU", "ComfyUI-VideoHelperSuite"] }), say: (l) => said.push(l),
   });
   assert.equal(plan.residentGb, 4);
@@ -288,12 +298,12 @@ test("planMulticard: null for single without reading any card; a plan for multic
   assert.equal(plan.env.COMFY_DYNAMIC_VRAM, "");
   assert.equal(said.length, 1);
   assert.match(said[0], /^wan-placement: multicard on the GPU lease: storage cuda:0 = idx 2 .*; compute cuda:1 = idx 0 .*; 4 GiB of each expert resident/);
-  const refuse = (over, re) => assert.throws(() => M.planMulticard({ flags: { "wan-placement": "multicard" }, env: {}, comfyDir: "/c", isWanGraph: true, cards: () => CARDS, ...over }), re);
+  const refuse = (over, re) => assert.throws(() => M.planMulticard({ flags: { "wan-placement": "multicard", ...EXPERTS }, env: {}, comfyDir: "/c", isWanGraph: true, cards: () => CARDS, ...over }), re);
   refuse({ isWanGraph: false, flags: { "wan-placement": "multicard", model: "ltx25" } }, /places the Wan 2\.2 graph.*--model ltx25/);
   refuse({ isWanGraph: false, flags: { "wan-placement": "multicard", graph: "g.json" } }, /--graph file/);
   refuse({}, /needs the two cards it runs on/);
   refuse({ env: { GPU_LEASE_DEVICES: `${U0},${U1}` } }, /drives a display/);
-  refuse({ flags: { "wan-placement": "multicard", "wan-resident-gb": "x" } }, /--wan-resident-gb/);
+  refuse({ env: LEASE, flags: { "wan-placement": "multicard", "wan-resident-gb": "x", ...EXPERTS } }, /--wan-resident-gb/);
 });
 
 test("decodeFellBack finds ComfyUI's out-of-memory retry in a console stretch, and only that", () => {
@@ -445,4 +455,126 @@ test("verifyMulticardDevices stops the run, before anything is submitted, when C
   await assert.rejects(verifyMulticardDevices("http://x", plan, { fetchImpl: reply([dev(16311)]) }), /WAN-PLACEMENT-MISMATCH: ComfyUI sees 1 CUDA device.*Nothing was submitted/);
   await assert.rejects(verifyMulticardDevices("http://x", plan, { fetchImpl: async () => ({ ok: false, status: 500 }) }), /WAN-PLACEMENT-MISMATCH: GET \/system_stats gave no device list \(HTTP 500\)/);
   await assert.rejects(verifyMulticardDevices("http://x", plan, { fetchImpl: async () => { throw new Error("refused"); } }), /gave no device list \(refused\)/);
+});
+
+// ---- the review round (2026-10-11): what a wrong spelling, a wrong pair or a missing pack must not do silently -----------
+
+test("an '=' spelling of the placement's own flags is refused: the runner's parser does not split it, so it would run single, undeclared", () => {
+  const boom = () => { throw new Error("must not be read"); };
+  const flags = (k) => ({ [k]: "--wan-decode" });
+  assert.throws(() => M.planMulticard({ flags: flags("wan-placement=multicard"), comfyDir: "/c", isWanGraph: true, cards: boom }), /--wan-placement=multicard is spelled with '='.*write --wan-placement multicard/);
+  assert.throws(() => M.planMulticard({ flags: flags("wan-resident-gb=4"), comfyDir: "/c", isWanGraph: true, cards: boom }), /--wan-resident-gb=4 is spelled with '='.*write --wan-resident-gb 4/);
+  assert.throws(() => M.planMulticard({ flags: flags("wan-cards=0,2"), comfyDir: "/c", isWanGraph: true, cards: boom }), /--wan-cards=0,2 is spelled with '='.*write --wan-cards 0,2/);
+  // no other '=' key is this placement's business: the single path is what it was, flag by flag
+  assert.equal(M.planMulticard({ flags: { "high-unet=x.safetensors": "y" }, comfyDir: "/c", isWanGraph: true, cards: boom }), null);
+  assert.equal(M.planMulticard({ flags: { "wan-decode=plain": "x" }, comfyDir: "/c", isWanGraph: true, cards: boom }), null);
+  // (internal/hostneed splits '=' and pins `--wan-placement=multicard` as the multicard call it sizes; that is why this side refuses the spelling
+  // instead of running it as single: the lease and the run can never disagree about a call that starts.)
+});
+
+test("verifyMulticardPack stops the run when the harness's node pack did not load, under any decode, and when it cannot tell", async () => {
+  const plan = { launch: { key: "mc-cccc3333-aaaa1111" } };
+  const reply = (body) => async () => ({ ok: true, status: 200, json: async () => body });
+  await verifyMulticardPack("http://x", plan, { fetchImpl: reply({ OffloadFreeForDecode: { input: {} } }) });
+  await assert.rejects(verifyMulticardPack("http://x", plan, { fetchImpl: reply({}) }),
+    /WAN-PLACEMENT-PACK: ComfyUI at http:\/\/x has no OffloadFreeForDecode.*failed to import.*offload-comfyui-mc-cccc3333-aaaa1111\.log.*Nothing was submitted/s);
+  await assert.rejects(verifyMulticardPack("http://x", plan, { fetchImpl: async () => ({ ok: false, status: 500 }) }), /WAN-PLACEMENT-PACK: .*cannot tell.*HTTP 500.*Nothing was submitted/s);
+  await assert.rejects(verifyMulticardPack("http://x", plan, { fetchImpl: async () => { throw new Error("refused"); } }), /cannot tell.*refused/s);
+});
+
+test("generate() verifies the devices and then the pack, before it builds or submits anything", () => {
+  const src = readFileSync(new URL("./comfy-video.mjs", import.meta.url), "utf8");
+  const body = src.slice(src.indexOf("async function generate("), src.indexOf("async function main("));
+  assert.match(body, /if \(multicard\) \{\s*await verifyMulticardDevices\(API, multicard\);\s*await verifyMulticardPack\(API, multicard\);\s*\}\s*const \{ graph, seed, model \} = await buildGraphForRun/);
+});
+
+test("the missing-node message for the harness's own pack says it failed to import, not 'install it into custom_nodes'", async () => {
+  const { missingNodeMessage, NODE_PACKS } = await import("./comfy-nodes.mjs");
+  const own = missingNodeMessage("http://x", ["OffloadFreeForDecode"], "/c");
+  assert.match(own, /^MISSING_NODE: ComfyUI at http:\/\/x has no node class OffloadFreeForDecode/);
+  assert.match(own, /never installed into custom_nodes.*failed to import.*Nothing was submitted\.$/s);
+  assert.doesNotMatch(own, /install the pack into/);
+  // a third-party class keeps today's sentence byte for byte
+  assert.equal(missingNodeMessage("http://x", ["UNETLoaderDisTorch2MultiGPU"], "/c"),
+    `MISSING_NODE: ComfyUI at http://x has no node class UNETLoaderDisTorch2MultiGPU (custom node pack ${NODE_PACKS.UNETLoaderDisTorch2MultiGPU}) — install the pack into /c/custom_nodes and restart ComfyUI (\`local-offload doctor\` lists every route's node classes). Nothing was submitted.`);
+  // mixed: the pack sentence still applies to the class that has one
+  const mixed = missingNodeMessage("http://x", ["OffloadFreeForDecode", "VAELoaderMultiGPU"], "/c");
+  assert.match(mixed, /install the pack into \/c\/custom_nodes/);
+});
+
+test("under multicard a decode that is the tiled one is said to seam, once, and plain says nothing", async () => {
+  const flags = { ...EXPERTS, width: "720", height: "1280", frames: "81", seed: "7" };
+  const run = async (extra, withPlan = true) => {
+    const said = [];
+    await buildGraphForRun(["o.mp4", "s.png", "p"], { ...flags, ...extra }, "http://x", { stage: () => "s.png", log: (m) => said.push(m), ...(withPlan ? { multicard: { residentGb: 3 } } : {}) });
+    return said.filter((m) => /WAN-PLACEMENT-NOTE/.test(m));
+  };
+  const tiled = await run({});
+  assert.equal(tiled.length, 1);
+  assert.match(tiled[0], /tiled decode.*frames 24 and 48.*--wan-decode plain/);
+  assert.equal((await run({ "wan-decode": "tiled" })).length, 1);
+  assert.deepEqual(await run({ "wan-decode": "plain" }), []);
+  assert.deepEqual(await run({}, false), [], "the single placement's tiled default is what it always was, and says nothing new");
+});
+
+test("planMulticard refuses --fast and a GGUF or unnamed expert before anything starts, not after the cold start", () => {
+  assert.doesNotThrow(() => planWith());
+  assert.throws(() => planWith({ fast: true }), /native recipe only.*drop --fast/);
+  assert.throws(() => planWith({ "high-unet": "h.gguf" }), /--high-unet.*h\.gguf.*GGUF/);
+  assert.throws(() => planWith({ "low-unet": "L.GGUF" }), /--low-unet.*L\.GGUF.*GGUF/);
+  for (const flag of ["high-unet", "low-unet"]) {
+    const flags = { "wan-placement": "multicard", ...EXPERTS };
+    delete flags[flag];
+    assert.throws(() => planWith({}, { flags }), new RegExp(`needs --${flag}.*fp8 safetensors expert.*default experts are GGUF`));
+    assert.throws(() => planWith({ [flag]: "" }), new RegExp(`needs --${flag}`), "an empty name is no name");
+  }
+});
+
+test("--wan-cards can confirm the lease's cards or name them when no lease does, and never replaces a lease", () => {
+  const held = ["gpu-aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee", "gpu-cccc3333-dddd-eeee-ffff-000000000000"];
+  assert.doesNotThrow(() => planWith({ "wan-cards": "0,2" }, { leaseDevicesFn: () => held }), "the same two cards: confirmed");
+  assert.doesNotThrow(() => planWith({ "wan-cards": "2,0" }, { leaseDevicesFn: () => held }), "in the other order");
+  assert.throws(() => planWith({ "wan-cards": "0,2" }, { leaseDevicesFn: () => ["gpu-aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee", "gpu-bbbb2222-cccc-dddd-eeee-ffffffffffff"] }),
+    /--wan-cards names idx 2, which the GPU lease does not hold.*the lease is the authority/);
+  assert.throws(() => planWith({ "wan-cards": "0,2" }, { leaseDevicesFn: () => ["gpu-bbbb2222", "gpu-dddd4444"] }), /does not hold/);
+  // no lease: --wan-cards is the caller's word, as before
+  const p = planWith({ "wan-cards": "0,2" }, { leaseDevicesFn: () => [], env: {} });
+  assert.deepEqual([p.pair.storage.index, p.pair.compute.index], [0, 2]);
+  // a dangling or empty flag names no card and is not skipped for the lease
+  for (const bad of [undefined, "", " , "]) assert.throws(() => M.wanCardTokens({ flags: { "wan-cards": bad }, env: {}, leaseDevicesFn: () => held }), /--wan-cards needs/, JSON.stringify(bad));
+});
+
+test("a token that names no card says how to name one", () => {
+  assert.throws(() => M.resolveWanCards({ tokens: ["0", "7"], source: "--wan-cards", cards: CARDS }), /"7".*no card in the driver's table.*name the card by its nvidia-smi index or its UUID/);
+});
+
+test("a card whose display state the driver did not report is refused, never taken for a screenless one", () => {
+  const cards = M.parseCardTable([`0, ${U0}, A, 16311, 16000, Disabled, No`, `2, ${U2}, A, 16311, 16000, [N/A], [Not Supported]`].join("\n"));
+  assert.throws(() => M.resolveWanCards({ tokens: ["0", "2"], source: "the GPU lease", cards }), /cannot tell whether idx 2 \(A\) drives a display.*display_active \[N\/A\], display_attached \[Not Supported\]/);
+  // the six-column fallback (a driver that lacks display_attached) leaves it unknown too: a monitor on a sleeping card says Disabled
+  const six = M.parseCardTable(`0, ${U0}, A, 16311, 16000, Disabled\n2, ${U2}, A, 16311, 16000, Disabled`);
+  assert.throws(() => M.resolveWanCards({ tokens: ["0", "2"], source: "the GPU lease", cards: six }), /cannot tell whether idx 0/);
+  // a known card beside an unknown one that is not chosen is fine
+  assert.doesNotThrow(() => M.resolveWanCards({ tokens: ["0", "2"], source: "t", cards: [...CARDS, ...M.parseCardTable(`3, ${U1}, A, 100, 50, [N/A], [N/A]`)] }));
+});
+
+test("a row without a numeric size is no card, so a size check can never pass on NaN", () => {
+  assert.deepEqual(M.parseCardTable(`0, ${U0}, A, [N/A], 50, Disabled, No\n2, ${U2}, A, 16311, [N/A], Disabled, No`).map((c) => c.index), [2], "a size that is not a number drops the card");
+  assert.equal(M.parseCardTable(`2, ${U2}, A, 16311, [N/A], Disabled, No`)[0].freeMiB, 0, "a free column that is not a number is 0");
+});
+
+test("--wan-resident-gb above what the compute card can hold beside the activations is refused with the numbers", () => {
+  assert.equal(planWith({ "wan-resident-gb": "12" }).residentGb, 12, "15.9 GiB card - 3.5 = 12.4 GiB at most");
+  assert.throws(() => planWith({ "wan-resident-gb": "13" }), /--wan-resident-gb 13 .*compute card .*idx 0.*15\.9 GiB.*at most 12\.4/);
+  assert.throws(() => planWith({ "wan-resident-gb": "40" }), /--wan-resident-gb 40/);
+});
+
+test("portNote names the port a multicard instance falls back to when no --api or COMFY_API gives it one", () => {
+  assert.match(M.portNote({}, {}, "http://127.0.0.1:8189"), /no --api or COMFY_API.*127\.0\.0\.1:8189.*--api http:\/\/127\.0\.0\.1:<port>/);
+  assert.equal(M.portNote({ api: "http://127.0.0.1:18852" }, {}, "http://127.0.0.1:18852"), "");
+  assert.equal(M.portNote({}, { COMFY_API: "http://127.0.0.1:18852" }, "http://127.0.0.1:18852"), "");
+});
+
+test("packDirs keeps the reason a custom_nodes listing failed", () => {
+  assert.throws(() => M.packDirs("/c", () => { throw new Error("EACCES: nope"); }), /no comfyui-multigpu pack.*EACCES: nope/s);
 });

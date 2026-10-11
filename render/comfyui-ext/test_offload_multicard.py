@@ -99,7 +99,7 @@ class ReadOnlyReader(unittest.TestCase):
         load_pack()
         state = utils.load_torch_file(self.path)
         refs = getattr(state["a.weight"].untyped_storage(), "_offload_ro_refs")
-        handle, mapped, view = refs
+        mapped, view = refs
         self.assertFalse(view.readonly is False, "the map is read-only")
         with self.assertRaises((TypeError, ValueError)):
             mapped[0:1] = b"x"  # a write through the map is refused
@@ -114,6 +114,40 @@ class ReadOnlyReader(unittest.TestCase):
         self.assertEqual(utils.load_torch_file(self.path, device=torch.device("cuda", 0)), "ORIGINAL", "a load straight to a card")
         self.assertEqual([c[0] for c in utils.calls], ["model.ckpt", self.path])
         self.assertIsInstance(utils.load_torch_file(self.path, device=torch.device("cpu")), dict, "an explicit CPU load is ours")
+
+    def _reader(self):
+        os.environ["OFFLOAD_RO_LOAD"] = "1"
+        self.addCleanup(os.environ.pop, "OFFLOAD_RO_LOAD", None)
+        utils, _ = stub_comfy()
+        load_pack()
+        return utils
+
+    def test_a_truncated_file_is_a_clear_error_not_a_torch_shape_error(self):
+        utils = self._reader()
+        raw = open(self.path, "rb").read()
+        cut = os.path.join(self.dir.name, "cut.safetensors")
+        with open(cut, "wb") as fh:
+            fh.write(raw[:-8])
+        with self.assertRaises(ValueError) as ctx:
+            utils.load_torch_file(cut, return_metadata=True)
+        message = str(ctx.exception)
+        self.assertIn("cut.safetensors", message)
+        self.assertIn("truncated", message)
+        self.assertIn("data section", message)
+
+    def test_a_header_whose_byte_range_disagrees_with_its_shape_is_a_clear_error(self):
+        utils = self._reader()
+        header = json.dumps({"w": {"dtype": "F32", "shape": [4], "data_offsets": [0, 8]}}).encode()
+        bad = os.path.join(self.dir.name, "bad.safetensors")
+        with open(bad, "wb") as fh:
+            fh.write(len(header).to_bytes(8, "little") + header + bytes(8))
+        with self.assertRaises(ValueError) as ctx:
+            utils.load_torch_file(bad)
+        message = str(ctx.exception)
+        self.assertIn("bad.safetensors", message)
+        self.assertIn("'w'", message)
+        self.assertIn("16 bytes", message)
+        self.assertIn("8 bytes", message)
 
     def test_a_pack_that_cannot_install_its_reader_fails_to_import(self):
         os.environ["OFFLOAD_RO_LOAD"] = "1"
