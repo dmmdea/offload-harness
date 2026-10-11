@@ -375,6 +375,8 @@ holds the queued one, and asserts that it landed so; register C-77).
 | `pair_seat_activity_enabled` | `false` | fleet-serve reports DIRECT traffic on this box's vLLM seats (see *Seat activity* below). Enable on every box that **serves** a vLLM seat; independent of `pair_workloads_enabled` |
 | `pair_node_info_url` | `""` = `http://127.0.0.1:14318/v1/node-info`, except where `OFFLOAD_PAIR_APPDIR` is set | PAIR's loopback node-info, read for this node's UUID only when `node-id.json` is missing or unreadable (*Identity when the harness user is not PAIR's user*). Loopback only: any other host fails the config load naming the key |
 | `pair_workloads_relay` | absent = `auto` | where this box's frames go when it has **no** PAIR identity (*The card relay*): `auto` / absent = every `delegate_remotes` base whose health advertises `pair_relay`; `"off"` = no relay; other entries = explicit member base URLs. Each entry is validated like `delegate_remotes`. The bearer is `fleet_auth_token` |
+| env `LOCAL_OFFLOAD_RUN_CLASS` | unset = production | a process that sets a non-production class (`bake`, `measurement`, `test`, or a label of the operator's) **opens no card** and asks no fleet node to card its jobs (it sends no `X-Offload-Pair-Card`, where an ordinary disabled asker sends `node`); a class-prefixed `LOCAL_OFFLOAD_ORIGIN` (`bake:run-7`) does the same (register F48). `production` sets nothing. The `go-test` origin labels ledger rows only: the repo's own tests point their emitters at fixtures |
+| env `LOCAL_OFFLOAD_PAIR_TEST_CARDS` | unset | any value keeps the cards of a labelled run, for the operator testing PAIR itself |
 | env `OFFLOAD_PAIR_APPDIR` | platform default | PAIR's app-data dir when it is not at `%LOCALAPPDATA%\Nvidia Corporation\Personal AI Router` (Windows) / `~/.config/Nvidia Corporation/Personal AI Router` (Linux); tests use it |
 
 ## Identity when the harness user is not PAIR's user
@@ -749,8 +751,35 @@ A real check is one `agent_delegate` from a fresh MCP session with the key on: t
 appears in PAIR's Jobs list on this box **and** on the node that ran it, reading
 "Requested from <this box> / Ran on <node>" with the seat as the model name.
 
+## Test, bake and measurement runs open no card (register F48)
+
+A bake and a measurement run are not work the operator wants on the Jobs list: 42 cards for a seat named `bake` that
+no endpoint served (`agent seat "bake" is not in the endpoint's served roster`, connection refused on the bake's own
+port) sat among the real ones in 48 hours. Three rules, one per way a run says what it is:
+
+1. **A process with a run class has no emitter.** `FromConfig` turns `Enabled` off when `ledger.RunClassFromEnv`
+   (the rule `Record` stamps rows with, read without the process-table walk `OriginFromEnv` does: `FromConfig` runs on every request) resolves a class (`LOCAL_OFFLOAD_RUN_CLASS`, or a `bake:` / `test:` / `measurement:` origin), so the
+   delegation cards, the call cards, the ledger observer, the remote-call cards and the node cards of that process
+   all go quiet through the one gate they already use. `Config.Suppressed` records why it is off.
+2. **A suppressed asker asks nobody to card its jobs.** An asker with no emitter sends `X-Offload-Pair-Card: node` and
+   the serving node cards the job (D7); sent from a bake, that would put the card back on the node. `SetWireHeaders`
+   sends the asker name and no card header when the emitter is suppressed, which a node reads as "the asker cards
+   it".
+3. **A call can declare itself.** A delegation pinned with `pin_reason: measurement` opens no card
+   (`runner.cardless`), and the ledger observer cards no row whose `ledger.ClassOf` is set (the measure door, a
+   measurement pin, a go-test escape).
+
+`LOCAL_OFFLOAD_PAIR_TEST_CARDS=1` keeps the cards of a labelled run. `fleet-smoke` is deliberately unchanged: it is
+the harness's Test traffic button and exists to show a card. The `go-test` origin is **not** a process class
+(`TestFromConfigOpensNoCardsForANonProductionRun`): the delegate and root suites build real emitters against
+fixture ingresses and assert their frames.
+
 ## Failure modes
 
+- **A bake or measurement run has a card**: its process has no class (set `LOCAL_OFFLOAD_RUN_CLASS=bake` where the
+  tool starts it), or `LOCAL_OFFLOAD_PAIR_TEST_CARDS` is set. A run that dispatches to a fleet node opens no card
+  there either: its asker sends no `X-Offload-Pair-Card`. The label does not ride the wire (yet), so the NODE's own
+  ledger row for that work carries no `run_class`.
 - **Two cards for one job**: the in-flight and terminal frames named different
   models/engines. Source 1 pins the identity on the `PlacedResult` for exactly this reason;
   a new emit site must reuse `pairInflight` / `pairTerminal`, never build its own frame.

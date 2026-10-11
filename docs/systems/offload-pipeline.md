@@ -272,7 +272,13 @@ upstream: an alone call that dies that way reads as no speech.
   stamped at each door, carried through `core.Meta` and mapped onto the row, so "which door produced
   this cascade call" stops being unanswerable. It is documentary and never routes; a forwarded request
   keeps its origin door, and agent-contract rows carry the contract's door (`agent_delegate`, `offload_ask`, `offload_review_diff`, `offload_research`, `cli:delegate`, `cli:research`, or `fleet` for a contract a node received with none) and the composite sub-calls (extract_image's ocr + extract, inpaint's text-box vqa) keep their parent's; a row with no `door` (every row before the door stamp) reads as UNKNOWN door,
-  never as one of the values above.
+  never as one of the values above. Since register F48 (job-error class C23) a row also carries `run_class` when it
+  was not real work (`test`, `bake`, `measurement`, or an operator label from `LOCAL_OFFLOAD_RUN_CLASS`; absent is
+  production): `Record` settles it beside the origin (`ledger.settleRunClass`, the process class, a test binary's
+  escape from its throwaway directory, then what the row declares: `pin_reason: measurement`, the measure and smoke
+  doors, the `go-test` origin), and every summary (`ledger.SummarizeFile`, `TopDeferReasons`, `loupe`, `stats`,
+  `audit-sample`, the training readers) skips those rows by default and reports the jobs it skipped
+  (`Summary.ExcludedNonProduction`); `SummarizeFileWith(..., true)` and `--include-test-traffic` count them.
 - **Cache** — keyed result reuse. Bypassed on the *recordless* path (`NewRecordlessPipeline`);
   **shared** on the *in-loop* path (`NewInLoopPipeline`) — see Interfaces below for why those are two
   different things.

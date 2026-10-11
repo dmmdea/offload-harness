@@ -212,6 +212,46 @@ reader that counts rows must skip it. A per-session share is one filter away:
 `grep '"origin_session":"<session id>"' ~/.local-offload/ledger.jsonl`. Rows written before 0.124.0
 carry none of these and must be read as unattributed, not as another session's.
 
+**Test, bake and measurement traffic is labelled and kept off the production views** (register F48, job-error
+class C23). A row carries `run_class` when the run that wrote it was not real work: `test`, `bake`,
+`measurement`, or a label your tool chose. An unlabelled row is production, so every ordinary row is
+byte-identical to before. `Record` settles the class on the one path every writer takes, from (first match):
+
+1. what the writer set on the row;
+2. the process: `LOCAL_OFFLOAD_RUN_CLASS=bake` (any lower-case `[a-z0-9_-]` label up to 32 bytes; `production` sets
+   nothing), or an origin of the form `bake:run-7` / `test:...` / `measurement:...` in `LOCAL_OFFLOAD_ORIGIN`.
+   **A bake or measurement tool sets one of these once, and everything it runs is labelled**;
+3. a test binary that opened a ledger outside its own throwaway directory (`test`; this is how test rows reached
+   the real ledger on 2026-10-03 and 2026-10-08);
+4. what the row says itself: a call pinned with `pin_reason: measurement`, the `cli:fleet-measure` door
+   (`measurement`), the `cli:fleet-smoke` door, the `go-test` origin the repo's own suites set (`test`; rows
+   written before the label existed read the same way).
+
+Nothing is guessed from a seat name. A seat that is not in the served roster is a real misconfiguration (a
+mistyped `agent_model` fails exactly like a bake's fixture seat) and stays on every view; a bake that wants to be
+off them says so with the variable.
+
+`ledger`, `loupe`, `stats` and `audit-sample` leave the labelled jobs out by default and **say how many they
+left out**: `ledger` adds `"excluded_non_production": {"bake": 40, "test": 3}` to its JSON and a `left out:`
+line, `loupe` the same field and line, `stats` and `audit-sample` a note on stderr (their stdout keeps its
+shape). `--include-test-traffic` counts them again. The inner `agent` row of a labelled job is left out with its
+parent. `confhead-eval`, `confhead-calibrate`, `train-confhead`, `calibrate`, `health` and `train-router` read
+production rows only, since a fixture's margin would move the live thresholds. The raw reader
+(`ledger.ReadAll`) still returns every row.
+
+On PAIR, a process with a class opens **no card** and asks no fleet node to card its jobs, and a delegation
+pinned for `measurement` opens none. `LOCAL_OFFLOAD_PAIR_TEST_CARDS=1` keeps the cards of a labelled run (to test
+PAIR itself). `fleet-smoke` keeps its card: it is the check that cards work.
+
+```powershell
+$env:LOCAL_OFFLOAD_RUN_CLASS = "bake"        # everything this shell runs is a bake: labelled rows, no PAIR card
+local-offload ledger --since 2                # production only, with "excluded_non_production"
+local-offload ledger --since 2 --include-test-traffic
+```
+
+The harness-share gate and any other reader that sums the ledger itself should skip rows whose `run_class` is
+set (and, for rows written before the label, whose `origin_session` is `go-test`).
+
 | Failure | Fix |
 |---|---|
 | every call `deferred:true` | Run `doctor`. Usually the endpoint is down or unreachable. A defer on genuinely hard/over-long input is by design. |
