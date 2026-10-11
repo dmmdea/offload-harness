@@ -52,7 +52,9 @@ import { dirname } from "node:path";
 import { writeFileAtomic } from "./atomic-out.mjs";
 import { withGpuSlot } from "./gpu-lock.mjs";
 import { familySignature } from "./comfy-family.mjs";
-import { comfyApi } from "./comfy-lifecycle.mjs";
+import { COMFY_DIR, comfyApi } from "./comfy-lifecycle.mjs";
+import { planImageMulticard, lifecycleOptions, verifyImagePlacement, imagePlacementMode } from "./multicard-image.mjs";
+import { findRecipe, RecipeRefusal } from "./multicard-recipes.mjs";
 import { buildHiDreamO1 } from "./wf-hidream-o1.mjs";
 import { buildKrea2 } from "./wf-krea2.mjs";
 import { buildQwenImage, QWEN_IMAGE_PRESETS } from "./wf-qwen-image.mjs";
@@ -111,7 +113,7 @@ export function parseRenderArgs(argv) {
  * Pure apart from reading --graph from disk; caller mistakes throw UsageError. Returns
  * { graph, seed, width, height } (width/height as they will actually render).
  */
-export function buildRenderGraph({ pos, flags, env = process.env, random = Math.random }) {
+export function buildRenderGraph({ pos, flags, env = process.env, random = Math.random, multicard }) {
   let graph;
   let seed = Number(pos[2] || flags.seed || Math.floor(random() * 1e15));
   let width = Number(pos[3] || flags.width || 1024);
@@ -119,6 +121,23 @@ export function buildRenderGraph({ pos, flags, env = process.env, random = Math.
 
   if (!flags.graph && flags.family !== undefined && flags.family !== "" && !KNOWN_FAMILIES.includes(flags.family)) {
     throw new UsageError(`error: unknown --family '${flags.family}' (known: ${KNOWN_FAMILIES.join(", ")}; omit it for the generic SDXL graph) — refusing to render a different model family than the one bound`);
+  }
+
+  // --placement single (today's graph, the default) | multicard (the card-only recipe of render/multicard-recipes.mjs). The plan (the two cards
+  // and their launch) is made by the runner before it gets here; a graph is never built as "multicard" without one, and never as single.
+  let placement;
+  try { placement = imagePlacementMode(flags); } catch (e) { throw new UsageError("error: " + e.message); }
+  let residentGb;
+  if (placement === "multicard") {
+    if (flags.graph) throw new UsageError("error: --placement multicard places the graphs this runner builds; --graph posts your own workflow, which it does not touch");
+    if (!multicard) throw new UsageError("error: --placement multicard needs the plan the runner makes before it builds a graph (the two cards and their launch); a direct call of buildRenderGraph has none");
+    try {
+      findRecipe({ route: "image", family: flags.family, unet: flags.ckpt || env.COMFY_CKPT, clip: flags.clip });
+    } catch (e) {
+      if (e instanceof RecipeRefusal) throw new UsageError("error: " + e.message);
+      throw e;
+    }
+    residentGb = multicard.residentGb ?? undefined;
   }
 
   if (flags.graph) {
@@ -237,6 +256,7 @@ export function buildRenderGraph({ pos, flags, env = process.env, random = Math.
       sampler: flags.sampler || undefined, scheduler: flags.scheduler || undefined,
       shift: flags.shift != null ? Number(flags.shift) : undefined,
       width, height, seed,
+      ...(placement === "multicard" ? { placement, residentGb } : {}),
     });
   } else if (flags.family === "qwen-image-2.1") {
     // Qwen-Image-2.1 (wf-qwen-image-21.mjs): a different model from 2512 — Qwen3-VL-8B
@@ -286,6 +306,7 @@ export function buildRenderGraph({ pos, flags, env = process.env, random = Math.
       sampler: flags.sampler || undefined, scheduler: flags.scheduler || undefined,
       schedule, transparent,
       width, height, seed,
+      ...(placement === "multicard" ? { placement, residentGb } : {}),
     });
   } else {
     const positive = pos[1] || flags.prompt || "";
@@ -370,7 +391,10 @@ const firstImage = (outputs) => {
 // node_errors verbatim, run-row provenance) with raw POST as the byte-identical
 // fallback; polling keeps the dead-server watchdog + suspend/resume fence documented
 // there (2026-07-30 incident class).
-async function generate(out, API, built, flags) {
+async function generate(out, API, built, flags, placement) {
+  // The card-only placement: the running ComfyUI's own cards must be the pinned pair and the harness's pack must have loaded, before
+  // anything is posted (the same check the Wan runner makes; a mismatch submits nothing).
+  if (placement) await verifyImagePlacement(API, placement);
   const { graph, seed, width, height } = built;
   const cli = resolveCli();
   const { promptId } = await submitGraph({ api: API, graph, clientId: "render-" + seed, cli });
@@ -402,7 +426,13 @@ async function generate(out, API, built, flags) {
 async function main() {
   const { pos, flags } = parseRenderArgs(process.argv.slice(2));
   const out = pos[0];
-  const API = comfyApi(flags.api);
+  // The card-only placement is planned first: it refuses, before anything is launched, every request it cannot honour (no recipe, no cards
+  // named, not two, a display card). Its own environment names the instance, so the api and the lease slot read it too.
+  let placement = null;
+  try {
+    placement = planImageMulticard({ route: "image", family: flags.family, unet: flags.ckpt || process.env.COMFY_CKPT, clip: flags.clip, flags, comfyDir: COMFY_DIR, isGraph: !!flags.graph, say: (m) => console.error(m) });
+  } catch (e) { console.error("PLACEMENT REFUSED: " + e.message); process.exit(2); }
+  const API = comfyApi(flags.api, placement ? placement.env : process.env);
   if (!out) { console.error('usage: node comfy-render.mjs <out.png> "<prompt>" [seed] [w] [h] [flags]   |   <out.png> --graph wf.json'); process.exit(2); }
   // Create the output parent UP-FRONT: a bad path must fail in 0s, not after the
   // render — an ENOENT at the write site used to discard a finished image after
@@ -412,7 +442,7 @@ async function main() {
   // Build the graph: either the caller's full workflow, or a family / SDXL graph.
   let built;
   try {
-    built = buildRenderGraph({ pos, flags });
+    built = buildRenderGraph({ pos, flags, multicard: placement });
   } catch (e) {
     if (e instanceof UsageError) { console.error(e.message); process.exit(2); }
     throw e;
@@ -424,7 +454,7 @@ async function main() {
     // already-running server, render, done. No withGpuSlot here, so a batch
     // session's warm ComfyUI is never torn down between jobs.
     await waitServer(API);
-    await generate(out, API, built, flags);
+    await generate(out, API, built, flags, placement);
     return;
   }
   // Standalone invocation (gap: this runner used to REQUIRE an already-running
@@ -436,8 +466,9 @@ async function main() {
   // GPU slot, tear down after.
   await withGpuSlot(
     { noLock: flags["no-lock"], keepComfy: flags["keep-comfy"], comfyManaged: true, api: API, reserveVram: flags["reserve-vram"],
-      family: familySignature(flags.family || "sdxl", flags.ckpt || process.env.COMFY_CKPT) },
-    () => generate(out, API, built, flags),
+      family: familySignature(flags.family || "sdxl", flags.ckpt || process.env.COMFY_CKPT),
+      ...lifecycleOptions(placement) },
+    () => generate(out, API, built, flags, placement),
   );
 }
 

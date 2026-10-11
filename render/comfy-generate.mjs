@@ -29,7 +29,8 @@ import { spawn } from "node:child_process";
 import { readFileSync, writeFileSync, appendFileSync, mkdirSync } from "node:fs";
 import { withGpuSlot } from "./gpu-lock.mjs";
 import { familySignature } from "./comfy-family.mjs";
-import { comfyApi } from "./comfy-lifecycle.mjs";
+import { COMFY_DIR, comfyApi } from "./comfy-lifecycle.mjs";
+import { planImageMulticard, lifecycleOptions } from "./multicard-image.mjs";
 import { parseJobs, jobArgs, runBatchJobs, renderExitError, batchExitCode, batchEndLine, JOB_PARAM_FLAGS, SHARED_BINDING_FLAGS } from "./batch-jobs.mjs";
 import { leaseBeat } from "./lease-progress.mjs";
 
@@ -44,7 +45,14 @@ for (let i = 0; i < argv.length; i++) {
   } else pos.push(argv[i]);
 }
 const out = pos[0], prompt = pos[1];
-const API = comfyApi(flags.api);
+// The card-only placement (--placement multicard, render/multicard-image.mjs) is planned before anything starts: a recipe it does not have, no
+// cards named, not two, a display card are refusals here (exit 2), not a lease spent and a ComfyUI cold-started. Its environment names the pair's
+// own instance, so the api and the lease slot read it; the render child gets the same flags and verifies the pair before it submits.
+let placement = null;
+try {
+  placement = planImageMulticard({ route: "image", family: flags.family, unet: flags.ckpt || process.env.COMFY_CKPT, clip: flags.clip, flags, comfyDir: COMFY_DIR, isGraph: !!flags.graph, say: (m) => console.error(m) });
+} catch (e) { console.error("PLACEMENT REFUSED: " + e.message); process.exit(2); }
+const API = comfyApi(flags.api, placement ? placement.env : process.env);
 
 // Delegate the actual render to the proven comfy-render.mjs (ComfyUI is up now — THIS
 // file's own withGpuSlot, below, already booted/confirmed it). comfy-render reads
@@ -90,7 +98,8 @@ if (flags.batch) {
   writeFileSync(resultsPath, "");
   withGpuSlot(
     { noLock: flags["no-lock"], keepComfy: flags["keep-comfy"], comfyManaged: true, api: API, reserveVram: flags["reserve-vram"], warm: true,
-      family: familySignature(flags.family || "sdxl", flags.ckpt || process.env.COMFY_CKPT) },
+      family: familySignature(flags.family || "sdxl", flags.ckpt || process.env.COMFY_CKPT),
+      ...lifecycleOptions(placement) },
     () => runBatchJobs({
       jobs,
       runJob: (job) => runRenderArgs(jobArgs(job, sharedFlags)),
@@ -117,7 +126,8 @@ if (flags.batch) {
   }
   withGpuSlot(
     { noLock: flags["no-lock"], keepComfy: flags["keep-comfy"], comfyManaged: true, api: API, reserveVram: flags["reserve-vram"],
-      family: familySignature(flags.family || "sdxl", flags.ckpt || process.env.COMFY_CKPT) },
+      family: familySignature(flags.family || "sdxl", flags.ckpt || process.env.COMFY_CKPT),
+      ...lifecycleOptions(placement) },
     () => runRenderArgs(jobArgs({ out, prompt }, sharedFlags)),
   ).catch((e) => { console.error("IMAGE GEN FAILED:", e.message); process.exit(1); });
 }

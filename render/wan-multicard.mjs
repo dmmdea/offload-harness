@@ -48,13 +48,13 @@ const OWN_FLAGS = Object.freeze(["wan-placement", "wan-resident-gb", "wan-cards"
  * the placement's own flags spelled with '=', and any other flag spelled with '=' that swallowed one of ours as its value
  * (`--seed=7 --wan-placement multicard`). A `=` key that swallowed something else is none of this placement's business and passes.
  */
-export function refuseEqualsSpelling(flags) {
+export function refuseEqualsSpelling(flags, ownFlags = OWN_FLAGS) {
   for (const [key, value] of Object.entries(flags || {})) {
-    const own = OWN_FLAGS.find((f) => key.startsWith(f + "="));
+    const own = ownFlags.find((f) => key.startsWith(f + "="));
     if (own) {
       throw new Error(`--${key} is spelled with '=', which this runner's parser does not split (it reads the whole thing as one flag name, takes the next flag as its value, and the call would run the single-card placement): write --${own} ${key.slice(own.length + 1)}`);
     }
-    const lost = typeof value === "string" ? OWN_FLAGS.find((f) => value === "--" + f) : undefined;
+    const lost = typeof value === "string" ? ownFlags.find((f) => value === "--" + f) : undefined;
     if (lost) {
       throw new Error(`--${key} took --${lost} as its value (this runner's parser does not split '=': a flag spelled --name=value swallows the flag after it), so the placement's own flag would be lost and the call would run the single-card placement: write each flag as --name value`);
     }
@@ -143,13 +143,13 @@ export function queryCards(spawnSync = nodeSpawnSync) {
  * Returns { tokens, source } and no tokens when nothing says. A --wan-cards that names no card (dangling or empty) is refused,
  * not skipped: a caller who typed it meant something.
  */
-export function wanCardTokens({ flags = {}, env = process.env, leaseDevicesFn = leaseDevices } = {}) {
+export function wanCardTokens({ flags = {}, env = process.env, leaseDevicesFn = leaseDevices, cardsFlag = "wan-cards" } = {}) {
   const split = (s) => String(s || "").split(",").map((t) => t.trim()).filter(Boolean);
-  const given = split(flags["wan-cards"]);
-  if ("wan-cards" in flags && given.length === 0) {
-    throw placementError(`--wan-cards needs <card>,<card> (nvidia-smi indices or UUIDs), got ${JSON.stringify(flags["wan-cards"])}`);
+  const given = split(flags[cardsFlag]);
+  if (cardsFlag in flags && given.length === 0) {
+    throw placementError(`--${cardsFlag} needs <card>,<card> (nvidia-smi indices or UUIDs), got ${JSON.stringify(flags[cardsFlag])}`);
   }
-  if (given.length) return { tokens: given, source: "--wan-cards" };
+  if (given.length) return { tokens: given, source: "--" + cardsFlag };
   const held = leaseDevicesFn(env);
   if (held.length) return { tokens: held, source: "the GPU lease" };
   const visible = split(env.CUDA_VISIBLE_DEVICES).filter((t) => /^GPU-/i.test(t));
@@ -172,9 +172,9 @@ function matchCard(token, cards) {
  * exactly two distinct cards, when a token names no card of the driver's table, or when a card drives a display.
  * Roles: the larger card is the compute card (cuda:1); equal cards keep the order the caller gave (the second computes).
  */
-export function resolveWanCards({ tokens, source, cards }) {
+export function resolveWanCards({ tokens, source, cards, cardsFlag = "wan-cards" }) {
   if (!tokens || tokens.length === 0) {
-    throw placementError("the multicard placement needs the two cards it runs on, and none was named: run it under `local-offload gpu reserve --devices <card>,<card>` (the lease names them), or pass --wan-cards <card>,<card>");
+    throw placementError(`the multicard placement needs the two cards it runs on, and none was named: run it under \`local-offload gpu reserve --devices <card>,<card>\` (the lease names them), or pass --${cardsFlag} <card>,<card>`);
   }
   const found = [];
   for (const token of tokens) {
@@ -200,13 +200,17 @@ export function resolveWanCards({ tokens, source, cards }) {
 
 // ---- the ComfyUI launch ---------------------------------------------------------------------------
 
-/** packDirs finds the custom-node folders a multicard launch must load, by name, in the install's custom_nodes. */
-export function packDirs(comfyDir, list = (d) => readdirSync(d, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name)) {
+/** The packs the image and edit recipes load (render/multicard-image.mjs), besides the harness's own. */
+export const PACK_MULTIGPU = Object.freeze({ match: "comfyui-multigpu", why: "the DisTorch2 and MultiGPU loaders" });
+export const PACK_GGUF = Object.freeze({ match: "comfyui-gguf", why: "the GGUF unet loader the DisTorch2 GGUF loader wraps" });
+
+/** packDirs finds the custom-node folders a multicard launch must load, by name, in the install's custom_nodes (the Wan pair by default). */
+export function packDirs(comfyDir, list = (d) => readdirSync(d, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name), required = REQUIRED_PACKS) {
   const dir = join(comfyDir, "custom_nodes");
   let names, why = "";
   try { names = list(dir); } catch (e) { names = []; why = ` (the listing failed: ${e && e.message ? e.message : e})`; }
   const out = [];
-  for (const need of REQUIRED_PACKS) {
+  for (const need of required) {
     const hit = names.find((n) => n.toLowerCase() === need.match);
     if (!hit) throw placementError(`ComfyUI has no ${need.match} pack in ${dir}${why} (${need.why}); the multicard placement needs it`);
     out.push(hit);
@@ -330,12 +334,12 @@ function checkResident(residentGb, pair, flags) {
   }
 }
 
-/** confirmWithLease: --wan-cards may name the two cards when no lease does; when a lease holds cards it can only confirm them. */
-function confirmWithLease(pair, held) {
+/** confirmWithLease: --wan-cards (or the image runners' --cards) may name the two cards when no lease does; when a lease holds cards it can only confirm them. */
+export function confirmWithLease(pair, held, cardsFlag = "wan-cards") {
   if (!held || held.length === 0) return;
   const outside = [pair.storage, pair.compute].filter((c) => !held.some((id) => matchCard(id, [c]) === c));
   if (outside.length) {
-    throw placementError(`--wan-cards names idx ${outside.map((c) => c.index).join(", ")}, which the GPU lease does not hold (it holds ${held.join(", ")}): the lease is the authority on which cards this run may touch, so --wan-cards can only confirm them`);
+    throw placementError(`--${cardsFlag} names idx ${outside.map((c) => c.index).join(", ")}, which the GPU lease does not hold (it holds ${held.join(", ")}): the lease is the authority on which cards this run may touch, so --${cardsFlag} can only confirm them`);
   }
 }
 
@@ -344,9 +348,9 @@ function confirmWithLease(pair, held) {
  * the port the per-card instances use too). A ComfyUI already holding it stops the run, closed (COMFY-PORT-TAKEN / COMFY-PROFILE-MISMATCH),
  * so the caller is told which port it got and how to pick its own. "" when the caller gave one.
  */
-export function portNote(flags, env, api) {
+export function portNote(flags, env, api, label = "wan-placement") {
   if ((flags && flags.api) || (env && env.COMFY_API)) return "";
-  return `wan-placement: no --api or COMFY_API was given, so the multicard instance falls back to ${api}; a ComfyUI already holding that port stops the run (COMFY-PORT-TAKEN or COMFY-PROFILE-MISMATCH): give it its own port with --api http://127.0.0.1:<port>`;
+  return `${label}: no --api or COMFY_API was given, so the multicard instance falls back to ${api}; a ComfyUI already holding that port stops the run (COMFY-PORT-TAKEN or COMFY-PROFILE-MISMATCH): give it its own port with --api http://127.0.0.1:<port>`;
 }
 
 /**
