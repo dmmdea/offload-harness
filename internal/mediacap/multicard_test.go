@@ -14,7 +14,7 @@ import (
 type recipeFile struct {
 	Rows []struct {
 		ID, Route, Family, Quant, UnetMatch, ClipMatch, DefaultClip, Basis, LoraLoader, Blocked string
-		Unet                                                                           struct {
+		Unet                                                                                    struct {
 			Loader     string
 			ResidentGb float64
 		}
