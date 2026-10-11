@@ -328,7 +328,7 @@ func TestRunLocalCapacityDeferStaysADeferWhenNothingElseHasRoom(t *testing.T) {
 func TestReplacementDoesNotLandOnAFullLocalSeat(t *testing.T) {
 	compressPolls(t, 5*time.Millisecond, time.Second)
 	compressWait(t, 20*time.Millisecond, 0)
-	_, url := refusingNode(t, "node-full", http.StatusServiceUnavailable, nil)
+	full, url := refusingNode(t, "node-full", http.StatusServiceUnavailable, nil)
 	cfg := testCfg(t)
 	cfg.GPULockPath = busyLocalAsHolder(t) // a media lease: the local seat is "busy", so route=auto asks the remote first
 	cfg.FleetMaxConcurrentJobs = 1
@@ -339,8 +339,24 @@ func TestReplacementDoesNotLandOnAFullLocalSeat(t *testing.T) {
 		t.Fatal("fixture: could not register a run on the local seat")
 	}
 	var freedAt, ranAt atomic.Int64
+	// The slot frees once the capacity wait is under way: the node was refused (a dispatch) and the wait
+	// has re-read its health three times since. A fixed 300 ms sleep freed it before a loaded box had even
+	// reached the refusal, and the run then took the seat with no wait to name (register F66).
 	go func() {
-		time.Sleep(300 * time.Millisecond)
+		for full.dispatches.Load() < 1 {
+			select {
+			case <-t.Context().Done():
+				return
+			case <-time.After(time.Millisecond):
+			}
+		}
+		for h0 := full.healths.Load(); full.healths.Load() < h0+3; {
+			select {
+			case <-t.Context().Done():
+				return
+			case <-time.After(time.Millisecond):
+			}
+		}
 		freedAt.Store(time.Now().UnixNano())
 		seatRun.End()
 	}()

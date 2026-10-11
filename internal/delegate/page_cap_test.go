@@ -123,15 +123,16 @@ func TestPageIssueFailedReadsTheRetryOfASeatDownFirstAttempt(t *testing.T) {
 // Each ends as a queue deadline - the fleet's busy day, not the page - so none of
 // them may back the page off.
 func TestPageCapIgnoresQueueDeadlines(t *testing.T) {
-	compressPolls(t, 10*time.Millisecond, 20*time.Millisecond)
-	compressWallUnit(t, 20*time.Millisecond)
+	// The queue-budget clocks (see compressQueueBudget): with a 40 ms budget a first poll that
+	// answered 40 ms late handed the issue to the poll-deadline arm and an empty err (register F66).
+	compressQueueBudget(t)
 	stuck := &fakeNode{
 		t: t, agentEnabled: true, resident: true, ctxTokens: 32768, nodeID: "node-stuck",
 		pollState: func(int64) (map[string]any, int) { return map[string]any{"state": "accepted"}, http.StatusOK },
 	}
 	url := stuck.server().URL
 	c := pageContract(uniquePage("the page behind a busy node"))
-	c.TimeoutSec = 1
+	c.TimeoutSec = 30
 	for issue := 1; issue <= 5; issue++ {
 		results, _, err := Run(t.Context(), testCfg(t), neverLocal(t), []core.AgentContract{c}, "remote", []string{url})
 		if err != nil {
