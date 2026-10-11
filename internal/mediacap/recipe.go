@@ -17,16 +17,20 @@ import (
 // A node that takes another machine's image job should render the SAME image the caller's own lane would have: the
 // same weights, the same sampling. Two nodes can name a family alike and bind different files under it (one node's
 // qwen-image-2.1 is the bf16 DiT and another's is an int8 build), and a name says nothing about a file that was
-// truncated in a copy. So a family is identified by its RECIPE: the weight files it loads, each with its NAME and
-// BYTE SIZE, and the sampling it renders with, digested over RESOLVED values and compared strictly.
+// truncated in a copy. So a family is identified by its RECIPE: the weight files it loads, each with its NAME, BYTE
+// SIZE and CONTENT FINGERPRINT, and the sampling it renders with, digested over RESOLVED values and compared strictly.
 //
 // WHAT THAT CAN AND CANNOT SEE. Name plus size separates builds that differ in size (bf16 against int8 against NVFP4)
-// and catches a truncated copy. It does NOT see content: two files with the same name and the same byte size but
-// different bytes (a full-length corrupted copy, a same-named re-release with the same tensor layout, one node's file
-// updated in place and the other's not) digest alike, and the node's own 412 check recomputes the same size-based
-// digest, so it cannot catch what the published digest cannot. A content fingerprint per weight file (a sha256 cached
-// by path, size and mtime) is the fix and is not built; until it is, a file replaced in place on a node is a case the
-// match does not see.
+// and catches a truncated copy. The fingerprint (fingerprint.go) adds the content: two files of one name and one size
+// whose bytes differ (a same-named re-release with the same tensor layout, a full-length altered copy, one node's file
+// updated in place and the other's not) no longer digest alike, and the node's own 412 check recomputes the same
+// fingerprint from the disk. The fingerprint is a SAMPLE (64 evenly spaced MiB of the file), so it sees a wholesale
+// difference in weights and not a few corrupted bytes between the sample points; fingerprint.go says what it was chosen
+// for and what it measured.
+//
+// A file whose fingerprint is not known yet (still being hashed, or unreadable) is never a match, on either side of the
+// comparison: Unfingerprinted names such files, and a recipe that has any is not an identity. The digest of a recipe
+// built before the fingerprint existed cannot collide with one built after it (RecipeVersion).
 //
 // RESOLVED, not raw. The same render has more than one config spelling: a binding that leaves the scheduler unset
 // gets the builder's own default, and a binding that writes that default out explicitly renders identically. A
@@ -40,7 +44,8 @@ import (
 // overlay's clear list less those; TestRecipeChangesOnEveryRenderKey fails when a key joins that list unclassified.
 
 // RecipeVersion is stamped into the digest, so a change to what a recipe digests can never collide with an older one.
-const RecipeVersion = 1
+// 2: each present weight file carries its content fingerprint (F59).
+const RecipeVersion = 2
 
 // EngineComfyUI is the only engine a recipe is defined for: an sd.cpp binding renders other pixels for the same
 // weights, so a ComfyUI recipe never matches it and a recipe is not built for it.
@@ -54,13 +59,15 @@ const (
 	RecipeRoleLoRA = "lora"
 )
 
-// RecipeFile is one weight file the graph loads: its role, its ComfyUI-relative name and its size on this machine
-// (-1 when it is not found: a recipe with a missing file is never a match). Name and size only: the bytes are not
-// read, so two same-named files of one size are one file as far as a recipe can tell.
+// RecipeFile is one weight file the graph loads: its role, its ComfyUI-relative name, its size on this machine (-1 when
+// it is not found: a recipe with a missing file is never a match) and its content fingerprint (fingerprint.go): a
+// sha256 in hex, FingerprintPending while this machine is still hashing it, FingerprintUnreadable when it could not be
+// read, and absent for a file that is not there. Only a hash is an identity.
 type RecipeFile struct {
-	Role  string `json:"role"`
-	Name  string `json:"name"`
-	Bytes int64  `json:"bytes"`
+	Role        string `json:"role"`
+	Name        string `json:"name"`
+	Bytes       int64  `json:"bytes"`
+	Fingerprint string `json:"fingerprint,omitempty"`
 }
 
 // Recipe is the resolved identity of one image binding.
@@ -171,7 +178,18 @@ func imageRecipeFiles(cfg config.Config) []roledFile {
 // FamilyInfo). roots are the models roots the files are looked up under (ModelRoots of the ComfyUI directory) and
 // stat reads a size (nil = the file system); both are the caller's so a test needs no model tree. ok is false for a
 // binding that is not a ComfyUI one: no recipe is defined for it, and it never matches another.
+//
+// ImageRecipe WAITS for each present file's content fingerprint (SharedFingerprints().Await): it is for the callers that
+// need the answer, the delegator's own recipe and the node's 412 re-check. The node's health must not wait, and uses
+// ImageRecipeWith with Peek.
 func ImageRecipe(cfg config.Config, fi config.FamilyInfo, roots []ModelRoot, stat func(path string) (int64, bool)) (Recipe, bool) {
+	return ImageRecipeWith(cfg, fi, roots, stat, SharedFingerprints().Await)
+}
+
+// ImageRecipeWith is ImageRecipe with the source of the content fingerprints chosen by the caller. A nil fp leaves
+// every present file FingerprintPending, which is never a match: a caller that has no way to read content gets a recipe
+// that cannot be mistaken for an identity.
+func ImageRecipeWith(cfg config.Config, fi config.FamilyInfo, roots []ModelRoot, stat func(path string) (int64, bool), fp FingerprintFunc) (Recipe, bool) {
 	if fi.Engine != "" && fi.Engine != EngineComfyUI {
 		return Recipe{}, false
 	}
@@ -212,11 +230,15 @@ func ImageRecipe(cfg config.Config, fi config.FamilyInfo, roots []ModelRoot, sta
 		}
 	}
 	for _, rf := range imageRecipeFiles(cfg) {
-		size, found := ResolveModelFile(roots, rf.file, stat)
-		if !found {
-			size = -1
+		path, size, found := ResolveModelFilePath(roots, rf.file, stat)
+		file := RecipeFile{Role: rf.role, Name: rf.file.Name, Bytes: -1}
+		if found {
+			file.Bytes, file.Fingerprint = size, FingerprintPending
+			if fp != nil {
+				file.Fingerprint = fp(path, size)
+			}
 		}
-		r.Files = append(r.Files, RecipeFile{Role: rf.role, Name: rf.file.Name, Bytes: size})
+		r.Files = append(r.Files, file)
 	}
 	sort.SliceStable(r.Files, func(i, j int) bool { return r.Files[i].Role < r.Files[j].Role })
 	return r, true
@@ -233,6 +255,40 @@ func (r Recipe) Missing() []string {
 		}
 	}
 	return out
+}
+
+// Unfingerprinted names, with the state each is in, the files that are there but have no content fingerprint yet
+// ("name (pending)", "name (unreadable)"). A recipe that has any is not an identity: it is never a match, on either
+// side of the comparison, and a node publishes no digest for it. Missing files are Missing's, not these.
+func (r Recipe) Unfingerprinted() []string {
+	var out []string
+	for _, f := range r.Files {
+		if f.Bytes >= 0 && !IsFingerprint(f.Fingerprint) {
+			out = append(out, f.Name+" ("+fingerprintState(f.Fingerprint)+")")
+		}
+	}
+	return out
+}
+
+// WithoutContent is the recipe with every file's fingerprint dropped: what it says by name, size and sampling alone. A
+// delegator uses it to tell a node that holds this machine's build but has not finished hashing it (a named wait) from
+// one that holds another build.
+func (r Recipe) WithoutContent() Recipe {
+	r.Files = append([]RecipeFile(nil), r.Files...)
+	for i := range r.Files {
+		r.Files[i].Fingerprint = ""
+	}
+	return r
+}
+
+func fingerprintState(fp string) string {
+	switch {
+	case fp == FingerprintPending || fp == FingerprintUnreadable:
+		return fp
+	case fp == "":
+		return "not published"
+	}
+	return "invalid"
 }
 
 // digestForm is the canonical shape that is hashed: fixed field order, no omitted zero, files in role order.
@@ -299,6 +355,8 @@ func (r Recipe) Diff(o Recipe) []string {
 			d = append(d, fmt.Sprintf("%s: %s vs %s", key, shown(fa.Name), shown(fb.Name)))
 		} else if fa.Bytes != fb.Bytes {
 			d = append(d, fmt.Sprintf("%s: %s is %s vs %s bytes", key, shown(fa.Name), sizeShown(fa.Bytes), sizeShown(fb.Bytes)))
+		} else if fa.Fingerprint != fb.Fingerprint {
+			d = append(d, fingerprintDiff(key, fa, fb))
 		}
 	}
 	str("imagegen_preset", r.Preset, o.Preset)
@@ -317,6 +375,15 @@ func (r Recipe) Diff(o Recipe) []string {
 		d = append(d, fmt.Sprintf("commercial_use: %v vs %v", *r.CommercialUse, *o.CommercialUse))
 	}
 	return d
+}
+
+// fingerprintDiff words a pair of files of one name and one size whose fingerprints differ: other content, or content
+// that cannot be compared because one side has no hash yet.
+func fingerprintDiff(key string, a, b RecipeFile) string {
+	if IsFingerprint(a.Fingerprint) && IsFingerprint(b.Fingerprint) {
+		return fmt.Sprintf("%s: %s has the same size on both and different content (fingerprint %s vs %s)", key, shown(a.Name), a.Fingerprint[:12], b.Fingerprint[:12])
+	}
+	return fmt.Sprintf("%s: %s has the same size on both and its content is not comparable (fingerprint %s vs %s)", key, shown(a.Name), fingerprintState(a.Fingerprint), fingerprintState(b.Fingerprint))
 }
 
 func shown(s string) string {
