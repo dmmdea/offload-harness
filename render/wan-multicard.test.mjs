@@ -508,10 +508,32 @@ test("under multicard a decode that is the tiled one is said to seam, once, and 
   };
   const tiled = await run({});
   assert.equal(tiled.length, 1);
-  assert.match(tiled[0], /tiled decode.*frames 24 and 48.*--wan-decode plain/);
+  assert.match(tiled[0], /tiled decode.*can seam where its tiles meet, in time at frames 24, 48 and 72.*--wan-decode plain/s, "the film's 21 latent frames meet three times");
+  const short = await run({ frames: "29" });
+  assert.equal(short.length, 1);
+  assert.doesNotMatch(short[0], /in time at frame/, "a clip of 8 latent frames decodes in one temporal tile");
   assert.equal((await run({ "wan-decode": "tiled" })).length, 1);
   assert.deepEqual(await run({ "wan-decode": "plain" }), []);
   assert.deepEqual(await run({}, false), [], "the single placement's tiled default is what it always was, and says nothing new");
+});
+
+// ComfyUI's VAEDecodeTiled (nodes.py) reads temporal_size and temporal_overlap in frames and divides both by the Wan VAE's temporal compression 4 (the
+// overlap never under 1 nor over half the tile); tiled_scale_multidim (comfy/utils.py) starts a tile every (tile - overlap) latent frames while the
+// start is under (latent frames - overlap), and writes it at pixel frame 4 x start (sd.py: the Wan VAE's upscale_index_formula is 4). With the
+// builder's 32 / 8 that is tiles of 8 latent frames that overlap by 2: the film's 81 frames are 21 latent frames, starts 0, 6, 12, 18.
+test("tiledSeamFrames reproduces the temporal tiling of VAEDecodeTiled: where one tile meets the next", () => {
+  assert.deepEqual(M.tiledSeamFrames(81), [24, 48, 72], "the film");
+  assert.deepEqual(M.tiledSeamFrames(49), [24], "13 latent frames: starts 0 and 6");
+  assert.deepEqual(M.tiledSeamFrames(33), [24], "9 latent frames are one over a tile");
+  assert.deepEqual(M.tiledSeamFrames(29), [], "8 latent frames fit one tile: no temporal seam");
+  assert.deepEqual(M.tiledSeamFrames(65), [24, 48]);
+  assert.deepEqual(M.tiledSeamFrames(121), [24, 48, 72, 96]);
+  assert.deepEqual(M.tiledSeamFrames(81, 64, 8), [56], "the node's own default of 64 / 8: tiles of 16, overlap 2, stride 14");
+  assert.deepEqual(M.tiledSeamFrames(81, 8, 8), Array.from({ length: 19 }, (_, i) => 4 * (i + 1)), "a temporal size under twice the overlap halves the overlap: tile 2, overlap 1");
+  assert.equal(M.describeFrames([24, 48, 72]), "frames 24, 48 and 72");
+  assert.equal(M.describeFrames([24, 48]), "frames 24 and 48");
+  assert.equal(M.describeFrames([24]), "frame 24");
+  assert.equal(M.describeFrames([]), "");
 });
 
 test("planMulticard refuses --fast and a GGUF or unnamed expert before anything starts, not after the cold start", () => {

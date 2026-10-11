@@ -407,6 +407,31 @@ test("pollOutputs: an exec-error status throws with the unified prefix and fires
   assert.ok(hooked, "onExecError must run before the throw");
 });
 
+test("pollOutputs: ComfyUI's own exception message reaches the error whole, even when the status is long enough for the 500-character cut to lose it", async () => {
+  const c = clock();
+  const message = "OFFLOAD-DECODE-NOFIT: cuda:0 has 6.1 GiB free and the plain decode needs 10.0 GiB; the sampled latent is saved as latents/wan_00001_.latent";
+  const status = {
+    status_str: "error", completed: false,
+    messages: [
+      ["execution_start", { prompt_id: "p1", timestamp: 1 }],
+      ["execution_cached", { nodes: [], prompt_id: "p1", timestamp: 2 }],
+      ["execution_error", {
+        prompt_id: "p1", node_id: "21", node_type: "OffloadFreeForDecode", executed: Array.from({ length: 20 }, (_, i) => String(i + 1)),
+        exception_message: message, exception_type: "RuntimeError", traceback: ["  File \"execution.py\", line 1, in execute\n"], current_inputs: {}, current_outputs: {},
+      }],
+    ],
+  };
+  assert.ok(!JSON.stringify(status).slice(0, 500).includes("latents/wan_00001_.latent"), "premise: the cut lands before the message");
+  const fetchImpl = async () => entry({ p1: { outputs: {}, status } });
+  const err = await pollOutputs({ api: "http://x", promptId: "p1", waitSec: 60, isDone: () => false, fetchImpl, sleep: c.sleep, now: c.now, env: {} }).then(() => null, (e) => e);
+  assert.match(err.message, /^ComfyUI exec error: \{"status_str":"error"/, "the unified prefix is what it was");
+  assert.ok(err.message.includes(message), err.message);
+  assert.match(err.message, /OffloadFreeForDecode.*RuntimeError/s, "and it says which node raised what");
+  // a status that is short enough to show whole says nothing twice
+  const short = await pollOutputs({ api: "http://x", promptId: "p1", waitSec: 60, isDone: () => false, fetchImpl: async () => entry({ p1: { outputs: {}, status: { status_str: "error", messages: [["execution_error", { exception_message: "boom", node_type: "N", exception_type: "E" }]] } } }), sleep: c.sleep, now: c.now, env: {} }).then(() => null, (e) => e);
+  assert.equal(short.message.split("boom").length - 1, 1, short.message);
+});
+
 test("pollOutputs: budget exhaustion throws the caller's message", async () => {
   const c = clock();
   const fetchImpl = async () => entry({});
