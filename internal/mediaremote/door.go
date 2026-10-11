@@ -325,9 +325,12 @@ func (q *queueRT) adopt(ctx context.Context, cfg config.Config, runner Runner, r
 			}
 		}
 		// The attribution handle opens no card (Dispatched is never called): the call writes its one ledger row and the card
-		// the ended process opened is closed by the sweep that closes a dead process's cards.
+		// the ended process opened is closed by the sweep that closes a dead process's cards. The row still says where the call
+		// ran: the handle is told the node and the job the ticket recorded, which a dispatch would have told it (NameNode), because
+		// the placement note's "; ran on <node>" tail does not survive the ledger's cap on a long lane sentence.
 		h := core.BeginRemote(runner, lt.req, RouteAuto)
 		defer core.CloseOnPanic(h)
+		core.NameNode(h, t.Base, t.Node, t.Job)
 		res, err := collect(actx, cfg, lt.req, lt.pl, t.Base, t.Node, t.Job, start, &ticketHandle{RemoteAttribution: h, lt: lt})
 		if err == nil && passedBack(res) {
 			// The node took the job and passed it back (another job held its card): nothing ran, as for a live owner's job. The
