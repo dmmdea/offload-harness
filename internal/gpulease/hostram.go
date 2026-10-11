@@ -19,7 +19,9 @@ package gpulease
 //     under the epoch lock, after the cards are shown free and before the epoch is issued. The
 //     record that carries the declared need is written inside that same critical section, so two
 //     grants on different cards cannot both read the same headroom: the second one's check sees
-//     the first one's record.
+//     the first one's record. The machine's readings (the host's counters, what each declaring
+//     holder's processes hold resident) are taken before the lock (readHost) and only compared
+//     inside it, so the walk of the process trees is not done while everyone else spins on the lock.
 //   - a whole-node grant: in TryAcquire, after the cheap held-probe and before the epoch is
 //     bumped (a refusal burns no epoch). No lock is needed there. A whole-node lease conflicts with
 //     every other lease, so when it is not refused as held there is nothing live to account for
@@ -207,6 +209,84 @@ func DeclaredHostRAMGiB(leases []Info) float64 {
 		sum += l.HostRAMGiB
 	}
 	return sum
+}
+
+// hostReading is the machine's side of a host-RAM check: the host's memory counters and what the processes below each
+// declaring lease holder hold resident. A card-scoped grant takes it BEFORE the epoch lock (readHost) and compares it
+// inside (hostRAMCheckWith): the counters are syscalls, but the holders' process trees are a walk with a memory read per
+// process (measured by the reviewer at about 26 ms median and 63 ms worst for one holder), and that walk used to run inside
+// the machine-wide lock on every grant attempt and every waiter poll (F57).
+//
+// What is read early is only the machine's side. The leases a need is judged against, and so the declared need of every one
+// of them, are still read under the lock, so a grant that lands between the reading and the lock is counted. The stale parts
+// err the conservative way: a resident figure read a moment early is lower, which leaves more of a declared need still to
+// load; a holder that appeared after the reading has no figure at all and counts as having loaded nothing, which is also
+// the reading the guard takes of a process it cannot read (descendantsResidentGiB).
+type hostReading struct {
+	mem   gpuprobe.HostMemory
+	memOK bool
+	held  map[int]heldReading // by holder pid
+}
+
+type heldReading struct {
+	gib float64
+	ok  bool
+}
+
+// heldGiB is Manager.heldGiB from the reading: the figure taken early for a holder that was live then, else "cannot be read".
+func (r *hostReading) heldGiB(pid int) (float64, bool) {
+	h, ok := r.held[pid]
+	if !ok {
+		return 0, false
+	}
+	return h.gib, h.ok
+}
+
+// readHost takes the readings a check of needGiB will compare: the host's memory and the resident memory below the holder of
+// every live lease that declared a need. A need of 0 is admitted without reading anything (hostRAMCheckAgainst's rule), so it
+// takes none (nil).
+func (m *Manager) readHost(needGiB float64) *hostReading {
+	if needGiB <= 0 {
+		return nil
+	}
+	r := &hostReading{held: map[int]heldReading{}}
+	r.mem, r.memOK = m.hostMemory()
+	for _, l := range m.Leases() {
+		if l.HostRAMGiB <= 0 || l.PID <= 0 {
+			continue
+		}
+		if _, done := r.held[l.PID]; done {
+			continue
+		}
+		g, ok := m.heldGiB(l.PID)
+		r.held[l.PID] = heldReading{g, ok}
+	}
+	return r
+}
+
+// hostRAMCheckWith is hostRAMCheckAgainst over a reading taken earlier: the same function of the same four things (the
+// host's memory, the need, the not-yet-loaded part of the leases in live, the headroom), with no machine read of its own. It
+// is what the grant calls under the epoch lock.
+func (m *Manager) hostRAMCheckWith(needGiB float64, live []Info, r *hostReading) gpuprobe.HostRAMCheck {
+	if needGiB <= 0 {
+		return gpuprobe.HostRAMCheck{OK: true}
+	}
+	if r == nil {
+		return m.hostRAMCheckAgainst(needGiB, live) // a caller that took no reading reads here: correct, only not early
+	}
+	var pending float64
+	if len(live) > 0 {
+		pending = pendingGiB(live, r.heldGiB)
+	}
+	return gpuprobe.HostRAMAdmits(r.mem, r.memOK, needGiB, pending, m.HostRAMHeadroom())
+}
+
+// hostRAMRefusalWith is hostRAMRefusal over a reading taken earlier.
+func (m *Manager) hostRAMRefusalWith(opts Options, live []Info, r *hostReading) *ErrHostRAM {
+	if chk := m.hostRAMCheckWith(opts.HostRAMGiB, live, r); !chk.OK {
+		return &ErrHostRAM{chk}
+	}
+	return nil
 }
 
 // hostRAMCheckAgainst is THE function that puts the admission rule to a need: the host's memory as it

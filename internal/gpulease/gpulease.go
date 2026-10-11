@@ -635,6 +635,9 @@ type Manager struct {
 	// writeProbe is a test seam for "this process cannot write the lease directory"; nil
 	// means a real probe.
 	writeProbe func(dir string) error
+	// afterHostReadHook, when set, runs after a card-scoped grant has taken its host readings and before it takes the epoch
+	// lock, so a test can land another grant in exactly that window. Production never sets it.
+	afterHostReadHook func()
 	// hostHeadroomGiB is this Manager's own host-RAM headroom (SetHostRAMHeadroom, a test seam); 0 = the
 	// process-wide one config.Load installed (SetDefaultHostRAMHeadroom).
 	hostHeadroomGiB float64

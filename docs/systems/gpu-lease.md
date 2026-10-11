@@ -1287,7 +1287,17 @@ which term refused: `committed X of Y GiB physical` or `only A GiB of Y GiB phys
   `grantDevicesLocked`, under the epoch lock, after the cards are shown free and before the epoch is issued; the record that
   carries the declared need is written in the same critical section, so two grants on different cards cannot both read the
   same headroom: the second one's check sees the first one's record
-  (`TestConcurrentGrantsOnDifferentCardsCannotBothTakeTheLastHeadroom`: exactly one of four racers fits, 25 rounds). A
+  (`TestConcurrentGrantsOnDifferentCardsCannotBothTakeTheLastHeadroom`: exactly one of four racers fits, 25 rounds).
+  **The readings are taken before the lock and only compared inside it** (`readHost`, F57): the host's counters and, for every
+  live lease that declared a need, the resident memory below its holder (a walk of the process tree with a memory read per
+  process, which the reviewer measured at about 26 ms median and 63 ms worst for one holder, on every grant attempt and every
+  waiter poll, inside a lock everyone else spins on for 2 s). The decision is still made under the lock, against the leases
+  live then: their declared needs are read from the records there, so a grant that lands between the reading and the lock is
+  counted (`TestAGrantThatLandsAfterTheReadingIsStillCountedInsideTheLock`); the early parts err the conservative way (a
+  resident figure read a moment early is lower, so more of a declared need is still to load; a holder that appeared after the
+  reading counts as having loaded nothing), and a need of 0 reads nothing
+  (`TestTheHostReadingsAreTakenBeforeTheEpochLockAndOnlyComparedInside` counts the host and process-tree reads made while the
+  lock file exists: none). A
   whole-node grant checks in `TryAcquire` before its epoch is bumped, so a refusal burns none; it needs no lock because a
   whole-node lease conflicts with every other live lease, so nothing else is live to account for. The detached holder
   receives the parent's resolved number as `--ram` and declares exactly that. The card allocator applies the same function
