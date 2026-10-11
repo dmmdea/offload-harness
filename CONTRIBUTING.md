@@ -17,6 +17,17 @@ go test ./...    # run the full test suite
 All three must pass before you open a pull request. The tests do not require a running
 llama.cpp server.
 
+`go.mod` names the compiler the harness ships with (`toolchain go1.27.2`; the `go` line is only the
+oldest one allowed). With `GOTOOLCHAIN` at its default, a Go older than that downloads the release
+on the first build in this tree (from the module proxy, into the module cache) and builds with it.
+`GOTOOLCHAIN=local` builds with the installed Go instead and ignores the line without a message,
+which is the way to build offline. CI also scans the harness module and both printed CLIs for known
+vulnerabilities, for linux and windows, in the `govulncheck` job. To run one scan by hand:
+`go install golang.org/x/vuln/cmd/govulncheck@v1.8.0`, then `govulncheck ./...` in the module's
+directory (`GOOS=windows govulncheck ./...` for the other system). A finding fails the job; the fix
+is a newer toolchain pin in `go.mod` (and the floor in `gomod_toolchain_pin_test.go`) or a newer
+dependency.
+
 ## Guidelines
 
 - **Keep changes scoped.** One focused change per PR. Avoid drive-by refactors, renames, or
