@@ -426,31 +426,7 @@ func (lt *liveTicket) step(ctx context.Context, cs *cycleState) {
 
 	// The tickets of this machine that are older than this one and still waiting (their owners alive): each is first in
 	// line for the nodes it matches, and one that has not been scanned yet is first in line for all of them.
-	var older []ticketFile
-	for _, t := range all {
-		if t.ID == selfID || t.State != stWaiting || t.dead() {
-			continue
-		}
-		if t.Created < selfCreated || (t.Created == selfCreated && t.ID < selfID) {
-			older = append(older, t)
-		}
-	}
-	firstIn := func(base string) (ticketFile, bool) {
-		for _, t := range older {
-			if !honourOrder {
-				break
-			}
-			if !t.Scanned {
-				return t, true
-			}
-			for _, m := range t.Matches {
-				if m == normBase(base) {
-					return t, true
-				}
-			}
-		}
-		return ticketFile{}, false
-	}
+	older := ticketsAhead(all, selfID, selfCreated)
 
 	var (
 		extra   []rowAt
@@ -466,13 +442,11 @@ func (lt *liveTicket) step(ctx context.Context, cs *cycleState) {
 		c := cands[i]
 		matched = append(matched, normBase(c.base))
 		if h, held := claims[normBase(c.base)]; held && h.Ticket != selfID {
-			extra = append(extra, rowAt{idx: c.idx, row: ClusterRow{Node: c.shown, State: "in-use",
-				Why: fmt.Sprintf("a job of this machine is running there (ticket %s, since %s)", h.Ticket, time.UnixMilli(h.At).UTC().Format(time.RFC3339))}})
+			extra = append(extra, rowAt{idx: c.idx, row: ClusterRow{Node: c.shown, State: "in-use", Why: h.words()}})
 			continue
 		}
-		if t, first := firstIn(c.base); first {
-			extra = append(extra, rowAt{idx: c.idx, row: ClusterRow{Node: c.shown, State: "free",
-				Why: fmt.Sprintf("idle, but ticket %s is older and first in line for it", t.ID)}})
+		if t, first := firstInLine(older, c.base); first {
+			extra = append(extra, rowAt{idx: c.idx, row: firstInLineRow(c, t)})
 			continue
 		}
 		if chosen == nil {
@@ -501,6 +475,47 @@ func (lt *liveTicket) step(ctx context.Context, cs *cycleState) {
 	}
 }
 
+// ticketsAhead are the tickets of this machine that are older than the one (selfID, selfCreated) and still waiting with their
+// owners alive. A caller that is not a ticket and arrives now (a graph call: selfID empty, selfCreated the largest time) has every
+// such ticket ahead of it.
+func ticketsAhead(all []ticketFile, selfID string, selfCreated int64) []ticketFile {
+	var ahead []ticketFile
+	for _, t := range all {
+		if t.ID == selfID || t.State != stWaiting || t.dead() {
+			continue
+		}
+		if t.Created < selfCreated || (t.Created == selfCreated && t.ID < selfID) {
+			ahead = append(ahead, t)
+		}
+	}
+	return ahead
+}
+
+// firstInLine says whether one of the tickets ahead is first in line for base, and which: a ticket that has not been scanned yet is
+// first in line for every node (it has not said which it matches), a scanned one for the nodes it matched. One rule for the
+// tickets (scan) and for a graph call (placeGraph), which yields by it.
+func firstInLine(ahead []ticketFile, base string) (ticketFile, bool) {
+	for _, t := range ahead {
+		if !honourOrder {
+			break
+		}
+		if !t.Scanned {
+			return t, true
+		}
+		for _, m := range t.Matches {
+			if m == normBase(base) {
+				return t, true
+			}
+		}
+	}
+	return ticketFile{}, false
+}
+
+// firstInLineRow is the cluster row of an idle node that an older ticket is first in line for.
+func firstInLineRow(c candidate, t ticketFile) ClusterRow {
+	return ClusterRow{Node: c.shown, State: "free", Why: fmt.Sprintf("idle, but ticket %s is older and first in line for it", t.ID)}
+}
+
 func plural(n int, what string) string {
 	if n == 1 {
 		return what
@@ -508,16 +523,20 @@ func plural(n int, what string) string {
 	return fmt.Sprintf("%d %ss", n, what)
 }
 
-// lanePlacement is the placement sentence of a result that ran on a node, from the reading of this machine's lane that sent it
-// there (was: the call was sent earlier, by a process that has since ended).
-func lanePlacement(why string, was bool) string {
+// lanePlacement is the placement sentence of an image result that ran on a node, from the reading of this machine's lane that
+// sent it there (was: the call was sent earlier, by a process that has since ended).
+func lanePlacement(why string, was bool) string { return lanePlacementOf("image", why, was) }
+
+// lanePlacementOf is lanePlacement for the named lane (a graph's is "graph"): a lane the pipeline could not read says so, and is
+// not called busy.
+func lanePlacementOf(lane, why string, was bool) string {
 	if rest, unread := strings.CutPrefix(why, "not judged: "); unread {
-		return "remote: this machine's image lane could not be judged (" + rest + ")"
+		return "remote: this machine's " + lane + " lane could not be judged (" + rest + ")"
 	}
 	if was {
-		return "remote: this machine's image lane was not free (" + why + ")"
+		return "remote: this machine's " + lane + " lane was not free (" + why + ")"
 	}
-	return "remote: this machine's image lane is not free (" + why + ")"
+	return "remote: this machine's " + lane + " lane is not free (" + why + ")"
 }
 
 // markScanned says the first scan of the ticket is over (a call waits for it before it answers).

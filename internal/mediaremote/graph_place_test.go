@@ -4,12 +4,11 @@ package mediaremote
 // overflow (ADR 0082 Amendment 1). An image call has ONE busy-lane path, the ticket. A graph keeps the one-shot overflow
 // and, when no node admits it, waits in this machine's own lane: it is not a ticket, it keeps no place in the cluster queue
 // and is not idempotent by content. These tests pin that edge, and the three small pieces S2 removed from the image path that
-// the graph path needs (the in-process hold, the bound of three nodes, and the read of the ticket claims).
+// the graph path needs (the in-process hold, the bound of three nodes, and the machine-wide claim of a node). graph_ticket_test.go
+// pins how a graph and the tickets share the nodes.
 
 import (
 	"context"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -29,7 +28,8 @@ func startGraphNodeWith(t *testing.T, id string, o nodeOpts, files ...string) *n
 
 // A graph whose lane is busy and that no node admits is not a ticket: it waits in the local lane exactly as 0.179.0 left it
 // (one question, one run, the caller's request untouched), no ticket file is made, nothing is queued for the scanner, and a
-// repeat of the same graph is a second call, not the first one's ticket.
+// repeat of the same graph is a second call, not the first one's ticket. The graph does take a claim on the node it sends a job
+// to (the claim file is not a ticket), and lets it go when the call ends.
 func TestAGraphIsNotATicket(t *testing.T) {
 	n := startGraphNode(t, "node-a", []string{"models/vae/other.safetensors"}, 7.96) // lacks the file: 503 at its door
 	cfg := graphClient(t, n)
@@ -56,8 +56,11 @@ func TestAGraphIsNotATicket(t *testing.T) {
 	if got := Queue(cfg); len(got) != 0 {
 		t.Errorf("no ticket was made: %+v", got)
 	}
-	if ents, _ := os.ReadDir(filepath.Join(cfg.StateDir, queueDirName)); len(ents) != 0 {
-		t.Errorf("nothing was written under the queue directory: %v", ents)
+	// The directory lock file stays for good (queuefs.go); no ticket and no claim is left behind.
+	for _, prefix := range []string{"mq-", "use-"} {
+		if files := queueFiles(t, cfg, prefix); len(files) != 0 {
+			t.Errorf("nothing of the graph is left under the queue directory (%s*): %v", prefix, files)
+		}
 	}
 
 	// The same graph again is a second call: a second question, a second run.
@@ -69,12 +72,15 @@ func TestAGraphIsNotATicket(t *testing.T) {
 
 // Two graph calls of one process that both read a node idle must not both send it a job: the second would wait out the node's
 // whole window in the node's own queue and come back as a bounce. The node a graph has a job on is held for it, and the second
-// goes on to its own lane and says why. (S1's test for the image path, kept for the path that still has the hold.)
+// goes on to its own lane and says why. (S1's test for the image path, kept for the path that still has the hold. On a machine
+// with a state directory the claim file answers first and the row says so, graph_ticket_test.go; the in-process hold is the whole
+// of the cover on a machine without one, which is what this test runs on.)
 func TestTwoGraphCallsDoNotStackOnOneNode(t *testing.T) {
 	hold := make(chan struct{})
 	n := startGraphNodeWith(t, "node-b", nodeOpts{hold: hold}, krea2File)
 	t.Cleanup(func() { close(hold) })
 	cfg := graphClient(t, n)
+	cfg.StateDir = "" // no queue directory, so no claim file: only the in-process hold stands between the two calls
 
 	first := make(chan core.Result, 1)
 	go func() {
@@ -158,7 +164,8 @@ func TestAGraphIsSentToAtMostThreeNodes(t *testing.T) {
 }
 
 // A node a ticket of this machine has a job on is in use, whatever its health says yet (a job shows as a lease only once the
-// node admitted it). A graph leaves it to that ticket and says so; it reads the claim and never writes one.
+// node admitted it). A graph leaves it to that ticket and says so, and takes the claim of the node it does use only for the
+// length of its call: the ticket's claim is neither taken nor changed.
 func TestAGraphLeavesANodeATicketHasAJobOn(t *testing.T) {
 	inUse := startGraphNode(t, "node-a", []string{krea2File}, 7.96)
 	idle := startGraphNode(t, "node-b", []string{krea2File}, 7.96)
@@ -181,7 +188,7 @@ func TestAGraphLeavesANodeATicketHasAJobOn(t *testing.T) {
 	}
 	noPosts(t, "the node a ticket has a job on", inUse)
 	if after := st.claims(); len(after) != len(before) || after[normBase(inUse.srv.URL)].Ticket != tk.ID {
-		t.Errorf("a graph neither takes nor changes a claim: before %+v after %+v", before, after)
+		t.Errorf("a graph neither takes over nor changes a ticket's claim, and lets its own go: before %+v after %+v", before, after)
 	}
 
 	// With only that node on the roster, the graph waits in its own lane and the row says whose the node is.

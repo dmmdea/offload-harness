@@ -13,8 +13,9 @@ package mediaremote
 // mismatch with 412), carries refine when the caller sent refine=false, runs this release, has the family's route
 // configured when it reports its routes, and holds no lease of any class (the delegator cannot know which card a
 // node's lease sits on or which card the job would take, so it is conservative and the node's own grant is the
-// authority). Candidates rank by the shorter queue, then config order. A ticket then also leaves out the nodes a ticket
-// of this machine has a job on, and the ones an older waiting ticket matches.
+// authority). Candidates rank by the shorter queue, then config order. A ticket then also leaves out the nodes a job of this
+// machine has a claim on (a ticket's or a graph call's), and the ones an older waiting ticket matches; a graph call leaves out
+// the same two sets.
 //
 // HOW AN ATTEMPT ENDS. A node that refuses the POST (503, 429) or accepts the job and answers that another job holds its
 // card (gpu_busy, gpu_queued) or that its lease cannot be taken (gpu_lease_unavailable: in all three nothing ran) is
@@ -27,15 +28,18 @@ package mediaremote
 //
 // TWO PATHS USE THIS FILE. An IMAGE call has one busy-lane path, the ticket (door.go, ticket.go, scan.go): S2 removed S1's
 // synchronous placement for it. A whole-node GRAPH keeps the one-shot overflow of S1 and S4 (tryGraphOverflow and placeGraph
-// below, nothing else): it is offered once to an idle single-card node that holds every file it names and, when none takes it,
-// it waits in this machine's own local lane. A graph is not a ticket in 0.180.0: it keeps no place in the cluster queue and
-// does not start on a lane that frees after its one look at the fleet.
+// below, nothing else): it is offered once to an idle single-card node that holds every file it names, that no job of this
+// machine has a claim on and that no older waiting ticket is first in line for, and, when none takes it, it waits in this
+// machine's own local lane. A graph is not a ticket in 0.180.0: it keeps no place in the cluster queue and does not start on a
+// lane that frees after its one look at the fleet; but it takes the same claim a ticket takes, so a ticket and a graph (of this
+// process or of another) never both send one node a job.
 
 import (
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"math/rand"
 	"os"
 	"sort"
@@ -109,10 +113,11 @@ type RowHolder struct {
 type placerState struct {
 	mu    sync.Mutex
 	nodes map[string]*nodeBackoff
-	// held is the nodes a GRAPH call of this process has a job on right now (placeGraph; tickets take a claim file instead,
-	// ticket.go). Two graph calls of one process (an MCP server answers its session's calls in parallel) that both read a
-	// node idle must not both send it a job: the second would sit in the node's own queue for its whole window and come
-	// back as a bounce.
+	// held is the nodes a GRAPH call of this process has a job on right now (placeGraph). It is the first line, the one that
+	// needs no state directory: two graph calls of one process (an MCP server answers its session's calls in parallel) that
+	// both read a node idle must not both send it a job: the second would sit in the node's own queue for its whole window and
+	// come back as a bounce. With a state directory the graph also takes the machine-wide claim (ticket.go: claimGraph), which
+	// keeps every other process and every ticket off the node as well.
 	held map[string]bool
 }
 
@@ -351,7 +356,9 @@ func ambientLease() bool {
 // here" (the local lane, where a graph that no node admitted waits). A graph is identified by the files its node holds
 // (graph.go), not by a recipe, so there is no local identity to compare. A graph that names devices is card-scoped and stays
 // here: plan() below refuses to carry devices (a card id names a card on this machine), and a call it refuses is never asked
-// about the lane. A call that resumes a place in the local line (waiter_token) is never moved.
+// about the lane. A call that resumes a place in the local line (waiter_token) is never moved. A lane the pipeline tried to read
+// and could not (core.LaneVerdict.Unjudged) is not a free lane, as for an image: the fleet is looked at, and the graph runs here
+// when no node takes it.
 func tryGraphOverflow(ctx context.Context, cfg config.Config, runner Runner, req core.Request, remotes []string) overflowOutcome {
 	if req.Task != core.TaskRunGraph || str(req.Params, "waiter_token") != "" || ambientLease() {
 		return overflowOutcome{}
@@ -365,7 +372,7 @@ func tryGraphOverflow(ctx context.Context, cfg config.Config, runner Runner, req
 		return overflowOutcome{} // the lane that runs it reports its own contract
 	}
 	v := core.ProbeLane(ctx, runner, req)
-	if v.Free {
+	if v.Free && !v.Unjudged {
 		return overflowOutcome{}
 	}
 	if names := inputFilesOf(pl); len(names) > 0 {
@@ -396,10 +403,12 @@ type rowAt struct {
 // came back and not from when it arrived (a graph keeps no place in the cluster queue).
 const maxGraphPlacements = 3
 
-// placeGraph offers a graph whose local lane is not free to the nodes that can take it, in order, once. It is the whole of
-// the graph's busy-lane path: it asks the roster, skips the nodes a ticket of this machine has a job on (a read of the claim
-// files, which it never writes), sends the job to the first node that takes it and answers with that node's result, or
-// returns the rows that say per node why not and lets the caller run the graph here.
+// placeGraph offers a graph whose local lane is not free (or could not be read) to the nodes that can take it, in order, once. It is
+// the whole of the graph's busy-lane path: it asks the roster, leaves out the nodes a job of this machine has a claim on (a ticket's
+// or another graph call's) and the ones an older waiting ticket is first in line for (a graph arrives after every ticket that is
+// waiting, so it yields to them by the ticket's own rule), takes the machine-wide claim of the first node left (under the
+// directory lock, so a ticket or another process cannot be sent the same node between the look and the send), sends the job
+// there and answers with that node's result, or returns the rows that say per node why not and lets the caller run the graph here.
 func placeGraph(ctx context.Context, cfg config.Config, runner Runner, req core.Request, pl planned, bases []string, v core.LaneVerdict) overflowOutcome {
 	var local localID // a graph has no recipe; matchFor reads the graph rules from need.graph
 	cands, rows := candidatesFor(ctx, cfg, bases, local, needOf(req))
@@ -411,22 +420,28 @@ func placeGraph(ctx context.Context, cfg config.Config, runner Runner, req core.
 			out.rows = append(out.rows, r.row)
 		}
 	}
-	// A node a ticket of this machine has a job on is in use whatever its health says yet (a job shows as a lease only once the
-	// node admitted it): the graph leaves it to that ticket, as one ticket leaves it to another.
+	// A node a job of this machine has a claim on (a ticket's, or another graph call's, of any process) is in use whatever its health
+	// says yet (a job shows as a lease only once the node admitted it): the graph leaves it, as one ticket leaves it to another.
+	// And every ticket of this machine that is waiting is older than this graph, so a node an older ticket is first in line for
+	// (one it matched at its last scan, or any node while it has not been scanned) is left to it by the ticket's own rule.
 	var after []rowAt
-	if st, ok := storeFor(cfg); ok && len(cands) > 0 {
-		if claims := st.claims(); len(claims) > 0 {
-			free := cands[:0:0]
-			for _, c := range cands {
-				if h, held := claims[normBase(c.base)]; held {
-					after = append(after, rowAt{idx: c.idx, row: ClusterRow{Node: c.shown, State: "in-use",
-						Why: fmt.Sprintf("a job of this machine is running there (ticket %s, since %s)", h.Ticket, time.UnixMilli(h.At).UTC().Format(time.RFC3339))}})
-					continue
-				}
-				free = append(free, c)
+	st, haveStore := storeFor(cfg)
+	if haveStore && len(cands) > 0 {
+		claims := st.claims()
+		ahead := ticketsAhead(st.list(), "", math.MaxInt64)
+		free := cands[:0:0]
+		for _, c := range cands {
+			if h, held := claims[normBase(c.base)]; held {
+				after = append(after, rowAt{idx: c.idx, row: ClusterRow{Node: c.shown, State: "in-use", Why: h.words()}})
+				continue
 			}
-			cands = free
+			if t, first := firstInLine(ahead, c.base); first {
+				after = append(after, rowAt{idx: c.idx, row: firstInLineRow(c, t)})
+				continue
+			}
+			free = append(free, c)
 		}
+		cands = free
 	}
 	if len(cands) == 0 {
 		flush(after)
@@ -438,10 +453,11 @@ func placeGraph(ctx context.Context, cfg config.Config, runner Runner, req core.
 		defer cancel()
 	}
 	start := time.Now()
-	placement := "remote: this machine's " + laneName(req) + " lane is not free (" + v.Why + ")"
+	placement := lanePlacementOf(laneName(req), v.Why, false)
 	h := core.BeginRemote(runner, req, RouteAuto)
 	defer core.CloseOnPanic(h)
 
+	graphID := graphClaimID()
 	attempts := 0
 	for _, c := range cands {
 		if attempts >= maxGraphPlacements {
@@ -455,16 +471,37 @@ func placeGraph(ctx context.Context, cfg config.Config, runner Runner, req core.
 			after = append(after, rowAt{idx: c.idx, row: ClusterRow{Node: c.shown, State: "busy", Why: "another call of this machine has a job there"}})
 			continue
 		}
+		// The machine-wide claim, taken under the directory lock before anything is sent: the look at the claims above was not
+		// atomic with the send, so a ticket of this process or a call of another could have taken the node since.
+		if haveStore {
+			ok, holder, cerr := st.claimGraph(graphID, c.base)
+			if cerr != nil || !ok {
+				placer.release(c.base)
+				row := ClusterRow{Node: c.shown, State: "in-use", Why: holder.words()}
+				if cerr != nil {
+					logQueue("a graph call could not claim node %s: %v", c.shown, cerr)
+					row = ClusterRow{Node: c.shown, State: "skipped", Why: "its claim could not be taken (" + cerr.Error() + "), so nothing was sent"}
+				}
+				after = append(after, rowAt{idx: c.idx, row: row})
+				continue
+			}
+		}
+		letGo := func() {
+			placer.release(c.base)
+			if haveStore {
+				st.releaseNode(c.base, graphID)
+			}
+		}
 		jobID, jerr := newJobID()
 		if jerr != nil {
-			placer.release(c.base)
+			letGo()
 			res := placementDefer(&placementError{core.DeferClassInfrastructure, "job id: " + jerr.Error()}, placement)
 			h.Finish(res)
 			return overflowOutcome{placed: true, res: res}
 		}
 		attempts++
 		a := func() attemptResult {
-			defer placer.release(c.base)
+			defer letGo()
 			return attempt(ctx, cfg, req, pl, c, local, start, jobID, h)
 		}()
 		switch a.kind {
@@ -666,6 +703,10 @@ func attempt(ctx context.Context, cfg config.Config, req core.Request, pl planne
 			cause := fmt.Sprintf("it answered %d to the last dispatch and asked to be left alone", pe.status)
 			if pe.retryAfter <= 0 {
 				cause = fmt.Sprintf("it answered %d to the last dispatch (it is full)", pe.status)
+				if pl.fleetTask != taskImage {
+					// A graph's 503 is also the node's refusal of a file it lacks (graph_files.go): the node is not full.
+					cause = fmt.Sprintf("it answered %d to the last dispatch at its door", pe.status)
+				}
 			}
 			placer.cooldown(c.base, maxDuration(pe.retryAfter, backoffSteps[0]), c.shown, cause)
 			return attemptResult{kind: attemptBounce, row: ClusterRow{Node: c.shown, State: "refused", Why: fmt.Sprintf("answered %d to the dispatch: %s", pe.status, pe.Error())}}

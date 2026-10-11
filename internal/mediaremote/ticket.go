@@ -33,6 +33,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -320,15 +321,35 @@ func (t ticketFile) dead() bool {
 
 // ---- node claims ---------------------------------------------------------------------------------------------------
 
-// claim says a ticket of this machine has a job on a node. It is the machine-wide "in use": every scanner on the
-// machine reads the claims before it sends a node a job, and takes one (under the directory lock, which makes the
-// read and the write one step) before it does. Reading the tickets' states and then sending would leave exactly the
-// window in which two processes both read a node idle and both send it a job.
+// claim says a job of this machine is on a node: a ticket's, or a whole-node graph call's. It is the machine-wide "in use":
+// every scanner on the machine reads the claims before it sends a node a job, and takes one (under the directory lock,
+// which makes the read and the write one step) before it does, and so does a graph call. Reading the tickets' states and
+// then sending would leave exactly the window in which two processes both read a node idle and both send it a job.
 type claim struct {
-	Base   string  `json:"base"`
-	Ticket string  `json:"ticket"`
-	Owner  ownerID `json:"owner"`
-	At     int64   `json:"at_ms"`
+	Base string `json:"base"`
+	// Ticket is the holder's id: a ticket's (mq-...) or, for a graph call, the id the call minted for its claim (gr-...).
+	Ticket string `json:"ticket"`
+	// Kind is empty for a ticket's claim and claimKindGraph for a graph call's.
+	Kind  string  `json:"kind,omitempty"`
+	Owner ownerID `json:"owner"`
+	At    int64   `json:"at_ms"`
+}
+
+// claimKindGraph marks the claim of a whole-node graph call (placeGraph). A graph is not a ticket: it has no ticket file and no
+// scanner to write a beat for it, so its claim is judged by its owner alone (claimLive). The call ends, and lets its node go,
+// when its job does.
+const claimKindGraph = "graph"
+
+// graphClaimID is the id a graph call claims its nodes under.
+func graphClaimID() string { return "gr-" + randHex(6) }
+
+// words is the cluster row's sentence for a node this claim holds.
+func (c claim) words() string {
+	since := time.UnixMilli(c.At).UTC().Format(time.RFC3339)
+	if c.Kind == claimKindGraph {
+		return fmt.Sprintf("a job of this machine is running there (graph call, since %s)", since)
+	}
+	return fmt.Sprintf("a job of this machine is running there (ticket %s, since %s)", c.Ticket, since)
 }
 
 func (s *store) claimPath(base string) string {
@@ -350,8 +371,17 @@ func (s *store) readClaim(path string) (claim, bool) {
 
 // claimLive: the claim's ticket is on file with a job in flight on that node, and its owner is alive (and has written its beat
 // within ownerStale) or died less than deadClaimGrace ago. Anything else is a leak, or a dead process's long after, and does
-// not hold the node.
+// not hold the node. A graph call's claim has no ticket to read: it holds while its owner is alive (and is younger than the
+// longest call budget plus an hour, the same bound that sweeps a fetch leftover), and for deadClaimGrace after the claim if its
+// owner is gone, which is the window that matters (the node shows the job's lease only once it admitted it).
 func (s *store) claimLive(c claim) bool {
+	if c.Kind == claimKindGraph {
+		age := time.Since(time.UnixMilli(c.At))
+		if c.Owner.alive() {
+			return age < staleAfter()
+		}
+		return age < deadClaimGrace
+	}
 	t, ok := s.read(c.Ticket)
 	if !ok || !inFlightState(t.State) || normBase(t.Base) != normBase(c.Base) {
 		return false
@@ -378,6 +408,27 @@ func (s *store) claimNode(t *ticketFile, base, nodeID, state string) (ok bool, h
 			return err
 		}
 		b, _ := json.Marshal(claim{Base: normBase(base), Ticket: t.ID, Owner: t.Owner, At: nowMs()})
+		if err := writeFileAtomic(path, b); err != nil {
+			return err
+		}
+		ok = true
+		return nil
+	})
+	return ok, holder, err
+}
+
+// claimGraph takes base for one whole-node graph call, under the lock a ticket's claim is taken under: ok is false, with the
+// holder, when another live claim has it, a ticket's or another graph's, of this process or of any other of the machine. The
+// graph writes no ticket file; the claim record names it, and releaseNode(base, id) lets it go.
+func (s *store) claimGraph(id, base string) (ok bool, holder claim, err error) {
+	owner := selfOwner() // a process lookup: not inside the lock
+	err = s.withLock(func() error {
+		path := s.claimPath(base)
+		if c, have := s.readClaim(path); have && c.Ticket != id && s.claimLive(c) {
+			holder = c
+			return nil
+		}
+		b, _ := json.Marshal(claim{Base: normBase(base), Ticket: id, Kind: claimKindGraph, Owner: owner, At: nowMs()})
 		if err := writeFileAtomic(path, b); err != nil {
 			return err
 		}
