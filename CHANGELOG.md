@@ -6,6 +6,53 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed — `agent_run` fits its final answer to the wall that is left, so a wall between the minimal-answer floor and the estimate answers instead of being cut (D-102, register D-134)
+
+`agent_run` runs its loop under a context deadline, and the loop was built without the final-budget fit (register D-95) that the
+delegation node installs. D-102 sized the run and refused a wall below one tool step and a minimal answer, and left the
+register's own case admitted: a 420 s wall against a `min_turn_sec` of 807 s and an estimate of 928 s, which the INV-5 rider
+(ADR 0050) forbids refusing on. That run spent its tool steps and then opened the forced final answer at the configured budget (4x
+the step budget, up to 8,192 tokens): 476 s of decode on a 17.2 tok/s seat, against a wall with at most 420 s in it, so it was cut
+at the deadline with no answer. This closes what D-102 left PARTIAL: the case is still admitted, and is now usable.
+
+- **The cure is the fit, not a refusal.** At the forced final step the loop now opens the answer at the largest budget the wall that
+  is LEFT can decode at the seat's measured rate, `(remaining − max(10 %, 6 s)) × tok/s`, never above the configured final and
+  floored at 1,024 tokens (the D-95 arithmetic, read off the live clock). The register's case, rebuilt from the seat-rate arithmetic
+  (a 17.2 tok/s seat with a 330 s cold load, an 8,192-token final, ten steps, thinking off), opens its final at no more than about
+  6,500 tokens with the whole wall left, and at about 4,600 (270 s of decode) once the tool steps have spent the 121 s the estimate
+  gives them, instead of 8,192 (476 s). The tool steps are untouched. Nothing new is refused, so there is no INV-5 conflict, and the
+  `min_turn_sec` refusal the row offered as the alternative is not needed.
+- **The rate is the one the wall gate sized the run from.** A model the caller names, or a seat that placement picks, with no rate
+  of its own is left exactly as before: no fit, the configured final. The agent seat's `agent_seat_tok_s` is not lent to it.
+- **Published under the delegation wire's names.** The answer, and a run that died at its wall, carry `final_budget_fit` (the budget
+  the forced final opened at) and `budget_note` (the arithmetic: `final 8192 → 6501 to fit 420 s at 17.2 tok/s`), only when the fit
+  narrowed something. What the loop ran at supersedes the fit predicted when the wall started, as on the node; a run cut before its
+  forced final carries the prediction, and so does one that answered early or reached its forced final with wall to spare: the
+  estimate charges the seat's remembered cold load against the wall and admission pays it outside the wall, so a wall just under the
+  estimate predicts a narrowing the live clock never asks for (900 s against 928 s predicts a 6,174-token final, and the final opens
+  at 8,192). A wall with room, a seat with no rate and a run that neither the prediction nor the loop narrowed carry neither field,
+  and the wall refusal, which starts no run, carries neither.
+- **One copy of the arithmetic.** `pipeline.InstallFinalFit` installs the fit on the loop and returns the run-start figure, and both
+  agent doors call it, so they cannot size one run differently. The node's behaviour is unchanged (a characterisation test, run
+  before the move and after it, passes on both sides), and `TestAgentRunSizesTheRunStartFinalLikeTheNodeDoes` compares the two
+  doors' published sizing on the register's case byte for byte.
+- **What it does not do.** The fit narrows the final answer. It does not shorten the tool steps, so a run whose tool steps outlast
+  the wall still ends at the deadline, and a wall that buys fewer than 1,024 tokens of final at the seat's rate keeps the floor and
+  the deadline stays the stop (`budget_note` says `the wall will be the stop`). A wall below one tool step and a minimal answer is
+  still refused (D-102).
+- **Observed, not changed.** The node runs its loop under the liveness ceiling (ADR 0055), at least twice its wall, so its live fit
+  has room until a run nears the ceiling: on the register's case the node's forced final opens at 8,192 while its published
+  run-start fit says 1,024 (measured this release on a seat that answers every step with a tool call until the forced final). On a
+  run the fit left alone the node publishes the configured budget as `final_budget_fit`, where its docs say both fields are absent.
+- **Tests, written first and red.** The four door tests failed on the unfixed tree (the forced final opened at 8,192 and
+  `final_budget_fit` was absent: the wall-fit case, the door-against-node comparison, the run cut before its forced final, the
+  prediction published when the loop's own final was not narrowed) and the two installer tests failed against a no-op installer.
+  Three tests pass on both sides of the fix and guard it from the other direction: a seat with no rate, a named model with no rate
+  of its own and a wall with room publish no fit; the wall refusal carries none; and the node's published run-start fit is
+  unchanged by the move. Mutants, each compiled and each killed: the installer's closure returning the configured budget, the
+  closure never installed, a raised budget, the answer or the deferral left unstamped, the door installing with no rate, the node
+  no longer calling the shared function, the stamp ignoring its own narrowing rule.
+
 ### Fixed — a render on one card no longer unloads the seats placed on the others, and a seat that comes back onto a leased card leaves before the next render (F15)
 
 - **The defect (register F15, from the 0.176.0 notes).** The render helper cleared "every non-keep-set model whatever card it sits

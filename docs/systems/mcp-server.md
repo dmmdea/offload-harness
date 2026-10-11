@@ -183,9 +183,14 @@ placement, answered or deferred, carries `wall_estimate_sec` / `min_turn_sec` / 
 64-token final (`seatrate.MinViableSec`, the delegator's `feasibleFinal` floor, never the max-final `min_turn_sec` that
 ADR 0050 rejects as a refusal; it does not depend on `max_steps`) is refused with `deferred: true`, `defer_class: budget`,
 `steps: 0` and the numbers; a
-seat with no rate is never refused. D-102 is PARTIAL: a wall above that floor but below the estimate (the row's own 420 s
-against a `min_turn_sec` of 807 s) still runs and can still die at the hard deadline; the cure (the D-95 final-budget fit
-on this door, or an operator decision on a literal `min_turn_sec` refusal) is open as register D-134. A resolved planner absent from the endpoint's served roster fails loud with
+seat with no rate is never refused. **A wall above that floor but below the estimate (the row's own 420 s against a `min_turn_sec` of
+807 s) runs, and its final answer is fitted to the wall that is left (register D-134):** the loop carries the D-95 final-budget fit
+(`pipeline.InstallFinalFit`, the same function the delegation door's node calls), so at the forced final step the answer opens at
+the largest budget the remaining wall can decode at the seat's rate instead of the configured worst case (4x the step budget, up to 8,192
+tokens), floored at 1,024, off the live clock; the tool steps are untouched. The rate is the one the wall gate sized the run from, so a
+named or placed seat with no rate of its own is left as it was. The answer, and a run that died at its wall, then carry `final_budget_fit`
+(the budget the forced final opened at) and `budget_note` (the arithmetic), only when the fit narrowed something (a run whose own final was not narrowed, because it answered early, was cut before its forced final or reached it with wall to spare, carries the fit predicted when its wall started, as the node's result does); a wall that buys fewer
+than 1,024 tokens of final keeps the floor, and `budget_note` says the wall will be the stop. A resolved planner absent from the endpoint's served roster fails loud with
 `deferred: true` naming the model, never a silent fall back to the workhorse — "served" means
 matched against canonical ids **or** `meta.llamaswap.aliases`, since a tier-seeded `agent_model`
 is normally an alias. Every response
