@@ -70,8 +70,8 @@ func resolveReserveHostRAMWith(ramGiven bool, ramGiB float64, class gpulease.Cla
 // classDefaultHint is the line after the declaring one when the declared figure is the media class default (the largest
 // ComfyUI family this box binds, sized as if it streamed from RAM) and the operator gave no --ram (F71). The default is a
 // figure for a call the lease could not read, so the caller whose weights sit on the cards cannot tell from "class default"
-// that it is theirs to correct; the film session declared 46.8 GiB for a driver script that wrapped renders with their
-// weights on two cards, and waited a queue cycle on it. Resolve reaches the class default for exactly four reasons, and the
+// that it is theirs to correct: a driver script that wrapped card-only renders declared 46.8 GiB for weights that sat on
+// two cards, and waited a queue cycle on it. Resolve reaches the class default for exactly four reasons, and the
 // line names the one that applies: nothing is wrapped (a hold), the wrapped command is not a render helper it knows (named
 // from the same table that recognises them), a recognised helper runs its own --graph, or a recognised helper's weight
 // files could not be sized. It is one line, and it never contains the word the declaring line is grepped by, so a script
