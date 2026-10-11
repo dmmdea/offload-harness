@@ -352,6 +352,35 @@ Versioning: [SemVer](https://semver.org/).
   seam; a console close cannot be driven from a test); 16 mutations were each caught, and 9 more for the transcription
   text, the recovered-card wording and the warm-back. `docs/systems/pair-workloads.md`.
 
+### Fixed — the first vision call after an idle unload no longer fails on the seat's cold load (F49)
+
+- **The defect.** The vision seat unloads after its idle ttl. The next vision call (`vqa`, `ocr`, `assess_image`,
+  `video_describe`, each `video_watch` window) met a cold seat, and llama-swap holds that request open for the whole load, so the
+  client's single `request_timeout_sec` (120 s) had to cover the load AND the inference. A 32B vision seat's cold load plus a
+  many-frame video prefill outlasted it: the call failed with `Client.Timeout exceeded while awaiting headers` (`err_class: timeout`,
+  120.3 s in the ledger, a 499 at 2m0.016s in the router's log) while the load carried on: the router logged the seat's health check
+  passing after the cancel. The next vision call, seconds later, succeeded in 29.6 s. The pipeline already knew a first call after an idle gap was likely cold, but only to keep
+  that timeout out of the circuit breaker (`breakerFailure`); the call itself still failed.
+- **The fix.** `runVisionGen` reads `/running` once after its GPU-lease gate. A seat not listed ready is warmed first with the
+  agent door's warm-up (`warmSeat`): one passthrough request that triggers the load, passes the GPU-lease fence like every
+  deliberate load, and holds until the seat is up, for at most the new `vision_coldload_wait_sec`. The vision request is sent only
+  afterwards, so it keeps its full `request_timeout_sec` for inference alone. Every vision door shares the one function, so all of
+  them get it. A seat already ready costs one `/running` read and nothing else; a model routed off this box (`seat_endpoints`, a
+  cascade lane) is not warmed on the local router; `vision_coldload_wait_sec: 0` restores the old behaviour.
+- **The bound is chosen, and it is a bound.** Default 180 s, **chosen, not measured as one figure**: first requests to a cold seat
+  took 14 to 84 s, load plus their own inference (the router's access log, 20 completed loads), and one load outlasted the
+  120 s client timeout; 180 s is about twice the slowest completed one and far inside the router's own 600 s health-check
+  ceiling. It limits how long the caller is held, not whether the call is made: when a load outlasts it the call goes on and the
+  load carries on behind the request, and a defer after a wait says so (`(the vision seat was cold: waited Ns for its load before
+  sending)`). A cold call's worst case is now the wait plus `request_timeout_sec` (300 s with the defaults, which equals the
+  delegator's fleet vision budget). Config: `vision_coldload_wait_sec`; `docs/systems/offload-pipeline.md`, `docs/OPERATOR-GUIDE.md`.
+- **Proof.** `TestVisionColdSeatIsWaitedForBeforeTheRequestIsSent` has a router that starts the load on the first request for the
+  model and holds the request until the seat is up (the real behaviour), with a load three times the request timeout: it failed
+  with the production error before the change and passes after, and the vision request arrives only once the seat is ready.
+  `TestVisionColdLoadWaitIsBounded`, `TestVisionResidentSeatIsNotWarmed`, `TestVisionSeatRoutedElsewhereIsNotWarmedLocally` and
+  `TestVisionColdLoadWaitOffLeavesTheLoadToTheRequest` pin the bound, the free resident case, the off-box case and the off switch;
+  stubbing the wait out, removing its bound and removing the off-box guard each fail the test that names them.
+
 ## [0.179.0] - 2026-10-10 - a busy image lane overflows to an idle node that renders the same recipe, and every GPU lease path has a host-RAM brake
 
 ### Added — a busy image lane overflows to an idle node that renders the same recipe (F52, ADR 0082)

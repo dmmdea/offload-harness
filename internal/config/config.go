@@ -1419,6 +1419,26 @@ type Config struct {
 	// harness never calls a cloud model, it hands the work back to the calling session,
 	// which is the expensive path this wait exists to avoid. Default 90.
 	VisionGPUWaitSec int `json:"vision_gpu_wait_sec,omitempty"`
+	// VisionColdLoadWaitSec is how long a vision call (vqa/ocr/assess_image/video_describe/
+	// video_watch) waits for its seat to LOAD before the request is sent, when llama-swap does
+	// not list the seat as ready (the seat unloads after its idle ttl, so the first call after
+	// an idle gap meets a cold seat). llama-swap holds a request open for the whole load, and
+	// the request's own timeout (request_timeout_sec, 120 s) then has to cover the load AND the
+	// inference: a 32B vision seat's cold load plus a many-frame video prefill outlasted it, and
+	// the call failed with "Client.Timeout exceeded while awaiting headers" while the load was
+	// still running. The wait is a separate passthrough request that triggers the load and holds
+	// for it (the warm-up the agent door already runs), so the vision request that follows rides
+	// its full request_timeout_sec for inference alone. A seat already listed ready costs one
+	// /running read; a seat the call is routed away from this box (seat_endpoints) is not warmed
+	// here. It is a BOUND, not a promise: when the load outlasts it the call proceeds anyway and
+	// the load carries on behind the request. 0 or negative turns the wait off (the request
+	// then carries the load, as before). Default 180: CHOSEN, not measured as a single figure.
+	// Observed on the reference box: first requests to a cold seat (load plus their own
+	// inference) took 14-84 s over 20 completed loads, and one load outlasted a 120 s client
+	// timeout; 180 s is about twice the slowest completed one and sits far inside llama-swap's
+	// own 600 s health-check ceiling. Worst case a cold call now costs this wait plus
+	// request_timeout_sec.
+	VisionColdLoadWaitSec int `json:"vision_coldload_wait_sec,omitempty"`
 	// MemoryStack lists the llama-swap models of the load-bearing mem0 stack, which
 	// nothing that clears cards for a GPU job may unload: not the render runner's
 	// helper and not `gpu reserve --unload-seat` (register C-87). They are small and,
@@ -2249,6 +2269,7 @@ func Default() Config {
 		ForeignGPUMinMiB:            0,     // 0 = built-in default (512 MiB, gpu_foreign.go)
 		StateDir:                    "",    // platform default: %ProgramData%\local-offload | /var/lib/local-offload
 		VisionGPUWaitSec:            90,    // LO-1: bounded wait for the gen lock before a vision call defers
+		VisionColdLoadWaitSec:       180,   // F49: bounded wait for a cold vision seat to load BEFORE the request is sent (chosen; see the field)
 		ComposeTimeoutSec:           1800,
 		ComposeQuality:              "high",
 		BrowseTimeoutSec:            300,
