@@ -2512,10 +2512,12 @@ func (s *Server) admit(w http.ResponseWriter, r *http.Request, env dispatchEnvel
 			return
 		}
 		// An image job whose recipe_digest is not the one of the family it names here: the node is not what the
-		// delegator matched (its files changed since it read health). 412, and no job exists (image_recipe.go).
+		// delegator matched (its files changed since it read health, or it has not finished reading them). 412, and no job
+		// exists (image_recipe.go). The body names the cause beside the sentence, so a delegator tells a wait from a change by a
+		// member and not by matching words.
 		var rme *recipeMismatchError
 		if errors.As(err, &rme) {
-			writeError(w, http.StatusPreconditionFailed, err.Error())
+			writeJSON(w, http.StatusPreconditionFailed, map[string]string{"status": "error", "error": err.Error(), mediacap.RecipeRefusalCauseKey: rme.cause})
 			return
 		}
 		// A failure that is this node's own (a disk that filled while unpacking a project) is not the

@@ -163,7 +163,25 @@ func TestDigestCoversTheFingerprintAndItsVersion(t *testing.T) {
 	}
 }
 
-// ImageRecipe (the delegator's and the 412 check's door) reads through the shared fingerprinter and waits for it.
+// The causes of a node's 412 are words of the wire: a node and a delegator of two builds must read them alike, and the docs quote
+// them. Two of them are the words of the file states they come from (a pending refusal is files that read pending).
+func TestTheRefusalCausesAreTheWordsOfTheWire(t *testing.T) {
+	for _, tc := range []struct{ got, want string }{
+		{RecipeRefusalCauseKey, "cause"},
+		{RecipeRefusalPending, "pending"},
+		{RecipeRefusalUnreadable, "unreadable"},
+		{RecipeRefusalChanged, "changed"},
+		{RecipeRefusalPending, FingerprintPending},
+		{RecipeRefusalUnreadable, FingerprintUnreadable},
+	} {
+		if tc.got != tc.want {
+			t.Errorf("a word of the wire changed: %q, want %q", tc.got, tc.want)
+		}
+	}
+}
+
+// ImageRecipe (the blocking spelling: the delegator's identity and the node's 412 check read through ImageRecipeWith with the
+// AwaitContext of their own request) reads through the shared fingerprinter and waits for it.
 func TestImageRecipeWaitsForTheSharedFingerprinter(t *testing.T) {
 	r := fpRecipe(t, fpTree(t, nil))
 	for _, f := range r.Files {

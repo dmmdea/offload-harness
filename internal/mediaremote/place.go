@@ -20,7 +20,9 @@ package mediaremote
 // card (gpu_busy, gpu_queued) or that its lease cannot be taken (gpu_lease_unavailable: in all three nothing ran) is
 // passed over and is not offered another call by this process for a while (a node that read idle in health but whose own
 // grant refuses the job refuses every call alike, and each one would park for the node's whole gpu_wait_ms before the
-// bounce came back). A node's own answer after it accepted the job is final: a render that failed is the call's result
+// bounce came back). A 412 (the node refuses the recipe) is read by the cause it names: a node that has only not finished reading
+// its weight files is left alone for the first bounce step and no longer, and does not count as a bounce; any other cause is
+// bounced (refusedRecipe). A node's own answer after it accepted the job is final: a render that failed is the call's result
 // and is never placed elsewhere, and a job a node holds is never also run here (a media job cannot be recalled, ADR
 // 0064). The ticket waits for the next lane; it does not give up the way the S1 call did, and it keeps the arrival time
 // the S1 call lost on every bounce.
@@ -47,6 +49,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/delegate"
+	"github.com/dmmdea/offload-harness/internal/mediacap"
 	"github.com/dmmdea/offload-harness/internal/rosterprobe"
 )
 
@@ -670,14 +673,60 @@ func attempt(ctx context.Context, cfg config.Config, req core.Request, pl planne
 			placer.cooldown(c.base, maxDuration(pe.retryAfter, backoffSteps[0]), c.shown, cause)
 			return attemptResult{kind: attemptBounce, row: ClusterRow{Node: c.shown, State: "refused", Why: fmt.Sprintf("answered %d to the dispatch: %s", pe.status, pe.Error())}}
 		case pe.status == 412:
-			placer.bounced(c.base, c.shown, "refused", "it refused the recipe (412): its files changed since it published them")
-			return attemptResult{kind: attemptOut, row: ClusterRow{Node: c.shown, State: "refused", Why: "refused the recipe (412): its files changed since it published them; " + pe.Error()}}
+			return refusedRecipe(c, pe)
 		case pe.status != 0:
 			placer.bounced(c.base, c.shown, "refused", fmt.Sprintf("it answered %d to the last dispatch", pe.status))
 			return attemptResult{kind: attemptOut, row: ClusterRow{Node: c.shown, State: "refused", Why: fmt.Sprintf("answered %d to the dispatch: %s", pe.status, pe.Error())}}
 		}
 	}
 	return attemptResult{kind: attemptFailed, err: serr}
+}
+
+// refusalCause reads the cause a node named in the JSON body of its refusal (mediacap.RecipeRefusalCauseKey), "" when it named
+// none: the body is not an object, has no such member, or the word is not one of the three of the wire. What a node writes
+// chooses nothing beyond those words, and a word is a member of the body and never a part of its sentence.
+func refusalCause(body []byte) string {
+	var m map[string]any
+	if json.Unmarshal(body, &m) != nil {
+		return ""
+	}
+	cause, _ := m[mediacap.RecipeRefusalCauseKey].(string)
+	switch cause {
+	case mediacap.RecipeRefusalPending, mediacap.RecipeRefusalUnreadable, mediacap.RecipeRefusalChanged:
+		return cause
+	}
+	return ""
+}
+
+// refusedRecipe is a node's 412: it refused the recipe_digest this machine sent, and nothing ran there. The cause it names (pe.cause)
+// tells a wait from a difference, and the two are not left alone alike.
+//
+// A node that has not finished reading its weight files (pending) cannot say yet whether anything changed: it has made no finding,
+// and it is expected to have read them soon. It is left alone for the first bounce step and no longer, however often it answers
+// so, and that is a cooldown and not a bounce: the count that carries a node from a minute to the cap is not touched, so a real
+// change after a run of waits still starts at a minute. The pause is there because the rows the node published can be up to a
+// minute old (its health memo) and would offer it the job again at the next scan, each dispatch waiting up to 20 s for the same
+// answer; what the node IS is decided by the health row the next scan reads, not by this pause.
+//
+// Any other cause is bounced, a minute and then the cap: a node that cannot read one of its files, or whose files or binding are
+// not what it published, refuses every call alike until someone looks. A refusal that names no cause this build knows (a proxy, a
+// node of another build) is read that way too, and says it does not know.
+func refusedRecipe(c candidate, pe *postError) attemptResult {
+	says, bounce := "it refused the recipe (412) without saying why", true
+	switch pe.cause {
+	case mediacap.RecipeRefusalPending:
+		says, bounce = "it refused the recipe (412): it had not finished reading its weight files, so it could not say yet whether they changed", false
+	case mediacap.RecipeRefusalUnreadable:
+		says = "it refused the recipe (412): it could not read one of its weight files, so it cannot vouch for the family"
+	case mediacap.RecipeRefusalChanged:
+		says = "it refused the recipe (412): its files or its binding changed since it published them"
+	}
+	if bounce {
+		placer.bounced(c.base, c.shown, "refused", says)
+	} else {
+		placer.cooldown(c.base, bounceSteps[0], c.shown, says)
+	}
+	return attemptResult{kind: attemptOut, row: ClusterRow{Node: c.shown, State: "refused", Why: strings.TrimPrefix(says, "it ") + "; " + pe.Error()}}
 }
 
 func maxDuration(a, b time.Duration) time.Duration {

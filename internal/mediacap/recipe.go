@@ -51,6 +51,23 @@ const RecipeVersion = 2
 // weights, so a ComfyUI recipe never matches it and a recipe is not built for it.
 const EngineComfyUI = "comfyui"
 
+// The wire words of a node's 412. A node refuses an image dispatch whose recipe_digest is not the digest of the family it names
+// with 412, and the JSON body of that refusal carries, beside "status" and "error", the member RecipeRefusalCauseKey with one of
+// the causes below. The node writes it (fleetnode/image_recipe.go) and the delegator reads it (mediaremote/place.go), both from
+// these constants, so a delegator can tell a node that has only not finished reading its weight files (a wait) from one whose
+// files or binding are not what it published (a difference) without matching a sentence. A cause is a word of the wire: a test
+// pins the values, because a node and a delegator of two builds must read them alike.
+const (
+	RecipeRefusalCauseKey = "cause"
+	// RecipeRefusalPending: every weight file the node lacks a fingerprint for is still being read, so it cannot say yet whether
+	// the family is what it was sent. It has made no finding that anything changed.
+	RecipeRefusalPending = "pending"
+	// RecipeRefusalUnreadable: a weight file is there and could not be read, so the node cannot vouch for the family.
+	RecipeRefusalUnreadable = "unreadable"
+	// RecipeRefusalChanged: the family the node holds no longer digests to the digest it was sent, or the node no longer serves it.
+	RecipeRefusalChanged = "changed"
+)
+
 // The file roles of a recipe.
 const (
 	RecipeRoleCkpt = "ckpt"
@@ -179,9 +196,12 @@ func imageRecipeFiles(cfg config.Config) []roledFile {
 // stat reads a size (nil = the file system); both are the caller's so a test needs no model tree. ok is false for a
 // binding that is not a ComfyUI one: no recipe is defined for it, and it never matches another.
 //
-// ImageRecipe WAITS for each present file's content fingerprint (SharedFingerprints().Await): it is for the callers that
-// need the answer, the delegator's own recipe and the node's 412 re-check. The node's health must not wait, and uses
-// ImageRecipeWith with Peek.
+// ImageRecipe WAITS for each present file's content fingerprint (SharedFingerprints().Await). NO PRODUCTION CODE CALLS IT any
+// more: the callers that need the answer read through ImageRecipeWith with the AwaitContext of their own request, so that
+// the wait ends with the request (the delegator's own identity, mediaremote.localIdentity, and the node's 412 re-check,
+// fleetnode.checkRecipe), and the node's health uses ImageRecipeWith with Peek, which never waits. ImageRecipe stays as the
+// blocking spelling for tests and for a caller with no request to bound the wait by (the wait still ends at the
+// fingerprinter's own bound).
 func ImageRecipe(cfg config.Config, fi config.FamilyInfo, roots []ModelRoot, stat func(path string) (int64, bool)) (Recipe, bool) {
 	return ImageRecipeWith(cfg, fi, roots, stat, SharedFingerprints().Await)
 }

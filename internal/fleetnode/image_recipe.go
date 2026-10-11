@@ -112,6 +112,10 @@ type recipeMismatchError struct {
 	family string
 	want   string
 	why    string
+	// cause is the word the refusal carries in its JSON body (mediacap.RecipeRefusalCauseKey): pending, unreadable or
+	// changed. A delegator reads it to tell a node that has only not finished reading its weight files, which is a wait,
+	// from one that is not what it published, which is a difference, without matching a sentence.
+	cause string
 }
 
 func (e *recipeMismatchError) Error() string {
@@ -121,6 +125,20 @@ func (e *recipeMismatchError) Error() string {
 	}
 	return fmt.Sprintf("recipe_digest %s does not match image family %s on this node: %s; read /fleet/health image_recipes again and place the job from that",
 		shortDigest(e.want), name, e.why)
+}
+
+// gapCause is the cause of a refusal for a recipe that has files with no content fingerprint: pending when every such file is
+// still being read (nothing is known to have changed, and a later read may settle it), unreadable as soon as one of them is
+// there and could not be read (or reads as a state this build does not publish), because the node will not be able to vouch for
+// the family when the others land. A file the node does not hold is not a gap here (Missing's, and its bytes are -1).
+func gapCause(r mediacap.Recipe) string {
+	cause := mediacap.RecipeRefusalPending
+	for _, f := range r.Files {
+		if f.Bytes >= 0 && !mediacap.IsFingerprint(f.Fingerprint) && f.Fingerprint != mediacap.FingerprintPending {
+			cause = mediacap.RecipeRefusalUnreadable
+		}
+	}
+	return cause
 }
 
 func shortDigest(d string) string {
@@ -136,16 +154,17 @@ func shortDigest(d string) string {
 func checkRecipe(ctx context.Context, cfg config.Config, family, want string) error {
 	eff, fi, err := cfg.ResolveImageFamily(family)
 	if err != nil {
-		return &recipeMismatchError{family: family, want: want, why: err.Error()}
+		return &recipeMismatchError{family: family, want: want, why: err.Error(), cause: mediacap.RecipeRefusalChanged}
 	}
 	await := func(path string, size int64) string { return recipeFingerprints.AwaitContext(ctx, path, size) }
 	rec, ok := mediacap.ImageRecipeWith(eff, fi, mediacap.ModelRoots(eff.ComfyDir), nil, await)
 	if !ok {
-		return &recipeMismatchError{family: family, want: want, why: "that binding is not a ComfyUI one, which has no recipe to match"}
+		return &recipeMismatchError{family: family, want: want, why: "that binding is not a ComfyUI one, which has no recipe to match", cause: mediacap.RecipeRefusalChanged}
 	}
-	// A family with a file this node could not fingerprint is not an identity, whatever it would digest to.
+	// A family with a file this node could not fingerprint is not an identity, whatever it would digest to. Whether it is a wait
+	// (the file is still being read) or not (it cannot be read) is the refusal's cause.
 	if gaps := rec.Unfingerprinted(); len(gaps) > 0 {
-		return &recipeMismatchError{family: family, want: want, why: "this node cannot fingerprint " + strings.Join(gaps, ", ")}
+		return &recipeMismatchError{family: family, want: want, why: "this node cannot fingerprint " + strings.Join(gaps, ", "), cause: gapCause(rec)}
 	}
 	if have := rec.Digest(); have != strings.TrimSpace(want) {
 		why := fmt.Sprintf("this node's family digests to %s", shortDigest(have))
@@ -153,7 +172,7 @@ func checkRecipe(ctx context.Context, cfg config.Config, family, want string) er
 			sort.Strings(missing)
 			why += " and is missing " + strings.Join(missing, ", ")
 		}
-		return &recipeMismatchError{family: family, want: want, why: why}
+		return &recipeMismatchError{family: family, want: want, why: why, cause: mediacap.RecipeRefusalChanged}
 	}
 	return nil
 }
