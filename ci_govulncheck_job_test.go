@@ -2,11 +2,11 @@ package main
 
 // H-26. CI scans the code that ships for known vulnerabilities, with the compiler that ships.
 //
-// Before this job nothing in the repository looked: the last scan was a one-off on a released tree,
-// and a Go advisory fixed in a patch release (the go1.27.1 tree carries eleven open ones) would have
-// shipped unnoticed. The job installs a pinned govulncheck and runs it over the root module and both
-// printed CLIs under tools/ (separate modules, so `./...` at the root never reaches them) for linux AND
-// windows, because some advisories are platform-specific: a scan of one OS says nothing of the other.
+// Before this job nothing in the repository looked, so a Go advisory fixed in a patch release (the
+// tree built with go1.27.1 calls eleven standard-library ones) would have shipped unnoticed. The job
+// installs a pinned govulncheck and runs it over the root module and both printed CLIs under tools/
+// (separate modules, so `./...` at the root never reaches them) for linux AND windows, because some
+// advisories are platform-specific: a scan of one OS says nothing of the other.
 //
 // Two details are easy to get wrong and are checked here:
 //

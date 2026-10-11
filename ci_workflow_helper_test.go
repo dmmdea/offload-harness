@@ -5,9 +5,9 @@ package main
 //
 // Why they read the workflow instead of trusting it. A CI job that is deleted, indented into a no-op,
 // moved to the wrong runner, or left running `go test` where the test only SKIPS is green by
-// construction, and nothing else in the repository notices: the Windows cage's environment proof
-// existed for months and ran only on a developer's own Windows machine, because the one job on a
-// Windows runner never ran `go test`. So each rule here is checked twice: the yaml says the right
+// construction, and nothing else in the repository notices: the Windows cage's environment proof ran
+// only on a developer's own Windows machine, because the one job on a Windows runner never ran
+// `go test`. So each rule here is checked twice: the yaml says the right
 // thing (structure), and the step's own script, run under bash with stand-ins for the commands it
 // calls, does the right thing (behaviour). The second half is the one that catches a script that
 // reads fine and exits 0 when it should not.
@@ -371,4 +371,24 @@ func (s *ciScriptSandbox) githubPath() string {
 		s.t.Fatalf("read GITHUB_PATH: %v", err)
 	}
 	return string(raw)
+}
+
+// TestCIScriptSandboxStartsAStepLikeTheRunner: run applies the options the runner adds to a `shell: bash` step
+// (-e and pipefail) and runPlain applies neither. The step tests lean on that difference to tell a script that
+// carries its own safety from one that borrows the runner's, so the sandbox is held to it.
+func TestCIScriptSandboxStartsAStepLikeTheRunner(t *testing.T) {
+	sb := newCIScriptSandbox(t)
+	for _, c := range []struct {
+		name, script string
+	}{
+		{"a failing command", "false\necho reached\n"},
+		{"a failing pipe", "false | cat\necho reached\n"},
+	} {
+		if out, rc := sb.run(c.script); rc == 0 || strings.Contains(out, "reached") {
+			t.Errorf("%s, as the runner starts the step: the step must stop there (rc=%d, output=%q)", c.name, rc, out)
+		}
+		if out, rc := sb.runPlain(c.script); rc != 0 || !strings.Contains(out, "reached") {
+			t.Errorf("%s, under a bare bash: the step must carry on (rc=%d, output=%q)", c.name, rc, out)
+		}
+	}
 }
