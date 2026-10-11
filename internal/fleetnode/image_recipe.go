@@ -9,7 +9,7 @@ package fleetnode
 // the family the payload names and refuses a dispatch whose digest is not that one, with 412. The digest is the whole
 // contract; the check below and the delegator's match read the same mediacap.Recipe.Digest, so they cannot disagree.
 // The fingerprint (mediacap/fingerprint.go) is a sample of each file, so the check sees a file replaced by one of the
-// same name and size and does not see a few corrupted bytes between the sample points.
+// same name and size and does not see a change confined to the stretch between two sample blocks.
 //
 // Health stays cheap (server.go: only cached or cheap reads) and NEVER waits for a hash: the rows come from a memo of
 // mediaRoutesTTL, the same freshness a route verdict has, built with the fingerprinter's Peek, which answers from its

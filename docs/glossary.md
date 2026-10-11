@@ -147,7 +147,7 @@ the builder's own default, so a node that writes the default out and one that le
 "named family": the name is a label, the recipe is the identity the harness can check. The fingerprint is a sha256 of the file's
 size and a SAMPLE of its bytes (64 evenly spaced blocks of 1 MiB, the whole file when it is 64 MiB or smaller): it separates a
 bf16 build from an int8 one, catches a truncated copy, and tells two same-named files of one size apart when their weights differ,
-but it does not see a few corrupted bytes between the sampled blocks. A file not hashed yet is published `pending` and the
+but it does not see a change confined to the stretch between two sampled blocks (about a sixty-third of the file). A file not hashed yet is published `pending` and the
 family has no digest and no match until it is. Node-local keys (which card, timeouts, scripts, `reserve_vram`, the pool keys) are not in it, and an
 sd.cpp binding has none. A node publishes its recipes in `/fleet/health` `image_recipes[]`, a delegator matches the `digest`
 strictly, and the node re-checks it at admission (412 on a mismatch). See [ADR 0082](architecture/decisions/0082-a-media-call-overflows-to-the-fleet-when-its-own-lane-cannot-take-it-and-a-family-is-identified-by-its-recipe.md).

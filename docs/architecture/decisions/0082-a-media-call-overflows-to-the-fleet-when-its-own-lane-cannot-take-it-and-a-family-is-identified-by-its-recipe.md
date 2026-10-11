@@ -136,7 +136,7 @@ Three facts made the obvious change unsafe as stated.
   one bounce per node per pause (60 s, then 300 s): up to the node's `gpu_wait_ms` (90 s by default) parked on the node and one
   deferred row there, before the placer sees it. The health pre-filter (no lease of any class) makes that rare; if the logs show it is not, a place-now header read in
   admission is the first optimisation (a lane verdict published by the node, answered before a job exists), not built here.
-- **Named limits.** The content check is a sample of each weight file, not a full hash (Amendment 2). One FIFO per delegating machine; cross-machine order is node arrival. ADR 0083 closes the two limits the first cut named: a call resumed with
+- **Named limits.** The content check is a sample of each weight file, not a full hash, and does not see a change confined to the stretch between two sample blocks (about a sixty-third of the file; Amendment 2). One FIFO per delegating machine; cross-machine order is node arrival. ADR 0083 closes the two limits the first cut named: a call resumed with
   its token joins the cluster queue and brings its place with it, and a call no node could take keeps its arrival time through the
   ticket's place in the local line, so a bounce no longer costs it its seniority. Every
   remote job pays ComfyUI's cold start. The same recipe and seed on a different GPU architecture is the same composition, not
@@ -156,7 +156,7 @@ Three facts made the obvious change unsafe as stated.
   lane question need not be asked), and a short table copy for the pinned and whole-node plans only, where the table maps a pin
   to a card and sizes the host-RAM need (total VRAM) and nothing else. The delegator's own recipe is three or four stats of its
   model tree per call that gets as far as the lane question (and, the first time it sees a file, a read of a sample of at most
-  64 MiB of it: Amendment 2); the recipes of its OTHER families are read only when a node misses, to
+  64 MiB of it: Amendment 2); the recipes of its OTHER families are read only when a node misses, from the fingerprint cache without waiting, to
   name the family that would match. A node's health rows are 60 s old at worst, and the node re-checks the digest at admission from
   the files then on disk.
 - **An attribution edge.** An overflowing call opens its PAIR card when the node's 202 arrives, not before the POST. If the caller's
@@ -272,45 +272,67 @@ file can see. Every other decision stands.
    the block count are **chosen**, not derived from a requirement. The path is not in it (the same bytes under two paths are one
    file, which is what lets two machines agree), and `RecipeVersion` is 2, so a digest of the first cut can never equal one of
    this release. A family that has a file the node does not hold keeps `bytes` -1 and no fingerprint, and never matches.
-2. **A sample, not the whole file, and why (measured, not assumed).** On one workstation on 2026-10-10 (its local model store;
-   the page cache was not controlled) the sample read 0.17 to 0.87 s per file for files from 0.36 GB to 42 GB. A whole-file
+2. **A sample, not the whole file, and why (the times are measured, the weight given to the window is a judgement).** On one workstation on 2026-10-10 (its local model store;
+   the page cache was not controlled, so read these as warm-cache figures) the sample read 0.17 to 0.87 s per file for files from 0.36 GB to 42 GB. A whole-file
    sha256 of the same store ran at 389 MB/s on one core (3.8 s for a 1.47 GB file), which extrapolates (not run) to about 50 s for
    a 20 GB checkpoint and about 110 s for a 42 GB one, per node, after every release and every model change, with the node unable
-   to match until it finished: minutes of a core and of the disk, against the operator's rule that nothing overloads the host
-   or pages, and a window in which the fleet cannot take a call. The sample catches the failure this exists for: two real builds
+   to match until it finished: minutes of a core and of the disk, and a window in which the fleet cannot take a call. That the
+   window is too costly is a judgement, not a measurement, and RAM was not the reason (a streaming hash holds one 1 MiB buffer). The sample catches the failure this exists for: two real builds
    of one 42 GB transformer that share a size differed in 58 of the 64 sample blocks. There is no persisted cache: the
    fingerprint cache is in memory, keyed by path, size and modification time, so a restart reads each file's sample again
-   (sub-second per file) and nothing on disk can go stale or be written by two processes.
-3. **What it does not see (named).** A few corrupted bytes between sample points (the sample is 64 MiB of a file of tens of GB),
-   and a file replaced by one of the same size **and** the same modification time (a copy that preserves times) while the
-   process that cached the old reading is still running. Both are what a full hash would catch; after a copy that is suspect,
-   compare whole-file hashes. Amendment 1's weight check for a graph is still by name and is not changed by this one.
+   (0.17 to 0.87 s per file on the machine measured; a cold or network disk was not measured) and nothing on disk can go stale or be written by two processes.
+3. **What it does not see (named).** (a) A change confined to the stretch between two sample blocks. The blocks are evenly
+   spaced, so that stretch is about a sixty-third of the file less one block: roughly 0.3 GB of a 20 GB checkpoint and 0.65 GB of
+   a 42 GB one (`TestTheUnsampledStretchBetweenTwoBlocksIsAboutASixtyThirdOfTheFile` pins those widths, and a test rewrites a
+   whole stretch and shows the fingerprint unchanged). Every byte in it can differ and the digest is the same: a layer-wise merge
+   that changes a few transformer blocks, a VAE or text encoder baked into a checkpoint, a few corrupted bytes. A retrain or a
+   fine-tune that touches the weights throughout is seen; a change that leaves such a stretch alone may not be. (b) A file
+   replaced by one of the same size **and** the same modification time (a copy that preserves times) while the process that
+   cached the old reading is still running. A full hash would catch both; after a copy that is suspect, or a merge swapped in,
+   compare whole-file hashes (`sha256sum`) on the nodes. Amendment 1's weight check for a graph is still by name and is not
+   changed by this one.
 4. **Computed off the request path; a file not yet hashed is a named miss.** `/fleet/health` never waits for a hash. It reads the
-   cache (`Fingerprinter.Peek`); a file not yet hashed starts one background read, one file at a time so the disk is never raced,
-   and is published `"fingerprint":"pending"`; a file that could not be read, or that changed while it was read, is
+   cache (`Fingerprinter.Peek`); a file not yet hashed starts one background read, one file at a time in this process (a model load in
+   another process, ComfyUI's, is not coordinated with), and is published `"fingerprint":"pending"`; a file that could not be read, or that changed while it was read, is
    `"unreadable"` and is tried again after 30 s (chosen). **A row with any such file publishes an empty `digest`**: two nodes
    that were both pending would otherwise share a digest of unhashed files, which is the match by size this amendment ends. The
    row memo is also rebuilt when a read settles, so a pending row turns into its digest on the next health read and not up to
    a minute later. The node's 412 re-check and the delegator's own recipe wait for a fingerprint they do not have
-   (`Fingerprinter.Await`, the same cache and the same single worker), because a dispatch and a placement are not health; a
-   family with a file the node cannot fingerprint is refused with 412 naming the file and its state.
+   (`Fingerprinter.AwaitContext`, the same cache and the same single worker), because a dispatch and a placement are not health.
+   **The wait has a bound**: it ends when the request's context does (the dispatch handler's, the door's) and, whatever the
+   context, after 20 s (chosen; a cold family of four files read in a few seconds on the machine measured), and answers `pending`.
+   A family with a file the node cannot fingerprint, or has not finished, is refused with 412 naming the file and its state (the
+   delegator reads health again); at the door the same state is no identity for that call, which runs on the local line and logs
+   the reason once. **A read that does not finish in 60 s (chosen) is given up on**: its file is `unreadable`, the worker serves
+   the other files, and the read, which cannot be cancelled, runs on until the disk lets it return; the file is not read again
+   meanwhile, so a hung disk costs one goroutine and one handle per stuck file, and one log line. Until the 60 s pass, a stalled
+   read holds the single worker and every other file stays `pending`: the node publishes no digest for those families and is a
+   named miss, which is what a node with a hung disk should be. Nothing watches the disk beyond that (no watchdog, by the
+   operator's rule).
 5. **A recipe that is not fully fingerprinted is never compared, on either side.** `localIdentity` gives no identity to a family
-   with an unfingerprinted present file (the call runs as it does for a missing file); `matchNode` refuses to compare when this
+   with an unfingerprinted present file (the call runs as it does for a missing file, and the door and the adopter log why); `matchNode` refuses to compare when this
    machine's recipe has one (two all-pending recipes are the same string), and a node row whose files are not all hashed is a
    miss whether or not it carries a digest (the files are read, not only the digest). When the node holds this machine's build
    by name, size and sampling and has only not finished hashing it, the cluster row is `not-capable` and says so, and that the
    node is a candidate once it has; the ticket's next scan reads health again. A same-named, same-size file with other bytes is
-   a miss that names it: `imagegen_ckpt: <name> has the same size on both and different content (fingerprint <12 hex> vs <12 hex>)`.
+   a miss that names it: `imagegen_ckpt: <name> has the same size on both and different content (fingerprint <12 hex> vs <12 hex>)`. The
+   "send family=X to use its Y" hint reads this machine's other families from the cache without waiting and leaves out a family
+   not hashed yet, so it never holds the ticket scan up on a hash.
 6. **The deploy story.** The digest is version 2 and a recipe is compared only between the same release (`harness_version`), so a
    fleet part-way through the upgrade matches only inside each release: a delegator at this release finds no match on a node still
    on the one before, and a node at this release is matched by no older delegator, and an overflow then degrades to the local
    line and the ticket as it does for any release skew. **Every node that should take overflow must run this release before
-   the live matches can be read again.**
+   the live matches can be read again.** The first dispatch after a node restarts can be answered 412 naming a file `pending` (its
+   files are not read yet): the delegator reads health again.
 
-**Named limits of the amendment.** For a few seconds after a node starts, or after one of its weight files changes, its family is
+**Named limits of the amendment.** For a window of seconds after a node starts, or after one of its weight files changes (0.17 to
+0.87 s per file on the machine measured, with a warm cache; a cold disk was not measured), its family is
 `pending` and the node is a named miss; a delegator that starts reads its own files once, a sample per file, before its first
 comparison. **A one-shot CLI call is a fresh process, so it reads its family's samples again on every call, before the lane
 question** (an estimate from the figures above: one to three seconds for a family of three or four files; the MCP server and
-`fleet-serve` keep the cache for the life of the process). The two sizes and the 30 s retry are chosen, and the timings above are one machine's. Nothing here was run against a
+`fleet-serve` keep the cache for the life of the process). The two sizes, the 30 s retry, the 20 s wait and the 60 s read bound are chosen, and the timings above are one machine's, with the
+page cache not controlled. The 30 s retry is keyed on the file's state (path, size, modification time), so a file still being
+copied, whose size or time keeps moving, is read again on every health refresh (64 MiB at most per read, bounded by the health
+poll) and not once per 30 s. Nothing here was run against a
 live fleet: the acceptance is the three live matches of 0.179.0 read again after every node runs this release
 (docs/systems/media-generation.md, "Reading a node's recipes").

@@ -1917,12 +1917,12 @@ node is still reading it and `"unreadable"` when it cannot; **a row with any suc
 Amendment 2); `explicit` lists the sampling keys the binding
 set (the rest are the builder's defaults, already resolved in the other fields and in `digest`, which does not include
 `explicit`). The rows are read from a memo of `mediaRoutesTTL` (60 s) so health stays cheap, **and health never waits for a hash**:
-a file not yet read starts one background read (one file at a time), and the memo is rebuilt as soon as a read settles, so a
+a file not yet read starts one background read (one file at a time in this process), and the memo is rebuilt as soon as a read settles, so a
 pending row becomes its digest on the next read; a node without an image lane, an
 sd.cpp family, and a binding that names no checkpoint publish no row, and a node that predates the keys publishes none, which a
 delegator reads as "cannot be matched", never "matches anything". An `image-gen` payload may carry `recipe_digest`; admission
 recomputes the digest of the family the payload names (the default binding when `family` is empty or its own name) from the
-files on disk at that moment (waiting for a fingerprint it has not got), and a mismatch, a file it cannot fingerprint, a family
+files on disk at that moment (waiting for a fingerprint it has not got, for 20 s at most or until the request is gone), and a mismatch, a file it cannot fingerprint, a family
 this node does not serve, or a non-ComfyUI binding is answered **`412`**
 with the node's digest, before any job exists: not `409` (a job that failed here before) and not `503` (busy). A delegator that
 reads `/fleet/health` decodes the rows (`delegate.NodeView.ImageRecipes`, `RefineHonoured`) and, beside them, the singular

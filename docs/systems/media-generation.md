@@ -2011,12 +2011,15 @@ The first cut (0.179.0) had name and size only, so two same-named files of one s
 with the same tensor layout, a file updated in place on one node only) digested alike and the node's 412 check could not catch
 them. Each present weight file now carries a **fingerprint**: a sha256 of a scheme tag, the file's size and a SAMPLE of its bytes,
 64 blocks of 1 MiB at evenly spaced offsets (the first at the start of the file, the last ending at its end; a file of 64 MiB or
-less is hashed whole). The block size and count are chosen. It is a sample and not a full hash for a measured reason: on one
-workstation it read 0.17 to 0.87 s per file for files of 0.36 to 42 GB, while a whole-file sha256 ran at 389 MB/s on a core (about
+less is hashed whole). The block size and count are chosen. It is a sample and not a full hash for a measured reason (time) and a judged one (the window): on one
+workstation, page cache not controlled (read these as warm-cache figures), it read 0.17 to 0.87 s per file for files of 0.36 to 42 GB, while a whole-file sha256 ran at 389 MB/s on a core (about
 50 s for a 20 GB checkpoint, about 110 s for 42 GB, extrapolated), minutes per node after every release or model change with no
-match possible meanwhile. It separates two real builds of one 42 GB model that share a size (58 of 64 sample blocks differed). It
-does **not** see a few corrupted bytes between the sampled blocks, nor a file replaced by one of the same size and the same
-modification time while the process that cached the old reading runs; the cache (path, size, modification time) is in memory and a
+match possible meanwhile. That the window is too costly is a judgement; RAM was not the reason (a streaming hash holds one 1 MiB buffer). It separates two real builds of one 42 GB model that share a size (58 of 64 sample blocks differed). It
+does **not** see a change confined to the stretch between two sampled blocks (the blocks are evenly spaced, so that stretch is
+about a sixty-third of the file: roughly 0.3 GB of a 20 GB checkpoint and 0.65 GB of a 42 GB one; a layer-wise merge or a baked-in
+VAE can sit inside it, and a pinned test shows a rewritten stretch leaving the fingerprint unchanged), nor a file replaced by one of
+the same size and the same modification time while the process that cached the old reading runs; compare whole-file hashes after a
+merge you swap in or a copy you doubt; the cache (path, size, modification time) is in memory and a
 restart reads again (a one-shot CLI call is a fresh process, so it reads its family's samples on every call: an estimate of one
 to three seconds from the measured rates). `RecipeVersion` is 2, so a digest of 0.179.0 never equals one of this release. The digest is over **resolved** values: a key the binding leaves unset
 takes the builder's default (Qwen-Image-2.1: 40 steps, cfg 1, euler, scheduler `simple`, schedule `official`), so a node that
@@ -2030,12 +2033,16 @@ binding has no recipe; a ComfyUI recipe never matches one.
 `default`, `digest`, `files[{role,name,bytes,fingerprint}]`, the resolved sampling, `license`, `commercial_use`, and `explicit`, the
 sampling keys the binding actually set) and `refine_honoured`. The rows come from a memo of 60 s (the route cache's), so health stays
 cheap; `bytes` is `-1` for a file the node lacks, which never matches. **Health never waits for a hash.** It reads the fingerprint
-cache; a file not hashed yet starts one background read (one file at a time) and is published `"fingerprint":"pending"` (`"unreadable"`
+cache; a file not hashed yet starts one background read (one file at a time in this process) and is published `"fingerprint":"pending"` (`"unreadable"`
 when it cannot be read, retried after 30 s), and **a row with any such file has an empty `digest`**, because two nodes that were both
 pending would otherwise share a digest of unhashed files. The memo is rebuilt as soon as a read settles, so a pending row becomes its
 digest on the next health read. An image-gen dispatch may carry `recipe_digest`: the node recomputes the digest of the family the
-payload names from the files on disk **now** (waiting for a fingerprint it does not have, because a dispatch is not health) and
-refuses a mismatch, or a file it cannot fingerprint, with **412**, creating no job.
+payload names from the files on disk **now** (waiting for a fingerprint it does not have, because a dispatch is not health: for
+20 s at most or until the request is gone, and a file still unread is named `pending`) and refuses a mismatch, or a file it cannot
+fingerprint, with **412**, creating no job (the delegator reads health again). A read that does not finish in 60 s is given up on:
+that file reads `"unreadable"`, the single reader serves the others, and the harness logs it once; until then it holds the reader and
+the other files stay `pending`. The "send family=X to use its Y" hint reads this machine's other families from the cache without
+waiting, and a call with no fleet overflow because of a file this machine could not fingerprint logs which file and why.
 
 **Which node.** A node is a candidate when it serves `image-gen`; holds a family whose digest equals this machine's (strict,
 no substitution); runs this same release (`harness_version`: the graph builders ship with it); carries refine when the call sent
@@ -2098,7 +2105,8 @@ locally from when it came back, not from when it arrived).
 **Reading a node's recipes** (the first live check, before relying on a match): `curl -s http://<node>:18811/fleet/health` and
 read `image_recipes` on the target and, on a machine that also runs `fleet-serve`, on the delegator's own node: the digest of the
 family you will name there is the one the target's row must equal. A row whose files say `pending` and whose `digest` is empty is
-a node that has not finished reading them: read it again in a few seconds. **Every node must run the same release for digests to
+a node that has not finished reading them: read it again in a few seconds (a row that stays `pending` for minutes, or says
+`unreadable`, has a disk problem and the harness log has the line). **Every node must run the same release for digests to
 match** (the digest is version 2 and a recipe is compared only between the same release), so read the three live matches of
 0.179.0 again only after every node of them runs this one. A pair that does not match once both publish digests is a finding about
 the files (other bytes under one name), not a defect to fix in the matcher: the cluster answer names the file and prints the first

@@ -25,8 +25,8 @@ import (
 // whose bytes differ (a same-named re-release with the same tensor layout, a full-length altered copy, one node's file
 // updated in place and the other's not) no longer digest alike, and the node's own 412 check recomputes the same
 // fingerprint from the disk. The fingerprint is a SAMPLE (64 evenly spaced MiB of the file), so it sees a wholesale
-// difference in weights and not a few corrupted bytes between the sample points; fingerprint.go says what it was chosen
-// for and what it measured.
+// difference in weights and not a change confined to the stretch between two sample blocks (about a sixty-third of the
+// file); fingerprint.go says what it was chosen for and what it measured.
 //
 // A file whose fingerprint is not known yet (still being hashed, or unreadable) is never a match, on either side of the
 // comparison: Unfingerprinted names such files, and a recipe that has any is not an identity. The digest of a recipe

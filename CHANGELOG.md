@@ -360,18 +360,30 @@ Versioning: [SemVer](https://semver.org/).
   the digest, which is now version 2: a digest of 0.179.0 never equals one of this release.
 - **What the fingerprint is.** A sha256 of a scheme tag, the file's size and a SAMPLE of its bytes: 64 blocks of 1 MiB at evenly
   spaced offsets, the first at the start of the file and the last ending at its end, or the whole file when it is 64 MiB or smaller
-  (block size and count are chosen). A sample and not a full hash, measured: it read 0.17 to 0.87 s per file for files of 0.36 to
-  42 GB on one workstation, against 389 MB/s for a whole-file sha256 on a core (about 50 s for 20 GB and 110 s for 42 GB,
-  extrapolated), minutes per node after every release or model change. Two real 42 GB builds that share a size differed in 58 of
-  the 64 sample blocks. **It does not see a few corrupted bytes between the sampled blocks, nor a replacement with the same size
-  and the same modification time while the process that cached the old reading runs** (the cache is in memory, by path, size and
+  (block size and count are chosen). A sample and not a full hash: on one workstation, page cache not controlled (read these as
+  warm-cache figures), it read 0.17 to 0.87 s per file for files of 0.36 to 42 GB, against 389 MB/s for a whole-file sha256 on a core
+  (about 50 s for 20 GB and 110 s for 42 GB, extrapolated), minutes per node after every release or model change in which the node
+  cannot be matched; that this window is too costly is a judgement, and RAM was not the reason. Two real 42 GB builds that share a
+  size differed in 58 of the 64 sample blocks. **It does not see a change confined to the stretch between two sampled blocks (the
+  blocks are evenly spaced, so that stretch is about a sixty-third of the file: roughly 0.3 GB of a 20 GB checkpoint and 0.65 GB of
+  a 42 GB one; a layer-wise merge or a baked-in VAE can sit inside it), nor a replacement with the same size and the same
+  modification time while the process that cached the old reading runs** (the cache is in memory, by path, size and
   modification time, and a restart reads again; a one-shot CLI call is a fresh process, so it reads its family's samples on every
-  call, an estimated one to three seconds from the rates above, before the lane question); compare whole-file hashes after a copy
-  you doubt.
+  call, an estimated one to three seconds from the rates above, before the lane question); compare whole-file hashes after a merge
+  you swap in or a copy you doubt.
 - **Health never waits for it.** `/fleet/health` reads the fingerprint cache; a file not hashed yet starts one background read (one
-  file at a time) and is published `"fingerprint":"pending"` (`"unreadable"` when it cannot be read, retried after 30 s). **A row
+  file at a time in this process) and is published `"fingerprint":"pending"` (`"unreadable"` when it cannot be read, retried after 30 s). **A row
   with any such file publishes an empty `digest`**, so two nodes that were both pending cannot share one. The row memo (60 s) is
   rebuilt as soon as a read settles. The node's 412 re-check and the delegator's own recipe wait for a fingerprint they do not have.
+- **A wait for a fingerprint ends, and a stalled read is given up on.** The 412 re-check and the delegator's door wait through
+  `AwaitContext`: it ends when the request's context does and, whatever the context, after 20 s (chosen), and a file still unread is
+  named `pending` (the 412 names it and the delegator reads health again; at the door the family has no identity for that call and
+  it runs on the local line). A read that does not finish in 60 s (chosen) is given up on: that file reads `unreadable`, the single
+  reader serves the other files, the file is not read again while the first read is out, and the harness logs it once; until then a
+  stalled read holds the reader and the other files stay `pending`. The "send family=X to use its Y" hint reads this machine's other
+  families from the cache without waiting (a family not hashed yet is left out), and a call that has no fleet overflow because a file
+  of its own family could not be fingerprinted logs which file and why, from the door and from the adopter of a dead owner's ticket.
+  A file still being copied is read again on every health refresh (the 30 s retry is keyed on its size and time).
 - **A recipe that is not fully fingerprinted is never compared.** This machine's family with such a file has no identity (the call
   runs here, as for a missing file); a node whose rows are not all hashed is a `not-capable` row that says it has not finished (a
   candidate once it has), whether or not the row carries a digest; two all-pending recipes are never taken for one match; and a
@@ -379,7 +391,8 @@ Versioning: [SemVer](https://semver.org/).
   different content (fingerprint <12 hex> vs <12 hex>)`. A node whose file cannot be read answers the 412 with the file and its state.
 - **Deploying.** Every node that should take overflow must run this release: the digest is version 2 and a recipe is compared only
   between the same release (`harness_version`), so a fleet part-way through the upgrade matches only inside each release, and an
-  overflow between releases falls back to the local line and the ticket. After the upgrade the three live matches of 0.179.0 are
+  overflow between releases falls back to the local line and the ticket. The first dispatch after a node restarts can be answered
+  412 naming a file `pending`; the delegator reads health again. After the upgrade the three live matches of 0.179.0 are
   read again (`image_recipes` on both nodes of each pair); a pair that no longer matches is a finding about the files, and the
   cluster answer names the file. Nothing here was run against a live fleet.
 

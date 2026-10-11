@@ -1244,7 +1244,7 @@ type healthPayload struct {
 	// a family whose commercial_use is false, and read a null license as UNKNOWN.
 	// Omitted on a node with no named families — the pre-0.134 shape.
 	ImageFamilies []ImageFamily `json:"image_families,omitempty"`
-	// ImageRecipes is what each ComfyUI image binding IS: the weight files with their sizes, the resolved sampling,
+	// ImageRecipes is what each ComfyUI image binding IS: the weight files with their sizes and content fingerprints, the resolved sampling,
 	// the license a result is tagged with, and the digest a delegator matches and sends back as recipe_digest
 	// (image_recipe.go, ADR 0082). Additive; omitted on a node with no ComfyUI binding that names a checkpoint, and
 	// on a node that predates it, which a reader takes as "cannot be matched", never as "matches anything".
