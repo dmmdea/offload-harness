@@ -3150,21 +3150,23 @@ func runLedger(args []string) error {
 	fs := flag.NewFlagSet("ledger", flag.ExitOnError)
 	fs.String("config", "", "config file path")
 	since := fs.Int("since", 0, "only count entries from the last N days")
+	includeTraffic := includeTrafficFlag(fs)
 	_ = fs.Parse(args)
 	cfg := loadCfg(fs)
 	var sinceTS int64
 	if *since > 0 {
 		sinceTS = time.Now().AddDate(0, 0, -*since).Unix()
 	}
-	// Lock-free read: works even while the MCP server is appending to the ledger.
-	s, err := ledger.SummarizeFile(cfg.LedgerPath, sinceTS, ledger.PricesFrom(cfg.OpusInputPricePerMTok, cfg.OpusOutputPricePerMTok))
+	// Lock-free read: works even while the MCP server is appending to the ledger. Test, bake and
+	// measurement traffic is left out and counted in excluded_non_production (register F48).
+	s, err := ledger.SummarizeFileWith(cfg.LedgerPath, sinceTS, ledger.PricesFrom(cfg.OpusInputPricePerMTok, cfg.OpusOutputPricePerMTok), *includeTraffic)
 	if err != nil {
 		return err
 	}
 	// LO-8: surface WHY calls deferred — top defer reasons over the last 7 days
 	// (fixed window regardless of --since, so the recent-failure signal is
 	// always visible). Best-effort: a read error must not sink the summary.
-	reasons, rerr := ledger.TopDeferReasons(cfg.LedgerPath, time.Now().AddDate(0, 0, -7).Unix(), 5)
+	reasons, rerr := ledger.TopDeferReasonsWith(cfg.LedgerPath, time.Now().AddDate(0, 0, -7).Unix(), 5, *includeTraffic)
 	if rerr != nil {
 		fmt.Fprintln(os.Stderr, "note: defer-reason aggregation failed:", rerr)
 	}
@@ -3180,6 +3182,9 @@ func runLedger(args []string) error {
 	// line names both token counts rather than only the input one.
 	fmt.Printf("tokens kept local (est.): %d in + %d out (~$%.2f Opus value — an estimate, not billed savings)\n",
 		s.TokensSaved, s.TokensOut, s.EstValueKeptLocal)
+	if len(s.ExcludedNonProduction) > 0 {
+		fmt.Printf("left out: test, bake and measurement traffic (%s job(s)); --include-test-traffic counts it\n", describeExcluded(s.ExcludedNonProduction))
+	}
 	return nil
 }
 
@@ -4313,10 +4318,13 @@ func runConfheadEval(args []string) error {
 	_ = fs.Parse(args)
 	cfg := loadCfg(fs)
 
-	rows, err := ledger.ReadAll(cfg.LedgerPath)
+	// Test, bake and measurement rows carry a fixture's margin, not the box's (register F48): the head is
+	// judged and calibrated on production rows only, and the omission is stated.
+	rows, excluded, err := ledger.ReadProduction(cfg.LedgerPath)
 	if err != nil {
 		return fmt.Errorf("confhead-eval: read ledger: %w", err)
 	}
+	noteExcluded(excluded)
 	labels, err := ledger.ReadLabelFile(cfg.ConfHeadLabelsPath)
 	if err != nil {
 		return fmt.Errorf("confhead-eval: read labels: %w", err)
@@ -4452,10 +4460,13 @@ func runConfheadCalibrate(args []string) error {
 		dst = cfg.ConfHeadThresholdsPath
 	}
 
-	rows, err := ledger.ReadAll(cfg.LedgerPath)
+	// Test, bake and measurement rows carry a fixture's margin, not the box's (register F48): the head is
+	// judged and calibrated on production rows only, and the omission is stated.
+	rows, excluded, err := ledger.ReadProduction(cfg.LedgerPath)
 	if err != nil {
 		return fmt.Errorf("confhead-calibrate: read ledger: %w", err)
 	}
+	noteExcluded(excluded)
 	labels, err := ledger.ReadLabelFile(cfg.ConfHeadLabelsPath)
 	if err != nil {
 		return fmt.Errorf("confhead-calibrate: read labels: %w", err)
@@ -4615,12 +4626,15 @@ func runAuditSample(args []string) error {
 	n := fs.Int("n", 20, "number of cases to surface")
 	hard := fs.Bool("hard", false, "only hard cases (deferred / ungrounded / low margin)")
 	asJSON := fs.Bool("json", false, "emit JSON (for codex/Opus review)")
+	includeTraffic := includeTrafficFlag(fs)
 	_ = fs.Parse(args)
 	cfg := loadCfg(fs)
 	entries, err := ledger.ReadAll(cfg.LedgerPath)
 	if err != nil {
 		return err
 	}
+	entries, excluded := productionEntries(entries, *includeTraffic)
+	noteExcluded(excluded)
 	var picked []ledger.Entry
 	for _, e := range ledger.JobRows(entries) { // a local job is one job (C-62)
 		if e.CacheHit {
@@ -4849,12 +4863,15 @@ func runEval(args []string) error {
 func runStats(args []string) error {
 	fs := flag.NewFlagSet("stats", flag.ExitOnError)
 	fs.String("config", "", "config file path")
+	includeTraffic := includeTrafficFlag(fs)
 	_ = fs.Parse(args)
 	cfg := loadCfg(fs)
 	entries, err := ledger.ReadAll(cfg.LedgerPath)
 	if err != nil {
 		return err
 	}
+	entries, excluded := productionEntries(entries, *includeTraffic)
+	noteExcluded(excluded)
 	m := report.Summarize(entries, cfg.ConfidenceMarginThreshold)
 	b, _ := json.MarshalIndent(m, "", "  ")
 	fmt.Println(string(b))
