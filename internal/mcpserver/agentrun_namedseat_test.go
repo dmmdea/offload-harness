@@ -10,17 +10,19 @@ package mcpserver
 // real delegator engine: nothing between the door and the wire is faked, except where a test injects the dispatch seam
 // (s.reviewFleet) to read the exact arguments the door hands the engine.
 //
-// HERMETIC. The delegator appends a row to cfg.LedgerPath for every contract it places. The stale build of this item
-// appended 1,194 fixture rows to an operator's real ledger because its fixture set Home and StateDir after
-// config.Default() had already fixed LedgerPath from the real home. This fixture sets the ledger and every state path to
-// temp explicitly (the package's TestMain also points LOCAL_OFFLOAD_HOME at a throwaway root), proves the configuration
-// is temp (requireHermetic), and proves the real ledger took no row of the run (guardRealLedger).
+// HERMETIC. The delegator appends a row to cfg.LedgerPath for every contract it places, and a fixture that sets Home and
+// StateDir after config.Default() has fixed LedgerPath from the real home writes those rows to the operator's real ledger
+// (the package's TestMain records one such incident, where fixture rows read as fleet traffic). This fixture sets the ledger
+// and every state path to a directory the test owns (the package's TestMain also points LOCAL_OFFLOAD_HOME at a throwaway
+// root), proves the configuration is there (requireHermetic), and proves the real ledger took no row of the run
+// (guardRealLedger).
 
 import (
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -71,7 +73,7 @@ func (n *nsNode) received() []core.AgentContract {
 
 func newNSNode(t *testing.T, id, agentSeat string, served ...string) *nsNode {
 	t.Helper()
-	n := &nsNode{id: id, agentSeat: agentSeat, served: served}
+	n := &nsNode{id: id + "-" + nsTag(t), agentSeat: agentSeat, served: served}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /fleet/health", func(w http.ResponseWriter, _ *http.Request) {
 		n.healths.Add(1)
@@ -181,9 +183,9 @@ func requireHermetic(t *testing.T, cfg config.Config, root string) {
 	}
 }
 
-// guardRealLedger fails the test when a row carrying marker was appended to the ledger the operator's real home would
-// name (DefaultBase without LOCAL_OFFLOAD_HOME). The ledger is append-only, so what matters is the bytes added after the
-// test began, and unrelated writers (a live harness on the same machine) cannot trip it: only the marker can.
+// guardRealLedger fails the test when a row carrying marker (nsTag) was appended to the ledger the operator's real home
+// would name (DefaultBase without LOCAL_OFFLOAD_HOME). The ledger is append-only, so what matters is the bytes added after
+// the test began, and unrelated writers (a live harness on the same machine) cannot trip it: only the marker can.
 func guardRealLedger(t *testing.T, marker string) {
 	t.Helper()
 	home, err := os.UserHomeDir()
@@ -191,30 +193,71 @@ func guardRealLedger(t *testing.T, marker string) {
 		return
 	}
 	path := filepath.Join(home, ".local-offload", "ledger.jsonl")
-	var before int64
-	if st, serr := os.Stat(path); serr == nil {
-		before = st.Size()
-	}
+	before := ledgerSize(path)
 	t.Cleanup(func() {
-		f, oerr := os.Open(path)
-		if oerr != nil {
-			return
-		}
-		defer f.Close()
-		if _, serr := f.Seek(before, io.SeekStart); serr != nil {
-			return
-		}
-		added, _ := io.ReadAll(f)
-		if bytes.Contains(added, []byte(marker)) {
+		if bytes.Contains(ledgerAddedSince(path, before), []byte(marker)) {
 			t.Errorf("the real ledger %s took a row of this test (marker %q): the fixture is not hermetic", path, marker)
 		}
 	})
 }
 
+// ledgerSize is the size of the ledger at path, 0 when there is none.
+func ledgerSize(path string) int64 {
+	if st, err := os.Stat(path); err == nil {
+		return st.Size()
+	}
+	return 0
+}
+
+// ledgerAddedSince returns the bytes appended to the ledger at path after it was before bytes long (nil when there are none
+// or it cannot be read).
+func ledgerAddedSince(path string, before int64) []byte {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	if _, err := f.Seek(before, io.SeekStart); err != nil {
+		return nil
+	}
+	added, _ := io.ReadAll(f)
+	return added
+}
+
+// TestLedgerAddedSinceReadsOnlyWhatWasAppended pins the reading the guard rests on: rows written before the test began are
+// never its business, and a row appended after is.
+func TestLedgerAddedSinceReadsOnlyWhatWasAppended(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ledger.jsonl")
+	if got := ledgerSize(path); got != 0 {
+		t.Fatalf("a missing ledger has size 0, got %d", got)
+	}
+	if got := ledgerAddedSince(path, 0); got != nil {
+		t.Fatalf("a missing ledger has nothing added, got %q", got)
+	}
+	if err := os.WriteFile(path, []byte(`{"before":"tag-x"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	before := ledgerSize(path)
+	if bytes.Contains(ledgerAddedSince(path, before), []byte("tag-x")) {
+		t.Fatalf("a row written before the test began must not be read as the test's")
+	}
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(`{"after":"tag-y"}` + "\n"); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	if added := ledgerAddedSince(path, before); !bytes.Contains(added, []byte("tag-y")) || bytes.Contains(added, []byte("tag-x")) {
+		t.Fatalf("want exactly the appended row, got %q", added)
+	}
+}
+
 // runNS calls the agent_run door with args (a goal carrying marker is added when none is given) and decodes the answer.
 func runNS(t *testing.T, s *Server, marker string, args map[string]any) map[string]any {
 	t.Helper()
-	guardRealLedger(t, marker)
+	guardRealLedger(t, nsTag(t))
 	if _, has := args["goal"]; !has {
 		args["goal"] = "digest the standing notes in one paragraph " + marker
 	}
@@ -227,6 +270,16 @@ func runNS(t *testing.T, s *Server, marker string, args map[string]any) map[stri
 }
 
 func nsMarker(t *testing.T) string { return "ns-marker-" + strings.ReplaceAll(t.Name(), "/", "-") }
+
+// nsTag is a short token unique to the test, carried by every fake node's id. A ledger row does not hold the goal, but it
+// names the node and the seat that took the work (model_tier "<node>:<seat>"), so the tag in a node's id is what a row the
+// test leaked would carry; guardRealLedger looks for it, and TestAgentRunLedgerRowsCarryTheTagTheRealLedgerGuardLooksFor
+// proves a row does.
+func nsTag(t *testing.T) string {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(t.Name()))
+	return fmt.Sprintf("t%08x", h.Sum32())
+}
 
 func nsReason(m map[string]any) string { r, _ := m["reason"].(string); return r }
 
@@ -553,6 +606,220 @@ func TestAgentRunNamingALayersAgentSeatPassesTheRealGate(t *testing.T) {
 	got := comp.received()
 	if len(got) != 1 || got[0].Layer != "wide" {
 		t.Fatalf("the node must receive one contract naming layer wide, got %+v", got)
+	}
+}
+
+// compositeNS is a composite node whose default layer runs defaultSeat and whose layer serves seat as its agent seat.
+func compositeNS(t *testing.T, id, defaultSeat, layer, seat string) *nsNode {
+	t.Helper()
+	n := newNSNode(t, id, defaultSeat, defaultSeat, seat)
+	n.layers = []placetable.LayerRow{
+		{Name: "base", Admissible: true, Reason: "ok", Seats: []placetable.SeatRow{{Role: "agent", Model: defaultSeat, CtxTokens: 32768}}},
+		{Name: layer, Admissible: true, Reason: "ok", Seats: []placetable.SeatRow{{Role: "agent", Model: seat, CtxTokens: 32768}}},
+	}
+	return n
+}
+
+// engineArgs captures what the door hands the dispatch seam, and answers as a node would.
+type engineArgs struct {
+	remotes  []string
+	contract core.AgentContract
+	calls    int
+}
+
+func (e *engineArgs) seam(result core.AgentWireResult, node string) fleetDispatch {
+	return func(_ context.Context, _ config.Config, _ delegate.LocalRunner, subtasks []core.AgentContract, _ string, remotes []string, _ *delegate.RunOptions) ([]delegate.PlacedResult, delegate.Summary, error) {
+		e.calls++
+		e.remotes, e.contract = remotes, subtasks[0]
+		return []delegate.PlacedResult{{Node: node, Seat: result.Seat, PlacementReason: "route=remote forced -> " + node, Result: result}}, delegate.Summary{}, nil
+	}
+}
+
+// TestAgentRunPrefersNodesThatRunTheNameAsTheirAgentSeatOverLayeredOnes: a node that runs the name as its own agent seat
+// takes the contract with no layer; a composite node that only serves it from a layer is not asked beside it, because one
+// contract names one layer and that layer would make the plain node ineligible.
+func TestAgentRunPrefersNodesThatRunTheNameAsTheirAgentSeatOverLayeredOnes(t *testing.T) {
+	comp := compositeNS(t, "node-comp", "default-agent-seat", "wide", nsFastSeat)
+	plain := newNSNode(t, "node-plain", nsFastSeat, nsFastSeat)
+	s, _ := nsDoor(t, []string{nsLocalSeat}, []string{comp.url, plain.url}, nil)
+	var e engineArgs
+	s.reviewFleet = e.seam(core.AgentWireResult{SchemaVersion: core.AgentWireSchemaVersion, Output: nsAnswer, Seat: nsFastSeat}, "node-plain")
+
+	m := runNS(t, s, nsMarker(t), map[string]any{"model": nsFastSeat})
+
+	if m["deferred"] == true {
+		t.Fatalf("want an answer, got %v", m)
+	}
+	if len(e.remotes) != 1 || e.remotes[0] != plain.url || e.contract.Layer != "" {
+		t.Errorf("only the node that runs the name as its agent seat may be asked, with no layer: remotes=%v layer=%q", e.remotes, e.contract.Layer)
+	}
+}
+
+// TestAgentRunNamingASeatServedFromDifferentLayersNamesTheFirstNodesLayer: with no node running the name as its agent seat
+// and composite nodes serving it from different layers, one contract can name only one layer: the first node's, and only
+// the nodes that serve it from that layer are asked.
+func TestAgentRunNamingASeatServedFromDifferentLayersNamesTheFirstNodesLayer(t *testing.T) {
+	first := compositeNS(t, "node-first", "default-agent-seat", "wide", nsFastSeat)
+	other := compositeNS(t, "node-other", "default-agent-seat", "deep", nsFastSeat)
+	third := compositeNS(t, "node-third", "default-agent-seat", "wide", nsFastSeat)
+	s, _ := nsDoor(t, []string{nsLocalSeat}, []string{first.url, third.url, other.url}, nil) // the node on another layer is last, so "the first node's layer" and "the last node's" differ
+	var e engineArgs
+	s.reviewFleet = e.seam(core.AgentWireResult{SchemaVersion: core.AgentWireSchemaVersion, Output: nsAnswer, Seat: nsFastSeat}, "node-first")
+
+	m := runNS(t, s, nsMarker(t), map[string]any{"model": nsFastSeat})
+
+	if m["deferred"] == true {
+		t.Fatalf("want an answer, got %v", m)
+	}
+	if e.contract.Layer != "wide" || len(e.remotes) != 2 || e.remotes[0] != first.url || e.remotes[1] != third.url {
+		t.Errorf("want layer wide on the two nodes that serve it from that layer: layer=%q remotes=%v", e.contract.Layer, e.remotes)
+	}
+}
+
+// TestAgentRunNamingASeatOnANodeWithTheAgentLaneOffSaysSo: a node that does not advertise the agent lane is not a target
+// even when its agent seat is the name, and the refusal says why it was passed over.
+func TestAgentRunNamingASeatOnANodeWithTheAgentLaneOffSaysSo(t *testing.T) {
+	off := newNSNode(t, "node-off", nsFastSeat, nsFastSeat)
+	off.agentOff = true
+	s, _ := nsDoor(t, []string{nsLocalSeat}, []string{off.url}, nil)
+
+	m := runNS(t, s, nsMarker(t), map[string]any{"model": nsFastSeat})
+
+	if m["deferred"] != true || !strings.Contains(nsReason(m), "node-off") || !strings.Contains(nsReason(m), "agent lane is not advertised") {
+		t.Fatalf("the refusal must say the node's agent lane is not advertised, got %v", m)
+	}
+	if off.dispatches.Load() != 0 {
+		t.Errorf("a node without the agent lane must not be dispatched to")
+	}
+}
+
+// TestAgentRunARosterEntryTheTailnetGuardRefusesIsConfigNotInfrastructure: an entry the guard never dials is the
+// operator's roster to fix, not a box that is down, so it does not turn the refusal into an infrastructure one; it is still named.
+func TestAgentRunARosterEntryTheTailnetGuardRefusesIsConfigNotInfrastructure(t *testing.T) {
+	a := newNSNode(t, "node-a", nsBigSeat, nsBigSeat)
+	s, _ := nsDoor(t, []string{nsLocalSeat}, []string{a.url, "http://not-a-tailnet-host.example.com:18811"}, nil)
+
+	m := runNS(t, s, nsMarker(t), map[string]any{"model": nsFastSeat})
+
+	if m["deferred"] != true || m["defer_class"] != core.DeferClassConfig {
+		t.Fatalf("a guard-refused entry is config, got %v", m)
+	}
+	if r := nsReason(m); !strings.Contains(r, "not-a-tailnet-host.example.com") || !strings.Contains(r, "not dialled") {
+		t.Errorf("the refusal must name the entry that was never dialled, got %q", r)
+	}
+}
+
+// TestAgentRunRouteRemoteNamingASeatNobodyRunsIsRefusedWithWhereItLooked: with route=remote this box's roster was never
+// consulted, so its sentence is not used: the reason says no fleet node runs the model and where the fleet looked.
+func TestAgentRunRouteRemoteNamingASeatNobodyRunsIsRefusedWithWhereItLooked(t *testing.T) {
+	a := newNSNode(t, "node-a", nsBigSeat, nsBigSeat)
+	dead := deadNodeURL(t)
+	s, _ := nsDoor(t, []string{nsLocalSeat}, []string{a.url, dead}, nil)
+
+	m := runNS(t, s, nsMarker(t), map[string]any{"route": "remote", "model": nsFastSeat})
+
+	if m["deferred"] != true || m["defer_class"] != core.DeferClassInfrastructure {
+		t.Fatalf("want an infrastructure refusal (one node did not answer), got %v", m)
+	}
+	reason := nsReason(m)
+	for _, need := range []string{fmt.Sprintf("no fleet node runs model %q as its agent seat", nsFastSeat), "node-a", nsBigSeat, strings.TrimPrefix(dead, "http://")} {
+		if !strings.Contains(reason, need) {
+			t.Errorf("the refusal must say %q, got %q", need, reason)
+		}
+	}
+	if strings.Contains(reason, "served roster") {
+		t.Errorf("this box's roster sentence must not appear on route=remote: %q", reason)
+	}
+	if steps, _ := m["steps"].(float64); steps != 0 || m["route"] != "remote" {
+		t.Errorf("want steps 0 on route remote, got %v", m)
+	}
+}
+
+// TestAgentRunRouteRemoteNamingASeatWithNoFleetSaysThereIsNoFleet: a box that lists no node has nowhere to run the name.
+func TestAgentRunRouteRemoteNamingASeatWithNoFleetSaysThereIsNoFleet(t *testing.T) {
+	s, _ := nsDoor(t, []string{nsLocalSeat}, nil, nil)
+
+	m := runNS(t, s, nsMarker(t), map[string]any{"route": "remote", "model": nsFastSeat})
+
+	if m["deferred"] != true || m["defer_class"] != core.DeferClassConfig || !strings.Contains(nsReason(m), "delegate_remotes is empty") {
+		t.Fatalf("want a config refusal naming the empty delegate_remotes, got %v", m)
+	}
+}
+
+// TestAgentRunARoutedCallThatCannotRideAContractIsRefusedAtTheDoor: the call goes through the delegation intake, so a
+// malformed field dies at the door naming it, and nothing is asked of the fleet.
+func TestAgentRunARoutedCallThatCannotRideAContractIsRefusedAtTheDoor(t *testing.T) {
+	a := newNSNode(t, "node-a", nsFastSeat, nsFastSeat)
+	s, _ := nsDoor(t, []string{nsLocalSeat}, []string{a.url}, nil)
+
+	m := runNS(t, s, nsMarker(t), map[string]any{"route": "remote", "thinking": "sometimes"})
+
+	if m["deferred"] != true || m["defer_class"] != core.DeferClassContract || !strings.Contains(nsReason(m), "thinking") {
+		t.Fatalf("want a contract-class refusal naming thinking, got %v", m)
+	}
+	if a.healths.Load() != 0 || a.dispatches.Load() != 0 {
+		t.Errorf("a refused call must touch nothing: healths=%d dispatches=%d", a.healths.Load(), a.dispatches.Load())
+	}
+}
+
+// TestAgentRunARoutedCallTheFleetDefersCarriesItsClassNodeAndFinishedAnswer: a deferral keeps what the node said: its
+// reason and class, where it ran, and the loop's finished prose when only the structuring failed (flagged, never graded).
+func TestAgentRunARoutedCallTheFleetDefersCarriesItsClassNodeAndFinishedAnswer(t *testing.T) {
+	a := newNSNode(t, "node-a", nsFastSeat, nsFastSeat)
+	s, _ := nsDoor(t, []string{nsLocalSeat}, []string{a.url}, nil)
+	var e engineArgs
+	s.reviewFleet = e.seam(core.AgentWireResult{SchemaVersion: core.AgentWireSchemaVersion, Seat: nsFastSeat, Steps: 5, Deferred: true,
+		Reason: "structured re-pack unreachable", DeferClass: core.DeferClassInfrastructure, SchemaMiss: true, Output: "the finished prose"}, "node-a")
+
+	m := runNS(t, s, nsMarker(t), map[string]any{"route": "remote", "model": nsFastSeat})
+
+	if m["deferred"] != true || m["defer_class"] != core.DeferClassInfrastructure || nsReason(m) != "structured re-pack unreachable" {
+		t.Fatalf("the node's reason and class must reach the caller, got %v", m)
+	}
+	if m["output"] != "the finished prose" || m["schema_miss"] != true {
+		t.Errorf("the finished answer must ride the deferral, flagged schema_miss: %v", m)
+	}
+	if m["node"] != "node-a" || m["executed_on"] != "fleet" || m["placement"] == nil {
+		t.Errorf("the deferral must say where it ran: %v", m)
+	}
+	if steps, _ := m["steps"].(float64); steps != 5 {
+		t.Errorf("steps = %v, want the node's 5", m["steps"])
+	}
+}
+
+// TestAgentRunARoutedAnswerCarriesThePlacementTheNodeReports: a composite node's `placed` block rides the answer.
+func TestAgentRunARoutedAnswerCarriesThePlacementTheNodeReports(t *testing.T) {
+	a := newNSNode(t, "node-a", nsFastSeat, nsFastSeat)
+	s, _ := nsDoor(t, []string{nsLocalSeat}, []string{a.url}, nil)
+	var e engineArgs
+	s.reviewFleet = e.seam(core.AgentWireResult{SchemaVersion: core.AgentWireSchemaVersion, Seat: nsFastSeat, Output: nsAnswer,
+		Placed: &core.Placed{Layer: "wide", Role: "agent", Seat: nsFastSeat}}, "node-a")
+
+	m := runNS(t, s, nsMarker(t), map[string]any{"route": "remote", "model": nsFastSeat})
+
+	if p, _ := m["placed"].(map[string]any); p["layer"] != "wide" || p["seat"] != nsFastSeat {
+		t.Errorf("the node's placed block must be published, got %v", m["placed"])
+	}
+}
+
+// TestAgentRunLedgerRowsCarryTheTagTheRealLedgerGuardLooksFor proves the real-ledger guard is not vacuous: a run's row lands
+// in the ledger the fixture configured, and it carries the test's tag, so the same row appended to the operator's real
+// ledger is exactly what guardRealLedger would catch.
+func TestAgentRunLedgerRowsCarryTheTagTheRealLedgerGuardLooksFor(t *testing.T) {
+	a := newNSNode(t, "node-a", nsFastSeat, nsFastSeat)
+	s, _ := nsDoor(t, []string{nsLocalSeat}, []string{a.url}, nil)
+
+	m := runNS(t, s, nsMarker(t), map[string]any{"model": nsFastSeat})
+
+	if m["deferred"] == true {
+		t.Fatalf("want an answer, got %v", m)
+	}
+	rows, err := os.ReadFile(s.p.Cfg().LedgerPath)
+	if err != nil {
+		t.Fatalf("the run must record its row in the ledger the fixture configured (%s): %v", s.p.Cfg().LedgerPath, err)
+	}
+	if !bytes.Contains(rows, []byte(nsTag(t))) {
+		t.Fatalf("the row must carry the tag %q the real-ledger guard looks for, got %s", nsTag(t), rows)
 	}
 }
 
