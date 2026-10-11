@@ -941,29 +941,15 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	// the field out of its own answer. Presence only: a direct object that carries
 	// the field empty is delivered as it is.
 	outSchema := core.RequireAcceptanceFields(contract.OutputSchema, contract.Acceptance)
-	startFit := seatrate.FitFinalBudget(seatrate.FinalFit{
-		ConfiguredFinal: finalBudget,
-		RemainingSec:    float64(timeoutSec),
-		OtherSec:        float64(est.OtherSec),
-		TokS:            est.TokS,
-		Schema:          hasSchema,
-	})
+	// The fit itself: InstallFinalFit (finalfit.go) installs it on the loop and
+	// returns the run-start figure published below. It is the one copy of that
+	// arithmetic: the local agent_run door installs the fit through it too
+	// (register D-134), so the two doors cannot size one run differently.
+	startFit := InstallFinalFit(built.Loop, est, finalBudget, timeoutSec, hasSchema)
 	wire.FinalBudgetFit, wire.BudgetNote = startFit.Budget, startFit.Note
 	if startFit.Note != "" {
 		log.Printf("agent task: final-budget fit (%s): %s", seat, startFit.Note)
 	}
-	built.Loop.WithFinalBudgetFit(func(configured int, remaining time.Duration) (int, string) {
-		// At the final turn the cold load, the think block and the tool steps
-		// are already spent, so only the answer (and its re-pack) still has to
-		// fit — OtherSec is 0 here on purpose.
-		f := seatrate.FitFinalBudget(seatrate.FinalFit{
-			ConfiguredFinal: configured,
-			RemainingSec:    remaining.Seconds(),
-			TokS:            est.TokS,
-			Schema:          hasSchema,
-		})
-		return f.Budget, f.Note
-	})
 	// A cut final on a schema contract is re-issued ONCE with the schema's own
 	// list caps (D-95), gated on the wall still holding one turn at this seat's
 	// rate. No schema, no instruction, no re-issue — and no rate means a 0
