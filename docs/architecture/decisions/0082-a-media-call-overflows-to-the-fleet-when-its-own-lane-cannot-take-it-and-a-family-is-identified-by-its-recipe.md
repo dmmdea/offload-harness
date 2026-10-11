@@ -45,7 +45,8 @@ Three facts made the obvious change unsafe as stated.
    have served; it may call free a lane the grant then refuses, and the call then runs locally as before, after the one bounded card-table read the question costs. A call that resumes a place in line counts only the callers
    that arrived before that place, on every plan, because the lease queue serves a resumed place by arrival time (ADR 0083
    decision 4; `TestMediaLaneFreeOrdersByArrivalForACallThatResumesItsPlace`); a new arrival counts every other caller in line. Every doubt
-   (a lease this process inherited, a card table that does not read in 4 s, a request it does not model) reads as free. It
+   (a lease this process inherited, a card table that does not read in 4 s, a request it does not model) reads as free; a READ that
+   failed (the card table, the lease directory) also says so (`Unjudged`, ADR 0083 decision 5), and a router does not take it for a free lane. It
    creates no lease, place in line, epoch, waiter record, ledger row, PAIR card or ComfyUI instance, and it removes nothing: the
    readers of the line it shares with the admission prune a record they find dead (an expired place, a waiter that stopped
    polling) as housekeeping, and the probe reads through `gpulease.Manager.ReadOnly`, a view that skips such a record and leaves
@@ -109,7 +110,7 @@ Three facts made the obvious change unsafe as stated.
    `unreachable`, `in-use`, `refused`, `bounced`, `skipped`), each with the reason in the node's own terms (the lease and its
    reason, the key that differs and the family of this machine that would match, the release or the refine it lacks) and since when.
    A call that ran is not annotated. **A whole-node graph (Amendment 1) is a ticket too** (ADR 0083 Amendment 1, which supersedes
-   what 0.180.0 shipped: a graph that went on to the local admission from when it came back): when nothing admits it, it waits for
+   the first cut, never released: a graph that went on to the local admission from when it came back): when nothing admits it, it waits for
    the first matching lane that frees, and its answer carries the same `cluster[]`.
 9. **Never overflow** a call that runs under a lease its process inherited, on a box with no `delegate_remotes` (that path is byte for
    byte what it was, and asks the lane nothing), or for anything but an image job or a whole-node graph in this release (Amendment 1
@@ -209,8 +210,8 @@ card. This amendment adds them under four rules; every other decision stands, an
    largest family the box binds: the lease is taken for the graph as a whole before anything reads its weights, so that is an
    upper bound and not the graph's own size), under the same contract: a relaxation of the real wait-0 admission, held by
    a differential test, that writes nothing. ADR 0083 turned an image call into a ticket, and **its Amendment 1 does the same for a
-   graph** (it supersedes the one-shot placement 0.180.0 shipped, which offered the graph once to at most three nodes and then
-   joined the local queue late): a busy graph waits for the first matching lane that frees, the scanner applying rules 1, 3 and 4
+   graph** (it supersedes the one-shot placement of this ADR's first cut, never released, which offered the graph once to at most three
+   nodes and then joined the local queue late): a busy graph waits for the first matching lane that frees, the scanner applying rules 1, 3 and 4
    below to each node. A node's 503 for a file the graph names carries `refusal: "not_capable"`: the ticket marks that node
    not-capable for itself, quoting the node, and puts no pause on it (a full node's 503 is the placer's, as for an image). A graph
    that names `devices` (refused by `plan()` before the lane is asked) and one under an inherited lease are no tickets and stay here.
@@ -235,7 +236,7 @@ card. This amendment adds them under four rules; every other decision stands, an
    cites it says so. The caller's number wins over it, 0 included. The floor filters remote candidates only: the local lane is
    the node's own grant.
 
-**Named limits of the amendment.** *Closed by ADR 0083 Amendment 1:* in 0.180.0 a graph did not wait in the cluster queue; it is a ticket
+**Named limits of the amendment.** *Closed by ADR 0083 Amendment 1:* in this ADR's first cut a graph did not wait in the cluster queue; it is a ticket
 now, identified by the content of its graph and manifest. The file check is by name (a same-named file of other bytes is held), which is why a graph that
 reads an input file is not auto-overflowed, though a call that must leave its machine anyway keeps the same-named-file risk. Input files need to be on the node already when a node is named by hand. The node's
 host-RAM guard sizes a graph at the media class default, not at the files the door has resolved, so a graph naming weights bigger

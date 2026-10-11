@@ -322,9 +322,14 @@ local-offload run-graph --graph wf.json --manifest manifest.json --out-dir out/
 ```
 
 Executes any API-format ComfyUI graph under the same GPU-lock/zero-warm lifecycle. With a fleet
-(`delegate_remotes`) an `auto` graph whose lane is not free goes to an idle node instead of waiting, under three rules
-([media-generation.md](systems/media-generation.md), "Graphs on the fleet"): the node must hold every model file and input file the
-graph names (it refuses with 503 naming what it lacks, and the call moves on); it must publish exactly **one** card, because a
+(`delegate_remotes`) an `auto` graph whose lane is not free (or whose lane could not be read) is a **ticket**: the harness holds it
+and starts it on the first matching lane that frees, here or on an idle node, in order of arrival, and the call answers with the
+ticket, its position and, per node, why not yet (the MCP tool answers inside `wait_s`, the CLI blocks and tells you on stderr where
+the ticket stands; a first Ctrl-C before anything was sent cancels it). The ticket keeps its own copy of the graph and the manifest,
+so overwriting or deleting your file afterwards changes nothing, and `waiter_token=mq-...` collects the result even then. A node takes
+it under three rules ([media-generation.md](systems/media-generation.md), "Graphs on the fleet"): it must hold every model file and
+input file the graph names (it refuses with 503 naming what it lacks; that marks the node not-capable for this ticket alone, quoting the
+node, and the ticket moves on and asks that node again only after 5 minutes); it must publish exactly **one** card, because a
 whole-node graph runs in the default ComfyUI instance, which sees every card, and could land on a multi-GPU box's display card (a
 single card that drives a display passes); and,
 with `--min-vram-gb N`, its largest card must be at least N GB (a 16 GB card reads 15.92 GiB and counts as 16). `--model-family wan22`
@@ -332,9 +337,10 @@ with a graph height of 720 or more gets a 16 GB floor **chosen** from the film o
 card), not measured; `--min-vram-gb 0` lifts it. The floor filters nodes only: `--route local` never reads it. With the fleet as
 the film owner described it on 2026-10-09 (the 16 GB cards are the multi-card workstation's three; the single-card nodes have 8 GB
 cards) the two rules together leave a default-floor Wan graph no remote node: it waits for its own lane. A graph that reads an input
-file (`LoadImage`, `LoadVideo`, `LoadAudio`) is never auto-overflowed either, because a node can match such a file only by name; the
-call waits for this machine's own lane, and if that wait ends in a deferral the deferral says the fleet was not asked and why (a
-call that then runs here and succeeds carries no such note). A call that must leave this machine anyway (`--route remote`, or
+file (`LoadImage`, `LoadVideo`, `LoadAudio`) is a ticket that is never offered to a node, because a node can match such a file only by
+name; it keeps its place and its position and waits for this machine's own lane, and every answer it gives carries `fleet_note`
+saying the fleet was not asked and why (a result carries no such note). A waiting graph ticket's place is the whole-node one, so
+younger calls on this machine's lane queue behind it. A call that must leave this machine anyway (`--route remote`, or
 `auto` on a machine with no graph lane) still sends it, with the node's check by name only. On every route that sends a graph to
 a node, the node must run this machine's own release (the file check ships with it): a node on another release, or one that
 publishes none, is skipped by name, so a fleet part-way through an upgrade takes graphs only on the nodes already upgraded. The **node manifest** (`node_packs[{name,repo,commit}]` + `models[{path,source_url,sha256}]`)

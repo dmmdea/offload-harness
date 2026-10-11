@@ -172,13 +172,32 @@ Versioning: [SemVer](https://semver.org/).
   order of arrival, with one answer that says per node why not (`cluster[]`) and no caller loop. The MCP door answers inside `wait_s`
   (new argument; else the machine's `gpu_wait_ms`) and the ticket goes on after the call returns; `run-graph` on the CLI blocks until
   the job is done, prints on stderr where the ticket stands, and the first Ctrl-C cancels a ticket that sent nothing. This closes the
-  limit this release stated for graphs ("a graph does not wait in the cluster queue yet").
+  limit this release stated for graphs ("a graph does not wait in the cluster queue yet"). **A graph whose lane could not be read is a
+  ticket too**: the graph probe answered "free, not judged" for a lease directory that would not open and a card table that did not read
+  inside its 4 s bound, without the `Unjudged` flag the image probe sets for exactly those two reads, so a graph in that state (the
+  card table is slowest to read exactly when a heavy render holds the card) skipped the queue and took the old pipeline wait with a
+  `tk-` token. It now sets the flag for those two reads and for nothing else (a graph that names devices, and a process under a lease it
+  inherited, are not in question for the lane); the ticket's first scan looks at the fleet, and the run on this machine's lane is the
+  answer only when no node can take the graph (`TestMediaLaneFreeGraphIsFreeWhenTheCardTableCannotBeRead`,
+  `TestMediaLaneFreeGraphIsUnjudgedWhenTheLeaseDirectoryCannotBeOpened`, `TestAnUnreadLaneStillLooksAtTheFleetForAGraph`).
 - **A graph is the same call when its content is.** The key is the sha256 of the task and the parameters without the `waiter_token`,
   with the graph and the manifest taken as canonical JSON (keys sorted, whitespace dropped, numbers as written) in place of their
   paths: the MCP door writes an inline `graph_json` to a new temp file on every call, so a key made of the path would never attach,
   and a file edited under the same path is another graph. `out_dir`, `reserve_vram`, `min_vram_gb` and `model_family` are part of the
   key. One ticket per identical request, from either of two processes; `waiter_token=mq-...` collects it. The ticket mints no seed and
   sends no recipe: the graph owns its sampling.
+- **The ticket is the bytes it was admitted with.** The key was the graph file's content at admit, and the node was sent that content,
+  but this machine's own lane was handed the file's PATH and read it when the lane freed, up to eight hours later: a caller that reuses
+  one file (shot 1 written, "queued", shot 2 written over it) got shot 2 rendered under shot 1's key and shot 1 never rendered, a
+  different result depending on which lane served the ticket, and a finished result that could not be collected by its own token once
+  the file was removed or edited (the key is recomputed from the file at every call). The ticket now writes the graph and the manifest
+  as the plan holds them into its queue directory (`body-<id>-graph.json`, `body-<id>-manifest.json`), takes its key from those bytes,
+  and the node's payload, the local run, the need and an adopter all read them; the copies go with the ticket (finished, canceled, swept
+  after an owner that died before sending, the loser of a create race), stay while a dead owner's placed ticket can be adopted, and are
+  never swept while a ticket may still be being made. A graph ticket also records a path key (the same paths and parameters, no file
+  read): a `waiter_token` is accepted for a request with the same content or the same path key, so the result stays collectable and a
+  dead owner's placed job is adopted from the copies after the file is gone or overwritten, while a repeat WITHOUT a token attaches by
+  content alone (a file overwritten with the next shot is a new job and inherits no arrival).
 - **It keeps its place in this machine's line.** `LeaveMediaPlace` answered "only image generation is probed" for a graph; it now
   leaves the whole-node token the real admission leaves for a waiting graph (reason `run-graph`) at the ticket's arrival time, brings
   along a `tk-` place the call already held, and the final local run spends it through `waiter_token`. A host that leases no cards keeps
@@ -210,16 +229,30 @@ Versioning: [SemVer](https://semver.org/).
   file that has gone would turn into a lost VRAM floor) and is killed by the test added for it; one is killed by a timeout and not by an
   assertion (a refusal that is not remembered makes the ticket POST in a loop). The order of two lines in the not-capable path (the
   refusal is kept before the ticket goes back in line) is a race too narrow to fail on demand and is not mutation-checked.
-- **Compatibility.** No config key or file format changed: a ticket file gains an optional `fleet_note`, the 503 body an optional
-  `refusal`, `offload_run_graph` an optional `wait_s`. A session started before the deploy keeps the one-shot path until restarted; it
+- **Review fixes, mutation-checked.** The two defects above (the local run reading the live path, and the unread lane) were reproduced
+  by the reviewers and written as tests first: the lane ran the overwritten file's bytes, the token was refused as "a different request"
+  after the file was removed or edited, the adopter could not plan after the file was gone, and the graph probe returned `Unjudged:
+  false` for an unreadable table and an unopenable lease directory; every one failed before the change. Nineteen mutations of the new
+  rules (no repointing to the copies, the token ignoring the path key, the adopter planning from the caller's path, a losing create or
+  a finished ticket or a removed one keeping its copies, the sweep taking a young orphan, an in-flight ticket's copies or never an old
+  orphan, a key that is not the plan's bytes, no path key recorded, an arrival inherited for other content, five choices of the
+  `Unjudged` flag, and the two places that would run an unread lane here) were each proven applied, run through the RAM guard and
+  restored byte for byte: all 19 are killed. The first set left two surviving (a removal covered only by a redundant one, an inherited
+  arrival) and four that did not compile; the tests added for the first two and valid forms of the rest are the 19.
+- **Compatibility.** No config key or file format changed: a ticket file gains an optional `fleet_note` and an optional `path_key`, the
+  queue directory `body-*` files while a graph ticket lives, the 503 body an optional `refusal`, `offload_run_graph` an optional `wait_s`. A session started before the deploy keeps the one-shot path until restarted; it
   reads the claim files and honours them, and writes none (the old limit). A node on the build before this one answers its file refusal
   without the word, which a delegator of this build reads as a 503 for a full node (the old behaviour); graph placement already requires
   an equal `harness_version`, so such a node is not a candidate while the numbers differ.
-- Not changed, and said: the file check is by name, not content; a graph is read once when its ticket is made, for the nodes, and the
-  local run reads the file when this machine's lane serves it (a file edited meanwhile runs here as edited); the ticket remembers a
-  node's refusal in the owning process only. No VERSION or buildinfo bump. **Nothing here was run live**: live acceptance A9 (the
-  workstation lane and the headless node held, a graph call gets one ticket answer and then runs on the first node released) is the
-  first evidence.
+- Not changed, and said: the file check is by name, not content, and the bytes of a graph's input files are no part of its key (a
+  finished result nobody collected, kept up to six hours, answers a repeat of the same graph even if the caller has put other bytes
+  under the same input name: set another `out_dir`, which is part of the key, or collect first); the ticket remembers a node's refusal
+  in the owning process only; a waiting graph ticket's place is the whole-node token, so every call that arrives after it queues behind
+  it on this machine's own lane, an image call whose own card is idle included (it can still go to an idle node), until the ticket
+  runs, is canceled or ends (8 h at most), which is the seniority asked for and also what it costs. No VERSION or buildinfo bump.
+  **Nothing here was run live**: live acceptance A9 (the workstation lane and the headless node held, a graph call gets one ticket
+  answer and then runs on the first node released; with the workstation's card table slow to read while a render holds it, the same
+  holds, because an unread lane is a ticket) is the first evidence.
 
 ### Fixed — a healthy long render's lease (a render helper, or a script that runs one) is no longer labelled "expired ... open to a takeover" (F8)
 

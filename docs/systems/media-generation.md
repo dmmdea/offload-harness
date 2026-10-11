@@ -2230,7 +2230,11 @@ every route that sends a graph to a node holds it to the rules below. The graph 
 what makes a node a fit is that it **holds the files the graph names**, and the node says so itself.
 
 **A graph is a ticket.** The ticket queue above is the busy-lane path of an image call and of a whole-node graph (a graph that names
-`devices` is card-scoped: it is never offered to a node, and it is no ticket). Four things differ from an image's, each held by a test:
+`devices` is card-scoped: it is never offered to a node, and it is no ticket). A lane the pipeline could not READ (the card table past
+its bound, the lease directory not opening) is not a free lane for a graph either, as for an image: the graph is a ticket and its first
+scan looks at the fleet (`TestMediaLaneFreeGraphIsFreeWhenTheCardTableCannotBeRead`,
+`TestMediaLaneFreeGraphIsUnjudgedWhenTheLeaseDirectoryCannotBeOpened`, `TestAnUnreadLaneStillLooksAtTheFleetForAGraph`,
+`TestAnUnreadLaneWithNoNodeRunsAGraphHere`). Five things differ from an image's, each held by a test:
 
 - **Identity is the graph's content.** The key is the sha256 of the task and the parameters without the `waiter_token`, with the
   graph and the manifest taken as what they say (canonical JSON: keys sorted, whitespace dropped, numbers as written) in place of the
@@ -2240,6 +2244,20 @@ what makes a node a fit is that it **holds the files the graph names**, and the 
   request, from either of two processes, and `waiter_token=mq-...` collects it (`TestABusyGraphIsATicketAndTheSameGraphAttachesToIt`,
   `TestAGraphsKeyIsItsContent`, `TestTwoProcessesAskingForOneGraphAtOnceMakeOneTicket`). The ticket mints no seed and sends no
   recipe digest: the graph owns its own sampling (`TestAGraphTicketKeepsItsPlaceInTheLocalLine`).
+- **The ticket is its bytes.** A ticket may wait for hours and the caller's graph file is the caller's: reused for the next shot,
+  edited, removed. The ticket writes the graph and the manifest as the plan holds them into its queue directory
+  (`body-<id>-graph.json`, `body-<id>-manifest.json`; the one request body the store keeps), takes its key from those bytes, and
+  the node's payload, the local run, the need and an adopter all read them, so whichever lane serves it renders the same graph
+  (`TestAGraphTicketRunsTheBytesItWasAdmittedWith`, `TestAGraphTicketSendsTheBytesItWasAdmittedWithToANode`,
+  `TestACreatedGraphTicketIsKeyedByWhatItHolds`, `TestAGraphTicketsKeyComesFromTheBytesItHolds`). The copies go with the ticket and
+  stay while a dead owner's placed ticket can be adopted (`TestAGraphTicketsCopiesLiveAndDieWithTheirTicket`,
+  `TestALosingCreateLeavesNoCopies`). The ticket also stores a path key (the same paths and parameters, no file read): a
+  `waiter_token` is accepted for a request with the same content or the same path key, so a finished result is collected by its token
+  and a dead owner's placed job is adopted from the copies after the file is gone or overwritten
+  (`TestAGraphTicketIsCollectedByItsTokenOnceItsFilesAreGoneOrEdited`,
+  `TestADeadOwnersPlacedGraphIsAdoptedAfterTheCallersFilesAreGone`); a repeat WITHOUT a token attaches by content alone, and an
+  abandoned ticket's arrival is inherited only by the same content
+  (`TestATokenOfAnAbandonedGraphTicketInheritsItsArrivalOnlyForTheSameContent`).
 - **Seniority.** The place a graph keeps in this machine's line is the whole-node token the real admission leaves for a waiting graph
   (no card named, reason `run-graph`; `Pipeline.leaveGraphPlace`), at the ticket's arrival time; a place the call already held is
   brought along; the final local run spends it through `waiter_token`
@@ -2359,12 +2377,16 @@ The floor filters **remote** candidates only: the local lane is this machine's o
 malformed value (negative, not a number) is refused by name on every route (`mediaremote.Run`), so a call that stays on this
 machine never drops it silently.
 
-**Named limits of the graph ticket.** The graph is read once, when its ticket is made, for the nodes; the local run reads the file again
-when this machine's lane serves it, so a file edited meanwhile runs here as edited (and a repeat of the edited file is another
-ticket). The ticket remembers a node's refusal in the owning process only: an adopter of a ticket that went back to waiting asks that
-node once more. A graph's lane reading is the whole-node one, so a lane the pipeline could not read (the card table past its bound) reads
-as free and the graph runs here, as before. Nothing here was run against a live lease, a live node or a render: A9 of the step report
-is the first live evidence.
+**Named limits of the graph ticket.** The graph is read once, when its ticket is made, and the ticket keeps that copy, so a file
+overwritten or removed meanwhile changes nothing (a repeat of the overwritten file is another ticket). What it does not keep is the
+input files a graph reads: their bytes are no part of the key, so a finished result nobody collected (kept up to six hours) answers a
+repeat of the same graph even when the caller has put other bytes under the same input name; set another `out_dir` (part of the key)
+or collect first. The ticket remembers a node's refusal in the owning process only: an adopter of a ticket that went back to waiting
+asks that node once more. A graph ticket's place in this machine's line is the whole-node token, so every call that arrives after it
+queues behind it on this machine's own lane, an image call whose own card is idle included (it can still go to an idle node), until
+the ticket runs, is canceled or ends (8 h at most); that is the seniority the operator asked for, and it is also what it costs. Nothing
+here was run against a live lease, a live node or a render: the live acceptance in the CHANGELOG entry of this change (A9) is the
+first live evidence.
 
 **Not built.** Input files for graphs, and with them a size and hash of each to let a graph that reads one go to a node; a
 content check of the files; `devices` on a remote graph; a custom node's own file key; a default floor for other families or for

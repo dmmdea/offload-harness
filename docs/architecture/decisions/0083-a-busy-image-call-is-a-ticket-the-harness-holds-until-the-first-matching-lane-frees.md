@@ -116,8 +116,9 @@ make the caller retry. Three things were still wrong once every lane was busy.
     admits, the call is a ticket, not a local run that joins the line late. Decision 9: a call that carries a `waiter_token`
     overflows like any other, bringing its place along. All four were written for an image call; Amendment 1 extends them to a
     whole-node graph.
-12. **Superseded by Amendment 1 below.** *What 0.180.0 shipped, kept as the record:* a whole-node graph is not a ticket. ADR 0082's Amendment 1 (a graph overflows to an idle single-card node that
-    holds the files it names) is released together with this ADR. The ticket is the only busy-lane path of an IMAGE call; a graph
+12. **Superseded by Amendment 1 below.** *The state this decision was first written in (never released), kept as the record:* a
+    whole-node graph is not a ticket. ADR 0082's Amendment 1 (a graph overflows to an idle single-card node that holds the files it
+    names) goes out together with this ADR. The ticket is the only busy-lane path of an IMAGE call; a graph
     keeps the one-shot placement of the first cut (`tryGraphOverflow` and `placeGraph` in `internal/mediaremote/place.go`, reached
     from `RunWith` before the ticket door): it is offered once to the nodes that can take it, at most three, one graph call of a
     process per node, and never a node a ticket of this machine has a job on (it reads the claim files and writes none), and when
@@ -157,9 +158,9 @@ make the caller retry. Three things were still wrong once every lane was busy.
 
 - **Keep S1's synchronous placement beside the ticket.** Rejected for an image call: a first call that placed itself outside the
   ticket bypassed the claim, so two processes' first calls could still stack on one idle node, and a bounced first call still
-  rejoined the local line late. It was kept for a whole-node graph in 0.180.0 (decision 12), reading the claim files so that it did not
+  rejoined the local line late. It was kept for a whole-node graph in this ADR's first cut (decision 12), reading the claim files so that it did not
   take a node a ticket was using, and the same two defects stayed with it; Amendment 1 removes it.
-- **Make a whole-node graph a ticket in the same release.** Deferred in 0.180.0, not rejected: the identity of a graph call was
+- **Make a whole-node graph a ticket in the first cut.** Deferred there, not rejected: the identity of a graph call was
   undecided. Amendment 1 decides it (the content of the graph) and does it.
 - **Park the job on the first node that will be free soonest.** Rejected: a lease end is a ceiling, not a promise, and a job parked
   on a node cannot be recalled; late binding starts it on whichever lane frees first.
@@ -186,7 +187,9 @@ supersedes decision 12.
    that cannot be read keeps its path in the key, and the lane that runs it reports the contract. The ticket mints no seed and sends
    no recipe digest: the graph owns its own sampling, and decision 3 is for an image.
 2. **The trigger and the place are the whole-node reading's.** A graph that names no devices asks `Pipeline.MediaLaneFree` (ADR 0082
-   Amendment 1 rule 2); a free lane runs it here as it always did, a busy one makes the ticket. The place it keeps in this machine's
+   Amendment 1 rule 2); a free lane runs it here as it always did, a busy one makes the ticket, and so does a lane the pipeline
+   tried to read and could not (the card table past its bound, the lease directory not opening: decision 5's `Unjudged`, which the
+   graph probe sets for exactly those two reads and for nothing else), whose ticket looks at the fleet in its first scan. The place it keeps in this machine's
    line is the whole-node token the real admission leaves for a waiting graph (no card named, reason `run-graph`;
    `Pipeline.leaveGraphPlace`, which adds no admission logic), at the ticket's arrival time, resumed if the call already held one,
    touched like an image ticket's and spent by the final local run through `waiter_token`. A graph that names `devices`, one under an
@@ -224,6 +227,18 @@ supersedes decision 12.
 8. **ADR 0082 changes** in decision 8 (a graph that no node admits is a ticket and carries `cluster[]` in its answer), decision 9 (a
    graph that carries a `waiter_token` brings its place into the ticket), decision 11 (a graph is no longer outside the four
    amendments), and Amendment 1 rule 2 and its named limits.
+9. **The ticket is its bytes.** A ticket may wait for hours and the caller's graph file is the caller's: reused for the next shot,
+   edited, removed. So the ticket writes the graph and the manifest exactly as the plan holds them into its queue directory
+   (`body-<id>-graph.json`, `body-<id>-manifest.json`), takes its key from those bytes, and the node's payload, the local run, the
+   need and an adopter all read them: whichever lane serves the ticket renders the same graph, and nothing the caller does to its own
+   file afterwards changes it. They are the one request body the store keeps (an image's lives in the owning process). They go with
+   the ticket (finished, canceled, swept after an owner that died before sending, the loser of a create race), stay while a dead
+   owner's placed ticket can still be adopted, and are never swept while a ticket may still be being made (younger than a minute).
+   The ticket also stores a **path key** (the same paths and parameters, no file read): a `waiter_token` is accepted for a request
+   with the same content or the same path key, so a result stays collectable by the token it was promised under after the file is
+   gone or overwritten, and the call that names it adopts a placed job from the copies. A repeat WITHOUT a token attaches by content
+   alone: a file overwritten with the next shot is a new job, and it does not inherit the arrival of an abandoned ticket it only
+   shares paths with.
 
 **Consequences.** A graph call that finds every lane busy no longer comes back as the local lane's own queued answer with a `tk-`
 token the caller must re-send; it comes back with a ticket and does not loop, as an image does. A caller that obeyed the old text and
@@ -231,12 +246,18 @@ re-sends with its `tk-` token still gets a ticket, bringing its place. The one-s
 run ended in (a graph that, after its wait, failed here with a typed code); the final result of a ticket is the lane's own, as an image
 ticket's is, and the per-node reasons live in the queued answers. A node that lacks a file is asked once per ticket per 5
 minutes instead of being hidden for 5 s from everything. Every waiting graph ticket costs what an image ticket costs: one lane
-question and one roster read per scan (a local-only ticket reads no roster). The graph is read once, when the ticket is made, for the
-nodes; the local run reads the file again when this machine's lane serves it, so a file edited meanwhile runs here as edited (and a
-repeat of the edited file is another ticket). A lane the pipeline could not read reads as free for a graph and the graph runs here, as
-before. Tickets of a build before this amendment, and processes started before it, keep the one-shot behaviour until restarted: they
-read the claim files and honour them, and they write none. Nothing here was run against a live lease, a live node or a render; A9 of
-the step report is the first live evidence.
+question and one roster read per scan (a local-only ticket reads no roster). The graph is read once, when the ticket is made, and the
+ticket keeps that copy (rule 9), so a file overwritten or removed meanwhile changes nothing and a repeat of the overwritten file is
+another ticket. What the ticket does not keep is the input files a graph reads (rule 5): their bytes are no part of the key, so a
+finished result nobody collected (kept up to six hours) answers a repeat of the same graph even when the caller has put other bytes
+under the same input name; such a caller sets another `out_dir` (part of the key) or collects first. A waiting graph ticket's place
+is the whole-node token, so every call that arrives after it queues behind it on this machine's own lane, an image call whose own
+card is idle included (it can still go to an idle node), until the ticket runs, is canceled or ends (8 h at most); an image
+ticket's place names its cards, and before this amendment a graph's place lapsed about ten minutes after its caller stopped
+polling. That is the seniority the operator asked for and also what it costs. A lane that could not be read is a ticket, not a graph
+that waits in the pipeline with a `tk-` token. Processes started before this amendment keep the one-shot behaviour until restarted:
+they read the claim files and honour them, and they write none. Nothing here was run against a live lease, a live node or a render;
+the live acceptance in the CHANGELOG entry of this change (A9) is the first live evidence.
 
 ## Related code
 
