@@ -579,6 +579,9 @@ func runGPUReserve(args []string) error {
 		return nil
 	}
 
+	if wrapperBeforeCard != nil {
+		wrapperBeforeCard(sw)
+	}
 	// A signal that came in while the plan was made (the card table is read, patiently, above) ends the reserve before
 	// anything is opened: no card to close, no place in line to leave, nothing held.
 	if sig := sw.Signal(); sig != nil {

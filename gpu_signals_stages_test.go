@@ -20,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -232,9 +233,19 @@ func TestASignalDuringTheDrainReleasesTheLeaseAndOwesNoWarm(t *testing.T) {
 // nothing taken and no card to close.
 func TestASignalBeforeTheLeaseIsAskedForTakesNothing(t *testing.T) {
 	r := newStageRig(t)
-	old := wrapperSignalFeed
-	wrapperSignalFeed = func(c chan<- os.Signal) { c <- syscall.SIGTERM } // already pending when the wrapper looks
-	t.Cleanup(func() { wrapperSignalFeed = old })
+	oldFeed, oldBefore := wrapperSignalFeed, wrapperBeforeCard
+	var feed chan<- os.Signal
+	ready := make(chan struct{})
+	wrapperSignalFeed = func(c chan<- os.Signal) { feed = c; close(ready) }
+	// The signal is delivered AT the checkpoint, and the checkpoint waits until the watch has recorded it. The feed runs in its
+	// own goroutine, so a signal that is merely "already pending" can still be on its way when the checkpoint looks, and then it
+	// is found by a later stage with the card open: the test passed or failed on the scheduler.
+	wrapperBeforeCard = func(w *signalWatch) {
+		<-ready
+		feed <- syscall.SIGTERM
+		<-w.Done()
+	}
+	t.Cleanup(func() { wrapperSignalFeed, wrapperBeforeCard = oldFeed, oldBefore })
 
 	args := append([]string{"--config", r.cfg, "--wait", "20s", "--reason", "early"}, markerCmd()...)
 	var err error
@@ -289,6 +300,122 @@ func TestASignalWhileChoosingCardsEndsTheAllocation(t *testing.T) {
 			}
 			if n := len(m.Waiters()); n != 0 {
 				t.Errorf("the waiter must leave the line, %d remain", n)
+			}
+		})
+	}
+}
+
+// newScopedStageRig is newStageRig on a host with card-scoped leases (the config key and a green reader audit) and the
+// synthetic three-card table: `--cards` plans on the card table and allocates, so it needs both.
+func newScopedStageRig(t *testing.T) *stageRig {
+	t.Helper()
+	r := newStageRig(t)
+	b, err := os.ReadFile(r.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(b, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	cfg["gpu_card_scoped_leases"] = true
+	if b, err = json.Marshal(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(r.cfg, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gpuDir := filepath.Join(filepath.Dir(r.cfg), "gpu")
+	if err := os.MkdirAll(gpuDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(gpuDir, "reader-audit.json"), []byte(`{"result":"green"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	useCardTable(t, "")
+	return r
+}
+
+// THE CARD CHOICE, THROUGH THE WRAPPER: the test above drives the allocation loop with a cancel it closes itself, so it pins
+// the loop and not the wiring. This one runs `gpu reserve --cards 1` and delivers the signal a console close sends, so what is
+// pinned is what runGPUReserve hands the loop: the watch's Done as the lease line's cancel (Options.Cancel), the watch's
+// Sleep as the allocator's sleep, and the wrapper's own words for the end ("while queued", the signal, "never started").
+func TestASignalWhileChoosingCardsThroughTheReserveEndsTheWait(t *testing.T) {
+	const signalAt = 300 * time.Millisecond
+	cases := []struct {
+		name  string
+		hold  bool          // the test holds the whole node first
+		extra []string      // flags that keep the allocator from finding a card
+		bound time.Duration // how long after the signal is SENT the wrapper may take to end
+	}{
+		// Every card is held, so the request queues on a set: the lease line's own cancel ends it at its next poll (about 1 s).
+		{name: "every card is held, so the request queues on a set", hold: true, bound: 6 * time.Second},
+		// No card has the VRAM, so the allocator polls every 2 s: the watch's Sleep must wake it on the signal, or the wait ends
+		// at the next poll, about 1.7 s after the signal. The bound stays under that, and far above what a woken wait takes.
+		{name: "no card has the VRAM, so the allocator polls", extra: []string{"--vram", "100"}, bound: time.Second},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			r := newScopedStageRig(t)
+			var holder *gpulease.Lease
+			if tc.hold {
+				var err error
+				holder, err = r.m.TryAcquire(gpulease.ClassMedia, gpulease.Options{Reason: "whole node bench", TTL: time.Hour})
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer func() { _ = holder.Release() }()
+			}
+			// The bound is measured from the moment the signal is sent, not from the start of the reserve: the wrapper's set-up
+			// (the lease directory, the card table, the PAIR card) is not what it judges, and on a loaded box it can be slow.
+			var sentAt atomic.Int64
+			oldFeed := wrapperSignalFeed
+			wrapperSignalFeed = func(c chan<- os.Signal) {
+				time.Sleep(signalAt)
+				sentAt.Store(time.Now().UnixNano())
+				c <- syscall.SIGTERM
+			}
+			t.Cleanup(func() { wrapperSignalFeed = oldFeed })
+
+			args := append([]string{"--config", r.cfg, "--class", "media", "--cards", "1", "--wait", "20s", "--reason", "choose"}, tc.extra...)
+			args = append(args, markerCmd()...)
+			var err error
+			stderr := captureStderr(t, func() { err = runGPUReserve(args) })
+			took := time.Since(time.Unix(0, sentAt.Load()))
+			if err == nil {
+				t.Fatalf("a card choice ended by a signal is not a success\n%s", stderr)
+			}
+			if took > tc.bound {
+				t.Errorf("the wrapper ended %s after the signal, want within %s\n%s", took, tc.bound, stderr)
+			}
+			for _, w := range []string{"SIGTERM", "likely", "while queued", "never started"} {
+				if !strings.Contains(err.Error(), w) {
+					t.Errorf("the error %q lacks %q", err, w)
+				}
+			}
+			if strings.Contains(err.Error(), "cancelled by its caller") {
+				t.Errorf("the signal is the cause, not the cancel's own wording: %v", err)
+			}
+			if r.commandStarted() {
+				t.Error("the command must not start after the signal")
+			}
+			if n := len(r.m.Waiters()); n != 0 {
+				t.Errorf("the waiter must leave the line, %d record(s) remain", n)
+			}
+			if tc.hold {
+				if info := r.m.Inspect(); !info.Held || info.Reason != "whole node bench" {
+					t.Errorf("the signal must not touch the other holder's lease: %+v", info)
+				}
+			}
+			method, errText, methods := r.cardEnd(t)
+			if method != "workload:errored" {
+				t.Fatalf("the card must be closed (failed) with the cause, frames %v\n%s", methods, stderr)
+			}
+			for _, w := range []string{"SIGTERM", "while queued", "never started"} {
+				if !strings.Contains(errText, w) {
+					t.Errorf("the card's error %q lacks %q", errText, w)
+				}
 			}
 		})
 	}

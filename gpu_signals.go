@@ -41,6 +41,12 @@ var wrapperCommandStarted func()
 // to land one in that window (it is as wide as the lines between two statements). Production leaves it nil.
 var wrapperBeforeStart func(*signalWatch)
 
+// wrapperBeforeCard is the same seam for the checkpoint that keeps a signalled wrapper from opening its card: called right
+// before it, handed the watch. The feed that delivers a test's signal runs in its own goroutine, so without a wait for the
+// watch to record the signal the checkpoint can look first and the signal is then found by a later stage, the card already
+// open. Production leaves it nil.
+var wrapperBeforeCard func(*signalWatch)
+
 // The stages a signal can find the wrapper in before its command runs, worded for the card: the card keeps 140 characters
 // (pairworkloads.CardErrorMax) and cuts the rest, so each stage text, with the signal and the cause around it, is asserted to
 // fit whole (TestEveryStageTextFitsTheCardWhole). The re-queue after a lease lost during the drain reuses stageQueued.
