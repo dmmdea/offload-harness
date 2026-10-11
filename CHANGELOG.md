@@ -6,6 +6,10 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed — tests that depended on the machine that ran them (no product change)
+
+- **`internal/sandbox` `TestWindowsLowILWriteConfinement` passed only when the temp directory sat under the user profile.** The cage lowers a worktree's mandatory integrity label for a run, which needs `WRITE_OWNER` on it, and owning a directory does not grant that. On a drive whose root ACL gives Authenticated Users "Modify" and the user nothing by name, the label change is refused ("Access is denied"), `Run` goes on without lowering (best effort, fails safe) and a low-integrity child cannot write the worktree, so the test failed on any temp directory off the profile. The test's worktree now comes from `labelableTempDir`, which grants the owner an explicit full-control entry and leaves the labelling to `Run`, so the test proves the cage's labelling and not the temp directory's inherited ACL (disabling `applyLowIntegrityLabel` fails it on every drive). `TestWindowsRelabelRevertedAfterRun` takes the same directory: on such a drive it had passed without ever seeing a label to revert (a no-op revert passed it). The cage itself is unchanged, including that it proceeds unlabelled when the label change is refused.
+
 ## [0.180.0] - 2026-10-10 - a busy image call waits for the first matching lane anywhere in the cluster, graphs overflow to a node that holds their files, and a live render keeps its lease
 
 ### Fixed — the ticket queue was off on any machine whose config sets no `state_dir`, which is the usual config (ADR 0083)
