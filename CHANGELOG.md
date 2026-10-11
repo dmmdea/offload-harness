@@ -386,7 +386,10 @@ Versioning: [SemVer](https://semver.org/).
   and `TopDeferReasons` default the same way (`SummarizeFileWith` / `TopDeferReasonsWith` include them), `ledger.ReadProduction`
   and `ledger.ProductionRows` are the filtered readers, and `ledger.ReadAll` stays the raw one. The confidence calibration, the
   tier health report, the router and the correctness head are fitted on production rows only: a fixture's margin would move the
-  live thresholds. `TestEveryRawLedgerReaderFiltersTestTraffic` fails when a new report reads the raw rows without dropping them.
+  live thresholds. The calibration, the health report and the router read the file with their own scanners, and they judge the rows
+  TOGETHER (`ledger.ProductionRows`), so the inner `agent` row of a measurement-pinned job, which names its parent and carries no
+  class of its own, leaves with its parent as it does in the views above (a first version judged each row alone and counted it).
+  `TestEveryRawLedgerReaderFiltersTestTraffic` fails when a new report reads the raw rows without dropping them.
 - **PAIR.** A process with a run class opens no card (`pairworkloads.Config.Suppressed`, through the gate every card already
   uses) and asks no fleet node to card its jobs: an asker with no emitter sends `X-Offload-Pair-Card: node`, which would have put
   the card back on the node, so a suppressed asker sends the asker name and no card header. A delegation pinned for `measurement`
@@ -412,7 +415,9 @@ Versioning: [SemVer](https://semver.org/).
   `TestARemoteCallThroughTheMeasureDoorOpensNoCardButStillWritesItsRow` (pairworkloads);
   `TestAMeasurementPinnedDelegationOpensNoPairCard`, `TestAMeasurementPinnedDispatchAsksNoNodeToCard` (delegate);
   `TestLedgerCommandLeavesOutTestTrafficAndSaysSo`, `TestLoupeLeavesOutTestTrafficAndSaysSo`, `TestStatsAndAuditSampleLeaveOutTestTraffic`
-  (root); the four `...ProductionRowsOnly` tests of the health, calibration, router and confhead packages.
+  (root); the four `...ProductionRowsOnly` tests of the health, calibration, router and confhead packages, and the inner-row twins of
+  three of them (`TestHealthLeavesOutTheInnerRowOfALabelledJob`, `TestRouterTrainsWithoutTheInnerRowsOfALabelledJob`,
+  `TestCalibrationLeavesOutTheInnerRowsOfALabelledJob`: red before, three mutants each caught).
 
 ### Added — a busy whole-node graph is a ticket in the cluster queue, and a node's "I do not hold this file" is about that ticket only (S5, ADR 0083 Amendment 1)
 
