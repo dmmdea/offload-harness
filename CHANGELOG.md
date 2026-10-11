@@ -6,6 +6,16 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added — a mutation harness whose RED has to compile (register H-17)
+
+- **`scripts/mutation-check.sh` and its PowerShell twin `scripts/mutation-check.ps1`** are the one proof that a test can fail. They run the
+  unmutated control arm (which must pass), apply a single-line mutation and assert it landed (line endings compared normalised, so an LF
+  pattern cannot fake a pass on a CRLF file), compile the test binary first (a mutant that does not build is `BAD-MUTANT`, never `RED`),
+  report `RED` or `SURVIVED`, and restore the file byte for byte on every path, including a signal or Ctrl-C; each prints the applied
+  mutation and a final `MUTATION-VERDICT:` line. The self-tests (`scripts/mutation-check-selftest.sh`, `.ps1`) show every verdict on the
+  fixture module `scripts/testdata/mutfixture`; `CONTRIBUTING.md` and `docs/systems/security.md` (invariant I5) point at the harness. No
+  Go package is touched.
+
 ## [0.180.0] - 2026-10-10 - a busy image call waits for the first matching lane anywhere in the cluster, graphs overflow to a node that holds their files, and a live render keeps its lease
 
 ### Fixed — the ticket queue was off on any machine whose config sets no `state_dir`, which is the usual config (ADR 0083)

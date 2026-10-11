@@ -34,6 +34,20 @@ llama.cpp server.
   [ADR 0001](docs/architecture/decisions/0001-defer-never-cloud-fallback.md) and
   [ADR 0060](docs/architecture/decisions/0060-opt-in-browse-lane-drives-the-operators-browser.md).)
 
+## Proving a test can fail
+
+A test that has only ever passed proves nothing, so a fix or a new gate is shown to work by making it fail on purpose:
+apply one single-line mutation that removes the control and watch the test go red. Do that with
+[`scripts/mutation-check.sh`](scripts/mutation-check.sh) (PowerShell twin: [`scripts/mutation-check.ps1`](scripts/mutation-check.ps1)),
+not with an ad hoc `sed` plus `go test` that counts any failure as a kill. From the module root it takes the file, the
+mutation (`--old`/`--new`, or `--marker` to pick the line) and either a Go package (`--pkg ./internal/x --run TestX`) or your
+own `--test` and `--compile` commands, and it runs the unmutated control arm, which must pass; applies the mutation and asserts
+it landed, comparing with line endings normalised so a CRLF file cannot fake a pass; compiles the test binary before
+running the tests, so a mutant that does not build is reported `BAD-MUTANT` and never counted as a kill; reports `RED` (the
+tests caught it) or `SURVIVED` (they did not); and restores the file byte for byte, even when interrupted. Quote the final
+`MUTATION-VERDICT:` line, with the mutation it printed, in the pull request. `bash scripts/mutation-check-selftest.sh` (or
+`pwsh -File scripts/mutation-check-selftest.ps1`) shows every verdict on a fixture under `scripts/testdata/`.
+
 ## Documentation
 
 Documentation lives in [`docs/`](docs/README.md) and is part of the change, not a follow-up.
