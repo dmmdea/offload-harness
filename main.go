@@ -1234,14 +1234,28 @@ func runRunGraph(args []string) error {
 		return err
 	}
 
-	cfg := loadCfg(fs)
+	cfg, src := loadCfgWithSource(fs)
 	p, cleanup, err := openPipeline(cfg)
 	if err != nil {
 		return err
 	}
 	defer cleanup()
 
-	res := mediaremote.Run(context.Background(), cfg, p, core.Request{Task: core.TaskRunGraph, Door: "cli:run-graph", Params: params}, *route, remotes)
+	// This verb IS the wait, as generate-image's is (ADR 0083 Amendment 1): when this machine's lane is busy the graph becomes a
+	// ticket and the verb blocks until the first matching lane that frees has run it, telling the operator where it stands on
+	// stderr. The first Ctrl-C cancels a ticket that has sent nothing anywhere (a graph already on a node cannot be recalled; run
+	// the same command to collect it); the second interrupt is the default one.
+	ictx, stopInterrupt := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stopInterrupt()
+	go func() {
+		<-ictx.Done()
+		stopInterrupt()
+	}()
+	wait := mediaremote.Wait{Window: -1, Notify: func(line string) { fmt.Fprintln(os.Stderr, line) }}
+	if src.Loaded() {
+		wait.RosterFile = src.Path
+	}
+	res := mediaremote.RunWith(ictx, cfg, p, core.Request{Task: core.TaskRunGraph, Door: "cli:run-graph", Params: params}, *route, remotes, wait)
 	emitResult(res, *asJSON, "", *compactFlag)
 	return nil
 }
