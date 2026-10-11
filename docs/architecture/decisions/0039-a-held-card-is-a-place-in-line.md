@@ -182,7 +182,11 @@ lease, the argv and the declaration it always was):
    node for a call the runner then refuses, because it names no cards. A binding with no recipe is refused before any lease.
 4. **The declaration is the pair's.** 0 host RAM only for a recipe whose host growth was measured with the read-only loader and whose per-card peaks fit
    the two leased cards; a predicted recipe declares the ordinary estimate and says it is predicted. An early merge of a guess costs a wait, never a
-   false 0.
+   false 0. The 0 is said (the pipeline's log, `gpu reserve`), because nothing corrects it afterwards. The per-card peaks follow the call: the DiT's total is
+   the invariant, so a resident share below the recipe's puts the same bytes on the storage card, and a canvas above the recipe's cap is no recipe's figure.
+5. **A row that was never run is held back, not launched.** A recipe row may carry a reason it may not launch (`blocked`); it stays in the table for the arm
+   that would lift it, but the runner refuses it by name and the door, the estimate and the doctor treat the binding as one without a recipe. The 2.1 int8
+   convrot row is held: its int8 DiT on the non-default device is a recorded fault of the loader, and no arm ran it there.
 
 Alternatives rejected. *The allocator with a pair-sized plan* (`PickAuto` with two cards): it would let the display card into the pair when the operator is
 away, and it chooses among cards by free VRAM, which says nothing about which two a recipe was measured on. *Falling back to one card* when one of the

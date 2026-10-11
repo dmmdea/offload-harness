@@ -138,8 +138,12 @@ node render/preflight-graph.mjs hunyuan   # validate a graph vs a running ComfyU
   name). The two cards are the lease's (`--cards` only names them when no lease does), never a display card, and the runner starts its
   own keyed ComfyUI on them, the one the Wan placement uses. Run it under `local-offload gpu reserve --devices <a>,<b> -- node render/comfy-edit.mjs
   out.png in.png "<instruction>" --unet <fp8mixed file> --placement multicard`, flags spelled `--flag value`; `[--resident-gb N]` moves the DiT's share on the
-  compute card. Only the 2511 fp8mixed edit has a *measured* row, so it alone declares 0 host RAM; the others declare the ordinary estimate until a run with the
-  read-only loader promotes them. `docs/systems/media-generation.md`, "Card-only image and edit".
+  compute card (the DiT's total is the invariant: a smaller share puts the same bytes on the storage card, and a split that card cannot hold is refused). Only the 2511
+  fp8mixed edit has a *measured* row, so it alone declares 0 host RAM (and `gpu reserve` says so); the others declare the ordinary estimate until a run with the
+  read-only loader promotes them. The 2.1 int8 convrot row is held back (its DiT on `cuda:1` never ran) and refused by name; an edit canvas pinned above the recipe's
+  2.0 MP cap is refused before anything starts. The runner checks the recipe's loader classes and their inputs against `/object_info` before it submits, watches the pair's
+  ComfyUI console while it waits (`IMAGE-PLACEMENT-OOM` ends a wait on a worker that died of an out-of-memory error), and keeps an image whose VAE decode ComfyUI retried tiled
+  beside the requested path as `<name>.tiled.<ext>` (`IMAGE-DECODE-FALLBACK`). `docs/systems/media-generation.md`, "Card-only image and edit".
 - **`--reserve-vram 2.0`** keeps headroom for the Windows display/WDDM (too low → a decode spike
   kills the whole process with no traceback).
 - **Qwen2.5-VL fp8 text encoder CPU-offloads automatically** (~free with 64 GB RAM, saves 4–6 GB).
