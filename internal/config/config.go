@@ -1865,6 +1865,13 @@ type Config struct {
 	//
 	// The node only READS it. Nothing in the harness rewrites a live serving
 	// config; re-rendering is `install render`, run by a human.
+	//
+	// It is also where a model that `layers` do not declare is placed: the env
+	// CUDA_VISIBLE_DEVICES of its entry names its card, which the GPU lease's
+	// unload list (register F15) and the load gate (register C-86a, ModelPins) read
+	// through internal/servingcfg, so that a lease on one card leaves the seats on
+	// the others alone. Unset, unreadable or not listing the model, the model is on
+	// every card and a lease fences it, as it always did.
 	ServingConfigPath string `json:"serving_config_path,omitempty"`
 	// FleetQueueHost — Option B, ADR 0030, DARK by default: when true THIS
 	// node's fleet server also hosts the consolidated pull queue (durable
