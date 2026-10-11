@@ -53,6 +53,66 @@ at the deadline with no answer. This closes what D-102 left PARTIAL: the case is
   closure never installed, a raised budget, the answer or the deferral left unstamped, the door installing with no rate, the node
   no longer calling the shared function, the stamp ignoring its own narrowing rule.
 
+### Added — `agent_run(model: <seat>)` runs on the fleet node whose agent seat is that model, and every routed `agent_run` carries the schema the gate requires (D-125, C-46)
+
+Two defects shared one door. `agent_run` checked the `model` it was given against this box's llama-swap roster and refused any
+name that roster lacks (`explicitly requested model … is not in the endpoint's served roster`), however many fleet nodes ran
+it, so a seat another node runs could not be asked for by name from a box that does not serve it. And a routed `agent_run`
+(`route: remote | auto | spread | queue`, register C-46) built its contract with no `output_schema`, which the delegator refuses on
+every node as `noschema` (remote output merges only after a mechanical check) and which a node's own ack refuses too, so a
+routed call could never be placed on a node. The new real-gate test reproduces it on the unchanged tree:
+`route=remote: the contract carries no output_schema … node-a: noschema; node-b: noschema`.
+
+- **A name this box does not serve is looked up on the fleet.** With no route, or `route: "remote"`, the door reads the roster's
+  health once (`rosterprobe.Probe`, the read the single-shot lanes share: concurrent, 5 s a node, a down node named and not waited
+  on), takes the nodes that advertise the agent lane and whose `agent_seat` is the name (without regard to case), and sends ONE
+  contract through the delegator at `route=remote` with its remotes narrowed to them (a call's own list replaces the configured
+  roster and is checked against it). It runs on exactly one of them, placed by the usual gate. A composite node whose layer has an
+  agent-role seat of that model counts too, and the contract names the layer (register A-100); nodes that run the name as their own
+  agent seat are preferred, and one contract names one layer, so the first layered node's layer wins and only the nodes that serve
+  it from that layer are asked. The response names `node`, `placement`, `seat`, `model` (the seat that ran it), `route` and
+  `executed_on`, and carries no sizing of this box (the wall is the executing node's expectation, ADR 0055).
+- **It honours a name only when it IS a node's agent seat.** The contract names no seat, so the node runs its own agent seat, and
+  no wire field and no node changed: it works against the nodes as deployed. A name a node merely serves (an alias, a non-agent
+  seat) is refused naming the seat that node does run; nothing is guessed. The answer is checked against the name: a node that
+  changed its agent seat between the read and the dispatch runs another seat, and an answer whose `seat` differs is withheld
+  (`defer_class: config`). Running a seat that is not a node's agent seat needs the contract to name it, a wire change that widens
+  what a fleet-token holder can make a node load; it is not here.
+- **A name nobody runs keeps the roster sentence and says where the fleet looked,** one clause per node (its id, its agent seat,
+  a name it serves without running it as its agent seat, an agent lane that is off, a node that did not answer). `defer_class` is
+  `config` when every node answered and `infrastructure` when one did not, and the reason names that node; an entry the tailnet
+  guard never dials is the roster's to fix and stays `config`. A box with no `delegate_remotes` refuses byte for byte as before.
+- **The fork is narrow, and a model that cannot be honoured is no longer dropped.** A name this box serves runs here and never
+  reads the fleet; `route: "local"` never asks it whatever the name is; a local roster that cannot be read leaves the call on this
+  box. `route: "auto"`, `"spread"` and `"queue"` with a model are now refused (`defer_class: contract`, `steps: 0`, nothing asked of
+  the fleet, the reason names `route=remote`): they place by capacity, not by seat name, and the model used to be ignored without a
+  word. `route: "remote"` with a model asks the fleet whatever this box serves. `allow_browse` cannot travel (the browse tool drives
+  this machine's own browser) and is refused when the name could only run on a node.
+- **Every routed `agent_run` now passes the gate.** The goal goes through the delegation intake as a contract with a flat
+  `{answer}` `output_schema` (flat and string-only, like `offload_ask`'s): the wire's own ceilings (12 steps, 900 s) apply at the door, a field
+  the intake refuses (a thinking policy, a setup action) is refused there naming it (`defer_class: contract`), and a call with no
+  `timeout_sec` lets the executing node size the wall. The prose is still the `output` and the node's `{answer}` object rides
+  beside it as `structured`. `read_root` and `judge` do not travel, and the response's `notes` name each one the caller passed. A
+  deferral carries the node's `defer_class`, its `node` and `placement`, its steps and, when only the structuring failed, the
+  finished prose as `output` flagged `schema_miss`, as `offload_ask` does; the delegator's rescue of such an answer stays unwired
+  on this door.
+- **Tests, written first and red.** The fixture drives the real door at a real local roster and real scripted fleet nodes
+  (`/fleet/health`, `/fleet/dispatch`, `/fleet/jobs/{id}`) through the real delegator, and reads the engine's arguments through the
+  dispatch seam where a test needs them. With the door change removed, 23 of the 27 tests fail (the roster refusal for every named
+  seat, `noschema` for every routed call, a model on `auto`/`spread`/`queue` dispatched and ignored, no class, no notes, no
+  placement) and the other 4 pass on both sides: three guards (a locally served name and `route: "local"` never read the fleet; a
+  box with no nodes refuses as it did) and the unit test of the ledger guard's reading. The fixture keeps the ledger and every state path in a directory the test owns, checks
+  that configuration, and checks that the operator's real ledger took no row of the run (a fixture that sets its home after
+  the default configuration has fixed the ledger path writes to the real ledger; the package's `TestMain` records one such
+  incident). 24 mutants were run, each compiled and each killed after two survivors led to two more tests (the preference for
+  plain nodes over layered ones, and which layered node's layer is taken):
+  matching `served_models` instead of the agent seat, the engine handed the whole roster, a withheld answer published, no
+  schema, a model on `auto` ignored, forced local asking the fleet, an unreachable node classed `config`, the layer never named, the
+  fleet asked for a served name, notes dropped, a browse grant let through, the roster check dropped, the model not published,
+  a guard-refused entry classed `infrastructure`, an agent lane that is off still a target, the last layer taken, the
+  `route=remote` class forced to `config`, the contract error ignored, the deferral class, placement or finished answer dropped,
+  and the two refusal texts.
+
 ### Fixed — a render on one card no longer unloads the seats placed on the others, and a seat that comes back onto a leased card leaves before the next render (F15)
 
 - **The defect (register F15, from the 0.176.0 notes).** The render helper cleared "every non-keep-set model whatever card it sits

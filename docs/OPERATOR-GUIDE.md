@@ -1094,8 +1094,21 @@ not shorten the tool steps, and a wall that buys less than the 1,024-token floor
 (`budget_note` says `the wall will be the stop`). `final_budget_fit` and `budget_note` ride on the answer and on a run that died at its
 wall, only when the fit narrowed something (a run whose own final was not narrowed, because it answered early, was cut before its forced final or reached it with wall to spare, carries the fit predicted when its wall started, as the node's result does); the refusal (which starts no run), a wall with room and a seat with no rate carry neither. The
 two agent doors share one copy of the arithmetic (`pipeline.InstallFinalFit`), so the node and this door size one run alike. A call
-refused before a seat is chosen (a bad argument, or a composite placement guard refusing the seat) carries no numbers, and the `route` forms are untouched: a contract sent
+refused before a seat is chosen (a bad argument, or a composite placement guard refusing the seat) carries no numbers, and a routed call carries no sizing of this box either: a contract sent
 through the fleet carries its wall to the node, where it is an expectation (ADR 0055).
+
+**A seat only the fleet runs (register D-125).** `agent_run(model: <seat>)` used to refuse any name this box's roster lacks,
+however many nodes ran it. A name the local roster lacks is now looked up on the fleet: the door reads the roster's health once
+and sends ONE contract, at `route=remote` and narrowed to the nodes that match, to a node whose `agent_seat` is that name
+(without regard to case; a composite node's agent seat in a named layer counts). The result names `node`, `placement`, `seat`,
+`model` and `executed_on`, and is withheld if it came from another seat (a node that changed its agent seat after it was read).
+A name nobody runs keeps the old refusal and adds where the fleet looked, `config` when every node answered and `infrastructure`
+when one did not; a name a node serves without running it as its agent seat is refused naming the seat it does run, because the
+contract names no seat and the node runs its own. `route: "auto"`, `"spread"` and `"queue"` refuse a model (they place by
+capacity, and the model used to be dropped without a word); `route: "local"` and a name this box serves never read the fleet.
+Every routed `agent_run` now carries a flat `{answer}` `output_schema`: before, the delegator refused the contract on every node
+as `noschema` (register C-46), so a routed call could never be placed on a node. No node needs a change; a seat that is not a node's agent seat would need
+the contract to name it, which is a wire change and is not here. Detail in [mcp-server.md](systems/mcp-server.md).
 
 **One question before the wall: the seat coherence probe (register D-118).** A seat can be HEALTHY by every gate the
 harness had and still be numerically broken. On 2026-09-16/17 the blackwell-16 vLLM seat (Qwen3.8-27B GSQ, `fp8_e5m2` KV
