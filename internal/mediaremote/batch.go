@@ -880,7 +880,7 @@ func proveFile(r *BatchRow) {
 	case err != nil:
 		r.Verdict, r.Error = VerdictFailed, "the lane reported success but the file cannot be read: "+err.Error()
 	case n == 0:
-		// An empty file is not a picture, and a failed job leaves nothing at its path (the 21 zero-byte PNGs of 2026-10-09).
+		// An empty file is not a picture, and a failed job leaves no file of its own at its path (the 21 zero-byte PNGs of 2026-10-09).
 		_ = os.Remove(r.Out)
 		r.Verdict, r.Error = VerdictFailed, "the lane reported success but "+r.Out+" is empty"
 	default:

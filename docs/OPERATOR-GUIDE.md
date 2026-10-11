@@ -257,17 +257,21 @@ has ended, telling you on stderr where each stands. A node renders one job per t
 checked against the hash the node published, to the exact `out` you gave. **When no roster node publishes a matching recipe** (today krea2 and the 2512
 build: the nodes hold no such weights, and a node that gains them will match), the batch is not split across the fleet: it keeps its place in line for
 this machine's lane for up to the queue's 8 h ceiling (not the 90 s `gpu_wait_ms`), runs warm on it, and says which node does not match and why; Ctrl-C
-ends the wait. With `--route remote`, or on a machine with no image lane, the jobs go one at a time and a busy or unreachable node is waited for (a pause
-of 5 s growing to 5 min, up to 8 h), never turned into a `failed` row; the node's recipe is not compared there, so each row carries the family and
-licence the node reports.
+ends the wait. With `--route remote`, or on a machine with no image lane, the jobs go one at a time. A place that is not there yet (every node busy, text-leased or
+not answering) is waited for (a pause of 5 s growing to 5 min, up to 8 h), never turned into a `failed` row; after 8 h the job is `queued` and the jobs not
+sent yet are queued at once, not held 8 h each. A fleet that cannot take the job as configured (no node serves image generation, a route is not
+configured, no node carries `refine=false`, a roster entry the tailnet guard refuses) is not waited for: that job fails at once, naming each node's
+miss. A node that was chosen and then cannot be reached when the job is sent, or is lost after, fails it too. The node's recipe is not compared there,
+so each row carries the family and licence the node reports.
 
 One row per job goes to the printed JSON and to `--results`: `{i, out, seed, ok, ms, error, node, family, sha256, verdict}` (kept in
 `results.jsonl.partial` as jobs end and written over `results.jsonl` when the batch ends, so an earlier `results.jsonl` survives a refused or a dead
-batch; a warm batch's rows arrive when its session ends) with
+batch; a run that reopens the name sets a killed batch's `results.jsonl.partial` aside as `results.jsonl.partial.prev` first and says so; a folder, or on
+Windows a read-only file, is refused before anything runs; a warm batch's rows arrive when its session ends) with
 `verdict` `rendered`, `skipped-existing`, `failed` or `queued`. Give each job its own `out` and, for a batch you may have to re-run, its own `seed`.
 Exit **0** every job has its picture, or a busy lane deferred the whole warm batch (its rows are `queued`: count them, a 0 is not "all done" then),
-**4** some job failed (the rows with `failed` say why), **1** it stopped, was interrupted (the jobs that had not ended are `queued`), a one-at-a-time
-job found no place within 8 h, or was refused before it began (an empty prompt, two different pictures for one `out`, an unknown family, an unwritable
+**4** some job failed (the rows with `failed` say why), **1** it stopped, was interrupted (the jobs that had not ended are `queued`), a job found no
+place (the queue's 8 h ceiling passed, or a card stayed held: the job is `queued`, and so are the jobs not sent yet; the exit line says which), or was refused before it began (an empty prompt, two different pictures for one `out`, an unknown family, an unwritable
 `--results`, a `--results` that is the `--batch` file). A picture a node sent without a published hash is set aside as `out.unverified` and its job is
 `failed`, so `--resume` renders it again.
 

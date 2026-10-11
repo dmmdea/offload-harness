@@ -127,15 +127,17 @@ make the caller retry. Three things were still wrong once every lane was busy.
     this machine's lane plus one per matching node, at most 8, chosen), so a node's claim (decision 6) is what keeps a batch from sending two jobs to
     one single-job node; where no claim protects a node (`--route remote`, a machine with no image lane: the single-render call picks a node without
     one) the jobs run one at a time. There is no ticket to hold such a job, so a held card or a fleet with no free node is asked again after a pause
-    (5 s, 15 s, 1 min, then every 5 min; chosen) up to the same ceiling, and a job that finds no place is `queued`, never `failed`; the node's
+    (5 s, 15 s, 1 min, then every 5 min; chosen) up to the same ceiling, and a job that finds no place is `queued`, never `failed` (nor is a ticket the
+    queue ended at its ceiling, which is not sent again as a new ticket); once one job has waited the ceiling the jobs not yet sent are queued at once; a fleet
+    that can never take the job as configured (every node left out for a configuration fact, none merely busy or out of reach: `core.ErrClassNoNodeConfigured`)
+    is not waited for, and the job fails at once naming each node's miss; the node's
     recipe is not compared there, so a row carries the family and licence the node reports, and a family only the nodes define is carried by name. The jobs reach a node exactly as written (decision 3 fixes a seed the job did not give; `refine=false` only
     when the job says so), and each output is fetched, checked against the sha256 the node published, to its exact `out`. There is no mixed
     local/remote work stealing and no batch task on the fleet (v1). Each job ends in a row `{i, out, seed, ok, ms, error, node, family, sha256,
-    verdict}` (`rendered`, `skipped-existing`, `failed`, `queued`), kept beside the results file (`<results>.partial`) as its job is final and written over it when the batch ends, so an earlier results file survives a refused or a dead batch; a file the batch rejects (a node's file with no published sha256) is set aside as `<out>.unverified`, so a failed job leaves nothing at its path. `--resume` skips a job only when the file
+    verdict}` (`rendered`, `skipped-existing`, `failed`, `queued`), kept beside the results file (`<results>.partial`) as its job is final and written over it when the batch ends, so an earlier results file survives a refused or a dead batch (a run that reopens the name sets a dead batch's partial aside as `<results>.partial.prev`); a file the batch rejects (a node's file with no published sha256) is set aside as `<out>.unverified`, so a failed job leaves no file of its own at its path (a picture that was already there before the batch is not its to remove). `--resume` skips a job only when the file
     at its `out` is not empty, decodes whole as a PNG and has the size the job names; anything doubtful is rendered again (the 21 zero-byte PNGs of
     2026-10-09). A job whose `out` cannot be made fails alone before a lane is asked for it. Exit 0 every job has its picture or a busy lane deferred
-    the whole warm batch (rows `queued`), 4 some job failed (also in a deferred batch), 1 it stopped, was interrupted or a job found no place within the
-    ceiling.
+    the whole warm batch (rows `queued`), 4 some job failed (also in a deferred batch), 1 it stopped, was interrupted or a job found no place (`queued`).
 
 ## Consequences
 

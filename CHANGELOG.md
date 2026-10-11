@@ -118,32 +118,48 @@ Versioning: [SemVer](https://semver.org/).
   `--results` when the batch ends (an earlier results file survives a batch the command refuses or one that dies; the warm path's rows arrive when its
   session ends, because the render script runs to the end before the batch sees a result):
   `{i, out, seed, ok, ms, error, node, family, sha256, verdict}`, the first six being what `parseBatchResults` already reads. `verdict` is
-  `rendered`, `skipped-existing`, `failed` or `queued` (the command ended first). A job counts as rendered only when the file at `out` is there,
+  `rendered`, `skipped-existing`, `failed` or `queued` (the command ended before the job did, or no lane or node had a place for it). A job counts as rendered only when the file at `out` is there,
   not empty, and hashed; a lane that said it rendered a missing or empty file, or a node's file with no published sha256, did not render it.
-  **Exit 4** when any job failed (`imagegen.BatchExitJobsFailed`; also when a deferred warm batch already had a failed row), **1** when it stopped
-  or was interrupted, so a wrapper tells "some failed" from "stopped"; **0** also when a busy lane deferred the whole warm batch (its rows are `queued`).
+  **Exit 4** when any job failed (`imagegen.BatchExitJobsFailed`; also when a deferred warm batch already had a failed row), **1** when it stopped,
+  was interrupted or a job is `queued` for want of a place, so a wrapper tells "some failed" from "stopped"; **0** also when a busy lane deferred the whole warm batch (its rows are `queued`).
   A job whose `out` folder cannot be made fails alone before any lane is asked for it.
 - **`--resume` is fail-safe** (the 21 zero-byte PNGs of 2026-10-09): a job is skipped only when the file at its `out` is not empty, **decodes
   whole as a PNG** and has the width and height the job names; a zero-byte file, a file cut short, another size, not a picture and a missing file are
   rendered again (`TestBatchResumeSkipsOnlyExistingAndVerifying`, `TestBatchResumeAfterTicketsPlacesOnlyWhatIsMissing`,
   `TestGenerateImageBatchResultsFileAndResume`). A job with no `out` is never skipped, and a size off the family's grid (2.1 floors to 32)
   never matches: both are said in the docs.
-- **A busy place is waited for, never failed** (review of this step). Where jobs go one at a time (`--route remote`, a machine with no image lane)
-  a held card or a fleet with no node to take the job is asked again after a pause (5 s, 15 s, 1 min, then every 5 min; chosen) until the job is
-  placed, Ctrl-C ends it, or the queue's 8 h ceiling passes and the job is `queued` (exit 1, `--resume` renders it); any other answer is final at once
-  (`TestBatchSerialWaitsForAPlaceAndNeverFailsTheJob`, `TestBatchSerialEndsQueuedAtTheCeilingNeverFailed`, `TestBatchSerialWaitsOnlyForAPlace`,
-  `TestBatchSerialInterruptEndsTheWait`). The warm batch of a busy lane no node can relieve holds its place in line instead of giving up at 90 s
+- **A busy place is waited for, never failed; a place that can never come is not waited for** (review of this step, and its second round). An answer that
+  says no lane or node had a place for a job ends the job `queued` with the true reason, never `failed` (exit 1, `--resume` renders it). On the ticket path the
+  queue's own end of a ticket (its 8 h ceiling, or a ticket it could not take over) is no lost race and is not sent again as a new ticket; before, it was taken for
+  "the lane was taken a moment after it read free", re-sent twice with another 8 h wait each, and the row failed after about 24 h. A lane that read free and was taken a
+  moment later is still asked again, at most twice, and a card that stays held ends `queued` (`TestBatchTicketThatExpiresIsQueuedAndNotSentAgain`,
+  `TestBatchRetriesALostLaneRaceAndOnlyThat`). Where jobs go one at a time (`--route remote`, a machine with no image lane) a held card or a fleet with no node
+  free to take the job is asked again after a pause (5 s, 15 s, 1 min, then every 5 min; chosen) until the job is placed, Ctrl-C ends it, or the queue's 8 h
+  ceiling passes and the job is `queued` (`TestBatchSerialWaitsForAPlaceAndNeverFailsTheJob`, `TestBatchSerialEndsQueuedAtTheCeilingNeverFailed`,
+  `TestBatchSerialWaitsOnlyForAPlace`, `TestBatchSerialInterruptEndsTheWait`). A fleet that cannot take the job as configured (every node left out because it does
+  not serve image generation, a route is not configured on it, it cannot carry `refine=false`, or the tailnet guard refused its roster entry; none merely busy,
+  text-leased or out of reach) is not waited for: `pickNodeFor` files `core.ErrClassNoNodeConfigured` (the defer class is unchanged) and the job fails at once,
+  naming each node's miss (`TestBatchSerialFailsAtOnceWhereNoNodeCanEverTakeTheJob`, `TestPickNodeFilesNoNodeConfiguredOnlyWhenEveryNodeIsLeftOutForConfiguration`);
+  one node that may take it later keeps the wait (`TestBatchSerialStillWaitsWhereAnyNodeMightTakeTheJobLater`). A node chosen and then lost when the job is sent, or
+  after, and every other answer, is final at once. Once one job has waited the ceiling for a place, the jobs not yet sent are queued at once, on both paths,
+  instead of each waiting the ceiling in turn (200 jobs, 200 ceilings: `TestBatchSerialCeilingQueuesTheJobsNotYetSent`, `TestBatchTicketCeilingQueuesTheJobsNotYetSent`),
+  and the exit-1 line says which cause ended the batch (`TestBatchExitSaysWhyTheJobsAreUnfinished`). The warm batch of a busy lane no node can relieve holds its place in line instead of giving up at 90 s
   (`pipeline.RunImageBatchWaiting`; the wait ends the moment the context does and a grant that arrives after is given back:
   `TestRunImageBatchWaitingKeepsItsPlaceUntilTheCardFrees`, `TestRunImageBatchWaitingEndsOnInterruptAndLeavesNoLease`).
 - **What a one-at-a-time row says.** The node's recipe is not compared there, so a row carries the family, licence and `commercial_use` the node that
   rendered it reported (nothing if it reported nothing), the printed header names none, and a family only the nodes define is carried by name under
   `--route remote` or on a machine with no image lane (`TestBatchSerialRowsCarryTheNodesOwnFamilyAndLicense`,
-  `TestBatchCarriesAFamilyThisMachineCannotResolveWhereItCannotRenderLocally`). `refine_fallbacks` is printed for a warm batch only
+  `TestBatchCarriesAFamilyThisMachineCannotResolveWhereItCannotRenderLocally`). `refine_fallbacks` is printed for a warm batch whose warm call ran and answered only
   (`TestBatchPayloadReportsRefineFallbacksOnlyWhereTheyWereMeasured`).
-- **A failed job leaves nothing at its path.** An empty file a lane left is removed, and a node's file with no published sha256 is moved aside as
-  `<out>.unverified` (the picture is kept, the row names it) so a later `--resume` cannot take it for finished (`TestBatchAJobIsRenderedOnlyWhenItsFileIsThere`). `--results` may not name the
+- **A failed job leaves no file of its own at its path.** An empty file a lane left is removed, and a node's file with no published sha256 is moved aside as
+  `<out>.unverified` (the picture is kept, the row names it) so a later `--resume` cannot take it for finished (`TestBatchAJobIsRenderedOnlyWhenItsFileIsThere`).
+  A picture that was already at `out` before the batch is not a failed job's to remove: a render that fails keeps it (the render helpers write atomically), and only the
+  node's file the fetch has already put at `out` replaced it. `--results` may not name the
   `--batch` file, and an earlier results file is replaced only when the batch ends (`TestResultsFileNeverCostsAnEarlierRecordUntilTheBatchEnds`,
-  `TestGenerateImageBatchResultsFileIsNeverTheJobsFileNorLostToARefusal`). One file spelled two ways (relative and absolute, another case where the file
+  `TestGenerateImageBatchResultsFileIsNeverTheJobsFileNorLostToARefusal`). A folder as `--results`, and on Windows a read-only file, are refused when the file is opened, before any
+  lane time is spent (`TestOpenResultsRefusesAFolderAtOnce`); the `--resume` run that recovers a killed batch no longer truncates the `<results>.partial` that batch left: it is
+  set aside as `<results>.partial.prev` (one is kept, the newest), the command says so, and a refused run puts it back
+  (`TestOpenResultsKeepsAnEarlierBatchsRecordAside`, `TestGenerateImageBatchKeepsTheRecordOfAKilledBatchBesideTheRecoveryRun`). One file spelled two ways (relative and absolute, another case where the file
   system ignores it) is one `out` (`TestBatchOutsThatNameOneFileTwoWaysClash`). `--resume` reads the PNG header first and renders again, without decoding,
   a canvas that is not the named size or is over 64 Mpx (a chosen ceiling; `TestResumeDoesNotDecodeACanvasItCannotUse`).
 - **`RunImageBatchAs(ctx, family, jobs)`** is the family seam: `RunImageBatch` is it with no family. Every read of the binding goes through the

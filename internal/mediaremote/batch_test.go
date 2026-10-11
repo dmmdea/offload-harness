@@ -982,7 +982,7 @@ func TestBatchAJobIsRenderedOnlyWhenItsFileIsThere(t *testing.T) {
 			t.Errorf("row %d = %+v, want failed (%q), no hash", i, r, want)
 		}
 	}
-	// A failed job leaves nothing at its path: an empty file is removed, and a file the batch rejected must not be promoted by
+	// A failed job leaves no file of its own at its path: an empty file is removed, and a file the batch rejected must not be promoted by
 	// the next --resume. The picture the node sent is set aside beside it, not destroyed, and the row says where.
 	if _, err := os.Stat(jobs[1].Out); err == nil {
 		t.Errorf("the empty file the lane left is still at %s", jobs[1].Out)

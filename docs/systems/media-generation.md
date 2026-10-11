@@ -2219,8 +2219,8 @@ the results file.
 | `--family F` | the family every job renders under (the single render's `family`; default: this machine's default binding) |
 | `--route auto` (default) | where the jobs run is decided once, below |
 | `--route local` | the warm batch on this machine whatever the lane says, as before the fleet existed |
-| `--route remote` | each job sent to a roster node through the single-render call, one at a time; refused up front without `delegate_remotes`; there is no ticket, so a job whose node is busy, text-leased or out of reach is asked again after a pause (5 s, 15 s, 1 min, then every 5 min; chosen) for up to the queue's 8 h ceiling, and ends `queued`, never `failed`, if it finds no place by then; the node's recipe is not compared (below) |
-| `--results r.jsonl` | one row per job, kept in `r.jsonl.partial` as each job is final and written whole, in job order, over `r.jsonl` when the batch ends; an earlier `r.jsonl` is untouched until then, so a batch the command refuses leaves it whole and one that dies leaves `r.jsonl.partial` with the jobs that ended; opened before anything runs, so an unwritable path stops the command with no lane time spent; it may not name the `--batch` file |
+| `--route remote` | each job sent to a roster node through the single-render call, one at a time; refused up front without `delegate_remotes`; there is no ticket, so a job whose every node is busy, text-leased or not answering is asked again after a pause (5 s, 15 s, 1 min, then every 5 min; chosen) for up to the queue's 8 h ceiling, and ends `queued`, never `failed`, if it finds no place by then (the jobs not sent yet are then queued at once); a fleet that cannot take the job as configured (no node serves it, a route is not configured, no node carries `refine=false`, a roster entry the tailnet guard refuses) is not waited for, and the job fails at once naming each node's miss; a node chosen and then lost when the job is sent, or after, fails it too; the node's recipe is not compared (below) |
+| `--results r.jsonl` | one row per job, kept in `r.jsonl.partial` as each job is final and written whole, in job order, over `r.jsonl` when the batch ends; an earlier `r.jsonl` is untouched until then, so a batch the command refuses leaves it whole and one that dies leaves `r.jsonl.partial` with the jobs that ended; the run that reopens the name (the `--resume` that recovers a killed batch) first sets that record aside as `r.jsonl.partial.prev` (one is kept, the newest; an empty partial never replaces it), says so, and puts it back if the batch is then refused; opened before anything runs, so an unwritable path, a folder, and on Windows a read-only file stop the command with no lane time spent; it may not name the `--batch` file |
 | `--resume` | skip a job whose `out` already holds a file that proves itself (below) |
 | `--jobs N` | the most tickets in flight (0 = the default below); applies to the ticket path only |
 
@@ -2246,15 +2246,26 @@ the results file.
    `refine=false` only when the job says so, the seed, the negative, `width`, `height` and `steps` exactly, the family under the node's own name
    (`TestBatchJobsPlacedThroughTickets`). The output is fetched, checked against the sha256 the node published, to the exact `out`. A node renders
    under its own zero-warm lifecycle (ADR 0009): one ComfyUI cold start per job. There is no mixed local/remote work stealing and no batch task on
-   the fleet in v1: a node renders one job per ticket and the warm session exists only here.
+   the fleet in v1: a node renders one job per ticket and the warm session exists only here. **A ticket that ends without a place is not a failed job
+   and is not sent again**: the queue's own ceiling (a ticket that waited 8 h without a lane anywhere) and a ticket it could not take over carry the held
+   class like a lost race does, but they come from a ticket that is over, so the job is `queued` with the queue's reason and `--resume` renders it; a new
+   ticket would only wait another ceiling (`TestBatchTicketThatExpiresIsQueuedAndNotSentAgain`). Once one job has waited the ceiling, the jobs not yet
+   sent are queued at once as `not started`, not sent to wait it again in turn (`TestBatchTicketCeilingQueuesTheJobsNotYetSent`).
 3. **One at a time** through the single-render call when `--route remote`, or when this machine has no image lane at all (a thin client). The claim
    belongs to the ticket queue and that call picks a node without one, so two jobs in flight could pick one idle node; `--jobs` is told it did not
    apply (`TestBatchOneAtATimeWhereNoClaimProtectsANode`). Three things are different here, and the first line printed says them. **A busy place
-   is waited for**: there is no ticket to hold the job, so a held card (a node's `gpu_busy`) or a fleet with no node to take it (unreachable,
-   text-leased: the delegator's own capacity defer) is asked again after a pause until the job is placed, Ctrl-C ends it, or the queue's 8 h
-   ceiling passes, and then the job is `queued` and `--resume` renders it; any other answer (a failed render, a refused contract, a node lost
-   after the job was sent) is final at once (`TestBatchSerialWaitsForAPlaceAndNeverFailsTheJob`, `TestBatchSerialEndsQueuedAtTheCeilingNeverFailed`,
-   `TestBatchSerialWaitsOnlyForAPlace`, `TestBatchSerialInterruptEndsTheWait`). **The recipe is not compared** with this machine's: a row carries
+   is waited for**: there is no ticket to hold the job, so a held card (a node's `gpu_busy`) or a fleet with no node free to take it (every node
+   unreachable or text-leased, or a node refusing the send for want of room: the delegator's own capacity defer) is asked again after a pause until
+   the job is placed, Ctrl-C ends it, or the queue's 8 h ceiling passes, and then the job is `queued` and `--resume` renders it, and so are the jobs
+   not sent yet (`TestBatchSerialCeilingQueuesTheJobsNotYetSent`). **A place that can never come is not waited for**: `pickNodeFor` files
+   `core.ErrClassNoNodeConfigured` (the defer class stays capacity) when it has no node and every node was left out for a configuration fact (it does
+   not serve image generation, a route the call needs is not configured on it, it cannot carry `refine=false`, the tailnet guard refused its roster
+   entry) and none for a reason that passes (unreachable, text-leased), and the job fails at once with the reason naming each node's miss; one
+   node that may take it later keeps the wait (`TestBatchSerialFailsAtOnceWhereNoNodeCanEverTakeTheJob`,
+   `TestPickNodeFilesNoNodeConfiguredOnlyWhenEveryNodeIsLeftOutForConfiguration`, `TestBatchSerialStillWaitsWhereAnyNodeMightTakeTheJobLater`). Any
+   other answer (a failed render, a refused contract, a node chosen and then lost when the job was sent or after) is final at once
+   (`TestBatchSerialWaitsForAPlaceAndNeverFailsTheJob`, `TestBatchSerialEndsQueuedAtTheCeilingNeverFailed`, `TestBatchSerialWaitsOnlyForAPlace`,
+   `TestBatchSerialInterruptEndsTheWait`). **The recipe is not compared** with this machine's: a row carries
    the `family`, `license` and `commercial_use` the node that rendered it reported (nothing when it reported nothing), and the printed header
    names none, so a node whose own default is another family is never recorded under this machine's default binding
    (`TestBatchSerialRowsCarryTheNodesOwnFamilyAndLicense`, `TestBatchPayloadSerialCarriesNoLocalFamilyOrLicense`). **A family only the nodes
@@ -2265,8 +2276,8 @@ the results file.
 frees), at most 8, and never more than there are jobs (`TestBatchNeverHasMoreThanNInFlight`). The cap of 8 is a chosen constant, not a
 measurement; more tickets than lanes only wait. A job whose single render comes back "a card is held", because a sibling job took the lane a
 moment after it read free, is sent again, at most twice (chosen): asked again, a call that finds the lane busy becomes a ticket and waits, so the retry
-is what turns a lost race into a wait. A lane that refuses the same job three times in a row gives a `failed` row, and so does any other failure at
-once (`TestBatchRetriesALostLaneRaceAndOnlyThat`).
+is what turns a lost race into a wait. A lane that refuses the same job three times in a row is a place not had, so the row is `queued`, never `failed`; any
+other failure is a `failed` row at once, and the queue's own end of a ticket is not a lost race and is not asked again (`TestBatchRetriesALostLaneRaceAndOnlyThat`).
 
 **The rows.** One per job, in the printed JSON (`items`) and in `--results`: `{i, out, seed, ok, ms, error?, node?, family?, sha256?, verdict}`, the first
 six keys being the ones `pipeline.parseBatchResults` reads from the render script's own results file.
@@ -2276,19 +2287,20 @@ six keys being the ones `pipeline.parseBatchResults` reads from the render scrip
 | `rendered` | a lane ran it, and the file at `out` is there, not empty, and hashed (`sha256`); `node` is the roster node's id, or this machine's own id for a render here |
 | `skipped-existing` | `--resume` found the file and it proved itself; `ms` is 0, there is no `node`, `sha256` is the file's |
 | `failed` | it did not render; `error` says why |
-| `queued` | the command ended before the job did: an interrupt, a warm batch a busy lane kept waiting past its window, or a one-at-a-time job that found no place within the queue's ceiling |
+| `queued` | the job has no result yet: the command ended before it did (an interrupt, a warm batch a busy lane kept waiting past its window), or no lane or node had a place for it (the queue's ceiling, a card that stayed held, a job not sent because an earlier one had waited the ceiling); `error` says which, and `--resume` renders it |
 
 `ms` is the render's wall time as its lane reports it (the wait for a lane is not in it). `family` is the name THIS machine gives the recipe: a node
 renders the same recipe under its own name for it, and the row says where (`node`), not under which name. `sha256` is read from the file on disk; for
 a node's job the fetch had already verified the file against the hash the node published. A lane that said it rendered a file that is missing, or
 empty, or that came back from a node that published no sha256, did not render it (`TestBatchAJobIsRenderedOnlyWhenItsFileIsThere`). A failed job
-leaves nothing at its path: an empty file a lane left is removed, and the fetch has already put a node's unverified file at `out`, so the batch moves it beside it as `<out>.unverified` (the
-render took minutes; the row names where it went) and a later `--resume` renders the job again instead of taking the file for finished. A job whose `out`
+leaves no file of its own at its path: an empty file a lane left is removed, and the fetch has already put a node's unverified file at `out`, so the batch moves it beside it as `<out>.unverified` (the
+render took minutes; the row names where it went) and a later `--resume` renders the job again instead of taking the file for finished. A picture that was already at `out` before the batch is
+not a failed job's to remove: a render that fails keeps it (the render helpers write atomically), and only the node's file the fetch put at `out` replaced it. A job whose `out`
 folder cannot be made fails alone, before any lane is asked for it (`TestBatchAnOutThatCannotBeMadeFailsOnlyThatJob`). The printed JSON keeps its shape
 (`count`, `succeeded`, `failed`, `items`, `family`, `license`, `commercial_use`, `refine_fallbacks`) and gains `mode` (`warm`, `tickets`, `serial` or
 `none`), `skipped` and, when no node matched, `cluster`; every item gains the row's keys. `refine_fallbacks` counts the warm items whose refiner fell
-back, so it is present only for a warm batch with a refiner configured (a ticket or one-at-a-time render does not measure it, and a 0 would claim it
-did). A one-at-a-time batch carries no `family`, `license` or `commercial_use` in its header, and its items carry the node's. A deferred warm batch now lists its jobs as `queued` items
+back, so it is present only for a warm batch with a refiner configured whose warm call ran and answered (a ticket or one-at-a-time render does not measure it, nor does a
+warm call a busy lane kept waiting or that stopped, and a 0 would claim it did: `TestBatchPayloadReportsRefineFallbacksOnlyWhereTheyWereMeasured`). A one-at-a-time batch carries no `family`, `license` or `commercial_use` in its header, and its items carry the node's. A deferred warm batch now lists its jobs as `queued` items
 (its `count` was 0).
 
 **Resume is fail-safe by construction.** On 2026-10-09 a full disk left 21 zero-byte PNGs at the `out` paths, and a skip-existing script read them as
@@ -2324,8 +2336,9 @@ Ctrl-C killed the whole process. The second Ctrl-C is the default one.
 **Exit status.** 0: every job has its picture, or a busy lane deferred the whole warm batch (nothing ran, the jobs are `queued`, as it always
 was: so a 0 is not "every picture is there", count the `queued` rows). 4: some job failed (`imagegen.BatchExitJobsFailed`), whether the batch ran
 every job or was deferred after a job had failed before any lane was asked. 1: it stopped (the warm call's error), was interrupted (`queued` rows),
-a one-at-a-time job found no place within the ceiling, or it was refused before any job, so a wrapper tells "some failed" from "stopped"
-(`TestBatchExit4OnAnyFailure`, `TestBatchInterruptLeavesQueuedRowsAndExit1`).
+a job found no place (the queue's ceiling, or a card that stayed held: `queued` rows, and the jobs not sent yet with them), or it was refused before any job, so a wrapper tells "some failed"
+from "stopped" (`TestBatchExit4OnAnyFailure`, `TestBatchInterruptLeavesQueuedRowsAndExit1`). The line the command prints says which: an interrupt (a job already on a node cannot be
+recalled), a job that waited the ceiling (and the jobs behind it were not sent), or jobs no lane or node had a place for (`TestBatchExitSaysWhyTheJobsAreUnfinished`).
 
 **Named limits.** Nothing here was run against a live lease, a live node or a render: the tests use the real fleet-node servers, ticket files and
 results file with fakes for the pipeline and the renderer, and a node stub for the warm session. The 8-ticket cap, the two retries, the 8 h hold
