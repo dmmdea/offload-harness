@@ -54,7 +54,9 @@ var longCallTasks = map[string]bool{
 // calls core.MarkWorking for them, so their card is "queued" from the first frame to the last, whether the
 // work is waiting or half done. A card in that state says nothing about whether the work started, and the
 // orphan sweep (orphanText) must not claim it had not. TestOnlyTranscribeNeverMarksWorking pins the list to
-// internal/pipeline.
+// internal/pipeline in BOTH directions: transcribe's lane reaches no core.MarkWorking, and every lane of every other
+// long-call task (laneEntries in that test) reaches one. The voice endpoint of generate_audio takes no lease and so
+// marks its card itself, where its request to the server starts.
 var tasksThatNeverMarkWorking = map[string]bool{"transcribe": true}
 
 // FleetDoor is the door a fleet node stamps on work it serves FOR another box

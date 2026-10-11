@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/dmmdea/offload-harness/internal/config"
@@ -145,5 +146,55 @@ func TestUseTTSEndpointDecision(t *testing.T) {
 		if got := useTTSEndpoint(c.cfg, c.voice); got != c.want {
 			t.Errorf("useTTSEndpoint(endpoint=%q script=%q voice=%q) = %v, want %v", c.cfg.TTSEndpoint, c.cfg.VoiceGenScript, c.voice, got, c.want)
 		}
+	}
+}
+
+// A generate_audio call on the tts_endpoint lane never marked its PAIR card working (0.180 final check): the lane takes
+// no media lease (the server owns its GPU), and every other lane marks the card from the lease it takes, so a card for a
+// voice render sat "queued" for the whole synthesis and a sweep of a card whose process died mid-synthesis said it
+// never started. The lane marks the card where its work starts, the request to the server, and not before: a call that
+// defers on its input has not started anything.
+func TestRunVoiceEndpointMarksItsCardWorkingWhereTheRequestStarts(t *testing.T) {
+	var marks atomic.Int64
+	var marksWhenServed atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		marksWhenServed.Store(marks.Load())
+		w.Header().Set("Content-Type", "audio/wav")
+		b := make([]byte, 4096)
+		copy(b, "RIFF")
+		_, _ = w.Write(b)
+	}))
+	defer srv.Close()
+	cfg := config.Default()
+	cfg.VoiceGenScript = ""
+	cfg.TTSEndpoint = srv.URL
+	cfg.MediaDir = t.TempDir()
+	p := &Pipeline{cfg: cfg}
+	ctx := core.WithWorkingMark(context.Background(), func() { marks.Add(1) })
+
+	res := p.Run(ctx, core.Request{Task: core.TaskGenerateAudio, Input: "hola mundo", Params: map[string]any{"kind": "voice"}})
+	if !res.OK {
+		t.Fatalf("expected ok via the endpoint, got defer: %s", res.Reason)
+	}
+	if got := marks.Load(); got != 1 {
+		t.Errorf("the card must be marked working once, got %d", got)
+	}
+	if got := marksWhenServed.Load(); got != 1 {
+		t.Errorf("the mark belongs before the request reaches the server (where the work starts), seen when served: %d", got)
+	}
+
+	// A call that never reaches the server has started nothing, so its card is not marked running.
+	marks.Store(0)
+	if res := p.Run(ctx, core.Request{Task: core.TaskGenerateAudio, Input: "", Params: map[string]any{"kind": "voice"}}); res.OK {
+		t.Fatal("an empty prompt must defer")
+	}
+	cfg2 := cfg
+	cfg2.TTSEndpoint = ""
+	p2 := &Pipeline{cfg: cfg2}
+	if res := p2.Run(ctx, core.Request{Task: core.TaskGenerateAudio, Input: "x", Params: map[string]any{"kind": "voice", "voice": VoiceEndpoint}}); res.OK {
+		t.Fatal("voice=endpoint with no endpoint must defer")
+	}
+	if got := marks.Load(); got != 0 {
+		t.Errorf("a call that deferred before any request must not mark its card working, marked %d", got)
 	}
 }
