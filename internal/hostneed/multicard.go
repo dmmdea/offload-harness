@@ -58,7 +58,16 @@ func estimatePlaced(route Route, family string, files []mediacap.ModelFile, f Fa
 	reserve := f.reserve()
 	compute, storage := row.ComputeGiB, row.StorageGiB
 	if f.ResidentGiB != nil && !row.Plain() {
-		compute += *f.ResidentGiB - row.ResidentGiB
+		// The DiT's total is the invariant: the allocation string keeps --resident-gb GiB of it on the compute card and sends the REMAINDER to the
+		// storage card. A larger share raises the compute peak; a smaller one puts the same bytes on the storage card, which is the card whose
+		// room is thinner (a 5 GiB share of the 19.1 GiB fp8mixed DiT is 15.0 GiB there, and a whole DiT on one card ran out of memory at load). The
+		// storage figure is never LOWERED by a larger share: no run measured that, so the row's own figure stands. For a row whose storage peak is
+		// its text-encoder stage (the 2.1 bf16 one), a smaller share is refused somewhat early; that is the conservative side.
+		shift := *f.ResidentGiB - row.ResidentGiB
+		compute += shift
+		if shift < 0 {
+			storage -= shift
+		}
 	}
 	fits := small > 0 && compute <= large-reserve && storage <= small-reserve
 	peaks := fmt.Sprintf("the compute card peaks at %.1f GiB (of %.1f usable) and the storage card at %.1f GiB (of %.1f usable)", compute, large-reserve, storage, small-reserve)

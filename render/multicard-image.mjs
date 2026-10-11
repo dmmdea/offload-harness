@@ -85,13 +85,16 @@ function checkResident(recipe, residentGb, pair) {
 }
 
 /**
- * checkPeaks: the recipe's per-card peak against the two cards it was handed, each less --reserve-vram. The compute card's peak moves
- * with the resident share (more resident, more on the compute card); the storage card's is the recipe's.
+ * checkPeaks: the recipe's per-card peak against the two cards it was handed, each less --reserve-vram. The DiT's total is the invariant, so
+ * a resident share moves bytes between the cards one for one: a larger share raises the compute card's peak, and a smaller one puts the
+ * same bytes on the storage card (the allocation string keeps `residentGb` on the compute card and sends the REMAINDER to the storage card).
+ * The storage figure is never lowered by a larger share, because no run measured that: the recipe's own stands. For a recipe whose storage
+ * peak is its text-encoder stage (the 2.1 bf16 one) a smaller share is therefore refused somewhat early, on the conservative side.
  */
 function checkPeaks(recipe, residentGb, pair, flags) {
   const reserve = reserveGiB(flags);
   const shift = residentGb === null ? 0 : residentGb - recipe.unet.residentGb;
-  const asks = [["compute", pair.compute, recipe.peakGiB.compute + shift], ["storage", pair.storage, recipe.peakGiB.storage]];
+  const asks = [["compute", pair.compute, recipe.peakGiB.compute + shift], ["storage", pair.storage, recipe.peakGiB.storage + Math.max(0, -shift)]];
   for (const [role, card, peak] of asks) {
     const total = card.totalMiB / 1024;
     if (peak > total - reserve) {
