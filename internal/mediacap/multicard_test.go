@@ -93,6 +93,10 @@ func TestFindMulticardRowPicksTheRecipeOfTheFilesAndRefusesTheRest(t *testing.T)
 		{"image", "qwen-image", "qwen-image-2512-Q4_K_M.gguf", "", ""},
 		{"image", "qwen-image-2.1", "qwen_image_2.1_bf16.gguf", "qwen3vl_8b_bf16.safetensors", ""},
 		{"image", "qwen-image-2.1", "qwen_image_2.1_bf16.safetensors", "qwen3vl_8b_int8.safetensors", ""},
+		// the ban on an int8, int4 or nf4 encoder stands on its own, not only through the bf16/fp8 match: a name that carries both is refused
+		{"image", "qwen-image-2.1", "qwen_image_2.1_bf16.safetensors", "qwen3vl_8b_bf16_int8.safetensors", ""},
+		{"image", "qwen-image-2.1", "qwen_image_2.1_bf16.safetensors", "qwen3vl_8b_bf16_nf4.safetensors", ""},
+		{"edit", "qwen-image-edit-2511", "qwen_image_edit_2511_fp8mixed.safetensors", "qwen_2.5_vl_7b_fp8_int4.safetensors", ""},
 		{"image", "qwen-image-2.1", "qwen_image_2.1_bf16.safetensors", "qwen3vl_8b_fp8.safetensors", ""},
 		{"image", "qwen-image-2.1", "qwen_image_2.1_bf16.safetensors", "", ""},
 		{"image", "qwen-image", "qwen-image-2512-Q5_1.gguf", "qwen_2.5_vl_7b_bf16.safetensors", ""},
