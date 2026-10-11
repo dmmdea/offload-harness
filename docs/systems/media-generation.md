@@ -2225,7 +2225,7 @@ that sends a graph to a node holds it to the rules below. The graph is the calle
 node a fit is that it **holds the files the graph names**, and the node says so itself.
 
 **A graph is not a ticket.** The ticket queue above is the busy-lane path of an IMAGE call and of nothing else. A graph keeps the
-one-shot overflow of 0.179.0 (`tryGraphOverflow` and `placeGraph` in `internal/mediaremote/place.go`, the only placement code left
+one-shot overflow of 0.179.0 (`tryGraphOverflow` and `placeGraph` in `internal/mediaremote/place.go`, the only overflow code left
 that is not the ticket's): it is offered once to the nodes that can take it, in the roster's order, at most three of them, one graph
 call of a process per node (the in-process hold) and never a node a ticket of this machine has a job on (a graph reads the claim
 files and never writes one); a node that refuses or bounces is left alone by the same placer memory the tickets use. When no node
