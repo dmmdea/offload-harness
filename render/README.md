@@ -67,8 +67,10 @@ zero-always-warm (it shares the 8 GB with llama-swap, so it must coordinate). Ta
   does); it honours and fences the lease a runner inherits, elects one unloader per lease, drains, and runs
   `freeLlamaSwap` / `freeComfy`. `freeLlamaSwap` unloads only what the lease may take: a lease on the whole node
   unloads every model off the memory stack; a lease on SOME cards unloads the list in `GPU_LEASE_UNLOAD_MODELS`
-  (the models positively placed on those cards; `-` = none) and leaves every other model resident, and with no list it
-  unloads nothing and says why (`GPU_LEASE_DEVICES` names a card lease). A job that lost the once-per-lease election
+  (every model except the memory stack and the models positively placed on other cards, by `layers` or by the
+  serving config's device pin; a model nothing places is on it; `-` = none) and leaves every other model resident. With
+  no list (`GPU_LEASE_DEVICES` names a card lease) every placement is unknown, so it unloads every model off the memory
+  stack, as before, and says so. A job that lost the once-per-lease election
   under a card lease with a list reads that list against `/running` again before it submits, so a seat that came back
   onto the leased cards leaves again (F15; `docs/systems/gpu-lease.md`, "Between renders").
 - **`comfy-output.mjs`** — finds the produced file in `/history`. `VHS_VideoCombine` writes
