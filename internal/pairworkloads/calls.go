@@ -92,10 +92,15 @@ func (c *openCall) callID() string { return c.jobID }
 // the call's ledger row already closed it, in which case end waits for that
 // frame). end returns after the close is on the wire, so the caller may answer
 // and be killed. The id is "" and both functions are nil when nothing was
-// opened: emitter disabled, a task whose engine is not fixed by the task, or
-// work this box serves for another (FleetDoor).
+// opened: emitter disabled, a task whose engine is not fixed by the task, work
+// this box serves for another (FleetDoor), or a door that makes test traffic.
 func (e *Emitter) Begin(task, door string) (callID string, working func(), end func(res core.Result)) {
 	if !e.Enabled() || !longCallTasks[task] || door == FleetDoor {
+		return "", nil, nil
+	}
+	// A call through a door that exists to produce measurement traffic (fleet-measure) opens no card, like the
+	// row that would close it (register F48; AttachLedger).
+	if ledger.ClassOf(ledger.Entry{Door: door}) != "" && !e.keepTestCards() {
 		return "", nil, nil
 	}
 	now := e.now().UnixMilli()
