@@ -42,14 +42,20 @@ func TestGenerateImageCLIFamilyFlagsReachThePipeline(t *testing.T) {
 	if !strings.Contains(out, "transparent output needs") {
 		t.Errorf("--transparent on the krea2 default must reach the pipeline and defer, got:\n%s", out)
 	}
-	// A batch has no family seam: the flag would be silently ignored, so it is refused.
+	// A batch renders under a named family (ADR 0083, decision 12): the flag reaches the resolver, so an unknown family
+	// stops the batch by name before anything runs.
 	jobs := filepath.Join(home, "jobs.jsonl")
 	if err := os.WriteFile(jobs, []byte(`{"prompt":"p"}`+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	err := runGenerateImage([]string{"--batch", jobs, "--config", cfgPath, "--family", "qwen-image-2.1"})
-	if err == nil || !strings.Contains(err.Error(), "--batch renders this machine's default binding") {
-		t.Errorf("--family with --batch must be refused, got %v", err)
+	err := runGenerateImage([]string{"--batch", jobs, "--config", cfgPath, "--family", "nope"})
+	if err == nil || !strings.Contains(err.Error(), `unknown image family "nope"`) {
+		t.Errorf("--family with --batch must reach the resolver and stop on an unknown family, got %v", err)
+	}
+	// --transparent is one render's alpha channel: a batch has no place for it.
+	err = runGenerateImage([]string{"--batch", jobs, "--config", cfgPath, "--transparent"})
+	if err == nil || !strings.Contains(err.Error(), "--transparent") {
+		t.Errorf("--transparent with --batch must be refused by name, got %v", err)
 	}
 }
 
