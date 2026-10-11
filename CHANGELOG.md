@@ -738,6 +738,15 @@ Versioning: [SemVer](https://semver.org/).
   - The log line for a read that is given up on is once per stalled read; the line for a caller that stops waiting (the 20 s bound of one file) is one per file it stopped waiting for, and no test pins that one.
   - `mediacap.ImageRecipe` has no production caller (its comment says so); it stays because tests and documents name it, and
     deleting it is a separate cleanup.
+- **Found in the integration review, fixed.** (1) The lane reading a call hands its ticket's first scan was dated from the ticket and not
+  from the question: the door asks the lane, then waits on the identity (up to 20 s for each weight file), then makes the ticket, so a lane
+  that freed during that wait was still taken for held and the ticket waited one more scan or went to an idle node. The reading now carries
+  the instant it was made and the scan reuses it only inside the 2 s `verdictFresh`
+  (`TestTheFirstScanReusesTheLaneReadingOnlyWhileItIsFresh`, three mutants caught). (2) The batch's order, the lane first and the
+  identity only after a held lane, was pinned for the single call and not for `generate-image --batch`: moving the identity above the
+  lane question passed every test of the package. `TestBatchOnAFreeLaneNeverWaitsOnAFingerprintRead` (every read held, the batch returns,
+  zero reads) and its control `TestBatchOnABusyLaneReadsTheFingerprintsOnlyAfterTheLaneWasAsked` now pin it, and the mutant that builds the
+  identity first is killed by both.
 
 ### Fixed — the hardening batch: a console close at any stage of `gpu reserve`, `gpu owner-flags --config`, voice cards, honest cause wording, and the host-RAM guard's loose ends (F55, F56, F57, F58, F60, F63)
 

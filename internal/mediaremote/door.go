@@ -156,6 +156,7 @@ func (q *queueRT) admit(ctx context.Context, cfg config.Config, runner Runner, r
 	// that does not become a ticket has no use for it. One the pipeline could not read (v.Unjudged) is not a free lane: the call
 	// becomes a ticket, whose first scan looks at the fleet and runs the call here only if no node can take it.
 	v := core.ProbeLane(ctx, runner, req)
+	laneAt := time.Now() // the age of the reading, which the first scan reuses while it is fresh, counts from here
 	if v.Free && !v.Unjudged {
 		return runner.Run(ctx, req), nil
 	}
@@ -172,7 +173,7 @@ func (q *queueRT) admit(ctx context.Context, cfg config.Config, runner Runner, r
 		}
 		local = l
 	}
-	lt, existing, err := q.create(ctx, cfg, runner, req, remotes, w, st, key, local, v, inherit)
+	lt, existing, err := q.create(ctx, cfg, runner, req, remotes, w, st, key, local, v, laneAt, inherit)
 	if err != nil {
 		logQueue("no ticket could be made (%v): the call waits in the local line", err)
 		return runner.Run(ctx, req), nil
@@ -186,10 +187,11 @@ func (q *queueRT) admit(ctx context.Context, cfg config.Config, runner Runner, r
 	return core.Result{}, lt
 }
 
-// create makes the ticket for a call whose lane is busy. A request identical to a ticket that appeared meanwhile (two
-// processes asked at once) is not made twice: existing is that ticket.
+// create makes the ticket for a call whose lane is busy: v is the reading that said so and laneAt the instant it was made (the
+// call may have waited on its identity since, so it can be older than the ticket). A request identical to a ticket that appeared
+// meanwhile (two processes asked at once) is not made twice: existing is that ticket.
 func (q *queueRT) create(ctx context.Context, cfg config.Config, runner Runner, req core.Request, remotes []string, w Wait,
-	st *store, key string, local localID, v core.LaneVerdict, inherit time.Time) (*liveTicket, *ticketFile, error) {
+	st *store, key string, local localID, v core.LaneVerdict, laneAt, inherit time.Time) (*liveTicket, *ticketFile, error) {
 	req2 := req
 	params := make(map[string]any, len(req.Params)+1)
 	for k, val := range req.Params {
@@ -241,7 +243,7 @@ func (q *queueRT) create(ctx context.Context, cfg config.Config, runner Runner, 
 		done: make(chan struct{}), scanned: make(chan struct{}), rowSince: map[string]rowMemo{}, need: needOf(req2), needSet: true,
 	}
 	lt.ctx, lt.cancel = context.WithCancel(q.rootCtx)
-	lt.first, lt.firstAt = &v, time.Now()
+	lt.first, lt.firstAt = &v, laneAt
 	lt.t = ticketFile{
 		ID: id, ReqKey: key, PathKey: pathID, Created: created.UnixMilli(), Owner: q.owner, Beat: nowMs(),
 		Task: string(req.Task), Seed: seed, State: stWaiting, LaneWhy: v.Why,
