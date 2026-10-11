@@ -57,6 +57,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/comfyinst"
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
+	"github.com/dmmdea/offload-harness/internal/fleetnode"
 	"github.com/dmmdea/offload-harness/internal/gpualloc"
 
 	"github.com/dmmdea/offload-harness/internal/gpulease"
@@ -119,6 +120,14 @@ func (n mediaNeed) withFootprint(k footKey) mediaNeed {
 // data, not toward admitting on less.
 const hostPeakMinRuns = 3
 
+// hostPeakMaxRaise is the most a measurement may raise a declaration above the sum of the model files, as a multiple of it.
+// Chosen 2026-10-10, not measured: the files are what must stream and the tree around them is the runtime's own baseline
+// plus caches, so a tree that reads more than twice its files is an estimate that is wrong or a sampler that is charging
+// card memory to the process (a driver does, on Windows), and either is a finding for the estimate and not a number to
+// declare. Unclamped, a declaration above what the box can ever admit makes the lane read "can never admit" for every
+// later call, and `gpu reserve --ram` is no remedy for a pipeline call (F56). The clamp is said in the declaration.
+const hostPeakMaxRaise = 2.0
+
 // calibratedRAM raises a declared need to what renders of the call's key were measured to hold: the footprint
 // store's peak RESIDENT memory of the render's process tree, once at least hostPeakMinRuns runs exist, when that is
 // higher than the estimate from the model files. Three properties are the point:
@@ -147,9 +156,20 @@ func (p *Pipeline) calibratedRAM(n hostneed.Need, k footKey) hostneed.Need {
 	if !ok || hp.Runs < hostPeakMinRuns || hp.ResidentGiB <= n.GiB {
 		return n
 	}
-	return hostneed.Need{GiB: hp.ResidentGiB, Source: hostneed.SourceMeasured,
-		Detail: fmt.Sprintf("measured: the resident memory of %s/%s renders peaked at %.1f GiB over %d runs, above the %.1f GiB their model files add up to",
-			k.family, k.task, hp.ResidentGiB, hp.Runs, n.GiB)}
+	// The figure is a high percentile of the last runs, not the all-time maximum (fleetnode.HostPeaks): one inflated run is
+	// not the declaration. And the raise is clamped (hostPeakMaxRaise).
+	declared, clamp := hp.ResidentGiB, ""
+	if limit := n.GiB * hostPeakMaxRaise; declared > limit {
+		declared = limit
+		clamp = fmt.Sprintf("; clamped at %.0fx the files' sum (%.1f GiB): a tree that reads more than that is an estimate that is wrong or a sampler that counts card memory, not a need to declare", hostPeakMaxRaise, limit)
+	}
+	runs := hp.Window
+	if runs == 0 {
+		runs = hp.Runs // a store written before the window existed: its maxima over its runs
+	}
+	return hostneed.Need{GiB: declared, Source: hostneed.SourceMeasured,
+		Detail: fmt.Sprintf("the resident memory of %s/%s renders measured %.1f GiB at the %dth percentile of the last %d runs (%d recorded, the largest %.1f GiB), above the %.1f GiB their model files add up to%s",
+			k.family, k.task, hp.ResidentGiB, fleetnode.HostPeakPercentile, runs, hp.Runs, hp.MaxResidentGiB, n.GiB, clamp)}
 }
 
 // declaresRAM sets how the call's host RAM need is resolved.
@@ -184,9 +204,9 @@ func videoRAM(cfg config.Config, renderFamily string, over hostneed.VideoOverrid
 	}
 }
 
-// classDefaultRAM is for a call whose weights the pipeline cannot name (an arbitrary graph, sd.cpp,
-// an iGPU engine): the media class default, the largest ComfyUI render family this box binds. A box that binds
-// none (sd.cpp only) gets 0, so those lanes declare nothing (hostneed.ClassDefault says why).
+// classDefaultRAM is for a call whose weights the pipeline cannot name (an arbitrary graph, the audio.cpp lanes): the media class
+// default, the largest ComfyUI render family this box binds. A box that binds none (sd.cpp only) gets 0 (hostneed.ClassDefault says
+// why). The sd.cpp lanes start from it and add the weights they park themselves (sdcppDeclared, F60).
 func classDefaultRAM(cfg config.Config) func(float64) hostneed.Need {
 	return func(vram float64) hostneed.Need {
 		return hostneed.ClassDefault(hostneed.Facts{Cfg: cfg, VRAMGiB: vram})
@@ -209,9 +229,31 @@ func (p *Pipeline) declaredRAM(ctx context.Context, need mediaNeed, cards []gpup
 	}
 	n := p.calibratedRAM(need.RAM(hostneed.LargestCardGiB(cards, ids)), need.Foot)
 	if n.GiB > 0 {
-		planNote("declaring host RAM: " + n.String())
+		key := "declaring host RAM: " + n.String()
+		if n.Source == hostneed.SourceMeasured {
+			// A measured declaration's text carries the run counts, which move with every render: the note is made once
+			// per key and figure, not once per render (one map entry and one log line per render, for the life of a
+			// fleet-serve, was F56). A figure that moves is a new note.
+			key = fmt.Sprintf("measured|%s|%s|%s|%.1f", need.Foot.family, need.Foot.quant, need.Foot.task, n.GiB)
+		}
+		planNoteKeyed(key, "declaring host RAM: "+n.String())
 	}
 	return n.GiB
+}
+
+// askRAMFor is the host RAM a call declares against the cards its PLAN names, for the readers that need the figure before the
+// card is held: the allocator's pre-filter and the lane probe, and whether the call declares any at all, which decides whether a
+// waiter that waits only on host RAM holds its cards against it (gpualloc.QueuedClaims, G6). A plan that names its cards (a
+// pin, a pool, a declared device) is sized on THEM, as the lease the call then takes is (optsFor): sized on the largest card of
+// the whole table a krea2 render pinned to a 16 GiB card declared nothing on a box that also has a 48 GiB one, and disagreed
+// with its own grant (F58). A plan that does not name them (the whole node, an allocator pick that cannot be known yet) keeps
+// the largest card on the box: the smallest answer, which can only err toward "nothing in the way".
+func (p *Pipeline) askRAMFor(ctx context.Context, need mediaNeed, plan mediaPlan, cards []gpuprobe.Card) float64 {
+	var ids []string
+	if !plan.auto && !plan.whole {
+		ids = plan.ids
+	}
+	return p.declaredRAM(ctx, need, cards, ids)
 }
 
 // resumableBy marks the need with whether the request's door can resume a place in line.
@@ -348,9 +390,13 @@ func (p *Pipeline) scopedManager() (*gpulease.Manager, error) {
 var planNoteOnce sync.Map // note -> struct{}
 
 // planNote logs why a call fell back to the whole-node lease, once per distinct reason.
-func planNote(why string) {
-	if _, dup := planNoteOnce.LoadOrStore(why, struct{}{}); !dup {
-		log.Printf("media admission: %s", why)
+func planNote(why string) { planNoteKeyed(why, why) }
+
+// planNoteKeyed is planNote for a text that carries something that changes without the fact changing: the note is made
+// once per key.
+func planNoteKeyed(key, text string) {
+	if _, dup := planNoteOnce.LoadOrStore(key, struct{}{}); !dup {
+		log.Printf("media admission: %s", text)
 	}
 }
 
@@ -479,26 +525,35 @@ func (p *Pipeline) mediaGrantEnv(lease *gpulease.Lease, ids []string, unload str
 }
 
 // unloadEnv is the GPU_LEASE_UNLOAD_MODELS entry for a lease on ids: the models the runner's
-// unload may take, which excludes the seats pinned to cards the lease does not hold. Without it
-// the render lane unloads every model off the memory stack, and a render on one card empties the
-// seats on the others (register C-86). "" (no roster, unreadable) leaves the lane on its own rule.
+// unload may take (gpualloc.UnloadModels): every model of the roster except the memory stack and the
+// models positively placed on another card, by layers or by the serving config's device pin. A model
+// placed on the call's card goes, and so does a model nothing places, as before F15. Without the
+// variable the render lane unloads every model off the memory stack, and a render on one card
+// empties the seats placed on the others (register C-86, F15). "" for a whole-node call (no ids),
+// which holds every card, and "" for a card call whose roster could not be read: nothing then says
+// what is resident, a list built from the config alone could leave a resident model on the leased card
+// (or, on a box that declares nothing, unload nothing), so the lane keeps its own rule and the log says
+// so. Otherwise a card call gets a list, and with no llama-swap endpoint it is the none sentinel.
 //
 // Which seat sits on which card needs the card LIST, not a fresh reading (uuids and indices do not
 // change under a running call), so it is scoped from the table the call already holds: a third
 // nvidia-smi read here, with the lease already granted, could only cost time, and one that ran out
-// widened the list to every seat, so a render on one card emptied the seats on the others.
+// used to widen the list to every seat, so a render on one card emptied the seats on the others.
 func (p *Pipeline) unloadEnv(ctx context.Context, ids []string, cards []gpuprobe.Card) string {
-	if len(ids) == 0 || strings.TrimSpace(p.cfg.Endpoint) == "" {
+	if len(ids) == 0 {
 		return ""
 	}
-	roster, err := swapclient.FetchRoster(ctx, p.cfg.Endpoint, 5*time.Second)
-	if err != nil {
-		log.Printf("media admission: the llama-swap roster could not be read (%v): the render lane keeps its own rule and unloads every model off the memory stack", err)
-		return ""
+	if strings.TrimSpace(p.cfg.Endpoint) == "" {
+		return gpualloc.UnloadEnv(nil, true)
+	}
+	var roster []string
+	r, rosterErr := swapclient.FetchRoster(ctx, p.cfg.Endpoint, 5*time.Second)
+	if rosterErr == nil {
+		roster = r.IDs()
 	}
 	held := p.alloc
 	held.Cards = func(context.Context, config.Config) ([]gpuprobe.Card, string, error) { return cards, "", nil }
-	models, known := gpualloc.UnloadModels(ctx, p.cfg, roster.IDs(), ids, held, io.Discard)
+	models, known := gpualloc.UnloadModels(ctx, p.cfg, roster, rosterErr, ids, held, log.Writer())
 	return gpualloc.UnloadEnv(models, known)
 }
 
@@ -598,6 +653,40 @@ func (p *Pipeline) acquireMediaLease(ctx context.Context, reason string, ttl, wa
 		place.m.DropToken(place.tok.ID) // served: the place is spent (a grant without a wait never consumed it)
 	}
 	return mediaGrant{Env: env, Release: release}, nil
+}
+
+// acquireMediaLeaseHeld is acquireMediaLease for a caller that waits a long time for its card (a batch with nowhere else to
+// go): the wait is the lease queue's, so the place in line is kept for the whole of it, and it ends the moment ctx does. The
+// queue's wait takes no context, so it runs beside the caller; if the card is granted after the caller left, the grant is
+// given straight back, so an interrupted batch leaves no lease behind. The abandoned wait ends with the process or at its own
+// deadline.
+func (p *Pipeline) acquireMediaLeaseHeld(ctx context.Context, reason string, ttl, wait time.Duration, need mediaNeed) (mediaGrant, error) {
+	return holdAcquire(ctx, func() (mediaGrant, error) { return p.acquireMediaLease(ctx, reason, ttl, wait, need) })
+}
+
+// holdAcquire runs acquire beside the caller and returns when it does or when ctx ends, whichever is first. A grant that
+// arrives after the caller left is released at once.
+func holdAcquire(ctx context.Context, acquire func() (mediaGrant, error)) (mediaGrant, error) {
+	type result struct {
+		g   mediaGrant
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		g, err := acquire()
+		done <- result{g, err}
+	}()
+	select {
+	case r := <-done:
+		return r.g, r.err
+	case <-ctx.Done():
+		go func() {
+			if r := <-done; r.err == nil && r.g.Release != nil {
+				r.g.Release()
+			}
+		}()
+		return mediaGrant{}, fmt.Errorf("interrupted while waiting for the GPU lane: %w", ctx.Err())
+	}
 }
 
 // wholePlace is a place in line a whole-node call resumes.
@@ -807,10 +896,10 @@ func (p *Pipeline) acquireCards(ctx context.Context, m *gpulease.Manager, reason
 	}
 	reads := &tableReads{cards: cards, at: start}
 	defer func() { err = withTableNote(err, reads.note()) }()
-	// askRAM is the host RAM the call declares against the largest card (the smallest answer): what the
-	// allocator's pre-filter reads, and whether the call declares any at all, which decides whether a waiter
-	// that waits only on host RAM holds its cards against it (gpualloc.QueuedClaims).
-	askRAM := p.declaredRAM(ctx, need, cards, nil)
+	// askRAM is the host RAM the call declares: against the cards its plan names, else against the largest card
+	// (askRAMFor, the smallest answer). What the allocator's pre-filter reads, and whether the call declares any at all,
+	// which decides whether a waiter that waits only on host RAM holds its cards against it (gpualloc.QueuedClaims).
+	askRAM := p.askRAMFor(ctx, need, plan, cards)
 	// A call that resumes a place keeps the arrival time it left with, and keeps the place itself
 	// held while it waits (keepPlace). The keeper is stopped before the call spends the place
 	// (grantCards), consumes it (the lease wait registers a waiter) or leaves it again.

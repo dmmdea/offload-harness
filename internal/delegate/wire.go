@@ -241,6 +241,34 @@ type ResultWire struct {
 	Diff      string   `json:"diff,omitempty"`
 	DiffFiles []string `json:"diff_files,omitempty"`
 	WriteNote string   `json:"write_note,omitempty"`
+	// QuoteCheck (register F4) is the research lane's finding about this digest's
+	// `quotes` against the page it was written from. Only offload_research and the
+	// research verb set it, after the engine returns; every other door publishes
+	// no such block, byte-identically to before.
+	QuoteCheck *QuoteCheck `json:"quote_check,omitempty"`
+}
+
+// QuoteCheck reports what the delegator found when it looked each item of a
+// research digest's `quotes` up in the page the digest was written from. A quote
+// is the one field of a digest that promises the page's own words, and a seat
+// that paraphrases it hands a fact-checker something no search of the page can
+// find (register F4). The check never fails a digest: an acceptance failure
+// discards a whole run (register C15), so a quote that is not on the page is
+// FLAGGED here and left where the seat put it.
+type QuoteCheck struct {
+	// Checked counts the non-empty quotes looked up.
+	Checked int `json:"checked"`
+	// Verbatim counts the quotes that are the page's own bytes.
+	Verbatim int `json:"verbatim"`
+	// Corrected counts the quotes found on the page only after case, spacing,
+	// quote-mark and dash differences were set aside; each was replaced in the
+	// published digest by the page's own span.
+	Corrected int `json:"corrected,omitempty"`
+	// Unverified lists the quotes found nowhere on the page, exactly as the seat
+	// wrote them. They stay in the digest's `quotes`.
+	Unverified []string `json:"unverified,omitempty"`
+	// Note says in one line what the Unverified list means; empty when there is none.
+	Note string `json:"note,omitempty"`
 }
 
 // ResponseWire is the full response: summary first, then per-subtask results

@@ -18,7 +18,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, readFileSync, existsSync, statSync, rmSync, mkdirSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, statSync, mkdirSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -26,6 +26,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { EventEmitter } from "node:events";
 import { ensureComfy, comfyLogPath, rotateComfyLog, tailComfyLog, trimRotatedLog } from "./comfy-lifecycle.mjs";
 import { withGpuSlot } from "./gpu-lock.mjs";
+import { removeTree, scratchDir } from "./test-scratch.mjs";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
 const url = (f) => pathToFileURL(join(HERE, f)).href;
@@ -61,8 +62,7 @@ function killTree(pid) {
   else { try { process.kill(pid, "SIGKILL"); } catch {} }
 }
 
-async function setup() {
-  const comfyDir = mkdtempSync(join(tmpdir(), "comfy-keep-"));
+async function setup(comfyDir) {
   writeFileSync(join(comfyDir, "main.py"), STUB_MAIN);
   const port = await freePort();
   assert.ok(port < 8188 || port > 8191, "the stub must never sit on 8188-8191");
@@ -76,15 +76,19 @@ const out = await withGpuSlot({
 }, async () => "job-done");
 console.log("RUNNER-RESULT " + out);
 `);
-  return { comfyDir, port, api: `http://127.0.0.1:${port}`, runner };
+  return { port, api: `http://127.0.0.1:${port}`, runner };
 }
 
 test("a runner given keep-comfy exits after its job while the instance it launched stays up", async (t) => {
-  const { comfyDir, port, api, runner } = await setup();
-  const markerPath = join(comfyDir, ".offload-launch-keepcase.json");
+  // the folder, and the hook that kills what runs in it and then removes it, come before anything that can
+  // throw. scratchDir would not do here: node:test runs a test's hooks in the order they were registered,
+  // and the removal has to wait for the kill (a running stub holds its files open on Windows)
+  const comfyDir = mkdtempSync(join(tmpdir(), "comfy-keep-"));
   let stubPid = 0;
   let child;
-  t.after(() => { if (stubPid) killTree(stubPid); if (child && child.exitCode === null) killTree(child.pid); try { rmSync(comfyDir, { recursive: true, force: true }); } catch {} });
+  t.after(() => { if (stubPid) killTree(stubPid); if (child && child.exitCode === null) killTree(child.pid); removeTree(comfyDir); });
+  const { port, api, runner } = await setup(comfyDir);
+  const markerPath = join(comfyDir, ".offload-launch-keepcase.json");
 
   child = spawn(process.execPath, [runner], {
     env: { ...process.env, COMFY_DIR: comfyDir, COMFY_PY: process.execPath, COMFY_INSTANCE: "keepcase", TEST_API: api, COMFY_START_WAIT_SEC: "30" },
@@ -131,8 +135,8 @@ function fakeKeptChild() {
   return c;
 }
 
-test("a kept launch spawns detached, console to a log file descriptor, unref'd, window hidden", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "comfy-keep-spawn-"));
+test("a kept launch spawns detached, console to a log file descriptor, unref'd, window hidden", async (t) => {
+  const dir = scratchDir(t, "comfy-keep-spawn-");
   let ups = 0;
   let seen;
   const fds = { opened: [], closed: [] };
@@ -157,8 +161,8 @@ test("a kept launch spawns detached, console to a log file descriptor, unref'd, 
   assert.deepEqual(fds.closed, [77], "the runner's own copy of the descriptor must be closed once the child has its dup");
 });
 
-test("a non-kept launch is unchanged: piped, attached, not unref'd", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "comfy-keep-plain-"));
+test("a non-kept launch is unchanged: piped, attached, not unref'd", async (t) => {
+  const dir = scratchDir(t, "comfy-keep-plain-");
   let ups = 0;
   let seen;
   const child = fakeKeptChild();
@@ -173,8 +177,8 @@ test("a non-kept launch is unchanged: piped, attached, not unref'd", async () =>
   assert.equal(child.unrefCalls, 0);
 });
 
-test("a kept instance that never answers is still killed: a half-started instance is nobody's", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "comfy-keep-dead-"));
+test("a kept instance that never answers is still killed: a half-started instance is nobody's", async (t) => {
+  const dir = scratchDir(t, "comfy-keep-dead-");
   let killed = 0;
   const child = fakeKeptChild();
   child.kill = () => { killed++; };
@@ -190,8 +194,8 @@ test("a kept instance that never answers is still killed: a half-started instanc
 
 // ---- the log: bounded by rotation, not by a pipe ------------------------------------
 
-test("trimRotatedLog keeps the last 5 MB of an oversized archived console log", () => {
-  const dir = mkdtempSync(join(tmpdir(), "comfy-keep-trim-"));
+test("trimRotatedLog keeps the last 5 MB of an oversized archived console log", (t) => {
+  const dir = scratchDir(t, "comfy-keep-trim-");
   const cap = 5 * 1024 * 1024;
   const head = Buffer.alloc(cap, "a"), tail = Buffer.from("THE-END-OF-THE-RUN\n");
   writeFileSync(comfyLogPath(dir), Buffer.concat([head, Buffer.alloc(1024 * 1024, "b"), tail]));
@@ -203,8 +207,8 @@ test("trimRotatedLog keeps the last 5 MB of an oversized archived console log", 
   assert.match(readFileSync(archived, "utf8").slice(-20), /THE-END-OF-THE-RUN/);
 });
 
-test("trimRotatedLog leaves a small archive alone and never throws on a missing one", () => {
-  const dir = mkdtempSync(join(tmpdir(), "comfy-keep-trim2-"));
+test("trimRotatedLog leaves a small archive alone and never throws on a missing one", (t) => {
+  const dir = scratchDir(t, "comfy-keep-trim2-");
   trimRotatedLog(dir); // nothing to trim
   writeFileSync(comfyLogPath(dir), "small\n");
   rotateComfyLog(dir);
@@ -212,8 +216,8 @@ test("trimRotatedLog leaves a small archive alone and never throws on a missing 
   assert.equal(readFileSync(comfyLogPath(dir) + ".1", "utf8"), "small\n");
 });
 
-test("tailComfyLog reads a bounded window of a huge live log, not the whole file", () => {
-  const dir = mkdtempSync(join(tmpdir(), "comfy-keep-tail-"));
+test("tailComfyLog reads a bounded window of a huge live log, not the whole file", (t) => {
+  const dir = scratchDir(t, "comfy-keep-tail-");
   const line = "x".repeat(99) + "\n";
   writeFileSync(comfyLogPath(dir, "k"), line.repeat(60000) + "last-line\n"); // ~6 MB of ordinary lines
   const tail = tailComfyLog(dir, 3, "k");
@@ -225,8 +229,8 @@ test("tailComfyLog reads a bounded window of a huge live log, not the whole file
   assert.equal(tailComfyLog(dir, 2, "j"), "last-line");
 });
 
-test("tailComfyLog on a small log is what it always was", () => {
-  const dir = mkdtempSync(join(tmpdir(), "comfy-keep-tail2-"));
+test("tailComfyLog on a small log is what it always was", (t) => {
+  const dir = scratchDir(t, "comfy-keep-tail2-");
   writeFileSync(comfyLogPath(dir), "a\nb\nc\nd\n");
   assert.equal(tailComfyLog(dir, 2), "c\nd");
   assert.equal(tailComfyLog(dir, 20), "a\nb\nc\nd");

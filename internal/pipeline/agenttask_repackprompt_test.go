@@ -174,9 +174,9 @@ func TestRepackPromptsNameEachFieldsTypeAndItsItemType(t *testing.T) {
 	})
 }
 
-// objectFieldSchemaJSON has the two fields the grammar cannot express: a list of
-// numbers (gbnf compiles every array to a list of strings) and an object (it has
-// no object type, so the field compiles to a string).
+// objectFieldSchemaJSON has a field the grammar cannot express, a list of numbers
+// (gbnf compiles a list of scalars to a list of strings), beside one it can, an
+// object (an open one here; before register F43 it compiled to a string too).
 const objectFieldSchemaJSON = `{"type":"object","properties":{` +
 	`"ratios":{"type":"array","items":{"type":"number"}},` +
 	`"meta":{"type":"object"},` +
@@ -187,7 +187,8 @@ const objectFieldSchemaJSON = `{"type":"object","properties":{` +
 // the chat lane's, which has no grammar, names the schema's own. Both lanes run in
 // one re-pack on one seat, so one field reads differently on purpose: the seat
 // must never be told "array of numbers" beside a grammar that forces a quote after
-// the `[` (register C-80).
+// the `[` (register C-80). An object is not one of those fields any more: the
+// grammar admits it as an object, so both lanes call it one.
 func TestRepackPromptsOnFieldsTheGrammarCannotExpress(t *testing.T) {
 	contract := testContract()
 	contract.OutputSchema = json.RawMessage(objectFieldSchemaJSON)
@@ -207,12 +208,12 @@ func TestRepackPromptsOnFieldsTheGrammarCannotExpress(t *testing.T) {
 		t.Fatalf("deferred (%s): %s", wire.DeferClass, wire.Reason)
 	}
 	_, grammarUser := promptOf(t, <-fake.repackBodies)
-	for _, want := range []string{`"ratios" (array of strings)`, `"meta" (string)`, `"label" (string)`} {
+	for _, want := range []string{`"ratios" (array of strings)`, `"meta" (object)`, `"label" (string)`} {
 		if !strings.Contains(grammarUser, want) {
 			t.Errorf("grammar lane: the user prompt does not say %s:\n%s", want, grammarUser)
 		}
 	}
-	for _, bad := range []string{"array of numbers", "(object)"} {
+	for _, bad := range []string{"array of numbers", `"meta" (string)`} {
 		if strings.Contains(grammarUser, bad) {
 			t.Errorf("grammar lane: the user prompt says %q, which its grammar does not allow:\n%s", bad, grammarUser)
 		}

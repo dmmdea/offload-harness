@@ -264,8 +264,23 @@ func TestTheCutSaysWhatTheNodeAnsweredToTheWithdraw(t *testing.T) {
 
 // TestTheCutSaysWhenTheNodeNeverAnsweredTheWithdraw: no answer inside the bound is said as
 // such — a blackholed node is not the same as one with no route.
+//
+// The subject is the clause a hung node's withdraw leaves on the cut, so the bound that
+// fires is made short (withdrawTimeout, which withdrawBound keeps whenever three quarters of
+// the allowance is longer) and the unwind allowance around it long: the goroutine that asked
+// then has the whole difference to hand the truthful cut back. Left to the shared bound
+// (three quarters of the 250 ms floor) it had ~60 ms, and the first cut in a process costs
+// more than that by itself (the one-time process-origin lookup behind the first ledger row
+// is ~40-60 ms on Windows, so run alone the test failed every time and run after another cut
+// it passed); a loaded box starves it the same way (register F66). The three-quarters arm is
+// pinned end to end by TestRunWithDeadlineWithdrawNeverHoldsTheCallPastTheUnwind.
 func TestTheCutSaysWhenTheNodeNeverAnsweredTheWithdraw(t *testing.T) {
 	compressPolls(t, 5*time.Millisecond, time.Second)
+	const bound = 150 * time.Millisecond
+	oldTimeout := withdrawTimeout
+	withdrawTimeout = bound
+	t.Cleanup(func() { withdrawTimeout = oldTimeout })
+	widenUnwind(t, 5*time.Second) // 5 s - bound is what the asking goroutine has left to hand the cut back
 	_, inner := remoteQueuedForeverServer(t)
 	mux := http.NewServeMux()
 	mux.HandleFunc("DELETE /fleet/jobs/{id}", func(w http.ResponseWriter, r *http.Request) {
@@ -277,10 +292,10 @@ func TestTheCutSaysWhenTheNodeNeverAnsweredTheWithdraw(t *testing.T) {
 	mux.Handle("/", inner.Config.Handler)
 	front := httptest.NewServer(mux)
 	t.Cleanup(front.Close)
-	results, _, _ := runWithin(t, 6*time.Second, testCfg(t), neverLocal(t),
+	results, _, _ := runWithin(t, 15*time.Second, testCfg(t), neverLocal(t),
 		[]core.AgentContract{remoteGoal("slow one")}, "remote", []string{front.URL}, deadlineIn(300*time.Millisecond), nil)
-	if r := results[0].Result.Reason; !strings.Contains(r, "no answer within") || strings.Contains(r, "did not stop") {
-		t.Fatalf("reason = %q, want it to say the node did not answer within the bound (and still be the truthful cut, not an abandoned subtask)", r)
+	if r := results[0].Result.Reason; !strings.Contains(r, "no answer within "+bound.String()) || strings.Contains(r, "did not stop") {
+		t.Fatalf("reason = %q, want it to say the node did not answer within the bound (%s) and still be the truthful cut, not an abandoned subtask", r, bound)
 	}
 }
 

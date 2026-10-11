@@ -1,13 +1,39 @@
 package main
 
 import (
+	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/dmmdea/offload-harness/internal/gpulease"
 )
+
+// The marker is embedded with a terminator, so a literal the linker lays next to it cannot become part of the version it
+// reads back ("0.179.0interrupted"). The audit is run on a file that has exactly that neighbour.
+func TestTheBuildMarkerIsReadBackWhateverLiteralFollowsIt(t *testing.T) {
+	if !strings.HasSuffix(embeddedBuildMarker, "\x00") || strings.HasSuffix(buildMarker, "\x00") {
+		t.Fatalf("the embedded marker is NUL-terminated and the shown one is not: %q / %q", embeddedBuildMarker, buildMarker)
+	}
+	if buildMarker != gpulease.BuildMarkerPrefix+version {
+		t.Fatalf("the shown marker is the prefix and the version: %q", buildMarker)
+	}
+	for _, next := range []string{"interrupted %s; never started", "9 lives", "-rc1", "Zeta", "+meta"} {
+		path := filepath.Join(t.TempDir(), "fake.exe")
+		if runtime.GOOS != "windows" {
+			path = filepath.Join(t.TempDir(), "fake")
+		}
+		if err := os.WriteFile(path, []byte("MZ-----"+gpulease.FormatSignature+"-----"+embeddedBuildMarker+next+"-----"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		r := gpulease.Audit(gpulease.AuditOptions{Files: []string{path}})
+		if len(r.Items) != 1 || !r.Items[0].Aware || r.Items[0].Version != version {
+			t.Errorf("a literal %q laid right after the marker must not change the version read back: %+v", next, r.Items)
+		}
+	}
+}
 
 // THE LINKER MUST KEEP THE SIGNATURE. `gpu doctor` tells a binary that understands the
 // lease format from one that does not by the literal FormatSignature inside it, so a

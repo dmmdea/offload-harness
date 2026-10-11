@@ -200,6 +200,26 @@ empty = OCR rides `vision_model`, byte-identical to before. The alias is resolve
 through, so the call, the cache key, the circuit breaker, and the ledger all name the model that
 actually ran; `offload_status`'s roster reports the effective `ocr` model, falling back to vision.
 
+**A cold vision seat is loaded before the request is sent** (F49). The vision seat unloads after its idle
+ttl, and llama-swap holds the first request open for the whole load, so the request's own timeout
+(`request_timeout_sec`, 120 s) used to have to cover the load AND the inference: a 32B vision seat's cold
+load plus a many-frame `video_describe` prefill outlasted it, and the first call after an idle gap failed
+with `Client.Timeout exceeded while awaiting headers` (`err_class: timeout`) while the load carried on
+behind it. `runVisionGen` now reads `/running` once after its GPU-lease gate; a seat that is not listed
+ready is warmed by the agent door's warm-up (`warmSeat`: one passthrough request that triggers the load,
+passes the GPU-lease fence like every deliberate load, and holds until the seat is up) for at most
+`vision_coldload_wait_sec` (default 180 s, **chosen, not measured as one figure**: first requests to a
+cold seat took 14 to 84 s, load plus their own inference: the first chat completion logged after each of the last
+25 cold starts, 21 of which completed; and one load outlasted a 120 s client timeout). The vision request is sent only afterwards, so it keeps its full
+timeout for inference. The bound limits how long the caller is held, not whether the call is made: when
+the load outlasts it the call goes on and the load carries on behind the request, and a defer after a
+wait names it (`(the vision seat was cold: waited Ns for its load before sending)`). A seat that is
+already ready costs the one read; a model routed off this box (`seat_endpoints`, a cascade lane) is not
+warmed here; `vision_coldload_wait_sec` 0 turns the wait off. `vqa`/`ocr`/`assess_image`,
+`video_describe` and each `video_watch` window all pass through `runVisionGen`, so all three get it. A
+cold call's worst case is now the wait plus `request_timeout_sec` (and `vision_gpu_wait_sec` before both, when a render holds the card first)
+(`TestVisionColdSeatIsWaitedForBeforeTheRequestIsSent`, `TestVisionColdLoadWaitIsBounded`).
+
 **Whole-video watching** (`offload_video_watch`, `runVideoWatch`) sweeps a video window by window
 (8 s at 1 fps by default), sends each window through the same per-call vision machinery as
 `video_describe`, then synthesizes the per-window notes on the text seat. One call is one call:
@@ -272,7 +292,13 @@ upstream: an alone call that dies that way reads as no speech.
   stamped at each door, carried through `core.Meta` and mapped onto the row, so "which door produced
   this cascade call" stops being unanswerable. It is documentary and never routes; a forwarded request
   keeps its origin door, and agent-contract rows carry the contract's door (`agent_delegate`, `offload_ask`, `offload_review_diff`, `offload_research`, `cli:delegate`, `cli:research`, or `fleet` for a contract a node received with none) and the composite sub-calls (extract_image's ocr + extract, inpaint's text-box vqa) keep their parent's; a row with no `door` (every row before the door stamp) reads as UNKNOWN door,
-  never as one of the values above.
+  never as one of the values above. Since register F48 (job-error class C23) a row also carries `run_class` when it
+  was not real work (`test`, `bake`, `measurement`, or an operator label from `LOCAL_OFFLOAD_RUN_CLASS`; absent is
+  production): `Record` settles it beside the origin (`ledger.settleRunClass`, the process class, a test binary's
+  escape from its throwaway directory, then what the row declares: `pin_reason: measurement`, the measure and smoke
+  doors, the `go-test` origin), and every summary (`ledger.SummarizeFile`, `TopDeferReasons`, `loupe`, `stats`,
+  `audit-sample`, the training readers) skips those rows by default and reports the jobs it skipped
+  (`Summary.ExcludedNonProduction`); `SummarizeFileWith(..., true)` and `--include-test-traffic` count them.
 - **Cache** — keyed result reuse. Bypassed on the *recordless* path (`NewRecordlessPipeline`);
   **shared** on the *in-loop* path (`NewInLoopPipeline`) — see Interfaces below for why those are two
   different things.

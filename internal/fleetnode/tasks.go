@@ -480,7 +480,7 @@ func buildRequestIn(ctx context.Context, v *mediaView, loopbackListener bool, ta
 	}
 	switch taskType {
 	case "image-gen":
-		return buildImageGen(cfg, payload)
+		return buildImageGen(ctx, cfg, payload)
 	case "video-gen":
 		return buildVideoGen(payload)
 	case "animate":
@@ -533,7 +533,7 @@ func buildRequestIn(ctx context.Context, v *mediaView, loopbackListener bool, ta
 // callers on this box.
 
 // buildImageGen mirrors mcpserver.handleGenerateImage, minus `out` (see above).
-func buildImageGen(cfg config.Config, payload json.RawMessage) (core.Request, func(), error) {
+func buildImageGen(ctx context.Context, cfg config.Config, payload json.RawMessage) (core.Request, func(), error) {
 	noop := func() {}
 	var in struct {
 		Prompt   string `json:"prompt"`
@@ -562,7 +562,7 @@ func buildImageGen(cfg config.Config, payload json.RawMessage) (core.Request, fu
 		return core.Request{}, noop, fmt.Errorf("image-gen payload: prompt required")
 	}
 	if in.RecipeDigest != "" {
-		if err := checkRecipe(cfg, in.Family, in.RecipeDigest); err != nil {
+		if err := checkRecipe(ctx, cfg, in.Family, in.RecipeDigest); err != nil {
 			return core.Request{}, noop, err
 		}
 	}

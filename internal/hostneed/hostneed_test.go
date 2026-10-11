@@ -512,11 +512,11 @@ func TestSeatNeedIsTheConfiguredFigureElseTheFailClosedDefault(t *testing.T) {
 	}
 }
 
-// sd.cpp and the iGPU engines are not sized. The class default is the largest COMFYUI family a box binds, and a binding on the
-// "sdcpp" engine is left out of it on purpose: its weights are not in a ComfyUI model tree, and "does it fit the card" means
-// nothing on a unified-memory iGPU. So a box that binds only sd.cpp (the shape of the small nodes) declares NOTHING and its
-// lanes are admitted whatever the host reads; the spill `--offload-to-cpu` parks in RAM there is outside the guard. The docs say
-// so (gpu-lease.md, media-generation.md); this pins it so the docs and the code change together.
+// The CLASS DEFAULT is the largest COMFYUI family a box binds, and a binding on the "sdcpp" engine is left out of it on purpose:
+// its weights are not in a ComfyUI model tree, and "does it fit the card" means nothing on a unified-memory iGPU. So on a box
+// that binds only sd.cpp (the shape of the small nodes) the class default is NOTHING. That is no longer what the sd.cpp lanes
+// declare there (F60): they add the weights they park themselves, ForSdcpp (hostneed_sdcpp_test.go) wired in internal/pipeline
+// (sdcpp_need_test.go). The docs say so (gpu-lease.md, media-generation.md); this pins the default so they change together.
 func TestAnSdcppOnlyBoxDeclaresNothing(t *testing.T) {
 	f := krea2Facts(t, 16)
 	// Bound to krea2's files on the sdcpp engine: were the engine not screened out these would size to 32.75 GiB.

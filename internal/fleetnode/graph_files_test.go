@@ -336,3 +336,44 @@ func TestRunGraphThatNamesNoFileIsAdmittedAsBefore(t *testing.T) {
 		t.Fatalf("a graph that is not an object keeps its 400, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
+
+// The refusal says WHICH kind of 503 it is. A graph that names a file the node does not hold is "not this request": the node is
+// not full and its route is fine, so the body carries refusal "not_capable" and a delegator marks the node not-capable for that
+// ticket alone, with no pause on the node. A node whose run-graph route is not CONFIGURED is the node's own state and says no
+// such thing, and neither does a full queue (media_ready_test.go, server_test.go): those delegators do leave alone for a while.
+func TestAGraphFileRefusalCarriesTheNotCapableWord(t *testing.T) {
+	cfg := graphNode(t, "models/diffusion_models/wan/high.safetensors")
+	s, _ := newTestServer(t, cfg, &fakeRunner{}, nil)
+	for name, body := range map[string]string{
+		"a weight file": graphDispatch("g-w", wanGraph, ""),
+		"an input file": graphDispatch("g-i", refGraph, ""),
+	} {
+		rec := do(t, s, http.MethodPost, "/fleet/dispatch", body, nil)
+		if rec.Code != http.StatusServiceUnavailable {
+			t.Fatalf("%s: status %d: %s", name, rec.Code, rec.Body.String())
+		}
+		if got := decodeMap(t, rec)["refusal"]; got != RefusalNotCapable {
+			t.Errorf("%s: refusal = %v, want %q (body %s)", name, got, RefusalNotCapable, rec.Body.String())
+		}
+	}
+}
+
+func TestARouteThatIsNotReadyIsNotSaidToBeNotCapable(t *testing.T) {
+	useRealMediaRoutes(t)
+	script := filepath.Join(t.TempDir(), "comfy-run-graph.mjs")
+	touchFile(t, script)
+	cfg := graphNode(t, "models/diffusion_models/wan/high.safetensors")
+	cfg.RunGraphScript = script
+	s, _ := newTestServer(t, cfg, &fakeRunner{}, nil)
+	if err := os.Remove(script); err != nil {
+		t.Fatal(err)
+	}
+	ResetMediaRoutesCache()
+	rec := do(t, s, http.MethodPost, "/fleet/dispatch", graphDispatch("g-r", wanGraph, ""), nil)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("a bound run-graph whose route is not ready: status %d: %s", rec.Code, rec.Body.String())
+	}
+	if got, has := decodeMap(t, rec)["refusal"]; has {
+		t.Errorf("a route that is not CONFIGURED is the node's state, not a refusal of this graph: refusal = %v", got)
+	}
+}

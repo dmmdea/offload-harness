@@ -423,12 +423,12 @@ func TestTheLocalSeatCountsOnlyItsRunCapRoomInTheWidth(t *testing.T) {
 
 // ---- R1's rules, at a width other than four --------------------------------------------------------------
 
-// TestAWaitHoldingARunSlotOfAWideCallKeepsItsTTLWhileASubtaskIsUnstarted is ADR 0073 decision 9 with six slots instead of four:
-// seven subtasks, one node that publishes six slots and never has room. The deal opens six, the seventh waits behind them for a
-// slot, and the six that hold slots wait only the TTL and say why; the seventh, started when the first slot freed, has
-// nothing behind it and waits for the call's horizon. heldSlotWait (callwait_slots_test.go) is the body the four-slot test
-// shares, and says what each assertion proves and when a run is skipped as the runner's stall.
-func TestAWaitHoldingARunSlotOfAWideCallKeepsItsTTLWhileASubtaskIsUnstarted(t *testing.T) {
+// TestAWaitHoldingARunSlotOfAWideCallGivesItUpAtItsTTLAndKeepsWaiting is ADR 0073 decision 9, as amended, with six slots instead
+// of four: seven subtasks, one node that publishes six slots and never has room. The deal opens six, the seventh waits behind
+// them for a slot, and the six that hold slots give them up at the TTL, so the seventh begins while the node is still full; all
+// seven wait for the call's horizon. heldSlotWait (callwait_slots_test.go) is the body the four-slot test shares, and says what
+// each assertion proves and when a run is skipped as the runner's stall.
+func TestAWaitHoldingARunSlotOfAWideCallGivesItUpAtItsTTLAndKeepsWaiting(t *testing.T) {
 	heldSlotWait(t, pages(7), func(f *fakeNode) { f.maxConcurrentJobs, f.maxQueueDepth = 6, 12 })
 }
 

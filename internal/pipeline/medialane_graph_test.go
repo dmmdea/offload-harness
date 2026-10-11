@@ -130,6 +130,22 @@ func graphLaneCases() []laneCase {
 	}
 }
 
+// nextMillisecond waits until the wall clock has left the millisecond it is in. The lease queue orders the places in a line by the
+// millisecond each was left (Token.SinceMs, Waiter.SinceMs) and does not count a tie as "ahead" (tokens.go tokenBlocks and
+// gpualloc.QueuedClaimsBefore count only a place strictly earlier; waiters.go: a tie breaks on the waiter's file name), so two
+// events stamped in one millisecond are not in the order a fixture meant. A case that leaves a place with time.Now() and lets the
+// call arrive straight after it tied on a host fast enough to do both inside one millisecond (a Linux disk: 36 of 50 runs of
+// "a live place in line on a card" failed on one box, "the table is stale: the real wait-0 admission granted=true"), and the real
+// admission, which is right not to wait on a tie, granted a call the table says is behind a place. The code is as designed; this
+// makes the order the table states a strict one by leaving the next millisecond between the step that leaves a place and the
+// step that arrives.
+func nextMillisecond() {
+	start := time.Now().UnixMilli()
+	for time.Now().UnixMilli() == start {
+		time.Sleep(100 * time.Microsecond)
+	}
+}
+
 // THE CONTRACT, for a whole-node graph. Over every state of the table a lane the real wait-0 admission would grant is never
 // called busy, and a state the prober reads is called busy.
 func TestMediaLaneFreeGraphNeverRefusesAGrant(t *testing.T) {
@@ -140,10 +156,12 @@ func TestMediaLaneFreeGraphNeverRefusesAGrant(t *testing.T) {
 			if c.setup != nil {
 				c.setup(t, f)
 			}
+			nextMillisecond() // the places the setup left are strictly earlier than the place the params leave and than the call
 			params := map[string]any{}
 			if c.params != nil {
 				params = c.params(t, f)
 			}
+			nextMillisecond() // ...and than the arrival of the call, which is stamped inside the probe and the admission below
 			req := graphLaneReq(params)
 			v := f.p.MediaLaneFree(context.Background(), req)
 			granted, gerr := graphGrant(f, req)
@@ -266,7 +284,7 @@ func TestMediaLaneFreeGraphIsFreeForWhatItDoesNotModel(t *testing.T) {
 		if v := f.p.MediaLaneFree(context.Background(), graphLaneReq(params)); !v.Free || !strings.Contains(v.Why, "devices") {
 			t.Errorf("%s: want free (not judged) naming the devices, got %+v", name, v)
 		} else if v.Unjudged {
-			t.Errorf("%s: a card-scoped graph is not in question on this lane, so it is not an UNREAD lane: %+v", name, v)
+			t.Errorf("%s: a card-scoped graph is not in question for the lane (it stays here), so it is not an UNREAD lane: %+v", name, v)
 		}
 	}
 
@@ -280,18 +298,31 @@ func TestMediaLaneFreeGraphIsFreeForWhatItDoesNotModel(t *testing.T) {
 	}
 }
 
+// A card table that does not read is a lane that could not be READ, which a router must not take for a free lane (the card table
+// is slowest to read exactly when a heavy render holds the card): free, with the reason, and Unjudged, as for an image. Without the
+// flag a busy graph with an unreadable lane skipped the ticket queue and kept the old pipeline wait and its tk- token.
 func TestMediaLaneFreeGraphIsFreeWhenTheCardTableCannotBeRead(t *testing.T) {
 	f := newAdmitFixtureWith(t, admitSpec{order: admitOrder})
 	hold(t, f, "a bench render", leaseIDOf(admitUUIDA))
+	if v := f.p.MediaLaneFree(context.Background(), graphLaneReq(nil)); v.Free || v.Unjudged {
+		t.Fatalf("control: busy while the table reads, and the lane is judged: %+v", v)
+	}
 	f.p.alloc.Cards = func(context.Context, config.Config) ([]gpuprobe.Card, string, error) {
 		return nil, "", context.DeadlineExceeded
 	}
-	if v := f.p.MediaLaneFree(context.Background(), graphLaneReq(nil)); !v.Free || !strings.Contains(v.Why, "card table") {
+	v := f.p.MediaLaneFree(context.Background(), graphLaneReq(nil))
+	if !v.Free || !strings.Contains(v.Why, "card table") {
 		t.Errorf("an unreadable table must read as free with the reason: %+v", v)
 	} else if !v.Unjudged {
 		// core.LaneVerdict.Unjudged: the card table is slowest to read exactly when a heavy render holds the card, so a lane that
 		// could not be read must not be taken for a free one, a graph's lane no more than an image's.
 		t.Errorf("an unreadable table is a lane that could not be read, which a router must not take for a free lane: %+v", v)
+	}
+
+	// A table that lists no card is as unread as one that failed.
+	f.p.alloc.Cards = func(context.Context, config.Config) ([]gpuprobe.Card, string, error) { return nil, "", nil }
+	if v := f.p.MediaLaneFree(context.Background(), graphLaneReq(nil)); !v.Free || !v.Unjudged || !strings.Contains(v.Why, "card table") {
+		t.Errorf("a table that lists no card is an unread lane: %+v", v)
 	}
 }
 

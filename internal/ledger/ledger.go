@@ -257,6 +257,14 @@ type Entry struct {
 	// job that hangs, or a ghost that outlives its delegator, is visible before it
 	// ends. A marker is never a job: every job counter skips it (jobrows.go).
 	Phase string `json:"phase,omitempty"`
+	// RunClass names the kind of run that wrote the row when it was not real work: "test" (a go-test row, the
+	// fleet-smoke door, a test binary that opened a real ledger), "bake" (a bake or bake-off run), "measurement"
+	// (a call pinned for measurement, the fleet-measure door), or a label the operator's tool chose with
+	// LOCAL_OFFLOAD_RUN_CLASS (register F48 / C23). Record settles it on the one path every writer takes. EMPTY
+	// IS PRODUCTION: every row written before the label existed, and every ordinary row after it, carries no
+	// key at all. Every production view skips a labelled row by default and reports how many it skipped
+	// (Summary.ExcludedNonProduction); a reader that must see them all asks (ReadAll, SummarizeFileWith).
+	RunClass string `json:"run_class,omitempty"`
 }
 
 // Label provenance values for Entry.LabelSource. Constants rather than string literals so
@@ -309,6 +317,9 @@ type Ledger struct {
 	mu   sync.Mutex
 	f    *os.File
 	path string
+	// class is the run class every row written through this handle takes when its writer and its process name
+	// none: "test" for a test binary that opened a ledger outside its throwaway directory (runclass.go).
+	class string
 	// observer, when set, sees every entry AFTER it is durably written. It
 	// runs on the recording goroutine and must not block: the one consumer
 	// (internal/pairworkloads) hands the entry to a background sender.
@@ -330,7 +341,11 @@ func Open(path string) (*Ledger, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Ledger{f: f, path: path}, nil
+	l := &Ledger{f: f, path: path}
+	if escapedTestWriter(path) {
+		l.class = ClassTest
+	}
+	return l, nil
 }
 
 // Close releases the append handle.
@@ -361,6 +376,7 @@ func (l *Ledger) Record(e Entry) error {
 	// Provenance and the one token figure are stamped HERE, on the one path
 	// every writer takes, so no record site can forget them (D-101).
 	stampOrigin(&e)
+	settleRunClass(&e, l.class)
 	switch {
 	case e.ParentJobID != "":
 		// An inner row (C-62): its card work is on the parent row.
@@ -454,6 +470,11 @@ type Summary struct {
 	// emitted for one release for consumers of the JSON; remove in v0.7.
 	EstDollarSaved float64        `json:"est_dollar_saved"`
 	ByTask         map[string]int `json:"by_task"`
+	// ExcludedNonProduction is how many JOBS the summary skipped per run class because they were test, bake or
+	// measurement traffic (register F48): the default views leave them out, and this says how many so nothing is
+	// hidden. Absent when nothing was skipped, and always absent when the summary included them
+	// (SummarizeFileWith includeTraffic).
+	ExcludedNonProduction map[string]int `json:"excluded_non_production,omitempty"`
 }
 
 // Prices values what a local seat produced, in Opus dollars per 1M tokens.
@@ -538,10 +559,21 @@ type ReasonCount struct {
 // alphabetically for deterministic output. Deferred entries written before
 // the reason field existed count under "(unrecorded)" so the denominator
 // stays honest. Lock-free like SummarizeFile; a missing file returns nil.
+// Test, bake and measurement traffic is left out (register F48: a bake's
+// "seat is not in the served roster" ranked among the real reasons);
+// TopDeferReasonsWith includes it.
 func TopDeferReasons(path string, since int64, topN int) ([]ReasonCount, error) {
+	return TopDeferReasonsWith(path, since, topN, false)
+}
+
+// TopDeferReasonsWith is TopDeferReasons with the choice of counting the non-production traffic.
+func TopDeferReasonsWith(path string, since int64, topN int, includeTraffic bool) ([]ReasonCount, error) {
 	entries, err := ReadAll(path)
 	if err != nil {
 		return nil, err
+	}
+	if !includeTraffic {
+		entries, _ = ProductionRows(entries)
 	}
 	counts := map[string]int{}
 	for _, e := range JobRows(entries) { // an inner row's defer is its parent's (C-62)
@@ -581,11 +613,21 @@ func TopDeferReasons(path string, since int64, topN int) ([]ReasonCount, error) 
 // SummarizeFile reads a JSONL ledger without any lock — safe to call while
 // another process is appending (a partial final line is skipped). A missing
 // file reports an empty summary (nothing offloaded yet), not an error.
+// Test, bake and measurement traffic is left out and counted in
+// Summary.ExcludedNonProduction (register F48); SummarizeFileWith includes it.
 func SummarizeFile(path string, since int64, prices Prices) (Summary, error) {
+	return SummarizeFileWith(path, since, prices, false)
+}
+
+// SummarizeFileWith is SummarizeFile with the choice of counting the
+// non-production traffic. With includeTraffic every row counts, as before the
+// run class existed, and nothing is reported skipped.
+func SummarizeFileWith(path string, since int64, prices Prices, includeTraffic bool) (Summary, error) {
 	s := Summary{ByTask: map[string]int{}}
 	// First pass: the parent job ids, so an ORPHAN inner row (its parent row
-	// never landed) counts as its job instead of vanishing (C-62).
-	parents, perr := parentJobIDsInFile(path)
+	// never landed) counts as its job instead of vanishing (C-62), and the
+	// class of every job, so the inner row of a labelled job is skipped with it.
+	parents, jobs, perr := classIndexInFile(path)
 	if perr != nil {
 		return s, perr
 	}
@@ -610,6 +652,17 @@ func SummarizeFile(path string, since int64, prices Prices) (Summary, error) {
 		}
 		if since > 0 && e.TS < since {
 			continue
+		}
+		if !includeTraffic {
+			if c := classIn(e, jobs); c != "" {
+				if CountsAsJob(e, parents) {
+					if s.ExcludedNonProduction == nil {
+						s.ExcludedNonProduction = map[string]int{}
+					}
+					s.ExcludedNonProduction[c]++
+				}
+				continue
+			}
 		}
 		if !CountsAsJob(e, parents) {
 			// An inner row (C-62): the parent `agent_delegate` row is the job —

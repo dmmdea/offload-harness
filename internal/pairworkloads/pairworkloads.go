@@ -92,6 +92,11 @@ type Config struct {
 	// Relay is the card relay (relay.go): where frames go when this box has no PAIR identity of
 	// its own (neither node-id.json nor the node-info fallback). The zero value is no relay.
 	Relay RelayConfig
+	// Suppressed says the emitter is off because this process declares a non-production run class
+	// (ledger.EnvRunClass, or a class-prefixed origin; register F48 / C23): a bake or measurement opens no
+	// card. It is not the same as Enabled=false for a box that does not use PAIR: a suppressed run also asks
+	// no fleet node to card its jobs (SetWireHeaders), where an ordinary disabled asker does.
+	Suppressed bool
 }
 
 // UnderLeaseEnv is set by `gpu reserve -- <cmd>` on the command it wraps. The
@@ -100,14 +105,27 @@ type Config struct {
 // reports nothing of its own: one job, one card (0.140.6).
 const UnderLeaseEnv = "OFFLOAD_PAIR_UNDER_LEASE"
 
+// TestCardsEnv, set to anything, keeps the cards of a process that declares a non-production run class
+// (ledger.EnvRunClass): for the operator who is testing PAIR itself with a labelled run. Unset, a bake, a
+// measurement and a test run open no card on the production dashboard (register F48 / C23).
+const TestCardsEnv = "LOCAL_OFFLOAD_PAIR_TEST_CARDS"
+
+// suppressedByRunClass reports whether this process declares a non-production class and has not asked to keep
+// its cards. Read from the environment each time (ledger.RunClassFromEnv, the rule Record stamps rows with, with
+// no process-table walk: FromConfig runs on every request), so a test's t.Setenv is what it reads.
+func suppressedByRunClass() bool {
+	return ledger.RunClassFromEnv(os.Getenv) != "" && strings.TrimSpace(os.Getenv(TestCardsEnv)) == ""
+}
+
 // FromConfig reads the two harness config keys.
 func FromConfig(cfg config.Config) Config {
 	ep := strings.TrimSpace(cfg.PairWorkloadsEndpoint)
 	if ep == "" {
 		ep = DefaultEndpoint
 	}
-	enabled := cfg.PairWorkloadsEnabled && strings.TrimSpace(os.Getenv(UnderLeaseEnv)) == ""
-	return Config{Enabled: enabled, Endpoint: ep,
+	suppressed := suppressedByRunClass()
+	enabled := cfg.PairWorkloadsEnabled && strings.TrimSpace(os.Getenv(UnderLeaseEnv)) == "" && !suppressed
+	return Config{Enabled: enabled, Endpoint: ep, Suppressed: suppressed,
 		VLLMSeats: cfg.VLLMSeats, SwapEndpoint: cfg.Endpoint, StateDir: cfg.StateDir,
 		NodeInfoURL: nodeInfoURLFor(cfg), Relay: RelayFromConfig(cfg)}
 }
@@ -265,6 +283,15 @@ func defaultAppDir() string {
 	}
 	return filepath.Join(base, "Nvidia Corporation", "Personal AI Router")
 }
+
+// keepTestCards is the operator's opt-in to cards for labelled rows (TestCardsEnv).
+func (e *Emitter) keepTestCards() bool {
+	return strings.TrimSpace(os.Getenv(TestCardsEnv)) != ""
+}
+
+// suppressed reports an emitter that is off because its process is a non-production run (Config.Suppressed).
+// Nil is not suppressed.
+func (e *Emitter) suppressed() bool { return e != nil && e.cfg.Suppressed }
 
 // Enabled is true when the config opts in AND frames have somewhere to go: PAIR is installed on
 // this box (its node-id.json exists and names a UUID, or PAIR's node-info answers on loopback
@@ -863,6 +890,12 @@ func (e *Emitter) AttachLedger(l *ledger.Ledger) {
 		}
 		// A remote call's writer carded it (or deliberately did not: no node was chosen).
 		if row.CardByCaller {
+			return
+		}
+		// Test, bake and measurement traffic is no card on the production dashboard (register F48 / C23):
+		// a process of that class has no emitter at all (FromConfig), and a row a production process
+		// wrote for a call pinned for measurement, or through the measure door, says so itself.
+		if ledger.ClassOf(row) != "" && !e.keepTestCards() {
 			return
 		}
 		if row.CacheHit {

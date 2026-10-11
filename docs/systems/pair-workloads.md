@@ -375,6 +375,8 @@ holds the queued one, and asserts that it landed so; register C-77).
 | `pair_seat_activity_enabled` | `false` | fleet-serve reports DIRECT traffic on this box's vLLM seats (see *Seat activity* below). Enable on every box that **serves** a vLLM seat; independent of `pair_workloads_enabled` |
 | `pair_node_info_url` | `""` = `http://127.0.0.1:14318/v1/node-info`, except where `OFFLOAD_PAIR_APPDIR` is set | PAIR's loopback node-info, read for this node's UUID only when `node-id.json` is missing or unreadable (*Identity when the harness user is not PAIR's user*). Loopback only: any other host fails the config load naming the key |
 | `pair_workloads_relay` | absent = `auto` | where this box's frames go when it has **no** PAIR identity (*The card relay*): `auto` / absent = every `delegate_remotes` base whose health advertises `pair_relay`; `"off"` = no relay; other entries = explicit member base URLs. Each entry is validated like `delegate_remotes`. The bearer is `fleet_auth_token` |
+| env `LOCAL_OFFLOAD_RUN_CLASS` | unset = production | a process that sets a non-production class (`bake`, `measurement`, `test`, or a label of the operator's) **opens no card** and asks no fleet node to card its jobs (it sends no `X-Offload-Pair-Card`, where an ordinary disabled asker sends `node`); a class-prefixed `LOCAL_OFFLOAD_ORIGIN` (`bake:run-7`) does the same (register F48). `production` sets nothing. The `go-test` origin labels ledger rows only: the repo's own tests point their emitters at fixtures |
+| env `LOCAL_OFFLOAD_PAIR_TEST_CARDS` | unset | any value keeps the cards of a labelled run, for the operator testing PAIR itself |
 | env `OFFLOAD_PAIR_APPDIR` | platform default | PAIR's app-data dir when it is not at `%LOCALAPPDATA%\Nvidia Corporation\Personal AI Router` (Windows) / `~/.config/Nvidia Corporation/Personal AI Router` (Linux); tests use it |
 
 ## Identity when the harness user is not PAIR's user
@@ -636,7 +638,13 @@ side can know the producer died, so the harness retires its own orphans:
   holds the GPU). A **transcription** never does (the wait is inside llama-swap, so its lane cannot tell when the
   engine starts; `internal/pairworkloads/calls.go`), so its card is queued from the first frame to the last and the
   sweep says only how long the call had been open: "gone 9m in, no outcome reported (killed, console closed or
-  reboot)" (`tasksThatNeverMarkWorking`, pinned to `internal/pipeline` by `TestOnlyTranscribeNeverMarksWorking`). It
+  reboot)" (`tasksThatNeverMarkWorking`, pinned to `internal/pipeline` in both directions by
+  `TestOnlyTranscribeNeverMarksWorking`: transcribe's lane reaches no `core.MarkWorking`, and every lane of every other
+  long call, listed by name, reaches one; "reaches" is by function name through the package, so it says a lane marks
+  somewhere, not on every path, and the lease path and the voice endpoint have behavioural tests of their own). The
+  **voice endpoint** of `generate_audio` (`tts_endpoint`) takes no lease, so it marks its card running itself, where its
+  request to the speech server starts; until it did, a swept card of a voice render that died mid-synthesis said it never
+  started. The sweep
   cannot say who ended the process: the register holds a pid and a
   start time, not a cause, so it names the causes it has seen and no more. A **delegation's** card ("agd-"
   id) reads the delegator's intent ledger (`<state root>/delegate-intent.jsonl`, `internal/delegate`):
@@ -653,13 +661,35 @@ side can know the producer died, so the harness retires its own orphans:
   card (requester `llama-swap/direct`) is not a harness job at all, so its orphan is closed `completed` with no
   error, as a clean stop closes it. Its `completedAt` is the moment the sweep found the watcher gone: the register
   holds the stretch's start and not its last busy poll, so after a long outage the stretch can read longer than the
-  traffic it carried.
+  traffic it carried. **The sweep's log line counts what it closed by kind** (it counted every card as "harness process
+  exited before the job finished", which is false of a seat-watch stretch, closed completed, and of a terminal frame the
+  producer parked and the sweep delivered): "closed 3 PAIR card(s): 2 whose harness process exited before the job
+  finished; 1 seat-watch stretch(es) whose watcher exited (closed completed: ...)". A sweep that closed orphans alone
+  logs the line it always did.
 - **The wrapper answers a console close itself.** `gpu reserve -- <command>` asks for `SIGTERM` as well as
   `os.Interrupt` (`gpu_signals.go`). Go on Windows delivers a console close, a logoff and a shutdown as
   `SIGTERM`, and ends the process only after its handler has had its grace, so the wrapper kills its command,
-  closes its card with "terminated: its console was closed, or the session is ending or the machine is shutting
-  down" and releases its lease instead of dying silent (the 01:09:59 incident: five card-scoped leases and two
-  queued ones, exit `0xC000013A`). With `--drain --unload-seat` it skips the seat's warm-back (a reload of
+  closes its card with "ended on SIGTERM: likely a console close, a logoff or a shutdown; a plain kill sends it
+  too" and releases its lease instead of dying silent (the 01:09:59 incident: five card-scoped leases and two
+  queued ones, exit `0xC000013A`). The card names the signal and gives its cause as **likely**: a plain `kill` (and, on
+  Linux, every `SIGTERM`) arrives as the same signal, so the wrapper cannot tell a console close from a kill, and the
+  text no longer claims one. **The handler is registered first** (before the lease directory is opened), and every stage
+  returns on it: a signal while the wrapper is **queued** (`--wait`, up to hours) or **choosing cards** (`--cards`) ends the
+  wait through `gpulease.Options.Cancel`, takes its waiter record out of the line, closes the card failed with "ended on
+  SIGTERM while queued (...); never started" and leaves the other holder's lease alone; a signal **during the drain**
+  cancels the drain, releases the lease, unloads and warms nothing and says nothing about a warm owed (none is: the seat
+  was not unloaded, unless the signal cancelled the unload request itself: then the warm stays owed); a signal while the wrapper
+  is **queued again** after a lease lost during the drain ends that wait the same way, and one that lands **between the end of the
+  drain and the command's start** closes the card "ended on SIGTERM before its command started (...); never started" and starts
+  nothing; a signal while the wrapper **plans** (before its card opens) ends it with nothing opened. Every stage text fits the
+  card's 140 characters whole (`TestEveryStageTextFitsTheCardWhole`). A second signal is dropped (see `gpu_signals.go`): the OS
+  ends the process after its grace only for a console close, a logoff or a shutdown, so a second Ctrl-C or a plain kill waits for
+  a stage that never consults the signal (the plan's card-table read, stopping the kept ComfyUI instances, a Ctrl-C's warm-back).
+  Before
+  this the handler was registered only after the drain, so a console close in any of those stages was unhandled: Go
+  ended the process at once, the card stayed open until the sweep closed it "harness process exited before the job
+  finished" and the waiter's record stayed in the line until a reader found its pid gone. With `--drain --unload-seat`
+  and a seat that was unloaded, a command ended on SIGTERM skips the seat's warm-back (a reload of
   minutes inside a grace of seconds, with a model loading while the machine goes down) and releases the lease right
   after stopping the ComfyUI instances kept under it (a step bounded at 60 s, usually seconds): the warm stays owed in the seat marker, and `gpu release --warm-seat` or the seat's next request pays
   it. A Ctrl-C has no deadline and still warms the seat back first. A `taskkill /F` or a `SIGKILL` gives the process no signal; nothing in-process
@@ -749,8 +779,37 @@ A real check is one `agent_delegate` from a fresh MCP session with the key on: t
 appears in PAIR's Jobs list on this box **and** on the node that ran it, reading
 "Requested from <this box> / Ran on <node>" with the seat as the model name.
 
+## Test, bake and measurement runs open no card (register F48)
+
+A bake and a measurement run are not work the operator wants on the Jobs list: 42 cards for a seat named `bake` that
+no endpoint served (`agent seat "bake" is not in the endpoint's served roster`, connection refused on the bake's own
+port) sat among the real ones in 48 hours. Three rules, one per way a run says what it is:
+
+1. **A process with a run class has no emitter.** `FromConfig` turns `Enabled` off when `ledger.RunClassFromEnv`
+   (the rule `Record` stamps rows with, read without the process-table walk `OriginFromEnv` does: `FromConfig` runs on every request) resolves a class (`LOCAL_OFFLOAD_RUN_CLASS`, or a `bake:` / `test:` / `measurement:` origin), so the
+   delegation cards, the call cards, the ledger observer, the remote-call cards and the node cards of that process
+   all go quiet through the one gate they already use. `Config.Suppressed` records why it is off.
+2. **A suppressed asker asks nobody to card its jobs.** An asker with no emitter sends `X-Offload-Pair-Card: node` and
+   the serving node cards the job (D7); sent from a bake, that would put the card back on the node. `SetWireHeaders`
+   sends the asker name and no card header when the emitter is suppressed, which a node reads as "the asker cards
+   it".
+3. **A call can declare itself.** A delegation pinned with `pin_reason: measurement` opens no card
+   (`runner.cardless`) and its dispatch deletes `X-Offload-Pair-Card`, so a thin client with no emitter of its own does not
+   ask the serving node to open the card either; `Begin` and the remote-call card (`RemoteCall.cardless`) refuse the
+   `cli:fleet-measure` door (the asker's ledger row is still written and says `measurement`), and the ledger observer
+   cards no row whose `ledger.ClassOf` is set (the measure door, a measurement pin, a go-test escape).
+
+`LOCAL_OFFLOAD_PAIR_TEST_CARDS=1` keeps the cards of a labelled run. `fleet-smoke` is deliberately unchanged: it is
+the harness's Test traffic button and exists to show a card. The `go-test` origin is **not** a process class
+(`TestFromConfigOpensNoCardsForANonProductionRun`): the delegate and root suites build real emitters against
+fixture ingresses and assert their frames.
+
 ## Failure modes
 
+- **A bake or measurement run has a card**: its process has no class (set `LOCAL_OFFLOAD_RUN_CLASS=bake` where the
+  tool starts it), or `LOCAL_OFFLOAD_PAIR_TEST_CARDS` is set. A run that dispatches to a fleet node opens no card
+  there either: its asker sends no `X-Offload-Pair-Card`. The label does not ride the wire (yet), so the NODE's own
+  ledger row for that work carries no `run_class`.
 - **Two cards for one job**: the in-flight and terminal frames named different
   models/engines. Source 1 pins the identity on the `PlacedResult` for exactly this reason;
   a new emit site must reuse `pairInflight` / `pairTerminal`, never build its own frame.

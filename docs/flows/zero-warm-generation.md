@@ -31,7 +31,8 @@ script.
 2. **Free the llama-swap tiers**, giving the render the whole card. This enumerates loaded models and
    unloads them **individually, skipping a keep-set** — the always-loaded embedding and reranker
    models are small and, on the reference box, pinned to the utility card, not the render card, and an earlier unload-everything implementation destroyed
-   that memory stack on every job for no benefit.
+   that memory stack on every job for no benefit. Under a lease on SOME cards the helper also leaves the models positively placed on the other cards (by `layers`
+   or by the serving config's device pin) resident; it unloads the list the lease hands it, which includes a model nothing places.
 
 3. **Cold-start ComfyUI** with `--disable-smart-memory`, `--cache-none`, and a VRAM reservation.
    If an instance is already running, the harness uses it and does **not** take ownership — it will
@@ -48,7 +49,9 @@ script.
 `generate-image --batch` runs N renders inside **one** slot acquisition. The only behavioral
 difference is that `--cache-none` is omitted, so the checkpoint loads once instead of per render.
 Teardown is not special-cased — it is the same single teardown, now at the batch boundary. Zero-warm
-moves from per-render to per-batch rather than being abandoned.
+moves from per-render to per-batch rather than being abandoned. When this machine's lane is held and a
+roster node renders the recipe, the batch is instead one ticket per job (ADR 0083, decision 13): each job
+is a node's own zero-warm render, a ComfyUI cold start apiece, and the warm session exists only here.
 
 A failed render inside a batch is recorded and the loop continues (unless ComfyUI itself became unusable, or the output disk filled: the batch then stops at that job, the later jobs get `not run:` rows and the batch exits non-zero, register C-83, 0.158.1; the full disk 0.178.0); one JSONL result line is written
 per job. A batch that ran every job and had a failed one exits 4 (`render/comfy-generate.mjs`, `render/comfy-inpaint.mjs` and `local-offload generate-image --batch`; 0 is every job rendered, 1 a stop, 2 usage), and the Go caller reads the runner's 4 as a finished batch and takes the per-job rows. **The default single-render path is byte-identical to its pre-batch behavior.**

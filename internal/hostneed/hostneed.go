@@ -19,7 +19,8 @@
 //     runner's --reserve-vram); 0 when they do. A file whose size cannot be read takes the
 //     documented per-family size in familySizes; a family with neither is unknown, and the call
 //     takes the class default.
-//  3. The media class default: the largest of the ComfyUI render families THIS BOX has bound (an sd.cpp binding counts nothing; its own
+//  3. The media class default: the largest of the ComfyUI render families THIS BOX has bound (an sd.cpp binding counts nothing here, the
+//     pipeline's sd.cpp lanes add the weights they park themselves, ForSdcpp; its own
 //     imagegen_*, gen_edit_*, videogen_* bindings), so a 32 GiB node is not held to the numbers of a
 //     128 GiB one; 0 when nothing is bound. It is never clamped to fit the box: a default that
 //     cannot be admitted here is refused with the reason and the way out (--ram), because quietly
@@ -33,6 +34,7 @@ package hostneed
 import (
 	"fmt"
 	"math"
+	"os"
 	"path"
 	"strings"
 
@@ -72,6 +74,10 @@ type Need struct {
 	Source Source
 	// Detail is one sentence for the line the CLI prints and the docs quote.
 	Detail string
+	// Unsized names, comma-separated by their binding keys, the weight files an sd.cpp estimate (ForSdcpp) could not size. Set
+	// together with a figure that is then a LOWER BOUND, or alone when nothing could be sized; the caller says so once.
+	// A string, not a slice, so a Need stays comparable.
+	Unsized string
 }
 
 func (n Need) String() string {
@@ -362,12 +368,11 @@ func videoFamily(fam string) string {
 // A binding on the "sdcpp" engine is left out ON PURPOSE: its weights are not in a ComfyUI model tree, and "does it
 // fit the card" means nothing on a unified-memory iGPU. That is the image, animate and music routes by their engine
 // keys and a video family by its binding's engine (the box's default family included); the edit route has no engine
-// key and is always ComfyUI. So an sd.cpp call (and the iGPU engines' video, animate and
-// audio calls, which take this default too) declares the largest COMFYUI family the box binds, an upper bound that
-// is not its own size, and on a box that binds no ComfyUI family (an sd.cpp-only node) it declares 0: its lanes are
-// admitted whatever the host reads, and the weights `--offload-to-cpu` parks in RAM are outside the guard there.
-// Sizing sd.cpp from its own model files is not built (TestAnSdcppOnlyBoxDeclaresNothing pins the behaviour the docs
-// state, so they change together).
+// key and is always ComfyUI. So the class default of an sd.cpp-only node (and of the audio.cpp lanes, which take it
+// too) is the largest COMFYUI family the box binds, an upper bound that is not its own size, and on a box that binds no
+// ComfyUI family it is 0 (TestAnSdcppOnlyBoxDeclaresNothing pins that the CLASS DEFAULT is nothing there). The sd.cpp
+// lanes do not stop at it (F60): they declare the larger of it and the weights they park themselves (ForSdcpp, wired in
+// internal/pipeline sdcppDeclared), so on that box the `--offload-to-cpu` spill is inside the guard, as an estimate.
 func ClassDefault(f Facts) Need {
 	cfg := f.Cfg
 	if strings.TrimSpace(cfg.ComfyDir) == "" {
@@ -435,6 +440,88 @@ func ClassDefault(f Facts) Need {
 		return Need{Source: SourceNone, Detail: "this box binds no render family whose weights could be sized"}
 	}
 	return Need{GiB: best.GiB, Source: SourceClassDefault, Detail: fmt.Sprintf("the largest render family this box binds is %s: %s", bestLabel, best.Detail)}
+}
+
+// SdcppFile is one weight file an sd.cpp call loads: where the binding names it (Label, a config key) and the full path.
+type SdcppFile struct{ Label, Path string }
+
+// OffloadToCPUFlag is the sd.cpp flag that parks the weights in host RAM and stages them to the device as they are needed
+// (sanctioned spill: all compute stays on the device, config.sanctionedSpillFlags).
+const OffloadToCPUFlag = "--offload-to-cpu"
+
+// ForSdcpp is the host RAM an sd.cpp call parks (F60): with --offload-to-cpu among its extra args, every distinct weight file
+// its binding names, in full (the diffusion model, a high-noise expert, the text encoders, the VAE); without it the weights go
+// straight to the device and nothing is parked. A file whose size cannot be read (missing, or empty) does not take the whole
+// estimate with it: the files that can be sized are summed, Need.Unsized names the rest and the detail says the figure is a
+// lower bound, because the class default is 0 on an sd.cpp-only box and dropping the estimate over one mistyped path put the
+// whole spill back outside the brake in silence (0.180 hardening). ok is false when the binding names no file or none of them
+// can be sized: there is no number to declare, and the caller keeps the class default it had (Unsized still names the files,
+// so the caller can say why).
+//
+// It is an ESTIMATE, from the files' sizes, and says so: sd.cpp may hold a little more (compute buffers) or stage lazily, and
+// nothing here has been measured on a node. The footprint store raises the declaration to what the lane's runs were measured
+// to hold once three exist (internal/pipeline calibratedRAM), as it does for a ComfyUI family.
+func ForSdcpp(family string, files []SdcppFile, extraArgs []string, f Facts) (Need, bool) {
+	stat := f.Stat
+	if stat == nil {
+		stat = defaultStat
+	}
+	if stat == nil {
+		stat = osStat
+	}
+	var uniq []SdcppFile
+	seen := map[string]bool{}
+	for _, sf := range files {
+		p := strings.TrimSpace(sf.Path)
+		if p == "" || seen[p] {
+			continue
+		}
+		seen[p] = true
+		uniq = append(uniq, SdcppFile{Label: sf.Label, Path: p})
+	}
+	if len(uniq) == 0 {
+		return Need{}, false
+	}
+	offload := false
+	for _, a := range extraArgs {
+		if strings.TrimSpace(a) == OffloadToCPUFlag {
+			offload = true
+		}
+	}
+	if !offload {
+		return Need{GiB: 0, Source: SourceEstimate, Detail: fmt.Sprintf("%s: sd.cpp without %s loads its weights straight to the device, so nothing is parked in RAM", family, OffloadToCPUFlag)}, true
+	}
+	var total float64
+	var parts, unsized []string
+	for _, sf := range uniq {
+		n, ok := stat(sf.Path)
+		if !ok || n <= 0 {
+			unsized = append(unsized, sf.Label)
+			continue
+		}
+		g := float64(n) / gib
+		total += g
+		parts = append(parts, fmt.Sprintf("%s %.1f", path.Base(strings.ReplaceAll(sf.Path, `\`, "/")), g))
+	}
+	missing := strings.Join(unsized, ", ")
+	if len(parts) == 0 {
+		return Need{Unsized: missing}, false
+	}
+	if missing != "" {
+		return Need{GiB: total, Source: SourceEstimate, Unsized: missing,
+			Detail: fmt.Sprintf("%s: sd.cpp parks at least %s = %.1f GiB in RAM with %s (a lower bound: %s could not be sized and is not counted; an estimate from the files' sizes, not a measurement: measured runs raise it after three)", family, strings.Join(parts, " + "), total, OffloadToCPUFlag, missing)}, true
+	}
+	return Need{GiB: total, Source: SourceEstimate,
+		Detail: fmt.Sprintf("%s: sd.cpp parks %s = %.1f GiB in RAM with %s (an estimate from the files' sizes, not a measurement: measured runs raise it after three)", family, strings.Join(parts, " + "), total, OffloadToCPUFlag)}, true
+}
+
+// osStat is the real file size, for a Facts with no seam.
+func osStat(p string) (int64, bool) {
+	fi, err := os.Stat(p)
+	if err != nil || fi.IsDir() {
+		return 0, false
+	}
+	return fi.Size(), true
 }
 
 // Request is what the CLI knows about a reservation when it resolves the need.

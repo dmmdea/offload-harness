@@ -245,7 +245,14 @@ func readLedger(path string) ([]ledger.Entry, error) {
 		}
 		out = append(out, e)
 	}
-	return out, sc.Err()
+	if err := sc.Err(); err != nil {
+		return out, err
+	}
+	// Test, bake and measurement rows are not the traffic the router serves (register F48). The rows are judged
+	// TOGETHER: the inner `agent` row of a labelled job names its parent and carries no class of its own, so a row
+	// judged alone would teach the router.
+	kept, _ := ledger.ProductionRows(out)
+	return kept, nil
 }
 
 // featOrder returns a deterministic sorted list of feature names.

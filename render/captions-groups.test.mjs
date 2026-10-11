@@ -4,13 +4,13 @@
 import { test } from "node:test";
 import assert from "node:assert";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import {
   DEFAULTS, PACES, TEMPLATE_LIMITS, captionsFromSegments, groupWords, main, splitForVariable, toWordsJson, wordsFromSegments,
 } from "./captions-groups.mjs";
+import { scratchDir } from "./test-scratch.mjs";
 
 const HELPER = join(dirname(fileURLToPath(import.meta.url)), "captions-groups.mjs");
 
@@ -552,8 +552,8 @@ test("captionsFromSegments: segments.json to chunk, on whole-word entries", () =
 
 // --- the command line: the way a skill or an operator calls it ---------------------------------------
 
-test("command line: reads a segments.json and prints the chunks as one JSON document; a bad file fails non-zero", () => {
-  const dir = mkdtempSync(join(tmpdir(), "captions-groups-"));
+test("command line: reads a segments.json and prints the chunks as one JSON document; a bad file fails non-zero", (t) => {
+  const dir = scratchDir(t, "captions-groups-");
   const file = join(dir, "clip.segments.json");
   writeFileSync(file, JSON.stringify(TOKEN_SEGMENTS));
   const ok = spawnSync(process.execPath, [HELPER, file, "--pace", "punchy"], { encoding: "utf8" });
@@ -578,8 +578,8 @@ function cli(argv) {
   const code = main(argv, { stdout: { write: (s) => out.push(s) }, stderr: { write: (s) => err.push(s) } });
   return { code, stdout: out.join(""), stderr: err.join("") };
 }
-function cliFixture() {
-  const dir = mkdtempSync(join(tmpdir(), "captions-groups-cli-"));
+function cliFixture(t) {
+  const dir = scratchDir(t, "captions-groups-cli-");
   const words = Array.from({ length: 13 }, (_, i) => ({ word: ` w${i + 1}`, start: i * 0.4, end: (i + 1) * 0.4, probability: 0.9 }));
   const file = join(dir, "clip.segments.json");
   writeFileSync(file, JSON.stringify([{ id: 0, start: 0, end: 5.2, text: words.map((x) => x.word).join(""), words }]));
@@ -590,8 +590,8 @@ const doc = (r) => {
   return JSON.parse(r.stdout);
 };
 
-test("command line: each flag changes exactly the option it names", () => {
-  const { file } = cliFixture();
+test("command line: each flag changes exactly the option it names", (t) => {
+  const { file } = cliFixture(t);
   const sizes = (argv) => doc(cli(argv)).groups.map((g) => g.words);
   const last = (argv) => doc(cli(argv)).groups.at(-1);
   assert.deepEqual(sizes([file]), [5, 5, 3], "the default is the conversational pace");
@@ -613,15 +613,15 @@ test("command line: each flag changes exactly the option it names", () => {
 // A long chunk is many frames and the lane has limits (README, "Long chunks"), so the size of a chunk has to be
 // the caller's to choose on the command line. By default 300 words at 0.4 s is 120 s of speech, and every group
 // breaks at 3 words.
-function longCliFixture(seconds = 120) {
-  const dir = mkdtempSync(join(tmpdir(), "captions-groups-long-"));
+function longCliFixture(t, seconds = 120) {
+  const dir = scratchDir(t, "captions-groups-long-");
   const file = join(dir, "long.segments.json");
   writeFileSync(file, JSON.stringify(spokenSegments(seconds)));
   return file;
 }
 
-test("command line: --chunk-sec and --chunk-chars cap a chunk, and neither may pass the template's own limits", () => {
-  const file = longCliFixture();
+test("command line: --chunk-sec and --chunk-chars cap a chunk, and neither may pass the template's own limits", (t) => {
+  const file = longCliFixture(t);
   const whole = doc(cli([file, "--pace", "punchy"]));
   assert.equal(whole.chunks.length, 1, "the defaults keep 120 s of speech in one chunk");
   const groups = whole.groups.length;
@@ -630,7 +630,7 @@ test("command line: --chunk-sec and --chunk-chars cap a chunk, and neither may p
   assert.ok(bySec.chunks.length >= 4, `${bySec.chunks.length} chunks for 120 s at 30 s each`);
   for (const [k, c] of bySec.chunks.entries()) {
     assert.ok(c.duration_sec <= 30 + 1e-9, `chunk ${k}: ${c.duration_sec} s`);
-    for (const t of JSON.parse(c.words_json)) assert.ok(t[1] <= c.duration_sec + 1e-9, `chunk ${k}: a caption ends after its chunk`);
+    for (const tri of JSON.parse(c.words_json)) assert.ok(tri[1] <= c.duration_sec + 1e-9, `chunk ${k}: a caption ends after its chunk`);
   }
   assert.equal(bySec.chunks.reduce((n, c) => n + c.group_count, 0), groups, "no group is lost");
   // by characters
@@ -655,15 +655,15 @@ test("command line: --chunk-sec and --chunk-chars cap a chunk, and neither may p
 // The default cut and the template's limit are two numbers: by default a chunk is at most 300 s, a caller may
 // ask for any length up to the template's own 600 s (a cap between the two is honoured, not clamped to the
 // default), and past 600 s the request is refused with the template's reason.
-test("command line: the default chunk is 300 s, --chunk-sec asks for a longer one up to the template's 600 s, and 601 is refused", () => {
-  const file = longCliFixture(1000); // 1,000 s of speech: 834 punchy groups
+test("command line: the default chunk is 300 s, --chunk-sec asks for a longer one up to the template's 600 s, and 601 is refused", (t) => {
+  const file = longCliFixture(t, 1000); // 1,000 s of speech: 834 punchy groups
   const by = (...extra) => doc(cli([file, "--pace", "punchy", ...extra]));
   const grouped = (r) => r.chunks.reduce((n, c) => n + c.group_count, 0);
   const dflt = by();
   assert.ok(dflt.chunks.length >= 4, `${dflt.chunks.length} chunks for 1,000 s at the default`);
   for (const [k, c] of dflt.chunks.entries()) {
     assert.ok(c.duration_sec <= 300, `default chunk ${k}: ${c.duration_sec} s`);
-    for (const t of JSON.parse(c.words_json)) assert.ok(t[1] <= c.duration_sec + 1e-9, `default chunk ${k}: a caption ends after its chunk`);
+    for (const tri of JSON.parse(c.words_json)) assert.ok(tri[1] <= c.duration_sec + 1e-9, `default chunk ${k}: a caption ends after its chunk`);
   }
   const mid = by("--chunk-sec", "450");
   assert.ok(mid.chunks.some((c) => c.duration_sec > 300 && c.duration_sec <= 450), `at 450 s: ${mid.chunks.map((c) => c.duration_sec)}`);
@@ -677,8 +677,8 @@ test("command line: the default chunk is 300 s, --chunk-sec asks for a longer on
   assert.equal(over.stderr, "captions-groups: --chunk-sec must be more than 0 and at most 600 (the template's duration limit)\n");
 });
 
-test("command line: --out writes the document to that file and prints nothing", () => {
-  const { dir, file } = cliFixture();
+test("command line: --out writes the document to that file and prints nothing", (t) => {
+  const { dir, file } = cliFixture(t);
   const target = join(dir, "chunks.json");
   const r = cli([file, "--pace", "punchy", "--out", target]);
   assert.equal(r.code, 0, r.stderr);
@@ -686,8 +686,8 @@ test("command line: --out writes the document to that file and prints nothing", 
   assert.deepEqual(JSON.parse(readFileSync(target, "utf8")), doc(cli([file, "--pace", "punchy"])));
 });
 
-test("command line: every way to call it wrong exits non-zero with a message that names the problem", () => {
-  const { dir, file } = cliFixture();
+test("command line: every way to call it wrong exits non-zero with a message that names the problem", (t) => {
+  const { dir, file } = cliFixture(t);
   const bad = join(dir, "bad.json");
   writeFileSync(bad, "{not json");
   const fails = (argv, code, re) => {

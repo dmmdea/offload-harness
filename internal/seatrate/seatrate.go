@@ -49,7 +49,7 @@ const (
 	// tokens on the 27B, measured: 213,785 prompt tokens over 12 steps in a
 	// 381 s wall of which ~300 s were the final answer). Named here so the
 	// note can print them and a reader can refute them.
-	toolStepTokens = 128
+	toolStepTokens  = 128
 	stepOverheadSec = 6
 )
 
@@ -62,8 +62,17 @@ type Seat struct {
 	// second, an EMA over runs), observed from the loop's prefill accounting
 	// (0.131.0, liveness walls). It sizes the stall allowance while the seat
 	// is prefilling: a 214k-token prompt at 2,000 tok/s is 160 s of
-	// legitimate silence. 0 = never measured (the policy assumes 400 tok/s).
+	// legitimate silence. 0 = never measured (the policy assumes its own slow-seat rate, 100 tok/s).
 	PrefillTokS float64 `json:"prefill_tok_s,omitempty"`
+	// PrefillRates is the last prefillWindow SOLO prefill rates (tok/s), oldest first, and
+	// PrefillSlowTokS the slowest of them (register F10). The EMA above is the average, and an
+	// average is the wrong number for a STALL bound: a seat that heat-soaked for one run is
+	// still averaged with the cool ones, so an allowance sized from the EMA is the cool
+	// seat's and files a stall on a seat that is working. Like cold_load_sec, which is the
+	// slowest of its window for the same reason, the bound must hold the slow case.
+	// 0 / empty = no solo sample since the window existed (StallPrefillTokS falls back to the EMA).
+	PrefillRates    []float64 `json:"prefill_rates,omitempty"`
+	PrefillSlowTokS float64   `json:"prefill_slow_tok_s,omitempty"`
 	// ColdLoadSec is the slowest of the last coldLoadWindow observed loads.
 	ColdLoadSec float64   `json:"cold_load_sec,omitempty"`
 	ColdLoads   []float64 `json:"cold_loads,omitempty"`
@@ -75,6 +84,23 @@ type Seat struct {
 	ColdLoadEnds []time.Time `json:"cold_load_ends,omitempty"`
 	Samples      int         `json:"samples"`
 	Updated      time.Time   `json:"updated"`
+}
+
+// prefillWindow is how many of the most recent solo prefill rates a seat keeps for its stall
+// bound (chosen, not measured): one run folds in up to two samples (its aggregate and its
+// largest first-delta sample), so five cover the last two or three runs, enough for a heat
+// soak that lasts a few runs to be held and short enough that a seat that cooled down gets its
+// tight allowance back within an hour of ordinary traffic.
+const prefillWindow = 5
+
+// StallPrefillTokS is the prefill rate the seat's STALL bound is sized from: the slowest of its
+// recent solo samples, so the bound holds a seat that runs slower than its average (heat soak, a
+// throttled card), else the EMA of a store written before the window existed. 0 = never measured.
+func (s Seat) StallPrefillTokS() float64 {
+	if s.PrefillSlowTokS > 0 {
+		return s.PrefillSlowTokS
+	}
+	return s.PrefillTokS
 }
 
 // Store is the per-seat memory. Zero value = empty.
@@ -158,6 +184,13 @@ func (s *Store) ObservePrefillLoad(seat string, promptTokens int64, promptMS flo
 	} else {
 		cur.PrefillTokS = emaWeight*rate + (1-emaWeight)*cur.PrefillTokS
 	}
+	// The stall bound's window (register F10): the slowest of the last prefillWindow solo
+	// samples, kept beside the average.
+	rates := append(append([]float64(nil), cur.PrefillRates...), math.Round(rate*10)/10)
+	if len(rates) > prefillWindow {
+		rates = rates[len(rates)-prefillWindow:]
+	}
+	cur.PrefillRates, cur.PrefillSlowTokS = rates, slowestRate(rates)
 	cur.Updated = now
 	s.Seats[seat] = cur
 	return true
@@ -209,6 +242,17 @@ func coldLoadEntries(cur Seat) ([]float64, []time.Time) {
 		copy(ends, cur.ColdLoadEnds)
 	}
 	return loads, ends
+}
+
+// slowestRate is the lowest rate of the window (0 for none).
+func slowestRate(rates []float64) float64 {
+	m := 0.0
+	for _, r := range rates {
+		if r > 0 && (m == 0 || r < m) {
+			m = r
+		}
+	}
+	return m
 }
 
 // slowest is the longest load of the window (0 for none).

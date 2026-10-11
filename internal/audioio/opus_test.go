@@ -4,9 +4,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/dmmdea/offload-harness/internal/fakeexe"
 )
 
 // The test binary doubles as a fake ffmpeg: started under a name whose stem is "ffmpeg" it records
@@ -36,21 +37,7 @@ func init() {
 
 func fakeFFmpegBin(t *testing.T) string {
 	t.Helper()
-	ext := ""
-	if runtime.GOOS == "windows" {
-		ext = ".exe"
-	}
-	dst := filepath.Join(t.TempDir(), "ffmpeg"+ext)
-	if err := os.Link(os.Args[0], dst); err != nil {
-		b, rerr := os.ReadFile(os.Args[0])
-		if rerr != nil {
-			t.Fatal(rerr)
-		}
-		if werr := os.WriteFile(dst, b, 0o755); werr != nil {
-			t.Fatal(werr)
-		}
-	}
-	return dst
+	return fakeexe.Place(t, "ffmpeg")
 }
 
 func srcFile(t *testing.T) string {

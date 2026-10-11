@@ -49,7 +49,9 @@ func TestLoupeStatsGroupsDefersByTheShortForm(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, polls := range []int{31, 29} {
-		if err := led.Record(ledger.Entry{Task: "agent_delegate", ModelTier: "n:s", Deferred: true, Reason: queueDeadlineReason(polls)}); err != nil {
+		// A real session's row: the root suite's own origin (go-test) labels a row as test traffic, which
+		// the loupe view leaves out by default (register F48).
+		if err := led.Record(ledger.Entry{Task: "agent_delegate", ModelTier: "n:s", Deferred: true, Reason: queueDeadlineReason(polls), OriginSession: "sess-real"}); err != nil {
 			t.Fatal(err)
 		}
 	}
