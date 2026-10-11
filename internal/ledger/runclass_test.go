@@ -344,3 +344,18 @@ func TestRunClassFromEnvNamesTheSameClassAsOriginFromEnv(t *testing.T) {
 		}
 	}
 }
+
+// A card opens when a call begins, before any row exists, so the door alone has to say what it makes.
+func TestClassOfDoorNamesTheDoorsThatMakeTestTraffic(t *testing.T) {
+	for door, want := range map[string]string{
+		"cli:fleet-smoke": "test", "cli:fleet-measure": "measurement",
+		"cli:generate-image": "", "offload_generate_image": "", "fleet": "", "": "",
+	} {
+		if got := ClassOfDoor(door); got != want {
+			t.Errorf("ClassOfDoor(%q) = %q, want %q", door, got, want)
+		}
+		if got := ClassOf(Entry{Door: door}); got != want {
+			t.Errorf("ClassOf(door %q) = %q, want the door's class %q", door, got, want)
+		}
+	}
+}

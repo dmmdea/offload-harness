@@ -100,7 +100,7 @@ func (e *Emitter) Begin(task, door string) (callID string, working func(), end f
 	}
 	// A call through a door that exists to produce measurement traffic (fleet-measure) opens no card, like the
 	// row that would close it (register F48; AttachLedger).
-	if ledger.ClassOf(ledger.Entry{Door: door}) != "" && !e.keepTestCards() {
+	if ledger.ClassOfDoor(door) != "" && !e.keepTestCards() {
 		return "", nil, nil
 	}
 	now := e.now().UnixMilli()

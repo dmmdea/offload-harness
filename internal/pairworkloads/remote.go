@@ -53,7 +53,7 @@ type RemoteCall struct {
 // no ledger row). route is the normalized route the caller asked for.
 func NewRemoteCall(e *Emitter, led *ledger.Ledger, req core.Request, route string) *RemoteCall {
 	return &RemoteCall{e: e, led: led, req: req, route: route, start: time.Now(),
-		cardless: ledger.ClassOf(ledger.Entry{Door: req.Door}) != "" && !e.keepTestCards()}
+		cardless: ledger.ClassOfDoor(req.Door) != "" && !e.keepTestCards()}
 }
 
 var _ core.RemoteAttribution = (*RemoteCall)(nil)

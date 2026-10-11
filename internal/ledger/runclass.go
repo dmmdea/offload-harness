@@ -123,7 +123,14 @@ func ClassOf(e Entry) string {
 	if e.PinReason == "measurement" {
 		return ClassMeasurement
 	}
-	switch e.Door {
+	return ClassOfDoor(e.Door)
+}
+
+// ClassOfDoor is the class a door makes on its own: fleet-smoke and fleet-measure exist to produce test and
+// measurement traffic, so everything admitted through them is. A caller that must decide before it has a row
+// (a card opened when a call begins) asks this instead of building one.
+func ClassOfDoor(door string) string {
+	switch door {
 	case "cli:fleet-smoke":
 		return ClassTest
 	case "cli:fleet-measure":
