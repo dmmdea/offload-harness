@@ -36,7 +36,14 @@ var wrapperSignalFeed func(chan<- os.Signal)
 // arrive while the command runs (the stage the feed's clock used to start at, before the handler moved up).
 var wrapperCommandStarted func()
 
-// The stages a signal can find the wrapper in before its command runs, worded for the card (140 characters, cut after).
+// wrapperBeforeStart is a test seam called after the drain and before the checkpoint that keeps a signalled wrapper from
+// starting its command, handed the watch so a test can deliver a signal and wait until it is recorded: there is no other way
+// to land one in that window (it is as wide as the lines between two statements). Production leaves it nil.
+var wrapperBeforeStart func(*signalWatch)
+
+// The stages a signal can find the wrapper in before its command runs, worded for the card: the card keeps 140 characters
+// (pairworkloads.CardErrorMax) and cuts the rest, so each stage text, with the signal and the cause around it, is asserted to
+// fit whole (TestEveryStageTextFitsTheCardWhole). The re-queue after a lease lost during the drain reuses stageQueued.
 const (
 	stageBeforeCard  = "before it asked for the card"
 	stageQueued      = "while queued"
@@ -46,8 +53,10 @@ const (
 
 // termCauseLikely is what a SIGTERM most likely is, said as likely: Go on Windows delivers a console close, a logoff and
 // a shutdown as SIGTERM, but a plain kill sends the same signal (and on Linux it is the only way SIGTERM comes), so the
-// wrapper cannot tell which it was. Text that named one of them as the cause claimed what nothing here can know.
-const termCauseLikely = "likely a console close, a logoff or a shutdown, though a plain kill sends it too"
+// wrapper cannot tell which it was. Text that named one of them as the cause claimed what nothing here can know. Kept short
+// on purpose: the card keeps 140 characters (pairworkloads.CardErrorMax) and the longest stage text that reaches it, with
+// this clause in it, must fit whole (TestEveryStageTextFitsTheCardWhole).
+const termCauseLikely = "likely a console close, a logoff or a shutdown; a plain kill sends it too"
 
 // endedBySignal is the error a wrapper ends with when a signal stopped it at stage, before its command ran: the signal
 // named, the cause as likely, and that the command never started. It is also the text of the card.
@@ -90,7 +99,17 @@ func cancelClosed(c <-chan struct{}) bool {
 //
 // One goroutine reads the signal channel once and closes Done; the stages that block (the queue wait, the card
 // choice, the drain) are handed Done, and the command stage selects on it. A second signal is dropped on the
-// channel's full buffer: the first one is the news, and the OS ends the process after its grace either way.
+// channel's full buffer: the first one is the news.
+//
+// Nothing outside this process backs that up for every signal: the OS ends the process after its grace for a console
+// close, a logoff and a shutdown only, so a Ctrl-C or a plain kill that comes after the first signal does nothing until the
+// stage in progress ends, and the stages that never consult Done run to their own bounds: the plan's card-table read (up to
+// 20 s), the allocator's reads, the stop of the ComfyUI instances kept under the lease (up to 60 s) and the seat's warm-back
+// (minutes, after a Ctrl-C). The handler also stays installed through that finish (sw.Stop is deferred before it), where the
+// base wrapper had stopped listening before its warm-back on the exit-0 path. Before this watch moved up, the stages before
+// the lease ran with no handler at all, so Ctrl-C ended the process on the spot with its card open and its waiter in the
+// line. Ending the process at once on a second signal, after releasing what is held, would close that gap; it is not done
+// here (an exit skips the deferred finish and leaves the instances running), and docs/systems/gpu-lease.md says so.
 // A nil *signalWatch is the detached form (no wrapper, nothing to watch) and every method is inert.
 type signalWatch struct {
 	sigc chan os.Signal

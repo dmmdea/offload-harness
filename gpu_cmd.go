@@ -697,12 +697,23 @@ func runGPUReserve(args []string) error {
 			_ = lease.Release() // gone or another holder's: Release only ever drops its own epoch
 			next, aerr := acquireQueued(m, gpulease.Class(*class), opts, requeueWait(queuedAt, *wait))
 			if aerr != nil {
+				if sig := sw.Signal(); sig != nil && errors.Is(aerr, gpulease.ErrCancelled) {
+					// The wait ended on the signal (opts carries its cancel): say so, like the first wait. The old lease is
+					// released and the seat was never unloaded under the new one, so finish() has no warm to skip.
+					endedOnTerm = endsGraceBounded(sig)
+					err := endedBySignal(sig, stageQueued)
+					card.finish(err)
+					return err
+				}
 				err := fmt.Errorf("the lease was lost during the drain and the card could not be taken again: %w", aerr)
 				card.finish(err)
 				return err
 			}
 			lease = next
 		}
+	}
+	if wrapperBeforeStart != nil {
+		wrapperBeforeStart(sw)
 	}
 	if sig := sw.Signal(); sig != nil {
 		endedOnTerm = endsGraceBounded(sig)

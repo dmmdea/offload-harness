@@ -864,6 +864,13 @@ func maintainSeatScoped(ctx context.Context, cfg config.Config, restamp restampe
 		}
 		if agentOn {
 			if err := unloadSeat(ctx, maintenanceClient, endpoint, model, protect); err != nil {
+				// A request the caller cancelled (a signal, a lost lease) says nothing about the seat: llama-swap
+				// finishes the unload it was asked for while the client only stops waiting. "Could not tell must not cost
+				// a warm seat" (above), so the debt is recorded before the cancel is returned; a warm of a seat that is
+				// still loaded is one health request.
+				if ctx.Err() != nil && wasLoaded && owed != nil {
+					owed(model)
+				}
 				return err
 			}
 		}

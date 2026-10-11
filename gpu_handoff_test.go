@@ -29,6 +29,9 @@ type orderedSwap struct {
 	// warmHold is how long a warm (a model load) takes; onWarm runs at its start.
 	warmHold time.Duration
 	onWarm   func()
+	// onUnload runs when an unload request arrives, before the seat is touched (a test that wants a signal to land
+	// during the unload sends it here and holds the request).
+	onUnload func()
 }
 
 func (o *orderedSwap) note(ev string) {
@@ -48,6 +51,9 @@ func (o *orderedSwap) handler(model string) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/models/unload/"+model, func(w http.ResponseWriter, r *http.Request) {
 		o.note("unload")
+		if o.onUnload != nil {
+			o.onUnload()
+		}
 		inner.ServeHTTP(w, r)
 	})
 	mux.HandleFunc("/upstream/"+model+"/health", func(w http.ResponseWriter, r *http.Request) {

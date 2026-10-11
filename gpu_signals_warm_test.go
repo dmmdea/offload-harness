@@ -39,12 +39,22 @@ func TestHelperWrapperDriver(t *testing.T) {
 	var feed chan<- os.Signal
 	ready := make(chan struct{})
 	wrapperSignalFeed = func(c chan<- os.Signal) { feed = c; close(ready) }
-	wrapperCommandStarted = func() {
-		<-ready
-		go func() {
-			time.Sleep(time.Duration(ms) * time.Millisecond)
+	if os.Getenv("LO_WRAP_AT") == "before-start" {
+		// The window between the end of the drain and the command's start: deliver the signal there and wait until the
+		// watch has recorded it, so the checkpoint is what stands between the signal and the command.
+		wrapperBeforeStart = func(w *signalWatch) {
+			<-ready
 			feed <- sig
-		}()
+			<-w.Done()
+		}
+	} else {
+		wrapperCommandStarted = func() {
+			<-ready
+			go func() {
+				time.Sleep(time.Duration(ms) * time.Millisecond)
+				feed <- sig
+			}()
+		}
 	}
 	if err := runGPUReserve(strings.Split(raw, "\n")); err != nil {
 		fmt.Fprintln(os.Stderr, "driver: reserve:", err)
