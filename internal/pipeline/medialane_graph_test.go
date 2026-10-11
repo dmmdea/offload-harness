@@ -265,6 +265,8 @@ func TestMediaLaneFreeGraphIsFreeForWhatItDoesNotModel(t *testing.T) {
 	} {
 		if v := f.p.MediaLaneFree(context.Background(), graphLaneReq(params)); !v.Free || !strings.Contains(v.Why, "devices") {
 			t.Errorf("%s: want free (not judged) naming the devices, got %+v", name, v)
+		} else if v.Unjudged {
+			t.Errorf("%s: a card-scoped graph is not in question for the lane (it stays here), so it is not an UNREAD lane: %+v", name, v)
 		}
 	}
 
@@ -273,18 +275,50 @@ func TestMediaLaneFreeGraphIsFreeForWhatItDoesNotModel(t *testing.T) {
 		k, v, _ := strings.Cut(kv, "=")
 		t.Setenv(k, v)
 	}
-	if v := f.p.MediaLaneFree(context.Background(), graphLaneReq(nil)); !v.Free || !strings.Contains(v.Why, "inherit") {
-		t.Errorf("under an inherited lease the lane is the parent's: %+v", v)
+	if v := f.p.MediaLaneFree(context.Background(), graphLaneReq(nil)); !v.Free || !strings.Contains(v.Why, "inherit") || v.Unjudged {
+		t.Errorf("under an inherited lease the lane is the parent's, and not in question: %+v", v)
 	}
 }
 
+// A card table that does not read is a lane that could not be READ, which a router must not take for a free lane (the card table
+// is slowest to read exactly when a heavy render holds the card): free, with the reason, and Unjudged, as for an image. Without the
+// flag a busy graph with an unreadable lane skipped the ticket queue and kept the old pipeline wait and its tk- token.
 func TestMediaLaneFreeGraphIsFreeWhenTheCardTableCannotBeRead(t *testing.T) {
 	f := newAdmitFixtureWith(t, admitSpec{order: admitOrder})
 	hold(t, f, "a bench render", leaseIDOf(admitUUIDA))
+	if v := f.p.MediaLaneFree(context.Background(), graphLaneReq(nil)); v.Free || v.Unjudged {
+		t.Fatalf("control: busy while the table reads, and the lane is judged: %+v", v)
+	}
 	f.p.alloc.Cards = func(context.Context, config.Config) ([]gpuprobe.Card, string, error) {
 		return nil, "", context.DeadlineExceeded
 	}
-	if v := f.p.MediaLaneFree(context.Background(), graphLaneReq(nil)); !v.Free || !strings.Contains(v.Why, "card table") {
+	v := f.p.MediaLaneFree(context.Background(), graphLaneReq(nil))
+	if !v.Free || !strings.Contains(v.Why, "card table") {
 		t.Errorf("an unreadable table must read as free with the reason: %+v", v)
+	} else if !v.Unjudged {
+		t.Errorf("an unreadable table is a lane that could not be read, which a router must not take for a free lane: %+v", v)
+	}
+
+	// A table that lists no card is as unread as one that failed.
+	f.p.alloc.Cards = func(context.Context, config.Config) ([]gpuprobe.Card, string, error) { return nil, "", nil }
+	if v := f.p.MediaLaneFree(context.Background(), graphLaneReq(nil)); !v.Free || !v.Unjudged || !strings.Contains(v.Why, "card table") {
+		t.Errorf("a table that lists no card is an unread lane: %+v", v)
+	}
+}
+
+// A lease directory that cannot be opened is a lane that could not be read as well (the same flag as an unreadable card table).
+func TestMediaLaneFreeGraphIsUnjudgedWhenTheLeaseDirectoryCannotBeOpened(t *testing.T) {
+	f := newAdmitFixtureWith(t, admitSpec{order: admitOrder})
+	if v := f.p.MediaLaneFree(context.Background(), graphLaneReq(nil)); !v.Free || v.Unjudged {
+		t.Fatalf("control: the lane reads and nothing holds it: %+v", v)
+	}
+	notADir := filepath.Join(t.TempDir(), "a-file")
+	if err := os.WriteFile(notADir, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f.p.cfg.GPULockPath = filepath.Join(notADir, "gpu.lock") // a lease root under a file: it cannot be made
+	v := f.p.MediaLaneFree(context.Background(), graphLaneReq(nil))
+	if !v.Free || !v.Unjudged || !strings.Contains(v.Why, "lease directory") {
+		t.Errorf("an unopenable lease directory is an unread lane: %+v", v)
 	}
 }

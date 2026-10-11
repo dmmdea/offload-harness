@@ -18,8 +18,12 @@ package pipeline
 // limit of this step (S0's G3 owns the numbers), not a measurement.
 //
 // A graph with operator-declared devices is a card-scoped graph the delegator never places on another node (request.go in
-// mediaremote refuses to carry devices), so the question is not asked for it. An inherited lease and a card table that does not
-// read in laneProbeBound read as free, as for an image: the call then takes the path it always took.
+// mediaremote refuses to carry devices), so the question is not asked for it, and neither is it for a process under a lease it
+// inherited (the lane is its parent's): both read as free and judged, and the call takes the path it always took. A lease
+// directory that cannot be opened and a card table that does not read in laneProbeBound are the lane in question and not read:
+// free, with the reason, and Unjudged, exactly as for an image (resolveLane), so a ticket queue does not take them for a free
+// lane (the card table is slowest to read exactly when a heavy render holds the card): the graph becomes a ticket whose first
+// scan looks at the fleet. TestMediaLaneFreeGraphIsFreeWhenTheCardTableCannotBeRead holds it.
 
 import (
 	"context"
@@ -32,20 +36,24 @@ import (
 
 // graphLaneFree answers the lane question for a run_graph request.
 func (p *Pipeline) graphLaneFree(ctx context.Context, req core.Request) core.LaneVerdict {
-	notJudged := func(why string) core.LaneVerdict { return core.LaneVerdict{Free: true, Why: "not judged: " + why} }
+	// notJudged answers "free, and here is why this box did not look". unread is true only for a READ that failed: there the lane
+	// is in question and the box could not look at it, which the router must not take for a free lane (core.LaneVerdict.Unjudged).
+	notJudged := func(why string, unread bool) core.LaneVerdict {
+		return core.LaneVerdict{Free: true, Why: "not judged: " + why, Unjudged: unread}
+	}
 	if devs := declaredDevices(req.Params); len(devs) > 0 {
-		return notJudged("the graph names devices (" + strings.Join(devs, ", ") + "), so it is card-scoped and stays on this machine")
+		return notJudged("the graph names devices ("+strings.Join(devs, ", ")+"), so it is card-scoped and stays on this machine", false)
 	}
 	token := paramStr(req.Params, "waiter_token")
 	need := declaredNeed(nil, token).declaresRAM(classDefaultRAM(p.cfg))
 
 	// A call that runs under a lease its parent holds has a lane chosen for it.
 	if inherited, ierr := ambientLeaseEnv(); ierr != nil || inherited != nil {
-		return notJudged("this process runs under a GPU lease it inherited, so the lane is its parent's")
+		return notJudged("this process runs under a GPU lease it inherited, so the lane is its parent's", false)
 	}
 	m, err := p.scopedManager()
 	if err != nil {
-		return notJudged("the lease directory cannot be opened (" + err.Error() + "); the call reports it itself")
+		return notJudged("the lease directory cannot be opened ("+err.Error()+"); the call reports it itself", true)
 	}
 	// The card table, once, under a bound of its own: it sizes the host-RAM need (the declaration depends on the largest card).
 	rctx, cancel := context.WithTimeout(ctx, laneProbeBound)
@@ -56,7 +64,7 @@ func (p *Pipeline) graphLaneFree(ctx context.Context, req core.Request) core.Lan
 		if terr != nil {
 			cause = terr.Error()
 		}
-		return notJudged("the card table could not be read (" + cause + "); the call reads it itself")
+		return notJudged("the card table could not be read ("+cause+"); the call reads it itself", true)
 	}
 	// Every read below goes through a view that prunes nothing: the question must not change the state it asks about.
 	r := &laneReading{p: p, m: m.ReadOnly(), cards: table, token: token}
