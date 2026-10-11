@@ -927,10 +927,13 @@ list is `-`; with no card table no seat can be placed, so the list is empty and 
 these cases was an unset variable, which the lane read as "every model off the memory stack": the render on one card emptied the
 seats on the others (`TestUnloadModelsOnABoxWithNoLayersUnloadsNothingItCannotPlace`, `TestWrapperUnloadEnvForACardLeaseIsNeverUnset`,
 `TestAnUnreadableRosterStillHandsTheRenderLaneTheConfigSeatsOnItsCard`). A box that declares no layers has no placement for any
-model, so a card render there unloads nothing from llama-swap and names what it left: declare the seats' devices in `layers` (or
-hold the whole node) to have a card clear.
+model (the installer's tier seeds do not write `layers`), so a card render there unloads nothing from llama-swap and names what it
+left: declare the seats' devices in `layers` (or hold the whole node) to have a card clear. The llama-swap config is no substitute
+for a seat it launches under a `proxy:` (a vLLM engine): that seat's cards are pinned in the engine's own unit.
 
-Only a whole-node lease has no list: it holds every card, so the lane keeps its own rule. The render side backs this up: a lease
+Only a whole-node lease has no list: it holds every card, so the lane keeps its own rule. A lease that names every card the card
+table lists is the whole node whatever it is called (a one-card box's only card, all three of three), so its list is every model
+off the memory stack (`LeaseScope` `holdsAll`). The render side backs this up: a lease
 whose environment names cards (`GPU_LEASE_DEVICES`, else `devices` in the epoch record, `leaseDevices`) and carries no list
 unloads nothing and says why, instead of falling back to the whole-node rule (`render/gpu-lock.test.mjs`, "a card lease with NO
 list unloads nothing").

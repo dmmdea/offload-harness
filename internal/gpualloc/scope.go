@@ -212,8 +212,13 @@ func UnloadModels(ctx context.Context, cfg config.Config, roster []string, lease
 	on, _, unplaced := scope.SplitPlaced(models)
 	if len(unplaced) > 0 && warn != nil {
 		why := "the config does not place them on a card"
-		if !scope.CardsReadable() {
+		switch {
+		case !scope.CardsReadable():
 			why = "the card table could not be read (" + scope.CardsWhy() + "), so no seat can be placed on a card"
+		case len(cfg.Layers) == 0:
+			// The case an operator can act on: nothing is declared anywhere, and the installer's tier seeds
+			// do not declare layers, so a fresh box is here until someone writes them.
+			why = "this box declares no layers, so no seat has a declared card: declare each seat's device in layers, or hold the whole node, for a card lease to clear it"
 		}
 		fmt.Fprintf(warn, "unload list: left resident, placement unknown (%s): %s\n", why, strings.Join(unplaced, ", "))
 	}

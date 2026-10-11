@@ -240,8 +240,13 @@ func TestUnloadModelsOnABoxWithNoLayersUnloadsNothingItCannotPlace(t *testing.T)
 	if !ok || len(got) != 0 {
 		t.Fatalf("list = %v ok=%v, want a known, empty list", got, ok)
 	}
-	if !strings.Contains(warn.String(), "a") || !strings.Contains(warn.String(), "left resident") {
-		t.Errorf("the lane must say what it left resident and why: %q", warn.String())
+	if !strings.Contains(warn.String(), "left resident") || !strings.Contains(warn.String(), "a, b") {
+		t.Errorf("the lane must say what it left resident: %q", warn.String())
+	}
+	// The reason is the one an operator can act on: this box declares no layers, so no seat has a
+	// declared card, and a card lease clears only what is declared.
+	if !strings.Contains(warn.String(), "no layers") || !strings.Contains(warn.String(), "hold the whole node") {
+		t.Errorf("the lane must say that declaring the seats' devices in layers (or holding the whole node) is what makes a card lease clear them: %q", warn.String())
 	}
 	if UnloadEnv(got, ok) != "GPU_LEASE_UNLOAD_MODELS=-" {
 		t.Errorf("an empty known list is exported as the none sentinel, got %q", UnloadEnv(got, ok))

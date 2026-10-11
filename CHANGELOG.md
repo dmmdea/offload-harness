@@ -190,12 +190,22 @@ Versioning: [SemVer](https://semver.org/).
   model off the memory stack. A box that declares no layers has no placement for any model, so there every model was "unknown" and
   a render on card 2 emptied card 0 too. (Reading the rest of the fence: `blocksLoadOne` already gates a media lease, per card,
   through `Admit`, `AwaitUpstream` and `AwaitRunSlot`; it never read the exclusive flag for it. The flag is a text-lease field.)
+- **Before you deploy this: a card render clears only what the box has declared.** Placement comes from `layers` (each seat's
+  `device`) and the card table. The installer's tier seeds do not write `layers`, so a box that never had them added by hand
+  declares no card for any seat, and on it a render under a card lease now unloads NOTHING from llama-swap (before, it unloaded
+  everything off the memory stack, which is the defect, but it did clear the render's card). A two-card agent seat that spans the
+  leased card then stays resident beside the render, and `gpu reserve --unload-seat` is the only thing that unloads the configured
+  agent seat there. The lane says so each time, naming what it left and that declaring each seat's device in `layers` (or holding
+  the whole node) is what makes a card lease clear it. Whether the reference boxes declare `layers` was not checked (no live
+  config was read); look before deploying.
 - **Only what is placed on the leased cards is unloaded.** New `LeaseScope.Placement` reads positive knowledge only: the config
   declares the seat's pins and the card table places every one of them. `UnloadModels` lists those models minus the memory stack.
   A model placed on another card stays, and a model whose card is not known stays and is named (`left resident, placement unknown
   (...)`). The drain and the fence keep the other direction (`Touches`: a doubt waits). With no roster the candidates are the
   seats the config declares, said so; with no card table nothing can be placed, so the list is empty and the reason is named.
-  Only a whole-node lease has no list (it holds every card).
+  Only a whole-node lease has no list (it holds every card), and a lease that names every card the table lists counts as one:
+  a one-card box's only card, or all three of three, lists every model off the memory stack as before
+  (`TestUnloadModelsOnALeaseThatHoldsEveryCardListsEveryModelButTheStack`).
 - **A card lease always gets a list.** `wrapperUnloadEnv` (`gpu reserve --devices`) and the media admission's `unloadEnv` export
   `GPU_LEASE_UNLOAD_MODELS=-` when there is nothing to unload (no endpoint, nothing placed) instead of leaving the variable
   unset. `gpu reserve --unload-seat` unloads the configured agent seat (asked for by name) and the other residents that are
@@ -220,11 +230,12 @@ Versioning: [SemVer](https://semver.org/).
   fences its own cards through every door exactly as an exclusive text lease does and lets a free card through, and the fence
   starts when the drain ends. Each rule has a mutant that turns its test red (the unknown-as-unload direction, the config fallback,
   the placement itself, the memory-stack filter, the unset variable on a roster error and on a missing endpoint, the old split in
-  `--unload-seat`, the pipeline's roster fallback, the media clause, the draining clause, the per-card scoping, the Node hands-off,
+  `--unload-seat`, the pipeline's roster fallback, the hold-every-card reading, the media clause, the draining clause, the per-card scoping, the Node hands-off,
   the re-clear and its card condition, the left-resident line).
 - **Not changed, and not verified here.** A client that is not the harness can still load a model onto a leased card; the re-clear
-  removes it before the next render, it does not stop it. A box that declares no layers now leaves every seat on llama-swap alone
-  under a card lease: declare the seats' devices in `layers` (or hold the whole node) to have a card cleared. Two parallel jobs of
+  removes it before the next render, it does not stop it. A seat the serving config launches under a `proxy:` (a vLLM engine) pins
+  its cards in the engine's own unit, not in the llama-swap config, so that file is no placement source for it; none was added.
+  Two parallel jobs of
   one lease can both read the same resident model and both ask for its unload (idempotent; the second may log a failed per-model
   unload). Nothing here was run against a live node, a ComfyUI instance or a llama-swap; the render helper was exercised against
   stand-ins for `/v1/models`, `/running` and the unload routes only.
