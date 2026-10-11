@@ -7,10 +7,14 @@ package main
 // after the call returns.
 
 import (
+	"bytes"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 const (
@@ -180,5 +184,134 @@ func TestRunGraphCLIRemovesItsTempFilesWhenThePipelineCannotOpen(t *testing.T) {
 	}
 	if got := tempEntries(t, tmp); len(got) != 0 {
 		t.Fatalf("run-graph left %v in the OS temp dir after it failed to open the pipeline (%v)", got, err)
+	}
+}
+
+// heldFile is what a delete gets when a scanner, or a process that has only just exited, still holds the file (a sharing violation on
+// Windows).
+var heldFile = errors.New("The process cannot access the file because it is being used by another process.")
+
+// holdRemovals makes removeFile fail with heldFile for its first n calls and then delete for real (n < 0: it never deletes), puts the
+// pause between attempts at a millisecond, and returns the number of calls made so far.
+func holdRemovals(t *testing.T, n int) *int {
+	t.Helper()
+	prevRemove, prevPause := removeFile, removePause
+	calls := 0
+	removeFile = func(name string) error {
+		calls++
+		if n < 0 || calls <= n {
+			return &fs.PathError{Op: "remove", Path: name, Err: heldFile}
+		}
+		return os.Remove(name)
+	}
+	removePause = time.Millisecond
+	t.Cleanup(func() { removeFile, removePause = prevRemove, prevPause })
+	return &calls
+}
+
+// warned captures what the CLI says on stderr about a temp file it could not remove while the test runs.
+func warned(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := tempWarnings
+	tempWarnings = &buf
+	t.Cleanup(func() { tempWarnings = prev })
+	return &buf
+}
+
+// A delete that is refused for a moment is waited out, as removeRunGraphEnvelope waits out a scanner holding the envelope: the
+// cleanup tries again until the file goes.
+func TestMaterializeArgCleanupWaitsOutAFileHeldForAMoment(t *testing.T) {
+	tmp := freshTempDir(t)
+	calls := holdRemovals(t, 3)
+	_, cleanup, err := materializeArg("", inlineGraph, "run-graph-*.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanup()
+	if got := tempEntries(t, tmp); len(got) != 0 {
+		t.Fatalf("the cleanup gave up on a file that was held for three attempts and left %v", got)
+	}
+	if *calls != 4 {
+		t.Fatalf("removeFile ran %d times, want 4 (three refused, one removed)", *calls)
+	}
+}
+
+// A file that is held for good is named once on stderr, with the reason, after a bounded number of attempts: the leak is never
+// silent, and the cleanup does not wait for ever.
+func TestMaterializeArgCleanupNamesAFileItCannotRemove(t *testing.T) {
+	tmp := freshTempDir(t)
+	calls := holdRemovals(t, -1)
+	out := warned(t)
+	path, cleanup, err := materializeArg("", inlineGraph, "run-graph-*.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanup()
+	if *calls != removeAttempts {
+		t.Fatalf("removeFile ran %d times, want %d (the attempts, then give up)", *calls, removeAttempts)
+	}
+	if got := tempEntries(t, tmp); len(got) != 1 {
+		t.Fatalf("test premise: the file was held, so it must still be there, got %v", got)
+	}
+	line := out.String()
+	if strings.Count(line, "\n") != 1 || !strings.Contains(line, path) || !strings.Contains(line, heldFile.Error()) {
+		t.Fatalf("want one line on stderr naming %q and the reason %q, got %q", path, heldFile, line)
+	}
+}
+
+// A file that is already gone is not a failure and is not waited for: a cleanup may be run twice, and the second run says nothing.
+func TestMaterializeArgCleanupIsQuietAboutAFileThatIsAlreadyGone(t *testing.T) {
+	freshTempDir(t)
+	calls := holdRemovals(t, 0)
+	out := warned(t)
+	path, cleanup, err := materializeArg("", inlineGraph, "run-graph-*.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	cleanup()
+	if *calls != 1 || out.Len() != 0 {
+		t.Fatalf("a missing file: removeFile ran %d times (want 1) and said %q (want nothing)", *calls, out)
+	}
+}
+
+// The file of a write that failed is removed through the same wait, so a hold on it does not leave it behind either.
+func TestMaterializeArgRemovesTheFileOfAFailedWriteEvenWhenItIsHeldForAMoment(t *testing.T) {
+	tmp := freshTempDir(t)
+	failingWrites(t, 1)
+	calls := holdRemovals(t, 2)
+	path, cleanup, err := materializeArg("", inlineGraph, "run-graph-*.json")
+	if err == nil || path != "" || cleanup == nil {
+		t.Fatalf("a failed write returns an error, no path and a cleanup: %q %v nil=%v", path, err, cleanup == nil)
+	}
+	if got := tempEntries(t, tmp); len(got) != 0 {
+		t.Fatalf("the file of a failed write was left: %v", got)
+	}
+	if *calls != 3 {
+		t.Fatalf("removeFile ran %d times, want 3 (two refused, one removed)", *calls)
+	}
+}
+
+// The real thing, with no seam: a handle that is still open when the cleanup runs, and closes a moment later. Windows refuses to
+// delete a file that is open, so there the cleanup must wait for the handle; elsewhere the delete simply works.
+func TestMaterializeArgCleanupOutwaitsAHandleThatIsClosedAMomentLater(t *testing.T) {
+	tmp := freshTempDir(t)
+	path, cleanup, err := materializeArg("", inlineGraph, "run-graph-*.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	held, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	closed := make(chan struct{})
+	time.AfterFunc(60*time.Millisecond, func() { _ = held.Close(); close(closed) })
+	cleanup()
+	<-closed
+	if got := tempEntries(t, tmp); len(got) != 0 {
+		t.Fatalf("the cleanup returned while the file was held and left %v", got)
 	}
 }

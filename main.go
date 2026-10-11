@@ -1270,6 +1270,32 @@ func runGraphParams(args []string) (map[string]any, func(), error) {
 // createTemp makes the temp file an inline graph or manifest is written to; a seam, so that a test can make the write fail.
 var createTemp = os.CreateTemp
 
+// removeFile, removeAttempts and removePause are how the temp files an inline graph or manifest became are deleted, and tempWarnings
+// is where one that cannot be is named; seams, so that a test can make a delete fail the way a file held for a moment fails on Windows.
+var (
+	removeFile               = os.Remove
+	removeAttempts           = 20
+	removePause              = 25 * time.Millisecond
+	tempWarnings   io.Writer = os.Stderr
+)
+
+// removeInlineTemp deletes a temp file this call made. A scanner that holds the file for a moment, or a runner that has only just
+// exited, makes the delete fail with a sharing violation on Windows, so it is tried again for about half a second, as
+// pipeline.removeRunGraphEnvelope does for the envelope; a file that is not there is not a failure. One that still cannot be removed is
+// named on stderr, so that the leak this cleanup exists to stop is never silent.
+func removeInlineTemp(name string) {
+	var err error
+	for i := 0; i < removeAttempts; i++ {
+		if i > 0 {
+			time.Sleep(removePause)
+		}
+		if err = removeFile(name); err == nil || errors.Is(err, os.ErrNotExist) {
+			return
+		}
+	}
+	fmt.Fprintf(tempWarnings, "local-offload: run-graph: could not remove the temp file %s (%v); it stays in the OS temp dir until someone deletes it\n", name, err)
+}
+
 // materializeArg returns path if set, else writes inline json to a temp file and returns
 // that path (the runner reads files, not inline). Empty+empty → no path and no error.
 //
@@ -1294,10 +1320,10 @@ func materializeArg(path, inline, pattern string) (string, func(), error) {
 		werr = cerr
 	}
 	if werr != nil {
-		_ = os.Remove(name)
+		removeInlineTemp(name)
 		return "", noop, werr
 	}
-	return name, func() { _ = os.Remove(name) }, nil
+	return name, func() { removeInlineTemp(name) }, nil
 }
 
 // runGenerateSVG handles `local-offload generate-svg <kind> --spec '<json>' [--spec-file path] [--out file.svg] [--json]`.

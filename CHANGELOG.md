@@ -945,6 +945,17 @@ Versioning: [SemVer](https://semver.org/).
   `the file of a failed write was left`, and `run-graph left [...] in the OS temp dir after it failed to open the pipeline`.
   After: 0 `run-graph*` entries left by the `internal/mcpserver` tests on Windows (26 before) and by a whole run of the root package's
   tests on Windows and on Linux (3 before).
+- **Review round: a delete that is refused for a moment is waited out, and one that still fails is named.** The cleanup made one
+  `os.Remove` and dropped the error, so on Windows a scanner (or a runner that had only just exited) holding the file for a moment
+  brought the leak back with nothing to say so; the write-error branches dropped it the same way. Both doors now delete through one
+  helper (`removeInlineTemp`, in `internal/mcpserver` and in the root package) that tries again for about half a second (20 attempts,
+  25 ms apart, as `removeRunGraphEnvelope` does for the envelope), treats a file that is not there as done, and, when the file still
+  resists, writes one line naming it and the reason (to the log in the MCP server, to stderr in the CLI). Red before, on a Windows PC,
+  in `internal/mcpserver` (and the same four as `TestMaterializeArg...` in the root package): `TestMaterializeCleanupWaitsOutAFileHeldForAMoment`
+  (a delete refused three times left the file), `TestMaterializeCleanupNamesAFileItCannotRemove` (no line),
+  `TestMaterializeRemovesTheFileOfAFailedWriteEvenWhenItIsHeldForAMoment` and
+  `TestMaterializeCleanupOutwaitsAHandleThatIsClosedAMomentLater` (a real open handle, no seam: the cleanup returned and left the file).
+  One attempt, no line, a missing file counted as a failure and the failed-write branch left out of the helper each turn their own test red.
 - **Not covered.** Files an earlier release left in the OS temp dir stay until someone removes them (this is a one-time cleanup, not
   code), and a call that is killed (a second Ctrl-C, a kill) leaves the files of that one call.
 

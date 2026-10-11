@@ -2128,14 +2128,39 @@ func materialize(path, inline, pattern string) (string, func(), error) {
 		werr = cerr
 	}
 	if werr != nil {
-		_ = os.Remove(name)
+		removeInlineTemp(name)
 		return "", noop, werr
 	}
-	return name, func() { _ = os.Remove(name) }, nil
+	return name, func() { removeInlineTemp(name) }, nil
 }
 
 // createTemp makes the temp file an inline graph or manifest is written to; a seam, so that a test can make the write fail.
 var createTemp = os.CreateTemp
+
+// removeFile, removeAttempts and removePause are how the temp files an inline graph or manifest became are deleted; seams, so that a
+// test can make a delete fail the way a file held for a moment fails on Windows.
+var (
+	removeFile     = os.Remove
+	removeAttempts = 20
+	removePause    = 25 * time.Millisecond
+)
+
+// removeInlineTemp deletes a temp file this call made. A scanner that holds the file for a moment, or a runner that has only just
+// exited, makes the delete fail with a sharing violation on Windows, so it is tried again for about half a second, as
+// pipeline.removeRunGraphEnvelope does for the envelope; a file that is not there is not a failure. One that still cannot be removed is
+// named in the log, so that the leak this cleanup exists to stop is never silent.
+func removeInlineTemp(name string) {
+	var err error
+	for i := 0; i < removeAttempts; i++ {
+		if i > 0 {
+			time.Sleep(removePause)
+		}
+		if err = removeFile(name); err == nil || errors.Is(err, os.ErrNotExist) {
+			return
+		}
+	}
+	log.Printf("offload_run_graph: could not remove the temp file %s (%v); it stays in the OS temp dir until someone deletes it", name, err)
+}
 
 func (s *Server) handleGenerateSVG(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	var in struct {
