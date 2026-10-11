@@ -11,6 +11,9 @@ package mediaremote
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,6 +21,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
@@ -843,5 +847,41 @@ func TestAGraphDoorThatEndsLeavesTheTicketRunning(t *testing.T) {
 	e.free(0)
 	if res := settle(t, e.cfg, e.lr, req, func(r core.Result) bool { return r.OK }); res.Meta.Node != "node-a" {
 		t.Errorf("it still runs when a lane frees: %+v", res)
+	}
+}
+
+// The delegator reads the node's refusal word and the sentence from the body it wrote, and nothing from a body it did not: a proxy's
+// page, a body with another word, or a sentence of unbounded length (the body is the node's to write) makes a plain 503.
+func TestPostReadsTheNodesRefusalWordAndABoundedSentence(t *testing.T) {
+	long := "a" + strings.Repeat("é", 700) // two bytes each, after one: the cut at 600 bytes falls inside a character
+	for name, c := range map[string]struct {
+		status       int
+		body         string
+		refusal, why string
+		maxWhy       int
+	}{
+		"the node's word and sentence":   {503, `{"status":"error","error":"the graph loads 1 file this node does not hold: a.safetensors","refusal":"not_capable"}`, "not_capable", "a.safetensors", 600},
+		"another word":                   {503, `{"status":"error","error":"queue full","refusal":"other"}`, "other", "queue full", 600},
+		"no word (a full node)":          {503, `{"status":"error","error":"queue full (3 jobs)"}`, "", "queue full", 600},
+		"a proxy's page":                 {503, `<html>busy</html>`, "", "", 600},
+		"a sentence of unbounded length": {503, `{"error":"` + long + `","refusal":"not_capable"}`, "not_capable", "aé", 603},
+	} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(c.status)
+			_, _ = w.Write([]byte(c.body))
+		}))
+		err := post(context.Background(), config.Config{}, srv.URL, "/fleet/dispatch", []byte(`{}`))
+		srv.Close()
+		var pe *postError
+		if !errors.As(err, &pe) {
+			t.Fatalf("%s: want a postError, got %v", name, err)
+		}
+		if pe.status != c.status || pe.refusal != c.refusal || !strings.Contains(pe.detail, c.why) || len(pe.detail) > c.maxWhy {
+			t.Errorf("%s: status %d refusal %q detail %q (%d bytes), want refusal %q containing %q within %d bytes", name, pe.status, pe.refusal, pe.detail, len(pe.detail), c.refusal, c.why, c.maxWhy)
+		}
+		if !utf8.ValidString(pe.detail) {
+			t.Errorf("%s: the cut sentence splits a character: %q", name, pe.detail)
+		}
 	}
 }
