@@ -46,10 +46,12 @@ Versioning: [SemVer](https://semver.org/).
   poll (`TestTheFenceFollowsAnEditOfTheServingConfigWithoutARestart`). `internal/gpualloc`: the fence/unload parity
   (`TestTheLoadFenceAndTheUnloadListPlaceEveryModelAlike`). `internal/modelaffinity`: an idle box and a whole-node lease look no pins up
   (`TestSeatPinsAreNotLookedUpWhenNoLeaseNamesCards`). Green on the previous tree on purpose, as guards of the fail-closed direction
-  (`TestTheFenceStaysClosedWhereTheServingConfigCannotPlaceAModel`, `TestModelPinsServingConfigThatCannotBeReadPlacesNothing`), as the
-  real-file wiring in `internal/modelaffinity` (`TestASeatPinnedByTheServingConfigLoadsUnderALeaseOnAnotherCard`,
+  (`TestTheFenceStaysClosedWhereTheServingConfigCannotPlaceAModel`, `TestModelPinsServingConfigThatCannotBeReadPlacesNothing`; the
+  mutants below are what show they bite). Added beside them and not red first, because they need the new package: the real-file wiring
+  in `internal/modelaffinity` (`TestASeatPinnedByTheServingConfigLoadsUnderALeaseOnAnotherCard`,
   `TestAProxySeatAndAnUnpinnedEntryStayFencedByAnyLease`: that package cannot import `config`, so they show the fence resolves a yaml's
-  full-UUID pins, not that `Load` arms them), and the parser and memo tests that moved or were added with `internal/servingcfg`.
+  full-UUID pins, not that `Load` arms them) and the parser and memo tests that moved or were added with `internal/servingcfg`, which
+  the mutants below turn red.
 - **Mutants.** Twenty-one small mutants (a line or a few), each shown to compile (`go vet` over the package and its tests) and to have landed, each
   restored byte for byte, each turning a named test red: the fallback removed, the serving config outranking layers, `Load` arming the
   layers' reading, `Locate` asking `ModelPins`, `LayerPins` reading the file, the pins looked up on an idle box, a fence that does not
