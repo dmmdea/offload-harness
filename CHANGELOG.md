@@ -561,6 +561,89 @@ Versioning: [SemVer](https://semver.org/).
   where the queue makes it, and the result envelope's name is random instead of a hash of the paths and the file no longer outlives
   the call. No VERSION or buildinfo bump. Nothing here was run live.
 
+### Added — `generate-image --batch` across the fleet: a family, a verdict per job, a results file, a resume, and one ticket per job when the lane is held (F28, ADR 0083 decision 13)
+
+- **The behaviour.** `local-offload generate-image --batch jobs.jsonl [--family F] [--route auto|local|remote] [--results r.jsonl] [--resume]
+  [--jobs N]`. Where the jobs run is decided once, at the start, and never mixed. If this machine's lane is free (or the route is local, or there is no fleet, no queue (a state root the lease refuses) or an inherited lease) the whole batch goes through the warm session as before (one change, below: an interrupt). If the lane is held
+  (or could not be read) and at least one roster node renders the batch's recipe, **each job is one ticket** of the ticket queue (ADR 0083): it starts on
+  the first matching lane that frees, here or on a node, in file order, at most N in flight (default: this machine's lane plus one per matching
+  node, at most 8, a chosen cap; `--jobs` overrides), and the command blocks until they have all ended. A node is claimed by the ticket that has a
+  job on it, so a batch never sends two jobs to one single-job node at once (`TestBatchNeverDispatchesTwoJobsToOneSingleJobNodeAtOnce`).
+  Each job reaches the node as written (`refine=false` only when the job says so, the seed, the negative, `width`, `height`, `steps` exact; the
+  family under the node's own name) and its output is fetched, checked against the sha256 the node published, to the exact `out`
+  (`TestBatchJobsPlacedThroughTickets`). No mixed local/remote work stealing and no batch task on the fleet in v1.
+- **The honest limit.** krea2 and the 2512 build have no remote match (the nodes hold no such weights), so a batch of either never goes to the
+  fleet: it keeps its place in the lease line for this machine's lane (up to the queue's 8 h ceiling, a chosen constant, not the 90 s `gpu_wait_ms`;
+  Ctrl-C ends the wait) and runs warm on it, and the command prints, and the JSON carries as
+  `cluster`, which node does not match and why (`TestBatchWithNoRemoteMatchRunsWarmOnThisMachineAndSaysWhy`). Per-job tickets would be a cold
+  start per picture on the same lane. Where no claim protects a node (`--route remote`, a machine with no image lane) the jobs run one at a time.
+- **A row per job** in the printed JSON and in `--results`, kept in `<results>.partial` as each job is final and written whole, in job order, over
+  `--results` when the batch ends (an earlier results file survives a batch the command refuses or one that dies; the warm path's rows arrive when its
+  session ends, because the render script runs to the end before the batch sees a result):
+  `{i, out, seed, ok, ms, error, node, family, sha256, verdict}`, the first six being what `parseBatchResults` already reads. `verdict` is
+  `rendered`, `skipped-existing`, `failed` or `queued` (the command ended before the job did, or no lane or node had a place for it). A job counts as rendered only when the file at `out` is there,
+  not empty, and hashed; a lane that said it rendered a missing or empty file, or a node's file with no published sha256, did not render it.
+  **Exit 4** when any job failed (`imagegen.BatchExitJobsFailed`; also when a deferred warm batch already had a failed row), **1** when it stopped,
+  was interrupted or a job is `queued` for want of a place, so a wrapper tells "some failed" from "stopped"; **0** also when a busy lane deferred the whole warm batch (its rows are `queued`).
+  A job whose `out` folder cannot be made fails alone before any lane is asked for it.
+- **`--resume` is fail-safe** (the 21 zero-byte PNGs of 2026-10-09): a job is skipped only when the file at its `out` is not empty, **decodes
+  whole as a PNG** and has the width and height the job names; a zero-byte file, a file cut short, another size, not a picture and a missing file are
+  rendered again (`TestBatchResumeSkipsOnlyExistingAndVerifying`, `TestBatchResumeAfterTicketsPlacesOnlyWhatIsMissing`,
+  `TestGenerateImageBatchResultsFileAndResume`). A job with no `out` is never skipped, and a size off the family's grid (2.1 floors to 32)
+  never matches: both are said in the docs.
+- **A busy place is waited for, never failed; a place that can never come is not waited for** (review of this step, and its second round). An answer that
+  says no lane or node had a place for a job ends the job `queued` with the true reason, never `failed` (exit 1, `--resume` renders it). On the ticket path the
+  queue's own end of a ticket (its 8 h ceiling, or a ticket it could not take over) is no lost race and is not sent again as a new ticket; before, it was taken for
+  "the lane was taken a moment after it read free", re-sent twice with another 8 h wait each, and the row failed after about 24 h. A lane that read free and was taken a
+  moment later is still asked again, at most twice, and a card that stays held ends `queued` (`TestBatchTicketThatExpiresIsQueuedAndNotSentAgain`,
+  `TestBatchRetriesALostLaneRaceAndOnlyThat`). Where jobs go one at a time (`--route remote`, a machine with no image lane) a held card or a fleet with no node
+  free to take the job is asked again after a pause (5 s, 15 s, 1 min, then every 5 min; chosen) until the job is placed, Ctrl-C ends it, or the queue's 8 h
+  ceiling passes and the job is `queued` (`TestBatchSerialWaitsForAPlaceAndNeverFailsTheJob`, `TestBatchSerialEndsQueuedAtTheCeilingNeverFailed`,
+  `TestBatchSerialWaitsOnlyForAPlace`, `TestBatchSerialInterruptEndsTheWait`). A fleet that cannot take the job as configured (every node left out because it does
+  not serve image generation, a route is not configured on it, it cannot carry `refine=false`, or the tailnet guard refused its roster entry; none merely busy,
+  text-leased or out of reach) is not waited for: `pickNodeFor` files `core.ErrClassNoNodeConfigured` (the defer class is unchanged) and the job fails at once,
+  naming each node's miss (`TestBatchSerialFailsAtOnceWhereNoNodeCanEverTakeTheJob`, `TestPickNodeFilesNoNodeConfiguredOnlyWhenEveryNodeIsLeftOutForConfiguration`);
+  one node that may take it later keeps the wait (`TestBatchSerialStillWaitsWhereAnyNodeMightTakeTheJobLater`). A node chosen and then lost when the job is sent, or
+  after, and every other answer, is final at once. Once one job has waited the ceiling for a place, the jobs not yet sent are queued at once, on both paths,
+  instead of each waiting the ceiling in turn (200 jobs, 200 ceilings: `TestBatchSerialCeilingQueuesTheJobsNotYetSent`, `TestBatchTicketCeilingQueuesTheJobsNotYetSent`),
+  and the exit-1 line says which cause ended the batch (`TestBatchExitSaysWhyTheJobsAreUnfinished`). The warm batch of a busy lane no node can relieve holds its place in line instead of giving up at 90 s
+  (`pipeline.RunImageBatchWaiting`; the wait ends the moment the context does and a grant that arrives after is given back:
+  `TestRunImageBatchWaitingKeepsItsPlaceUntilTheCardFrees`, `TestRunImageBatchWaitingEndsOnInterruptAndLeavesNoLease`).
+- **What a one-at-a-time row says.** The node's recipe is not compared there, so a row carries the family, licence and `commercial_use` the node that
+  rendered it reported (nothing if it reported nothing), the printed header names none, and a family only the nodes define is carried by name under
+  `--route remote` or on a machine with no image lane (`TestBatchSerialRowsCarryTheNodesOwnFamilyAndLicense`,
+  `TestBatchCarriesAFamilyThisMachineCannotResolveWhereItCannotRenderLocally`). `refine_fallbacks` is printed for a warm batch whose warm call ran and answered only
+  (`TestBatchPayloadReportsRefineFallbacksOnlyWhereTheyWereMeasured`).
+- **A failed job leaves no file of its own at its path.** An empty file a lane left is removed, and a node's file with no published sha256 is moved aside as
+  `<out>.unverified` (the picture is kept, the row names it) so a later `--resume` cannot take it for finished (`TestBatchAJobIsRenderedOnlyWhenItsFileIsThere`).
+  A picture that was already at `out` before the batch is not a failed job's to remove: a render that fails keeps it (the render helpers write atomically), and only the
+  node's file the fetch has already put at `out` replaced it. `--results` may not name the
+  `--batch` file, and an earlier results file is replaced only when the batch ends (`TestResultsFileNeverCostsAnEarlierRecordUntilTheBatchEnds`,
+  `TestGenerateImageBatchResultsFileIsNeverTheJobsFileNorLostToARefusal`). A folder as `--results`, and on Windows a read-only file, are refused when the file is opened, before any
+  lane time is spent (`TestOpenResultsRefusesAFolderAtOnce`); the `--resume` run that recovers a killed batch no longer truncates the `<results>.partial` that batch left: it is
+  set aside as `<results>.partial.prev` (one is kept, the newest), the command says so, and a refused run puts it back
+  (`TestOpenResultsKeepsAnEarlierBatchsRecordAside`, `TestGenerateImageBatchKeepsTheRecordOfAKilledBatchBesideTheRecoveryRun`). One file spelled two ways (relative and absolute, another case where the file
+  system ignores it) is one `out` (`TestBatchOutsThatNameOneFileTwoWaysClash`). `--resume` reads the PNG header first and renders again, without decoding,
+  a canvas that is not the named size or is over 64 Mpx (a chosen ceiling; `TestResumeDoesNotDecodeACanvasItCannotUse`).
+- **`RunImageBatchAs(ctx, family, jobs)`** is the family seam: `RunImageBatch` is it with no family. Every read of the binding goes through the
+  family's resolved config, not `p.cfg`: the lease is asked for on the family's card and with its timeout, the launch is its pin, the runner script,
+  ledger label and every item's tag and license are the family's (`TestRunImageBatchFamilySeam`, `TestRunImageBatchAsAsksForTheFamilysCard`,
+  `TestRunImageBatchAsLeasesForTheFamilysTimeout`). A family on stable-diffusion.cpp has no warm session and is refused by name. The family is now
+  part of a default `out`'s hash, as it is of the single render's; no family hashes exactly as before.
+- **Changed, said.** The warm session now runs under the verb's interrupt context; before, `generate-image --batch` ran it under
+  `context.Background()` and a Ctrl-C killed the whole process. Now the first Ctrl-C cancels the render: `gpugen.Generate` builds the child with
+  `exec.CommandContext` and a tree kill (the child and its descendants are killed), and the process stays up to run the deferred lease release
+  and teardown; the second Ctrl-C is the default one. The ticket path needs the same context (a ticket that sent nothing is canceled by it).
+  `--family` and `--route remote` are no longer refused on a batch (`--transparent` still is, `family_cli_test.go` follows);
+  `--results`, `--resume` and `--jobs` without `--batch` are refused by name. The printed JSON keeps its shape and adds `mode`, `skipped`,
+  `cluster` and a verdict, hash and node on every item; a warm batch a busy lane deferred now lists its jobs as `queued` items (its `count` was 0)
+  and still exits 0 (4 if a job had already failed). Two *different* pictures for one `out` are refused before anything runs (the second used to replace the first); an empty
+  prompt still refuses the whole batch with `job N: empty prompt`.
+- **Not changed, and said.** An interrupt leaves a job already on a node running (ADR 0064); the same command adopts it only if its jobs carry
+  explicit seeds. A node job pays a ComfyUI cold start. Nothing here was run against a live lease, a live node or a render: the tests use the real
+  fleet-node servers, ticket files and results file with fakes for the pipeline and the renderer. The 8-ticket cap and the two retries of a job
+  whose lane a sibling took are chosen constants, not measurements.
+
 ## [0.180.0] - 2026-10-10 - a busy image call waits for the first matching lane anywhere in the cluster, graphs overflow to a node that holds their files, and a live render keeps its lease
 
 ### Fixed — the ticket queue was off on any machine whose config sets no `state_dir`, which is the usual config (ADR 0083)

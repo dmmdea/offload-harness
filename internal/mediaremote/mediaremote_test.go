@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -91,6 +92,9 @@ type nodeRunner struct {
 	deferClass string
 	// hold, when set, blocks every run until it is closed (a render that never finishes during the test).
 	hold chan struct{}
+	// imageBody, when set, is the file an image render writes (the batch tests render real PNGs of the size asked for);
+	// without it the file is the three bytes "IMG".
+	imageBody func(req core.Request) []byte
 }
 
 func (n *nodeRunner) Run(_ context.Context, req core.Request) core.Result {
@@ -123,7 +127,11 @@ func (n *nodeRunner) Run(_ context.Context, req core.Request) core.Result {
 	var data any
 	switch req.Task {
 	case core.TaskGenerateImage:
-		data = map[string]any{"image_path": write("render-1.png", "IMG"), "width": 64, "seed": 9007199254740993}
+		body := "IMG"
+		if n.imageBody != nil {
+			body = string(n.imageBody(req))
+		}
+		data = map[string]any{"image_path": write("render-1.png", body), "width": 64, "seed": 9007199254740993}
 	case core.TaskGenerateVideo:
 		data = map[string]any{"video_path": write("video-1.mp4", "VIDEO"), "seed": 5}
 	case core.TaskAnimateCharacter:
@@ -165,6 +173,8 @@ type nodeOpts struct {
 	healthEdit func(map[string]any)
 	// deferAs / deferClass make the node's pipeline defer every job (see nodeRunner).
 	deferAs, deferClass string
+	// imageBody is what an image render writes (see nodeRunner).
+	imageBody func(req core.Request) []byte
 }
 
 // bindOnly is the derivation a fixture node runs on: a route is CONFIGURED when its script is bound.
@@ -204,7 +214,7 @@ func startNode(t *testing.T, o nodeOpts) *node {
 	if version == "" {
 		version = buildinfo.Version
 	}
-	r := &nodeRunner{media: media, hold: o.hold, deferAs: o.deferAs, deferClass: o.deferClass}
+	r := &nodeRunner{media: media, hold: o.hold, deferAs: o.deferAs, deferClass: o.deferClass, imageBody: o.imageBody}
 	jobs := fleetnode.NewJobs(time.Hour, cfg.FleetConcurrencyLimit())
 	t.Cleanup(func() { jobs.DrainAndStop(2 * time.Second) })
 	s := fleetnode.New(r, jobs, fleetnode.Options{
@@ -990,11 +1000,7 @@ func TestPlacementNamesEveryMissAndMediaJobIsRequiredForInputs(t *testing.T) {
 }
 
 func asPlacement(err error, target **placementError) bool {
-	pe, ok := err.(*placementError)
-	if ok {
-		*target = pe
-	}
-	return ok
+	return errors.As(err, target)
 }
 
 func TestRankingPrefersNoHeldLeaseThenTheShortestQueueThenConfigOrder(t *testing.T) {

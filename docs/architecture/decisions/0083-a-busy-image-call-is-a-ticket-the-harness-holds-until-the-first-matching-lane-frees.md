@@ -137,6 +137,29 @@ make the caller retry. Three things were still wrong once every lane was busy.
     graph's parameters name files on this machine (`graph_path`, `manifest_path`) rather than carry them, so what makes two graph calls
     the same call needed a decision of its own; Amendment 1 is that decision.
 
+13. **A batch is a set of tickets when it must be and one warm session when it can be.** `generate-image --batch jobs.jsonl [--family F]
+    [--route auto|local|remote] [--results r.jsonl] [--resume] [--jobs N]` (register F28) decides once, at the start, where its jobs run and never
+    mixes. The whole batch goes through the warm session (`pipeline.RunImageBatchAs`: one ComfyUI, the checkpoint loads once) when the route is
+    local, the machine has no fleet, no state dir or an inherited lease, its lane is free, or its lane is not free **and no roster node renders the
+    recipe** (krea2 and the 2512 build exist on this machine's files only, so per-job tickets would be a cold start per picture on the one lane that
+    can run them: slower than waiting for the lane once; that batch keeps its place in the lease line for the lane, up to the queue's 8 h ceiling and
+    not the 90 s window, so the command blocks until it has the lane instead of ending `queued` with exit 0 to be re-run from the back of the line,
+    and an interrupt ends the wait). Otherwise each job is one ticket of decisions 1 to 10, at most N in flight (default 1 for
+    this machine's lane plus one per matching node, at most 8, chosen), so a node's claim (decision 6) is what keeps a batch from sending two jobs to
+    one single-job node; where no claim protects a node (`--route remote`, a machine with no image lane: the single-render call picks a node without
+    one) the jobs run one at a time. There is no ticket to hold such a job, so a held card or a fleet with no free node is asked again after a pause
+    (5 s, 15 s, 1 min, then every 5 min; chosen) up to the same ceiling, and a job that finds no place is `queued`, never `failed` (nor is a ticket the
+    queue ended at its ceiling, which is not sent again as a new ticket); once one job has waited the ceiling the jobs not yet sent are queued at once; a fleet
+    that can never take the job as configured (every node left out for a configuration fact, none merely busy or out of reach: `core.ErrClassNoNodeConfigured`)
+    is not waited for, and the job fails at once naming each node's miss; the node's
+    recipe is not compared there, so a row carries the family and licence the node reports, and a family only the nodes define is carried by name. The jobs reach a node exactly as written (decision 3 fixes a seed the job did not give; `refine=false` only
+    when the job says so), and each output is fetched, checked against the sha256 the node published, to its exact `out`. There is no mixed
+    local/remote work stealing and no batch task on the fleet (v1). Each job ends in a row `{i, out, seed, ok, ms, error, node, family, sha256,
+    verdict}` (`rendered`, `skipped-existing`, `failed`, `queued`), kept beside the results file (`<results>.partial`) as its job is final and written over it when the batch ends, so an earlier results file survives a refused or a dead batch (a run that reopens the name sets a dead batch's partial aside as `<results>.partial.prev`); a file the batch rejects (a node's file with no published sha256) is set aside as `<out>.unverified`, so a failed job leaves no file of its own at its path (a picture that was already there before the batch is not its to remove). `--resume` skips a job only when the file
+    at its `out` is not empty, decodes whole as a PNG and has the size the job names; anything doubtful is rendered again (the 21 zero-byte PNGs of
+    2026-10-09). A job whose `out` cannot be made fails alone before a lane is asked for it. Exit 0 every job has its picture or a busy lane deferred
+    the whole warm batch (rows `queued`), 4 some job failed (also in a deferred batch), 1 it stopped, was interrupted or a job found no place (`queued`).
+
 ## Consequences
 
 - The operator's "even if all PCs are full" holds for images and, by Amendment 1, for a whole-node graph: the job waits for the first matching lane that frees anywhere, in the
@@ -158,6 +181,13 @@ make the caller retry. Three things were still wrong once every lane was busy.
 - **Cost.** Each waiting ticket pays a lane question (one bounded `nvidia-smi` read) and a roster read per scan; the creation
   reading is reused by the first scan for 2 s. N waiting tickets are N reads per interval; a roster-first short circuit and a
   shared table read are named follow-ups.
+- **A batch of krea2 or of the 2512 build never leaves this machine** (decision 13): no node renders them, so the batch keeps its place in line
+  for the lane (up to the 8 h ceiling) and runs warm on it, and says which node does not match and why. A batch of a 2.1 family pays a ComfyUI cold start per job
+  on a node (zero-warm, ADR 0009), which beats waiting only while this machine's lane is held by a long job and a node is idle.
+- **An interrupted batch leaves its jobs on the nodes.** A job already on a node cannot be recalled (ADR 0064); the same command adopts it only if
+  the jobs carry explicit seeds (the ticket's identity is the request, and a seed minted afresh is a new request). The verb runs both
+  paths under one interrupt context, so on the warm session the first interrupt cancels the render too (its process tree is killed and
+  the lease released); before, the warm session ran under `context.Background()` and an interrupt killed the whole process.
 - **Measured and unmeasured.** Everything is proved against real fleet-node servers, a real lease manager and fakes (the S1
   pattern); nothing was run against a live lease, a live node or a render. The scan interval, its jitter, the pause steps, the
   owner and keep timings and the 8 h ceiling are chosen constants, not resource numbers (docs/systems/media-generation.md,
@@ -178,6 +208,11 @@ make the caller retry. Three things were still wrong once every lane was busy.
 - **Read the state files and then send.** Rejected for the in-use rule: that is exactly the window in which two processes both
   read a node idle.
 - **Enable the pull queue (ADR 0030).** Still rejected for the reasons of ADR 0082: the nodes in question cannot pull.
+- **Mixed local/remote work stealing for a batch** (the warm session on this machine plus tickets on the nodes for the rest). Rejected for v1:
+  it needs a rule for which jobs go where, and nothing has measured the cold start a node pays against a warm job here, so the rule would be a guess.
+- **A batch task on the fleet** (a node holds a warm session for N jobs). Rejected for v1: every candidate node streams the 2.1 text encoder from
+  RAM on every render, so a warm remote session buys little today, and it would be a new fleet task every node must keep true.
+- **Per-job tickets even when no node matches.** Rejected: one cold start per picture on one lane, to gain nothing.
 
 ## Amendment 1 (2026-10-10, P0 step S5; released in 0.181.0): a whole-node graph is a ticket
 
@@ -298,9 +333,10 @@ the live acceptance in the CHANGELOG entry of this change (A9) is the first live
 
 ## Related code
 
-- `internal/mediaremote/ticket.go`, `queuefs.go`, `scan.go`, `door.go`, `place.go` (the placement both kinds of ticket share: the roster, the filter, the attempt and its refusals), `graph.go` (a graph's rules and the note for one that reads input files), `mediaremote.go` (`RunWith`)
+- `internal/mediaremote/ticket.go`, `queuefs.go`, `scan.go`, `door.go`, `place.go` (the placement both kinds of ticket share: the roster, the filter, the attempt and its refusals), `graph.go` (a graph's rules and the note for one that reads input files), `mediaremote.go` (`RunWith`), `batch.go` (`RunBatch`, decision 13)
 - `internal/core/place.go` (`PlaceKeeper`), `internal/pipeline/medialane_place.go`, `medialane_graph.go` (`leaveGraphPlace`), `medialane.go`, `internal/gpualloc/queued.go`, `internal/fleetnode/graph_files.go` (the refusal word)
-- `internal/mcpserver/mcpserver.go` (`wait_s`, the place forwarding), `status_section.go` (`media_queue`), `main.go` (`generate-image`, `run-graph`)
+- `internal/mcpserver/mcpserver.go` (`wait_s`, the place forwarding), `status_section.go` (`media_queue`), `main.go` and `generate_image_batch.go` (`generate-image`, the batch verb, `run-graph`),
+  `internal/pipeline/pipeline.go` (`RunImageBatchAs`, `NormalizeImageBatch`)
 
 ## Related docs
 

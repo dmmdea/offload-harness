@@ -122,7 +122,7 @@ offload-harness video-watch reel.mp4 --question "List every shot; flag anything 
 
 # Generate (free, local GPU)
 offload-harness generate-image "a product photo of a coffee mug on white" --negative "people, text, watermark"
-offload-harness generate-image --batch jobs.jsonl   # N prompts through ONE warm ComfyUI session (checkpoint loads once)
+offload-harness generate-image --batch jobs.jsonl   # N prompts through ONE warm ComfyUI session (checkpoint loads once); --family, --results, --resume; a held lane sends each job through the fleet (ADR 0083)
 offload-harness generate-image "a glass perfume bottle" --family qwen-image-2.1 --transparent   # a NAMED opt-in family (ADR 0058)
 offload-harness run-graph --graph wf.json --manifest m.json --out-dir out/   # arbitrary ComfyUI graph + self-provisioned node manifest
 offload-harness edit-image render.png --ops '[{"op":"mask_boxes","boxes":[{"x":620,"y":540,"width":820,"height":820}],"feather":6}]' --out mask.png   # build a white-on-black inpaint mask

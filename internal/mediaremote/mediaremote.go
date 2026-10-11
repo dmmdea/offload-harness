@@ -279,8 +279,19 @@ func contractDefer(msg string, meta core.Meta) core.Result {
 	return res
 }
 
+// noNodeConfigured is the placementError of a call no node of the roster can ever take as configured (see pickNodeFor): it
+// answers like any capacity defer, and also files core.ErrClassNoNodeConfigured so that a caller that waits for a place (the
+// image batch) can tell it from a fleet that is only busy or out of reach.
+type noNodeConfigured struct{ *placementError }
+
+func (e *noNodeConfigured) Unwrap() error { return e.placementError }
+
 func placementDefer(err error, placement string) core.Result {
 	res := core.Deferf(err.Error(), "", core.Meta{Placement: placement})
+	var nc *noNodeConfigured
+	if errors.As(err, &nc) {
+		res.Meta.ErrClass = core.ErrClassNoNodeConfigured
+	}
 	var pe *placementError
 	var ce *contractError
 	switch {
@@ -610,7 +621,11 @@ func contains(xs []string, x string) bool {
 // reachable, lists the task (and media-job when input files travel), reports every route the task needs as
 // CONFIGURED when it reports routes at all (an older node reports none: unknown, not refused), and does not
 // hold a TEXT lease (it would answer 503 anyway). Among them a node with no held lease ranks first, then
-// the shortest queue (queued plus running), then config order. Every miss is named in the error.
+// the shortest queue (queued plus running), then config order. Every miss is named in the error. When no node
+// is eligible and every one of them was left out for a CONFIGURATION fact (not serving the task, a route not
+// configured, no refine=false, an entry the tailnet guard refused), the error is a noNodeConfigured: waiting
+// does not change any of those. One node that is merely unreachable or text-leased keeps it an ordinary
+// capacity defer, because that node may take the call later.
 func pickNode(ctx context.Context, cfg config.Config, bases []string, task, doorTask string, routes []string) (base, node string, err error) {
 	return pickNodeFor(ctx, cfg, bases, task, doorTask, routes, need{})
 }
@@ -627,6 +642,9 @@ func pickNodeFor(ctx context.Context, cfg config.Config, bases []string, task, d
 	var (
 		cands  []cand
 		misses []string
+		// later counts the nodes left out for a reason that passes (not reachable, a text lease on the card); fixed counts
+		// the ones left out for a configuration fact.
+		later, fixed int
 	)
 	// The candidates are read through internal/rosterprobe like every other single-shot lane (ADR 0074):
 	// each entry is judged by the tailnet shape check before it is dialled (a refused entry is a named miss,
@@ -637,27 +655,37 @@ func pickNodeFor(ctx context.Context, cfg config.Config, bases []string, task, d
 		b, v := r.Base, r.View
 		if r.Err != nil {
 			misses = append(misses, r.Miss())
+			if r.Refused != nil {
+				fixed++ // the tailnet guard will not admit the entry: it is never dialled, whatever the node is doing
+			} else {
+				later++ // it did not answer, or answered something that is not health: it may be back
+			}
 			continue
 		}
 		who := fmt.Sprintf("%s (%s)", r.Shown(), v.NodeID)
 		if !contains(v.Tasks, task) {
 			misses = append(misses, fmt.Sprintf("%s: does not serve %s", who, task))
+			fixed++
 			continue
 		}
 		if doorTask == taskMediaJob && !contains(v.Tasks, taskMediaJob) {
 			misses = append(misses, fmt.Sprintf("%s: does not advertise media-job (a node opens that door with fleet_media_inputs and a fleet_auth_token)", who))
+			fixed++
 			continue
 		}
 		if len(routes) > 0 && v.MediaRoutesKnown && !anyConfigured(v, routes) {
 			misses = append(misses, fmt.Sprintf("%s: route %s is %s on that node", who, strings.Join(routes, " or "), stateOf(v, routes)))
+			fixed++
 			continue
 		}
 		if v.LeasedText {
 			misses = append(misses, fmt.Sprintf("%s: a text lease holds its card", who))
+			later++
 			continue
 		}
 		if n.refineOff && task == taskImage && !v.RefineHonoured {
 			misses = append(misses, fmt.Sprintf("%s: does not honour refine=false (an older harness would refine the prompt anyway)", who))
+			fixed++
 			continue
 		}
 		if why := n.releaseRefuses(v); why != "" {
@@ -679,7 +707,12 @@ func pickNodeFor(ctx context.Context, cfg config.Config, bases []string, task, d
 		if doorTask == taskMediaJob {
 			why += " with input files"
 		}
-		return "", "", &placementError{core.DeferClassCapacity, why + ": probed " + strings.Join(misses, "; ")}
+		pe := &placementError{core.DeferClassCapacity, why + ": probed " + strings.Join(misses, "; ")}
+		if later == 0 && fixed > 0 {
+			pe.msg += "; every node is left out for how it is configured, which waiting does not change"
+			return "", "", &noNodeConfigured{pe}
+		}
+		return "", "", pe
 	}
 	sort.SliceStable(cands, func(a, b int) bool {
 		if cands[a].held != cands[b].held {

@@ -1001,6 +1001,21 @@ func deferRes(class, reason, errClass string) core.Result {
 	return res
 }
 
+// queueEnded says res is the ticket queue's own end of a call (a ticket that is over), not an answer of a lane. The queue files
+// every such end under the held class gpu_queued, with a defer class the lanes' own held answers never carry: the ceiling
+// (step: "waited ... without a lane anywhere", DeferClassBudget) and an adoption it could not make (attach,
+// DeferClassInfrastructure). A lane's own held answer, a lane that read free and was taken a moment later, is gpu_busy with
+// no defer class or gpu_queued with the capacity class (pipeline.deferForLease). The batch reads this to tell the two apart:
+// the second is asked again, the first is not (it would start another ticket and wait another ceiling).
+func queueEnded(res core.Result) bool {
+	return core.CardHeld(res.Meta.ErrClass) && (res.DeferClass == core.DeferClassBudget || res.DeferClass == core.DeferClassInfrastructure)
+}
+
+// queueCeiling says res is the ceiling in particular: a ticket that waited ticketMaxWait without a lane anywhere (step).
+func queueCeiling(res core.Result) bool {
+	return core.CardHeld(res.Meta.ErrClass) && res.DeferClass == core.DeferClassBudget
+}
+
 // queueLog is where the queue's log lines go (the process's stderr; a test replaces it).
 var queueLog = func(line string) { fmt.Fprintln(os.Stderr, line) }
 

@@ -423,7 +423,9 @@ swap. The architect gets read and search only.
 ## Warm Batch
 
 The opt-in `generate-image --batch` session where the checkpoint loads once for N renders. Teardown
-still happens exactly once, at the batch boundary — Zero-Warm moves from per-render to per-batch.
+still happens exactly once, at the batch boundary — Zero-Warm moves from per-render to per-batch. When
+this machine's lane is held and a roster node renders the recipe, the batch is one ticket per job instead
+(ADR 0083, decision 13), and the warm session exists only on this machine.
 
 ## Worktree
 

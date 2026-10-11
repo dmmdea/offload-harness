@@ -2292,6 +2292,13 @@ func (it *ImageBatchItem) tagLicense(fam config.FamilyInfo) {
 // (a concrete seed BEFORE the render so the report is reproducible; a stable output
 // path under mediaDir) and renders the jobs file the render script consumes. Pure.
 func normalizeImageBatch(jobs []ImageBatchJob, mediaDir string) ([]ImageBatchJob, string) {
+	return normalizeImageBatchFor(jobs, mediaDir, "")
+}
+
+// normalizeImageBatchFor is normalizeImageBatch for a batch of one named family: the family is part of a default out's
+// hash, as it is part of the single render's (its `family` param is in the hashed params), so the same prompt and seed
+// under two families are two files and not one overwriting the other. No family hashes exactly as it always did.
+func normalizeImageBatchFor(jobs []ImageBatchJob, mediaDir, family string) ([]ImageBatchJob, string) {
 	norm := make([]ImageBatchJob, len(jobs))
 	for i, j := range jobs {
 		if j.Seed <= 0 {
@@ -2302,6 +2309,9 @@ func normalizeImageBatch(jobs []ImageBatchJob, mediaDir string) ([]ImageBatchJob
 			// negative): two jobs differing only in negative must not share an output
 			// path, or the second silently overwrites the first.
 			params := map[string]any{"seed": j.Seed, "width": j.Width, "height": j.Height, "steps": j.Steps, "negative": j.Negative}
+			if family = strings.TrimSpace(family); family != "" {
+				params["family"] = family
+			}
 			j.Out = filepath.Join(mediaDir, "render-"+sha256hex(j.Prompt + tasks.StableParamsKey(params))[:8]+".png")
 		}
 		norm[i] = j
@@ -2373,13 +2383,52 @@ func batchErrClass(itemErr string, gerr error) string {
 	return classifyErr(fmt.Errorf("%s", itemErr))
 }
 
-// RunImageBatch renders N prompts through ONE warm ComfyUI session (the checkpoint
+// NormalizeImageBatch is normalizeImageBatchFor without the jobs file: the batch's jobs with a concrete seed and a concrete
+// out filled in, exactly as RunImageBatchAs fills them. The CLI calls it before it chooses where the batch runs, so a job
+// that names neither has the same seed and out whether the whole batch renders warm here or each job is placed on the
+// fleet (the default out is a hash of the seed, so a seed minted twice would be two files). Idempotent: a job that already
+// has both is unchanged.
+func NormalizeImageBatch(jobs []ImageBatchJob, mediaDir, family string) []ImageBatchJob {
+	norm, _ := normalizeImageBatchFor(jobs, mediaDir, family)
+	return norm
+}
+
+// RunImageBatch renders N prompts through ONE warm ComfyUI session under the machine's default binding: the batch of
+// RunImageBatchAs with no family.
+func (p *Pipeline) RunImageBatch(ctx context.Context, jobs []ImageBatchJob) ([]ImageBatchItem, error) {
+	return p.RunImageBatchAs(ctx, "", jobs)
+}
+
+// RunImageBatchAs renders N prompts through ONE warm ComfyUI session (the checkpoint
 // loads once) while preserving zero-always-warm AT THE BATCH BOUNDARY: the render
 // script's single teardown + gpugen's deferred /free restore a clean GPU when the
 // batch ends, however it ends. Ledger: one entry per job, same model label as the
 // single-render path (health tiers must not fragment).
-func (p *Pipeline) RunImageBatch(ctx context.Context, jobs []ImageBatchJob) ([]ImageBatchItem, error) {
-	if p.cfg.ImageGenScript == "" {
+//
+// family selects the binding exactly as the single render's `family` does (ADR 0058): "" or the default binding's own
+// name is this machine's default, a named overlay renders under its own config copy (its checkpoint, steps, card pin,
+// license) and tags every item with it. EVERY read of the binding below goes through that resolved copy, never p.cfg: the
+// lease is asked for on the family's card and sized from the family's files, the launch is the family's pin, and the
+// ledger label and the tag are the family's. Only what no overlay changes (the prompt refiner, the ledger) stays on p.cfg.
+// A family on stable-diffusion.cpp has no warm session to share, so it is refused by name: its jobs render one at a time.
+func (p *Pipeline) RunImageBatchAs(ctx context.Context, family string, jobs []ImageBatchJob) ([]ImageBatchItem, error) {
+	return p.RunImageBatchWaiting(ctx, family, jobs, 0)
+}
+
+// RunImageBatchWaiting is RunImageBatchAs for a batch that has to wait for a busy lane: the fleet cannot relieve it (no
+// roster node renders its recipe), so it keeps its place in the lease line instead of giving up at the pipeline's own window
+// and coming back `queued`, which the caller would only run again from the back of the line. wait > 0 is how long it keeps
+// that place; 0 is the pipeline's own gpu_wait_ms window, the call RunImageBatchAs always was. The wait ends the moment ctx
+// does, with an error that says so and is not a busy answer (IsGPUBusy is false for it).
+func (p *Pipeline) RunImageBatchWaiting(ctx context.Context, family string, jobs []ImageBatchJob, wait time.Duration) ([]ImageBatchItem, error) {
+	cfg, fam, ferr := p.cfg.ResolveImageFamily(family)
+	if ferr != nil {
+		return nil, ferr
+	}
+	if strings.TrimSpace(family) != "" && cfg.ImageGenEngine == "sdcpp" {
+		return nil, fmt.Errorf("image family %q renders on stable-diffusion.cpp, which has no warm ComfyUI session to batch through: render its jobs one at a time", family)
+	}
+	if cfg.ImageGenScript == "" {
 		return nil, fmt.Errorf("no image-gen route configured")
 	}
 	if len(jobs) == 0 {
@@ -2390,12 +2439,12 @@ func (p *Pipeline) RunImageBatch(ctx context.Context, jobs []ImageBatchJob) ([]I
 			return nil, fmt.Errorf("job %d: empty prompt", i)
 		}
 	}
-	script, serr := gpugen.ResolveScript(p.cfg.ImageGenScript)
+	script, serr := gpugen.ResolveScript(cfg.ImageGenScript)
 	if serr != nil {
 		return nil, serr
 	}
-	_ = os.MkdirAll(p.cfg.MediaDir, 0o755)
-	norm, jsonl := normalizeImageBatch(jobs, p.cfg.MediaDir)
+	_ = os.MkdirAll(cfg.MediaDir, 0o755)
+	norm, jsonl := normalizeImageBatchFor(jobs, cfg.MediaDir, family)
 	// The batch file stamp derives from the RAW jobs, BEFORE any refinement:
 	// refined text is temperature-sampled, so hashing it would mint new
 	// jobs/results filenames for every run of an identical batch.
@@ -2451,8 +2500,8 @@ func (p *Pipeline) RunImageBatch(ctx context.Context, jobs []ImageBatchJob) ([]I
 			jsonl = jobsJSONL(norm)
 		}
 	}
-	jobsPath := filepath.Join(p.cfg.MediaDir, "batch-"+stamp+".jobs.jsonl")
-	resultsPath := filepath.Join(p.cfg.MediaDir, "batch-"+stamp+".results.jsonl")
+	jobsPath := filepath.Join(cfg.MediaDir, "batch-"+stamp+".jobs.jsonl")
+	resultsPath := filepath.Join(cfg.MediaDir, "batch-"+stamp+".results.jsonl")
 	if err := os.WriteFile(jobsPath, []byte(jsonl), 0o644); err != nil {
 		return nil, err
 	}
@@ -2461,31 +2510,36 @@ func (p *Pipeline) RunImageBatch(ctx context.Context, jobs []ImageBatchJob) ([]I
 	// actually renders with; UNBOUND keeps the historical "comfyui-sdxl" label so
 	// health tiers don't fragment.
 	modelLabel := "comfyui-sdxl"
-	if p.cfg.ImageGenCkpt != "" {
-		modelLabel = "comfyui:" + p.cfg.ImageGenCkpt
+	if cfg.ImageGenCkpt != "" {
+		modelLabel = "comfyui:" + cfg.ImageGenCkpt
 	}
-	model := imageModelFromConfig(p.cfg)
+	model := imageModelFromConfig(cfg)
 	// The whole batch shares one timeout: per-image budget × N (the first job also
 	// absorbs the ComfyUI cold start, which the per-image budget already covers today).
-	timeout := time.Duration(p.cfg.ImageGenTimeoutSec) * time.Second * time.Duration(len(norm))
+	timeout := time.Duration(cfg.ImageGenTimeoutSec) * time.Second * time.Duration(len(norm))
 	// ONE lease for the WHOLE batch. That is the point of batching: the tier is torn
 	// down once for N renders instead of once each, which is the arithmetic behind the
 	// 3,356 unloads in the server log.
 	// This helper returns items+error rather than a core.Result, so a busy card surfaces
 	// as an error for the caller to classify — no items were produced.
-	grant, lerr := p.acquireMediaLease(ctx, "image-gen batch", timeout, p.gpuWait(), imageNeed(p.cfg, ""))
+	var grant mediaGrant
+	var lerr error
+	if wait > 0 {
+		grant, lerr = p.acquireMediaLeaseHeld(ctx, "image-gen batch", timeout, wait, imageNeed(cfg, ""))
+	} else {
+		grant, lerr = p.acquireMediaLease(ctx, "image-gen batch", timeout, p.gpuWait(), imageNeed(cfg, ""))
+	}
 	if lerr != nil {
 		return nil, lerr
 	}
 	defer grant.Release()
 	model.Launch = grant.launch(model.Launch)
-	gerr := imagegen.GenerateBatch(ctx, p.cfg.NodePath, script, p.cfg.ComfyDir, jobsPath, resultsPath, model, timeout, grant.Env...)
+	gerr := imagegen.GenerateBatch(ctx, cfg.NodePath, script, cfg.ComfyDir, jobsPath, resultsPath, model, timeout, grant.Env...)
 
 	raw, _ := os.ReadFile(resultsPath) // best-effort even on gerr: partial results are real work
 	items := parseBatchResults(raw, norm)
-	// The default binding (""), exactly what the single path resolves for a request
-	// without a family: every item is tagged with it (ADR 0058).
-	_, fam, _ := p.cfg.ResolveImageFamily("")
+	// The binding the batch rendered under (the default for no family, exactly what the
+	// single path resolves for a request without one): every item is tagged with it (ADR 0058).
 	for i, it := range items {
 		items[i].tagLicense(fam)
 		// Refiner outcome onto the item (single-path result-key parity: with a
@@ -2502,8 +2556,7 @@ func (p *Pipeline) RunImageBatch(ctx context.Context, jobs []ImageBatchJob) ([]I
 		}
 		// Ledger input-chars parity with the single path: the RAW prompt is the
 		// caller's input (jobs[i]; norm[i].Prompt may hold the refined text).
-		// Batches render the DEFAULT binding (no family param on this path), so its
-		// declared license, if any, is the one every row carries.
+		// Every row carries the license the rendering binding declares, if any.
 		meta := core.Meta{Model: modelLabel, LatencyMs: it.Ms, License: fam.License}
 		if it.OK {
 			p.record(core.TaskGenerateImage, meta, len(jobs[i].Prompt))
