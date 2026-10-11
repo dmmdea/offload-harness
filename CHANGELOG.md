@@ -352,6 +352,35 @@ Versioning: [SemVer](https://semver.org/).
   seam; a console close cannot be driven from a test); 16 mutations were each caught, and 9 more for the transcription
   text, the recovered-card wording and the warm-back. `docs/systems/pair-workloads.md`.
 
+### Added — a family's identity includes the content of its weight files (F59, ADR 0082 Amendment 2)
+
+- **The hole.** A recipe identified a weight file by its name and byte size, so a same-named file of the same size with different
+  weights on another node digested alike and matched; the node's 412 re-check recomputed the same size-based digest and could not
+  catch it. Each present weight file now carries a **content fingerprint** in `mediacap.RecipeFile` (`fingerprint`), and it is in
+  the digest, which is now version 2: a digest of 0.179.0 never equals one of this release.
+- **What the fingerprint is.** A sha256 of a scheme tag, the file's size and a SAMPLE of its bytes: 64 blocks of 1 MiB at evenly
+  spaced offsets, the first at the start of the file and the last ending at its end, or the whole file when it is 64 MiB or smaller
+  (block size and count are chosen). A sample and not a full hash, measured: it read 0.17 to 0.87 s per file for files of 0.36 to
+  42 GB on one workstation, against 389 MB/s for a whole-file sha256 on a core (about 50 s for 20 GB and 110 s for 42 GB,
+  extrapolated), minutes per node after every release or model change. Two real 42 GB builds that share a size differed in 58 of
+  the 64 sample blocks. **It does not see a few corrupted bytes between the sampled blocks, nor a replacement with the same size
+  and the same modification time while the process that cached the old reading runs** (the cache is in memory, by path, size and
+  modification time, and a restart reads again); compare whole-file hashes after a copy you doubt.
+- **Health never waits for it.** `/fleet/health` reads the fingerprint cache; a file not hashed yet starts one background read (one
+  file at a time) and is published `"fingerprint":"pending"` (`"unreadable"` when it cannot be read, retried after 30 s). **A row
+  with any such file publishes an empty `digest`**, so two nodes that were both pending cannot share one. The row memo (60 s) is
+  rebuilt as soon as a read settles. The node's 412 re-check and the delegator's own recipe wait for a fingerprint they do not have.
+- **A recipe that is not fully fingerprinted is never compared.** This machine's family with such a file has no identity (the call
+  runs here, as for a missing file); a node whose rows are not all hashed is a `not-capable` row that says it has not finished (a
+  candidate once it has), whether or not the row carries a digest; two all-pending recipes are never taken for one match; and a
+  same-named, same-size file with other bytes is a miss that names the file: `imagegen_ckpt: <name> has the same size on both and
+  different content (fingerprint <12 hex> vs <12 hex>)`. A node whose file cannot be read answers the 412 with the file and its state.
+- **Deploying.** Every node that should take overflow must run this release: the digest is version 2 and a recipe is compared only
+  between the same release (`harness_version`), so a fleet part-way through the upgrade matches only inside each release, and an
+  overflow between releases falls back to the local line and the ticket. After the upgrade the three live matches of 0.179.0 are
+  read again (`image_recipes` on both nodes of each pair); a pair that no longer matches is a finding about the files, and the
+  cluster answer names the file. Nothing here was run against a live fleet.
+
 ## [0.179.0] - 2026-10-10 - a busy image lane overflows to an idle node that renders the same recipe, and every GPU lease path has a host-RAM brake
 
 ### Added — a busy image lane overflows to an idle node that renders the same recipe (F52, ADR 0082)

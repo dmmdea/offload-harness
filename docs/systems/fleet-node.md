@@ -1910,14 +1910,20 @@ every delegator re-places; a task that is not bound at all keeps the `400 unsupp
 task decodes `refine` the way the MCP handler does, so an explicit `refine=false` reaches the pipeline) and `image_recipes[]`:
 one row per ComfyUI image binding, default first then named families in name order, that names a checkpoint
 (`internal/fleetnode/image_recipe.go`, from `mediacap.ImageRecipe`). A row is `{name, default, digest, engine, graph,
-files:[{role, name, bytes}], steps, cfg, sampler, scheduler, schedule, shift, lora_strength, preset, license, commercial_use,
-explicit}`; `bytes` is the size on this node's disk and `-1` for a file it lacks; `explicit` lists the sampling keys the binding
+files:[{role, name, bytes, fingerprint}], steps, cfg, sampler, scheduler, schedule, shift, lora_strength, preset, license,
+commercial_use, explicit}`; `bytes` is the size on this node's disk and `-1` for a file it lacks; `fingerprint` is the sampled
+content hash of the file (`internal/mediacap/fingerprint.go`: a sha256 of the size and 64 blocks of 1 MiB), or `"pending"` while the
+node is still reading it and `"unreadable"` when it cannot; **a row with any such file has an empty `digest`** (F59, ADR 0082
+Amendment 2); `explicit` lists the sampling keys the binding
 set (the rest are the builder's defaults, already resolved in the other fields and in `digest`, which does not include
-`explicit`). The rows are read from a memo of `mediaRoutesTTL` (60 s) so health stays cheap; a node without an image lane, an
+`explicit`). The rows are read from a memo of `mediaRoutesTTL` (60 s) so health stays cheap, **and health never waits for a hash**:
+a file not yet read starts one background read (one file at a time), and the memo is rebuilt as soon as a read settles, so a
+pending row becomes its digest on the next read; a node without an image lane, an
 sd.cpp family, and a binding that names no checkpoint publish no row, and a node that predates the keys publishes none, which a
 delegator reads as "cannot be matched", never "matches anything". An `image-gen` payload may carry `recipe_digest`; admission
 recomputes the digest of the family the payload names (the default binding when `family` is empty or its own name) from the
-files on disk at that moment, and a mismatch, a family this node does not serve, or a non-ComfyUI binding is answered **`412`**
+files on disk at that moment (waiting for a fingerprint it has not got), and a mismatch, a file it cannot fingerprint, a family
+this node does not serve, or a non-ComfyUI binding is answered **`412`**
 with the node's digest, before any job exists: not `409` (a job that failed here before) and not `503` (busy). A delegator that
 reads `/fleet/health` decodes the rows (`delegate.NodeView.ImageRecipes`, `RefineHonoured`) and, beside them, the singular
 lease block's class, reason and remaining seconds (`LeaseClass`, `LeaseReason`, `LeaseRemainingSec`) and, when it lists more than
@@ -1960,7 +1966,7 @@ died is still on the node under its job id; the next identical call from that ma
 - [`internal/fleetnode/media_ready.go`](../../internal/fleetnode/media_ready.go) — the cached mediacap reading behind
   the honest advertisement and `media_routes`
 - [`internal/fleetnode/image_recipe.go`](../../internal/fleetnode/image_recipe.go) — the `image_recipes` rows
-  (memoised), the `recipe_digest` check and the 412
+  (memoised, fingerprints read without waiting), the `recipe_digest` check and the 412
 - [`internal/mediaremote/`](../../internal/mediaremote/) — the client that places a media job on a node, and (ADR 0082) the
   overflow of a busy image lane
 - [`internal/fleetnode/jobs.go`](../../internal/fleetnode/jobs.go) — state machine, the admit-then-
