@@ -848,6 +848,16 @@ Versioning: [SemVer](https://semver.org/).
   the retry (a comment-only change). Nothing here was measured on a node: every figure
   above that is new (10 s, 20, 90, 2x, a minute) is chosen, and no real `gpu reserve`, ComfyUI, PAIR or llama-swap was touched.
 
+### Fixed — a re-placement after a refusal never reuses a fleet snapshot whose probe began at the refusal's own clock reading (F66)
+
+- **The bug.** A subtask refused for capacity is offered to another node from a fresh read of the fleet: the run's cached probe
+  (2 s) is reused only when it was taken after the refusal, so a node the run's own siblings had just filled is not picked again.
+  The comparison was "at or after". On a clock that ticks coarsely (Windows: a millisecond or so) a probe that ended before the
+  refusal reads the same as the refusal when both fall in one tick, and the stale picture was reused. It is now "strictly after":
+  a probe that began at the refusal's own reading is read again, one more probe in a rare tie. `TestRunSpreadReplacementReprobesTheFleet`
+  failed 46 and 50 times in 400 on a Windows PC and never in 800 on Linux; `TestAProbeMemoThatBeganAtTheInstantOfTheRefusalIsNotReused`
+  pins the boundary on the readings themselves.
+
 ## [0.180.0] - 2026-10-10 - a busy image call waits for the first matching lane anywhere in the cluster, graphs overflow to a node that holds their files, and a live render keeps its lease
 
 ### Fixed — the ticket queue was off on any machine whose config sets no `state_dir`, which is the usual config (ADR 0083)

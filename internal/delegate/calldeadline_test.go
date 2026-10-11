@@ -164,10 +164,14 @@ func TestRunWithDeadlineDoesNotWaitForARunnerThatIgnoresItsContext(t *testing.T)
 		}
 		return localOK(), nil
 	}
-	results, sum, elapsed := runWithin(t, 6*time.Second, cfg, local,
-		[]core.AgentContract{{Goal: "fast one"}, {Goal: "slow one"}}, "local", nil, deadlineIn(300*time.Millisecond), unblock)
+	results, sum, elapsed := runWithin(t, 8*time.Second, cfg, local,
+		// One second, not 300 ms, for the reason TestRunWithDeadlineReturnsFinishedAndDefersUnfinished says: the
+		// instant "fast one" was still unscheduled at 300 ms on a loaded box and read as unfinished (register F66).
+		[]core.AgentContract{{Goal: "fast one"}, {Goal: "slow one"}}, "local", nil, deadlineIn(time.Second), unblock)
 
-	if elapsed > 2*time.Second {
+	// A call that waited for the deaf runner would run to runWithin's 8 s limit (the runner is released only
+	// by unblock): the deadline, its allowance and 3 s of slack is the bound that tells the two apart.
+	if elapsed > time.Second+callGraceMin+3*time.Second {
 		t.Fatalf("RunWith returned after %s: it waited for a runner that never looks at its context", elapsed)
 	}
 	if sum != (Summary{Succeeded: 1, Deferred: 1}) {

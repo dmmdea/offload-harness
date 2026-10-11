@@ -222,11 +222,7 @@ func TestRunOneOccupiedWithNoFleetTakesTheSeatOnceTheOccupantLeaves(t *testing.T
 		}
 		return passingLocal(&localCalls)(ctx, c, o)
 	}
-	go func() {
-		time.Sleep(200 * time.Millisecond)
-		occupied.Store(false)
-	}()
-	pr := occupiedRunner(t, cfg, local, nil, &occupied).runOne(context.Background(), 0, remoteContract())
+	pr := occupiedRunnerLeavingAfter(t, cfg, local, nil, &occupied, 3).runOne(context.Background(), 0, remoteContract())
 	if localCalls.Load() != 1 || pr.Result.Deferred {
 		t.Fatalf("local=%d err=%q result=%+v: once the occupant left, the waiting subtask must run local", localCalls.Load(), pr.Err, pr.Result)
 	}
@@ -277,11 +273,24 @@ func TestProbeLocalBusyAsksTheGuardWhenTheRosterIsUnreadable(t *testing.T) {
 // *occupied is true, against the given remotes.
 func occupiedRunner(t *testing.T, cfg config.Config, local LocalRunner, remotes []string, occupied *atomic.Bool) *runner {
 	t.Helper()
+	return occupiedRunnerLeavingAfter(t, cfg, local, remotes, occupied, 0)
+}
+
+// occupiedRunnerLeavingAfter is occupiedRunner whose occupant leaves once the runner has READ the seat as
+// occupied n times (0: it never leaves by itself). The occupant leaves on the runner's own progress, not on a
+// timer: a timer set against a placement that a loaded box delayed past it left the seat free before the
+// runner ever saw it occupied, and the run took the seat without waiting for anyone (register F66).
+func occupiedRunnerLeavingAfter(t *testing.T, cfg config.Config, local LocalRunner, remotes []string, occupied *atomic.Bool, n int64) *runner {
+	t.Helper()
+	var busyReads atomic.Int64
 	return &runner{
 		cfg: cfg, local: local, route: "auto", remotes: remotes,
 		intent: openIntentLedger(cfg),
 		localBusyProbe: func(context.Context) busyReading {
 			if occupied.Load() {
+				if reads := busyReads.Add(1); n > 0 && reads >= n {
+					occupied.Store(false) // the occupant leaves after this reading: the next one finds the seat free
+				}
 				return busyReading{busy: true, occupiedBy: "opencode-seat", note: "local seat not loaded; would evict"}
 			}
 			return busyReading{note: "local seat not loaded"}
@@ -325,11 +334,7 @@ func TestCapacityWaitTakesTheLocalSeatOnlyOnceTheOccupantLeaves(t *testing.T) {
 		}
 		return passingLocal(&localCalls)(ctx, c, o)
 	}
-	go func() {
-		time.Sleep(200 * time.Millisecond)
-		occupied.Store(false)
-	}()
-	pr := occupiedRunner(t, cfg, local, []string{url}, &occupied).runOne(context.Background(), 0, remoteContract())
+	pr := occupiedRunnerLeavingAfter(t, cfg, local, []string{url}, &occupied, 3).runOne(context.Background(), 0, remoteContract())
 	if localCalls.Load() != 1 || pr.Result.Deferred {
 		t.Fatalf("local=%d result=%+v: once the occupant left, the waiting subtask must run local", localCalls.Load(), pr.Result)
 	}
