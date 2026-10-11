@@ -288,12 +288,20 @@ Versioning: [SemVer](https://semver.org/).
   answer (the test passed with the mutant applied). It now removes the ticket's copy as well, after checking it is there; with the
   mutant applied it fails (the 8 GB node is sent the Wan graph its default floor keeps it off), with the code it passes. The two code
   comments that gave the caller's vanished temp file as the reason (`liveTicket.need`, `liveTicket.req`) name the copy.
-- **Mutations of this round: eleven, all killed.** Each applied once to the text of one file, proven applied (its hash changed and
+- **A contention test of this change no longer races itself.** `TestTwoProcessesNeverStackTwoGraphsOnOneNode` started eight goroutines
+  per queue, so one ticket was stepped by several scans at once, which no process does (a process has one scanner): one step could
+  write the ticket's file with the state it had before its claim while the other process judged that claim, and the node was sent two
+  graphs, 13 runs of 30 on one Windows box, with no product code involved. Each queue's scans now run one after another and the two
+  queues against each other: 0 failures in 60 runs, and a claim that ignores a live holder still fails it (10 of 10 runs). The image
+  ticket's equivalent, `TestTwoProcessesNeverDispatchTwoTicketsToOneSingleJobNode`, is built the same way, fails the same way on this
+  branch and on its base (13 to 17 of 30 runs on that box, 2 of 30 on a Linux one) and is fixed on main; it is not touched here.
+- **Mutations of this round: twelve, all killed.** Each applied once to the text of one file, proven applied (its hash changed and
   `git diff --stat` showed it), run, and restored byte for byte (the hash checked): the need re-read at every scan (it passed the old
   test), no removal of the envelope, removal also of a caller's `result_path`, removal only after a success, one envelope name for every
   call, the queue's files 0644 again, the lock file 0644, the directory 0755, a chmod of a directory that exists, the state root stamped
-  private, and a door that asks for `cfg.StateDir` itself instead of `storeFor` (against a scratch tree in which `storeFor` resolves the
-  lease's state root). The tests of the modes ran on Linux, where a mode means something; the others through the RAM guard.
+  private, a claim that ignores a live holder (against the reworked contention test), and a door that asks for `cfg.StateDir` itself
+  instead of `storeFor` (against a scratch tree in which `storeFor` resolves the lease's state root). The tests of the modes ran on
+  Linux, where a mode means something; the others through the RAM guard.
 - **Named limit (parked): a narrow re-key race.** The door keys a request from the graph file as it reads it (`admit`, `reqKey`), and
   `create` keys the ticket again from the bytes the plan holds (`payloadKey`). A caller that overwrites its file between those two reads
   gets a ticket for the bytes it holds, which is what runs (never another graph), but the attach and arrival-inheritance decisions made
