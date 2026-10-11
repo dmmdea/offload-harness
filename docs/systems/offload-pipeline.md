@@ -200,6 +200,26 @@ empty = OCR rides `vision_model`, byte-identical to before. The alias is resolve
 through, so the call, the cache key, the circuit breaker, and the ledger all name the model that
 actually ran; `offload_status`'s roster reports the effective `ocr` model, falling back to vision.
 
+**A cold vision seat is loaded before the request is sent** (F49). The vision seat unloads after its idle
+ttl, and llama-swap holds the first request open for the whole load, so the request's own timeout
+(`request_timeout_sec`, 120 s) used to have to cover the load AND the inference: a 32B vision seat's cold
+load plus a many-frame `video_describe` prefill outlasted it, and the first call after an idle gap failed
+with `Client.Timeout exceeded while awaiting headers` (`err_class: timeout`) while the load carried on
+behind it. `runVisionGen` now reads `/running` once after its GPU-lease gate; a seat that is not listed
+ready is warmed by the agent door's warm-up (`warmSeat`: one passthrough request that triggers the load,
+passes the GPU-lease fence like every deliberate load, and holds until the seat is up) for at most
+`vision_coldload_wait_sec` (default 180 s, **chosen, not measured as one figure**: first requests to a
+cold seat took 14 to 84 s, load plus their own inference: the first chat completion logged after each of the last
+25 cold starts, 21 of which completed; and one load outlasted a 120 s client timeout). The vision request is sent only afterwards, so it keeps its full
+timeout for inference. The bound limits how long the caller is held, not whether the call is made: when
+the load outlasts it the call goes on and the load carries on behind the request, and a defer after a
+wait names it (`(the vision seat was cold: waited Ns for its load before sending)`). A seat that is
+already ready costs the one read; a model routed off this box (`seat_endpoints`, a cascade lane) is not
+warmed here; `vision_coldload_wait_sec` 0 turns the wait off. `vqa`/`ocr`/`assess_image`,
+`video_describe` and each `video_watch` window all pass through `runVisionGen`, so all three get it. A
+cold call's worst case is now the wait plus `request_timeout_sec` (and `vision_gpu_wait_sec` before both, when a render holds the card first)
+(`TestVisionColdSeatIsWaitedForBeforeTheRequestIsSent`, `TestVisionColdLoadWaitIsBounded`).
+
 **Whole-video watching** (`offload_video_watch`, `runVideoWatch`) sweeps a video window by window
 (8 s at 1 fps by default), sends each window through the same per-call vision machinery as
 `video_describe`, then synthesizes the per-window notes on the text seat. One call is one call:

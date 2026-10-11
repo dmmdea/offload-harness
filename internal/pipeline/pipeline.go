@@ -175,6 +175,10 @@ type Pipeline struct {
 	visionGPUWait   time.Duration
 	visionGPUPoll   time.Duration
 	visionRetryWait time.Duration
+	// visionColdLoadWait (F49) bounds the wait for a COLD vision seat to load before the
+	// request is sent (cfg.VisionColdLoadWaitSec, floored at one admission poll). Zero turns
+	// the wait off. Resolved once in New; a field so tests can shrink it.
+	visionColdLoadWait time.Duration
 	// Passive fleet footprint recording (docs/FLEET-NODE.md): every GPU render
 	// carries a gpugen sampling hook keyed by this machine's bindings, so
 	// measured VRAM peaks accumulate during NORMAL harness use, not just fleet
@@ -298,6 +302,11 @@ func New(cfg config.Config, c *llamaclient.Client, ca *cache.Cache, l *ledger.Le
 	p.visionGPUWait = time.Duration(cfg.VisionGPUWaitSec) * time.Second
 	p.visionGPUPoll = 2 * time.Second
 	p.visionRetryWait = 3 * time.Second
+	if sec := cfg.VisionColdLoadWaitSec; sec > 0 {
+		// A wait shorter than warmSeat's one-poll floor would be read as "no budget left" and
+		// skip the warm-up silently; the floor makes a small setting mean the shortest real wait.
+		p.visionColdLoadWait = max(time.Duration(sec)*time.Second, admissionPoll)
+	}
 	p.thresholds = loadThresholds(cfg.ThresholdsPath)    // Phase 2
 	p.router = router.Load(cfg.RouterWeightsPath)        // Phase 5
 	p.overrides = loadOverrides(cfg.TierOverridesPath)   // Phase 4
@@ -1032,6 +1041,16 @@ func (p *Pipeline) runVisionGen(ctx context.Context, req core.Request, built tas
 		return core.Deferf(reason, "", meta)
 	}
 
+	// F49: a COLD vision seat is loaded BEFORE the request is sent, not inside it. The seat
+	// unloads after its idle ttl, and llama-swap holds the first request open for the whole
+	// load, so the request's timeout (request_timeout_sec) had to cover the load AND the
+	// inference: a 32B seat's cold load plus a many-frame prefill outlasted it and the call
+	// failed with "Client.Timeout exceeded while awaiting headers" while the load was still
+	// running. The bounded wait below (vision_coldload_wait_sec) is a separate passthrough
+	// request, so the vision request keeps its full timeout for inference. A seat already
+	// listed ready costs one /running read.
+	coldNote := p.waitForColdVisionSeat(ctx, meta.Model)
+
 	// LO-9 parity for the vision tier: stamp the call so a cold-swap timeout is
 	// exempt from breaker accounting (http_5xx / warm timeouts still count).
 	likelyColdSwap := p.noteTierCall(meta.Model)
@@ -1061,6 +1080,11 @@ func (p *Pipeline) runVisionGen(ctx context.Context, req core.Request, built tas
 		meta.LatencyMs = time.Since(start).Milliseconds()
 		meta.ErrClass = classifyErr(gerr)
 		reason := "vision model call failed: " + gerr.Error()
+		if coldNote != "" {
+			// Say that the seat was cold and how long the load was waited for, so a
+			// failure after a long cold load is not read as a failure of a warm call.
+			reason += coldNote
+		}
 		// A context-overflow defer that runVideoDescribe is about to retry at a
 		// smaller frame width is a STEP of that call, not the call: its row is
 		// an inner row of the row the final attempt writes.
@@ -5173,6 +5197,34 @@ func (p *Pipeline) noteTierCall(model string) bool {
 // beyond RequestTimeoutSec and is deterministic to unit-test.
 func breakerFailure(errClass string, likelyColdSwap bool) bool {
 	return errClass != "" && !(likelyColdSwap && errClass == "timeout")
+}
+
+// waitForColdVisionSeat (F49) loads a cold vision seat before the vision request is sent, and
+// returns the note a failed call should carry ("" when nothing was waited for).
+//
+// It reuses the agent door's warm-up (warmSeat): one passthrough request that makes llama-swap
+// load the seat and holds until the load is done, preceded by one /running read that makes a
+// seat already listed ready cost nothing more. The warm-up passes the GPU-lease fence like every
+// other deliberate load, so a render's card is not loaded onto. The wait is bounded by
+// vision_coldload_wait_sec; when the load outlasts it the call goes on regardless and the load
+// carries on behind the request (the router keeps loading after a client hangs up), so the bound
+// limits how long the caller is held, never whether the call is made.
+//
+// Only this box's own llama-swap is warmed: a model routed to another base (seat_endpoints, a
+// cascade lane) is that base's to load, and asking the local router for it would load a model
+// here that none of this box's calls use.
+func (p *Pipeline) waitForColdVisionSeat(ctx context.Context, model string) string {
+	if p.visionColdLoadWait <= 0 || model == "" || p.client == nil || strings.TrimSpace(p.cfg.Endpoint) == "" {
+		return ""
+	}
+	if p.client.BaseFor(model) != strings.TrimRight(p.cfg.Endpoint, "/") {
+		return ""
+	}
+	spent, _, attempted := warmSeat(ctx, p.cfg.Endpoint, model, p.visionColdLoadWait)
+	if !attempted {
+		return ""
+	}
+	return fmt.Sprintf(" (the vision seat was cold: waited %.0fs for its load before sending)", spent.Seconds())
 }
 
 // classifyErr buckets an infra error for the ledger + circuit breaker (Phase 3).

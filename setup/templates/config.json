@@ -43,6 +43,7 @@
   "gpu_wait_ms": 90000,
   "gpu_lock_path": "",
   "vision_gpu_wait_sec": 90,
+  "vision_coldload_wait_sec": 180,
   "memory_stack": ["embeddinggemma","bge-reranker-v2-m3"],
   "embed_model": "embeddinggemma",
   "temperature": 0,
