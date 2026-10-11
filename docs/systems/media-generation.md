@@ -664,6 +664,9 @@ estimate (the lease it needs then declares the whole set, or `--ram 0` explicitl
 no fit, another family or no flag keep the ordinary estimate, the whole set (33 GiB). Measured host growth in the benchmark was 2.3 GiB
 over ComfyUI's idle, inside the headroom the brake keeps anyway. The pipeline's media admission has no multicard door: every typed door leases one card, so the placement
 is reached through the render helper under an explicit `gpu reserve --devices`.
+A driver script that wraps the helper is not itself a recognised render helper, so a lease around the script declares the media class
+default (the largest bound family's figure) whatever the helper inside it does; the verb says so on a second line (F71), and the way out
+is `--ram 0` on that `gpu reserve`, because the card-only placement keeps its weights on the two cards.
 
 **Measured.** The recipe comes from a benchmark of 2026-10-11 on two RTX 5060 Ti 16 GB, the two non-display cards of a three-card box.
 At the film's geometry (720x1280x81) with 4 of the 20 steps it ran at 250 s per step on either expert, with a peak of 13.3 GiB on the

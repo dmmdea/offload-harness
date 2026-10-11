@@ -51,6 +51,41 @@ Versioning: [SemVer](https://semver.org/).
   the `=` spelling, the pack check under the tiled decode, `--wan-cards` over a lease, late refusals, an unknown display state and a
   sum-based host-RAM fit; each is fixed here. Docs: `docs/systems/media-generation.md`, "Card-only Wan".
 
+### Fixed — `gpu reserve` says why its declared figure is the media class default, and that `--ram` states the real one (F71)
+
+- **The defect (register F71).** A `gpu reserve` around a command the estimator does not recognise (a driver script that runs several
+  renders, a Python wrapper), around a recognised helper that runs its own `--graph`, or around a recognised helper whose weight files
+  cannot be sized, declares the media class default: the largest ComfyUI family the box binds, counted in full as if it streamed from RAM
+  (Qwen-Image 2512 on the reference box: 38.0 + 8.8 = 46.8 GiB). The declaring line said "class default" inside its parenthesis and nothing
+  else, so a caller whose weights sat on the cards (the card-only Wan placement above) could not tell that the figure was not theirs,
+  declared 46.8 GiB, and waited a queue cycle for host RAM it never used.
+- **The fix.** The declaring line is unchanged. When its figure is the class default and the operator gave no `--ram`, ONE more line
+  follows it with the reason (no command is wrapped, as in a `--detach` hold; the wrapped command is not a recognised render helper, the
+  helpers named from the table that recognises them; a recognised helper runs its own `--graph`; or a recognised helper's weight files
+  could not be sized) and the way out: `--ram <GiB>` states the real figure, `--ram 0` when the weights sit on the cards. No line when the
+  operator gave `--ram` (0 included), when the figure was estimated from the helper's own files, for a text lease, or on a box whose class
+  default is 0. The line never contains the word the declaring line is grepped by, and no figure, lease record or queue behaviour changes.
+  `internal/hostneed` gains `RenderHelpers` and `RenderCall.RunsOwnGraph`, the two answers the line reads (`Estimate` asks the same
+  function about `--graph`, so the line and the estimate cannot disagree).
+- **Tests.** `gpu_hostram_hint_test.go` (seven: the four reasons, the cases that print nothing more, the invariant that the hint changes
+  no figure, and one through `runGPUReserve` on stderr) and `internal/hostneed/helpers_test.go` (two), written first. Red before: the five
+  that pin the line failed on the tree without the fix, each with "want the declaring line and exactly one line of why, got 1 line(s)"; the
+  other two hold before the change and guard it. Mutation-checked: fourteen changes (ten to the line and its guards, four to the two
+  hostneed answers), each reverted in turn fails a test it names. Docs: `docs/systems/gpu-lease.md` ("Host RAM"),
+  `docs/systems/media-generation.md` ("Card-only Wan") and `render/README.md`.
+
+### Added — the single placement of the Wan graph is pinned to the graph the builder made before placements existed (no product change)
+
+- **Why.** The merged `wan-multicard.test.mjs` compares `placement: "single"` with the default placement, which shows the two agree with
+  each other and not with what was built before: with the single graph's stock `VAELoader` replaced by the multi-GPU loader, every test of
+  the four files that cover the builder and the scratch scan still passed. A differential run of the base builder against the merged one over
+  103 argument sets (309 builder comparisons, 24 decode-chooser cases and the exported constants) found no difference.
+- **The pin.** `render/wan-single-golden.test.mjs` builds nine graphs (GGUF and fp8 experts; the auto, native and forced DisTorch2 loaders;
+  tiled, plain and auto decode; fast; an upscale; a short clip with a negative prompt, steps, cfg, boundary and shift) with no placement
+  argument, with `placement: "single"` and with a `residentGb` the single placement must ignore, and requires the graph held in
+  `render/testdata/wan22-single-graphs.json` (made by the builder as it stood at the 0.181.0 release tip) and no warning. The VAE and
+  text-encoder loaders swapped for their multi-GPU twins in the single graph each fail all nine of its graphs (the VAE one passed the old tests).
+
 ### Fixed — a render on one card no longer unloads the seats placed on the others, and a seat that comes back onto a leased card leaves before the next render (F15)
 
 - **The defect (register F15, from the 0.176.0 notes).** The render helper cleared "every non-keep-set model whatever card it sits

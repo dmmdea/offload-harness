@@ -94,7 +94,7 @@ func wantHint(t *testing.T, name string, lines []string, why string, extra ...st
 	}
 }
 
-// THE FILM SESSION'S CASE. A media lease around a script of its own: the line after the declaring one names the
+// THE DRIVER-SCRIPT CASE. A media lease around a script of its own: the line after the declaring one names the
 // helpers that WOULD have been sized, and says --ram states the figure.
 func TestReserveNamesTheUnrecognisedWrapperWhenItDeclaresTheClassDefault(t *testing.T) {
 	cfg := classDefaultBox(t)

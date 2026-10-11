@@ -1307,6 +1307,20 @@ binary ignores it, and a record without it declares nothing). Where the number c
 | the **media class default** | for a media lease with no `--ram` and no recognised call: the largest estimate over the render families **this box binds** (`imagegen_*`, `gen_edit_*`, `videogen_*`, named families; a binding on the sd.cpp engine is not counted, on whichever route it is, a video family included), so a 32 GiB node is not held to a 128 GiB node's numbers; 0 when nothing is bound. It is never clamped to fit the box: a default that cannot be admitted is refused with the reason and `--ram` as the way out. |
 | a text lease | 0: the harness cannot size an arbitrary wrapped command, so a text reservation declares nothing unless `--ram` says (the agent seat's own reload is sized where the harness does it, below). |
 
+**When the figure is the class default, the verb says why** (F71, `classDefaultHint`;
+`TestReserveNamesTheUnrecognisedWrapperWhenItDeclaresTheClassDefault`, `TestReserveNamesTheGraphWhenARecognisedHelperRunsOne`,
+`TestReserveNamesTheUnsizedHelperWhenItsFilesCannotBeSized`, `TestTheHintChangesNoFigure`). The class default is a figure for a call the
+lease could not read, and the declaring line (`gpu reserve: declaring <N> GiB host RAM (class default: ...)`) does not tell a caller whose
+weights sit on the cards that it is theirs to correct: a driver script around card-only renders declared 46.8 GiB for weights that sat on
+two cards and waited a queue cycle for host RAM it never used. So when the declared figure is the class default and `--ram` was not given,
+ONE more line follows the declaring line and names how the call reached the default: nothing is wrapped (a `--detach` hold); the wrapped
+command is not a recognised render helper (a driver script, a Python wrapper, `comfy-run-graph.mjs`; the helpers that are recognised are
+named, from the same table that recognises them); a recognised helper runs its own `--graph`; or a recognised helper's weight files could
+not be sized. The line ends with the way out: `--ram <GiB>` states the real figure, and `--ram 0` is the answer when the weights sit on the
+cards. It is printed for none of: an explicit `--ram` (0 or any figure), a figure estimated from the helper's own files, a text lease that
+wraps no render helper, or a box whose class default is 0. The declaring line stays one line (the new one never contains the word a script
+greps it by), and no figure, lease record or queue behaviour changes.
+
 **Why the full file size and not the overflow.** ComfyUI's dynamic VRAM stages the whole file in host memory ("Model Krea2
 prepared for dynamic VRAM loading. 24449MB Staged", the encoder "8463MB Staged" in the incident lane's own console log),
 and its RAM-pressure cache keeps it there between prompts. The same principle says a set that fits the card streams nothing
