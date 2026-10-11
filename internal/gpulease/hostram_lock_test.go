@@ -64,6 +64,26 @@ func TestTheHostReadingsAreTakenBeforeTheEpochLockAndOnlyComparedInside(t *testi
 	}
 }
 
+// A grant that declares nothing is admitted without reading the host at all (the rule's own word for a need of 0), and the
+// readings taken early do not change that.
+func TestAGrantThatDeclaresNothingReadsNothingFromTheHost(t *testing.T) {
+	m, f := ramScoped(t, 40)
+	holder, err := m.TryAcquire(ClassMedia, Options{Reason: "krea2", TTL: time.Hour, Devices: []string{card0}, HostRAMGiB: 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = holder.Release() }()
+	before := f.reads.Load()
+	l, err := m.TryAcquire(ClassMedia, Options{Reason: "upscale", TTL: time.Hour, Devices: []string{card1}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = l.Release() }()
+	if got := f.reads.Load() - before; got != 0 {
+		t.Errorf("a need of 0 reads no host memory, read %d time(s)", got)
+	}
+}
+
 // The decision is still made under the lock, on the leases live then: a grant that lands between this grant's reading and its
 // turn is counted (its record is read inside the lock), so two grants that read the same headroom cannot both take it.
 func TestAGrantThatLandsAfterTheReadingIsStillCountedInsideTheLock(t *testing.T) {

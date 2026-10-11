@@ -94,6 +94,23 @@ func TestAnOutlierAgesOutOfTheWindow(t *testing.T) {
 	}
 }
 
+// Runs that left a full window are forgotten, not stood in for by the all-time maximum (that is for the runs a legacy store never
+// held): twenty-four ascending runs leave the last twenty, and their 90th percentile is the 18th of them, not the 19th a
+// twenty-first, stood-in sample would make it.
+func TestRunsThatLeftAFullWindowAreForgottenNotStoodInFor(t *testing.T) {
+	f := OpenFootprints(filepath.Join(t.TempDir(), "footprints.json"))
+	for i := 1; i <= 24; i++ {
+		f.RecordHost("krea2", "bf16", "image-gen", float64(i)+10, float64(i))
+	}
+	got, _ := f.HostPeak("krea2", "bf16", "image-gen")
+	if got.Window != 20 || got.ResidentGiB != 22 || got.PrivateGiB != 32 {
+		t.Errorf("window 5..24, nearest-rank 90th percentile = the 18th = 22 (private 32): %+v", got)
+	}
+	if got.MaxResidentGiB != 24 || got.Runs != 24 {
+		t.Errorf("the all-time figures are kept for the wire: %+v", got)
+	}
+}
+
 // The window survives a restart, and a process that opened the store before another wrote to it does not drop that
 // process's runs when it records its own (the merge comes before the fold).
 func TestTheWindowIsPersistedAndMergedBeforeARunIsFolded(t *testing.T) {
