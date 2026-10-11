@@ -8,7 +8,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -16,6 +15,7 @@ import (
 
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
+	"github.com/dmmdea/offload-harness/internal/fakeexe"
 	"github.com/dmmdea/offload-harness/internal/sttclient"
 )
 
@@ -40,20 +40,7 @@ const fakeOpus = "OggS-fake-opus-bytes"
 // fakeFFmpeg returns an "ffmpeg" (the test binary) whose conversion writes fakeOpus, or fails.
 func fakeFFmpeg(t *testing.T, fail bool) string {
 	t.Helper()
-	ext := ""
-	if runtime.GOOS == "windows" {
-		ext = ".exe"
-	}
-	dst := filepath.Join(t.TempDir(), "ffmpeg"+ext)
-	if err := os.Link(os.Args[0], dst); err != nil {
-		b, rerr := os.ReadFile(os.Args[0])
-		if rerr != nil {
-			t.Fatal(rerr)
-		}
-		if werr := os.WriteFile(dst, b, 0o755); werr != nil {
-			t.Fatal(werr)
-		}
-	}
+	dst := fakeexe.Place(t, "ffmpeg")
 	t.Setenv("LO_FAKE_OUT_TEXT", fakeOpus)
 	if fail {
 		t.Setenv("LO_FAKE_FAIL", "1")

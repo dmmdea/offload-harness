@@ -6,6 +6,10 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Tests on Windows: the fake `ffmpeg` of the `audioio`, `fleetnode`, `pipeline` and `sttremote` tests was a hard link to the running test binary, which some Windows hosts will not unlink ("Access is denied" in the `TempDir` cleanup, 51 cleanup failures on one host); it is now a copy installed by the new `internal/fakeexe` test helper, which removes its own directory and starts the stand-in once so its slow first start is outside a test's time budget (test-only, no product code changed).
+
 ## [0.180.0] - 2026-10-10 - a busy image call waits for the first matching lane anywhere in the cluster, graphs overflow to a node that holds their files, and a live render keeps its lease
 
 ### Fixed — the ticket queue was off on any machine whose config sets no `state_dir`, which is the usual config (ADR 0083)

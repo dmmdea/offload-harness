@@ -15,20 +15,20 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/dmmdea/offload-harness/internal/core"
+	"github.com/dmmdea/offload-harness/internal/fakeexe"
 	"github.com/dmmdea/offload-harness/internal/gpulease"
 	"github.com/dmmdea/offload-harness/internal/ledger"
 	"github.com/dmmdea/offload-harness/internal/llamaclient"
 )
 
 // The test binary doubles as a fake ffmpeg/ffprobe: when it is started under a
-// name whose stem is "ffmpeg" or "ffprobe" (fakeFFmpeg links/copies it so), it
+// name whose stem is "ffmpeg" or "ffprobe" (fakeFFmpeg installs it so), it
 // answers like the tool instead of running tests. That keeps the window loop
 // testable with no real ffmpeg, so the test runs wherever the suite does.
 func init() {
@@ -61,29 +61,15 @@ var fakePNG = []byte{
 // test binary) and a dummy video file, with the probe reporting seconds.
 func fakeFFmpeg(t *testing.T, seconds string) (ffmpeg, video string) {
 	t.Helper()
-	dir := t.TempDir()
-	ext := ""
-	if runtime.GOOS == "windows" {
-		ext = ".exe"
-	}
-	for _, name := range []string{"ffmpeg", "ffprobe"} {
-		dst := filepath.Join(dir, name+ext)
-		if err := os.Link(os.Args[0], dst); err != nil {
-			b, rerr := os.ReadFile(os.Args[0])
-			if rerr != nil {
-				t.Fatal(rerr)
-			}
-			if werr := os.WriteFile(dst, b, 0o755); werr != nil {
-				t.Fatal(werr)
-			}
-		}
-	}
+	dir := fakeexe.Dir(t)
+	ffmpeg = fakeexe.Install(t, dir, "ffmpeg")
+	fakeexe.Install(t, dir, "ffprobe")
 	t.Setenv("LO_FAKE_VIDEO_SECONDS", seconds)
 	video = filepath.Join(dir, "clip.mp4")
 	if err := os.WriteFile(video, []byte("not a real video"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	return filepath.Join(dir, "ffmpeg"+ext), video
+	return ffmpeg, video
 }
 
 // watchPipeline builds a Pipeline whose ledger is the returned path, over srv.
