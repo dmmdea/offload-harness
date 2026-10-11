@@ -599,7 +599,8 @@ func runGPUReserve(args []string) error {
 	// The warm is heartbeat for its length; the lease outlives the command by
 	// exactly the warm. A command ended on SIGTERM is the exception (C02): a console close, a logoff or a
 	// shutdown gives the process about five seconds, and a seat reload is minutes, so the lease is released
-	// inside the grace and the warm stays owed (the marker is the debt; the next holder to release, `gpu
+	// without waiting for the reload (the ComfyUI instances kept under it are still stopped first, a step
+	// bounded at 60 s that is usually seconds) and the warm stays owed (the marker is the debt; the next holder to release, `gpu
 	// release --warm-seat` or the seat's next request pays it).
 	endedOnTerm := false
 	finish := func() {

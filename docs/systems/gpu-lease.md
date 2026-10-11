@@ -1607,7 +1607,8 @@ stack. The wrapper form warms the seat back (`GET /upstream/<model>/health`) BEF
 contract placed here again finds a loaded seat, unless its command was ended on `SIGTERM` (C02): that is how a console
 close, a logoff and a shutdown reach a Go program on Windows, and the OS ends the process about five seconds later, so
 a reload of minutes inside that grace would stand in the warm-back with the lease held while the machine goes down. The
-lease is released at once, the wrapper says the warm-back was skipped, and the warm stays owed (the marker below;
+lease is released right after the ComfyUI instances kept under it are stopped (a step bounded at 60 s, usually
+seconds), the wrapper says the warm-back was skipped, and the warm stays owed (the marker below;
 `gpu release --warm-seat` or the seat's next request pays it). A Ctrl-C has no such deadline and still warms. The detach
 form's counterpart is `gpu release --warm-seat`. That request
 is the load, so a llama-swap reload or restart can interrupt it: the warm re-sends it for up to 60 s (see "A warm-back

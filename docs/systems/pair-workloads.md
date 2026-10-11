@@ -659,9 +659,9 @@ side can know the producer died, so the harness retires its own orphans:
   `SIGTERM`, and ends the process only after its handler has had its grace, so the wrapper kills its command,
   closes its card with "terminated: its console was closed, or the session is ending or the machine is shutting
   down" and releases its lease instead of dying silent (the 01:09:59 incident: five card-scoped leases and two
-  queued ones, exit `0xC000013A`). With `--drain --unload-seat` it releases the lease **before** anything slow and
-  skips the seat's warm-back (a reload of minutes inside a grace of seconds, with a model loading while the machine
-  goes down): the warm stays owed in the seat marker, and `gpu release --warm-seat` or the seat's next request pays
+  queued ones, exit `0xC000013A`). With `--drain --unload-seat` it skips the seat's warm-back (a reload of
+  minutes inside a grace of seconds, with a model loading while the machine goes down) and releases the lease right
+  after stopping the ComfyUI instances kept under it (a step bounded at 60 s, usually seconds): the warm stays owed in the seat marker, and `gpu release --warm-seat` or the seat's next request pays
   it. A Ctrl-C has no deadline and still warms the seat back first. A `taskkill /F` or a `SIGKILL` gives the process no signal; nothing in-process
   can answer it and the sweep's text above covers it. Verified here: the signal set, the text, and (through a seam that delivers the signal to a wrapper running in a
   child process) that a SIGTERM releases the lease with no warm-back while a Ctrl-C still warms. Not verified:

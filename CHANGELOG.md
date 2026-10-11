@@ -162,9 +162,9 @@ Versioning: [SemVer](https://semver.org/).
   register holds a pid and a start time. `gpu reserve -- <command>` now also asks for `SIGTERM`: Go on Windows delivers a console
   close, a logoff and a shutdown as `SIGTERM` and ends the process only after its handler has had its grace, so the wrapper kills
   its command, closes its card ("terminated: its console was closed, or the session is ending or the machine is shutting down")
-  and releases its lease instead of dying silent. With `--drain --unload-seat` it releases the lease **before** the seat's
-  warm-back and skips the warm-back (a reload of minutes inside a grace of seconds, with a model loading while the machine goes
-  down): the warm stays owed in the seat marker, and `gpu release --warm-seat` or the seat's next request pays it. A Ctrl-C has
+  and releases its lease instead of dying silent. With `--drain --unload-seat` it skips the seat's warm-back (a reload of
+  minutes inside a grace of seconds, with a model loading while the machine goes down) and releases the lease right after
+  stopping the ComfyUI instances kept under it (a step bounded at 60 s, usually seconds): the warm stays owed in the seat marker, and `gpu release --warm-seat` or the seat's next request pays it. A Ctrl-C has
   no such deadline and still warms the seat back first. A `taskkill /F` gives no signal; the sweep's text covers it. The cause of
   the 01:09:59 incident itself was never established.
 - **C03, a recovered delegation.** A job a node finished and a recovery pass filed under `delegate-recovered/` had a card that
