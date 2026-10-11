@@ -1,0 +1,152 @@
+// multicard-recipes.mjs — the card-only recipes of the image and edit routes, and the loader nodes they put in a graph.
+//
+// WHAT A RECIPE IS. A (route, family, quant) that was run, or is reasoned from components that were run, on TWO cards with no
+// host RAM: which loader holds which weight on which card, the DiT's resident share on the compute card, the loader of the
+// LoRA, and the per-card VRAM peak a call is held to (render/multicard-recipes.json, which holds the figures and the evidence
+// for each; internal/hostneed keeps a copy of the figures that decide a host-RAM declaration, and a Go test pins the copy).
+//   cuda:0 = the STORAGE card: the text encoder, the VAE and the donor blocks of the DiT;
+//   cuda:1 = the COMPUTE card: the DiT's resident share and the sampler's activations.
+// The same two names the Wan placement uses (wf-wan22-i2v.mjs), so one launch (wan-multicard.mjs multicardLaunch) serves both.
+//
+// WHAT IT REFUSES, by name and before a lease is taken: a family or quant with no recipe (2512 bf16 fits no card, krea2 has its
+// own pool flags, SDXL and HiDream fit one card); an int8 TEXT ENCODER (PSNR 28.65 dB against the 30 dB gate in the benchmark;
+// the int8_convrot DiT is a different file and a recipe of its own); a text encoder other than the one the recipe was built for.
+// An fp8 text encoder is never placed on cuda:1 (two measured runs aborted the process there), so a recipe pins it whole to
+// cuda:0; only a bf16 encoder too big for one card is split, and a test walks every recipe to keep it that way.
+//
+// Classes are the ones ComfyUI-MultiGPU's own NODE_CLASS_MAPPINGS registers (read from the installed pack's __init__.py): the
+// plain UNETLoaderMultiGPU / CLIPLoaderMultiGPU / VAELoaderMultiGPU (input `device`), the UNETLoaderDisTorch2MultiGPU and
+// CLIPLoaderDisTorch2MultiGPU (`compute_device` / `device`, `virtual_vram_gb`, `donor_device`, `expert_mode_allocations`,
+// `eject_models`) and, when ComfyUI-GGUF is installed, UnetLoaderGGUFDisTorch2MultiGPU. The UNET DisTorch2 loader ejects the
+// loaded models unless told not to, so `eject_models: false` is always spelled out.
+// Dependency-free.
+import { readFileSync } from "node:fs";
+
+export const MULTICARD_STORAGE = "cuda:0";
+export const MULTICARD_COMPUTE = "cuda:1";
+
+/** The placements of the image and edit builders: single is today's graph (the default), multicard is the card-only one. */
+export const PLACEMENTS = Object.freeze(["single", "multicard"]);
+export const PLACEMENT_DEFAULT = "single";
+
+function deepFreeze(o) {
+  if (o && typeof o === "object" && !Object.isFrozen(o)) {
+    Object.freeze(o);
+    for (const v of Object.values(o)) deepFreeze(v);
+  }
+  return o;
+}
+
+/** The recipes, frozen: read once from multicard-recipes.json. */
+export const RECIPES = deepFreeze(JSON.parse(readFileSync(new URL("./multicard-recipes.json", import.meta.url), "utf8")).rows);
+
+/** A refusal to place a call, with the reason; the runners print it and exit before anything starts. */
+export class RecipeRefusal extends Error {}
+
+/** The text-encoder files that are never placed: the int8 encoder failed the 30 dB gate on the one prompt it was measured on. */
+const BANNED_TEXT_ENCODER = /int8|int4|nf4/i;
+
+const FAMILY_HINTS = Object.freeze({
+  "qwen-image": "2512 bf16 fits no card (a 38 GiB DiT); bind the Q5_1 GGUF (14.3 GiB), which has a recipe",
+  krea2: "its 24.5 GiB DiT is split by the pool flags (--pool-vvram/--pool-compute/--pool-donor), which are a different placement and stay as they are",
+  sdxl: "it fits one card, so there is nothing to place across two",
+  "hidream-o1": "it fits one card pair only with host RAM and was never measured card-only",
+  "hidream-o1-dev": "it fits one card pair only with host RAM and was never measured card-only",
+  "qwen-image-2.1": "only the int8_convrot and bf16 safetensors DiTs have a recipe",
+});
+
+/**
+ * findRecipe: the recipe for a call, or a RecipeRefusal that says why there is none. route is "image" or "edit"; family is the
+ * graph family ("" is the generic SDXL graph on the image route and the 2511 graph on the edit route); unet is the DiT file the
+ * call names; clip is the text encoder it names (the recipe's default stands in when the builder has one and the call names none).
+ */
+export function findRecipe({ route, family, unet, clip } = {}) {
+  const fam = String(family || "").trim() || (route === "edit" ? "qwen-image-edit-2511" : "sdxl");
+  const rows = RECIPES.filter((r) => r.route === route && r.family === fam);
+  const noRecipe = (why) => new RecipeRefusal(`no measured card-only recipe for ${fam}${route === "edit" ? " edit" : ""}${unet ? ` (${unet})` : ""}: ${why}`);
+  if (rows.length === 0) {
+    throw noRecipe(FAMILY_HINTS[fam] || "the card-only placement has recipes for qwen-image-2.1, qwen-image (the Q5_1 GGUF) and the 2511 edit only");
+  }
+  const unetName = String(unet || "").trim();
+  if (!unetName) throw new RecipeRefusal(`the card-only placement needs the DiT file to pick its recipe for ${fam}${route === "edit" ? " edit" : ""}: name it (--ckpt, or --unet on the edit route)`);
+  const clipName = String(clip || "").trim();
+  if (clipName && BANNED_TEXT_ENCODER.test(clipName)) {
+    throw new RecipeRefusal(`the text encoder ${clipName} is int8: an int8 text encoder moved the render off the bf16 one (PSNR 28.65 dB against the 30 dB gate), so the card-only placement never uses one; name the bf16 or fp8 encoder the recipe was built for`);
+  }
+  const row = rows.find((r) => new RegExp(r.unetMatch, "i").test(unetName));
+  if (!row) {
+    const known = rows.map((r) => r.quant).join(", ");
+    throw noRecipe(`the recipes of this family are ${known}; ${FAMILY_HINTS[fam] || "name one of those files"}`);
+  }
+  const want = clipName || row.defaultClip || "";
+  if (!want) throw new RecipeRefusal(`the card-only placement needs the text encoder file to pick its recipe for ${row.id}: name it (--clip)`);
+  if (!new RegExp(row.clipMatch, "i").test(want)) {
+    throw new RecipeRefusal(`the text encoder ${want} is not the one the ${row.id} recipe was built for (a ${row.clipMatch} file): the placement of any other was never measured`);
+  }
+  return row;
+}
+
+/**
+ * allocationString: DisTorch2's expert-bytes allocation that keeps `residentGb` GiB of the DiT on the compute card and the remainder
+ * on the storage card. The unit letter is required (`cuda:0,*` alone is rejected), so the share is always written with `gb`.
+ */
+export function allocationString(residentGb) {
+  if (typeof residentGb !== "number" || !Number.isFinite(residentGb) || residentGb < 0) {
+    throw new Error(`allocationString: residentGb must be a number of GiB, 0 or more, got ${JSON.stringify(residentGb)}`);
+  }
+  return `${MULTICARD_COMPUTE},${Number(residentGb.toFixed(2))}gb;${MULTICARD_STORAGE},*`;
+}
+
+/**
+ * recipeResident: the GiB of the DiT kept on the compute card: the recipe's own, or the caller's override (--resident-gb). A recipe
+ * that puts the whole DiT on the compute card has no share to set, and an override for it is refused rather than ignored.
+ */
+export function recipeResident(row, override) {
+  if (row.unet.loader === "plain") {
+    if (override !== undefined && override !== null) throw new Error(`--resident-gb means nothing to the ${row.id} recipe: it puts the whole DiT on the compute card`);
+    return null;
+  }
+  const v = override === undefined || override === null ? row.unet.residentGb : override;
+  if (typeof v !== "number" || !Number.isFinite(v) || v < 0 || v > 64) {
+    throw new Error(`the DiT's resident share on the compute card must be a number of GiB from 0 to 64, got ${JSON.stringify(v)}`);
+  }
+  return v;
+}
+
+/**
+ * multicardLoaders: the three loader nodes of a graph ("1" DiT, "2" text encoder, "3" VAE, the ids the single-card builders use), for a
+ * recipe. unet/clip/vae are the file names the call binds; residentGb overrides the recipe's share of the DiT on the compute card.
+ */
+export function multicardLoaders(row, { unet, clip, vae, residentGb } = {}) {
+  const share = recipeResident(row, residentGb);
+  let unetNode;
+  switch (row.unet.loader) {
+    case "plain":
+      unetNode = { class_type: "UNETLoaderMultiGPU", inputs: { unet_name: unet, weight_dtype: "default", device: MULTICARD_COMPUTE } };
+      break;
+    case "distorch2":
+      unetNode = { class_type: "UNETLoaderDisTorch2MultiGPU", inputs: { unet_name: unet, weight_dtype: "default", compute_device: MULTICARD_COMPUTE, virtual_vram_gb: 0, donor_device: "cpu", expert_mode_allocations: allocationString(share), eject_models: false } };
+      break;
+    case "gguf-distorch2":
+      unetNode = { class_type: "UnetLoaderGGUFDisTorch2MultiGPU", inputs: { unet_name: unet, compute_device: MULTICARD_COMPUTE, virtual_vram_gb: 0, donor_device: "cpu", expert_mode_allocations: allocationString(share), eject_models: false } };
+      break;
+    default:
+      throw new Error(`multicardLoaders: recipe ${row.id} names the DiT loader ${JSON.stringify(row.unet.loader)}, which is none of plain|distorch2|gguf-distorch2`);
+  }
+  let clipNode;
+  switch (row.clip.loader) {
+    case "plain":
+      clipNode = { class_type: "CLIPLoaderMultiGPU", inputs: { clip_name: clip, type: "qwen_image", device: MULTICARD_STORAGE } };
+      break;
+    case "distorch2":
+      clipNode = { class_type: "CLIPLoaderDisTorch2MultiGPU", inputs: { clip_name: clip, type: "qwen_image", device: MULTICARD_STORAGE, virtual_vram_gb: 0, donor_device: "cpu", expert_mode_allocations: allocationString(row.clip.residentGb), eject_models: false } };
+      break;
+    default:
+      throw new Error(`multicardLoaders: recipe ${row.id} names the text-encoder loader ${JSON.stringify(row.clip.loader)}, which is none of plain|distorch2`);
+  }
+  return {
+    "1": unetNode,
+    "2": clipNode,
+    "3": { class_type: "VAELoaderMultiGPU", inputs: { vae_name: vae, device: MULTICARD_STORAGE } },
+  };
+}
