@@ -695,7 +695,11 @@ func TestRunAgentTaskSilentSeatIsAStallNotABudgetDefer(t *testing.T) {
 	defer srv.Close()
 
 	contract := testContract()
-	res := agentTestPipeline(t, srv.URL).Run(context.Background(), agentTestRequest(t, contract))
+	// The seat has a measured, very fast prefill (as the cold-load tests give theirs): an UNMEASURED seat is
+	// sized at the assumed 100 tok/s over a prompt that now counts the whole tool-spec block (register F10), which
+	// is tens of seconds of legitimate silence and not what this fixture asks about. A silent seat that was
+	// measured fast is a stall in a fraction of a second.
+	res := coldLoadTestPipeline(t, srv.URL).Run(context.Background(), agentTestRequest(t, contract))
 	wire := decodeWire(t, res)
 
 	if !wire.Deferred || !strings.HasPrefix(wire.Reason, "stalled: no progress for ") {

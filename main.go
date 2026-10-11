@@ -45,7 +45,6 @@ import (
 	"github.com/dmmdea/offload-harness/internal/grounding"
 	"github.com/dmmdea/offload-harness/internal/health"
 	"github.com/dmmdea/offload-harness/internal/hostsample"
-	"github.com/dmmdea/offload-harness/internal/imagegen"
 	"github.com/dmmdea/offload-harness/internal/judge"
 	"github.com/dmmdea/offload-harness/internal/knn"
 	"github.com/dmmdea/offload-harness/internal/ledger"
@@ -304,8 +303,12 @@ Usage:
   local-offload assess-image <image-path> [--brief "..."] [--json]
   local-offload generate-audio <out> "<text>" [--kind voice|music] [--voice generalist|finetuned|endpoint] [--tts-voice NAME] [--clone ref.wav] [--lang es] [--seconds N] [--seed N]
   local-offload generate-image "<prompt>" [--negative "..."] [--width N] [--height N] [--steps N] [--seed N] [--out path] [--refine=false] [--family NAME] [--transparent]
-  local-offload generate-image --batch jobs.jsonl    N prompts through ONE warm ComfyUI session (checkpoint loads once)
-                                         exit 0 every job rendered, 4 the batch ran every job and some failed (the JSON names them), 1 it stopped or errored
+  local-offload generate-image --batch jobs.jsonl [--family F] [--route auto|local|remote] [--results r.jsonl] [--resume] [--jobs N]
+                                         N prompts: ONE warm ComfyUI session when this machine's lane is free, else each job a ticket on the
+                                         first matching lane that frees (fleet nodes included); a verdict per job; --resume re-renders only
+                                         what is missing or does not prove itself; rows go to r.jsonl.partial and over r.jsonl when the batch
+                                         ends. exit 0 every job has its picture (or a busy lane deferred the whole warm batch: rows queued),
+                                         4 some job failed (the JSON and the results file name them), 1 it stopped, errored or was interrupted
   local-offload inpaint-image <image> --mask m.png --prompt "..."   re-render ONLY the masked region (white=repaint)
   local-offload upscale-image <image> [--scale F] [--width N --height N] [--method lanczos] [--model name] [--out path]   ESRGAN enlarge (this machine's upscale_model)
   local-offload generate-video <out.mp4> <still.png> "<prompt>" [--model hunyuan|wan] [--frames 49] [--seed N] [--reserve-vram F] [--fast] [--upscale]
@@ -900,14 +903,17 @@ func runGenerateImage(args []string) error {
 	compactFlag := fs.Bool("compact", false, "compact (minified) JSON output")
 	family := fs.String("family", "", "named image family to render with (ADR 0058; offload_status media.image_families / doctor list them); default = this machine's default binding")
 	transparent := fs.Bool("transparent", false, "keep an alpha channel (RGBA PNG; qwen-image-2.1 families only — any other binding defers)")
-	batchFile := fs.String("batch", "", "render a JSONL batch of jobs through ONE warm ComfyUI session (one line per job: {\"prompt\":...,\"out\"?,\"negative\"?,\"width\"?,\"height\"?,\"steps\"?,\"seed\"?,\"refine\"?})")
+	batchFile := fs.String("batch", "", "render a JSONL batch of jobs (one line per job: {\"prompt\":...,\"out\"?,\"negative\"?,\"width\"?,\"height\"?,\"steps\"?,\"seed\"?,\"refine\"?}): through ONE warm ComfyUI session when this machine's lane is free, else each job a ticket on the first matching lane that frees (ADR 0083)")
+	resultsFlag := fs.String("results", "", "with --batch: write one JSON row per job to this file as it ends ({i,out,seed,ok,ms,error,node,family,sha256,verdict}; verdict rendered | skipped-existing | failed | queued)")
+	resume := fs.Bool("resume", false, "with --batch: skip a job whose out already holds a PNG that decodes whole and has the size the job names; anything doubtful (empty, cut short, another size, missing) is rendered again")
+	jobsFlag := fs.Int("jobs", 0, "with --batch: the most jobs in flight on the ticket path (default: this machine's lane plus one per roster node that renders the recipe, at most 8)")
 	route := fs.String("route", "auto", "local | auto (here when this machine has the lane, derived from the files its route loads, else a fleet node from delegate_remotes) | remote (a fleet node; input files travel in a hash-checked bundle and the output is fetched back verified; ADR 0077)")
 	var remotes repeatedFlag
 	fs.Var(&remotes, "remote", "fleet node base URL for this call (repeatable); must be one of delegate_remotes")
 	positional, flagArgs := splitArgs(args, map[string]bool{
 		"config": true, "negative": true, "out": true,
 		"width": true, "height": true, "steps": true, "seed": true,
-		"batch": true, "family": true, "route": true, "remote": true,
+		"batch": true, "family": true, "route": true, "remote": true, "results": true, "jobs": true,
 	})
 	_ = fs.Parse(flagArgs)
 	// Boolean flags in space form ("--refine false") make the value a stray
@@ -918,95 +924,24 @@ func runGenerateImage(args []string) error {
 	}
 
 	if *batchFile != "" {
-		if r, _ := mediaremote.NormalizeRoute(*route); r == mediaremote.RouteRemote {
-			return fmt.Errorf("generate-image: --batch renders on this machine through one warm session; drop --route remote (or render the jobs one at a time)")
+		// A batch renders ONE binding for every job: --transparent (a per-render alpha channel) has no place on it.
+		if *transparent {
+			return fmt.Errorf("generate-image: --transparent selects an alpha-channel render of ONE image; a batch renders its jobs opaque (render the jobs one at a time)")
 		}
-		// A batch renders the DEFAULT binding through one warm session (RunImageBatch
-		// has no family seam); a family flag here would be silently ignored, so refuse.
-		if *family != "" || *transparent {
-			return fmt.Errorf("generate-image: --family/--transparent select a named binding for ONE render; --batch renders this machine's default binding")
+		if *jobsFlag < 0 {
+			return fmt.Errorf("generate-image: --jobs %d: the number of jobs in flight cannot be negative (0 is the default)", *jobsFlag)
 		}
-		raw, rerr := os.ReadFile(*batchFile)
-		if rerr != nil {
-			return rerr
+		return runImageBatchVerb(fs, imageBatchArgs{
+			file: *batchFile, family: *family, route: *route, results: *resultsFlag, resume: *resume, jobs: *jobsFlag,
+			refine: *refine, remotes: remotes, asJSON: *asJSON, compact: *compactFlag,
+		})
+	}
+	for _, name := range []string{"results", "resume", "jobs"} {
+		set := false
+		fs.Visit(func(f *flag.Flag) { set = set || f.Name == name })
+		if set {
+			return fmt.Errorf("generate-image: --%s belongs to --batch (jobs.jsonl), and no batch was given", name)
 		}
-		var jobs []pipeline.ImageBatchJob
-		for n, line := range strings.Split(string(raw), "\n") {
-			line = strings.TrimSpace(line)
-			if line == "" {
-				continue
-			}
-			var j pipeline.ImageBatchJob
-			if jerr := json.Unmarshal([]byte(line), &j); jerr != nil {
-				return fmt.Errorf("batch line %d: %w", n+1, jerr)
-			}
-			jobs = append(jobs, j)
-		}
-		// --refine=false applies to every job that does not set its own
-		// "refine" (job-level wins) — before this, the flag was silently
-		// ignored on the batch path.
-		applyBatchRefineDefault(jobs, *refine)
-		cfg := loadCfg(fs)
-		p, cleanup, err := openPipeline(cfg)
-		if err != nil {
-			return err
-		}
-		defer cleanup()
-		items, berr := p.RunImageBatch(context.Background(), jobs)
-		ok := 0
-		refineFallbacks := 0
-		for _, it := range items {
-			if it.OK {
-				ok++
-			}
-			if it.RefineFallback != "" {
-				refineFallbacks++
-			}
-		}
-		payload := map[string]any{"count": len(items), "succeeded": ok, "failed": len(items) - ok, "items": items}
-		// A batch renders the DEFAULT binding, so the whole batch carries that
-		// binding's family and license (ADR 0058) at the top level too — the same
-		// keys a single render returns — and every item repeats them.
-		if _, fam, ferr := p.Cfg().ResolveImageFamily(""); ferr == nil {
-			payload["family"] = fam.Name
-			if fam.License != "" {
-				payload["license"] = fam.License
-			}
-			if fam.CommercialUse != nil {
-				payload["commercial_use"] = *fam.CommercialUse
-			}
-		}
-		// Surface the refiner fallback count in the batch summary whenever a
-		// refiner is configured (0 = all jobs refined or opted out) — absent
-		// otherwise, keeping the refiner-less payload byte-identical.
-		if p.Cfg().ImageGenRefinerModel != "" {
-			payload["refine_fallbacks"] = refineFallbacks
-		}
-		data, _ := json.Marshal(payload)
-		res := core.Result{OK: berr == nil && ok == len(items), Data: data}
-		if berr != nil {
-			res.Reason = berr.Error()
-			// A busy card is a DEFER, not a failure: the batch waited its window behind
-			// another holder and produced nothing, which is recoverable by retrying.
-			// Returning it as an error made the CLI exit non-zero, so any wrapper read a
-			// queued render as a broken one.
-			if pipeline.IsGPUBusy(berr) {
-				res.Deferred = true
-				res.Meta.ErrClass = "gpu_busy"
-				berr = nil
-			}
-		}
-		emitResult(res, *asJSON, "", *compactFlag)
-		// Every job ran and some failed (0.178.0): the JSON above keeps reporting per-job status, and the
-		// exit status says so too, with the code the render helpers end such a batch with, so a shell
-		// caller no longer has to parse the JSON (or grep a log) to learn that pictures are missing. A
-		// stop (berr), a deferral (a busy card) and a clean batch are unchanged.
-		if berr == nil && !res.Deferred && ok < len(items) {
-			return &exitCodeError{code: imagegen.BatchExitJobsFailed, msg: fmt.Sprintf(
-				"generate-image --batch: %d of %d jobs failed (exit %d); the items with \"ok\": false in the output name them",
-				len(items)-ok, len(items), imagegen.BatchExitJobsFailed)}
-		}
-		return berr
 	}
 
 	if positional == "" || positional == "-" {
@@ -1234,14 +1169,28 @@ func runRunGraph(args []string) error {
 		return err
 	}
 
-	cfg := loadCfg(fs)
+	cfg, src := loadCfgWithSource(fs)
 	p, cleanup, err := openPipeline(cfg)
 	if err != nil {
 		return err
 	}
 	defer cleanup()
 
-	res := mediaremote.Run(context.Background(), cfg, p, core.Request{Task: core.TaskRunGraph, Door: "cli:run-graph", Params: params}, *route, remotes)
+	// This verb IS the wait, as generate-image's is (ADR 0083 Amendment 1): when this machine's lane is busy the graph becomes a
+	// ticket and the verb blocks until the first matching lane that frees has run it, telling the operator where it stands on
+	// stderr. The first Ctrl-C cancels a ticket that has sent nothing anywhere (a graph already on a node cannot be recalled; run
+	// the same command to collect it); the second interrupt is the default one.
+	ictx, stopInterrupt := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stopInterrupt()
+	go func() {
+		<-ictx.Done()
+		stopInterrupt()
+	}()
+	wait := mediaremote.Wait{Window: -1, Notify: func(line string) { fmt.Fprintln(os.Stderr, line) }}
+	if src.Loaded() {
+		wait.RosterFile = src.Path
+	}
+	res := mediaremote.RunWith(ictx, cfg, p, core.Request{Task: core.TaskRunGraph, Door: "cli:run-graph", Params: params}, *route, remotes, wait)
 	emitResult(res, *asJSON, "", *compactFlag)
 	return nil
 }
@@ -3150,21 +3099,23 @@ func runLedger(args []string) error {
 	fs := flag.NewFlagSet("ledger", flag.ExitOnError)
 	fs.String("config", "", "config file path")
 	since := fs.Int("since", 0, "only count entries from the last N days")
+	includeTraffic := includeTrafficFlag(fs)
 	_ = fs.Parse(args)
 	cfg := loadCfg(fs)
 	var sinceTS int64
 	if *since > 0 {
 		sinceTS = time.Now().AddDate(0, 0, -*since).Unix()
 	}
-	// Lock-free read: works even while the MCP server is appending to the ledger.
-	s, err := ledger.SummarizeFile(cfg.LedgerPath, sinceTS, ledger.PricesFrom(cfg.OpusInputPricePerMTok, cfg.OpusOutputPricePerMTok))
+	// Lock-free read: works even while the MCP server is appending to the ledger. Test, bake and
+	// measurement traffic is left out and counted in excluded_non_production (register F48).
+	s, err := ledger.SummarizeFileWith(cfg.LedgerPath, sinceTS, ledger.PricesFrom(cfg.OpusInputPricePerMTok, cfg.OpusOutputPricePerMTok), *includeTraffic)
 	if err != nil {
 		return err
 	}
 	// LO-8: surface WHY calls deferred — top defer reasons over the last 7 days
 	// (fixed window regardless of --since, so the recent-failure signal is
 	// always visible). Best-effort: a read error must not sink the summary.
-	reasons, rerr := ledger.TopDeferReasons(cfg.LedgerPath, time.Now().AddDate(0, 0, -7).Unix(), 5)
+	reasons, rerr := ledger.TopDeferReasonsWith(cfg.LedgerPath, time.Now().AddDate(0, 0, -7).Unix(), 5, *includeTraffic)
 	if rerr != nil {
 		fmt.Fprintln(os.Stderr, "note: defer-reason aggregation failed:", rerr)
 	}
@@ -3180,6 +3131,9 @@ func runLedger(args []string) error {
 	// line names both token counts rather than only the input one.
 	fmt.Printf("tokens kept local (est.): %d in + %d out (~$%.2f Opus value — an estimate, not billed savings)\n",
 		s.TokensSaved, s.TokensOut, s.EstValueKeptLocal)
+	if len(s.ExcludedNonProduction) > 0 {
+		fmt.Printf("left out: test, bake and measurement traffic (%s job(s)); --include-test-traffic counts it\n", describeExcluded(s.ExcludedNonProduction))
+	}
 	return nil
 }
 
@@ -4313,10 +4267,13 @@ func runConfheadEval(args []string) error {
 	_ = fs.Parse(args)
 	cfg := loadCfg(fs)
 
-	rows, err := ledger.ReadAll(cfg.LedgerPath)
+	// Test, bake and measurement rows carry a fixture's margin, not the box's (register F48): the head is
+	// judged and calibrated on production rows only, and the omission is stated.
+	rows, excluded, err := ledger.ReadProduction(cfg.LedgerPath)
 	if err != nil {
 		return fmt.Errorf("confhead-eval: read ledger: %w", err)
 	}
+	noteExcluded(excluded)
 	labels, err := ledger.ReadLabelFile(cfg.ConfHeadLabelsPath)
 	if err != nil {
 		return fmt.Errorf("confhead-eval: read labels: %w", err)
@@ -4452,10 +4409,13 @@ func runConfheadCalibrate(args []string) error {
 		dst = cfg.ConfHeadThresholdsPath
 	}
 
-	rows, err := ledger.ReadAll(cfg.LedgerPath)
+	// Test, bake and measurement rows carry a fixture's margin, not the box's (register F48): the head is
+	// judged and calibrated on production rows only, and the omission is stated.
+	rows, excluded, err := ledger.ReadProduction(cfg.LedgerPath)
 	if err != nil {
 		return fmt.Errorf("confhead-calibrate: read ledger: %w", err)
 	}
+	noteExcluded(excluded)
 	labels, err := ledger.ReadLabelFile(cfg.ConfHeadLabelsPath)
 	if err != nil {
 		return fmt.Errorf("confhead-calibrate: read labels: %w", err)
@@ -4615,12 +4575,15 @@ func runAuditSample(args []string) error {
 	n := fs.Int("n", 20, "number of cases to surface")
 	hard := fs.Bool("hard", false, "only hard cases (deferred / ungrounded / low margin)")
 	asJSON := fs.Bool("json", false, "emit JSON (for codex/Opus review)")
+	includeTraffic := includeTrafficFlag(fs)
 	_ = fs.Parse(args)
 	cfg := loadCfg(fs)
 	entries, err := ledger.ReadAll(cfg.LedgerPath)
 	if err != nil {
 		return err
 	}
+	entries, excluded := productionEntries(entries, *includeTraffic)
+	noteExcluded(excluded)
 	var picked []ledger.Entry
 	for _, e := range ledger.JobRows(entries) { // a local job is one job (C-62)
 		if e.CacheHit {
@@ -4849,12 +4812,15 @@ func runEval(args []string) error {
 func runStats(args []string) error {
 	fs := flag.NewFlagSet("stats", flag.ExitOnError)
 	fs.String("config", "", "config file path")
+	includeTraffic := includeTrafficFlag(fs)
 	_ = fs.Parse(args)
 	cfg := loadCfg(fs)
 	entries, err := ledger.ReadAll(cfg.LedgerPath)
 	if err != nil {
 		return err
 	}
+	entries, excluded := productionEntries(entries, *includeTraffic)
+	noteExcluded(excluded)
 	m := report.Summarize(entries, cfg.ConfidenceMarginThreshold)
 	b, _ := json.MarshalIndent(m, "", "  ")
 	fmt.Println(string(b))
@@ -4947,6 +4913,8 @@ func runResearch(args []string) error {
 		lints = lints[:len(results)]
 	}
 	wire := delegate.WireResponse(results, sum, lints)
+	// The same quote check as the MCP door (register F4); the results map to the pages that produced a digest.
+	research.AnnotateWire(&wire, research.ResultSources(sources), fetched)
 	out, err := json.MarshalIndent(struct {
 		Summary any               `json:"summary"`
 		Sources []research.Source `json:"sources"`

@@ -128,6 +128,11 @@ type statsReport struct {
 	// Carries its own verdict so the gate cannot be quietly reinterpreted later.
 	Atlas AtlasReport `json:"failure_atlas"`
 
+	// --- register F48: test, bake and measurement traffic ---
+	// How many jobs per run class the report left out; absent when none, and always absent under
+	// --include-test-traffic. The rows above and below are production rows only.
+	ExcludedNonProduction map[string]int `json:"excluded_non_production,omitempty"`
+
 	// --- routing health ---
 	ByTask       []statRow `json:"by_task,omitempty"`
 	ByTier       []statRow `json:"by_tier,omitempty"`
@@ -218,6 +223,7 @@ func runLoupe(args []string) error {
 	since := fs.Int("since", 0, "only include entries from the last N days (0 = all)")
 	top := fs.Int("top", 10, "how many rows per ranked section")
 	asJSON := fs.Bool("json", false, "emit JSON instead of the text report")
+	includeTraffic := includeTrafficFlag(fs)
 	_ = fs.Parse(args)
 	cfg := loadCfg(fs)
 
@@ -231,6 +237,9 @@ func runLoupe(args []string) error {
 	if err != nil {
 		return err
 	}
+	// Test, bake and measurement traffic is left out of the report (register F48), and the report says
+	// how many jobs it left out.
+	all, excluded := productionEntries(all, *includeTraffic)
 	rows := make([]ledger.Entry, 0, len(all))
 	for _, e := range ledger.JobRows(all) { // a local job is one job (C-62)
 		if sinceTS == 0 || e.TS >= sinceTS {
@@ -238,7 +247,7 @@ func runLoupe(args []string) error {
 		}
 	}
 
-	rep := statsReport{LedgerPath: cfg.LedgerPath, Rows: len(rows), WindowDays: *since}
+	rep := statsReport{LedgerPath: cfg.LedgerPath, Rows: len(rows), WindowDays: *since, ExcludedNonProduction: excluded}
 	rep.EmbedMemo = readEmbedMemoReport(cfg)
 
 	// Built BEFORE the empty-ledger early return, deliberately. Labels live in their OWN
@@ -480,6 +489,9 @@ func emitStats(rep statsReport, asJSON bool) error {
 
 	p := func(f string, a ...any) { fmt.Printf(f+"\n", a...) }
 	p("ledger: %s", rep.LedgerPath)
+	if len(rep.ExcludedNonProduction) > 0 {
+		p("left out: test, bake and measurement traffic (%s job(s)); --include-test-traffic counts it", describeExcluded(rep.ExcludedNonProduction))
+	}
 	if rep.Rows == 0 {
 		p("no rows in window — nothing to report")
 		return nil

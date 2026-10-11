@@ -76,15 +76,28 @@ func boundConfidence(schema map[string]any, fields []gbnf.Field) {
 // compact example. It is deterministic, because it rides in the system prompt and so in the
 // prompt-prefix fingerprint.
 func ShapeInstruction(fields []gbnf.Field) string {
-	var keys, ex []string
-	for _, f := range fields {
-		k := jsonString(f.Name)
-		keys = append(keys, k+" ("+typeWords(f)+")")
-		ex = append(ex, k+":"+exampleValue(f))
-	}
 	return "OUTPUT FORMAT: reply with exactly ONE JSON object and nothing else: no prose before or after it, no markdown fences. " +
-		"It has exactly these keys, each once, in this order: " + strings.Join(keys, ", ") + ". " +
-		"Do not add any other key. Example of the shape: {" + strings.Join(ex, ",") + "}"
+		"It has exactly these keys, each once, in this order: " + keyWords(fields) + ". " +
+		"Do not add any other key. Example of the shape: " + exampleObject(fields)
+}
+
+// keyWords is `"key" (type)` for each field, in order: the keys of the top-level object, and of
+// every nested object, are stated the same way.
+func keyWords(fields []gbnf.Field) string {
+	keys := make([]string, 0, len(fields))
+	for _, f := range fields {
+		keys = append(keys, jsonString(f.Name)+" ("+typeWords(f)+")")
+	}
+	return strings.Join(keys, ", ")
+}
+
+// exampleObject is one compact example object over the fields.
+func exampleObject(fields []gbnf.Field) string {
+	ex := make([]string, 0, len(fields))
+	for _, f := range fields {
+		ex = append(ex, jsonString(f.Name)+":"+exampleValue(f))
+	}
+	return "{" + strings.Join(ex, ",") + "}"
 }
 
 func typeWords(f gbnf.Field) string {
@@ -97,6 +110,13 @@ func typeWords(f gbnf.Field) string {
 		return "true or false"
 	case gbnf.TStringArray:
 		return "an array of strings"
+	case gbnf.TObject:
+		if len(f.Props) == 0 {
+			return "a JSON object"
+		}
+		return "an object with exactly these keys, each once, in this order: " + keyWords(f.Props)
+	case gbnf.TArray:
+		return "an array whose every element is " + typeWords(itemOf(f))
 	case gbnf.TEnum:
 		if len(f.Enum) > 0 {
 			vals := make([]string, len(f.Enum))
@@ -119,12 +139,24 @@ func exampleValue(f gbnf.Field) string {
 		return "true"
 	case gbnf.TStringArray:
 		return `["..."]`
+	case gbnf.TObject:
+		return exampleObject(f.Props)
+	case gbnf.TArray:
+		return "[" + exampleValue(itemOf(f)) + "]"
 	case gbnf.TEnum:
 		if len(f.Enum) > 0 {
 			return jsonString(f.Enum[0])
 		}
 	}
 	return `"..."`
+}
+
+// itemOf is the element of an array field: its Items, or a string where it names none.
+func itemOf(f gbnf.Field) gbnf.Field {
+	if f.Items != nil {
+		return *f.Items
+	}
+	return gbnf.Field{Type: gbnf.TString}
 }
 
 func jsonString(s string) string {

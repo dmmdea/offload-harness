@@ -142,9 +142,7 @@ func TestDeletionGuardRefusesAnUndeclaredDeletion(t *testing.T) {
 // bash. CI runs the build job on ubuntu, where it always runs.
 func scriptPath(t *testing.T) string {
 	t.Helper()
-	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skip("no bash on PATH; the guard runs in CI's ubuntu build job")
-	}
+	guardBash(t) // skips when no usable bash exists (check_deletions_bash_test.go)
 	abs, err := filepath.Abs(filepath.Join("scripts", "check-deletions.sh"))
 	if err != nil {
 		t.Fatalf("resolve the guard: %v", err)
@@ -152,18 +150,20 @@ func scriptPath(t *testing.T) string {
 	if _, err := os.Stat(abs); err != nil {
 		t.Fatalf("the guard is missing: %v", err)
 	}
-	return abs
+	// Forward slashes: a backslash path through a bash that is not Git's loses its separators (F63).
+	return filepath.ToSlash(abs)
 }
 
 type synthRepo struct {
-	t   *testing.T
-	dir string
-	env []string
+	t    *testing.T
+	dir  string
+	env  []string
+	bash string
 }
 
 func newSynthRepo(t *testing.T) *synthRepo {
 	t.Helper()
-	r := &synthRepo{t: t, dir: t.TempDir()}
+	r := &synthRepo{t: t, dir: t.TempDir(), bash: guardBash(t)}
 	// A sandboxed identity and config: the guard must never read the developer's
 	// own git config, and a test must never write to it.
 	r.env = append(os.Environ(),
@@ -172,6 +172,7 @@ func newSynthRepo(t *testing.T) *synthRepo {
 		"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@example.invalid",
 		"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@example.invalid",
 	)
+	r.env = withBashOnPath(r.env, r.bash)
 	r.git("init", "-q", "-b", "main")
 	return r
 }
@@ -214,7 +215,7 @@ func (r *synthRepo) rev(ref string) string {
 // run invokes the guard in the synthetic repo and returns its combined output.
 func (r *synthRepo) run(script string, base, head string) (string, error) {
 	r.t.Helper()
-	return r.finish(exec.Command("bash", script, base, head))
+	return r.finish(exec.Command(r.bash, script, base, head))
 }
 
 func (r *synthRepo) exec(args ...string) (string, error) {

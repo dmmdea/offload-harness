@@ -1059,15 +1059,18 @@ launch:
 		dl.begin()
 		wg.Add(1)
 		launched++
+		// The subtask's place in the call's width (runSlot): the capacity wait may give it up while the
+		// subtask waits for a node and takes one again to dispatch; whatever it holds is given back here.
+		slot := newRunSlot(sem)
 		go func(i int, contract core.AgentContract) {
 			defer wg.Done()
-			defer func() { <-sem }()
+			defer slot.finish()
 			progress.started(i)
 			// runOne's outcome was already cut where it was PRODUCED (finish, settle, exhaustedSettled): the
 			// only moment "after the deadline?" can be answered. Asking again here, with no
 			// timestamp, would rewrite an answer that finished before the deadline — an
 			// abstention whose retry was cut, for one — into a call-deadline defer.
-			pr := r.runCapped(ctx, i, contract)
+			pr := r.runCapped(withRunSlot(ctx, slot), i, contract)
 			if board.put(i, pr) {
 				if !pr.deadlineCut {
 					dl.answer()
@@ -2620,6 +2623,14 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 	// until it, less the reserve a placed job needs; any other call waits agent_placement_wait_sec.
 	cw := r.capacityWaitFor(waitStart, decided != nil)
 	wait := cw.wait
+	// slot is this subtask's place in its call's width, when it came through RunWith. A wait that is held
+	// to its TTL because it holds that place while subtasks of the call have not started does not END at
+	// the TTL: it gives the place up and runs on to the call's horizon (extendHeld, ADR 0073 amendment
+	// 2026-10-10, register C16). leftAtStart is the call's time when the wait began, for the words of the
+	// defer that finally ends it.
+	slot := runSlotFrom(ctx)
+	leftAtStart, _ := r.call.timeLeft()
+	gaveSlotUp := false
 	if wait <= 0 {
 		if cw.call != nil {
 			// Neither the operator's off switch nor a chain of refusals that ended: the call has less left
@@ -2663,6 +2674,44 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 	deadline := cw.deadline
 	spanStart := waitStart
 	var idle time.Duration
+	// extendHeld is what the TTL of a wait that holds a run slot does instead of ending it. The TTL was
+	// the old rule's price for not starving the subtasks behind this one (ADR 0073 decision 9), and the
+	// price was the subtask: it ended as a capacity defer while the call had most of its time left and a
+	// node freeing a minute later would have taken it. Now the wait gives its place in the call's width
+	// up when a subtask of the call has not started (so that one can begin), keeps waiting to the call's
+	// horizon like the last subtask to start, and takes a place again only to dispatch (ensureSlot), so
+	// the number of attempts the call has open at once is still its width. false = nothing to extend:
+	// the wait was not capped by a held slot, or the call's horizon is no later than now.
+	extendHeld := func() bool {
+		if cw.held == 0 || cw.call != nil || decided != nil {
+			return false
+		}
+		horizon, ok := r.call.waitHorizon()
+		if !ok || !horizon.After(time.Now()) {
+			return false
+		}
+		if r.call.unstarted() > 0 && slot.release() {
+			gaveSlotUp = true
+		}
+		cw.call = &callWaitInfo{left: leftAtStart, reserve: callWaitReserve}
+		deadline, wait = horizon, horizon.Sub(waitStart)
+		return true
+	}
+	// ensureSlot takes the place back before a dispatch when the wait gave it up. blocked says it had to
+	// wait for one, so the room the caller saw is old and the tick is read again; ok=false is the wait
+	// (or the call) ending first.
+	ensureSlot := func() (ok, blocked bool) {
+		if !gaveSlotUp {
+			return true, false
+		}
+		return slot.acquire(ctx, deadline)
+	}
+	// yieldSlot gives the place up again once an attempt has been refused and the wait goes on.
+	yieldSlot := func() {
+		if gaveSlotUp {
+			slot.release()
+		}
+	}
 	// stLeft is st with the wall the NEXT dispatch would carry: what is left of the
 	// budget once the idle time so far is credited (never under the retry floor). The
 	// candidates of a tick are judged against it - the same wall re-placement uses - so
@@ -2833,6 +2882,11 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 				stillBusy, _ = r.localStillBusy(ctx, readLease)
 			}
 			if !Reserved(lease) && !fenced && free && !stillBusy && !occupied {
+				if ok, blocked := ensureSlot(); !ok {
+					break
+				} else if blocked {
+					continue
+				}
 				credit()
 				remaining := pl.remaining(start, budget)
 				if remaining < minRetrySec {
@@ -2892,6 +2946,9 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 			views, bases, _, failed, readAfter := r.fleetReadForWait(tickCtx)
 			cancelTick()
 			fleetFirst = false // the fleet has been read once: from the next tick the seat may take its place in line
+			if ctx.Err() == nil && !time.Now().Before(deadline) && extendHeld() {
+				continue // the TTL ended mid-probe and the wait runs on: the probe may have been cut by it, so read again
+			}
 			if ctx.Err() != nil || !time.Now().Before(deadline) {
 				// The tick's probe is bounded by the wait's own deadline, and by the
 				// context the wait runs under (the call's deadline, ADR 0065, or the
@@ -2983,6 +3040,11 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 				}
 			}
 			if best >= 0 {
+				if ok, blocked := ensureSlot(); !ok {
+					break
+				} else if blocked {
+					continue
+				}
 				credit()
 				remaining := pl.remaining(start, budget)
 				if remaining < minRetrySec {
@@ -3026,9 +3088,10 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 				// poll interval — never a tight loop of dispatches.
 			}
 		}
-		if !time.Now().Before(deadline) {
+		if !time.Now().Before(deadline) && !extendHeld() {
 			break
 		}
+		yieldSlot()
 		tick := jitteredWithin(placementPollInterval, time.Until(deadline))
 		select {
 		case <-ctx.Done():
@@ -3392,8 +3455,9 @@ var placementWaitDefault = config.DefaultPlacementWait
 
 // placementTTL is the capacity wait of a call that has no whole-call deadline:
 // agent_placement_wait_sec, else the built-in 120 s, and 0 when the operator switched the wait
-// off. A call that has a deadline waits until it instead (capacityWaitFor), except a wait that
-// holds a run slot while subtasks of the call have not started; the retry's wait
+// off. A call that has a deadline waits until it instead (capacityWaitFor); a wait that holds a
+// run slot while subtasks of the call have not started holds the slot for this TTL and then
+// gives it up and runs on to the call's horizon (awaitCapacity, extendHeld); the retry's wait
 // (awaitRetrySeat) and a composite decision's eviction wait keep this TTL under any call
 // (ADR 0073).
 func (r *runner) placementTTL() time.Duration {
@@ -3413,9 +3477,11 @@ func (r *runner) placementTTL() time.Duration {
 // operator's off switch for every call, and the deadline does not turn it back on. A decided
 // seed (a composite box's pair seat draining) keeps it because its expiry RUNS the contract on
 // the decided seat, which needs the time the reserve would take away. And a wait that holds a
-// run slot while subtasks of the call have not started keeps the bound it had before the
-// deadline (the larger of the TTL and agent_lease_wait_sec) unless the call ends sooner: only
-// the last subtask to start waits for the horizon.
+// run slot while subtasks of the call have not started holds that slot for the bound it had
+// before the deadline (the larger of the TTL and agent_lease_wait_sec) unless the call ends
+// sooner. That bound no longer ENDS the wait (amendment 2026-10-10, register C16): at it the
+// wait gives the slot up and runs on to the horizon like the last subtask to start (awaitCapacity,
+// extendHeld), so a subtask in line for a node is never refused while the call has time.
 //
 // agent_lease_wait_sec is part of that bound, never of the call's: a wait the call bounds ends
 // at the horizon even when the lease wait is longer, because a wait past the deadline helps no
@@ -3435,9 +3501,10 @@ func (r *runner) capacityWaitFor(start time.Time, decided bool) capacityWait {
 	bound := max(horizon.Sub(start), 0)
 	// A wait holds one of the call's run slots (RunWith's sem), so while subtasks of the call have not started
 	// - the ones waiting for a slot and the ones of later chunks - it may not run to the horizon: they would
-	// start late, or never, and with less than the reserve left. Such a wait keeps the bound it had before
-	// ADR 0073, unless the call's own end comes sooner. The last subtask to start waits for the horizon, since
-	// nothing is behind it.
+	// start late, or never, and with less than the reserve left. Such a wait holds the slot for the bound it
+	// had before ADR 0073, unless the call's own end comes sooner, and awaitCapacity then gives the slot up
+	// and runs the wait on to the horizon instead of ending it (the 2026-10-10 amendment). The last subtask to
+	// start waits for the horizon holding its slot, since nothing is behind it.
 	if held := r.call.unstarted(); held > 0 && base <= bound {
 		w.held = held
 		return w
@@ -4758,8 +4825,9 @@ func headroom(v NodeView) int {
 //     constant gave it;
 //   - a slot the deal gave no place (capacityWait: every node with room was already dealt to its headroom; reserved:
 //     a lease holds the seat) counts nothing. It reaches the wait only when a slot frees, so the launch loop still
-//     starts it behind the dealt ones and ADR 0073 decision 9 holds as written: a wait keeps its TTL while a subtask of
-//     the call has not started, and only the last to start waits to the call's horizon.
+//     starts it behind the dealt ones and ADR 0073 decision 9 holds as amended: a wait holds its slot for the TTL while
+//     a subtask of the call has not started and then gives it up (it dispatches only with a slot), and every wait,
+//     not only the last to start, runs to the call's horizon.
 //
 // A call with no deal to read (route=local, which has none) has runConcurrency.
 func (r *runner) dealParallelism() int {
@@ -6190,6 +6258,9 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 	// the node's backlog" across time the node was doing something else.
 	var queuedCredit time.Duration
 	var lastQueuedAt time.Time
+	// keptInLine counts the times the job was left in the node's line at its budget (stayInLine) and
+	// keptWhy is the last reason, for the deferral if it is finally given up.
+	keptInLine, keptWhy := 0, ""
 	// queuedPolls counts ONLY the polls that actually answered `accepted`.
 	// Deliberately not the total poll count: this run may also have seen 404s
 	// and 5xxs, and a message saying "N polls, every one queued" over a total
@@ -6548,6 +6619,16 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 					setDeadline()
 				}
 				lastQueuedAt = now
+				if queuedCredit >= queuedWaitBudget && queuedWaitBudget < pollBudget {
+					// The budget is where the delegator asks whether there is a better place (stayInLine,
+					// ADR 0063 amendment 2026-10-10): a job waiting for a busy node's worker with nowhere
+					// better to go stays in line, since withdrawing it would put it at the back of the
+					// same line. It is asked about again a step later, up to the contract's patience.
+					if why, stay := r.stayInLine(ctx, base, contract); stay {
+						queuedWaitBudget = min(queuedWaitBudget+queueStayStep(), pollBudget)
+						keptInLine, keptWhy = keptInLine+1, why
+					}
+				}
 				if queuedCredit >= queuedWaitBudget {
 					// Bounded give-up while STILL QUEUED. Deliberately an
 					// ERROR, not a defer, for three reasons — and note that
@@ -6589,7 +6670,7 @@ func (r *runner) runRemote(ctx context.Context, base, jobID string, contract cor
 						// how the wait was sized, then what was done at its end, so a row that says the
 						// node did not take the job back still ENDS with that clause (ADR 0064).
 						pr.Err = fmt.Sprintf("queue deadline after %s: the node accepted the job but never started it — it waited in the node's backlog and never reached running (%d poll(s) answered `accepted`)",
-							queuedWaitBudget, queuedPolls) + queueRefreshNote(refreshErr, refreshTries)
+							queuedWaitBudget, queuedPolls) + queueRefreshNote(refreshErr, refreshTries) + keptInLineNote(keptInLine, keptWhy)
 						if verdict == withdrawConfirmed {
 							// The node took it back: it will never run there, so the
 							// subtask may be offered to another node, and the intent
@@ -6889,6 +6970,11 @@ func (r *runner) dispatchDetailed(ctx context.Context, base, jobID string, paylo
 		// Who asked, and whether the serving node must card the job because this box will not
 		// (D7/D11): a header, for the same reason the tenant is one.
 		r.pair.SetWireHeaders(req.Header)
+		if r.cardless() {
+			// A call pinned for measurement opens no card anywhere: this box opens none (pairInflight), so a box
+			// with no emitter of its own must not ask the serving node to open one for it either (register F48).
+			req.Header.Del(core.PairCardHeader)
+		}
 		resp, derr := fleetClient.Do(req)
 		if derr != nil {
 			cancel()
@@ -7069,8 +7155,11 @@ func (r *runner) fetchViewsDetailed(ctx context.Context) ([]NodeView, []string, 
 
 // fetchViewsSince is fetchViews for a caller that has just learned its picture of
 // the fleet was wrong - a re-placement after a refusal: the memo serves it only
-// when the snapshot was taken AT OR AFTER notBefore. A snapshot taken after the
-// refusal is shared; one that predates it is the stale picture and is never reused.
+// when the snapshot's probe began strictly AFTER notBefore. A snapshot taken after the
+// refusal is shared; one that predates it is the stale picture and is never reused, and
+// so is one whose probe began at the very reading of notBefore: on a clock that ticks
+// coarsely (Windows: a millisecond or so) a probe that ended before the refusal reads
+// the same as the refusal when both fall in one tick, and which came first is unknown.
 // Siblings that refuse together are not deduped by this: each one's refusal is newer
 // than the probe another began, so each reads the fleet once.
 func (r *runner) fetchViewsSince(ctx context.Context, notBefore time.Time) ([]NodeView, []string, []string) {
@@ -7115,7 +7204,7 @@ func (r *runner) memoisedProbe(notBefore time.Time) *probeSnapshot {
 	if r.probeMemo == nil || time.Since(r.probeMemo.at) >= fetchViewsMemoTTL {
 		return nil
 	}
-	if !notBefore.IsZero() && r.probeMemo.at.Before(notBefore) {
+	if !notBefore.IsZero() && !r.probeMemo.at.After(notBefore) {
 		return nil
 	}
 	return r.probeMemo

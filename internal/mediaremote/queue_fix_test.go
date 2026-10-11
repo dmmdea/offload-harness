@@ -290,7 +290,7 @@ func TestAnAdoptedJobTheNodePassedBackGoesBackInLine(t *testing.T) {
 			})
 			req := e.req("a red door", nil)
 			n := e.nodes[0]
-			local, _, _ := localIdentity(e.cfg, "qwen-image-2.1-fast")
+			local, _, _ := localIdentity(context.Background(), e.cfg, "qwen-image-2.1-fast")
 			jobID := "media-deadbeef00000003"
 			body, _ := json.Marshal(map[string]any{"job_id": jobID, "task_type": taskImage, "payload": map[string]any{
 				"prompt": req.Input, "family": "qwen-image-2.1", "seed": 424242, "width": 2048, "height": 2048, "recipe_digest": local.recipe.Digest()}})
@@ -639,6 +639,9 @@ func TestARunningTicketsPlaceIsNotKeptAlive(t *testing.T) {
 	lt.mu.Lock()
 	lt.running, lt.t.State = true, stPlaced
 	lt.mu.Unlock()
+	// A keeper tick that decided "waiting" just before the state changed touches the place just after it: let that one land
+	// (a tick is ~43 ms at the test's rhythm) before the count is taken, or it reads as a touch of a ticket that is not waiting.
+	time.Sleep(150 * time.Millisecond)
 	before := e.lr.keptCount(tf.Place)
 	time.Sleep(300 * time.Millisecond) // seven keeper ticks at the test's rhythm
 	if got := e.lr.keptCount(tf.Place) - before; got != 0 {

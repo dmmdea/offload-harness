@@ -217,6 +217,9 @@ type Server struct {
 	recipeRows []ImageRecipeHealth
 	recipeAt   time.Time
 	recipeRead bool
+	// recipeGen is the fingerprinter's generation the rows were built at: a read that settled since turns a pending row
+	// into its digest without waiting for the memo's minute.
+	recipeGen uint64
 	// agentSeat is the resolved agent planner seat (config.AgentPlannerModel:
 	// agent_model > workhorse Model), computed once here at construction —
 	// the config cannot change under a running server. Advertised (and probed
@@ -1241,7 +1244,7 @@ type healthPayload struct {
 	// a family whose commercial_use is false, and read a null license as UNKNOWN.
 	// Omitted on a node with no named families — the pre-0.134 shape.
 	ImageFamilies []ImageFamily `json:"image_families,omitempty"`
-	// ImageRecipes is what each ComfyUI image binding IS: the weight files with their sizes, the resolved sampling,
+	// ImageRecipes is what each ComfyUI image binding IS: the weight files with their sizes and content fingerprints, the resolved sampling,
 	// the license a result is tagged with, and the digest a delegator matches and sends back as recipe_digest
 	// (image_recipe.go, ADR 0082). Additive; omitted on a node with no ComfyUI binding that names a checkpoint, and
 	// on a node that predates it, which a reader takes as "cannot be matched", never as "matches anything".
@@ -1267,6 +1270,13 @@ type healthPayload struct {
 	// sum by construction).
 	JobsQueued  int `json:"jobs_queued"`  // admitted, waiting for a worker
 	JobsRunning int `json:"jobs_running"` // executing right now
+	// JobsRunningCapped is the part of jobs_running that counts against max_concurrent_jobs (Jobs.CountsCapped):
+	// the jobs an agent job that is still `accepted` is waiting behind. jobs_running counts every job on the
+	// node, so a node with four renders running and four agent workers free reads "all busy" by that count,
+	// and a delegator deciding whether a queued job is waiting for a worker (internal/delegate stayInLine)
+	// needs this one. Additive and a pointer, so a published 0 is not an absent key; published with the agent
+	// lane only, and absent on a node that predates it, which a delegator reads as unknown (register C16).
+	JobsRunningCapped *int `json:"jobs_running_capped,omitempty"`
 	// JobsAdmitting is the SUBSET of jobs_running whose worker has not started
 	// generating yet: it is still in the run's admission phase — cordon, swap
 	// pre-flight, warm, coherence probe — which the node budgets up to 300 s
@@ -1713,6 +1723,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 			payload.SeatLoaded, payload.SeatStarting = &loaded, &starting
 		}
 		payload.JobsAdmitting = admitting
+		payload.JobsRunningCapped = &cappedRunning
 		if recentWall > 0 {
 			payload.RecentAgentWallSec = recentWall
 		}
@@ -2038,6 +2049,11 @@ type SeatRateHealth struct {
 	ColdLoadSec float64 `json:"cold_load_sec"`
 	Samples     int     `json:"samples"`
 	MinTurnSec  int     `json:"min_turn_sec"`
+	// PrefillTokS is the seat's remembered prefill rate (an average over runs) and PrefillSlowTokS the
+	// slowest of its recent solo samples: the rate the stall allowance of a prefill is sized from
+	// (register F10). Both are omitted until a solo prefill has been measured, never published as 0.
+	PrefillTokS     float64 `json:"prefill_tok_s,omitempty"`
+	PrefillSlowTokS float64 `json:"prefill_slow_tok_s,omitempty"`
 }
 
 // seatRateTTL bounds how often health re-reads the seat-rates file: the
@@ -2080,7 +2096,8 @@ func (s *Server) seatRate() *SeatRateHealth {
 	}
 	b := s.seatBudget()
 	s.seatRateCache = &SeatRateHealth{TokS: known.TokS, ColdLoadSec: known.ColdLoadSec, Samples: known.Samples,
-		MinTurnSec: seatrate.MinTurnFor(known.ColdLoadSec, b.FinalTokens, 0, known.TokS)}
+		MinTurnSec:  seatrate.MinTurnFor(known.ColdLoadSec, b.FinalTokens, 0, known.TokS),
+		PrefillTokS: known.PrefillTokS, PrefillSlowTokS: known.PrefillSlowTokS}
 	return s.seatRateCache
 }
 
@@ -2505,14 +2522,16 @@ func (s *Server) admit(w http.ResponseWriter, r *http.Request, env dispatchEnvel
 		// state, not a malformed request: 503, which every delegator re-places elsewhere.
 		var nre *routeNotReadyError
 		if errors.As(err, &nre) {
-			writeError(w, http.StatusServiceUnavailable, err.Error())
+			writeRouteNotReady(w, err, nre)
 			return
 		}
 		// An image job whose recipe_digest is not the one of the family it names here: the node is not what the
-		// delegator matched (its files changed since it read health). 412, and no job exists (image_recipe.go).
+		// delegator matched (its files changed since it read health, or it has not finished reading them). 412, and no job
+		// exists (image_recipe.go). The body names the cause beside the sentence, so a delegator tells a wait from a change by a
+		// member and not by matching words.
 		var rme *recipeMismatchError
 		if errors.As(err, &rme) {
-			writeError(w, http.StatusPreconditionFailed, err.Error())
+			writeJSON(w, http.StatusPreconditionFailed, map[string]string{"status": "error", "error": err.Error(), mediacap.RecipeRefusalCauseKey: rme.cause})
 			return
 		}
 		// A failure that is this node's own (a disk that filled while unpacking a project) is not the

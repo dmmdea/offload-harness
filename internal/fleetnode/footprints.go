@@ -11,11 +11,12 @@ package fleetnode
 // vram_peak_gb <= 0 entry (the contract has dispatchers ignore those).
 //
 // HOST peaks (G3 of the P0 plan). Beside the VRAM peak the store keeps, per key, the MAX private and the MAX
-// resident memory (GiB) of the render's process tree and how many runs they come from
-// (RecordHost / HostPeak). They are the measurement the host-RAM guard calibrates a declaration with
-// (internal/pipeline: a render whose weights stream from RAM declares what its files add up to, raised to what
-// the largest resident peak the store holds for the key, once at least hostPeakMinRuns (internal/pipeline) runs exist; it only raises).
-// They ride the wire as host_peak_gb (private)
+// resident memory (GiB) of the render's process tree and how many runs they come from, and the last hostRecentRuns
+// runs' peaks (RecordHost / HostPeak). They are the measurement the host-RAM guard calibrates a declaration with
+// (internal/pipeline: a render whose weights stream from RAM declares what its files add up to, raised to the
+// hostPeakPercentile-th percentile of the recent runs' resident peaks, clamped, once at least hostPeakMinRuns
+// (internal/pipeline) runs exist; it only raises). The percentile and the window, not the all-time maximum, are what the
+// calibration reads (F56): one inflated run is not the answer. The maxima ride the wire as host_peak_gb (private)
 // and host_resident_peak_gb (resident), additive and omitted when unmeasured. Two quantities on purpose: on
 // Windows a process's GPU allocations may be charged to its private bytes and not appear in its working set,
 // so recording only one would leave the question "which of these is RAM?" unanswerable.
@@ -58,6 +59,9 @@ type footprintRecord struct {
 	HostPeakGiB         float64 `json:"host_peak_gb,omitempty"`
 	HostResidentPeakGiB float64 `json:"host_resident_peak_gb,omitempty"`
 	HostRuns            int     `json:"host_runs,omitempty"`
+	// HostRecent is the last hostRecentRuns runs' peaks (the window the calibration's percentile is taken over). Additive: a
+	// store written before it has none, and then the maxima stand in for the runs the window does not hold (HostPeak).
+	HostRecent []hostRun `json:"host_recent,omitempty"`
 }
 
 type footprintKey struct {
@@ -163,6 +167,11 @@ func (f *Footprints) reloadMergeLocked() {
 		cur.HostPeakGiB = math.Max(cur.HostPeakGiB, r.HostPeakGiB)
 		cur.HostResidentPeakGiB = math.Max(cur.HostResidentPeakGiB, r.HostResidentPeakGiB)
 		if r.HostRuns > cur.HostRuns {
+			// The other process has seen more runs, and its window holds them (and ours as far as it had read the file): take it
+			// whole. RecordHost merges BEFORE it folds its own run, so the run it adds lands in the merged window.
+			if len(r.HostRecent) > 0 {
+				cur.HostRecent = r.HostRecent
+			}
 			cur.HostRuns = r.HostRuns
 		}
 	}
@@ -206,11 +215,57 @@ func (f *Footprints) Record(family, quant, task string, observedGiB float64) {
 	}
 }
 
-// HostPeaks is what a render of one key was measured to hold on the host: the max private and the max resident
-// memory of its process tree (GiB) over Runs runs.
+// HostPeaks is what the renders of one key were measured to hold on the host: the private and the resident memory of
+// the render's process tree (GiB).
+//
+// PrivateGiB and ResidentGiB are the CALIBRATION figures: the hostPeakPercentile-th percentile of the last hostRecentRuns runs'
+// peaks, so one inflated run is not the answer and a bad run leaves the window after hostRecentRuns more (F56). The
+// all-time maxima ride beside them (MaxPrivateGiB, MaxResidentGiB: what the wire still advertises as host_peak_gb and
+// host_resident_peak_gb). Runs counts every run ever recorded and Window the ones the store still holds.
 type HostPeaks struct {
-	PrivateGiB, ResidentGiB float64
-	Runs                    int
+	PrivateGiB, ResidentGiB       float64
+	Runs                          int
+	MaxPrivateGiB, MaxResidentGiB float64
+	Window                        int
+}
+
+// hostRecentRuns is how many of a key's most recent host peaks the store keeps, and hostPeakPercentile (nearest rank, in
+// percent) the order statistic the calibration reads from them. Both are CHOSEN, not measured: twenty runs are far more than
+// the three the calibration waits for and still few enough that a bad run (a kept ComfyUI that was not under the sampled
+// runner, a driver charging card memory to the process) is gone after a day of use; the 90th percentile of fewer than ten
+// runs is their maximum (rank ceil(0.9 n) = n), so outlier rejection starts at ten runs, where there is something to reject
+// an outlier against, and below that the calibration errs toward declaring more, as the all-time max always did.
+const (
+	hostRecentRuns     = 20
+	hostPeakPercentile = 90
+)
+
+// HostPeakPercentile is hostPeakPercentile for the callers that word it (the media admission's declaration says which
+// percentile it read).
+const HostPeakPercentile = hostPeakPercentile
+
+// hostRun is one run's host peaks, as the window keeps them.
+type hostRun struct {
+	Private  float64 `json:"private_gb"`
+	Resident float64 `json:"resident_gb"`
+}
+
+// nearestRank is the p-th percentile (0 < p <= 100) of xs by the nearest-rank method; 0 for no samples.
+func nearestRank(xs []float64, p int) float64 {
+	n := len(xs)
+	if n == 0 {
+		return 0
+	}
+	s := append([]float64(nil), xs...)
+	sort.Float64s(s)
+	rank := (n*p + 99) / 100
+	if rank < 1 {
+		rank = 1
+	}
+	if rank > n {
+		rank = n
+	}
+	return s[rank-1]
 }
 
 // RecordHost folds one render's host peaks into the (family, quant, task) entry: the max of each, runs++, then
@@ -223,6 +278,9 @@ func (f *Footprints) RecordHost(family, quant, task string, privateGiB, resident
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	// Merge what another process wrote BEFORE the run is folded in (the max-merge below does not care about the order, the
+	// window does: merging after would replace our fresh run with the other process's window, which has not seen it).
+	f.reloadMergeLocked()
 	key := footprintKey{family, quant, task}
 	rec, ok := f.entries[key]
 	if !ok {
@@ -234,6 +292,14 @@ func (f *Footprints) RecordHost(family, quant, task string, privateGiB, resident
 		rec.HostResidentPeakGiB = math.Max(rec.HostResidentPeakGiB, roundToTenth(residentGiB))
 	}
 	rec.HostRuns++
+	run := hostRun{Private: roundToTenth(privateGiB)}
+	if residentGiB > 0 {
+		run.Resident = roundToTenth(residentGiB)
+	}
+	rec.HostRecent = append(rec.HostRecent, run)
+	if n := len(rec.HostRecent); n > hostRecentRuns {
+		rec.HostRecent = append([]hostRun(nil), rec.HostRecent[n-hostRecentRuns:]...)
+	}
 	rec.Updated = time.Now().UTC()
 	f.reloadMergeLocked()
 	if err := f.persistLocked(); err != nil {
@@ -250,7 +316,30 @@ func (f *Footprints) HostPeak(family, quant, task string) (HostPeaks, bool) {
 	if !ok || r.HostPeakGiB <= 0 {
 		return HostPeaks{}, false
 	}
-	return HostPeaks{PrivateGiB: r.HostPeakGiB, ResidentGiB: r.HostResidentPeakGiB, Runs: r.HostRuns}, true
+	var priv, res []float64
+	for _, h := range r.HostRecent {
+		priv = append(priv, h.Private)
+		if h.Resident > 0 {
+			res = append(res, h.Resident)
+		}
+	}
+	// Runs the window does not hold because it never could (a store written before the window existed: it has the maxima and
+	// a run count) are stood in for, once, by the maxima, so a legacy outlier keeps speaking until the window fills with real
+	// runs. Runs that LEFT a full window are forgotten on purpose, and the window being full is how they are told apart.
+	if len(r.HostRecent) < hostRecentRuns && r.HostRuns > len(r.HostRecent) {
+		priv = append(priv, r.HostPeakGiB)
+		if r.HostResidentPeakGiB > 0 {
+			res = append(res, r.HostResidentPeakGiB)
+		}
+	}
+	return HostPeaks{
+		PrivateGiB:     nearestRank(priv, hostPeakPercentile),
+		ResidentGiB:    nearestRank(res, hostPeakPercentile),
+		Runs:           r.HostRuns,
+		MaxPrivateGiB:  r.HostPeakGiB,
+		MaxResidentGiB: r.HostResidentPeakGiB,
+		Window:         len(r.HostRecent),
+	}, true
 }
 
 // Entries returns the wire-shaped entries with vram_peak_gb > 0, sorted by

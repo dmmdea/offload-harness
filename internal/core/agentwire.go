@@ -884,7 +884,7 @@ func validateOutputSchema(raw json.RawMessage) error {
 		return fmt.Errorf("not a JSON object: %w", err)
 	}
 	if len(gbnf.FromJSONSchema(schema)) == 0 {
-		return errors.New("no gbnf-compilable properties (needs a \"properties\" map of string/number/integer/boolean/string-array/enum fields)")
+		return errors.New("no gbnf-compilable properties (needs a \"properties\" map of string/number/integer/boolean/string-array/enum fields, and objects or arrays of objects, nested to any depth)")
 	}
 	return nil
 }

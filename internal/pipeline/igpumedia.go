@@ -13,6 +13,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/gpugen"
+	"github.com/dmmdea/offload-harness/internal/hostneed"
 	"github.com/dmmdea/offload-harness/internal/mediaops"
 	"github.com/dmmdea/offload-harness/internal/tasks"
 )
@@ -223,6 +224,8 @@ type igpuRun struct {
 	args        []string
 	out         string
 	timeout     time.Duration
+	// ram is the lane's own host-RAM declaration (sdcppDeclared); nil = the class default, as every iGPU lane had.
+	ram func(vram float64) hostneed.Need
 }
 
 // generateIGPU is gpugen.Generate; a var so a test can capture the Spec a lane hands it (the flags
@@ -233,7 +236,14 @@ var generateIGPU = gpugen.Generate
 // timeout, no ComfyUI /free) and returns the produced file, or the defer result.
 func (p *Pipeline) runIGPU(ctx context.Context, req core.Request, meta *core.Meta, start time.Time, r igpuRun) (string, *core.Result) {
 	// an iGPU engine has no ComfyUI instance to bind to a card: the whole node, as the sdcpp image lane
-	grant, lerr := p.acquireMediaLease(ctx, r.leaseReason, r.timeout, p.gpuWait(), wholeNeed(paramStr(req.Params, "waiter_token")).declaresRAM(classDefaultRAM(p.cfg)).resumableBy(req))
+	need := wholeNeed(paramStr(req.Params, "waiter_token")).resumableBy(req)
+	if r.ram != nil {
+		// An sd.cpp lane declares what it parks, and carries its footprint key so measured runs raise the estimate (F60).
+		need = need.declaresRAM(r.ram).withFootprint(footKey{r.fpFamily, r.fpQuant, r.fpTask})
+	} else {
+		need = need.declaresRAM(classDefaultRAM(p.cfg))
+	}
+	grant, lerr := p.acquireMediaLease(ctx, r.leaseReason, r.timeout, p.gpuWait(), need)
 	if lerr != nil {
 		res := p.deferForLease(lerr, req.Task, *meta, len(req.Input), start)
 		return "", &res
@@ -434,6 +444,7 @@ func (p *Pipeline) runGenerateVideoSdcpp(ctx context.Context, req core.Request, 
 		leaseReason: "video-gen (sdcpp)", failVerb: "video generation failed",
 		fpFamily: videoFootprintFamily(renderFamily), fpQuant: quantFromModelFile(fb.SdcppModel), fpTask: "video-gen",
 		script: script, args: runnerArgs(flags, positionals...), out: out, timeout: timeout,
+		ram: sdcppDeclared(p.cfg, renderFamily, videoSdcppFiles(fb), fb.SdcppExtraArgs),
 	})
 	if dres != nil {
 		return *dres
@@ -604,6 +615,7 @@ func (p *Pipeline) runAnimateCharacterSdcpp(ctx context.Context, req core.Reques
 		leaseReason: "animate (sdcpp)", failVerb: "character animation failed",
 		fpFamily: config.AnimateSdcppFootprintFamily, fpQuant: quantFromModelFile(cfg.AnimateGenSdcppModel), fpTask: "animate",
 		script: script, args: runnerArgs(flags, out, ref, driver, prompt), out: out, timeout: timeout,
+		ram: sdcppDeclared(p.cfg, config.AnimateSdcppFootprintFamily, animateSdcppFiles(cfg), cfg.AnimateGenSdcppExtraArgs),
 	})
 	if dres != nil {
 		return *dres

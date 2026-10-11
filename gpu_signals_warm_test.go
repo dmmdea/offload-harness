@@ -34,9 +34,27 @@ func TestHelperWrapperDriver(t *testing.T) {
 		sig = os.Interrupt
 	}
 	ms, _ := strconv.Atoi(os.Getenv("LO_WRAP_SIGNAL_MS"))
-	wrapperSignalFeed = func(c chan<- os.Signal) {
-		time.Sleep(time.Duration(ms) * time.Millisecond)
-		c <- sig
+	// The handler is registered first now (before the queue and the drain), so the clock starts when the command does:
+	// these tests are about a command ended inside the grace, not a drain or a wait.
+	var feed chan<- os.Signal
+	ready := make(chan struct{})
+	wrapperSignalFeed = func(c chan<- os.Signal) { feed = c; close(ready) }
+	if os.Getenv("LO_WRAP_AT") == "before-start" {
+		// The window between the end of the drain and the command's start: deliver the signal there and wait until the
+		// watch has recorded it, so the checkpoint is what stands between the signal and the command.
+		wrapperBeforeStart = func(w *signalWatch) {
+			<-ready
+			feed <- sig
+			<-w.Done()
+		}
+	} else {
+		wrapperCommandStarted = func() {
+			<-ready
+			go func() {
+				time.Sleep(time.Duration(ms) * time.Millisecond)
+				feed <- sig
+			}()
+		}
 	}
 	if err := runGPUReserve(strings.Split(raw, "\n")); err != nil {
 		fmt.Fprintln(os.Stderr, "driver: reserve:", err)
@@ -89,7 +107,7 @@ func TestWrapperEndedOnTermReleasesAtOnceAndLeavesTheWarmOwed(t *testing.T) {
 	if n := f.unloads.Load(); n != 1 {
 		t.Errorf("the seat was unloaded %d times, want 1 (the wrapper ran its drain and unload first)\n%s", n, out)
 	}
-	for _, want := range []string{"ended on a termination signal", "NOT warming the seat back", "the warm stays owed"} {
+	for _, want := range []string{"the command was ended on SIGTERM", "likely", "NOT warming the seat back", "the warm stays owed"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("the wrapper's output lacks %q:\n%s", want, out)
 		}

@@ -54,6 +54,11 @@ type NodeView struct {
 	JobsQueued        int
 	MaxConcurrentJobs int
 	MaxQueueDepth     int
+	// JobsRunningCapped is the part of JobsRunning that counts against MaxConcurrentJobs (health
+	// jobs_running_capped), valid when JobsRunningCappedKnown: JobsRunning counts every job on the node, a
+	// render included, so only this says whether the workers a queued agent job waits for are busy.
+	JobsRunningCapped      int
+	JobsRunningCappedKnown bool
 	// ServedModels is the node's advertised roster (health served_models).
 	// nil/empty = UNKNOWN (a pre-0.113.0 node): never a refusal. When
 	// published, the agent seat must be in it — a stronger check than the
@@ -102,9 +107,11 @@ type NodeView struct {
 	LeaseReason       string
 	LeaseRemainingSec int
 	// ImageRecipes is what each ComfyUI image family on the node IS (health `image_recipes`, ADR 0082): the weight
-	// files with their sizes, the resolved sampling and a digest. nil on a node that predates it or that has no
-	// binding to identify, which is "cannot be matched", never "matches anything". RefineHonoured is health
-	// `refine_honoured`: the node's image-gen task carries an explicit refine=false.
+	// files with their sizes and their content fingerprints (F59: a sampled sha256, or `pending` while the node is
+	// still reading the file and `unreadable` when it cannot), the resolved sampling and a digest, which is empty on
+	// a row that has a file without a fingerprint yet. nil on a node that predates it or that has no binding to
+	// identify, which is "cannot be matched", never "matches anything". RefineHonoured is health `refine_honoured`:
+	// the node's image-gen task carries an explicit refine=false.
 	ImageRecipes   []ImageRecipeView
 	RefineHonoured bool
 	// MediaRoutes is the node's own verdict on each file-backed media route (health
@@ -422,11 +429,14 @@ type ImageRecipeView struct {
 	Explicit      []string              `json:"explicit"`
 }
 
-// ImageRecipeFileView is one weight file of a recipe: its role, its name and its size on the node (-1: not found there).
+// ImageRecipeFileView is one weight file of a recipe: its role, its name, its size on the node (-1: not found there) and
+// its content fingerprint (a sha256 in hex, "pending" while the node is still hashing it, "unreadable", or "" for a file
+// that is not there or a node that predates the field: only a hash is an identity).
 type ImageRecipeFileView struct {
-	Role  string `json:"role"`
-	Name  string `json:"name"`
-	Bytes int64  `json:"bytes"`
+	Role        string `json:"role"`
+	Name        string `json:"name"`
+	Bytes       int64  `json:"bytes"`
+	Fingerprint string `json:"fingerprint"`
 }
 
 // MediaRouteConfigured is the state string of a route that can run right now.
@@ -460,6 +470,10 @@ type SeatRateView struct {
 	ColdLoadSec float64 `json:"cold_load_sec"`
 	Samples     int     `json:"samples"`
 	MinTurnSec  int     `json:"min_turn_sec"`
+	// PrefillTokS / PrefillSlowTokS: the seat's prefill rate (average, and the slowest recent solo
+	// sample its stall bound is sized from). 0 = the node publishes none (register F10).
+	PrefillTokS     float64 `json:"prefill_tok_s,omitempty"`
+	PrefillSlowTokS float64 `json:"prefill_slow_tok_s,omitempty"`
 }
 
 // SeatBudgetView mirrors fleetnode.SeatBudgetHealth.
@@ -489,6 +503,9 @@ type healthWire struct {
 	JobsQueued        int `json:"jobs_queued"`
 	MaxConcurrentJobs int `json:"max_concurrent_jobs"`
 	MaxQueueDepth     int `json:"max_queue_depth"`
+	// Additive (register C16): the part of jobs_running that counts against max_concurrent_jobs. nil = the
+	// node does not publish it (it predates it, or its agent lane is off).
+	JobsRunningCapped *int `json:"jobs_running_capped"`
 	// Additive (0.113.0). Absent on a pre-0.113.0 node, which decodes to the
 	// zero value — nil/false, both read as UNKNOWN by the gate.
 	ServedModels []string `json:"served_models"`
@@ -671,6 +688,9 @@ func FetchNodeView(ctx context.Context, base, token string) (NodeView, error) {
 	}
 	if w.Lease != nil && w.Lease.Held {
 		v.LeaseClass, v.LeaseReason, v.LeaseRemainingSec = strings.ToLower(w.Lease.Class), w.Lease.Reason, w.Lease.RemainingSec
+	}
+	if w.JobsRunningCapped != nil {
+		v.JobsRunningCapped, v.JobsRunningCappedKnown = *w.JobsRunningCapped, true
 	}
 	if w.Saturation != nil {
 		v.SaturationKnown = true

@@ -132,7 +132,11 @@ does not start what it never began.
 Health publishes the split additively: `queue_depth` keeps its original meaning and shape,
 and `jobs_running`, `jobs_queued`, `max_concurrent_jobs`, `max_queue_depth` sit alongside it
 (always present — `0` is a real value, and for the two limits it means *unlimited*, which a
-reader must be able to tell apart from a pre-0.100.0 node that publishes no limit at all).
+reader must be able to tell apart from a pre-0.100.0 node that publishes no limit at all). With the agent lane on, health also
+publishes `jobs_running_capped` (register C16): the part of `jobs_running` that counts against `max_concurrent_jobs`. `jobs_running`
+counts every job on the node, a render or a transcription included, so a node with four renders running and its agent workers free
+reads "all busy" by it; the delegator that decides whether a queued job is waiting for a worker reads this one. A pointer, so a
+published `0` is not an absent key; absent on a node that predates it or whose lane is off, which a delegator reads as unknown.
 
 ## Running as a Windows scheduled task
 
@@ -367,8 +371,9 @@ node — so don't pad the store by hand.
 The same sampling tick also reads the **host** memory of the render's process tree and folds two more peaks into the same
 entry: `host_peak_gb` (private bytes, the commit-side figure) and `host_resident_peak_gb` (resident set, the RAM figure),
 with the number of runs they come from. Both are additive and omitted until measured. They are for this node's own
-host-RAM guard, which raises a render's declared need to the largest resident peak any of its runs reached once at least three
-runs exist (it never lowers one)
+host-RAM guard, which raises a render's declared need to a high percentile (the 90th, nearest rank) of the resident peaks of its last
+twenty runs once at least three runs exist, clamped at twice the model files' size (it never lowers one; the fields themselves stay
+the all-time maxima)
 ([GPU lease, "How the numbers get measured"](systems/gpu-lease.md)); a dispatcher may ignore them. Private and resident
 are both kept on purpose: on Windows a process's GPU allocations may be charged to its private bytes without occupying
 RAM, so the two differ exactly where the question is open.
@@ -473,19 +478,40 @@ two are the exclusions the code keeps) and the files its input loaders read (`Lo
 `LoadImageOutput`, `LoadVideo`, `LoadAudio`). Each weight file must exist **by name** under any class directory of any of the node's
 models roots (`<comfy_dir>/models/*`, every `extra_model_paths.yaml` entry; a class directory that is a link counts); each input
 file must be in `<comfy_dir>/input` (`output` or `temp` when its `[output]` / `[temp]` annotation says so). A node
-that lacks one answers **503** (the re-placeable "this node cannot run this now", the same refusal as a route that is not CONFIGURED)
+that lacks one answers **503** (the re-placeable "this node cannot run this now", the same status as a route that is not CONFIGURED)
 naming what is missing, up to six names of each kind (past six weight files it says `7 or more files ... and more` and gives no
 count: the node stops looking at the seventh, because the door is open to any peer and a graph can name thousands of files; the
-delegator's `cluster[]` row keeps the first 300 bytes of that answer, so
-it shows the first two or three of a long list), and creates no job: the delegator places the graph on the next node instead of
-this one cold-starting ComfyUI to defer. **Input files do not travel with a graph** (`/fleet/dispatch` carries JSON, and the
+delegator's `cluster[]` row quotes the body's `error` sentence cut at 600 bytes, so it shows the first few of a long list), and
+creates no job. The body is `{"status":"error","error":"...","refusal":"not_capable"}`: the `refusal` member is the node's word that
+it is not full and not out of route but cannot run THIS graph (a route that is not CONFIGURED and a full queue leave it out), so a
+delegator marks the node not-capable for that ticket alone and puts no pause on it (ADR 0083 Amendment 1); it places the graph on
+the next node instead of this one cold-starting ComfyUI to defer. **Input files do not travel with a graph** (`/fleet/dispatch` carries JSON, and the
 media-job door carries no input for `run-graph`), so a file the node does not hold cannot be sent to it; the refusal says so. A
 model the graph's manifest tells the node to fetch (a `models[]` entry with a `source_url`) is not refused. The check is by name
-(a same-named file of other bytes is held; a delegator therefore never auto-overflows a graph that reads an input file, though a
+(a same-named file of other bytes is held; a delegator therefore never offers a graph that reads an input file to a node, though a
 call that must leave its machine anyway, `route remote` or `auto` on a machine with no graph lane, reaches this check with one) and a name that is absolute or climbs with `..` is never looked up.
 Health gains no key for it: a delegator requires the node to run its own release, on every remote placement of a graph (the
 overflow, `route remote` and a thin client alike), which proves the check only because the release that adds it carries a new
 version number. A graph that names no file is admitted as before, on a node with no models root too.
+
+### Image recipes carry a content fingerprint (ADR 0082 Amendment 2)
+
+A node that serves `image-gen` publishes `image_recipes[]` in `/fleet/health`: one row per ComfyUI image binding, each with its
+weight files (`role`, `name`, `bytes`, `fingerprint`) and a `digest` a delegator compares. The `fingerprint` is a sha256 of the
+file's size and a SAMPLE of its bytes (64 evenly spaced blocks of 1 MiB; the whole file when it is 64 MiB or smaller), so two
+files of one name and one size with different weights no longer digest alike; a change confined to the stretch between two sampled
+blocks (about a sixty-third of the file, roughly 0.3 GB of a 20 GB checkpoint) is not seen, so compare whole-file hashes after you
+swap in a layer-wise merge. **Health never waits for it.** For a few seconds after the node starts, or after a weight file changes, that
+file reads `"fingerprint":"pending"` (`"unreadable"` if it cannot be read, tried again after 30 s) and the row's `digest` is
+empty; it fills in on the next health read once the file has been read (this process reads one weight file at a time, 64 MiB at
+most each; a model load in another process is not coordinated with). A read that has not finished in 60 s is given up on: that file
+reads `"unreadable"`, the others are read, and the harness logs it once. The node re-checks a `recipe_digest` at admission from the
+files then on disk (waiting for each fingerprint it has not got, for 20 s at most per file or until the request is gone; a file still unread is
+named `pending`) and answers **412** on a mismatch or on a file it cannot fingerprint; the body names the `cause` (`pending`: files still
+being read, so it cannot say yet whether they changed; `unreadable`; `changed`) and the delegator then reads health again. **Every node must run the same release for digests to match**: the
+digest is version 2, and a delegator compares recipes only between nodes on its own release, so upgrade the fleet before relying
+on a match. The cache is in memory (path, size, modification time); a restart reads each file's sample again (0.17 to 0.87 s per file on the one workstation measured, page cache not controlled; a cold or network disk was not measured).
+Details: [media-generation.md](systems/media-generation.md#overflow-a-busy-lane-places-an-image-call-on-the-fleet-adr-0082).
 
 ## Pipeline-job task families
 
@@ -655,7 +681,7 @@ one contract. Unknown payload fields are **ignored** (staggered node deploys mus
 | `schema_version` | int | must be `1`; anything else is a 400 at ack |
 | `goal` | string | **required** — the self-contained task; the sub-agent sees only this + `context` |
 | `context` | `[{name, text}]` | inline docs, ≤ 16, ≤ 256 KiB total; each becomes a file the sub-agent can read, so `name` must be a flat filename: no `/` `\` `:` NUL, not `.`/`..`, **not a reserved Windows device name** (`CON`/`PRN`/`AUX`/`NUL`/`COM1-9`/`LPT1-9`, any case, with or without extensions — a write to one succeeds and reads back EMPTY), and no trailing space or dot (Windows strips them). Duplicates are rejected on a normalized key (trailing space/dot trimmed, case-folded), so `notes.md` / `notes.md ` / `Notes.MD` cannot shadow each other |
-| `output_schema` | object | JSON Schema with a `properties` map of string/number/integer/boolean/string-array/enum fields. **Required over the wire** — an agent dispatch without one is refused at ack, because the delegator would have no mechanical check before merging. A LOCAL placement (`route: local`, or `auto` with an idle GPU) may omit it: the run then returns its `output` with `structured` empty, and acceptance's text verbs carry the verification |
+| `output_schema` | object | JSON Schema with a `properties` map of string / number / integer / boolean / `enum` fields, lists of strings, and objects and lists of objects nested to any depth. A list of numbers, booleans or enum values is written by the grammar as a list of quoted strings and converted back to the schema's type; a type list, `anyOf`, `oneOf` or `$ref` reads as a string; every property the schema lists is required by the grammar, at every depth. **Required over the wire** — an agent dispatch without one is refused at ack, because the delegator would have no mechanical check before merging. A LOCAL placement (`route: local`, or `auto` with an idle GPU) may omit it: the run then returns its `output` with `structured` empty, and acceptance's text verbs carry the verification |
 | `acceptance` | `[string]` | delegator-evaluated checks: `contains:<s>` \| `not_contains:<s>` \| `regex:<re>` \| `min_items:<field>:<n>` \| `nonempty:<field>` \| `nonempty:<f1>\|<f2>` (at least one named field has a value; an empty alternative or a repeated name is malformed); malformed or unfalsifiable checks are a 400 |
 | `profile` | string | agent task profile; default = the executing node's configured `agent_profile`, else `general` (small tiers seed `research` in `config_seed`); unknown names defer naming the valid set |
 | `max_steps` | int | default 12, clamped to 12 |
@@ -743,7 +769,8 @@ No transcript field exists — remote reasoning never crosses the wire.
 "agent_enabled": true, "agent_seat": "offload-e4b",
 "agent_ctx_tokens": 16384, "agent_seat_resident": true,
 "seat_budget": {"step_tokens": 1024, "final_tokens": 4096, "thinking": "auto"},
-"seat_rate": {"tok_s": 24.6, "cold_load_sec": 34.3, "samples": 2, "min_turn_sec": 201}
+"seat_rate": {"tok_s": 24.6, "cold_load_sec": 34.3, "samples": 2, "min_turn_sec": 201,
+              "prefill_tok_s": 412.0, "prefill_slow_tok_s": 188.5}
 ```
 
 A COMPOSITE node (ADR 0052) publishes two more, under the same lane predicate:
@@ -778,6 +805,10 @@ standard quality instrument, register H-04) reads it here. `seat_rate` (0.117.2)
 rate and cold load from this node's seat-rates store (`seat-rates.json` under the state root, written by every
 agent run since 0.115.21) with `min_turn_sec` = cold load + one final turn at this node's final budget; absent until
 the seat has a sample; cached for 30 s. The delegator sizes a RETRY that lands here by it (register D-46).
+`prefill_tok_s` and `prefill_slow_tok_s` (register F10) are the seat's prefill rate — the average over runs, and the
+slowest of its last five solo samples, which is the rate the prefill stall allowance is sized from (a heat-soaked seat
+is judged at the speed it runs now, not the average of the cool ones). Both are omitted until a solo prefill has been
+measured, never published as 0, and only a run known to have had the seat to itself moves them (ADR 0066).
 `agent_seat_resident` is a cached, alias-aware roster probe refreshed in the background at most
 once per 30 s — **fail-closed**: `false` until the first probe lands, and `false` again on any
 probe failure (a stale "resident" while llama-swap is down would route work at a node that
@@ -977,7 +1008,13 @@ The wait is **bounded** — a job may wait for a slot at most as long as it was 
 the wait it is given is derived from the node's own ETA: `clamp(1.5 x etaStart + 30 s, 60 s, that limit)`, where
 `etaStart` is the wait the node publishes for a NEW job (`new_job_wait_sec`; an older node's `queue_wait_estimate_sec`
 plus one slot, ADR 0073) or the arithmetic over its jobs and recent wall, read again when
-the job is first seen queued; a node that publishes no ETA keeps **5 minutes** (ADR 0063). Hitting that bound while
+the job is first seen queued; a node that publishes no ETA keeps **5 minutes** (ADR 0063). That bound is where the delegator
+*asks* (ADR 0063 amendment 2026-10-10, register C16): it reads the node's health once more, and a job whose node has all its workers
+running (a published `max_concurrent_jobs`, that many `jobs_running_capped`: the running jobs that count against it, which `jobs_running` does not say because it includes renders and transcriptions) while no other node, and not the local seat, has room for it
+**stays in line** and is asked about again one step later (60 s, chosen), up to the limit above. A node with a free worker that still
+has not started the job, a node whose health cannot be read, and a job with a better place on offer are withdrawn at the bound as
+before, because withdrawing a queued job only to land it at the back of the same line throws away the wait it has already spent.
+Hitting the bound while
 the job is *still queued* is a **failure**,
 not a defer, with its own stable prefix:
 
@@ -1099,6 +1136,7 @@ Every `agent_delegate` row in the delegator's `ledger.jsonl` carries (ADR 0064):
 | `reason_code` | a closed set saying why the job ended the way it did: `ok`, `failed_verification`, `queue_full`, `queue_deadline`, `queue_withdrawn`, `poll_deadline`, `canceled`, `node_unreachable`, `job_lost`, `dispatch_refused`, `remote_error`, `capacity_wait`, `node_busy`, `shed`, `no_eligible_node`, `seat_down`, `stall_admission` / `stall_cold_load` / `stall_prefill` / `stall_decode` / `stall_tool` / `stall_repack` / `stall_engine` / `stall_other`, the node's defer classes (`budget`, `abstention`, `contract`, `config`, `write`, `infrastructure`), `bad_input` (the call's own input cannot be processed as given: an audio file with no audio stream, a picture that does not load), `started`, `other`. Present on every `agent_delegate` row **and on every deferred row of any task** (F22: the code used to be settled for `agent_delegate` alone, so a deferred transcribe, media or review-lane row carried free text and, on the media doors, an `err_class`): a writer's own code from the set wins, otherwise `Record` classifies the row from its `err_class` (`ledger.DeferCode`: `gpu_busy`, `gpu_queued` and `compose_busy` are `node_busy`; `timeout`, `conn_refused`, `oom`, `disk_full` and the lease and lane classes are `infrastructure`; `not_configured` is `config`; the iGPU runners' typed classes are `config`, `contract` or `failed_verification`; `bad_input` is `bad_input`) and then from the stable prefix of its reason (`gpu busy:` and `seat busy:` are `node_busy`, `no ... configured` and `imagegen_families[` are `config`, `audio generation failed:` and `video generation failed:` are `infrastructure`, `audio convert:` is `bad_input` unless ffmpeg could not be run at all (`err_class` `ffmpeg_unavailable`, `config`) or the temp directory could not be made (`infrastructure`)), and `other` when neither names it: a growing share of `other` means the table needs a member. The agent door's deferred rows carry the node's defer class as their code, because their reasons are prose (`output failed schema`, `structured re-pack skipped`, `step budget exhausted`): `capacity` files as `node_busy` and every other class as the code of the same name. `TestEveryLiteralReasonAPipelineDoorDefersWithHasACode` walks the pipeline's writers, so a new reason sentence cannot arrive uncoded. A row of another task that did not defer carries none. `capacity_wait` is the delegator's own outcome (no node had room; nothing ran the job); `node_busy` is a node, or this box's own seat, answering a capacity defer after admission (a seat at its run cap, a card under a lease or fence, an engine held busy by other work). `seat_down` is the seat itself failing to serve the job (ADR 0066): unreachable, gone down under the run and not back inside the node's recovery wait (`seat down:`), or answering llama-swap's 5xx past the busy-seat wait (`seat not serving:`) — never its peers holding its slots (`seat contended:`, a 429, is `infrastructure`). |
 | `reason` | the whole reason (up to 4096 bytes); rows written before ADR 0064 hold the first 120 bytes. Group by `reason_code`, or by its first 120 bytes. |
 | `phase` | `"started"` on the dispatch marker row, absent on every finished row |
+| `run_class` | `test`, `bake`, `measurement` (or an operator label) when the run was not real work, absent on every production row (register F48 / job-error class C23): the process said so (`LOCAL_OFFLOAD_RUN_CLASS`, a `bake:` origin), or the call did (`pin_reason: measurement`, the `cli:fleet-smoke` and `cli:fleet-measure` doors, the `go-test` origin). The summaries and `loupe` leave these rows out and count them (`--include-test-traffic` counts them again); the inner `agent` row of a labelled job is left out with its parent. A node's own row for work it ran for a labelled asker is not labelled: the class does not ride the wire |
 
 A **started marker** is written when a node acks the job (or a local run begins), so a hang or a ghost
 is visible while it happens. A refused dispatch leaves no marker. The marker is never a job (every

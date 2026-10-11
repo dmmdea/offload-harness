@@ -45,16 +45,19 @@ Three facts made the obvious change unsafe as stated.
    have served; it may call free a lane the grant then refuses, and the call then runs locally as before, after the one bounded card-table read the question costs. A call that resumes a place in line counts only the callers
    that arrived before that place, on every plan, because the lease queue serves a resumed place by arrival time (ADR 0083
    decision 4; `TestMediaLaneFreeOrdersByArrivalForACallThatResumesItsPlace`); a new arrival counts every other caller in line. Every doubt
-   (a lease this process inherited, a card table that does not read in 4 s, a request it does not model) reads as free; the card
-   table that does not read and a lease directory that does not open are marked unread (`Unjudged`, ADR 0083 decision 5), and a
-   router then looks at the fleet before it runs the call here. It
+   (a lease this process inherited, a card table that does not read in 4 s nor in the one 10 s retry that follows a read that ran
+   out of time, a request it does not model) reads as free; the card table that does not read and a lease directory that does not
+   open are marked unread (`Unjudged`, ADR 0083 decision 5), and a router then looks at the fleet before it runs the call here. A
+   card table that was not read leaves a log line ("media lane probe", F55: the first time, then once a minute per probe and cause
+   while the fault lasts). It
    creates no lease, place in line, epoch, waiter record, ledger row, PAIR card or ComfyUI instance, and it removes nothing: the
    readers of the line it shares with the admission prune a record they find dead (an expired place, a waiter that stopped
    polling) as housekeeping, and the probe reads through `gpulease.Manager.ReadOnly`, a view that skips such a record and leaves
    it on disk. A differential test drives the real wait-0 admission over a table of lane states and holds the prober to the one
    direction that matters, and `TestMediaLaneFreeWritesNothing` snapshots the lease root over each of them, those records included.
 3. **A family is its recipe (`mediacap.ImageRecipe`).** The recipe is the weight files the graph loads (checkpoint, text
-   encoder, VAE, LoRA), each with its name and byte size on the node's disk, and the sampling it renders with, digested (sha256
+   encoder, VAE, LoRA), each with its name, byte size on the node's disk and sampled content fingerprint (Amendment 2), and the
+   sampling it renders with, digested (sha256
    of canonical JSON) over RESOLVED values: a key the binding leaves unset takes the builder's own default, from a table that a
    test reads out of `render/wf-qwen-image-21.mjs` and `render/comfy-render.mjs`, so it cannot drift from the code that renders
    (Qwen-Image-2.1 only in this release; any other graph leaves unset keys unset, which is stricter, never looser). The license
@@ -62,14 +65,15 @@ Three facts made the obvious change unsafe as stated.
    a test fails when a key joins the image overlay's clear list unclassified. No recipe exists for an sd.cpp binding, so a
    ComfyUI recipe never matches one. The match is strict, also requires the same `harness_version` (the graph builders ship
    with the release) and a recipe with no missing file, and never substitutes: a caller who accepts another build names that
-   family himself, and the answer tells him which of his own families would match. **The identity is name plus size, not
-   content.** It tells a bf16 build from an int8 one and catches a truncated copy; it cannot tell two same-named files of one
-   size whose bytes differ (a full-length corrupted copy, a same-named re-release with the same tensor layout, a file updated in
-   place on one node), and the node's 412 re-check recomputes the same size-based digest, so it does not catch them either. A
-   sha256 per weight file, cached by path, size and mtime and published in `image_recipes`, is the upgrade and is not built.
+   family himself, and the answer tells him which of his own families would match. **The first cut (0.179.0) identified a file by
+   name plus size, not content**: it told a bf16 build from an int8 one and caught a truncated copy, but not two same-named files
+   of one size whose bytes differ (a full-length altered copy, a same-named re-release with the same tensor layout, a file updated
+   in place on one node), and the node's 412 re-check recomputed the same size-based digest, so it did not catch them either.
+   Amendment 2 adds a content fingerprint per weight file and says what it sees and what it does not.
 4. **Nodes publish and check recipes.** `/fleet/health` gains `image_recipes[]` (one row per ComfyUI binding that names a
-   checkpoint: name, default, digest, files with sizes, resolved sampling, license, and which sampling keys the binding set) and
-   `refine_honoured`, from a memo of the route cache's 60 s so health stays cheap. An image-gen dispatch may carry
+   checkpoint: name, default, digest, files with sizes and fingerprints, resolved sampling, license, and which sampling keys the
+   binding set) and `refine_honoured`, from a memo of the route cache's 60 s so health stays cheap (and never waiting for a hash:
+   Amendment 2). An image-gen dispatch may carry
    `recipe_digest`; the node recomputes the digest of the family the payload names from the files on disk now and refuses a
    mismatch with `412` and no job (not `409`, which already means "this job failed here before", nor `503`, which means busy).
    `refine` is decoded as the MCP handler does, so `refine=false` reaches the pipeline; a delegator that sends it requires
@@ -82,9 +86,7 @@ Three facts made the obvious change unsafe as stated.
    `node_id` equals `fleet_node_id`, else the OS hostname: such an entry would match perfectly and send the call back into the
    lane that is not free; it is named in `cluster[]`). Candidates rank by the shorter queue, then config order. The family is sent under the node's own name for the recipe, never the caller's, and never empty: a call
    that names no family is this machine's default binding, and must not land on a node's different default.
-6. **Refusals move on; an accepted job is final.** (ADR 0083 replaced the bound of three nodes for an image call: the ticket tries
-   one node per scan and has no limit on how many it tries over its life. A graph keeps the bound: it is offered to at most three
-   nodes, once.) A refusal at the door (`503`, `429`, `412`, any
+6. **Refusals move on; an accepted job is final.** (ADR 0083 replaced the bound of three nodes for an image call: the ticket tries one node per scan and has no limit on how many it tries over its life. A graph kept the bound in 0.180.0, where it was offered to at most three nodes, once; its Amendment 1 makes the graph a ticket and lifts it.) A refusal at the door (`503`, `429`, `412`, any
    other status, or a dial that never connected) means nothing ran: the call goes on, under a fresh job id. A node that accepted
    the job and answers `gpu_busy` or `gpu_queued` (another job holds its card, nothing ran) or `gpu_lease_unavailable` (it could
    not take its lease: a lease location it cannot use, a host-RAM need no state of it admits; nothing ran) is passed over the
@@ -110,21 +112,20 @@ Three facts made the obvious change unsafe as stated.
    the answer carries `cluster[]`: one row per roster node in config order (`free`, `busy`, `draining`, `not-capable`,
    `unreachable`, `in-use`, `refused`, `bounced`, `skipped`), each with the reason in the node's own terms (the lease and its
    reason, the key that differs and the family of this machine that would match, the release or the refine it lacks) and since when.
-   A call that ran is not annotated. **A whole-node graph (Amendment 1) is not a ticket in 0.180.0:** when nothing admits it, it goes
-   on to the local admission from when it came back, joining the local line when the fleet attempt is over and not from when it
-   arrived, and a deferral it ends in carries the same `cluster[]`. A graph does not wait in the cluster queue yet.
+   A call that ran is not annotated. **A whole-node graph (Amendment 1) is a ticket too** (ADR 0083 Amendment 1, which supersedes the one-shot placement of 0.180.0: a graph that went on to the local admission from when it came back): when nothing admits it, it waits for
+   the first matching lane that frees, and its answer carries the same `cluster[]`.
 9. **Never overflow** a call that runs under a lease its process inherited, on a box with no `delegate_remotes` (that path is byte for
    byte what it was, and asks the lane nothing), or for anything but an image job or a whole-node graph in this release (Amendment 1
    adds the graph, under its own file check and a single-card rule). (An image call that resumed a place did not overflow in the
-   first cut; ADR 0083 brings its place into the ticket. A graph that carries a `waiter_token` resumes a place in the local line and
-   is still never moved.) Video, animation and audio carry no per-family identity yet.
+   first cut; ADR 0083 brings its place into the ticket, and its Amendment 1 does the same for a graph.) Video, animation and audio
+   carry no per-family identity yet.
 10. **ADR 0077 changes in three sentences.** Decision 6: `auto` runs here when the lane is free and, when it is not and a
     matching node is idle, there. The consequence that `refine=false` defers on a remote route no longer holds for image jobs:
     it travels, gated on `refine_honoured`. The consequence about `waiter_token` stands: a call that goes to a node leaves the
     local place.
-11. **Amended by ADR 0083** in four places, all for an image call: decision 2 (a resumed place is ordered by arrival on every plan),
-    decision 6 (no bound of three nodes), decision 8 (a ticket, not a late local run) and decision 9 (a call with a `waiter_token`
-    overflows). A graph is outside all four: it keeps the one-shot overflow of Amendment 1.
+11. **Amended by ADR 0083** in four places, for an image call and, by its Amendment 1, for a whole-node graph: decision 2 (a resumed
+    place is ordered by arrival on every plan), decision 6 (no bound of three nodes), decision 8 (a ticket, not a late local run) and
+    decision 9 (a call with a `waiter_token` overflows).
 
 ## Consequences
 
@@ -136,7 +137,7 @@ Three facts made the obvious change unsafe as stated.
   one bounce per node per pause (60 s, then 300 s): up to the node's `gpu_wait_ms` (90 s by default) parked on the node and one
   deferred row there, before the placer sees it. The health pre-filter (no lease of any class) makes that rare; if the logs show it is not, a place-now header read in
   admission is the first optimisation (a lane verdict published by the node, answered before a job exists), not built here.
-- **Named limits.** The recipe is name plus size, not content (decision 3). One FIFO per delegating machine; cross-machine order is node arrival. ADR 0083 closes the two limits the first cut named: a call resumed with
+- **Named limits.** The content check is a sample of each weight file, not a full hash, and does not see a change confined to the stretch between two sample blocks (about a sixty-third of the file; Amendment 2). One FIFO per delegating machine; cross-machine order is node arrival. ADR 0083 closes the two limits the first cut named: a call resumed with
   its token joins the cluster queue and brings its place with it, and a call no node could take keeps its arrival time through the
   ticket's place in the local line, so a bounce no longer costs it its seniority. Every
   remote job pays ComfyUI's cold start. The same recipe and seed on a different GPU architecture is the same composition, not
@@ -145,17 +146,16 @@ Three facts made the obvious change unsafe as stated.
 - **Measured and unmeasured.** The recipe tests use fixtures that reproduce the image blocks of three live nodes as they stood
   in config text read on 2026-10-09 and 2026-10-10 (two from stored extracts; text, not a render), and the extract of one of
   them was cut inside the block it matters for; the live acceptance reads `image_recipes` on both nodes first. Nothing here was
-  run against a live lease or a real render. The backoff steps, the attempt bound and the probe's 4 s card-table bound are chosen
+  run against a live lease or a real render. The backoff steps, the attempt bound and the probe's 4 s card-table bound and 10 s retry are chosen
   constants, not resource numbers; the host-RAM numbers are the guard's and are not chosen here.
 - **Cost, stated plainly.** Every `auto` image call on a box that has the lane and a fleet pays one `nvidia-smi` read (bounded at
-  4 s) for the lane question, and a roster read when the lane is not free, even when no node can ever match (the default family
+  4 s, and read once more under 10 s when it ran out of time) for the lane question, and a roster read when the lane is not free, even when no node can ever match (the default family
   and the 2512 bf16 family of the busiest submitter have no remote match today). A caller that re-sends without its token pays it
   per re-send. The first sketch kept a 60 s copy of the card table; it was dropped for the AUTO plan, where the allocator reads the
   display card's free memory and a minute-old table can call busy a lane the grant would serve, which the contract forbids. Two
   follow-ups, neither built: a roster-first short circuit (health is memoised 2 s; when no published digest equals the local one the
   lane question need not be asked), and a short table copy for the pinned and whole-node plans only, where the table maps a pin
-  to a card and sizes the host-RAM need (total VRAM) and nothing else. The delegator's own recipe is three or four stats of its
-  model tree per call that gets as far as the lane question; the recipes of its OTHER families are read only when a node misses, to
+  to a card and sizes the host-RAM need (total VRAM) and nothing else. The delegator's own recipe is three or four stats of its model tree per call whose lane read busy or could not be read (the lane is asked first, and a call whose lane is free reads no weight file) and, the first time this process sees a file, a read of a sample of at most 64 MiB of it (Amendment 2); the recipes of its OTHER families are read only when a node misses, from the fingerprint cache without waiting, to
   name the family that would match. A node's health rows are 60 s old at worst, and the node re-checks the digest at admission from
   the files then on disk.
 - **An attribution edge.** An overflowing call opens its PAIR card when the node's 202 arrives, not before the POST. If the caller's
@@ -206,28 +206,19 @@ card. This amendment adds them under four rules; every other decision stands, an
    ships with the merge, before any delegator is deployed. The release proof holds for **every** remote placement of a graph, as
    rule 3's card rule does: the overflow asks it of its candidates, and `route remote` and a thin client's `auto` ask it when they
    pick a node, so a node on another release, or one that publishes none, is a named miss on all three.
-2. **The trigger is the image's; the placement is one-shot, not a ticket.** `Pipeline.MediaLaneFree` answers for a whole-node `run_graph` with the
+2. **The trigger is the image's; the placement is the ticket's.** `Pipeline.MediaLaneFree` answers for a whole-node `run_graph` with the
    whole-node reading (any lease, in-process slot or place in line, and the host's memory against the media class default, the
    largest family the box binds: the lease is taken for the graph as a whole before anything reads its weights, so that is an
    upper bound and not the graph's own size), under the same contract: a relaxation of the real wait-0 admission, held by
-   a differential test, that writes nothing. ADR 0083 turned an image call into a ticket; **a graph is not one in 0.180.0**: it
-   keeps the one-shot placement of the first cut, offered once to the nodes that can take it (at most three, one graph call of a
-   process per node, never a node a job of this machine has a claim on, a ticket's or another graph's, of any process of the
-   machine: the graph takes the same claim under the same lock, ADR 0083 decision 6; and never a node an older waiting ticket is
-   first in line for, by the ticket's own rule, ADR 0083 decision 12) and, when none admits it, it waits in this machine's own
-   queue, joining it when the fleet attempt is over. A graph's lane the pipeline could not read (`Unjudged`) is offered to the fleet
-   the same way, and the graph runs here when no node takes it. A graph that names `devices` (refused by `plan()` before the lane is asked), one
-   that carries a `waiter_token`, one under an inherited lease and one that reads an input file stay here; the last waits for
-   this machine's own lane, and if that wait ends in a deferral the deferral says the fleet was not asked and why (`fleet_note`;
-   a call that then runs here and succeeds carries no note, because only a deferral is annotated). A call with no lane of its own
-   to wait for (`route remote`, or `auto` on a thin client) is placed as before, checked by name only, and held to rule 1's release
-   proof and rules 3 and 4. Hashing each input file to
-   the node would lift that last exception and close that limit; it is not built. A node's 503 at the door moves the call to the
-   next node like any refusal at the door (decision 6) and counts toward the three attempts; like any 503 that names no
-   `Retry-After` it also leaves that node alone for about 5 s in the calling process (the placer's memory, the same for a graph as
-   for an image: a ticket's scan reads that node as refused for those seconds; the cause kept for a graph's 503 does not call the node
-   full, since the same 503 is a missing file). The call falls back to the local queue, and when that wait ends in a deferral the deferral carries `cluster[]`
-   naming, per node, the file it lacks.
+   a differential test, that writes nothing. ADR 0083 turned an image call into a ticket, and **its Amendment 1 does the same for a
+   graph** (it supersedes the one-shot placement of 0.180.0, which offered the graph once to at most three nodes and then joined the local queue late): a busy graph waits for the first matching lane that frees, the scanner applying rules 1, 3 and 4
+   below to each node. A node's 503 for a file the graph names carries `refusal: "not_capable"`: the ticket marks that node
+   not-capable for itself, quoting the node, and puts no pause on it (a full node's 503 is the placer's, as for an image). A graph
+   that names `devices` (refused by `plan()` before the lane is asked) and one under an inherited lease are no tickets and stay here.
+   One that reads an input file is a ticket that is never offered to a node; it waits for this machine's own lane, keeps its place and
+   position, and every answer says the fleet was not asked and why (`fleet_note`). A call with no lane of its own to wait for
+   (`route remote`, or `auto` on a thin client) is placed as before, checked by name only, and held to rule 1's release proof and
+   rules 3 and 4. Hashing each input file to the node would lift that last exception and close that limit; it is not built.
 3. **A whole-node graph is placed only on a node that publishes exactly one card.** A graph that names no devices holds the
    whole node and runs in the default ComfyUI instance, which sees every card; on a node with several, the delegator cannot
    know which card that instance picks and it may be the display card. So a node with more than one card is a named miss, and
@@ -245,12 +236,18 @@ card. This amendment adds them under four rules; every other decision stands, an
    cites it says so. The caller's number wins over it, 0 included. The floor filters remote candidates only: the local lane is
    the node's own grant.
 
-**Named limits of the amendment.** **A graph does not wait in the cluster queue yet** (decided for 0.180.0, the release that carries both
-the ticket queue and this amendment): it has no ticket, so it keeps no place in the cluster queue, does not start on a lane that
-frees after its one look at the fleet, and a repeat of the same graph is a second call, not the first one's ticket. Making it a
-ticket is a follow-up: a ticket's identity is the hash of the request's parameters, and a graph's parameters name files on this
-machine (`graph_path`, `manifest_path`) rather than carry them, so what makes two graph calls the same call needs a decision of its
-own. The file check is by name (a same-named file of other bytes is held), which is why a graph that
+**Named limit of the lane probe at an exact tie (found in the 0.181.0 integration).** The lane table orders places by the millisecond
+they were left, and the real admission counts only a place STRICTLY earlier as ahead of a call (so simultaneous arrivals do not wait
+on each other). On the whole-node path, for a NEW arrival, the probe (`laneReading.callersAhead` with no `since`) counts every live place
+on the call's cards as ahead without comparing times, so when a place was left in the very millisecond the call arrives the probe says
+busy where the grant would succeed: the one direction the probe's contract forbids. The window is one millisecond and the cost is a
+ticket whose first scan grants it. A
+test of the table had stated an order it did not guarantee (a place left with `time.Now()` against a call arriving in the same
+millisecond) and was fixed in the TEST (`nextMillisecond`, the lane tables of `medialane_graph_test.go` and `medialane_test.go`); the
+probe is not changed. The follow-up that closes it is to pass the call's own arrival as `since` for a new arrival in
+`laneReading.wholeNode`.
+
+**Named limits of the amendment.** *Closed by ADR 0083 Amendment 1:* in 0.180.0 a graph did not wait in the cluster queue; it is a ticket now, identified by the content of its graph and manifest. The file check is by name (a same-named file of other bytes is held), which is why a graph that
 reads an input file is not auto-overflowed, though a call that must leave its machine anyway keeps the same-named-file risk. Input files need to be on the node already when a node is named by hand. The node's
 host-RAM guard sizes a graph at the media class default, not at the files the door has resolved, so a graph naming weights bigger
 than every bound family can be under-counted. The default floor reads two things the harness otherwise never reads in a graph (`model_family`, the
@@ -260,4 +257,103 @@ operator's. With the fleet as the film owner described it on 2026-10-09 (the 16 
 workstation, the single-card nodes carry 8 GB cards) rules 3 and 4 together leave a graph that gets the default Wan floor no remote
 target: it waits for its own lane. The durable fix is on the node (keep a whole-node graph off the display card there). A graph is
 placed only on a node that runs this machine's release, on every route, so a fleet part-way through an upgrade routes graphs only
-to the nodes already on it (and `route remote` to a node still on the old release is a named miss, not a send). Nothing here was run live: A8 in the step report is the first.
+to the nodes already on it (and `route remote` to a node still on the old release is a named miss, not a send). Nothing here was run live: the live acceptance named A8 in the CHANGELOG entry of that change is the first.
+
+## Amendment 2 (2026-10-10, P0 step F59): a family's identity includes the content of its weight files
+
+Decision 3 identified a weight file by its name and byte size and named the limit: two same-named files of one size with
+different bytes digested alike, so a delegator could send a job to a node that renders other pixels, and the node's 412
+re-check, which recomputes the same digest, could not catch it. This amendment closes that for the differences a sample of a
+file can see. Every other decision stands.
+
+1. **Each present weight file carries a content fingerprint, and it is in the digest.** `mediacap.RecipeFile.Fingerprint` is a
+   sha256 over a scheme tag, the file's size and a sample of its bytes: 64 blocks of 1 MiB at evenly spaced offsets, the first
+   at the start of the file and the last ending at its end, or the whole file when it is 64 MiB or smaller. The block size and
+   the block count are **chosen**, not derived from a requirement. The path is not in it (the same bytes under two paths are one
+   file, which is what lets two machines agree), and `RecipeVersion` is 2, so a digest of the first cut can never equal one of
+   this release. A family that has a file the node does not hold keeps `bytes` -1 and no fingerprint, and never matches.
+2. **A sample, not the whole file, and why (the times are measured, the weight given to the window is a judgement).** On one workstation on 2026-10-10 (its local model store;
+   the page cache was not controlled, so read these as warm-cache figures) the sample read 0.17 to 0.87 s per file for files from 0.36 GB to 42 GB. A whole-file
+   sha256 of the same store ran at 389 MB/s on one core (3.8 s for a 1.47 GB file), which extrapolates (not run) to about 50 s for
+   a 20 GB checkpoint and about 110 s for a 42 GB one, per node, after every release and every model change, with the node unable
+   to match until it finished: minutes of a core and of the disk, and a window in which the fleet cannot take a call. That the
+   window is too costly is a judgement, not a measurement, and RAM was not the reason (a streaming hash holds one 1 MiB buffer). The sample catches the failure this exists for: two real builds
+   of one 42 GB transformer that share a size differed in 58 of the 64 sample blocks. There is no persisted cache: the
+   fingerprint cache is in memory, keyed by path, size and modification time, so a restart reads each file's sample again
+   (0.17 to 0.87 s per file on the machine measured; a cold or network disk was not measured) and nothing on disk can go stale or be written by two processes.
+3. **What it does not see (named).** (a) A change confined to the stretch between two sample blocks. The blocks are evenly
+   spaced, so that stretch is about a sixty-third of the file less one block: roughly 0.3 GB of a 20 GB checkpoint and 0.65 GB of
+   a 42 GB one (`TestTheUnsampledStretchBetweenTwoBlocksIsAboutASixtyThirdOfTheFile` pins those widths, and a test rewrites a
+   whole stretch and shows the fingerprint unchanged). Every byte in it can differ and the digest is the same: a layer-wise merge
+   that changes a few transformer blocks, a VAE or text encoder baked into a checkpoint, a few corrupted bytes. A retrain or a
+   fine-tune that touches the weights throughout is seen; a change that leaves such a stretch alone may not be. (b) A file
+   replaced by one of the same size **and** the same modification time (a copy that preserves times) while the process that
+   cached the old reading is still running. A full hash would catch both; after a copy that is suspect, or a merge swapped in,
+   compare whole-file hashes (`sha256sum`) on the nodes. Amendment 1's weight check for a graph is still by name and is not
+   changed by this one.
+4. **Computed off the request path; a file not yet hashed is a named miss.** `/fleet/health` never waits for a hash. It reads the
+   cache (`Fingerprinter.Peek`); a file not yet hashed starts one background read, one file at a time in this process (a model load in
+   another process, ComfyUI's, is not coordinated with), and is published `"fingerprint":"pending"`; a file that could not be read, or that changed while it was read, is
+   `"unreadable"` and is tried again after 30 s (chosen). **A row with any such file publishes an empty `digest`**: two nodes
+   that were both pending would otherwise share a digest of unhashed files, which is the match by size this amendment ends. The
+   row memo is also rebuilt when a read settles, so a pending row turns into its digest on the next health read and not up to
+   a minute later. The node's 412 re-check and the delegator's own recipe wait for a fingerprint they do not have
+   (`Fingerprinter.AwaitContext`, the same cache and the same single worker), because a dispatch and a placement are not health.
+   **The wait has a bound, and it is per file**: the wait for one file's fingerprint ends when the request's context does (the dispatch handler's, the door's) and, whatever the context, after 20 s (chosen; a cold family of four files read in a few seconds on the machine measured), and answers `pending` for that file. A recipe waits for its files one after another, so the bound of a whole recipe is its file count times 20 s (four files: 80 s) and is reached only when the request lives that long and every read is stalled behind the single worker; the request's own end stops all of it at once.
+   A family with a file the node cannot fingerprint, or has not finished, is refused with 412 naming the file and its state, and
+   the cause (decision 7); at the door the same state is no identity for that call, which runs on the local line and logs the
+   reason once (the identity is built only when the lane read busy: a free lane reads no file). **A read that does not finish in
+   60 s (chosen) is given up on**: its file is `unreadable`, the worker serves
+   the other files, and the read, which cannot be cancelled, runs on until the disk lets it return; the file is not read again
+   meanwhile, so a hung disk costs one goroutine and one handle per stuck file, and one log line. Until the 60 s pass, a stalled
+   read holds the single worker and every other file stays `pending`: the node publishes no digest for those families and is a
+   named miss, which is what a node with a hung disk should be. Nothing watches the disk beyond that (no watchdog, by the
+   operator's rule).
+5. **A recipe that is not fully fingerprinted is never compared, on either side.** `localIdentity` gives no identity to a family
+   with an unfingerprinted present file (the call runs as it does for a missing file, and the door and the adopter log why); `matchNode` refuses to compare when this
+   machine's recipe has one (two all-pending recipes are the same string), and a node row whose files are not all hashed is a
+   miss whether or not it carries a digest (the files are read, not only the digest). When the node holds this machine's build
+   by name, size and sampling and has only not finished hashing it, the cluster row is `not-capable` and says so, and that the
+   node is a candidate once it has; the ticket's next scan reads health again. A same-named, same-size file with other bytes is
+   a miss that names it: `imagegen_ckpt: <name> has the same size on both and different content (fingerprint <12 hex> vs <12 hex>)`. The
+   "send family=X to use its Y" hint reads this machine's other families from the cache without waiting and leaves out a family
+   not hashed yet, so it never holds the ticket scan up on a hash; it is built again at the next miss while any family was left
+   out, so a ticket that waits for hours gains the hint once the hashes land.
+6. **The deploy story.** The digest is version 2 and a recipe is compared only between the same release (`harness_version`), so a
+   fleet part-way through the upgrade matches only inside each release: a delegator at this release finds no match on a node still
+   on the one before, and a node at this release is matched by no older delegator, and an overflow then degrades to the local
+   line and the ticket as it does for any release skew. **Every node that should take overflow must run this release before
+   the live matches can be read again.** A dispatch is sent only to a node whose health row carries a
+   digest, which the node publishes once it has read its files, so the first dispatch after a node restarts finds them cached and is
+   not refused for want of them. A dispatch that does meet a file the node has not read (one that changed after its row was
+   published, or a cache that was dropped) waits for it (decision 4: until the request ends and, whatever the request, 20 s at most for each file; a family of four files read in a few seconds on the machine measured) and is admitted when the digest then matches. Only a
+   read still unfinished at that bound (a slow or cold disk, a stalled read) is answered 412 with the cause `pending`, which the
+   delegator reads as a wait and not as a finding (decision 7).
+7. **A 412 says why, and the delegator tells a wait from a difference.** A 412 used to mean one thing, that the node's files had
+   changed since it published them, and the delegator left such a node alone for a minute and, on the next, for the cap (5 minutes),
+   counting each as a bounce. A node can now also refuse because it has not finished reading its weight files and cannot say yet
+   whether the family is what it was sent, which is a wait for an answer and not a finding. The refusal's JSON body carries a
+   `cause` beside `status` and `error`, one of `pending` (every file the node lacks a fingerprint for is still being read),
+   `unreadable` (a file is there and could not be read, so the node cannot vouch for the family) or `changed` (the family no longer
+   digests to the digest sent, or the node no longer serves it or binds it to another engine). The member is read as a member and
+   not matched out of a sentence, and the node's words choose nothing beyond these three: a refusal that names none this build
+   knows (a proxy, a node of another build, a node of an earlier build) is bounced like `changed`, the conservative reading, and its
+   row says the node did not say why. A delegator that reads `pending` leaves the node alone for the first bounce step (a minute:
+   chosen) and does **not** count it as a bounce, so a run of `pending` answers never reaches the cap and a later `changed` still
+   starts at a minute. `unreadable` and `changed` are bounced as before. The cluster row names the cause. The pause is there because
+   the rows a node published can be up to a minute old (its health memo is 60 s) and would offer it the job again at the next scan,
+   each dispatch waiting up to 20 s for the same answer; what the node is, is decided by the health row the next scan reads, not by
+   the pause, and it is a minute and not the cap because a node that is reading its files is expected to have read them by then.
+
+**Named limits of the amendment.** For a window of seconds after a node starts, or after one of its weight files changes (0.17 to
+0.87 s per file on the machine measured, with a warm cache; a cold disk was not measured), its family is
+`pending` and the node is a named miss; a delegator that starts reads its own files once, a sample per file, before its first
+comparison. **A one-shot CLI call is a fresh process, so on a busy lane it reads its family's samples again on every call, before
+it makes its ticket** (an estimate from the figures above: one to three seconds for a family of three or four files), and on a free
+lane it reads nothing, because the lane is asked first; the MCP server and `fleet-serve` keep the cache for the life of the
+process. The two sizes, the 30 s retry, the 20 s wait and the 60 s read bound are chosen, and the timings above are one machine's, with the
+page cache not controlled. The 30 s retry is keyed on the file's state (path, size, modification time), so a file still being
+copied, whose size or time keeps moving, is read again on every health refresh (64 MiB at most per read, bounded by the health
+poll) and not once per 30 s. Nothing here was run against a
+live fleet: the acceptance is the three live matches of 0.179.0 read again after every node runs this release
+(docs/systems/media-generation.md, "Reading a node's recipes").

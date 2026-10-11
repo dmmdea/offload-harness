@@ -41,6 +41,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/dmmdea/offload-harness/internal/composebundle"
 	"github.com/dmmdea/offload-harness/internal/composeremote"
@@ -187,7 +188,7 @@ func nodeRoutes(req core.Request) []string {
 }
 
 // Run is the entry point the CLI verbs share: RunWith for a caller that waits for its job (Wait.Window < 0), so an image
-// call that finds every lane busy blocks until the first lane that frees runs it.
+// call or a graph that finds every lane busy blocks until the first lane that frees runs it.
 func Run(ctx context.Context, cfg config.Config, runner Runner, req core.Request, route string, remotes []string) core.Result {
 	return RunWith(ctx, cfg, runner, req, route, remotes, Wait{Window: -1})
 }
@@ -195,8 +196,8 @@ func Run(ctx context.Context, cfg config.Config, runner Runner, req core.Request
 // RunWith is the entry point the MCP tools and the CLI verbs share. local runs here; remote runs on a fleet
 // node; auto runs here when this box has the lane (byte-identical to before the route existed) and on a
 // fleet node when it has none and a node is configured. remotes, when given, replaces delegate_remotes for
-// this call and must be a subset of it. An image call on a box that has the lane AND a fleet, whose lane is not free,
-// becomes a ticket (ticket.go) and w says how the call waits for it.
+// this call and must be a subset of it. An image call or a whole-node graph on a box that has the lane AND a fleet, whose
+// lane is not free, becomes a ticket (ticket.go) and w says how the call waits for it.
 func RunWith(ctx context.Context, cfg config.Config, runner Runner, req core.Request, route string, remotes []string, w Wait) core.Result {
 	r, ok := NormalizeRoute(route)
 	if ok && r == RouteAuto {
@@ -223,20 +224,10 @@ func RunWith(ctx context.Context, cfg config.Config, runner Runner, req core.Req
 			if noFleet {
 				return runner.Run(ctx, req)
 			}
-			// A lane here AND a fleet. A whole-node GRAPH is offered once to an idle single-card node that holds the files
-			// it names when its lane is not free, and otherwise waits in this machine's own lane; the deferral it ends in
-			// says per node why the fleet did not take it (ADR 0082 Amendment 1). It is not a ticket: a graph does not wait
-			// in the cluster queue yet (ADR 0083).
-			if req.Task == core.TaskRunGraph {
-				ov := tryGraphOverflow(ctx, cfg, runner, req, remotes)
-				if ov.placed {
-					return ov.res
-				}
-				return ov.annotate(runner.Run(ctx, req))
-			}
-			// Any other call: a free lane runs it here; a busy one makes an IMAGE call a ticket that runs on the
-			// first matching lane that frees, here or on an idle node that renders the same recipe (ADR 0082,
-			// ADR 0083). The answer, when the call's window ends first, says per node why not.
+			// A lane here AND a fleet: a free lane runs the call here; a busy one makes an IMAGE call or a whole-node GRAPH
+			// a ticket that runs on the first matching lane that frees, here or on an idle node that renders the same
+			// recipe or holds the files the graph names (ADR 0082, ADR 0083 and its Amendment 1). The answer, when the
+			// call's window ends first, says per node why not. Any other task runs here as before (admit).
 			return defaultQ.runQueued(ctx, cfg, runner, req, remotes, w)
 		}
 	}
@@ -288,8 +279,19 @@ func contractDefer(msg string, meta core.Meta) core.Result {
 	return res
 }
 
+// noNodeConfigured is the placementError of a call no node of the roster can ever take as configured (see pickNodeFor): it
+// answers like any capacity defer, and also files core.ErrClassNoNodeConfigured so that a caller that waits for a place (the
+// image batch) can tell it from a fleet that is only busy or out of reach.
+type noNodeConfigured struct{ *placementError }
+
+func (e *noNodeConfigured) Unwrap() error { return e.placementError }
+
 func placementDefer(err error, placement string) core.Result {
 	res := core.Deferf(err.Error(), "", core.Meta{Placement: placement})
+	var nc *noNodeConfigured
+	if errors.As(err, &nc) {
+		res.Meta.ErrClass = core.ErrClassNoNodeConfigured
+	}
 	var pe *placementError
 	var ce *contractError
 	switch {
@@ -619,7 +621,11 @@ func contains(xs []string, x string) bool {
 // reachable, lists the task (and media-job when input files travel), reports every route the task needs as
 // CONFIGURED when it reports routes at all (an older node reports none: unknown, not refused), and does not
 // hold a TEXT lease (it would answer 503 anyway). Among them a node with no held lease ranks first, then
-// the shortest queue (queued plus running), then config order. Every miss is named in the error.
+// the shortest queue (queued plus running), then config order. Every miss is named in the error. When no node
+// is eligible and every one of them was left out for a CONFIGURATION fact (not serving the task, a route not
+// configured, no refine=false, an entry the tailnet guard refused), the error is a noNodeConfigured: waiting
+// does not change any of those. One node that is merely unreachable or text-leased keeps it an ordinary
+// capacity defer, because that node may take the call later.
 func pickNode(ctx context.Context, cfg config.Config, bases []string, task, doorTask string, routes []string) (base, node string, err error) {
 	return pickNodeFor(ctx, cfg, bases, task, doorTask, routes, need{})
 }
@@ -636,6 +642,9 @@ func pickNodeFor(ctx context.Context, cfg config.Config, bases []string, task, d
 	var (
 		cands  []cand
 		misses []string
+		// later counts the nodes left out for a reason that passes (not reachable, a text lease on the card); fixed counts
+		// the ones left out for a configuration fact.
+		later, fixed int
 	)
 	// The candidates are read through internal/rosterprobe like every other single-shot lane (ADR 0074):
 	// each entry is judged by the tailnet shape check before it is dialled (a refused entry is a named miss,
@@ -646,27 +655,37 @@ func pickNodeFor(ctx context.Context, cfg config.Config, bases []string, task, d
 		b, v := r.Base, r.View
 		if r.Err != nil {
 			misses = append(misses, r.Miss())
+			if r.Refused != nil {
+				fixed++ // the tailnet guard will not admit the entry: it is never dialled, whatever the node is doing
+			} else {
+				later++ // it did not answer, or answered something that is not health: it may be back
+			}
 			continue
 		}
 		who := fmt.Sprintf("%s (%s)", r.Shown(), v.NodeID)
 		if !contains(v.Tasks, task) {
 			misses = append(misses, fmt.Sprintf("%s: does not serve %s", who, task))
+			fixed++
 			continue
 		}
 		if doorTask == taskMediaJob && !contains(v.Tasks, taskMediaJob) {
 			misses = append(misses, fmt.Sprintf("%s: does not advertise media-job (a node opens that door with fleet_media_inputs and a fleet_auth_token)", who))
+			fixed++
 			continue
 		}
 		if len(routes) > 0 && v.MediaRoutesKnown && !anyConfigured(v, routes) {
 			misses = append(misses, fmt.Sprintf("%s: route %s is %s on that node", who, strings.Join(routes, " or "), stateOf(v, routes)))
+			fixed++
 			continue
 		}
 		if v.LeasedText {
 			misses = append(misses, fmt.Sprintf("%s: a text lease holds its card", who))
+			later++
 			continue
 		}
 		if n.refineOff && task == taskImage && !v.RefineHonoured {
 			misses = append(misses, fmt.Sprintf("%s: does not honour refine=false (an older harness would refine the prompt anyway)", who))
+			fixed++
 			continue
 		}
 		if why := n.releaseRefuses(v); why != "" {
@@ -688,7 +707,12 @@ func pickNodeFor(ctx context.Context, cfg config.Config, bases []string, task, d
 		if doorTask == taskMediaJob {
 			why += " with input files"
 		}
-		return "", "", &placementError{core.DeferClassCapacity, why + ": probed " + strings.Join(misses, "; ")}
+		pe := &placementError{core.DeferClassCapacity, why + ": probed " + strings.Join(misses, "; ")}
+		if later == 0 && fixed > 0 {
+			pe.msg += "; every node is left out for how it is configured, which waiting does not change"
+			return "", "", &noNodeConfigured{pe}
+		}
+		return "", "", pe
 	}
 	sort.SliceStable(cands, func(a, b int) bool {
 		if cands[a].held != cands[b].held {
@@ -733,8 +757,14 @@ type postError struct {
 	// status is the HTTP status the node answered (0: no answer), retryAfter its Retry-After.
 	status     int
 	retryAfter time.Duration
+	// cause is the reason a node named in the body of its refusal (mediacap.RecipeRefusalCauseKey: one of
+	// mediacap.RecipeRefusal*), "" when it named none this build knows. Only a 412 carries one.
+	cause string
 	// neverReached: the connection was never made, so nothing was sent.
 	neverReached bool
+	// refusal is the "refusal" member of a 503 body (refusalNotCapable: the node is not full, it cannot run THIS request), and
+	// detail the node's own sentence from the body's "error" member ("" when the body has none).
+	refusal, detail string
 }
 
 func (e *postError) Unwrap() error { return e.placementError }
@@ -776,7 +806,17 @@ func post(ctx context.Context, cfg config.Config, base, route string, body []byt
 		if secs, perr := strconv.Atoi(strings.TrimSpace(resp.Header.Get("Retry-After"))); perr == nil && secs > 0 {
 			retry = time.Duration(secs) * time.Second
 		}
-		return &postError{placementError: &placementError{class, rosterprobe.Scrub(base, fmt.Errorf("dispatch %s: status %d: %s", url, resp.StatusCode, truncate(rb)))}, status: resp.StatusCode, retryAfter: retry}
+		pe := &postError{placementError: &placementError{class, rosterprobe.Scrub(base, fmt.Errorf("dispatch %s: status %d: %s", url, resp.StatusCode, truncate(rb)))}, status: resp.StatusCode, retryAfter: retry, cause: refusalCause(rb)}
+		// The node's own word for the kind of refusal, and its sentence, from a body it wrote (a proxy's body is no JSON and says
+		// nothing): a delegator tells "not this request" from "not now" by the member and never by the wording.
+		var wire struct {
+			Refusal string `json:"refusal"`
+			Error   string `json:"error"`
+		}
+		if json.Unmarshal(rb, &wire) == nil {
+			pe.refusal, pe.detail = wire.Refusal, cutText(rosterprobe.Scrub(base, errors.New(wire.Error)), detailMax)
+		}
+		return pe
 	}
 	// The node accepted the job: whatever the negative cache holds against it is out of date.
 	rosterprobe.Default.Forget(base)
@@ -1388,6 +1428,21 @@ func auth(cfg config.Config, req *http.Request) {
 	if cfg.FleetAuthToken != "" {
 		req.Header.Set("Authorization", "Bearer "+cfg.FleetAuthToken)
 	}
+}
+
+// detailMax bounds the node's own sentence that a cluster row quotes (a node lists up to six missing names; a body is the node's
+// to write and must not make a row of unbounded size). Chosen, not measured.
+const detailMax = 600
+
+// cutText cuts s to at most n bytes without splitting a character.
+func cutText(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n] + "…"
 }
 
 func truncate(b []byte) string {

@@ -4,7 +4,10 @@
 // only a raw grammar is a safe path.
 package gbnf
 
-import "strings"
+import (
+	"fmt"
+	"strings"
+)
 
 // FieldType enumerates the value kinds we constrain.
 type FieldType int
@@ -15,14 +18,25 @@ const (
 	TInteger
 	TBool
 	TStringArray
-	TEnum // string limited to Enum values
+	TEnum   // string limited to Enum values
+	TObject // a nested object: its keys are Props, in order
+	TArray  // an array whose every element is Items (an object, or another array)
 )
 
 // Field is one JSON object property, emitted in declaration order.
+//
+// A TObject field carries its own fields in Props and a TArray field the shape of
+// its elements in Items (Items.Name is unused), so a schema of any depth is a tree
+// of Fields. Both are what the strings used to stand in for: before they existed
+// an object and a list of objects compiled to a string and a list of strings, and
+// the seat was constrained into a shape the schema then refused (register F43,
+// job-error class C12).
 type Field struct {
-	Name string
-	Type FieldType
-	Enum []string // used when Type == TEnum
+	Name  string
+	Type  FieldType
+	Enum  []string // used when Type == TEnum
+	Props []Field  // used when Type == TObject; empty means any JSON object
+	Items *Field   // used when Type == TArray; nil means strings
 }
 
 // commonRules are the shared terminals. Written as a raw string so the GBNF
@@ -76,19 +90,95 @@ func typeRule(f Field) string {
 	return "string"
 }
 
-// Object returns a complete GBNF grammar for a JSON object with the given
-// fields in order. All fields are required and emitted in declaration order.
-func Object(fields []Field) string {
+// genericRules admit any JSON value. They are written out only when a grammar
+// holds an object the schema left open (a TObject with no Props), which has no keys
+// to constrain and must still be an object, not a string.
+const genericRules = `jvalue ::= jobject | jarray | string | number | boolean | "null"
+jobject ::= "{" ws ( string ws ":" ws jvalue ( ws "," ws string ws ":" ws jvalue )* )? ws "}"
+jarray ::= "[" ws ( jvalue ( ws "," ws jvalue )* )? ws "]"
+`
+
+// builder collects the rules a nested grammar needs beyond root and commonRules. A
+// nested object or array gets a rule of its own, named by position (`obj-3`,
+// `arr-4`) and never by the property name: llama.cpp's parser takes only letters,
+// digits and dashes in a rule name, and a JSON key such as `key_facts` is not one.
+// Rules are numbered in the order they finish, children before the rule that uses
+// them, so the same fields always yield the same text.
+type builder struct {
+	n       int
+	rules   []string
+	generic bool
+}
+
+// add records `prefix-N ::= expr` and returns the name.
+func (b *builder) add(prefix, expr string) string {
+	b.n++
+	name := fmt.Sprintf("%s-%d", prefix, b.n)
+	b.rules = append(b.rules, name+" ::= "+expr)
+	return name
+}
+
+// object is the production of a JSON object with the given fields, in order:
+// every field required, no other key. It is a single line.
+func (b *builder) object(fields []Field) string {
 	parts := []string{`"{"`, "ws"}
 	for i, f := range fields {
 		if i > 0 {
 			parts = append(parts, `ws "," ws`)
 		}
-		parts = append(parts, jkey(f.Name), `ws ":" ws`, typeRule(f))
+		parts = append(parts, jkey(f.Name), `ws ":" ws`, b.value(f))
 	}
 	parts = append(parts, `ws "}"`)
-	root := "root ::= " + strings.Join(parts, " ")
-	return root + "\n" + commonRules
+	return strings.Join(parts, " ")
+}
+
+// value is what stands for one field's value inside an object or an array: a
+// terminal's name or inline alternation for a scalar, the name of a rule of its
+// own for an object or an array.
+func (b *builder) value(f Field) string {
+	switch f.Type {
+	case TObject:
+		if len(f.Props) == 0 {
+			b.generic = true
+			return "jobject"
+		}
+		return b.add("obj", b.object(f.Props))
+	case TArray:
+		item := Field{Type: TString}
+		if f.Items != nil {
+			item = *f.Items
+		}
+		v := b.value(item)
+		return b.add("arr", `"[" ws ( `+v+` (ws "," ws `+v+`)* )? ws "]"`)
+	}
+	return typeRule(f)
+}
+
+// text is the rules after commonRules: the generic value rules when used, then the
+// nested object and array rules. Empty for a flat object, so a flat grammar is
+// byte for byte what it always was.
+func (b *builder) text() string {
+	var sb strings.Builder
+	if b.generic {
+		sb.WriteString(genericRules)
+	}
+	for _, r := range b.rules {
+		sb.WriteString(r)
+		sb.WriteByte('\n')
+	}
+	return sb.String()
+}
+
+// Object returns a complete GBNF grammar for a JSON object with the given
+// fields in order. All fields are required and emitted in declaration order, at
+// every depth: a nested object admits its own keys, in order, and nothing else.
+//
+// The root production stays on ONE line (`root ::= ...`), which WrapThinking
+// relies on; whatever a nested shape needs follows the common rules.
+func Object(fields []Field) string {
+	var b builder
+	root := "root ::= " + b.object(fields)
+	return root + "\n" + commonRules + b.text()
 }
 
 // WrapThinking turns a grammar G (whose root is "root ::= <prod>") into a reasoning grammar
@@ -124,7 +214,8 @@ func WrapThinking(grammar string) string {
 // none, and orderedKeys reads `required` first when FromJSONSchema turns this
 // back into Fields. So JSONSchema -> FromJSONSchema round-trips, order and
 // all, and the two constraint expressions of one task cannot drift apart in
-// which field comes first.
+// which field comes first. A nested object is rendered the same way at its own
+// level, so the order survives at every depth.
 func JSONSchema(fields []Field) map[string]any {
 	props := make(map[string]any, len(fields))
 	required := make([]any, 0, len(fields))
@@ -151,6 +242,18 @@ func schemaProp(f Field) map[string]any {
 		return map[string]any{"type": "boolean"}
 	case TStringArray:
 		return map[string]any{"type": "array", "items": map[string]any{"type": "string"}}
+	case TObject:
+		if len(f.Props) == 0 {
+			// the grammar's open object (genericRules): any object, no keys named.
+			return map[string]any{"type": "object"}
+		}
+		return JSONSchema(f.Props)
+	case TArray:
+		items := map[string]any{"type": "string"}
+		if f.Items != nil {
+			items = schemaProp(*f.Items)
+		}
+		return map[string]any{"type": "array", "items": items}
 	case TEnum:
 		if len(f.Enum) == 0 {
 			// typeRule degrades an empty enum to a plain string; keep the two
@@ -167,9 +270,19 @@ func schemaProp(f Field) map[string]any {
 }
 
 // FromJSONSchema builds Fields from a minimal JSON-schema object (used by the
-// dynamic `extract` task). It handles type: string/number/integer/boolean,
-// arrays of strings, and string enums. Property order follows the schema's
-// "required" list if present, else map iteration is sorted by required then name.
+// dynamic `extract` task and the agent re-pack). It handles type:
+// string/number/integer/boolean, string enums, nested objects (their own
+// "properties", to any depth) and arrays of objects or of arrays. Property order
+// follows the schema's "required" list if present, then the remaining properties
+// by name; a nested object is ordered the same way at its own level.
+//
+// What it still reads as a plain string, and the grammar therefore forces to be
+// one: a type it has no field kind for (a type list such as ["string","null"], an
+// anyOf/oneOf/allOf/$ref schema), and the ITEMS of an array that are not objects or
+// arrays. An array of strings, numbers, booleans or enum values compiles to an array
+// of strings, as it always has: the re-pack's coercion turns the quoted scalars back
+// into the schema's type. Every property a schema lists is required by the grammar,
+// at every depth, whether or not the schema's own "required" names it.
 func FromJSONSchema(schema map[string]any) []Field {
 	props, _ := schema["properties"].(map[string]any)
 	if props == nil {
@@ -182,9 +295,24 @@ func FromJSONSchema(schema map[string]any) []Field {
 		if p == nil {
 			continue
 		}
-		fields = append(fields, Field{Name: name, Type: schemaType(p), Enum: enumOf(p)})
+		fields = append(fields, fieldOf(name, p))
 	}
 	return fields
+}
+
+// fieldOf is one property's Field: its kind, and for an object or an array the
+// shape underneath it.
+func fieldOf(name string, p map[string]any) Field {
+	f := Field{Name: name, Type: schemaType(p), Enum: enumOf(p)}
+	switch f.Type {
+	case TObject:
+		f.Props = FromJSONSchema(p)
+	case TArray:
+		items, _ := p["items"].(map[string]any)
+		it := fieldOf("", items)
+		f.Items = &it
+	}
+	return f
 }
 
 func schemaType(p map[string]any) FieldType {
@@ -199,10 +327,36 @@ func schemaType(p map[string]any) FieldType {
 	case "boolean":
 		return TBool
 	case "array":
+		if compositeItems(p) {
+			return TArray
+		}
 		return TStringArray
-	default:
-		return TString
+	case "object":
+		return TObject
+	case "":
+		// a nested schema that lists properties and names no type is an object
+		if _, ok := p["properties"].(map[string]any); ok {
+			return TObject
+		}
 	}
+	return TString
+}
+
+// compositeItems reports whether an array schema's items are objects or arrays,
+// the elements a list of strings cannot stand in for.
+func compositeItems(p map[string]any) bool {
+	items, _ := p["items"].(map[string]any)
+	if items == nil {
+		return false
+	}
+	switch s, _ := items["type"].(string); s {
+	case "object", "array":
+		return true
+	case "":
+		_, ok := items["properties"].(map[string]any)
+		return ok
+	}
+	return false
 }
 
 func enumOf(p map[string]any) []string {

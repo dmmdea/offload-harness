@@ -41,7 +41,14 @@ func okRepackFake() *agentFake {
 //
 // A 30 s wall and 30 s of slack leave about 60 s. At 0.5 tok/s that buys 30
 // tokens, and the one-line answer alone needs 69 (len/3 + 64).
-func TestRunAgentTaskRepackIsSkippedWhenTheWallCannotBuyTheAnswer(t *testing.T) {
+//
+// Since register F44/C13 (ADR 0055 item 10) the WALL is no longer what skips it: the
+// re-pack is owed the time its own answer needs (207 s here), and runs on it. What
+// still skips it is the run's CEILING having no room for the answer, so this pins the
+// same shape under a 10 s ceiling, and the starved wall is pinned the other way
+// round in agenttask_repackowed_test.go.
+func TestRunAgentTaskRepackIsSkippedWhenTheCeilingCannotBuyTheAnswer(t *testing.T) {
+	defer compressLiveness(t, time.Minute, 30*time.Second, 10)()
 	fake := okRepackFake()
 	srv := fake.server(t)
 	defer srv.Close()
@@ -59,7 +66,7 @@ func TestRunAgentTaskRepackIsSkippedWhenTheWallCannotBuyTheAnswer(t *testing.T) 
 	if wire.RepackAttempts != 0 {
 		t.Fatalf("repack_attempts = %d, want 0: attempts count the requests actually sent", wire.RepackAttempts)
 	}
-	for _, want := range []string{"re-pack skipped:", " left ", "0.5 tok/s", "buys ", " tokens < the answer's 69"} {
+	for _, want := range []string{"re-pack skipped:", " left to the ceiling", "0.5 tok/s", "buys ", " tokens < the answer's 69"} {
 		if !strings.Contains(wire.RepackNote, want) {
 			t.Errorf("repack_note = %q, want it to say %q", wire.RepackNote, want)
 		}

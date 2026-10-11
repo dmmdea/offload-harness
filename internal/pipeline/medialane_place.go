@@ -1,6 +1,7 @@
 package pipeline
 
-// The place a queued image call keeps in this box's line (core.PlaceKeeper; P0 plan S2, ADR 0083).
+// The place a queued image call keeps in this box's line (core.PlaceKeeper; P0 plan S2, ADR 0083). A whole-node graph's place is
+// leaveGraphPlace (medialane_graph.go); the keep and the drop below serve both.
 //
 // A ticket (internal/mediaremote) waits for the first lane that frees anywhere in the cluster, so it can wait for hours
 // and must stay senior to every call that arrives after it the whole while. The local line already has the thing for
@@ -28,6 +29,9 @@ func noPlace(why string) error { return fmt.Errorf("%w (%s)", core.ErrNoMediaPla
 
 // LeaveMediaPlace implements core.PlaceKeeper.
 func (p *Pipeline) LeaveMediaPlace(ctx context.Context, req core.Request, since time.Time) (core.MediaPlace, error) {
+	if req.Task == core.TaskRunGraph {
+		return p.leaveGraphPlace(req, since) // a whole-node graph's place (medialane_graph.go)
+	}
 	ln, why, _ := p.resolveLane(ctx, req)
 	if why != "" {
 		return core.MediaPlace{}, noPlace(why)

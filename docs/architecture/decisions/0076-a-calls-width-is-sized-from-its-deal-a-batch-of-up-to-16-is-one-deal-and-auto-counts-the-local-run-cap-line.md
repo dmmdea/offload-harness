@@ -91,7 +91,8 @@ counted the local seat's line for the spread deal only) and [ADR 0032](0032-a-pe
 
 5. **R1's rules hold at any width.** ADR 0073 decisions 9 and 10 are stated in terms of `callDeadline.unstarted()` and the
    reserve, not of the number 4, and nothing about them moved. A wait that holds a run slot while a subtask of the call has not
-   started keeps its TTL, and only the last subtask to start waits to the call's horizon; the launch loop starts nothing inside
+   started holds its slot for the TTL and then gives it up and waits on to the call's horizon (the 2026-10-10 amendment of ADR
+   0073); the launch loop starts nothing inside
    the reserve; the call-deadline unwind is the same. A wider semaphore means fewer subtasks are ever behind a wait, which is
    the point: the overflow, which counts nothing in the width (decision 1), starts behind the dealt subtasks as their slots
    free, and the last of them waits to the horizon.

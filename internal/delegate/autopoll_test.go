@@ -180,8 +180,12 @@ func TestExplicitTimeoutContractIsNeverAutoBounded(t *testing.T) {
 // at the bound its OWN advertisement implies — not 900 s later. The wall unit
 // is compressed so the 300 s floor is testable; the arithmetic is real.
 func TestAutoContractIsAbandonedAtTheSizedBoundNotTheCap(t *testing.T) {
+	// The claim is a difference of wall clocks, so the margin is what the unit buys: the cap sits
+	// (AgentTimeoutSecCap - AgentTimeoutSecDefault) units past the sized bound, and at 1 ms that was 600 ms,
+	// which a loaded box overran (abandoned "after 1.04 s", register F66). 5 ms puts it 3 s away.
+	const unit = 5 * time.Millisecond
 	compressPolls(t, 2*time.Millisecond, 50*time.Millisecond)
-	compressWallUnit(t, time.Millisecond)
+	compressWallUnit(t, unit)
 	node := &fakeNode{
 		t: t, agentEnabled: true, resident: true, ctxTokens: 8192, nodeID: "fake-node",
 		// A fast seat: the estimate lands under the floor, so the bound is the
@@ -203,8 +207,8 @@ func TestAutoContractIsAbandonedAtTheSizedBoundNotTheCap(t *testing.T) {
 	if sum != (Summary{Deferred: 1}) {
 		t.Fatalf("summary = %+v, want exactly one defer", sum)
 	}
-	bound := time.Duration(core.AgentTimeoutSecDefault) * time.Millisecond // the compressed 300 s
-	capBudget := time.Duration(core.AgentTimeoutSecCap)*time.Millisecond + 50*time.Millisecond
+	bound := time.Duration(core.AgentTimeoutSecDefault) * unit // the compressed 300 s
+	capBudget := time.Duration(core.AgentTimeoutSecCap)*unit + 50*time.Millisecond
 	if elapsed < bound {
 		t.Fatalf("abandoned after %s, before the sized bound %s — the delegator cut the node short", elapsed, bound)
 	}

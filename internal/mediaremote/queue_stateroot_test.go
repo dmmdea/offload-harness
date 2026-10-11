@@ -7,7 +7,6 @@ package mediaremote
 // platform default.
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -51,9 +50,11 @@ func TestTicketQueueNeedsNoStateDirKey(t *testing.T) {
 	}
 }
 
-// A graph call on a machine with no state_dir takes and reads the same per-node claims as one that sets it: a node a ticket
-// has a job on is in use for the graph, and the row names the ticket.
-func TestAGraphReadsTheTicketClaimsOfTheDefaultStateRoot(t *testing.T) {
+// A graph ticket on a machine with no state_dir takes and reads the same per-node claims as one that sets it: a node an image
+// ticket has a job on is in use for the graph, and the row names the ticket. (In 0.180.0 this was a graph CALL reading the
+// claims; a busy graph is a ticket now, ADR 0083 Amendment 1, and the ticket's scan reads them.)
+func TestAGraphTicketReadsTheTicketClaimsOfTheDefaultStateRoot(t *testing.T) {
+	freshQueue(t)
 	inUse := startGraphNode(t, "node-a", []string{krea2File}, 7.96)
 	cfg := graphClient(t, inUse)
 	cfg.StateDir = ""
@@ -71,12 +72,15 @@ func TestAGraphReadsTheTicketClaimsOfTheDefaultStateRoot(t *testing.T) {
 		t.Fatalf("the claim is a file under the default state root: %v", files)
 	}
 
-	lr := &laneRunner{verdict: heldLane(), local: queuedLocal()}
-	res := Run(context.Background(), cfg, lr, graphReqOf(t, krea2Graph, nil), "auto", nil)
+	res := runDoor(cfg, newKeeperRunner(heldLane()), graphReqOf(t, krea2Graph, nil), AtOnce)
+	a := graphAnswer(t, res)
 	noPosts(t, "the node a ticket has a job on", inUse)
-	row, found := rowFor(clusterOf(t, res), "node-a")
+	row, found := rowFor(a.Cluster, "node-a")
 	if !found || row.State != "in-use" || !strings.Contains(row.Why, tk.ID) {
 		t.Errorf("the row names the ticket that uses the node: %+v", row)
+	}
+	if _, has := os.Stat(filepath.Join(root, queueDirName, a.Ticket+".json")); has != nil {
+		t.Errorf("the graph's ticket %s is a file under the default state root: %v", a.Ticket, has)
 	}
 }
 

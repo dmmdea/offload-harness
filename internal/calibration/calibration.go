@@ -235,6 +235,7 @@ func readLedger(path, scale string) (map[string][]point, int, error) {
 	// Increase scanner buffer for potentially long lines.
 	sc.Buffer(make([]byte, 1<<20), 1<<20)
 
+	var all []ledger.Entry
 	for sc.Scan() {
 		line := sc.Bytes()
 		if len(line) == 0 {
@@ -244,7 +245,17 @@ func readLedger(path, scale string) (map[string][]point, int, error) {
 		if json.Unmarshal(line, &e) != nil {
 			continue // skip malformed / partial trailing lines
 		}
+		all = append(all, e)
+	}
+	if err := sc.Err(); err != nil {
+		return byTask, excluded, err
+	}
 
+	// Filter: a test, bake or measurement row carries a fixture's margin, not the box's (register F48):
+	// calibrating the live thresholds on it would move them for traffic nobody sent. The rows are judged
+	// TOGETHER: the inner `agent` row of a labelled job names its parent and carries no class of its own.
+	production, _ := ledger.ProductionRows(all)
+	for _, e := range production {
 		// Filter: cache hits and zero-margin rows carry no useful calibration signal.
 		if e.CacheHit || e.Margin == 0 {
 			continue
@@ -264,7 +275,7 @@ func readLedger(path, scale string) (map[string][]point, int, error) {
 
 		byTask[e.Task] = append(byTask[e.Task], point{margin: e.Margin, correct: correct})
 	}
-	return byTask, excluded, sc.Err()
+	return byTask, excluded, nil
 }
 
 // label extracts the correctness signal from a ledger entry.

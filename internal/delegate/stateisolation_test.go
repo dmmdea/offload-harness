@@ -30,7 +30,7 @@ const stateIsolationPrefix = "lo-delegate-state-"
 // sets it with t.Setenv. Same shape as internal/pipeline/leaseisolation_test.go
 // and internal/pairworkloads/main_test.go.
 func TestMain(m *testing.M) {
-	os.Exit(runIsolated(m, os.MkdirTemp, os.Setenv, os.RemoveAll))
+	os.Exit(runQuietLog(func() int { return runIsolated(m, os.MkdirTemp, os.Setenv, os.RemoveAll) }, os.Stderr))
 }
 
 // suiteRunner is what TestMain runs: *testing.M, or a stub in the fail-closed test.

@@ -30,6 +30,9 @@ type RemoteCall struct {
 	req   core.Request
 	route string
 	start time.Time
+	// cardless is a call through a door that makes test traffic (fleet-measure): the call keeps its asker
+	// ledger row, which says what it was, and opens no card (register F48; Begin and AttachLedger agree).
+	cardless bool
 
 	mu         sync.Mutex
 	finished   bool
@@ -49,10 +52,12 @@ type RemoteCall struct {
 // NewRemoteCall begins attributing a remote call of req. e and led may each be nil (no PAIR card,
 // no ledger row). route is the normalized route the caller asked for.
 func NewRemoteCall(e *Emitter, led *ledger.Ledger, req core.Request, route string) *RemoteCall {
-	return &RemoteCall{e: e, led: led, req: req, route: route, start: time.Now()}
+	return &RemoteCall{e: e, led: led, req: req, route: route, start: time.Now(),
+		cardless: ledger.ClassOfDoor(req.Door) != "" && !e.keepTestCards()}
 }
 
 var _ core.RemoteAttribution = (*RemoteCall)(nil)
+var _ core.NodeNamer = (*RemoteCall)(nil)
 
 // remoteModel is the model a remote call's card names before the node has said which seat it used.
 func remoteModel(task string) string {
@@ -86,8 +91,28 @@ func (c *RemoteCall) Dispatched(base, nodeID, fleetJobID string) {
 		c.jobID = fmt.Sprintf("remote-%d-%d", c.created, c.e.seq.Add(1))
 	}
 	ev := c.eventLocked("queued")
+	cardless := c.cardless
 	c.mu.Unlock()
-	c.e.Emit(ev)
+	if !cardless {
+		c.e.Emit(ev)
+	}
+}
+
+// Ran names the node the call ran on and the job it carried WITHOUT opening a card (core.NodeNamer): the row Finish writes then
+// carries node, node_id and fleet_job_id as a dispatched call's does. It is for the adopter of a ticket whose owner ended, which
+// never dispatches because the card is already open. A call that was dispatched keeps the node it was dispatched to, and one that
+// has ended is left alone.
+func (c *RemoteCall) Ran(base, nodeID, fleetJobID string) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.finished || c.dispatched {
+		return
+	}
+	c.base, c.nodeID, c.fleetJob = base, nodeID, fleetJobID
+	c.host = NodeName(base, nodeID)
 }
 
 // Running turns the card running, once, when the node reports the job started.
@@ -102,8 +127,11 @@ func (c *RemoteCall) Running() {
 	}
 	c.started = time.Now().UnixMilli()
 	ev := c.eventLocked("running")
+	cardless := c.cardless
 	c.mu.Unlock()
-	c.e.Emit(ev)
+	if !cardless {
+		c.e.Emit(ev)
+	}
 }
 
 // Finish ends the call: one terminal frame when a node was chosen, and always one asker ledger row.
@@ -125,7 +153,7 @@ func (c *RemoteCall) Finish(res core.Result) {
 		c.started = c.created
 	}
 	var ev Event
-	card := c.dispatched
+	card := c.dispatched && !c.cardless
 	if card {
 		// started is false whatever Running saw: a remote card turns running when the node ADMITS the
 		// job (a media job is claimed to running at admission, before its lane waits for the card), so
@@ -204,8 +232,11 @@ func (c *RemoteCall) Bounce(res core.Result) {
 	c.dispatched = false
 	c.base, c.host, c.nodeID, c.fleetJob, c.jobID = "", "", "", "", ""
 	c.started, c.created = 0, 0
+	cardless := c.cardless
 	c.mu.Unlock()
-	c.e.EmitSync(ev)
+	if !cardless {
+		c.e.EmitSync(ev)
+	}
 }
 
 // Discard ends an attempt that is not the final answer (the auto route fell back to a local run). An

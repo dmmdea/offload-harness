@@ -62,14 +62,15 @@ func recipeNode(t *testing.T) config.Config {
 	return cfg
 }
 
-// recipeOfFamily is the recipe the test computes on its own for a family of cfg, the way the delegator does.
+// recipeOfFamily is the recipe the test computes on its own for a family of cfg, the way the delegator does: it waits for
+// the content fingerprints, through the cache the node's health reads, so it also warms that cache.
 func recipeOfFamily(t *testing.T, cfg config.Config, name string) mediacap.Recipe {
 	t.Helper()
 	eff, fi, err := cfg.ResolveImageFamily(name)
 	if err != nil {
 		t.Fatal(err)
 	}
-	r, ok := mediacap.ImageRecipe(eff, fi, mediacap.ModelRoots(eff.ComfyDir), nil)
+	r, ok := mediacap.ImageRecipeWith(eff, fi, mediacap.ModelRoots(eff.ComfyDir), nil, recipeFingerprints.Await)
 	if !ok {
 		t.Fatalf("no recipe for %q", name)
 	}
@@ -86,9 +87,10 @@ type healthRecipes struct {
 		Graph   string `json:"graph"`
 		Steps   int    `json:"steps"`
 		Files   []struct {
-			Role  string `json:"role"`
-			Name  string `json:"name"`
-			Bytes int64  `json:"bytes"`
+			Role        string `json:"role"`
+			Name        string `json:"name"`
+			Bytes       int64  `json:"bytes"`
+			Fingerprint string `json:"fingerprint"`
 		} `json:"files"`
 		Explicit []string `json:"explicit"`
 	} `json:"image_recipes"`
@@ -112,6 +114,7 @@ func readHealthRecipes(t *testing.T, s *Server) (healthRecipes, string) {
 // node carries `refine`.
 func TestHealthPublishesImageRecipes(t *testing.T) {
 	cfg := recipeNode(t)
+	warmRecipes(t, cfg) // a node publishes a digest for files it has hashed; this one has been up long enough
 	s, _ := newTestServer(t, cfg, &fakeRunner{}, nil)
 	h, body := readHealthRecipes(t, s)
 	if !h.Refine {
@@ -148,6 +151,13 @@ func TestHealthPublishesImageRecipes(t *testing.T) {
 	}
 	if strings.Contains(body, `"license":"Qwen Research License"`) == false {
 		t.Errorf("the license a result is tagged with is part of the recipe row: %s", body)
+	}
+	for _, row := range h.Recipes {
+		for _, f := range row.Files {
+			if !mediacap.IsFingerprint(f.Fingerprint) {
+				t.Errorf("%s: %s publishes fingerprint %q, want a sha256 beside its size", row.Name, f.Name, f.Fingerprint)
+			}
+		}
 	}
 }
 
@@ -193,6 +203,7 @@ func TestImageRecipesSkipAnSdcppFamily(t *testing.T) {
 // weight files every time, and a file that changes shows within a minute.
 func TestImageRecipesAreMemoisedForAMinute(t *testing.T) {
 	cfg := recipeNode(t)
+	warmRecipes(t, cfg)
 	now := time.Now()
 	prev := mediaClock
 	mediaClock = func() time.Time { return now }

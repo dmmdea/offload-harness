@@ -7,13 +7,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { writeFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { freeComfy, withGpuSlot } from "./gpu-lock.mjs";
 import { familySignature, settleInstanceFamily, freeHarnessInstance } from "./comfy-family.mjs";
 import { readLaunchOwner, stampLaunchFamily } from "./comfy-ownership.mjs";
 import { runGraphFlow } from "./comfy-run-graph.mjs";
+import { scratchDir } from "./test-scratch.mjs";
 
 const MEDIA = { dir: "X", epoch: 7, class: "media" };
 const KEY = "gfake0001";
@@ -45,8 +45,8 @@ async function fakeComfy({ events, freeStatus = 200, argv = ["main.py", "--port"
 }
 
 // A comfy directory whose launch marker for the keyed instance says what it may still hold.
-function comfyDirWith(marker) {
-  const dir = mkdtempSync(join(tmpdir(), "comfy-hoard-"));
+function comfyDirWith(t, marker) {
+  const dir = scratchDir(t, "comfy-hoard-");
   if (marker) writeFileSync(join(dir, `.offload-launch-${KEY}.json`), JSON.stringify({ startedAt: 1, pid: 4242, ownerPid: 1, args: ["main.py", "--port", "1"], profile: {}, key: KEY, port: 1, leaseEpoch: 7, ...marker }));
   return dir;
 }
@@ -66,8 +66,8 @@ function slot(fake, comfyDir, family, fn, extra = {}) {
 test("teardown ALWAYS sends /free {unload_models, free_memory} to a KEPT keyed instance, after the job", async (t) => {
   const events = [];
   const fake = await fakeComfy({ events });
-  const dir = comfyDirWith(null);
-  t.after(async () => { await fake.close(); rmSync(dir, { recursive: true, force: true }); });
+  const dir = comfyDirWith(t, null);
+  t.after(() => fake.close());
   const out = await slot(fake, dir, "", async () => { events.push("job"); return "done"; });
   assert.equal(out, "done");
   assert.deepEqual(events, ["job", "free"], "the free comes after the job, once");
@@ -77,8 +77,8 @@ test("teardown ALWAYS sends /free {unload_models, free_memory} to a KEPT keyed i
 test("a failing /free is said loudly, never swallowed and never fatal to the finished job", async (t) => {
   const events = [];
   const fake = await fakeComfy({ events, freeStatus: 500 });
-  const dir = comfyDirWith(null);
-  t.after(async () => { await fake.close(); rmSync(dir, { recursive: true, force: true }); });
+  const dir = comfyDirWith(t, null);
+  t.after(() => fake.close());
   const lines = [];
   const orig = console.error;
   console.error = (m) => lines.push(String(m));
@@ -111,8 +111,8 @@ test("freeComfy resolves true on an acknowledged free", async (t) => {
 test("a kept instance whose last family DIFFERS is freed BEFORE the first job, and records the new family", async (t) => {
   const events = [];
   const fake = await fakeComfy({ events });
-  const dir = comfyDirWith({ lastFamily: familySignature("qwen-image", "qwen-image-2512-Q5_1.gguf") });
-  t.after(async () => { await fake.close(); rmSync(dir, { recursive: true, force: true }); });
+  const dir = comfyDirWith(t, { lastFamily: familySignature("qwen-image", "qwen-image-2512-Q5_1.gguf") });
+  t.after(() => fake.close());
   const krea2 = familySignature("krea2", "krea2_turbo_bf16.safetensors");
   await slot(fake, dir, krea2, async () => {
     events.push("job");
@@ -126,8 +126,8 @@ test("the SAME family keeps its warm weights: no free before the first job, only
   const events = [];
   const fake = await fakeComfy({ events });
   const sig = familySignature("krea2", "krea2_turbo_bf16.safetensors");
-  const dir = comfyDirWith({ lastFamily: sig });
-  t.after(async () => { await fake.close(); rmSync(dir, { recursive: true, force: true }); });
+  const dir = comfyDirWith(t, { lastFamily: sig });
+  t.after(() => fake.close());
   await slot(fake, dir, sig, async () => { events.push("job"); }, { settleFamily: (o) => settleInstanceFamily({ ...o, settleMs: 0, log: () => {} }) });
   assert.deepEqual(events, ["job", "free"]);
 });
@@ -135,8 +135,8 @@ test("the SAME family keeps its warm weights: no free before the first job, only
 test("a freshly launched instance (a marker with no family) is not freed first, and records its family", async (t) => {
   const events = [];
   const fake = await fakeComfy({ events });
-  const dir = comfyDirWith({});
-  t.after(async () => { await fake.close(); rmSync(dir, { recursive: true, force: true }); });
+  const dir = comfyDirWith(t, {});
+  t.after(() => fake.close());
   const sig = familySignature("krea2", "k.safetensors");
   await slot(fake, dir, sig, async () => { events.push("job"); assert.equal(readLaunchOwner(dir, KEY).lastFamily, sig); },
     { settleFamily: (o) => settleInstanceFamily({ ...o, settleMs: 0, log: () => {} }) });
@@ -146,8 +146,8 @@ test("a freshly launched instance (a marker with no family) is not freed first, 
 test("after the teardown free the instance holds nothing, so the marker no longer names a family", async (t) => {
   const events = [];
   const fake = await fakeComfy({ events });
-  const dir = comfyDirWith({});
-  t.after(async () => { await fake.close(); rmSync(dir, { recursive: true, force: true }); });
+  const dir = comfyDirWith(t, {});
+  t.after(() => fake.close());
   await slot(fake, dir, familySignature("krea2", "k.safetensors"), async () => {}, { settleFamily: (o) => settleInstanceFamily({ ...o, settleMs: 0, log: () => {} }) });
   assert.equal(readLaunchOwner(dir, KEY).lastFamily, undefined, "freed, so nothing is held");
   // The next runner, of ANOTHER family, therefore has nothing to free first.
@@ -160,8 +160,8 @@ test("a free that did NOT succeed before the first job leaves the old family rec
   const events = [];
   const fake = await fakeComfy({ events, freeStatus: 500 });
   const old = familySignature("qwen-image", "q.gguf");
-  const dir = comfyDirWith({ lastFamily: old });
-  t.after(async () => { await fake.close(); rmSync(dir, { recursive: true, force: true }); });
+  const dir = comfyDirWith(t, { lastFamily: old });
+  t.after(() => fake.close());
   const lines = [];
   const r = await settleInstanceFamily({
     comfyDir: dir, key: KEY, api: fake.api, family: familySignature("krea2", "k.safetensors"),
@@ -175,26 +175,24 @@ test("a free that did NOT succeed before the first job leaves the old family rec
 test("an instance with no launch marker is not one this harness launched: settle leaves it alone", async (t) => {
   const events = [];
   const fake = await fakeComfy({ events });
-  const dir = comfyDirWith(null);
-  t.after(async () => { await fake.close(); rmSync(dir, { recursive: true, force: true }); });
+  const dir = comfyDirWith(t, null);
+  t.after(() => fake.close());
   const r = await settleInstanceFamily({ comfyDir: dir, key: KEY, api: fake.api, family: "krea2:k", free: (a) => freeComfy(a, quiet), settleMs: 0, log: () => {} });
   assert.equal(r.freed, false);
   assert.deepEqual(events, []);
 });
 
-test("stampLaunchFamily changes only the family: pid, argv and lease epoch stay what prove the instance is ours", () => {
-  const dir = comfyDirWith({});
-  try {
-    const before = readLaunchOwner(dir, KEY);
-    assert.deepEqual(stampLaunchFamily(dir, KEY, "krea2:k"), { changed: true, previous: "" });
-    const after = readLaunchOwner(dir, KEY);
-    assert.equal(after.lastFamily, "krea2:k");
-    for (const k of ["pid", "args", "leaseEpoch", "key", "port", "startedAt"]) assert.deepEqual(after[k], before[k], k);
-    assert.deepEqual(stampLaunchFamily(dir, KEY, "krea2:k"), { changed: false, previous: "krea2:k" });
-    assert.deepEqual(stampLaunchFamily(dir, KEY, ""), { changed: true, previous: "krea2:k" });
-    assert.equal("lastFamily" in readLaunchOwner(dir, KEY), false);
-    assert.deepEqual(stampLaunchFamily(dir, "gother", "x"), { changed: false, why: "no marker" });
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+test("stampLaunchFamily changes only the family: pid, argv and lease epoch stay what prove the instance is ours", (t) => {
+  const dir = comfyDirWith(t, {});
+  const before = readLaunchOwner(dir, KEY);
+  assert.deepEqual(stampLaunchFamily(dir, KEY, "krea2:k"), { changed: true, previous: "" });
+  const after = readLaunchOwner(dir, KEY);
+  assert.equal(after.lastFamily, "krea2:k");
+  for (const k of ["pid", "args", "leaseEpoch", "key", "port", "startedAt"]) assert.deepEqual(after[k], before[k], k);
+  assert.deepEqual(stampLaunchFamily(dir, KEY, "krea2:k"), { changed: false, previous: "krea2:k" });
+  assert.deepEqual(stampLaunchFamily(dir, KEY, ""), { changed: true, previous: "krea2:k" });
+  assert.equal("lastFamily" in readLaunchOwner(dir, KEY), false);
+  assert.deepEqual(stampLaunchFamily(dir, "gother", "x"), { changed: false, why: "no marker" });
 });
 
 test("familySignature names the family and the weights file, directories dropped", () => {
@@ -209,8 +207,8 @@ test("familySignature names the family and the weights file, directories dropped
 test("freeHarnessInstance frees a kept instance the harness launched, and clears its family", async (t) => {
   const events = [];
   const fake = await fakeComfy({ events });
-  const dir = comfyDirWith({ lastFamily: "graph:x" });
-  t.after(async () => { await fake.close(); rmSync(dir, { recursive: true, force: true }); });
+  const dir = comfyDirWith(t, { lastFamily: "graph:x" });
+  t.after(() => fake.close());
   const r = await freeHarnessInstance({
     comfyDir: dir, key: KEY, api: fake.api, free: (a) => freeComfy(a, quiet), alive: () => true, log: () => {},
     systemArgv: async () => ["main.py", "--port", "1"],
@@ -223,8 +221,8 @@ test("freeHarnessInstance frees a kept instance the harness launched, and clears
 test("freeHarnessInstance leaves a ComfyUI the harness did not start alone", async (t) => {
   const events = [];
   const fake = await fakeComfy({ events });
-  const dir = comfyDirWith({});
-  t.after(async () => { await fake.close(); rmSync(dir, { recursive: true, force: true }); });
+  const dir = comfyDirWith(t, {});
+  t.after(() => fake.close());
   // argv differs from the marker's: not shown to be ours
   let r = await freeHarnessInstance({ comfyDir: dir, key: KEY, api: fake.api, free: (a) => freeComfy(a, quiet), alive: () => true, log: () => {}, systemArgv: async () => ["main.py", "--port", "9"] });
   assert.equal(r.freed, false);
@@ -232,7 +230,7 @@ test("freeHarnessInstance leaves a ComfyUI the harness did not start alone", asy
   r = await freeHarnessInstance({ comfyDir: dir, key: KEY, api: fake.api, free: (a) => freeComfy(a, quiet), alive: () => false, log: () => {}, systemArgv: async () => ["main.py", "--port", "1"] });
   assert.equal(r.freed, false);
   // no marker at all
-  r = await freeHarnessInstance({ comfyDir: comfyDirWith(null), key: KEY, api: fake.api, free: (a) => freeComfy(a, quiet), alive: () => true, log: () => {}, systemArgv: async () => ["main.py", "--port", "1"] });
+  r = await freeHarnessInstance({ comfyDir: comfyDirWith(t, null), key: KEY, api: fake.api, free: (a) => freeComfy(a, quiet), alive: () => true, log: () => {}, systemArgv: async () => ["main.py", "--port", "1"] });
   assert.equal(r.freed, false);
   assert.deepEqual(events, [], "nothing was sent to an instance that is not shown to be ours");
 });

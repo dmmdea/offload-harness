@@ -19,16 +19,16 @@ import (
 
 // TierHealth holds the computed health metrics for one ModelTier.
 type TierHealth struct {
-	Tier            string  `json:"tier"`
-	N               int     `json:"n"`
-	EWMAMargin      float64 `json:"ewma_margin"`
-	EWMADeferRate   float64 `json:"ewma_defer_rate"`
-	EWMATokPerSec   float64 `json:"ewma_tok_per_sec"`
-	P95LatencyMs    float64 `json:"p95_latency_ms"`
-	DriftMargin     bool    `json:"drift_margin"`
-	DriftTokPerSec  bool    `json:"drift_tok_per_sec"`
-	Status          string  `json:"status"`     // "OK" | "DEGRADED" — any anomaly (observability)
-	RouteSkip       bool    `json:"route_skip"` // true ONLY on a genuine quality collapse — the routing signal
+	Tier           string  `json:"tier"`
+	N              int     `json:"n"`
+	EWMAMargin     float64 `json:"ewma_margin"`
+	EWMADeferRate  float64 `json:"ewma_defer_rate"`
+	EWMATokPerSec  float64 `json:"ewma_tok_per_sec"`
+	P95LatencyMs   float64 `json:"p95_latency_ms"`
+	DriftMargin    bool    `json:"drift_margin"`
+	DriftTokPerSec bool    `json:"drift_tok_per_sec"`
+	Status         string  `json:"status"`     // "OK" | "DEGRADED" — any anomaly (observability)
+	RouteSkip      bool    `json:"route_skip"` // true ONLY on a genuine quality collapse — the routing signal
 }
 
 // Report is the result returned by Run. It holds per-tier health and any
@@ -138,7 +138,14 @@ func readLedger(path string) ([]ledger.Entry, error) {
 		}
 		out = append(out, e)
 	}
-	return out, sc.Err()
+	if err := sc.Err(); err != nil {
+		return out, err
+	}
+	// Test, bake and measurement rows are not the box's health (register F48). The rows are judged TOGETHER:
+	// the inner `agent` row of a labelled job names its parent and carries no class of its own, so a row judged
+	// alone would count as real work.
+	kept, _ := ledger.ProductionRows(out)
+	return kept, nil
 }
 
 // keepScale drops rows written on a different margin scale than the one this

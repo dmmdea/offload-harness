@@ -23,16 +23,24 @@ package fleetnode
 
 import (
 	"fmt"
+	"net/http"
 	"strings"
 
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/mediacap"
 )
 
+// RefusalNotCapable is the value of the "refusal" member in the body of a 503 that says "not THIS request" and not "not now": the
+// node is not full and not out of route, it lacks a file this graph names (graphFilesRefusal). A delegator reads the member and
+// not the sentence, so that a node that cannot run one graph is marked not-capable for that ticket alone and is not left alone as
+// a busy one (ADR 0083 Amendment 1). Every other 503 of the dispatch door (queue full, a route that is not CONFIGURED) leaves the
+// member out: those are the node's state, and a delegator is right to look elsewhere for a while.
+const RefusalNotCapable = "not_capable"
+
 // graphNamesCap is how many missing names one refusal lists. A graph with a long list is almost always a whole workflow this
-// node was never meant to run; six names say so and keep the sentence one a caller reads. The delegator's cluster row keeps
-// only the first 300 bytes of the answer's body, so a graph missing many long names shows its first two or three there; the
-// node's own 503 body lists up to six. For a weight file the node stops looking at the seventh missing name (the door is open
+// node was never meant to run; six names say so and keep the sentence one a caller reads. The delegator's cluster row quotes
+// the sentence from the body's "error" member, cut at 600 bytes (mediaremote detailMax), so a graph missing many long names shows
+// its first few there; the node's own 503 body lists up to six. For a weight file the node stops looking at the seventh missing name (the door is open
 // to any peer, and a graph can name thousands of files), so past six it says "more" and not how many; for an input file,
 // which is a short list, it counts the rest.
 const graphNamesCap = 6
@@ -79,6 +87,17 @@ func graphFilesRefusal(cfg config.Config, graph, manifest []byte) *routeNotReady
 		return nil
 	}
 	return &routeNotReadyError{task: "run-graph", detail: strings.Join(parts, "; ")}
+}
+
+// writeRouteNotReady answers a refused dispatch with 503. A refusal that is about THIS request (detail set: the graph names a file
+// the node does not hold) carries the "refusal" member RefusalNotCapable, which tells the delegator the node is not full and not
+// out of route; any other (a route that is not CONFIGURED) is the node's own state and is answered as it always was.
+func writeRouteNotReady(w http.ResponseWriter, err error, nre *routeNotReadyError) {
+	if nre.detail == "" {
+		writeError(w, http.StatusServiceUnavailable, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "error", "error": err.Error(), "refusal": RefusalNotCapable})
 }
 
 func plural(n int, one, many string) string {

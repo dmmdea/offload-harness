@@ -324,7 +324,9 @@ func TestStartedRowIsWrittenAtDispatch(t *testing.T) {
 	if jr := ledger.JobRows(all); len(jr) != 1 || jr[0].Phase != "" || jr[0].JobID != jobID {
 		t.Fatalf("JobRows = %+v, want exactly the finished row of %s", jr, jobID)
 	}
-	s, err := ledger.SummarizeFile(cfg.LedgerPath, 0, ledger.DefaultPrices)
+	// This suite's rows carry the go-test origin, which the default summary leaves out as test traffic
+	// (register F48): the test counts jobs, so it asks for them all.
+	s, err := ledger.SummarizeFileWith(cfg.LedgerPath, 0, ledger.DefaultPrices, true)
 	if err != nil || s.Calls != 1 {
 		t.Fatalf("Summarize = %+v (%v), want 1 call: the marker is not a job", s, err)
 	}
@@ -429,7 +431,7 @@ func TestInnerAgentRowCarriesParentJobID(t *testing.T) {
 	if len(jobs) != 1 || jobs[0].Task != "agent_delegate" || jobs[0].JobID != jobID {
 		t.Fatalf("JobRows = %+v, want exactly the delegator's finished row for %s", jobs, jobID)
 	}
-	if s, serr := ledger.SummarizeFile(cfg.LedgerPath, 0, ledger.DefaultPrices); serr != nil || s.Calls != 1 {
+	if s, serr := ledger.SummarizeFileWith(cfg.LedgerPath, 0, ledger.DefaultPrices, true); serr != nil || s.Calls != 1 {
 		t.Fatalf("Summarize = %+v (%v), want 1 call: a local job is counted once", s, serr)
 	}
 }
