@@ -15,6 +15,7 @@ import { rmSync, mkdtempSync, writeFileSync, mkdirSync, unlinkSync } from "node:
 import {
   memoryStack, quiesceLlamaSwap, freeLlamaSwap, parseUnloadModels, parseInflightMetrics,
   checkInheritedLease, claimLeaseUnload, readLease, inheritedLease, LEASE_FORMAT_SIGNATURE,
+  leaseDevices,
 } from "./gpu-lock.mjs";
 
 test("MEMORY_STACK is sourced from env, not a buried const (invariant 1)", () => {
@@ -634,4 +635,66 @@ test("freeLlamaSwap refuses the unload-all fallback while a model outside the li
   }));
   assert.equal(calls.bulk, 0, "GET /unload is total and must not run beside a seat that has to stay");
   assert.ok(logged.some((m) => /cannot unload-all/.test(m) && /b/.test(m)), "and it says why: " + JSON.stringify(logged));
+});
+
+// --- a lease on some cards never unloads "everything" (register F15) ------------------------
+// The wrapper hands a card lease a list (a list, or "-" for none). A card lease that arrives with NO
+// list (an older wrapper, a hand-built environment, a roster nobody could read) used to fall to today's
+// rule, every model off the memory stack, which empties the seats on the cards the lease does not hold.
+// The lane cannot tell which seats those are, so it unloads nothing and says why. A whole-node lease
+// holds every card and keeps today's rule.
+
+test("leaseDevices: the cards of a lease come from GPU_LEASE_DEVICES, else from the epoch record", () => {
+  assert.deepEqual(leaseDevices({ GPU_LEASE_DEVICES: "gpu-aaaa, gpu-bbbb ," }, null), ["gpu-aaaa", "gpu-bbbb"]);
+  assert.deepEqual(leaseDevices({}, null), [], "no lease, no cards: a whole-node run");
+  assert.deepEqual(leaseDevices({}, { dir: "X", epoch: 5 }, () => ({ epoch: 5, state: "active", devices: ["gpu-cccc"] })), ["gpu-cccc"],
+    "a card-scoped lease names its cards in e/<epoch>.json");
+  assert.deepEqual(leaseDevices({}, { dir: "X", epoch: 5 }, () => null), [], "a lease with no epoch record is a whole-node lease");
+  assert.deepEqual(leaseDevices({}, { dir: "X", epoch: 5 }, () => ({ epoch: 5, devices: ["../x"] })), ["../x"],
+    "an id this file would not open as a claim is still a card the lease holds: a card lease, never a whole-node one");
+});
+
+test("a card lease with NO list unloads nothing and says why (never every model off the stack)", async () => {
+  const { calls, fetchImpl } = fakeSwap({ roster: ["a", "b", "embeddinggemma"], running: ["a", "b", "embeddinggemma"] });
+  const logged = [];
+  await withFetch(fetchImpl, () => freeLlamaSwap("http://x", {
+    unloadModels: null, leaseDevices: ["gpu-cccc"], log: (m) => logged.push(m),
+    quiesce: async () => ({ drained: true, waitedMs: 0, unknown: [] }),
+  }));
+  assert.equal(calls.unloads.length, 0, "no model may leave: its card is not known");
+  assert.equal(calls.bulk, 0, "and the total route does not run either");
+  assert.ok(logged.some((m) => /gpu-cccc/.test(m) && /no list|NOT unloading/.test(m)), "the refusal is loud and names the cards: " + JSON.stringify(logged));
+});
+
+test("a card lease reads the cards from the environment when none is passed", async () => {
+  const { calls, fetchImpl } = fakeSwap({ roster: ["a", "b"], running: ["a", "b"] });
+  const prevList = process.env.GPU_LEASE_UNLOAD_MODELS, prevDev = process.env.GPU_LEASE_DEVICES;
+  delete process.env.GPU_LEASE_UNLOAD_MODELS;
+  process.env.GPU_LEASE_DEVICES = "gpu-cccc";
+  try {
+    await withFetch(fetchImpl, () => freeLlamaSwap("http://x", { log: () => {}, quiesce: async () => ({ drained: true, waitedMs: 0, unknown: [] }) }));
+  } finally {
+    if (prevList === undefined) delete process.env.GPU_LEASE_UNLOAD_MODELS; else process.env.GPU_LEASE_UNLOAD_MODELS = prevList;
+    if (prevDev === undefined) delete process.env.GPU_LEASE_DEVICES; else process.env.GPU_LEASE_DEVICES = prevDev;
+  }
+  assert.equal(calls.unloads.length, 0, "GPU_LEASE_DEVICES set and no list: nothing leaves");
+});
+
+test("a whole-node lease with no list keeps today's rule (it holds every card)", async () => {
+  const { calls, fetchImpl } = fakeSwap({ roster: ["a", "b", "embeddinggemma"], running: ["a", "b", "embeddinggemma"] });
+  await withFetch(fetchImpl, () => freeLlamaSwap("http://x", {
+    unloadModels: null, leaseDevices: [], quiesce: async () => ({ drained: true, waitedMs: 0, unknown: [] }),
+  }));
+  assert.deepEqual(calls.unloads.sort(), ["a", "b"]);
+});
+
+test("a card lease with a list names what it left resident", async () => {
+  const { calls, fetchImpl } = fakeSwap({ roster: ["a", "b", "c"], running: ["a", "b", "c"] });
+  const logged = [];
+  await withFetch(fetchImpl, () => freeLlamaSwap("http://x", {
+    unloadModels: ["a"], leaseDevices: ["gpu-cccc"], log: (m) => logged.push(m),
+    quiesce: async () => ({ drained: true, waitedMs: 0, unknown: [] }),
+  }));
+  assert.deepEqual(calls.unloads, ["a"]);
+  assert.ok(logged.some((m) => /left resident/.test(m) && /b/.test(m) && /c/.test(m)), "the models that stay are named: " + JSON.stringify(logged));
 });
